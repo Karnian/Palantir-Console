@@ -1,0 +1,21 @@
+services:
+  palantir-console:
+    build: .
+    ports:
+      - "4177:4177"
+    environment:
+      PORT: 4177
+      OPENCODE_STORAGE: /root/.local/share/opencode/storage
+      OPENCODE_BIN: /root/.opencode/bin/opencode
+      NODE_TLS_REJECT_UNAUTHORIZED: "0"
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+    volumes:
+      - ${OPENCODE_STORAGE_HOST:-/Users/K/.local/share/opencode/storage}:/root/.local/share/opencode/storage
+      - /Users/K/.config/opencode:/root/.config/opencode
+      - /Users/K/.local/share/opencode/state:/root/.local/share/opencode/state:ro
+      - /Users/K/.local/share/opencode/auth.json:/root/.local/share/opencode/auth.json:ro
+      - /Users/K/.local/share/opencode/mcp-auth.json:/root/.local/share/opencode/mcp-auth.json:ro
+      - /Users/K/.local/share/opencode/antigravity-accounts.json:/root/.local/share/opencode/antigravity-accounts.json:ro

@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Palantir Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600&family=Cormorant+Garamond:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-title">Palantir Console</div>
+          <div class="brand-subtitle">Seeing Stones for AI Sessions</div>
+        </div>
+        <div class="session-header">
+          <span>Sessions</span>
+          <div class="session-actions">
+            <button id="newSessionBtn" class="ghost">New</button>
+            <button id="refreshBtn" class="ghost">Refresh</button>
+          </div>
+        </div>
+        <div class="session-search">
+          <input
+            id="sessionSearch"
+            type="search"
+            placeholder="Filter by title, slug, or directory"
+            aria-label="Filter sessions"
+          />
+        </div>
+        <div id="sessionList" class="session-list"></div>
+      </aside>
+
+      <main class="content">
+        <header class="session-title" id="sessionTitle">
+          <div class="title-row">
+            <div class="title">Select a session</div>
+            <div class="session-controls">
+              <button id="trashToggleBtn" class="ghost" type="button" aria-expanded="false">Trash</button>
+              <button id="renameSessionBtn" class="ghost" type="button" disabled>Rename</button>
+              <button id="deleteSessionBtn" class="ghost danger" type="button" disabled>Delete</button>
+            </div>
+          </div>
+          <div class="meta" id="sessionMeta"></div>
+        </header>
+
+        <div id="trashModal" class="trash-modal" hidden>
+          <div class="trash-backdrop"></div>
+          <div id="trashPanel" class="trash-panel" role="dialog" aria-modal="true" aria-label="Trashed sessions">
+            <div class="trash-header">
+              <div class="trash-title">Trashed Sessions</div>
+              <button id="trashCloseBtn" class="ghost" type="button">Close</button>
+            </div>
+            <div id="trashList" class="trash-list">
+              <div class="trash-empty">No trashed sessions.</div>
+            </div>
+          </div>
+        </div>
+
+        <div id="directoryModal" class="directory-modal" hidden>
+          <div id="directoryBackdrop" class="directory-backdrop"></div>
+          <div class="directory-panel" role="dialog" aria-modal="true" aria-label="Select directory">
+            <div class="directory-header">
+              <div class="directory-title">Select Directory</div>
+              <button id="directoryUpBtn" class="ghost" type="button">Up</button>
+            </div>
+            <div class="directory-path" id="directoryPath">/</div>
+            <div class="directory-toggle">
+              <label class="directory-toggle-label" id="directoryHiddenLabel" for="directoryHiddenToggle">
+                <input id="directoryHiddenToggle" type="checkbox" />
+                <span>Show hidden folders</span>
+              </label>
+            </div>
+            <div id="directoryList" class="directory-list" role="list"></div>
+            <div class="directory-actions">
+              <button id="directorySelectBtn" class="primary" type="button">Use this folder</button>
+              <button id="directoryCancelBtn" class="ghost" type="button">Cancel</button>
+            </div>
+          </div>
+        </div>
+
+        <section class="conversation">
+          <div id="loadMoreWrap" class="message-controls" hidden>
+            <button id="loadMoreBtn" class="ghost load-more" type="button">Load more</button>
+          </div>
+          <div id="messageList" class="message-list"></div>
+        </section>
+
+        <footer class="composer">
+          <form id="sendForm">
+            <textarea
+              id="messageInput"
+              placeholder="Send a message to the selected session..."
+              rows="3"
+              required
+            ></textarea>
+            <div class="composer-actions">
+              <span id="sendStatus" class="status"></span>
+              <button type="submit" class="primary">Send</button>
+            </div>
+          </form>
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>
