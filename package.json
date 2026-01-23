@@ -1,0 +1,17 @@
+{
+  "name": "palantir_console",
+  "version": "1.0.0",
+  "main": "server/index.js",
+  "scripts": {
+    "dev": "node server/index.js",
+    "start": "node server/index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "express": "^5.2.1",
+    "fast-glob": "^3.3.3"
+  }
+}
