@@ -242,7 +242,7 @@ function createCodexService({ codexBin, codexHome, timeoutMs = DEFAULT_TIMEOUT_M
     const status = await getStatus();
     return {
       id: 'codex',
-      name: 'Codex',
+      name: 'codex',
       ...status
     };
   }
