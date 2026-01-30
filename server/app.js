@@ -8,6 +8,8 @@ const { createMessageService } = require('./services/messageService');
 const { createFsService } = require('./services/fsService');
 const { createOpencodeService } = require('./services/opencodeService');
 const { createCodexService } = require('./services/codexService');
+const { createProviderService } = require('./services/providerService');
+const { fetchAnthropicUsage, fetchGeminiUsage } = require('./services/externalUsageService');
 const { createSessionsRouter } = require('./routes/sessions');
 const { createTrashRouter } = require('./routes/trash');
 const { createFsRouter } = require('./routes/fs');
@@ -25,6 +27,9 @@ function createApp(options = {}) {
   const codexHome = options.codexHome
     || process.env.CODEX_HOME
     || path.join(os.homedir(), '.codex');
+  const opencodeAuthPath = options.opencodeAuthPath
+    || process.env.OPENCODE_AUTH_PATH
+    || path.join(os.homedir(), '.local', 'share', 'opencode', 'auth.json');
   const codexStatusTimeoutMs = Number(
     options.codexStatusTimeoutMs || process.env.CODEX_STATUS_TIMEOUT_MS || 60000
   );
@@ -39,6 +44,7 @@ function createApp(options = {}) {
     codexHome,
     timeoutMs: codexStatusTimeoutMs
   });
+  const providerService = createProviderService({ authPath: opencodeAuthPath });
 
   app.use(express.json({ limit: '2mb' }));
   app.use((req, res, next) => {
@@ -59,7 +65,12 @@ function createApp(options = {}) {
   }));
   app.use('/api/trash/sessions', createTrashRouter({ trashService }));
   app.use('/api/fs', createFsRouter({ fsService }));
-  app.use('/api/usage', createUsageRouter({ codexService }));
+  app.use('/api/usage', createUsageRouter({
+    codexService,
+    providerService,
+    fetchAnthropicUsage,
+    fetchGeminiUsage
+  }));
   app.use(errorHandler);
 
   return app;

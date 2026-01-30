@@ -224,6 +224,14 @@ body {
   overflow-y: auto;
 }
 
+.usage-registered {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(155, 178, 166, 0.75);
+  margin-bottom: 10px;
+}
+
 .usage-cards {
   display: flex;
   flex-direction: column;
@@ -273,6 +281,7 @@ body {
 .usage-limit-bar {
   font-size: 12px;
   color: rgba(237, 247, 241, 0.92);
+  white-space: pre-line;
 }
 
 .usage-details {

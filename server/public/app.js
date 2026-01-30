@@ -591,23 +591,44 @@ function formatUsageBar(percentLeft) {
 function buildLimitLine(limit) {
   const label = limit.label || 'limit';
   const percentLeft = typeof limit.remainingPct === 'number' ? limit.remainingPct : null;
-  const usageText = percentLeft == null ? '? left' : `${Math.round(percentLeft)}% left`;
   const resetText = formatUsageReset(limit.resetAt);
-  const resetSuffix = resetText ? ` (resets ${resetText})` : '';
+  const resetSuffix = resetText ? `\nresets ${resetText}` : '';
+  if (limit.errorMessage) {
+    return {
+      label,
+      barLine: limit.errorMessage
+    };
+  }
+  const usageText = percentLeft == null ? '? left' : `${Math.round(percentLeft)}% left`;
   return {
     label,
     barLine: `${formatUsageBar(percentLeft)} ${usageText}${resetSuffix}`
   };
 }
 
-function renderUsageProviders(providers) {
+function formatRegisteredProviders(list) {
+  if (!Array.isArray(list) || !list.length) return 'Registered: none';
+  const labels = list.map((item) => {
+    if (item === 'openai') return 'codex';
+    if (item === 'google' || item === 'gemini') return 'gemini';
+    if (item === 'anthropic') return 'claude';
+    return item;
+  });
+  return `Registered: ${labels.join(', ')}`;
+}
+
+function renderUsageProviders(providers, registeredProviders) {
   if (!usageOutput) return;
   usageOutput.innerHTML = '';
+  const header = document.createElement('div');
+  header.className = 'usage-registered';
+  header.textContent = formatRegisteredProviders(registeredProviders);
+
   const list = document.createElement('div');
   list.className = 'usage-cards';
 
   if (!Array.isArray(providers) || !providers.length) {
-    usageOutput.textContent = 'No providers enabled.';
+    usageOutput.textContent = 'No registered providers with usage data.';
     return;
   }
 
@@ -703,7 +724,7 @@ function renderUsageProviders(providers) {
     list.append(card);
   });
 
-  usageOutput.append(list);
+  usageOutput.append(header, list);
 }
 
 async function loadCodexStatus() {
@@ -716,7 +737,7 @@ async function loadCodexStatus() {
       const details = data?.details ? `\n${data.details}` : '';
       throw new Error(`${data?.error || 'Failed to load codex status'}${details}`);
     }
-    renderUsageProviders(data.providers);
+    renderUsageProviders(data.providers, data.registeredProviders);
   } catch (err) {
     usageOutput.textContent = err?.message || 'Failed to load codex status';
   }
