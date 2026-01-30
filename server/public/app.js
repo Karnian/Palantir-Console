@@ -606,15 +606,30 @@ function buildLimitLine(limit) {
   };
 }
 
-function formatRegisteredProviders(list) {
+function displayProviderLabel(id) {
+  if (id === 'openai' || id === 'codex') return 'codex';
+  if (id === 'google' || id === 'gemini') return 'gemini';
+  if (id === 'anthropic' || id === 'claude') return 'claude';
+  return id;
+}
+
+function formatRegisteredProviders(list, providers) {
   if (!Array.isArray(list) || !list.length) return 'Registered: none';
-  const labels = list.map((item) => {
-    if (item === 'openai') return 'codex';
-    if (item === 'google' || item === 'gemini') return 'gemini';
-    if (item === 'anthropic') return 'claude';
-    return item;
+  const ordered = [];
+  if (Array.isArray(providers) && providers.length) {
+    providers.forEach((provider) => {
+      const id = provider?.id || provider?.name;
+      if (!id) return;
+      const label = displayProviderLabel(id);
+      if (!ordered.includes(label)) ordered.push(label);
+    });
+  }
+
+  list.forEach((item) => {
+    const label = displayProviderLabel(item);
+    if (!ordered.includes(label)) ordered.push(label);
   });
-  return `Registered: ${labels.join(', ')}`;
+  return `Registered: ${ordered.join(', ')}`;
 }
 
 function renderUsageProviders(providers, registeredProviders) {
@@ -622,7 +637,7 @@ function renderUsageProviders(providers, registeredProviders) {
   usageOutput.innerHTML = '';
   const header = document.createElement('div');
   header.className = 'usage-registered';
-  header.textContent = formatRegisteredProviders(registeredProviders);
+  header.textContent = formatRegisteredProviders(registeredProviders, providers);
 
   const list = document.createElement('div');
   list.className = 'usage-cards';
