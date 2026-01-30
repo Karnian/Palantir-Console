@@ -588,55 +588,135 @@ function formatUsageBar(percentLeft) {
   return `[${'█'.repeat(filled)}${'░'.repeat(width - filled)}]`;
 }
 
-function formatUsageLines(limits, updatedAt) {
-  if (!Array.isArray(limits) || !limits.length) return 'No output';
-  const lines = [];
-  limits.forEach((limit) => {
-    const label = limit.label || 'limit';
-    const percentLeft = typeof limit.remainingPct === 'number' ? limit.remainingPct : null;
-    const usageText = percentLeft == null ? '? left' : `${Math.round(percentLeft)}% left`;
-    const resetText = formatUsageReset(limit.resetAt);
-    const resetSuffix = resetText ? ` (resets ${resetText})` : '';
-    lines.push(`${label}`);
-    lines.push(`  ${formatUsageBar(percentLeft)} ${usageText}${resetSuffix}`);
-  });
-  if (updatedAt) {
-    const localUpdated = new Date(updatedAt);
-    if (!Number.isNaN(localUpdated.getTime())) {
-      lines.push(`updated: ${localUpdated.toLocaleString()}`);
-    }
+function buildLimitLine(limit) {
+  const label = limit.label || 'limit';
+  const percentLeft = typeof limit.remainingPct === 'number' ? limit.remainingPct : null;
+  const usageText = percentLeft == null ? '? left' : `${Math.round(percentLeft)}% left`;
+  const resetText = formatUsageReset(limit.resetAt);
+  const resetSuffix = resetText ? ` (resets ${resetText})` : '';
+  return {
+    label,
+    barLine: `${formatUsageBar(percentLeft)} ${usageText}${resetSuffix}`
+  };
+}
+
+function renderUsageProviders(providers) {
+  if (!usageOutput) return;
+  usageOutput.innerHTML = '';
+  const list = document.createElement('div');
+  list.className = 'usage-cards';
+
+  if (!Array.isArray(providers) || !providers.length) {
+    usageOutput.textContent = 'No providers enabled.';
+    return;
   }
-  return lines.join('\n');
+
+  providers.forEach((provider) => {
+    const card = document.createElement('div');
+    card.className = 'usage-card';
+
+    const header = document.createElement('div');
+    header.className = 'usage-card-header';
+
+    const title = document.createElement('div');
+    title.className = 'usage-card-title';
+    title.textContent = provider.name || 'Provider';
+
+    const meta = document.createElement('div');
+    meta.className = 'usage-card-meta';
+    if (provider.account?.type === 'chatgpt') {
+      const accountLabel = provider.account.email || 'unknown';
+      const planLabel = provider.account.planType ? ` / ${provider.account.planType}` : '';
+      meta.textContent = `${accountLabel}${planLabel}`;
+    } else if (provider.account?.type === 'apiKey') {
+      meta.textContent = 'API key';
+    } else if (provider.requiresOpenaiAuth) {
+      meta.textContent = 'Login required';
+    }
+
+    header.append(title, meta);
+
+    const summary = document.createElement('div');
+    summary.className = 'usage-card-summary';
+    const limits = Array.isArray(provider.limits) ? provider.limits : [];
+    const firstLimit = limits[0] || null;
+    if (firstLimit) {
+      const summaryLine = buildLimitLine(firstLimit);
+      const label = document.createElement('div');
+      label.className = 'usage-limit-label';
+      label.textContent = summaryLine.label;
+      const barLine = document.createElement('div');
+      barLine.className = 'usage-limit-bar';
+      barLine.textContent = summaryLine.barLine;
+      summary.append(label, barLine);
+    } else {
+      summary.textContent = 'No usage data.';
+    }
+
+    const details = document.createElement('details');
+    details.className = 'usage-details';
+    const detailsSummary = document.createElement('summary');
+    detailsSummary.textContent = '상세보기';
+
+    details.addEventListener('toggle', () => {
+      detailsSummary.textContent = details.open ? '접기' : '상세보기';
+    });
+
+    const detailsBody = document.createElement('div');
+    detailsBody.className = 'usage-details-body';
+
+    const detailLimits = limits.length > 1 ? limits.slice(1) : [];
+    if (detailLimits.length) {
+      detailLimits.forEach((limit) => {
+        const block = document.createElement('div');
+        block.className = 'usage-limit-block';
+        const line = buildLimitLine(limit);
+        const label = document.createElement('div');
+        label.className = 'usage-limit-label';
+        label.textContent = line.label;
+        const barLine = document.createElement('div');
+        barLine.className = 'usage-limit-bar';
+        barLine.textContent = line.barLine;
+        block.append(label, barLine);
+        detailsBody.append(block);
+      });
+    }
+
+    if (provider.accountError) {
+      const errorLine = document.createElement('div');
+      errorLine.textContent = `Account error: ${provider.accountError}`;
+      detailsBody.append(errorLine);
+    }
+
+    if (provider.updatedAt) {
+      const updatedLine = document.createElement('div');
+      const localUpdated = new Date(provider.updatedAt);
+      updatedLine.textContent = Number.isNaN(localUpdated.getTime())
+        ? `Updated: ${provider.updatedAt}`
+        : `Updated: ${localUpdated.toLocaleString()}`;
+      detailsBody.append(updatedLine);
+    }
+
+    details.append(detailsSummary, detailsBody);
+
+    card.append(header, summary, details);
+    list.append(card);
+  });
+
+  usageOutput.append(list);
 }
 
 async function loadCodexStatus() {
   if (!usageOutput) return;
   usageOutput.textContent = 'Loading...';
   try {
-    const response = await fetch('/api/usage/codex-status');
+    const response = await fetch('/api/usage/providers');
     const data = await response.json();
     if (!response.ok) {
       const details = data?.details ? `\n${data.details}` : '';
       throw new Error(`${data?.error || 'Failed to load codex status'}${details}`);
     }
-    const accountLines = [];
-    if (data.account) {
-      if (data.account.type === 'chatgpt') {
-        accountLines.push(`Account: ${data.account.email || 'unknown'}`);
-        if (data.account.planType) accountLines.push(`Plan: ${data.account.planType}`);
-      } else if (data.account.type === 'apiKey') {
-        accountLines.push('Account: API key');
-      }
-    } else if (data.requiresOpenaiAuth) {
-      accountLines.push('Account: login required');
-    }
-    if (data.accountError) {
-      accountLines.push(`Account error: ${data.accountError}`);
-    }
-    const usageBlock = formatUsageLines(data.limits, data.updatedAt);
-    usageOutput.textContent = accountLines.length
-      ? `${accountLines.join('\n')}\n\n${usageBlock}`
-      : usageBlock;
+    renderUsageProviders(data.providers);
   } catch (err) {
     usageOutput.textContent = err?.message || 'Failed to load codex status';
   }
