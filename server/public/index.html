@@ -11,6 +11,8 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js" defer></script>
     <script src="app.js" defer></script>
   </head>
   <body>
@@ -43,6 +45,7 @@
           <div class="title-row">
             <div class="title">Select a session</div>
             <div class="session-controls">
+              <button id="usageToggleBtn" class="ghost" type="button" aria-expanded="false">Usage</button>
               <button id="trashToggleBtn" class="ghost" type="button" aria-expanded="false">Trash</button>
               <button id="renameSessionBtn" class="ghost" type="button" disabled>Rename</button>
               <button id="deleteSessionBtn" class="ghost danger" type="button" disabled>Delete</button>
@@ -61,6 +64,20 @@
             <div id="trashList" class="trash-list">
               <div class="trash-empty">No trashed sessions.</div>
             </div>
+          </div>
+        </div>
+
+        <div id="usageModal" class="trash-modal" hidden>
+          <div id="usageBackdrop" class="trash-backdrop"></div>
+          <div id="usagePanel" class="trash-panel" role="dialog" aria-modal="true" aria-label="Codex status">
+            <div class="trash-header">
+              <div class="trash-title">Codex Status</div>
+              <div class="usage-actions">
+                <button id="usageRefreshBtn" class="ghost" type="button">Refresh</button>
+                <button id="usageCloseBtn" class="ghost" type="button">Close</button>
+              </div>
+            </div>
+            <pre id="usageOutput" class="usage-output">Loading...</pre>
           </div>
         </div>
 

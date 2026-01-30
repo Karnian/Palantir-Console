@@ -17,16 +17,37 @@ function createSessionService(storage) {
     return aTime - bTime;
   }
 
+  function getProviderModel(meta) {
+    if (!meta) return { providerId: null, modelId: null };
+    return {
+      providerId: meta.providerID || meta.model?.providerID || null,
+      modelId: meta.modelID || meta.model?.modelID || null
+    };
+  }
+
+  function getLastProviderModel(metas) {
+    for (let index = metas.length - 1; index >= 0; index -= 1) {
+      const { providerId, modelId } = getProviderModel(metas[index]);
+      if (providerId || modelId) {
+        return { lastProviderId: providerId, lastModelId: modelId };
+      }
+    }
+    return { lastProviderId: null, lastModelId: null };
+  }
+
   async function getLastMessageInfo(sessionId) {
     const metas = await storage.getMessageMetas(sessionId);
     if (!metas.length) return null;
     metas.sort(sortByCreated);
     const last = metas[metas.length - 1];
+    const lastProviderModel = getLastProviderModel(metas);
     return {
       lastActivity: last?.time?.created || 0,
       lastRole: last?.role || null,
       hasUserMessage: metas.some((meta) => meta?.role === 'user'),
-      hasRunning: Boolean(last?.time?.created && !last?.time?.completed)
+      hasRunning: Boolean(last?.time?.created && !last?.time?.completed),
+      lastProviderId: lastProviderModel.lastProviderId,
+      lastModelId: lastProviderModel.lastModelId
     };
   }
 
@@ -56,7 +77,9 @@ function createSessionService(storage) {
           summary: session.summary || null,
           lastActivity,
           status,
-          hasUserMessage: lastInfo?.hasUserMessage ?? false
+          hasUserMessage: lastInfo?.hasUserMessage ?? false,
+          lastProviderId: lastInfo?.lastProviderId || null,
+          lastModelId: lastInfo?.lastModelId || null
         });
       } catch (error) {
         continue;
