@@ -13,7 +13,14 @@ const sessionSearch = document.getElementById('sessionSearch');
 const newSessionBtn = document.getElementById('newSessionBtn');
 const renameSessionBtn = document.getElementById('renameSessionBtn');
 const deleteSessionBtn = document.getElementById('deleteSessionBtn');
+const usageToggleBtn = document.getElementById('usageToggleBtn');
 const trashToggleBtn = document.getElementById('trashToggleBtn');
+const usageModal = document.getElementById('usageModal');
+const usagePanel = document.getElementById('usagePanel');
+const usageBackdrop = document.getElementById('usageBackdrop');
+const usageOutput = document.getElementById('usageOutput');
+const usageCloseBtn = document.getElementById('usageCloseBtn');
+const usageRefreshBtn = document.getElementById('usageRefreshBtn');
 const trashModal = document.getElementById('trashModal');
 const trashPanel = document.getElementById('trashPanel');
 const trashList = document.getElementById('trashList');
@@ -44,6 +51,10 @@ const state = {
 const CLAMP_LINES = 20;
 const INITIAL_MESSAGE_LIMIT = 40;
 const MESSAGE_LIMIT_STEP = 40;
+const MARKDOWN_OPTIONS = {
+  breaks: true,
+  gfm: true
+};
 
 function getMessageLimit(sessionId) {
   return state.messageLimitBySession.get(sessionId) ?? INITIAL_MESSAGE_LIMIT;
@@ -71,6 +82,15 @@ function formatTime(ms) {
   return date.toLocaleString();
 }
 
+function formatProviderModel(session) {
+  if (!session) return 'unknown';
+  const model = session.lastModelId || null;
+  if (model) return model;
+  const provider = session.lastProviderId || null;
+  if (provider) return provider;
+  return 'unknown';
+}
+
 function createSessionCard(session) {
   const card = document.createElement('div');
   card.className = 'session-card';
@@ -79,16 +99,19 @@ function createSessionCard(session) {
   const title = document.createElement('div');
   title.className = 'title';
 
-  const meta = document.createElement('div');
-  meta.className = 'meta';
+  const directoryMeta = document.createElement('div');
+  directoryMeta.className = 'meta meta-directory';
+
+  const providerMeta = document.createElement('div');
+  providerMeta.className = 'meta meta-provider';
 
   const badge = document.createElement('span');
   badge.className = 'badge';
 
   const time = document.createElement('div');
-  time.className = 'meta';
+  time.className = 'meta meta-time';
 
-  card.append(title, meta, badge, time);
+  card.append(title, directoryMeta, providerMeta, badge, time);
   card.addEventListener('click', () =>
     selectSession(session.id, { focusInput: true, forceAutoScroll: true })
   );
@@ -106,9 +129,14 @@ function updateSessionCard(card, session) {
   const title = card.querySelector('.title');
   if (title) title.textContent = session.title;
 
-  const metas = card.querySelectorAll('.meta');
-  if (metas[0]) metas[0].textContent = session.directory || 'No directory';
-  if (metas[1]) metas[1].textContent = `Last activity: ${formatTime(session.lastActivity)}`;
+  const directoryMeta = card.querySelector('.meta-directory');
+  if (directoryMeta) directoryMeta.textContent = session.directory || 'No directory';
+
+  const providerMeta = card.querySelector('.meta-provider');
+  if (providerMeta) providerMeta.textContent = formatProviderModel(session);
+
+  const timeMeta = card.querySelector('.meta-time');
+  if (timeMeta) timeMeta.textContent = `Last activity: ${formatTime(session.lastActivity)}`;
 
   const badge = card.querySelector('.badge');
   if (badge) {
@@ -132,7 +160,9 @@ function renderSessions() {
   const query = state.sessionQuery.trim().toLowerCase();
   const eligible = state.sessions.filter((session) => {
     if (!session.hasUserMessage) return false;
-    if (!query) return !isSubagentSession(session) && !isBackgroundSession(session);
+    if (isSubagentSession(session)) return false;
+    if (isBackgroundSession(session)) return false;
+    if (isTaskSession(session)) return false;
     return true;
   });
   const filtered = query
@@ -192,8 +222,16 @@ function isBackgroundSession(session) {
   return marker.includes('background');
 }
 
+function isTaskSession(session) {
+  const marker = `${session.title || ''} ${session.slug || ''}`.toLowerCase();
+  return /\btask\b/.test(marker);
+}
+
 function renderMessages(messages, options = {}) {
   const { autoScroll = false, onRendered = null } = options;
+  if (window.marked) {
+    window.marked.setOptions(MARKDOWN_OPTIONS);
+  }
   messageList.innerHTML = '';
   if (!messages.length) {
     messageList.innerHTML = '<div class="meta">No messages found for this session.</div>';
@@ -222,7 +260,13 @@ function renderMessages(messages, options = {}) {
 
     const content = document.createElement('div');
     content.className = 'content';
-    content.textContent = msg.content || '[no text]';
+    const raw = msg.content || '[no text]';
+    if (window.marked && window.DOMPurify) {
+      const rendered = window.marked.parse(raw, { breaks: true });
+      content.innerHTML = window.DOMPurify.sanitize(rendered);
+    } else {
+      content.textContent = raw;
+    }
     content.style.setProperty('--clamp-lines', CLAMP_LINES);
 
     const toggle = document.createElement('button');
@@ -502,6 +546,102 @@ async function deleteSession() {
   await loadTrashSessions();
 }
 
+function toggleUsagePanel() {
+  if (!usageModal || !usageToggleBtn) return;
+  const shouldOpen = usageModal.hasAttribute('hidden');
+  if (shouldOpen) {
+    usageModal.removeAttribute('hidden');
+    usageToggleBtn.setAttribute('aria-expanded', 'true');
+    loadCodexStatus();
+  } else {
+    usageModal.setAttribute('hidden', '');
+    usageToggleBtn.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function closeUsagePanel() {
+  if (!usageModal || !usageToggleBtn) return;
+  usageModal.setAttribute('hidden', '');
+  usageToggleBtn.setAttribute('aria-expanded', 'false');
+}
+
+function formatUsageReset(resetAt) {
+  if (!resetAt) return '';
+  const date = new Date(resetAt);
+  if (Number.isNaN(date.getTime())) return '';
+  const now = new Date();
+  const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const sameDay =
+    date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate();
+  if (sameDay) return time;
+  const dateLabel = date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  return `${time} on ${dateLabel}`;
+}
+
+function formatUsageBar(percentLeft) {
+  const width = 20;
+  if (percentLeft == null) return `[${'░'.repeat(width)}]`;
+  const clamped = Math.max(0, Math.min(100, percentLeft));
+  const filled = Math.round((clamped / 100) * width);
+  return `[${'█'.repeat(filled)}${'░'.repeat(width - filled)}]`;
+}
+
+function formatUsageLines(limits, updatedAt) {
+  if (!Array.isArray(limits) || !limits.length) return 'No output';
+  const lines = [];
+  limits.forEach((limit) => {
+    const label = limit.label || 'limit';
+    const percentLeft = typeof limit.remainingPct === 'number' ? limit.remainingPct : null;
+    const usageText = percentLeft == null ? '? left' : `${Math.round(percentLeft)}% left`;
+    const resetText = formatUsageReset(limit.resetAt);
+    const resetSuffix = resetText ? ` (resets ${resetText})` : '';
+    lines.push(`${label}`);
+    lines.push(`  ${formatUsageBar(percentLeft)} ${usageText}${resetSuffix}`);
+  });
+  if (updatedAt) {
+    const localUpdated = new Date(updatedAt);
+    if (!Number.isNaN(localUpdated.getTime())) {
+      lines.push(`updated: ${localUpdated.toLocaleString()}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+async function loadCodexStatus() {
+  if (!usageOutput) return;
+  usageOutput.textContent = 'Loading...';
+  try {
+    const response = await fetch('/api/usage/codex-status');
+    const data = await response.json();
+    if (!response.ok) {
+      const details = data?.details ? `\n${data.details}` : '';
+      throw new Error(`${data?.error || 'Failed to load codex status'}${details}`);
+    }
+    const accountLines = [];
+    if (data.account) {
+      if (data.account.type === 'chatgpt') {
+        accountLines.push(`Account: ${data.account.email || 'unknown'}`);
+        if (data.account.planType) accountLines.push(`Plan: ${data.account.planType}`);
+      } else if (data.account.type === 'apiKey') {
+        accountLines.push('Account: API key');
+      }
+    } else if (data.requiresOpenaiAuth) {
+      accountLines.push('Account: login required');
+    }
+    if (data.accountError) {
+      accountLines.push(`Account error: ${data.accountError}`);
+    }
+    const usageBlock = formatUsageLines(data.limits, data.updatedAt);
+    usageOutput.textContent = accountLines.length
+      ? `${accountLines.join('\n')}\n\n${usageBlock}`
+      : usageBlock;
+  } catch (err) {
+    usageOutput.textContent = err?.message || 'Failed to load codex status';
+  }
+}
+
 function toggleTrashPanel() {
   if (!trashModal || !trashToggleBtn) return;
   const shouldOpen = trashModal.hasAttribute('hidden');
@@ -663,6 +803,10 @@ sendForm.addEventListener('submit', sendMessage);
 if (newSessionBtn) newSessionBtn.addEventListener('click', createSession);
 if (renameSessionBtn) renameSessionBtn.addEventListener('click', renameSession);
 if (deleteSessionBtn) deleteSessionBtn.addEventListener('click', deleteSession);
+if (usageToggleBtn) usageToggleBtn.addEventListener('click', toggleUsagePanel);
+if (usageCloseBtn) usageCloseBtn.addEventListener('click', closeUsagePanel);
+if (usageBackdrop) usageBackdrop.addEventListener('click', closeUsagePanel);
+if (usageRefreshBtn) usageRefreshBtn.addEventListener('click', loadCodexStatus);
 if (trashToggleBtn) trashToggleBtn.addEventListener('click', toggleTrashPanel);
 if (trashCloseBtn) trashCloseBtn.addEventListener('click', closeTrashPanel);
 if (directoryBackdrop) directoryBackdrop.addEventListener('click', cancelDirectoryModal);

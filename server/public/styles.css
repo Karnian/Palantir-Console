@@ -127,6 +127,7 @@ body {
   flex-direction: column;
   gap: 10px;
   overflow-y: auto;
+  overflow-x: hidden;
   flex: 1 1 auto;
   min-height: 0;
   padding-top: 6px;
@@ -201,6 +202,26 @@ body {
   letter-spacing: 0.12em;
   font-size: 11px;
   color: var(--gold);
+}
+
+.usage-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.usage-output {
+  margin: 0;
+  padding: 12px;
+  border-radius: 10px;
+  background: rgba(4, 7, 8, 0.72);
+  border: 1px solid rgba(111, 212, 160, 0.18);
+  color: rgba(237, 247, 241, 0.9);
+  font-family: var(--terminal-font);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-y: auto;
 }
 
 .trash-list {
@@ -401,6 +422,13 @@ body {
   gap: 6px;
   cursor: pointer;
   transition: border 0.2s ease, transform 0.2s ease;
+  width: 100%;
+  min-width: 0;
+}
+
+.session-card > * {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .session-card:hover {
@@ -415,12 +443,17 @@ body {
 
 .session-card .title {
   font-size: 16px;
-  color: var(--moonlight);
+  color: rgba(237, 247, 241, 0.98);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .session-card .meta {
   font-size: 12px;
-  color: var(--silver);
+  color: rgba(155, 178, 166, 0.62);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .badge {
@@ -431,6 +464,13 @@ body {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   font-family: var(--terminal-font);
+  justify-self: stretch;
+  align-self: center;
+  width: calc(100% - 16px);
+  margin: 0 8px;
+  max-width: 100%;
+  box-sizing: border-box;
+  justify-content: center;
 }
 
 .badge.running {
@@ -572,6 +612,147 @@ body {
   line-height: 1.5;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.message .content h1,
+.message .content h2,
+.message .content h3,
+.message .content h4,
+.message .content h5,
+.message .content h6 {
+  margin: 12px 0 6px;
+  color: var(--gold);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-shadow: 0 0 12px rgba(111, 212, 160, 0.12);
+}
+
+.message .content h1 { font-size: 20px; }
+.message .content h2 { font-size: 18px; }
+.message .content h3 { font-size: 16px; }
+
+.message .content p {
+  margin: 8px 0;
+}
+
+.message .content > :first-child {
+  margin-top: 0;
+}
+
+.message .content > :last-child {
+  margin-bottom: 0;
+}
+
+.message .content ul,
+.message .content ol {
+  margin: 10px 0;
+  padding-left: 20px;
+}
+
+.message .content li {
+  margin: 4px 0;
+}
+
+.message .content li::marker {
+  color: rgba(124, 232, 177, 0.75);
+}
+
+.message .content a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.message .content a:hover {
+  color: var(--gold);
+}
+
+.message .content blockquote {
+  border-left: 3px solid rgba(111, 212, 160, 0.4);
+  padding: 8px 14px;
+  color: var(--silver);
+  margin: 12px 0;
+  background: rgba(6, 12, 13, 0.6);
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px rgba(111, 212, 160, 0.08);
+}
+
+.message .content blockquote > :first-child {
+  margin-top: 0;
+}
+
+.message .content blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+.message .content pre {
+  background: rgba(4, 7, 8, 0.85);
+  border: 1px solid rgba(111, 212, 160, 0.2);
+  border-radius: 12px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  margin: 12px 0;
+  font-size: 13px;
+  line-height: 1.55;
+  box-shadow: 0 10px 20px rgba(2, 6, 7, 0.35);
+}
+
+.message .content code {
+  background: rgba(4, 7, 8, 0.6);
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #c9f1dc;
+  border: 1px solid rgba(111, 212, 160, 0.2);
+}
+
+.message .content pre code {
+  background: transparent;
+  padding: 0;
+  border: none;
+  color: inherit;
+}
+
+.message .content hr {
+  border: none;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(124, 232, 177, 0.6), transparent);
+  margin: 14px 0;
+}
+
+.message .content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: 13px;
+  background: rgba(5, 9, 10, 0.7);
+  border: 1px solid rgba(111, 212, 160, 0.2);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.message .content th,
+.message .content td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(111, 212, 160, 0.16);
+}
+
+.message .content th {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+  color: var(--gold);
+  background: rgba(7, 14, 15, 0.9);
+}
+
+.message .content tr:last-child td {
+  border-bottom: none;
+}
+
+.message .content tbody tr:nth-child(even) td {
+  background: rgba(6, 11, 12, 0.6);
 }
 
 .message .content.clamped {
