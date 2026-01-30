@@ -19,6 +19,15 @@ function createUsageRouter({ codexService }) {
     }
   });
 
+  router.get('/providers', async (req, res, next) => {
+    try {
+      const codex = await codexService.getProviderStatus();
+      res.json({ status: 'ok', providers: [codex] });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   return router;
 }
 

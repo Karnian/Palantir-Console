@@ -238,7 +238,16 @@ function createCodexService({ codexBin, codexHome, timeoutMs = DEFAULT_TIMEOUT_M
     };
   }
 
-  return { getStatus };
+  async function getProviderStatus() {
+    const status = await getStatus();
+    return {
+      id: 'codex',
+      name: 'Codex',
+      ...status
+    };
+  }
+
+  return { getStatus, getProviderStatus };
 }
 
 module.exports = { createCodexService };
