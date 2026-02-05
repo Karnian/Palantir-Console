@@ -81,6 +81,17 @@
           </div>
         </div>
 
+        <div id="childSessionModal" class="trash-modal" hidden>
+          <div id="childSessionBackdrop" class="trash-backdrop"></div>
+          <div id="childSessionPanel" class="trash-panel child-panel" role="dialog" aria-modal="true" aria-label="Subagent activity">
+            <div class="trash-header">
+              <div class="trash-title">Agent Activity</div>
+              <button id="childSessionCloseBtn" class="ghost" type="button">Close</button>
+            </div>
+            <div id="childSessionBody" class="child-session-body">Loading...</div>
+          </div>
+        </div>
+
         <div id="directoryModal" class="directory-modal" hidden>
           <div id="directoryBackdrop" class="directory-backdrop"></div>
           <div class="directory-panel" role="dialog" aria-modal="true" aria-label="Select directory">

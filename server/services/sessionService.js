@@ -62,13 +62,15 @@ function createSessionService(storage) {
         const lastInfo = await getLastMessageInfo(session.id);
         const updatedAt = session?.time?.updated || session?.time?.created || 0;
         const lastActivity = Math.max(updatedAt, lastInfo?.lastActivity || 0);
+        const runningAgeMs = now - lastActivity;
         const status = lastInfo?.hasRunning
-          ? 'running'
+          ? (runningAgeMs > 60 * 60 * 1000 ? 'idle' : 'running')
           : computeStatus(now, lastActivity, lastInfo?.lastRole);
         sessions.push({
           id: session.id,
           slug: session.slug,
           title: session.title || session.slug || session.id,
+          parentId: session.parentID || null,
           directory: session.directory,
           projectId: session.projectID || null,
           version: session.version || null,
@@ -86,7 +88,18 @@ function createSessionService(storage) {
       }
     }
 
-    sessions.sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
+    const statusRank = (status) => {
+      if (status === 'running') return 0;
+      if (status === 'idle') return 1;
+      if (status === 'stale') return 2;
+      if (status === 'waiting') return 1;
+      return 3;
+    };
+    sessions.sort((a, b) => {
+      const statusDiff = statusRank(a.status) - statusRank(b.status);
+      if (statusDiff) return statusDiff;
+      return (b.lastActivity || 0) - (a.lastActivity || 0);
+    });
     return sessions;
   }
 
