@@ -25,6 +25,10 @@ const trashModal = document.getElementById('trashModal');
 const trashPanel = document.getElementById('trashPanel');
 const trashList = document.getElementById('trashList');
 const trashCloseBtn = document.getElementById('trashCloseBtn');
+const childSessionModal = document.getElementById('childSessionModal');
+const childSessionBackdrop = document.getElementById('childSessionBackdrop');
+const childSessionBody = document.getElementById('childSessionBody');
+const childSessionCloseBtn = document.getElementById('childSessionCloseBtn');
 const directoryModal = document.getElementById('directoryModal');
 const directoryBackdrop = document.getElementById('directoryBackdrop');
 const directoryPath = document.getElementById('directoryPath');
@@ -80,6 +84,137 @@ function formatTime(ms) {
   if (!ms) return 'unknown';
   const date = new Date(ms);
   return date.toLocaleString();
+}
+
+function renderMessageContent(target, raw) {
+  if (window.marked) {
+    window.marked.setOptions(MARKDOWN_OPTIONS);
+  }
+  if (window.marked && window.DOMPurify) {
+    const rendered = window.marked.parse(raw, { breaks: true });
+    target.innerHTML = window.DOMPurify.sanitize(rendered);
+  } else {
+    target.textContent = raw;
+  }
+}
+
+function createChildMessageNode(message) {
+  const wrap = document.createElement('div');
+  wrap.className = `message ${message.role || 'assistant'}`;
+
+  const role = document.createElement('div');
+  role.className = 'role';
+  role.textContent = message.role || 'assistant';
+
+  const content = document.createElement('div');
+  content.className = 'content';
+  const raw = message.content || '[no text]';
+  renderMessageContent(content, raw);
+
+  const time = document.createElement('div');
+  time.className = 'timestamp';
+  time.textContent = formatTime(message.createdAt);
+
+  wrap.append(role, content, time);
+  return wrap;
+}
+
+function renderChildSessionCard(session, messages) {
+  const card = document.createElement('div');
+  card.className = 'child-session-card';
+
+  const header = document.createElement('div');
+  header.className = 'child-session-header';
+
+  const title = document.createElement('div');
+  title.className = 'child-session-title';
+  title.textContent = session.title || session.slug || session.id;
+
+  const meta = document.createElement('div');
+  meta.className = 'child-session-meta';
+  const agent = messages.find((msg) => msg.agent)?.agent || 'unknown';
+  const updatedAt = session?.time?.updated || session?.time?.created || null;
+  meta.textContent = `agent: ${agent} · ${updatedAt ? `updated ${formatTime(updatedAt)}` : 'updated unknown'}`;
+
+  header.append(title, meta);
+
+  const list = document.createElement('div');
+  list.className = 'child-session-messages';
+  const visible = (messages || []).filter((msg) => msg.content && msg.content.trim().length > 0);
+  if (!visible.length) {
+    const empty = document.createElement('div');
+    empty.className = 'trash-empty';
+    empty.textContent = 'No messages found for this session.';
+    list.appendChild(empty);
+  } else {
+    visible.forEach((msg) => list.appendChild(createChildMessageNode(msg)));
+  }
+
+  card.append(header, list);
+  return card;
+}
+
+function closeChildSessionModal() {
+  if (!childSessionModal) return;
+  childSessionModal.setAttribute('hidden', '');
+  if (childSessionBody) childSessionBody.textContent = '';
+}
+
+function renderChildSessionTabs(results) {
+  const tabs = document.createElement('div');
+  tabs.className = 'child-session-tabs';
+  const panel = document.createElement('div');
+  panel.className = 'child-session-panel';
+
+  const setActive = (index) => {
+    Array.from(tabs.children).forEach((button, idx) => {
+      button.classList.toggle('active', idx === index);
+    });
+    panel.innerHTML = '';
+    const { session, messages } = results[index];
+    panel.appendChild(renderChildSessionCard(session, messages));
+  };
+
+  results.forEach((result, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'child-session-tab';
+    const title = result.session.title || result.session.slug || result.session.id;
+    const agent = result.messages.find((msg) => msg.agent)?.agent || 'agent';
+    button.textContent = `${agent}: ${title}`;
+    button.addEventListener('click', () => setActive(index));
+    tabs.appendChild(button);
+  });
+
+  setActive(0);
+  return { tabs, panel };
+}
+
+async function openChildSessionModal(message) {
+  if (!childSessionModal || !childSessionBody) return;
+  const ids = message.childSessionIds || [];
+  if (!ids.length) return;
+  childSessionBody.textContent = 'Loading...';
+  childSessionModal.removeAttribute('hidden');
+  try {
+    const results = await Promise.all(ids.map(async (id) => {
+      const response = await fetch(`/api/sessions/${id}?limit=200`);
+      const data = await response.json();
+      if (!response.ok || !data.session) {
+        throw new Error(data?.error || `Failed to load session ${id}`);
+      }
+      return { session: data.session, messages: data.messages || [] };
+    }));
+    childSessionBody.innerHTML = '';
+    if (results.length === 1) {
+      childSessionBody.appendChild(renderChildSessionCard(results[0].session, results[0].messages));
+      return;
+    }
+    const { tabs, panel } = renderChildSessionTabs(results);
+    childSessionBody.append(tabs, panel);
+  } catch (error) {
+    childSessionBody.textContent = error?.message || 'Failed to load subagent activity.';
+  }
 }
 
 function formatProviderModel(session) {
@@ -160,6 +295,7 @@ function renderSessions() {
   const query = state.sessionQuery.trim().toLowerCase();
   const eligible = state.sessions.filter((session) => {
     if (!session.hasUserMessage) return false;
+    if (isChildSession(session)) return false;
     if (isSubagentSession(session)) return false;
     if (isBackgroundSession(session)) return false;
     if (isTaskSession(session)) return false;
@@ -212,6 +348,10 @@ function getSessionSearchText(session) {
   return [session.title, session.slug, session.directory].filter(Boolean).join(' ').toLowerCase();
 }
 
+function isChildSession(session) {
+  return Boolean(session.parentId);
+}
+
 function isSubagentSession(session) {
   const marker = `${session.title || ''} ${session.slug || ''}`.toLowerCase();
   return marker.includes('subagent') || marker.includes('sub agent') || marker.includes('sub-agent');
@@ -261,38 +401,56 @@ function renderMessages(messages, options = {}) {
     const content = document.createElement('div');
     content.className = 'content';
     const raw = msg.content || '[no text]';
-    if (window.marked && window.DOMPurify) {
-      const rendered = window.marked.parse(raw, { breaks: true });
-      content.innerHTML = window.DOMPurify.sanitize(rendered);
-    } else {
-      content.textContent = raw;
-    }
+    renderMessageContent(content, raw);
     content.style.setProperty('--clamp-lines', CLAMP_LINES);
-
-    const toggle = document.createElement('button');
-    toggle.className = 'expand-toggle';
-    toggle.type = 'button';
-    toggle.textContent = 'Expand';
-    toggle.hidden = true;
-    toggle.setAttribute('aria-expanded', 'false');
-    toggle.addEventListener('click', () => {
-      const isCollapsed = content.classList.contains('clamped');
-      if (isCollapsed) {
-        content.classList.remove('clamped');
-        toggle.textContent = 'Collapse';
-        toggle.setAttribute('aria-expanded', 'true');
-      } else {
-        content.classList.add('clamped');
-        toggle.textContent = 'Expand';
-        toggle.setAttribute('aria-expanded', 'false');
-      }
-    });
 
     const time = document.createElement('div');
     time.className = 'timestamp';
     time.textContent = formatTime(msg.createdAt);
+    const childSessions = Array.isArray(msg.childSessionIds) ? msg.childSessionIds : [];
+    const childKinds = Array.isArray(msg.childSessionKinds) ? msg.childSessionKinds : [];
+    if (childSessions.length) {
+      wrap.classList.add('has-children');
+      wrap.title = 'Click to view agent activity';
+      let label = 'agent';
+      if (childKinds.includes('background') && !childKinds.includes('subagent')) {
+        label = 'background';
+      } else if (childKinds.includes('subagent') && !childKinds.includes('background')) {
+        label = 'subagent';
+      }
+      role.textContent = `${msg.role || 'assistant'} · ${label}`;
+      wrap.addEventListener('click', (event) => {
+        if (event.target.closest('a') || event.target.closest('.expand-toggle')) return;
+        if (window.getSelection && window.getSelection().toString()) return;
+        openChildSessionModal(msg);
+      });
+    }
 
-    wrap.append(role, content, toggle, time);
+    let toggle = null;
+    if (!childSessions.length) {
+      toggle = document.createElement('button');
+      toggle.className = 'expand-toggle';
+      toggle.type = 'button';
+      toggle.textContent = 'Expand';
+      toggle.hidden = true;
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.addEventListener('click', (event) => {
+        event.stopPropagation();
+        const isCollapsed = content.classList.contains('clamped');
+        if (isCollapsed) {
+          content.classList.remove('clamped');
+          toggle.textContent = 'Collapse';
+          toggle.setAttribute('aria-expanded', 'true');
+        } else {
+          content.classList.add('clamped');
+          toggle.textContent = 'Expand';
+          toggle.setAttribute('aria-expanded', 'false');
+        }
+      });
+    }
+    wrap.append(role, content);
+    if (toggle) wrap.appendChild(toggle);
+    wrap.appendChild(time);
     messageList.appendChild(wrap);
   });
 
@@ -925,6 +1083,8 @@ if (usageBackdrop) usageBackdrop.addEventListener('click', closeUsagePanel);
 if (usageRefreshBtn) usageRefreshBtn.addEventListener('click', loadCodexStatus);
 if (trashToggleBtn) trashToggleBtn.addEventListener('click', toggleTrashPanel);
 if (trashCloseBtn) trashCloseBtn.addEventListener('click', closeTrashPanel);
+if (childSessionCloseBtn) childSessionCloseBtn.addEventListener('click', closeChildSessionModal);
+if (childSessionBackdrop) childSessionBackdrop.addEventListener('click', closeChildSessionModal);
 if (directoryBackdrop) directoryBackdrop.addEventListener('click', cancelDirectoryModal);
 if (directoryCancelBtn) directoryCancelBtn.addEventListener('click', cancelDirectoryModal);
 if (directorySelectBtn) directorySelectBtn.addEventListener('click', handleDirectoryConfirm);
