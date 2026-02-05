@@ -55,6 +55,35 @@ function createMessageService(storage) {
       .join('\n\n');
   }
 
+  function extractChildSessionInfo(parts) {
+    if (!Array.isArray(parts)) return { ids: [], kinds: [] };
+    const ids = new Set();
+    const kinds = new Set();
+    const toolSources = new Set(['delegate_task', 'background_task', 'call_omo_agent', 'task']);
+    parts.forEach((part) => {
+      if (!part || part.type !== 'tool') return;
+      if (part.tool && !toolSources.has(part.tool)) return;
+      if (part.tool === 'background_task') {
+        kinds.add('background');
+      } else {
+        kinds.add('subagent');
+      }
+      const input = part.state?.input || null;
+      const directId = input?.session_id || input?.sessionId || input?.sessionID;
+      if (typeof directId === 'string' && directId.startsWith('ses_')) {
+        ids.add(directId);
+      }
+      const output = part.state?.output;
+      if (typeof output === 'string') {
+        const matches = output.match(/\bses_[A-Za-z0-9]+\b/g);
+        if (matches) {
+          matches.forEach((match) => ids.add(match));
+        }
+      }
+    });
+    return { ids: Array.from(ids), kinds: Array.from(kinds) };
+  }
+
   function sortByCreated(a, b) {
     const aTime = a?.time?.created || 0;
     const bTime = b?.time?.created || 0;
@@ -70,6 +99,7 @@ function createMessageService(storage) {
     for (const meta of slice) {
       const parts = await storage.loadMessageParts(meta.id);
       const content = mergeParts(parts);
+      const childSessionInfo = extractChildSessionInfo(parts);
       messages.push({
         id: meta.id,
         sessionId: meta.sessionID,
@@ -80,7 +110,9 @@ function createMessageService(storage) {
         providerId: meta.providerID || meta.model?.providerID || null,
         modelId: meta.modelID || meta.model?.modelID || null,
         path: meta.path || null,
-        content
+        content,
+        childSessionIds: childSessionInfo.ids,
+        childSessionKinds: childSessionInfo.kinds
       });
     }
 
