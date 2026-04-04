@@ -20,7 +20,9 @@ function createStorageContext(options = {}) {
 
   async function writeJson(filePath, data) {
     const raw = JSON.stringify(data, null, 2);
-    await fs.writeFile(filePath, `${raw}\n`, 'utf8');
+    const tmpPath = `${filePath}.tmp`;
+    await fs.writeFile(tmpPath, `${raw}\n`, 'utf8');
+    await fs.rename(tmpPath, filePath);
   }
 
   async function ensureDir(dir) {

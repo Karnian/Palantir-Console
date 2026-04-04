@@ -84,6 +84,7 @@ function createSessionService(storage) {
           lastModelId: lastInfo?.lastModelId || null
         });
       } catch (error) {
+        console.error(`[sessionService] Failed to load session from ${filePath}:`, error.message);
         continue;
       }
     }
