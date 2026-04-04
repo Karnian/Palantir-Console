@@ -163,7 +163,7 @@ test('Agent profile CRUD', async (t) => {
   const create = await request(app).post('/api/agents').send({
     name: 'Custom Agent',
     type: 'custom',
-    command: 'my-agent',
+    command: 'claude',
     args_template: '--run {prompt}',
   });
   assert.equal(create.status, 201);
@@ -176,6 +176,17 @@ test('Agent profile CRUD', async (t) => {
 
   const del = await request(app).delete(`/api/agents/${agentId}`);
   assert.equal(del.status, 200);
+});
+
+test('Agent profile rejects disallowed commands', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/agents').send({
+    name: 'Evil Agent',
+    type: 'custom',
+    command: 'rm',
+  });
+  assert.equal(res.status, 400);
+  assert.ok(res.body.error.includes('not in the allowlist'));
 });
 
 // ---- Runs ----

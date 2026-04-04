@@ -68,10 +68,10 @@ function createRunService(db, eventBus) {
       VALUES (?, ?, ?)
     `),
     getEvents: db.prepare(`
-      SELECT * FROM run_events WHERE run_id = ? ORDER BY id ASC
+      SELECT * FROM run_events WHERE run_id = ? ORDER BY id ASC LIMIT 1000
     `),
     getEventsAfter: db.prepare(`
-      SELECT * FROM run_events WHERE run_id = ? AND id > ? ORDER BY id ASC
+      SELECT * FROM run_events WHERE run_id = ? AND id > ? ORDER BY id ASC LIMIT 500
     `),
   };
 

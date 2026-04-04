@@ -95,7 +95,7 @@ function createTmuxEngine() {
       });
 
       // Execute the script in the tmux session
-      execFileSync('tmux', ['send-keys', '-t', name, `bash ${scriptPath}`, 'Enter'], {
+      execFileSync('tmux', ['send-keys', '-t', name, `bash '${scriptPath}'`, 'Enter'], {
         stdio: 'pipe',
       });
 

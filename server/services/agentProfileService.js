@@ -1,6 +1,34 @@
 const crypto = require('node:crypto');
 const { BadRequestError, NotFoundError } = require('../utils/errors');
 
+// Allowlist of safe agent commands — only these can be used as agent executables
+const ALLOWED_COMMANDS = new Set([
+  'claude', 'codex', 'opencode', 'gemini',        // known agent CLIs
+  '/opt/homebrew/bin/claude', '/opt/homebrew/bin/codex',
+  '/opt/homebrew/bin/opencode', '/opt/homebrew/bin/gemini',
+  '/usr/local/bin/claude', '/usr/local/bin/codex',
+  '/usr/local/bin/opencode', '/usr/local/bin/gemini',
+]);
+
+// Additional allowed commands can be set via PALANTIR_ALLOWED_COMMANDS env var (comma-separated)
+if (process.env.PALANTIR_ALLOWED_COMMANDS) {
+  process.env.PALANTIR_ALLOWED_COMMANDS.split(',').map(s => s.trim()).filter(Boolean).forEach(cmd => ALLOWED_COMMANDS.add(cmd));
+}
+
+function validateCommand(command) {
+  if (!command || typeof command !== 'string') {
+    throw new BadRequestError('Agent command is required');
+  }
+  const trimmed = command.trim();
+  if (!ALLOWED_COMMANDS.has(trimmed)) {
+    throw new BadRequestError(
+      `Command '${trimmed}' is not in the allowlist. Allowed: ${[...ALLOWED_COMMANDS].filter(c => !c.startsWith('/')).join(', ')}. ` +
+      'Set PALANTIR_ALLOWED_COMMANDS env var to add custom commands.'
+    );
+  }
+  return trimmed;
+}
+
 function createAgentProfileService(db) {
   const stmts = {
     getAll: db.prepare('SELECT * FROM agent_profiles ORDER BY name ASC'),
@@ -42,10 +70,10 @@ function createAgentProfileService(db) {
   function createProfile({ name, type, command, args_template, capabilities_json, env_allowlist, icon, color, max_concurrent }) {
     if (!name) throw new BadRequestError('Agent name is required');
     if (!type) throw new BadRequestError('Agent type is required');
-    if (!command) throw new BadRequestError('Agent command is required');
+    const validatedCommand = validateCommand(command);
     const id = `agent_${crypto.randomUUID().slice(0, 8)}`;
     stmts.insert.run({
-      id, name, type, command,
+      id, name, type, command: validatedCommand,
       args_template: args_template || null,
       capabilities_json: capabilities_json || '{}',
       env_allowlist: env_allowlist || '[]',
@@ -58,6 +86,9 @@ function createAgentProfileService(db) {
 
   function updateProfile(id, fields) {
     getProfile(id);
+    if (fields.command) {
+      fields.command = validateCommand(fields.command);
+    }
     stmts.update.run({
       id,
       name: null, type: null, command: null, args_template: null,

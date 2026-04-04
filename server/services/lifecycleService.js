@@ -88,10 +88,22 @@ function createLifecycleService({
     if (!profile.args_template) return [prompt];
 
     const template = profile.args_template;
-    // Replace {prompt} placeholder
-    const rendered = template.replace(/\{prompt\}/g, prompt);
-    // Split by spaces but respect quoted strings
-    return rendered.match(/(?:[^\s"]+|"[^"]*")+/g) || [prompt];
+    // Split template into parts first, then replace {prompt} placeholder as single arg
+    const parts = template.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
+    const args = [];
+    for (const part of parts) {
+      if (part === '{prompt}') {
+        // Prompt is always a single argument — never split by spaces
+        args.push(prompt);
+      } else if (part.includes('{prompt}')) {
+        // Replace placeholder within a larger string
+        args.push(part.replace(/\{prompt\}/g, prompt));
+      } else {
+        // Static template part — strip surrounding quotes if present
+        args.push(part.replace(/^"(.*)"$/, '$1'));
+      }
+    }
+    return args.length > 0 ? args : [prompt];
   }
 
   /**
