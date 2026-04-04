@@ -30,11 +30,16 @@ function timeAgo(ms) {
   return `${days}d ago`;
 }
 
+// Auth token — read from meta tag or query param ?token=
+const _authToken = (() => {
+  const params = new URLSearchParams(location.search);
+  return params.get('token') || null;
+})();
+
 async function apiFetch(url, opts = {}) {
-  const res = await fetch(url, {
-    headers: { 'Content-Type': 'application/json', ...opts.headers },
-    ...opts,
-  });
+  const headers = { 'Content-Type': 'application/json', ...opts.headers };
+  if (_authToken) headers['Authorization'] = `Bearer ${_authToken}`;
+  const res = await fetch(url, { headers, ...opts });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || `Request failed: ${res.status}`);
   return data;
@@ -571,7 +576,10 @@ function RunInspector({ run, onClose }) {
           const newEvents = data.events || [];
           if (newEvents.length) {
             lastEventId = Math.max(...newEvents.map(e => e.id || 0));
-            setEvents(prev => [...prev, ...newEvents]);
+            setEvents(prev => {
+              const combined = [...prev, ...newEvents];
+              return combined.length > 500 ? combined.slice(-500) : combined;
+            });
           }
           // also refresh run status
           const runData = await apiFetch(`/api/runs/${run.id}`);
@@ -840,7 +848,7 @@ function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadT
               key=${col.id}
               class="board-column ${dragTarget === col.id ? 'drag-over' : ''}"
               onDragOver=${(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDragTarget(col.id); }}
-              onDragLeave=${() => setDragTarget(null)}
+              onDragLeave=${(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setDragTarget(null); }}
               onDrop=${(e) => handleDrop(col.id, e)}
             >
               <div class="column-header">
