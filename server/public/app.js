@@ -410,6 +410,14 @@ function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
   const [saving, setSaving] = useState(false);
   useEscape(open, onClose);
 
+  // Reset form state when modal opens
+  useEffect(() => {
+    if (open) {
+      setTitle(''); setDescription(''); setProjectId('');
+      setPriority('medium'); setAgentProfileId('');
+    }
+  }, [open]);
+
   if (!open) return null;
 
   const handleSubmit = async () => {
@@ -431,7 +439,7 @@ function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
       setTitle(''); setDescription(''); setProjectId(''); setPriority('medium'); setAgentProfileId('');
       onClose();
     } catch (err) {
-      alert(err.message);
+      addToast(err.message, 'error');
     }
     setSaving(false);
   };
@@ -513,7 +521,7 @@ function ExecuteModal({ open, task, agents, onClose, onExecute }) {
       await onExecute(task.id, agentProfileId, prompt);
       onClose();
     } catch (err) {
-      alert(err.message);
+      addToast(err.message, 'error');
     }
     setExecuting(false);
   };
@@ -583,7 +591,13 @@ function RunInspector({ run, onClose }) {
           }
           // also refresh run status
           const runData = await apiFetch(`/api/runs/${run.id}`);
-          if (!cancelled) setCurrentRun(runData.run);
+          if (!cancelled) {
+            setCurrentRun(runData.run);
+            // Stop polling if run reached a terminal state
+            if (['completed', 'failed', 'cancelled'].includes(runData.run?.status)) {
+              break;
+            }
+          }
         } catch { /* ignore */ }
         await new Promise(r => setTimeout(r, 2000));
       }
@@ -608,7 +622,7 @@ function RunInspector({ run, onClose }) {
       });
       setInputText('');
     } catch (err) {
-      alert(err.message);
+      addToast(err.message, 'error');
     }
     setSending(false);
   };
@@ -618,7 +632,7 @@ function RunInspector({ run, onClose }) {
     try {
       await apiFetch(`/api/runs/${run.id}/cancel`, { method: 'POST' });
     } catch (err) {
-      alert(err.message);
+      addToast(err.message, 'error');
     }
   };
 
@@ -778,7 +792,7 @@ function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadT
       });
       reloadTasks();
     } catch (err) {
-      alert(err.message);
+      addToast(err.message, 'error');
     }
   };
 
@@ -909,7 +923,7 @@ function ProjectsView({ projects, reloadProjects }) {
       setName(''); setDesc(''); setShowNew(false);
       reloadProjects();
     } catch (err) {
-      alert(err.message);
+      addToast(err.message, 'error');
     }
     setSaving(false);
   };
