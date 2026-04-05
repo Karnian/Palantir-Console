@@ -85,7 +85,24 @@ Backlog  →  Todo  →  In Progress  →  Review  →  Done
 
 프로젝트는 Task를 논리적으로 묶는 단위. Task 생성 시 프로젝트를 지정하면 보드에서 프로젝트 뱃지가 표시된다.
 
-### 4. Agents (⚙)
+### 4. Manager (✦)
+
+**중앙 오케스트레이터.** Claude Code CLI를 Manager 에이전트로 실행해 워커들을 관제한다.
+
+- **40/60 분할 레이아웃**: 왼쪽 채팅(40%) + 오른쪽 워커 세션 그리드(60%)
+- **Start Manager** — Manager 세션 시작. Claude Code가 stream-json 프로토콜로 multi-turn 대화
+- **채팅** — Manager에게 상태 보고, 작업 위임, 실패 분석 등 지시
+- **Stop** — Manager 세션 종료
+
+Manager는 Palantir Console REST API를 curl로 직접 조회하여 실제 런/태스크 상태를 파악한다.
+
+**기술 구현:**
+- Claude Code CLI `--print --output-format stream-json --input-format stream-json` 모드
+- OAuth 인증 자동 전달 (`.claude-auth.json` 메커니즘)
+- 매 턴마다 result 이벤트가 발생하지만, Manager는 세션을 유지 (completed로 전환하지 않음)
+- Health check에서 Manager 런을 건너뜀 (TmuxEngine 미사용)
+
+### 5. Agents (⚙)
 
 에이전트 프로필 관리. 기본 3개가 제공된다:
 
@@ -199,9 +216,19 @@ PATCH  /api/agents/:id         — 수정
 DELETE /api/agents/:id         — 삭제
 ```
 
+### Manager Session
+```
+POST   /api/manager/start      — Manager 시작 { prompt?, cwd?, model? }
+POST   /api/manager/message    — Manager에 메시지 전송 { text }
+GET    /api/manager/status     — Manager 상태 (active, run, usage, claudeSessionId)
+GET    /api/manager/events     — Manager 이벤트 목록
+GET    /api/manager/output     — Manager 출력 텍스트
+POST   /api/manager/stop       — Manager 종료
+```
+
 ### SSE / Health
 ```
-GET    /api/events             — SSE 스트림 (task:*, run:* 이벤트)
+GET    /api/events             — SSE 스트림 (task:*, run:*, manager:* 이벤트)
 GET    /api/health             — 헬스체크
 ```
 
@@ -228,7 +255,8 @@ POST   /api/sessions/:id/message — 메시지 전송
 - **Backend**: Express.js 5, SQLite (WAL mode, better-sqlite3)
 - **Frontend**: Preact + HTM (UMD, 빌드 불필요)
 - **Font**: Inter (Google Fonts CDN)
-- **에이전트 실행**: tmux 세션 + git worktree 격리
+- **워커 에이전트 실행**: tmux 세션 + git worktree 격리
+- **매니저 에이전트 실행**: Claude Code CLI stream-json 프로토콜 (NDJSON)
 - **실시간**: SSE (Server-Sent Events)
 - **테스트**: Node.js built-in test runner + supertest
 
