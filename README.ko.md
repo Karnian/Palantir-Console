@@ -16,6 +16,16 @@ npm start
 open http://localhost:4177
 ```
 
+### 자동 환경 설정 (nvm/volta/fnm)
+
+```bash
+bash setup.sh   # Node 20+ 자동 감지/설치, npm install 실행
+npm start
+```
+
+Node 버전 매니저(nvm, volta, fnm)가 설치되어 있으면 자동으로 Node 20을 설치합니다.
+없으면 안내 메시지가 출력됩니다.
+
 ### Docker 실행
 
 ```bash
