@@ -23,6 +23,13 @@ docker compose up --build
 open http://localhost:4177
 ```
 
+### Auto Setup (nvm/volta/fnm)
+
+```bash
+bash setup.sh   # auto-detects and installs Node 20+, runs npm install
+npm start
+```
+
 ### Docker with Auth
 
 ```bash
