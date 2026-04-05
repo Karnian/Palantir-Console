@@ -74,15 +74,8 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus }) {
     const {
       prompt,
       model,
-      maxBudgetUsd = 5,
       cwd,
-      apiKey,
     } = req.body || {};
-
-    // Store API key in process env if provided (persists for future spawns)
-    if (apiKey) {
-      process.env.ANTHROPIC_API_KEY = apiKey;
-    }
 
     // Validate cwd if provided — must be absolute path, no traversal
     let safeCwd = cwd || process.cwd();
@@ -112,8 +105,7 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus }) {
         systemPrompt,
         permissionMode: 'bypassPermissions',
         allowedTools: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebSearch', 'WebFetch'],
-        maxBudgetUsd,
-        model: model || 'sonnet',
+        model: model || undefined,
         isManager: true,
       });
 
@@ -180,7 +172,7 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus }) {
   router.get('/status', asyncHandler(async (req, res) => {
     const manager = getActiveManager();
     if (!manager) {
-      return res.json({ active: false, run: null, hasApiKey: Boolean(process.env.ANTHROPIC_API_KEY) });
+      return res.json({ active: false, run: null });
     }
 
     const usage = streamJsonEngine.getUsage(activeManagerRunId);
@@ -191,7 +183,6 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus }) {
       run: manager,
       usage,
       claudeSessionId: sessionId,
-      hasApiKey: Boolean(process.env.ANTHROPIC_API_KEY),
     });
   }));
 

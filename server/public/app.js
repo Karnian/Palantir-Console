@@ -2596,19 +2596,9 @@ function ManagerView({ manager, runs }) {
     }
   };
 
-  const [apiKeyInput, setApiKeyInput] = useState('');
-  const [showApiKeyForm, setShowApiKeyForm] = useState(false);
-
   const handleStart = async () => {
-    // If no API key configured, show the form
-    if (!status.hasApiKey && !apiKeyInput) {
-      setShowApiKeyForm(true);
-      return;
-    }
     try {
-      await start({ apiKey: apiKeyInput || undefined });
-      setApiKeyInput('');
-      setShowApiKeyForm(false);
+      await start({});
     } catch { /* toast handled */ }
   };
 
@@ -2681,20 +2671,7 @@ function ManagerView({ manager, runs }) {
             <div class="manager-empty">
               <div class="manager-empty-icon">\u2726</div>
               <div class="manager-empty-text">Start a Manager session to orchestrate your agents</div>
-              ${showApiKeyForm || (!status.hasApiKey && !apiKeyInput) ? html`
-                <div class="api-key-form">
-                  <input
-                    type="password"
-                    class="api-key-input"
-                    placeholder="ANTHROPIC_API_KEY (sk-ant-...)"
-                    value=${apiKeyInput}
-                    onInput=${(e) => setApiKeyInput(e.target.value)}
-                    onKeyDown=${(e) => { if (e.key === 'Enter' && apiKeyInput) handleStart(); }}
-                  />
-                  <div class="api-key-hint">--print mode requires an API key (OAuth not supported)</div>
-                </div>
-              ` : null}
-              <button class="btn btn-primary" onClick=${handleStart} disabled=${loading || (showApiKeyForm && !apiKeyInput)}>
+              <button class="btn btn-primary" onClick=${handleStart} disabled=${loading}>
                 ${loading ? 'Starting...' : 'Start Manager'}
               </button>
             </div>
