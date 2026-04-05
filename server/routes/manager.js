@@ -95,8 +95,11 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus }) {
     });
     const runId = run.id;
 
+    // Build run summary for initial context
+    const runSummary = buildRunSummary(runService);
+
     // Build system prompt for the Manager role
-    const systemPrompt = buildManagerSystemPrompt();
+    const systemPrompt = buildManagerSystemPrompt(runSummary);
 
     try {
       const result = streamJsonEngine.spawnAgent(runId, {
@@ -244,10 +247,60 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus }) {
 }
 
 /**
+ * Build a summary of current runs/tasks for the Manager's initial context.
+ */
+function buildRunSummary(runService) {
+  try {
+    const allRuns = runService.listRuns({});
+    if (!allRuns || allRuns.length === 0) return 'No runs found.';
+
+    const running = allRuns.filter(r => r.status === 'running' && !r.is_manager);
+    const needsInput = allRuns.filter(r => r.status === 'needs_input');
+    const failed = allRuns.filter(r => r.status === 'failed');
+    const completed = allRuns.filter(r => r.status === 'completed');
+
+    const lines = [];
+    lines.push(`- 🟢 Running: ${running.length}`);
+    lines.push(`- 🟡 Needs Input: ${needsInput.length}`);
+    lines.push(`- 🔴 Failed: ${failed.length}`);
+    lines.push(`- ✅ Completed: ${completed.length}`);
+    lines.push(`- Total runs: ${allRuns.length}`);
+
+    if (failed.length > 0) {
+      lines.push('\nRecent failures:');
+      for (const r of failed.slice(0, 5)) {
+        const name = r.prompt ? r.prompt.slice(0, 60) : r.id;
+        lines.push(`  - [${r.id}] ${name} (exit: ${r.exit_code ?? '?'})`);
+      }
+    }
+
+    if (running.length > 0) {
+      lines.push('\nCurrently running:');
+      for (const r of running) {
+        const name = r.prompt ? r.prompt.slice(0, 60) : r.id;
+        lines.push(`  - [${r.id}] ${name}`);
+      }
+    }
+
+    if (needsInput.length > 0) {
+      lines.push('\n⚠️ Waiting for input:');
+      for (const r of needsInput) {
+        const name = r.prompt ? r.prompt.slice(0, 60) : r.id;
+        lines.push(`  - [${r.id}] ${name}`);
+      }
+    }
+
+    return lines.join('\n');
+  } catch {
+    return 'Unable to load run summary.';
+  }
+}
+
+/**
  * Build the system prompt for the Manager agent.
  * The Manager's role is to orchestrate worker agents and report status to the user.
  */
-function buildManagerSystemPrompt() {
+function buildManagerSystemPrompt(runSummary) {
   return `You are the Palantir Manager — a central orchestration agent for the Palantir Console.
 
 Your role:
@@ -257,11 +310,36 @@ Your role:
 4. DELEGATE new work to appropriate worker agents
 5. ALERT the user to issues that need attention (failures, stuck agents, etc.)
 
-You have access to the Palantir Console API via tools. Use them to:
-- Check task and run status
-- View agent outputs
-- Create new tasks and trigger agent runs
-- Send input to agents that need it
+## Palantir Console REST API
+
+The Palantir Console server runs at http://localhost:4177. Use Bash with curl to query it:
+
+### Runs (agent executions)
+- List all runs: curl -s http://localhost:4177/api/runs | jq
+- Filter by status: curl -s "http://localhost:4177/api/runs?status=running" | jq
+- Filter by task: curl -s "http://localhost:4177/api/runs?task_id=TASK_ID" | jq
+- Get single run: curl -s http://localhost:4177/api/runs/RUN_ID | jq
+- Get run events: curl -s http://localhost:4177/api/runs/RUN_ID/events | jq
+
+### Tasks
+- List all tasks: curl -s http://localhost:4177/api/tasks | jq
+- Filter by status: curl -s "http://localhost:4177/api/tasks?status=in_progress" | jq
+- Create task: curl -s -X POST http://localhost:4177/api/tasks -H 'Content-Type: application/json' -d '{"title":"...","description":"...","priority":"medium"}'
+- Update status: curl -s -X PATCH http://localhost:4177/api/tasks/TASK_ID/status -H 'Content-Type: application/json' -d '{"status":"done"}'
+
+### Projects
+- List projects: curl -s http://localhost:4177/api/projects | jq
+
+### Agent Profiles
+- List agents: curl -s http://localhost:4177/api/agents | jq
+
+### Worker Management
+- Execute task with agent: curl -s -X POST http://localhost:4177/api/tasks/TASK_ID/execute -H 'Content-Type: application/json' -d '{"agent_profile_id":"AGENT_ID","prompt":"..."}'
+- Send input to run: curl -s -X POST http://localhost:4177/api/runs/RUN_ID/input -H 'Content-Type: application/json' -d '{"text":"..."}'
+- Cancel run: curl -s -X POST http://localhost:4177/api/runs/RUN_ID/cancel
+
+Run statuses: queued, running, paused, needs_input, completed, failed, cancelled
+Task statuses: backlog, todo, in_progress, review, done
 
 Always be concise and action-oriented. When reporting status, use a structured format:
 - 🟢 Running (count)
@@ -269,7 +347,10 @@ Always be concise and action-oriented. When reporting status, use a structured f
 - 🔴 Failed (count)
 - ✅ Completed today (count)
 
-Prioritize issues that need user attention (needs_input, failures) over routine updates.`;
+Prioritize issues that need user attention (needs_input, failures) over routine updates.
+Always query the actual Palantir API to get real data — never guess or assume.
+
+${runSummary ? `\n## Current State (at session start)\n${runSummary}` : ''}`;
 }
 
 module.exports = { createManagerRouter };
