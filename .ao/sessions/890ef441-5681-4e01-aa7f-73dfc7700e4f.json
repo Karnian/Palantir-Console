@@ -1,0 +1,11 @@
+{
+  "sessionId": "890ef441-5681-4e01-aa7f-73dfc7700e4f",
+  "startedAt": "2026-04-05T13:47:18.501Z",
+  "endedAt": "2026-04-05T13:50:06.382Z",
+  "branch": "claude/clever-bose",
+  "cwd": "/Users/k/Desktop/sub_project/Palantir-Console/.claude/worktrees/clever-bose",
+  "transcriptPath": "/Users/k/.claude/projects/-Users-k-Desktop-sub-project-Palantir-Console--claude-worktrees-clever-bose/890ef441-5681-4e01-aa7f-73dfc7700e4f.jsonl",
+  "status": "ended",
+  "runIds": [],
+  "headSha": "1cc2f71"
+}
