@@ -16,6 +16,7 @@ async function createTestApp(t) {
   const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode' });
 
   t.after(async () => {
+    if (app.shutdown) app.shutdown();
     await fs.rm(storageRoot, { recursive: true, force: true });
     await fs.rm(fsRoot, { recursive: true, force: true });
   });
