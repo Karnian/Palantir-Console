@@ -153,13 +153,19 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
     processes.set(runId, proc);
 
     // Parse NDJSON from stdout
+    child.stdout.on('data', (chunk) => {
+      console.log(`[engine][debug] stdout chunk (${chunk.length} bytes) for ${runId}`);
+    });
+
     const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
     rl.on('line', (line) => {
+      console.log(`[engine][debug] line for ${runId}: ${line.slice(0, 120)}`);
       if (!line.trim()) return;
       try {
         const event = JSON.parse(line);
         handleEvent(runId, proc, event);
-      } catch {
+      } catch (err) {
+        console.warn(`[engine][debug] JSON parse error: ${err.message}`);
         proc.outputBuffer.push(line);
       }
     });
@@ -167,6 +173,7 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
     // Capture stderr
     const stderrBuf = [];
     child.stderr.on('data', (data) => {
+      console.log(`[engine][debug] stderr for ${runId}: ${data.toString().slice(0, 200)}`);
       stderrBuf.push(data.toString());
       while (stderrBuf.length > 100) stderrBuf.shift();
     });
