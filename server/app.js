@@ -86,7 +86,7 @@ function createApp(options = {}) {
   const worktreeService = createWorktreeService();
   const lifecycleService = createLifecycleService({
     runService, taskService, agentProfileService,
-    executionEngine, worktreeService, eventBus,
+    executionEngine, streamJsonEngine, worktreeService, eventBus,
   });
 
   // Middleware

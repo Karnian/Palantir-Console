@@ -58,18 +58,19 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus }) {
    * Body: { prompt?, model?, maxBudgetUsd?, cwd? }
    */
   router.post('/start', asyncHandler(async (req, res) => {
-    // Check if manager already running — with race condition guard
+    // Atomic guard: set flag first, then check state, reset on bail-out
     if (startingManager) {
       return res.status(409).json({ error: 'Manager session is starting' });
     }
+    startingManager = true;
     const existing = getActiveManager();
     if (existing) {
+      startingManager = false;
       return res.status(409).json({
         error: 'Manager session already running',
         run: existing,
       });
     }
-    startingManager = true;
 
     const {
       prompt,
@@ -77,14 +78,18 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus }) {
       cwd,
     } = req.body || {};
 
-    // Validate cwd if provided — must be absolute path, no traversal
+    // Validate cwd if provided — must be under home directory or current working dir
     let safeCwd = cwd || process.cwd();
     if (cwd) {
       const path = require('node:path');
+      const os = require('node:os');
       safeCwd = path.resolve(cwd);
-      // Block obviously dangerous paths
-      if (safeCwd === '/' || safeCwd.startsWith('/etc') || safeCwd.startsWith('/var') || safeCwd.startsWith('/usr')) {
-        throw new BadRequestError(`cwd not allowed: ${safeCwd}`);
+      const home = os.homedir();
+      const cwdRoot = process.cwd();
+      // Allowlist: must be under home dir or server's cwd
+      if (safeCwd !== home && safeCwd !== cwdRoot &&
+          !safeCwd.startsWith(home + path.sep) && !safeCwd.startsWith(cwdRoot + path.sep)) {
+        throw new BadRequestError(`cwd must be under home directory or project root: ${safeCwd}`);
       }
     }
 
@@ -199,7 +204,8 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus }) {
       return res.json({ events: [] });
     }
 
-    const afterId = req.query.after ? Number(req.query.after) : undefined;
+    const rawAfter = req.query.after ? Number(req.query.after) : undefined;
+    const afterId = (rawAfter != null && !Number.isNaN(rawAfter)) ? rawAfter : undefined;
     const events = runService.getRunEvents(activeManagerRunId, afterId);
     res.json({ events });
   }));
@@ -301,6 +307,11 @@ function buildRunSummary(runService) {
  * The Manager's role is to orchestrate worker agents and report status to the user.
  */
 function buildManagerSystemPrompt(runSummary) {
+  const port = process.env.PORT || 4177;
+  const base = `http://localhost:${port}`;
+  const token = process.env.PALANTIR_TOKEN;
+  const auth = token ? `-H 'Authorization: Bearer ${token}' ` : '';
+
   return `You are the Palantir Manager — a central orchestration agent for the Palantir Console.
 
 Your role:
@@ -312,31 +323,32 @@ Your role:
 
 ## Palantir Console REST API
 
-The Palantir Console server runs at http://localhost:4177. Use Bash with curl to query it:
+The Palantir Console server runs at ${base}. Use Bash with curl to query it.
+${token ? `\nIMPORTANT: All API requests require auth header: ${auth.trim()}` : ''}
 
 ### Runs (agent executions)
-- List all runs: curl -s http://localhost:4177/api/runs | jq
-- Filter by status: curl -s "http://localhost:4177/api/runs?status=running" | jq
-- Filter by task: curl -s "http://localhost:4177/api/runs?task_id=TASK_ID" | jq
-- Get single run: curl -s http://localhost:4177/api/runs/RUN_ID | jq
-- Get run events: curl -s http://localhost:4177/api/runs/RUN_ID/events | jq
+- List all runs: curl -s ${auth}${base}/api/runs | jq
+- Filter by status: curl -s ${auth}"${base}/api/runs?status=running" | jq
+- Filter by task: curl -s ${auth}"${base}/api/runs?task_id=TASK_ID" | jq
+- Get single run: curl -s ${auth}${base}/api/runs/RUN_ID | jq
+- Get run events: curl -s ${auth}${base}/api/runs/RUN_ID/events | jq
 
 ### Tasks
-- List all tasks: curl -s http://localhost:4177/api/tasks | jq
-- Filter by status: curl -s "http://localhost:4177/api/tasks?status=in_progress" | jq
-- Create task: curl -s -X POST http://localhost:4177/api/tasks -H 'Content-Type: application/json' -d '{"title":"...","description":"...","priority":"medium"}'
-- Update status: curl -s -X PATCH http://localhost:4177/api/tasks/TASK_ID/status -H 'Content-Type: application/json' -d '{"status":"done"}'
+- List all tasks: curl -s ${auth}${base}/api/tasks | jq
+- Filter by status: curl -s ${auth}"${base}/api/tasks?status=in_progress" | jq
+- Create task: curl -s ${auth}-X POST ${base}/api/tasks -H 'Content-Type: application/json' -d '{"title":"...","description":"...","priority":"medium"}'
+- Update status: curl -s ${auth}-X PATCH ${base}/api/tasks/TASK_ID/status -H 'Content-Type: application/json' -d '{"status":"done"}'
 
 ### Projects
-- List projects: curl -s http://localhost:4177/api/projects | jq
+- List projects: curl -s ${auth}${base}/api/projects | jq
 
 ### Agent Profiles
-- List agents: curl -s http://localhost:4177/api/agents | jq
+- List agents: curl -s ${auth}${base}/api/agents | jq
 
 ### Worker Management
-- Execute task with agent: curl -s -X POST http://localhost:4177/api/tasks/TASK_ID/execute -H 'Content-Type: application/json' -d '{"agent_profile_id":"AGENT_ID","prompt":"..."}'
-- Send input to run: curl -s -X POST http://localhost:4177/api/runs/RUN_ID/input -H 'Content-Type: application/json' -d '{"text":"..."}'
-- Cancel run: curl -s -X POST http://localhost:4177/api/runs/RUN_ID/cancel
+- Execute task with agent: curl -s ${auth}-X POST ${base}/api/tasks/TASK_ID/execute -H 'Content-Type: application/json' -d '{"agent_profile_id":"AGENT_ID","prompt":"..."}'
+- Send input to run: curl -s ${auth}-X POST ${base}/api/runs/RUN_ID/input -H 'Content-Type: application/json' -d '{"text":"..."}'
+- Cancel run: curl -s ${auth}-X POST ${base}/api/runs/RUN_ID/cancel
 
 Run statuses: queued, running, paused, needs_input, completed, failed, cancelled
 Task statuses: backlog, todo, in_progress, review, done
