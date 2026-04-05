@@ -57,14 +57,13 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
       '--verbose',
     ];
 
-    // For manager (multi-turn): use stream-json input
-    // For worker (single-shot): use -p with prompt
+    // For manager (multi-turn): use stream-json input format
+    // IMPORTANT: Do NOT use -p with --input-format stream-json — they conflict.
+    // The initial prompt is sent via stdin after spawn.
     if (opts.isManager) {
       args.push('--input-format', 'stream-json');
-      if (opts.prompt) {
-        args.push('-p', opts.prompt);
-      }
     } else {
+      // Worker (single-shot): use -p with prompt
       if (opts.prompt) {
         args.push('-p', opts.prompt);
       }
@@ -212,6 +211,17 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
         } catch { /* ignore */ }
       }
     });
+
+    // For manager mode: send initial prompt via stdin (stream-json format)
+    // because --input-format stream-json + -p flag don't work together.
+    if (isManager && prompt) {
+      const initMsg = JSON.stringify({
+        type: 'user',
+        message: { role: 'user', content: prompt },
+      });
+      console.log(`[engine] Sending initial prompt via stdin for ${runId}`);
+      child.stdin.write(initMsg + '\n');
+    }
 
     return { pid: child.pid, engine: 'stream-json', isManager };
   }
