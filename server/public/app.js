@@ -107,6 +107,7 @@ function useSSE(listeners) {
     const channels = [
       'task:created', 'task:updated', 'task:deleted',
       'run:created', 'run:status', 'run:completed', 'run:event',
+      'manager:started', 'manager:stopped', 'run:output', 'run:result',
     ];
     channels.forEach((ch) => {
       source.addEventListener(ch, (e) => {
@@ -220,6 +221,94 @@ function useAgents() {
   useEffect(() => { load(); }, [load]);
 
   return { agents, loading, reload: load };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Manager Session Hook
+// ─────────────────────────────────────────────────────────────────────────────
+
+function useManager() {
+  const [status, setStatus] = useState({ active: false, run: null, usage: null });
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const pollRef = useRef(null);
+
+  const checkStatus = useCallback(async () => {
+    try {
+      const data = await apiFetch('/api/manager/status');
+      setStatus(data);
+      return data;
+    } catch { return { active: false }; }
+  }, []);
+
+  const loadEvents = useCallback(async () => {
+    try {
+      const data = await apiFetch('/api/manager/events');
+      setEvents(data.events || []);
+    } catch { /* ignore */ }
+  }, []);
+
+  const start = useCallback(async (opts = {}) => {
+    setLoading(true);
+    try {
+      const data = await apiFetch('/api/manager/start', {
+        method: 'POST',
+        body: JSON.stringify(opts),
+      });
+      setStatus({ active: true, run: data.run, usage: null });
+      addToast('Manager session started', 'success');
+      return data;
+    } catch (err) {
+      addToast('Failed to start manager: ' + err.message, 'error');
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const sendMessage = useCallback(async (text) => {
+    try {
+      await apiFetch('/api/manager/message', {
+        method: 'POST',
+        body: JSON.stringify({ text }),
+      });
+    } catch (err) {
+      addToast('Failed to send message: ' + err.message, 'error');
+      throw err;
+    }
+  }, []);
+
+  const stop = useCallback(async () => {
+    try {
+      await apiFetch('/api/manager/stop', { method: 'POST' });
+      setStatus({ active: false, run: null, usage: null });
+      setEvents([]);
+      addToast('Manager session stopped', 'info');
+    } catch (err) {
+      addToast('Failed to stop manager: ' + err.message, 'error');
+    }
+  }, []);
+
+  // Poll for status and events when active
+  useEffect(() => {
+    checkStatus();
+  }, [checkStatus]);
+
+  useEffect(() => {
+    if (!status.active) {
+      if (pollRef.current) clearInterval(pollRef.current);
+      return;
+    }
+    // Poll events every 2s when active
+    loadEvents();
+    pollRef.current = setInterval(() => {
+      checkStatus();
+      loadEvents();
+    }, 2000);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [status.active, checkStatus, loadEvents]);
+
+  return { status, events, loading, start, sendMessage, stop, checkStatus };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2455,6 +2544,161 @@ function AgentsView({ agents, loading, reloadAgents }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Manager Chat Panel
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ManagerChatPanel({ manager }) {
+  const { status, events, loading, start, sendMessage, stop } = manager;
+  const [expanded, setExpanded] = useState(false);
+  const [input, setInput] = useState('');
+  const [sending, setSending] = useState(false);
+  const messagesRef = useRef(null);
+
+  // Auto-scroll to bottom on new events
+  useEffect(() => {
+    if (messagesRef.current && expanded) {
+      messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
+    }
+  }, [events, expanded]);
+
+  // Parse events into displayable messages
+  const messages = useMemo(() => {
+    return events
+      .filter(e => ['assistant_text', 'user_input', 'result', 'error', 'init'].includes(e.event_type))
+      .map(e => {
+        let payload = {};
+        try { payload = JSON.parse(e.payload_json || '{}'); } catch { /* ignore */ }
+        return {
+          id: e.id,
+          type: e.event_type,
+          text: payload.text || payload.result || payload.message || '',
+          time: e.created_at,
+        };
+      })
+      .filter(m => m.text);
+  }, [events]);
+
+  const handleSend = async () => {
+    const text = input.trim();
+    if (!text || sending) return;
+    setSending(true);
+    setInput('');
+    try {
+      await sendMessage(text);
+    } catch { /* toast handled in hook */ }
+    setSending(false);
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  const handleStart = async () => {
+    try {
+      await start({});
+      setExpanded(true);
+    } catch { /* toast handled */ }
+  };
+
+  // Collapsed bar
+  if (!expanded) {
+    return html`
+      <div class="manager-bar" onClick=${() => setExpanded(true)}>
+        <div class="manager-bar-left">
+          <span class="manager-icon">\u2726</span>
+          <span class="manager-label">Manager</span>
+          ${status.active && html`
+            <span class="manager-status-badge running">Active</span>
+          `}
+          ${!status.active && html`
+            <span class="manager-status-badge idle">Idle</span>
+          `}
+        </div>
+        <div class="manager-bar-right">
+          ${status.active && status.usage && html`
+            <span class="manager-cost">$${(status.usage.costUsd || 0).toFixed(4)}</span>
+          `}
+          <button class="manager-expand-btn" title="Expand">\u25B2</button>
+        </div>
+      </div>
+    `;
+  }
+
+  // Expanded chat panel
+  return html`
+    <div class="manager-panel">
+      <div class="manager-panel-header">
+        <div class="manager-panel-title">
+          <span class="manager-icon">\u2726</span>
+          <span>Manager Session</span>
+          ${status.active && html`
+            <span class="manager-status-badge running">Active</span>
+          `}
+        </div>
+        <div class="manager-panel-actions">
+          ${status.active && status.usage && html`
+            <span class="manager-cost">$${(status.usage.costUsd || 0).toFixed(4)}</span>
+          `}
+          ${status.active && html`
+            <button class="btn btn-sm btn-danger" onClick=${stop}>Stop</button>
+          `}
+          <button class="manager-collapse-btn" onClick=${() => setExpanded(false)} title="Collapse">\u25BC</button>
+        </div>
+      </div>
+
+      <div class="manager-messages" ref=${messagesRef}>
+        ${!status.active && messages.length === 0 && html`
+          <div class="manager-empty">
+            <div class="manager-empty-icon">\u2726</div>
+            <div class="manager-empty-text">Start a Manager session to orchestrate your agents</div>
+            <button class="btn btn-primary" onClick=${handleStart} disabled=${loading}>
+              ${loading ? 'Starting...' : 'Start Manager'}
+            </button>
+          </div>
+        `}
+        ${messages.map(m => html`
+          <div key=${m.id} class="manager-msg ${m.type === 'user_input' ? 'manager-msg-user' : 'manager-msg-assistant'}">
+            <div class="manager-msg-content">${m.text}</div>
+            <div class="manager-msg-time">${timeAgo(m.time)}</div>
+          </div>
+        `)}
+      </div>
+
+      ${status.active && html`
+        <div class="manager-input-row">
+          <textarea
+            class="manager-input"
+            placeholder="Message the manager..."
+            value=${input}
+            onInput=${(e) => setInput(e.target.value)}
+            onKeyDown=${handleKeyDown}
+            rows="1"
+            disabled=${sending}
+          />
+          <button
+            class="manager-send-btn"
+            onClick=${handleSend}
+            disabled=${!input.trim() || sending}
+            title="Send"
+          >\u2191</button>
+        </div>
+      `}
+
+      ${!status.active && messages.length > 0 && html`
+        <div class="manager-input-row">
+          <button class="btn btn-primary" style="width:100%" onClick=${handleStart} disabled=${loading}>
+            ${loading ? 'Starting...' : 'Start New Session'}
+          </button>
+        </div>
+      `}
+    </div>
+  `;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Command Palette
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2540,6 +2784,7 @@ function App() {
   const { projects, loading: projectsLoading, reload: reloadProjects } = useProjects();
   const { agents, loading: agentsLoading, reload: reloadAgents } = useAgents();
   const { sessions: claudeSessions } = useClaudeSessions();
+  const manager = useManager();
   const [inspectRun, setInspectRun] = useState(null);
   const [showPalette, setShowPalette] = useState(false);
 
@@ -2672,6 +2917,7 @@ function App() {
           onClose=${() => setInspectRun(null)}
         />
       `}
+      <${ManagerChatPanel} manager=${manager} />
       <${CommandPalette} open=${showPalette} onClose=${() => setShowPalette(false)} />
       <${ToastContainer} />
     </div>
