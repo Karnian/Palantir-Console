@@ -25,6 +25,7 @@ const { createTasksRouter } = require('./routes/tasks');
 const { createRunsRouter } = require('./routes/runs');
 const { createAgentsRouter } = require('./routes/agents');
 const { createEventsRouter } = require('./routes/events');
+const { createClaudeSessionsRouter } = require('./routes/claude-sessions');
 const { createExecutionEngine } = require('./services/executionEngine');
 const { createWorktreeService } = require('./services/worktreeService');
 const { createLifecycleService } = require('./services/lifecycleService');
@@ -128,6 +129,7 @@ function createApp(options = {}) {
   app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine }));
   app.use('/api/agents', createAgentsRouter({ agentProfileService }));
   app.use('/api/events', createEventsRouter({ eventBus }));
+  app.use('/api/claude-sessions', createClaudeSessionsRouter());
 
   app.use(errorHandler);
 

@@ -221,9 +221,15 @@ function createSubprocessEngine() {
 
   function spawnAgent(runId, { command, args, cwd, env }) {
     const safeCwd = validateCwd(cwd);
+
+    // Ensure common binary paths are available (e.g., homebrew, nvm, local bins)
+    const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
+    const currentPath = process.env.PATH || '';
+    const augmentedPath = [...extraPaths, currentPath].join(path.delimiter);
+
     const child = spawn(command, args, {
       cwd: safeCwd,
-      env: { ...process.env, ...env },
+      env: { ...process.env, ...env, PATH: augmentedPath },
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: false,
     });
@@ -243,10 +249,19 @@ function createSubprocessEngine() {
       while (outputBuffer.length > MAX_BUFFER_LINES) outputBuffer.shift();
     });
 
-    processes.set(runId, { child, outputBuffer, exitCode: null, exitedAt: null });
+    const proc = { child, outputBuffer, exitCode: null, exitedAt: null, spawnError: null };
+    processes.set(runId, proc);
+
+    // CRITICAL: Handle spawn errors (e.g., command not found — ENOENT).
+    // Without this handler, the error becomes an uncaught exception and crashes the server.
+    child.on('error', (err) => {
+      console.error(`[subprocess] Spawn error for run ${runId}: ${err.message}`);
+      proc.spawnError = err;
+      proc.exitCode = 1;
+      proc.exitedAt = Date.now();
+    });
 
     child.on('exit', (code) => {
-      const proc = processes.get(runId);
       if (proc) {
         proc.exitCode = code;
         proc.exitedAt = Date.now();
@@ -303,12 +318,15 @@ function createSubprocessEngine() {
   function isAlive(runId) {
     const proc = processes.get(runId);
     if (!proc) return false;
+    if (proc.spawnError) return false;
     return proc.exitCode === null;
   }
 
   function detectExitCode(runId) {
     const proc = processes.get(runId);
-    return proc ? proc.exitCode : null;
+    if (!proc) return null;
+    if (proc.spawnError) return 1;
+    return proc.exitCode;
   }
 
   function listSessions() {

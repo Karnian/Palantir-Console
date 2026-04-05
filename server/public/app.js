@@ -7,6 +7,16 @@ const html = htm.bind(h);
 // Utilities
 // ─────────────────────────────────────────────────────────────────────────────
 
+function formatDuration(ms) {
+  if (!ms || ms < 0) return '';
+  const secs = Math.floor(ms / 1000);
+  const mins = Math.floor(secs / 60);
+  const hrs = Math.floor(mins / 60);
+  if (hrs > 0) return `${hrs}h ${mins % 60}m`;
+  if (mins > 0) return `${mins}m`;
+  return `${secs}s`;
+}
+
 function formatTime(ms) {
   if (!ms) return 'unknown';
   // Handle both millisecond timestamps and ISO/SQLite datetime strings
@@ -172,6 +182,29 @@ function useProjects() {
   return { projects, setProjects, loading, reload: load };
 }
 
+function useClaudeSessions() {
+  const [sessions, setSessions] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const reload = useCallback(async () => {
+    try {
+      const data = await apiFetch('/api/claude-sessions');
+      setSessions(data.sessions || []);
+    } catch {
+      setSessions([]);
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    reload();
+    const timer = setInterval(reload, 15000);
+    return () => clearInterval(timer);
+  }, [reload]);
+
+  return { sessions, loading, reload };
+}
+
 function useAgents() {
   const [agents, setAgents] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -196,7 +229,6 @@ function useAgents() {
 const NAV_ITEMS = [
   { hash: 'dashboard', icon: '\u25C9', label: 'Dashboard' },
   { hash: 'board',     icon: '\u2592', label: 'Task Board' },
-  { hash: 'sessions',  icon: '\u2261', label: 'Sessions' },
   { hash: 'projects',  icon: '\u25A3', label: 'Projects' },
   { hash: 'agents',    icon: '\u2699', label: 'Agents' },
 ];
@@ -251,7 +283,7 @@ function EmptyState({ icon, text, sub }) {
 // Dashboard View
 // ─────────────────────────────────────────────────────────────────────────────
 
-function DashboardView({ tasks, runs, onOpenRun }) {
+function DashboardView({ tasks, runs, onOpenRun, claudeSessions }) {
   const activeRuns = runs.filter(r => r.status === 'running');
   const needsInputRuns = runs.filter(r => r.status === 'needs_input');
   const failedRuns = runs.filter(r => r.status === 'failed');
@@ -326,7 +358,7 @@ function DashboardView({ tasks, runs, onOpenRun }) {
   return html`
     <div class="dashboard-view">
       <div class="dashboard-header">
-        <div class="dashboard-title">Attention Dashboard</div>
+        <h1 class="dashboard-title">Attention Dashboard</h1>
       </div>
       <div class="stats-bar">
         <div class="stat-chip stat-running">
@@ -393,6 +425,30 @@ function DashboardView({ tasks, runs, onOpenRun }) {
           </div>
         `)}
       </div>
+      ${claudeSessions && claudeSessions.length > 0 && html`
+        <div style="padding: 0 28px 28px;">
+          <div class="task-detail-section-title" style="margin-bottom:8px;">Active Claude Sessions (${claudeSessions.filter(s => s.alive).length})</div>
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            ${claudeSessions.filter(s => s.alive).map(s => html`
+              <div key=${s.pid} class="claude-session-item">
+                <span class="run-status-dot running"></span>
+                <div style="flex:1;min-width:0;">
+                  <div style="font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                    ${s.projectName}
+                  </div>
+                  <div style="font-size:11px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title=${s.cwd}>
+                    ${s.cwd}
+                  </div>
+                </div>
+                <div style="text-align:right;flex-shrink:0;">
+                  <div style="font-size:11px;color:var(--text-muted);">PID ${s.pid}</div>
+                  <div style="font-size:11px;color:var(--text-secondary);">${formatDuration(s.runningFor)}</div>
+                </div>
+              </div>
+            `)}
+          </div>
+        </div>
+      `}
     </div>
   `;
 }
@@ -449,7 +505,7 @@ function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
       <div class="modal-backdrop" onClick=${onClose}></div>
       <div class="modal-panel">
         <div class="modal-header">
-          <div class="modal-title">New Task</div>
+          <h2 class="modal-title">New Task</h2>
           <button class="ghost" onClick=${onClose}>Close</button>
         </div>
         <div class="modal-body">
@@ -509,7 +565,7 @@ function ExecuteModal({ open, task, agents, onClose, onExecute }) {
   useEffect(() => {
     if (open && task) {
       setPrompt(task.description || '');
-      setAgentProfileId(task.agent_profile_id || '');
+      setAgentProfileId(task.agent_profile_id || agents[0]?.id || '');
     }
   }, [open, task]);
 
@@ -531,14 +587,14 @@ function ExecuteModal({ open, task, agents, onClose, onExecute }) {
       <div class="modal-backdrop" onClick=${onClose}></div>
       <div class="modal-panel">
         <div class="modal-header">
-          <div class="modal-title">Execute Task: ${task.title}</div>
+          <h2 class="modal-title">Execute Task: ${task.title}</h2>
           <button class="ghost" onClick=${onClose}>Close</button>
         </div>
         <div class="modal-body">
           <div class="form-field">
             <label class="form-label">Agent Profile</label>
             <select class="form-select" value=${agentProfileId} onChange=${e => setAgentProfileId(e.target.value)}>
-              <option value="">Default</option>
+              <option value="" disabled>Select Agent...</option>
               ${agents.map(a => html`<option key=${a.id} value=${a.id}>${a.name}</option>`)}
             </select>
           </div>
@@ -549,12 +605,237 @@ function ExecuteModal({ open, task, agents, onClose, onExecute }) {
         </div>
         <div class="modal-footer">
           <button class="ghost" onClick=${onClose}>Cancel</button>
-          <button class="primary" onClick=${handleExecute} disabled=${executing}>
+          <button class="primary" onClick=${handleExecute} disabled=${executing || !agentProfileId}>
             ${executing ? 'Starting...' : 'Start Agent'}
           </button>
         </div>
       </div>
     </div>
+  `;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task Detail Panel
+// ─────────────────────────────────────────────────────────────────────────────
+
+const STATUS_OPTIONS = ['backlog', 'todo', 'in_progress', 'review', 'done'];
+const PRIORITY_OPTIONS = ['low', 'medium', 'high', 'critical'];
+
+function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onExecute, reloadTasks }) {
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(task?.title || '');
+  const [description, setDescription] = useState(task?.description || '');
+  const [status, setStatus] = useState(task?.status || 'backlog');
+  const [priority, setPriority] = useState(task?.priority || 'medium');
+  const [projectId, setProjectId] = useState(task?.project_id || '');
+  const [saving, setSaving] = useState(false);
+  const [showExecute, setShowExecute] = useState(false);
+  useEscape(!!task, onClose);
+
+  // Sync form state when task changes
+  useEffect(() => {
+    if (task) {
+      setTitle(task.title || '');
+      setDescription(task.description || '');
+      setStatus(task.status || 'backlog');
+      setPriority(task.priority || 'medium');
+      setProjectId(task.project_id || '');
+      setEditing(false);
+    }
+  }, [task?.id, task?.updated_at]);
+
+  if (!task) return null;
+
+  const taskRuns = runs.filter(r => r.task_id === task.id)
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const project = projects.find(p => p.id === task.project_id);
+  const activeRun = taskRuns.find(r => r.status === 'running' || r.status === 'needs_input');
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const body = { title: title.trim(), description: description.trim() || null, priority, project_id: projectId || null };
+      await apiFetch(`/api/tasks/${task.id}`, { method: 'PATCH', body: JSON.stringify(body) });
+      if (status !== task.status) {
+        await apiFetch(`/api/tasks/${task.id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
+      }
+      addToast('Task updated', 'success');
+      setEditing(false);
+      reloadTasks();
+    } catch (err) {
+      addToast(err.message, 'error');
+    }
+    setSaving(false);
+  };
+
+  const handleDelete = async () => {
+    if (!confirm('Delete this task? This cannot be undone.')) return;
+    try {
+      await apiFetch(`/api/tasks/${task.id}`, { method: 'DELETE' });
+      addToast('Task deleted', 'success');
+      reloadTasks();
+      onClose();
+    } catch (err) {
+      addToast(err.message, 'error');
+    }
+  };
+
+  const handleExecuteDone = async (taskId, agentProfileId, prompt) => {
+    const prevStatus = task.status;
+    // Move to in_progress (ignore error if already in that state)
+    try {
+      await apiFetch(`/api/tasks/${taskId}/status`, {
+        method: 'PATCH', body: JSON.stringify({ status: 'in_progress' }),
+      });
+    } catch (statusErr) {
+      // If task is already in_progress, continue with execution
+      if (!statusErr.message?.includes('in_progress')) throw statusErr;
+    }
+    try {
+      await apiFetch(`/api/tasks/${taskId}/execute`, {
+        method: 'POST', body: JSON.stringify({ agent_profile_id: agentProfileId, prompt: prompt || undefined }),
+      });
+    } catch (err) {
+      // Rollback status on execution failure
+      await apiFetch(`/api/tasks/${taskId}/status`, {
+        method: 'PATCH', body: JSON.stringify({ status: prevStatus }),
+      }).catch(() => {});
+      reloadTasks();
+      throw err;
+    }
+    reloadTasks();
+  };
+
+  const statusColor = {
+    backlog: 'var(--status-queued)', todo: 'var(--info)', in_progress: 'var(--accent)',
+    review: 'var(--status-review)', done: 'var(--success)',
+  };
+
+  return html`
+    <div class="modal-overlay">
+      <div class="modal-backdrop" onClick=${onClose}></div>
+      <div class="modal-panel wide task-detail-panel">
+        <div class="modal-header">
+          <h2 class="modal-title" style="display:flex;align-items:center;gap:8px;">
+            <span class="task-detail-status-dot" style="background:${statusColor[task.status] || 'var(--text-muted)'};width:8px;height:8px;border-radius:50%;display:inline-block;"></span>
+            Task Detail
+          </h2>
+          <div style="display:flex;gap:6px;">
+            ${!editing && html`<button class="ghost" onClick=${() => setEditing(true)}>Edit</button>`}
+            <button class="ghost" onClick=${onClose}>\u2715</button>
+          </div>
+        </div>
+
+        <div class="modal-body" style="gap:16px;">
+          ${editing ? html`
+            <div class="form-field">
+              <label class="form-label">Title</label>
+              <input class="form-input" value=${title} onInput=${e => setTitle(e.target.value)} />
+            </div>
+            <div class="form-field">
+              <label class="form-label">Description</label>
+              <textarea class="form-textarea" value=${description} onInput=${e => setDescription(e.target.value)} rows="3" placeholder="Add a description..."></textarea>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+              <div class="form-field">
+                <label class="form-label">Status</label>
+                <select class="form-select" value=${status} onChange=${e => setStatus(e.target.value)}>
+                  ${STATUS_OPTIONS.map(s => html`<option key=${s} value=${s}>${s.replace('_', ' ')}</option>`)}
+                </select>
+              </div>
+              <div class="form-field">
+                <label class="form-label">Priority</label>
+                <select class="form-select" value=${priority} onChange=${e => setPriority(e.target.value)}>
+                  ${PRIORITY_OPTIONS.map(p => html`<option key=${p} value=${p}>${p}</option>`)}
+                </select>
+              </div>
+            </div>
+            <div class="form-field">
+              <label class="form-label">Project</label>
+              <select class="form-select" value=${projectId} onChange=${e => setProjectId(e.target.value)}>
+                <option value="">None</option>
+                ${projects.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
+              </select>
+            </div>
+          ` : html`
+            <div>
+              <div class="task-detail-title">${task.title}</div>
+              ${task.description && html`<div class="task-detail-desc">${task.description}</div>`}
+            </div>
+            <div class="task-detail-meta-grid">
+              <div class="task-detail-meta-item">
+                <span class="task-detail-meta-label">Status</span>
+                <span class="task-badge" style="background:${statusColor[task.status]}22;color:${statusColor[task.status]};border:1px solid ${statusColor[task.status]}44;font-size:11px;padding:2px 8px;">
+                  ${task.status.replace('_', ' ')}
+                </span>
+              </div>
+              <div class="task-detail-meta-item">
+                <span class="task-detail-meta-label">Priority</span>
+                <span class="task-badge priority-${task.priority}" style="font-size:11px;padding:2px 8px;">${task.priority}</span>
+              </div>
+              ${project && html`
+                <div class="task-detail-meta-item">
+                  <span class="task-detail-meta-label">Project</span>
+                  <span class="task-badge project" style="font-size:11px;padding:2px 8px;">${project.name}</span>
+                </div>
+              `}
+              <div class="task-detail-meta-item">
+                <span class="task-detail-meta-label">Created</span>
+                <span style="color:var(--text-secondary);font-size:12px;">${formatTime(task.created_at)}</span>
+              </div>
+            </div>
+          `}
+
+          ${taskRuns.length > 0 && html`
+            <div class="task-detail-runs">
+              <div class="task-detail-section-title">Runs (${taskRuns.length})</div>
+              <div class="task-detail-runs-list">
+                ${taskRuns.slice(0, 5).map(r => html`
+                  <div key=${r.id} class="task-detail-run-item" onClick=${() => { onOpenRun(r); onClose(); }}>
+                    <span class="run-status-dot ${r.status}"></span>
+                    <span style="flex:1;min-width:0;">
+                      <span style="color:var(--text-primary);font-size:13px;">${r.agent_name || 'Agent'}</span>
+                      <span style="color:var(--text-muted);font-size:11px;margin-left:6px;">${r.status}</span>
+                    </span>
+                    <span style="color:var(--text-muted);font-size:11px;">${timeAgo(r.created_at)}</span>
+                  </div>
+                `)}
+              </div>
+            </div>
+          `}
+        </div>
+
+        <div class="modal-footer" style="justify-content:space-between;">
+          <div style="display:flex;gap:6px;">
+            ${editing ? html`
+              <button class="primary" onClick=${handleSave} disabled=${saving || !title.trim()}>
+                ${saving ? 'Saving...' : 'Save Changes'}
+              </button>
+              <button class="ghost" onClick=${() => setEditing(false)}>Cancel</button>
+            ` : html`
+              <button class="primary" onClick=${() => setShowExecute(true)}>
+                ${activeRun ? 'View Run' : '\u25B6 Run Agent'}
+              </button>
+              ${activeRun && html`
+                <button class="ghost" onClick=${() => { onOpenRun(activeRun); onClose(); }}>Inspect</button>
+              `}
+            `}
+          </div>
+          ${!editing && html`
+            <button class="ghost danger" onClick=${handleDelete}>Delete</button>
+          `}
+        </div>
+      </div>
+    </div>
+    ${showExecute && !activeRun && html`
+      <${ExecuteModal}
+        open=${true}
+        task=${task}
+        agents=${agents}
+        onClose=${() => setShowExecute(false)}
+        onExecute=${handleExecuteDone}
+      />
+    `}
   `;
 }
 
@@ -644,7 +925,7 @@ function RunInspector({ run, onClose }) {
       <div class="modal-backdrop" onClick=${onClose}></div>
       <div class="modal-panel wide">
         <div class="modal-header">
-          <div class="modal-title">Run Inspector</div>
+          <h2 class="modal-title">Run Inspector</h2>
           <button class="ghost" onClick=${onClose}>Close</button>
         </div>
         <div class="run-status-bar">
@@ -738,6 +1019,7 @@ function TaskCard({ task, projects, onDragStart, onClick }) {
 function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadTasks }) {
   const [showNewTask, setShowNewTask] = useState(false);
   const [executeTask, setExecuteTask] = useState(null);
+  const [detailTask, setDetailTask] = useState(null);
   const [filterProject, setFilterProject] = useState('');
   const [filterPriority, setFilterPriority] = useState('');
   const [dragTarget, setDragTarget] = useState(null);
@@ -797,19 +1079,24 @@ function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadT
   };
 
   const handleExecute = async (taskId, agentProfileId, prompt) => {
+    const prevStatus = executeTask?._previousStatus || 'todo';
     // Move task to in_progress first, then execute
-    await apiFetch(`/api/tasks/${taskId}/status`, {
-      method: 'PATCH',
-      body: JSON.stringify({ status: 'in_progress' }),
-    });
+    try {
+      await apiFetch(`/api/tasks/${taskId}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: 'in_progress' }),
+      });
+    } catch (statusErr) {
+      // If task is already in_progress, continue with execution
+      if (!statusErr.message?.includes('in_progress')) throw statusErr;
+    }
     try {
       await apiFetch(`/api/tasks/${taskId}/execute`, {
         method: 'POST',
-        body: JSON.stringify({ agent_profile_id: agentProfileId || undefined, prompt: prompt || undefined }),
+        body: JSON.stringify({ agent_profile_id: agentProfileId, prompt: prompt || undefined }),
       });
     } catch (err) {
       // Rollback: if execution failed, revert to previous status
-      const prevStatus = executeTask?._previousStatus || 'todo';
       try {
         await apiFetch(`/api/tasks/${taskId}/status`, {
           method: 'PATCH',
@@ -827,17 +1114,17 @@ function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadT
   };
 
   const handleTaskClick = (task) => {
-    // If task has active runs, open the run inspector
-    const activeRun = runs.find(r => r.task_id === task.id && (r.status === 'running' || r.status === 'needs_input'));
-    if (activeRun) {
-      onOpenRun(activeRun);
-    }
+    // Always open the task detail panel
+    setDetailTask(task);
   };
+
+  // Keep detailTask in sync with latest task data
+  const currentDetailTask = detailTask ? tasks.find(t => t.id === detailTask.id) || detailTask : null;
 
   return html`
     <div class="board-view">
       <div class="board-toolbar">
-        <div class="board-toolbar-title">Task Board</div>
+        <h1 class="board-toolbar-title">Task Board</h1>
         <div class="board-toolbar-spacer"></div>
         <div class="board-filter">
           <select class="form-select" value=${filterProject} onChange=${e => setFilterProject(e.target.value)}>
@@ -898,6 +1185,18 @@ function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadT
         onClose=${() => setExecuteTask(null)}
         onExecute=${handleExecute}
       />
+      ${currentDetailTask && html`
+        <${TaskDetailPanel}
+          task=${currentDetailTask}
+          onClose=${() => setDetailTask(null)}
+          projects=${projects}
+          agents=${agents}
+          runs=${runs}
+          onOpenRun=${onOpenRun}
+          onExecute=${handleExecute}
+          reloadTasks=${reloadTasks}
+        />
+      `}
     </div>
   `;
 }
@@ -931,7 +1230,7 @@ function ProjectsView({ projects, reloadProjects }) {
   return html`
     <div class="projects-view">
       <div class="projects-header">
-        <div class="projects-title">Projects</div>
+        <h1 class="projects-title">Projects</h1>
         <button class="primary" onClick=${() => setShowNew(true)}>+ New Project</button>
       </div>
       <div class="projects-list">
@@ -955,7 +1254,7 @@ function ProjectsView({ projects, reloadProjects }) {
           <div class="modal-backdrop" onClick=${() => setShowNew(false)}></div>
           <div class="modal-panel">
             <div class="modal-header">
-              <div class="modal-title">New Project</div>
+              <h2 class="modal-title">New Project</h2>
               <button class="ghost" onClick=${() => setShowNew(false)}>Close</button>
             </div>
             <div class="modal-body">
@@ -1035,7 +1334,7 @@ function SessionsView() {
           <div class="trash-backdrop" data-action="trash-close"></div>
           <div class="trash-panel" role="dialog">
             <div class="trash-header">
-              <div class="trash-title">Trashed Sessions</div>
+              <h2 class="trash-title">Trashed Sessions</h2>
               <button class="ghost" data-action="trash-close">Close</button>
             </div>
             <div class="trash-list" data-role="trash-list">
@@ -1047,7 +1346,7 @@ function SessionsView() {
           <div class="trash-backdrop" data-action="usage-close"></div>
           <div class="trash-panel" role="dialog">
             <div class="trash-header">
-              <div class="trash-title">Codex Status</div>
+              <h2 class="trash-title">Codex Status</h2>
               <div class="usage-actions">
                 <button class="ghost" data-action="usage-refresh">Refresh</button>
                 <button class="ghost" data-action="usage-close">Close</button>
@@ -1060,7 +1359,7 @@ function SessionsView() {
           <div class="trash-backdrop" data-action="child-close"></div>
           <div class="trash-panel child-panel" role="dialog">
             <div class="trash-header">
-              <div class="trash-title">Agent Activity</div>
+              <h2 class="trash-title">Agent Activity</h2>
               <button class="ghost" data-action="child-close">Close</button>
             </div>
             <div class="child-session-body" data-role="child-body">Loading...</div>
@@ -1070,7 +1369,7 @@ function SessionsView() {
           <div class="directory-backdrop" data-action="dir-cancel"></div>
           <div class="directory-panel" role="dialog">
             <div class="directory-header">
-              <div class="directory-title">Select Directory</div>
+              <h2 class="directory-title">Select Directory</h2>
               <button class="ghost" data-action="dir-up">Up</button>
             </div>
             <div class="directory-path" data-role="dir-path">/</div>
@@ -1929,7 +2228,7 @@ function ToastContainer() {
   const toasts = useToasts();
   if (!toasts.length) return null;
   return html`
-    <div class="toast-container">
+    <div class="toast-container" role="status" aria-live="polite">
       ${toasts.map(t => html`
         <div key=${t.id} class="toast toast-${t.type}">
           <span class="toast-message">${t.message}</span>
@@ -2050,7 +2349,7 @@ function AgentModal({ open, onClose, agent, onSaved }) {
       <div class="modal-backdrop" onClick=${onClose}></div>
       <div class="modal-panel">
         <div class="modal-header">
-          <div class="modal-title">${agent ? 'Edit Agent' : 'New Agent'}</div>
+          <h2 class="modal-title">${agent ? 'Edit Agent' : 'New Agent'}</h2>
           <button class="ghost" onClick=${onClose}>Close</button>
         </div>
         <div class="modal-body">
@@ -2116,7 +2415,7 @@ function AgentsView({ agents, loading, reloadAgents }) {
   return html`
     <div class="agents-view">
       <div class="agents-header">
-        <div class="agents-title">Agent Profiles</div>
+        <h1 class="agents-title">Agent Profiles</h1>
         <button class="primary" onClick=${() => { setEditAgent(null); setShowModal(true); }}>+ New Agent</button>
       </div>
       <div class="agents-list">
@@ -2240,6 +2539,7 @@ function App() {
   const { runs, setRuns, loading: runsLoading, reload: reloadRuns } = useRuns();
   const { projects, loading: projectsLoading, reload: reloadProjects } = useProjects();
   const { agents, loading: agentsLoading, reload: reloadAgents } = useAgents();
+  const { sessions: claudeSessions } = useClaudeSessions();
   const [inspectRun, setInspectRun] = useState(null);
   const [showPalette, setShowPalette] = useState(false);
 
@@ -2355,6 +2655,7 @@ function App() {
         tasks=${tasks}
         runs=${runs}
         onOpenRun=${(run) => setInspectRun(run)}
+        claudeSessions=${claudeSessions}
       />
     `;
   };
