@@ -2564,7 +2564,7 @@ function ManagerView({ manager, runs }) {
   // Parse events into displayable messages
   const messages = useMemo(() => {
     return events
-      .filter(e => ['assistant_text', 'user_input', 'result', 'error', 'init'].includes(e.event_type))
+      .filter(e => ['assistant_text', 'user_input', 'error'].includes(e.event_type))
       .map(e => {
         let payload = {};
         try { payload = JSON.parse(e.payload_json || '{}'); } catch { /* ignore */ }
