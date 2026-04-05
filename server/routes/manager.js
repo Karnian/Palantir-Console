@@ -76,7 +76,13 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus }) {
       model,
       maxBudgetUsd = 5,
       cwd,
+      apiKey,
     } = req.body || {};
+
+    // Store API key in process env if provided (persists for future spawns)
+    if (apiKey) {
+      process.env.ANTHROPIC_API_KEY = apiKey;
+    }
 
     // Validate cwd if provided — must be absolute path, no traversal
     let safeCwd = cwd || process.cwd();
@@ -174,7 +180,7 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus }) {
   router.get('/status', asyncHandler(async (req, res) => {
     const manager = getActiveManager();
     if (!manager) {
-      return res.json({ active: false, run: null });
+      return res.json({ active: false, run: null, hasApiKey: Boolean(process.env.ANTHROPIC_API_KEY) });
     }
 
     const usage = streamJsonEngine.getUsage(activeManagerRunId);
@@ -185,6 +191,7 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus }) {
       run: manager,
       usage,
       claudeSessionId: sessionId,
+      hasApiKey: Boolean(process.env.ANTHROPIC_API_KEY),
     });
   }));
 

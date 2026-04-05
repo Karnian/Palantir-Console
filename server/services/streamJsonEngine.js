@@ -163,9 +163,27 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
       throw new Error(`cwd does not exist: ${safeCwd}`);
     }
 
+    // Build environment — ensure Claude auth env vars are passed through
+    const spawnEnv = { ...process.env, ...env, PATH: augmentedPath };
+
+    // If ANTHROPIC_API_KEY is not set, check for common locations
+    if (!spawnEnv.ANTHROPIC_API_KEY) {
+      // Try reading from shell profile dotfiles
+      try {
+        const { execSync } = require('node:child_process');
+        const shellKey = execSync('bash -l -c "echo $ANTHROPIC_API_KEY"', { timeout: 3000 }).toString().trim();
+        if (shellKey) spawnEnv.ANTHROPIC_API_KEY = shellKey;
+      } catch { /* ignore */ }
+    }
+
+    if (!spawnEnv.ANTHROPIC_API_KEY && !spawnEnv.CLAUDE_CODE_OAUTH_TOKEN) {
+      console.warn('[streamJson] WARNING: No ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN in environment.');
+      console.warn('[streamJson] Set ANTHROPIC_API_KEY env var before starting the server.');
+    }
+
     const child = spawn(claudeBin, args, {
       cwd: safeCwd,
-      env: { ...process.env, ...env, PATH: augmentedPath },
+      env: spawnEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: false,
     });

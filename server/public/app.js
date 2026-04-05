@@ -317,6 +317,7 @@ function useManager() {
 
 const NAV_ITEMS = [
   { hash: 'dashboard', icon: '\u25C9', label: 'Dashboard' },
+  { hash: 'manager',   icon: '\u2726', label: 'Manager' },
   { hash: 'board',     icon: '\u2592', label: 'Task Board' },
   { hash: 'projects',  icon: '\u25A3', label: 'Projects' },
   { hash: 'agents',    icon: '\u2699', label: 'Agents' },
@@ -2544,22 +2545,21 @@ function AgentsView({ agents, loading, reloadAgents }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Manager Chat Panel
+// Manager View (Full Page — Left: Chat 40%, Right: Session Grid 60%)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function ManagerChatPanel({ manager }) {
+function ManagerView({ manager, runs }) {
   const { status, events, loading, start, sendMessage, stop } = manager;
-  const [expanded, setExpanded] = useState(false);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const messagesRef = useRef(null);
 
   // Auto-scroll to bottom on new events
   useEffect(() => {
-    if (messagesRef.current && expanded) {
+    if (messagesRef.current) {
       messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
     }
-  }, [events, expanded]);
+  }, [events]);
 
   // Parse events into displayable messages
   const messages = useMemo(() => {
@@ -2596,104 +2596,184 @@ function ManagerChatPanel({ manager }) {
     }
   };
 
+  const [apiKeyInput, setApiKeyInput] = useState('');
+  const [showApiKeyForm, setShowApiKeyForm] = useState(false);
+
   const handleStart = async () => {
+    // If no API key configured, show the form
+    if (!status.hasApiKey && !apiKeyInput) {
+      setShowApiKeyForm(true);
+      return;
+    }
     try {
-      await start({});
-      setExpanded(true);
+      await start({ apiKey: apiKeyInput || undefined });
+      setApiKeyInput('');
+      setShowApiKeyForm(false);
     } catch { /* toast handled */ }
   };
 
-  // Collapsed bar
-  if (!expanded) {
-    return html`
-      <div class="manager-bar" onClick=${() => setExpanded(true)}>
-        <div class="manager-bar-left">
-          <span class="manager-icon">\u2726</span>
-          <span class="manager-label">Manager</span>
-          ${status.active && html`
-            <span class="manager-status-badge running">Active</span>
-          `}
-          ${!status.active && html`
-            <span class="manager-status-badge idle">Idle</span>
-          `}
-        </div>
-        <div class="manager-bar-right">
-          ${status.active && status.usage && html`
-            <span class="manager-cost">$${(status.usage.costUsd || 0).toFixed(4)}</span>
-          `}
-          <button class="manager-expand-btn" title="Expand">\u25B2</button>
-        </div>
-      </div>
-    `;
-  }
+  // Active/recent worker runs
+  const workerRuns = useMemo(() => {
+    return (runs || [])
+      .filter(r => !r.is_manager)
+      .sort((a, b) => {
+        // Running first, then by created_at desc
+        const statusOrder = { running: 0, needs_input: 1, queued: 2, paused: 3, completed: 4, failed: 5, cancelled: 6 };
+        const oa = statusOrder[a.status] ?? 9;
+        const ob = statusOrder[b.status] ?? 9;
+        if (oa !== ob) return oa - ob;
+        return new Date(b.created_at) - new Date(a.created_at);
+      })
+      .slice(0, 20);
+  }, [runs]);
 
-  // Expanded chat panel
+  const runStatusIcon = (status) => {
+    switch (status) {
+      case 'running': return '\u25CF'; // ●
+      case 'completed': return '\u2713'; // ✓
+      case 'failed': return '\u2717'; // ✗
+      case 'needs_input': return '\u23F8'; // ⏸
+      case 'queued': return '\u25CB'; // ○
+      case 'cancelled': return '\u2015'; // ―
+      default: return '\u25CB';
+    }
+  };
+
+  const runStatusColor = (status) => {
+    switch (status) {
+      case 'running': return '#3b82f6';
+      case 'completed': return '#22c55e';
+      case 'failed': return '#ef4444';
+      case 'needs_input': return '#f59e0b';
+      case 'queued': return '#6b7280';
+      case 'cancelled': return '#6b7280';
+      default: return '#6b7280';
+    }
+  };
+
   return html`
-    <div class="manager-panel">
-      <div class="manager-panel-header">
-        <div class="manager-panel-title">
-          <span class="manager-icon">\u2726</span>
-          <span>Manager Session</span>
-          ${status.active && html`
-            <span class="manager-status-badge running">Active</span>
-          `}
+    <div class="manager-view">
+      <!-- Left: Chat Panel (40%) -->
+      <div class="manager-chat-side">
+        <div class="manager-chat-header">
+          <div class="manager-panel-title">
+            <span class="manager-icon">\u2726</span>
+            <span>Manager Session</span>
+            ${status.active && html`
+              <span class="manager-status-badge running">Active</span>
+            `}
+            ${!status.active && html`
+              <span class="manager-status-badge idle">Idle</span>
+            `}
+          </div>
+          <div class="manager-panel-actions">
+            ${status.active && status.usage && html`
+              <span class="manager-cost">$${(status.usage.costUsd || 0).toFixed(4)}</span>
+            `}
+            ${status.active && html`
+              <button class="btn btn-sm btn-danger" onClick=${stop}>Stop</button>
+            `}
+          </div>
         </div>
-        <div class="manager-panel-actions">
-          ${status.active && status.usage && html`
-            <span class="manager-cost">$${(status.usage.costUsd || 0).toFixed(4)}</span>
-          `}
-          ${status.active && html`
-            <button class="btn btn-sm btn-danger" onClick=${stop}>Stop</button>
-          `}
-          <button class="manager-collapse-btn" onClick=${() => setExpanded(false)} title="Collapse">\u25BC</button>
-        </div>
-      </div>
 
-      <div class="manager-messages" ref=${messagesRef}>
-        ${!status.active && messages.length === 0 && html`
-          <div class="manager-empty">
-            <div class="manager-empty-icon">\u2726</div>
-            <div class="manager-empty-text">Start a Manager session to orchestrate your agents</div>
-            <button class="btn btn-primary" onClick=${handleStart} disabled=${loading}>
-              ${loading ? 'Starting...' : 'Start Manager'}
+        <div class="manager-messages" ref=${messagesRef}>
+          ${!status.active && messages.length === 0 && html`
+            <div class="manager-empty">
+              <div class="manager-empty-icon">\u2726</div>
+              <div class="manager-empty-text">Start a Manager session to orchestrate your agents</div>
+              ${showApiKeyForm || (!status.hasApiKey && !apiKeyInput) ? html`
+                <div class="api-key-form">
+                  <input
+                    type="password"
+                    class="api-key-input"
+                    placeholder="ANTHROPIC_API_KEY (sk-ant-...)"
+                    value=${apiKeyInput}
+                    onInput=${(e) => setApiKeyInput(e.target.value)}
+                    onKeyDown=${(e) => { if (e.key === 'Enter' && apiKeyInput) handleStart(); }}
+                  />
+                  <div class="api-key-hint">--print mode requires an API key (OAuth not supported)</div>
+                </div>
+              ` : null}
+              <button class="btn btn-primary" onClick=${handleStart} disabled=${loading || (showApiKeyForm && !apiKeyInput)}>
+                ${loading ? 'Starting...' : 'Start Manager'}
+              </button>
+            </div>
+          `}
+          ${messages.map(m => html`
+            <div key=${m.id} class="manager-msg ${m.type === 'user_input' ? 'manager-msg-user' : 'manager-msg-assistant'}">
+              <div class="manager-msg-content">${m.text}</div>
+              <div class="manager-msg-time">${timeAgo(m.time)}</div>
+            </div>
+          `)}
+        </div>
+
+        ${status.active && html`
+          <div class="manager-input-row">
+            <textarea
+              class="manager-input"
+              placeholder="Message the manager..."
+              value=${input}
+              onInput=${(e) => setInput(e.target.value)}
+              onKeyDown=${handleKeyDown}
+              rows="1"
+              disabled=${sending}
+            />
+            <button
+              class="manager-send-btn"
+              onClick=${handleSend}
+              disabled=${!input.trim() || sending}
+              title="Send"
+            >\u2191</button>
+          </div>
+        `}
+
+        ${!status.active && messages.length > 0 && html`
+          <div class="manager-input-row">
+            <button class="btn btn-primary" style="width:100%" onClick=${handleStart} disabled=${loading}>
+              ${loading ? 'Starting...' : 'Start New Session'}
             </button>
           </div>
         `}
-        ${messages.map(m => html`
-          <div key=${m.id} class="manager-msg ${m.type === 'user_input' ? 'manager-msg-user' : 'manager-msg-assistant'}">
-            <div class="manager-msg-content">${m.text}</div>
-            <div class="manager-msg-time">${timeAgo(m.time)}</div>
-          </div>
-        `)}
       </div>
 
-      ${status.active && html`
-        <div class="manager-input-row">
-          <textarea
-            class="manager-input"
-            placeholder="Message the manager..."
-            value=${input}
-            onInput=${(e) => setInput(e.target.value)}
-            onKeyDown=${handleKeyDown}
-            rows="1"
-            disabled=${sending}
-          />
-          <button
-            class="manager-send-btn"
-            onClick=${handleSend}
-            disabled=${!input.trim() || sending}
-            title="Send"
-          >\u2191</button>
+      <!-- Right: Session Grid (60%) -->
+      <div class="manager-grid-side">
+        <div class="manager-grid-header">
+          <h3>Worker Sessions</h3>
+          <div class="manager-grid-stats">
+            <span class="mgr-stat" style="color: #3b82f6">\u25CF ${workerRuns.filter(r => r.status === 'running').length} running</span>
+            <span class="mgr-stat" style="color: #f59e0b">\u23F8 ${workerRuns.filter(r => r.status === 'needs_input').length} waiting</span>
+            <span class="mgr-stat" style="color: #ef4444">\u2717 ${workerRuns.filter(r => r.status === 'failed').length} failed</span>
+          </div>
         </div>
-      `}
 
-      ${!status.active && messages.length > 0 && html`
-        <div class="manager-input-row">
-          <button class="btn btn-primary" style="width:100%" onClick=${handleStart} disabled=${loading}>
-            ${loading ? 'Starting...' : 'Start New Session'}
-          </button>
+        <div class="manager-grid-body">
+          ${workerRuns.length === 0 && html`
+            <${EmptyState} icon="\u2699" text="No worker sessions yet" sub="Start a manager and assign tasks" />
+          `}
+          ${workerRuns.map(run => html`
+            <div key=${run.id} class="worker-card worker-card-${run.status}">
+              <div class="worker-card-header">
+                <span class="worker-status-icon" style="color: ${runStatusColor(run.status)}">
+                  ${runStatusIcon(run.status)}
+                </span>
+                <span class="worker-card-name">${run.agent_name || run.agent_type || 'Agent'}</span>
+                <span class="worker-card-time">${timeAgo(run.started_at || run.created_at)}</span>
+              </div>
+              <div class="worker-card-task">${run.task_title || run.prompt?.slice(0, 60) || 'No task'}</div>
+              <div class="worker-card-meta">
+                <span class="worker-card-status">${run.status}</span>
+                ${run.cost_usd > 0 && html`
+                  <span class="worker-card-cost">$${run.cost_usd.toFixed(4)}</span>
+                `}
+                ${run.exit_code != null && html`
+                  <span class="worker-card-exit">exit: ${run.exit_code}</span>
+                `}
+              </div>
+            </div>
+          `)}
         </div>
-      `}
+      </div>
     </div>
   `;
 }
@@ -2863,6 +2943,9 @@ function App() {
   const routeBase = route.split('/')[0];
 
   const renderView = () => {
+    if (routeBase === 'manager') {
+      return html`<${ManagerView} manager=${manager} runs=${runs} />`;
+    }
     if (routeBase === 'board') {
       if (tasksLoading) return html`<${Loading} />`;
       return html`
@@ -2917,7 +3000,6 @@ function App() {
           onClose=${() => setInspectRun(null)}
         />
       `}
-      <${ManagerChatPanel} manager=${manager} />
       <${CommandPalette} open=${showPalette} onClose=${() => setShowPalette(false)} />
       <${ToastContainer} />
     </div>
