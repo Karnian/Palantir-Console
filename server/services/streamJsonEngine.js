@@ -44,6 +44,7 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
       try { if (fs.existsSync(p)) return p; } catch { /* ignore */ }
     }
 
+    console.warn('[engine] Claude binary not found in known paths, falling back to PATH lookup: "claude"');
     return 'claude';
   }
 
@@ -256,6 +257,7 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
 
           if (text) {
             proc.outputBuffer.push(text);
+            while (proc.outputBuffer.length > 500) proc.outputBuffer.shift();
             if (runService) {
               runService.addRunEvent(runId, 'assistant_text', JSON.stringify({ text: text.slice(0, 5000) }));
             }
