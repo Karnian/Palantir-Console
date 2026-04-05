@@ -14,6 +14,7 @@ function createLifecycleService({
   taskService,
   agentProfileService,
   executionEngine,
+  streamJsonEngine,
   worktreeService,
   eventBus,
 }) {
@@ -333,7 +334,12 @@ function createLifecycleService({
     if (['completed', 'failed', 'cancelled'].includes(run.status)) {
       return run;
     }
-    executionEngine.kill(runId);
+    // Use correct engine: streamJsonEngine for manager, executionEngine for workers
+    if (run.is_manager && streamJsonEngine) {
+      streamJsonEngine.kill(runId);
+    } else {
+      executionEngine.kill(runId);
+    }
     runService.updateRunStatus(runId, 'cancelled', { force: true });
     if (run.task_id) {
       checkTaskCompletion(run.task_id);
