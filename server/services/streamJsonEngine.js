@@ -152,19 +152,13 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
     processes.set(runId, proc);
 
     // Parse NDJSON from stdout
-    child.stdout.on('data', (chunk) => {
-      console.log(`[engine][debug] stdout chunk (${chunk.length} bytes) for ${runId}`);
-    });
-
     const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
     rl.on('line', (line) => {
-      console.log(`[engine][debug] line for ${runId}: ${line.slice(0, 120)}`);
       if (!line.trim()) return;
       try {
         const event = JSON.parse(line);
         handleEvent(runId, proc, event);
-      } catch (err) {
-        console.warn(`[engine][debug] JSON parse error: ${err.message}`);
+      } catch {
         proc.outputBuffer.push(line);
       }
     });
@@ -172,7 +166,6 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
     // Capture stderr
     const stderrBuf = [];
     child.stderr.on('data', (data) => {
-      console.log(`[engine][debug] stderr for ${runId}: ${data.toString().slice(0, 200)}`);
       stderrBuf.push(data.toString());
       while (stderrBuf.length > 100) stderrBuf.shift();
     });
@@ -285,7 +278,6 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
 
       case 'result': {
         proc.result = event;
-        proc.status = event.is_error ? 'failed' : 'completed';
 
         if (event.usage) {
           proc.usage.inputTokens = event.usage.input_tokens || proc.usage.inputTokens;
@@ -313,7 +305,18 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
               output_tokens: proc.usage.outputTokens,
               cost_usd: proc.usage.costUsd,
             });
-            runService.updateRunStatus(runId, event.is_error ? 'failed' : 'completed', { force: true });
+
+            // For manager sessions: result event = one turn finished, NOT session end.
+            // Only mark completed for non-manager (worker) runs.
+            if (!proc.isManager) {
+              proc.status = event.is_error ? 'failed' : 'completed';
+              runService.updateRunStatus(runId, event.is_error ? 'failed' : 'completed', { force: true });
+            } else if (event.is_error) {
+              // Manager: only transition to failed on error
+              proc.status = 'failed';
+              runService.updateRunStatus(runId, 'failed', { force: true });
+            }
+            // Manager non-error: stays 'running', ready for next turn
           } catch { /* ignore */ }
         }
         if (eventBus) eventBus.emit('run:result', { runId, result: event });
