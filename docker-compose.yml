@@ -2,22 +2,19 @@ services:
   palantir-console:
     build: .
     ports:
-      - "4177:4177"
+      - "${PORT:-4177}:${PORT:-4177}"
     environment:
-      PORT: 4177
-      OPENCODE_STORAGE: /root/.local/share/opencode/storage
-      OPENCODE_BIN: /root/.opencode/bin/opencode
-      CODEX_HOME: /root/.codex
-      NODE_TLS_REJECT_UNAUTHORIZED: "0"
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      GEMINI_API_KEY: ${GEMINI_API_KEY}
-      GROQ_API_KEY: ${GROQ_API_KEY}
+      PORT: ${PORT:-4177}
+      PALANTIR_TOKEN: ${PALANTIR_TOKEN:-}
+      PALANTIR_ALLOWED_COMMANDS: ${PALANTIR_ALLOWED_COMMANDS:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      OPENCODE_STORAGE: /data/opencode/storage
+      OPENCODE_BIN: opencode
     volumes:
-      - ${OPENCODE_STORAGE_HOST:-/Users/K/.local/share/opencode/storage}:/root/.local/share/opencode/storage
-      - /Users/K/.config/opencode:/root/.config/opencode
-      - /Users/K/.local/share/opencode/state:/root/.local/share/opencode/state:ro
-      - /Users/K/.local/share/opencode/auth.json:/root/.local/share/opencode/auth.json:ro
-      - /Users/K/.local/share/opencode/mcp-auth.json:/root/.local/share/opencode/mcp-auth.json:ro
-      - /Users/K/.local/share/opencode/antigravity-accounts.json:/root/.local/share/opencode/antigravity-accounts.json:ro
-      - /Users/K/.codex:/root/.codex
+      - palantir-data:/app/data
+      - ${OPENCODE_STORAGE_HOST:-/dev/null}:/data/opencode/storage:ro
+    restart: unless-stopped
+
+volumes:
+  palantir-data:
