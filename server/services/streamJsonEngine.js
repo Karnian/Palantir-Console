@@ -125,6 +125,11 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
 
     const spawnEnv = { ...process.env, ...env, PATH: augmentedPath };
 
+    console.log(`[engine] Spawning: ${claudeBin}`);
+    console.log(`[engine] Args: ${JSON.stringify(args)}`);
+    console.log(`[engine] CWD: ${safeCwd}`);
+    console.log(`[engine] Has OAUTH: ${!!spawnEnv.CLAUDE_CODE_OAUTH_TOKEN}, Has API_KEY: ${!!spawnEnv.ANTHROPIC_API_KEY}, Has BASE_URL: ${!!spawnEnv.ANTHROPIC_BASE_URL}`);
+
     const child = spawn(claudeBin, args, {
       cwd: safeCwd,
       env: spawnEnv,
@@ -185,7 +190,10 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
       }
     });
 
-    child.on('exit', (code) => {
+    child.on('exit', (code, signal) => {
+      console.log(`[engine] Process ${runId} exited: code=${code} signal=${signal}`);
+      console.log(`[engine] stderr: ${stderrBuf.join('').slice(0, 1000)}`);
+      console.log(`[engine] stdout lines: ${proc.outputBuffer.length}`);
       proc.exitCode = code;
       proc.exitedAt = Date.now();
 

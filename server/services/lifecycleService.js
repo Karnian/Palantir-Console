@@ -141,6 +141,8 @@ function createLifecycleService({
     const runningRuns = runService.listRuns({ status: 'running' });
 
     for (const run of runningRuns) {
+      // Skip manager runs — they're managed by streamJsonEngine, not executionEngine
+      if (run.is_manager) continue;
       const alive = executionEngine.isAlive(run.id);
       const exitCode = executionEngine.detectExitCode(run.id);
 
