@@ -401,12 +401,17 @@ function DashboardView({ tasks, runs, onOpenRun, claudeSessions }) {
   // Build triage items sorted by urgency
   const triageItems = [];
 
+  const runTitle = (run, task) => {
+    if (run.is_manager) return 'Manager Session';
+    return task?.title || `Run ${run.id.slice(0, 8)}`;
+  };
+
   needsInputRuns.forEach(run => {
     const task = tasks.find(t => t.id === run.task_id);
     triageItems.push({
       type: 'needs-input',
       priority: 0,
-      title: task?.title || `Run ${run.id.slice(0, 8)}`,
+      title: runTitle(run, task),
       meta: `Waiting for input - ${timeAgo(run.updated_at || run.created_at)}`,
       run,
       task,
@@ -418,7 +423,7 @@ function DashboardView({ tasks, runs, onOpenRun, claudeSessions }) {
     triageItems.push({
       type: 'failed',
       priority: 1,
-      title: task?.title || `Run ${run.id.slice(0, 8)}`,
+      title: runTitle(run, task),
       meta: `Failed - ${timeAgo(run.updated_at || run.created_at)}`,
       run,
       task,
@@ -430,7 +435,7 @@ function DashboardView({ tasks, runs, onOpenRun, claudeSessions }) {
     triageItems.push({
       type: 'running',
       priority: 2,
-      title: task?.title || `Run ${run.id.slice(0, 8)}`,
+      title: runTitle(run, task),
       meta: `Running - ${timeAgo(run.created_at)}`,
       run,
       task,
