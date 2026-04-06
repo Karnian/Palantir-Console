@@ -55,24 +55,33 @@ function createLifecycleService({
       }
     }
 
-    // Build agent command args
-    const args = buildAgentArgs(profile, prompt);
-
-    // Ensure Claude Code workers have permission mode set for autonomous execution
-    const isClaude = (profile.command || '').includes('claude');
-    if (isClaude && !args.some(a => a.includes('--permission-mode'))) {
-      args.push('--permission-mode', 'bypassPermissions');
-    }
-
     const cwd = worktreePath || projectDir || process.cwd();
 
+    // Route Claude Code workers through streamJsonEngine for rich event parsing.
+    // Other agents (codex, gemini, etc.) use the tmux/subprocess executionEngine.
+    const isClaude = (profile.command || '').includes('claude');
+
     try {
-      const result = executionEngine.spawnAgent(run.id, {
-        command: profile.command,
-        args,
-        cwd,
-        env: parseEnvAllowlist(profile.env_allowlist),
-      });
+      let result;
+      if (isClaude && streamJsonEngine) {
+        // Use streamJsonEngine — same as Manager but isManager=false (single-shot worker)
+        result = streamJsonEngine.spawnAgent(run.id, {
+          prompt,
+          cwd,
+          env: parseEnvAllowlist(profile.env_allowlist),
+          permissionMode: 'bypassPermissions',
+          isManager: false,
+        });
+      } else {
+        // Non-Claude agents: use tmux/subprocess engine
+        const args = buildAgentArgs(profile, prompt);
+        result = executionEngine.spawnAgent(run.id, {
+          command: profile.command,
+          args,
+          cwd,
+          env: parseEnvAllowlist(profile.env_allowlist),
+        });
+      }
 
       // Mark run as started
       runService.markRunStarted(run.id, {
@@ -154,8 +163,26 @@ function createLifecycleService({
     const runningRuns = runService.listRuns({ status: 'running' });
 
     for (const run of runningRuns) {
-      // Skip manager runs — they're managed by streamJsonEngine, not executionEngine
+      // Skip runs managed by streamJsonEngine (manager + claude workers)
+      // streamJsonEngine handles its own lifecycle via process exit events
       if (run.is_manager) continue;
+      const managedByStream = streamJsonEngine && streamJsonEngine.isAlive(run.id) !== undefined
+        && (streamJsonEngine.isAlive(run.id) || streamJsonEngine.detectExitCode(run.id) !== null);
+
+      if (managedByStream) {
+        // streamJsonEngine worker — check if it exited
+        const alive = streamJsonEngine.isAlive(run.id);
+        if (!alive) {
+          const exitCode = streamJsonEngine.detectExitCode(run.id);
+          if (exitCode !== null) {
+            const status = exitCode === 0 ? 'completed' : 'failed';
+            try { runService.updateRunStatus(run.id, status, { force: true }); } catch {}
+            if (run.task_id) checkTaskCompletion(run.task_id);
+          }
+        }
+        continue;
+      }
+
       const alive = executionEngine.isAlive(run.id);
       const exitCode = executionEngine.detectExitCode(run.id);
 
@@ -172,7 +199,7 @@ function createLifecycleService({
         }
 
         // Capture final output
-        const output = executionEngine.getOutput(run.id, 50);
+        const output = executionEngine.getOutput(run.id, 200);
         if (output) {
           runService.addRunEvent(run.id, 'final_output', JSON.stringify({ output: output.slice(-2000) }));
         }
@@ -338,7 +365,9 @@ function createLifecycleService({
       throw new Error(`Cannot send input to run in status: ${run.status}`);
     }
 
-    const sent = executionEngine.sendInput(runId, text);
+    // Try streamJsonEngine first (for Claude workers), fall back to executionEngine
+    const sent = (streamJsonEngine && streamJsonEngine.sendInput(runId, text))
+      || executionEngine.sendInput(runId, text);
     if (sent) {
       runService.addRunEvent(runId, 'user_input', JSON.stringify({ text }));
       if (run.status === 'needs_input') {
@@ -357,10 +386,9 @@ function createLifecycleService({
     if (['completed', 'failed', 'cancelled'].includes(run.status)) {
       return run;
     }
-    // Use correct engine: streamJsonEngine for manager, executionEngine for workers
-    if (run.is_manager && streamJsonEngine) {
-      streamJsonEngine.kill(runId);
-    } else {
+    // Use correct engine: streamJsonEngine for manager + claude workers, executionEngine for others
+    const killedByStream = streamJsonEngine && streamJsonEngine.kill(runId);
+    if (!killedByStream) {
       executionEngine.kill(runId);
     }
     runService.updateRunStatus(runId, 'cancelled', { force: true });
