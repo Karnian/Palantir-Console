@@ -1,7 +1,7 @@
 const crypto = require('node:crypto');
 const { BadRequestError, NotFoundError } = require('../utils/errors');
 
-const VALID_STATUSES = ['backlog', 'todo', 'in_progress', 'review', 'done'];
+const VALID_STATUSES = ['backlog', 'todo', 'in_progress', 'review', 'done', 'failed'];
 const VALID_PRIORITIES = ['low', 'medium', 'high', 'critical'];
 
 function createTaskService(db, eventBus) {
