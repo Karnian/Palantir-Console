@@ -2812,10 +2812,9 @@ function ManagerView({ manager, runs, tasks, projects }) {
   };
 
   const [inspectRun, setInspectRun] = useState(null);
+  const [selectedTask, setSelectedTask] = useState(null);
   const [collapsedProjects, setCollapsedProjects] = useState({});
-  const [collapsedTasks, setCollapsedTasks] = useState({});
   const toggleProject = (key) => setCollapsedProjects(prev => ({ ...prev, [key]: !prev[key] }));
-  const toggleTask = (id) => setCollapsedTasks(prev => ({ ...prev, [id]: !prev[id] }));
 
   const workerRuns = useMemo(() => (runs || []).filter(r => !r.is_manager), [runs]);
 
@@ -2991,41 +2990,18 @@ function ManagerView({ manager, runs, tasks, projects }) {
                 <span class="worker-project-count">${group.tasks.length} task${group.tasks.length !== 1 ? 's' : ''}${activeCount > 0 ? ` \u00B7 ${activeCount} active` : ''}</span>
               </div>
               ${!projCollapsed && group.tasks.map(({ task, runs: taskRuns }) => {
-                const taskId = task?.id || '_orphan';
-                const taskCollapsed = collapsedTasks[taskId];
                 const taskStatusColor = { in_progress: '#3b82f6', todo: '#6b7280', review: '#f59e0b', done: '#22c55e', failed: '#ef4444', backlog: '#6b7280' }[task?.status] || '#6b7280';
+                const activeRunCount = taskRuns.filter(r => ['running', 'needs_input'].includes(r.status)).length;
 
                 return html`
                   <div class="task-session-group">
-                    <div class="task-session-header" onClick=${() => toggleTask(taskId)} style="cursor:pointer">
-                      <span class="worker-project-chevron">${taskCollapsed ? '\u25B6' : '\u25BC'}</span>
+                    <div class="task-session-header" onClick=${() => task && setSelectedTask(task)} style="cursor:${task ? 'pointer' : 'default'}">
                       <span class="task-session-dot" style="background:${taskStatusColor}"></span>
                       <span class="task-session-title">${task?.title || 'Unassigned Runs'}</span>
                       <span class="task-session-meta">
-                        ${task?.status || ''}${taskRuns.length > 0 ? ` \u00B7 ${taskRuns.length} run${taskRuns.length > 1 ? 's' : ''}` : ''}
+                        ${task?.status || ''}${taskRuns.length > 0 ? ` \u00B7 ${taskRuns.length} run${taskRuns.length > 1 ? 's' : ''}` : ''}${activeRunCount > 0 ? ` \u00B7 ${activeRunCount} active` : ''}
                       </span>
                     </div>
-                    ${!taskCollapsed && taskRuns.length > 0 && html`
-                      <div class="task-session-body">
-                        ${taskRuns.map(run => html`
-                          <div key=${run.id} class="worker-card worker-card-${run.status}" onClick=${() => setInspectRun(run)} style="cursor:pointer">
-                            <div class="worker-card-header">
-                              <span class="worker-status-icon" style="color: ${runStatusColor(run.status)}">
-                                ${runStatusIcon(run.status)}
-                              </span>
-                              <span class="worker-card-name">${run.prompt?.slice(0, 50) || run.agent_name || 'Run'}</span>
-                              <span class="worker-card-agent-type">${run.agent_name || run.agent_type || 'Agent'}</span>
-                              <span class="worker-card-time">${timeAgo(run.started_at || run.created_at)}</span>
-                            </div>
-                            <div class="worker-card-meta">
-                              <span class="worker-card-status">${run.status}</span>
-                              ${run.cost_usd > 0 && html`<span class="worker-card-cost">$${run.cost_usd.toFixed(4)}</span>`}
-                              ${run.exit_code != null && html`<span class="worker-card-exit">exit: ${run.exit_code}</span>`}
-                            </div>
-                          </div>
-                        `)}
-                      </div>
-                    `}
                   </div>
                 `;
               })}
@@ -3036,6 +3012,18 @@ function ManagerView({ manager, runs, tasks, projects }) {
 
       ${inspectRun && html`
         <${RunInspector} run=${inspectRun} onClose=${() => setInspectRun(null)} />
+      `}
+      ${selectedTask && html`
+        <${TaskDetailPanel}
+          task=${selectedTask}
+          onClose=${() => setSelectedTask(null)}
+          projects=${projects}
+          agents=${[]}
+          runs=${workerRuns}
+          onOpenRun=${(run) => { setSelectedTask(null); setInspectRun(run); }}
+          onExecute=${() => {}}
+          reloadTasks=${() => {}}
+        />
       `}
     </div>
   `;
