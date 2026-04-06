@@ -1,0 +1,8 @@
+- navigation [ref=e4]:
+  - generic "Palantir Console" [ref=e5]: ✦
+  - button "◉" [ref=e6] [cursor=pointer]
+  - button "✦" [ref=e7] [cursor=pointer]
+  - button "▒" [ref=e8] [cursor=pointer]
+  - button "▣" [ref=e9] [cursor=pointer]
+  - button "⚙" [ref=e10] [cursor=pointer]
+  - generic "SSE Disconnected" [ref=e11]

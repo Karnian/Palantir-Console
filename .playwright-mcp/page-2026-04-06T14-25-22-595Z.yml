@@ -1,0 +1,95 @@
+- generic [ref=e3]:
+  - navigation [ref=e4]:
+    - generic "Palantir Console" [ref=e5]: ✦
+    - button "◉" [ref=e6] [cursor=pointer]
+    - button "✦" [ref=e7] [cursor=pointer]
+    - button "▒" [ref=e8] [cursor=pointer]
+    - button "▣" [ref=e9] [cursor=pointer]
+    - button "⚙" [ref=e10] [cursor=pointer]
+    - generic "SSE Disconnected" [ref=e11]
+  - generic [ref=e18]:
+    - generic [ref=e19]:
+      - heading "Projects" [level=1] [ref=e20]
+      - button "+ New Project" [ref=e21] [cursor=pointer]
+    - generic [ref=e22]:
+      - generic [ref=e23] [cursor=pointer]:
+        - generic [ref=e24]:
+          - generic [ref=e25]: AIOps
+          - generic [ref=e26]: 2 tasks
+        - generic "/Users/K/Desktop/AIOps" [ref=e27]: 📁 /Users/K/Desktop/AIOps
+        - generic [ref=e28]: Created 2026. 4. 6. 오후 7:26:46
+      - generic [ref=e29] [cursor=pointer]:
+        - generic [ref=e30]:
+          - generic [ref=e31]: 멘토링
+          - generic [ref=e32]: 1 task
+        - generic "/Users/K/Desktop/멘토링" [ref=e33]: 📁 /Users/K/Desktop/멘토링
+        - generic [ref=e34]: Created 2026. 4. 6. 오후 7:24:35
+      - generic [ref=e35] [cursor=pointer]:
+        - generic [ref=e36]:
+          - generic [ref=e37]: AIProduct1
+          - generic [ref=e38]: 4 tasks
+        - generic "/Users/K/Desktop/SK/AIProduct1팀" [ref=e39]: 📁 /Users/K/Desktop/SK/AIProduct1팀
+        - generic [ref=e40]: Created 2026. 4. 6. 오후 6:35:04
+      - generic [ref=e41] [cursor=pointer]:
+        - generic [ref=e42]:
+          - generic [ref=e43]: Palantir-Console
+          - generic [ref=e44]: 4 tasks
+        - generic "/Users/K/Desktop/sub_project/palantir_console" [ref=e45]: 📁 /Users/K/Desktop/sub_project/palantir_console
+        - generic [ref=e46]: Created 2026. 4. 6. 오후 2:19:14
+      - generic [ref=e47] [cursor=pointer]:
+        - generic [ref=e48]:
+          - generic [ref=e49]: Rakkun
+          - generic [ref=e50]: 1 task
+        - generic "/Users/K/Desktop/sub_project/rakkun" [ref=e51]: 📁 /Users/K/Desktop/sub_project/rakkun
+        - generic [ref=e52]: Created 2026. 4. 6. 오후 2:18:17
+    - generic [ref=e55]:
+      - generic [ref=e56]:
+        - heading "▣ Project Detail" [level=2] [ref=e57]:
+          - generic [ref=e58]: ▣
+          - text: Project Detail
+        - button "✕" [ref=e59] [cursor=pointer]
+      - generic [ref=e60]:
+        - generic [ref=e62]: Palantir-Console
+        - generic [ref=e63]:
+          - generic [ref=e64]:
+            - generic [ref=e65]: Directory
+            - generic "/Users/K/Desktop/sub_project/palantir_console" [ref=e66]
+          - generic [ref=e67]:
+            - generic [ref=e68]: Tasks
+            - generic [ref=e69]: 4 total
+          - generic [ref=e70]:
+            - generic [ref=e71]: Active / Done
+            - generic [ref=e72]: 0 / 4
+          - generic [ref=e73]:
+            - generic [ref=e74]: Runs
+            - generic [ref=e75]: 7 total
+          - generic [ref=e76]:
+            - generic [ref=e77]: Created
+            - generic [ref=e78]: 2026. 4. 6. 오후 2:19:14
+        - generic [ref=e79]:
+          - generic [ref=e80]: Tasks (4)
+          - generic [ref=e81]:
+            - generic [ref=e82]:
+              - generic [ref=e84]: DONE
+              - generic [ref=e85]: "4"
+            - generic [ref=e86]:
+              - generic [ref=e87]:
+                - generic [ref=e88]: 코드 및 파일/폴더 구조 리팩토링 계획
+                - generic [ref=e89]:
+                  - generic [ref=e90]: 1 run
+                  - button "Detail" [ref=e91] [cursor=pointer]
+              - generic [ref=e92]:
+                - generic [ref=e93]: Task 상태에 failed 추가 + Run-Task 상태 동기화 수정
+                - generic [ref=e94]:
+                  - generic [ref=e95]: 4 runs
+                  - button "Detail" [ref=e96] [cursor=pointer]
+              - generic [ref=e97]:
+                - generic [ref=e98]: "[점검] PR #7 closed 사유 확인 및 반영 여부 점검"
+                - generic [ref=e99]:
+                  - generic [ref=e100]: 1 run
+                  - button "Detail" [ref=e101] [cursor=pointer]
+              - generic [ref=e102]:
+                - generic [ref=e103]: "[테스트] PR #12 테스트 플랜 실행 및 완료 처리"
+                - generic [ref=e104]:
+                  - generic [ref=e105]: 1 run
+                  - button "Detail" [ref=e106] [cursor=pointer]
