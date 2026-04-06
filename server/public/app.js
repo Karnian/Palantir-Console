@@ -2811,15 +2811,17 @@ function ManagerView({ manager, runs, tasks, projects }) {
     } catch { /* toast handled */ }
   };
 
-  // Task sessions with their runs
   const [inspectRun, setInspectRun] = useState(null);
+  const [collapsedProjects, setCollapsedProjects] = useState({});
   const [collapsedTasks, setCollapsedTasks] = useState({});
+  const toggleProject = (key) => setCollapsedProjects(prev => ({ ...prev, [key]: !prev[key] }));
   const toggleTask = (id) => setCollapsedTasks(prev => ({ ...prev, [id]: !prev[id] }));
 
   const workerRuns = useMemo(() => (runs || []).filter(r => !r.is_manager), [runs]);
 
-  // Build task list with runs attached
-  const taskSessions = useMemo(() => {
+  // Group: Project → Task → Runs
+  const projectGroups = useMemo(() => {
+    // Build runs map by task
     const runsMap = new Map();
     for (const r of workerRuns) {
       const tid = r.task_id || '_orphan';
@@ -2827,38 +2829,34 @@ function ManagerView({ manager, runs, tasks, projects }) {
       runsMap.get(tid).push(r);
     }
 
-    const result = [];
-    const activeTasks = (tasks || []).filter(t => ['in_progress', 'todo', 'review', 'failed'].includes(t.status));
-    const doneTasks = (tasks || []).filter(t => t.status === 'done' || t.status === 'backlog');
-
-    // Active tasks first (with or without runs)
-    for (const t of activeTasks) {
+    // Build project groups with tasks
+    const projMap = new Map();
+    for (const t of (tasks || [])) {
+      const pid = t.project_id || '_none';
+      const pname = (projects || []).find(p => p.id === t.project_id)?.name || 'No Project';
+      if (!projMap.has(pid)) projMap.set(pid, { key: pid, name: pname, tasks: [] });
       const taskRuns = runsMap.get(t.id) || [];
       runsMap.delete(t.id);
-      result.push({ task: t, runs: taskRuns, projectName: (projects || []).find(p => p.id === t.project_id)?.name || null });
+      projMap.get(pid).tasks.push({ task: t, runs: taskRuns });
     }
 
     // Orphan runs (no task)
     const orphanRuns = runsMap.get('_orphan') || [];
     runsMap.delete('_orphan');
+
+    // Sort tasks within each project: active first, then done
+    const statusOrder = { in_progress: 0, running: 0, needs_input: 1, todo: 2, review: 3, failed: 4, done: 5, backlog: 6 };
+    for (const group of projMap.values()) {
+      group.tasks.sort((a, b) => (statusOrder[a.task.status] ?? 9) - (statusOrder[b.task.status] ?? 9));
+    }
+
+    const result = Array.from(projMap.values());
+
+    // Add orphan runs as a virtual group if any
     if (orphanRuns.length > 0) {
-      result.push({ task: null, runs: orphanRuns, projectName: null });
-    }
-
-    // Done tasks with runs
-    for (const t of doneTasks) {
-      const taskRuns = runsMap.get(t.id) || [];
-      runsMap.delete(t.id);
-      if (taskRuns.length > 0) {
-        result.push({ task: t, runs: taskRuns, projectName: (projects || []).find(p => p.id === t.project_id)?.name || null });
-      }
-    }
-
-    // Remaining runs from unknown tasks
-    for (const [, taskRuns] of runsMap) {
-      if (taskRuns.length > 0) {
-        result.push({ task: null, runs: taskRuns, projectName: taskRuns[0]?.project_name || null });
-      }
+      const noneGroup = result.find(g => g.key === '_none') || { key: '_none', name: 'No Project', tasks: [] };
+      if (!result.includes(noneGroup)) result.push(noneGroup);
+      noneGroup.tasks.push({ task: null, runs: orphanRuns });
     }
 
     return result;
