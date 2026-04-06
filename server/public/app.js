@@ -1292,6 +1292,115 @@ function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadT
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Directory Picker (Preact component — reuses existing directory-* CSS classes)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function DirectoryPicker({ value, onSelect }) {
+  const [open, setOpen] = useState(false);
+  const [currentPath, setCurrentPath] = useState('');
+  const [rootPath, setRootPath] = useState('');
+  const [dirs, setDirs] = useState([]);
+  const [showHidden, setShowHidden] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const loadDir = async (targetPath) => {
+    setLoading(true);
+    try {
+      const hq = showHidden ? 'showHidden=1' : 'showHidden=0';
+      const url = targetPath
+        ? `/api/fs?path=${encodeURIComponent(targetPath)}&${hq}`
+        : `/api/fs?${hq}`;
+      const data = await apiFetch(url);
+      setRootPath(data.root);
+      setCurrentPath(data.path);
+      setDirs(data.directories || []);
+    } catch (err) {
+      addToast(err.message, 'error');
+    }
+    setLoading(false);
+  };
+
+  const handleOpen = () => {
+    setOpen(true);
+    loadDir(value || null);
+  };
+
+  const handleUp = () => {
+    if (currentPath && currentPath !== rootPath) {
+      const parent = currentPath.split('/').slice(0, -1).join('/') || '/';
+      loadDir(parent);
+    }
+  };
+
+  const handleConfirm = () => {
+    if (currentPath) {
+      onSelect(currentPath);
+      setOpen(false);
+    }
+  };
+
+  // Reload when toggling hidden
+  useEffect(() => {
+    if (open && currentPath) loadDir(currentPath);
+  }, [showHidden]);
+
+  return html`
+    <div class="form-field">
+      <label class="form-label">Directory</label>
+      <div class="dir-picker-row">
+        <input
+          class="form-input dir-picker-input"
+          value=${value}
+          readOnly
+          placeholder="Select project directory..."
+          onClick=${handleOpen}
+        />
+        <button type="button" class="ghost dir-picker-btn" onClick=${handleOpen}>Browse</button>
+        ${value && html`
+          <button type="button" class="ghost dir-picker-btn dir-picker-clear" onClick=${() => onSelect('')}>✕</button>
+        `}
+      </div>
+    </div>
+
+    ${open && html`
+      <div class="directory-modal">
+        <div class="directory-backdrop" onClick=${() => setOpen(false)}></div>
+        <div class="directory-panel">
+          <div class="directory-header">
+            <span class="directory-title">Select Directory</span>
+            <button class="ghost" onClick=${() => setOpen(false)}>Close</button>
+          </div>
+          <div class="directory-path">${currentPath || '...'}</div>
+          <div class="directory-toggle">
+            <label class="directory-toggle-label">
+              <input type="checkbox" checked=${showHidden} onChange=${e => setShowHidden(e.target.checked)} />
+              Show hidden
+            </label>
+          </div>
+          <div class="directory-list" style="max-height: 300px;">
+            ${currentPath !== rootPath && html`
+              <button type="button" class="directory-item" onClick=${handleUp}>⬆ ..</button>
+            `}
+            ${loading && html`<div style="color: var(--text-secondary); font-size: 13px; padding: 8px;">Loading...</div>`}
+            ${!loading && dirs.length === 0 && html`
+              <div style="color: var(--text-secondary); font-size: 13px; padding: 8px;">No subfolders.</div>
+            `}
+            ${!loading && dirs.map(d => html`
+              <button key=${d.path} type="button" class="directory-item" onClick=${() => loadDir(d.path)}>
+                📁 ${d.name}
+              </button>
+            `)}
+          </div>
+          <div style="display: flex; justify-content: flex-end; gap: 8px; padding-top: 4px;">
+            <button class="ghost" onClick=${() => setOpen(false)}>Cancel</button>
+            <button class="primary" onClick=${handleConfirm}>Select</button>
+          </div>
+        </div>
+      </div>
+    `}
+  `;
+}
+
 // Projects View
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1354,10 +1463,7 @@ function ProjectsView({ projects, reloadProjects }) {
                 <label class="form-label">Name</label>
                 <input class="form-input" value=${name} onInput=${e => setName(e.target.value)} placeholder="Project name" />
               </div>
-              <div class="form-field">
-                <label class="form-label">Directory</label>
-                <input class="form-input" value=${dir} onInput=${e => setDir(e.target.value)} placeholder="/path/to/project" />
-              </div>
+              <${DirectoryPicker} value=${dir} onSelect=${setDir} />
               <div class="form-field">
                 <label class="form-label">Description</label>
                 <textarea class="form-textarea" value=${desc} onInput=${e => setDesc(e.target.value)} placeholder="Optional" rows="3"></textarea>
