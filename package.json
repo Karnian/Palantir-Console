@@ -3,6 +3,8 @@
   "version": "1.0.0",
   "main": "server/index.js",
   "scripts": {
+    "prestart": "npm rebuild better-sqlite3 --silent 2>/dev/null || true",
+    "predev": "npm rebuild better-sqlite3 --silent 2>/dev/null || true",
     "dev": "node server/index.js",
     "start": "node server/index.js",
     "test": "node --test"
