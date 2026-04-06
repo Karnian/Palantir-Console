@@ -163,16 +163,12 @@ function createLifecycleService({
     const runningRuns = runService.listRuns({ status: 'running' });
 
     for (const run of runningRuns) {
-      // Skip runs managed by streamJsonEngine (manager + claude workers)
-      // streamJsonEngine handles its own lifecycle via process exit events
+      // Skip manager runs and streamJsonEngine workers — they manage their own lifecycle
       if (run.is_manager) continue;
-      const managedByStream = streamJsonEngine && streamJsonEngine.isAlive(run.id) !== undefined
-        && (streamJsonEngine.isAlive(run.id) || streamJsonEngine.detectExitCode(run.id) !== null);
-
-      if (managedByStream) {
-        // streamJsonEngine worker — check if it exited
-        const alive = streamJsonEngine.isAlive(run.id);
-        if (!alive) {
+      if (streamJsonEngine && streamJsonEngine.hasProcess(run.id)) {
+        // streamJsonEngine handles exit via its own event handler (result → updateRunStatus)
+        // Just check for orphaned processes where exit was missed
+        if (!streamJsonEngine.isAlive(run.id)) {
           const exitCode = streamJsonEngine.detectExitCode(run.id);
           if (exitCode !== null) {
             const status = exitCode === 0 ? 'completed' : 'failed';
