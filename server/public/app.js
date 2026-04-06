@@ -781,10 +781,12 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
       // If task is already in_progress, continue with execution
       if (!statusErr.message?.includes('in_progress')) throw statusErr;
     }
+    let newRun;
     try {
-      await apiFetch(`/api/tasks/${taskId}/execute`, {
+      const data = await apiFetch(`/api/tasks/${taskId}/execute`, {
         method: 'POST', body: JSON.stringify({ agent_profile_id: agentProfileId, prompt: prompt || undefined }),
       });
+      newRun = data.run;
     } catch (err) {
       // Rollback status on execution failure
       await apiFetch(`/api/tasks/${taskId}/status`, {
@@ -794,6 +796,11 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
       throw err;
     }
     reloadTasks();
+    // Open RunInspector immediately after execution
+    if (newRun) {
+      onOpenRun(newRun);
+      onClose();
+    }
   };
 
   const statusColor = {
@@ -903,11 +910,10 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
               </button>
               <button class="ghost" onClick=${() => setEditing(false)}>Cancel</button>
             ` : html`
-              <button class="primary" onClick=${() => setShowExecute(true)}>
-                ${activeRun ? 'View Run' : '\u25B6 Run Agent'}
-              </button>
-              ${activeRun && html`
-                <button class="ghost" onClick=${() => { onOpenRun(activeRun); onClose(); }}>Inspect</button>
+              ${activeRun ? html`
+                <button class="primary" onClick=${() => { onOpenRun(activeRun); onClose(); }}>View Run</button>
+              ` : html`
+                <button class="primary" onClick=${() => setShowExecute(true)}>${'\u25B6'} Run Agent</button>
               `}
             `}
           </div>
