@@ -23,6 +23,17 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
   let activeManagerRunId = null;
   let startingManager = false; // guard against concurrent /start requests
 
+  // On startup: mark any stale manager runs (from previous server instances) as stopped
+  try {
+    const staleManagers = runService.listRuns({ status: 'running' })
+      .concat(runService.listRuns({ status: 'queued' }))
+      .concat(runService.listRuns({ status: 'needs_input' }))
+      .filter(r => r.is_manager);
+    for (const r of staleManagers) {
+      runService.updateRunStatus(r.id, 'stopped', { force: true });
+    }
+  } catch { /* ignore */ }
+
   /**
    * Find the active manager run. Checks both in-memory and DB state.
    */
@@ -169,12 +180,17 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
       return res.status(404).json({ error: 'No active manager session' });
     }
 
-    const { text } = req.body || {};
-    if (!text || typeof text !== 'string') {
-      throw new BadRequestError('text is required');
+    const { text, images } = req.body || {};
+    if ((!text || typeof text !== 'string') && (!Array.isArray(images) || images.length === 0)) {
+      throw new BadRequestError('text or images is required');
     }
 
-    const sent = streamJsonEngine.sendInput(activeManagerRunId, text);
+    // Validate images if provided
+    const validImages = Array.isArray(images)
+      ? images.filter(img => img && typeof img.data === 'string' && typeof img.media_type === 'string')
+      : undefined;
+
+    const sent = streamJsonEngine.sendInput(activeManagerRunId, text || '', validImages);
     if (!sent) {
       return res.status(502).json({ error: 'Failed to send message to manager' });
     }
@@ -389,7 +405,7 @@ ${token ? `\nIMPORTANT: All API requests require auth header: ${auth.trim()}` : 
 - Send input to run: curl -s ${auth}-X POST ${base}/api/runs/RUN_ID/input -H 'Content-Type: application/json' -d '{"text":"..."}'
 - Cancel run: curl -s ${auth}-X POST ${base}/api/runs/RUN_ID/cancel
 
-Run statuses: queued, running, paused, needs_input, completed, failed, cancelled
+Run statuses: queued, running, paused, needs_input, completed, failed, cancelled, stopped
 Task statuses: backlog, todo, in_progress, review, done
 
 Always be concise and action-oriented. When reporting status, use a structured format:
