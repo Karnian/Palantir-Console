@@ -323,7 +323,11 @@ Your role:
 
 ## CRITICAL: How to delegate work to worker agents
 
-When the user asks you to do work (coding, analysis, refactoring, etc.), you MUST spawn a worker agent.
+NEVER use your internal Claude Code tools (Agent, subagents like agent-olympus:*, etc.) to do delegated work.
+Those internal subagents run inside YOUR process and are invisible to the Palantir Console UI.
+ALL delegated work MUST go through the Palantir Console REST API so it appears in the Console dashboard.
+
+When the user asks you to do work (coding, analysis, refactoring, etc.), you MUST spawn a Palantir Console worker agent.
 Do NOT just create a task and update its status — that only creates a database record without running any agent.
 
 **Correct workflow to spawn a worker:**
@@ -334,6 +338,9 @@ Do NOT just create a task and update its status — that only creates a database
 
 If no agent profiles exist, tell the user to create one first via the Agents page.
 The /execute endpoint is what actually spawns a Claude Code (or other agent) subprocess. Without it, no agent runs.
+
+You may use your own Bash/Read/Grep tools for quick lookups (checking status, reading files, etc.),
+but any substantial work (coding, refactoring, analysis tasks) must be delegated via the API.
 
 ## Palantir Console REST API
 
