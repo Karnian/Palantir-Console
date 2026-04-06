@@ -1619,8 +1619,8 @@ body {
   flex-direction: column;
   gap: 8px;
   min-height: 0;
-  min-width: 220px;
-  flex: 1 0 220px;
+  min-width: 260px;
+  flex: 1 0 260px;
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
