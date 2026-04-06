@@ -1024,7 +1024,7 @@ function RunInspector({ run, onClose }) {
           const runData = await apiFetch(`/api/runs/${run.id}`);
           if (!cancelled) {
             setCurrentRun(runData.run);
-            if (['completed', 'failed', 'cancelled'].includes(runData.run?.status)) {
+            if (['completed', 'failed', 'cancelled', 'stopped'].includes(runData.run?.status)) {
               // One final output fetch
               try {
                 const finalOut = await apiFetch(`/api/runs/${run.id}/output?lines=200`);
@@ -2972,6 +2972,7 @@ function ManagerView({ manager, runs, tasks, projects }) {
       case 'needs_input': return '\u23F8'; // ⏸
       case 'queued': return '\u25CB'; // ○
       case 'cancelled': return '\u2015'; // ―
+      case 'stopped': return '\u23F9'; // ⏹
       default: return '\u25CB';
     }
   };
@@ -2984,6 +2985,7 @@ function ManagerView({ manager, runs, tasks, projects }) {
       case 'needs_input': return '#f59e0b';
       case 'queued': return '#6b7280';
       case 'cancelled': return '#6b7280';
+      case 'stopped': return '#6b7280';
       default: return '#6b7280';
     }
   };
