@@ -2681,12 +2681,28 @@ body {
 }
 
 .worker-project-label {
-  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
   font-weight: 600;
+  color: var(--text-secondary);
+  padding: 10px 16px 6px;
+  user-select: none;
+}
+
+.worker-project-chevron {
+  font-size: 10px;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 10px 16px 4px;
+  width: 12px;
+  flex-shrink: 0;
+}
+
+.worker-project-count {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+  margin-left: auto;
 }
 
 /* Shared manager elements */
