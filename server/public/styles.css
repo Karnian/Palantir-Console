@@ -1436,6 +1436,12 @@ body {
 }
 .stat-chip.stat-done .stat-value { color: var(--status-done); }
 
+.stat-chip.stat-failed {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: rgba(239, 68, 68, 0.2);
+}
+.stat-chip.stat-failed .stat-value { color: var(--status-failed); }
+
 /* Triage feed */
 .triage-feed {
   flex: 1;
