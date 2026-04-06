@@ -1395,6 +1395,8 @@ body {
   background: var(--bg-surface);
   font-size: 12px;
   color: var(--text-primary);
+  flex: 1;
+  min-width: 0;
 }
 
 .stat-chip .stat-value {
@@ -2463,7 +2465,7 @@ body {
 
 /* Left: Chat side */
 .manager-chat-side {
-  width: 40%;
+  width: 60%;
   min-width: 320px;
   display: flex;
   flex-direction: column;
