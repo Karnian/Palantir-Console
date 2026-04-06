@@ -36,7 +36,7 @@ function createTaskService(db, eventBus) {
       UPDATE tasks
       SET title = COALESCE(@title, title),
           description = COALESCE(@description, description),
-          project_id = COALESCE(@project_id, project_id),
+          project_id = CASE WHEN @has_project_id THEN @project_id ELSE project_id END,
           priority = COALESCE(@priority, priority),
           updated_at = datetime('now')
       WHERE id = @id
@@ -99,7 +99,9 @@ function createTaskService(db, eventBus) {
     stmts.update.run({
       id,
       title: null, description: null, project_id: null, priority: null,
+      has_project_id: 0,
       ...fields,
+      has_project_id: 'project_id' in fields ? 1 : 0,
     });
     const task = stmts.getById.get(id);
     if (eventBus) eventBus.emit('task:updated', { task });
