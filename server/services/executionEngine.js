@@ -169,7 +169,7 @@ function createTmuxEngine() {
   }
 
   function detectExitCode(runId) {
-    const output = getOutput(runId, 50);
+    const output = getOutput(runId, 500);
     if (!output) return null;
     const match = output.match(/___EXIT_CODE_(\d+)___/);
     return match ? parseInt(match[1], 10) : null;
