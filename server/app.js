@@ -85,7 +85,7 @@ function createApp(options = {}) {
   const streamJsonEngine = createStreamJsonEngine({ runService, eventBus });
   const worktreeService = createWorktreeService();
   const lifecycleService = createLifecycleService({
-    runService, taskService, agentProfileService,
+    runService, taskService, agentProfileService, projectService,
     executionEngine, streamJsonEngine, worktreeService, eventBus,
   });
 

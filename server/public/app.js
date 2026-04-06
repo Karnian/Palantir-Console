@@ -1299,6 +1299,7 @@ function ProjectsView({ projects, reloadProjects }) {
   const [showNew, setShowNew] = useState(false);
   const [name, setName] = useState('');
   const [desc, setDesc] = useState('');
+  const [dir, setDir] = useState('');
   const [saving, setSaving] = useState(false);
 
   const handleCreate = async () => {
@@ -1307,9 +1308,9 @@ function ProjectsView({ projects, reloadProjects }) {
     try {
       await apiFetch('/api/projects', {
         method: 'POST',
-        body: JSON.stringify({ name: name.trim(), description: desc.trim() || undefined }),
+        body: JSON.stringify({ name: name.trim(), description: desc.trim() || undefined, directory: dir.trim() || undefined }),
       });
-      setName(''); setDesc(''); setShowNew(false);
+      setName(''); setDesc(''); setDir(''); setShowNew(false);
       reloadProjects();
     } catch (err) {
       addToast(err.message, 'error');
@@ -1334,6 +1335,7 @@ function ProjectsView({ projects, reloadProjects }) {
         ${projects.map(p => html`
           <div key=${p.id} class="project-card">
             <div class="project-card-title">${p.name}</div>
+            ${p.directory && html`<div class="project-card-dir" title=${p.directory}>📁 ${p.directory}</div>`}
             ${p.description && html`<div class="project-card-desc">${p.description}</div>`}
             <div class="project-card-meta">Created ${formatTime(p.created_at)}</div>
           </div>
@@ -1351,6 +1353,10 @@ function ProjectsView({ projects, reloadProjects }) {
               <div class="form-field">
                 <label class="form-label">Name</label>
                 <input class="form-input" value=${name} onInput=${e => setName(e.target.value)} placeholder="Project name" />
+              </div>
+              <div class="form-field">
+                <label class="form-label">Directory</label>
+                <input class="form-input" value=${dir} onInput=${e => setDir(e.target.value)} placeholder="/path/to/project" />
               </div>
               <div class="form-field">
                 <label class="form-label">Description</label>
