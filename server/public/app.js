@@ -2696,91 +2696,6 @@ function AgentsView({ agents, loading, reloadAgents }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Worker Detail (inline expandable)
-// ─────────────────────────────────────────────────────────────────────────────
-
-function WorkerDetail({ run }) {
-  const [events, setEvents] = useState([]);
-  const [loadingEvents, setLoadingEvents] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const data = await apiFetch(`/api/runs/${run.id}/events?after=0`);
-        if (!cancelled) setEvents((data.events || []).slice(-30));
-      } catch { /* ignore */ }
-      if (!cancelled) setLoadingEvents(false);
-    })();
-    return () => { cancelled = true; };
-  }, [run.id]);
-
-  return html`
-    <div class="worker-detail" onClick=${e => e.stopPropagation()}>
-      <div class="worker-detail-info">
-        <div class="worker-detail-row">
-          <span class="worker-detail-label">Run ID</span>
-          <span class="worker-detail-value">${run.id}</span>
-        </div>
-        ${run.prompt && html`
-          <div class="worker-detail-row">
-            <span class="worker-detail-label">Prompt</span>
-            <span class="worker-detail-value" style="white-space:pre-wrap;max-height:100px;overflow-y:auto;">${run.prompt.slice(0, 500)}</span>
-          </div>
-        `}
-        ${run.result_summary && html`
-          <div class="worker-detail-row">
-            <span class="worker-detail-label">Result</span>
-            <span class="worker-detail-value" style="white-space:pre-wrap;max-height:100px;overflow-y:auto;">${run.result_summary}</span>
-          </div>
-        `}
-        <div class="worker-detail-row">
-          <span class="worker-detail-label">Tokens</span>
-          <span class="worker-detail-value">${(run.input_tokens || 0).toLocaleString()} in / ${(run.output_tokens || 0).toLocaleString()} out</span>
-        </div>
-        ${run.cost_usd > 0 && html`
-          <div class="worker-detail-row">
-            <span class="worker-detail-label">Cost</span>
-            <span class="worker-detail-value">$${run.cost_usd.toFixed(4)}</span>
-          </div>
-        `}
-        <div class="worker-detail-row">
-          <span class="worker-detail-label">Started</span>
-          <span class="worker-detail-value">${run.started_at ? new Date(run.started_at).toLocaleString() : '-'}</span>
-        </div>
-        ${run.ended_at && html`
-          <div class="worker-detail-row">
-            <span class="worker-detail-label">Ended</span>
-            <span class="worker-detail-value">${new Date(run.ended_at).toLocaleString()}</span>
-          </div>
-        `}
-      </div>
-      ${events.length > 0 && html`
-        <div class="worker-detail-events">
-          <div class="worker-detail-label" style="margin-bottom:4px;">Recent Events</div>
-          ${events.slice(-10).map((evt, i) => {
-            const evtType = evt.event_type || 'event';
-            let evtText = '';
-            try {
-              const p = evt.payload_json ? JSON.parse(evt.payload_json) : {};
-              evtText = p.text || p.message || p.result || p.tool || '';
-            } catch { evtText = ''; }
-            if (!evtText && evtType === 'heartbeat') return null;
-            return html`
-              <div key=${i} class="worker-detail-event">
-                <span class="event-channel">${evtType}</span>
-                <span>${typeof evtText === 'string' ? evtText.slice(0, 120) : ''}</span>
-              </div>
-            `;
-          })}
-        </div>
-      `}
-      ${loadingEvents && html`<div style="color:var(--text-muted);font-size:11px;padding:4px 0;">Loading events...</div>`}
-    </div>
-  `;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Manager View (Full Page — Left: Chat 60%, Right: Session Grid 40%)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2839,7 +2754,7 @@ function ManagerView({ manager, runs }) {
   };
 
   // Active/recent worker runs
-  const [selectedWorker, setSelectedWorker] = useState(null);
+  const [inspectRun, setInspectRun] = useState(null);
   const allWorkerRuns = useMemo(() => {
     return (runs || [])
       .filter(r => !r.is_manager)
@@ -2990,7 +2905,7 @@ function ManagerView({ manager, runs }) {
                 <div class="worker-project-label">${group.name}</div>
               `}
               ${group.runs.map(run => html`
-                <div key=${run.id} class="worker-card worker-card-${run.status}" onClick=${() => setSelectedWorker(selectedWorker?.id === run.id ? null : run)} style="cursor:pointer">
+                <div key=${run.id} class="worker-card worker-card-${run.status}" onClick=${() => setInspectRun(run)} style="cursor:pointer">
                   <div class="worker-card-header">
                     <span class="worker-status-icon" style="color: ${runStatusColor(run.status)}">
                       ${runStatusIcon(run.status)}
@@ -3008,15 +2923,16 @@ function ManagerView({ manager, runs }) {
                       <span class="worker-card-exit">exit: ${run.exit_code}</span>
                     `}
                   </div>
-                  ${selectedWorker?.id === run.id && html`
-                    <${WorkerDetail} run=${run} />
-                  `}
                 </div>
               `)}
             </div>
           `)}
         </div>
       </div>
+
+      ${inspectRun && html`
+        <${RunInspector} run=${inspectRun} onClose=${() => setInspectRun(null)} />
+      `}
     </div>
   `;
 }
