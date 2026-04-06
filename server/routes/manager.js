@@ -109,7 +109,7 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
     try {
       if (projectService) {
         const projects = projectService.listProjects();
-        projectList = projects.map(p => `  - ${p.name} (id: ${p.id})`).join('\n');
+        projectList = projects.map(p => `  - ${p.name} (id: ${p.id})${p.directory ? ` — dir: ${p.directory}` : ''}`).join('\n');
       }
       if (agentProfileService) {
         const agents = agentProfileService.listProfiles();
