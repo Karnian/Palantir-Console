@@ -2910,6 +2910,8 @@ function AgentDetailModal({ agent, open, onClose, onEdit }) {
     if (diff <= 0) return 'now';
     const mins = Math.floor(diff / 60000);
     const hrs = Math.floor(mins / 60);
+    const days = Math.floor(hrs / 24);
+    if (days > 0) return `${days}d ${hrs % 24}h ${mins % 60}m`;
     if (hrs > 0) return `${hrs}h ${mins % 60}m`;
     return `${mins}m`;
   };
