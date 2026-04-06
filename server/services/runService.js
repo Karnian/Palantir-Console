@@ -18,34 +18,40 @@ function createRunService(db, eventBus) {
   const stmts = {
     getAll: db.prepare(`
       SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
-             t.title as task_title
+             t.title as task_title, t.project_id as project_id, p.name as project_name
       FROM runs r
       LEFT JOIN agent_profiles ap ON r.agent_profile_id = ap.id
       LEFT JOIN tasks t ON r.task_id = t.id
+      LEFT JOIN projects p ON t.project_id = p.id
       ORDER BY r.created_at DESC
     `),
     getByTask: db.prepare(`
-      SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon
+      SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
+             t.title as task_title, t.project_id as project_id, p.name as project_name
       FROM runs r
       LEFT JOIN agent_profiles ap ON r.agent_profile_id = ap.id
+      LEFT JOIN tasks t ON r.task_id = t.id
+      LEFT JOIN projects p ON t.project_id = p.id
       WHERE r.task_id = ?
       ORDER BY r.created_at DESC
     `),
     getByStatus: db.prepare(`
       SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
-             t.title as task_title
+             t.title as task_title, t.project_id as project_id, p.name as project_name
       FROM runs r
       LEFT JOIN agent_profiles ap ON r.agent_profile_id = ap.id
       LEFT JOIN tasks t ON r.task_id = t.id
+      LEFT JOIN projects p ON t.project_id = p.id
       WHERE r.status = ?
       ORDER BY r.created_at DESC
     `),
     getById: db.prepare(`
       SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
-             t.title as task_title
+             t.title as task_title, t.project_id as project_id, p.name as project_name
       FROM runs r
       LEFT JOIN agent_profiles ap ON r.agent_profile_id = ap.id
       LEFT JOIN tasks t ON r.task_id = t.id
+      LEFT JOIN projects p ON t.project_id = p.id
       WHERE r.id = ?
     `),
     insert: db.prepare(`
