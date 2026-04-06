@@ -23,6 +23,7 @@ function createLifecycleService({
   const IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 min
   let heartbeatTimer = null;
   let healthCheckRunning = false; // Re-entrancy guard
+  const _outputHashes = new Map(); // Track tmux output changes per run
 
   /**
    * Execute a task: create a Run, spawn the agent.
@@ -51,21 +52,43 @@ function createLifecycleService({
     if (task.project_id) {
       const project = projectService.getProject(task.project_id);
       if (project?.directory) {
-        projectDir = project.directory;
+        const fs = require('node:fs');
+        if (fs.existsSync(project.directory)) {
+          projectDir = project.directory;
+        } else {
+          console.warn(`[lifecycle] Project directory not found: ${project.directory}, falling back to server cwd`);
+        }
       }
     }
 
-    // Build agent command args
-    const args = buildAgentArgs(profile, prompt);
     const cwd = worktreePath || projectDir || process.cwd();
+    console.log(`[lifecycle] Executing task ${taskId} in cwd: ${cwd} (project: ${task.project_id || 'none'})`);
+
+    // Route Claude Code workers through streamJsonEngine for rich event parsing.
+    // Other agents (codex, gemini, etc.) use the tmux/subprocess executionEngine.
+    const isClaude = (profile.command || '').includes('claude');
 
     try {
-      const result = executionEngine.spawnAgent(run.id, {
-        command: profile.command,
-        args,
-        cwd,
-        env: parseEnvAllowlist(profile.env_allowlist),
-      });
+      let result;
+      if (isClaude && streamJsonEngine) {
+        // Use streamJsonEngine — same as Manager but isManager=false (single-shot worker)
+        result = streamJsonEngine.spawnAgent(run.id, {
+          prompt,
+          cwd,
+          env: parseEnvAllowlist(profile.env_allowlist),
+          permissionMode: 'bypassPermissions',
+          isManager: false,
+        });
+      } else {
+        // Non-Claude agents: use tmux/subprocess engine
+        const args = buildAgentArgs(profile, prompt);
+        result = executionEngine.spawnAgent(run.id, {
+          command: profile.command,
+          args,
+          cwd,
+          env: parseEnvAllowlist(profile.env_allowlist),
+        });
+      }
 
       // Mark run as started
       runService.markRunStarted(run.id, {
@@ -147,8 +170,22 @@ function createLifecycleService({
     const runningRuns = runService.listRuns({ status: 'running' });
 
     for (const run of runningRuns) {
-      // Skip manager runs — they're managed by streamJsonEngine, not executionEngine
+      // Skip manager runs and streamJsonEngine workers — they manage their own lifecycle
       if (run.is_manager) continue;
+      if (streamJsonEngine && streamJsonEngine.hasProcess(run.id)) {
+        // streamJsonEngine handles exit via its own event handler (result → updateRunStatus)
+        // Just check for orphaned processes where exit was missed
+        if (!streamJsonEngine.isAlive(run.id)) {
+          const exitCode = streamJsonEngine.detectExitCode(run.id);
+          if (exitCode !== null) {
+            const status = exitCode === 0 ? 'completed' : 'failed';
+            try { runService.updateRunStatus(run.id, status, { force: true }); } catch {}
+            if (run.task_id) checkTaskCompletion(run.task_id);
+          }
+        }
+        continue;
+      }
+
       const alive = executionEngine.isAlive(run.id);
       const exitCode = executionEngine.detectExitCode(run.id);
 
@@ -165,7 +202,7 @@ function createLifecycleService({
         }
 
         // Capture final output
-        const output = executionEngine.getOutput(run.id, 50);
+        const output = executionEngine.getOutput(run.id, 200);
         if (output) {
           runService.addRunEvent(run.id, 'final_output', JSON.stringify({ output: output.slice(-2000) }));
         }
@@ -175,41 +212,75 @@ function createLifecycleService({
           checkTaskCompletion(run.task_id);
         }
 
-        // Cleanup tmux session
+        // Cleanup tmux session and output tracking
         executionEngine.kill(run.id);
+        _outputHashes.delete(run.id);
 
         if (eventBus) {
           eventBus.emit('run:completed', { run: runService.getRun(run.id) });
         }
       } else {
-        // Still alive — check for idle timeout
-        const events = runService.getRunEvents(run.id);
-        const lastEvent = events[events.length - 1];
-        const lastActivity = lastEvent ? new Date(lastEvent.created_at).getTime() : new Date(run.started_at || run.created_at).getTime();
-        const idleTime = Date.now() - lastActivity;
+        // Still alive — check if tmux output has changed (real activity indicator)
+        const currentOutput = executionEngine.getOutput(run.id, 10);
+        const outputHash = currentOutput ? currentOutput.length + ':' + currentOutput.slice(-100) : '';
+        const prevHash = _outputHashes.get(run.id);
+        _outputHashes.set(run.id, outputHash);
 
-        if (idleTime > IDLE_TIMEOUT_MS) {
-          // Agent has been idle too long — mark as needs_input for user attention
-          runService.updateRunStatus(run.id, 'needs_input', { force: true });
-          runService.addRunEvent(run.id, 'idle_timeout', JSON.stringify({
-            message: `Agent idle for ${Math.round(idleTime / 60000)} minutes`,
-            idleMs: idleTime,
-          }));
-          if (eventBus) {
-            eventBus.emit('run:needs_input', { runId: run.id, taskId: run.task_id });
-          }
+        if (outputHash !== prevHash) {
+          // Output changed — agent is actively working, record heartbeat with snippet
+          const snippet = currentOutput ? currentOutput.trim().split('\n').pop()?.slice(0, 200) : '';
+          runService.addRunEvent(run.id, 'heartbeat', snippet ? JSON.stringify({ output: snippet }) : null);
         } else {
-          // Normal heartbeat
-          runService.addRunEvent(run.id, 'heartbeat', null);
+          // Output unchanged — check idle timeout
+          const events = runService.getRunEvents(run.id);
+          const lastEvent = events[events.length - 1];
+          const lastActivity = lastEvent ? new Date(lastEvent.created_at).getTime() : new Date(run.started_at || run.created_at).getTime();
+          const idleTime = Date.now() - lastActivity;
+
+          if (idleTime > IDLE_TIMEOUT_MS) {
+            runService.updateRunStatus(run.id, 'needs_input', { force: true });
+            runService.addRunEvent(run.id, 'idle_timeout', JSON.stringify({
+              message: `Agent idle for ${Math.round(idleTime / 60000)} minutes`,
+              idleMs: idleTime,
+            }));
+            if (eventBus) {
+              eventBus.emit('run:needs_input', { runId: run.id, taskId: run.task_id });
+            }
+          } else {
+            runService.addRunEvent(run.id, 'heartbeat', null);
+          }
         }
       }
     }
 
-    // Check for queued runs that need input
-    const queuedRuns = runService.listRuns({ status: 'needs_input' });
-    for (const run of queuedRuns) {
-      if (eventBus) {
-        eventBus.emit('run:needs_input', { runId: run.id, taskId: run.task_id });
+    // Check needs_input runs — recover if tmux is still active and output changed
+    const needsInputRuns = runService.listRuns({ status: 'needs_input' });
+    for (const run of needsInputRuns) {
+      if (run.is_manager) continue;
+      // Skip streamJsonEngine runs
+      if (streamJsonEngine && streamJsonEngine.hasProcess(run.id)) continue;
+
+      const alive = executionEngine.isAlive(run.id);
+      if (alive) {
+        // Check if output changed — agent may still be working
+        const currentOutput = executionEngine.getOutput(run.id, 10);
+        const outputHash = currentOutput ? currentOutput.length + ':' + currentOutput.slice(-100) : '';
+        const prevHash = _outputHashes.get(run.id);
+        _outputHashes.set(run.id, outputHash);
+
+        if (outputHash !== prevHash && prevHash !== undefined) {
+          // Output changed — agent is working, recover to running
+          runService.updateRunStatus(run.id, 'running', { force: true });
+          runService.addRunEvent(run.id, 'recovered', JSON.stringify({ message: 'Agent output detected, recovered from needs_input' }));
+        }
+      } else {
+        // Process died while in needs_input
+        const exitCode = executionEngine.detectExitCode(run.id);
+        const status = (exitCode === 0) ? 'completed' : 'failed';
+        runService.updateRunStatus(run.id, status, { force: true });
+        if (run.task_id) checkTaskCompletion(run.task_id);
+        executionEngine.kill(run.id);
+        _outputHashes.delete(run.id);
       }
     }
   }
@@ -223,7 +294,8 @@ function createLifecycleService({
 
     if (allComplete && runs.length > 0) {
       const hasSuccess = runs.some(r => r.status === 'completed');
-      const newStatus = hasSuccess ? 'review' : 'todo'; // failed runs → back to todo
+      const hasFailed = runs.some(r => r.status === 'failed');
+      const newStatus = hasSuccess ? 'review' : hasFailed ? 'failed' : 'todo';
       try {
         taskService.updateTaskStatus(taskId, newStatus);
       } catch {
@@ -297,6 +369,16 @@ function createLifecycleService({
   function startMonitoring() {
     if (heartbeatTimer) return;
     heartbeatTimer = setInterval(checkHealth, HEARTBEAT_INTERVAL_MS);
+
+    // Subscribe to run:ended so task status syncs immediately (not just on next health check)
+    if (eventBus) {
+      eventBus.subscribe((event) => {
+        if (event.channel === 'run:ended' && event.data?.run?.task_id) {
+          checkTaskCompletion(event.data.run.task_id);
+        }
+      });
+    }
+
     console.log(`[lifecycleService] Health monitor started (${HEARTBEAT_INTERVAL_MS}ms interval)`);
   }
 
@@ -320,7 +402,9 @@ function createLifecycleService({
       throw new Error(`Cannot send input to run in status: ${run.status}`);
     }
 
-    const sent = executionEngine.sendInput(runId, text);
+    // Try streamJsonEngine first (for Claude workers), fall back to executionEngine
+    const sent = (streamJsonEngine && streamJsonEngine.sendInput(runId, text))
+      || executionEngine.sendInput(runId, text);
     if (sent) {
       runService.addRunEvent(runId, 'user_input', JSON.stringify({ text }));
       if (run.status === 'needs_input') {
@@ -339,10 +423,9 @@ function createLifecycleService({
     if (['completed', 'failed', 'cancelled'].includes(run.status)) {
       return run;
     }
-    // Use correct engine: streamJsonEngine for manager, executionEngine for workers
-    if (run.is_manager && streamJsonEngine) {
-      streamJsonEngine.kill(runId);
-    } else {
+    // Use correct engine: streamJsonEngine for manager + claude workers, executionEngine for others
+    const killedByStream = streamJsonEngine && streamJsonEngine.kill(runId);
+    if (!killedByStream) {
       executionEngine.kill(runId);
     }
     runService.updateRunStatus(runId, 'cancelled', { force: true });

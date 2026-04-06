@@ -384,6 +384,10 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
     try { proc.child.kill('SIGTERM'); return true; } catch { return false; }
   }
 
+  function hasProcess(runId) {
+    return processes.has(runId);
+  }
+
   function isAlive(runId) {
     const proc = processes.get(runId);
     if (!proc) return false;
@@ -424,7 +428,7 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
   return {
     type: 'stream-json',
     spawnAgent, sendInput, getOutput, getEvents, getUsage, getSessionId,
-    kill, isAlive, detectExitCode, listSessions, discoverGhostSessions,
+    kill, hasProcess, isAlive, detectExitCode, listSessions, discoverGhostSessions,
   };
 }
 

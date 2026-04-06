@@ -1,7 +1,7 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 
-function createRunsRouter({ runService, lifecycleService, executionEngine }) {
+function createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine }) {
   const router = express.Router();
 
   router.get('/', asyncHandler(async (req, res) => {
@@ -59,7 +59,9 @@ function createRunsRouter({ runService, lifecycleService, executionEngine }) {
       return res.status(501).json({ error: 'Execution engine not configured' });
     }
     const lines = Math.min(Math.max(1, Number(req.query.lines || 100)), 2000);
-    const output = executionEngine.getOutput(req.params.id, lines);
+    // Try streamJsonEngine first (claude workers), fall back to executionEngine (tmux)
+    const output = (streamJsonEngine && streamJsonEngine.getOutput(req.params.id, lines))
+      || executionEngine.getOutput(req.params.id, lines);
     res.json({ output });
   }));
 

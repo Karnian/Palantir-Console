@@ -9,16 +9,7 @@ function createProjectService(db) {
       INSERT INTO projects (id, name, directory, description, color, budget_usd)
       VALUES (@id, @name, @directory, @description, @color, @budget_usd)
     `),
-    update: db.prepare(`
-      UPDATE projects
-      SET name = COALESCE(@name, name),
-          directory = COALESCE(@directory, directory),
-          description = COALESCE(@description, description),
-          color = COALESCE(@color, color),
-          budget_usd = COALESCE(@budget_usd, budget_usd),
-          updated_at = datetime('now')
-      WHERE id = @id
-    `),
+    // update: dynamic — see updateProject() below
     delete: db.prepare('DELETE FROM projects WHERE id = ?'),
   };
 
@@ -45,9 +36,22 @@ function createProjectService(db) {
     return stmts.getById.get(id);
   }
 
+  const PROJECT_UPDATABLE = ['name', 'directory', 'description', 'color', 'budget_usd'];
+
   function updateProject(id, fields) {
-    getProject(id); // throws if not found
-    stmts.update.run({ id, name: null, directory: null, description: null, color: null, budget_usd: null, ...fields });
+    getProject(id);
+    const setClauses = [];
+    const params = { id };
+    for (const col of PROJECT_UPDATABLE) {
+      if (col in fields) {
+        setClauses.push(`${col} = @${col}`);
+        params[col] = fields[col] ?? null;
+      }
+    }
+    if (setClauses.length > 0) {
+      setClauses.push("updated_at = datetime('now')");
+      db.prepare(`UPDATE projects SET ${setClauses.join(', ')} WHERE id = @id`).run(params);
+    }
     return stmts.getById.get(id);
   }
 

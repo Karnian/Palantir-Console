@@ -129,11 +129,11 @@ function createApp(options = {}) {
   // New routes (v2)
   app.use('/api/projects', createProjectsRouter({ projectService, taskService }));
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService }));
-  app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine }));
+  app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine }));
   app.use('/api/agents', createAgentsRouter({ agentProfileService }));
   app.use('/api/events', createEventsRouter({ eventBus }));
   app.use('/api/claude-sessions', createClaudeSessionsRouter());
-  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, eventBus }));
+  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, eventBus, projectService, agentProfileService }));
 
   app.use(errorHandler);
 

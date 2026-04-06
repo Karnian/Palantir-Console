@@ -169,10 +169,26 @@ function createTmuxEngine() {
   }
 
   function detectExitCode(runId) {
-    const output = getOutput(runId, 50);
+    const output = getOutput(runId, 500);
     if (!output) return null;
     const match = output.match(/___EXIT_CODE_(\d+)___/);
-    return match ? parseInt(match[1], 10) : null;
+    if (match) return parseInt(match[1], 10);
+
+    // Fallback: check if the shell prompt appeared (agent finished, shell returned)
+    // This catches cases where exit code marker scrolled off but shell is back
+    const name = sessionName(runId);
+    try {
+      const paneCmd = execFileSync('tmux', ['display-message', '-pt', name, '#{pane_current_command}'], {
+        stdio: 'pipe', encoding: 'utf-8', timeout: 3000,
+      }).trim();
+      // If the current command is a shell (bash/zsh/sh), the agent script has finished
+      if (['bash', 'zsh', 'sh', '-bash', '-zsh'].includes(paneCmd)) {
+        // Agent finished but exit code marker not found — assume success
+        return 0;
+      }
+    } catch { /* tmux command failed, session may not exist */ }
+
+    return null;
   }
 
   function listSessions() {

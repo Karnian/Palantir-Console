@@ -37,19 +37,7 @@ function createAgentProfileService(db) {
       INSERT INTO agent_profiles (id, name, type, command, args_template, capabilities_json, env_allowlist, icon, color, max_concurrent)
       VALUES (@id, @name, @type, @command, @args_template, @capabilities_json, @env_allowlist, @icon, @color, @max_concurrent)
     `),
-    update: db.prepare(`
-      UPDATE agent_profiles
-      SET name = COALESCE(@name, name),
-          type = COALESCE(@type, type),
-          command = COALESCE(@command, command),
-          args_template = COALESCE(@args_template, args_template),
-          capabilities_json = COALESCE(@capabilities_json, capabilities_json),
-          env_allowlist = COALESCE(@env_allowlist, env_allowlist),
-          icon = COALESCE(@icon, icon),
-          color = COALESCE(@color, color),
-          max_concurrent = COALESCE(@max_concurrent, max_concurrent)
-      WHERE id = @id
-    `),
+    // update: dynamic — see updateProfile() below
     delete: db.prepare('DELETE FROM agent_profiles WHERE id = ?'),
     countRunning: db.prepare(`
       SELECT COUNT(*) as count FROM runs
@@ -84,17 +72,24 @@ function createAgentProfileService(db) {
     return stmts.getById.get(id);
   }
 
+  const AGENT_UPDATABLE = ['name', 'type', 'command', 'args_template', 'capabilities_json', 'env_allowlist', 'icon', 'color', 'max_concurrent'];
+
   function updateProfile(id, fields) {
     getProfile(id);
     if (fields.command) {
       fields.command = validateCommand(fields.command);
     }
-    stmts.update.run({
-      id,
-      name: null, type: null, command: null, args_template: null,
-      capabilities_json: null, env_allowlist: null, icon: null, color: null, max_concurrent: null,
-      ...fields,
-    });
+    const setClauses = [];
+    const params = { id };
+    for (const col of AGENT_UPDATABLE) {
+      if (col in fields) {
+        setClauses.push(`${col} = @${col}`);
+        params[col] = fields[col] ?? null;
+      }
+    }
+    if (setClauses.length > 0) {
+      db.prepare(`UPDATE agent_profiles SET ${setClauses.join(', ')} WHERE id = @id`).run(params);
+    }
     return stmts.getById.get(id);
   }
 
