@@ -401,7 +401,9 @@ Always be concise and action-oriented. When reporting status, use a structured f
 Prioritize issues that need user attention (needs_input, failures) over routine updates.
 Always query the actual Palantir API to get real data — never guess or assume.
 
-${runSummary ? `\n## Current State (at session start)\n${runSummary}` : ''}`;
+${runSummary ? `\n## Current State (at session start)\n${runSummary}` : ''}
+${projectList ? `\n## Available Projects\n${projectList}\nAlways assign a project_id when creating tasks.` : ''}
+${agentList ? `\n## Available Agent Profiles\n${agentList}\nUse the agent id when calling /execute.` : ''}`;
 }
 
 module.exports = { createManagerRouter };
