@@ -16,7 +16,7 @@ const { BadRequestError } = require('../utils/errors');
  *   POST   /api/manager/stop    — Stop the active manager session
  */
 
-function createManagerRouter({ runService, streamJsonEngine, eventBus }) {
+function createManagerRouter({ runService, streamJsonEngine, eventBus, projectService, agentProfileService }) {
   const router = express.Router();
 
   // Track the active manager run ID (only one manager at a time)
@@ -103,8 +103,22 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus }) {
     // Build run summary for initial context
     const runSummary = buildRunSummary(runService);
 
+    // Build project and agent lists for context
+    let projectList = '';
+    let agentList = '';
+    try {
+      if (projectService) {
+        const projects = projectService.listProjects();
+        projectList = projects.map(p => `  - ${p.name} (id: ${p.id})`).join('\n');
+      }
+      if (agentProfileService) {
+        const agents = agentProfileService.listProfiles();
+        agentList = agents.map(a => `  - ${a.name} [${a.type}] (id: ${a.id})`).join('\n');
+      }
+    } catch { /* ignore */ }
+
     // Build system prompt for the Manager role
-    const systemPrompt = buildManagerSystemPrompt(runSummary);
+    const systemPrompt = buildManagerSystemPrompt(runSummary, projectList, agentList);
 
     try {
       const result = streamJsonEngine.spawnAgent(runId, {
@@ -306,7 +320,7 @@ function buildRunSummary(runService) {
  * Build the system prompt for the Manager agent.
  * The Manager's role is to orchestrate worker agents and report status to the user.
  */
-function buildManagerSystemPrompt(runSummary) {
+function buildManagerSystemPrompt(runSummary, projectList, agentList) {
   const port = process.env.PORT || 4177;
   const base = `http://localhost:${port}`;
   const token = process.env.PALANTIR_TOKEN;
@@ -360,7 +374,8 @@ ${token ? `\nIMPORTANT: All API requests require auth header: ${auth.trim()}` : 
 ### Tasks
 - List all tasks: curl -s ${auth}${base}/api/tasks | jq
 - Filter by status: curl -s ${auth}"${base}/api/tasks?status=in_progress" | jq
-- Create task: curl -s ${auth}-X POST ${base}/api/tasks -H 'Content-Type: application/json' -d '{"title":"...","description":"...","priority":"medium"}'
+- Create task: curl -s ${auth}-X POST ${base}/api/tasks -H 'Content-Type: application/json' -d '{"title":"...","description":"...","priority":"medium","project_id":"PROJECT_ID"}'
+  IMPORTANT: Always include project_id when creating tasks. List projects first (GET /api/projects) to find the correct project_id.
 - Update status: curl -s ${auth}-X PATCH ${base}/api/tasks/TASK_ID/status -H 'Content-Type: application/json' -d '{"status":"done"}'
 
 ### Projects
