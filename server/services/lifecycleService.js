@@ -308,9 +308,9 @@ function createLifecycleService({
 
     // Subscribe to run:ended so task status syncs immediately (not just on next health check)
     if (eventBus) {
-      eventBus.on('run:ended', ({ run }) => {
-        if (run && run.task_id) {
-          checkTaskCompletion(run.task_id);
+      eventBus.subscribe((event) => {
+        if (event.channel === 'run:ended' && event.data?.run?.task_id) {
+          checkTaskCompletion(event.data.run.task_id);
         }
       });
     }
