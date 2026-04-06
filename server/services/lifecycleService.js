@@ -52,11 +52,17 @@ function createLifecycleService({
     if (task.project_id) {
       const project = projectService.getProject(task.project_id);
       if (project?.directory) {
-        projectDir = project.directory;
+        const fs = require('node:fs');
+        if (fs.existsSync(project.directory)) {
+          projectDir = project.directory;
+        } else {
+          console.warn(`[lifecycle] Project directory not found: ${project.directory}, falling back to server cwd`);
+        }
       }
     }
 
     const cwd = worktreePath || projectDir || process.cwd();
+    console.log(`[lifecycle] Executing task ${taskId} in cwd: ${cwd} (project: ${task.project_id || 'none'})`);
 
     // Route Claude Code workers through streamJsonEngine for rich event parsing.
     // Other agents (codex, gemini, etc.) use the tmux/subprocess executionEngine.
