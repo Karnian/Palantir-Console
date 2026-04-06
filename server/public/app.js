@@ -40,6 +40,17 @@ function timeAgo(ms) {
   return `${days}d ago`;
 }
 
+// Markdown renderer — uses marked + DOMPurify (loaded via CDN in index.html)
+function renderMarkdown(text) {
+  if (!text) return '';
+  if (window.marked && window.DOMPurify) {
+    const html = window.marked.parse(text, { breaks: true, gfm: true });
+    return window.DOMPurify.sanitize(html);
+  }
+  // Fallback: escape HTML and convert newlines
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+}
+
 // Auth token — read from meta tag or query param ?token=
 const _authToken = (() => {
   const params = new URLSearchParams(location.search);
@@ -2796,7 +2807,10 @@ function ManagerView({ manager, runs }) {
           `}
           ${messages.map(m => html`
             <div key=${m.id} class="manager-msg ${m.type === 'user_input' ? 'manager-msg-user' : 'manager-msg-assistant'}">
-              <div class="manager-msg-content">${m.text}</div>
+              ${m.type === 'user_input'
+                ? html`<div class="manager-msg-content">${m.text}</div>`
+                : html`<div class="manager-msg-content markdown-body" dangerouslySetInnerHTML=${{ __html: renderMarkdown(m.text) }}></div>`
+              }
               <div class="manager-msg-time">${timeAgo(m.time)}</div>
             </div>
           `)}
