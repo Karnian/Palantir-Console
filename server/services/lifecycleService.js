@@ -57,6 +57,13 @@ function createLifecycleService({
 
     // Build agent command args
     const args = buildAgentArgs(profile, prompt);
+
+    // Ensure Claude Code workers have permission mode set for autonomous execution
+    const isClaude = (profile.command || '').includes('claude');
+    if (isClaude && !args.some(a => a.includes('--permission-mode'))) {
+      args.push('--permission-mode', 'bypassPermissions');
+    }
+
     const cwd = worktreePath || projectDir || process.cwd();
 
     try {
