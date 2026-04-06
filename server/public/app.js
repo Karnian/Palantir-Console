@@ -873,20 +873,44 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
             <div class="task-detail-meta-grid">
               <div class="task-detail-meta-item">
                 <span class="task-detail-meta-label">Status</span>
-                <span class="task-badge" style="background:${statusColor[task.status]}22;color:${statusColor[task.status]};border:1px solid ${statusColor[task.status]}44;font-size:11px;padding:2px 8px;">
-                  ${task.status.replace('_', ' ')}
-                </span>
+                <select class="form-select inline-select" value=${status} onChange=${async (e) => {
+                  const newStatus = e.target.value;
+                  setStatus(newStatus);
+                  try {
+                    await apiFetch(`/api/tasks/${task.id}/status`, { method: 'PATCH', body: JSON.stringify({ status: newStatus }) });
+                    reloadTasks();
+                  } catch (err) { addToast(err.message, 'error'); }
+                }}>
+                  ${['backlog','todo','in_progress','review','done','failed'].map(s => html`<option key=${s} value=${s}>${s.replace('_',' ')}</option>`)}
+                </select>
               </div>
               <div class="task-detail-meta-item">
                 <span class="task-detail-meta-label">Priority</span>
-                <span class="task-badge priority-${task.priority}" style="font-size:11px;padding:2px 8px;">${task.priority}</span>
+                <select class="form-select inline-select" value=${priority} onChange=${async (e) => {
+                  const newPri = e.target.value;
+                  setPriority(newPri);
+                  try {
+                    await apiFetch(`/api/tasks/${task.id}`, { method: 'PATCH', body: JSON.stringify({ priority: newPri }) });
+                    reloadTasks();
+                  } catch (err) { addToast(err.message, 'error'); }
+                }}>
+                  ${['low','medium','high','urgent'].map(p => html`<option key=${p} value=${p}>${p}</option>`)}
+                </select>
               </div>
-              ${project && html`
-                <div class="task-detail-meta-item">
-                  <span class="task-detail-meta-label">Project</span>
-                  <span class="task-badge project" style="font-size:11px;padding:2px 8px;">${project.name}</span>
-                </div>
-              `}
+              <div class="task-detail-meta-item">
+                <span class="task-detail-meta-label">Project</span>
+                <select class="form-select inline-select" value=${projectId} onChange=${async (e) => {
+                  const newPid = e.target.value;
+                  setProjectId(newPid);
+                  try {
+                    await apiFetch(`/api/tasks/${task.id}`, { method: 'PATCH', body: JSON.stringify({ project_id: newPid || null }) });
+                    reloadTasks();
+                  } catch (err) { addToast(err.message, 'error'); }
+                }}>
+                  <option value="">None</option>
+                  ${projects.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
+                </select>
+              </div>
               <div class="task-detail-meta-item">
                 <span class="task-detail-meta-label">Created</span>
                 <span style="color:var(--text-secondary);font-size:12px;">${formatTime(task.created_at)}</span>
