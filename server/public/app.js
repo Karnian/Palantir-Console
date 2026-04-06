@@ -277,11 +277,13 @@ function useManager() {
     }
   }, []);
 
-  const sendMessage = useCallback(async (text) => {
+  const sendMessage = useCallback(async (text, images) => {
     try {
+      const body = { text };
+      if (images && images.length > 0) body.images = images;
       await apiFetch('/api/manager/message', {
         method: 'POST',
-        body: JSON.stringify({ text }),
+        body: JSON.stringify(body),
       });
     } catch (err) {
       addToast('Failed to send message: ' + err.message, 'error');
@@ -2789,7 +2791,9 @@ function ManagerView({ manager, runs, tasks, projects }) {
   const { status, events, loading, start, sendMessage, stop } = manager;
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [attachedImages, setAttachedImages] = useState([]);
   const messagesRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   // Auto-scroll to bottom on new events
   useEffect(() => {
@@ -2797,6 +2801,55 @@ function ManagerView({ manager, runs, tasks, projects }) {
       messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
     }
   }, [events]);
+
+  // Read file as base64
+  const readFileAsBase64 = (file) => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const base64 = reader.result.split(',')[1];
+        resolve({ data: base64, media_type: file.type, name: file.name, preview: reader.result });
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const addImages = async (files) => {
+    const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/'));
+    if (imageFiles.length === 0) return;
+    const newImages = await Promise.all(imageFiles.map(readFileAsBase64));
+    setAttachedImages(prev => [...prev, ...newImages]);
+  };
+
+  const removeImage = (idx) => {
+    setAttachedImages(prev => prev.filter((_, i) => i !== idx));
+  };
+
+  // Handle paste with images
+  const handlePaste = (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const files = [];
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
+    }
+    if (files.length > 0) {
+      e.preventDefault();
+      addImages(files);
+    }
+  };
+
+  // Handle drag & drop
+  const [dragOver, setDragOver] = useState(false);
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    if (e.dataTransfer?.files) addImages(e.dataTransfer.files);
+  };
 
   // Parse events into displayable messages
   const messages = useMemo(() => {
@@ -2817,11 +2870,13 @@ function ManagerView({ manager, runs, tasks, projects }) {
 
   const handleSend = async () => {
     const text = input.trim();
-    if (!text || sending) return;
+    if ((!text && attachedImages.length === 0) || sending) return;
     setSending(true);
     setInput('');
+    const imagesToSend = attachedImages.map(img => ({ data: img.data, media_type: img.media_type }));
+    setAttachedImages([]);
     try {
-      await sendMessage(text);
+      await sendMessage(text, imagesToSend.length > 0 ? imagesToSend : undefined);
     } catch { /* toast handled in hook */ }
     setSending(false);
   };
@@ -2980,26 +3035,53 @@ function ManagerView({ manager, runs, tasks, projects }) {
         </div>
 
         ${status.active && html`
-          <div class="manager-input-row">
-            <textarea
-              class="manager-input"
-              placeholder="Message the manager..."
-              value=${input}
-              onInput=${(e) => {
-                setInput(e.target.value);
-                e.target.style.height = 'auto';
-                e.target.style.height = e.target.scrollHeight + 'px';
-              }}
-              onKeyDown=${handleKeyDown}
-              rows="1"
-              disabled=${sending}
-            />
-            <button
-              class="manager-send-btn"
-              onClick=${handleSend}
-              disabled=${!input.trim() || sending}
-              title="Send"
-            >\u2191</button>
+          <div class="manager-input-area ${dragOver ? 'drag-over' : ''}"
+            onDragOver=${(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave=${() => setDragOver(false)}
+            onDrop=${handleDrop}
+          >
+            ${attachedImages.length > 0 && html`
+              <div class="manager-image-previews">
+                ${attachedImages.map((img, i) => html`
+                  <div key=${i} class="manager-image-preview">
+                    <img src=${img.preview} alt=${img.name} />
+                    <button class="manager-image-remove" onClick=${() => removeImage(i)} title="Remove">\u00d7</button>
+                  </div>
+                `)}
+              </div>
+            `}
+            <div class="manager-input-row">
+              <input type="file" accept="image/*" multiple hidden ref=${fileInputRef}
+                onChange=${(e) => { addImages(e.target.files); e.target.value = ''; }}
+              />
+              <button class="manager-attach-btn" onClick=${() => fileInputRef.current?.click()} title="Attach image" disabled=${sending}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                  <circle cx="8.5" cy="8.5" r="1.5"/>
+                  <polyline points="21 15 16 10 5 21"/>
+                </svg>
+              </button>
+              <textarea
+                class="manager-input"
+                placeholder="Message the manager..."
+                value=${input}
+                onInput=${(e) => {
+                  setInput(e.target.value);
+                  e.target.style.height = 'auto';
+                  e.target.style.height = e.target.scrollHeight + 'px';
+                }}
+                onKeyDown=${handleKeyDown}
+                onPaste=${handlePaste}
+                rows="1"
+                disabled=${sending}
+              />
+              <button
+                class="manager-send-btn"
+                onClick=${handleSend}
+                disabled=${(!input.trim() && attachedImages.length === 0) || sending}
+                title="Send"
+              >\u2191</button>
+            </div>
           </div>
         `}
 
