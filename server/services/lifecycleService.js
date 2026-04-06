@@ -13,6 +13,7 @@ function createLifecycleService({
   runService,
   taskService,
   agentProfileService,
+  projectService,
   executionEngine,
   streamJsonEngine,
   worktreeService,
@@ -43,16 +44,20 @@ function createLifecycleService({
       prompt,
     });
 
-    // Create worktree if project has a directory
+    // Resolve project directory for agent CWD
     let worktreePath = null;
     let branch = null;
+    let projectDir = null;
     if (task.project_id) {
-      // We'd need project directory — for now use cwd
+      const project = projectService.getProject(task.project_id);
+      if (project?.directory) {
+        projectDir = project.directory;
+      }
     }
 
     // Build agent command args
     const args = buildAgentArgs(profile, prompt);
-    const cwd = worktreePath || task.directory || process.cwd();
+    const cwd = worktreePath || projectDir || process.cwd();
 
     try {
       const result = executionEngine.spawnAgent(run.id, {
