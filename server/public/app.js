@@ -871,46 +871,50 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
               ${task.description && html`<div class="task-detail-desc">${task.description}</div>`}
             </div>
             <div class="task-detail-meta-grid">
-              <div class="task-detail-meta-item">
-                <span class="task-detail-meta-label">Status</span>
-                <select class="form-select inline-select" value=${status} onChange=${async (e) => {
-                  const newStatus = e.target.value;
-                  setStatus(newStatus);
-                  try {
-                    await apiFetch(`/api/tasks/${task.id}/status`, { method: 'PATCH', body: JSON.stringify({ status: newStatus }) });
-                    reloadTasks();
-                  } catch (err) { addToast(err.message, 'error'); }
-                }}>
-                  ${['backlog','todo','in_progress','review','done','failed'].map(s => html`<option key=${s} value=${s}>${s.replace('_',' ')}</option>`)}
-                </select>
-              </div>
-              <div class="task-detail-meta-item">
-                <span class="task-detail-meta-label">Priority</span>
-                <select class="form-select inline-select" value=${priority} onChange=${async (e) => {
-                  const newPri = e.target.value;
-                  setPriority(newPri);
-                  try {
-                    await apiFetch(`/api/tasks/${task.id}`, { method: 'PATCH', body: JSON.stringify({ priority: newPri }) });
-                    reloadTasks();
-                  } catch (err) { addToast(err.message, 'error'); }
-                }}>
-                  ${['low','medium','high','urgent'].map(p => html`<option key=${p} value=${p}>${p}</option>`)}
-                </select>
-              </div>
-              <div class="task-detail-meta-item">
-                <span class="task-detail-meta-label">Project</span>
-                <select class="form-select inline-select" value=${projectId} onChange=${async (e) => {
-                  const newPid = e.target.value;
-                  setProjectId(newPid);
-                  try {
-                    await apiFetch(`/api/tasks/${task.id}`, { method: 'PATCH', body: JSON.stringify({ project_id: newPid || null }) });
-                    reloadTasks();
-                  } catch (err) { addToast(err.message, 'error'); }
-                }}>
-                  <option value="">None</option>
-                  ${projects.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
-                </select>
-              </div>
+              ${(() => {
+                const sc = statusColor[status] || 'var(--text-muted)';
+                const priorityColors = { low: '#6b7280', medium: '#3b82f6', high: '#f59e0b', urgent: '#ef4444' };
+                const pc = priorityColors[priority] || '#6b7280';
+                return html`
+                  <div class="task-detail-meta-item">
+                    <span class="task-detail-meta-label">Status</span>
+                    <select class="form-select inline-select" value=${status}
+                      style="color:${sc};background:color-mix(in srgb, ${sc} 12%, transparent);border-color:color-mix(in srgb, ${sc} 30%, transparent);"
+                      onChange=${async (e) => {
+                        const v = e.target.value; setStatus(v);
+                        try { await apiFetch('/api/tasks/' + task.id + '/status', { method: 'PATCH', body: JSON.stringify({ status: v }) }); reloadTasks(); }
+                        catch (err) { addToast(err.message, 'error'); }
+                      }}>
+                      ${['backlog','todo','in_progress','review','done','failed'].map(s => html`<option key=${s} value=${s}>${s.replace('_',' ')}</option>`)}
+                    </select>
+                  </div>
+                  <div class="task-detail-meta-item">
+                    <span class="task-detail-meta-label">Priority</span>
+                    <select class="form-select inline-select" value=${priority}
+                      style="color:${pc};background:color-mix(in srgb, ${pc} 12%, transparent);border-color:color-mix(in srgb, ${pc} 30%, transparent);"
+                      onChange=${async (e) => {
+                        const v = e.target.value; setPriority(v);
+                        try { await apiFetch('/api/tasks/' + task.id, { method: 'PATCH', body: JSON.stringify({ priority: v }) }); reloadTasks(); }
+                        catch (err) { addToast(err.message, 'error'); }
+                      }}>
+                      ${['low','medium','high','urgent'].map(p => html`<option key=${p} value=${p}>${p}</option>`)}
+                    </select>
+                  </div>
+                  <div class="task-detail-meta-item">
+                    <span class="task-detail-meta-label">Project</span>
+                    <select class="form-select inline-select" value=${projectId}
+                      style="color:var(--accent-light);background:rgba(139,92,246,0.08);border-color:rgba(139,92,246,0.25);"
+                      onChange=${async (e) => {
+                        const v = e.target.value; setProjectId(v);
+                        try { await apiFetch('/api/tasks/' + task.id, { method: 'PATCH', body: JSON.stringify({ project_id: v || null }) }); reloadTasks(); }
+                        catch (err) { addToast(err.message, 'error'); }
+                      }}>
+                      <option value="">None</option>
+                      ${projects.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
+                    </select>
+                  </div>
+                `;
+              })()}
               <div class="task-detail-meta-item">
                 <span class="task-detail-meta-label">Created</span>
                 <span style="color:var(--text-secondary);font-size:12px;">${formatTime(task.created_at)}</span>
