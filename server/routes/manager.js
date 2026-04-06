@@ -23,6 +23,17 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
   let activeManagerRunId = null;
   let startingManager = false; // guard against concurrent /start requests
 
+  // On startup: mark any stale manager runs (from previous server instances) as cancelled
+  try {
+    const staleManagers = runService.listRuns({ status: 'running' })
+      .concat(runService.listRuns({ status: 'queued' }))
+      .concat(runService.listRuns({ status: 'needs_input' }))
+      .filter(r => r.is_manager);
+    for (const r of staleManagers) {
+      runService.updateRunStatus(r.id, 'cancelled', { force: true });
+    }
+  } catch { /* ignore */ }
+
   /**
    * Find the active manager run. Checks both in-memory and DB state.
    */
