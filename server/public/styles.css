@@ -1605,13 +1605,13 @@ body {
 }
 
 .board-columns {
-  display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  display: flex;
   gap: 12px;
   padding: 16px 20px;
   flex: 1;
   min-height: 0;
   overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .board-column {
@@ -1619,6 +1619,8 @@ body {
   flex-direction: column;
   gap: 8px;
   min-height: 0;
+  min-width: 220px;
+  flex: 1 0 220px;
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
