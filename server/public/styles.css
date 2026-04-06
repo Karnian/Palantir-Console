@@ -2717,6 +2717,44 @@ body {
   margin-left: auto;
 }
 
+/* Task status section dividers */
+.task-status-section {
+  margin-bottom: 2px;
+}
+
+.task-status-divider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px 4px 32px;
+}
+
+.task-status-divider-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.task-status-divider-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.task-status-divider-count {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.task-status-divider-line {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
 /* Task session groups */
 .task-session-group {
   margin-bottom: 2px;

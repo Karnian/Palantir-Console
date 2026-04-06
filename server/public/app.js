@@ -2871,10 +2871,30 @@ function ManagerView({ manager, runs, tasks, projects }) {
     const orphanRuns = runsMap.get('_orphan') || [];
     runsMap.delete('_orphan');
 
-    // Sort tasks within each project: active first, then done
-    const statusOrder = { in_progress: 0, running: 0, needs_input: 1, todo: 2, review: 3, failed: 4, done: 5, backlog: 6 };
+    // Group tasks by status within each project
+    const STATUS_SECTIONS = [
+      { key: 'in_progress', label: 'In Progress', statuses: ['in_progress'] },
+      { key: 'todo', label: 'Todo', statuses: ['todo'] },
+      { key: 'review', label: 'Review', statuses: ['review'] },
+      { key: 'failed', label: 'Failed', statuses: ['failed'] },
+      { key: 'backlog', label: 'Backlog', statuses: ['backlog'] },
+      { key: 'done', label: 'Done', statuses: ['done'] },
+    ];
+    const STATUS_COLORS = { in_progress: '#3b82f6', todo: '#6b7280', review: '#f59e0b', failed: '#ef4444', backlog: '#6b7280', done: '#22c55e' };
+
     for (const group of projMap.values()) {
-      group.tasks.sort((a, b) => (statusOrder[a.task.status] ?? 9) - (statusOrder[b.task.status] ?? 9));
+      group.sections = STATUS_SECTIONS
+        .map(sec => ({
+          ...sec,
+          color: STATUS_COLORS[sec.key],
+          tasks: group.tasks.filter(t => t.task && sec.statuses.includes(t.task.status)),
+        }))
+        .filter(sec => sec.tasks.length > 0);
+      // Keep orphan tasks (no status match)
+      const orphanTasks = group.tasks.filter(t => !t.task);
+      if (orphanTasks.length > 0) {
+        group.sections.push({ key: '_orphan', label: 'Unassigned', color: '#6b7280', tasks: orphanTasks });
+      }
     }
 
     const result = Array.from(projMap.values());
@@ -3017,23 +3037,30 @@ function ManagerView({ manager, runs, tasks, projects }) {
                 <span>${group.name}</span>
                 <span class="worker-project-count">${group.tasks.length} task${group.tasks.length !== 1 ? 's' : ''}${activeCount > 0 ? ` \u00B7 ${activeCount} active` : ''}</span>
               </div>
-              ${!projCollapsed && group.tasks.map(({ task, runs: taskRuns }) => {
-                const taskStatusColor = { in_progress: '#3b82f6', todo: '#6b7280', review: '#f59e0b', done: '#22c55e', failed: '#ef4444', backlog: '#6b7280' }[task?.status] || '#6b7280';
-                const activeRunCount = taskRuns.filter(r => ['running', 'needs_input'].includes(r.status)).length;
-
-                return html`
-                  <div class="task-session-group">
-                    <div class="task-session-header">
-                      <span class="task-session-dot" style="background:${taskStatusColor}"></span>
-                      <span class="task-session-title">${task?.title || 'Unassigned Runs'}</span>
-                      <span class="task-session-meta">
-                        ${task?.status || ''}${taskRuns.length > 0 ? ` \u00B7 ${taskRuns.length} run${taskRuns.length > 1 ? 's' : ''}` : ''}${activeRunCount > 0 ? ` \u00B7 ${activeRunCount} active` : ''}
-                      </span>
-                      ${task && html`<button class="task-session-detail-btn" onClick=${(e) => { e.stopPropagation(); setSelectedTask(task); }}>Detail</button>`}
-                    </div>
+              ${!projCollapsed && group.sections.map(sec => html`
+                <div class="task-status-section">
+                  <div class="task-status-divider">
+                    <span class="task-status-divider-dot" style="background:${sec.color}"></span>
+                    <span class="task-status-divider-label">${sec.label}</span>
+                    <span class="task-status-divider-count">${sec.tasks.length}</span>
+                    <span class="task-status-divider-line"></span>
                   </div>
-                `;
-              })}
+                  ${sec.tasks.map(({ task, runs: taskRuns }) => {
+                    const activeRunCount = taskRuns.filter(r => ['running', 'needs_input'].includes(r.status)).length;
+                    return html`
+                      <div class="task-session-group">
+                        <div class="task-session-header">
+                          <span class="task-session-title">${task?.title || 'Unassigned Runs'}</span>
+                          <span class="task-session-meta">
+                            ${taskRuns.length > 0 ? `${taskRuns.length} run${taskRuns.length > 1 ? 's' : ''}` : ''}${activeRunCount > 0 ? ` \u00B7 ${activeRunCount} active` : ''}
+                          </span>
+                          ${task && html`<button class="task-session-detail-btn" onClick=${(e) => { e.stopPropagation(); setSelectedTask(task); }}>Detail</button>`}
+                        </div>
+                      </div>
+                    `;
+                  })}
+                </div>
+              `)}
             </div>
           `;})}
         </div>
