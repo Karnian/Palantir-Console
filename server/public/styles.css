@@ -1606,7 +1606,7 @@ body {
 
 .board-columns {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   gap: 12px;
   padding: 16px 20px;
   flex: 1;
