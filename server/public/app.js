@@ -481,16 +481,16 @@ function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions }) 
             <div class="stat-label">Needs Input</div>
           </div>
         </div>
+        <div class="stat-chip stat-failed">
+          <div>
+            <div class="stat-value">${failedRuns.length}</div>
+            <div class="stat-label">Failed</div>
+          </div>
+        </div>
         <div class="stat-chip stat-done">
           <div>
             <div class="stat-value">${completedToday.length}</div>
             <div class="stat-label">Done Today</div>
-          </div>
-        </div>
-        <div class="stat-chip">
-          <div>
-            <div class="stat-value">${tasks.length}</div>
-            <div class="stat-label">Total Tasks</div>
           </div>
         </div>
       </div>
