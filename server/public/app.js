@@ -719,7 +719,7 @@ function ExecuteModal({ open, task, agents, onClose, onExecute }) {
 // Task Detail Panel
 // ─────────────────────────────────────────────────────────────────────────────
 
-const STATUS_OPTIONS = ['backlog', 'todo', 'in_progress', 'review', 'done'];
+const STATUS_OPTIONS = ['backlog', 'todo', 'in_progress', 'review', 'done', 'failed'];
 const PRIORITY_OPTIONS = ['low', 'medium', 'high', 'critical'];
 
 function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onExecute, reloadTasks }) {
@@ -816,7 +816,7 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
 
   const statusColor = {
     backlog: 'var(--status-queued)', todo: 'var(--info)', in_progress: 'var(--accent)',
-    review: 'var(--status-review)', done: 'var(--success)',
+    review: 'var(--status-review)', done: 'var(--success)', failed: 'var(--status-failed)',
   };
 
   return html`
@@ -871,22 +871,50 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
               ${task.description && html`<div class="task-detail-desc">${task.description}</div>`}
             </div>
             <div class="task-detail-meta-grid">
-              <div class="task-detail-meta-item">
-                <span class="task-detail-meta-label">Status</span>
-                <span class="task-badge" style="background:${statusColor[task.status]}22;color:${statusColor[task.status]};border:1px solid ${statusColor[task.status]}44;font-size:11px;padding:2px 8px;">
-                  ${task.status.replace('_', ' ')}
-                </span>
-              </div>
-              <div class="task-detail-meta-item">
-                <span class="task-detail-meta-label">Priority</span>
-                <span class="task-badge priority-${task.priority}" style="font-size:11px;padding:2px 8px;">${task.priority}</span>
-              </div>
-              ${project && html`
-                <div class="task-detail-meta-item">
-                  <span class="task-detail-meta-label">Project</span>
-                  <span class="task-badge project" style="font-size:11px;padding:2px 8px;">${project.name}</span>
-                </div>
-              `}
+              ${(() => {
+                const sc = statusColor[status] || 'var(--text-muted)';
+                const priorityColors = { low: '#6b7280', medium: '#3b82f6', high: '#f59e0b', urgent: '#ef4444' };
+                const pc = priorityColors[priority] || '#6b7280';
+                return html`
+                  <div class="task-detail-meta-item">
+                    <span class="task-detail-meta-label">Status</span>
+                    <select class="form-select inline-select" value=${status}
+                      style="color:${sc};background:color-mix(in srgb, ${sc} 12%, transparent);border-color:color-mix(in srgb, ${sc} 30%, transparent);"
+                      onChange=${async (e) => {
+                        const v = e.target.value; setStatus(v);
+                        try { await apiFetch('/api/tasks/' + task.id + '/status', { method: 'PATCH', body: JSON.stringify({ status: v }) }); reloadTasks(); }
+                        catch (err) { addToast(err.message, 'error'); }
+                      }}>
+                      ${['backlog','todo','in_progress','review','done','failed'].map(s => html`<option key=${s} value=${s}>${s.replace('_',' ')}</option>`)}
+                    </select>
+                  </div>
+                  <div class="task-detail-meta-item">
+                    <span class="task-detail-meta-label">Priority</span>
+                    <select class="form-select inline-select" value=${priority}
+                      style="color:${pc};background:color-mix(in srgb, ${pc} 12%, transparent);border-color:color-mix(in srgb, ${pc} 30%, transparent);"
+                      onChange=${async (e) => {
+                        const v = e.target.value; setPriority(v);
+                        try { await apiFetch('/api/tasks/' + task.id, { method: 'PATCH', body: JSON.stringify({ priority: v }) }); reloadTasks(); }
+                        catch (err) { addToast(err.message, 'error'); }
+                      }}>
+                      ${['low','medium','high','urgent'].map(p => html`<option key=${p} value=${p}>${p}</option>`)}
+                    </select>
+                  </div>
+                  <div class="task-detail-meta-item">
+                    <span class="task-detail-meta-label">Project</span>
+                    <select class="form-select inline-select" value=${projectId}
+                      style="color:var(--accent-light);background:rgba(139,92,246,0.08);border-color:rgba(139,92,246,0.25);"
+                      onChange=${async (e) => {
+                        const v = e.target.value; setProjectId(v);
+                        try { await apiFetch('/api/tasks/' + task.id, { method: 'PATCH', body: JSON.stringify({ project_id: v || null }) }); reloadTasks(); }
+                        catch (err) { addToast(err.message, 'error'); }
+                      }}>
+                      <option value="">None</option>
+                      ${projects.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
+                    </select>
+                  </div>
+                `;
+              })()}
               <div class="task-detail-meta-item">
                 <span class="task-detail-meta-label">Created</span>
                 <span style="color:var(--text-secondary);font-size:12px;">${formatTime(task.created_at)}</span>
@@ -952,24 +980,36 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
 
 function RunInspector({ run, onClose }) {
   const [events, setEvents] = useState([]);
+  const [liveOutput, setLiveOutput] = useState('');
   const [inputText, setInputText] = useState('');
   const [sending, setSending] = useState(false);
   const [currentRun, setCurrentRun] = useState(run);
-  const eventsEndRef = useRef(null);
+  const [tab, setTab] = useState('output');
+  const outputRef = useRef(null);
+  const userScrolledUp = useRef(false);
 
+  // Poll live output + events + run status
   useEffect(() => {
     if (!run) return;
     setCurrentRun(run);
-    setEvents([]); // Clear previous run's events
+    setEvents([]);
+    setLiveOutput('');
     let cancelled = false;
     let lastEventId = 0;
 
     const poll = async () => {
       while (!cancelled) {
         try {
-          const data = await apiFetch(`/api/runs/${run.id}/events?after=${lastEventId}`);
+          // Fetch live output from tmux/subprocess
+          const outputData = await apiFetch(`/api/runs/${run.id}/output?lines=200`);
+          if (!cancelled && outputData.output) {
+            setLiveOutput(outputData.output);
+          }
+
+          // Fetch new events
+          const evtData = await apiFetch(`/api/runs/${run.id}/events?after=${lastEventId}`);
           if (cancelled) break;
-          const newEvents = data.events || [];
+          const newEvents = evtData.events || [];
           if (newEvents.length) {
             lastEventId = Math.max(...newEvents.map(e => e.id || 0));
             setEvents(prev => {
@@ -977,12 +1017,17 @@ function RunInspector({ run, onClose }) {
               return combined.length > 500 ? combined.slice(-500) : combined;
             });
           }
-          // also refresh run status
+
+          // Refresh run status
           const runData = await apiFetch(`/api/runs/${run.id}`);
           if (!cancelled) {
             setCurrentRun(runData.run);
-            // Stop polling if run reached a terminal state
             if (['completed', 'failed', 'cancelled'].includes(runData.run?.status)) {
+              // One final output fetch
+              try {
+                const finalOut = await apiFetch(`/api/runs/${run.id}/output?lines=200`);
+                if (finalOut.output) setLiveOutput(finalOut.output);
+              } catch {}
               break;
             }
           }
@@ -994,9 +1039,18 @@ function RunInspector({ run, onClose }) {
     return () => { cancelled = true; };
   }, [run?.id]);
 
+  // Auto-scroll output unless user scrolled up
   useEffect(() => {
-    eventsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [events.length]);
+    if (outputRef.current && !userScrolledUp.current) {
+      outputRef.current.scrollTop = outputRef.current.scrollHeight;
+    }
+  }, [liveOutput]);
+
+  const handleOutputScroll = () => {
+    if (!outputRef.current) return;
+    const el = outputRef.current;
+    userScrolledUp.current = el.scrollTop + el.clientHeight < el.scrollHeight - 40;
+  };
 
   if (!run) return null;
 
@@ -1027,17 +1081,24 @@ function RunInspector({ run, onClose }) {
   const status = currentRun?.status || run.status;
   const isActive = status === 'running' || status === 'needs_input';
 
+  // Filter meaningful events (skip heartbeats)
+  const meaningfulEvents = events.filter(evt => {
+    const t = evt.event_type || '';
+    return t !== 'heartbeat';
+  });
+
   return html`
     <div class="modal-overlay">
       <div class="modal-backdrop" onClick=${onClose}></div>
       <div class="modal-panel wide">
         <div class="modal-header">
-          <h2 class="modal-title">Run Inspector</h2>
+          <h2 class="modal-title">${currentRun?.task_title || run.task_title || 'Run Inspector'}</h2>
           <button class="ghost" onClick=${onClose}>Close</button>
         </div>
         <div class="run-status-bar">
           <span class="run-status-dot ${status}"></span>
           <span>${status}</span>
+          <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">${currentRun?.agent_name || run.agent_name || ''}</span>
           <span style="margin-left: auto; font-size: 11px; color: rgba(155,178,166,0.55);">
             Started ${timeAgo(run.created_at)}
           </span>
@@ -1045,20 +1106,52 @@ function RunInspector({ run, onClose }) {
             <button class="ghost danger" style="font-size: 10px; padding: 3px 8px;" onClick=${handleCancel}>Cancel</button>
           `}
         </div>
-        <div class="run-events-list">
-          ${events.length === 0 && html`
-            <div class="run-event-item" style="color: rgba(155,178,166,0.5); text-align: center;">
-              Waiting for events...
-            </div>
-          `}
-          ${events.map((evt, i) => html`
-            <div key=${i} class="run-event-item">
-              <span class="event-channel">${evt.channel || evt.type || 'event'}</span>
-              ${typeof evt.data === 'string' ? evt.data : JSON.stringify(evt.data || evt.payload || '')}
-            </div>
-          `)}
-          <div ref=${eventsEndRef}></div>
+
+        <div class="run-inspector-tabs">
+          <button class="run-inspector-tab ${tab === 'output' ? 'active' : ''}" onClick=${() => setTab('output')}>
+            Live Output
+          </button>
+          <button class="run-inspector-tab ${tab === 'events' ? 'active' : ''}" onClick=${() => setTab('events')}>
+            Events (${meaningfulEvents.length})
+          </button>
         </div>
+
+        ${tab === 'output' && html`
+          <div class="run-output-area" ref=${outputRef} onScroll=${handleOutputScroll}>
+            ${liveOutput
+              ? html`<pre class="run-output-pre">${liveOutput}</pre>`
+              : html`<div style="color:var(--text-muted);text-align:center;padding:40px 0;">
+                  ${isActive ? 'Waiting for output...' : 'No output captured.'}
+                </div>`
+            }
+          </div>
+        `}
+
+        ${tab === 'events' && html`
+          <div class="run-events-list">
+            ${meaningfulEvents.length === 0 && html`
+              <div class="run-event-item" style="color: rgba(155,178,166,0.5); text-align: center;">
+                No events yet.
+              </div>
+            `}
+            ${meaningfulEvents.map((evt, i) => {
+              const evtType = evt.event_type || 'event';
+              let evtText = '';
+              try {
+                const p = evt.payload_json ? JSON.parse(evt.payload_json) : {};
+                evtText = p.text || p.message || p.result || p.output?.slice(0, 300) || p.tool || '';
+                if (!evtText && Object.keys(p).length > 0) evtText = JSON.stringify(p);
+              } catch { evtText = evt.payload_json || ''; }
+              return html`
+                <div key=${i} class="run-event-item">
+                  <span class="event-channel">${evtType}</span>
+                  <span class="run-event-text">${evtText}</span>
+                </div>
+              `;
+            })}
+          </div>
+        `}
+
         ${isActive && html`
           <div class="run-input-row">
             <input
@@ -1086,6 +1179,7 @@ const BOARD_COLUMNS = [
   { id: 'backlog', label: 'Backlog' },
   { id: 'todo', label: 'Todo' },
   { id: 'in_progress', label: 'In Progress' },
+  { id: 'failed', label: 'Failed' },
   { id: 'review', label: 'Review' },
   { id: 'done', label: 'Done' },
 ];
@@ -2578,9 +2672,23 @@ function AgentModal({ open, onClose, agent, onSaved }) {
           </div>
           <div class="form-field">
             <label class="form-label">Type</label>
-            <select class="form-select" value=${type} onChange=${e => setType(e.target.value)}>
+            <select class="form-select" value=${type} onChange=${e => {
+              const t = e.target.value;
+              setType(t);
+              if (!agent) {
+                const presets = {
+                  'claude-code': { cmd: 'claude', args: '-p {prompt} --permission-mode bypassPermissions' },
+                  'codex': { cmd: 'codex', args: 'exec --full-auto --skip-git-repo-check -c \'model_reasoning_effort="high"\' {prompt}' },
+                  'gemini': { cmd: 'gemini', args: '-p {prompt} --yolo' },
+                  'opencode': { cmd: 'opencode', args: '{prompt}' },
+                };
+                const p = presets[t];
+                if (p) { setCommand(p.cmd); setArgsTemplate(p.args); }
+              }
+            }}>
               <option value="claude-code">claude-code</option>
               <option value="codex">codex</option>
+              <option value="gemini">gemini</option>
               <option value="opencode">opencode</option>
               <option value="custom">custom</option>
             </select>
@@ -2674,10 +2782,10 @@ function AgentsView({ agents, loading, reloadAgents }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Manager View (Full Page — Left: Chat 40%, Right: Session Grid 60%)
+// Manager View (Full Page — Left: Chat 60%, Right: Session Grid 40%)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function ManagerView({ manager, runs }) {
+function ManagerView({ manager, runs, tasks, projects }) {
   const { status, events, loading, start, sendMessage, stop } = manager;
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -2731,20 +2839,75 @@ function ManagerView({ manager, runs }) {
     } catch { /* toast handled */ }
   };
 
-  // Active/recent worker runs
-  const workerRuns = useMemo(() => {
-    return (runs || [])
-      .filter(r => !r.is_manager)
-      .sort((a, b) => {
-        // Running first, then by created_at desc
-        const statusOrder = { running: 0, needs_input: 1, queued: 2, paused: 3, completed: 4, failed: 5, cancelled: 6 };
-        const oa = statusOrder[a.status] ?? 9;
-        const ob = statusOrder[b.status] ?? 9;
-        if (oa !== ob) return oa - ob;
-        return new Date(b.created_at) - new Date(a.created_at);
-      })
-      .slice(0, 20);
-  }, [runs]);
+  const [inspectRun, setInspectRun] = useState(null);
+  const [selectedTask, setSelectedTask] = useState(null);
+  const [collapsedProjects, setCollapsedProjects] = useState({});
+  const toggleProject = (key) => setCollapsedProjects(prev => ({ ...prev, [key]: !prev[key] }));
+
+  const workerRuns = useMemo(() => (runs || []).filter(r => !r.is_manager), [runs]);
+
+  // Group: Project → Task → Runs
+  const projectGroups = useMemo(() => {
+    // Build runs map by task
+    const runsMap = new Map();
+    for (const r of workerRuns) {
+      const tid = r.task_id || '_orphan';
+      if (!runsMap.has(tid)) runsMap.set(tid, []);
+      runsMap.get(tid).push(r);
+    }
+
+    // Build project groups with tasks
+    const projMap = new Map();
+    for (const t of (tasks || [])) {
+      const pid = t.project_id || '_none';
+      const pname = (projects || []).find(p => p.id === t.project_id)?.name || 'No Project';
+      if (!projMap.has(pid)) projMap.set(pid, { key: pid, name: pname, tasks: [] });
+      const taskRuns = runsMap.get(t.id) || [];
+      runsMap.delete(t.id);
+      projMap.get(pid).tasks.push({ task: t, runs: taskRuns });
+    }
+
+    // Orphan runs (no task)
+    const orphanRuns = runsMap.get('_orphan') || [];
+    runsMap.delete('_orphan');
+
+    // Group tasks by status within each project
+    const STATUS_SECTIONS = [
+      { key: 'in_progress', label: 'In Progress', statuses: ['in_progress'] },
+      { key: 'todo', label: 'Todo', statuses: ['todo'] },
+      { key: 'review', label: 'Review', statuses: ['review'] },
+      { key: 'failed', label: 'Failed', statuses: ['failed'] },
+      { key: 'backlog', label: 'Backlog', statuses: ['backlog'] },
+      { key: 'done', label: 'Done', statuses: ['done'] },
+    ];
+    const STATUS_COLORS = { in_progress: '#3b82f6', todo: '#6b7280', review: '#f59e0b', failed: '#ef4444', backlog: '#6b7280', done: '#22c55e' };
+
+    for (const group of projMap.values()) {
+      group.sections = STATUS_SECTIONS
+        .map(sec => ({
+          ...sec,
+          color: STATUS_COLORS[sec.key],
+          tasks: group.tasks.filter(t => t.task && sec.statuses.includes(t.task.status)),
+        }))
+        .filter(sec => sec.tasks.length > 0);
+      // Keep orphan tasks (no status match)
+      const orphanTasks = group.tasks.filter(t => !t.task);
+      if (orphanTasks.length > 0) {
+        group.sections.push({ key: '_orphan', label: 'Unassigned', color: '#6b7280', tasks: orphanTasks });
+      }
+    }
+
+    const result = Array.from(projMap.values());
+
+    // Add orphan runs as a virtual group if any
+    if (orphanRuns.length > 0) {
+      const noneGroup = result.find(g => g.key === '_none') || { key: '_none', name: 'No Project', tasks: [] };
+      if (!result.includes(noneGroup)) result.push(noneGroup);
+      noneGroup.tasks.push({ task: null, runs: orphanRuns });
+    }
+
+    return result;
+  }, [tasks, workerRuns, projects]);
 
   const runStatusIcon = (status) => {
     switch (status) {
@@ -2822,7 +2985,11 @@ function ManagerView({ manager, runs }) {
               class="manager-input"
               placeholder="Message the manager..."
               value=${input}
-              onInput=${(e) => setInput(e.target.value)}
+              onInput=${(e) => {
+                setInput(e.target.value);
+                e.target.style.height = 'auto';
+                e.target.style.height = e.target.scrollHeight + 'px';
+              }}
               onKeyDown=${handleKeyDown}
               rows="1"
               disabled=${sending}
@@ -2845,10 +3012,10 @@ function ManagerView({ manager, runs }) {
         `}
       </div>
 
-      <!-- Right: Session Grid (60%) -->
+      <!-- Right: Task Sessions -->
       <div class="manager-grid-side">
         <div class="manager-grid-header">
-          <h3>Worker Sessions</h3>
+          <h3>Task Sessions</h3>
           <div class="manager-grid-stats">
             <span class="mgr-stat" style="color: #3b82f6">\u25CF ${workerRuns.filter(r => r.status === 'running').length} running</span>
             <span class="mgr-stat" style="color: #f59e0b">\u23F8 ${workerRuns.filter(r => r.status === 'needs_input').length} waiting</span>
@@ -2857,32 +3024,63 @@ function ManagerView({ manager, runs }) {
         </div>
 
         <div class="manager-grid-body">
-          ${workerRuns.length === 0 && html`
-            <${EmptyState} icon="\u2699" text="No worker sessions yet" sub="Start a manager and assign tasks" />
+          ${projectGroups.length === 0 && html`
+            <${EmptyState} icon="\u2699" text="No tasks yet" sub="Start a manager and assign tasks" />
           `}
-          ${workerRuns.map(run => html`
-            <div key=${run.id} class="worker-card worker-card-${run.status}">
-              <div class="worker-card-header">
-                <span class="worker-status-icon" style="color: ${runStatusColor(run.status)}">
-                  ${runStatusIcon(run.status)}
-                </span>
-                <span class="worker-card-name">${run.agent_name || run.agent_type || 'Agent'}</span>
-                <span class="worker-card-time">${timeAgo(run.started_at || run.created_at)}</span>
+          ${projectGroups.map(group => {
+            const projCollapsed = collapsedProjects[group.key];
+            const activeCount = group.tasks.reduce((n, t) => n + t.runs.filter(r => ['running', 'needs_input'].includes(r.status)).length, 0);
+            return html`
+            <div class="worker-project-group">
+              <div class="worker-project-label" onClick=${() => toggleProject(group.key)} style="cursor:pointer">
+                <span class="worker-project-chevron">${projCollapsed ? '\u25B6' : '\u25BC'}</span>
+                <span>${group.name}</span>
+                <span class="worker-project-count">${group.tasks.length} task${group.tasks.length !== 1 ? 's' : ''}${activeCount > 0 ? ` \u00B7 ${activeCount} active` : ''}</span>
               </div>
-              <div class="worker-card-task">${run.task_title || run.prompt?.slice(0, 60) || 'No task'}</div>
-              <div class="worker-card-meta">
-                <span class="worker-card-status">${run.status}</span>
-                ${run.cost_usd > 0 && html`
-                  <span class="worker-card-cost">$${run.cost_usd.toFixed(4)}</span>
-                `}
-                ${run.exit_code != null && html`
-                  <span class="worker-card-exit">exit: ${run.exit_code}</span>
-                `}
-              </div>
+              ${!projCollapsed && group.sections.map(sec => html`
+                <div class="task-status-section">
+                  <div class="task-status-divider">
+                    <span class="task-status-divider-dot" style="background:${sec.color}"></span>
+                    <span class="task-status-divider-label">${sec.label}</span>
+                    <span class="task-status-divider-count">${sec.tasks.length}</span>
+                    <span class="task-status-divider-line"></span>
+                  </div>
+                  ${sec.tasks.map(({ task, runs: taskRuns }) => {
+                    const activeRunCount = taskRuns.filter(r => ['running', 'needs_input'].includes(r.status)).length;
+                    return html`
+                      <div class="task-session-group">
+                        <div class="task-session-header">
+                          <span class="task-session-title">${task?.title || 'Unassigned Runs'}</span>
+                          <span class="task-session-meta">
+                            ${taskRuns.length > 0 ? `${taskRuns.length} run${taskRuns.length > 1 ? 's' : ''}` : ''}${activeRunCount > 0 ? ` \u00B7 ${activeRunCount} active` : ''}
+                          </span>
+                          ${task && html`<button class="task-session-detail-btn" onClick=${(e) => { e.stopPropagation(); setSelectedTask(task); }}>Detail</button>`}
+                        </div>
+                      </div>
+                    `;
+                  })}
+                </div>
+              `)}
             </div>
-          `)}
+          `;})}
         </div>
       </div>
+
+      ${inspectRun && html`
+        <${RunInspector} run=${inspectRun} onClose=${() => setInspectRun(null)} />
+      `}
+      ${selectedTask && html`
+        <${TaskDetailPanel}
+          task=${selectedTask}
+          onClose=${() => setSelectedTask(null)}
+          projects=${projects}
+          agents=${[]}
+          runs=${workerRuns}
+          onOpenRun=${(run) => { setSelectedTask(null); setInspectRun(run); }}
+          onExecute=${() => {}}
+          reloadTasks=${() => {}}
+        />
+      `}
     </div>
   `;
 }
@@ -3053,7 +3251,7 @@ function App() {
 
   const renderView = () => {
     if (routeBase === 'manager') {
-      return html`<${ManagerView} manager=${manager} runs=${runs} />`;
+      return html`<${ManagerView} manager=${manager} runs=${runs} tasks=${tasks} projects=${projects} />`;
     }
     if (routeBase === 'board') {
       if (tasksLoading) return html`<${Loading} />`;

@@ -1,7 +1,7 @@
 const crypto = require('node:crypto');
 const { BadRequestError, NotFoundError } = require('../utils/errors');
 
-const VALID_STATUSES = ['backlog', 'todo', 'in_progress', 'review', 'done'];
+const VALID_STATUSES = ['backlog', 'todo', 'in_progress', 'review', 'done', 'failed'];
 const VALID_PRIORITIES = ['low', 'medium', 'high', 'critical'];
 
 function createTaskService(db, eventBus) {
@@ -32,15 +32,7 @@ function createTaskService(db, eventBus) {
       INSERT INTO tasks (id, project_id, title, description, status, priority, sort_order)
       VALUES (@id, @project_id, @title, @description, @status, @priority, @sort_order)
     `),
-    update: db.prepare(`
-      UPDATE tasks
-      SET title = COALESCE(@title, title),
-          description = COALESCE(@description, description),
-          project_id = COALESCE(@project_id, project_id),
-          priority = COALESCE(@priority, priority),
-          updated_at = datetime('now')
-      WHERE id = @id
-    `),
+    // update: dynamic — see dynamicUpdate() below
     updateStatus: db.prepare(`
       UPDATE tasks SET status = ?, updated_at = datetime('now') WHERE id = ?
     `),
@@ -91,16 +83,25 @@ function createTaskService(db, eventBus) {
     return task;
   }
 
+  const TASK_UPDATABLE = ['title', 'description', 'project_id', 'priority'];
+
   function updateTask(id, fields) {
     getTask(id);
     if (fields.priority && !VALID_PRIORITIES.includes(fields.priority)) {
       throw new BadRequestError(`Invalid priority: ${fields.priority}`);
     }
-    stmts.update.run({
-      id,
-      title: null, description: null, project_id: null, priority: null,
-      ...fields,
-    });
+    const setClauses = [];
+    const params = { id };
+    for (const col of TASK_UPDATABLE) {
+      if (col in fields) {
+        setClauses.push(`${col} = @${col}`);
+        params[col] = fields[col] ?? null;
+      }
+    }
+    if (setClauses.length > 0) {
+      setClauses.push("updated_at = datetime('now')");
+      db.prepare(`UPDATE tasks SET ${setClauses.join(', ')} WHERE id = @id`).run(params);
+    }
     const task = stmts.getById.get(id);
     if (eventBus) eventBus.emit('task:updated', { task });
     return task;
