@@ -2737,14 +2737,175 @@ function AgentModal({ open, onClose, agent, onSaved }) {
   `;
 }
 
+function AgentDetailModal({ agent, open, onClose, onEdit }) {
+  const [usage, setUsage] = useState(null);
+  const [runningCount, setRunningCount] = useState(0);
+  const [loadingUsage, setLoadingUsage] = useState(true);
+  const [error, setError] = useState(null);
+
+  const loadUsage = async () => {
+    if (!agent) return;
+    setLoadingUsage(true);
+    setError(null);
+    try {
+      const data = await apiFetch(`/api/agents/${agent.id}/usage`);
+      setUsage(data.usage);
+      setRunningCount(data.runningCount || 0);
+    } catch (err) {
+      setError(err.message);
+      setUsage(null);
+    } finally {
+      setLoadingUsage(false);
+    }
+  };
+
+  useEffect(() => { setUsage(null); setError(null); setRunningCount(0); setLoadingUsage(true); loadUsage(); }, [agent?.id]);
+
+  if (!open || !agent) return null;
+
+  const formatResetTime = (resetAt) => {
+    if (!resetAt) return null;
+    const d = new Date(resetAt);
+    if (Number.isNaN(d.getTime())) return null;
+    const now = Date.now();
+    const diff = d.getTime() - now;
+    if (diff <= 0) return 'now';
+    const mins = Math.floor(diff / 60000);
+    const hrs = Math.floor(mins / 60);
+    if (hrs > 0) return `${hrs}h ${mins % 60}m`;
+    return `${mins}m`;
+  };
+
+  const renderBar = (pct) => {
+    if (pct === null || pct === undefined) return null;
+    const remaining = Math.max(0, Math.min(100, pct));
+    const barColor = pct > 50 ? '#10b981' : pct > 20 ? '#3b82f6' : pct > 10 ? '#f59e0b' : '#ef4444';
+    return html`
+      <div class="agent-usage-bar-track">
+        <div class="agent-usage-bar-fill" style=${{ width: `${remaining}%`, background: barColor }} />
+      </div>
+    `;
+  };
+
+  return html`
+    <div class="modal-overlay" onClick=${(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div class="agent-detail-panel">
+        <div class="agent-detail-header">
+          <div class="agent-detail-header-title">Agent Detail</div>
+          <div class="agent-detail-header-actions">
+            <button class="ghost" onClick=${() => onEdit(agent)}>Edit</button>
+            <button class="ghost" onClick=${onClose}>\u2715</button>
+          </div>
+        </div>
+
+      <div class="agent-detail-profile">
+        <div class="agent-detail-icon" style=${{ color: agent.color || undefined, borderColor: agent.color ? agent.color + '33' : undefined }}>
+          ${agent.icon || '\u2699'}
+        </div>
+        <div>
+          <div class="agent-detail-name">${agent.name}</div>
+          <div class="agent-detail-type">${agent.type || 'custom'}</div>
+        </div>
+      </div>
+
+      <div class="agent-detail-section">
+        <div class="agent-detail-section-title">Configuration</div>
+        <div class="agent-detail-grid">
+          ${agent.command && html`
+            <div class="agent-detail-field">
+              <span class="agent-detail-field-label">Command</span>
+              <span class="agent-detail-field-value mono">${agent.command}</span>
+            </div>
+          `}
+          ${agent.args_template && html`
+            <div class="agent-detail-field">
+              <span class="agent-detail-field-label">Args Template</span>
+              <span class="agent-detail-field-value mono">${agent.args_template}</span>
+            </div>
+          `}
+          <div class="agent-detail-field">
+            <span class="agent-detail-field-label">Max Concurrent</span>
+            <span class="agent-detail-field-value">${agent.max_concurrent || 1}</span>
+          </div>
+          <div class="agent-detail-field">
+            <span class="agent-detail-field-label">Running Now</span>
+            <span class="agent-detail-field-value">${runningCount}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="agent-detail-section">
+        <div class="agent-detail-section-header">
+          <div class="agent-detail-section-title">Usage & Limits</div>
+          <button class="ghost small" onClick=${loadUsage} disabled=${loadingUsage}>
+            ${loadingUsage ? 'Loading...' : 'Refresh'}
+          </button>
+        </div>
+        ${loadingUsage && !usage && html`<div class="agent-detail-loading">Loading usage data...</div>`}
+        ${error && html`<div class="agent-detail-error">${error}</div>`}
+        ${usage && html`
+          <div class="agent-usage-card">
+            ${usage.account ? html`
+              <div class="agent-usage-account">
+                ${usage.account.email && html`
+                  <div class="agent-detail-field">
+                    <span class="agent-detail-field-label">Account</span>
+                    <span class="agent-detail-field-value">${usage.account.email}</span>
+                  </div>
+                `}
+                ${usage.account.planType && html`
+                  <div class="agent-detail-field">
+                    <span class="agent-detail-field-label">Plan</span>
+                    <span class="agent-detail-field-value">${usage.account.planType}</span>
+                  </div>
+                `}
+                ${usage.account.type && html`
+                  <div class="agent-detail-field">
+                    <span class="agent-detail-field-label">Auth Type</span>
+                    <span class="agent-detail-field-value">${usage.account.type}</span>
+                  </div>
+                `}
+              </div>
+            ` : ''}
+            ${usage.requiresOpenaiAuth && !usage.account && html`
+              <div class="agent-detail-warning">OpenAI login required</div>
+            `}
+            ${(usage.limits || []).map(limit => html`
+              <div class="agent-usage-limit">
+                <div class="agent-usage-limit-header">
+                  <span class="agent-usage-limit-label">${limit.label}</span>
+                  ${limit.remainingPct !== null && limit.remainingPct !== undefined
+                    ? html`<span class="agent-usage-limit-pct">${Math.round(limit.remainingPct)}% remaining</span>`
+                    : ''}
+                </div>
+                ${renderBar(limit.remainingPct)}
+                ${limit.errorMessage ? html`<div class="agent-usage-limit-error">${limit.errorMessage}</div>` : ''}
+                ${limit.resetAt ? html`
+                  <div class="agent-usage-limit-reset">Resets in ${formatResetTime(limit.resetAt) || new Date(limit.resetAt).toLocaleString()}</div>
+                ` : ''}
+              </div>
+            `)}
+            ${usage.updatedAt && html`
+              <div class="agent-usage-updated">Updated: ${new Date(usage.updatedAt).toLocaleString()}</div>
+            `}
+          </div>
+        `}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function AgentsView({ agents, loading, reloadAgents }) {
   const [showModal, setShowModal] = useState(false);
   const [editAgent, setEditAgent] = useState(null);
+  const [selectedAgent, setSelectedAgent] = useState(null);
 
   const handleDelete = async (agent) => {
     if (!confirm(`Delete agent "${agent.name}"?`)) return;
     try {
       await apiFetchWithToast(`/api/agents/${agent.id}`, { method: 'DELETE' });
+      if (selectedAgent?.id === agent.id) setSelectedAgent(null);
       reloadAgents();
     } catch { /* toast already shown */ }
   };
@@ -2766,7 +2927,9 @@ function AgentsView({ agents, loading, reloadAgents }) {
           />
         `}
         ${agents.map(a => html`
-          <div key=${a.id} class="agent-card">
+          <div key=${a.id} class="agent-card clickable" role="button" tabIndex="0"
+            onClick=${() => setSelectedAgent(a)}
+            onKeyDown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedAgent(a); } }}>
             <div class="agent-card-top">
               <div class="agent-card-icon" style=${a.color ? `color: ${a.color}` : ''}>${a.icon || '\u2699'}</div>
               <div class="agent-card-info">
@@ -2777,8 +2940,8 @@ function AgentsView({ agents, loading, reloadAgents }) {
             ${a.command && html`<div class="agent-card-detail"><span class="agent-detail-label">Command:</span> ${a.command}</div>`}
             <div class="agent-card-detail"><span class="agent-detail-label">Max Concurrent:</span> ${a.max_concurrent || 1}</div>
             <div class="agent-card-actions">
-              <button class="ghost" onClick=${() => { setEditAgent(a); setShowModal(true); }}>Edit</button>
-              <button class="ghost danger" onClick=${() => handleDelete(a)}>Delete</button>
+              <button class="ghost" onClick=${(e) => { e.stopPropagation(); setEditAgent(a); setShowModal(true); }}>Edit</button>
+              <button class="ghost danger" onClick=${(e) => { e.stopPropagation(); handleDelete(a); }}>Delete</button>
             </div>
           </div>
         `)}
@@ -2788,6 +2951,12 @@ function AgentsView({ agents, loading, reloadAgents }) {
         onClose=${() => { setShowModal(false); setEditAgent(null); }}
         agent=${editAgent}
         onSaved=${reloadAgents}
+      />
+      <${AgentDetailModal}
+        open=${!!selectedAgent}
+        agent=${selectedAgent}
+        onClose=${() => setSelectedAgent(null)}
+        onEdit=${(a) => { setSelectedAgent(null); setEditAgent(a); setShowModal(true); }}
       />
     </div>
   `;

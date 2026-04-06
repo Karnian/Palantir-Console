@@ -2340,10 +2340,230 @@ body {
   letter-spacing: 0.02em;
 }
 
+.agent-card.clickable {
+  cursor: pointer;
+}
+
 .agent-card-actions {
   display: flex;
   gap: 6px;
   margin-top: 4px;
+}
+
+/* Agent Detail Modal */
+.agent-detail-panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 12px);
+  width: 480px;
+  max-width: 90vw;
+  max-height: 80vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 20px 24px;
+}
+
+.agent-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.agent-detail-header-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.agent-detail-header-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.agent-detail-profile {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.agent-detail-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: var(--radius-md);
+  display: grid;
+  place-items: center;
+  font-size: 26px;
+  background: var(--accent-muted);
+  border: 1px solid var(--accent-border);
+  color: var(--accent-light);
+  flex-shrink: 0;
+}
+
+.agent-detail-name {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.agent-detail-type {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  letter-spacing: 0.02em;
+}
+
+.agent-detail-section {
+  margin-bottom: 20px;
+}
+
+.agent-detail-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.agent-detail-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.agent-detail-section-header .agent-detail-section-title {
+  margin-bottom: 0;
+}
+
+.agent-detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.agent-detail-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+}
+
+.agent-detail-field-label {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.agent-detail-field-value {
+  font-size: 13px;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.agent-detail-field-value.mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.agent-detail-loading {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 12px 0;
+}
+
+.agent-detail-error {
+  font-size: 12px;
+  color: var(--status-error);
+  padding: 8px 10px;
+  background: var(--status-error-bg, rgba(255,80,80,0.08));
+  border-radius: var(--radius-sm);
+}
+
+.agent-detail-warning {
+  font-size: 12px;
+  color: var(--status-warning, #f0a030);
+  padding: 8px 10px;
+  background: rgba(240,160,48,0.08);
+  border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+}
+
+.agent-usage-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.agent-usage-account {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.agent-usage-limit {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-usage-limit-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.agent-usage-limit-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.agent-usage-limit-pct {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-usage-bar-track {
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.agent-usage-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.agent-usage-limit-error {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.agent-usage-limit-reset {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.agent-usage-updated {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-align: right;
+  padding-top: 4px;
 }
 
 /* =============================================
