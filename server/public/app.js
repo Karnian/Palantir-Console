@@ -2977,62 +2977,60 @@ function ManagerView({ manager, runs, tasks, projects }) {
         </div>
 
         <div class="manager-grid-body">
-          ${taskSessions.length === 0 && html`
+          ${projectGroups.length === 0 && html`
             <${EmptyState} icon="\u2699" text="No tasks yet" sub="Start a manager and assign tasks" />
           `}
-          ${taskSessions.map(({ task, runs: taskRuns, projectName }) => {
-            const taskId = task?.id || '_orphan';
-            const collapsed = collapsedTasks[taskId];
-            const activeRuns = taskRuns.filter(r => ['running', 'needs_input'].includes(r.status));
-            const taskStatus = task?.status || (taskRuns.length > 0 ? 'runs only' : '');
-            const taskStatusColor = { in_progress: '#3b82f6', todo: '#6b7280', review: '#f59e0b', done: '#22c55e', failed: '#ef4444', backlog: '#6b7280' }[task?.status] || '#6b7280';
-
+          ${projectGroups.map(group => {
+            const projCollapsed = collapsedProjects[group.key];
+            const activeCount = group.tasks.reduce((n, t) => n + t.runs.filter(r => ['running', 'needs_input'].includes(r.status)).length, 0);
             return html`
-              <div class="task-session-group">
-                <div class="task-session-header" onClick=${() => toggleTask(taskId)} style="cursor:pointer">
-                  <span class="worker-project-chevron">${collapsed ? '\u25B6' : '\u25BC'}</span>
-                  <span class="task-session-dot" style="background:${taskStatusColor}"></span>
-                  <span class="task-session-title">${task?.title || 'Unassigned Runs'}</span>
-                  ${projectName && html`<span class="task-session-project">${projectName}</span>`}
-                  <span class="task-session-meta">
-                    ${taskRuns.length > 0 ? `${taskRuns.length} run${taskRuns.length > 1 ? 's' : ''}` : ''}
-                    ${activeRuns.length > 0 ? ` \u00B7 ${activeRuns.length} active` : ''}
-                  </span>
-                </div>
-                ${!collapsed && html`
-                  <div class="task-session-body">
-                    ${task?.description && html`
-                      <div class="task-session-desc">${task.description.slice(0, 120)}${task.description.length > 120 ? '...' : ''}</div>
-                    `}
-                    ${taskRuns.map(run => html`
-                      <div key=${run.id} class="worker-card worker-card-${run.status}" onClick=${() => setInspectRun(run)} style="cursor:pointer">
-                        <div class="worker-card-header">
-                          <span class="worker-status-icon" style="color: ${runStatusColor(run.status)}">
-                            ${runStatusIcon(run.status)}
-                          </span>
-                          <span class="worker-card-name">${run.prompt?.slice(0, 60) || run.agent_name || 'Run'}</span>
-                          <span class="worker-card-agent-type">${run.agent_name || run.agent_type || 'Agent'}</span>
-                          <span class="worker-card-time">${timeAgo(run.started_at || run.created_at)}</span>
-                        </div>
-                        <div class="worker-card-meta">
-                          <span class="worker-card-status">${run.status}</span>
-                          ${run.cost_usd > 0 && html`
-                            <span class="worker-card-cost">$${run.cost_usd.toFixed(4)}</span>
-                          `}
-                          ${run.exit_code != null && html`
-                            <span class="worker-card-exit">exit: ${run.exit_code}</span>
-                          `}
-                        </div>
+            <div class="worker-project-group">
+              <div class="worker-project-label" onClick=${() => toggleProject(group.key)} style="cursor:pointer">
+                <span class="worker-project-chevron">${projCollapsed ? '\u25B6' : '\u25BC'}</span>
+                <span>${group.name}</span>
+                <span class="worker-project-count">${group.tasks.length} task${group.tasks.length !== 1 ? 's' : ''}${activeCount > 0 ? ` \u00B7 ${activeCount} active` : ''}</span>
+              </div>
+              ${!projCollapsed && group.tasks.map(({ task, runs: taskRuns }) => {
+                const taskId = task?.id || '_orphan';
+                const taskCollapsed = collapsedTasks[taskId];
+                const taskStatusColor = { in_progress: '#3b82f6', todo: '#6b7280', review: '#f59e0b', done: '#22c55e', failed: '#ef4444', backlog: '#6b7280' }[task?.status] || '#6b7280';
+
+                return html`
+                  <div class="task-session-group">
+                    <div class="task-session-header" onClick=${() => toggleTask(taskId)} style="cursor:pointer">
+                      <span class="worker-project-chevron">${taskCollapsed ? '\u25B6' : '\u25BC'}</span>
+                      <span class="task-session-dot" style="background:${taskStatusColor}"></span>
+                      <span class="task-session-title">${task?.title || 'Unassigned Runs'}</span>
+                      <span class="task-session-meta">
+                        ${task?.status || ''}${taskRuns.length > 0 ? ` \u00B7 ${taskRuns.length} run${taskRuns.length > 1 ? 's' : ''}` : ''}
+                      </span>
+                    </div>
+                    ${!taskCollapsed && taskRuns.length > 0 && html`
+                      <div class="task-session-body">
+                        ${taskRuns.map(run => html`
+                          <div key=${run.id} class="worker-card worker-card-${run.status}" onClick=${() => setInspectRun(run)} style="cursor:pointer">
+                            <div class="worker-card-header">
+                              <span class="worker-status-icon" style="color: ${runStatusColor(run.status)}">
+                                ${runStatusIcon(run.status)}
+                              </span>
+                              <span class="worker-card-name">${run.prompt?.slice(0, 50) || run.agent_name || 'Run'}</span>
+                              <span class="worker-card-agent-type">${run.agent_name || run.agent_type || 'Agent'}</span>
+                              <span class="worker-card-time">${timeAgo(run.started_at || run.created_at)}</span>
+                            </div>
+                            <div class="worker-card-meta">
+                              <span class="worker-card-status">${run.status}</span>
+                              ${run.cost_usd > 0 && html`<span class="worker-card-cost">$${run.cost_usd.toFixed(4)}</span>`}
+                              ${run.exit_code != null && html`<span class="worker-card-exit">exit: ${run.exit_code}</span>`}
+                            </div>
+                          </div>
+                        `)}
                       </div>
-                    `)}
-                    ${taskRuns.length === 0 && html`
-                      <div style="font-size:11px;color:var(--text-muted);padding:4px 8px;">No runs yet</div>
                     `}
                   </div>
-                `}
-              </div>
-            `;
-          })}
+                `;
+              })}
+            </div>
+          `;})}
         </div>
       </div>
 
