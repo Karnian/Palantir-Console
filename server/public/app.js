@@ -2586,9 +2586,23 @@ function AgentModal({ open, onClose, agent, onSaved }) {
           </div>
           <div class="form-field">
             <label class="form-label">Type</label>
-            <select class="form-select" value=${type} onChange=${e => setType(e.target.value)}>
+            <select class="form-select" value=${type} onChange=${e => {
+              const t = e.target.value;
+              setType(t);
+              if (!agent) {
+                const presets = {
+                  'claude-code': { cmd: 'claude', args: '-p {prompt} --output-format stream-json --verbose' },
+                  'codex': { cmd: 'codex', args: '{prompt}' },
+                  'gemini': { cmd: 'gemini', args: '-p {prompt} --yolo' },
+                  'opencode': { cmd: 'opencode', args: '{prompt}' },
+                };
+                const p = presets[t];
+                if (p) { setCommand(p.cmd); setArgsTemplate(p.args); }
+              }
+            }}>
               <option value="claude-code">claude-code</option>
               <option value="codex">codex</option>
+              <option value="gemini">gemini</option>
               <option value="opencode">opencode</option>
               <option value="custom">custom</option>
             </select>
