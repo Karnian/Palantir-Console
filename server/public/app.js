@@ -392,7 +392,7 @@ function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions }) 
   const failedRuns = runs.filter(r => r.status === 'failed');
   const completedToday = runs.filter(r => {
     if (r.status !== 'completed') return false;
-    const d = new Date(r.completed_at || r.updated_at);
+    const d = new Date(r.ended_at || r.created_at);
     const now = new Date();
     return d.toDateString() === now.toDateString();
   });
