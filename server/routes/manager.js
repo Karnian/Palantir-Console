@@ -339,6 +339,9 @@ Do NOT just create a task and update its status — that only creates a database
 If no agent profiles exist, tell the user to create one first via the Agents page.
 The /execute endpoint is what actually spawns a Claude Code (or other agent) subprocess. Without it, no agent runs.
 
+IMPORTANT: NEVER call /execute without explicit user approval. Always confirm before spawning workers.
+Do NOT auto-execute tasks just because their status is in_progress — status alone does not mean "run an agent".
+
 You may use your own Bash/Read/Grep tools for quick lookups (checking status, reading files, etc.),
 but any substantial work (coding, refactoring, analysis tasks) must be delegated via the API.
 
