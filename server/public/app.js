@@ -1527,8 +1527,128 @@ function DirectoryPicker({ value, onSelect }) {
 // Projects View
 // ─────────────────────────────────────────────────────────────────────────────
 
-function ProjectsView({ projects, reloadProjects }) {
+function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun }) {
+  useEscape(!!project, onClose);
+  if (!project) return null;
+
+  const projectTasks = tasks.filter(t => t.project_id === project.id);
+  const projectRuns = runs.filter(r => projectTasks.some(t => t.id === r.task_id));
+
+  const statusColor = {
+    backlog: 'var(--status-queued)', todo: 'var(--info)', in_progress: 'var(--accent)',
+    review: 'var(--status-review)', done: 'var(--success)', failed: 'var(--status-failed)',
+  };
+
+  // Group tasks by status
+  const statusGroups = useMemo(() => {
+    const groups = {};
+    BOARD_COLUMNS.forEach(col => { groups[col.id] = []; });
+    projectTasks.forEach(t => {
+      const col = groups[t.status] ? t.status : 'backlog';
+      groups[col].push(t);
+    });
+    return groups;
+  }, [projectTasks]);
+
+  const activeGroups = BOARD_COLUMNS.filter(col => (statusGroups[col.id] || []).length > 0);
+
+  // Stats
+  const activeTasks = projectTasks.filter(t => t.status === 'in_progress').length;
+  const doneTasks = projectTasks.filter(t => t.status === 'done').length;
+  const activeRuns = projectRuns.filter(r => r.status === 'running').length;
+
+  return html`
+    <div class="modal-overlay">
+      <div class="modal-backdrop" onClick=${onClose}></div>
+      <div class="modal-panel wide project-detail-panel">
+        <div class="modal-header">
+          <h2 class="modal-title" style="display:flex;align-items:center;gap:8px;">
+            <span style="font-size:16px;">\u25A3</span>
+            Project Detail
+          </h2>
+          <button class="ghost" onClick=${onClose}>\u2715</button>
+        </div>
+
+        <div class="modal-body" style="gap:16px;">
+          <div>
+            <div class="task-detail-title">${project.name}</div>
+            ${project.description && html`<div class="task-detail-desc">${project.description}</div>`}
+          </div>
+
+          <div class="task-detail-meta-grid">
+            ${project.directory && html`
+              <div class="task-detail-meta-item">
+                <span class="task-detail-meta-label">Directory</span>
+                <span style="color:var(--text-secondary);font-size:12px;word-break:break-all;" title=${project.directory}>${project.directory}</span>
+              </div>
+            `}
+            <div class="task-detail-meta-item">
+              <span class="task-detail-meta-label">Tasks</span>
+              <span style="color:var(--text-secondary);font-size:12px;">${projectTasks.length} total</span>
+            </div>
+            <div class="task-detail-meta-item">
+              <span class="task-detail-meta-label">Active / Done</span>
+              <span style="color:var(--text-secondary);font-size:12px;">${activeTasks} / ${doneTasks}</span>
+            </div>
+            <div class="task-detail-meta-item">
+              <span class="task-detail-meta-label">Runs</span>
+              <span style="color:var(--text-secondary);font-size:12px;">${projectRuns.length} total${activeRuns > 0 ? ` (${activeRuns} running)` : ''}</span>
+            </div>
+            <div class="task-detail-meta-item">
+              <span class="task-detail-meta-label">Created</span>
+              <span style="color:var(--text-secondary);font-size:12px;">${formatTime(project.created_at)}</span>
+            </div>
+          </div>
+
+          <div class="project-detail-tasks">
+            <div class="task-detail-section-title">Tasks (${projectTasks.length})</div>
+            ${projectTasks.length === 0 && html`
+              <div style="color:var(--text-muted);font-size:13px;padding:12px 0;">No tasks assigned to this project.</div>
+            `}
+            ${activeGroups.map(col => {
+              const groupTasks = statusGroups[col.id];
+              const sc = statusColor[col.id] || 'var(--text-muted)';
+              return html`
+                <div key=${col.id} class="project-task-group">
+                  <div class="project-task-group-header">
+                    <span class="project-task-status-dot" style="background:${sc};"></span>
+                    <span class="project-task-status-label" style="color:${sc};">${col.label.toUpperCase()}</span>
+                    <span class="project-task-status-count">${groupTasks.length}</span>
+                  </div>
+                  <div class="project-task-group-list">
+                    ${groupTasks.map(t => {
+                      const taskRuns = runs.filter(r => r.task_id === t.id);
+                      const runCount = taskRuns.length;
+                      return html`
+                        <div key=${t.id} class="project-task-item">
+                          <span class="project-task-item-title">${t.title}</span>
+                          <span class="project-task-item-right">
+                            ${runCount > 0 && html`<span class="project-task-run-count">${runCount} run${runCount !== 1 ? 's' : ''}</span>`}
+                            ${taskRuns.length > 0 && html`
+                              <button class="ghost project-task-detail-btn" onClick=${() => {
+                                const latestRun = taskRuns.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+                                onOpenRun(latestRun);
+                                onClose();
+                              }}>Detail</button>
+                            `}
+                          </span>
+                        </div>
+                      `;
+                    })}
+                  </div>
+                </div>
+              `;
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun }) {
   const [showNew, setShowNew] = useState(false);
+  const [detailProject, setDetailProject] = useState(null);
   const [name, setName] = useState('');
   const [desc, setDesc] = useState('');
   const [dir, setDir] = useState('');
@@ -1550,6 +1670,9 @@ function ProjectsView({ projects, reloadProjects }) {
     setSaving(false);
   };
 
+  // Keep detailProject in sync with latest data
+  const currentDetailProject = detailProject ? projects.find(p => p.id === detailProject.id) || detailProject : null;
+
   return html`
     <div class="projects-view">
       <div class="projects-header">
@@ -1564,14 +1687,20 @@ function ProjectsView({ projects, reloadProjects }) {
             sub="Create a project to organize your tasks."
           />
         `}
-        ${projects.map(p => html`
-          <div key=${p.id} class="project-card">
-            <div class="project-card-title">${p.name}</div>
-            ${p.directory && html`<div class="project-card-dir" title=${p.directory}>📁 ${p.directory}</div>`}
-            ${p.description && html`<div class="project-card-desc">${p.description}</div>`}
-            <div class="project-card-meta">Created ${formatTime(p.created_at)}</div>
-          </div>
-        `)}
+        ${projects.map(p => {
+          const taskCount = tasks.filter(t => t.project_id === p.id).length;
+          return html`
+            <div key=${p.id} class="project-card clickable" onClick=${() => setDetailProject(p)}>
+              <div class="project-card-header">
+                <div class="project-card-title">${p.name}</div>
+                ${taskCount > 0 && html`<span class="project-card-task-count">${taskCount} task${taskCount !== 1 ? 's' : ''}</span>`}
+              </div>
+              ${p.directory && html`<div class="project-card-dir" title=${p.directory}>\u{1F4C1} ${p.directory}</div>`}
+              ${p.description && html`<div class="project-card-desc">${p.description}</div>`}
+              <div class="project-card-meta">Created ${formatTime(p.created_at)}</div>
+            </div>
+          `;
+        })}
       </div>
       ${showNew && html`
         <div class="modal-overlay">
@@ -1600,6 +1729,15 @@ function ProjectsView({ projects, reloadProjects }) {
             </div>
           </div>
         </div>
+      `}
+      ${currentDetailProject && html`
+        <${ProjectDetailModal}
+          project=${currentDetailProject}
+          tasks=${tasks}
+          runs=${runs}
+          onClose=${() => setDetailProject(null)}
+          onOpenRun=${onOpenRun}
+        />
       `}
     </div>
   `;
@@ -3535,7 +3673,7 @@ function App() {
     }
     if (routeBase === 'projects') {
       if (projectsLoading) return html`<${Loading} />`;
-      return html`<${ProjectsView} projects=${projects} reloadProjects=${reloadProjects} />`;
+      return html`<${ProjectsView} projects=${projects} tasks=${tasks} runs=${runs} reloadProjects=${reloadProjects} onOpenRun=${(run) => setInspectRun(run)} />`;
     }
     if (routeBase === 'agents') {
       return html`<${AgentsView} agents=${agents} loading=${agentsLoading} reloadAgents=${reloadAgents} />`;
