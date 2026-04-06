@@ -2728,7 +2728,6 @@ body {
   gap: 8px;
   padding: 6px 12px 6px 28px;
   border-radius: var(--radius-sm);
-  user-select: none;
 }
 
 .task-session-header:hover {
@@ -2771,23 +2770,17 @@ body {
   font-size: 10px;
   padding: 2px 8px;
   border-radius: 4px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-muted);
+  border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(255,255,255,0.06);
+  color: var(--text-secondary);
   cursor: pointer;
   flex-shrink: 0;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-
-.task-session-header:hover .task-session-detail-btn {
-  opacity: 1;
 }
 
 .task-session-detail-btn:hover {
   color: var(--text-primary);
-  border-color: var(--border-active);
-  background: rgba(255,255,255,0.05);
+  border-color: var(--accent-border);
+  background: rgba(139,92,246,0.15);
 }
 
 .task-session-body {
