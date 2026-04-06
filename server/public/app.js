@@ -2959,9 +2959,7 @@ function ManagerView({ manager, runs }) {
           `}
           ${groupedWorkerRuns.map(group => html`
             <div class="worker-project-group">
-              ${groupedWorkerRuns.length > 1 && html`
-                <div class="worker-project-label">${group.name}</div>
-              `}
+              <div class="worker-project-label">${group.name}</div>
               ${group.runs.map(run => html`
                 <div key=${run.id} class="worker-card worker-card-${run.status}" onClick=${() => setInspectRun(run)} style="cursor:pointer">
                   <div class="worker-card-header">
