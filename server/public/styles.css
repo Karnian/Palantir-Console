@@ -2924,18 +2924,17 @@ body {
   padding: 12px 32px;
   font-size: 15px;
   font-weight: 600;
-  color: #fff;
-  background: var(--accent);
-  border: none;
+  color: var(--text-primary);
+  background: transparent;
+  border: 1.5px solid var(--accent-border);
   border-radius: 10px;
   cursor: pointer;
-  transition: background 0.15s, transform 0.1s, box-shadow 0.15s;
-  box-shadow: 0 0 20px rgba(139, 92, 246, 0.3);
+  transition: background 0.15s, transform 0.1s, border-color 0.15s;
 }
 
 .manager-empty .btn-primary:hover {
-  background: var(--accent-hover);
-  box-shadow: 0 0 30px rgba(139, 92, 246, 0.5);
+  background: var(--accent-muted);
+  border-color: var(--accent-light);
   transform: translateY(-1px);
 }
 
