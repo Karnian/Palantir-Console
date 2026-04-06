@@ -2844,7 +2844,11 @@ function ManagerView({ manager, runs }) {
               class="manager-input"
               placeholder="Message the manager..."
               value=${input}
-              onInput=${(e) => setInput(e.target.value)}
+              onInput=${(e) => {
+                setInput(e.target.value);
+                e.target.style.height = 'auto';
+                e.target.style.height = e.target.scrollHeight + 'px';
+              }}
               onKeyDown=${handleKeyDown}
               rows="1"
               disabled=${sending}
