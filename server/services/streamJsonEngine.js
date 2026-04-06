@@ -332,16 +332,35 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
 
   /**
    * Send a user message via stdin (stream-json format for manager, raw text for worker).
+   * @param {string} runId
+   * @param {string} text
+   * @param {Array<{data: string, media_type: string}>} [images] - base64 images (manager only)
    */
-  function sendInput(runId, text) {
+  function sendInput(runId, text, images) {
     const proc = processes.get(runId);
     if (!proc || !proc.child || !proc.child.stdin.writable) return false;
-    if (!text || text.length > 50000) return false;
+    if ((!text || text.length > 50000) && (!images || images.length === 0)) return false;
 
-    // Manager uses stream-json input format
-    const message = proc.isManager
-      ? JSON.stringify({ type: 'user', message: { role: 'user', content: text } })
-      : text;
+    let message;
+    if (proc.isManager) {
+      // Build content: if images present, use content blocks array
+      let content;
+      if (images && images.length > 0) {
+        content = [];
+        for (const img of images) {
+          content.push({
+            type: 'image',
+            source: { type: 'base64', media_type: img.media_type, data: img.data },
+          });
+        }
+        if (text) content.push({ type: 'text', text });
+      } else {
+        content = text;
+      }
+      message = JSON.stringify({ type: 'user', message: { role: 'user', content } });
+    } else {
+      message = text;
+    }
 
     try {
       proc.child.stdin.write(message + '\n');

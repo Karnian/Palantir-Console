@@ -169,12 +169,17 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
       return res.status(404).json({ error: 'No active manager session' });
     }
 
-    const { text } = req.body || {};
-    if (!text || typeof text !== 'string') {
-      throw new BadRequestError('text is required');
+    const { text, images } = req.body || {};
+    if ((!text || typeof text !== 'string') && (!Array.isArray(images) || images.length === 0)) {
+      throw new BadRequestError('text or images is required');
     }
 
-    const sent = streamJsonEngine.sendInput(activeManagerRunId, text);
+    // Validate images if provided
+    const validImages = Array.isArray(images)
+      ? images.filter(img => img && typeof img.data === 'string' && typeof img.media_type === 'string')
+      : undefined;
+
+    const sent = streamJsonEngine.sendInput(activeManagerRunId, text || '', validImages);
     if (!sent) {
       return res.status(502).json({ error: 'Failed to send message to manager' });
     }
