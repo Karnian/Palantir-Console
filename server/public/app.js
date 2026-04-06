@@ -1051,12 +1051,20 @@ function RunInspector({ run, onClose }) {
               Waiting for events...
             </div>
           `}
-          ${events.map((evt, i) => html`
-            <div key=${i} class="run-event-item">
-              <span class="event-channel">${evt.channel || evt.type || 'event'}</span>
-              ${typeof evt.data === 'string' ? evt.data : JSON.stringify(evt.data || evt.payload || '')}
-            </div>
-          `)}
+          ${events.map((evt, i) => {
+            const evtType = evt.event_type || evt.type || 'event';
+            let evtText = '';
+            try {
+              const p = evt.payload_json ? JSON.parse(evt.payload_json) : (evt.data || evt.payload || {});
+              evtText = p.text || p.message || p.result || p.tool || (typeof p === 'string' ? p : JSON.stringify(p));
+            } catch { evtText = evt.payload_json || ''; }
+            return html`
+              <div key=${i} class="run-event-item">
+                <span class="event-channel">${evtType}</span>
+                ${evtText}
+              </div>
+            `;
+          })}
           <div ref=${eventsEndRef}></div>
         </div>
         ${isActive && html`
