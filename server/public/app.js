@@ -2827,11 +2827,14 @@ function ManagerView({ manager, runs }) {
   }, [runs]);
 
   // Group by project
+  const [collapsedProjects, setCollapsedProjects] = useState({});
+  const toggleProject = (key) => setCollapsedProjects(prev => ({ ...prev, [key]: !prev[key] }));
+
   const groupedWorkerRuns = useMemo(() => {
     const groups = new Map();
     for (const r of allWorkerRuns) {
       const key = r.project_id || '_none';
-      if (!groups.has(key)) groups.set(key, { name: r.project_name || 'No Project', runs: [] });
+      if (!groups.has(key)) groups.set(key, { key, name: r.project_name || 'No Project', runs: [] });
       groups.get(key).runs.push(r);
     }
     return Array.from(groups.values());
@@ -2957,10 +2960,17 @@ function ManagerView({ manager, runs }) {
           ${workerRuns.length === 0 && html`
             <${EmptyState} icon="\u2699" text="No worker sessions yet" sub="Start a manager and assign tasks" />
           `}
-          ${groupedWorkerRuns.map(group => html`
+          ${groupedWorkerRuns.map(group => {
+            const collapsed = collapsedProjects[group.key];
+            const activeCount = group.runs.filter(r => ['running', 'needs_input'].includes(r.status)).length;
+            return html`
             <div class="worker-project-group">
-              <div class="worker-project-label">${group.name}</div>
-              ${group.runs.map(run => html`
+              <div class="worker-project-label" onClick=${() => toggleProject(group.key)} style="cursor:pointer">
+                <span class="worker-project-chevron">${collapsed ? '\u25B6' : '\u25BC'}</span>
+                <span>${group.name}</span>
+                <span class="worker-project-count">${group.runs.length}${activeCount > 0 ? ` \u00B7 ${activeCount} active` : ''}</span>
+              </div>
+              ${!collapsed && group.runs.map(run => html`
                 <div key=${run.id} class="worker-card worker-card-${run.status}" onClick=${() => setInspectRun(run)} style="cursor:pointer">
                   <div class="worker-card-header">
                     <span class="worker-status-icon" style="color: ${runStatusColor(run.status)}">
