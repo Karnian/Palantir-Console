@@ -2754,11 +2754,12 @@ function ManagerView({ manager, runs }) {
   };
 
   // Active/recent worker runs
+  const [projectFilter, setProjectFilter] = useState('all');
   const workerRuns = useMemo(() => {
     return (runs || [])
       .filter(r => !r.is_manager)
+      .filter(r => projectFilter === 'all' || (r.project_id || '') === projectFilter)
       .sort((a, b) => {
-        // Running first, then by created_at desc
         const statusOrder = { running: 0, needs_input: 1, queued: 2, paused: 3, completed: 4, failed: 5, cancelled: 6 };
         const oa = statusOrder[a.status] ?? 9;
         const ob = statusOrder[b.status] ?? 9;
@@ -2766,6 +2767,15 @@ function ManagerView({ manager, runs }) {
         return new Date(b.created_at) - new Date(a.created_at);
       })
       .slice(0, 20);
+  }, [runs, projectFilter]);
+
+  const workerProjects = useMemo(() => {
+    const map = new Map();
+    (runs || []).filter(r => !r.is_manager).forEach(r => {
+      const pid = r.project_id || '';
+      if (!map.has(pid)) map.set(pid, r.project_name || 'No Project');
+    });
+    return Array.from(map.entries());
   }, [runs]);
 
   const runStatusIcon = (status) => {
@@ -2874,7 +2884,18 @@ function ManagerView({ manager, runs }) {
       <!-- Right: Session Grid (60%) -->
       <div class="manager-grid-side">
         <div class="manager-grid-header">
-          <h3>Worker Sessions</h3>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <h3 style="margin:0;">Worker Sessions</h3>
+            ${workerProjects.length > 1 && html`
+              <select class="form-select" style="font-size:11px;padding:3px 8px;min-width:0;width:auto;"
+                value=${projectFilter} onChange=${e => setProjectFilter(e.target.value)}>
+                <option value="all">All Projects</option>
+                ${workerProjects.map(([pid, pname]) => html`
+                  <option key=${pid} value=${pid}>${pname}</option>
+                `)}
+              </select>
+            `}
+          </div>
           <div class="manager-grid-stats">
             <span class="mgr-stat" style="color: #3b82f6">\u25CF ${workerRuns.filter(r => r.status === 'running').length} running</span>
             <span class="mgr-stat" style="color: #f59e0b">\u23F8 ${workerRuns.filter(r => r.status === 'needs_input').length} waiting</span>
@@ -2892,10 +2913,10 @@ function ManagerView({ manager, runs }) {
                 <span class="worker-status-icon" style="color: ${runStatusColor(run.status)}">
                   ${runStatusIcon(run.status)}
                 </span>
-                <span class="worker-card-name">${run.agent_name || run.agent_type || 'Agent'}</span>
+                <span class="worker-card-name">${run.task_title || run.prompt?.slice(0, 60) || 'No task'}</span>
+                <span class="worker-card-agent-type">${run.agent_name || run.agent_type || 'Agent'}</span>
                 <span class="worker-card-time">${timeAgo(run.started_at || run.created_at)}</span>
               </div>
-              <div class="worker-card-task">${run.task_title || run.prompt?.slice(0, 60) || 'No task'}</div>
               <div class="worker-card-meta">
                 <span class="worker-card-status">${run.status}</span>
                 ${run.cost_usd > 0 && html`

@@ -2573,15 +2573,19 @@ body {
   flex: 1;
 }
 
+.worker-card-agent-type {
+  font-size: 10px;
+  color: var(--text-muted);
+  background: rgba(255,255,255,0.06);
+  padding: 1px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
 .worker-card-time {
   font-size: 11px;
   color: var(--text-muted);
-}
-
-.worker-card-task {
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-bottom: 6px;
+  flex-shrink: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
