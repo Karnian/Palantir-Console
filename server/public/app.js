@@ -719,7 +719,7 @@ function ExecuteModal({ open, task, agents, onClose, onExecute }) {
 // Task Detail Panel
 // ─────────────────────────────────────────────────────────────────────────────
 
-const STATUS_OPTIONS = ['backlog', 'todo', 'in_progress', 'review', 'done'];
+const STATUS_OPTIONS = ['backlog', 'todo', 'in_progress', 'review', 'done', 'failed'];
 const PRIORITY_OPTIONS = ['low', 'medium', 'high', 'critical'];
 
 function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onExecute, reloadTasks }) {
@@ -816,7 +816,7 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
 
   const statusColor = {
     backlog: 'var(--status-queued)', todo: 'var(--info)', in_progress: 'var(--accent)',
-    review: 'var(--status-review)', done: 'var(--success)',
+    review: 'var(--status-review)', done: 'var(--success)', failed: 'var(--status-failed)',
   };
 
   return html`
@@ -1151,6 +1151,7 @@ const BOARD_COLUMNS = [
   { id: 'backlog', label: 'Backlog' },
   { id: 'todo', label: 'Todo' },
   { id: 'in_progress', label: 'In Progress' },
+  { id: 'failed', label: 'Failed' },
   { id: 'review', label: 'Review' },
   { id: 'done', label: 'Done' },
 ];
@@ -2971,6 +2972,9 @@ function ManagerView({ manager, runs }) {
                     <span class="worker-card-agent-type">${run.agent_name || run.agent_type || 'Agent'}</span>
                     <span class="worker-card-time">${timeAgo(run.started_at || run.created_at)}</span>
                   </div>
+                  ${run.prompt && run.prompt !== run.task_title && html`
+                    <div class="worker-card-prompt">${run.prompt.slice(0, 80)}${run.prompt.length > 80 ? '...' : ''}</div>
+                  `}
                   <div class="worker-card-meta">
                     <span class="worker-card-status">${run.status}</span>
                     ${run.cost_usd > 0 && html`

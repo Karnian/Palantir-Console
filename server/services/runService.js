@@ -130,6 +130,12 @@ function createRunService(db, eventBus) {
     const run = stmts.getById.get(id);
     addRunEvent(id, `status:${status}`, null);
     if (eventBus) eventBus.emit('run:status', { run });
+
+    // Emit run:ended for terminal states so lifecycleService can sync task status
+    if (['completed', 'failed', 'cancelled'].includes(status) && eventBus) {
+      eventBus.emit('run:ended', { run });
+    }
+
     return run;
   }
 

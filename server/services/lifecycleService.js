@@ -230,7 +230,8 @@ function createLifecycleService({
 
     if (allComplete && runs.length > 0) {
       const hasSuccess = runs.some(r => r.status === 'completed');
-      const newStatus = hasSuccess ? 'review' : 'todo'; // failed runs → back to todo
+      const hasFailed = runs.some(r => r.status === 'failed');
+      const newStatus = hasSuccess ? 'review' : hasFailed ? 'failed' : 'todo';
       try {
         taskService.updateTaskStatus(taskId, newStatus);
       } catch {
@@ -304,6 +305,16 @@ function createLifecycleService({
   function startMonitoring() {
     if (heartbeatTimer) return;
     heartbeatTimer = setInterval(checkHealth, HEARTBEAT_INTERVAL_MS);
+
+    // Subscribe to run:ended so task status syncs immediately (not just on next health check)
+    if (eventBus) {
+      eventBus.on('run:ended', ({ run }) => {
+        if (run && run.task_id) {
+          checkTaskCompletion(run.task_id);
+        }
+      });
+    }
+
     console.log(`[lifecycleService] Health monitor started (${HEARTBEAT_INTERVAL_MS}ms interval)`);
   }
 

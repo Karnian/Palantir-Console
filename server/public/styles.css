@@ -2649,6 +2649,15 @@ body {
   white-space: nowrap;
 }
 
+.worker-card-prompt {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .worker-card-meta {
   display: flex;
   gap: 10px;
