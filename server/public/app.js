@@ -3023,12 +3023,13 @@ function ManagerView({ manager, runs, tasks, projects }) {
 
                 return html`
                   <div class="task-session-group">
-                    <div class="task-session-header" onClick=${() => task && setSelectedTask(task)} style="cursor:${task ? 'pointer' : 'default'}">
+                    <div class="task-session-header">
                       <span class="task-session-dot" style="background:${taskStatusColor}"></span>
                       <span class="task-session-title">${task?.title || 'Unassigned Runs'}</span>
                       <span class="task-session-meta">
                         ${task?.status || ''}${taskRuns.length > 0 ? ` \u00B7 ${taskRuns.length} run${taskRuns.length > 1 ? 's' : ''}` : ''}${activeRunCount > 0 ? ` \u00B7 ${activeRunCount} active` : ''}
                       </span>
+                      ${task && html`<button class="task-session-detail-btn" onClick=${(e) => { e.stopPropagation(); setSelectedTask(task); }}>Detail</button>`}
                     </div>
                   </div>
                 `;
