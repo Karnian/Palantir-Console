@@ -375,7 +375,7 @@ ${token ? `\nIMPORTANT: All API requests require auth header: ${auth.trim()}` : 
 - List all tasks: curl -s ${auth}${base}/api/tasks | jq
 - Filter by status: curl -s ${auth}"${base}/api/tasks?status=in_progress" | jq
 - Create task: curl -s ${auth}-X POST ${base}/api/tasks -H 'Content-Type: application/json' -d '{"title":"...","description":"...","priority":"medium","project_id":"PROJECT_ID"}'
-  IMPORTANT: Always include project_id when creating tasks. List projects first (GET /api/projects) to find the correct project_id.
+  Only include project_id if the task clearly belongs to an existing project. If unrelated, omit project_id (the task will be unassigned). Do NOT guess or force a project assignment.
 - Update status: curl -s ${auth}-X PATCH ${base}/api/tasks/TASK_ID/status -H 'Content-Type: application/json' -d '{"status":"done"}'
 
 ### Projects
@@ -402,7 +402,7 @@ Prioritize issues that need user attention (needs_input, failures) over routine 
 Always query the actual Palantir API to get real data — never guess or assume.
 
 ${runSummary ? `\n## Current State (at session start)\n${runSummary}` : ''}
-${projectList ? `\n## Available Projects\n${projectList}\nAlways assign a project_id when creating tasks.` : ''}
+${projectList ? `\n## Available Projects\n${projectList}\nOnly assign project_id when the task clearly belongs to a project. Leave it out if unrelated.` : ''}
 ${agentList ? `\n## Available Agent Profiles\n${agentList}\nUse the agent id when calling /execute.` : ''}`;
 }
 
