@@ -2757,7 +2757,7 @@ function AgentsView({ agents, loading, reloadAgents }) {
 // Manager View (Full Page — Left: Chat 60%, Right: Session Grid 40%)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function ManagerView({ manager, runs }) {
+function ManagerView({ manager, runs, tasks, projects }) {
   const { status, events, loading, start, sendMessage, stop } = manager;
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -3172,7 +3172,7 @@ function App() {
 
   const renderView = () => {
     if (routeBase === 'manager') {
-      return html`<${ManagerView} manager=${manager} runs=${runs} />`;
+      return html`<${ManagerView} manager=${manager} runs=${runs} tasks=${tasks} projects=${projects} />`;
     }
     if (routeBase === 'board') {
       if (tasksLoading) return html`<${Loading} />`;
