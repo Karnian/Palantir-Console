@@ -2591,7 +2591,7 @@ function AgentModal({ open, onClose, agent, onSaved }) {
               setType(t);
               if (!agent) {
                 const presets = {
-                  'claude-code': { cmd: 'claude', args: '-p {prompt} --output-format stream-json --verbose' },
+                  'claude-code': { cmd: 'claude', args: '-p {prompt} --permission-mode bypassPermissions --verbose' },
                   'codex': { cmd: 'codex', args: '{prompt}' },
                   'gemini': { cmd: 'gemini', args: '-p {prompt} --yolo' },
                   'opencode': { cmd: 'opencode', args: '{prompt}' },
