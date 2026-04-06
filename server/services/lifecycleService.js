@@ -290,7 +290,7 @@ function createLifecycleService({
    */
   function checkTaskCompletion(taskId) {
     const runs = runService.listRuns({ task_id: taskId });
-    const allComplete = runs.every(r => ['completed', 'failed', 'cancelled'].includes(r.status));
+    const allComplete = runs.every(r => ['completed', 'failed', 'cancelled', 'stopped'].includes(r.status));
 
     if (allComplete && runs.length > 0) {
       const hasSuccess = runs.some(r => r.status === 'completed');
@@ -420,7 +420,7 @@ function createLifecycleService({
   function cancelRun(runId) {
     const run = runService.getRun(runId);
     // Don't cancel already-terminal runs
-    if (['completed', 'failed', 'cancelled'].includes(run.status)) {
+    if (['completed', 'failed', 'cancelled', 'stopped'].includes(run.status)) {
       return run;
     }
     // Use correct engine: streamJsonEngine for manager + claude workers, executionEngine for others

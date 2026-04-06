@@ -23,14 +23,14 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
   let activeManagerRunId = null;
   let startingManager = false; // guard against concurrent /start requests
 
-  // On startup: mark any stale manager runs (from previous server instances) as cancelled
+  // On startup: mark any stale manager runs (from previous server instances) as stopped
   try {
     const staleManagers = runService.listRuns({ status: 'running' })
       .concat(runService.listRuns({ status: 'queued' }))
       .concat(runService.listRuns({ status: 'needs_input' }))
       .filter(r => r.is_manager);
     for (const r of staleManagers) {
-      runService.updateRunStatus(r.id, 'cancelled', { force: true });
+      runService.updateRunStatus(r.id, 'stopped', { force: true });
     }
   } catch { /* ignore */ }
 
@@ -405,7 +405,7 @@ ${token ? `\nIMPORTANT: All API requests require auth header: ${auth.trim()}` : 
 - Send input to run: curl -s ${auth}-X POST ${base}/api/runs/RUN_ID/input -H 'Content-Type: application/json' -d '{"text":"..."}'
 - Cancel run: curl -s ${auth}-X POST ${base}/api/runs/RUN_ID/cancel
 
-Run statuses: queued, running, paused, needs_input, completed, failed, cancelled
+Run statuses: queued, running, paused, needs_input, completed, failed, cancelled, stopped
 Task statuses: backlog, todo, in_progress, review, done
 
 Always be concise and action-oriented. When reporting status, use a structured format:

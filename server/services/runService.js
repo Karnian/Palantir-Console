@@ -1,17 +1,18 @@
 const crypto = require('node:crypto');
 const { BadRequestError, NotFoundError } = require('../utils/errors');
 
-const VALID_STATUSES = ['queued', 'running', 'paused', 'needs_input', 'completed', 'failed', 'cancelled'];
+const VALID_STATUSES = ['queued', 'running', 'paused', 'needs_input', 'completed', 'failed', 'cancelled', 'stopped'];
 
 // State machine: allowed transitions
 const VALID_TRANSITIONS = {
   queued:      ['running', 'cancelled'],
-  running:     ['paused', 'needs_input', 'completed', 'failed', 'cancelled'],
-  paused:      ['running', 'cancelled'],
-  needs_input: ['running', 'cancelled', 'failed'],
+  running:     ['paused', 'needs_input', 'completed', 'failed', 'cancelled', 'stopped'],
+  paused:      ['running', 'cancelled', 'stopped'],
+  needs_input: ['running', 'cancelled', 'failed', 'stopped'],
   completed:   [],  // terminal
   failed:      ['queued'],  // allow retry
   cancelled:   ['queued'],  // allow retry
+  stopped:     ['queued'],  // allow retry — unclean shutdown (server restart, process crash)
 };
 
 function createRunService(db, eventBus) {
@@ -59,7 +60,7 @@ function createRunService(db, eventBus) {
       VALUES (@id, @task_id, @agent_profile_id, @prompt, @status, @is_manager, @parent_run_id)
     `),
     updateStatus: db.prepare(`
-      UPDATE runs SET status = ?, ended_at = CASE WHEN ? IN ('completed','failed','cancelled') THEN datetime('now') ELSE ended_at END WHERE id = ?
+      UPDATE runs SET status = ?, ended_at = CASE WHEN ? IN ('completed','failed','cancelled','stopped') THEN datetime('now') ELSE ended_at END WHERE id = ?
     `),
     updateStarted: db.prepare(`
       UPDATE runs SET status = 'running', started_at = datetime('now'), tmux_session = ?, worktree_path = ?, branch = ? WHERE id = ?
@@ -132,7 +133,7 @@ function createRunService(db, eventBus) {
     if (eventBus) eventBus.emit('run:status', { run });
 
     // Emit run:ended for terminal states so lifecycleService can sync task status
-    if (['completed', 'failed', 'cancelled'].includes(status) && eventBus) {
+    if (['completed', 'failed', 'cancelled', 'stopped'].includes(status) && eventBus) {
       eventBus.emit('run:ended', { run });
     }
 
