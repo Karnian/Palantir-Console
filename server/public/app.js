@@ -2995,7 +2995,7 @@ function ManagerView({ manager, runs }) {
                 </div>
               `)}
             </div>
-          `)}
+          `;})}
         </div>
       </div>
 
