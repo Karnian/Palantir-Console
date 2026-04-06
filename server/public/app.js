@@ -2678,7 +2678,7 @@ function AgentModal({ open, onClose, agent, onSaved }) {
               if (!agent) {
                 const presets = {
                   'claude-code': { cmd: 'claude', args: '-p {prompt} --permission-mode bypassPermissions' },
-                  'codex': { cmd: 'codex', args: 'exec --full-auto -c \'model_reasoning_effort="high"\' {prompt}' },
+                  'codex': { cmd: 'codex', args: 'exec --full-auto --skip-git-repo-check -c \'model_reasoning_effort="high"\' {prompt}' },
                   'gemini': { cmd: 'gemini', args: '-p {prompt} --yolo' },
                   'opencode': { cmd: 'opencode', args: '{prompt}' },
                 };
