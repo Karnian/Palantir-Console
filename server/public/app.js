@@ -386,7 +386,7 @@ function EmptyState({ icon, text, sub }) {
 // Dashboard View
 // ─────────────────────────────────────────────────────────────────────────────
 
-function DashboardView({ tasks, runs, onOpenRun, claudeSessions }) {
+function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions }) {
   const activeRuns = runs.filter(r => r.status === 'running');
   const needsInputRuns = runs.filter(r => r.status === 'needs_input');
   const failedRuns = runs.filter(r => r.status === 'failed');
@@ -517,6 +517,11 @@ function DashboardView({ tasks, runs, onOpenRun, claudeSessions }) {
               ${item.type === 'needs-input' && html`
                 <button class="ghost" onClick=${(e) => { e.stopPropagation(); item.run && onOpenRun(item.run); }}>
                   Respond
+                </button>
+              `}
+              ${item.type === 'failed' && html`
+                <button class="ghost" onClick=${(e) => { e.stopPropagation(); item.run && onDeleteRun(item.run.id); }}>
+                  Dismiss
                 </button>
               `}
               ${item.type === 'running' && html`
@@ -3379,6 +3384,12 @@ function App() {
         tasks=${tasks}
         runs=${runs}
         onOpenRun=${(run) => setInspectRun(run)}
+        onDeleteRun=${async (id) => {
+          try {
+            await apiFetch('/api/runs/' + id, { method: 'DELETE' });
+            reloadRuns();
+          } catch (err) { addToast(err.message, 'error'); }
+        }}
         claudeSessions=${claudeSessions}
       />
     `;
