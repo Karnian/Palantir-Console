@@ -2919,6 +2919,37 @@ body {
   line-height: 1.5;
 }
 
+.manager-empty .btn-primary {
+  margin-top: 8px;
+  padding: 12px 32px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s, box-shadow 0.15s;
+  box-shadow: 0 0 20px rgba(139, 92, 246, 0.3);
+}
+
+.manager-empty .btn-primary:hover {
+  background: var(--accent-hover);
+  box-shadow: 0 0 30px rgba(139, 92, 246, 0.5);
+  transform: translateY(-1px);
+}
+
+.manager-empty .btn-primary:active {
+  transform: translateY(0);
+}
+
+.manager-empty .btn-primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+  transform: none;
+  box-shadow: none;
+}
+
 /* Message bubbles */
 .manager-msg {
   max-width: 85%;
