@@ -955,7 +955,7 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
             <div class="task-detail-meta-grid">
               ${(() => {
                 const sc = statusColor[status] || 'var(--text-muted)';
-                const priorityColors = { low: '#6b7280', medium: '#3b82f6', high: '#f59e0b', urgent: '#ef4444' };
+                const priorityColors = { low: '#6b7280', medium: '#3b82f6', high: '#f59e0b', critical: '#ef4444' };
                 const pc = priorityColors[priority] || '#6b7280';
                 return html`
                   <div class="task-detail-meta-item">
@@ -979,7 +979,7 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
                         try { await apiFetch('/api/tasks/' + task.id, { method: 'PATCH', body: JSON.stringify({ priority: v }) }); reloadTasks(); }
                         catch (err) { addToast(err.message, 'error'); }
                       }}>
-                      ${['low','medium','high','urgent'].map(p => html`<option key=${p} value=${p}>${p}</option>`)}
+                      ${PRIORITY_OPTIONS.map(p => html`<option key=${p} value=${p}>${p}</option>`)}
                     </select>
                   </div>
                   <div class="task-detail-meta-item">
