@@ -53,6 +53,7 @@ const REQUIRED_ASSETS = [
   { path: '/app/lib/format.js', mime: /text\/javascript|application\/javascript/ },
   { path: '/app/lib/markdown.js', mime: /text\/javascript|application\/javascript/ },
   { path: '/app/lib/api.js', mime: /text\/javascript|application\/javascript/ },
+  { path: '/app/components/RunInspector.js', mime: /text\/javascript|application\/javascript/ },
   { path: '/vendor/preact.module.js', mime: /text\/javascript|application\/javascript/ },
   { path: '/vendor/hooks.module.js', mime: /text\/javascript|application\/javascript/ },
   { path: '/vendor/htm.module.js', mime: /text\/javascript|application\/javascript/ },
@@ -153,4 +154,18 @@ test('boot: app/lib/api.js exports apiFetch', async (t) => {
   const app = await createTestApp(t);
   const res = await request(app).get('/app/lib/api.js');
   assert.match(res.text, /export\s+(async\s+)?function\s+apiFetch/, 'apiFetch export present');
+});
+
+test('boot: app/components/RunInspector.js exports the component and main.js bridges it', async (t) => {
+  const app = await createTestApp(t);
+  const componentRes = await request(app).get('/app/components/RunInspector.js');
+  assert.match(componentRes.text, /export\s+function\s+RunInspector/, 'RunInspector export present');
+
+  const mainRes = await request(app).get('/app/main.js');
+  // main.js loads the component via dynamic import AFTER the preact globals
+  // are assigned (so module top-level destructuring of window.preactHooks
+  // resolves), then bridges it onto window.RunInspector for the legacy app.js
+  // htm template lookup. Both halves of the contract get checked here.
+  assert.match(mainRes.text, /import\(['"]\.\/components\/RunInspector\.js['"]\)/, 'dynamic import of RunInspector');
+  assert.match(mainRes.text, /window\.RunInspector\s*=/, 'window.RunInspector bridge');
 });

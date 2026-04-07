@@ -22,6 +22,10 @@ import htmFactory from '../vendor/htm.module.js';
 import { formatDuration, formatTime, timeAgo } from './lib/format.js';
 import { renderMarkdown, configureMarked } from './lib/markdown.js';
 import { apiFetch } from './lib/api.js';
+// NOTE: ./components/RunInspector.js dereferences window.preact / preactHooks
+// / htm at module top level, so it MUST be imported AFTER those bridges are
+// assigned below. The dynamic import below pushes RunInspector loading until
+// after the window assignments — keep that order if you add more components.
 
 // Re-expose the same globals app.js currently consumes. The shape mirrors
 // the UMD bundles (window.preact, window.preactHooks, window.htm).
@@ -44,6 +48,14 @@ window.apiFetch = apiFetch;
 // time main.js runs `window.marked` is already loaded. configureMarked() is
 // a no-op if it isn't, so timing failures degrade gracefully.
 configureMarked();
+
+// Components extracted from app.js. Loaded via dynamic import so the module
+// resolves AFTER the window.preact / preactHooks / htm assignments above —
+// the components dereference those at module top level. Bridge each one onto
+// window so the legacy app.js (htm template uses bare identifiers) can still
+// reference them via global lookup.
+const { RunInspector } = await import('./components/RunInspector.js');
+window.RunInspector = RunInspector;
 
 // Load app.js as a classic script after the globals are in place. We use a
 // dynamic <script> tag (rather than `import './app.js'`) because app.js is
