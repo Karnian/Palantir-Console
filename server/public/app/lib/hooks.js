@@ -39,17 +39,26 @@ export function navigate(hash) {
 // pressing Escape should only close the topmost one. We track each active
 // useEscape registration in mount order; the handler short-circuits unless its
 // own entry is at the top of the stack.
+//
+// IMPORTANT: the effect dep list intentionally OMITS `onClose`. Call sites
+// usually pass a fresh inline arrow on every render, which would otherwise
+// tear down and re-push the entry on every parent rerender (SSE reloads,
+// minute tickers, etc.) and shuffle the stack — making Escape close the
+// wrong modal layer. We read `onClose` through a ref so the registration
+// lifetime stays bound to the modal's actual mount lifetime.
 const _escapeStack = [];
 
 export function useEscape(open, onClose) {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
     if (!open) return;
-    const entry = { onClose };
+    const entry = { fire: () => onCloseRef.current?.() };
     _escapeStack.push(entry);
     const handler = (e) => {
       if (e.key !== 'Escape') return;
       if (_escapeStack[_escapeStack.length - 1] !== entry) return;
-      onClose();
+      entry.fire();
     };
     window.addEventListener('keydown', handler);
     return () => {
@@ -57,7 +66,8 @@ export function useEscape(open, onClose) {
       const idx = _escapeStack.indexOf(entry);
       if (idx >= 0) _escapeStack.splice(idx, 1);
     };
-  }, [open, onClose]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 }
 
 // ---- SSE ----

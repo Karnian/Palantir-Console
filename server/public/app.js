@@ -744,6 +744,11 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
   const [projectId, setProjectId] = useState(task?.project_id || '');
   // Single editing field state — 'title' | 'description' | null
   const [editingField, setEditingField] = useState(null);
+  // Idempotency guard for commitField. Both the inline-edit input's onBlur AND
+  // the modal-body onMouseDown outside-click handler can fire commit for the
+  // same edit (e.g. when the click target also steals focus). Without this
+  // guard we'd PATCH twice. Cleared when a new edit session starts.
+  const committingFieldRef = useRef(null);
   const [showExecute, setShowExecute] = useState(false);
   // Track pointerdown coords to distinguish click-to-edit vs drag-to-select
   const pointerDownRef = useRef(null);
@@ -789,6 +794,10 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
   };
 
   const commitField = (field) => {
+    // Guard against duplicate commits from blur + outside-click firing in
+    // sequence for the same edit session.
+    if (committingFieldRef.current === field) return;
+    committingFieldRef.current = field;
     if (field === 'title') {
       const next = title.trim();
       setEditingField(null);
@@ -805,6 +814,7 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
   const cancelField = (field) => {
     if (field === 'title') setTitle(task.title || '');
     if (field === 'description') setDescription(task.description || '');
+    committingFieldRef.current = field; // prevent any pending blur from re-saving
     setEditingField(null);
   };
 
@@ -841,6 +851,7 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
     if (field === 'description' && descReadonlyRef.current) {
       descEditHeightRef.current = Math.round(descReadonlyRef.current.getBoundingClientRect().height);
     }
+    committingFieldRef.current = null;
     setEditingField(field);
   };
 
