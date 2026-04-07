@@ -2248,6 +2248,63 @@ body {
   white-space: pre-wrap;
 }
 
+/* Click-to-edit affordance (Jira-style inline edit) */
+.task-detail-title.editable,
+.task-detail-desc.editable {
+  cursor: text;
+  border-radius: 4px;
+  padding: 4px 6px;
+  margin-left: -6px;
+  margin-right: -6px;
+  border: 1px solid transparent;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.task-detail-title.editable:hover,
+.task-detail-desc.editable:hover {
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+  border-color: var(--border, rgba(255, 255, 255, 0.08));
+}
+.task-detail-desc.editable.placeholder {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.task-detail-title-input {
+  width: 100%;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.3;
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--accent, #8b5cf6);
+  border-radius: 4px;
+  padding: 4px 6px;
+  margin-left: -6px;
+  margin-right: -6px;
+  outline: none;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+
+.task-detail-desc-input {
+  width: 100%;
+  margin-top: 8px;
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--accent, #8b5cf6);
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin-left: -8px;
+  margin-right: -8px;
+  outline: none;
+  font-family: inherit;
+  resize: vertical;
+  min-height: 80px;
+  box-sizing: border-box;
+}
+
 .task-detail-meta-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

@@ -737,15 +737,15 @@ const STATUS_OPTIONS = ['backlog', 'todo', 'in_progress', 'review', 'done', 'fai
 const PRIORITY_OPTIONS = ['low', 'medium', 'high', 'critical'];
 
 function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onExecute, reloadTasks }) {
-  const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(task?.title || '');
   const [description, setDescription] = useState(task?.description || '');
   const [status, setStatus] = useState(task?.status || 'backlog');
   const [priority, setPriority] = useState(task?.priority || 'medium');
   const [projectId, setProjectId] = useState(task?.project_id || '');
-  const [saving, setSaving] = useState(false);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [editingDesc, setEditingDesc] = useState(false);
   const [showExecute, setShowExecute] = useState(false);
-  useEscape(!!task, onClose);
+  useEscape(!!task && !editingTitle && !editingDesc, onClose);
 
   // Sync form state when task changes
   useEffect(() => {
@@ -755,7 +755,8 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
       setStatus(task.status || 'backlog');
       setPriority(task.priority || 'medium');
       setProjectId(task.project_id || '');
-      setEditing(false);
+      setEditingTitle(false);
+      setEditingDesc(false);
     }
   }, [task?.id, task?.updated_at]);
 
@@ -766,21 +767,31 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
   const project = projects.find(p => p.id === task.project_id);
   const activeRun = taskRuns.find(r => r.status === 'running' || r.status === 'needs_input');
 
-  const handleSave = async () => {
-    setSaving(true);
+  // Save a single field via PATCH (used by inline click-to-edit)
+  const saveField = async (field, value) => {
     try {
-      const body = { title: title.trim(), description: description.trim() || null, priority, project_id: projectId || null };
-      await apiFetch(`/api/tasks/${task.id}`, { method: 'PATCH', body: JSON.stringify(body) });
-      if (status !== task.status) {
-        await apiFetch(`/api/tasks/${task.id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
-      }
-      addToast('Task updated', 'success');
-      setEditing(false);
+      await apiFetch(`/api/tasks/${task.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ [field]: value }),
+      });
       reloadTasks();
     } catch (err) {
       addToast(err.message, 'error');
     }
-    setSaving(false);
+  };
+
+  const commitTitle = () => {
+    const next = title.trim();
+    setEditingTitle(false);
+    if (!next) { setTitle(task.title || ''); return; }
+    if (next !== task.title) saveField('title', next);
+  };
+
+  const commitDesc = () => {
+    const next = description.trim();
+    setEditingDesc(false);
+    const prev = task.description || '';
+    if (next !== prev) saveField('description', next || null);
   };
 
   const handleDelete = async () => {
@@ -843,46 +854,41 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
             Task Detail
           </h2>
           <div style="display:flex;gap:6px;">
-            ${!editing && html`<button class="ghost" onClick=${() => setEditing(true)}>Edit</button>`}
             <button class="ghost" onClick=${onClose}>\u2715</button>
           </div>
         </div>
 
         <div class="modal-body" style="gap:16px;">
-          ${editing ? html`
-            <div class="form-field">
-              <label class="form-label">Title</label>
-              <input class="form-input" value=${title} onInput=${e => setTitle(e.target.value)} />
-            </div>
-            <div class="form-field">
-              <label class="form-label">Description</label>
-              <textarea class="form-textarea" value=${description} onInput=${e => setDescription(e.target.value)} rows="3" placeholder="Add a description..."></textarea>
-            </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-              <div class="form-field">
-                <label class="form-label">Status</label>
-                <select class="form-select" value=${status} onChange=${e => setStatus(e.target.value)}>
-                  ${STATUS_OPTIONS.map(s => html`<option key=${s} value=${s}>${s.replace('_', ' ')}</option>`)}
-                </select>
-              </div>
-              <div class="form-field">
-                <label class="form-label">Priority</label>
-                <select class="form-select" value=${priority} onChange=${e => setPriority(e.target.value)}>
-                  ${PRIORITY_OPTIONS.map(p => html`<option key=${p} value=${p}>${p}</option>`)}
-                </select>
-              </div>
-            </div>
-            <div class="form-field">
-              <label class="form-label">Project</label>
-              <select class="form-select" value=${projectId} onChange=${e => setProjectId(e.target.value)}>
-                <option value="">None</option>
-                ${projects.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
-              </select>
-            </div>
-          ` : html`
+          ${html`
             <div>
-              <div class="task-detail-title">${task.title}</div>
-              ${task.description && html`<div class="task-detail-desc">${task.description}</div>`}
+              ${editingTitle ? html`
+                <input class="task-detail-title-input" value=${title} autoFocus
+                  onInput=${e => setTitle(e.target.value)}
+                  onBlur=${commitTitle}
+                  onKeyDown=${e => {
+                    if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); }
+                    if (e.key === 'Escape') { setTitle(task.title || ''); setEditingTitle(false); }
+                  }} />
+              ` : html`
+                <div class="task-detail-title editable" title="Click to edit"
+                  onClick=${() => setEditingTitle(true)}>${task.title}</div>
+              `}
+              ${editingDesc ? html`
+                <textarea class="task-detail-desc-input" value=${description} autoFocus rows="4"
+                  placeholder="Add a description..."
+                  onInput=${e => setDescription(e.target.value)}
+                  onBlur=${commitDesc}
+                  onKeyDown=${e => {
+                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.target.blur(); }
+                    if (e.key === 'Escape') { setDescription(task.description || ''); setEditingDesc(false); }
+                  }}></textarea>
+              ` : (task.description ? html`
+                <div class="task-detail-desc editable" title="Click to edit"
+                  onClick=${() => setEditingDesc(true)}>${task.description}</div>
+              ` : html`
+                <div class="task-detail-desc editable placeholder" title="Click to edit"
+                  onClick=${() => setEditingDesc(true)}>Add a description...</div>
+              `)}
             </div>
             <div class="task-detail-meta-grid">
               ${(() => {
@@ -957,22 +963,13 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
 
         <div class="modal-footer" style="justify-content:space-between;">
           <div style="display:flex;gap:6px;">
-            ${editing ? html`
-              <button class="primary" onClick=${handleSave} disabled=${saving || !title.trim()}>
-                ${saving ? 'Saving...' : 'Save Changes'}
-              </button>
-              <button class="ghost" onClick=${() => setEditing(false)}>Cancel</button>
+            ${activeRun ? html`
+              <button class="primary" onClick=${() => { onOpenRun(activeRun); onClose(); }}>View Run</button>
             ` : html`
-              ${activeRun ? html`
-                <button class="primary" onClick=${() => { onOpenRun(activeRun); onClose(); }}>View Run</button>
-              ` : html`
-                <button class="primary" onClick=${() => setShowExecute(true)}>${'\u25B6'} Run Agent</button>
-              `}
+              <button class="primary" onClick=${() => setShowExecute(true)}>${'\u25B6'} Run Agent</button>
             `}
           </div>
-          ${!editing && html`
-            <button class="ghost danger" onClick=${handleDelete}>Delete</button>
-          `}
+          <button class="ghost danger" onClick=${handleDelete}>Delete</button>
         </div>
       </div>
     </div>
