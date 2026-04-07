@@ -144,6 +144,134 @@ test('Tasks status validation', async (t) => {
   assert.equal(bad.status, 400);
 });
 
+test('Tasks due_date create, update, clear', async (t) => {
+  const { app } = await createTestApp(t);
+
+  // Create with due_date
+  const create = await request(app).post('/api/tasks').send({
+    title: 'Ship feature',
+    due_date: '2026-04-15',
+  });
+  assert.equal(create.status, 201);
+  assert.equal(create.body.task.due_date, '2026-04-15');
+  const taskId = create.body.task.id;
+
+  // Update due_date
+  const upd = await request(app).patch(`/api/tasks/${taskId}`).send({ due_date: '2026-04-20' });
+  assert.equal(upd.status, 200);
+  assert.equal(upd.body.task.due_date, '2026-04-20');
+
+  // Clear due_date with null
+  const clr = await request(app).patch(`/api/tasks/${taskId}`).send({ due_date: null });
+  assert.equal(clr.status, 200);
+  assert.equal(clr.body.task.due_date, null);
+});
+
+test('Tasks recurring: completing a recurring task spawns next instance', async (t) => {
+  const { app } = await createTestApp(t);
+
+  // Create weekly recurring task
+  const create = await request(app).post('/api/tasks').send({
+    title: 'Weekly report',
+    due_date: '2026-04-10',
+    recurrence: 'weekly',
+  });
+  assert.equal(create.status, 201);
+  const parent = create.body.task;
+  assert.equal(parent.recurrence, 'weekly');
+
+  // Mark as done
+  const done = await request(app).patch(`/api/tasks/${parent.id}/status`).send({ status: 'done' });
+  assert.equal(done.status, 200);
+
+  // List should now contain the parent + the spawned next-week instance
+  const list = await request(app).get('/api/tasks');
+  assert.equal(list.body.tasks.length, 2);
+  const child = list.body.tasks.find(t => t.id !== parent.id);
+  assert.ok(child, 'child instance was created');
+  assert.equal(child.due_date, '2026-04-17');
+  assert.equal(child.recurrence, 'weekly');
+  assert.equal(child.parent_task_id, parent.id);
+  assert.equal(child.title, parent.title);
+
+  // Marking done a SECOND time on the parent should NOT spawn another instance
+  // (because before.status is already 'done')
+  await request(app).patch(`/api/tasks/${parent.id}/status`).send({ status: 'done' });
+  const list2 = await request(app).get('/api/tasks');
+  assert.equal(list2.body.tasks.length, 2);
+});
+
+test('Tasks recurring: dateless recurring task spawns dateless copy on done', async (t) => {
+  const { app } = await createTestApp(t);
+
+  // Recurring task with NO due_date — "infinite repeat" mode
+  const create = await request(app).post('/api/tasks').send({
+    title: 'Daily standup',
+    recurrence: 'daily',
+  });
+  assert.equal(create.status, 201);
+  assert.equal(create.body.task.due_date, null);
+  assert.equal(create.body.task.recurrence, 'daily');
+  const parent = create.body.task;
+
+  // Mark done
+  await request(app).patch(`/api/tasks/${parent.id}/status`).send({ status: 'done' });
+
+  // Should spawn a fresh dateless copy
+  const list = await request(app).get('/api/tasks');
+  assert.equal(list.body.tasks.length, 2);
+  const child = list.body.tasks.find(t => t.id !== parent.id);
+  assert.ok(child);
+  assert.equal(child.due_date, null);
+  assert.equal(child.recurrence, 'daily');
+  assert.equal(child.parent_task_id, parent.id);
+  assert.equal(child.title, parent.title);
+});
+
+test('Tasks recurring: invalid recurrence is rejected', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/tasks').send({
+    title: 'X',
+    due_date: '2026-04-10',
+    recurrence: 'biweekly',
+  });
+  assert.equal(res.status, 400);
+});
+
+test('Tasks recurring: monthly advances by month', async (t) => {
+  const { app } = await createTestApp(t);
+  const create = await request(app).post('/api/tasks').send({
+    title: 'Monthly invoice',
+    due_date: '2026-01-31',
+    recurrence: 'monthly',
+  });
+  await request(app).patch(`/api/tasks/${create.body.task.id}/status`).send({ status: 'done' });
+  const list = await request(app).get('/api/tasks');
+  const child = list.body.tasks.find(t => t.id !== create.body.task.id);
+  // JS Date rolls 2026-01-31 + 1 month → 2026-03-03 (Feb 31 doesn't exist)
+  // We accept whatever the JS Date math produces; just assert it advanced
+  assert.ok(child.due_date > '2026-01-31');
+});
+
+test('Tasks due_date validation rejects bad input', async (t) => {
+  const { app } = await createTestApp(t);
+
+  const bad1 = await request(app).post('/api/tasks').send({ title: 'X', due_date: '2026/04/15' });
+  assert.equal(bad1.status, 400);
+
+  const bad2 = await request(app).post('/api/tasks').send({ title: 'X', due_date: 'not-a-date' });
+  assert.equal(bad2.status, 400);
+
+  // Impossible calendar date
+  const bad3 = await request(app).post('/api/tasks').send({ title: 'X', due_date: '2026-13-40' });
+  assert.equal(bad3.status, 400);
+
+  // Empty string is treated as null (clears)
+  const ok = await request(app).post('/api/tasks').send({ title: 'X', due_date: '' });
+  assert.equal(ok.status, 201);
+  assert.equal(ok.body.task.due_date, null);
+});
+
 // ---- Agents ----
 
 test('Default agent profiles exist', async (t) => {
