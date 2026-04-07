@@ -1921,7 +1921,10 @@ function initLegacySessions(root) {
   const CLAMP_LINES = 20;
   const INITIAL_MESSAGE_LIMIT = 40;
   const MESSAGE_LIMIT_STEP = 40;
-  const MARKDOWN_OPTIONS = { breaks: true, gfm: true };
+  // marked's global options are configured once at boot from app/main.js via
+  // configureMarked() in app/lib/markdown.js. Per-call options below merge
+  // with that global config, so we no longer need a local MARKDOWN_OPTIONS
+  // const here or per-render setOptions calls.
 
   function getMessageLimit(sessionId) {
     return state.messageLimitBySession.get(sessionId) ?? INITIAL_MESSAGE_LIMIT;
@@ -1944,7 +1947,6 @@ function initLegacySessions(root) {
   }
 
   function renderMessageContent(target, raw) {
-    if (window.marked) window.marked.setOptions(MARKDOWN_OPTIONS);
     if (window.marked && window.DOMPurify) {
       target.innerHTML = window.DOMPurify.sanitize(window.marked.parse(raw, { breaks: true }));
     } else {
@@ -2142,7 +2144,6 @@ function initLegacySessions(root) {
 
   function renderMessages(messages, options = {}) {
     const { autoScroll = false, onRendered = null } = options;
-    if (window.marked) window.marked.setOptions(MARKDOWN_OPTIONS);
     messageList.innerHTML = '';
     if (!messages.length) {
       messageList.innerHTML = '<div class="meta">No messages found for this session.</div>';
