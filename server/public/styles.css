@@ -2247,6 +2247,26 @@ body {
   font-family: var(--font-sans);
 }
 
+/* Native <input type="date"> renders each segment (year/month/day) as a
+   webkit spinbutton internal that does NOT inherit our font properties by
+   default — Korean placeholder "연도. 월. 일." then renders with mixed sizes
+   because each segment falls back to its own UA font. Force inherit on every
+   internal pseudo-element so all segments share the same font + size + weight.
+   Also enable tabular numerals so digits stay column-aligned once filled. */
+input[type="date"].form-input {
+  font-variant-numeric: tabular-nums;
+}
+input[type="date"]::-webkit-datetime-edit,
+input[type="date"]::-webkit-datetime-edit-fields-wrapper,
+input[type="date"]::-webkit-datetime-edit-text,
+input[type="date"]::-webkit-datetime-edit-year-field,
+input[type="date"]::-webkit-datetime-edit-month-field,
+input[type="date"]::-webkit-datetime-edit-day-field {
+  font: inherit;
+  color: inherit;
+  padding: 0;
+}
+
 .form-input:focus,
 .form-textarea:focus,
 .form-select:focus {
