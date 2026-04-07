@@ -1,6 +1,7 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { BadRequestError } = require('../utils/errors');
+const { resolveManagerAuth } = require('../services/authResolver');
 
 /**
  * Manager Session API routes.
@@ -131,6 +132,25 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           !safeCwd.startsWith(home + path.sep) && !safeCwd.startsWith(cwdRoot + path.sep)) {
         throw new BadRequestError(`cwd must be under home directory or project root: ${safeCwd}`);
       }
+    }
+
+    // PR2: resolve auth before we touch the DB so a misconfigured environment
+    // fails fast with a structured 400 instead of leaving an orphaned run row.
+    //
+    // SCOPE NOTE: PR2 only does the *preflight* check (canAuth + diagnostics).
+    // It does NOT propagate authCtx.env into the spawned subprocess — the
+    // Claude adapter still inherits the full process.env via streamJsonEngine.
+    // PR3 will read agent_profile_id (and its env_allowlist) and pass a
+    // filtered env down through the adapter.
+    const authCtx = resolveManagerAuth('claude-code');
+    if (!authCtx.canAuth) {
+      startingManager = false;
+      return res.status(400).json({
+        error: 'manager_auth_unavailable',
+        adapter: 'claude-code',
+        sources: authCtx.sources,
+        diagnostics: authCtx.diagnostics,
+      });
     }
 
     // Create a run record via service (eventBus will fire)

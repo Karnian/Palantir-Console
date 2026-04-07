@@ -134,6 +134,111 @@ test('StreamJsonEngine.listSessions returns empty array initially', async (t) =>
   assert.deepEqual(engine.discoverGhostSessions(), []);
 });
 
+// --- PR2: authResolver ---
+
+test('resolveClaudeAuth returns canAuth=true when CLAUDE_CODE_OAUTH_TOKEN is set', async (t) => {
+  const { resolveClaudeAuth } = require('../services/authResolver');
+  const orig = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  const origKey = process.env.ANTHROPIC_API_KEY;
+  process.env.CLAUDE_CODE_OAUTH_TOKEN = 'sk-oauth-fake';
+  delete process.env.ANTHROPIC_API_KEY;
+  t.after(() => {
+    if (orig != null) process.env.CLAUDE_CODE_OAUTH_TOKEN = orig;
+    else delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    if (origKey != null) process.env.ANTHROPIC_API_KEY = origKey;
+  });
+  const r = resolveClaudeAuth();
+  assert.equal(r.canAuth, true);
+  assert.ok(r.sources.includes('env:CLAUDE_CODE_OAUTH_TOKEN'));
+  assert.equal(r.env.CLAUDE_CODE_OAUTH_TOKEN, 'sk-oauth-fake');
+  assert.deepEqual(r.diagnostics, []);
+});
+
+test('resolveClaudeAuth returns canAuth=false with diagnostics when no creds', async (t) => {
+  const { resolveClaudeAuth } = require('../services/authResolver');
+  const saved = {};
+  for (const k of ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL']) {
+    saved[k] = process.env[k];
+    delete process.env[k];
+  }
+  t.after(() => {
+    for (const k of Object.keys(saved)) {
+      if (saved[k] != null) process.env[k] = saved[k];
+    }
+  });
+  // Force the auth file path to a nonexistent location for this test by
+  // jest-style intercept isn't available; rely on the path not existing in
+  // the test temp environment. Even if the file exists in the dev workspace,
+  // canAuth checks env first — without env vars and an envAllowlist that
+  // limits to a non-existent var we still get canAuth=false.
+  const r = resolveClaudeAuth({ envAllowlist: ['NOPE'] });
+  assert.equal(r.canAuth, false);
+  assert.ok(r.diagnostics.length > 0);
+});
+
+test('resolveCodexAuth honors env_allowlist diagnostics', async (t) => {
+  // Deterministic: stub fs.existsSync so the test outcome doesn't depend on
+  // whether the dev box happens to have ~/.codex/auth.json.
+  const fsMod = require('node:fs');
+  const origExists = fsMod.existsSync;
+  const { CODEX_AUTH_FILE } = require('../services/authResolver');
+  fsMod.existsSync = (p) => (p === CODEX_AUTH_FILE ? false : origExists.call(fsMod, p));
+
+  const saved = process.env.CODEX_API_KEY;
+  const savedOpenAI = process.env.OPENAI_API_KEY;
+  process.env.CODEX_API_KEY = 'codex-fake';
+  delete process.env.OPENAI_API_KEY;
+  t.after(() => {
+    fsMod.existsSync = origExists;
+    if (saved != null) process.env.CODEX_API_KEY = saved;
+    else delete process.env.CODEX_API_KEY;
+    if (savedOpenAI != null) process.env.OPENAI_API_KEY = savedOpenAI;
+  });
+
+  // Re-require so the resolver picks up the stubbed existsSync. require cache
+  // means the function reference is the same; the module-level fs require is
+  // shared, so the stub above is enough — no re-require needed.
+  const { resolveCodexAuth } = require('../services/authResolver');
+
+  // Allowlist excludes CODEX_API_KEY so resolveCodexAuth must report it as blocked.
+  const r = resolveCodexAuth({ envAllowlist: ['SOMETHING_ELSE'] });
+  assert.equal(r.canAuth, false, 'canAuth must be false: env var blocked, file stubbed missing');
+  assert.ok(r.diagnostics.some(d => /env_allowlist/.test(d)),
+    'diagnostics should mention the env_allowlist exclusion');
+});
+
+test('resolveCodexAuth canAuth=true when CODEX_API_KEY set and allowed', async (t) => {
+  const fsMod = require('node:fs');
+  const origExists = fsMod.existsSync;
+  const { CODEX_AUTH_FILE } = require('../services/authResolver');
+  fsMod.existsSync = (p) => (p === CODEX_AUTH_FILE ? false : origExists.call(fsMod, p));
+
+  const saved = process.env.CODEX_API_KEY;
+  process.env.CODEX_API_KEY = 'codex-fake-2';
+  t.after(() => {
+    fsMod.existsSync = origExists;
+    if (saved != null) process.env.CODEX_API_KEY = saved;
+    else delete process.env.CODEX_API_KEY;
+  });
+
+  const { resolveCodexAuth } = require('../services/authResolver');
+  const r = resolveCodexAuth();
+  assert.equal(r.canAuth, true);
+  assert.ok(r.sources.includes('env:CODEX_API_KEY'));
+  assert.equal(r.env.CODEX_API_KEY, 'codex-fake-2');
+});
+
+test('resolveManagerAuth dispatches by type', async (t) => {
+  const { resolveManagerAuth } = require('../services/authResolver');
+  const claude = resolveManagerAuth('claude-code', { envAllowlist: ['NOPE'] });
+  assert.equal(typeof claude.canAuth, 'boolean');
+  const codex = resolveManagerAuth('codex', { envAllowlist: ['NOPE'] });
+  assert.equal(typeof codex.canAuth, 'boolean');
+  // Default falls through to claude.
+  const def = resolveManagerAuth(undefined, { envAllowlist: ['NOPE'] });
+  assert.equal(def.canAuth, claude.canAuth);
+});
+
 // --- DB Migration Tests ---
 
 test('002 migration adds manager columns to runs', async (t) => {
