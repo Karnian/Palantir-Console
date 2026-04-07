@@ -1,70 +1,11 @@
-/* global preact, preactHooks, htm */
+/* global preact, preactHooks, htm, formatDuration, formatTime, timeAgo, renderMarkdown, apiFetch */
+// Helpers (formatDuration / formatTime / timeAgo / renderMarkdown / apiFetch)
+// are provided by app/main.js, which imports them from app/lib/* and bridges
+// them onto window before this script runs. See app/main.js for the wiring
+// and the Phase 4 refactor notes there.
 const { h, render } = preact;
 const { useState, useEffect, useRef, useCallback, useMemo } = preactHooks;
 const html = htm.bind(h);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Utilities
-// ─────────────────────────────────────────────────────────────────────────────
-
-function formatDuration(ms) {
-  if (!ms || ms < 0) return '';
-  const secs = Math.floor(ms / 1000);
-  const mins = Math.floor(secs / 60);
-  const hrs = Math.floor(mins / 60);
-  if (hrs > 0) return `${hrs}h ${mins % 60}m`;
-  if (mins > 0) return `${mins}m`;
-  return `${secs}s`;
-}
-
-function formatTime(ms) {
-  if (!ms) return 'unknown';
-  // Handle both millisecond timestamps and ISO/SQLite datetime strings
-  const d = typeof ms === 'string' ? new Date(ms.replace(' ', 'T') + 'Z') : new Date(ms);
-  if (isNaN(d.getTime())) return 'unknown';
-  return d.toLocaleString();
-}
-
-function timeAgo(ms) {
-  if (!ms) return '';
-  // Handle both millisecond timestamps and ISO/SQLite datetime strings
-  const timestamp = typeof ms === 'string' ? new Date(ms.replace(' ', 'T') + 'Z').getTime() : ms;
-  if (isNaN(timestamp)) return '';
-  const diff = Date.now() - timestamp;
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  return `${days}d ago`;
-}
-
-// Markdown renderer — uses marked + DOMPurify (loaded via CDN in index.html)
-function renderMarkdown(text) {
-  if (!text) return '';
-  if (window.marked && window.DOMPurify) {
-    const html = window.marked.parse(text, { breaks: true, gfm: true });
-    return window.DOMPurify.sanitize(html);
-  }
-  // Fallback: escape HTML and convert newlines
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
-}
-
-// Auth token — read from meta tag or query param ?token=
-const _authToken = (() => {
-  const params = new URLSearchParams(location.search);
-  return params.get('token') || null;
-})();
-
-async function apiFetch(url, opts = {}) {
-  const headers = { 'Content-Type': 'application/json', ...opts.headers };
-  if (_authToken) headers['Authorization'] = `Bearer ${_authToken}`;
-  const res = await fetch(url, { headers, ...opts });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `Request failed: ${res.status}`);
-  return data;
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Hash Router
