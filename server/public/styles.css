@@ -1767,6 +1767,38 @@ body {
   height: auto;
 }
 
+/* Board / Calendar tab toggle (shared by both views' toolbars) */
+.board-mode-tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  margin-left: 12px;
+}
+
+.board-mode-tab {
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: calc(var(--radius-sm) - 2px);
+  cursor: pointer;
+  font-family: inherit;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.board-mode-tab:hover {
+  color: var(--text-primary);
+}
+
+.board-mode-tab.active {
+  background: var(--accent);
+  color: white;
+}
+
 /* =============================================
    Calendar View (월간 캘린더)
    ============================================= */

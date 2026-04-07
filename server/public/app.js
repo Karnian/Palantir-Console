@@ -88,7 +88,6 @@ const NAV_ITEMS = [
   { hash: 'dashboard', icon: '\u25C9', label: 'Dashboard' },
   { hash: 'manager',   icon: '\u2726', label: 'Manager' },
   { hash: 'board',     icon: '\u2592', label: 'Task Board' },
-  { hash: 'calendar',  icon: '\u2637', label: 'Calendar' },
   { hash: 'projects',  icon: '\u25A3', label: 'Projects' },
   { hash: 'agents',    icon: '\u2699', label: 'Agents' },
 ];
@@ -1010,6 +1009,29 @@ function TaskCard({ task, projects, onDragStart, onClick }) {
   `;
 }
 
+// Tab toggle shown in both Board and Calendar toolbars so the user can flip
+// between the two views without leaving the task workflow.
+function BoardModeTabs({ active }) {
+  return html`
+    <div class="board-mode-tabs" role="tablist">
+      <button
+        role="tab"
+        class="board-mode-tab ${active === 'board' ? 'active' : ''}"
+        aria-selected=${active === 'board'}
+        onClick=${() => navigate('board')}>
+        \u2592 Board
+      </button>
+      <button
+        role="tab"
+        class="board-mode-tab ${active === 'calendar' ? 'active' : ''}"
+        aria-selected=${active === 'calendar'}
+        onClick=${() => navigate('calendar')}>
+        \u2637 Calendar
+      </button>
+    </div>
+  `;
+}
+
 function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadTasks }) {
   const [showNewTask, setShowNewTask] = useState(false);
   const [executeTask, setExecuteTask] = useState(null);
@@ -1178,7 +1200,8 @@ function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadT
   return html`
     <div class="board-view">
       <div class="board-toolbar">
-        <h1 class="board-toolbar-title">Task Board</h1>
+        <h1 class="board-toolbar-title">Tasks</h1>
+        <${BoardModeTabs} active="board" />
         <div class="board-toolbar-spacer"></div>
         <div class="board-filter">
           <select class="form-select" value=${filterProject} onChange=${e => setFilterProject(e.target.value)}>
@@ -1279,7 +1302,14 @@ function CalendarView({ tasks, projects, agents, runs, reloadTasks, onOpenRun })
   today.setHours(0, 0, 0, 0);
   const [cursor, setCursor] = useState(() => new Date(today.getFullYear(), today.getMonth(), 1));
   const [detailTask, setDetailTask] = useState(null);
+  const [filterProject, setFilterProject] = useState('');
   useNowTick(60_000);
+
+  // Filter tasks by project before grouping by date
+  const filteredTasks = useMemo(() => {
+    if (!filterProject) return tasks;
+    return tasks.filter(t => t.project_id === filterProject);
+  }, [tasks, filterProject]);
 
   // Build 6-week grid starting from the Sunday on/before the 1st of cursor month
   const grid = useMemo(() => {
@@ -1304,7 +1334,7 @@ function CalendarView({ tasks, projects, agents, runs, reloadTasks, onOpenRun })
   // Group tasks by due_date string for fast lookup
   const tasksByDate = useMemo(() => {
     const map = {};
-    tasks.forEach(t => {
+    filteredTasks.forEach(t => {
       if (!t.due_date) return;
       (map[t.due_date] ||= []).push(t);
     });
@@ -1317,7 +1347,7 @@ function CalendarView({ tasks, projects, agents, runs, reloadTasks, onOpenRun })
       return (a.title || '').localeCompare(b.title || '');
     }));
     return map;
-  }, [tasks]);
+  }, [filteredTasks]);
 
   const monthLabel = `${cursor.getFullYear()}년 ${cursor.getMonth() + 1}월`;
   const goPrev = () => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1));
@@ -1330,8 +1360,15 @@ function CalendarView({ tasks, projects, agents, runs, reloadTasks, onOpenRun })
   return html`
     <div class="calendar-view">
       <div class="board-toolbar">
-        <h1 class="board-toolbar-title">Calendar</h1>
+        <h1 class="board-toolbar-title">Tasks</h1>
+        <${BoardModeTabs} active="calendar" />
         <div class="board-toolbar-spacer"></div>
+        <div class="board-filter">
+          <select class="form-select" value=${filterProject} onChange=${e => setFilterProject(e.target.value)}>
+            <option value="">All Projects</option>
+            ${projects.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
+          </select>
+        </div>
         <div class="calendar-nav">
           <button class="ghost" onClick=${goPrev} title="이전 달">\u2039</button>
           <button class="ghost" onClick=${goToday}>오늘</button>
