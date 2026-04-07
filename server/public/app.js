@@ -78,7 +78,7 @@ function EmptyState({ icon, text, sub }) {
 // Dashboard View
 // ─────────────────────────────────────────────────────────────────────────────
 
-function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions }) {
+function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions, manager }) {
   // Manager session is tracked separately via /api/manager/status — exclude from worker dashboard counts
   const workerRuns = (runs || []).filter(r => !r.is_manager);
   const activeRuns = workerRuns.filter(r => r.status === 'running');
@@ -99,6 +99,18 @@ function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions }) 
     if (run.is_manager) return 'Manager Session';
     return task?.title || `Run ${run.id.slice(0, 8)}`;
   };
+
+  if (manager?.status?.active && manager.status.run) {
+    const mrun = manager.status.run;
+    triageItems.push({
+      type: 'manager',
+      priority: -1,
+      title: 'Manager Session',
+      meta: `Active - ${timeAgo(mrun.started_at || mrun.created_at)}`,
+      run: null,
+      task: null,
+    });
+  }
 
   needsInputRuns.forEach(run => {
     const task = tasks.find(t => t.id === run.task_id);
@@ -155,6 +167,7 @@ function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions }) 
     'running': '\u25B6',
     'review': '\u2714',
     'done': '\u2713',
+    'manager': '\u2726',
   };
 
   return html`
@@ -198,9 +211,12 @@ function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions }) 
         `}
         ${triageItems.map((item, i) => html`
           <div
-            key=${item.run?.id || item.task?.id || i}
+            key=${item.run?.id || item.task?.id || `manager-${i}`}
             class="triage-item"
-            onClick=${() => item.run && onOpenRun(item.run)}
+            onClick=${() => {
+              if (item.type === 'manager') { navigate('manager'); return; }
+              if (item.run) onOpenRun(item.run);
+            }}
           >
             <div class="triage-icon ${item.type}">${iconMap[item.type]}</div>
             <div class="triage-body">
@@ -226,6 +242,11 @@ function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions }) 
               ${item.type === 'review' && html`
                 <button class="ghost" onClick=${(e) => { e.stopPropagation(); navigate('board'); }}>
                   Review
+                </button>
+              `}
+              ${item.type === 'manager' && html`
+                <button class="ghost" onClick=${(e) => { e.stopPropagation(); navigate('manager'); }}>
+                  Open
                 </button>
               `}
             </div>
@@ -3223,6 +3244,7 @@ function App() {
           } catch (err) { addToast(err.message, 'error'); }
         }}
         claudeSessions=${claudeSessions}
+        manager=${manager}
       />
     `;
   };
