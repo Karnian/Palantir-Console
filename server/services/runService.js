@@ -56,8 +56,11 @@ function createRunService(db, eventBus) {
       WHERE r.id = ?
     `),
     insert: db.prepare(`
-      INSERT INTO runs (id, task_id, agent_profile_id, prompt, status, is_manager, parent_run_id)
-      VALUES (@id, @task_id, @agent_profile_id, @prompt, @status, @is_manager, @parent_run_id)
+      INSERT INTO runs (id, task_id, agent_profile_id, prompt, status, is_manager, parent_run_id, manager_adapter, manager_thread_id)
+      VALUES (@id, @task_id, @agent_profile_id, @prompt, @status, @is_manager, @parent_run_id, @manager_adapter, @manager_thread_id)
+    `),
+    updateManagerThread: db.prepare(`
+      UPDATE runs SET manager_thread_id = ? WHERE id = ?
     `),
     updateStatus: db.prepare(`
       UPDATE runs SET status = ?, ended_at = CASE WHEN ? IN ('completed','failed','cancelled','stopped') THEN datetime('now') ELSE ended_at END WHERE id = ?
@@ -94,7 +97,7 @@ function createRunService(db, eventBus) {
     return run;
   }
 
-  function createRun({ task_id, agent_profile_id, prompt, is_manager, parent_run_id }) {
+  function createRun({ task_id, agent_profile_id, prompt, is_manager, parent_run_id, manager_adapter, manager_thread_id }) {
     // task_id and agent_profile_id are required for worker runs, optional for manager
     if (!is_manager && !task_id) throw new BadRequestError('task_id is required');
     if (!is_manager && !agent_profile_id) throw new BadRequestError('agent_profile_id is required');
@@ -107,10 +110,18 @@ function createRunService(db, eventBus) {
       status: 'queued',
       is_manager: is_manager ? 1 : 0,
       parent_run_id: parent_run_id || null,
+      manager_adapter: manager_adapter || null,
+      manager_thread_id: manager_thread_id || null,
     });
     const run = stmts.getById.get(id);
     if (eventBus) eventBus.emit('run:status', { run });
     return run;
+  }
+
+  function updateManagerThreadId(id, threadId) {
+    getRun(id);
+    stmts.updateManagerThread.run(threadId || null, id);
+    return stmts.getById.get(id);
   }
 
   function updateRunStatus(id, status, { force = false } = {}) {
@@ -210,6 +221,7 @@ function createRunService(db, eventBus) {
   return {
     listRuns, getRun, createRun,
     updateRunStatus, markRunStarted, updateRunResult,
+    updateManagerThreadId,
     deleteRun, addRunEvent, getRunEvents,
     getActiveManager, getWorkerRuns,
   };
