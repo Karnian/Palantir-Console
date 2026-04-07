@@ -192,11 +192,24 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
         proc.status = code === 0 ? 'completed' : 'failed';
       }
 
-      // Update DB if no result event was received (abnormal exit)
-      if (!proc.result && runService) {
+      // Finalize DB status on exit.
+      // - Worker (single-shot): only if no `result` event arrived (the result handler
+      //   already updates the DB; skipping prevents duplicate transitions).
+      // - Manager (multi-turn): `result` arrives every turn but the session keeps
+      //   running, so we MUST finalize on exit regardless of `proc.result`. Otherwise
+      //   the run row stays as 'running' forever and shows up as a stale dashboard entry.
+      // In both cases, never overwrite a terminal status (cancelled/stopped/completed/failed)
+      // — that would clobber an explicit user `stop`/`cancel` with `failed`.
+      const shouldFinalize = runService && (proc.isManager || !proc.result);
+      if (shouldFinalize) {
         const dbStatus = code === 0 ? 'completed' : 'failed';
         try {
-          runService.updateRunStatus(runId, dbStatus, { force: true });
+          let currentStatus = null;
+          try { currentStatus = runService.getRun(runId)?.status; } catch { /* ignore */ }
+          const terminal = ['completed', 'failed', 'cancelled', 'stopped'];
+          if (!terminal.includes(currentStatus)) {
+            runService.updateRunStatus(runId, dbStatus, { force: true });
+          }
           runService.addRunEvent(runId, 'exit', JSON.stringify({
             exit_code: code,
             signal,
