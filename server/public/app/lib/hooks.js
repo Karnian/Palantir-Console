@@ -215,6 +215,7 @@ export function useManager() {
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(false);
   const pollRef = useRef(null);
+  const lastEventIdRef = useRef(0); // PR1c: incremental polling cursor
 
   const checkStatus = useCallback(async () => {
     try {
@@ -224,10 +225,40 @@ export function useManager() {
     } catch { return { active: false }; }
   }, []);
 
-  const loadEvents = useCallback(async () => {
+  // PR1c: incremental polling. Server caps GET /api/manager/events at 1000 rows
+  // (the underlying runService.getEvents query). Now that PR1b dual-emits
+  // normalized events, the row count effectively doubled — so we MUST stop
+  // refetching from row 0 every poll. Pass ?after=<lastSeenId> and append.
+  const loadEvents = useCallback(async (opts = {}) => {
     try {
-      const data = await apiFetch('/api/manager/events');
-      setEvents(data.events || []);
+      const reset = !!opts.reset;
+      if (reset) {
+        lastEventIdRef.current = 0;
+        setEvents([]);
+      }
+      const after = lastEventIdRef.current;
+      const url = after > 0
+        ? `/api/manager/events?after=${after}`
+        : '/api/manager/events';
+      const data = await apiFetch(url);
+      const incoming = Array.isArray(data.events) ? data.events : [];
+      if (incoming.length === 0) return;
+      // Track high-water mark for next poll.
+      let maxId = lastEventIdRef.current;
+      for (const ev of incoming) {
+        if (typeof ev.id === 'number' && ev.id > maxId) maxId = ev.id;
+      }
+      lastEventIdRef.current = maxId;
+      // Append (with dedupe by id in case the cap window slid past an event).
+      setEvents(prev => {
+        if (prev.length === 0) return incoming;
+        const seen = new Set(prev.map(e => e.id));
+        const merged = prev.slice();
+        for (const ev of incoming) {
+          if (!seen.has(ev.id)) merged.push(ev);
+        }
+        return merged;
+      });
     } catch { /* ignore */ }
   }, []);
 
@@ -268,6 +299,7 @@ export function useManager() {
       await apiFetch('/api/manager/stop', { method: 'POST' });
       setStatus({ active: false, run: null, usage: null });
       setEvents([]);
+      lastEventIdRef.current = 0;
       addToast('Manager session stopped', 'info');
     } catch (err) {
       addToast('Failed to stop manager: ' + err.message, 'error');
@@ -281,9 +313,12 @@ export function useManager() {
   useEffect(() => {
     if (!status.active) {
       if (pollRef.current) clearInterval(pollRef.current);
+      // Reset cursor when session goes inactive so a fresh start re-fetches.
+      lastEventIdRef.current = 0;
       return;
     }
-    loadEvents();
+    // First load on activation: full backlog.
+    loadEvents({ reset: true });
     pollRef.current = setInterval(() => {
       checkStatus();
       loadEvents();

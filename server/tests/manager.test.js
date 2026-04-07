@@ -49,6 +49,39 @@ test('POST /api/manager/stop returns no_active_session when no session', async (
   assert.equal(res.body.status, 'no_active_session');
 });
 
+test('runService.getRunEvents honors ?after= cursor (PR1c)', async (t) => {
+  // Direct service-level test for the cursor that the frontend now uses
+  // for incremental polling. Route-level coverage of /api/manager/events
+  // requires an active manager run id (the route only serves the in-memory
+  // active session) which we cannot fake without spawning a real subprocess.
+  const fs2 = require('node:fs/promises');
+  const path2 = require('node:path');
+  const os2 = require('node:os');
+  const dbPath = path2.join(await fs2.mkdtemp(path2.join(os2.tmpdir(), 'palantir-mgr-cursor-')), 'test.db');
+  const { createDatabase } = require('../db/database');
+  const { createRunService } = require('../services/runService');
+  const { db, migrate, close } = createDatabase(dbPath);
+  migrate();
+  t.after(() => { close(); });
+  const rs = createRunService(db, null);
+  const run = rs.createRun({ is_manager: true, prompt: 'cursor test' });
+  const id1 = rs.addRunEvent(run.id, 'mgr.assistant_message', JSON.stringify({ turnIndex: 0, summaryText: 'a', hasRawStored: false, data: { text: 'a' } }));
+  const id2 = rs.addRunEvent(run.id, 'mgr.assistant_message', JSON.stringify({ turnIndex: 0, summaryText: 'b', hasRawStored: false, data: { text: 'b' } }));
+  const id3 = rs.addRunEvent(run.id, 'mgr.assistant_message', JSON.stringify({ turnIndex: 1, summaryText: 'c', hasRawStored: false, data: { text: 'c' } }));
+
+  const all = rs.getRunEvents(run.id);
+  // The createRun + addRunEvent calls also write a 'status:queued' status row,
+  // so we filter to the rows we explicitly created.
+  const mgrRows = all.filter(e => e.event_type === 'mgr.assistant_message');
+  assert.equal(mgrRows.length, 3);
+  const after1 = rs.getRunEvents(run.id, id1).filter(e => e.event_type === 'mgr.assistant_message');
+  assert.equal(after1.length, 2);
+  assert.equal(after1[0].id, id2);
+  assert.equal(after1[1].id, id3);
+  const afterLast = rs.getRunEvents(run.id, id3).filter(e => e.event_type === 'mgr.assistant_message');
+  assert.equal(afterLast.length, 0);
+});
+
 test('GET /api/manager/events returns empty when no session', async (t) => {
   const { app } = await createTestApp(t);
   const res = await request(app).get('/api/manager/events');

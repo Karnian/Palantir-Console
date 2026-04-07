@@ -3335,21 +3335,91 @@ function ManagerView({ manager, runs, tasks, projects }) {
     if (e.dataTransfer?.files) addImages(e.dataTransfer.files);
   };
 
-  // Parse events into displayable messages
+  // Parse events into displayable messages.
+  // PR1c: prefer normalized adapter events (mgr.assistant_message). Each
+  // normalized event is paired with the adjacent legacy assistant_text that
+  // came from the same vendor turn. Pairing is 1:1 and identified by exact
+  // text match within a small id-window, so a same-prefix collision in a
+  // different turn never drops a real message. user_input + error are not
+  // dual-emitted and pass through unchanged.
   const messages = useMemo(() => {
-    return events
-      .filter(e => ['assistant_text', 'user_input', 'error'].includes(e.event_type))
-      .map(e => {
-        let payload = {};
-        try { payload = JSON.parse(e.payload_json || '{}'); } catch { /* ignore */ }
-        return {
-          id: e.id,
-          type: e.event_type,
-          text: payload.text || payload.result || payload.message || '',
-          time: e.created_at,
-        };
-      })
-      .filter(m => m.text);
+    const out = [];
+
+    // Index legacy assistant_text events by their full text, in arrival order.
+    // We'll pop one entry per match so each legacy row can only be paired once.
+    const legacyByText = new Map(); // text -> array of { id, idx } in event order
+    events.forEach((e, idx) => {
+      if (e.event_type !== 'assistant_text') return;
+      let p = {};
+      try { p = JSON.parse(e.payload_json || '{}'); } catch { return; }
+      const text = p.text || p.result || '';
+      if (!text) return;
+      if (!legacyByText.has(text)) legacyByText.set(text, []);
+      legacyByText.get(text).push({ id: e.id, idx });
+    });
+
+    // First pass: emit normalized assistant messages and consume one matching
+    // legacy row per emission so it won't be re-emitted in the fallback pass.
+    const consumedLegacyIds = new Set();
+    for (const e of events) {
+      if (e.event_type !== 'mgr.assistant_message') continue;
+      let p = {};
+      try { p = JSON.parse(e.payload_json || '{}'); } catch { continue; }
+      const text = (p.data && p.data.text) || p.summaryText || '';
+      if (!text) continue;
+      // Pair with the nearest unconsumed legacy assistant_text whose full text
+      // matches and whose event id is close to ours (PR1b emits both within
+      // the same vendor message handler — they land adjacent).
+      const candidates = legacyByText.get(text);
+      if (candidates) {
+        let pickedIdx = -1;
+        let bestDelta = Infinity;
+        for (let i = 0; i < candidates.length; i++) {
+          const c = candidates[i];
+          if (consumedLegacyIds.has(c.id)) continue;
+          const delta = Math.abs(c.id - e.id);
+          // 8 row window: dual emit produces ids 1-2 apart; allow slack for
+          // interleaved tool_use rows.
+          if (delta <= 8 && delta < bestDelta) {
+            bestDelta = delta;
+            pickedIdx = i;
+          }
+        }
+        if (pickedIdx >= 0) consumedLegacyIds.add(candidates[pickedIdx].id);
+      }
+      out.push({
+        id: e.id,
+        type: 'assistant_text',
+        text,
+        time: e.created_at,
+        source: 'normalized',
+      });
+    }
+
+    // Second pass: surface non-dual events (user_input, error) and any legacy
+    // assistant_text that did NOT get paired with a normalized counterpart
+    // (Manager runs that started before PR1b dual-emit shipped).
+    for (const e of events) {
+      const t = e.event_type;
+      if (t === 'assistant_text') {
+        if (consumedLegacyIds.has(e.id)) continue;
+        let p = {};
+        try { p = JSON.parse(e.payload_json || '{}'); } catch { continue; }
+        const text = p.text || p.result || '';
+        if (!text) continue;
+        out.push({ id: e.id, type: 'assistant_text', text, time: e.created_at, source: 'legacy' });
+      } else if (t === 'user_input' || t === 'error') {
+        let p = {};
+        try { p = JSON.parse(e.payload_json || '{}'); } catch { continue; }
+        const text = p.text || p.result || p.message || '';
+        if (!text) continue;
+        out.push({ id: e.id, type: t, text, time: e.created_at, source: 'legacy' });
+      }
+    }
+
+    // Stable order: by event id (server-assigned monotonic).
+    out.sort((a, b) => (a.id || 0) - (b.id || 0));
+    return out;
   }, [events]);
 
   const handleSend = async () => {
