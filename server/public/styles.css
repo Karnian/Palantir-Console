@@ -2249,24 +2249,48 @@ body {
 }
 
 /* Click-to-edit affordance (Jira-style inline edit) */
+
+/* Reset native button look so it visually matches the readonly text */
+.editable-reset {
+  appearance: none;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  width: 100%;
+  display: block;
+  cursor: text;
+  user-select: text;
+}
+.editable-reset:focus { outline: none; }
+
 .task-detail-title.editable,
 .task-detail-desc.editable {
-  cursor: text;
   border-radius: 4px;
   padding: 4px 6px;
-  margin-left: -6px;
-  margin-right: -6px;
   border: 1px solid transparent;
   transition: background 0.12s ease, border-color 0.12s ease;
 }
-.task-detail-title.editable:hover,
-.task-detail-desc.editable:hover {
+/* Suppress hover chrome on ANY editable while one of them is being edited
+   (prevents stale hover during the readonly→input swap) */
+.task-detail-inline-root:not(.is-inline-editing) .task-detail-title.editable:hover,
+.task-detail-inline-root:not(.is-inline-editing) .task-detail-desc.editable:hover,
+.task-detail-inline-root:not(.is-inline-editing) .task-detail-title.editable:focus-visible,
+.task-detail-inline-root:not(.is-inline-editing) .task-detail-desc.editable:focus-visible {
   background: var(--surface-2, rgba(255, 255, 255, 0.04));
   border-color: var(--border, rgba(255, 255, 255, 0.08));
 }
 .task-detail-desc.editable.placeholder {
   color: var(--text-muted);
   font-style: italic;
+}
+
+/* Tame the default browser selection color so it doesn't clash with hover bg */
+.task-detail-title.editable::selection,
+.task-detail-desc.editable::selection {
+  background: rgba(139, 92, 246, 0.32);
+  color: var(--text-primary);
 }
 
 .task-detail-title-input {
@@ -2279,8 +2303,6 @@ body {
   border: 1px solid var(--accent, #8b5cf6);
   border-radius: 4px;
   padding: 4px 6px;
-  margin-left: -6px;
-  margin-right: -6px;
   outline: none;
   font-family: inherit;
   box-sizing: border-box;
@@ -2295,14 +2317,15 @@ body {
   background: var(--surface-2, rgba(255, 255, 255, 0.04));
   border: 1px solid var(--accent, #8b5cf6);
   border-radius: 4px;
-  padding: 6px 8px;
-  margin-left: -8px;
-  margin-right: -8px;
+  /* Padding identical to readonly .task-detail-desc.editable so height carry-over is exact */
+  padding: 4px 6px;
   outline: none;
   font-family: inherit;
   resize: vertical;
-  min-height: 80px;
+  /* min-height kept small so inline JS height (matching readonly height) wins */
+  min-height: 60px;
   box-sizing: border-box;
+  white-space: pre-wrap;
 }
 
 .task-detail-meta-grid {

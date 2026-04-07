@@ -742,10 +742,19 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
   const [status, setStatus] = useState(task?.status || 'backlog');
   const [priority, setPriority] = useState(task?.priority || 'medium');
   const [projectId, setProjectId] = useState(task?.project_id || '');
-  const [editingTitle, setEditingTitle] = useState(false);
-  const [editingDesc, setEditingDesc] = useState(false);
+  // Single editing field state — 'title' | 'description' | null
+  const [editingField, setEditingField] = useState(null);
   const [showExecute, setShowExecute] = useState(false);
-  useEscape(!!task && !editingTitle && !editingDesc, onClose);
+  // Track pointerdown coords to distinguish click-to-edit vs drag-to-select
+  const pointerDownRef = useRef(null);
+  // Capture readonly description's rendered height so the textarea matches it
+  // (prevents the popup from shrinking when entering edit mode on long content)
+  const descReadonlyRef = useRef(null);
+  const descEditHeightRef = useRef(null);
+  const titleReadonlyRef = useRef(null);
+  const titleEditHeightRef = useRef(null);
+
+  useEscape(!!task && editingField === null, onClose);
 
   // Sync form state when task changes
   useEffect(() => {
@@ -755,8 +764,7 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
       setStatus(task.status || 'backlog');
       setPriority(task.priority || 'medium');
       setProjectId(task.project_id || '');
-      setEditingTitle(false);
-      setEditingDesc(false);
+      setEditingField(null);
     }
   }, [task?.id, task?.updated_at]);
 
@@ -780,18 +788,60 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
     }
   };
 
-  const commitTitle = () => {
-    const next = title.trim();
-    setEditingTitle(false);
-    if (!next) { setTitle(task.title || ''); return; }
-    if (next !== task.title) saveField('title', next);
+  const commitField = (field) => {
+    if (field === 'title') {
+      const next = title.trim();
+      setEditingField(null);
+      if (!next) { setTitle(task.title || ''); return; }
+      if (next !== (task.title || '')) saveField('title', next);
+    } else if (field === 'description') {
+      const next = description.trim();
+      const prev = task.description || '';
+      setEditingField(null);
+      if (next !== prev) saveField('description', next || null);
+    }
   };
 
-  const commitDesc = () => {
-    const next = description.trim();
-    setEditingDesc(false);
-    const prev = task.description || '';
-    if (next !== prev) saveField('description', next || null);
+  const cancelField = (field) => {
+    if (field === 'title') setTitle(task.title || '');
+    if (field === 'description') setDescription(task.description || '');
+    setEditingField(null);
+  };
+
+  // Pointerdown coordinate tracking — used to detect drag-select vs click
+  const handleEditablePointerDown = (e) => {
+    pointerDownRef.current = { x: e.clientX, y: e.clientY };
+  };
+  const handleEditablePointerEnd = () => {
+    // Clear after pointer interaction completes so the next click (especially
+    // a keyboard-triggered click) doesn't compare against stale coordinates
+    pointerDownRef.current = null;
+  };
+
+  const beginEdit = (field) => (e) => {
+    // Keyboard-activated clicks (Enter/Space on a focused button) report
+    // detail === 0; skip the drag-distance check for them entirely
+    const isKeyboard = e.detail === 0;
+    if (!isKeyboard) {
+      const start = pointerDownRef.current;
+      const moved = start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 4;
+      if (moved) { pointerDownRef.current = null; return; }
+      const sel = window.getSelection && window.getSelection();
+      if (sel && !sel.isCollapsed && String(sel).trim().length > 0) {
+        pointerDownRef.current = null;
+        return;
+      }
+    }
+    pointerDownRef.current = null;
+    // Capture current rendered height so the input/textarea preserves it
+    // (use getBoundingClientRect to avoid integer rounding jumps)
+    if (field === 'title' && titleReadonlyRef.current) {
+      titleEditHeightRef.current = Math.round(titleReadonlyRef.current.getBoundingClientRect().height);
+    }
+    if (field === 'description' && descReadonlyRef.current) {
+      descEditHeightRef.current = Math.round(descReadonlyRef.current.getBoundingClientRect().height);
+    }
+    setEditingField(field);
   };
 
   const handleDelete = async () => {
@@ -860,35 +910,47 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
 
         <div class="modal-body" style="gap:16px;">
           ${html`
-            <div>
-              ${editingTitle ? html`
+            <div class=${`task-detail-inline-root ${editingField ? 'is-inline-editing' : ''}`}>
+              ${editingField === 'title' ? html`
                 <input class="task-detail-title-input" value=${title} autoFocus
+                  style=${titleEditHeightRef.current ? `height:${titleEditHeightRef.current}px;` : ''}
                   onInput=${e => setTitle(e.target.value)}
-                  onBlur=${commitTitle}
+                  onBlur=${() => commitField('title')}
                   onKeyDown=${e => {
-                    if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); }
-                    if (e.key === 'Escape') { setTitle(task.title || ''); setEditingTitle(false); }
+                    // IME composition guard (한글 조합 중 Enter/Escape 무시)
+                    if (e.isComposing || e.keyCode === 229) return;
+                    if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur(); }
+                    if (e.key === 'Escape') { e.preventDefault(); cancelField('title'); }
                   }} />
               ` : html`
-                <div class="task-detail-title editable" title="Click to edit"
-                  onClick=${() => setEditingTitle(true)}>${task.title}</div>
+                <button type="button" ref=${titleReadonlyRef}
+                  class="task-detail-title editable editable-reset"
+                  aria-label="Edit title"
+                  onPointerDown=${handleEditablePointerDown}
+                  onPointerUp=${handleEditablePointerEnd}
+                  onPointerCancel=${handleEditablePointerEnd}
+                  onClick=${beginEdit('title')}>${task.title}</button>
               `}
-              ${editingDesc ? html`
-                <textarea class="task-detail-desc-input" value=${description} autoFocus rows="4"
+              ${editingField === 'description' ? html`
+                <textarea class="task-detail-desc-input" value=${description} autoFocus
+                  style=${descEditHeightRef.current ? `height:${descEditHeightRef.current}px;` : ''}
                   placeholder="Add a description..."
                   onInput=${e => setDescription(e.target.value)}
-                  onBlur=${commitDesc}
+                  onBlur=${() => commitField('description')}
                   onKeyDown=${e => {
-                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.target.blur(); }
-                    if (e.key === 'Escape') { setDescription(task.description || ''); setEditingDesc(false); }
+                    if (e.isComposing || e.keyCode === 229) return;
+                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.currentTarget.blur(); }
+                    if (e.key === 'Escape') { e.preventDefault(); cancelField('description'); }
                   }}></textarea>
-              ` : (task.description ? html`
-                <div class="task-detail-desc editable" title="Click to edit"
-                  onClick=${() => setEditingDesc(true)}>${task.description}</div>
               ` : html`
-                <div class="task-detail-desc editable placeholder" title="Click to edit"
-                  onClick=${() => setEditingDesc(true)}>Add a description...</div>
-              `)}
+                <button type="button" ref=${descReadonlyRef}
+                  class=${`task-detail-desc editable editable-reset ${task.description ? '' : 'placeholder'}`}
+                  aria-label="Edit description"
+                  onPointerDown=${handleEditablePointerDown}
+                  onPointerUp=${handleEditablePointerEnd}
+                  onPointerCancel=${handleEditablePointerEnd}
+                  onClick=${beginEdit('description')}>${task.description || 'Add a description...'}</button>
+              `}
             </div>
             <div class="task-detail-meta-grid">
               ${(() => {
