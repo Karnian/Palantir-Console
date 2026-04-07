@@ -23,7 +23,61 @@ function createLifecycleService({
   const IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 min
   let heartbeatTimer = null;
   let healthCheckRunning = false; // Re-entrancy guard
+  let unsubscribeEventBus = null; // for stopMonitoring teardown
   const _outputHashes = new Map(); // Track tmux output changes per run
+  // runId → projectDir snapshot captured at executeTask time. Used as a fallback
+  // for worktree cleanup when the run→task→project chain has been broken (e.g. the
+  // task or project was deleted while the run was still in flight).
+  const _runProjectDirs = new Map();
+
+  /**
+   * Build a git-branch-safe identifier from a run id (run_xxx → palantir/run-xxx).
+   * Underscores break worktreeService.validateBranchName, so they get replaced.
+   */
+  function runBranchName(runId) {
+    return `palantir/${String(runId).replace(/_/g, '-')}`;
+  }
+
+  /**
+   * Resolve the project directory associated with a run. Tries the in-memory
+   * snapshot first (captured at executeTask), then falls back to walking
+   * run → task → project → directory. Returns null only if both fail.
+   * The snapshot makes cleanup robust against task/project deletion mid-run.
+   */
+  function resolveProjectDirForRun(run) {
+    if (run?.id && _runProjectDirs.has(run.id)) {
+      return _runProjectDirs.get(run.id);
+    }
+    try {
+      if (!run?.task_id) return null;
+      const task = taskService.getTask(run.task_id);
+      if (!task?.project_id) return null;
+      const project = projectService.getProject(task.project_id);
+      return project?.directory || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Cleanup worktree for a run that has reached a terminal state.
+   * Idempotent: safe to call even if no worktree was created or already removed.
+   * Always clears the in-memory project-dir snapshot to avoid leaks.
+   */
+  function cleanupRunWorktree(run) {
+    if (!run?.id) return;
+    if (worktreeService && run.worktree_path && run.branch) {
+      const projectDir = resolveProjectDirForRun(run);
+      if (projectDir) {
+        try {
+          worktreeService.removeWorktree(projectDir, run.worktree_path, run.branch);
+        } catch (err) {
+          console.warn(`[lifecycle] Worktree cleanup failed for run ${run.id}: ${err.message}`);
+        }
+      }
+    }
+    _runProjectDirs.delete(run.id);
+  }
 
   /**
    * Execute a task: create a Run, spawn the agent.
@@ -46,8 +100,6 @@ function createLifecycleService({
     });
 
     // Resolve project directory for agent CWD
-    let worktreePath = null;
-    let branch = null;
     let projectDir = null;
     if (task.project_id) {
       const project = projectService.getProject(task.project_id);
@@ -58,6 +110,28 @@ function createLifecycleService({
         } else {
           console.warn(`[lifecycle] Project directory not found: ${project.directory}, falling back to server cwd`);
         }
+      }
+    }
+
+    // Snapshot the project dir against the run id so cleanup still works even if
+    // the task or project is deleted before the run terminates.
+    if (projectDir) _runProjectDirs.set(run.id, projectDir);
+
+    // Create an isolated git worktree for this run, when the project is a git repo.
+    // Each run gets its own branch (palantir/run-<id>) so concurrent agents don't
+    // collide on shared files. Falls back to projectDir if worktree creation fails
+    // or the project isn't under git.
+    let worktreePath = null;
+    let branch = null;
+    if (projectDir && worktreeService && worktreeService.isGitRepo(projectDir)) {
+      try {
+        const result = worktreeService.createWorktree(projectDir, runBranchName(run.id));
+        if (result?.branch) {
+          worktreePath = result.path;
+          branch = result.branch;
+        }
+      } catch (err) {
+        console.warn(`[lifecycle] Worktree creation failed for run ${run.id}: ${err.message}`);
       }
     }
 
@@ -106,6 +180,17 @@ function createLifecycleService({
     } catch (error) {
       runService.updateRunStatus(run.id, 'failed', { force: true });
       runService.addRunEvent(run.id, 'error', JSON.stringify({ message: error.message }));
+      // Synchronous cleanup so the worktree AND the in-memory _runProjectDirs entry
+      // are released even if monitoring/subscriber were never started or have been
+      // torn down. cleanupRunWorktree is idempotent — the run:ended subscriber that
+      // updateRunStatus may also trigger will be a safe no-op the second time.
+      cleanupRunWorktree({
+        id: run.id,
+        is_manager: false,
+        worktree_path: worktreePath,
+        branch,
+        task_id: run.task_id,
+      });
       throw error;
     }
   }
@@ -370,12 +455,18 @@ function createLifecycleService({
     if (heartbeatTimer) return;
     heartbeatTimer = setInterval(checkHealth, HEARTBEAT_INTERVAL_MS);
 
-    // Subscribe to run:ended so task status syncs immediately (not just on next health check)
+    // Subscribe to run:ended so task status syncs immediately (not just on next health check),
+    // and so worktrees get cleaned up regardless of which engine drove the termination
+    // (tmux health check, streamJsonEngine exit handler, or explicit cancelRun all funnel here).
+    // Stash the unsubscribe so stopMonitoring() can release the listener — without this,
+    // tests that spin up multiple createApp() instances accumulate stale listeners.
     if (eventBus) {
-      eventBus.subscribe((event) => {
-        if (event.channel === 'run:ended' && event.data?.run?.task_id) {
-          checkTaskCompletion(event.data.run.task_id);
-        }
+      unsubscribeEventBus = eventBus.subscribe((event) => {
+        if (event.channel !== 'run:ended') return;
+        const run = event.data?.run;
+        if (!run) return;
+        if (run.task_id) checkTaskCompletion(run.task_id);
+        if (!run.is_manager) cleanupRunWorktree(run);
       });
     }
 
@@ -390,6 +481,10 @@ function createLifecycleService({
       clearInterval(heartbeatTimer);
       heartbeatTimer = null;
       console.log('[lifecycleService] Health monitor stopped');
+    }
+    if (unsubscribeEventBus) {
+      try { unsubscribeEventBus(); } catch { /* ignore */ }
+      unsubscribeEventBus = null;
     }
   }
 

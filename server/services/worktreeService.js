@@ -36,12 +36,22 @@ function createWorktreeService() {
     }
   }
 
+  /**
+   * Resolve the base ref to branch a new worktree from. Falls back from the
+   * current branch name → HEAD sha (detached HEAD case) → 'main'. Returning
+   * something usable here is critical: an empty value would make the downstream
+   * `git branch <new> ''` call fail and silently disable worktree isolation.
+   */
   function getCurrentBranch(dir) {
     try {
-      return execFileSync('git', ['branch', '--show-current'], { cwd: dir, stdio: 'pipe', encoding: 'utf-8' }).trim();
-    } catch {
-      return 'main';
-    }
+      const branch = execFileSync('git', ['branch', '--show-current'], { cwd: dir, stdio: 'pipe', encoding: 'utf-8' }).trim();
+      if (branch) return branch;
+    } catch { /* fall through */ }
+    try {
+      const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, stdio: 'pipe', encoding: 'utf-8' }).trim();
+      if (sha) return sha;
+    } catch { /* fall through */ }
+    return 'main';
   }
 
   /**
@@ -71,6 +81,9 @@ function createWorktreeService() {
       return { path: worktreePath, branch: safeBranch, created: false };
     }
 
+    // Track whether we created the branch ourselves so partial-failure cleanup
+    // (after the branch exists but `git worktree add` failed) doesn't strand it.
+    let branchPreexisted = true;
     try {
       // Ensure base directory exists
       fs.mkdirSync(worktreesBase, { recursive: true });
@@ -79,8 +92,9 @@ function createWorktreeService() {
       const baseBranch = getCurrentBranch(projectDir);
       try {
         execFileSync('git', ['branch', safeBranch, baseBranch], { cwd: projectDir, stdio: 'pipe' });
+        branchPreexisted = false;
       } catch {
-        // Branch may already exist
+        // Branch already existed; leave it alone on rollback
       }
 
       execFileSync('git', ['worktree', 'add', worktreePath, safeBranch], {
@@ -91,6 +105,13 @@ function createWorktreeService() {
       return { path: worktreePath, branch: safeBranch, created: true };
     } catch (error) {
       console.error(`[worktreeService] Failed to create worktree: ${error.message}`);
+      // Roll back the freshly-created branch so it doesn't strand as `palantir/...` debris.
+      // Pre-existing branches are left untouched.
+      if (!branchPreexisted) {
+        try {
+          execFileSync('git', ['branch', '-D', safeBranch], { cwd: projectDir, stdio: 'pipe' });
+        } catch { /* best effort */ }
+      }
       // Fallback: use project directory directly
       return { path: projectDir, branch: null, created: false };
     }
