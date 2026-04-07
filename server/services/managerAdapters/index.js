@@ -7,9 +7,11 @@
  */
 
 const { createClaudeAdapter } = require('./claudeAdapter');
+const { createCodexAdapter } = require('./codexAdapter');
 
-function createManagerAdapterFactory({ streamJsonEngine, runService }) {
+function createManagerAdapterFactory({ streamJsonEngine, runService, codexBin }) {
   const claude = createClaudeAdapter({ streamJsonEngine, runService });
+  const codex = createCodexAdapter({ runService, codexBin });
 
   /**
    * Resolve an adapter for the given type.
@@ -23,13 +25,14 @@ function createManagerAdapterFactory({ streamJsonEngine, runService }) {
    */
   function getAdapter(type) {
     if (type == null || type === 'claude-code') return claude;
+    if (type === 'codex') return codex;
     throw new Error(`Unknown manager adapter type: ${type}`);
   }
 
   return {
     getAdapter,
     // Exposed for tests and lifecycle checks
-    listAdapters() { return [claude]; },
+    listAdapters() { return [claude, codex]; },
   };
 }
 

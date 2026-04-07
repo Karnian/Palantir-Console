@@ -228,6 +228,31 @@ test('resolveCodexAuth canAuth=true when CODEX_API_KEY set and allowed', async (
   assert.equal(r.env.CODEX_API_KEY, 'codex-fake-2');
 });
 
+test('buildManagerSpawnEnv strips cross-vendor credentials not on allowlist', async (t) => {
+  const { buildManagerSpawnEnv } = require('../services/authResolver');
+  const base = {
+    PATH: '/usr/bin',
+    HOME: '/home/test',
+    CLAUDE_CODE_OAUTH_TOKEN: 'claude-token',
+    ANTHROPIC_API_KEY: 'anth-key',
+    CODEX_API_KEY: 'codex-key',
+    OPENAI_API_KEY: 'openai-key',
+    UNRELATED: 'keep-me',
+  };
+  // Claude profile allowlist excludes Codex + OpenAI keys.
+  const env = buildManagerSpawnEnv({
+    baseEnv: base,
+    envAllowlist: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL'],
+    authEnv: { CLAUDE_CODE_OAUTH_TOKEN: 'claude-token' },
+  });
+  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, 'claude-token');
+  assert.equal(env.ANTHROPIC_API_KEY, 'anth-key');
+  assert.equal(env.CODEX_API_KEY, undefined, 'CODEX_API_KEY must be stripped');
+  assert.equal(env.OPENAI_API_KEY, undefined, 'OPENAI_API_KEY must be stripped');
+  assert.equal(env.PATH, '/usr/bin', 'PATH must be preserved');
+  assert.equal(env.UNRELATED, 'keep-me', 'unrelated vars must be preserved');
+});
+
 test('resolveManagerAuth dispatches by type', async (t) => {
   const { resolveManagerAuth } = require('../services/authResolver');
   const claude = resolveManagerAuth('claude-code', { envAllowlist: ['NOPE'] });
@@ -293,7 +318,7 @@ test('runService.createRun accepts manager_adapter + manager_thread_id', async (
   assert.equal(updated.manager_thread_id, 'thr_new');
 });
 
-test('managerAdapterFactory.getAdapter throws on unknown type (PR3)', async (t) => {
+test('managerAdapterFactory.getAdapter dispatches by type (PR3+PR4)', async (t) => {
   const { createManagerAdapterFactory } = require('../services/managerAdapters');
   const { createStreamJsonEngine } = require('../services/streamJsonEngine');
   const f = createManagerAdapterFactory({ streamJsonEngine: createStreamJsonEngine({}), runService: null });
@@ -301,7 +326,9 @@ test('managerAdapterFactory.getAdapter throws on unknown type (PR3)', async (t) 
   assert.equal(f.getAdapter(null).type, 'claude-code');
   assert.equal(f.getAdapter(undefined).type, 'claude-code');
   assert.equal(f.getAdapter('claude-code').type, 'claude-code');
-  assert.throws(() => f.getAdapter('codex'), /Unknown manager adapter type/);
+  // PR4: codex now resolves to a real adapter
+  assert.equal(f.getAdapter('codex').type, 'codex');
+  // Unknown types still throw
   assert.throws(() => f.getAdapter('whatever'), /Unknown manager adapter type/);
 });
 

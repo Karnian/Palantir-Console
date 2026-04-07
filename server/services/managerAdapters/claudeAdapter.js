@@ -206,12 +206,13 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
    * Start a manager session.
    * Returns { sessionRef } where sessionRef is the spawn result (pid, etc).
    */
-  function startSession(runId, { prompt, cwd, systemPrompt, model, allowedTools, permissionMode }) {
+  function startSession(runId, { prompt, cwd, systemPrompt, model, allowedTools, permissionMode, env }) {
     // Reset normalizer state in case the runId is recycled.
     runState.delete(runId);
     const result = streamJsonEngine.spawnAgent(runId, {
       prompt,
       cwd,
+      env, // PR4: filtered env from buildManagerSpawnEnv — overrides process.env
       systemPrompt,
       permissionMode: permissionMode || 'bypassPermissions',
       allowedTools: allowedTools || ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebSearch', 'WebFetch'],
@@ -295,9 +296,23 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
     return streamJsonEngine.getOutput(runId, lines);
   }
 
+  /**
+   * Adapter-specific guardrails appended after the role section in the
+   * manager system prompt. Mirrors the original wording in
+   * routes/manager.js so the Claude manager prompt is unchanged.
+   */
+  function buildGuardrailsSection() {
+    return `## Claude Code adapter notes
+
+You are running as a Claude Code subprocess. Do NOT use Agent / subagent /
+agent-olympus:* tools to do delegated work — those are invisible to the
+Palantir Console UI. Spawn workers via the REST API documented below.`;
+  }
+
   return {
     type: 'claude-code',
     capabilities,
+    buildGuardrailsSection,
     startSession,
     runTurn,
     cancelTurn,

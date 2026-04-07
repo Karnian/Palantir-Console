@@ -185,11 +185,45 @@ function resolveManagerAuth(type, opts = {}) {
   return resolveClaudeAuth(opts);
 }
 
+/**
+ * Build a filtered subprocess env for a manager adapter spawn.
+ *
+ * Strategy (defensive, low blast radius):
+ *   - Start from process.env
+ *   - Remove known-credential keys that are NOT on the allowlist. This
+ *     prevents a Claude-type profile from leaking CODEX_API_KEY / OPENAI_API_KEY
+ *     into the subprocess (and vice versa), which was the explicit threat
+ *     model in the PR2/3/4 reviews.
+ *   - Keep everything else (PATH, HOME, LANG, tool-specific config dirs)
+ *     because both CLIs rely on a lot of environment for normal operation.
+ *   - Merge authCtx.env on top so any values that passed the allowlist are
+ *     definitely present.
+ */
+function buildManagerSpawnEnv({ baseEnv = process.env, authEnv = {}, envAllowlist } = {}) {
+  const env = { ...baseEnv };
+  const allowSet = Array.isArray(envAllowlist) ? new Set(envAllowlist) : null;
+  const KNOWN_CREDENTIAL_KEYS = [
+    ...CLAUDE_AUTH_KEYS,
+    ...CODEX_AUTH_KEYS,
+  ];
+  for (const key of KNOWN_CREDENTIAL_KEYS) {
+    if (allowSet && !allowSet.has(key)) {
+      delete env[key];
+    }
+  }
+  // Merge resolved auth env last so it always wins.
+  for (const [k, v] of Object.entries(authEnv)) {
+    if (v != null) env[k] = v;
+  }
+  return env;
+}
+
 module.exports = {
   bootstrapClaudeAuthFromEnv,
   resolveClaudeAuth,
   resolveCodexAuth,
   resolveManagerAuth,
+  buildManagerSpawnEnv,
   // Exposed for tests
   CLAUDE_AUTH_FILE,
   CODEX_AUTH_FILE,

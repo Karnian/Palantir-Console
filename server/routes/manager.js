@@ -1,7 +1,11 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { BadRequestError } = require('../utils/errors');
-const { resolveManagerAuth } = require('../services/authResolver');
+const { resolveManagerAuth, buildManagerSpawnEnv } = require('../services/authResolver');
+const {
+  buildManagerSystemPrompt: buildManagerSystemPromptModule,
+  buildInitialUserContext,
+} = require('../services/managerSystemPrompt');
 
 /**
  * Manager Session API routes.
@@ -17,12 +21,11 @@ const { resolveManagerAuth } = require('../services/authResolver');
  *   POST   /api/manager/stop    — Stop the active manager session
  */
 
-// PR3: map agent profile type → manager adapter type. Currently the only
-// adapter family that exists is claude-code; PR4 adds 'codex'. Profiles whose
+// PR3/PR4: map agent profile type → manager adapter type. Profiles whose
 // type is not in this set cannot back a manager session.
 const PROFILE_TYPE_TO_ADAPTER = {
   'claude-code': 'claude-code',
-  // 'codex': 'codex', // PR4 will enable this once CodexAdapter ships
+  'codex': 'codex',
 };
 
 function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, eventBus, projectService, agentProfileService }) {
@@ -240,17 +243,43 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       }
     } catch { /* ignore */ }
 
-    // Build system prompt for the Manager role
-    const systemPrompt = buildManagerSystemPrompt(runSummary, projectList, agentList);
+    // PR4: build system prompt via the dedicated module so each adapter can
+    // contribute its own guardrails section. The dynamic context (run summary,
+    // project/agent lists) is NOT in the system prompt anymore — it goes in
+    // the first user message so Codex's model_instructions_file caching is
+    // preserved across turns.
+    const adapter = managerAdapterFactory.getAdapter(adapterType);
+    const port = process.env.PORT || 4177;
+    const token = process.env.PALANTIR_TOKEN;
+    const systemPrompt = buildManagerSystemPromptModule({ adapter, port, token });
+    const initialUserContext = buildInitialUserContext({
+      runSummary,
+      projectList,
+      agentList,
+      userPrompt: prompt || 'You are now active as the Palantir Manager. Await instructions.',
+    });
+
+    // PR4: finally propagate the filtered env to the spawned subprocess.
+    // buildManagerSpawnEnv strips credential-like vars that are NOT on the
+    // profile's env_allowlist, then layers resolved auth env on top. Tool
+    // CLIs still inherit PATH/HOME/etc., but cross-vendor credentials can
+    // no longer leak.
+    const spawnEnv = buildManagerSpawnEnv({
+      authEnv: authCtx.env,
+      envAllowlist,
+    });
 
     try {
-      // PR1a/PR3: route through ManagerAdapter using the resolved type.
-      const adapter = managerAdapterFactory.getAdapter(adapterType);
       const { sessionRef } = adapter.startSession(runId, {
-        prompt: prompt || 'You are now active as the Palantir Manager. Await instructions.',
+        // For Claude (persistent process) the prompt argument is the FIRST
+        // user message piped via stdin during spawn. For Codex (stateless)
+        // it is ignored — we'll send the same content as the first runTurn
+        // immediately below.
+        prompt: initialUserContext,
         cwd: safeCwd,
         systemPrompt,
         model: model || undefined,
+        env: spawnEnv,
       });
       const result = sessionRef;
 
@@ -264,12 +293,23 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       activeManagerRunId = runId;
       activeManagerAdapter = adapter;
 
+      // PR4 / D2: for Codex, startSession is the LIGHT path (just writes the
+      // instructions file). The first turn is launched here so the user sees
+      // the manager pick up the initial context immediately.
+      if (adapter.capabilities && adapter.capabilities.persistentProcess === false) {
+        try {
+          adapter.runTurn(runId, { text: initialUserContext });
+        } catch (err) {
+          console.warn(`[manager] failed to launch first Codex turn: ${err.message}`);
+        }
+      }
+
       if (eventBus) {
         eventBus.emit('manager:started', { runId });
       }
 
       const updatedRun = runService.getRun(runId);
-      res.status(201).json({ run: updatedRun, pid: result.pid });
+      res.status(201).json({ run: updatedRun, pid: result && result.pid });
     } catch (error) {
       // Cleanup on failure
       try {
@@ -452,94 +492,10 @@ function buildRunSummary(runService) {
   }
 }
 
-/**
- * Build the system prompt for the Manager agent.
- * The Manager's role is to orchestrate worker agents and report status to the user.
- */
-function buildManagerSystemPrompt(runSummary, projectList, agentList) {
-  const port = process.env.PORT || 4177;
-  const base = `http://localhost:${port}`;
-  const token = process.env.PALANTIR_TOKEN;
-  const auth = token ? `-H 'Authorization: Bearer ${token}' ` : '';
-
-  return `You are the Palantir Manager — a central orchestration agent for the Palantir Console.
-
-Your role:
-1. MONITOR all running worker agents and report their status
-2. COORDINATE work across multiple projects and tasks
-3. ANSWER questions about what agents are doing
-4. DELEGATE new work by spawning worker agents via the Execute API
-5. ALERT the user to issues that need attention (failures, stuck agents, etc.)
-
-## CRITICAL: How to delegate work to worker agents
-
-NEVER use your internal Claude Code tools (Agent, subagents like agent-olympus:*, etc.) to do delegated work.
-Those internal subagents run inside YOUR process and are invisible to the Palantir Console UI.
-ALL delegated work MUST go through the Palantir Console REST API so it appears in the Console dashboard.
-
-When the user asks you to do work (coding, analysis, refactoring, etc.), you MUST spawn a Palantir Console worker agent.
-Do NOT just create a task and update its status — that only creates a database record without running any agent.
-
-**Correct workflow to spawn a worker:**
-1. List available agent profiles: GET /api/agents
-2. Create a task: POST /api/tasks
-3. Execute the task (THIS spawns the actual agent process): POST /api/tasks/TASK_ID/execute with {"agent_profile_id":"AGENT_ID","prompt":"detailed instructions"}
-4. Monitor the spawned run: GET /api/runs?task_id=TASK_ID
-
-If no agent profiles exist, tell the user to create one first via the Agents page.
-The /execute endpoint is what actually spawns a Claude Code (or other agent) subprocess. Without it, no agent runs.
-
-IMPORTANT: NEVER call /execute without explicit user approval. Always confirm before spawning workers.
-Do NOT auto-execute tasks just because their status is in_progress — status alone does not mean "run an agent".
-
-You may use your own Bash/Read/Grep tools for quick lookups (checking status, reading files, etc.),
-but any substantial work (coding, refactoring, analysis tasks) must be delegated via the API.
-
-## Palantir Console REST API
-
-The Palantir Console server runs at ${base}. Use Bash with curl to query it.
-${token ? `\nIMPORTANT: All API requests require auth header: ${auth.trim()}` : ''}
-
-### Runs (agent executions)
-- List all runs: curl -s ${auth}${base}/api/runs | jq
-- Filter by status: curl -s ${auth}"${base}/api/runs?status=running" | jq
-- Filter by task: curl -s ${auth}"${base}/api/runs?task_id=TASK_ID" | jq
-- Get single run: curl -s ${auth}${base}/api/runs/RUN_ID | jq
-- Get run events: curl -s ${auth}${base}/api/runs/RUN_ID/events | jq
-
-### Tasks
-- List all tasks: curl -s ${auth}${base}/api/tasks | jq
-- Filter by status: curl -s ${auth}"${base}/api/tasks?status=in_progress" | jq
-- Create task: curl -s ${auth}-X POST ${base}/api/tasks -H 'Content-Type: application/json' -d '{"title":"...","description":"...","priority":"medium","project_id":"PROJECT_ID"}'
-  Only include project_id if the task clearly belongs to an existing project. If unrelated, omit project_id (the task will be unassigned). Do NOT guess or force a project assignment.
-- Update status: curl -s ${auth}-X PATCH ${base}/api/tasks/TASK_ID/status -H 'Content-Type: application/json' -d '{"status":"done"}'
-
-### Projects
-- List projects: curl -s ${auth}${base}/api/projects | jq
-
-### Agent Profiles
-- List agents: curl -s ${auth}${base}/api/agents | jq
-
-### Worker Management (IMPORTANT: use /execute to actually spawn agents)
-- Execute task with agent: curl -s ${auth}-X POST ${base}/api/tasks/TASK_ID/execute -H 'Content-Type: application/json' -d '{"agent_profile_id":"AGENT_ID","prompt":"detailed work instructions here"}'
-- Send input to run: curl -s ${auth}-X POST ${base}/api/runs/RUN_ID/input -H 'Content-Type: application/json' -d '{"text":"..."}'
-- Cancel run: curl -s ${auth}-X POST ${base}/api/runs/RUN_ID/cancel
-
-Run statuses: queued, running, paused, needs_input, completed, failed, cancelled, stopped
-Task statuses: backlog, todo, in_progress, review, done
-
-Always be concise and action-oriented. When reporting status, use a structured format:
-- 🟢 Running (count)
-- 🟡 Needs Input (count)
-- 🔴 Failed (count)
-- ✅ Completed today (count)
-
-Prioritize issues that need user attention (needs_input, failures) over routine updates.
-Always query the actual Palantir API to get real data — never guess or assume.
-
-${runSummary ? `\n## Current State (at session start)\n${runSummary}` : ''}
-${projectList ? `\n## Available Projects\n${projectList}\nOnly assign project_id when the task clearly belongs to a project. Leave it out if unrelated.` : ''}
-${agentList ? `\n## Available Agent Profiles\n${agentList}\nUse the agent id when calling /execute.` : ''}`;
-}
+// PR4: the inline buildManagerSystemPrompt() that used to live here was moved
+// to server/services/managerSystemPrompt.js so each adapter can contribute its
+// own guardrails section and so the dynamic context (run summary, project /
+// agent lists) can be sent as the first user message — protecting Codex's
+// model_instructions_file caching. Do not re-add the inline version.
 
 module.exports = { createManagerRouter };

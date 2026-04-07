@@ -126,7 +126,11 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
       throw new Error(`cwd does not exist: ${safeCwd}`);
     }
 
-    const spawnEnv = { ...process.env, ...env, PATH: augmentedPath };
+    // PR4: if the caller passes a filtered env (manager adapter path), use it
+    // as the authoritative base instead of process.env. Worker/legacy callers
+    // still get the merge behavior.
+    const baseEnv = (isManager && env) ? env : { ...process.env, ...(env || {}) };
+    const spawnEnv = { ...baseEnv, PATH: augmentedPath };
 
     console.log(`[engine] Spawning claude for ${runId} (manager=${!!isManager})`);
 
