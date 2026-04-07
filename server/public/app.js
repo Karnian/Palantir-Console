@@ -387,10 +387,12 @@ function EmptyState({ icon, text, sub }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions }) {
-  const activeRuns = runs.filter(r => r.status === 'running');
-  const needsInputRuns = runs.filter(r => r.status === 'needs_input');
-  const failedRuns = runs.filter(r => r.status === 'failed');
-  const completedToday = runs.filter(r => {
+  // Manager session is tracked separately via /api/manager/status — exclude from worker dashboard counts
+  const workerRuns = (runs || []).filter(r => !r.is_manager);
+  const activeRuns = workerRuns.filter(r => r.status === 'running');
+  const needsInputRuns = workerRuns.filter(r => r.status === 'needs_input');
+  const failedRuns = workerRuns.filter(r => r.status === 'failed');
+  const completedToday = workerRuns.filter(r => {
     if (r.status !== 'completed') return false;
     const d = new Date(r.ended_at || r.created_at);
     const now = new Date();
