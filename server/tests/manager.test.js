@@ -239,6 +239,72 @@ test('resolveManagerAuth dispatches by type', async (t) => {
   assert.equal(def.canAuth, claude.canAuth);
 });
 
+// --- PR3: migration 005 + manager_adapter columns ---
+
+test('migration 005 adds manager_adapter and manager_thread_id columns', async (t) => {
+  const { createDatabase } = require('../db/database');
+  const dbPath = path.join(os.tmpdir(), `palantir-mgr-005-${Date.now()}.db`);
+  const { db, migrate, close } = createDatabase(dbPath);
+  migrate();
+  t.after(async () => {
+    close();
+    await fs.unlink(dbPath).catch(() => {});
+  });
+
+  const cols = db.pragma('table_info(runs)').map(c => c.name);
+  assert.ok(cols.includes('manager_adapter'), 'manager_adapter column should exist');
+  assert.ok(cols.includes('manager_thread_id'), 'manager_thread_id column should exist');
+
+  // Index exists
+  const idx = db.pragma('index_list(runs)').map(i => i.name);
+  assert.ok(idx.includes('idx_runs_manager_adapter'), 'idx_runs_manager_adapter should exist');
+
+  // Seed update applied
+  const claude = db.prepare('SELECT env_allowlist FROM agent_profiles WHERE id = ?').get('claude-code');
+  assert.ok(JSON.parse(claude.env_allowlist).includes('CLAUDE_CODE_OAUTH_TOKEN'));
+  const codex = db.prepare('SELECT env_allowlist FROM agent_profiles WHERE id = ?').get('codex');
+  assert.ok(JSON.parse(codex.env_allowlist).includes('CODEX_API_KEY'));
+});
+
+test('runService.createRun accepts manager_adapter + manager_thread_id', async (t) => {
+  const { createDatabase } = require('../db/database');
+  const { createRunService } = require('../services/runService');
+  const dbPath = path.join(os.tmpdir(), `palantir-mgr-cols-${Date.now()}.db`);
+  const { db, migrate, close } = createDatabase(dbPath);
+  migrate();
+  t.after(async () => {
+    close();
+    await fs.unlink(dbPath).catch(() => {});
+  });
+
+  const rs = createRunService(db, null);
+  const run = rs.createRun({
+    is_manager: true,
+    prompt: 'codex test',
+    agent_profile_id: 'codex',
+    manager_adapter: 'codex',
+    manager_thread_id: 'thr_xyz',
+  });
+  assert.equal(run.manager_adapter, 'codex');
+  assert.equal(run.manager_thread_id, 'thr_xyz');
+
+  // updateManagerThreadId
+  const updated = rs.updateManagerThreadId(run.id, 'thr_new');
+  assert.equal(updated.manager_thread_id, 'thr_new');
+});
+
+test('managerAdapterFactory.getAdapter throws on unknown type (PR3)', async (t) => {
+  const { createManagerAdapterFactory } = require('../services/managerAdapters');
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const f = createManagerAdapterFactory({ streamJsonEngine: createStreamJsonEngine({}), runService: null });
+  // null/undefined → claude (backward compat for boot cleanup of pre-005 rows)
+  assert.equal(f.getAdapter(null).type, 'claude-code');
+  assert.equal(f.getAdapter(undefined).type, 'claude-code');
+  assert.equal(f.getAdapter('claude-code').type, 'claude-code');
+  assert.throws(() => f.getAdapter('codex'), /Unknown manager adapter type/);
+  assert.throws(() => f.getAdapter('whatever'), /Unknown manager adapter type/);
+});
+
 // --- DB Migration Tests ---
 
 test('002 migration adds manager columns to runs', async (t) => {

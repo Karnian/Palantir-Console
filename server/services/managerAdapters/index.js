@@ -13,13 +13,17 @@ function createManagerAdapterFactory({ streamJsonEngine, runService }) {
 
   /**
    * Resolve an adapter for the given type.
-   * PR1a: only 'claude-code' is supported. Unknown types fall back to claude
-   *       to preserve current behavior — PR3 will turn this into a hard error
-   *       once /start requires agent_profile_id.
+   * PR3: now strict. The router gates by PROFILE_TYPE_TO_ADAPTER first, so
+   * by the time we get here we expect a known type. Unknown types throw so
+   * misconfiguration cannot silently fall through to Claude.
+   *
+   * Backward compat: undefined/null still maps to claude-code so the
+   * boot-time stale-cleanup loop in routes/manager.js (which sees rows
+   * predating migration 005 with NULL manager_adapter) works.
    */
   function getAdapter(type) {
-    if (!type || type === 'claude-code') return claude;
-    return claude;
+    if (type == null || type === 'claude-code') return claude;
+    throw new Error(`Unknown manager adapter type: ${type}`);
   }
 
   return {

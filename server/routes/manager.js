@@ -17,6 +17,14 @@ const { resolveManagerAuth } = require('../services/authResolver');
  *   POST   /api/manager/stop    — Stop the active manager session
  */
 
+// PR3: map agent profile type → manager adapter type. Currently the only
+// adapter family that exists is claude-code; PR4 adds 'codex'. Profiles whose
+// type is not in this set cannot back a manager session.
+const PROFILE_TYPE_TO_ADAPTER = {
+  'claude-code': 'claude-code',
+  // 'codex': 'codex', // PR4 will enable this once CodexAdapter ships
+};
+
 function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, eventBus, projectService, agentProfileService }) {
   const router = express.Router();
 
@@ -117,7 +125,39 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       prompt,
       model,
       cwd,
+      agent_profile_id: agentProfileIdFromBody,
     } = req.body || {};
+
+    // PR3: resolve which adapter to use from agent_profile_id.
+    // Backward-compat: if no profile id is sent, default to 'claude-code' for
+    // one minor version so existing UI keeps working. The default will be
+    // removed once the picker (PR3 frontend) is in production.
+    let resolvedProfile = null;
+    let adapterType = 'claude-code';
+    try {
+      const profileId = agentProfileIdFromBody || 'claude-code';
+      if (agentProfileService) {
+        resolvedProfile = agentProfileService.getProfile(profileId);
+        const mapped = PROFILE_TYPE_TO_ADAPTER[resolvedProfile.type];
+        if (!mapped) {
+          startingManager = false;
+          return res.status(400).json({
+            error: 'manager_adapter_unsupported',
+            profileId: resolvedProfile.id,
+            profileType: resolvedProfile.type,
+            supported: Object.keys(PROFILE_TYPE_TO_ADAPTER),
+          });
+        }
+        adapterType = mapped;
+      }
+    } catch (err) {
+      startingManager = false;
+      return res.status(400).json({
+        error: 'manager_profile_not_found',
+        profileId: agentProfileIdFromBody || 'claude-code',
+        message: err.message,
+      });
+    }
 
     // Validate cwd if provided — must be under home directory or current working dir
     let safeCwd = cwd || process.cwd();
@@ -134,20 +174,41 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       }
     }
 
-    // PR2: resolve auth before we touch the DB so a misconfigured environment
-    // fails fast with a structured 400 instead of leaving an orphaned run row.
+    // PR2/PR3: preflight auth using the chosen adapter type and the profile's
+    // env_allowlist (PR3). If canAuth=false, fail fast with structured info
+    // before any DB row is created.
     //
-    // SCOPE NOTE: PR2 only does the *preflight* check (canAuth + diagnostics).
-    // It does NOT propagate authCtx.env into the spawned subprocess — the
-    // Claude adapter still inherits the full process.env via streamJsonEngine.
-    // PR3 will read agent_profile_id (and its env_allowlist) and pass a
-    // filtered env down through the adapter.
-    const authCtx = resolveManagerAuth('claude-code');
+    // Fail-closed on malformed env_allowlist: a user who hand-edits the row
+    // and corrupts it must NOT silently re-enable all default credentials.
+    let envAllowlist;
+    if (resolvedProfile && resolvedProfile.env_allowlist) {
+      try {
+        const parsed = JSON.parse(resolvedProfile.env_allowlist);
+        if (!Array.isArray(parsed)) {
+          throw new Error('env_allowlist must be a JSON array');
+        }
+        envAllowlist = parsed;
+      } catch (parseErr) {
+        startingManager = false;
+        return res.status(400).json({
+          error: 'manager_profile_env_allowlist_invalid',
+          profileId: resolvedProfile.id,
+          message: parseErr.message,
+          raw: resolvedProfile.env_allowlist,
+        });
+      }
+    } else {
+      // No profile resolved (back-compat path with no agent_profile_id) —
+      // fall through to the resolver's defaults.
+      envAllowlist = undefined;
+    }
+    const authCtx = resolveManagerAuth(adapterType, { envAllowlist });
     if (!authCtx.canAuth) {
       startingManager = false;
       return res.status(400).json({
         error: 'manager_auth_unavailable',
-        adapter: 'claude-code',
+        adapter: adapterType,
+        profileId: resolvedProfile ? resolvedProfile.id : null,
         sources: authCtx.sources,
         diagnostics: authCtx.diagnostics,
       });
@@ -157,6 +218,8 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     const run = runService.createRun({
       is_manager: true,
       prompt: prompt || 'Manager session',
+      agent_profile_id: resolvedProfile ? resolvedProfile.id : null,
+      manager_adapter: adapterType,
     });
     const runId = run.id;
 
@@ -181,9 +244,8 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     const systemPrompt = buildManagerSystemPrompt(runSummary, projectList, agentList);
 
     try {
-      // PR1a: route through ManagerAdapter. Today only claude-code exists;
-      // PR3 will resolve adapter type from agent_profile_id.
-      const adapter = managerAdapterFactory.getAdapter('claude-code');
+      // PR1a/PR3: route through ManagerAdapter using the resolved type.
+      const adapter = managerAdapterFactory.getAdapter(adapterType);
       const { sessionRef } = adapter.startSession(runId, {
         prompt: prompt || 'You are now active as the Palantir Manager. Await instructions.',
         cwd: safeCwd,
