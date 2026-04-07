@@ -49,11 +49,30 @@ window.apiFetch = apiFetch;
 // a no-op if it isn't, so timing failures degrade gracefully.
 configureMarked();
 
-// Components extracted from app.js. Loaded via dynamic import so the module
-// resolves AFTER the window.preact / preactHooks / htm assignments above —
-// the components dereference those at module top level. Bridge each one onto
-// window so the legacy app.js (htm template uses bare identifiers) can still
-// reference them via global lookup.
+// Modules extracted from app.js. Loaded via dynamic import so they resolve
+// AFTER the window.preact / preactHooks / htm assignments above — these
+// modules dereference those at module top level. Bridge each export onto
+// window so the legacy app.js (which uses bare identifiers in htm templates
+// and direct calls) can still reference them via global lookup.
+
+const toast = await import('./lib/toast.js');
+window.addToast = toast.addToast;
+window.useToasts = toast.useToasts;
+window.ToastContainer = toast.ToastContainer;
+window.apiFetchWithToast = toast.apiFetchWithToast;
+
+const hooks = await import('./lib/hooks.js');
+window.useRoute = hooks.useRoute;
+window.navigate = hooks.navigate;
+window.useEscape = hooks.useEscape;
+window.useSSE = hooks.useSSE;
+window.useTasks = hooks.useTasks;
+window.useRuns = hooks.useRuns;
+window.useProjects = hooks.useProjects;
+window.useClaudeSessions = hooks.useClaudeSessions;
+window.useAgents = hooks.useAgents;
+window.useManager = hooks.useManager;
+
 const { RunInspector } = await import('./components/RunInspector.js');
 window.RunInspector = RunInspector;
 
