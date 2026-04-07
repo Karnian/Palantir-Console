@@ -8,8 +8,8 @@
 
 const { createClaudeAdapter } = require('./claudeAdapter');
 
-function createManagerAdapterFactory({ streamJsonEngine }) {
-  const claude = createClaudeAdapter({ streamJsonEngine });
+function createManagerAdapterFactory({ streamJsonEngine, runService }) {
+  const claude = createClaudeAdapter({ streamJsonEngine, runService });
 
   /**
    * Resolve an adapter for the given type.

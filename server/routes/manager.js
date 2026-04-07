@@ -25,7 +25,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
   // that construct the router directly without passing the factory.
   if (!managerAdapterFactory) {
     const { createManagerAdapterFactory } = require('../services/managerAdapters');
-    managerAdapterFactory = createManagerAdapterFactory({ streamJsonEngine });
+    managerAdapterFactory = createManagerAdapterFactory({ streamJsonEngine, runService });
   }
 
   // Track the active manager run ID (only one manager at a time)
@@ -72,6 +72,13 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           runService.updateRunStatus(activeManagerRunId, status, { force: true });
         } catch { /* already updated */ }
       }
+      // PR1b: ensure normalized session_ended fires even on natural exit, and
+      // free adapter-local bookkeeping. The adapter's hook is idempotent.
+      try {
+        if (adapter.emitSessionEndedIfNeeded) {
+          adapter.emitSessionEndedIfNeeded(activeManagerRunId, 'natural-exit');
+        }
+      } catch { /* ignore */ }
       activeManagerRunId = null;
       activeManagerAdapter = null;
       return null;

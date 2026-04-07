@@ -109,7 +109,7 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
    * Spawn a Claude Code agent with stream-json protocol.
    */
   function spawnAgent(runId, { prompt, cwd, env, systemPrompt, permissionMode,
-    allowedTools, maxBudgetUsd, model, mcpConfig, addDir, isManager }) {
+    allowedTools, maxBudgetUsd, model, mcpConfig, addDir, isManager, onVendorEvent }) {
 
     const claudeBin = resolveClaudeBin();
     const args = buildArgs({
@@ -149,6 +149,7 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
       usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
       status: 'starting',
       isManager: !!isManager,
+      onVendorEvent: typeof onVendorEvent === 'function' ? onVendorEvent : null,
     };
     processes.set(runId, proc);
 
@@ -239,6 +240,15 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
   function handleEvent(runId, proc, event) {
     proc.events.push(event);
     while (proc.events.length > 5000) proc.events.shift();
+
+    // PR1b: vendor event hook for adapters that want to emit normalized events.
+    // The hook fires BEFORE the legacy event handling below so that the adapter
+    // can correlate raw vendor data with the legacy run_events writes that follow.
+    if (proc.onVendorEvent) {
+      try { proc.onVendorEvent(event, proc); } catch (err) {
+        console.warn(`[engine] onVendorEvent hook threw for ${runId}: ${err.message}`);
+      }
+    }
 
     const type = event.type;
     const subtype = event.subtype;

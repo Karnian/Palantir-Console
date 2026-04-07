@@ -151,6 +151,117 @@ test('runService.getActiveManager returns null when no manager', async (t) => {
   assert.equal(mgr, null);
 });
 
+// --- PR1b: ClaudeAdapter normalized event emission ---
+
+test('claudeAdapter dual-emits normalized events alongside legacy ones', async (t) => {
+  const { createClaudeAdapter } = require('../services/managerAdapters/claudeAdapter');
+  const { NORMALIZED_EVENT_TYPES } = require('../services/managerAdapters/eventTypes');
+
+  // Capture all addRunEvent calls.
+  const captured = [];
+  const fakeRunService = {
+    addRunEvent(runId, eventType, payload) {
+      captured.push({ runId, eventType, payload: payload ? JSON.parse(payload) : null });
+      return captured.length;
+    },
+  };
+
+  // Fake streamJsonEngine — only spawnAgent is invoked, and we just need to
+  // capture the onVendorEvent hook so we can drive it manually.
+  let capturedHook = null;
+  const fakeEngine = {
+    spawnAgent(runId, opts) {
+      capturedHook = opts.onVendorEvent;
+      return { pid: 1234 };
+    },
+    sendInput: () => true,
+    isAlive: () => true,
+    detectExitCode: () => null,
+    getUsage: () => ({ inputTokens: 0, outputTokens: 0, costUsd: 0 }),
+    getSessionId: () => 'sess_x',
+    getOutput: () => '',
+    kill: () => true,
+  };
+
+  const adapter = createClaudeAdapter({ streamJsonEngine: fakeEngine, runService: fakeRunService });
+  adapter.startSession('run_mgr_test', { prompt: 'hi', cwd: process.cwd() });
+  assert.ok(typeof capturedHook === 'function', 'onVendorEvent hook should be installed');
+
+  const fakeProc = { usage: { inputTokens: 100, outputTokens: 50, costUsd: 0.01 } };
+
+  // Drive a synthetic Claude turn.
+  capturedHook({ type: 'system', subtype: 'init', session_id: 'sess_x', model: 'sonnet', cwd: '/tmp' }, fakeProc);
+  capturedHook({
+    type: 'assistant',
+    message: { content: [
+      { type: 'text', text: 'hello world' },
+      { type: 'tool_use', id: 'tu_1', name: 'Bash', input: { cmd: 'ls' } },
+    ] },
+  }, fakeProc);
+  capturedHook({
+    type: 'user',
+    message: { content: [
+      { type: 'tool_result', tool_use_id: 'tu_1', content: 'file1\nfile2', is_error: false },
+    ] },
+  }, fakeProc);
+  capturedHook({
+    type: 'result',
+    is_error: false,
+    stop_reason: 'end_turn',
+    duration_ms: 1234,
+    num_turns: 1,
+  }, fakeProc);
+
+  const types = captured.map(c => c.eventType);
+  assert.ok(types.includes(NORMALIZED_EVENT_TYPES.SESSION_STARTED), 'session_started');
+  assert.ok(types.includes(NORMALIZED_EVENT_TYPES.ASSISTANT_MESSAGE), 'assistant_message');
+  assert.ok(types.includes(NORMALIZED_EVENT_TYPES.TOOL_CALL_STARTED), 'tool_call_started');
+  assert.ok(types.includes(NORMALIZED_EVENT_TYPES.TOOL_CALL_FINISHED), 'tool_call_finished');
+  assert.ok(types.includes(NORMALIZED_EVENT_TYPES.USAGE), 'usage');
+  assert.ok(types.includes(NORMALIZED_EVENT_TYPES.TURN_COMPLETED), 'turn_completed');
+
+  // Payload shape: every normalized payload has turnIndex, summaryText, hasRawStored, data
+  for (const ev of captured) {
+    if (!ev.eventType.startsWith('mgr.')) continue;
+    assert.equal(typeof ev.payload.turnIndex, 'number');
+    assert.equal(typeof ev.payload.summaryText, 'string');
+    assert.equal(typeof ev.payload.hasRawStored, 'boolean');
+    assert.equal(typeof ev.payload.data, 'object');
+  }
+
+  // turnIndex on assistant message should be 0; turn_completed advances state for next turn
+  const am = captured.find(c => c.eventType === NORMALIZED_EVENT_TYPES.ASSISTANT_MESSAGE);
+  assert.equal(am.payload.turnIndex, 0);
+
+  // Drive a second turn — should now be turnIndex 1.
+  capturedHook({ type: 'assistant', message: { content: [{ type: 'text', text: 'turn 2' }] } }, fakeProc);
+  const am2 = captured.filter(c => c.eventType === NORMALIZED_EVENT_TYPES.ASSISTANT_MESSAGE).pop();
+  assert.equal(am2.payload.turnIndex, 1);
+
+  // disposeSession emits session_ended.
+  adapter.disposeSession('run_mgr_test');
+  const ended = captured.find(c => c.eventType === NORMALIZED_EVENT_TYPES.SESSION_ENDED);
+  assert.ok(ended, 'session_ended emitted on dispose');
+});
+
+test('claudeAdapter does not emit raw_vendor_event by default', async (t) => {
+  const { createClaudeAdapter } = require('../services/managerAdapters/claudeAdapter');
+  const { NORMALIZED_EVENT_TYPES } = require('../services/managerAdapters/eventTypes');
+
+  const captured = [];
+  const fakeRunService = { addRunEvent(_r, t) { captured.push(t); return 1; } };
+  let hook = null;
+  const fakeEngine = {
+    spawnAgent(_id, opts) { hook = opts.onVendorEvent; return { pid: 1 }; },
+    sendInput: () => true, isAlive: () => true, detectExitCode: () => null,
+    getUsage: () => null, getSessionId: () => null, getOutput: () => '', kill: () => true,
+  };
+  const adapter = createClaudeAdapter({ streamJsonEngine: fakeEngine, runService: fakeRunService });
+  adapter.startSession('r1', { prompt: 'x', cwd: process.cwd() });
+  hook({ type: 'system', subtype: 'init', session_id: 's' }, { usage: {} });
+  assert.ok(!captured.includes(NORMALIZED_EVENT_TYPES.RAW_VENDOR_EVENT));
+});
+
 test('runService.createRun with is_manager allows null task_id', async (t) => {
   const { createDatabase } = require('../db/database');
   const { createRunService } = require('../services/runService');

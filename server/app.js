@@ -83,7 +83,7 @@ function createApp(options = {}) {
   // Execution engines
   const executionEngine = createExecutionEngine();
   const streamJsonEngine = createStreamJsonEngine({ runService, eventBus });
-  const managerAdapterFactory = createManagerAdapterFactory({ streamJsonEngine });
+  const managerAdapterFactory = createManagerAdapterFactory({ streamJsonEngine, runService });
   const worktreeService = createWorktreeService();
   const lifecycleService = createLifecycleService({
     runService, taskService, agentProfileService, projectService,
