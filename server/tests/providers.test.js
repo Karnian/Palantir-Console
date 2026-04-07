@@ -188,7 +188,7 @@ test('fetchAllRegistered: only-unknown providers emit fallback rows', async (t) 
   }
 });
 
-test('fetchAllRegistered: codex stub throws → error isolated, other providers still rendered', async (t) => {
+test('fetchAllRegistered: codex stub throws → error isolated and id stays canonical (codex)', async (t) => {
   withClearedEnv(t);
   const { dir, filePath } = await makeAuthFile({ openai: {}, anthropic: {} });
   t.after(() => cleanup(dir));
@@ -198,15 +198,20 @@ test('fetchAllRegistered: codex stub throws → error isolated, other providers 
   });
   const result = await registry.fetchAllRegistered();
   assert.equal(result.length, 2);
-  // openai (codex) → fallback envelope with the error message
-  const codexEntry = result.find(r => r.id === 'openai' || r.id === 'codex');
-  assert.ok(codexEntry, 'codex/openai entry rendered');
+  // Failure envelope must use the canonical provider id (`codex`), NOT the raw
+  // auth-file key (`openai`). Otherwise the front-end keys success vs failure
+  // responses by different ids for the same provider.
+  const codexEntry = result.find(r => r.id === 'codex');
+  assert.ok(codexEntry, 'failure path emits canonical id `codex`');
+  assert.equal(codexEntry.name, 'codex');
   assert.match(codexEntry.limits[0].errorMessage || '', /boom/);
   // anthropic → its own fallback (independent of codex failure)
-  assert.ok(result.find(r => r.id === 'anthropic'));
+  const anthropicEntry = result.find(r => r.id === 'anthropic');
+  assert.ok(anthropicEntry, 'anthropic entry rendered independently');
+  assert.equal(anthropicEntry.name, 'claude');
 });
 
-test('fetchAllRegistered: codex stub returns null → "Provider returned no data" fallback', async (t) => {
+test('fetchAllRegistered: codex stub returns null → fallback envelope with canonical id', async (t) => {
   withClearedEnv(t);
   const { dir, filePath } = await makeAuthFile({ openai: {} });
   t.after(() => cleanup(dir));
@@ -216,6 +221,9 @@ test('fetchAllRegistered: codex stub returns null → "Provider returned no data
   });
   const result = await registry.fetchAllRegistered();
   assert.equal(result.length, 1);
+  // Same canonical-id rule as the throw case
+  assert.equal(result[0].id, 'codex');
+  assert.equal(result[0].name, 'codex');
   assert.match(result[0].limits[0].errorMessage || '', /returned no data/i);
 });
 
