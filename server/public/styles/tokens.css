@@ -11,6 +11,10 @@
  */
 
 :root {
+  /* Tell the browser this UI is dark so native form controls
+     (date picker, select popup, scrollbars) render in dark theme. */
+  color-scheme: dark;
+
   /* Backgrounds - deep blue-gray layering */
   --bg-base: #09090b;
   --bg-surface: #111113;

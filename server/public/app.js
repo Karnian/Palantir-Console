@@ -475,20 +475,20 @@ function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
             </select>
           </div>
           <div class="form-field">
-            <label class="form-label">마감일</label>
+            <label class="form-label">Due Date</label>
             <input type="date" class="form-input" value=${dueDate}
               onInput=${e => setDueDate(e.target.value)} />
           </div>
           <div class="form-field">
-            <label class="form-label">반복</label>
+            <label class="form-label">Recurrence</label>
             <select class="form-select" value=${recurrence}
               onChange=${e => setRecurrence(e.target.value)}
               disabled=${!dueDate}
-              title=${dueDate ? '' : '반복은 마감일이 있어야 사용 가능합니다'}>
-              <option value="">반복 안 함</option>
-              <option value="daily">매일</option>
-              <option value="weekly">매주</option>
-              <option value="monthly">매월</option>
+              title=${dueDate ? '' : 'Set a due date first to enable recurrence'}>
+              <option value="">None</option>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
             </select>
           </div>
         </div>
@@ -744,7 +744,17 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
           </div>
         </div>
 
-        <div class="modal-body" style="gap:16px;">
+        <div class="modal-body" style="gap:16px;"
+          onMouseDown=${(e) => {
+            // Click outside the active inline-edit input commits the change.
+            // Native blur doesn't fire when clicking non-focusable whitespace,
+            // so we explicitly commit when the click target is outside the
+            // editing input. (Other interactive elements still receive their
+            // own clicks normally.)
+            if (!editingField) return;
+            const inEditor = e.target.closest('.task-detail-title-input, .task-detail-desc-input');
+            if (!inEditor) commitField(editingField);
+          }}>
           ${html`
             <div class=${`task-detail-inline-root ${editingField ? 'is-inline-editing' : ''}`}>
               ${editingField === 'title' ? html`
@@ -834,11 +844,11 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
                 `;
               })()}
               <div class="task-detail-meta-item">
-                <span class="task-detail-meta-label">반복</span>
+                <span class="task-detail-meta-label">Recurrence</span>
                 <select class="form-select inline-select"
                   value=${task.recurrence || ''}
                   disabled=${!task.due_date}
-                  title=${task.due_date ? '' : '마감일이 있어야 반복을 설정할 수 있습니다'}
+                  title=${task.due_date ? '' : 'Set a due date first to enable recurrence'}
                   style="color:var(--text-secondary);"
                   onChange=${async (e) => {
                     const v = e.target.value || null;
@@ -850,10 +860,10 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
                       reloadTasks();
                     } catch (err) { addToast(err.message, 'error'); }
                   }}>
-                  <option value="">반복 안 함</option>
-                  <option value="daily">매일</option>
-                  <option value="weekly">매주</option>
-                  <option value="monthly">매월</option>
+                  <option value="">None</option>
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
                 </select>
               </div>
               ${(() => {
@@ -863,11 +873,11 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
                   : 'var(--text-secondary)';
                 return html`
                   <div class="task-detail-meta-item">
-                    <span class="task-detail-meta-label">마감일</span>
+                    <span class="task-detail-meta-label">Due Date</span>
                     <div style="display:flex;align-items:center;gap:6px;">
                       <input type="date" class="form-input inline-date"
                         value=${task.due_date || ''}
-                        style="color:${dueColor};border-color:color-mix(in srgb, ${dueColor} 30%, transparent);background:color-mix(in srgb, ${dueColor} 10%, transparent);max-width:160px;"
+                        style="color:${dueColor};border-color:color-mix(in srgb, ${dueColor} 30%, transparent);background:color-mix(in srgb, ${dueColor} 10%, transparent);flex:1;min-width:0;"
                         onChange=${async (e) => {
                           const v = e.target.value || null;
                           try {
