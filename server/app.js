@@ -8,8 +8,7 @@ const { createMessageService } = require('./services/messageService');
 const { createFsService } = require('./services/fsService');
 const { createOpencodeService } = require('./services/opencodeService');
 const { createCodexService } = require('./services/codexService');
-const { createProviderService } = require('./services/providerService');
-const { fetchAnthropicUsage, fetchGeminiUsage } = require('./services/externalUsageService');
+const { createProviderRegistry } = require('./services/providers');
 const { createDatabase } = require('./db/database');
 const { createEventBus } = require('./services/eventBus');
 const { createProjectService } = require('./services/projectService');
@@ -72,7 +71,7 @@ function createApp(options = {}) {
     codexHome,
     timeoutMs: codexStatusTimeoutMs
   });
-  const providerService = createProviderService({ authPath: opencodeAuthPath });
+  const providerRegistry = createProviderRegistry({ codexService, opencodeAuthPath });
 
   // New services (SQLite-based)
   const projectService = createProjectService(db);
@@ -80,7 +79,7 @@ function createApp(options = {}) {
   const runService = createRunService(db, eventBus);
   const agentProfileService = createAgentProfileService(db);
 
-  // Execution engines (Phase 2)
+  // Execution engines
   const executionEngine = createExecutionEngine();
   const streamJsonEngine = createStreamJsonEngine({ runService, eventBus });
   const worktreeService = createWorktreeService();
@@ -119,18 +118,13 @@ function createApp(options = {}) {
   }));
   app.use('/api/trash/sessions', createTrashRouter({ trashService }));
   app.use('/api/fs', createFsRouter({ fsService }));
-  app.use('/api/usage', createUsageRouter({
-    codexService,
-    providerService,
-    fetchAnthropicUsage,
-    fetchGeminiUsage
-  }));
+  app.use('/api/usage', createUsageRouter({ codexService, providerRegistry }));
 
   // New routes (v2)
   app.use('/api/projects', createProjectsRouter({ projectService, taskService }));
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService }));
   app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine }));
-  app.use('/api/agents', createAgentsRouter({ agentProfileService, codexService, fetchAnthropicUsage, fetchGeminiUsage }));
+  app.use('/api/agents', createAgentsRouter({ agentProfileService, providerRegistry }));
   app.use('/api/events', createEventsRouter({ eventBus }));
   app.use('/api/claude-sessions', createClaudeSessionsRouter());
   app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, eventBus, projectService, agentProfileService }));
