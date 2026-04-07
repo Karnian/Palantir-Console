@@ -3,7 +3,22 @@ const { BadRequestError, NotFoundError } = require('../utils/errors');
 
 const VALID_STATUSES = ['backlog', 'todo', 'in_progress', 'review', 'done', 'failed'];
 const VALID_PRIORITIES = ['low', 'medium', 'high', 'critical'];
+const VALID_RECURRENCE = ['daily', 'weekly', 'monthly'];
 const DUE_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// Compute the next due_date for a recurring task. Always advances strictly
+// past `from`. Returns ISO YYYY-MM-DD string. Used by completion handler and
+// the periodic catch-up tick.
+function nextDueDate(from, recurrence) {
+  const m = DUE_DATE_RE.exec(from || '');
+  if (!m) return null;
+  const d = new Date(Number(m[0].slice(0, 4)), Number(m[0].slice(5, 7)) - 1, Number(m[0].slice(8, 10)));
+  if (recurrence === 'daily') d.setDate(d.getDate() + 1);
+  else if (recurrence === 'weekly') d.setDate(d.getDate() + 7);
+  else if (recurrence === 'monthly') d.setMonth(d.getMonth() + 1);
+  else return null;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
 
 function normalizeDueDate(value) {
   if (value === undefined) return undefined;
@@ -45,8 +60,8 @@ function createTaskService(db, eventBus) {
       WHERE t.id = ?
     `),
     insert: db.prepare(`
-      INSERT INTO tasks (id, project_id, title, description, status, priority, sort_order, due_date)
-      VALUES (@id, @project_id, @title, @description, @status, @priority, @sort_order, @due_date)
+      INSERT INTO tasks (id, project_id, title, description, status, priority, sort_order, due_date, recurrence, parent_task_id)
+      VALUES (@id, @project_id, @title, @description, @status, @priority, @sort_order, @due_date, @recurrence, @parent_task_id)
     `),
     // update: dynamic — see dynamicUpdate() below
     updateStatus: db.prepare(`
@@ -71,7 +86,7 @@ function createTaskService(db, eventBus) {
     return task;
   }
 
-  const insertTaskTxn = db.transaction(({ id, project_id, title, description, status, priority, due_date }) => {
+  const insertTaskTxn = db.transaction(({ id, project_id, title, description, status, priority, due_date, recurrence, parent_task_id }) => {
     const maxSort = stmts.maxSortOrder.get().max_sort;
     stmts.insert.run({
       id,
@@ -82,11 +97,22 @@ function createTaskService(db, eventBus) {
       priority: priority || 'medium',
       sort_order: maxSort + 1,
       due_date: due_date ?? null,
+      recurrence: recurrence ?? null,
+      parent_task_id: parent_task_id ?? null,
     });
     return stmts.getById.get(id);
   });
 
-  function createTask({ project_id, title, description, status, priority, due_date }) {
+  function normalizeRecurrence(value) {
+    if (value === undefined) return undefined;
+    if (value === null || value === '' || value === 'none') return null;
+    if (!VALID_RECURRENCE.includes(value)) {
+      throw new BadRequestError(`Invalid recurrence: ${value}`);
+    }
+    return value;
+  }
+
+  function createTask({ project_id, title, description, status, priority, due_date, recurrence, parent_task_id }) {
     if (!title) throw new BadRequestError('Task title is required');
     if (status && !VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid status: ${status}`);
@@ -95,16 +121,19 @@ function createTaskService(db, eventBus) {
       throw new BadRequestError(`Invalid priority: ${priority}`);
     }
     const normalizedDue = normalizeDueDate(due_date);
+    const normalizedRec = normalizeRecurrence(recurrence);
     const id = `task_${crypto.randomUUID().slice(0, 8)}`;
     const task = insertTaskTxn({
       id, project_id, title, description, status, priority,
       due_date: normalizedDue === undefined ? null : normalizedDue,
+      recurrence: normalizedRec === undefined ? null : normalizedRec,
+      parent_task_id: parent_task_id || null,
     });
     if (eventBus) eventBus.emit('task:created', { task });
     return task;
   }
 
-  const TASK_UPDATABLE = ['title', 'description', 'project_id', 'priority', 'due_date'];
+  const TASK_UPDATABLE = ['title', 'description', 'project_id', 'priority', 'due_date', 'recurrence'];
 
   function updateTask(id, fields) {
     getTask(id);
@@ -113,6 +142,9 @@ function createTaskService(db, eventBus) {
     }
     if ('due_date' in fields) {
       fields = { ...fields, due_date: normalizeDueDate(fields.due_date) };
+    }
+    if ('recurrence' in fields) {
+      fields = { ...fields, recurrence: normalizeRecurrence(fields.recurrence) };
     }
     const setClauses = [];
     const params = { id };
@@ -135,10 +167,32 @@ function createTaskService(db, eventBus) {
     if (!VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid status: ${status}`);
     }
-    getTask(id);
+    const before = getTask(id);
     stmts.updateStatus.run(status, id);
     const task = stmts.getById.get(id);
     if (eventBus) eventBus.emit('task:updated', { task });
+    // Recurring task completion: spawn next instance.
+    // Only fires on the done transition (avoids duplicates if PATCHed twice).
+    if (status === 'done' && before.status !== 'done' && task.recurrence && task.due_date) {
+      const next = nextDueDate(task.due_date, task.recurrence);
+      if (next) {
+        try {
+          const child = createTask({
+            project_id: task.project_id,
+            title: task.title,
+            description: task.description,
+            priority: task.priority,
+            due_date: next,
+            recurrence: task.recurrence,
+            parent_task_id: task.id,
+          });
+          if (eventBus) eventBus.emit('task:recurring-spawned', { parent: task, child });
+        } catch (err) {
+          // Don't fail the status update if spawning fails (e.g. invalid date)
+          if (eventBus) eventBus.emit('task:recurring-error', { task, error: err.message });
+        }
+      }
+    }
     return task;
   }
 

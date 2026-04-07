@@ -31,6 +31,29 @@ function formatDueDate(d) {
   return `${m[1]}.${m[2]}.${m[3]}`;
 }
 
+// Re-render every `intervalMs` to reflect time-based state (overdue rolls over
+// at midnight, "N일 남음" decrements daily). Pauses while tab is hidden and
+// fires immediately on visibility return so coming back from sleep is fresh.
+function useNowTick(intervalMs = 60_000) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    let id = null;
+    const start = () => {
+      if (id != null) return;
+      id = setInterval(() => setTick(t => t + 1), intervalMs);
+    };
+    const stop = () => { if (id != null) { clearInterval(id); id = null; } };
+    const onVis = () => {
+      if (document.hidden) { stop(); }
+      else { setTick(t => t + 1); start(); }
+    };
+    if (!document.hidden) start();
+    document.addEventListener('visibilitychange', onVis);
+    return () => { stop(); document.removeEventListener('visibilitychange', onVis); };
+  }, [intervalMs]);
+  return tick;
+}
+
 function dueDateMeta(task) {
   const state = dueState(task);
   if (!state) return null;
@@ -65,6 +88,7 @@ const NAV_ITEMS = [
   { hash: 'dashboard', icon: '\u25C9', label: 'Dashboard' },
   { hash: 'manager',   icon: '\u2726', label: 'Manager' },
   { hash: 'board',     icon: '\u2592', label: 'Task Board' },
+  { hash: 'calendar',  icon: '\u2637', label: 'Calendar' },
   { hash: 'projects',  icon: '\u25A3', label: 'Projects' },
   { hash: 'agents',    icon: '\u2699', label: 'Agents' },
 ];
@@ -120,6 +144,10 @@ function EmptyState({ icon, text, sub }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions, manager }) {
+  // Tick every minute so overdue/due-soon triage rolls over without a reload.
+  // The hook itself returns a counter we don't read; calling it is enough to
+  // force a re-render at each tick.
+  useNowTick(60_000);
   // Manager session is tracked separately via /api/manager/status — exclude from worker dashboard counts
   const workerRuns = (runs || []).filter(r => !r.is_manager);
   const activeRuns = workerRuns.filter(r => r.status === 'running');
@@ -367,6 +395,7 @@ function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
   const [priority, setPriority] = useState('medium');
   const [agentProfileId, setAgentProfileId] = useState('');
   const [dueDate, setDueDate] = useState('');
+  const [recurrence, setRecurrence] = useState('');
   const [saving, setSaving] = useState(false);
   useEscape(open, onClose);
 
@@ -374,7 +403,7 @@ function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
   useEffect(() => {
     if (open) {
       setTitle(''); setDescription(''); setProjectId('');
-      setPriority('medium'); setAgentProfileId(''); setDueDate('');
+      setPriority('medium'); setAgentProfileId(''); setDueDate(''); setRecurrence('');
     }
   }, [open]);
 
@@ -391,13 +420,14 @@ function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
         priority,
         agent_profile_id: agentProfileId || undefined,
         due_date: dueDate || undefined,
+        recurrence: recurrence || undefined,
       };
       const data = await apiFetch('/api/tasks', {
         method: 'POST',
         body: JSON.stringify(body),
       });
       onCreated(data.task);
-      setTitle(''); setDescription(''); setProjectId(''); setPriority('medium'); setAgentProfileId(''); setDueDate('');
+      setTitle(''); setDescription(''); setProjectId(''); setPriority('medium'); setAgentProfileId(''); setDueDate(''); setRecurrence('');
       onClose();
     } catch (err) {
       addToast(err.message, 'error');
@@ -449,6 +479,18 @@ function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
             <label class="form-label">마감일</label>
             <input type="date" class="form-input" value=${dueDate}
               onInput=${e => setDueDate(e.target.value)} />
+          </div>
+          <div class="form-field">
+            <label class="form-label">반복</label>
+            <select class="form-select" value=${recurrence}
+              onChange=${e => setRecurrence(e.target.value)}
+              disabled=${!dueDate}
+              title=${dueDate ? '' : '반복은 마감일이 있어야 사용 가능합니다'}>
+              <option value="">반복 안 함</option>
+              <option value="daily">매일</option>
+              <option value="weekly">매주</option>
+              <option value="monthly">매월</option>
+            </select>
           </div>
         </div>
         <div class="modal-footer">
@@ -792,6 +834,29 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
                   </div>
                 `;
               })()}
+              <div class="task-detail-meta-item">
+                <span class="task-detail-meta-label">반복</span>
+                <select class="form-select inline-select"
+                  value=${task.recurrence || ''}
+                  disabled=${!task.due_date}
+                  title=${task.due_date ? '' : '마감일이 있어야 반복을 설정할 수 있습니다'}
+                  style="color:var(--text-secondary);"
+                  onChange=${async (e) => {
+                    const v = e.target.value || null;
+                    try {
+                      await apiFetch('/api/tasks/' + task.id, {
+                        method: 'PATCH',
+                        body: JSON.stringify({ recurrence: v }),
+                      });
+                      reloadTasks();
+                    } catch (err) { addToast(err.message, 'error'); }
+                  }}>
+                  <option value="">반복 안 함</option>
+                  <option value="daily">매일</option>
+                  <option value="weekly">매주</option>
+                  <option value="monthly">매월</option>
+                </select>
+              </div>
               ${(() => {
                 const due = dueDateMeta(task);
                 const dueColor = due?.state === 'overdue' ? '#ef4444'
@@ -934,6 +999,9 @@ function TaskCard({ task, projects, onDragStart, onClick }) {
             \u23F0 ${due.label}
           </span>
         `}
+        ${task.recurrence && html`
+          <span class="task-badge recurrence" title=${`반복: ${task.recurrence}`}>\u21BB ${task.recurrence}</span>
+        `}
       </div>
       ${task.updated_at && html`
         <div class="task-card-meta">${timeAgo(task.updated_at || task.created_at)}</div>
@@ -948,7 +1016,10 @@ function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadT
   const [detailTask, setDetailTask] = useState(null);
   const [filterProject, setFilterProject] = useState('');
   const [filterPriority, setFilterPriority] = useState('');
+  const [filterDue, setFilterDue] = useState('');
+  const [sortMode, setSortMode] = useState('manual'); // 'manual' | 'due-asc' | 'due-desc' | 'priority'
   const [dragTarget, setDragTarget] = useState(null);
+  const nowTick = useNowTick(60_000);
 
   // Listen for 'N' key shortcut to open new task modal
   useEffect(() => {
@@ -957,13 +1028,38 @@ function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadT
     return () => window.removeEventListener('palantir:new-task', handler);
   }, []);
 
+  // Helper: days from today to a YYYY-MM-DD string (local time, midnight-aligned)
+  const daysUntilDue = (due) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(due || '');
+    if (!m) return null;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return Math.round((d - today) / 86400000);
+  };
+
   const filtered = useMemo(() => {
     return tasks.filter(t => {
       if (filterProject && t.project_id !== filterProject) return false;
       if (filterPriority && t.priority !== filterPriority) return false;
+      if (filterDue) {
+        if (filterDue === 'no-due') {
+          if (t.due_date) return false;
+        } else {
+          const days = daysUntilDue(t.due_date);
+          if (days === null) return false;
+          // 'done' tasks are excluded from due-state filters (no longer actionable)
+          if (t.status === 'done') return false;
+          if (filterDue === 'overdue' && days >= 0) return false;
+          if (filterDue === 'today' && days !== 0) return false;
+          if (filterDue === 'this-week' && (days < 0 || days > 6)) return false;
+        }
+      }
       return true;
     });
-  }, [tasks, filterProject, filterPriority]);
+    // nowTick re-runs the filter at every tick so date-based filters
+    // (overdue/today/this-week) update without a server reload.
+  }, [tasks, filterProject, filterPriority, filterDue, nowTick]);
 
   const columnTasks = useMemo(() => {
     const map = {};
@@ -972,10 +1068,42 @@ function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadT
       const col = map[t.status] ? t.status : 'backlog';
       map[col].push(t);
     });
-    // Sort by sort_order within each column
-    Object.values(map).forEach(arr => arr.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)));
+    // Comparators. Manual = persisted sort_order (drag-friendly).
+    // Other modes are display-only — drag-to-reorder is disabled in those modes.
+    const PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
+    const cmpManual = (a, b) => (a.sort_order || 0) - (b.sort_order || 0);
+    const cmpDueAsc = (a, b) => {
+      const da = daysUntilDue(a.due_date);
+      const db = daysUntilDue(b.due_date);
+      // null (no due date) sinks to bottom
+      if (da === null && db === null) return cmpManual(a, b);
+      if (da === null) return 1;
+      if (db === null) return -1;
+      if (da !== db) return da - db;
+      return cmpManual(a, b);
+    };
+    const cmpDueDesc = (a, b) => {
+      const da = daysUntilDue(a.due_date);
+      const db = daysUntilDue(b.due_date);
+      if (da === null && db === null) return cmpManual(a, b);
+      if (da === null) return 1;
+      if (db === null) return -1;
+      if (da !== db) return db - da;
+      return cmpManual(a, b);
+    };
+    const cmpPriority = (a, b) => {
+      const pa = PRIORITY_RANK[a.priority] ?? 99;
+      const pb = PRIORITY_RANK[b.priority] ?? 99;
+      if (pa !== pb) return pa - pb;
+      return cmpManual(a, b);
+    };
+    const cmp = sortMode === 'due-asc' ? cmpDueAsc
+      : sortMode === 'due-desc' ? cmpDueDesc
+      : sortMode === 'priority' ? cmpPriority
+      : cmpManual;
+    Object.values(map).forEach(arr => arr.sort(cmp));
     return map;
-  }, [filtered]);
+  }, [filtered, sortMode, nowTick]);
 
   const handleDrop = async (columnId, e) => {
     e.preventDefault();
@@ -1064,6 +1192,21 @@ function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadT
             <option value="high">High</option>
             <option value="critical">Critical</option>
           </select>
+          <select class="form-select" value=${filterDue} onChange=${e => setFilterDue(e.target.value)}
+            title="마감일 필터">
+            <option value="">전체 마감일</option>
+            <option value="overdue">\u23F0 지난 마감</option>
+            <option value="today">오늘 마감</option>
+            <option value="this-week">이번 주 (7일 이내)</option>
+            <option value="no-due">마감일 없음</option>
+          </select>
+          <select class="form-select" value=${sortMode} onChange=${e => setSortMode(e.target.value)}
+            title="컬럼 내 카드 정렬 (드래그는 컬럼 이동에만 사용)">
+            <option value="manual">수동 정렬</option>
+            <option value="due-asc">마감일 \u2191 (임박순)</option>
+            <option value="due-desc">마감일 \u2193 (먼 순)</option>
+            <option value="priority">우선순위순</option>
+          </select>
         </div>
         <button class="primary" onClick=${() => setShowNewTask(true)}>+ New Task</button>
       </div>
@@ -1120,6 +1263,130 @@ function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadT
           runs=${runs}
           onOpenRun=${onOpenRun}
           onExecute=${handleExecute}
+          reloadTasks=${reloadTasks}
+        />
+      `}
+    </div>
+  `;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Calendar View — month grid showing tasks by due_date
+// ─────────────────────────────────────────────────────────────────────────────
+
+function CalendarView({ tasks, projects, agents, runs, reloadTasks, onOpenRun }) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const [cursor, setCursor] = useState(() => new Date(today.getFullYear(), today.getMonth(), 1));
+  const [detailTask, setDetailTask] = useState(null);
+  useNowTick(60_000);
+
+  // Build 6-week grid starting from the Sunday on/before the 1st of cursor month
+  const grid = useMemo(() => {
+    const first = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+    const start = new Date(first);
+    start.setDate(first.getDate() - first.getDay()); // back to Sunday
+    const cells = [];
+    for (let i = 0; i < 42; i++) {
+      const d = new Date(start);
+      d.setDate(start.getDate() + i);
+      const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      cells.push({
+        date: d,
+        iso,
+        inMonth: d.getMonth() === cursor.getMonth(),
+        isToday: d.getTime() === today.getTime(),
+      });
+    }
+    return cells;
+  }, [cursor]);
+
+  // Group tasks by due_date string for fast lookup
+  const tasksByDate = useMemo(() => {
+    const map = {};
+    tasks.forEach(t => {
+      if (!t.due_date) return;
+      (map[t.due_date] ||= []).push(t);
+    });
+    // Sort within day by priority (critical first), then title
+    const PRI = { critical: 0, high: 1, medium: 2, low: 3 };
+    Object.values(map).forEach(arr => arr.sort((a, b) => {
+      const pa = PRI[a.priority] ?? 99;
+      const pb = PRI[b.priority] ?? 99;
+      if (pa !== pb) return pa - pb;
+      return (a.title || '').localeCompare(b.title || '');
+    }));
+    return map;
+  }, [tasks]);
+
+  const monthLabel = `${cursor.getFullYear()}년 ${cursor.getMonth() + 1}월`;
+  const goPrev = () => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1));
+  const goNext = () => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1));
+  const goToday = () => setCursor(new Date(today.getFullYear(), today.getMonth(), 1));
+
+  const currentDetailTask = detailTask ? tasks.find(t => t.id === detailTask.id) || detailTask : null;
+  const weekdayLabels = ['일', '월', '화', '수', '목', '금', '토'];
+
+  return html`
+    <div class="calendar-view">
+      <div class="board-toolbar">
+        <h1 class="board-toolbar-title">Calendar</h1>
+        <div class="board-toolbar-spacer"></div>
+        <div class="calendar-nav">
+          <button class="ghost" onClick=${goPrev} title="이전 달">\u2039</button>
+          <button class="ghost" onClick=${goToday}>오늘</button>
+          <button class="ghost" onClick=${goNext} title="다음 달">\u203A</button>
+          <span class="calendar-month-label">${monthLabel}</span>
+        </div>
+      </div>
+      <div class="calendar-grid">
+        <div class="calendar-weekday-row">
+          ${weekdayLabels.map((w, i) => html`
+            <div key=${w} class="calendar-weekday ${i === 0 ? 'sun' : ''} ${i === 6 ? 'sat' : ''}">${w}</div>
+          `)}
+        </div>
+        <div class="calendar-cells">
+          ${grid.map(cell => {
+            const dayTasks = tasksByDate[cell.iso] || [];
+            return html`
+              <div key=${cell.iso}
+                class="calendar-cell ${cell.inMonth ? '' : 'out-month'} ${cell.isToday ? 'today' : ''}">
+                <div class="calendar-cell-header">
+                  <span class="calendar-cell-day">${cell.date.getDate()}</span>
+                  ${dayTasks.length > 0 && html`
+                    <span class="calendar-cell-count">${dayTasks.length}</span>
+                  `}
+                </div>
+                <div class="calendar-cell-tasks">
+                  ${dayTasks.slice(0, 4).map(t => {
+                    const due = dueDateMeta(t);
+                    return html`
+                      <button key=${t.id}
+                        class="calendar-task ${due ? `due-${due.state}` : ''} ${t.status === 'done' ? 'is-done' : ''}"
+                        title=${t.title}
+                        onClick=${() => setDetailTask(t)}>
+                        ${t.title}
+                      </button>
+                    `;
+                  })}
+                  ${dayTasks.length > 4 && html`
+                    <div class="calendar-task-more">+${dayTasks.length - 4} more</div>
+                  `}
+                </div>
+              </div>
+            `;
+          })}
+        </div>
+      </div>
+      ${currentDetailTask && html`
+        <${TaskDetailPanel}
+          task=${currentDetailTask}
+          onClose=${() => setDetailTask(null)}
+          projects=${projects}
+          agents=${agents}
+          runs=${runs}
+          onOpenRun=${onOpenRun}
+          onExecute=${async () => {}}
           reloadTasks=${reloadTasks}
         />
       `}
@@ -3338,6 +3605,19 @@ function App() {
           runs=${runs}
           onOpenRun=${(run) => setInspectRun(run)}
           reloadTasks=${reloadTasks}
+        />
+      `;
+    }
+    if (routeBase === 'calendar') {
+      if (tasksLoading) return html`<${Loading} />`;
+      return html`
+        <${CalendarView}
+          tasks=${tasks}
+          projects=${projects}
+          agents=${agents}
+          runs=${runs}
+          reloadTasks=${reloadTasks}
+          onOpenRun=${(run) => setInspectRun(run)}
         />
       `;
     }
