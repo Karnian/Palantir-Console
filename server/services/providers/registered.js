@@ -23,7 +23,10 @@ async function listRegisteredProviders(authPath) {
   } catch {
     return [];
   }
-  if (!parsed || typeof parsed !== 'object') return [];
+  // Reject arrays explicitly: typeof [] === 'object' would otherwise let an
+  // array through and `Object.keys([1,2,3]).sort()` would return ["0","1","2"],
+  // which would then look like three "registered providers" named after indexes.
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
   return Object.keys(parsed).sort();
 }
 
