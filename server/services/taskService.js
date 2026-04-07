@@ -173,24 +173,25 @@ function createTaskService(db, eventBus) {
     if (eventBus) eventBus.emit('task:updated', { task });
     // Recurring task completion: spawn next instance.
     // Only fires on the done transition (avoids duplicates if PATCHed twice).
-    if (status === 'done' && before.status !== 'done' && task.recurrence && task.due_date) {
-      const next = nextDueDate(task.due_date, task.recurrence);
-      if (next) {
-        try {
-          const child = createTask({
-            project_id: task.project_id,
-            title: task.title,
-            description: task.description,
-            priority: task.priority,
-            due_date: next,
-            recurrence: task.recurrence,
-            parent_task_id: task.id,
-          });
-          if (eventBus) eventBus.emit('task:recurring-spawned', { parent: task, child });
-        } catch (err) {
-          // Don't fail the status update if spawning fails (e.g. invalid date)
-          if (eventBus) eventBus.emit('task:recurring-error', { task, error: err.message });
-        }
+    // If the parent has a due_date, the next instance gets the next computed
+    // date for that recurrence. Without a due_date, recurrence still spawns
+    // a fresh dateless copy ("infinite repeat" mode).
+    if (status === 'done' && before.status !== 'done' && task.recurrence) {
+      const next = task.due_date ? nextDueDate(task.due_date, task.recurrence) : null;
+      try {
+        const child = createTask({
+          project_id: task.project_id,
+          title: task.title,
+          description: task.description,
+          priority: task.priority,
+          due_date: next, // null is fine — dateless recurring task
+          recurrence: task.recurrence,
+          parent_task_id: task.id,
+        });
+        if (eventBus) eventBus.emit('task:recurring-spawned', { parent: task, child });
+      } catch (err) {
+        // Don't fail the status update if spawning fails (e.g. invalid date)
+        if (eventBus) eventBus.emit('task:recurring-error', { task, error: err.message });
       }
     }
     return task;

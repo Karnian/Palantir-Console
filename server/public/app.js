@@ -384,6 +384,111 @@ function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions, ma
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Custom Dropdown — replaces native <select> where we need the popup to align
+// pixel-perfectly with the trigger button. The macOS native select popup
+// overlays the selected option onto the cursor position and adds its own
+// padding, which makes it impossible to keep visual alignment with adjacent
+// fields. This component renders a styled trigger + an absolutely-positioned
+// menu the same width as the trigger.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function Dropdown({ value, onChange, options, disabled, style, className, title, ariaLabel }) {
+  const [open, setOpen] = useState(false);
+  const [hoverIdx, setHoverIdx] = useState(-1);
+  const buttonRef = useRef(null);
+  const menuRef = useRef(null);
+
+  const selected = options.find(o => o.value === value);
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => {
+      if (buttonRef.current?.contains(e.target)) return;
+      if (menuRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  // Focus the menu when opening so keyboard navigation works
+  useEffect(() => {
+    if (open && menuRef.current) {
+      menuRef.current.focus();
+      const idx = options.findIndex(o => o.value === value);
+      setHoverIdx(idx >= 0 ? idx : 0);
+    }
+  }, [open]);
+
+  const handleButtonKey = (e) => {
+    if (disabled) return;
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      setOpen(true);
+    }
+  };
+
+  const commit = (v) => {
+    setOpen(false);
+    if (v !== value) onChange(v);
+  };
+
+  const handleMenuKey = (e) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setHoverIdx(i => Math.min(options.length - 1, i + 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setHoverIdx(i => Math.max(0, i - 1));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (hoverIdx >= 0) commit(options[hoverIdx].value);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      setOpen(false);
+      buttonRef.current?.focus();
+    } else if (e.key === 'Tab') {
+      setOpen(false);
+    }
+  };
+
+  return html`
+    <div class="dropdown ${className || ''} ${disabled ? 'is-disabled' : ''} ${open ? 'is-open' : ''}">
+      <button type="button" ref=${buttonRef}
+        class="dropdown-button"
+        style=${style || ''}
+        disabled=${disabled}
+        title=${title || ''}
+        aria-label=${ariaLabel || ''}
+        aria-haspopup="listbox"
+        aria-expanded=${open}
+        onClick=${() => !disabled && setOpen(o => !o)}
+        onKeyDown=${handleButtonKey}>
+        <span class="dropdown-label">${selected?.label ?? ''}</span>
+        <span class="dropdown-chevron" aria-hidden="true">\u25BE</span>
+      </button>
+      ${open && html`
+        <div class="dropdown-menu" ref=${menuRef} role="listbox" tabindex="-1"
+          onKeyDown=${handleMenuKey}>
+          ${options.map((opt, i) => html`
+            <button type="button" key=${opt.value}
+              role="option"
+              aria-selected=${value === opt.value}
+              class="dropdown-item ${value === opt.value ? 'selected' : ''} ${i === hoverIdx ? 'hover' : ''}"
+              onMouseEnter=${() => setHoverIdx(i)}
+              onClick=${() => commit(opt.value)}>
+              <span class="dropdown-item-check">${value === opt.value ? '\u2713' : ''}</span>
+              <span class="dropdown-item-label">${opt.label}</span>
+            </button>
+          `)}
+        </div>
+      `}
+    </div>
+  `;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // New Task Modal
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -483,8 +588,7 @@ function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
             <label class="form-label">Recurrence</label>
             <select class="form-select" value=${recurrence}
               onChange=${e => setRecurrence(e.target.value)}
-              disabled=${!dueDate}
-              title=${dueDate ? '' : 'Set a due date first to enable recurrence'}>
+              title="Without a due date, the task simply respawns when marked done">
               <option value="">None</option>
               <option value="daily">Daily</option>
               <option value="weekly">Weekly</option>
@@ -803,68 +907,73 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
                 const sc = statusColor[status] || 'var(--text-muted)';
                 const priorityColors = { low: '#6b7280', medium: '#3b82f6', high: '#f59e0b', critical: '#ef4444' };
                 const pc = priorityColors[priority] || '#6b7280';
+                const statusOpts = ['backlog','todo','in_progress','review','done','failed']
+                  .map(s => ({ value: s, label: s.replace('_', ' ') }));
+                const priorityOpts = PRIORITY_OPTIONS.map(p => ({ value: p, label: p }));
+                const projectOpts = [{ value: '', label: 'None' }, ...projects.map(p => ({ value: p.id, label: p.name }))];
                 return html`
                   <div class="task-detail-meta-item">
                     <span class="task-detail-meta-label">Status</span>
-                    <select class="form-select inline-select" value=${status}
-                      style="color:${sc};background:color-mix(in srgb, ${sc} 12%, transparent);border-color:color-mix(in srgb, ${sc} 30%, transparent);"
-                      onChange=${async (e) => {
-                        const v = e.target.value; setStatus(v);
+                    <${Dropdown}
+                      value=${status}
+                      options=${statusOpts}
+                      ariaLabel="Status"
+                      style=${`color:${sc};background:color-mix(in srgb, ${sc} 12%, transparent);border-color:color-mix(in srgb, ${sc} 30%, transparent);`}
+                      onChange=${async (v) => {
+                        setStatus(v);
                         try { await apiFetch('/api/tasks/' + task.id + '/status', { method: 'PATCH', body: JSON.stringify({ status: v }) }); reloadTasks(); }
                         catch (err) { addToast(err.message, 'error'); }
-                      }}>
-                      ${['backlog','todo','in_progress','review','done','failed'].map(s => html`<option key=${s} value=${s}>${s.replace('_',' ')}</option>`)}
-                    </select>
+                      }} />
                   </div>
                   <div class="task-detail-meta-item">
                     <span class="task-detail-meta-label">Priority</span>
-                    <select class="form-select inline-select" value=${priority}
-                      style="color:${pc};background:color-mix(in srgb, ${pc} 12%, transparent);border-color:color-mix(in srgb, ${pc} 30%, transparent);"
-                      onChange=${async (e) => {
-                        const v = e.target.value; setPriority(v);
+                    <${Dropdown}
+                      value=${priority}
+                      options=${priorityOpts}
+                      ariaLabel="Priority"
+                      style=${`color:${pc};background:color-mix(in srgb, ${pc} 12%, transparent);border-color:color-mix(in srgb, ${pc} 30%, transparent);`}
+                      onChange=${async (v) => {
+                        setPriority(v);
                         try { await apiFetch('/api/tasks/' + task.id, { method: 'PATCH', body: JSON.stringify({ priority: v }) }); reloadTasks(); }
                         catch (err) { addToast(err.message, 'error'); }
-                      }}>
-                      ${PRIORITY_OPTIONS.map(p => html`<option key=${p} value=${p}>${p}</option>`)}
-                    </select>
+                      }} />
                   </div>
                   <div class="task-detail-meta-item">
                     <span class="task-detail-meta-label">Project</span>
-                    <select class="form-select inline-select" value=${projectId}
+                    <${Dropdown}
+                      value=${projectId}
+                      options=${projectOpts}
+                      ariaLabel="Project"
                       style="color:var(--accent-light);background:rgba(139,92,246,0.08);border-color:rgba(139,92,246,0.25);"
-                      onChange=${async (e) => {
-                        const v = e.target.value; setProjectId(v);
+                      onChange=${async (v) => {
+                        setProjectId(v);
                         try { await apiFetch('/api/tasks/' + task.id, { method: 'PATCH', body: JSON.stringify({ project_id: v || null }) }); reloadTasks(); }
                         catch (err) { addToast(err.message, 'error'); }
-                      }}>
-                      <option value="">None</option>
-                      ${projects.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
-                    </select>
+                      }} />
                   </div>
                 `;
               })()}
               <div class="task-detail-meta-item">
                 <span class="task-detail-meta-label">Recurrence</span>
-                <select class="form-select inline-select"
+                <${Dropdown}
                   value=${task.recurrence || ''}
-                  disabled=${!task.due_date}
-                  title=${task.due_date ? '' : 'Set a due date first to enable recurrence'}
-                  style="color:var(--text-secondary);"
-                  onChange=${async (e) => {
-                    const v = e.target.value || null;
+                  ariaLabel="Recurrence"
+                  options=${[
+                    { value: '', label: 'None' },
+                    { value: 'daily', label: 'Daily' },
+                    { value: 'weekly', label: 'Weekly' },
+                    { value: 'monthly', label: 'Monthly' },
+                  ]}
+                  onChange=${async (v) => {
+                    const next = v || null;
                     try {
                       await apiFetch('/api/tasks/' + task.id, {
                         method: 'PATCH',
-                        body: JSON.stringify({ recurrence: v }),
+                        body: JSON.stringify({ recurrence: next }),
                       });
                       reloadTasks();
                     } catch (err) { addToast(err.message, 'error'); }
-                  }}>
-                  <option value="">None</option>
-                  <option value="daily">Daily</option>
-                  <option value="weekly">Weekly</option>
-                  <option value="monthly">Monthly</option>
-                </select>
+                  }} />
               </div>
               ${(() => {
                 const due = dueDateMeta(task);

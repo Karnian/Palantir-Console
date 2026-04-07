@@ -201,6 +201,33 @@ test('Tasks recurring: completing a recurring task spawns next instance', async 
   assert.equal(list2.body.tasks.length, 2);
 });
 
+test('Tasks recurring: dateless recurring task spawns dateless copy on done', async (t) => {
+  const { app } = await createTestApp(t);
+
+  // Recurring task with NO due_date — "infinite repeat" mode
+  const create = await request(app).post('/api/tasks').send({
+    title: 'Daily standup',
+    recurrence: 'daily',
+  });
+  assert.equal(create.status, 201);
+  assert.equal(create.body.task.due_date, null);
+  assert.equal(create.body.task.recurrence, 'daily');
+  const parent = create.body.task;
+
+  // Mark done
+  await request(app).patch(`/api/tasks/${parent.id}/status`).send({ status: 'done' });
+
+  // Should spawn a fresh dateless copy
+  const list = await request(app).get('/api/tasks');
+  assert.equal(list.body.tasks.length, 2);
+  const child = list.body.tasks.find(t => t.id !== parent.id);
+  assert.ok(child);
+  assert.equal(child.due_date, null);
+  assert.equal(child.recurrence, 'daily');
+  assert.equal(child.parent_task_id, parent.id);
+  assert.equal(child.title, parent.title);
+});
+
 test('Tasks recurring: invalid recurrence is rejected', async (t) => {
   const { app } = await createTestApp(t);
   const res = await request(app).post('/api/tasks').send({
