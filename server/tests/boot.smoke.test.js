@@ -48,6 +48,7 @@ async function createTestApp(t) {
 const REQUIRED_ASSETS = [
   { path: '/', mime: /text\/html/ },
   { path: '/styles.css', mime: /text\/css/ },
+  { path: '/styles/tokens.css', mime: /text\/css/ },
   { path: '/app/main.js', mime: /text\/javascript|application\/javascript/ },
   { path: '/app.js', mime: /text\/javascript|application\/javascript/ },
   { path: '/app/lib/format.js', mime: /text\/javascript|application\/javascript/ },
@@ -77,6 +78,29 @@ test('boot: index.html loads app/main.js as a module entry', async (t) => {
   const res = await request(app).get('/');
   assert.equal(res.status, 200);
   assert.match(res.text, /<script\s+type="module"\s+src="app\/main\.js"/, 'module entry tag present');
+});
+
+test('boot: index.html loads styles/tokens.css before styles.css', async (t) => {
+  const app = await createTestApp(t);
+  const res = await request(app).get('/');
+  // styles.css consumes the CSS variables defined in tokens.css. The cascade
+  // depends on tokens loading first; if someone reorders the links, the
+  // variables resolve to the fallbacks (or `unset`) and the page degrades.
+  const tokensIdx = res.text.indexOf('styles/tokens.css');
+  const stylesIdx = res.text.indexOf('"styles.css"');
+  assert.notEqual(tokensIdx, -1, 'tokens link present');
+  assert.notEqual(stylesIdx, -1, 'styles link present');
+  assert.ok(tokensIdx < stylesIdx, 'tokens.css must precede styles.css in source order');
+});
+
+test('boot: styles/tokens.css defines the core design tokens', async (t) => {
+  const app = await createTestApp(t);
+  const res = await request(app).get('/styles/tokens.css');
+  // Smoke: every variable that the rest of styles.css unconditionally uses
+  // must still be defined here. Catches a token rename or accidental drop.
+  for (const v of ['--bg-base', '--text-primary', '--accent', '--border', '--font-sans', '--radius-md']) {
+    assert.match(res.text, new RegExp(`${v}\\s*:`), `${v} defined`);
+  }
 });
 
 test('boot: index.html does NOT include the legacy classic script tag', async (t) => {
