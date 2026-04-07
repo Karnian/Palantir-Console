@@ -103,6 +103,34 @@ test('boot: styles/tokens.css defines the core design tokens', async (t) => {
   }
 });
 
+test('boot: every fallback-less var() in styles.css is defined in tokens.css', async (t) => {
+  // Token parity check. Codex spotted that styles.css references
+  // `--bg-tertiary` and `--status-error` via var() with no fallback, but
+  // tokens.css used to leave them undefined — they silently rendered as
+  // empty strings. This test fails the build the moment a new fallback-less
+  // var() is added without a matching definition.
+  const app = await createTestApp(t);
+  const stylesRes = await request(app).get('/styles.css');
+  const tokensRes = await request(app).get('/styles/tokens.css');
+
+  // Match var(--name) where there's no comma fallback before the closing )
+  const varPattern = /var\(\s*(--[a-z][a-z0-9-]*)\s*\)/g;
+  const used = new Set();
+  let m;
+  while ((m = varPattern.exec(stylesRes.text)) !== null) {
+    used.add(m[1]);
+  }
+
+  const definedPattern = /^\s*(--[a-z][a-z0-9-]*)\s*:/gm;
+  const defined = new Set();
+  while ((m = definedPattern.exec(tokensRes.text)) !== null) {
+    defined.add(m[1]);
+  }
+
+  const missing = [...used].filter((name) => !defined.has(name));
+  assert.deepEqual(missing, [], `tokens.css missing definitions for fallback-less var() usages in styles.css: ${missing.join(', ')}`);
+});
+
 test('boot: index.html does NOT include the legacy classic script tag', async (t) => {
   const app = await createTestApp(t);
   const res = await request(app).get('/');

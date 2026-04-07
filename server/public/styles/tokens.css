@@ -17,6 +17,11 @@
   --bg-elevated: #1a1a1f;
   --bg-hover: #222228;
   --bg-overlay: rgba(0, 0, 0, 0.7);
+  /* `--bg-tertiary` is the chip/panel background used by agent detail
+     fields and usage limit cards. It used to be referenced via var() with
+     no fallback, which silently rendered transparent. Aliased to bg-elevated
+     so the surface is consistent with other elevated chrome. */
+  --bg-tertiary: var(--bg-elevated);
 
   /* Text hierarchy */
   --text-primary: #ededef;
@@ -41,6 +46,10 @@
   --success: #10b981;
   --warning: #f59e0b;
   --info: #3b82f6;
+  /* `--status-error` is the inline-error color used by detail panels.
+     It used to be referenced via var() with no fallback (silently empty).
+     Aliased to --danger so error chrome stays on the warm-red palette. */
+  --status-error: var(--danger);
 
   /* Status colors */
   --status-running: #3b82f6;
