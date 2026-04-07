@@ -7,6 +7,70 @@ const { h, render } = preact;
 const { useState, useEffect, useRef, useCallback, useMemo } = preactHooks;
 const html = htm.bind(h);
 
+// Due date helpers (마감일) — local-day comparison.
+// Returns: 'overdue' | 'due-soon' | 'on-track' | null. `dueSoonDays` defaults to
+// 2 (today + tomorrow). Tasks already in 'done' status are treated as on-track.
+function dueState(task, dueSoonDays = 2) {
+  if (!task || !task.due_date) return null;
+  if (task.status === 'done') return 'on-track';
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(task.due_date);
+  if (!m) return null;
+  const due = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diffDays = Math.round((due - today) / 86400000);
+  if (diffDays < 0) return 'overdue';
+  if (diffDays <= dueSoonDays - 1) return 'due-soon';
+  return 'on-track';
+}
+
+function formatDueDate(d) {
+  if (!d) return '';
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d);
+  if (!m) return d;
+  return `${m[1]}.${m[2]}.${m[3]}`;
+}
+
+// Re-render every `intervalMs` to reflect time-based state (overdue rolls over
+// at midnight, "N일 남음" decrements daily). Pauses while tab is hidden and
+// fires immediately on visibility return so coming back from sleep is fresh.
+function useNowTick(intervalMs = 60_000) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    let id = null;
+    const start = () => {
+      if (id != null) return;
+      id = setInterval(() => setTick(t => t + 1), intervalMs);
+    };
+    const stop = () => { if (id != null) { clearInterval(id); id = null; } };
+    const onVis = () => {
+      if (document.hidden) { stop(); }
+      else { setTick(t => t + 1); start(); }
+    };
+    if (!document.hidden) start();
+    document.addEventListener('visibilitychange', onVis);
+    return () => { stop(); document.removeEventListener('visibilitychange', onVis); };
+  }, [intervalMs]);
+  return tick;
+}
+
+function dueDateMeta(task) {
+  const state = dueState(task);
+  if (!state) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(task.due_date);
+  if (!m) return null;
+  const due = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diffDays = Math.round((due - today) / 86400000);
+  let label;
+  if (state === 'overdue') label = `${Math.abs(diffDays)}일 지남`;
+  else if (diffDays === 0) label = '오늘';
+  else if (diffDays === 1) label = '내일';
+  else label = `${diffDays}일 남음`;
+  return { state, label, formatted: formatDueDate(task.due_date), diffDays };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Hash Router
 // ─────────────────────────────────────────────────────────────────────────────
@@ -78,7 +142,11 @@ function EmptyState({ icon, text, sub }) {
 // Dashboard View
 // ─────────────────────────────────────────────────────────────────────────────
 
-function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions }) {
+function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun, claudeSessions, manager }) {
+  // Tick every minute so overdue/due-soon triage rolls over without a reload.
+  // The hook itself returns a counter we don't read; calling it is enough to
+  // force a re-render at each tick.
+  useNowTick(60_000);
   // Manager session is tracked separately via /api/manager/status — exclude from worker dashboard counts
   const workerRuns = (runs || []).filter(r => !r.is_manager);
   const activeRuns = workerRuns.filter(r => r.status === 'running');
@@ -99,6 +167,44 @@ function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions }) 
     if (run.is_manager) return 'Manager Session';
     return task?.title || `Run ${run.id.slice(0, 8)}`;
   };
+
+  if (manager?.status?.active && manager.status.run) {
+    const mrun = manager.status.run;
+    triageItems.push({
+      type: 'manager',
+      priority: -1,
+      title: 'Manager Session',
+      meta: `Active - ${timeAgo(mrun.started_at || mrun.created_at)}`,
+      run: null,
+      task: null,
+    });
+  }
+
+  // Due-date triage: overdue and due-soon (excluding done tasks)
+  tasks.forEach(t => {
+    if (t.status === 'done') return;
+    const due = dueDateMeta(t);
+    if (!due) return;
+    if (due.state === 'overdue') {
+      triageItems.push({
+        type: 'overdue',
+        priority: 1.5, // between failed (1) and running (2)
+        title: t.title,
+        meta: `마감일 지남 ${due.formatted} (${due.label})`,
+        run: null,
+        task: t,
+      });
+    } else if (due.state === 'due-soon') {
+      triageItems.push({
+        type: 'due-soon',
+        priority: 1.7,
+        title: t.title,
+        meta: `마감 임박 ${due.formatted} (${due.label})`,
+        run: null,
+        task: t,
+      });
+    }
+  });
 
   needsInputRuns.forEach(run => {
     const task = tasks.find(t => t.id === run.task_id);
@@ -155,6 +261,9 @@ function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions }) 
     'running': '\u25B6',
     'review': '\u2714',
     'done': '\u2713',
+    'manager': '\u2726',
+    'overdue': '\u23F0',
+    'due-soon': '\u23F0',
   };
 
   return html`
@@ -198,9 +307,16 @@ function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions }) 
         `}
         ${triageItems.map((item, i) => html`
           <div
-            key=${item.run?.id || item.task?.id || i}
+            key=${item.run?.id || item.task?.id || `manager-${i}`}
             class="triage-item"
-            onClick=${() => item.run && onOpenRun(item.run)}
+            onClick=${() => {
+              if (item.type === 'manager') { navigate('manager'); return; }
+              if (item.type === 'overdue' || item.type === 'due-soon') {
+                if (item.task && onOpenTask) onOpenTask(item.task);
+                return;
+              }
+              if (item.run) onOpenRun(item.run);
+            }}
           >
             <div class="triage-icon ${item.type}">${iconMap[item.type]}</div>
             <div class="triage-body">
@@ -226,6 +342,16 @@ function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions }) 
               ${item.type === 'review' && html`
                 <button class="ghost" onClick=${(e) => { e.stopPropagation(); navigate('board'); }}>
                   Review
+                </button>
+              `}
+              ${item.type === 'manager' && html`
+                <button class="ghost" onClick=${(e) => { e.stopPropagation(); navigate('manager'); }}>
+                  Open
+                </button>
+              `}
+              ${(item.type === 'overdue' || item.type === 'due-soon') && html`
+                <button class="ghost" onClick=${(e) => { e.stopPropagation(); if (item.task && onOpenTask) onOpenTask(item.task); }}>
+                  Open
                 </button>
               `}
             </div>
@@ -261,6 +387,168 @@ function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions }) 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Custom Dropdown — replaces native <select> where we need the popup to align
+// pixel-perfectly with the trigger button. The macOS native select popup
+// overlays the selected option onto the cursor position and adds its own
+// padding, which makes it impossible to keep visual alignment with adjacent
+// fields. This component renders a styled trigger + an absolutely-positioned
+// menu the same width as the trigger.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function Dropdown({ value, onChange, options, disabled, style, className, title, ariaLabel }) {
+  const [open, setOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState(null); // { top, left, width, flipUp }
+  const [hoverIdx, setHoverIdx] = useState(-1);
+  const buttonRef = useRef(null);
+  const menuRef = useRef(null);
+
+  const selected = options.find(o => o.value === value);
+
+  // Compute fixed-position coordinates from the trigger's bounding box.
+  // Using `position: fixed` (not absolute) escapes the modal-body's scroll
+  // container so the popup doesn't grow the modal's scroll area.
+  const computePosition = useCallback(() => {
+    if (!buttonRef.current) return;
+    const rect = buttonRef.current.getBoundingClientRect();
+    // Approx menu height: 4px padding * 2 + ~30px per row, capped at 280
+    const estimated = Math.min(280, options.length * 30 + 12);
+    const spaceBelow = window.innerHeight - rect.bottom - 8;
+    const spaceAbove = rect.top - 8;
+    const flipUp = spaceBelow < estimated && spaceAbove > spaceBelow;
+    setMenuPos({
+      top: flipUp ? rect.top - 4 : rect.bottom + 4,
+      left: rect.left,
+      width: rect.width,
+      flipUp,
+    });
+  }, [options.length]);
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => {
+      if (buttonRef.current?.contains(e.target)) return;
+      if (menuRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  // On open: compute position, close on ancestor scroll/resize. We listen in
+  // capture phase so we catch scrolls inside any ancestor (modal-body etc.),
+  // but we must IGNORE scrolls originating inside the menu itself — otherwise
+  // the menu's own `overflow-y: auto` triggers self-close on the first wheel
+  // event when the option list is long.
+  useEffect(() => {
+    if (!open) { setMenuPos(null); return; }
+    computePosition();
+    const onScroll = (e) => {
+      if (menuRef.current && menuRef.current.contains(e.target)) return;
+      setOpen(false);
+    };
+    const onResize = () => setOpen(false);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onResize);
+    return () => {
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onResize);
+    };
+  }, [open, computePosition]);
+
+  // Focus the menu when opening so keyboard navigation works
+  useEffect(() => {
+    if (open && menuRef.current) {
+      menuRef.current.focus();
+      const idx = options.findIndex(o => o.value === value);
+      setHoverIdx(idx >= 0 ? idx : 0);
+    }
+  }, [open]);
+
+  const handleButtonKey = (e) => {
+    if (disabled) return;
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      setOpen(true);
+    }
+  };
+
+  const commit = (v) => {
+    setOpen(false);
+    if (v !== value) onChange(v);
+  };
+
+  const handleMenuKey = (e) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      e.stopPropagation();
+      setHoverIdx(i => Math.min(options.length - 1, i + 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      e.stopPropagation();
+      setHoverIdx(i => Math.max(0, i - 1));
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      e.stopPropagation();
+      setHoverIdx(0);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      e.stopPropagation();
+      setHoverIdx(options.length - 1);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (hoverIdx >= 0) commit(options[hoverIdx].value);
+    } else if (e.key === 'Escape') {
+      // Stop propagation so the modal's window-level Escape handler
+      // doesn't ALSO close the modal when we just want to close the menu.
+      e.preventDefault();
+      e.stopPropagation();
+      setOpen(false);
+      buttonRef.current?.focus();
+    } else if (e.key === 'Tab') {
+      setOpen(false);
+    }
+  };
+
+  return html`
+    <div class="dropdown ${className || ''} ${disabled ? 'is-disabled' : ''} ${open ? 'is-open' : ''}">
+      <button type="button" ref=${buttonRef}
+        class="dropdown-button"
+        style=${style || ''}
+        disabled=${disabled}
+        title=${title || ''}
+        aria-label=${ariaLabel || ''}
+        aria-haspopup="listbox"
+        aria-expanded=${open}
+        onClick=${() => !disabled && setOpen(o => !o)}
+        onKeyDown=${handleButtonKey}>
+        <span class="dropdown-label">${selected?.label ?? ''}</span>
+        <span class="dropdown-chevron" aria-hidden="true">\u25BE</span>
+      </button>
+      ${open && menuPos && html`
+        <div class="dropdown-menu ${menuPos.flipUp ? 'flip-up' : ''}"
+          ref=${menuRef} role="listbox" tabindex="-1"
+          style=${`position: fixed; top: ${menuPos.top}px; left: ${menuPos.left}px; width: ${menuPos.width}px; ${menuPos.flipUp ? 'transform: translateY(-100%);' : ''}`}
+          onKeyDown=${handleMenuKey}>
+          ${options.map((opt, i) => html`
+            <button type="button" key=${opt.value}
+              role="option"
+              aria-selected=${value === opt.value}
+              class="dropdown-item ${value === opt.value ? 'selected' : ''} ${i === hoverIdx ? 'hover' : ''}"
+              onMouseEnter=${() => setHoverIdx(i)}
+              onClick=${() => commit(opt.value)}>
+              <span class="dropdown-item-check">${value === opt.value ? '\u2713' : ''}</span>
+              <span class="dropdown-item-label">${opt.label}</span>
+            </button>
+          `)}
+        </div>
+      `}
+    </div>
+  `;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // New Task Modal
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -270,6 +558,8 @@ function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
   const [projectId, setProjectId] = useState('');
   const [priority, setPriority] = useState('medium');
   const [agentProfileId, setAgentProfileId] = useState('');
+  const [dueDate, setDueDate] = useState('');
+  const [recurrence, setRecurrence] = useState('');
   const [saving, setSaving] = useState(false);
   useEscape(open, onClose);
 
@@ -277,7 +567,7 @@ function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
   useEffect(() => {
     if (open) {
       setTitle(''); setDescription(''); setProjectId('');
-      setPriority('medium'); setAgentProfileId('');
+      setPriority('medium'); setAgentProfileId(''); setDueDate(''); setRecurrence('');
     }
   }, [open]);
 
@@ -293,13 +583,15 @@ function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
         project_id: projectId || undefined,
         priority,
         agent_profile_id: agentProfileId || undefined,
+        due_date: dueDate || undefined,
+        recurrence: recurrence || undefined,
       };
       const data = await apiFetch('/api/tasks', {
         method: 'POST',
         body: JSON.stringify(body),
       });
       onCreated(data.task);
-      setTitle(''); setDescription(''); setProjectId(''); setPriority('medium'); setAgentProfileId('');
+      setTitle(''); setDescription(''); setProjectId(''); setPriority('medium'); setAgentProfileId(''); setDueDate(''); setRecurrence('');
       onClose();
     } catch (err) {
       addToast(err.message, 'error');
@@ -345,6 +637,22 @@ function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
             <select class="form-select" value=${agentProfileId} onChange=${e => setAgentProfileId(e.target.value)}>
               <option value="">None</option>
               ${agents.map(a => html`<option key=${a.id} value=${a.id}>${a.name}</option>`)}
+            </select>
+          </div>
+          <div class="form-field">
+            <label class="form-label">Due Date</label>
+            <input type="date" class="form-input" value=${dueDate}
+              onInput=${e => setDueDate(e.target.value)} />
+          </div>
+          <div class="form-field">
+            <label class="form-label">Recurrence</label>
+            <select class="form-select" value=${recurrence}
+              onChange=${e => setRecurrence(e.target.value)}
+              title="Without a due date, the task simply respawns when marked done">
+              <option value="">None</option>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
             </select>
           </div>
         </div>
@@ -436,6 +744,11 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
   const [projectId, setProjectId] = useState(task?.project_id || '');
   // Single editing field state — 'title' | 'description' | null
   const [editingField, setEditingField] = useState(null);
+  // Idempotency guard for commitField. Both the inline-edit input's onBlur AND
+  // the modal-body onMouseDown outside-click handler can fire commit for the
+  // same edit (e.g. when the click target also steals focus). Without this
+  // guard we'd PATCH twice. Cleared when a new edit session starts.
+  const committingFieldRef = useRef(null);
   const [showExecute, setShowExecute] = useState(false);
   // Track pointerdown coords to distinguish click-to-edit vs drag-to-select
   const pointerDownRef = useRef(null);
@@ -481,6 +794,10 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
   };
 
   const commitField = (field) => {
+    // Guard against duplicate commits from blur + outside-click firing in
+    // sequence for the same edit session.
+    if (committingFieldRef.current === field) return;
+    committingFieldRef.current = field;
     if (field === 'title') {
       const next = title.trim();
       setEditingField(null);
@@ -497,6 +814,7 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
   const cancelField = (field) => {
     if (field === 'title') setTitle(task.title || '');
     if (field === 'description') setDescription(task.description || '');
+    committingFieldRef.current = field; // prevent any pending blur from re-saving
     setEditingField(null);
   };
 
@@ -533,6 +851,7 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
     if (field === 'description' && descReadonlyRef.current) {
       descEditHeightRef.current = Math.round(descReadonlyRef.current.getBoundingClientRect().height);
     }
+    committingFieldRef.current = null;
     setEditingField(field);
   };
 
@@ -600,7 +919,17 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
           </div>
         </div>
 
-        <div class="modal-body" style="gap:16px;">
+        <div class="modal-body" style="gap:16px;"
+          onMouseDown=${(e) => {
+            // Click outside the active inline-edit input commits the change.
+            // Native blur doesn't fire when clicking non-focusable whitespace,
+            // so we explicitly commit when the click target is outside the
+            // editing input. (Other interactive elements still receive their
+            // own clicks normally.)
+            if (!editingField) return;
+            const inEditor = e.target.closest('.task-detail-title-input, .task-detail-desc-input');
+            if (!inEditor) commitField(editingField);
+          }}>
           ${html`
             <div class=${`task-detail-inline-root ${editingField ? 'is-inline-editing' : ''}`}>
               ${editingField === 'title' ? html`
@@ -649,43 +978,110 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
                 const sc = statusColor[status] || 'var(--text-muted)';
                 const priorityColors = { low: '#6b7280', medium: '#3b82f6', high: '#f59e0b', critical: '#ef4444' };
                 const pc = priorityColors[priority] || '#6b7280';
+                const statusOpts = ['backlog','todo','in_progress','review','done','failed']
+                  .map(s => ({ value: s, label: s.replace('_', ' ') }));
+                const priorityOpts = PRIORITY_OPTIONS.map(p => ({ value: p, label: p }));
+                const projectOpts = [{ value: '', label: 'None' }, ...projects.map(p => ({ value: p.id, label: p.name }))];
                 return html`
                   <div class="task-detail-meta-item">
                     <span class="task-detail-meta-label">Status</span>
-                    <select class="form-select inline-select" value=${status}
-                      style="color:${sc};background:color-mix(in srgb, ${sc} 12%, transparent);border-color:color-mix(in srgb, ${sc} 30%, transparent);"
-                      onChange=${async (e) => {
-                        const v = e.target.value; setStatus(v);
+                    <${Dropdown}
+                      value=${status}
+                      options=${statusOpts}
+                      ariaLabel="Status"
+                      style=${`color:${sc};background:color-mix(in srgb, ${sc} 12%, transparent);border-color:color-mix(in srgb, ${sc} 30%, transparent);`}
+                      onChange=${async (v) => {
+                        setStatus(v);
                         try { await apiFetch('/api/tasks/' + task.id + '/status', { method: 'PATCH', body: JSON.stringify({ status: v }) }); reloadTasks(); }
                         catch (err) { addToast(err.message, 'error'); }
-                      }}>
-                      ${['backlog','todo','in_progress','review','done','failed'].map(s => html`<option key=${s} value=${s}>${s.replace('_',' ')}</option>`)}
-                    </select>
+                      }} />
                   </div>
                   <div class="task-detail-meta-item">
                     <span class="task-detail-meta-label">Priority</span>
-                    <select class="form-select inline-select" value=${priority}
-                      style="color:${pc};background:color-mix(in srgb, ${pc} 12%, transparent);border-color:color-mix(in srgb, ${pc} 30%, transparent);"
-                      onChange=${async (e) => {
-                        const v = e.target.value; setPriority(v);
+                    <${Dropdown}
+                      value=${priority}
+                      options=${priorityOpts}
+                      ariaLabel="Priority"
+                      style=${`color:${pc};background:color-mix(in srgb, ${pc} 12%, transparent);border-color:color-mix(in srgb, ${pc} 30%, transparent);`}
+                      onChange=${async (v) => {
+                        setPriority(v);
                         try { await apiFetch('/api/tasks/' + task.id, { method: 'PATCH', body: JSON.stringify({ priority: v }) }); reloadTasks(); }
                         catch (err) { addToast(err.message, 'error'); }
-                      }}>
-                      ${PRIORITY_OPTIONS.map(p => html`<option key=${p} value=${p}>${p}</option>`)}
-                    </select>
+                      }} />
                   </div>
                   <div class="task-detail-meta-item">
                     <span class="task-detail-meta-label">Project</span>
-                    <select class="form-select inline-select" value=${projectId}
+                    <${Dropdown}
+                      value=${projectId}
+                      options=${projectOpts}
+                      ariaLabel="Project"
                       style="color:var(--accent-light);background:rgba(139,92,246,0.08);border-color:rgba(139,92,246,0.25);"
-                      onChange=${async (e) => {
-                        const v = e.target.value; setProjectId(v);
+                      onChange=${async (v) => {
+                        setProjectId(v);
                         try { await apiFetch('/api/tasks/' + task.id, { method: 'PATCH', body: JSON.stringify({ project_id: v || null }) }); reloadTasks(); }
                         catch (err) { addToast(err.message, 'error'); }
-                      }}>
-                      <option value="">None</option>
-                      ${projects.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
-                    </select>
+                      }} />
+                  </div>
+                `;
+              })()}
+              <div class="task-detail-meta-item">
+                <span class="task-detail-meta-label">Recurrence</span>
+                <${Dropdown}
+                  value=${task.recurrence || ''}
+                  ariaLabel="Recurrence"
+                  options=${[
+                    { value: '', label: 'None' },
+                    { value: 'daily', label: 'Daily' },
+                    { value: 'weekly', label: 'Weekly' },
+                    { value: 'monthly', label: 'Monthly' },
+                  ]}
+                  onChange=${async (v) => {
+                    const next = v || null;
+                    try {
+                      await apiFetch('/api/tasks/' + task.id, {
+                        method: 'PATCH',
+                        body: JSON.stringify({ recurrence: next }),
+                      });
+                      reloadTasks();
+                    } catch (err) { addToast(err.message, 'error'); }
+                  }} />
+              </div>
+              ${(() => {
+                const due = dueDateMeta(task);
+                const dueColor = due?.state === 'overdue' ? '#ef4444'
+                  : due?.state === 'due-soon' ? '#f59e0b'
+                  : 'var(--text-secondary)';
+                return html`
+                  <div class="task-detail-meta-item">
+                    <span class="task-detail-meta-label">Due Date</span>
+                    <div style="display:flex;align-items:center;gap:6px;">
+                      <input type="date" class="form-input inline-date"
+                        value=${task.due_date || ''}
+                        style="color:${dueColor};border-color:color-mix(in srgb, ${dueColor} 30%, transparent);background:color-mix(in srgb, ${dueColor} 10%, transparent);flex:1;min-width:0;"
+                        onChange=${async (e) => {
+                          const v = e.target.value || null;
+                          try {
+                            await apiFetch('/api/tasks/' + task.id, {
+                              method: 'PATCH',
+                              body: JSON.stringify({ due_date: v }),
+                            });
+                            reloadTasks();
+                          } catch (err) { addToast(err.message, 'error'); }
+                        }} />
+                      ${task.due_date && html`
+                        <button class="ghost" title="Clear due date"
+                          style="padding:2px 6px;font-size:11px;"
+                          onClick=${async () => {
+                            try {
+                              await apiFetch('/api/tasks/' + task.id, {
+                                method: 'PATCH',
+                                body: JSON.stringify({ due_date: null }),
+                              });
+                              reloadTasks();
+                            } catch (err) { addToast(err.message, 'error'); }
+                          }}>\u2715</button>
+                      `}
+                    </div>
                   </div>
                 `;
               })()}
@@ -763,10 +1159,11 @@ const BOARD_COLUMNS = [
 
 function TaskCard({ task, projects, onDragStart, onClick }) {
   const project = projects.find(p => p.id === task.project_id);
+  const due = dueDateMeta(task);
 
   return html`
     <div
-      class="task-card"
+      class="task-card ${due ? `due-${due.state}` : ''}"
       draggable="true"
       onDragStart=${(e) => {
         e.dataTransfer.setData('text/plain', task.id);
@@ -786,10 +1183,41 @@ function TaskCard({ task, projects, onDragStart, onClick }) {
         ${task.agent_profile_id && html`
           <span class="task-badge agent">\u2699 agent</span>
         `}
+        ${due && html`
+          <span class="task-badge due-badge due-${due.state}" title=${`마감일 ${due.formatted}`}>
+            \u23F0 ${due.label}
+          </span>
+        `}
+        ${task.recurrence && html`
+          <span class="task-badge recurrence" title=${`반복: ${task.recurrence}`}>\u21BB ${task.recurrence}</span>
+        `}
       </div>
       ${task.updated_at && html`
         <div class="task-card-meta">${timeAgo(task.updated_at || task.created_at)}</div>
       `}
+    </div>
+  `;
+}
+
+// Tab toggle shown in both Board and Calendar toolbars so the user can flip
+// between the two views without leaving the task workflow.
+function BoardModeTabs({ active }) {
+  return html`
+    <div class="board-mode-tabs" role="tablist">
+      <button
+        role="tab"
+        class="board-mode-tab ${active === 'board' ? 'active' : ''}"
+        aria-selected=${active === 'board'}
+        onClick=${() => navigate('board')}>
+        \u2592 Board
+      </button>
+      <button
+        role="tab"
+        class="board-mode-tab ${active === 'calendar' ? 'active' : ''}"
+        aria-selected=${active === 'calendar'}
+        onClick=${() => navigate('calendar')}>
+        \u2637 Calendar
+      </button>
     </div>
   `;
 }
@@ -800,7 +1228,10 @@ function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadT
   const [detailTask, setDetailTask] = useState(null);
   const [filterProject, setFilterProject] = useState('');
   const [filterPriority, setFilterPriority] = useState('');
+  const [filterDue, setFilterDue] = useState('');
+  const [sortMode, setSortMode] = useState('manual'); // 'manual' | 'due-asc' | 'due-desc' | 'priority'
   const [dragTarget, setDragTarget] = useState(null);
+  const nowTick = useNowTick(60_000);
 
   // Listen for 'N' key shortcut to open new task modal
   useEffect(() => {
@@ -809,13 +1240,38 @@ function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadT
     return () => window.removeEventListener('palantir:new-task', handler);
   }, []);
 
+  // Helper: days from today to a YYYY-MM-DD string (local time, midnight-aligned)
+  const daysUntilDue = (due) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(due || '');
+    if (!m) return null;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return Math.round((d - today) / 86400000);
+  };
+
   const filtered = useMemo(() => {
     return tasks.filter(t => {
       if (filterProject && t.project_id !== filterProject) return false;
       if (filterPriority && t.priority !== filterPriority) return false;
+      if (filterDue) {
+        if (filterDue === 'no-due') {
+          if (t.due_date) return false;
+        } else {
+          const days = daysUntilDue(t.due_date);
+          if (days === null) return false;
+          // 'done' tasks are excluded from due-state filters (no longer actionable)
+          if (t.status === 'done') return false;
+          if (filterDue === 'overdue' && days >= 0) return false;
+          if (filterDue === 'today' && days !== 0) return false;
+          if (filterDue === 'this-week' && (days < 0 || days > 6)) return false;
+        }
+      }
       return true;
     });
-  }, [tasks, filterProject, filterPriority]);
+    // nowTick re-runs the filter at every tick so date-based filters
+    // (overdue/today/this-week) update without a server reload.
+  }, [tasks, filterProject, filterPriority, filterDue, nowTick]);
 
   const columnTasks = useMemo(() => {
     const map = {};
@@ -824,10 +1280,42 @@ function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadT
       const col = map[t.status] ? t.status : 'backlog';
       map[col].push(t);
     });
-    // Sort by sort_order within each column
-    Object.values(map).forEach(arr => arr.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)));
+    // Comparators. Manual = persisted sort_order (drag-friendly).
+    // Other modes are display-only — drag-to-reorder is disabled in those modes.
+    const PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
+    const cmpManual = (a, b) => (a.sort_order || 0) - (b.sort_order || 0);
+    const cmpDueAsc = (a, b) => {
+      const da = daysUntilDue(a.due_date);
+      const db = daysUntilDue(b.due_date);
+      // null (no due date) sinks to bottom
+      if (da === null && db === null) return cmpManual(a, b);
+      if (da === null) return 1;
+      if (db === null) return -1;
+      if (da !== db) return da - db;
+      return cmpManual(a, b);
+    };
+    const cmpDueDesc = (a, b) => {
+      const da = daysUntilDue(a.due_date);
+      const db = daysUntilDue(b.due_date);
+      if (da === null && db === null) return cmpManual(a, b);
+      if (da === null) return 1;
+      if (db === null) return -1;
+      if (da !== db) return db - da;
+      return cmpManual(a, b);
+    };
+    const cmpPriority = (a, b) => {
+      const pa = PRIORITY_RANK[a.priority] ?? 99;
+      const pb = PRIORITY_RANK[b.priority] ?? 99;
+      if (pa !== pb) return pa - pb;
+      return cmpManual(a, b);
+    };
+    const cmp = sortMode === 'due-asc' ? cmpDueAsc
+      : sortMode === 'due-desc' ? cmpDueDesc
+      : sortMode === 'priority' ? cmpPriority
+      : cmpManual;
+    Object.values(map).forEach(arr => arr.sort(cmp));
     return map;
-  }, [filtered]);
+  }, [filtered, sortMode, nowTick]);
 
   const handleDrop = async (columnId, e) => {
     e.preventDefault();
@@ -902,7 +1390,8 @@ function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadT
   return html`
     <div class="board-view">
       <div class="board-toolbar">
-        <h1 class="board-toolbar-title">Task Board</h1>
+        <h1 class="board-toolbar-title">Tasks</h1>
+        <${BoardModeTabs} active="board" />
         <div class="board-toolbar-spacer"></div>
         <div class="board-filter">
           <select class="form-select" value=${filterProject} onChange=${e => setFilterProject(e.target.value)}>
@@ -915,6 +1404,21 @@ function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadT
             <option value="medium">Medium</option>
             <option value="high">High</option>
             <option value="critical">Critical</option>
+          </select>
+          <select class="form-select" value=${filterDue} onChange=${e => setFilterDue(e.target.value)}
+            title="마감일 필터">
+            <option value="">전체 마감일</option>
+            <option value="overdue">\u23F0 지난 마감</option>
+            <option value="today">오늘 마감</option>
+            <option value="this-week">이번 주 (7일 이내)</option>
+            <option value="no-due">마감일 없음</option>
+          </select>
+          <select class="form-select" value=${sortMode} onChange=${e => setSortMode(e.target.value)}
+            title="컬럼 내 카드 정렬 (드래그는 컬럼 이동에만 사용)">
+            <option value="manual">수동 정렬</option>
+            <option value="due-asc">마감일 \u2191 (임박순)</option>
+            <option value="due-desc">마감일 \u2193 (먼 순)</option>
+            <option value="priority">우선순위순</option>
           </select>
         </div>
         <button class="primary" onClick=${() => setShowNewTask(true)}>+ New Task</button>
@@ -972,6 +1476,144 @@ function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadT
           runs=${runs}
           onOpenRun=${onOpenRun}
           onExecute=${handleExecute}
+          reloadTasks=${reloadTasks}
+        />
+      `}
+    </div>
+  `;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Calendar View — month grid showing tasks by due_date
+// ─────────────────────────────────────────────────────────────────────────────
+
+function CalendarView({ tasks, projects, agents, runs, reloadTasks, onOpenRun }) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const [cursor, setCursor] = useState(() => new Date(today.getFullYear(), today.getMonth(), 1));
+  const [detailTask, setDetailTask] = useState(null);
+  const [filterProject, setFilterProject] = useState('');
+  useNowTick(60_000);
+
+  // Filter tasks by project before grouping by date
+  const filteredTasks = useMemo(() => {
+    if (!filterProject) return tasks;
+    return tasks.filter(t => t.project_id === filterProject);
+  }, [tasks, filterProject]);
+
+  // Build 6-week grid starting from the Sunday on/before the 1st of cursor month
+  const grid = useMemo(() => {
+    const first = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+    const start = new Date(first);
+    start.setDate(first.getDate() - first.getDay()); // back to Sunday
+    const cells = [];
+    for (let i = 0; i < 42; i++) {
+      const d = new Date(start);
+      d.setDate(start.getDate() + i);
+      const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      cells.push({
+        date: d,
+        iso,
+        inMonth: d.getMonth() === cursor.getMonth(),
+        isToday: d.getTime() === today.getTime(),
+      });
+    }
+    return cells;
+  }, [cursor]);
+
+  // Group tasks by due_date string for fast lookup
+  const tasksByDate = useMemo(() => {
+    const map = {};
+    filteredTasks.forEach(t => {
+      if (!t.due_date) return;
+      (map[t.due_date] ||= []).push(t);
+    });
+    // Sort within day by priority (critical first), then title
+    const PRI = { critical: 0, high: 1, medium: 2, low: 3 };
+    Object.values(map).forEach(arr => arr.sort((a, b) => {
+      const pa = PRI[a.priority] ?? 99;
+      const pb = PRI[b.priority] ?? 99;
+      if (pa !== pb) return pa - pb;
+      return (a.title || '').localeCompare(b.title || '');
+    }));
+    return map;
+  }, [filteredTasks]);
+
+  const monthLabel = `${cursor.getFullYear()}년 ${cursor.getMonth() + 1}월`;
+  const goPrev = () => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1));
+  const goNext = () => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1));
+  const goToday = () => setCursor(new Date(today.getFullYear(), today.getMonth(), 1));
+
+  const currentDetailTask = detailTask ? tasks.find(t => t.id === detailTask.id) || detailTask : null;
+  const weekdayLabels = ['일', '월', '화', '수', '목', '금', '토'];
+
+  return html`
+    <div class="calendar-view">
+      <div class="board-toolbar">
+        <h1 class="board-toolbar-title">Tasks</h1>
+        <${BoardModeTabs} active="calendar" />
+        <div class="board-toolbar-spacer"></div>
+        <div class="board-filter">
+          <select class="form-select" value=${filterProject} onChange=${e => setFilterProject(e.target.value)}>
+            <option value="">All Projects</option>
+            ${projects.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
+          </select>
+        </div>
+        <div class="calendar-nav">
+          <button class="ghost" onClick=${goPrev} title="이전 달">\u2039</button>
+          <button class="ghost" onClick=${goToday}>오늘</button>
+          <button class="ghost" onClick=${goNext} title="다음 달">\u203A</button>
+          <span class="calendar-month-label">${monthLabel}</span>
+        </div>
+      </div>
+      <div class="calendar-grid">
+        <div class="calendar-weekday-row">
+          ${weekdayLabels.map((w, i) => html`
+            <div key=${w} class="calendar-weekday ${i === 0 ? 'sun' : ''} ${i === 6 ? 'sat' : ''}">${w}</div>
+          `)}
+        </div>
+        <div class="calendar-cells">
+          ${grid.map(cell => {
+            const dayTasks = tasksByDate[cell.iso] || [];
+            return html`
+              <div key=${cell.iso}
+                class="calendar-cell ${cell.inMonth ? '' : 'out-month'} ${cell.isToday ? 'today' : ''}">
+                <div class="calendar-cell-header">
+                  <span class="calendar-cell-day">${cell.date.getDate()}</span>
+                  ${dayTasks.length > 0 && html`
+                    <span class="calendar-cell-count">${dayTasks.length}</span>
+                  `}
+                </div>
+                <div class="calendar-cell-tasks">
+                  ${dayTasks.slice(0, 4).map(t => {
+                    const due = dueDateMeta(t);
+                    return html`
+                      <button key=${t.id}
+                        class="calendar-task ${due ? `due-${due.state}` : ''} ${t.status === 'done' ? 'is-done' : ''}"
+                        title=${t.title}
+                        onClick=${() => setDetailTask(t)}>
+                        ${t.title}
+                      </button>
+                    `;
+                  })}
+                  ${dayTasks.length > 4 && html`
+                    <div class="calendar-task-more">+${dayTasks.length - 4} more</div>
+                  `}
+                </div>
+              </div>
+            `;
+          })}
+        </div>
+      </div>
+      ${currentDetailTask && html`
+        <${TaskDetailPanel}
+          task=${currentDetailTask}
+          onClose=${() => setDetailTask(null)}
+          projects=${projects}
+          agents=${agents}
+          runs=${runs}
+          onOpenRun=${onOpenRun}
+          onExecute=${async () => {}}
           reloadTasks=${reloadTasks}
         />
       `}
@@ -1092,7 +1734,7 @@ function DirectoryPicker({ value, onSelect }) {
 // Projects View
 // ─────────────────────────────────────────────────────────────────────────────
 
-function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun }) {
+function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTask }) {
   useEscape(!!project, onClose);
   if (!project) return null;
 
@@ -1185,17 +1827,18 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun }) {
                       const taskRuns = runs.filter(r => r.task_id === t.id);
                       const runCount = taskRuns.length;
                       return html`
-                        <div key=${t.id} class="project-task-item">
+                        <div key=${t.id} class="project-task-item clickable"
+                          role="button" tabindex="0"
+                          onClick=${() => { if (onOpenTask) onOpenTask(t); }}
+                          onKeyDown=${(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              if (onOpenTask) onOpenTask(t);
+                            }
+                          }}>
                           <span class="project-task-item-title">${t.title}</span>
                           <span class="project-task-item-right">
                             ${runCount > 0 && html`<span class="project-task-run-count">${runCount} run${runCount !== 1 ? 's' : ''}</span>`}
-                            ${taskRuns.length > 0 && html`
-                              <button class="ghost project-task-detail-btn" onClick=${() => {
-                                const latestRun = taskRuns.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
-                                onOpenRun(latestRun);
-                                onClose();
-                              }}>Detail</button>
-                            `}
                           </span>
                         </div>
                       `;
@@ -1211,7 +1854,7 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun }) {
   `;
 }
 
-function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun }) {
+function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun, onOpenTask }) {
   const [showNew, setShowNew] = useState(false);
   const [detailProject, setDetailProject] = useState(null);
   const [name, setName] = useState('');
@@ -1302,6 +1945,7 @@ function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun }) {
           runs=${runs}
           onClose=${() => setDetailProject(null)}
           onOpenRun=${onOpenRun}
+          onOpenTask=${onOpenTask}
         />
       `}
     </div>
@@ -2633,6 +3277,7 @@ function ManagerView({ manager, runs, tasks, projects }) {
   const [attachedImages, setAttachedImages] = useState([]);
   const messagesRef = useRef(null);
   const fileInputRef = useRef(null);
+  const inputRef = useRef(null);
 
   // Auto-scroll to bottom on new events
   useEffect(() => {
@@ -2712,6 +3357,7 @@ function ManagerView({ manager, runs, tasks, projects }) {
     if ((!text && attachedImages.length === 0) || sending) return;
     setSending(true);
     setInput('');
+    if (inputRef.current) inputRef.current.style.height = '';
     const imagesToSend = attachedImages.map(img => ({ data: img.data, media_type: img.media_type }));
     setAttachedImages([]);
     try {
@@ -2903,6 +3549,7 @@ function ManagerView({ manager, runs, tasks, projects }) {
                 </svg>
               </button>
               <textarea
+                ref=${inputRef}
                 class="manager-input"
                 placeholder="Message the manager..."
                 value=${input}
@@ -3096,6 +3743,10 @@ function App() {
   const { sessions: claudeSessions } = useClaudeSessions();
   const manager = useManager();
   const [inspectRun, setInspectRun] = useState(null);
+  // Global task detail popup — opened from Dashboard, ProjectDetailModal, etc.
+  // BoardView/CalendarView still manage their own local detail state because
+  // they have richer interactions (drag, execute, etc.).
+  const [inspectTask, setInspectTask] = useState(null);
   const [showPalette, setShowPalette] = useState(false);
 
   // Helper to look up task title for a run (used in notifications)
@@ -3190,12 +3841,25 @@ function App() {
         />
       `;
     }
+    if (routeBase === 'calendar') {
+      if (tasksLoading) return html`<${Loading} />`;
+      return html`
+        <${CalendarView}
+          tasks=${tasks}
+          projects=${projects}
+          agents=${agents}
+          runs=${runs}
+          reloadTasks=${reloadTasks}
+          onOpenRun=${(run) => setInspectRun(run)}
+        />
+      `;
+    }
     if (routeBase === 'sessions') {
       return html`<${SessionsView} />`;
     }
     if (routeBase === 'projects') {
       if (projectsLoading) return html`<${Loading} />`;
-      return html`<${ProjectsView} projects=${projects} tasks=${tasks} runs=${runs} reloadProjects=${reloadProjects} onOpenRun=${(run) => setInspectRun(run)} />`;
+      return html`<${ProjectsView} projects=${projects} tasks=${tasks} runs=${runs} reloadProjects=${reloadProjects} onOpenRun=${(run) => setInspectRun(run)} onOpenTask=${(task) => setInspectTask(task)} />`;
     }
     if (routeBase === 'agents') {
       return html`<${AgentsView} agents=${agents} loading=${agentsLoading} reloadAgents=${reloadAgents} />`;
@@ -3213,6 +3877,7 @@ function App() {
         tasks=${tasks}
         runs=${runs}
         onOpenRun=${(run) => setInspectRun(run)}
+        onOpenTask=${(task) => setInspectTask(task)}
         onDeleteRun=${async (id) => {
           try {
             await apiFetch('/api/runs/' + id, { method: 'DELETE' });
@@ -3220,9 +3885,15 @@ function App() {
           } catch (err) { addToast(err.message, 'error'); }
         }}
         claudeSessions=${claudeSessions}
+        manager=${manager}
       />
     `;
   };
+
+  // Always-fresh task reference (so live updates flow into the open popup)
+  const currentInspectTask = inspectTask
+    ? tasks.find(t => t.id === inspectTask.id) || inspectTask
+    : null;
 
   return html`
     <div class="v2-shell">
@@ -3234,6 +3905,18 @@ function App() {
         <${RunInspector}
           run=${inspectRun}
           onClose=${() => setInspectRun(null)}
+        />
+      `}
+      ${currentInspectTask && html`
+        <${TaskDetailPanel}
+          task=${currentInspectTask}
+          onClose=${() => setInspectTask(null)}
+          projects=${projects}
+          agents=${agents}
+          runs=${runs}
+          onOpenRun=${(run) => { setInspectTask(null); setInspectRun(run); }}
+          onExecute=${async () => {}}
+          reloadTasks=${reloadTasks}
         />
       `}
       <${CommandPalette} open=${showPalette} onClose=${() => setShowPalette(false)} />
