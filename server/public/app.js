@@ -142,7 +142,7 @@ function EmptyState({ icon, text, sub }) {
 // Dashboard View
 // ─────────────────────────────────────────────────────────────────────────────
 
-function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions, manager }) {
+function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun, claudeSessions, manager }) {
   // Tick every minute so overdue/due-soon triage rolls over without a reload.
   // The hook itself returns a counter we don't read; calling it is enough to
   // force a re-render at each tick.
@@ -311,7 +311,10 @@ function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions, ma
             class="triage-item"
             onClick=${() => {
               if (item.type === 'manager') { navigate('manager'); return; }
-              if (item.type === 'overdue' || item.type === 'due-soon') { navigate('board'); return; }
+              if (item.type === 'overdue' || item.type === 'due-soon') {
+                if (item.task && onOpenTask) onOpenTask(item.task);
+                return;
+              }
               if (item.run) onOpenRun(item.run);
             }}
           >
@@ -347,8 +350,8 @@ function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions, ma
                 </button>
               `}
               ${(item.type === 'overdue' || item.type === 'due-soon') && html`
-                <button class="ghost" onClick=${(e) => { e.stopPropagation(); navigate('board'); }}>
-                  Board
+                <button class="ghost" onClick=${(e) => { e.stopPropagation(); if (item.task && onOpenTask) onOpenTask(item.task); }}>
+                  Open
                 </button>
               `}
             </div>
@@ -1720,7 +1723,7 @@ function DirectoryPicker({ value, onSelect }) {
 // Projects View
 // ─────────────────────────────────────────────────────────────────────────────
 
-function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun }) {
+function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTask }) {
   useEscape(!!project, onClose);
   if (!project) return null;
 
@@ -1813,17 +1816,18 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun }) {
                       const taskRuns = runs.filter(r => r.task_id === t.id);
                       const runCount = taskRuns.length;
                       return html`
-                        <div key=${t.id} class="project-task-item">
+                        <div key=${t.id} class="project-task-item clickable"
+                          role="button" tabindex="0"
+                          onClick=${() => { if (onOpenTask) { onOpenTask(t); onClose(); } }}
+                          onKeyDown=${(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              if (onOpenTask) { onOpenTask(t); onClose(); }
+                            }
+                          }}>
                           <span class="project-task-item-title">${t.title}</span>
                           <span class="project-task-item-right">
                             ${runCount > 0 && html`<span class="project-task-run-count">${runCount} run${runCount !== 1 ? 's' : ''}</span>`}
-                            ${taskRuns.length > 0 && html`
-                              <button class="ghost project-task-detail-btn" onClick=${() => {
-                                const latestRun = taskRuns.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
-                                onOpenRun(latestRun);
-                                onClose();
-                              }}>Detail</button>
-                            `}
                           </span>
                         </div>
                       `;
@@ -1839,7 +1843,7 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun }) {
   `;
 }
 
-function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun }) {
+function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun, onOpenTask }) {
   const [showNew, setShowNew] = useState(false);
   const [detailProject, setDetailProject] = useState(null);
   const [name, setName] = useState('');
@@ -1930,6 +1934,7 @@ function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun }) {
           runs=${runs}
           onClose=${() => setDetailProject(null)}
           onOpenRun=${onOpenRun}
+          onOpenTask=${onOpenTask}
         />
       `}
     </div>
@@ -3727,6 +3732,10 @@ function App() {
   const { sessions: claudeSessions } = useClaudeSessions();
   const manager = useManager();
   const [inspectRun, setInspectRun] = useState(null);
+  // Global task detail popup — opened from Dashboard, ProjectDetailModal, etc.
+  // BoardView/CalendarView still manage their own local detail state because
+  // they have richer interactions (drag, execute, etc.).
+  const [inspectTask, setInspectTask] = useState(null);
   const [showPalette, setShowPalette] = useState(false);
 
   // Helper to look up task title for a run (used in notifications)
@@ -3839,7 +3848,7 @@ function App() {
     }
     if (routeBase === 'projects') {
       if (projectsLoading) return html`<${Loading} />`;
-      return html`<${ProjectsView} projects=${projects} tasks=${tasks} runs=${runs} reloadProjects=${reloadProjects} onOpenRun=${(run) => setInspectRun(run)} />`;
+      return html`<${ProjectsView} projects=${projects} tasks=${tasks} runs=${runs} reloadProjects=${reloadProjects} onOpenRun=${(run) => setInspectRun(run)} onOpenTask=${(task) => setInspectTask(task)} />`;
     }
     if (routeBase === 'agents') {
       return html`<${AgentsView} agents=${agents} loading=${agentsLoading} reloadAgents=${reloadAgents} />`;
@@ -3857,6 +3866,7 @@ function App() {
         tasks=${tasks}
         runs=${runs}
         onOpenRun=${(run) => setInspectRun(run)}
+        onOpenTask=${(task) => setInspectTask(task)}
         onDeleteRun=${async (id) => {
           try {
             await apiFetch('/api/runs/' + id, { method: 'DELETE' });
@@ -3869,6 +3879,11 @@ function App() {
     `;
   };
 
+  // Always-fresh task reference (so live updates flow into the open popup)
+  const currentInspectTask = inspectTask
+    ? tasks.find(t => t.id === inspectTask.id) || inspectTask
+    : null;
+
   return html`
     <div class="v2-shell">
       <${NavSidebar} route=${route} connected=${sseConnected} />
@@ -3879,6 +3894,18 @@ function App() {
         <${RunInspector}
           run=${inspectRun}
           onClose=${() => setInspectRun(null)}
+        />
+      `}
+      ${currentInspectTask && html`
+        <${TaskDetailPanel}
+          task=${currentInspectTask}
+          onClose=${() => setInspectTask(null)}
+          projects=${projects}
+          agents=${agents}
+          runs=${runs}
+          onOpenRun=${(run) => { setInspectTask(null); setInspectRun(run); }}
+          onExecute=${async () => {}}
+          reloadTasks=${reloadTasks}
         />
       `}
       <${CommandPalette} open=${showPalette} onClose=${() => setShowPalette(false)} />

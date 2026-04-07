@@ -2116,8 +2116,17 @@ body {
   transition: background 0.12s ease;
 }
 
+.project-task-item.clickable {
+  cursor: pointer;
+}
+
 .project-task-item:hover {
   background: var(--bg-hover);
+}
+
+.project-task-item.clickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .project-task-item-title {
