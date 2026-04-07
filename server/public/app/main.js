@@ -20,7 +20,7 @@ import * as preactHooksNs from '../vendor/hooks.module.js';
 import htmFactory from '../vendor/htm.module.js';
 
 import { formatDuration, formatTime, timeAgo } from './lib/format.js';
-import { renderMarkdown } from './lib/markdown.js';
+import { renderMarkdown, configureMarked } from './lib/markdown.js';
 import { apiFetch } from './lib/api.js';
 
 // Re-expose the same globals app.js currently consumes. The shape mirrors
@@ -38,6 +38,12 @@ window.formatTime = formatTime;
 window.timeAgo = timeAgo;
 window.renderMarkdown = renderMarkdown;
 window.apiFetch = apiFetch;
+
+// Apply marked's global options once at boot. The CDN <script> for marked
+// is `defer`, same as this module, and sits earlier in index.html, so by the
+// time main.js runs `window.marked` is already loaded. configureMarked() is
+// a no-op if it isn't, so timing failures degrade gracefully.
+configureMarked();
 
 // Load app.js as a classic script after the globals are in place. We use a
 // dynamic <script> tag (rather than `import './app.js'`) because app.js is
