@@ -1,6 +1,12 @@
 const express = require('express');
 
-function createUsageRouter({ codexService, providerService, fetchAnthropicUsage, fetchGeminiUsage }) {
+/**
+ * Usage routes — thin layer on top of the provider registry.
+ *
+ * Wire format is locked by server/tests/usage-contract.test.js. Any change
+ * here that alters response shape will fail those tests.
+ */
+function createUsageRouter({ codexService, providerRegistry }) {
   const router = express.Router();
 
   router.get('/codex-status', async (req, res, next) => {
@@ -12,7 +18,7 @@ function createUsageRouter({ codexService, providerService, fetchAnthropicUsage,
         updatedAt: result.updatedAt,
         account: result.account,
         requiresOpenaiAuth: result.requiresOpenaiAuth,
-        accountError: result.accountError
+        accountError: result.accountError,
       });
     } catch (err) {
       next(err);
@@ -21,34 +27,12 @@ function createUsageRouter({ codexService, providerService, fetchAnthropicUsage,
 
   router.get('/providers', async (req, res, next) => {
     try {
-      const registeredProviders = providerService
-        ? await providerService.listRegisteredProviders()
+      const registeredProviders = providerRegistry
+        ? await providerRegistry.listRegistered()
         : [];
-      const providers = [];
-      if (registeredProviders.includes('openai')) {
-        providers.push(await codexService.getProviderStatus());
-      }
-      if (registeredProviders.includes('anthropic')) {
-        providers.push(await fetchAnthropicUsage(process.env.ANTHROPIC_API_KEY || ''));
-      }
-      if (registeredProviders.includes('google') || registeredProviders.includes('gemini')) {
-        providers.push(await fetchGeminiUsage(process.env.GEMINI_API_KEY || ''));
-      }
-      if (!providers.length && registeredProviders.length) {
-        registeredProviders.forEach((provider) => {
-          providers.push({
-            id: provider,
-            name: provider,
-            limits: [{
-              label: 'usage',
-              remainingPct: null,
-              resetAt: null,
-              errorMessage: 'Usage provider not configured'
-            }],
-            updatedAt: new Date().toISOString()
-          });
-        });
-      }
+      const providers = providerRegistry
+        ? await providerRegistry.fetchAllRegistered()
+        : [];
       res.json({ status: 'ok', providers, registeredProviders });
     } catch (err) {
       next(err);

@@ -1,4 +1,15 @@
-const { AppError } = require('../utils/errors');
+/**
+ * Anthropic provider adapter — OAuth API-key flavor.
+ *
+ * Calls the Anthropic OAuth usage endpoint with a plain ANTHROPIC_API_KEY.
+ * This is the "external" auth path (e.g. server-side workflows that ship an
+ * API key via env var). The Claude Code OAuth flow lives in claude-code.js
+ * and uses a different token source — do NOT collapse the two.
+ *
+ * Returns the canonical provider envelope: { id, name, limits[], updatedAt }.
+ */
+
+const { AppError } = require('../../utils/errors');
 
 const ANTHROPIC_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 
@@ -31,7 +42,7 @@ async function fetchAnthropicUsage(apiKey) {
       id: 'anthropic',
       name: 'claude',
       limits: [{ label: 'usage', remainingPct: null, resetAt: null, errorMessage: 'ANTHROPIC_API_KEY not set' }],
-      updatedAt: nowIso()
+      updatedAt: nowIso(),
     };
   }
 
@@ -40,8 +51,8 @@ async function fetchAnthropicUsage(apiKey) {
       Authorization: `Bearer ${apiKey}`,
       'anthropic-beta': 'oauth-2025-04-20',
       Accept: 'application/json',
-      'Content-Type': 'application/json'
-    }
+      'Content-Type': 'application/json',
+    },
   });
 
   if (!response.ok) {
@@ -58,7 +69,7 @@ async function fetchAnthropicUsage(apiKey) {
       const remainingPct = toRemainingPct({
         utilization: value.utilization,
         usedCredits: value.used_credits,
-        limit: value.monthly_limit
+        limit: value.monthly_limit,
       });
       const resetAt = parseResetAt(value.resets_at);
       limits.push({ label: key, remainingPct, resetAt });
@@ -70,7 +81,7 @@ async function fetchAnthropicUsage(apiKey) {
       label: 'usage',
       remainingPct: null,
       resetAt: null,
-      errorMessage: 'No usage data found'
+      errorMessage: 'No usage data found',
     });
   }
 
@@ -78,31 +89,8 @@ async function fetchAnthropicUsage(apiKey) {
     id: 'anthropic',
     name: 'claude',
     limits,
-    updatedAt: nowIso()
+    updatedAt: nowIso(),
   };
 }
 
-async function fetchGeminiUsage(apiKey) {
-  if (!apiKey) {
-    return {
-      id: 'google',
-      name: 'gemini',
-      limits: [{ label: 'usage', remainingPct: null, resetAt: null, errorMessage: 'GEMINI_API_KEY not set' }],
-      updatedAt: nowIso()
-    };
-  }
-
-  return {
-    id: 'google',
-    name: 'gemini',
-    limits: [{
-      label: 'usage',
-      remainingPct: null,
-      resetAt: null,
-      errorMessage: 'Gemini usage requires GCP quota APIs'
-    }],
-    updatedAt: nowIso()
-  };
-}
-
-module.exports = { fetchAnthropicUsage, fetchGeminiUsage };
+module.exports = { fetchAnthropicUsage };
