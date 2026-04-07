@@ -2633,6 +2633,7 @@ function ManagerView({ manager, runs, tasks, projects }) {
   const [attachedImages, setAttachedImages] = useState([]);
   const messagesRef = useRef(null);
   const fileInputRef = useRef(null);
+  const inputRef = useRef(null);
 
   // Auto-scroll to bottom on new events
   useEffect(() => {
@@ -2712,6 +2713,7 @@ function ManagerView({ manager, runs, tasks, projects }) {
     if ((!text && attachedImages.length === 0) || sending) return;
     setSending(true);
     setInput('');
+    if (inputRef.current) inputRef.current.style.height = '';
     const imagesToSend = attachedImages.map(img => ({ data: img.data, media_type: img.media_type }));
     setAttachedImages([]);
     try {
@@ -2903,6 +2905,7 @@ function ManagerView({ manager, runs, tasks, projects }) {
                 </svg>
               </button>
               <textarea
+                ref=${inputRef}
                 class="manager-input"
                 placeholder="Message the manager..."
                 value=${input}
