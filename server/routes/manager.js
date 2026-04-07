@@ -1,6 +1,11 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { BadRequestError } = require('../utils/errors');
+const { resolveManagerAuth, buildManagerSpawnEnv } = require('../services/authResolver');
+const {
+  buildManagerSystemPrompt: buildManagerSystemPromptModule,
+  buildInitialUserContext,
+} = require('../services/managerSystemPrompt');
 
 /**
  * Manager Session API routes.
@@ -16,20 +21,44 @@ const { BadRequestError } = require('../utils/errors');
  *   POST   /api/manager/stop    — Stop the active manager session
  */
 
-function createManagerRouter({ runService, streamJsonEngine, eventBus, projectService, agentProfileService }) {
+// PR3/PR4: map agent profile type → manager adapter type. Profiles whose
+// type is not in this set cannot back a manager session.
+const PROFILE_TYPE_TO_ADAPTER = {
+  'claude-code': 'claude-code',
+  'codex': 'codex',
+};
+
+function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, eventBus, projectService, agentProfileService }) {
   const router = express.Router();
+
+  // PR1a: ManagerAdapter seam. The factory is the single entrypoint for
+  // engine operations; routes never call streamJsonEngine directly anymore.
+  // streamJsonEngine is still in the param list for back-compat with tests
+  // that construct the router directly without passing the factory.
+  if (!managerAdapterFactory) {
+    const { createManagerAdapterFactory } = require('../services/managerAdapters');
+    managerAdapterFactory = createManagerAdapterFactory({ streamJsonEngine, runService });
+  }
 
   // Track the active manager run ID (only one manager at a time)
   let activeManagerRunId = null;
+  let activeManagerAdapter = null;
   let startingManager = false; // guard against concurrent /start requests
 
-  // On startup: mark any stale manager runs (from previous server instances) as stopped
+  // On startup: mark any stale manager runs (from previous server instances) as stopped.
+  // PR1a: route disposeSession() through every adapter so external resources
+  // (Codex temp files in PR4, etc.) get cleaned up — not just the Claude
+  // subprocess. Today no resources exist, so this is a no-op for Claude.
   try {
     const staleManagers = runService.listRuns({ status: 'running' })
       .concat(runService.listRuns({ status: 'queued' }))
       .concat(runService.listRuns({ status: 'needs_input' }))
       .filter(r => r.is_manager);
     for (const r of staleManagers) {
+      try {
+        const adapter = managerAdapterFactory.getAdapter(r.manager_adapter || 'claude-code');
+        adapter.disposeSession(r.id);
+      } catch { /* ignore */ }
       runService.updateRunStatus(r.id, 'stopped', { force: true });
     }
   } catch { /* ignore */ }
@@ -40,18 +69,30 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
   function getActiveManager() {
     if (!activeManagerRunId) return null;
 
+    const adapter = activeManagerAdapter || managerAdapterFactory.getAdapter('claude-code');
+
     // Check if still alive
-    const alive = streamJsonEngine.isAlive(activeManagerRunId);
+    const alive = adapter.isSessionAlive(activeManagerRunId);
     if (!alive) {
       // Check if it completed naturally
-      const exitCode = streamJsonEngine.detectExitCode(activeManagerRunId);
+      const exitCode = adapter.detectExitCode
+        ? adapter.detectExitCode(activeManagerRunId)
+        : null;
       if (exitCode !== null) {
         try {
           const status = exitCode === 0 ? 'completed' : 'failed';
           runService.updateRunStatus(activeManagerRunId, status, { force: true });
         } catch { /* already updated */ }
       }
+      // PR1b: ensure normalized session_ended fires even on natural exit, and
+      // free adapter-local bookkeeping. The adapter's hook is idempotent.
+      try {
+        if (adapter.emitSessionEndedIfNeeded) {
+          adapter.emitSessionEndedIfNeeded(activeManagerRunId, 'natural-exit');
+        }
+      } catch { /* ignore */ }
       activeManagerRunId = null;
+      activeManagerAdapter = null;
       return null;
     }
 
@@ -87,7 +128,39 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
       prompt,
       model,
       cwd,
+      agent_profile_id: agentProfileIdFromBody,
     } = req.body || {};
+
+    // PR3: resolve which adapter to use from agent_profile_id.
+    // Backward-compat: if no profile id is sent, default to 'claude-code' for
+    // one minor version so existing UI keeps working. The default will be
+    // removed once the picker (PR3 frontend) is in production.
+    let resolvedProfile = null;
+    let adapterType = 'claude-code';
+    try {
+      const profileId = agentProfileIdFromBody || 'claude-code';
+      if (agentProfileService) {
+        resolvedProfile = agentProfileService.getProfile(profileId);
+        const mapped = PROFILE_TYPE_TO_ADAPTER[resolvedProfile.type];
+        if (!mapped) {
+          startingManager = false;
+          return res.status(400).json({
+            error: 'manager_adapter_unsupported',
+            profileId: resolvedProfile.id,
+            profileType: resolvedProfile.type,
+            supported: Object.keys(PROFILE_TYPE_TO_ADAPTER),
+          });
+        }
+        adapterType = mapped;
+      }
+    } catch (err) {
+      startingManager = false;
+      return res.status(400).json({
+        error: 'manager_profile_not_found',
+        profileId: agentProfileIdFromBody || 'claude-code',
+        message: err.message,
+      });
+    }
 
     // Validate cwd if provided — must be under home directory or current working dir
     let safeCwd = cwd || process.cwd();
@@ -104,10 +177,52 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
       }
     }
 
+    // PR2/PR3: preflight auth using the chosen adapter type and the profile's
+    // env_allowlist (PR3). If canAuth=false, fail fast with structured info
+    // before any DB row is created.
+    //
+    // Fail-closed on malformed env_allowlist: a user who hand-edits the row
+    // and corrupts it must NOT silently re-enable all default credentials.
+    let envAllowlist;
+    if (resolvedProfile && resolvedProfile.env_allowlist) {
+      try {
+        const parsed = JSON.parse(resolvedProfile.env_allowlist);
+        if (!Array.isArray(parsed)) {
+          throw new Error('env_allowlist must be a JSON array');
+        }
+        envAllowlist = parsed;
+      } catch (parseErr) {
+        startingManager = false;
+        return res.status(400).json({
+          error: 'manager_profile_env_allowlist_invalid',
+          profileId: resolvedProfile.id,
+          message: parseErr.message,
+          raw: resolvedProfile.env_allowlist,
+        });
+      }
+    } else {
+      // No profile resolved (back-compat path with no agent_profile_id) —
+      // fall through to the resolver's defaults.
+      envAllowlist = undefined;
+    }
+    const authCtx = resolveManagerAuth(adapterType, { envAllowlist });
+    if (!authCtx.canAuth) {
+      startingManager = false;
+      return res.status(400).json({
+        error: 'manager_auth_unavailable',
+        adapter: adapterType,
+        profileId: resolvedProfile ? resolvedProfile.id : null,
+        sources: authCtx.sources,
+        diagnostics: authCtx.diagnostics,
+      });
+    }
+
     // Create a run record via service (eventBus will fire)
     const run = runService.createRun({
       is_manager: true,
       prompt: prompt || 'Manager session',
+      agent_profile_id: resolvedProfile ? resolvedProfile.id : null,
+      manager_adapter: adapterType,
     });
     const runId = run.id;
 
@@ -128,19 +243,45 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
       }
     } catch { /* ignore */ }
 
-    // Build system prompt for the Manager role
-    const systemPrompt = buildManagerSystemPrompt(runSummary, projectList, agentList);
+    // PR4: build system prompt via the dedicated module so each adapter can
+    // contribute its own guardrails section. The dynamic context (run summary,
+    // project/agent lists) is NOT in the system prompt anymore — it goes in
+    // the first user message so Codex's model_instructions_file caching is
+    // preserved across turns.
+    const adapter = managerAdapterFactory.getAdapter(adapterType);
+    const port = process.env.PORT || 4177;
+    const token = process.env.PALANTIR_TOKEN;
+    const systemPrompt = buildManagerSystemPromptModule({ adapter, port, token });
+    const initialUserContext = buildInitialUserContext({
+      runSummary,
+      projectList,
+      agentList,
+      userPrompt: prompt || 'You are now active as the Palantir Manager. Await instructions.',
+    });
+
+    // PR4: finally propagate the filtered env to the spawned subprocess.
+    // buildManagerSpawnEnv strips credential-like vars that are NOT on the
+    // profile's env_allowlist, then layers resolved auth env on top. Tool
+    // CLIs still inherit PATH/HOME/etc., but cross-vendor credentials can
+    // no longer leak.
+    const spawnEnv = buildManagerSpawnEnv({
+      authEnv: authCtx.env,
+      envAllowlist,
+    });
 
     try {
-      const result = streamJsonEngine.spawnAgent(runId, {
-        prompt: prompt || 'You are now active as the Palantir Manager. Await instructions.',
+      const { sessionRef } = adapter.startSession(runId, {
+        // For Claude (persistent process) the prompt argument is the FIRST
+        // user message piped via stdin during spawn. For Codex (stateless)
+        // it is ignored — we'll send the same content as the first runTurn
+        // immediately below.
+        prompt: initialUserContext,
         cwd: safeCwd,
         systemPrompt,
-        permissionMode: 'bypassPermissions',
-        allowedTools: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebSearch', 'WebFetch'],
         model: model || undefined,
-        isManager: true,
+        env: spawnEnv,
       });
+      const result = sessionRef;
 
       // Mark as started
       runService.markRunStarted(runId, {
@@ -150,13 +291,25 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
       });
 
       activeManagerRunId = runId;
+      activeManagerAdapter = adapter;
+
+      // PR4 / D2: for Codex, startSession is the LIGHT path (just writes the
+      // instructions file). The first turn is launched here so the user sees
+      // the manager pick up the initial context immediately.
+      if (adapter.capabilities && adapter.capabilities.persistentProcess === false) {
+        try {
+          adapter.runTurn(runId, { text: initialUserContext });
+        } catch (err) {
+          console.warn(`[manager] failed to launch first Codex turn: ${err.message}`);
+        }
+      }
 
       if (eventBus) {
         eventBus.emit('manager:started', { runId });
       }
 
       const updatedRun = runService.getRun(runId);
-      res.status(201).json({ run: updatedRun, pid: result.pid });
+      res.status(201).json({ run: updatedRun, pid: result && result.pid });
     } catch (error) {
       // Cleanup on failure
       try {
@@ -190,8 +343,9 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
       ? images.filter(img => img && typeof img.data === 'string' && typeof img.media_type === 'string')
       : undefined;
 
-    const sent = streamJsonEngine.sendInput(activeManagerRunId, text || '', validImages);
-    if (!sent) {
+    const adapter = activeManagerAdapter || managerAdapterFactory.getAdapter('claude-code');
+    const { accepted } = adapter.runTurn(activeManagerRunId, { text: text || '', images: validImages });
+    if (!accepted) {
       return res.status(502).json({ error: 'Failed to send message to manager' });
     }
 
@@ -213,9 +367,12 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
       return res.json({ active: false, run: null });
     }
 
-    const usage = streamJsonEngine.getUsage(activeManagerRunId);
-    const sessionId = streamJsonEngine.getSessionId(activeManagerRunId);
+    const adapter = activeManagerAdapter || managerAdapterFactory.getAdapter('claude-code');
+    const usage = adapter.getUsage(activeManagerRunId);
+    const sessionId = adapter.getSessionId(activeManagerRunId);
 
+    // PR1a is pure indirection — keep response shape identical to pre-refactor.
+    // PR3 will add adapter type once /start accepts agent_profile_id.
     res.json({
       active: true,
       run: manager,
@@ -250,7 +407,8 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
     }
 
     const lines = Math.min(Math.max(1, Number(req.query.lines || 100)), 2000);
-    const output = streamJsonEngine.getOutput(activeManagerRunId, lines);
+    const adapter = activeManagerAdapter || managerAdapterFactory.getAdapter('claude-code');
+    const output = adapter.getOutput ? adapter.getOutput(activeManagerRunId, lines) : null;
     res.json({ output, runId: activeManagerRunId });
   }));
 
@@ -264,13 +422,15 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
     }
 
     const runId = activeManagerRunId;
-    streamJsonEngine.kill(runId);
+    const adapter = activeManagerAdapter || managerAdapterFactory.getAdapter('claude-code');
+    adapter.disposeSession(runId);
 
     try {
       runService.updateRunStatus(runId, 'cancelled', { force: true });
     } catch { /* ignore */ }
 
     activeManagerRunId = null;
+    activeManagerAdapter = null;
 
     if (eventBus) {
       eventBus.emit('manager:stopped', { runId });
@@ -332,94 +492,10 @@ function buildRunSummary(runService) {
   }
 }
 
-/**
- * Build the system prompt for the Manager agent.
- * The Manager's role is to orchestrate worker agents and report status to the user.
- */
-function buildManagerSystemPrompt(runSummary, projectList, agentList) {
-  const port = process.env.PORT || 4177;
-  const base = `http://localhost:${port}`;
-  const token = process.env.PALANTIR_TOKEN;
-  const auth = token ? `-H 'Authorization: Bearer ${token}' ` : '';
-
-  return `You are the Palantir Manager — a central orchestration agent for the Palantir Console.
-
-Your role:
-1. MONITOR all running worker agents and report their status
-2. COORDINATE work across multiple projects and tasks
-3. ANSWER questions about what agents are doing
-4. DELEGATE new work by spawning worker agents via the Execute API
-5. ALERT the user to issues that need attention (failures, stuck agents, etc.)
-
-## CRITICAL: How to delegate work to worker agents
-
-NEVER use your internal Claude Code tools (Agent, subagents like agent-olympus:*, etc.) to do delegated work.
-Those internal subagents run inside YOUR process and are invisible to the Palantir Console UI.
-ALL delegated work MUST go through the Palantir Console REST API so it appears in the Console dashboard.
-
-When the user asks you to do work (coding, analysis, refactoring, etc.), you MUST spawn a Palantir Console worker agent.
-Do NOT just create a task and update its status — that only creates a database record without running any agent.
-
-**Correct workflow to spawn a worker:**
-1. List available agent profiles: GET /api/agents
-2. Create a task: POST /api/tasks
-3. Execute the task (THIS spawns the actual agent process): POST /api/tasks/TASK_ID/execute with {"agent_profile_id":"AGENT_ID","prompt":"detailed instructions"}
-4. Monitor the spawned run: GET /api/runs?task_id=TASK_ID
-
-If no agent profiles exist, tell the user to create one first via the Agents page.
-The /execute endpoint is what actually spawns a Claude Code (or other agent) subprocess. Without it, no agent runs.
-
-IMPORTANT: NEVER call /execute without explicit user approval. Always confirm before spawning workers.
-Do NOT auto-execute tasks just because their status is in_progress — status alone does not mean "run an agent".
-
-You may use your own Bash/Read/Grep tools for quick lookups (checking status, reading files, etc.),
-but any substantial work (coding, refactoring, analysis tasks) must be delegated via the API.
-
-## Palantir Console REST API
-
-The Palantir Console server runs at ${base}. Use Bash with curl to query it.
-${token ? `\nIMPORTANT: All API requests require auth header: ${auth.trim()}` : ''}
-
-### Runs (agent executions)
-- List all runs: curl -s ${auth}${base}/api/runs | jq
-- Filter by status: curl -s ${auth}"${base}/api/runs?status=running" | jq
-- Filter by task: curl -s ${auth}"${base}/api/runs?task_id=TASK_ID" | jq
-- Get single run: curl -s ${auth}${base}/api/runs/RUN_ID | jq
-- Get run events: curl -s ${auth}${base}/api/runs/RUN_ID/events | jq
-
-### Tasks
-- List all tasks: curl -s ${auth}${base}/api/tasks | jq
-- Filter by status: curl -s ${auth}"${base}/api/tasks?status=in_progress" | jq
-- Create task: curl -s ${auth}-X POST ${base}/api/tasks -H 'Content-Type: application/json' -d '{"title":"...","description":"...","priority":"medium","project_id":"PROJECT_ID"}'
-  Only include project_id if the task clearly belongs to an existing project. If unrelated, omit project_id (the task will be unassigned). Do NOT guess or force a project assignment.
-- Update status: curl -s ${auth}-X PATCH ${base}/api/tasks/TASK_ID/status -H 'Content-Type: application/json' -d '{"status":"done"}'
-
-### Projects
-- List projects: curl -s ${auth}${base}/api/projects | jq
-
-### Agent Profiles
-- List agents: curl -s ${auth}${base}/api/agents | jq
-
-### Worker Management (IMPORTANT: use /execute to actually spawn agents)
-- Execute task with agent: curl -s ${auth}-X POST ${base}/api/tasks/TASK_ID/execute -H 'Content-Type: application/json' -d '{"agent_profile_id":"AGENT_ID","prompt":"detailed work instructions here"}'
-- Send input to run: curl -s ${auth}-X POST ${base}/api/runs/RUN_ID/input -H 'Content-Type: application/json' -d '{"text":"..."}'
-- Cancel run: curl -s ${auth}-X POST ${base}/api/runs/RUN_ID/cancel
-
-Run statuses: queued, running, paused, needs_input, completed, failed, cancelled, stopped
-Task statuses: backlog, todo, in_progress, review, done
-
-Always be concise and action-oriented. When reporting status, use a structured format:
-- 🟢 Running (count)
-- 🟡 Needs Input (count)
-- 🔴 Failed (count)
-- ✅ Completed today (count)
-
-Prioritize issues that need user attention (needs_input, failures) over routine updates.
-Always query the actual Palantir API to get real data — never guess or assume.
-
-${runSummary ? `\n## Current State (at session start)\n${runSummary}` : ''}
-${projectList ? `\n## Available Projects\n${projectList}\nOnly assign project_id when the task clearly belongs to a project. Leave it out if unrelated.` : ''}
-${agentList ? `\n## Available Agent Profiles\n${agentList}\nUse the agent id when calling /execute.` : ''}`;
-}
+// PR4: the inline buildManagerSystemPrompt() that used to live here was moved
+// to server/services/managerSystemPrompt.js so each adapter can contribute its
+// own guardrails section and so the dynamic context (run summary, project /
+// agent lists) can be sent as the first user message — protecting Codex's
+// model_instructions_file caching. Do not re-add the inline version.
 
 module.exports = { createManagerRouter };

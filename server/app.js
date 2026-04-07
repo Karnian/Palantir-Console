@@ -27,6 +27,7 @@ const { createEventsRouter } = require('./routes/events');
 const { createClaudeSessionsRouter } = require('./routes/claude-sessions');
 const { createExecutionEngine } = require('./services/executionEngine');
 const { createStreamJsonEngine } = require('./services/streamJsonEngine');
+const { createManagerAdapterFactory } = require('./services/managerAdapters');
 const { createWorktreeService } = require('./services/worktreeService');
 const { createLifecycleService } = require('./services/lifecycleService');
 const { createAuthMiddleware } = require('./middleware/auth');
@@ -82,6 +83,7 @@ function createApp(options = {}) {
   // Execution engines
   const executionEngine = createExecutionEngine();
   const streamJsonEngine = createStreamJsonEngine({ runService, eventBus });
+  const managerAdapterFactory = createManagerAdapterFactory({ streamJsonEngine, runService });
   const worktreeService = createWorktreeService();
   const lifecycleService = createLifecycleService({
     runService, taskService, agentProfileService, projectService,
@@ -127,7 +129,7 @@ function createApp(options = {}) {
   app.use('/api/agents', createAgentsRouter({ agentProfileService, providerRegistry }));
   app.use('/api/events', createEventsRouter({ eventBus }));
   app.use('/api/claude-sessions', createClaudeSessionsRouter());
-  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, eventBus, projectService, agentProfileService }));
+  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, eventBus, projectService, agentProfileService }));
 
   app.use(errorHandler);
 

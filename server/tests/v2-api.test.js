@@ -285,6 +285,71 @@ test('Default agent profiles exist', async (t) => {
   assert.ok(names.includes('OpenCode'));
 });
 
+// PR5: picker consumes agents[].auth from GET /api/agents.
+// Back-compat: every existing field must still be present, and profiles
+// that aren't manager-capable (e.g. 'custom') get auth=null instead of an
+// error. Profiles that ARE manager-capable get { canAuth, sources, diagnostics }.
+test('GET /api/agents attaches auth preflight for manager profile types', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).get('/api/agents');
+  assert.equal(res.status, 200);
+  assert.ok(Array.isArray(res.body.agents));
+  assert.ok(res.body.agents.length >= 3);
+  for (const a of res.body.agents) {
+    // Existing fields must still be there (spot check a few).
+    assert.ok(typeof a.id === 'string');
+    assert.ok(typeof a.name === 'string');
+    assert.ok(typeof a.type === 'string');
+    // PR5: new auth field. null for non-manager types, object otherwise.
+    if (a.type === 'claude-code' || a.type === 'codex') {
+      assert.ok(a.auth && typeof a.auth === 'object');
+      assert.equal(typeof a.auth.canAuth, 'boolean');
+      assert.ok(Array.isArray(a.auth.sources));
+      assert.ok(Array.isArray(a.auth.diagnostics));
+    } else {
+      assert.equal(a.auth, null);
+    }
+  }
+});
+
+// PR5: D7 fail-closed — a profile whose env_allowlist is valid JSON but not
+// an array (e.g. {}) must surface canAuth=false in the GET /api/agents preview
+// so the picker cannot false-green a profile that the start path rejects.
+test('GET /api/agents: env_allowlist of wrong JSON type fails closed', async (t) => {
+  const { app } = await createTestApp(t);
+  const create = await request(app).post('/api/agents').send({
+    name: 'Broken Allowlist',
+    type: 'claude-code',
+    command: 'claude',
+    env_allowlist: '{"not":"an array"}',
+  });
+  assert.equal(create.status, 201);
+  const id = create.body.agent.id;
+  const list = await request(app).get('/api/agents');
+  const row = list.body.agents.find(a => a.id === id);
+  assert.ok(row);
+  assert.ok(row.auth && row.auth.canAuth === false);
+  assert.ok(row.auth.diagnostics.some(d => /env_allowlist/.test(d)));
+  await request(app).delete(`/api/agents/${id}`);
+});
+
+// Same check on the syntax-error path (already worked, but lock it in).
+test('GET /api/agents: env_allowlist with JSON syntax error fails closed', async (t) => {
+  const { app } = await createTestApp(t);
+  const create = await request(app).post('/api/agents').send({
+    name: 'Broken Syntax',
+    type: 'codex',
+    command: 'codex',
+    env_allowlist: '[not valid',
+  });
+  assert.equal(create.status, 201);
+  const id = create.body.agent.id;
+  const list = await request(app).get('/api/agents');
+  const row = list.body.agents.find(a => a.id === id);
+  assert.ok(row && row.auth && row.auth.canAuth === false);
+  await request(app).delete(`/api/agents/${id}`);
+});
+
 test('Agent profile CRUD', async (t) => {
   const { app } = await createTestApp(t);
 

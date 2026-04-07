@@ -3721,6 +3721,134 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   box-shadow: none;
 }
 
+/* PR5: Manager agent profile picker (rendered in the empty state) */
+.manager-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  max-width: 340px;
+  margin: 4px 0 12px;
+  text-align: left;
+}
+
+.manager-picker-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted, #9ca3af);
+  font-weight: 600;
+}
+
+.manager-picker-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.manager-picker-select {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border, rgba(255,255,255,0.12));
+  background: var(--surface-2, rgba(255,255,255,0.04));
+  color: var(--fg, #e5e7eb);
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.manager-picker-select:focus {
+  outline: 2px solid var(--accent, #3b82f6);
+  outline-offset: 1px;
+}
+
+.manager-picker-refresh {
+  width: 34px;
+  border-radius: 8px;
+  border: 1px solid var(--border, rgba(255,255,255,0.12));
+  background: var(--surface-2, rgba(255,255,255,0.04));
+  color: var(--fg, #e5e7eb);
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.manager-picker-refresh:hover {
+  background: var(--surface-3, rgba(255,255,255,0.08));
+}
+
+.manager-picker-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--muted, #9ca3af);
+  min-height: 16px;
+}
+
+.manager-picker-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #6b7280;
+  flex-shrink: 0;
+}
+
+.manager-picker-status.ok .manager-picker-dot {
+  background: #22c55e;
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.18);
+}
+
+.manager-picker-status.bad .manager-picker-dot {
+  background: #ef4444;
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.18);
+}
+
+.manager-picker-status.ok { color: var(--fg, #e5e7eb); }
+.manager-picker-status.bad { color: #fca5a5; }
+
+.manager-picker-empty {
+  font-size: 12px;
+  color: var(--muted, #9ca3af);
+  max-width: 340px;
+  margin: 4px 0 12px;
+  line-height: 1.5;
+}
+
+.manager-picker-link {
+  color: var(--accent, #60a5fa);
+  text-decoration: underline;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+}
+
+.manager-picker-link-btn:hover,
+.manager-picker-link-btn:focus-visible {
+  color: var(--accent, #60a5fa);
+  outline: none;
+  text-decoration: underline;
+}
+
+.manager-picker-diagnostics {
+  margin: 2px 0 0;
+  padding-left: 16px;
+  font-size: 11px;
+  color: #fca5a5;
+  line-height: 1.35;
+  list-style: disc;
+}
+
+.manager-picker-remediation {
+  font-size: 11px;
+  color: var(--muted, #9ca3af);
+  line-height: 1.35;
+  margin-top: 2px;
+}
+
 /* Message bubbles */
 .manager-msg {
   max-width: 85%;
