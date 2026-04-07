@@ -3,6 +3,22 @@ const { BadRequestError, NotFoundError } = require('../utils/errors');
 
 const VALID_STATUSES = ['backlog', 'todo', 'in_progress', 'review', 'done', 'failed'];
 const VALID_PRIORITIES = ['low', 'medium', 'high', 'critical'];
+const DUE_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function normalizeDueDate(value) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  if (typeof value !== 'string' || !DUE_DATE_RE.test(value)) {
+    throw new BadRequestError(`Invalid due_date: must be YYYY-MM-DD or null`);
+  }
+  // Reject impossible calendar dates (e.g. 2026-13-40)
+  const [y, m, d] = value.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) {
+    throw new BadRequestError(`Invalid due_date: ${value}`);
+  }
+  return value;
+}
 
 function createTaskService(db, eventBus) {
   const stmts = {
@@ -29,8 +45,8 @@ function createTaskService(db, eventBus) {
       WHERE t.id = ?
     `),
     insert: db.prepare(`
-      INSERT INTO tasks (id, project_id, title, description, status, priority, sort_order)
-      VALUES (@id, @project_id, @title, @description, @status, @priority, @sort_order)
+      INSERT INTO tasks (id, project_id, title, description, status, priority, sort_order, due_date)
+      VALUES (@id, @project_id, @title, @description, @status, @priority, @sort_order, @due_date)
     `),
     // update: dynamic — see dynamicUpdate() below
     updateStatus: db.prepare(`
@@ -55,7 +71,7 @@ function createTaskService(db, eventBus) {
     return task;
   }
 
-  const insertTaskTxn = db.transaction(({ id, project_id, title, description, status, priority }) => {
+  const insertTaskTxn = db.transaction(({ id, project_id, title, description, status, priority, due_date }) => {
     const maxSort = stmts.maxSortOrder.get().max_sort;
     stmts.insert.run({
       id,
@@ -65,11 +81,12 @@ function createTaskService(db, eventBus) {
       status: status || 'backlog',
       priority: priority || 'medium',
       sort_order: maxSort + 1,
+      due_date: due_date ?? null,
     });
     return stmts.getById.get(id);
   });
 
-  function createTask({ project_id, title, description, status, priority }) {
+  function createTask({ project_id, title, description, status, priority, due_date }) {
     if (!title) throw new BadRequestError('Task title is required');
     if (status && !VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid status: ${status}`);
@@ -77,18 +94,25 @@ function createTaskService(db, eventBus) {
     if (priority && !VALID_PRIORITIES.includes(priority)) {
       throw new BadRequestError(`Invalid priority: ${priority}`);
     }
+    const normalizedDue = normalizeDueDate(due_date);
     const id = `task_${crypto.randomUUID().slice(0, 8)}`;
-    const task = insertTaskTxn({ id, project_id, title, description, status, priority });
+    const task = insertTaskTxn({
+      id, project_id, title, description, status, priority,
+      due_date: normalizedDue === undefined ? null : normalizedDue,
+    });
     if (eventBus) eventBus.emit('task:created', { task });
     return task;
   }
 
-  const TASK_UPDATABLE = ['title', 'description', 'project_id', 'priority'];
+  const TASK_UPDATABLE = ['title', 'description', 'project_id', 'priority', 'due_date'];
 
   function updateTask(id, fields) {
     getTask(id);
     if (fields.priority && !VALID_PRIORITIES.includes(fields.priority)) {
       throw new BadRequestError(`Invalid priority: ${fields.priority}`);
+    }
+    if ('due_date' in fields) {
+      fields = { ...fields, due_date: normalizeDueDate(fields.due_date) };
     }
     const setClauses = [];
     const params = { id };

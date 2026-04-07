@@ -7,6 +7,47 @@ const { h, render } = preact;
 const { useState, useEffect, useRef, useCallback, useMemo } = preactHooks;
 const html = htm.bind(h);
 
+// Due date helpers (마감일) — local-day comparison.
+// Returns: 'overdue' | 'due-soon' | 'on-track' | null. `dueSoonDays` defaults to
+// 2 (today + tomorrow). Tasks already in 'done' status are treated as on-track.
+function dueState(task, dueSoonDays = 2) {
+  if (!task || !task.due_date) return null;
+  if (task.status === 'done') return 'on-track';
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(task.due_date);
+  if (!m) return null;
+  const due = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diffDays = Math.round((due - today) / 86400000);
+  if (diffDays < 0) return 'overdue';
+  if (diffDays <= dueSoonDays - 1) return 'due-soon';
+  return 'on-track';
+}
+
+function formatDueDate(d) {
+  if (!d) return '';
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d);
+  if (!m) return d;
+  return `${m[1]}.${m[2]}.${m[3]}`;
+}
+
+function dueDateMeta(task) {
+  const state = dueState(task);
+  if (!state) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(task.due_date);
+  if (!m) return null;
+  const due = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diffDays = Math.round((due - today) / 86400000);
+  let label;
+  if (state === 'overdue') label = `${Math.abs(diffDays)}일 지남`;
+  else if (diffDays === 0) label = '오늘';
+  else if (diffDays === 1) label = '내일';
+  else label = `${diffDays}일 남음`;
+  return { state, label, formatted: formatDueDate(task.due_date), diffDays };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Hash Router
 // ─────────────────────────────────────────────────────────────────────────────
@@ -112,6 +153,32 @@ function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions, ma
     });
   }
 
+  // Due-date triage: overdue and due-soon (excluding done tasks)
+  tasks.forEach(t => {
+    if (t.status === 'done') return;
+    const due = dueDateMeta(t);
+    if (!due) return;
+    if (due.state === 'overdue') {
+      triageItems.push({
+        type: 'overdue',
+        priority: 1.5, // between failed (1) and running (2)
+        title: t.title,
+        meta: `마감일 지남 ${due.formatted} (${due.label})`,
+        run: null,
+        task: t,
+      });
+    } else if (due.state === 'due-soon') {
+      triageItems.push({
+        type: 'due-soon',
+        priority: 1.7,
+        title: t.title,
+        meta: `마감 임박 ${due.formatted} (${due.label})`,
+        run: null,
+        task: t,
+      });
+    }
+  });
+
   needsInputRuns.forEach(run => {
     const task = tasks.find(t => t.id === run.task_id);
     triageItems.push({
@@ -168,6 +235,8 @@ function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions, ma
     'review': '\u2714',
     'done': '\u2713',
     'manager': '\u2726',
+    'overdue': '\u23F0',
+    'due-soon': '\u23F0',
   };
 
   return html`
@@ -215,6 +284,7 @@ function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions, ma
             class="triage-item"
             onClick=${() => {
               if (item.type === 'manager') { navigate('manager'); return; }
+              if (item.type === 'overdue' || item.type === 'due-soon') { navigate('board'); return; }
               if (item.run) onOpenRun(item.run);
             }}
           >
@@ -247,6 +317,11 @@ function DashboardView({ tasks, runs, onOpenRun, onDeleteRun, claudeSessions, ma
               ${item.type === 'manager' && html`
                 <button class="ghost" onClick=${(e) => { e.stopPropagation(); navigate('manager'); }}>
                   Open
+                </button>
+              `}
+              ${(item.type === 'overdue' || item.type === 'due-soon') && html`
+                <button class="ghost" onClick=${(e) => { e.stopPropagation(); navigate('board'); }}>
+                  Board
                 </button>
               `}
             </div>
@@ -291,6 +366,7 @@ function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
   const [projectId, setProjectId] = useState('');
   const [priority, setPriority] = useState('medium');
   const [agentProfileId, setAgentProfileId] = useState('');
+  const [dueDate, setDueDate] = useState('');
   const [saving, setSaving] = useState(false);
   useEscape(open, onClose);
 
@@ -298,7 +374,7 @@ function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
   useEffect(() => {
     if (open) {
       setTitle(''); setDescription(''); setProjectId('');
-      setPriority('medium'); setAgentProfileId('');
+      setPriority('medium'); setAgentProfileId(''); setDueDate('');
     }
   }, [open]);
 
@@ -314,13 +390,14 @@ function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
         project_id: projectId || undefined,
         priority,
         agent_profile_id: agentProfileId || undefined,
+        due_date: dueDate || undefined,
       };
       const data = await apiFetch('/api/tasks', {
         method: 'POST',
         body: JSON.stringify(body),
       });
       onCreated(data.task);
-      setTitle(''); setDescription(''); setProjectId(''); setPriority('medium'); setAgentProfileId('');
+      setTitle(''); setDescription(''); setProjectId(''); setPriority('medium'); setAgentProfileId(''); setDueDate('');
       onClose();
     } catch (err) {
       addToast(err.message, 'error');
@@ -367,6 +444,11 @@ function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
               <option value="">None</option>
               ${agents.map(a => html`<option key=${a.id} value=${a.id}>${a.name}</option>`)}
             </select>
+          </div>
+          <div class="form-field">
+            <label class="form-label">마감일</label>
+            <input type="date" class="form-input" value=${dueDate}
+              onInput=${e => setDueDate(e.target.value)} />
           </div>
         </div>
         <div class="modal-footer">
@@ -710,6 +792,45 @@ function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onE
                   </div>
                 `;
               })()}
+              ${(() => {
+                const due = dueDateMeta(task);
+                const dueColor = due?.state === 'overdue' ? '#ef4444'
+                  : due?.state === 'due-soon' ? '#f59e0b'
+                  : 'var(--text-secondary)';
+                return html`
+                  <div class="task-detail-meta-item">
+                    <span class="task-detail-meta-label">마감일</span>
+                    <div style="display:flex;align-items:center;gap:6px;">
+                      <input type="date" class="form-input inline-date"
+                        value=${task.due_date || ''}
+                        style="color:${dueColor};border-color:color-mix(in srgb, ${dueColor} 30%, transparent);background:color-mix(in srgb, ${dueColor} 10%, transparent);max-width:160px;"
+                        onChange=${async (e) => {
+                          const v = e.target.value || null;
+                          try {
+                            await apiFetch('/api/tasks/' + task.id, {
+                              method: 'PATCH',
+                              body: JSON.stringify({ due_date: v }),
+                            });
+                            reloadTasks();
+                          } catch (err) { addToast(err.message, 'error'); }
+                        }} />
+                      ${task.due_date && html`
+                        <button class="ghost" title="Clear due date"
+                          style="padding:2px 6px;font-size:11px;"
+                          onClick=${async () => {
+                            try {
+                              await apiFetch('/api/tasks/' + task.id, {
+                                method: 'PATCH',
+                                body: JSON.stringify({ due_date: null }),
+                              });
+                              reloadTasks();
+                            } catch (err) { addToast(err.message, 'error'); }
+                          }}>\u2715</button>
+                      `}
+                    </div>
+                  </div>
+                `;
+              })()}
               <div class="task-detail-meta-item">
                 <span class="task-detail-meta-label">Created</span>
                 <span style="color:var(--text-secondary);font-size:12px;">${formatTime(task.created_at)}</span>
@@ -784,10 +905,11 @@ const BOARD_COLUMNS = [
 
 function TaskCard({ task, projects, onDragStart, onClick }) {
   const project = projects.find(p => p.id === task.project_id);
+  const due = dueDateMeta(task);
 
   return html`
     <div
-      class="task-card"
+      class="task-card ${due ? `due-${due.state}` : ''}"
       draggable="true"
       onDragStart=${(e) => {
         e.dataTransfer.setData('text/plain', task.id);
@@ -806,6 +928,11 @@ function TaskCard({ task, projects, onDragStart, onClick }) {
         `}
         ${task.agent_profile_id && html`
           <span class="task-badge agent">\u2699 agent</span>
+        `}
+        ${due && html`
+          <span class="task-badge due-badge due-${due.state}" title=${`마감일 ${due.formatted}`}>
+            \u23F0 ${due.label}
+          </span>
         `}
       </div>
       ${task.updated_at && html`

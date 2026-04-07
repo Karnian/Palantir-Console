@@ -1458,6 +1458,24 @@ body {
   color: var(--status-done);
 }
 
+.triage-icon.manager {
+  background: rgba(139, 92, 246, 0.12);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  color: var(--accent-light, #a78bfa);
+}
+
+.triage-icon.overdue {
+  background: rgba(239, 68, 68, 0.14);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #ef4444;
+}
+
+.triage-icon.due-soon {
+  background: rgba(245, 158, 11, 0.14);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: #f59e0b;
+}
+
 @keyframes triage-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.6; }
@@ -1700,10 +1718,47 @@ body {
   border: 1px solid rgba(239, 68, 68, 0.25);
 }
 
+.task-badge.due-badge.due-overdue {
+  background: rgba(239, 68, 68, 0.14);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  font-weight: 600;
+}
+
+.task-badge.due-badge.due-due-soon {
+  background: rgba(245, 158, 11, 0.14);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.task-badge.due-badge.due-on-track {
+  background: rgba(107, 114, 128, 0.10);
+  color: var(--text-muted);
+  border: 1px solid rgba(107, 114, 128, 0.25);
+}
+
+.task-card.due-overdue {
+  border-color: rgba(239, 68, 68, 0.45);
+  box-shadow: inset 3px 0 0 #ef4444;
+}
+
+.task-card.due-due-soon {
+  border-color: rgba(245, 158, 11, 0.45);
+  box-shadow: inset 3px 0 0 #f59e0b;
+}
+
 .task-card-meta {
   margin-top: 6px;
   font-size: 10px;
   color: var(--text-muted);
+}
+
+/* Inline date input in task detail meta grid */
+.form-input.inline-date {
+  padding: 4px 8px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  height: auto;
 }
 
 /* =============================================

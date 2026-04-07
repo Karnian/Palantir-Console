@@ -144,6 +144,48 @@ test('Tasks status validation', async (t) => {
   assert.equal(bad.status, 400);
 });
 
+test('Tasks due_date create, update, clear', async (t) => {
+  const { app } = await createTestApp(t);
+
+  // Create with due_date
+  const create = await request(app).post('/api/tasks').send({
+    title: 'Ship feature',
+    due_date: '2026-04-15',
+  });
+  assert.equal(create.status, 201);
+  assert.equal(create.body.task.due_date, '2026-04-15');
+  const taskId = create.body.task.id;
+
+  // Update due_date
+  const upd = await request(app).patch(`/api/tasks/${taskId}`).send({ due_date: '2026-04-20' });
+  assert.equal(upd.status, 200);
+  assert.equal(upd.body.task.due_date, '2026-04-20');
+
+  // Clear due_date with null
+  const clr = await request(app).patch(`/api/tasks/${taskId}`).send({ due_date: null });
+  assert.equal(clr.status, 200);
+  assert.equal(clr.body.task.due_date, null);
+});
+
+test('Tasks due_date validation rejects bad input', async (t) => {
+  const { app } = await createTestApp(t);
+
+  const bad1 = await request(app).post('/api/tasks').send({ title: 'X', due_date: '2026/04/15' });
+  assert.equal(bad1.status, 400);
+
+  const bad2 = await request(app).post('/api/tasks').send({ title: 'X', due_date: 'not-a-date' });
+  assert.equal(bad2.status, 400);
+
+  // Impossible calendar date
+  const bad3 = await request(app).post('/api/tasks').send({ title: 'X', due_date: '2026-13-40' });
+  assert.equal(bad3.status, 400);
+
+  // Empty string is treated as null (clears)
+  const ok = await request(app).post('/api/tasks').send({ title: 'X', due_date: '' });
+  assert.equal(ok.status, 201);
+  assert.equal(ok.body.task.due_date, null);
+});
+
 // ---- Agents ----
 
 test('Default agent profiles exist', async (t) => {
