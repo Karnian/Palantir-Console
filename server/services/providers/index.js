@@ -23,19 +23,25 @@ const { fetchClaudeCodeUsage } = require('./claude-code');
 const { fetchGeminiUsage } = require('./gemini');
 const { listRegisteredProviders } = require('./registered');
 
-// opencode auth.json key → list of canonical fetcher invocations.
+// opencode auth.json key → handler config.
 // `openai` ships with the codex CLI auth in opencode parlance, so it maps to
 // the codex provider, which lives in codexService and gets injected.
 //
+// fallbackId/fallbackName are used when the handler throws or returns null.
+// Without them, the failure envelope would inherit the auth.json key (`openai`)
+// instead of the canonical provider id (`codex`), creating a subtle drift
+// between success and failure responses for the same provider.
+//
 // Aliases (`google` / `gemini` both point to gemini) MUST share the same
-// handler reference so fetchAllRegistered() can dedupe by identity. Otherwise
-// we'd produce two duplicate provider cards when both keys live in auth.json.
+// handler function reference so fetchAllRegistered() can dedupe by identity.
+// Otherwise we'd produce two duplicate provider cards when both keys live
+// in auth.json.
 const geminiHandler = () => fetchGeminiUsage(process.env.GEMINI_API_KEY || '');
 const REGISTERED_KEY_HANDLERS = {
-  openai:    (deps) => deps.codexService?.getProviderStatus(),
-  anthropic: () => fetchAnthropicUsage(process.env.ANTHROPIC_API_KEY || ''),
-  google:    geminiHandler,
-  gemini:    geminiHandler,
+  openai:    { handler: (deps) => deps.codexService?.getProviderStatus(), fallbackId: 'codex',     fallbackName: 'codex'  },
+  anthropic: { handler: () => fetchAnthropicUsage(process.env.ANTHROPIC_API_KEY || ''), fallbackId: 'anthropic', fallbackName: 'claude' },
+  google:    { handler: geminiHandler, fallbackId: 'google', fallbackName: 'gemini' },
+  gemini:    { handler: geminiHandler, fallbackId: 'google', fallbackName: 'gemini' },
 };
 
 // agent_profiles.type → adapter dispatch.
@@ -97,15 +103,19 @@ function createProviderRegistry({ codexService, opencodeAuthPath }) {
 
     for (const key of KNOWN_PROVIDER_ORDER) {
       if (!keySet.has(key)) continue;
-      const handler = REGISTERED_KEY_HANDLERS[key];
-      if (!handler || seenHandlers.has(handler)) continue;
-      seenHandlers.add(handler);
+      const cfg = REGISTERED_KEY_HANDLERS[key];
+      if (!cfg || seenHandlers.has(cfg.handler)) continue;
+      seenHandlers.add(cfg.handler);
       try {
-        const result = await handler(deps);
+        const result = await cfg.handler(deps);
         if (result) out.push(result);
-        else out.push(buildFallbackProvider(key, 'Provider returned no data'));
+        // Fallback id/name come from the handler config so failure envelopes
+        // surface the canonical provider (e.g. `codex`) rather than the raw
+        // auth-file key (e.g. `openai`) — keeping success and failure paths
+        // keyed identically.
+        else out.push(buildFallbackProvider(cfg.fallbackId, 'Provider returned no data', cfg.fallbackName));
       } catch (err) {
-        out.push(buildFallbackProvider(key, err?.message || 'Provider fetch failed'));
+        out.push(buildFallbackProvider(cfg.fallbackId, err?.message || 'Provider fetch failed', cfg.fallbackName));
       }
     }
 
