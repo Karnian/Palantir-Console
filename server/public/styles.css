@@ -3805,8 +3805,17 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.18);
 }
 
+/* 'unknown' state: server did not provide an auth preflight at all
+   (stale build, fetch failure). Distinct amber so the user doesn't
+   confuse it with a real credential problem. */
+.manager-picker-status.unknown .manager-picker-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.18);
+}
+
 .manager-picker-status.ok { color: var(--fg, #e5e7eb); }
 .manager-picker-status.bad { color: #fca5a5; }
+.manager-picker-status.unknown { color: #fcd34d; }
 
 .manager-picker-empty {
   font-size: 12px;

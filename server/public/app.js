@@ -3275,6 +3275,26 @@ function AgentsView({ agents, loading, reloadAgents }) {
 const MANAGER_PROFILE_TYPES = ['claude-code', 'codex'];
 const MANAGER_PROFILE_PICK_KEY = 'palantir.manager.lastProfileId';
 
+// 3-state auth classification for the manager picker.
+//
+// Why 3 states: the picker must distinguish "user needs to add credentials"
+// from "server didn't tell us anything" — both previously rendered as
+// "no credentials", which misled users into the wrong remediation after a
+// server restart / version mismatch (see bugfix branch
+// fix/manager-picker-undefined-auth). Non-manager profiles have auth:null
+// by server contract but are filtered out of managerProfiles before this
+// helper sees them, so null/undefined here always means the server did not
+// attach a preflight (stale build, failed fetch, etc.).
+//
+//   ok      — server preflight says canAuth:true
+//   missing — server preflight says canAuth:false (user must add creds)
+//   unknown — server did not provide an auth field (outdated server?)
+function managerProfileAuthState(profile) {
+  if (!profile) return 'none';
+  if (profile.auth == null) return 'unknown';
+  return profile.auth.canAuth ? 'ok' : 'missing';
+}
+
 function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError = null, agentsLoading = false, reloadAgents }) {
   const { status, events, loading, start, sendMessage, stop } = manager;
   const [input, setInput] = useState('');
@@ -3294,7 +3314,7 @@ function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError 
     if (managerProfiles.length === 0) return;
     const exists = managerProfiles.some(p => p.id === selectedProfileId);
     if (exists) return;
-    const firstOk = managerProfiles.find(p => p.auth && p.auth.canAuth);
+    const firstOk = managerProfiles.find(p => managerProfileAuthState(p) === 'ok');
     const fallback = firstOk || managerProfiles[0];
     setSelectedProfileId(fallback ? fallback.id : '');
   }, [managerProfiles, selectedProfileId]);
@@ -3483,7 +3503,10 @@ function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError 
 
   // PR5: selected profile row (may be undefined before the list loads).
   const selectedProfile = managerProfiles.find(p => p.id === selectedProfileId) || null;
-  const selectedCanAuth = !!(selectedProfile && selectedProfile.auth && selectedProfile.auth.canAuth);
+  const selectedAuthState = managerProfileAuthState(selectedProfile);
+  const selectedCanAuth = selectedAuthState === 'ok';
+  // Start is only enabled on 'ok'. 'missing' requires user action (creds),
+  // 'unknown' requires server restart/refresh — neither is a green light.
   const startDisabled = loading || managerProfiles.length === 0 || !selectedProfile || !selectedCanAuth;
 
   const [inspectRun, setInspectRun] = useState(null);
@@ -3637,14 +3660,17 @@ function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError 
                       aria-describedby="manager-picker-status"
                     >
                       ${managerProfiles.map(p => {
-                        const ok = !!(p.auth && p.auth.canAuth);
-                        // A11y: bury glyphs behind explicit text. Screen
-                        // readers read the full option label verbatim, so
-                        // "authenticated" / "no credentials" is what gets
-                        // announced. The dot glyph is decorative tail.
-                        const statusText = ok ? 'authenticated' : 'no credentials';
-                        const mark = ok ? '\u25CF' : '\u25CB';
-                        return html`<option key=${p.id} value=${p.id}>${p.name} (${p.type}) \u2014 ${statusText} ${mark}</option>`;
+                        const state = managerProfileAuthState(p);
+                        // A11y: <option> text is read verbatim by screen
+                        // readers and glyphs CANNOT be hidden inside option
+                        // labels (no aria-hidden support there), so we use
+                        // plain English status text only. 3-state:
+                        // authenticated / no credentials / auth status
+                        // unavailable (server version mismatch).
+                        const statusText = state === 'ok' ? 'authenticated'
+                          : state === 'unknown' ? 'auth status unavailable'
+                          : 'no credentials';
+                        return html`<option key=${p.id} value=${p.id}>${p.name} (${p.type}) \u2014 ${statusText}</option>`;
                       })}
                     </select>
                     <button
@@ -3655,25 +3681,34 @@ function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError 
                       onClick=${() => reloadAgents && reloadAgents()}
                     >\u21BB</button>
                   </div>
-                  <div id="manager-picker-status"
-                    class=${"manager-picker-status " + (selectedCanAuth ? 'ok' : 'bad')}
-                    role="status"
-                    aria-live="polite"
-                  >
-                    <span class="manager-picker-dot" aria-hidden="true"></span>
-                    ${selectedProfile && selectedCanAuth
-                      ? html`<span>Authenticated${selectedProfile.auth.sources && selectedProfile.auth.sources.length > 0 ? ' \u00B7 ' + selectedProfile.auth.sources.join(', ') : ''}</span>`
-                      : html`<span>${selectedProfile && selectedProfile.auth && selectedProfile.auth.diagnostics && selectedProfile.auth.diagnostics[0] ? selectedProfile.auth.diagnostics[0] : 'No credentials resolved for this profile.'}</span>`
-                    }
-                  </div>
-                  ${selectedProfile && !selectedCanAuth && selectedProfile.auth && selectedProfile.auth.diagnostics && selectedProfile.auth.diagnostics.length > 1 && html`
+                  ${selectedProfile && html`
+                    <div id="manager-picker-status"
+                      class=${"manager-picker-status " + (selectedAuthState === 'ok' ? 'ok' : selectedAuthState === 'unknown' ? 'unknown' : 'bad')}
+                      role="status"
+                      aria-live="polite"
+                    >
+                      <span class="manager-picker-dot" aria-hidden="true"></span>
+                      ${selectedAuthState === 'ok'
+                        ? html`<span>Authenticated${selectedProfile.auth.sources && selectedProfile.auth.sources.length > 0 ? ' \u00B7 ' + selectedProfile.auth.sources.join(', ') : ''}</span>`
+                        : selectedAuthState === 'unknown'
+                        ? html`<span>Auth status unavailable. The server may be outdated \u2014 restart the server and refresh.</span>`
+                        : html`<span>${selectedProfile.auth && selectedProfile.auth.diagnostics && selectedProfile.auth.diagnostics[0] ? selectedProfile.auth.diagnostics[0] : 'No credentials resolved for this profile.'}</span>`
+                      }
+                    </div>
+                  `}
+                  ${selectedAuthState === 'missing' && selectedProfile && selectedProfile.auth && selectedProfile.auth.diagnostics && selectedProfile.auth.diagnostics.length > 1 && html`
                     <ul class="manager-picker-diagnostics">
                       ${selectedProfile.auth.diagnostics.slice(1).map((d, i) => html`<li key=${i}>${d}</li>`)}
                     </ul>
                   `}
-                  ${selectedProfile && !selectedCanAuth && html`
+                  ${selectedAuthState === 'missing' && html`
                     <div class="manager-picker-remediation">
                       Fix credentials on the <a href="#agents" class="manager-picker-link">Agents page</a>, then <button type="button" class="manager-picker-link manager-picker-link-btn" onClick=${() => reloadAgents && reloadAgents()}>refresh</button>.
+                    </div>
+                  `}
+                  ${selectedAuthState === 'unknown' && html`
+                    <div class="manager-picker-remediation">
+                      Try <button type="button" class="manager-picker-link manager-picker-link-btn" onClick=${() => reloadAgents && reloadAgents()}>refresh</button>. If this persists, restart the server to pick up the latest code.
                     </div>
                   `}
                 </div>
