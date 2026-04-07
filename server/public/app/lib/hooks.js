@@ -194,18 +194,26 @@ export function useClaudeSessions() {
 export function useAgents() {
   const [agents, setAgents] = useState([]);
   const [loading, setLoading] = useState(true);
+  // PR5: expose an error flag so consumers (manager picker) can tell a
+  // "transient fetch failure" apart from a real "no agents registered"
+  // state and avoid locking the user out on a flaky network.
+  const [error, setError] = useState(null);
 
   const load = useCallback(async () => {
     try {
       const data = await apiFetch('/api/agents');
       setAgents(data.agents || []);
-    } catch (err) { addToast('Failed to load agents: ' + (err.message || 'unknown'), 'error'); }
+      setError(null);
+    } catch (err) {
+      setError(err.message || 'unknown');
+      addToast('Failed to load agents: ' + (err.message || 'unknown'), 'error');
+    }
     setLoading(false);
   }, []);
 
   useEffect(() => { load(); }, [load]);
 
-  return { agents, loading, reload: load };
+  return { agents, loading, error, reload: load };
 }
 
 // ---- Manager session ----

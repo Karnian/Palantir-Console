@@ -3270,9 +3270,34 @@ function AgentsView({ agents, loading, reloadAgents }) {
 // Manager View (Full Page — Left: Chat 60%, Right: Session Grid 40%)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function ManagerView({ manager, runs, tasks, projects }) {
+// PR5: profile types that can back a manager session. Must stay in sync
+// with PROFILE_TYPE_TO_ADAPTER in server/routes/manager.js.
+const MANAGER_PROFILE_TYPES = ['claude-code', 'codex'];
+const MANAGER_PROFILE_PICK_KEY = 'palantir.manager.lastProfileId';
+
+function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError = null, agentsLoading = false, reloadAgents }) {
   const { status, events, loading, start, sendMessage, stop } = manager;
   const [input, setInput] = useState('');
+  // PR5: agent profile picker state. null = no selection yet; '' = nothing
+  // available. We persist the last chosen id in localStorage so repeat
+  // sessions don't force the user to re-pick.
+  const managerProfiles = useMemo(
+    () => (agents || []).filter(a => MANAGER_PROFILE_TYPES.includes(a.type)),
+    [agents]
+  );
+  const [selectedProfileId, setSelectedProfileId] = useState(() => {
+    try { return localStorage.getItem(MANAGER_PROFILE_PICK_KEY) || ''; } catch { return ''; }
+  });
+  // When the profile list first loads, make sure the remembered id still
+  // exists; otherwise fall back to the first auth-capable profile.
+  useEffect(() => {
+    if (managerProfiles.length === 0) return;
+    const exists = managerProfiles.some(p => p.id === selectedProfileId);
+    if (exists) return;
+    const firstOk = managerProfiles.find(p => p.auth && p.auth.canAuth);
+    const fallback = firstOk || managerProfiles[0];
+    setSelectedProfileId(fallback ? fallback.id : '');
+  }, [managerProfiles, selectedProfileId]);
   const [sending, setSending] = useState(false);
   const [attachedImages, setAttachedImages] = useState([]);
   const messagesRef = useRef(null);
@@ -3444,10 +3469,22 @@ function ManagerView({ manager, runs, tasks, projects }) {
   };
 
   const handleStart = async () => {
+    // PR5: send agent_profile_id so the server can pick the right adapter
+    // (Claude Code or Codex). Empty string = omit, preserving the server's
+    // backward-compat default of 'claude-code'.
+    const opts = selectedProfileId ? { agent_profile_id: selectedProfileId } : {};
     try {
-      await start({});
+      if (selectedProfileId) {
+        try { localStorage.setItem(MANAGER_PROFILE_PICK_KEY, selectedProfileId); } catch { /* ignore */ }
+      }
+      await start(opts);
     } catch { /* toast handled */ }
   };
+
+  // PR5: selected profile row (may be undefined before the list loads).
+  const selectedProfile = managerProfiles.find(p => p.id === selectedProfileId) || null;
+  const selectedCanAuth = !!(selectedProfile && selectedProfile.auth && selectedProfile.auth.canAuth);
+  const startDisabled = loading || managerProfiles.length === 0 || !selectedProfile || !selectedCanAuth;
 
   const [inspectRun, setInspectRun] = useState(null);
   const [selectedTask, setSelectedTask] = useState(null);
@@ -3575,7 +3612,73 @@ function ManagerView({ manager, runs, tasks, projects }) {
             <div class="manager-empty">
               <div class="manager-empty-icon">\u2726</div>
               <div class="manager-empty-text">Start a Manager session to orchestrate your agents</div>
-              <button class="btn btn-primary" onClick=${handleStart} disabled=${loading}>
+              ${agentsLoading && managerProfiles.length === 0 ? html`
+                <div class="manager-picker-empty">Loading agent profiles\u2026</div>
+              ` : agentsError ? html`
+                <div class="manager-picker-empty" role="alert">
+                  Couldn't load agent profiles: ${agentsError}.
+                  <br/>
+                  <button type="button" class="manager-picker-link manager-picker-link-btn" onClick=${() => reloadAgents && reloadAgents()}>Retry</button>
+                </div>
+              ` : managerProfiles.length === 0 ? html`
+                <div class="manager-picker-empty">
+                  No Claude Code or Codex agents registered.<br/>
+                  <a href="#agents" class="manager-picker-link">Go to the Agents page</a> to create one.
+                </div>
+              ` : html`
+                <div class="manager-picker" role="group" aria-label="Manager agent picker">
+                  <label class="manager-picker-label" for="manager-profile-select">Agent</label>
+                  <div class="manager-picker-row">
+                    <select
+                      id="manager-profile-select"
+                      class="manager-picker-select"
+                      value=${selectedProfileId}
+                      onChange=${(e) => setSelectedProfileId(e.target.value)}
+                      aria-describedby="manager-picker-status"
+                    >
+                      ${managerProfiles.map(p => {
+                        const ok = !!(p.auth && p.auth.canAuth);
+                        // A11y: bury glyphs behind explicit text. Screen
+                        // readers read the full option label verbatim, so
+                        // "authenticated" / "no credentials" is what gets
+                        // announced. The dot glyph is decorative tail.
+                        const statusText = ok ? 'authenticated' : 'no credentials';
+                        const mark = ok ? '\u25CF' : '\u25CB';
+                        return html`<option key=${p.id} value=${p.id}>${p.name} (${p.type}) \u2014 ${statusText} ${mark}</option>`;
+                      })}
+                    </select>
+                    <button
+                      class="manager-picker-refresh"
+                      type="button"
+                      title="Refresh auth status"
+                      aria-label="Refresh auth status"
+                      onClick=${() => reloadAgents && reloadAgents()}
+                    >\u21BB</button>
+                  </div>
+                  <div id="manager-picker-status"
+                    class=${"manager-picker-status " + (selectedCanAuth ? 'ok' : 'bad')}
+                    role="status"
+                    aria-live="polite"
+                  >
+                    <span class="manager-picker-dot" aria-hidden="true"></span>
+                    ${selectedProfile && selectedCanAuth
+                      ? html`<span>Authenticated${selectedProfile.auth.sources && selectedProfile.auth.sources.length > 0 ? ' \u00B7 ' + selectedProfile.auth.sources.join(', ') : ''}</span>`
+                      : html`<span>${selectedProfile && selectedProfile.auth && selectedProfile.auth.diagnostics && selectedProfile.auth.diagnostics[0] ? selectedProfile.auth.diagnostics[0] : 'No credentials resolved for this profile.'}</span>`
+                    }
+                  </div>
+                  ${selectedProfile && !selectedCanAuth && selectedProfile.auth && selectedProfile.auth.diagnostics && selectedProfile.auth.diagnostics.length > 1 && html`
+                    <ul class="manager-picker-diagnostics">
+                      ${selectedProfile.auth.diagnostics.slice(1).map((d, i) => html`<li key=${i}>${d}</li>`)}
+                    </ul>
+                  `}
+                  ${selectedProfile && !selectedCanAuth && html`
+                    <div class="manager-picker-remediation">
+                      Fix credentials on the <a href="#agents" class="manager-picker-link">Agents page</a>, then <button type="button" class="manager-picker-link manager-picker-link-btn" onClick=${() => reloadAgents && reloadAgents()}>refresh</button>.
+                    </div>
+                  `}
+                </div>
+              `}
+              <button class="btn btn-primary" onClick=${handleStart} disabled=${startDisabled}>
                 ${loading ? 'Starting...' : 'Start Manager'}
               </button>
             </div>
@@ -3809,7 +3912,7 @@ function App() {
   const { tasks, setTasks, loading: tasksLoading, reload: reloadTasks } = useTasks();
   const { runs, setRuns, loading: runsLoading, reload: reloadRuns } = useRuns();
   const { projects, loading: projectsLoading, reload: reloadProjects } = useProjects();
-  const { agents, loading: agentsLoading, reload: reloadAgents } = useAgents();
+  const { agents, loading: agentsLoading, error: agentsError, reload: reloadAgents } = useAgents();
   const { sessions: claudeSessions } = useClaudeSessions();
   const manager = useManager();
   const [inspectRun, setInspectRun] = useState(null);
@@ -3895,7 +3998,7 @@ function App() {
 
   const renderView = () => {
     if (routeBase === 'manager') {
-      return html`<${ManagerView} manager=${manager} runs=${runs} tasks=${tasks} projects=${projects} />`;
+      return html`<${ManagerView} manager=${manager} runs=${runs} tasks=${tasks} projects=${projects} agents=${agents} agentsError=${agentsError} agentsLoading=${agentsLoading} reloadAgents=${reloadAgents} />`;
     }
     if (routeBase === 'board') {
       if (tasksLoading) return html`<${Loading} />`;
