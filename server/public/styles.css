@@ -2991,12 +2991,14 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 }
 
 .agent-detail-field {
+  /* Intentionally transparent: this matched the original visual before
+     `--bg-tertiary` was defined as an alias of `--bg-elevated`. The boxed
+     look made every field feel like a form input; the minimal label/value
+     pair reads better in a read-only detail view. */
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-tertiary);
+  gap: 4px;
+  padding: 4px 0;
 }
 
 .agent-detail-field-label {

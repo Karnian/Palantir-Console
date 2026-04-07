@@ -1818,11 +1818,11 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTa
                       return html`
                         <div key=${t.id} class="project-task-item clickable"
                           role="button" tabindex="0"
-                          onClick=${() => { if (onOpenTask) { onOpenTask(t); onClose(); } }}
+                          onClick=${() => { if (onOpenTask) onOpenTask(t); }}
                           onKeyDown=${(e) => {
                             if (e.key === 'Enter' || e.key === ' ') {
                               e.preventDefault();
-                              if (onOpenTask) { onOpenTask(t); onClose(); }
+                              if (onOpenTask) onOpenTask(t);
                             }
                           }}>
                           <span class="project-task-item-title">${t.title}</span>

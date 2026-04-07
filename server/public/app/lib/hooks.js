@@ -34,12 +34,29 @@ export function navigate(hash) {
 
 // ---- UI hooks ----
 
+// Module-level stack so nested modals don't all react to the same Escape key.
+// When two modals are open (e.g. ProjectDetailModal -> TaskDetailPanel on top),
+// pressing Escape should only close the topmost one. We track each active
+// useEscape registration in mount order; the handler short-circuits unless its
+// own entry is at the top of the stack.
+const _escapeStack = [];
+
 export function useEscape(open, onClose) {
   useEffect(() => {
     if (!open) return;
-    const handler = (e) => { if (e.key === 'Escape') onClose(); };
+    const entry = { onClose };
+    _escapeStack.push(entry);
+    const handler = (e) => {
+      if (e.key !== 'Escape') return;
+      if (_escapeStack[_escapeStack.length - 1] !== entry) return;
+      onClose();
+    };
     window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
+    return () => {
+      window.removeEventListener('keydown', handler);
+      const idx = _escapeStack.indexOf(entry);
+      if (idx >= 0) _escapeStack.splice(idx, 1);
+    };
   }, [open, onClose]);
 }
 
