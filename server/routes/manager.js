@@ -16,20 +16,37 @@ const { BadRequestError } = require('../utils/errors');
  *   POST   /api/manager/stop    — Stop the active manager session
  */
 
-function createManagerRouter({ runService, streamJsonEngine, eventBus, projectService, agentProfileService }) {
+function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, eventBus, projectService, agentProfileService }) {
   const router = express.Router();
+
+  // PR1a: ManagerAdapter seam. The factory is the single entrypoint for
+  // engine operations; routes never call streamJsonEngine directly anymore.
+  // streamJsonEngine is still in the param list for back-compat with tests
+  // that construct the router directly without passing the factory.
+  if (!managerAdapterFactory) {
+    const { createManagerAdapterFactory } = require('../services/managerAdapters');
+    managerAdapterFactory = createManagerAdapterFactory({ streamJsonEngine });
+  }
 
   // Track the active manager run ID (only one manager at a time)
   let activeManagerRunId = null;
+  let activeManagerAdapter = null;
   let startingManager = false; // guard against concurrent /start requests
 
-  // On startup: mark any stale manager runs (from previous server instances) as stopped
+  // On startup: mark any stale manager runs (from previous server instances) as stopped.
+  // PR1a: route disposeSession() through every adapter so external resources
+  // (Codex temp files in PR4, etc.) get cleaned up — not just the Claude
+  // subprocess. Today no resources exist, so this is a no-op for Claude.
   try {
     const staleManagers = runService.listRuns({ status: 'running' })
       .concat(runService.listRuns({ status: 'queued' }))
       .concat(runService.listRuns({ status: 'needs_input' }))
       .filter(r => r.is_manager);
     for (const r of staleManagers) {
+      try {
+        const adapter = managerAdapterFactory.getAdapter(r.manager_adapter || 'claude-code');
+        adapter.disposeSession(r.id);
+      } catch { /* ignore */ }
       runService.updateRunStatus(r.id, 'stopped', { force: true });
     }
   } catch { /* ignore */ }
@@ -40,11 +57,15 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
   function getActiveManager() {
     if (!activeManagerRunId) return null;
 
+    const adapter = activeManagerAdapter || managerAdapterFactory.getAdapter('claude-code');
+
     // Check if still alive
-    const alive = streamJsonEngine.isAlive(activeManagerRunId);
+    const alive = adapter.isSessionAlive(activeManagerRunId);
     if (!alive) {
       // Check if it completed naturally
-      const exitCode = streamJsonEngine.detectExitCode(activeManagerRunId);
+      const exitCode = adapter.detectExitCode
+        ? adapter.detectExitCode(activeManagerRunId)
+        : null;
       if (exitCode !== null) {
         try {
           const status = exitCode === 0 ? 'completed' : 'failed';
@@ -52,6 +73,7 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
         } catch { /* already updated */ }
       }
       activeManagerRunId = null;
+      activeManagerAdapter = null;
       return null;
     }
 
@@ -132,15 +154,16 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
     const systemPrompt = buildManagerSystemPrompt(runSummary, projectList, agentList);
 
     try {
-      const result = streamJsonEngine.spawnAgent(runId, {
+      // PR1a: route through ManagerAdapter. Today only claude-code exists;
+      // PR3 will resolve adapter type from agent_profile_id.
+      const adapter = managerAdapterFactory.getAdapter('claude-code');
+      const { sessionRef } = adapter.startSession(runId, {
         prompt: prompt || 'You are now active as the Palantir Manager. Await instructions.',
         cwd: safeCwd,
         systemPrompt,
-        permissionMode: 'bypassPermissions',
-        allowedTools: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebSearch', 'WebFetch'],
         model: model || undefined,
-        isManager: true,
       });
+      const result = sessionRef;
 
       // Mark as started
       runService.markRunStarted(runId, {
@@ -150,6 +173,7 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
       });
 
       activeManagerRunId = runId;
+      activeManagerAdapter = adapter;
 
       if (eventBus) {
         eventBus.emit('manager:started', { runId });
@@ -190,8 +214,9 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
       ? images.filter(img => img && typeof img.data === 'string' && typeof img.media_type === 'string')
       : undefined;
 
-    const sent = streamJsonEngine.sendInput(activeManagerRunId, text || '', validImages);
-    if (!sent) {
+    const adapter = activeManagerAdapter || managerAdapterFactory.getAdapter('claude-code');
+    const { accepted } = adapter.runTurn(activeManagerRunId, { text: text || '', images: validImages });
+    if (!accepted) {
       return res.status(502).json({ error: 'Failed to send message to manager' });
     }
 
@@ -213,9 +238,12 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
       return res.json({ active: false, run: null });
     }
 
-    const usage = streamJsonEngine.getUsage(activeManagerRunId);
-    const sessionId = streamJsonEngine.getSessionId(activeManagerRunId);
+    const adapter = activeManagerAdapter || managerAdapterFactory.getAdapter('claude-code');
+    const usage = adapter.getUsage(activeManagerRunId);
+    const sessionId = adapter.getSessionId(activeManagerRunId);
 
+    // PR1a is pure indirection — keep response shape identical to pre-refactor.
+    // PR3 will add adapter type once /start accepts agent_profile_id.
     res.json({
       active: true,
       run: manager,
@@ -250,7 +278,8 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
     }
 
     const lines = Math.min(Math.max(1, Number(req.query.lines || 100)), 2000);
-    const output = streamJsonEngine.getOutput(activeManagerRunId, lines);
+    const adapter = activeManagerAdapter || managerAdapterFactory.getAdapter('claude-code');
+    const output = adapter.getOutput ? adapter.getOutput(activeManagerRunId, lines) : null;
     res.json({ output, runId: activeManagerRunId });
   }));
 
@@ -264,13 +293,15 @@ function createManagerRouter({ runService, streamJsonEngine, eventBus, projectSe
     }
 
     const runId = activeManagerRunId;
-    streamJsonEngine.kill(runId);
+    const adapter = activeManagerAdapter || managerAdapterFactory.getAdapter('claude-code');
+    adapter.disposeSession(runId);
 
     try {
       runService.updateRunStatus(runId, 'cancelled', { force: true });
     } catch { /* ignore */ }
 
     activeManagerRunId = null;
+    activeManagerAdapter = null;
 
     if (eventBus) {
       eventBus.emit('manager:stopped', { runId });
