@@ -2323,10 +2323,9 @@ body {
 }
 
 .dropdown-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
+  /* position/top/left/width are set inline (fixed positioning relative to
+     the trigger's bounding box). Using `fixed` lets the menu escape any
+     scroll container the dropdown lives in (e.g. modal-body overflow:auto). */
   z-index: 1000;
   display: flex;
   flex-direction: column;
@@ -2339,6 +2338,12 @@ body {
   outline: none;
   max-height: 280px;
   overflow-y: auto;
+}
+
+.dropdown-menu.flip-up {
+  /* When flipping above the trigger we use translateY(-100%) so the menu's
+     bottom sits at the trigger's top. The 4px gap is folded into the inline
+     `top` value (rect.top - 4). */
 }
 
 .dropdown-item {
