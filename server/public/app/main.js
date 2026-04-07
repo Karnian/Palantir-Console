@@ -44,7 +44,16 @@ window.apiFetch = apiFetch;
 // still a non-module bundle that relies on top-level globals. Once helpers
 // and hooks are extracted into modules, app.js itself will become a module
 // and this loader can be deleted.
+//
+// `async = false` is the actual ordering knob for dynamically inserted
+// classic scripts: it preserves source order against any subsequent dynamic
+// inserts. Module scripts are already deferred to after DOMContentLoaded
+// (and to after this main.js completes), so by the time appendChild runs
+// the bridge globals are already on window.
 const legacy = document.createElement('script');
 legacy.src = './app.js';
-legacy.defer = false; // module script already runs after DOMContentLoaded
+legacy.async = false;
+legacy.onerror = (err) => {
+  console.error('[palantir] failed to load legacy app.js bundle', err);
+};
 document.head.appendChild(legacy);
