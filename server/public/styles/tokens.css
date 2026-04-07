@@ -1,0 +1,78 @@
+/*
+ * Palantir Console — design tokens (Phase 4 / Task 5).
+ *
+ * Single source of truth for CSS custom properties (color palette, typography,
+ * radii, sidebar width, semantic/status/priority colors, legacy aliases).
+ *
+ * Loaded in index.html BEFORE styles.css so the rest of the stylesheet
+ * resolves the variables. Splitting is minimal on purpose: reset, base, and
+ * component styles still live in styles.css. CSS-in-pieces beyond tokens is
+ * a separate refactor — see Phase 4 follow-ups in the repo history.
+ */
+
+:root {
+  /* Backgrounds - deep blue-gray layering */
+  --bg-base: #09090b;
+  --bg-surface: #111113;
+  --bg-elevated: #1a1a1f;
+  --bg-hover: #222228;
+  --bg-overlay: rgba(0, 0, 0, 0.7);
+
+  /* Text hierarchy */
+  --text-primary: #ededef;
+  --text-secondary: #a0a0ab;
+  --text-muted: #63636e;
+  --text-inverse: #09090b;
+
+  /* Accent - indigo/violet */
+  --accent: #7c5cfc;
+  --accent-hover: #6d4fee;
+  --accent-light: #a78bfa;
+  --accent-muted: rgba(124, 92, 252, 0.15);
+  --accent-border: rgba(124, 92, 252, 0.4);
+
+  /* Borders - neutral */
+  --border: rgba(255, 255, 255, 0.06);
+  --border-hover: rgba(255, 255, 255, 0.12);
+  --border-active: rgba(124, 92, 252, 0.5);
+
+  /* Semantic colors */
+  --danger: #f43f5e;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --info: #3b82f6;
+
+  /* Status colors */
+  --status-running: #3b82f6;
+  --status-needs-input: #f59e0b;
+  --status-review: #8b5cf6;
+  --status-done: #10b981;
+  --status-failed: #ef4444;
+  --status-queued: #6b7280;
+
+  /* Priority */
+  --priority-low: #6b7280;
+  --priority-medium: #3b82f6;
+  --priority-high: #f59e0b;
+  --priority-critical: #ef4444;
+
+  /* Fonts */
+  --font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', Menlo, Monaco, Consolas, monospace;
+
+  /* Spacing/sizing */
+  --sidebar-nav-width: 56px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* Legacy aliases -- DO NOT USE in new code */
+  --gold: var(--accent-light);
+  --silver: var(--text-secondary);
+  --moonlight: var(--text-primary);
+  --terminal-font: var(--font-mono);
+  --obsidian: var(--bg-base);
+  --midnight: var(--bg-base);
+  --smoke: var(--bg-elevated);
+  --glow: var(--accent-muted);
+}
