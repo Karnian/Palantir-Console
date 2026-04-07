@@ -53,6 +53,8 @@ const REQUIRED_ASSETS = [
   { path: '/app/lib/format.js', mime: /text\/javascript|application\/javascript/ },
   { path: '/app/lib/markdown.js', mime: /text\/javascript|application\/javascript/ },
   { path: '/app/lib/api.js', mime: /text\/javascript|application\/javascript/ },
+  { path: '/app/lib/toast.js', mime: /text\/javascript|application\/javascript/ },
+  { path: '/app/lib/hooks.js', mime: /text\/javascript|application\/javascript/ },
   { path: '/app/components/RunInspector.js', mime: /text\/javascript|application\/javascript/ },
   { path: '/vendor/preact.module.js', mime: /text\/javascript|application\/javascript/ },
   { path: '/vendor/hooks.module.js', mime: /text\/javascript|application\/javascript/ },
@@ -154,6 +156,36 @@ test('boot: app/lib/api.js exports apiFetch', async (t) => {
   const app = await createTestApp(t);
   const res = await request(app).get('/app/lib/api.js');
   assert.match(res.text, /export\s+(async\s+)?function\s+apiFetch/, 'apiFetch export present');
+});
+
+test('boot: app/lib/toast.js exports the toast system', async (t) => {
+  const app = await createTestApp(t);
+  const res = await request(app).get('/app/lib/toast.js');
+  for (const sym of ['addToast', 'useToasts', 'ToastContainer', 'apiFetchWithToast']) {
+    assert.match(res.text, new RegExp(`export\\s+(async\\s+)?function\\s+${sym}`), `${sym} export present`);
+  }
+});
+
+test('boot: app/lib/hooks.js exports every hook the app needs', async (t) => {
+  const app = await createTestApp(t);
+  const res = await request(app).get('/app/lib/hooks.js');
+  // Locks the public surface of hooks.js. If a hook gets renamed or dropped
+  // here, the bridge in main.js would silently fail to assign it on window
+  // and app.js would fall back to a ReferenceError on first use.
+  for (const sym of ['useRoute', 'navigate', 'useEscape', 'useSSE', 'useTasks', 'useRuns', 'useProjects', 'useClaudeSessions', 'useAgents', 'useManager']) {
+    assert.match(res.text, new RegExp(`export\\s+(async\\s+)?function\\s+${sym}`), `${sym} export present`);
+  }
+});
+
+test('boot: main.js bridges the toast and hook modules onto window', async (t) => {
+  const app = await createTestApp(t);
+  const res = await request(app).get('/app/main.js');
+  for (const sym of ['addToast', 'useToasts', 'ToastContainer', 'apiFetchWithToast']) {
+    assert.match(res.text, new RegExp(`window\\.${sym}\\s*=`), `${sym} window bridge present`);
+  }
+  for (const sym of ['useRoute', 'navigate', 'useEscape', 'useSSE', 'useTasks', 'useRuns', 'useProjects', 'useClaudeSessions', 'useAgents', 'useManager']) {
+    assert.match(res.text, new RegExp(`window\\.${sym}\\s*=`), `${sym} window bridge present`);
+  }
 });
 
 test('boot: app/components/RunInspector.js exports the component and main.js bridges it', async (t) => {
