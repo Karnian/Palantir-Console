@@ -7,3 +7,4 @@ node_modules/
 *.db-shm
 .claude-auth.json
 .ao/
+.playwright-mcp/
