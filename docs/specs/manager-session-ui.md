@@ -835,7 +835,7 @@ Manager Chat은 서버 사이드에서 다음과 같이 동작한다:
 
 ## 17. Data Model Additions
 
-기존 스키마(RESEARCH_AND_REVIEW.md에 정의된 것)에 추가:
+기존 스키마([../research/research-and-review.md](../research/research-and-review.md)에 정의된 것)에 추가:
 
 ```sql
 -- Manager conversation history
