@@ -2,6 +2,31 @@
 
 Palantir Console — AI 코딩 에이전트 (Claude Code, Codex, OpenCode) 중앙 관제 허브.
 
+## Working style (autonomous mode default ON)
+
+이 repo에서는 Claude가 **default autonomous**로 동작한다. 사용자가 명시적으로 "이번엔 단계별로 확인해" / "자율 모드 꺼"라고 선언하지 않는 이상, 아래 범위는 승인 없이 진행하고 phase 종료 시점에 한 번만 요약 보고한다.
+
+**승인 없이 진행**:
+- codex PASS + 테스트 그린인 PR의 squash merge + branch 삭제 + main pull
+- 테스트 / gitignore / cleanup / 문서 등 보조 작업 (발견 즉시 수정, 별도 작은 PR 포함)
+- 명확한 테스트 찌꺼기 / orphan 리소스 정리
+- smoke 레벨 자동 승격 (레벨 1 PASS → 즉시 레벨 2)
+- codex 라운드 반복, 블로커 자동 수정, commit/PR 본문 작성
+- 옵션 A/B/C 중 권장안 자동 선택 — 사후 "A로 했다" 통보만
+
+**여전히 사용자 확인 필요**:
+- 되돌리기 불가한 git: force push, 원격 브랜치 삭제, 사용자 작업물을 덮어쓸 `reset --hard`, published commit amend
+- 사용자가 띄운 prod 서버 프로세스 kill (Claude가 직접 띄운 백그라운드는 예외)
+- LLM 실제 호출이 상당량 누적되는 작업
+- spec / lock-in / 원칙 재해석이 필요한 설계 결정
+- 이전 feedback과 충돌하는 방향 전환
+- codex가 ~5라운드 넘도록 수렴 안 되는 경우 (설계 전제 오류 가능성)
+
+**Phase 기반 작업 표준 체인** (자동):
+`branch → 구현 → npm test → codex 교차검증 (PASS까지 반복) → commit → PR → merge → main pull → 다음 phase 진입 여부 보고`
+
+spec 소스: `docs/specs/manager-v3-multilayer.md`. 교차검증 루틴 세부: `.claude/memory/feedback_phase_workflow.md`.
+
 ## Commands
 
 ```bash
