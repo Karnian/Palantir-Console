@@ -97,7 +97,7 @@ function createCodexAdapter({
    * Worker role (future) keeps the bypass because workers have legitimate
    * filesystem write needs. See docs/specs/manager-v3-multilayer.md principle 1.
    */
-  function startSession(runId, { systemPrompt, cwd, model, env, role }) {
+  function startSession(runId, { systemPrompt, cwd, model, env, role, resumeThreadId, onThreadStarted } = {}) {
     if (sessions.has(runId)) {
       throw new Error(`codexAdapter: session ${runId} already started`);
     }
@@ -110,13 +110,24 @@ function createCodexAdapter({
     fs.writeFileSync(instructionsPath, systemPrompt || '', { mode: 0o600 });
 
     sessions.set(runId, {
-      threadId: null,
+      // v3 Phase 3a: if the caller passes a persisted thread_id (PM lazy
+      // spawn loading `project_briefs.pm_thread_id`), seed it so the first
+      // runTurn goes through `codex exec resume <thread_id>` instead of
+      // creating a brand new thread. Passing null (default) keeps the
+      // pre-3a behavior: thread_id is captured from the first vendor
+      // thread.started event.
+      threadId: resumeThreadId || null,
       instructionsPath,
       tmpDir,
       cwd: cwd || process.cwd(),
       model: model || null,
       env: env || null, // PR4: filtered subprocess env from routes/manager.js
       role: role || 'manager', // v3 Phase 0: default to manager (tightened)
+      // v3 Phase 3a: fires exactly once when thread.started arrives or on
+      // synthetic emission for resumes. pmSpawnService uses this to
+      // persist pm_thread_id into project_briefs.
+      onThreadStarted: typeof onThreadStarted === 'function' ? onThreadStarted : null,
+      threadStartedFired: false,
       turnIndex: 0,
       usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
       currentChild: null,
@@ -124,7 +135,16 @@ function createCodexAdapter({
       sessionStartedEmitted: false,
     });
 
-    return { sessionRef: { instructionsPath } };
+    // If we're resuming from a persisted thread id, fire the callback
+    // immediately so the caller can finalize any bookkeeping that would
+    // otherwise wait for the first turn to complete.
+    if (resumeThreadId) {
+      const state = sessions.get(runId);
+      state.threadStartedFired = true;
+      try { if (state.onThreadStarted) state.onThreadStarted(resumeThreadId); } catch { /* ignore */ }
+    }
+
+    return { sessionRef: { instructionsPath, resumedThreadId: resumeThreadId || null } };
   }
 
   /**
@@ -276,6 +296,15 @@ function createCodexAdapter({
         try {
           if (runService) runService.updateManagerThreadId(runId, state.threadId);
         } catch { /* ignore */ }
+      }
+      // v3 Phase 3a: notify the PM spawn service exactly once so it can
+      // persist the fresh thread id into project_briefs.pm_thread_id.
+      // Guarded by threadStartedFired so we don't double-fire on multiple
+      // thread.started vendor emissions (codex has been known to re-emit
+      // on reconnect).
+      if (!state.threadStartedFired && state.threadId) {
+        state.threadStartedFired = true;
+        try { if (state.onThreadStarted) state.onThreadStarted(state.threadId); } catch { /* ignore */ }
       }
       if (!state.sessionStartedEmitted) {
         state.sessionStartedEmitted = true;

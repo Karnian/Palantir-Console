@@ -1,7 +1,7 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 
-function createProjectsRouter({ projectService, taskService, projectBriefService }) {
+function createProjectsRouter({ projectService, taskService, projectBriefService, pmCleanupService }) {
   const router = express.Router();
 
   router.get('/', asyncHandler(async (req, res) => {
@@ -31,6 +31,28 @@ function createProjectsRouter({ projectService, taskService, projectBriefService
   }));
 
   router.delete('/:id', asyncHandler(async (req, res) => {
+    // v3 Phase 3a: tear down any live PM for this project BEFORE deleting
+    // the row (spec §5 책임 분담표). pmCleanupService is idempotent and
+    // safe to call on projects that never had a PM. The project row
+    // delete cascades to project_briefs, but the in-memory adapter
+    // session and managerRegistry slot are NOT cascaded by SQLite and
+    // must be scrubbed explicitly.
+    //
+    // Codex R1 finding #2: if dispose throws we MUST abort the delete.
+    // Otherwise we lose the only durable reference (the project row)
+    // needed to locate and clean up the orphaned in-memory PM state
+    // later. Failing the request lets the user retry once the adapter
+    // is healthy, or manually /reset first.
+    if (pmCleanupService) {
+      try {
+        pmCleanupService.dispose(req.params.id);
+      } catch (err) {
+        return res.status(502).json({
+          error: 'pm_dispose_failed',
+          message: `Refusing to delete project — PM teardown failed: ${err.message}. Try POST /api/manager/pm/${req.params.id}/reset first, or retry after resolving the underlying adapter error.`,
+        });
+      }
+    }
     projectService.deleteProject(req.params.id);
     res.json({ status: 'ok' });
   }));
