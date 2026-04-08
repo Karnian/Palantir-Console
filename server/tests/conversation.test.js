@@ -304,11 +304,17 @@ test('sendMessage to worker without text is rejected', async (t) => {
 async function createTestApp(t) {
   const storageRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-conv-storage-'));
   const fsRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-conv-fs-'));
-  const app = createApp({ storageRoot, fsRoot });
+  // Per-test SQLite — unset dbPath falls back to server/palantir.db (dev DB),
+  // so explicit isolation is required. The v3 Phase 1.5 cleanup had to
+  // remove dozens of fixture rows leaked from this exact oversight.
+  const dbDir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-conv-db-'));
+  const dbPath = path.join(dbDir, 'test.db');
+  const app = createApp({ storageRoot, fsRoot, dbPath });
   t.after(async () => {
     if (app.shutdown) app.shutdown();
     await fs.rm(storageRoot, { recursive: true, force: true });
     await fs.rm(fsRoot, { recursive: true, force: true });
+    await fs.rm(dbDir, { recursive: true, force: true });
   });
   return app;
 }

@@ -13,12 +13,17 @@ async function createTempDir(prefix) {
 async function createTestApp(t) {
   const storageRoot = await createTempDir('palantir-mgr-storage-');
   const fsRoot = await createTempDir('palantir-mgr-fs-');
-  const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode' });
+  // Per-test SQLite so the suite can never leak fixture rows into the
+  // dev DB at server/palantir.db.
+  const dbDir = await createTempDir('palantir-mgr-db-');
+  const dbPath = path.join(dbDir, 'test.db');
+  const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode', dbPath });
 
   t.after(async () => {
     if (app.shutdown) app.shutdown();
     await fs.rm(storageRoot, { recursive: true, force: true });
     await fs.rm(fsRoot, { recursive: true, force: true });
+    await fs.rm(dbDir, { recursive: true, force: true });
   });
 
   return { app, storageRoot, fsRoot };
@@ -57,12 +62,18 @@ test('runService.getRunEvents honors ?after= cursor (PR1c)', async (t) => {
   const fs2 = require('node:fs/promises');
   const path2 = require('node:path');
   const os2 = require('node:os');
-  const dbPath = path2.join(await fs2.mkdtemp(path2.join(os2.tmpdir(), 'palantir-mgr-cursor-')), 'test.db');
+  const dbDir = await fs2.mkdtemp(path2.join(os2.tmpdir(), 'palantir-mgr-cursor-'));
+  const dbPath = path2.join(dbDir, 'test.db');
   const { createDatabase } = require('../db/database');
   const { createRunService } = require('../services/runService');
   const { db, migrate, close } = createDatabase(dbPath);
   migrate();
-  t.after(() => { close(); });
+  t.after(async () => {
+    close();
+    // rm the tempdir so failed runs don't leak palantir-mgr-cursor-*
+    // into /tmp forever (codex round review finding).
+    await fs2.rm(dbDir, { recursive: true, force: true });
+  });
   const rs = createRunService(db, null);
   const run = rs.createRun({ is_manager: true, prompt: 'cursor test' });
   const id1 = rs.addRunEvent(run.id, 'mgr.assistant_message', JSON.stringify({ turnIndex: 0, summaryText: 'a', hasRawStored: false, data: { text: 'a' } }));
