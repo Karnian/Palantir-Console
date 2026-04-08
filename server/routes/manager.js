@@ -28,7 +28,11 @@ const PROFILE_TYPE_TO_ADAPTER = {
   'codex': 'codex',
 };
 
-function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, eventBus, projectService, agentProfileService }) {
+// authResolverOpts is forwarded into resolveManagerAuth for every preflight
+// so tests can inject `hasKeychain` (and any future DI hooks) without
+// monkey-patching child_process. Production callers leave this empty and
+// get the real keychain probe.
+function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, eventBus, projectService, agentProfileService, authResolverOpts = {} }) {
   const router = express.Router();
 
   // PR1a: ManagerAdapter seam. The factory is the single entrypoint for
@@ -205,7 +209,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       // fall through to the resolver's defaults.
       envAllowlist = undefined;
     }
-    const authCtx = resolveManagerAuth(adapterType, { envAllowlist });
+    const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
     if (!authCtx.canAuth) {
       startingManager = false;
       return res.status(400).json({

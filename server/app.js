@@ -126,10 +126,15 @@ function createApp(options = {}) {
   app.use('/api/projects', createProjectsRouter({ projectService, taskService }));
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService }));
   app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine }));
-  app.use('/api/agents', createAgentsRouter({ agentProfileService, providerRegistry }));
+  // PR18: tests can pass options.authResolverOpts (e.g. a fake `hasKeychain`)
+  // so /api/agents and /api/manager preflights are deterministic across CI
+  // hosts that may or may not have a Claude keychain item. Production callers
+  // leave this empty and get the real keychain probe.
+  const authResolverOpts = options.authResolverOpts || {};
+  app.use('/api/agents', createAgentsRouter({ agentProfileService, providerRegistry, authResolverOpts }));
   app.use('/api/events', createEventsRouter({ eventBus }));
   app.use('/api/claude-sessions', createClaudeSessionsRouter());
-  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, eventBus, projectService, agentProfileService }));
+  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, eventBus, projectService, agentProfileService, authResolverOpts }));
 
   app.use(errorHandler);
 

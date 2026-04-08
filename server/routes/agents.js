@@ -16,7 +16,7 @@ const MANAGER_PROFILE_TYPES = {
   'codex': 'codex',
 };
 
-function computeAuthForProfile(profile) {
+function computeAuthForProfile(profile, resolverOpts = {}) {
   const adapterType = MANAGER_PROFILE_TYPES[profile && profile.type];
   if (!adapterType) return null;
   let envAllowlist;
@@ -44,7 +44,7 @@ function computeAuthForProfile(profile) {
     }
     envAllowlist = parsed;
   }
-  const ctx = resolveManagerAuth(adapterType, { envAllowlist });
+  const ctx = resolveManagerAuth(adapterType, { envAllowlist, ...resolverOpts });
   return {
     canAuth: !!ctx.canAuth,
     sources: ctx.sources || [],
@@ -52,7 +52,10 @@ function computeAuthForProfile(profile) {
   };
 }
 
-function createAgentsRouter({ agentProfileService, providerRegistry }) {
+// authResolverOpts is forwarded to resolveManagerAuth so tests can inject
+// `hasKeychain` (and any future DI hooks) without monkey-patching globals.
+// Production callers leave this empty and get the real keychain probe.
+function createAgentsRouter({ agentProfileService, providerRegistry, authResolverOpts = {} }) {
   const router = express.Router();
 
   router.get('/', asyncHandler(async (req, res) => {
@@ -60,7 +63,7 @@ function createAgentsRouter({ agentProfileService, providerRegistry }) {
     // PR5: attach per-profile manager auth preflight so the frontend picker
     // can render a green/red status dot without N+1 probing. Non-manager
     // profiles get `auth: null` and stay untouched.
-    const enriched = agents.map(a => ({ ...a, auth: computeAuthForProfile(a) }));
+    const enriched = agents.map(a => ({ ...a, auth: computeAuthForProfile(a, authResolverOpts) }));
     res.json({ agents: enriched });
   }));
 
@@ -84,7 +87,7 @@ function createAgentsRouter({ agentProfileService, providerRegistry }) {
     const runningCount = agentProfileService.getRunningCount(req.params.id);
     // PR5: include auth preflight so a targeted fetch (e.g. picker refresh
     // after credentials are added) doesn't need a second round-trip.
-    const auth = computeAuthForProfile(agent);
+    const auth = computeAuthForProfile(agent, authResolverOpts);
     res.json({ agent: { ...agent, auth }, runningCount });
   }));
 
