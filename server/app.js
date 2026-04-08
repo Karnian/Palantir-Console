@@ -34,6 +34,9 @@ const { createLifecycleService } = require('./services/lifecycleService');
 const { createAuthMiddleware } = require('./middleware/auth');
 const { errorHandler } = require('./middleware/errorHandler');
 const { createManagerRouter } = require('./routes/manager');
+const { createConversationsRouter } = require('./routes/conversations');
+const { createManagerRegistry } = require('./services/managerRegistry');
+const { createConversationService } = require('./services/conversationService');
 
 function createApp(options = {}) {
   const app = express();
@@ -92,6 +95,19 @@ function createApp(options = {}) {
     executionEngine, streamJsonEngine, worktreeService, eventBus,
   });
 
+  // v3 Phase 1.5: shared manager registry + conversation service.
+  // managerRegistry tracks which manager runs are live per conversation
+  // ('top' / 'pm:<projectId>'); conversationService owns the parent-notice
+  // queue and the unified send/resolve routing used by both the new
+  // /api/conversations router and the legacy /api/manager/* routes.
+  const managerRegistry = createManagerRegistry({ runService });
+  const conversationService = createConversationService({
+    runService,
+    managerRegistry,
+    managerAdapterFactory,
+    lifecycleService,
+  });
+
   // Middleware
   app.use(express.json({ limit: '2mb' }));
   app.use((req, res, next) => {
@@ -127,7 +143,7 @@ function createApp(options = {}) {
   // New routes (v2)
   app.use('/api/projects', createProjectsRouter({ projectService, taskService, projectBriefService }));
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService }));
-  app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine }));
+  app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService }));
   // PR18: tests can pass options.authResolverOpts (e.g. a fake `hasKeychain`)
   // so /api/agents and /api/manager preflights are deterministic across CI
   // hosts that may or may not have a Claude keychain item. Production callers
@@ -136,7 +152,8 @@ function createApp(options = {}) {
   app.use('/api/agents', createAgentsRouter({ agentProfileService, providerRegistry, authResolverOpts }));
   app.use('/api/events', createEventsRouter({ eventBus }));
   app.use('/api/claude-sessions', createClaudeSessionsRouter());
-  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, eventBus, projectService, projectBriefService, agentProfileService, authResolverOpts }));
+  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, authResolverOpts }));
+  app.use('/api/conversations', createConversationsRouter({ conversationService, runService }));
 
   app.use(errorHandler);
 

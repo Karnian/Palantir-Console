@@ -72,6 +72,7 @@ window.useProjects = hooks.useProjects;
 window.useClaudeSessions = hooks.useClaudeSessions;
 window.useAgents = hooks.useAgents;
 window.useManager = hooks.useManager;
+window.useConversation = hooks.useConversation; // v3 Phase 1.5
 
 const { RunInspector } = await import('./components/RunInspector.js');
 window.RunInspector = RunInspector;

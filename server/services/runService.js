@@ -56,8 +56,8 @@ function createRunService(db, eventBus) {
       WHERE r.id = ?
     `),
     insert: db.prepare(`
-      INSERT INTO runs (id, task_id, agent_profile_id, prompt, status, is_manager, parent_run_id, manager_adapter, manager_thread_id)
-      VALUES (@id, @task_id, @agent_profile_id, @prompt, @status, @is_manager, @parent_run_id, @manager_adapter, @manager_thread_id)
+      INSERT INTO runs (id, task_id, agent_profile_id, prompt, status, is_manager, parent_run_id, manager_adapter, manager_thread_id, manager_layer, conversation_id)
+      VALUES (@id, @task_id, @agent_profile_id, @prompt, @status, @is_manager, @parent_run_id, @manager_adapter, @manager_thread_id, @manager_layer, @conversation_id)
     `),
     updateManagerThread: db.prepare(`
       UPDATE runs SET manager_thread_id = ? WHERE id = ?
@@ -97,11 +97,33 @@ function createRunService(db, eventBus) {
     return run;
   }
 
-  function createRun({ task_id, agent_profile_id, prompt, is_manager, parent_run_id, manager_adapter, manager_thread_id }) {
+  function createRun({ task_id, agent_profile_id, prompt, is_manager, parent_run_id, manager_adapter, manager_thread_id, manager_layer, conversation_id }) {
     // task_id and agent_profile_id are required for worker runs, optional for manager
     if (!is_manager && !task_id) throw new BadRequestError('task_id is required');
     if (!is_manager && !agent_profile_id) throw new BadRequestError('agent_profile_id is required');
     const id = is_manager ? `run_mgr_${crypto.randomUUID().slice(0, 8)}` : `run_${crypto.randomUUID().slice(0, 8)}`;
+
+    // v3 Phase 1.5: conversation identity defaults.
+    // Manager runs default to layer='top' + conversation_id='top' (the MVP
+    // singleton). Worker runs default to conversation_id='worker:<id>'.
+    // Callers that spawn a PM (Phase 3a) must pass manager_layer='pm' +
+    // conversation_id='pm:<projectId>' explicitly.
+    let effectiveLayer = manager_layer || null;
+    let effectiveConversationId = conversation_id || null;
+    if (is_manager) {
+      if (!effectiveLayer) effectiveLayer = 'top';
+      if (!effectiveConversationId) effectiveConversationId = effectiveLayer === 'top' ? 'top' : null;
+      if (!effectiveConversationId) {
+        throw new BadRequestError('conversation_id is required for non-top manager runs');
+      }
+    } else {
+      // Worker
+      if (effectiveLayer) {
+        throw new BadRequestError('manager_layer must be null for worker runs');
+      }
+      if (!effectiveConversationId) effectiveConversationId = `worker:${id}`;
+    }
+
     stmts.insert.run({
       id,
       task_id: task_id || null,
@@ -112,6 +134,8 @@ function createRunService(db, eventBus) {
       parent_run_id: parent_run_id || null,
       manager_adapter: manager_adapter || null,
       manager_thread_id: manager_thread_id || null,
+      manager_layer: effectiveLayer,
+      conversation_id: effectiveConversationId,
     });
     const run = stmts.getById.get(id);
     if (eventBus) eventBus.emit('run:status', { run });
@@ -196,14 +220,51 @@ function createRunService(db, eventBus) {
     return stmts.getEvents.all(runId);
   }
 
+  // v3 Phase 1.5: layer-aware active manager lookups.
+  // getActiveManager() is kept as a thin wrapper for callers that still
+  // assume a single Top manager (lifecycleService, legacy routes). It
+  // returns the most recent live Top manager row.
   function getActiveManager() {
+    return getActiveManagers({ layer: 'top' })[0] || null;
+  }
+
+  // Returns all live manager runs matching the given filter. `layer` can be
+  // 'top', 'pm', or undefined (all layers). Ordered by created_at DESC so
+  // index [0] is the most recent match — callers that expect a singleton
+  // (Top) can rely on that.
+  function getActiveManagers({ layer } = {}) {
+    const live = ['running', 'queued', 'needs_input'];
+    const placeholders = live.map(() => '?').join(',');
+    const params = [...live];
+    let layerClause = '';
+    if (layer) {
+      layerClause = 'AND r.manager_layer = ?';
+      params.push(layer);
+    }
     return db.prepare(`
       SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon
       FROM runs r
       LEFT JOIN agent_profiles ap ON r.agent_profile_id = ap.id
-      WHERE r.is_manager = 1 AND r.status IN ('running', 'queued', 'needs_input')
+      WHERE r.is_manager = 1 AND r.status IN (${placeholders}) ${layerClause}
+      ORDER BY r.created_at DESC
+    `).all(...params);
+  }
+
+  // Resolve a conversation_id to the most recent run that owns it. Used by
+  // the conversation router to map 'top' / 'pm:<projectId>' / 'worker:<id>'
+  // back to the underlying run row for event/message operations.
+  function getRunByConversationId(conversationId) {
+    if (!conversationId) return null;
+    return db.prepare(`
+      SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
+             t.title as task_title, t.project_id as project_id, p.name as project_name
+      FROM runs r
+      LEFT JOIN agent_profiles ap ON r.agent_profile_id = ap.id
+      LEFT JOIN tasks t ON r.task_id = t.id
+      LEFT JOIN projects p ON t.project_id = p.id
+      WHERE r.conversation_id = ?
       ORDER BY r.created_at DESC LIMIT 1
-    `).get() || null;
+    `).get(conversationId) || null;
   }
 
   function getWorkerRuns(managerRunId) {
@@ -223,7 +284,7 @@ function createRunService(db, eventBus) {
     updateRunStatus, markRunStarted, updateRunResult,
     updateManagerThreadId,
     deleteRun, addRunEvent, getRunEvents,
-    getActiveManager, getWorkerRuns,
+    getActiveManager, getActiveManagers, getRunByConversationId, getWorkerRuns,
   };
 }
 

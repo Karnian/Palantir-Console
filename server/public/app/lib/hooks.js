@@ -216,6 +216,105 @@ export function useAgents() {
   return { agents, loading, error, reload: load };
 }
 
+// ---- Conversations (v3 Phase 1.5) ----
+//
+// Conversation identity is the new 1st-class surface. A conversation id
+// is one of: 'top' | 'pm:<projectId>' (Phase 3a) | 'worker:<runId>'.
+// useConversation() polls /api/conversations/:id/events with an
+// incremental cursor (same pattern as useManager), and exposes a
+// sendMessage() that hits /api/conversations/:id/message.
+//
+// useManager() below is PRESERVED unchanged — it still consumes the
+// legacy /api/manager/* routes, which now internally go through the
+// same conversationService. The intent is that new UI surfaces
+// (worker direct chat, future PM panel) use useConversation() while
+// the existing ManagerView keeps running on useManager() until a
+// later phase needs to dismantle it.
+
+export function useConversation(conversationId, { poll = true, pollMs = 2000 } = {}) {
+  const [events, setEvents] = useState([]);
+  const [run, setRun] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const pollRef = useRef(null);
+  const lastEventIdRef = useRef(0);
+  const activeIdRef = useRef(conversationId);
+  activeIdRef.current = conversationId;
+
+  const resolve = useCallback(async () => {
+    if (!conversationId) return;
+    try {
+      const data = await apiFetch(`/api/conversations/${encodeURIComponent(conversationId)}`);
+      setRun(data.conversation?.run || null);
+    } catch { /* 4xx — leave run null */ }
+  }, [conversationId]);
+
+  const loadEvents = useCallback(async (opts = {}) => {
+    if (!conversationId) return;
+    try {
+      if (opts.reset) {
+        lastEventIdRef.current = 0;
+        setEvents([]);
+      }
+      const after = lastEventIdRef.current;
+      const base = `/api/conversations/${encodeURIComponent(conversationId)}/events`;
+      const url = after > 0 ? `${base}?after=${after}` : base;
+      const data = await apiFetch(url);
+      const incoming = Array.isArray(data.events) ? data.events : [];
+      if (incoming.length === 0) return;
+      let maxId = lastEventIdRef.current;
+      for (const ev of incoming) {
+        if (typeof ev.id === 'number' && ev.id > maxId) maxId = ev.id;
+      }
+      lastEventIdRef.current = maxId;
+      setEvents(prev => {
+        if (prev.length === 0) return incoming;
+        const seen = new Set(prev.map(e => e.id));
+        const merged = prev.slice();
+        for (const ev of incoming) {
+          if (!seen.has(ev.id)) merged.push(ev);
+        }
+        return merged;
+      });
+    } catch { /* ignore */ }
+  }, [conversationId]);
+
+  const sendMessage = useCallback(async (text, images) => {
+    if (!conversationId) return;
+    setLoading(true);
+    try {
+      const body = { text };
+      if (images && images.length > 0) body.images = images;
+      const data = await apiFetch(`/api/conversations/${encodeURIComponent(conversationId)}/message`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      return data;
+    } catch (err) {
+      addToast('Failed to send: ' + err.message, 'error');
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, [conversationId]);
+
+  useEffect(() => {
+    resolve();
+    loadEvents({ reset: true });
+    if (!poll) return;
+    pollRef.current = setInterval(() => {
+      if (activeIdRef.current !== conversationId) return;
+      resolve();
+      loadEvents();
+    }, pollMs);
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      lastEventIdRef.current = 0;
+    };
+  }, [conversationId, poll, pollMs, resolve, loadEvents]);
+
+  return { run, events, loading, sendMessage, reload: () => loadEvents({ reset: true }) };
+}
+
 // ---- Manager session ----
 
 export function useManager() {

@@ -93,7 +93,13 @@ export function RunInspector({ run, onClose }) {
     if (!inputText.trim()) return;
     setSending(true);
     try {
-      await window.apiFetch(`/api/runs/${run.id}/input`, {
+      // v3 Phase 1.5: use the new /api/conversations/worker:<id>/message
+      // entry point. Going through this path guarantees the parent-notice
+      // router fires (lock-in #2 + principle 9): the user's direct message
+      // to this worker is queued as a system notice for the Top manager's
+      // next turn. The legacy /api/runs/:id/input route is still an alias
+      // for external callers but the in-app UI now speaks the new shape.
+      await window.apiFetch(`/api/conversations/worker:${encodeURIComponent(run.id)}/message`, {
         method: 'POST',
         body: JSON.stringify({ text: inputText.trim() }),
       });
@@ -103,6 +109,12 @@ export function RunInspector({ run, onClose }) {
     }
     setSending(false);
   };
+
+  // v3 Phase 1.5: parent_run_id is set iff this worker was spawned by a
+  // manager (Top in 1.5). We use it to show a visible hint next to the
+  // input so users understand that direct messages surface to Top —
+  // Principle 9 made legible.
+  const hasManagerParent = !!(currentRun?.parent_run_id || run?.parent_run_id);
 
   const handleCancel = async () => {
     if (!confirm('Cancel this run?')) return;
@@ -200,6 +212,11 @@ export function RunInspector({ run, onClose }) {
               ${sending ? '...' : 'Send'}
             </button>
           </div>
+          ${hasManagerParent && html`
+            <div class="run-input-hint" style="font-size:11px;color:var(--text-muted);padding:4px 2px 0;">
+              \u2726 Top Manager will be notified of this direct message on its next turn.
+            </div>
+          `}
         `}
       </div>
     </div>
