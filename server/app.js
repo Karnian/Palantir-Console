@@ -39,6 +39,8 @@ const { createManagerRegistry } = require('./services/managerRegistry');
 const { createConversationService } = require('./services/conversationService');
 const { createPmCleanupService } = require('./services/pmCleanupService');
 const { createPmSpawnService } = require('./services/pmSpawnService');
+const { createReconciliationService } = require('./services/reconciliationService');
+const { createDispatchAuditRouter } = require('./routes/dispatchAudit');
 
 function createApp(options = {}) {
   const app = express();
@@ -139,6 +141,20 @@ function createApp(options = {}) {
     try { conversationService.clearParentNotices(runId); } catch { /* ignore */ }
   });
 
+  // v3 Phase 4: annotate-only reconciliation. reconciliationService
+  // reads conversationService.peekParentNotices to detect "user
+  // intervention stale" claims, so it has to be constructed AFTER
+  // conversationService. It does not emit events or block anything —
+  // it writes to dispatch_audit_log and the UI renders a badge.
+  const reconciliationService = createReconciliationService({
+    db,
+    runService,
+    taskService,
+    projectService,
+    agentProfileService,
+    conversationService,
+  });
+
   // Middleware
   app.use(express.json({ limit: '2mb' }));
   app.use((req, res, next) => {
@@ -185,6 +201,7 @@ function createApp(options = {}) {
   app.use('/api/claude-sessions', createClaudeSessionsRouter());
   app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, authResolverOpts }));
   app.use('/api/conversations', createConversationsRouter({ conversationService, runService }));
+  app.use('/api/dispatch-audit', createDispatchAuditRouter({ reconciliationService }));
 
   app.use(errorHandler);
 
