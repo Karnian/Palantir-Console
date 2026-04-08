@@ -147,8 +147,14 @@ function buildManagerSystemPrompt({ adapter, port, token, layer = 'top' }) {
  * Build the first user message containing dynamic context. Sent right after
  * the system prompt so Codex's cached_input_tokens hit on the system prompt
  * is preserved across turns.
+ *
+ * v3 Phase 1: accepts optional `projectBriefsSection` — per-project conventions
+ * and pitfalls from project_briefs table (spec §7). Injected AFTER the project
+ * list so the manager sees both the roster and the per-project context.
+ * agentList entries in v3 include capabilities + max_concurrent so the
+ * dispatcher can make data-driven selections (principle 3).
  */
-function buildInitialUserContext({ runSummary, projectList, agentList, userPrompt }) {
+function buildInitialUserContext({ runSummary, projectList, projectBriefsSection, agentList, userPrompt }) {
   const sections = [];
   if (runSummary) {
     sections.push(`## Current State (at session start)\n${runSummary}`);
@@ -156,8 +162,11 @@ function buildInitialUserContext({ runSummary, projectList, agentList, userPromp
   if (projectList) {
     sections.push(`## Available Projects\n${projectList}\nOnly assign project_id when the task clearly belongs to a project. Leave it out if unrelated.`);
   }
+  if (projectBriefsSection) {
+    sections.push(`## Project Briefs (conventions & pitfalls)\n${projectBriefsSection}\nRespect these when dispatching work to the relevant project.`);
+  }
   if (agentList) {
-    sections.push(`## Available Agent Profiles\n${agentList}\nUse the agent id when calling /execute.`);
+    sections.push(`## Available Agent Profiles\n${agentList}\nPrefer agents whose capabilities match the task's requires_capabilities. Respect max_concurrent limits when spawning. Use the agent id when calling /execute.`);
   }
   if (userPrompt) {
     sections.push(`## Initial instruction\n${userPrompt}`);
