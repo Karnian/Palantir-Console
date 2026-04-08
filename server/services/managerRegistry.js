@@ -21,16 +21,51 @@
 function createManagerRegistry({ runService }) {
   // conversationId -> { runId, adapter }
   const active = new Map();
+  // listeners fired whenever a slot is cleared (explicit stop OR liveness
+  // probe detecting a dead session OR replacement via setActive). Each
+  // listener receives ({ conversationId, runId }). Consumers register
+  // here to scrub auxiliary state keyed by the dying run id — e.g.,
+  // conversationService.clearParentNotices — without this registry having
+  // to import conversationService. v3 Phase 2 fixes a codex-R1 finding
+  // where PM notice queues survived PM rotation and became undrainable.
+  const slotClearedListeners = [];
+  function notifySlotCleared(conversationId, runId) {
+    for (const cb of slotClearedListeners) {
+      try { cb({ conversationId, runId }); } catch { /* ignore */ }
+    }
+  }
 
   function setActive(conversationId, runId, adapter) {
     if (!conversationId) throw new Error('conversationId required');
     if (!runId) throw new Error('runId required');
     if (!adapter) throw new Error('adapter required');
+    // If a previous entry existed for this slot, treat the swap as a
+    // clear for the OLD run id so listeners can scrub per-runId state
+    // before we overwrite. This covers PM slot rotation (new PM run
+    // replaces an old one without anyone calling clearActive first).
+    const prev = active.get(conversationId);
+    if (prev && prev.runId !== runId) {
+      notifySlotCleared(conversationId, prev.runId);
+    }
     active.set(conversationId, { runId, adapter });
   }
 
   function clearActive(conversationId) {
+    const entry = active.get(conversationId);
+    if (!entry) return;
     active.delete(conversationId);
+    notifySlotCleared(conversationId, entry.runId);
+  }
+
+  // Register a slot-clear listener. Returns an unsubscribe function so
+  // tests can unwire without globals.
+  function onSlotCleared(cb) {
+    if (typeof cb !== 'function') return () => {};
+    slotClearedListeners.push(cb);
+    return () => {
+      const idx = slotClearedListeners.indexOf(cb);
+      if (idx !== -1) slotClearedListeners.splice(idx, 1);
+    };
   }
 
   function getActiveRunId(conversationId) {
@@ -73,6 +108,11 @@ function createManagerRegistry({ runService }) {
         }
       } catch { /* ignore */ }
       active.delete(conversationId);
+      // Notify listeners so they can scrub per-runId auxiliary state
+      // (e.g., pending parent notices keyed by this run id) before the
+      // run id drifts out of the registry. Without this, PM rotation or
+      // natural exit would strand notices targeting the old run id.
+      notifySlotCleared(conversationId, runId);
       return null;
     }
 
@@ -104,6 +144,7 @@ function createManagerRegistry({ runService }) {
     getActiveAdapter,
     probeActive,
     snapshot,
+    onSlotCleared,
   };
 }
 

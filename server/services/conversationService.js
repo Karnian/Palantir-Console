@@ -126,9 +126,12 @@ function createConversationService({
       return { kind: 'top', conversationId: 'top', run };
     }
     if (parsed.kind === 'pm') {
-      // Phase 1.5: PM is not yet wired. Return a placeholder so /status can
-      // show an empty PM slot without 404ing.
-      return { kind: 'pm', conversationId: id, projectId: parsed.projectId, run: null };
+      // v3 Phase 2: PM slot is now a 1st-class runtime target. probeActive
+      // returns the currently live PM run for this project (or null if no
+      // PM has been spawned yet — Phase 3a handles lazy spawn). The /status
+      // endpoint gets an accurate projected slot either way.
+      const run = managerRegistry.probeActive(id);
+      return { kind: 'pm', conversationId: id, projectId: parsed.projectId, run };
     }
     // Worker
     const run = runService.getRunByConversationId(id);
@@ -157,15 +160,17 @@ function createConversationService({
     }
 
     if (parsed.kind === 'top') {
-      return sendToTop({ text, images });
+      return sendToManagerSlot('top', { text, images });
     }
     if (parsed.kind === 'worker') {
       return sendToWorker(parsed.runId, { text, images });
     }
     if (parsed.kind === 'pm') {
-      const err = new Error('PM conversation not yet implemented (Phase 3a)');
-      err.httpStatus = 501;
-      throw err;
+      return sendToManagerSlot(conversationId, {
+        text,
+        images,
+        projectId: parsed.projectId,
+      });
     }
     const err = new Error('unreachable');
     err.httpStatus = 500;
@@ -181,14 +186,41 @@ function createConversationService({
     return arr ? arr.slice() : [];
   }
 
-  function sendToTop({ text, images }) {
-    const run = managerRegistry.probeActive('top');
+  // Race-safe drain. Removes EXACTLY `count` items from the head of the
+  // queue keyed by `parentRunId` and nothing more. This guarantees that
+  // notices queued between the peek and the commit — e.g., a worker send
+  // that lands mid-runTurn (codex R1 blocker) — stay in the queue and are
+  // delivered on the NEXT manager turn instead of being silently deleted
+  // together with the ones we actually shipped.
+  function commitDrainParentNotices(parentRunId, count) {
+    if (!parentRunId || !count || count <= 0) return;
+    const arr = pendingNotices.get(parentRunId);
+    if (!arr || arr.length === 0) return;
+    const toRemove = Math.min(count, arr.length);
+    arr.splice(0, toRemove);
+    if (arr.length === 0) pendingNotices.delete(parentRunId);
+  }
+
+  // v3 Phase 2: unified manager slot sender. Handles both the Top singleton
+  // ('top') and any PM slot ('pm:<projectId>') — both share the same
+  // peek → deliver → commit-drain → parent-notice semantics. The only
+  // layer-specific bit is how the parent is identified:
+  //   * top: parent_run_id is NULL, no upward notice is queued
+  //   * pm : parent_run_id points at the Top run that spawned this PM;
+  //          on success, queue a PM→Top notice on the PM run's parent
+  //          (but only if that parent still matches the currently active
+  //           Top, to avoid leaking stale signals into unrelated runs).
+  function sendToManagerSlot(conversationId, { text, images, projectId } = {}) {
+    const isTop = conversationId === 'top';
+    const layerLabel = isTop ? 'Top' : 'PM';
+
+    const run = managerRegistry.probeActive(conversationId);
     if (!run) {
-      const err = new Error('No active Top manager session');
+      const err = new Error(`No active ${layerLabel} manager session`);
       err.httpStatus = 404;
       throw err;
     }
-    const adapter = managerRegistry.getActiveAdapter('top')
+    const adapter = managerRegistry.getActiveAdapter(conversationId)
       || managerAdapterFactory.getAdapter(run.manager_adapter || 'claude-code');
 
     // Peek (do not drain) pending notices. We only commit the drain AFTER
@@ -213,27 +245,51 @@ function createConversationService({
       accepted = !!(result && result.accepted);
     } catch (runErr) {
       // Notice queue is untouched — next send will retry.
-      const err = new Error(`Failed to deliver message to Top manager: ${runErr.message}`);
+      const err = new Error(`Failed to deliver message to ${layerLabel} manager: ${runErr.message}`);
       err.httpStatus = 502;
       throw err;
     }
     if (!accepted) {
       // Notice queue is untouched — next send will retry.
-      const err = new Error('Failed to deliver message to Top manager');
+      const err = new Error(`Failed to deliver message to ${layerLabel} manager`);
       err.httpStatus = 502;
       throw err;
     }
 
-    // Commit the drain now that the send is confirmed accepted.
+    // Commit the drain now that the send is confirmed accepted. We remove
+    // EXACTLY the number of notices we peeked — if a concurrent worker
+    // send appended more while runTurn was in flight, those tail entries
+    // remain queued for the next turn (codex R1 blocker fix).
     if (notices.length > 0) {
-      consumeParentNotices(run.id);
+      commitDrainParentNotices(run.id, notices.length);
     }
 
     if (run.status === 'needs_input') {
       try { runService.updateRunStatus(run.id, 'running', { force: true }); } catch {}
     }
 
-    return { status: 'sent', target: { kind: 'top', runId: run.id } };
+    // PM → Top: every user message to a PM is a staleness signal to its
+    // parent Top (lock-in #2, no intent classification). We queue the
+    // notice only if the PM's parent_run_id is the currently active Top
+    // run — a historical parent is dropped.
+    if (!isTop && run.parent_run_id) {
+      const activeTopRunId = managerRegistry.getActiveRunId('top');
+      if (activeTopRunId && activeTopRunId === run.parent_run_id) {
+        const notice = formatParentNotice({
+          childConversationId: conversationId,
+          childRunId: run.id,
+          text,
+        });
+        queueParentNotice(run.parent_run_id, notice);
+      } else {
+        log(`pm ${conversationId} (run=${run.id}) parent_run_id=${run.parent_run_id} is not the active Top — notice dropped`);
+      }
+    }
+
+    const target = isTop
+      ? { kind: 'top', runId: run.id }
+      : { kind: 'pm', runId: run.id, projectId };
+    return { status: 'sent', target };
   }
 
   function sendToWorker(workerRunId, { text, images }) {
@@ -285,13 +341,17 @@ function createConversationService({
     }
 
     // Principle 9 + lock-in #2: now that the worker really received the
-    // message, queue a parent-staleness notice for the currently live Top
-    // — IF and only if the worker's parent_run_id matches it. A historical
-    // parent (old Top that has since stopped) gets its notice dropped
-    // rather than applied to some unrelated Top run.
+    // message, queue a parent-staleness notice for whichever manager slot
+    // currently owns this worker's parent. The parent may be either the
+    // active Top (worker→Top, Phase 1.5) OR an active PM (worker→PM,
+    // Phase 2 extension). In either case we queue by parent RUN id, and
+    // the drain happens on that parent's next accepted turn. A historical
+    // parent — one that is no longer registered in managerRegistry under
+    // the expected slot — gets its notice dropped rather than applied to
+    // some unrelated future run.
     if (worker.parent_run_id) {
-      const activeTopRunId = managerRegistry.getActiveRunId('top');
-      if (activeTopRunId && activeTopRunId === worker.parent_run_id) {
+      const parentSlot = resolveParentSlot(worker.parent_run_id);
+      if (parentSlot) {
         const notice = formatParentNotice({
           childConversationId: worker.conversation_id || `worker:${worker.id}`,
           childRunId: worker.id,
@@ -299,11 +359,40 @@ function createConversationService({
         });
         queueParentNotice(worker.parent_run_id, notice);
       } else {
-        log(`worker ${worker.id} parent_run_id=${worker.parent_run_id} is not the active Top — notice dropped`);
+        log(`worker ${worker.id} parent_run_id=${worker.parent_run_id} is not an active manager slot — notice dropped`);
       }
     }
 
     return { status: 'sent', target: { kind: 'worker', runId: workerRunId } };
+  }
+
+  // Given a worker's parent run id, return the conversation slot key
+  // ('top' | 'pm:<projectId>') if that parent is currently the live
+  // occupant of that slot, or null otherwise. This is the single place
+  // that decides "is this parent still the one users see?" for both Top
+  // and PM layers.
+  function resolveParentSlot(parentRunId) {
+    if (!parentRunId) return null;
+    // Fast path: Top slot
+    const activeTopRunId = managerRegistry.getActiveRunId('top');
+    if (activeTopRunId && activeTopRunId === parentRunId) return 'top';
+
+    // PM slot: we need to know which project the parent run belongs to so
+    // we can look up the right 'pm:<projectId>' registry key. We read the
+    // parent run row to get its conversation_id (set at createRun time for
+    // PM runs: 'pm:<projectId>'). If the parent isn't a PM manager, bail.
+    let parent;
+    try {
+      parent = runService.getRun(parentRunId);
+    } catch {
+      return null;
+    }
+    if (!parent || !parent.is_manager || parent.manager_layer !== 'pm') return null;
+    const pmSlotKey = parent.conversation_id;
+    if (!pmSlotKey || !pmSlotKey.startsWith('pm:')) return null;
+    const activePmRunId = managerRegistry.getActiveRunId(pmSlotKey);
+    if (activePmRunId && activePmRunId === parentRunId) return pmSlotKey;
+    return null;
   }
 
   // Events for a conversation are simply the events of the backing run,
