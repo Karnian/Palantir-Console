@@ -2906,6 +2906,46 @@ function showBrowserNotification(title, body) {
   }
 }
 
+// v3 Phase 5: tab title pulse for priority alerts (spec §9.8 mandates
+// "탭 타이틀 변경" as part of the priority-alert UX on top of OS
+// notification). We briefly flip document.title to an alert string so
+// an unfocused tab shows the new state in the browser tab strip, then
+// restore the original title after a short window OR immediately on
+// focus so the user isn't left with a dangling alert after they come
+// back. A single-shot global timer is enough — overlapping alerts
+// simply reset the window.
+let _tabTitleOriginal = null;
+let _tabTitleTimer = null;
+let _tabTitleFocusHandler = null;
+function pulseTabTitle(alertText, durationMs = 20000) {
+  if (typeof document === 'undefined') return;
+  if (_tabTitleOriginal == null) {
+    _tabTitleOriginal = document.title;
+  }
+  // If the tab is already focused, there's no point flipping the
+  // title — the user is here. Skip.
+  if (typeof document.hasFocus === 'function' && document.hasFocus()) {
+    return;
+  }
+  document.title = alertText;
+  clearTimeout(_tabTitleTimer);
+  const restore = () => {
+    if (_tabTitleOriginal != null) {
+      document.title = _tabTitleOriginal;
+      _tabTitleOriginal = null;
+    }
+    if (_tabTitleFocusHandler) {
+      window.removeEventListener('focus', _tabTitleFocusHandler);
+      _tabTitleFocusHandler = null;
+    }
+  };
+  _tabTitleTimer = setTimeout(restore, durationMs);
+  if (!_tabTitleFocusHandler) {
+    _tabTitleFocusHandler = restore;
+    window.addEventListener('focus', _tabTitleFocusHandler);
+  }
+}
+
 // Request permission on first user interaction
 if (typeof window !== 'undefined') {
   const requestOnce = () => {
@@ -3970,13 +4010,19 @@ function App() {
   const [showPalette, setShowPalette] = useState(false);
 
   // Helper to look up task title for a run (used in notifications)
+  // v3 Phase 5: SSE payloads carry the full run row under `data.run`
+  // plus hoisted envelope fields (task_id, project_id, from_status,
+  // to_status, reason). Pre-Phase 5 code read fields off the top level,
+  // so normalize both shapes here to keep the rest of the notification
+  // code layout-agnostic.
   const getRunTaskTitle = useCallback((data) => {
-    const taskId = data.task_id || data.taskId;
+    const run = (data && data.run) || data || {};
+    const taskId = data.task_id || data.taskId || run.task_id;
     if (taskId) {
       const task = tasks.find(t => t.id === taskId);
       if (task) return task.title;
     }
-    return data.title || `Run ${(data.id || '').slice(0, 8)}`;
+    return run.title || data.title || `Run ${(run.id || data.id || '').slice(0, 8)}`;
   }, [tasks]);
 
   // Debounced reloads to prevent SSE burst storms
@@ -3995,20 +4041,40 @@ function App() {
     'run:status': (data) => {
       debouncedReload('runs', reloadRuns);
       debouncedReload('tasks', reloadTasks);
-      if (data.status === 'needs_input') {
-        showBrowserNotification('Agent needs input', getRunTaskTitle(data));
-      }
+      // v3 Phase 5: run:status is a generic reload-trigger channel.
+      // Priority alerts (needs_input / failed) live on dedicated
+      // channels (run:needs_input, run:completed) and are the sole
+      // source of user-visible notifications. Surfacing needs_input
+      // here would duplicate the alert emitted on run:needs_input
+      // (codex R3 finding).
     },
     'run:completed': (data) => {
       debouncedReload('runs', reloadRuns);
       debouncedReload('tasks', reloadTasks);
-      const status = data.status || 'completed';
+      const status = data.to_status || (data.run && data.run.status) || data.status || 'completed';
       const title = getRunTaskTitle(data);
       if (status === 'failed') {
         showBrowserNotification('Run failed', title);
+        pulseTabTitle('⚠ Run failed');
       } else {
+        // Spec §9.8: only `needs_input` and `failed` qualify as
+        // priority alerts. Success completions get the OS
+        // notification but NO tab title pulse — otherwise routine
+        // success spam would drown out the real alerts.
         showBrowserNotification('Run completed', title);
       }
+    },
+    // v3 Phase 5: dedicated priority-alert channel (spec §9.8). The
+    // server emits this on idle timeouts. The spec mandates three
+    // priority-alert mechanisms: OS notification + tab title change
+    // + sound. We implement OS notification + tab title pulse here;
+    // sound is deferred (browser autoplay restrictions require user
+    // gesture to enable, which needs settings UI outside this phase).
+    'run:needs_input': (data) => {
+      debouncedReload('runs', reloadRuns);
+      debouncedReload('tasks', reloadTasks);
+      showBrowserNotification('Agent needs input', getRunTaskTitle(data));
+      pulseTabTitle('⚠ Needs input');
     },
   });
 

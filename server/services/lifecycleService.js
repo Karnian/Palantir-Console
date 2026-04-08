@@ -277,7 +277,11 @@ function createLifecycleService({
       if (!alive || exitCode !== null) {
         // Agent has terminated
         const status = (exitCode === 0) ? 'completed' : 'failed';
-        runService.updateRunStatus(run.id, status, { force: true });
+        // v3 Phase 5: propagate the actual transition reason so
+        // subscribers see WHY the run ended, not just that it did.
+        const reason = exitCode === 0 ? 'agent-exit-success' : `agent-exit-error(${exitCode})`;
+        const fromStatus = run.status;
+        runService.updateRunStatus(run.id, status, { force: true, reason });
 
         if (exitCode !== null) {
           runService.updateRunResult(run.id, {
@@ -302,7 +306,18 @@ function createLifecycleService({
         _outputHashes.delete(run.id);
 
         if (eventBus) {
-          eventBus.emit('run:completed', { run: runService.getRun(run.id) });
+          // v3 Phase 5: enrich run:completed with the same semantic
+          // envelope fields so clients can filter priority alerts
+          // (task_id / project_id) without re-reading the row.
+          const finalRun = runService.getRun(run.id);
+          eventBus.emit('run:completed', {
+            run: finalRun,
+            from_status: fromStatus,
+            to_status: status,
+            reason,
+            task_id: finalRun.task_id || null,
+            project_id: finalRun.project_id || null,
+          });
         }
       } else {
         // Still alive — check if tmux output has changed (real activity indicator)
@@ -323,13 +338,28 @@ function createLifecycleService({
           const idleTime = Date.now() - lastActivity;
 
           if (idleTime > IDLE_TIMEOUT_MS) {
-            runService.updateRunStatus(run.id, 'needs_input', { force: true });
+            const fromStatus = run.status;
+            runService.updateRunStatus(run.id, 'needs_input', { force: true, reason: 'idle_timeout' });
             runService.addRunEvent(run.id, 'idle_timeout', JSON.stringify({
               message: `Agent idle for ${Math.round(idleTime / 60000)} minutes`,
               idleMs: idleTime,
             }));
             if (eventBus) {
-              eventBus.emit('run:needs_input', { runId: run.id, taskId: run.task_id });
+              // v3 Phase 5: run:needs_input is a PRIORITY alert —
+              // the client should surface it via tab title / sound /
+              // OS notification. Payload now carries the semantic
+              // envelope fields and the priority marker so clients
+              // don't have to hardcode a list of "important" channels.
+              eventBus.emit('run:needs_input', {
+                runId: run.id,
+                run: runService.getRun(run.id),
+                from_status: fromStatus,
+                to_status: 'needs_input',
+                reason: 'idle_timeout',
+                task_id: run.task_id || null,
+                project_id: run.project_id || null,
+                priority: 'alert',
+              });
             }
           } else {
             runService.addRunEvent(run.id, 'heartbeat', null);
