@@ -4,7 +4,34 @@ const { BadRequestError, NotFoundError } = require('../utils/errors');
 const VALID_STATUSES = ['backlog', 'todo', 'in_progress', 'review', 'done', 'failed'];
 const VALID_PRIORITIES = ['low', 'medium', 'high', 'critical'];
 const VALID_RECURRENCE = ['daily', 'weekly', 'monthly'];
+// v3 Phase 1: task_kind classification for dispatch routing
+const VALID_TASK_KINDS = ['code_change', 'investigation', 'review', 'docs', 'refactor', 'other'];
 const DUE_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// v3 Phase 1: requires_capabilities accepts array of strings or null.
+// Stored as JSON string in DB; exposed as array on read.
+function normalizeRequiresCapabilities(value) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  if (!Array.isArray(value)) {
+    throw new BadRequestError('requires_capabilities must be an array of strings or null');
+  }
+  for (const entry of value) {
+    if (typeof entry !== 'string' || entry.length === 0) {
+      throw new BadRequestError('requires_capabilities entries must be non-empty strings');
+    }
+  }
+  return JSON.stringify(value);
+}
+
+function normalizeTaskKind(value) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  if (!VALID_TASK_KINDS.includes(value)) {
+    throw new BadRequestError(`Invalid task_kind: ${value} (valid: ${VALID_TASK_KINDS.join(', ')})`);
+  }
+  return value;
+}
 
 // Compute the next due_date for a recurring task. Always advances strictly
 // past `from`. Returns ISO YYYY-MM-DD string. Used by completion handler and
@@ -60,8 +87,16 @@ function createTaskService(db, eventBus) {
       WHERE t.id = ?
     `),
     insert: db.prepare(`
-      INSERT INTO tasks (id, project_id, title, description, status, priority, sort_order, due_date, recurrence, parent_task_id)
-      VALUES (@id, @project_id, @title, @description, @status, @priority, @sort_order, @due_date, @recurrence, @parent_task_id)
+      INSERT INTO tasks (
+        id, project_id, title, description, status, priority, sort_order,
+        due_date, recurrence, parent_task_id,
+        task_kind, requires_capabilities, suggested_agent_profile_id, acceptance_criteria
+      )
+      VALUES (
+        @id, @project_id, @title, @description, @status, @priority, @sort_order,
+        @due_date, @recurrence, @parent_task_id,
+        @task_kind, @requires_capabilities, @suggested_agent_profile_id, @acceptance_criteria
+      )
     `),
     // update: dynamic — see dynamicUpdate() below
     updateStatus: db.prepare(`
@@ -74,33 +109,50 @@ function createTaskService(db, eventBus) {
     maxSortOrder: db.prepare('SELECT COALESCE(MAX(sort_order), 0) as max_sort FROM tasks'),
   };
 
+  // v3 Phase 1: parse requires_capabilities from JSON on every read.
+  function parseRow(row) {
+    if (!row) return row;
+    if (row.requires_capabilities) {
+      try { row.requires_capabilities = JSON.parse(row.requires_capabilities); }
+      catch { row.requires_capabilities = null; }
+    }
+    return row;
+  }
+
   function listTasks({ project_id, status } = {}) {
-    if (project_id) return stmts.getByProject.all(project_id);
-    if (status) return stmts.getByStatus.all(status);
-    return stmts.getAll.all();
+    let rows;
+    if (project_id) rows = stmts.getByProject.all(project_id);
+    else if (status) rows = stmts.getByStatus.all(status);
+    else rows = stmts.getAll.all();
+    return rows.map(parseRow);
   }
 
   function getTask(id) {
-    const task = stmts.getById.get(id);
+    const task = parseRow(stmts.getById.get(id));
     if (!task) throw new NotFoundError(`Task not found: ${id}`);
     return task;
   }
 
-  const insertTaskTxn = db.transaction(({ id, project_id, title, description, status, priority, due_date, recurrence, parent_task_id }) => {
+  const insertTaskTxn = db.transaction((args) => {
     const maxSort = stmts.maxSortOrder.get().max_sort;
     stmts.insert.run({
-      id,
-      project_id: project_id || null,
-      title,
-      description: description || null,
-      status: status || 'backlog',
-      priority: priority || 'medium',
+      id: args.id,
+      project_id: args.project_id || null,
+      title: args.title,
+      description: args.description || null,
+      status: args.status || 'backlog',
+      priority: args.priority || 'medium',
       sort_order: maxSort + 1,
-      due_date: due_date ?? null,
-      recurrence: recurrence ?? null,
-      parent_task_id: parent_task_id ?? null,
+      due_date: args.due_date ?? null,
+      recurrence: args.recurrence ?? null,
+      parent_task_id: args.parent_task_id ?? null,
+      // v3 Phase 1
+      task_kind: args.task_kind ?? null,
+      requires_capabilities: args.requires_capabilities ?? null,
+      suggested_agent_profile_id: args.suggested_agent_profile_id ?? null,
+      acceptance_criteria: args.acceptance_criteria ?? null,
     });
-    return stmts.getById.get(id);
+    return parseRow(stmts.getById.get(args.id));
   });
 
   function normalizeRecurrence(value) {
@@ -112,7 +164,11 @@ function createTaskService(db, eventBus) {
     return value;
   }
 
-  function createTask({ project_id, title, description, status, priority, due_date, recurrence, parent_task_id }) {
+  function createTask(input = {}) {
+    const {
+      project_id, title, description, status, priority, due_date, recurrence, parent_task_id,
+      task_kind, requires_capabilities, suggested_agent_profile_id, acceptance_criteria,
+    } = input;
     if (!title) throw new BadRequestError('Task title is required');
     if (status && !VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid status: ${status}`);
@@ -122,18 +178,29 @@ function createTaskService(db, eventBus) {
     }
     const normalizedDue = normalizeDueDate(due_date);
     const normalizedRec = normalizeRecurrence(recurrence);
+    // v3 Phase 1: new field validations
+    const normalizedKind = normalizeTaskKind(task_kind);
+    const normalizedCaps = normalizeRequiresCapabilities(requires_capabilities);
     const id = `task_${crypto.randomUUID().slice(0, 8)}`;
     const task = insertTaskTxn({
       id, project_id, title, description, status, priority,
       due_date: normalizedDue === undefined ? null : normalizedDue,
       recurrence: normalizedRec === undefined ? null : normalizedRec,
       parent_task_id: parent_task_id || null,
+      task_kind: normalizedKind === undefined ? null : normalizedKind,
+      requires_capabilities: normalizedCaps === undefined ? null : normalizedCaps,
+      suggested_agent_profile_id: suggested_agent_profile_id || null,
+      acceptance_criteria: acceptance_criteria ?? null,
     });
     if (eventBus) eventBus.emit('task:created', { task });
     return task;
   }
 
-  const TASK_UPDATABLE = ['title', 'description', 'project_id', 'priority', 'due_date', 'recurrence'];
+  const TASK_UPDATABLE = [
+    'title', 'description', 'project_id', 'priority', 'due_date', 'recurrence',
+    // v3 Phase 1
+    'task_kind', 'requires_capabilities', 'suggested_agent_profile_id', 'acceptance_criteria',
+  ];
 
   function updateTask(id, fields) {
     getTask(id);
@@ -145,6 +212,15 @@ function createTaskService(db, eventBus) {
     }
     if ('recurrence' in fields) {
       fields = { ...fields, recurrence: normalizeRecurrence(fields.recurrence) };
+    }
+    // v3 Phase 1: normalize new fields on update
+    if ('task_kind' in fields) {
+      const n = normalizeTaskKind(fields.task_kind);
+      fields = { ...fields, task_kind: n === undefined ? null : n };
+    }
+    if ('requires_capabilities' in fields) {
+      const n = normalizeRequiresCapabilities(fields.requires_capabilities);
+      fields = { ...fields, requires_capabilities: n === undefined ? null : n };
     }
     const setClauses = [];
     const params = { id };
@@ -158,7 +234,7 @@ function createTaskService(db, eventBus) {
       setClauses.push("updated_at = datetime('now')");
       db.prepare(`UPDATE tasks SET ${setClauses.join(', ')} WHERE id = @id`).run(params);
     }
-    const task = stmts.getById.get(id);
+    const task = parseRow(stmts.getById.get(id));
     if (eventBus) eventBus.emit('task:updated', { task });
     return task;
   }
@@ -169,7 +245,7 @@ function createTaskService(db, eventBus) {
     }
     const before = getTask(id);
     stmts.updateStatus.run(status, id);
-    const task = stmts.getById.get(id);
+    const task = parseRow(stmts.getById.get(id));
     if (eventBus) eventBus.emit('task:updated', { task });
     // Recurring task completion: spawn next instance.
     // Only fires on the done transition (avoids duplicates if PATCHed twice).

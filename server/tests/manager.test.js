@@ -785,6 +785,271 @@ test('v3 Phase 0 behavior: codexAdapter role=worker spawn args INCLUDE sandbox b
   adapter.disposeSession('run_codex_wkr');
 });
 
+// ─────────────────────────────────────────────────────────────────────────
+// v3 Phase 1: data model enrichment tests
+// ─────────────────────────────────────────────────────────────────────────
+
+test('v3 Phase 1: taskService accepts task_kind / requires_capabilities / suggested_agent_profile_id / acceptance_criteria', async (t) => {
+  const { app } = await createTestApp(t);
+  const proj = await request(app).post('/api/projects').send({ name: 'p1' });
+  const projectId = proj.body.project.id;
+
+  const create = await request(app).post('/api/tasks').send({
+    title: 'refactor auth',
+    project_id: projectId,
+    task_kind: 'refactor',
+    requires_capabilities: ['filesystem_write', 'code_editing'],
+    acceptance_criteria: 'tests pass',
+  });
+  assert.equal(create.status, 201);
+  assert.equal(create.body.task.task_kind, 'refactor');
+  assert.deepEqual(create.body.task.requires_capabilities, ['filesystem_write', 'code_editing']);
+  assert.equal(create.body.task.acceptance_criteria, 'tests pass');
+
+  // Update task_kind + add new requires_capabilities
+  const update = await request(app).patch(`/api/tasks/${create.body.task.id}`).send({
+    task_kind: 'code_change',
+    requires_capabilities: ['web'],
+  });
+  assert.equal(update.body.task.task_kind, 'code_change');
+  assert.deepEqual(update.body.task.requires_capabilities, ['web']);
+
+  // Clear requires_capabilities (null)
+  const clear = await request(app).patch(`/api/tasks/${create.body.task.id}`).send({
+    requires_capabilities: null,
+  });
+  assert.equal(clear.body.task.requires_capabilities, null);
+});
+
+test('v3 Phase 1: taskService rejects invalid task_kind', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/tasks').send({
+    title: 't', task_kind: 'bogus',
+  });
+  assert.equal(res.status, 400);
+});
+
+test('v3 Phase 1: taskService rejects non-array requires_capabilities', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/tasks').send({
+    title: 't', requires_capabilities: 'not-an-array',
+  });
+  assert.equal(res.status, 400);
+});
+
+test('v3 Phase 1: projectService accepts pm_enabled / preferred_pm_adapter', async (t) => {
+  const { app } = await createTestApp(t);
+  const create = await request(app).post('/api/projects').send({
+    name: 'p-disabled',
+    pm_enabled: false,
+    preferred_pm_adapter: 'claude',
+  });
+  assert.equal(create.status, 201);
+  assert.equal(create.body.project.pm_enabled, 0);
+  assert.equal(create.body.project.preferred_pm_adapter, 'claude');
+
+  // Update back to enabled + codex
+  const update = await request(app).patch(`/api/projects/${create.body.project.id}`).send({
+    pm_enabled: true,
+    preferred_pm_adapter: 'codex',
+  });
+  assert.equal(update.body.project.pm_enabled, 1);
+  assert.equal(update.body.project.preferred_pm_adapter, 'codex');
+});
+
+test('v3 Phase 1: projectService rejects invalid preferred_pm_adapter', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/projects').send({
+    name: 'p', preferred_pm_adapter: 'opencode',
+  });
+  assert.equal(res.status, 400);
+});
+
+test('v3 Phase 1: default project has pm_enabled=1 and null preferred_pm_adapter', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/projects').send({ name: 'p' });
+  assert.equal(res.body.project.pm_enabled, 1);
+  assert.equal(res.body.project.preferred_pm_adapter, null);
+});
+
+test('v3 Phase 1: project_briefs GET auto-creates empty brief', async (t) => {
+  const { app } = await createTestApp(t);
+  const proj = await request(app).post('/api/projects').send({ name: 'p' });
+  const get = await request(app).get(`/api/projects/${proj.body.project.id}/brief`);
+  assert.equal(get.status, 200);
+  assert.equal(get.body.brief.conventions, null);
+  assert.equal(get.body.brief.known_pitfalls, null);
+  assert.equal(get.body.brief.pm_thread_id, null);
+  assert.equal(get.body.brief.pm_adapter, null);
+});
+
+test('v3 Phase 1: project_briefs PATCH updates conventions and pitfalls', async (t) => {
+  const { app } = await createTestApp(t);
+  const proj = await request(app).post('/api/projects').send({ name: 'p' });
+  const patch = await request(app).patch(`/api/projects/${proj.body.project.id}/brief`).send({
+    conventions: 'use typescript strict mode',
+    known_pitfalls: 'auth module is fragile',
+  });
+  assert.equal(patch.status, 200);
+  assert.equal(patch.body.brief.conventions, 'use typescript strict mode');
+  assert.equal(patch.body.brief.known_pitfalls, 'auth module is fragile');
+});
+
+test('v3 Phase 1: project_briefs PATCH ignores pm_thread_id (internally managed)', async (t) => {
+  const { app } = await createTestApp(t);
+  const proj = await request(app).post('/api/projects').send({ name: 'p' });
+  // Attempt to set pm_thread_id via PATCH — should be ignored
+  const patch = await request(app).patch(`/api/projects/${proj.body.project.id}/brief`).send({
+    conventions: 'abc',
+    pm_thread_id: 'should-be-ignored',
+    pm_adapter: 'claude',
+  });
+  assert.equal(patch.body.brief.conventions, 'abc');
+  assert.equal(patch.body.brief.pm_thread_id, null);
+  assert.equal(patch.body.brief.pm_adapter, null);
+});
+
+test('v3 Phase 1: project_briefs PATCH is true partial update (omitted fields preserved)', async (t) => {
+  // Codex Phase 1 review blocker: earlier version destructured the body and
+  // forwarded both keys unconditionally, which wiped omitted fields to NULL.
+  const { app } = await createTestApp(t);
+  const proj = await request(app).post('/api/projects').send({ name: 'p' });
+
+  // Seed both fields
+  await request(app).patch(`/api/projects/${proj.body.project.id}/brief`).send({
+    conventions: 'use strict mode',
+    known_pitfalls: 'auth is fragile',
+  });
+
+  // Patch conventions only — known_pitfalls MUST be preserved
+  const r1 = await request(app).patch(`/api/projects/${proj.body.project.id}/brief`).send({
+    conventions: 'use strict mode v2',
+  });
+  assert.equal(r1.body.brief.conventions, 'use strict mode v2');
+  assert.equal(r1.body.brief.known_pitfalls, 'auth is fragile',
+    'known_pitfalls must be preserved when only conventions is sent');
+
+  // Patch known_pitfalls only — conventions MUST be preserved
+  const r2 = await request(app).patch(`/api/projects/${proj.body.project.id}/brief`).send({
+    known_pitfalls: 'auth is fragile v2',
+  });
+  assert.equal(r2.body.brief.conventions, 'use strict mode v2',
+    'conventions must be preserved when only known_pitfalls is sent');
+  assert.equal(r2.body.brief.known_pitfalls, 'auth is fragile v2');
+
+  // Patch only pm_thread_id (managed field) — both content fields preserved
+  const r3 = await request(app).patch(`/api/projects/${proj.body.project.id}/brief`).send({
+    pm_thread_id: 'should-be-ignored',
+  });
+  assert.equal(r3.body.brief.conventions, 'use strict mode v2');
+  assert.equal(r3.body.brief.known_pitfalls, 'auth is fragile v2');
+  assert.equal(r3.body.brief.pm_thread_id, null);
+
+  // Explicit null clears the field — intentional
+  const r4 = await request(app).patch(`/api/projects/${proj.body.project.id}/brief`).send({
+    conventions: null,
+  });
+  assert.equal(r4.body.brief.conventions, null);
+  assert.equal(r4.body.brief.known_pitfalls, 'auth is fragile v2',
+    'explicit null on one field does not touch the other');
+
+  // Empty body PATCH — no-op, both fields preserved
+  const r5 = await request(app).patch(`/api/projects/${proj.body.project.id}/brief`).send({});
+  assert.equal(r5.status, 200);
+  assert.equal(r5.body.brief.conventions, null, 'empty body preserves current conventions (still null)');
+  assert.equal(r5.body.brief.known_pitfalls, 'auth is fragile v2',
+    'empty body preserves current known_pitfalls');
+});
+
+test('v3 Phase 1: DB CHECK rejects non-array requires_capabilities via direct SQL', async (t) => {
+  // Codex Phase 1 review: JSON array shape was enforced only at the service
+  // layer. This migration 006 update adds json_valid + json_type CHECK so
+  // out-of-band writes cannot inject non-array payloads.
+  const { createDatabase } = require('../db/database');
+  const tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-reqcap-test-'));
+  const dbPath = path.join(tmpdir, 'test.db');
+  const { db, migrate, close } = createDatabase(dbPath);
+  migrate();
+  t.after(async () => {
+    close();
+    await fs.rm(tmpdir, { recursive: true, force: true });
+  });
+
+  // Valid array — should insert
+  const insertValid = db.prepare(
+    `INSERT INTO tasks (id, title, requires_capabilities) VALUES (?, ?, ?)`
+  );
+  insertValid.run('task_ok', 't', '["cap1"]');
+
+  // Object (not array) — CHECK must reject
+  assert.throws(() => {
+    insertValid.run('task_bad_obj', 't', '{"cap": "x"}');
+  }, /CHECK constraint failed/);
+
+  // Malformed JSON — CHECK must reject
+  assert.throws(() => {
+    insertValid.run('task_bad_json', 't', 'not json');
+  }, /CHECK constraint failed/);
+
+  // NULL — allowed
+  insertValid.run('task_null', 't', null);
+});
+
+test('v3 Phase 1: projectBriefService setPmThread and clearPmThread round-trip', async (t) => {
+  // Direct service test to avoid exposing pm_thread_id via HTTP.
+  const { createDatabase } = require('../db/database');
+  const { createProjectService } = require('../services/projectService');
+  const { createProjectBriefService } = require('../services/projectBriefService');
+  const tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-brief-test-'));
+  const dbPath = path.join(tmpdir, 'test.db');
+  const { db, migrate, close } = createDatabase(dbPath);
+  migrate();
+  t.after(async () => {
+    close();
+    await fs.rm(tmpdir, { recursive: true, force: true });
+  });
+
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+
+  const project = projectService.createProject({ name: 'alpha' });
+  const brief = projectBriefService.setPmThread(project.id, {
+    pm_thread_id: 'thread-abc',
+    pm_adapter: 'codex',
+  });
+  assert.equal(brief.pm_thread_id, 'thread-abc');
+  assert.equal(brief.pm_adapter, 'codex');
+
+  const cleared = projectBriefService.clearPmThread(project.id);
+  assert.equal(cleared.pm_thread_id, null);
+  assert.equal(cleared.pm_adapter, null);
+});
+
+test('v3 Phase 1: buildInitialUserContext injects project briefs section', async () => {
+  const { buildInitialUserContext } = require('../services/managerSystemPrompt');
+  const ctx = buildInitialUserContext({
+    runSummary: null,
+    projectList: '  - alpha (id: proj_1)',
+    projectBriefsSection: '### alpha (id: proj_1)\n  - conventions: use strict mode',
+    agentList: '  - claude [claude-code] (id: ag_1)',
+    userPrompt: 'hello',
+  });
+  assert.ok(ctx.includes('## Project Briefs'), 'must include Project Briefs section');
+  assert.ok(ctx.includes('conventions: use strict mode'), 'must include brief content');
+  assert.ok(ctx.includes('Respect these when dispatching'), 'must include respect instruction');
+});
+
+test('v3 Phase 1: buildInitialUserContext omits project briefs section when none provided', async () => {
+  const { buildInitialUserContext } = require('../services/managerSystemPrompt');
+  const ctx = buildInitialUserContext({
+    runSummary: null,
+    projectList: '  - alpha (id: proj_1)',
+    agentList: '  - claude [claude-code] (id: ag_1)',
+    userPrompt: 'hello',
+  });
+  assert.ok(!ctx.includes('## Project Briefs'), 'must not include Project Briefs when empty');
+});
+
 test('v3 Phase 0 behavior: codexAdapter PALANTIR_CODEX_MANAGER_BYPASS=1 re-enables bypass for manager', () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
   const { EventEmitter } = require('node:events');

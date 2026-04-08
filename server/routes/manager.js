@@ -32,7 +32,7 @@ const PROFILE_TYPE_TO_ADAPTER = {
 // so tests can inject `hasKeychain` (and any future DI hooks) without
 // monkey-patching child_process. Production callers leave this empty and
 // get the real keychain probe.
-function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, eventBus, projectService, agentProfileService, authResolverOpts = {} }) {
+function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, eventBus, projectService, projectBriefService, agentProfileService, authResolverOpts = {} }) {
   const router = express.Router();
 
   // PR1a: ManagerAdapter seam. The factory is the single entrypoint for
@@ -233,17 +233,70 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     // Build run summary for initial context
     const runSummary = buildRunSummary(runService);
 
-    // Build project and agent lists for context
+    // Build project and agent lists for context.
+    // v3 Phase 1: projectList now includes brief hints (conventions/pitfalls
+    // preview + pm_enabled / preferred_pm_adapter). agentList exposes
+    // capabilities_json + max_concurrent so the dispatcher can make
+    // data-driven choices instead of free-text guessing (spec principle 3).
     let projectList = '';
     let agentList = '';
+    let projectBriefsSection = '';
     try {
       if (projectService) {
         const projects = projectService.listProjects();
-        projectList = projects.map(p => `  - ${p.name} (id: ${p.id})${p.directory ? ` — dir: ${p.directory}` : ''}`).join('\n');
+        const lines = [];
+        const briefLines = [];
+        for (const p of projects) {
+          const pmBits = [];
+          if (p.pm_enabled === 0) pmBits.push('PM disabled');
+          if (p.preferred_pm_adapter) pmBits.push(`prefers ${p.preferred_pm_adapter}`);
+          const pmSuffix = pmBits.length > 0 ? ` {${pmBits.join(', ')}}` : '';
+          lines.push(`  - ${p.name} (id: ${p.id})${p.directory ? ` — dir: ${p.directory}` : ''}${pmSuffix}`);
+
+          // Include brief hints if available. Truncate long text aggressively —
+          // the manager's context window matters.
+          if (projectBriefService) {
+            try {
+              const brief = projectBriefService.getBrief(p.id);
+              if (brief && (brief.conventions || brief.known_pitfalls)) {
+                const sectionParts = [];
+                if (brief.conventions) {
+                  sectionParts.push(`  - conventions: ${String(brief.conventions).slice(0, 400)}`);
+                }
+                if (brief.known_pitfalls) {
+                  sectionParts.push(`  - pitfalls: ${String(brief.known_pitfalls).slice(0, 400)}`);
+                }
+                if (sectionParts.length > 0) {
+                  briefLines.push(`### ${p.name} (id: ${p.id})`);
+                  briefLines.push(sectionParts.join('\n'));
+                }
+              }
+            } catch { /* ignore per-project brief errors */ }
+          }
+        }
+        projectList = lines.join('\n');
+        if (briefLines.length > 0) {
+          projectBriefsSection = briefLines.join('\n');
+        }
       }
       if (agentProfileService) {
         const agents = agentProfileService.listProfiles();
-        agentList = agents.map(a => `  - ${a.name} [${a.type}] (id: ${a.id})`).join('\n');
+        agentList = agents.map(a => {
+          const bits = [`${a.name} [${a.type}] (id: ${a.id})`];
+          // v3 Phase 1: expose dormant fields.
+          let caps = null;
+          try {
+            caps = a.capabilities_json ? JSON.parse(a.capabilities_json) : null;
+          } catch { /* ignore malformed */ }
+          if (caps && typeof caps === 'object' && Object.keys(caps).length > 0) {
+            const keys = Object.keys(caps).slice(0, 6).join(',');
+            bits.push(`caps: ${keys}`);
+          }
+          if (a.max_concurrent != null) {
+            bits.push(`max_concurrent: ${a.max_concurrent}`);
+          }
+          return `  - ${bits.join(' | ')}`;
+        }).join('\n');
       }
     } catch { /* ignore */ }
 
@@ -252,13 +305,15 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     // project/agent lists) is NOT in the system prompt anymore — it goes in
     // the first user message so Codex's model_instructions_file caching is
     // preserved across turns.
+    // v3 Phase 0: layer='top' (all current manager starts are Top layer).
     const adapter = managerAdapterFactory.getAdapter(adapterType);
     const port = process.env.PORT || 4177;
     const token = process.env.PALANTIR_TOKEN;
-    const systemPrompt = buildManagerSystemPromptModule({ adapter, port, token });
+    const systemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'top' });
     const initialUserContext = buildInitialUserContext({
       runSummary,
       projectList,
+      projectBriefsSection,
       agentList,
       userPrompt: prompt || 'You are now active as the Palantir Manager. Await instructions.',
     });
