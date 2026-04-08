@@ -595,3 +595,287 @@ test('runService.createRun with is_manager allows null task_id', async (t) => {
   assert.equal(run.status, 'queued');
   assert.equal(run.task_id, null);
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// v3 Phase 0: Capability Diet regression tests
+// ─────────────────────────────────────────────────────────────────────────
+
+test('v3 Phase 0: managerSystemPrompt top layer excludes worker intervention APIs', async () => {
+  const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
+  const prompt = buildManagerSystemPrompt({
+    adapter: null, port: 4177, token: null, layer: 'top',
+  });
+  // Worker intervention APIs MUST NOT appear in top layer prompt
+  assert.ok(!prompt.includes('/api/runs/RUN_ID/input'),
+    'top layer must not document /api/runs/:id/input');
+  assert.ok(!prompt.includes('/api/runs/RUN_ID/cancel'),
+    'top layer must not document /api/runs/:id/cancel');
+  assert.ok(!prompt.includes('PATCH ${base}/api/tasks/TASK_ID/status') &&
+            !prompt.includes('PATCH http://localhost:4177/api/tasks/TASK_ID/status'),
+    'top layer must not document PATCH /api/tasks/:id/status');
+  // Dispatch API MUST appear
+  assert.ok(prompt.includes('/api/tasks/TASK_ID/execute'),
+    'top layer must document /execute');
+  // Capability diet explanation MUST appear
+  assert.ok(prompt.includes('You do NOT have Write or Edit tools'),
+    'top layer must explain Write/Edit absence');
+});
+
+test('v3 Phase 0: managerSystemPrompt pm layer includes worker intervention APIs', async () => {
+  const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
+  const prompt = buildManagerSystemPrompt({
+    adapter: null, port: 4177, token: null, layer: 'pm',
+  });
+  assert.ok(prompt.includes('/api/runs/RUN_ID/input'),
+    'pm layer must document /api/runs/:id/input');
+  assert.ok(prompt.includes('/api/runs/RUN_ID/cancel'),
+    'pm layer must document /api/runs/:id/cancel');
+  assert.ok(prompt.includes('/api/tasks/TASK_ID/status'),
+    'pm layer must document PATCH /api/tasks/:id/status');
+  assert.ok(prompt.includes('project-scoped PM'),
+    'pm layer must identify itself as project-scoped PM');
+});
+
+test('v3 Phase 0: routes/manager.js passes role=manager to adapter.startSession', async () => {
+  // Verify the route passes role='manager' explicitly (belt-and-suspenders,
+  // since codexAdapter defaults to 'manager' anyway).
+  const src = await fs.readFile(
+    path.join(__dirname, '..', 'routes', 'manager.js'),
+    'utf8'
+  );
+  // Match startSession call and verify role: 'manager' is inside the options object
+  const startSessionCall = src.match(/adapter\.startSession\(runId,\s*\{[\s\S]*?\}\)/);
+  assert.ok(startSessionCall, 'adapter.startSession call must exist');
+  assert.ok(startSessionCall[0].includes("role: 'manager'"),
+    "adapter.startSession options must include role: 'manager'");
+});
+
+test('v3 Phase 0: codexAdapter escape hatch honors PALANTIR_CODEX_MANAGER_BYPASS=1', async () => {
+  // Source-level verification that the env var is read and OR'd with worker-role branch.
+  const src = await fs.readFile(
+    path.join(__dirname, '..', 'services', 'managerAdapters', 'codexAdapter.js'),
+    'utf8'
+  );
+  // Pattern: shouldBypass = role === 'worker' || managerBypassOverride
+  const shouldBypassPattern = /shouldBypass\s*=\s*role\s*===\s*['"]worker['"]\s*\|\|\s*managerBypassOverride/;
+  assert.ok(shouldBypassPattern.test(src),
+    'shouldBypass must OR role===worker with managerBypassOverride');
+  const envReadPattern = /managerBypassOverride\s*=\s*process\.env\.PALANTIR_CODEX_MANAGER_BYPASS\s*===\s*['"]1['"]/;
+  assert.ok(envReadPattern.test(src),
+    'managerBypassOverride must read PALANTIR_CODEX_MANAGER_BYPASS === "1"');
+});
+
+test('v3 Phase 0: codexAdapter stores role in session state for resume turns', async () => {
+  // Verify role is persisted so resume turns (spawnOneTurn called after thread_id
+  // is captured) retain the role policy.
+  const src = await fs.readFile(
+    path.join(__dirname, '..', 'services', 'managerAdapters', 'codexAdapter.js'),
+    'utf8'
+  );
+  // sessions.set(runId, { ... role: role || 'manager', ... })
+  assert.ok(/role:\s*role\s*\|\|\s*['"]manager['"]/.test(src),
+    'sessions.set must store role with manager default');
+  // spawnOneTurn reads state.role
+  assert.ok(/const\s+role\s*=\s*state\.role\s*\|\|\s*['"]manager['"]/.test(src),
+    'spawnOneTurn must read role from state');
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// v3 Phase 0: Behavior tests (runtime, not source-level)
+// ─────────────────────────────────────────────────────────────────────────
+
+test('v3 Phase 0 behavior: claudeAdapter.startSession passes restricted Bash allowlist to engine', () => {
+  const { createClaudeAdapter } = require('../services/managerAdapters/claudeAdapter');
+  let capturedArgs = null;
+  const fakeEngine = {
+    spawnAgent(runId, args) {
+      capturedArgs = args;
+      return { pid: 12345, engine: 'fake', isManager: true };
+    },
+  };
+  const adapter = createClaudeAdapter({ streamJsonEngine: fakeEngine, runService: null });
+  adapter.startSession('run_mgr_test', {
+    prompt: 'test',
+    cwd: process.cwd(),
+    systemPrompt: 'test',
+  });
+  assert.ok(capturedArgs, 'spawnAgent must be called');
+  const tools = capturedArgs.allowedTools;
+  assert.ok(Array.isArray(tools), 'allowedTools must be an array');
+  // Verify no plain Bash or redirection-exploitable patterns
+  assert.equal(tools.indexOf('Bash'), -1, 'must not include bare Bash');
+  assert.equal(tools.indexOf('Bash(cat:*)'), -1, 'must not include Bash(cat:*) — redirection vulnerable');
+  assert.equal(tools.indexOf('Bash(echo:*)'), -1, 'must not include Bash(echo:*) — redirection vulnerable');
+  assert.equal(tools.indexOf('Write'), -1, 'must not include Write');
+  assert.equal(tools.indexOf('Edit'), -1, 'must not include Edit');
+  // Verify core dispatcher tools present
+  assert.ok(tools.includes('Bash(curl:*)'), 'must include Bash(curl:*)');
+  assert.ok(tools.includes('Read'), 'must include Read');
+  assert.equal(capturedArgs.isManager, true, 'must spawn as manager');
+});
+
+test('v3 Phase 0 behavior: codexAdapter role=manager spawn args OMIT sandbox bypass flag', () => {
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+
+  // Minimal fake child process — enough for spawnOneTurn to not throw
+  function makeFakeChild() {
+    const { EventEmitter } = require('node:events');
+    const stdout = new EventEmitter();
+    const stderr = new EventEmitter();
+    const stdin = { write: () => {}, end: () => {} };
+    const child = Object.assign(new EventEmitter(), { stdout, stderr, stdin, kill: () => {} });
+    return child;
+  }
+
+  let capturedArgs = null;
+  let capturedOpts = null;
+  const fakeSpawn = (bin, args, opts) => {
+    capturedArgs = args;
+    capturedOpts = opts;
+    return makeFakeChild();
+  };
+
+  const adapter = createCodexAdapter({
+    runService: null,
+    codexBin: '/bin/true',
+    spawnFn: fakeSpawn,
+  });
+
+  adapter.startSession('run_codex_mgr', {
+    systemPrompt: 'test',
+    cwd: process.cwd(),
+    role: 'manager',
+  });
+  adapter.runTurn('run_codex_mgr', { text: 'hello' });
+
+  assert.ok(capturedArgs, 'fake spawn must have been called');
+  assert.ok(!capturedArgs.includes('--dangerously-bypass-approvals-and-sandbox'),
+    'manager role must NOT pass sandbox bypass flag');
+  assert.ok(capturedArgs.includes('--skip-git-repo-check'),
+    'manager role should still pass --skip-git-repo-check');
+  assert.ok(capturedArgs.includes('exec'), 'should invoke codex exec subcommand');
+  assert.ok(capturedArgs.includes('--json'), 'should request JSON output');
+
+  adapter.disposeSession('run_codex_mgr');
+});
+
+test('v3 Phase 0 behavior: codexAdapter role=worker spawn args INCLUDE sandbox bypass flag', () => {
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const { EventEmitter } = require('node:events');
+  function makeFakeChild() {
+    const stdout = new EventEmitter();
+    const stderr = new EventEmitter();
+    const stdin = { write: () => {}, end: () => {} };
+    return Object.assign(new EventEmitter(), { stdout, stderr, stdin, kill: () => {} });
+  }
+  let capturedArgs = null;
+  const adapter = createCodexAdapter({
+    runService: null,
+    codexBin: '/bin/true',
+    spawnFn: (bin, args) => { capturedArgs = args; return makeFakeChild(); },
+  });
+  adapter.startSession('run_codex_wkr', {
+    systemPrompt: 'test',
+    cwd: process.cwd(),
+    role: 'worker',
+  });
+  adapter.runTurn('run_codex_wkr', { text: 'hello' });
+  assert.ok(capturedArgs.includes('--dangerously-bypass-approvals-and-sandbox'),
+    'worker role MUST pass sandbox bypass flag');
+  adapter.disposeSession('run_codex_wkr');
+});
+
+test('v3 Phase 0 behavior: codexAdapter PALANTIR_CODEX_MANAGER_BYPASS=1 re-enables bypass for manager', () => {
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const { EventEmitter } = require('node:events');
+  function makeFakeChild() {
+    const stdout = new EventEmitter();
+    const stderr = new EventEmitter();
+    const stdin = { write: () => {}, end: () => {} };
+    return Object.assign(new EventEmitter(), { stdout, stderr, stdin, kill: () => {} });
+  }
+  const prev = process.env.PALANTIR_CODEX_MANAGER_BYPASS;
+  process.env.PALANTIR_CODEX_MANAGER_BYPASS = '1';
+  try {
+    let capturedArgs = null;
+    const adapter = createCodexAdapter({
+      runService: null,
+      codexBin: '/bin/true',
+      spawnFn: (bin, args) => { capturedArgs = args; return makeFakeChild(); },
+    });
+    adapter.startSession('run_codex_bypass', {
+      systemPrompt: 'test',
+      cwd: process.cwd(),
+      role: 'manager',
+    });
+    adapter.runTurn('run_codex_bypass', { text: 'hello' });
+    assert.ok(capturedArgs.includes('--dangerously-bypass-approvals-and-sandbox'),
+      'PALANTIR_CODEX_MANAGER_BYPASS=1 must re-enable bypass for manager role');
+    adapter.disposeSession('run_codex_bypass');
+  } finally {
+    if (prev === undefined) delete process.env.PALANTIR_CODEX_MANAGER_BYPASS;
+    else process.env.PALANTIR_CODEX_MANAGER_BYPASS = prev;
+  }
+});
+
+test('v3 Phase 0: managerSystemPrompt default layer is top', async () => {
+  const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
+  const promptDefault = buildManagerSystemPrompt({
+    adapter: null, port: 4177, token: null,
+  });
+  const promptTop = buildManagerSystemPrompt({
+    adapter: null, port: 4177, token: null, layer: 'top',
+  });
+  assert.equal(promptDefault, promptTop, 'default layer must equal top');
+});
+
+test('v3 Phase 0: claudeAdapter default allowedTools excludes Write/Edit and restricts Bash', async () => {
+  // Verify the capability diet is applied at adapter level, not just prompt.
+  // We inspect the source file because mocking streamJsonEngine is heavier.
+  const src = await fs.readFile(
+    path.join(__dirname, '..', 'services', 'managerAdapters', 'claudeAdapter.js'),
+    'utf8'
+  );
+  // Find the default allowedTools array literal (may span multiple lines)
+  const match = src.match(/allowedTools:\s*allowedTools\s*\|\|\s*(\[[\s\S]*?\])/);
+  assert.ok(match, 'default allowedTools literal must exist');
+  const defaultTools = match[1];
+  // Write/Edit must be absent entirely
+  assert.ok(!defaultTools.includes("'Write'") && !defaultTools.includes('"Write"'),
+    'default allowedTools must not include Write');
+  assert.ok(!defaultTools.includes("'Edit'") && !defaultTools.includes('"Edit"'),
+    'default allowedTools must not include Edit');
+  // Plain 'Bash' (no pattern restriction) must NOT appear — would be an escape hatch
+  // Match 'Bash' or "Bash" as a bare element (not Bash(...))
+  const bareBashMatch = defaultTools.match(/['"]Bash['"](?![\w\(])/);
+  assert.equal(bareBashMatch, null,
+    'default allowedTools must not contain bare "Bash" (only Bash(pattern:*) restrictions allowed)');
+  // Bash(curl:*) pattern MUST exist — primary dispatcher operation
+  assert.ok(defaultTools.includes("'Bash(curl:*)'"),
+    'default allowedTools must include Bash(curl:*) for API calls');
+  // Read must exist
+  assert.ok(defaultTools.includes("'Read'"), 'default allowedTools must include Read');
+});
+
+test('v3 Phase 0: codexAdapter omits sandbox bypass flag for manager role', async () => {
+  // Inspect source to verify role-aware branching is present.
+  const src = await fs.readFile(
+    path.join(__dirname, '..', 'services', 'managerAdapters', 'codexAdapter.js'),
+    'utf8'
+  );
+  // The role-aware branch must exist
+  assert.ok(src.includes("role === 'worker'"),
+    'codexAdapter must branch bypass flag on role');
+  assert.ok(src.includes('PALANTIR_CODEX_MANAGER_BYPASS'),
+    'codexAdapter must provide env escape hatch');
+  // The bypass flag push must be guarded by `if (shouldBypass)` — i.e., the
+  // line `args.push('--dangerously-bypass-approvals-and-sandbox');` must
+  // appear inside a shouldBypass conditional, not at top level.
+  const guarded = /if\s*\(\s*shouldBypass\s*\)\s*\{\s*args\.push\('--dangerously-bypass-approvals-and-sandbox'\)/;
+  assert.ok(guarded.test(src),
+    'bypass push must be guarded by if (shouldBypass) { ... }');
+  // And the count of bypass pushes should be exactly 1 (the guarded one)
+  const pushMatches = src.match(/args\.push\('--dangerously-bypass-approvals-and-sandbox'\)/g);
+  assert.equal(pushMatches && pushMatches.length, 1,
+    'exactly one bypass push should exist, and it should be the guarded one');
+});
