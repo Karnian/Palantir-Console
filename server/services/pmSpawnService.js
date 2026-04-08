@@ -99,16 +99,20 @@ function createPmSpawnService({
   // (conversationService.sendToManagerSlot) is about to call runTurn
   // with the user's actual message. Two back-to-back turns on the same
   // Codex run id hit the single-turn guard at codexAdapter:spawnOneTurn.
-  function buildProjectScopedSystemSection({ project, brief }) {
+  function buildProjectScopedSystemSection({ project, brief, pmRunId }) {
     const sections = [];
-    sections.push(`## Project Scope\nname: ${project.name}\nid: ${project.id}${project.directory ? `\ndirectory: ${project.directory}` : ''}`);
+    // Include pmRunId so the PM can self-identify when calling
+    // /api/dispatch-audit (codex R3 blocker: the audit route requires
+    // pm_run_id for staleness attribution but the PM previously had no
+    // way to obtain its own run id).
+    sections.push(`## Project Scope\nname: ${project.name}\nid: ${project.id}${project.directory ? `\ndirectory: ${project.directory}` : ''}${pmRunId ? `\npm_run_id: ${pmRunId}` : ''}`);
     if (brief && brief.conventions) {
       sections.push(`## Project Conventions\n${brief.conventions}`);
     }
     if (brief && brief.known_pitfalls) {
       sections.push(`## Known Pitfalls\n${brief.known_pitfalls}`);
     }
-    sections.push('## PM Role\nYou are this project\'s PM (project-scoped dispatcher). Every user turn is either: answer from the brief, dispatch a worker via /execute, or modify an in-flight worker via the worker intervention APIs above. Stay within this project\'s scope.');
+    sections.push('## PM Role\nYou are this project\'s PM (project-scoped dispatcher). Every user turn is either: answer from the brief, dispatch a worker via /execute, or modify an in-flight worker via the worker intervention APIs above. When you record a dispatch audit claim, use the pm_run_id value shown above in the Project Scope section as your pm_run_id envelope field. Stay within this project\'s scope.');
     return sections.join('\n\n');
   }
 
@@ -191,6 +195,21 @@ function createPmSpawnService({
       : null;
     const resumeThreadId = brief && brief.pm_thread_id ? brief.pm_thread_id : null;
 
+    // Create the run row FIRST so we have a stable runId. The runId is
+    // baked into the project-scoped system prompt so the PM can
+    // self-identify when calling POST /api/dispatch-audit (codex R3 fix
+    // for the "PM has no way to know its own run id" contract gap).
+    // parent_run_id = active Top.
+    const run = runService.createRun({
+      is_manager: true,
+      manager_layer: 'pm',
+      conversation_id: slotKey,
+      parent_run_id: activeTopRunId,
+      manager_adapter: adapterType,
+      prompt: `PM ${project.name}`,
+    });
+    const runId = run.id;
+
     // System prompt for the PM layer. Dynamic context (run/agent/project
     // list) is deliberately NOT included — Codex's model_instructions_file
     // caching relies on a stable system prompt across turns. The project
@@ -201,20 +220,8 @@ function createPmSpawnService({
     const port = process.env.PORT || 4177;
     const token = process.env.PALANTIR_TOKEN;
     const baseSystemPrompt = buildManagerSystemPrompt({ adapter, port, token, layer: 'pm' });
-    const projectSection = buildProjectScopedSystemSection({ project, brief });
+    const projectSection = buildProjectScopedSystemSection({ project, brief, pmRunId: runId });
     const systemPrompt = [baseSystemPrompt, projectSection].filter(Boolean).join('\n\n');
-
-    // Create the run row FIRST so we have a stable runId to register and
-    // to reference in onThreadStarted. parent_run_id = active Top.
-    const run = runService.createRun({
-      is_manager: true,
-      manager_layer: 'pm',
-      conversation_id: slotKey,
-      parent_run_id: activeTopRunId,
-      manager_adapter: adapterType,
-      prompt: `PM ${project.name}`,
-    });
-    const runId = run.id;
 
     // Hook that persists a freshly captured thread id into the brief.
     // Runs at most once per session (codexAdapter guards with

@@ -54,7 +54,35 @@ function buildCommonBase({ port, token, layer = 'top' }) {
     ? `\n\n### Worker Plan Modification (PM-only, in-flight)
 - Send input to run: curl -s ${auth}-X POST ${base}/api/runs/RUN_ID/input -H 'Content-Type: application/json' -d '{"text":"..."}'
 - Cancel run: curl -s ${auth}-X POST ${base}/api/runs/RUN_ID/cancel
-- Update task status: curl -s ${auth}-X PATCH ${base}/api/tasks/TASK_ID/status -H 'Content-Type: application/json' -d '{"status":"done"}'`
+- Update task status: curl -s ${auth}-X PATCH ${base}/api/tasks/TASK_ID/status -H 'Content-Type: application/json' -d '{"status":"done"}'
+
+### Dispatch Audit (PM-only, v3 Phase 4 annotate-only reconciliation)
+Every time you make a definitive claim about a task or worker state —
+"I just spawned worker X for task Y", "task Z is done", "worker W is
+running" — you MUST also record that claim by POSTing to the dispatch
+audit endpoint. The server compares your claim against the real DB
+state and flags mismatches without blocking your message. This is how
+the user notices when your mental model has drifted.
+
+- Record a dispatch claim:
+  curl -s ${auth}-X POST ${base}/api/dispatch-audit -H 'Content-Type: application/json' -d '{"project_id":"PROJECT_ID","task_id":"TASK_ID","pm_run_id":"YOUR_OWN_PM_RUN_ID","pm_claim":{"kind":"task_complete","task_id":"TASK_ID"}}'
+
+pm_claim.kind values the server understands:
+- task_complete / task_in_progress (requires pm_claim.task_id)
+- worker_spawned / worker_running / worker_completed / worker_failed (requires pm_claim.run_id)
+
+Envelope fields vs pm_claim fields — these are DIFFERENT identities,
+do not confuse them:
+- project_id: your PM's project. MUST belong to you.
+- task_id (envelope, optional): the task you're making a claim about.
+  If you provide it, it must equal pm_claim.task_id.
+- pm_run_id: YOUR OWN PM MANAGER run id (the run that represents
+  this PM session). The server uses it to check whether you have
+  pending parent-staleness notices queued against you. It is NOT
+  the worker run id.
+- pm_claim.task_id / pm_claim.run_id: the task or WORKER run your
+  claim references. Both must belong to this project — the server
+  will reject cross-project claims with 400.`
     : '';
 
   return `## CRITICAL: How to delegate work to worker agents
