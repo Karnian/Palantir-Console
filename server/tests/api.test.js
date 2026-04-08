@@ -13,12 +13,19 @@ async function createTempDir(prefix) {
 async function createTestApp(t) {
   const storageRoot = await createTempDir('palantir-storage-');
   const fsRoot = await createTempDir('palantir-fs-');
-  const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode' });
+  // Isolate each run's SQLite file in a tempdir. Before this, leaving
+  // dbPath unset caused createApp() to fall back to server/palantir.db
+  // (the dev DB), so running `npm test` would silently write fixture
+  // projects/tasks into the real database.
+  const dbDir = await createTempDir('palantir-db-');
+  const dbPath = path.join(dbDir, 'test.db');
+  const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode', dbPath });
 
   t.after(async () => {
     if (app.shutdown) app.shutdown();
     await fs.rm(storageRoot, { recursive: true, force: true });
     await fs.rm(fsRoot, { recursive: true, force: true });
+    await fs.rm(dbDir, { recursive: true, force: true });
   });
 
   return { app, storageRoot, fsRoot };
