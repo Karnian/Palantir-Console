@@ -138,7 +138,24 @@ function createRunService(db, eventBus) {
       conversation_id: effectiveConversationId,
     });
     const run = stmts.getById.get(id);
-    if (eventBus) eventBus.emit('run:status', { run });
+    if (eventBus) {
+      // v3 Phase 5: normalize run:status envelope on the initial queued
+      // emission too (codex R1 finding). Prior to this, subscribers saw
+      // two different shapes on the same channel depending on lifecycle
+      // phase — queued events shipped bare `{ run }` while every later
+      // transition shipped the full envelope. `from_status` is null for
+      // a fresh create because there is literally no prior status (per
+      // codex R2: a synthetic empty-string sentinel weakens the state
+      // semantics; null is the right "no prior state" contract).
+      eventBus.emit('run:status', {
+        run,
+        from_status: null,
+        to_status: run.status,
+        reason: 'created',
+        task_id: run.task_id || null,
+        project_id: run.project_id || null,
+      });
+    }
     return run;
   }
 
@@ -148,7 +165,7 @@ function createRunService(db, eventBus) {
     return stmts.getById.get(id);
   }
 
-  function updateRunStatus(id, status, { force = false } = {}) {
+  function updateRunStatus(id, status, { force = false, reason = null } = {}) {
     if (!VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid run status: ${status}`);
     }
@@ -162,21 +179,52 @@ function createRunService(db, eventBus) {
         );
       }
     }
+    const fromStatus = current.status;
     stmts.updateStatus.run(status, status, id);
     const run = stmts.getById.get(id);
-    addRunEvent(id, `status:${status}`, null);
-    if (eventBus) eventBus.emit('run:status', { run });
+    addRunEvent(id, `status:${status}`, reason ? JSON.stringify({ reason }) : null);
+    if (eventBus) {
+      // v3 Phase 5 semantic event fields (spec §9.8):
+      //   from_status / to_status — the transition, not just the
+      //     terminal state. A client that missed the previous status
+      //     can still react correctly (e.g., "just became failed" vs
+      //     "was already failed, refresh").
+      //   reason — why this transition happened (idle_timeout, codex-
+      //     exit-error, user-stop, etc.). Null when no one supplied it.
+      //   task_id / project_id — surfaced at the envelope level so a
+      //     client can filter / route without having to follow the
+      //     run→task→project join itself. These are already present on
+      //     the `run` object (the JOIN in getById) but the old
+      //     payload only shipped the full row, forcing every subscriber
+      //     to re-derive them. Hoisting lets clients write dumber
+      //     filters and matches the spec exactly.
+      eventBus.emit('run:status', {
+        run,
+        from_status: fromStatus,
+        to_status: status,
+        reason: reason || null,
+        task_id: run.task_id || null,
+        project_id: run.project_id || null,
+      });
+    }
 
     // Emit run:ended for terminal states so lifecycleService can sync task status
     if (['completed', 'failed', 'cancelled', 'stopped'].includes(status) && eventBus) {
-      eventBus.emit('run:ended', { run });
+      eventBus.emit('run:ended', {
+        run,
+        from_status: fromStatus,
+        to_status: status,
+        reason: reason || null,
+        task_id: run.task_id || null,
+        project_id: run.project_id || null,
+      });
     }
 
     return run;
   }
 
   function markRunStarted(id, { tmux_session, worktree_path, branch } = {}) {
-    getRun(id);
+    const prev = getRun(id);
     stmts.updateStarted.run(
       tmux_session || null,
       worktree_path || null,
@@ -185,7 +233,16 @@ function createRunService(db, eventBus) {
     );
     const run = stmts.getById.get(id);
     addRunEvent(id, 'started', JSON.stringify({ tmux_session, worktree_path, branch }));
-    if (eventBus) eventBus.emit('run:status', { run });
+    if (eventBus) {
+      eventBus.emit('run:status', {
+        run,
+        from_status: prev.status,
+        to_status: 'running',
+        reason: 'started',
+        task_id: run.task_id || null,
+        project_id: run.project_id || null,
+      });
+    }
     return run;
   }
 
