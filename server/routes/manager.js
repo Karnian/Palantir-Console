@@ -32,7 +32,7 @@ const PROFILE_TYPE_TO_ADAPTER = {
 // so tests can inject `hasKeychain` (and any future DI hooks) without
 // monkey-patching child_process. Production callers leave this empty and
 // get the real keychain probe.
-function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, authResolverOpts = {} }) {
+function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, authResolverOpts = {} }) {
   const router = express.Router();
 
   // PR1a: ManagerAdapter seam. The factory is the single entrypoint for
@@ -425,6 +425,34 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       if (err && err.httpStatus === 400) {
         throw new BadRequestError(err.message);
       }
+      if (err && err.httpStatus) {
+        return res.status(err.httpStatus).json({ error: err.message });
+      }
+      throw err;
+    }
+  }));
+
+  /**
+   * POST /api/manager/pm/:projectId/reset
+   * v3 Phase 3a: single-owner PM teardown (spec §5 책임 분담표). The
+   * user clicks "Reset PM" (or the client forces a reset during adapter
+   * switch) and this route delegates to pmCleanupService.reset, which
+   * disposes the live adapter session, clears pm_thread_id/pm_adapter on
+   * the project brief, and drops the managerRegistry slot. The NEXT
+   * message to this project's PM will lazy-spawn a fresh Codex thread.
+   */
+  router.post('/pm/:projectId/reset', asyncHandler(async (req, res) => {
+    const { projectId } = req.params;
+    if (!projectId) {
+      throw new BadRequestError('projectId is required');
+    }
+    if (!pmCleanupService) {
+      return res.status(501).json({ error: 'pmCleanupService not wired' });
+    }
+    try {
+      const result = pmCleanupService.reset(projectId);
+      return res.json({ status: 'reset', projectId, ...result });
+    } catch (err) {
       if (err && err.httpStatus) {
         return res.status(err.httpStatus).json({ error: err.message });
       }

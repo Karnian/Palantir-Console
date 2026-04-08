@@ -757,13 +757,19 @@ test('Phase 2: PM send drain is NOT committed when adapter rejects', async (t) =
   assert.match(acceptedPayload, /second/);
 });
 
-test('Phase 2: POST /api/manager/pm/:projectId/message returns 404 when no PM', async (t) => {
+test('Phase 2: POST /api/manager/pm/:projectId/message returns 404 when project missing', async (t) => {
+  // v3 Phase 3a delta: conversationService now delegates PM misses to
+  // pmSpawnService (lazy spawn). When the project itself doesn't exist,
+  // the spawn service throws with httpStatus=404 and the error message
+  // changes shape accordingly. The original Phase 2 expectation (no PM
+  // → 404) still holds — just the error text moved from the registry
+  // path into the spawn path.
   const app = await createTestApp(t);
   const res = await request(app)
     .post('/api/manager/pm/alpha/message')
     .send({ text: 'hi' });
   assert.equal(res.status, 404);
-  assert.match(res.body.error, /No active PM manager session/);
+  assert.match(res.body.error, /project not found/);
 });
 
 test('Phase 2: race-safe drain — notices queued mid-turn survive commit', async (t) => {
