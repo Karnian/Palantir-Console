@@ -166,14 +166,94 @@ test('resolveClaudeAuth returns canAuth=false with diagnostics when no creds', a
       if (saved[k] != null) process.env[k] = saved[k];
     }
   });
-  // Force the auth file path to a nonexistent location for this test by
-  // jest-style intercept isn't available; rely on the path not existing in
-  // the test temp environment. Even if the file exists in the dev workspace,
-  // canAuth checks env first — without env vars and an envAllowlist that
-  // limits to a non-existent var we still get canAuth=false.
-  const r = resolveClaudeAuth({ envAllowlist: ['NOPE'] });
+  // PR18: inject hasKeychain=false so this test is deterministic on dev
+  // machines that have a real Claude Code keychain item. The original
+  // 'envAllowlist: ["NOPE"]' trick was sufficient pre-PR18 because the
+  // resolver only checked env vars, but now keychain is a separate path
+  // that allowlist filtering does NOT cover (Claude CLI reads keychain
+  // itself, the resolver doesn't materialize the token into env).
+  const r = resolveClaudeAuth({ envAllowlist: ['NOPE'], hasKeychain: () => false });
   assert.equal(r.canAuth, false);
   assert.ok(r.diagnostics.length > 0);
+});
+
+// PR18: regression for the on-demand .claude-auth.json re-read. Pre-PR18 the
+// file existed only as an informational `sources` entry; canAuth was decided
+// purely from process.env, so dropping a fresh file in did NOT flip canAuth
+// without a server restart. Now the resolver re-reads the file every call and
+// merges allowed keys into the local env, which both flips canAuth and makes
+// the token available for forwarding to the spawned subprocess.
+test('resolveClaudeAuth re-reads .claude-auth.json on demand', async (t) => {
+  const { resolveClaudeAuth, CLAUDE_AUTH_FILE } = require('../services/authResolver');
+  const fsMod = require('node:fs');
+  const saved = {};
+  for (const k of ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL']) {
+    saved[k] = process.env[k];
+    delete process.env[k];
+  }
+  // Stash any pre-existing file so the test is hermetic and we don't clobber
+  // a real cred file on the dev box.
+  let savedFile = null;
+  try {
+    if (fsMod.existsSync(CLAUDE_AUTH_FILE)) {
+      savedFile = fsMod.readFileSync(CLAUDE_AUTH_FILE, 'utf-8');
+      fsMod.unlinkSync(CLAUDE_AUTH_FILE);
+    }
+  } catch { /* ignore */ }
+  t.after(() => {
+    try { fsMod.unlinkSync(CLAUDE_AUTH_FILE); } catch { /* ignore */ }
+    if (savedFile != null) {
+      try { fsMod.writeFileSync(CLAUDE_AUTH_FILE, savedFile, { mode: 0o600 }); } catch { /* ignore */ }
+    }
+    for (const k of Object.keys(saved)) {
+      if (saved[k] != null) process.env[k] = saved[k];
+    }
+  });
+
+  // Step 1 — no env, no keychain, no file → canAuth false
+  let r = resolveClaudeAuth({ hasKeychain: () => false });
+  assert.equal(r.canAuth, false);
+
+  // Step 2 — drop a file in WITHOUT restarting the resolver
+  fsMod.writeFileSync(
+    CLAUDE_AUTH_FILE,
+    JSON.stringify({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-test-from-file' }),
+    { mode: 0o600 }
+  );
+
+  // Step 3 — resolver picks it up on the next call
+  r = resolveClaudeAuth({ hasKeychain: () => false });
+  assert.equal(r.canAuth, true);
+  assert.equal(r.env.CLAUDE_CODE_OAUTH_TOKEN, 'sk-test-from-file');
+  assert.ok(r.sources.includes('file:.claude-auth.json'));
+});
+
+// PR18: companion positive case at the resolver unit level. Establishes
+// the contract that "keychain present, env empty, file absent" → canAuth=true
+// AND env stays empty (no token leakage into the spawned subprocess env).
+test('resolveClaudeAuth flips canAuth true on keychain only and does not leak token to env', async (t) => {
+  const { resolveClaudeAuth } = require('../services/authResolver');
+  const saved = {};
+  for (const k of ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL']) {
+    saved[k] = process.env[k];
+    delete process.env[k];
+  }
+  t.after(() => {
+    for (const k of Object.keys(saved)) {
+      if (saved[k] != null) process.env[k] = saved[k];
+    }
+  });
+  const r = resolveClaudeAuth({ hasKeychain: () => true });
+  assert.equal(r.canAuth, true);
+  assert.ok(
+    r.sources.includes('keychain:Claude Code-credentials'),
+    `expected keychain source, got: ${JSON.stringify(r.sources)}`
+  );
+  // Critical: keychain entries must NOT be materialized into env. Claude CLI
+  // reads keychain at spawn time; forwarding the secret would just leak it.
+  assert.equal(r.env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+  assert.equal(r.env.ANTHROPIC_API_KEY, undefined);
+  assert.deepEqual(r.diagnostics, []);
 });
 
 test('resolveCodexAuth honors env_allowlist diagnostics', async (t) => {

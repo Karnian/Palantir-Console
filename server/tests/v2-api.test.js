@@ -10,11 +10,16 @@ async function createTempDir(prefix) {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
-async function createTestApp(t) {
+async function createTestApp(t, opts = {}) {
   const storageRoot = await createTempDir('palantir-storage-');
   const fsRoot = await createTempDir('palantir-fs-');
   const dbPath = path.join(await createTempDir('palantir-db-'), 'test.db');
-  const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode', dbPath });
+  // PR18: pin hasKeychain=false by default so contract tests are
+  // deterministic on dev machines that *do* have a Claude keychain item.
+  // Tests that want to exercise the keychain-positive path pass
+  // { authResolverOpts: { hasKeychain: () => true } } explicitly.
+  const authResolverOpts = opts.authResolverOpts || { hasKeychain: () => false };
+  const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode', dbPath, authResolverOpts });
 
   t.after(async () => {
     if (app.shutdown) app.shutdown();
@@ -331,6 +336,99 @@ test('GET /api/agents: env_allowlist of wrong JSON type fails closed', async (t)
   assert.ok(row.auth && row.auth.canAuth === false);
   assert.ok(row.auth.diagnostics.some(d => /env_allowlist/.test(d)));
   await request(app).delete(`/api/agents/${id}`);
+});
+
+// PR18: regression — manager preflight must NOT false-negative when the user
+// is logged into Claude Code via the macOS desktop app (no env vars set, no
+// .claude-auth.json file, but `Claude Code-credentials` exists in the keychain).
+// Before PR18 the picker showed "no credentials" and POST /api/manager/start
+// returned 400 manager_auth_unavailable, even though /api/agents/.../usage
+// happily fetched live usage data via the keychain fallback.
+test('GET /api/agents: keychain-only Claude flips canAuth true', async (t) => {
+  const { app } = await createTestApp(t, {
+    authResolverOpts: { hasKeychain: () => true },
+  });
+  // Make sure the env doesn't accidentally satisfy canAuth via env vars.
+  const savedToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  const savedKey = process.env.ANTHROPIC_API_KEY;
+  delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  delete process.env.ANTHROPIC_API_KEY;
+  try {
+    const list = await request(app).get('/api/agents');
+    assert.equal(list.status, 200);
+    const claude = list.body.agents.find(a => a.id === 'claude-code');
+    assert.ok(claude, 'seed claude-code profile must exist');
+    assert.ok(claude.auth, 'claude-code must carry an auth preflight');
+    assert.equal(claude.auth.canAuth, true);
+    assert.ok(
+      claude.auth.sources.some(s => s.startsWith('keychain:')),
+      `expected keychain source, got: ${JSON.stringify(claude.auth.sources)}`
+    );
+    assert.deepEqual(claude.auth.diagnostics, []);
+  } finally {
+    if (savedToken !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = savedToken;
+    if (savedKey !== undefined) process.env.ANTHROPIC_API_KEY = savedKey;
+  }
+});
+
+// PR18: companion regression — POST /api/manager/start with the keychain-only
+// Claude profile must NOT return 400 manager_auth_unavailable. We don't actually
+// spawn anything (the test stub adapter is enough); we just confirm the
+// preflight gate lets the request through.
+test('POST /api/manager/start: keychain-only Claude does not 400', async (t) => {
+  const { app } = await createTestApp(t, {
+    authResolverOpts: { hasKeychain: () => true },
+  });
+  const savedToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  const savedKey = process.env.ANTHROPIC_API_KEY;
+  delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  delete process.env.ANTHROPIC_API_KEY;
+  try {
+    const res = await request(app)
+      .post('/api/manager/start')
+      .send({ agent_profile_id: 'claude-code' });
+    // The point is that we don't see 400 manager_auth_unavailable.
+    // The actual outcome depends on whether the test environment can spawn
+    // a real Claude process (it usually can't), so we accept any response
+    // EXCEPT manager_auth_unavailable.
+    if (res.status === 400) {
+      assert.notEqual(
+        res.body.error,
+        'manager_auth_unavailable',
+        `keychain should satisfy preflight; got 400 manager_auth_unavailable: ${JSON.stringify(res.body)}`
+      );
+    }
+    // Best-effort cleanup if a manager actually started.
+    if (res.status === 201) {
+      await request(app).post('/api/manager/stop');
+    }
+  } finally {
+    if (savedToken !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = savedToken;
+    if (savedKey !== undefined) process.env.ANTHROPIC_API_KEY = savedKey;
+  }
+});
+
+// PR18: negative companion — when neither env, file, nor keychain are present,
+// preflight must still 400 with the right error code so the regression above
+// is meaningful.
+test('POST /api/manager/start: no creds at all still returns manager_auth_unavailable', async (t) => {
+  const { app } = await createTestApp(t, {
+    authResolverOpts: { hasKeychain: () => false },
+  });
+  const savedToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  const savedKey = process.env.ANTHROPIC_API_KEY;
+  delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  delete process.env.ANTHROPIC_API_KEY;
+  try {
+    const res = await request(app)
+      .post('/api/manager/start')
+      .send({ agent_profile_id: 'claude-code' });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'manager_auth_unavailable');
+  } finally {
+    if (savedToken !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = savedToken;
+    if (savedKey !== undefined) process.env.ANTHROPIC_API_KEY = savedKey;
+  }
 });
 
 // Same check on the syntax-error path (already worked, but lock it in).

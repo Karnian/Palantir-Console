@@ -26,11 +26,78 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const { execFileSync } = require('node:child_process');
 
 const CLAUDE_AUTH_FILE = path.join(__dirname, '..', '..', '.claude-auth.json');
 const CLAUDE_AUTH_KEYS = ['ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
+const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials';
 const CODEX_AUTH_KEYS = ['CODEX_API_KEY', 'OPENAI_API_KEY'];
 const CODEX_AUTH_FILE = path.join(os.homedir(), '.codex', 'auth.json');
+
+/**
+ * Check whether the macOS Keychain has a Claude Code OAuth credentials item.
+ *
+ * Why this exists: server/services/providers/claude-code.js uses the
+ * keychain as a token fallback when neither CLAUDE_CODE_OAUTH_TOKEN nor
+ * ANTHROPIC_API_KEY is set in process.env. Before this helper, the manager
+ * preflight (resolveClaudeAuth) was unaware of the keychain entirely, which
+ * produced false-negative "no credentials" errors for the very common case
+ * of a user logged in via the Claude Code desktop app: agent detail modal
+ * showed live usage data (because the usage path read keychain directly),
+ * but the manager picker rendered "no credentials" and /api/manager/start
+ * returned 400 manager_auth_unavailable. See PR #18.
+ *
+ * Implementation notes:
+ *   - We deliberately do NOT pass `-w` to `security`. Without `-w`, the
+ *     password payload is never written to our process memory. We only
+ *     learn whether the item exists. The Claude CLI itself reads the
+ *     payload at spawn time, so we don't need it in the preflight.
+ *   - execFileSync (not execSync) — argv array, no shell, no injection.
+ *   - 3s timeout because keychain ACL prompts can stall otherwise.
+ *   - non-darwin platforms short-circuit to false; the `security` binary
+ *     does not exist there.
+ *   - Failures (item missing, ACL denied, command not found) all collapse
+ *     to false. preflight is a hint, not a guarantee — if keychain says
+ *     "yes" and the actual spawn later fails, the spawn-time error is the
+ *     authoritative signal.
+ */
+function hasClaudeKeychainCredentials() {
+  if (process.platform !== 'darwin') return false;
+  try {
+    execFileSync('security', ['find-generic-password', '-s', CLAUDE_KEYCHAIN_SERVICE], {
+      stdio: 'pipe',
+      timeout: 3000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read .claude-auth.json on demand and merge any keys that pass the
+ * allowlist into the returned env object. This is a DEFERRED read so
+ * users who manually drop the file in (without restarting the server
+ * to re-run bootstrap) still see canAuth flip to true on the next
+ * picker refresh. Returns {} on any failure (file missing, parse error,
+ * non-object payload).
+ */
+function readClaudeAuthFile(allowSet) {
+  try {
+    const raw = fs.readFileSync(CLAUDE_AUTH_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out = {};
+    for (const k of CLAUDE_AUTH_KEYS) {
+      if (typeof parsed[k] === 'string' && parsed[k] && allowSet.has(k)) {
+        out[k] = parsed[k];
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
 
 /**
  * Persist any Claude credentials currently visible in process.env to disk so
@@ -83,13 +150,27 @@ function bootstrapClaudeAuthFromEnv({ logger = console } = {}) {
 /**
  * Resolve auth for a Claude manager session.
  *
+ * Source parity (matches server/services/providers/claude-code.js):
+ *   1. process.env (CLAUDE_CODE_OAUTH_TOKEN > ANTHROPIC_API_KEY)
+ *   2. .claude-auth.json on disk (re-read on demand so a freshly seeded
+ *      file flips canAuth without a server restart)
+ *   3. macOS Keychain item "Claude Code-credentials" (existence only —
+ *      payload is read at spawn time by Claude CLI itself)
+ *
+ * env returned in the result is what should be FORWARDED to the spawned
+ * subprocess. The keychain entry is intentionally NOT materialized into
+ * env: Claude CLI reads keychain itself and forwarding it would just
+ * leak the secret further.
+ *
  * @param {object} [opts]
  * @param {string[]} [opts.envAllowlist]  agent profile env_allowlist; if
  *                                        provided, only these keys are
  *                                        forwarded to the subprocess env.
+ * @param {() => boolean} [opts.hasKeychain] DI hook for tests; defaults
+ *                                           to the real keychain probe.
  * @returns {{ canAuth: boolean, env: object, sources: string[], diagnostics: string[] }}
  */
-function resolveClaudeAuth({ envAllowlist } = {}) {
+function resolveClaudeAuth({ envAllowlist, hasKeychain = hasClaudeKeychainCredentials } = {}) {
   const env = {};
   const sources = [];
   const diagnostics = [];
@@ -98,7 +179,7 @@ function resolveClaudeAuth({ envAllowlist } = {}) {
     ? new Set(envAllowlist)
     : new Set(CLAUDE_AUTH_KEYS);
 
-  // Direct env vars
+  // (1) Direct env vars
   if (process.env.CLAUDE_CODE_OAUTH_TOKEN && allow.has('CLAUDE_CODE_OAUTH_TOKEN')) {
     env.CLAUDE_CODE_OAUTH_TOKEN = process.env.CLAUDE_CODE_OAUTH_TOKEN;
     sources.push('env:CLAUDE_CODE_OAUTH_TOKEN');
@@ -112,16 +193,32 @@ function resolveClaudeAuth({ envAllowlist } = {}) {
     sources.push('env:ANTHROPIC_BASE_URL');
   }
 
-  // Saved auth file
+  // (2) Saved auth file — re-read on demand. If the file has keys we
+  //     don't yet have in env, merge them. This makes "drop file in,
+  //     refresh picker" work without a server restart.
+  let fileEnv = {};
+  let fileExists = false;
   try {
-    if (fs.existsSync(CLAUDE_AUTH_FILE)) {
-      sources.push('file:.claude-auth.json');
-    }
+    fileExists = fs.existsSync(CLAUDE_AUTH_FILE);
   } catch { /* ignore */ }
+  if (fileExists) {
+    fileEnv = readClaudeAuthFile(allow);
+    if (Object.keys(fileEnv).length > 0) {
+      sources.push('file:.claude-auth.json');
+      for (const [k, v] of Object.entries(fileEnv)) {
+        if (!env[k]) env[k] = v;
+      }
+    }
+  }
 
-  const canAuth = !!(env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY);
+  // (3) macOS Keychain — existence only. NOT merged into env (Claude CLI
+  //     reads keychain itself; forwarding the secret would leak it).
+  const keychain = hasKeychain();
+  if (keychain) sources.push('keychain:Claude Code-credentials');
+
+  const canAuth = !!(env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY || keychain);
   if (!canAuth) {
-    diagnostics.push('No Claude credentials found. Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, or start the server once from inside a Claude Code session to seed .claude-auth.json.');
+    diagnostics.push('No Claude credentials found. Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, run the Claude Code desktop app to populate the macOS keychain, or start the server once from inside a Claude Code session to seed .claude-auth.json.');
     if (Array.isArray(envAllowlist) && envAllowlist.length > 0) {
       const blocked = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']
         .filter(k => process.env[k] && !allow.has(k));
@@ -176,6 +273,9 @@ function resolveCodexAuth({ envAllowlist } = {}) {
 
 /**
  * Single entry point used by routes/manager.js. type → strategy.
+ *
+ * opts is forwarded to the strategy. Tests may inject `hasKeychain` here
+ * to make resolveClaudeAuth deterministic.
  */
 function resolveManagerAuth(type, opts = {}) {
   if (type === 'codex') return resolveCodexAuth(opts);
@@ -224,9 +324,11 @@ module.exports = {
   resolveCodexAuth,
   resolveManagerAuth,
   buildManagerSpawnEnv,
+  hasClaudeKeychainCredentials,
   // Exposed for tests
   CLAUDE_AUTH_FILE,
   CODEX_AUTH_FILE,
   CLAUDE_AUTH_KEYS,
   CODEX_AUTH_KEYS,
+  CLAUDE_KEYCHAIN_SERVICE,
 };
