@@ -160,7 +160,11 @@ function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun, claude
   });
   const reviewTasks = tasks.filter(t => t.status === 'review');
 
-  // Build triage items sorted by urgency
+  // Build triage items sorted by urgency.
+  // Track task ids that already appear via due-date triage so we don't re-list
+  // them as separate "Ready for review" rows — the overdue/due-soon row
+  // already surfaces the same task with more actionable context.
+  const dueDateTaskIds = new Set();
   const triageItems = [];
 
   const runTitle = (run, task) => {
@@ -194,6 +198,7 @@ function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun, claude
         run: null,
         task: t,
       });
+      dueDateTaskIds.add(t.id);
     } else if (due.state === 'due-soon') {
       triageItems.push({
         type: 'due-soon',
@@ -203,6 +208,7 @@ function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun, claude
         run: null,
         task: t,
       });
+      dueDateTaskIds.add(t.id);
     }
   });
 
@@ -243,6 +249,8 @@ function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun, claude
   });
 
   reviewTasks.forEach(task => {
+    // Suppress review row if this task is already surfaced by a due-date row.
+    if (dueDateTaskIds.has(task.id)) return;
     triageItems.push({
       type: 'review',
       priority: 3,
@@ -311,7 +319,7 @@ function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun, claude
             class="triage-item"
             onClick=${() => {
               if (item.type === 'manager') { navigate('manager'); return; }
-              if (item.type === 'overdue' || item.type === 'due-soon') {
+              if (item.type === 'overdue' || item.type === 'due-soon' || item.type === 'review') {
                 if (item.task && onOpenTask) onOpenTask(item.task);
                 return;
               }
@@ -340,7 +348,7 @@ function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun, claude
                 </button>
               `}
               ${item.type === 'review' && html`
-                <button class="ghost" onClick=${(e) => { e.stopPropagation(); navigate('board'); }}>
+                <button class="ghost" onClick=${(e) => { e.stopPropagation(); if (item.task && onOpenTask) onOpenTask(item.task); }}>
                   Review
                 </button>
               `}
@@ -3392,12 +3400,15 @@ function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError 
 
     // Index legacy assistant_text events by their full text, in arrival order.
     // We'll pop one entry per match so each legacy row can only be paired once.
-    const legacyByText = new Map(); // text -> array of { id, idx } in event order
+    // Note: normalized (claudeAdapter) trims whitespace while legacy
+    // (streamJsonEngine) does not. Key on the trimmed form so leading/trailing
+    // whitespace doesn't defeat dedupe and cause the same message to render twice.
+    const legacyByText = new Map(); // trimmedText -> array of { id, idx } in event order
     events.forEach((e, idx) => {
       if (e.event_type !== 'assistant_text') return;
       let p = {};
       try { p = JSON.parse(e.payload_json || '{}'); } catch { return; }
-      const text = p.text || p.result || '';
+      const text = (p.text || p.result || '').trim();
       if (!text) return;
       if (!legacyByText.has(text)) legacyByText.set(text, []);
       legacyByText.get(text).push({ id: e.id, idx });
@@ -3410,7 +3421,8 @@ function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError 
       if (e.event_type !== 'mgr.assistant_message') continue;
       let p = {};
       try { p = JSON.parse(e.payload_json || '{}'); } catch { continue; }
-      const text = (p.data && p.data.text) || p.summaryText || '';
+      const rawText = (p.data && p.data.text) || p.summaryText || '';
+      const text = rawText.trim();
       if (!text) continue;
       // Pair with the nearest unconsumed legacy assistant_text whose full text
       // matches and whose event id is close to ours (PR1b emits both within
