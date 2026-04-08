@@ -37,6 +37,8 @@ const { createManagerRouter } = require('./routes/manager');
 const { createConversationsRouter } = require('./routes/conversations');
 const { createManagerRegistry } = require('./services/managerRegistry');
 const { createConversationService } = require('./services/conversationService');
+const { createPmCleanupService } = require('./services/pmCleanupService');
+const { createPmSpawnService } = require('./services/pmSpawnService');
 
 function createApp(options = {}) {
   const app = express();
@@ -101,11 +103,33 @@ function createApp(options = {}) {
   // queue and the unified send/resolve routing used by both the new
   // /api/conversations router and the legacy /api/manager/* routes.
   const managerRegistry = createManagerRegistry({ runService });
+  // v3 Phase 3a: lazy PM spawn + single-owner cleanup. pmSpawnService is
+  // wired into conversationService below so a first message to
+  // pm:<projectId> creates the PM run on demand. pmCleanupService is the
+  // single termination owner for /reset, delete-project, and future
+  // pm_enabled=false toggles (spec §5 책임 분담표).
+  const pmSpawnService = createPmSpawnService({
+    runService,
+    managerRegistry,
+    managerAdapterFactory,
+    projectService,
+    projectBriefService,
+    agentProfileService,
+    authResolverOpts: options.authResolverOpts || {},
+  });
+  const pmCleanupService = createPmCleanupService({
+    projectService,
+    projectBriefService,
+    managerRegistry,
+    managerAdapterFactory,
+    runService,
+  });
   const conversationService = createConversationService({
     runService,
     managerRegistry,
     managerAdapterFactory,
     lifecycleService,
+    pmSpawnService,
   });
   // v3 Phase 2: whenever a manager slot (top or pm:<projectId>) is cleared
   // — by explicit stop, liveness probe, or rotation — drop any lingering
@@ -148,7 +172,7 @@ function createApp(options = {}) {
   app.use('/api/usage', createUsageRouter({ codexService, providerRegistry }));
 
   // New routes (v2)
-  app.use('/api/projects', createProjectsRouter({ projectService, taskService, projectBriefService }));
+  app.use('/api/projects', createProjectsRouter({ projectService, taskService, projectBriefService, pmCleanupService }));
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService }));
   app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService }));
   // PR18: tests can pass options.authResolverOpts (e.g. a fake `hasKeychain`)
@@ -159,7 +183,7 @@ function createApp(options = {}) {
   app.use('/api/agents', createAgentsRouter({ agentProfileService, providerRegistry, authResolverOpts }));
   app.use('/api/events', createEventsRouter({ eventBus }));
   app.use('/api/claude-sessions', createClaudeSessionsRouter());
-  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, authResolverOpts }));
+  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, authResolverOpts }));
   app.use('/api/conversations', createConversationsRouter({ conversationService, runService }));
 
   app.use(errorHandler);

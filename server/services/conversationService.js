@@ -42,6 +42,12 @@ function createConversationService({
   managerRegistry,
   managerAdapterFactory,
   lifecycleService,
+  // v3 Phase 3a: optional PM spawn hook. When provided, sendToManagerSlot
+  // for a 'pm:<projectId>' target will call ensureLivePm() on a 404 so
+  // the first message to a project's PM lazily creates the run instead of
+  // returning "No active PM manager session". Tests that don't care about
+  // lazy spawn can omit this dependency and keep the pre-3a behavior.
+  pmSpawnService,
   logger,
 }) {
   // parentRunId -> array of notice strings
@@ -214,7 +220,25 @@ function createConversationService({
     const isTop = conversationId === 'top';
     const layerLabel = isTop ? 'Top' : 'PM';
 
-    const run = managerRegistry.probeActive(conversationId);
+    let run = managerRegistry.probeActive(conversationId);
+    // v3 Phase 3a: lazy PM spawn. If no PM is live for this project and a
+    // spawn service is wired, delegate to it. The spawn service refuses
+    // when no Top is active (409) or pm_enabled=0 (409) — those errors
+    // bubble through unchanged. Top layer NEVER auto-spawns; /start is
+    // the only legitimate entry point for Top.
+    if (!run && !isTop && pmSpawnService && projectId) {
+      try {
+        const spawn = pmSpawnService.ensureLivePm({ projectId });
+        run = spawn.run;
+      } catch (spawnErr) {
+        // Preserve the spawn service's httpStatus if set so the route
+        // layer returns a meaningful code (409/404/502) instead of a
+        // generic 500.
+        const err = new Error(spawnErr.message || 'PM spawn failed');
+        err.httpStatus = spawnErr.httpStatus || 502;
+        throw err;
+      }
+    }
     if (!run) {
       const err = new Error(`No active ${layerLabel} manager session`);
       err.httpStatus = 404;
