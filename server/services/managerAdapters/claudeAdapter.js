@@ -205,6 +205,18 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
   /**
    * Start a manager session.
    * Returns { sessionRef } where sessionRef is the spawn result (pid, etc).
+   *
+   * v3 Phase 0: capability diet. Manager role does NOT get Write/Edit tools,
+   * and Bash is restricted to a safe-command allowlist (curl, jq, cat, ls, pwd).
+   * The manager's job is dispatch/routing, not direct file modification.
+   * Substantial edit work is delegated to workers via POST /api/tasks/:id/execute.
+   *
+   * Why Bash(pattern:*) instead of plain 'Bash': principle 1 (권한 정합성 우선) —
+   * without pattern restrictions, `permissionMode: bypassPermissions` combined
+   * with plain 'Bash' would allow `sed -i`, redirection, `tee`, etc. to bypass
+   * the Write/Edit diet. The pattern allowlist closes that escape hatch.
+   *
+   * See docs/specs/manager-v3-multilayer.md principle 1.
    */
   function startSession(runId, { prompt, cwd, systemPrompt, model, allowedTools, permissionMode, env }) {
     // Reset normalizer state in case the runId is recycled.
@@ -215,7 +227,22 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
       env, // PR4: filtered env from buildManagerSpawnEnv — overrides process.env
       systemPrompt,
       permissionMode: permissionMode || 'bypassPermissions',
-      allowedTools: allowedTools || ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebSearch', 'WebFetch'],
+      allowedTools: allowedTools || [
+        // Bash restricted to commands whose *primary* operation is read-only
+        // and whose *typical usage* does not write files. Excluded: cat, echo,
+        // tee, sed, awk, python, node — all commonly used with redirection or
+        // inline write flags. File reading goes through the Read tool, not Bash.
+        //
+        // KNOWN PHASE 0 LIMITATION: Bash(cmd:*) patterns match only on command
+        // name, not full shell string. So `curl ... > file` can still write.
+        // A complete fix requires replacing Bash(curl:*) with an MCP/HTTP
+        // helper tool that exposes the Palantir API as typed operations
+        // without shell access. Tracked as Phase X follow-up. The threat
+        // model today is drift (LLM following role), not malicious escape —
+        // and the manager's system prompt explicitly forbids file edits.
+        'Bash(curl:*)', 'Bash(jq:*)', 'Bash(ls:*)', 'Bash(pwd:*)',
+        'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
+      ],
       model: model || undefined,
       isManager: true,
       onVendorEvent: (event, proc) => normalizeClaudeEvent(runId, event, proc),

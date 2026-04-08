@@ -284,6 +284,10 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         systemPrompt,
         model: model || undefined,
         env: spawnEnv,
+        // v3 Phase 0: all current manager starts are Top layer. PM layer
+        // (Phase 3a) will pass role='manager' with layer='pm' system prompt.
+        // role='manager' is the default in codexAdapter so this is belt-and-suspenders.
+        role: 'manager',
       });
       const result = sessionRef;
 
