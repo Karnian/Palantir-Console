@@ -12,6 +12,7 @@ const { createProviderRegistry } = require('./services/providers');
 const { createDatabase } = require('./db/database');
 const { createEventBus } = require('./services/eventBus');
 const { createProjectService } = require('./services/projectService');
+const { createProjectBriefService } = require('./services/projectBriefService');
 const { createTaskService } = require('./services/taskService');
 const { createRunService } = require('./services/runService');
 const { createAgentProfileService } = require('./services/agentProfileService');
@@ -76,6 +77,7 @@ function createApp(options = {}) {
 
   // New services (SQLite-based)
   const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db); // v3 Phase 1
   const taskService = createTaskService(db, eventBus);
   const runService = createRunService(db, eventBus);
   const agentProfileService = createAgentProfileService(db);
@@ -123,7 +125,7 @@ function createApp(options = {}) {
   app.use('/api/usage', createUsageRouter({ codexService, providerRegistry }));
 
   // New routes (v2)
-  app.use('/api/projects', createProjectsRouter({ projectService, taskService }));
+  app.use('/api/projects', createProjectsRouter({ projectService, taskService, projectBriefService }));
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService }));
   app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine }));
   // PR18: tests can pass options.authResolverOpts (e.g. a fake `hasKeychain`)
@@ -134,7 +136,7 @@ function createApp(options = {}) {
   app.use('/api/agents', createAgentsRouter({ agentProfileService, providerRegistry, authResolverOpts }));
   app.use('/api/events', createEventsRouter({ eventBus }));
   app.use('/api/claude-sessions', createClaudeSessionsRouter());
-  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, eventBus, projectService, agentProfileService, authResolverOpts }));
+  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, eventBus, projectService, projectBriefService, agentProfileService, authResolverOpts }));
 
   app.use(errorHandler);
 
