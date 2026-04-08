@@ -107,6 +107,13 @@ function createApp(options = {}) {
     managerAdapterFactory,
     lifecycleService,
   });
+  // v3 Phase 2: whenever a manager slot (top or pm:<projectId>) is cleared
+  // — by explicit stop, liveness probe, or rotation — drop any lingering
+  // parent-notice queue entries keyed by the dying run id so they cannot
+  // be misapplied to some future unrelated run. Codex R1 blocker fix.
+  managerRegistry.onSlotCleared(({ runId }) => {
+    try { conversationService.clearParentNotices(runId); } catch { /* ignore */ }
+  });
 
   // Middleware
   app.use(express.json({ limit: '2mb' }));

@@ -477,3 +477,461 @@ test('GET /api/manager/status returns layer-aware shape (top+pms)', async (t) =>
   assert.ok(Array.isArray(res.body.pms));
   assert.equal(res.body.pms.length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// v3 Phase 2 — multi-slot PM runtime + worker→PM and PM→Top notice routing
+// ---------------------------------------------------------------------------
+
+// Helper: seed a PM run in the registry under 'pm:<projectId>'. Phase 2 does
+// not spawn real PM adapters (that lives in Phase 3a); tests use a fake
+// adapter identical to the Top fake.
+function seedPmRun({ rs, registry, adapter, projectId, parentTopRunId }) {
+  const run = rs.createRun({
+    is_manager: true,
+    manager_adapter: 'codex',
+    manager_layer: 'pm',
+    conversation_id: `pm:${projectId}`,
+    parent_run_id: parentTopRunId || null,
+    prompt: `pm ${projectId}`,
+  });
+  rs.updateRunStatus(run.id, 'running', { force: true });
+  registry.setActive(`pm:${projectId}`, run.id, adapter);
+  return run;
+}
+
+test('Phase 2: PM send when no active PM returns 404', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const registry = createManagerRegistry({ runService: rs });
+  const conv = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => makeFakeAdapter() },
+    lifecycleService: makeFakeLifecycle(),
+  });
+  assert.throws(
+    () => conv.sendMessage('pm:alpha', { text: 'hi' }),
+    /No active PM manager session/
+  );
+});
+
+test('Phase 2: worker→PM queues notice and PM send drains it', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const registry = createManagerRegistry({ runService: rs });
+  const topAdapter = makeFakeAdapter();
+  const pmAdapter = makeFakeAdapter();
+  const fakeLifecycle = makeFakeLifecycle();
+  const conv = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    // getAdapter is layer-agnostic for the fake — the registry already
+    // hands out the correct adapter instance per slot.
+    managerAdapterFactory: { getAdapter: () => pmAdapter },
+    lifecycleService: fakeLifecycle,
+  });
+
+  // Live Top
+  const top = rs.createRun({ is_manager: true, prompt: 'top', manager_adapter: 'claude-code' });
+  rs.updateRunStatus(top.id, 'running', { force: true });
+  registry.setActive('top', top.id, topAdapter);
+
+  // Live PM with parent = Top
+  const pm = seedPmRun({ rs, registry, adapter: pmAdapter, projectId: 'alpha', parentTopRunId: top.id });
+
+  // Worker whose parent is the PM (not the Top)
+  db.prepare(`INSERT INTO projects (id, name) VALUES ('p1','Proj')`).run();
+  db.prepare(`INSERT INTO tasks (id, project_id, title, status) VALUES ('t1','p1','T','backlog')`).run();
+  db.prepare(`INSERT INTO agent_profiles (id, name, type, command) VALUES ('a1','A','codex','codex')`).run();
+  const worker = rs.createRun({ task_id: 't1', agent_profile_id: 'a1', parent_run_id: pm.id, prompt: 'w' });
+  rs.updateRunStatus(worker.id, 'running', { force: true });
+
+  // Direct message to worker → notice queued against PM run, not Top run
+  conv.sendMessage(`worker:${worker.id}`, { text: '경로 변경해줘' });
+  assert.equal(fakeLifecycle.delivered.length, 1);
+  assert.equal(topAdapter.calls.length, 0);
+  assert.equal(pmAdapter.calls.length, 0);
+
+  // PM send drains and prepends
+  conv.sendMessage('pm:alpha', { text: '요약 보내' });
+  assert.equal(pmAdapter.calls.length, 1);
+  const pmPayload = pmAdapter.calls[0].payload.text;
+  assert.match(pmPayload, /\[system notice\]/);
+  assert.match(pmPayload, new RegExp(`worker:${worker.id}`));
+  assert.match(pmPayload, /경로 변경해줘/);
+  assert.match(pmPayload, /요약 보내/);
+
+  // Top has received nothing — the worker's parent is PM, not Top.
+  assert.equal(topAdapter.calls.length, 0);
+});
+
+test('Phase 2: PM send emits PM→Top notice drained on next Top turn', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const registry = createManagerRegistry({ runService: rs });
+  const topAdapter = makeFakeAdapter();
+  const pmAdapter = makeFakeAdapter();
+  const conv = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => pmAdapter },
+    lifecycleService: makeFakeLifecycle(),
+  });
+
+  const top = rs.createRun({ is_manager: true, prompt: 'top' });
+  rs.updateRunStatus(top.id, 'running', { force: true });
+  registry.setActive('top', top.id, topAdapter);
+
+  seedPmRun({ rs, registry, adapter: pmAdapter, projectId: 'alpha', parentTopRunId: top.id });
+
+  // User talks directly to PM → this alone must mark Top stale
+  conv.sendMessage('pm:alpha', { text: '새 방향으로 가자' });
+  assert.equal(pmAdapter.calls.length, 1);
+  assert.doesNotMatch(pmAdapter.calls[0].payload.text, /\[system notice\]/);
+
+  // Next Top turn should see the PM→Top staleness notice prepended.
+  conv.sendMessage('top', { text: '현재 계획 공유' });
+  assert.equal(topAdapter.calls.length, 1);
+  const topPayload = topAdapter.calls[0].payload.text;
+  assert.match(topPayload, /\[system notice\]/);
+  assert.match(topPayload, /pm:alpha/);
+  assert.match(topPayload, /새 방향으로 가자/);
+  assert.match(topPayload, /현재 계획 공유/);
+
+  // And the queue was drained — a follow-up Top turn has no notice.
+  conv.sendMessage('top', { text: '다음 단계' });
+  assert.equal(topAdapter.calls.length, 2);
+  assert.doesNotMatch(topAdapter.calls[1].payload.text, /\[system notice\]/);
+});
+
+test('Phase 2: PM→Top notice drops if PM parent is not the active Top', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const registry = createManagerRegistry({ runService: rs });
+  const topAdapter = makeFakeAdapter();
+  const pmAdapter = makeFakeAdapter();
+  const conv = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => pmAdapter },
+    lifecycleService: makeFakeLifecycle(),
+    logger: () => {},
+  });
+
+  // Historical top — not registered
+  const oldTop = rs.createRun({ is_manager: true });
+  rs.updateRunStatus(oldTop.id, 'completed', { force: true });
+
+  // New active top (different run id) is registered
+  const newTop = rs.createRun({ is_manager: true });
+  rs.updateRunStatus(newTop.id, 'running', { force: true });
+  registry.setActive('top', newTop.id, topAdapter);
+
+  // PM still carries the OLD top as its parent
+  seedPmRun({ rs, registry, adapter: pmAdapter, projectId: 'alpha', parentTopRunId: oldTop.id });
+
+  conv.sendMessage('pm:alpha', { text: '바꿔' });
+  assert.equal(pmAdapter.calls.length, 1);
+
+  // Next Top turn must not carry a notice — the PM's parent is stale.
+  conv.sendMessage('top', { text: 'status?' });
+  assert.equal(topAdapter.calls.length, 1);
+  assert.doesNotMatch(topAdapter.calls[0].payload.text, /\[system notice\]/);
+});
+
+test('Phase 2: worker→PM drops notice if the PM parent is not the registered PM', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const registry = createManagerRegistry({ runService: rs });
+  const topAdapter = makeFakeAdapter();
+  const pmAdapter = makeFakeAdapter();
+  const fakeLifecycle = makeFakeLifecycle();
+  const conv = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => pmAdapter },
+    lifecycleService: fakeLifecycle,
+    logger: () => {},
+  });
+
+  const top = rs.createRun({ is_manager: true });
+  rs.updateRunStatus(top.id, 'running', { force: true });
+  registry.setActive('top', top.id, topAdapter);
+
+  // Stale PM run (exists in DB but NOT registered as the live pm:alpha)
+  const stalePm = rs.createRun({
+    is_manager: true, manager_layer: 'pm', conversation_id: 'pm:alpha',
+    parent_run_id: top.id, manager_adapter: 'codex',
+  });
+  rs.updateRunStatus(stalePm.id, 'completed', { force: true });
+
+  db.prepare(`INSERT INTO projects (id, name) VALUES ('p1','Proj')`).run();
+  db.prepare(`INSERT INTO tasks (id, project_id, title, status) VALUES ('t1','p1','T','backlog')`).run();
+  db.prepare(`INSERT INTO agent_profiles (id, name, type, command) VALUES ('a1','A','codex','codex')`).run();
+  const worker = rs.createRun({ task_id: 't1', agent_profile_id: 'a1', parent_run_id: stalePm.id });
+  rs.updateRunStatus(worker.id, 'running', { force: true });
+
+  conv.sendMessage(`worker:${worker.id}`, { text: 'hi' });
+  assert.equal(fakeLifecycle.delivered.length, 1);
+
+  // Neither PM nor Top should have received a notice.
+  conv.sendMessage('top', { text: 'status?' });
+  assert.equal(topAdapter.calls.length, 1);
+  assert.doesNotMatch(topAdapter.calls[0].payload.text, /\[system notice\]/);
+});
+
+test('Phase 2: worker→Top path unchanged (Phase 1.5 regression guard)', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const registry = createManagerRegistry({ runService: rs });
+  const topAdapter = makeFakeAdapter();
+  const fakeLifecycle = makeFakeLifecycle();
+  const conv = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => topAdapter },
+    lifecycleService: fakeLifecycle,
+  });
+  const top = rs.createRun({ is_manager: true });
+  rs.updateRunStatus(top.id, 'running', { force: true });
+  registry.setActive('top', top.id, topAdapter);
+
+  db.prepare(`INSERT INTO projects (id, name) VALUES ('p1','Proj')`).run();
+  db.prepare(`INSERT INTO tasks (id, project_id, title, status) VALUES ('t1','p1','T','backlog')`).run();
+  db.prepare(`INSERT INTO agent_profiles (id, name, type, command) VALUES ('a1','A','codex','codex')`).run();
+  const worker = rs.createRun({ task_id: 't1', agent_profile_id: 'a1', parent_run_id: top.id });
+  rs.updateRunStatus(worker.id, 'running', { force: true });
+
+  conv.sendMessage(`worker:${worker.id}`, { text: 'direct' });
+  conv.sendMessage('top', { text: 'ping' });
+  assert.equal(topAdapter.calls.length, 1);
+  assert.match(topAdapter.calls[0].payload.text, /\[system notice\]/);
+  assert.match(topAdapter.calls[0].payload.text, /direct/);
+});
+
+test('Phase 2: PM send drain is NOT committed when adapter rejects', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const registry = createManagerRegistry({ runService: rs });
+  const topAdapter = makeFakeAdapter();
+  let callIdx = 0;
+  const flakyPm = {
+    calls: [],
+    isSessionAlive: () => true, detectExitCode: () => null,
+    emitSessionEndedIfNeeded: () => {},
+    getUsage: () => null, getSessionId: () => null, getOutput: () => null, disposeSession: () => {},
+    runTurn: (runId, payload) => {
+      callIdx += 1;
+      flakyPm.calls.push({ runId, payload });
+      if (callIdx === 1) return { accepted: false };
+      return { accepted: true };
+    },
+  };
+  const conv = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => flakyPm },
+    lifecycleService: makeFakeLifecycle(),
+  });
+  const top = rs.createRun({ is_manager: true });
+  rs.updateRunStatus(top.id, 'running', { force: true });
+  registry.setActive('top', top.id, topAdapter);
+  const pm = seedPmRun({ rs, registry, adapter: flakyPm, projectId: 'alpha', parentTopRunId: top.id });
+
+  // Pre-queue a notice manually on the PM run (simulating a worker→PM)
+  db.prepare(`INSERT INTO projects (id, name) VALUES ('p1','Proj')`).run();
+  db.prepare(`INSERT INTO tasks (id, project_id, title, status) VALUES ('t1','p1','T','backlog')`).run();
+  db.prepare(`INSERT INTO agent_profiles (id, name, type, command) VALUES ('a1','A','codex','codex')`).run();
+  const worker = rs.createRun({ task_id: 't1', agent_profile_id: 'a1', parent_run_id: pm.id });
+  rs.updateRunStatus(worker.id, 'running', { force: true });
+  conv.sendMessage(`worker:${worker.id}`, { text: 'WNOTE' });
+
+  // First PM send fails → queue must survive
+  assert.throws(() => conv.sendMessage('pm:alpha', { text: 'first' }), /Failed to deliver/);
+  // Second PM send succeeds → notice delivered
+  conv.sendMessage('pm:alpha', { text: 'second' });
+  // Accepted call is index 1 (first was rejected but still appended)
+  const acceptedPayload = flakyPm.calls[1].payload.text;
+  assert.match(acceptedPayload, /\[system notice\]/);
+  assert.match(acceptedPayload, /WNOTE/);
+  assert.match(acceptedPayload, /second/);
+});
+
+test('Phase 2: POST /api/manager/pm/:projectId/message returns 404 when no PM', async (t) => {
+  const app = await createTestApp(t);
+  const res = await request(app)
+    .post('/api/manager/pm/alpha/message')
+    .send({ text: 'hi' });
+  assert.equal(res.status, 404);
+  assert.match(res.body.error, /No active PM manager session/);
+});
+
+test('Phase 2: race-safe drain — notices queued mid-turn survive commit', async (t) => {
+  // Codex R1 blocker regression: if a worker→parent notice lands between
+  // peek and commit, the old "delete entire key" drain wiped it out.
+  // The fix removes exactly the count that was peeked via splice().
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const registry = createManagerRegistry({ runService: rs });
+  const fakeLifecycle = makeFakeLifecycle();
+
+  // This adapter calls a hook during runTurn so we can simulate another
+  // worker send queuing a fresh notice while the parent turn is in flight.
+  let midTurnHook = null;
+  const raceAdapter = {
+    calls: [],
+    isSessionAlive: () => true, detectExitCode: () => null,
+    emitSessionEndedIfNeeded: () => {},
+    getUsage: () => null, getSessionId: () => null, getOutput: () => null, disposeSession: () => {},
+    runTurn: (runId, payload) => {
+      raceAdapter.calls.push({ runId, payload });
+      if (midTurnHook) { const h = midTurnHook; midTurnHook = null; h(); }
+      return { accepted: true };
+    },
+  };
+  const conv = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => raceAdapter },
+    lifecycleService: fakeLifecycle,
+  });
+  const top = rs.createRun({ is_manager: true });
+  rs.updateRunStatus(top.id, 'running', { force: true });
+  registry.setActive('top', top.id, raceAdapter);
+
+  db.prepare(`INSERT INTO projects (id, name) VALUES ('p1','Proj')`).run();
+  db.prepare(`INSERT INTO tasks (id, project_id, title, status) VALUES ('t1','p1','T','backlog')`).run();
+  db.prepare(`INSERT INTO agent_profiles (id, name, type, command) VALUES ('a1','A','codex','codex')`).run();
+  const worker = rs.createRun({ task_id: 't1', agent_profile_id: 'a1', parent_run_id: top.id });
+  rs.updateRunStatus(worker.id, 'running', { force: true });
+
+  // Pre-seed first notice
+  conv.sendMessage(`worker:${worker.id}`, { text: 'FIRST' });
+  // Schedule a second worker send to fire while Top's runTurn is in flight
+  midTurnHook = () => { conv.sendMessage(`worker:${worker.id}`, { text: 'MID' }); };
+
+  // Top send consumes FIRST but MID arrives mid-turn (only runTurn goes
+  // through raceAdapter — worker sends go through lifecycleService).
+  conv.sendMessage('top', { text: 'ping' });
+  assert.equal(raceAdapter.calls.length, 1, 'top runTurn fires once');
+  const topPayload = raceAdapter.calls[0].payload.text;
+  assert.match(topPayload, /FIRST/);
+  assert.doesNotMatch(topPayload, /MID/, 'MID arrived after peek, must NOT be in this turn');
+
+  // Next Top turn MUST still see MID — the race-safe drain kept it queued.
+  conv.sendMessage('top', { text: 'next' });
+  assert.equal(raceAdapter.calls.length, 2);
+  const secondTop = raceAdapter.calls[1].payload.text;
+  assert.match(secondTop, /MID/, 'MID must carry over to the next Top turn');
+  assert.match(secondTop, /next/);
+});
+
+test('Phase 2: PM slot cleared → lingering notices are dropped', async (t) => {
+  // Codex R1 blocker regression: PM death/rotation used to strand worker
+  // notices keyed by the old PM run id. The managerRegistry onSlotCleared
+  // hook now drops them. This test uses the dying-probe path.
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const registry = createManagerRegistry({ runService: rs });
+  const topAdapter = makeFakeAdapter();
+  // PM adapter that reports dead on the second probeActive call — the
+  // first probe (during sendMessage('pm:alpha') below) still reports alive.
+  let pmAlive = true;
+  const dyingPm = {
+    calls: [],
+    isSessionAlive: () => pmAlive,
+    detectExitCode: () => 0,
+    emitSessionEndedIfNeeded: () => {},
+    getUsage: () => null, getSessionId: () => null, getOutput: () => null, disposeSession: () => {},
+    runTurn: (runId, payload) => { dyingPm.calls.push({ runId, payload }); return { accepted: true }; },
+  };
+  const conv = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => dyingPm },
+    lifecycleService: makeFakeLifecycle(),
+    logger: () => {},
+  });
+  // Wire the production slot-clear hook explicitly (test harness).
+  registry.onSlotCleared(({ runId }) => { conv.clearParentNotices(runId); });
+
+  const top = rs.createRun({ is_manager: true });
+  rs.updateRunStatus(top.id, 'running', { force: true });
+  registry.setActive('top', top.id, topAdapter);
+
+  const pm = seedPmRun({ rs, registry, adapter: dyingPm, projectId: 'alpha', parentTopRunId: top.id });
+
+  // Queue a worker→PM notice against the PM
+  db.prepare(`INSERT INTO projects (id, name) VALUES ('p1','Proj')`).run();
+  db.prepare(`INSERT INTO tasks (id, project_id, title, status) VALUES ('t1','p1','T','backlog')`).run();
+  db.prepare(`INSERT INTO agent_profiles (id, name, type, command) VALUES ('a1','A','codex','codex')`).run();
+  const worker = rs.createRun({ task_id: 't1', agent_profile_id: 'a1', parent_run_id: pm.id });
+  rs.updateRunStatus(worker.id, 'running', { force: true });
+  conv.sendMessage(`worker:${worker.id}`, { text: 'stranded' });
+
+  // Simulate PM death via probeActive — registry slot clears, listener fires
+  pmAlive = false;
+  const probed = registry.probeActive('pm:alpha');
+  assert.equal(probed, null);
+
+  // A brand-new PM run takes over the same slot. If the queue had
+  // survived, the new PM would see the old notice on its first turn.
+  pmAlive = true;
+  const newPm = seedPmRun({ rs, registry, adapter: dyingPm, projectId: 'alpha', parentTopRunId: top.id });
+  assert.notEqual(newPm.id, pm.id);
+  conv.sendMessage('pm:alpha', { text: 'fresh' });
+  const firstFresh = dyingPm.calls[0].payload.text;
+  assert.doesNotMatch(firstFresh, /stranded/, 'old PM notice must be dropped on slot clear');
+  assert.match(firstFresh, /fresh/);
+});
+
+test('Phase 2: setActive rotation clears notices for replaced run id', async (t) => {
+  // Direct slot replacement (setActive without intermediate clearActive)
+  // also scrubs the old run's notice queue.
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const registry = createManagerRegistry({ runService: rs });
+  const pmAdapter = makeFakeAdapter();
+  const conv = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => pmAdapter },
+    lifecycleService: makeFakeLifecycle(),
+    logger: () => {},
+  });
+  registry.onSlotCleared(({ runId }) => { conv.clearParentNotices(runId); });
+
+  const top = rs.createRun({ is_manager: true });
+  rs.updateRunStatus(top.id, 'running', { force: true });
+  registry.setActive('top', top.id, pmAdapter);
+  const oldPm = seedPmRun({ rs, registry, adapter: pmAdapter, projectId: 'alpha', parentTopRunId: top.id });
+
+  db.prepare(`INSERT INTO projects (id, name) VALUES ('p1','Proj')`).run();
+  db.prepare(`INSERT INTO tasks (id, project_id, title, status) VALUES ('t1','p1','T','backlog')`).run();
+  db.prepare(`INSERT INTO agent_profiles (id, name, type, command) VALUES ('a1','A','codex','codex')`).run();
+  const worker = rs.createRun({ task_id: 't1', agent_profile_id: 'a1', parent_run_id: oldPm.id });
+  rs.updateRunStatus(worker.id, 'running', { force: true });
+  conv.sendMessage(`worker:${worker.id}`, { text: 'old' });
+
+  // Rotate: new PM takes the slot directly
+  const newPm = rs.createRun({
+    is_manager: true, manager_layer: 'pm', conversation_id: 'pm:alpha',
+    parent_run_id: top.id, manager_adapter: 'codex',
+  });
+  rs.updateRunStatus(newPm.id, 'running', { force: true });
+  registry.setActive('pm:alpha', newPm.id, pmAdapter);
+
+  conv.sendMessage('pm:alpha', { text: 'new' });
+  assert.equal(pmAdapter.calls.length, 1);
+  assert.doesNotMatch(pmAdapter.calls[0].payload.text, /old/);
+  assert.match(pmAdapter.calls[0].payload.text, /new/);
+});
+
+test('Phase 2: POST /api/conversations/pm:alpha returns null run when no PM', async (t) => {
+  const app = await createTestApp(t);
+  const res = await request(app).get('/api/conversations/pm:alpha');
+  assert.equal(res.status, 200);
+  assert.equal(res.body.conversation.kind, 'pm');
+  assert.equal(res.body.conversation.projectId, 'alpha');
+  assert.equal(res.body.conversation.run, null);
+});

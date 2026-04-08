@@ -60,6 +60,14 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       managerAdapterFactory,
       lifecycleService: null, // routes/manager.js does not need worker delivery
     });
+    // Test-path: wire slot-clear → notice scrub so the standalone router
+    // constructed by manager.test.js gets the same Phase 2 semantics as
+    // app.js's production wiring.
+    if (typeof managerRegistry.onSlotCleared === 'function') {
+      managerRegistry.onSlotCleared(({ runId }) => {
+        try { conversationService.clearParentNotices(runId); } catch { /* ignore */ }
+      });
+    }
   }
 
   let startingManager = false; // guard against concurrent /start requests
@@ -396,6 +404,35 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
   }));
 
   /**
+   * POST /api/manager/pm/:projectId/message
+   * v3 Phase 2: send a message to a project-scoped PM manager.
+   *
+   * Thin alias over conversationService.sendMessage('pm:<projectId>', ...).
+   * Phase 2 wires the runtime slot + parent-notice router; lazy PM spawn
+   * on first message is a Phase 3a concern. Until then, callers that hit
+   * this route when no PM is active will get 404 — this is intentional.
+   */
+  router.post('/pm/:projectId/message', asyncHandler(async (req, res) => {
+    const { projectId } = req.params;
+    if (!projectId) {
+      throw new BadRequestError('projectId is required');
+    }
+    const { text, images } = req.body || {};
+    try {
+      const result = conversationService.sendMessage(`pm:${projectId}`, { text, images });
+      return res.json(result);
+    } catch (err) {
+      if (err && err.httpStatus === 400) {
+        throw new BadRequestError(err.message);
+      }
+      if (err && err.httpStatus) {
+        return res.status(err.httpStatus).json({ error: err.message });
+      }
+      throw err;
+    }
+  }));
+
+  /**
    * GET /api/manager/status
    * Get current manager session status.
    */
@@ -423,13 +460,34 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       claudeSessionId: sessionId,
     };
 
+    // v3 Phase 2: project-scoped PM slots are a 1st-class runtime target.
+    // Each entry mirrors the top snapshot shape so the client can render
+    // a unified card list without branching on layer. The registry is the
+    // source of truth for "which PM run is live right now"; the DB row is
+    // fetched for status/metadata. probeActive takes care of liveness +
+    // cleanup along the way.
+    const snapshot = managerRegistry.snapshot();
+    const pms = [];
+    for (const pmEntry of snapshot.pms) {
+      const pmRun = managerRegistry.probeActive(pmEntry.conversationId);
+      if (!pmRun) continue;
+      const pmAdapter = managerRegistry.getActiveAdapter(pmEntry.conversationId)
+        || managerAdapterFactory.getAdapter(pmRun.manager_adapter || 'claude-code');
+      pms.push({
+        conversationId: pmEntry.conversationId,
+        run: pmRun,
+        usage: pmAdapter.getUsage ? pmAdapter.getUsage(pmRun.id) : null,
+        claudeSessionId: pmAdapter.getSessionId ? pmAdapter.getSessionId(pmRun.id) : null,
+      });
+    }
+
     res.json({
       active: true,
       run: manager,
       usage,
       claudeSessionId: sessionId,
       top: topSnapshot,
-      pms: [], // Phase 3a populates this
+      pms,
     });
   }));
 
