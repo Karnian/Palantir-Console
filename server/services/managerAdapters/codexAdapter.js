@@ -34,7 +34,7 @@
  *   supportsUsdCost:   false  (callers must NOT show $ for Codex)
  */
 
-const { spawn } = require('node:child_process');
+const { spawn: realSpawn } = require('node:child_process');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
@@ -47,7 +47,17 @@ const {
   buildPayload,
 } = require('./eventTypes');
 
-function createCodexAdapter({ runService, codexBin = process.env.CODEX_BIN || 'codex' } = {}) {
+/**
+ * v3 Phase 0: spawnFn is injectable for behavior testing. Production callers
+ * omit it and get the real child_process.spawn. Tests inject a fake that
+ * captures args without actually spawning a subprocess.
+ */
+function createCodexAdapter({
+  runService,
+  codexBin = process.env.CODEX_BIN || 'codex',
+  spawnFn,
+} = {}) {
+  const spawn = spawnFn || realSpawn;
   // Per-run state. Codex sessions are NOT persistent processes, so this map
   // tracks: thread id (after first turn), pending child (during a turn),
   // turn counter, instructions file path, accumulated usage.
@@ -80,8 +90,14 @@ function createCodexAdapter({ runService, codexBin = process.env.CODEX_BIN || 'c
    * no process spawn yet. We just write the system prompt to a temp file and
    * record the session metadata. The first user message will trigger the
    * first turn (which spawns `codex exec` and captures thread_id).
+   *
+   * v3 Phase 0: accepts optional `role` ('manager' | 'worker', default 'manager').
+   * Role-aware launch flags are resolved in spawnOneTurn — manager role omits
+   * `--dangerously-bypass-approvals-and-sandbox` per the capability diet policy.
+   * Worker role (future) keeps the bypass because workers have legitimate
+   * filesystem write needs. See docs/specs/manager-v3-multilayer.md principle 1.
    */
-  function startSession(runId, { systemPrompt, cwd, model, env }) {
+  function startSession(runId, { systemPrompt, cwd, model, env, role }) {
     if (sessions.has(runId)) {
       throw new Error(`codexAdapter: session ${runId} already started`);
     }
@@ -100,6 +116,7 @@ function createCodexAdapter({ runService, codexBin = process.env.CODEX_BIN || 'c
       cwd: cwd || process.cwd(),
       model: model || null,
       env: env || null, // PR4: filtered subprocess env from routes/manager.js
+      role: role || 'manager', // v3 Phase 0: default to manager (tightened)
       turnIndex: 0,
       usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
       currentChild: null,
@@ -140,7 +157,17 @@ function createCodexAdapter({ runService, codexBin = process.env.CODEX_BIN || 'c
       args.push('exec', 'resume', state.threadId, '--json');
     }
     args.push('--skip-git-repo-check');
-    args.push('--dangerously-bypass-approvals-and-sandbox');
+    // v3 Phase 0: role-aware sandbox policy.
+    // - 'manager': no sandbox bypass. Manager's legitimate surface is curl + read;
+    //   filesystem write is a worker concern. Escape hatch via PALANTIR_CODEX_MANAGER_BYPASS=1
+    //   for users hitting genuine Codex CLI limitations during the rollout.
+    // - 'worker' (future): full bypass because workers need filesystem write.
+    const role = state.role || 'manager';
+    const managerBypassOverride = process.env.PALANTIR_CODEX_MANAGER_BYPASS === '1';
+    const shouldBypass = role === 'worker' || managerBypassOverride;
+    if (shouldBypass) {
+      args.push('--dangerously-bypass-approvals-and-sandbox');
+    }
     args.push('-c', `model_instructions_file="${state.instructionsPath}"`);
     if (state.model) {
       args.push('-m', state.model);
