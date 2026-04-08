@@ -8,3 +8,4 @@ node_modules/
 .claude-auth.json
 .ao/
 .playwright-mcp/
+.palantir-worktrees/
