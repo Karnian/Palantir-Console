@@ -32,7 +32,7 @@ const PROFILE_TYPE_TO_ADAPTER = {
 // so tests can inject `hasKeychain` (and any future DI hooks) without
 // monkey-patching child_process. Production callers leave this empty and
 // get the real keychain probe.
-function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, eventBus, projectService, projectBriefService, agentProfileService, authResolverOpts = {} }) {
+function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, authResolverOpts = {} }) {
   const router = express.Router();
 
   // PR1a: ManagerAdapter seam. The factory is the single entrypoint for
@@ -44,9 +44,24 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     managerAdapterFactory = createManagerAdapterFactory({ streamJsonEngine, runService });
   }
 
-  // Track the active manager run ID (only one manager at a time)
-  let activeManagerRunId = null;
-  let activeManagerAdapter = null;
+  // v3 Phase 1.5: active manager tracking moved into managerRegistry so the
+  // new /api/conversations router can share state with this one. Tests that
+  // construct the router directly still get a fresh registry via the
+  // fallback factory below.
+  if (!managerRegistry) {
+    const { createManagerRegistry } = require('../services/managerRegistry');
+    managerRegistry = createManagerRegistry({ runService });
+  }
+  if (!conversationService) {
+    const { createConversationService } = require('../services/conversationService');
+    conversationService = createConversationService({
+      runService,
+      managerRegistry,
+      managerAdapterFactory,
+      lifecycleService: null, // routes/manager.js does not need worker delivery
+    });
+  }
+
   let startingManager = false; // guard against concurrent /start requests
 
   // On startup: mark any stale manager runs (from previous server instances) as stopped.
@@ -64,48 +79,16 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         adapter.disposeSession(r.id);
       } catch { /* ignore */ }
       runService.updateRunStatus(r.id, 'stopped', { force: true });
+      try { conversationService.clearParentNotices(r.id); } catch { /* ignore */ }
     }
   } catch { /* ignore */ }
 
   /**
-   * Find the active manager run. Checks both in-memory and DB state.
+   * Find the active Top manager run. Checks managerRegistry + DB state.
+   * v3 Phase 1.5: this is now a thin wrapper around managerRegistry.
    */
   function getActiveManager() {
-    if (!activeManagerRunId) return null;
-
-    const adapter = activeManagerAdapter || managerAdapterFactory.getAdapter('claude-code');
-
-    // Check if still alive
-    const alive = adapter.isSessionAlive(activeManagerRunId);
-    if (!alive) {
-      // Check if it completed naturally
-      const exitCode = adapter.detectExitCode
-        ? adapter.detectExitCode(activeManagerRunId)
-        : null;
-      if (exitCode !== null) {
-        try {
-          const status = exitCode === 0 ? 'completed' : 'failed';
-          runService.updateRunStatus(activeManagerRunId, status, { force: true });
-        } catch { /* already updated */ }
-      }
-      // PR1b: ensure normalized session_ended fires even on natural exit, and
-      // free adapter-local bookkeeping. The adapter's hook is idempotent.
-      try {
-        if (adapter.emitSessionEndedIfNeeded) {
-          adapter.emitSessionEndedIfNeeded(activeManagerRunId, 'natural-exit');
-        }
-      } catch { /* ignore */ }
-      activeManagerRunId = null;
-      activeManagerAdapter = null;
-      return null;
-    }
-
-    try {
-      return runService.getRun(activeManagerRunId);
-    } catch {
-      activeManagerRunId = null;
-      return null;
-    }
+    return managerRegistry.probeActive('top');
   }
 
   /**
@@ -353,8 +336,9 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         branch: null,
       });
 
-      activeManagerRunId = runId;
-      activeManagerAdapter = adapter;
+      // v3 Phase 1.5: register in shared registry so /api/conversations
+      // can also see this session. Conversation id = 'top' for singleton.
+      managerRegistry.setActive('top', runId, adapter);
 
       // PR4 / D2: for Codex, startSession is the LIGHT path (just writes the
       // instructions file). The first turn is launched here so the user sees
@@ -391,33 +375,24 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
    * Body: { text }
    */
   router.post('/message', asyncHandler(async (req, res) => {
-    const manager = getActiveManager();
-    if (!manager) {
-      return res.status(404).json({ error: 'No active manager session' });
-    }
-
+    // v3 Phase 1.5: delegate to conversationService so the Top and
+    // /api/conversations/top paths share the SAME parent-notice drain
+    // semantics. If a worker direct chat left a pending notice on the
+    // active Top run id, it will be consumed here regardless of which
+    // entry point the client used.
     const { text, images } = req.body || {};
-    if ((!text || typeof text !== 'string') && (!Array.isArray(images) || images.length === 0)) {
-      throw new BadRequestError('text or images is required');
+    try {
+      const result = conversationService.sendMessage('top', { text, images });
+      return res.json(result);
+    } catch (err) {
+      if (err && err.httpStatus === 400) {
+        throw new BadRequestError(err.message);
+      }
+      if (err && err.httpStatus) {
+        return res.status(err.httpStatus).json({ error: err.message });
+      }
+      throw err;
     }
-
-    // Validate images if provided
-    const validImages = Array.isArray(images)
-      ? images.filter(img => img && typeof img.data === 'string' && typeof img.media_type === 'string')
-      : undefined;
-
-    const adapter = activeManagerAdapter || managerAdapterFactory.getAdapter('claude-code');
-    const { accepted } = adapter.runTurn(activeManagerRunId, { text: text || '', images: validImages });
-    if (!accepted) {
-      return res.status(502).json({ error: 'Failed to send message to manager' });
-    }
-
-    // If manager was in needs_input, transition back to running
-    if (manager.status === 'needs_input') {
-      runService.updateRunStatus(activeManagerRunId, 'running', { force: true });
-    }
-
-    res.json({ status: 'sent' });
   }));
 
   /**
@@ -425,22 +400,36 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
    * Get current manager session status.
    */
   router.get('/status', asyncHandler(async (req, res) => {
+    // v3 Phase 1.5: layer-aware status shape.
+    //   { active, run, usage, claudeSessionId, top: {...}, pms: [] }
+    // `active`/`run`/`usage`/`claudeSessionId` preserve the legacy shape so
+    // existing Frontend code keeps working during the hooks.js migration.
+    // The `top` + `pms` keys are the new 1.5 shape that useConversations()
+    // will switch to.
     const manager = getActiveManager();
     if (!manager) {
-      return res.json({ active: false, run: null });
+      return res.json({ active: false, run: null, top: null, pms: [] });
     }
 
-    const adapter = activeManagerAdapter || managerAdapterFactory.getAdapter('claude-code');
-    const usage = adapter.getUsage(activeManagerRunId);
-    const sessionId = adapter.getSessionId(activeManagerRunId);
+    const adapter = managerRegistry.getActiveAdapter('top')
+      || managerAdapterFactory.getAdapter(manager.manager_adapter || 'claude-code');
+    const usage = adapter.getUsage(manager.id);
+    const sessionId = adapter.getSessionId(manager.id);
 
-    // PR1a is pure indirection — keep response shape identical to pre-refactor.
-    // PR3 will add adapter type once /start accepts agent_profile_id.
+    const topSnapshot = {
+      conversationId: 'top',
+      run: manager,
+      usage,
+      claudeSessionId: sessionId,
+    };
+
     res.json({
       active: true,
       run: manager,
       usage,
       claudeSessionId: sessionId,
+      top: topSnapshot,
+      pms: [], // Phase 3a populates this
     });
   }));
 
@@ -450,13 +439,14 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
    * Query: ?after=<eventIndex>
    */
   router.get('/events', asyncHandler(async (req, res) => {
-    if (!activeManagerRunId) {
+    const activeTopRunId = managerRegistry.getActiveRunId('top');
+    if (!activeTopRunId) {
       return res.json({ events: [] });
     }
 
     const rawAfter = req.query.after ? Number(req.query.after) : undefined;
     const afterId = (rawAfter != null && !Number.isNaN(rawAfter)) ? rawAfter : undefined;
-    const events = runService.getRunEvents(activeManagerRunId, afterId);
+    const events = runService.getRunEvents(activeTopRunId, afterId);
     res.json({ events });
   }));
 
@@ -465,14 +455,16 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
    * Get raw text output from manager.
    */
   router.get('/output', asyncHandler(async (req, res) => {
-    if (!activeManagerRunId) {
+    const activeTopRunId = managerRegistry.getActiveRunId('top');
+    if (!activeTopRunId) {
       return res.json({ output: null });
     }
 
     const lines = Math.min(Math.max(1, Number(req.query.lines || 100)), 2000);
-    const adapter = activeManagerAdapter || managerAdapterFactory.getAdapter('claude-code');
-    const output = adapter.getOutput ? adapter.getOutput(activeManagerRunId, lines) : null;
-    res.json({ output, runId: activeManagerRunId });
+    const adapter = managerRegistry.getActiveAdapter('top')
+      || managerAdapterFactory.getAdapter('claude-code');
+    const output = adapter.getOutput ? adapter.getOutput(activeTopRunId, lines) : null;
+    res.json({ output, runId: activeTopRunId });
   }));
 
   /**
@@ -480,20 +472,24 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
    * Stop the active manager session.
    */
   router.post('/stop', asyncHandler(async (req, res) => {
-    if (!activeManagerRunId) {
+    const runId = managerRegistry.getActiveRunId('top');
+    if (!runId) {
       return res.json({ status: 'no_active_session' });
     }
 
-    const runId = activeManagerRunId;
-    const adapter = activeManagerAdapter || managerAdapterFactory.getAdapter('claude-code');
+    const adapter = managerRegistry.getActiveAdapter('top')
+      || managerAdapterFactory.getAdapter('claude-code');
     adapter.disposeSession(runId);
 
     try {
       runService.updateRunStatus(runId, 'cancelled', { force: true });
     } catch { /* ignore */ }
 
-    activeManagerRunId = null;
-    activeManagerAdapter = null;
+    managerRegistry.clearActive('top');
+    // v3 Phase 1.5: drop any lingering parent-notice queue entries for this
+    // run id. A future Top manager will have a different run id so there is
+    // no risk of cross-session leakage, but we prefer explicit cleanup.
+    try { conversationService.clearParentNotices(runId); } catch { /* ignore */ }
 
     if (eventBus) {
       eventBus.emit('manager:stopped', { runId });
