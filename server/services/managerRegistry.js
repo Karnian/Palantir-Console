@@ -43,8 +43,27 @@ function createManagerRegistry({ runService }) {
     // clear for the OLD run id so listeners can scrub per-runId state
     // before we overwrite. This covers PM slot rotation (new PM run
     // replaces an old one without anyone calling clearActive first).
+    //
+    // PR2 / P1-4: also dispose the previous adapter session. Prior to
+    // this, a setActive() that implicitly replaced an earlier run (e.g.
+    // PM re-spawn through pmSpawnService) left the old subprocess + its
+    // working tmp dir behind. The registry is the only component that
+    // actually sees the rotation, so disposal has to happen here.
+    // Wrap in try/catch — dispose failure must NOT prevent the new run
+    // from becoming active (that would strand the caller with no slot
+    // at all and half-initialized state).
     const prev = active.get(conversationId);
     if (prev && prev.runId !== runId) {
+      try {
+        if (prev.adapter && typeof prev.adapter.disposeSession === 'function') {
+          prev.adapter.disposeSession(prev.runId);
+        }
+      } catch (err) {
+        // Log-and-continue: the new run still gets the slot. If the old
+        // subprocess leaked, it will be caught by the next lifecycle
+        // sweep or by shutdown (PR2 / P1-5).
+        console.warn(`[managerRegistry] disposeSession failed during setActive replacement of ${conversationId}/${prev.runId}:`, err && err.message);
+      }
       notifySlotCleared(conversationId, prev.runId);
     }
     active.set(conversationId, { runId, adapter });
@@ -107,6 +126,20 @@ function createManagerRegistry({ runService }) {
           adapter.emitSessionEndedIfNeeded(runId, 'natural-exit');
         }
       } catch { /* ignore */ }
+      // PR2 / NEW-B2: dispose the adapter session even on natural exit.
+      // Prior to this, a dead subprocess left its tmp directory behind
+      // on disk because nobody called disposeSession — the adapter
+      // itself doesn't self-clean. disposeSession is idempotent
+      // (adapters wrap streamJsonEngine.kill in try/catch and the
+      // session-ended emit has an `endedEmitted` fence) so calling it
+      // after we already emitted 'natural-exit' above is safe.
+      try {
+        if (typeof adapter.disposeSession === 'function') {
+          adapter.disposeSession(runId);
+        }
+      } catch (err) {
+        console.warn(`[managerRegistry] disposeSession failed during probeActive dead-session path of ${conversationId}/${runId}:`, err && err.message);
+      }
       active.delete(conversationId);
       // Notify listeners so they can scrub per-runId auxiliary state
       // (e.g., pending parent notices keyed by this run id) before the
@@ -119,7 +152,13 @@ function createManagerRegistry({ runService }) {
     try {
       return runService.getRun(runId);
     } catch {
+      // PR2 / P1-2: the pre-PR2 code silently deleted the slot here
+      // without firing notifySlotCleared, so parent-notice queues keyed
+      // by the dead run id never got scrubbed. Conversation service
+      // already tolerates double-scrubs (map delete is idempotent), so
+      // adding the notify is safe and closes the leak.
       active.delete(conversationId);
+      notifySlotCleared(conversationId, runId);
       return null;
     }
   }
