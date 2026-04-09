@@ -46,12 +46,34 @@ docker compose up --build
 # → http://localhost:4177 (Authorization: Bearer my-secret-token 헤더로 호출)
 ```
 
-기본값은 인증 없이 `0.0.0.0` 바인딩(경고 로그 출력). 모든 API 호출에 토큰을 요구하려면:
+### 바인딩 정책 (PR1 에서 변경)
+
+기본값은 **`127.0.0.1`** 바인딩 (loopback, 인증 없음). `PALANTIR_TOKEN` 을
+설정하면 자동으로 `0.0.0.0` 으로 승격된다. 토큰 없이 모든 인터페이스에
+노출하려면 `HOST=0.0.0.0` 을 명시해야 한다 (권장하지 않음 — `[security] WARNING`
+로그 출력).
+
+| 설정 | `HOST` | `PALANTIR_TOKEN` | 바인딩 |
+| --- | --- | --- | --- |
+| 개발 기본 | 미지정 | 미지정 | `127.0.0.1` |
+| 원격 + 인증 | 미지정 | 설정 | `0.0.0.0` |
+| 레거시 (항상 0.0.0.0) | `0.0.0.0` | 미지정 | `0.0.0.0` (⚠️ 무인증 공개) |
+| 커스텀 | `192.168.x.y` | 무관 | 지정값 |
 
 ```bash
 PALANTIR_TOKEN=my-secret-token npm start
-# → 모든 API 에 Authorization: Bearer my-secret-token 헤더 필요
+# → CLI: Authorization: Bearer my-secret-token
+# → 브라우저: POST /api/auth/login 으로 palantir_token 쿠키 수립 (자동)
+# → 바인딩: 0.0.0.0
 ```
+
+**브라우저 클라이언트**는 HttpOnly 쿠키로 인증한다. `http://host:4177/login.html`
+로 접속해 POST 폼에 토큰을 입력하면 `palantir_token` 쿠키가 수립된 뒤 콘솔로
+리다이렉트된다. 토큰은 URL 에 절대 노출되지 않는다 — 초기 PR1 초안은
+`?token=` 쿼리 파람 부트스트랩을 허용했으나, 첫 document 요청이 이미 리버스
+프록시 액세스 로그에 토큰을 기록한다는 Codex 리뷰 지적을 받고 제거했다.
+`EventSource` 가 커스텀 헤더를 보낼 수 없어 Bearer 만으로는 `/api/events`
+SSE 가 구조적으로 막히던 문제를 수정한 결과 (NEW-S1).
 
 ## 핵심 개념
 
@@ -313,7 +335,8 @@ GET    /api/health  — 헬스체크
 | 변수 | 기본값 | 설명 |
 |------|--------|------|
 | `PORT` | `4177` | 서버 포트 |
-| `PALANTIR_TOKEN` | (없음) | Bearer 인증 활성화. 미설정 시에도 `0.0.0.0` 바인딩이지만 경고 로그 |
+| `PALANTIR_TOKEN` | (없음) | Bearer/쿠키 인증 활성화 + 기본 바인딩을 `127.0.0.1` → `0.0.0.0` 으로 승격 |
+| `HOST` | 자동 | 바인딩 주소 명시적 오버라이드. 토큰 없이 `0.0.0.0` 이면 경고 로그 |
 | `PALANTIR_ALLOWED_COMMANDS` | (없음) | 추가 허용 CLI 명령어 (쉼표 구분) |
 | `PALANTIR_DEFAULT_PM_ADAPTER` | `codex` | 프로젝트 preference 미설정 시 전역 PM 어댑터 기본값. Claude preference 도 Phase 3b 전까지는 codex 로 fallback |
 | `PALANTIR_CODEX_MANAGER_BYPASS` | (미설정) | `1` 로 설정하면 Codex 매니저 턴이 `--dangerously-bypass-approvals-and-sandbox` 를 붙인다. 기본값은 sandbox 정책 유지 |

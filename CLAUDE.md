@@ -175,7 +175,9 @@ server/
 
 ## Security
 
-- 서버는 `PALANTIR_TOKEN` 유무와 관계없이 **항상 `0.0.0.0` 에 바인딩** (`server/index.js:14`). 토큰 미설정 시 auth 미적용 + 시작 시 `[security] WARNING: No PALANTIR_TOKEN set` 경고 로그
+- **바인딩 정책 (PR1 / NEW-S1 + P0-1)**: 기본 `127.0.0.1`. `PALANTIR_TOKEN` 이 설정되면 자동으로 `0.0.0.0` 으로 승격. 사용자가 `HOST=` 를 명시하면 그대로 사용하되, 토큰 없이 `HOST=0.0.0.0` 이면 위험 경고를 찍음. 토큰 미설정 시 auth 비활성 + `[security] No PALANTIR_TOKEN set — auth disabled.` 로그. 이전(항상 0.0.0.0) 동작은 breaking change — 기존 배포는 `HOST=0.0.0.0` 을 명시하거나 토큰을 설정해야 같은 바인딩을 얻는다.
+- **브라우저 쿠키 인증**: `PALANTIR_TOKEN` 이 설정된 경우 브라우저는 `palantir_token` HttpOnly 쿠키로 인증한다 (EventSource 는 커스텀 헤더 전송 불가 → Bearer 만으로는 SSE 가 구조적으로 막혔던 문제를 수정). 사용자는 `/login.html` 에서 POST 폼으로 토큰을 입력하고, 서버가 쿠키를 set 한 뒤 sanitized `next` 경로로 리다이렉트한다. 토큰은 URL 에 절대 노출되지 않음 (초기 PR1 draft 의 `?token=` 부트스트랩은 Codex review 에서 access-log leak 블로커로 지적되어 제거). `apiFetch` 는 401/403 응답을 받으면 `/login.html?next=…` 로 bounce. CLI / 테스트는 `Authorization: Bearer` 헤더 사용. Bearer 경로가 invalid 면 cookie 로 fallback 하지 않음 — 명시적 실패.
+- **CSP self-host**: `marked` / `DOMPurify` 는 `server/public/vendor/` 에서 직접 서빙. CSP 는 `script-src 'self'; connect-src 'self'` (더 이상 cdn.jsdelivr.net 허용 안 함).
 - 에이전트 명령어 allowlist 제한 (임의 명령 실행 불가)
 - `.claude-auth.json`은 절대 커밋 금지
 - CWD 검증: `/etc`, `/var`, `/usr` 등 위험 경로 차단

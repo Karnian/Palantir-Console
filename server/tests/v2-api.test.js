@@ -620,11 +620,38 @@ test('Run retry: failed -> queued is allowed', async (t) => {
 
 test('GET /api/events returns SSE content-type', async (t) => {
   const { app } = await createTestApp(t);
-  const res = await request(app).get('/api/events').timeout({ response: 500 }).catch(err => err.response);
-  // The endpoint should start a streaming response with text/event-stream
-  if (res) {
-    assert.ok(res.headers['content-type']?.includes('text/event-stream'));
-  }
+  // Previously this test relied on supertest's `.timeout` firing before
+  // headers flushed — it caught the error and (if defined) checked the
+  // response. That was a silent no-op whenever headers were still buffered.
+  // events.js now calls res.flushHeaders() immediately (PR1 / NEW-S1), so
+  // the response header DOES arrive and supertest would hang waiting for
+  // the body. Drop to a raw http.get against a real listener and abort
+  // once we've asserted the headers — same shape as the auth.test.js SSE
+  // smoke test.
+  const http = require('node:http');
+  await new Promise((resolve, reject) => {
+    const server = app.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      const req = http.get({ host: '127.0.0.1', port, path: '/api/events' }, (res) => {
+        try {
+          assert.equal(res.statusCode, 200);
+          assert.ok(res.headers['content-type']?.includes('text/event-stream'));
+          req.destroy();
+          res.destroy();
+          server.close(() => resolve());
+        } catch (err) {
+          req.destroy();
+          res.destroy();
+          server.close(() => reject(err));
+        }
+      });
+      req.on('error', (err) => {
+        if (String(err.message).match(/hang up|aborted|ECONNRESET/i)) return;
+        server.close(() => reject(err));
+      });
+    });
+    setTimeout(() => reject(new Error('SSE open timed out')), 3000).unref();
+  });
 });
 
 // ---- Task reorder ----

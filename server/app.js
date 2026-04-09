@@ -43,9 +43,17 @@ const { createReconciliationService } = require('./services/reconciliationServic
 const { createDispatchAuditRouter } = require('./routes/dispatchAudit');
 const { createRouterService } = require('./services/routerService');
 const { createRouterRouter } = require('./routes/router');
+const { createAuthRouter } = require('./routes/auth');
 
 function createApp(options = {}) {
   const app = express();
+  // PR1: tests pass `authToken` explicitly to avoid mutating
+  // process.env.PALANTIR_TOKEN (which would leak into sibling test files
+  // running in parallel via `node --test`). Production code path leaves
+  // options.authToken undefined and falls back to process.env.
+  const authToken = options.authToken !== undefined
+    ? options.authToken
+    : process.env.PALANTIR_TOKEN;
   const storageRoot = options.storageRoot
     || process.env.OPENCODE_STORAGE
     || path.join(os.homedir(), '.local', 'share', 'opencode', 'storage');
@@ -166,10 +174,20 @@ function createApp(options = {}) {
   // Middleware
   app.use(express.json({ limit: '2mb' }));
   app.use((req, res, next) => {
+    // PR1 / P0-1: marked + DOMPurify are now self-hosted in /vendor/, so
+    // cdn.jsdelivr.net is gone from script-src and connect-src. fonts remain
+    // because Google Fonts is still a CDN link in index.html (low-risk,
+    // static CSS only).
     res.setHeader(
       'Content-Security-Policy',
-      "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://cdn.jsdelivr.net"
+      "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; connect-src 'self'"
     );
+    // PR1 round 2: prevent any URL-carried credentials (even if a caller
+    // accidentally builds a URL like `/?foo=token`) from leaking via
+    // Referer headers to the external font hosts that CSP above still
+    // permits. `no-referrer` is fine here — the SPA is same-origin and
+    // nothing uses Referer for functionality.
+    res.setHeader('Referrer-Policy', 'no-referrer');
     next();
   });
   app.use(express.static(path.join(__dirname, 'public')));
@@ -179,8 +197,14 @@ function createApp(options = {}) {
     res.json({ status: 'ok', version: '2.0.0' });
   });
 
-  // Auth middleware for API routes (skips static files + health)
-  const auth = createAuthMiddleware();
+  // Auth router mounted BEFORE the global /api auth middleware — login
+  // and logout have to be reachable without an existing session cookie.
+  // /api/auth/login performs its own timing-safe comparison against
+  // PALANTIR_TOKEN; logout always succeeds (it just clears the cookie).
+  app.use('/api/auth', createAuthRouter({ token: authToken }));
+
+  // Auth middleware for API routes (skips static files + health + /api/auth)
+  const auth = createAuthMiddleware({ token: authToken });
   app.use('/api', auth);
 
   // Existing routes
