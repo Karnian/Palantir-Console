@@ -3633,6 +3633,7 @@ function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError 
         setInput(text);
         setAttachedImages(attachedImages);
         setSending(false);
+        setTimeout(() => { if (inputRef.current) inputRef.current.focus(); }, 0);
         return;
       }
       // No @mention → safe to fall through to the UI selection.
@@ -3660,6 +3661,8 @@ function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError 
       addToast('Failed to send: ' + (err && err.message ? err.message : 'unknown'), 'error');
     }
     setSending(false);
+    // 전송 완료 후 입력창에 포커스 복원 (disabled 해제 후 DOM 반영 대기)
+    setTimeout(() => { if (inputRef.current) inputRef.current.focus(); }, 0);
   };
 
   // v3 Phase 6 — Reset PM. Only meaningful while a PM conversation is
@@ -4186,6 +4189,61 @@ function CommandPalette({ open, onClose }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function DriftDrawer({ open, onClose, driftAudit, projects }) {
+  // PR3b / P1-11: WCAG 2.2 AA a11y. The pre-PR3b DriftDrawer had none of
+  // the dialog semantics — no role, no aria-modal, no label wiring, and
+  // tabbing out of the drawer would land in the underlying dashboard
+  // which is still in the DOM. ESC handling already lives at app level
+  // (App's useEffect for showDriftDrawer), so we only need to cover:
+  //   * role="dialog" + aria-modal + aria-labelledby on the drawer root
+  //   * auto-focus the Close button on open (first meaningful focus
+  //     target; the dismiss buttons rotate, Close is stable)
+  //   * focus trap via keydown handler — Tab cycles through focusable
+  //     elements inside the drawer, Shift+Tab cycles in reverse
+  // PR3b R1 suggestion #1: use the top-level useRef/useEffect imports
+  // (destructured at the top of app.js) instead of dereferencing
+  // window.preactHooks per render. Less surprising, zero chance of
+  // the ref becoming null on a later main.js refactor.
+  const drawerRef = useRef(null);
+
+  // Auto-focus + focus trap. Effect intentionally depends only on `open`
+  // — the rows may change over the drawer's lifetime but the trap should
+  // stay bound to mount/unmount, not churn per reload.
+  useEffect(() => {
+    if (!open || !drawerRef.current) return;
+    const node = drawerRef.current;
+
+    // First focusable: the Close button. Scan once after mount — if
+    // it's missing (e.g. someone removes it), fall back to the first
+    // button in document order.
+    const focusables = () => Array.from(node.querySelectorAll(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    ));
+    const first = focusables()[0];
+    if (first) first.focus();
+
+    const onKeyDown = (e) => {
+      if (e.key !== 'Tab') return;
+      const list = focusables();
+      if (list.length === 0) return;
+      const firstEl = list[0];
+      const lastEl = list[list.length - 1];
+      if (e.shiftKey) {
+        if (document.activeElement === firstEl || !node.contains(document.activeElement)) {
+          e.preventDefault();
+          lastEl.focus();
+        }
+      } else {
+        if (document.activeElement === lastEl) {
+          e.preventDefault();
+          firstEl.focus();
+        }
+      }
+    };
+    node.addEventListener('keydown', onKeyDown);
+    return () => { node.removeEventListener('keydown', onKeyDown); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
   if (!open) return null;
   const rows = driftAudit ? driftAudit.rows : [];
   const projectName = (pid) => {
@@ -4203,9 +4261,16 @@ function DriftDrawer({ open, onClose, driftAudit, projects }) {
   };
   return html`
     <div class="drift-drawer-backdrop" onClick=${onClose}>
-      <div class="drift-drawer" onClick=${(e) => e.stopPropagation()}>
+      <div
+        class="drift-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="drift-drawer-title"
+        ref=${drawerRef}
+        onClick=${(e) => e.stopPropagation()}
+      >
         <div class="drift-drawer-header">
-          <div class="drift-drawer-title">
+          <div class="drift-drawer-title" id="drift-drawer-title">
             <span>\u26A0 Drift</span>
             <span class="drift-drawer-count">${rows.length}</span>
           </div>
@@ -4215,7 +4280,7 @@ function DriftDrawer({ open, onClose, driftAudit, projects }) {
                 Restore ${driftAudit.dismissedCount} dismissed
               </button>
             `}
-            <button class="ghost" onClick=${onClose}>Close</button>
+            <button class="ghost" onClick=${onClose} aria-label="Close drift drawer">Close</button>
           </div>
         </div>
         <div class="drift-drawer-body">
@@ -4292,20 +4357,26 @@ function App() {
   const [inspectTask, setInspectTask] = useState(null);
   const [showPalette, setShowPalette] = useState(false);
 
-  // Helper to look up task title for a run (used in notifications)
+  // Helper to look up task title for a run (used in notifications).
+  //
   // v3 Phase 5: SSE payloads carry the full run row under `data.run`
   // plus hoisted envelope fields (task_id, project_id, from_status,
-  // to_status, reason). Pre-Phase 5 code read fields off the top level,
-  // so normalize both shapes here to keep the rest of the notification
-  // code layout-agnostic.
+  // to_status, reason). PR3b / X3 makes this reader STRICT about the
+  // envelope shape: the pre-PR3b fallback `data.taskId` (camelCase)
+  // never existed in any Phase 5+ emitter — it was there to catch a
+  // hypothetical legacy shape that we then confirmed doesn't ship. The
+  // fallback masked real envelope drift (e.g. a new channel forgetting
+  // to hoist `task_id`) because the camelCase branch silently returned
+  // undefined instead of triggering the `run.title` fallback path.
+  // Removing it forces every emitter to conform to the Phase 5 contract.
   const getRunTaskTitle = useCallback((data) => {
     const run = (data && data.run) || data || {};
-    const taskId = data.task_id || data.taskId || run.task_id;
+    const taskId = (data && data.task_id) || run.task_id;
     if (taskId) {
       const task = tasks.find(t => t.id === taskId);
       if (task) return task.title;
     }
-    return run.title || data.title || `Run ${(run.id || data.id || '').slice(0, 8)}`;
+    return run.title || (data && data.title) || `Run ${(run.id || (data && data.id) || '').slice(0, 8)}`;
   }, [tasks]);
 
   // Debounced reloads to prevent SSE burst storms
