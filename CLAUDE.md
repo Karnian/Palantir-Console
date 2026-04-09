@@ -45,45 +45,108 @@ node --test server/tests/v2-api.test.js
 Express.js 5 + SQLite (WAL, better-sqlite3) + Preact/HTM (CDN 없이 vendor/ UMD).
 빌드 스텝 없음 — `server/public/`의 파일이 그대로 서빙됨.
 
+**v3 기준 (Phase 0~7 merged)**: Top manager + 프로젝트 단위 PM (lazy-spawn, conversation identity), deterministic router, annotate-only drift reconciliation, SSE 시맨틱 envelope.
+
 ```
 server/
-  index.js                  — 진입점, 포트/auth 설정
-  app.js                    — Express 앱 조립 (라우터, 서비스, 미들웨어)
-  db/database.js            — SQLite 초기화 + 자동 마이그레이션
-  db/migrations/            — SQL DDL (001_initial, 002_manager_sessions)
+  index.js                    — 진입점, 포트/auth 설정
+  app.js                      — Express 앱 조립 (라우터, 서비스, 미들웨어)
+  db/database.js              — SQLite 초기화 + 자동 마이그레이션
+  db/migrations/              — 001_initial ~ 010_dispatch_audit.sql
   routes/
-    manager.js              — Manager Session API (/api/manager/*)
+    manager.js                — Top/PM /api/manager/* + /pm/:projectId/message + /reset
+    conversations.js          — /api/conversations/:id/* (top|pm:<id>|worker:<id>)
+    router.js                 — /api/router/resolve (v3 Phase 6 3-step matcher)
+    dispatchAudit.js          — /api/dispatch-audit (POST/GET, annotate-only)
     tasks.js, runs.js, projects.js, agents.js, events.js
+    sessions.js, trash.js, fs.js, usage.js, claude-sessions.js — legacy + support
   services/
-    streamJsonEngine.js     — Manager 전용: Claude Code CLI stream-json 프로토콜
-    executionEngine.js      — Worker 전용: TmuxEngine / SubprocessEngine
-    lifecycleService.js     — Health check, 상태 전환, 자동 정리
-    runService.js           — Run CRUD
-    taskService.js          — Task CRUD
-    eventBus.js             — EventEmitter pub/sub
-    worktreeService.js      — Git worktree 관리
+    streamJsonEngine.js       — Claude Code CLI stream-json (Manager용)
+    managerAdapters/
+      claudeAdapter.js        — Claude 어댑터 (stream-json persistent process)
+      codexAdapter.js         — Codex 어댑터 (stateless, thread resume)
+    executionEngine.js        — Worker 전용: TmuxEngine / SubprocessEngine
+    lifecycleService.js       — Health check, 상태 전환, 자동 정리
+    managerRegistry.js        — top / pm:<id> 슬롯 단일 source + onSlotCleared 리스너
+    conversationService.js    — 1급 conversation 엔트리 + peek-then-drain parent-notice 큐
+    pmSpawnService.js         — PM lazy spawn (brief 을 static system prompt 에 bake)
+    pmCleanupService.js       — PM 종료 단일 owner (fail-closed, reset/dispose)
+    routerService.js          — 3-step 매처 (1 @mention → 2 current → 3 name fuzzy → 4 default)
+    reconciliationService.js  — dispatch audit (pm_hallucination / user_intervention_stale)
+    runService.js             — Run CRUD + SSE envelope (from_status/to_status/reason/…)
+    taskService.js            — Task CRUD
+    projectService.js         — Project CRUD + pm_enabled / preferred_pm_adapter
+    projectBriefService.js    — project_briefs (conventions, pitfalls, pm_thread_id)
+    agentProfileService.js    — Agent profile + capabilities_json / env_allowlist
+    managerSystemPrompt.js    — layer='top'|'pm' 분기 시스템 프롬프트 빌더
+    authResolver.js           — Claude/Codex auth preflight + 필터링 spawn env
+    eventBus.js               — EventEmitter pub/sub (replay 200)
+    worktreeService.js        — Git worktree 관리
   public/
-    app.js                  — Preact SPA (단일 파일, ~3800줄)
-    styles.css              — 전체 스타일
-    vendor/                 — Preact/HTM UMD 번들 (빌드 불필요)
+    app.js                    — Preact SPA (단일 파일, ~4500줄 — 수정 시 영역만 탐색)
+    app/main.js               — ESM 엔트리 포인트 (preact/htm/hooks 를 window 로 브릿지)
+    app/lib/hooks.js          — useSSE, useConversation, useDispatchAudit, useManager, …
+    styles.css                — 전체 스타일
+    vendor/                   — Preact/HTM UMD/ESM 번들 (빌드 불필요)
   tests/
-    manager.test.js         — Manager 기능 11개 테스트
-    v2-api.test.js          — v2 API 통합 테스트
+    conversation.test.js      — Phase 1.5/2 parent-notice + registry + rotation
+    pm-phase3a.test.js        — Phase 3a lazy spawn + cleanup (fail-closed)
+    reconciliation.test.js    — Phase 4/7 envelope binding + audit + eventBus emit
+    router.test.js            — Phase 6 3-step matcher (rules 1~4)
+    phase5-sse-semantics.test.js — Phase 5 envelope shape (createRun/update/completed)
+    manager.test.js           — Top manager 기본 동작
+    manager-codex.test.js     — Codex adapter role/resume 동작
+    v2-api.test.js, api.test.js, boot.smoke.test.js, …
 ```
+
+> **238 tests** 기준 (Phase 7 merge 시점). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙.
 
 ## Key Patterns
 
-### Manager Session (stream-json 프로토콜)
+### Manager Session (Claude stream-json 프로토콜)
 - Claude Code CLI를 `--print --output-format stream-json --input-format stream-json` 모드로 spawn
 - **절대 `-p` 플래그와 `--input-format stream-json`을 함께 사용하지 말 것** — 충돌하여 CLI가 hooks 이후 멈춤
 - 초기 프롬프트는 spawn 후 stdin으로 전송: `{"type":"user","message":{"role":"user","content":"..."}}`
 - 매 턴마다 `result` 이벤트가 발생하지만, Manager는 `completed`로 전환하지 않음 (multi-turn 유지)
 - `lifecycleService` health check에서 `is_manager` 런은 건너뜀 (TmuxEngine과 무관)
 
+### Manager Session (Codex stateless + thread resume) — v3 Phase 3a
+- `codex exec --json` 으로 첫 turn, 이후 턴은 `codex exec resume <thread_id>` — Codex 는 stateless 어댑터 (매 턴마다 subprocess 생성/종료)
+- system prompt 는 `-c 'model_instructions_file="<path>"'` — stable 파일 경로 + stable 내용이면 `cached_input_tokens` hit
+- `codexAdapter.startSession` 의 `resumeThreadId` 옵션: `project_briefs.pm_thread_id` 가 있으면 seed 해서 첫 runTurn 이 바로 resume 으로 감
+- `onThreadStarted(threadId)` 콜백: `thread.started` 이벤트 (또는 resume 시 synchronous) 때 정확히 한 번 호출 — `pmSpawnService` 가 이걸로 `project_briefs.pm_thread_id` 를 persist
+- **brief 은 static system prompt 에 bake** — 절대 seed runTurn 으로 넣지 말 것 (codex 어댑터는 단일-turn 가드가 있어서 back-to-back runTurn 이면 두 번째 turn 이 "previous turn still running" 으로 실패)
+
+### v3 Manager 계층 (top / pm:&lt;id&gt;)
+- `managerRegistry` 가 `top` / `pm:<projectId>` 슬롯별 단일 source. `setActive` / `probeActive` / `clearActive` / `snapshot` / `onSlotCleared` 리스너.
+- `conversationService` 가 모든 send 경로의 단일 엔트리. peek-then-drain parent-notice 큐 (race-safe splice, myId fence).
+- **lock-in #2 (Phase 1.5)**: 자식 타깃 사용자 메시지 = 무조건 부모 staleness notice. 의도 분류 금지.
+- `resolveParentSlot(parentRunId)` 로 worker 의 parent 가 활성 Top 인지 활성 PM 인지 판정 → 해당 슬롯에만 notice 큐잉.
+- `pmCleanupService.reset` / `.dispose` 는 **fail-closed**: `disposeSession` throw 시 레지스트리/brief/run 상태를 유지한 채 re-throw (Phase 3a R2).
+- `run.is_manager=1` 이면 lifecycleService health loop 가 건너뜀. Top/PM 양쪽 모두 이 가드 하나로 커버.
+
+### Dispatch audit & router (v3 Phase 4/6/7)
+- PM 이 definitive claim 을 만들 때마다 `POST /api/dispatch-audit` 로 기록 → `reconciliationService` 가 DB truth 와 비교. incoherent 시 flag + kind (`pm_hallucination`, `user_intervention_stale`, …). Annotate-only — **절대 block 안 함** (recordClaim 은 never throws except on hard envelope binding errors).
+- 클라 `useDispatchAudit` hook 이 GET 폴링 + `dispatch_audit:recorded` SSE 구독. `requestSeqRef` 모노토닉 토큰으로 stale-response fence.
+- `routerService.resolveTarget({text, currentConversationId})` 3-step:
+  1. `@<name|id>` prefix → `pm:<projectId>` + prefix strip
+  2. 유효 `currentConversationId` → 그대로 유지
+  3. (현재 context 없을 때만) 프로젝트명 exact-insensitive 매칭; 다중 매칭 = ambiguous + candidates
+  4. default (`top`)
+- **envelope binding** (R5 최종): `pmRunId` 는 must-exist + `is_manager=1` + `manager_layer='pm'` + `conversation_id === 'pm:<projectId>'`. `taskId` / `run_id` cross-project 차단. `selectedAgentProfileId` must exist.
+
+### SSE semantic envelope (v3 Phase 5) — additive
+- `runService` 가 `createRun` / `updateRunStatus` / `markRunStarted` 에서 `{ run, from_status, to_status, reason, task_id, project_id }` 를 emit. Pre-Phase 5 의 `{ run }` 구독자는 그대로 동작.
+- `lifecycleService` 의 `run:completed` / `run:needs_input` 도 동일 envelope + `reason` + (priority alert 의 경우) `priority: 'alert'`.
+- **중요**: `useSSE` 의 channels 배열은 hard-coded. 새 SSE 채널 추가 시 반드시 `server/public/app/lib/hooks.js useSSE` 의 channels 배열에도 추가할 것. Phase 5/7 에서 `run:needs_input` / `dispatch_audit:recorded` 를 까먹어 dead code 되는 회귀가 있었음.
+- 클라는 `run:status` 를 pure reload 로만 쓴다. 우선순위 알림은 dedicated 채널(`run:needs_input`, `run:completed`) 이 전담해야 duplicate 알림 안 생김.
+
 ### Auth 전달
 - `.claude-auth.json`에 OAuth 토큰 저장 (mode 0o600, gitignored)
 - Claude Code 세션 내 서버 시작 시 자동 저장 → 이후 독립 실행 시 로드
-- 환경변수: `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`
+- 환경변수: `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CODEX_API_KEY`, `OPENAI_API_KEY`
+- `authResolver.resolveManagerAuth(type, { envAllowlist, hasKeychain })` 가 preflight. 테스트는 `authResolverOpts: { hasKeychain: true }` 로 주입 가능.
+- `buildManagerSpawnEnv({ authEnv, envAllowlist })` 가 credential leak 방지 필터링 env 생성.
 
 ### Worker Run 실행
 - tmux 세션 또는 subprocess로 에이전트 CLI 실행
@@ -92,13 +155,16 @@ server/
 
 ### Frontend
 - Preact + HTM (UMD) — `server/public/vendor/`에 번들됨, CDN 의존 없음
-- 빌드 파이프라인 없음. `app.js`를 직접 수정
+- 빌드 파이프라인 없음. `app.js`를 직접 수정 (현재 ~4500줄)
+- `server/public/app/main.js` 가 ESM 엔트리로 hooks/libs 를 `window` 로 브릿지
 - 해시 라우팅: `#dashboard`, `#manager`, `#board`, `#projects`, `#agents`
+- **클라이언트 async fence 패턴** (Phase 6/7): id-change 시 `setRun(null); setEvents([])` 동기 reset + await 이전 `myId = conversationId` 캡처 + commit 전 `activeIdRef.current === myId` 비교. `useDispatchAudit` 는 `requestSeqRef` 시퀀스 토큰.
 
 ### DB
 - SQLite WAL 모드. `palantir.db` (gitignored)
-- 서버 시작 시 `db/migrations/` 자동 실행
+- 서버 시작 시 `db/migrations/` 자동 실행 (현재 001~010)
 - `better-sqlite3` 동기 API 사용
+- `runs.manager_layer`, `runs.conversation_id` (009), `dispatch_audit_log` (010), `project_briefs` (008) 등 v3 필드 존재
 
 ## Style Guidelines
 
@@ -109,14 +175,20 @@ server/
 
 ## Security
 
-- `PALANTIR_TOKEN` 미설정 시 인증 비활성 + localhost only 바인딩
+- 서버는 `PALANTIR_TOKEN` 유무와 관계없이 **항상 `0.0.0.0` 에 바인딩** (`server/index.js:14`). 토큰 미설정 시 auth 미적용 + 시작 시 `[security] WARNING: No PALANTIR_TOKEN set` 경고 로그
 - 에이전트 명령어 allowlist 제한 (임의 명령 실행 불가)
 - `.claude-auth.json`은 절대 커밋 금지
 - CWD 검증: `/etc`, `/var`, `/usr` 등 위험 경로 차단
 
 ## Things to Watch Out For
 
-- `server/public/app.js`가 ~3800줄 단일 파일 — 수정 시 해당 컴포넌트 영역만 탐색
-- Manager 프로세스는 stdin이 닫히면 종료됨 — stdin pipe를 열어두어야 함
+- `server/public/app.js`가 ~4500줄 단일 파일 — 수정 시 해당 컴포넌트 영역만 탐색
+- `useSSE` channels 배열이 hard-coded — 새 SSE 채널 추가 시 반드시 `server/public/app/lib/hooks.js useSSE` 에도 추가. Phase 5/7 에서 까먹어 "핸들러는 등록됐지만 실제 subscribe 안 됨" 회귀가 있었음
+- `pmSpawnService` 에서 **seed runTurn 금지** — brief 은 static system prompt 에 bake. Codex 어댑터는 back-to-back runTurn 에서 "previous turn still running" 을 던진다
+- `pmCleanupService` 는 fail-closed — dispose 실패 시 상태를 유지한 채 re-throw. 호출자 (DELETE /api/projects/:id, /reset) 가 502 로 거절해야 함. 절대 swallow 하지 말 것
+- `reconciliationService.recordClaim` 의 envelope binding 은 strict — `projectId`/`taskId`/`pmRunId`/`selectedAgentProfileId` 전부 존재+소유 검증. hard input error 는 400 throw, incoherence 는 flag 로만 표시 (annotate-only 원칙: PM drift 는 기록만, block 안 함)
+- Manager 프로세스는 stdin이 닫히면 종료됨 — stdin pipe를 열어두어야 함 (Claude adapter)
 - `result` 이벤트 처리 시 Manager/Worker 분기 확인 (`proc.isManager`)
 - Health check가 Manager를 잘못 죽이지 않는지 `lifecycleService.js`의 `is_manager` 가드 확인
+- `conversationService` 의 peek-then-drain 은 race-safe: `commitDrainParentNotices(runId, count)` 가 `splice(0, count)` — 절대 `pendingNotices.delete(key)` 로 돌리지 말 것 (runTurn 중 도착한 notice 가 소실됨)
+- `managerRegistry.onSlotCleared` 리스너가 3 경로 (`clearActive`, `probeActive` dead detection, `setActive` replacement) 모두에서 발화. 이게 notice 큐 scrub 의 유일한 hook

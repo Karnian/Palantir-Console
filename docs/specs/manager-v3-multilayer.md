@@ -1,10 +1,12 @@
 # Manager Session V3 — Multi-Layer Redesign
 
 > Version 0.2 | 2026-04-08
-> Status: **Lock-in 완료** (3줄 원칙 잠금, 세부 구현은 발견 단계에서 조정)
-> 관련 문서: [manager-v2.md](./manager-v2.md), [manager-session-ui.md](./manager-session-ui.md)
+> Status: **Phase 0 ~ 7 merged to main.** Phase 3b (Claude PM resume) 보류 — spec §9.6 트리거 조건 미충족.
+> 관련 문서: [manager-v2.md](./manager-v2.md), [manager-session-ui.md](./manager-session-ui.md), [../test-scenarios.md](../test-scenarios.md)
 >
 > v0.2 변경: 코덱스 2차 검증 반영. 스키마 충돌 (parent_run_id 재사용, pm_thread_id 리네임), Phase 1.5에 worker→Top parent notice 포함, 원칙 9 추가, PM lifecycle cleanup owner 명시.
+>
+> 본 문서 본문(§1~§14) 은 **lock-in 문서** 로 역사 기록을 위해 유지된다. 실제 구현 현황은 아래 §15 (Implementation Log) 를 참고.
 
 ---
 
@@ -656,4 +658,60 @@ MVP 트랙 종료. 트리거 조건 모니터링 시작. PM 트랙 진입 여부
 - [manager-v2.md](./manager-v2.md) — 현재 매니저 세션 (Claude Code subprocess + stream-json) UI/UX 스펙
 - [manager-session-ui.md](./manager-session-ui.md) — 매니저 세션 초기 설계 제안
 - [research-and-review.md](../research/research-and-review.md) — 프로젝트 리서치 노트
+- [../test-scenarios.md](../test-scenarios.md) — QA 사용자 시나리오 (Phase 0~7 포함)
 - `CLAUDE.md` (프로젝트 루트) — 프로젝트 컨벤션과 아키텍처 개요
+
+---
+
+## 15. Implementation Log (Phase 0 ~ 7)
+
+> 이 섹션은 lock-in 이 아니라 **구현 결과 기록** 이다. 본 문서 §1~§14 는 역사 고정, 이 섹션은 실제 merge 된 내용을 반영한다.
+
+### Phase 매핑
+
+| Phase | 설명 | PR | 상태 |
+|---|---|---|---|
+| 0 | Capability Diet (Write/Edit 제거, layer prompt, Codex role-based sandbox) | #20 | ✅ merged |
+| 1 | 데이터 모델 풍부화 (task_kind, pm settings, project_briefs, agent dormant fields) | #21 | ✅ merged |
+| 1.5 | Conversation identity + worker→Top parent notice (`managerRegistry`, `conversationService`, migration 009, `/api/conversations/*`, `/api/runs/:id/input` alias, Principle 9 hints) | #22 | ✅ merged |
+| 2 | 멀티 슬롯 PM 런타임 + PM-layer parent notice 확장 (`sendToManagerSlot`, `resolveParentSlot`, `POST /api/manager/pm/:projectId/message`, `status.pms[]`, `onSlotCleared` 리스너, race-safe drain splice) | #27 | ✅ merged |
+| 3a | Codex PM lazy spawn + single-owner cleanup (`pmSpawnService`, `pmCleanupService` fail-closed, `codexAdapter.resumeThreadId` + `onThreadStarted`, `/reset` 라우트, project delete cascade, brief 을 static system prompt 에 bake) | #28 | ✅ merged |
+| 4 | Annotate-only reconciliation (migration 010, `reconciliationService.recordClaim`, pm_hallucination + user_intervention_stale 탐지, strict envelope/entity binding, `/api/dispatch-audit`) | #29 | ✅ merged |
+| 5 | SSE lifecycle 시맨틱 envelope (from/to_status/reason/task_id/project_id additive, `run:needs_input` priority alert, client pulseTabTitle) | #30 | ✅ merged |
+| 6 | PM UI exposure + routerService (3-step matcher `/api/router/resolve`, ManagerView Conversation dropdown + PM label + Reset PM 버튼, `useConversation` race fence 5 layer) | #31 | ✅ merged |
+| 7 | Dispatch audit UI (Dashboard Drift 배지 + DriftDrawer, ManagerView per-PM drift indicator, `useDispatchAudit` + SSE live push, `useSSE` channels 회귀 수정 run:needs_input + dispatch_audit:recorded) | #32 | ✅ merged |
+| 3b | Claude PM adapter resume (`streamJsonEngine --resume/--continue`, claudeAdapter supportsResume) | — | 🚦 트리거 조건 미충족 (§9.6, "Claude PM use case 발생") |
+
+### 구현 결과 vs 본문 §9 / §12 의 차이점
+
+본문의 phase 설계는 lock-in 이지만, 실제 코드 진입 후 조정된 것은 다음과 같다:
+
+0. **PM 트랙 진입 트리거 조건 (§12) 의 실질 유예** — **가장 중요한 변경점**.
+   - 본문 §12 는 PM 트랙 (Phase 2~5) 진입을 "세 트리거 중 둘 이상 충족 시" 로 잠갔다. 트리거: (a) 3+ 프로젝트 동시 취급, (b) 단일 매니저 컨텍스트 비대화 체감, (c) 프로젝트 간 추론 오염 관찰.
+   - **실제 merge 이력은 트리거 조건 없이 Phase 2→7 까지 연속 진행됨.** 사용자가 "자율모드로 쭉 진행해" 라고 선언하여 트리거 gating 을 명시적으로 철회했고, 그 선언에 따라 Phase 2 (멀티 슬롯 런타임) → Phase 3a (Codex PM 활성화) → Phase 4/5/6/7 까지 한 세션에 전부 merge 되었다.
+   - 결과적으로 §12 는 **역사 기록** 으로만 의미를 갖는다. "트리거 없이 진입해도 된다" 는 런타임 증명은 Phase 3a/6/7 각각의 live Playwright smoke 로 수행되었고, 실제 운영 손실 없음을 확인.
+   - Phase 3b (Claude PM resume) 만 §9.6 의 독립 트리거 ("Claude PM use case 발생") 로 여전히 gated 상태 유지.
+1. **Phase 6 (UI exposure) 독립** — 본문에 독립 phase 로 정의되지 않았다. 본문 §9.3 (Phase 1.5) 이 "conversation identity + worker 직접 채팅 UI" 를 포함했고, PM UI 는 §9.4 (Phase 2) 에 암묵적으로 들어갈 것으로 설계되었다. 실제로는 §9.4 를 "런타임 플러밍" 과 "사용자 노출 UI" 로 나누어 각각 Phase 2 / Phase 6 으로 분리. Spec 원칙 9 ("UI 노출은 시맨틱 먼저") 는 이 분리로 유지된다.
+2. **Phase 7 (Dispatch audit UI) 독립** — 본문에 독립 phase 로 없었다. 본문 §9.7 (Phase 4 Reconciliation) 이 서버 기록 + UI warning 배지를 한 phase 로 묶었지만, 실제 코드는 서버 배선 (Phase 4) 과 사용자 노출 (Phase 7) 로 분리. Phase 4 를 완성하는 마지막 조각이 Phase 7.
+3. **`useManager()` dismantle 보류** — 본문 §9.3 완료 정의에 포함되지만, Phase 6 에서 의도적으로 **공존 구조 (C안)** 로 남겼다. 전면 마이그레이션은 별도 phase 로 분리. 근거: codex 상호 리뷰에서 "Phase 6 범위에서 `ManagerView` 재구축은 과함" 판정.
+4. **PM 시스템 프롬프트에 Dispatch Audit 섹션 + pm_run_id 주입 추가** — 본문에 없던 Phase 4 R1/R3 교차 리뷰 결과. PM 이 실제로 audit API 를 호출하려면 프롬프트 지시 + 자기 run id 접근이 필요하다는 발견.
+5. **Phase 6 과 Phase 7 에서 `useSSE` channels 회귀 발견** — 본문 §9.8 의 Phase 5 가 `run:needs_input` 을 추가했지만 `server/public/app/lib/hooks.js useSSE` 의 hard-coded channels 배열에 등록하는 것을 누락했다. Phase 7 live smoke 에서 `dispatch_audit:recorded` 채널도 같은 누락을 시도하다가 발견되어, 두 채널을 함께 복구. Phase 5 의 tab-title pulse 경로는 이 수정 전까지 dead code 였음. 이 사실은 CLAUDE.md "Things to Watch Out For" + test-scenarios REG-09 에 기록됨.
+
+### Codex 교차검증 누적 요약
+
+Phase 2~7 merge 시점까지 누적 codex round: **17+ rounds** (Phase 4 가 6 rounds 로 가장 많음 — 매 라운드마다 새로운 envelope forgery vector 발견). 모든 phase 최종 PASS. 자세한 blocker 기록은 각 PR 본문 참조 (#27~#32).
+
+### 누적 테스트 상태
+
+- Phase 1.5 merge 시점: ~172 tests
+- Phase 7 merge 시점: **238 tests** (server-side unit + supertest HTTP + fake adapter)
+- Playwright live smoke: Phase 3a/6/7 에서 각각 수행 (격리 포트 4188 + 임시 DB, prod 4177 무손상)
+- 회귀 0
+
+### Trigger-gated / 의도적 deferred 항목
+
+- **Phase 3b (Claude PM resume)**: §9.6 의 "Claude PM use case 발생" 트리거 미충족. 사용자 선언 전까지 대기.
+- **Reconciliation hard gate 승격** (§9.7 후반): 운영 false-positive 율 관찰 후 결정. Phase 7 로 UI 가 붙은 이후부터 데이터 수집 가능.
+- **`useManager()` → `useConversations()` 전면 마이그레이션**: 공존 구조가 막힌 기능 없음. 별도 phase 로 분리.
+- **`dispatch_audit_log` CASCADE FK**: codex 상호 리뷰에서 "거절" — audit trail 의미 유지. 필요 시 read-side filter 로 대응.
+- **Force-delete 탈출구** (고장난 PM 복구용): Phase 3a R3 에서 "future work" 판정. fail-closed 가 현 기본값.
