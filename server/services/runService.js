@@ -15,6 +15,22 @@ const VALID_TRANSITIONS = {
   stopped:     ['queued'],  // allow retry — unclean shutdown (server restart, process crash)
 };
 
+// PR3a / ADD-1: PM manager runs have no task_id (they're standalone
+// conversation slots), so the run row's JOIN-derived project_id is null
+// for them. Their project identity is encoded in conversation_id as
+// 'pm:<projectId>'. Derive a best-effort project_id for envelope
+// emission so clients don't have to re-parse the conversation_id
+// themselves. Pure function — safe to call on any run row.
+function derivePmProjectId(run) {
+  if (!run) return null;
+  if (run.project_id) return run.project_id; // JOIN-derived wins
+  if (run.manager_layer !== 'pm') return null;
+  const cid = run.conversation_id;
+  if (typeof cid !== 'string' || !cid.startsWith('pm:')) return null;
+  const pid = cid.slice(3);
+  return pid || null;
+}
+
 function createRunService(db, eventBus) {
   const stmts = {
     getAll: db.prepare(`
@@ -153,7 +169,7 @@ function createRunService(db, eventBus) {
         to_status: run.status,
         reason: 'created',
         task_id: run.task_id || null,
-        project_id: run.project_id || null,
+        project_id: derivePmProjectId(run),
       });
     }
     return run;
@@ -204,7 +220,7 @@ function createRunService(db, eventBus) {
         to_status: status,
         reason: reason || null,
         task_id: run.task_id || null,
-        project_id: run.project_id || null,
+        project_id: derivePmProjectId(run),
       });
     }
 
@@ -216,7 +232,7 @@ function createRunService(db, eventBus) {
         to_status: status,
         reason: reason || null,
         task_id: run.task_id || null,
-        project_id: run.project_id || null,
+        project_id: derivePmProjectId(run),
       });
     }
 
@@ -240,7 +256,7 @@ function createRunService(db, eventBus) {
         to_status: 'running',
         reason: 'started',
         task_id: run.task_id || null,
-        project_id: run.project_id || null,
+        project_id: derivePmProjectId(run),
       });
     }
     return run;
@@ -345,4 +361,4 @@ function createRunService(db, eventBus) {
   };
 }
 
-module.exports = { createRunService };
+module.exports = { createRunService, derivePmProjectId };

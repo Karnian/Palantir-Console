@@ -238,12 +238,18 @@ function createApp(options = {}) {
 
   app.use(errorHandler);
 
-  // Lifecycle: recover orphans + start monitoring
+  // Lifecycle: start monitoring FIRST (installs the run:ended subscriber
+  // that drives cleanupRunWorktree), THEN recover orphans. PR3a / NEW-B1:
+  // pre-PR3a the order was reversed — recoverOrphanSessions emitted
+  // run:ended events while nothing was listening, so orphaned worktrees
+  // never got cleaned. Reversing keeps a single cleanup authority (the
+  // run:ended subscriber) instead of duplicating teardown logic in the
+  // recovery path (Codex-agreed option A).
+  lifecycleService.startMonitoring();
   const recovered = lifecycleService.recoverOrphanSessions();
   if (recovered.length > 0) {
     console.log(`[app] Recovered ${recovered.length} orphan session(s)`);
   }
-  lifecycleService.startMonitoring();
 
   // Expose for graceful shutdown + tests. managerRegistry is exposed
   // here (PR2) so manager-lifecycle.test.js can drive a real
