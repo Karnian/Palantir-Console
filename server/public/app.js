@@ -3344,8 +3344,46 @@ function managerProfileAuthState(profile) {
 }
 
 function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError = null, agentsLoading = false, reloadAgents }) {
-  const { status, events, loading, start, sendMessage, stop } = manager;
+  const { status, events: topEvents, loading, start, sendMessage: topSendMessage, stop } = manager;
   const [input, setInput] = useState('');
+
+  // v3 Phase 6 — conversation target selector.
+  //
+  // The chat panel can now point at the Top manager OR a project-scoped
+  // PM conversation (`pm:<projectId>`). State is kept in one string so
+  // every downstream read (events, send, reset availability, header
+  // label) can branch on a single value. Defaults to 'top' so the legacy
+  // behavior is unchanged on first mount — users only see a difference
+  // after they pick a PM from the dropdown.
+  const [conversationTarget, setConversationTarget] = useState('top');
+  const pmConversationId = conversationTarget !== 'top' ? conversationTarget : null;
+  const pmConv = useConversation(pmConversationId); // null-safe in hook
+  const isPm = conversationTarget !== 'top';
+  const pmProjectId = isPm ? conversationTarget.slice(3) : null;
+  const pmProject = isPm ? (projects || []).find(p => p.id === pmProjectId) || null : null;
+
+  // Unified event source + send path + run + active flag. The PM hook
+  // mirrors the Top hook's shape (events, run, sendMessage), so the
+  // downstream rendering code doesn't have to branch per target beyond
+  // these aliases.
+  const events = isPm ? (pmConv.events || []) : topEvents;
+  const sendMessage = isPm
+    ? (async (text, images) => pmConv.sendMessage(text, images))
+    : topSendMessage;
+  // A PM conversation is "active" when its backing run exists and is
+  // running. The Top session uses status.active (legacy).
+  const pmRunActive = isPm && pmConv.run && pmConv.run.status === 'running';
+  const chatActive = isPm ? pmRunActive : status.active;
+  // Badge label for the header
+  const chatBadge = isPm
+    ? (pmConv.run
+        ? (pmConv.run.status === 'running' ? 'Active' : pmConv.run.status)
+        : 'Idle')
+    : (status.active ? 'Active' : 'Idle');
+  const chatBadgeClass = isPm
+    ? (pmRunActive ? 'running' : 'idle')
+    : (status.active ? 'running' : 'idle');
+
   // PR5: agent profile picker state. null = no selection yet; '' = nothing
   // available. We persist the last chosen id in localStorage so repeat
   // sessions don't force the user to re-pick.
@@ -3527,10 +3565,106 @@ function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError 
     if (inputRef.current) inputRef.current.style.height = '';
     const imagesToSend = attachedImages.map(img => ({ data: img.data, media_type: img.media_type }));
     setAttachedImages([]);
+
+    // v3 Phase 6 — route through POST /api/router/resolve so @mention
+    // rewriting and project-name matching run in exactly one place. If
+    // the resolver picks a different target than the UI's current
+    // selection (user typed @alpha while on Top), we honor the resolved
+    // target by POSTing directly to /api/conversations/:id/message and
+    // then flipping the UI selector to follow along so subsequent
+    // messages stay in the same conversation.
+    //
+    // Codex R1 blocker #1 — fail-closed on resolver error FOR ANY
+    // message that contains an explicit `@<...>` prefix. Without this
+    // guard, a transient resolver failure could silently deliver
+    // `@beta ...` to the currently selected `pm:alpha` → cross-project
+    // misdelivery. Messages with no `@` prefix are safe to fall back
+    // to the UI selection (no rewrite intent).
+    const hasExplicitMention = /^\s*@\S+/.test(text || '');
+    let effectiveTarget = conversationTarget;
+    let effectiveText = text;
+    let resolveFailed = false;
     try {
-      await sendMessage(text, imagesToSend.length > 0 ? imagesToSend : undefined);
-    } catch { /* toast handled in hook */ }
+      if (text) {
+        const resolved = await apiFetch('/api/router/resolve', {
+          method: 'POST',
+          body: JSON.stringify({
+            text,
+            currentConversationId: conversationTarget,
+          }),
+        });
+        if (resolved && resolved.target) {
+          effectiveTarget = resolved.target;
+          if (typeof resolved.text === 'string' && resolved.text.length > 0) {
+            effectiveText = resolved.text;
+          }
+          if (resolved.ambiguous && resolved.candidates && resolved.candidates.length > 0) {
+            const names = resolved.candidates.map(c => c.name).join(', ');
+            addToast(`여러 프로젝트와 매칭되어 ${effectiveTarget}로 보냅니다: ${names}`, 'info');
+          }
+        }
+      }
+    } catch (resolveErr) {
+      resolveFailed = true;
+      if (hasExplicitMention) {
+        addToast(
+          `라우터 해석 실패 — @mention이 포함된 메시지는 전송 취소됩니다: ${resolveErr && resolveErr.message ? resolveErr.message : 'unknown'}`,
+          'error'
+        );
+        // Put the text back in the input so the user doesn't lose it.
+        setInput(text);
+        setAttachedImages(attachedImages);
+        setSending(false);
+        return;
+      }
+      // No @mention → safe to fall through to the UI selection.
+    }
+
+    try {
+      if (effectiveTarget === 'top') {
+        await topSendMessage(effectiveText, imagesToSend.length > 0 ? imagesToSend : undefined);
+      } else {
+        // PM path: hit the conversation endpoint directly so the
+        // send works even if the UI selector is still pointing at
+        // Top (router rewrote to pm:<id>).
+        await apiFetch(`/api/conversations/${encodeURIComponent(effectiveTarget)}/message`, {
+          method: 'POST',
+          body: JSON.stringify({
+            text: effectiveText,
+            images: imagesToSend.length > 0 ? imagesToSend : undefined,
+          }),
+        });
+        if (effectiveTarget !== conversationTarget) {
+          setConversationTarget(effectiveTarget);
+        }
+      }
+    } catch (err) {
+      addToast('Failed to send: ' + (err && err.message ? err.message : 'unknown'), 'error');
+    }
     setSending(false);
+  };
+
+  // v3 Phase 6 — Reset PM. Only meaningful while a PM conversation is
+  // selected. Confirms first, then hits the single-owner cleanup route
+  // from Phase 3a, and flips the selector back to Top on success so the
+  // next message isn't stranded against a dead slot.
+  const handleResetPm = async () => {
+    if (!isPm || !pmProjectId) return;
+    const label = pmProject ? pmProject.name : pmProjectId;
+    const ok = confirm(
+      `Reset PM for "${label}"? 이 PM 세션은 종료되고 저장된 thread가 삭제됩니다. ` +
+      `다음 메시지부터 새 thread로 시작합니다.`
+    );
+    if (!ok) return;
+    try {
+      await apiFetch(`/api/manager/pm/${encodeURIComponent(pmProjectId)}/reset`, {
+        method: 'POST',
+      });
+      addToast(`PM reset: ${label}`, 'success');
+      setConversationTarget('top');
+    } catch (err) {
+      addToast('Reset failed: ' + (err && err.message ? err.message : 'unknown'), 'error');
+    }
   };
 
   const handleKeyDown = (e) => {
@@ -3664,19 +3798,40 @@ function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError 
         <div class="manager-chat-header">
           <div class="manager-panel-title">
             <span class="manager-icon">\u2726</span>
-            <span>Manager Session</span>
-            ${status.active && html`
-              <span class="manager-status-badge running">Active</span>
-            `}
-            ${!status.active && html`
-              <span class="manager-status-badge idle">Idle</span>
-            `}
+            <span>${isPm ? `PM · ${pmProject ? pmProject.name : pmProjectId}` : 'Manager Session'}</span>
+            <span class="manager-status-badge ${chatBadgeClass}">${chatBadge}</span>
           </div>
           <div class="manager-panel-actions">
-            ${status.active && status.usage && html`
+            ${!isPm && status.active && status.usage && html`
               <span class="manager-cost">$${(status.usage.costUsd || 0).toFixed(4)}</span>
             `}
+            ${/* v3 Phase 6: conversation selector. Only Top is always
+                 present. PMs are enumerated from the project list so
+                 the user can lazy-spawn a new PM just by picking one +
+                 sending a message. */ ''}
             ${status.active && html`
+              <select
+                class="manager-picker-select"
+                style="max-width:180px"
+                value=${conversationTarget}
+                onChange=${(e) => setConversationTarget(e.target.value)}
+                title="Conversation target"
+              >
+                <option value="top">Top manager</option>
+                ${(projects || [])
+                  .filter(p => p.pm_enabled !== 0)
+                  .map(p => {
+                    const active = (status.pms || []).some(s => s.conversationId === `pm:${p.id}`);
+                    return html`<option key=${p.id} value=${`pm:${p.id}`}>
+                      ${`@${p.name}${active ? ' · active' : ''}`}
+                    </option>`;
+                  })}
+              </select>
+            `}
+            ${isPm && pmRunActive && html`
+              <button class="btn btn-sm btn-danger" onClick=${handleResetPm} title="Terminate this PM thread; next message starts fresh">Reset PM</button>
+            `}
+            ${!isPm && status.active && html`
               <button class="btn btn-sm btn-danger" onClick=${stop}>Stop</button>
             `}
           </div>
