@@ -51,6 +51,11 @@ function createReconciliationService({
   projectService, // required for envelope/entity ownership binding (codex R1)
   agentProfileService, // optional — used to validate selected_agent_profile_id (codex R5)
   conversationService, // optional — exposes peekParentNotices for staleness check
+  // v3 Phase 7: optional eventBus so the UI (dispatch audit badges +
+  // drift drawer) can subscribe to newly recorded claims without
+  // polling on a timer. We emit exactly once per recordClaim, with the
+  // row shape matching `listClaims` so subscribers can append directly.
+  eventBus,
   logger,
 }) {
   const log = logger || ((msg) => console.log(`[reconciliation] ${msg}`));
@@ -471,7 +476,24 @@ function createReconciliationService({
     if (incoherent) {
       log(`incoherent claim project=${projectId} kind=${incoherenceKind} claim=${JSON.stringify(pmClaim)}`);
     }
-    return stmts.getById.get(id);
+    const inserted = stmts.getById.get(id);
+    // v3 Phase 7: fire a single SSE-facing event per recorded claim so
+    // the Dashboard drift badge and the ManagerView per-PM indicator
+    // can refresh without timer polling. The event payload carries the
+    // full row (identical to /api/dispatch-audit GET shape) plus the
+    // few envelope fields clients filter on locally.
+    if (eventBus) {
+      try {
+        eventBus.emit('dispatch_audit:recorded', {
+          audit: inserted,
+          project_id: inserted.project_id,
+          pm_run_id: inserted.pm_run_id,
+          incoherence_flag: inserted.incoherence_flag,
+          incoherence_kind: inserted.incoherence_kind,
+        });
+      } catch { /* ignore — annotate-only, must never block */ }
+    }
+    return inserted;
   }
 
   function listClaims({ projectId, incoherentOnly = false, limit = 100 } = {}) {

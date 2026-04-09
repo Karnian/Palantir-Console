@@ -142,7 +142,7 @@ function EmptyState({ icon, text, sub }) {
 // Dashboard View
 // ─────────────────────────────────────────────────────────────────────────────
 
-function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun, claudeSessions, manager }) {
+function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun, claudeSessions, manager, driftAudit, onOpenDrift }) {
   // Tick every minute so overdue/due-soon triage rolls over without a reload.
   // The hook itself returns a counter we don't read; calling it is enough to
   // force a re-render at each tick.
@@ -304,6 +304,24 @@ function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun, claude
             <div class="stat-label">Done Today</div>
           </div>
         </div>
+        ${/* v3 Phase 7: Drift badge. Hidden when zero so the bar stays
+             calm. Clickable → opens the DriftDrawer at app level. */ ''}
+        ${driftAudit && driftAudit.totalCount > 0 && html`
+          <div
+            class="stat-chip stat-failed"
+            style="cursor:pointer"
+            role="button"
+            tabIndex=${0}
+            title="PM hallucination / staleness incidents. Click to inspect."
+            onClick=${() => onOpenDrift && onOpenDrift()}
+            onKeyDown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenDrift && onOpenDrift(); } }}
+          >
+            <div>
+              <div class="stat-value">${driftAudit.totalCount}</div>
+              <div class="stat-label">Drift \u26A0</div>
+            </div>
+          </div>
+        `}
       </div>
       <div class="triage-feed">
         ${triageItems.length === 0 && html`
@@ -3343,7 +3361,7 @@ function managerProfileAuthState(profile) {
   return profile.auth.canAuth ? 'ok' : 'missing';
 }
 
-function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError = null, agentsLoading = false, reloadAgents }) {
+function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError = null, agentsLoading = false, reloadAgents, driftAudit, onOpenDrift }) {
   const { status, events: topEvents, loading, start, sendMessage: topSendMessage, stop } = manager;
   const [input, setInput] = useState('');
 
@@ -3828,6 +3846,18 @@ function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError 
                   })}
               </select>
             `}
+            ${/* v3 Phase 7: per-PM drift indicator. Only surfaces
+                 when the currently selected PM has one or more
+                 incoherent audit rows. Clicking opens the global
+                 DriftDrawer so the user can inspect + dismiss. */ ''}
+            ${isPm && driftAudit && (driftAudit.countByProject.get(pmProjectId) || 0) > 0 && html`
+              <button
+                class="btn btn-sm btn-danger"
+                style="padding:2px 8px"
+                title="This PM has pending drift warnings. Click to inspect."
+                onClick=${() => onOpenDrift && onOpenDrift()}
+              >\u26A0 ${driftAudit.countByProject.get(pmProjectId)}</button>
+            `}
             ${isPm && pmRunActive && html`
               <button class="btn btn-sm btn-danger" onClick=${handleResetPm} title="Terminate this PM thread; next message starts fresh">Reset PM</button>
             `}
@@ -4146,6 +4176,101 @@ function CommandPalette({ open, onClose }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// v3 Phase 7 — Drift Drawer
+//
+// Right-side slide panel listing pending PM dispatch-audit incoherences.
+// Each row shows the claim vs db_truth diff + incoherence kind + "Dismiss"
+// button that hides the row on this client (server row untouched — this
+// is annotate-only, never block). "Clear all dismissals" restores the
+// hidden set so the user can re-inspect historical incidents.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function DriftDrawer({ open, onClose, driftAudit, projects }) {
+  if (!open) return null;
+  const rows = driftAudit ? driftAudit.rows : [];
+  const projectName = (pid) => {
+    const p = (projects || []).find(p => p.id === pid);
+    return p ? p.name : pid;
+  };
+  const parseJson = (s) => {
+    try { return JSON.parse(s); } catch { return null; }
+  };
+  const kindColor = (kind) => {
+    if (kind === 'pm_hallucination') return '#ef4444';
+    if (kind === 'user_intervention_stale') return '#f59e0b';
+    if (kind === 'invalid_claim') return '#8b5cf6';
+    return '#6b7280';
+  };
+  return html`
+    <div class="drift-drawer-backdrop" onClick=${onClose}>
+      <div class="drift-drawer" onClick=${(e) => e.stopPropagation()}>
+        <div class="drift-drawer-header">
+          <div class="drift-drawer-title">
+            <span>\u26A0 Drift</span>
+            <span class="drift-drawer-count">${rows.length}</span>
+          </div>
+          <div class="drift-drawer-actions">
+            ${driftAudit && driftAudit.dismissedCount > 0 && html`
+              <button class="ghost" onClick=${() => driftAudit.clearDismissed()}>
+                Restore ${driftAudit.dismissedCount} dismissed
+              </button>
+            `}
+            <button class="ghost" onClick=${onClose}>Close</button>
+          </div>
+        </div>
+        <div class="drift-drawer-body">
+          ${rows.length === 0 && html`
+            <div class="drift-drawer-empty">
+              <div class="drift-drawer-empty-icon">\u2713</div>
+              <div>모든 PM 주장과 DB 상태가 일치합니다.</div>
+              <div class="drift-drawer-empty-sub">PM이 잘못된 주장을 기록하면 여기에 표시됩니다.</div>
+            </div>
+          `}
+          ${rows.map(row => {
+            const claim = parseJson(row.pm_claim);
+            const truth = parseJson(row.db_truth);
+            const pname = projectName(row.project_id);
+            return html`
+              <div key=${row.id} class="drift-row" style=${`border-left: 3px solid ${kindColor(row.incoherence_kind)}`}>
+                <div class="drift-row-header">
+                  <span class="drift-row-kind" style=${`color:${kindColor(row.incoherence_kind)}`}>
+                    ${row.incoherence_kind || 'unknown'}
+                  </span>
+                  <span class="drift-row-project">${pname}</span>
+                  <span class="drift-row-time">${timeAgo(new Date(row.created_at).toISOString())}</span>
+                  <button
+                    class="ghost"
+                    style="margin-left:auto"
+                    onClick=${() => driftAudit.dismiss(row.id)}
+                    title="Hide from this client (server row is kept as history)"
+                  >Dismiss</button>
+                </div>
+                <div class="drift-row-diff">
+                  <div class="drift-diff-col">
+                    <div class="drift-diff-label">PM claimed</div>
+                    <pre>${JSON.stringify(claim, null, 2)}</pre>
+                  </div>
+                  <div class="drift-diff-col">
+                    <div class="drift-diff-label">DB truth</div>
+                    <pre>${JSON.stringify(truth, null, 2)}</pre>
+                  </div>
+                </div>
+                ${row.pm_run_id && html`
+                  <div class="drift-row-meta">pm_run_id: <code>${row.pm_run_id}</code></div>
+                `}
+                ${row.rationale && html`
+                  <div class="drift-row-meta">rationale: ${row.rationale}</div>
+                `}
+              </div>
+            `;
+          })}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // App Root
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -4157,6 +4282,9 @@ function App() {
   const { agents, loading: agentsLoading, error: agentsError, reload: reloadAgents } = useAgents();
   const { sessions: claudeSessions } = useClaudeSessions();
   const manager = useManager();
+  // v3 Phase 7: drift badge + drawer + per-PM indicator shared state.
+  const driftAudit = useDispatchAudit();
+  const [showDriftDrawer, setShowDriftDrawer] = useState(false);
   const [inspectRun, setInspectRun] = useState(null);
   // Global task detail popup — opened from Dashboard, ProjectDetailModal, etc.
   // BoardView/CalendarView still manage their own local detail state because
@@ -4231,6 +4359,12 @@ function App() {
       showBrowserNotification('Agent needs input', getRunTaskTitle(data));
       pulseTabTitle('⚠ Needs input');
     },
+    // v3 Phase 7: live refresh of the drift badge / drawer on every
+    // new audit row. Debounced so a burst of PM claims doesn't fan
+    // out into dozens of refetches. The reload path is idempotent.
+    'dispatch_audit:recorded': () => {
+      debouncedReload('dispatch_audit', driftAudit.reload);
+    },
   });
 
   // Global keyboard shortcuts
@@ -4245,6 +4379,7 @@ function App() {
       // Esc: close any open modal/palette
       if (e.key === 'Escape') {
         if (showPalette) { setShowPalette(false); return; }
+        if (showDriftDrawer) { setShowDriftDrawer(false); return; }
         if (inspectRun) { setInspectRun(null); return; }
         return;
       }
@@ -4260,13 +4395,13 @@ function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [showPalette, inspectRun]);
+  }, [showPalette, inspectRun, showDriftDrawer]);
 
   const routeBase = route.split('/')[0];
 
   const renderView = () => {
     if (routeBase === 'manager') {
-      return html`<${ManagerView} manager=${manager} runs=${runs} tasks=${tasks} projects=${projects} agents=${agents} agentsError=${agentsError} agentsLoading=${agentsLoading} reloadAgents=${reloadAgents} />`;
+      return html`<${ManagerView} manager=${manager} runs=${runs} tasks=${tasks} projects=${projects} agents=${agents} agentsError=${agentsError} agentsLoading=${agentsLoading} reloadAgents=${reloadAgents} driftAudit=${driftAudit} onOpenDrift=${() => setShowDriftDrawer(true)} />`;
     }
     if (routeBase === 'board') {
       if (tasksLoading) return html`<${Loading} />`;
@@ -4327,6 +4462,8 @@ function App() {
         }}
         claudeSessions=${claudeSessions}
         manager=${manager}
+        driftAudit=${driftAudit}
+        onOpenDrift=${() => setShowDriftDrawer(true)}
       />
     `;
   };
@@ -4361,6 +4498,12 @@ function App() {
         />
       `}
       <${CommandPalette} open=${showPalette} onClose=${() => setShowPalette(false)} />
+      <${DriftDrawer}
+        open=${showDriftDrawer}
+        onClose=${() => setShowDriftDrawer(false)}
+        driftAudit=${driftAudit}
+        projects=${projects}
+      />
       <${ToastContainer} />
     </div>
   `;
