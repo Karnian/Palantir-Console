@@ -1,62 +1,84 @@
 # Agent Guide
 
-Palantir Console — AI 코딩 에이전트 중앙 관제 허브.
+Palantir Console — AI 코딩 에이전트 중앙 관제 허브. 상세 내용은 `CLAUDE.md` 와 `docs/specs/manager-v3-multilayer.md` 참고. 이 파일은 빠른 오리엔테이션 용.
 
 ## Quick Start
 
 ```bash
 npm install
 npm start          # http://localhost:4177
-npm test           # node --test
+npm test           # node --test (238 tests at Phase 7 merge)
 ```
 
-## Architecture
+## Architecture (v3 Phase 0~7 merged)
+
+Express.js 5 + SQLite (WAL) + Preact/HTM (UMD, no build).
 
 ```
 server/
-  index.js              — 서버 진입점 (포트, auth 로딩)
-  app.js                — Express 앱 설정, 라우터/서비스 조립
-  db/
-    database.js         — SQLite (WAL mode, better-sqlite3) 초기화 + 마이그레이션
-    migrations/         — SQL 마이그레이션 (001_initial, 002_manager_sessions)
+  index.js              — 진입점 (포트, auth 로딩)
+  app.js                — Express 조립 (라우터/서비스 조립)
+  db/migrations/        — 001~010 (v3: 006 task enrichment, 007 pm settings,
+                          008 project_briefs, 009 manager_layer/conversation_id,
+                          010 dispatch_audit_log)
   routes/
-    manager.js          — Manager Session API (/api/manager/*)
-    tasks.js            — Task CRUD + execute
-    runs.js             — Run CRUD + input/cancel
-    projects.js         — Project CRUD
-    agents.js           — Agent Profile CRUD
-    events.js           — SSE 스트림
-    claude-sessions.js  — Legacy OpenCode 세션
+    manager.js          — Top/PM /api/manager/* + pm/:id/message + /reset
+    conversations.js    — /api/conversations/:id/* (top|pm:<id>|worker:<id>)
+    router.js           — /api/router/resolve (Phase 6 3-step matcher)
+    dispatchAudit.js    — /api/dispatch-audit (Phase 4, annotate-only)
+    tasks.js runs.js projects.js agents.js events.js
+    sessions.js trash.js fs.js usage.js claude-sessions.js
   services/
-    streamJsonEngine.js — Claude Code CLI stream-json 프로토콜 엔진 (Manager용)
-    executionEngine.js  — TmuxEngine/SubprocessEngine (Worker용)
-    lifecycleService.js — Health check, 상태 전환, 자동 정리
-    runService.js       — Run DB CRUD
-    taskService.js      — Task DB CRUD
-    projectService.js   — Project DB CRUD
-    agentProfileService.js — Agent Profile DB CRUD
-    eventBus.js         — EventEmitter pub/sub
-    worktreeService.js  — Git worktree 관리
+    managerAdapters/claudeAdapter.js  — stream-json persistent process
+    managerAdapters/codexAdapter.js   — stateless + thread resume
+    streamJsonEngine.js  — Claude stream-json 엔진
+    executionEngine.js   — TmuxEngine / SubprocessEngine (worker)
+    lifecycleService.js  — Health check, 상태 전환
+    managerRegistry.js   — top/pm 슬롯 단일 source + onSlotCleared
+    conversationService.js — 1급 conversation + parent-notice router
+    pmSpawnService.js    — PM lazy spawn (brief-in-system-prompt)
+    pmCleanupService.js  — PM 단일 owner teardown (fail-closed)
+    routerService.js     — 3-step @mention matcher
+    reconciliationService.js — dispatch audit (annotate-only)
+    runService.js        — Run CRUD + Phase 5 semantic envelope
+    taskService.js projectService.js projectBriefService.js
+    agentProfileService.js managerSystemPrompt.js authResolver.js
+    eventBus.js worktreeService.js
   public/
-    app.js              — Preact + HTM SPA (빌드 없음)
-    styles.css          — CSS 스타일
-    index.html          — HTML 진입점
+    app.js               — Preact SPA (~4500줄)
+    app/main.js          — ESM 엔트리 + window 브릿지
+    app/lib/hooks.js     — useSSE, useConversation, useDispatchAudit, useManager
+    vendor/              — Preact/HTM UMD+ESM
   tests/
-    manager.test.js     — Manager 기능 테스트 (11개)
-    v2-api.test.js      — v2 API 통합 테스트
+    conversation.test.js pm-phase3a.test.js reconciliation.test.js
+    router.test.js phase5-sse-semantics.test.js
+    manager.test.js manager-codex.test.js v2-api.test.js ...
 ```
 
-## Key Concepts
+## Key Concepts (v3)
 
-- **Manager Session**: Claude Code CLI를 stream-json 모드로 실행하여 multi-turn 대화. `--input-format stream-json`으로 stdin을 통해 메시지 전달.
-- **Worker Run**: tmux/subprocess로 에이전트 CLI 실행. Task에 연결됨.
-- **StreamJsonEngine**: NDJSON 이벤트 파싱 (system/init, assistant, result 등). Manager 전용.
-- **Health Check**: lifecycleService가 주기적으로 실행 중인 run 체크. Manager run은 건너뜀 (`is_manager` 가드).
-- **Auth Persistence**: `.claude-auth.json`에 OAuth 토큰 저장. Claude Code 세션 내에서 서버 시작 시 자동 저장, 이후 독립 실행 시 로드.
+- **Conversation identity**: 모든 채팅 surface 가 1급 식별자를 가짐 — `top`, `pm:<projectId>`, `worker:<runId>`. `conversationService` 가 단일 엔트리.
+- **PM lazy spawn**: 첫 `pm:<projectId>` 메시지에서 `pmSpawnService.ensureLivePm` 이 Codex 어댑터로 run 생성 + brief 을 static system prompt 에 bake. 이후 턴은 thread resume.
+- **Parent-notice router** (lock-in #2): 자식 타깃 사용자 메시지 = 무조건 부모 staleness notice. worker→Top (Phase 1.5), worker→PM + PM→Top (Phase 2). 의도 분류 금지.
+- **Single-owner PM cleanup**: `pmCleanupService.reset` / `.dispose` 가 유일한 종료 경로. fail-closed — dispose 실패 시 상태 유지 + re-throw.
+- **Dispatch audit** (annotate-only): PM claim 을 `POST /api/dispatch-audit` 로 기록 → `reconciliationService` 가 DB truth 와 비교해 `incoherence_flag` 만 남김. 절대 block 안 함.
+- **Router 3-step**: `@<name|id>` → current context → name fuzzy → default. 서버 함수 + HTTP wrapper.
+- **SSE semantic envelope**: `run:*` 이벤트가 `from_status/to_status/reason/task_id/project_id` 를 additive 로 운반. `run:status` 는 pure reload, `run:needs_input`/`run:completed` 가 priority alert.
 
 ## Important Notes
 
-- Manager에서 `--input-format stream-json` + `-p` 플래그 조합은 동작하지 않음. 초기 프롬프트는 반드시 stdin으로 전송.
-- Manager의 result 이벤트는 "한 턴 끝남"을 의미하지 "세션 끝남"이 아님. completed로 전환하지 않음.
-- UI는 CDN 없이 `server/public/vendor/`에 번들된 Preact/HTM UMD 사용.
-- `.claude-auth.json`은 gitignore에 포함. 민감 정보 커밋 금지.
+- Manager 에서 `--input-format stream-json` + `-p` 플래그 조합은 동작하지 않음 (Claude). 초기 프롬프트는 반드시 stdin 으로 전송
+- **Codex 어댑터는 stateless** — back-to-back runTurn 은 "previous turn still running" 으로 실패. brief 은 seed runTurn 이 아니라 system prompt 에 넣는다
+- **`pmCleanupService` 는 fail-closed**. dispose 실패 시 절대 swallow 하지 말 것
+- **`useSSE` channels 배열은 hard-coded** — 새 SSE 채널 추가 시 `server/public/app/lib/hooks.js` 에도 반드시 추가. Phase 5/7 에서 이 회귀가 있었음
+- Manager 의 result 이벤트는 "한 턴 끝남" 이지 "세션 끝남" 아님. completed 로 전환하지 않음
+- UI 는 CDN 없이 `server/public/vendor/` 에 번들된 Preact/HTM 사용
+- `.claude-auth.json` 은 gitignore. 민감 정보 커밋 금지
+- 환경변수: `PALANTIR_DEFAULT_PM_ADAPTER`, `PALANTIR_CODEX_MANAGER_BYPASS`, Claude/Codex auth 키들
+
+## 관련 문서
+
+- `CLAUDE.md` — 상세 컨벤션 + 자율 모드 working style + things to watch out for
+- `docs/specs/manager-v3-multilayer.md` — v3 재설계 스펙 (lock-in, phase 구조)
+- `docs/test-scenarios.md` — QA 사용자 시나리오 (PRJ/TSK/BRD/RUN/INS/MGR/PM/DRIFT/ROUTER/SSE/REG)
+- `README.md` / `README.ko.md` — 사용자 가이드 + API 레퍼런스
