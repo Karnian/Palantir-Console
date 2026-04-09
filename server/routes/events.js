@@ -10,6 +10,12 @@ function createEventsRouter({ eventBus }) {
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
     });
+    // Flush headers immediately so EventSource clients transition to OPEN
+    // even before the first event fires. Without this, Node buffers the
+    // status line + headers until the first body write, which meant a
+    // fresh connection could sit in CONNECTING for up to the 30s heartbeat
+    // interval on quiet servers. Also makes integration tests reliable.
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
     function safeWrite(data) {
       try {

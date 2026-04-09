@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Sign in — Palantir Console</title>
+  <link rel="stylesheet" href="styles/tokens.css" />
+  <style>
+    /* Self-contained — we intentionally don't pull styles.css so this page
+       has zero SPA coupling and loads instantly on first visit. Uses only
+       design tokens that are defined in tokens.css. */
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0;
+      font-family: Inter, system-ui, -apple-system, sans-serif;
+      background: var(--color-bg, #0b0c10);
+      color: var(--color-fg, #e8ebf0);
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+    }
+    .card {
+      width: 100%;
+      max-width: 380px;
+      padding: 32px;
+      border: 1px solid var(--color-border, #2a2d36);
+      border-radius: 12px;
+      background: var(--color-bg-elev, #13151b);
+    }
+    h1 { margin: 0 0 4px; font-size: 20px; font-weight: 600; }
+    p.sub { margin: 0 0 24px; color: var(--color-fg-mute, #8a8f9a); font-size: 13px; }
+    label { display: block; font-size: 12px; color: var(--color-fg-mute, #8a8f9a); margin-bottom: 6px; }
+    input[type="password"] {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 10px 12px;
+      border: 1px solid var(--color-border, #2a2d36);
+      border-radius: 8px;
+      background: var(--color-bg, #0b0c10);
+      color: inherit;
+      font-family: inherit;
+      font-size: 14px;
+    }
+    button {
+      margin-top: 16px;
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: none;
+      background: var(--color-accent, #4f6df5);
+      color: white;
+      font-weight: 600;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.5; cursor: wait; }
+    .error {
+      margin-top: 12px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      background: var(--color-danger-soft, #3b1b21);
+      color: var(--color-danger, #ef8799);
+      font-size: 13px;
+      display: none;
+    }
+    .error.visible { display: block; }
+  </style>
+</head>
+<body>
+  <form class="card" id="login">
+    <h1>Palantir Console</h1>
+    <p class="sub">Enter your <code>PALANTIR_TOKEN</code> to continue.</p>
+    <label for="token">Token</label>
+    <input id="token" name="token" type="password" autocomplete="current-password" autofocus required />
+    <button type="submit" id="submit">Sign in</button>
+    <div class="error" id="err"></div>
+  </form>
+  <script>
+    // This page exists so the token NEVER appears in a URL, Referer header,
+    // or access log. The old ?token= bootstrap path was Codex-flagged as a
+    // blocker (PR1 review): even with history.replaceState cleanup, the
+    // first document request already hit reverse proxy logs with the
+    // token in the query string.
+    //
+    // We POST the token to /api/auth/login, which sets an HttpOnly cookie
+    // and then we redirect to /. Zero token exposure in URLs.
+    const form = document.getElementById('login');
+    const input = document.getElementById('token');
+    const btn = document.getElementById('submit');
+    const err = document.getElementById('err');
+
+    function showError(msg) {
+      err.textContent = msg;
+      err.classList.add('visible');
+    }
+
+    // Strict same-origin path whitelist for the post-login redirect.
+    // Codex PR1 R2 flagged the naive `location.replace(next)` as an
+    // open-redirect / script sink: `?next=javascript:...` would execute
+    // attacker JS in the app origin with the fresh auth cookie in scope.
+    // Acceptable shapes:
+    //   - "/"                              → root
+    //   - "/#dashboard"                    → root + hash
+    //   - "/any/path"                      → same-origin path
+    //   - "/path?foo=bar#hash"             → same-origin with query/hash
+    // Rejected (fall back to "/"):
+    //   - "javascript:...", "data:...", "vbscript:..." (any scheme)
+    //   - "//evil.example" (protocol-relative, network-authority)
+    //   - "https://evil.example/..." (absolute URL)
+    //   - anything that fails URL parsing relative to the current origin
+    function sanitizeNext(raw) {
+      if (!raw || typeof raw !== 'string') return '/';
+      if (!raw.startsWith('/')) return '/';       // must be absolute path
+      if (raw.startsWith('//')) return '/';       // reject protocol-relative
+      if (raw.startsWith('/\\')) return '/';      // reject backslash trick
+      // Resolve against the current origin and make sure the result lives
+      // on it. Any surprise (different host, non-http scheme) bounces to /.
+      try {
+        const u = new URL(raw, location.origin);
+        if (u.origin !== location.origin) return '/';
+        if (u.protocol !== location.protocol) return '/';
+        // Reconstruct from the URL's parsed components. pathname always
+        // starts with "/" after WHATWG normalization, so we cannot produce
+        // a protocol-relative output — but belt and suspenders, explicitly
+        // reject any result that does. Catches cases like
+        // `/..//dashboard` that the regex allowlist above lets through
+        // (Codex PR1 R3 suggestion #1 regression case).
+        const out = u.pathname + u.search + u.hash;
+        if (!out.startsWith('/') || out.startsWith('//')) return '/';
+        return out;
+      } catch {
+        return '/';
+      }
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      err.classList.remove('visible');
+      btn.disabled = true;
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: input.value }),
+          credentials: 'same-origin',
+        });
+        if (res.status === 204) {
+          const raw = new URLSearchParams(location.search).get('next');
+          location.replace(sanitizeNext(raw));
+          return;
+        }
+        if (res.status === 404) {
+          showError('Auth is not configured on this server.');
+        } else if (res.status === 403) {
+          showError('Invalid token.');
+        } else {
+          showError('Login failed (HTTP ' + res.status + ').');
+        }
+      } catch (e2) {
+        showError('Network error: ' + (e2.message || 'unknown'));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

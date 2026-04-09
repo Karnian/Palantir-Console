@@ -44,12 +44,37 @@ docker compose up --build
 # → http://localhost:4177 (send Authorization: Bearer my-secret-token)
 ```
 
-By default, the server binds to `0.0.0.0` with no authentication (logged as a warning). To require a token for every API call:
+### Binding policy (changed in PR1)
+
+By default the server now binds to **`127.0.0.1`** (loopback only, no auth).
+Setting `PALANTIR_TOKEN` automatically promotes the bind to `0.0.0.0` so remote
+clients can reach an authenticated API. If you want to listen on all
+interfaces without auth (discouraged), pass `HOST=0.0.0.0` explicitly — the
+server will log a `[security] WARNING` in that case.
+
+| Setup | `HOST` | `PALANTIR_TOKEN` | Bind |
+| --- | --- | --- | --- |
+| Dev default | unset | unset | `127.0.0.1` |
+| Remote + auth | unset | set | `0.0.0.0` |
+| Legacy ("always 0.0.0.0") | `0.0.0.0` | unset | `0.0.0.0` (⚠️ open, logged) |
+| Custom interface | `192.168.x.y` | either | as specified |
 
 ```bash
 PALANTIR_TOKEN=my-secret-token npm start
-# → all APIs require Authorization: Bearer my-secret-token
+# → all APIs require Authorization: Bearer my-secret-token (CLI) OR
+#   the palantir_token cookie set by POST /api/auth/login (browser).
+# → binds to 0.0.0.0
 ```
+
+**Browser clients** use an HttpOnly cookie under the hood. Visit
+`http://host:4177/login.html`, enter your token in the POST form, and
+you'll be redirected to the console with a `palantir_token` cookie set.
+The token never appears in a URL — earlier PR1 drafts accepted `?token=`
+as a one-shot bootstrap, but that was removed after Codex review because
+the first document request would already leak the token into reverse
+proxy access logs. This is required because `EventSource` cannot send
+custom headers, so the `/api/events` SSE stream would otherwise be
+unreachable with auth enabled.
 
 ## Core Concepts
 
@@ -235,7 +260,8 @@ Client pattern: the Drift badge + drawer and `run:needs_input` tab-title pulse a
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `4177` | Server port |
-| `PALANTIR_TOKEN` | (none) | Enables Bearer auth. Without it the server still binds to `0.0.0.0` but logs a warning |
+| `PALANTIR_TOKEN` | (none) | Enables Bearer/cookie auth and promotes bind from `127.0.0.1` to `0.0.0.0` |
+| `HOST` | auto | Override the bind address. `0.0.0.0` without a token logs a security warning |
 | `PALANTIR_ALLOWED_COMMANDS` | (none) | Additional allowed CLI commands (comma-separated) |
 | `PALANTIR_DEFAULT_PM_ADAPTER` | `codex` | Global default PM adapter when a project has no `preferred_pm_adapter`. Claude preference still falls through to Codex until Phase 3b (Claude PM resume) ships |
 | `PALANTIR_CODEX_MANAGER_BYPASS` | (unset) | Set to `1` to let Codex manager turns run with `--dangerously-bypass-approvals-and-sandbox`. Default (unset) keeps the manager role in the sandboxed policy |
