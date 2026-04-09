@@ -245,9 +245,50 @@ function createApp(options = {}) {
   }
   lifecycleService.startMonitoring();
 
-  // Expose for graceful shutdown
+  // Expose for graceful shutdown + tests. managerRegistry is exposed
+  // here (PR2) so manager-lifecycle.test.js can drive a real
+  // app.shutdown() with a live slot without reimplementing the sweep
+  // algorithm. Production callers have no reason to reach for it.
+  app.managerRegistry = managerRegistry;
   app.closeDb = closeDb;
   app.shutdown = () => {
+    // PR2 / P1-5: walk every live manager slot (Top + every PM) and
+    // dispose the adapter session before we tear the process down.
+    // Without this, `app.shutdown()` left manager subprocesses and
+    // their tmp dirs orphaned across test runs (visible as test
+    // `.palantir-worktrees/` leaks) and, in production, survived a
+    // graceful restart as zombie processes.
+    //
+    // Order matters:
+    //   1) manager dispose — uses runService + eventBus, so must
+    //      happen BEFORE closeDb() severs the sqlite handle,
+    //   2) lifecycleService.stopMonitoring() — cancels the health
+    //      loop that might otherwise try to act on a closed db,
+    //   3) closeDb().
+    //
+    // Dispose failures are logged but do NOT re-throw; shutdown is
+    // best-effort and a partial cleanup is still better than leaving
+    // the db open. This is distinct from the /reset + DELETE /projects
+    // paths, which are fail-closed (pmCleanupService re-throws so the
+    // HTTP layer can 502).
+    try {
+      const snap = managerRegistry.snapshot();
+      const slots = [];
+      if (snap.top) slots.push(snap.top);
+      for (const pm of (snap.pms || [])) slots.push(pm);
+      for (const slot of slots) {
+        try {
+          const adapter = managerRegistry.getActiveAdapter(slot.conversationId);
+          if (adapter && typeof adapter.disposeSession === 'function') {
+            adapter.disposeSession(slot.runId);
+          }
+        } catch (err) {
+          console.warn(`[app.shutdown] disposeSession failed for ${slot.conversationId}/${slot.runId}:`, err && err.message);
+        }
+      }
+    } catch (err) {
+      console.warn('[app.shutdown] manager dispose sweep failed:', err && err.message);
+    }
     lifecycleService.stopMonitoring();
     closeDb();
   };
