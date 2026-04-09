@@ -242,23 +242,37 @@ export function useConversation(conversationId, { poll = true, pollMs = 2000 } =
 
   const resolve = useCallback(async () => {
     if (!conversationId) return;
+    // v3 Phase 6 R2 fix — fence late responses. Capture the id that
+    // this fetch targets BEFORE awaiting, then only commit the state
+    // update if `activeIdRef.current` still matches. Without this,
+    // a slow response for PM A can land after the user switched to
+    // PM B and overwrite B's state (A→B race) — which would briefly
+    // flash the Reset PM button and stale Active badge back onto B
+    // even though Phase 6's synchronous clear already wiped it.
+    const myId = conversationId;
     try {
-      const data = await apiFetch(`/api/conversations/${encodeURIComponent(conversationId)}`);
+      const data = await apiFetch(`/api/conversations/${encodeURIComponent(myId)}`);
+      if (activeIdRef.current !== myId) return; // user already moved
       setRun(data.conversation?.run || null);
     } catch { /* 4xx — leave run null */ }
   }, [conversationId]);
 
   const loadEvents = useCallback(async (opts = {}) => {
     if (!conversationId) return;
+    const myId = conversationId;
     try {
       if (opts.reset) {
         lastEventIdRef.current = 0;
         setEvents([]);
       }
       const after = lastEventIdRef.current;
-      const base = `/api/conversations/${encodeURIComponent(conversationId)}/events`;
+      const base = `/api/conversations/${encodeURIComponent(myId)}/events`;
       const url = after > 0 ? `${base}?after=${after}` : base;
       const data = await apiFetch(url);
+      // v3 Phase 6 R2 fix — same fence as resolve(). Late events
+      // batches from a previous id must not leak into the current
+      // conversation's render state.
+      if (activeIdRef.current !== myId) return;
       const incoming = Array.isArray(data.events) ? data.events : [];
       if (incoming.length === 0) return;
       let maxId = lastEventIdRef.current;
@@ -280,11 +294,17 @@ export function useConversation(conversationId, { poll = true, pollMs = 2000 } =
 
   const sendMessage = useCallback(async (text, images) => {
     if (!conversationId) return;
+    // v3 Phase 6 R3 fix — fence loading writes on the conversation id
+    // captured at call time so a late resolve/finally from a previous
+    // conversation (A.sendMessage in flight, user switched to B) cannot
+    // stomp on B's loading state. Same class of race as resolve()/
+    // loadEvents() above.
+    const myId = conversationId;
     setLoading(true);
     try {
       const body = { text };
       if (images && images.length > 0) body.images = images;
-      const data = await apiFetch(`/api/conversations/${encodeURIComponent(conversationId)}/message`, {
+      const data = await apiFetch(`/api/conversations/${encodeURIComponent(myId)}/message`, {
         method: 'POST',
         body: JSON.stringify(body),
       });
@@ -293,11 +313,33 @@ export function useConversation(conversationId, { poll = true, pollMs = 2000 } =
       addToast('Failed to send: ' + err.message, 'error');
       throw err;
     } finally {
-      setLoading(false);
+      if (activeIdRef.current === myId) {
+        setLoading(false);
+      }
     }
   }, [conversationId]);
 
   useEffect(() => {
+    // v3 Phase 6 R1 fix — clear stale run/events SYNCHRONOUSLY on
+    // every id change so consumers that derive UI affordances from
+    // `run` (e.g., Phase 6 "Reset PM" button + active badge) never
+    // see the previous PM's state while the async resolve() for the
+    // new id is in flight. Without this, switching from an active
+    // PM A to an idle PM B would briefly render B as active and
+    // expose a Reset that then operates on B based on A's stale
+    // state. resolve() will repopulate run/events asynchronously.
+    //
+    // R4 fix — also reset `loading` here. sendMessage() now fences its
+    // `finally` by id (R3), which means a mid-flight A send whose
+    // finally is skipped would otherwise leave B stuck at loading=true
+    // forever. Clearing on id switch is correct because loading is a
+    // per-conversation concept tied to "am I waiting for my own
+    // response", not a global app state.
+    setRun(null);
+    setEvents([]);
+    setLoading(false);
+    lastEventIdRef.current = 0;
+
     resolve();
     loadEvents({ reset: true });
     if (!poll) return;
