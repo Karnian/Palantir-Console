@@ -41,6 +41,8 @@ const { createPmCleanupService } = require('./services/pmCleanupService');
 const { createPmSpawnService } = require('./services/pmSpawnService');
 const { createReconciliationService } = require('./services/reconciliationService');
 const { createDispatchAuditRouter } = require('./routes/dispatchAudit');
+const { createRouterService } = require('./services/routerService');
+const { createRouterRouter } = require('./routes/router');
 
 function createApp(options = {}) {
   const app = express();
@@ -146,6 +148,11 @@ function createApp(options = {}) {
   // intervention stale" claims, so it has to be constructed AFTER
   // conversationService. It does not emit events or block anything —
   // it writes to dispatch_audit_log and the UI renders a badge.
+  // v3 Phase 6: deterministic conversation-target matcher. Pure,
+  // projectService-only dependency, reused by both the HTTP route and
+  // (future) in-process Top-layer LLM dispatch paths.
+  const routerService = createRouterService({ projectService });
+
   const reconciliationService = createReconciliationService({
     db,
     runService,
@@ -202,6 +209,7 @@ function createApp(options = {}) {
   app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, authResolverOpts }));
   app.use('/api/conversations', createConversationsRouter({ conversationService, runService }));
   app.use('/api/dispatch-audit', createDispatchAuditRouter({ reconciliationService }));
+  app.use('/api/router', createRouterRouter({ routerService }));
 
   app.use(errorHandler);
 
