@@ -76,6 +76,13 @@ export function useSSE(listeners) {
   const listenersRef = useRef(listeners);
   listenersRef.current = listeners;
   const [connected, setConnected] = useState(false);
+  // PR3a / ADD-3: cache the server_session_id across reconnects. On
+  // silent EventSource auto-reconnect after a server restart, the new
+  // process starts eventId at 0 and replayBuffer is empty — our Last-
+  // Event-ID cursor becomes meaningless and any un-replayed transitions
+  // are lost forever. Detect the change and do a full reload so the
+  // client gets a consistent view.
+  const serverSessionRef = useRef(null);
 
   useEffect(() => {
     let source;
@@ -107,6 +114,27 @@ export function useSSE(listeners) {
         } catch { /* ignore parse errors */ }
       });
     });
+
+    // PR3a / ADD-3: server_session channel — emitted as the first frame
+    // on every SSE connect. If we have a cached id and the new one
+    // differs, trigger a full reload.
+    source.addEventListener('server_session', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        const newId = data && data.server_session_id;
+        if (!newId) return;
+        const prev = serverSessionRef.current;
+        if (prev && prev !== newId) {
+          // Server restarted under us — the cursor is stale. Full reload
+          // is the least-surprising option; a delta-replay would require
+          // a server-side cursor table we don't have.
+          location.reload();
+          return;
+        }
+        serverSessionRef.current = newId;
+      } catch { /* ignore */ }
+    });
+
     source.onerror = () => {
       setConnected(false);
       // EventSource auto-reconnects
