@@ -17,6 +17,16 @@ function createEventsRouter({ eventBus }) {
     // interval on quiet servers. Also makes integration tests reliable.
     if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
+    // PR3a / ADD-3: send the server_session_id as the very first SSE
+    // frame. The client caches this; if it ever sees a DIFFERENT
+    // server_session_id (e.g. after a silent reconnect to a restarted
+    // server) it does a full reload — its replay cursor is stale
+    // because the new process's eventId counter started at 0 and any
+    // events from the old process are gone.
+    if (eventBus.serverSessionId) {
+      safeWrite(`event: server_session\ndata: ${JSON.stringify({ server_session_id: eventBus.serverSessionId })}\n\n`);
+    }
+
     function safeWrite(data) {
       try {
         if (!res.writableEnded) res.write(data);
@@ -46,9 +56,16 @@ function createEventsRouter({ eventBus }) {
     }
     seenIds.clear(); // free memory — dedup only needed during replay window
 
-    // Heartbeat every 30s to keep connection alive
+    // Heartbeat every 30s to keep connection alive. Also re-sends the
+    // server_session_id as an SSE comment so a client that missed the
+    // initial `server_session` event (race on reconnect) still gets it
+    // on the next tick without waiting for the next real event.
     const heartbeat = setInterval(() => {
-      safeWrite(': heartbeat\n\n');
+      if (eventBus.serverSessionId) {
+        safeWrite(`: heartbeat server_session=${eventBus.serverSessionId}\n\n`);
+      } else {
+        safeWrite(': heartbeat\n\n');
+      }
     }, 30000);
 
     // Cleanup on disconnect
