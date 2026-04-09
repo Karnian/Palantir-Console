@@ -43,6 +43,60 @@ test('Phase 4: migration 010 creates dispatch_audit_log', async (t) => {
   assert.ok(row);
 });
 
+test('Phase 7: recordClaim emits dispatch_audit:recorded event on the bus', async (t) => {
+  const db = await mkdb(t);
+  const { projectService, taskService, runService, project } = seedCore(db);
+  const events = [];
+  const fakeBus = {
+    emit: (channel, data) => events.push({ channel, data }),
+  };
+  const svc = createReconciliationService({
+    db, runService, taskService, projectService, eventBus: fakeBus,
+  });
+  const task = taskService.createTask({ title: 'T', project_id: project.id });
+
+  // Coherent claim
+  taskService.updateTaskStatus(task.id, 'in_progress');
+  svc.recordClaim({
+    projectId: project.id,
+    pmClaim: { kind: 'task_in_progress', task_id: task.id },
+  });
+  // Incoherent claim (wrong status)
+  svc.recordClaim({
+    projectId: project.id,
+    pmClaim: { kind: 'task_complete', task_id: task.id },
+  });
+
+  assert.equal(events.length, 2);
+  assert.equal(events[0].channel, 'dispatch_audit:recorded');
+  assert.equal(events[0].data.project_id, project.id);
+  assert.equal(events[0].data.incoherence_flag, 0);
+  assert.equal(events[1].data.incoherence_flag, 1);
+  assert.equal(events[1].data.incoherence_kind, 'pm_hallucination');
+  // Full row present (listClaims-compatible)
+  assert.ok(events[1].data.audit);
+  assert.ok(events[1].data.audit.id);
+});
+
+test('Phase 7: eventBus emit failure must not block recordClaim (annotate-only)', async (t) => {
+  const db = await mkdb(t);
+  const { projectService, taskService, runService, project } = seedCore(db);
+  const explodeBus = {
+    emit: () => { throw new Error('bus is down'); },
+  };
+  const svc = createReconciliationService({
+    db, runService, taskService, projectService, eventBus: explodeBus,
+  });
+  const task = taskService.createTask({ title: 'T', project_id: project.id });
+  // Must NOT throw even though the bus does.
+  const row = svc.recordClaim({
+    projectId: project.id,
+    pmClaim: { kind: 'task_complete', task_id: task.id },
+  });
+  assert.ok(row);
+  assert.equal(row.incoherence_flag, 1);
+});
+
 test('Phase 4: coherent task_complete claim is recorded with flag=0', async (t) => {
   const db = await mkdb(t);
   const { projectService, taskService, runService, project } = seedCore(db);

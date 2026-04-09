@@ -160,6 +160,7 @@ function createApp(options = {}) {
     projectService,
     agentProfileService,
     conversationService,
+    eventBus, // v3 Phase 7: enables dispatch_audit:recorded SSE events
   });
 
   // Middleware
