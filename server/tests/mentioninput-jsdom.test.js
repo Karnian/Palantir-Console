@@ -31,8 +31,9 @@ function typeInto(env, textarea, text) {
   textarea.dispatchEvent(new env.window.Event('input', { bubbles: true }));
 }
 
-test('MentionInput jsdom: shows dropdown when @ is typed', async () => {
+test('MentionInput jsdom: shows dropdown when @ is typed', async (t) => {
   const env = createEnv();
+  t.after(env.cleanup);
   const { render, h } = env.context.preact;
   const root = env.document.getElementById('root');
 
@@ -74,8 +75,9 @@ test('MentionInput jsdom: shows dropdown when @ is typed', async () => {
   assert.equal(items.length, 3, 'all projects should show when just @ is typed');
 });
 
-test('MentionInput jsdom: filters projects by text after @', async () => {
+test('MentionInput jsdom: filters projects by text after @', async (t) => {
   const env = createEnv();
+  t.after(env.cleanup);
   const { render, h } = env.context.preact;
   const root = env.document.getElementById('root');
 
@@ -101,8 +103,9 @@ test('MentionInput jsdom: filters projects by text after @', async () => {
   assert.ok(names.includes('FrontPorch'), 'should include FrontPorch');
 });
 
-test('MentionInput jsdom: arrow keys navigate suggestions', async () => {
+test('MentionInput jsdom: arrow keys navigate suggestions', async (t) => {
   const env = createEnv();
+  t.after(env.cleanup);
   const { render, h } = env.context.preact;
   const root = env.document.getElementById('root');
 
@@ -145,8 +148,9 @@ test('MentionInput jsdom: arrow keys navigate suggestions', async () => {
     'ArrowUp should highlight first item');
 });
 
-test('MentionInput jsdom: Enter selects project and inserts @name ', async () => {
+test('MentionInput jsdom: Enter selects project and inserts @name ', async (t) => {
   const env = createEnv();
+  t.after(env.cleanup);
   const { render, h } = env.context.preact;
   const root = env.document.getElementById('root');
 
@@ -181,8 +185,9 @@ test('MentionInput jsdom: Enter selects project and inserts @name ', async () =>
   assert.equal(capturedValue, '@Backend ', 'onInput should have fired with @Backend ');
 });
 
-test('MentionInput jsdom: Esc closes the suggestion dropdown', async () => {
+test('MentionInput jsdom: Esc closes the suggestion dropdown', async (t) => {
   const env = createEnv();
+  t.after(env.cleanup);
   const { render, h } = env.context.preact;
   const root = env.document.getElementById('root');
 
