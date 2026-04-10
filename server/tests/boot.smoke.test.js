@@ -226,7 +226,7 @@ test('boot: app/lib/hooks.js exports every hook the app needs', async (t) => {
   // Locks the public surface of hooks.js. If a hook gets renamed or dropped
   // here, the bridge in main.js would silently fail to assign it on window
   // and app.js would fall back to a ReferenceError on first use.
-  for (const sym of ['useRoute', 'navigate', 'useEscape', 'useSSE', 'useTasks', 'useRuns', 'useProjects', 'useClaudeSessions', 'useAgents', 'useManager']) {
+  for (const sym of ['useRoute', 'navigate', 'useEscape', 'useSSE', 'useTasks', 'useRuns', 'useProjects', 'useClaudeSessions', 'useAgents', 'useManagerLifecycle']) {
     assert.match(res.text, new RegExp(`export\\s+(async\\s+)?function\\s+${sym}`), `${sym} export present`);
   }
 });
@@ -237,7 +237,7 @@ test('boot: main.js bridges the toast and hook modules onto window', async (t) =
   for (const sym of ['addToast', 'useToasts', 'ToastContainer', 'apiFetchWithToast']) {
     assert.match(res.text, new RegExp(`window\\.${sym}\\s*=`), `${sym} window bridge present`);
   }
-  for (const sym of ['useRoute', 'navigate', 'useEscape', 'useSSE', 'useTasks', 'useRuns', 'useProjects', 'useClaudeSessions', 'useAgents', 'useManager']) {
+  for (const sym of ['useRoute', 'navigate', 'useEscape', 'useSSE', 'useTasks', 'useRuns', 'useProjects', 'useClaudeSessions', 'useAgents', 'useManagerLifecycle']) {
     assert.match(res.text, new RegExp(`window\\.${sym}\\s*=`), `${sym} window bridge present`);
   }
 });

@@ -11,7 +11,7 @@ import { formatDuration, formatTime, timeAgo } from './app/lib/format.js';
 import { renderMarkdown } from './app/lib/markdown.js';
 import { apiFetch } from './app/lib/api.js';
 import { addToast, useToasts, ToastContainer, apiFetchWithToast } from './app/lib/toast.js';
-import { useRoute, navigate, useEscape, useSSE, useTasks, useRuns, useProjects, useClaudeSessions, useAgents, useManager, useConversation, useDispatchAudit } from './app/lib/hooks.js';
+import { useRoute, navigate, useEscape, useSSE, useTasks, useRuns, useProjects, useClaudeSessions, useAgents, useManagerLifecycle, useConversation, useDispatchAudit } from './app/lib/hooks.js';
 import { dueState, formatDueDate, useNowTick, dueDateMeta } from './app/lib/dueDate.js';
 import { requestNotificationPermission, showBrowserNotification, pulseTabTitle } from './app/lib/notifications.js';
 
@@ -91,7 +91,18 @@ function App() {
   const { projects, loading: projectsLoading, reload: reloadProjects } = useProjects();
   const { agents, loading: agentsLoading, error: agentsError, reload: reloadAgents } = useAgents();
   const { sessions: claudeSessions } = useClaudeSessions();
-  const manager = useManager();
+  // P8-3: useManager split → lifecycle + conversation('top')
+  const managerLifecycle = useManagerLifecycle();
+  const topConv = useConversation('top', { poll: true, pollMs: 2000 });
+  const manager = useMemo(() => ({
+    status: managerLifecycle.status,
+    events: topConv.events,
+    loading: managerLifecycle.loading,
+    start: managerLifecycle.start,
+    sendMessage: topConv.sendMessage,
+    stop: managerLifecycle.stop,
+    checkStatus: managerLifecycle.checkStatus,
+  }), [managerLifecycle.status, topConv.events, managerLifecycle.loading, managerLifecycle.start, topConv.sendMessage, managerLifecycle.stop, managerLifecycle.checkStatus]);
   const driftAudit = useDispatchAudit();
   const [showDriftDrawer, setShowDriftDrawer] = useState(false);
   const [inspectRun, setInspectRun] = useState(null);

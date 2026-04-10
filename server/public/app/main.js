@@ -78,7 +78,7 @@ window.useRuns = hooks.useRuns;
 window.useProjects = hooks.useProjects;
 window.useClaudeSessions = hooks.useClaudeSessions;
 window.useAgents = hooks.useAgents;
-window.useManager = hooks.useManager;
+window.useManagerLifecycle = hooks.useManagerLifecycle;
 window.useConversation = hooks.useConversation; // v3 Phase 1.5
 window.useDispatchAudit = hooks.useDispatchAudit; // v3 Phase 7
 
