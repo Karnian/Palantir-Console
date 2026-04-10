@@ -59,6 +59,28 @@ async function loadDashboardViewSource() {
   return _dashboardViewSrcCache;
 }
 
+// P7-1 (ESM phase 6): TaskModals — NewTaskModal, ExecuteModal, TaskDetailPanel.
+let _taskModalsSrcCache;
+async function loadTaskModalsSource() {
+  if (_taskModalsSrcCache) return _taskModalsSrcCache;
+  _taskModalsSrcCache = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'components', 'TaskModals.js'),
+    'utf8'
+  );
+  return _taskModalsSrcCache;
+}
+
+// P6-3 (ESM phase 5): SessionsView — Legacy sessions management view.
+let _sessionsViewSrcCache;
+async function loadSessionsViewSource() {
+  if (_sessionsViewSrcCache) return _sessionsViewSrcCache;
+  _sessionsViewSrcCache = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'components', 'SessionsView.js'),
+    'utf8'
+  );
+  return _sessionsViewSrcCache;
+}
+
 function sliceFunction(src, header) {
   // Find the declaration, then grab a generous window afterwards. We
   // don't need to precisely delimit the function body — a brace
@@ -485,4 +507,101 @@ test('P3-1 ManagerView uses MentionInput instead of plain textarea', async () =>
   // And it should pass projects prop
   assert.match(src, /projects=\$\{projects\}/,
     'MentionInput must receive the projects prop for autocomplete candidates');
+});
+
+// ---- P8-8: TaskModals (P7-1 ESM phase 6) ----
+
+test('P8-8 TaskModals.js exports NewTaskModal, ExecuteModal, TaskDetailPanel as named exports', async () => {
+  const src = await loadTaskModalsSource();
+  assert.match(src, /export\s+function\s+NewTaskModal\s*\(/,
+    'TaskModals.js must provide `export function NewTaskModal(...)`');
+  assert.match(src, /export\s+function\s+ExecuteModal\s*\(/,
+    'TaskModals.js must provide `export function ExecuteModal(...)`');
+  assert.match(src, /export\s+function\s+TaskDetailPanel\s*\(/,
+    'TaskModals.js must provide `export function TaskDetailPanel(...)`');
+});
+
+test('P8-8 TaskModals.js dereferences window.preact / preactHooks / htm at top level', async () => {
+  const src = await loadTaskModalsSource();
+  assert.match(src, /window\.preactHooks/, 'window.preactHooks reference missing');
+  assert.match(src, /window\.preact/, 'window.preact reference missing');
+  assert.match(src, /window\.htm\.bind\(h\)/, 'htm.bind(h) wiring missing');
+});
+
+test('P8-8 NewTaskModal has accessible close button', async () => {
+  const src = await loadTaskModalsSource();
+  // Locate NewTaskModal function body (up to next export function)
+  const start = src.indexOf('export function NewTaskModal');
+  const nextExport = src.indexOf('export function ExecuteModal');
+  assert.ok(start >= 0, 'NewTaskModal not found');
+  assert.ok(nextExport > start, 'ExecuteModal boundary not found');
+  const body = src.slice(start, nextExport);
+  // Must have a close button with onClick=${onClose}
+  assert.match(body, /onClick=\$\{onClose\}/, 'NewTaskModal must have a close button bound to onClose');
+  // Must have modal-header with a title
+  assert.match(body, /class="modal-header"/, 'NewTaskModal must have a modal-header');
+  assert.match(body, /class="modal-title"/, 'NewTaskModal must have a modal-title');
+});
+
+test('P8-8 ExecuteModal has accessible modal structure', async () => {
+  const src = await loadTaskModalsSource();
+  const start = src.indexOf('export function ExecuteModal');
+  const nextExport = src.indexOf('export function TaskDetailPanel');
+  assert.ok(start >= 0, 'ExecuteModal not found');
+  assert.ok(nextExport > start, 'TaskDetailPanel boundary not found');
+  const body = src.slice(start, nextExport);
+  // Must have modal overlay + backdrop + panel
+  assert.match(body, /class="modal-overlay"/, 'ExecuteModal must have a modal-overlay');
+  assert.match(body, /class="modal-backdrop"/, 'ExecuteModal must have a modal-backdrop for click-outside close');
+  assert.match(body, /class="modal-panel"/, 'ExecuteModal must have a modal-panel');
+  // Must use useEscape hook for keyboard dismiss
+  assert.match(body, /useEscape\(/, 'ExecuteModal must use useEscape hook for Esc dismissal');
+});
+
+test('P8-8 TaskDetailPanel has proper semantic structure', async () => {
+  const src = await loadTaskModalsSource();
+  const start = src.indexOf('export function TaskDetailPanel');
+  assert.ok(start >= 0, 'TaskDetailPanel not found');
+  const body = src.slice(start);
+  // Must have inline-edit aria labels for accessibility
+  assert.match(body, /aria-label="Edit title"/, 'TaskDetailPanel must have aria-label for title editing');
+  assert.match(body, /aria-label="Edit description"/, 'TaskDetailPanel must have aria-label for description editing');
+  // Must have status/priority Dropdown components with ariaLabel
+  assert.match(body, /ariaLabel="Status"/, 'TaskDetailPanel must pass ariaLabel to Status Dropdown');
+  assert.match(body, /ariaLabel="Priority"/, 'TaskDetailPanel must pass ariaLabel to Priority Dropdown');
+  assert.match(body, /ariaLabel="Project"/, 'TaskDetailPanel must pass ariaLabel to Project Dropdown');
+});
+
+test('P8-8 main.js dynamically imports TaskModals and bridges all three exports onto window', async () => {
+  const src = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'main.js'),
+    'utf8',
+  );
+  assert.match(src, /import\(\s*['"]\.\/components\/TaskModals\.js['"]\s*\)/,
+    'main.js must dynamically import ./components/TaskModals.js');
+  assert.match(src, /window\.NewTaskModal\s*=\s*NewTaskModal/,
+    'main.js must assign window.NewTaskModal = NewTaskModal');
+  assert.match(src, /window\.ExecuteModal\s*=\s*ExecuteModal/,
+    'main.js must assign window.ExecuteModal = ExecuteModal');
+  assert.match(src, /window\.TaskDetailPanel\s*=\s*TaskDetailPanel/,
+    'main.js must assign window.TaskDetailPanel = TaskDetailPanel');
+});
+
+// ---- P8-8: SessionsView (P6-3 ESM phase 5) ----
+
+test('P8-8 SessionsView.js exports SessionsView as a named export', async () => {
+  const src = await loadSessionsViewSource();
+  assert.match(src, /export\s+function\s+SessionsView\s*\(/,
+    'SessionsView.js must provide `export function SessionsView(...)`');
+});
+
+test('P8-8 main.js dynamically imports SessionsView and bridges it onto window', async () => {
+  const src = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'main.js'),
+    'utf8',
+  );
+  assert.match(src, /import\(\s*['"]\.\/components\/SessionsView\.js['"]\s*\)/,
+    'main.js must dynamically import ./components/SessionsView.js');
+  assert.match(src, /window\.SessionsView\s*=\s*SessionsView/,
+    'main.js must assign window.SessionsView = SessionsView');
 });
