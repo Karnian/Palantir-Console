@@ -126,6 +126,156 @@ test('CodexAdapter normalizes thread.started + agent_message + turn.completed', 
   assert.equal(adapter.isSessionAlive('run_mgr_codex2'), false);
 });
 
+// --- P4-6: Codex error classifier tests ---
+
+test('classifyCodexErrorAsNotice returns true for severity-based notices', () => {
+  const { classifyCodexErrorAsNotice } = require('../services/managerAdapters/codexAdapter');
+  assert.equal(classifyCodexErrorAsNotice({ severity: 'warning', message: 'something' }), true);
+  assert.equal(classifyCodexErrorAsNotice({ severity: 'warn', message: '' }), true);
+  assert.equal(classifyCodexErrorAsNotice({ severity: 'notice', message: '' }), true);
+  assert.equal(classifyCodexErrorAsNotice({ severity: 'info', message: '' }), true);
+  assert.equal(classifyCodexErrorAsNotice({ severity: 'deprecation', message: '' }), true);
+  assert.equal(classifyCodexErrorAsNotice({ severity: 'WARNING', message: '' }), true, 'case insensitive');
+  assert.equal(classifyCodexErrorAsNotice({ severity: 'error', message: '' }), false);
+  assert.equal(classifyCodexErrorAsNotice({ severity: 'fatal', message: '' }), false);
+});
+
+test('classifyCodexErrorAsNotice returns true for code-prefix notices', () => {
+  const { classifyCodexErrorAsNotice } = require('../services/managerAdapters/codexAdapter');
+  assert.equal(classifyCodexErrorAsNotice({ code: 'deprecated_feature_x' }), true);
+  assert.equal(classifyCodexErrorAsNotice({ code: 'deprecation_notice' }), true);
+  assert.equal(classifyCodexErrorAsNotice({ code: 'notice_something' }), true);
+  assert.equal(classifyCodexErrorAsNotice({ code: 'warn_something' }), true);
+  assert.equal(classifyCodexErrorAsNotice({ code: 'warning_something' }), true);
+  assert.equal(classifyCodexErrorAsNotice({ code: 'error_something' }), false);
+});
+
+test('classifyCodexErrorAsNotice returns true for deprecation message regex', () => {
+  const { classifyCodexErrorAsNotice } = require('../services/managerAdapters/codexAdapter');
+  assert.equal(classifyCodexErrorAsNotice({ message: '[features].foo is deprecated' }), true);
+  assert.equal(classifyCodexErrorAsNotice({ message: 'Deprecation warning for X' }), true);
+  assert.equal(classifyCodexErrorAsNotice({ message: 'Something else entirely' }), false);
+});
+
+test('classifyCodexErrorAsNotice returns false for null/invalid input', () => {
+  const { classifyCodexErrorAsNotice } = require('../services/managerAdapters/codexAdapter');
+  assert.equal(classifyCodexErrorAsNotice(null), false);
+  assert.equal(classifyCodexErrorAsNotice(undefined), false);
+  assert.equal(classifyCodexErrorAsNotice('string'), false);
+  assert.equal(classifyCodexErrorAsNotice(42), false);
+});
+
+test('classifyCodexErrorKind uses structured error_type first', () => {
+  const { classifyCodexErrorKind } = require('../services/managerAdapters/codexAdapter');
+  assert.equal(classifyCodexErrorKind({ error_type: 'rate_limit', message: 'rate limit hit' }), 'rate_limit');
+  assert.equal(classifyCodexErrorKind({ error_type: 'custom_vendor_error', message: '' }), 'custom_vendor_error');
+});
+
+test('classifyCodexErrorKind uses structured code field', () => {
+  const { classifyCodexErrorKind } = require('../services/managerAdapters/codexAdapter');
+  assert.equal(classifyCodexErrorKind({ code: 'model_not_available', message: '' }), 'model_not_available');
+  // Notice-prefixed codes should NOT be used as error kind
+  assert.equal(classifyCodexErrorKind({ code: 'deprecated_feature', message: 'timeout happened' }), 'timeout');
+});
+
+test('classifyCodexErrorKind classifies common error patterns via regex', () => {
+  const { classifyCodexErrorKind } = require('../services/managerAdapters/codexAdapter');
+
+  // rate_limit
+  assert.equal(classifyCodexErrorKind({ message: 'Rate limit exceeded' }), 'rate_limit');
+  assert.equal(classifyCodexErrorKind({ message: 'rate-limit reached' }), 'rate_limit');
+
+  // auth_error
+  assert.equal(classifyCodexErrorKind({ message: 'Unauthorized access' }), 'auth_error');
+  assert.equal(classifyCodexErrorKind({ message: '401 auth required' }), 'auth_error');
+  assert.equal(classifyCodexErrorKind({ message: 'Forbidden: 403' }), 'auth_error');
+
+  // timeout
+  assert.equal(classifyCodexErrorKind({ message: 'Request timed out' }), 'timeout');
+  assert.equal(classifyCodexErrorKind({ message: 'ETIMEDOUT connecting' }), 'timeout');
+  assert.equal(classifyCodexErrorKind({ message: 'Connection timeout' }), 'timeout');
+
+  // network_error
+  assert.equal(classifyCodexErrorKind({ message: 'ECONNREFUSED 127.0.0.1:443' }), 'network_error');
+  assert.equal(classifyCodexErrorKind({ message: 'ECONNRESET by peer' }), 'network_error');
+  assert.equal(classifyCodexErrorKind({ message: 'Network error occurred' }), 'network_error');
+  assert.equal(classifyCodexErrorKind({ message: 'fetch failed' }), 'network_error');
+
+  // context_length
+  assert.equal(classifyCodexErrorKind({ message: 'Context length exceeded' }), 'context_length');
+  assert.equal(classifyCodexErrorKind({ message: 'max tokens reached' }), 'context_length');
+  assert.equal(classifyCodexErrorKind({ message: 'Input too long for model' }), 'context_length');
+
+  // invalid_model
+  assert.equal(classifyCodexErrorKind({ message: 'Model gpt-99 not found' }), 'invalid_model');
+  assert.equal(classifyCodexErrorKind({ message: 'The model does not exist' }), 'invalid_model');
+
+  // server_overloaded
+  assert.equal(classifyCodexErrorKind({ message: 'Server overloaded, try later' }), 'server_overloaded');
+  assert.equal(classifyCodexErrorKind({ message: 'HTTP 503 service unavailable' }), 'server_overloaded');
+  assert.equal(classifyCodexErrorKind({ message: 'HTTP 529 overloaded' }), 'server_overloaded');
+
+  // invalid_request
+  assert.equal(classifyCodexErrorKind({ message: 'Invalid request body' }), 'invalid_request');
+  assert.equal(classifyCodexErrorKind({ message: 'Bad request: missing field' }), 'invalid_request');
+
+  // content_filtered
+  assert.equal(classifyCodexErrorKind({ message: 'Content filter triggered' }), 'content_filtered');
+  assert.equal(classifyCodexErrorKind({ message: 'Output blocked by safety' }), 'content_filtered');
+});
+
+test('classifyCodexErrorKind falls back to unknown_error', () => {
+  const { classifyCodexErrorKind } = require('../services/managerAdapters/codexAdapter');
+  assert.equal(classifyCodexErrorKind({ message: 'Something completely unexpected' }), 'unknown_error');
+  assert.equal(classifyCodexErrorKind({ message: '' }), 'unknown_error');
+  assert.equal(classifyCodexErrorKind({}), 'unknown_error');
+  assert.equal(classifyCodexErrorKind(null), 'unknown_error');
+  assert.equal(classifyCodexErrorKind(undefined), 'unknown_error');
+});
+
+// --- P4-7: allowedTools source invariant tests ---
+
+test('P4-7: claudeAdapter allowedTools must NOT include Bash(curl:*)', () => {
+  const { createClaudeAdapter } = require('../services/managerAdapters/claudeAdapter');
+  const capturedTools = [];
+  const adapter = createClaudeAdapter({
+    streamJsonEngine: {
+      spawnAgent: (_runId, opts) => { capturedTools.push(...(opts.allowedTools || [])); return { pid: 1 }; },
+      isAlive: () => false,
+      detectExitCode: () => null,
+      kill: () => true,
+      getOutput: () => '',
+      getUsage: () => null,
+      getSessionId: () => null,
+      sendInput: () => true,
+    },
+    runService: null,
+  });
+  adapter.startSession('test-invariant', { prompt: 'hi', cwd: '/tmp' });
+  const hasCurl = capturedTools.some(t => /Bash\(curl/i.test(t));
+  assert.equal(hasCurl, false, 'Bash(curl:*) must not appear in default allowedTools');
+  const hasWebFetch = capturedTools.includes('WebFetch');
+  assert.equal(hasWebFetch, true, 'WebFetch must be in default allowedTools');
+});
+
+test('P4-7: source invariant — no Bash(curl string literal in claudeAdapter.js baseTools', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'managerAdapters', 'claudeAdapter.js'), 'utf-8');
+  // Find the baseTools array definition and extract only the string literals
+  // (ignoring comments that may reference Bash(curl in historical context).
+  const toolsSection = src.match(/const baseTools\s*=\s*allowedTools\s*\|\|\s*\[([\s\S]*?)\];/);
+  assert.ok(toolsSection, 'baseTools array should exist in claudeAdapter.js');
+  const stringLiterals = toolsSection[1].match(/'[^']*'/g) || [];
+  const hasCurlLiteral = stringLiterals.some(s => s.includes('Bash(curl'));
+  assert.equal(hasCurlLiteral, false, 'Bash(curl must not appear as a string literal in baseTools array');
+});
+
+test('P4-7: system prompt no longer uses curl examples', () => {
+  const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
+  const out = buildManagerSystemPrompt({ adapter: null, port: 4177, token: 'tok' });
+  assert.match(out, /WebFetch/, 'system prompt should mention WebFetch');
+  assert.doesNotMatch(out, /curl -s/, 'system prompt should not contain curl -s examples');
+});
+
 test('ClaudeAdapter exposes Claude guardrails section', () => {
   const { createClaudeAdapter } = require('../services/managerAdapters/claudeAdapter');
   const adapter = createClaudeAdapter({
