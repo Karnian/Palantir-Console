@@ -33,8 +33,9 @@ function loadComponent(componentName, context) {
   const raw = fs.readFileSync(filePath, 'utf8');
 
   // Strip leading `export` from `export function Foo` declarations.
+  // The `g` flag handles files with multiple exported functions.
   const transformed = raw
-    .replace(/^export\s+function\s+/m, 'function ')
+    .replace(/^export\s+function\s+/gm, 'function ')
     + `\nthis.${componentName} = ${componentName};`;
 
   vm.runInContext(transformed, context);
@@ -80,6 +81,8 @@ function createPreactEnv() {
     render,
     /** Load a component from server/public/app/components/<name>.js */
     loadComponent: (name) => loadComponent(name, context),
+    /** Tear down the jsdom instance — call in after() to prevent resource leaks. */
+    cleanup: () => dom.window.close(),
   };
 }
 
