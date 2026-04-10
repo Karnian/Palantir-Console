@@ -45,7 +45,7 @@ node --test server/tests/v2-api.test.js
 Express.js 5 + SQLite (WAL, better-sqlite3) + Preact/HTM (CDN 없이 vendor/ UMD).
 빌드 스텝 없음 — `server/public/`의 파일이 그대로 서빙됨.
 
-**v3 기준 (Phase 0~7 merged)**: Top manager + 프로젝트 단위 PM (lazy-spawn, conversation identity), deterministic router, annotate-only drift reconciliation, SSE 시맨틱 envelope.
+**v3 기준 (Phase 0~8 merged)**: Top manager + 프로젝트 단위 PM (lazy-spawn, conversation identity), deterministic router, annotate-only drift reconciliation, SSE 시맨틱 envelope. P8: app.js ESM 전환, hooks 분할, ManagerView 분할.
 
 ```
 server/
@@ -83,10 +83,13 @@ server/
     eventBus.js               — EventEmitter pub/sub (replay 200)
     worktreeService.js        — Git worktree 관리
   public/
-    app.js                    — Preact SPA 진입 (NAV_ITEMS + NavSidebar + Loading + App + mount, ~291줄)
+    app.js                    — Preact SPA 진입 (ES module, P8-2), NAV_ITEMS + NavSidebar + App + mount
     app/main.js               — ESM 엔트리 포인트 (preact/htm/hooks 를 window 로 브릿지)
-    app/lib/hooks.js          — useSSE, useConversation, useDispatchAudit, useManager, …
-    app/components/ManagerView.js  — Manager UI (P6-1)
+    app/lib/hooks.js          — re-export barrel (→ hooks/ 디렉토리)
+    app/lib/hooks/             — P8-4 분할: routing, utils, sse, data, conversation, dispatch, manager
+    app/components/ManagerView.js  — Manager 레이아웃 셸 (P8-5, ~35줄)
+    app/components/ManagerChat.js  — Manager 채팅 패널 (P8-5, ~500줄)
+    app/components/SessionGrid.js  — Task 세션 그리드 (P8-5, ~200줄)
     app/components/SessionsView.js — Legacy sessions (P6-3)
     app/components/TaskModals.js   — NewTaskModal, ExecuteModal, TaskDetailPanel (P7-1)
     app/lib/notifications.js       — Browser notifications + tab pulse (P7-4)
@@ -103,7 +106,7 @@ server/
     v2-api.test.js, api.test.js, boot.smoke.test.js, …
 ```
 
-> **498 tests** 기준 (P6+P7 ESM 추출 + 정리 완료 시점). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙.
+> **509 tests** 기준 (P8 완료 시점). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙.
 
 ## Key Patterns
 
