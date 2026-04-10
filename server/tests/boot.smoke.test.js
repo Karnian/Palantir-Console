@@ -160,10 +160,12 @@ test('boot: app/main.js bridges Preact onto window globals', async (t) => {
   assert.match(res.text, /window\.htm\s*=/, 'window.htm assignment');
 });
 
-test('boot: app/main.js loads legacy app.js dynamically', async (t) => {
+test('boot: app/main.js imports app.js as ES module (P8-2)', async (t) => {
   const app = await createTestApp(t);
   const res = await request(app).get('/app/main.js');
-  assert.match(res.text, /legacy\.src\s*=\s*['"]\.\/app\.js['"]/, 'dynamic legacy loader present');
+  assert.match(res.text, /import\(\s*['"]\.\.\/app\.js['"]\s*\)/, 'ESM dynamic import of app.js present');
+  // The legacy classic-script loader must be gone.
+  assert.doesNotMatch(res.text, /legacy\.src\s*=/, 'legacy script loader removed');
 });
 
 test('boot: app/main.js bridges helper modules onto window', async (t) => {

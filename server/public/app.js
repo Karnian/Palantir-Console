@@ -1,15 +1,34 @@
-/* global preact, preactHooks, htm, formatDuration, formatTime, timeAgo, renderMarkdown, apiFetch */
-/* global dueState, formatDueDate, useNowTick, dueDateMeta */
-/* global DashboardView, BoardView, CalendarView, DirectoryPicker, ProjectsView, AgentsView, SessionsView */
-/* global NewTaskModal, ExecuteModal, TaskDetailPanel */
-/* global requestNotificationPermission, showBrowserNotification, pulseTabTitle */
-// All globals are bridged onto window by app/main.js before this script loads.
-// ESM components: DashboardView(P5-1), BoardView/CalendarView(P5-2), ProjectsView(P5-3),
-// AgentsView(P5-4), SessionsView(P6-3), ManagerView(P6-1), TaskModals(P7-1),
-// Notifications(P7-4). Hooks/helpers live in app/lib/hooks.js + app/lib/format.js.
-const { h, render } = preact;
-const { useState, useEffect, useRef, useCallback, useMemo } = preactHooks;
-const html = htm.bind(h);
+// Palantir Console — App shell (ES module, P8-2).
+// All dependencies imported directly; no window globals needed.
+
+import { h, render } from './vendor/preact.module.js';
+import { useState, useEffect, useRef, useCallback, useMemo } from './vendor/hooks.module.js';
+import htmFactory from './vendor/htm.module.js';
+const html = htmFactory.bind(h);
+
+// Helpers
+import { formatDuration, formatTime, timeAgo } from './app/lib/format.js';
+import { renderMarkdown } from './app/lib/markdown.js';
+import { apiFetch } from './app/lib/api.js';
+import { addToast, useToasts, ToastContainer, apiFetchWithToast } from './app/lib/toast.js';
+import { useRoute, navigate, useEscape, useSSE, useTasks, useRuns, useProjects, useClaudeSessions, useAgents, useManager, useConversation, useDispatchAudit } from './app/lib/hooks.js';
+import { dueState, formatDueDate, useNowTick, dueDateMeta } from './app/lib/dueDate.js';
+import { requestNotificationPermission, showBrowserNotification, pulseTabTitle } from './app/lib/notifications.js';
+
+// Components
+import { RunInspector } from './app/components/RunInspector.js';
+import { DriftDrawer } from './app/components/DriftDrawer.js';
+import { Dropdown } from './app/components/Dropdown.js';
+import { EmptyState } from './app/components/EmptyState.js';
+import { MentionInput } from './app/components/MentionInput.js';
+import { CommandPalette } from './app/components/CommandPalette.js';
+import { DashboardView } from './app/components/DashboardView.js';
+import { BoardView, CalendarView, DirectoryPicker } from './app/components/BoardView.js';
+import { ProjectsView } from './app/components/ProjectsView.js';
+import { AgentsView } from './app/components/AgentsView.js';
+import { SessionsView } from './app/components/SessionsView.js';
+import { ManagerView } from './app/components/ManagerView.js';
+import { NewTaskModal, ExecuteModal, TaskDetailPanel } from './app/components/TaskModals.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sidebar Navigation
