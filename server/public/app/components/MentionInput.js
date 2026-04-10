@@ -1,0 +1,165 @@
+// MentionInput — textarea wrapper with @mention autocomplete for project
+// names. Extracted as part of P3-1 (ESM phase 2, @mention autocomplete).
+//
+// When the user types `@` as the first non-whitespace character, an inline
+// popup appears below the textarea listing matching project names. Keyboard
+// navigation (↑↓ to select, Enter to insert, Esc to dismiss) and mouse
+// click both work. On selection the `@partial` prefix is replaced with
+// `@projectName ` (trailing space included for quick follow-up text).
+//
+// The component accepts all standard textarea props (value, onInput,
+// onKeyDown, placeholder, rows, disabled, class, etc.) plus:
+//   - projects: array of { id, name } project objects
+//   - ref: forwarded to the underlying <textarea> element
+//
+// Module-time dependencies are pulled from window because main.js assigns
+// them BEFORE this module is imported — same convention as DriftDrawer.js
+// and RunInspector.js.
+
+const { useState, useRef, useEffect, useCallback, useMemo } = window.preactHooks;
+const { h, createRef } = window.preact;
+const html = window.htm.bind(h);
+
+export function MentionInput({ projects = [], ref: forwardedRef, onInput, onKeyDown, value, ...rest }) {
+  // Internal ref for the textarea; we merge with the forwarded ref.
+  const innerRef = useRef(null);
+  const textareaRef = forwardedRef || innerRef;
+
+  // Autocomplete state
+  const [mentionQuery, setMentionQuery] = useState(null); // null = closed; string = filter text
+  const [mentionIdx, setMentionIdx] = useState(0);
+  const popupRef = useRef(null);
+
+  // Filtered candidates — case-insensitive prefix match on project name.
+  const candidates = useMemo(() => {
+    if (mentionQuery === null) return [];
+    const q = mentionQuery.toLowerCase();
+    return (projects || []).filter(p => p.name.toLowerCase().includes(q));
+  }, [mentionQuery, projects]);
+
+  // When candidates shrink we clamp the selected index.
+  useEffect(() => {
+    setMentionIdx(i => Math.min(i, Math.max(0, candidates.length - 1)));
+  }, [candidates.length]);
+
+  // Detect `@` trigger: present when value starts with `@` (ignoring
+  // leading whitespace). Extract the portion after `@` as the query.
+  const computeMentionQuery = useCallback((text) => {
+    const trimmed = (text || '').trimStart();
+    if (!trimmed.startsWith('@')) return null;
+    return trimmed.slice(1); // everything after the @
+  }, []);
+
+  // Apply a selected project name back into the input.
+  const applyMention = useCallback((projectName) => {
+    const el = textareaRef.current;
+    if (!el) return;
+    // Replace whatever comes after the leading whitespace + @ with the
+    // chosen name plus a trailing space.
+    const leading = (value || '').match(/^(\s*)/)[0];
+    const newValue = `${leading}@${projectName} `;
+    // Synthesise an input event so the parent state (setInput) updates.
+    el.value = newValue;
+    el.style.height = 'auto';
+    el.style.height = el.scrollHeight + 'px';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    setMentionQuery(null);
+    el.focus();
+  }, [value, textareaRef]);
+
+  // Handle keydown: intercept ↑↓/Enter/Esc when popup is open, then fall
+  // through to the parent's onKeyDown for everything else.
+  const handleKeyDown = useCallback((e) => {
+    if (mentionQuery !== null && candidates.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        e.stopPropagation();
+        setMentionIdx(i => Math.min(candidates.length - 1, i + 1));
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        e.stopPropagation();
+        setMentionIdx(i => Math.max(0, i - 1));
+        return;
+      }
+      if (e.key === 'Enter') {
+        // Only intercept Enter for mention selection — do NOT call
+        // e.stopPropagation so the parent send handler (Enter = send) still
+        // fires after the mention is applied. We suppress the default (new
+        // line) and replace the text, which is sufficient.
+        e.preventDefault();
+        applyMention(candidates[mentionIdx].name);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        setMentionQuery(null);
+        return;
+      }
+    }
+    // Forward to parent handler (e.g. Enter = send message, Shift+Enter = newline).
+    if (onKeyDown) onKeyDown(e);
+  }, [mentionQuery, candidates, mentionIdx, applyMention, onKeyDown]);
+
+  // Handle input: keep mention query in sync with textarea value.
+  const handleInput = useCallback((e) => {
+    const q = computeMentionQuery(e.target.value);
+    setMentionQuery(q);
+    if (onInput) onInput(e);
+  }, [computeMentionQuery, onInput]);
+
+  // Sync query when value changes externally (e.g. on send the parent
+  // resets value to '').
+  useEffect(() => {
+    const q = computeMentionQuery(value);
+    setMentionQuery(q);
+  }, [value, computeMentionQuery]);
+
+  // Close popup on outside click.
+  useEffect(() => {
+    if (mentionQuery === null) return;
+    const handler = (e) => {
+      if (textareaRef.current?.contains(e.target)) return;
+      if (popupRef.current?.contains(e.target)) return;
+      setMentionQuery(null);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [mentionQuery, textareaRef]);
+
+  const showPopup = mentionQuery !== null && candidates.length > 0;
+
+  return html`
+    <div class="mention-input-wrap" style="position:relative;flex:1;display:flex;">
+      <textarea
+        ref=${textareaRef}
+        value=${value}
+        onInput=${handleInput}
+        onKeyDown=${handleKeyDown}
+        ...${rest}
+      />
+      ${showPopup && html`
+        <div
+          ref=${popupRef}
+          class="mention-popup"
+          style="position:absolute;bottom:calc(100% + 4px);left:0;z-index:9999;background:var(--bg-secondary,#1e1e2e);border:1px solid var(--border,#3f3f5a);border-radius:6px;min-width:180px;max-width:320px;box-shadow:0 4px 16px rgba(0,0,0,.4);overflow:hidden;"
+        >
+          ${candidates.map((p, i) => html`
+            <button
+              key=${p.id}
+              type="button"
+              class="mention-item ${i === mentionIdx ? 'mention-item-active' : ''}"
+              style="display:block;width:100%;text-align:left;padding:6px 12px;background:${i === mentionIdx ? 'var(--accent-muted,#3b3b5c)' : 'transparent'};border:none;cursor:pointer;color:var(--text,#e2e8f0);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
+              onMouseEnter=${() => setMentionIdx(i)}
+              onClick=${() => applyMention(p.name)}
+            >
+              <span style="opacity:.6;margin-right:4px;">@</span>${p.name}
+            </button>
+          `)}
+        </div>
+      `}
+    </div>
+  `;
+}

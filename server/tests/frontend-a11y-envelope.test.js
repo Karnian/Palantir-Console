@@ -343,3 +343,116 @@ test('X3 getRunTaskTitle does not fall back to data.taskId (camelCase)', async (
   assert.doesNotMatch(body, /data\.taskId\b/,
     'PR3b / X3: the camelCase data.taskId fallback must be removed — Phase 5+ emitters always hoist task_id (snake_case).');
 });
+
+// ---- P3-2: ESM phase 2 — Dropdown + EmptyState extraction ----
+
+test('P3-2 Dropdown.js exports Dropdown as a named export', async () => {
+  const src = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'components', 'Dropdown.js'),
+    'utf8',
+  );
+  assert.match(src, /export\s+function\s+Dropdown\s*\(/,
+    'Dropdown.js must provide `export function Dropdown(...)`');
+});
+
+test('P3-2 Dropdown.js dereferences window.preact / preactHooks / htm at top level', async () => {
+  const src = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'components', 'Dropdown.js'),
+    'utf8',
+  );
+  assert.match(src, /window\.preactHooks/, 'window.preactHooks reference missing');
+  assert.match(src, /window\.preact/, 'window.preact reference missing');
+  assert.match(src, /window\.htm\.bind\(h\)/, 'htm.bind(h) wiring missing');
+});
+
+test('P3-2 EmptyState.js exports EmptyState as a named export', async () => {
+  const src = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'components', 'EmptyState.js'),
+    'utf8',
+  );
+  assert.match(src, /export\s+function\s+EmptyState\s*\(/,
+    'EmptyState.js must provide `export function EmptyState(...)`');
+});
+
+test('P3-2 legacy app.js no longer defines `function Dropdown`', async () => {
+  const src = await loadAppJs();
+  assert.doesNotMatch(src, /function\s+Dropdown\s*\(/,
+    'function Dropdown was extracted to an ES module and must not be redefined in app.js');
+});
+
+test('P3-2 legacy app.js no longer defines `function EmptyState`', async () => {
+  const src = await loadAppJs();
+  assert.doesNotMatch(src, /function\s+EmptyState\s*\(/,
+    'function EmptyState was extracted to an ES module and must not be redefined in app.js');
+});
+
+test('P3-2 main.js dynamically imports Dropdown and EmptyState and bridges them onto window', async () => {
+  const src = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'main.js'),
+    'utf8',
+  );
+  assert.match(src, /import\(\s*['"]\.\/components\/Dropdown\.js['"]\s*\)/,
+    'main.js must dynamically import ./components/Dropdown.js');
+  assert.match(src, /window\.Dropdown\s*=\s*Dropdown/,
+    'main.js must assign window.Dropdown = Dropdown');
+  assert.match(src, /import\(\s*['"]\.\/components\/EmptyState\.js['"]\s*\)/,
+    'main.js must dynamically import ./components/EmptyState.js');
+  assert.match(src, /window\.EmptyState\s*=\s*EmptyState/,
+    'main.js must assign window.EmptyState = EmptyState');
+});
+
+// ---- P3-1: @mention autocomplete (MentionInput) ----
+
+test('P3-1 MentionInput.js exports MentionInput as a named export', async () => {
+  const src = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'components', 'MentionInput.js'),
+    'utf8',
+  );
+  assert.match(src, /export\s+function\s+MentionInput\s*\(/,
+    'MentionInput.js must provide `export function MentionInput(...)`');
+});
+
+test('P3-1 MentionInput.js contains @-mention handling logic', async () => {
+  const src = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'components', 'MentionInput.js'),
+    'utf8',
+  );
+  // Must handle the @ trigger character
+  assert.match(src, /@/, 'MentionInput.js must reference the @ trigger character');
+  // Must have keyboard navigation for the popup (ArrowDown / ArrowUp)
+  assert.match(src, /ArrowDown/, 'MentionInput.js must handle ArrowDown for keyboard navigation');
+  assert.match(src, /ArrowUp/, 'MentionInput.js must handle ArrowUp for keyboard navigation');
+  // Must handle Escape to dismiss
+  assert.match(src, /Escape/, 'MentionInput.js must handle Escape to dismiss popup');
+});
+
+test('P3-1 MentionInput.js dereferences window.preact / preactHooks / htm at top level', async () => {
+  const src = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'components', 'MentionInput.js'),
+    'utf8',
+  );
+  assert.match(src, /window\.preactHooks/, 'window.preactHooks reference missing');
+  assert.match(src, /window\.preact/, 'window.preact reference missing');
+  assert.match(src, /window\.htm\.bind\(h\)/, 'htm.bind(h) wiring missing');
+});
+
+test('P3-1 main.js dynamically imports MentionInput and bridges it onto window', async () => {
+  const src = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'main.js'),
+    'utf8',
+  );
+  assert.match(src, /import\(\s*['"]\.\/components\/MentionInput\.js['"]\s*\)/,
+    'main.js must dynamically import ./components/MentionInput.js');
+  assert.match(src, /window\.MentionInput\s*=\s*MentionInput/,
+    'main.js must assign window.MentionInput = MentionInput');
+});
+
+test('P3-1 app.js uses MentionInput in ManagerView instead of plain textarea', async () => {
+  const src = await loadAppJs();
+  // The MentionInput component should be used in the manager input area
+  assert.match(src, /<\$\{MentionInput\}/,
+    'app.js must render <${MentionInput}> in the ManagerView input area');
+  // And it should pass projects prop
+  assert.match(src, /projects=\$\{projects\}/,
+    'MentionInput must receive the projects prop for autocomplete candidates');
+});

@@ -85,6 +85,17 @@ window.RunInspector = RunInspector;
 const { DriftDrawer } = await import('./components/DriftDrawer.js');
 window.DriftDrawer = DriftDrawer;
 
+// P3-2 (ESM phase 2): Dropdown + EmptyState extracted from app.js.
+const { Dropdown } = await import('./components/Dropdown.js');
+window.Dropdown = Dropdown;
+
+const { EmptyState } = await import('./components/EmptyState.js');
+window.EmptyState = EmptyState;
+
+// P3-1 (ESM phase 2): MentionInput — @mention autocomplete textarea wrapper.
+const { MentionInput } = await import('./components/MentionInput.js');
+window.MentionInput = MentionInput;
+
 // Load app.js as a classic script after the globals are in place. We use a
 // dynamic <script> tag (rather than `import './app.js'`) because app.js is
 // still a non-module bundle that relies on top-level globals. Once helpers
