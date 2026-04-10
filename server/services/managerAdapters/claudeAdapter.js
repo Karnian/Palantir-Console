@@ -218,7 +218,7 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
    *
    * See docs/specs/manager-v3-multilayer.md principle 1.
    */
-  function startSession(runId, { prompt, cwd, systemPrompt, model, allowedTools, mcpTools, permissionMode, env }) {
+  function startSession(runId, { prompt, cwd, systemPrompt, model, allowedTools, mcpTools, mcpConfig, permissionMode, env }) {
     // Reset normalizer state in case the runId is recycled.
     runState.delete(runId);
     const baseTools = allowedTools || [
@@ -250,6 +250,7 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
       systemPrompt,
       permissionMode: permissionMode || 'bypassPermissions',
       allowedTools: mergedTools,
+      mcpConfig: mcpConfig || undefined, // P4-2: project-scoped MCP config path
       model: model || undefined,
       isManager: true,
       onVendorEvent: (event, proc) => normalizeClaudeEvent(runId, event, proc),

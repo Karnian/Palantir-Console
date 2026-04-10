@@ -297,7 +297,7 @@ allowedTools: allowedTools || [
 
 | 항목 | 상태 | 비고 |
 |------|------|------|
-| Claude CLI --mcp-config의 allowedTools 와일드카드 지원 | 미확인 | `mcp__slack__*` 패턴이 먹는지 실제 테스트 필요 |
+| Claude CLI --mcp-config의 allowedTools 와일드카드 지원 | ✅ 확인됨 | `--allowed-tools "mcp__claude_ai_Slack__*"` 와일드카드 동작 확인 (2026-04-10). 13개 Slack 도구 전부 노출 |
 | OAuth 토큰 자식 프로세스 자동 전달 | 미확인 | HTTP MCP는 OAuth — spawn 프로세스가 자동 인증되는지 |
 | Codex CLI의 MCP 지원 여부 | 미확인 | Codex exec에서 MCP 도구가 노출되는지 |
 | MCP command 기반 서버의 자식 프로세스 전파 | 미확인 | npx 기반 서버가 spawn마다 새로 뜨는지 |

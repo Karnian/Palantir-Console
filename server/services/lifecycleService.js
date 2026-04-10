@@ -99,8 +99,9 @@ function createLifecycleService({
       prompt,
     });
 
-    // Resolve project directory for agent CWD
+    // Resolve project directory and MCP config for agent CWD
     let projectDir = null;
+    let projectMcpConfig = null;
     if (task.project_id) {
       const project = projectService.getProject(task.project_id);
       if (project?.directory) {
@@ -110,6 +111,10 @@ function createLifecycleService({
         } else {
           console.warn(`[lifecycle] Project directory not found: ${project.directory}, falling back to server cwd`);
         }
+      }
+      // P4-2: capture project-scoped MCP config path for worker spawn
+      if (project?.mcp_config_path) {
+        projectMcpConfig = project.mcp_config_path;
       }
     }
 
@@ -153,6 +158,7 @@ function createLifecycleService({
           env: parseEnvAllowlist(profile.env_allowlist),
           permissionMode: 'bypassPermissions',
           allowedTools: mcpTools.length > 0 ? mcpTools : undefined,
+          mcpConfig: projectMcpConfig || undefined, // P4-2: project-scoped MCP config
           isManager: false,
         });
       } else {
