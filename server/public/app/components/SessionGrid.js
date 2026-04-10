@@ -41,6 +41,8 @@ export function SessionGrid({ tasks, runs, projects }) {
   const [selectedTask, setSelectedTask] = useState(null);
   const [collapsedProjects, setCollapsedProjects] = useState({});
   const toggleProject = (key) => setCollapsedProjects(prev => ({ ...prev, [key]: !prev[key] }));
+  const [collapsedSections, setCollapsedSections] = useState({});
+  const toggleSection = (key) => setCollapsedSections(prev => ({ ...prev, [key]: !prev[key] }));
 
   const workerRuns = useMemo(() => (runs || []).filter(r => !r.is_manager), [runs]);
 
@@ -71,11 +73,11 @@ export function SessionGrid({ tasks, runs, projects }) {
 
     // Group tasks by status within each project
     const STATUS_SECTIONS = [
-      { key: 'in_progress', label: 'In Progress', statuses: ['in_progress'] },
-      { key: 'todo', label: 'Todo', statuses: ['todo'] },
-      { key: 'review', label: 'Review', statuses: ['review'] },
-      { key: 'failed', label: 'Failed', statuses: ['failed'] },
       { key: 'backlog', label: 'Backlog', statuses: ['backlog'] },
+      { key: 'todo', label: 'Todo', statuses: ['todo'] },
+      { key: 'in_progress', label: 'In Progress', statuses: ['in_progress'] },
+      { key: 'failed', label: 'Failed', statuses: ['failed'] },
+      { key: 'review', label: 'Review', statuses: ['review'] },
       { key: 'done', label: 'Done', statuses: ['done'] },
     ];
     const STATUS_COLORS = { in_progress: '#3b82f6', todo: '#6b7280', review: '#f59e0b', failed: '#ef4444', backlog: '#6b7280', done: '#22c55e' };
@@ -132,22 +134,34 @@ export function SessionGrid({ tasks, runs, projects }) {
               <span>${group.name}</span>
               <span class="worker-project-count">${group.tasks.length} task${group.tasks.length !== 1 ? 's' : ''}${activeCount > 0 ? ` \u00B7 ${activeCount} active` : ''}</span>
             </div>
-            ${!projCollapsed && group.sections.map(sec => html`
+            ${!projCollapsed && group.sections.map(sec => {
+              const secKey = `${group.key}::${sec.key}`;
+              const secCollapsed = collapsedSections[secKey];
+              return html`
               <div class="task-status-section">
-                <div class="task-status-divider">
+                <div class="task-status-divider" onClick=${() => toggleSection(secKey)} style="cursor:pointer">
+                  <span class="task-status-divider-chevron">${secCollapsed ? '\u25B6' : '\u25BC'}</span>
                   <span class="task-status-divider-dot" style="background:${sec.color}"></span>
                   <span class="task-status-divider-label">${sec.label}</span>
                   <span class="task-status-divider-count">${sec.tasks.length}</span>
                   <span class="task-status-divider-line"></span>
                 </div>
-                ${sec.tasks.map(({ task, runs: taskRuns }) => {
-                  const activeRunCount = taskRuns.filter(r => ['running', 'needs_input'].includes(r.status)).length;
+                ${!secCollapsed && sec.tasks.map(({ task, runs: taskRuns }) => {
+                  const running = taskRuns.filter(r => r.status === 'running').length;
+                  const waiting = taskRuns.filter(r => r.status === 'needs_input').length;
+                  const done = taskRuns.filter(r => r.status === 'completed').length;
+                  const failed = taskRuns.filter(r => r.status === 'failed').length;
+                  const parts = [];
+                  if (running) parts.push(html`<span style="color:#3b82f6">${running} running</span>`);
+                  if (waiting) parts.push(html`<span style="color:#f59e0b">${waiting} waiting</span>`);
+                  if (failed) parts.push(html`<span style="color:#ef4444">${failed} failed</span>`);
+                  if (done) parts.push(html`<span style="color:#22c55e">${done} done</span>`);
                   return html`
                     <div class="task-session-group">
                       <div class="task-session-header">
                         <span class="task-session-title">${task?.title || 'Unassigned Runs'}</span>
                         <span class="task-session-meta">
-                          ${taskRuns.length > 0 ? `${taskRuns.length} run${taskRuns.length > 1 ? 's' : ''}` : ''}${activeRunCount > 0 ? ` \u00B7 ${activeRunCount} active` : ''}
+                          ${parts.length > 0 ? parts.reduce((acc, el, i) => i === 0 ? [el] : [...acc, ', ', el], []) : (taskRuns.length > 0 ? `${taskRuns.length} run${taskRuns.length > 1 ? 's' : ''}` : '')}
                         </span>
                         ${task && html`<button class="task-session-detail-btn" onClick=${(e) => { e.stopPropagation(); setSelectedTask(task); }}>Detail</button>`}
                       </div>
@@ -155,7 +169,7 @@ export function SessionGrid({ tasks, runs, projects }) {
                   `;
                 })}
               </div>
-            `)}
+            `; })}
           </div>
         `;})}
       </div>
