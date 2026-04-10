@@ -721,6 +721,229 @@ test('Phase 3a: R1 fix — DELETE /api/projects/:id refuses on pmCleanupService 
   assert.match(res.body.message, /adapter exploded/);
 });
 
+// ---------------------------------------------------------------------------
+// pmCleanupService.forceReset (v3 Phase 7 P7-2)
+// ---------------------------------------------------------------------------
+
+test('P7-2: forceReset succeeds even when disposeSession throws', async (t) => {
+  // Core contract: force mode swallows dispose failures and always clears
+  // the registry slot + brief so the PM is never permanently locked.
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const registry = createManagerRegistry({ runService: rs });
+  const fakePm = makeFakeCodexAdapter();
+  const topAdapter = makeFakeCodexAdapter();
+
+  // Make disposeSession fail
+  fakePm.disposeSession = () => { throw new Error('adapter stuck'); };
+
+  const conv = createConversationService({
+    runService: rs, managerRegistry: registry,
+    managerAdapterFactory: wireFactory(fakePm),
+    lifecycleService: { sendAgentInput: () => true },
+  });
+  const spawn = createPmSpawnService({
+    runService: rs, managerRegistry: registry,
+    managerAdapterFactory: wireFactory(fakePm),
+    projectService, projectBriefService,
+    authResolverOpts: { hasKeychain: true },
+  });
+
+  // Capture eventBus emissions
+  const emitted = [];
+  const fakeEventBus = { emit: (channel, data) => emitted.push({ channel, data }) };
+
+  const cleanup = createPmCleanupService({
+    projectService, projectBriefService, managerRegistry: registry,
+    managerAdapterFactory: wireFactory(fakePm), runService: rs,
+    eventBus: fakeEventBus,
+  });
+
+  const project = projectService.createProject({ name: 'alpha' });
+  seedTop({ rs, registry, adapter: topAdapter });
+  spawn.ensureLivePm({ projectId: project.id });
+  conv.sendMessage(`pm:${project.id}`, { text: 'hello' });
+
+  const pmRunId = registry.getActiveRunId(`pm:${project.id}`);
+  assert.ok(pmRunId, 'PM run is live before forceReset');
+  assert.ok(projectBriefService.getBrief(project.id).pm_thread_id, 'brief has thread id');
+
+  // Normal reset must fail-closed (throws)
+  assert.throws(() => cleanup.reset(project.id), /disposeSession failed/);
+
+  // forceReset must succeed despite the broken dispose
+  const result = cleanup.forceReset(project.id);
+
+  // disposed=false because disposeSession threw, but everything else is cleaned up
+  assert.equal(result.disposed, false, 'disposed=false when disposeSession threw');
+  assert.equal(result.clearedBrief, true, 'brief was cleared regardless');
+  assert.ok(result.cancelledRunId, 'cancelledRunId captured');
+  assert.ok(result.disposeError, 'disposeError records the failure reason');
+
+  // Registry slot must be gone
+  assert.equal(registry.getActiveRunId(`pm:${project.id}`), null, 'registry slot cleared');
+
+  // Brief must be cleared
+  assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, null, 'pm_thread_id cleared');
+
+  // Run must be marked failed
+  const run = rs.getRun(pmRunId);
+  assert.equal(run.status, 'failed', 'run marked failed even when dispose threw');
+
+  // Audit event must have been emitted
+  assert.equal(emitted.length, 1, 'exactly one eventBus emission');
+  assert.equal(emitted[0].channel, 'pm:force_reset');
+  assert.equal(emitted[0].data.projectId, project.id);
+  assert.equal(emitted[0].data.disposed, false);
+  assert.ok(emitted[0].data.disposeError, 'disposeError in event payload');
+});
+
+test('P7-2: forceReset succeeds cleanly when disposeSession works', async (t) => {
+  // When the adapter is healthy, forceReset should report disposed=true and
+  // emit the audit event just like the failure path.
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const registry = createManagerRegistry({ runService: rs });
+  const fakePm = makeFakeCodexAdapter();
+  const topAdapter = makeFakeCodexAdapter();
+
+  const conv = createConversationService({
+    runService: rs, managerRegistry: registry,
+    managerAdapterFactory: wireFactory(fakePm),
+    lifecycleService: { sendAgentInput: () => true },
+  });
+  const spawn = createPmSpawnService({
+    runService: rs, managerRegistry: registry,
+    managerAdapterFactory: wireFactory(fakePm),
+    projectService, projectBriefService,
+    authResolverOpts: { hasKeychain: true },
+  });
+
+  const emitted = [];
+  const fakeEventBus = { emit: (channel, data) => emitted.push({ channel, data }) };
+
+  const cleanup = createPmCleanupService({
+    projectService, projectBriefService, managerRegistry: registry,
+    managerAdapterFactory: wireFactory(fakePm), runService: rs,
+    eventBus: fakeEventBus,
+  });
+
+  const project = projectService.createProject({ name: 'beta' });
+  seedTop({ rs, registry, adapter: topAdapter });
+  spawn.ensureLivePm({ projectId: project.id });
+  conv.sendMessage(`pm:${project.id}`, { text: 'hello' });
+
+  const pmRunId = registry.getActiveRunId(`pm:${project.id}`);
+
+  const result = cleanup.forceReset(project.id);
+
+  assert.equal(result.disposed, true, 'disposed=true when disposeSession succeeded');
+  assert.equal(result.clearedBrief, true);
+  assert.equal(result.cancelledRunId, pmRunId);
+  assert.equal(result.disposeError, null, 'no disposeError when dispose succeeded');
+
+  assert.equal(registry.getActiveRunId(`pm:${project.id}`), null);
+  assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, null);
+
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0].channel, 'pm:force_reset');
+  assert.equal(emitted[0].data.disposed, true);
+  assert.equal(emitted[0].data.disposeError, null);
+});
+
+test('P7-2: forceReset is idempotent when no PM is live', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const registry = createManagerRegistry({ runService: rs });
+  const fakePm = makeFakeCodexAdapter();
+  const emitted = [];
+  const fakeEventBus = { emit: (channel, data) => emitted.push({ channel, data }) };
+
+  const cleanup = createPmCleanupService({
+    projectService, projectBriefService, managerRegistry: registry,
+    managerAdapterFactory: wireFactory(fakePm), runService: rs,
+    eventBus: fakeEventBus,
+  });
+
+  const project = projectService.createProject({ name: 'gamma' });
+  const result = cleanup.forceReset(project.id);
+
+  assert.equal(result.disposed, false);
+  assert.equal(result.clearedBrief, false);
+  assert.equal(result.cancelledRunId, null);
+  assert.equal(result.disposeError, null);
+
+  // Audit event still fired so the operator knows the call happened
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0].channel, 'pm:force_reset');
+});
+
+test('P7-2: normal reset behavior is unchanged (fail-closed still applies)', async (t) => {
+  // Regression guard: ensure forceReset existence does not affect normal reset.
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const registry = createManagerRegistry({ runService: rs });
+  const fakePm = makeFakeCodexAdapter();
+  const topAdapter = makeFakeCodexAdapter();
+  const broken = makeFakeCodexAdapter();
+  broken.disposeSession = () => { throw new Error('still broken'); };
+
+  const conv = createConversationService({
+    runService: rs, managerRegistry: registry,
+    managerAdapterFactory: wireFactory(broken),
+    lifecycleService: { sendAgentInput: () => true },
+  });
+  const spawn = createPmSpawnService({
+    runService: rs, managerRegistry: registry,
+    managerAdapterFactory: wireFactory(broken),
+    projectService, projectBriefService,
+    authResolverOpts: { hasKeychain: true },
+  });
+  const cleanup = createPmCleanupService({
+    projectService, projectBriefService, managerRegistry: registry,
+    managerAdapterFactory: wireFactory(broken), runService: rs,
+  });
+
+  const project = projectService.createProject({ name: 'delta' });
+  seedTop({ rs, registry, adapter: topAdapter });
+  spawn.ensureLivePm({ projectId: project.id });
+  conv.sendMessage(`pm:${project.id}`, { text: 'hi' });
+
+  const pmRunId = registry.getActiveRunId(`pm:${project.id}`);
+  const threadId = projectBriefService.getBrief(project.id).pm_thread_id;
+
+  // reset() must still throw (fail-closed unchanged)
+  assert.throws(() => cleanup.reset(project.id), /disposeSession failed/);
+
+  // State must remain intact after failed reset
+  assert.equal(registry.getActiveRunId(`pm:${project.id}`), pmRunId, 'slot intact after failed reset');
+  assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, threadId, 'brief intact after failed reset');
+});
+
+test('P7-2: POST /api/manager/pm/:projectId/force-reset HTTP wiring', async (t) => {
+  const app = await createTestApp(t);
+  const createRes = await request(app).post('/api/projects').send({ name: 'force-test' });
+  assert.equal(createRes.status, 201);
+  const projectId = createRes.body.project.id;
+
+  // With no PM live, force-reset should still return 200 with correct shape
+  const res = await request(app).post(`/api/manager/pm/${projectId}/force-reset`).send({});
+  assert.equal(res.status, 200);
+  assert.equal(res.body.status, 'force_reset');
+  assert.equal(res.body.projectId, projectId);
+  assert.equal(res.body.disposed, false);
+  assert.equal(res.body.clearedBrief, false);
+  assert.equal(res.body.disposeError, null);
+});
+
 test('Phase 3a: PM system prompt uses layer=pm variant', () => {
   const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
   const fakeAdapter = {

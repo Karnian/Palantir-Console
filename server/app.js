@@ -135,6 +135,7 @@ function createApp(options = {}) {
     managerRegistry,
     managerAdapterFactory,
     runService,
+    eventBus,
   });
   const conversationService = createConversationService({
     runService,

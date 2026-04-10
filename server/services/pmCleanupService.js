@@ -31,6 +31,7 @@ function createPmCleanupService({
   managerRegistry,
   managerAdapterFactory,
   runService,
+  eventBus,
   logger,
 }) {
   const log = logger || ((msg) => console.log(`[pmCleanup] ${msg}`));
@@ -135,7 +136,83 @@ function createPmCleanupService({
     return _terminate(projectId, 'dispose');
   }
 
-  return { reset, dispose };
+  // Force-delete escape hatch (v3 Phase 7 P7-2). Unlike reset/dispose which
+  // are fail-closed, forceReset swallows disposeSession errors so a stuck
+  // adapter cannot keep the PM slot locked indefinitely. The registry slot,
+  // project brief, and run row are always cleaned up regardless of adapter
+  // health.
+  //
+  // This is a LAST-RESORT path. Call reset() first whenever the adapter
+  // might be healthy — fail-closed gives stronger consistency guarantees.
+  // forceReset deliberately accepts the orphan-subprocess risk documented
+  // in spec §10.
+  //
+  // Emits 'pm:force_reset' on eventBus so operators can audit usage.
+  function forceReset(projectId) {
+    if (!projectId) throw new Error('projectId is required');
+
+    const slotKey = `pm:${projectId}`;
+    let disposeError = null;
+    let disposed = false;
+    let clearedBrief = false;
+    let cancelledRunId = null;
+
+    // 1. Attempt adapter dispose — ignore failures (force mode).
+    const liveRunId = managerRegistry.getActiveRunId(slotKey);
+    const liveAdapter = managerRegistry.getActiveAdapter(slotKey);
+    if (liveRunId && liveAdapter) {
+      try {
+        liveAdapter.disposeSession(liveRunId);
+        disposed = true;
+      } catch (err) {
+        disposeError = err.message;
+        log(`forceReset: disposeSession failed for ${slotKey} (run=${liveRunId}) — continuing: ${err.message}`);
+        // disposed stays false to accurately report what happened
+      }
+      // Mark run failed/cancelled even if dispose threw — the run is
+      // considered unreachable after force-reset regardless.
+      try {
+        if (runService) {
+          runService.updateRunStatus(liveRunId, 'failed', { force: true });
+        }
+      } catch { /* already terminal */ }
+      cancelledRunId = liveRunId;
+    }
+
+    // 2. Drop the registry slot unconditionally.
+    managerRegistry.clearActive(slotKey);
+
+    // 3. Clear the brief — best-effort but log failures rather than throw.
+    try {
+      if (projectBriefService) {
+        const before = projectBriefService.getBrief(projectId);
+        if (before && before.pm_thread_id) {
+          projectBriefService.clearPmThread(projectId);
+          clearedBrief = true;
+        }
+      }
+    } catch (err) {
+      log(`forceReset: brief clear failed for ${projectId}: ${err.message} — continuing anyway`);
+    }
+
+    log(`forceReset projectId=${projectId} disposed=${disposed} clearedBrief=${clearedBrief} disposeError=${disposeError || 'none'}`);
+
+    // 4. Audit log via eventBus so operators can detect misuse.
+    if (eventBus) {
+      eventBus.emit('pm:force_reset', {
+        projectId,
+        runId: cancelledRunId,
+        disposed,
+        clearedBrief,
+        disposeError,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    return { disposed, clearedBrief, cancelledRunId, disposeError };
+  }
+
+  return { reset, dispose, forceReset };
 }
 
 module.exports = { createPmCleanupService };
