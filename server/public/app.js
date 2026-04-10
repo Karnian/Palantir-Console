@@ -35,10 +35,6 @@ import { NewTaskModal, ExecuteModal, TaskDetailPanel } from './app/components/Ta
 // Sidebar Navigation
 // ─────────────────────────────────────────────────────────────────────────────
 
-// NAV_ITEMS is imported from app/lib/nav.js (shared with CommandPalette).
-// Bridge onto window for main.js legacy consumers.
-window.NAV_ITEMS = NAV_ITEMS;
-
 function NavSidebar({ route, connected }) {
   return html`
     <nav class="nav-sidebar">
