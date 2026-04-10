@@ -66,6 +66,141 @@ test('P1-11 DriftDrawer Close button has aria-label', async () => {
   assert.match(body, /aria-label="Close drift drawer"/, 'Close button aria-label missing');
 });
 
+// ---- P2-6: hardened structural/source invariants ----
+//
+// Scope note: these are STRUCTURAL invariants on the app.js text, not
+// behavioral DOM tests. A real jsdom mount of DriftDrawer requires the
+// component to be an ES module export — that is the work in PR #44
+// (P2-10 ESM phase 1). Until then these assertions catch the most
+// common regression shapes (missing ref binding, cleanup function drop,
+// Tab / Shift+Tab branch loss, dependency-array bloat) that a simple
+// useEffect edit can introduce without the existing tests noticing.
+// Codex PROCEED_HARDENED consensus — see PR #41 body for context.
+
+test('P2-6 DriftDrawer useEffect returns a cleanup function that removes the keydown listener', async () => {
+  const src = await loadAppJs();
+  const body = sliceFunction(src, 'function DriftDrawer');
+  assert.match(
+    body,
+    /return\s*\(\)\s*=>\s*\{\s*node\.removeEventListener\('keydown'/,
+    'DriftDrawer useEffect must return a cleanup that removes the keydown listener',
+  );
+});
+
+test('P2-6 DriftDrawer outer dialog div binds drawerRef via ref attribute (attribute-scoped)', async () => {
+  // Codex R1 blocker fix: the previous `role="dialog"[\s\S]{0,400}?ref=`
+  // window match could pass even if ref= ended up on a descendant
+  // within 400 chars. Now we slice the dialog element's opening-tag
+  // attribute list (role="dialog" to the first `>` that closes it) and
+  // assert ref=${drawerRef} lives in THAT window specifically.
+  const src = await loadAppJs();
+  const body = sliceFunction(src, 'function DriftDrawer');
+  // The function comment block also contains the literal string
+  // `role="dialog"` for documentation. Find the FIRST occurrence that
+  // is inside an HTM template literal by searching after the return
+  // keyword that opens the template literal (`return html\``).
+  const returnHtmlIdx = body.indexOf('return html`');
+  assert.ok(returnHtmlIdx > 0, 'return html` template not found in DriftDrawer');
+  const template = body.slice(returnHtmlIdx);
+  const roleIdx = template.indexOf('role="dialog"');
+  assert.ok(roleIdx >= 0, 'role="dialog" not found in DriftDrawer template');
+  // Walk backwards to the element's `<div` (HTM uses angle brackets
+  // inside template literals) so we anchor on the tag start.
+  const tagStart = template.lastIndexOf('<div', roleIdx);
+  assert.ok(tagStart >= 0 && tagStart < roleIdx, 'could not find the opening <div for role="dialog"');
+  // Walk forward to the first unescaped `>` that closes the opening
+  // tag. Nested template expressions use `${...}` — the closing `>` of
+  // the opening tag is the first `>` that is not inside a template
+  // expression. Simple approach: scan char-by-char tracking brace depth
+  // for `${...}` placeholders.
+  let i = roleIdx;
+  let depth = 0;
+  let tagEnd = -1;
+  while (i < template.length) {
+    const ch = template[i];
+    const next = template[i + 1];
+    if (ch === '$' && next === '{') { depth++; i += 2; continue; }
+    if (ch === '}' && depth > 0) { depth--; i++; continue; }
+    if (ch === '>' && depth === 0) { tagEnd = i; break; }
+    i++;
+  }
+  assert.ok(tagEnd > roleIdx, 'could not locate the end of the role="dialog" opening tag');
+  const openingTag = template.slice(tagStart, tagEnd + 1);
+  assert.match(
+    openingTag,
+    /ref=\$\{drawerRef\}/,
+    'drawerRef must be bound to the role="dialog" element itself, not a descendant. openingTag=\n' + openingTag,
+  );
+});
+
+test('P2-6 DriftDrawer Tab cycle — forward (lastEl → firstEl) branch present', async () => {
+  const src = await loadAppJs();
+  const body = sliceFunction(src, 'function DriftDrawer');
+  assert.match(
+    body,
+    /document\.activeElement\s*===\s*lastEl[\s\S]{0,200}?firstEl\.focus\(\)/,
+    'forward Tab cycle (lastEl → firstEl) path missing',
+  );
+});
+
+test('P2-6 DriftDrawer Tab cycle — reverse (firstEl → lastEl) branch present', async () => {
+  const src = await loadAppJs();
+  const body = sliceFunction(src, 'function DriftDrawer');
+  assert.match(
+    body,
+    /document\.activeElement\s*===\s*firstEl[\s\S]{0,200}?lastEl\.focus\(\)/,
+    'reverse Shift+Tab cycle (firstEl → lastEl) path missing',
+  );
+});
+
+test('P2-6 DriftDrawer focusables selector covers the WAI-ARIA focusable superset', async () => {
+  const src = await loadAppJs();
+  const body = sliceFunction(src, 'function DriftDrawer');
+  // The selector string is single-quoted in app.js and INTERNALLY uses
+  // double quotes (e.g. `[tabindex="-1"]`), so a naive `[^'"]+` char
+  // class stops at the first inner `"`. Match on single-quote-only
+  // boundaries.
+  const selectorMatch = body.match(/querySelectorAll\(\s*'([^']+)'/);
+  assert.ok(selectorMatch, 'focusables selector not found');
+  const sel = selectorMatch[1];
+  for (const needle of [
+    'button:not([disabled])',
+    '[href]',
+    'input:not([disabled])',
+    'select:not([disabled])',
+    'textarea:not([disabled])',
+    '[tabindex]',
+  ]) {
+    assert.ok(sel.includes(needle), `focusables selector missing: ${needle}`);
+  }
+});
+
+test('P2-6 DriftDrawer focus-trap useEffect depends only on [open]', async () => {
+  const src = await loadAppJs();
+  const body = sliceFunction(src, 'function DriftDrawer');
+  // A wider dep array (e.g. [open, rows]) would tear down + re-install
+  // the trap on every content reload, stealing focus mid-interaction.
+  assert.match(
+    body,
+    /\},\s*\[open\]\);/,
+    'DriftDrawer focus-trap useEffect must depend only on [open]',
+  );
+});
+
+// ---- P2-7: drift badge aria-label ----
+
+test('P2-7 drift badge has aria-label announcing the count', async () => {
+  const src = await loadAppJs();
+  const badgeStart = src.indexOf('PM hallucination / staleness incidents');
+  assert.ok(badgeStart > 0, 'drift badge region not located');
+  const region = src.slice(badgeStart, badgeStart + 600);
+  assert.match(
+    region,
+    /aria-label=\$\{`Drift warnings: \$\{driftAudit\.totalCount\}/,
+    'drift badge must have an aria-label that announces the count to screen readers',
+  );
+});
+
 // ---- X3: getRunTaskTitle envelope strict ----
 
 test('X3 getRunTaskTitle does not fall back to data.taskId (camelCase)', async () => {
