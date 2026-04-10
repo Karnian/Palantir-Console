@@ -21,14 +21,52 @@ const VALID_TRANSITIONS = {
 // 'pm:<projectId>'. Derive a best-effort project_id for envelope
 // emission so clients don't have to re-parse the conversation_id
 // themselves. Pure function — safe to call on any run row.
+//
+// P2-4: both sources of truth (the JOIN path via task_id → project_id
+// and the parsed conversation_id 'pm:<id>') can theoretically disagree
+// if a run was created with a mismatched conversation_id and task — a
+// bug that was silent before because derivePmProjectId simply preferred
+// the JOIN path without complaint. This function now logs a warn via
+// the optional logger when both are present and disagree, and via the
+// optional diagnostics callback records it on the run event stream.
+// Pure-ish: emits side effects only when a logger / diagnostics hook is
+// provided. Behavior (return value) is unchanged.
+let _derivePmProjectIdDiagnostics = null;
+
+function setDerivePmProjectIdDiagnostics(fn) {
+  _derivePmProjectIdDiagnostics = typeof fn === 'function' ? fn : null;
+}
+
 function derivePmProjectId(run) {
   if (!run) return null;
-  if (run.project_id) return run.project_id; // JOIN-derived wins
-  if (run.manager_layer !== 'pm') return null;
+  const joinPid = run.project_id || null;
+  let parsedPid = null;
   const cid = run.conversation_id;
-  if (typeof cid !== 'string' || !cid.startsWith('pm:')) return null;
-  const pid = cid.slice(3);
-  return pid || null;
+  if (run.manager_layer === 'pm' && typeof cid === 'string' && cid.startsWith('pm:')) {
+    const slice = cid.slice(3);
+    parsedPid = slice || null;
+  }
+
+  // P2-4 diagnostic path: both present and disagreeing. The JOIN path is
+  // authoritative (it comes through task_id which is user-controlled in
+  // the DB), so we still return joinPid, but we shout about the drift.
+  if (joinPid && parsedPid && joinPid !== parsedPid) {
+    try {
+      if (_derivePmProjectIdDiagnostics) {
+        _derivePmProjectIdDiagnostics({
+          runId: run.id,
+          joinPid,
+          parsedPid,
+          conversationId: cid,
+        });
+      } else {
+        console.warn(`[runService] derivePmProjectId mismatch run=${run.id} joinPid=${joinPid} parsedPid=${parsedPid} cid=${cid}`);
+      }
+    } catch { /* ignore diagnostic failures */ }
+  }
+
+  if (joinPid) return joinPid;
+  return parsedPid;
 }
 
 function createRunService(db, eventBus) {
@@ -361,4 +399,8 @@ function createRunService(db, eventBus) {
   };
 }
 
-module.exports = { createRunService, derivePmProjectId };
+module.exports = {
+  createRunService,
+  derivePmProjectId,
+  setDerivePmProjectIdDiagnostics,
+};
