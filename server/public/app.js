@@ -3,34 +3,13 @@
 /* global DashboardView, BoardView, CalendarView, DirectoryPicker, ProjectsView, AgentsView, SessionsView */
 /* global NewTaskModal, ExecuteModal, TaskDetailPanel */
 /* global requestNotificationPermission, showBrowserNotification, pulseTabTitle */
-// Helpers (formatDuration / formatTime / timeAgo / renderMarkdown / apiFetch)
-// are provided by app/main.js, which imports them from app/lib/* and bridges
-// them onto window before this script runs. See app/main.js for the wiring
-// and the Phase 4 refactor notes there.
-//
-// Due-date helpers (dueState, formatDueDate, useNowTick, dueDateMeta) —
-// extracted to app/lib/dueDate.js (P5-1). Bridged onto window by
-// app/components/DashboardView.js, which is loaded by main.js before app.js.
-// Bare-identifier usage below resolves via global (window) scope.
-//
-// DashboardView — extracted to app/components/DashboardView.js (P5-1).
-// BoardView, CalendarView, DirectoryPicker — extracted to app/components/BoardView.js (P5-2).
-// ProjectsView (+ ProjectDetailModal) — extracted to app/components/ProjectsView.js (P5-3).
-// AgentsView (+ AgentModal + AgentDetailModal) — extracted to app/components/AgentsView.js (P5-4).
-// SessionsView (+ initLegacySessions) — extracted to app/components/SessionsView.js (P6-3).
-// All bridged onto window by main.js before this script runs.
+// All globals are bridged onto window by app/main.js before this script loads.
+// ESM components: DashboardView(P5-1), BoardView/CalendarView(P5-2), ProjectsView(P5-3),
+// AgentsView(P5-4), SessionsView(P6-3), ManagerView(P6-1), TaskModals(P7-1),
+// Notifications(P7-4). Hooks/helpers live in app/lib/hooks.js + app/lib/format.js.
 const { h, render } = preact;
 const { useState, useEffect, useRef, useCallback, useMemo } = preactHooks;
 const html = htm.bind(h);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Hash Router
-// ─────────────────────────────────────────────────────────────────────────────
-
-// All application hooks (useRoute, navigate, useEscape, useSSE, useTasks,
-// useRuns, useProjects, useClaudeSessions, useAgents, useManager) live in
-// app/lib/hooks.js — main.js imports them and bridges each onto window
-// before app.js loads, so the call sites below resolve via global lookup.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sidebar Navigation
@@ -69,7 +48,7 @@ function NavSidebar({ route, connected }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Loading / Empty components
+// Loading component (inline — too small to extract)
 // ─────────────────────────────────────────────────────────────────────────────
 
 function Loading() {
@@ -81,98 +60,6 @@ function Loading() {
     </div>
   `;
 }
-
-// EmptyState — extracted to server/public/app/components/EmptyState.js (P3-2).
-// Bridged onto window by main.js. The bare identifier `EmptyState` below
-// in htm templates resolves via global scope.
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Dashboard View — extracted to app/components/DashboardView.js (P5-1).
-// Bridged onto window by main.js. The bare identifier `DashboardView` in htm
-// templates below resolves via global scope.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Dropdown — extracted to server/public/app/components/Dropdown.js (P3-2).
-// Bridged onto window by main.js. The bare identifier `Dropdown` in htm
-// templates below resolves via global scope.
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Task Modals — NewTaskModal, ExecuteModal, TaskDetailPanel extracted to
-// app/components/TaskModals.js (P7-1). Bridged onto window by main.js.
-// Bare identifiers `NewTaskModal`, `ExecuteModal`, `TaskDetailPanel` in htm
-// templates below resolve via global scope.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Run Inspector Modal
-// ─────────────────────────────────────────────────────────────────────────────
-
-// RunInspector lives in app/components/RunInspector.js — main.js imports it
-// and bridges it onto window.RunInspector before app.js loads. The htm
-// templates below reference it as a bare identifier (e.g. `<${RunInspector}>`),
-// which resolves via the script-global lookup down to the window property.
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Kanban Board View — BoardView, CalendarView, DirectoryPicker extracted to
-// app/components/BoardView.js (P5-2). Bridged onto window by main.js.
-// Bare identifiers `BoardView`, `CalendarView`, `DirectoryPicker` resolve
-// via global scope.
-//
-// Projects View — ProjectDetailModal + ProjectsView extracted to
-// app/components/ProjectsView.js (P5-3). Bridged onto window by main.js.
-// Bare identifier `ProjectsView` resolves via global scope.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Sessions View — SessionsView + initLegacySessions extracted to
-// app/components/SessionsView.js (P6-3). Bridged onto window by main.js.
-// Bare identifier `SessionsView` resolves via global scope.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Toast Notification System
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Toast system (addToast, useToasts, ToastContainer, apiFetchWithToast) lives
-// in app/lib/toast.js — main.js imports it and bridges the symbols onto
-// window before app.js loads, so the call sites here resolve via global
-// lookup. See app/lib/toast.js for the implementation.
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Browser Notifications + Tab Title Pulse — extracted to
-// app/lib/notifications.js (P7-4). Bridged onto window by main.js.
-// Bare identifiers `requestNotificationPermission`, `showBrowserNotification`,
-// `pulseTabTitle` resolve via global scope. Permission side-effect (click /
-// keydown listeners) runs inside the notifications module at import time.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Agent Config View — AgentModal + AgentDetailModal + AgentsView extracted to
-// app/components/AgentsView.js (P5-4). Bridged onto window by main.js.
-// Bare identifier `AgentsView` resolves via global scope.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Manager View — ManagerView + managerProfileAuthState extracted to
-// app/components/ManagerView.js (P6-1). Bridged onto window by main.js.
-// Bare identifier `ManagerView` resolves via global scope.
-// ─────────────────────────────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────────────────────
-// Command Palette
-//
-// CommandPalette — extracted to app/components/CommandPalette.js
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
-// v3 Phase 7 — Drift Drawer
-//
-// Extracted to an ES module as the first step of P2-10 (ESM phase 1).
-// See server/public/app/components/DriftDrawer.js for the component
-// body. This file references `DriftDrawer` as a bare global identifier
-// — main.js assigns window.DriftDrawer before app.js loads so the
-// HTM templates that use `<${DriftDrawer} ... />` continue to resolve
-// via a global lookup. Behavior and rendered output are unchanged.
-// ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
 // App Root
@@ -186,28 +73,13 @@ function App() {
   const { agents, loading: agentsLoading, error: agentsError, reload: reloadAgents } = useAgents();
   const { sessions: claudeSessions } = useClaudeSessions();
   const manager = useManager();
-  // v3 Phase 7: drift badge + drawer + per-PM indicator shared state.
   const driftAudit = useDispatchAudit();
   const [showDriftDrawer, setShowDriftDrawer] = useState(false);
   const [inspectRun, setInspectRun] = useState(null);
-  // Global task detail popup — opened from Dashboard, ProjectDetailModal, etc.
-  // BoardView/CalendarView still manage their own local detail state because
-  // they have richer interactions (drag, execute, etc.).
   const [inspectTask, setInspectTask] = useState(null);
   const [showPalette, setShowPalette] = useState(false);
 
-  // Helper to look up task title for a run (used in notifications).
-  //
-  // v3 Phase 5: SSE payloads carry the full run row under `data.run`
-  // plus hoisted envelope fields (task_id, project_id, from_status,
-  // to_status, reason). PR3b / X3 makes this reader STRICT about the
-  // envelope shape: the pre-PR3b fallback `data.taskId` (camelCase)
-  // never existed in any Phase 5+ emitter — it was there to catch a
-  // hypothetical legacy shape that we then confirmed doesn't ship. The
-  // fallback masked real envelope drift (e.g. a new channel forgetting
-  // to hoist `task_id`) because the camelCase branch silently returned
-  // undefined instead of triggering the `run.title` fallback path.
-  // Removing it forces every emitter to conform to the Phase 5 contract.
+  // Resolve task title for SSE payloads (Phase 5 envelope: data.run + data.task_id).
   const getRunTaskTitle = useCallback((data) => {
     const run = (data && data.run) || data || {};
     const taskId = (data && data.task_id) || run.task_id;
@@ -234,12 +106,7 @@ function App() {
     'run:status': (data) => {
       debouncedReload('runs', reloadRuns);
       debouncedReload('tasks', reloadTasks);
-      // v3 Phase 5: run:status is a generic reload-trigger channel.
-      // Priority alerts (needs_input / failed) live on dedicated
-      // channels (run:needs_input, run:completed) and are the sole
-      // source of user-visible notifications. Surfacing needs_input
-      // here would duplicate the alert emitted on run:needs_input
-      // (codex R3 finding).
+      // run:status is a generic reload trigger; priority alerts live on run:needs_input / run:completed.
     },
     'run:completed': (data) => {
       debouncedReload('runs', reloadRuns);
@@ -250,28 +117,16 @@ function App() {
         showBrowserNotification('Run failed', title);
         pulseTabTitle('⚠ Run failed');
       } else {
-        // Spec §9.8: only `needs_input` and `failed` qualify as
-        // priority alerts. Success completions get the OS
-        // notification but NO tab title pulse — otherwise routine
-        // success spam would drown out the real alerts.
+        // Success: OS notification only, no tab pulse (§9.8 — only needs_input/failed are priority alerts).
         showBrowserNotification('Run completed', title);
       }
     },
-    // v3 Phase 5: dedicated priority-alert channel (spec §9.8). The
-    // server emits this on idle timeouts. The spec mandates three
-    // priority-alert mechanisms: OS notification + tab title change
-    // + sound. We implement OS notification + tab title pulse here;
-    // sound is deferred (browser autoplay restrictions require user
-    // gesture to enable, which needs settings UI outside this phase).
     'run:needs_input': (data) => {
       debouncedReload('runs', reloadRuns);
       debouncedReload('tasks', reloadTasks);
       showBrowserNotification('Agent needs input', getRunTaskTitle(data));
       pulseTabTitle('⚠ Needs input');
     },
-    // v3 Phase 7: live refresh of the drift badge / drawer on every
-    // new audit row. Debounced so a burst of PM claims doesn't fan
-    // out into dozens of refetches. The reload path is idempotent.
     'dispatch_audit:recorded': () => {
       debouncedReload('dispatch_audit', driftAudit.reload);
     },
@@ -378,7 +233,6 @@ function App() {
     `;
   };
 
-  // Always-fresh task reference (so live updates flow into the open popup)
   const currentInspectTask = inspectTask
     ? tasks.find(t => t.id === inspectTask.id) || inspectTask
     : null;

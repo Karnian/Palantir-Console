@@ -83,9 +83,13 @@ server/
     eventBus.js               — EventEmitter pub/sub (replay 200)
     worktreeService.js        — Git worktree 관리
   public/
-    app.js                    — Preact SPA (단일 파일, ~4500줄 — 수정 시 영역만 탐색)
+    app.js                    — Preact SPA 진입 (NAV_ITEMS + NavSidebar + Loading + App + mount, ~291줄)
     app/main.js               — ESM 엔트리 포인트 (preact/htm/hooks 를 window 로 브릿지)
     app/lib/hooks.js          — useSSE, useConversation, useDispatchAudit, useManager, …
+    app/components/ManagerView.js  — Manager UI (P6-1)
+    app/components/SessionsView.js — Legacy sessions (P6-3)
+    app/components/TaskModals.js   — NewTaskModal, ExecuteModal, TaskDetailPanel (P7-1)
+    app/lib/notifications.js       — Browser notifications + tab pulse (P7-4)
     styles.css                — 전체 스타일
     vendor/                   — Preact/HTM UMD/ESM 번들 (빌드 불필요)
   tests/
@@ -99,7 +103,7 @@ server/
     v2-api.test.js, api.test.js, boot.smoke.test.js, …
 ```
 
-> **238 tests** 기준 (Phase 7 merge 시점). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙.
+> **498 tests** 기준 (P6+P7 ESM 추출 + 정리 완료 시점). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙.
 
 ## Key Patterns
 
@@ -155,7 +159,7 @@ server/
 
 ### Frontend
 - Preact + HTM (UMD) — `server/public/vendor/`에 번들됨, CDN 의존 없음
-- 빌드 파이프라인 없음. `app.js`를 직접 수정 (현재 ~4500줄)
+- 빌드 파이프라인 없음. `app.js`는 ~291줄 (NAV/App/mount 셸만 남음). 실제 뷰/모달은 `app/components/` ESM 모듈에 있음
 - `server/public/app/main.js` 가 ESM 엔트리로 hooks/libs 를 `window` 로 브릿지
 - 해시 라우팅: `#dashboard`, `#manager`, `#board`, `#projects`, `#agents`
 - **클라이언트 async fence 패턴** (Phase 6/7): id-change 시 `setRun(null); setEvents([])` 동기 reset + await 이전 `myId = conversationId` 캡처 + commit 전 `activeIdRef.current === myId` 비교. `useDispatchAudit` 는 `requestSeqRef` 시퀀스 토큰.
@@ -184,7 +188,7 @@ server/
 
 ## Things to Watch Out For
 
-- `server/public/app.js`가 ~4500줄 단일 파일 — 수정 시 해당 컴포넌트 영역만 탐색
+- `server/public/app.js`는 ~291줄 셸 파일 (NAV/App/mount) — 뷰/모달 수정은 `app/components/` 또는 `app/lib/` ESM 모듈을 직접 탐색
 - `useSSE` channels 배열이 hard-coded — 새 SSE 채널 추가 시 반드시 `server/public/app/lib/hooks.js useSSE` 에도 추가. Phase 5/7 에서 까먹어 "핸들러는 등록됐지만 실제 subscribe 안 됨" 회귀가 있었음
 - `pmSpawnService` 에서 **seed runTurn 금지** — brief 은 static system prompt 에 bake. Codex 어댑터는 back-to-back runTurn 에서 "previous turn still running" 을 던진다
 - `pmCleanupService` 는 fail-closed — dispose 실패 시 상태를 유지한 채 re-throw. 호출자 (DELETE /api/projects/:id, /reset) 가 502 로 거절해야 함. 절대 swallow 하지 말 것

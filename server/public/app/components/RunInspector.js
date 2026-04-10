@@ -154,6 +154,12 @@ export function RunInspector({ run, onClose }) {
           `}
         </div>
 
+        ${currentRun?.result_summary && html`
+          <div class="run-result-summary" style="padding:8px 16px;background:var(--bg-secondary,rgba(0,0,0,0.15));border-bottom:1px solid var(--border-color,rgba(155,178,166,0.1));font-size:12px;color:var(--text-secondary);">
+            <span style="font-weight:600;color:var(--text-muted);margin-right:6px;">Summary:</span>
+            ${currentRun.result_summary}
+          </div>
+        `}
         <div class="run-inspector-tabs">
           <button class="run-inspector-tab ${tab === 'output' ? 'active' : ''}" onClick=${() => setTab('output')}>
             Live Output

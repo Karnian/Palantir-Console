@@ -680,6 +680,8 @@ MVP 트랙 종료. 트리거 조건 모니터링 시작. PM 트랙 진입 여부
 | 5 | SSE lifecycle 시맨틱 envelope (from/to_status/reason/task_id/project_id additive, `run:needs_input` priority alert, client pulseTabTitle) | #30 | ✅ merged |
 | 6 | PM UI exposure + routerService (3-step matcher `/api/router/resolve`, ManagerView Conversation dropdown + PM label + Reset PM 버튼, `useConversation` race fence 5 layer) | #31 | ✅ merged |
 | 7 | Dispatch audit UI (Dashboard Drift 배지 + DriftDrawer, ManagerView per-PM drift indicator, `useDispatchAudit` + SSE live push, `useSSE` channels 회귀 수정 run:needs_input + dispatch_audit:recorded) | #32 | ✅ merged |
+| P6 (ESM) | ManagerView(P6-1) + self-bridge 정리(P6-7), SessionsView ESM(P6-3), streamJsonEngine 테스트 + pm:id 커버리지(P6-5/P6-8), result_summary UI(P6-6) | #60~#61, #64 | ✅ merged |
+| P7 (ESM) | TaskModals ESM(P7-1) + Notifications ESM(P7-4), PM force-delete 탈출구(P7-2), legacy alias deprecation(P7-3), app.js 슬림화→291줄(P7-5) | #62~#64 | ✅ merged |
 | 3b | Claude PM adapter resume (`streamJsonEngine --resume/--continue`, claudeAdapter supportsResume) | — | 🚦 트리거 조건 미충족 (§9.6, "Claude PM use case 발생") |
 
 ### 구현 결과 vs 본문 §9 / §12 의 차이점
@@ -705,6 +707,7 @@ Phase 2~7 merge 시점까지 누적 codex round: **17+ rounds** (Phase 4 가 6 r
 
 - Phase 1.5 merge 시점: ~172 tests
 - Phase 7 merge 시점: **238 tests** (server-side unit + supertest HTTP + fake adapter)
+- P6+P7 ESM 추출 + 정리 완료 시점: **498 tests**
 - Playwright live smoke: Phase 3a/6/7 에서 각각 수행 (격리 포트 4188 + 임시 DB, prod 4177 무손상)
 - 회귀 0
 
