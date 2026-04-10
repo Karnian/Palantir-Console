@@ -73,7 +73,7 @@ async function loadTaskModalsSource() {
   return _taskModalsSrcCache;
 }
 
-// P6-3 (ESM phase 5): SessionsView — Legacy sessions management view.
+// P9-4: SessionsView — Preact rewrite (layout shell + modals).
 let _sessionsViewSrcCache;
 async function loadSessionsViewSource() {
   if (_sessionsViewSrcCache) return _sessionsViewSrcCache;
@@ -82,6 +82,28 @@ async function loadSessionsViewSource() {
     'utf8'
   );
   return _sessionsViewSrcCache;
+}
+
+// P9-4: SessionList — session sidebar list component.
+let _sessionListSrcCache;
+async function loadSessionListSource() {
+  if (_sessionListSrcCache) return _sessionListSrcCache;
+  _sessionListSrcCache = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'components', 'SessionList.js'),
+    'utf8'
+  );
+  return _sessionListSrcCache;
+}
+
+// P9-4: ConversationPanel — conversation display panel component.
+let _conversationPanelSrcCache;
+async function loadConversationPanelSource() {
+  if (_conversationPanelSrcCache) return _conversationPanelSrcCache;
+  _conversationPanelSrcCache = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'components', 'ConversationPanel.js'),
+    'utf8'
+  );
+  return _conversationPanelSrcCache;
 }
 
 function sliceFunction(src, header) {
@@ -535,12 +557,63 @@ test('P8-8 TaskDetailPanel has proper semantic structure', async () => {
 
 // P9-3: TaskModals bridge test removed — app.js imports directly.
 
-// ---- P8-8: SessionsView (P6-3 ESM phase 5) ----
+// ---- P8-8 / P9-4: SessionsView (Preact rewrite) ----
 
-test('P8-8 SessionsView.js exports SessionsView as a named export', async () => {
+test('P9-4 SessionsView.js exports SessionsView as a named export', async () => {
   const src = await loadSessionsViewSource();
   assert.match(src, /export\s+function\s+SessionsView\s*\(/,
     'SessionsView.js must provide `export function SessionsView(...)`');
+});
+
+test('P9-4 SessionsView.js imports preact / hooks / htm from vendor ES modules', async () => {
+  const src = await loadSessionsViewSource();
+  assert.match(src, /import\s.*from\s+['"].*hooks\.module\.js['"]/, 'hooks vendor import missing');
+  assert.match(src, /import\s.*from\s+['"].*preact\.module\.js['"]/, 'preact vendor import missing');
+  assert.match(src, /htm\.bind\(h\)/, 'htm.bind(h) wiring missing');
+});
+
+test('P9-4 SessionsView.js composes SessionList + ConversationPanel', async () => {
+  const src = await loadSessionsViewSource();
+  assert.match(src, /import\s.*SessionList.*from\s+['"]\.\/SessionList\.js['"]/, 'SessionList import missing');
+  assert.match(src, /import\s.*ConversationPanel.*from\s+['"]\.\/ConversationPanel\.js['"]/, 'ConversationPanel import missing');
+  assert.match(src, /<\$\{SessionList\}/, 'SessionList component usage missing');
+  assert.match(src, /<\$\{ConversationPanel\}/, 'ConversationPanel component usage missing');
+});
+
+test('P9-4 SessionsView.js no longer contains initLegacySessions', async () => {
+  const src = await loadSessionsViewSource();
+  assert.doesNotMatch(src, /function\s+initLegacySessions/,
+    'initLegacySessions must not exist — SessionsView is fully Preact now');
+});
+
+// ---- P9-4: SessionList ----
+
+test('P9-4 SessionList.js exports SessionList as a named export', async () => {
+  const src = await loadSessionListSource();
+  assert.match(src, /export\s+function\s+SessionList\s*\(/,
+    'SessionList.js must provide `export function SessionList(...)`');
+});
+
+test('P9-4 SessionList.js imports preact / hooks / htm from vendor ES modules', async () => {
+  const src = await loadSessionListSource();
+  assert.match(src, /import\s.*from\s+['"].*hooks\.module\.js['"]/, 'hooks vendor import missing');
+  assert.match(src, /import\s.*from\s+['"].*preact\.module\.js['"]/, 'preact vendor import missing');
+  assert.match(src, /htm\.bind\(h\)/, 'htm.bind(h) wiring missing');
+});
+
+// ---- P9-4: ConversationPanel ----
+
+test('P9-4 ConversationPanel.js exports ConversationPanel as a named export', async () => {
+  const src = await loadConversationPanelSource();
+  assert.match(src, /export\s+function\s+ConversationPanel\s*\(/,
+    'ConversationPanel.js must provide `export function ConversationPanel(...)`');
+});
+
+test('P9-4 ConversationPanel.js imports preact / hooks / htm from vendor ES modules', async () => {
+  const src = await loadConversationPanelSource();
+  assert.match(src, /import\s.*from\s+['"].*hooks\.module\.js['"]/, 'hooks vendor import missing');
+  assert.match(src, /import\s.*from\s+['"].*preact\.module\.js['"]/, 'preact vendor import missing');
+  assert.match(src, /htm\.bind\(h\)/, 'htm.bind(h) wiring missing');
 });
 
 // P9-3: SessionsView bridge test removed — app.js imports directly.

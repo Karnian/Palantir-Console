@@ -45,7 +45,7 @@ node --test server/tests/v2-api.test.js
 Express.js 5 + SQLite (WAL, better-sqlite3) + Preact/HTM (CDN 없이 vendor/ UMD).
 빌드 스텝 없음 — `server/public/`의 파일이 그대로 서빙됨.
 
-**v3 기준 (Phase 0~8 merged)**: Top manager + 프로젝트 단위 PM (lazy-spawn, conversation identity), deterministic router, annotate-only drift reconciliation, SSE 시맨틱 envelope. P8: app.js ESM 전환, hooks 분할, ManagerView 분할.
+**v3 기준 (Phase 0~9 merged)**: Top manager + 프로젝트 단위 PM (lazy-spawn, conversation identity), deterministic router, annotate-only drift reconciliation, SSE 시맨틱 envelope. P8: app.js ESM 전환, hooks 분할, ManagerView 분할. P9: 전 컴포넌트 직접 ESM import (window bridge 0개), SessionsView Preact 재작성.
 
 ```
 server/
@@ -83,14 +83,17 @@ server/
     eventBus.js               — EventEmitter pub/sub (replay 200)
     worktreeService.js        — Git worktree 관리
   public/
-    app.js                    — Preact SPA 진입 (ES module, P8-2), NAV_ITEMS + NavSidebar + App + mount
-    app/main.js               — ESM 엔트리 포인트 (preact/htm/hooks 를 window 로 브릿지)
+    app.js                    — Preact SPA 진입 (ES module, P8-2), NavSidebar + App + mount
+    app/main.js               — ESM 부트스트래퍼 (~14줄): configureMarked + import app.js
+    app/lib/nav.js            — NAV_ITEMS 공유 모듈 (P9-2)
     app/lib/hooks.js          — re-export barrel (→ hooks/ 디렉토리)
     app/lib/hooks/             — P8-4 분할: routing, utils, sse, data, conversation, dispatch, manager
     app/components/ManagerView.js  — Manager 레이아웃 셸 (P8-5, ~35줄)
     app/components/ManagerChat.js  — Manager 채팅 패널 (P8-5, ~500줄)
     app/components/SessionGrid.js  — Task 세션 그리드 (P8-5, ~200줄)
-    app/components/SessionsView.js — Legacy sessions (P6-3)
+    app/components/SessionsView.js — Sessions 레이아웃 셸 (P9-4, Preact 재작성)
+    app/components/SessionList.js  — 세션 목록 (P9-4)
+    app/components/ConversationPanel.js — 대화 패널 (P9-4)
     app/components/TaskModals.js   — NewTaskModal, ExecuteModal, TaskDetailPanel (P7-1)
     app/lib/notifications.js       — Browser notifications + tab pulse (P7-4)
     styles.css                — 전체 스타일
@@ -106,7 +109,7 @@ server/
     v2-api.test.js, api.test.js, boot.smoke.test.js, …
 ```
 
-> **509 tests** 기준 (P8 완료 시점). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙.
+> **509 tests** 기준 (P9 완료 시점). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙.
 
 ## Key Patterns
 
@@ -161,9 +164,10 @@ server/
 - `executionEngine.js`가 TmuxEngine (tmux 있을 때) / SubprocessEngine (없을 때) 자동 선택
 
 ### Frontend
-- Preact + HTM (UMD) — `server/public/vendor/`에 번들됨, CDN 의존 없음
-- 빌드 파이프라인 없음. `app.js`는 ~291줄 (NAV/App/mount 셸만 남음). 실제 뷰/모달은 `app/components/` ESM 모듈에 있음
-- `server/public/app/main.js` 가 ESM 엔트리로 hooks/libs 를 `window` 로 브릿지
+- Preact + HTM (ESM) — `server/public/vendor/`에 번들됨, CDN 의존 없음
+- 빌드 파이프라인 없음. `app.js`는 App/mount 셸. 실제 뷰/모달은 `app/components/` ESM 모듈에 있음
+- `server/public/app/main.js` 는 최소 부트스트래퍼 (~14줄): `configureMarked()` + `import('../app.js')`. window bridge 없음 (P9에서 전부 제거)
+- 모든 ESM 컴포넌트는 vendor/ 에서 직접 import (`import { h } from '../../vendor/preact.module.js'` 등)
 - 해시 라우팅: `#dashboard`, `#manager`, `#board`, `#projects`, `#agents`
 - **클라이언트 async fence 패턴** (Phase 6/7): id-change 시 `setRun(null); setEvents([])` 동기 reset + await 이전 `myId = conversationId` 캡처 + commit 전 `activeIdRef.current === myId` 비교. `useDispatchAudit` 는 `requestSeqRef` 시퀀스 토큰.
 
@@ -191,9 +195,11 @@ server/
 
 ## Things to Watch Out For
 
-- `server/public/app.js`는 ES module (P8-2). NAV_ITEMS + NavSidebar + App + mount 만 남은 셸 — 뷰/모달 수정은 `app/components/`, hooks 수정은 `app/lib/hooks/` 디렉토리를 직접 탐색
+- `server/public/app.js`는 ES module (P8-2). NavSidebar + App + mount 만 남은 셸 — 뷰/모달 수정은 `app/components/`, hooks 수정은 `app/lib/hooks/` 디렉토리를 직접 탐색. NAV_ITEMS 는 `app/lib/nav.js` 에 분리 (P9-2)
 - `useSSE` channels 배열이 hard-coded (`app/lib/hooks/sse.js`) — 새 SSE 채널 추가 시 반드시 이 배열에도 추가. Phase 5/7 에서 까먹어 "핸들러는 등록됐지만 실제 subscribe 안 됨" 회귀가 있었음
 - `ManagerView.js`는 thin layout shell (P8-5) — 채팅 로직은 `ManagerChat.js`, 세션 그리드는 `SessionGrid.js`에 있음
+- `SessionsView.js`는 thin layout shell (P9-4) — 세션 목록은 `SessionList.js`, 대화 패널은 `ConversationPanel.js`에 있음. `initLegacySessions` 는 삭제됨
+- `app/main.js` 는 최소 부트스트래퍼 (~14줄) — window bridge 없음. 모든 컴포넌트는 vendor/ 에서 직접 import
 - `pmSpawnService` 에서 **seed runTurn 금지** — brief 은 static system prompt 에 bake. Codex 어댑터는 back-to-back runTurn 에서 "previous turn still running" 을 던진다
 - `pmCleanupService` 는 fail-closed — dispose 실패 시 상태를 유지한 채 re-throw. 호출자 (DELETE /api/projects/:id, /reset) 가 502 로 거절해야 함. 절대 swallow 하지 말 것
 - `reconciliationService.recordClaim` 의 envelope binding 은 strict — `projectId`/`taskId`/`pmRunId`/`selectedAgentProfileId` 전부 존재+소유 검증. hard input error 는 400 throw, incoherence 는 flag 로만 표시 (annotate-only 원칙: PM drift 는 기록만, block 안 함)
