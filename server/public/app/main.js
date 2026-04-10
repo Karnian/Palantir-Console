@@ -133,6 +133,20 @@ window.SessionsView = SessionsView;
 const { ManagerView } = await import('./components/ManagerView.js');
 window.ManagerView = ManagerView;
 
+// P7-4 (ESM phase 6): Notification utilities — requestNotificationPermission,
+// showBrowserNotification, pulseTabTitle. Also registers the click/keydown
+// permission-request side effect at module load time.
+const notifications = await import('./lib/notifications.js');
+window.requestNotificationPermission = notifications.requestNotificationPermission;
+window.showBrowserNotification = notifications.showBrowserNotification;
+window.pulseTabTitle = notifications.pulseTabTitle;
+
+// P7-1 (ESM phase 6): TaskModals — NewTaskModal, ExecuteModal, TaskDetailPanel.
+const { NewTaskModal, ExecuteModal, TaskDetailPanel } = await import('./components/TaskModals.js');
+window.NewTaskModal = NewTaskModal;
+window.ExecuteModal = ExecuteModal;
+window.TaskDetailPanel = TaskDetailPanel;
+
 // Load app.js as a classic script after the globals are in place. We use a
 // dynamic <script> tag (rather than `import './app.js'`) because app.js is
 // still a non-module bundle that relies on top-level globals. Once helpers
