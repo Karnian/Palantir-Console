@@ -100,6 +100,20 @@ window.MentionInput = MentionInput;
 const { CommandPalette } = await import('./components/CommandPalette.js');
 window.CommandPalette = CommandPalette;
 
+// P5-1 (ESM phase 4a): DashboardView — Attention Dashboard.
+// Also bridges dueState / formatDueDate / useNowTick / dueDateMeta onto window
+// so that legacy app.js code (TaskDetailPanel etc.) can use them as bare identifiers.
+const { DashboardView } = await import('./components/DashboardView.js');
+window.DashboardView = DashboardView;
+
+// P5-2 (ESM phase 4a): BoardView + CalendarView + DirectoryPicker.
+// CalendarView is exported for app.js to reference via window.CalendarView.
+// DirectoryPicker is bridged for ProjectsView (in app.js) to use as a bare identifier.
+const { BoardView, CalendarView, DirectoryPicker } = await import('./components/BoardView.js');
+window.BoardView = BoardView;
+window.CalendarView = CalendarView;
+window.DirectoryPicker = DirectoryPicker;
+
 // Load app.js as a classic script after the globals are in place. We use a
 // dynamic <script> tag (rather than `import './app.js'`) because app.js is
 // still a non-module bundle that relies on top-level globals. Once helpers

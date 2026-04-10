@@ -35,6 +35,18 @@ async function loadDriftDrawerSource() {
   return _driftDrawerSrcCache;
 }
 
+// P5-1 (ESM phase 4a): DashboardView was extracted from app.js into
+// its own ES module (app/components/DashboardView.js).
+let _dashboardViewSrcCache;
+async function loadDashboardViewSource() {
+  if (_dashboardViewSrcCache) return _dashboardViewSrcCache;
+  _dashboardViewSrcCache = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'components', 'DashboardView.js'),
+    'utf8'
+  );
+  return _dashboardViewSrcCache;
+}
+
 function sliceFunction(src, header) {
   // Find the declaration, then grab a generous window afterwards. We
   // don't need to precisely delimit the function body — a brace
@@ -196,7 +208,13 @@ test('P2-6 DriftDrawer focus-trap useEffect depends only on [open]', async () =>
 // ---- P2-7: drift badge aria-label ----
 
 test('P2-7 drift badge has aria-label announcing the count', async () => {
-  const src = await loadAppJs();
+  // P5-1: DashboardView (including the drift badge) was extracted from app.js
+  // into app/components/DashboardView.js. Search there first, fall back to
+  // app.js for future migrations that might restructure further.
+  const [appSrc, dashboardSrc] = await Promise.all([loadAppJs(), loadDashboardViewSource()]);
+  const src = dashboardSrc.indexOf('PM hallucination / staleness incidents') >= 0
+    ? dashboardSrc
+    : appSrc;
   const badgeStart = src.indexOf('PM hallucination / staleness incidents');
   assert.ok(badgeStart > 0, 'drift badge region not located');
   const region = src.slice(badgeStart, badgeStart + 600);
