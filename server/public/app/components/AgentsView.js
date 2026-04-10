@@ -427,5 +427,3 @@ export function AgentsView({ agents, loading, reloadAgents }) {
     </div>
   `;
 }
-
-window.AgentsView = AgentsView;

@@ -35,6 +35,18 @@ async function loadDriftDrawerSource() {
   return _driftDrawerSrcCache;
 }
 
+// P6-1 (ESM phase 5a): ManagerView was extracted from app.js into
+// its own ES module (app/components/ManagerView.js).
+let _managerViewSrcCache;
+async function loadManagerViewSource() {
+  if (_managerViewSrcCache) return _managerViewSrcCache;
+  _managerViewSrcCache = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'components', 'ManagerView.js'),
+    'utf8'
+  );
+  return _managerViewSrcCache;
+}
+
 // P5-1 (ESM phase 4a): DashboardView was extracted from app.js into
 // its own ES module (app/components/DashboardView.js).
 let _dashboardViewSrcCache;
@@ -278,7 +290,7 @@ test('P2-10 app.js still references <${DriftDrawer} ... /> via global bridge', a
 // ---- P2-9: Stop/Reset label clarity + PM selector Dropdown swap ----
 
 test('P2-9 Reset PM button has explicit aria-label and scope-clarifying title', async () => {
-  const src = await loadAppJs();
+  const src = await loadManagerViewSource();
   const idx = src.indexOf('aria-label="Reset PM for this project"');
   assert.ok(idx > 0, 'Reset PM aria-label not found — P2-9 title/aria update missing');
   const region = src.slice(idx - 600, idx + 200);
@@ -290,7 +302,7 @@ test('P2-9 Reset PM button has explicit aria-label and scope-clarifying title', 
 });
 
 test('P2-9 Stop Top button has explicit aria-label and scope-clarifying title', async () => {
-  const src = await loadAppJs();
+  const src = await loadManagerViewSource();
   const idx = src.indexOf('aria-label="Stop Top manager"');
   assert.ok(idx > 0, 'Stop Top aria-label not found — P2-9 title/aria update missing');
   const region = src.slice(idx - 600, idx + 200);
@@ -302,7 +314,7 @@ test('P2-9 Stop Top button has explicit aria-label and scope-clarifying title', 
 });
 
 test('P2-9 PM selector uses the Dropdown component, not native <select>', async () => {
-  const src = await loadAppJs();
+  const src = await loadManagerViewSource();
   // Anchor on the unique className the swap kept.
   const idx = src.indexOf('className="manager-picker-select"');
   assert.ok(idx > 0, 'PM selector Dropdown className not found — swap missing');
@@ -327,7 +339,7 @@ test('P2-9 legacy conversation-target native <select> is removed', async () => {
   // check below therefore anchors on the conversation-target path
   // (value=${conversationTarget}) and confirms it is NOT wired to a
   // native <select>.
-  const src = await loadAppJs();
+  const src = await loadManagerViewSource();
   // Find the conversationTarget binding and inspect the enclosing
   // element type. The Dropdown swap uses `<${Dropdown}` on the same
   // element; a regression to native <select> would show `<select`
@@ -465,8 +477,8 @@ test('P3-1 main.js dynamically imports MentionInput and bridges it onto window',
     'main.js must assign window.MentionInput = MentionInput');
 });
 
-test('P3-1 app.js uses MentionInput in ManagerView instead of plain textarea', async () => {
-  const src = await loadAppJs();
+test('P3-1 ManagerView uses MentionInput instead of plain textarea', async () => {
+  const src = await loadManagerViewSource();
   // The MentionInput component should be used in the manager input area
   assert.match(src, /<\$\{MentionInput\}/,
     'app.js must render <${MentionInput}> in the ManagerView input area');

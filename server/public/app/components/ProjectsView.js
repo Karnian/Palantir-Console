@@ -352,5 +352,3 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
     </div>
   `;
 }
-
-window.ProjectsView = ProjectsView;
