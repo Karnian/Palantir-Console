@@ -1654,6 +1654,12 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTa
                 <span style="color:var(--text-secondary);font-size:12px;word-break:break-all;" title=${project.directory}>${project.directory}</span>
               </div>
             `}
+            ${project.mcp_config_path && html`
+              <div class="task-detail-meta-item">
+                <span class="task-detail-meta-label">MCP Config</span>
+                <span style="color:var(--text-secondary);font-size:12px;word-break:break-all;" title=${project.mcp_config_path}>${project.mcp_config_path}</span>
+              </div>
+            `}
             <div class="task-detail-meta-item">
               <span class="task-detail-meta-label">Tasks</span>
               <span style="color:var(--text-secondary);font-size:12px;">${projectTasks.length} total</span>
@@ -1725,6 +1731,7 @@ function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun, onOpen
   const [name, setName] = useState('');
   const [desc, setDesc] = useState('');
   const [dir, setDir] = useState('');
+  const [mcpConfigPath, setMcpConfigPath] = useState('');
   const [saving, setSaving] = useState(false);
 
   const handleCreate = async () => {
@@ -1733,9 +1740,9 @@ function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun, onOpen
     try {
       await apiFetch('/api/projects', {
         method: 'POST',
-        body: JSON.stringify({ name: name.trim(), description: desc.trim() || undefined, directory: dir.trim() || undefined }),
+        body: JSON.stringify({ name: name.trim(), description: desc.trim() || undefined, directory: dir.trim() || undefined, mcp_config_path: mcpConfigPath.trim() || undefined }),
       });
-      setName(''); setDesc(''); setDir(''); setShowNew(false);
+      setName(''); setDesc(''); setDir(''); setMcpConfigPath(''); setShowNew(false);
       reloadProjects();
     } catch (err) {
       addToast(err.message, 'error');
@@ -1792,6 +1799,11 @@ function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun, onOpen
               <div class="form-field">
                 <label class="form-label">Description</label>
                 <textarea class="form-textarea" value=${desc} onInput=${e => setDesc(e.target.value)} placeholder="Optional" rows="3"></textarea>
+              </div>
+              <div class="form-field">
+                <label class="form-label">MCP Config Path</label>
+                <input class="form-input" value=${mcpConfigPath} onInput=${e => setMcpConfigPath(e.target.value)} placeholder="/path/to/mcp-config.json (optional)" />
+                <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">Project-scoped MCP server config file for Claude CLI --mcp-config</div>
               </div>
             </div>
             <div class="modal-footer">

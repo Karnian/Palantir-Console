@@ -28,11 +28,11 @@ function createProjectService(db) {
     insert: db.prepare(`
       INSERT INTO projects (
         id, name, directory, description, color, budget_usd,
-        pm_enabled, preferred_pm_adapter
+        pm_enabled, preferred_pm_adapter, mcp_config_path
       )
       VALUES (
         @id, @name, @directory, @description, @color, @budget_usd,
-        @pm_enabled, @preferred_pm_adapter
+        @pm_enabled, @preferred_pm_adapter, @mcp_config_path
       )
     `),
     // update: dynamic — see updateProject() below
@@ -49,7 +49,7 @@ function createProjectService(db) {
     return project;
   }
 
-  function createProject({ name, directory, description, color, budget_usd, pm_enabled, preferred_pm_adapter }) {
+  function createProject({ name, directory, description, color, budget_usd, pm_enabled, preferred_pm_adapter, mcp_config_path }) {
     if (!name) throw new BadRequestError('Project name is required');
     const id = `proj_${crypto.randomUUID().slice(0, 8)}`;
     const normalizedPmEnabled = normalizePmEnabled(pm_enabled);
@@ -63,6 +63,7 @@ function createProjectService(db) {
       // v3 Phase 1: PM settings default to enabled + no preference
       pm_enabled: normalizedPmEnabled === undefined ? 1 : normalizedPmEnabled,
       preferred_pm_adapter: normalizedAdapter === undefined ? null : normalizedAdapter,
+      mcp_config_path: mcp_config_path || null,
     });
     return stmts.getById.get(id);
   }
@@ -71,6 +72,8 @@ function createProjectService(db) {
     'name', 'directory', 'description', 'color', 'budget_usd',
     // v3 Phase 1
     'pm_enabled', 'preferred_pm_adapter',
+    // v3 Phase 4 (P4-2): project-scoped MCP config file path
+    'mcp_config_path',
   ];
 
   function updateProject(id, fields) {

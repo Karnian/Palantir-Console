@@ -300,6 +300,10 @@ function createPmSpawnService({
         resumeThreadId,
         onThreadStarted,
         mcpTools: pmMcpTools.length > 0 ? pmMcpTools : undefined,
+        // P4-2: pass project-scoped MCP config file path to the adapter.
+        // Claude adapter forwards this to streamJsonEngine as --mcp-config.
+        // Codex adapter silently skips it (unsupported).
+        mcpConfig: project.mcp_config_path || undefined,
       });
     } catch (err) {
       // Adapter startup failed — mark the run as failed and bubble up
