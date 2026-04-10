@@ -37,11 +37,14 @@ async function loadDriftDrawerSource() {
 
 // P6-1 (ESM phase 5a): ManagerView was extracted from app.js into
 // its own ES module (app/components/ManagerView.js).
+// P8-5: ManagerView was further split into ManagerChat.js + SessionGrid.js.
+// loadManagerViewSource now returns ManagerChat.js since the chat-specific
+// aria-labels, Dropdown, and MentionInput live there.
 let _managerViewSrcCache;
 async function loadManagerViewSource() {
   if (_managerViewSrcCache) return _managerViewSrcCache;
   _managerViewSrcCache = await fs.readFile(
-    path.join(__dirname, '..', 'public', 'app', 'components', 'ManagerView.js'),
+    path.join(__dirname, '..', 'public', 'app', 'components', 'ManagerChat.js'),
     'utf8'
   );
   return _managerViewSrcCache;
