@@ -124,6 +124,10 @@ window.ProjectsView = ProjectsView;
 const { AgentsView } = await import('./components/AgentsView.js');
 window.AgentsView = AgentsView;
 
+// P6-3 (ESM phase 5): SessionsView + initLegacySessions.
+const { SessionsView } = await import('./components/SessionsView.js');
+window.SessionsView = SessionsView;
+
 // P6-1 (ESM phase 5a): ManagerView — Full-page manager chat + session grid.
 // Also includes managerProfileAuthState (module-internal to ManagerView).
 const { ManagerView } = await import('./components/ManagerView.js');
