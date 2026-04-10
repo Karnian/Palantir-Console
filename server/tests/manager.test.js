@@ -762,6 +762,8 @@ test('v3 Phase 0 behavior: codexAdapter role=manager spawn args OMIT sandbox byp
   assert.ok(capturedArgs, 'fake spawn must have been called');
   assert.ok(!capturedArgs.includes('--dangerously-bypass-approvals-and-sandbox'),
     'manager role must NOT pass sandbox bypass flag');
+  assert.ok(capturedArgs.includes('--full-auto'),
+    'manager role must pass --full-auto for tool call auto-approval');
   assert.ok(capturedArgs.includes('--skip-git-repo-check'),
     'manager role should still pass --skip-git-repo-check');
   assert.ok(capturedArgs.includes('exec'), 'should invoke codex exec subcommand');
@@ -793,6 +795,8 @@ test('v3 Phase 0 behavior: codexAdapter role=worker spawn args INCLUDE sandbox b
   adapter.runTurn('run_codex_wkr', { text: 'hello' });
   assert.ok(capturedArgs.includes('--dangerously-bypass-approvals-and-sandbox'),
     'worker role MUST pass sandbox bypass flag');
+  assert.ok(!capturedArgs.includes('--full-auto'),
+    'worker role must NOT pass --full-auto (bypass already implies it)');
   adapter.disposeSession('run_codex_wkr');
 });
 
@@ -1087,6 +1091,8 @@ test('v3 Phase 0 behavior: codexAdapter PALANTIR_CODEX_MANAGER_BYPASS=1 re-enabl
     adapter.runTurn('run_codex_bypass', { text: 'hello' });
     assert.ok(capturedArgs.includes('--dangerously-bypass-approvals-and-sandbox'),
       'PALANTIR_CODEX_MANAGER_BYPASS=1 must re-enable bypass for manager role');
+    assert.ok(!capturedArgs.includes('--full-auto'),
+      'bypass mode must NOT also pass --full-auto (bypass already implies auto-approval)');
     adapter.disposeSession('run_codex_bypass');
   } finally {
     if (prev === undefined) delete process.env.PALANTIR_CODEX_MANAGER_BYPASS;
@@ -1154,4 +1160,8 @@ test('v3 Phase 0: codexAdapter omits sandbox bypass flag for manager role', asyn
   const pushMatches = src.match(/args\.push\('--dangerously-bypass-approvals-and-sandbox'\)/g);
   assert.equal(pushMatches && pushMatches.length, 1,
     'exactly one bypass push should exist, and it should be the guarded one');
+  // The else branch must push --full-auto for non-bypass manager mode
+  const fullAutoGuarded = /else\s*\{\s*\n?\s*args\.push\('--full-auto'\)/;
+  assert.ok(fullAutoGuarded.test(src),
+    '--full-auto push must exist in the else branch of shouldBypass');
 });

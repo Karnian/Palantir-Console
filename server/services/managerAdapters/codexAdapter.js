@@ -16,9 +16,10 @@
  *     subsequent turns get a high cached_input_tokens, which we want.
  *   - The temp file is created in startSession() and deleted in
  *     disposeSession() (the dispose hook is precisely what D1 was added for).
- *   - --skip-git-repo-check + --dangerously-bypass-approvals-and-sandbox
- *     match how Atlas/Athena already drive Codex; we are an externally
- *     sandboxed Manager so this is acceptable.
+ *   - --skip-git-repo-check is always passed. --full-auto is the default
+ *     for manager role (auto-approves tool calls, keeps filesystem sandbox).
+ *     --dangerously-bypass-approvals-and-sandbox is only for worker role
+ *     or when PALANTIR_CODEX_MANAGER_BYPASS=1 is set.
  *   - AGENTS.md interaction (verified 2026-04-07 against codex-cli 0.118.0):
  *     ~/.codex/AGENTS.md is auto-loaded by codex when present and prepended
  *     to the model_instructions_file content. On the dev box this file is
@@ -196,16 +197,22 @@ function createCodexAdapter({
       args.push('exec', 'resume', state.threadId, '--json');
     }
     args.push('--skip-git-repo-check');
-    // v3 Phase 0: role-aware sandbox policy.
-    // - 'manager': no sandbox bypass. Manager's legitimate surface is curl + read;
-    //   filesystem write is a worker concern. Escape hatch via PALANTIR_CODEX_MANAGER_BYPASS=1
-    //   for users hitting genuine Codex CLI limitations during the rollout.
-    // - 'worker' (future): full bypass because workers need filesystem write.
+    // Role-aware approval + sandbox policy.
+    // - 'worker': full bypass (approvals + sandbox) — workers need filesystem write.
+    // - 'manager' with PALANTIR_CODEX_MANAGER_BYPASS=1: same as worker (escape hatch).
+    // - 'manager' default: --full-auto only. Auto-approves tool calls (curl, read,
+    //   etc.) so the PM can hit the Palantir API in non-interactive exec --json
+    //   mode, but keeps the filesystem sandbox active as defense-in-depth against
+    //   accidental writes. Without --full-auto, codex exec --json blocks tool
+    //   calls waiting for interactive approval that can never arrive (stdin is a
+    //   pipe, not a TTY), making the PM unable to execute any commands.
     const role = state.role || 'manager';
     const managerBypassOverride = process.env.PALANTIR_CODEX_MANAGER_BYPASS === '1';
     const shouldBypass = role === 'worker' || managerBypassOverride;
     if (shouldBypass) {
       args.push('--dangerously-bypass-approvals-and-sandbox');
+    } else {
+      args.push('--full-auto');
     }
     args.push('-c', `model_instructions_file="${state.instructionsPath}"`);
     if (state.model) {
@@ -593,8 +600,8 @@ You are running as a Codex CLI subprocess (codex exec --json). HARD RULES:
 - Do NOT do code edits directly inside this manager session. Spawn a worker.
 - Do NOT install a polling loop on /execute results — the user will see them
   in the Palantir Console UI; just report once per turn.
-- Bypassed sandbox is intentional because the Palantir Console is the
-  sandbox boundary. Do not assume you can write anywhere on the filesystem.`;
+- Filesystem sandbox is active. Your tools are limited to read operations
+  and curl for API calls. Do not attempt file writes — those are a worker concern.`;
   }
 
   return {
