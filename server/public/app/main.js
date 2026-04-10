@@ -78,6 +78,13 @@ window.useDispatchAudit = hooks.useDispatchAudit; // v3 Phase 7
 const { RunInspector } = await import('./components/RunInspector.js');
 window.RunInspector = RunInspector;
 
+// P2-10 (ESM phase 1): DriftDrawer extracted from the legacy app.js
+// monolith. Same window-bridge pattern as RunInspector — the legacy
+// app.js references DriftDrawer as a bare global identifier inside
+// its htm templates, so we assign the named export onto window here.
+const { DriftDrawer } = await import('./components/DriftDrawer.js');
+window.DriftDrawer = DriftDrawer;
+
 // Load app.js as a classic script after the globals are in place. We use a
 // dynamic <script> tag (rather than `import './app.js'`) because app.js is
 // still a non-module bundle that relies on top-level globals. Once helpers
