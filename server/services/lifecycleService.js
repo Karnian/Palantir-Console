@@ -20,7 +20,7 @@ function createLifecycleService({
   eventBus,
 }) {
   const HEARTBEAT_INTERVAL_MS = 30000;  // 30s
-  const IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 min
+  const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min (increased from 10 min for long-running tasks)
   let heartbeatTimer = null;
   let healthCheckRunning = false; // Re-entrancy guard
   let unsubscribeEventBus = null; // for stopMonitoring teardown
@@ -29,6 +29,53 @@ function createLifecycleService({
   // for worktree cleanup when the run→task→project chain has been broken (e.g. the
   // task or project was deleted while the run was still in flight).
   const _runProjectDirs = new Map();
+
+  /**
+   * Check if the agent process for a tmux run is actively consuming CPU.
+   * Uses `tmux list-panes` to get the child PID, then checks /proc or `ps`
+   * to see if it's actually working vs idle/sleeping.
+   */
+  function _isProcessActive(runId) {
+    try {
+      const { execFileSync } = require('node:child_process');
+      const sessionName = `palantir-run-${String(runId).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+
+      // Get the PID of the process running inside the tmux pane
+      const pidStr = execFileSync('tmux', ['list-panes', '-t', sessionName, '-F', '#{pane_pid}'], {
+        stdio: 'pipe', timeout: 3000, encoding: 'utf8',
+      }).trim();
+
+      if (!pidStr) return false;
+      const panePid = parseInt(pidStr.split('\n')[0], 10);
+      if (isNaN(panePid)) return false;
+
+      // Check all descendant processes for CPU activity using ps
+      // ps -o pid,state,%cpu for the pane PID and all its children
+      const psOutput = execFileSync('ps', ['-o', 'pid=,state=,%cpu=', '-g', String(panePid)], {
+        stdio: 'pipe', timeout: 3000, encoding: 'utf8',
+      }).trim();
+
+      if (!psOutput) return false;
+
+      // Check if any process in the group is running (R state) or using CPU > 0
+      for (const line of psOutput.split('\n')) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length >= 3) {
+          const state = parts[1];
+          const cpu = parseFloat(parts[2]);
+          // R = running, S = sleeping (interruptible, often normal for I/O wait)
+          // If any process is in R state or using measurable CPU, it's active
+          if (state.startsWith('R') || cpu > 0.5) {
+            return true;
+          }
+        }
+      }
+      return false;
+    } catch {
+      // If we can't determine, assume not active (safe fallback)
+      return false;
+    }
+  }
 
   /**
    * Build a git-branch-safe identifier from a run id (run_xxx → palantir/run-xxx).
@@ -354,38 +401,56 @@ function createLifecycleService({
           const snippet = currentOutput ? currentOutput.trim().split('\n').pop()?.slice(0, 200) : '';
           runService.addRunEvent(run.id, 'heartbeat', snippet ? JSON.stringify({ output: snippet }) : null);
         } else {
-          // Output unchanged — check idle timeout
-          const events = runService.getRunEvents(run.id);
-          const lastEvent = events[events.length - 1];
-          const lastActivity = lastEvent ? new Date(lastEvent.created_at).getTime() : new Date(run.started_at || run.created_at).getTime();
-          const idleTime = Date.now() - lastActivity;
+          // Output unchanged — but check if the process is still alive and consuming CPU
+          // before declaring it idle. Agents may be thinking/processing without terminal output.
+          const processStillActive = _isProcessActive(run.id);
 
-          if (idleTime > IDLE_TIMEOUT_MS) {
-            const fromStatus = run.status;
-            runService.updateRunStatus(run.id, 'needs_input', { force: true, reason: 'idle_timeout' });
-            runService.addRunEvent(run.id, 'idle_timeout', JSON.stringify({
-              message: `Agent idle for ${Math.round(idleTime / 60000)} minutes`,
-              idleMs: idleTime,
-            }));
-            if (eventBus) {
-              // v3 Phase 5: run:needs_input is a PRIORITY alert —
-              // the client should surface it via tab title / sound /
-              // OS notification. Payload now carries the semantic
-              // envelope fields and the priority marker so clients
-              // don't have to hardcode a list of "important" channels.
-              eventBus.emit('run:needs_input', {
-                runId: run.id,
-                run: runService.getRun(run.id),
-                from_status: fromStatus,
-                to_status: 'needs_input',
-                reason: 'idle_timeout',
-                task_id: run.task_id || null,
-                project_id: run.project_id || null,
-                priority: 'alert',
-              });
-            }
+          if (processStillActive) {
+            // Process is alive and consuming CPU — agent is working, just no terminal output yet.
+            // Record a heartbeat and let it keep running.
+            runService.addRunEvent(run.id, 'heartbeat', JSON.stringify({ status: 'process_active_no_output' }));
           } else {
-            runService.addRunEvent(run.id, 'heartbeat', null);
+            // Process is idle or dead — check idle timeout
+            const events = runService.getRunEvents(run.id);
+            const lastEvent = events[events.length - 1];
+            const lastActivity = lastEvent ? new Date(lastEvent.created_at).getTime() : new Date(run.started_at || run.created_at).getTime();
+            const idleTime = Date.now() - lastActivity;
+
+            if (idleTime > IDLE_TIMEOUT_MS) {
+              // Double-check: is the process truly dead or just idle?
+              const alive = executionEngine.isAlive(run.id);
+              if (!alive) {
+                // Process is dead — finalize as completed/failed
+                const exitCode = executionEngine.detectExitCode(run.id);
+                const status = (exitCode === 0) ? 'completed' : 'failed';
+                runService.updateRunStatus(run.id, status, { force: true, reason: 'process_dead_after_idle' });
+                if (run.task_id) checkTaskCompletion(run.task_id);
+                executionEngine.kill(run.id);
+                _outputHashes.delete(run.id);
+              } else {
+                // Process alive but truly idle for too long — mark needs_input
+                const fromStatus = run.status;
+                runService.updateRunStatus(run.id, 'needs_input', { force: true, reason: 'idle_timeout' });
+                runService.addRunEvent(run.id, 'idle_timeout', JSON.stringify({
+                  message: `Agent idle for ${Math.round(idleTime / 60000)} minutes (process alive but no activity)`,
+                  idleMs: idleTime,
+                }));
+                if (eventBus) {
+                  eventBus.emit('run:needs_input', {
+                    runId: run.id,
+                    run: runService.getRun(run.id),
+                    from_status: fromStatus,
+                    to_status: 'needs_input',
+                    reason: 'idle_timeout',
+                    task_id: run.task_id || null,
+                    project_id: run.project_id || null,
+                    priority: 'alert',
+                  });
+                }
+              }
+            } else {
+              runService.addRunEvent(run.id, 'heartbeat', null);
+            }
           }
         }
       }
