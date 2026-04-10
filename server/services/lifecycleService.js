@@ -117,7 +117,7 @@ function createLifecycleService({
       const projectDir = resolveProjectDirForRun(run);
       if (projectDir) {
         try {
-          worktreeService.removeWorktree(projectDir, run.worktree_path, run.branch);
+          worktreeService.removeWorktree(projectDir, run.worktree_path, run.branch, { runId: run.id });
         } catch (err) {
           console.warn(`[lifecycle] Worktree cleanup failed for run ${run.id}: ${err.message}`);
         }
