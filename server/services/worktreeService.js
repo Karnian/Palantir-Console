@@ -118,14 +118,89 @@ function createWorktreeService() {
   }
 
   /**
-   * Remove a worktree and optionally its branch.
+   * Check if a worktree has uncommitted changes (staged or unstaged).
+   * Returns true if there is anything that would be lost on removal.
    */
-  function removeWorktree(projectDir, worktreePath, branchName) {
+  function hasUncommittedChanges(worktreePath) {
+    try {
+      const status = execFileSync('git', ['status', '--porcelain'], {
+        cwd: worktreePath,
+        stdio: 'pipe',
+        encoding: 'utf-8',
+      });
+      return status.trim().length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Auto-save uncommitted changes in a worktree before removal.
+   * Stages all changes and creates a commit so work is not lost.
+   * Returns true if a commit was created.
+   */
+  function autoSaveWorktree(worktreePath, runId) {
+    try {
+      if (!hasUncommittedChanges(worktreePath)) return false;
+
+      // Stage all changes (new, modified, deleted)
+      execFileSync('git', ['add', '-A'], {
+        cwd: worktreePath,
+        stdio: 'pipe',
+      });
+
+      // Commit with an identifiable message
+      const msg = `[palantir] auto-save uncommitted changes from run ${runId || 'unknown'}`;
+      execFileSync('git', ['commit', '-m', msg, '--no-verify'], {
+        cwd: worktreePath,
+        stdio: 'pipe',
+      });
+      console.log(`[worktreeService] Auto-saved uncommitted changes in ${worktreePath} (run: ${runId || 'unknown'})`);
+      return true;
+    } catch (err) {
+      console.warn(`[worktreeService] Auto-save failed for ${worktreePath}: ${err.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Check if a branch has commits ahead of the base branch.
+   * If it does, the branch should be preserved (not deleted).
+   */
+  function branchHasWork(projectDir, branchName) {
+    try {
+      const safeBranch = validateBranchName(branchName);
+      const baseBranch = getCurrentBranch(projectDir);
+      const count = execFileSync(
+        'git', ['rev-list', '--count', `${baseBranch}..${safeBranch}`],
+        { cwd: projectDir, stdio: 'pipe', encoding: 'utf-8' }
+      );
+      return parseInt(count.trim(), 10) > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Remove a worktree. Auto-saves uncommitted changes before removal
+   * and preserves the branch if it contains work (commits ahead of base).
+   * @param {string} projectDir - The git repository root
+   * @param {string} worktreePath - Path to the worktree directory
+   * @param {string} branchName - Branch name to optionally delete
+   * @param {object} [opts] - Options
+   * @param {string} [opts.runId] - Run ID for the auto-save commit message
+   */
+  function removeWorktree(projectDir, worktreePath, branchName, opts = {}) {
     // Validate worktreePath is within projectDir to prevent arbitrary deletion
     const resolvedProject = path.resolve(projectDir);
     const resolvedWorktree = path.resolve(worktreePath);
     if (!resolvedWorktree.startsWith(resolvedProject + path.sep) && resolvedWorktree !== resolvedProject) {
       throw new Error(`Worktree path ${worktreePath} is outside project directory ${projectDir}`);
+    }
+
+    // Auto-save uncommitted changes before removal
+    if (fs.existsSync(resolvedWorktree)) {
+      autoSaveWorktree(resolvedWorktree, opts.runId);
     }
 
     try {
@@ -146,12 +221,18 @@ function createWorktreeService() {
       }
     }
 
+    // Only delete the branch if it has no commits ahead of base.
+    // Branches with work are preserved so the user can review/merge them.
     if (branchName) {
-      try {
-        const safeBranch = validateBranchName(branchName);
-        execFileSync('git', ['branch', '-D', safeBranch], { cwd: projectDir, stdio: 'pipe' });
-      } catch {
-        // branch may have been merged or doesn't exist
+      const safeBranch = validateBranchName(branchName);
+      if (branchHasWork(projectDir, safeBranch)) {
+        console.log(`[worktreeService] Preserving branch '${safeBranch}' — has commits ahead of base`);
+      } else {
+        try {
+          execFileSync('git', ['branch', '-D', safeBranch], { cwd: projectDir, stdio: 'pipe' });
+        } catch {
+          // branch may have been merged or doesn't exist
+        }
       }
     }
   }
@@ -215,7 +296,7 @@ function createWorktreeService() {
     }
   }
 
-  return { createWorktree, removeWorktree, listWorktrees, getWorktreeDiff, isGitRepo };
+  return { createWorktree, removeWorktree, listWorktrees, getWorktreeDiff, isGitRepo, hasUncommittedChanges, branchHasWork };
 }
 
 module.exports = { createWorktreeService };
