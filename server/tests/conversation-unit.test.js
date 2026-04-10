@@ -413,3 +413,241 @@ test('conv: managerRegistry.onSlotCleared listener scrubs pending notices', asyn
   const remaining = conv.consumeParentNotices(topRun.id);
   assert.equal(remaining.length, 0, 'notices scrubbed when slot is cleared');
 });
+
+// ---------------------------------------------------------------------------
+// P6-8: pm:<id> sendMessage 라우팅
+// ---------------------------------------------------------------------------
+
+// Helper: PM run을 registry 에 seed
+function seedPmRun(db, rs, registry, pmAdapter, { projectId = 'proj-pm1', parentTopRunId = null } = {}) {
+  db.prepare(`INSERT OR IGNORE INTO projects (id, name, pm_enabled) VALUES ('${projectId}','PMProj',1)`).run();
+  const run = rs.createRun({
+    is_manager: true,
+    manager_adapter: 'codex',
+    manager_layer: 'pm',
+    conversation_id: `pm:${projectId}`,
+    parent_run_id: parentTopRunId || null,
+    prompt: `pm for ${projectId}`,
+  });
+  rs.updateRunStatus(run.id, 'running', { force: true });
+  registry.setActive(`pm:${projectId}`, run.id, pmAdapter);
+  return rs.getRun(run.id);
+}
+
+test('conv: sendMessage to pm:<id> dispatches runTurn on PM adapter', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const registry = createManagerRegistry({ runService: rs });
+  const pmAdapter = makeFakeAdapter();
+  const conv = createConversationService({
+    runService: rs, managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => pmAdapter },
+    lifecycleService: null,
+  });
+
+  seedPmRun(db, rs, registry, pmAdapter);
+  const result = conv.sendMessage('pm:proj-pm1', { text: 'hello pm' });
+
+  assert.equal(result.status, 'sent');
+  assert.equal(result.target.kind, 'pm');
+  assert.equal(result.target.projectId, 'proj-pm1');
+  assert.equal(pmAdapter.calls.length, 1);
+  assert.equal(pmAdapter.calls[0].payload.text, 'hello pm');
+});
+
+test('conv: sendMessage to pm:<id> throws 404 when no active PM', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const registry = createManagerRegistry({ runService: rs });
+  const conv = createConversationService({
+    runService: rs, managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => makeFakeAdapter() },
+    lifecycleService: null,
+  });
+
+  let caught;
+  try { conv.sendMessage('pm:no-such-project', { text: 'hi' }); } catch (e) { caught = e; }
+  assert.ok(caught, 'should throw');
+  assert.equal(caught.httpStatus, 404);
+  assert.match(caught.message, /No active PM manager session/);
+});
+
+test('conv: PM→Top notice queued when PM message has active parent Top', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const registry = createManagerRegistry({ runService: rs });
+  const topAdapter = makeFakeAdapter();
+  const pmAdapter = makeFakeAdapter();
+  const conv = createConversationService({
+    runService: rs, managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => topAdapter },
+    lifecycleService: null,
+  });
+
+  const topRun = seedTopRun(rs, registry, topAdapter);
+  const pmRun = seedPmRun(db, rs, registry, pmAdapter, { parentTopRunId: topRun.id });
+
+  // PM adapter is registered directly — but managerAdapterFactory.getAdapter returns topAdapter.
+  // The registry returns pmAdapter for the pm: slot, which is what sendToManagerSlot uses.
+  // We need to ensure the correct adapter is returned per slot.
+  // Override so registry-bound adapter is used (matches real app.js wiring):
+  const conv2 = createConversationService({
+    runService: rs, managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => makeFakeAdapter() },
+    lifecycleService: null,
+  });
+
+  // sendMessage to PM — pmAdapter is in registry, so it gets the call
+  conv2.sendMessage(`pm:proj-pm1`, { text: 'PM task update' });
+
+  // PM's parent_run_id = topRun.id, and topRun is still active Top
+  // → notice should be queued for topRun.id
+  const notices = conv2.consumeParentNotices(topRun.id);
+  assert.equal(notices.length, 1, 'PM→Top notice queued');
+  assert.match(notices[0], /\[system notice\]/);
+});
+
+test('conv: PM→Top notice dropped when parent Top is no longer active', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const registry = createManagerRegistry({ runService: rs });
+  const topAdapter = makeFakeAdapter();
+  const pmAdapter = makeFakeAdapter();
+  const conv = createConversationService({
+    runService: rs, managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => makeFakeAdapter() },
+    lifecycleService: null,
+  });
+
+  const topRun = seedTopRun(rs, registry, topAdapter);
+  seedPmRun(db, rs, registry, pmAdapter, { parentTopRunId: topRun.id });
+
+  // Clear the Top slot → parent is no longer active
+  registry.clearActive('top');
+
+  conv.sendMessage('pm:proj-pm1', { text: 'PM message after top gone' });
+
+  // No notice should be queued — parent Top is gone
+  const notices = conv.consumeParentNotices(topRun.id);
+  assert.equal(notices.length, 0, 'notice dropped when parent Top not active');
+});
+
+// ---------------------------------------------------------------------------
+// P6-8: onSlotCleared via probeActive dead detection
+// ---------------------------------------------------------------------------
+
+test('conv: onSlotCleared fires via probeActive when adapter reports dead session', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const registry = createManagerRegistry({ runService: rs });
+
+  // Adapter that reports the session as dead on first isSessionAlive call
+  const deadAdapter = {
+    ...makeFakeAdapter(),
+    isSessionAlive: () => false,
+    detectExitCode: () => 1,
+    emitSessionEndedIfNeeded: () => {},
+    disposeSession: () => {},
+  };
+
+  const conv = createConversationService({
+    runService: rs, managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => deadAdapter },
+    lifecycleService: null,
+  });
+
+  // Wire onSlotCleared to scrub notices (same as app.js)
+  registry.onSlotCleared(({ runId }) => conv.clearParentNotices(runId));
+
+  const topRun = seedTopRun(rs, registry, deadAdapter);
+  conv.queueParentNotice(topRun.id, 'queued notice');
+
+  // probeActive detects the dead adapter → fires onSlotCleared → conv.clearParentNotices
+  const probeResult = registry.probeActive('top');
+  assert.equal(probeResult, null, 'probeActive returns null for dead session');
+
+  // Notice should be scrubbed by the onSlotCleared hook
+  const remaining = conv.consumeParentNotices(topRun.id);
+  assert.equal(remaining.length, 0, 'notice scrubbed via probeActive dead detection');
+});
+
+// ---------------------------------------------------------------------------
+// P6-8: onSlotCleared via setActive replacement
+// ---------------------------------------------------------------------------
+
+test('conv: onSlotCleared fires via setActive replacement and scrubs old run notices', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const registry = createManagerRegistry({ runService: rs });
+  const adapter1 = makeFakeAdapter();
+  const adapter2 = makeFakeAdapter();
+  const conv = createConversationService({
+    runService: rs, managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => makeFakeAdapter() },
+    lifecycleService: null,
+  });
+
+  // Wire onSlotCleared
+  registry.onSlotCleared(({ runId }) => conv.clearParentNotices(runId));
+
+  // Seed first Top run
+  const run1 = rs.createRun({ is_manager: true, manager_adapter: 'claude-code', prompt: 'top1' });
+  rs.updateRunStatus(run1.id, 'running', { force: true });
+  registry.setActive('top', run1.id, adapter1);
+
+  conv.queueParentNotice(run1.id, 'notice for old run');
+
+  // Replace with a second Top run (setActive triggers onSlotCleared for run1)
+  const run2 = rs.createRun({ is_manager: true, manager_adapter: 'claude-code', prompt: 'top2' });
+  rs.updateRunStatus(run2.id, 'running', { force: true });
+  registry.setActive('top', run2.id, adapter2);
+
+  // run1's notices should be scrubbed
+  const remaining1 = conv.consumeParentNotices(run1.id);
+  assert.equal(remaining1.length, 0, 'old run notices scrubbed on setActive replacement');
+
+  // run2 should be the new active Top
+  assert.equal(registry.getActiveRunId('top'), run2.id);
+});
+
+test('conv: onSlotCleared for PM slot scrubs PM notices on setActive replacement', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const registry = createManagerRegistry({ runService: rs });
+  const adapter1 = makeFakeAdapter();
+  const adapter2 = makeFakeAdapter();
+  const conv = createConversationService({
+    runService: rs, managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => makeFakeAdapter() },
+    lifecycleService: null,
+  });
+
+  registry.onSlotCleared(({ runId }) => conv.clearParentNotices(runId));
+
+  db.prepare(`INSERT OR IGNORE INTO projects (id, name) VALUES ('proj-slot','SlotProj')`).run();
+
+  // First PM run
+  const pm1 = rs.createRun({
+    is_manager: true, manager_adapter: 'codex', manager_layer: 'pm',
+    conversation_id: 'pm:proj-slot', prompt: 'pm1',
+  });
+  rs.updateRunStatus(pm1.id, 'running', { force: true });
+  registry.setActive('pm:proj-slot', pm1.id, adapter1);
+
+  conv.queueParentNotice(pm1.id, 'pm notice for old slot');
+
+  // Spawn a new PM (rotation) — setActive fires onSlotCleared for pm1
+  const pm2 = rs.createRun({
+    is_manager: true, manager_adapter: 'codex', manager_layer: 'pm',
+    conversation_id: 'pm:proj-slot', prompt: 'pm2',
+  });
+  rs.updateRunStatus(pm2.id, 'running', { force: true });
+  registry.setActive('pm:proj-slot', pm2.id, adapter2);
+
+  // pm1's notices should be gone
+  const remaining = conv.consumeParentNotices(pm1.id);
+  assert.equal(remaining.length, 0, 'old PM run notices scrubbed on PM rotation');
+
+  // pm2 should be the active PM
+  assert.equal(registry.getActiveRunId('pm:proj-slot'), pm2.id);
+});
