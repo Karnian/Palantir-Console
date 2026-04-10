@@ -480,6 +480,32 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
   }));
 
   /**
+   * POST /api/manager/pm/:projectId/force-reset
+   * v3 Phase 7 (P7-2): force-delete escape hatch for when the normal
+   * fail-closed reset is stuck because disposeSession throws. Unlike the
+   * normal /reset route this call swallows disposeSession failures and
+   * unconditionally clears the registry slot + brief so the PM slot is
+   * always freed. Intended as a last-resort operator action — prefer
+   * /reset first whenever the adapter might be healthy.
+   *
+   * Emits 'pm:force_reset' on eventBus for audit visibility.
+   */
+  router.post('/pm/:projectId/force-reset', asyncHandler(async (req, res) => {
+    const { projectId } = req.params;
+    if (!projectId) {
+      throw new BadRequestError('projectId is required');
+    }
+    if (!pmCleanupService) {
+      return res.status(501).json({ error: 'pmCleanupService not wired' });
+    }
+    if (typeof pmCleanupService.forceReset !== 'function') {
+      return res.status(501).json({ error: 'forceReset not available on pmCleanupService' });
+    }
+    const result = pmCleanupService.forceReset(projectId);
+    return res.json({ status: 'force_reset', projectId, ...result });
+  }));
+
+  /**
    * GET /api/manager/status
    * Get current manager session status.
    */
