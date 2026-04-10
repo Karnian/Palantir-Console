@@ -36,7 +36,7 @@ const runStatusColor = (status) => {
   }
 };
 
-export function SessionGrid({ tasks, runs, projects }) {
+export function SessionGrid({ tasks, runs, projects, activePms = [], onSelectPm }) {
   const [inspectRun, setInspectRun] = useState(null);
   const [selectedTask, setSelectedTask] = useState(null);
   const [collapsedProjects, setCollapsedProjects] = useState({});
@@ -134,6 +134,18 @@ export function SessionGrid({ tasks, runs, projects }) {
               <span>${group.name}</span>
               <span class="worker-project-count">${group.tasks.length} task${group.tasks.length !== 1 ? 's' : ''}${activeCount > 0 ? ` \u00B7 ${activeCount} active` : ''}</span>
             </div>
+            ${!projCollapsed && (() => {
+              const pm = activePms.find(p => p.conversationId === `pm:${group.key}`);
+              const pmStatus = pm?.run?.status;
+              const pmColor = pmStatus === 'running' ? '#3b82f6' : pmStatus === 'needs_input' ? '#f59e0b' : '#6b7280';
+              return pm ? html`
+                <div class="pm-session-row" onClick=${() => onSelectPm && onSelectPm(`pm:${group.key}`)}>
+                  <span class="pm-session-dot" style="background:${pmColor}"></span>
+                  <span class="pm-session-label">PM Session</span>
+                  <span class="pm-session-status" style="color:${pmColor}">${pmStatus || 'idle'}</span>
+                </div>
+              ` : null;
+            })()}
             ${!projCollapsed && group.sections.map(sec => {
               const secKey = `${group.key}::${sec.key}`;
               const secCollapsed = collapsedSections[secKey];

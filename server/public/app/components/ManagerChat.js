@@ -40,19 +40,19 @@ export function managerProfileAuthState(profile) {
   return profile.auth.canAuth ? 'ok' : 'missing';
 }
 
-export function ManagerChat({ manager, projects, agents = [], agentsError = null, agentsLoading = false, reloadAgents, driftAudit, onOpenDrift }) {
+export function ManagerChat({ manager, projects, agents = [], agentsError = null, agentsLoading = false, reloadAgents, driftAudit, onOpenDrift, conversationTarget: externalTarget, onConversationChange }) {
   const { status, events: topEvents, loading, start, sendMessage: topSendMessage, stop } = manager;
   const [input, setInput] = useState('');
 
   // v3 Phase 6 — conversation target selector.
   //
   // The chat panel can now point at the Top manager OR a project-scoped
-  // PM conversation (`pm:<projectId>`). State is kept in one string so
-  // every downstream read (events, send, reset availability, header
-  // label) can branch on a single value. Defaults to 'top' so the legacy
-  // behavior is unchanged on first mount — users only see a difference
-  // after they pick a PM from the dropdown.
-  const [conversationTarget, setConversationTarget] = useState('top');
+  // PM conversation (`pm:<projectId>`). When lifted to ManagerView,
+  // externalTarget / onConversationChange props are used. Otherwise
+  // falls back to local state for backwards compat.
+  const [localTarget, setLocalTarget] = useState('top');
+  const conversationTarget = externalTarget !== undefined ? externalTarget : localTarget;
+  const setConversationTarget = onConversationChange || setLocalTarget;
   const pmConversationId = conversationTarget !== 'top' ? conversationTarget : null;
   const pmConv = useConversation(pmConversationId); // null-safe in hook
   const isPm = conversationTarget !== 'top';
