@@ -3527,6 +3527,36 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 }
 
 /* Task status section dividers */
+/* PM session row inside project group */
+.pm-session-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 6px 28px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  margin-bottom: 2px;
+}
+.pm-session-row:hover {
+  background: rgba(139,92,246,0.1);
+}
+.pm-session-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.pm-session-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  flex: 1;
+}
+.pm-session-status {
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
 .task-status-section {
   margin-bottom: 2px;
 }

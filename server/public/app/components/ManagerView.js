@@ -8,6 +8,7 @@ import { ManagerChat, managerProfileAuthState } from './ManagerChat.js';
 import { SessionGrid } from './SessionGrid.js';
 
 import { h } from '../../vendor/preact.module.js';
+import { useState } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
@@ -16,6 +17,11 @@ const html = htm.bind(h);
 export { managerProfileAuthState };
 
 export function ManagerView({ manager, runs, tasks, projects, agents, agentsError, agentsLoading, reloadAgents, driftAudit, onOpenDrift }) {
+  // Lifted conversation target state — shared between ManagerChat (dropdown)
+  // and SessionGrid (PM session click).
+  const [conversationTarget, setConversationTarget] = useState('top');
+  const activePms = manager.status?.pms || [];
+
   return html`
     <div class="manager-view">
       <${ManagerChat}
@@ -27,11 +33,15 @@ export function ManagerView({ manager, runs, tasks, projects, agents, agentsErro
         reloadAgents=${reloadAgents}
         driftAudit=${driftAudit}
         onOpenDrift=${onOpenDrift}
+        conversationTarget=${conversationTarget}
+        onConversationChange=${setConversationTarget}
       />
       <${SessionGrid}
         tasks=${tasks}
         runs=${runs}
         projects=${projects}
+        activePms=${activePms}
+        onSelectPm=${setConversationTarget}
       />
     </div>
   `;
