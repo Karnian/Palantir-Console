@@ -2593,7 +2593,7 @@ function initLegacySessions(root) {
     });
     if (!response.ok) { const d = await response.json(); window.alert(d.error || 'Failed to rename session'); return; }
     await loadSessions();
-    await selectSession(state.selectedId, { preserveDraft: true, focusInput: false, clearStatus: false, forceAutoScroll: false });
+    await selectSession(state.selectedId, { preserveDraft: true, focusInput: true, clearStatus: false, forceAutoScroll: false });
   }
 
   async function deleteSession() {
@@ -2885,7 +2885,8 @@ function initLegacySessions(root) {
   const pollTimer = setInterval(async () => {
     await loadSessions();
     if (state.selectedId) {
-      await selectSession(state.selectedId, { preserveDraft: true, focusInput: false, clearStatus: false, forceAutoScroll: false });
+      const hadFocus = document.activeElement === messageInput;
+      await selectSession(state.selectedId, { preserveDraft: true, focusInput: hadFocus, clearStatus: false, forceAutoScroll: false });
     }
   }, 5000);
 
@@ -3428,6 +3429,11 @@ function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError 
   const fileInputRef = useRef(null);
   const inputRef = useRef(null);
 
+  // Refocus chat input when conversation target changes (e.g. PM picker)
+  useEffect(() => {
+    if (inputRef.current) inputRef.current.focus();
+  }, [conversationTarget]);
+
   // Auto-scroll to bottom on new events
   useEffect(() => {
     if (messagesRef.current) {
@@ -3633,7 +3639,7 @@ function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError 
         setInput(text);
         setAttachedImages(attachedImages);
         setSending(false);
-        setTimeout(() => { if (inputRef.current) inputRef.current.focus(); }, 0);
+        requestAnimationFrame(() => { if (inputRef.current) inputRef.current.focus(); });
         return;
       }
       // No @mention → safe to fall through to the UI selection.
@@ -3661,8 +3667,9 @@ function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError 
       addToast('Failed to send: ' + (err && err.message ? err.message : 'unknown'), 'error');
     }
     setSending(false);
-    // 전송 완료 후 입력창에 포커스 복원 (disabled 해제 후 DOM 반영 대기)
-    setTimeout(() => { if (inputRef.current) inputRef.current.focus(); }, 0);
+    // 전송 완료 후 입력창에 포커스 복원 — rAF 로 Preact 가 disabled 속성을
+    // 제거한 뒤의 프레임을 기다림 (setTimeout(0) 은 paint 전에 실행될 수 있음)
+    requestAnimationFrame(() => { if (inputRef.current) inputRef.current.focus(); });
   };
 
   // v3 Phase 6 — Reset PM. Only meaningful while a PM conversation is
