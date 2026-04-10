@@ -574,6 +574,28 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
               </div>
             </div>
           `}
+
+          ${(() => {
+            const finishedRuns = taskRuns.filter(r => ['completed', 'failed', 'stopped'].includes(r.status) && (r.result_summary || r.error_message));
+            if (finishedRuns.length === 0) return null;
+            return html`
+              <div class="task-detail-results">
+                <div class="task-detail-section-title">Results</div>
+                <div class="task-detail-results-list">
+                  ${finishedRuns.slice(0, 5).map(r => html`
+                    <div key=${r.id} class="task-detail-result-item">
+                      <div class="task-detail-result-header">
+                        <span class="run-status-dot ${r.status}"></span>
+                        <span style="color:var(--text-primary);font-size:12px;font-weight:500;">${r.agent_name || 'Agent'}</span>
+                        <span style="color:var(--text-muted);font-size:11px;margin-left:auto;">${timeAgo(r.ended_at || r.created_at)}</span>
+                      </div>
+                      <div class="task-detail-result-body">${r.status === 'failed' && r.error_message ? r.error_message : r.result_summary}</div>
+                    </div>
+                  `)}
+                </div>
+              </div>
+            `;
+          })()}
         </div>
 
         <div class="modal-footer" style="justify-content:space-between;">
