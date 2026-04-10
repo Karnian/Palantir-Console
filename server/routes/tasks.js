@@ -1,5 +1,6 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
+const { validateCreateTask, validateUpdateTask } = require('../middleware/validate');
 
 function createTasksRouter({ taskService, lifecycleService }) {
   const router = express.Router();
@@ -10,7 +11,7 @@ function createTasksRouter({ taskService, lifecycleService }) {
     res.json({ tasks });
   }));
 
-  router.post('/', asyncHandler(async (req, res) => {
+  router.post('/', validateCreateTask, asyncHandler(async (req, res) => {
     const task = taskService.createTask(req.body || {});
     res.status(201).json({ task });
   }));
@@ -27,7 +28,7 @@ function createTasksRouter({ taskService, lifecycleService }) {
     res.json({ task });
   }));
 
-  router.patch('/:id', asyncHandler(async (req, res) => {
+  router.patch('/:id', validateUpdateTask, asyncHandler(async (req, res) => {
     const task = taskService.updateTask(req.params.id, req.body || {});
     res.json({ task });
   }));

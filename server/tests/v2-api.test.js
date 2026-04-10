@@ -692,3 +692,186 @@ test('Existing GET /api/fs still works', async (t) => {
   assert.equal(res.status, 200);
   assert.equal(res.body.root, fsRoot);
 });
+
+// ---- P5-9: Input schema validation ----
+
+// Tasks: invalid inputs
+test('POST /api/tasks: missing title returns 400', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/tasks').send({ description: 'no title here' });
+  assert.equal(res.status, 400);
+  assert.ok(res.body.error, 'should have error message');
+});
+
+test('POST /api/tasks: empty string title returns 400', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/tasks').send({ title: '' });
+  assert.equal(res.status, 400);
+  assert.ok(/title/i.test(res.body.error));
+});
+
+test('POST /api/tasks: non-string title returns 400', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/tasks').send({ title: 42 });
+  assert.equal(res.status, 400);
+  assert.ok(/title/i.test(res.body.error));
+});
+
+test('POST /api/tasks: requires_capabilities as non-array returns 400', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/tasks').send({ title: 'Valid', requires_capabilities: 'string-not-array' });
+  assert.equal(res.status, 400);
+  assert.ok(/requires_capabilities/.test(res.body.error));
+});
+
+test('PATCH /api/tasks/:id: empty title returns 400', async (t) => {
+  const { app } = await createTestApp(t);
+  const create = await request(app).post('/api/tasks').send({ title: 'Original' });
+  const taskId = create.body.task.id;
+  const res = await request(app).patch(`/api/tasks/${taskId}`).send({ title: '' });
+  assert.equal(res.status, 400);
+  assert.ok(/title/i.test(res.body.error));
+});
+
+test('PATCH /api/tasks/:id: numeric priority string passes to service for enum check', async (t) => {
+  // "invalid_priority" should be caught by the service-layer enum check (not the middleware)
+  // but a numeric priority field (wrong type) should be caught by middleware
+  const { app } = await createTestApp(t);
+  const create = await request(app).post('/api/tasks').send({ title: 'Test' });
+  const taskId = create.body.task.id;
+  const res = await request(app).patch(`/api/tasks/${taskId}`).send({ priority: 999 });
+  assert.equal(res.status, 400);
+});
+
+// Agents: invalid inputs
+test('POST /api/agents: missing name returns 400', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/agents').send({ type: 'custom', command: 'claude' });
+  assert.equal(res.status, 400);
+  assert.ok(/name/i.test(res.body.error));
+});
+
+test('POST /api/agents: missing type returns 400', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/agents').send({ name: 'My Agent', command: 'claude' });
+  assert.equal(res.status, 400);
+  assert.ok(/type/i.test(res.body.error));
+});
+
+test('POST /api/agents: missing command returns 400', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/agents').send({ name: 'My Agent', type: 'custom' });
+  assert.equal(res.status, 400);
+  assert.ok(/command/i.test(res.body.error));
+});
+
+test('POST /api/agents: non-number max_concurrent returns 400', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/agents').send({
+    name: 'Test Agent',
+    type: 'custom',
+    command: 'claude',
+    max_concurrent: 'many',
+  });
+  assert.equal(res.status, 400);
+  assert.ok(/max_concurrent/i.test(res.body.error));
+});
+
+test('PATCH /api/agents/:id: empty name returns 400', async (t) => {
+  const { app } = await createTestApp(t);
+  const create = await request(app).post('/api/agents').send({
+    name: 'Patch Target',
+    type: 'custom',
+    command: 'claude',
+  });
+  const agentId = create.body.agent.id;
+  const res = await request(app).patch(`/api/agents/${agentId}`).send({ name: '' });
+  assert.equal(res.status, 400);
+  assert.ok(/name/i.test(res.body.error));
+  await request(app).delete(`/api/agents/${agentId}`);
+});
+
+test('PATCH /api/agents/:id: empty command returns 400', async (t) => {
+  const { app } = await createTestApp(t);
+  const create = await request(app).post('/api/agents').send({
+    name: 'Patch Target 2',
+    type: 'custom',
+    command: 'claude',
+  });
+  const agentId = create.body.agent.id;
+  const res = await request(app).patch(`/api/agents/${agentId}`).send({ command: '' });
+  assert.equal(res.status, 400);
+  assert.ok(/command/i.test(res.body.error));
+  await request(app).delete(`/api/agents/${agentId}`);
+});
+
+// Projects: invalid inputs
+test('POST /api/projects: missing name returns 400', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/projects').send({ directory: '/tmp/test' });
+  assert.equal(res.status, 400);
+  assert.ok(/name/i.test(res.body.error));
+});
+
+test('POST /api/projects: empty string name returns 400', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/projects').send({ name: '' });
+  assert.equal(res.status, 400);
+  assert.ok(/name/i.test(res.body.error));
+});
+
+test('POST /api/projects: non-string name returns 400', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/projects').send({ name: 123 });
+  assert.equal(res.status, 400);
+  assert.ok(/name/i.test(res.body.error));
+});
+
+test('POST /api/projects: non-number budget_usd returns 400', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/projects').send({ name: 'Test', budget_usd: 'lots' });
+  assert.equal(res.status, 400);
+  assert.ok(/budget_usd/i.test(res.body.error));
+});
+
+test('POST /api/projects: invalid pm_enabled value returns 400', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/projects').send({ name: 'Test', pm_enabled: 'yes' });
+  assert.equal(res.status, 400);
+  assert.ok(/pm_enabled/i.test(res.body.error));
+});
+
+test('PATCH /api/projects/:id: empty name returns 400', async (t) => {
+  const { app } = await createTestApp(t);
+  const create = await request(app).post('/api/projects').send({ name: 'Patchable' });
+  const projectId = create.body.project.id;
+  const res = await request(app).patch(`/api/projects/${projectId}`).send({ name: '' });
+  assert.equal(res.status, 400);
+  assert.ok(/name/i.test(res.body.error));
+  await request(app).delete(`/api/projects/${projectId}`);
+});
+
+test('PATCH /api/projects/:id: non-number budget_usd returns 400', async (t) => {
+  const { app } = await createTestApp(t);
+  const create = await request(app).post('/api/projects').send({ name: 'Budget Test' });
+  const projectId = create.body.project.id;
+  const res = await request(app).patch(`/api/projects/${projectId}`).send({ budget_usd: 'unlimited' });
+  assert.equal(res.status, 400);
+  assert.ok(/budget_usd/i.test(res.body.error));
+  await request(app).delete(`/api/projects/${projectId}`);
+});
+
+// Edge cases: valid optional fields pass through
+test('POST /api/tasks: null requires_capabilities is accepted', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/tasks').send({ title: 'Valid', requires_capabilities: null });
+  assert.equal(res.status, 201);
+  assert.equal(res.body.task.requires_capabilities, null);
+});
+
+test('POST /api/projects: null budget_usd is accepted', async (t) => {
+  const { app } = await createTestApp(t);
+  const res = await request(app).post('/api/projects').send({ name: 'Null Budget', budget_usd: null });
+  assert.equal(res.status, 201);
+  assert.equal(res.body.project.budget_usd, null);
+});
