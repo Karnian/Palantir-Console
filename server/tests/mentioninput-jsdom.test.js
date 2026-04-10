@@ -185,6 +185,106 @@ test('MentionInput jsdom: Enter selects project and inserts @name ', async (t) =
   assert.equal(capturedValue, '@Backend ', 'onInput should have fired with @Backend ');
 });
 
+// ---- P8-6: inputRef prop tests (P7 hotfix ref→inputRef) ----
+
+test('MentionInput jsdom: inputRef receives the textarea DOM element', async (t) => {
+  const env = createEnv();
+  t.after(env.cleanup);
+  const { render, h } = env.context.preact;
+  const root = env.document.getElementById('root');
+
+  const inputRef = env.context.preact.createRef();
+
+  render(
+    h(env.context.MentionInput, {
+      value: '',
+      projects: PROJECTS,
+      onInput: () => {},
+      inputRef,
+    }),
+    root,
+  );
+  await flushEffects();
+
+  assert.ok(inputRef.current, 'inputRef.current should be assigned after render');
+  assert.equal(inputRef.current.tagName, 'TEXTAREA', 'inputRef.current should be the textarea element');
+});
+
+test('MentionInput jsdom: inputRef.current.style.height is accessible', async (t) => {
+  const env = createEnv();
+  t.after(env.cleanup);
+  const { render, h } = env.context.preact;
+  const root = env.document.getElementById('root');
+
+  const inputRef = env.context.preact.createRef();
+
+  render(
+    h(env.context.MentionInput, {
+      value: '',
+      projects: PROJECTS,
+      onInput: () => {},
+      inputRef,
+    }),
+    root,
+  );
+  await flushEffects();
+
+  assert.ok(inputRef.current.style, 'inputRef.current.style should be accessible');
+  // Verify height can be read (empty string initially) and written without error
+  const originalHeight = inputRef.current.style.height;
+  inputRef.current.style.height = '100px';
+  assert.equal(inputRef.current.style.height, '100px', 'style.height should be writable');
+  inputRef.current.style.height = originalHeight;
+});
+
+test('MentionInput jsdom: inputRef.current.focus() works without throwing', async (t) => {
+  const env = createEnv();
+  t.after(env.cleanup);
+  const { render, h } = env.context.preact;
+  const root = env.document.getElementById('root');
+
+  const inputRef = env.context.preact.createRef();
+
+  render(
+    h(env.context.MentionInput, {
+      value: '',
+      projects: PROJECTS,
+      onInput: () => {},
+      inputRef,
+    }),
+    root,
+  );
+  await flushEffects();
+
+  // focus() must not throw — callers rely on this for auto-focus patterns
+  assert.doesNotThrow(() => inputRef.current.focus(), 'focus() should not throw');
+});
+
+test('MentionInput jsdom: falls back to internal ref when inputRef not provided', async (t) => {
+  const env = createEnv();
+  t.after(env.cleanup);
+  const { render, h } = env.context.preact;
+  const root = env.document.getElementById('root');
+
+  // Render WITHOUT inputRef
+  render(
+    h(env.context.MentionInput, {
+      value: '@',
+      projects: PROJECTS,
+      onInput: () => {},
+    }),
+    root,
+  );
+  await flushEffects();
+
+  const textarea = root.querySelector('textarea');
+  assert.ok(textarea, 'textarea should render even without inputRef');
+
+  // Popup should still appear (internal ref is used for measurements)
+  const popup = root.querySelector('.mention-popup');
+  assert.ok(popup, 'popup should appear when @ is typed without inputRef');
+});
+
 test('MentionInput jsdom: Esc closes the suggestion dropdown', async (t) => {
   const env = createEnv();
   t.after(env.cleanup);
