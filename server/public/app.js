@@ -2989,6 +2989,7 @@ function AgentModal({ open, onClose, agent, onSaved }) {
   const [icon, setIcon] = useState('');
   const [color, setColor] = useState('');
   const [maxConcurrent, setMaxConcurrent] = useState(1);
+  const [mcpTools, setMcpTools] = useState('');
   const [saving, setSaving] = useState(false);
   useEscape(open, onClose);
 
@@ -3001,9 +3002,13 @@ function AgentModal({ open, onClose, agent, onSaved }) {
       setIcon(agent.icon || '');
       setColor(agent.color || '');
       setMaxConcurrent(agent.max_concurrent || 1);
+      try {
+        const caps = JSON.parse(agent.capabilities_json || '{}');
+        setMcpTools(Array.isArray(caps.mcp_tools) ? caps.mcp_tools.join('\n') : '');
+      } catch { setMcpTools(''); }
     } else if (open) {
       setName(''); setType('claude-code'); setCommand(''); setArgsTemplate('');
-      setIcon(''); setColor(''); setMaxConcurrent(1);
+      setIcon(''); setColor(''); setMaxConcurrent(1); setMcpTools('');
     }
   }, [open, agent]);
 
@@ -3013,6 +3018,8 @@ function AgentModal({ open, onClose, agent, onSaved }) {
     if (!name.trim()) return;
     setSaving(true);
     try {
+      const parsedMcpTools = mcpTools.trim().split('\n').map(s => s.trim()).filter(Boolean);
+      const capsObj = parsedMcpTools.length > 0 ? { mcp_tools: parsedMcpTools } : {};
       const body = {
         name: name.trim(),
         type,
@@ -3021,6 +3028,7 @@ function AgentModal({ open, onClose, agent, onSaved }) {
         icon: icon.trim() || undefined,
         color: color.trim() || undefined,
         max_concurrent: parseInt(maxConcurrent, 10) || 1,
+        capabilities_json: JSON.stringify(capsObj),
       };
       if (agent) {
         await apiFetchWithToast(`/api/agents/${agent.id}`, {
@@ -3094,6 +3102,13 @@ function AgentModal({ open, onClose, agent, onSaved }) {
           <div class="form-field">
             <label class="form-label">Max Concurrent</label>
             <input class="form-input" type="number" min="1" value=${maxConcurrent} onInput=${e => setMaxConcurrent(e.target.value)} />
+          </div>
+          <div class="form-field">
+            <label class="form-label">MCP Tools</label>
+            <textarea class="form-input" rows="3" value=${mcpTools}
+              onInput=${e => setMcpTools(e.target.value)}
+              placeholder="mcp__claude_ai_Slack__*\nmcp__claude_ai_Notion__*" />
+            <small class="form-hint">One pattern per line. Supports wildcards (e.g. mcp__slack__*)</small>
           </div>
         </div>
         <div class="modal-footer">
@@ -3203,6 +3218,20 @@ function AgentDetailModal({ agent, open, onClose, onEdit }) {
             <span class="agent-detail-field-label">Running Now</span>
             <span class="agent-detail-field-value">${runningCount}</span>
           </div>
+          ${(() => {
+            try {
+              const caps = JSON.parse(agent.capabilities_json || '{}');
+              if (Array.isArray(caps.mcp_tools) && caps.mcp_tools.length > 0) {
+                return html`
+                  <div class="agent-detail-field" style=${{ gridColumn: '1 / -1' }}>
+                    <span class="agent-detail-field-label">MCP Tools</span>
+                    <span class="agent-detail-field-value mono" style=${{ whiteSpace: 'pre-wrap', fontSize: '0.75rem' }}>${caps.mcp_tools.join('\n')}</span>
+                  </div>
+                `;
+              }
+            } catch { /* ignore */ }
+            return null;
+          })()}
         </div>
       </div>
 
