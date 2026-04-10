@@ -283,30 +283,13 @@ test('P2-10 legacy app.js no longer defines `function DriftDrawer`', async () =>
     'function DriftDrawer was extracted to an ES module and must not be redefined in app.js');
 });
 
-test('P2-10 main.js dynamically imports DriftDrawer and bridges it onto window', async () => {
-  const src = await fs.readFile(
-    path.join(__dirname, '..', 'public', 'app', 'main.js'),
-    'utf8',
-  );
-  assert.match(
-    src,
-    /import\(\s*['"]\.\/components\/DriftDrawer\.js['"]\s*\)/,
-    'main.js must dynamically import ./components/DriftDrawer.js',
-  );
-  assert.match(
-    src,
-    /window\.DriftDrawer\s*=\s*DriftDrawer/,
-    'main.js must assign window.DriftDrawer = DriftDrawer for the legacy app.js bridge',
-  );
-});
+// P9-3: DriftDrawer bridge test removed — main.js no longer bridges components.
+// app.js imports DriftDrawer directly via ES module import.
 
-test('P2-10 app.js still references <${DriftDrawer} ... /> via global bridge', async () => {
-  // Behavior contract: removing the function from app.js must not
-  // break the call site that mounts the component. We grep for the
-  // component tag literal.
+test('P2-10 app.js still references <${DriftDrawer} ... /> via direct import', async () => {
   const src = await loadAppJs();
   assert.match(src, /<\$\{DriftDrawer\}/,
-    'app.js must still render <${DriftDrawer}> — the bridge (window.DriftDrawer) makes this bare reference resolve via global scope');
+    'app.js must still render <${DriftDrawer}> via direct ES module import');
 });
 
 // ---- P2-9: Stop/Reset label clarity + PM selector Dropdown swap ----
@@ -438,20 +421,7 @@ test('P3-2 legacy app.js no longer defines `function EmptyState`', async () => {
     'function EmptyState was extracted to an ES module and must not be redefined in app.js');
 });
 
-test('P3-2 main.js dynamically imports Dropdown and EmptyState and bridges them onto window', async () => {
-  const src = await fs.readFile(
-    path.join(__dirname, '..', 'public', 'app', 'main.js'),
-    'utf8',
-  );
-  assert.match(src, /import\(\s*['"]\.\/components\/Dropdown\.js['"]\s*\)/,
-    'main.js must dynamically import ./components/Dropdown.js');
-  assert.match(src, /window\.Dropdown\s*=\s*Dropdown/,
-    'main.js must assign window.Dropdown = Dropdown');
-  assert.match(src, /import\(\s*['"]\.\/components\/EmptyState\.js['"]\s*\)/,
-    'main.js must dynamically import ./components/EmptyState.js');
-  assert.match(src, /window\.EmptyState\s*=\s*EmptyState/,
-    'main.js must assign window.EmptyState = EmptyState');
-});
+// P9-3: Dropdown/EmptyState bridge tests removed — app.js imports directly.
 
 // ---- P3-1: @mention autocomplete (MentionInput) ----
 
@@ -488,16 +458,7 @@ test('P3-1 MentionInput.js imports preact / hooks / htm from vendor ES modules',
   assert.match(src, /htm\.bind\(h\)/, 'htm.bind(h) wiring missing');
 });
 
-test('P3-1 main.js dynamically imports MentionInput and bridges it onto window', async () => {
-  const src = await fs.readFile(
-    path.join(__dirname, '..', 'public', 'app', 'main.js'),
-    'utf8',
-  );
-  assert.match(src, /import\(\s*['"]\.\/components\/MentionInput\.js['"]\s*\)/,
-    'main.js must dynamically import ./components/MentionInput.js');
-  assert.match(src, /window\.MentionInput\s*=\s*MentionInput/,
-    'main.js must assign window.MentionInput = MentionInput');
-});
+// P9-3: MentionInput bridge test removed — app.js imports directly.
 
 test('P3-1 ManagerView uses MentionInput instead of plain textarea', async () => {
   const src = await loadManagerViewSource();
@@ -572,20 +533,7 @@ test('P8-8 TaskDetailPanel has proper semantic structure', async () => {
   assert.match(body, /ariaLabel="Project"/, 'TaskDetailPanel must pass ariaLabel to Project Dropdown');
 });
 
-test('P8-8 main.js dynamically imports TaskModals and bridges all three exports onto window', async () => {
-  const src = await fs.readFile(
-    path.join(__dirname, '..', 'public', 'app', 'main.js'),
-    'utf8',
-  );
-  assert.match(src, /import\(\s*['"]\.\/components\/TaskModals\.js['"]\s*\)/,
-    'main.js must dynamically import ./components/TaskModals.js');
-  assert.match(src, /window\.NewTaskModal\s*=\s*NewTaskModal/,
-    'main.js must assign window.NewTaskModal = NewTaskModal');
-  assert.match(src, /window\.ExecuteModal\s*=\s*ExecuteModal/,
-    'main.js must assign window.ExecuteModal = ExecuteModal');
-  assert.match(src, /window\.TaskDetailPanel\s*=\s*TaskDetailPanel/,
-    'main.js must assign window.TaskDetailPanel = TaskDetailPanel');
-});
+// P9-3: TaskModals bridge test removed — app.js imports directly.
 
 // ---- P8-8: SessionsView (P6-3 ESM phase 5) ----
 
@@ -595,13 +543,4 @@ test('P8-8 SessionsView.js exports SessionsView as a named export', async () => 
     'SessionsView.js must provide `export function SessionsView(...)`');
 });
 
-test('P8-8 main.js dynamically imports SessionsView and bridges it onto window', async () => {
-  const src = await fs.readFile(
-    path.join(__dirname, '..', 'public', 'app', 'main.js'),
-    'utf8',
-  );
-  assert.match(src, /import\(\s*['"]\.\/components\/SessionsView\.js['"]\s*\)/,
-    'main.js must dynamically import ./components/SessionsView.js');
-  assert.match(src, /window\.SessionsView\s*=\s*SessionsView/,
-    'main.js must assign window.SessionsView = SessionsView');
-});
+// P9-3: SessionsView bridge test removed — app.js imports directly.
