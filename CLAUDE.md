@@ -191,8 +191,9 @@ server/
 
 ## Things to Watch Out For
 
-- `server/public/app.js`는 ~291줄 셸 파일 (NAV/App/mount) — 뷰/모달 수정은 `app/components/` 또는 `app/lib/` ESM 모듈을 직접 탐색
-- `useSSE` channels 배열이 hard-coded — 새 SSE 채널 추가 시 반드시 `server/public/app/lib/hooks.js useSSE` 에도 추가. Phase 5/7 에서 까먹어 "핸들러는 등록됐지만 실제 subscribe 안 됨" 회귀가 있었음
+- `server/public/app.js`는 ES module (P8-2). NAV_ITEMS + NavSidebar + App + mount 만 남은 셸 — 뷰/모달 수정은 `app/components/`, hooks 수정은 `app/lib/hooks/` 디렉토리를 직접 탐색
+- `useSSE` channels 배열이 hard-coded (`app/lib/hooks/sse.js`) — 새 SSE 채널 추가 시 반드시 이 배열에도 추가. Phase 5/7 에서 까먹어 "핸들러는 등록됐지만 실제 subscribe 안 됨" 회귀가 있었음
+- `ManagerView.js`는 thin layout shell (P8-5) — 채팅 로직은 `ManagerChat.js`, 세션 그리드는 `SessionGrid.js`에 있음
 - `pmSpawnService` 에서 **seed runTurn 금지** — brief 은 static system prompt 에 bake. Codex 어댑터는 back-to-back runTurn 에서 "previous turn still running" 을 던진다
 - `pmCleanupService` 는 fail-closed — dispose 실패 시 상태를 유지한 채 re-throw. 호출자 (DELETE /api/projects/:id, /reset) 가 502 로 거절해야 함. 절대 swallow 하지 말 것
 - `reconciliationService.recordClaim` 의 envelope binding 은 strict — `projectId`/`taskId`/`pmRunId`/`selectedAgentProfileId` 전부 존재+소유 검증. hard input error 는 400 throw, incoherence 는 flag 로만 표시 (annotate-only 원칙: PM drift 는 기록만, block 안 함)
