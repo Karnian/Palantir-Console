@@ -663,7 +663,7 @@ MVP 트랙 종료. 트리거 조건 모니터링 시작. PM 트랙 진입 여부
 
 ---
 
-## 15. Implementation Log (Phase 0 ~ 7)
+## 15. Implementation Log (Phase 0 ~ 9)
 
 > 이 섹션은 lock-in 이 아니라 **구현 결과 기록** 이다. 본 문서 §1~§14 는 역사 고정, 이 섹션은 실제 merge 된 내용을 반영한다.
 
@@ -683,6 +683,7 @@ MVP 트랙 종료. 트리거 조건 모니터링 시작. PM 트랙 진입 여부
 | P6 (ESM) | ManagerView(P6-1) + self-bridge 정리(P6-7), SessionsView ESM(P6-3), streamJsonEngine 테스트 + pm:id 커버리지(P6-5/P6-8), result_summary UI(P6-6) | #60~#61, #64 | ✅ merged |
 | P7 (ESM) | TaskModals ESM(P7-1) + Notifications ESM(P7-4), PM force-delete 탈출구(P7-2), legacy alias deprecation(P7-3), app.js 슬림화→291줄(P7-5) | #62~#64 | ✅ merged |
 | P8 (품질) | DashboardView self-bridge 제거(P8-1), app.js ESM 전환(P8-2), useManager→useManagerLifecycle+useConversation(P8-3), hooks.js 7-module 분할(P8-4), ManagerView→ManagerChat+SessionGrid(P8-5), MentionInput inputRef 테스트(P8-6), Playwright E2E Manager(P8-7), a11y 테스트 현행화(P8-8), spec deferred 정리(P8-9) | #65~#71 | ✅ merged |
+| P9 | ESM 직접 import + SessionsView Preact 재작성 | #72 P9-1: preact/hooks/htm 직접 import, #73 P9-2: helper/component window.* 직접 import, #74 P9-3+P9-5: main.js bridge 제거 + 부트스트래퍼 최소화, #76 P9-4: SessionsView Preact 재작성 (initLegacySessions 제거), #77 P9-6: 테스트 + 문서 현행화 | ✅ merged |
 | 3b | Claude PM adapter resume (`streamJsonEngine --resume/--continue`, claudeAdapter supportsResume) | — | 🚦 트리거 조건 미충족 (§9.6, "Claude PM use case 발생") |
 
 ### 구현 결과 vs 본문 §9 / §12 의 차이점
@@ -710,6 +711,7 @@ Phase 2~7 merge 시점까지 누적 codex round: **17+ rounds** (Phase 4 가 6 r
 - Phase 7 merge 시점: **238 tests** (server-side unit + supertest HTTP + fake adapter)
 - P6+P7 ESM 추출 + 정리 완료 시점: **498 tests**
 - P8 완료 시점: **509 tests** (+12 MentionInput/a11y, +10 Playwright E2E, -1 구조 조정)
+- P9 완료 시점: **509 tests** (+8 SessionsView/SessionList/ConversationPanel a11y, -1 구 테스트 교체, -7 bridge 테스트 제거(P9-3))
 - Playwright live smoke: Phase 3a/6/7 에서 각각 수행 (격리 포트 4188 + 임시 DB, prod 4177 무손상)
 - 회귀 0
 
