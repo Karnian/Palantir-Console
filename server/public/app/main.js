@@ -124,6 +124,11 @@ window.ProjectsView = ProjectsView;
 const { AgentsView } = await import('./components/AgentsView.js');
 window.AgentsView = AgentsView;
 
+// P6-1 (ESM phase 5a): ManagerView — Full-page manager chat + session grid.
+// Also includes managerProfileAuthState (module-internal to ManagerView).
+const { ManagerView } = await import('./components/ManagerView.js');
+window.ManagerView = ManagerView;
+
 // Load app.js as a classic script after the globals are in place. We use a
 // dynamic <script> tag (rather than `import './app.js'`) because app.js is
 // still a non-module bundle that relies on top-level globals. Once helpers
