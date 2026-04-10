@@ -218,31 +218,38 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
    *
    * See docs/specs/manager-v3-multilayer.md principle 1.
    */
-  function startSession(runId, { prompt, cwd, systemPrompt, model, allowedTools, permissionMode, env }) {
+  function startSession(runId, { prompt, cwd, systemPrompt, model, allowedTools, mcpTools, permissionMode, env }) {
     // Reset normalizer state in case the runId is recycled.
     runState.delete(runId);
+    const baseTools = allowedTools || [
+      // Bash restricted to commands whose *primary* operation is read-only
+      // and whose *typical usage* does not write files. Excluded: cat, echo,
+      // tee, sed, awk, python, node — all commonly used with redirection or
+      // inline write flags. File reading goes through the Read tool, not Bash.
+      //
+      // KNOWN PHASE 0 LIMITATION: Bash(cmd:*) patterns match only on command
+      // name, not full shell string. So `curl ... > file` can still write.
+      // A complete fix requires replacing Bash(curl:*) with an MCP/HTTP
+      // helper tool that exposes the Palantir API as typed operations
+      // without shell access. Tracked as Phase X follow-up. The threat
+      // model today is drift (LLM following role), not malicious escape —
+      // and the manager's system prompt explicitly forbids file edits.
+      'Bash(curl:*)', 'Bash(jq:*)', 'Bash(ls:*)', 'Bash(pwd:*)',
+      'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
+    ];
+    // Merge MCP tool patterns (from agent profile capabilities_json.mcp_tools)
+    // into the base allowedTools list. This lets Manager/PM access MCP tools
+    // without relaxing the base capability diet for built-in tools.
+    const mergedTools = (mcpTools && mcpTools.length > 0)
+      ? [...baseTools, ...mcpTools]
+      : baseTools;
     const result = streamJsonEngine.spawnAgent(runId, {
       prompt,
       cwd,
       env, // PR4: filtered env from buildManagerSpawnEnv — overrides process.env
       systemPrompt,
       permissionMode: permissionMode || 'bypassPermissions',
-      allowedTools: allowedTools || [
-        // Bash restricted to commands whose *primary* operation is read-only
-        // and whose *typical usage* does not write files. Excluded: cat, echo,
-        // tee, sed, awk, python, node — all commonly used with redirection or
-        // inline write flags. File reading goes through the Read tool, not Bash.
-        //
-        // KNOWN PHASE 0 LIMITATION: Bash(cmd:*) patterns match only on command
-        // name, not full shell string. So `curl ... > file` can still write.
-        // A complete fix requires replacing Bash(curl:*) with an MCP/HTTP
-        // helper tool that exposes the Palantir API as typed operations
-        // without shell access. Tracked as Phase X follow-up. The threat
-        // model today is drift (LLM following role), not malicious escape —
-        // and the manager's system prompt explicitly forbids file edits.
-        'Bash(curl:*)', 'Bash(jq:*)', 'Bash(ls:*)', 'Bash(pwd:*)',
-        'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
-      ],
+      allowedTools: mergedTools,
       model: model || undefined,
       isManager: true,
       onVendorEvent: (event, proc) => normalizeClaudeEvent(runId, event, proc),
