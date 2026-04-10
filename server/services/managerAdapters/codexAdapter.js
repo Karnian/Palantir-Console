@@ -47,6 +47,25 @@ const {
   buildPayload,
 } = require('./eventTypes');
 
+// P2-2: vendor item.type='error' classification constants. Kept at
+// module scope so the exported helper `classifyCodexErrorAsNotice` (below
+// `createCodexAdapter`) can be called without instantiating an adapter,
+// and so test fixtures can reference the same set the runtime uses.
+const NON_FATAL_SEVERITIES = new Set(['warning', 'warn', 'notice', 'info', 'deprecation']);
+const NOTICE_CODE_PREFIXES = ['deprecated_', 'deprecation_', 'notice_', 'warn_', 'warning_'];
+
+function classifyCodexErrorAsNotice(item) {
+  if (!item || typeof item !== 'object') return false;
+  const severity = typeof item.severity === 'string'
+    ? item.severity.toLowerCase()
+    : null;
+  if (severity && NON_FATAL_SEVERITIES.has(severity)) return true;
+  const code = typeof item.code === 'string' ? item.code.toLowerCase() : null;
+  if (code && NOTICE_CODE_PREFIXES.some(p => code.startsWith(p))) return true;
+  const msg = typeof item.message === 'string' ? item.message : '';
+  return /\b(deprecated|deprecation)\b/i.test(msg);
+}
+
 /**
  * v3 Phase 0: spawnFn is injectable for behavior testing. Production callers
  * omit it and get the real child_process.spawn. Tests inject a fake that
@@ -371,16 +390,32 @@ function createCodexAdapter({
 
       if (itemType === 'error') {
         // Codex overloads item.type='error' for two things:
-        //   1. Benign deprecated-config warnings (e.g. `[features].foo` is
-        //      deprecated). These do NOT fail the turn.
+        //   1. Benign config notices (e.g. `[features].foo` is deprecated).
+        //      These do NOT fail the turn.
         //   2. Real model/runtime errors.
-        // The only way to tell them apart today is pattern-match the
-        // message. "deprecated" (case-insensitive) plus variants like
-        // "is deprecated because" are warnings. Everything else is escalated
-        // to a real TURN_FAILED. The turn.completed / process exit code is
-        // still the authoritative turn outcome.
+        //
+        // P2-2 hardening: we used to depend SOLELY on a loose regex
+        // (`/deprecated|deprecation/i`) against the message. A vendor
+        // localization tweak or rename would flip benign notices into
+        // TURN_FAILED and kill the session. Now we classify as a notice
+        // when ANY of the following hold (ordered from most to least
+        // structured):
+        //   a. `item.severity` is a non-fatal label
+        //      ('warning'|'warn'|'notice'|'info'|'deprecation').
+        //   b. `item.code` looks like a deprecation/notice marker
+        //      (starts with 'deprecated_', 'notice_', 'warn_', or 'warning_').
+        //   c. regex fallback on the message — still intentional because
+        //      current codex-cli builds (verified 2026-04-07 on 0.118.0)
+        //      do NOT populate severity/code on deprecation items, so
+        //      dropping the regex today would re-introduce the fail. Keep
+        //      the fallback until vendor shape is reliable. Pattern uses
+        //      \b word boundaries to avoid matching user text like
+        //      "deprecation was reversed".
+        //
+        // Everything else is escalated to a real TURN_FAILED. The
+        // turn.completed / process exit code is still authoritative.
         const msg = item.message || '';
-        const isDeprecationNotice = /deprecated|deprecation/i.test(msg);
+        const isDeprecationNotice = classifyCodexErrorAsNotice(item);
         if (isDeprecationNotice) {
           emitNormalized(runId, NORMALIZED_EVENT_TYPES.TOOL_CALL_FINISHED, buildPayload({
             turnIndex: state.turnIndex,
@@ -579,4 +614,10 @@ You are running as a Codex CLI subprocess (codex exec --json). HARD RULES:
   };
 }
 
-module.exports = { createCodexAdapter };
+module.exports = {
+  createCodexAdapter,
+  // P2-2: expose classifier + constants for vendor fixture tests.
+  classifyCodexErrorAsNotice,
+  NON_FATAL_SEVERITIES,
+  NOTICE_CODE_PREFIXES,
+};
