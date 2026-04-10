@@ -3834,28 +3834,38 @@ function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError 
             ${!isPm && status.active && status.usage && html`
               <span class="manager-cost">$${(status.usage.costUsd || 0).toFixed(4)}</span>
             `}
-            ${/* v3 Phase 6: conversation selector. Only Top is always
-                 present. PMs are enumerated from the project list so
-                 the user can lazy-spawn a new PM just by picking one +
-                 sending a message. */ ''}
+            ${/* v3 Phase 6 + P2-9: conversation selector. Upgraded from
+                 the native <select> to the existing Dropdown component
+                 so it matches the rest of the app's picker styling AND
+                 so the "· active" annotation can use a small trailing
+                 chip rather than jamming everything into the option
+                 text. The option list is derived from projects with
+                 pm_enabled !== 0; Top is always present as the first
+                 option. */ ''}
             ${status.active && html`
-              <select
-                class="manager-picker-select"
-                style="max-width:180px"
+              <${Dropdown}
+                className="manager-picker-select"
+                style="max-width:220px"
+                title="Conversation target — pick Top or a project PM"
+                ariaLabel="Conversation target"
                 value=${conversationTarget}
-                onChange=${(e) => setConversationTarget(e.target.value)}
-                title="Conversation target"
-              >
-                <option value="top">Top manager</option>
-                ${(projects || [])
-                  .filter(p => p.pm_enabled !== 0)
-                  .map(p => {
-                    const active = (status.pms || []).some(s => s.conversationId === `pm:${p.id}`);
-                    return html`<option key=${p.id} value=${`pm:${p.id}`}>
-                      ${`@${p.name}${active ? ' · active' : ''}`}
-                    </option>`;
-                  })}
-              </select>
+                onChange=${(v) => setConversationTarget(v)}
+                options=${[
+                  { value: 'top', label: 'Top manager' },
+                  ...((projects || [])
+                    .filter(p => p.pm_enabled !== 0)
+                    .map(p => {
+                      const active = (status.pms || []).some(s => s.conversationId === `pm:${p.id}`);
+                      return {
+                        value: `pm:${p.id}`,
+                        // `· active` suffix preserved — Dropdown renders
+                        // the label as plain text, so the visual is the
+                        // same as the pre-P2-9 native <select>.
+                        label: `@${p.name}${active ? ' · active' : ''}`,
+                      };
+                    })),
+                ]}
+              />
             `}
             ${/* v3 Phase 7: per-PM drift indicator. Only surfaces
                  when the currently selected PM has one or more
@@ -3869,11 +3879,27 @@ function ManagerView({ manager, runs, tasks, projects, agents = [], agentsError 
                 onClick=${() => onOpenDrift && onOpenDrift()}
               >\u26A0 ${driftAudit.countByProject.get(pmProjectId)}</button>
             `}
+            ${/* P2-9: clarified tooltips so the Stop (Top) vs Reset PM
+                 distinction is unambiguous. Stop terminates the shared
+                 Top manager process — all PMs keep running. Reset PM
+                 terminates ONLY this project's PM thread; Top and other
+                 PMs are unaffected. The label text stays short; the
+                 tooltip + aria-label carry the detail. */ ''}
             ${isPm && pmRunActive && html`
-              <button class="btn btn-sm btn-danger" onClick=${handleResetPm} title="Terminate this PM thread; next message starts fresh">Reset PM</button>
+              <button
+                class="btn btn-sm btn-danger"
+                onClick=${handleResetPm}
+                title="Reset PM: terminate this project's PM thread only. Top and other PMs keep running. Next message starts a fresh PM thread for this project."
+                aria-label="Reset PM for this project"
+              >Reset PM</button>
             `}
             ${!isPm && status.active && html`
-              <button class="btn btn-sm btn-danger" onClick=${stop}>Stop</button>
+              <button
+                class="btn btn-sm btn-danger"
+                onClick=${stop}
+                title="Stop Top manager: terminate the shared Top manager process. Any currently active PMs continue running in their own sessions."
+                aria-label="Stop Top manager"
+              >Stop</button>
             `}
           </div>
         </div>
