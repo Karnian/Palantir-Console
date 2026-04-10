@@ -74,15 +74,17 @@ if (!isManager) {
   process.stdout.write(result + '\\n');
   process.exit(0);
 } else {
-  // Manager: read stdin lines, echo as assistant events
+  // Manager: read stdin lines, echo as assistant events + result per turn
   const rl = readline.createInterface({ input: process.stdin });
   rl.on('line', (line) => {
     if (!line.trim()) return;
     const evt = JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'echo:' + line }] } });
     process.stdout.write(evt + '\\n');
+    // Emit a result after each turn (matching real Claude multi-turn behavior)
+    const result = JSON.stringify({ type: 'result', is_error: false, result: 'turn-done', total_cost_usd: 0.01, usage: { input_tokens: 10, output_tokens: 5 } });
+    process.stdout.write(result + '\\n');
   });
   rl.on('close', () => {
-    process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result: 'done', total_cost_usd: 0.01, usage: { input_tokens: 10, output_tokens: 5 } }) + '\\n');
     process.exit(0);
   });
 }
@@ -332,39 +334,37 @@ test('engine: result event for worker triggers updateRunStatus completed', async
   assert.ok(completedUpdates.length >= 1, 'completed status 업데이트 호출됨');
 });
 
-test('engine: result event for manager does NOT call updateRunStatus on non-error', async () => {
+test('engine: result event for manager does NOT call updateRunStatus on non-error', async (t) => {
   process.env.CLAUDE_BIN = fakeClaudioPath;
   const rs = makeRunService();
   rs._setRun('run-result-mgr', { status: 'running' });
   const { engine } = makeEngine({ runService: rs });
+  t.after(() => engine.kill('run-result-mgr'));
 
   engine.spawnAgent('run-result-mgr', { cwd: os.tmpdir(), isManager: true });
 
-  // init 대기 후 stdin close → result 발생
+  // Wait for init event
   await waitForEvent(engine, 'run-result-mgr', e => e.type === 'system');
-  // stdin을 닫으면 fake-claude가 result를 emit하고 exit
-  engine.spawnAgent; // no-op: just trigger the already-spawned process
-  // stdin end를 직접 트리거하려면 kill을 사용하지 말고 endInput 경로를 찾아야 함.
-  // fake-claude는 stdin close 시 result를 emit. child.stdin.end()가 없으므로,
-  // result 이벤트를 직접 주입하는 대신 kill 후 exit 이벤트를 이용한다.
 
-  // kill을 보내면 프로세스가 종료되고 exit 핸들러가 실행됨.
-  // isManager=true면 exit 시 updateRunStatus가 호출됨. 하지만 여기선
-  // result:non-error 경로만 검증하려면 stdin close로 result를 받아야 함.
-  // kill로 SIGTERM → 프로세스가 죽는다.
-  engine.kill('run-result-mgr');
+  // Send a message — fake-claude manager mode emits assistant + result per turn.
+  // This exercises the actual handleEvent result→manager code path.
+  engine.sendInput('run-result-mgr', 'hello');
 
-  // 짧게 대기
-  await new Promise(r => setTimeout(r, 200));
+  // Wait for the result event (emitted after the assistant echo)
+  await waitForEvent(engine, 'run-result-mgr', e => e.type === 'result', 2000);
 
-  // manager non-error result: updateRunStatus 호출 없어야 함
-  // exit 시 is_manager=true이므로 exit 핸들러는 updateRunStatus를 호출하지만,
-  // 그것은 exit 경로지 result 이벤트 경로가 아님. result 이벤트 자체는 오지 않음.
-  // 즉 statusUpdates에 'completed' 항목이 있을 수 있지만, result 이벤트로 온 것은 아님.
-  // 이 테스트는 "result 이벤트에 의한 updateRunStatus 호출 없음"을 검증하므로
-  // result 이벤트 수신 전에 kill하면 result 이벤트가 오지 않아 result-path 업데이트는 없다.
-  const resultEvents = rs._events.filter(e => e.type === 'result' && e.runId === 'run-result-mgr');
-  assert.equal(resultEvents.length, 0, 'kill로 종료 시 result 이벤트 없음');
+  // The result event arrived (is_error: false). For manager sessions,
+  // handleEvent must NOT call updateRunStatus('completed') — only workers
+  // transition to completed on non-error result.
+  const completedUpdates = rs._statusUpdates.filter(
+    u => u.runId === 'run-result-mgr' && u.status === 'completed'
+  );
+  assert.equal(completedUpdates.length, 0,
+    'manager non-error result must not trigger updateRunStatus(completed)');
+
+  // Verify the result event WAS recorded (proving we tested the right path)
+  const resultEvents = engine.getEvents('run-result-mgr').filter(e => e.type === 'result');
+  assert.ok(resultEvents.length >= 1, 'result event was received and recorded');
 });
 
 test('engine: onVendorEvent hook fires for each parsed event', async (t) => {
