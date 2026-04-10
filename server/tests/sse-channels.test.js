@@ -14,7 +14,8 @@ const path = require('node:path');
 
 const { SERVER_EMITS, CLIENT_REQUIRED_LIVE } = require('../services/eventChannels');
 
-const HOOKS_PATH = path.resolve(__dirname, '..', 'public', 'app', 'lib', 'hooks.js');
+// P8-4: useSSE now lives in hooks/sse.js (split from monolithic hooks.js).
+const HOOKS_PATH = path.resolve(__dirname, '..', 'public', 'app', 'lib', 'hooks', 'sse.js');
 
 // Extract the channels array specifically from inside the `useSSE`
 // function body. Scoping matters (Codex R1 blocker): a future refactor

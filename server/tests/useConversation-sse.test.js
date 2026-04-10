@@ -15,8 +15,14 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const HOOKS_PATH = path.resolve(__dirname, '..', 'public', 'app', 'lib', 'hooks.js');
-const src = fs.readFileSync(HOOKS_PATH, 'utf8');
+// P8-4: hooks split into focused modules. sseBroker lives in sse.js,
+// useConversation lives in conversation.js. Concat both for the source
+// analysis so sliceFn can locate each function by its export declaration.
+const HOOKS_DIR = path.resolve(__dirname, '..', 'public', 'app', 'lib', 'hooks');
+const src = [
+  fs.readFileSync(path.join(HOOKS_DIR, 'sse.js'), 'utf8'),
+  fs.readFileSync(path.join(HOOKS_DIR, 'conversation.js'), 'utf8'),
+].join('\n');
 
 function sliceFn(name) {
   const headerRe = new RegExp(`export function ${name}\\s*\\(`);

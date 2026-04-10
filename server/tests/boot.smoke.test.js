@@ -222,12 +222,12 @@ test('boot: app/lib/toast.js exports the toast system', async (t) => {
 
 test('boot: app/lib/hooks.js exports every hook the app needs', async (t) => {
   const app = await createTestApp(t);
-  const res = await request(app).get('/app/lib/hooks.js');
-  // Locks the public surface of hooks.js. If a hook gets renamed or dropped
-  // here, the bridge in main.js would silently fail to assign it on window
-  // and app.js would fall back to a ReferenceError on first use.
+  // P8-4: hooks.js is now a thin re-exporter (`export * from './hooks/index.js'`).
+  // The barrel index.js re-exports every symbol from focused sub-modules.
+  // Verify the barrel lists every required name.
+  const res = await request(app).get('/app/lib/hooks/index.js');
   for (const sym of ['useRoute', 'navigate', 'useEscape', 'useSSE', 'useTasks', 'useRuns', 'useProjects', 'useClaudeSessions', 'useAgents', 'useManagerLifecycle']) {
-    assert.match(res.text, new RegExp(`export\\s+(async\\s+)?function\\s+${sym}`), `${sym} export present`);
+    assert.match(res.text, new RegExp(sym), `${sym} re-export present in barrel`);
   }
 });
 
