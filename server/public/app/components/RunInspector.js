@@ -1,12 +1,14 @@
 // RunInspector — modal that polls a single run for live output, events,
-// and status, and lets the user send input or cancel. First component
-// extracted from the legacy app.js monolith as part of Phase 4 to validate
-// the "ESM module + window bridge" pattern.
-//
+// and status, and lets the user send input or cancel.
+
 import { h } from '../../vendor/preact.module.js';
 import { useState, useEffect, useRef } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
+
+import { apiFetch } from '../lib/api.js';
+import { addToast } from '../lib/toast.js';
+import { timeAgo } from '../lib/format.js';
 
 export function RunInspector({ run, onClose }) {
   const [events, setEvents] = useState([]);
@@ -31,13 +33,13 @@ export function RunInspector({ run, onClose }) {
       while (!cancelled) {
         try {
           // Fetch live output from tmux/subprocess
-          const outputData = await window.apiFetch(`/api/runs/${run.id}/output?lines=200`);
+          const outputData = await apiFetch(`/api/runs/${run.id}/output?lines=200`);
           if (!cancelled && outputData.output) {
             setLiveOutput(outputData.output);
           }
 
           // Fetch new events
-          const evtData = await window.apiFetch(`/api/runs/${run.id}/events?after=${lastEventId}`);
+          const evtData = await apiFetch(`/api/runs/${run.id}/events?after=${lastEventId}`);
           if (cancelled) break;
           const newEvents = evtData.events || [];
           if (newEvents.length) {
@@ -49,13 +51,13 @@ export function RunInspector({ run, onClose }) {
           }
 
           // Refresh run status
-          const runData = await window.apiFetch(`/api/runs/${run.id}`);
+          const runData = await apiFetch(`/api/runs/${run.id}`);
           if (!cancelled) {
             setCurrentRun(runData.run);
             if (['completed', 'failed', 'cancelled', 'stopped'].includes(runData.run?.status)) {
               // One final output fetch
               try {
-                const finalOut = await window.apiFetch(`/api/runs/${run.id}/output?lines=200`);
+                const finalOut = await apiFetch(`/api/runs/${run.id}/output?lines=200`);
                 if (finalOut.output) setLiveOutput(finalOut.output);
               } catch {}
               break;
@@ -94,13 +96,13 @@ export function RunInspector({ run, onClose }) {
       // to this worker is queued as a system notice for the Top manager's
       // next turn. The legacy /api/runs/:id/input route is still an alias
       // for external callers but the in-app UI now speaks the new shape.
-      await window.apiFetch(`/api/conversations/worker:${encodeURIComponent(run.id)}/message`, {
+      await apiFetch(`/api/conversations/worker:${encodeURIComponent(run.id)}/message`, {
         method: 'POST',
         body: JSON.stringify({ text: inputText.trim() }),
       });
       setInputText('');
     } catch (err) {
-      window.addToast?.(err.message, 'error');
+      addToast?.(err.message, 'error');
     }
     setSending(false);
   };
@@ -114,9 +116,9 @@ export function RunInspector({ run, onClose }) {
   const handleCancel = async () => {
     if (!confirm('Cancel this run?')) return;
     try {
-      await window.apiFetch(`/api/runs/${run.id}/cancel`, { method: 'POST' });
+      await apiFetch(`/api/runs/${run.id}/cancel`, { method: 'POST' });
     } catch (err) {
-      window.addToast?.(err.message, 'error');
+      addToast?.(err.message, 'error');
     }
   };
 
@@ -142,7 +144,7 @@ export function RunInspector({ run, onClose }) {
           <span>${status}</span>
           <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">${currentRun?.agent_name || run.agent_name || ''}</span>
           <span style="margin-left: auto; font-size: 11px; color: rgba(155,178,166,0.55);">
-            Started ${window.timeAgo(run.created_at)}
+            Started ${timeAgo(run.created_at)}
           </span>
           ${isActive && html`
             <button class="ghost danger" style="font-size: 10px; padding: 3px 8px;" onClick=${handleCancel}>Cancel</button>

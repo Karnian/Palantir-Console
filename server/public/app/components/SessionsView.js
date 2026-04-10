@@ -1,18 +1,15 @@
 // SessionsView + initLegacySessions — Sessions management view.
 // Extracted from server/public/app.js as part of P6-3 (ESM phase 5).
 //
-// Dependencies:
-//   - window.formatTime   (from app/lib/format.js)
-//   - window.marked, window.DOMPurify  (CDN scripts, loaded via index.html)
-//
-// initLegacySessions: vanilla JS scoped to a container element — no Preact
-// dependency. Uses fetch directly (not apiFetch) since it predates the
-// apiFetch helper and does not need auth-bounce behaviour.
+// NOTE: window.marked and window.DOMPurify are loaded via index.html
+// <script> tags — they are NOT ES module imports.
 
 import { h } from '../../vendor/preact.module.js';
 import { useEffect, useRef } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
+
+import { formatTime } from '../lib/format.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Legacy session logic — ported as-is but scoped to a container
@@ -108,7 +105,7 @@ export function initLegacySessions(root) {
     renderMessageContent(content, message.content || '[no text]');
     const time = document.createElement('div');
     time.className = 'timestamp';
-    time.textContent = window.formatTime(message.createdAt);
+    time.textContent = formatTime(message.createdAt);
     wrap.append(role, content, time);
     return wrap;
   }
@@ -125,7 +122,7 @@ export function initLegacySessions(root) {
     meta.className = 'child-session-meta';
     const agent = messages.find(m => m.agent)?.agent || 'unknown';
     const updatedAt = session?.time?.updated || session?.time?.created || null;
-    meta.textContent = `agent: ${agent} \u00B7 ${updatedAt ? `updated ${window.formatTime(updatedAt)}` : 'updated unknown'}`;
+    meta.textContent = `agent: ${agent} \u00B7 ${updatedAt ? `updated ${formatTime(updatedAt)}` : 'updated unknown'}`;
     header.append(title, meta);
     const list = document.createElement('div');
     list.className = 'child-session-messages';
@@ -229,7 +226,7 @@ export function initLegacySessions(root) {
     const providerMeta = card.querySelector('.meta-provider');
     if (providerMeta) providerMeta.textContent = formatProviderModel(session);
     const timeMeta = card.querySelector('.meta-time');
-    if (timeMeta) timeMeta.textContent = `Last activity: ${window.formatTime(session.lastActivity)}`;
+    if (timeMeta) timeMeta.textContent = `Last activity: ${formatTime(session.lastActivity)}`;
     const badge = card.querySelector('.badge');
     if (badge) {
       const nextStatus = session.status;
@@ -311,7 +308,7 @@ export function initLegacySessions(root) {
       content.style.setProperty('--clamp-lines', CLAMP_LINES);
       const time = document.createElement('div');
       time.className = 'timestamp';
-      time.textContent = window.formatTime(msg.createdAt);
+      time.textContent = formatTime(msg.createdAt);
       const childSessions = Array.isArray(msg.childSessionIds) ? msg.childSessionIds : [];
       const childKinds = Array.isArray(msg.childSessionKinds) ? msg.childSessionKinds : [];
       if (childSessions.length) {
@@ -418,7 +415,7 @@ export function initLegacySessions(root) {
     state.hasActiveSession = true;
     updateSessionControls(true);
     sessionTitleEl.querySelector('.title').textContent = data.session.title || data.session.slug || data.session.id;
-    sessionMeta.textContent = `${data.session.directory || 'No directory'} \u00B7 Updated ${window.formatTime(data.session.time?.updated)}`;
+    sessionMeta.textContent = `${data.session.directory || 'No directory'} \u00B7 Updated ${formatTime(data.session.time?.updated)}`;
     const messages = data.messages || [];
     const hasMoreMessages = messages.length > messageLimit;
     const displayMessages = hasMoreMessages ? messages.slice(Math.max(0, messages.length - messageLimit)) : messages;
@@ -673,7 +670,7 @@ export function initLegacySessions(root) {
       const t = document.createElement('div');
       t.textContent = item.session?.title || item.session?.slug || item.session?.id || 'Untitled';
       const w = document.createElement('div');
-      w.textContent = `Trashed: ${item.trashedAt ? window.formatTime(item.trashedAt) : 'Unknown'}`;
+      w.textContent = `Trashed: ${item.trashedAt ? formatTime(item.trashedAt) : 'Unknown'}`;
       meta.append(t, w);
       const actions = document.createElement('div');
       actions.className = 'trash-actions';

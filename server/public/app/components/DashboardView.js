@@ -1,29 +1,17 @@
 // DashboardView — Attention Dashboard component.
 // Extracted from server/public/app.js as part of P5-1 (ESM phase 4a).
-//
-// Dependencies:
-//   - window.timeAgo, window.formatDuration  (from app/lib/format.js)
-//   - window.navigate                        (from app/lib/hooks.js)
-//   - window.EmptyState                      (from app/components/EmptyState.js)
-//
-// Due-date helpers (dueState, formatDueDate, useNowTick, dueDateMeta) are
-// imported from app/lib/dueDate.js. The window bridge lives in main.js
-// (P8-1: "bridge는 main.js에서만" principle).
 
 import { h } from '../../vendor/preact.module.js';
 import { useState, useEffect } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
+import { timeAgo, formatDuration } from '../lib/format.js';
+import { navigate } from '../lib/hooks.js';
+import { EmptyState } from './EmptyState.js';
 import { dueState, formatDueDate, useNowTick, dueDateMeta } from '../lib/dueDate.js';
 
 export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun, claudeSessions, manager, driftAudit, onOpenDrift }) {
-  // Resolve window globals at call time (set by main.js before this module runs)
-  const timeAgo = window.timeAgo;
-  const formatDuration = window.formatDuration;
-  const navigate = window.navigate;
-  const EmptyState = window.EmptyState;
-
   // Tick every minute so overdue/due-soon triage rolls over without a reload.
   // The hook itself returns a counter we don't read; calling it is enough to
   // force a re-render at each tick.

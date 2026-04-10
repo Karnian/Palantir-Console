@@ -1,26 +1,12 @@
 // DriftDrawer — right-side slide panel listing pending PM
-// dispatch-audit incoherences. Extracted from server/public/app.js as
-// part of P2-10 (ESM phase 1 — single-component extraction to validate
-// the pattern established by RunInspector.js).
-//
-// Why this component first:
-//   - DriftDrawer is self-contained. It takes props (open, onClose,
-//     driftAudit, projects) and has no out-of-scope references to
-//     other legacy app.js state.
-//   - It already has a hardened a11y contract (WCAG 2.2 AA — role
-//     dialog, aria-modal, aria-labelledby, focus trap, Close button
-//     aria-label). Extraction preserves the exact same shape and is
-//     covered by server/tests/frontend-a11y-envelope.test.js.
-//   - It is an active surface for ongoing work (dispatch audit UI) —
-//     future edits are easier against an ES module than against a 4500-
-//     line classic script.
-//
-// Module-time dependencies are now direct ES module imports.
+// dispatch-audit incoherences.
 
 import { h } from '../../vendor/preact.module.js';
 import { useRef, useEffect } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
+
+import { timeAgo } from '../lib/format.js';
 
 export function DriftDrawer({ open, onClose, driftAudit, projects }) {
   // PR3b / P1-11: WCAG 2.2 AA a11y. Pre-PR3b the drawer had none of
@@ -132,7 +118,7 @@ export function DriftDrawer({ open, onClose, driftAudit, projects }) {
                     ${row.incoherence_kind || 'unknown'}
                   </span>
                   <span class="drift-row-project">${pname}</span>
-                  <span class="drift-row-time">${window.timeAgo(new Date(row.created_at).toISOString())}</span>
+                  <span class="drift-row-time">${timeAgo(new Date(row.created_at).toISOString())}</span>
                   <button
                     class="ghost"
                     style="margin-left:auto"
