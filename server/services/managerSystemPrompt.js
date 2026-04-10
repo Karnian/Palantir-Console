@@ -43,6 +43,7 @@ Your role:
 function buildCommonBase({ port, token, layer = 'top' }) {
   const base = `http://localhost:${port}`;
   const auth = token ? `-H 'Authorization: Bearer ${token}' ` : '';
+  const authHeader = token ? `Authorization: Bearer ${token}` : null;
 
   const layerNote = layer === 'pm'
     ? `\n\nYou are running as a **project-scoped PM**. You own dispatch decisions within your project, and you may modify in-flight worker plans via the worker intervention APIs (cancel, input, status patch) when the user or conditions require a plan change.`
@@ -52,9 +53,9 @@ function buildCommonBase({ port, token, layer = 'top' }) {
   // about these, so it cannot drift into modifying workers via prompt.
   const workerInterventionSection = layer === 'pm'
     ? `\n\n### Worker Plan Modification (PM-only, in-flight)
-- Send input to run: curl -s ${auth}-X POST ${base}/api/runs/RUN_ID/input -H 'Content-Type: application/json' -d '{"text":"..."}'
-- Cancel run: curl -s ${auth}-X POST ${base}/api/runs/RUN_ID/cancel
-- Update task status: curl -s ${auth}-X PATCH ${base}/api/tasks/TASK_ID/status -H 'Content-Type: application/json' -d '{"status":"done"}'
+- Send input to run: POST ${base}/api/runs/RUN_ID/input  body: {"text":"..."}
+- Cancel run: POST ${base}/api/runs/RUN_ID/cancel
+- Update task status: PATCH ${base}/api/tasks/TASK_ID/status  body: {"status":"done"}
 
 ### Dispatch Audit (PM-only, v3 Phase 4 annotate-only reconciliation)
 Every time you make a definitive claim about a task or worker state —
@@ -65,7 +66,7 @@ state and flags mismatches without blocking your message. This is how
 the user notices when your mental model has drifted.
 
 - Record a dispatch claim:
-  curl -s ${auth}-X POST ${base}/api/dispatch-audit -H 'Content-Type: application/json' -d '{"project_id":"PROJECT_ID","task_id":"TASK_ID","pm_run_id":"YOUR_OWN_PM_RUN_ID","pm_claim":{"kind":"task_complete","task_id":"TASK_ID"}}'
+  POST ${base}/api/dispatch-audit  body: {"project_id":"PROJECT_ID","task_id":"TASK_ID","pm_run_id":"YOUR_OWN_PM_RUN_ID","pm_claim":{"kind":"task_complete","task_id":"TASK_ID"}}
 
 pm_claim.kind values the server understands:
 - task_complete / task_in_progress (requires pm_claim.task_id)
@@ -113,7 +114,7 @@ You do NOT have Write or Edit tools — this is intentional. Direct file modific
 
 ## Palantir Console REST API
 
-The Palantir Console server runs at ${base}. Use Bash with curl to query it.
+The Palantir Console server runs at ${base}. Use WebFetch to query it (do NOT use Bash with curl — curl is not in your tool allowlist).
 ${token ? `\nIMPORTANT: All API requests require auth header: ${auth.trim()}` : ''}
 
 ### Runs (read-only)

@@ -218,7 +218,7 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
    *
    * See docs/specs/manager-v3-multilayer.md principle 1.
    */
-  function startSession(runId, { prompt, cwd, systemPrompt, model, allowedTools, mcpTools, permissionMode, env }) {
+  function startSession(runId, { prompt, cwd, systemPrompt, model, allowedTools, mcpTools, mcpConfig, permissionMode, env }) {
     // Reset normalizer state in case the runId is recycled.
     runState.delete(runId);
     const baseTools = allowedTools || [
@@ -227,14 +227,12 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
       // tee, sed, awk, python, node — all commonly used with redirection or
       // inline write flags. File reading goes through the Read tool, not Bash.
       //
-      // KNOWN PHASE 0 LIMITATION: Bash(cmd:*) patterns match only on command
-      // name, not full shell string. So `curl ... > file` can still write.
-      // A complete fix requires replacing Bash(curl:*) with an MCP/HTTP
-      // helper tool that exposes the Palantir API as typed operations
-      // without shell access. Tracked as Phase X follow-up. The threat
-      // model today is drift (LLM following role), not malicious escape —
-      // and the manager's system prompt explicitly forbids file edits.
-      'Bash(curl:*)', 'Bash(jq:*)', 'Bash(ls:*)', 'Bash(pwd:*)',
+      // P4-7: Bash(curl:*) REMOVED. Bash(cmd:*) patterns match only on command
+      // name, not full shell string — `curl ... > file` could write arbitrary
+      // files, bypassing the capability diet. WebFetch covers HTTP needs
+      // without shell access. jq/ls/pwd are genuinely read-only in their
+      // primary operation and kept for convenience.
+      'Bash(jq:*)', 'Bash(ls:*)', 'Bash(pwd:*)',
       'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
     ];
     // Merge MCP tool patterns (from agent profile capabilities_json.mcp_tools)

@@ -20,58 +20,28 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
-const { JSDOM } = require('jsdom');
+const { createPreactEnv, flushEffects, COMPONENTS_DIR } = require('./helpers/jsdom-preact');
 
 // ---- helpers ----
 
-const VENDOR_DIR = path.join(__dirname, '..', 'public', 'vendor');
-const DRIFT_DRAWER_PATH = path.join(__dirname, '..', 'public', 'app', 'components', 'DriftDrawer.js');
-
-const preactSrc = fs.readFileSync(path.join(VENDOR_DIR, 'preact.umd.js'), 'utf8');
-const hooksSrc = fs.readFileSync(path.join(VENDOR_DIR, 'hooks.umd.js'), 'utf8');
-const htmSrc = fs.readFileSync(path.join(VENDOR_DIR, 'htm.umd.js'), 'utf8');
-
-// DriftDrawer.js uses ES module syntax — strip `export` keyword so
-// vm.runInContext can evaluate it. The function name stays the same
-// so this.DriftDrawer assignment (appended below) captures it.
-const rawDriftSrc = fs.readFileSync(DRIFT_DRAWER_PATH, 'utf8');
-const driftDrawerSrc =
-  rawDriftSrc.replace(/^export\s+function\s+DriftDrawer\b/m, 'function DriftDrawer') +
-  '\nthis.DriftDrawer = DriftDrawer;';
-
 /**
- * 독립된 jsdom 인스턴스 + vm context 를 생성하고,
- * Preact / hooks / htm UMD 를 로드한 뒤 DriftDrawer 를 평가해서 돌려준다.
+ * Create env with DriftDrawer loaded.  We still use the manual strip approach
+ * because DriftDrawer has a unique `window.timeAgo` dependency.
  */
 function createEnv() {
-  const dom = new JSDOM(
-    '<!DOCTYPE html><html><body><div id="root"></div></body></html>',
-    { url: 'http://localhost', pretendToBeVisual: true },
-  );
-  const { window } = dom;
-  const context = vm.createContext(window);
+  const env = createPreactEnv();
 
-  // hooks UMD 는 CJS 환경에서 require('preact') 를 호출하므로 패치
-  context.require = (m) => {
-    if (m === 'preact') return context.preact;
-    return require(m);
-  };
+  // DriftDrawer calls window.timeAgo at render time
+  env.context.timeAgo = () => '1m ago';
 
-  vm.runInContext(preactSrc, context);
-  vm.runInContext(hooksSrc, context);
-  vm.runInContext(htmSrc, context);
+  // Load DriftDrawer via manual transform (it pre-dates the generic loader)
+  const rawSrc = fs.readFileSync(path.join(COMPONENTS_DIR, 'DriftDrawer.js'), 'utf8');
+  const transformed =
+    rawSrc.replace(/^export\s+function\s+DriftDrawer\b/m, 'function DriftDrawer') +
+    '\nthis.DriftDrawer = DriftDrawer;';
+  vm.runInContext(transformed, env.context);
 
-  // DriftDrawer 의 row 렌더에서 window.timeAgo 를 호출
-  context.timeAgo = () => '1m ago';
-
-  vm.runInContext(driftDrawerSrc, context);
-
-  return { window, context };
-}
-
-/** Preact useEffect 가 setTimeout 큐에서 실행될 때까지 대기 */
-function flushEffects(ms = 100) {
-  return new Promise((r) => setTimeout(r, ms));
+  return { window: env.window, context: env.context };
 }
 
 /** 샘플 driftAudit 오브젝트 (버튼이 여러 개 생성되도록 row 포함) */
