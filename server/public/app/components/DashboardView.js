@@ -8,22 +8,14 @@
 //   - window.EmptyState                      (from app/components/EmptyState.js)
 //
 // Due-date helpers (dueState, formatDueDate, useNowTick, dueDateMeta) are
-// imported from app/lib/dueDate.js and also bridged onto window so that
-// the legacy app.js (TaskDetailPanel etc.) can still use them as bare
-// identifiers after they are removed from app.js.
+// imported from app/lib/dueDate.js. The window bridge lives in main.js
+// (P8-1: "bridge는 main.js에서만" principle).
 
 const { h } = window.preact;
 const { useState, useEffect } = window.preactHooks;
 const html = window.htm.bind(h);
 
 import { dueState, formatDueDate, useNowTick, dueDateMeta } from '../lib/dueDate.js';
-
-// Bridge helpers onto window so legacy app.js code (e.g. TaskDetailPanel)
-// that uses bare identifiers still resolves them after removal from app.js.
-window.dueState = dueState;
-window.formatDueDate = formatDueDate;
-window.useNowTick = useNowTick;
-window.dueDateMeta = dueDateMeta;
 
 export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun, claudeSessions, manager, driftAudit, onOpenDrift }) {
   // Resolve window globals at call time (set by main.js before this module runs)
