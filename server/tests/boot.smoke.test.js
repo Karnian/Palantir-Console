@@ -149,33 +149,17 @@ test('boot: index.html still pulls marked + DOMPurify from CDN', async (t) => {
   assert.match(res.text, /purify.*\.js/i, 'DOMPurify CDN script tag present');
 });
 
-// ---- main.js bridge contract ----
+// ---- main.js bootstrapper contract (P9-3: bridges removed) ----
 
-test('boot: app/main.js bridges Preact onto window globals', async (t) => {
+test('boot: app/main.js is a minimal bootstrapper that loads app.js', async (t) => {
   const app = await createTestApp(t);
   const res = await request(app).get('/app/main.js');
   assert.equal(res.status, 200);
-  assert.match(res.text, /window\.preact\s*=/, 'window.preact assignment');
-  assert.match(res.text, /window\.preactHooks\s*=/, 'window.preactHooks assignment');
-  assert.match(res.text, /window\.htm\s*=/, 'window.htm assignment');
-});
-
-test('boot: app/main.js imports app.js as ES module (P8-2)', async (t) => {
-  const app = await createTestApp(t);
-  const res = await request(app).get('/app/main.js');
+  // Must call configureMarked and load app.js — that's its entire job.
+  assert.match(res.text, /configureMarked\(\)/, 'configureMarked() call present');
   assert.match(res.text, /import\(\s*['"]\.\.\/app\.js['"]\s*\)/, 'ESM dynamic import of app.js present');
-  // The legacy classic-script loader must be gone.
-  assert.doesNotMatch(res.text, /legacy\.src\s*=/, 'legacy script loader removed');
-});
-
-test('boot: app/main.js bridges helper modules onto window', async (t) => {
-  const app = await createTestApp(t);
-  const res = await request(app).get('/app/main.js');
-  // Each pure helper extracted in B2 must be on window so legacy app.js can
-  // see it. If any of these go missing, app.js calls become ReferenceError.
-  for (const sym of ['formatDuration', 'formatTime', 'timeAgo', 'renderMarkdown', 'apiFetch']) {
-    assert.match(res.text, new RegExp(`window\\.${sym}\\s*=`), `${sym} bridge present`);
-  }
+  // No window.* bridge assignments should remain (P9-3).
+  assert.doesNotMatch(res.text, /window\.\w+\s*=/, 'no window.* bridge assignments');
 });
 
 // ---- vendor patch must survive upstream re-bundles ----
@@ -231,27 +215,8 @@ test('boot: app/lib/hooks.js exports every hook the app needs', async (t) => {
   }
 });
 
-test('boot: main.js bridges the toast and hook modules onto window', async (t) => {
-  const app = await createTestApp(t);
-  const res = await request(app).get('/app/main.js');
-  for (const sym of ['addToast', 'useToasts', 'ToastContainer', 'apiFetchWithToast']) {
-    assert.match(res.text, new RegExp(`window\\.${sym}\\s*=`), `${sym} window bridge present`);
-  }
-  for (const sym of ['useRoute', 'navigate', 'useEscape', 'useSSE', 'useTasks', 'useRuns', 'useProjects', 'useClaudeSessions', 'useAgents', 'useManagerLifecycle']) {
-    assert.match(res.text, new RegExp(`window\\.${sym}\\s*=`), `${sym} window bridge present`);
-  }
-});
-
-test('boot: app/components/RunInspector.js exports the component and main.js bridges it', async (t) => {
+test('boot: app/components/RunInspector.js exports the component', async (t) => {
   const app = await createTestApp(t);
   const componentRes = await request(app).get('/app/components/RunInspector.js');
   assert.match(componentRes.text, /export\s+function\s+RunInspector/, 'RunInspector export present');
-
-  const mainRes = await request(app).get('/app/main.js');
-  // main.js loads the component via dynamic import AFTER the preact globals
-  // are assigned (so module top-level destructuring of window.preactHooks
-  // resolves), then bridges it onto window.RunInspector for the legacy app.js
-  // htm template lookup. Both halves of the contract get checked here.
-  assert.match(mainRes.text, /import\(['"]\.\/components\/RunInspector\.js['"]\)/, 'dynamic import of RunInspector');
-  assert.match(mainRes.text, /window\.RunInspector\s*=/, 'window.RunInspector bridge');
 });
