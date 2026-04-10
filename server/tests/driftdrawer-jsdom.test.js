@@ -38,7 +38,7 @@ function createEnv() {
   // but loadComponent works fine — we just need the timeAgo stub above).
   env.loadComponent('DriftDrawer');
 
-  return { window: env.window, context: env.context };
+  return { window: env.window, context: env.context, cleanup: env.cleanup };
 }
 
 /** 샘플 driftAudit 오브젝트 (버튼이 여러 개 생성되도록 row 포함) */
@@ -73,8 +73,9 @@ function getFocusables(drawerEl) {
 
 // ---- tests ----
 
-test('DriftDrawer jsdom: open=false 시 DOM 에 drawer 없음', () => {
-  const { window, context } = createEnv();
+test('DriftDrawer jsdom: open=false 시 DOM 에 drawer 없음', (t) => {
+  const { window, context, cleanup } = createEnv();
+  t.after(cleanup);
   const { render, h } = context.preact;
   const root = window.document.getElementById('root');
 
@@ -87,8 +88,9 @@ test('DriftDrawer jsdom: open=false 시 DOM 에 drawer 없음', () => {
   assert.equal(drawerEl, null, 'open=false 면 role=dialog 엘리먼트가 DOM 에 없어야 함');
 });
 
-test('DriftDrawer jsdom: open=true 시 Close 버튼 자동 포커스', async () => {
-  const { window, context } = createEnv();
+test('DriftDrawer jsdom: open=true 시 Close 버튼 자동 포커스', async (t) => {
+  const { window, context, cleanup } = createEnv();
+  t.after(cleanup);
   const { render, h } = context.preact;
   const root = window.document.getElementById('root');
 
@@ -116,8 +118,9 @@ test('DriftDrawer jsdom: open=true 시 Close 버튼 자동 포커스', async () 
   );
 });
 
-test('DriftDrawer jsdom: Tab 순환 — 마지막 focusable 에서 Tab → 첫 번째', async () => {
-  const { window, context } = createEnv();
+test('DriftDrawer jsdom: Tab 순환 — 마지막 focusable 에서 Tab → 첫 번째', async (t) => {
+  const { window, context, cleanup } = createEnv();
+  t.after(cleanup);
   const { render, h } = context.preact;
   const root = window.document.getElementById('root');
 
@@ -156,8 +159,9 @@ test('DriftDrawer jsdom: Tab 순환 — 마지막 focusable 에서 Tab → 첫 �
   );
 });
 
-test('DriftDrawer jsdom: Shift+Tab 역순환 — 첫 번째 focusable 에서 Shift+Tab → 마지막', async () => {
-  const { window, context } = createEnv();
+test('DriftDrawer jsdom: Shift+Tab 역순환 — 첫 번째 focusable 에서 Shift+Tab → 마지막', async (t) => {
+  const { window, context, cleanup } = createEnv();
+  t.after(cleanup);
   const { render, h } = context.preact;
   const root = window.document.getElementById('root');
 
@@ -196,8 +200,9 @@ test('DriftDrawer jsdom: Shift+Tab 역순환 — 첫 번째 focusable 에서 Shi
   );
 });
 
-test('DriftDrawer jsdom: Esc 는 drawer 의 keydown 핸들러에서 onClose 를 호출하지 않음', async () => {
-  const { window, context } = createEnv();
+test('DriftDrawer jsdom: Esc 는 drawer 의 keydown 핸들러에서 onClose 를 호출하지 않음', async (t) => {
+  const { window, context, cleanup } = createEnv();
+  t.after(cleanup);
   const { render, h } = context.preact;
   const root = window.document.getElementById('root');
 

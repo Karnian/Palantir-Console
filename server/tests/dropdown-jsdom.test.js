@@ -41,8 +41,9 @@ async function openDropdown(env, root) {
   return root.querySelector('[role="listbox"]');
 }
 
-test('Dropdown jsdom: opens on trigger click, closes on second click', async () => {
+test('Dropdown jsdom: opens on trigger click, closes on second click', async (t) => {
   const env = createEnv();
+  t.after(env.cleanup);
   const { render, h } = env.context.preact;
   const root = env.document.getElementById('root');
 
@@ -70,8 +71,9 @@ test('Dropdown jsdom: opens on trigger click, closes on second click', async () 
   assert.equal(root.querySelector('[role="listbox"]'), null, 'menu should close on second click');
 });
 
-test('Dropdown jsdom: keyboard nav — ArrowDown/ArrowUp moves, Enter selects, Esc closes', async () => {
+test('Dropdown jsdom: keyboard nav — ArrowDown/ArrowUp moves, Enter selects, Esc closes', async (t) => {
   const env = createEnv();
+  t.after(env.cleanup);
   const { render, h } = env.context.preact;
   const root = env.document.getElementById('root');
 
@@ -145,8 +147,9 @@ test('Dropdown jsdom: keyboard nav — ArrowDown/ArrowUp moves, Enter selects, E
   assert.equal(root.querySelector('[role="listbox"]'), null, 'Esc should close the menu');
 });
 
-test('Dropdown jsdom: outside click closes the dropdown', async () => {
+test('Dropdown jsdom: outside click closes the dropdown', async (t) => {
   const env = createEnv();
+  t.after(env.cleanup);
   const { render, h } = env.context.preact;
   const root = env.document.getElementById('root');
 
@@ -170,8 +173,9 @@ test('Dropdown jsdom: outside click closes the dropdown', async () => {
   assert.equal(root.querySelector('[role="listbox"]'), null, 'outside click should close menu');
 });
 
-test('Dropdown jsdom: renders items with correct labels', async () => {
+test('Dropdown jsdom: renders items with correct labels', async (t) => {
   const env = createEnv();
+  t.after(env.cleanup);
   const { render, h } = env.context.preact;
   const root = env.document.getElementById('root');
 
@@ -207,8 +211,9 @@ test('Dropdown jsdom: renders items with correct labels', async () => {
     'selected item should show checkmark');
 });
 
-test('Dropdown jsdom: handles empty options array gracefully', async () => {
+test('Dropdown jsdom: handles empty options array gracefully', async (t) => {
   const env = createEnv();
+  t.after(env.cleanup);
   const { render, h } = env.context.preact;
   const root = env.document.getElementById('root');
 
