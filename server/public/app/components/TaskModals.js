@@ -1,8 +1,7 @@
 // TaskModals.js — NewTaskModal + ExecuteModal + TaskDetailPanel.
 // Extracted from server/public/app.js as part of P7-1 (ESM phase 6).
 //
-// Dependencies (all bridged onto window by main.js before this module loads):
-//   - window.preact, window.preactHooks, window.htm
+// Dependencies:
 //   - window.apiFetch          (from app/lib/api.js)
 //   - window.addToast          (from app/lib/toast.js)
 //   - window.useEscape         (from app/lib/hooks.js)
@@ -11,9 +10,10 @@
 //   - window.dueDateMeta       (from app/components/DashboardView.js)
 //   - window.Dropdown          (from app/components/Dropdown.js)
 
-const { h } = window.preact;
-const { useState, useEffect, useRef } = window.preactHooks;
-const html = window.htm.bind(h);
+import { h } from '../../vendor/preact.module.js';
+import { useState, useEffect, useRef } from '../../vendor/hooks.module.js';
+import htm from '../../vendor/htm.module.js';
+const html = htm.bind(h);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // New Task Modal

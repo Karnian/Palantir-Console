@@ -14,7 +14,7 @@ import { apiFetch } from '../api.js';
 import { addToast } from '../toast.js';
 import { sseBroker } from './sse.js';
 
-const { useState, useEffect, useCallback, useRef } = window.preactHooks;
+import { useState, useEffect, useCallback, useRef } from '../../../vendor/hooks.module.js';
 
 export function useConversation(conversationId, { poll = true, pollMs = 10000 } = {}) {
   // P2-8: pollMs default relaxed from 2000 → 10000 now that run:event

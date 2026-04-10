@@ -9,7 +9,7 @@
 
 import { apiFetch } from '../api.js';
 
-const { useState, useEffect, useCallback, useRef } = window.preactHooks;
+import { useState, useEffect, useCallback, useRef } from '../../../vendor/hooks.module.js';
 
 const DRIFT_DISMISS_STORAGE_KEY = 'palantir.drift.dismissed.v1';
 

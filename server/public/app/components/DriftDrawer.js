@@ -15,17 +15,12 @@
 //     future edits are easier against an ES module than against a 4500-
 //     line classic script.
 //
-// Module-time dependencies (preact, htm, timeAgo) are pulled from
-// window because main.js is responsible for assigning them BEFORE this
-// module gets imported — same convention as RunInspector.js. This is
-// the minimum viable migration shape: app.js still references
-// `DriftDrawer` as a bare global identifier, main.js bridges the
-// export onto window, and nothing in app.js had to change beyond
-// DELETING the now-duplicated function definition.
+// Module-time dependencies are now direct ES module imports.
 
-const { useRef, useEffect } = window.preactHooks;
-const { h } = window.preact;
-const html = window.htm.bind(h);
+import { h } from '../../vendor/preact.module.js';
+import { useRef, useEffect } from '../../vendor/hooks.module.js';
+import htm from '../../vendor/htm.module.js';
+const html = htm.bind(h);
 
 export function DriftDrawer({ open, onClose, driftAudit, projects }) {
   // PR3b / P1-11: WCAG 2.2 AA a11y. Pre-PR3b the drawer had none of

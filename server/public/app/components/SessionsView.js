@@ -1,8 +1,7 @@
 // SessionsView + initLegacySessions — Sessions management view.
 // Extracted from server/public/app.js as part of P6-3 (ESM phase 5).
 //
-// Dependencies (all bridged onto window by main.js before this module loads):
-//   - window.preact, window.preactHooks, window.htm
+// Dependencies:
 //   - window.formatTime   (from app/lib/format.js)
 //   - window.marked, window.DOMPurify  (CDN scripts, loaded via index.html)
 //
@@ -10,9 +9,10 @@
 // dependency. Uses fetch directly (not apiFetch) since it predates the
 // apiFetch helper and does not need auth-bounce behaviour.
 
-const { h } = window.preact;
-const { useEffect, useRef } = window.preactHooks;
-const html = window.htm.bind(h);
+import { h } from '../../vendor/preact.module.js';
+import { useEffect, useRef } from '../../vendor/hooks.module.js';
+import htm from '../../vendor/htm.module.js';
+const html = htm.bind(h);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Legacy session logic — ported as-is but scoped to a container

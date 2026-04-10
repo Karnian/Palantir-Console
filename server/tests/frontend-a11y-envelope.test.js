@@ -270,14 +270,11 @@ test('P2-10 DriftDrawer module exports the component as a named export', async (
     'DriftDrawer.js must provide `export function DriftDrawer(...)`');
 });
 
-test('P2-10 DriftDrawer module dereferences window.preact / preactHooks / htm at top level', async () => {
-  // Mirrors the RunInspector.js convention. main.js assigns these
-  // globals before dynamically importing DriftDrawer.js, so module-
-  // time reads are safe.
+test('P2-10 DriftDrawer module imports preact / hooks / htm from vendor ES modules', async () => {
   const body = await loadDriftDrawerSource();
-  assert.match(body, /window\.preactHooks/, 'window.preactHooks reference missing');
-  assert.match(body, /window\.preact/, 'window.preact reference missing');
-  assert.match(body, /window\.htm\.bind\(h\)/, 'htm.bind(h) wiring missing');
+  assert.match(body, /import\s.*from\s+['"].*hooks\.module\.js['"]/, 'hooks vendor import missing');
+  assert.match(body, /import\s.*from\s+['"].*preact\.module\.js['"]/, 'preact vendor import missing');
+  assert.match(body, /htm\.bind\(h\)/, 'htm.bind(h) wiring missing');
 });
 
 test('P2-10 legacy app.js no longer defines `function DriftDrawer`', async () => {
@@ -410,14 +407,14 @@ test('P3-2 Dropdown.js exports Dropdown as a named export', async () => {
     'Dropdown.js must provide `export function Dropdown(...)`');
 });
 
-test('P3-2 Dropdown.js dereferences window.preact / preactHooks / htm at top level', async () => {
+test('P3-2 Dropdown.js imports preact / hooks / htm from vendor ES modules', async () => {
   const src = await fs.readFile(
     path.join(__dirname, '..', 'public', 'app', 'components', 'Dropdown.js'),
     'utf8',
   );
-  assert.match(src, /window\.preactHooks/, 'window.preactHooks reference missing');
-  assert.match(src, /window\.preact/, 'window.preact reference missing');
-  assert.match(src, /window\.htm\.bind\(h\)/, 'htm.bind(h) wiring missing');
+  assert.match(src, /import\s.*from\s+['"].*hooks\.module\.js['"]/, 'hooks vendor import missing');
+  assert.match(src, /import\s.*from\s+['"].*preact\.module\.js['"]/, 'preact vendor import missing');
+  assert.match(src, /htm\.bind\(h\)/, 'htm.bind(h) wiring missing');
 });
 
 test('P3-2 EmptyState.js exports EmptyState as a named export', async () => {
@@ -481,14 +478,14 @@ test('P3-1 MentionInput.js contains @-mention handling logic', async () => {
   assert.match(src, /Escape/, 'MentionInput.js must handle Escape to dismiss popup');
 });
 
-test('P3-1 MentionInput.js dereferences window.preact / preactHooks / htm at top level', async () => {
+test('P3-1 MentionInput.js imports preact / hooks / htm from vendor ES modules', async () => {
   const src = await fs.readFile(
     path.join(__dirname, '..', 'public', 'app', 'components', 'MentionInput.js'),
     'utf8',
   );
-  assert.match(src, /window\.preactHooks/, 'window.preactHooks reference missing');
-  assert.match(src, /window\.preact/, 'window.preact reference missing');
-  assert.match(src, /window\.htm\.bind\(h\)/, 'htm.bind(h) wiring missing');
+  assert.match(src, /import\s.*from\s+['"].*hooks\.module\.js['"]/, 'hooks vendor import missing');
+  assert.match(src, /import\s.*from\s+['"].*preact\.module\.js['"]/, 'preact vendor import missing');
+  assert.match(src, /htm\.bind\(h\)/, 'htm.bind(h) wiring missing');
 });
 
 test('P3-1 main.js dynamically imports MentionInput and bridges it onto window', async () => {
@@ -524,11 +521,11 @@ test('P8-8 TaskModals.js exports NewTaskModal, ExecuteModal, TaskDetailPanel as 
     'TaskModals.js must provide `export function TaskDetailPanel(...)`');
 });
 
-test('P8-8 TaskModals.js dereferences window.preact / preactHooks / htm at top level', async () => {
+test('P8-8 TaskModals.js imports preact / hooks / htm from vendor ES modules', async () => {
   const src = await loadTaskModalsSource();
-  assert.match(src, /window\.preactHooks/, 'window.preactHooks reference missing');
-  assert.match(src, /window\.preact/, 'window.preact reference missing');
-  assert.match(src, /window\.htm\.bind\(h\)/, 'htm.bind(h) wiring missing');
+  assert.match(src, /import\s.*from\s+['"].*hooks\.module\.js['"]/, 'hooks vendor import missing');
+  assert.match(src, /import\s.*from\s+['"].*preact\.module\.js['"]/, 'preact vendor import missing');
+  assert.match(src, /htm\.bind\(h\)/, 'htm.bind(h) wiring missing');
 });
 
 test('P8-8 NewTaskModal has accessible close button', async () => {

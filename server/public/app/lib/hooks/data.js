@@ -8,7 +8,7 @@
 import { apiFetch } from '../api.js';
 import { addToast } from '../toast.js';
 
-const { useState, useEffect, useCallback } = window.preactHooks;
+import { useState, useEffect, useCallback } from '../../../vendor/hooks.module.js';
 
 export function useTasks() {
   const [tasks, setTasks] = useState([]);

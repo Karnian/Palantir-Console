@@ -1,8 +1,7 @@
 // BoardView + CalendarView + DirectoryPicker — Task Board components.
 // Extracted from server/public/app.js as part of P5-2 (ESM phase 4a).
 //
-// Dependencies (all bridged onto window by main.js before this module loads):
-//   - window.preact, window.preactHooks, window.htm
+// Dependencies:
 //   - window.timeAgo                          (from app/lib/format.js)
 //   - window.navigate                         (from app/lib/hooks.js)
 //   - window.addToast                         (from app/lib/toast.js)
@@ -17,9 +16,10 @@
 // DirectoryPicker is also bridged onto window so ProjectsView in app.js
 // can continue to reference it as a bare identifier.
 
-const { h } = window.preact;
-const { useState, useEffect, useMemo } = window.preactHooks;
-const html = window.htm.bind(h);
+import { h } from '../../vendor/preact.module.js';
+import { useState, useEffect, useMemo } from '../../vendor/hooks.module.js';
+import htm from '../../vendor/htm.module.js';
+const html = htm.bind(h);
 
 import { dueDateMeta, useNowTick } from '../lib/dueDate.js';
 

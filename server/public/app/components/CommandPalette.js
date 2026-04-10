@@ -7,13 +7,10 @@
 //     NavSidebar also consumes it)
 //   - window.navigate: hash router helper (bridged from hooks.js)
 //
-// Module-time dependencies are pulled from window because main.js assigns
-// them BEFORE this module is imported — same convention as DriftDrawer.js,
-// RunInspector.js, MentionInput.js, etc.
-
-const { useState, useEffect, useRef } = window.preactHooks;
-const { h } = window.preact;
-const html = window.htm.bind(h);
+import { h } from '../../vendor/preact.module.js';
+import { useState, useEffect, useRef } from '../../vendor/hooks.module.js';
+import htm from '../../vendor/htm.module.js';
+const html = htm.bind(h);
 
 export function CommandPalette({ open, onClose }) {
   const [query, setQuery] = useState('');

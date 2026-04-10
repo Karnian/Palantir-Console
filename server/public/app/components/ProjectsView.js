@@ -1,8 +1,7 @@
 // ProjectsView + ProjectDetailModal — Projects management view.
 // Extracted from server/public/app.js as part of P5-3 (ESM phase 4b).
 //
-// Dependencies (all bridged onto window by main.js before this module loads):
-//   - window.preact, window.preactHooks, window.htm
+// Dependencies:
 //   - window.formatTime                      (from app/lib/format.js)
 //   - window.addToast                        (from app/lib/toast.js)
 //   - window.apiFetch                        (from app/lib/api.js)
@@ -16,9 +15,10 @@
 // Only ProjectsView is exported. ProjectDetailModal is a module-internal
 // helper used exclusively by ProjectsView.
 
-const { h } = window.preact;
-const { useState, useMemo } = window.preactHooks;
-const html = window.htm.bind(h);
+import { h } from '../../vendor/preact.module.js';
+import { useState, useMemo } from '../../vendor/hooks.module.js';
+import htm from '../../vendor/htm.module.js';
+const html = htm.bind(h);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal constants

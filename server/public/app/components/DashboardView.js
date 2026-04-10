@@ -1,8 +1,7 @@
 // DashboardView — Attention Dashboard component.
 // Extracted from server/public/app.js as part of P5-1 (ESM phase 4a).
 //
-// Dependencies (all bridged onto window by main.js before this module loads):
-//   - window.preact, window.preactHooks, window.htm
+// Dependencies:
 //   - window.timeAgo, window.formatDuration  (from app/lib/format.js)
 //   - window.navigate                        (from app/lib/hooks.js)
 //   - window.EmptyState                      (from app/components/EmptyState.js)
@@ -11,9 +10,10 @@
 // imported from app/lib/dueDate.js. The window bridge lives in main.js
 // (P8-1: "bridge는 main.js에서만" principle).
 
-const { h } = window.preact;
-const { useState, useEffect } = window.preactHooks;
-const html = window.htm.bind(h);
+import { h } from '../../vendor/preact.module.js';
+import { useState, useEffect } from '../../vendor/hooks.module.js';
+import htm from '../../vendor/htm.module.js';
+const html = htm.bind(h);
 
 import { dueState, formatDueDate, useNowTick, dueDateMeta } from '../lib/dueDate.js';
 

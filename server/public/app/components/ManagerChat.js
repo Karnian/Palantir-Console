@@ -1,8 +1,7 @@
 // ManagerChat — Left chat panel of the Manager view.
 // Extracted from ManagerView.js as part of P8-5.
 //
-// Dependencies (all bridged onto window by main.js before this module loads):
-//   - window.preact, window.preactHooks, window.htm
+// Dependencies:
 //   - window.apiFetch                        (from app/lib/api.js)
 //   - window.addToast                        (from app/lib/toast.js)
 //   - window.useConversation                 (from app/lib/hooks.js)
@@ -12,9 +11,10 @@
 //   - window.EmptyState                      (from app/components/EmptyState.js)
 //   - window.MentionInput                    (from app/components/MentionInput.js)
 
-const { h } = window.preact;
-const { useState, useEffect, useMemo, useRef } = window.preactHooks;
-const html = window.htm.bind(h);
+import { h } from '../../vendor/preact.module.js';
+import { useState, useEffect, useMemo, useRef } from '../../vendor/hooks.module.js';
+import htm from '../../vendor/htm.module.js';
+const html = htm.bind(h);
 
 // PR5: profile types that can back a manager session. Must stay in sync
 // with PROFILE_TYPE_TO_ADAPTER in server/routes/manager.js.

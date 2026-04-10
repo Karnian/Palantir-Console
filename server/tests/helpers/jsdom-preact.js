@@ -21,9 +21,11 @@ const htmSrc = fs.readFileSync(path.join(VENDOR_DIR, 'htm.umd.js'), 'utf8');
 
 /**
  * Load an ES-module component file into a vm context by stripping `export`
- * keywords.  The `const { ... } = window.xxx` lines are kept because the
- * vm context IS the jsdom window — `window.preact`, `window.preactHooks`,
- * and `window.htm` are already available.
+ * keywords and `import` statements.  Vendor imports (preact, hooks, htm)
+ * are replaced with equivalent destructuring from `window.*` globals that
+ * are already available in the vm context (set by the UMD bundles).
+ * Local relative imports are stripped entirely (the caller must pre-load
+ * any dependencies into the context manually).
  *
  * @param {string} componentName  e.g. 'Dropdown', 'MentionInput'
  * @param {object} context        vm context to evaluate in
@@ -32,10 +34,24 @@ function loadComponent(componentName, context) {
   const filePath = path.join(COMPONENTS_DIR, `${componentName}.js`);
   const raw = fs.readFileSync(filePath, 'utf8');
 
-  // Strip leading `export` from `export function Foo` declarations.
-  // The `g` flag handles files with multiple exported functions.
   const transformed = raw
+    // Strip leading `export` from `export function Foo` declarations.
+    // The `g` flag handles files with multiple exported functions.
     .replace(/^export\s+function\s+/gm, 'function ')
+    // Replace `import { h, ... } from '../../vendor/preact.module.js';`
+    // with `const { h, ... } = window.preact;`
+    .replace(/^import\s+\{([^}]+)\}\s+from\s+['"][^'"]*preact\.module\.js['"];?\s*$/gm,
+      (_, names) => `const {${names}} = window.preact;`)
+    // Replace `import { useState, ... } from '../../vendor/hooks.module.js';`
+    // with `const { useState, ... } = window.preactHooks;`
+    .replace(/^import\s+\{([^}]+)\}\s+from\s+['"][^'"]*hooks\.module\.js['"];?\s*$/gm,
+      (_, names) => `const {${names}} = window.preactHooks;`)
+    // Replace `import htm from '../../vendor/htm.module.js';`
+    // with `var htm = window.htm;`
+    .replace(/^import\s+htm\s+from\s+['"][^'"]*htm\.module\.js['"];?\s*$/gm,
+      'var htm = window.htm;')
+    // Strip any remaining local relative imports (e.g. from '../lib/...')
+    .replace(/^import\s+.*from\s+['"]\.\.?\/.+['"];?\s*$/gm, '// [stripped import]')
     + `\nthis.${componentName} = ${componentName};`;
 
   vm.runInContext(transformed, context);

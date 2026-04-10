@@ -17,13 +17,10 @@
 //   - projects: array of { id, name, color? } project objects
 //   - ref: forwarded to the underlying <textarea> element
 //
-// Module-time dependencies are pulled from window because main.js assigns
-// them BEFORE this module is imported — same convention as DriftDrawer.js
-// and RunInspector.js.
-
-const { useState, useRef, useEffect, useCallback, useMemo } = window.preactHooks;
-const { h, createRef } = window.preact;
-const html = window.htm.bind(h);
+import { h, createRef } from '../../vendor/preact.module.js';
+import { useState, useRef, useEffect, useCallback, useMemo } from '../../vendor/hooks.module.js';
+import htm from '../../vendor/htm.module.js';
+const html = htm.bind(h);
 
 const RECENT_KEY = 'palantir.mention.recent';
 const MAX_RECENT = 10;

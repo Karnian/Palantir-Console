@@ -2,6 +2,8 @@
 // Extracted as a standalone ES module so both components can import
 // without duplicating logic.
 
+import { useState, useEffect } from '../../vendor/hooks.module.js';
+
 // Returns: 'overdue' | 'due-soon' | 'on-track' | null.
 // `dueSoonDays` defaults to 2 (today + tomorrow).
 // Tasks already in 'done' status are treated as on-track.
@@ -30,7 +32,6 @@ export function formatDueDate(d) {
 // at midnight, "N일 남음" decrements daily). Pauses while tab is hidden and
 // fires immediately on visibility return so coming back from sleep is fresh.
 export function useNowTick(intervalMs = 60_000) {
-  const { useState, useEffect } = window.preactHooks;
   const [tick, setTick] = useState(0);
   useEffect(() => {
     let id = null;

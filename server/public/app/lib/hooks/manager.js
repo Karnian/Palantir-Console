@@ -5,7 +5,7 @@
 import { apiFetch } from '../api.js';
 import { addToast } from '../toast.js';
 
-const { useState, useEffect, useCallback, useRef } = window.preactHooks;
+import { useState, useEffect, useCallback, useRef } from '../../../vendor/hooks.module.js';
 
 export function useManagerLifecycle() {
   const [status, setStatus] = useState({ active: false, run: null, usage: null });

@@ -1,8 +1,7 @@
 // AgentsView + AgentModal + AgentDetailModal — Agent profiles management view.
 // Extracted from server/public/app.js as part of P5-4 (ESM phase 4b).
 //
-// Dependencies (all bridged onto window by main.js before this module loads):
-//   - window.preact, window.preactHooks, window.htm
+// Dependencies:
 //   - window.apiFetch                        (from app/lib/api.js)
 //   - window.apiFetchWithToast               (from app/lib/toast.js)
 //   - window.useEscape                       (from app/lib/hooks.js)
@@ -14,9 +13,10 @@
 // managerProfileAuthState lives in app.js (used also by ManagerView) and is
 // NOT extracted here.
 
-const { h } = window.preact;
-const { useState, useEffect } = window.preactHooks;
-const html = window.htm.bind(h);
+import { h } from '../../vendor/preact.module.js';
+import { useState, useEffect } from '../../vendor/hooks.module.js';
+import htm from '../../vendor/htm.module.js';
+const html = htm.bind(h);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Loading spinner — minimal inline component (avoids coupling to app.js Loading)
