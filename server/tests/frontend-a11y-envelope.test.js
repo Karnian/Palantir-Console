@@ -201,6 +201,78 @@ test('P2-7 drift badge has aria-label announcing the count', async () => {
   );
 });
 
+// ---- P2-9: Stop/Reset label clarity + PM selector Dropdown swap ----
+
+test('P2-9 Reset PM button has explicit aria-label and scope-clarifying title', async () => {
+  const src = await loadAppJs();
+  const idx = src.indexOf('aria-label="Reset PM for this project"');
+  assert.ok(idx > 0, 'Reset PM aria-label not found — P2-9 title/aria update missing');
+  const region = src.slice(idx - 600, idx + 200);
+  assert.match(
+    region,
+    /title="Reset PM: terminate this project's PM thread only/,
+    'Reset PM title must clearly scope the action to the current project',
+  );
+});
+
+test('P2-9 Stop Top button has explicit aria-label and scope-clarifying title', async () => {
+  const src = await loadAppJs();
+  const idx = src.indexOf('aria-label="Stop Top manager"');
+  assert.ok(idx > 0, 'Stop Top aria-label not found — P2-9 title/aria update missing');
+  const region = src.slice(idx - 600, idx + 200);
+  assert.match(
+    region,
+    /title="Stop Top manager: terminate the shared Top manager process/,
+    'Stop button title must make scope explicit',
+  );
+});
+
+test('P2-9 PM selector uses the Dropdown component, not native <select>', async () => {
+  const src = await loadAppJs();
+  // Anchor on the unique className the swap kept.
+  const idx = src.indexOf('className="manager-picker-select"');
+  assert.ok(idx > 0, 'PM selector Dropdown className not found — swap missing');
+  const region = src.slice(idx, idx + 1500);
+  assert.match(
+    region,
+    /value=\$\{conversationTarget\}/,
+    'PM selector Dropdown must bind to conversationTarget state',
+  );
+  assert.match(
+    region,
+    /onChange=\$\{\(v\)\s*=>\s*setConversationTarget\(v\)\}/,
+    'PM selector Dropdown onChange must call setConversationTarget(v)',
+  );
+});
+
+test('P2-9 legacy conversation-target native <select> is removed', async () => {
+  // Scope note: the agent profile picker ALSO uses the
+  // `manager-picker-select` class and is legitimately a native
+  // <select> — we do NOT touch that picker in P2-9 (the P2-9 swap
+  // specifically targets the Top-vs-PM conversation selector). The
+  // check below therefore anchors on the conversation-target path
+  // (value=${conversationTarget}) and confirms it is NOT wired to a
+  // native <select>.
+  const src = await loadAppJs();
+  // Find the conversationTarget binding and inspect the enclosing
+  // element type. The Dropdown swap uses `<${Dropdown}` on the same
+  // element; a regression to native <select> would show `<select`
+  // within ~200 chars upstream.
+  const idx = src.indexOf('value=${conversationTarget}');
+  assert.ok(idx > 0, 'conversationTarget binding not found');
+  const before = src.slice(Math.max(0, idx - 400), idx);
+  assert.match(
+    before,
+    /<\$\{Dropdown\}/,
+    'conversationTarget must be bound on the Dropdown component, not a native <select>',
+  );
+  assert.doesNotMatch(
+    before,
+    /<select\b/,
+    'legacy native <select> for conversationTarget must be removed',
+  );
+});
+
 // ---- X3: getRunTaskTitle envelope strict ----
 
 test('X3 getRunTaskTitle does not fall back to data.taskId (camelCase)', async () => {
