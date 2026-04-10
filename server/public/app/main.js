@@ -49,6 +49,13 @@ window.apiFetch = apiFetch;
 // a no-op if it isn't, so timing failures degrade gracefully.
 configureMarked();
 
+// P8-1: dueDate helpers bridged for legacy app.js (TaskDetailPanel etc.)
+import { dueState, formatDueDate, useNowTick, dueDateMeta } from './lib/dueDate.js';
+window.dueState = dueState;
+window.formatDueDate = formatDueDate;
+window.useNowTick = useNowTick;
+window.dueDateMeta = dueDateMeta;
+
 // Modules extracted from app.js. Loaded via dynamic import so they resolve
 // AFTER the window.preact / preactHooks / htm assignments above — these
 // modules dereference those at module top level. Bridge each export onto
@@ -101,8 +108,6 @@ const { CommandPalette } = await import('./components/CommandPalette.js');
 window.CommandPalette = CommandPalette;
 
 // P5-1 (ESM phase 4a): DashboardView — Attention Dashboard.
-// Also bridges dueState / formatDueDate / useNowTick / dueDateMeta onto window
-// so that legacy app.js code (TaskDetailPanel etc.) can use them as bare identifiers.
 const { DashboardView } = await import('./components/DashboardView.js');
 window.DashboardView = DashboardView;
 
