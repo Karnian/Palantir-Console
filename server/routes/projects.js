@@ -1,5 +1,6 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
+const { validateCreateProject, validateUpdateProject } = require('../middleware/validate');
 
 function createProjectsRouter({ projectService, taskService, projectBriefService, pmCleanupService }) {
   const router = express.Router();
@@ -20,12 +21,12 @@ function createProjectsRouter({ projectService, taskService, projectBriefService
     res.json({ tasks });
   }));
 
-  router.post('/', asyncHandler(async (req, res) => {
+  router.post('/', validateCreateProject, asyncHandler(async (req, res) => {
     const project = projectService.createProject(req.body || {});
     res.status(201).json({ project });
   }));
 
-  router.patch('/:id', asyncHandler(async (req, res) => {
+  router.patch('/:id', validateUpdateProject, asyncHandler(async (req, res) => {
     const project = projectService.updateProject(req.params.id, req.body || {});
     res.json({ project });
   }));

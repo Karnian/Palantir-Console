@@ -1,6 +1,7 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { resolveManagerAuth } = require('../services/authResolver');
+const { validateCreateAgent, validateUpdateAgent } = require('../middleware/validate');
 
 /**
  * Agent routes. Per-agent usage dispatch goes through the provider registry,
@@ -91,12 +92,12 @@ function createAgentsRouter({ agentProfileService, providerRegistry, authResolve
     res.json({ agent: { ...agent, auth }, runningCount });
   }));
 
-  router.post('/', asyncHandler(async (req, res) => {
+  router.post('/', validateCreateAgent, asyncHandler(async (req, res) => {
     const agent = agentProfileService.createProfile(req.body || {});
     res.status(201).json({ agent });
   }));
 
-  router.patch('/:id', asyncHandler(async (req, res) => {
+  router.patch('/:id', validateUpdateAgent, asyncHandler(async (req, res) => {
     const agent = agentProfileService.updateProfile(req.params.id, req.body || {});
     res.json({ agent });
   }));
