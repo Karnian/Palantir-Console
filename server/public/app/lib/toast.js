@@ -2,15 +2,12 @@
 // part of Phase 4 (B3) so the data hooks could stop reaching at it via
 // global identifiers and so it could be tested or mocked in isolation.
 //
-// Module-time dependencies (preact hooks, htm) are resolved off `window`,
-// so this file MUST be loaded AFTER main.js has assigned the bridges.
-// main.js handles that ordering by dynamic-importing this module.
-
 import { apiFetch } from './api.js';
 
-const { useState, useEffect } = window.preactHooks;
-const { h } = window.preact;
-const html = window.htm.bind(h);
+import { h } from '../../vendor/preact.module.js';
+import { useState, useEffect } from '../../vendor/hooks.module.js';
+import htm from '../../vendor/htm.module.js';
+const html = htm.bind(h);
 
 // Simple pub/sub: addToast pushes a new toast onto the array and notifies
 // every subscriber. useToasts subscribes a setState updater so any rendered

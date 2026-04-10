@@ -1,6 +1,6 @@
 // hooks/routing.js — hash routing primitives.
 
-const { useState, useEffect } = window.preactHooks;
+import { useState, useEffect } from '../../../vendor/hooks.module.js';
 
 export function useRoute() {
   const getHash = () => location.hash.slice(1) || 'dashboard';

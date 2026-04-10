@@ -7,8 +7,9 @@
 import { ManagerChat, managerProfileAuthState } from './ManagerChat.js';
 import { SessionGrid } from './SessionGrid.js';
 
-const { h } = window.preact;
-const html = window.htm.bind(h);
+import { h } from '../../vendor/preact.module.js';
+import htm from '../../vendor/htm.module.js';
+const html = htm.bind(h);
 
 // Re-export so tests and other consumers that import from ManagerView
 // still find managerProfileAuthState at the same path.

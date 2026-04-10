@@ -1,6 +1,6 @@
 // hooks/utils.js — UI utility hooks (useEscape).
 
-const { useRef, useEffect } = window.preactHooks;
+import { useRef, useEffect } from '../../../vendor/hooks.module.js';
 
 // Module-level stack so nested modals don't all react to the same Escape key.
 // When two modals are open (e.g. ProjectDetailModal -> TaskDetailPanel on top),

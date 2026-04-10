@@ -9,7 +9,7 @@
 // `useConversation` uses the broker to receive `run:event` frames so it
 // can drop its 2s poll down to 10s without losing responsiveness.
 
-const { useState, useEffect, useRef } = window.preactHooks;
+import { useState, useEffect, useRef } from '../../../vendor/hooks.module.js';
 
 export const sseBroker = (() => {
   const subs = new Map(); // channel -> Set<callback>
