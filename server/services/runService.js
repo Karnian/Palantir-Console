@@ -331,6 +331,31 @@ function createRunService(db, eventBus) {
     return stmts.getEvents.all(runId);
   }
 
+  // P3-6: connect derivePmProjectId diagnostic to eventBus.
+  // Registered here (after addRunEvent is defined) so the callback can both
+  // emit to the bus and persist to run_events in one place. Belt-and-suspenders:
+  // console.warn is kept so the mismatch is always visible in server logs even
+  // if the eventBus is absent. Both side effects are wrapped in try/catch so a
+  // diagnostic failure never breaks the caller.
+  setDerivePmProjectIdDiagnostics(({ runId, joinPid, parsedPid, conversationId }) => {
+    console.warn(`[runService] derivePmProjectId mismatch run=${runId} joinPid=${joinPid} parsedPid=${parsedPid} cid=${conversationId}`);
+    if (eventBus) {
+      try {
+        eventBus.emit('diagnostic:pm_project_mismatch', {
+          runId, derived: joinPid, joined: parsedPid, conversationId,
+        });
+      } catch { /* ignore diagnostic failures */ }
+    }
+    try {
+      addRunEvent(runId, 'diagnostic', JSON.stringify({
+        subtype: 'pm_project_mismatch',
+        joinPid,
+        parsedPid,
+        conversationId,
+      }));
+    } catch { /* ignore — diagnostic must not break callers */ }
+  });
+
   // v3 Phase 1.5: layer-aware active manager lookups.
   // getActiveManager() is kept as a thin wrapper for callers that still
   // assume a single Top manager (lifecycleService, legacy routes). It

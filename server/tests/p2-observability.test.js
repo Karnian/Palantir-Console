@@ -1,18 +1,27 @@
-// P2-3 / P2-4: observability round.
+// P2-3 / P2-4 / P3-6: observability round.
 //
 // P2-3 is locked by sse-channels.test.js (static assertion against
 // hooks.js). This file covers the P2-4 derivePmProjectId diagnostic
 // hook — a pure observability addition that does not change return
 // behavior but surfaces drift between the JOIN-derived project id and
 // the conversation_id 'pm:<id>' path.
+//
+// P3-6: wires the diagnostic hook (set inside createRunService) to the
+// eventBus so server-side observers and run_events get the mismatch signal.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const os = require('node:os');
+const EventEmitter = require('node:events');
 
 const {
   derivePmProjectId,
   setDerivePmProjectIdDiagnostics,
+  createRunService,
 } = require('../services/runService');
+const { createDatabase } = require('../db/database');
 
 test('P2-4: derivePmProjectId returns joinPid when only JOIN is present', () => {
   const run = { id: 'r1', project_id: 'proj_a', manager_layer: null, conversation_id: null };
@@ -92,4 +101,111 @@ test('P2-4: derivePmProjectId handles null / malformed runs without throwing', (
   assert.equal(derivePmProjectId({}), null);
   assert.equal(derivePmProjectId({ manager_layer: 'pm', conversation_id: 'pm:' }), null);
   assert.equal(derivePmProjectId({ manager_layer: 'pm', conversation_id: 'notpm:x' }), null);
+});
+
+// ---------------------------------------------------------------------------
+// P3-6: eventBus wiring via createRunService
+// ---------------------------------------------------------------------------
+
+async function mkTestDb(t) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-p3obs-'));
+  const dbPath = path.join(dir, 'test.db');
+  const { db, migrate, close } = createDatabase(dbPath);
+  migrate();
+  t.after(async () => {
+    close();
+    await fs.rm(dir, { recursive: true, force: true });
+    // Reset the module-level diagnostic hook so P2-4 tests are not affected
+    // by P3-6 wiring introduced by createRunService calls in this suite.
+    setDerivePmProjectIdDiagnostics(null);
+  });
+  return db;
+}
+
+test('P3-6: createRunService wires derivePmProjectId to emit diagnostic:pm_project_mismatch on eventBus', async (t) => {
+  const db = await mkTestDb(t);
+  const mockBus = new EventEmitter();
+  const received = [];
+  mockBus.on('diagnostic:pm_project_mismatch', (payload) => received.push(payload));
+
+  // Instantiating the service registers the diagnostic hook
+  createRunService(db, mockBus);
+
+  // Now trigger a mismatch directly via derivePmProjectId
+  const run = {
+    id: 'r_p3_bus',
+    project_id: 'proj_join',
+    manager_layer: 'pm',
+    conversation_id: 'pm:proj_other',
+  };
+  derivePmProjectId(run);
+
+  assert.equal(received.length, 1, 'diagnostic:pm_project_mismatch fired exactly once');
+  assert.equal(received[0].runId, 'r_p3_bus');
+  assert.equal(received[0].derived, 'proj_join');
+  assert.equal(received[0].joined, 'proj_other');
+  assert.equal(received[0].conversationId, 'pm:proj_other');
+});
+
+test('P3-6: createRunService wires derivePmProjectId to record diagnostic run_event on mismatch', async (t) => {
+  const db = await mkTestDb(t);
+  const mockBus = new EventEmitter();
+
+  // Seed a real PM run row so addRunEvent can foreign-key insert
+  db.prepare(`INSERT INTO agent_profiles (id, name, type, command) VALUES ('ap_p3','PA','codex','codex')`).run();
+  db.prepare(`INSERT INTO projects (id, name) VALUES ('proj_p3_j', 'JoinProj')`).run();
+  db.prepare(`INSERT INTO projects (id, name) VALUES ('proj_p3_o', 'OtherProj')`).run();
+
+  const runService = createRunService(db, mockBus);
+
+  // Create a PM manager run with conversation_id matching project join
+  const run = runService.createRun({
+    is_manager: true,
+    manager_layer: 'pm',
+    conversation_id: 'pm:proj_p3_j',
+  });
+
+  // Manually trigger derivePmProjectId with a mismatch between row's project_id
+  // (from the JOIN path, currently null since no task) and conversation_id path.
+  // We fabricate a run object that mimics the mismatch condition.
+  const mismatchRun = {
+    id: run.id,
+    project_id: 'proj_p3_j',
+    manager_layer: 'pm',
+    conversation_id: 'pm:proj_p3_o',
+  };
+  derivePmProjectId(mismatchRun);
+
+  // Verify a diagnostic run_event was recorded
+  const events = runService.getRunEvents(run.id);
+  const diagEvent = events.find(e => e.event_type === 'diagnostic');
+  assert.ok(diagEvent, 'diagnostic run_event recorded');
+  const payload = JSON.parse(diagEvent.payload_json);
+  assert.equal(payload.subtype, 'pm_project_mismatch');
+  assert.equal(payload.joinPid, 'proj_p3_j');
+  assert.equal(payload.parsedPid, 'proj_p3_o');
+});
+
+test('P3-6: diagnostic wiring is resilient — emitting on mockBus that throws does not propagate', async (t) => {
+  const db = await mkTestDb(t);
+  const throwingBus = new EventEmitter();
+  throwingBus.emit = () => { throw new Error('bus exploded'); };
+
+  createRunService(db, throwingBus);
+
+  const run = {
+    id: 'r_p3_safe',
+    project_id: 'a',
+    manager_layer: 'pm',
+    conversation_id: 'pm:b',
+  };
+  // Must not throw even though the bus is broken
+  const result = derivePmProjectId(run);
+  assert.equal(result, 'a', 'return value unaffected when bus throws');
+});
+
+test('P3-6: diagnostic:pm_project_mismatch is in SERVER_EMITS and not in CLIENT_REQUIRED_LIVE', () => {
+  const { SERVER_EMITS, CLIENT_REQUIRED_LIVE } = require('../services/eventChannels');
+  assert.ok(SERVER_EMITS.includes('diagnostic:pm_project_mismatch'), 'channel in SERVER_EMITS');
+  assert.ok(!CLIENT_REQUIRED_LIVE.includes('diagnostic:pm_project_mismatch'), 'channel NOT in CLIENT_REQUIRED_LIVE');
 });

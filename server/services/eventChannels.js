@@ -40,6 +40,9 @@
  * within each grouping so diffs are clean.
  */
 const SERVER_EMITS = Object.freeze([
+  // diagnostic (server-only observability)
+  'diagnostic:pm_project_mismatch',
+
   // dispatch audit (v3 Phase 7)
   'dispatch_audit:recorded',
 
