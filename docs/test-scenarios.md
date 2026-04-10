@@ -6,7 +6,7 @@
 > "Then"은 코드 내부 동작이 아닌 **관찰 가능한 결과**(DOM, API 응답, DB 상태, 토스트 등)로 작성한다.
 > 시나리오 ID prefix: `PRJ`, `TSK`, `BRD`, `RUN`, `INS`, `MGR`, `PM`, `CONV`, `ROUTER`, `DRIFT`, `DSH`, `AGT`, `KBD`, `SSE`, `AUTH`, `SES`, `TRS`, `FS`, `USG`, `CLS`, `REG`.
 >
-> *현재 main 기준. v3 Phase 0~7 merged (#20, #21, #22, #27, #28, #29, #30, #31, #32).* Phase 3b 는 트리거 조건 미충족으로 대기. 자세한 phase 히스토리는 `docs/specs/manager-v3-multilayer.md` §15 참조.
+> *현재 main 기준. v3 Phase 0~8 merged (#20~#32, #60~#64, #65~#71).* Phase 3b 는 트리거 조건 미충족으로 대기. 자세한 phase 히스토리는 `docs/specs/manager-v3-multilayer.md` §15 참조.
 
 ---
 
@@ -553,7 +553,7 @@
 - **When** 클릭
 - **Then** localStorage set 비워짐, 모든 row 복원
 
-### DRIFT-16 — ManagerView per-PM 배지
+### DRIFT-16 — ManagerChat per-PM 배지
 - **Given** `pm:alpha` 가 UI 에서 선택되어 있고 해당 프로젝트에 incoherent row 가 있음
 - **Then** chat header 에 `⚠ N` 버튼 (Reset PM 옆) 노출, 같은 DriftDrawer 를 연다. N 이 0 이 되면 버튼 자동 사라짐
 
@@ -821,11 +821,11 @@
 - 회귀 검증: inline priority를 `critical`로 변경 → 200 응답 + DB에 반영됨
 
 ### REG-09 — useSSE channels 배열에 신규 채널 subscribe 누락 방지 (Phase 7 발견)
-- **이전 버그**: `server/public/app/lib/hooks.js useSSE` 의 `channels` 배열이 hard-coded 되어 있어, Phase 5 에서 추가한 `run:needs_input` 과 Phase 7 에서 추가한 `dispatch_audit:recorded` 가 subscribe 되지 않아 App() 의 handler 가 dead code 상태였음
+- **이전 버그**: `server/public/app/lib/hooks/sse.js` (P8-4 이전: `hooks.js`) `useSSE` 의 `channels` 배열이 hard-coded 되어 있어, Phase 5 에서 추가한 `run:needs_input` 과 Phase 7 에서 추가한 `dispatch_audit:recorded` 가 subscribe 되지 않아 App() 의 handler 가 dead code 상태였음
 - **회귀 검증**:
   - `run:needs_input`: idle timeout 발생 시 클라에서 OS 알림 + 탭 타이틀 pulse 가 실제로 동작 (SSE-03)
   - `dispatch_audit:recorded`: `POST /api/dispatch-audit` 후 2초 이내에 클라의 drift badge 가 갱신 (DRIFT-11)
-- **코드 가드**: `useSSE` 의 channels 배열은 수동 관리. 새 SSE 채널 추가 시 반드시 이 배열에도 추가. CLAUDE.md "Things to Watch Out For" 에 경고 등록
+- **코드 가드**: `useSSE` 의 channels 배열은 수동 관리 (`server/public/app/lib/hooks/sse.js`). 새 SSE 채널 추가 시 반드시 이 배열에도 추가. CLAUDE.md "Things to Watch Out For" 에 경고 등록
 
 ### REG-10 — PM 단일-turn 가드 (Codex stateless) (Phase 3a R1)
 - **이전 설계**: `pmSpawnService` 가 brief 을 **seed runTurn** 으로 PM 에 넣었고, `conversationService` 가 곧바로 사용자 메시지로 두 번째 runTurn 호출 → Codex 어댑터의 `currentChild` 가드가 "previous turn still running" throw
@@ -852,6 +852,21 @@
 - **이전 버그**: App() 의 global keydown useEffect deps 배열에 `showDriftDrawer` 가 빠져 있어 handler closure 가 stale → drawer 의 Esc 닫기 분기가 발동하지 않음
 - **수정**: deps 배열에 `showDriftDrawer` 추가
 - **회귀 검증**: drawer 열고 Esc 키 → 닫힘
+
+### REG-15 — DashboardView self-bridge 원칙 위반 (P8-1)
+- **이전 버그**: `DashboardView.js` 가 `window.dueState/formatDueDate/useNowTick/dueDateMeta` 를 자체 bridge — "bridge 는 main.js 에서만" 원칙 위반
+- **수정**: 4줄 self-bridge 제거, `main.js` 에서 static import + bridge
+- **회귀 검증**: DashboardView 의 due date 표시, TaskDetailPanel 의 bare identifier 참조 모두 정상
+
+### REG-16 — app.js ESM 전환 시 import 경로 (P8-2)
+- **이전 상태**: `app.js` 가 classic script 로 window global 참조. `main.js` 가 `document.createElement('script')` 로 로드
+- **수정**: ESM `import` 문으로 전환, `main.js` 에서 `await import('../app.js')`. vendor 경로: `./vendor/*.module.js`, lib 경로: `./app/lib/*.js`, component 경로: `./app/components/*.js`
+- **회귀 검증**: boot.smoke.test.js 의 ESM import 패턴 검증 + 전체 테스트 green
+
+### REG-17 — useManager 제거 후 compat 객체 shape (P8-3)
+- **이전 상태**: `useManager()` 가 lifecycle + conversation 을 한 훅에서 처리
+- **수정**: `useManagerLifecycle()` (start/stop/status) + `useConversation('top')` (events/sendMessage) 로 분리, App() 에서 `useMemo` 로 compat 객체 합성
+- **회귀 검증**: ManagerView `{ status, events, loading, start, sendMessage, stop }` destructure 정상, DashboardView `manager.status.active` 정상
 
 ---
 
