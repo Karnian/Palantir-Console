@@ -432,6 +432,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
    * this route when no PM is active will get 404 — this is intentional.
    */
   router.post('/pm/:projectId/message', asyncHandler(async (req, res) => {
+    console.warn('[deprecation] POST /api/manager/pm/:projectId/message — use POST /api/conversations/pm:<projectId>/message instead');
     const { projectId } = req.params;
     if (!projectId) {
       throw new BadRequestError('projectId is required');
