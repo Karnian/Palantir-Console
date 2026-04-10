@@ -9,3 +9,6 @@ node_modules/
 .ao/
 .playwright-mcp/
 .palantir-worktrees/
+# Playwright
+test-results/
+playwright-report/
