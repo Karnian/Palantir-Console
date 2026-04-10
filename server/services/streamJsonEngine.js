@@ -100,6 +100,10 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
 
     if (!opts.isManager) {
       args.push('--no-session-persistence');
+      // Set high max-turns so workers can complete complex multi-step tasks
+      // without being cut short by CLI default limits.
+      const maxTurns = opts.maxTurns ?? 200;
+      args.push('--max-turns', String(maxTurns));
     }
 
     return args;
@@ -109,12 +113,12 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
    * Spawn a Claude Code agent with stream-json protocol.
    */
   function spawnAgent(runId, { prompt, cwd, env, systemPrompt, permissionMode,
-    allowedTools, maxBudgetUsd, model, mcpConfig, addDir, isManager, onVendorEvent }) {
+    allowedTools, maxBudgetUsd, model, mcpConfig, addDir, isManager, maxTurns, onVendorEvent }) {
 
     const claudeBin = resolveClaudeBin();
     const args = buildArgs({
       prompt, systemPrompt, permissionMode, allowedTools,
-      maxBudgetUsd, model, mcpConfig, addDir, isManager,
+      maxBudgetUsd, model, mcpConfig, addDir, isManager, maxTurns,
     });
 
     const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
@@ -338,8 +342,38 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
             // For manager sessions: result event = one turn finished, NOT session end.
             // Only mark completed for non-manager (worker) runs.
             if (!proc.isManager) {
-              proc.status = event.is_error ? 'failed' : 'completed';
-              runService.updateRunStatus(runId, event.is_error ? 'failed' : 'completed', { force: true });
+              // Check stop_reason to distinguish genuine completion from premature termination.
+              // If the agent hit max_turns or was interrupted, treat as incomplete (needs_input)
+              // so the user can review and optionally resume.
+              const stopReason = event.stop_reason;
+              const hitLimit = stopReason === 'max_turns' || stopReason === 'max_tokens';
+
+              if (event.is_error) {
+                proc.status = 'failed';
+                runService.updateRunStatus(runId, 'failed', { force: true });
+              } else if (hitLimit) {
+                // Agent was cut short by turn/token limit — not a real completion
+                proc.status = 'needs_input';
+                runService.updateRunStatus(runId, 'needs_input', { force: true, reason: stopReason });
+                runService.addRunEvent(runId, 'limit_reached', JSON.stringify({
+                  message: `Agent stopped due to ${stopReason} — task may be incomplete`,
+                  stop_reason: stopReason,
+                  num_turns: event.num_turns,
+                }));
+                if (eventBus) {
+                  eventBus.emit('run:needs_input', {
+                    runId,
+                    run: runService.getRun(runId),
+                    from_status: 'running',
+                    to_status: 'needs_input',
+                    reason: stopReason,
+                    priority: 'alert',
+                  });
+                }
+              } else {
+                proc.status = 'completed';
+                runService.updateRunStatus(runId, 'completed', { force: true });
+              }
             } else if (event.is_error) {
               // Manager: only transition to failed on error
               proc.status = 'failed';
