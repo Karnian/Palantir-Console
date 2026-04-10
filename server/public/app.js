@@ -313,6 +313,7 @@ function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun, claude
             role="button"
             tabIndex=${0}
             title="PM hallucination / staleness incidents. Click to inspect."
+            aria-label=${`Drift warnings: ${driftAudit.totalCount}. Activate to open the drift drawer.`}
             onClick=${() => onOpenDrift && onOpenDrift()}
             onKeyDown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenDrift && onOpenDrift(); } }}
           >
