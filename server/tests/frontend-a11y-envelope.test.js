@@ -20,6 +20,21 @@ async function loadAppJs() {
   return _srcCache;
 }
 
+// P2-10 (ESM phase 1): DriftDrawer was extracted from app.js into
+// its own ES module. The a11y / focus-trap assertions below used to
+// call `sliceFunction(appSrc, 'function DriftDrawer')` — now they
+// load the module file directly. The ESM file is the whole component
+// body so no slicing is needed.
+let _driftDrawerSrcCache;
+async function loadDriftDrawerSource() {
+  if (_driftDrawerSrcCache) return _driftDrawerSrcCache;
+  _driftDrawerSrcCache = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'components', 'DriftDrawer.js'),
+    'utf8'
+  );
+  return _driftDrawerSrcCache;
+}
+
 function sliceFunction(src, header) {
   // Find the declaration, then grab a generous window afterwards. We
   // don't need to precisely delimit the function body — a brace
@@ -40,9 +55,8 @@ function sliceFunction(src, header) {
 // ---- P1-11: DriftDrawer WCAG a11y ----
 
 test('P1-11 DriftDrawer has role=dialog + aria-modal + aria-labelledby', async () => {
-  const src = await loadAppJs();
-  const body = sliceFunction(src, 'function DriftDrawer');
-  assert.ok(body, 'DriftDrawer function not found in app.js');
+  const body = await loadDriftDrawerSource();
+  assert.ok(body && body.length > 0, 'DriftDrawer module source not found');
   assert.match(body, /role="dialog"/, 'role=dialog missing');
   assert.match(body, /aria-modal="true"/, 'aria-modal missing');
   assert.match(body, /aria-labelledby="drift-drawer-title"/, 'aria-labelledby missing');
@@ -50,8 +64,7 @@ test('P1-11 DriftDrawer has role=dialog + aria-modal + aria-labelledby', async (
 });
 
 test('P1-11 DriftDrawer installs focus trap + auto-focus via useEffect', async () => {
-  const src = await loadAppJs();
-  const body = sliceFunction(src, 'function DriftDrawer');
+  const body = await loadDriftDrawerSource();
   // Must reference drawerRef + a keydown listener (the focus trap handler).
   assert.match(body, /drawerRef/, 'drawerRef missing');
   assert.match(body, /addEventListener\('keydown'/, 'keydown handler missing (no focus trap)');
@@ -61,8 +74,7 @@ test('P1-11 DriftDrawer installs focus trap + auto-focus via useEffect', async (
 });
 
 test('P1-11 DriftDrawer Close button has aria-label', async () => {
-  const src = await loadAppJs();
-  const body = sliceFunction(src, 'function DriftDrawer');
+  const body = await loadDriftDrawerSource();
   assert.match(body, /aria-label="Close drift drawer"/, 'Close button aria-label missing');
 });
 
@@ -78,8 +90,7 @@ test('P1-11 DriftDrawer Close button has aria-label', async () => {
 // Codex PROCEED_HARDENED consensus — see PR #41 body for context.
 
 test('P2-6 DriftDrawer useEffect returns a cleanup function that removes the keydown listener', async () => {
-  const src = await loadAppJs();
-  const body = sliceFunction(src, 'function DriftDrawer');
+  const body = await loadDriftDrawerSource();
   assert.match(
     body,
     /return\s*\(\)\s*=>\s*\{\s*node\.removeEventListener\('keydown'/,
@@ -93,8 +104,7 @@ test('P2-6 DriftDrawer outer dialog div binds drawerRef via ref attribute (attri
   // within 400 chars. Now we slice the dialog element's opening-tag
   // attribute list (role="dialog" to the first `>` that closes it) and
   // assert ref=${drawerRef} lives in THAT window specifically.
-  const src = await loadAppJs();
-  const body = sliceFunction(src, 'function DriftDrawer');
+  const body = await loadDriftDrawerSource();
   // The function comment block also contains the literal string
   // `role="dialog"` for documentation. Find the FIRST occurrence that
   // is inside an HTM template literal by searching after the return
@@ -134,8 +144,7 @@ test('P2-6 DriftDrawer outer dialog div binds drawerRef via ref attribute (attri
 });
 
 test('P2-6 DriftDrawer Tab cycle — forward (lastEl → firstEl) branch present', async () => {
-  const src = await loadAppJs();
-  const body = sliceFunction(src, 'function DriftDrawer');
+  const body = await loadDriftDrawerSource();
   assert.match(
     body,
     /document\.activeElement\s*===\s*lastEl[\s\S]{0,200}?firstEl\.focus\(\)/,
@@ -144,8 +153,7 @@ test('P2-6 DriftDrawer Tab cycle — forward (lastEl → firstEl) branch present
 });
 
 test('P2-6 DriftDrawer Tab cycle — reverse (firstEl → lastEl) branch present', async () => {
-  const src = await loadAppJs();
-  const body = sliceFunction(src, 'function DriftDrawer');
+  const body = await loadDriftDrawerSource();
   assert.match(
     body,
     /document\.activeElement\s*===\s*firstEl[\s\S]{0,200}?lastEl\.focus\(\)/,
@@ -154,8 +162,7 @@ test('P2-6 DriftDrawer Tab cycle — reverse (firstEl → lastEl) branch present
 });
 
 test('P2-6 DriftDrawer focusables selector covers the WAI-ARIA focusable superset', async () => {
-  const src = await loadAppJs();
-  const body = sliceFunction(src, 'function DriftDrawer');
+  const body = await loadDriftDrawerSource();
   // The selector string is single-quoted in app.js and INTERNALLY uses
   // double quotes (e.g. `[tabindex="-1"]`), so a naive `[^'"]+` char
   // class stops at the first inner `"`. Match on single-quote-only
@@ -176,8 +183,7 @@ test('P2-6 DriftDrawer focusables selector covers the WAI-ARIA focusable superse
 });
 
 test('P2-6 DriftDrawer focus-trap useEffect depends only on [open]', async () => {
-  const src = await loadAppJs();
-  const body = sliceFunction(src, 'function DriftDrawer');
+  const body = await loadDriftDrawerSource();
   // A wider dep array (e.g. [open, rows]) would tear down + re-install
   // the trap on every content reload, stealing focus mid-interaction.
   assert.match(
@@ -199,6 +205,56 @@ test('P2-7 drift badge has aria-label announcing the count', async () => {
     /aria-label=\$\{`Drift warnings: \$\{driftAudit\.totalCount\}/,
     'drift badge must have an aria-label that announces the count to screen readers',
   );
+});
+
+// ---- P2-10: ESM phase 1 — DriftDrawer extraction ----
+
+test('P2-10 DriftDrawer module exports the component as a named export', async () => {
+  const body = await loadDriftDrawerSource();
+  assert.match(body, /export\s+function\s+DriftDrawer\s*\(/,
+    'DriftDrawer.js must provide `export function DriftDrawer(...)`');
+});
+
+test('P2-10 DriftDrawer module dereferences window.preact / preactHooks / htm at top level', async () => {
+  // Mirrors the RunInspector.js convention. main.js assigns these
+  // globals before dynamically importing DriftDrawer.js, so module-
+  // time reads are safe.
+  const body = await loadDriftDrawerSource();
+  assert.match(body, /window\.preactHooks/, 'window.preactHooks reference missing');
+  assert.match(body, /window\.preact/, 'window.preact reference missing');
+  assert.match(body, /window\.htm\.bind\(h\)/, 'htm.bind(h) wiring missing');
+});
+
+test('P2-10 legacy app.js no longer defines `function DriftDrawer`', async () => {
+  const src = await loadAppJs();
+  assert.doesNotMatch(src, /function\s+DriftDrawer\s*\(/,
+    'function DriftDrawer was extracted to an ES module and must not be redefined in app.js');
+});
+
+test('P2-10 main.js dynamically imports DriftDrawer and bridges it onto window', async () => {
+  const src = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'main.js'),
+    'utf8',
+  );
+  assert.match(
+    src,
+    /import\(\s*['"]\.\/components\/DriftDrawer\.js['"]\s*\)/,
+    'main.js must dynamically import ./components/DriftDrawer.js',
+  );
+  assert.match(
+    src,
+    /window\.DriftDrawer\s*=\s*DriftDrawer/,
+    'main.js must assign window.DriftDrawer = DriftDrawer for the legacy app.js bridge',
+  );
+});
+
+test('P2-10 app.js still references <${DriftDrawer} ... /> via global bridge', async () => {
+  // Behavior contract: removing the function from app.js must not
+  // break the call site that mounts the component. We grep for the
+  // component tag literal.
+  const src = await loadAppJs();
+  assert.match(src, /<\$\{DriftDrawer\}/,
+    'app.js must still render <${DriftDrawer}> — the bridge (window.DriftDrawer) makes this bare reference resolve via global scope');
 });
 
 // ---- P2-9: Stop/Reset label clarity + PM selector Dropdown swap ----
