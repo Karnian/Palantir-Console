@@ -55,6 +55,22 @@ const {
 const NON_FATAL_SEVERITIES = new Set(['warning', 'warn', 'notice', 'info', 'deprecation']);
 const NOTICE_CODE_PREFIXES = ['deprecated_', 'deprecation_', 'notice_', 'warn_', 'warning_'];
 
+// P4-6: error classification patterns. Each entry: [regex, category].
+// Order matters — first match wins. Patterns are tested against the
+// error message when no structured `item.code` or `item.error_type` field
+// provides a category directly.
+const ERROR_CLASSIFICATION_PATTERNS = [
+  [/\brate.?limit/i, 'rate_limit'],
+  [/\b(auth|unauthorized|forbidden|401|403)\b/i, 'auth_error'],
+  [/\b(timeout|timed?\s*out|ETIMEDOUT|ESOCKETTIMEDOUT)\b/i, 'timeout'],
+  [/\b(network|ECONNREFUSED|ECONNRESET|ENOTFOUND|fetch failed)\b/i, 'network_error'],
+  [/\b(context.?length|token.?limit|too.?long|max.?tokens)\b/i, 'context_length'],
+  [/\b(model.*not.*found|invalid.*model|does not exist)\b/i, 'invalid_model'],
+  [/\b(overloaded|capacity|server.?error|500|502|503|529)\b/i, 'server_overloaded'],
+  [/\b(invalid.*request|bad.*request|malformed|parse error)\b/i, 'invalid_request'],
+  [/\b(content.?filter|safety|blocked|refus)/i, 'content_filtered'],
+];
+
 function classifyCodexErrorAsNotice(item) {
   if (!item || typeof item !== 'object') return false;
   const severity = typeof item.severity === 'string'
@@ -65,6 +81,35 @@ function classifyCodexErrorAsNotice(item) {
   if (code && NOTICE_CODE_PREFIXES.some(p => code.startsWith(p))) return true;
   const msg = typeof item.message === 'string' ? item.message : '';
   return /\b(deprecated|deprecation)\b/i.test(msg);
+}
+
+/**
+ * P4-6: classify a codex error item into a specific category.
+ * Uses structured fields first (item.error_type, item.code), then falls
+ * back to regex on the message. Returns 'unknown_error' if nothing matches.
+ */
+function classifyCodexErrorKind(item) {
+  if (!item || typeof item !== 'object') return 'unknown_error';
+
+  // 1. Structured field: item.error_type (if codex provides it)
+  if (typeof item.error_type === 'string' && item.error_type.trim()) {
+    return item.error_type.trim();
+  }
+
+  // 2. Structured field: item.code (non-notice codes)
+  const code = typeof item.code === 'string' ? item.code.toLowerCase() : null;
+  if (code && !NOTICE_CODE_PREFIXES.some(p => code.startsWith(p))) {
+    return code;
+  }
+
+  // 3. Regex classification on message
+  const msg = typeof item.message === 'string' ? item.message : '';
+  for (const [pattern, category] of ERROR_CLASSIFICATION_PATTERNS) {
+    if (pattern.test(msg)) return category;
+  }
+
+  // 4. Fallback — never silently drop
+  return 'unknown_error';
 }
 
 /**
@@ -432,12 +477,15 @@ function createCodexAdapter({
             data: { kind: 'codex_notice', message: msg },
           }));
         } else {
+          // P4-6: classify error into a specific category for downstream
+          // consumers. Falls back to 'unknown_error' — never silently drops.
+          const errorKind = classifyCodexErrorKind(item);
           emitNormalized(runId, NORMALIZED_EVENT_TYPES.TURN_FAILED, buildPayload({
             turnIndex: state.turnIndex,
             vendorItemId: itemId,
-            summaryText: `codex error: ${msg.slice(0, 160)}`,
+            summaryText: `codex error [${errorKind}]: ${msg.slice(0, 140)}`,
             hasRawStored: RAW_EVENTS_ENABLED,
-            data: { kind: 'codex_error', message: msg },
+            data: { kind: 'codex_error', errorKind, message: msg },
           }));
         }
         return;
@@ -601,7 +649,7 @@ You are running as a Codex CLI subprocess (codex exec --json). HARD RULES:
 - Do NOT install a polling loop on /execute results — the user will see them
   in the Palantir Console UI; just report once per turn.
 - Filesystem sandbox is active. Your tools are limited to read operations
-  and curl for API calls. Do not attempt file writes — those are a worker concern.`;
+  and WebFetch for API calls. Do not attempt file writes — those are a worker concern.`;
   }
 
   return {
@@ -627,4 +675,7 @@ module.exports = {
   classifyCodexErrorAsNotice,
   NON_FATAL_SEVERITIES,
   NOTICE_CODE_PREFIXES,
+  // P4-6: expose error kind classifier + patterns for tests.
+  classifyCodexErrorKind,
+  ERROR_CLASSIFICATION_PATTERNS,
 };

@@ -42,8 +42,8 @@ Your role:
  */
 function buildCommonBase({ port, token, layer = 'top' }) {
   const base = `http://localhost:${port}`;
-  const auth = token ? `-H 'Authorization: Bearer ${token}' ` : '';
-  const authHeader = token ? `Authorization: Bearer ${token}` : null;
+  // P4-7: auth variable kept for backward-compat with PM layer docs
+  // but curl examples are replaced with WebFetch-friendly format.
 
   const layerNote = layer === 'pm'
     ? `\n\nYou are running as a **project-scoped PM**. You own dispatch decisions within your project, and you may modify in-flight worker plans via the worker intervention APIs (cancel, input, status patch) when the user or conditions require a plan change.`
@@ -115,29 +115,31 @@ You do NOT have Write or Edit tools — this is intentional. Direct file modific
 ## Palantir Console REST API
 
 The Palantir Console server runs at ${base}. Use WebFetch to query it (do NOT use Bash with curl — curl is not in your tool allowlist).
-${token ? `\nIMPORTANT: All API requests require auth header: ${auth.trim()}` : ''}
+${token ? `\nIMPORTANT: All API requests require auth header: Authorization: Bearer ${token}` : ''}
 
 ### Runs (read-only)
-- List all runs: curl -s ${auth}${base}/api/runs | jq
-- Filter by status: curl -s ${auth}"${base}/api/runs?status=running" | jq
-- Filter by task: curl -s ${auth}"${base}/api/runs?task_id=TASK_ID" | jq
-- Get single run: curl -s ${auth}${base}/api/runs/RUN_ID | jq
-- Get run events: curl -s ${auth}${base}/api/runs/RUN_ID/events | jq
+- List all runs: GET ${base}/api/runs
+- Filter by status: GET ${base}/api/runs?status=running
+- Filter by task: GET ${base}/api/runs?task_id=TASK_ID
+- Get single run: GET ${base}/api/runs/RUN_ID
+- Get run events: GET ${base}/api/runs/RUN_ID/events
 
 ### Tasks (create only; status changes handled by lifecycle/PM)
-- List all tasks: curl -s ${auth}${base}/api/tasks | jq
-- Filter by status: curl -s ${auth}"${base}/api/tasks?status=in_progress" | jq
-- Create task: curl -s ${auth}-X POST ${base}/api/tasks -H 'Content-Type: application/json' -d '{"title":"...","description":"...","priority":"medium","project_id":"PROJECT_ID"}'
+- List all tasks: GET ${base}/api/tasks
+- Filter by status: GET ${base}/api/tasks?status=in_progress
+- Create task: POST ${base}/api/tasks  body: {"title":"...","description":"...","priority":"medium","project_id":"PROJECT_ID"}
   Only include project_id if the task clearly belongs to an existing project. If unrelated, omit project_id (the task will be unassigned). Do NOT guess or force a project assignment.
 
 ### Projects
-- List projects: curl -s ${auth}${base}/api/projects | jq
+- List projects: GET ${base}/api/projects
 
 ### Agent Profiles
-- List agents: curl -s ${auth}${base}/api/agents | jq
+- List agents: GET ${base}/api/agents
 
 ### Dispatch (spawn actual worker agents — the only write path you own)
-- Execute task with agent: curl -s ${auth}-X POST ${base}/api/tasks/TASK_ID/execute -H 'Content-Type: application/json' -d '{"agent_profile_id":"AGENT_ID","prompt":"detailed work instructions here"}'${workerInterventionSection}
+- Execute task with agent: POST ${base}/api/tasks/TASK_ID/execute  body: {"agent_profile_id":"AGENT_ID","prompt":"detailed work instructions here"}
+
+Use the WebFetch tool for all API calls.${workerInterventionSection}
 
 Run statuses: queued, running, paused, needs_input, completed, failed, cancelled, stopped
 Task statuses: backlog, todo, in_progress, review, done

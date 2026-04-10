@@ -720,7 +720,9 @@ test('v3 Phase 0 behavior: claudeAdapter.startSession passes restricted Bash all
   assert.equal(tools.indexOf('Write'), -1, 'must not include Write');
   assert.equal(tools.indexOf('Edit'), -1, 'must not include Edit');
   // Verify core dispatcher tools present
-  assert.ok(tools.includes('Bash(curl:*)'), 'must include Bash(curl:*)');
+  // P4-7: Bash(curl:*) removed — shell bypass risk. WebFetch covers HTTP needs.
+  assert.equal(tools.indexOf('Bash(curl:*)'), -1, 'must NOT include Bash(curl:*) — shell bypass risk');
+  assert.ok(tools.includes('WebFetch'), 'must include WebFetch as curl replacement');
   assert.ok(tools.includes('Read'), 'must include Read');
   assert.equal(capturedArgs.isManager, true, 'must spawn as manager');
 });
@@ -1135,9 +1137,10 @@ test('v3 Phase 0: claudeAdapter default allowedTools excludes Write/Edit and res
   const bareBashMatch = defaultTools.match(/['"]Bash['"](?![\w\(])/);
   assert.equal(bareBashMatch, null,
     'default allowedTools must not contain bare "Bash" (only Bash(pattern:*) restrictions allowed)');
-  // Bash(curl:*) pattern MUST exist — primary dispatcher operation
-  assert.ok(defaultTools.includes("'Bash(curl:*)'"),
-    'default allowedTools must include Bash(curl:*) for API calls');
+  // P4-7: Bash(curl:*) REMOVED — shell bypass risk. WebFetch covers HTTP needs.
+  assert.ok(!defaultTools.includes("'Bash(curl:*)'"),
+    'default allowedTools must NOT include Bash(curl:*) — shell bypass risk');
+  assert.ok(defaultTools.includes("'WebFetch'"), 'default allowedTools must include WebFetch');
   // Read must exist
   assert.ok(defaultTools.includes("'Read'"), 'default allowedTools must include Read');
 });
