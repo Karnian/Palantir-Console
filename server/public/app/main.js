@@ -108,11 +108,21 @@ window.DashboardView = DashboardView;
 
 // P5-2 (ESM phase 4a): BoardView + CalendarView + DirectoryPicker.
 // CalendarView is exported for app.js to reference via window.CalendarView.
-// DirectoryPicker is bridged for ProjectsView (in app.js) to use as a bare identifier.
+// DirectoryPicker is bridged for ProjectsView to use as a bare identifier.
 const { BoardView, CalendarView, DirectoryPicker } = await import('./components/BoardView.js');
 window.BoardView = BoardView;
 window.CalendarView = CalendarView;
 window.DirectoryPicker = DirectoryPicker;
+
+// P5-3 (ESM phase 4b): ProjectsView — Projects management view.
+// Also includes ProjectDetailModal (module-internal).
+const { ProjectsView } = await import('./components/ProjectsView.js');
+window.ProjectsView = ProjectsView;
+
+// P5-4 (ESM phase 4b): AgentsView — Agent profiles management view.
+// Also includes AgentModal + AgentDetailModal (module-internal).
+const { AgentsView } = await import('./components/AgentsView.js');
+window.AgentsView = AgentsView;
 
 // Load app.js as a classic script after the globals are in place. We use a
 // dynamic <script> tag (rather than `import './app.js'`) because app.js is

@@ -21,6 +21,21 @@ function normalizePmEnabled(value) {
   throw new BadRequestError(`Invalid pm_enabled: must be boolean or 0/1`);
 }
 
+function normalizeMcpConfigPath(value) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  if (typeof value !== 'string') throw new BadRequestError('mcp_config_path must be a string');
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!trimmed.startsWith('/')) {
+    throw new BadRequestError('mcp_config_path must be an absolute path (starting with /)');
+  }
+  if (!trimmed.endsWith('.json')) {
+    throw new BadRequestError('mcp_config_path must end with .json');
+  }
+  return trimmed;
+}
+
 function createProjectService(db) {
   const stmts = {
     getAll: db.prepare('SELECT * FROM projects ORDER BY updated_at DESC'),
@@ -54,6 +69,7 @@ function createProjectService(db) {
     const id = `proj_${crypto.randomUUID().slice(0, 8)}`;
     const normalizedPmEnabled = normalizePmEnabled(pm_enabled);
     const normalizedAdapter = normalizePmAdapter(preferred_pm_adapter);
+    const normalizedMcpPath = normalizeMcpConfigPath(mcp_config_path);
     stmts.insert.run({
       id, name,
       directory: directory || null,
@@ -63,7 +79,7 @@ function createProjectService(db) {
       // v3 Phase 1: PM settings default to enabled + no preference
       pm_enabled: normalizedPmEnabled === undefined ? 1 : normalizedPmEnabled,
       preferred_pm_adapter: normalizedAdapter === undefined ? null : normalizedAdapter,
-      mcp_config_path: mcp_config_path || null,
+      mcp_config_path: normalizedMcpPath === undefined ? null : normalizedMcpPath,
     });
     return stmts.getById.get(id);
   }
@@ -86,6 +102,11 @@ function createProjectService(db) {
     if ('preferred_pm_adapter' in fields) {
       const n = normalizePmAdapter(fields.preferred_pm_adapter);
       fields = { ...fields, preferred_pm_adapter: n === undefined ? null : n };
+    }
+    // P5-7: normalize mcp_config_path (absolute path + .json extension)
+    if ('mcp_config_path' in fields) {
+      const n = normalizeMcpConfigPath(fields.mcp_config_path);
+      fields = { ...fields, mcp_config_path: n === undefined ? null : n };
     }
     const setClauses = [];
     const params = { id };

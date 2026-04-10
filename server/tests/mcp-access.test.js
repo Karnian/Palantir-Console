@@ -222,23 +222,27 @@ test('claudeAdapter.startSession — empty mcpTools array leaves base unchanged'
 });
 
 // ---------------------------------------------------------------------------
-// 4. Source invariant: AgentModal in app.js contains "MCP Tools" label
+// 4. Source invariant: AgentModal contains "MCP Tools" label
+//    (AgentModal was extracted to app/components/AgentsView.js in P5-4)
 // ---------------------------------------------------------------------------
 
-test('app.js AgentModal contains "MCP Tools" label', () => {
-  const appJsPath = path.join(__dirname, '../public/app.js');
-  const source = fs.readFileSync(appJsPath, 'utf8');
+test('AgentModal contains "MCP Tools" label', () => {
+  // AgentModal was extracted from app.js to AgentsView.js (P5-4).
+  // Check the canonical location — AgentsView.js.
+  const agentsViewPath = path.join(__dirname, '../public/app/components/AgentsView.js');
+  const source = fs.readFileSync(agentsViewPath, 'utf8');
   assert.ok(
     source.includes('MCP Tools'),
-    'app.js AgentModal must contain "MCP Tools" label (P3-5 UI)'
+    'AgentsView.js AgentModal must contain "MCP Tools" label (P3-5 UI)'
   );
 });
 
-test('app.js AgentModal contains mcp_tools textarea placeholder', () => {
-  const appJsPath = path.join(__dirname, '../public/app.js');
-  const source = fs.readFileSync(appJsPath, 'utf8');
+test('AgentModal contains mcp_tools textarea placeholder', () => {
+  // AgentModal was extracted from app.js to AgentsView.js (P5-4).
+  const agentsViewPath = path.join(__dirname, '../public/app/components/AgentsView.js');
+  const source = fs.readFileSync(agentsViewPath, 'utf8');
   assert.ok(
     source.includes('mcp__claude_ai_Slack__*') || source.includes('mcp__slack__*'),
-    'app.js AgentModal textarea should have an MCP placeholder'
+    'AgentsView.js AgentModal textarea should have an MCP placeholder'
   );
 });
