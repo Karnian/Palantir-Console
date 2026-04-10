@@ -1,15 +1,15 @@
 // SessionGrid — Right task sessions grid of the Manager view.
 // Extracted from ManagerView.js as part of P8-5.
 //
-// Dependencies (all bridged onto window by main.js before this module loads):
-//   - window.preact, window.preactHooks, window.htm
+// Dependencies:
 //   - window.EmptyState                      (from app/components/EmptyState.js)
 //   - window.RunInspector                    (from app/components/RunInspector.js)
 //   - window.TaskDetailPanel                 (lives in app/components/TaskModals.js)
 
-const { h } = window.preact;
-const { useState, useMemo } = window.preactHooks;
-const html = window.htm.bind(h);
+import { h } from '../../vendor/preact.module.js';
+import { useState, useMemo } from '../../vendor/hooks.module.js';
+import htm from '../../vendor/htm.module.js';
+const html = htm.bind(h);
 
 const runStatusIcon = (status) => {
   switch (status) {

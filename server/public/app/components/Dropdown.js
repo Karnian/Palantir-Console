@@ -6,13 +6,10 @@
 // alignment with adjacent fields. This component renders a styled trigger
 // + an absolutely-positioned menu the same width as the trigger.
 //
-// Module-time dependencies are pulled from window because main.js assigns
-// them BEFORE this module is imported — same convention as DriftDrawer.js
-// and RunInspector.js.
-
-const { useState, useRef, useEffect, useCallback, useMemo } = window.preactHooks;
-const { h } = window.preact;
-const html = window.htm.bind(h);
+import { h } from '../../vendor/preact.module.js';
+import { useState, useRef, useEffect, useCallback, useMemo } from '../../vendor/hooks.module.js';
+import htm from '../../vendor/htm.module.js';
+const html = htm.bind(h);
 
 export function Dropdown({ value, onChange, options, disabled, style, className, title, ariaLabel }) {
   const [open, setOpen] = useState(false);

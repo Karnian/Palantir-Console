@@ -3,15 +3,10 @@
 // extracted from the legacy app.js monolith as part of Phase 4 to validate
 // the "ESM module + window bridge" pattern.
 //
-// Module-time dependencies (preact, htm, helpers) are pulled from window
-// because main.js is responsible for assigning them BEFORE this module
-// gets imported. addToast is still owned by app.js so we look it up via
-// window at call time, not at module load — that way the legacy toast
-// system can keep moving without breaking the import.
-
-const { useState, useEffect, useRef } = window.preactHooks;
-const { h } = window.preact;
-const html = window.htm.bind(h);
+import { h } from '../../vendor/preact.module.js';
+import { useState, useEffect, useRef } from '../../vendor/hooks.module.js';
+import htm from '../../vendor/htm.module.js';
+const html = htm.bind(h);
 
 export function RunInspector({ run, onClose }) {
   const [events, setEvents] = useState([]);
