@@ -163,19 +163,31 @@ function createPmSpawnService({
     const adapterType = resolvePmAdapterType(project);
     const adapter = managerAdapterFactory.getAdapter(adapterType);
 
-    // Resolve env_allowlist from the agent profile of the same type if
-    // one exists — mirrors routes/manager.js /start behavior. We do NOT
-    // require agent_profile_id for PM spawns (the PM is a server-owned
-    // construct, not a user-selected profile), so if no profile is found
-    // we fall through to the resolver's defaults.
+    // Resolve env_allowlist and mcp_tools from the agent profile of the same
+    // type if one exists — mirrors routes/manager.js /start behavior. We do
+    // NOT require agent_profile_id for PM spawns (the PM is a server-owned
+    // construct, not a user-selected profile), so if no profile is found we
+    // fall through to the resolver's defaults.
     let envAllowlist;
+    let pmMcpTools = [];
     try {
       if (agentProfileService) {
         const profiles = agentProfileService.listProfiles();
         const codexProfile = profiles.find(p => p.type === 'codex');
-        if (codexProfile && codexProfile.env_allowlist) {
-          const parsed = JSON.parse(codexProfile.env_allowlist);
-          if (Array.isArray(parsed)) envAllowlist = parsed;
+        if (codexProfile) {
+          if (codexProfile.env_allowlist) {
+            const parsed = JSON.parse(codexProfile.env_allowlist);
+            if (Array.isArray(parsed)) envAllowlist = parsed;
+          }
+          // P3-4: extract mcp_tools for PM adapter startup
+          if (codexProfile.capabilities_json) {
+            try {
+              const caps = JSON.parse(codexProfile.capabilities_json);
+              if (Array.isArray(caps.mcp_tools)) {
+                pmMcpTools = caps.mcp_tools.filter(t => typeof t === 'string' && t.trim());
+              }
+            } catch { /* ignore */ }
+          }
         }
       }
     } catch { /* ignore — fall through to defaults */ }
@@ -287,6 +299,7 @@ function createPmSpawnService({
         role: 'manager',
         resumeThreadId,
         onThreadStarted,
+        mcpTools: pmMcpTools.length > 0 ? pmMcpTools : undefined,
       });
     } catch (err) {
       // Adapter startup failed — mark the run as failed and bubble up

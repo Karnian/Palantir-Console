@@ -146,11 +146,13 @@ function createLifecycleService({
       let result;
       if (isClaude && streamJsonEngine) {
         // Use streamJsonEngine — same as Manager but isManager=false (single-shot worker)
+        const mcpTools = parseMcpTools(profile.capabilities_json);
         result = streamJsonEngine.spawnAgent(run.id, {
           prompt,
           cwd,
           env: parseEnvAllowlist(profile.env_allowlist),
           permissionMode: 'bypassPermissions',
+          allowedTools: mcpTools.length > 0 ? mcpTools : undefined,
           isManager: false,
         });
       } else {
@@ -233,6 +235,21 @@ function createLifecycleService({
       return env;
     } catch {
       return {};
+    }
+  }
+
+  /**
+   * Parse mcp_tools from capabilities_json. Returns a filtered array of
+   * non-empty strings, or [] if the field is absent / malformed.
+   */
+  function parseMcpTools(capabilitiesJson) {
+    try {
+      const caps = JSON.parse(capabilitiesJson || '{}');
+      return Array.isArray(caps.mcp_tools)
+        ? caps.mcp_tools.filter(t => typeof t === 'string' && t.trim())
+        : [];
+    } catch {
+      return [];
     }
   }
 

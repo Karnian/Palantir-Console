@@ -1118,8 +1118,11 @@ test('v3 Phase 0: claudeAdapter default allowedTools excludes Write/Edit and res
     path.join(__dirname, '..', 'services', 'managerAdapters', 'claudeAdapter.js'),
     'utf8'
   );
-  // Find the default allowedTools array literal (may span multiple lines)
-  const match = src.match(/allowedTools:\s*allowedTools\s*\|\|\s*(\[[\s\S]*?\])/);
+  // Find the base allowedTools array literal (may span multiple lines).
+  // P3-4 refactor renamed the inline literal from `allowedTools || [...]` to
+  // `const baseTools = allowedTools || [...]` so the regex is updated to match
+  // either form.
+  const match = src.match(/(?:allowedTools:\s*allowedTools\s*\|\|\s*|baseTools\s*=\s*allowedTools\s*\|\|\s*)(\[[\s\S]*?\])/);
   assert.ok(match, 'default allowedTools literal must exist');
   const defaultTools = match[1];
   // Write/Edit must be absent entirely

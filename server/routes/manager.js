@@ -28,6 +28,19 @@ const PROFILE_TYPE_TO_ADAPTER = {
   'codex': 'codex',
 };
 
+// P3-4: parse mcp_tools from capabilities_json. Mirrors the helper in
+// lifecycleService.js — kept local to avoid a circular dependency.
+function parseMcpTools(capabilitiesJson) {
+  try {
+    const caps = JSON.parse(capabilitiesJson || '{}');
+    return Array.isArray(caps.mcp_tools)
+      ? caps.mcp_tools.filter(t => typeof t === 'string' && t.trim())
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 // authResolverOpts is forwarded into resolveManagerAuth for every preflight
 // so tests can inject `hasKeychain` (and any future DI hooks) without
 // monkey-patching child_process. Production callers leave this empty and
@@ -319,6 +332,11 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       envAllowlist,
     });
 
+    // P3-4: extract MCP tool patterns from the agent profile's capabilities_json
+    // so Manager (Top layer) can access MCP tools. The claudeAdapter.startSession
+    // merges these into the base allowedTools list.
+    const mcpTools = parseMcpTools(resolvedProfile && resolvedProfile.capabilities_json);
+
     try {
       const { sessionRef } = adapter.startSession(runId, {
         // For Claude (persistent process) the prompt argument is the FIRST
@@ -330,6 +348,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         systemPrompt,
         model: model || undefined,
         env: spawnEnv,
+        mcpTools: mcpTools.length > 0 ? mcpTools : undefined,
         // v3 Phase 0: all current manager starts are Top layer. PM layer
         // (Phase 3a) will pass role='manager' with layer='pm' system prompt.
         // role='manager' is the default in codexAdapter so this is belt-and-suspenders.
