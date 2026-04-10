@@ -45,8 +45,9 @@ function recordRecent(projectId) {
   } catch { /* localStorage unavailable */ }
 }
 
-export function MentionInput({ projects = [], ref: forwardedRef, onInput, onKeyDown, value, ...rest }) {
-  // Internal ref for the textarea; we merge with the forwarded ref.
+export function MentionInput({ projects = [], inputRef: forwardedRef, onInput, onKeyDown, value, ...rest }) {
+  // Internal ref for the textarea. Callers pass `inputRef` (not `ref`) because
+  // Preact strips `ref` from props before they reach function components.
   const innerRef = useRef(null);
   const textareaRef = forwardedRef || innerRef;
 

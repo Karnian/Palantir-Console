@@ -728,7 +728,7 @@ export function ManagerView({ manager, runs, tasks, projects, agents = [], agent
                 </svg>
               </button>
               <${MentionInput}
-                ref=${inputRef}
+                inputRef=${inputRef}
                 class="manager-input"
                 placeholder="Message the manager..."
                 value=${input}
