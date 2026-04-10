@@ -715,6 +715,6 @@ Phase 2~7 merge 시점까지 누적 codex round: **17+ rounds** (Phase 4 가 6 r
 
 - **Phase 3b (Claude PM resume)**: §9.6 의 "Claude PM use case 발생" 트리거 미충족. 사용자 선언 전까지 대기.
 - **Reconciliation hard gate 승격** (§9.7 후반): 운영 false-positive 율 관찰 후 결정. Phase 7 로 UI 가 붙은 이후부터 데이터 수집 가능.
-- **`useManager()` → `useConversations()` 전면 마이그레이션**: 공존 구조가 막힌 기능 없음. 별도 phase 로 분리.
+- **`useManager()` → `useConversation()` 전면 마이그레이션**: P8-3 에서 진행 예정. 공존 구조가 막힌 기능 없음.
 - **`dispatch_audit_log` CASCADE FK**: codex 상호 리뷰에서 "거절" — audit trail 의미 유지. 필요 시 read-side filter 로 대응.
-- **Force-delete 탈출구** (고장난 PM 복구용): Phase 3a R3 에서 "future work" 판정. fail-closed 가 현 기본값.
+
