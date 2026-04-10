@@ -25,8 +25,8 @@ const { createPreactEnv, flushEffects, COMPONENTS_DIR } = require('./helpers/jsd
 // ---- helpers ----
 
 /**
- * Create env with DriftDrawer loaded.  We still use the manual strip approach
- * because DriftDrawer has a unique `window.timeAgo` dependency.
+ * Create env with DriftDrawer loaded.  DriftDrawer has a unique
+ * `window.timeAgo` dependency, so we inject it before loading.
  */
 function createEnv() {
   const env = createPreactEnv();
@@ -34,12 +34,9 @@ function createEnv() {
   // DriftDrawer calls window.timeAgo at render time
   env.context.timeAgo = () => '1m ago';
 
-  // Load DriftDrawer via manual transform (it pre-dates the generic loader)
-  const rawSrc = fs.readFileSync(path.join(COMPONENTS_DIR, 'DriftDrawer.js'), 'utf8');
-  const transformed =
-    rawSrc.replace(/^export\s+function\s+DriftDrawer\b/m, 'function DriftDrawer') +
-    '\nthis.DriftDrawer = DriftDrawer;';
-  vm.runInContext(transformed, env.context);
+  // Load DriftDrawer via manual transform (it pre-dates the generic loader
+  // but loadComponent works fine — we just need the timeAgo stub above).
+  env.loadComponent('DriftDrawer');
 
   return { window: env.window, context: env.context };
 }

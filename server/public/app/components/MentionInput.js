@@ -61,9 +61,12 @@ export function MentionInput({ projects = [], ref: forwardedRef, onInput, onKeyD
     if (mentionQuery === null) return [];
     const q = mentionQuery.toLowerCase();
     const filtered = (projects || []).filter(p => p.name.toLowerCase().includes(q));
-    // Sort by recent usage (most recent first), then alphabetical.
+    // Sort by recent usage: recently-used projects float to the top
+    // (most recent first). Non-recent items preserve their original
+    // filter order so behaviour is stable when no history exists.
     const recentIds = getRecentIds();
-    return filtered.sort((a, b) => {
+    if (recentIds.length === 0) return filtered;
+    return filtered.slice().sort((a, b) => {
       const ai = recentIds.indexOf(a.id);
       const bi = recentIds.indexOf(b.id);
       // Both recent: lower index = more recent = first
@@ -71,8 +74,8 @@ export function MentionInput({ projects = [], ref: forwardedRef, onInput, onKeyD
       // Only one recent: it goes first
       if (ai !== -1) return -1;
       if (bi !== -1) return 1;
-      // Neither recent: alphabetical
-      return a.name.localeCompare(b.name);
+      // Neither recent: preserve original order (stable sort)
+      return 0;
     });
   }, [mentionQuery, projects]);
 

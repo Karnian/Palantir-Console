@@ -248,6 +248,7 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
       systemPrompt,
       permissionMode: permissionMode || 'bypassPermissions',
       allowedTools: mergedTools,
+      mcpConfig: mcpConfig || undefined, // P4-2: project-scoped MCP config path
       model: model || undefined,
       isManager: true,
       onVendorEvent: (event, proc) => normalizeClaudeEvent(runId, event, proc),

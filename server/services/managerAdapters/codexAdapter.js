@@ -161,8 +161,12 @@ function createCodexAdapter({
    * `--dangerously-bypass-approvals-and-sandbox` per the capability diet policy.
    * Worker role (future) keeps the bypass because workers have legitimate
    * filesystem write needs. See docs/specs/manager-v3-multilayer.md principle 1.
+   *
+   * P4-2: mcpConfig is accepted for interface parity with claudeAdapter but
+   * silently ignored. Codex CLI does not support --mcp-config as of 0.118.0.
+   * When/if Codex adds MCP support, wire mcpConfig into spawnOneTurn args.
    */
-  function startSession(runId, { systemPrompt, cwd, model, env, role, resumeThreadId, onThreadStarted } = {}) {
+  function startSession(runId, { systemPrompt, cwd, model, env, role, resumeThreadId, onThreadStarted, mcpConfig } = {}) {
     if (sessions.has(runId)) {
       throw new Error(`codexAdapter: session ${runId} already started`);
     }

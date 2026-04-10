@@ -17,6 +17,7 @@ const html = window.htm.bind(h);
 
 export function CommandPalette({ open, onClose }) {
   const [query, setQuery] = useState('');
+  const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef(null);
 
   useEffect(() => {
@@ -39,8 +40,6 @@ export function CommandPalette({ open, onClose }) {
     navigate(hash);
     onClose();
   };
-
-  const [selectedIndex, setSelectedIndex] = useState(0);
 
   const handleKeyDown = (e) => {
     if (e.key === 'Escape') { onClose(); return; }

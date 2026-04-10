@@ -21,7 +21,9 @@ const htmSrc = fs.readFileSync(path.join(VENDOR_DIR, 'htm.umd.js'), 'utf8');
 
 /**
  * Load an ES-module component file into a vm context by stripping `export`
- * keywords and assigning the named function to `this.<Name>`.
+ * keywords.  The `const { ... } = window.xxx` lines are kept because the
+ * vm context IS the jsdom window — `window.preact`, `window.preactHooks`,
+ * and `window.htm` are already available.
  *
  * @param {string} componentName  e.g. 'Dropdown', 'MentionInput'
  * @param {object} context        vm context to evaluate in
@@ -30,13 +32,9 @@ function loadComponent(componentName, context) {
   const filePath = path.join(COMPONENTS_DIR, `${componentName}.js`);
   const raw = fs.readFileSync(filePath, 'utf8');
 
-  // Strip leading `export` from `export function Foo` declarations and
-  // remove top-level `const ... = window.xxx` lines (destructured or plain).
-  // The context already has window.preact / window.preactHooks / window.htm.
+  // Strip leading `export` from `export function Foo` declarations.
   const transformed = raw
     .replace(/^export\s+function\s+/m, 'function ')
-    .replace(/^const\s+\{[^}]+\}\s*=\s*window\.\w+;\s*$/gm, '')
-    .replace(/^const\s+\w+\s*=\s*window\.\w+\.bind\([^)]+\);\s*$/gm, '')
     + `\nthis.${componentName} = ${componentName};`;
 
   vm.runInContext(transformed, context);
@@ -65,17 +63,10 @@ function createPreactEnv() {
   vm.runInContext(hooksSrc, context);
   vm.runInContext(htmSrc, context);
 
-  // Provide window globals that components read at module-init time.
-  context.window = context;
-  context.window.preact = context.preact;
-  context.window.preactHooks = context.preactHooks;
-  // htm.bind(h) — provide a ready-made binding on window
-  vm.runInContext('this.htm = htm; this.window.htm = htm;', context);
-  // Bind htm to h so components that do `html = window.htm.bind(h)` work.
-  // Components call `window.htm.bind(h)` at module top level, so we need
-  // htm to have a `.bind` that accepts the preact `h`.
-  // htm.umd already exposes htm as a function with .bind — we just ensure
-  // window.htm is the raw htm export.
+  // The vm context IS the jsdom window object, so `window.preact` and
+  // `window.preactHooks` are already accessible (set by the UMD bundles).
+  // htm UMD sets `self.htm` — ensure it's also reachable as `this.htm`.
+  vm.runInContext('this.htm = htm;', context);
 
   const { h, render } = context.preact;
   const html = context.htm.bind(h);
