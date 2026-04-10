@@ -1,27 +1,17 @@
 // BoardView + CalendarView + DirectoryPicker — Task Board components.
 // Extracted from server/public/app.js as part of P5-2 (ESM phase 4a).
-//
-// Dependencies:
-//   - window.timeAgo                          (from app/lib/format.js)
-//   - window.navigate                         (from app/lib/hooks.js)
-//   - window.addToast                         (from app/lib/toast.js)
-//   - window.apiFetch                         (from app/lib/api.js)
-//   - window.dueDateMeta, window.useNowTick   (bridged by DashboardView.js)
-//   - window.NewTaskModal, window.ExecuteModal, window.TaskDetailPanel
-//     (defined in app.js — available because app.js runs after main.js dynamic
-//      imports resolve, and these components are referenced at render time only)
-//
-// Only BoardView is exported. CalendarView and DirectoryPicker are
-// module-internal helpers used by BoardView and ProjectsView respectively;
-// DirectoryPicker is also bridged onto window so ProjectsView in app.js
-// can continue to reference it as a bare identifier.
 
 import { h } from '../../vendor/preact.module.js';
 import { useState, useEffect, useMemo } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
+import { timeAgo } from '../lib/format.js';
+import { navigate } from '../lib/hooks.js';
+import { apiFetch } from '../lib/api.js';
+import { addToast } from '../lib/toast.js';
 import { dueDateMeta, useNowTick } from '../lib/dueDate.js';
+import { NewTaskModal, ExecuteModal, TaskDetailPanel } from './TaskModals.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Kanban Board View — internal constants
@@ -39,7 +29,6 @@ const BOARD_COLUMNS = [
 function TaskCard({ task, projects, onDragStart, onClick }) {
   const project = projects.find(p => p.id === task.project_id);
   const due = dueDateMeta(task);
-  const timeAgo = window.timeAgo;
 
   return html`
     <div
@@ -82,7 +71,6 @@ function TaskCard({ task, projects, onDragStart, onClick }) {
 // Tab toggle shown in both Board and Calendar toolbars so the user can flip
 // between the two views without leaving the task workflow.
 function BoardModeTabs({ active }) {
-  const navigate = window.navigate;
   return html`
     <div class="board-mode-tabs" role="tablist">
       <button
@@ -104,9 +92,6 @@ function BoardModeTabs({ active }) {
 }
 
 export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, reloadTasks }) {
-  const apiFetch = window.apiFetch;
-  const addToast = window.addToast;
-
   const [showNewTask, setShowNewTask] = useState(false);
   const [executeTask, setExecuteTask] = useState(null);
   const [detailTask, setDetailTask] = useState(null);
@@ -271,11 +256,6 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
   // Keep detailTask in sync with latest task data
   const currentDetailTask = detailTask ? tasks.find(t => t.id === detailTask.id) || detailTask : null;
 
-  // Resolve components defined in app.js at render time
-  const NewTaskModal = window.NewTaskModal;
-  const ExecuteModal = window.ExecuteModal;
-  const TaskDetailPanel = window.TaskDetailPanel;
-
   return html`
     <div class="board-view">
       <div class="board-toolbar">
@@ -377,8 +357,6 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function CalendarView({ tasks, projects, agents, runs, reloadTasks, onOpenRun }) {
-  const navigate = window.navigate;
-
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const [cursor, setCursor] = useState(() => new Date(today.getFullYear(), today.getMonth(), 1));
@@ -437,9 +415,6 @@ export function CalendarView({ tasks, projects, agents, runs, reloadTasks, onOpe
 
   const currentDetailTask = detailTask ? tasks.find(t => t.id === detailTask.id) || detailTask : null;
   const weekdayLabels = ['일', '월', '화', '수', '목', '금', '토'];
-
-  // Resolve app.js component at render time
-  const TaskDetailPanel = window.TaskDetailPanel;
 
   return html`
     <div class="calendar-view">
@@ -520,9 +495,6 @@ export function CalendarView({ tasks, projects, agents, runs, reloadTasks, onOpe
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function DirectoryPicker({ value, onSelect }) {
-  const apiFetch = window.apiFetch;
-  const addToast = window.addToast;
-
   const [open, setOpen] = useState(false);
   const [currentPath, setCurrentPath] = useState('');
   const [rootPath, setRootPath] = useState('');

@@ -1,15 +1,14 @@
 // SessionGrid — Right task sessions grid of the Manager view.
 // Extracted from ManagerView.js as part of P8-5.
-//
-// Dependencies:
-//   - window.EmptyState                      (from app/components/EmptyState.js)
-//   - window.RunInspector                    (from app/components/RunInspector.js)
-//   - window.TaskDetailPanel                 (lives in app/components/TaskModals.js)
 
 import { h } from '../../vendor/preact.module.js';
 import { useState, useMemo } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
+
+import { EmptyState } from './EmptyState.js';
+import { RunInspector } from './RunInspector.js';
+import { TaskDetailPanel } from './TaskModals.js';
 
 const runStatusIcon = (status) => {
   switch (status) {
@@ -38,10 +37,6 @@ const runStatusColor = (status) => {
 };
 
 export function SessionGrid({ tasks, runs, projects }) {
-  const EmptyState = window.EmptyState;
-  const RunInspector = window.RunInspector;
-  const TaskDetailPanel = window.TaskDetailPanel;
-
   const [inspectRun, setInspectRun] = useState(null);
   const [selectedTask, setSelectedTask] = useState(null);
   const [collapsedProjects, setCollapsedProjects] = useState({});
