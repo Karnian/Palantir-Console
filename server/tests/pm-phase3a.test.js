@@ -163,6 +163,94 @@ test('Phase 3a: lazy spawn creates a PM run when none exists', async (t) => {
   assert.equal(result2.run.id, result1.run.id);
 });
 
+test('P2-1: fresh PM spawn leaves run in queued until first turn emits thread.started', async (t) => {
+  // Regression guard for the P2-1 fix: pmSpawnService used to call
+  // markRunStarted unconditionally right after adapter.startSession
+  // returned. For Codex (stateless — no subprocess until the first
+  // runTurn) that advertised the PM as 'running' before any execution
+  // had actually started, which made the UI pmRunActive badge flip to
+  // "Active" pre-flight. The fix moves markRunStarted into the
+  // onThreadStarted callback so the transition only happens when the
+  // adapter really has a live execution context.
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const registry = createManagerRegistry({ runService: rs });
+  const fakePm = makeFakeCodexAdapter();
+  const topAdapter = makeFakeCodexAdapter();
+
+  const spawn = createPmSpawnService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: wireFactory(fakePm),
+    projectService, projectBriefService,
+    authResolverOpts: { hasKeychain: true },
+  });
+  const conv = createConversationService({
+    runService: rs, managerRegistry: registry,
+    managerAdapterFactory: wireFactory(fakePm),
+    lifecycleService: { sendAgentInput: () => true },
+    pmSpawnService: spawn,
+  });
+  const project = projectService.createProject({ name: 'alpha' });
+  seedTop({ rs, registry, adapter: topAdapter });
+
+  // Fresh spawn — no resumeThreadId, no runTurn yet.
+  const result = spawn.ensureLivePm({ projectId: project.id });
+  assert.equal(result.spawned, true);
+  assert.equal(result.resumed, false);
+
+  // Pre-P2-1 behavior: run.status would already be 'running'. Post-fix:
+  // still 'queued' because thread.started has not fired.
+  const runBefore = rs.getRun(result.run.id);
+  assert.equal(runBefore.status, 'queued', 'PM run must stay queued until first turn');
+
+  // Trigger the first real user turn via conversationService. The fake
+  // adapter's runTurn synthesizes thread.started on first call, which
+  // invokes onThreadStarted → markRunStarted.
+  conv.sendMessage(`pm:${project.id}`, { text: 'hello' });
+
+  const runAfter = rs.getRun(result.run.id);
+  assert.equal(runAfter.status, 'running', 'PM run flips to running after first turn / thread.started');
+  // started_at should now be populated (markRunStarted path).
+  assert.ok(runAfter.started_at, 'started_at populated by markRunStarted');
+});
+
+test('P2-1: resumed PM spawn is marked running synchronously inside startSession', async (t) => {
+  // For the resume path the fake adapter fires onThreadStarted
+  // synchronously inside startSession, so ensureLivePm should return a
+  // run that is already 'running' — no pre-turn 'queued' window is
+  // possible because the adapter semantically already has a live thread
+  // as soon as resume is wired up.
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const registry = createManagerRegistry({ runService: rs });
+  const fakePm = makeFakeCodexAdapter();
+
+  const spawn = createPmSpawnService({
+    runService: rs, managerRegistry: registry,
+    managerAdapterFactory: wireFactory(fakePm),
+    projectService, projectBriefService,
+    authResolverOpts: { hasKeychain: true },
+  });
+  const project = projectService.createProject({ name: 'alpha' });
+  seedTop({ rs, registry, adapter: fakePm });
+
+  projectBriefService.ensureBrief(project.id);
+  projectBriefService.setPmThread(project.id, {
+    pm_thread_id: 'thread_persisted',
+    pm_adapter: 'codex',
+  });
+
+  const result = spawn.ensureLivePm({ projectId: project.id });
+  assert.equal(result.resumed, true);
+  const run = rs.getRun(result.run.id);
+  assert.equal(run.status, 'running', 'resumed PM must be running immediately');
+});
+
 test('Phase 3a: lazy spawn resumes a persisted pm_thread_id', async (t) => {
   const db = await mkdb(t);
   const rs = createRunService(db, null);

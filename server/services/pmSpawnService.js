@@ -223,13 +223,43 @@ function createPmSpawnService({
     const projectSection = buildProjectScopedSystemSection({ project, brief, pmRunId: runId });
     const systemPrompt = [baseSystemPrompt, projectSection].filter(Boolean).join('\n\n');
 
-    // Hook that persists a freshly captured thread id into the brief.
-    // Runs at most once per session (codexAdapter guards with
-    // threadStartedFired). For resume, the adapter fires this synchronously
-    // inside startSession with the existing id — we DON'T want to overwrite
-    // the brief in that case (it's already equal).
+    // Hook that persists a freshly captured thread id into the brief AND
+    // flips the PM run row from queued → running. Fires exactly once per
+    // session (codexAdapter guards with threadStartedFired). For resume,
+    // the adapter fires this synchronously inside startSession with the
+    // existing id — we DON'T want to overwrite the brief in that case
+    // (it's already equal), but we DO still want to mark the run started
+    // immediately because a resumed Codex session IS live from the
+    // caller's point of view.
+    //
+    // P2-1 fix: markRunStarted was previously called unconditionally
+    // right after startSession returned. For Codex (stateless adapter —
+    // the `codex exec` process is not spawned until the first runTurn)
+    // that was a lie: the PM was advertised as `running` before any turn
+    // actually executed, so the UI `pmRunActive` badge turned "Active"
+    // pre-flight. The correct "execution actually started" boundary is
+    // thread.started (fresh spawn) or synchronous resume. We piggyback
+    // on this callback so the semantics match adapter reality without
+    // adding a second state flag. If the first runTurn fails before
+    // emitting thread.started, the run stays in `queued` — which is
+    // also correct (we never actually started).
+    let markStartedOnce = false;
+    function markPmRunStartedOnce() {
+      if (markStartedOnce) return;
+      markStartedOnce = true;
+      try {
+        runService.markRunStarted(runId, {
+          tmux_session: null,
+          worktree_path: null,
+          branch: null,
+        });
+      } catch (err) {
+        log(`markRunStarted failed run=${runId}: ${err.message}`);
+      }
+    }
     const onThreadStarted = (threadId) => {
       if (!threadId) return;
+      markPmRunStartedOnce();
       if (resumeThreadId && resumeThreadId === threadId) return;
       try {
         projectBriefService.setPmThread(projectId, {
@@ -268,10 +298,16 @@ function createPmSpawnService({
       throw wrap;
     }
 
-    // Mark the run as started so lifecycleService + UI see it.
-    try {
-      runService.markRunStarted(runId, { tmux_session: null, worktree_path: null, branch: null });
-    } catch { /* ignore */ }
+    // P2-1: markRunStarted is NO LONGER called here. The onThreadStarted
+    // callback above now owns that transition:
+    //   - resume path: onThreadStarted fires synchronously inside
+    //     adapter.startSession, so the run is already 'running' by the
+    //     time we reach this line.
+    //   - fresh spawn path: onThreadStarted fires on the first turn's
+    //     vendor 'thread.started' event, so the run stays in 'queued'
+    //     until the first real `codex exec` subprocess actually starts.
+    //     That matches the UI `pmRunActive` semantic (run.status ===
+    //     'running' === adapter has a live execution context).
 
     // Register in the manager registry so sendToManagerSlot finds it.
     managerRegistry.setActive(slotKey, runId, adapter);
