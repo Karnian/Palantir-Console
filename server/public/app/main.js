@@ -96,6 +96,10 @@ window.EmptyState = EmptyState;
 const { MentionInput } = await import('./components/MentionInput.js');
 window.MentionInput = MentionInput;
 
+// P4-3 (ESM phase 3): CommandPalette — Cmd+K navigation overlay.
+const { CommandPalette } = await import('./components/CommandPalette.js');
+window.CommandPalette = CommandPalette;
+
 // Load app.js as a classic script after the globals are in place. We use a
 // dynamic <script> tag (rather than `import './app.js'`) because app.js is
 // still a non-module bundle that relies on top-level globals. Once helpers
