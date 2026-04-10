@@ -123,12 +123,10 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           // Rebuild system prompt + env for the resumed session.
           const port = process.env.PORT || 4177;
           const token = process.env.PALANTIR_TOKEN;
-          const { buildManagerSystemPrompt: buildSysPrompt } = require('../services/managerSystemPrompt');
-          const systemPrompt = buildSysPrompt({ adapter, port, token, layer: 'top' });
-          const { resolveManagerAuth: resolveAuth, buildManagerSpawnEnv: buildEnv } = require('../services/authResolver');
-          const authCtx = resolveAuth(adapterType, authResolverOpts);
+          const systemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'top' });
+          const authCtx = resolveManagerAuth(adapterType, authResolverOpts);
           if (authCtx.canAuth) {
-            const spawnEnv = buildEnv({ authEnv: authCtx.env });
+            const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env });
             const safeCwd = process.cwd();
             adapter.startSession(r.id, {
               cwd: safeCwd,
@@ -183,12 +181,17 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
               if (project) {
                 const port = process.env.PORT || 4177;
                 const token = process.env.PALANTIR_TOKEN;
-                const { buildManagerSystemPrompt: buildSysPrompt } = require('../services/managerSystemPrompt');
-                const systemPrompt = buildSysPrompt({ adapter, port, token, layer: 'pm' });
-                const { resolveManagerAuth: resolveAuth, buildManagerSpawnEnv: buildEnv } = require('../services/authResolver');
-                const authCtx = resolveAuth('codex', authResolverOpts);
+                const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'pm' });
+                // Bake project brief into the system prompt (mirrors pmSpawnService).
+                const briefSections = [];
+                briefSections.push(`## Project Scope\nname: ${project.name}\nid: ${project.id}${project.directory ? `\ndirectory: ${project.directory}` : ''}${r.id ? `\npm_run_id: ${r.id}` : ''}`);
+                if (brief.conventions) briefSections.push(`## Project Conventions\n${brief.conventions}`);
+                if (brief.known_pitfalls) briefSections.push(`## Known Pitfalls\n${brief.known_pitfalls}`);
+                briefSections.push('## PM Role\nYou are this project\'s PM (project-scoped dispatcher). Every user turn is either: answer from the brief, dispatch a worker via /execute, or modify an in-flight worker via the worker intervention APIs above. When you record a dispatch audit claim, use the pm_run_id value shown above in the Project Scope section as your pm_run_id envelope field. Stay within this project\'s scope.');
+                const systemPrompt = [baseSystemPrompt, ...briefSections].filter(Boolean).join('\n\n');
+                const authCtx = resolveManagerAuth('codex', authResolverOpts);
                 if (authCtx.canAuth) {
-                  const spawnEnv = buildEnv({ authEnv: authCtx.env });
+                  const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env });
                   const cwd = project.directory || process.cwd();
                   adapter.startSession(r.id, {
                     systemPrompt,
