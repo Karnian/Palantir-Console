@@ -14,6 +14,7 @@ import { addToast, useToasts, ToastContainer, apiFetchWithToast } from './app/li
 import { useRoute, navigate, useEscape, useSSE, useTasks, useRuns, useProjects, useClaudeSessions, useAgents, useManagerLifecycle, useConversation, useDispatchAudit } from './app/lib/hooks.js';
 import { dueState, formatDueDate, useNowTick, dueDateMeta } from './app/lib/dueDate.js';
 import { requestNotificationPermission, showBrowserNotification, pulseTabTitle } from './app/lib/notifications.js';
+import { NAV_ITEMS } from './app/lib/nav.js';
 
 // Components
 import { RunInspector } from './app/components/RunInspector.js';
@@ -34,14 +35,8 @@ import { NewTaskModal, ExecuteModal, TaskDetailPanel } from './app/components/Ta
 // Sidebar Navigation
 // ─────────────────────────────────────────────────────────────────────────────
 
-const NAV_ITEMS = [
-  { hash: 'dashboard', icon: '\u25C9', label: 'Dashboard' },
-  { hash: 'manager',   icon: '\u2726', label: 'Manager' },
-  { hash: 'board',     icon: '\u2592', label: 'Task Board' },
-  { hash: 'projects',  icon: '\u25A3', label: 'Projects' },
-  { hash: 'agents',    icon: '\u2699', label: 'Agents' },
-];
-// Bridge NAV_ITEMS for the extracted CommandPalette ESM module.
+// NAV_ITEMS is imported from app/lib/nav.js (shared with CommandPalette).
+// Bridge onto window for main.js legacy consumers.
 window.NAV_ITEMS = NAV_ITEMS;
 
 function NavSidebar({ route, connected }) {

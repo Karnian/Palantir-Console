@@ -1,20 +1,19 @@
 // ManagerChat — Left chat panel of the Manager view.
 // Extracted from ManagerView.js as part of P8-5.
-//
-// Dependencies:
-//   - window.apiFetch                        (from app/lib/api.js)
-//   - window.addToast                        (from app/lib/toast.js)
-//   - window.useConversation                 (from app/lib/hooks.js)
-//   - window.renderMarkdown                  (from app/lib/markdown.js)
-//   - window.timeAgo                         (from app/lib/format.js)
-//   - window.Dropdown                        (from app/components/Dropdown.js)
-//   - window.EmptyState                      (from app/components/EmptyState.js)
-//   - window.MentionInput                    (from app/components/MentionInput.js)
 
 import { h } from '../../vendor/preact.module.js';
 import { useState, useEffect, useMemo, useRef } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
+
+import { apiFetch } from '../lib/api.js';
+import { addToast } from '../lib/toast.js';
+import { useConversation } from '../lib/hooks.js';
+import { renderMarkdown } from '../lib/markdown.js';
+import { timeAgo } from '../lib/format.js';
+import { Dropdown } from './Dropdown.js';
+import { EmptyState } from './EmptyState.js';
+import { MentionInput } from './MentionInput.js';
 
 // PR5: profile types that can back a manager session. Must stay in sync
 // with PROFILE_TYPE_TO_ADAPTER in server/routes/manager.js.
@@ -42,15 +41,6 @@ export function managerProfileAuthState(profile) {
 }
 
 export function ManagerChat({ manager, projects, agents = [], agentsError = null, agentsLoading = false, reloadAgents, driftAudit, onOpenDrift }) {
-  const apiFetch = window.apiFetch;
-  const addToast = window.addToast;
-  const useConversation = window.useConversation;
-  const renderMarkdown = window.renderMarkdown;
-  const timeAgo = window.timeAgo;
-  const Dropdown = window.Dropdown;
-  const EmptyState = window.EmptyState;
-  const MentionInput = window.MentionInput;
-
   const { status, events: topEvents, loading, start, sendMessage: topSendMessage, stop } = manager;
   const [input, setInput] = useState('');
 

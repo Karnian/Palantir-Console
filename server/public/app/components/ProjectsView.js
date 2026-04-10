@@ -1,24 +1,17 @@
 // ProjectsView + ProjectDetailModal — Projects management view.
 // Extracted from server/public/app.js as part of P5-3 (ESM phase 4b).
-//
-// Dependencies:
-//   - window.formatTime                      (from app/lib/format.js)
-//   - window.addToast                        (from app/lib/toast.js)
-//   - window.apiFetch                        (from app/lib/api.js)
-//   - window.useEscape                       (from app/lib/hooks.js)
-//   - window.EmptyState                      (from app/components/EmptyState.js)
-//   - window.DirectoryPicker                 (from app/components/BoardView.js)
-//
-// BOARD_COLUMNS is defined locally (same values as BoardView.js — kept in
-// sync manually; if they ever diverge, extract to a shared lib).
-//
-// Only ProjectsView is exported. ProjectDetailModal is a module-internal
-// helper used exclusively by ProjectsView.
 
 import { h } from '../../vendor/preact.module.js';
 import { useState, useMemo } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
+
+import { useEscape } from '../lib/hooks.js';
+import { formatTime } from '../lib/format.js';
+import { apiFetch } from '../lib/api.js';
+import { addToast } from '../lib/toast.js';
+import { EmptyState } from './EmptyState.js';
+import { DirectoryPicker } from './BoardView.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal constants
@@ -38,9 +31,6 @@ const BOARD_COLUMNS = [
 // ─────────────────────────────────────────────────────────────────────────────
 
 function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTask }) {
-  const useEscape = window.useEscape;
-  const formatTime = window.formatTime;
-
   useEscape(!!project, onClose);
   if (!project) return null;
 
@@ -171,12 +161,6 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTa
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun, onOpenTask }) {
-  const apiFetch = window.apiFetch;
-  const addToast = window.addToast;
-  const formatTime = window.formatTime;
-  const EmptyState = window.EmptyState;
-  const DirectoryPicker = window.DirectoryPicker;
-
   const [showNew, setShowNew] = useState(false);
   const [detailProject, setDetailProject] = useState(null);
   const [editProject, setEditProject] = useState(null);

@@ -1,22 +1,15 @@
 // AgentsView + AgentModal + AgentDetailModal — Agent profiles management view.
 // Extracted from server/public/app.js as part of P5-4 (ESM phase 4b).
-//
-// Dependencies:
-//   - window.apiFetch                        (from app/lib/api.js)
-//   - window.apiFetchWithToast               (from app/lib/toast.js)
-//   - window.useEscape                       (from app/lib/hooks.js)
-//   - window.EmptyState                      (from app/components/EmptyState.js)
-//
-// Only AgentsView is exported. AgentModal and AgentDetailModal are
-// module-internal helpers used exclusively by AgentsView.
-//
-// managerProfileAuthState lives in app.js (used also by ManagerView) and is
-// NOT extracted here.
 
 import { h } from '../../vendor/preact.module.js';
 import { useState, useEffect } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
+
+import { apiFetch } from '../lib/api.js';
+import { apiFetchWithToast } from '../lib/toast.js';
+import { useEscape } from '../lib/hooks.js';
+import { EmptyState } from './EmptyState.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Loading spinner — minimal inline component (avoids coupling to app.js Loading)
@@ -31,9 +24,6 @@ function Loading() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function AgentModal({ open, onClose, agent, onSaved }) {
-  const apiFetchWithToast = window.apiFetchWithToast;
-  const useEscape = window.useEscape;
-
   const [name, setName] = useState('');
   const [type, setType] = useState('claude-code');
   const [command, setCommand] = useState('');
@@ -179,8 +169,6 @@ function AgentModal({ open, onClose, agent, onSaved }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function AgentDetailModal({ agent, open, onClose, onEdit }) {
-  const apiFetch = window.apiFetch;
-
   const [usage, setUsage] = useState(null);
   const [runningCount, setRunningCount] = useState(0);
   const [loadingUsage, setLoadingUsage] = useState(true);
@@ -360,9 +348,6 @@ function AgentDetailModal({ agent, open, onClose, onEdit }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function AgentsView({ agents, loading, reloadAgents }) {
-  const apiFetchWithToast = window.apiFetchWithToast;
-  const EmptyState = window.EmptyState;
-
   const [showModal, setShowModal] = useState(false);
   const [editAgent, setEditAgent] = useState(null);
   const [selectedAgent, setSelectedAgent] = useState(null);

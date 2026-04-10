@@ -1,16 +1,13 @@
 // CommandPalette — Cmd+K / Ctrl+K navigation overlay with fuzzy filter
-// and number-key shortcuts. Extracted from server/public/app.js as part
-// of P4-3 (ESM phase 3).
-//
-// Dependencies:
-//   - window.NAV_ITEMS: navigation item array (stays in app.js because
-//     NavSidebar also consumes it)
-//   - window.navigate: hash router helper (bridged from hooks.js)
-//
+// and number-key shortcuts.
+
 import { h } from '../../vendor/preact.module.js';
 import { useState, useEffect, useRef } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
+
+import { NAV_ITEMS } from '../lib/nav.js';
+import { navigate } from '../lib/hooks.js';
 
 export function CommandPalette({ open, onClose }) {
   const [query, setQuery] = useState('');
@@ -25,9 +22,6 @@ export function CommandPalette({ open, onClose }) {
   }, [open]);
 
   if (!open) return null;
-
-  const NAV_ITEMS = window.NAV_ITEMS || [];
-  const navigate = window.navigate;
 
   const items = NAV_ITEMS.filter(item =>
     !query || item.label.toLowerCase().includes(query.toLowerCase())
