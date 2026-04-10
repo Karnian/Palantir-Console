@@ -71,6 +71,42 @@ export function useEscape(open, onClose) {
 }
 
 // ---- SSE ----
+//
+// P2-8: module-level broker so multiple hooks can consume the same SSE
+// stream without each opening its own EventSource. `useSSE` is still
+// the singleton owner of the real connection; when it receives an
+// event it calls both (a) the listeners map the caller passed in (the
+// legacy per-channel callback contract) AND (b) broker.publish(), which
+// fan-outs to any hook that called broker.subscribe() for this channel.
+// `useConversation` uses the broker to receive `run:event` frames so it
+// can drop its 2s poll down to 10s without losing responsiveness.
+const sseBroker = (() => {
+  const subs = new Map(); // channel -> Set<callback>
+  return {
+    subscribe(channel, cb) {
+      if (!channel || typeof cb !== 'function') return () => {};
+      let set = subs.get(channel);
+      if (!set) { set = new Set(); subs.set(channel, set); }
+      set.add(cb);
+      return () => {
+        const s = subs.get(channel);
+        if (!s) return;
+        s.delete(cb);
+        if (s.size === 0) subs.delete(channel);
+      };
+    },
+    publish(channel, data) {
+      const s = subs.get(channel);
+      if (!s || s.size === 0) return;
+      // Iterate over a snapshot so a subscriber that unsubscribes
+      // synchronously during dispatch (e.g. unmount side-effect) does
+      // not corrupt the set mid-iteration.
+      for (const cb of Array.from(s)) {
+        try { cb(data); } catch { /* per-subscriber errors are isolated */ }
+      }
+    },
+  };
+})();
 
 export function useSSE(listeners) {
   const listenersRef = useRef(listeners);
@@ -109,6 +145,12 @@ export function useSSE(listeners) {
       source.addEventListener(ch, (e) => {
         try {
           const data = JSON.parse(e.data);
+          // P2-8: publish every parsed event to the module broker so
+          // any hook that wants the frame (e.g. useConversation for
+          // `run:event`) can receive it without opening a second
+          // EventSource to the same endpoint. The per-channel callback
+          // map is still invoked — legacy contract preserved.
+          sseBroker.publish(ch, data);
           const fn = listenersRef.current[ch];
           if (fn) fn(data);
         } catch { /* ignore parse errors */ }
@@ -267,7 +309,14 @@ export function useAgents() {
 // the existing ManagerView keeps running on useManager() until a
 // later phase needs to dismantle it.
 
-export function useConversation(conversationId, { poll = true, pollMs = 2000 } = {}) {
+export function useConversation(conversationId, { poll = true, pollMs = 10000 } = {}) {
+  // P2-8: pollMs default relaxed from 2000 → 10000 now that run:event
+  // SSE frames drive live refresh. Poll is kept as a cheap safety net
+  // in case the SSE stream drops silently (EventSource reconnects are
+  // transparent but the useSSE server_session id check mitigates the
+  // replay-cursor hole). With both paths active the user sees chat
+  // updates within ~1 event-loop tick on the happy path, and within
+  // 10s on a full SSE outage.
   const [events, setEvents] = useState([]);
   const [run, setRun] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -275,6 +324,33 @@ export function useConversation(conversationId, { poll = true, pollMs = 2000 } =
   const lastEventIdRef = useRef(0);
   const activeIdRef = useRef(conversationId);
   activeIdRef.current = conversationId;
+  // Track the current backing run id so the SSE subscription can filter
+  // `run:event` frames to "this conversation's run". We keep it in a
+  // ref (not state) because the SSE callback captures closure state at
+  // subscription time — a ref lets us read the latest id without
+  // re-subscribing on every resolve() completion.
+  const runIdRef = useRef(null);
+  // P2-8 R2 fix (Codex R1 blocker): an unmount-only tombstone separate
+  // from activeIdRef. The existing activeIdRef fence catches id
+  // CHANGES mid-await (the next render re-seats activeIdRef to the new
+  // id so the post-await compare fails). But it does NOT catch UNMOUNT
+  // — on unmount the component is gone, no re-render happens, and the
+  // last committed value of activeIdRef remains equal to the captured
+  // myId. A late resolve()/loadEvents() post-await fence then passes
+  // and calls setRun / setEvents on an unmounted component.
+  //
+  // mountedRef solves this with a one-shot cleanup that fires ONLY on
+  // final unmount (empty dep effect). Every post-await state write is
+  // additionally gated on mountedRef.current. We cannot tombstone
+  // activeIdRef in the main effect's cleanup because that cleanup also
+  // fires on every id CHANGE — and by that point the render phase has
+  // already reseated activeIdRef to the new id, so clobbering to null
+  // would poison the newly-mounted conversation.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const resolve = useCallback(async () => {
     if (!conversationId) return;
@@ -288,8 +364,15 @@ export function useConversation(conversationId, { poll = true, pollMs = 2000 } =
     const myId = conversationId;
     try {
       const data = await apiFetch(`/api/conversations/${encodeURIComponent(myId)}`);
+      // P2-8 R2: mountedRef gates the unmount race in addition to the
+      // activeIdRef gate that catches id switches.
+      if (!mountedRef.current) return;
       if (activeIdRef.current !== myId) return; // user already moved
-      setRun(data.conversation?.run || null);
+      const nextRun = data.conversation?.run || null;
+      setRun(nextRun);
+      // P2-8: keep runIdRef in sync so the SSE subscription filter can
+      // tell which `run:event` frames belong to this conversation.
+      runIdRef.current = nextRun ? nextRun.id : null;
     } catch { /* 4xx — leave run null */ }
   }, [conversationId]);
 
@@ -307,7 +390,9 @@ export function useConversation(conversationId, { poll = true, pollMs = 2000 } =
       const data = await apiFetch(url);
       // v3 Phase 6 R2 fix — same fence as resolve(). Late events
       // batches from a previous id must not leak into the current
-      // conversation's render state.
+      // conversation's render state. P2-8 R2: mountedRef additionally
+      // gates the unmount race.
+      if (!mountedRef.current) return;
       if (activeIdRef.current !== myId) return;
       const incoming = Array.isArray(data.events) ? data.events : [];
       if (incoming.length === 0) return;
@@ -349,7 +434,8 @@ export function useConversation(conversationId, { poll = true, pollMs = 2000 } =
       addToast('Failed to send: ' + err.message, 'error');
       throw err;
     } finally {
-      if (activeIdRef.current === myId) {
+      // P2-8 R2: same unmount fence as resolve/loadEvents.
+      if (mountedRef.current && activeIdRef.current === myId) {
         setLoading(false);
       }
     }
@@ -375,18 +461,47 @@ export function useConversation(conversationId, { poll = true, pollMs = 2000 } =
     setEvents([]);
     setLoading(false);
     lastEventIdRef.current = 0;
+    runIdRef.current = null;
 
     resolve();
     loadEvents({ reset: true });
-    if (!poll) return;
+
+    // P2-8: subscribe to run:event SSE frames on the module broker and
+    // filter to this conversation's current backing run id. Handler
+    // captures conversationId in closure so the id-change effect
+    // teardown unsubscribes cleanly. On match, just call loadEvents()
+    // — the incremental cursor (`after=`) prevents duplicate rows even
+    // if the poll tick arrives first, and the fetch is cheap because
+    // 99% of ticks return zero new events.
+    const unsubscribe = sseBroker.subscribe('run:event', (data) => {
+      if (!data || typeof data !== 'object') return;
+      const eventRunId = data.runId || data.run_id || null;
+      if (!eventRunId) return;
+      // Fence: this conversation must still be the active one AND the
+      // runIdRef must match (populated by resolve() after mount).
+      if (activeIdRef.current !== conversationId) return;
+      if (!runIdRef.current || runIdRef.current !== eventRunId) return;
+      loadEvents();
+    });
+
+    if (!poll) {
+      return () => {
+        unsubscribe();
+        if (pollRef.current) clearInterval(pollRef.current);
+        lastEventIdRef.current = 0;
+        runIdRef.current = null;
+      };
+    }
     pollRef.current = setInterval(() => {
       if (activeIdRef.current !== conversationId) return;
       resolve();
       loadEvents();
     }, pollMs);
     return () => {
+      unsubscribe();
       if (pollRef.current) clearInterval(pollRef.current);
       lastEventIdRef.current = 0;
+      runIdRef.current = null;
     };
   }, [conversationId, poll, pollMs, resolve, loadEvents]);
 
