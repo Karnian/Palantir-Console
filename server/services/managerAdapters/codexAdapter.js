@@ -556,6 +556,15 @@ function createCodexAdapter({
     if (!state) return { accepted: false };
     if (state.ended) return { accepted: false };
     try {
+      // Record user_input event BEFORE spawning the turn so the UI shows
+      // the message immediately (parity with streamJsonEngine/claudeAdapter).
+      if (runService && text) {
+        try {
+          runService.addRunEvent(runId, 'user_input', JSON.stringify({ text: text.slice(0, 5000) }));
+        } catch (err) {
+          console.warn(`[codexAdapter] user_input event failed for ${runId}: ${err.message}`);
+        }
+      }
       spawnOneTurn(runId, text || '');
       return { accepted: true };
     } catch (err) {

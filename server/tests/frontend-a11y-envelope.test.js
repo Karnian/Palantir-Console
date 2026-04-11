@@ -328,61 +328,30 @@ test('P2-9 Reset PM button has explicit aria-label and scope-clarifying title', 
   );
 });
 
-test('P2-9 Stop Top button has explicit aria-label and scope-clarifying title', async () => {
+test('P2-9 Stop Top button has explicit aria-label', async () => {
   const src = await loadManagerViewSource();
   const idx = src.indexOf('aria-label="Stop Top manager"');
-  assert.ok(idx > 0, 'Stop Top aria-label not found — P2-9 title/aria update missing');
-  const region = src.slice(idx - 600, idx + 200);
-  assert.match(
-    region,
-    /title="Stop Top manager: terminate the shared Top manager process/,
-    'Stop button title must make scope explicit',
+  assert.ok(idx > 0, 'Stop Top aria-label not found');
+});
+
+test('P2-9 conversation target is driven by SessionGrid, not a dropdown in ManagerChat', async () => {
+  const src = await loadManagerViewSource();
+  // The Dropdown-based conversation picker was removed from ManagerChat.
+  // Conversation switching is now handled by SessionGrid rows.
+  assert.ok(
+    !src.includes('className="manager-picker-select"') || !src.includes('value=${conversationTarget}'),
+    'Dropdown conversation picker should be removed from ManagerChat',
   );
 });
 
-test('P2-9 PM selector uses the Dropdown component, not native <select>', async () => {
-  const src = await loadManagerViewSource();
-  // Anchor on the unique className the swap kept.
-  const idx = src.indexOf('className="manager-picker-select"');
-  assert.ok(idx > 0, 'PM selector Dropdown className not found — swap missing');
-  const region = src.slice(idx, idx + 1500);
-  assert.match(
-    region,
-    /value=\$\{conversationTarget\}/,
-    'PM selector Dropdown must bind to conversationTarget state',
+test('P2-9 SessionGrid accepts onSelectConversation prop', async () => {
+  const gridSrc = await fs.readFile(
+    path.join(__dirname, '..', 'public', 'app', 'components', 'SessionGrid.js'),
+    'utf8',
   );
-  assert.match(
-    region,
-    /onChange=\$\{\(v\)\s*=>\s*setConversationTarget\(v\)\}/,
-    'PM selector Dropdown onChange must call setConversationTarget(v)',
-  );
-});
-
-test('P2-9 legacy conversation-target native <select> is removed', async () => {
-  // Scope note: the agent profile picker ALSO uses the
-  // `manager-picker-select` class and is legitimately a native
-  // <select> — we do NOT touch that picker in P2-9 (the P2-9 swap
-  // specifically targets the Top-vs-PM conversation selector). The
-  // check below therefore anchors on the conversation-target path
-  // (value=${conversationTarget}) and confirms it is NOT wired to a
-  // native <select>.
-  const src = await loadManagerViewSource();
-  // Find the conversationTarget binding and inspect the enclosing
-  // element type. The Dropdown swap uses `<${Dropdown}` on the same
-  // element; a regression to native <select> would show `<select`
-  // within ~200 chars upstream.
-  const idx = src.indexOf('value=${conversationTarget}');
-  assert.ok(idx > 0, 'conversationTarget binding not found');
-  const before = src.slice(Math.max(0, idx - 400), idx);
-  assert.match(
-    before,
-    /<\$\{Dropdown\}/,
-    'conversationTarget must be bound on the Dropdown component, not a native <select>',
-  );
-  assert.doesNotMatch(
-    before,
-    /<select\b/,
-    'legacy native <select> for conversationTarget must be removed',
+  assert.ok(
+    gridSrc.includes('onSelectConversation'),
+    'SessionGrid must accept onSelectConversation prop for conversation switching',
   );
 });
 

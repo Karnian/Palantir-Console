@@ -108,8 +108,13 @@ export function ManagerChat({ manager, projects, agents = [], agentsError = null
   const inputRef = useRef(null);
 
   // Refocus chat input when conversation target changes (e.g. PM picker)
+  // and pre-warm PM session so first message doesn't pay lazy spawn cost.
   useEffect(() => {
     if (inputRef.current) inputRef.current.focus();
+    if (isPm && pmProjectId && status.active) {
+      apiFetch(`/api/manager/pm/${encodeURIComponent(pmProjectId)}/warm`, { method: 'POST' })
+        .catch(() => {}); // best-effort, no toast on failure
+    }
   }, [conversationTarget]);
 
   // Auto-scroll to bottom on new events
@@ -413,62 +418,11 @@ export function ManagerChat({ manager, projects, agents = [], agentsError = null
           ${!isPm && status.active && status.usage && html`
             <span class="manager-cost">$${(status.usage.costUsd || 0).toFixed(4)}</span>
           `}
-          ${/* v3 Phase 6 + P2-9: conversation selector. Upgraded from
-               the native <select> to the existing Dropdown component
-               so it matches the rest of the app's picker styling AND
-               so the "· active" annotation can use a small trailing
-               chip rather than jamming everything into the option
-               text. The option list is derived from projects with
-               pm_enabled !== 0; Top is always present as the first
-               option. */ ''}
-          ${status.active && html`
-            <${Dropdown}
-              className="manager-picker-select"
-              style="max-width:220px"
-              title="Conversation target — pick Top or a project PM"
-              ariaLabel="Conversation target"
-              value=${conversationTarget}
-              onChange=${(v) => setConversationTarget(v)}
-              options=${[
-                { value: 'top', label: 'Top manager' },
-                ...((projects || [])
-                  .filter(p => p.pm_enabled !== 0)
-                  .map(p => {
-                    const active = (status.pms || []).some(s => s.conversationId === `pm:${p.id}`);
-                    return {
-                      value: `pm:${p.id}`,
-                      // \`· active\` suffix preserved — Dropdown renders
-                      // the label as plain text, so the visual is the
-                      // same as the pre-P2-9 native <select>.
-                      label: `@${p.name}${active ? ' \u00B7 active' : ''}`,
-                    };
-                  })),
-              ]}
-            />
-          `}
-          ${/* v3 Phase 7: per-PM drift indicator. Only surfaces
-               when the currently selected PM has one or more
-               incoherent audit rows. Clicking opens the global
-               DriftDrawer so the user can inspect + dismiss. */ ''}
-          ${isPm && driftAudit && (driftAudit.countByProject.get(pmProjectId) || 0) > 0 && html`
-            <button
-              class="btn btn-sm btn-danger"
-              style="padding:2px 8px"
-              title="This PM has pending drift warnings. Click to inspect."
-              onClick=${() => onOpenDrift && onOpenDrift()}
-            >\u26A0 ${driftAudit.countByProject.get(pmProjectId)}</button>
-          `}
-          ${/* P2-9: clarified tooltips so the Stop (Top) vs Reset PM
-               distinction is unambiguous. Stop terminates the shared
-               Top manager process — all PMs keep running. Reset PM
-               terminates ONLY this project's PM thread; Top and other
-               PMs are unaffected. The label text stays short; the
-               tooltip + aria-label carry the detail. */ ''}
           ${isPm && pmRunActive && html`
             <button
               class="btn btn-sm btn-danger"
               onClick=${handleResetPm}
-              title="Reset PM: terminate this project's PM thread only. Top and other PMs keep running. Next message starts a fresh PM thread for this project."
+              title="Reset PM: terminate this project's PM thread only."
               aria-label="Reset PM for this project"
             >Reset PM</button>
           `}
@@ -476,7 +430,7 @@ export function ManagerChat({ manager, projects, agents = [], agentsError = null
             <button
               class="btn btn-sm btn-danger"
               onClick=${stop}
-              title="Stop Top manager: terminate the shared Top manager process. Any currently active PMs continue running in their own sessions."
+              title="Stop Top manager"
               aria-label="Stop Top manager"
             >Stop</button>
           `}

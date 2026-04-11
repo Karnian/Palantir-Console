@@ -152,6 +152,64 @@ function createApp(options = {}) {
     try { conversationService.clearParentNotices(runId); } catch { /* ignore */ }
   });
 
+  // PM auto-review: when a worker run completes/fails within a project
+  // that has an active PM, send the result summary to the PM so it can
+  // autonomously review and decide whether to re-run or mark the task done.
+  //
+  // Circuit breaker: track per-(project, task) review count. After
+  // MAX_AUTO_REVIEWS rounds without a user message, stop auto-reviewing
+  // and let the PM sit idle so the user can intervene. Resets when the
+  // user sends a message to the PM (tracked via onSlotCleared or next
+  // user-initiated sendMessage).
+  const AUTO_REVIEW_MAX = 5;
+  const _autoReviewCounts = new Map(); // "projectId:taskId" -> count
+  eventBus.subscribe((event) => {
+    if (event.channel !== 'run:completed') return;
+    const run = event.data?.run;
+    if (!run || run.is_manager) return;
+    const projectId = run.project_id;
+    if (!projectId) return;
+    const pmSlotKey = `pm:${projectId}`;
+    const pmRunId = managerRegistry.getActiveRunId(pmSlotKey);
+    if (!pmRunId) return; // no active PM for this project
+    // Circuit breaker check
+    const countKey = `${projectId}:${run.task_id || '_'}`;
+    const count = _autoReviewCounts.get(countKey) || 0;
+    if (count >= AUTO_REVIEW_MAX) {
+      console.warn(`[pm-auto-review] Circuit breaker: ${countKey} hit ${AUTO_REVIEW_MAX} reviews — skipping. User intervention needed.`);
+      return;
+    }
+    _autoReviewCounts.set(countKey, count + 1);
+    // Build review notification
+    const status = run.status || 'unknown';
+    const taskId = run.task_id || 'none';
+    const summaryRaw = (run.result_summary || '').replace(/\[system[:\s]/gi, '[info ');
+    const exitCode = run.exit_code != null ? run.exit_code : '?';
+    const reviewText = [
+      `[system: worker completed — auto-review required]`,
+      `Worker run ${run.id} finished.`,
+      `  status: ${status}`,
+      `  exit_code: ${exitCode}`,
+      `  task_id: ${taskId}`,
+      summaryRaw ? `  result: ${summaryRaw.slice(0, 1000)}` : '',
+      '',
+      `Review round ${count + 1}/${AUTO_REVIEW_MAX} for this task.`,
+      'Review this worker\'s output (GET /api/runs/' + run.id + '/events), then:',
+      '- If the work is satisfactory, update the task status to "done".',
+      '- If additional work is needed, spawn a new worker with corrective instructions.',
+      '- If the worker failed, diagnose and retry or escalate to the user.',
+    ].filter(Boolean).join('\n');
+    // Defer to next tick to avoid "previous turn still running" conflict
+    // when the PM is mid-turn (Codex stateless adapter single-turn guard).
+    setImmediate(() => {
+      try {
+        conversationService.sendMessage(pmSlotKey, { text: reviewText });
+      } catch (err) {
+        console.warn(`[pm-auto-review] Failed to send review to ${pmSlotKey}: ${err.message}`);
+      }
+    });
+  });
+
   // v3 Phase 4: annotate-only reconciliation. reconciliationService
   // reads conversationService.peekParentNotices to detect "user
   // intervention stale" claims, so it has to be constructed AFTER
@@ -232,7 +290,7 @@ function createApp(options = {}) {
   app.use('/api/agents', createAgentsRouter({ agentProfileService, providerRegistry, authResolverOpts }));
   app.use('/api/events', createEventsRouter({ eventBus }));
   app.use('/api/claude-sessions', createClaudeSessionsRouter());
-  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, authResolverOpts }));
+  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, pmSpawnService, authResolverOpts }));
   app.use('/api/conversations', createConversationsRouter({ conversationService, runService }));
   app.use('/api/dispatch-audit', createDispatchAuditRouter({ reconciliationService }));
   app.use('/api/router', createRouterRouter({ routerService }));

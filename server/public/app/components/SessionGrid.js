@@ -36,7 +36,8 @@ const runStatusColor = (status) => {
   }
 };
 
-export function SessionGrid({ tasks, runs, projects, activePms = [], onSelectPm }) {
+export function SessionGrid({ tasks, runs, projects, activePms = [], managerStatus, conversationTarget, onSelectConversation }) {
+  const onSelectPm = onSelectConversation;
   const [inspectRun, setInspectRun] = useState(null);
   const [selectedTask, setSelectedTask] = useState(null);
   const [collapsedProjects, setCollapsedProjects] = useState({});
@@ -121,7 +122,17 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], onSelectPm 
       </div>
 
       <div class="manager-grid-body">
-        ${projectGroups.length === 0 && html`
+        ${managerStatus?.active && (() => {
+          const isSelected = conversationTarget === 'top';
+          return html`
+            <div class="manager-session-row ${isSelected ? 'selected' : ''}" onClick=${() => onSelectConversation && onSelectConversation('top')}>
+              <span class="manager-session-icon">\u2726</span>
+              <span class="manager-session-label">Manager Session</span>
+              <span class="manager-session-badge running">Active</span>
+            </div>
+          `;
+        })()}
+        ${projectGroups.length === 0 && !managerStatus?.active && html`
           <${EmptyState} icon="\u2699" text="No tasks yet" sub="Start a manager and assign tasks" />
         `}
         ${projectGroups.map(group => {
@@ -137,18 +148,30 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], onSelectPm 
             ${!projCollapsed && (() => {
               const pm = activePms.find(p => p.conversationId === `pm:${group.key}`);
               const pmStatus = pm?.run?.status;
-              const pmColor = pmStatus === 'running' ? '#3b82f6' : pmStatus === 'needs_input' ? '#f59e0b' : '#6b7280';
+              const pmLabel = pmStatus === 'running' ? 'Running'
+                : pmStatus === 'needs_input' ? 'Waiting'
+                : pmStatus === 'queued' ? 'Starting...'
+                : pmStatus === 'completed' ? 'Done'
+                : pmStatus === 'stopped' ? 'Stopped'
+                : pmStatus === 'failed' ? 'Failed'
+                : 'Idle';
+              const pmColor = pmStatus === 'running' ? '#3b82f6'
+                : pmStatus === 'needs_input' ? '#f59e0b'
+                : pmStatus === 'completed' ? '#22c55e'
+                : pmStatus === 'failed' ? '#ef4444'
+                : '#6b7280';
+              const pmSelected = conversationTarget === `pm:${group.key}`;
               return pm ? html`
-                <div class="pm-session-row" onClick=${() => onSelectPm && onSelectPm(`pm:${group.key}`)}>
+                <div class="pm-session-row ${pmSelected ? 'selected' : ''}" onClick=${() => onSelectPm && onSelectPm(`pm:${group.key}`)}>
                   <span class="pm-session-dot" style="background:${pmColor}"></span>
                   <span class="pm-session-label">PM Session</span>
-                  <span class="pm-session-status" style="color:${pmColor}">${pmStatus || 'idle'}</span>
+                  <span class="pm-session-status" style="color:${pmColor}">${pmLabel}${pmStatus === 'running' ? html` <span class="pm-spinner"></span>` : ''}</span>
                 </div>
               ` : null;
             })()}
             ${!projCollapsed && group.sections.map(sec => {
               const secKey = `${group.key}::${sec.key}`;
-              const secCollapsed = collapsedSections[secKey];
+              const secCollapsed = secKey in collapsedSections ? collapsedSections[secKey] : sec.key === 'done';
               return html`
               <div class="task-status-section">
                 <div class="task-status-divider" onClick=${() => toggleSection(secKey)} style="cursor:pointer">
