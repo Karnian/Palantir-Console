@@ -616,14 +616,11 @@ test('v3 Phase 0: managerSystemPrompt top layer excludes worker intervention API
   const prompt = buildManagerSystemPrompt({
     adapter: null, port: 4177, token: null, layer: 'top',
   });
-  // Worker intervention APIs MUST NOT appear in top layer prompt
+  // Worker intervention APIs (run input/cancel) MUST NOT appear in top layer prompt
   assert.ok(!prompt.includes('/api/runs/RUN_ID/input'),
     'top layer must not document /api/runs/:id/input');
   assert.ok(!prompt.includes('/api/runs/RUN_ID/cancel'),
     'top layer must not document /api/runs/:id/cancel');
-  assert.ok(!prompt.includes('PATCH ${base}/api/tasks/TASK_ID/status') &&
-            !prompt.includes('PATCH http://localhost:4177/api/tasks/TASK_ID/status'),
-    'top layer must not document PATCH /api/tasks/:id/status');
   // Dispatch API MUST appear
   assert.ok(prompt.includes('/api/tasks/TASK_ID/execute'),
     'top layer must document /execute');

@@ -119,12 +119,7 @@ POST ${base}/api/conversations/pm:PROJECT_ID/message  body: {"text":"your instru
   // Worker intervention APIs — only documented for PM layer. Top does not know
   // about these, so it cannot drift into modifying workers via prompt.
   const workerInterventionSection = layer === 'pm'
-    ? `\n\n### Worker Plan Modification (PM-only, in-flight)
-- Send input to run: POST ${base}/api/runs/RUN_ID/input  body: {"text":"..."}
-- Cancel run: POST ${base}/api/runs/RUN_ID/cancel
-- Update task status: PATCH ${base}/api/tasks/TASK_ID/status  body: {"status":"done"}
-
-### Dispatch Audit (PM-only, v3 Phase 4 annotate-only reconciliation)
+    ? `\n\n### Dispatch Audit (PM-only, v3 Phase 4 annotate-only reconciliation)
 Every time you make a definitive claim about a task or worker state —
 "I just spawned worker X for task Y", "task Z is done", "worker W is
 running" — you MUST also record that claim by POSTing to the dispatch
@@ -153,6 +148,30 @@ do not confuse them:
   will reject cross-project claims with 400.`
     : '';
 
+  // Approval gate differs by layer: Top asks user, PM acts autonomously
+  const approvalNote = layer === 'pm'
+    ? `As PM, you may call /execute autonomously when reviewing worker results or following user instructions. No additional user confirmation is needed for corrective re-runs within your project scope.`
+    : `IMPORTANT: NEVER call /execute without explicit user approval. Always confirm before spawning workers.
+Do NOT auto-execute tasks just because their status is in_progress — status alone does not mean "run an agent".`;
+
+  // Curl templates for Codex adapter
+  const curlNote = adapterType === 'codex'
+    ? `Use curl (via Bash) to query the API.
+\`\`\`
+# GET
+curl -s ${base}/api/runs${token ? ` -H "Authorization: Bearer ${token}"` : ''} | head -c 2000
+
+# POST (create/execute)
+curl -s -X POST ${base}/api/tasks${token ? ` -H "Authorization: Bearer ${token}"` : ''} -H "Content-Type: application/json" -d '{"title":"...","project_id":"..."}'
+
+# PATCH (update)
+curl -s -X PATCH ${base}/api/tasks/TASK_ID/status${token ? ` -H "Authorization: Bearer ${token}"` : ''} -H "Content-Type: application/json" -d '{"status":"done"}'
+
+# DELETE
+curl -s -X DELETE ${base}/api/tasks/TASK_ID${token ? ` -H "Authorization: Bearer ${token}"` : ''}
+\`\`\``
+    : `Use WebFetch to query it (do NOT use Bash with curl — curl is not in your tool allowlist).`;
+
   return `## CRITICAL: How to delegate work to worker agents
 
 NEVER use your internal tools (subagents, nested codex/claude spawn, etc.) to do delegated work.
@@ -172,8 +191,7 @@ ${layerNote}
 If no agent profiles exist, tell the user to create one first via the Agents page.
 The /execute endpoint is what actually spawns a Claude Code (or other agent) subprocess. Without it, no agent runs.
 
-IMPORTANT: NEVER call /execute without explicit user approval. Always confirm before spawning workers.
-Do NOT auto-execute tasks just because their status is in_progress — status alone does not mean "run an agent".
+${approvalNote}
 
 You may use your own Bash/Read/Grep tools for quick lookups (checking status, reading files, etc.),
 but any substantial work (coding, refactoring, analysis tasks) must be delegated via the API.
@@ -182,40 +200,45 @@ You do NOT have Write or Edit tools — this is intentional. Direct file modific
 ## Palantir Console REST API
 
 The Palantir Console server runs at ${base}.
-${adapterType === 'codex'
-  ? `Use curl (via Bash) to query the API. Example: curl -s ${base}/api/runs | head -c 2000`
-  : `Use WebFetch to query it (do NOT use Bash with curl — curl is not in your tool allowlist).`}
-${token ? `\nIMPORTANT: All API requests require auth header: Authorization: Bearer ${token}${adapterType === 'codex' ? `\nFor curl: curl -s -H "Authorization: Bearer ${token}" ${base}/api/runs` : ''}` : ''}
+${curlNote}
+${token && adapterType !== 'codex' ? `\nIMPORTANT: All API requests require auth header: Authorization: Bearer ${token}` : ''}
 
-### Runs (read-only)
+### Runs
 - List all runs: GET ${base}/api/runs
 - Filter by status: GET ${base}/api/runs?status=running
 - Filter by task: GET ${base}/api/runs?task_id=TASK_ID
 - Get single run: GET ${base}/api/runs/RUN_ID
 - Get run events: GET ${base}/api/runs/RUN_ID/events
+- Get run output: GET ${base}/api/runs/RUN_ID/output${layer === 'pm' ? `
+- Send input to run: POST ${base}/api/runs/RUN_ID/input  body: {"text":"..."}
+- Cancel run: POST ${base}/api/runs/RUN_ID/cancel` : ''}
 
 ### Tasks
 - List all tasks: GET ${base}/api/tasks
 - Filter by status: GET ${base}/api/tasks?status=in_progress
+- Filter by project: GET ${base}/api/tasks?project_id=PROJECT_ID
 - Create task: POST ${base}/api/tasks  body: {"title":"...","description":"...","priority":"medium","project_id":"PROJECT_ID"}
   Only include project_id if the task clearly belongs to an existing project. If unrelated, omit project_id (the task will be unassigned). Do NOT guess or force a project assignment.
 - Update task: PATCH ${base}/api/tasks/TASK_ID  body: {"title":"...","description":"...","priority":"high"}
 - Update task status: PATCH ${base}/api/tasks/TASK_ID/status  body: {"status":"done"}
 - Delete task: DELETE ${base}/api/tasks/TASK_ID
+- Execute task with agent: POST ${base}/api/tasks/TASK_ID/execute  body: {"agent_profile_id":"AGENT_ID","prompt":"detailed work instructions here"}
 
 ### Projects
 - List projects: GET ${base}/api/projects
+- Get project tasks: GET ${base}/api/projects/PROJECT_ID/tasks
 
 ### Agent Profiles
 - List agents: GET ${base}/api/agents
 
-### Dispatch (spawn actual worker agents — the only write path you own)
-- Execute task with agent: POST ${base}/api/tasks/TASK_ID/execute  body: {"agent_profile_id":"AGENT_ID","prompt":"detailed work instructions here"}
-
-${adapterType === 'codex' ? 'Use curl (via Bash) for all API calls.' : 'Use the WebFetch tool for all API calls.'}${workerInterventionSection}
+### Conversations (for PM delegation from Top)
+- Send message to conversation: POST ${base}/api/conversations/CONVERSATION_ID/message  body: {"text":"..."}
+  CONVERSATION_ID format: "top" | "pm:PROJECT_ID" | "worker:RUN_ID"
+- Get conversation events: GET ${base}/api/conversations/CONVERSATION_ID/events
+${workerInterventionSection}
 
 Run statuses: queued, running, paused, needs_input, completed, failed, cancelled, stopped
-Task statuses: backlog, todo, in_progress, review, done
+Task statuses: backlog, todo, in_progress, review, done, failed
 
 Always be concise and action-oriented. When reporting status, use a structured format:
 - Running (count)
