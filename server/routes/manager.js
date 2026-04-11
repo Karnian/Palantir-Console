@@ -123,7 +123,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           // Rebuild system prompt + env for the resumed session.
           const port = process.env.PORT || 4177;
           const token = process.env.PALANTIR_TOKEN;
-          const systemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'top' });
+          const systemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'top', adapterType });
           const authCtx = resolveManagerAuth(adapterType, authResolverOpts);
           if (authCtx.canAuth) {
             const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env });
@@ -181,7 +181,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
               if (project) {
                 const port = process.env.PORT || 4177;
                 const token = process.env.PALANTIR_TOKEN;
-                const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'pm' });
+                const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'pm', adapterType: 'codex' });
                 // Bake project brief into the system prompt (mirrors pmSpawnService).
                 const briefSections = [];
                 briefSections.push(`## Project Scope\nname: ${project.name}\nid: ${project.id}${project.directory ? `\ndirectory: ${project.directory}` : ''}${r.id ? `\npm_run_id: ${r.id}` : ''}`);
@@ -442,7 +442,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     const adapter = managerAdapterFactory.getAdapter(adapterType);
     const port = process.env.PORT || 4177;
     const token = process.env.PALANTIR_TOKEN;
-    const systemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'top' });
+    const systemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'top', adapterType });
     const initialUserContext = buildInitialUserContext({
       runSummary,
       projectList,
