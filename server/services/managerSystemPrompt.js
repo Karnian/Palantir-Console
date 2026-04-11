@@ -41,7 +41,38 @@ Your role:
  * See docs/specs/manager-v3-multilayer.md principle 8 (prompt 계층별 분기).
  */
 function buildCommonBase({ port, token, layer = 'top' }) {
-  const base = `http://localhost:${port}`;
+  // When the server is bound to 0.0.0.0 (external access), use the
+  // machine's actual IP so remote Codex/Claude processes can reach the
+  // API. PALANTIR_BASE_URL takes highest priority (explicit override),
+  // then HOST env detection, then localhost fallback.
+  let host = 'localhost';
+  if (process.env.PALANTIR_BASE_URL) {
+    // User explicitly set the full base URL — use it directly.
+    const base = process.env.PALANTIR_BASE_URL.replace(/\/+$/, '');
+    return _buildCommonBaseInner({ base, token, layer });
+  }
+  const bindHost = process.env.HOST || '';
+  if (bindHost === '0.0.0.0') {
+    // Resolve to a reachable IP. Prefer non-internal IPv4.
+    try {
+      const os = require('os');
+      const ifaces = os.networkInterfaces();
+      for (const name of Object.keys(ifaces)) {
+        for (const iface of ifaces[name]) {
+          if (iface.family === 'IPv4' && !iface.internal) {
+            host = iface.address;
+            break;
+          }
+        }
+        if (host !== 'localhost') break;
+      }
+    } catch { /* fallback to localhost */ }
+  }
+  const base = `http://${host}:${port}`;
+  return _buildCommonBaseInner({ base, token, layer });
+}
+
+function _buildCommonBaseInner({ base, token, layer }) {
   // P4-7: auth variable kept for backward-compat with PM layer docs
   // but curl examples are replaced with WebFetch-friendly format.
 
