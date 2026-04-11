@@ -98,6 +98,11 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
       args.push('--add-dir', opts.addDir);
     }
 
+    // Resume a previous Claude Code session by session_id.
+    if (opts.resumeSessionId) {
+      args.push('--resume', opts.resumeSessionId);
+    }
+
     if (!opts.isManager) {
       args.push('--no-session-persistence');
       // Set high max-turns so workers can complete complex multi-step tasks
@@ -113,12 +118,12 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
    * Spawn a Claude Code agent with stream-json protocol.
    */
   function spawnAgent(runId, { prompt, cwd, env, systemPrompt, permissionMode,
-    allowedTools, maxBudgetUsd, model, mcpConfig, addDir, isManager, maxTurns, onVendorEvent }) {
+    allowedTools, maxBudgetUsd, model, mcpConfig, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent }) {
 
     const claudeBin = resolveClaudeBin();
     const args = buildArgs({
       prompt, systemPrompt, permissionMode, allowedTools,
-      maxBudgetUsd, model, mcpConfig, addDir, isManager, maxTurns,
+      maxBudgetUsd, model, mcpConfig, addDir, isManager, maxTurns, resumeSessionId,
     });
 
     const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
@@ -273,6 +278,10 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
               tools: (event.tools || []).slice(0, 20),
               cwd: event.cwd,
             }));
+            // Persist session_id so we can --resume on server restart.
+            if (event.session_id) {
+              try { runService.updateClaudeSessionId(runId, event.session_id); } catch { /* ignore */ }
+            }
           }
           if (eventBus) eventBus.emit('run:init', { runId, sessionId: event.session_id });
         }

@@ -199,7 +199,7 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
     supportsTokenUsage: true,
     supportsUsdCost: true,
     supportsToolStreaming: true,
-    supportsResume: false,
+    supportsResume: true,
   };
 
   /**
@@ -218,7 +218,7 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
    *
    * See docs/specs/manager-v3-multilayer.md principle 1.
    */
-  function startSession(runId, { prompt, cwd, systemPrompt, model, allowedTools, mcpTools, mcpConfig, permissionMode, env }) {
+  function startSession(runId, { prompt, cwd, systemPrompt, model, allowedTools, mcpTools, mcpConfig, permissionMode, env, resumeSessionId } = {}) {
     // Reset normalizer state in case the runId is recycled.
     runState.delete(runId);
     const baseTools = allowedTools || [
@@ -251,6 +251,7 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
       mcpConfig: mcpConfig || undefined, // P4-2: project-scoped MCP config path
       model: model || undefined,
       isManager: true,
+      resumeSessionId: resumeSessionId || undefined,
       onVendorEvent: (event, proc) => normalizeClaudeEvent(runId, event, proc),
     });
     return { sessionRef: result };
