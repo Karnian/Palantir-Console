@@ -116,6 +116,9 @@ function createRunService(db, eventBus) {
     updateManagerThread: db.prepare(`
       UPDATE runs SET manager_thread_id = ? WHERE id = ?
     `),
+    updateClaudeSessionId: db.prepare(`
+      UPDATE runs SET claude_session_id = ? WHERE id = ?
+    `),
     updateStatus: db.prepare(`
       UPDATE runs SET status = ?, ended_at = CASE WHEN ? IN ('completed','failed','cancelled','stopped') THEN datetime('now') ELSE ended_at END WHERE id = ?
     `),
@@ -216,6 +219,12 @@ function createRunService(db, eventBus) {
   function updateManagerThreadId(id, threadId) {
     getRun(id);
     stmts.updateManagerThread.run(threadId || null, id);
+    return stmts.getById.get(id);
+  }
+
+  function updateClaudeSessionId(id, sessionId) {
+    getRun(id);
+    stmts.updateClaudeSessionId.run(sessionId || null, id);
     return stmts.getById.get(id);
   }
 
@@ -418,7 +427,7 @@ function createRunService(db, eventBus) {
   return {
     listRuns, getRun, createRun,
     updateRunStatus, markRunStarted, updateRunResult,
-    updateManagerThreadId,
+    updateManagerThreadId, updateClaudeSessionId,
     deleteRun, addRunEvent, getRunEvents,
     getActiveManager, getActiveManagers, getRunByConversationId, getWorkerRuns,
   };

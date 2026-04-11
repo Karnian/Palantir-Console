@@ -85,24 +85,153 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
 
   let startingManager = false; // guard against concurrent /start requests
 
-  // On startup: mark any stale manager runs (from previous server instances) as stopped.
-  // PR1a: route disposeSession() through every adapter so external resources
-  // (Codex temp files in PR4, etc.) get cleaned up — not just the Claude
-  // subprocess. Today no resources exist, so this is a no-op for Claude.
+  // On startup: attempt to RESUME stale manager runs from previous server
+  // instances. If a run has a persisted session/thread id, we try to
+  // reconnect instead of killing it. Only runs that cannot be resumed are
+  // marked 'stopped' (the previous behavior).
+  //
+  // Resume support:
+  //   - Claude (top): uses `--resume <claude_session_id>` to reconnect the
+  //     CLI conversation. The session_id is persisted in runs.claude_session_id.
+  //   - Codex (pm): uses `codex exec resume <thread_id>`. The thread_id is
+  //     persisted in project_briefs.pm_thread_id.
+  //
+  // Resume happens synchronously at module load time (before any HTTP
+  // request). Failures are silent — the run is simply marked 'stopped'.
+  const _resumeResults = { attempted: 0, resumed: 0, stopped: 0 };
   try {
     const staleManagers = runService.listRuns({ status: 'running' })
       .concat(runService.listRuns({ status: 'queued' }))
       .concat(runService.listRuns({ status: 'needs_input' }))
       .filter(r => r.is_manager);
-    for (const r of staleManagers) {
-      try {
-        const adapter = managerAdapterFactory.getAdapter(r.manager_adapter || 'claude-code');
-        adapter.disposeSession(r.id);
-      } catch { /* ignore */ }
-      runService.updateRunStatus(r.id, 'stopped', { force: true });
-      try { conversationService.clearParentNotices(r.id); } catch { /* ignore */ }
+
+    // Phase 1: resume Top managers (claude-code with session_id).
+    // Phase 2: resume PM managers (codex with thread_id).
+    // We process Tops first because PMs need an active Top for
+    // parent-notice routing.
+    const tops = staleManagers.filter(r => r.manager_layer !== 'pm');
+    const pms = staleManagers.filter(r => r.manager_layer === 'pm');
+
+    for (const r of tops) {
+      _resumeResults.attempted++;
+      let resumed = false;
+      const adapterType = r.manager_adapter || 'claude-code';
+
+      if (adapterType === 'claude-code' && r.claude_session_id) {
+        try {
+          const adapter = managerAdapterFactory.getAdapter('claude-code');
+          // Rebuild system prompt + env for the resumed session.
+          const port = process.env.PORT || 4177;
+          const token = process.env.PALANTIR_TOKEN;
+          const systemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'top' });
+          const authCtx = resolveManagerAuth(adapterType, authResolverOpts);
+          if (authCtx.canAuth) {
+            const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env });
+            const safeCwd = process.cwd();
+            adapter.startSession(r.id, {
+              cwd: safeCwd,
+              systemPrompt,
+              env: spawnEnv,
+              resumeSessionId: r.claude_session_id,
+            });
+            managerRegistry.setActive('top', r.id, adapter);
+            // Ensure run status is 'running'.
+            try { runService.updateRunStatus(r.id, 'running', { force: true }); } catch { /* ignore */ }
+            resumed = true;
+            console.log(`[boot] Resumed top manager run=${r.id} session=${r.claude_session_id}`);
+          }
+        } catch (err) {
+          console.warn(`[boot] Failed to resume top manager run=${r.id}: ${err.message}`);
+        }
+      }
+
+      if (!resumed) {
+        try {
+          const adapter = managerAdapterFactory.getAdapter(adapterType);
+          adapter.disposeSession(r.id);
+        } catch { /* ignore */ }
+        runService.updateRunStatus(r.id, 'stopped', { force: true });
+        try { conversationService.clearParentNotices(r.id); } catch { /* ignore */ }
+        _resumeResults.stopped++;
+      } else {
+        _resumeResults.resumed++;
+      }
     }
-  } catch { /* ignore */ }
+
+    for (const r of pms) {
+      _resumeResults.attempted++;
+      let resumed = false;
+      const adapterType = r.manager_adapter || 'codex';
+
+      // Extract projectId from conversation_id ('pm:<projectId>').
+      const projectId = r.conversation_id && r.conversation_id.startsWith('pm:')
+        ? r.conversation_id.slice(3)
+        : null;
+
+      if (projectId && adapterType === 'codex' && projectBriefService) {
+        try {
+          const brief = projectBriefService.getBrief(projectId);
+          if (brief && brief.pm_thread_id) {
+            const adapter = managerAdapterFactory.getAdapter('codex');
+            // We need the active Top for parent-notice routing.
+            const activeTopRunId = managerRegistry.getActiveRunId('top');
+            if (activeTopRunId) {
+              let project;
+              try { project = projectService.getProject(projectId); } catch { /* ignore */ }
+              if (project) {
+                const port = process.env.PORT || 4177;
+                const token = process.env.PALANTIR_TOKEN;
+                const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'pm' });
+                // Bake project brief into the system prompt (mirrors pmSpawnService).
+                const briefSections = [];
+                briefSections.push(`## Project Scope\nname: ${project.name}\nid: ${project.id}${project.directory ? `\ndirectory: ${project.directory}` : ''}${r.id ? `\npm_run_id: ${r.id}` : ''}`);
+                if (brief.conventions) briefSections.push(`## Project Conventions\n${brief.conventions}`);
+                if (brief.known_pitfalls) briefSections.push(`## Known Pitfalls\n${brief.known_pitfalls}`);
+                briefSections.push('## PM Role\nYou are this project\'s PM (project-scoped dispatcher). Every user turn is either: answer from the brief, dispatch a worker via /execute, or modify an in-flight worker via the worker intervention APIs above. When you record a dispatch audit claim, use the pm_run_id value shown above in the Project Scope section as your pm_run_id envelope field. Stay within this project\'s scope.');
+                const systemPrompt = [baseSystemPrompt, ...briefSections].filter(Boolean).join('\n\n');
+                const authCtx = resolveManagerAuth('codex', authResolverOpts);
+                if (authCtx.canAuth) {
+                  const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env });
+                  const cwd = project.directory || process.cwd();
+                  adapter.startSession(r.id, {
+                    systemPrompt,
+                    cwd,
+                    env: spawnEnv,
+                    role: 'manager',
+                    resumeThreadId: brief.pm_thread_id,
+                  });
+                  managerRegistry.setActive(r.conversation_id, r.id, adapter);
+                  try { runService.updateRunStatus(r.id, 'running', { force: true }); } catch { /* ignore */ }
+                  resumed = true;
+                  console.log(`[boot] Resumed PM run=${r.id} project=${projectId} thread=${brief.pm_thread_id}`);
+                }
+              }
+            }
+          }
+        } catch (err) {
+          console.warn(`[boot] Failed to resume PM run=${r.id}: ${err.message}`);
+        }
+      }
+
+      if (!resumed) {
+        try {
+          const adapter = managerAdapterFactory.getAdapter(adapterType);
+          adapter.disposeSession(r.id);
+        } catch { /* ignore */ }
+        runService.updateRunStatus(r.id, 'stopped', { force: true });
+        try { conversationService.clearParentNotices(r.id); } catch { /* ignore */ }
+        _resumeResults.stopped++;
+      } else {
+        _resumeResults.resumed++;
+      }
+    }
+
+    if (_resumeResults.attempted > 0) {
+      console.log(`[boot] Session resume: ${_resumeResults.resumed} resumed, ${_resumeResults.stopped} stopped (of ${_resumeResults.attempted} stale)`);
+    }
+  } catch (err) {
+    console.warn(`[boot] Session resume failed: ${err.message}`);
+  }
 
   /**
    * Find the active Top manager run. Checks managerRegistry + DB state.
