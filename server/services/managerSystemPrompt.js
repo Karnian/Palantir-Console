@@ -194,11 +194,14 @@ ${token ? `\nIMPORTANT: All API requests require auth header: Authorization: Bea
 - Get single run: GET ${base}/api/runs/RUN_ID
 - Get run events: GET ${base}/api/runs/RUN_ID/events
 
-### Tasks (create only; status changes handled by lifecycle/PM)
+### Tasks
 - List all tasks: GET ${base}/api/tasks
 - Filter by status: GET ${base}/api/tasks?status=in_progress
 - Create task: POST ${base}/api/tasks  body: {"title":"...","description":"...","priority":"medium","project_id":"PROJECT_ID"}
   Only include project_id if the task clearly belongs to an existing project. If unrelated, omit project_id (the task will be unassigned). Do NOT guess or force a project assignment.
+- Update task: PATCH ${base}/api/tasks/TASK_ID  body: {"title":"...","description":"...","priority":"high"}
+- Update task status: PATCH ${base}/api/tasks/TASK_ID/status  body: {"status":"done"}
+- Delete task: DELETE ${base}/api/tasks/TASK_ID
 
 ### Projects
 - List projects: GET ${base}/api/projects
