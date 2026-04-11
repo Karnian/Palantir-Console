@@ -209,7 +209,7 @@ ${token ? `\nIMPORTANT: All API requests require auth header: Authorization: Bea
 ### Dispatch (spawn actual worker agents — the only write path you own)
 - Execute task with agent: POST ${base}/api/tasks/TASK_ID/execute  body: {"agent_profile_id":"AGENT_ID","prompt":"detailed work instructions here"}
 
-Use the WebFetch tool for all API calls.${workerInterventionSection}
+${adapterType === 'codex' ? 'Use curl (via Bash) for all API calls.' : 'Use the WebFetch tool for all API calls.'}${workerInterventionSection}
 
 Run statuses: queued, running, paused, needs_input, completed, failed, cancelled, stopped
 Task statuses: backlog, todo, in_progress, review, done
