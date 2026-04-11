@@ -41,7 +41,9 @@ export function ManagerView({ manager, runs, tasks, projects, agents, agentsErro
         runs=${runs}
         projects=${projects}
         activePms=${activePms}
-        onSelectPm=${setConversationTarget}
+        managerStatus=${manager.status}
+        conversationTarget=${conversationTarget}
+        onSelectConversation=${setConversationTarget}
       />
     </div>
   `;

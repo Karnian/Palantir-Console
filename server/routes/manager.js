@@ -45,7 +45,7 @@ function parseMcpTools(capabilitiesJson) {
 // so tests can inject `hasKeychain` (and any future DI hooks) without
 // monkey-patching child_process. Production callers leave this empty and
 // get the real keychain probe.
-function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, authResolverOpts = {} }) {
+function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, pmSpawnService, authResolverOpts = {} }) {
   const router = express.Router();
 
   // PR1a: ManagerAdapter seam. The factory is the single entrypoint for
@@ -544,6 +544,30 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       if (err && err.httpStatus === 400) {
         throw new BadRequestError(err.message);
       }
+      if (err && err.httpStatus) {
+        return res.status(err.httpStatus).json({ error: err.message });
+      }
+      throw err;
+    }
+  }));
+
+  /**
+   * POST /api/manager/pm/:projectId/warm
+   * Pre-warm a PM session so the first message doesn't pay the lazy
+   * spawn cost. Called by the client when the user switches the
+   * conversation target to a PM (dropdown select). Returns the PM run
+   * if spawned, or the already-live run if one exists.
+   */
+  router.post('/pm/:projectId/warm', asyncHandler(async (req, res) => {
+    const { projectId } = req.params;
+    if (!projectId) throw new BadRequestError('projectId is required');
+    if (!pmSpawnService) {
+      return res.status(501).json({ error: 'PM spawn service not available' });
+    }
+    try {
+      const result = pmSpawnService.ensureLivePm({ projectId });
+      return res.json({ run: result.run, spawned: result.spawned, resumed: result.resumed });
+    } catch (err) {
       if (err && err.httpStatus) {
         return res.status(err.httpStatus).json({ error: err.message });
       }
