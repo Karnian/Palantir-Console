@@ -52,7 +52,7 @@ server/
   index.js                    — 진입점, 포트/auth 설정
   app.js                      — Express 앱 조립 (라우터, 서비스, 미들웨어)
   db/database.js              — SQLite 초기화 + 자동 마이그레이션
-  db/migrations/              — 001_initial ~ 010_dispatch_audit.sql
+  db/migrations/              — 001_initial ~ 012_add_stopped_status.sql
   routes/
     manager.js                — Top/PM /api/manager/* + /pm/:projectId/message + /reset
     conversations.js          — /api/conversations/:id/* (top|pm:<id>|worker:<id>)
@@ -106,10 +106,11 @@ server/
     phase5-sse-semantics.test.js — Phase 5 envelope shape (createRun/update/completed)
     manager.test.js           — Top manager 기본 동작
     manager-codex.test.js     — Codex adapter role/resume 동작
+    session-resume.test.js    — 부팅 시 session resume 로직
     v2-api.test.js, api.test.js, boot.smoke.test.js, …
 ```
 
-> **509 tests** 기준 (P9 완료 시점). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙.
+> **521 tests** 기준. 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙.
 
 ## Key Patterns
 
@@ -119,6 +120,14 @@ server/
 - 초기 프롬프트는 spawn 후 stdin으로 전송: `{"type":"user","message":{"role":"user","content":"..."}}`
 - 매 턴마다 `result` 이벤트가 발생하지만, Manager는 `completed`로 전환하지 않음 (multi-turn 유지)
 - `lifecycleService` health check에서 `is_manager` 런은 건너뜀 (TmuxEngine과 무관)
+
+### Session Resume on Boot
+- 서버 재시작 시 이전 매니저/PM 세션을 자동 resume (기존: 무조건 stopped)
+- **Claude (top)**: `runs.claude_session_id` 를 `--resume <id>` 로 전달하여 CLI 세션 재접속. `streamJsonEngine` 이 `system:init` 이벤트에서 session_id 를 DB 에 persist
+- **Codex (PM)**: `project_briefs.pm_thread_id` 로 `codex exec resume <thread_id>` 재접속. 이미 persist 됨
+- 부팅 순서: **Top 먼저 → PM 나중** (PM 은 parent-notice 라우팅을 위해 active Top 필요)
+- resume 실패 시 기존 동작 fallback (`stopped` 마킹 + `disposeSession`)
+- PM resume 시 project brief (conventions/pitfalls/pm_run_id) 를 system prompt 에 bake (pmSpawnService 와 동일)
 
 ### Manager Session (Codex stateless + thread resume) — v3 Phase 3a
 - `codex exec --json` 으로 첫 turn, 이후 턴은 `codex exec resume <thread_id>` — Codex 는 stateless 어댑터 (매 턴마다 subprocess 생성/종료)
