@@ -246,23 +246,11 @@ function createCodexAdapter({
       args.push('exec', 'resume', state.threadId, '--json');
     }
     args.push('--skip-git-repo-check');
-    // Role-aware approval + sandbox policy.
-    // - 'worker': full bypass (approvals + sandbox) — workers need filesystem write.
-    // - 'manager' with PALANTIR_CODEX_MANAGER_BYPASS=1: same as worker (escape hatch).
-    // - 'manager' default: --full-auto only. Auto-approves tool calls (curl, read,
-    //   etc.) so the PM can hit the Palantir API in non-interactive exec --json
-    //   mode, but keeps the filesystem sandbox active as defense-in-depth against
-    //   accidental writes. Without --full-auto, codex exec --json blocks tool
-    //   calls waiting for interactive approval that can never arrive (stdin is a
-    //   pipe, not a TTY), making the PM unable to execute any commands.
-    const role = state.role || 'manager';
-    const managerBypassOverride = process.env.PALANTIR_CODEX_MANAGER_BYPASS === '1';
-    const shouldBypass = role === 'worker' || managerBypassOverride;
-    if (shouldBypass) {
-      args.push('--dangerously-bypass-approvals-and-sandbox');
-    } else {
-      args.push('--full-auto');
-    }
+    // Sandbox policy: always bypass. PM must call the Palantir Console
+    // API (curl) to spawn workers, update tasks, etc. The --full-auto
+    // sandbox blocks network access, making PM non-functional. Workers
+    // also need full bypass for filesystem writes.
+    args.push('--dangerously-bypass-approvals-and-sandbox');
     args.push('-c', `model_instructions_file="${state.instructionsPath}"`);
     if (state.model) {
       args.push('-m', state.model);

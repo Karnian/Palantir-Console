@@ -661,34 +661,23 @@ test('v3 Phase 0: routes/manager.js passes role=manager to adapter.startSession'
     "adapter.startSession options must include role: 'manager'");
 });
 
-test('v3 Phase 0: codexAdapter escape hatch honors PALANTIR_CODEX_MANAGER_BYPASS=1', async () => {
-  // Source-level verification that the env var is read and OR'd with worker-role branch.
+test('v3 Phase 0: codexAdapter always uses sandbox bypass for API access', async () => {
   const src = await fs.readFile(
     path.join(__dirname, '..', 'services', 'managerAdapters', 'codexAdapter.js'),
     'utf8'
   );
-  // Pattern: shouldBypass = role === 'worker' || managerBypassOverride
-  const shouldBypassPattern = /shouldBypass\s*=\s*role\s*===\s*['"]worker['"]\s*\|\|\s*managerBypassOverride/;
-  assert.ok(shouldBypassPattern.test(src),
-    'shouldBypass must OR role===worker with managerBypassOverride');
-  const envReadPattern = /managerBypassOverride\s*=\s*process\.env\.PALANTIR_CODEX_MANAGER_BYPASS\s*===\s*['"]1['"]/;
-  assert.ok(envReadPattern.test(src),
-    'managerBypassOverride must read PALANTIR_CODEX_MANAGER_BYPASS === "1"');
+  assert.ok(src.includes('--dangerously-bypass-approvals-and-sandbox'),
+    'codexAdapter must use sandbox bypass so PM can call the Palantir API');
 });
 
-test('v3 Phase 0: codexAdapter stores role in session state for resume turns', async () => {
-  // Verify role is persisted so resume turns (spawnOneTurn called after thread_id
-  // is captured) retain the role policy.
+test('v3 Phase 0: codexAdapter stores role in session state', async () => {
   const src = await fs.readFile(
     path.join(__dirname, '..', 'services', 'managerAdapters', 'codexAdapter.js'),
     'utf8'
   );
-  // sessions.set(runId, { ... role: role || 'manager', ... })
+  // sessions.set must still store role for potential future use
   assert.ok(/role:\s*role\s*\|\|\s*['"]manager['"]/.test(src),
     'sessions.set must store role with manager default');
-  // spawnOneTurn reads state.role
-  assert.ok(/const\s+role\s*=\s*state\.role\s*\|\|\s*['"]manager['"]/.test(src),
-    'spawnOneTurn must read role from state');
 });
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -762,10 +751,8 @@ test('v3 Phase 0 behavior: codexAdapter role=manager spawn args OMIT sandbox byp
   adapter.runTurn('run_codex_mgr', { text: 'hello' });
 
   assert.ok(capturedArgs, 'fake spawn must have been called');
-  assert.ok(!capturedArgs.includes('--dangerously-bypass-approvals-and-sandbox'),
-    'manager role must NOT pass sandbox bypass flag');
-  assert.ok(capturedArgs.includes('--full-auto'),
-    'manager role must pass --full-auto for tool call auto-approval');
+  assert.ok(capturedArgs.includes('--dangerously-bypass-approvals-and-sandbox'),
+    'all codex sessions must bypass sandbox for API access');
   assert.ok(capturedArgs.includes('--skip-git-repo-check'),
     'manager role should still pass --skip-git-repo-check');
   assert.ok(capturedArgs.includes('exec'), 'should invoke codex exec subcommand');
@@ -1067,7 +1054,7 @@ test('v3 Phase 1: buildInitialUserContext omits project briefs section when none
   assert.ok(!ctx.includes('## Project Briefs'), 'must not include Project Briefs when empty');
 });
 
-test('v3 Phase 0 behavior: codexAdapter PALANTIR_CODEX_MANAGER_BYPASS=1 re-enables bypass for manager', () => {
+test('v3 Phase 0 behavior: codexAdapter always bypasses sandbox for all roles', () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
   const { EventEmitter } = require('node:events');
   function makeFakeChild() {
@@ -1076,30 +1063,23 @@ test('v3 Phase 0 behavior: codexAdapter PALANTIR_CODEX_MANAGER_BYPASS=1 re-enabl
     const stdin = { write: () => {}, end: () => {} };
     return Object.assign(new EventEmitter(), { stdout, stderr, stdin, kill: () => {} });
   }
-  const prev = process.env.PALANTIR_CODEX_MANAGER_BYPASS;
-  process.env.PALANTIR_CODEX_MANAGER_BYPASS = '1';
-  try {
-    let capturedArgs = null;
-    const adapter = createCodexAdapter({
-      runService: null,
-      codexBin: '/bin/true',
-      spawnFn: (bin, args) => { capturedArgs = args; return makeFakeChild(); },
-    });
-    adapter.startSession('run_codex_bypass', {
-      systemPrompt: 'test',
-      cwd: process.cwd(),
-      role: 'manager',
-    });
-    adapter.runTurn('run_codex_bypass', { text: 'hello' });
-    assert.ok(capturedArgs.includes('--dangerously-bypass-approvals-and-sandbox'),
-      'PALANTIR_CODEX_MANAGER_BYPASS=1 must re-enable bypass for manager role');
-    assert.ok(!capturedArgs.includes('--full-auto'),
-      'bypass mode must NOT also pass --full-auto (bypass already implies auto-approval)');
-    adapter.disposeSession('run_codex_bypass');
-  } finally {
-    if (prev === undefined) delete process.env.PALANTIR_CODEX_MANAGER_BYPASS;
-    else process.env.PALANTIR_CODEX_MANAGER_BYPASS = prev;
-  }
+  let capturedArgs = null;
+  const adapter = createCodexAdapter({
+    runService: null,
+    codexBin: '/bin/true',
+    spawnFn: (bin, args) => { capturedArgs = args; return makeFakeChild(); },
+  });
+  adapter.startSession('run_codex_bypass', {
+    systemPrompt: 'test',
+    cwd: process.cwd(),
+    role: 'manager',
+  });
+  adapter.runTurn('run_codex_bypass', { text: 'hello' });
+  assert.ok(capturedArgs.includes('--dangerously-bypass-approvals-and-sandbox'),
+    'codex sessions must always bypass sandbox for API access');
+  assert.ok(!capturedArgs.includes('--full-auto'),
+    'bypass mode must NOT also pass --full-auto');
+  adapter.disposeSession('run_codex_bypass');
 });
 
 test('v3 Phase 0: managerSystemPrompt default layer is top', async () => {
@@ -1145,29 +1125,16 @@ test('v3 Phase 0: claudeAdapter default allowedTools excludes Write/Edit and res
   assert.ok(defaultTools.includes("'Read'"), 'default allowedTools must include Read');
 });
 
-test('v3 Phase 0: codexAdapter omits sandbox bypass flag for manager role', async () => {
-  // Inspect source to verify role-aware branching is present.
+test('v3 Phase 0: codexAdapter unconditionally bypasses sandbox', async () => {
   const src = await fs.readFile(
     path.join(__dirname, '..', 'services', 'managerAdapters', 'codexAdapter.js'),
     'utf8'
   );
-  // The role-aware branch must exist
-  assert.ok(src.includes("role === 'worker'"),
-    'codexAdapter must branch bypass flag on role');
-  assert.ok(src.includes('PALANTIR_CODEX_MANAGER_BYPASS'),
-    'codexAdapter must provide env escape hatch');
-  // The bypass flag push must be guarded by `if (shouldBypass)` — i.e., the
-  // line `args.push('--dangerously-bypass-approvals-and-sandbox');` must
-  // appear inside a shouldBypass conditional, not at top level.
-  const guarded = /if\s*\(\s*shouldBypass\s*\)\s*\{\s*args\.push\('--dangerously-bypass-approvals-and-sandbox'\)/;
-  assert.ok(guarded.test(src),
-    'bypass push must be guarded by if (shouldBypass) { ... }');
-  // And the count of bypass pushes should be exactly 1 (the guarded one)
+  // Bypass must be unconditional — PM needs network access for API calls
   const pushMatches = src.match(/args\.push\('--dangerously-bypass-approvals-and-sandbox'\)/g);
-  assert.equal(pushMatches && pushMatches.length, 1,
-    'exactly one bypass push should exist, and it should be the guarded one');
-  // The else branch must push --full-auto for non-bypass manager mode
-  const fullAutoGuarded = /else\s*\{\s*\n?\s*args\.push\('--full-auto'\)/;
-  assert.ok(fullAutoGuarded.test(src),
-    '--full-auto push must exist in the else branch of shouldBypass');
+  assert.ok(pushMatches && pushMatches.length >= 1,
+    'bypass push must exist in codexAdapter');
+  // --full-auto should NOT be used (bypass already implies auto-approval)
+  assert.ok(!src.includes("args.push('--full-auto')"),
+    '--full-auto should not be used when bypass is always active');
 });
