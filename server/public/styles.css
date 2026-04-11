@@ -2416,6 +2416,42 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   text-overflow: ellipsis;
 }
 
+/* wide variant — trigger shrinks to fit content instead of 100% width */
+.dropdown.dropdown-wide {
+  width: auto;
+}
+
+.dropdown.dropdown-wide .dropdown-button {
+  width: auto;
+  min-width: 80px;
+}
+
+/* Color dot shown on the trigger button and inside menu items */
+.dropdown-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+/* Active (green) dot — indicates a running PM session */
+.dropdown-dot-active {
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.25);
+}
+
+/* Inactive dot — greyed-out when no color provided */
+.dropdown-dot-inactive {
+  background: var(--text-muted, rgba(255,255,255,0.3));
+}
+
+/* Separator rule between option groups */
+.dropdown-separator {
+  height: 1px;
+  background: var(--border, rgba(255,255,255,0.06));
+  margin: 4px 4px;
+}
+
 .form-textarea {
   resize: vertical;
   min-height: 60px;

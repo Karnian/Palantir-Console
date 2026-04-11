@@ -406,12 +406,49 @@ export function ManagerChat({ manager, projects, agents = [], agentsError = null
   // 'unknown' requires server restart/refresh — neither is a green light.
   const startDisabled = loading || managerProfiles.length === 0 || !selectedProfile || !selectedCanAuth;
 
+  // PM picker — build the conversation selector options shown in the header.
+  // Structure: Top entry → separator → one entry per pm_enabled project.
+  // Each PM entry shows a color dot from the project's color field (if any)
+  // and a green "active" dot when the PM run is running.
+  const activePms = status.pms || []; // array of { projectId, status } from /api/manager/status
+  const pmEnabledProjects = useMemo(
+    () => (projects || []).filter(p => p.pm_enabled),
+    [projects]
+  );
+  const pmPickerOptions = useMemo(() => {
+    const opts = [
+      { value: 'top', label: 'Top Manager', dot: null },
+    ];
+    if (pmEnabledProjects.length > 0) {
+      opts.push({ separator: true, key: '_sep' });
+      for (const p of pmEnabledProjects) {
+        const convId = `pm:${p.id}`;
+        const isActive = activePms.some(pm => pm.projectId === p.id && pm.status === 'running');
+        // dot: project color if set, else a neutral grey; overlay active with green
+        const dotColor = isActive ? '#22c55e' : (p.color || null);
+        opts.push({ value: convId, label: p.name, dot: dotColor });
+      }
+    }
+    return opts;
+  }, [pmEnabledProjects, activePms]);
+
   return html`
     <div class="manager-chat-side">
       <div class="manager-chat-header">
         <div class="manager-panel-title">
           <span class="manager-icon">\u2726</span>
-          <span>${isPm ? `PM \u00B7 ${pmProject ? pmProject.name : pmProjectId}` : 'Manager Session'}</span>
+          ${status.active && pmEnabledProjects.length > 0 ? html`
+            <${Dropdown}
+              wide
+              value=${conversationTarget}
+              onChange=${setConversationTarget}
+              options=${pmPickerOptions}
+              ariaLabel="Switch conversation target"
+              className="manager-pm-picker"
+            />
+          ` : html`
+            <span>${isPm ? `PM \u00B7 ${pmProject ? pmProject.name : pmProjectId}` : 'Manager Session'}</span>
+          `}
           <span class="manager-status-badge ${chatBadgeClass}">${chatBadge}</span>
         </div>
         <div class="manager-panel-actions">

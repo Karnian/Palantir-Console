@@ -11,14 +11,23 @@ import { useState, useRef, useEffect, useCallback, useMemo } from '../../vendor/
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
-export function Dropdown({ value, onChange, options, disabled, style, className, title, ariaLabel }) {
+// Option shape (all fields optional except value + label):
+//   { value, label, dot?: string (CSS color), disabled?: bool }
+// Separator pseudo-item:
+//   { separator: true }   — rendered as a visual divider, not selectable
+//
+// Additional component props:
+//   wide — makes the trigger width: max-content (don't stretch to container)
+export function Dropdown({ value, onChange, options, disabled, style, className, title, ariaLabel, wide }) {
   const [open, setOpen] = useState(false);
   const [menuPos, setMenuPos] = useState(null); // { top, left, width, flipUp }
   const [hoverIdx, setHoverIdx] = useState(-1);
   const buttonRef = useRef(null);
   const menuRef = useRef(null);
 
-  const selected = options.find(o => o.value === value);
+  // Selectable options only (separators are skipped for value matching + keyboard nav)
+  const selectableOptions = options.filter(o => !o.separator);
+  const selected = selectableOptions.find(o => o.value === value);
 
   // Compute fixed-position coordinates from the trigger's bounding box.
   // Using `position: fixed` (not absolute) escapes the modal-body's scroll
@@ -27,7 +36,7 @@ export function Dropdown({ value, onChange, options, disabled, style, className,
     if (!buttonRef.current) return;
     const rect = buttonRef.current.getBoundingClientRect();
     // Approx menu height: 4px padding * 2 + ~30px per row, capped at 280
-    const estimated = Math.min(280, options.length * 30 + 12);
+    const estimated = Math.min(280, selectableOptions.length * 30 + 12);
     const spaceBelow = window.innerHeight - rect.bottom - 8;
     const spaceAbove = rect.top - 8;
     const flipUp = spaceBelow < estimated && spaceAbove > spaceBelow;
@@ -76,7 +85,7 @@ export function Dropdown({ value, onChange, options, disabled, style, className,
   useEffect(() => {
     if (open && menuRef.current) {
       menuRef.current.focus();
-      const idx = options.findIndex(o => o.value === value);
+      const idx = selectableOptions.findIndex(o => o.value === value);
       setHoverIdx(idx >= 0 ? idx : 0);
     }
   }, [open]);
@@ -98,7 +107,7 @@ export function Dropdown({ value, onChange, options, disabled, style, className,
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       e.stopPropagation();
-      setHoverIdx(i => Math.min(options.length - 1, i + 1));
+      setHoverIdx(i => Math.min(selectableOptions.length - 1, i + 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       e.stopPropagation();
@@ -110,11 +119,11 @@ export function Dropdown({ value, onChange, options, disabled, style, className,
     } else if (e.key === 'End') {
       e.preventDefault();
       e.stopPropagation();
-      setHoverIdx(options.length - 1);
+      setHoverIdx(selectableOptions.length - 1);
     } else if (e.key === 'Enter') {
       e.preventDefault();
       e.stopPropagation();
-      if (hoverIdx >= 0) commit(options[hoverIdx].value);
+      if (hoverIdx >= 0) commit(selectableOptions[hoverIdx].value);
     } else if (e.key === 'Escape') {
       // Stop propagation so the modal's window-level Escape handler
       // doesn't ALSO close the modal when we just want to close the menu.
@@ -127,8 +136,12 @@ export function Dropdown({ value, onChange, options, disabled, style, className,
     }
   };
 
+  // Map flat options list into render items, tracking selectable index separately
+  // so keyboard hoverIdx lines up with selectableOptions[].
+  let selectableCounter = 0;
+
   return html`
-    <div class="dropdown ${className || ''} ${disabled ? 'is-disabled' : ''} ${open ? 'is-open' : ''}">
+    <div class="dropdown ${className || ''} ${disabled ? 'is-disabled' : ''} ${open ? 'is-open' : ''} ${wide ? 'dropdown-wide' : ''}">
       <button type="button" ref=${buttonRef}
         class="dropdown-button"
         style=${style || ''}
@@ -139,6 +152,11 @@ export function Dropdown({ value, onChange, options, disabled, style, className,
         aria-expanded=${open}
         onClick=${() => !disabled && setOpen(o => !o)}
         onKeyDown=${handleButtonKey}>
+        ${selected?.dot != null && html`
+          <span class="dropdown-dot ${selected.dot ? '' : 'dropdown-dot-inactive'}"
+            style=${selected.dot ? `background:${selected.dot}` : ''}
+            aria-hidden="true"></span>
+        `}
         <span class="dropdown-label">${selected?.label ?? ''}</span>
         <span class="dropdown-chevron" aria-hidden="true">\u25BE</span>
       </button>
@@ -147,17 +165,31 @@ export function Dropdown({ value, onChange, options, disabled, style, className,
           ref=${menuRef} role="listbox" tabindex="-1"
           style=${`position: fixed; top: ${menuPos.top}px; left: ${menuPos.left}px; width: ${menuPos.width}px; ${menuPos.flipUp ? 'transform: translateY(-100%);' : ''}`}
           onKeyDown=${handleMenuKey}>
-          ${options.map((opt, i) => html`
-            <button type="button" key=${opt.value}
-              role="option"
-              aria-selected=${value === opt.value}
-              class="dropdown-item ${value === opt.value ? 'selected' : ''} ${i === hoverIdx ? 'hover' : ''}"
-              onMouseEnter=${() => setHoverIdx(i)}
-              onClick=${() => commit(opt.value)}>
-              <span class="dropdown-item-check">${value === opt.value ? '\u2713' : ''}</span>
-              <span class="dropdown-item-label">${opt.label}</span>
-            </button>
-          `)}
+          ${options.map((opt) => {
+            // Separator pseudo-item — not a button, not focusable
+            if (opt.separator) {
+              return html`<div key=${opt.key || '_sep'} class="dropdown-separator" role="separator" aria-hidden="true"></div>`;
+            }
+            const si = selectableCounter++;
+            const isSelected = value === opt.value;
+            const isHover = si === hoverIdx;
+            return html`
+              <button type="button" key=${opt.value}
+                role="option"
+                aria-selected=${isSelected}
+                class="dropdown-item ${isSelected ? 'selected' : ''} ${isHover ? 'hover' : ''}"
+                onMouseEnter=${() => setHoverIdx(si)}
+                onClick=${() => commit(opt.value)}>
+                <span class="dropdown-item-check">${isSelected ? '\u2713' : ''}</span>
+                ${opt.dot != null && html`
+                  <span class="dropdown-dot ${opt.dot ? 'dropdown-dot-active' : 'dropdown-dot-inactive'}"
+                    style=${opt.dot ? `background:${opt.dot}` : ''}
+                    aria-hidden="true"></span>
+                `}
+                <span class="dropdown-item-label">${opt.label}</span>
+              </button>
+            `;
+          })}
         </div>
       `}
     </div>
