@@ -231,7 +231,7 @@ function createPmSpawnService({
     // finding #1). The whole blob is still cached across turns.
     const port = process.env.PORT || 4177;
     const token = process.env.PALANTIR_TOKEN;
-    const baseSystemPrompt = buildManagerSystemPrompt({ adapter, port, token, layer: 'pm' });
+    const baseSystemPrompt = buildManagerSystemPrompt({ adapter, port, token, layer: 'pm', adapterType });
     const projectSection = buildProjectScopedSystemSection({ project, brief, pmRunId: runId });
     const systemPrompt = [baseSystemPrompt, projectSection].filter(Boolean).join('\n\n');
 

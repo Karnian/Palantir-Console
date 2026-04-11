@@ -40,7 +40,7 @@ Your role:
  *
  * See docs/specs/manager-v3-multilayer.md principle 8 (prompt 계층별 분기).
  */
-function buildCommonBase({ port, token, layer = 'top' }) {
+function buildCommonBase({ port, token, layer = 'top', adapterType }) {
   // When the server is bound to 0.0.0.0 (external access), use the
   // machine's actual IP so remote Codex/Claude processes can reach the
   // API. PALANTIR_BASE_URL takes highest priority (explicit override),
@@ -49,7 +49,7 @@ function buildCommonBase({ port, token, layer = 'top' }) {
   if (process.env.PALANTIR_BASE_URL) {
     // User explicitly set the full base URL — use it directly.
     const base = process.env.PALANTIR_BASE_URL.replace(/\/+$/, '');
-    return _buildCommonBaseInner({ base, token, layer });
+    return _buildCommonBaseInner({ base, token, layer, adapterType });
   }
   const bindHost = process.env.HOST || '';
   if (bindHost === '0.0.0.0') {
@@ -69,10 +69,10 @@ function buildCommonBase({ port, token, layer = 'top' }) {
     } catch { /* fallback to localhost */ }
   }
   const base = `http://${host}:${port}`;
-  return _buildCommonBaseInner({ base, token, layer });
+  return _buildCommonBaseInner({ base, token, layer, adapterType });
 }
 
-function _buildCommonBaseInner({ base, token, layer }) {
+function _buildCommonBaseInner({ base, token, layer, adapterType }) {
   // P4-7: auth variable kept for backward-compat with PM layer docs
   // but curl examples are replaced with WebFetch-friendly format.
 
@@ -181,8 +181,11 @@ You do NOT have Write or Edit tools — this is intentional. Direct file modific
 
 ## Palantir Console REST API
 
-The Palantir Console server runs at ${base}. Use WebFetch to query it (do NOT use Bash with curl — curl is not in your tool allowlist).
-${token ? `\nIMPORTANT: All API requests require auth header: Authorization: Bearer ${token}` : ''}
+The Palantir Console server runs at ${base}.
+${adapterType === 'codex'
+  ? `Use curl (via Bash) to query the API. Example: curl -s ${base}/api/runs | head -c 2000`
+  : `Use WebFetch to query it (do NOT use Bash with curl — curl is not in your tool allowlist).`}
+${token ? `\nIMPORTANT: All API requests require auth header: Authorization: Bearer ${token}${adapterType === 'codex' ? `\nFor curl: curl -s -H "Authorization: Bearer ${token}" ${base}/api/runs` : ''}` : ''}
 
 ### Runs (read-only)
 - List all runs: GET ${base}/api/runs
@@ -230,14 +233,14 @@ Always query the actual Palantir API to get real data — never guess or assume.
  * is only used by Phase 3a PM activation; today all callers pass 'top' (or omit).
  * See docs/specs/manager-v3-multilayer.md principle 8.
  */
-function buildManagerSystemPrompt({ adapter, port, token, layer = 'top' }) {
+function buildManagerSystemPrompt({ adapter, port, token, layer = 'top', adapterType }) {
   const guardrails = adapter && typeof adapter.buildGuardrailsSection === 'function'
     ? adapter.buildGuardrailsSection()
     : '';
   return [
     buildRoleSection(),
     guardrails,
-    buildCommonBase({ port, token, layer }),
+    buildCommonBase({ port, token, layer, adapterType }),
   ].filter(Boolean).join('\n\n');
 }
 
