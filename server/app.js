@@ -163,6 +163,15 @@ function createApp(options = {}) {
   // user-initiated sendMessage).
   const AUTO_REVIEW_MAX = 5;
   const _autoReviewCounts = new Map(); // "projectId:taskId" -> count
+  // Reset circuit breaker when PM slot is cleared (session end/reset)
+  // and evict stale entries to prevent unbounded growth.
+  managerRegistry.onSlotCleared(({ conversationId }) => {
+    if (!conversationId || !conversationId.startsWith('pm:')) return;
+    const projectId = conversationId.slice(3);
+    for (const key of _autoReviewCounts.keys()) {
+      if (key.startsWith(`${projectId}:`)) _autoReviewCounts.delete(key);
+    }
+  });
   eventBus.subscribe((event) => {
     if (event.channel !== 'run:completed') return;
     const run = event.data?.run;
