@@ -157,14 +157,11 @@ function createApp(options = {}) {
   // autonomously review and decide whether to re-run or mark the task done.
   //
   // Circuit breaker: track per-(project, task) review count. After
-  // MAX_AUTO_REVIEWS rounds without a user message, stop auto-reviewing
-  // and let the PM sit idle so the user can intervene. Resets when the
-  // user sends a message to the PM (tracked via onSlotCleared or next
-  // user-initiated sendMessage).
+  // AUTO_REVIEW_MAX rounds, stop auto-reviewing and let the PM sit idle
+  // so the user can intervene. Resets on PM slot cleared (session end/reset).
   const AUTO_REVIEW_MAX = 5;
   const _autoReviewCounts = new Map(); // "projectId:taskId" -> count
-  // Reset circuit breaker when PM slot is cleared (session end/reset)
-  // and evict stale entries to prevent unbounded growth.
+  // Reset circuit breaker when PM slot is cleared (session end/reset).
   managerRegistry.onSlotCleared(({ conversationId }) => {
     if (!conversationId || !conversationId.startsWith('pm:')) return;
     const projectId = conversationId.slice(3);
@@ -188,7 +185,6 @@ function createApp(options = {}) {
       console.warn(`[pm-auto-review] Circuit breaker: ${countKey} hit ${AUTO_REVIEW_MAX} reviews — skipping. User intervention needed.`);
       return;
     }
-    _autoReviewCounts.set(countKey, count + 1);
     // Build review notification
     const status = run.status || 'unknown';
     const taskId = run.task_id || 'none';
@@ -208,13 +204,15 @@ function createApp(options = {}) {
       '- If additional work is needed, spawn a new worker with corrective instructions.',
       '- If the worker failed, diagnose and retry or escalate to the user.',
     ].filter(Boolean).join('\n');
-    // Defer to next tick to avoid "previous turn still running" conflict
-    // when the PM is mid-turn (Codex stateless adapter single-turn guard).
+    // Defer to next tick to avoid "previous turn still running" conflict.
+    // Counter is incremented only AFTER successful send (rollback on failure).
     setImmediate(() => {
       try {
         conversationService.sendMessage(pmSlotKey, { text: reviewText });
+        _autoReviewCounts.set(countKey, count + 1); // increment only on success
       } catch (err) {
         console.warn(`[pm-auto-review] Failed to send review to ${pmSlotKey}: ${err.message}`);
+        // Counter NOT incremented — next completion will retry
       }
     });
   });
