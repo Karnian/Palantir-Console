@@ -13,7 +13,7 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "Central control hub for orchestrating AI coding agents through a 3-tier hierarchy (Main Manager → PM → Worker)",
   "dependencies": {
     "better-sqlite3": "^12.8.0",
     "express": "^5.2.1",

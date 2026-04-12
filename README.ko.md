@@ -2,11 +2,30 @@
 
 [English](README.md)
 
-AI 코딩 에이전트(Claude Code, Codex, OpenCode)를 중앙에서 관리하는 관제 허브.
+AI 코딩 에이전트(Claude Code, Codex, OpenCode)를 3계층 구조로 운영하는 중앙 관제 허브.
 
-여러 프로젝트에서 여러 에이전트를 동시에 돌릴 때, 누가 뭘 하고 있는지, 어디서 막혔는지, 비용은 얼마인지를 한 화면에서 본다.
+```
+Main Manager (Top)          ← 전체 프로젝트와 PM을 총괄
+ ├── PM (Project A)         ← 프로젝트 내 워커들을 관리
+ │    ├── Worker 1          ← 실제 코딩 작업 수행
+ │    ├── Worker 2
+ │    └── Worker 3
+ ├── PM (Project B)
+ │    └── Worker 1
+ └── PM (Project C)
+      ├── Worker 1
+      └── Worker 2
+```
 
-> **v3 Manager 재설계 완료.** 이제 Manager 는 프로젝트 단위 PM 계층을 둔 디스패처로 동작한다. Top 세션 + 프로젝트별 PM(Codex lazy-spawn) + 모든 노드에 대한 conversation identity(Top/PM/Worker) + deterministic 라우팅 + annotate-only drift 리컨실리에이션 + SSE 시맨틱 이벤트가 모두 포함되어 있다. 스펙은 `docs/specs/manager-v3-multilayer.md`, 사용자 시나리오는 `docs/test-scenarios.md` 참고.
+**Worker** — 프로젝트 안에서 실제 코딩 작업을 수행하는 AI 에이전트(Claude Code, Codex 등). 각 워커는 독립된 Git worktree에서 격리 실행되어 서로 충돌하지 않는다.
+
+**PM (Project Manager)** — 프로젝트 단위로 할당되어 해당 프로젝트의 워커들을 관리한다. 태스크를 워커에게 분배하고, 진행 상황을 추적하며, 프로젝트의 컨벤션과 맥락을 유지해 일관된 방향으로 작업을 조율한다.
+
+**Main Manager (Top)** — 최상위 관제자. 여러 프로젝트와 PM들을 총괄하며, 사용자의 지시를 적절한 PM에게 라우팅하고, 프로젝트 간 우선순위와 상태를 한눈에 파악할 수 있는 단일 대화 창구.
+
+이 모든 계층을 웹 대시보드(`localhost:4177`)에서 실시간으로 모니터링하고 제어한다.
+
+> **v3 Manager 재설계 완료.** 스펙은 `docs/specs/manager-v3-multilayer.md`, 사용자 시나리오는 `docs/test-scenarios.md` 참고.
 
 ## 빠른 시작
 
@@ -78,18 +97,20 @@ SSE 가 구조적으로 막히던 문제를 수정한 결과 (NEW-S1).
 ## 핵심 개념
 
 ```
-Project  →  Task  →  Run  →  Agent
- (묶음)    (할 일)  (실행)   (Claude/Codex/OpenCode)
+Main Manager (Top)  →  PM (프로젝트별)  →  Worker (태스크별)
+ (총괄 관제)          (프로젝트 관리)      (AI 코딩 에이전트)
 ```
 
 | 개념 | 설명 |
 |------|------|
+| **Main Manager (Top)** | 최상위 관제자. 사용자 지시를 적절한 PM에게 라우팅하고 전체 프로젝트를 총괄 |
+| **PM (Project Manager)** | 프로젝트별 관리자. 워커를 조율하고 태스크를 분배하며 프로젝트 맥락을 유지. 첫 메시지 시 lazy-spawn |
+| **Worker** | 실제 코딩을 수행하는 AI 에이전트 (Claude Code, Codex, OpenCode). 독립 Git worktree에서 격리 실행 |
 | **Project** | 작업 묶음. 예: "백엔드 API", "프론트엔드 리팩토링" |
 | **Task** | 구체적인 할 일. 칸반 보드에서 관리. Backlog → Todo → In Progress → Review → Done |
-| **Run** | Task 에 대해 에이전트를 실행한 기록. 하나의 Task 에 여러 Run 가능 |
+| **Run** | Task에 대해 에이전트를 실행한 기록. 하나의 Task에 여러 Run 가능 |
 | **Agent Profile** | 실행할 에이전트 설정 (Claude Code, Codex CLI, OpenCode, 커스텀) |
-| **Manager layer** | `top` (단일 디스패처) 또는 `pm:<projectId>` (프로젝트 단위 PM, lazy-spawn) |
-| **Conversation** | 모든 채팅 surface 의 1급 식별자: `top`, `pm:<projectId>`, `worker:<runId>` |
+| **Conversation** | 모든 채팅 surface의 1급 식별자: `top`, `pm:<projectId>`, `worker:<runId>` |
 
 ## 화면 구성
 

@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Palantir Console — AI 코딩 에이전트 (Claude Code, Codex, OpenCode) 중앙 관제 허브.
+Palantir Console — AI 코딩 에이전트(Claude Code, Codex, OpenCode)를 3계층(Main Manager → PM → Worker)으로 운영하는 중앙 관제 허브. Main Manager가 여러 프로젝트와 PM을 총괄, PM이 프로젝트 내 워커들을 관리, Worker가 실제 코딩 작업을 수행.
 
 ## Working style (autonomous mode default ON)
 
