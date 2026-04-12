@@ -624,9 +624,9 @@ test('v3 Phase 0: managerSystemPrompt top layer excludes worker intervention API
   // Dispatch API MUST appear
   assert.ok(prompt.includes('/api/tasks/TASK_ID/execute'),
     'top layer must document /execute');
-  // Capability diet explanation MUST appear
-  assert.ok(prompt.includes('You do NOT have Write or Edit tools'),
-    'top layer must explain Write/Edit absence');
+  // File modification guardrail MUST appear
+  assert.ok(prompt.includes('Do NOT directly modify project files'),
+    'top layer must explain file modification prohibition');
 });
 
 test('v3 Phase 0: managerSystemPrompt pm layer includes worker intervention APIs', async () => {

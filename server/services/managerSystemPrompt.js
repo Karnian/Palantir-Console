@@ -193,9 +193,9 @@ The /execute endpoint is what actually spawns a Claude Code (or other agent) sub
 
 ${approvalNote}
 
-You may use your own Bash/Read/Grep tools for quick lookups (checking status, reading files, etc.),
+You may use your own tools for quick lookups (checking status, reading files, API calls, etc.),
 but any substantial work (coding, refactoring, analysis tasks) must be delegated via the API.
-You do NOT have Write or Edit tools — this is intentional. Direct file modification is a worker concern.
+Do NOT directly modify project files — file changes are a worker concern, not yours.
 
 ## Palantir Console REST API
 
