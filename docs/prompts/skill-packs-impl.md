@@ -18,21 +18,22 @@ feature/skill-packs (스펙 + 문서 업데이트 커밋 4개)
 
 ## 구현할 Phase
 
-### Phase 1a: DB + CRUD + API (기반)
-- 마이그레이션 013 (`mcp_server_templates`, `skill_packs`, 바인딩 테이블, `run_skill_packs`)
-- `runtime/mcp/` 디렉토리 생성 (서버 부팅 시) + `.gitignore` 추가
-- `skillPackService.js` CRUD + 바인딩 + MCP alias 해소 + env allowlist 검증
-- REST API 라우트 (CRUD + 바인딩 + 소유권 검증)
-- 테스트: 스키마, CRUD, 바인딩 제약, MCP 해소, env 검증
+### Phase 1a: DB + CRUD + API (기반) — ✅ 완료
+- 마이그레이션 013 (6 테이블, 6 DB 트리거)
+- `runtime/mcp/` + `.gitignore`
+- `skillPackService.js` CRUD + 바인딩 + MCP alias 해소 + 2-tier env 검증
+- REST API 라우트 (CRUD + 바인딩 + run 스냅샷)
+- MCP 템플릿 seed (playwright, filesystem)
+- 42 tests, Codex 교차검증 P1-1 수정 (pinned_by 업데이트 누락)
 
-### Phase 1b: 실행 통합
-- `skillPackService.resolveForRun` 구현 + 테스트
-- `lifecycleService.executeTask` 통합 (Claude 워커 전용, `is_manager` 가드)
-- MCP config 파일 생성/cleanup 라이프사이클
-- `run_skill_packs` 비정규화 스냅샷 기록
-- run 이벤트 경고 (`skill_pack:mcp_skipped`, `skill_pack:adapter_unsupported`)
+### Phase 1b: 실행 통합 — ✅ 완료
+- `resolveForRun` 5단계 파이프라인 (입력검증→수집→shadow→excluded→adapter gating→합성)
+- `lifecycleService.executeTask` 통합 (prompt overlay, MCP config 생성/cleanup)
+- `/execute` API `skill_pack_ids` 파라미터
+- `run_skill_packs` 비정규화 스냅샷 + `runs.mcp_config_path/snapshot`
 - 부팅 시 orphan MCP config cleanup
-- 통합 테스트: 기존 테스트 회귀 없음 확인
+- 12 tests, Codex 교차검증 P0×2 + P1×2 + P2×2 수정
+- 총 575 tests, 0 failures (기존 521 + 신규 54)
 
 ## 핵심 주의사항
 
