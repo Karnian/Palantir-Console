@@ -10,7 +10,7 @@ import { apiFetch } from '../lib/api.js';
 import { addToast } from '../lib/toast.js';
 import { timeAgo } from '../lib/format.js';
 
-function RunSkillItem({ sp }) {
+function RunSkillItem({ sp, runId, acceptanceChecks, onCheckToggle }) {
   const [showMcp, setShowMcp] = useState(false);
   let checklist = [];
   try { checklist = JSON.parse(sp.checklist_snapshot || '[]'); } catch { /* */ }
@@ -25,9 +25,18 @@ function RunSkillItem({ sp }) {
       </div>
       ${checklist.length > 0 && html`
         <div class="run-skill-checklist">
-          ${checklist.map((item, i) => html`
-            <label key=${i}><input type="checkbox" disabled /> ${item}</label>
-          `)}
+          ${checklist.map((item, i) => {
+            const globalIdx = (sp._checkOffset || 0) + i;
+            const check = (acceptanceChecks || []).find(c => c.check_index === globalIdx);
+            const checked = check ? !!check.checked : false;
+            return html`
+              <label key=${i} style=${{ cursor: 'pointer' }}>
+                <input type="checkbox" checked=${checked}
+                  onChange=${() => onCheckToggle && onCheckToggle(globalIdx, !checked)} />
+                ${item}
+              </label>
+            `;
+          })}
         </div>
       `}
       ${mcpSnap && html`
@@ -52,6 +61,7 @@ export function RunInspector({ run, onClose }) {
   const [tab, setTab] = useState('output');
   const [skillPacks, setSkillPacks] = useState([]);
   const [skillsLoaded, setSkillsLoaded] = useState(false);
+  const [acceptanceChecks, setAcceptanceChecks] = useState([]);
   const outputRef = useRef(null);
   const userScrolledUp = useRef(false);
 
@@ -205,6 +215,7 @@ export function RunInspector({ run, onClose }) {
               try {
                 const data = await apiFetch('/api/runs/' + run.id + '/skill-packs');
                 setSkillPacks(data.skill_packs || []);
+                setAcceptanceChecks(data.acceptance_checks || []);
               } catch { /* ignore */ }
               setSkillsLoaded(true);
             }
@@ -256,9 +267,26 @@ export function RunInspector({ run, onClose }) {
                 ${skillsLoaded ? 'No skill packs applied to this run.' : 'Loading...'}
               </div>
             `}
-            ${skillPacks.sort((a, b) => (a.applied_order ?? 0) - (b.applied_order ?? 0)).map(sp => html`
-              <${RunSkillItem} key=${sp.skill_pack_id} sp=${sp} />
-            `)}
+            ${(() => {
+              const sorted = [...skillPacks].sort((a, b) => (a.applied_order ?? 0) - (b.applied_order ?? 0));
+              let offset = 0;
+              return sorted.map(sp => {
+                const checkCount = (() => { try { return JSON.parse(sp.checklist_snapshot || '[]').length; } catch { return 0; } })();
+                const item = html`<${RunSkillItem} key=${sp.skill_pack_id} sp=${{ ...sp, _checkOffset: offset }}
+                  runId=${run.id} acceptanceChecks=${acceptanceChecks}
+                  onCheckToggle=${async (idx, checked) => {
+                    try {
+                      const res = await apiFetch('/api/runs/' + run.id + '/skill-packs/checks', {
+                        method: 'PATCH',
+                        body: JSON.stringify({ checks: [{ check_index: idx, checked }] }),
+                      });
+                      setAcceptanceChecks(res.acceptance_checks || []);
+                    } catch { /* ignore */ }
+                  }} />`;
+                offset += checkCount;
+                return item;
+              });
+            })()}
           </div>
         `}
 

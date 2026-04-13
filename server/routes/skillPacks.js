@@ -41,6 +41,42 @@ function createSkillPacksRouter({ skillPackService }) {
     res.json({ status: 'ok' });
   }));
 
+  // GET /api/skill-packs/:id/export — export as JSON (Phase 4-3)
+  router.get('/:id/export', asyncHandler(async (req, res) => {
+    const pack = skillPackService.getSkillPack(req.params.id);
+    // Strip internal fields
+    const exported = {
+      name: pack.name,
+      description: pack.description,
+      scope: pack.scope,
+      icon: pack.icon,
+      color: pack.color,
+      priority: pack.priority,
+      prompt_full: pack.prompt_full,
+      prompt_compact: pack.prompt_compact,
+      mcp_servers: pack.mcp_servers,
+      checklist: pack.checklist,
+      conflict_policy: pack.conflict_policy,
+      inject_checklist: pack.inject_checklist,
+    };
+    res.json({ skill_pack: exported });
+  }));
+
+  // POST /api/skill-packs/import — import from JSON (Phase 4-3)
+  router.post('/import', asyncHandler(async (req, res) => {
+    const { skill_pack: data, project_id } = req.body || {};
+    if (!data || !data.name) {
+      return res.status(400).json({ error: 'skill_pack with name is required' });
+    }
+    // Override project_id if provided
+    const createData = {
+      ...data,
+      project_id: project_id || data.project_id,
+    };
+    const pack = skillPackService.createSkillPack(createData);
+    res.status(201).json({ skill_pack: pack });
+  }));
+
   return router;
 }
 
@@ -111,7 +147,24 @@ function createRunSnapshotsRouter({ skillPackService }) {
   // GET /api/runs/:id/skill-packs
   router.get('/:id/skill-packs', asyncHandler(async (req, res) => {
     const snapshots = skillPackService.listRunSnapshots(req.params.id);
-    res.json({ skill_packs: snapshots });
+    // Attach acceptance checks if available
+    const checks = skillPackService.listAcceptanceChecks(req.params.id);
+    const checksMap = {};
+    for (const c of checks) {
+      if (!checksMap[c.check_index]) checksMap[c.check_index] = c;
+    }
+    res.json({ skill_packs: snapshots, acceptance_checks: checks });
+  }));
+
+  // PATCH /api/runs/:id/skill-packs/checks — update check state (Phase 4-4)
+  router.patch('/:id/skill-packs/checks', asyncHandler(async (req, res) => {
+    const { checks } = req.body || {};
+    if (!Array.isArray(checks)) {
+      return res.status(400).json({ error: 'checks must be an array of { check_index, checked }' });
+    }
+    skillPackService.updateAcceptanceChecks(req.params.id, checks);
+    const updated = skillPackService.listAcceptanceChecks(req.params.id);
+    res.json({ acceptance_checks: updated });
   }));
 
   return router;

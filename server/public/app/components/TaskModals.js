@@ -202,6 +202,29 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
   const budgetPct = Math.min(100, (totalTokens / SKILL_PACK_TOKEN_BUDGET) * 100);
   const budgetColor = budgetPct > 90 ? 'var(--status-failed)' : budgetPct > 70 ? '#f59e0b' : 'var(--success)';
 
+  // MCP conflict detection (Phase 4-2)
+  const mcpConflicts = (() => {
+    const aliasMap = {}; // alias -> [pack names]
+    for (const pack of selectedPacks) {
+      try {
+        const servers = JSON.parse(pack.mcp_servers || '{}');
+        for (const alias of Object.keys(servers)) {
+          if (!aliasMap[alias]) aliasMap[alias] = [];
+          aliasMap[alias].push({ name: pack.name, policy: pack.conflict_policy || 'warn' });
+        }
+      } catch { /* skip */ }
+    }
+    const conflicts = [];
+    for (const [alias, packs] of Object.entries(aliasMap)) {
+      if (packs.length > 1) {
+        const hasFail = packs.some(p => p.policy === 'fail');
+        conflicts.push({ alias, packs: packs.map(p => p.name), blocking: hasFail });
+      }
+    }
+    return conflicts;
+  })();
+  const hasBlockingConflict = mcpConflicts.some(c => c.blocking);
+
   // Categorize packs
   const autoApplyIds = new Set(projectBindings.filter(b => b.auto_apply).map(b => b.skill_pack_id));
   const taskBoundIds = new Set(taskBindings.filter(b => !b.excluded).map(b => b.skill_pack_id));
@@ -288,11 +311,21 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
                 </div>
               </div>
             `}
+            ${mcpConflicts.length > 0 && html`
+              <div style=${{ marginTop: '8px' }}>
+                ${mcpConflicts.map(c => html`
+                  <div key=${c.alias} class="skill-select-warning" style=${{ marginTop: '4px', background: c.blocking ? 'color-mix(in srgb, var(--status-failed) 15%, transparent)' : 'color-mix(in srgb, #f59e0b 10%, transparent)', color: c.blocking ? 'var(--status-failed)' : '#f59e0b' }}>
+                    ${c.blocking ? '\u26D4' : '\u26A0'} MCP "${c.alias}" conflict: ${c.packs.join(', ')}
+                    ${c.blocking ? ' — execution blocked (fail policy)' : ' — higher priority wins'}
+                  </div>
+                `)}
+              </div>
+            `}
           </div>
         </div>
         <div class="modal-footer">
           <button class="ghost" onClick=${onClose}>Cancel</button>
-          <button class="primary" onClick=${handleExecute} disabled=${executing || !agentProfileId}>
+          <button class="primary" onClick=${handleExecute} disabled=${executing || !agentProfileId || hasBlockingConflict}>
             ${executing ? 'Starting...' : 'Start Agent'}
           </button>
         </div>

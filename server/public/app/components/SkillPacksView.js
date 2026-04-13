@@ -404,6 +404,38 @@ export function SkillPacksView({ projects }) {
     return list.sort((a, b) => (a.priority || 100) - (b.priority || 100));
   }, [packs, filterScope, filterProjectId]);
 
+  // Export pack as JSON download (Phase 4-3)
+  const handleExport = async (pack) => {
+    try {
+      const data = await apiFetch(`/api/skill-packs/${pack.id}/export`);
+      const blob = new Blob([JSON.stringify(data.skill_pack, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `skill-pack-${pack.name.replace(/\s+/g, '-').toLowerCase()}.json`;
+      a.click(); URL.revokeObjectURL(url);
+    } catch (err) { addToast(err.message, 'error'); }
+  };
+
+  // Import pack from JSON file (Phase 4-3)
+  const handleImport = () => {
+    const input = document.createElement('input');
+    input.type = 'file'; input.accept = '.json';
+    input.onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const parsed = JSON.parse(text);
+        await apiFetchWithToast('/api/skill-packs/import', {
+          method: 'POST',
+          body: JSON.stringify({ skill_pack: parsed }),
+        });
+        loadData();
+      } catch (err) { addToast(err.message || 'Invalid JSON', 'error'); }
+    };
+    input.click();
+  };
+
   if (loading) return html`<${Loading} />`;
 
   return html`
@@ -411,6 +443,7 @@ export function SkillPacksView({ projects }) {
       <div class="skill-packs-header">
         <h1 class="skill-packs-title">Skill Packs</h1>
         <div class="skill-packs-actions">
+          <button class="ghost small" onClick=${handleImport}>Import</button>
           <button class="ghost small" onClick=${() => setShowTemplates(v => !v)}>
             ${showTemplates ? 'Hide Templates' : 'MCP Templates'}
           </button>
@@ -433,6 +466,36 @@ export function SkillPacksView({ projects }) {
         `}
         <span class="skill-packs-count">${filteredPacks.length} pack${filteredPacks.length !== 1 ? 's' : ''}</span>
       </div>
+
+      <!-- Token Budget Overview (Phase 4-1) -->
+      ${filteredPacks.length > 0 && (() => {
+        const BUDGET = 4000;
+        const totalTokens = filteredPacks.reduce((s, p) => s + (p.estimated_tokens || 0), 0);
+        const pct = Math.min(100, (totalTokens / BUDGET) * 100);
+        const color = pct > 90 ? 'var(--status-failed)' : pct > 70 ? '#f59e0b' : 'var(--success)';
+        return html`
+          <div class="skill-budget-overview">
+            <div class="skill-budget-header">
+              <span class="form-label" style=${{ marginBottom: 0 }}>Token Budget</span>
+              <span style=${{ fontSize: '11px', color: 'var(--text-muted)' }}>${totalTokens} / ${BUDGET}</span>
+            </div>
+            <div class="skill-budget-bar" style=${{ height: '8px' }}>
+              <div class="skill-budget-fill" style=${{ width: `${pct}%`, background: color }}></div>
+            </div>
+            <div class="skill-budget-breakdown">
+              ${filteredPacks.filter(p => (p.estimated_tokens || 0) > 0).map(p => {
+                const w = Math.max(2, ((p.estimated_tokens || 0) / BUDGET) * 100);
+                return html`
+                  <div class="skill-budget-item" key=${p.id} title="${p.name}: ${p.estimated_tokens} tokens">
+                    <div class="skill-budget-item-bar" style=${{ width: `${w}%`, background: p.color || 'var(--accent)' }}></div>
+                    <span class="skill-budget-item-label">${p.name} (${p.estimated_tokens})</span>
+                  </div>
+                `;
+              })}
+            </div>
+          </div>
+        `;
+      })()}
 
       <!-- MCP Templates (collapsible) -->
       ${showTemplates && html`
@@ -489,6 +552,7 @@ export function SkillPacksView({ projects }) {
               </div>
               <div class="skill-pack-card-actions" onClick=${e => e.stopPropagation()}>
                 <button class="ghost small" onClick=${() => { setEditPack(pack); setShowModal(true); }}>Edit</button>
+                <button class="ghost small" onClick=${() => handleExport(pack)}>Export</button>
                 <button class="ghost small danger-text" onClick=${() => setDeletePack(pack)}>Delete</button>
               </div>
             </div>

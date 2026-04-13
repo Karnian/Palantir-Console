@@ -839,6 +839,55 @@ function createSkillPackService(db) {
     insertAll();
   }
 
+  // ─── Acceptance Checks (Phase 4-4) ───
+
+  // Lazy-init: only prepare if table exists (migration 014)
+  let acceptanceStmts = null;
+  function getAcceptanceStmts() {
+    if (acceptanceStmts) return acceptanceStmts;
+    try {
+      acceptanceStmts = {
+        list: db.prepare('SELECT * FROM run_acceptance_checks WHERE run_id = ? ORDER BY check_index ASC'),
+        upsert: db.prepare(`
+          INSERT INTO run_acceptance_checks (run_id, check_index, checked, checked_by, checked_at)
+          VALUES (@run_id, @check_index, @checked, @checked_by, @checked_at)
+          ON CONFLICT(run_id, check_index) DO UPDATE SET
+            checked = excluded.checked,
+            checked_by = excluded.checked_by,
+            checked_at = excluded.checked_at
+        `),
+      };
+    } catch {
+      acceptanceStmts = null;
+    }
+    return acceptanceStmts;
+  }
+
+  function listAcceptanceChecks(runId) {
+    const s = getAcceptanceStmts();
+    if (!s) return [];
+    return s.list.all(runId);
+  }
+
+  function updateAcceptanceChecks(runId, checks) {
+    const s = getAcceptanceStmts();
+    if (!s) throw new BadRequestError('Acceptance checks table not available');
+    const now = new Date().toISOString();
+    const tx = db.transaction(() => {
+      for (const { check_index, checked } of checks) {
+        if (typeof check_index !== 'number') continue;
+        s.upsert.run({
+          run_id: runId,
+          check_index,
+          checked: checked ? 1 : 0,
+          checked_by: 'user',
+          checked_at: checked ? now : null,
+        });
+      }
+    });
+    tx();
+  }
+
   return {
     // CRUD
     createSkillPack,
@@ -866,6 +915,9 @@ function createSkillPackService(db) {
     // Run snapshots
     listRunSnapshots,
     recordRunSnapshots,
+    // Acceptance checks (Phase 4-4)
+    listAcceptanceChecks,
+    updateAcceptanceChecks,
     // Exported for testing
     _isEnvKeyDenied: isEnvKeyDenied,
     _estimateTokens: estimateTokens,
