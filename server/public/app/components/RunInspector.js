@@ -10,6 +10,39 @@ import { apiFetch } from '../lib/api.js';
 import { addToast } from '../lib/toast.js';
 import { timeAgo } from '../lib/format.js';
 
+function RunSkillItem({ sp }) {
+  const [showMcp, setShowMcp] = useState(false);
+  let checklist = [];
+  try { checklist = JSON.parse(sp.checklist_snapshot || '[]'); } catch { /* */ }
+  const mcpSnap = sp.mcp_snapshot || null;
+  return html`
+    <div>
+      <div class="run-skill-item">
+        <span class="run-skill-name">${sp.name || sp.skill_pack_id?.slice(0, 8)}</span>
+        <span class="run-skill-mode">${sp.applied_mode || 'full'}</span>
+        <span style=${{ fontSize: '10px', color: 'var(--text-muted)' }}>P${sp.effective_priority ?? '?'}</span>
+        <span style=${{ fontSize: '10px', color: 'var(--text-muted)' }}>#${(sp.applied_order ?? 0) + 1}</span>
+      </div>
+      ${checklist.length > 0 && html`
+        <div class="run-skill-checklist">
+          ${checklist.map((item, i) => html`
+            <label key=${i}><input type="checkbox" disabled /> ${item}</label>
+          `)}
+        </div>
+      `}
+      ${mcpSnap && html`
+        <div>
+          <button class="ghost small" style=${{ fontSize: '10px', padding: '2px 6px' }}
+            onClick=${() => setShowMcp(v => !v)}>
+            ${showMcp ? 'Hide MCP Config' : 'Show MCP Config'}
+          </button>
+          ${showMcp && html`<pre class="run-skill-mcp-snap">${typeof mcpSnap === 'string' ? mcpSnap : JSON.stringify(mcpSnap, null, 2)}</pre>`}
+        </div>
+      `}
+    </div>
+  `;
+}
+
 export function RunInspector({ run, onClose }) {
   const [events, setEvents] = useState([]);
   const [liveOutput, setLiveOutput] = useState('');
@@ -17,6 +50,8 @@ export function RunInspector({ run, onClose }) {
   const [sending, setSending] = useState(false);
   const [currentRun, setCurrentRun] = useState(run);
   const [tab, setTab] = useState('output');
+  const [skillPacks, setSkillPacks] = useState([]);
+  const [skillsLoaded, setSkillsLoaded] = useState(false);
   const outputRef = useRef(null);
   const userScrolledUp = useRef(false);
 
@@ -164,6 +199,18 @@ export function RunInspector({ run, onClose }) {
           <button class="run-inspector-tab ${tab === 'events' ? 'active' : ''}" onClick=${() => setTab('events')}>
             Events (${meaningfulEvents.length})
           </button>
+          <button class="run-inspector-tab ${tab === 'skills' ? 'active' : ''}" onClick=${async () => {
+            setTab('skills');
+            if (!skillsLoaded) {
+              try {
+                const data = await apiFetch('/api/runs/' + run.id + '/skill-packs');
+                setSkillPacks(data.skill_packs || []);
+              } catch { /* ignore */ }
+              setSkillsLoaded(true);
+            }
+          }}>
+            Skills${skillPacks.length > 0 ? ` (${skillPacks.length})` : ''}
+          </button>
         </div>
 
         ${tab === 'output' && html`
@@ -199,6 +246,19 @@ export function RunInspector({ run, onClose }) {
                 </div>
               `;
             })}
+          </div>
+        `}
+
+        ${tab === 'skills' && html`
+          <div class="run-skills-section" style=${{ flex: 1, overflowY: 'auto' }}>
+            ${skillPacks.length === 0 && html`
+              <div style="color:var(--text-muted);text-align:center;padding:40px 0;">
+                ${skillsLoaded ? 'No skill packs applied to this run.' : 'Loading...'}
+              </div>
+            `}
+            ${skillPacks.sort((a, b) => (a.applied_order ?? 0) - (b.applied_order ?? 0)).map(sp => html`
+              <${RunSkillItem} key=${sp.skill_pack_id} sp=${sp} />
+            `)}
           </div>
         `}
 

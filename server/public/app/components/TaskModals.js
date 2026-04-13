@@ -136,25 +136,96 @@ export function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
 // Agent Execution Modal (drag to In Progress)
 // ─────────────────────────────────────────────────────────────────────────────
 
+const SKILL_PACK_TOKEN_BUDGET = 4000;
+
 export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
   const [agentProfileId, setAgentProfileId] = useState('');
   const [prompt, setPrompt] = useState('');
   const [executing, setExecuting] = useState(false);
+  const [skillPacks, setSkillPacks] = useState([]); // all available
+  const [projectBindings, setProjectBindings] = useState([]); // auto_apply bindings
+  const [taskBindings, setTaskBindings] = useState([]); // task-level bindings
+  const [selectedIds, setSelectedIds] = useState(new Set());
   useEscape(open, onClose);
 
   useEffect(() => {
     if (open && task) {
       setPrompt(task.description || '');
       setAgentProfileId(task.agent_profile_id || agents[0]?.id || '');
+      setSelectedIds(new Set());
+      // Load skill packs
+      (async () => {
+        try {
+          const [spRes, tbRes] = await Promise.all([
+            apiFetch('/api/skill-packs'),
+            apiFetch(`/api/tasks/${task.id}/skill-packs`),
+          ]);
+          setSkillPacks(spRes.skill_packs || []);
+          setTaskBindings(tbRes.bindings || []);
+          // Load project bindings if task has a project
+          if (task.project_id) {
+            const pbRes = await apiFetch(`/api/projects/${task.project_id}/skill-packs`);
+            setProjectBindings(pbRes.bindings || []);
+          } else {
+            setProjectBindings([]);
+          }
+          // Pre-select auto_apply and task-bound packs
+          const preSelected = new Set();
+          if (task.project_id) {
+            const pb = (await apiFetch(`/api/projects/${task.project_id}/skill-packs`)).bindings || [];
+            pb.filter(b => b.auto_apply).forEach(b => preSelected.add(b.skill_pack_id));
+          }
+          (tbRes.bindings || []).filter(b => !b.excluded).forEach(b => preSelected.add(b.skill_pack_id));
+          setSelectedIds(preSelected);
+        } catch (err) { addToast(err.message, 'error'); }
+      })();
     }
   }, [open, task]);
 
   if (!open || !task) return null;
 
+  const selectedAgent = agents.find(a => a.id === agentProfileId);
+  const isClaudeAgent = selectedAgent?.type === 'claude-code';
+
+  const togglePack = (id) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  // Token budget calculation
+  const selectedPacks = skillPacks.filter(p => selectedIds.has(p.id));
+  const totalTokens = selectedPacks.reduce((sum, p) => sum + (p.estimated_tokens || 0), 0);
+  const budgetPct = Math.min(100, (totalTokens / SKILL_PACK_TOKEN_BUDGET) * 100);
+  const budgetColor = budgetPct > 90 ? 'var(--status-failed)' : budgetPct > 70 ? '#f59e0b' : 'var(--success)';
+
+  // Categorize packs
+  const autoApplyIds = new Set(projectBindings.filter(b => b.auto_apply).map(b => b.skill_pack_id));
+  const taskBoundIds = new Set(taskBindings.filter(b => !b.excluded).map(b => b.skill_pack_id));
+  const excludedIds = new Set(taskBindings.filter(b => b.excluded).map(b => b.skill_pack_id));
+
+  const getSource = (packId) => {
+    if (autoApplyIds.has(packId)) return 'auto';
+    if (taskBoundIds.has(packId)) return 'task';
+    return 'manual';
+  };
+
+  // Sort: auto_apply first, then task-bound, then rest
+  const sortedPacks = [...skillPacks].sort((a, b) => {
+    const sa = autoApplyIds.has(a.id) ? 0 : taskBoundIds.has(a.id) ? 1 : 2;
+    const sb = autoApplyIds.has(b.id) ? 0 : taskBoundIds.has(b.id) ? 1 : 2;
+    return sa - sb || (a.priority || 100) - (b.priority || 100);
+  });
+
   const handleExecute = async () => {
     setExecuting(true);
     try {
-      await onExecute(task.id, agentProfileId, prompt);
+      // Send skill_pack_ids = explicitly selected packs beyond auto_apply/task bindings
+      const extraIds = [...selectedIds].filter(id => !autoApplyIds.has(id) && !taskBoundIds.has(id));
+      await onExecute(task.id, agentProfileId, prompt, extraIds.length > 0 ? extraIds : undefined);
       onClose();
     } catch (err) {
       addToast(err.message, 'error');
@@ -165,7 +236,7 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
   return html`
     <div class="modal-overlay">
       <div class="modal-backdrop" onClick=${onClose}></div>
-      <div class="modal-panel">
+      <div class="modal-panel" style=${{ maxWidth: '640px' }}>
         <div class="modal-header">
           <h2 class="modal-title">Execute Task: ${task.title}</h2>
           <button class="ghost" onClick=${onClose}>Close</button>
@@ -181,6 +252,42 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
           <div class="form-field">
             <label class="form-label">Prompt / Instructions</label>
             <textarea class="form-textarea" value=${prompt} onInput=${e => setPrompt(e.target.value)} rows="4" placeholder="Instructions for the agent..."></textarea>
+          </div>
+
+          <!-- Skill Pack Selection (Phase 3-3) -->
+          <div class="skill-select-section">
+            <div class="skill-select-title">Skill Packs</div>
+            ${!isClaudeAgent && agentProfileId && html`
+              <div class="skill-select-warning">Skill packs will be skipped for non-Claude agents.</div>
+            `}
+            <div class="skill-select-list">
+              ${sortedPacks.map(pack => {
+                const source = getSource(pack.id);
+                const isExcluded = excludedIds.has(pack.id);
+                const checked = selectedIds.has(pack.id) && !isExcluded;
+                const sourceLabel = source === 'auto' ? 'auto-apply' : source === 'task' ? 'task-bound' : '';
+                return html`
+                  <label class="skill-select-item" key=${pack.id} style=${{ opacity: isExcluded ? 0.5 : 1 }}>
+                    <input type="checkbox" checked=${checked} disabled=${isExcluded}
+                      onChange=${() => togglePack(pack.id)} />
+                    <span class="skill-select-item-name">
+                      ${pack.icon || '\u2662'} ${pack.name}
+                      ${isExcluded ? ' (excluded)' : ''}
+                    </span>
+                    ${sourceLabel && html`<span class="skill-select-item-source">${sourceLabel}</span>`}
+                    <span style=${{ fontSize: '10px', color: 'var(--text-muted)' }}>${pack.estimated_tokens || 0} tok</span>
+                  </label>
+                `;
+              })}
+            </div>
+            ${selectedPacks.length > 0 && html`
+              <div class="skill-select-budget">
+                <span>${totalTokens} / ${SKILL_PACK_TOKEN_BUDGET} tokens</span>
+                <div class="skill-budget-bar">
+                  <div class="skill-budget-fill" style=${{ width: `${budgetPct}%`, background: budgetColor }}></div>
+                </div>
+              </div>
+            `}
           </div>
         </div>
         <div class="modal-footer">
@@ -332,7 +439,7 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
     }
   };
 
-  const handleExecuteDone = async (taskId, agentProfileId, prompt) => {
+  const handleExecuteDone = async (taskId, agentProfileId, prompt, skillPackIds) => {
     const prevStatus = task.status;
     // Move to in_progress (ignore error if already in that state)
     try {
@@ -346,7 +453,7 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
     let newRun;
     try {
       const data = await apiFetch(`/api/tasks/${taskId}/execute`, {
-        method: 'POST', body: JSON.stringify({ agent_profile_id: agentProfileId, prompt: prompt || undefined }),
+        method: 'POST', body: JSON.stringify({ agent_profile_id: agentProfileId, prompt: prompt || undefined, skill_pack_ids: skillPackIds }),
       });
       newRun = data.run;
     } catch (err) {

@@ -4522,3 +4522,452 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   padding: 0 4px;
   border-radius: 3px;
 }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Skill Packs (Phase 3)
+   ───────────────────────────────────────────────────────────────────────────── */
+
+.skill-packs-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+.skill-packs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px 12px;
+  flex-shrink: 0;
+}
+.skill-packs-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.skill-packs-actions {
+  display: flex;
+  gap: 8px;
+}
+.skill-packs-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 24px 12px;
+}
+.skill-packs-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+.skill-packs-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+  padding: 0 24px 24px;
+  overflow-y: auto;
+  flex: 1;
+}
+.skill-pack-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.skill-pack-card:hover {
+  border-color: var(--accent-muted);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+.skill-pack-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.skill-pack-icon {
+  font-size: 18px;
+}
+.skill-pack-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex: 1;
+}
+.skill-pack-priority {
+  font-size: 10px;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.06);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.skill-pack-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.skill-pack-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.skill-pack-scope,
+.skill-pack-tokens,
+.skill-pack-mcp,
+.skill-pack-check {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+}
+.skill-pack-scope.global { color: var(--accent); background: var(--accent-muted); }
+.skill-pack-scope.project { color: var(--info); background: color-mix(in srgb, var(--info) 15%, transparent); }
+.skill-pack-mcp { color: #a78bfa; }
+.skill-pack-check { color: var(--success); }
+.skill-pack-card-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+.danger-text { color: var(--status-failed) !important; }
+
+/* Skill tabs (inside modal) */
+.skill-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 8px 0;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0;
+}
+.skill-tab {
+  background: none;
+  border: none;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.skill-tab:hover { color: var(--text-primary); }
+.skill-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* MCP section in modal */
+.skill-mcp-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.skill-mcp-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 12px;
+  text-align: center;
+}
+.skill-mcp-item {
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+.skill-mcp-item-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.skill-mcp-alias {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.skill-mcp-cmd {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skill-mcp-env {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+/* Checklist section */
+.skill-checklist-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.skill-checklist-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+}
+.skill-checklist-text { flex: 1; color: var(--text-primary); }
+.skill-checklist-inject {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+/* Adapter compat badges */
+.skill-adapter-compat {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.skill-adapter-badges { display: flex; gap: 6px; }
+.skill-badge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.skill-badge-ok { color: var(--success); background: color-mix(in srgb, var(--success) 15%, transparent); }
+.skill-badge-na { color: var(--text-muted); background: rgba(255, 255, 255, 0.06); }
+
+/* MCP templates table */
+.skill-templates-section {
+  margin: 0 24px 16px;
+  padding: 16px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.skill-templates-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 10px;
+}
+.skill-templates-table {
+  display: grid;
+  grid-template-columns: 100px 1fr 1fr 120px;
+  gap: 1px;
+  font-size: 12px;
+}
+.skill-templates-row {
+  display: contents;
+}
+.skill-templates-row > span {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+.skill-templates-header-row > span {
+  font-weight: 600;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Form helpers */
+.form-row {
+  display: flex;
+  gap: 12px;
+}
+.form-select.small, .form-input.small {
+  font-size: 12px;
+  padding: 5px 8px;
+}
+.danger {
+  background: var(--status-failed);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.danger:hover { opacity: 0.9; }
+.danger:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Run inspector skill packs section (Phase 3-4) */
+.run-skills-section {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+.run-skills-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+}
+.run-skill-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+.run-skill-item:last-child { border-bottom: none; }
+.run-skill-name { font-weight: 500; color: var(--text-primary); flex: 1; }
+.run-skill-mode {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+}
+.run-skill-checklist {
+  padding: 4px 0 4px 20px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.run-skill-checklist label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  cursor: default;
+}
+.run-skill-mcp-snap {
+  margin-top: 4px;
+  padding: 8px;
+  background: var(--bg-base);
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  max-height: 120px;
+  overflow-y: auto;
+  color: var(--text-secondary);
+}
+
+/* Skill pack select in execute modal (Phase 3-3) */
+.skill-select-section {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  margin-top: 4px;
+}
+.skill-select-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+}
+.skill-select-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.skill-select-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.skill-select-item:hover { background: rgba(255, 255, 255, 0.04); }
+.skill-select-item input[type="checkbox"] { flex-shrink: 0; }
+.skill-select-item-name { flex: 1; color: var(--text-primary); }
+.skill-select-item-source {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.skill-select-budget {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.skill-budget-bar {
+  flex: 1;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.skill-budget-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.2s;
+}
+.skill-select-warning {
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--status-failed) 10%, transparent);
+  color: var(--status-failed);
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+/* Project detail skill packs section (Phase 3-2) */
+.project-skills-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.project-skills-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.project-skills-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.project-skill-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+.project-skill-name { flex: 1; font-weight: 500; color: var(--text-primary); }
+.project-skill-auto {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.project-skill-auto.on { color: var(--success); background: color-mix(in srgb, var(--success) 15%, transparent); }
+.project-skill-auto.off { color: var(--text-muted); background: rgba(255, 255, 255, 0.06); }
