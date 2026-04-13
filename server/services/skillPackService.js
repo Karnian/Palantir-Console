@@ -531,16 +531,6 @@ function createSkillPackService(db) {
       }
     }
 
-    // Shadow rule: project-scope packs shadow same-name globals
-    const nameToId = new Map();
-    for (const [id, entry] of packMap) {
-      const existing = nameToId.get(entry.pack.name);
-      if (existing && existing.pack.scope === 'global' && entry.pack.scope === 'project') {
-        packMap.delete(existing.pack.id);
-      }
-      nameToId.set(entry.pack.name, entry);
-    }
-
     // B2: explicitPackIds (per-run ephemeral, not persisted)
     if (explicitPackIds && explicitPackIds.length > 0) {
       for (const packId of explicitPackIds) {
@@ -549,12 +539,22 @@ function createSkillPackService(db) {
         if (!pack) continue;
         packMap.set(pack.id, { pack, source: 'explicit', bindingPriority: pack.priority });
       }
-      // Shadow rule for explicit too
+    }
+
+    // Shadow rule: project-scope packs shadow same-name globals
+    {
+      const nameGroups = new Map();
       for (const [id, entry] of packMap) {
-        const sameNameEntries = [...packMap.values()].filter(e => e.pack.name === entry.pack.name && e.pack.id !== id);
-        for (const other of sameNameEntries) {
-          if (other.pack.scope === 'global' && entry.pack.scope === 'project') {
-            packMap.delete(other.pack.id);
+        const name = entry.pack.name;
+        if (!nameGroups.has(name)) nameGroups.set(name, []);
+        nameGroups.get(name).push(id);
+      }
+      for (const [, ids] of nameGroups) {
+        if (ids.length <= 1) continue;
+        const hasProject = ids.some(id => packMap.get(id).pack.scope === 'project');
+        if (hasProject) {
+          for (const id of ids) {
+            if (packMap.get(id).pack.scope === 'global') packMap.delete(id);
           }
         }
       }
