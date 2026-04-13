@@ -307,8 +307,8 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
             <span class="form-label">Adapter Support</span>
             <div class="skill-adapter-badges">
               <span class="skill-badge skill-badge-ok">Claude \u2714 Full</span>
-              <span class="skill-badge skill-badge-na">Codex \u2013 Not yet</span>
-              <span class="skill-badge skill-badge-na">Gemini \u2013 Not yet</span>
+              <span class="skill-badge skill-badge-ok">Codex \u2714 Prompt</span>
+              <span class="skill-badge skill-badge-ok">Gemini \u2714 Prompt</span>
             </div>
           </div>
         </div>

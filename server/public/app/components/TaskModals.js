@@ -280,8 +280,8 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
           <!-- Skill Pack Selection (Phase 3-3) -->
           <div class="skill-select-section">
             <div class="skill-select-title">Skill Packs</div>
-            ${!isClaudeAgent && agentProfileId && html`
-              <div class="skill-select-warning">Skill packs will be skipped for non-Claude agents.</div>
+            ${!isClaudeAgent && agentProfileId && !(selectedAgent?.args_template || '').includes('{system_prompt_file}') && html`
+              <div class="skill-select-warning">This agent has no {system_prompt_file} support. Skill pack prompts will be skipped.</div>
             `}
             <div class="skill-select-list">
               ${sortedPacks.map(pack => {

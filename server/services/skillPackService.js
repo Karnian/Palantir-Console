@@ -173,6 +173,7 @@ function createSkillPackService(db) {
       icon, color, prompt_full, prompt_compact,
       mcp_servers, conflict_policy = 'fail',
       checklist, inject_checklist = 0, priority = 100,
+      requires_capabilities,
     } = data;
 
     if (!name || typeof name !== 'string' || !name.trim()) {
@@ -216,6 +217,14 @@ function createSkillPackService(db) {
       inject_checklist: inject_checklist ? 1 : 0,
       priority: typeof priority === 'number' ? priority : 100,
     });
+
+    // Phase 5-3: requires_capabilities (added via migration 015, not in pre-compiled insert)
+    if (requires_capabilities) {
+      const validated = validateChecklist(requires_capabilities); // same format: JSON array of strings
+      if (validated) {
+        db.prepare('UPDATE skill_packs SET requires_capabilities = ? WHERE id = ?').run(validated, id);
+      }
+    }
 
     return stmts.getById.get(id);
   }
@@ -262,6 +271,7 @@ function createSkillPackService(db) {
       'prompt_full', 'prompt_compact',
       'mcp_servers', 'conflict_policy',
       'checklist', 'inject_checklist', 'priority',
+      'requires_capabilities',
     ];
 
     for (const field of allowedFields) {
@@ -280,6 +290,8 @@ function createSkillPackService(db) {
         } else if (field === 'name') {
           if (!value || typeof value !== 'string' || !value.trim()) throw new BadRequestError('name cannot be empty');
           value = value.trim();
+        } else if (field === 'requires_capabilities') {
+          value = validateChecklist(value); // reuse: JSON array of strings
         }
 
         fields.push(`${field} = @${field}`);
@@ -607,11 +619,14 @@ function createSkillPackService(db) {
 
     // Phase D: Adapter gating
     const isClaude = (profile.command || '').includes('claude');
-    if (!isClaude) {
+    // Phase 5: Non-Claude agents with {system_prompt_file} in args_template support prompt plane
+    const hasPromptFileSupport = (profile.args_template || '').includes('{system_prompt_file}');
+    const supportsPromptPlane = isClaude || hasPromptFileSupport;
+    if (!supportsPromptPlane) {
       if (packMap.size === 0) {
         return { promptSections: [], mcpConfig: null, checklist: [], appliedPacks: [], warnings };
       }
-      // Non-Claude workers: skip prompt/MCP planes
+      // Non-supported workers: skip prompt/MCP planes
       const appliedPacks = [...packMap.values()].map(e => ({
         id: e.pack.id, name: e.pack.name, skippedReason: 'adapter_unsupported',
       }));
@@ -630,8 +645,39 @@ function createSkillPackService(db) {
 
       return { promptSections: [], mcpConfig: null, checklist: deduplicateChecklist(checklist), appliedPacks, warnings };
     }
+    // Non-Claude with prompt file support: MCP plane is still skipped
+    const supportsMcpPlane = isClaude;
 
-    // Phase E: Synthesis (Claude workers only)
+    // Phase E: Synthesis
+
+    // E6.5 (Phase 5-3): requires_capabilities check
+    let agentCapabilities = [];
+    try {
+      const caps = JSON.parse(profile.capabilities_json || '{}');
+      agentCapabilities = Array.isArray(caps.capabilities) ? caps.capabilities : [];
+      // Also consider mcp_tools as capabilities
+      if (Array.isArray(caps.mcp_tools)) agentCapabilities.push(...caps.mcp_tools);
+    } catch { /* */ }
+    const capSet = new Set(agentCapabilities);
+
+    for (const [id, entry] of packMap) {
+      if (!entry.pack.requires_capabilities) continue;
+      try {
+        const required = JSON.parse(entry.pack.requires_capabilities);
+        if (!Array.isArray(required)) continue;
+        const missing = required.filter(c => !capSet.has(c));
+        if (missing.length > 0) {
+          warnings.push({
+            type: 'skill_pack:capability_mismatch',
+            pack: entry.pack.name,
+            missing,
+            agent: profile.name,
+          });
+          // Remove from effective set — agent doesn't have required capabilities
+          packMap.delete(id);
+        }
+      } catch { /* skip invalid JSON */ }
+    }
 
     // E7: effective priority — task binding > project binding > pack default
     const sorted = [...packMap.values()].map(entry => {
@@ -688,64 +734,72 @@ function createSkillPackService(db) {
       }
     }
 
-    // E10: MCP alias resolution + conflict check
-    const allMcpServers = {};
-    const mcpConflicts = new Map(); // alias → [packNames]
+    // E10: MCP alias resolution + conflict check (Claude-only; Phase 5: skip for non-Claude)
+    let cleanMcpServers = {};
     const perPackMcp = new Map(); // packId → resolved servers obj
 
-    for (const entry of resolvedPacks) {
-      if (!entry.pack.mcp_servers) {
-        perPackMcp.set(entry.pack.id, null);
-        continue;
-      }
-      const { servers, warnings: resolveWarnings } = resolveMcpServers(entry.pack.mcp_servers);
-      perPackMcp.set(entry.pack.id, servers);
-      for (const w of resolveWarnings) warnings.push({ type: 'skill_pack:mcp_resolve_warning', message: w });
+    if (supportsMcpPlane) {
+      const allMcpServers = {};
+      const mcpConflicts = new Map(); // alias → [packNames]
 
-      for (const [alias, config] of Object.entries(servers)) {
-        if (allMcpServers[alias]) {
-          if (!mcpConflicts.has(alias)) {
-            mcpConflicts.set(alias, [allMcpServers[alias]._sourcePack]);
+      for (const entry of resolvedPacks) {
+        if (!entry.pack.mcp_servers) {
+          perPackMcp.set(entry.pack.id, null);
+          continue;
+        }
+        const { servers, warnings: resolveWarnings } = resolveMcpServers(entry.pack.mcp_servers);
+        perPackMcp.set(entry.pack.id, servers);
+        for (const w of resolveWarnings) warnings.push({ type: 'skill_pack:mcp_resolve_warning', message: w });
+
+        for (const [alias, config] of Object.entries(servers)) {
+          if (allMcpServers[alias]) {
+            if (!mcpConflicts.has(alias)) {
+              mcpConflicts.set(alias, [allMcpServers[alias]._sourcePack]);
+            }
+            mcpConflicts.get(alias).push(entry.pack.name);
+          } else {
+            allMcpServers[alias] = { ...config, _sourcePack: entry.pack.name, _sourcePolicy: entry.pack.conflict_policy };
           }
-          mcpConflicts.get(alias).push(entry.pack.name);
-        } else {
-          allMcpServers[alias] = { ...config, _sourcePack: entry.pack.name, _sourcePolicy: entry.pack.conflict_policy };
         }
       }
-    }
 
-    // Handle inter-pack conflicts
-    for (const [alias, packs] of mcpConflicts) {
-      const allEntries = resolvedPacks.filter(e => {
-        const servers = perPackMcp.get(e.pack.id);
-        return servers && servers[alias];
-      });
-      const anyFail = allEntries.some(e => e.pack.conflict_policy === 'fail');
-      if (anyFail) {
-        throw new BadRequestError(
-          `MCP server conflict on alias "${alias}" between packs: ${packs.join(', ')}. One or more packs have conflict_policy=fail.`
-        );
+      // Handle inter-pack conflicts
+      for (const [alias, packs] of mcpConflicts) {
+        const allEntries = resolvedPacks.filter(e => {
+          const servers = perPackMcp.get(e.pack.id);
+          return servers && servers[alias];
+        });
+        const anyFail = allEntries.some(e => e.pack.conflict_policy === 'fail');
+        if (anyFail) {
+          throw new BadRequestError(
+            `MCP server conflict on alias "${alias}" between packs: ${packs.join(', ')}. One or more packs have conflict_policy=fail.`
+          );
+        }
+        // All warn: use highest priority pack's config
+        warnings.push({ type: 'skill_pack:mcp_conflict_warn', alias, packs });
+        const highestPriority = allEntries.sort((a, b) =>
+          a.effectivePriority !== b.effectivePriority
+            ? a.effectivePriority - b.effectivePriority
+            : (a.order ?? 0) - (b.order ?? 0)
+        )[0];
+        const servers = perPackMcp.get(highestPriority.pack.id);
+        if (servers && servers[alias]) {
+          allMcpServers[alias] = { ...servers[alias], _sourcePack: highestPriority.pack.name, _sourcePolicy: highestPriority.pack.conflict_policy };
+        }
       }
-      // All warn: use highest priority pack's config
-      warnings.push({ type: 'skill_pack:mcp_conflict_warn', alias, packs });
-      // The allMcpServers already has the first pack's config; replace with highest priority
-      // Lowest number = highest priority; use applied_order as tie-breaker
-      const highestPriority = allEntries.sort((a, b) =>
-        a.effectivePriority !== b.effectivePriority
-          ? a.effectivePriority - b.effectivePriority
-          : (a.order ?? 0) - (b.order ?? 0)
-      )[0];
-      const servers = perPackMcp.get(highestPriority.pack.id);
-      if (servers && servers[alias]) {
-        allMcpServers[alias] = { ...servers[alias], _sourcePack: highestPriority.pack.name, _sourcePolicy: highestPriority.pack.conflict_policy };
-      }
-    }
 
-    // Clean up internal markers from MCP config
-    const cleanMcpServers = {};
-    for (const [alias, config] of Object.entries(allMcpServers)) {
-      const { _sourcePack, _sourcePolicy, ...clean } = config;
-      cleanMcpServers[alias] = clean;
+      // Clean up internal markers from MCP config
+      for (const [alias, config] of Object.entries(allMcpServers)) {
+        const { _sourcePack, _sourcePolicy, ...clean } = config;
+        cleanMcpServers[alias] = clean;
+      }
+    } else {
+      // Non-MCP agent: log warning for any packs that have MCP servers
+      for (const entry of resolvedPacks) {
+        if (entry.pack.mcp_servers) {
+          warnings.push({ type: 'skill_pack:mcp_skipped', pack: entry.pack.name, agent: profile.name });
+        }
+      }
     }
 
     // E11: Build prompt sections

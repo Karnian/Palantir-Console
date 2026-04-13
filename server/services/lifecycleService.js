@@ -325,7 +325,20 @@ function createLifecycleService({
         });
       } else {
         // Non-Claude agents: use tmux/subprocess engine
-        const args = buildAgentArgs(profile, prompt);
+        // Phase 5: Write system prompt file for agents that support {system_prompt_file}
+        const placeholders = {};
+        if (skillPackResult && skillPackResult.promptSections.length > 0 &&
+            profile.args_template && profile.args_template.includes('{system_prompt_file}')) {
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const promptContent = skillPackResult.promptSections
+            .map(s => `--- Skill: ${s.name} ---\n${s.text}`)
+            .join('\n\n');
+          const promptFilePath = path.resolve(process.cwd(), 'runtime', 'mcp', `${run.id}-system-prompt.md`);
+          fs.writeFileSync(promptFilePath, promptContent, { mode: 0o600 });
+          placeholders.system_prompt_file = promptFilePath;
+        }
+        const args = buildAgentArgs(profile, prompt, placeholders);
         result = executionEngine.spawnAgent(run.id, {
           command: profile.command,
           args,
@@ -368,20 +381,25 @@ function createLifecycleService({
   /**
    * Build command arguments from agent profile template.
    */
-  function buildAgentArgs(profile, prompt) {
+  function buildAgentArgs(profile, prompt, placeholders = {}) {
     if (!profile.args_template) return [prompt];
 
     const template = profile.args_template;
-    // Split template into parts first, then replace {prompt} placeholder as single arg
+    // Split template into parts first, then replace placeholders as single args
     const parts = template.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
     const args = [];
     for (const part of parts) {
       if (part === '{prompt}') {
-        // Prompt is always a single argument — never split by spaces
         args.push(prompt);
-      } else if (part.includes('{prompt}')) {
-        // Replace placeholder within a larger string
-        args.push(part.replace(/\{prompt\}/g, prompt));
+      } else if (part === '{system_prompt_file}' && placeholders.system_prompt_file) {
+        args.push(placeholders.system_prompt_file);
+      } else if (part.includes('{prompt}') || part.includes('{system_prompt_file}')) {
+        let resolved = part;
+        resolved = resolved.replace(/\{prompt\}/g, prompt);
+        if (placeholders.system_prompt_file) {
+          resolved = resolved.replace(/\{system_prompt_file\}/g, placeholders.system_prompt_file);
+        }
+        args.push(resolved);
       } else {
         // Static template part — strip surrounding quotes if present
         args.push(part.replace(/^"(.*)"$/, '$1'));
@@ -776,8 +794,9 @@ function createLifecycleService({
     try {
       const files = fs.readdirSync(mcpDir);
       for (const file of files) {
-        if (!file.endsWith('.json')) continue;
-        const runId = file.replace('.json', '');
+        // Clean both .json (MCP config) and .md (system prompt) files
+        if (!file.endsWith('.json') && !file.endsWith('.md')) continue;
+        const runId = file.replace('.json', '').replace('-system-prompt.md', '').replace('.md', '');
         try {
           const run = runService.getRun(runId);
           if (!['running', 'queued'].includes(run.status)) {

@@ -58,6 +58,7 @@ function createSkillPacksRouter({ skillPackService }) {
       checklist: pack.checklist,
       conflict_policy: pack.conflict_policy,
       inject_checklist: pack.inject_checklist,
+      requires_capabilities: pack.requires_capabilities,
     };
     res.json({ skill_pack: exported });
   }));
