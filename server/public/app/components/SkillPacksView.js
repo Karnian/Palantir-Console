@@ -9,6 +9,7 @@ import { apiFetch } from '../lib/api.js';
 import { addToast, apiFetchWithToast } from '../lib/toast.js';
 import { useEscape } from '../lib/hooks.js';
 import { EmptyState } from './EmptyState.js';
+import { Dropdown } from './Dropdown.js';
 
 function Loading() {
   return html`<div class="loading">Loading...</div>`;
@@ -173,10 +174,10 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
           <div class="form-row">
             <div class="form-field" style=${{ flex: 1 }}>
               <label class="form-label">Scope</label>
-              <select class="form-select" value=${scope} onChange=${e => setScope(e.target.value)}>
-                <option value="global">Global</option>
-                <option value="project">Project</option>
-              </select>
+              <${Dropdown} value=${scope} onChange=${setScope} options=${[
+                { value: 'global', label: 'Global' },
+                { value: 'project', label: 'Project' },
+              ]} />
             </div>
             ${scope === 'project' && html`
               <div class="form-field" style=${{ flex: 2 }}>
