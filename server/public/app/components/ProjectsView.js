@@ -2,14 +2,14 @@
 // Extracted from server/public/app.js as part of P5-3 (ESM phase 4b).
 
 import { h } from '../../vendor/preact.module.js';
-import { useState, useMemo } from '../../vendor/hooks.module.js';
+import { useState, useEffect, useMemo, useCallback } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
 import { useEscape } from '../lib/hooks.js';
 import { formatTime } from '../lib/format.js';
 import { apiFetch } from '../lib/api.js';
-import { addToast } from '../lib/toast.js';
+import { addToast, apiFetchWithToast } from '../lib/toast.js';
 import { EmptyState } from './EmptyState.js';
 import { DirectoryPicker } from './BoardView.js';
 
@@ -25,6 +25,124 @@ const BOARD_COLUMNS = [
   { id: 'review', label: 'Review' },
   { id: 'done', label: 'Done' },
 ];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ProjectSkillPacks — skill pack bindings for a project (Phase 3-2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ProjectSkillPacks({ projectId }) {
+  const [bindings, setBindings] = useState([]);
+  const [allPacks, setAllPacks] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [addingId, setAddingId] = useState('');
+  const [managerActive, setManagerActive] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const [bRes, pRes] = await Promise.all([
+        apiFetch(`/api/projects/${projectId}/skill-packs`),
+        apiFetch('/api/skill-packs'),
+      ]);
+      setBindings(bRes.bindings || []);
+      setAllPacks(pRes.skill_packs || []);
+      // Check if there's an active PM for this project
+      try {
+        const mgrRes = await apiFetch('/api/manager/status');
+        const pmSlots = (mgrRes.registry || []).filter(s => s.slot === `pm:${projectId}` && s.active);
+        setManagerActive(pmSlots.length > 0);
+      } catch { setManagerActive(false); }
+    } catch (err) { addToast(err.message, 'error'); }
+    setLoading(false);
+  }, [projectId]);
+
+  useEffect(() => { setLoading(true); load(); }, [projectId]);
+
+  const boundIds = bindings.map(b => b.skill_pack_id);
+  const available = allPacks.filter(p => !boundIds.includes(p.id));
+
+  const handleAdd = async () => {
+    if (!addingId) return;
+    try {
+      await apiFetchWithToast(`/api/projects/${projectId}/skill-packs`, {
+        method: 'POST', body: JSON.stringify({ skill_pack_id: addingId }),
+      });
+      setAddingId('');
+      load();
+    } catch { /* toast */ }
+  };
+
+  const handleRemove = async (packId) => {
+    try {
+      await apiFetchWithToast(`/api/projects/${projectId}/skill-packs/${packId}`, { method: 'DELETE' });
+      load();
+    } catch { /* toast */ }
+  };
+
+  const handleToggleAuto = async (packId, currentAuto) => {
+    try {
+      await apiFetchWithToast(`/api/projects/${projectId}/skill-packs/${packId}`, {
+        method: 'PATCH', body: JSON.stringify({ auto_apply: !currentAuto }),
+      });
+      load();
+    } catch { /* toast */ }
+  };
+
+  const handlePriorityChange = async (packId, newPriority) => {
+    try {
+      await apiFetchWithToast(`/api/projects/${projectId}/skill-packs/${packId}`, {
+        method: 'PATCH', body: JSON.stringify({ priority: parseInt(newPriority, 10) || 100 }),
+      });
+      load();
+    } catch { /* toast */ }
+  };
+
+  if (loading) return html`<div class="project-skills-section"><span style="font-size:12px;color:var(--text-muted);">Loading skill packs...</span></div>`;
+
+  return html`
+    <div class="project-skills-section">
+      <div class="project-skills-header">
+        <span class="project-skills-title">Skill Packs (${bindings.length})</span>
+      </div>
+      ${bindings.map(b => {
+        const pack = allPacks.find(p => p.id === b.skill_pack_id);
+        const name = pack ? pack.name : b.skill_pack_id.slice(0, 8);
+        return html`
+          <div class="project-skill-item" key=${b.skill_pack_id}>
+            <span class="project-skill-name">${pack?.icon || '\u2662'} ${name}</span>
+            <button class="ghost small project-skill-auto ${b.auto_apply ? 'on' : 'off'}"
+              onClick=${() => handleToggleAuto(b.skill_pack_id, b.auto_apply)}
+              title=${managerActive && !b.auto_apply ? 'Enabling auto_apply requires PM reset' : ''}>
+              ${b.auto_apply ? 'Auto' : 'Manual'}
+            </button>
+            <input type="number" class="form-input" style=${{ width: '60px', padding: '2px 6px', fontSize: '11px' }}
+              value=${b.priority ?? 100}
+              onChange=${e => handlePriorityChange(b.skill_pack_id, e.target.value)}
+              title="Priority" />
+            <button class="ghost small danger-text" onClick=${() => handleRemove(b.skill_pack_id)}>\u2715</button>
+          </div>
+          ${managerActive && b.auto_apply === 0 && html`
+            <!-- Only show warning when toggling auto_apply ON while PM is active -->
+          `}
+        `;
+      })}
+      ${available.length > 0 && html`
+        <div class="form-row" style=${{ gap: '6px', marginTop: '8px' }}>
+          <select class="form-select" style=${{ flex: 1, fontSize: '12px' }} value=${addingId}
+            onChange=${e => setAddingId(e.target.value)}>
+            <option value="">Add skill pack...</option>
+            ${available.map(p => html`<option key=${p.id} value=${p.id}>${p.icon || '\u2662'} ${p.name} (${p.scope})</option>`)}
+          </select>
+          <button class="ghost small" onClick=${handleAdd} disabled=${!addingId}>Add</button>
+        </div>
+      `}
+      ${managerActive && html`
+        <div style=${{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '6px' }}>
+          \u26A0 Changing auto_apply while PM is active may require PM reset to take effect.
+        </div>
+      `}
+    </div>
+  `;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ProjectDetailModal — internal, not exported
@@ -150,6 +268,8 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTa
               `;
             })}
           </div>
+
+          <${ProjectSkillPacks} projectId=${project.id} />
         </div>
       </div>
     </div>

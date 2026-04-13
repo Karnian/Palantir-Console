@@ -210,8 +210,9 @@ test('P4-2: lifecycleService source includes projectMcpConfig', () => {
     src.includes('projectMcpConfig'),
     'lifecycleService should capture projectMcpConfig from project'
   );
+  // Phase 1b: mcpConfig now comes from effectiveMcpConfig (skill pack merged or fallback to project)
   assert.ok(
-    src.includes('mcpConfig: projectMcpConfig'),
-    'lifecycleService should pass mcpConfig to spawnAgent'
+    src.includes('effectiveMcpConfig') && src.includes('mcpConfig: effectiveMcpConfig'),
+    'lifecycleService should pass mcpConfig (effectiveMcpConfig) to spawnAgent'
   );
 });

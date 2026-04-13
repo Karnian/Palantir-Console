@@ -1,6 +1,6 @@
 # Agent Guide
 
-Palantir Console — AI 코딩 에이전트 중앙 관제 허브. 상세 내용은 `CLAUDE.md` 와 `docs/specs/manager-v3-multilayer.md` 참고. 이 파일은 빠른 오리엔테이션 용.
+Palantir Console — AI 코딩 에이전트를 3계층(Main Manager → PM → Worker)으로 운영하는 중앙 관제 허브. Main Manager가 여러 프로젝트와 PM을 총괄하고, PM이 프로젝트 내 워커들을 관리하며, Worker가 실제 코딩 작업을 수행한다. 상세 내용은 `CLAUDE.md` 와 `docs/specs/manager-v3-multilayer.md` 참고. 이 파일은 빠른 오리엔테이션 용.
 
 ## Quick Start
 

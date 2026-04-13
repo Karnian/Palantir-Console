@@ -2,11 +2,30 @@
 
 [한국어](README.ko.md)
 
-Central control hub for managing AI coding agents (Claude Code, Codex, OpenCode).
+Central control hub for orchestrating AI coding agents (Claude Code, Codex, OpenCode) through a 3-tier hierarchy.
 
-Monitor multiple agents across multiple projects — see who's doing what, where they're stuck, and how much they cost, all from one screen.
+```
+Main Manager (Top)          ← oversees all projects and PMs
+ ├── PM (Project A)         ← manages workers within the project
+ │    ├── Worker 1          ← performs actual coding tasks
+ │    ├── Worker 2
+ │    └── Worker 3
+ ├── PM (Project B)
+ │    └── Worker 1
+ └── PM (Project C)
+      ├── Worker 1
+      └── Worker 2
+```
 
-> **v3 Manager redesign shipped.** The Manager is now a project-scoped dispatcher with a Top session, optional per-project PM sessions (lazy-spawned Codex), conversation identity for every node (Top / PM / Worker), deterministic routing, annotate-only drift reconciliation, and semantic lifecycle events. See `docs/specs/manager-v3-multilayer.md` for the spec and `docs/test-scenarios.md` for the user-facing scenarios.
+**Worker** — AI coding agents (Claude Code, Codex, etc.) that perform actual tasks within a project. Each worker runs in an isolated git worktree so they never collide.
+
+**PM (Project Manager)** — Assigned per-project to coordinate its workers. Distributes tasks, tracks progress, and maintains project-specific conventions and context for consistent direction.
+
+**Main Manager (Top)** — The top-level orchestrator. Routes user instructions to the right PM, manages priorities across projects, and serves as a single conversational entry point.
+
+All layers are monitored and controlled from a single web dashboard (`localhost:4177`).
+
+> **v3 Manager redesign shipped.** See `docs/specs/manager-v3-multilayer.md` for the spec and `docs/test-scenarios.md` for the user-facing scenarios.
 
 ## Quick Start
 
@@ -79,17 +98,19 @@ unreachable with auth enabled.
 ## Core Concepts
 
 ```
-Project  →  Task  →  Run  →  Agent
- (group)   (work)  (exec)  (Claude/Codex/OpenCode)
+Main Manager (Top)  →  PM (per project)  →  Worker (per task)
+ (orchestrator)       (project manager)     (AI coding agent)
 ```
 
 | Concept | Description |
 |---------|-------------|
+| **Main Manager (Top)** | Top-level orchestrator. Routes user instructions to the right PM, oversees all projects |
+| **PM (Project Manager)** | Per-project manager. Coordinates workers, distributes tasks, maintains project context. Lazy-spawned on first message |
+| **Worker** | AI agent (Claude Code, Codex, OpenCode) that executes a task. Runs in an isolated git worktree |
 | **Project** | Logical grouping of tasks. e.g. "Backend API", "Frontend Refactor" |
 | **Task** | A unit of work. Managed on a kanban board. Status: Backlog → Todo → In Progress → Review → Done |
 | **Run** | An agent execution against a Task. Multiple Runs per Task allowed |
 | **Agent Profile** | Agent configuration (Claude Code, Codex CLI, OpenCode, custom) |
-| **Manager layer** | `top` (singleton dispatcher) or `pm:<projectId>` (project-scoped PM, lazy-spawned) |
 | **Conversation** | 1st-class identity for any chat surface: `top`, `pm:<projectId>`, or `worker:<runId>` |
 
 ## Views

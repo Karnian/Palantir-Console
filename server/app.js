@@ -44,6 +44,8 @@ const { createDispatchAuditRouter } = require('./routes/dispatchAudit');
 const { createRouterService } = require('./services/routerService');
 const { createRouterRouter } = require('./routes/router');
 const { createAuthRouter } = require('./routes/auth');
+const { createSkillPackService } = require('./services/skillPackService');
+const { createSkillPacksRouter } = require('./routes/skillPacks');
 
 function createApp(options = {}) {
   const app = express();
@@ -75,6 +77,10 @@ function createApp(options = {}) {
   const { db, migrate, close: closeDb } = createDatabase(dbPath);
   migrate();
 
+  // Skill Packs: ensure runtime/mcp/ directory exists for MCP config files
+  const fs = require('fs');
+  fs.mkdirSync(path.resolve(process.cwd(), 'runtime', 'mcp'), { recursive: true });
+
   // Event bus for SSE
   const eventBus = createEventBus();
 
@@ -98,6 +104,7 @@ function createApp(options = {}) {
   const taskService = createTaskService(db, eventBus);
   const runService = createRunService(db, eventBus);
   const agentProfileService = createAgentProfileService(db);
+  const skillPackService = createSkillPackService(db);
 
   // Execution engines
   const executionEngine = createExecutionEngine();
@@ -107,6 +114,7 @@ function createApp(options = {}) {
   const lifecycleService = createLifecycleService({
     runService, taskService, agentProfileService, projectService,
     executionEngine, streamJsonEngine, worktreeService, eventBus,
+    skillPackService,
   });
 
   // v3 Phase 1.5: shared manager registry + conversation service.
@@ -127,6 +135,7 @@ function createApp(options = {}) {
     projectService,
     projectBriefService,
     agentProfileService,
+    skillPackService,
     authResolverOpts: options.authResolverOpts || {},
   });
   const pmCleanupService = createPmCleanupService({
@@ -297,10 +306,14 @@ function createApp(options = {}) {
   app.use('/api/agents', createAgentsRouter({ agentProfileService, providerRegistry, authResolverOpts }));
   app.use('/api/events', createEventsRouter({ eventBus }));
   app.use('/api/claude-sessions', createClaudeSessionsRouter());
-  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, pmSpawnService, authResolverOpts }));
+  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, pmSpawnService, skillPackService, authResolverOpts }));
   app.use('/api/conversations', createConversationsRouter({ conversationService, runService }));
   app.use('/api/dispatch-audit', createDispatchAuditRouter({ reconciliationService }));
   app.use('/api/router', createRouterRouter({ routerService }));
+  app.use('/api/skill-packs', createSkillPacksRouter({ skillPackService }));
+  app.use('/api/projects', createSkillPacksRouter.projectBindings({ skillPackService }));
+  app.use('/api/tasks', createSkillPacksRouter.taskBindings({ skillPackService }));
+  app.use('/api/runs', createSkillPacksRouter.runSnapshots({ skillPackService }));
 
   app.use(errorHandler);
 
@@ -315,6 +328,11 @@ function createApp(options = {}) {
   const recovered = lifecycleService.recoverOrphanSessions();
   if (recovered.length > 0) {
     console.log(`[app] Recovered ${recovered.length} orphan session(s)`);
+  }
+  // Skill Packs: clean up orphan MCP config files from previous runs
+  const mcpCleaned = lifecycleService.cleanupOrphanMcpConfigs();
+  if (mcpCleaned > 0) {
+    console.log(`[app] Cleaned ${mcpCleaned} orphan MCP config file(s)`);
   }
 
   // Expose for graceful shutdown + tests. managerRegistry is exposed
