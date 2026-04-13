@@ -489,10 +489,347 @@ function createSkillPackService(db) {
     return existing;
   }
 
+  // ─── resolveForRun ───
+
+  /**
+   * Resolve the effective skill pack set for a run.
+   * Spec §12.1: Phase A→E pipeline.
+   *
+   * @param {Object} deps - { taskService, agentProfileService, projectService }
+   * @param {Object} params - { taskId, explicitPackIds?, agentProfileId }
+   * @returns {{ promptSections[], mcpConfig, checklist[], appliedPacks[], warnings[] }}
+   */
+  function resolveForRun(deps, { taskId, explicitPackIds, agentProfileId }) {
+    const task = deps.taskService.getTask(taskId);
+    const profile = deps.agentProfileService.getProfile(agentProfileId);
+    const warnings = [];
+
+    // Phase A: Input validation — explicitPackIds cross-project check
+    if (explicitPackIds && explicitPackIds.length > 0) {
+      for (const packId of explicitPackIds) {
+        const pack = stmts.getById.get(packId);
+        if (!pack) throw new BadRequestError(`Skill pack not found: ${packId}`);
+        if (pack.scope === 'project') {
+          if (!task.project_id || pack.project_id !== task.project_id) {
+            throw new BadRequestError(`Cannot apply project-scope skill pack "${pack.name}" to task in different/no project`);
+          }
+        }
+      }
+    }
+
+    // Phase B: Collection
+    const packMap = new Map(); // packId → { pack, source, bindingPriority }
+
+    // B1: project auto_apply packs
+    if (task.project_id) {
+      const projectBindings = stmts.listProjectBindings.all(task.project_id);
+      for (const binding of projectBindings) {
+        if (!binding.auto_apply) continue;
+        const pack = stmts.getById.get(binding.skill_pack_id);
+        if (!pack) continue;
+        packMap.set(pack.id, { pack, source: 'project', bindingPriority: binding.priority });
+      }
+    }
+
+    // Shadow rule: project-scope packs shadow same-name globals
+    const nameToId = new Map();
+    for (const [id, entry] of packMap) {
+      const existing = nameToId.get(entry.pack.name);
+      if (existing && existing.pack.scope === 'global' && entry.pack.scope === 'project') {
+        packMap.delete(existing.pack.id);
+      }
+      nameToId.set(entry.pack.name, entry);
+    }
+
+    // B2: explicitPackIds (per-run ephemeral, not persisted)
+    if (explicitPackIds && explicitPackIds.length > 0) {
+      for (const packId of explicitPackIds) {
+        if (packMap.has(packId)) continue; // dedup
+        const pack = stmts.getById.get(packId);
+        if (!pack) continue;
+        packMap.set(pack.id, { pack, source: 'explicit', bindingPriority: pack.priority });
+      }
+      // Shadow rule for explicit too
+      for (const [id, entry] of packMap) {
+        const sameNameEntries = [...packMap.values()].filter(e => e.pack.name === entry.pack.name && e.pack.id !== id);
+        for (const other of sameNameEntries) {
+          if (other.pack.scope === 'global' && entry.pack.scope === 'project') {
+            packMap.delete(other.pack.id);
+          }
+        }
+      }
+    }
+
+    // B3: task pinned packs
+    const taskBindings = stmts.listTaskBindings.all(taskId);
+    const taskBindingMap = new Map();
+    for (const binding of taskBindings) {
+      taskBindingMap.set(binding.skill_pack_id, binding);
+      if (binding.excluded) continue; // will handle in Phase C
+      if (packMap.has(binding.skill_pack_id)) {
+        // Update source to task for priority resolution
+        const existing = packMap.get(binding.skill_pack_id);
+        existing.source = 'task';
+        existing.bindingPriority = binding.priority;
+        continue;
+      }
+      const pack = stmts.getById.get(binding.skill_pack_id);
+      if (!pack) continue;
+      packMap.set(pack.id, { pack, source: 'task', bindingPriority: binding.priority });
+    }
+
+    // Phase C: Effective set validation
+
+    // C4: Cross-project isolation (full effective set)
+    for (const [id, entry] of packMap) {
+      if (entry.pack.scope === 'project' && task.project_id && entry.pack.project_id !== task.project_id) {
+        packMap.delete(id);
+        warnings.push({ type: 'skill_pack:cross_project_violation', packId: id, name: entry.pack.name });
+      }
+    }
+
+    // C5: Excluded filter
+    for (const [id, entry] of packMap) {
+      const binding = taskBindingMap.get(id);
+      if (!binding || !binding.excluded) continue;
+
+      if (binding.pinned_by === 'user') {
+        // Lock-in #4: user-excluded → always removed
+        packMap.delete(id);
+      } else {
+        // PM-excluded: can be overridden by explicitPackIds
+        if (explicitPackIds && explicitPackIds.includes(id)) {
+          // Keep — explicit override of PM exclusion
+        } else {
+          packMap.delete(id);
+        }
+      }
+    }
+
+    // Phase D: Adapter gating
+    const isClaude = (profile.command || '').includes('claude');
+    if (!isClaude) {
+      // Non-Claude workers: skip prompt/MCP planes
+      const appliedPacks = [...packMap.values()].map(e => ({
+        id: e.pack.id, name: e.pack.name, skippedReason: 'adapter_unsupported',
+      }));
+      warnings.push({ type: 'skill_pack:adapter_unsupported', agent: profile.name, count: packMap.size });
+
+      // Only acceptance overlay (checklist) survives
+      const checklist = [];
+      for (const entry of packMap.values()) {
+        if (entry.pack.checklist) {
+          try {
+            const items = JSON.parse(entry.pack.checklist);
+            checklist.push(...items);
+          } catch { /* skip */ }
+        }
+      }
+
+      return { promptSections: [], mcpConfig: null, checklist: deduplicateChecklist(checklist), appliedPacks, warnings };
+    }
+
+    // Phase E: Synthesis (Claude workers only)
+
+    // E7: effective priority — task binding > project binding > pack default
+    const sorted = [...packMap.values()].map(entry => {
+      const taskBinding = taskBindingMap.get(entry.pack.id);
+      const effectivePriority = taskBinding ? taskBinding.priority
+        : entry.source === 'project' ? entry.bindingPriority
+        : entry.pack.priority;
+      return { ...entry, effectivePriority };
+    });
+
+    // E8: sort by effective priority ascending
+    sorted.sort((a, b) => a.effectivePriority - b.effectivePriority);
+
+    // E9: Token budget
+    const TOKEN_BUDGET = Number(process.env.SKILL_PACK_TOKEN_BUDGET || 4000);
+    let totalTokens = 0;
+    const resolvedPacks = [];
+
+    // First pass: compute tokens with full mode
+    for (const entry of sorted) {
+      const fullTokens = estimateTokens(entry.pack.prompt_full);
+      const compactTokens = estimateTokens(entry.pack.prompt_compact);
+      resolvedPacks.push({
+        ...entry,
+        fullTokens,
+        compactTokens,
+        mode: 'full',
+        promptText: entry.pack.prompt_full,
+      });
+      totalTokens += fullTokens;
+    }
+
+    // Compact pass: if over budget, compact from lowest priority first
+    if (totalTokens > TOKEN_BUDGET) {
+      // Sort by priority ASC (lowest first), tie-break by largest tokens first
+      const compactOrder = [...resolvedPacks].sort((a, b) => {
+        if (a.effectivePriority !== b.effectivePriority) return a.effectivePriority - b.effectivePriority;
+        return b.fullTokens - a.fullTokens;
+      });
+
+      for (const entry of compactOrder) {
+        if (totalTokens <= TOKEN_BUDGET) break;
+        if (!entry.pack.prompt_compact) continue; // can't compact
+        const saved = entry.fullTokens - entry.compactTokens;
+        entry.mode = 'compact';
+        entry.promptText = entry.pack.prompt_compact;
+        totalTokens -= saved;
+      }
+
+      if (totalTokens > TOKEN_BUDGET) {
+        throw new BadRequestError(
+          `Skill pack token budget exceeded (${totalTokens}/${TOKEN_BUDGET}). Remove packs or use compact mode.`
+        );
+      }
+    }
+
+    // E10: MCP alias resolution + conflict check
+    const allMcpServers = {};
+    const mcpConflicts = new Map(); // alias → [packNames]
+    const perPackMcp = new Map(); // packId → resolved servers obj
+
+    for (const entry of resolvedPacks) {
+      if (!entry.pack.mcp_servers) {
+        perPackMcp.set(entry.pack.id, null);
+        continue;
+      }
+      const { servers, warnings: resolveWarnings } = resolveMcpServers(entry.pack.mcp_servers);
+      perPackMcp.set(entry.pack.id, servers);
+      for (const w of resolveWarnings) warnings.push({ type: 'skill_pack:mcp_resolve_warning', message: w });
+
+      for (const [alias, config] of Object.entries(servers)) {
+        if (allMcpServers[alias]) {
+          if (!mcpConflicts.has(alias)) {
+            mcpConflicts.set(alias, [allMcpServers[alias]._sourcePack]);
+          }
+          mcpConflicts.get(alias).push(entry.pack.name);
+        } else {
+          allMcpServers[alias] = { ...config, _sourcePack: entry.pack.name, _sourcePolicy: entry.pack.conflict_policy };
+        }
+      }
+    }
+
+    // Handle inter-pack conflicts
+    for (const [alias, packs] of mcpConflicts) {
+      const allEntries = resolvedPacks.filter(e => {
+        const servers = perPackMcp.get(e.pack.id);
+        return servers && servers[alias];
+      });
+      const anyFail = allEntries.some(e => e.pack.conflict_policy === 'fail');
+      if (anyFail) {
+        throw new BadRequestError(
+          `MCP server conflict on alias "${alias}" between packs: ${packs.join(', ')}. One or more packs have conflict_policy=fail.`
+        );
+      }
+      // All warn: use highest priority pack's config
+      warnings.push({ type: 'skill_pack:mcp_conflict_warn', alias, packs });
+      // The allMcpServers already has the first pack's config; replace with highest priority
+      const highestPriority = allEntries.sort((a, b) => b.effectivePriority - a.effectivePriority)[0];
+      const servers = perPackMcp.get(highestPriority.pack.id);
+      if (servers && servers[alias]) {
+        allMcpServers[alias] = { ...servers[alias], _sourcePack: highestPriority.pack.name, _sourcePolicy: highestPriority.pack.conflict_policy };
+      }
+    }
+
+    // Clean up internal markers from MCP config
+    const cleanMcpServers = {};
+    for (const [alias, config] of Object.entries(allMcpServers)) {
+      const { _sourcePack, _sourcePolicy, ...clean } = config;
+      cleanMcpServers[alias] = clean;
+    }
+
+    // E11: Build prompt sections
+    const promptSections = [];
+    for (let i = 0; i < resolvedPacks.length; i++) {
+      const entry = resolvedPacks[i];
+      if (!entry.promptText) continue;
+      promptSections.push({
+        name: entry.pack.name,
+        text: entry.promptText,
+        mode: entry.mode,
+        priority: entry.effectivePriority,
+        order: i,
+      });
+    }
+
+    // Build checklist
+    const checklist = [];
+    for (const entry of resolvedPacks) {
+      if (entry.pack.checklist) {
+        try { checklist.push(...JSON.parse(entry.pack.checklist)); } catch { /* skip */ }
+      }
+    }
+
+    // Build appliedPacks for snapshot recording
+    const appliedPacks = resolvedPacks.map((entry, i) => ({
+      id: entry.pack.id,
+      name: entry.pack.name,
+      promptText: entry.promptText || null,
+      promptHash: entry.promptText ? require('node:crypto').createHash('sha256').update(entry.promptText).digest('hex') : null,
+      mcpConfigSnapshot: perPackMcp.get(entry.pack.id) ? JSON.stringify(perPackMcp.get(entry.pack.id)) : null,
+      checklistSnapshot: entry.pack.checklist || null,
+      mode: entry.mode,
+      order: i,
+      effectivePriority: entry.effectivePriority,
+    }));
+
+    return {
+      promptSections,
+      mcpConfig: Object.keys(cleanMcpServers).length > 0 ? { mcpServers: cleanMcpServers } : null,
+      checklist: deduplicateChecklist(checklist),
+      appliedPacks,
+      warnings,
+    };
+  }
+
+  function deduplicateChecklist(items) {
+    const seen = new Set();
+    const result = [];
+    for (const item of items) {
+      const key = item.trim().toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(item);
+    }
+    return result;
+  }
+
   // ─── Run Snapshots ───
 
   function listRunSnapshots(runId) {
     return stmts.listRunSnapshots.all(runId);
+  }
+
+  /**
+   * Record run skill pack snapshots (denormalized).
+   */
+  function recordRunSnapshots(runId, appliedPacks) {
+    const insertSnapshot = db.prepare(`
+      INSERT INTO run_skill_packs (run_id, skill_pack_id, skill_pack_name, prompt_text, prompt_hash,
+        mcp_config_snapshot, checklist_snapshot, applied_mode, applied_order, effective_priority)
+      VALUES (@run_id, @skill_pack_id, @skill_pack_name, @prompt_text, @prompt_hash,
+        @mcp_config_snapshot, @checklist_snapshot, @applied_mode, @applied_order, @effective_priority)
+    `);
+    const insertAll = db.transaction(() => {
+      for (const pack of appliedPacks) {
+        insertSnapshot.run({
+          run_id: runId,
+          skill_pack_id: pack.id,
+          skill_pack_name: pack.name,
+          prompt_text: pack.promptText,
+          prompt_hash: pack.promptHash,
+          mcp_config_snapshot: pack.mcpConfigSnapshot,
+          checklist_snapshot: pack.checklistSnapshot,
+          applied_mode: pack.mode,
+          applied_order: pack.order,
+          effective_priority: pack.effectivePriority,
+        });
+      }
+    });
+    insertAll();
   }
 
   return {
@@ -517,8 +854,11 @@ function createSkillPackService(db) {
     listTaskBindings,
     bindToTask,
     unbindFromTask,
+    // Resolution
+    resolveForRun,
     // Run snapshots
     listRunSnapshots,
+    recordRunSnapshots,
     // Exported for testing
     _isEnvKeyDenied: isEnvKeyDenied,
     _estimateTokens: estimateTokens,

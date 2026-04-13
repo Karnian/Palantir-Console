@@ -50,13 +50,14 @@ function createTasksRouter({ taskService, lifecycleService }) {
       const task = taskService.getTask(req.params.id);
       return res.json({ status: 'not_implemented', message: 'Lifecycle service not configured', task });
     }
-    const { agent_profile_id, prompt } = req.body || {};
+    const { agent_profile_id, prompt, skill_pack_ids } = req.body || {};
     if (!agent_profile_id) {
       return res.status(400).json({ error: 'agent_profile_id is required' });
     }
     const run = lifecycleService.executeTask(req.params.id, {
       agentProfileId: agent_profile_id,
       prompt: prompt || '',
+      skillPackIds: skill_pack_ids || undefined,
     });
     res.status(201).json({ run });
   }));

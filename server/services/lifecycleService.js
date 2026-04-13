@@ -18,6 +18,7 @@ function createLifecycleService({
   streamJsonEngine,
   worktreeService,
   eventBus,
+  skillPackService,
 }) {
   const HEARTBEAT_INTERVAL_MS = 30000;  // 30s
   const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min (increased from 10 min for long-running tasks)
@@ -124,12 +125,24 @@ function createLifecycleService({
       }
     }
     _runProjectDirs.delete(run.id);
+
+    // Skill Packs: cleanup MCP config file
+    if (run.mcp_config_path) {
+      try {
+        const fs = require('node:fs');
+        if (fs.existsSync(run.mcp_config_path)) {
+          fs.unlinkSync(run.mcp_config_path);
+        }
+      } catch (err) {
+        console.warn(`[lifecycle] MCP config cleanup failed for run ${run.id}: ${err.message}`);
+      }
+    }
   }
 
   /**
    * Execute a task: create a Run, spawn the agent.
    */
-  function executeTask(taskId, { agentProfileId, prompt }) {
+  function executeTask(taskId, { agentProfileId, prompt, skillPackIds }) {
     const task = taskService.getTask(taskId);
     const profile = agentProfileService.getProfile(agentProfileId);
 
@@ -169,6 +182,88 @@ function createLifecycleService({
     // the task or project is deleted before the run terminates.
     if (projectDir) _runProjectDirs.set(run.id, projectDir);
 
+    // ── Skill Pack resolution (Phase 1b) ──
+    // Only for workers (is_manager guard is implicit: executeTask is worker-only)
+    let skillPackResult = null;
+    let skillPackMcpConfigPath = null;
+    if (skillPackService) {
+      try {
+        skillPackResult = skillPackService.resolveForRun(
+          { taskService, agentProfileService, projectService },
+          { taskId, explicitPackIds: skillPackIds, agentProfileId }
+        );
+
+        // Log warnings as run events
+        for (const w of skillPackResult.warnings) {
+          runService.addRunEvent(run.id, w.type || 'skill_pack:warning', JSON.stringify(w));
+        }
+
+        // Write MCP config file if needed
+        if (skillPackResult.mcpConfig) {
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          // Validate runId for path safety
+          if (!/^[a-zA-Z0-9_-]+$/.test(run.id)) {
+            throw new Error(`Invalid run id for MCP config path: ${run.id}`);
+          }
+
+          // Merge with project MCP config (project base wins on conflict)
+          let baseMcp = {};
+          if (projectMcpConfig) {
+            try {
+              const raw = fs.readFileSync(projectMcpConfig, 'utf8');
+              baseMcp = JSON.parse(raw);
+            } catch (err) {
+              console.warn(`[lifecycle] Failed to read project MCP config: ${err.message}`);
+            }
+          }
+
+          const mergedMcpServers = { ...skillPackResult.mcpConfig.mcpServers };
+          // Project MCP base wins on alias conflict
+          if (baseMcp.mcpServers) {
+            for (const [alias, config] of Object.entries(baseMcp.mcpServers)) {
+              if (mergedMcpServers[alias]) {
+                skillPackResult.warnings.push({
+                  type: 'skill_pack:mcp_project_override',
+                  alias,
+                  message: `Project MCP config overrides skill pack MCP for alias "${alias}"`,
+                });
+                runService.addRunEvent(run.id, 'skill_pack:mcp_project_override',
+                  JSON.stringify({ alias }));
+              }
+              mergedMcpServers[alias] = config;
+            }
+          }
+
+          const mergedConfig = { mcpServers: mergedMcpServers };
+          const mcpConfigFilePath = path.resolve(process.cwd(), 'runtime', 'mcp', `${run.id}.json`);
+          fs.writeFileSync(mcpConfigFilePath, JSON.stringify(mergedConfig, null, 2), { mode: 0o600 });
+
+          skillPackMcpConfigPath = mcpConfigFilePath;
+
+          // Save to runs table
+          const mcpSnapshot = JSON.stringify(mergedConfig);
+          runService.updateRunMcpConfig(run.id, { mcp_config_path: mcpConfigFilePath, mcp_config_snapshot: mcpSnapshot });
+        }
+
+        // Record denormalized snapshots
+        if (skillPackResult.appliedPacks.length > 0) {
+          skillPackService.recordRunSnapshots(run.id, skillPackResult.appliedPacks);
+        }
+      } catch (err) {
+        // If skill pack resolution fails, mark run as failed
+        if (err.status === 400) {
+          runService.updateRunStatus(run.id, 'failed', { force: true });
+          runService.addRunEvent(run.id, 'error', JSON.stringify({ message: err.message }));
+          throw err;
+        }
+        // Non-400 errors: log and continue without skill packs
+        console.warn(`[lifecycle] Skill pack resolution failed for run ${run.id}: ${err.message}`);
+        runService.addRunEvent(run.id, 'skill_pack:resolution_error', JSON.stringify({ message: err.message }));
+      }
+    }
+
     // Create an isolated git worktree for this run, when the project is a git repo.
     // Each run gets its own branch (palantir/run-<id>) so concurrent agents don't
     // collide on shared files. Falls back to projectDir if worktree creation fails
@@ -199,13 +294,26 @@ function createLifecycleService({
       if (isClaude && streamJsonEngine) {
         // Use streamJsonEngine — same as Manager but isManager=false (single-shot worker)
         const mcpTools = parseMcpTools(profile.capabilities_json);
+
+        // Skill pack prompt overlay: concatenate all sections into a system prompt
+        let systemPrompt = undefined;
+        if (skillPackResult && skillPackResult.promptSections.length > 0) {
+          systemPrompt = skillPackResult.promptSections
+            .map(s => `--- Skill: ${s.name} ---\n${s.text}`)
+            .join('\n\n');
+        }
+
+        // MCP config: skill pack merged config takes precedence over plain project MCP
+        const effectiveMcpConfig = skillPackMcpConfigPath || projectMcpConfig || undefined;
+
         result = streamJsonEngine.spawnAgent(run.id, {
           prompt,
           cwd,
           env: parseEnvAllowlist(profile.env_allowlist),
+          systemPrompt,
           permissionMode: 'bypassPermissions',
           allowedTools: mcpTools.length > 0 ? mcpTools : undefined,
-          mcpConfig: projectMcpConfig || undefined, // P4-2: project-scoped MCP config
+          mcpConfig: effectiveMcpConfig,
           isManager: false,
         });
       } else {
@@ -648,10 +756,44 @@ function createLifecycleService({
     return runService.getRun(runId);
   }
 
+  /**
+   * Clean up orphan MCP config files from runtime/mcp/ on boot.
+   * Files whose runs are no longer active (not running/queued) are removed.
+   */
+  function cleanupOrphanMcpConfigs() {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const mcpDir = path.resolve(process.cwd(), 'runtime', 'mcp');
+    if (!fs.existsSync(mcpDir)) return 0;
+    let cleaned = 0;
+    try {
+      const files = fs.readdirSync(mcpDir);
+      for (const file of files) {
+        if (!file.endsWith('.json')) continue;
+        const runId = file.replace('.json', '');
+        try {
+          const run = runService.getRun(runId);
+          if (!['running', 'queued'].includes(run.status)) {
+            fs.unlinkSync(path.join(mcpDir, file));
+            cleaned++;
+          }
+        } catch {
+          // Run not found — orphan file
+          fs.unlinkSync(path.join(mcpDir, file));
+          cleaned++;
+        }
+      }
+    } catch (err) {
+      console.warn(`[lifecycle] Orphan MCP config cleanup failed: ${err.message}`);
+    }
+    return cleaned;
+  }
+
   return {
     executeTask,
     checkHealth,
     recoverOrphanSessions,
+    cleanupOrphanMcpConfigs,
     startMonitoring,
     stopMonitoring,
     sendAgentInput,

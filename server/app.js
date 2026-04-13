@@ -114,6 +114,7 @@ function createApp(options = {}) {
   const lifecycleService = createLifecycleService({
     runService, taskService, agentProfileService, projectService,
     executionEngine, streamJsonEngine, worktreeService, eventBus,
+    skillPackService,
   });
 
   // v3 Phase 1.5: shared manager registry + conversation service.
@@ -326,6 +327,11 @@ function createApp(options = {}) {
   const recovered = lifecycleService.recoverOrphanSessions();
   if (recovered.length > 0) {
     console.log(`[app] Recovered ${recovered.length} orphan session(s)`);
+  }
+  // Skill Packs: clean up orphan MCP config files from previous runs
+  const mcpCleaned = lifecycleService.cleanupOrphanMcpConfigs();
+  if (mcpCleaned > 0) {
+    console.log(`[app] Cleaned ${mcpCleaned} orphan MCP config file(s)`);
   }
 
   // Expose for graceful shutdown + tests. managerRegistry is exposed
