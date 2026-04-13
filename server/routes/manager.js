@@ -45,7 +45,7 @@ function parseMcpTools(capabilitiesJson) {
 // so tests can inject `hasKeychain` (and any future DI hooks) without
 // monkey-patching child_process. Production callers leave this empty and
 // get the real keychain probe.
-function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, pmSpawnService, authResolverOpts = {} }) {
+function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, pmSpawnService, skillPackService, authResolverOpts = {} }) {
   const router = express.Router();
 
   // PR1a: ManagerAdapter seam. The factory is the single entrypoint for
@@ -187,7 +187,20 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 briefSections.push(`## Project Scope\nname: ${project.name}\nid: ${project.id}${project.directory ? `\ndirectory: ${project.directory}` : ''}${r.id ? `\npm_run_id: ${r.id}` : ''}`);
                 if (brief.conventions) briefSections.push(`## Project Conventions\n${brief.conventions}`);
                 if (brief.known_pitfalls) briefSections.push(`## Known Pitfalls\n${brief.known_pitfalls}`);
-                briefSections.push('## PM Role\nYou are this project\'s PM (project-scoped dispatcher). Every user turn is either: answer from the brief, dispatch a worker via /execute, or modify an in-flight worker via the worker intervention APIs above. When you record a dispatch audit claim, use the pm_run_id value shown above in the Project Scope section as your pm_run_id envelope field. Stay within this project\'s scope.');
+                // Phase 2: inject project auto_apply skill packs into resumed PM prompt (mirrors pmSpawnService)
+                if (skillPackService) {
+                  try {
+                    const bindings = skillPackService.listProjectBindings(projectId);
+                    const autoApply = bindings.filter(b => b.auto_apply !== 0);
+                    if (autoApply.length > 0) {
+                      const lines = autoApply.map(b =>
+                        `- ${b.skill_pack_name}${b.skill_pack_description ? `: ${b.skill_pack_description}` : ''} (id: ${b.skill_pack_id})`
+                      );
+                      briefSections.push(`## Project Skill Packs (auto_apply)\nThese skills are automatically applied to every worker in this project. You do NOT need to include them in skill_pack_ids.\n${lines.join('\n')}`);
+                    }
+                  } catch (err) { console.warn(`[boot] Failed to load skill packs for PM resume project=${projectId}: ${err.message}`); }
+                }
+                briefSections.push('## PM Role\nYou are this project\'s PM (project-scoped dispatcher). Every user turn is either: answer from the brief, dispatch a worker via /execute, or modify an in-flight worker via the worker intervention APIs above. When you record a dispatch audit claim, use the pm_run_id value shown above in the Project Scope section as your pm_run_id envelope field. Stay within this project\'s scope.\n\nWhen spawning workers, choose skill packs that match the task\'s nature. Use your project\'s auto_apply skills as a baseline, and add extra skills via skill_pack_ids when the task needs specialized capabilities beyond the defaults.');
                 const systemPrompt = [baseSystemPrompt, ...briefSections].filter(Boolean).join('\n\n');
                 const authCtx = resolveManagerAuth('codex', authResolverOpts);
                 if (authCtx.canAuth) {

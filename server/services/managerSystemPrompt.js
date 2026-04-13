@@ -222,7 +222,8 @@ ${token && adapterType !== 'codex' ? `\nIMPORTANT: All API requests require auth
 - Update task: PATCH ${base}/api/tasks/TASK_ID  body: {"title":"...","description":"...","priority":"high"}
 - Update task status: PATCH ${base}/api/tasks/TASK_ID/status  body: {"status":"done"}
 - Delete task: DELETE ${base}/api/tasks/TASK_ID
-- Execute task with agent: POST ${base}/api/tasks/TASK_ID/execute  body: {"agent_profile_id":"AGENT_ID","prompt":"detailed work instructions here"}
+- Execute task with agent: POST ${base}/api/tasks/TASK_ID/execute  body: {"agent_profile_id":"AGENT_ID","prompt":"detailed work instructions here"${layer === 'pm' ? ',"skill_pack_ids":["PACK_ID",...]' : ''}}${layer === 'pm' ? `
+  skill_pack_ids (optional): array of skill pack IDs to equip on the worker for this run. These are per-run ephemeral — they do NOT persist as task bindings. Omit to use only project auto_apply + task persistent bindings.` : ''}
 
 ### Projects
 - List projects: GET ${base}/api/projects
@@ -235,7 +236,28 @@ ${token && adapterType !== 'codex' ? `\nIMPORTANT: All API requests require auth
 - Send message to conversation: POST ${base}/api/conversations/CONVERSATION_ID/message  body: {"text":"..."}
   CONVERSATION_ID format: "top" | "pm:PROJECT_ID" | "worker:RUN_ID"
 - Get conversation events: GET ${base}/api/conversations/CONVERSATION_ID/events
-${workerInterventionSection}
+${workerInterventionSection}${layer === 'pm' ? `
+
+### Skill Packs (PM-only, worker capability injection)
+Skill packs equip workers with specialized knowledge (prompt overlays), tools (MCP servers), and acceptance checklists. As PM, you should choose skill packs that match the task's nature.
+
+**Your project's default skills are listed in the "Project Skill Packs" section below (if any).** These auto_apply packs are automatically applied to every worker in this project — you do NOT need to specify them in skill_pack_ids.
+
+- Browse all available skill packs: GET ${base}/api/skill-packs
+  Query global packs only: GET ${base}/api/skill-packs?scope=global
+  Query project-effective view: GET ${base}/api/skill-packs?project_id=PROJECT_ID
+  Do lazy lookup — do NOT call this every turn. Cache the result mentally and re-query only when you need a pack you haven't seen.
+- View project bindings: GET ${base}/api/projects/PROJECT_ID/skill-packs
+
+**How to equip workers with skills:**
+When calling POST /api/tasks/TASK_ID/execute, include skill_pack_ids to add extra skills for that run:
+  {"agent_profile_id":"AGENT_ID","prompt":"...","skill_pack_ids":["pack-id-1","pack-id-2"]}
+
+- skill_pack_ids is additive: project auto_apply + task persistent bindings are always included.
+- skill_pack_ids is per-run ephemeral: does NOT persist as task bindings. Next run of the same task won't inherit them unless you specify again.
+- Omit skill_pack_ids to use only automatic + persistent bindings.
+- User-excluded packs (excluded=true, pinned_by=user) cannot be overridden — respect user exclusions.
+- v1: only Claude workers support skill pack injection (prompt + MCP). Non-Claude workers will skip all planes with a warning.` : ''}
 
 Run statuses: queued, running, paused, needs_input, completed, failed, cancelled, stopped
 Task statuses: backlog, todo, in_progress, review, done, failed
