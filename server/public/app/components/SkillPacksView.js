@@ -171,9 +171,9 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
             <input class="form-input" value=${description} onInput=${e => setDescription(e.target.value)} placeholder="Short description..." />
           </div>
           <div class="form-row">
-            <div class="form-field" style=${{ width: '140px', flex: 'none' }}>
+            <div class="form-field" style=${{ flex: 1 }}>
               <label class="form-label">Scope</label>
-              <select class="form-select" style=${{ width: '100%' }} value=${scope} onChange=${e => setScope(e.target.value)}>
+              <select class="form-select" value=${scope} onChange=${e => setScope(e.target.value)}>
                 <option value="global">Global</option>
                 <option value="project">Project</option>
               </select>

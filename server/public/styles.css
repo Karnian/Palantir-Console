@@ -2255,6 +2255,8 @@ body {
   padding: 8px 12px;
   font-size: 13px;
   font-family: var(--font-sans);
+  width: 100%;
+  box-sizing: border-box;
 }
 
 /* Native <input type="date"> renders each segment (year/month/day) as a
