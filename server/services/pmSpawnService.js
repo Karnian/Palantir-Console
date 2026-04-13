@@ -67,6 +67,7 @@ function createPmSpawnService({
   projectService,
   projectBriefService,
   agentProfileService, // optional — used for env_allowlist resolution
+  skillPackService,    // optional — Phase 2: inject project skill pack list into PM prompt
   authResolverOpts = {},
   logger,
 }) {
@@ -112,7 +113,22 @@ function createPmSpawnService({
     if (brief && brief.known_pitfalls) {
       sections.push(`## Known Pitfalls\n${brief.known_pitfalls}`);
     }
-    sections.push('## PM Role\nYou are this project\'s PM (project-scoped dispatcher). Every user turn is either: answer from the brief, dispatch a worker via /execute, or modify an in-flight worker via the worker intervention APIs above. When you record a dispatch audit claim, use the pm_run_id value shown above in the Project Scope section as your pm_run_id envelope field. Stay within this project\'s scope.');
+    // Phase 2: inject project auto_apply skill packs list (name + description)
+    // so the PM knows which skills are available and can choose task-appropriate ones.
+    // This is baked into the static system prompt (Codex caching-safe: stable per PM session).
+    if (skillPackService) {
+      try {
+        const bindings = skillPackService.listProjectBindings(project.id);
+        const autoApply = bindings.filter(b => b.auto_apply !== 0);
+        if (autoApply.length > 0) {
+          const lines = autoApply.map(b =>
+            `- ${b.skill_pack_name}${b.skill_pack_description ? `: ${b.skill_pack_description}` : ''} (id: ${b.skill_pack_id})`
+          );
+          sections.push(`## Project Skill Packs (auto_apply)\nThese skills are automatically applied to every worker in this project. You do NOT need to include them in skill_pack_ids.\n${lines.join('\n')}`);
+        }
+      } catch (err) { log(`Failed to load skill packs for project=${project.id}: ${err.message}`); }
+    }
+    sections.push('## PM Role\nYou are this project\'s PM (project-scoped dispatcher). Every user turn is either: answer from the brief, dispatch a worker via /execute, or modify an in-flight worker via the worker intervention APIs above. When you record a dispatch audit claim, use the pm_run_id value shown above in the Project Scope section as your pm_run_id envelope field. Stay within this project\'s scope.\n\nWhen spawning workers, choose skill packs that match the task\'s nature. Use your project\'s auto_apply skills as a baseline, and add extra skills via skill_pack_ids when the task needs specialized capabilities beyond the defaults.');
     return sections.join('\n\n');
   }
 

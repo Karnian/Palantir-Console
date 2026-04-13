@@ -424,10 +424,16 @@ function createRunService(db, eventBus) {
     `).all(managerRunId);
   }
 
+  function updateRunMcpConfig(id, { mcp_config_path, mcp_config_snapshot }) {
+    db.prepare(`UPDATE runs SET mcp_config_path = ?, mcp_config_snapshot = ? WHERE id = ?`)
+      .run(mcp_config_path || null, mcp_config_snapshot || null, id);
+  }
+
   return {
     listRuns, getRun, createRun,
     updateRunStatus, markRunStarted, updateRunResult,
     updateManagerThreadId, updateClaudeSessionId,
+    updateRunMcpConfig,
     deleteRun, addRunEvent, getRunEvents,
     getActiveManager, getActiveManagers, getRunByConversationId, getWorkerRuns,
   };

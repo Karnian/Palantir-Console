@@ -30,6 +30,7 @@ import { AgentsView } from './app/components/AgentsView.js';
 import { SessionsView } from './app/components/SessionsView.js';
 import { ManagerView } from './app/components/ManagerView.js';
 import { NewTaskModal, ExecuteModal, TaskDetailPanel } from './app/components/TaskModals.js';
+import { SkillPacksView } from './app/components/SkillPacksView.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sidebar Navigation
@@ -225,6 +226,9 @@ function App() {
     }
     if (routeBase === 'agents') {
       return html`<${AgentsView} agents=${agents} loading=${agentsLoading} reloadAgents=${reloadAgents} />`;
+    }
+    if (routeBase === 'skills') {
+      return html`<${SkillPacksView} projects=${projects} />`;
     }
     if (routeBase === 'run') {
       const runId = route.split('/')[1];

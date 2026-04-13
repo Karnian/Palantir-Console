@@ -9,6 +9,8 @@ node_modules/
 .ao/
 .playwright-mcp/
 .palantir-worktrees/
+# Runtime (MCP configs, ephemeral)
+runtime/
 # Playwright
 test-results/
 playwright-report/

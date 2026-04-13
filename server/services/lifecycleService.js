@@ -18,6 +18,7 @@ function createLifecycleService({
   streamJsonEngine,
   worktreeService,
   eventBus,
+  skillPackService,
 }) {
   const HEARTBEAT_INTERVAL_MS = 30000;  // 30s
   const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min (increased from 10 min for long-running tasks)
@@ -124,12 +125,24 @@ function createLifecycleService({
       }
     }
     _runProjectDirs.delete(run.id);
+
+    // Skill Packs: cleanup MCP config file
+    if (run.mcp_config_path) {
+      try {
+        const fs = require('node:fs');
+        if (fs.existsSync(run.mcp_config_path)) {
+          fs.unlinkSync(run.mcp_config_path);
+        }
+      } catch (err) {
+        console.warn(`[lifecycle] MCP config cleanup failed for run ${run.id}: ${err.message}`);
+      }
+    }
   }
 
   /**
    * Execute a task: create a Run, spawn the agent.
    */
-  function executeTask(taskId, { agentProfileId, prompt }) {
+  function executeTask(taskId, { agentProfileId, prompt, skillPackIds }) {
     const task = taskService.getTask(taskId);
     const profile = agentProfileService.getProfile(agentProfileId);
 
@@ -169,6 +182,95 @@ function createLifecycleService({
     // the task or project is deleted before the run terminates.
     if (projectDir) _runProjectDirs.set(run.id, projectDir);
 
+    // ── Skill Pack resolution (Phase 1b) ──
+    // Only for workers (is_manager guard is implicit: executeTask is worker-only)
+    let skillPackResult = null;
+    let skillPackMcpConfigPath = null;
+    if (skillPackService) {
+      try {
+        skillPackResult = skillPackService.resolveForRun(
+          { taskService, agentProfileService, projectService },
+          { taskId, explicitPackIds: skillPackIds, agentProfileId }
+        );
+
+        // Log warnings as run events
+        for (const w of skillPackResult.warnings) {
+          runService.addRunEvent(run.id, w.type || 'skill_pack:warning', JSON.stringify(w));
+        }
+
+        // Write MCP config file if needed
+        if (skillPackResult.mcpConfig) {
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          // Validate runId for path safety
+          if (!/^[a-zA-Z0-9_-]+$/.test(run.id)) {
+            throw new Error(`Invalid run id for MCP config path: ${run.id}`);
+          }
+
+          // Merge with project MCP config (project base wins on conflict)
+          // Trust boundary: realpathSync + containment check (spec §12.2, v0.5)
+          let baseMcp = {};
+          if (projectMcpConfig && projectDir) {
+            try {
+              const realRoot = fs.realpathSync(projectDir);
+              const realMcpPath = fs.realpathSync(projectMcpConfig);
+              if (realMcpPath !== realRoot && !realMcpPath.startsWith(realRoot + path.sep)) {
+                throw new Error('mcp_config_path escapes project directory boundary');
+              }
+              const raw = fs.readFileSync(realMcpPath, 'utf8');
+              baseMcp = JSON.parse(raw);
+            } catch (err) {
+              console.warn(`[lifecycle] Failed to read project MCP config: ${err.message}`);
+            }
+          }
+
+          const mergedMcpServers = { ...skillPackResult.mcpConfig.mcpServers };
+          // Project MCP base wins on alias conflict
+          if (baseMcp.mcpServers) {
+            for (const [alias, config] of Object.entries(baseMcp.mcpServers)) {
+              if (mergedMcpServers[alias]) {
+                skillPackResult.warnings.push({
+                  type: 'skill_pack:mcp_project_override',
+                  alias,
+                  message: `Project MCP config overrides skill pack MCP for alias "${alias}"`,
+                });
+                runService.addRunEvent(run.id, 'skill_pack:mcp_project_override',
+                  JSON.stringify({ alias }));
+              }
+              mergedMcpServers[alias] = config;
+            }
+          }
+
+          const mergedConfig = { mcpServers: mergedMcpServers };
+          const mcpConfigFilePath = path.resolve(process.cwd(), 'runtime', 'mcp', `${run.id}.json`);
+          fs.writeFileSync(mcpConfigFilePath, JSON.stringify(mergedConfig, null, 2), { mode: 0o600 });
+
+          skillPackMcpConfigPath = mcpConfigFilePath;
+
+          // Save to runs table
+          const mcpSnapshot = JSON.stringify(mergedConfig);
+          runService.updateRunMcpConfig(run.id, { mcp_config_path: mcpConfigFilePath, mcp_config_snapshot: mcpSnapshot });
+        }
+
+        // Record denormalized snapshots
+        if (skillPackResult.appliedPacks.length > 0) {
+          skillPackService.recordRunSnapshots(run.id, skillPackResult.appliedPacks);
+        }
+      } catch (err) {
+        // If skill pack resolution fails, mark run as failed
+        if (err.status === 400) {
+          runService.updateRunStatus(run.id, 'failed', { force: true });
+          runService.addRunEvent(run.id, 'error', JSON.stringify({ message: err.message }));
+          throw err;
+        }
+        // All skill pack errors fail the run — never proceed without intended overlays
+        runService.updateRunStatus(run.id, 'failed', { force: true });
+        runService.addRunEvent(run.id, 'error', JSON.stringify({ message: err.message }));
+        throw err;
+      }
+    }
+
     // Create an isolated git worktree for this run, when the project is a git repo.
     // Each run gets its own branch (palantir/run-<id>) so concurrent agents don't
     // collide on shared files. Falls back to projectDir if worktree creation fails
@@ -199,18 +301,44 @@ function createLifecycleService({
       if (isClaude && streamJsonEngine) {
         // Use streamJsonEngine — same as Manager but isManager=false (single-shot worker)
         const mcpTools = parseMcpTools(profile.capabilities_json);
+
+        // Skill pack prompt overlay: concatenate all sections into a system prompt
+        let systemPrompt = undefined;
+        if (skillPackResult && skillPackResult.promptSections.length > 0) {
+          systemPrompt = skillPackResult.promptSections
+            .map(s => `--- Skill: ${s.name} ---\n${s.text}`)
+            .join('\n\n');
+        }
+
+        // MCP config: skill pack merged config takes precedence over plain project MCP
+        const effectiveMcpConfig = skillPackMcpConfigPath || projectMcpConfig || undefined;
+
         result = streamJsonEngine.spawnAgent(run.id, {
           prompt,
           cwd,
           env: parseEnvAllowlist(profile.env_allowlist),
+          systemPrompt,
           permissionMode: 'bypassPermissions',
           allowedTools: mcpTools.length > 0 ? mcpTools : undefined,
-          mcpConfig: projectMcpConfig || undefined, // P4-2: project-scoped MCP config
+          mcpConfig: effectiveMcpConfig,
           isManager: false,
         });
       } else {
         // Non-Claude agents: use tmux/subprocess engine
-        const args = buildAgentArgs(profile, prompt);
+        // Phase 5: Write system prompt file for agents that support {system_prompt_file}
+        const placeholders = {};
+        if (skillPackResult && skillPackResult.promptSections.length > 0 &&
+            profile.args_template && profile.args_template.includes('{system_prompt_file}')) {
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const promptContent = skillPackResult.promptSections
+            .map(s => `--- Skill: ${s.name} ---\n${s.text}`)
+            .join('\n\n');
+          const promptFilePath = path.resolve(process.cwd(), 'runtime', 'mcp', `${run.id}-system-prompt.md`);
+          fs.writeFileSync(promptFilePath, promptContent, { mode: 0o600 });
+          placeholders.system_prompt_file = promptFilePath;
+        }
+        const args = buildAgentArgs(profile, prompt, placeholders);
         result = executionEngine.spawnAgent(run.id, {
           command: profile.command,
           args,
@@ -253,20 +381,25 @@ function createLifecycleService({
   /**
    * Build command arguments from agent profile template.
    */
-  function buildAgentArgs(profile, prompt) {
+  function buildAgentArgs(profile, prompt, placeholders = {}) {
     if (!profile.args_template) return [prompt];
 
     const template = profile.args_template;
-    // Split template into parts first, then replace {prompt} placeholder as single arg
+    // Split template into parts first, then replace placeholders as single args
     const parts = template.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
     const args = [];
     for (const part of parts) {
       if (part === '{prompt}') {
-        // Prompt is always a single argument — never split by spaces
         args.push(prompt);
-      } else if (part.includes('{prompt}')) {
-        // Replace placeholder within a larger string
-        args.push(part.replace(/\{prompt\}/g, prompt));
+      } else if (part === '{system_prompt_file}') {
+        // Skip placeholder entirely when no system prompt file was generated
+        if (placeholders.system_prompt_file) args.push(placeholders.system_prompt_file);
+      } else if (part.includes('{prompt}') || part.includes('{system_prompt_file}')) {
+        let resolved = part;
+        resolved = resolved.replace(/\{prompt\}/g, prompt);
+        // Replace {system_prompt_file} or remove it if no file
+        resolved = resolved.replace(/\{system_prompt_file\}/g, placeholders.system_prompt_file || '');
+        if (resolved.trim()) args.push(resolved);
       } else {
         // Static template part — strip surrounding quotes if present
         args.push(part.replace(/^"(.*)"$/, '$1'));
@@ -648,10 +781,45 @@ function createLifecycleService({
     return runService.getRun(runId);
   }
 
+  /**
+   * Clean up orphan MCP config files from runtime/mcp/ on boot.
+   * Files whose runs are no longer active (not running/queued) are removed.
+   */
+  function cleanupOrphanMcpConfigs() {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const mcpDir = path.resolve(process.cwd(), 'runtime', 'mcp');
+    if (!fs.existsSync(mcpDir)) return 0;
+    let cleaned = 0;
+    try {
+      const files = fs.readdirSync(mcpDir);
+      for (const file of files) {
+        // Clean both .json (MCP config) and .md (system prompt) files
+        if (!file.endsWith('.json') && !file.endsWith('.md')) continue;
+        const runId = file.replace('.json', '').replace('-system-prompt.md', '').replace('.md', '');
+        try {
+          const run = runService.getRun(runId);
+          if (!['running', 'queued'].includes(run.status)) {
+            fs.unlinkSync(path.join(mcpDir, file));
+            cleaned++;
+          }
+        } catch {
+          // Run not found — orphan file
+          fs.unlinkSync(path.join(mcpDir, file));
+          cleaned++;
+        }
+      }
+    } catch (err) {
+      console.warn(`[lifecycle] Orphan MCP config cleanup failed: ${err.message}`);
+    }
+    return cleaned;
+  }
+
   return {
     executeTask,
     checkHealth,
     recoverOrphanSessions,
+    cleanupOrphanMcpConfigs,
     startMonitoring,
     stopMonitoring,
     sendAgentInput,
