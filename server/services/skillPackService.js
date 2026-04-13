@@ -154,7 +154,7 @@ function createSkillPackService(db) {
       VALUES (@task_id, @skill_pack_id, @priority, @pinned_by, @excluded)
     `),
     updateTaskBinding: db.prepare(`
-      UPDATE task_skill_packs SET priority = @priority, excluded = @excluded
+      UPDATE task_skill_packs SET priority = @priority, excluded = @excluded, pinned_by = @pinned_by
       WHERE task_id = @task_id AND skill_pack_id = @skill_pack_id
     `),
     deleteTaskBinding: db.prepare('DELETE FROM task_skill_packs WHERE task_id = ? AND skill_pack_id = ?'),
@@ -454,12 +454,13 @@ function createSkillPackService(db) {
       if (existing.excluded === 1 && existing.pinned_by === 'user' && callerType === 'pm') {
         throw new BadRequestError('Cannot override user-excluded skill pack binding');
       }
-      // Update existing binding
+      // Update existing binding — pinned_by tracks the last writer
       stmts.updateTaskBinding.run({
         task_id: taskId,
         skill_pack_id,
         priority: typeof priority === 'number' ? priority : existing.priority,
         excluded: excluded ? 1 : 0,
+        pinned_by,
       });
       return stmts.getTaskBinding.get(taskId, skill_pack_id);
     }
