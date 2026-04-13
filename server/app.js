@@ -44,6 +44,8 @@ const { createDispatchAuditRouter } = require('./routes/dispatchAudit');
 const { createRouterService } = require('./services/routerService');
 const { createRouterRouter } = require('./routes/router');
 const { createAuthRouter } = require('./routes/auth');
+const { createSkillPackService } = require('./services/skillPackService');
+const { createSkillPacksRouter } = require('./routes/skillPacks');
 
 function createApp(options = {}) {
   const app = express();
@@ -75,6 +77,10 @@ function createApp(options = {}) {
   const { db, migrate, close: closeDb } = createDatabase(dbPath);
   migrate();
 
+  // Skill Packs: ensure runtime/mcp/ directory exists for MCP config files
+  const fs = require('fs');
+  fs.mkdirSync(path.resolve(process.cwd(), 'runtime', 'mcp'), { recursive: true });
+
   // Event bus for SSE
   const eventBus = createEventBus();
 
@@ -98,6 +104,7 @@ function createApp(options = {}) {
   const taskService = createTaskService(db, eventBus);
   const runService = createRunService(db, eventBus);
   const agentProfileService = createAgentProfileService(db);
+  const skillPackService = createSkillPackService(db);
 
   // Execution engines
   const executionEngine = createExecutionEngine();
@@ -301,6 +308,10 @@ function createApp(options = {}) {
   app.use('/api/conversations', createConversationsRouter({ conversationService, runService }));
   app.use('/api/dispatch-audit', createDispatchAuditRouter({ reconciliationService }));
   app.use('/api/router', createRouterRouter({ routerService }));
+  app.use('/api/skill-packs', createSkillPacksRouter({ skillPackService }));
+  app.use('/api/projects', createSkillPacksRouter.projectBindings({ skillPackService }));
+  app.use('/api/tasks', createSkillPacksRouter.taskBindings({ skillPackService }));
+  app.use('/api/runs', createSkillPacksRouter.runSnapshots({ skillPackService }));
 
   app.use(errorHandler);
 
