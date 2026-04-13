@@ -45,6 +45,7 @@ const { createRouterService } = require('./services/routerService');
 const { createRouterRouter } = require('./routes/router');
 const { createAuthRouter } = require('./routes/auth');
 const { createSkillPackService } = require('./services/skillPackService');
+const { createRegistryService } = require('./services/registryService');
 const { createSkillPacksRouter } = require('./routes/skillPacks');
 
 function createApp(options = {}) {
@@ -105,6 +106,7 @@ function createApp(options = {}) {
   const runService = createRunService(db, eventBus);
   const agentProfileService = createAgentProfileService(db);
   const skillPackService = createSkillPackService(db);
+  const registryService = createRegistryService();
 
   // Execution engines
   const executionEngine = createExecutionEngine();
@@ -310,7 +312,7 @@ function createApp(options = {}) {
   app.use('/api/conversations', createConversationsRouter({ conversationService, runService }));
   app.use('/api/dispatch-audit', createDispatchAuditRouter({ reconciliationService }));
   app.use('/api/router', createRouterRouter({ routerService }));
-  app.use('/api/skill-packs', createSkillPacksRouter({ skillPackService }));
+  app.use('/api/skill-packs', createSkillPacksRouter({ skillPackService, registryService }));
   app.use('/api/projects', createSkillPacksRouter.projectBindings({ skillPackService }));
   app.use('/api/tasks', createSkillPacksRouter.taskBindings({ skillPackService }));
   app.use('/api/runs', createSkillPacksRouter.runSnapshots({ skillPackService }));

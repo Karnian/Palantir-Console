@@ -10,6 +10,7 @@ import { addToast, apiFetchWithToast } from '../lib/toast.js';
 import { useEscape } from '../lib/hooks.js';
 import { EmptyState } from './EmptyState.js';
 import { Dropdown } from './Dropdown.js';
+import { GalleryView } from './GalleryView.js';
 
 function Loading() {
   return html`<div class="loading">Loading...</div>`;
@@ -365,10 +366,39 @@ function DeleteConfirm({ open, pack, onClose, onConfirm }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SkillPacksView — main view
+// ─────────────────────────────────────────────────────────────────────────────
+// SkillPacksView — tabbed container (My Packs | Gallery)
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function SkillPacksView({ projects }) {
+  const [activeTab, setActiveTab] = useState('my-packs'); // 'my-packs' | 'gallery'
+
+  return html`
+    <div class="skill-packs-view">
+      <div class="skill-packs-header">
+        <h1 class="skill-packs-title">Skill Packs</h1>
+      </div>
+      <div class="gallery-page-tabs">
+        <button
+          class="gallery-page-tab ${activeTab === 'my-packs' ? 'active' : ''}"
+          onClick=${() => setActiveTab('my-packs')}
+        >My Packs</button>
+        <button
+          class="gallery-page-tab ${activeTab === 'gallery' ? 'active' : ''}"
+          onClick=${() => setActiveTab('gallery')}
+        >Gallery</button>
+      </div>
+      ${activeTab === 'my-packs' && html`<${MyPacksView} projects=${projects} />`}
+      ${activeTab === 'gallery' && html`<${GalleryView} />`}
+    </div>
+  `;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MyPacksView — original skill pack management
+// ─────────────────────────────────────────────────────────────────────────────
+
+function MyPacksView({ projects }) {
   const [packs, setPacks] = useState([]);
   const [templates, setTemplates] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -440,16 +470,13 @@ export function SkillPacksView({ projects }) {
   if (loading) return html`<${Loading} />`;
 
   return html`
-    <div class="skill-packs-view">
-      <div class="skill-packs-header">
-        <h1 class="skill-packs-title">Skill Packs</h1>
-        <div class="skill-packs-actions">
-          <button class="ghost small" onClick=${handleImport}>Import</button>
-          <button class="ghost small" onClick=${() => setShowTemplates(v => !v)}>
-            ${showTemplates ? 'Hide Templates' : 'MCP Templates'}
-          </button>
-          <button class="primary" onClick=${() => { setEditPack(null); setShowModal(true); }}>New Skill Pack</button>
-        </div>
+    <div class="my-packs-view">
+      <div class="my-packs-actions">
+        <button class="ghost small" onClick=${handleImport}>Import</button>
+        <button class="ghost small" onClick=${() => setShowTemplates(v => !v)}>
+          ${showTemplates ? 'Hide Templates' : 'MCP Templates'}
+        </button>
+        <button class="primary" onClick=${() => { setEditPack(null); setShowModal(true); }}>New Skill Pack</button>
       </div>
 
       <!-- Filters -->

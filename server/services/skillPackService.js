@@ -1,5 +1,5 @@
 const crypto = require('node:crypto');
-const { BadRequestError, NotFoundError } = require('../utils/errors');
+const { BadRequestError, NotFoundError, ConflictError } = require('../utils/errors');
 
 // Default MCP server templates — seed-only in v1 (no API CRUD)
 const DEFAULT_MCP_TEMPLATES = [
@@ -114,6 +114,24 @@ function createSkillPackService(db) {
       )
     `),
     delete: db.prepare('DELETE FROM skill_packs WHERE id = ?'),
+
+    // Registry
+    findByRegistryId: db.prepare('SELECT * FROM skill_packs WHERE registry_id = ?'),
+    findByName: db.prepare('SELECT * FROM skill_packs WHERE name = ? AND scope = ?'),
+    listInstalled: db.prepare('SELECT id, registry_id, registry_version FROM skill_packs WHERE registry_id IS NOT NULL'),
+    insertWithRegistry: db.prepare(`
+      INSERT INTO skill_packs (
+        id, name, description, scope, project_id, icon, color,
+        prompt_full, prompt_compact, estimated_tokens, estimated_tokens_compact,
+        mcp_servers, conflict_policy, checklist, inject_checklist, priority,
+        registry_id, registry_version, requires_capabilities
+      ) VALUES (
+        @id, @name, @description, @scope, @project_id, @icon, @color,
+        @prompt_full, @prompt_compact, @estimated_tokens, @estimated_tokens_compact,
+        @mcp_servers, @conflict_policy, @checklist, @inject_checklist, @priority,
+        @registry_id, @registry_version, @requires_capabilities
+      )
+    `),
 
     // MCP templates
     getTemplateByAlias: db.prepare('SELECT * FROM mcp_server_templates WHERE alias = ?'),
@@ -858,6 +876,160 @@ function createSkillPackService(db) {
     return result;
   }
 
+  // ─── Registry Install/Update ───
+
+  const PROMPT_FULL_MAX_BYTES = 32 * 1024;   // 32KB
+  const PROMPT_COMPACT_MAX_BYTES = 8 * 1024;  // 8KB
+  const COLOR_HEX_RE = /^#[0-9a-fA-F]{3,8}$/;
+
+  /**
+   * Validate registry pack content per §6.2 security pipeline.
+   * Throws BadRequestError on failure.
+   */
+  function validateRegistryPack(pack) {
+    // 1. prompt_full byte limit
+    if (pack.prompt_full && Buffer.byteLength(pack.prompt_full, 'utf-8') > PROMPT_FULL_MAX_BYTES) {
+      throw new BadRequestError(`prompt_full exceeds ${PROMPT_FULL_MAX_BYTES} byte limit`);
+    }
+    // 2. prompt_compact byte limit
+    if (pack.prompt_compact && Buffer.byteLength(pack.prompt_compact, 'utf-8') > PROMPT_COMPACT_MAX_BYTES) {
+      throw new BadRequestError(`prompt_compact exceeds ${PROMPT_COMPACT_MAX_BYTES} byte limit`);
+    }
+    // 3-4. MCP alias + env validation
+    const validatedMcp = validateMcpServersJson(pack.mcp_servers);
+    if (validatedMcp) {
+      validateMcpEnvOverrides(JSON.parse(validatedMcp));
+    }
+    // 5. checklist validation
+    const validatedChecklist = validateChecklist(pack.checklist);
+    // 6. color hex validation
+    let color = pack.color || null;
+    if (color && !COLOR_HEX_RE.test(color)) {
+      color = null; // invalid color → ignore
+    }
+    return { validatedMcp, validatedChecklist, color };
+  }
+
+  /**
+   * Install a pack from the registry into local DB.
+   * @param {Object} registryPack - pack object from registry JSON
+   * @param {Object} opts - { confirmed_preview? }
+   * @returns {Object} installed skill_pack row
+   */
+  function installFromRegistry(registryPack, opts = {}) {
+    if (!registryPack || !registryPack.registry_id) {
+      throw new BadRequestError('Invalid registry pack: missing registry_id');
+    }
+
+    // Remote source requires confirmed_preview
+    if (registryPack._source === 'remote' && !opts.confirmed_preview) {
+      throw new BadRequestError('Remote registry packs require confirmed_preview: true');
+    }
+
+    // Check duplicate registry_id
+    const existingByRegistry = stmts.findByRegistryId.get(registryPack.registry_id);
+    if (existingByRegistry) {
+      throw new ConflictError('Already installed');
+    }
+
+    // Check name collision (scope=global)
+    const existingByName = stmts.findByName.get(registryPack.name, 'global');
+    if (existingByName) {
+      throw new ConflictError(
+        `A skill pack named '${registryPack.name}' already exists. Rename the existing pack before installing.`
+      );
+    }
+
+    // §6.2 security validation
+    const { validatedMcp, validatedChecklist, color } = validateRegistryPack(registryPack);
+
+    const id = `sp_${crypto.randomUUID().slice(0, 12)}`;
+    const validatedRequires = validateChecklist(registryPack.requires_capabilities);
+
+    stmts.insertWithRegistry.run({
+      id,
+      name: registryPack.name,
+      description: registryPack.description || null,
+      scope: 'global',
+      project_id: null,
+      icon: registryPack.icon || null,
+      color,
+      prompt_full: registryPack.prompt_full || null,
+      prompt_compact: registryPack.prompt_compact || null,
+      estimated_tokens: estimateTokens(registryPack.prompt_full),
+      estimated_tokens_compact: estimateTokens(registryPack.prompt_compact),
+      mcp_servers: validatedMcp,
+      conflict_policy: registryPack.conflict_policy || 'warn',
+      checklist: validatedChecklist,
+      inject_checklist: registryPack.inject_checklist ? 1 : 0,
+      priority: typeof registryPack.priority === 'number' ? registryPack.priority : 100,
+      registry_id: registryPack.registry_id,
+      registry_version: registryPack.registry_version || null,
+      requires_capabilities: validatedRequires,
+    });
+
+    return stmts.getById.get(id);
+  }
+
+  /**
+   * Update an installed pack from registry (content fields only).
+   * User-customized fields (name, scope, priority, conflict_policy) are preserved.
+   */
+  function updateFromRegistry(localPackId, registryPack) {
+    const existing = getSkillPack(localPackId);
+    if (!existing) throw new NotFoundError(`Skill pack not found: ${localPackId}`);
+
+    // §6.2 security validation
+    const { validatedMcp, validatedChecklist, color } = validateRegistryPack(registryPack);
+    const validatedRequires = validateChecklist(registryPack.requires_capabilities);
+
+    // Content fields only — preserve user settings (Lock-in #3)
+    const contentUpdate = {
+      id: localPackId,
+      prompt_full: registryPack.prompt_full || null,
+      prompt_compact: registryPack.prompt_compact || null,
+      estimated_tokens: estimateTokens(registryPack.prompt_full),
+      estimated_tokens_compact: estimateTokens(registryPack.prompt_compact),
+      mcp_servers: validatedMcp,
+      checklist: validatedChecklist,
+      inject_checklist: registryPack.inject_checklist ? 1 : 0,
+      registry_version: registryPack.registry_version || null,
+      requires_capabilities: validatedRequires,
+    };
+
+    db.prepare(`
+      UPDATE skill_packs SET
+        prompt_full = @prompt_full,
+        prompt_compact = @prompt_compact,
+        estimated_tokens = @estimated_tokens,
+        estimated_tokens_compact = @estimated_tokens_compact,
+        mcp_servers = @mcp_servers,
+        checklist = @checklist,
+        inject_checklist = @inject_checklist,
+        registry_version = @registry_version,
+        requires_capabilities = @requires_capabilities,
+        updated_at = datetime('now')
+      WHERE id = @id
+    `).run(contentUpdate);
+
+    return stmts.getById.get(localPackId);
+  }
+
+  /**
+   * Find a locally installed pack by its registry_id.
+   */
+  function findByRegistryId(registryId) {
+    return stmts.findByRegistryId.get(registryId) || null;
+  }
+
+  /**
+   * List all installed packs that have a registry_id.
+   * Returns array of { id, registry_id, registry_version }.
+   */
+  function listInstalledFromRegistry() {
+    return stmts.listInstalled.all();
+  }
+
   // ─── Run Snapshots ───
 
   function listRunSnapshots(runId) {
@@ -972,6 +1144,11 @@ function createSkillPackService(db) {
     // Acceptance checks (Phase 4-4)
     listAcceptanceChecks,
     updateAcceptanceChecks,
+    // Registry
+    installFromRegistry,
+    updateFromRegistry,
+    findByRegistryId,
+    listInstalledFromRegistry,
     // Exported for testing
     _isEnvKeyDenied: isEnvKeyDenied,
     _estimateTokens: estimateTokens,
