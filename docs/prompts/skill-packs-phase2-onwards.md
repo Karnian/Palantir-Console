@@ -11,17 +11,19 @@
 - REST API — `/api/skill-packs` CRUD, 프로젝트/태스크 바인딩, run 스냅샷, `/execute` skill_pack_ids
 - `lifecycleService` 통합 — prompt overlay, MCP config 생성/cleanup, orphan cleanup
 - `run_skill_packs` 비정규화 스냅샷, `runs.mcp_config_path/snapshot`
+- **Phase 2 완료**: PM 시스템 프롬프트에 스킬 팩 섹션 추가 (API 문서, skill_pack_ids 사용법, lazy 조회 안내)
+  - `pmSpawnService` — auto_apply 스킬 목록 주입 (spawn + resume 양쪽)
+  - `managerSystemPrompt.js` — PM layer에 Skill Packs 섹션 (Top layer 미포함)
+  - 588 tests, 0 failures
 
 ## 남은 Phase
 
-### Phase 2: PM 통합
-- `managerSystemPrompt.js`에 스킬 팩 관련 추가 (spec §12.3):
-  - PM layer: 프로젝트 기본 스킬 목록 (이름 + 설명) + 글로벌 조회 API 안내
-  - `/execute` 호출 시 `skill_pack_ids` 배열 사용법 문서화
-  - "태스크 성격에 맞는 스킬을 선택해서 워커에 장착하라" 지시
-  - "글로벌 스킬 목록은 lazy 조회 — 매 턴마다 호출하지 말 것" 명시
-- PM이 자율적으로 스킬 선택하는 동작 검증
-- excluded 최종 우선 규칙 통합 테스트
+### Phase 2: PM 통합 ✅ (a33c797)
+- ✅ `managerSystemPrompt.js` PM layer에 Skill Packs 섹션 추가
+- ✅ `pmSpawnService` auto_apply 스킬 목록 PM 프롬프트 주입 (spawn + resume)
+- ✅ `/execute` skill_pack_ids 문서화 (PM layer only)
+- ✅ excluded 최종 우선 규칙 통합 테스트
+- ✅ Codex 교차검증 1라운드 PASS (P0=0, P1=2 fixed, P2=4 fixed)
 
 ### Phase 3: UI
 - 스킬 팩 관리 페이지 (NavSidebar 신규 항목, 목록/생성/편집/삭제)
