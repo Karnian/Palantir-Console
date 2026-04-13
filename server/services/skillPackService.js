@@ -541,25 +541,6 @@ function createSkillPackService(db) {
       }
     }
 
-    // Shadow rule: project-scope packs shadow same-name globals
-    {
-      const nameGroups = new Map();
-      for (const [id, entry] of packMap) {
-        const name = entry.pack.name;
-        if (!nameGroups.has(name)) nameGroups.set(name, []);
-        nameGroups.get(name).push(id);
-      }
-      for (const [, ids] of nameGroups) {
-        if (ids.length <= 1) continue;
-        const hasProject = ids.some(id => packMap.get(id).pack.scope === 'project');
-        if (hasProject) {
-          for (const id of ids) {
-            if (packMap.get(id).pack.scope === 'global') packMap.delete(id);
-          }
-        }
-      }
-    }
-
     // B3: task pinned packs
     const taskBindings = stmts.listTaskBindings.all(taskId);
     const taskBindingMap = new Map();
@@ -576,6 +557,24 @@ function createSkillPackService(db) {
       const pack = stmts.getById.get(binding.skill_pack_id);
       if (!pack) continue;
       packMap.set(pack.id, { pack, source: 'task', bindingPriority: binding.priority });
+    }
+
+    // Shadow rule (after all collection): project-scope packs shadow same-name globals
+    {
+      const nameGroups = new Map();
+      for (const [id, entry] of packMap) {
+        const name = entry.pack.name;
+        if (!nameGroups.has(name)) nameGroups.set(name, []);
+        nameGroups.get(name).push(id);
+      }
+      for (const [, ids] of nameGroups) {
+        if (ids.length <= 1) continue;
+        if (ids.some(id => packMap.get(id).pack.scope === 'project')) {
+          for (const id of ids) {
+            if (packMap.get(id).pack.scope === 'global') packMap.delete(id);
+          }
+        }
+      }
     }
 
     // Phase C: Effective set validation
@@ -609,6 +608,9 @@ function createSkillPackService(db) {
     // Phase D: Adapter gating
     const isClaude = (profile.command || '').includes('claude');
     if (!isClaude) {
+      if (packMap.size === 0) {
+        return { promptSections: [], mcpConfig: null, checklist: [], appliedPacks: [], warnings };
+      }
       // Non-Claude workers: skip prompt/MCP planes
       const appliedPacks = [...packMap.values()].map(e => ({
         id: e.pack.id, name: e.pack.name, skippedReason: 'adapter_unsupported',
@@ -727,7 +729,12 @@ function createSkillPackService(db) {
       // All warn: use highest priority pack's config
       warnings.push({ type: 'skill_pack:mcp_conflict_warn', alias, packs });
       // The allMcpServers already has the first pack's config; replace with highest priority
-      const highestPriority = allEntries.sort((a, b) => b.effectivePriority - a.effectivePriority)[0];
+      // Lowest number = highest priority; use applied_order as tie-breaker
+      const highestPriority = allEntries.sort((a, b) =>
+        a.effectivePriority !== b.effectivePriority
+          ? a.effectivePriority - b.effectivePriority
+          : (a.order ?? 0) - (b.order ?? 0)
+      )[0];
       const servers = perPackMcp.get(highestPriority.pack.id);
       if (servers && servers[alias]) {
         allMcpServers[alias] = { ...servers[alias], _sourcePack: highestPriority.pack.name, _sourcePolicy: highestPriority.pack.conflict_policy };

@@ -209,10 +209,16 @@ function createLifecycleService({
           }
 
           // Merge with project MCP config (project base wins on conflict)
+          // Trust boundary: realpathSync + containment check (spec §12.2, v0.5)
           let baseMcp = {};
-          if (projectMcpConfig) {
+          if (projectMcpConfig && projectDir) {
             try {
-              const raw = fs.readFileSync(projectMcpConfig, 'utf8');
+              const realRoot = fs.realpathSync(projectDir);
+              const realMcpPath = fs.realpathSync(projectMcpConfig);
+              if (realMcpPath !== realRoot && !realMcpPath.startsWith(realRoot + path.sep)) {
+                throw new Error('mcp_config_path escapes project directory boundary');
+              }
+              const raw = fs.readFileSync(realMcpPath, 'utf8');
               baseMcp = JSON.parse(raw);
             } catch (err) {
               console.warn(`[lifecycle] Failed to read project MCP config: ${err.message}`);
@@ -258,9 +264,10 @@ function createLifecycleService({
           runService.addRunEvent(run.id, 'error', JSON.stringify({ message: err.message }));
           throw err;
         }
-        // Non-400 errors: log and continue without skill packs
-        console.warn(`[lifecycle] Skill pack resolution failed for run ${run.id}: ${err.message}`);
-        runService.addRunEvent(run.id, 'skill_pack:resolution_error', JSON.stringify({ message: err.message }));
+        // All skill pack errors fail the run — never proceed without intended overlays
+        runService.updateRunStatus(run.id, 'failed', { force: true });
+        runService.addRunEvent(run.id, 'error', JSON.stringify({ message: err.message }));
+        throw err;
       }
     }
 

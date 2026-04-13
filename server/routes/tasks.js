@@ -54,6 +54,9 @@ function createTasksRouter({ taskService, lifecycleService }) {
     if (!agent_profile_id) {
       return res.status(400).json({ error: 'agent_profile_id is required' });
     }
+    if (skill_pack_ids !== undefined && !Array.isArray(skill_pack_ids)) {
+      return res.status(400).json({ error: 'skill_pack_ids must be an array' });
+    }
     const run = lifecycleService.executeTask(req.params.id, {
       agentProfileId: agent_profile_id,
       prompt: prompt || '',
