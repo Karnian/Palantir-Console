@@ -150,6 +150,7 @@ body {
 .ghost.danger {
   border-color: rgba(244, 63, 94, 0.5);
   color: var(--danger);
+  background: transparent;
 }
 
 .session-search {
