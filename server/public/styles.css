@@ -148,9 +148,12 @@ body {
 }
 
 .ghost.danger {
-  border-color: rgba(244, 63, 94, 0.5);
-  color: var(--danger);
   background: transparent;
+  border: 1px solid rgba(244, 63, 94, 0.5);
+  color: var(--danger);
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
 }
 
 .session-search {
