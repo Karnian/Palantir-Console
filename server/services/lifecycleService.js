@@ -391,15 +391,15 @@ function createLifecycleService({
     for (const part of parts) {
       if (part === '{prompt}') {
         args.push(prompt);
-      } else if (part === '{system_prompt_file}' && placeholders.system_prompt_file) {
-        args.push(placeholders.system_prompt_file);
+      } else if (part === '{system_prompt_file}') {
+        // Skip placeholder entirely when no system prompt file was generated
+        if (placeholders.system_prompt_file) args.push(placeholders.system_prompt_file);
       } else if (part.includes('{prompt}') || part.includes('{system_prompt_file}')) {
         let resolved = part;
         resolved = resolved.replace(/\{prompt\}/g, prompt);
-        if (placeholders.system_prompt_file) {
-          resolved = resolved.replace(/\{system_prompt_file\}/g, placeholders.system_prompt_file);
-        }
-        args.push(resolved);
+        // Replace {system_prompt_file} or remove it if no file
+        resolved = resolved.replace(/\{system_prompt_file\}/g, placeholders.system_prompt_file || '');
+        if (resolved.trim()) args.push(resolved);
       } else {
         // Static template part — strip surrounding quotes if present
         args.push(part.replace(/^"(.*)"$/, '$1'));

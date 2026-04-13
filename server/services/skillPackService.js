@@ -710,11 +710,11 @@ function createSkillPackService(db) {
       totalTokens += fullTokens;
     }
 
-    // Compact pass: if over budget, compact from lowest priority first
+    // Compact pass: if over budget, compact least important (highest priority number) first
     if (totalTokens > TOKEN_BUDGET) {
-      // Sort by priority ASC (lowest first), tie-break by largest tokens first
+      // Sort by priority DESC (highest number = least important first), tie-break by largest tokens first
       const compactOrder = [...resolvedPacks].sort((a, b) => {
-        if (a.effectivePriority !== b.effectivePriority) return a.effectivePriority - b.effectivePriority;
+        if (a.effectivePriority !== b.effectivePriority) return b.effectivePriority - a.effectivePriority;
         return b.fullTokens - a.fullTokens;
       });
 
