@@ -76,6 +76,30 @@ export function PackPreviewModal({ open, pack, onClose, onInstall, onUpdate, ins
             </div>
           `}
 
+          ${pack.source_url_display && html`
+            <div class="preview-section">
+              <div class="preview-section-header">Source (URL Installed)</div>
+              <div class="preview-source-info">
+                <div class="preview-source-row">
+                  <span class="preview-source-label">URL</span>
+                  <span class="preview-source-value mono" title=${pack.source_url_display}>${pack.source_url_display}</span>
+                </div>
+                ${pack.source_fetched_at && html`
+                  <div class="preview-source-row">
+                    <span class="preview-source-label">Fetched</span>
+                    <span class="preview-source-value">${new Date(pack.source_fetched_at).toLocaleString()}</span>
+                  </div>
+                `}
+                ${pack.source_hash && html`
+                  <div class="preview-source-row">
+                    <span class="preview-source-label">Hash</span>
+                    <span class="preview-source-value mono">${String(pack.source_hash).slice(0, 16)}…</span>
+                  </div>
+                `}
+              </div>
+            </div>
+          `}
+
           <!-- Prompt -->
           ${pack.prompt_full && html`
             <div class="preview-section">

@@ -1,6 +1,20 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 
+/**
+ * Strip server-only fields before returning a skill_pack row to the client.
+ * Per spec §6.2, `source_url` (full, query-included) must never be rendered
+ * in UI/logs. Only `source_url_display` (query-stripped) is safe.
+ */
+function sanitizePack(row) {
+  if (!row) return row;
+  const { source_url: _, ...safe } = row;
+  return safe;
+}
+function sanitizePacks(rows) {
+  return Array.isArray(rows) ? rows.map(sanitizePack) : rows;
+}
+
 function createSkillPacksRouter({ skillPackService, registryService }) {
   const router = express.Router();
 
@@ -76,7 +90,7 @@ function createSkillPacksRouter({ skillPackService, registryService }) {
       return res.status(404).json({ error: `Registry pack not found: ${registry_id}` });
     }
     const installed = skillPackService.installFromRegistry(registryPack, { confirmed_preview });
-    res.status(201).json({ skill_pack: installed });
+    res.status(201).json({ skill_pack: sanitizePack(installed) });
   }));
 
   // POST /api/skill-packs/registry/update — update installed pack from registry
@@ -97,10 +111,10 @@ function createSkillPacksRouter({ skillPackService, registryService }) {
       return res.status(404).json({ error: `Registry pack not found: ${registry_id}` });
     }
     const updated = skillPackService.updateFromRegistry(local.id, registryPack);
-    res.json({ skill_pack: updated });
+    res.json({ skill_pack: sanitizePack(updated) });
   }));
 
-  // POST /api/skill-packs/registry/refresh — manual remote registry refresh (Stage 2 stub)
+  // POST /api/skill-packs/registry/refresh — deprecated in v1.1, kept for back-compat
   router.post('/registry/refresh', asyncHandler(async (req, res) => {
     if (!registryService) {
       return res.status(501).json({ error: 'Registry service not available' });
@@ -109,13 +123,103 @@ function createSkillPacksRouter({ skillPackService, registryService }) {
     res.json(result);
   }));
 
+  // ─── v1.1: Install from URL ───
+
+  router.post('/registry/install-url', asyncHandler(async (req, res) => {
+    if (!registryService) {
+      return res.status(501).json({ error: 'Registry service not available' });
+    }
+    const { url, dry_run, preview_token, expected_hash } = req.body || {};
+    if (!url) {
+      return res.status(400).json({ error: 'url required' });
+    }
+
+    const { canonicalUrl, displayUrl, pack, hash } = await registryService.fetchPackFromUrl(url);
+
+    if (dry_run === true) {
+      const token = registryService.issuePreviewToken(`url:${canonicalUrl}`, hash);
+      return res.json({
+        pack,
+        hash,
+        preview_token: token,
+        source_url_display: displayUrl,
+      });
+    }
+
+    if (!preview_token) {
+      return res.status(400).json({ error: 'preview_token required for install (run dry_run first)' });
+    }
+    if (!expected_hash) {
+      return res.status(400).json({ error: 'expected_hash required for install' });
+    }
+    registryService.consumePreviewToken(preview_token, `url:${canonicalUrl}`, expected_hash);
+
+    // Gather bundled registry_ids for namespace collision check
+    const bundledRegistry = registryService.getRegistry();
+    const bundledRegistryIds = (bundledRegistry.packs || [])
+      .map(p => p.registry_id)
+      .filter(Boolean);
+
+    const installed = skillPackService.installFromUrl({
+      canonicalUrl, displayUrl, pack, hash, expected_hash, bundledRegistryIds,
+    });
+    res.status(201).json({ skill_pack: sanitizePack(installed) });
+  }));
+
+  router.post('/registry/check-update-url', asyncHandler(async (req, res) => {
+    if (!registryService) {
+      return res.status(501).json({ error: 'Registry service not available' });
+    }
+    const { pack_id } = req.body || {};
+    if (!pack_id) {
+      return res.status(400).json({ error: 'pack_id required' });
+    }
+    const existing = skillPackService.getSkillPack(pack_id);
+    if (existing.origin_type !== 'url' || !existing.source_url) {
+      return res.status(400).json({ error: 'Not a URL-installed pack' });
+    }
+
+    const { pack, hash, displayUrl } = await registryService.fetchPackFromUrl(existing.source_url);
+    const update_available = hash !== existing.source_hash;
+    const token = registryService.issuePreviewToken(`pack:${pack_id}`, hash);
+
+    res.json({
+      update_available,
+      new_hash: hash,
+      new_pack_preview: pack,
+      fetched_at: new Date().toISOString(),
+      source_url_display: displayUrl,
+      preview_token: token,
+    });
+  }));
+
+  router.post('/registry/update-url', asyncHandler(async (req, res) => {
+    if (!registryService) {
+      return res.status(501).json({ error: 'Registry service not available' });
+    }
+    const { pack_id, preview_token, expected_hash } = req.body || {};
+    if (!pack_id || !preview_token || !expected_hash) {
+      return res.status(400).json({ error: 'pack_id, preview_token, expected_hash required' });
+    }
+    const existing = skillPackService.getSkillPack(pack_id);
+    if (existing.origin_type !== 'url' || !existing.source_url) {
+      return res.status(400).json({ error: 'Not a URL-installed pack' });
+    }
+
+    const { pack, hash } = await registryService.fetchPackFromUrl(existing.source_url);
+    registryService.consumePreviewToken(preview_token, `pack:${pack_id}`, expected_hash);
+
+    const updated = skillPackService.updateFromUrl({ pack_id, pack, hash, expected_hash });
+    res.json({ skill_pack: sanitizePack(updated) });
+  }));
+
   // ─── Existing Skill Pack CRUD ───
 
   // GET /api/skill-packs — list (optional ?scope=global|project&project_id=)
   router.get('/', asyncHandler(async (req, res) => {
     const { scope, project_id } = req.query;
     const packs = skillPackService.listSkillPacks({ scope, project_id });
-    res.json({ skill_packs: packs });
+    res.json({ skill_packs: sanitizePacks(packs) });
   }));
 
   // GET /api/skill-packs/templates — list MCP server templates (read-only)
@@ -124,22 +228,22 @@ function createSkillPacksRouter({ skillPackService, registryService }) {
     res.json({ templates });
   }));
 
-  // POST /api/skill-packs ��� create
+  // POST /api/skill-packs — create (manual; origin_type='manual')
   router.post('/', asyncHandler(async (req, res) => {
     const pack = skillPackService.createSkillPack(req.body || {});
-    res.status(201).json({ skill_pack: pack });
+    res.status(201).json({ skill_pack: sanitizePack(pack) });
   }));
 
   // GET /api/skill-packs/:id — get
   router.get('/:id', asyncHandler(async (req, res) => {
     const pack = skillPackService.getSkillPack(req.params.id);
-    res.json({ skill_pack: pack });
+    res.json({ skill_pack: sanitizePack(pack) });
   }));
 
   // PATCH /api/skill-packs/:id — update
   router.patch('/:id', asyncHandler(async (req, res) => {
     const pack = skillPackService.updateSkillPack(req.params.id, req.body || {});
-    res.json({ skill_pack: pack });
+    res.json({ skill_pack: sanitizePack(pack) });
   }));
 
   // DELETE /api/skill-packs/:id — delete
@@ -176,13 +280,14 @@ function createSkillPacksRouter({ skillPackService, registryService }) {
     if (!data || !data.name) {
       return res.status(400).json({ error: 'skill_pack with name is required' });
     }
-    // Override project_id if provided
+    // Override project_id if provided. Imports are marked origin_type='import'.
     const createData = {
       ...data,
       project_id: project_id || data.project_id,
+      origin_type: 'import',
     };
     const pack = skillPackService.createSkillPack(createData);
-    res.status(201).json({ skill_pack: pack });
+    res.status(201).json({ skill_pack: sanitizePack(pack) });
   }));
 
   return router;

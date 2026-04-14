@@ -119,17 +119,35 @@ function createSkillPackService(db) {
     findByRegistryId: db.prepare('SELECT * FROM skill_packs WHERE registry_id = ?'),
     findByName: db.prepare('SELECT * FROM skill_packs WHERE name = ? AND scope = ?'),
     listInstalled: db.prepare('SELECT id, registry_id, registry_version FROM skill_packs WHERE registry_id IS NOT NULL'),
+    findBySourceUrl: db.prepare('SELECT * FROM skill_packs WHERE source_url = ?'),
     insertWithRegistry: db.prepare(`
       INSERT INTO skill_packs (
         id, name, description, scope, project_id, icon, color,
         prompt_full, prompt_compact, estimated_tokens, estimated_tokens_compact,
         mcp_servers, conflict_policy, checklist, inject_checklist, priority,
-        registry_id, registry_version, requires_capabilities
+        registry_id, registry_version, requires_capabilities,
+        origin_type
       ) VALUES (
         @id, @name, @description, @scope, @project_id, @icon, @color,
         @prompt_full, @prompt_compact, @estimated_tokens, @estimated_tokens_compact,
         @mcp_servers, @conflict_policy, @checklist, @inject_checklist, @priority,
-        @registry_id, @registry_version, @requires_capabilities
+        @registry_id, @registry_version, @requires_capabilities,
+        @origin_type
+      )
+    `),
+    insertWithSourceUrl: db.prepare(`
+      INSERT INTO skill_packs (
+        id, name, description, scope, project_id, icon, color,
+        prompt_full, prompt_compact, estimated_tokens, estimated_tokens_compact,
+        mcp_servers, conflict_policy, checklist, inject_checklist, priority,
+        registry_id, registry_version, requires_capabilities,
+        source_url, source_url_display, source_hash, source_fetched_at, origin_type
+      ) VALUES (
+        @id, @name, @description, @scope, @project_id, @icon, @color,
+        @prompt_full, @prompt_compact, @estimated_tokens, @estimated_tokens_compact,
+        @mcp_servers, @conflict_policy, @checklist, @inject_checklist, @priority,
+        @registry_id, @registry_version, @requires_capabilities,
+        @source_url, @source_url_display, @source_hash, @source_fetched_at, 'url'
       )
     `),
 
@@ -192,6 +210,7 @@ function createSkillPackService(db) {
       mcp_servers, conflict_policy = 'fail',
       checklist, inject_checklist = 0, priority = 100,
       requires_capabilities,
+      origin_type,
     } = data;
 
     if (!name || typeof name !== 'string' || !name.trim()) {
@@ -242,6 +261,11 @@ function createSkillPackService(db) {
       if (validated) {
         db.prepare('UPDATE skill_packs SET requires_capabilities = ? WHERE id = ?').run(validated, id);
       }
+    }
+
+    // v1.1: origin_type override (e.g. 'import' from JSON import route)
+    if (origin_type && ['manual', 'import'].includes(origin_type)) {
+      db.prepare('UPDATE skill_packs SET origin_type = ? WHERE id = ?').run(origin_type, id);
     }
 
     return stmts.getById.get(id);
@@ -966,6 +990,7 @@ function createSkillPackService(db) {
       registry_id: registryPack.registry_id,
       registry_version: registryPack.registry_version || null,
       requires_capabilities: validatedRequires,
+      origin_type: 'bundled',
     });
 
     return stmts.getById.get(id);
@@ -1028,6 +1053,152 @@ function createSkillPackService(db) {
    */
   function listInstalledFromRegistry() {
     return stmts.listInstalled.all();
+  }
+
+  // ─── v1.1: URL install / update ───
+  // Server-authoritative contract (Lock-in #10): service methods receive url
+  // or pack_id + expected_hash only. Server calls registryService.fetchPackFromUrl
+  // internally. Clients never pass pack content or hash.
+
+  /**
+   * Install a pack fetched from a URL.
+   * @param {Object} deps - { registryService }
+   * @param {Object} args - { canonicalUrl, displayUrl, pack, hash, expected_hash }
+   *   canonicalUrl/displayUrl/pack/hash come from registryService.fetchPackFromUrl
+   *   (server has already fetched + validated).
+   *   expected_hash is the dry-run hash from the client.
+   * @returns {Object} installed skill_pack row
+   */
+  function installFromUrl({ canonicalUrl, displayUrl, pack, hash, expected_hash, bundledRegistryIds }) {
+    if (!canonicalUrl || !pack || !hash) {
+      throw new BadRequestError('canonicalUrl, pack, and hash required');
+    }
+    if (hash !== expected_hash) {
+      throw new ConflictError('Source content changed since preview');
+    }
+
+    // Check source_url collision
+    const existingByUrl = stmts.findBySourceUrl.get(canonicalUrl);
+    if (existingByUrl) {
+      throw new ConflictError('Already installed from this URL');
+    }
+
+    // OQ-v1.1-4: URL pack with registry_id that collides with:
+    //   (a) an existing installed pack, OR
+    //   (b) bundled registry catalog (even if not yet installed)
+    // must be rejected with 409. Otherwise URL packs could squat on bundled
+    // IDs before the user installs them.
+    if (pack.registry_id) {
+      const existingByRegistry = stmts.findByRegistryId.get(pack.registry_id);
+      if (existingByRegistry) {
+        throw new ConflictError(
+          `Pack registry_id '${pack.registry_id}' conflicts with an existing installed pack`
+        );
+      }
+      if (Array.isArray(bundledRegistryIds) && bundledRegistryIds.includes(pack.registry_id)) {
+        throw new ConflictError(
+          `Pack registry_id '${pack.registry_id}' collides with a bundled registry pack. Pick a different registry_id.`
+        );
+      }
+    }
+
+    // Name collision check (scope=global)
+    const existingByName = stmts.findByName.get(pack.name, 'global');
+    if (existingByName) {
+      throw new ConflictError(
+        `A skill pack named '${pack.name}' already exists. Rename the existing pack before installing.`
+      );
+    }
+
+    // §6.2 content validation
+    const { validatedMcp, validatedChecklist, color } = validateRegistryPack(pack);
+    const validatedRequires = validateChecklist(pack.requires_capabilities);
+
+    const id = `sp_${crypto.randomUUID().slice(0, 12)}`;
+    const now = new Date().toISOString();
+
+    stmts.insertWithSourceUrl.run({
+      id,
+      name: pack.name,
+      description: pack.description || null,
+      scope: 'global',
+      project_id: null,
+      icon: pack.icon || null,
+      color,
+      prompt_full: pack.prompt_full || null,
+      prompt_compact: pack.prompt_compact || null,
+      estimated_tokens: estimateTokens(pack.prompt_full),
+      estimated_tokens_compact: estimateTokens(pack.prompt_compact),
+      mcp_servers: validatedMcp,
+      conflict_policy: pack.conflict_policy || 'warn',
+      checklist: validatedChecklist,
+      inject_checklist: pack.inject_checklist ? 1 : 0,
+      priority: typeof pack.priority === 'number' ? pack.priority : 100,
+      registry_id: pack.registry_id || null,
+      registry_version: pack.registry_version || null,
+      requires_capabilities: validatedRequires,
+      source_url: canonicalUrl,
+      source_url_display: displayUrl,
+      source_hash: hash,
+      source_fetched_at: now,
+    });
+
+    return stmts.getById.get(id);
+  }
+
+  /**
+   * Update a URL-installed pack with fresh content.
+   * Caller responsible for re-fetching via registryService.fetchPackFromUrl.
+   */
+  function updateFromUrl({ pack_id, pack, hash, expected_hash }) {
+    const existing = stmts.getById.get(pack_id);
+    if (!existing) throw new NotFoundError(`Skill pack not found: ${pack_id}`);
+    if (existing.origin_type !== 'url') {
+      throw new BadRequestError('Not a URL-installed pack');
+    }
+    if (hash !== expected_hash) {
+      throw new ConflictError('Source content changed since preview');
+    }
+
+    const { validatedMcp, validatedChecklist } = validateRegistryPack(pack);
+    const validatedRequires = validateChecklist(pack.requires_capabilities);
+    const now = new Date().toISOString();
+
+    db.prepare(`
+      UPDATE skill_packs SET
+        prompt_full = @prompt_full,
+        prompt_compact = @prompt_compact,
+        estimated_tokens = @estimated_tokens,
+        estimated_tokens_compact = @estimated_tokens_compact,
+        mcp_servers = @mcp_servers,
+        checklist = @checklist,
+        inject_checklist = @inject_checklist,
+        registry_version = @registry_version,
+        requires_capabilities = @requires_capabilities,
+        source_hash = @source_hash,
+        source_fetched_at = @source_fetched_at,
+        updated_at = datetime('now')
+      WHERE id = @id
+    `).run({
+      id: pack_id,
+      prompt_full: pack.prompt_full || null,
+      prompt_compact: pack.prompt_compact || null,
+      estimated_tokens: estimateTokens(pack.prompt_full),
+      estimated_tokens_compact: estimateTokens(pack.prompt_compact),
+      mcp_servers: validatedMcp,
+      checklist: validatedChecklist,
+      inject_checklist: pack.inject_checklist ? 1 : 0,
+      registry_version: pack.registry_version || null,
+      requires_capabilities: validatedRequires,
+      source_hash: hash,
+      source_fetched_at: now,
+    });
+
+    return stmts.getById.get(pack_id);
+  }
+
+  function findBySourceUrl(canonicalUrl) {
+    return stmts.findBySourceUrl.get(canonicalUrl) || null;
   }
 
   // ─── Run Snapshots ───
@@ -1149,6 +1320,10 @@ function createSkillPackService(db) {
     updateFromRegistry,
     findByRegistryId,
     listInstalledFromRegistry,
+    // v1.1: URL install
+    installFromUrl,
+    updateFromUrl,
+    findBySourceUrl,
     // Exported for testing
     _isEnvKeyDenied: isEnvKeyDenied,
     _estimateTokens: estimateTokens,

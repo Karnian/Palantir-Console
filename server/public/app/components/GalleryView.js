@@ -8,6 +8,7 @@ const html = htm.bind(h);
 import { apiFetch } from '../lib/api.js';
 import { addToast, apiFetchWithToast } from '../lib/toast.js';
 import { PackPreviewModal } from './PackPreviewModal.js';
+import { UrlInstallDialog } from './UrlInstallDialog.js';
 
 export function GalleryView() {
   const [registry, setRegistry] = useState(null);
@@ -18,6 +19,7 @@ export function GalleryView() {
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [previewPack, setPreviewPack] = useState(null);
   const [installing, setInstalling] = useState(null); // registry_id being installed
+  const [urlDialogOpen, setUrlDialogOpen] = useState(false);
   const debounceRef = useRef(null);
 
   const loadRegistry = useCallback(async () => {
@@ -120,14 +122,19 @@ export function GalleryView() {
   return html`
     <div class="gallery-view">
       <div class="gallery-toolbar">
-        <div class="gallery-search-wrap">
-          <input
-            type="text"
-            class="form-input gallery-search"
-            placeholder="Search packs..."
-            value=${search}
-            onInput=${e => setSearch(e.target.value)}
-          />
+        <div class="gallery-toolbar-row">
+          <div class="gallery-search-wrap">
+            <input
+              type="text"
+              class="form-input gallery-search"
+              placeholder="Search packs..."
+              value=${search}
+              onInput=${e => setSearch(e.target.value)}
+            />
+          </div>
+          <button class="primary small" onClick=${() => setUrlDialogOpen(true)}>
+            Install from URL
+          </button>
         </div>
         <div class="gallery-filters">
           <button
@@ -218,6 +225,12 @@ export function GalleryView() {
         onInstall=${handleInstall}
         onUpdate=${handleUpdate}
         installing=${installing}
+      />
+
+      <${UrlInstallDialog}
+        open=${urlDialogOpen}
+        onClose=${() => setUrlDialogOpen(false)}
+        onInstalled=${loadRegistry}
       />
     </div>
   `;

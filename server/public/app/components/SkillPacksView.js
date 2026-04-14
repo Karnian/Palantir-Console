@@ -405,6 +405,7 @@ function MyPacksView({ projects }) {
   const [showModal, setShowModal] = useState(false);
   const [editPack, setEditPack] = useState(null);
   const [deletePack, setDeletePack] = useState(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(null); // pack_id currently being checked
   const [filterScope, setFilterScope] = useState('all'); // all | global | project
   const [filterProjectId, setFilterProjectId] = useState('');
   const [showTemplates, setShowTemplates] = useState(false);
@@ -465,6 +466,51 @@ function MyPacksView({ projects }) {
       } catch (err) { addToast(err.message || 'Invalid JSON', 'error'); }
     };
     input.click();
+  };
+
+  const handleCheckUpdate = async (pack) => {
+    setCheckingUpdate(pack.id);
+    try {
+      const res = await apiFetch('/api/skill-packs/registry/check-update-url', {
+        method: 'POST',
+        body: JSON.stringify({ pack_id: pack.id }),
+      });
+      if (!res.update_available) {
+        addToast(`"${pack.name}" is up to date`, 'info');
+      } else {
+        // Prompt user to confirm update
+        const confirmed = window.confirm(
+          `Update available for "${pack.name}"\n\nHash: ${String(res.new_hash).slice(0, 16)}…\nFetched: ${new Date(res.fetched_at).toLocaleString()}\n\nApply update?`
+        );
+        if (confirmed) {
+          await apiFetchWithToast('/api/skill-packs/registry/update-url', {
+            method: 'POST',
+            body: JSON.stringify({
+              pack_id: pack.id,
+              preview_token: res.preview_token,
+              expected_hash: res.new_hash,
+            }),
+          });
+          addToast(`Updated "${pack.name}"`, 'success');
+          loadData();
+        }
+      }
+    } catch (err) {
+      addToast(err.message || 'Update check failed', 'error');
+    }
+    setCheckingUpdate(null);
+  };
+
+  const originBadge = (pack) => {
+    const t = pack.origin_type;
+    if (t === 'bundled') return { label: 'Bundled', cls: 'bundled', title: pack.registry_id || '' };
+    if (t === 'url') {
+      let host = '';
+      try { host = new URL(pack.source_url_display || 'https://x').host; } catch { /* */ }
+      return { label: `URL${host ? `: ${host}` : ''}`, cls: 'url', title: pack.source_url_display || '' };
+    }
+    if (t === 'import') return { label: 'Imported', cls: 'import', title: '' };
+    return { label: 'Manual', cls: 'manual', title: '' };
   };
 
   if (loading) return html`<${Loading} />`;
@@ -563,6 +609,8 @@ function MyPacksView({ projects }) {
           let checkCount = 0;
           try { checkCount = JSON.parse(pack.checklist || '[]').length; } catch { /* */ }
           const proj = pack.project_id ? (projects || []).find(p => p.id === pack.project_id) : null;
+          const origin = originBadge(pack);
+          const isChecking = checkingUpdate === pack.id;
 
           return html`
             <div class="skill-pack-card" key=${pack.id} onClick=${() => { setEditPack(pack); setShowModal(true); }}>
@@ -574,12 +622,20 @@ function MyPacksView({ projects }) {
               ${pack.description && html`<div class="skill-pack-desc">${pack.description}</div>`}
               <div class="skill-pack-meta">
                 <span class="skill-pack-scope ${pack.scope}">${pack.scope}${proj ? `: ${proj.name}` : ''}</span>
+                <span class="skill-pack-origin ${origin.cls}" title=${origin.title}>${origin.label}</span>
                 ${tokens > 0 && html`<span class="skill-pack-tokens">${tokens} tok</span>`}
                 ${mcpCount > 0 && html`<span class="skill-pack-mcp">${mcpCount} MCP</span>`}
                 ${checkCount > 0 && html`<span class="skill-pack-check">\u2713 ${checkCount}</span>`}
               </div>
               <div class="skill-pack-card-actions" onClick=${e => e.stopPropagation()}>
                 <button class="ghost small" onClick=${() => { setEditPack(pack); setShowModal(true); }}>Edit</button>
+                ${pack.origin_type === 'url' && html`
+                  <button
+                    class="ghost small"
+                    disabled=${isChecking}
+                    onClick=${() => handleCheckUpdate(pack)}
+                  >${isChecking ? 'Checking...' : 'Check Update'}</button>
+                `}
                 <button class="ghost small" onClick=${() => handleExport(pack)}>Export</button>
                 <button class="ghost small danger-text" onClick=${() => setDeletePack(pack)}>Delete</button>
               </div>
