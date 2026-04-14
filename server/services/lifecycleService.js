@@ -19,6 +19,8 @@ function createLifecycleService({
   worktreeService,
   eventBus,
   skillPackService,
+  presetService,
+  claudeVersionResolver,
 }) {
   const HEARTBEAT_INTERVAL_MS = 30000;  // 30s
   const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min (increased from 10 min for long-running tasks)
@@ -75,6 +77,42 @@ function createLifecycleService({
     } catch {
       // If we can't determine, assume not active (safe fallback)
       return false;
+    }
+  }
+
+  /**
+   * Classify an agent profile into one of the three adapter families Phase
+   * 10C wires preset injection for. Falls back to 'other' so callers can
+   * emit a Tier 1 skip warning instead of silently dropping MCP.
+   */
+  function resolveAdapterName(profile) {
+    const cmd = (profile?.command || '').toLowerCase();
+    if (cmd.includes('claude')) return 'claude';
+    if (cmd.includes('codex')) return 'codex';
+    if (cmd.includes('opencode')) return 'opencode';
+    return 'other';
+  }
+
+  /**
+   * Run `claude --version` and return the raw semver portion, or null on
+   * any failure. The gate is enforced only when the preset declares
+   * `min_claude_version`; callers treat null as "unable to verify" and
+   * fall back to passing the preset through unchanged (documented in the
+   * gate call site). Test path injects `claudeVersionResolver`.
+   */
+  function resolveClaudeVersion() {
+    if (typeof claudeVersionResolver === 'function') {
+      try { return claudeVersionResolver() || null; } catch { return null; }
+    }
+    try {
+      const { execFileSync } = require('node:child_process');
+      const out = execFileSync('claude', ['--version'], {
+        stdio: 'pipe', timeout: 3000, encoding: 'utf8',
+      }).trim();
+      const match = out.match(/(\d+\.\d+\.\d+)/);
+      return match ? match[1] : null;
+    } catch {
+      return null;
     }
   }
 
@@ -142,7 +180,7 @@ function createLifecycleService({
   /**
    * Execute a task: create a Run, spawn the agent.
    */
-  function executeTask(taskId, { agentProfileId, prompt, skillPackIds }) {
+  function executeTask(taskId, { agentProfileId, prompt, skillPackIds, presetId }) {
     const task = taskService.getTask(taskId);
     const profile = agentProfileService.getProfile(agentProfileId);
 
@@ -151,6 +189,11 @@ function createLifecycleService({
     if (runningCount >= profile.max_concurrent) {
       throw new Error(`Agent ${profile.name} at concurrency limit (${profile.max_concurrent})`);
     }
+
+    // Phase 10C: resolve preferred preset. Explicit argument wins over
+    // task.preferred_preset_id so callers can override per-execute.
+    const effectivePresetId = presetId || task.preferred_preset_id || null;
+    const adapterName = resolveAdapterName(profile);
 
     // Create run
     const run = runService.createRun({
@@ -182,6 +225,77 @@ function createLifecycleService({
     // the task or project is deleted before the run terminates.
     if (projectDir) _runProjectDirs.set(run.id, projectDir);
 
+    // ── Preset resolution (Phase 10C) ──
+    // Resolve the worker preset BEFORE skill packs so the combined MCP
+    // precedence (preset > project > skill pack) can be applied in one
+    // place. Failures here are fail-closed — the run is marked failed
+    // and the error rethrown (same pattern as skill pack resolution).
+    let presetResolution = null;
+    let presetObj = null;
+    if (effectivePresetId && presetService) {
+      try {
+        presetResolution = presetService.resolveForSpawn({
+          presetId: effectivePresetId,
+          adapter: adapterName,
+        });
+        presetObj = presetResolution.preset;
+
+        // min_claude_version gate (Claude adapter only — non-Claude adapters
+        // can't meaningfully satisfy a Claude CLI version constraint). If
+        // we cannot resolve the installed CLI version we warn and proceed.
+        if (adapterName === 'claude' && presetResolution.minClaudeVersion) {
+          const found = resolveClaudeVersion();
+          if (!found) {
+            runService.addRunEvent(run.id, 'preset:version_unverified', JSON.stringify({
+              min_claude_version: presetResolution.minClaudeVersion,
+              reason: 'claude --version resolution failed',
+            }));
+          } else if (presetService.compareSemver(found, presetResolution.minClaudeVersion) < 0) {
+            const msg = `Preset requires Claude CLI >= ${presetResolution.minClaudeVersion}, found ${found}`;
+            runService.addRunEvent(run.id, 'preset:version_mismatch', JSON.stringify({
+              min_claude_version: presetResolution.minClaudeVersion, found,
+            }));
+            const err = new Error(msg);
+            err.status = 400;
+            throw err;
+          }
+        }
+
+        // Emit resolver warnings as run events (tier2_skipped,
+        // mcp_template_missing, etc.). These are annotate-only.
+        for (const w of presetResolution.warnings || []) {
+          runService.addRunEvent(run.id, w.type || 'preset:warning', JSON.stringify(w));
+        }
+
+        // Phase 10C: Tier 2 stays dormant. When the resolver returns
+        // isolated=true (i.e. Claude adapter + isolated preset) we log a
+        // pending marker so operators see preset requested `--bare` but
+        // Phase 10C is only applying Tier 1. Phase 10D flips this on.
+        if (presetResolution.isolated) {
+          runService.addRunEvent(run.id, 'preset:tier2_pending', JSON.stringify({
+            reason: 'Tier 2 isolation is implemented in Phase 10D; applying Tier 1 only',
+            plugin_refs: (presetObj.plugin_refs || []),
+          }));
+        }
+
+        // Persist the content snapshot + bind preset_id to the run row
+        // immediately (R1-P1-5: persist at resolve time, not at spawn
+        // completion, so forensic data survives crashes mid-spawn).
+        presetService.persistSnapshot(run.id, presetObj, presetResolution.snapshot);
+        runService.updateRunPreset(run.id, {
+          preset_id: presetObj.id,
+          preset_snapshot_hash: presetResolution.snapshot.hash,
+        });
+      } catch (err) {
+        // Fail the run on any preset resolution error so operators never
+        // ship a worker that was meant to carry a preset without it.
+        runService.updateRunStatus(run.id, 'failed', { force: true });
+        runService.addRunEvent(run.id, 'error', JSON.stringify({ message: err.message }));
+        _runProjectDirs.delete(run.id);
+        throw err;
+      }
+    }
+
     // ── Skill Pack resolution (Phase 1b) ──
     // Only for workers (is_manager guard is implicit: executeTask is worker-only)
     let skillPackResult = null;
@@ -198,60 +312,9 @@ function createLifecycleService({
           runService.addRunEvent(run.id, w.type || 'skill_pack:warning', JSON.stringify(w));
         }
 
-        // Write MCP config file if needed
-        if (skillPackResult.mcpConfig) {
-          const fs = require('node:fs');
-          const path = require('node:path');
-
-          // Validate runId for path safety
-          if (!/^[a-zA-Z0-9_-]+$/.test(run.id)) {
-            throw new Error(`Invalid run id for MCP config path: ${run.id}`);
-          }
-
-          // Merge with project MCP config (project base wins on conflict)
-          // Trust boundary: realpathSync + containment check (spec §12.2, v0.5)
-          let baseMcp = {};
-          if (projectMcpConfig && projectDir) {
-            try {
-              const realRoot = fs.realpathSync(projectDir);
-              const realMcpPath = fs.realpathSync(projectMcpConfig);
-              if (realMcpPath !== realRoot && !realMcpPath.startsWith(realRoot + path.sep)) {
-                throw new Error('mcp_config_path escapes project directory boundary');
-              }
-              const raw = fs.readFileSync(realMcpPath, 'utf8');
-              baseMcp = JSON.parse(raw);
-            } catch (err) {
-              console.warn(`[lifecycle] Failed to read project MCP config: ${err.message}`);
-            }
-          }
-
-          const mergedMcpServers = { ...skillPackResult.mcpConfig.mcpServers };
-          // Project MCP base wins on alias conflict
-          if (baseMcp.mcpServers) {
-            for (const [alias, config] of Object.entries(baseMcp.mcpServers)) {
-              if (mergedMcpServers[alias]) {
-                skillPackResult.warnings.push({
-                  type: 'skill_pack:mcp_project_override',
-                  alias,
-                  message: `Project MCP config overrides skill pack MCP for alias "${alias}"`,
-                });
-                runService.addRunEvent(run.id, 'skill_pack:mcp_project_override',
-                  JSON.stringify({ alias }));
-              }
-              mergedMcpServers[alias] = config;
-            }
-          }
-
-          const mergedConfig = { mcpServers: mergedMcpServers };
-          const mcpConfigFilePath = path.resolve(process.cwd(), 'runtime', 'mcp', `${run.id}.json`);
-          fs.writeFileSync(mcpConfigFilePath, JSON.stringify(mergedConfig, null, 2), { mode: 0o600 });
-
-          skillPackMcpConfigPath = mcpConfigFilePath;
-
-          // Save to runs table
-          const mcpSnapshot = JSON.stringify(mergedConfig);
-          runService.updateRunMcpConfig(run.id, { mcp_config_path: mcpConfigFilePath, mcp_config_snapshot: mcpSnapshot });
-        }
+        // MCP merge is deferred until after the skill pack block so the
+        // three sources (preset > project > skill pack, §6.8) can be
+        // composed in one place. See _buildMergedMcp below.
 
         // Record denormalized snapshots
         if (skillPackResult.appliedPacks.length > 0) {
@@ -270,6 +333,82 @@ function createLifecycleService({
         throw err;
       }
     }
+
+    // ── Unified MCP merge + system prompt chain (Phase 10C §6.8) ──
+    // Source precedence — MCP: preset > project > skill pack. Prompt:
+    // preset base → skill pack sections (priority order) → adapter footer.
+    // `skillPackMcpConfigPath` is reused downstream and repurposed to point
+    // at the merged config file so Phase 1b consumers keep working.
+    const mergedMcpWarnings = [];
+    const presetMcp = presetResolution ? presetResolution.mcpConfig : null;
+    const skillPackMcp = skillPackResult ? skillPackResult.mcpConfig : null;
+    let projectMcpObj = null;
+    if (projectMcpConfig && projectDir) {
+      try {
+        const fsM = require('node:fs');
+        const pathM = require('node:path');
+        const realRoot = fsM.realpathSync(projectDir);
+        const realMcpPath = fsM.realpathSync(projectMcpConfig);
+        if (realMcpPath !== realRoot && !realMcpPath.startsWith(realRoot + pathM.sep)) {
+          throw new Error('mcp_config_path escapes project directory boundary');
+        }
+        projectMcpObj = JSON.parse(fsM.readFileSync(realMcpPath, 'utf8'));
+      } catch (err) {
+        console.warn(`[lifecycle] Failed to read project MCP config: ${err.message}`);
+      }
+    }
+    let mergedMcp = null;
+    if (presetService) {
+      mergedMcp = presetService.mergeMcp3(presetMcp, projectMcpObj, skillPackMcp, {
+        warnings: mergedMcpWarnings,
+      });
+    } else if (skillPackMcp || projectMcpObj) {
+      // Legacy fallback (presetService absent in some tests): mimic the
+      // pre-10C behavior — project wins over skill pack.
+      const servers = { ...(skillPackMcp?.mcpServers || {}) };
+      for (const [alias, config] of Object.entries(projectMcpObj?.mcpServers || {})) {
+        servers[alias] = config;
+      }
+      mergedMcp = Object.keys(servers).length > 0 ? { mcpServers: servers } : null;
+    }
+    if (mergedMcp) {
+      const fsW = require('node:fs');
+      const pathW = require('node:path');
+      if (!/^[a-zA-Z0-9_-]+$/.test(run.id)) {
+        throw new Error(`Invalid run id for MCP config path: ${run.id}`);
+      }
+      const mcpConfigFilePath = pathW.resolve(process.cwd(), 'runtime', 'mcp', `${run.id}.json`);
+      fsW.writeFileSync(mcpConfigFilePath, JSON.stringify(mergedMcp, null, 2), { mode: 0o600 });
+      skillPackMcpConfigPath = mcpConfigFilePath;
+      runService.updateRunMcpConfig(run.id, {
+        mcp_config_path: mcpConfigFilePath,
+        mcp_config_snapshot: JSON.stringify(mergedMcp),
+      });
+      for (const w of mergedMcpWarnings) {
+        runService.addRunEvent(run.id, w.type || 'mcp:alias_conflict', JSON.stringify(w));
+      }
+    }
+
+    // Composed system prompt: preset base → skill pack sections → (no
+    // adapter footer at this layer — callers apply adapter-specific
+    // footers elsewhere). For non-preset runs with skill pack sections,
+    // still use the legacy "--- Skill: <name> ---" concatenation to
+    // avoid changing behavior for existing deployments.
+    const composedSystemPrompt = (() => {
+      if (!presetService || !presetObj) {
+        if (!skillPackResult || skillPackResult.promptSections.length === 0) return null;
+        return skillPackResult.promptSections
+          .map(s => `--- Skill: ${s.name} ---\n${s.text}`)
+          .join('\n\n');
+      }
+      const skillSections = (skillPackResult?.promptSections || [])
+        .map(s => `--- Skill: ${s.name} ---\n${s.text}`);
+      return presetService.resolvePromptChain({
+        presetPrompt: presetObj.base_system_prompt || '',
+        skillPackSections: skillSections,
+        adapterFooter: null,
+      }) || null;
+    })();
 
     // Create an isolated git worktree for this run, when the project is a git repo.
     // Each run gets its own branch (palantir/run-<id>) so concurrent agents don't
@@ -302,15 +441,11 @@ function createLifecycleService({
         // Use streamJsonEngine — same as Manager but isManager=false (single-shot worker)
         const mcpTools = parseMcpTools(profile.capabilities_json);
 
-        // Skill pack prompt overlay: concatenate all sections into a system prompt
-        let systemPrompt = undefined;
-        if (skillPackResult && skillPackResult.promptSections.length > 0) {
-          systemPrompt = skillPackResult.promptSections
-            .map(s => `--- Skill: ${s.name} ---\n${s.text}`)
-            .join('\n\n');
-        }
+        // Preset/skill-pack composed prompt (Phase 10C §6.8).
+        const systemPrompt = composedSystemPrompt || undefined;
 
-        // MCP config: skill pack merged config takes precedence over plain project MCP
+        // MCP config file: unified (preset > project > skill pack) if
+        // anything merged, else plain project MCP, else undefined.
         const effectiveMcpConfig = skillPackMcpConfigPath || projectMcpConfig || undefined;
 
         result = streamJsonEngine.spawnAgent(run.id, {
@@ -325,20 +460,35 @@ function createLifecycleService({
         });
       } else {
         // Non-Claude agents: use tmux/subprocess engine
-        // Phase 5: Write system prompt file for agents that support {system_prompt_file}
+        // Phase 5 / Phase 10C: Write composed system prompt file for agents
+        // that support {system_prompt_file}. `composedSystemPrompt` already
+        // merges preset base prompt + skill pack sections (§6.8).
         const placeholders = {};
-        if (skillPackResult && skillPackResult.promptSections.length > 0 &&
+        if (composedSystemPrompt &&
             profile.args_template && profile.args_template.includes('{system_prompt_file}')) {
           const fs = require('node:fs');
           const path = require('node:path');
-          const promptContent = skillPackResult.promptSections
-            .map(s => `--- Skill: ${s.name} ---\n${s.text}`)
-            .join('\n\n');
           const promptFilePath = path.resolve(process.cwd(), 'runtime', 'mcp', `${run.id}-system-prompt.md`);
-          fs.writeFileSync(promptFilePath, promptContent, { mode: 0o600 });
+          fs.writeFileSync(promptFilePath, composedSystemPrompt, { mode: 0o600 });
           placeholders.system_prompt_file = promptFilePath;
         }
-        const args = buildAgentArgs(profile, prompt, placeholders);
+        // Phase 10C: Codex worker gets preset MCP injected via
+        // `codex exec -c mcp_servers=<json>`. Only applied when the
+        // merged MCP config is non-empty AND the profile command is
+        // codex — opencode today has no equivalent flag, so we emit a
+        // degrade warning and fall back to prompt-only (spec §7 Phase 10C).
+        let extraArgs = [];
+        if (mergedMcp && adapterName === 'codex') {
+          const jsonStr = JSON.stringify(mergedMcp.mcpServers || {});
+          extraArgs = ['-c', `mcp_servers=${jsonStr}`];
+        } else if (mergedMcp && adapterName === 'opencode') {
+          runService.addRunEvent(run.id, 'preset:mcp_unsupported', JSON.stringify({
+            adapter: 'opencode',
+            reason: 'opencode CLI has no MCP config flag — prompt-only injection applied',
+          }));
+        }
+        const baseArgs = buildAgentArgs(profile, prompt, placeholders);
+        const args = adapterName === 'codex' ? [...extraArgs, ...baseArgs] : baseArgs;
         result = executionEngine.spawnAgent(run.id, {
           command: profile.command,
           args,

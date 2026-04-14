@@ -429,11 +429,20 @@ function createRunService(db, eventBus) {
       .run(mcp_config_path || null, mcp_config_snapshot || null, id);
   }
 
+  // Phase 10C: bind a resolved preset + snapshot hash to an existing run
+  // row. Snapshot JSON + file hashes live in run_preset_snapshots and are
+  // written by presetService.persistSnapshot; only the ids live on runs.
+  function updateRunPreset(id, { preset_id, preset_snapshot_hash }) {
+    db.prepare(`UPDATE runs SET preset_id = ?, preset_snapshot_hash = ? WHERE id = ?`)
+      .run(preset_id || null, preset_snapshot_hash || null, id);
+  }
+
   return {
     listRuns, getRun, createRun,
     updateRunStatus, markRunStarted, updateRunResult,
     updateManagerThreadId, updateClaudeSessionId,
     updateRunMcpConfig,
+    updateRunPreset,
     deleteRun, addRunEvent, getRunEvents,
     getActiveManager, getActiveManagers, getRunByConversationId, getWorkerRuns,
   };
