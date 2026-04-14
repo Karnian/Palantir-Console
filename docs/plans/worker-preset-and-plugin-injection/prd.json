@@ -1,0 +1,151 @@
+{
+  "projectName": "Worker Preset & Plugin Injection",
+  "scale": "L",
+  "createdAt": "2026-04-14T12:00:00Z",
+  "status": "draft",
+  "mode": "forward",
+  "problemStatement": "Workers inherit host ~/.claude/ state causing non-reproducibility, and Palantir Skill Pack format is incompatible with Claude Code plugin ecosystem. Users cannot reuse ecosystem plugins like agent-olympus in workers without polluting the host Claude Code session.",
+  "targetUsers": "Solo Operator (primary: localhost single-user), Team Admin (future: shared Console), Pack Author (future: preset author/sharer).",
+  "goals": [
+    "G1: Host-isolation-safe worker execution — preset isolated=true blocks ~/.claude/{plugins,skills,settings} leakage (verified by canary test).",
+    "G2: Ecosystem plugin reuse — agent-olympus placed in server/plugins/ + preset reference → Claude worker runs its slash commands.",
+    "G3: Zero regression to existing 671+ tests and Skill Pack behavior.",
+    "G4: MCP consistency across Claude/Codex/OpenCode workers via Tier 1 portable registry.",
+    "G5: Full preset snapshot on every non-manager run (preset_snapshot_hash + per-file hashes)."
+  ],
+  "nonGoals": [
+    "Remote plugin marketplace (users cannot install arbitrary plugins via API in v1).",
+    "Plugin content audit/sandboxing (plugin trust is user's responsibility).",
+    "Auto-conversion between Claude plugins and Palantir Skill Packs (kept orthogonal).",
+    "Preset inheritance/composition (flat presets only in v1).",
+    "Dynamic preset reload for running workers (snapshots are frozen at spawn).",
+    "Auto-copying from host ~/.claude/plugins/* into server/plugins/ (violates isolation goal)."
+  ],
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Create Worker Preset",
+      "asA": "operator",
+      "iWantTo": "create a reusable Worker Preset (name, isolation, plugin_refs, mcp_server_ids, base_system_prompt)",
+      "soThat": "worker spawn can repeatedly specify the environment",
+      "acceptanceCriteria": [
+        "GIVEN operator POSTs /api/worker-presets with valid body WHEN server validates (name unique, plugin_refs exist in server/plugins/, mcp_server_ids exist, base_system_prompt ≤16KB) THEN 201 with created row",
+        "GIVEN plugin_refs contains a nonexistent name WHEN POST THEN 400 with 'Unknown plugin ref' error"
+      ]
+    },
+    {
+      "id": "US-002",
+      "title": "Apply preset on worker spawn",
+      "asA": "operator",
+      "iWantTo": "specify preset on Task or /execute",
+      "soThat": "the worker runs with the defined environment",
+      "acceptanceCriteria": [
+        "GIVEN task has preferred_preset_id or /execute body has preset_id WHEN lifecycleService.executeTask spawns the worker THEN Tier 1 applied (MCP config + base system prompt) AND if isolated=true then Tier 2 applied for Claude adapter only (--bare --strict-mcp-config --setting-sources '' --plugin-dir <path>) AND runs.preset_id + preset_snapshot_hash recorded",
+        "GIVEN no preset_id supplied WHEN worker spawns THEN existing legacy behavior preserved (host inheritance + skill pack overlay only)"
+      ]
+    },
+    {
+      "id": "US-003",
+      "title": "Claude plugin injection",
+      "asA": "operator",
+      "iWantTo": "use ecosystem Claude plugins (e.g. agent-olympus) in a Palantir worker",
+      "soThat": "ecosystem assets are reusable without polluting host Claude Code",
+      "acceptanceCriteria": [
+        "GIVEN server/plugins/agent-olympus/ is populated AND Preset P1 sets plugin_refs=['agent-olympus'] + isolated=true WHEN Claude worker spawns THEN spawn args include '--plugin-dir <absolute path>' + --bare + --strict-mcp-config AND slash commands from agent-olympus are callable in the session",
+        "GIVEN the same preset used with Codex/OpenCode adapter THEN Tier 2 args are skipped AND run_events records 'preset:tier2_skipped' warning AND Tier 1 MCP still applied"
+      ]
+    },
+    {
+      "id": "US-004",
+      "title": "Auth compatibility with --bare",
+      "asA": "Palantir server",
+      "iWantTo": "preserve Claude authentication under --bare",
+      "soThat": "isolated presets are actually usable",
+      "acceptanceCriteria": [
+        "GIVEN preset isolated=true WHEN Claude worker spawns THEN env contains CLAUDE_CODE_OAUTH_TOKEN (from .claude-auth.json) AND worker completes first turn receiving 'result' event",
+        "GIVEN no valid Claude auth in .claude-auth.json / ANTHROPIC_API_KEY WHEN isolated preset spawn attempted THEN 400 with 'Isolated preset requires valid Claude auth' error (fail-closed)"
+      ]
+    },
+    {
+      "id": "US-005",
+      "title": "Preset snapshot recorded on every run",
+      "asA": "operator",
+      "iWantTo": "know which exact preset + plugin files were applied to each past run",
+      "soThat": "reproducibility and forensics are possible",
+      "acceptanceCriteria": [
+        "GIVEN a worker run spawned with preset P1 THEN runs.preset_snapshot_hash = SHA-256(preset JSON + sorted file hashes) AND run_preset_snapshots row contains snapshot_json + file_hashes",
+        "GIVEN preset P1 is edited later WHEN historical snapshot queried THEN pre-edit values returned (snapshot row unchanged)"
+      ]
+    },
+    {
+      "id": "US-006",
+      "title": "Preset management UI",
+      "asA": "operator",
+      "iWantTo": "manage presets visually",
+      "soThat": "I don't run REST commands by hand",
+      "acceptanceCriteria": [
+        "GIVEN #presets page loaded WHEN 'New Preset' clicked THEN modal with name + isolated toggle + plugin_refs multi-select (from server/plugins/ listing) + mcp multi-select + system prompt textarea (16KB counter)",
+        "GIVEN Task edit modal WHEN preferred_preset_id dropdown opened THEN worker_presets list + 'None (default)' option AND on save tasks.preferred_preset_id is updated"
+      ]
+    },
+    {
+      "id": "US-007",
+      "title": "Canary isolation test (non-functional, CI)",
+      "asA": "system",
+      "iWantTo": "automatically verify --bare blocks host plugin leakage",
+      "soThat": "G1 remains guaranteed",
+      "acceptanceCriteria": [
+        "GIVEN test fixtures place ~/.claude/plugins/test-canary-plugin/ (tmpdir HOME override) AND Preset {isolated: true, plugin_refs: []} WHEN worker spawns and lists available plugins THEN test-canary-plugin is NOT in the listing"
+      ]
+    }
+  ],
+  "successMetrics": [
+    { "metric": "Host-isolation canary test pass rate", "target": "100% (US-007)" },
+    { "metric": "Regression test count", "target": "0 regressions vs baseline 671 tests" },
+    { "metric": "Preset snapshot coverage", "target": "100% of non-manager runs with preset_id have snapshot row" },
+    { "metric": "agent-olympus smoke test", "target": "PASS — preset with agent-olympus plugin runs Claude worker that can invoke its slash commands" }
+  ],
+  "constraints": [
+    "Backward compat: existing Skill Packs + 651+ tests untouched",
+    "--bare auth PoC (Phase 10A) is a hard gate — failure halts entire Phase 10",
+    "Plugin files placed manually in server/plugins/ (no upload API in v1)",
+    "Tier 2 is Claude-only; Codex/OpenCode workers get Tier 1 and a warning",
+    "Preset snapshots are immutable post-spawn (no retroactive rewriting)"
+  ],
+  "openQuestions": [
+    {
+      "question": "Does `--bare` + CLAUDE_CODE_OAUTH_TOKEN env actually keep OAuth session valid?",
+      "recommendedDefault": "Run Phase 10A spike. If fail, suspend the phase and redesign auth flow.",
+      "stakeholder": "tech lead",
+      "impact": "Blocker — entire Phase 10 depends on this."
+    },
+    {
+      "question": "Is server/plugins/ gitignored or a git submodule?",
+      "recommendedDefault": "gitignored + document in README. Submodule deferred to v2.",
+      "stakeholder": "tech lead",
+      "impact": "Low."
+    },
+    {
+      "question": "Reuse mcp_server_templates for Tier 1 vs new table?",
+      "recommendedDefault": "Reuse mcp_server_templates. Existing allowlist/denylist policies already cover Tier 1 needs.",
+      "stakeholder": "tech lead",
+      "impact": "Low."
+    },
+    {
+      "question": "Should Preset reference existing Skill Packs (preset.skill_pack_ids)?",
+      "recommendedDefault": "No in v1. Keep Preset and Skill Pack orthogonal. Revisit in v2.",
+      "stakeholder": "product",
+      "impact": "Low."
+    }
+  ],
+  "phaseBreakdown": [
+    { "id": "10A", "name": "Auth Compat Spike", "estimate": "1-2d", "gate": true },
+    { "id": "10B", "name": "DB + Service (presetService + CRUD API)", "estimate": "3-5d" },
+    { "id": "10C", "name": "Spawn Wiring — Tier 1 only (MCP + prompt, all adapters)", "estimate": "2-3d" },
+    { "id": "10D", "name": "Tier 2 (Claude-only): --bare + --plugin-dir + auth env", "estimate": "2-3d" },
+    { "id": "10E", "name": "Task integration + #presets UI", "estimate": "3-5d" },
+    { "id": "10F", "name": "Snapshot + audit (run_preset_snapshots + GET)", "estimate": "1-2d" },
+    { "id": "10G", "name": "agent-olympus integration smoke", "estimate": "1d" }
+  ],
+  "totalEstimate": "13-21 days solo"
+}
