@@ -215,34 +215,59 @@ test('Phase 10C: OpenCode worker with preset — emits preset:mcp_unsupported wa
   assert.equal(args.indexOf('-c'), -1);
 });
 
-test('Phase 10C: isolated preset emits tier2_pending warn (dormant in 10C)', async (t) => {
+test('Phase 10C→10D: isolated preset emits tier2_active (dormant marker replaced by live wiring)', async (t) => {
   const db = await mkdb(t);
   const pluginsRoot = mkPluginsRoot(t); writePlugin(pluginsRoot, 'xfx');
   const presetService = createPresetService(db, { pluginsRoot });
-  const { lc, sje, rs } = buildLifecycle(db, { presetService });
+  // Stub authResolver so Phase 10D's canAuth check doesn't depend on host env.
+  const fakeAuthTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-auth-'));
+  t.after(() => fs.rmSync(fakeAuthTmp, { recursive: true, force: true }));
+  const fakeAuth = {
+    resolveClaudeAuthForIsolated: () => ({
+      canAuth: true, env: {}, sources: ['test'], diagnostics: [],
+      apiKeyHelperSettings: {
+        settingsPath: path.join(fakeAuthTmp, 's.json'),
+        helperPath: path.join(fakeAuthTmp, 'h.sh'),
+        tmpDir: fakeAuthTmp,
+        cleanup: () => {},
+      },
+    }),
+  };
+  fs.writeFileSync(path.join(fakeAuthTmp, 's.json'), '{}');
 
-  const project = seedProject(db);
-  const task = seedTask(db, project.id);
+  // buildLifecycle doesn't expose authResolver injection. Inline constructor.
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const exec = stubExecEngine(), sje = stubSJE();
+  const { createLifecycleService: createLc } = require('../services/lifecycleService');
+  const lc = createLc({
+    runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+    executionEngine: exec, streamJsonEngine: sje, worktreeService: null, eventBus: null,
+    presetService, authResolver: fakeAuth,
+  });
+
+  const project = ps.createProject({ name: 'P' });
+  const task = ts.createTask({ project_id: project.id, title: 't' });
   const profile = seedProfile(db, 'claude');
 
   const preset = presetService.createPreset({
-    name: 'IsoDormant', isolated: true, plugin_refs: ['xfx'],
+    name: 'IsoLive', isolated: true, plugin_refs: ['xfx'],
   });
 
   const run = lc.executeTask(task.id, {
     agentProfileId: profile.id, prompt: 'hi', presetId: preset.id,
   });
   const events = rs.getRunEvents(run.id);
-  assert.ok(events.some(e => e.event_type === 'preset:tier2_pending'),
-    'preset:tier2_pending emitted');
-  // Tier 2 still dormant in 10C: mcpConfig may or may not be present; but args
-  // in sje.spawned[0] should NOT include --bare or --plugin-dir.
-  // The stub captures opts.mcpConfig only, not raw CLI args — the streamJsonEngine
-  // builder is not exercised here. Assert via presetResolution contract instead:
-  // resolveForSpawn returns isolated=true for claude, but executeTask does not
-  // surface --bare to the engine in Phase 10C. The lack of a canary — confirm
-  // only that the isolated warn was logged and Tier 1 MCP (if any) was applied.
+  assert.ok(events.some(e => e.event_type === 'preset:tier2_active'),
+    'preset:tier2_active emitted (Phase 10D)');
+  assert.equal(events.some(e => e.event_type === 'preset:tier2_pending'), false,
+    'no longer emits the Phase 10C dormant marker');
+  // Phase 10D: spawn gets Tier 2 flags through to streamJsonEngine.
   assert.equal(sje.spawned.length, 1);
+  assert.equal(sje.spawned[0].opts.isolated, true);
+  assert.equal(sje.spawned[0].opts.pluginDirs.length, 1);
 });
 
 test('Phase 10C: MCP precedence preset > project > skillPack when all present', async (t) => {

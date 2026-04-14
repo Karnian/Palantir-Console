@@ -272,6 +272,178 @@ function resolveCodexAuth({ envAllowlist } = {}) {
 }
 
 /**
+ * Read the Claude Code credentials payload from the macOS keychain and
+ * extract the OAuth access token that can be passed as ANTHROPIC_API_KEY.
+ *
+ * Unlike hasClaudeKeychainCredentials(), this uses `security -w` which
+ * materializes the payload into our process memory. Only called from the
+ * isolated preset path (Phase 10D) where token materialization is
+ * intentional — the CLI is spawned with `--bare` and cannot read keychain
+ * itself.
+ *
+ * Returns the JSON-parsed `claudeAiOauth.accessToken` string, or null on
+ * any failure (platform !== darwin, missing keychain item, parse error).
+ */
+function readClaudeKeychainToken() {
+  if (process.platform !== 'darwin') return null;
+  try {
+    const raw = execFileSync(
+      'security',
+      ['find-generic-password', '-s', CLAUDE_KEYCHAIN_SERVICE, '-w'],
+      { stdio: 'pipe', timeout: 3000, encoding: 'utf8' },
+    ).trim();
+    if (!raw) return null;
+    // Claude Code stores its credentials as JSON in the keychain payload.
+    // Fields of interest: claudeAiOauth.accessToken.
+    try {
+      const parsed = JSON.parse(raw);
+      const token = parsed?.claudeAiOauth?.accessToken;
+      if (typeof token === 'string' && token) return token;
+    } catch {
+      // Older schemas might store a bare token string instead of JSON.
+      if (/^[\w.-]+$/.test(raw)) return raw;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve Claude auth for an **isolated preset** spawn (Phase 10D, §6.9).
+ *
+ * `--bare` strips the CLI's ability to read OAuth / keychain / settings, so
+ * we must materialize a token as `ANTHROPIC_API_KEY` and wire it via either
+ * an `apiKeyHelper` script (default — token stays off `ps`/`/proc`) or an
+ * env pass-through (fallback — test / temporary use).
+ *
+ * Token source priority (first hit wins):
+ *   1. env `ANTHROPIC_API_KEY`
+ *   2. `.claude-auth.json` — `ANTHROPIC_API_KEY` if present, else OAuth
+ *      token (API accepts OAuth access tokens in the API-key slot —
+ *      confirmed by Phase 10A spike, PR #87).
+ *   3. macOS keychain item "Claude Code-credentials"
+ *      (JSON `claudeAiOauth.accessToken`)
+ *
+ * Fail-closed: when no token materializes, `{ canAuth: false, diagnostics }`.
+ *
+ * @param {object} [opts]
+ * @param {string[]} [opts.envAllowlist]
+ * @param {() => boolean} [opts.hasKeychain]
+ * @param {() => string|null} [opts.readKeychainToken]
+ * @param {'apiKeyHelper'|'env'} [opts.prefer]  Default 'apiKeyHelper'.
+ * @param {string} [opts.tmpRoot]               Override (tests).
+ * @returns {{
+ *   canAuth: boolean,
+ *   env: Record<string,string>,
+ *   sources: string[],
+ *   diagnostics: string[],
+ *   apiKeyHelperSettings?: { settingsPath, helperPath, tmpDir, cleanup },
+ * }}
+ */
+function resolveClaudeAuthForIsolated({
+  envAllowlist,
+  hasKeychain = hasClaudeKeychainCredentials,
+  readKeychainToken = readClaudeKeychainToken,
+  prefer = 'apiKeyHelper',
+  tmpRoot = os.tmpdir(),
+} = {}) {
+  const sources = [];
+  const diagnostics = [];
+
+  const allow = Array.isArray(envAllowlist) && envAllowlist.length > 0
+    ? new Set(envAllowlist)
+    : new Set(CLAUDE_AUTH_KEYS);
+
+  let token = null;
+
+  if (process.env.ANTHROPIC_API_KEY && allow.has('ANTHROPIC_API_KEY')) {
+    token = process.env.ANTHROPIC_API_KEY;
+    sources.push('env:ANTHROPIC_API_KEY');
+  }
+
+  if (!token) {
+    // Read the on-disk file directly with the broadest allowlist — once we
+    // are in the isolated path we WILL materialize the token, and the
+    // allowlist exists to restrict what leaks into the child env, not to
+    // constrain which on-disk fields we may read.
+    let fileEnv = {};
+    try {
+      fileEnv = readClaudeAuthFile(new Set(CLAUDE_AUTH_KEYS));
+    } catch { /* ignore */ }
+    if (fileEnv.ANTHROPIC_API_KEY) {
+      token = fileEnv.ANTHROPIC_API_KEY;
+      sources.push('file:.claude-auth.json:ANTHROPIC_API_KEY');
+    } else if (fileEnv.CLAUDE_CODE_OAUTH_TOKEN) {
+      // Phase 10A spike (PR #87) confirmed OAuth access tokens are
+      // accepted in the ANTHROPIC_API_KEY slot — so we forward the OAuth
+      // token into the API-key materialization path here.
+      token = fileEnv.CLAUDE_CODE_OAUTH_TOKEN;
+      sources.push('file:.claude-auth.json:CLAUDE_CODE_OAUTH_TOKEN');
+    }
+  }
+
+  if (!token) {
+    if (hasKeychain()) {
+      // sources note added after success only — the probe alone isn't
+      // proof of extraction.
+      const kcToken = readKeychainToken();
+      if (kcToken) {
+        token = kcToken;
+        sources.push('keychain:Claude Code-credentials:claudeAiOauth.accessToken');
+      }
+    }
+  }
+
+  if (!token) {
+    diagnostics.push(
+      'Isolated preset requires Claude auth. Set ANTHROPIC_API_KEY, run Palantir from a Claude Code session to seed .claude-auth.json, or ensure the macOS keychain has a "Claude Code-credentials" item.',
+    );
+    return { canAuth: false, env: {}, sources, diagnostics };
+  }
+
+  // Fallback path: expose token via env. Leaks the token to `ps`/`/proc` of
+  // the child process; documented — only use when apiKeyHelper is
+  // explicitly unavailable or opted out.
+  if (prefer === 'env') {
+    sources.push('materialize:env:ANTHROPIC_API_KEY');
+    return {
+      canAuth: true,
+      env: { ANTHROPIC_API_KEY: token },
+      sources,
+      diagnostics,
+    };
+  }
+
+  // Default: write a temp apiKeyHelper script + settings.json. Token is
+  // kept off env. Caller is responsible for invoking cleanup on process
+  // exit — streamJsonEngine wires this into the child's 'close' handler.
+  const tmpDir = fs.mkdtempSync(path.join(tmpRoot, 'palantir-claude-iso-'));
+  const helperPath = path.join(tmpDir, 'api-key-helper.sh');
+  const settingsPath = path.join(tmpDir, 'settings.json');
+
+  // Shell-safe embedding: single-quote + escape existing quotes.
+  const shEscaped = String(token).replace(/'/g, `'\\''`);
+  const script = `#!/bin/sh\nprintf '%s' '${shEscaped}'\n`;
+  fs.writeFileSync(helperPath, script, { mode: 0o700 });
+  fs.writeFileSync(settingsPath, JSON.stringify({ apiKeyHelper: helperPath }), { mode: 0o600 });
+
+  sources.push('materialize:apiKeyHelper');
+
+  const cleanup = () => {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* */ }
+  };
+
+  return {
+    canAuth: true,
+    env: {},
+    sources,
+    diagnostics,
+    apiKeyHelperSettings: { settingsPath, helperPath, tmpDir, cleanup },
+  };
+}
+
+/**
  * Single entry point used by routes/manager.js. type → strategy.
  *
  * opts is forwarded to the strategy. Tests may inject `hasKeychain` here
@@ -321,6 +493,8 @@ function buildManagerSpawnEnv({ baseEnv = process.env, authEnv = {}, envAllowlis
 module.exports = {
   bootstrapClaudeAuthFromEnv,
   resolveClaudeAuth,
+  resolveClaudeAuthForIsolated,
+  readClaudeKeychainToken,
   resolveCodexAuth,
   resolveManagerAuth,
   buildManagerSpawnEnv,

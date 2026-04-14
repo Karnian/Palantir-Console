@@ -126,6 +126,9 @@ function createApp(options = {}) {
     skillPackService,
     presetService,
     claudeVersionResolver: options.claudeVersionResolver,
+    // Phase 10D: isolated-preset auth materialization honors the same
+    // `authResolverOpts` tests already pass for manager-path preflight.
+    authResolverOpts: options.authResolverOpts || {},
   });
 
   // v3 Phase 1.5: shared manager registry + conversation service.
