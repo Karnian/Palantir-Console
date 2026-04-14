@@ -252,7 +252,7 @@ test('installFromRegistry rejects prompt_compact exceeding 8KB', async (t) => {
   );
 });
 
-test('installFromRegistry stores null for invalid color hex', async (t) => {
+test('installFromRegistry rejects invalid color hex', async (t) => {
   const { createSkillPackService } = require('../services/skillPackService');
   const { createDatabase } = require('../db/database');
   const dbDir = await createTempDir('palantir-db-sec3-');
@@ -272,8 +272,10 @@ test('installFromRegistry stores null for invalid color hex', async (t) => {
     checklist: [],
     _source: 'bundled',
   };
-  const result = svc.installFromRegistry(packWithBadColor, {});
-  assert.equal(result.color, null);
+  assert.throws(
+    () => svc.installFromRegistry(packWithBadColor, {}),
+    /Invalid color hex/
+  );
 });
 
 test('installFromRegistry requires confirmed_preview for remote packs', async (t) => {
@@ -300,7 +302,20 @@ test('installFromRegistry requires confirmed_preview for remote packs', async (t
     () => svc.installFromRegistry(remotePack, {}),
     /confirmed_preview/
   );
-  // With confirmed_preview → accepted
+  // Truthy non-true values must NOT bypass (strict === true)
+  assert.throws(
+    () => svc.installFromRegistry(remotePack, { confirmed_preview: 'true' }),
+    /confirmed_preview/
+  );
+  assert.throws(
+    () => svc.installFromRegistry(remotePack, { confirmed_preview: 1 }),
+    /confirmed_preview/
+  );
+  assert.throws(
+    () => svc.installFromRegistry(remotePack, { confirmed_preview: {} }),
+    /confirmed_preview/
+  );
+  // With confirmed_preview === true → accepted
   const result = svc.installFromRegistry(remotePack, { confirmed_preview: true });
   assert.ok(result.id);
 });

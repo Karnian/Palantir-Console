@@ -902,10 +902,10 @@ function createSkillPackService(db) {
     }
     // 5. checklist validation
     const validatedChecklist = validateChecklist(pack.checklist);
-    // 6. color hex validation
-    let color = pack.color || null;
+    // 6. color hex validation — reject (not silently null) per §6.2
+    const color = pack.color || null;
     if (color && !COLOR_HEX_RE.test(color)) {
-      color = null; // invalid color → ignore
+      throw new BadRequestError(`Invalid color hex value: '${color}'`);
     }
     return { validatedMcp, validatedChecklist, color };
   }
@@ -921,8 +921,8 @@ function createSkillPackService(db) {
       throw new BadRequestError('Invalid registry pack: missing registry_id');
     }
 
-    // Remote source requires confirmed_preview
-    if (registryPack._source === 'remote' && !opts.confirmed_preview) {
+    // Remote source requires confirmed_preview === true (strict, no truthy-bypass)
+    if (registryPack._source === 'remote' && opts.confirmed_preview !== true) {
       throw new BadRequestError('Remote registry packs require confirmed_preview: true');
     }
 
