@@ -1,8 +1,115 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 
-function createSkillPacksRouter({ skillPackService }) {
+function createSkillPacksRouter({ skillPackService, registryService }) {
   const router = express.Router();
+
+  // ─── Registry endpoints (must precede /:id routes) ───
+
+  // GET /api/skill-packs/registry — registry listing + install status
+  router.get('/registry', asyncHandler(async (req, res) => {
+    if (!registryService) {
+      return res.status(501).json({ error: 'Registry service not available' });
+    }
+    const registry = registryService.getRegistry();
+    // Build install status map
+    const installed = skillPackService.listInstalledFromRegistry();
+    const installMap = new Map();
+    for (const row of installed) {
+      installMap.set(row.registry_id, { localId: row.id, localVersion: row.registry_version });
+    }
+    // Annotate packs with install status
+    const packs = (registry.packs || []).map(pack => {
+      const info = installMap.get(pack.registry_id);
+      return {
+        ...pack,
+        installed: !!info,
+        localId: info ? info.localId : null,
+        updateAvailable: info ? info.localVersion !== pack.registry_version : false,
+        localVersion: info ? info.localVersion : null,
+      };
+    });
+    res.json({
+      source: registry.source,
+      categories: registry.categories,
+      packs,
+    });
+  }));
+
+  // GET /api/skill-packs/registry/pack?id=<registryId> — single pack detail
+  router.get('/registry/pack', asyncHandler(async (req, res) => {
+    if (!registryService) {
+      return res.status(501).json({ error: 'Registry service not available' });
+    }
+    const registryId = req.query.id;
+    if (!registryId) {
+      return res.status(400).json({ error: 'id query parameter required' });
+    }
+    const pack = registryService.getRegistryPack(registryId);
+    if (!pack) {
+      return res.status(404).json({ error: `Registry pack not found: ${registryId}` });
+    }
+    // Add install status
+    const local = skillPackService.findByRegistryId(registryId);
+    res.json({
+      pack: {
+        ...pack,
+        installed: !!local,
+        localId: local ? local.id : null,
+        localVersion: local ? local.registry_version : null,
+        updateAvailable: local ? local.registry_version !== pack.registry_version : false,
+      },
+    });
+  }));
+
+  // POST /api/skill-packs/registry/install — install from registry
+  router.post('/registry/install', asyncHandler(async (req, res) => {
+    if (!registryService) {
+      return res.status(501).json({ error: 'Registry service not available' });
+    }
+    const { registry_id, confirmed_preview } = req.body || {};
+    if (!registry_id) {
+      return res.status(400).json({ error: 'registry_id is required' });
+    }
+    const registryPack = registryService.getRegistryPack(registry_id);
+    if (!registryPack) {
+      return res.status(404).json({ error: `Registry pack not found: ${registry_id}` });
+    }
+    const installed = skillPackService.installFromRegistry(registryPack, { confirmed_preview });
+    res.status(201).json({ skill_pack: installed });
+  }));
+
+  // POST /api/skill-packs/registry/update — update installed pack from registry
+  router.post('/registry/update', asyncHandler(async (req, res) => {
+    if (!registryService) {
+      return res.status(501).json({ error: 'Registry service not available' });
+    }
+    const { registry_id } = req.body || {};
+    if (!registry_id) {
+      return res.status(400).json({ error: 'registry_id is required' });
+    }
+    const local = skillPackService.findByRegistryId(registry_id);
+    if (!local) {
+      return res.status(404).json({ error: `No installed pack found for registry_id: '${registry_id}'` });
+    }
+    const registryPack = registryService.getRegistryPack(registry_id);
+    if (!registryPack) {
+      return res.status(404).json({ error: `Registry pack not found: ${registry_id}` });
+    }
+    const updated = skillPackService.updateFromRegistry(local.id, registryPack);
+    res.json({ skill_pack: updated });
+  }));
+
+  // POST /api/skill-packs/registry/refresh — manual remote registry refresh (Stage 2 stub)
+  router.post('/registry/refresh', asyncHandler(async (req, res) => {
+    if (!registryService) {
+      return res.status(501).json({ error: 'Registry service not available' });
+    }
+    const result = await registryService.refreshRemoteRegistry();
+    res.json(result);
+  }));
+
+  // ─── Existing Skill Pack CRUD ───
 
   // GET /api/skill-packs — list (optional ?scope=global|project&project_id=)
   router.get('/', asyncHandler(async (req, res) => {
