@@ -583,9 +583,46 @@ Non-isolated 워커 / manager 는 이 규칙 적용 대상 아님 — 기존 `re
 
 Spec v0.1-rc1 최종 수렴. **Status: Approved — merge 가능, Phase 10A 착수 가능.**
 
----
+### Round 6 — Phase 10A Spike Results (2026-04-14, branch `spike/phase-10a-bare-auth`)
 
-## 12. Acceptance (해당 Phase 전체 완료 조건)
+**VERDICT: CONDITIONAL PASS — §6.9 를 amend 하면 gate 통과.**
+
+PoC 스크립트: `scripts/spike-bare-auth.mjs`. 4 variant 매트릭스, macOS darwin + Claude CLI 2.1.107.
+
+| # | Variant | Result | Notes |
+|---|---------|--------|-------|
+| A | `--bare` + `CLAUDE_CODE_OAUTH_TOKEN` env (spec §6.9 primary) | **FAIL** | stdout = "Not logged in · Please run /login" (exit 1). CLI help 의 "OAuth and keychain are never read" 가 env 에도 적용됨. |
+| B | `--bare` + `ANTHROPIC_API_KEY=<oauth-token>` env | **PASS** | stdout = "HELLO" (exit 0, ~3.4s). OAuth access token (`sk-ant-oat01-...`) 을 API key 슬롯으로 전달하면 Anthropic API 가 그대로 수용. |
+| C | `--bare` + `apiKeyHelper` via `--settings` | **PASS** | stdout = "HELLO" (exit 0, ~3.3s). 임시 shell 스크립트가 토큰을 stdout 으로 출력, settings.json 이 가리킴. 토큰이 env 에 남지 않는 정방어 이점. |
+| D | `--bare` + no auth (negative control) | **FAIL** (예상대로) | negative control — 격리 유효. |
+
+**핵심 인사이트:**
+
+1. `--bare` 의 CLI help ("Anthropic auth is strictly ANTHROPIC_API_KEY or apiKeyHelper via --settings — OAuth and keychain are never read") 는 env 까지 포함해서 엄격히 적용. `CLAUDE_CODE_OAUTH_TOKEN` 은 non-bare 모드 전용.
+2. 동일한 OAuth access token 값을 `ANTHROPIC_API_KEY` 로 전달하면 API 쪽에서 수용하므로 **auth flow 자체는 구현 가능**.
+3. 따라서 §6.9 를 다음과 같이 amend:
+   - ~~`CLAUDE_CODE_OAUTH_TOKEN` env 주입~~ → **`ANTHROPIC_API_KEY` env 에 토큰 값 주입** (primary path)
+   - 선택적 hardening: token 값을 env 대신 `apiKeyHelper` 쉘 스크립트로 materialize 하고 `--settings <temp-settings.json>` 로 가리키기 (token 이 `ps`/`/proc` 에 안 찍힘)
+4. `authResolver.resolveClaudeAuthForIsolated()` 는 3 source (env `ANTHROPIC_API_KEY` → `.claude-auth.json` → keychain) 에서 materialize 가능한 token 을 찾아 최종적으로 **하나의 `ANTHROPIC_API_KEY` 값**을 반환. OAuth vs API key 구분은 isolated spawn 시점에서는 무의미.
+5. Variant D 가 FAIL 한 점은 `--bare` 가 실제로 host keychain / `~/.claude/` 을 무시함을 확인 — isolation 자체는 원 스펙대로 동작.
+
+**다음 단계:**
+
+- Phase 10A gate: **PASS (conditional)** — Phase 10B 진입 가능.
+- Phase 10D 구현 시 §6.9 의 환경변수 이름을 `CLAUDE_CODE_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` 로 교체. `authResolver.resolveClaudeAuthForIsolated()` 의 반환 계약도 그에 맞춰 `{ ANTHROPIC_API_KEY }` 를 생성.
+- 스펙 §6.9 의 normative 블록은 Phase 10D 구현 PR 에서 같이 수정 (현재 round 6 로그만으로 구현 가이드 충분).
+- 보안 메모: OAuth access token 은 수명이 유한 (Anthropic 회전) 이므로 materialize 시 refresh 전략은 v1 non-goal — 만료 시 `/login` 안내 에러만 surface.
+
+**Round 6 Codex cross-review (ask-codex-20260414-212157-d40e) — PASS:**
+
+- 방법론: 반례·대조군 포함으로 결론 근거 충분 (P0 이슈 없음).
+- §6.9 amendment 타당. `resolveClaudeAuthForIsolated() → { ANTHROPIC_API_KEY }` 정합.
+- **P1 security refinement**: env 주입은 동일 사용자 proc/env 열람으로 노출면이 남고, OAuth token 을 API key 슬롯에 두면 다운스트림 로거의 key-name redaction 이 100% 안전하다 가정 불가. 권고: **지속 경로는 `apiKeyHelper + --settings` 를 기본 (default)** 으로, env materialize 는 temporary/test fallback. Phase 10D 구현 시 이 우선순위 반영.
+- Phase 10B 진입 OK — §6.9 문구를 "ANTHROPIC_API_KEY or apiKeyHelper only under `--bare`" 로 정정하는 선행 작업만 Phase 10D 에 같이 넣으면 됨.
+
+
+
+
 
 - [ ] Migration 018 통과 + 기존 테스트 회귀 0건 (npm test)
 - [ ] US-001~US-007 모두 자동화 테스트로 증명
