@@ -47,6 +47,8 @@ const { createAuthRouter } = require('./routes/auth');
 const { createSkillPackService } = require('./services/skillPackService');
 const { createRegistryService } = require('./services/registryService');
 const { createSkillPacksRouter } = require('./routes/skillPacks');
+const { createPresetService } = require('./services/presetService');
+const { createWorkerPresetsRouter } = require('./routes/workerPresets');
 
 function createApp(options = {}) {
   const app = express();
@@ -107,6 +109,11 @@ function createApp(options = {}) {
   const agentProfileService = createAgentProfileService(db);
   const skillPackService = createSkillPackService(db);
   const registryService = createRegistryService();
+  // Phase 10B: Worker Preset service. pluginsRoot defaults to
+  // <repo>/server/plugins/ but tests can override via options.pluginsRoot.
+  const presetService = createPresetService(db, {
+    pluginsRoot: options.pluginsRoot,
+  });
 
   // Execution engines
   const executionEngine = createExecutionEngine();
@@ -312,6 +319,7 @@ function createApp(options = {}) {
   app.use('/api/conversations', createConversationsRouter({ conversationService, runService }));
   app.use('/api/dispatch-audit', createDispatchAuditRouter({ reconciliationService }));
   app.use('/api/router', createRouterRouter({ routerService }));
+  app.use('/api/worker-presets', createWorkerPresetsRouter({ presetService }));
   app.use('/api/skill-packs', createSkillPacksRouter({ skillPackService, registryService }));
   app.use('/api/projects', createSkillPacksRouter.projectBindings({ skillPackService }));
   app.use('/api/tasks', createSkillPacksRouter.taskBindings({ skillPackService }));
