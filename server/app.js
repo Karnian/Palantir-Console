@@ -124,6 +124,8 @@ function createApp(options = {}) {
     runService, taskService, agentProfileService, projectService,
     executionEngine, streamJsonEngine, worktreeService, eventBus,
     skillPackService,
+    presetService,
+    claudeVersionResolver: options.claudeVersionResolver,
   });
 
   // v3 Phase 1.5: shared manager registry + conversation service.
