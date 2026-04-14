@@ -194,7 +194,8 @@ test('POST /api/skill-packs/registry/refresh returns stub response', async (t) =
     .post('/api/skill-packs/registry/refresh');
   assert.equal(res.status, 200);
   assert.equal(res.body.refreshed, false);
-  assert.equal(res.body.reason, 'remote_not_configured');
+  // v1.1 deprecated central registry; both reason strings acceptable during transition
+  assert.ok(['remote_not_configured', 'deprecated_in_v1_1'].includes(res.body.reason));
 });
 
 // ─── Security validation (unit-level) ───
