@@ -156,6 +156,11 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
 
     const safeCwd = cwd || process.cwd();
     if (!fs.existsSync(safeCwd)) {
+      // Phase 10D: clean up apiKeyHelper temp artifacts before rethrowing so
+      // validation failures before spawn don't leak the token on disk.
+      if (typeof onCleanup === 'function') {
+        try { onCleanup(); } catch { /* ignore secondary errors */ }
+      }
       throw new Error(`cwd does not exist: ${safeCwd}`);
     }
 
@@ -167,12 +172,33 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
 
     console.log(`[engine] Spawning claude for ${runId} (manager=${!!isManager})`);
 
-    const child = spawn(claudeBin, args, {
-      cwd: safeCwd,
-      env: spawnEnv,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      detached: false,
-    });
+    // Phase 10D: per-spawn cleanup is fired exactly once to avoid double-rm
+    // races when both 'exit' and 'error' handlers are reached.
+    let cleanupFired = false;
+    const fireCleanup = () => {
+      if (cleanupFired) return;
+      cleanupFired = true;
+      if (typeof onCleanup === 'function') {
+        try { onCleanup(); } catch (err) {
+          console.warn(`[engine] onCleanup threw for ${runId}: ${err && err.message}`);
+        }
+      }
+    };
+
+    let child;
+    try {
+      child = spawn(claudeBin, args, {
+        cwd: safeCwd,
+        env: spawnEnv,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        detached: false,
+      });
+    } catch (err) {
+      // spawn() itself can throw synchronously (ENOENT on the binary,
+      // invalid args). Clean up the apiKeyHelper temp dir before rethrow.
+      fireCleanup();
+      throw err;
+    }
 
     const proc = {
       child,
@@ -215,6 +241,9 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
       proc.exitCode = 1;
       proc.exitedAt = Date.now();
       proc.status = 'failed';
+      // Phase 10D: some spawn errors do not produce a subsequent 'exit'
+      // (e.g. ENOENT on the binary), so we must fire cleanup here too.
+      fireCleanup();
       if (runService) {
         runService.addRunEvent(runId, 'error', JSON.stringify({
           message: `Spawn error: ${err.message}`,
@@ -224,12 +253,7 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
 
     child.on('exit', (code, signal) => {
       console.log(`[engine] Process ${runId} exited: code=${code} signal=${signal}`);
-      // Phase 10D: cleanup apiKeyHelper temp dir / other per-spawn resources.
-      if (typeof onCleanup === 'function') {
-        try { onCleanup(); } catch (err) {
-          console.warn(`[engine] onCleanup threw for ${runId}: ${err && err.message}`);
-        }
-      }
+      fireCleanup();
       proc.exitCode = code;
       proc.exitedAt = Date.now();
       if (proc.status === 'starting' || proc.status === 'running') {

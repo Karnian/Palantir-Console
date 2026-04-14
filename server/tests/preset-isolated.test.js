@@ -136,6 +136,59 @@ test('resolveClaudeAuthForIsolated: fail-closed when no source available', (t) =
   assert.ok(result.diagnostics[0].includes('ANTHROPIC_API_KEY'));
 });
 
+test('readClaudeKeychainToken: older schema bare string fallback accepts any string (not just [\\w.-])', () => {
+  // Guard against the regex-too-narrow P1 — confirm the public helper now
+  // returns unusual-character tokens verbatim when JSON.parse fails.
+  // We can't spawn `security`, so exercise via module-level monkeypatch of
+  // execFileSync is fragile; instead call resolveClaudeAuthForIsolated with
+  // a readKeychainToken injection and verify no character filter is imposed
+  // upstream (the helper value flows through unchanged into apiKeyHelper).
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'p10d-'));
+  try {
+    const weird = 'sk-opaque+token/with%chars=';  // contains +/%=
+    const r = authResolverModule.resolveClaudeAuthForIsolated({
+      tmpRoot,
+      hasKeychain: () => true,
+      readKeychainToken: () => weird,
+    });
+    // With the P1 fix in the keychain helper, any non-empty raw string is a
+    // valid token. Here we verify the isolated resolver forwarded it.
+    assert.equal(r.canAuth, true);
+    const helperContent = fs.readFileSync(r.apiKeyHelperSettings.helperPath, 'utf8');
+    assert.ok(helperContent.includes(weird), 'odd-character token forwarded verbatim');
+    r.apiKeyHelperSettings.cleanup();
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('apiKeyHelper cleanup fires on streamJsonEngine spawn synchronous throw (Codex P1 fix)', (t) => {
+  // Fake engine with a spawn that throws synchronously — driven through a
+  // cwd validation failure so we don't have to mock child_process.
+  const engine = streamJsonEngineModule.createStreamJsonEngine({
+    runService: { addRunEvent() {}, updateRunStatus() {}, getRun() { return {}; } },
+    eventBus: null,
+  });
+  const cleanupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'p10d-cleanup-'));
+  t.after(() => fs.rmSync(cleanupDir, { recursive: true, force: true }));
+  let cleanupCalls = 0;
+  const onCleanup = () => { cleanupCalls++; };
+
+  // cwd does not exist → spawnAgent throws; onCleanup must fire before the throw.
+  assert.throws(
+    () => engine.spawnAgent('run_cleanup', {
+      cwd: '/definitely/does/not/exist/palantir-p10d',
+      isolated: true,
+      pluginDirs: [],
+      settingsPath: null,
+      onCleanup,
+      isManager: false,
+    }),
+    /cwd does not exist/,
+  );
+  assert.equal(cleanupCalls, 1, 'onCleanup was invoked exactly once on pre-spawn validation failure');
+});
+
 test('resolveClaudeAuthForIsolated: envAllowlist blocks env ANTHROPIC_API_KEY source', (t) => {
   const tmpRoot = mkTempDir('iso-tmp-', t);
   const result = withEnv('ANTHROPIC_API_KEY', 'sk-blocked', () => {

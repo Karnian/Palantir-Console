@@ -461,6 +461,7 @@ function createLifecycleService({
         // message surfaces in the response.
         let isolatedOpts = null;
         let spawnEnv = parseEnvAllowlist(profile.env_allowlist);
+        let presetAuthCleanup = null;
         if (presetResolution && presetResolution.isolated) {
           const auth = _authResolver.resolveClaudeAuthForIsolated({
             envAllowlist: parseEnvAllowlistArray(profile.env_allowlist),
@@ -476,27 +477,39 @@ function createLifecycleService({
             err.status = 400;
             throw err;
           }
+          presetAuthCleanup = auth.apiKeyHelperSettings?.cleanup || null;
           isolatedOpts = {
             isolated: true,
             pluginDirs: presetResolution.pluginDirs,
             settingsPath: auth.apiKeyHelperSettings?.settingsPath || null,
             settingSources: presetResolution.settingSources || '',
-            onCleanup: auth.apiKeyHelperSettings?.cleanup || null,
+            onCleanup: presetAuthCleanup,
           };
           spawnEnv = { ...spawnEnv, ...auth.env };
         }
 
-        result = streamJsonEngine.spawnAgent(run.id, {
-          prompt,
-          cwd,
-          env: spawnEnv,
-          systemPrompt,
-          permissionMode: 'bypassPermissions',
-          allowedTools: mcpTools.length > 0 ? mcpTools : undefined,
-          mcpConfig: effectiveMcpConfig,
-          isManager: false,
-          ...(isolatedOpts || {}),
-        });
+        try {
+          result = streamJsonEngine.spawnAgent(run.id, {
+            prompt,
+            cwd,
+            env: spawnEnv,
+            systemPrompt,
+            permissionMode: 'bypassPermissions',
+            allowedTools: mcpTools.length > 0 ? mcpTools : undefined,
+            mcpConfig: effectiveMcpConfig,
+            isManager: false,
+            ...(isolatedOpts || {}),
+          });
+        } catch (spawnErr) {
+          // spawnAgent itself invokes its onCleanup before rethrow when
+          // spawn() is called, so the temp dir is already gone. This is
+          // belt-and-suspenders for any pre-spawn validation failure that
+          // throws before spawn() is even attempted.
+          if (presetAuthCleanup) {
+            try { presetAuthCleanup(); } catch { /* ignore */ }
+          }
+          throw spawnErr;
+        }
       } else {
         // Non-Claude agents: use tmux/subprocess engine
         // Phase 5 / Phase 10C: Write composed system prompt file for agents

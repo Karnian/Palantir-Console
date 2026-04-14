@@ -299,11 +299,13 @@ function readClaudeKeychainToken() {
       const parsed = JSON.parse(raw);
       const token = parsed?.claudeAiOauth?.accessToken;
       if (typeof token === 'string' && token) return token;
+      return null;
     } catch {
-      // Older schemas might store a bare token string instead of JSON.
-      if (/^[\w.-]+$/.test(raw)) return raw;
+      // Older schemas / test fixtures may store a bare token string instead
+      // of JSON. Accept any non-empty string — the Anthropic API itself is
+      // the authoritative validator of whether the value is a usable token.
+      return raw;
     }
-    return null;
   } catch {
     return null;
   }
