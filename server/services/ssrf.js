@@ -192,9 +192,17 @@ function doHttpsGet(canonicalUrl, originalHostname, pinned) {
   return new Promise((resolve, reject) => {
     const u = new URL(canonicalUrl);
     const agent = new https.Agent({
-      // Force connection to pinned IP, preserving SNI and Host header
-      lookup: (_host, _opts, cb) => {
-        cb(null, pinned.address, pinned.family);
+      // Force connection to pinned IP, preserving SNI and Host header.
+      // Node's http.Agent passes `{ all: true }` in modern versions —
+      // when `all` is true, the callback must receive an array of
+      // `{address, family}`; when false/omitted, the 3-arg form
+      // `(err, address, family)`. Support both.
+      lookup: (_host, opts, cb) => {
+        if (opts && opts.all) {
+          cb(null, [{ address: pinned.address, family: pinned.family }]);
+        } else {
+          cb(null, pinned.address, pinned.family);
+        }
       },
     });
 
@@ -250,7 +258,11 @@ function doHttpsGet(canonicalUrl, originalHostname, pinned) {
       const ct = (res.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
       if (!ALLOWED_CONTENT_TYPES.includes(ct)) {
         res.destroy();
-        return reject(badRequest(`Content-Type not allowed: ${ct}`, 'invalid_content_type'));
+        // Common mistake: users paste a GitHub repo page URL instead of raw JSON
+        const hint = ct === 'text/html'
+          ? ' (URL returned HTML — use a raw JSON URL, e.g. raw.githubusercontent.com/...)'
+          : '';
+        return reject(badRequest(`Content-Type not allowed: ${ct}${hint}`, 'invalid_content_type'));
       }
 
       const chunks = [];
