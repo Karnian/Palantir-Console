@@ -181,8 +181,29 @@ function resolvePromptChain({ presetPrompt, skillPackSections, adapterFooter }) 
   if (presetPrompt && presetPrompt.trim()) parts.push(presetPrompt.trim());
   if (Array.isArray(skillPackSections)) {
     for (const s of skillPackSections) {
-      if (typeof s === 'string' && s.trim()) parts.push(s.trim());
-      else if (s && typeof s.text === 'string' && s.text.trim()) parts.push(s.text.trim());
+      if (s == null || s === '') continue;
+      if (typeof s === 'string') {
+        if (s.trim()) parts.push(s.trim());
+        continue;
+      }
+      if (typeof s === 'object') {
+        // Accept both `{ text }` (skill-pack standard) and `{ string }`
+        // (alternate naming that Phase 10C consumers may use). Throw on any
+        // other object shape so silent drops don't happen.
+        const value = typeof s.text === 'string' ? s.text
+                    : typeof s.string === 'string' ? s.string
+                    : null;
+        if (value === null) {
+          throw new BadRequestError(
+            `resolvePromptChain: unsupported section shape (expected string or { text }/{ string }, got keys: ${Object.keys(s).join(',') || '<empty>'})`,
+          );
+        }
+        if (value.trim()) parts.push(value.trim());
+        continue;
+      }
+      throw new BadRequestError(
+        `resolvePromptChain: unsupported section type: ${typeof s}`,
+      );
     }
   }
   if (adapterFooter && adapterFooter.trim()) parts.push(adapterFooter.trim());

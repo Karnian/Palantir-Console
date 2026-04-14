@@ -265,6 +265,24 @@ test('resolvePromptChain: order + separator + empty drop', () => {
   assert.equal(s, ['PRESET', 'one', 'two', 'FOOT'].join('\n\n---\n\n'));
 });
 
+test('resolvePromptChain: supports { string } alias and throws on unknown shape', () => {
+  const ok = resolvePromptChain({
+    presetPrompt: 'P',
+    skillPackSections: [{ string: 'S1' }, { text: 'S2' }],
+    adapterFooter: 'F',
+  });
+  assert.equal(ok, ['P', 'S1', 'S2', 'F'].join('\n\n---\n\n'));
+
+  assert.throws(
+    () => resolvePromptChain({ skillPackSections: [{ body: 'oops' }] }),
+    /unsupported section shape/,
+  );
+  assert.throws(
+    () => resolvePromptChain({ skillPackSections: [42] }),
+    /unsupported section type/,
+  );
+});
+
 test('resolvePromptChain: empty inputs → ""', () => {
   assert.equal(resolvePromptChain({}), '');
   assert.equal(resolvePromptChain({ presetPrompt: '', skillPackSections: [], adapterFooter: '' }), '');
