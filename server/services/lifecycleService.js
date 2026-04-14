@@ -21,7 +21,13 @@ function createLifecycleService({
   skillPackService,
   presetService,
   claudeVersionResolver,
+  authResolver,               // Phase 10D: injectable for tests
+  authResolverOpts,           // { hasKeychain, readKeychainToken, prefer, tmpRoot }
 }) {
+  // Lazy-require default authResolver so tests that don't use Tier 2 don't
+  // force a load of the real keychain probe.
+  const _authResolver = authResolver || require('./authResolver');
+  const _authResolverOpts = authResolverOpts || {};
   const HEARTBEAT_INTERVAL_MS = 30000;  // 30s
   const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min (increased from 10 min for long-running tasks)
   let heartbeatTimer = null;
@@ -267,14 +273,15 @@ function createLifecycleService({
           runService.addRunEvent(run.id, w.type || 'preset:warning', JSON.stringify(w));
         }
 
-        // Phase 10C: Tier 2 stays dormant. When the resolver returns
-        // isolated=true (i.e. Claude adapter + isolated preset) we log a
-        // pending marker so operators see preset requested `--bare` but
-        // Phase 10C is only applying Tier 1. Phase 10D flips this on.
+        // Phase 10D: Tier 2 active (Claude isolated worker). Auth must be
+        // materialized here because `--bare` strips the CLI's ability to
+        // read OAuth / keychain. The resolver writes a temp apiKeyHelper
+        // script + settings.json (default) or falls back to env
+        // ANTHROPIC_API_KEY. Either path is fail-closed on missing auth.
         if (presetResolution.isolated) {
-          runService.addRunEvent(run.id, 'preset:tier2_pending', JSON.stringify({
-            reason: 'Tier 2 isolation is implemented in Phase 10D; applying Tier 1 only',
+          runService.addRunEvent(run.id, 'preset:tier2_active', JSON.stringify({
             plugin_refs: (presetObj.plugin_refs || []),
+            setting_sources: presetObj.setting_sources || '',
           }));
         }
 
@@ -448,16 +455,61 @@ function createLifecycleService({
         // anything merged, else plain project MCP, else undefined.
         const effectiveMcpConfig = skillPackMcpConfigPath || projectMcpConfig || undefined;
 
-        result = streamJsonEngine.spawnAgent(run.id, {
-          prompt,
-          cwd,
-          env: parseEnvAllowlist(profile.env_allowlist),
-          systemPrompt,
-          permissionMode: 'bypassPermissions',
-          allowedTools: mcpTools.length > 0 ? mcpTools : undefined,
-          mcpConfig: effectiveMcpConfig,
-          isManager: false,
-        });
+        // Phase 10D Tier 2: isolated Claude worker. `--bare` path needs
+        // explicit auth materialization (apiKeyHelper by default, env
+        // fallback). Fail-closed: the run is marked failed and the 400
+        // message surfaces in the response.
+        let isolatedOpts = null;
+        let spawnEnv = parseEnvAllowlist(profile.env_allowlist);
+        let presetAuthCleanup = null;
+        if (presetResolution && presetResolution.isolated) {
+          const auth = _authResolver.resolveClaudeAuthForIsolated({
+            envAllowlist: parseEnvAllowlistArray(profile.env_allowlist),
+            ..._authResolverOpts,
+          });
+          runService.addRunEvent(run.id, 'preset:auth_sources', JSON.stringify({
+            sources: auth.sources,
+          }));
+          if (!auth.canAuth) {
+            const err = new Error(
+              (auth.diagnostics[0] || 'Isolated preset requires Claude auth.'),
+            );
+            err.status = 400;
+            throw err;
+          }
+          presetAuthCleanup = auth.apiKeyHelperSettings?.cleanup || null;
+          isolatedOpts = {
+            isolated: true,
+            pluginDirs: presetResolution.pluginDirs,
+            settingsPath: auth.apiKeyHelperSettings?.settingsPath || null,
+            settingSources: presetResolution.settingSources || '',
+            onCleanup: presetAuthCleanup,
+          };
+          spawnEnv = { ...spawnEnv, ...auth.env };
+        }
+
+        try {
+          result = streamJsonEngine.spawnAgent(run.id, {
+            prompt,
+            cwd,
+            env: spawnEnv,
+            systemPrompt,
+            permissionMode: 'bypassPermissions',
+            allowedTools: mcpTools.length > 0 ? mcpTools : undefined,
+            mcpConfig: effectiveMcpConfig,
+            isManager: false,
+            ...(isolatedOpts || {}),
+          });
+        } catch (spawnErr) {
+          // spawnAgent itself invokes its onCleanup before rethrow when
+          // spawn() is called, so the temp dir is already gone. This is
+          // belt-and-suspenders for any pre-spawn validation failure that
+          // throws before spawn() is even attempted.
+          if (presetAuthCleanup) {
+            try { presetAuthCleanup(); } catch { /* ignore */ }
+          }
+          throw spawnErr;
+        }
       } else {
         // Non-Claude agents: use tmux/subprocess engine
         // Phase 5 / Phase 10C: Write composed system prompt file for agents
@@ -571,6 +623,17 @@ function createLifecycleService({
       return env;
     } catch {
       return {};
+    }
+  }
+
+  // Raw allowlist (array) for callers that need the key set, not the
+  // materialized env map.
+  function parseEnvAllowlistArray(allowlistJson) {
+    try {
+      const arr = JSON.parse(allowlistJson || '[]');
+      return Array.isArray(arr) ? arr.filter(k => typeof k === 'string') : [];
+    } catch {
+      return [];
     }
   }
 

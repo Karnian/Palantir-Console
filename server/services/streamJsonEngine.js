@@ -94,6 +94,27 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
       args.push('--mcp-config', opts.mcpConfig);
     }
 
+    // Phase 10D Tier 2 (Claude isolated worker): drop host ~/.claude/
+    // inheritance, inject preset-supplied plugins, and point at a
+    // temp settings file when apiKeyHelper is used for auth. Manager
+    // path never sets any of these — this block is worker-only.
+    if (opts.isolated) {
+      args.push('--bare');
+      args.push('--strict-mcp-config');
+      // --setting-sources accepts an empty string to disable all inherited
+      // sources. Preset.setting_sources is operator-override.
+      const srcs = typeof opts.settingSources === 'string' ? opts.settingSources : '';
+      args.push('--setting-sources', srcs);
+      if (Array.isArray(opts.pluginDirs)) {
+        for (const dir of opts.pluginDirs) {
+          args.push('--plugin-dir', dir);
+        }
+      }
+      if (opts.settingsPath) {
+        args.push('--settings', opts.settingsPath);
+      }
+    }
+
     if (opts.addDir) {
       args.push('--add-dir', opts.addDir);
     }
@@ -118,12 +139,15 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
    * Spawn a Claude Code agent with stream-json protocol.
    */
   function spawnAgent(runId, { prompt, cwd, env, systemPrompt, permissionMode,
-    allowedTools, maxBudgetUsd, model, mcpConfig, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent }) {
+    allowedTools, maxBudgetUsd, model, mcpConfig, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent,
+    // Phase 10D Tier 2
+    isolated, pluginDirs, settingsPath, settingSources, onCleanup }) {
 
     const claudeBin = resolveClaudeBin();
     const args = buildArgs({
       prompt, systemPrompt, permissionMode, allowedTools,
       maxBudgetUsd, model, mcpConfig, addDir, isManager, maxTurns, resumeSessionId,
+      isolated, pluginDirs, settingsPath, settingSources,
     });
 
     const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
@@ -132,6 +156,11 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
 
     const safeCwd = cwd || process.cwd();
     if (!fs.existsSync(safeCwd)) {
+      // Phase 10D: clean up apiKeyHelper temp artifacts before rethrowing so
+      // validation failures before spawn don't leak the token on disk.
+      if (typeof onCleanup === 'function') {
+        try { onCleanup(); } catch { /* ignore secondary errors */ }
+      }
       throw new Error(`cwd does not exist: ${safeCwd}`);
     }
 
@@ -143,12 +172,33 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
 
     console.log(`[engine] Spawning claude for ${runId} (manager=${!!isManager})`);
 
-    const child = spawn(claudeBin, args, {
-      cwd: safeCwd,
-      env: spawnEnv,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      detached: false,
-    });
+    // Phase 10D: per-spawn cleanup is fired exactly once to avoid double-rm
+    // races when both 'exit' and 'error' handlers are reached.
+    let cleanupFired = false;
+    const fireCleanup = () => {
+      if (cleanupFired) return;
+      cleanupFired = true;
+      if (typeof onCleanup === 'function') {
+        try { onCleanup(); } catch (err) {
+          console.warn(`[engine] onCleanup threw for ${runId}: ${err && err.message}`);
+        }
+      }
+    };
+
+    let child;
+    try {
+      child = spawn(claudeBin, args, {
+        cwd: safeCwd,
+        env: spawnEnv,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        detached: false,
+      });
+    } catch (err) {
+      // spawn() itself can throw synchronously (ENOENT on the binary,
+      // invalid args). Clean up the apiKeyHelper temp dir before rethrow.
+      fireCleanup();
+      throw err;
+    }
 
     const proc = {
       child,
@@ -191,6 +241,9 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
       proc.exitCode = 1;
       proc.exitedAt = Date.now();
       proc.status = 'failed';
+      // Phase 10D: some spawn errors do not produce a subsequent 'exit'
+      // (e.g. ENOENT on the binary), so we must fire cleanup here too.
+      fireCleanup();
       if (runService) {
         runService.addRunEvent(runId, 'error', JSON.stringify({
           message: `Spawn error: ${err.message}`,
@@ -200,6 +253,7 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
 
     child.on('exit', (code, signal) => {
       console.log(`[engine] Process ${runId} exited: code=${code} signal=${signal}`);
+      fireCleanup();
       proc.exitCode = code;
       proc.exitedAt = Date.now();
       if (proc.status === 'starting' || proc.status === 'running') {
@@ -518,6 +572,8 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
     type: 'stream-json',
     spawnAgent, sendInput, getOutput, getEvents, getUsage, getSessionId,
     kill, hasProcess, isAlive, detectExitCode, listSessions, discoverGhostSessions,
+    // Exposed for tests that need to assert argv shape without spawning.
+    _buildArgs: buildArgs,
   };
 }
 
