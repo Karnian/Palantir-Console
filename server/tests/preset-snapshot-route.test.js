@@ -73,3 +73,31 @@ test('GET /api/runs/:id/preset-snapshot 404s for unknown run', async (t) => {
   const res = await request(app).get('/api/runs/run_does_not_exist/preset-snapshot');
   assert.equal(res.status, 404);
 });
+
+// Phase D1: legacy snapshot row backward compat + drift_error surface
+
+test('computePresetDrift skips description when snapshotCore omits it (legacy row)', () => {
+  // Simulate a legacy snapshot_json that has no `description` key
+  const legacyCore = {
+    name: 'X', isolated: false, plugin_refs: [], mcp_server_ids: [],
+    base_system_prompt: null, setting_sources: '', min_claude_version: null,
+    // no `description` field — pre-Phase-D snapshot
+  };
+  const current = { ...legacyCore, description: 'some new description' };
+  const d = computePresetDrift(legacyCore, current, [], []);
+  assert.ok(!d.changed_fields.includes('description'),
+    'description must not appear in changed_fields for legacy snapshots that omit it');
+  assert.equal(d.has_drift, false);
+});
+
+test('computePresetDrift still compares description when snapshotCore explicitly contains it', () => {
+  const core = {
+    name: 'X', description: null, isolated: false, plugin_refs: [], mcp_server_ids: [],
+    base_system_prompt: null, setting_sources: '', min_claude_version: null,
+  };
+  const current = { ...core, description: 'new value' };
+  const d = computePresetDrift(core, current, [], []);
+  assert.ok(d.changed_fields.includes('description'),
+    'description must appear in changed_fields when it was present in snapshot and differs');
+  assert.equal(d.has_drift, true);
+});

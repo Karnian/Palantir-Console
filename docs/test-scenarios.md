@@ -702,6 +702,8 @@
   - 노랑 배너 "Preset drift detected. Changed fields: description"
   - 탭 라벨에 `⚠ 1` 배지
 
+> **Note**: Legacy runs created before Phase D may not detect description drift (old snapshot_json rows do not include description; intentionally not backfilled for forensic integrity).
+
 ### PRESET-15b — Drift 감지 (plugin 파일 수정 후)
 - **Given** PRESET-14 의 run, 이후 preset 에 연결된 plugin 디렉토리의 파일 1개 내용 수정
 - **When** RunInspector → Preset 탭 재오픈

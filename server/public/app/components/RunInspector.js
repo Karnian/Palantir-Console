@@ -242,7 +242,10 @@ export function RunInspector({ run, onClose }) {
                 if (!d) return 'Preset';
                 if (d.deleted) return 'Preset ⚠ deleted';
                 const totalChanges = (d.changed_fields?.length || 0) + (d.changed_files?.length || 0);
-                return totalChanges > 0 ? `Preset ⚠ ${totalChanges}` : 'Preset';
+                if (totalChanges > 0) return `Preset ⚠ ${totalChanges}`;
+                // drift_error present but no actual field/file changes → show bare warning
+                if (d.drift_error) return 'Preset ⚠';
+                return 'Preset';
               })()}
             </button>
           `}
@@ -337,6 +340,14 @@ export function RunInspector({ run, onClose }) {
                   ⚠ The preset has been deleted since this run. Snapshot below is the only record.
                 </div>
               `}
+              ${presetData.drift && !presetData.drift.deleted && presetData.drift.drift_error && html`
+                <div style=${{ padding: '8px', background: 'color-mix(in srgb, #f59e0b 15%, transparent)', color: '#f59e0b', borderRadius: '4px', marginBottom: '12px' }}>
+                  ⚠ Preset file drift could not be computed. Core-field drift is shown, but plugin file comparison is unavailable.
+                  <div style=${{ marginTop: '4px', fontSize: '11px', opacity: 0.85 }}>
+                    Reason: ${presetData.drift.drift_error}
+                  </div>
+                </div>
+              `}
               ${presetData.drift && !presetData.drift.deleted && presetData.drift.has_drift && html`
                 <div style=${{ padding: '8px', background: 'color-mix(in srgb, #f59e0b 15%, transparent)', color: '#f59e0b', borderRadius: '4px', marginBottom: '12px' }}>
                   ⚠ Preset drift detected.
@@ -362,7 +373,7 @@ export function RunInspector({ run, onClose }) {
                   `}
                 </div>
               `}
-              ${presetData.drift && !presetData.drift.deleted && !presetData.drift.has_drift && html`
+              ${presetData.drift && !presetData.drift.deleted && !presetData.drift.drift_error && !presetData.drift.has_drift && html`
                 <div style=${{ padding: '8px', background: 'color-mix(in srgb, var(--success) 15%, transparent)', color: 'var(--success)', borderRadius: '4px', marginBottom: '12px' }}>
                   ✓ Preset matches the snapshot — no drift.
                 </div>

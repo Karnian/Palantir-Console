@@ -264,3 +264,76 @@ test('GET /api/runs/:id/preset-snapshot — no file drift when hashes match', as
   assert.deepEqual(drift.changed_files, [], 'no changed files');
   assert.deepEqual(drift.changed_fields, [], 'no changed fields');
 });
+
+// ─── Phase D1: drift_error surface ───────────────────────────────────────────
+
+test('computePresetDrift returns drift_error with empty changed_files when file comparison unavailable', () => {
+  const core = { ...CORE };
+  const current = { ...CORE };
+  // currentFileHashes=null triggers skip, driftError is surfaced
+  const d = computePresetDrift(core, current, [], null, { driftError: 'boom' });
+  assert.equal(d.drift_error, 'boom', 'drift_error must equal the provided error message');
+  assert.deepEqual(d.changed_files, [], 'changed_files must be empty when file comparison skipped');
+  assert.equal(d.has_drift, false, 'drift_error alone must not set has_drift');
+});
+
+test('has_drift is false when only drift_error is set (no core diff)', () => {
+  const core = { ...CORE };
+  const current = { ...CORE };
+  const d = computePresetDrift(core, current, [], null, { driftError: 'fs error' });
+  assert.equal(d.has_drift, false);
+  assert.ok(d.drift_error);
+});
+
+test('route surfaces drift_error when computeCurrentFileHashes throws', async (t) => {
+  const { app, rawDb, pluginsRoot } = await createTestEnv(t, {
+    fx: { 'plugin.json': '{"name":"fx"}' },
+  });
+
+  const agentRes = await request(app).post('/api/agents').send({
+    name: 'err-agent', type: 'claude', command: 'claude',
+  });
+  const agentId = agentRes.body.agent.id;
+
+  const presetRes = await request(app).post('/api/worker-presets').send({
+    name: 'err-preset', plugin_refs: ['fx'],
+  });
+  const presetId = presetRes.body.preset.id;
+
+  const taskRes = await request(app).post('/api/tasks').send({ title: 'err-task' });
+  const taskId = taskRes.body.task.id;
+  const runRes = await request(app).post('/api/runs').send({
+    task_id: taskId, agent_profile_id: agentId, status: 'completed',
+  });
+  const runId = runRes.body.run.id;
+
+  // Inject snapshot with old name so core-field 'name' differs from current preset
+  const snapCore = JSON.stringify({
+    name: 'err-preset-OLD', description: null, isolated: false, plugin_refs: ['fx'],
+    mcp_server_ids: [], base_system_prompt: null, setting_sources: '', min_claude_version: null,
+  });
+  rawDb.prepare(`
+    INSERT OR REPLACE INTO run_preset_snapshots
+      (run_id, preset_id, preset_snapshot_hash, snapshot_json, file_hashes, applied_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'))
+  `).run(runId, presetId, 'errhash', snapCore, JSON.stringify([]));
+  rawDb.prepare('UPDATE runs SET preset_id = ? WHERE id = ?').run(presetId, runId);
+
+  // Make plugin.json unreadable so fs.readFileSync throws EACCES during
+  // buildManifest → computeCurrentFileHashes will throw → route catches it.
+  const pluginJsonPath = path.join(pluginsRoot, 'fx', 'plugin.json');
+  const origMode = fs.statSync(pluginJsonPath).mode;
+  fs.chmodSync(pluginJsonPath, 0o000);
+  t.after(() => {
+    try { fs.chmodSync(pluginJsonPath, origMode); } catch { /* already cleaned */ }
+  });
+
+  const res = await request(app).get(`/api/runs/${runId}/preset-snapshot`);
+  assert.equal(res.status, 200, 'must respond 200 even when file recomputation fails');
+  const drift = res.body.drift;
+  assert.ok(drift, 'drift must be present');
+  assert.ok(drift.drift_error, 'drift_error must be present when file computation throws');
+  assert.deepEqual(drift.changed_files, [], 'changed_files must be empty on drift_error');
+  // Core field 'name' differs between old snapshot ('err-preset-OLD') and current preset ('err-preset')
+  assert.ok(drift.changed_fields.includes('name'), 'core-field name drift must still be detected');
+});

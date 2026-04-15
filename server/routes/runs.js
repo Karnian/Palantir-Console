@@ -2,22 +2,32 @@ const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 
 /**
- * Phase 10F: compute a shallow drift summary between a run's frozen preset
- * snapshot and the current preset row. Returns
- * `{ deleted, changed_fields[], changed_files[], has_drift }`.
+ * Phase 10F / Phase D1: compute a shallow drift summary between a run's frozen
+ * preset snapshot and the current preset row. Returns
+ * `{ deleted, changed_fields[], changed_files[], has_drift, drift_error? }`.
  *
  * `changed_fields` — subset of core fields that differ.
+ *   Legacy snapshots that were persisted before Phase D may omit `description`
+ *   in `snapshot_json`. The hasOwnProperty guard below skips those fields so
+ *   old rows do not spuriously appear as drifted.
  * `changed_files`  — [{path, old_hash, new_hash, status: 'modified'|'deleted'|'added'}]
  *   comparing snapshotFileHashes (stored at run time) with currentFileHashes (disk now).
+ *   When `currentFileHashes` is `null` (file recomputation failed), file comparison
+ *   is skipped and `changed_files` is returned as `[]`.
  * `has_drift`      — true if any changed_fields or changed_files exist, or preset deleted.
+ *   A `drift_error` alone does NOT set `has_drift`.
+ * `drift_error`    — present (string) when file hash recomputation failed. Core-field
+ *   comparison is still attempted; only the file diff is unavailable.
  *
- * @param {Object} snapshotCore      — JSON-parsed preset core at run time
- * @param {Object|null} currentPreset — current preset row (null if deleted)
- * @param {Array}  snapshotFileHashes — [{path, sha256}] stored at snapshot time
- * @param {Array}  currentFileHashes  — [{path, sha256}] recomputed from disk now
+ * @param {Object} snapshotCore        — JSON-parsed preset core at run time
+ * @param {Object|null} currentPreset  — current preset row (null if deleted)
+ * @param {Array}  snapshotFileHashes  — [{path, sha256}] stored at snapshot time
+ * @param {Array|null} currentFileHashes — [{path, sha256}] recomputed from disk, or null
+ * @param {Object} [opts]
+ * @param {string|null} [opts.driftError] — error message from file-hash recomputation
  */
 function computePresetDrift(snapshotCore, currentPreset,
-  snapshotFileHashes = [], currentFileHashes = []) {
+  snapshotFileHashes = [], currentFileHashes = null, { driftError = null } = {}) {
   if (!snapshotCore) return null;
   if (!currentPreset) return { deleted: true, changed_fields: [], changed_files: [], has_drift: true };
 
@@ -27,6 +37,10 @@ function computePresetDrift(snapshotCore, currentPreset,
   ];
   const changed_fields = [];
   for (const f of FIELDS) {
+    // Backward-compat shim: legacy snapshot_json rows created before Phase D may
+    // omit `description`. Skip comparison for any field not present in the snapshot
+    // so we do not create spurious drift on old runs.
+    if (!Object.prototype.hasOwnProperty.call(snapshotCore, f)) continue;
     const a = snapshotCore[f];
     const b = currentPreset[f];
     const aJson = JSON.stringify(a == null ? null : a);
@@ -34,30 +48,35 @@ function computePresetDrift(snapshotCore, currentPreset,
     if (aJson !== bJson) changed_fields.push(f);
   }
 
-  // File-level drift: compare snapshot hashes vs current hashes
-  const snapMap = new Map((snapshotFileHashes || []).map(e => [e.path, e.sha256]));
-  const currMap = new Map((currentFileHashes || []).map(e => [e.path, e.sha256]));
+  // File-level drift: skip entirely when currentFileHashes is null (recomputation failed).
   const changed_files = [];
+  if (currentFileHashes !== null) {
+    const snapMap = new Map((snapshotFileHashes || []).map(e => [e.path, e.sha256]));
+    const currMap = new Map(currentFileHashes.map(e => [e.path, e.sha256]));
 
-  // Files in snapshot: check if modified or deleted
-  for (const [p, oldHash] of snapMap) {
-    const newHash = currMap.get(p);
-    if (newHash === undefined) {
-      changed_files.push({ path: p, old_hash: oldHash, new_hash: null, status: 'deleted' });
-    } else if (newHash !== oldHash) {
-      changed_files.push({ path: p, old_hash: oldHash, new_hash: newHash, status: 'modified' });
+    // Files in snapshot: check if modified or deleted
+    for (const [p, oldHash] of snapMap) {
+      const newHash = currMap.get(p);
+      if (newHash === undefined) {
+        changed_files.push({ path: p, old_hash: oldHash, new_hash: null, status: 'deleted' });
+      } else if (newHash !== oldHash) {
+        changed_files.push({ path: p, old_hash: oldHash, new_hash: newHash, status: 'modified' });
+      }
     }
-  }
-  // Files on disk but not in snapshot: added
-  for (const [p, newHash] of currMap) {
-    if (!snapMap.has(p)) {
-      changed_files.push({ path: p, old_hash: null, new_hash: newHash, status: 'added' });
+    // Files on disk but not in snapshot: added
+    for (const [p, newHash] of currMap) {
+      if (!snapMap.has(p)) {
+        changed_files.push({ path: p, old_hash: null, new_hash: newHash, status: 'added' });
+      }
     }
+    changed_files.sort((a, b) => a.path.localeCompare(b.path));
   }
-  changed_files.sort((a, b) => a.path.localeCompare(b.path));
 
+  // has_drift is based on actual diff only — drift_error alone does not set it.
   const has_drift = changed_fields.length > 0 || changed_files.length > 0;
-  return { deleted: false, changed_fields, changed_files, has_drift };
+  const result = { deleted: false, changed_fields, changed_files, has_drift };
+  if (driftError) result.drift_error = driftError;
+  return result;
 }
 
 function createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService }) {
@@ -95,19 +114,26 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
     try { snapshotCore = JSON.parse(snapshot.snapshot_json); }
     catch { snapshotCore = null; }
 
-    // Gap #2: compute current file hashes from disk for drift comparison.
+    // Phase D1: compute current file hashes from disk for drift comparison.
     // snapshotFileHashes were frozen at run time; currentFileHashes are now.
+    // On failure, surface drift_error in the response (200) rather than crashing —
+    // core-field drift is still reported; only file comparison is unavailable.
     const snapshotFileHashes = Array.isArray(snapshot.file_hashes) ? snapshot.file_hashes : [];
-    let currentFileHashes = [];
+    let currentFileHashes = null;
+    let driftError = null;
     if (currentPreset) {
       const pluginRefs = Array.isArray(currentPreset.plugin_refs)
         ? currentPreset.plugin_refs
         : (snapshotCore?.plugin_refs || []);
-      try { currentFileHashes = presetService.computeCurrentFileHashes(pluginRefs); }
-      catch { currentFileHashes = []; }
+      try {
+        currentFileHashes = presetService.computeCurrentFileHashes(pluginRefs);
+      } catch (err) {
+        driftError = err?.message || 'Failed to compute current plugin file hashes';
+        currentFileHashes = null;
+      }
     }
 
-    const drift = computePresetDrift(snapshotCore, currentPreset, snapshotFileHashes, currentFileHashes);
+    const drift = computePresetDrift(snapshotCore, currentPreset, snapshotFileHashes, currentFileHashes, { driftError });
     res.json({
       run_id: run.id,
       snapshot: {

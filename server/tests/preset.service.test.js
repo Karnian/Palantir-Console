@@ -229,6 +229,27 @@ test('buildSnapshot: path namespacing + stable hash', async (t) => {
   assert.notEqual(snap3.hash, snap1.hash);
 });
 
+test('buildSnapshot includes description in snapshot_json', async (t) => {
+  const db = setupDb(t);
+  const pluginsRoot = setupPluginsRoot(t);
+  const svc = createPresetService(db, { pluginsRoot });
+  const preset = svc.createPreset({ name: 'desc-snap', description: 'my desc', plugin_refs: [] });
+  const snap = svc.buildSnapshot(preset);
+  const core = JSON.parse(snap.snapshotJson);
+  assert.equal(core.description, 'my desc');
+});
+
+test('buildSnapshot hash changes when only description changes', async (t) => {
+  const db = setupDb(t);
+  const pluginsRoot = setupPluginsRoot(t);
+  const svc = createPresetService(db, { pluginsRoot });
+  const preset1 = svc.createPreset({ name: 'hash-desc', description: 'v1', plugin_refs: [] });
+  const snap1 = svc.buildSnapshot(preset1);
+  const preset2 = svc.updatePreset(preset1.id, { description: 'v2' });
+  const snap2 = svc.buildSnapshot(preset2);
+  assert.notEqual(snap1.hash, snap2.hash);
+});
+
 test('buildSnapshot rejects missing plugin', async (t) => {
   const db = setupDb(t);
   const pluginsRoot = setupPluginsRoot(t);
