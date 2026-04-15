@@ -504,6 +504,30 @@ function createPresetService(db, options = {}) {
   }
 
   /**
+   * Compute the current file hashes for a list of plugin refs. Missing plugin
+   * directories are silently skipped (they will appear as "deleted" entries
+   * when compared to a stored snapshot). Returns the same [{path, sha256}]
+   * shape as buildSnapshot's fileHashes array.
+   *
+   * Used by drift computation in GET /api/runs/:id/preset-snapshot.
+   */
+  function computeCurrentFileHashes(pluginRefs) {
+    const fileHashes = [];
+    for (const ref of pluginRefs) {
+      if (!pluginDirExists(ref)) continue; // will show as deleted in drift
+      const absDir = path.join(pluginsRoot, ref);
+      const cached = manifestCache.get(ref);
+      const manifest = buildManifest(absDir, cached);
+      manifestCache.set(ref, manifest);
+      for (const entry of manifest.files) {
+        fileHashes.push({ path: `${ref}/${entry.path}`, sha256: entry.sha256 });
+      }
+    }
+    fileHashes.sort((a, b) => a.path.localeCompare(b.path));
+    return fileHashes;
+  }
+
+  /**
    * Persist a snapshot row for a given run. Idempotent per (runId) — the
    * caller is expected to only invoke this once per run.
    */
@@ -601,6 +625,7 @@ function createPresetService(db, options = {}) {
     deletePreset,
     listPluginRefs,
     buildSnapshot,
+    computeCurrentFileHashes,
     persistSnapshot,
     getSnapshotForRun,
     resolveForSpawn,

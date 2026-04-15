@@ -356,6 +356,28 @@ const snapshotHash = crypto.createHash('sha256').update(combined).digest('hex');
 
 Manifest cache invalidation: plugin 디렉토리의 모든 파일 stat 를 한 번 스캔해서 manifest 에 저장된 (path, mtimeNs, size, sha256) 와 비교. 변경된 파일만 재해싱. 디렉토리 변경 감시는 구현 안 함 — spawn 시점 재검증.
 
+**Drift 계산 (Gap #2 fix)**: `GET /api/runs/:id/preset-snapshot` 응답의 `drift` 필드는 core 필드 비교 + **file hash 비교** 를 모두 포함한다.
+
+```js
+// computePresetDrift 반환 shape
+{
+  deleted: false,           // true if preset row was deleted
+  changed_fields: ['name'], // core fields that differ
+  changed_files: [          // plugin file-level changes
+    { path: 'agent-olympus/main.ts', old_hash: 'abc...', new_hash: 'def...', status: 'modified' },
+    { path: 'agent-olympus/gone.js', old_hash: 'xyz...', new_hash: null,    status: 'deleted'  },
+    { path: 'agent-olympus/new.js',  old_hash: null,     new_hash: '123...', status: 'added'   },
+  ],
+  has_drift: true,          // true if any changed_fields OR changed_files exist
+}
+```
+
+- `snapshotFileHashes` — run 시점에 동결된 `file_hashes` (DB 저장값).
+- `currentFileHashes` — `presetService.computeCurrentFileHashes(pluginRefs)` 로 현재 디스크에서 재계산.
+- 누락된 plugin 디렉토리(preset에 남아있지만 삭제됨)는 해당 파일이 전부 `deleted` 로 표시됨.
+- `has_drift = changed_fields.length > 0 || changed_files.length > 0`.
+- UI: RunInspector Preset 탭의 배지 (`⚠ N`) 는 `changed_fields + changed_files` 합산. `changed_files` 는 path, status 를 목록으로 표시.
+
 ### 6.6 API
 
 | Method | Path | 설명 |

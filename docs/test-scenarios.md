@@ -702,6 +702,30 @@
   - 노랑 배너 "Preset drift detected. Changed fields: description"
   - 탭 라벨에 `⚠ 1` 배지
 
+### PRESET-15b — Drift 감지 (plugin 파일 수정 후)
+- **Given** PRESET-14 의 run, 이후 preset 에 연결된 plugin 디렉토리의 파일 1개 내용 수정
+- **When** RunInspector → Preset 탭 재오픈
+- **Then**
+  - 노랑 배너 "Preset drift detected." + changed_files 목록
+  - 수정된 파일: `agent-olympus/main.ts` — status: `modified`
+  - 탭 라벨 배지: `⚠ 1` (changed_fields 0 + changed_files 1)
+  - `has_drift: true`
+
+### PRESET-15c — Drift 감지 (plugin 파일 삭제/추가 후)
+- **Given** PRESET-14 의 run, 이후 plugin 파일 1개 삭제 + 1개 추가
+- **When** RunInspector → Preset 탭 재오픈
+- **Then**
+  - changed_files 에 `deleted` 1건 + `added` 1건
+  - 탭 배지: `⚠ 2`
+  - `has_drift: true`
+
+### PRESET-15d — Drift 없음 (파일 무변경)
+- **Given** PRESET-14 의 run, preset 내용/파일 모두 동일
+- **When** RunInspector → Preset 탭
+- **Then**
+  - `has_drift: false`, `changed_files: []`, 초록 배너
+  - 탭 배지 없음
+
 ### PRESET-16 — Drift 감지 (preset 삭제 후)
 - **Given** PRESET-14 의 run, 이후 preset DELETE
 - **When** RunInspector → Preset 탭
