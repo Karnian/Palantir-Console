@@ -276,6 +276,70 @@ GET    /api/health             — health check
 
 Client pattern: the Drift badge + drawer and `run:needs_input` tab-title pulse are both wired through these semantic fields. `run:status` is a pure reload trigger and does NOT fire priority notifications — that responsibility belongs to the dedicated channels (`run:needs_input`, `run:completed`) to avoid duplicate alerts.
 
+## Creating a Worker Preset
+
+Worker Presets bundle a system prompt, MCP server set, and (optionally)
+host-isolated plugin directories so a worker spawn is reproducible across
+machines. Spec: `docs/specs/worker-preset-and-plugin-injection.md`.
+
+### When to use
+
+- You want a Claude worker that loads ecosystem plugins (e.g. `agent-olympus`)
+  without polluting your host `~/.claude/`.
+- You want to enforce a specific MCP server set per task class.
+- You want forensic snapshots of "exactly what plugin files / prompt / MCP
+  config the worker ran with" for past runs.
+
+### Steps
+
+1. Drop a Claude Code plugin under `server/plugins/<name>/` with a
+   `plugin.json` at its root. Example:
+   ```
+   server/plugins/agent-olympus/
+     plugin.json
+     skills/
+     commands/
+     agents/
+   ```
+   The directory is gitignored — operators place plugins by hand. The CI
+   suite uses fixtures under `server/tests/fixtures/plugins/`.
+
+2. Open the **Presets** view (`#presets`) and create a preset. Fields:
+   - **Plugin Refs** — one or more directory names from `server/plugins/`.
+   - **MCP Server Templates** — pick from existing `mcp_server_templates`
+     entries (managed by the Skill Pack subsystem).
+   - **Base System Prompt** (≤16KB) — prepended to skill-pack sections.
+   - **Isolated** — Tier 2 (Claude only). Adds `--bare`,
+     `--strict-mcp-config`, `--setting-sources`, and one `--plugin-dir`
+     flag per ref to the worker spawn. Codex / OpenCode get a
+     `preset:tier2_skipped` warning and continue with Tier 1 only.
+   - **Min Claude Version** — semver gate enforced before spawn.
+   - **Setting Sources** — passed as `--setting-sources <value>`. Default
+     empty disables host setting inheritance entirely.
+
+3. Set the preset on a Task (the `Worker Preset` dropdown in
+   `Execute Task`). The dropdown defaults to the task's
+   `preferred_preset_id`. Operator can override per-execute.
+
+4. After the run finishes, open `Run Inspector → Preset` to see the
+   frozen snapshot, the current preset row, and any drift between them.
+
+### Auth in isolated mode
+
+`--bare` Claude ignores OAuth and the macOS keychain, so the preset
+service materializes the token. Default path is an `apiKeyHelper` shell
+script + `--settings <temp>` (token never lands in env). Token sources
+tried in order: env `ANTHROPIC_API_KEY` → `.claude-auth.json` → keychain
+`claudeAiOauth.accessToken`. Fail-closed with a 400 + diagnostic when
+none are available.
+
+### Snapshot semantics
+
+`run_preset_snapshots` rows are written at preset-resolve time (before
+spawn), keyed by `run_id` with `<pluginRef>/<relpath>` namespaced file
+hashes. Deleting a preset later does not erase past snapshot rows;
+`tasks.preferred_preset_id` is set NULL via app-level cascade.
+
 ## Environment Variables
 
 | Variable | Default | Description |

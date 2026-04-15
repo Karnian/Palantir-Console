@@ -1,0 +1,5 @@
+{
+  "name": "agent-olympus-mock",
+  "version": "0.0.1",
+  "description": "CI fixture mirroring agent-olympus layout for Phase 10G smoke tests"
+}
