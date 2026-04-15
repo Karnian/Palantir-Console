@@ -325,11 +325,11 @@ export function RunInspector({ run, onClose }) {
 
         ${tab === 'preset' && html`
           <div class="run-skills-section" style=${{ flex: 1, overflowY: 'auto', padding: '16px' }}>
-            ${!presetLoaded && html`<div style="color:var(--text-muted);">Loading preset snapshot...</div>`}
-            ${presetLoaded && !presetData?.snapshot && html`
+            ${presetFetching && html`<div style="color:var(--text-muted);">Loading preset snapshot...</div>`}
+            ${!presetFetching && !presetData?.snapshot && html`
               <div style="color:var(--text-muted);">No preset bound to this run.</div>
             `}
-            ${presetLoaded && presetData?.snapshot && html`
+            ${!presetFetching && presetData?.snapshot && html`
               <div style=${{ marginBottom: '12px' }}>
                 <div style=${{ fontSize: '12px', color: 'var(--text-muted)' }}>
                   Preset id: <code>${presetData.snapshot.preset_id}</code>
