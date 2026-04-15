@@ -4,27 +4,60 @@ const { asyncHandler } = require('../middleware/asyncHandler');
 /**
  * Phase 10F: compute a shallow drift summary between a run's frozen preset
  * snapshot and the current preset row. Returns
- * `{ deleted, changed_fields[], current_hash? }`. `changed_fields` is the
- * subset of `name|description|isolated|plugin_refs|mcp_server_ids|
- * base_system_prompt|setting_sources|min_claude_version` whose value
- * differs between the snapshot and the current preset.
+ * `{ deleted, changed_fields[], changed_files[], has_drift }`.
+ *
+ * `changed_fields` — subset of core fields that differ.
+ * `changed_files`  — [{path, old_hash, new_hash, status: 'modified'|'deleted'|'added'}]
+ *   comparing snapshotFileHashes (stored at run time) with currentFileHashes (disk now).
+ * `has_drift`      — true if any changed_fields or changed_files exist, or preset deleted.
+ *
+ * @param {Object} snapshotCore      — JSON-parsed preset core at run time
+ * @param {Object|null} currentPreset — current preset row (null if deleted)
+ * @param {Array}  snapshotFileHashes — [{path, sha256}] stored at snapshot time
+ * @param {Array}  currentFileHashes  — [{path, sha256}] recomputed from disk now
  */
-function computePresetDrift(snapshotCore, currentPreset) {
+function computePresetDrift(snapshotCore, currentPreset,
+  snapshotFileHashes = [], currentFileHashes = []) {
   if (!snapshotCore) return null;
-  if (!currentPreset) return { deleted: true, changed_fields: [] };
+  if (!currentPreset) return { deleted: true, changed_fields: [], changed_files: [], has_drift: true };
+
   const FIELDS = [
     'name', 'description', 'isolated', 'plugin_refs', 'mcp_server_ids',
     'base_system_prompt', 'setting_sources', 'min_claude_version',
   ];
-  const changed = [];
+  const changed_fields = [];
   for (const f of FIELDS) {
     const a = snapshotCore[f];
     const b = currentPreset[f];
     const aJson = JSON.stringify(a == null ? null : a);
     const bJson = JSON.stringify(b == null ? null : b);
-    if (aJson !== bJson) changed.push(f);
+    if (aJson !== bJson) changed_fields.push(f);
   }
-  return { deleted: false, changed_fields: changed };
+
+  // File-level drift: compare snapshot hashes vs current hashes
+  const snapMap = new Map((snapshotFileHashes || []).map(e => [e.path, e.sha256]));
+  const currMap = new Map((currentFileHashes || []).map(e => [e.path, e.sha256]));
+  const changed_files = [];
+
+  // Files in snapshot: check if modified or deleted
+  for (const [p, oldHash] of snapMap) {
+    const newHash = currMap.get(p);
+    if (newHash === undefined) {
+      changed_files.push({ path: p, old_hash: oldHash, new_hash: null, status: 'deleted' });
+    } else if (newHash !== oldHash) {
+      changed_files.push({ path: p, old_hash: oldHash, new_hash: newHash, status: 'modified' });
+    }
+  }
+  // Files on disk but not in snapshot: added
+  for (const [p, newHash] of currMap) {
+    if (!snapMap.has(p)) {
+      changed_files.push({ path: p, old_hash: null, new_hash: newHash, status: 'added' });
+    }
+  }
+  changed_files.sort((a, b) => a.path.localeCompare(b.path));
+
+  const has_drift = changed_fields.length > 0 || changed_files.length > 0;
+  return { deleted: false, changed_fields, changed_files, has_drift };
 }
 
 function createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService }) {
@@ -62,7 +95,19 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
     try { snapshotCore = JSON.parse(snapshot.snapshot_json); }
     catch { snapshotCore = null; }
 
-    const drift = computePresetDrift(snapshotCore, currentPreset);
+    // Gap #2: compute current file hashes from disk for drift comparison.
+    // snapshotFileHashes were frozen at run time; currentFileHashes are now.
+    const snapshotFileHashes = Array.isArray(snapshot.file_hashes) ? snapshot.file_hashes : [];
+    let currentFileHashes = [];
+    if (currentPreset) {
+      const pluginRefs = Array.isArray(currentPreset.plugin_refs)
+        ? currentPreset.plugin_refs
+        : (snapshotCore?.plugin_refs || []);
+      try { currentFileHashes = presetService.computeCurrentFileHashes(pluginRefs); }
+      catch { currentFileHashes = []; }
+    }
+
+    const drift = computePresetDrift(snapshotCore, currentPreset, snapshotFileHashes, currentFileHashes);
     res.json({
       run_id: run.id,
       snapshot: {
@@ -70,7 +115,7 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
         preset_snapshot_hash: snapshot.preset_snapshot_hash,
         applied_at: snapshot.applied_at,
         core: snapshotCore,
-        file_hashes: snapshot.file_hashes,
+        file_hashes: snapshotFileHashes,
       },
       current_preset: currentPreset,
       drift,
