@@ -175,17 +175,20 @@ test('presetService: listPluginRefs returns plugin.json-bearing dirs', async (t)
   fs.mkdirSync(path.join(pluginsRoot, 'not-a-plugin'), { recursive: true });
   fs.writeFileSync(path.join(pluginsRoot, 'not-a-plugin', 'readme.md'), 'x');
   const svc = createPresetService(db, { pluginsRoot });
-  const refs = svc.listPluginRefs();
+  const { plugin_refs: refs, warnings } = svc.listPluginRefs();
   assert.deepEqual(refs.map(r => r.name), ['p1', 'p2']);
   assert.equal(refs[0].description, 'p one');
   assert.equal(refs[0].version, '1.0.0');
+  assert.deepEqual(warnings, []);
 });
 
 test('presetService: listPluginRefs on missing pluginsRoot returns []', async (t) => {
   const db = setupDb(t);
   const pluginsRoot = path.join(os.tmpdir(), 'palantir-never-exists-' + Date.now());
   const svc = createPresetService(db, { pluginsRoot });
-  assert.deepEqual(svc.listPluginRefs(), []);
+  const result = svc.listPluginRefs();
+  assert.deepEqual(result.plugin_refs, []);
+  assert.deepEqual(result.warnings, []);
 });
 
 test('buildSnapshot: path namespacing + stable hash', async (t) => {

@@ -5,8 +5,12 @@ function createWorkerPresetsRouter({ presetService }) {
   const router = express.Router();
 
   // GET /api/worker-presets/plugin-refs — must precede /:id
+  // Returns { plugin_refs: [...], warnings: [{dir, reason}] }.
+  // Directories with malformed/non-object plugin.json are excluded from
+  // plugin_refs and reported in warnings.
   router.get('/plugin-refs', asyncHandler(async (req, res) => {
-    res.json({ plugin_refs: presetService.listPluginRefs() });
+    const { plugin_refs, warnings } = presetService.listPluginRefs();
+    res.json({ plugin_refs, warnings });
   }));
 
   router.get('/', asyncHandler(async (req, res) => {
