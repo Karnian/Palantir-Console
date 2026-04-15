@@ -299,9 +299,21 @@ export function PresetsView() {
               ${pluginWarnings.length} plugin director${pluginWarnings.length === 1 ? 'y has' : 'ies have'} a malformed plugin.json and will be skipped:
             </span>
             <ul style=${{ margin: '4px 0 0 0', paddingLeft: '16px', color: 'var(--text-secondary)' }}>
-              ${pluginWarnings.map((w, i) => html`
-                <li key=${i}><code>${w.dir}</code> — ${w.reason}</li>
-              `)}
+              ${pluginWarnings.map((w, i) => {
+                const REASON_LABELS = {
+                  invalid_json: 'JSON 파싱 실패',
+                  not_an_object: 'JSON 객체가 아님',
+                  io_error: '파일 읽기 실패',
+                  other: '알 수 없는 오류',
+                };
+                const label = REASON_LABELS[w.reason] || w.reason;
+                return html`
+                  <li key=${i}>
+                    <code>${w.dir}</code> — ${label}
+                    ${w.message && html`<span style=${{ opacity: 0.7, fontSize: '11px', marginLeft: '4px' }}>(${w.message})</span>`}
+                  </li>
+                `;
+              })}
             </ul>
           </div>
         </div>

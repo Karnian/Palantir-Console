@@ -63,8 +63,10 @@ export function RunInspector({ run, onClose }) {
   const [skillsLoaded, setSkillsLoaded] = useState(false);
   const [acceptanceChecks, setAcceptanceChecks] = useState([]);
   // Phase 10F: preset snapshot + drift
+  // presetLoaded guard removed (D2a): always refetch on tab activation for freshness.
   const [presetData, setPresetData] = useState(null);
-  const [presetLoaded, setPresetLoaded] = useState(false);
+  const [presetFetching, setPresetFetching] = useState(false);
+  const presetFetchRef = useRef(false); // in-flight dedup
   const outputRef = useRef(null);
   const userScrolledUp = useRef(false);
 
@@ -228,12 +230,16 @@ export function RunInspector({ run, onClose }) {
           ${currentRun?.preset_id && html`
             <button class="run-inspector-tab ${tab === 'preset' ? 'active' : ''}" onClick=${async () => {
               setTab('preset');
-              if (!presetLoaded) {
-                try {
-                  const data = await apiFetch('/api/runs/' + run.id + '/preset-snapshot');
-                  setPresetData(data);
-                } catch { /* ignore */ }
-                setPresetLoaded(true);
+              // D2a: always refetch on activation; in-flight dedup prevents duplicate requests
+              if (presetFetchRef.current) return;
+              presetFetchRef.current = true;
+              setPresetFetching(true);
+              try {
+                const data = await apiFetch('/api/runs/' + run.id + '/preset-snapshot');
+                setPresetData(data);
+              } catch { /* ignore */ } finally {
+                presetFetchRef.current = false;
+                setPresetFetching(false);
               }
             }}>
               ${(() => {
@@ -319,11 +325,11 @@ export function RunInspector({ run, onClose }) {
 
         ${tab === 'preset' && html`
           <div class="run-skills-section" style=${{ flex: 1, overflowY: 'auto', padding: '16px' }}>
-            ${!presetLoaded && html`<div style="color:var(--text-muted);">Loading preset snapshot...</div>`}
-            ${presetLoaded && !presetData?.snapshot && html`
+            ${presetFetching && html`<div style="color:var(--text-muted);">Loading preset snapshot...</div>`}
+            ${!presetFetching && !presetData?.snapshot && html`
               <div style="color:var(--text-muted);">No preset bound to this run.</div>
             `}
-            ${presetLoaded && presetData?.snapshot && html`
+            ${!presetFetching && presetData?.snapshot && html`
               <div style=${{ marginBottom: '12px' }}>
                 <div style=${{ fontSize: '12px', color: 'var(--text-muted)' }}>
                   Preset id: <code>${presetData.snapshot.preset_id}</code>

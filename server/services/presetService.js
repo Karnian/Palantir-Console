@@ -409,7 +409,9 @@ function createPresetService(db, options = {}) {
    * parseable `plugin.json`. Directories whose manifest is missing, unparseable,
    * or not a plain object are skipped and reported in `warnings`.
    *
-   * Returns `{ plugin_refs: [...], warnings: [{ dir, reason }] }`.
+   * Returns `{ plugin_refs: [...], warnings: [{ dir, reason, message }] }`.
+   * `reason` is one of: 'invalid_json' | 'not_an_object' | 'io_error' | 'other'.
+   * `message` carries the raw detail string.
    * Used by UI dropdowns and GET /api/worker-presets/plugin-refs.
    */
   function listPluginRefs() {
@@ -430,23 +432,42 @@ function createPresetService(db, options = {}) {
       try {
         if (!fs.statSync(manifestPath).isFile()) continue;
       } catch { continue; }
-      // plugin.json must parse as a plain object
+      // plugin.json must be readable and parse as a plain object
       let meta = null;
-      let parseError = null;
+      let warnReason = null;
+      let warnMessage = null;
       try {
-        const raw = fs.readFileSync(manifestPath, 'utf8');
-        const parsed = JSON.parse(raw);
-        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-          parseError = 'plugin.json must be a JSON object';
-        } else {
-          meta = parsed;
+        let raw;
+        try {
+          raw = fs.readFileSync(manifestPath, 'utf8');
+        } catch (ioErr) {
+          warnReason = 'io_error';
+          warnMessage = ioErr.message;
+        }
+        if (warnReason === null) {
+          let parsed;
+          try {
+            parsed = JSON.parse(raw);
+          } catch (syntaxErr) {
+            warnReason = 'invalid_json';
+            warnMessage = syntaxErr.message;
+          }
+          if (warnReason === null) {
+            if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+              warnReason = 'not_an_object';
+              warnMessage = 'plugin.json must be a JSON object';
+            } else {
+              meta = parsed;
+            }
+          }
         }
       } catch (err) {
-        parseError = err.message;
+        warnReason = 'other';
+        warnMessage = err.message;
       }
-      if (parseError !== null) {
-        console.warn(`[preset] skipped malformed plugin.json at ${manifestPath}: ${parseError}`);
-        warnings.push({ dir: entry.name, reason: parseError });
+      if (warnReason !== null) {
+        console.warn(`[preset] skipped malformed plugin.json at ${manifestPath}: ${warnMessage}`);
+        warnings.push({ dir: entry.name, reason: warnReason, message: warnMessage });
         continue;
       }
       out.push({

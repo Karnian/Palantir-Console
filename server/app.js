@@ -104,16 +104,19 @@ function createApp(options = {}) {
   // New services (SQLite-based)
   const projectService = createProjectService(db);
   const projectBriefService = createProjectBriefService(db); // v3 Phase 1
-  const taskService = createTaskService(db, eventBus);
+  // Phase 10B: Worker Preset service. Created before taskService so that
+  // taskService can validate preferred_preset_id at the service layer (D2c).
+  const presetService = createPresetService(db, {
+    pluginsRoot: options.pluginsRoot,
+  });
+  const taskService = createTaskService(db, eventBus, {
+    // D2c: defense-in-depth — service-layer preset existence check
+    validatePresetId: (id) => presetService.getPreset(id),
+  });
   const runService = createRunService(db, eventBus);
   const agentProfileService = createAgentProfileService(db);
   const skillPackService = createSkillPackService(db);
   const registryService = createRegistryService();
-  // Phase 10B: Worker Preset service. pluginsRoot defaults to
-  // <repo>/server/plugins/ but tests can override via options.pluginsRoot.
-  const presetService = createPresetService(db, {
-    pluginsRoot: options.pluginsRoot,
-  });
 
   // Execution engines
   const executionEngine = createExecutionEngine();
