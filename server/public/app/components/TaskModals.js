@@ -501,7 +501,7 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
     }
   };
 
-  const handleExecuteDone = async (taskId, agentProfileId, prompt, skillPackIds) => {
+  const handleExecuteDone = async (taskId, agentProfileId, prompt, skillPackIds, presetId) => {
     const prevStatus = task.status;
     // Move to in_progress (ignore error if already in that state)
     try {
@@ -515,7 +515,7 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
     let newRun;
     try {
       const data = await apiFetch(`/api/tasks/${taskId}/execute`, {
-        method: 'POST', body: JSON.stringify({ agent_profile_id: agentProfileId, prompt: prompt || undefined, skill_pack_ids: skillPackIds }),
+        method: 'POST', body: JSON.stringify({ agent_profile_id: agentProfileId, prompt: prompt || undefined, skill_pack_ids: skillPackIds, preset_id: presetId || undefined }),
       });
       newRun = data.run;
     } catch (err) {
