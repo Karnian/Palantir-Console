@@ -4,7 +4,7 @@
 >
 > 각 시나리오는 **Given (전제) → When (액션) → Then (기대 결과)** 형식.
 > "Then"은 코드 내부 동작이 아닌 **관찰 가능한 결과**(DOM, API 응답, DB 상태, 토스트 등)로 작성한다.
-> 시나리오 ID prefix: `PRJ`, `TSK`, `BRD`, `RUN`, `INS`, `MGR`, `PM`, `CONV`, `ROUTER`, `DRIFT`, `DSH`, `AGT`, `KBD`, `SSE`, `AUTH`, `SES`, `TRS`, `FS`, `USG`, `CLS`, `REG`.
+> 시나리오 ID prefix: `PRJ`, `TSK`, `BRD`, `RUN`, `INS`, `MGR`, `PM`, `CONV`, `ROUTER`, `DRIFT`, `DSH`, `AGT`, `PRESET`, `KBD`, `SSE`, `AUTH`, `SES`, `TRS`, `FS`, `USG`, `CLS`, `REG`.
 >
 > *현재 main 기준. v3 Phase 0~8 merged (#20~#32, #60~#64, #65~#71).* Phase 3b 는 트리거 조건 미충족으로 대기. 자세한 phase 히스토리는 `docs/specs/manager-v3-multilayer.md` §15 참조.
 
@@ -601,6 +601,124 @@
 - **When** DELETE `/api/agents/:id`
 - **Then** 항상 허용됨 (삭제 가드 없음 — 진행 중 run에서 사용 중이어도 삭제됨)
 - **Note**: 가드를 추가하면 시나리오 갱신 필요
+
+---
+
+## 8b. Worker Preset (PRESET) — v3 Phase 10
+
+> Spec: `docs/specs/worker-preset-and-plugin-injection.md`. Plugin 디렉토리는 `server/plugins/<name>/` (gitignored, 운영자 배치). CI fixture 는 `server/tests/fixtures/plugins/agent-olympus-mock/`.
+
+### PRESET-01 — Preset 생성 (UI)
+- **Given** `#presets` 페이지, `server/plugins/agent-olympus/` 가 디스크에 있음
+- **When** "+ New Preset" → name `Olympus Iso`, isolated 토글 ON, plugin_refs 에서 `agent-olympus` 체크, base_system_prompt 입력, Save
+- **Then**
+  - 201 응답, 목록에 카드 추가
+  - 카드에 "Isolated (Tier 2)" 배지
+  - 새로고침해도 유지
+
+### PRESET-02 — 잘못된 plugin_ref 차단
+- **When** plugin_refs 에 `nonexistent` (디렉토리 없음) 으로 POST `/api/worker-presets`
+- **Then** 400 + `Unknown plugin ref: 'nonexistent'`
+
+### PRESET-03 — 16KB 프롬프트 차단
+- **When** base_system_prompt 16,385 byte UTF-8 입력 후 Save
+- **Then** UI 가 Save 비활성 (byte counter 빨강) + 서버 400
+
+### PRESET-04 — Preset 수정
+- **When** 카드 Edit → description 변경 → Save
+- **Then** 200, 같은 카드 갱신. `updated_at` 진행
+
+### PRESET-05 — Preset 삭제 cascade
+- **Given** Task T1 의 `preferred_preset_id = preset.id`
+- **When** Preset 삭제
+- **Then**
+  - 200, 카드 사라짐
+  - `tasks.preferred_preset_id` 가 NULL 로 cascade
+  - 과거 run snapshot (`run_preset_snapshots`) 은 보존 (preset_id 텍스트 그대로)
+
+### PRESET-06 — Task 기본 preset 지정
+- **Given** Preset P 존재
+- **When** Task PATCH `{ preferred_preset_id: P.id }`
+- **Then** ExecuteModal 다음 오픈 시 Worker Preset 드롭다운이 P 로 prefill
+
+### PRESET-07 — ExecuteModal preset 오버라이드
+- **Given** Task T 의 default preset = A, Preset B 도 존재
+- **When** Execute → 드롭다운에서 B 선택 → Run
+- **Then**
+  - POST `/execute` body 에 `preset_id: B.id`
+  - 모달 안에 "Task default is `<A.id>`" 힌트 표시 (Phase 10E)
+  - 새 Run 의 `runs.preset_id = B.id`
+
+### PRESET-08 — Tier 1 (non-Claude) MCP 주입
+- **Given** Codex 워커 + preset (mcp_server_ids: [`tpl_ctx7`])
+- **When** Execute
+- **Then**
+  - spawn args 에 `-c mcp_servers={"ctx7":...}` prepend
+  - run_events 에 `preset:tier2_skipped` 없음 (isolated=false)
+  - DB `runs.mcp_config_snapshot` 에 ctx7 포함
+
+### PRESET-09 — OpenCode MCP 미지원 graceful degrade
+- **Given** OpenCode 워커 + preset (mcp_server_ids 보유)
+- **When** Execute
+- **Then** spawn args 에 `-c` 없음, run_events 에 `preset:mcp_unsupported` 1건
+
+### PRESET-10 — Tier 2 (Claude isolated) wiring
+- **Given** Claude 워커 + preset `{ isolated: true, plugin_refs: ['agent-olympus'] }`, 인증 가능
+- **When** Execute
+- **Then**
+  - spawn args 에 `--bare --strict-mcp-config --setting-sources '' --plugin-dir <abs>` 포함
+  - `--settings <temp-path>` 추가 (apiKeyHelper materialization)
+  - run_events: `preset:tier2_active` + `preset:auth_sources` (sources 배열)
+  - 워커 종료 시 temp 디렉토리 자동 정리 (onCleanup)
+
+### PRESET-11 — Tier 2 fail-closed (auth 없음)
+- **Given** isolated preset, 환경에 `ANTHROPIC_API_KEY` / `.claude-auth.json` / keychain 모두 부재
+- **When** Execute
+- **Then** 400 `Isolated preset requires Claude auth`, run 은 `failed`, spawn 미발생
+
+### PRESET-12 — `min_claude_version` mismatch
+- **Given** preset.min_claude_version = `2.0.0`, 호스트 `claude --version` 이 1.8.5
+- **When** Execute (Claude 워커)
+- **Then** 400 `Preset requires Claude CLI >= 2.0.0`, run `failed` + `preset:version_mismatch` 이벤트
+
+### PRESET-13 — Snapshot 즉시 persist
+- **When** preset 으로 Run 생성
+- **Then** `run_preset_snapshots` row 가 spawn 직전 (resolveForSpawn 직후) 에 INSERT.
+  - `runs.preset_id` + `runs.preset_snapshot_hash` 도 같은 시점 binding
+  - 파일 hash 는 `<pluginRef>/<relpath>` 네임스페이스 (예: `agent-olympus/skills/foo.md`)
+
+### PRESET-14 — RunInspector "Preset" 탭
+- **Given** preset 으로 실행된 run
+- **When** RunInspector 열기
+- **Then**
+  - "Preset" 탭이 보임 (`currentRun.preset_id` 가 있을 때만)
+  - 클릭 시 GET `/api/runs/:id/preset-snapshot` 호출, snapshot vs current side-by-side
+  - drift 없음 → 초록 배너 "Preset matches the snapshot"
+
+### PRESET-15 — Drift 감지 (preset edit 후)
+- **Given** PRESET-14 의 run, 이후 preset 의 description 수정
+- **When** RunInspector → Preset 탭 재오픈
+- **Then**
+  - 노랑 배너 "Preset drift detected. Changed fields: description"
+  - 탭 라벨에 `⚠ 1` 배지
+
+### PRESET-16 — Drift 감지 (preset 삭제 후)
+- **Given** PRESET-14 의 run, 이후 preset DELETE
+- **When** RunInspector → Preset 탭
+- **Then**
+  - 빨강 배너 "preset has been deleted since this run"
+  - "Current preset" 패널 = `(deleted)`
+  - snapshot.core / file_hashes 는 그대로 노출 (포렌식 데이터 보존)
+
+### PRESET-17 — Preset 미사용 run 의 Preset 탭
+- **Given** preset 없이 실행된 run
+- **When** RunInspector
+- **Then** "Preset" 탭 자체가 렌더되지 않음
+
+### PRESET-18 — `/api/worker-presets/plugin-refs`
+- **Given** `server/plugins/` 에 plugin.json 가진 디렉토리 2개 (a, b), plugin.json 없는 디렉토리 1개
+- **When** GET `/api/worker-presets/plugin-refs`
+- **Then** `plugin_refs: [{name:'a',...}, {name:'b',...}]` (a, b 만, 정렬됨)
 
 ---
 
