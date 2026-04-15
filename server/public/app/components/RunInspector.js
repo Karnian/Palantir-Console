@@ -63,8 +63,10 @@ export function RunInspector({ run, onClose }) {
   const [skillsLoaded, setSkillsLoaded] = useState(false);
   const [acceptanceChecks, setAcceptanceChecks] = useState([]);
   // Phase 10F: preset snapshot + drift
+  // presetLoaded guard removed (D2a): always refetch on tab activation for freshness.
   const [presetData, setPresetData] = useState(null);
-  const [presetLoaded, setPresetLoaded] = useState(false);
+  const [presetFetching, setPresetFetching] = useState(false);
+  const presetFetchRef = useRef(false); // in-flight dedup
   const outputRef = useRef(null);
   const userScrolledUp = useRef(false);
 
@@ -228,12 +230,16 @@ export function RunInspector({ run, onClose }) {
           ${currentRun?.preset_id && html`
             <button class="run-inspector-tab ${tab === 'preset' ? 'active' : ''}" onClick=${async () => {
               setTab('preset');
-              if (!presetLoaded) {
-                try {
-                  const data = await apiFetch('/api/runs/' + run.id + '/preset-snapshot');
-                  setPresetData(data);
-                } catch { /* ignore */ }
-                setPresetLoaded(true);
+              // D2a: always refetch on activation; in-flight dedup prevents duplicate requests
+              if (presetFetchRef.current) return;
+              presetFetchRef.current = true;
+              setPresetFetching(true);
+              try {
+                const data = await apiFetch('/api/runs/' + run.id + '/preset-snapshot');
+                setPresetData(data);
+              } catch { /* ignore */ } finally {
+                presetFetchRef.current = false;
+                setPresetFetching(false);
               }
             }}>
               ${(() => {
