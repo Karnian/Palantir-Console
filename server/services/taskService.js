@@ -62,7 +62,17 @@ function normalizeDueDate(value) {
   return value;
 }
 
-function createTaskService(db, eventBus) {
+/**
+ * @param {object} db - better-sqlite3 database instance
+ * @param {EventEmitter|null} eventBus
+ * @param {object} [opts]
+ * @param {(id: string) => void} [opts.validatePresetId] - Optional validator called
+ *   when preferred_preset_id is being set to a non-null string. Should throw
+ *   NotFoundError or BadRequestError if the preset does not exist. Used for
+ *   defense-in-depth validation independent of the HTTP layer (D2c).
+ */
+function createTaskService(db, eventBus, opts = {}) {
+  const { validatePresetId } = opts;
   const stmts = {
     getAll: db.prepare(`
       SELECT t.*, p.name as project_name, p.color as project_color
@@ -223,6 +233,20 @@ function createTaskService(db, eventBus) {
     if ('requires_capabilities' in fields) {
       const n = normalizeRequiresCapabilities(fields.requires_capabilities);
       fields = { ...fields, requires_capabilities: n === undefined ? null : n };
+    }
+    // D2c: defense-in-depth — validate preferred_preset_id at service layer
+    if ('preferred_preset_id' in fields && fields.preferred_preset_id !== null) {
+      if (typeof fields.preferred_preset_id !== 'string' || fields.preferred_preset_id.trim() === '') {
+        throw new BadRequestError('preferred_preset_id must be a non-empty string or null');
+      }
+      if (validatePresetId) {
+        try {
+          validatePresetId(fields.preferred_preset_id);
+        } catch (err) {
+          // Re-throw NotFoundError as BadRequestError for a clean 400 at HTTP layer
+          throw new BadRequestError(`preferred_preset_id not found: ${fields.preferred_preset_id}`);
+        }
+      }
     }
     const setClauses = [];
     const params = { id };
