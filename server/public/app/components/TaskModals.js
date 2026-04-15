@@ -146,6 +146,9 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
   const [projectBindings, setProjectBindings] = useState([]); // auto_apply bindings
   const [taskBindings, setTaskBindings] = useState([]); // task-level bindings
   const [selectedIds, setSelectedIds] = useState(new Set());
+  // Phase 10E: worker preset dropdown
+  const [presets, setPresets] = useState([]);
+  const [presetId, setPresetId] = useState('');
   useEscape(open, onClose);
 
   useEffect(() => {
@@ -153,6 +156,14 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
       setPrompt(task.description || '');
       setAgentProfileId(task.agent_profile_id || agents[0]?.id || '');
       setSelectedIds(new Set());
+      setPresetId(task.preferred_preset_id || '');
+      // Phase 10E: load available presets (best-effort — route may be absent in older deployments)
+      (async () => {
+        try {
+          const res = await apiFetch('/api/worker-presets');
+          setPresets(res.presets || []);
+        } catch { setPresets([]); }
+      })();
       // Load skill packs
       (async () => {
         try {
@@ -248,7 +259,7 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
     try {
       // Send skill_pack_ids = explicitly selected packs beyond auto_apply/task bindings
       const extraIds = [...selectedIds].filter(id => !autoApplyIds.has(id) && !taskBoundIds.has(id));
-      await onExecute(task.id, agentProfileId, prompt, extraIds.length > 0 ? extraIds : undefined);
+      await onExecute(task.id, agentProfileId, prompt, extraIds.length > 0 ? extraIds : undefined, presetId || undefined);
       onClose();
     } catch (err) {
       addToast(err.message, 'error');
@@ -275,6 +286,24 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
           <div class="form-field">
             <label class="form-label">Prompt / Instructions</label>
             <textarea class="form-textarea" value=${prompt} onInput=${e => setPrompt(e.target.value)} rows="4" placeholder="Instructions for the agent..."></textarea>
+          </div>
+
+          <!-- Worker Preset (Phase 10E) -->
+          <div class="form-field">
+            <label class="form-label">Worker Preset</label>
+            <select class="form-select" value=${presetId} onChange=${e => setPresetId(e.target.value)}>
+              <option value="">None (default — host environment)</option>
+              ${presets.map(p => html`
+                <option key=${p.id} value=${p.id}>
+                  ${p.name}${p.isolated ? ' (isolated)' : ''}
+                </option>
+              `)}
+            </select>
+            ${task.preferred_preset_id && task.preferred_preset_id !== presetId && html`
+              <div class="small" style=${{ color: 'var(--muted)', marginTop: '4px' }}>
+                Task default is <code>${task.preferred_preset_id}</code>.
+              </div>
+            `}
           </div>
 
           <!-- Skill Pack Selection (Phase 3-3) -->
@@ -472,7 +501,7 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
     }
   };
 
-  const handleExecuteDone = async (taskId, agentProfileId, prompt, skillPackIds) => {
+  const handleExecuteDone = async (taskId, agentProfileId, prompt, skillPackIds, presetId) => {
     const prevStatus = task.status;
     // Move to in_progress (ignore error if already in that state)
     try {
@@ -486,7 +515,7 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
     let newRun;
     try {
       const data = await apiFetch(`/api/tasks/${taskId}/execute`, {
-        method: 'POST', body: JSON.stringify({ agent_profile_id: agentProfileId, prompt: prompt || undefined, skill_pack_ids: skillPackIds }),
+        method: 'POST', body: JSON.stringify({ agent_profile_id: agentProfileId, prompt: prompt || undefined, skill_pack_ids: skillPackIds, preset_id: presetId || undefined }),
       });
       newRun = data.run;
     } catch (err) {
