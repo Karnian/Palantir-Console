@@ -1,7 +1,33 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 
-function createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService }) {
+/**
+ * Phase 10F: compute a shallow drift summary between a run's frozen preset
+ * snapshot and the current preset row. Returns
+ * `{ deleted, changed_fields[], current_hash? }`. `changed_fields` is the
+ * subset of `name|description|isolated|plugin_refs|mcp_server_ids|
+ * base_system_prompt|setting_sources|min_claude_version` whose value
+ * differs between the snapshot and the current preset.
+ */
+function computePresetDrift(snapshotCore, currentPreset) {
+  if (!snapshotCore) return null;
+  if (!currentPreset) return { deleted: true, changed_fields: [] };
+  const FIELDS = [
+    'name', 'description', 'isolated', 'plugin_refs', 'mcp_server_ids',
+    'base_system_prompt', 'setting_sources', 'min_claude_version',
+  ];
+  const changed = [];
+  for (const f of FIELDS) {
+    const a = snapshotCore[f];
+    const b = currentPreset[f];
+    const aJson = JSON.stringify(a == null ? null : a);
+    const bJson = JSON.stringify(b == null ? null : b);
+    if (aJson !== bJson) changed.push(f);
+  }
+  return { deleted: false, changed_fields: changed };
+}
+
+function createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService }) {
   const router = express.Router();
 
   router.get('/', asyncHandler(async (req, res) => {
@@ -13,6 +39,42 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
   router.get('/:id', asyncHandler(async (req, res) => {
     const run = runService.getRun(req.params.id);
     res.json({ run });
+  }));
+
+  // Phase 10F: per-run preset snapshot + drift comparison against current
+  // preset. Returns 200 with `snapshot: null, drift: null` when the run
+  // has no preset bound. When the preset has been deleted since,
+  // `currentPreset` is null and `drift.deleted` is true.
+  router.get('/:id/preset-snapshot', asyncHandler(async (req, res) => {
+    if (!presetService) {
+      return res.status(501).json({ error: 'Preset service unavailable' });
+    }
+    const run = runService.getRun(req.params.id);
+    const snapshot = presetService.getSnapshotForRun(req.params.id);
+    if (!snapshot) {
+      return res.json({ run_id: run.id, snapshot: null, current_preset: null, drift: null });
+    }
+    let currentPreset = null;
+    try { currentPreset = presetService.getPreset(snapshot.preset_id); }
+    catch { currentPreset = null; }
+
+    let snapshotCore = null;
+    try { snapshotCore = JSON.parse(snapshot.snapshot_json); }
+    catch { snapshotCore = null; }
+
+    const drift = computePresetDrift(snapshotCore, currentPreset);
+    res.json({
+      run_id: run.id,
+      snapshot: {
+        preset_id: snapshot.preset_id,
+        preset_snapshot_hash: snapshot.preset_snapshot_hash,
+        applied_at: snapshot.applied_at,
+        core: snapshotCore,
+        file_hashes: snapshot.file_hashes,
+      },
+      current_preset: currentPreset,
+      drift,
+    });
   }));
 
   router.get('/:id/events', asyncHandler(async (req, res) => {
@@ -110,4 +172,4 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
   return router;
 }
 
-module.exports = { createRunsRouter };
+module.exports = { createRunsRouter, computePresetDrift };

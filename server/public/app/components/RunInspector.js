@@ -62,6 +62,9 @@ export function RunInspector({ run, onClose }) {
   const [skillPacks, setSkillPacks] = useState([]);
   const [skillsLoaded, setSkillsLoaded] = useState(false);
   const [acceptanceChecks, setAcceptanceChecks] = useState([]);
+  // Phase 10F: preset snapshot + drift
+  const [presetData, setPresetData] = useState(null);
+  const [presetLoaded, setPresetLoaded] = useState(false);
   const outputRef = useRef(null);
   const userScrolledUp = useRef(false);
 
@@ -222,6 +225,20 @@ export function RunInspector({ run, onClose }) {
           }}>
             Skills${skillPacks.length > 0 ? ` (${skillPacks.length})` : ''}
           </button>
+          ${currentRun?.preset_id && html`
+            <button class="run-inspector-tab ${tab === 'preset' ? 'active' : ''}" onClick=${async () => {
+              setTab('preset');
+              if (!presetLoaded) {
+                try {
+                  const data = await apiFetch('/api/runs/' + run.id + '/preset-snapshot');
+                  setPresetData(data);
+                } catch { /* ignore */ }
+                setPresetLoaded(true);
+              }
+            }}>
+              Preset${presetData?.drift?.changed_fields?.length ? ` ⚠ ${presetData.drift.changed_fields.length}` : presetData?.drift?.deleted ? ' ⚠ deleted' : ''}
+            </button>
+          `}
         </div>
 
         ${tab === 'output' && html`
@@ -287,6 +304,54 @@ export function RunInspector({ run, onClose }) {
                 return item;
               });
             })()}
+          </div>
+        `}
+
+        ${tab === 'preset' && html`
+          <div class="run-skills-section" style=${{ flex: 1, overflowY: 'auto', padding: '16px' }}>
+            ${!presetLoaded && html`<div style="color:var(--text-muted);">Loading preset snapshot...</div>`}
+            ${presetLoaded && !presetData?.snapshot && html`
+              <div style="color:var(--text-muted);">No preset bound to this run.</div>
+            `}
+            ${presetLoaded && presetData?.snapshot && html`
+              <div style=${{ marginBottom: '12px' }}>
+                <div style=${{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                  Preset id: <code>${presetData.snapshot.preset_id}</code>
+                </div>
+                <div style=${{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                  Snapshot hash: <code>${(presetData.snapshot.preset_snapshot_hash || '').slice(0, 12)}…</code>
+                </div>
+                <div style=${{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                  Applied: ${presetData.snapshot.applied_at}
+                </div>
+              </div>
+              ${presetData.drift?.deleted && html`
+                <div style=${{ padding: '8px', background: 'color-mix(in srgb, var(--status-failed) 15%, transparent)', color: 'var(--status-failed)', borderRadius: '4px', marginBottom: '12px' }}>
+                  ⚠ The preset has been deleted since this run. Snapshot below is the only record.
+                </div>
+              `}
+              ${presetData.drift && !presetData.drift.deleted && presetData.drift.changed_fields.length > 0 && html`
+                <div style=${{ padding: '8px', background: 'color-mix(in srgb, #f59e0b 15%, transparent)', color: '#f59e0b', borderRadius: '4px', marginBottom: '12px' }}>
+                  ⚠ Preset drift detected. Changed fields:
+                  <strong>${presetData.drift.changed_fields.join(', ')}</strong>
+                </div>
+              `}
+              ${presetData.drift && !presetData.drift.deleted && presetData.drift.changed_fields.length === 0 && html`
+                <div style=${{ padding: '8px', background: 'color-mix(in srgb, var(--success) 15%, transparent)', color: 'var(--success)', borderRadius: '4px', marginBottom: '12px' }}>
+                  ✓ Preset matches the snapshot — no drift.
+                </div>
+              `}
+              <div style=${{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                <div>
+                  <div style=${{ fontWeight: 600, marginBottom: '4px' }}>Snapshot (run-time)</div>
+                  <pre class="run-skill-mcp-snap" style=${{ fontSize: '11px', maxHeight: '400px', overflow: 'auto' }}>${JSON.stringify(presetData.snapshot.core, null, 2)}</pre>
+                </div>
+                <div>
+                  <div style=${{ fontWeight: 600, marginBottom: '4px' }}>Current preset</div>
+                  <pre class="run-skill-mcp-snap" style=${{ fontSize: '11px', maxHeight: '400px', overflow: 'auto' }}>${presetData.current_preset ? JSON.stringify(presetData.current_preset, null, 2) : '(deleted)'}</pre>
+                </div>
+              </div>
+            `}
           </div>
         `}
 
