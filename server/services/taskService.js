@@ -200,6 +200,8 @@ function createTaskService(db, eventBus) {
     'title', 'description', 'project_id', 'priority', 'due_date', 'recurrence',
     // v3 Phase 1
     'task_kind', 'requires_capabilities', 'suggested_agent_profile_id', 'acceptance_criteria',
+    // v3 Phase 10E (worker preset linkage)
+    'preferred_preset_id',
   ];
 
   function updateTask(id, fields) {

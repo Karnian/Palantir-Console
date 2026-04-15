@@ -138,10 +138,12 @@ test('Phase 10C: Claude worker with preset — systemPrompt composed, mcpConfig 
   const opts = sje.spawned[0].opts;
   // systemPrompt starts with preset base — §6.8 ordering
   assert.ok(opts.systemPrompt && opts.systemPrompt.startsWith('PRESET PROMPT'), 'preset prompt first');
-  // mcpConfig is a written file
-  assert.ok(opts.mcpConfig && fs.existsSync(opts.mcpConfig), 'mcpConfig file written');
-  const merged = JSON.parse(fs.readFileSync(opts.mcpConfig, 'utf8'));
-  assert.ok(merged.mcpServers.ctx7, 'ctx7 MCP from preset present');
+  // mcpConfig was computed (path may be cleaned up by parallel tests' orphan
+  // sweep — verify via DB snapshot which cannot be touched by other tests).
+  assert.ok(opts.mcpConfig, 'mcpConfig path set');
+  const runFromDb = rs.getRun(run.id);
+  const mergedSnapshot = JSON.parse(runFromDb.mcp_config_snapshot || '{}');
+  assert.ok(mergedSnapshot.mcpServers && mergedSnapshot.mcpServers.ctx7, 'ctx7 MCP from preset present in snapshot');
 
   // runs.preset_id + preset_snapshot_hash bound
   const persistedRun = rs.getRun(run.id);
@@ -274,7 +276,7 @@ test('Phase 10C: MCP precedence preset > project > skillPack when all present', 
   const db = await mkdb(t);
   const pluginsRoot = mkPluginsRoot(t);
   const presetService = createPresetService(db, { pluginsRoot });
-  const { lc, sje, ps } = buildLifecycle(db, { presetService });
+  const { lc, sje, ps, rs } = buildLifecycle(db, { presetService });
 
   const tmpProjectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'p10c-proj-'));
   t.after(() => fs.rmSync(tmpProjectDir, { recursive: true, force: true }));
@@ -297,8 +299,11 @@ test('Phase 10C: MCP precedence preset > project > skillPack when all present', 
   // so just assert preset.ctx7 present + project overlays preserved.
   const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
   const opts = sje.spawned[0].opts;
-  assert.ok(opts.mcpConfig && fs.existsSync(opts.mcpConfig));
-  const merged = JSON.parse(fs.readFileSync(opts.mcpConfig, 'utf8'));
+  // Avoid reading the file path directly — parallel tests may sweep it via
+  // lifecycleService.cleanupOrphanMcpConfigs. Read from the DB snapshot.
+  assert.ok(opts.mcpConfig);
+  const runDb = rs.listRuns({ })[0];
+  const merged = JSON.parse(runDb.mcp_config_snapshot || '{}');
   assert.ok(merged.mcpServers.ctx7, 'preset ctx7');
   assert.ok(merged.mcpServers.shared && merged.mcpServers.shared.command === 'project', 'project shared');
   assert.ok(merged.mcpServers.projectOnly, 'project projectOnly');
