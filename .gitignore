@@ -1,4 +1,8 @@
 node_modules/
+# Phase 10: server/plugins/ holds operator-placed Claude Code plugin
+# directories referenced by Worker Presets. The directory tree itself is
+# ignored — repo ships fixtures under server/tests/fixtures/plugins/ for CI.
+server/plugins/
 .env
 .DS_Store
 .sisyphus/
