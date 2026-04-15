@@ -251,6 +251,7 @@ export function PresetsView() {
   const [loading, setLoading] = useState(true);
   const [presets, setPresets] = useState([]);
   const [pluginRefs, setPluginRefs] = useState([]);
+  const [pluginWarnings, setPluginWarnings] = useState([]);
   const [templates, setTemplates] = useState([]);
   const [editTarget, setEditTarget] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
@@ -266,6 +267,7 @@ export function PresetsView() {
       ]);
       setPresets(p.presets || []);
       setPluginRefs(r.plugin_refs || []);
+      setPluginWarnings(r.warnings || []);
       setTemplates(t.templates || []);
     } catch (err) { addToast(err.message, 'error'); }
     setLoading(false);
@@ -281,6 +283,29 @@ export function PresetsView() {
           + New Preset
         </button>
       </div>
+      ${!loading && pluginWarnings.length > 0 && html`
+        <div style=${{
+          display: 'flex', alignItems: 'flex-start', gap: '8px',
+          padding: '8px 12px',
+          background: 'color-mix(in srgb, #f59e0b 12%, transparent)',
+          border: '1px solid color-mix(in srgb, #f59e0b 40%, transparent)',
+          borderRadius: '6px',
+          marginBottom: '12px',
+          fontSize: '12px',
+        }}>
+          <span style=${{ color: '#f59e0b', flexShrink: 0 }} title="Malformed plugin.json detected">⚠</span>
+          <div>
+            <span style=${{ color: '#f59e0b', fontWeight: 600 }}>
+              ${pluginWarnings.length} plugin director${pluginWarnings.length === 1 ? 'y has' : 'ies have'} a malformed plugin.json and will be skipped:
+            </span>
+            <ul style=${{ margin: '4px 0 0 0', paddingLeft: '16px', color: 'var(--text-secondary)' }}>
+              ${pluginWarnings.map((w, i) => html`
+                <li key=${i}><code>${w.dir}</code> — ${w.reason}</li>
+              `)}
+            </ul>
+          </div>
+        </div>
+      `}
       ${loading && html`<${Loading} />`}
       ${!loading && presets.length === 0 && html`
         <${EmptyState}
