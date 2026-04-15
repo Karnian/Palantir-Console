@@ -10,4 +10,5 @@ export const NAV_ITEMS = [
   { hash: 'projects',  icon: '\u25A3', label: 'Projects' },
   { hash: 'agents',    icon: '\u2699', label: 'Agents' },
   { hash: 'skills',    icon: '\u2662', label: 'Skill Packs' },
+  { hash: 'presets',   icon: '\u2756', label: 'Presets' },
 ];

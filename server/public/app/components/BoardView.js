@@ -213,7 +213,7 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
     }
   };
 
-  const handleExecute = async (taskId, agentProfileId, prompt, skillPackIds) => {
+  const handleExecute = async (taskId, agentProfileId, prompt, skillPackIds, presetId) => {
     const prevStatus = executeTask?._previousStatus || 'todo';
     // Move task to in_progress first, then execute
     try {
@@ -228,7 +228,7 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
     try {
       await apiFetch(`/api/tasks/${taskId}/execute`, {
         method: 'POST',
-        body: JSON.stringify({ agent_profile_id: agentProfileId, prompt: prompt || undefined, skill_pack_ids: skillPackIds }),
+        body: JSON.stringify({ agent_profile_id: agentProfileId, prompt: prompt || undefined, skill_pack_ids: skillPackIds, preset_id: presetId || undefined }),
       });
     } catch (err) {
       // Rollback: if execution failed, revert to previous status
