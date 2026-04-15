@@ -236,7 +236,14 @@ export function RunInspector({ run, onClose }) {
                 setPresetLoaded(true);
               }
             }}>
-              Preset${presetData?.drift?.changed_fields?.length ? ` ⚠ ${presetData.drift.changed_fields.length}` : presetData?.drift?.deleted ? ' ⚠ deleted' : ''}
+              ${(() => {
+                if (!presetData) return 'Preset';
+                const d = presetData.drift;
+                if (!d) return 'Preset';
+                if (d.deleted) return 'Preset ⚠ deleted';
+                const totalChanges = (d.changed_fields?.length || 0) + (d.changed_files?.length || 0);
+                return totalChanges > 0 ? `Preset ⚠ ${totalChanges}` : 'Preset';
+              })()}
             </button>
           `}
         </div>
@@ -330,13 +337,32 @@ export function RunInspector({ run, onClose }) {
                   ⚠ The preset has been deleted since this run. Snapshot below is the only record.
                 </div>
               `}
-              ${presetData.drift && !presetData.drift.deleted && presetData.drift.changed_fields.length > 0 && html`
+              ${presetData.drift && !presetData.drift.deleted && presetData.drift.has_drift && html`
                 <div style=${{ padding: '8px', background: 'color-mix(in srgb, #f59e0b 15%, transparent)', color: '#f59e0b', borderRadius: '4px', marginBottom: '12px' }}>
-                  ⚠ Preset drift detected. Changed fields:
-                  <strong>${presetData.drift.changed_fields.join(', ')}</strong>
+                  ⚠ Preset drift detected.
+                  ${presetData.drift.changed_fields?.length > 0 && html`
+                    <div style=${{ marginTop: '4px' }}>
+                      Changed fields: <strong>${presetData.drift.changed_fields.join(', ')}</strong>
+                    </div>
+                  `}
+                  ${presetData.drift.changed_files?.length > 0 && html`
+                    <div style=${{ marginTop: '6px' }}>
+                      <strong>Changed plugin files (${presetData.drift.changed_files.length}):</strong>
+                      <ul style=${{ margin: '4px 0 0 0', paddingLeft: '16px', fontSize: '11px' }}>
+                        ${presetData.drift.changed_files.map((f, i) => html`
+                          <li key=${i}>
+                            <code style=${{ marginRight: '6px' }}>${f.path}</code>
+                            <span style=${{ color: f.status === 'deleted' ? 'var(--status-failed)' : f.status === 'added' ? 'var(--success)' : '#f59e0b' }}>
+                              ${f.status}
+                            </span>
+                          </li>
+                        `)}
+                      </ul>
+                    </div>
+                  `}
                 </div>
               `}
-              ${presetData.drift && !presetData.drift.deleted && presetData.drift.changed_fields.length === 0 && html`
+              ${presetData.drift && !presetData.drift.deleted && !presetData.drift.has_drift && html`
                 <div style=${{ padding: '8px', background: 'color-mix(in srgb, var(--success) 15%, transparent)', color: 'var(--success)', borderRadius: '4px', marginBottom: '12px' }}>
                   ✓ Preset matches the snapshot — no drift.
                 </div>
