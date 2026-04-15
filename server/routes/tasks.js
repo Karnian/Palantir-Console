@@ -2,7 +2,7 @@ const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { validateCreateTask, validateUpdateTask } = require('../middleware/validate');
 
-function createTasksRouter({ taskService, lifecycleService }) {
+function createTasksRouter({ taskService, lifecycleService, presetService }) {
   const router = express.Router();
 
   router.get('/', asyncHandler(async (req, res) => {
@@ -29,7 +29,21 @@ function createTasksRouter({ taskService, lifecycleService }) {
   }));
 
   router.patch('/:id', validateUpdateTask, asyncHandler(async (req, res) => {
-    const task = taskService.updateTask(req.params.id, req.body || {});
+    const body = req.body || {};
+    // Gap #1: validate preferred_preset_id before writing to DB
+    if ('preferred_preset_id' in body) {
+      const pid = body.preferred_preset_id;
+      if (pid !== null && pid !== undefined) {
+        if (typeof pid !== 'string' || !pid) {
+          return res.status(400).json({ error: 'preferred_preset_id must be a string or null' });
+        }
+        if (presetService) {
+          try { presetService.getPreset(pid); }
+          catch { return res.status(400).json({ error: `Unknown preset id: ${pid}` }); }
+        }
+      }
+    }
+    const task = taskService.updateTask(req.params.id, body);
     res.json({ task });
   }));
 
