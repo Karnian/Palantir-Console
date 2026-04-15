@@ -460,6 +460,30 @@ function createPresetService(db, options = {}) {
   }
 
   /**
+   * Extract the canonical core fields from a preset for snapshot/drift purposes.
+   * Having a dedicated helper lets callers (buildSnapshot, tests) share the same shape.
+   * `description` is included so changes to it are detected in drift comparisons.
+   *
+   * @param {Object} preset       — preset row (may be partially loaded)
+   * @param {Array}  pluginRefs   — already-resolved plugin_refs array
+   * @returns {Object} snapshotCore
+   */
+  function buildSnapshotCore(preset, pluginRefs) {
+    return {
+      name: preset.name,
+      description: preset.description ?? null,
+      isolated: !!preset.isolated,
+      plugin_refs: pluginRefs,
+      mcp_server_ids: Array.isArray(preset.mcp_server_ids)
+        ? preset.mcp_server_ids
+        : safeParseArray(preset.mcp_server_ids),
+      base_system_prompt: preset.base_system_prompt || null,
+      setting_sources: preset.setting_sources || '',
+      min_claude_version: preset.min_claude_version || null,
+    };
+  }
+
+  /**
    * Build a content snapshot of a preset. Path namespace: <pluginRef>/<relpath>
    * per spec §6.5. Plugin files are cached in manifestCache by (mtime, size).
    *
@@ -470,17 +494,7 @@ function createPresetService(db, options = {}) {
     const pluginRefs = Array.isArray(preset.plugin_refs)
       ? preset.plugin_refs
       : safeParseArray(preset.plugin_refs);
-    const snapshotCore = {
-      name: preset.name,
-      isolated: !!preset.isolated,
-      plugin_refs: pluginRefs,
-      mcp_server_ids: Array.isArray(preset.mcp_server_ids)
-        ? preset.mcp_server_ids
-        : safeParseArray(preset.mcp_server_ids),
-      base_system_prompt: preset.base_system_prompt || null,
-      setting_sources: preset.setting_sources || '',
-      min_claude_version: preset.min_claude_version || null,
-    };
+    const snapshotCore = buildSnapshotCore(preset, pluginRefs);
     const snapshotJson = JSON.stringify(snapshotCore);
 
     const fileHashes = [];
