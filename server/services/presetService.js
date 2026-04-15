@@ -405,28 +405,50 @@ function createPresetService(db, options = {}) {
   }
 
   /**
-   * Return the list of plugin directories present under pluginsRoot that
-   * have a `plugin.json` at their root. Used by UI dropdowns.
+   * Return valid plugin directories present under pluginsRoot that have a
+   * parseable `plugin.json`. Directories whose manifest is missing, unparseable,
+   * or not a plain object are skipped and reported in `warnings`.
+   *
+   * Returns `{ plugin_refs: [...], warnings: [{ dir, reason }] }`.
+   * Used by UI dropdowns and GET /api/worker-presets/plugin-refs.
    */
   function listPluginRefs() {
     let entries;
     try {
       entries = fs.readdirSync(pluginsRoot, { withFileTypes: true });
     } catch (err) {
-      if (err.code === 'ENOENT') return [];
+      if (err.code === 'ENOENT') return { plugin_refs: [], warnings: [] };
       throw err;
     }
     const out = [];
+    const warnings = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       if (entry.name.startsWith('.')) continue;
       const manifestPath = path.join(pluginsRoot, entry.name, 'plugin.json');
+      // plugin.json must exist and be a regular file
       try {
         if (!fs.statSync(manifestPath).isFile()) continue;
       } catch { continue; }
+      // plugin.json must parse as a plain object
       let meta = null;
-      try { meta = JSON.parse(fs.readFileSync(manifestPath, 'utf8')); }
-      catch { /* ignore invalid manifest — still listed, UI will warn */ }
+      let parseError = null;
+      try {
+        const raw = fs.readFileSync(manifestPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          parseError = 'plugin.json must be a JSON object';
+        } else {
+          meta = parsed;
+        }
+      } catch (err) {
+        parseError = err.message;
+      }
+      if (parseError !== null) {
+        console.warn(`[preset] skipped malformed plugin.json at ${manifestPath}: ${parseError}`);
+        warnings.push({ dir: entry.name, reason: parseError });
+        continue;
+      }
       out.push({
         name: entry.name,
         description: meta?.description || null,
@@ -434,7 +456,7 @@ function createPresetService(db, options = {}) {
       });
     }
     out.sort((a, b) => a.name.localeCompare(b.name));
-    return out;
+    return { plugin_refs: out, warnings };
   }
 
   /**
