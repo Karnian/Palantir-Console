@@ -6,7 +6,7 @@
 > "Then"은 코드 내부 동작이 아닌 **관찰 가능한 결과**(DOM, API 응답, DB 상태, 토스트 등)로 작성한다.
 > 시나리오 ID prefix: `PRJ`, `TSK`, `BRD`, `RUN`, `INS`, `MGR`, `PM`, `CONV`, `ROUTER`, `DRIFT`, `DSH`, `AGT`, `PRESET`, `KBD`, `SSE`, `AUTH`, `SES`, `TRS`, `FS`, `USG`, `CLS`, `REG`.
 >
-> *현재 main 기준. v3 Phase 0~8 merged (#20~#32, #60~#64, #65~#71).* Phase 3b 는 트리거 조건 미충족으로 대기. 자세한 phase 히스토리는 `docs/specs/manager-v3-multilayer.md` §15 참조.
+> *현재 main 기준. v3 Phase 0~10 merged (#20~#32, #60~#64, #65~#71, #85~#94).* Phase 3b 는 트리거 조건 미충족으로 대기. 자세한 phase 히스토리는 `docs/specs/manager-v3-multilayer.md` §15 참조.
 
 ---
 
@@ -766,8 +766,8 @@
 
 ### KBD-04 — Command Palette에서 숫자키로 빠른 뷰 전환
 - **Given** Command Palette 열림
-- **When** 숫자키 1~5
-- **Then** NAV_ITEMS 순서대로 해당 뷰로 전환 (1=Dashboard, 2=Manager, 3=Task Board, 4=Projects, 5=Agents — `NAV_ITEMS.length`만큼 매핑)
+- **When** 숫자키 1~N (N = `NAV_ITEMS.length`, 현재 7)
+- **Then** NAV_ITEMS 순서대로 해당 뷰로 전환 (1=Dashboard, 2=Manager, 3=Task Board, 4=Projects, 5=Agents, 6=Skill Packs, 7=Presets — `NAV_ITEMS.length`만큼 매핑). 숫자키는 검색 query 가 비어있을 때만 동작 (타이핑 충돌 방지)
 
 ---
 
@@ -823,21 +823,24 @@
 ## 11. 인증 / 보안 (AUTH)
 
 ### AUTH-01 — 토큰 미설정 모드
-- **Given** `PALANTIR_TOKEN` 미설정
+- **Given** `PALANTIR_TOKEN` 미설정, `HOST` 환경변수 미설정
 - **When** 서버 시작
 - **Then**
-  - 서버는 **항상 `0.0.0.0`에 바인딩** (localhost 전용 아님)
+  - 서버는 **`127.0.0.1`에 바인딩** (loopback 전용 — PR1 binding policy)
+  - `PALANTIR_TOKEN` 설정 시 자동으로 `0.0.0.0` 승격, `HOST=` 명시 시 해당 값 사용
   - 모든 API에 인증 미적용 (next 통과)
-  - 시작 시 `[security] WARNING: No PALANTIR_TOKEN set` 로그 출력
+  - 시작 시 `[security] No PALANTIR_TOKEN set — auth disabled.` 로그 출력
 
-### AUTH-02 — 토큰 설정 모드
+### AUTH-02 — 토큰 설정 모드 (Bearer + Cookie)
 - **Given** `PALANTIR_TOKEN=secret`
 - **When** API 호출
 - **Then**
   - `Authorization: Bearer secret` 헤더 없거나 잘못 → 403
   - 헤더 일치 → 정상 응답
-  - **`?token=secret` 쿼리 파라미터 인증은 현재 지원하지 않음** (Bearer 헤더만)
-  - 비교는 timing-safe (`crypto.timingSafeEqual`)
+  - **Cookie 인증**: `palantir_token=secret` HttpOnly 쿠키로도 인증 가능 (EventSource SSE 는 커스텀 헤더 전송 불가 → Bearer 만으로는 SSE 가 구조적으로 막히기 때문)
+  - Bearer 헤더가 존재하지만 잘못된 경우 → Cookie 로 fallback 하지 **않음** (명시적 실패, request-smuggling 방지)
+  - **`?token=secret` 쿼리 파라미터 인증은 지원하지 않음** (access-log leak 방지)
+  - 비교는 timing-safe (`crypto.timingSafeEqual`) — Bearer / Cookie 양쪽 모두
 
 ### AUTH-03 — Manager start 시 cwd 가드
 - **Given** Manager start 요청
