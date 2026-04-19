@@ -418,7 +418,8 @@ function createSkillPackService(db) {
         continue;
       }
 
-      const args = template.args ? JSON.parse(template.args) : [];
+      let args = [];
+      try { args = template.args ? JSON.parse(template.args) : []; } catch { /* malformed args — use empty */ }
       const env = {};
       const envOverrides = config?.env_overrides;
       if (envOverrides && typeof envOverrides === 'object') {
