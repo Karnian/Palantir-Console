@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
@@ -49,7 +50,7 @@ async function createTestApp(t, { fetchStub } = {}) {
 
 function samplePack(overrides = {}) {
   return {
-    name: 'Test URL Pack',
+    name: overrides.name || `Test URL Pack ${crypto.randomUUID().slice(0, 8)}`,
     description: 'URL-fetched pack for tests',
     category: 'general',
     author: 'test-author',
@@ -120,7 +121,7 @@ test('POST /install-url full flow: dry_run → confirm → installed', async (t)
   const fetchStub = async () => ({
     canonicalUrl: 'https://example.com/p.json',
     displayUrl: 'https://example.com/p.json',
-    pack: samplePack(),
+    pack: samplePack({ name: 'Test URL Pack' }),
     hash: 'abc123',
   });
   const { app } = await createTestApp(t, { fetchStub });

@@ -65,6 +65,7 @@ export function RunInspector({ run, onClose }) {
   // Phase 10F: preset snapshot + drift
   // presetLoaded guard removed (D2a): always refetch on tab activation for freshness.
   const [presetData, setPresetData] = useState(null);
+  const [presetFetchError, setPresetFetchError] = useState(null);
   const [presetFetching, setPresetFetching] = useState(false);
   const presetFetchRef = useRef(false); // in-flight dedup
   const outputRef = useRef(null);
@@ -237,7 +238,11 @@ export function RunInspector({ run, onClose }) {
               try {
                 const data = await apiFetch('/api/runs/' + run.id + '/preset-snapshot');
                 setPresetData(data);
-              } catch { /* ignore */ } finally {
+                setPresetFetchError(null);
+              } catch (err) {
+                // Keep existing presetData if already loaded (transient errors shouldn't wipe valid snapshot)
+                setPresetFetchError(err.message || 'Failed to load preset');
+              } finally {
                 presetFetchRef.current = false;
                 setPresetFetching(false);
               }
@@ -326,6 +331,11 @@ export function RunInspector({ run, onClose }) {
         ${tab === 'preset' && html`
           <div class="run-skills-section" style=${{ flex: 1, overflowY: 'auto', padding: '16px' }}>
             ${presetFetching && html`<div style="color:var(--text-muted);">Loading preset snapshot...</div>`}
+            ${!presetFetching && presetFetchError && html`
+              <div style=${{ padding: '8px', background: 'color-mix(in srgb, var(--status-failed) 15%, transparent)', color: 'var(--status-failed)', borderRadius: '4px', marginBottom: '12px' }}>
+                Failed to refresh preset snapshot: ${presetFetchError}
+              </div>
+            `}
             ${!presetFetching && !presetData?.snapshot && html`
               <div style="color:var(--text-muted);">No preset bound to this run.</div>
             `}
