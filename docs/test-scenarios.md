@@ -6,7 +6,7 @@
 > "Then"은 코드 내부 동작이 아닌 **관찰 가능한 결과**(DOM, API 응답, DB 상태, 토스트 등)로 작성한다.
 > 시나리오 ID prefix: `PRJ`, `TSK`, `BRD`, `RUN`, `INS`, `MGR`, `PM`, `CONV`, `ROUTER`, `DRIFT`, `DSH`, `AGT`, `PRESET`, `KBD`, `SSE`, `AUTH`, `SES`, `TRS`, `FS`, `USG`, `CLS`, `REG`.
 >
-> *현재 main 기준. v3 Phase 0~10 merged (#20~#32, #60~#64, #65~#71, #85~#94).* Phase 3b 는 트리거 조건 미충족으로 대기. 자세한 phase 히스토리는 `docs/specs/manager-v3-multilayer.md` §15 참조.
+> *현재 main 기준. v3 Phase 0~10G merged (#20~#32, #60~#64, #65~#71, #85~#94, #99~#111).* Phase 3b 는 트리거 조건 미충족으로 대기. 자세한 phase 히스토리는 `docs/specs/manager-v3-multilayer.md` §15 참조.
 
 ---
 
