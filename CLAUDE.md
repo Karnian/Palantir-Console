@@ -42,17 +42,17 @@ node --test server/tests/v2-api.test.js
 
 ## Architecture
 
-Express.js 5 + SQLite (WAL, better-sqlite3) + Preact/HTM (CDN 없이 vendor/ UMD).
-빌드 스텝 없음 — `server/public/`의 파일이 그대로 서빙됨.
+Express.js 5 + SQLite (WAL, better-sqlite3) + Preact/HTM (CDN 없이 vendor/ UMD) + Inter font (self-hosted woff2).
+빌드 스텝 없음 — `server/public/`의 파일이 그대로 서빙됨. 외부 CDN 의존 0개.
 
 **v3 기준 (Phase 0~9 merged)**: Top manager + 프로젝트 단위 PM (lazy-spawn, conversation identity), deterministic router, annotate-only drift reconciliation, SSE 시맨틱 envelope. P8: app.js ESM 전환, hooks 분할, ManagerView 분할. P9: 전 컴포넌트 직접 ESM import (window bridge 0개), SessionsView Preact 재작성.
 
 ```
 server/
-  index.js                    — 진입점, 포트/auth 설정
+  index.js                    — 진입점, 포트/auth 설정, SIGINT/SIGTERM graceful shutdown
   app.js                      — Express 앱 조립 (라우터, 서비스, 미들웨어)
   db/database.js              — SQLite 초기화 + 자동 마이그레이션
-  db/migrations/              — 001_initial ~ 012_add_stopped_status.sql
+  db/migrations/              — 001_initial ~ 019_task_preferred_preset_idx.sql
   routes/
     manager.js                — Top/PM /api/manager/* + /pm/:projectId/message + /reset
     conversations.js          — /api/conversations/:id/* (top|pm:<id>|worker:<id>)
@@ -60,6 +60,10 @@ server/
     dispatchAudit.js          — /api/dispatch-audit (POST/GET, annotate-only)
     tasks.js, runs.js, projects.js, agents.js, events.js
     sessions.js, trash.js, fs.js, usage.js, claude-sessions.js — legacy + support
+    workerPresets.js          — Worker Preset CRUD (Phase 10B)
+  utils/
+    pathGuard.js              — isWithinRoot() 경로 traversal 방어 유틸
+    errors.js                 — AppError / BadRequestError / NotFoundError
   services/
     streamJsonEngine.js       — Claude Code CLI stream-json (Manager용)
     managerAdapters/
@@ -96,8 +100,10 @@ server/
     app/components/ConversationPanel.js — 대화 패널 (P9-4)
     app/components/TaskModals.js   — NewTaskModal, ExecuteModal, TaskDetailPanel (P7-1)
     app/lib/notifications.js       — Browser notifications + tab pulse (P7-4)
+    app/lib/a11y.js                — clickableProps() 키보드 접근성 유틸
     styles.css                — 전체 스타일
-    vendor/                   — Preact/HTM UMD/ESM 번들 (빌드 불필요)
+    styles/fonts.css          — Inter @font-face 정의 (self-hosted)
+    vendor/                   — Preact/HTM UMD/ESM 번들 + Inter woff2 (빌드 불필요)
   tests/
     conversation.test.js      — Phase 1.5/2 parent-notice + registry + rotation
     pm-phase3a.test.js        — Phase 3a lazy spawn + cleanup (fail-closed)
@@ -110,7 +116,7 @@ server/
     v2-api.test.js, api.test.js, boot.smoke.test.js, …
 ```
 
-> **521 tests** 기준. 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙.
+> **792 tests** 기준 (PR #111 시점). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙.
 
 ## Key Patterns
 
@@ -182,9 +188,9 @@ server/
 
 ### DB
 - SQLite WAL 모드. `palantir.db` (gitignored)
-- 서버 시작 시 `db/migrations/` 자동 실행 (현재 001~010)
+- 서버 시작 시 `db/migrations/` 자동 실행 (현재 001~019)
 - `better-sqlite3` 동기 API 사용
-- `runs.manager_layer`, `runs.conversation_id` (009), `dispatch_audit_log` (010), `project_briefs` (008) 등 v3 필드 존재
+- `runs.manager_layer`, `runs.conversation_id` (009), `dispatch_audit_log` (010), `project_briefs` (008), `worker_presets` (018), `tasks.preferred_preset_id` index (019) 등 v3 필드 존재
 
 ## Style Guidelines
 
@@ -197,7 +203,9 @@ server/
 
 - **바인딩 정책 (PR1 / NEW-S1 + P0-1)**: 기본 `127.0.0.1`. `PALANTIR_TOKEN` 이 설정되면 자동으로 `0.0.0.0` 으로 승격. 사용자가 `HOST=` 를 명시하면 그대로 사용하되, 토큰 없이 `HOST=0.0.0.0` 이면 위험 경고를 찍음. 토큰 미설정 시 auth 비활성 + `[security] No PALANTIR_TOKEN set — auth disabled.` 로그. 이전(항상 0.0.0.0) 동작은 breaking change — 기존 배포는 `HOST=0.0.0.0` 을 명시하거나 토큰을 설정해야 같은 바인딩을 얻는다.
 - **브라우저 쿠키 인증**: `PALANTIR_TOKEN` 이 설정된 경우 브라우저는 `palantir_token` HttpOnly 쿠키로 인증한다 (EventSource 는 커스텀 헤더 전송 불가 → Bearer 만으로는 SSE 가 구조적으로 막혔던 문제를 수정). 사용자는 `/login.html` 에서 POST 폼으로 토큰을 입력하고, 서버가 쿠키를 set 한 뒤 sanitized `next` 경로로 리다이렉트한다. 토큰은 URL 에 절대 노출되지 않음 (초기 PR1 draft 의 `?token=` 부트스트랩은 Codex review 에서 access-log leak 블로커로 지적되어 제거). `apiFetch` 는 401/403 응답을 받으면 `/login.html?next=…` 로 bounce. CLI / 테스트는 `Authorization: Bearer` 헤더 사용. Bearer 경로가 invalid 면 cookie 로 fallback 하지 않음 — 명시적 실패.
-- **CSP self-host**: `marked` / `DOMPurify` 는 `server/public/vendor/` 에서 직접 서빙. CSP 는 `script-src 'self'; connect-src 'self'` (더 이상 cdn.jsdelivr.net 허용 안 함).
+- **CSP self-host**: `marked` / `DOMPurify` / Inter font 는 `server/public/vendor/` 에서 직접 서빙. CSP 는 `script-src 'self'; connect-src 'self'; font-src 'self'` (외부 CDN 의존 0개 — googleapis/gstatic/jsdelivr 전부 제거).
+- **세션 path traversal 방어**: `sessionService.createSession` + `trashService.restoreTrashedSession` 에서 `isWithinRoot()` 검증. `routes/sessions.js` 에서 route 레벨 `hasInvalidSessionProjectId` 이중 방어.
+- **TLS 검증**: `opencodeService.js` 의 `NODE_TLS_REJECT_UNAUTHORIZED` 기본값 `'1'` (secure). 운영자가 명시적 `'0'` 설정 시 override 가능.
 - 에이전트 명령어 allowlist 제한 (임의 명령 실행 불가)
 - `.claude-auth.json`은 절대 커밋 금지
 - CWD 검증: `/etc`, `/var`, `/usr` 등 위험 경로 차단
@@ -212,6 +220,7 @@ server/
 - `pmSpawnService` 에서 **seed runTurn 금지** — brief 은 static system prompt 에 bake. Codex 어댑터는 back-to-back runTurn 에서 "previous turn still running" 을 던진다
 - `pmCleanupService` 는 fail-closed — dispose 실패 시 상태를 유지한 채 re-throw. 호출자 (DELETE /api/projects/:id, /reset) 가 502 로 거절해야 함. 절대 swallow 하지 말 것
 - `reconciliationService.recordClaim` 의 envelope binding 은 strict — `projectId`/`taskId`/`pmRunId`/`selectedAgentProfileId` 전부 존재+소유 검증. hard input error 는 400 throw, incoherence 는 flag 로만 표시 (annotate-only 원칙: PM drift 는 기록만, block 안 함)
+- **Graceful shutdown**: `index.js` 가 SIGINT/SIGTERM → `app.shutdown()` 연결 (10s forced exit). `app.shutdown()` 은 매니저 dispose + lifecycle monitor 중단 + DB 닫기. 테스트에서는 `app.shutdown()` 직접 호출
 - Manager 프로세스는 stdin이 닫히면 종료됨 — stdin pipe를 열어두어야 함 (Claude adapter)
 - `result` 이벤트 처리 시 Manager/Worker 분기 확인 (`proc.isManager`)
 - Health check가 Manager를 잘못 죽이지 않는지 `lifecycleService.js`의 `is_manager` 가드 확인
