@@ -157,6 +157,7 @@
 - **Given** Run이 needs_input
 - **When** Send Input에 텍스트 입력 후 전송
 - **Then** stdin으로 전달, status가 running으로 복귀, 응답 이벤트 표시
+- **Coverage**: `lifecycle.test.js` mock 기반 (idle timeout → needs_input → sendAgentInput → running 복구). LLM 비결정적이므로 live E2E 불가, unit test로 커버
 
 ### INS-03 — Run 취소
 - **Given** running 상태
