@@ -1,6 +1,7 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { validateCreateTask, validateUpdateTask } = require('../middleware/validate');
+const { NotFoundError } = require('../utils/errors');
 
 function createTasksRouter({ taskService, lifecycleService, presetService }) {
   const router = express.Router();
@@ -12,7 +13,25 @@ function createTasksRouter({ taskService, lifecycleService, presetService }) {
   }));
 
   router.post('/', validateCreateTask, asyncHandler(async (req, res) => {
-    const task = taskService.createTask(req.body || {});
+    const body = req.body || {};
+    if ('preferred_preset_id' in body) {
+      const pid = body.preferred_preset_id;
+      if (pid !== null && pid !== undefined) {
+        if (typeof pid !== 'string' || !pid) {
+          return res.status(400).json({ error: 'preferred_preset_id must be a string or null' });
+        }
+        if (presetService) {
+          try { presetService.getPreset(pid); }
+          catch (e) {
+            if (e instanceof NotFoundError || e.name === 'NotFoundError') {
+              return res.status(400).json({ error: `Unknown preset id: ${pid}` });
+            }
+            throw e;
+          }
+        }
+      }
+    }
+    const task = taskService.createTask(body);
     res.status(201).json({ task });
   }));
 
@@ -39,7 +58,12 @@ function createTasksRouter({ taskService, lifecycleService, presetService }) {
         }
         if (presetService) {
           try { presetService.getPreset(pid); }
-          catch { return res.status(400).json({ error: `Unknown preset id: ${pid}` }); }
+          catch (e) {
+            if (e instanceof NotFoundError || e.name === 'NotFoundError') {
+              return res.status(400).json({ error: `Unknown preset id: ${pid}` });
+            }
+            throw e;
+          }
         }
       }
     }

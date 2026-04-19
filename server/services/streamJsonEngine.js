@@ -489,7 +489,14 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
     try {
       proc.child.stdin.write(message + '\n');
       if (runService) {
-        runService.addRunEvent(runId, 'user_input', JSON.stringify({ text: text.slice(0, 5000) }));
+        const eventPayload = { text: text ? text.slice(0, 5000) : '' };
+        if (images && images.length > 0) {
+          eventPayload.images = images.map(img => ({
+            media_type: img.media_type,
+            size: img.data ? img.data.length : 0,
+          }));
+        }
+        runService.addRunEvent(runId, 'user_input', JSON.stringify(eventPayload));
       }
       return true;
     } catch (err) {

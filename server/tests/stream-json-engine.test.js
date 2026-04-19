@@ -446,6 +446,55 @@ test('engine: sendInput returns false for text longer than 50000 chars', async (
   assert.equal(ok, false, '50001자 초과 시 false 반환');
 });
 
+test('engine: sendInput with images records image metadata in user_input event', async (t) => {
+  process.env.CLAUDE_BIN = fakeClaudioPath;
+  const rs = makeRunService();
+  const { engine } = makeEngine({ runService: rs });
+  t.after(() => engine.kill('run-img-meta'));
+
+  engine.spawnAgent('run-img-meta', { cwd: os.tmpdir(), isManager: true });
+  await waitForEvent(engine, 'run-img-meta', e => e.type === 'system');
+
+  const fakeBase64 = 'iVBORw0KGgoAAAANS'; // 17 chars
+  const ok = engine.sendInput('run-img-meta', 'describe this image', [
+    { media_type: 'image/png', data: fakeBase64 },
+  ]);
+  assert.equal(ok, true, 'sendInput with images succeeds');
+
+  // Wait for echo to confirm message was sent
+  await waitForEvent(engine, 'run-img-meta', e => e.type === 'assistant');
+
+  const userInputEvts = rs._events.filter(e => e.type === 'user_input');
+  assert.ok(userInputEvts.length >= 1, 'user_input event recorded');
+
+  const payload = JSON.parse(userInputEvts[0].data);
+  assert.equal(payload.text, 'describe this image');
+  assert.ok(Array.isArray(payload.images), 'images array present in payload');
+  assert.equal(payload.images.length, 1);
+  assert.equal(payload.images[0].media_type, 'image/png');
+  assert.equal(payload.images[0].size, fakeBase64.length);
+});
+
+test('engine: sendInput text-only does not include images field in user_input event', async (t) => {
+  process.env.CLAUDE_BIN = fakeClaudioPath;
+  const rs = makeRunService();
+  const { engine } = makeEngine({ runService: rs });
+  t.after(() => engine.kill('run-no-img'));
+
+  engine.spawnAgent('run-no-img', { cwd: os.tmpdir(), isManager: true });
+  await waitForEvent(engine, 'run-no-img', e => e.type === 'system');
+
+  engine.sendInput('run-no-img', 'just text');
+  await waitForEvent(engine, 'run-no-img', e => e.type === 'assistant');
+
+  const userInputEvts = rs._events.filter(e => e.type === 'user_input');
+  assert.ok(userInputEvts.length >= 1);
+
+  const payload = JSON.parse(userInputEvts[0].data);
+  assert.equal(payload.text, 'just text');
+  assert.equal(payload.images, undefined, 'no images field when text-only');
+});
+
 test('engine: manager initial prompt is sent via stdin as stream-json after spawn', async (t) => {
   process.env.CLAUDE_BIN = fakeClaudioPath;
   const { engine } = makeEngine();

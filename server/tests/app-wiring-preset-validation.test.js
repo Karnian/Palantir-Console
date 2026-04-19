@@ -214,12 +214,11 @@ test('D3-3 HTTP: PATCH /api/tasks/:id — unknown preset id → 400', async (t) 
   assert.match(res.body.error, /Unknown preset id/);
 });
 
-test('D3-3 HTTP: POST /api/tasks — creation does NOT validate preferred_preset_id (documented spec gap)', async (t) => {
-  // Known behavior: creation route does not call presetService.getPreset.
-  // Document this explicitly so future spec changes are visible.
+test('D3-3 HTTP: POST /api/tasks — creation validates preferred_preset_id (gap fixed)', async (t) => {
   const app = await createTestApp(t);
   const res = await request(app)
     .post('/api/tasks')
     .send({ title: 'Task with bogus preset', preferred_preset_id: 'nonexistent_d3_create' });
-  assert.equal(res.status, 201, 'creation silently accepts unknown preferred_preset_id (spec behavior)');
+  assert.equal(res.status, 400, 'creation rejects unknown preferred_preset_id');
+  assert.match(res.body.error, /Unknown preset id/);
 });
