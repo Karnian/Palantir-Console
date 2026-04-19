@@ -32,7 +32,27 @@ if (!hasAuth) {
   console.warn(`[security] Listening on ${host}. Set PALANTIR_TOKEN to require auth and expose on 0.0.0.0.`);
 }
 
-app.listen(port, host, () => {
+const server = app.listen(port, host, () => {
   const display = host === '0.0.0.0' || host === '::' ? 'localhost' : host;
   console.log(`Palantir Console running at http://${display}:${port}`);
 });
+
+// Graceful shutdown: wire OS signals to app.shutdown() which disposes
+// manager sessions, stops lifecycle monitor, and closes the database.
+let shuttingDown = false;
+function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal} received, shutting down...`);
+  if (app.shutdown) app.shutdown();
+  server.close(() => {
+    console.log('[shutdown] HTTP server closed');
+    process.exit(0);
+  });
+  setTimeout(() => {
+    console.warn('[shutdown] Forcing exit after timeout');
+    process.exit(1);
+  }, 10000).unref();
+}
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
