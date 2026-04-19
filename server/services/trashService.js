@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs/promises');
 const fg = require('fast-glob');
+const { isWithinRoot } = require('../utils/pathGuard');
 
 function createTrashService(storage) {
   async function moveSessionToTrash(sessionId) {
@@ -85,6 +86,9 @@ function createTrashService(storage) {
     if (!sessionFiles.length) return null;
     const session = await storage.readJson(sessionFiles[0]);
     const sessionDir = path.join(storage.sessionRoot, session.projectID || 'global');
+    if (!isWithinRoot(storage.sessionRoot, sessionDir)) {
+      throw new Error('Invalid projectID in trashed session: path traversal detected');
+    }
     await storage.ensureDir(sessionDir);
     const targetSessionFile = path.join(sessionDir, `${session.id}.json`);
 
