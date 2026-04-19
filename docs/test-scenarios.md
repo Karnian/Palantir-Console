@@ -899,7 +899,8 @@
 - **When** GET `/api/fs?path=/Users/me`
 - **Then** 디렉토리 목록 반환
 
-### FS-02 — Up 한 단계 / hidden 파일 토글
+### FS-02 — 디렉토리 브라우저 (상위 이동 + hidden 토글)
+- **When** 디렉토리 브라우저 UI에서 상위 폴더 이동 또는 showHidden 토글 클릭
 - **Then** UI 컴포넌트가 상위 폴더 이동, hidden 파일 표시 토글 지원
 
 ### FS-03 — Root guard
@@ -933,7 +934,8 @@
 
 ### CLS-02 — Dashboard에서 Active Claude Sessions 표시
 - **Given** Manager 또는 Worker가 Claude session으로 동작 중
-- **Then** Dashboard에 "Active Claude Sessions (n)" 카운트 표시
+- **When** Dashboard 화면 로드
+- **Then** Dashboard에 "Active Claude Sessions (n)" 카운트 + 세션 목록 표시 (`/api/claude-sessions` detail endpoint 사용)
 
 ---
 
