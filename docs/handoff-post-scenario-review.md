@@ -8,7 +8,7 @@
 - **PR #99~#104**: Codex 교차리뷰로 발견된 Preset gap 3건 수정 + Phase D1 audit correctness + Phase D2 hardening + Phase D3 테스트 하드닝
 - **docs/test-scenarios.md stale 수정**: AUTH-01/02, KBD-04, 헤더 (commit `6948b8a`)
 - **시나리오 결과**: 154 PASS / 0 FAIL / 1 BLOCKED (INS-02, LLM 비결정적)
-- **npm test**: 777/777 PASS
+- **npm test**: 777/777 PASS (작성 시점 기준; 이후 PR #108~#111 에서 792 로 증가)
 
 ## 남은 항목 (우선순위순)
 
