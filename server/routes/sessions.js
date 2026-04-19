@@ -6,6 +6,13 @@ const {
   NotFoundError
 } = require('../utils/errors');
 
+function hasInvalidSessionProjectId(projectId) {
+  if (projectId === null || projectId === undefined || projectId === '') return false;
+  if (typeof projectId !== 'string') return true;
+  if (projectId === '.') return true;
+  return /[\/\\]|\.\./.test(projectId);
+}
+
 function createSessionsRouter({
   sessionService,
   messageService,
@@ -40,6 +47,9 @@ function createSessionsRouter({
     const { title, projectId, directory } = req.body || {};
     if (!title || typeof title !== 'string') {
       throw new BadRequestError('title is required');
+    }
+    if (hasInvalidSessionProjectId(projectId)) {
+      throw new BadRequestError('Invalid projectId');
     }
 
     try {
@@ -104,4 +114,4 @@ function createSessionsRouter({
   return router;
 }
 
-module.exports = { createSessionsRouter };
+module.exports = { createSessionsRouter, hasInvalidSessionProjectId };

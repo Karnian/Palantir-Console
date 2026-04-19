@@ -143,6 +143,10 @@ function createSessionService(storage) {
     };
 
     const sessionDir = path.join(storage.sessionRoot, session.projectID || 'global');
+    const { isWithinRoot } = require('../utils/pathGuard');
+    if (!isWithinRoot(storage.sessionRoot, sessionDir)) {
+      throw new Error('Invalid projectId: path traversal detected');
+    }
     await storage.ensureDir(sessionDir);
     await storage.writeJson(path.join(sessionDir, `${id}.json`), session);
     return session;

@@ -1,12 +1,8 @@
 const path = require('path');
 const fs = require('fs/promises');
+const { isWithinRoot } = require('../utils/pathGuard');
 
 function createFsService(storage) {
-  function isWithinRoot(rootDir, targetPath) {
-    const rootResolved = path.resolve(rootDir);
-    const targetResolved = path.resolve(targetPath);
-    return targetResolved === rootResolved || targetResolved.startsWith(`${rootResolved}${path.sep}`);
-  }
 
   async function listDirectories(resolved, showHidden) {
     const entries = await fs.readdir(resolved, { withFileTypes: true });
