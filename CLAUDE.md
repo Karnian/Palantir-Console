@@ -34,6 +34,7 @@ npm install          # 의존성 설치
 npm start            # 서버 시작 (localhost:4177)
 npm test             # 전체 테스트 실행 (node --test)
 npm run dev          # 개발 서버 (동일)
+npm run test:e2e     # Playwright e2e 테스트
 
 # 특정 테스트 파일만
 node --test server/tests/manager.test.js
@@ -45,7 +46,7 @@ node --test server/tests/v2-api.test.js
 Express.js 5 + SQLite (WAL, better-sqlite3) + Preact/HTM (CDN 없이 vendor/ UMD) + Inter font (self-hosted woff2).
 빌드 스텝 없음 — `server/public/`의 파일이 그대로 서빙됨. 외부 CDN 의존 0개.
 
-**v3 기준 (Phase 0~9 merged)**: Top manager + 프로젝트 단위 PM (lazy-spawn, conversation identity), deterministic router, annotate-only drift reconciliation, SSE 시맨틱 envelope. P8: app.js ESM 전환, hooks 분할, ManagerView 분할. P9: 전 컴포넌트 직접 ESM import (window bridge 0개), SessionsView Preact 재작성.
+**v3 기준 (Phase 0~10G merged)**: Top manager + 프로젝트 단위 PM (lazy-spawn, conversation identity), deterministic router, annotate-only drift reconciliation, SSE 시맨틱 envelope. P8: app.js ESM 전환, hooks 분할, ManagerView 분할. P9: 전 컴포넌트 직접 ESM import (window bridge 0개), SessionsView Preact 재작성. P10: Worker Preset DB/Service (10B), Tier 1/2 spawn wiring (10C/10D), Task linkage + #presets UI (10E), Preset snapshot drift audit UI (10F), agent-olympus integration (10G).
 
 ```
 server/
@@ -53,22 +54,38 @@ server/
   app.js                      — Express 앱 조립 (라우터, 서비스, 미들웨어)
   db/database.js              — SQLite 초기화 + 자동 마이그레이션
   db/migrations/              — 001_initial ~ 019_task_preferred_preset_idx.sql
+  middleware/
+    auth.js                   — PALANTIR_TOKEN 쿠키/Bearer 인증
+    errorHandler.js           — 중앙 에러 핸들러
+    asyncHandler.js           — async 래퍼
+    validate.js               — 요청 검증 미들웨어
   routes/
     manager.js                — Top/PM /api/manager/* + /pm/:projectId/message + /reset
     conversations.js          — /api/conversations/:id/* (top|pm:<id>|worker:<id>)
     router.js                 — /api/router/resolve (v3 Phase 6 3-step matcher)
     dispatchAudit.js          — /api/dispatch-audit (POST/GET, annotate-only)
+    auth.js                   — POST /login, POST /logout (쿠키 인증)
     tasks.js, runs.js, projects.js, agents.js, events.js
     sessions.js, trash.js, fs.js, usage.js, claude-sessions.js — legacy + support
     workerPresets.js          — Worker Preset CRUD (Phase 10B)
+    skillPacks.js             — Skill Pack CRUD + gallery (Phase 10G)
   utils/
     pathGuard.js              — isWithinRoot() 경로 traversal 방어 유틸
     errors.js                 — AppError / BadRequestError / NotFoundError
+  data/
+    skill-pack-registry.json  — Skill Pack 갤러리 레지스트리
   services/
     streamJsonEngine.js       — Claude Code CLI stream-json (Manager용)
     managerAdapters/
       claudeAdapter.js        — Claude 어댑터 (stream-json persistent process)
       codexAdapter.js         — Codex 어댑터 (stateless, thread resume)
+      eventTypes.js           — 어댑터 공통 이벤트 타입
+      index.js                — 어댑터 팩토리 (type → adapter 매핑)
+    providers/
+      anthropic.js            — Anthropic API provider
+      claude-code.js          — Claude Code CLI provider
+      gemini.js               — Gemini provider
+      index.js, registered.js — provider registry
     executionEngine.js        — Worker 전용: TmuxEngine / SubprocessEngine
     lifecycleService.js       — Health check, 상태 전환, 자동 정리
     managerRegistry.js        — top / pm:<id> 슬롯 단일 source + onSlotCleared 리스너
@@ -78,33 +95,65 @@ server/
     routerService.js          — 3-step 매처 (1 @mention → 2 current → 3 name fuzzy → 4 default)
     reconciliationService.js  — dispatch audit (pm_hallucination / user_intervention_stale)
     runService.js             — Run CRUD + SSE envelope (from_status/to_status/reason/…)
-    taskService.js            — Task CRUD
+    taskService.js            — Task CRUD + preferred_preset_id 검증
     projectService.js         — Project CRUD + pm_enabled / preferred_pm_adapter
     projectBriefService.js    — project_briefs (conventions, pitfalls, pm_thread_id)
     agentProfileService.js    — Agent profile + capabilities_json / env_allowlist
+    presetService.js          — Worker Preset CRUD + snapshot drift 비교 (Phase 10B)
+    skillPackService.js       — Skill Pack 설치/제거/resolve (Phase 10G)
+    registryService.js        — Skill Pack 갤러리 레지스트리 조회
     managerSystemPrompt.js    — layer='top'|'pm' 분기 시스템 프롬프트 빌더
     authResolver.js           — Claude/Codex auth preflight + 필터링 spawn env
     eventBus.js               — EventEmitter pub/sub (replay 200)
+    eventChannels.js          — SSE 채널 상수 정의
+    messageService.js         — 메시지 처리 서비스
+    ssrf.js                   — SSRF 방어 (내부 IP 차단)
+    codexService.js           — Codex CLI 서비스
+    opencodeService.js        — OpenCode 서비스 (TLS 기본값 관리)
+    fsService.js              — 파일시스템 브라우저 서비스
+    storage.js                — 스토리지 경로 관리
     worktreeService.js        — Git worktree 관리
   public/
-    app.js                    — Preact SPA 진입 (ES module, P8-2), NavSidebar + App + mount
+    app.js                    — Preact SPA 진입 (ES module, P8-2), NavSidebar + App + mount (~320줄)
     app/main.js               — ESM 부트스트래퍼 (~14줄): configureMarked + import app.js
     app/lib/nav.js            — NAV_ITEMS 공유 모듈 (P9-2)
     app/lib/hooks.js          — re-export barrel (→ hooks/ 디렉토리)
     app/lib/hooks/             — P8-4 분할: routing, utils, sse, data, conversation, dispatch, manager
-    app/components/ManagerView.js  — Manager 레이아웃 셸 (P8-5, ~35줄)
-    app/components/ManagerChat.js  — Manager 채팅 패널 (P8-5, ~500줄)
-    app/components/SessionGrid.js  — Task 세션 그리드 (P8-5, ~200줄)
-    app/components/SessionsView.js — Sessions 레이아웃 셸 (P9-4, Preact 재작성)
-    app/components/SessionList.js  — 세션 목록 (P9-4)
-    app/components/ConversationPanel.js — 대화 패널 (P9-4)
-    app/components/TaskModals.js   — NewTaskModal, ExecuteModal, TaskDetailPanel (P7-1)
-    app/lib/notifications.js       — Browser notifications + tab pulse (P7-4)
-    app/lib/a11y.js                — clickableProps() 키보드 접근성 유틸
+    app/lib/api.js            — apiFetch() + 401 bounce 로직
+    app/lib/format.js         — 포맷 유틸리티
+    app/lib/markdown.js       — marked 설정 + DOMPurify 래퍼
+    app/lib/dueDate.js        — 마감일 계산 유틸
+    app/lib/toast.js          — 토스트 알림
+    app/lib/notifications.js  — Browser notifications + tab pulse (P7-4)
+    app/lib/a11y.js           — clickableProps() 키보드 접근성 유틸
+    app/components/
+      ManagerView.js          — Manager 레이아웃 셸 (P8-5)
+      ManagerChat.js          — Manager 채팅 패널 (P8-5)
+      SessionGrid.js          — Task 세션 그리드 (P8-5)
+      SessionsView.js         — Sessions 레이아웃 셸 (P9-4, Preact 재작성)
+      SessionList.js          — 세션 목록 (P9-4)
+      ConversationPanel.js    — 대화 패널 (P9-4)
+      TaskModals.js           — NewTaskModal, ExecuteModal, TaskDetailPanel (P7-1)
+      DashboardView.js        — 대시보드 뷰
+      BoardView.js            — Task Board 뷰 (칸반)
+      ProjectsView.js         — 프로젝트 관리 뷰
+      AgentsView.js           — 에이전트 프로필 관리 뷰
+      PresetsView.js          — Worker Preset 관리 뷰 (P10E)
+      SkillPacksView.js       — Skill Pack 관리 뷰 (P10G)
+      GalleryView.js          — Skill Pack 갤러리 브라우저
+      RunInspector.js         — Run 상세 + preset drift 감사 (P10F)
+      DriftDrawer.js          — Dispatch drift 서랍 패널
+      CommandPalette.js       — Cmd+K 커맨드 팔레트
+      MentionInput.js         — @mention 자동완성 입력
+      Dropdown.js             — 공통 드롭다운 컴포넌트
+      EmptyState.js           — 빈 상태 표시 컴포넌트
+      PackPreviewModal.js     — Skill Pack 미리보기 모달 (P10G)
+      UrlInstallDialog.js     — URL 기반 Skill Pack 설치 다이얼로그
     styles.css                — 전체 스타일
     styles/fonts.css          — Inter @font-face 정의 (self-hosted)
-    vendor/                   — Preact/HTM UMD/ESM 번들 + Inter woff2 (빌드 불필요)
-  tests/
+    styles/tokens.css         — CSS 디자인 토큰 (색상, 간격, 타이포 변수)
+    vendor/                   — Preact/HTM UMD/ESM 번들 + marked + DOMPurify + Inter woff2 (빌드 불필요)
+  tests/                      — 53 테스트 파일 + e2e 2개
     conversation.test.js      — Phase 1.5/2 parent-notice + registry + rotation
     pm-phase3a.test.js        — Phase 3a lazy spawn + cleanup (fail-closed)
     reconciliation.test.js    — Phase 4/7 envelope binding + audit + eventBus emit
@@ -113,7 +162,17 @@ server/
     manager.test.js           — Top manager 기본 동작
     manager-codex.test.js     — Codex adapter role/resume 동작
     session-resume.test.js    — 부팅 시 session resume 로직
+    preset.service.test.js    — Preset CRUD + snapshot drift
+    preset-spawn.test.js      — Preset spawn wiring (Tier 1/2)
+    skill-packs.test.js       — Skill Pack 설치/제거
+    sse-channels.test.js      — SSE 채널 등록 검증
+    stream-json-engine.test.js — stream-json 엔진 유닛
+    ssrf.test.js              — SSRF 방어 검증
+    providers.test.js         — Provider registry
     v2-api.test.js, api.test.js, boot.smoke.test.js, …
+    e2e/                      — Playwright e2e (smoke.spec.js, manager.spec.js)
+    fixtures/                 — 테스트 픽스처 (agent-olympus-mock 등)
+    helpers/                  — jsdom-preact.js 등
 ```
 
 > **792 tests** 기준 (PR #111 시점). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙.
@@ -163,7 +222,7 @@ server/
 ### SSE semantic envelope (v3 Phase 5) — additive
 - `runService` 가 `createRun` / `updateRunStatus` / `markRunStarted` 에서 `{ run, from_status, to_status, reason, task_id, project_id }` 를 emit. Pre-Phase 5 의 `{ run }` 구독자는 그대로 동작.
 - `lifecycleService` 의 `run:completed` / `run:needs_input` 도 동일 envelope + `reason` + (priority alert 의 경우) `priority: 'alert'`.
-- **중요**: `useSSE` 의 channels 배열은 hard-coded. 새 SSE 채널 추가 시 반드시 `server/public/app/lib/hooks.js useSSE` 의 channels 배열에도 추가할 것. Phase 5/7 에서 `run:needs_input` / `dispatch_audit:recorded` 를 까먹어 dead code 되는 회귀가 있었음.
+- **중요**: `useSSE` 의 channels 배열은 hard-coded. 새 SSE 채널 추가 시 반드시 `server/public/app/lib/hooks/sse.js` 의 channels 배열에도 추가할 것. Phase 5/7 에서 `run:needs_input` / `dispatch_audit:recorded` 를 까먹어 dead code 되는 회귀가 있었음.
 - 클라는 `run:status` 를 pure reload 로만 쓴다. 우선순위 알림은 dedicated 채널(`run:needs_input`, `run:completed`) 이 전담해야 duplicate 알림 안 생김.
 
 ### Auth 전달
@@ -183,7 +242,7 @@ server/
 - 빌드 파이프라인 없음. `app.js`는 App/mount 셸. 실제 뷰/모달은 `app/components/` ESM 모듈에 있음
 - `server/public/app/main.js` 는 최소 부트스트래퍼 (~14줄): `configureMarked()` + `import('../app.js')`. window bridge 없음 (P9에서 전부 제거)
 - 모든 ESM 컴포넌트는 vendor/ 에서 직접 import (`import { h } from '../../vendor/preact.module.js'` 등)
-- 해시 라우팅: `#dashboard`, `#manager`, `#board`, `#projects`, `#agents`
+- 해시 라우팅: `#dashboard`, `#manager`, `#board`, `#projects`, `#agents`, `#skills`, `#presets`
 - **클라이언트 async fence 패턴** (Phase 6/7): id-change 시 `setRun(null); setEvents([])` 동기 reset + await 이전 `myId = conversationId` 캡처 + commit 전 `activeIdRef.current === myId` 비교. `useDispatchAudit` 는 `requestSeqRef` 시퀀스 토큰.
 
 ### DB
@@ -205,6 +264,7 @@ server/
 - **브라우저 쿠키 인증**: `PALANTIR_TOKEN` 이 설정된 경우 브라우저는 `palantir_token` HttpOnly 쿠키로 인증한다 (EventSource 는 커스텀 헤더 전송 불가 → Bearer 만으로는 SSE 가 구조적으로 막혔던 문제를 수정). 사용자는 `/login.html` 에서 POST 폼으로 토큰을 입력하고, 서버가 쿠키를 set 한 뒤 sanitized `next` 경로로 리다이렉트한다. 토큰은 URL 에 절대 노출되지 않음 (초기 PR1 draft 의 `?token=` 부트스트랩은 Codex review 에서 access-log leak 블로커로 지적되어 제거). `apiFetch` 는 401/403 응답을 받으면 `/login.html?next=…` 로 bounce. CLI / 테스트는 `Authorization: Bearer` 헤더 사용. Bearer 경로가 invalid 면 cookie 로 fallback 하지 않음 — 명시적 실패.
 - **CSP self-host**: `marked` / `DOMPurify` / Inter font 는 `server/public/vendor/` 에서 직접 서빙. CSP 는 `script-src 'self'; connect-src 'self'; font-src 'self'` (외부 CDN 의존 0개 — googleapis/gstatic/jsdelivr 전부 제거).
 - **세션 path traversal 방어**: `sessionService.createSession` + `trashService.restoreTrashedSession` 에서 `isWithinRoot()` 검증. `routes/sessions.js` 에서 route 레벨 `hasInvalidSessionProjectId` 이중 방어.
+- **SSRF 방어**: 외부 URL 요청 (Skill Pack URL install 등) 은 반드시 `services/ssrf.js` 경유. 내부 IP 범위 차단.
 - **TLS 검증**: `opencodeService.js` 의 `NODE_TLS_REJECT_UNAUTHORIZED` 기본값 `'1'` (secure). 운영자가 명시적 `'0'` 설정 시 override 가능.
 - 에이전트 명령어 allowlist 제한 (임의 명령 실행 불가)
 - `.claude-auth.json`은 절대 커밋 금지

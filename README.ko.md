@@ -178,6 +178,14 @@ Backlog  →  Todo  →  In Progress  →  Review  →  Done
 
 커스텀 에이전트 추가 가능. `capabilities_json`, `max_concurrent`, `env_allowlist` 는 매니저 dispatch 추론과 lifecycleService 동시성 게이트에 연결된다. 보안: 허용된 명령어만 실행 가능 (allowlist). `PALANTIR_ALLOWED_COMMANDS` 로 추가 허용.
 
+### 6. Skill Packs (♢)
+
+MCP 서버 템플릿과 스킬 팩 관리. 갤러리 레지스트리 브라우즈, 레지스트리/URL 설치, JSON import/export. 팩은 프로젝트, 태스크, run 에 바인딩 가능.
+
+### 7. Presets (❖)
+
+Worker Preset 관리. 에이전트 프로필 + 플러그인 refs + MCP 서버 템플릿 + 시스템 프롬프트를 재사용 가능한 프리셋으로 묶음. `preferred_preset_id` 로 태스크에 연결. Run Inspector 에서 frozen snapshot vs 현재 preset drift 감사 가능.
+
 ## 에이전트 실행 흐름
 
 ```
@@ -349,7 +357,47 @@ GET    /api/events  — SSE 스트림
 GET    /api/health  — 헬스체크
 ```
 
-> **API 레퍼런스 완결성**: 위 섹션들은 `server/app.js` (commit `7a3affa`, Phase 7 merge 시점) 가 mount 하는 모든 라우트를 열거한다. 새 라우트 추가 시 `app.js` 에 mount 하는 동시에 이 섹션에도 추가하지 않으면 이 파일이 서버와 조용히 drift 됨.
+### Worker Presets (Phase 10B)
+```
+GET    /api/worker-presets             — 목록
+POST   /api/worker-presets             — 생성
+GET    /api/worker-presets/:id         — 조회
+PATCH  /api/worker-presets/:id         — 수정
+DELETE /api/worker-presets/:id         — 삭제 (app-level cascade: tasks.preferred_preset_id → NULL)
+GET    /api/worker-presets/plugin-refs — 사용 가능한 플러그인 디렉토리
+```
+
+### Skill Packs (Phase 10G)
+```
+GET    /api/skill-packs                — 설치된 목록 (MCP 서버 템플릿)
+POST   /api/skill-packs               — 템플릿 생성
+GET    /api/skill-packs/:id            — 조회
+PATCH  /api/skill-packs/:id            — 수정
+DELETE /api/skill-packs/:id            — 삭제
+GET    /api/skill-packs/:id/export     — JSON 으로 내보내기
+POST   /api/skill-packs/import         — JSON 에서 가져오기
+GET    /api/skill-packs/templates      — 템플릿 목록
+GET    /api/skill-packs/registry       — 갤러리 레지스트리 브라우즈
+GET    /api/skill-packs/registry/pack  — 단일 팩 상세
+POST   /api/skill-packs/registry/install     — 레지스트리에서 설치
+POST   /api/skill-packs/registry/install-url — URL 에서 설치 (SSRF 방어 경유)
+POST   /api/skill-packs/registry/update      — 설치된 팩 업데이트
+POST   /api/skill-packs/registry/refresh     — 레지스트리 캐시 갱신
+```
+Project/Task/Run 바인딩 (`skillPacks.projectBindings` / `taskBindings` / `runSnapshots` 로 mount):
+```
+GET    /api/projects/:id/skill-packs   — 프로젝트의 skill packs
+POST   /api/projects/:id/skill-packs   — 팩 바인딩
+PATCH  /api/projects/:id/skill-packs/:packId — 바인딩 수정
+DELETE /api/projects/:id/skill-packs/:packId — 바인딩 해제
+GET    /api/tasks/:id/skill-packs      — 태스크의 skill packs
+POST   /api/tasks/:id/skill-packs      — 팩 바인딩
+DELETE /api/tasks/:id/skill-packs/:packId   — 바인딩 해제
+GET    /api/runs/:id/skill-packs       — run 의 resolved packs
+PATCH  /api/runs/:id/skill-packs/checks — 팩 체크 업데이트
+```
+
+> **API 레퍼런스 완결성**: 위 섹션들은 `server/app.js` (Phase 10G merge 시점) 가 mount 하는 모든 라우트를 열거한다. 새 라우트 추가 시 `app.js` 에 mount 하는 동시에 이 섹션에도 추가하지 않으면 이 파일이 서버와 조용히 drift 됨.
 
 ## 환경변수
 
@@ -372,11 +420,11 @@ GET    /api/health  — 헬스체크
 ## 기술 스택
 
 - **Backend**: Express.js 5, SQLite (WAL, better-sqlite3), EventEmitter SSE
-- **Frontend**: Preact + HTM (UMD, 빌드 불필요), hash router
+- **Frontend**: Preact + HTM (ESM + UMD, 빌드 불필요), hash router, self-hosted Inter font
 - **Worker 에이전트**: tmux 세션 + git worktree 격리
 - **Manager 에이전트**: Claude Code CLI(stream-json NDJSON) 또는 Codex CLI (`codex exec --json` + thread resume). 에이전트 프로필 단위로 선택
 - **실시간**: SSE (Server-Sent Events) + `Last-Event-ID` 재생
-- **테스트**: Node.js built-in test runner + supertest (v3 Phase 7 머지 시점 238 tests)
+- **테스트**: Node.js built-in test runner + supertest + Playwright e2e (Phase 10G 머지 시점 792 tests)
 
 ## 개발
 
@@ -385,16 +433,18 @@ npm test     # 전체 테스트
 npm run dev  # 개발 서버
 ```
 
-데이터는 `palantir.db` (SQLite) 에 저장된다. 서버 시작 시 `server/db/migrations/001..010_*.sql` 자동 마이그레이션.
+데이터는 `palantir.db` (SQLite) 에 저장된다. 서버 시작 시 `server/db/migrations/001..019_*.sql` 자동 마이그레이션.
 
 관련 문서:
 - `docs/specs/manager-v3-multilayer.md` — v3 재설계 스펙 (lock-in + phase 역사)
-- `docs/test-scenarios.md` — QA 시나리오 (`PRJ`, `TSK`, `BRD`, `RUN`, `INS`, `MGR`, `PM`, `DRIFT`, `ROUTER`, `SSE`, `REG`, …)
+- `docs/specs/worker-preset-and-plugin-injection.md` — Phase 10 Worker Preset 스펙
+- `docs/specs/skill-packs.md` — Skill Pack 스펙
+- `docs/test-scenarios.md` — QA 시나리오 (`PRJ`, `TSK`, `BRD`, `RUN`, `INS`, `MGR`, `PM`, `DRIFT`, `ROUTER`, `SSE`, `REG`, `PRESET`, …)
 - `CLAUDE.md` — 프로젝트 컨벤션 + 자율 모드 작업 스타일
 
 ## 보안
 
-- `PALANTIR_TOKEN` 미설정 시에도 `0.0.0.0` 바인딩 — 프로덕션 환경에서는 반드시 토큰을 설정할 것 (경고 로그 출력)
+- `PALANTIR_TOKEN` 미설정 시 기본 `127.0.0.1` 바인딩 (loopback only). 토큰 설정 시 자동 `0.0.0.0` 승격. 토큰 없이 `HOST=0.0.0.0` 시 경고 로그 출력
 - 에이전트 명령어는 allowlist 로 제한 (임의 명령 실행 불가)
 - tmux 세션에서 에이전트 실행 시 shell injection 방지 (execFileSync + temp script)
 - git worktree 로 에이전트 간 파일시스템 격리

@@ -148,6 +148,14 @@ Project list. Tasks are grouped by project. Each project exposes:
 
 Agent profile management. Default profiles: Claude Code, Codex CLI, OpenCode. Agent profiles can gate dispatch via `capabilities_json` and `max_concurrent`.
 
+### 6. Skill Packs (♢)
+
+MCP server templates and skill pack management. Browse the gallery registry, install from registry or URL, import/export as JSON. Packs can be bound to projects, tasks, and runs.
+
+### 7. Presets (❖)
+
+Worker Preset management. Bundle agent profile + plugin refs + MCP server templates + system prompt into a reusable preset. Link presets to tasks via `preferred_preset_id`. Run Inspector shows frozen snapshot vs current preset drift.
+
 ## API
 
 REST API for external control. When auth is enabled, include `Authorization: Bearer <token>` header.
@@ -259,7 +267,47 @@ GET    /api/events             — SSE stream
 GET    /api/health             — health check
 ```
 
-> **API reference completeness**: the sections above enumerate every route mounted by `server/app.js` at commit `7a3affa` (Phase 7 merge). When adding a new route, mount it in `app.js` AND add it to this section — otherwise this file silently drifts out of sync with the server.
+### Worker Presets (Phase 10B)
+```
+GET    /api/worker-presets             — list
+POST   /api/worker-presets             — create
+GET    /api/worker-presets/:id         — get
+PATCH  /api/worker-presets/:id         — update
+DELETE /api/worker-presets/:id         — delete (app-level cascade: tasks.preferred_preset_id → NULL)
+GET    /api/worker-presets/plugin-refs — available plugin directories
+```
+
+### Skill Packs (Phase 10G)
+```
+GET    /api/skill-packs                — list installed (MCP server templates)
+POST   /api/skill-packs               — create template
+GET    /api/skill-packs/:id            — get
+PATCH  /api/skill-packs/:id            — update
+DELETE /api/skill-packs/:id            — delete
+GET    /api/skill-packs/:id/export     — export as JSON
+POST   /api/skill-packs/import         — import from JSON
+GET    /api/skill-packs/templates      — list templates
+GET    /api/skill-packs/registry       — browse gallery registry
+GET    /api/skill-packs/registry/pack  — get single pack detail
+POST   /api/skill-packs/registry/install     — install from registry
+POST   /api/skill-packs/registry/install-url — install from URL (SSRF-guarded)
+POST   /api/skill-packs/registry/update      — update installed pack
+POST   /api/skill-packs/registry/refresh     — refresh registry cache
+```
+Project/Task/Run bindings (mounted via `skillPacks.projectBindings` / `taskBindings` / `runSnapshots`):
+```
+GET    /api/projects/:id/skill-packs   — project's skill packs
+POST   /api/projects/:id/skill-packs   — bind pack to project
+PATCH  /api/projects/:id/skill-packs/:packId — update binding
+DELETE /api/projects/:id/skill-packs/:packId — unbind
+GET    /api/tasks/:id/skill-packs      — task's skill packs
+POST   /api/tasks/:id/skill-packs      — bind pack to task
+DELETE /api/tasks/:id/skill-packs/:packId   — unbind
+GET    /api/runs/:id/skill-packs       — run's resolved packs
+PATCH  /api/runs/:id/skill-packs/checks — update pack checks
+```
+
+> **API reference completeness**: the sections above enumerate every route mounted by `server/app.js` at Phase 10G merge. When adding a new route, mount it in `app.js` AND add it to this section — otherwise this file silently drifts out of sync with the server.
 
 #### SSE channels
 | Channel | Meaning | v3 semantic envelope fields |
@@ -361,11 +409,11 @@ hashes. Deleting a preset later does not erase past snapshot rows;
 ## Tech Stack
 
 - **Backend**: Express.js 5, SQLite (WAL mode, better-sqlite3), EventEmitter SSE
-- **Frontend**: Preact + HTM (UMD, no build step), hash router
+- **Frontend**: Preact + HTM (ESM + UMD, no build step), hash router, self-hosted Inter font
 - **Worker agents**: tmux session + git worktree isolation
 - **Manager agents**: Claude Code CLI (stream-json NDJSON) OR Codex CLI (`codex exec --json` + thread resume), selected per agent profile
 - **Real-time**: SSE (Server-Sent Events) with `Last-Event-ID` replay
-- **Tests**: Node.js built-in test runner + supertest (238 tests at time of v3 Phase 7 merge)
+- **Tests**: Node.js built-in test runner + supertest + Playwright e2e (792 tests at Phase 10G merge)
 
 ## Development
 
@@ -374,11 +422,13 @@ npm test     # run tests
 npm run dev  # dev server
 ```
 
-Data is stored in `palantir.db` (SQLite). Auto-migrated on server start (`server/db/migrations/001..010_*.sql`).
+Data is stored in `palantir.db` (SQLite). Auto-migrated on server start (`server/db/migrations/001..019_*.sql`).
 
 See also:
 - `docs/specs/manager-v3-multilayer.md` — the v3 redesign spec (lock-in + phase history)
-- `docs/test-scenarios.md` — QA scenarios (`PRJ`, `TSK`, `BRD`, `RUN`, `INS`, `MGR`, `PM`, `DRIFT`, `ROUTER`, `SSE`, `REG`, …)
+- `docs/specs/worker-preset-and-plugin-injection.md` — Phase 10 Worker Preset spec
+- `docs/specs/skill-packs.md` — Skill Pack spec
+- `docs/test-scenarios.md` — QA scenarios (`PRJ`, `TSK`, `BRD`, `RUN`, `INS`, `MGR`, `PM`, `DRIFT`, `ROUTER`, `SSE`, `REG`, `PRESET`, …)
 - `CLAUDE.md` — project conventions + autonomous-mode working style
 
 ## License
