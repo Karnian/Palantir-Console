@@ -140,13 +140,14 @@ test('boot: index.html does NOT include the legacy classic script tag', async (t
   assert.doesNotMatch(res.text, /<script\s+src="app\.js"/, 'no static <script src="app.js">');
 });
 
-test('boot: index.html still pulls marked + DOMPurify from CDN', async (t) => {
+test('boot: index.html includes self-hosted marked + DOMPurify scripts', async (t) => {
   const app = await createTestApp(t);
   const res = await request(app).get('/');
-  // markdown.js falls back to plain HTML escape when these globals are
-  // missing, so the test only verifies the script tags are still present.
-  assert.match(res.text, /marked.*\.js/, 'marked CDN script tag present');
-  assert.match(res.text, /purify.*\.js/i, 'DOMPurify CDN script tag present');
+  // marked + DOMPurify are self-hosted in vendor/. The test verifies the
+  // script tags are still present (markdown.js falls back to plain HTML
+  // escape when these globals are missing).
+  assert.match(res.text, /marked.*\.js/, 'marked script tag present');
+  assert.match(res.text, /purify.*\.js/i, 'DOMPurify script tag present');
 });
 
 // ---- main.js bootstrapper contract (P9-3: bridges removed) ----

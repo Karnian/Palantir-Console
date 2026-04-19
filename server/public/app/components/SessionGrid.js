@@ -8,6 +8,7 @@ const html = htm.bind(h);
 
 import { EmptyState } from './EmptyState.js';
 import { RunInspector } from './RunInspector.js';
+import { clickableProps } from '../lib/a11y.js';
 import { TaskDetailPanel } from './TaskModals.js';
 
 const runStatusIcon = (status) => {
@@ -125,7 +126,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
         ${managerStatus?.active && (() => {
           const isSelected = conversationTarget === 'top';
           return html`
-            <div class="manager-session-row ${isSelected ? 'selected' : ''}" onClick=${() => onSelectConversation && onSelectConversation('top')}>
+            <div class="manager-session-row ${isSelected ? 'selected' : ''}" ...${clickableProps(() => onSelectConversation && onSelectConversation('top'))}>
               <span class="manager-session-icon">\u2726</span>
               <span class="manager-session-label">Manager Session</span>
               <span class="manager-session-badge running">Active</span>
@@ -162,7 +163,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
                 : '#6b7280';
               const pmSelected = conversationTarget === `pm:${group.key}`;
               return pm ? html`
-                <div class="pm-session-row ${pmSelected ? 'selected' : ''}" onClick=${() => onSelectPm && onSelectPm(`pm:${group.key}`)}>
+                <div class="pm-session-row ${pmSelected ? 'selected' : ''}" ...${clickableProps(() => onSelectPm && onSelectPm(`pm:${group.key}`))}>
                   <span class="pm-session-dot" style="background:${pmColor}"></span>
                   <span class="pm-session-label">PM Session</span>
                   <span class="pm-session-status" style="color:${pmColor}">${pmLabel}${pmStatus === 'running' ? html` <span class="pm-spinner"></span>` : ''}</span>

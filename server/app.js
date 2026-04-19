@@ -266,13 +266,11 @@ function createApp(options = {}) {
   // Middleware
   app.use(express.json({ limit: '2mb' }));
   app.use((req, res, next) => {
-    // PR1 / P0-1: marked + DOMPurify are now self-hosted in /vendor/, so
-    // cdn.jsdelivr.net is gone from script-src and connect-src. fonts remain
-    // because Google Fonts is still a CDN link in index.html (low-risk,
-    // static CSS only).
+    // All assets self-hosted: vendor/ has Preact/HTM/marked/DOMPurify,
+    // vendor/fonts/ has Inter woff2. No external CDN dependencies.
     res.setHeader(
       'Content-Security-Policy',
-      "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; connect-src 'self'"
+      "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self'; connect-src 'self'"
     );
     // PR1 round 2: prevent any URL-carried credentials (even if a caller
     // accidentally builds a URL like `/?foo=token`) from leaking via

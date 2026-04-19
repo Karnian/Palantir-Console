@@ -8,6 +8,7 @@ const html = htm.bind(h);
 
 import { useEscape } from '../lib/hooks.js';
 import { formatTime } from '../lib/format.js';
+import { clickableProps } from '../lib/a11y.js';
 import { apiFetch } from '../lib/api.js';
 import { addToast, apiFetchWithToast } from '../lib/toast.js';
 import { EmptyState } from './EmptyState.js';
@@ -362,7 +363,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
         ${projects.map(p => {
           const taskCount = tasks.filter(t => t.project_id === p.id).length;
           return html`
-            <div key=${p.id} class="project-card clickable" onClick=${() => setDetailProject(p)}>
+            <div key=${p.id} class="project-card clickable" ...${clickableProps(() => setDetailProject(p))}>
               <div class="project-card-header">
                 <div class="project-card-title">${p.name}</div>
                 ${taskCount > 0 && html`<span class="project-card-task-count">${taskCount} task${taskCount !== 1 ? 's' : ''}</span>`}
