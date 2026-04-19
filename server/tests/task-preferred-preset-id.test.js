@@ -47,7 +47,45 @@ async function createPreset(app, name = 'test-preset') {
   return res.body.preset;
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+// ─── POST Tests (Gap #2) ─────────────────────────────────────────────────────
+
+test('POST /api/tasks — valid preferred_preset_id is accepted', async (t) => {
+  const app = await createTestApp(t);
+  const preset = await createPreset(app, 'post-preset');
+  const res = await request(app)
+    .post('/api/tasks')
+    .send({ title: 'Task with preset', preferred_preset_id: preset.id });
+  assert.equal(res.status, 201);
+  assert.equal(res.body.task.preferred_preset_id, preset.id);
+});
+
+test('POST /api/tasks — unknown preferred_preset_id → 400', async (t) => {
+  const app = await createTestApp(t);
+  const res = await request(app)
+    .post('/api/tasks')
+    .send({ title: 'Bad preset', preferred_preset_id: 'does_not_exist' });
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /Unknown preset id/);
+});
+
+test('POST /api/tasks — preferred_preset_id null is accepted', async (t) => {
+  const app = await createTestApp(t);
+  const res = await request(app)
+    .post('/api/tasks')
+    .send({ title: 'Null preset', preferred_preset_id: null });
+  assert.equal(res.status, 201);
+});
+
+test('POST /api/tasks — omitting preferred_preset_id works normally', async (t) => {
+  const app = await createTestApp(t);
+  const res = await request(app)
+    .post('/api/tasks')
+    .send({ title: 'No preset' });
+  assert.equal(res.status, 201);
+  assert.equal(res.body.task.preferred_preset_id ?? null, null);
+});
+
+// ─── PATCH Tests (Gap #1) ────────────────────────────────────────────────────
 
 test('PATCH /api/tasks/:id — preferred_preset_id null is accepted', async (t) => {
   const app = await createTestApp(t);

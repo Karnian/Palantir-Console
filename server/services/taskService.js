@@ -100,12 +100,14 @@ function createTaskService(db, eventBus, opts = {}) {
       INSERT INTO tasks (
         id, project_id, title, description, status, priority, sort_order,
         due_date, recurrence, parent_task_id,
-        task_kind, requires_capabilities, suggested_agent_profile_id, acceptance_criteria
+        task_kind, requires_capabilities, suggested_agent_profile_id, acceptance_criteria,
+        preferred_preset_id
       )
       VALUES (
         @id, @project_id, @title, @description, @status, @priority, @sort_order,
         @due_date, @recurrence, @parent_task_id,
-        @task_kind, @requires_capabilities, @suggested_agent_profile_id, @acceptance_criteria
+        @task_kind, @requires_capabilities, @suggested_agent_profile_id, @acceptance_criteria,
+        @preferred_preset_id
       )
     `),
     // update: dynamic — see dynamicUpdate() below
@@ -161,6 +163,7 @@ function createTaskService(db, eventBus, opts = {}) {
       requires_capabilities: args.requires_capabilities ?? null,
       suggested_agent_profile_id: args.suggested_agent_profile_id ?? null,
       acceptance_criteria: args.acceptance_criteria ?? null,
+      preferred_preset_id: args.preferred_preset_id ?? null,
     });
     return parseRow(stmts.getById.get(args.id));
   });
@@ -178,6 +181,7 @@ function createTaskService(db, eventBus, opts = {}) {
     const {
       project_id, title, description, status, priority, due_date, recurrence, parent_task_id,
       task_kind, requires_capabilities, suggested_agent_profile_id, acceptance_criteria,
+      preferred_preset_id,
     } = input;
     if (!title) throw new BadRequestError('Task title is required');
     if (status && !VALID_STATUSES.includes(status)) {
@@ -191,6 +195,16 @@ function createTaskService(db, eventBus, opts = {}) {
     // v3 Phase 1: new field validations
     const normalizedKind = normalizeTaskKind(task_kind);
     const normalizedCaps = normalizeRequiresCapabilities(requires_capabilities);
+    // D2c defense-in-depth: validate preferred_preset_id at service layer (same as updateTask)
+    if (preferred_preset_id !== null && preferred_preset_id !== undefined) {
+      if (typeof preferred_preset_id !== 'string' || preferred_preset_id.trim() === '') {
+        throw new BadRequestError('preferred_preset_id must be a non-empty string or null');
+      }
+      if (validatePresetId) {
+        try { validatePresetId(preferred_preset_id); }
+        catch { throw new BadRequestError(`preferred_preset_id not found: ${preferred_preset_id}`); }
+      }
+    }
     const id = `task_${crypto.randomUUID().slice(0, 8)}`;
     const task = insertTaskTxn({
       id, project_id, title, description, status, priority,
@@ -201,6 +215,7 @@ function createTaskService(db, eventBus, opts = {}) {
       requires_capabilities: normalizedCaps === undefined ? null : normalizedCaps,
       suggested_agent_profile_id: suggested_agent_profile_id || null,
       acceptance_criteria: acceptance_criteria ?? null,
+      preferred_preset_id: preferred_preset_id ?? null,
     });
     if (eventBus) eventBus.emit('task:created', { task });
     return task;
