@@ -44,7 +44,9 @@ export async function apiFetch(url, opts = {}) {
       throw new Error('Not authenticated');
     }
   }
-  const data = await res.json();
+  let data;
+  try { data = await res.json(); }
+  catch { throw new Error(`Request failed: ${res.status}`); }
   if (!res.ok) throw new Error(data.error || `Request failed: ${res.status}`);
   return data;
 }

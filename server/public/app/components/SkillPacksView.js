@@ -250,7 +250,7 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
                   <div class="skill-mcp-item" key=${alias}>
                     <div class="skill-mcp-item-header">
                       <span class="skill-mcp-alias">${alias}</span>
-                      <span class="skill-mcp-cmd mono">${tpl ? `${tpl.command} ${(JSON.parse(tpl.args || '[]')).join(' ')}` : 'unknown template'}</span>
+                      <span class="skill-mcp-cmd mono">${tpl ? `${tpl.command} ${(() => { try { return JSON.parse(tpl.args || '[]'); } catch { return []; } })().join(' ')}` : 'unknown template'}</span>
                       <button class="ghost small" onClick=${() => removeMcpAlias(alias)}>\u2715</button>
                     </div>
                     ${allowedKeys.length > 0 && html`
