@@ -464,6 +464,97 @@ test('checkHealth: transitions stale running run to needs_input on idle timeout 
 });
 
 // ---------------------------------------------------------------------------
+// INS-02: needs_input → sendAgentInput → running recovery
+// ---------------------------------------------------------------------------
+
+test('INS-02: sendAgentInput recovers needs_input run back to running', async (t) => {
+  const db = await mkdb(t);
+  const eventBus = createEventBus();
+  const rs = createRunService(db, eventBus);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const execEngine = makeStubExecutionEngine();
+
+  const statusEvents = [];
+  eventBus.subscribe((ev) => {
+    if (ev.channel === 'run:status') statusEvents.push(ev.data);
+  });
+
+  const lc = createLifecycleService({
+    runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+    executionEngine: execEngine, streamJsonEngine: null, worktreeService: null, eventBus,
+  });
+
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, { command: 'codex' });
+  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'work' });
+
+  // Simulate idle timeout: backdate + double checkHealth → needs_input
+  const pastTime = new Date(Date.now() - 11 * 60 * 1000).toISOString();
+  db.prepare(`UPDATE runs SET started_at = ? WHERE id = ?`).run(pastTime, run.id);
+  db.prepare(`UPDATE run_events SET created_at = ? WHERE run_id = ?`).run(pastTime, run.id);
+  lc.checkHealth();
+  lc.checkHealth();
+
+  const afterIdle = rs.getRun(run.id);
+  assert.equal(afterIdle.status, 'needs_input', 'run is needs_input after idle timeout');
+
+  // INS-02 core: send input while needs_input → should recover to running
+  statusEvents.length = 0; // clear prior status events
+  const sent = lc.sendAgentInput(run.id, 'user response');
+  assert.equal(sent, true, 'sendAgentInput succeeds on needs_input run');
+
+  const afterInput = rs.getRun(run.id);
+  assert.equal(afterInput.status, 'running', 'run recovers to running after sendAgentInput');
+
+  // Verify run:status event was emitted for the recovery transition (UI depends on this)
+  const recoveryEvt = statusEvents.find(e => e.to_status === 'running' && e.from_status === 'needs_input');
+  assert.ok(recoveryEvt, 'run:status event emitted for needs_input → running recovery');
+
+  // Verify user_input event was recorded
+  const events = rs.getRunEvents(run.id);
+  const userInputEvts = events.filter(e => e.event_type === 'user_input');
+  assert.ok(userInputEvts.length >= 1, 'user_input event recorded');
+});
+
+test('INS-02: sendAgentInput on needs_input — streamJsonEngine first, executionEngine fallback', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+
+  // streamJsonEngine returns false (run not owned) → falls through to executionEngine
+  const fakeStreamJsonEngine = {
+    sendInput() { return false; },
+  };
+  const execEngine = makeStubExecutionEngine();
+
+  const lc = createLifecycleService({
+    runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+    executionEngine: execEngine, streamJsonEngine: fakeStreamJsonEngine, worktreeService: null, eventBus: null,
+  });
+
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, { command: 'codex' });
+  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'start' });
+
+  // Force needs_input
+  rs.updateRunStatus(run.id, 'needs_input', { force: true });
+
+  const sent = lc.sendAgentInput(run.id, 'fallback input');
+  assert.equal(sent, true, 'executionEngine fallback succeeds');
+  assert.equal(execEngine.inputs.length, 1, 'executionEngine.sendInput was called');
+  assert.equal(execEngine.inputs[0].text, 'fallback input');
+
+  const afterInput = rs.getRun(run.id);
+  assert.equal(afterInput.status, 'running', 'needs_input → running recovery via executionEngine fallback');
+});
+
+// ---------------------------------------------------------------------------
 // Status transition: completed → task review
 // ---------------------------------------------------------------------------
 
