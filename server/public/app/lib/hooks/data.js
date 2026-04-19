@@ -72,7 +72,7 @@ export function useClaudeSessions() {
       const data = await apiFetch('/api/claude-sessions');
       setSessions(data.sessions || []);
     } catch {
-      setSessions([]);
+      // Keep previous sessions on transient failure (same pattern as RunInspector)
     }
     setLoading(false);
   }, []);
