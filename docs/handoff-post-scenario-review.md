@@ -1,7 +1,7 @@
-# Handoff: Post-Scenario Review — 남은 개선사항
+# Handoff: Post-Scenario Review — 남은 개선사항 (완료됨)
 
+> **상태: 전체 완료** — 2026-04-19 세션에서 #1~#6 전부 처리 (PR #105~#107).
 > 2026-04-19 세션에서 docs/test-scenarios.md 전체 155개 시나리오 실행 + Codex 교차리뷰 완료 후 작성.
-> 이 문서를 새 세션에 그대로 넘기면 맥락 없이 착수 가능.
 
 ## 완료된 작업 요약
 
