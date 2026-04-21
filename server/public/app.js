@@ -32,6 +32,7 @@ import { ManagerView } from './app/components/ManagerView.js';
 import { NewTaskModal, ExecuteModal, TaskDetailPanel } from './app/components/TaskModals.js';
 import { SkillPacksView } from './app/components/SkillPacksView.js';
 import { PresetsView } from './app/components/PresetsView.js';
+import { McpTemplatesView } from './app/components/McpTemplatesView.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sidebar Navigation
@@ -233,6 +234,9 @@ function App() {
     }
     if (routeBase === 'presets') {
       return html`<${PresetsView} />`;
+    }
+    if (routeBase === 'mcp-servers') {
+      return html`<${McpTemplatesView} />`;
     }
     if (routeBase === 'run') {
       const runId = route.split('/')[1];

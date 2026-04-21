@@ -4,11 +4,12 @@
 // needs NAV_ITEMS).
 
 export const NAV_ITEMS = [
-  { hash: 'dashboard', icon: '\u25C9', label: 'Dashboard' },
-  { hash: 'manager',   icon: '\u2726', label: 'Manager' },
-  { hash: 'board',     icon: '\u2592', label: 'Task Board' },
-  { hash: 'projects',  icon: '\u25A3', label: 'Projects' },
-  { hash: 'agents',    icon: '\u2699', label: 'Agents' },
-  { hash: 'skills',    icon: '\u2662', label: 'Skill Packs' },
-  { hash: 'presets',   icon: '\u2756', label: 'Presets' },
+  { hash: 'dashboard', icon: '◉', label: 'Dashboard' },
+  { hash: 'manager',   icon: '✦', label: 'Manager' },
+  { hash: 'board',     icon: '▒', label: 'Task Board' },
+  { hash: 'projects',  icon: '▣', label: 'Projects' },
+  { hash: 'agents',    icon: '⚙', label: 'Agents' },
+  { hash: 'skills',    icon: '♢', label: 'Skill Packs' },
+  { hash: 'presets',   icon: '❖', label: 'Presets' },
+  { hash: 'mcp-servers', icon: '⦿', label: 'MCP Servers' },
 ];

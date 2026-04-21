@@ -11,8 +11,20 @@ test.describe('Palantir Console Smoke', () => {
   test('nav sidebar contains all route items', async ({ page }) => {
     await page.goto('/');
     const nav = page.locator('nav.nav-sidebar');
-    // NAV_ITEMS: Dashboard, Manager, Task Board, Projects, Agents
-    await expect(nav.locator('.nav-item')).toHaveCount(5);
+    // NAV_ITEMS: Dashboard, Manager, Task Board, Projects, Agents,
+    // Skill Packs, Presets, MCP Servers (M3)
+    await expect(nav.locator('.nav-item')).toHaveCount(8);
+  });
+
+  test('hash navigation to #mcp-servers shows seeded templates', async ({ page }) => {
+    await page.goto('/#mcp-servers');
+    await expect(page.locator('#app')).not.toBeEmpty();
+    // Seeded templates from skillPackService.DEFAULT_MCP_TEMPLATES should
+    // render as cards. At minimum the page heading + one default alias
+    // confirms the tab is wired into app.js and the route resolves to
+    // McpTemplatesView (not a fallback Dashboard).
+    await expect(page.locator('h1', { hasText: 'MCP Servers' })).toBeVisible();
+    await expect(page.locator('body')).toContainText(/playwright|filesystem/);
   });
 
   test('hash navigation to #dashboard', async ({ page }) => {

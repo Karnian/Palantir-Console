@@ -49,6 +49,8 @@ const { createRegistryService } = require('./services/registryService');
 const { createSkillPacksRouter } = require('./routes/skillPacks');
 const { createPresetService } = require('./services/presetService');
 const { createWorkerPresetsRouter } = require('./routes/workerPresets');
+const { createMcpTemplateService } = require('./services/mcpTemplateService');
+const { createMcpTemplatesRouter } = require('./routes/mcpTemplates');
 
 function createApp(options = {}) {
   const app = express();
@@ -117,6 +119,12 @@ function createApp(options = {}) {
   const agentProfileService = createAgentProfileService(db);
   const skillPackService = createSkillPackService(db);
   const registryService = createRegistryService();
+  // M3: UI-driven mcp_server_templates CRUD. Constructed AFTER
+  // skillPackService so the default templates seed has already run —
+  // otherwise `svc.listTemplates()` on a fresh DB would be empty until
+  // the first request hit skillPackService. Must also come AFTER
+  // presetService so tests can delete-then-verify reference behavior.
+  const mcpTemplateService = createMcpTemplateService(db);
 
   // Execution engines
   const executionEngine = createExecutionEngine();
@@ -312,7 +320,7 @@ function createApp(options = {}) {
   // New routes (v2)
   app.use('/api/projects', createProjectsRouter({ projectService, taskService, projectBriefService, pmCleanupService }));
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService }));
-  app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService }));
+  app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService }));
   // PR18: tests can pass options.authResolverOpts (e.g. a fake `hasKeychain`)
   // so /api/agents and /api/manager preflights are deterministic across CI
   // hosts that may or may not have a Claude keychain item. Production callers
@@ -326,6 +334,7 @@ function createApp(options = {}) {
   app.use('/api/dispatch-audit', createDispatchAuditRouter({ reconciliationService }));
   app.use('/api/router', createRouterRouter({ routerService }));
   app.use('/api/worker-presets', createWorkerPresetsRouter({ presetService }));
+  app.use('/api/mcp-server-templates', createMcpTemplatesRouter({ mcpTemplateService }));
   app.use('/api/skill-packs', createSkillPacksRouter({ skillPackService, registryService }));
   app.use('/api/projects', createSkillPacksRouter.projectBindings({ skillPackService }));
   app.use('/api/tasks', createSkillPacksRouter.taskBindings({ skillPackService }));

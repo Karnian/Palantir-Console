@@ -394,6 +394,22 @@ export function RunInspector({ run, onClose }) {
                   ✓ Preset matches the snapshot — no drift.
                 </div>
               `}
+              ${presetData.mcp_template_drift && presetData.mcp_template_drift.modified_count > 0 && html`
+                <div style=${{ padding: '8px', background: 'color-mix(in srgb, #f59e0b 15%, transparent)', color: '#f59e0b', borderRadius: '4px', marginBottom: '12px' }}>
+                  ⚠ ${presetData.mcp_template_drift.modified_count} MCP template${presetData.mcp_template_drift.modified_count === 1 ? '' : 's'} modified after run started.
+                  <div style=${{ marginTop: '4px', fontSize: '11px' }}>
+                    The preset snapshot froze the template <em>ids</em>, not the template bodies. These aliases have changed since the run spawned:
+                  </div>
+                  <ul style=${{ margin: '4px 0 0 0', paddingLeft: '16px', fontSize: '11px' }}>
+                    ${presetData.mcp_template_drift.templates.map((t) => html`
+                      <li key=${t.id}>
+                        <code>${t.alias}</code>
+                        <span style=${{ opacity: 0.7, marginLeft: '6px' }}>(updated ${t.updated_at})</span>
+                      </li>
+                    `)}
+                  </ul>
+                </div>
+              `}
               <div style=${{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                 <div>
                   <div style=${{ fontWeight: 600, marginBottom: '4px' }}>Snapshot (run-time)</div>
