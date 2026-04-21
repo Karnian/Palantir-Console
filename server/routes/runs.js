@@ -79,7 +79,43 @@ function computePresetDrift(snapshotCore, currentPreset,
   return result;
 }
 
-function createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService }) {
+/**
+ * M3: detect MCP templates that were modified after this run's preset
+ * snapshot was captured. The preset snapshot freezes `mcp_server_ids` but
+ * NOT the template bodies (command/args/allowed_env_keys). Before M3 the
+ * table was code-seed-only so there was no reader for template drift;
+ * with UI CRUD now open a run's effective MCP spawn config can silently
+ * diverge from what the snapshot describes. We surface that as an
+ * info-level badge rather than a hard drift field because the spawn has
+ * already happened — the user only needs to know "the template used here
+ * has moved since".
+ *
+ * Comparison is lexicographic on SQLite's `YYYY-MM-DD HH:MM:SS` format —
+ * both `template.updated_at` and `snapshot.applied_at` come from the same
+ * `datetime('now')` source so string ordering matches chronological
+ * ordering without parsing.
+ *
+ * Returns `{ templates: [{id, alias, updated_at}], modified_count }` or
+ * null when the snapshot has no mcp_server_ids.
+ */
+function computeMcpTemplateDrift(snapshotCore, snapshotAppliedAt, mcpTemplateService) {
+  if (!mcpTemplateService || !snapshotCore || !snapshotAppliedAt) return null;
+  const ids = Array.isArray(snapshotCore.mcp_server_ids) ? snapshotCore.mcp_server_ids : [];
+  if (ids.length === 0) return null;
+  const drifted = [];
+  for (const id of ids) {
+    let tpl = null;
+    try { tpl = mcpTemplateService.getTemplate(id); }
+    catch { continue; /* template deleted — preset drift handles this separately */ }
+    if (!tpl.updated_at) continue;
+    if (tpl.updated_at > snapshotAppliedAt) {
+      drifted.push({ id: tpl.id, alias: tpl.alias, updated_at: tpl.updated_at });
+    }
+  }
+  return { templates: drifted, modified_count: drifted.length };
+}
+
+function createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService }) {
   const router = express.Router();
 
   router.get('/', asyncHandler(async (req, res) => {
@@ -134,6 +170,9 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
     }
 
     const drift = computePresetDrift(snapshotCore, currentPreset, snapshotFileHashes, currentFileHashes, { driftError });
+    const mcpTemplateDrift = computeMcpTemplateDrift(
+      snapshotCore, snapshot.applied_at, mcpTemplateService,
+    );
     res.json({
       run_id: run.id,
       snapshot: {
@@ -145,6 +184,7 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
       },
       current_preset: currentPreset,
       drift,
+      mcp_template_drift: mcpTemplateDrift,
     });
   }));
 
@@ -243,4 +283,4 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
   return router;
 }
 
-module.exports = { createRunsRouter, computePresetDrift };
+module.exports = { createRunsRouter, computePresetDrift, computeMcpTemplateDrift };
