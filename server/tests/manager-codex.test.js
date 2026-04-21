@@ -94,6 +94,46 @@ test('CodexAdapter.startSession writes a system prompt temp file and disposeSess
   }, 50));
 });
 
+test('M2: CodexAdapter.startSession with mcpConfig emits mcp:legacy_alias_conflict for overlapping user aliases', (t) => {
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  // Swap the user config path for this test only
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'palantir-m2-pm-'));
+  const cfgPath = path.join(dir, 'config.toml');
+  fs.writeFileSync(cfgPath, '[mcp_servers.slack]\ncommand = "legacy"\n');
+  const prev = process.env.PALANTIR_CODEX_CONFIG_PATH;
+  process.env.PALANTIR_CODEX_CONFIG_PATH = cfgPath;
+  t.after(() => {
+    if (prev === undefined) delete process.env.PALANTIR_CODEX_CONFIG_PATH;
+    else process.env.PALANTIR_CODEX_CONFIG_PATH = prev;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const events = [];
+  const fakeRunService = {
+    addRunEvent(_r, type, payload) { events.push({ type, payload: JSON.parse(payload) }); },
+    updateManagerThreadId() {},
+    updateRunResult() {},
+    updateRunStatus() {},
+  };
+  const adapter = createCodexAdapter({ runService: fakeRunService });
+  adapter.startSession('run_mgr_m2_conflict', {
+    systemPrompt: 'sys',
+    cwd: process.cwd(),
+    mcpConfig: {
+      mcpServers: {
+        slack: { command: 'from-pm', args: [] }, // conflicts with user config
+        fresh: { command: 'from-pm' },           // no conflict
+      },
+    },
+  });
+  const legacy = events.filter(e => e.type === 'mcp:legacy_alias_conflict');
+  assert.equal(legacy.length, 1, 'exactly one conflict event for slack');
+  assert.equal(legacy[0].payload.alias, 'slack');
+  assert.equal(legacy[0].payload.source, 'pm_config');
+  assert.deepEqual(Object.keys(legacy[0].payload).sort(), ['alias', 'message', 'source']);
+  adapter.disposeSession('run_mgr_m2_conflict');
+});
+
 test('M1: CodexAdapter.runTurn with mcpConfig injects leaf-level -c mcp_servers.<alias>.<key> flags', () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
   const { PassThrough } = require('node:stream');
