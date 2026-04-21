@@ -20,13 +20,18 @@
  *     for manager role (auto-approves tool calls, keeps filesystem sandbox).
  *     --dangerously-bypass-approvals-and-sandbox is only for worker role
  *     or when PALANTIR_CODEX_MANAGER_BYPASS=1 is set.
- *   - AGENTS.md interaction (verified 2026-04-07 against codex-cli 0.118.0):
+ *   - AGENTS.md interaction (verified 2026-04-20 against codex-cli 0.120.0):
  *     ~/.codex/AGENTS.md is auto-loaded by codex when present and prepended
  *     to the model_instructions_file content. On the dev box this file is
  *     empty (0 bytes), so there is no conflict in practice. If a future user
  *     populates it, it will simply prefix the manager system prompt — no
  *     adapter change needed. Project-local AGENTS.md (in cwd) is also
  *     auto-loaded; we accept this as part of how Codex sees the workspace.
+ *   - MCP injection (M1, verified 2026-04-20 against codex-cli 0.120.0):
+ *     `-c mcp_servers.<alias>.<key>=<TOML-value>` dotted-path overrides land
+ *     in the same merged config as ~/.codex/config.toml. The earlier
+ *     `-c mcp_servers=<JSON>` form is rejected with "invalid type: string,
+ *     expected a map" and MUST NOT be re-introduced. See codexMcpFlatten.js.
  *
  * Capability flags:
  *   persistentProcess: false  (matters for routes that try to "send to alive process")
@@ -47,6 +52,7 @@ const {
   RAW_EVENTS_ENABLED,
   buildPayload,
 } = require('./eventTypes');
+const { flattenMcpToCodexArgs } = require('./codexMcpFlatten');
 
 // P2-2: vendor item.type='error' classification constants. Kept at
 // module scope so the exported helper `classifyCodexErrorAsNotice` (below
@@ -162,9 +168,12 @@ function createCodexAdapter({
    * Worker role (future) keeps the bypass because workers have legitimate
    * filesystem write needs. See docs/specs/manager-v3-multilayer.md principle 1.
    *
-   * P4-2: mcpConfig is accepted for interface parity with claudeAdapter but
-   * silently ignored. Codex CLI does not support --mcp-config as of 0.118.0.
-   * When/if Codex adds MCP support, wire mcpConfig into spawnOneTurn args.
+   * M1 (supersedes P4-2 note): mcpConfig is now consumed. Codex 0.120.0 has
+   * no `--mcp-config` flag, but `-c mcp_servers.<alias>.<key>=<TOML>`
+   * dotted-path overrides land in the same merged config as the user's
+   * ~/.codex/config.toml. We persist the shape on the session and flatten
+   * on every turn via codexMcpFlatten.flattenMcpToCodexArgs. Worker path
+   * (lifecycleService) uses the same util so PM/worker never drift.
    */
   function startSession(runId, { systemPrompt, cwd, model, env, role, resumeThreadId, onThreadStarted, mcpConfig } = {}) {
     if (sessions.has(runId)) {
@@ -197,6 +206,9 @@ function createCodexAdapter({
       // persist pm_thread_id into project_briefs.
       onThreadStarted: typeof onThreadStarted === 'function' ? onThreadStarted : null,
       threadStartedFired: false,
+      // M1: merged MCP config to flatten into -c flags per turn. null means
+      // "no MCP injection" (empty object behaves the same).
+      mcpConfig: mcpConfig || null,
       turnIndex: 0,
       usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
       currentChild: null,
@@ -254,6 +266,35 @@ function createCodexAdapter({
     args.push('-c', `model_instructions_file="${state.instructionsPath}"`);
     if (state.model) {
       args.push('-m', state.model);
+    }
+    // M1: inject merged MCP config as leaf-level `-c mcp_servers.<alias>.<key>=<TOML>`
+    // overrides. These must come BEFORE `-` (the stdin sentinel) — codex's
+    // arg parser treats everything after `-` as prompt input.
+    //
+    // Fail-closed on invalid input (per Codex M1 review): silently dropping
+    // the MCP block would let a PM run proceed without tools a preset
+    // declared required. Emit TURN_FAILED + SESSION_ENDED, mark the run
+    // failed, and re-throw so runTurn returns { accepted: false } to its
+    // caller (routes/manager.js).
+    if (state.mcpConfig) {
+      let mcpArgs;
+      try {
+        mcpArgs = flattenMcpToCodexArgs(state.mcpConfig);
+      } catch (err) {
+        emitNormalized(runId, NORMALIZED_EVENT_TYPES.TURN_FAILED, buildPayload({
+          turnIndex: state.turnIndex,
+          summaryText: `mcpConfig invalid: ${err.message}`,
+          hasRawStored: RAW_EVENTS_ENABLED,
+          data: { kind: 'mcp_invalid', error: err.message },
+        }));
+        state.ended = true;
+        try {
+          if (runService) runService.updateRunStatus(runId, 'failed', { force: true });
+        } catch { /* ignore */ }
+        emitSessionEndedIfNeeded(runId, 'mcp-invalid');
+        throw new Error(`codexAdapter: mcpConfig flatten failed: ${err.message}`);
+      }
+      if (mcpArgs.length) args.push(...mcpArgs);
     }
     // Read prompt from stdin to avoid shell-quoting issues with multi-line input.
     args.push('-');
@@ -449,7 +490,7 @@ function createCodexAdapter({
         //   b. `item.code` looks like a deprecation/notice marker
         //      (starts with 'deprecated_', 'notice_', 'warn_', or 'warning_').
         //   c. regex fallback on the message — still intentional because
-        //      current codex-cli builds (verified 2026-04-07 on 0.118.0)
+        //      current codex-cli builds (verified 2026-04-20 on 0.120.0)
         //      do NOT populate severity/code on deprecation items, so
         //      dropping the regex today would re-introduce the fail. Keep
         //      the fallback until vendor shape is reliable. Pattern uses

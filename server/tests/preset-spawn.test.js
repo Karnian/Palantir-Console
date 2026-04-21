@@ -3,7 +3,9 @@
 // Drives lifecycleService.executeTask with stubbed spawn engines and asserts
 // that (a) preset MCP is merged with precedence preset > project > skill pack,
 // (b) Claude worker gets a merged mcp-config file + composed system prompt,
-// (c) Codex worker gets `-c mcp_servers=<json>` args + prompt-file placeholder,
+// (c) Codex worker gets leaf-level `-c mcp_servers.<alias>.<key>=<TOML>` args
+//     (M1: replaces the earlier top-level `mcp_servers=<JSON>` blob that Codex
+//     rejected with "invalid type: string, expected a map"),
 // (d) snapshot persists to run_preset_snapshots at resolve time (not spawn),
 // (e) Tier 2 isolated preset emits a `preset:tier2_pending` warn but does not
 // add --bare / --plugin-dir yet (Phase 10D).
@@ -156,7 +158,7 @@ test('Phase 10C: Claude worker with preset — systemPrompt composed, mcpConfig 
   assert.equal(snap.preset_id, preset.id);
 });
 
-test('Phase 10C: Codex worker with preset — injects -c mcp_servers + writes system prompt file', async (t) => {
+test('Phase 10C+M1: Codex worker with preset — injects leaf-level -c mcp_servers.<alias>.<key> + writes system prompt file', async (t) => {
   const db = await mkdb(t);
   const pluginsRoot = mkPluginsRoot(t);
   const presetService = createPresetService(db, { pluginsRoot });
@@ -178,17 +180,82 @@ test('Phase 10C: Codex worker with preset — injects -c mcp_servers + writes sy
 
   assert.equal(exec.spawned.length, 1);
   const args = exec.spawned[0].opts.args;
-  // `-c mcp_servers=<json>` prepended
-  const cIdx = args.indexOf('-c');
-  assert.ok(cIdx >= 0, 'codex -c flag present');
-  assert.ok(args[cIdx + 1].startsWith('mcp_servers='), '-c mcp_servers= form');
-  assert.ok(args[cIdx + 1].includes('"ctx7"'), 'ctx7 alias included');
+  // Collect all `-c <value>` pairs — M1 uses Codex leaf-level dotted path:
+  //   -c mcp_servers.<alias>.<key>=<TOML-value>
+  // Old worker path emitted `-c mcp_servers=<JSON>` which Codex rejects with
+  // "invalid type: string, expected a map". That MUST not appear.
+  const cflags = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '-c' && i + 1 < args.length) cflags.push(args[i + 1]);
+  }
+  assert.ok(cflags.length > 0, 'codex -c flag present');
+  assert.ok(
+    !cflags.some(c => /^mcp_servers=/.test(c)),
+    'must not emit top-level mcp_servers=<JSON> blob (Codex rejects it)',
+  );
+  assert.ok(
+    cflags.some(c => /^mcp_servers\.ctx7\.command=/.test(c)),
+    'ctx7.command leaf emitted',
+  );
+  assert.ok(
+    cflags.some(c => /^mcp_servers\.ctx7\.args=/.test(c)),
+    'ctx7.args leaf emitted',
+  );
   // system_prompt_file placeholder was written (args_template contains
   // {system_prompt_file} — the substituted path appears in args).
   const promptFileArg = args.find(a => a.includes('-system-prompt.md'));
   assert.ok(promptFileArg, 'system_prompt_file placeholder was substituted');
   const content = fs.readFileSync(promptFileArg, 'utf8');
   assert.ok(content.startsWith('CODEX PRESET'), 'preset prompt leads composed file');
+});
+
+test('M1: Codex worker with invalid MCP (direct bearer_token) — fails closed, run marked failed, preset:mcp_invalid emitted', async (t) => {
+  const db = await mkdb(t);
+  const presetService = createPresetService(db, { pluginsRoot: mkPluginsRoot(t) });
+  // Shim the merge so the lifecycleService receives an intentionally invalid
+  // mcpServers map (direct `bearer_token` is refused by flattenMcpToCodexArgs).
+  // This is the only surface we need to stage — mcp_server_templates / preset
+  // schema intentionally don't accept that field, which is the whole point of
+  // fail-closed on the lifecycle side.
+  const origMerge = presetService.mergeMcp3.bind(presetService);
+  presetService.mergeMcp3 = function patchedMerge(presetMcp, projectMcp, skillPackMcp, opts) {
+    origMerge(presetMcp, projectMcp, skillPackMcp, opts);
+    return {
+      mcpServers: {
+        bad: { command: 'echo', bearer_token: 'secret-leak' },
+      },
+    };
+  };
+
+  const { lc, exec, rs } = buildLifecycle(db, { presetService });
+
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, 'codex');
+
+  const preset = presetService.createPreset({
+    name: 'BadMcp',
+    base_system_prompt: 'PRESET',
+    mcp_server_ids: ['tpl_ctx7'], // valid template so createPreset passes; merge shim overrides
+  });
+
+  assert.throws(
+    () => lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id }),
+    /preset MCP invalid for codex worker/,
+  );
+  // Spawn must not happen
+  assert.equal(exec.spawned.length, 0, 'codex spawn must be skipped');
+  // Run row was created and then flipped to failed by the outer catch
+  const runs = rs.listRuns({});
+  assert.ok(runs.length >= 1);
+  const last = runs[0];
+  assert.equal(last.status, 'failed');
+  // preset:mcp_invalid event landed before the throw
+  const events = rs.getRunEvents(last.id);
+  assert.ok(
+    events.some(e => e.event_type === 'preset:mcp_invalid'),
+    'preset:mcp_invalid emitted',
+  );
 });
 
 test('Phase 10C: OpenCode worker with preset — emits preset:mcp_unsupported warning', async (t) => {
