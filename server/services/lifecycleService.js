@@ -542,6 +542,38 @@ function createLifecycleService({
         // flips the run to failed and runs worktree cleanup.
         let extraArgs = [];
         if (mergedMcp && adapterName === 'codex') {
+          // M2: detect alias conflicts with ~/.codex/config.toml BEFORE
+          // flatten so the event lands on the run even if flatten later
+          // throws. Annotate-only; Codex CLI will leaf-merge the two at
+          // spawn regardless — preset author just gets a visible signal.
+          const {
+            scanCodexUserConfigAliases,
+            detectLegacyAliasConflicts,
+            resolveCodexUserConfigPath,
+          } = require('./managerAdapters/codexUserConfigScan');
+          const resolvedConfigPath = resolveCodexUserConfigPath();
+          const userAliases = scanCodexUserConfigAliases(resolvedConfigPath);
+          // perAliasSource mirrors mergeMcp3's precedence (preset wins
+          // over project wins over skill pack). If merge precedence ever
+          // changes, update this resolver in lockstep so the source hint
+          // in the event payload still points at the actual winner.
+          const perAliasSource = (alias) => {
+            if (presetMcp && presetMcp.mcpServers && presetMcp.mcpServers[alias]) return 'preset';
+            if (projectMcpObj && projectMcpObj.mcpServers && projectMcpObj.mcpServers[alias]) return 'project';
+            if (skillPackMcp && skillPackMcp.mcpServers && skillPackMcp.mcpServers[alias]) return 'skillpack';
+            return 'unknown';
+          };
+          const conflicts = detectLegacyAliasConflicts(mergedMcp, userAliases, {
+            perAliasSource,
+            configPath: resolvedConfigPath,
+          });
+          for (const c of conflicts) {
+            runService.addRunEvent(run.id, 'mcp:legacy_alias_conflict', JSON.stringify({
+              alias: c.alias,
+              source: c.source,
+              message: c.message,
+            }));
+          }
           const { flattenMcpToCodexArgs } = require('./managerAdapters/codexMcpFlatten');
           try {
             extraArgs = flattenMcpToCodexArgs(mergedMcp);
