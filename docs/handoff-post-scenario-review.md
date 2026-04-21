@@ -22,20 +22,14 @@
 - Open issues: **#113** (M3 follow-up, 관측 대기)
 - Deferred: Phase 3b (Claude PM resume, 트리거 대기)
 
-## 남은 백로그 (우선순위순)
+## 남은 백로그
 
-### 데이터 대기
-- **M3 (#113)** — Codex MCP `env` 값 argv 노출 해결 (argv → file-based transport). 1-2주 실사용 관찰 후 M2 event 빈도 / alias 분포 / 사용자 무시율 데이터 기반 착수 여부 결정.
+전체 항목은 [`backlog.md`](./backlog.md) 에 카테고리별로 정리되어 있음 (Ready / Data-wait / Trigger-wait / Draft-review).
+주요 포인트:
 
-### 트리거 대기
-- **Phase 3b — Claude PM resume** — `docs/specs/manager-v3-multilayer.md` §9.6 의 "Claude PM use case 발생" 트리거 미충족. 사용자가 Claude 로 PM 을 쓸 필요 선언 시 착수.
-
-### Draft / 리뷰 필요
-- **`docs/specs/skill-pack-gallery-v1.1.md`** — URL 기반 Skill Pack 설치 spec. status "Draft — pending Codex cross-review". 구현 착수 전 리뷰 + lock-in 필요.
-- **`docs/specs/manager-session-ui.md`** — Manager Session UI/UX 재설계 Proposal. 현재 구현과의 diff 파악 필요.
-
-### Low priority
-- `install-from-url.test.js` 병렬 실행 시 간헐적 409 (기존 이슈, 이 세션과 무관) — pre-existing. 재현 빈도 낮음.
+- **Data-wait**: M3 (#113) — argv → file-based transport. 2026-04-22 + 1-2주 관측 후 결정.
+- **Trigger-wait**: Phase 3b (Claude PM resume).
+- **Ready**: skill-pack-gallery v1.1 spec Codex review, manager-session-ui 구현 gap 분석, install-from-url flake, test-scenarios stale 점검.
 
 ## 재입장 prompt 예시
 
