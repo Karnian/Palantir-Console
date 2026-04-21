@@ -524,15 +524,34 @@ function createLifecycleService({
           fs.writeFileSync(promptFilePath, composedSystemPrompt, { mode: 0o600 });
           placeholders.system_prompt_file = promptFilePath;
         }
-        // Phase 10C: Codex worker gets preset MCP injected via
-        // `codex exec -c mcp_servers=<json>`. Only applied when the
-        // merged MCP config is non-empty AND the profile command is
-        // codex — opencode today has no equivalent flag, so we emit a
-        // degrade warning and fall back to prompt-only (spec §7 Phase 10C).
+        // Phase 10C + M1: Codex worker gets preset MCP injected as leaf-level
+        // dotted paths:
+        //   -c mcp_servers.<alias>.<key>=<TOML-value>
+        // The earlier `-c mcp_servers=<JSON>` form was rejected by Codex CLI
+        // with "invalid type: string, expected a map", so it silently broke
+        // the entire config load. Shared util lives in
+        // managerAdapters/codexMcpFlatten.js and is reused by codexAdapter
+        // (PM path) so worker/PM never drift.
+        //
+        // Fail-closed on invalid input (per Codex M1 review): silently
+        // dropping an MCP block and still spawning would violate the
+        // preset's intent — Codex supports `mcp_servers.<id>.required=true`
+        // and a preset author choosing a required server expects spawn
+        // failure, not a quiet degrade. We emit `preset:mcp_invalid` for
+        // observability then throw; the outer catch on this try block
+        // flips the run to failed and runs worktree cleanup.
         let extraArgs = [];
         if (mergedMcp && adapterName === 'codex') {
-          const jsonStr = JSON.stringify(mergedMcp.mcpServers || {});
-          extraArgs = ['-c', `mcp_servers=${jsonStr}`];
+          const { flattenMcpToCodexArgs } = require('./managerAdapters/codexMcpFlatten');
+          try {
+            extraArgs = flattenMcpToCodexArgs(mergedMcp);
+          } catch (err) {
+            runService.addRunEvent(run.id, 'preset:mcp_invalid', JSON.stringify({
+              adapter: 'codex',
+              reason: err.message,
+            }));
+            throw new Error(`preset MCP invalid for codex worker: ${err.message}`);
+          }
         } else if (mergedMcp && adapterName === 'opencode') {
           runService.addRunEvent(run.id, 'preset:mcp_unsupported', JSON.stringify({
             adapter: 'opencode',

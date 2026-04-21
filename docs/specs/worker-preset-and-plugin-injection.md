@@ -683,3 +683,16 @@ PoC 스크립트: `scripts/spike-bare-auth.mjs`. 4 variant 매트릭스, macOS d
 - [x] 문서: 본 spec + README "Creating a Worker Preset" 섹션 추가.
 
 **Phase 10 status: GREEN** — US-007 은 정식 제외 (위 사유). 운영자가 isolated 워커 spawn 가능.
+
+## 13. Known limitations (M1 이후 follow-up)
+
+### M1 (Codex MCP leaf-level flatten) — `env` 값 argv 노출
+
+- **증상**: Codex worker / PM 모두 MCP 설정을 `-c mcp_servers.<alias>.<key>=<TOML>` dotted-path 로 주입한다 (`server/services/managerAdapters/codexMcpFlatten.js`). `env` subtable 은 inline-table 형태로 함께 argv 에 실린다. 즉 `-c mcp_servers.notion.env={NOTION_TOKEN="…"}` 같은 argv 가 `ps`, process listing, 셸 히스토리, core dump 에 그대로 노출된다.
+- **현 완화**: `bearer_token` 직접 값은 거부하고 `bearer_token_env_var` (env var 이름만) 만 허용. MCP `env` 값 자체는 "비민감 설정" 용도로만 사용하는 것을 전제로 한다. Codex 0.120 교차검증 (round 4) 에서 "bearer_token 막는 것만으로는 secret 이 argv 에 안 남는다고 보장할 수 없다" 고 지적받았다. M1 에선 **알려진 한계로 명시**하고 범위 밖으로 분리.
+- **근본 해결 방향 (M3 후보)**: argv 대신 **파일 기반 설정 전달**. 옵션:
+  1. Palantir-owned TOML fragment 를 spawn 직전 임시 파일로 써서 `CODEX_CONFIG=<path>` 같은 env 경로로 주입 (Codex 가 이 훅을 지원하면).
+  2. Preset spawn 시 `~/.codex/config.toml` 의 `mcp_servers.*` 섹션을 in-place merge/unmerge (원자성 이슈 큼, 비추천).
+  3. Codex CLI 측에 `--config-file` / `--mcp-config` 류 플래그 추가 요청 (upstream 기여).
+- **범위 밖 처리 이유**: 이 이슈는 이전 broken `-c mcp_servers=<JSON>` 경로에서도 동일하게 존재했다 (JSON blob 도 argv 에 실렸음 — 단지 Codex 가 파싱 실패해 MCP 자체가 로드되지 않아 가시화되지 않았을 뿐). M1 이 새로 도입한 위험이 아니라 **기존 설계 이슈를 노출**시킨 것. M1 의 목표 (worker 경로의 broken 주입을 leaf-level 로 교체) 와 분리해야 PR 범위가 관리 가능.
+- **트래킹**: GitHub issue [#113](https://github.com/Karnian/Palantir-Console/issues/113).
