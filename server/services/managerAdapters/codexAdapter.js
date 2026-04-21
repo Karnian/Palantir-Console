@@ -53,6 +53,11 @@ const {
   buildPayload,
 } = require('./eventTypes');
 const { flattenMcpToCodexArgs } = require('./codexMcpFlatten');
+const {
+  scanCodexUserConfigAliases,
+  detectLegacyAliasConflicts,
+  resolveCodexUserConfigPath,
+} = require('./codexUserConfigScan');
 
 // P2-2: vendor item.type='error' classification constants. Kept at
 // module scope so the exported helper `classifyCodexErrorAsNotice` (below
@@ -223,6 +228,36 @@ function createCodexAdapter({
       const state = sessions.get(runId);
       state.threadStartedFired = true;
       try { if (state.onThreadStarted) state.onThreadStarted(resumeThreadId); } catch { /* ignore */ }
+    }
+
+    // M2: legacy alias conflict detection. Emit once at startSession so the
+    // event lands even before the first turn spawns. Source is fixed to
+    // 'pm_config' because the PM path receives a single pre-merged
+    // mcpConfig and cannot split it back into preset / project /
+    // skillpack. Annotate-only — Codex will still leaf-merge user config
+    // at spawn; preset author just sees the drift warning. Event payload
+    // shape `{ alias, source, message }` matches the worker path so event
+    // consumers can treat both uniformly (M2 review cardinality rule).
+    if (mcpConfig && runService) {
+      try {
+        const resolvedConfigPath = resolveCodexUserConfigPath();
+        const userAliases = scanCodexUserConfigAliases(resolvedConfigPath);
+        const conflicts = detectLegacyAliasConflicts(mcpConfig, userAliases, {
+          perAliasSource: () => 'pm_config',
+          configPath: resolvedConfigPath,
+        });
+        for (const c of conflicts) {
+          try {
+            runService.addRunEvent(runId, 'mcp:legacy_alias_conflict', JSON.stringify({
+              alias: c.alias,
+              source: c.source,
+              message: c.message,
+            }));
+          } catch { /* ignore */ }
+        }
+      } catch (err) {
+        console.warn(`[codexAdapter] legacy alias scan failed for ${runId}: ${err.message}`);
+      }
     }
 
     return { sessionRef: { instructionsPath, resumedThreadId: resumeThreadId || null } };

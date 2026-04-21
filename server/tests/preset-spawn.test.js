@@ -422,6 +422,117 @@ test('Phase 10C: task.preferred_preset_id is used when presetId arg omitted', as
   assert.equal(rs.getRun(run.id).preset_id, preset.id);
 });
 
+// ────────────────────────────────────────────────────────────────────
+// M2: legacy alias conflict detection (mcp:legacy_alias_conflict event)
+// Matrix per Codex review: no conflict / preset conflict / skillpack
+// conflict / both. `~/.codex/config.toml` is swapped via
+// PALANTIR_CODEX_CONFIG_PATH so the util reads a test fixture.
+// ────────────────────────────────────────────────────────────────────
+
+function writeUserConfig(t, text) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-m2-userconf-'));
+  const p = path.join(dir, 'config.toml');
+  fs.writeFileSync(p, text);
+  const prev = process.env.PALANTIR_CODEX_CONFIG_PATH;
+  process.env.PALANTIR_CODEX_CONFIG_PATH = p;
+  t.after(() => {
+    if (prev === undefined) delete process.env.PALANTIR_CODEX_CONFIG_PATH;
+    else process.env.PALANTIR_CODEX_CONFIG_PATH = prev;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+}
+
+test('M2: no conflict — user config has no overlapping alias → no legacy event', async (t) => {
+  writeUserConfig(t, '[mcp_servers.other]\ncommand = "x"\n');
+  const db = await mkdb(t);
+  const presetService = createPresetService(db, { pluginsRoot: mkPluginsRoot(t) });
+  const { lc, rs } = buildLifecycle(db, { presetService });
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, 'codex');
+  const preset = presetService.createPreset({ name: 'NoConflict', mcp_server_ids: ['tpl_ctx7'] });
+  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
+  const events = rs.getRunEvents(run.id);
+  assert.equal(events.filter(e => e.event_type === 'mcp:legacy_alias_conflict').length, 0);
+});
+
+test('M2: preset conflict — source=preset emitted with fixed {alias, source, message} payload', async (t) => {
+  writeUserConfig(t, '[mcp_servers.ctx7]\ncommand = "legacy"\nargs = []\n');
+  const db = await mkdb(t);
+  const presetService = createPresetService(db, { pluginsRoot: mkPluginsRoot(t) });
+  const { lc, rs } = buildLifecycle(db, { presetService });
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, 'codex');
+  const preset = presetService.createPreset({ name: 'PresetCtx7', mcp_server_ids: ['tpl_ctx7'] });
+  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
+  const events = rs.getRunEvents(run.id).filter(e => e.event_type === 'mcp:legacy_alias_conflict');
+  assert.equal(events.length, 1);
+  const payload = JSON.parse(events[0].payload_json);
+  assert.deepEqual(Object.keys(payload).sort(), ['alias', 'message', 'source']);
+  assert.equal(payload.alias, 'ctx7');
+  assert.equal(payload.source, 'preset');
+  assert.match(payload.message, /ctx7.*config\.toml/);
+});
+
+test('M2: project conflict — source=project when legacy alias comes from project MCP file', async (t) => {
+  writeUserConfig(t, 'mcp_servers.shared.command = "legacy"\n');
+  const db = await mkdb(t);
+  const presetService = createPresetService(db, { pluginsRoot: mkPluginsRoot(t) });
+  const { lc, ps, rs } = buildLifecycle(db, { presetService });
+  const tmpProjectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-m2-proj2-'));
+  t.after(() => fs.rmSync(tmpProjectDir, { recursive: true, force: true }));
+  const projectMcpPath = path.join(tmpProjectDir, '.palantir-mcp.json');
+  fs.writeFileSync(projectMcpPath, JSON.stringify({
+    mcpServers: { shared: { command: 'from-project' } },
+  }));
+  const project = ps.createProject({ name: 'ProjOnly', directory: tmpProjectDir, mcp_config_path: projectMcpPath });
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, 'codex');
+  // Preset without MCP so only the project file contributes the 'shared' alias.
+  const preset = presetService.createPreset({ name: 'NoMcpPreset' });
+  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
+  const events = rs.getRunEvents(run.id).filter(e => e.event_type === 'mcp:legacy_alias_conflict');
+  assert.equal(events.length, 1);
+  const payload = JSON.parse(events[0].payload_json);
+  assert.deepEqual(Object.keys(payload).sort(), ['alias', 'message', 'source']);
+  assert.equal(payload.alias, 'shared');
+  assert.equal(payload.source, 'project');
+});
+
+test('M2: both preset + project aliases conflict — 2 events, correct sources', async (t) => {
+  writeUserConfig(t, `
+[mcp_servers.ctx7]
+command = "legacy"
+
+[mcp_servers.shared]
+command = "legacy-shared"
+`);
+  const db = await mkdb(t);
+  const presetService = createPresetService(db, { pluginsRoot: mkPluginsRoot(t) });
+  const { lc, ps, rs } = buildLifecycle(db, { presetService });
+  const tmpProjectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-m2-proj-'));
+  t.after(() => fs.rmSync(tmpProjectDir, { recursive: true, force: true }));
+  const projectMcpPath = path.join(tmpProjectDir, '.palantir-mcp.json');
+  fs.writeFileSync(projectMcpPath, JSON.stringify({
+    mcpServers: { shared: { command: 'from-project' } },
+  }));
+  const project = ps.createProject({ name: 'Both', directory: tmpProjectDir, mcp_config_path: projectMcpPath });
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, 'codex');
+  const preset = presetService.createPreset({ name: 'Both', mcp_server_ids: ['tpl_ctx7'] });
+  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
+  const events = rs.getRunEvents(run.id).filter(e => e.event_type === 'mcp:legacy_alias_conflict');
+  assert.equal(events.length, 2);
+  const byAlias = {};
+  for (const e of events) {
+    const p = JSON.parse(e.payload_json);
+    byAlias[p.alias] = p.source;
+  }
+  assert.equal(byAlias.ctx7, 'preset');
+  assert.equal(byAlias.shared, 'project');
+});
+
 test('Phase 10C: no preset → legacy path unchanged (no preset_id binding, no tier2 warn)', async (t) => {
   const db = await mkdb(t);
   const presetService = createPresetService(db, { pluginsRoot: mkPluginsRoot(t) });
