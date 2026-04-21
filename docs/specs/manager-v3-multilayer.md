@@ -1,7 +1,7 @@
 # Manager Session V3 — Multi-Layer Redesign
 
 > Version 0.2 | 2026-04-08
-> Status: **Phase 0 ~ 7 merged to main.** Phase 3b (Claude PM resume) 보류 — spec §9.6 트리거 조건 미충족.
+> Status: **Phase 0~10G merged to main.** Phase 3b (Claude PM resume) 보류 — spec §9.6 트리거 조건 미충족. Post-Phase 10G: M1 (Codex MCP leaf-level flatten, PR #114) / M2 (legacy alias detection, PR #115) / B3 (`npm run diagnose:mcp` ops 도구, PR #116) / Flake stabilization (PR #117) 반영. M3 (#113) 는 관측 대기. 현재 백로그는 [../backlog.md](../backlog.md) 참고.
 > 관련 문서: [manager-v2.md](./manager-v2.md), [manager-session-ui.md](./manager-session-ui.md), [../test-scenarios.md](../test-scenarios.md)
 >
 > v0.2 변경: 코덱스 2차 검증 반영. 스키마 충돌 (parent_run_id 재사용, pm_thread_id 리네임), Phase 1.5에 worker→Top parent notice 포함, 원칙 9 추가, PM lifecycle cleanup owner 명시.
