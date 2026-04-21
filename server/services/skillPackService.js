@@ -1,7 +1,10 @@
 const crypto = require('node:crypto');
 const { BadRequestError, NotFoundError, ConflictError } = require('../utils/errors');
+const { ENV_HARD_DENYLIST_PATTERNS, isEnvKeyDenied } = require('./envDenylist');
 
-// Default MCP server templates — seed-only in v1 (no API CRUD)
+// Default MCP server templates — seeded on every boot via upsert. M3 opens
+// up UI-driven CRUD via mcpTemplateService; the seed remains as a fallback
+// baseline so a fresh install has playwright/filesystem templates ready.
 const DEFAULT_MCP_TEMPLATES = [
   {
     id: 'tpl_playwright',
@@ -21,22 +24,10 @@ const DEFAULT_MCP_TEMPLATES = [
   },
 ];
 
-// Tier 2: Global hard denylist — always rejected regardless of per-template allowlist
-const ENV_HARD_DENYLIST_PATTERNS = [
-  // Credential patterns
-  /_KEY$/, /_SECRET$/, /_TOKEN$/, /_PASSWORD$/, /_CREDENTIAL$/, /_CREDENTIALS$/,
-  /_CERT$/, /_PRIVATE$/,
-  // Process-loader patterns
-  /^NODE_OPTIONS$/, /^NODE_EXTRA_CA_CERTS$/, /^LD_PRELOAD$/, /^LD_LIBRARY_PATH$/,
-  /^DYLD_/, /^PYTHONPATH$/, /^RUBYOPT$/, /^PERL5OPT$/, /^JAVA_TOOL_OPTIONS$/,
-  // Path/config hijack
-  /^PATH$/, /^HOME$/, /^SHELL$/, /^GIT_CONFIG_GLOBAL$/, /^GIT_CONFIG_SYSTEM$/,
-  /^XDG_CONFIG_HOME$/,
-];
-
-function isEnvKeyDenied(key) {
-  return ENV_HARD_DENYLIST_PATTERNS.some(pattern => pattern.test(key));
-}
+// Tier 2 env denylist is now in server/services/envDenylist.js so that
+// mcpTemplateService can apply the same rule to allowed_env_keys without
+// importing skillPackService (that would be a circular dependency once
+// mcpTemplateService is wired into the same app graph).
 
 function estimateTokens(text) {
   if (!text) return 0;
@@ -71,16 +62,32 @@ function validateChecklist(checklist) {
 }
 
 function createSkillPackService(db) {
-  // Seed default MCP templates on construction
+  // Seed default MCP templates on construction. On INSERT we stamp
+  // updated_at = now so a fresh install has a real timestamp. On CONFLICT
+  // we only bump updated_at when the seeded content actually changed —
+  // a server restart with an unchanged DEFAULT_MCP_TEMPLATES array must
+  // NOT spuriously invalidate run snapshot drift detection (§M3).
   const upsertTemplate = db.prepare(`
-    INSERT INTO mcp_server_templates (id, alias, command, args, allowed_env_keys, description)
-    VALUES (@id, @alias, @command, @args, @allowed_env_keys, @description)
+    INSERT INTO mcp_server_templates (
+      id, alias, command, args, allowed_env_keys, description, updated_at
+    ) VALUES (
+      @id, @alias, @command, @args, @allowed_env_keys, @description, datetime('now')
+    )
     ON CONFLICT(id) DO UPDATE SET
       alias = excluded.alias,
       command = excluded.command,
       args = excluded.args,
       allowed_env_keys = excluded.allowed_env_keys,
-      description = excluded.description
+      description = excluded.description,
+      updated_at = CASE
+        WHEN mcp_server_templates.alias != excluded.alias
+          OR mcp_server_templates.command != excluded.command
+          OR COALESCE(mcp_server_templates.args, '') != COALESCE(excluded.args, '')
+          OR COALESCE(mcp_server_templates.allowed_env_keys, '') != COALESCE(excluded.allowed_env_keys, '')
+          OR COALESCE(mcp_server_templates.description, '') != COALESCE(excluded.description, '')
+        THEN datetime('now')
+        ELSE mcp_server_templates.updated_at
+      END
   `);
   const seedTemplates = db.transaction(() => {
     for (const tpl of DEFAULT_MCP_TEMPLATES) {
