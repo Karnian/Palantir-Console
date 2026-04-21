@@ -35,6 +35,7 @@ npm start            # 서버 시작 (localhost:4177)
 npm test             # 전체 테스트 실행 (node --test)
 npm run dev          # 개발 서버 (동일)
 npm run test:e2e     # Playwright e2e 테스트
+npm run diagnose:mcp # M2: preset ↔ ~/.codex/config.toml alias 충돌 진단
 
 # 특정 테스트 파일만
 node --test server/tests/manager.test.js
@@ -46,7 +47,7 @@ node --test server/tests/v2-api.test.js
 Express.js 5 + SQLite (WAL, better-sqlite3) + Preact/HTM (CDN 없이 vendor/ UMD) + Inter font (self-hosted woff2).
 빌드 스텝 없음 — `server/public/`의 파일이 그대로 서빙됨. 외부 CDN 의존 0개.
 
-**v3 기준 (Phase 0~10G merged)**: Top manager + 프로젝트 단위 PM (lazy-spawn, conversation identity), deterministic router, annotate-only drift reconciliation, SSE 시맨틱 envelope. P8: app.js ESM 전환, hooks 분할, ManagerView 분할. P9: 전 컴포넌트 직접 ESM import (window bridge 0개), SessionsView Preact 재작성. P10: Worker Preset DB/Service (10B), Tier 1/2 spawn wiring (10C/10D), Task linkage + #presets UI (10E), Preset snapshot drift audit UI (10F), agent-olympus integration (10G).
+**v3 기준 (Phase 0~10G + M1/M2 merged)**: Top manager + 프로젝트 단위 PM (lazy-spawn, conversation identity), deterministic router, annotate-only drift reconciliation, SSE 시맨틱 envelope. P8: app.js ESM 전환, hooks 분할, ManagerView 분할. P9: 전 컴포넌트 직접 ESM import (window bridge 0개), SessionsView Preact 재작성. P10: Worker Preset DB/Service (10B), Tier 1/2 spawn wiring (10C/10D), Task linkage + #presets UI (10E), Preset snapshot drift audit UI (10F), agent-olympus integration (10G). **M1 (PR #114)**: Codex worker/PM MCP 주입을 leaf-level dotted path (`-c mcp_servers.<alias>.<key>=<TOML>`) 로 교체 + fail-closed flatten. **M2 (PR #115)**: user `~/.codex/config.toml` 과의 legacy alias 충돌을 `mcp:legacy_alias_conflict` run event 로 observability. **B3 (PR #116)**: `npm run diagnose:mcp` ops 도구.
 
 ```
 server/
@@ -78,7 +79,9 @@ server/
     streamJsonEngine.js       — Claude Code CLI stream-json (Manager용)
     managerAdapters/
       claudeAdapter.js        — Claude 어댑터 (stream-json persistent process)
-      codexAdapter.js         — Codex 어댑터 (stateless, thread resume)
+      codexAdapter.js         — Codex 어댑터 (stateless, thread resume + M1 flatten + M2 legacy scan)
+      codexMcpFlatten.js      — M1: JSON mcpServers → `-c mcp_servers.<alias>.<key>=<TOML>` 평탄화 + fail-closed
+      codexUserConfigScan.js  — M2: ~/.codex/config.toml alias 스캔 + legacy 충돌 감지
       eventTypes.js           — 어댑터 공통 이벤트 타입
       index.js                — 어댑터 팩토리 (type → adapter 매핑)
     providers/
@@ -154,6 +157,8 @@ server/
     styles/tokens.css         — CSS 디자인 토큰 (색상, 간격, 타이포 변수)
     vendor/                   — Preact/HTM UMD/ESM 번들 + marked + DOMPurify + Inter woff2 (빌드 불필요)
   tests/                      — 53 테스트 파일 + e2e 2개
+    codex-mcp-flatten.test.js — M1: flatten 유틸 unit (TOML encoding, fail-closed shape/leaf)
+    codex-user-config-scan.test.js — M2: ~/.codex/config.toml alias 스캔 + 충돌 감지 unit
     conversation.test.js      — Phase 1.5/2 parent-notice + registry + rotation
     pm-phase3a.test.js        — Phase 3a lazy spawn + cleanup (fail-closed)
     reconciliation.test.js    — Phase 4/7 envelope binding + audit + eventBus emit
@@ -175,7 +180,7 @@ server/
     helpers/                  — jsdom-preact.js 등
 ```
 
-> **792 tests** 기준 (PR #111 시점). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙.
+> **835 tests** 기준 (PR #116 시점). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙.
 
 ## Key Patterns
 
@@ -193,6 +198,14 @@ server/
 - 부팅 순서: **Top 먼저 → PM 나중** (PM 은 parent-notice 라우팅을 위해 active Top 필요)
 - resume 실패 시 기존 동작 fallback (`stopped` 마킹 + `disposeSession`)
 - PM resume 시 project brief (conventions/pitfalls/pm_run_id) 를 system prompt 에 bake (pmSpawnService 와 동일)
+
+### Codex MCP 주입 (M1/M2)
+- **절대 `-c mcp_servers=<JSON blob>` 형태로 넣지 말 것** — Codex 0.120 이 "invalid type: string, expected a map" 으로 전체 config 로드를 fail 시킨다 (기존 Phase 10C worker 경로 버그).
+- 올바른 형태는 leaf-level dotted path: `-c mcp_servers.<alias>.command="npx"`, `-c mcp_servers.<alias>.args=["-y","@pkg/mcp"]`, `-c mcp_servers.<alias>.env={KEY="val"}`. Worker (`lifecycleService`) + PM (`codexAdapter.spawnOneTurn`) 둘 다 `managerAdapters/codexMcpFlatten.js` 의 `flattenMcpToCodexArgs` 를 공유.
+- **Fail-closed**: flatten 실패 시 annotate-only 로 degrade 하지 않고 run 을 failed 로 마킹 + `preset:mcp_invalid` 이벤트 emit 후 throw. worker 는 executeTask catch 가 cleanup, PM 은 `TURN_FAILED` + `SESSION_ENDED` + `runTurn` 이 `{ accepted: false }` 반환.
+- 보안: direct `bearer_token` 값은 거부 (argv 노출 위험). `bearer_token_env_var` 로 env var 이름만 전달. 단, MCP `env` 는 여전히 argv 로 나가므로 secret 을 env 에 넣지 말 것 (issue #113, M3 에서 file-based transport 로 근본 해결 예정).
+- **M2 legacy alias detection**: spawn 전에 `~/.codex/config.toml` 의 alias 목록을 스캔해서 preset/project/skillpack alias 와 교차검사. 충돌이면 `mcp:legacy_alias_conflict` run event emit (annotate-only, spawn 은 계속). 이벤트 payload shape 고정: `{ alias, source, message }`. Codex 가 leaf-merge 하므로 preset 이 `ctx7.command="npx"` 만 지정해도 user 의 `ctx7.args` 는 살아남아 silent drift — 이 경고가 그걸 가시화.
+- 운영자 진단: `npm run diagnose:mcp` — spawn 없이 현재 DB 의 preset 들과 user config 의 alias 교집합을 보여줌. `--fail-on-conflict` 로 CI gate, `--json` 으로 자동화.
 
 ### Manager Session (Codex stateless + thread resume) — v3 Phase 3a
 - `codex exec --json` 으로 첫 turn, 이후 턴은 `codex exec resume <thread_id>` — Codex 는 stateless 어댑터 (매 턴마다 subprocess 생성/종료)
@@ -286,3 +299,6 @@ server/
 - Health check가 Manager를 잘못 죽이지 않는지 `lifecycleService.js`의 `is_manager` 가드 확인
 - `conversationService` 의 peek-then-drain 은 race-safe: `commitDrainParentNotices(runId, count)` 가 `splice(0, count)` — 절대 `pendingNotices.delete(key)` 로 돌리지 말 것 (runTurn 중 도착한 notice 가 소실됨)
 - `managerRegistry.onSlotCleared` 리스너가 3 경로 (`clearActive`, `probeActive` dead detection, `setActive` replacement) 모두에서 발화. 이게 notice 큐 scrub 의 유일한 hook
+- **Codex MCP flatten (M1)**: `-c mcp_servers=<JSON>` 재도입 금지. 무조건 `flattenMcpToCodexArgs` 경유. 테스트 assertion 도 leaf-level dotted path 검사여야 함 (`/^mcp_servers\.<alias>\.<key>=/`)
+- **M2 legacy scan**: 새 SSE channel 또는 event consumer 만들 때 `mcp:legacy_alias_conflict` payload shape `{ alias, source, message }` 를 확장하지 말 것 — M3 (file-based transport) 때 event 자체가 사라지거나 의미 바뀔 수 있음. cardinality 규율 유지
+- **`preset-route.test.js`**: 테스트에서 `createApp` 호출 시 반드시 `authToken: null` 명시. 안 넘기면 `process.env.PALANTIR_TOKEN` 으로 fall back 해서 sibling test 가 token 설정한 상태면 401 flake 발생 (PR #117 에서 근본 해결)

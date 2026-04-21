@@ -462,7 +462,15 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
    */
   function sendInput(runId, text, images) {
     const proc = processes.get(runId);
-    if (!proc || !proc.child || !proc.child.stdin.writable) return false;
+    if (!proc || !proc.child) return false;
+    // Exit detection must come BEFORE stdin.writable: Node marks stdin
+    // writable=false asynchronously after the child exits, so checking
+    // stdin.writable alone races (result event → sendInput → exit event,
+    // in that order, is the common path for single-shot workers). The
+    // exitCode check closes that race.
+    if (proc.exitCode !== null) return false;
+    const stdin = proc.child.stdin;
+    if (!stdin || stdin.destroyed || stdin.writableEnded || !stdin.writable) return false;
     if ((!text || text.length > 50000) && (!images || images.length === 0)) return false;
 
     let message;
