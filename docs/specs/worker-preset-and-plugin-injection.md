@@ -696,3 +696,50 @@ PoC 스크립트: `scripts/spike-bare-auth.mjs`. 4 variant 매트릭스, macOS d
   3. Codex CLI 측에 `--config-file` / `--mcp-config` 류 플래그 추가 요청 (upstream 기여).
 - **범위 밖 처리 이유**: 이 이슈는 이전 broken `-c mcp_servers=<JSON>` 경로에서도 동일하게 존재했다 (JSON blob 도 argv 에 실렸음 — 단지 Codex 가 파싱 실패해 MCP 자체가 로드되지 않아 가시화되지 않았을 뿐). M1 이 새로 도입한 위험이 아니라 **기존 설계 이슈를 노출**시킨 것. M1 의 목표 (worker 경로의 broken 주입을 leaf-level 로 교체) 와 분리해야 PR 범위가 관리 가능.
 - **트래킹**: GitHub issue [#113](https://github.com/Karnian/Palantir-Console/issues/113).
+
+### 13.1. M2 — How to diagnose MCP conflicts before a run
+
+M2 가 런타임에 `mcp:legacy_alias_conflict` run event 를 emit 하지만, 실제로 spawn 시키지 않고 **현재 DB 의 preset 들이 내 `~/.codex/config.toml` 과 어느 alias 에서 겹치는지** 미리 확인하려면:
+
+```bash
+npm run diagnose:mcp
+```
+
+출력 예시 (실 host 기준):
+
+```
+User config
+  path: /Users/K/.codex/config.toml
+  aliases: context7, sequentialthinking, slack, notion
+
+Presets (2)
+  ● DemoConflict [preset_demo1] — 1 conflict
+      conflicts with user config: context7
+      clean aliases: fresh
+  ● DemoClean [preset_demo2] — clean
+      clean aliases: fresh
+
+Summary
+  total presets:        2
+  conflicting presets:  1
+  user-config aliases:  4
+  conflict aliases:     context7
+```
+
+옵션:
+- `--db <path>` — palantir.db 위치 override
+- `--config <path>` — `~/.codex/config.toml` 이 아닌 경로 스캔 (`$PALANTIR_CODEX_CONFIG_PATH` 도 동일 역할)
+- `--fail-on-conflict` — 충돌 1개 이상 시 exit 2 (CI pipeline 에서 strict gate 로 쓸 때)
+- `--json` — 기계 판독용 JSON 출력
+
+Exit: 0 정상 / 1 fatal (DB 열기 실패, 필수 테이블 누락·손상, Codex user config 접근 실패) / 2 strict mode + conflict.
+
+도구가 **하는 일**: 각 preset 이 선언한 alias 와 user config 의 alias 집합의 **교집합만** 계산.
+도구가 **하지 않는 일**: 값 (command/args/env) 비교, override 시뮬레이션, 실제 spawn. M2 detection-only 스코프 준수 (§13 "Scope discipline" 참고).
+
+#### M2 계측 목적
+이 도구는 M3 (argv → file-based transport, 위 §13) 착수 여부를 **데이터 기반 으로** 결정하기 위한 수단이다. 권장 운영 흐름:
+
+1. 1–2주간 실사용하며 `npm run diagnose:mcp` + `runs` 테이블의 `mcp:legacy_alias_conflict` event 빈도를 관찰
+2. conflict noise 가 높거나 보안 정책상 argv leak 를 즉시 제거해야 하면 M3 착수
+3. 낮으면 M3 는 upstream 의 `--config-file` 급 진입점이 생길 때까지 대기
