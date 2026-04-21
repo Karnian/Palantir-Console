@@ -695,4 +695,4 @@ PoC 스크립트: `scripts/spike-bare-auth.mjs`. 4 variant 매트릭스, macOS d
   2. Preset spawn 시 `~/.codex/config.toml` 의 `mcp_servers.*` 섹션을 in-place merge/unmerge (원자성 이슈 큼, 비추천).
   3. Codex CLI 측에 `--config-file` / `--mcp-config` 류 플래그 추가 요청 (upstream 기여).
 - **범위 밖 처리 이유**: 이 이슈는 이전 broken `-c mcp_servers=<JSON>` 경로에서도 동일하게 존재했다 (JSON blob 도 argv 에 실렸음 — 단지 Codex 가 파싱 실패해 MCP 자체가 로드되지 않아 가시화되지 않았을 뿐). M1 이 새로 도입한 위험이 아니라 **기존 설계 이슈를 노출**시킨 것. M1 의 목표 (worker 경로의 broken 주입을 leaf-level 로 교체) 와 분리해야 PR 범위가 관리 가능.
-- **트래킹**: GitHub issue 로 등록 (follow-up label).
+- **트래킹**: GitHub issue [#113](https://github.com/Karnian/Palantir-Console/issues/113).

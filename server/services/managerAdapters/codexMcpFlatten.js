@@ -41,8 +41,9 @@
  *   leak through argv. Until MCP config is delivered through a file-based
  *   channel (a Palantir-owned TOML fragment merged into ~/.codex/config.toml
  *   or an alternative codex config hook), callers must treat MCP `env` as
- *   non-sensitive config only. Tracked as a follow-up to M1; see
- *   docs/specs/worker-preset-and-plugin-injection.md "Known limitations".
+ *   non-sensitive config only. Tracked as a follow-up to M1; see GitHub
+ *   issue #113 and docs/specs/worker-preset-and-plugin-injection.md
+ *   "Known limitations".
  */
 
 const ALIAS_KEY_RE = /^[A-Za-z0-9_-]+$/;
