@@ -94,6 +94,128 @@ test('CodexAdapter.startSession writes a system prompt temp file and disposeSess
   }, 50));
 });
 
+test('M1: CodexAdapter.runTurn with mcpConfig injects leaf-level -c mcp_servers.<alias>.<key> flags', () => {
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const { PassThrough } = require('node:stream');
+  // Capture spawn args without launching a real codex process. readline in
+  // spawnOneTurn needs a real Readable for child.stdout; PassThrough is the
+  // cheapest option. We never write to it so the rl stays idle.
+  let capturedArgs = null;
+  const fakeChild = {
+    stdin: { write() {}, end() {} },
+    stderr: new PassThrough(),
+    stdout: new PassThrough(),
+    on() { return this; },
+    kill() {},
+  };
+  const fakeSpawn = (_bin, args /* , opts */) => {
+    capturedArgs = args;
+    return fakeChild;
+  };
+  const fakeRunService = {
+    addRunEvent() {},
+    updateManagerThreadId() {},
+    updateRunResult() {},
+    updateRunStatus() {},
+  };
+  const adapter = createCodexAdapter({ runService: fakeRunService, spawnFn: fakeSpawn });
+  adapter.startSession('run_mgr_codex_m1', {
+    systemPrompt: 'sys',
+    cwd: process.cwd(),
+    mcpConfig: {
+      mcpServers: {
+        ctx7: {
+          command: 'npx',
+          args: ['-y', '@ctx7/mcp'],
+          env: { CTX7_KEY: 'val' },
+        },
+      },
+    },
+  });
+  const res = adapter.runTurn('run_mgr_codex_m1', { text: 'hi' });
+  assert.equal(res.accepted, true);
+  assert.ok(capturedArgs, 'spawn was invoked');
+
+  // Extract every `-c <value>` pair
+  const cflags = [];
+  for (let i = 0; i < capturedArgs.length; i++) {
+    if (capturedArgs[i] === '-c' && i + 1 < capturedArgs.length) cflags.push(capturedArgs[i + 1]);
+  }
+  // Top-level blob must NOT be emitted
+  assert.ok(
+    !cflags.some(c => /^mcp_servers=/.test(c)),
+    'must not emit top-level mcp_servers=<JSON> blob',
+  );
+  // Leaf-level dotted paths present
+  assert.ok(
+    cflags.some(c => /^mcp_servers\.ctx7\.command=/.test(c)),
+    'ctx7.command leaf present',
+  );
+  assert.ok(
+    cflags.some(c => /^mcp_servers\.ctx7\.args=/.test(c)),
+    'ctx7.args leaf present',
+  );
+  // env subtable is emitted as inline table (a single leaf) or as env.<name> —
+  // accept either form since both are valid TOML. M1 implementation uses the
+  // inline-table form for the env object.
+  assert.ok(
+    cflags.some(c => /^mcp_servers\.ctx7\.env=/.test(c)),
+    'ctx7.env leaf present',
+  );
+
+  adapter.disposeSession('run_mgr_codex_m1');
+});
+
+test('M1: CodexAdapter.runTurn with invalid mcpConfig fails closed (accepted=false + TURN_FAILED + session ended)', () => {
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const { PassThrough } = require('node:stream');
+  const events = [];
+  const fakeRunService = {
+    addRunEvent(_r, t, p) { events.push({ t, p: JSON.parse(p) }); },
+    updateManagerThreadId() {},
+    updateRunResult() {},
+    updateRunStatus(_r, status) { events.push({ t: '__status', status }); },
+  };
+  // spawn MUST NOT be reached — the flatten throw is upstream of spawn.
+  let spawned = 0;
+  const fakeSpawn = () => {
+    spawned += 1;
+    return {
+      stdin: { write() {}, end() {} },
+      stderr: new PassThrough(),
+      stdout: new PassThrough(),
+      on() { return this; },
+      kill() {},
+    };
+  };
+  const adapter = createCodexAdapter({ runService: fakeRunService, spawnFn: fakeSpawn });
+  adapter.startSession('run_mgr_codex_m1_bad', {
+    systemPrompt: 'sys',
+    cwd: process.cwd(),
+    mcpConfig: {
+      mcpServers: {
+        leak: { command: 'echo', bearer_token: 'secret' },
+      },
+    },
+  });
+  const res = adapter.runTurn('run_mgr_codex_m1_bad', { text: 'hi' });
+  assert.equal(res.accepted, false, 'runTurn must refuse to proceed');
+  assert.equal(spawned, 0, 'spawn must not be invoked');
+  // TURN_FAILED emitted with mcp_invalid kind. The normalized event type
+  // lives under the 'mgr.' namespace (see eventTypes.NORMALIZED_EVENT_TYPES).
+  const { NORMALIZED_EVENT_TYPES } = require('../services/managerAdapters/eventTypes');
+  const turnFailed = events.find(e => e.t === NORMALIZED_EVENT_TYPES.TURN_FAILED);
+  assert.ok(turnFailed, 'turn_failed event emitted');
+  assert.equal(turnFailed.p.data?.kind, 'mcp_invalid');
+  // Run marked failed
+  const statusEv = events.find(e => e.t === '__status');
+  assert.ok(statusEv && statusEv.status === 'failed', 'run status flipped to failed');
+  // Session ended
+  assert.equal(adapter.isSessionAlive('run_mgr_codex_m1_bad'), false);
+
+  adapter.disposeSession('run_mgr_codex_m1_bad');
+});
+
 test('CodexAdapter normalizes thread.started + agent_message + turn.completed', () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
   const { NORMALIZED_EVENT_TYPES } = require('../services/managerAdapters/eventTypes');
