@@ -28,7 +28,14 @@ async function createTestApp(t, { withPlugins = [] } = {}) {
   const pluginsRoot = await mkdirTemp('palantir-plugins-');
   for (const name of withPlugins) writePlugin(pluginsRoot, name);
   const authResolverOpts = { hasKeychain: () => false };
-  const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode', dbPath, pluginsRoot, authResolverOpts });
+  // Pin authToken=null so a sibling test leaking PALANTIR_TOKEN into
+  // process.env doesn't turn these requests into 401s. Previous behavior
+  // fell back to process.env.PALANTIR_TOKEN via createApp's default, which
+  // made the suite order-dependent (401 vs 200 on `GET /api/worker-presets/:id`).
+  const app = createApp({
+    storageRoot, fsRoot, opencodeBin: 'opencode', dbPath, pluginsRoot,
+    authResolverOpts, authToken: null,
+  });
   t.after(async () => {
     if (app.shutdown) app.shutdown(); else app.closeDb();
     await fs.rm(storageRoot, { recursive: true, force: true });
