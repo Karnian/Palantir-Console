@@ -4614,11 +4614,84 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   font-weight: 600;
 }
 
+/* R2-C.2: SuggestedActions chip row sits directly above the input area.
+   Flex wrap so a long label (many needs_input workers) still lays out
+   gracefully on a narrow side panel. Hidden when the strip is empty —
+   the JS short-circuits before render, so no `:empty` selector needed. */
+.manager-suggested-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 16px 0;
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+}
+
+.manager-suggested-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+
+.manager-suggested-chip:hover {
+  border-color: var(--accent-border);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  color: var(--accent);
+}
+
+.manager-suggested-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.manager-suggested-icon {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+/* Priority tints — mirror AttentionStrip so matching glyphs read as the
+   same affordance across surfaces. needs_input = amber, failed = red,
+   summary/new stay neutral (they're just prompts, not alerts). */
+.manager-suggested-chip.manager-suggested-respond {
+  border-color: color-mix(in srgb, #f59e0b 40%, var(--border));
+}
+
+.manager-suggested-chip.manager-suggested-respond:hover {
+  border-color: #f59e0b;
+  color: #f59e0b;
+  background: color-mix(in srgb, #f59e0b 8%, transparent);
+}
+
+.manager-suggested-chip.manager-suggested-retry {
+  border-color: color-mix(in srgb, #ef4444 40%, var(--border));
+}
+
+.manager-suggested-chip.manager-suggested-retry:hover {
+  border-color: #ef4444;
+  color: #ef4444;
+  background: color-mix(in srgb, #ef4444 8%, transparent);
+}
+
 /* Input area */
 .manager-input-area {
   border-top: 1px solid var(--border);
   flex-shrink: 0;
   transition: background 0.15s;
+}
+
+/* When SuggestedActions strip is present, it already owns the top border.
+   Drop the input-area's so users don't see two hairlines stacked. */
+.manager-suggested-actions + .manager-input-area {
+  border-top: 0;
 }
 
 .manager-input-area.drag-over {

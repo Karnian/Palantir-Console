@@ -27,6 +27,8 @@ export function ManagerView({ manager, runs, tasks, projects, agents, agentsErro
       <${ManagerChat}
         manager=${manager}
         projects=${projects}
+        runs=${runs}
+        tasks=${tasks}
         agents=${agents}
         agentsError=${agentsError}
         agentsLoading=${agentsLoading}

@@ -197,7 +197,11 @@ function App() {
       const tag = (e.target.tagName || '').toLowerCase();
       const isInput = tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable;
       if (!isInput && !inspectRun && !showPalette && e.key === 'n' && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        const routeBase = (location.hash.slice(1) || 'dashboard').split('/')[0];
+        // Only the explicit `#board` hash enables the `n` shortcut — an
+        // empty hash no longer defaults to dashboard here (R2-C.3 landed
+        // manager as the default), but since we specifically gate on
+        // 'board', the empty-hash case is still a safe no-op.
+        const routeBase = (location.hash.slice(1) || '').split('/')[0];
         if (routeBase === 'board') {
           window.dispatchEvent(new CustomEvent('palantir:new-task'));
         }

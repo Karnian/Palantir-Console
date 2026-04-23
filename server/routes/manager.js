@@ -673,6 +673,97 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
   }));
 
   /**
+   * GET /api/manager/summary
+   * R2-C.1: Aggregate worker run stats for SuggestedActions/dashboard widgets.
+   *
+   * Pure DB aggregation (no LLM). Only counts worker runs (is_manager=0) so
+   * Top/PM manager rows never inflate the numbers — ManagerChat already
+   * renders Top/PM status in a dedicated header.
+   *
+   * "today" uses the server's local timezone (SQLite `date('now','localtime')`)
+   * rather than UTC so users on non-UTC hosts see a day boundary that matches
+   * their wall clock. This differs from runs.created_at which is UTC via
+   * `datetime('now')`, so we normalize via `datetime(created_at,'localtime')`
+   * on the compare side as well.
+   *
+   * Response shape:
+   *   {
+   *     active:            <running + needs_input count>,
+   *     needs_input:       <needs_input count>,
+   *     failed:            <failed count>,
+   *     completed_today:   <completed runs whose created_at is today (local)>,
+   *     total_cost_today:  <SUM(cost_usd) of today's runs; 0 when all NULL>
+   *   }
+   */
+  router.get('/summary', asyncHandler(async (req, res) => {
+    // Access runService's private db via a private helper is clunky; the
+    // router already has runService, which exposes listRuns. We keep the
+    // aggregation in pure JS on top of listRuns so tests can stub the
+    // service without faking SQL. listRuns() is already indexed on status
+    // + created_at DESC and bounded by worker-run volume; for the ~few
+    // hundred runs a typical install has this is O(n) and cheap.
+    const allRuns = runService.listRuns({}) || [];
+    const workerRuns = allRuns.filter(r => !r.is_manager);
+
+    // Local-timezone "today at 00:00:00" in ISO-ish form — SQLite stores
+    // datetime('now') as UTC strings like "2026-04-22 14:05:00" so we
+    // compare against JS Date's local interpretation of that string.
+    // Using Date math here (not SQLite) keeps the aggregation entirely
+    // in-process and avoids one extra query round-trip.
+    const now = new Date();
+    const localStartOfDay = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+      0, 0, 0, 0
+    );
+
+    let active = 0;
+    let needsInput = 0;
+    let failed = 0;
+    let completedToday = 0;
+    let totalCostToday = 0;
+
+    for (const run of workerRuns) {
+      if (run.status === 'running' || run.status === 'needs_input') active++;
+      if (run.status === 'needs_input') needsInput++;
+      if (run.status === 'failed') failed++;
+
+      // created_at is a SQLite datetime string ("YYYY-MM-DD HH:MM:SS", UTC).
+      // JS Date() without a timezone suffix treats it as local time — which
+      // happens to be what we want here because `localStartOfDay` is also
+      // local. If a caller sets TZ=UTC, both sides shift together.
+      const createdAtStr = run.created_at;
+      if (!createdAtStr) continue;
+      // SQLite emits "YYYY-MM-DD HH:MM:SS" (UTC). Append 'Z' so Date() parses
+      // it as UTC; then the comparison below is timezone-correct regardless
+      // of server TZ. Without 'Z', Node parses the bare form as local time,
+      // which double-shifts (UTC row interpreted as local + compared to
+      // local midnight).
+      const createdAtUtc = new Date(createdAtStr.replace(' ', 'T') + 'Z');
+      if (isNaN(createdAtUtc.getTime())) continue;
+      if (createdAtUtc >= localStartOfDay) {
+        if (run.status === 'completed') completedToday++;
+        // Include cost for ALL of today's runs regardless of status —
+        // running/failed/needs_input still accumulate billable tokens.
+        // null/undefined cost_usd is treated as 0 (NULL-safe sum).
+        const cost = Number(run.cost_usd);
+        if (!Number.isNaN(cost) && Number.isFinite(cost)) {
+          totalCostToday += cost;
+        }
+      }
+    }
+
+    res.json({
+      active,
+      needs_input: needsInput,
+      failed,
+      completed_today: completedToday,
+      total_cost_today: totalCostToday,
+    });
+  }));
+
+  /**
    * GET /api/manager/status
    * Get current manager session status.
    */
