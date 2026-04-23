@@ -320,7 +320,7 @@ function createApp(options = {}) {
   // New routes (v2)
   app.use('/api/projects', createProjectsRouter({ projectService, taskService, projectBriefService, pmCleanupService }));
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService }));
-  app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService }));
+  app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService }));
   // PR18: tests can pass options.authResolverOpts (e.g. a fake `hasKeychain`)
   // so /api/agents and /api/manager preflights are deterministic across CI
   // hosts that may or may not have a Claude keychain item. Production callers
@@ -366,6 +366,18 @@ function createApp(options = {}) {
   // algorithm. Production callers have no reason to reach for it.
   app.managerRegistry = managerRegistry;
   app.closeDb = closeDb;
+  // R2-B.2: tests need direct service access to craft run rows with a
+  // worktree_path without spinning up the full tmux/adapter pipeline.
+  // Production callers have no reason to touch these, but exposing them
+  // is harmless — they're the same instances already wired into the
+  // routes.
+  app.services = {
+    runService,
+    taskService,
+    projectService,
+    presetService,
+    agentProfileService,
+  };
   app.shutdown = () => {
     // PR2 / P1-5: walk every live manager slot (Top + every PM) and
     // dispose the adapter session before we tear the process down.
