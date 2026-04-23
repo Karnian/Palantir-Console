@@ -38,7 +38,25 @@ import { McpTemplatesView } from './app/components/McpTemplatesView.js';
 // Sidebar Navigation
 // ─────────────────────────────────────────────────────────────────────────────
 
-function NavSidebar({ route, connected }) {
+// R2-A.1: AttentionBadge — needs_input + failed count on worker runs.
+// Clamped to "9+" at 10+. Renders nothing when count is 0 (spec §14.1).
+// Animation: badge-pulse 2s ease-in-out infinite (spec §14.1).
+function AttentionBadge({ count, onClick }) {
+  if (!count || count <= 0) return null;
+  const label = count >= 10 ? '9+' : String(count);
+  const title = `주의 필요: ${count}건 (needs_input + failed)`;
+  return html`
+    <button
+      type="button"
+      class="attention-badge"
+      title=${title}
+      aria-label=${title}
+      onClick=${onClick}
+    >${label}</button>
+  `;
+}
+
+function NavSidebar({ route, connected, attentionCount, onAttentionClick }) {
   return html`
     <nav class="nav-sidebar">
       <div class="nav-brand" title="Palantir Console">\u2726</div>
@@ -53,6 +71,9 @@ function NavSidebar({ route, connected }) {
         </button>
       `)}
       <div class="nav-spacer"></div>
+      <div class="nav-attention">
+        <${AttentionBadge} count=${attentionCount} onClick=${onAttentionClick} />
+      </div>
       <div class="nav-status" title=${connected ? 'SSE Connected' : 'SSE Disconnected'}>
         <span class="status-dot ${connected ? 'status-dot-ok' : 'status-dot-err'}"></span>
       </div>
@@ -188,6 +209,13 @@ function App() {
 
   const routeBase = route.split('/')[0];
 
+  // R2-A.1: attention count = needs_input + failed across worker runs only.
+  // v3 multi-layer note: is_manager=1 (Top + PM sessions) are excluded so
+  // only worker runs contribute — aligns with DashboardView.workerRuns filter.
+  const attentionCount = useMemo(() => (
+    (runs || []).filter(r => !r.is_manager && (r.status === 'needs_input' || r.status === 'failed')).length
+  ), [runs]);
+
   const renderView = () => {
     if (routeBase === 'manager') {
       return html`<${ManagerView} manager=${manager} runs=${runs} tasks=${tasks} projects=${projects} agents=${agents} agentsError=${agentsError} agentsLoading=${agentsLoading} reloadAgents=${reloadAgents} driftAudit=${driftAudit} onOpenDrift=${() => setShowDriftDrawer(true)} />`;
@@ -272,7 +300,12 @@ function App() {
 
   return html`
     <div class="v2-shell">
-      <${NavSidebar} route=${route} connected=${sseConnected} />
+      <${NavSidebar}
+        route=${route}
+        connected=${sseConnected}
+        attentionCount=${attentionCount}
+        onAttentionClick=${() => navigate('manager')}
+      />
       <div class="main-area">
         ${renderView()}
       </div>
