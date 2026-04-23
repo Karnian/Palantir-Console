@@ -71,14 +71,23 @@ export function AttentionStrip({ runs, tasks, onOpenRun }) {
 
   return html`
     <div class="attention-strip" role="region" aria-label="Attention — needs input and failed runs">
+      ${/* A11y note: do NOT nest interactive controls. The row is a plain
+           container and the inline action button is the only focusable
+           element per spec §12.1 ("인라인 액션 버튼 포함 — 클릭 한 번으로
+           대응"). Clicking anywhere on the row also opens the inspector
+           (larger tap target), but that path is exposed via the action
+           button's accessible name, not a duplicate role="button" wrapper. */ ''}
       ${visible.map(item => html`
         <div
           key=${item.id}
           class="attention-item attention-${item.status === 'needs_input' ? 'input' : 'failed'}"
-          role="button"
-          tabIndex=${0}
-          onClick=${() => onOpenRun && onOpenRun(item.run)}
-          onKeyDown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenRun && onOpenRun(item.run); } }}
+          onClick=${(e) => {
+            // Mouse/touch convenience only — keyboard users go through the
+            // action button. Swallow clicks that originate on the button
+            // itself so the button's own handler runs (avoids double-fire).
+            if (e.target.closest('.attention-action')) return;
+            onOpenRun && onOpenRun(item.run);
+          }}
         >
           <span class="attention-icon ${item.status === 'needs_input' ? 'pulse' : ''}" aria-hidden="true">${ICON[item.status]}</span>
           <div class="attention-body">
@@ -86,8 +95,10 @@ export function AttentionStrip({ runs, tasks, onOpenRun }) {
             <div class="attention-meta">${item.meta}</div>
           </div>
           <button
+            type="button"
             class="attention-action"
-            onClick=${(e) => { e.stopPropagation(); onOpenRun && onOpenRun(item.run); }}
+            aria-label=${`${ACTION_LABEL[item.status]}: ${item.title}`}
+            onClick=${() => onOpenRun && onOpenRun(item.run)}
           >
             ${ACTION_LABEL[item.status]}
           </button>

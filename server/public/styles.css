@@ -1600,9 +1600,11 @@ body {
   border-color: var(--border-hover);
 }
 
-.attention-item:focus-visible {
-  outline: 2px solid var(--accent-light, #a78bfa);
-  outline-offset: 2px;
+/* Row is a plain container (not role="button") — focus lives on the
+   nested .attention-action. When that button is focused, lift the row
+   visually so keyboard users see the same affordance mouse users get. */
+.attention-item:focus-within {
+  border-color: var(--border-hover);
 }
 
 .attention-item.attention-input {
@@ -1680,6 +1682,11 @@ body {
 .attention-action:hover {
   background: var(--bg-hover);
   border-color: var(--accent-border);
+}
+
+.attention-action:focus-visible {
+  outline: 2px solid var(--accent-light, #a78bfa);
+  outline-offset: 2px;
 }
 
 .attention-more {
