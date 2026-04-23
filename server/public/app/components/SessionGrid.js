@@ -10,6 +10,7 @@ import { EmptyState } from './EmptyState.js';
 import { RunInspector } from './RunInspector.js';
 import { clickableProps } from '../lib/a11y.js';
 import { TaskDetailPanel } from './TaskModals.js';
+import { AttentionStrip } from './AttentionStrip.js';
 
 const runStatusIcon = (status) => {
   switch (status) {
@@ -123,6 +124,13 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
       </div>
 
       <div class="manager-grid-body">
+        ${/* R2-A.3: AttentionStrip surfaces needs_input + failed worker runs
+             above the task sessions list. Self-hiding when empty (spec §12.1). */ ''}
+        <${AttentionStrip}
+          runs=${runs}
+          tasks=${tasks}
+          onOpenRun=${(run) => setInspectRun(run)}
+        />
         ${managerStatus?.active && (() => {
           const isSelected = conversationTarget === 'top';
           return html`

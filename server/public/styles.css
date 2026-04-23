@@ -1233,6 +1233,54 @@ body {
   place-items: center;
 }
 
+/* R2-A.1: Attention badge (NavSidebar).
+   Renders nothing when attentionCount is 0 (component guard).
+   Pulse animation makes new attention items draw the eye. */
+.nav-attention {
+  padding: 4px 0;
+  display: grid;
+  place-items: center;
+  min-height: 0;
+}
+
+.attention-badge {
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 11px;
+  background: var(--status-failed, #ef4444);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(239, 68, 68, 0.55);
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15);
+  cursor: pointer;
+  animation: badge-pulse 2s ease-in-out infinite;
+  transition: transform 0.15s ease;
+}
+
+.attention-badge:hover {
+  transform: scale(1.08);
+}
+
+.attention-badge:focus-visible {
+  outline: 2px solid var(--accent-light, #a78bfa);
+  outline-offset: 2px;
+}
+
+@keyframes badge-pulse {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15); }
+  50% { transform: scale(1.12); box-shadow: 0 0 0 5px rgba(239, 68, 68, 0.22); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .attention-badge { animation: none; }
+}
+
 .status-dot {
   width: 8px;
   height: 8px;
@@ -1521,6 +1569,141 @@ body {
   font-size: 32px;
   margin-bottom: 12px;
   opacity: 0.5;
+}
+
+/* =============================================
+   R2-A.2/3: Attention Strip (ManagerView right panel)
+   Attention-only projection of worker runs. Hides when empty.
+   Spec §12.1.
+   ============================================= */
+.attention-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.attention-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.15s ease, background-color 0.15s ease;
+}
+
+.attention-item:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-hover);
+}
+
+/* Row is a plain container (not role="button") — focus lives on the
+   nested .attention-action. When that button is focused, lift the row
+   visually so keyboard users see the same affordance mouse users get. */
+.attention-item:focus-within {
+  border-color: var(--border-hover);
+}
+
+.attention-item.attention-input {
+  background: rgba(245, 158, 11, 0.08);
+  border-left-color: rgba(245, 158, 11, 0.7);
+}
+
+.attention-item.attention-failed {
+  background: rgba(239, 68, 68, 0.08);
+  border-left-color: rgba(239, 68, 68, 0.7);
+}
+
+.attention-icon {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.attention-item.attention-input .attention-icon {
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--status-needs-input, #f59e0b);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.attention-item.attention-failed .attention-icon {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--status-failed, #ef4444);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+.attention-icon.pulse {
+  animation: triage-pulse 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .attention-icon.pulse { animation: none; }
+}
+
+.attention-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.attention-title {
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attention-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.attention-action {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-hover);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.attention-action:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent-border);
+}
+
+.attention-action:focus-visible {
+  outline: 2px solid var(--accent-light, #a78bfa);
+  outline-offset: 2px;
+}
+
+.attention-more {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 4px 10px;
+  font-size: 11px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.attention-more:hover {
+  border-color: var(--border-hover);
+  color: var(--text-secondary);
 }
 
 /* =============================================
