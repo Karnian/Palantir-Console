@@ -377,6 +377,12 @@ function createApp(options = {}) {
     projectService,
     presetService,
     agentProfileService,
+    // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
+    // run rows with specific status / cost_usd / backdated created_at
+    // (createRun() always stamps status='queued' and cost_usd=0 at now).
+    // Keeping the test seam next to the other service handles so future
+    // tests don't have to go hunting for a new entry point.
+    _rawDb: db,
   };
   app.shutdown = () => {
     // PR2 / P1-5: walk every live manager slot (Top + every PM) and

@@ -14,6 +14,7 @@ import { timeAgo } from '../lib/format.js';
 import { Dropdown } from './Dropdown.js';
 import { EmptyState } from './EmptyState.js';
 import { MentionInput } from './MentionInput.js';
+import { RunInspector } from './RunInspector.js';
 
 // PR5: profile types that can back a manager session. Must stay in sync
 // with PROFILE_TYPE_TO_ADAPTER in server/routes/manager.js.
@@ -40,9 +41,26 @@ export function managerProfileAuthState(profile) {
   return profile.auth.canAuth ? 'ok' : 'missing';
 }
 
-export function ManagerChat({ manager, projects, agents = [], agentsError = null, agentsLoading = false, reloadAgents, driftAudit, onOpenDrift, conversationTarget: externalTarget, onConversationChange }) {
+// R2-C.2: Suggested actions icon set — reuses AttentionStrip's glyph
+// vocabulary so a user seeing "⏸" in the nav badge, the AttentionStrip,
+// AND the SuggestedActions row recognises the same affordance across
+// all three surfaces. status/failure glyphs are fixed across the UI.
+const SUGGESTED_ICON = {
+  respond: '⏸', // ⏸ — needs_input
+  retry:   '✗', // ✗ — failed
+  summary: '◉', // ◉ — running/active idle query
+  new:     '✦', // ✦ — new work
+};
+
+export function ManagerChat({ manager, projects, runs = [], tasks = [], agents = [], agentsError = null, agentsLoading = false, reloadAgents, driftAudit, onOpenDrift, conversationTarget: externalTarget, onConversationChange }) {
   const { status, events: topEvents, loading, start, sendMessage: topSendMessage, stop } = manager;
   const [input, setInput] = useState('');
+  // R2-C.2: local RunInspector state so clicking a SuggestedActions chip
+  // opens the same slide-over used by AttentionStrip / SessionGrid /
+  // DashboardView. Kept local (not lifted to ManagerView) because the
+  // inspector is only triggered from this panel's suggestion strip —
+  // SessionGrid still owns its own inspector for the right-hand grid.
+  const [inspectRun, setInspectRun] = useState(null);
 
   // v3 Phase 6 — conversation target selector.
   //
@@ -102,6 +120,12 @@ export function ManagerChat({ manager, projects, agents = [], agentsError = null
     setSelectedProfileId(fallback ? fallback.id : '');
   }, [managerProfiles, selectedProfileId]);
   const [sending, setSending] = useState(false);
+  // Codex R1 MINOR #3: in-flight ref for SuggestedActions rapid-click guard.
+  // The useState-backed `sending` is captured per-render, so two quick
+  // chip clicks inside one render cycle both see `sending === false` and
+  // both schedule rAF submits. The ref flips synchronously so the second
+  // click bails before even scheduling the rAF.
+  const submittingRef = useRef(false);
   const [attachedImages, setAttachedImages] = useState([]);
   const messagesRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -263,6 +287,194 @@ export function ManagerChat({ manager, projects, agents = [], agentsError = null
     out.sort((a, b) => (a.id || 0) - (b.id || 0));
     return out;
   }, [events]);
+
+  // R2-C.2: SuggestedActions — context-aware chip row above ChatInput.
+  //
+  // Data source: the same `runs` prop the rest of the app already polls —
+  // we deliberately don't call GET /api/manager/summary here. Reasons:
+  //   (a) runs already streams via SSE + is debounced-reloaded, so the
+  //       chip list updates in near-real-time without adding a second
+  //       fetch loop.
+  //   (b) The summary endpoint is the right tool for *dashboard* widgets
+  //       (fixed aggregate shape, usable by multiple consumers). This UI
+  //       specifically needs the underlying run rows (run.agent_name,
+  //       task title) to build the action label — the aggregate wouldn't
+  //       give us that.
+  //
+  // Rules (spec §11.2 table):
+  //   needs_input > 0  →  [Agent-X 에게 응답]   (or "N 명에게 응답")
+  //   failed > 0       →  [Agent-Y 재시도]       (same count rule)
+  //   both idle        →  [상태 요약] [새 작업 시작]
+  //   (no runs)        →  [새 작업 시작]
+  //
+  // Manager runs (is_manager=1) are excluded at the source so Top/PM
+  // sessions never appear as a SuggestedAction — aligned with the
+  // AttentionStrip filter and GET /api/manager/summary aggregation.
+  const suggestedActions = useMemo(() => {
+    if (!status.active) return []; // session-idle flow owns the start button
+    const workerRuns = (runs || []).filter(r => !r.is_manager);
+    const needsInputRuns = workerRuns.filter(r => r.status === 'needs_input');
+    const failedRuns = workerRuns.filter(r => r.status === 'failed');
+    const runningCount = workerRuns.filter(r => r.status === 'running').length;
+    const taskMap = new Map((tasks || []).map(t => [t.id, t]));
+
+    // Resolve a human label for a run. Codex R2 MINOR #2: for the
+    // respond/retry chips, agent identity reads more naturally than
+    // task title — "Smoke Agent 에게 응답" not "Fix the widget 에게 응답".
+    // Agent name first, then task title as fallback, then short run id.
+    const labelFor = (run) => {
+      if (run.agent_name) return run.agent_name;
+      const task = run.task_id ? taskMap.get(run.task_id) : null;
+      if (task && task.title) return task.title;
+      return `Run ${String(run.id || '').slice(0, 6)}`;
+    };
+
+    // Codex R1 MINOR #2: multi-run label must match multi-run behavior.
+    // Clicking a chip opens ONE inspector (action.runs[0]) — if we say
+    // "3명에게 응답" users expect bulk handling, which we don't do. So
+    // disambiguate the label: show the head name + a "(외 N명)" suffix
+    // so it's visually clear this chip opens the first item first and
+    // there are more queued below (visible in AttentionStrip / SessionGrid
+    // for follow-up action).
+    const actions = [];
+    if (needsInputRuns.length > 0) {
+      const head = labelFor(needsInputRuns[0]);
+      const rest = needsInputRuns.length - 1;
+      const label = rest === 0
+        ? `${head} 에게 응답`
+        : `${head} 에게 응답 (외 ${rest}명)`;
+      actions.push({
+        kind: 'respond',
+        icon: SUGGESTED_ICON.respond,
+        label,
+        runs: needsInputRuns,
+      });
+    }
+    if (failedRuns.length > 0) {
+      const head = labelFor(failedRuns[0]);
+      const rest = failedRuns.length - 1;
+      const label = rest === 0
+        ? `${head} 재시도`
+        : `${head} 재시도 (외 ${rest}개)`;
+      actions.push({
+        kind: 'retry',
+        icon: SUGGESTED_ICON.retry,
+        label,
+        runs: failedRuns,
+      });
+    }
+    // Idle suggestions only when literally nothing needs attention AND
+    // nothing is running (§11.2 "모두 idle" rule). A running worker isn't
+    // interruptible suggestion-wise — the user should wait or open the
+    // RunInspector manually.
+    //
+    // Codex R1 MINOR #1: distinguish "no runs yet" from "all idle". When
+    // workerRuns.length === 0 the user has literally nothing to summarize,
+    // so "상태 요약" is misleading — drop it and leave only "새 작업 시작".
+    // The full idle pair only makes sense when prior runs exist.
+    const allIdle = needsInputRuns.length === 0 && failedRuns.length === 0 && runningCount === 0;
+    if (allIdle) {
+      if (workerRuns.length > 0) {
+        // There IS history (completed/cancelled/stopped workers) — offer
+        // both the summary-of-what-happened chip AND the new-task chip.
+        actions.push({
+          kind: 'summary',
+          icon: SUGGESTED_ICON.summary,
+          label: '상태 요약',
+        });
+      }
+      actions.push({
+        kind: 'new',
+        icon: SUGGESTED_ICON.new,
+        label: '새 작업 시작',
+      });
+    }
+    return actions;
+    // Depending on status.active so the strip disappears when the session
+    // stops. `runs` identity changes on every SSE reload — the useMemo
+    // still pays for itself because the result is consumed across mount
+    // + render for each chip.
+  }, [status.active, runs, tasks]);
+
+  // R2-C.2: suggestion chip click handlers.
+  //   respond/retry  →  open RunInspector (user picks up the conversation
+  //                     or kicks off a manual retry from inside the
+  //                     inspector; no backend retry endpoint exists yet)
+  //   summary        →  auto-insert "status" and submit — the Manager's
+  //                     system prompt already knows how to answer that
+  //   new            →  focus the input box and drop a placeholder hint
+  const handleSuggestedAction = (action) => {
+    if (!action) return;
+    if (action.kind === 'respond' || action.kind === 'retry') {
+      const target = action.runs && action.runs[0];
+      if (target) setInspectRun(target);
+      return;
+    }
+    if (action.kind === 'summary') {
+      // Codex R1 MINOR #3 + R2 MINOR #1: guard against rapid double-click
+      // AND cross-path duplicate submits (chip click + Enter in the same
+      // frame). The ref flips synchronously to block another chip click,
+      // and `setSending(true)` flips the state setter which handleSend
+      // (Enter-press path) also checks via its `if (sending) return`
+      // guard. Both paths read `sending` after the same setState commit.
+      if (submittingRef.current || sending) return;
+      submittingRef.current = true;
+      setSending(true); // block Enter-path's handleSend concurrently
+      setInput('status');
+      // Defer submit to next frame so Preact commits the input state first
+      // (handleSend reads `input` at call time).
+      requestAnimationFrame(() => {
+        // Use a local copy to avoid a stale closure on `input` inside
+        // handleSend — it reads from state via the setState path.
+        submitSuggestion('status');
+      });
+      return;
+    }
+    if (action.kind === 'new') {
+      if (inputRef.current) {
+        inputRef.current.focus();
+        // Don't mutate input — just hint via native placeholder flicker.
+        // The existing `placeholder="Message the manager..."` stays; this
+        // branch only restores focus so the user can start typing.
+      }
+      return;
+    }
+  };
+
+  // Bypass the handleSend closure-over-`input` so SuggestedActions can
+  // submit an arbitrary string without racing setState. Only used for the
+  // "상태 요약" chip today; factored out in case future chips want the
+  // same instant-submit path.
+  //
+  // The caller (handleSuggestedAction) already flipped `submittingRef` +
+  // `setSending(true)` so a concurrent click or Enter could not reach
+  // here / handleSend twice. We reset both in finally so subsequent
+  // clicks work once the send completes.
+  const submitSuggestion = async (textOverride) => {
+    const text = (textOverride || '').trim();
+    if (!text) {
+      // Roll back caller's sending-lock: nothing to send.
+      submittingRef.current = false;
+      setSending(false);
+      return;
+    }
+    setInput('');
+    try {
+      if (conversationTarget === 'top') {
+        await topSendMessage(text);
+      } else {
+        await apiFetch(`/api/conversations/${encodeURIComponent(conversationTarget)}/message`, {
+          method: 'POST',
+          body: JSON.stringify({ text }),
+        });
+      }
+    } catch (err) {
+      addToast('Failed to send: ' + (err && err.message ? err.message : 'unknown'), 'error');
+    }
+    setSending(false);
+    submittingRef.current = false;
+    requestAnimationFrame(() => { if (inputRef.current) inputRef.current.focus(); });
+  };
 
   const handleSend = async () => {
     const text = input.trim();
@@ -573,6 +785,30 @@ export function ManagerChat({ manager, projects, agents = [], agentsError = null
         `)}
       </div>
 
+      ${/* R2-C.2 SuggestedActions strip — renders directly above the
+           input area when the session is active AND there is at least
+           one rule-matched chip. Hidden otherwise (spec §11.2 — "빈 상태면
+           strip 자체 hide"). The strip sits INSIDE the flex column so it
+           doesn't overlap the message list's scroll, and it takes its
+           own border so it visually separates from the input even when
+           no dragover highlight is active. */ ''}
+      ${status.active && suggestedActions.length > 0 && html`
+        <div class="manager-suggested-actions" role="group" aria-label="Suggested actions">
+          ${suggestedActions.map(action => html`
+            <button
+              key=${action.kind}
+              type="button"
+              class="manager-suggested-chip manager-suggested-${action.kind}"
+              onClick=${() => handleSuggestedAction(action)}
+              aria-label=${action.label}
+            >
+              <span class="manager-suggested-icon" aria-hidden="true">${action.icon}</span>
+              <span class="manager-suggested-label">${action.label}</span>
+            </button>
+          `)}
+        </div>
+      `}
+
       ${status.active && html`
         <div class="manager-input-area ${dragOver ? 'drag-over' : ''}"
           onDragOver=${(e) => { e.preventDefault(); setDragOver(true); }}
@@ -632,6 +868,17 @@ export function ManagerChat({ manager, projects, agents = [], agentsError = null
             ${loading ? 'Starting...' : 'Start New Session'}
           </button>
         </div>
+      `}
+
+      ${/* R2-C.2: RunInspector triggered from SuggestedActions. The app
+           also renders a RunInspector at the top level (app.js) for
+           dashboard/board clicks; both inspectors render into the same
+           .run-inspector-overlay class but only one is mounted at a time
+           in practice because ManagerChat and the app-level inspector
+           live in different parts of the DOM tree and the SuggestedAction
+           path only fires when a user is focused on the Manager view. */ ''}
+      ${inspectRun && html`
+        <${RunInspector} run=${inspectRun} onClose=${() => setInspectRun(null)} />
       `}
     </div>
   `;

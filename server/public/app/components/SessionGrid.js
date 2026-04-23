@@ -104,9 +104,23 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
 
     // Add orphan runs as a virtual group if any
     if (orphanRuns.length > 0) {
-      const noneGroup = result.find(g => g.key === '_none') || { key: '_none', name: 'No Project', tasks: [] };
+      const noneGroup = result.find(g => g.key === '_none') || { key: '_none', name: 'No Project', tasks: [], sections: [] };
       if (!result.includes(noneGroup)) result.push(noneGroup);
       noneGroup.tasks.push({ task: null, runs: orphanRuns });
+      // R2-C incidental fix: ensure the orphan-runs group gets a sections
+      // array too. A newly-created noneGroup (no _none in the task projMap)
+      // would otherwise hit line ~181 (`group.sections.map`) as undefined.
+      // We push a single 'Unassigned' section containing the task-less
+      // orphan runs so the render loop stays uniform.
+      if (!noneGroup.sections) noneGroup.sections = [];
+      if (!noneGroup.sections.some(s => s.key === '_orphan')) {
+        noneGroup.sections.push({
+          key: '_orphan',
+          label: 'Unassigned',
+          color: '#6b7280',
+          tasks: [{ task: null, runs: orphanRuns }],
+        });
+      }
     }
 
     return result;
