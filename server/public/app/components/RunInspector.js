@@ -1,14 +1,78 @@
-// RunInspector — modal that polls a single run for live output, events,
-// and status, and lets the user send input or cancel.
+// RunInspector — slide-over panel that polls a single run for live
+// output, events, diff, costs, and status, and lets the user send input
+// or cancel the run.
+//
+// R2-B.1: converted from centered modal (`.modal-overlay` +
+//   `.modal-panel.wide`) to right-anchored slide-over
+//   (`.run-inspector-overlay` + `.run-inspector-slideover`). The
+//   close semantics (Escape + backdrop click) are unchanged from the
+//   modal version; Escape was previously routed at the app level so
+//   this component now owns its own keydown handler for parity with
+//   DriftDrawer.
+// R2-B.2: added Diff tab — fetches `GET /api/runs/:id/diff` lazily
+//   on first activation + every 5s while tab stays visible.
+// R2-B.3: added Costs tab — surfaces `runs.cost_usd` for Claude Code
+//   workers and aggregates `mgr.usage` events for Codex managers.
 
 import { h } from '../../vendor/preact.module.js';
-import { useState, useEffect, useRef } from '../../vendor/hooks.module.js';
+import { useState, useEffect, useRef, useMemo } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
 import { addToast } from '../lib/toast.js';
 import { timeAgo } from '../lib/format.js';
+
+/**
+ * R2-B.2: Colorise a unified diff string into per-line spans so +/-
+ * lines visually pop. We avoid DOM injection — each line is stored
+ * as `{ cls, text }` and rendered as a real child so HTM escapes
+ * text content. This also keeps line-by-line layout deterministic
+ * when `truncated` trims mid-line (the trailing partial line just
+ * renders without a class).
+ */
+function splitDiffLines(diffText) {
+  if (!diffText) return [];
+  const lines = diffText.split('\n');
+  return lines.map((line) => {
+    if (line.startsWith('+++') || line.startsWith('---')) return { cls: 'diff-file', text: line };
+    if (line.startsWith('diff --git ')) return { cls: 'diff-file', text: line };
+    if (line.startsWith('@@')) return { cls: 'diff-hunk', text: line };
+    if (line.startsWith('+')) return { cls: 'diff-add', text: line };
+    if (line.startsWith('-')) return { cls: 'diff-del', text: line };
+    return { cls: '', text: line };
+  });
+}
+
+/**
+ * R2-B.3: sum `mgr.usage` payloads across this run's events. Each
+ * `mgr.usage` event payload looks like
+ *   { inputTokens, outputTokens, cachedInputTokens?, costUsd? }
+ * Codex emits usage per turn (no dollars), Claude Code emits usage
+ * per turn with `costUsd`. We accumulate all three so a long manager
+ * conversation shows the session total rather than just the last turn.
+ */
+function aggregateManagerUsage(events) {
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cachedInputTokens = 0;
+  let costUsd = 0;
+  let turns = 0;
+  let hasAny = false;
+  for (const evt of events || []) {
+    if (evt.event_type !== 'mgr.usage') continue;
+    let payload = null;
+    try { payload = JSON.parse(evt.payload_json || '{}'); } catch { continue; }
+    const data = payload?.data || {};
+    inputTokens += Number(data.inputTokens || 0);
+    outputTokens += Number(data.outputTokens || 0);
+    cachedInputTokens += Number(data.cachedInputTokens || 0);
+    if (data.costUsd != null) costUsd += Number(data.costUsd || 0);
+    turns += 1;
+    hasAny = true;
+  }
+  return hasAny ? { inputTokens, outputTokens, cachedInputTokens, costUsd, turns } : null;
+}
 
 function RunSkillItem({ sp, runId, acceptanceChecks, onCheckToggle }) {
   const [showMcp, setShowMcp] = useState(false);
@@ -68,7 +132,31 @@ export function RunInspector({ run, onClose }) {
   const [presetFetchError, setPresetFetchError] = useState(null);
   const [presetFetching, setPresetFetching] = useState(false);
   const presetFetchRef = useRef(false); // in-flight dedup
+  // R2-B.2: diff tab state — lazy load on first activation; poll every
+  // 5s while the tab is visible so an actively running agent's diff
+  // refreshes without a manual refresh button.
+  const [diff, setDiff] = useState(null);
+  const [diffTruncated, setDiffTruncated] = useState(false);
+  const [diffReason, setDiffReason] = useState(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const diffFetchRef = useRef(false);
+  // R2-B.3: a dedicated event store for the Costs tab.
+  //
+  // Codex R2-B review (Medium 3): the main `events` array is capped
+  // at 500 entries by the polling loop (to keep the Events tab DOM
+  // bounded), which means a long-running manager session drops its
+  // earliest `mgr.usage` events from memory. Aggregating against
+  // `events` would then undercount cumulative tokens — visible to
+  // users as "session total went DOWN after a tab switch".
+  //
+  // For Costs we therefore fetch the entire event stream (no
+  // `after=` cursor, no cap) on tab activation + every 10s while
+  // visible. This is additive to the main poll; the Events tab still
+  // shows the 500 latest items.
+  const [costEvents, setCostEvents] = useState(null);
+  const costEventsFetchRef = useRef(false);
   const outputRef = useRef(null);
+  const slideoverRef = useRef(null);
   const userScrolledUp = useRef(false);
 
   // Poll live output + events + run status
@@ -129,6 +217,114 @@ export function RunInspector({ run, onClose }) {
     }
   }, [liveOutput]);
 
+  // R2-B.1: Escape-to-close + open/close focus management.
+  //
+  // Codex R2-B review (Medium 1): we intentionally allow tab flow to
+  // escape the panel — the panel has live-updating regions and making
+  // users cycle focus inside them is hostile. That is a deliberate
+  // non-modal interaction, so we do NOT advertise `aria-modal="true"`
+  // on the panel root; the parent dialog role is still useful for
+  // structure but the aria-modal lie is removed.
+  //
+  // Codex R2-B review (Medium 2): on close we must restore focus to
+  // the element that opened the panel. Skipping this leaves focus on
+  // <body>, which is disorienting for keyboard/AT users. We snapshot
+  // `document.activeElement` on mount and `.focus()` it on unmount.
+  //
+  // `requestAnimationFrame` (not `queueMicrotask`) is used for the
+  // open-time focus call so focus moves after the panel's slide-in
+  // has at least been laid out; microtasks run before paint, which
+  // meant a screen reader could announce "focused" on a panel the
+  // user hadn't seen arrive yet.
+  useEffect(() => {
+    if (!run) return;
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') { onClose && onClose(); }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    const raf = requestAnimationFrame(() => {
+      slideoverRef.current?.focus?.();
+    });
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      cancelAnimationFrame(raf);
+      // Only restore focus if the previously focused element is still
+      // in the DOM and is not the <body> fallback. This avoids fighting
+      // subsequent UI that might have moved focus intentionally.
+      if (previouslyFocused
+        && previouslyFocused !== document.body
+        && document.contains(previouslyFocused)) {
+        try { previouslyFocused.focus(); } catch { /* best-effort */ }
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run?.id]);
+
+  // R2-B.3: Costs tab — fetch complete event list so mgr.usage
+  // aggregation is not bounded by the Events tab's 500-item cap.
+  // 10s cadence (slower than diff because usage events arrive at
+  // turn boundaries, not continuously).
+  useEffect(() => {
+    if (!run || tab !== 'costs') return;
+    let cancelled = false;
+    const fetchCostEvents = async () => {
+      if (costEventsFetchRef.current) return;
+      costEventsFetchRef.current = true;
+      try {
+        // after=0 pulls the full stream (server returns all events
+        // with id > 0). We only actually need `mgr.usage` entries —
+        // the server could grow a query param someday, but for now
+        // filtering client-side is fine: the typical long session
+        // has ~a few hundred events, and we already fetch 200 in the
+        // main poll without issue.
+        const data = await apiFetch('/api/runs/' + run.id + '/events?after=0');
+        if (!cancelled) setCostEvents(data.events || []);
+      } catch { /* keep previous snapshot */ }
+      finally { costEventsFetchRef.current = false; }
+    };
+    fetchCostEvents();
+    const interval = setInterval(fetchCostEvents, 10000);
+    return () => { cancelled = true; clearInterval(interval); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, run?.id]);
+
+  // R2-B.2: diff tab lazy fetch + 5s refresh while visible.
+  // We key the interval on both `tab` and `run?.id` so switching tabs
+  // tears down the poll, and switching runs resets it.
+  useEffect(() => {
+    if (!run || tab !== 'diff') return;
+    let cancelled = false;
+    const fetchDiff = async () => {
+      if (diffFetchRef.current) return; // in-flight dedup
+      diffFetchRef.current = true;
+      setDiffLoading(true);
+      try {
+        const data = await apiFetch('/api/runs/' + run.id + '/diff');
+        if (cancelled) return;
+        setDiff(data.diff ?? null);
+        setDiffTruncated(!!data.truncated);
+        setDiffReason(data.reason || null);
+      } catch (err) {
+        if (!cancelled) {
+          setDiffReason('fetch_failed');
+        }
+      } finally {
+        diffFetchRef.current = false;
+        if (!cancelled) setDiffLoading(false);
+      }
+    };
+    fetchDiff();
+    const interval = setInterval(fetchDiff, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, run?.id]);
+
   const handleOutputScroll = () => {
     if (!outputRef.current) return;
     const el = outputRef.current;
@@ -182,12 +378,52 @@ export function RunInspector({ run, onClose }) {
     return t !== 'heartbeat';
   });
 
+  // R2-B.3: cost view data. Worker-side cost_usd comes straight off
+  // the run row; manager-side usage is aggregated from events. When
+  // both are zero we render an empty state so OpenCode / unsupported
+  // adapters don't show a confusing "$0.0000" headline.
+  //
+  // Manager runs persist their aggregated usage back into the run row
+  // (codexAdapter.js updateRunResult) so the row-level tokens match the
+  // event-level totals. Showing both as separate cards double-counts
+  // and confuses the user — for is_manager=1 we surface only the
+  // Manager Usage breakdown, which has the richer shape (cached input,
+  // turn count).
+  // R2-B.2: memoize line split so a 1 MiB diff doesn't re-parse on
+  // every unrelated render (loading-state toggle, Events tab's
+  // arrival of new events, etc.). Only recomputes when `diff` itself
+  // changes — the poll loop calls setDiff with the same string when
+  // nothing has changed (React won't re-render in that case, but
+  // it's cheap insurance).
+  const diffLines = useMemo(() => splitDiffLines(diff), [diff]);
+
+  const isManagerRun = !!(currentRun?.is_manager || run?.is_manager);
+  const workerCostUsd = typeof currentRun?.cost_usd === 'number'
+    ? currentRun.cost_usd
+    : typeof run.cost_usd === 'number' ? run.cost_usd : 0;
+  const workerInputTokens = Number(currentRun?.input_tokens || run.input_tokens || 0);
+  const workerOutputTokens = Number(currentRun?.output_tokens || run.output_tokens || 0);
+  // Use the dedicated full-stream snapshot when present; fall back to
+  // the bounded `events` array if the Costs tab hasn't loaded yet
+  // (keeps the first render meaningful instead of flashing "no data").
+  const managerUsage = aggregateManagerUsage(costEvents || events);
+  const showWorkerCost = !isManagerRun
+    && (workerCostUsd > 0 || workerInputTokens > 0 || workerOutputTokens > 0);
+  const showManagerUsage = !!managerUsage;
+  const hasCostData = showWorkerCost || showManagerUsage;
+
   return html`
-    <div class="modal-overlay">
-      <div class="modal-backdrop" onClick=${onClose}></div>
-      <div class="modal-panel wide">
-        <div class="modal-header">
-          <h2 class="modal-title">${currentRun?.task_title || run.task_title || 'Run Inspector'}</h2>
+    <div class="run-inspector-overlay">
+      <div class="run-inspector-backdrop" onClick=${onClose}></div>
+      <div
+        class="run-inspector-slideover"
+        ref=${slideoverRef}
+        tabIndex="-1"
+        role="dialog"
+        aria-label="Run inspector"
+      >
+        <div class="run-inspector-header">
+          <h2 class="run-inspector-title">${currentRun?.task_title || run.task_title || 'Run Inspector'}</h2>
           <button class="ghost" onClick=${onClose}>Close</button>
         </div>
         <div class="run-status-bar">
@@ -214,6 +450,12 @@ export function RunInspector({ run, onClose }) {
           </button>
           <button class="run-inspector-tab ${tab === 'events' ? 'active' : ''}" onClick=${() => setTab('events')}>
             Events (${meaningfulEvents.length})
+          </button>
+          <button class="run-inspector-tab ${tab === 'diff' ? 'active' : ''}" onClick=${() => setTab('diff')}>
+            Diff
+          </button>
+          <button class="run-inspector-tab ${tab === 'costs' ? 'active' : ''}" onClick=${() => setTab('costs')}>
+            Costs
           </button>
           <button class="run-inspector-tab ${tab === 'skills' ? 'active' : ''}" onClick=${async () => {
             setTab('skills');
@@ -295,6 +537,87 @@ export function RunInspector({ run, onClose }) {
                 </div>
               `;
             })}
+          </div>
+        `}
+
+        ${tab === 'diff' && html`
+          <div class="run-diff-area">
+            ${diffTruncated && html`
+              <div class="run-diff-warning">
+                ⚠ Diff truncated at 1 MiB — showing the first portion only. Check the worktree directly for the full changeset.
+              </div>
+            `}
+            ${(() => {
+              if (diffLoading && diff === null && !diffReason) {
+                return html`<div class="run-diff-empty">Loading diff...</div>`;
+              }
+              if (diffReason === 'no_worktree') {
+                return html`<div class="run-diff-empty">This run did not create an isolated git worktree.</div>`;
+              }
+              if (diffReason === 'worktree_missing') {
+                return html`<div class="run-diff-empty">Worktree directory no longer exists (it may have been cleaned up).</div>`;
+              }
+              if (diffReason === 'git_failed' || diffReason === 'fetch_failed') {
+                return html`<div class="run-diff-empty">Could not compute diff.</div>`;
+              }
+              if (diff === '') {
+                return html`<div class="run-diff-empty">No uncommitted changes in the worktree.</div>`;
+              }
+              return html`
+                <pre class="run-diff-pre">${diffLines.map((l, i) => html`
+                  <span key=${i} class=${l.cls}>${l.text}${i < diffLines.length - 1 ? '\n' : ''}</span>
+                `)}</pre>
+              `;
+            })()}
+          </div>
+        `}
+
+        ${tab === 'costs' && html`
+          <div class="run-cost-area">
+            ${!hasCostData && html`
+              <div class="run-cost-empty">
+                Cost data not available for this adapter.
+                <div style=${{ fontSize: '11px', marginTop: '4px', opacity: 0.8 }}>
+                  Claude Code workers and Codex manager sessions report usage; OpenCode and other adapters do not.
+                </div>
+              </div>
+            `}
+            ${showWorkerCost && html`
+              <div class="run-cost-card">
+                <div class="run-cost-card-label">Worker cost</div>
+                <div class="run-cost-card-value">
+                  ${workerCostUsd > 0 ? '$' + workerCostUsd.toFixed(4) : '—'}
+                </div>
+                ${(workerInputTokens > 0 || workerOutputTokens > 0) && html`
+                  <dl class="run-cost-breakdown" style=${{ marginTop: '10px' }}>
+                    <dt>Input tokens</dt><dd>${workerInputTokens.toLocaleString()}</dd>
+                    <dt>Output tokens</dt><dd>${workerOutputTokens.toLocaleString()}</dd>
+                  </dl>
+                `}
+                <div class="run-cost-card-sub">
+                  Reported by the worker adapter on completion.
+                </div>
+              </div>
+            `}
+            ${showManagerUsage && html`
+              <div class="run-cost-card">
+                <div class="run-cost-card-label">Manager usage (${managerUsage.turns} turn${managerUsage.turns === 1 ? '' : 's'})</div>
+                <div class="run-cost-card-value">
+                  ${managerUsage.costUsd > 0 ? '$' + managerUsage.costUsd.toFixed(4) : (managerUsage.inputTokens + managerUsage.outputTokens).toLocaleString() + ' tokens'}
+                </div>
+                <dl class="run-cost-breakdown" style=${{ marginTop: '10px' }}>
+                  <dt>Input tokens</dt><dd>${managerUsage.inputTokens.toLocaleString()}</dd>
+                  ${managerUsage.cachedInputTokens > 0 && html`
+                    <dt>Cached input</dt><dd>${managerUsage.cachedInputTokens.toLocaleString()}</dd>
+                  `}
+                  <dt>Output tokens</dt><dd>${managerUsage.outputTokens.toLocaleString()}</dd>
+                  ${managerUsage.costUsd > 0 && html`<dt>Cost</dt><dd>$${managerUsage.costUsd.toFixed(4)}</dd>`}
+                </dl>
+                <div class="run-cost-card-sub">
+                  Aggregated from <code>mgr.usage</code> run events. Codex does not report dollar cost.
+                </div>
+              </div>
+            `}
           </div>
         `}
 

@@ -1,5 +1,83 @@
 const express = require('express');
+const path = require('node:path');
+const fs = require('node:fs');
+const { execFile } = require('node:child_process');
 const { asyncHandler } = require('../middleware/asyncHandler');
+
+// R2-B.2: maximum unified-diff payload size, in bytes. Diffs larger than
+// this are truncated and the client is warned via a `truncated` flag so
+// long-running generation sessions don't push megabytes of text across
+// the wire on every poll. 1 MiB matches the ceiling noted in the R2-B
+// plan; change here + in the route tests if this ever moves.
+const DIFF_MAX_BYTES = 1 * 1024 * 1024;
+// Walltime cap — we never want `git diff` to hang the runs router.
+const DIFF_TIMEOUT_MS = 10 * 1000;
+
+/**
+ * Run `git diff` inside a worktree and return the unified diff output
+ * (stdout) as UTF-8 text. Uses `execFile` (no shell) with an explicit
+ * maxBuffer so we always return a predictable shape, even when the
+ * worktree's diff would exceed `DIFF_MAX_BYTES`.
+ *
+ * Resolves to `{ diff: string, truncated: boolean, empty: boolean }`.
+ *   - `empty`     — worktree had no tracked changes (git diff produced "")
+ *   - `truncated` — output hit `DIFF_MAX_BYTES`; callers should surface a
+ *     warning. The diff text returned is the prefix that fit.
+ *
+ * Rejects only on non-zero exit / git not available / timeout. Callers
+ * upstream translate those into a 502 with `{ diff: null, reason }`.
+ */
+function runGitDiff(cwd) {
+  return new Promise((resolve, reject) => {
+    // `git diff HEAD --no-color` covers staged + unstaged changes
+    // relative to the worktree's current commit — exactly what the
+    // user edited since the run started. `--no-color` keeps the text
+    // parseable / displayable without ANSI escapes.
+    //
+    // Security hardening (Codex R2-B review, High):
+    //   --no-ext-diff  — disables `diff.external` / `GIT_EXTERNAL_DIFF`.
+    //                    Without this, a repo carrying a hostile git
+    //                    config could have git spawn an arbitrary
+    //                    external program on every diff. The endpoint
+    //                    runs with server process privileges, so this
+    //                    is a remote-code-exec primitive for any user
+    //                    who can point a project at a malicious repo.
+    //   --no-textconv  — disables `textconv` filters configured via
+    //                    gitattributes. Same vector (arbitrary binary
+    //                    invocation on binary files like .png/.pdf).
+    // We also wipe `GIT_EXTERNAL_DIFF` from the child env as
+    // belt-and-suspenders — `--no-ext-diff` should cover it, but an
+    // older git build or a future CLI flag regression could put the
+    // door back. Explicitly clearing the env var closes both.
+    execFile(
+      'git',
+      ['diff', '--no-ext-diff', '--no-textconv', '--no-color', 'HEAD'],
+      {
+        cwd,
+        timeout: DIFF_TIMEOUT_MS,
+        maxBuffer: DIFF_MAX_BYTES + 1024,
+        encoding: 'utf-8',
+        env: { ...process.env, GIT_EXTERNAL_DIFF: '', GIT_TEXTCONV_DIFF: '' },
+      },
+      (err, stdout) => {
+        if (err) {
+          // ERR_CHILD_PROCESS_STDIO_MAXBUFFER: buffer exceeded cap.
+          // stdout may still contain a usable prefix.
+          if (err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+            const text = String(stdout || '').slice(0, DIFF_MAX_BYTES);
+            return resolve({ diff: text, truncated: true, empty: false });
+          }
+          return reject(err);
+        }
+        const text = String(stdout || '');
+        if (text.length > DIFF_MAX_BYTES) {
+          return resolve({ diff: text.slice(0, DIFF_MAX_BYTES), truncated: true, empty: false });
+        }
+        resolve({ diff: text, truncated: false, empty: text.length === 0 });
+      },
+    );
+  });
+}
 
 /**
  * Phase 10F / Phase D1: compute a shallow drift summary between a run's frozen
@@ -115,7 +193,7 @@ function computeMcpTemplateDrift(snapshotCore, snapshotAppliedAt, mcpTemplateSer
   return { templates: drifted, modified_count: drifted.length };
 }
 
-function createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService }) {
+function createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService }) {
   const router = express.Router();
 
   router.get('/', asyncHandler(async (req, res) => {
@@ -186,6 +264,98 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
       drift,
       mcp_template_drift: mcpTemplateDrift,
     });
+  }));
+
+  // R2-B.2: per-run worktree diff. Returns a unified diff of the run's
+  // worktree against HEAD — what the agent changed in its isolated
+  // branch, staged + unstaged.
+  //
+  // Response shape (always 200 for known runs):
+  //   { diff: string | null, truncated?: boolean, reason?: string }
+  // - `diff: null`         — run has no worktree (shared cwd, pre-worktree
+  //   boot, or the directory was cleaned up). `reason` explains which.
+  // - `diff: ""`           — worktree exists but there are no changes.
+  //   `empty: true` is also set.
+  // - `diff: "<text>"`     — unified diff body, capped at DIFF_MAX_BYTES.
+  //   When capped, `truncated: true` is set so the client can warn.
+  //
+  // Security: the worktree path is validated to live under the run's
+  // project directory before exec. Paths outside the project boundary
+  // (e.g. fabricated runs or stale rows after a project move) are
+  // rejected with 400 rather than silently falling back — we do not want
+  // to run `git diff` in an arbitrary cwd.
+  router.get('/:id/diff', asyncHandler(async (req, res) => {
+    const run = runService.getRun(req.params.id);
+    if (!run.worktree_path) {
+      return res.json({ diff: null, reason: 'no_worktree' });
+    }
+    if (!fs.existsSync(run.worktree_path)) {
+      return res.json({ diff: null, reason: 'worktree_missing' });
+    }
+
+    // Resolve the owning project directory so we can bound the worktree
+    // path. Without `projectService` / `taskService` wired (legacy test
+    // harnesses), fall back to trusting `run.worktree_path` directly —
+    // production code path always has both services present.
+    let projectDir = null;
+    try {
+      if (taskService && projectService && run.task_id) {
+        const task = taskService.getTask(run.task_id);
+        if (task?.project_id) {
+          const project = projectService.getProject(task.project_id);
+          projectDir = project?.directory || null;
+        }
+      }
+    } catch { /* fall through to unbounded check */ }
+
+    if (projectDir) {
+      // Resolve to canonical (symlink-free) paths before comparison.
+      // path.resolve alone would happily accept a worktree_path that
+      // looks like `/<proj>/evil` where `evil` is a symlink to `/etc` —
+      // the string prefix passes but `git diff` would then run in `/etc`.
+      // fs.realpathSync follows every component, so the startsWith check
+      // runs against the actual filesystem location.
+      //
+      // If either path isn't realpathable (deleted mid-request, perm
+      // error, etc.) we fall back to the non-real variant, which at
+      // worst allows the request — but the earlier fs.existsSync on
+      // worktree_path has already enforced existence, so the failure
+      // mode is narrow.
+      let resolvedProject = path.resolve(projectDir);
+      let resolvedWorktree = path.resolve(run.worktree_path);
+      try { resolvedProject = fs.realpathSync(resolvedProject); } catch { /* fall through */ }
+      try { resolvedWorktree = fs.realpathSync(resolvedWorktree); } catch { /* fall through */ }
+      // The worktree must be under the project root OR the project root
+      // itself (non-git-worktree runs share the base cwd). Anything else
+      // is either a bug or a malicious payload.
+      const underProject = resolvedWorktree === resolvedProject
+        || resolvedWorktree.startsWith(resolvedProject + path.sep);
+      if (!underProject) {
+        return res.status(400).json({
+          diff: null,
+          reason: 'worktree_outside_project',
+        });
+      }
+    }
+
+    try {
+      const result = await runGitDiff(run.worktree_path);
+      return res.json({
+        diff: result.diff,
+        truncated: result.truncated || false,
+        empty: result.empty || false,
+      });
+    } catch (err) {
+      // git exec failed — most likely the worktree isn't a git checkout
+      // anymore (it got pruned) or git isn't on PATH. Annotate-only: we
+      // respond 200 with diff:null so the tab shows an empty state
+      // rather than a toast error that would fire on every poll.
+      return res.json({
+        diff: null,
+        reason: 'git_failed',
+        error: err?.message || 'git diff failed',
+      });
+    }
   }));
 
   router.get('/:id/events', asyncHandler(async (req, res) => {
@@ -283,4 +453,10 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
   return router;
 }
 
-module.exports = { createRunsRouter, computePresetDrift, computeMcpTemplateDrift };
+module.exports = {
+  createRunsRouter,
+  computePresetDrift,
+  computeMcpTemplateDrift,
+  runGitDiff,
+  DIFF_MAX_BYTES,
+};
