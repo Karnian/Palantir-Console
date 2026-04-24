@@ -8,8 +8,8 @@ const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
 import { addToast, apiFetchWithToast } from '../lib/toast.js';
-import { useEscape } from '../lib/hooks.js';
 import { EmptyState } from './EmptyState.js';
+import { Modal } from './Modal.js';
 
 function Loading() { return html`<div class="loading">Loading...</div>`; }
 
@@ -36,7 +36,6 @@ function PresetModal({ open, onClose, preset, pluginRefs, templates, onSaved }) 
   const [minVersion, setMinVersion] = useState('');
   const [settingSources, setSettingSources] = useState('');
   const [saving, setSaving] = useState(false);
-  useEscape(open, onClose);
 
   useEffect(() => {
     if (!open) return;
@@ -55,8 +54,6 @@ function PresetModal({ open, onClose, preset, pluginRefs, templates, onSaved }) 
       setMinVersion(''); setSettingSources('');
     }
   }, [open, preset]);
-
-  if (!open) return null;
 
   const togglePlugin = (name) => {
     setSelectedPlugins(prev => {
@@ -109,14 +106,12 @@ function PresetModal({ open, onClose, preset, pluginRefs, templates, onSaved }) 
   };
 
   return html`
-    <div class="modal-overlay">
-      <div class="modal-backdrop" onClick=${onClose}></div>
-      <div class="modal-panel" style=${{ maxWidth: '640px' }}>
-        <div class="modal-header">
-          <h2 class="modal-title">${preset ? 'Edit Preset' : 'New Worker Preset'}</h2>
-          <button class="modal-close" onClick=${onClose}>\u2715</button>
-        </div>
-        <div class="modal-body">
+    <${Modal} open=${open} onClose=${onClose} labelledBy="preset-modal-title" maxWidth="640px">
+      <div class="modal-header">
+        <h2 class="modal-title" id="preset-modal-title">${preset ? 'Edit Preset' : 'New Worker Preset'}</h2>
+        <button class="modal-close" onClick=${onClose}>\u2715</button>
+      </div>
+      <div class="modal-body">
           <div class="form-field">
             <label class="form-label">Name</label>
             <input class="form-input" value=${name} onInput=${e => setName(e.target.value)}
@@ -200,8 +195,7 @@ function PresetModal({ open, onClose, preset, pluginRefs, templates, onSaved }) 
             ${saving ? 'Saving...' : preset ? 'Update' : 'Create'}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   `;
 }
 
@@ -211,8 +205,6 @@ function PresetModal({ open, onClose, preset, pluginRefs, templates, onSaved }) 
 
 function DeleteConfirm({ open, preset, onClose, onConfirm }) {
   const [deleting, setDeleting] = useState(false);
-  useEscape(open, onClose);
-  if (!open || !preset) return null;
 
   const handleDelete = async () => {
     setDeleting(true);
@@ -225,21 +217,18 @@ function DeleteConfirm({ open, preset, onClose, onConfirm }) {
   };
 
   return html`
-    <div class="modal-overlay">
-      <div class="modal-backdrop" onClick=${onClose}></div>
-      <div class="modal-panel" style=${{ maxWidth: '420px' }}>
-        <div class="modal-header"><h2 class="modal-title">Delete Preset</h2></div>
-        <div class="modal-body">
-          <p>Delete <strong>${preset.name}</strong>? Task links to this preset will be cleared. Past run snapshots are preserved.</p>
-        </div>
-        <div class="modal-footer">
-          <button class="ghost" onClick=${onClose}>Cancel</button>
-          <button class="danger" onClick=${handleDelete} disabled=${deleting}>
-            ${deleting ? 'Deleting...' : 'Delete'}
-          </button>
-        </div>
+    <${Modal} open=${open && !!preset} onClose=${onClose} labelledBy="preset-delete-title" maxWidth="420px">
+      <div class="modal-header"><h2 class="modal-title" id="preset-delete-title">Delete Preset</h2></div>
+      <div class="modal-body">
+        <p>Delete <strong>${preset?.name}</strong>? Task links to this preset will be cleared. Past run snapshots are preserved.</p>
       </div>
-    </div>
+      <div class="modal-footer">
+        <button class="ghost" onClick=${onClose}>Cancel</button>
+        <button class="danger" onClick=${handleDelete} disabled=${deleting}>
+          ${deleting ? 'Deleting...' : 'Delete'}
+        </button>
+      </div>
+    </Modal>
   `;
 }
 

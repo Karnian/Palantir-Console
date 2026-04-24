@@ -1322,14 +1322,99 @@ body {
 }
 
 @media (max-width: 640px) {
+  /* Mobile: nav rides the bottom as a tab bar instead of disappearing.
+     Aphrodite/Codex pass (2026-04-24) flagged the prior "display:none with no
+     alternative" as a WCAG 2.4.1 blocker — the app has no way to navigate
+     between views on a 375px phone. This layout keeps icon-only tabs at the
+     bottom, floats the SSE status indicator to the top-right, and stacks the
+     Manager chat/grid split vertically. `--mobile-nav-height` is defined
+     globally in tokens.css. */
+
   .v2-shell {
     grid-template-columns: 1fr;
   }
   .nav-sidebar {
+    display: flex;
+    flex-direction: row;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    width: 100%;
+    /* Pad by the bottom safe-area so the bar isn't hidden behind the
+       home indicator on notched iPhones in PWA / standalone mode. */
+    height: calc(var(--mobile-nav-height) + env(safe-area-inset-bottom, 0px));
+    padding: 0 8px env(safe-area-inset-bottom, 0px);
+    border-right: none;
+    border-top: 1px solid var(--border);
+    justify-content: space-around;
+    align-items: center;
+    z-index: 100;
+    gap: 0;
+  }
+  .nav-brand,
+  .nav-tooltip {
     display: none;
+  }
+  .nav-item {
+    flex: 1;
+    width: auto;
+    min-width: 44px;
+    height: 44px;
+    /* neutralize the desktop left-bar active indicator; bottom bar gets a
+       bottom accent line instead */
+    border-left: none !important;
+  }
+  .nav-item.active {
+    border-left: none !important;
+    box-shadow: inset 0 -2px 0 0 var(--accent);
+  }
+  /* SSE status: pulled out of the sidebar (which no longer has room) into a
+     small floating chip so disconnect is still observable on mobile.
+     The chip uses `.nav-status` as its anchor so screen-readers still pick
+     up the existing `title="SSE Connected|Disconnected"` tooltip. */
+  .nav-sidebar .nav-status {
+    position: fixed;
+    top: max(8px, env(safe-area-inset-top, 0px));
+    right: max(10px, env(safe-area-inset-right, 0px));
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    z-index: 101;
+  }
+  .nav-sidebar .nav-attention,
+  .nav-sidebar .nav-spacer {
+    display: none;
+  }
+  /* Reserve space so the bottom bar doesn't hide the last row of content. */
+  .main-area {
+    padding-bottom: var(--mobile-nav-height);
   }
   .sessions-layout {
     grid-template-columns: 1fr;
+  }
+  /* Manager 60/40 split → vertical stack on phone. Chat gets the top half,
+     worker grid scrolls below. */
+  .manager-view {
+    flex-direction: column;
+  }
+  .manager-chat-side {
+    width: 100%;
+    min-width: 0;
+    max-height: 55vh;
+    /* desktop uses a vertical chat/grid split with a right border on the
+       chat pane; on phone the layout is horizontal stack so the right
+       border reads as a stray line on the screen edge — swap to a bottom
+       rule instead. */
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+  .manager-grid-side {
+    width: 100%;
+    min-width: 0;
+    max-height: 45vh;
+    overflow-y: auto;
   }
 }
 
@@ -2344,7 +2429,11 @@ body {
   inset: 0;
   display: grid;
   place-items: center;
-  z-index: 30;
+  /* Must sit above the mobile bottom nav (z-index:100) and the floating SSE
+     chip (z-index:101). Without this bump, on a 375px phone the modal's
+     backdrop doesn't actually cover those elements and they remain clickable
+     while a dialog is open — defeats the focus trap. */
+  z-index: 200;
 }
 
 .modal-overlay[hidden] {
@@ -2688,6 +2777,17 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   outline: none;
   border-color: var(--border-active);
   box-shadow: 0 0 0 2px var(--accent-muted);
+}
+/* Forced Colors (Windows high-contrast) discards box-shadow entirely, so
+   the above rules leave keyboard users with no visible focus ring. Fall
+   back to a system-painted `outline` in that mode. */
+@media (forced-colors: active) {
+  .form-input:focus,
+  .form-textarea:focus,
+  .form-select:focus {
+    outline: 2px solid Highlight;
+    outline-offset: 0;
+  }
 }
 
 .inline-select {
@@ -3674,6 +3774,19 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 
 .command-palette-input:focus {
   outline: none;
+  /* Focus ring — replaces default outline with a visible 2px bottom accent
+     so keyboard users actually see where focus landed. A 1px bottom was
+     judged too subtle in review; bumped to 2px for clarity. Forced Colors
+     has its own override below using system keywords. */
+  border-bottom-color: var(--accent);
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+@media (forced-colors: active) {
+  .command-palette-input:focus {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+    box-shadow: none;
+  }
 }
 
 .command-palette-input::placeholder {

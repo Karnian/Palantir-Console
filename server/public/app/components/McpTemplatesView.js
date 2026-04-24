@@ -11,8 +11,8 @@ const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
 import { addToast, apiFetchWithToast } from '../lib/toast.js';
-import { useEscape } from '../lib/hooks.js';
 import { EmptyState } from './EmptyState.js';
+import { Modal } from './Modal.js';
 
 function Loading() { return html`<div class="loading">Loading...</div>`; }
 
@@ -65,7 +65,6 @@ function TemplateModal({ open, template, onClose, onSaved }) {
   const [envKeys, setEnvKeys] = useState('');
   const [description, setDescription] = useState('');
   const [saving, setSaving] = useState(false);
-  useEscape(open, onClose);
 
   useEffect(() => {
     if (!open) return;
@@ -85,8 +84,6 @@ function TemplateModal({ open, template, onClose, onSaved }) {
       setDescription('');
     }
   }, [open, template]);
-
-  if (!open) return null;
 
   const handleSave = async () => {
     if (!alias.trim() || !command.trim()) {
@@ -128,91 +125,98 @@ function TemplateModal({ open, template, onClose, onSaved }) {
   };
 
   return html`
-    <div class="modal-overlay">
-      <div class="modal-backdrop" onClick=${onClose}></div>
-      <div class="modal-panel" style=${{ maxWidth: '560px' }}>
-        <div class="modal-header">
-          <h2 class="modal-title">${isEdit ? 'Edit MCP Template' : 'New MCP Template'}</h2>
-        </div>
-        <div class="modal-body">
-          <div class="form-row">
-            <label class="form-label">Alias
-              <span style=${{ color: 'var(--muted)', fontWeight: 'normal', marginLeft: '6px' }}>
-                letters / digits / _ / -
-              </span>
-            </label>
-            <input
-              class="form-input"
-              value=${alias}
-              onInput=${e => setAlias(e.target.value)}
-              disabled=${isEdit}
-              placeholder="graphify"
-            />
-            ${isEdit && html`
-              <div class="small" style=${{ color: 'var(--muted)', marginTop: '4px' }}>
-                Alias is immutable — skill packs reference templates by this name.
-              </div>
-            `}
-          </div>
-          <div class="form-row">
-            <label class="form-label">Command</label>
-            <input
-              class="form-input"
-              value=${command}
-              onInput=${e => setCommand(e.target.value)}
-              placeholder="npx"
-            />
-          </div>
-          <div class="form-row">
-            <label class="form-label">Args
-              <span style=${{ color: 'var(--muted)', fontWeight: 'normal', marginLeft: '6px' }}>
-                JSON array of strings
-              </span>
-            </label>
-            <textarea
-              class="form-input"
-              rows="2"
-              value=${argsJson}
-              onInput=${e => setArgsJson(e.target.value)}
-              placeholder=${'["-y", "@graphify/mcp"]'}
-              style=${{ fontFamily: 'ui-monospace, monospace' }}
-            ></textarea>
-          </div>
-          <div class="form-row">
-            <label class="form-label">Allowed env keys
-              <span style=${{ color: 'var(--muted)', fontWeight: 'normal', marginLeft: '6px' }}>
-                comma-separated
-              </span>
-            </label>
-            <input
-              class="form-input"
-              value=${envKeys}
-              onInput=${e => setEnvKeys(e.target.value)}
-              placeholder="GRAPHIFY_ROOT, LOG_LEVEL"
-            />
-            <div class="small" style=${{ color: 'var(--muted)', marginTop: '4px' }}>
-              Credential / process-loader patterns (*_KEY, NODE_OPTIONS, PATH, …) are globally denied.
+    <${Modal}
+      open=${open}
+      onClose=${onClose}
+      labelledBy="mcp-template-title"
+      maxWidth="560px"
+    >
+      <div class="modal-header">
+        <h2 class="modal-title" id="mcp-template-title">${isEdit ? 'Edit MCP Template' : 'New MCP Template'}</h2>
+      </div>
+      <div class="modal-body">
+        <div class="form-row">
+          <label class="form-label" for="mcp-tpl-alias">Alias
+            <span style=${{ color: 'var(--text-muted)', fontWeight: 'normal', marginLeft: '6px' }}>
+              letters / digits / _ / -
+            </span>
+          </label>
+          <input
+            id="mcp-tpl-alias"
+            class="form-input"
+            value=${alias}
+            onInput=${e => setAlias(e.target.value)}
+            disabled=${isEdit}
+            placeholder="graphify"
+          />
+          ${isEdit && html`
+            <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '4px' }}>
+              Alias is immutable — skill packs reference templates by this name.
             </div>
-          </div>
-          <div class="form-row">
-            <label class="form-label">Description</label>
-            <textarea
-              class="form-input"
-              rows="2"
-              value=${description}
-              onInput=${e => setDescription(e.target.value)}
-              placeholder="What does this MCP server do?"
-            ></textarea>
+          `}
+        </div>
+        <div class="form-row">
+          <label class="form-label" for="mcp-tpl-command">Command</label>
+          <input
+            id="mcp-tpl-command"
+            class="form-input"
+            value=${command}
+            onInput=${e => setCommand(e.target.value)}
+            placeholder="npx"
+          />
+        </div>
+        <div class="form-row">
+          <label class="form-label" for="mcp-tpl-args">Args
+            <span style=${{ color: 'var(--text-muted)', fontWeight: 'normal', marginLeft: '6px' }}>
+              JSON array of strings
+            </span>
+          </label>
+          <textarea
+            id="mcp-tpl-args"
+            class="form-input"
+            rows="2"
+            value=${argsJson}
+            onInput=${e => setArgsJson(e.target.value)}
+            placeholder=${'["-y", "@graphify/mcp"]'}
+            style=${{ fontFamily: 'ui-monospace, monospace' }}
+          ></textarea>
+        </div>
+        <div class="form-row">
+          <label class="form-label" for="mcp-tpl-env">Allowed env keys
+            <span style=${{ color: 'var(--text-muted)', fontWeight: 'normal', marginLeft: '6px' }}>
+              comma-separated
+            </span>
+          </label>
+          <input
+            id="mcp-tpl-env"
+            class="form-input"
+            value=${envKeys}
+            onInput=${e => setEnvKeys(e.target.value)}
+            placeholder="GRAPHIFY_ROOT, LOG_LEVEL"
+          />
+          <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '4px' }}>
+            Credential / process-loader patterns (*_KEY, NODE_OPTIONS, PATH, …) are globally denied.
           </div>
         </div>
-        <div class="modal-footer">
-          <button class="ghost" onClick=${onClose} disabled=${saving}>Cancel</button>
-          <button class="primary" onClick=${handleSave} disabled=${saving}>
-            ${saving ? 'Saving...' : (isEdit ? 'Save' : 'Create')}
-          </button>
+        <div class="form-row">
+          <label class="form-label" for="mcp-tpl-desc">Description</label>
+          <textarea
+            id="mcp-tpl-desc"
+            class="form-input"
+            rows="2"
+            value=${description}
+            onInput=${e => setDescription(e.target.value)}
+            placeholder="What does this MCP server do?"
+          ></textarea>
         </div>
       </div>
-    </div>
+      <div class="modal-footer">
+        <button class="ghost" onClick=${onClose} disabled=${saving}>Cancel</button>
+        <button class="primary" onClick=${handleSave} disabled=${saving}>
+          ${saving ? 'Saving...' : (isEdit ? 'Save' : 'Create')}
+        </button>
+      </div>
+    </Modal>
   `;
 }
 
@@ -223,7 +227,6 @@ function TemplateModal({ open, template, onClose, onSaved }) {
 function DeleteConfirm({ open, template, onClose, onConfirm }) {
   const [deleting, setDeleting] = useState(false);
   const [refs, setRefs] = useState(null);
-  useEscape(open, onClose);
 
   useEffect(() => {
     // Reset on template change so we don't flash stale refs from a
@@ -245,7 +248,6 @@ function DeleteConfirm({ open, template, onClose, onConfirm }) {
     return () => { cancelled = true; };
   }, [open, template]);
 
-  if (!open || !template) return null;
   const refsLoaded = refs !== null;
   const hasRefs = refsLoaded && (refs.presets?.length > 0 || refs.skillPacks?.length > 0);
 
@@ -260,54 +262,56 @@ function DeleteConfirm({ open, template, onClose, onConfirm }) {
   };
 
   return html`
-    <div class="modal-overlay">
-      <div class="modal-backdrop" onClick=${onClose}></div>
-      <div class="modal-panel" style=${{ maxWidth: '460px' }}>
-        <div class="modal-header"><h2 class="modal-title">Delete MCP Template</h2></div>
-        <div class="modal-body">
-          <p>Delete <strong>${template.alias}</strong>?</p>
-          ${hasRefs && html`
-            <div style=${{
-              marginTop: '12px', padding: '10px',
-              background: 'color-mix(in srgb, #f59e0b 12%, transparent)',
-              border: '1px solid color-mix(in srgb, #f59e0b 40%, transparent)',
-              borderRadius: '6px', fontSize: '13px',
-            }}>
-              <strong style=${{ color: '#f59e0b' }}>In use</strong>
-              <div style=${{ marginTop: '6px' }}>
-                ${refs.presets?.length > 0 && html`
-                  <div>Presets: ${refs.presets.map(p => p.name).join(', ')}</div>
-                `}
-                ${refs.skillPacks?.length > 0 && html`
-                  <div>Skill packs: ${refs.skillPacks.map(p => p.name).join(', ')}</div>
-                `}
-                <div style=${{ marginTop: '6px', color: 'var(--muted)' }}>
-                  Remove these references before deleting.
-                </div>
+    <${Modal}
+      open=${open && !!template}
+      onClose=${onClose}
+      labelledBy="mcp-delete-title"
+      maxWidth="460px"
+    >
+      <div class="modal-header"><h2 class="modal-title" id="mcp-delete-title">Delete MCP Template</h2></div>
+      <div class="modal-body">
+        <p>Delete <strong>${template?.alias}</strong>?</p>
+        ${hasRefs && html`
+          <div style=${{
+            marginTop: '12px', padding: '10px',
+            background: 'color-mix(in srgb, #f59e0b 12%, transparent)',
+            border: '1px solid color-mix(in srgb, #f59e0b 40%, transparent)',
+            borderRadius: '6px', fontSize: '13px',
+          }}>
+            <strong style=${{ color: '#f59e0b' }}>In use</strong>
+            <div style=${{ marginTop: '6px' }}>
+              ${refs.presets?.length > 0 && html`
+                <div>Presets: ${refs.presets.map(p => p.name).join(', ')}</div>
+              `}
+              ${refs.skillPacks?.length > 0 && html`
+                <div>Skill packs: ${refs.skillPacks.map(p => p.name).join(', ')}</div>
+              `}
+              <div style=${{ marginTop: '6px', color: 'var(--text-muted)' }}>
+                Remove these references before deleting.
               </div>
             </div>
-          `}
-          ${!hasRefs && refsLoaded && html`
-            <div class="small" style=${{ color: 'var(--muted)', marginTop: '8px' }}>
-              No references found — safe to delete.
-            </div>
-          `}
-          ${!refsLoaded && html`
-            <div class="small" style=${{ color: 'var(--muted)', marginTop: '8px' }}>
-              Checking references…
-            </div>
-          `}
-        </div>
-        <div class="modal-footer">
-          <button class="ghost" onClick=${onClose} disabled=${deleting}>Cancel</button>
-          <button
-            class="danger"
-            onClick=${handleDelete}
-            disabled=${deleting || hasRefs || !refsLoaded}
-          >${deleting ? 'Deleting...' : 'Delete'}</button>
-        </div>
+          </div>
+        `}
+        ${!hasRefs && refsLoaded && html`
+          <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '8px' }}>
+            No references found — safe to delete.
+          </div>
+        `}
+        ${!refsLoaded && html`
+          <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '8px' }}>
+            Checking references…
+          </div>
+        `}
       </div>
-    </div>
+      <div class="modal-footer">
+        <button class="ghost" onClick=${onClose} disabled=${deleting}>Cancel</button>
+        <button
+          class="danger"
+          onClick=${handleDelete}
+          disabled=${deleting || hasRefs || !refsLoaded}
+        >${deleting ? 'Deleting...' : 'Delete'}</button>
+      </div>
+    </Modal>
   `;
 }
 
