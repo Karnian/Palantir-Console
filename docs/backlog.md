@@ -1,7 +1,7 @@
 # Palantir Console Backlog
 
-> Last updated: 2026-04-22 (post PR #117)
-> 
+> Last updated: 2026-04-24 (post PR #126 — R1/R3/R4 완료)
+>
 > 이 문서는 *현재 시점에서* 남은 작업들을 카테고리별로 정리한다.
 > 완료된 작업은 [handoff-post-scenario-review.md](./handoff-post-scenario-review.md) 및 각 spec 문서의 Implementation Log를 본다.
 
@@ -18,35 +18,7 @@
 
 ## Ready
 
-### R1. `docs/specs/skill-pack-gallery-v1.1.md` Codex cross-review + lock-in
-- **크기**: 반나절 (async 리뷰 + NIT 반영)
-- **Spec 상태**: 559줄, "Draft — pending Codex cross-review". Stage 1 (Bundled Registry + Gallery UI) 은 v1.0 그대로 유지, Stage 2 (중앙 Remote Registry) 는 폐기하고 **URL 기반 설치** (US-008/009/010) 로 대체.
-- **산출물**:
-  - 보안 검증 파이프라인 (§6.2) 리뷰
-  - DB 스키마 변경 (§6.3) — `source_url`, `source_hash`, `source_fetched_at`, `origin_type`
-  - API 라우트 변경 (§6.5) — URL preview / install / update check
-  - 사용자 편집 필드 (name/scope/project_id/priority/conflict_policy) 보존 정책
-- **Why Ready**: 구현 착수 시점에 또 다시 5라운드 교차검증 돌리지 않으려면 lock-in 이 먼저여야 함 (M1 전례).
-- **Blocker 없음**
-
-### R2. `docs/specs/manager-session-ui.md` 구현 gap 분석
-- **크기**: 반나절 ~ 1일 (읽기 + 현 구현과 diff 표 작성)
-- **Spec 상태**: 1001줄, Scale L (2-3주 구현), "Design Proposal (구현 전 검토 필요)". Information Architecture / Status system / Layout / Component Hierarchy / Manager Chat / Session Overview 구조 설계.
-- **산출물**:
-  - 현재 `ManagerView` / `SessionsView` / `ManagerChat` / `SessionGrid` 컴포넌트가 Proposal 의 어디까지 커버하는지 매트릭스
-  - Phase 분할 가능한 작은 작업들로 쪼개기
-  - "spec 의 어느 부분은 이미 현 구현과 동일, 어느 부분은 미구현" 명확화
-- **Why Ready**: Proposal 채택 여부 결정을 위해 diff 정량화 선행.
-
-### R3. `install-from-url.test.js` flaky 원인 고정
-- **크기**: 1-2시간
-- **증상**: 병렬 실행 시 간헐적 409 (name collision). 이번 세션의 flake 2건과는 별개인 pre-existing.
-- **Why Ready**: flake 2건 (#117) 으로 test noise 대폭 감소했으므로 이것까지 고치면 완전 clean. 재현 빈도 낮아서 priority 낮지만 스코프 작음.
-
-### R4. `docs/test-scenarios.md` stale 점검
-- **크기**: 2-3시간
-- **Context**: 2026-04-19 세션 기준으로 AUTH-01/02, KBD-04, 헤더 정정 완료 (`6948b8a`). 그 후 M1/M2/B3 에서 새 이벤트/필드 추가됨 — 시나리오에 반영 안 됨.
-- **산출물**: `mcp:legacy_alias_conflict` 관련 시나리오 (worker path / PM path), `npm run diagnose:mcp` 도구 검증 시나리오 추가.
+*(현재 비어있음 — R1/R2/R3/R4 는 2026-04-24 세션에서 모두 완료. §Non-backlog 의 "완료 항목 이동" 규율에 따라 handoff-post-scenario-review.md 로 이동됨)*
 
 ---
 
@@ -77,12 +49,9 @@
 
 ---
 
-## Draft-review (R1/R2 와 겹치지만 별도 서술)
+## Draft-review
 
-| Spec | 줄수 | 상태 | 다음 단계 |
-|------|-----|------|----------|
-| `skill-pack-gallery-v1.1.md` | 559 | Draft — pending Codex cross-review | R1 |
-| `manager-session-ui.md` | 1001 | Design Proposal | R2 |
+*(현재 비어있음 — `skill-pack-gallery-v1.1.md` 는 PR #124 에서 Final / locked-in, `manager-session-ui.md` 는 PR #120 의 gap analysis + PR #121-123 R2-A/B/C 로 대부분 소화. 추후 새 spec draft 가 생기면 여기에 등록)*
 
 ---
 
