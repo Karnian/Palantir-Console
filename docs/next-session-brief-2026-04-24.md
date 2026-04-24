@@ -204,6 +204,6 @@ docs/next-session-brief-2026-04-24.md 를 먼저 읽고, 남은 백로그 R1 / R
 | R1 | [#124](https://github.com/Karnian/Palantir-Console/pull/124) | `60dda43` | skill-pack-gallery v1.1 Draft → Final (Codex 3 라운드 cross-review PASS, NIT 반영) |
 | R3 | [#125](https://github.com/Karnian/Palantir-Console/pull/125) | `9b7a65c` | install-from-url flake 근본 해결 (supertest persistent server + UUID 기반 fixture 이름) |
 | R4 | [#126](https://github.com/Karnian/Palantir-Console/pull/126) | `13c4c27` | docs/test-scenarios.md — M2/B3/M3/R2-A/R2-B/R2-C 6개 섹션 추가 + Manager 기본 랜딩 업데이트. Codex 2 라운드 PASS |
-| Batch cleanup | (이어지는 PR) | (TBD) | backlog.md 에서 R1/R3/R4 제거 + 이 stamp 추가 + handoff 업데이트 |
+| Batch cleanup | [#127](https://github.com/Karnian/Palantir-Console/pull/127) | `99b2530` | backlog.md 에서 R1/R3/R4 제거 + 이 stamp 추가 + handoff 업데이트 |
 
 D1 (issue #113) 과 T1 (Claude PM resume) 은 §4 의 사유로 이 세션에서 제외. 다음 세션은 2026-05-06 ~ 2026-05-13 사이 M2 event 관측 결과로 M3 착수 여부 재평가.
