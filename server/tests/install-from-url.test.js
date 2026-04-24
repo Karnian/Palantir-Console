@@ -38,12 +38,36 @@ async function createTestApp(t, { fetchStub } = {}) {
   app.use('/api/skill-packs', createSkillPacksRouter({ skillPackService, registryService }));
   app.use(errorHandler);
 
-  t.after(() => {
-    close();
-    fs.rm(dbDir, { recursive: true, force: true });
+  // R3: Pre-bind a persistent server on an ephemeral port and hand it to
+  // supertest. Without this, supertest calls `app.listen(0)` per request and
+  // closes the server when the response ends. Under concurrent load (node
+  // --test runs test files in parallel processes), that per-request listen/
+  // close dance races with OS-level socket setup and intermittently yields
+  // `ECONNRESET` on the first request, or a misrouted 404 when a later
+  // request lands before the previous close completes. Binding once per
+  // test keeps the socket stable for the test's lifetime.
+  //
+  // Explicitly bind to 127.0.0.1 (not 0.0.0.0) — supertest only ever dials
+  // loopback, and sandboxed environments (e.g. Codex worker) deny binding
+  // to 0.0.0.0 with EPERM even for ephemeral ports.
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve, reject) => {
+    server.once('listening', resolve);
+    server.once('error', reject);
   });
 
-  return { app, skillPackService, registryService };
+  t.after(async () => {
+    await new Promise((resolve) => server.close(() => resolve()));
+    close();
+    await fs.rm(dbDir, { recursive: true, force: true });
+  });
+
+  // Return both for clarity: `app` is the Express instance (legacy callers
+  // can still reach middleware etc.), `server` is the listening http.Server
+  // that supertest should dial. Callers in this file use `request(server)`
+  // so supertest reuses the pre-bound socket instead of calling
+  // `app.listen(0)` per request.
+  return { app, server, skillPackService, registryService };
 }
 
 // ─── Helper: valid pack fixture ───
@@ -76,7 +100,7 @@ test('POST /install-url dry_run returns pack + hash + preview_token', async (t) 
     pack: samplePack(),
     hash: 'abc123',
   });
-  const { app } = await createTestApp(t, { fetchStub });
+  const { server: app } = await createTestApp(t, { fetchStub });
   const res = await request(app)
     .post('/api/skill-packs/registry/install-url')
     .send({ url: 'https://example.com/p.json', dry_run: true });
@@ -94,7 +118,7 @@ test('POST /install-url confirm requires preview_token', async (t) => {
     pack: samplePack(),
     hash: 'abc123',
   });
-  const { app } = await createTestApp(t, { fetchStub });
+  const { server: app } = await createTestApp(t, { fetchStub });
   const res = await request(app)
     .post('/api/skill-packs/registry/install-url')
     .send({ url: 'https://example.com/p.json', expected_hash: 'abc123' });
@@ -109,7 +133,7 @@ test('POST /install-url confirm requires expected_hash', async (t) => {
     pack: samplePack(),
     hash: 'abc123',
   });
-  const { app } = await createTestApp(t, { fetchStub });
+  const { server: app } = await createTestApp(t, { fetchStub });
   const res = await request(app)
     .post('/api/skill-packs/registry/install-url')
     .send({ url: 'https://example.com/p.json', preview_token: 'xxx' });
@@ -124,7 +148,7 @@ test('POST /install-url full flow: dry_run → confirm → installed', async (t)
     pack: samplePack({ name: 'Test URL Pack' }),
     hash: 'abc123',
   });
-  const { app } = await createTestApp(t, { fetchStub });
+  const { server: app } = await createTestApp(t, { fetchStub });
 
   // Dry run
   const dry = await request(app)
@@ -158,7 +182,7 @@ test('POST /install-url rejects bad preview_token', async (t) => {
     pack: samplePack(),
     hash: 'abc123',
   });
-  const { app } = await createTestApp(t, { fetchStub });
+  const { server: app } = await createTestApp(t, { fetchStub });
   const res = await request(app)
     .post('/api/skill-packs/registry/install-url')
     .send({
@@ -177,7 +201,7 @@ test('POST /install-url rejects when preview_token consumed twice', async (t) =>
     pack: samplePack(),
     hash: 'abc123',
   });
-  const { app } = await createTestApp(t, { fetchStub });
+  const { server: app } = await createTestApp(t, { fetchStub });
 
   const dry = await request(app)
     .post('/api/skill-packs/registry/install-url')
@@ -212,7 +236,7 @@ test('POST /install-url detects TOCTOU (hash changed since preview)', async (t) 
       hash: fetchCount === 1 ? 'hash-a' : 'hash-b', // different hash on second fetch
     };
   };
-  const { app } = await createTestApp(t, { fetchStub });
+  const { server: app } = await createTestApp(t, { fetchStub });
 
   const dry = await request(app)
     .post('/api/skill-packs/registry/install-url')
@@ -238,7 +262,7 @@ test('POST /install-url rejects duplicate source_url with 409', async (t) => {
     pack: samplePack(),
     hash: 'abc123',
   });
-  const { app } = await createTestApp(t, { fetchStub });
+  const { server: app } = await createTestApp(t, { fetchStub });
 
   const dry1 = await request(app)
     .post('/api/skill-packs/registry/install-url')
@@ -265,7 +289,7 @@ test('POST /install-url rejects name collision with existing pack', async (t) =>
     pack: samplePack({ name: 'Existing Pack' }),
     hash: 'abc123',
   });
-  const { app } = await createTestApp(t, { fetchStub });
+  const { server: app } = await createTestApp(t, { fetchStub });
   // Create a manual pack with same name
   await request(app).post('/api/skill-packs').send({ name: 'Existing Pack', scope: 'global' });
 
@@ -280,7 +304,7 @@ test('POST /install-url rejects name collision with existing pack', async (t) =>
 });
 
 test('POST /install-url rejects URL without url field', async (t) => {
-  const { app } = await createTestApp(t);
+  const { server: app } = await createTestApp(t);
   const res = await request(app)
     .post('/api/skill-packs/registry/install-url')
     .send({});
@@ -297,7 +321,7 @@ test('POST /check-update-url returns update_available=false when hash matches', 
     pack: samplePack(),
     hash: 'abc123',
   });
-  const { app } = await createTestApp(t, { fetchStub });
+  const { server: app } = await createTestApp(t, { fetchStub });
 
   // Install first
   const dry = await request(app)
@@ -328,7 +352,7 @@ test('POST /check-update-url returns update_available=true when hash differs', a
       hash: fetchCount >= 3 ? 'new-hash' : 'original-hash',
     };
   };
-  const { app } = await createTestApp(t, { fetchStub });
+  const { server: app } = await createTestApp(t, { fetchStub });
 
   // Install (fetch 1: dry, fetch 2: confirm)
   const dry = await request(app)
@@ -348,7 +372,7 @@ test('POST /check-update-url returns update_available=true when hash differs', a
 });
 
 test('POST /check-update-url rejects non-URL pack', async (t) => {
-  const { app } = await createTestApp(t);
+  const { server: app } = await createTestApp(t);
   // Create a manual pack
   const manual = await request(app).post('/api/skill-packs').send({ name: 'Manual', scope: 'global' });
   const res = await request(app)
@@ -372,7 +396,7 @@ test('POST /update-url updates content, preserves user customizations', async (t
       hash: fetchCount >= 3 ? 'new-hash' : 'old-hash',
     };
   };
-  const { app } = await createTestApp(t, { fetchStub });
+  const { server: app } = await createTestApp(t, { fetchStub });
 
   // Install
   const dry = await request(app)
@@ -404,7 +428,7 @@ test('POST /update-url updates content, preserves user customizations', async (t
 });
 
 test('POST /update-url rejects non-URL pack', async (t) => {
-  const { app } = await createTestApp(t);
+  const { server: app } = await createTestApp(t);
   const manual = await request(app).post('/api/skill-packs').send({ name: 'Manual', scope: 'global' });
   const res = await request(app)
     .post('/api/skill-packs/registry/update-url')
@@ -416,7 +440,7 @@ test('POST /update-url rejects non-URL pack', async (t) => {
 // ─── SSRF integration (real fetchPackFromUrl, no stub) ───
 
 test('SSRF blocks http:// URL via install-url', async (t) => {
-  const { app } = await createTestApp(t); // use real fetchPackFromUrl
+  const { server: app } = await createTestApp(t); // use real fetchPackFromUrl
   const res = await request(app)
     .post('/api/skill-packs/registry/install-url')
     .send({ url: 'http://example.com/pack.json', dry_run: true });
@@ -424,7 +448,7 @@ test('SSRF blocks http:// URL via install-url', async (t) => {
 });
 
 test('SSRF blocks localhost', async (t) => {
-  const { app } = await createTestApp(t);
+  const { server: app } = await createTestApp(t);
   const res = await request(app)
     .post('/api/skill-packs/registry/install-url')
     .send({ url: 'https://localhost/pack.json', dry_run: true });
@@ -432,7 +456,7 @@ test('SSRF blocks localhost', async (t) => {
 });
 
 test('SSRF blocks loopback IP', async (t) => {
-  const { app } = await createTestApp(t);
+  const { server: app } = await createTestApp(t);
   const res = await request(app)
     .post('/api/skill-packs/registry/install-url')
     .send({ url: 'https://127.0.0.1/pack.json', dry_run: true });
@@ -440,7 +464,7 @@ test('SSRF blocks loopback IP', async (t) => {
 });
 
 test('SSRF blocks AWS metadata IP', async (t) => {
-  const { app } = await createTestApp(t);
+  const { server: app } = await createTestApp(t);
   const res = await request(app)
     .post('/api/skill-packs/registry/install-url')
     .send({ url: 'https://169.254.169.254/latest/meta-data/', dry_run: true });
@@ -448,7 +472,7 @@ test('SSRF blocks AWS metadata IP', async (t) => {
 });
 
 test('SSRF blocks RFC1918 range', async (t) => {
-  const { app } = await createTestApp(t);
+  const { server: app } = await createTestApp(t);
   const res = await request(app)
     .post('/api/skill-packs/registry/install-url')
     .send({ url: 'https://192.168.1.1/pack.json', dry_run: true });
@@ -456,7 +480,7 @@ test('SSRF blocks RFC1918 range', async (t) => {
 });
 
 test('SSRF blocks .local hostname', async (t) => {
-  const { app } = await createTestApp(t);
+  const { server: app } = await createTestApp(t);
   const res = await request(app)
     .post('/api/skill-packs/registry/install-url')
     .send({ url: 'https://foo.local/pack.json', dry_run: true });
@@ -464,7 +488,7 @@ test('SSRF blocks .local hostname', async (t) => {
 });
 
 test('SSRF blocks user:pass@ URL', async (t) => {
-  const { app } = await createTestApp(t);
+  const { server: app } = await createTestApp(t);
   const res = await request(app)
     .post('/api/skill-packs/registry/install-url')
     .send({ url: 'https://user:pass@example.com/pack.json', dry_run: true });
@@ -473,7 +497,7 @@ test('SSRF blocks user:pass@ URL', async (t) => {
 });
 
 test('SSRF blocks non-443 port', async (t) => {
-  const { app } = await createTestApp(t);
+  const { server: app } = await createTestApp(t);
   const res = await request(app)
     .post('/api/skill-packs/registry/install-url')
     .send({ url: 'https://example.com:8080/pack.json', dry_run: true });
@@ -490,7 +514,7 @@ test('POST /install-url rejects URL pack claiming a bundled registry_id (namespa
     pack: samplePack({ registry_id: 'core/code-review', name: 'Pirate Code Review' }),
     hash: 'abc',
   });
-  const { app } = await createTestApp(t, { fetchStub });
+  const { server: app } = await createTestApp(t, { fetchStub });
   const dry = await request(app)
     .post('/api/skill-packs/registry/install-url')
     .send({ url: 'https://example.com/p.json', dry_run: true });
@@ -510,7 +534,7 @@ test('API responses do not include full source_url (server-only)', async (t) => 
     pack: samplePack(),
     hash: 'abc',
   });
-  const { app } = await createTestApp(t, { fetchStub });
+  const { server: app } = await createTestApp(t, { fetchStub });
   const dry = await request(app)
     .post('/api/skill-packs/registry/install-url')
     .send({ url: 'https://example.com/p.json?token=secret', dry_run: true });
@@ -534,7 +558,7 @@ test('API responses do not include full source_url (server-only)', async (t) => 
 // ─── JSON import origin_type (v1.1 R1-P1-3) ───
 
 test('POST /import marks pack as origin_type=import', async (t) => {
-  const { app } = await createTestApp(t);
+  const { server: app } = await createTestApp(t);
   const res = await request(app)
     .post('/api/skill-packs/import')
     .send({ skill_pack: { name: 'Imported Pack', scope: 'global', prompt_full: 'x' } });
@@ -543,7 +567,7 @@ test('POST /import marks pack as origin_type=import', async (t) => {
 });
 
 test('POST /api/skill-packs creates pack with origin_type=manual by default', async (t) => {
-  const { app } = await createTestApp(t);
+  const { server: app } = await createTestApp(t);
   const res = await request(app)
     .post('/api/skill-packs')
     .send({ name: 'Manual Pack', scope: 'global' });
