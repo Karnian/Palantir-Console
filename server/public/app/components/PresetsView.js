@@ -321,8 +321,9 @@ export function PresetsView() {
       ${loading && html`<${Loading} />`}
       ${!loading && presets.length === 0 && html`
         <${EmptyState}
-          title="No presets yet"
-          description="Worker presets bundle plugin directories, MCP servers, and a system prompt for reuse across worker runs. Create one to get started."
+          icon="❖"
+          text="No presets yet"
+          sub="Worker presets bundle plugin directories, MCP servers, and a system prompt for reuse across worker runs. Create one to get started."
         />
       `}
       ${!loading && presets.length > 0 && html`

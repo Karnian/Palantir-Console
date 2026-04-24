@@ -345,8 +345,9 @@ export function McpTemplatesView() {
       ${loading && html`<${Loading} />`}
       ${!loading && templates.length === 0 && html`
         <${EmptyState}
-          title="No MCP templates"
-          description="Register an MCP server so presets and skill packs can reference it by alias."
+          icon="⦿"
+          text="No MCP templates"
+          sub="Register an MCP server so presets and skill packs can reference it by alias."
         />
       `}
       ${!loading && templates.length > 0 && html`

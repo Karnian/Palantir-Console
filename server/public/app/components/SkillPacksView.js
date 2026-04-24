@@ -611,7 +611,7 @@ function MyPacksView({ projects }) {
 
       <!-- Pack list -->
       ${filteredPacks.length === 0 && html`
-        <${EmptyState} icon="\u2726" title="No Skill Packs" subtitle="Create your first skill pack to inject capabilities into agents." />
+        <${EmptyState} icon="\u2726" text="No Skill Packs" sub="Create your first skill pack to inject capabilities into agents." />
       `}
       <div class="skill-packs-list">
         ${filteredPacks.map(pack => {
