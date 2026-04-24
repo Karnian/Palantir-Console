@@ -352,7 +352,7 @@ export function McpTemplatesView() {
       ${!loading && templates.length > 0 && html`
         <div class="skill-packs-list">
           ${templates.map(t => html`
-            <div class="skill-pack-card" key=${t.id} style=${{ cursor: 'default' }}>
+            <div class="skill-pack-card static" key=${t.id}>
               <div class="skill-pack-card-header">
                 <h3 class="skill-pack-name" style=${{ margin: 0 }}>${t.alias}</h3>
               </div>

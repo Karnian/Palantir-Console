@@ -1720,6 +1720,8 @@ body {
 .board-toolbar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  row-gap: 8px;
   gap: 12px;
   padding: 16px 24px;
   flex-shrink: 0;
@@ -1740,24 +1742,13 @@ body {
 
 .board-filter {
   display: flex;
+  flex-wrap: wrap;
+  row-gap: 6px;
   gap: 8px;
   align-items: center;
 }
-
-.board-filter select {
-  background: var(--bg-base);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text-primary);
-  padding: 6px 10px;
-  font-size: 12px;
-  font-family: var(--font-sans);
-  cursor: pointer;
-}
-
-.board-filter select:focus {
-  outline: none;
-  border-color: var(--border-active);
+.board-filter .dropdown-wide .dropdown-button {
+  min-width: 140px;
 }
 
 .board-columns {
@@ -5043,13 +5034,11 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   gap: 8px;
   padding: 0 24px 12px;
 }
-/* Filter selects shouldn't stretch to fill the flex row — keep them sized to
-   their content so the count badge on the right doesn't get pushed off-screen
-   and the native dropdown menu doesn't span the whole viewport. */
-.skill-packs-filters .form-select {
-  width: auto;
+/* Filter dropdowns use the `wide` variant (width:auto) — its default
+   min-width:80px is too narrow for "All Scopes"/"All Projects" labels and
+   triggers an ellipsis. Bump min-width here so labels stay readable. */
+.skill-packs-filters .dropdown-wide .dropdown-button {
   min-width: 140px;
-  flex: 0 0 auto;
 }
 .skill-packs-count {
   font-size: 11px;
@@ -5081,6 +5070,16 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .skill-pack-card:hover {
   border-color: var(--accent-muted);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+/* Static variant — used when the card isn't clickable (e.g. MCP server
+   templates) so it doesn't pulse a pointer cursor or hover affordance that
+   suggests interactivity it doesn't have. */
+.skill-pack-card.static {
+  cursor: default;
+}
+.skill-pack-card.static:hover {
+  border-color: var(--border);
+  box-shadow: none;
 }
 .skill-pack-card-header {
   display: flex;

@@ -527,16 +527,28 @@ function MyPacksView({ projects }) {
 
       <!-- Filters -->
       <div class="skill-packs-filters">
-        <select class="form-select small" value=${filterScope} onChange=${e => { setFilterScope(e.target.value); setFilterProjectId(''); }}>
-          <option value="all">All Scopes</option>
-          <option value="global">Global</option>
-          <option value="project">Project</option>
-        </select>
+        <${Dropdown}
+          wide
+          value=${filterScope}
+          onChange=${(v) => { setFilterScope(v); setFilterProjectId(''); }}
+          options=${[
+            { value: 'all', label: 'All Scopes' },
+            { value: 'global', label: 'Global' },
+            { value: 'project', label: 'Project' },
+          ]}
+          ariaLabel="Scope filter"
+        />
         ${filterScope === 'project' && html`
-          <select class="form-select small" value=${filterProjectId} onChange=${e => setFilterProjectId(e.target.value)}>
-            <option value="">All Projects</option>
-            ${(projects || []).map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
-          </select>
+          <${Dropdown}
+            wide
+            value=${filterProjectId}
+            onChange=${setFilterProjectId}
+            options=${[
+              { value: '', label: 'All Projects' },
+              ...(projects || []).map(p => ({ value: p.id, label: p.name })),
+            ]}
+            ariaLabel="Project filter"
+          />
         `}
         <span class="skill-packs-count">${filteredPacks.length} pack${filteredPacks.length !== 1 ? 's' : ''}</span>
       </div>
