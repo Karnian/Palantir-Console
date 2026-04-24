@@ -350,23 +350,23 @@ export function McpTemplatesView() {
         />
       `}
       ${!loading && templates.length > 0 && html`
-        <div class="skill-pack-grid">
+        <div class="skill-packs-list">
           ${templates.map(t => html`
-            <div class="skill-pack-card" key=${t.id}>
-              <div class="skill-pack-header">
-                <h3 class="skill-pack-name">${t.alias}</h3>
+            <div class="skill-pack-card" key=${t.id} style=${{ cursor: 'default' }}>
+              <div class="skill-pack-card-header">
+                <h3 class="skill-pack-name" style=${{ margin: 0 }}>${t.alias}</h3>
               </div>
-              <div class="small" style=${{ color: 'var(--muted)', marginTop: '4px' }}>
+              <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '4px' }}>
                 <code>${t.command}</code>
                 ${t.args && html` <span style=${{ opacity: 0.7 }}>${argsPreview(t.args)}</span>`}
               </div>
               ${t.description && html`
                 <p class="skill-pack-desc" style=${{ marginTop: '6px' }}>${t.description}</p>
               `}
-              <div class="small" style=${{ color: 'var(--muted)', marginTop: '6px' }}>
+              <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '6px' }}>
                 Updated ${formatTs(t.updated_at)}
               </div>
-              <div class="skill-pack-actions" style=${{ marginTop: '10px', display: 'flex', gap: '6px' }}>
+              <div class="skill-pack-card-actions">
                 <button class="ghost small" onClick=${() => { setEditTarget(t); setModalOpen(true); }}>Edit</button>
                 <button class="ghost small" onClick=${() => setDeleteTarget(t)}>Delete</button>
               </div>
