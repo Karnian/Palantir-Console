@@ -4,9 +4,9 @@
 >
 > 각 시나리오는 **Given (전제) → When (액션) → Then (기대 결과)** 형식.
 > "Then"은 코드 내부 동작이 아닌 **관찰 가능한 결과**(DOM, API 응답, DB 상태, 토스트 등)로 작성한다.
-> 시나리오 ID prefix: `PRJ`, `TSK`, `BRD`, `RUN`, `INS`, `MGR`, `PM`, `CONV`, `ROUTER`, `DRIFT`, `DSH`, `AGT`, `PRESET`, `KBD`, `SSE`, `AUTH`, `SES`, `TRS`, `FS`, `USG`, `CLS`, `REG`.
+> 시나리오 ID prefix: `PRJ`, `TSK`, `BRD`, `RUN`, `INS`, `MGR`, `PM`, `CONV`, `ROUTER`, `DRIFT`, `MCP`, `ATT`, `MGRSUM`, `DSH`, `AGT`, `PRESET`, `KBD`, `SSE`, `AUTH`, `SES`, `TRS`, `FS`, `USG`, `CLS`, `REG`.
 >
-> *현재 main 기준. v3 Phase 0~10G merged (#20~#32, #60~#64, #65~#71, #85~#94, #99~#111).* Phase 3b 는 트리거 조건 미충족으로 대기. 자세한 phase 히스토리는 `docs/specs/manager-v3-multilayer.md` §15 참조.
+> *현재 main 기준. v3 Phase 0~10G merged (#20~#32, #60~#64, #65~#71, #85~#94, #99~#111). M1/M2/B3/M3/R2-A/R2-B/R2-C merged (#114~#123).* Phase 3b 는 트리거 조건 미충족으로 대기. 자세한 phase 히스토리는 `docs/specs/manager-v3-multilayer.md` §15 + `docs/plans/manager-session-ui-gap-analysis.md` 참조.
 
 ---
 
@@ -168,7 +168,44 @@
 - **Given** completed/failed/cancelled 상태 Run
 - **When** Inspector 오픈
 - **Then** 상태 표시, 출력, 이벤트 목록 표시. 입력란/취소 버튼은 비활성/숨김
-- **Note**: exit code, cost USD 전용 표시는 현재 UI에 없음 (필요 시 별도 시나리오로 추가)
+- **Note**: exit code, cost USD 전용 표시는 INS-07 Costs 탭으로 분리됨 (R2-B.3)
+
+### INS-05 — RunInspector slide-over 패널 (R2-B.1)
+- **Given** Inspector 닫힘 상태
+- **When** Triage 카드 / Board 카드 / AttentionStrip 항목 클릭으로 Inspector 오픈
+- **Then**
+  - 우측에서 슬라이드 오버레이로 등장 (`.run-inspector-overlay` + `.run-inspector-slideover`) — 이전의 `.modal-panel.wide` 중앙 모달 아님
+  - 좌측에 backdrop (`.run-inspector-backdrop`) 클릭하면 닫힘 (Esc 키도 동일)
+  - 패널은 `role="dialog"` + `aria-label="Run inspector"` + `tabIndex="-1"` (오픈 시 포커스 이동)
+  - 헤더에 task title + Close 버튼, Status bar 에 status dot + agent name + Started timeAgo + (active 인 경우) Cancel 버튼
+  - 탭 순서: `Live Output` / `Events (N)` / `Diff` / `Costs` / `Skills` / `Preset (preset_id 있을 때만)`
+
+### INS-06 — Diff 탭 (R2-B.2)
+- **Given** Inspector 오픈
+- **When** `Diff` 탭 클릭
+- **Then**
+  - GET `/api/runs/:id/diff` lazy fetch (탭 활성화 시 첫 요청, in-flight dedup 됨)
+  - 활성 상태 동안 5초마다 자동 polling
+  - 응답 shape `{ diff, truncated?, empty?, reason?, error? }`
+  - **worktree 있음 + 변경 있음**: `<pre class="run-diff-pre">` 에 colorized diff (`diff-add` 초록 / `diff-del` 빨강 / `diff-hunk` / `diff-file`). +/- 라인은 색상 span 으로 분리됨
+  - **worktree 있음 + 변경 없음**: 빈 상태 "No uncommitted changes in the worktree."
+  - **worktree 없음**: 빈 상태 "This run did not create an isolated git worktree." (response `reason: 'no_worktree'`)
+  - **worktree 디렉토리 사라짐**: "Worktree directory no longer exists (it may have been cleaned up)." (`reason: 'worktree_missing'`)
+  - **git 실패**: "Could not compute diff." (`reason: 'git_failed'` 또는 `'fetch_failed'`)
+  - **1 MiB 초과**: 상단에 `⚠ Diff truncated at 1 MiB — showing the first portion only.` 경고 배너 + 잘린 diff 표시
+- **Security**: worktree path 가 project 디렉토리 바깥이면 400 (`reason: 'worktree_outside_project'`). symlink 도 realpath 로 검증 후 비교
+- **Coverage**: `server/routes/runs.js` `/diff` route + `RunInspector.js` 의 `splitDiffLines` + tab effect
+
+### INS-07 — Costs 탭 (R2-B.3)
+- **Given** Inspector 오픈
+- **When** `Costs` 탭 클릭
+- **Then**
+  - **Worker run (is_manager=0) + cost_usd 또는 토큰이 있음**: 헤드라인에 `runs.cost_usd` (예: `$0.0123`) + 입출력 토큰 표시
+  - **Manager run (is_manager=1)**: worker cost 카드는 숨기고 Manager Usage breakdown 만 표시 (cached input / turn count 포함). Manager 는 행 단위 cost 와 event-level 합계가 동일하므로 중복 표시 방지
+  - **양쪽 모두 0/없음 (OpenCode / `cost_usd IS NULL`)**: 빈 상태 "Cost data not available for this adapter"
+  - 데이터 출처: worker = `runs.cost_usd` + `runs.input_tokens` + `runs.output_tokens` (Claude Code stream-json `result.total_cost_usd` 에서 persist), manager = `mgr.usage` 이벤트들을 `aggregateManagerUsage(events)` 로 합산
+  - manager-side usage 는 10초마다 별도 polling (`costEvents` snapshot)
+- **Coverage**: `RunInspector.js` `aggregateManagerUsage` + tab render
 
 ---
 
@@ -249,6 +286,16 @@
 - **Given** Top 매니저 active, 프로젝트 최소 1개 존재 (pm_enabled=1)
 - **Then** chat header 에 `Conversation target` 셀렉트가 나타나고 옵션이 `Top manager` + 모든 활성 프로젝트 목록 (`@<projectName>` 또는 `@<projectName> · active`)
 - **Note**: Top 이 idle 이면 셀렉트는 노출되지 않음
+
+### MGR-10 — Manager 가 기본 랜딩 (R2-C.3)
+- **Given** 새 브라우저 탭에서 `http://localhost:4177/` 진입 (URL 에 hash 없음)
+- **When** SPA 부팅 완료
+- **Then**
+  - `useRoute()` 의 `DEFAULT_ROUTE = 'manager'` 적용 → `routeBase === 'manager'` → `<ManagerView>` 렌더
+  - 사이드바 NAV 의 `Manager` 항목이 active 상태 (이전: `Dashboard` 가 default)
+  - 직접 `#dashboard`/`#board` 등 명시 hash 로 진입한 사용자는 영향 없음 (`location.hash.slice(1)` 그대로 반환)
+  - Sidebar 에서 `Dashboard` 클릭 시 정상 이동 — 제거된 것이 아니라 첫 진입 surface 만 변경
+- **Note**: 변경 위치는 `server/public/app/lib/hooks/routing.js`. 사용자 bookmark 는 hash 보존이므로 break 없음
 
 ---
 
@@ -569,6 +616,199 @@
 
 ---
 
+## 6.9. MCP Server Templates / Legacy alias detection (MCP) — M1/M2/B3/M3
+
+### MCP-01 — Worker 경로 mcp:legacy_alias_conflict event (M2)
+- **Given** Codex worker preset 이 `mcp_server_ids: [tpl_ctx7]` (alias `ctx7`) 를 포함하고, 사용자의 `~/.codex/config.toml` 에 이미 `[mcp_servers.ctx7]` 또는 `mcp_servers.ctx7.command = ...` 가 존재. (테스트 환경에서는 `PALANTIR_CODEX_CONFIG_PATH` 로 override 가능)
+- **When** `POST /api/tasks/:id/execute` 로 Codex worker spawn
+- **Then**
+  - spawn **전에** `lifecycleService` 가 `scanCodexUserConfigAliases` + `detectLegacyAliasConflicts` 실행
+  - 충돌 alias 1개당 `mcp:legacy_alias_conflict` run event 1개 emit (`runs.run_events` 테이블)
+  - payload shape **고정**: `{ alias, source, message }`
+    - `source` 는 mergeMcp3 precedence 기준 (`preset` > `project` > `skillpack` > `unknown`)
+    - `message` 는 `alias "<alias>" (source: <src>) already exists in <resolvedConfigPath> — Codex will leaf-merge ...`
+  - **annotate-only**: 이벤트 emit 후에도 spawn 은 정상 진행 (Codex CLI 가 leaf-merge 하므로 worker 자체는 동작). flatten 실패가 아닌 단순 alias 충돌은 fail-closed 가 아님
+  - Inspector → Events 탭에 노출됨
+
+### MCP-02 — PM 경로 mcp:legacy_alias_conflict event (M2)
+- **Given** PM preset / project 가 mcpConfig 를 보유하고, 동일 alias 가 `~/.codex/config.toml` 에 이미 존재. PM lazy spawn 발생 시점
+- **When** `pmSpawnService.ensureLivePm` → `codexAdapter.startSession({ mcpConfig })` 호출
+- **Then**
+  - `startSession` 내부에서 첫 turn spawn **전에** scan 실행
+  - source 는 PM 경로에서는 사전 분리가 불가능하므로 항상 `source: 'pm_config'` 로 고정
+  - 충돌 alias 1개당 `mcp:legacy_alias_conflict` event emit (PM run 의 `run_events`)
+  - resume 경로 (`resumeThreadId` 가 set 된 케이스) 에서도 동일하게 동작 — startSession 호출마다 1회 scan
+  - 이벤트 emit 실패는 spawn 을 막지 않음 (`try/catch` 로 swallow + warn)
+
+### MCP-03 — `~/.codex/config.toml` 누락 / 읽기 실패는 충돌 0건
+- **Given** 사용자 config 파일이 존재하지 않거나 권한 부족
+- **When** Codex worker / PM spawn
+- **Then** `scanCodexUserConfigAliases` 가 `[]` 반환 → conflicts 0건 → 이벤트 emit 없음, spawn 정상 진행 ("no data" = "no conflict" 원칙)
+
+### MCP-04 — alias detection 패턴 커버리지
+- **When** TOML 에 다음 형태들이 섞여 있다
+  - `[mcp_servers.ctx7]` (bare table header)
+  - `[ mcp_servers.deep ]` (whitespace 포함)
+  - `[mcp_servers."graphify"]` (quoted key)
+  - `mcp_servers.bingo.command = "npx"` (dotted root key)
+  - `mcp_servers."pm-bot".args = []` (dotted + quoted)
+- **Then** `extractAliasesFromToml` 이 `['ctx7', 'deep', 'graphify', 'bingo', 'pm-bot']` 반환 (등장 순서 dedup, 첫 출현 기준)
+- **NOT covered (acceptable blind spots)**: bare `[mcp_servers]` 블록 안의 inline table, 중첩 quoted sub-key. False positive 는 추가 경고 1회 비용으로 끝나며 spawn 실패는 발생하지 않음
+- **Coverage**: `server/tests/codex-user-config-scan.test.js`
+
+### MCP-05 — `npm run diagnose:mcp` 기본 실행 (B3)
+- **Given** `palantir.db` 에 worker_presets 와 mcp_server_templates 가 있고, `~/.codex/config.toml` 에 일부 alias 가 등록됨
+- **When** 터미널에서 `npm run diagnose:mcp` (또는 `node scripts/diagnose-mcp-conflicts.mjs`)
+- **Then**
+  - **spawn 0회** — 어떤 worker / PM 도 띄우지 않고 read-only 로 DB + user config 만 조회
+  - 출력에 다음 섹션 등장:
+    1. `User config` — resolved path + alias list (또는 `(empty)`)
+    2. `Presets (N)` — 각 preset 1줄, `●` 마커 (충돌이면 빨강 / 없으면 초록), `name [id] — N conflicts` 또는 `clean`
+       - 충돌 시 `conflicts with user config: <alias1>, <alias2>` 이어서 표시
+       - clean alias 도 dim 색으로 표기
+    3. `Summary` — total presets / conflicting presets / user-config aliases / aggregated conflict aliases
+  - 충돌이 1개 이상 → 노란색 `Note: at runtime these presets will emit mcp:legacy_alias_conflict events.` 안내
+  - 충돌 0개 → 초록색 `No conflicts. All presets are independent of the user config.`
+  - exit code: **0** (단순 실행 성공)
+- **Note**: `--db <path>` / `--config <path>` 로 위치 override 가능. DB 가 없거나 `mcp_server_templates` / `worker_presets` 테이블이 없으면 fatal error + exit 1 (`required table "<name>" missing or unreadable in <db>` 메시지) — "DB has no tables" 와 "DB has no presets" 를 구분 (조용한 false negative 금지)
+
+### MCP-06 — `--fail-on-conflict` exit code (B3)
+- **Given** MCP-05 시나리오에서 conflict 가 1개 이상
+- **When** `npm run diagnose:mcp -- --fail-on-conflict` (또는 `node scripts/diagnose-mcp-conflicts.mjs --fail-on-conflict`)
+- **Then**
+  - 출력은 동일
+  - `process.exitCode = 2` 로 종료 (CI gate 용)
+  - 충돌이 0이면 exit code 0 유지
+- **Coverage**: `scripts/diagnose-mcp-conflicts.mjs` 끝부분
+
+### MCP-07 — `--json` 머신 출력 (B3)
+- **When** `npm run diagnose:mcp -- --json`
+- **Then**
+  - stdout 에 단일 JSON 객체:
+    ```json
+    {
+      "userConfig": { "path": "<resolvedConfigPath>", "aliases": [...] },
+      "presets": [
+        { "id": "<preset_id>", "name": "<name>", "conflicts": [...], "clean": [...] },
+        ...
+      ],
+      "summary": {
+        "totalPresets": N,
+        "totalTemplates": M,
+        "conflictingPresets": K,
+        "aggregatedConflictAliases": [...]
+      }
+    }
+    ```
+  - ANSI 색상 코드 없음 (TTY 여부 무관). pipeable 출력 보장 (`process.exitCode` + 자연 종료로 truncation 방지)
+
+### MCP-08 — MCP Servers 탭 — 새 템플릿 생성 (M3)
+- **Given** `#mcp-servers` 페이지 (NavSidebar `MCP Servers` 클릭). 페이지 타이틀 `MCP Servers`
+- **When** `+ New MCP Server` 버튼 클릭 → 모달 제목 `New MCP Template`, alias `graphify`, command `npx`, args `["-y", "@graphify/mcp"]`, allowed env keys `GRAPHIFY_ROOT, LOG_LEVEL`, description 입력 후 Create
+- **Then**
+  - POST `/api/mcp-server-templates` → 201, body `{ template: {...} }`
+  - 목록에 새 템플릿 row 등장 (alias 알파벳 정렬)
+  - 새로고침해도 유지
+
+### MCP-09 — MCP Templates — alias / args / env 검증
+- **When** alias 가 빈 문자열 / 잘못된 패턴 (`^[A-Za-z0-9_-]+$` 위반) → POST 400
+- **When** alias 가 이미 존재 → 409 `alias already exists: <alias>`
+- **When** args 가 JSON array 가 아니면 → 400 `args must be valid JSON array` 또는 `args must be an array of strings`
+- **When** allowed_env_keys 에 globally-denied 키 (예: `*_KEY`, `NODE_OPTIONS`, `PATH`) → 400 `allowed_env_keys contains a globally-denied key: '<key>'`
+- **When** command 가 비어있거나 양끝 whitespace 포함 → 400 (`command is required` 또는 `command must not have leading or trailing whitespace`)
+- **When** args JSON 의 UTF-8 byte 길이가 **4096 byte (4 * 1024)** 초과 → 400 `args JSON exceeds 4096 byte limit`
+
+### MCP-10 — MCP Templates — alias 는 immutable (M3)
+- **Given** 기존 템플릿 `tpl_xxx` (alias `ctx7`)
+- **When** 카드 Edit → modal 오픈
+- **Then**
+  - alias input 이 `disabled` 상태 + 하단에 안내 문구 `Alias is immutable — skill packs reference templates by this name.`
+  - command / args / env / description 만 편집 가능
+  - PATCH body 에서 alias 키 제외 후 전송
+  - **만약** 직접 PATCH `/api/mcp-server-templates/:id { alias: 'newname' }` 호출 → 400 `alias is immutable (skill packs reference templates by alias — rename would orphan bindings)` (단, 같은 alias 를 echo 하는 no-op PATCH 는 허용)
+  - command/args/allowed_env_keys/description 가 실제로 변하지 않은 no-op PATCH 는 `updated_at` 도 bump 되지 않음 → RunInspector `mcp_template_drift` 에 false positive 안 생김
+- **Coverage**: `mcpTemplateService.updateTemplate`, `mcp-template.service.test.js`
+
+### MCP-11 — MCP Templates — 참조 있는 템플릿 삭제 차단 (M3)
+- **Given** 템플릿 `tpl_xxx` 가 worker preset 또는 skill pack 에서 참조 중
+- **When** Delete 버튼 클릭 → DeleteConfirm 모달 오픈
+- **Then**
+  - 모달 진입 시 GET `/api/mcp-server-templates/:id/references` 호출 → `{ references: { presets: [...], skillPacks: [...] } }`
+  - 참조 있으면 모달에 amber 배너 `In use` + `Presets: <name1>, <name2>` / `Skill packs: <name1>` 목록
+  - Delete 버튼 `disabled` (UI 사전 차단)
+  - 사용자가 강제 DELETE 호출 시 → 409 `Template in use: N preset(s), M skill pack(s). Remove references first.` + response body 의 `details: { presets, skillPacks }` 노출
+- **When** 참조 모두 제거 후 DELETE
+- **Then** 200 + 카드 사라짐
+- **Coverage**: `mcp-template.route.test.js` (`DELETE blocks when preset references template`, `DELETE blocks when skill pack references template by alias`, `DELETE succeeds after references removed`)
+
+---
+
+## 6.10. Manager Summary + Suggested Actions (MGRSUM) — R2-C
+
+### MGRSUM-01 — `/api/manager/summary` 빈 DB 응답
+- **Given** worker run 이 0개
+- **When** `GET /api/manager/summary`
+- **Then** 200 + `{ active: 0, needs_input: 0, failed: 0, completed_today: 0, total_cost_today: 0 }`
+
+### MGRSUM-02 — `/api/manager/summary` 혼합 상태 집계
+- **Given** worker run 5개: `running` × 2, `needs_input` × 1, `failed` × 1, `completed` × 1 (오늘 created), `cost_usd` 가 있는 run 2개 합계 0.0345
+- **When** `GET /api/manager/summary`
+- **Then** 응답 shape:
+  - `active = 3` (running + needs_input)
+  - `needs_input = 1`
+  - `failed = 1`
+  - `completed_today = 1` (today 기준, **로컬 타임존 자정** — `Date()` 로 local midnight 계산)
+  - `total_cost_today = 0.0345` (오늘 created 인 모든 run 의 `cost_usd` 합산. status 무관 — running/failed/needs_input 도 billable token 누적)
+
+### MGRSUM-03 — Manager run 은 집계에서 제외 (`is_manager=1`)
+- **Given** Top manager run 1개 (running) + worker run 1개 (running)
+- **When** `GET /api/manager/summary`
+- **Then** `active = 1` (worker only). Manager 행은 ManagerChat header 에 별도 표시되므로 summary 에서 중복 카운트 금지
+
+### MGRSUM-04 — `cost_usd IS NULL` 안전 처리
+- **Given** 오늘 run 들 중 일부가 `cost_usd = NULL` (OpenCode 또는 cost emit 안 한 adapter)
+- **When** `GET /api/manager/summary`
+- **Then** `total_cost_today` 는 NULL/NaN/Infinity 를 모두 0 으로 취급 (`Number.isNaN`/`Number.isFinite` 가드). 합계는 유효 숫자만 누적
+- **Coverage**: `server/tests/manager-summary.test.js`
+
+### MGRSUM-05 — SuggestedActions — needs_input 1개 (`Agent-X 에게 응답`)
+- **Given** Top manager active, worker run 1개가 `needs_input` (agent_name `Smoke Agent`)
+- **Then** ManagerChat 입력란 위에 chip 1개: `⏸ Smoke Agent 에게 응답` (icon = `SUGGESTED_ICON.respond = '⏸'`, AttentionStrip / nav badge 와 동일 glyph)
+- **When** chip 클릭
+- **Then** 해당 worker run 으로 `RunInspector` slide-over 오픈 (chat 메시지로 보내는 게 아니라 inspector 진입)
+
+### MGRSUM-06 — SuggestedActions — needs_input 다수 (head + 외 N명)
+- **Given** worker run 3개 모두 `needs_input`
+- **Then** chip label 은 `<head agent_name> 에게 응답 (외 2명)` — 1개만 다루면 오해 소지가 있어 명시
+- **When** chip 클릭
+- **Then** 첫 번째 (head) run 의 RunInspector 만 오픈. 나머지는 AttentionStrip / SessionGrid 에서 후속 처리
+
+### MGRSUM-07 — SuggestedActions — failed 재시도 chip
+- **Given** worker run 중 `failed` 1개 이상
+- **Then** chip `✗ <head> 재시도` 또는 `✗ <head> 재시도 (외 N개)` 표시 (icon = `SUGGESTED_ICON.retry = '✗'`)
+- **When** chip 클릭 → 해당 RunInspector 오픈 (현재는 inspector 안에서 사용자가 retry — backend 자동 retry 엔드포인트 없음)
+
+### MGRSUM-08 — SuggestedActions — 모두 idle + 이력 있음
+- **Given** `needs_input` / `failed` / `running` 모두 0, 단 worker run 이력 (completed/cancelled/stopped) 1개 이상 존재
+- **Then** chip 2개: `◉ 상태 요약` + `✦ 새 작업 시작` (icons = `SUGGESTED_ICON.summary = '◉'`, `SUGGESTED_ICON.new = '✦'`)
+- **When** `상태 요약` 클릭
+- **Then**
+  - input box 에 `status` 자동 입력
+  - 다음 frame 에서 `submitSuggestion('status')` 자동 호출 → ManagerChat 의 send path
+  - rapid double-click / Enter 동시 입력 시에도 정확히 1번만 send (`submittingRef` + `setSending(true)` 양면 가드)
+
+### MGRSUM-09 — SuggestedActions — 처음 사용 (run 0개)
+- **Given** worker run 자체가 0개
+- **Then** chip 1개만 표시: `✦ 새 작업 시작` (`상태 요약` 은 misleading 이라 숨김)
+- **When** chip 클릭
+- **Then** 입력란 focus, 텍스트 미변경 (placeholder 만 노출)
+
+### MGRSUM-10 — SuggestedActions — Manager 비활성 시 미표시
+- **Given** Top manager 가 idle 상태 (`status.active === false`)
+- **Then** SuggestedActions strip 자체가 렌더되지 않음 (session-idle 화면이 start 버튼을 책임짐)
+
+---
+
 ## 7. Dashboard 트리아지 (DSH)
 
 ### DSH-01 — All clear
@@ -586,6 +826,72 @@
 ### DSH-04 — Done Today 카운트
 - **Given** 오늘 completed run 5개, 어제 10개
 - **Then** "Done Today: 5"
+
+### DSH-05 — triage-feed 가 ManagerView 변경에도 살아있음 (Attention 분리 회귀 가드)
+- **Given** R2-A 가 AttentionStrip 을 ManagerView 우측 패널에 추가했지만
+- **When** Dashboard 페이지로 이동
+- **Then**
+  - `DashboardView.triage-feed` 가 그대로 렌더됨 (manager / running / review / overdue / due-soon 까지 포함하는 superset)
+  - 빈 상태일 때 "All clear. No items need attention." 표시 — 숨김 아님 (AttentionStrip 와 의도적으로 다른 동작)
+  - DriftDrawer 배지, Active Claude Sessions 카운트 등 Dashboard 의 모든 위젯 유지
+- **Note**: AttentionStrip 은 needs_input + failed 만 다루는 attention-only projection. triage-feed 와 둘 다 존재. 하나가 다른 하나를 대체하는 게 아님
+
+---
+
+## 7.5. Attention Surface (ATT) — R2-A
+
+### ATT-01 — AttentionBadge 가 needs_input + failed 카운트 (R2-A.1)
+- **Given** worker run 중 `needs_input` 2개 + `failed` 1개 + `running` 5개 + Top manager run 1개 (`is_manager=1`, status `running`)
+- **When** 임의 페이지 (Dashboard / Manager / Board 등) 진입
+- **Then**
+  - NavSidebar 우하단 (status dot 위쪽) `attention-badge` 버튼 노출, 라벨 `3` (= 2 + 1)
+  - `is_manager=1` 행은 카운트에서 제외 (worker only)
+  - 카운트 1~9 = 그대로 숫자, 10 이상 = `9+`
+  - title / aria-label = `주의 필요: 3건 (needs_input + failed)`
+  - 클릭 시 `navigate('manager')` → ManagerView 로 이동
+
+### ATT-02 — AttentionBadge — 빈 상태 hide
+- **Given** worker 중 `needs_input` / `failed` 가 0개
+- **Then** AttentionBadge 자체가 렌더되지 않음 (DOM 에 없음 — `null` 반환). triage-feed 의 "All clear" empty state 와 의도적으로 다름
+
+### ATT-03 — AttentionBadge — 카운트 변화 시 pulse 애니메이션
+- **Given** 사용자가 ManagerView 보고 있고 attention count 0
+- **When** 새 worker 가 `needs_input` 으로 전환 (SSE `run:needs_input`) → count 1 로 증가
+- **Then**
+  - `attention-badge` 가 `badge-pulse 2s ease-in-out infinite` CSS 애니메이션으로 강조 (count 가 0→1 이 되자마자 DOM 에 mount 되면서 애니메이션 시작)
+  - OS 알림은 **브라우저 알림 권한이 `granted` 일 때만** 발화 (`showBrowserNotification` 가 `Notification.permission === 'granted'` 가드). default/denied 상태면 알림 없음
+  - 탭 타이틀 pulse 는 **탭이 unfocus 상태일 때만** 발화 (`pulseTabTitle` 가 `document.hasFocus()` true 면 early return). 사용자가 이미 같은 탭에 focus 되어 있으면 title 은 그대로 유지 (의도된 UX)
+- **Note**: 배지의 pulse 는 `runs` SSE 재로드로 derive 된 count 기반이므로 알림 권한/탭 focus 여부와 무관하게 항상 표시됨
+
+### ATT-04 — AttentionStrip 표시 (ManagerView 우측 패널) (R2-A.2/A.3)
+- **Given** worker run 중 `needs_input` 1개 (task title `auth bug 수정`) + `failed` 1개 (task title `lint warning`), Top manager active
+- **When** Manager 페이지 진입
+- **Then**
+  - SessionGrid 의 `manager-grid-body` 최상단에 `<div class="attention-strip" role="region" aria-label="Attention — needs input and failed runs">` 등장
+  - 순서: `needs_input` bucket 이 `failed` bucket 보다 먼저 (status 기준 우선순위 고정)
+  - 같은 bucket 내부는 `updated_at`/`created_at` 로 정렬 시도하지만 SQLite datetime 문자열끼리 숫자 비교를 하므로 실제로는 `runs` 배열의 원래 순서에 수렴 (결과적으로 같은 bucket 내 항목 순서는 서버가 runs 를 반환한 순서에 의존 — 관찰 가능한 불변 속성은 bucket 우선순위 하나뿐)
+  - 각 row 에 status icon (`⏸` / `✗`) + title + meta (`입력 대기 · 5분 전` / `실패 · 12분 전`) + inline action 버튼 (`응답하기` / `재시도`)
+  - row 또는 inline action 버튼 클릭 시 `RunInspector` slide-over 오픈 (event.target 에 `.attention-action` 포함되면 outer click 무시 — double-fire 방지)
+  - 항목 5개 초과 시 `+N more` 버튼으로 expand, expand 상태에서 `접기` 토글
+  - **manager run (is_manager=1) 은 strip 에서 제외**
+
+### ATT-05 — AttentionStrip — 빈 상태 hide (spec §12.1)
+- **Given** worker 중 `needs_input`/`failed` 모두 0
+- **Then** `<AttentionStrip>` 컴포넌트가 `null` 반환 → DOM 에 영역 없음 (Dashboard `triage-feed` 의 "All clear" 와 의도적으로 다른 동작)
+- SessionGrid 의 다른 영역 (Manager Session row, project groups) 은 그대로 표시
+
+### ATT-06 — Attention 의 Dashboard triage-feed 회귀 0건
+- **Given** R2-A merge 이후
+- **When** Dashboard 진입
+- **Then**
+  - `triage-feed` 컴포넌트가 그대로 동작 (DSH-01~04 시나리오 모두 PASS)
+  - needs_input + failed 가 triage-feed 에서도 동시 노출됨 — Dashboard 사용자가 ManagerView 가지 않아도 attention 항목 확인 가능
+  - AttentionStrip 가 ManagerView 에 추가됐지만 triage-feed 는 제거되지 않음
+
+### ATT-07 — AttentionBadge → Manager 라우팅 + AttentionStrip 노출 일관성
+- **Given** ATT-01 의 카운트 3 상태
+- **When** AttentionBadge 클릭 → ManagerView 진입
+- **Then** ManagerView 우측 SessionGrid 최상단의 AttentionStrip 에서 동일 3개 항목 (needs_input 2 + failed 1) 표시 — badge 카운트와 strip 항목 수 항상 일치 (`!is_manager && (needs_input || failed)` 동일 필터)
 
 ---
 
@@ -767,8 +1073,8 @@
 
 ### KBD-04 — Command Palette에서 숫자키로 빠른 뷰 전환
 - **Given** Command Palette 열림
-- **When** 숫자키 1~N (N = `NAV_ITEMS.length`, 현재 7)
-- **Then** NAV_ITEMS 순서대로 해당 뷰로 전환 (1=Dashboard, 2=Manager, 3=Task Board, 4=Projects, 5=Agents, 6=Skill Packs, 7=Presets — `NAV_ITEMS.length`만큼 매핑). 숫자키는 검색 query 가 비어있을 때만 동작 (타이핑 충돌 방지)
+- **When** 숫자키 1~N (N = `NAV_ITEMS.length`, 현재 8 — M3 에서 `MCP Servers` 추가)
+- **Then** NAV_ITEMS 순서대로 해당 뷰로 전환 (1=Dashboard, 2=Manager, 3=Task Board, 4=Projects, 5=Agents, 6=Skill Packs, 7=Presets, 8=MCP Servers — `NAV_ITEMS.length`만큼 매핑). 숫자키는 검색 query 가 비어있을 때만 동작 (타이핑 충돌 방지)
 
 ---
 
@@ -1030,15 +1336,20 @@
 - **supertest + node:test**:
   - Core: `PRJ`, `TSK` API, `RUN` 상태머신, `AUTH`, `MGR-04/06/07/08`, `TRS`, `FS`, `USG`, `CLS`, `SES`
   - v3: `CONV-01~08`, `PM-01/05/06/07/08`, `ROUTER-01~08`, `DRIFT-01~11`, `SSE-04~07` — fake adapter 주입 + 임시 SQLite 로 전부 커버
+  - M2/M3/B3/R2-C: `MCP-01~04` (M2 scan/event), `MCP-05~07` (B3 diagnose CLI), `MCP-08~11` (M3 template CRUD), `MGRSUM-01~04` (summary aggregation)
   - 실제 테스트 파일 매핑:
     - `CONV-*` → `server/tests/conversation.test.js`
     - `PM-*` → `server/tests/pm-phase3a.test.js`
     - `ROUTER-*` → `server/tests/router.test.js`
     - `DRIFT-*` → `server/tests/reconciliation.test.js`
     - `SSE-04~07` → `server/tests/phase5-sse-semantics.test.js`
+    - `MCP-04` → `server/tests/codex-user-config-scan.test.js`
+    - `MCP-08~11` → `server/tests/mcp-template.route.test.js` + `mcp-template.service.test.js`
+    - `MGRSUM-01~04` → `server/tests/manager-summary.test.js`
 - **Playwright (격리 포트 4188 + 임시 DB 권장, prod 4177 금지)**:
   - 기존: `TSK-03~07`, `BRD-02/04`, `INS-01~03`, `KBD`, `SSE-02`, sessions/trash/dir picker UI
-  - v3: `MGR-09` (드롭다운 노출), `PM-02/06/09` (실제 Codex CLI 경유 lazy spawn / Reset / 멀티 PM), `DRIFT-12~17` (badge, drawer, per-PM, dismiss/restore, Esc), `ROUTER-09/10` (UI 라우터 fail-closed)
+  - v3: `MGR-09` (드롭다운 노출), `MGR-10` (Manager 기본 랜딩), `PM-02/06/09` (실제 Codex CLI 경유 lazy spawn / Reset / 멀티 PM), `DRIFT-12~17` (badge, drawer, per-PM, dismiss/restore, Esc), `ROUTER-09/10` (UI 라우터 fail-closed)
+  - R2-A/B/C: `INS-05` (slide-over 위치/포커스), `INS-06` (Diff 탭 worktree 케이스), `INS-07` (Costs 탭 OpenCode 빈 상태), `ATT-01~07` (badge 카운트/hide/pulse + strip 표시/숨김 + 회귀), `MGRSUM-05~10` (SuggestedActions UI flow)
 - **자동화 부적합 (LLM 의존)**:
   - `MGR-02` (Top 응답 내용)
   - `MGR-05` (LLM 이 실제로 worker 를 spawn 하는지)
