@@ -1,9 +1,11 @@
 # Skill Pack Gallery v1.1 — Install from URL
 
-> Version 1.1-rc1 | 2026-04-14
-> Status: **Draft — pending Codex cross-review**
+> Version 1.1 | Draft 2026-04-14 → **Final (locked in 2026-04-24)**
+> Status: **Final — locked in 2026-04-24 (R1 spec ↔ implementation lock-in PR)**
 > Supersedes: [skill-pack-gallery.md](./skill-pack-gallery.md) §Stage 2 only. Stage 1 (Bundled Registry + Gallery UI) remains unchanged.
 > 관련 문서: [skill-packs.md](./skill-packs.md), [../../CLAUDE.md](../../CLAUDE.md)
+
+> **Lock-in 이후 변경 규칙**: 이 문서는 R1 lock-in 시점의 실구현을 정규 명세로 고정한다. 이후 spec 변경은 반드시 (1) 새 PR 에서 code + spec + test 를 함께 변경, (2) Review Log 에 새 Round 를 추가, (3) PR 리뷰에서 이 문서를 참조하는 방식으로만 수행한다. `source_url` / 보안 파이프라인 / preview token / origin_type 을 건드리는 변경은 보안 리뷰어 승인 필수.
 
 ---
 
@@ -259,71 +261,95 @@ Step 3: content hash (SHA-256) 계산 + 반환/저장.
 
 ### 6.3 DB 스키마 변경
 
-**Migration 017_skill_pack_source_url.sql**:
+**Migration 017_skill_pack_source_url.sql** (shipped):
 
 ```sql
 -- URL install provenance + explicit origin typing
-ALTER TABLE skill_packs ADD COLUMN source_url TEXT;            -- canonicalized HTTPS URL
+ALTER TABLE skill_packs ADD COLUMN source_url TEXT;            -- full canonical URL (query included), server-only, never rendered in UI
+ALTER TABLE skill_packs ADD COLUMN source_url_display TEXT;    -- query/fragment stripped canonical, safe to render in UI/logs
 ALTER TABLE skill_packs ADD COLUMN source_hash TEXT;           -- SHA-256 hex of fetched bytes
 ALTER TABLE skill_packs ADD COLUMN source_fetched_at TEXT;     -- ISO8601
-ALTER TABLE skill_packs ADD COLUMN origin_type TEXT NOT NULL DEFAULT 'manual'
-  CHECK (origin_type IN ('bundled', 'url', 'manual', 'import'));
+ALTER TABLE skill_packs ADD COLUMN origin_type TEXT NOT NULL DEFAULT 'manual';
+
+-- Lossy reclassification: rows whose registry_id starts with 'core/' or 'community/'
+-- are promoted to origin_type = 'bundled'. All other pre-existing rows remain 'manual'.
+UPDATE skill_packs
+SET origin_type = 'bundled'
+WHERE (registry_id LIKE 'core/%' OR registry_id LIKE 'community/%')
+  AND source_url IS NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_skill_pack_source_url
   ON skill_packs(source_url) WHERE source_url IS NOT NULL;
 ```
 
-기존 row 마이그레이션 (**lossy — 역사적 정확도 불가**):
-- v1.0 / pre-v1.1 에는 `origin_type` 컬럼이 없었고, bundled install 과 import 경로 모두 `registry_id` 를 가질 수 있어 **registry_id 만으로 두 출처를 구분할 수 없다**.
-- 보수적 규칙 적용: 모든 기존 row 를 `origin_type = 'manual'` (CHECK constraint default) 로 분류한다.
-- 예외: v1.0 bundled install 경로가 `registry_id` 를 `core/...` 또는 `community/...` prefix 로 강제하고 있고, 수동/import 경로가 그 prefix 를 쓰지 않았다면 `registry_id LIKE 'core/%' OR registry_id LIKE 'community/%'` 조건을 추가해 해당 row 만 `'bundled'` 로 설정할 수 있다 (구현 시 코드베이스 확인 후 결정).
-- **Safe default**: 애매하면 `'manual'`. 사용자는 나중에 편집 UI 에서 origin 을 재분류하거나, bundled registry 로부터 재-install 할 수 있다.
-- JSON import 경로는 향후 신규 팩 생성 시 `origin_type = 'import'` 로 저장 (routes/skillPacks.js 의 `POST /api/skill-packs/import` 에서 강제).
+**Migration 021_skill_pack_origin_type_check.sql** (R1 2026-04-24 lock-in followup):
 
-**주의**: 이 마이그레이션은 lossy 로 선언됨. Review log 에 명시하고, `docs/specs/skill-pack-gallery-v1.1.md` 이후의 어떤 origin_type 추론도 이 lossy 전환을 가정해야 한다.
+Migration 017 cannot attach a `CHECK (origin_type IN (...))` to a column added via `ALTER TABLE` without a full table rebuild. 021 enforces the enum via BEFORE INSERT/UPDATE triggers that `RAISE(ABORT, ...)` on any value outside `{ bundled, url, manual, import }`. This is the DB-layer enforcement Lock-in #9 promises — the CHECK-via-trigger shape is an implementation detail; any rejection semantics (bad INSERT aborts with a clear error) match the CHECK spec exactly.
+
+```sql
+CREATE TRIGGER trg_skill_packs_origin_type_insert_check
+  BEFORE INSERT ON skill_packs
+  WHEN NEW.origin_type NOT IN ('bundled','url','manual','import')
+BEGIN SELECT RAISE(ABORT, 'origin_type must be one of: bundled, url, manual, import'); END;
+-- symmetric trigger for BEFORE UPDATE OF origin_type
+```
+
+**기존 row 마이그레이션 (lossy — 역사적 정확도 불가, shipped as migration 017 `UPDATE ...` above)**:
+- v1.0 / pre-v1.1 에는 `origin_type` 컬럼이 없었고, bundled install 과 import 경로 모두 `registry_id` 를 가질 수 있어 **registry_id 만으로 두 출처를 구분할 수 없다**.
+- 구현된 규칙 (migration 017 UPDATE): `registry_id LIKE 'core/%' OR registry_id LIKE 'community/%'` + `source_url IS NULL` 인 row 를 `'bundled'` 로 승격. 그 외 pre-existing row 는 `'manual'` (default) 로 남음.
+- **lossy 구간**: v1.0 경로에서 `core/` / `community/` prefix 없이 bundled 로 들어간 row 가 있다면 `'manual'` 로 남아 오분류됨. 사용자는 편집 UI 에서 origin 을 재분류하거나, bundled registry 로부터 재-install 할 수 있다.
+- JSON import 경로는 신규 팩 생성 시 `origin_type = 'import'` 로 저장 (routes/skillPacks.js 의 `POST /api/skill-packs/import` 에서 강제).
+- 모든 origin_type 추론 로직은 이 lossy 전환을 가정해야 한다.
+
+**server-only 컬럼** (security):
+- `source_url` 은 query string 포함 전체 canonical URL 을 저장. API response / UI / 로그 어디에도 절대 렌더되지 않음 — `routes/skillPacks.js` 의 `sanitizePack()` 가 모든 응답에서 strip 한다. Unique index + server-side re-fetch 전용.
+- `source_url_display` 는 `https://<host><pathname>` (query/fragment 제거) 만 저장 — UI 카드 배지, 툴팁, 로그, preview modal 의 provenance 섹션, install/check-update response 페이로드에 사용.
 
 Partial unique index 로 URL 중복 방지 (비-URL 팩은 `source_url IS NULL` 이라 영향 없음).
 
 ### 6.4 서비스 계층 변경
 
-**`registryService.js` 재작성**:
+**`registryService.js`**:
 
-- 제거: `refreshRemoteRegistry` (central stub), central URL 관련 전부
 - 유지: `getRegistry`, `getRegistryPack` (bundled-only)
-- 신규: `fetchPackFromUrl(url)` → Promise<{ pack, hash }>
+- 신규: `fetchPackFromUrl(rawUrl)` → `Promise<{ canonicalUrl, displayUrl, pack, hash }>`
   - Step 0~3 전체 수행 (SSRF 방어, fetch, parse, hash)
-  - 예외 시 BadRequestError w/ specific code (`ssrf_blocked` / `timeout` / `too_large` / `invalid_json`)
+  - 예외 시 status+code 부착된 Error (`ssrf_blocked` / `timeout` / `too_large` / `invalid_json` / `invalid_scheme` / `invalid_port` / `userinfo_forbidden` / `dns_failed` / `too_many_redirects` / `upstream_error` / `invalid_content_type` / `invalid_redirect` / `fetch_failed` / `invalid_url` / `invalid_schema`)
+- 신규: `issuePreviewToken(bindingKey, hash)` / `consumePreviewToken(token, expectedBindingKey, expectedHash)` — in-memory 24-byte hex, TTL 5분, LRU 1000, 1-shot consume. `bindingKey` 는 `"url:<canonicalUrl>"` 또는 `"pack:<packId>"`.
+- 보존된 stub: `refreshRemoteRegistry()` — v1.0 중앙 registry API 의 deprecated no-op. `{ refreshed: false, reason: 'deprecated_in_v1_1' }` 반환. 신규 작성 금지, 기존 API back-compat 용. (§6.5 참조)
 
 **`skillPackService.js` 확장**:
 
-> **Server-authoritative 계약 (Lock-in #10)**: 모든 URL 경로 메서드는 `url` / `pack_id` / `expected_hash` 만 받는다. 클라이언트가 전송한 pack content/hash 는 **입력 받지 않는다**. 서버가 내부에서 `registryService.fetchPackFromUrl` 을 호출해 직접 fetch + hash + validate 한다.
+> **Server-authoritative 계약 (Lock-in #10)**: URL 경로 메서드는 클라이언트로부터 pack content/hash 를 **받지 않는다**. 클라 요청은 `{ url }` 또는 `{ pack_id, preview_token, expected_hash }` 만 포함한다. route 레이어가 `registryService.fetchPackFromUrl` 을 호출해서 server-authoritative 로 fetch + canonicalize + hash 하고, service 메서드는 이미 검증된 `{ canonicalUrl, displayUrl, pack, hash, expected_hash }` 를 받는다.
 
-- 신규: `installFromUrl({ url, expected_hash })`
-  - 내부에서 `fetchPackFromUrl(url)` 호출 (§6.2 Step 0~3 전체)
+- 신규: `installFromUrl({ canonicalUrl, displayUrl, pack, hash, expected_hash, bundledRegistryIds })`
   - fetched hash 가 `expected_hash` 와 불일치 → 409 `"Source content changed since preview"`
-  - §6.2 content validation pipeline 전부 적용 (prompt 크기, MCP alias/env, color hex, checklist)
-  - name collision 체크 (기존 규칙 그대로)
-  - `source_url` (canonicalized) 중복 체크 → 409
-  - `scope='global'` + `origin_type='url'` + source_url / source_hash / source_fetched_at 저장
-- 신규: `updateFromUrl({ pack_id, expected_hash })`
+  - `source_url` 중복 체크 → 409 `"Already installed from this URL"`
+  - `registry_id` 가 bundled catalog 에 있거나 이미 설치된 등록 ID 와 충돌 → 409 (OQ-v1.1-4)
+  - name collision (global scope) → 409
+  - §6.2 content validation pipeline (`validateRegistryPack`) — prompt 크기, MCP alias/env allowlist, checklist 배열, color hex
+  - `scope='global'` + `origin_type='url'` + `source_url` / `source_url_display` / `source_hash` / `source_fetched_at` 저장
+- 신규: `updateFromUrl({ pack_id, pack, hash, expected_hash })`
   - 기존 row 조회 → `origin_type='url'` 검증 (아니면 400)
-  - 저장된 `source_url` 을 사용해 `fetchPackFromUrl` 재호출 (클라이언트 URL 재입력 금지)
-  - expected_hash 검증 + §6.2 → content 필드만 갱신, 사용자 설정 보존
-  - `source_hash`, `source_fetched_at` 갱신
-- 신규: `checkUpdateFromUrl({ pack_id })` — 서버가 저장된 `source_url` 을 re-fetch + hash 계산 → `{ update_available, new_hash, new_pack_preview, fetched_at }` 반환 (persist 없음)
+  - expected_hash 검증 → content 필드만 갱신 (`prompt_full`, `prompt_compact`, `estimated_tokens*`, `mcp_servers`, `checklist`, `inject_checklist`, `registry_version`, `requires_capabilities`)
+  - 사용자 편집 필드 보존: `name`, `scope`, `project_id`, `priority`, `conflict_policy`, `icon`, `color`, `description`
+  - 바인딩 보존: `project_skill_packs` / `task_skill_packs` 는 별도 테이블이라 영향 없음
+  - `source_hash`, `source_fetched_at`, `updated_at` 갱신
 - 신규: `findBySourceUrl(canonicalUrl)` → skill_pack | null
 - 유지: v1.0 의 `installFromRegistry` / `updateFromRegistry` (bundled 용)
 
-### 6.5 API 라우트 변경
+> **Check-update 동작**: service 에 `checkUpdateFromUrl` 전용 메서드는 두지 않는다. 대신 route 가 `registryService.fetchPackFromUrl(existing.source_url)` 을 직접 호출하여 hash 를 비교하고 preview_token 을 발급한다 (§6.5). 이는 service 가 persist 동작만 담당한다는 계층 분리 원칙 때문.
 
-**제거**:
-- `POST /api/skill-packs/registry/refresh` (central registry stub)
+### 6.5 API 라우트 변경
 
 **변경 없음**:
 - `GET /api/skill-packs/registry` (bundled + install status)
 - `GET /api/skill-packs/registry/pack?id=<registryId>`
 - `POST /api/skill-packs/registry/install` (bundled 전용)
 - `POST /api/skill-packs/registry/update` (bundled 전용)
+
+**Deprecated stub (shipped, not removed)**:
+- `POST /api/skill-packs/registry/refresh` — v1.0 중앙 registry refresh 를 위한 엔드포인트. v1.1 에서는 기능이 없어졌지만 back-compat 를 위해 no-op stub 로 보존됨. Response: `{ refreshed: false, reason: 'deprecated_in_v1_1' }`. 새로운 클라이언트는 호출하지 말 것. 미래 버전에서 제거 가능 (breaking change 로 명시 필요).
 
 **신규**:
 
@@ -333,80 +359,93 @@ Partial unique index 로 URL 중복 방지 (비-URL 팩은 `source_url IS NULL` 
 | `POST` | `/api/skill-packs/registry/check-update-url` | `{ pack_id }` | 설치된 URL 팩의 원본 변경 여부 확인 (preview_token 발급) |
 | `POST` | `/api/skill-packs/registry/update-url` | `{ pack_id, preview_token, expected_hash }` | URL 팩 갱신 (preview_token 필수) |
 
-**Preview Token 계약 (P1-2 해결)**:
+**Preview Token 계약** (shipped in `registryService.js`):
 - dry-run (install-url) 또는 check-update-url 응답에 서버가 `preview_token` 을 포함한다.
-- Token shape: HMAC-SHA256 or random 16+ bytes, binding `(url OR pack_id) + hash + issued_at + nonce`.
-- Server-side ephemeral store (in-memory Map, TTL 5분, max 1000 entries LRU).
-- Confirm (install-url non-dry-run / update-url) 시 `preview_token` 필수. 누락/만료/불일치 → 400.
-- Token 은 1회용 (consume 후 store 에서 제거). 재시도하려면 dry-run 재실행.
-- **효과**: UI bypass (preview 건너뛰고 confirm 직행) 를 서버 단에서 차단.
+- Token shape: `crypto.randomBytes(24).toString('hex')` (48 hex chars). Server-side ephemeral store (in-memory `Map`, TTL 5분, LRU cap 1000 entries, 만료 prune 은 발급/소비 시점에 lazy).
+- Binding: `"url:<canonicalUrl>"` 또는 `"pack:<pack_id>"` + fetched hash. Confirm 시 caller 가 `expected_hash` 를 보내고 서버 `consumePreviewToken(token, expectedBindingKey, expectedHash)` 이 store 의 `(bindingKey, hash)` 와 완전 일치하는지 검증.
+- **1-shot consume — validation-success only**: `consumePreviewToken` 은 (1) token 없거나 문자열 아님 → 400 w/o mutating store, (2) token 이 store 에 없음 (만료 / 재사용) → 400 w/o mutating store, (3) binding/hash 불일치 → 400 w/o mutating store, (4) 완전 일치 → `store.delete(token)` 후 리턴. 즉 오직 완전 일치한 검증 1회만 token 을 소비한다.
+- 재사용 공격 표면은 binding 이 `(canonicalUrl, hash)` 또는 `(pack_id, hash)` 에 tied 되어 있다는 것으로 제한됨 — 공격자가 hash 를 맞게 건네주지 않으면 검증 실패 (그러나 token 은 살아남음). hash 를 맞게 건네려면 서버가 방금 fetch 한 실제 content 를 알아야 하므로 외부 공격자에겐 의미 없는 side-channel. 만료 / 1회용 / TTL 5분이 실용적 방어.
+- **UI bypass 방지**: preview 를 건너뛰고 confirm 을 직접 호출하면 token 미발급 → 400.
 
-**`install-url` 동작**:
+> **관측**: 오늘 구현은 "검증 성공 시에만 consume" 이다. 미래에 "검증 실패도 consume (fail-closed) 으로 강화" 하려면 `consumePreviewToken` 의 step 3 분기에서 `previewTokens.delete(token)` 을 먼저 수행하고 throw 하도록 바꾸면 된다. 본 spec 은 shipped 동작을 정답으로 고정.
+
+**`install-url` 동작** (shipped):
 
 1. `dry_run: true` 모드:
-   - §6.2 Step 0~3 전체 수행 (server-authoritative fetch)
-   - `preview_token` 발급 + 서버 store 에 기록 (키: `url + hash`)
+   - §6.2 Step 0~3 전체 수행 (server-authoritative fetch → canonicalize → pin → fetch → parse → hash)
+   - `preview_token` 발급 + store 에 기록 (키: `"url:<canonicalUrl>"`, hash 와 함께)
    - DB 저장 없음
-   - 응답: `{ pack: <parsed>, hash: <sha256>, preview_token }`
+   - 응답: `{ pack, hash, preview_token, source_url_display }`
 2. 실제 install 모드 (`dry_run` false or omitted):
    - `preview_token` + `expected_hash` 필수 → 누락 시 400
-   - Token 검증: store 조회 → URL/hash 바인딩 일치 확인 → 불일치/만료 시 400
-   - §6.2 Step 0~3 재수행 (TOCTOU 재방어)
-   - 재계산된 hash 가 `expected_hash` 와 불일치 → 409 `"Source content changed since preview"`
-   - §6.2 content validation → install
-   - Token 소비 (store 에서 제거)
+   - §6.2 Step 0~3 재수행 (route 가 먼저 fetch — canonicalUrl 을 얻어야 token binding 키를 만들 수 있기 때문, 그리고 TOCTOU 재방어)
+   - Token 검증 (`consumePreviewToken`): store 의 `("url:<canonicalUrl>", expected_hash)` 와 일치 → 토큰 소비 + 진행 / 불일치 → 400, 토큰 미소비
+   - service `installFromUrl` 호출 → 재계산된 hash 가 `expected_hash` 와 불일치하면 409 `"Source content changed since preview"` (이 시점에 token 은 이미 소비된 상태)
+   - §6.2 content validation (`validateRegistryPack`) → 409 collision 체크 (source_url / bundled registry_id / name) → DB insert
 
-**`check-update-url` 동작**:
+**`check-update-url` 동작** (shipped):
 
-- `pack_id` 로 skill_pack row 조회 → `origin_type != 'url'` 이면 400 `"Not a URL-installed pack"`
+- `pack_id` 로 skill_pack row 조회 → `origin_type != 'url'` 또는 `source_url IS NULL` 이면 400 `"Not a URL-installed pack"`
 - 저장된 `source_url` 로 `fetchPackFromUrl` 재호출 (§6.2 전체)
-- `preview_token` 발급 (키: `pack_id + new_hash`)
-- 응답: `{ update_available: hash !== row.source_hash, new_hash, new_pack_preview, fetched_at, preview_token }`
+- `preview_token` 발급 (키: `"pack:<pack_id>"`, 새 hash 와 함께)
+- 응답: `{ update_available, new_hash, new_pack_preview, fetched_at, source_url_display, preview_token }`
+  - `update_available = (new_hash !== row.source_hash)`
+  - `fetched_at` 는 ISO8601 현재 시각 (server-side)
 
-**`update-url` 동작**:
+**`update-url` 동작** (shipped):
 
-- `pack_id` 로 조회 → `origin_type == 'url'` 검증 → 저장된 `source_url` 재-fetch
-- `preview_token` 검증 (pack_id + hash 바인딩)
-- 재계산된 hash === `expected_hash` 검증 (TOCTOU) → §6.2 content validation → content 필드만 갱신
-- 사용자 편집 필드 보존 (name/scope/project_id/priority/conflict_policy)
-- Token 소비
+- 필수: `{ pack_id, preview_token, expected_hash }` — 셋 중 하나라도 없으면 400
+- `pack_id` 조회 → `origin_type='url'` 검증 → 저장된 `source_url` 재-fetch (§6.2 전체, TOCTOU 재방어)
+- `preview_token` 검증 (`consumePreviewToken(preview_token, "pack:<pack_id>", expected_hash)`) → 완전 일치 시 토큰 소비 + 진행 / 불일치 시 400 (토큰 미소비)
+- service `updateFromUrl` 호출 → 재계산된 hash 가 `expected_hash` 와 일치하는지 검증 (TOCTOU 2차) → 409 on mismatch → content 필드만 갱신, 사용자 편집 필드 (name/scope/project_id/priority/conflict_policy) 보존
 
-### 6.6 프론트엔드 구조 변경
+**응답 sanitization**: 모든 skill_pack API response 는 `source_url` (query 포함 full URL) 을 strip 한다 (`sanitizePack()` in `routes/skillPacks.js`). 클라이언트에 노출되는 것은 `source_url_display` 뿐.
+
+### 6.6 프론트엔드 구조 변경 (shipped)
 
 `GalleryView.js`:
 
 - 우상단에 **"Install from URL"** 버튼 추가 (existing bundled card grid 는 유지)
-- 클릭 시 `UrlInstallDialog` 모달 열림 (신규):
-  - URL 입력창 + "Preview" 버튼
-  - Preview 클릭 → `install-url` dry_run 호출 → 성공 시 `PackPreviewModal` (기존 컴포넌트 재사용) 을 fetched 내용 + `expected_hash` 로 열음
-  - `PackPreviewModal` 의 "Install" 클릭 시 `install-url` 실제 호출
+- 클릭 시 `UrlInstallDialog` 모달 open
 
-`SkillPacksView.js` (My Packs 탭):
+`UrlInstallDialog.js` (신규, shipped):
 
-- 카드에 출처 배지 추가: Bundled / URL:`<host>`
-- `source_url IS NOT NULL` 팩 카드에 **"Check for update"** 버튼 추가 (hover 시 노출)
-- Update available 상태 시 "Update Available" 배지 + "Update" 버튼
+- URL 입력창 + "Fetch & Preview" 버튼
+- client-side https:// 강제 (toast warn on http://)
+- Fetch 클릭 → `POST /api/skill-packs/registry/install-url` `{ url, dry_run: true }`
+- 성공 시 자체 state 에 `{ pack, hash, preview_token, source_url_display }` 저장 → `PackPreviewModal` 을 `pack` 에 provenance 필드 + `_preview_context: 'url-dry-run'` 을 merge 해서 렌더
+- `PackPreviewModal` 의 Install 클릭 → `POST /api/skill-packs/registry/install-url` `{ url, preview_token, expected_hash }` → 성공 토스트
 
-`PackPreviewModal.js`:
+`SkillPacksView.js` (My Packs 탭, shipped):
 
-- URL install context (신규 prop `context: 'bundled' | 'url-dry-run' | 'url-update'`) 별 버튼 분기
-- 출처 정보 섹션 추가 (**`source_url_display`** (query/fragment 제거된 canonical) + fetched_at + hash truncated). 절대 full `source_url` 렌더 금지.
+- 카드에 출처 배지: `origin_type` 기반으로 `Bundled` / `URL: <host>` / `Manual` / `Imported`. URL 팩은 `source_url_display` 의 host 를 배지에 렌더하고 full path 를 hover tooltip 에 표시.
+- `origin_type === 'url'` 인 팩 카드에 **"Check for update"** 버튼 노출. 클릭 시 `POST /registry/check-update-url` → `update_available === true` 면 `window.confirm("Update available. Apply?")` → 확인 시 `POST /registry/update-url`. (Phase 1 UI: modal 기반 context 전환 대신 native confirm 사용 — 향후 PackPreviewModal 확장 여지 있음)
+
+`PackPreviewModal.js` (shipped):
+
+- `pack.source_url_display` 가 있으면 provenance 섹션 렌더: `URL`, `Fetched at`, `Hash` (앞 16자 truncated + `…`)
+- **절대 full `source_url` 렌더 금지** — server 의 `sanitizePack()` 가 이미 strip 하지만 클라 측에서도 이 필드를 참조하지 않는다.
+- `_preview_context` 마커는 UrlInstallDialog 가 전달하는 힌트일 뿐, 별도의 `context` prop 분기 로직은 shipped 버전에 없음. (context-aware 버튼 분기는 install/update 경로가 dialog 쪽에서 이미 분기되어 있어 불필요.)
+
+> v1.1 shipped UI 는 install 경로만 PackPreviewModal 을 사용하고 update 경로는 native confirm 을 쓴다. Update 경로도 preview modal 로 통일하려면 후속 PR 이 필요하지만 v1.1 lock-in scope 밖.
 
 ### 6.7 파일 목록
 
 | 파일 | 유형 |
 |------|------|
-| `server/db/migrations/017_skill_pack_source_url.sql` | Migration |
-| `server/services/registryService.js` | Central fetch 제거 + `fetchPackFromUrl` 신규 |
-| `server/services/skillPackService.js` | installFromUrl / updateFromUrl / findBySourceUrl |
-| `server/routes/skillPacks.js` | 3개 신규 엔드포인트 추가, refresh 엔드포인트 제거 |
-| `server/public/app/components/GalleryView.js` | Install from URL 버튼 |
-| `server/public/app/components/UrlInstallDialog.js` | 신규 |
-| `server/public/app/components/PackPreviewModal.js` | context prop + source 정보 |
-| `server/public/app/components/SkillPacksView.js` (MyPacksView) | 출처 배지 + Check for update |
+| `server/db/migrations/017_skill_pack_source_url.sql` | Migration (source_url / source_url_display / source_hash / source_fetched_at / origin_type + lossy reclassification) |
+| `server/db/migrations/021_skill_pack_origin_type_check.sql` | Migration (R1 lock-in followup: origin_type enum enforcement via triggers) |
+| `server/services/ssrf.js` | SSRF 방어 모듈 (canonicalizeUrl / resolveAndValidate / fetchUrlSafe / maskSensitiveParams) |
+| `server/services/registryService.js` | `fetchPackFromUrl` + preview token store. `refreshRemoteRegistry` 는 no-op stub 로 보존 |
+| `server/services/skillPackService.js` | `installFromUrl` / `updateFromUrl` / `findBySourceUrl` |
+| `server/routes/skillPacks.js` | `/registry/install-url` / `/registry/check-update-url` / `/registry/update-url` + `sanitizePack` 응답 필터 |
+| `server/public/app/components/GalleryView.js` | Install from URL 버튼 + `UrlInstallDialog` 통합 |
+| `server/public/app/components/UrlInstallDialog.js` | 신규 (Fetch → Preview → Install 플로우) |
+| `server/public/app/components/PackPreviewModal.js` | provenance 섹션 (`source_url_display` / `source_fetched_at` / truncated `source_hash`) |
+| `server/public/app/components/SkillPacksView.js` | 출처 배지 (origin_type 기반) + Check for update (native confirm 기반 update 경로) |
 | `server/public/styles.css` | Install from URL 다이얼로그 + 배지 스타일 |
-| `server/tests/install-from-url.test.js` | 신규 테스트 |
-| `server/tests/ssrf.test.js` | SSRF 단위 테스트 (mock DNS) |
+| `server/tests/install-from-url.test.js` | URL install route 통합 테스트 |
+| `server/tests/ssrf.test.js` | SSRF 유닛 테스트 (canonicalize / IP CIDR / hostname block / maskSensitiveParams) |
 
 ### 6.8 SSRF 테스트 벡터 (최소 커버리지)
 
@@ -471,7 +510,7 @@ Featured Packs (v2+ curation surface — 중앙 registry 의 가벼운 재도입
 | OQ-v1.1-6 | Content-Type 허용 범위 | `application/json` + `text/plain` (gist 대응) | **Resolved** |
 | OQ-v1.1-7 | Connection pinning vs outbound proxy | Node.js `https.Agent({ lookup })` 로 pinned IP 직접 연결. Proxy 는 v2+ 검토 | **Resolved** — Round 1 P0 |
 | OQ-v1.1-8 | Preview 강제 vs UX-only | Server-side preview_token (TTL 5분, 1회용) 로 강제 | **Resolved** — Round 1 P1 |
-| OQ-v1.1-9 | Origin type 분류 | `bundled / url / manual / import` enum 컬럼, CHECK constraint | **Resolved** — Round 1 P1 |
+| OQ-v1.1-9 | Origin type 분류 | `bundled / url / manual / import` enum 컬럼. migration 017 에서 컬럼 추가, migration 021 (R1) 에서 BEFORE INSERT/UPDATE 트리거로 enum enforcement (SQLite 제약상 ALTER TABLE 후 CHECK 추가 불가) | **Resolved** — Round 7 P0 (triggers-as-CHECK) |
 | OQ-v1.1-10 | 비표준 HTTPS 포트 허용 | v1.1 은 443 only. 비표준 포트는 v2+ OQ | **Resolved** — Round 1 P1 |
 
 ---
@@ -479,10 +518,11 @@ Featured Packs (v2+ curation surface — 중앙 registry 의 가벼운 재도입
 ## 10. v1.0 과의 호환성
 
 - `registry_id` / `registry_version` 컬럼 유지 (bundled 팩 identifier)
-- `source_url` / `source_hash` / `source_fetched_at` 컬럼 신규 (URL-installed 팩만)
+- `source_url` / `source_url_display` / `source_hash` / `source_fetched_at` / `origin_type` 컬럼 신규 (migration 017 + 021)
 - 기존 bundled install / update API 는 동작 유지
-- `_source: "remote"` 필드 및 관련 로직 제거 — bundled 에만 남아있던 `_source: "bundled"` 태그도 제거 (deprecated, Stage 1 에서 실질 사용은 없었음). 서버 응답에서는 대신 명시적 `bundled: true/false` 플래그 또는 URL host 기반 배지로 대체.
-- v1.0 의 `confirmed_preview` 플래그는 v1.1 에서 **preview_token 으로 대체**. Bundled 는 preview 요구 없음 (신뢰된 source).
+- `_source: "remote"` 필드 및 관련 로직은 v1.0 중앙 remote registry 제거 시 삭제됨 (해당 코드 path 없음). `_source: "bundled"` 태그는 여전히 `registryService.loadBundled()` 에서 bundled 팩 객체에 부착되지만 API response 에는 영향 없음 (bundled Gallery UI 는 `origin_type`/`installed` 플래그로 표시).
+- v1.0 의 `confirmed_preview` 플래그는 v1.1 에서 **preview_token 으로 대체**. Bundled install 경로 (`POST /registry/install`) 는 여전히 `confirmed_preview` 를 받을 수 있음 (기존 동작, `installFromRegistry` 에서 `_source === 'remote'` 인 경우에만 강제 — 현재 `_source === 'bundled'` 이므로 실질 bypass).
+- `POST /api/skill-packs/registry/refresh` 는 v1.0 중앙 registry 용이었으나 v1.1 에서 기능이 사라짐. back-compat 를 위해 no-op stub 로 보존 (§6.5 참조).
 
 ---
 
@@ -557,3 +597,39 @@ v1.0-rc1 의 중앙 registry → per-pack URL install 전환 초안. Codex pre-r
 Editorial nit `register_id` → `registry_id` 도 수정 완료. Spec v1.1-rc1 수렴.
 
 **Status: Approved — 구현 진입 가능.**
+
+### Round 7 — Codex Review (ask-codex-20260424-162828-bec3) — R1 lock-in
+
+v1.1 구현이 이미 merged 된 상태에서 spec ↔ 실구현 정합성 검토. Verdict: ISSUES (1× P0, 3× P1, 3× NIT). 모두 R1 PR 에서 반영:
+
+**P0 반영**:
+- [R7-P0-1] migration 017 에 `CHECK (origin_type IN (...))` 가 실제로 없다. SQLite 는 ADD COLUMN 후 CHECK 추가가 table rebuild 없이 안 되므로, **migration 021** 을 추가해 BEFORE INSERT / BEFORE UPDATE 트리거로 enum enforcement 를 구현. §6.3 의 lock-in 의도를 DB layer 에서 유지.
+
+**P1 반영**:
+- [R7-P1-1] `source_url_display` 가 schema + API response 에 실제로 존재하는데 spec §6.3 ALTER TABLE 블록과 §6.5 dry-run/check-update 응답 shape 에서 빠져 있었다. §6.3, §6.5, §6.7 에 명시 추가.
+- [R7-P1-2] Preview token lifecycle 이 spec 과 다르다. Spec 은 "token 검증 → re-fetch → install → consume on success"; 실구현은 "re-fetch → token consume only on validation-success → install". 실구현을 정답으로 고정. §6.5 install-url / update-url 순서 텍스트 업데이트.
+- [R7-P1-3] spec 이 `/registry/refresh` 를 "removed" 라고 기술했지만 실제로는 v1.0 back-compat 를 위해 no-op stub 로 보존됨 (registry.test.js 가 여전히 검증). §6.5 "Deprecated stub" 섹션 추가.
+
+**NIT 반영**:
+- [R7-N1] §6.3 lossy-migration 서술을 conditional (".. 조건을 추가해 해당 row 만 'bundled' 로 설정할 수 있다") 에서 definitive (migration 017 의 shipped UPDATE 문 그대로 인용) 로 tighten.
+- [R7-N2] §6.4 service signature 를 merged 계층에 맞춰 재작성 — router 가 fetch + canonicalize + hash 해서 service 메서드에 payload 를 넘기는 구조.
+- [R7-N3] §6.6 UI 섹션을 shipped 구현에 맞춰 narrowing: `PackPreviewModal` 의 `context` prop 분기 로직 없음, update 경로는 native `window.confirm` 사용, provenance 는 install preview 에서만 렌더.
+
+### Round 8 — Codex Re-review (ask-codex-20260424-164138-5798) — R1 post-fix
+
+Round 7 fixes 이후 재검토. Verdict: ISSUES (1× P1, 1× P2, 1× NIT).
+
+**추가 수정 (R1 PR 내)**:
+- [R8-P1-1] §6.5 preview-token 섹션에서 "fail-closed: 검증 실패도 token 소비" 라고 잘못 기술했던 부분을 실제 `consumePreviewToken` 동작에 맞춰 "validation-success only consume" 으로 수정. 공격 표면 분석과 향후 hardening 옵션을 별도 관측 블록으로 추가.
+- [R8-P2-1] Review Log 의 "Round 8 pending" / "Round 8 PASS 받으면 lock-in" 자기 모순 문구 제거. Round 8 fix 가 이 섹션 자체에서 이미 완결되므로 Status line 은 Final 을 유지.
+- [R8-N1] §9 OQ-v1.1-9 의 "CHECK constraint" 문구를 "migration 021 트리거" 로 수정하여 §6.3 와 일관화.
+
+### Round 9 — Codex Re-review (ask-codex-20260424-164809-512c) — R1 nit
+
+**Verdict: ISSUES (1× nit)** — §6.5 update-url 설명에서 `consumePreviewToken` 호출 signature 에 첫 인자 `preview_token` 이 빠져 있었음. Round 10 에서 수정.
+
+### Round 10 — Final (post-R9 nit fix)
+
+§6.5 update-url 의 consumePreviewToken 호출을 `consumePreviewToken(preview_token, "pack:<pack_id>", expected_hash)` 로 수정하여 §6.4 signature 정의 + shipped 코드와 완전 일치시킴. 다른 drift 없음.
+
+**Status: Final (locked in 2026-04-24).** R1 PR 머지 시점에 lock-in 완료.
