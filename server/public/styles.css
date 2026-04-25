@@ -1980,6 +1980,59 @@ body {
   color: var(--text-muted);
 }
 
+/* Phase G: keyboard alternative to drag-and-drop. The card itself is
+   intentionally NOT a `role="button"` (that would nest the status
+   `<select>` inside a button, an ARIA anti-pattern). Instead the card
+   surfaces two real interactive children — `Open` button + status
+   `<select>` — sitting in the natural Tab order so keyboard / AT users
+   can change status or open details without the drag handle.
+
+   The earlier `opacity: 0` + hover-reveal pattern was rejected in
+   review: invisible-but-laid-out controls still consume hit-area and
+   layout, defeating the "hidden until needed" intent and breaking
+   hover-less (touch / coarse-pointer) environments. The actions row
+   is therefore always visible — the visual density tradeoff is small
+   (one extra row), and the keyboard / AT operability gain is real. */
+.task-card-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  align-items: center;
+}
+.task-card-open {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: inherit;
+  color: var(--text-secondary);
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.task-card-open:hover { border-color: var(--border-hover); }
+.task-card-open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+.task-card-status-select {
+  flex: 1;
+  padding: 4px 6px;
+  font-size: 11px;
+  font-family: inherit;
+  color: var(--text-secondary);
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.task-card-status-select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+
 /* Inline date input in task detail meta grid */
 .form-input.inline-date {
   padding: 6px 10px;

@@ -18,7 +18,11 @@ const html = htm.bind(h);
 //
 // Additional component props:
 //   wide — makes the trigger width: max-content (don't stretch to container)
-export function Dropdown({ value, onChange, options, disabled, style, className, title, ariaLabel, wide }) {
+//   id   — forwarded to the trigger button so a sibling `<label for="X">`
+//          can announce a visible label without forcing every call site
+//          onto `aria-label`. Phase G (2026-04-26) added this so SkillPack /
+//          Preset / Agent modal Dropdowns can pair with their visible labels.
+export function Dropdown({ id, value, onChange, options, disabled, style, className, title, ariaLabel, wide }) {
   const [open, setOpen] = useState(false);
   const [menuPos, setMenuPos] = useState(null); // { top, left, width, flipUp }
   const [hoverIdx, setHoverIdx] = useState(-1);
@@ -143,11 +147,12 @@ export function Dropdown({ value, onChange, options, disabled, style, className,
   return html`
     <div class="dropdown ${className || ''} ${disabled ? 'is-disabled' : ''} ${open ? 'is-open' : ''} ${wide ? 'dropdown-wide' : ''}">
       <button type="button" ref=${buttonRef}
+        id=${id || undefined}
         class="dropdown-button"
         style=${style || ''}
         disabled=${disabled}
         title=${title || ''}
-        aria-label=${ariaLabel || ''}
+        aria-label=${ariaLabel || undefined}
         aria-haspopup="listbox"
         aria-expanded=${open}
         onClick=${() => !disabled && setOpen(o => !o)}

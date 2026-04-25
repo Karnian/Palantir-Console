@@ -14,6 +14,7 @@ import { dueDateMeta, useNowTick } from '../lib/dueDate.js';
 import { NewTaskModal, ExecuteModal, TaskDetailPanel } from './TaskModals.js';
 import { Dropdown } from './Dropdown.js';
 import { Modal } from './Modal.js';
+import { clickableProps } from '../lib/a11y.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Kanban Board View — internal constants
@@ -28,9 +29,20 @@ const BOARD_COLUMNS = [
   { id: 'done', label: 'Done' },
 ];
 
-function TaskCard({ task, projects, onDragStart, onClick }) {
+function TaskCard({ task, projects, onDragStart, onClick, onMoveStatus }) {
   const project = projects.find(p => p.id === task.project_id);
   const due = dueDateMeta(task);
+  // Phase G — drag-and-drop needs a keyboard equivalent (WCAG 2.1.1).
+  // Earlier draft put `role="button"` on the card itself, but that
+  // nests an interactive `<select>` inside a button (ARIA anti-pattern).
+  // Instead the card stays a generic container and surfaces TWO actual
+  // interactive children in the natural Tab order: an `Open` button
+  // and a status `<select>`. They are always visible (the original
+  // hover-reveal opacity trick was rejected in review — invisible
+  // controls still consume hit-area/layout and broke on coarse-pointer
+  // / no-hover environments). Mouse users still click anywhere on the
+  // card to open the detail panel — the card-level `onClick` is
+  // preserved for that path.
 
   return html`
     <div
@@ -43,7 +55,13 @@ function TaskCard({ task, projects, onDragStart, onClick }) {
         onDragStart(task);
       }}
       onDragEnd=${(e) => e.currentTarget.classList.remove('dragging')}
-      onClick=${() => onClick(task)}
+      onClick=${(e) => {
+        // Don't open the detail panel when the click originated inside
+        // an inline action — those handle their own behaviour.
+        if (e.target.closest('.task-card-status-select')) return;
+        if (e.target.closest('.task-card-open')) return;
+        onClick(task);
+      }}
     >
       <div class="task-card-title">${task.title}</div>
       <div class="task-card-badges">
@@ -66,6 +84,31 @@ function TaskCard({ task, projects, onDragStart, onClick }) {
       ${task.updated_at && html`
         <div class="task-card-meta">${timeAgo(task.updated_at || task.created_at)}</div>
       `}
+      <div class="task-card-actions">
+        <button
+          type="button"
+          class="task-card-open"
+          aria-label=${`Open details for task "${task.title}"`}
+          onClick=${(e) => { e.stopPropagation(); onClick(task); }}>
+          Open
+        </button>
+        ${onMoveStatus && html`
+          <select
+            class="task-card-status-select"
+            aria-label=${`Move task "${task.title}" to a different status column`}
+            value=${task.status || 'backlog'}
+            onClick=${(e) => e.stopPropagation()}
+            onKeyDown=${(e) => e.stopPropagation()}
+            onChange=${(e) => {
+              const next = e.target.value;
+              if (next && next !== task.status) onMoveStatus(task, next);
+            }}>
+            ${BOARD_COLUMNS.map(col => html`
+              <option key=${col.id} value=${col.id}>${col.label}</option>
+            `)}
+          </select>
+        `}
+      </div>
     </div>
   `;
 }
@@ -73,19 +116,25 @@ function TaskCard({ task, projects, onDragStart, onClick }) {
 // Tab toggle shown in both Board and Calendar toolbars so the user can flip
 // between the two views without leaving the task workflow.
 function BoardModeTabs({ active }) {
+  // Phase G: this control switches between two ROUTES (`#board` ↔
+  // `#calendar`), not panels under one page. The earlier `role="tab"`
+  // tablist pattern is wrong for that — a real tablist requires Arrow-key
+  // roving across simultaneously-mounted panels, which we don't have.
+  // We therefore use plain navigation buttons with `aria-current="page"`
+  // marking the active route, which is the WAI-ARIA pattern for in-app
+  // navigation. Both buttons stay in the natural Tab order so keyboard
+  // users can hit either with Tab alone.
   return html`
-    <div class="board-mode-tabs" role="tablist">
+    <div class="board-mode-tabs" role="group" aria-label="Tasks view">
       <button
-        role="tab"
         class="board-mode-tab ${active === 'board' ? 'active' : ''}"
-        aria-selected=${active === 'board'}
+        aria-current=${active === 'board' ? 'page' : undefined}
         onClick=${() => navigate('board')}>
         \u2592 Board
       </button>
       <button
-        role="tab"
         class="board-mode-tab ${active === 'calendar' ? 'active' : ''}"
-        aria-selected=${active === 'calendar'}
+        aria-current=${active === 'calendar' ? 'page' : undefined}
         onClick=${() => navigate('calendar')}>
         \u2637 Calendar
       </button>
@@ -188,24 +237,18 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
     return map;
   }, [filtered, sortMode, nowTick]);
 
-  const handleDrop = async (columnId, e) => {
-    e.preventDefault();
-    setDragTarget(null);
-    const taskId = e.dataTransfer.getData('text/plain');
-    if (!taskId) return;
-
-    const task = tasks.find(t => t.id === taskId);
+  // Phase G: extracted from handleDrop so the inline keyboard `select` on
+  // each TaskCard can move a task without going through a drag/drop event
+  // payload. The two paths share identical semantics — including the
+  // "in_progress requires execute confirmation" branch.
+  const moveTaskToStatus = async (task, columnId) => {
     if (!task || task.status === columnId) return;
-
-    // If moving to in_progress, open execute modal
     if (columnId === 'in_progress' && task.status !== 'in_progress') {
-      // Store previous status so we can rollback if modal is cancelled
       setExecuteTask({ ...task, _previousStatus: task.status });
       return;
     }
-
     try {
-      await apiFetch(`/api/tasks/${taskId}/status`, {
+      await apiFetch(`/api/tasks/${task.id}/status`, {
         method: 'PATCH',
         body: JSON.stringify({ status: columnId }),
       });
@@ -213,6 +256,15 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
     } catch (err) {
       addToast(err.message, 'error');
     }
+  };
+
+  const handleDrop = async (columnId, e) => {
+    e.preventDefault();
+    setDragTarget(null);
+    const taskId = e.dataTransfer.getData('text/plain');
+    if (!taskId) return;
+    const task = tasks.find(t => t.id === taskId);
+    await moveTaskToStatus(task, columnId);
   };
 
   const handleExecute = async (taskId, agentProfileId, prompt, skillPackIds, presetId) => {
@@ -341,6 +393,7 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
                     projects=${projects}
                     onDragStart=${() => {}}
                     onClick=${handleTaskClick}
+                    onMoveStatus=${moveTaskToStatus}
                   />
                 `)}
               </div>
