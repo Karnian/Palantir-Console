@@ -502,12 +502,13 @@ test('P8-8 ExecuteModal has accessible modal structure', async () => {
   assert.ok(start >= 0, 'ExecuteModal not found');
   assert.ok(nextExport > start, 'TaskDetailPanel boundary not found');
   const body = src.slice(start, nextExport);
-  // Must have modal overlay + backdrop + panel
-  assert.match(body, /class="modal-overlay"/, 'ExecuteModal must have a modal-overlay');
-  assert.match(body, /class="modal-backdrop"/, 'ExecuteModal must have a modal-backdrop for click-outside close');
-  assert.match(body, /class="modal-panel"/, 'ExecuteModal must have a modal-panel');
-  // Must use useEscape hook for keyboard dismiss
-  assert.match(body, /useEscape\(/, 'ExecuteModal must use useEscape hook for Esc dismissal');
+  // Post-refactor: ExecuteModal uses the shared Modal primitive which owns
+  // role=dialog, aria-modal, focus trap, Escape-to-close and the overlay
+  // chrome. So ExecuteModal source must compose <${Modal}> and pass a
+  // `labelledBy` pointing at the in-panel heading id.
+  assert.match(body, /<\$\{Modal\}/, 'ExecuteModal must use the Modal primitive');
+  assert.match(body, /labelledBy=/, 'ExecuteModal must pass labelledBy to Modal so aria-labelledby is set');
+  assert.match(body, /onClose=\$\{onClose\}/, 'ExecuteModal must forward onClose to Modal');
 });
 
 test('P8-8 TaskDetailPanel has proper semantic structure', async () => {

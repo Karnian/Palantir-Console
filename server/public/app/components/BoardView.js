@@ -12,6 +12,7 @@ import { apiFetch } from '../lib/api.js';
 import { addToast } from '../lib/toast.js';
 import { dueDateMeta, useNowTick } from '../lib/dueDate.js';
 import { NewTaskModal, ExecuteModal, TaskDetailPanel } from './TaskModals.js';
+import { Dropdown } from './Dropdown.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Kanban Board View — internal constants
@@ -263,32 +264,56 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
         <${BoardModeTabs} active="board" />
         <div class="board-toolbar-spacer"></div>
         <div class="board-filter">
-          <select class="form-select" value=${filterProject} onChange=${e => setFilterProject(e.target.value)}>
-            <option value="">All Projects</option>
-            ${projects.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
-          </select>
-          <select class="form-select" value=${filterPriority} onChange=${e => setFilterPriority(e.target.value)}>
-            <option value="">All Priorities</option>
-            <option value="low">Low</option>
-            <option value="medium">Medium</option>
-            <option value="high">High</option>
-            <option value="critical">Critical</option>
-          </select>
-          <select class="form-select" value=${filterDue} onChange=${e => setFilterDue(e.target.value)}
-            title="마감일 필터">
-            <option value="">전체 마감일</option>
-            <option value="overdue">\u23F0 지난 마감</option>
-            <option value="today">오늘 마감</option>
-            <option value="this-week">이번 주 (7일 이내)</option>
-            <option value="no-due">마감일 없음</option>
-          </select>
-          <select class="form-select" value=${sortMode} onChange=${e => setSortMode(e.target.value)}
-            title="컬럼 내 카드 정렬 (드래그는 컬럼 이동에만 사용)">
-            <option value="manual">수동 정렬</option>
-            <option value="due-asc">마감일 \u2191 (임박순)</option>
-            <option value="due-desc">마감일 \u2193 (먼 순)</option>
-            <option value="priority">우선순위순</option>
-          </select>
+          <${Dropdown}
+            wide
+            value=${filterProject}
+            onChange=${setFilterProject}
+            options=${[
+              { value: '', label: 'All Projects' },
+              ...projects.map(p => ({ value: p.id, label: p.name })),
+            ]}
+            ariaLabel="Project filter"
+          />
+          <${Dropdown}
+            wide
+            value=${filterPriority}
+            onChange=${setFilterPriority}
+            options=${[
+              { value: '', label: 'All Priorities' },
+              { value: 'low', label: 'Low' },
+              { value: 'medium', label: 'Medium' },
+              { value: 'high', label: 'High' },
+              { value: 'critical', label: 'Critical' },
+            ]}
+            ariaLabel="Priority filter"
+          />
+          <${Dropdown}
+            wide
+            value=${filterDue}
+            onChange=${setFilterDue}
+            options=${[
+              { value: '', label: '전체 마감일' },
+              { value: 'overdue', label: '\u23F0 지난 마감' },
+              { value: 'today', label: '오늘 마감' },
+              { value: 'this-week', label: '이번 주 (7일 이내)' },
+              { value: 'no-due', label: '마감일 없음' },
+            ]}
+            title="마감일 필터"
+            ariaLabel="Due date filter"
+          />
+          <${Dropdown}
+            wide
+            value=${sortMode}
+            onChange=${setSortMode}
+            options=${[
+              { value: 'manual', label: '수동 정렬' },
+              { value: 'due-asc', label: '마감일 \u2191 (임박순)' },
+              { value: 'due-desc', label: '마감일 \u2193 (먼 순)' },
+              { value: 'priority', label: '우선순위순' },
+            ]}
+            title="컬럼 내 카드 정렬 (드래그는 컬럼 이동에만 사용)"
+            ariaLabel="Sort mode"
+          />
         </div>
         <button class="primary" onClick=${() => setShowNewTask(true)}>+ New Task</button>
       </div>
@@ -423,10 +448,16 @@ export function CalendarView({ tasks, projects, agents, runs, reloadTasks, onOpe
         <${BoardModeTabs} active="calendar" />
         <div class="board-toolbar-spacer"></div>
         <div class="board-filter">
-          <select class="form-select" value=${filterProject} onChange=${e => setFilterProject(e.target.value)}>
-            <option value="">All Projects</option>
-            ${projects.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
-          </select>
+          <${Dropdown}
+            wide
+            value=${filterProject}
+            onChange=${setFilterProject}
+            options=${[
+              { value: '', label: 'All Projects' },
+              ...projects.map(p => ({ value: p.id, label: p.name })),
+            ]}
+            ariaLabel="Project filter"
+          />
         </div>
         <div class="calendar-nav">
           <button class="ghost" onClick=${goPrev} title="이전 달">\u2039</button>
