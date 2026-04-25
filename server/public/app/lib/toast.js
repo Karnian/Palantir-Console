@@ -16,9 +16,21 @@ const html = htm.bind(h);
 const toastState = { toasts: [], listeners: [] };
 let toastIdCounter = 0;
 
+// Phase J (2026-04-26): cap the visible stack at 5. Without this, a
+// burst of SSE error toasts (e.g. 30+ failures in a flapping connection)
+// would pile up and either off-screen or, with the new container max-
+// height + overflow-y, swallow keyboard focus inside the toast region.
+// New toasts win — when the stack is full the OLDEST entry is dropped
+// so the newest signal stays visible. The 5s auto-dismiss timer still
+// runs per toast, so a single transient error self-cleans on its own.
+const TOAST_STACK_CAP = 5;
+
 export function addToast(message, type = 'error') {
   const id = ++toastIdCounter;
-  toastState.toasts = [...toastState.toasts, { id, message, type }];
+  const next = [...toastState.toasts, { id, message, type }];
+  toastState.toasts = next.length > TOAST_STACK_CAP
+    ? next.slice(next.length - TOAST_STACK_CAP)
+    : next;
   toastState.listeners.forEach(fn => fn(toastState.toasts));
   // Auto-dismiss after 5s
   setTimeout(() => {

@@ -11,6 +11,7 @@ const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
 import { formatTime } from '../lib/format.js';
+import { renderMarkdown } from '../lib/markdown.js';
 import { Modal } from './Modal.js';
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -21,11 +22,14 @@ const MESSAGE_LIMIT_STEP = 40;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+// Phase J: route through the shared `renderMarkdown` helper so this
+// panel uses the same `breaks + gfm` flags + DOMPurify config as the
+// rest of the app. The earlier inline `marked.parse(...)` call dropped
+// `gfm` and skipped the helper's escape fallback for environments
+// where marked/DOMPurify haven't loaded.
 function renderMarkdownContent(raw) {
-  if (window.marked && window.DOMPurify) {
-    return window.DOMPurify.sanitize(window.marked.parse(raw, { breaks: true }));
-  }
-  return null; // caller will use textContent fallback
+  if (raw == null) return '';
+  return renderMarkdown(raw);
 }
 
 function fingerprintMessages(messages) {
