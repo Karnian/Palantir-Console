@@ -113,13 +113,13 @@ function PresetModal({ open, onClose, preset, pluginRefs, templates, onSaved }) 
       </div>
       <div class="modal-body">
           <div class="form-field">
-            <label class="form-label">Name</label>
-            <input class="form-input" value=${name} onInput=${e => setName(e.target.value)}
+            <label class="form-label" for="preset-name">Name</label>
+            <input id="preset-name" class="form-input" value=${name} onInput=${e => setName(e.target.value)}
               placeholder="e.g. agent-olympus-isolated" />
           </div>
           <div class="form-field">
-            <label class="form-label">Description</label>
-            <input class="form-input" value=${description} onInput=${e => setDescription(e.target.value)} />
+            <label class="form-label" for="preset-description">Description</label>
+            <input id="preset-description" class="form-input" value=${description} onInput=${e => setDescription(e.target.value)} />
           </div>
           <div class="form-field">
             <label style=${{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -135,8 +135,8 @@ function PresetModal({ open, onClose, preset, pluginRefs, templates, onSaved }) 
           </div>
 
           <div class="form-field">
-            <label class="form-label">Base System Prompt (≤16KB, ${byteLen} bytes)</label>
-            <textarea class="form-textarea" rows="6" value=${basePrompt}
+            <label class="form-label" for="preset-base-prompt">Base System Prompt (≤16KB, ${byteLen} bytes)</label>
+            <textarea id="preset-base-prompt" class="form-textarea" rows="6" value=${basePrompt}
               onInput=${e => setBasePrompt(e.target.value)}
               style=${promptOverLimit ? { borderColor: 'var(--status-failed)' } : null}
               placeholder="Optional preset base prompt. Prepended to skill-pack sections." />
@@ -176,14 +176,14 @@ function PresetModal({ open, onClose, preset, pluginRefs, templates, onSaved }) 
           </div>
 
           <div class="form-field">
-            <label class="form-label">Min Claude Version (optional, semver)</label>
-            <input class="form-input" value=${minVersion}
+            <label class="form-label" for="preset-min-version">Min Claude Version (optional, semver)</label>
+            <input id="preset-min-version" class="form-input" value=${minVersion}
               onInput=${e => setMinVersion(e.target.value)}
               placeholder="e.g. 2.0.0" />
           </div>
           <div class="form-field">
-            <label class="form-label">Setting Sources (Tier 2 flag, default empty)</label>
-            <input class="form-input" value=${settingSources}
+            <label class="form-label" for="preset-setting-sources">Setting Sources (Tier 2 flag, default empty)</label>
+            <input id="preset-setting-sources" class="form-input" value=${settingSources}
               onInput=${e => setSettingSources(e.target.value)}
               placeholder="(empty = --setting-sources '')" />
           </div>

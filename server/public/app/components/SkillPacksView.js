@@ -169,28 +169,28 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
         </div>
           <div class="form-row">
             <div class="form-field" style=${{ flex: 1 }}>
-              <label class="form-label">Scope</label>
-              <${Dropdown} value=${scope} onChange=${setScope} options=${[
+              <label class="form-label" for="skill-pack-scope">Scope</label>
+              <${Dropdown} id="skill-pack-scope" value=${scope} onChange=${setScope} options=${[
                 { value: 'global', label: 'Global' },
                 { value: 'project', label: 'Project' },
               ]} />
             </div>
             ${scope === 'project' && html`
               <div class="form-field" style=${{ flex: 2 }}>
-                <label class="form-label">Project</label>
-                <select class="form-select" value=${projectId} onChange=${e => setProjectId(e.target.value)}>
+                <label class="form-label" for="skill-pack-project">Project</label>
+                <select id="skill-pack-project" class="form-select" value=${projectId} onChange=${e => setProjectId(e.target.value)}>
                   <option value="" disabled>Select Project...</option>
                   ${(projects || []).map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
                 </select>
               </div>
             `}
             <div class="form-field" style=${{ width: '80px' }}>
-              <label class="form-label">Icon</label>
-              <input class="form-input" value=${icon} onInput=${e => setIcon(e.target.value)} placeholder="\u2726" />
+              <label class="form-label" for="skill-pack-icon">Icon</label>
+              <input id="skill-pack-icon" class="form-input" value=${icon} onInput=${e => setIcon(e.target.value)} placeholder="\u2726" />
             </div>
             <div class="form-field" style=${{ width: '100px' }}>
-              <label class="form-label">Color</label>
-              <input class="form-input" value=${color} onInput=${e => setColor(e.target.value)} placeholder="#6fd4a0" />
+              <label class="form-label" for="skill-pack-color">Color</label>
+              <input id="skill-pack-color" class="form-input" value=${color} onInput=${e => setColor(e.target.value)} placeholder="#6fd4a0" />
             </div>
           </div>
 
@@ -209,14 +209,14 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
 
           ${activeTab === 'prompt' && html`
             <div class="form-field">
-              <label class="form-label">Full Prompt</label>
-              <textarea class="form-textarea" rows="8" value=${promptFull}
+              <label class="form-label" for="skill-pack-prompt-full">Full Prompt</label>
+              <textarea id="skill-pack-prompt-full" class="form-textarea" rows="8" value=${promptFull}
                 onInput=${e => setPromptFull(e.target.value)}
                 placeholder="Full skill instructions for the agent..." />
             </div>
             <div class="form-field">
-              <label class="form-label">Compact Prompt (optional)${estimatedTokensCompact !== null ? ` (~${estimatedTokensCompact} tok)` : ''}</label>
-              <textarea class="form-textarea" rows="3" value=${promptCompact}
+              <label class="form-label" for="skill-pack-prompt-compact">Compact Prompt (optional)${estimatedTokensCompact !== null ? ` (~${estimatedTokensCompact} tok)` : ''}</label>
+              <textarea id="skill-pack-prompt-compact" class="form-textarea" rows="3" value=${promptCompact}
                 onInput=${e => setPromptCompact(e.target.value)}
                 placeholder="Shortened version for multi-skill token budget..." />
             </div>
@@ -226,8 +226,8 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
             <div class="skill-mcp-section">
               ${availableTemplates.length > 0 && html`
                 <div class="form-field">
-                  <label class="form-label">Add MCP Server</label>
-                  <select class="form-select" onChange=${e => { addMcpAlias(e.target.value); e.target.value = ''; }}>
+                  <label class="form-label" for="skill-pack-add-mcp">Add MCP Server</label>
+                  <select id="skill-pack-add-mcp" class="form-select" onChange=${e => { addMcpAlias(e.target.value); e.target.value = ''; }}>
                     <option value="">Select template...</option>
                     ${availableTemplates.map(t => html`<option key=${t.alias} value=${t.alias}>${t.alias} — ${t.description || ''}</option>`)}
                   </select>
@@ -268,8 +268,8 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
                 `;
               })}
               <div class="form-field" style=${{ marginTop: '8px' }}>
-                <label class="form-label">Conflict Policy</label>
-                <select class="form-select" value=${conflictPolicy} onChange=${e => setConflictPolicy(e.target.value)}>
+                <label class="form-label" for="skill-pack-conflict">Conflict Policy</label>
+                <select id="skill-pack-conflict" class="form-select" value=${conflictPolicy} onChange=${e => setConflictPolicy(e.target.value)}>
                   <option value="warn">Warn (higher priority wins)</option>
                   <option value="fail">Fail (block execution)</option>
                 </select>
