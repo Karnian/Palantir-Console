@@ -79,6 +79,12 @@
      `.main-area { padding-bottom: var(--mobile-nav-height) }` resolves even
      outside the media query (tests check for fallback-less var() parity). */
   --mobile-nav-height: 56px;
+  /* Phase I (2026-04-26): added `--radius-xs` so the dozens of `4px`
+     border-radius literals across the codebase can collapse onto a
+     single token. `4px` was the most common hardcoded radius — `8px`
+     and `11px` are still ad-hoc and may be picked up in a later
+     pass. The existing `--radius-sm/md/lg` scale is unchanged. */
+  --radius-xs: 4px;
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
