@@ -22,16 +22,31 @@ const html = htm.bind(h);
 //          can announce a visible label without forcing every call site
 //          onto `aria-label`. Phase G (2026-04-26) added this so SkillPack /
 //          Preset / Agent modal Dropdowns can pair with their visible labels.
+
+// Phase I (2026-04-26): each Dropdown gets a stable instance id used as
+// the prefix for its option ids. We need stable ids because the listbox
+// container points at the active option via `aria-activedescendant` so
+// AT users can hear the option text as Arrow keys move the highlight —
+// without explicit ids the listbox would announce nothing.
+let _dropdownIdSeq = 0;
+
 export function Dropdown({ id, value, onChange, options, disabled, style, className, title, ariaLabel, wide }) {
   const [open, setOpen] = useState(false);
   const [menuPos, setMenuPos] = useState(null); // { top, left, width, flipUp }
   const [hoverIdx, setHoverIdx] = useState(-1);
   const buttonRef = useRef(null);
   const menuRef = useRef(null);
+  // Stable per-instance id used for option ids (see comment above the
+  // module). The id is computed once on first render via useMemo so
+  // re-renders don't shuffle option ids while the listbox is open.
+  const instanceId = useMemo(() => `dropdown-${++_dropdownIdSeq}`, []);
 
   // Selectable options only (separators are skipped for value matching + keyboard nav)
   const selectableOptions = options.filter(o => !o.separator);
   const selected = selectableOptions.find(o => o.value === value);
+  const activeOptionId = hoverIdx >= 0 && hoverIdx < selectableOptions.length
+    ? `${instanceId}-opt-${hoverIdx}`
+    : undefined;
 
   // Compute fixed-position coordinates from the trigger's bounding box.
   // Using `position: fixed` (not absolute) escapes the modal-body's scroll
@@ -168,6 +183,9 @@ export function Dropdown({ id, value, onChange, options, disabled, style, classN
       ${open && menuPos && html`
         <div class="dropdown-menu ${menuPos.flipUp ? 'flip-up' : ''}"
           ref=${menuRef} role="listbox" tabindex="-1"
+          aria-activedescendant=${activeOptionId}
+          aria-labelledby=${id || undefined}
+          aria-label=${!id && ariaLabel ? ariaLabel : undefined}
           style=${`position: fixed; top: ${menuPos.top}px; left: ${menuPos.left}px; width: ${menuPos.width}px; ${menuPos.flipUp ? 'transform: translateY(-100%);' : ''}`}
           onKeyDown=${handleMenuKey}>
           ${options.map((opt) => {
@@ -180,8 +198,10 @@ export function Dropdown({ id, value, onChange, options, disabled, style, classN
             const isHover = si === hoverIdx;
             return html`
               <button type="button" key=${opt.value}
+                id=${`${instanceId}-opt-${si}`}
                 role="option"
                 aria-selected=${isSelected}
+                tabindex="-1"
                 class="dropdown-item ${isSelected ? 'selected' : ''} ${isHover ? 'hover' : ''}"
                 onMouseEnter=${() => setHoverIdx(si)}
                 onClick=${() => commit(opt.value)}>
