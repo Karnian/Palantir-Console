@@ -1105,6 +1105,35 @@ body {
 }
 
 /* Left nav sidebar */
+/* Phase H: WCAG 2.4.1 Bypass Blocks — visible-on-focus skip link.
+   Stays off-screen until keyboard focus lands on it (the first
+   `Tab` press from a fresh page load), then slides into view at the
+   top-left so users can jump past the sidebar nav. Uses a high
+   z-index so it floats above the bottom nav (100), drift drawer
+   backdrop (900), and command-palette overlay (1000). */
+.skip-link {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 8px 14px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  z-index: 1100;
+  transform: translateY(-200%);
+  transition: transform 0.15s ease;
+}
+.skip-link:focus,
+.skip-link:focus-visible {
+  transform: translateY(0);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .nav-sidebar {
   background: var(--bg-surface);
   border-right: 1px solid var(--border);
@@ -1132,8 +1161,11 @@ body {
 }
 
 .nav-item {
-  width: 42px;
-  height: 42px;
+  /* Phase H: bumped from 42×42 → 44×44 to meet WCAG 2.5.8 (Target Size
+     Minimum, AAA but recommended at AA for primary nav). The tooltip
+     positioning + sidebar layout absorb the extra 2px without overflow. */
+  width: 44px;
+  height: 44px;
   border-radius: var(--radius-md);
   display: grid;
   place-items: center;
@@ -1177,8 +1209,17 @@ body {
   z-index: 100;
 }
 
-.nav-item:hover .nav-tooltip {
-  display: block;
+/* Phase H: tooltip is a desktop-sidebar affordance only. Both hover and
+   focus-visible reveals are scoped to the ≥961px breakpoint that owns the
+   left-rail layout. Without this, the tooltip selectors (specificity 0,2,1)
+   would win against the responsive `.nav-tooltip { display: none }` rules
+   at 1368 / 1443 and pop the tooltip off the bottom-bar button — visible
+   even to hover-capable touch laptops. */
+@media (min-width: 961px) {
+  .nav-item:hover .nav-tooltip,
+  .nav-item:focus-visible .nav-tooltip {
+    display: block;
+  }
 }
 
 .nav-spacer {
@@ -1262,12 +1303,22 @@ body {
   50% { opacity: 0.4; }
 }
 
-/* Main content area (right of nav) */
+/* Main content area (right of nav).
+   Phase H: now a `<main>` landmark with `id="main-content"` and
+   `tabIndex="-1"`. The skip link points here. The `:focus` outline
+   from the global `*:focus-visible` rule looks like a stray border
+   on a layout container, so we suppress it for the main element
+   itself — the actual interactive children inside still keep their
+   own focus rings. */
 .main-area {
   display: grid;
   min-height: 0;
   height: 100%;
   overflow: hidden;
+}
+.main-area:focus,
+.main-area:focus-visible {
+  outline: none;
 }
 
 /* Sessions view uses the classic 2-col layout */
