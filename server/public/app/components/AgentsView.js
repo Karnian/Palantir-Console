@@ -98,8 +98,8 @@ function AgentModal({ open, onClose, agent, onSaved }) {
           <input id="agent-name" class="form-input" value=${name} onInput=${e => setName(e.target.value)} placeholder="Agent name" />
           </div>
           <div class="form-field">
-            <label class="form-label">Type</label>
-            <select class="form-select" value=${type} onChange=${e => {
+            <label class="form-label" for="agent-type">Type</label>
+            <select id="agent-type" class="form-select" value=${type} onChange=${e => {
               const t = e.target.value;
               setType(t);
               if (!agent) {
@@ -121,28 +121,28 @@ function AgentModal({ open, onClose, agent, onSaved }) {
             </select>
           </div>
           <div class="form-field">
-            <label class="form-label">Command</label>
-            <input class="form-input" value=${command} onInput=${e => setCommand(e.target.value)} placeholder="e.g. claude" />
+            <label class="form-label" for="agent-command">Command</label>
+            <input id="agent-command" class="form-input" value=${command} onInput=${e => setCommand(e.target.value)} placeholder="e.g. claude" />
           </div>
           <div class="form-field">
-            <label class="form-label">Args Template</label>
-            <input class="form-input" value=${argsTemplate} onInput=${e => setArgsTemplate(e.target.value)} placeholder="e.g. --model {{model}}" />
+            <label class="form-label" for="agent-args">Args Template</label>
+            <input id="agent-args" class="form-input" value=${argsTemplate} onInput=${e => setArgsTemplate(e.target.value)} placeholder="e.g. --model {{model}}" />
           </div>
           <div class="form-field">
-            <label class="form-label">Icon</label>
-            <input class="form-input" value=${icon} onInput=${e => setIcon(e.target.value)} placeholder="Emoji or symbol" />
+            <label class="form-label" for="agent-icon">Icon</label>
+            <input id="agent-icon" class="form-input" value=${icon} onInput=${e => setIcon(e.target.value)} placeholder="Emoji or symbol" />
           </div>
           <div class="form-field">
-            <label class="form-label">Color</label>
-            <input class="form-input" value=${color} onInput=${e => setColor(e.target.value)} placeholder="#6fd4a0" />
+            <label class="form-label" for="agent-color">Color</label>
+            <input id="agent-color" class="form-input" value=${color} onInput=${e => setColor(e.target.value)} placeholder="#6fd4a0" />
           </div>
           <div class="form-field">
-            <label class="form-label">Max Concurrent</label>
-            <input class="form-input" type="number" min="1" value=${maxConcurrent} onInput=${e => setMaxConcurrent(e.target.value)} />
+            <label class="form-label" for="agent-max-concurrent">Max Concurrent</label>
+            <input id="agent-max-concurrent" class="form-input" type="number" min="1" value=${maxConcurrent} onInput=${e => setMaxConcurrent(e.target.value)} />
           </div>
           <div class="form-field">
-            <label class="form-label">MCP Tools</label>
-            <textarea class="form-input" rows="3" value=${mcpTools}
+            <label class="form-label" for="agent-mcp-tools">MCP Tools</label>
+            <textarea id="agent-mcp-tools" class="form-input" rows="3" value=${mcpTools}
               onInput=${e => setMcpTools(e.target.value)}
               placeholder="mcp__claude_ai_Slack__*\nmcp__claude_ai_Notion__*" />
             <small class="form-hint">One pattern per line. Supports wildcards (e.g. mcp__slack__*)</small>
