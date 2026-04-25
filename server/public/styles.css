@@ -3759,8 +3759,19 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  /* `pointer-events: none` keeps clicks falling through the gaps
+     between toasts; individual `.toast` entries override back to
+     `auto` so they remain interactive. */
   pointer-events: none;
   max-width: 380px;
+  /* Phase J: stack height is bounded by the `TOAST_STACK_CAP = 5` in
+     `app/lib/toast.js` — five 60 px-ish entries comfortably fit on a
+     ≥600 px viewport. We intentionally do NOT add `max-height` +
+     `overflow-y: hidden` on the container itself: with this column
+     layout the newest toast sits at the bottom, and a hidden
+     overflow would clip the *new* entry rather than the *old* one,
+     reversing the "newest signal stays visible" intent. The cap is
+     the only safeguard needed in practice. */
 }
 
 .toast {

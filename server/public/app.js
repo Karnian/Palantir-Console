@@ -179,6 +179,42 @@ function App() {
     },
   });
 
+  // Phase J: surface SSE disconnects + recoveries as toasts.
+  //
+  // Single 10 s timer covers both the page-load grace window and the
+  // sustained-disconnect threshold. On mount `sseConnected` is `false`
+  // because the EventSource hasn't opened yet, but a healthy server
+  // sets `connected: true` within ~1 s — so the timer is started right
+  // away and harmlessly cleared by the first successful connect. If
+  // the server is down or the network is broken at page load, the
+  // 10 s window expires and the toast surfaces. After a successful
+  // first connect, any later disconnect path retains the same
+  // semantics: 10 s of unrecovered disconnect → toast.
+  //
+  // Recovery toast is only emitted if a disconnect toast was actually
+  // surfaced — silent flapping reconnects below the 10 s threshold
+  // produce no notifications either way.
+  const _sseDisconnectTimerRef = useRef(null);
+  const _sseDisconnectShownRef = useRef(false);
+  useEffect(() => {
+    if (sseConnected) {
+      if (_sseDisconnectTimerRef.current) {
+        clearTimeout(_sseDisconnectTimerRef.current);
+        _sseDisconnectTimerRef.current = null;
+      }
+      if (_sseDisconnectShownRef.current) {
+        addToast('SSE 연결 복구됨', 'success');
+        _sseDisconnectShownRef.current = false;
+      }
+    } else if (!_sseDisconnectTimerRef.current && !_sseDisconnectShownRef.current) {
+      _sseDisconnectTimerRef.current = setTimeout(() => {
+        addToast('SSE 연결 끊김 — 재시도 중...', 'error');
+        _sseDisconnectShownRef.current = true;
+        _sseDisconnectTimerRef.current = null;
+      }, 10000);
+    }
+  }, [sseConnected]);
+
   // Global keyboard shortcuts
   useEffect(() => {
     const handler = (e) => {
