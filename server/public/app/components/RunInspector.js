@@ -22,6 +22,7 @@ const html = htm.bind(h);
 import { apiFetch } from '../lib/api.js';
 import { addToast } from '../lib/toast.js';
 import { timeAgo } from '../lib/format.js';
+import { useEscape } from '../lib/hooks.js';
 
 /**
  * R2-B.2: Colorise a unified diff string into per-line spans so +/-
@@ -236,20 +237,23 @@ export function RunInspector({ run, onClose }) {
   // has at least been laid out; microtasks run before paint, which
   // meant a screen reader could announce "focused" on a panel the
   // user hadn't seen arrive yet.
+  //
+  // Phase F: ESC handling moved off this component's bespoke window
+  // keydown into the shared `useEscape` stack so a Cmd+K palette opened
+  // on top of the inspector closes the palette first, then the
+  // inspector. The focus restore + initial focus stay here as their own
+  // effect — non-modal semantics and aria-modal absence are unchanged.
+  useEscape(!!run, onClose);
+
   useEffect(() => {
     if (!run) return;
     const previouslyFocused = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
-    const onKeyDown = (e) => {
-      if (e.key === 'Escape') { onClose && onClose(); }
-    };
-    window.addEventListener('keydown', onKeyDown);
     const raf = requestAnimationFrame(() => {
       slideoverRef.current?.focus?.();
     });
     return () => {
-      window.removeEventListener('keydown', onKeyDown);
       cancelAnimationFrame(raf);
       // Only restore focus if the previously focused element is still
       // in the DOM and is not the <body> fallback. This avoids fighting

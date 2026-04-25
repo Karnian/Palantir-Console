@@ -13,6 +13,7 @@ import { addToast } from '../lib/toast.js';
 import { dueDateMeta, useNowTick } from '../lib/dueDate.js';
 import { NewTaskModal, ExecuteModal, TaskDetailPanel } from './TaskModals.js';
 import { Dropdown } from './Dropdown.js';
+import { Modal } from './Modal.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Kanban Board View — internal constants
@@ -592,41 +593,37 @@ export function DirectoryPicker({ value, onSelect }) {
       </div>
     </div>
 
-    ${open && html`
-      <div class="directory-modal">
-        <div class="directory-backdrop" onClick=${() => setOpen(false)}></div>
-        <div class="directory-panel">
-          <div class="directory-header">
-            <span class="directory-title">Select Directory</span>
-            <button class="ghost" onClick=${() => setOpen(false)}>Close</button>
-          </div>
-          <div class="directory-path">${currentPath || '...'}</div>
-          <div class="directory-toggle">
-            <label class="directory-toggle-label">
-              <input type="checkbox" checked=${showHidden} onChange=${e => setShowHidden(e.target.checked)} />
-              Show hidden
-            </label>
-          </div>
-          <div class="directory-list" style="max-height: 300px;">
-            ${currentPath !== rootPath && html`
-              <button type="button" class="directory-item" onClick=${handleUp}>⬆ ..</button>
-            `}
-            ${loading && html`<div style="color: var(--text-secondary); font-size: 13px; padding: 8px;">Loading...</div>`}
-            ${!loading && dirs.length === 0 && html`
-              <div style="color: var(--text-secondary); font-size: 13px; padding: 8px;">No subfolders.</div>
-            `}
-            ${!loading && dirs.map(d => html`
-              <button key=${d.path} type="button" class="directory-item" onClick=${() => loadDir(d.path)}>
-                📁 ${d.name}
-              </button>
-            `)}
-          </div>
-          <div style="display: flex; justify-content: flex-end; gap: 8px; padding-top: 4px;">
-            <button class="ghost" onClick=${() => setOpen(false)}>Cancel</button>
-            <button class="primary" onClick=${handleConfirm}>Select</button>
-          </div>
-        </div>
+    <${Modal} open=${!!open} onClose=${() => setOpen(false)}
+              labelledBy="dir-picker-title" panelClass="directory-panel">
+      <div class="directory-header">
+        <h2 class="directory-title" id="dir-picker-title">Select Directory</h2>
+        <button class="ghost" onClick=${() => setOpen(false)}>Close</button>
       </div>
-    `}
+      <div class="directory-path">${currentPath || '...'}</div>
+      <div class="directory-toggle">
+        <label class="directory-toggle-label">
+          <input type="checkbox" checked=${showHidden} onChange=${e => setShowHidden(e.target.checked)} />
+          Show hidden
+        </label>
+      </div>
+      <div class="directory-list" style="max-height: 300px;">
+        ${currentPath !== rootPath && html`
+          <button type="button" class="directory-item" onClick=${handleUp}>⬆ ..</button>
+        `}
+        ${loading && html`<div style="color: var(--text-secondary); font-size: 13px; padding: 8px;">Loading...</div>`}
+        ${!loading && dirs.length === 0 && html`
+          <div style="color: var(--text-secondary); font-size: 13px; padding: 8px;">No subfolders.</div>
+        `}
+        ${!loading && dirs.map(d => html`
+          <button key=${d.path} type="button" class="directory-item" onClick=${() => loadDir(d.path)}>
+            📁 ${d.name}
+          </button>
+        `)}
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: 8px; padding-top: 4px;">
+        <button class="ghost" onClick=${() => setOpen(false)}>Cancel</button>
+        <button class="primary" onClick=${handleConfirm}>Select</button>
+      </div>
+    </Modal>
   `;
 }

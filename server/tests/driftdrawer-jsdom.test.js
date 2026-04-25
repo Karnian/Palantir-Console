@@ -34,6 +34,15 @@ function createEnv() {
   // DriftDrawer calls window.timeAgo at render time
   env.context.timeAgo = () => '1m ago';
 
+  // Phase F: DriftDrawer now imports `useEscape` from ../lib/hooks.js so it
+  // joins the shared ESC stack. The jsdom loader strips relative imports,
+  // so we provide a no-op stub here; the panel-local keydown trap (which
+  // these tests actually exercise) still binds normally and the stripped
+  // hook just becomes a noop. The behavioural guarantee that ESC does NOT
+  // fire from the drawer's own keydown handler — the focus of test (d) —
+  // remains valid because the stub never calls onClose either.
+  env.context.useEscape = () => {};
+
   // Load DriftDrawer via manual transform (it pre-dates the generic loader
   // but loadComponent works fine — we just need the timeAgo stub above).
   env.loadComponent('DriftDrawer');

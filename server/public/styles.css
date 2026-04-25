@@ -192,44 +192,24 @@ body {
   box-shadow: 0 0 0 2px var(--accent-muted);
 }
 
-.trash-modal {
-  position: fixed;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  z-index: 20;
-}
-
-.trash-modal[hidden] {
-  display: none;
-}
-
-.trash-backdrop {
-  position: absolute;
-  inset: 0;
-  background: var(--bg-overlay);
-  backdrop-filter: blur(4px);
-}
-
-.trash-panel {
-  position: relative;
-  z-index: 1;
-  border: 1px solid var(--border-hover);
-  border-radius: var(--radius-lg);
-  background: var(--bg-surface);
+/* Phase F (2026-04-26): trash/usage/directory/child modals migrated onto
+   the shared Modal primitive (`.modal-overlay` + `.modal-panel`). The
+   panel-specific overrides keep their original padding / font-size /
+   width / max-height by raising specificity to `.modal-panel.<X>` so
+   they win against the later `.modal-panel` definition. The previous
+   `.trash-modal` + `.trash-backdrop` + `.directory-modal` +
+   `.directory-backdrop` overlay rules are now dead — the Modal
+   primitive owns those layers. */
+.modal-panel.trash-panel {
   padding: 14px 16px 12px;
-  display: flex;
-  flex-direction: column;
   gap: 12px;
   font-size: 12px;
   color: var(--text-secondary);
   width: min(520px, 90vw);
   max-height: min(70vh, 520px);
-  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
-  overflow: hidden;
 }
 
-.child-panel {
+.modal-panel.child-panel {
   width: min(820px, 92vw);
   max-height: min(78vh, 720px);
 }
@@ -489,38 +469,16 @@ body {
   padding-right: 2px;
 }
 
-.directory-modal {
-  position: fixed;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  z-index: 25;
-}
-
-.directory-modal[hidden] {
-  display: none;
-}
-
-.directory-backdrop {
-  position: absolute;
-  inset: 0;
-  background: var(--bg-overlay);
-  backdrop-filter: blur(6px);
-}
-
-.directory-panel {
-  position: relative;
-  z-index: 1;
+/* Phase F: directory picker now wraps in Modal primitive — only the
+   panel-specific layout overrides remain. The flex column on .modal-panel
+   becomes a CSS grid here so the toggle/list/actions rows stay vertically
+   aligned via gap (the legacy .directory-panel used grid). */
+.modal-panel.directory-panel {
   width: min(560px, 92vw);
   max-height: min(72vh, 560px);
   display: grid;
   gap: 12px;
   padding: 16px 18px;
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border-hover);
-  background: var(--bg-surface);
-  box-shadow: 0 20px 70px rgba(0, 0, 0, 0.5);
-  overflow: hidden;
 }
 
 .directory-header {
@@ -3748,6 +3706,24 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 /* =============================================
    Command Palette
    ============================================= */
+
+/* Phase F: dedicated overlay (split out of `.modal-overlay`) so the palette
+   can stack above the DriftDrawer (z-index 900). With a single shared
+   `.modal-overlay` (z-index 200), opening Cmd+K on top of the drawer left
+   the palette visually behind it while ESC still treated palette as the
+   topmost layer — visual stack and ESC stack must agree. The earlier
+   `.modal-overlay` chrome had no background of its own (the `.modal-
+   backdrop` div was the dimmer), and the palette never rendered that
+   backdrop — so this overlay is intentionally transparent to preserve the
+   pre-Phase-F visual where the palette floats over the dashboard without
+   dimming it. */
+.command-palette-overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  z-index: 1000;
+}
 
 .command-palette {
   position: relative;

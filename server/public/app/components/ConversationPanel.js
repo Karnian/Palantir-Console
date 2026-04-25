@@ -11,6 +11,7 @@ const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
 import { formatTime } from '../lib/format.js';
+import { Modal } from './Modal.js';
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -352,20 +353,16 @@ export function ConversationPanel({ sessionId, session, onTitleUpdate }) {
   }
 
   return html`
-    ${childModal && html`
-      <div class="trash-modal" data-role="child-modal">
-        <div class="trash-backdrop" onClick=${closeChildModal}></div>
-        <div class="trash-panel child-panel" role="dialog">
-          <div class="trash-header">
-            <h2 class="trash-title">Agent Activity</h2>
-            <button class="ghost" onClick=${closeChildModal}>Close</button>
-          </div>
-          <div class="child-session-body" data-role="child-body">
-            <${ChildSessionViewer} childIds=${childModal.childSessionIds} />
-          </div>
-        </div>
+    <${Modal} open=${!!childModal} onClose=${closeChildModal}
+              labelledBy="child-modal-title" panelClass="trash-panel child-panel">
+      <div class="trash-header" data-role="child-modal">
+        <h2 class="trash-title" id="child-modal-title">Agent Activity</h2>
+        <button class="ghost" onClick=${closeChildModal}>Close</button>
       </div>
-    `}
+      <div class="child-session-body" data-role="child-body">
+        ${childModal && html`<${ChildSessionViewer} childIds=${childModal.childSessionIds} />`}
+      </div>
+    </Modal>
     <section class="conversation" data-role="conversation" ref=${conversationRef}>
       <div class="message-controls" data-role="load-more-wrap" hidden=${!hasMore || !sessionId}>
         <button class="ghost load-more" data-action="load-more"

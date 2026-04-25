@@ -63,6 +63,12 @@ function createEnv() {
   // Inject stripped-import stubs
   env.context.timeAgo = () => '5m ago';
   env.context.addToast = () => {};
+  // Phase F: RunInspector now joins the shared `useEscape` stack so its
+  // ESC handler races on the same LIFO as Modal / DriftDrawer / palette.
+  // The jsdom-preact loader strips `import ... from '../lib/...'`, so we
+  // provide a no-op stub. The preset-dedup tests don't exercise ESC, so
+  // a stub is sufficient.
+  env.context.useEscape = () => {};
 
   // Load RunInspector (strips apiFetch/addToast/timeAgo imports, replaces vendor imports)
   env.loadComponent('RunInspector');
