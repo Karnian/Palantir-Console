@@ -10,6 +10,7 @@ import { apiFetch } from '../lib/api.js';
 import { formatTime } from '../lib/format.js';
 import { SessionList } from './SessionList.js';
 import { ConversationPanel } from './ConversationPanel.js';
+import { Modal } from './Modal.js';
 
 // ── Usage helpers ───────────────────────────────────────────────────────────
 
@@ -81,33 +82,30 @@ function UsageModal({ onClose }) {
   });
 
   return html`
-    <div class="trash-modal" data-role="usage-modal">
-      <div class="trash-backdrop" onClick=${onClose}></div>
-      <div class="trash-panel" role="dialog">
-        <div class="trash-header">
-          <h2 class="trash-title">Codex Status</h2>
-          <div class="usage-actions">
-            <button class="ghost" onClick=${load}>Refresh</button>
-            <button class="ghost" onClick=${onClose}>Close</button>
-          </div>
-        </div>
-        <div class="usage-output" data-role="usage-output">
-          ${error && html`<div>${error}</div>`}
-          ${!error && !providers && 'Loading...'}
-          ${!error && providers && providers.length === 0 && 'No registered providers with usage data.'}
-          ${!error && providers && providers.length > 0 && html`
-            <div class="usage-registered">
-              ${ordered.length ? `Registered: ${ordered.join(', ')}` : 'Registered: none'}
-            </div>
-            <div class="usage-cards">
-              ${providers.map((provider, pi) => html`
-                <${UsageCard} key=${pi} provider=${provider} />
-              `)}
-            </div>
-          `}
+    <${Modal} open=${true} onClose=${onClose} labelledBy="usage-modal-title" panelClass="trash-panel">
+      <div class="trash-header" data-role="usage-modal">
+        <h2 class="trash-title" id="usage-modal-title">Codex Status</h2>
+        <div class="usage-actions">
+          <button class="ghost" onClick=${load}>Refresh</button>
+          <button class="ghost" onClick=${onClose}>Close</button>
         </div>
       </div>
-    </div>
+      <div class="usage-output" data-role="usage-output">
+        ${error && html`<div>${error}</div>`}
+        ${!error && !providers && 'Loading...'}
+        ${!error && providers && providers.length === 0 && 'No registered providers with usage data.'}
+        ${!error && providers && providers.length > 0 && html`
+          <div class="usage-registered">
+            ${ordered.length ? `Registered: ${ordered.join(', ')}` : 'Registered: none'}
+          </div>
+          <div class="usage-cards">
+            ${providers.map((provider, pi) => html`
+              <${UsageCard} key=${pi} provider=${provider} />
+            `)}
+          </div>
+        `}
+      </div>
+    </Modal>
   `;
 }
 
@@ -189,30 +187,27 @@ function TrashModal({ onClose, onSessionsChanged }) {
   }, [load]);
 
   return html`
-    <div class="trash-modal" data-role="trash-modal">
-      <div class="trash-backdrop" onClick=${onClose}></div>
-      <div class="trash-panel" role="dialog">
-        <div class="trash-header">
-          <h2 class="trash-title">Trashed Sessions</h2>
-          <button class="ghost" onClick=${onClose}>Close</button>
-        </div>
-        <div class="trash-list" data-role="trash-list">
-          ${items.length === 0 && html`<div class="trash-empty">No trashed sessions.</div>`}
-          ${items.map(item => html`
-            <div key=${item.trashId} class="trash-item">
-              <div class="trash-meta">
-                <div>${item.session?.title || item.session?.slug || item.session?.id || 'Untitled'}</div>
-                <div>Trashed: ${item.trashedAt ? formatTime(item.trashedAt) : 'Unknown'}</div>
-              </div>
-              <div class="trash-actions">
-                <button class="ghost" onClick=${() => restore(item.trashId)}>Restore</button>
-                <button class="ghost danger" onClick=${() => remove(item.trashId)}>Delete</button>
-              </div>
-            </div>
-          `)}
-        </div>
+    <${Modal} open=${true} onClose=${onClose} labelledBy="trash-modal-title" panelClass="trash-panel">
+      <div class="trash-header" data-role="trash-modal">
+        <h2 class="trash-title" id="trash-modal-title">Trashed Sessions</h2>
+        <button class="ghost" onClick=${onClose}>Close</button>
       </div>
-    </div>
+      <div class="trash-list" data-role="trash-list">
+        ${items.length === 0 && html`<div class="trash-empty">No trashed sessions.</div>`}
+        ${items.map(item => html`
+          <div key=${item.trashId} class="trash-item">
+            <div class="trash-meta">
+              <div>${item.session?.title || item.session?.slug || item.session?.id || 'Untitled'}</div>
+              <div>Trashed: ${item.trashedAt ? formatTime(item.trashedAt) : 'Unknown'}</div>
+            </div>
+            <div class="trash-actions">
+              <button class="ghost" onClick=${() => restore(item.trashId)}>Restore</button>
+              <button class="ghost danger" onClick=${() => remove(item.trashId)}>Delete</button>
+            </div>
+          </div>
+        `)}
+      </div>
+    </Modal>
   `;
 }
 
@@ -257,33 +252,30 @@ function DirectoryModal({ onSelect, onCancel }) {
   }, [currentPath, onSelect]);
 
   return html`
-    <div class="directory-modal" data-role="dir-modal">
-      <div class="directory-backdrop" onClick=${onCancel}></div>
-      <div class="directory-panel" role="dialog">
-        <div class="directory-header">
-          <h2 class="directory-title">Select Directory</h2>
-          <button class="ghost" onClick=${goUp} disabled=${!currentPath || currentPath === root}>Up</button>
-        </div>
-        <div class="directory-path" data-role="dir-path">${currentPath || '/'}</div>
-        <div class="directory-toggle">
-          <label class="directory-toggle-label">
-            <input type="checkbox" checked=${showHidden} onChange=${handleToggleHidden} />
-            <span>Show hidden folders</span>
-          </label>
-        </div>
-        <div class="directory-list" data-role="dir-list" role="list">
-          ${dirs.length === 0 && html`<div class="trash-empty">No subfolders.</div>`}
-          ${dirs.map(dir => html`
-            <button key=${dir.path} type="button" class="directory-item"
-                    onClick=${() => load(dir.path, showHidden)}>${dir.name}</button>
-          `)}
-        </div>
-        <div class="directory-actions">
-          <button class="primary" onClick=${handleConfirm}>Use this folder</button>
-          <button class="ghost" onClick=${onCancel}>Cancel</button>
-        </div>
+    <${Modal} open=${true} onClose=${onCancel} labelledBy="dir-modal-title" panelClass="directory-panel">
+      <div class="directory-header" data-role="dir-modal">
+        <h2 class="directory-title" id="dir-modal-title">Select Directory</h2>
+        <button class="ghost" onClick=${goUp} disabled=${!currentPath || currentPath === root}>Up</button>
       </div>
-    </div>
+      <div class="directory-path" data-role="dir-path">${currentPath || '/'}</div>
+      <div class="directory-toggle">
+        <label class="directory-toggle-label">
+          <input type="checkbox" checked=${showHidden} onChange=${handleToggleHidden} />
+          <span>Show hidden folders</span>
+        </label>
+      </div>
+      <div class="directory-list" data-role="dir-list" role="list">
+        ${dirs.length === 0 && html`<div class="trash-empty">No subfolders.</div>`}
+        ${dirs.map(dir => html`
+          <button key=${dir.path} type="button" class="directory-item"
+                  onClick=${() => load(dir.path, showHidden)}>${dir.name}</button>
+        `)}
+      </div>
+      <div class="directory-actions">
+        <button class="primary" onClick=${handleConfirm}>Use this folder</button>
+        <button class="ghost" onClick=${onCancel}>Cancel</button>
+      </div>
+    </Modal>
   `;
 }
 

@@ -186,13 +186,11 @@ function App() {
         setShowPalette(prev => !prev);
         return;
       }
-      // Esc: close any open modal/palette
-      if (e.key === 'Escape') {
-        if (showPalette) { setShowPalette(false); return; }
-        if (showDriftDrawer) { setShowDriftDrawer(false); return; }
-        if (inspectRun) { setInspectRun(null); return; }
-        return;
-      }
+      // Esc: every overlay (palette / drift drawer / RunInspector / Modal-
+      // primitive modals) now routes through the shared `useEscape` stack so
+      // the topmost one closes first. The earlier app-level fallbacks were
+      // racing the stack and could close more than one layer per press —
+      // Phase F removed them.
       // N: open new task modal only on board view (not in input/textarea, not when modal is open)
       const tag = (e.target.tagName || '').toLowerCase();
       const isInput = tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable;
@@ -209,7 +207,7 @@ function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [showPalette, inspectRun, showDriftDrawer]);
+  }, [showPalette, inspectRun]);
 
   const routeBase = route.split('/')[0];
 

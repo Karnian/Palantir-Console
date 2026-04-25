@@ -7,8 +7,16 @@ import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
 import { timeAgo } from '../lib/format.js';
+import { useEscape } from '../lib/hooks.js';
 
 export function DriftDrawer({ open, onClose, driftAudit, projects }) {
+  // Phase F: ESC handling joins the shared useEscape stack so a Cmd+K
+  // palette opened on top of the drawer closes the palette first, then
+  // the drawer on a second press — same LIFO semantics as the centered
+  // modals. The earlier app-level Escape branch (app.js global keydown)
+  // is removed in lockstep.
+  useEscape(!!open, onClose);
+
   // PR3b / P1-11: WCAG 2.2 AA a11y. Pre-PR3b the drawer had none of
   // the dialog semantics — no role, no aria-modal, no label wiring,
   // and tabbing out would land in the underlying dashboard which is
