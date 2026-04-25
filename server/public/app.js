@@ -64,10 +64,12 @@ function NavSidebar({ route, connected, attentionCount, onAttentionClick }) {
         <button
           key=${item.hash}
           class="nav-item ${route.split('/')[0] === item.hash ? 'active' : ''}"
+          aria-label=${item.label}
+          aria-current=${route.split('/')[0] === item.hash ? 'page' : undefined}
           onClick=${() => navigate(item.hash)}
         >
           ${item.icon}
-          <span class="nav-tooltip">${item.label}</span>
+          <span class="nav-tooltip" aria-hidden="true">${item.label}</span>
         </button>
       `)}
       <div class="nav-spacer"></div>
@@ -302,15 +304,27 @@ function App() {
 
   return html`
     <div class="v2-shell">
+      <a class="skip-link" href="#main-content" onClick=${(e) => {
+        // Phase H: hash routing reads location.hash directly (see
+        // app/lib/hooks/routing.js), so a literal `#main-content` jump
+        // would change the route to "main-content" and fall back to
+        // Dashboard via app.js's renderView default. Cancel the
+        // navigation and move keyboard focus to the main landmark
+        // ourselves — the link still works for assistive-tech users
+        // with JS disabled because the href anchor is preserved.
+        e.preventDefault();
+        const main = document.getElementById('main-content');
+        if (main) main.focus();
+      }}>본문으로 건너뛰기</a>
       <${NavSidebar}
         route=${route}
         connected=${sseConnected}
         attentionCount=${attentionCount}
         onAttentionClick=${() => navigate('manager')}
       />
-      <div class="main-area">
+      <main id="main-content" class="main-area" tabIndex="-1">
         ${renderView()}
-      </div>
+      </main>
       ${inspectRun && html`
         <${RunInspector}
           run=${inspectRun}

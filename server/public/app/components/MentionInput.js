@@ -181,6 +181,7 @@ export function MentionInput({ projects = [], inputRef: forwardedRef, onInput, o
         value=${value}
         onInput=${handleInput}
         onKeyDown=${handleKeyDown}
+        aria-multiline="true"
         ...${rest}
       />
       ${showPopup && html`
