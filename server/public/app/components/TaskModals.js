@@ -12,6 +12,7 @@ import { useEscape } from '../lib/hooks.js';
 import { formatTime, timeAgo } from '../lib/format.js';
 import { dueDateMeta } from '../lib/dueDate.js';
 import { Dropdown } from './Dropdown.js';
+import { Modal } from './Modal.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // New Task Modal
@@ -26,7 +27,6 @@ export function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
   const [dueDate, setDueDate] = useState('');
   const [recurrence, setRecurrence] = useState('');
   const [saving, setSaving] = useState(false);
-  useEscape(open, onClose);
 
   // Reset form state when modal opens
   useEffect(() => {
@@ -35,8 +35,6 @@ export function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
       setPriority('medium'); setAgentProfileId(''); setDueDate(''); setRecurrence('');
     }
   }, [open]);
-
-  if (!open) return null;
 
   const handleSubmit = async () => {
     if (!title.trim()) return;
@@ -65,70 +63,67 @@ export function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
   };
 
   return html`
-    <div class="modal-overlay">
-      <div class="modal-backdrop" onClick=${onClose}></div>
-      <div class="modal-panel">
-        <div class="modal-header">
-          <h2 class="modal-title">New Task</h2>
-          <button class="ghost" onClick=${onClose}>Close</button>
+    <${Modal} open=${open} onClose=${onClose} labelledBy="new-task-title">
+      <div class="modal-header">
+        <h2 class="modal-title" id="new-task-title">New Task</h2>
+        <button class="ghost" onClick=${onClose}>Close</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-field">
+          <label class="form-label" for="new-task-title-input">Title</label>
+          <input id="new-task-title-input" class="form-input" value=${title} onInput=${e => setTitle(e.target.value)} placeholder="Task title" />
         </div>
-        <div class="modal-body">
-          <div class="form-field">
-            <label class="form-label">Title</label>
-            <input class="form-input" value=${title} onInput=${e => setTitle(e.target.value)} placeholder="Task title" />
-          </div>
-          <div class="form-field">
-            <label class="form-label">Description</label>
-            <textarea class="form-textarea" value=${description} onInput=${e => setDescription(e.target.value)} placeholder="Optional description" rows="3"></textarea>
-          </div>
-          <div class="form-field">
-            <label class="form-label">Project</label>
-            <select class="form-select" value=${projectId} onChange=${e => setProjectId(e.target.value)}>
-              <option value="">None</option>
-              ${projects.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
-            </select>
-          </div>
-          <div class="form-field">
-            <label class="form-label">Priority</label>
-            <select class="form-select" value=${priority} onChange=${e => setPriority(e.target.value)}>
-              <option value="low">Low</option>
-              <option value="medium">Medium</option>
-              <option value="high">High</option>
-              <option value="critical">Critical</option>
-            </select>
-          </div>
-          <div class="form-field">
-            <label class="form-label">Agent Profile</label>
-            <select class="form-select" value=${agentProfileId} onChange=${e => setAgentProfileId(e.target.value)}>
-              <option value="">None</option>
-              ${agents.map(a => html`<option key=${a.id} value=${a.id}>${a.name}</option>`)}
-            </select>
-          </div>
-          <div class="form-field">
-            <label class="form-label">Due Date</label>
-            <input type="date" class="form-input" value=${dueDate}
-              onInput=${e => setDueDate(e.target.value)} />
-          </div>
-          <div class="form-field">
-            <label class="form-label">Recurrence</label>
-            <select class="form-select" value=${recurrence}
-              onChange=${e => setRecurrence(e.target.value)}
-              title="Without a due date, the task simply respawns when marked done">
-              <option value="">None</option>
-              <option value="daily">Daily</option>
-              <option value="weekly">Weekly</option>
-              <option value="monthly">Monthly</option>
-            </select>
-          </div>
+        <div class="form-field">
+          <label class="form-label" for="new-task-desc">Description</label>
+          <textarea id="new-task-desc" class="form-textarea" value=${description} onInput=${e => setDescription(e.target.value)} placeholder="Optional description" rows="3"></textarea>
         </div>
+        <div class="form-field">
+          <label class="form-label" for="new-task-project">Project</label>
+          <select id="new-task-project" class="form-select" value=${projectId} onChange=${e => setProjectId(e.target.value)}>
+            <option value="">None</option>
+            ${projects.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
+          </select>
+        </div>
+        <div class="form-field">
+          <label class="form-label" for="new-task-priority">Priority</label>
+          <select id="new-task-priority" class="form-select" value=${priority} onChange=${e => setPriority(e.target.value)}>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+            <option value="critical">Critical</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label class="form-label" for="new-task-agent">Agent Profile</label>
+          <select id="new-task-agent" class="form-select" value=${agentProfileId} onChange=${e => setAgentProfileId(e.target.value)}>
+            <option value="">None</option>
+            ${agents.map(a => html`<option key=${a.id} value=${a.id}>${a.name}</option>`)}
+          </select>
+        </div>
+        <div class="form-field">
+          <label class="form-label" for="new-task-due">Due Date</label>
+          <input id="new-task-due" type="date" class="form-input" value=${dueDate}
+            onInput=${e => setDueDate(e.target.value)} />
+        </div>
+        <div class="form-field">
+          <label class="form-label" for="new-task-recurrence">Recurrence</label>
+          <select id="new-task-recurrence" class="form-select" value=${recurrence}
+            onChange=${e => setRecurrence(e.target.value)}
+            title="Without a due date, the task simply respawns when marked done">
+            <option value="">None</option>
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+            <option value="monthly">Monthly</option>
+          </select>
+        </div>
+      </div>
         <div class="modal-footer">
           <button class="ghost" onClick=${onClose}>Cancel</button>
           <button class="primary" onClick=${handleSubmit} disabled=${saving || !title.trim()}>
             ${saving ? 'Creating...' : 'Create Task'}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   `;
 }
 
@@ -149,7 +144,6 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
   // Phase 10E: worker preset dropdown
   const [presets, setPresets] = useState([]);
   const [presetId, setPresetId] = useState('');
-  useEscape(open, onClose);
 
   useEffect(() => {
     if (open && task) {
@@ -192,8 +186,6 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
       })();
     }
   }, [open, task]);
-
-  if (!open || !task) return null;
 
   const selectedAgent = agents.find(a => a.id === agentProfileId);
   const isClaudeAgent = selectedAgent?.type === 'claude-code';
@@ -268,30 +260,28 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
   };
 
   return html`
-    <div class="modal-overlay">
-      <div class="modal-backdrop" onClick=${onClose}></div>
-      <div class="modal-panel" style=${{ maxWidth: '640px' }}>
-        <div class="modal-header">
-          <h2 class="modal-title">Execute Task: ${task.title}</h2>
-          <button class="ghost" onClick=${onClose}>Close</button>
+    <${Modal} open=${open && !!task} onClose=${onClose} labelledBy="execute-task-title" maxWidth="640px">
+      <div class="modal-header">
+        <h2 class="modal-title" id="execute-task-title">Execute Task: ${task?.title}</h2>
+        <button class="ghost" onClick=${onClose}>Close</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-field">
+          <label class="form-label" for="execute-agent">Agent Profile</label>
+          <select id="execute-agent" class="form-select" value=${agentProfileId} onChange=${e => setAgentProfileId(e.target.value)}>
+            <option value="" disabled>Select Agent...</option>
+            ${agents.map(a => html`<option key=${a.id} value=${a.id}>${a.name}</option>`)}
+          </select>
         </div>
-        <div class="modal-body">
-          <div class="form-field">
-            <label class="form-label">Agent Profile</label>
-            <select class="form-select" value=${agentProfileId} onChange=${e => setAgentProfileId(e.target.value)}>
-              <option value="" disabled>Select Agent...</option>
-              ${agents.map(a => html`<option key=${a.id} value=${a.id}>${a.name}</option>`)}
-            </select>
-          </div>
-          <div class="form-field">
-            <label class="form-label">Prompt / Instructions</label>
-            <textarea class="form-textarea" value=${prompt} onInput=${e => setPrompt(e.target.value)} rows="4" placeholder="Instructions for the agent..."></textarea>
-          </div>
+        <div class="form-field">
+          <label class="form-label" for="execute-prompt">Prompt / Instructions</label>
+          <textarea id="execute-prompt" class="form-textarea" value=${prompt} onInput=${e => setPrompt(e.target.value)} rows="4" placeholder="Instructions for the agent..."></textarea>
+        </div>
 
-          <!-- Worker Preset (Phase 10E) -->
-          <div class="form-field">
-            <label class="form-label">Worker Preset</label>
-            <select class="form-select" value=${presetId} onChange=${e => setPresetId(e.target.value)}>
+        <!-- Worker Preset (Phase 10E) -->
+        <div class="form-field">
+          <label class="form-label" for="execute-preset">Worker Preset</label>
+          <select id="execute-preset" class="form-select" value=${presetId} onChange=${e => setPresetId(e.target.value)}>
               <option value="">None (default — host environment)</option>
               ${presets.map(p => html`
                 <option key=${p.id} value=${p.id}>
@@ -358,8 +348,7 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
             ${executing ? 'Starting...' : 'Start Agent'}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   `;
 }
 
@@ -392,8 +381,6 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
   const descEditHeightRef = useRef(null);
   const titleReadonlyRef = useRef(null);
   const titleEditHeightRef = useRef(null);
-
-  useEscape(!!task && editingField === null, onClose);
 
   // Sync form state when task changes
   useEffect(() => {
@@ -540,18 +527,23 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
   };
 
   return html`
-    <div class="modal-overlay">
-      <div class="modal-backdrop" onClick=${onClose}></div>
-      <div class="modal-panel wide task-detail-panel">
-        <div class="modal-header">
-          <h2 class="modal-title" style="display:flex;align-items:center;gap:8px;">
-            <span class="task-detail-status-dot" style="background:${statusColor[task.status] || 'var(--text-muted)'};width:8px;height:8px;border-radius:50%;display:inline-block;"></span>
-            Task Detail
-          </h2>
-          <div style="display:flex;gap:6px;">
-            <button class="ghost" onClick=${onClose}>\u2715</button>
-          </div>
+    <${Modal}
+      open=${!!task}
+      onClose=${onClose}
+      labelledBy="task-detail-title"
+      wide
+      panelClass="task-detail-panel"
+      escapeClose=${editingField === null}
+    >
+      <div class="modal-header">
+        <h2 class="modal-title" id="task-detail-title" style="display:flex;align-items:center;gap:8px;">
+          <span class="task-detail-status-dot" style="background:${statusColor[task.status] || 'var(--text-muted)'};width:8px;height:8px;border-radius:50%;display:inline-block;"></span>
+          Task Detail
+        </h2>
+        <div style="display:flex;gap:6px;">
+          <button class="ghost" onClick=${onClose}>\u2715</button>
         </div>
+      </div>
 
         <div class="modal-body" style="gap:16px;"
           onMouseDown=${(e) => {
@@ -777,8 +769,7 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
           </div>
           <button class="ghost danger" onClick=${handleDelete}>Delete</button>
         </div>
-      </div>
-    </div>
+    </Modal>
     ${showExecute && !activeRun && html`
       <${ExecuteModal}
         open=${true}

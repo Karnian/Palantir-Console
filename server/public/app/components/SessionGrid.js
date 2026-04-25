@@ -25,16 +25,21 @@ const runStatusIcon = (status) => {
   }
 };
 
+// Use CSS var() strings so these values stay in sync with the tokens in
+// styles/tokens.css and follow theme changes (dark/light, status recoloring)
+// without touching this file. Prior hardcoded hex values drifted from tokens
+// (e.g. `#22c55e` vs `--status-done: #10b981`, `#8b5cf6` review vs #f59e0b)
+// and were flagged in the 2026-04-24 a11y review (P1-3).
 const runStatusColor = (status) => {
   switch (status) {
-    case 'running': return '#3b82f6';
-    case 'completed': return '#22c55e';
-    case 'failed': return '#ef4444';
-    case 'needs_input': return '#f59e0b';
-    case 'queued': return '#6b7280';
-    case 'cancelled': return '#6b7280';
-    case 'stopped': return '#6b7280';
-    default: return '#6b7280';
+    case 'running': return 'var(--status-running)';
+    case 'completed': return 'var(--status-done)';
+    case 'failed': return 'var(--status-failed)';
+    case 'needs_input': return 'var(--status-needs-input)';
+    case 'queued':
+    case 'cancelled':
+    case 'stopped':
+    default: return 'var(--status-queued)';
   }
 };
 
@@ -83,7 +88,14 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
       { key: 'review', label: 'Review', statuses: ['review'] },
       { key: 'done', label: 'Done', statuses: ['done'] },
     ];
-    const STATUS_COLORS = { in_progress: '#3b82f6', todo: '#6b7280', review: '#f59e0b', failed: '#ef4444', backlog: '#6b7280', done: '#22c55e' };
+    const STATUS_COLORS = {
+      in_progress: 'var(--status-running)',
+      todo: 'var(--status-queued)',
+      review: 'var(--status-review)',
+      failed: 'var(--status-failed)',
+      backlog: 'var(--status-queued)',
+      done: 'var(--status-done)',
+    };
 
     for (const group of projMap.values()) {
       group.sections = STATUS_SECTIONS
@@ -96,7 +108,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
       // Keep orphan tasks (no status match)
       const orphanTasks = group.tasks.filter(t => !t.task);
       if (orphanTasks.length > 0) {
-        group.sections.push({ key: '_orphan', label: 'Unassigned', color: '#6b7280', tasks: orphanTasks });
+        group.sections.push({ key: '_orphan', label: 'Unassigned', color: 'var(--status-queued)', tasks: orphanTasks });
       }
     }
 
@@ -117,7 +129,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
         noneGroup.sections.push({
           key: '_orphan',
           label: 'Unassigned',
-          color: '#6b7280',
+          color: 'var(--status-queued)',
           tasks: [{ task: null, runs: orphanRuns }],
         });
       }
@@ -131,9 +143,9 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
       <div class="manager-grid-header">
         <h3>Task Sessions</h3>
         <div class="manager-grid-stats">
-          <span class="mgr-stat" style="color: #3b82f6">\u25CF ${workerRuns.filter(r => r.status === 'running').length} running</span>
-          <span class="mgr-stat" style="color: #f59e0b">\u23F8 ${workerRuns.filter(r => r.status === 'needs_input').length} waiting</span>
-          <span class="mgr-stat" style="color: #ef4444">\u2717 ${workerRuns.filter(r => r.status === 'failed').length} failed</span>
+          <span class="mgr-stat" style="color: var(--status-running)">\u25CF ${workerRuns.filter(r => r.status === 'running').length} running</span>
+          <span class="mgr-stat" style="color: var(--status-needs-input)">\u23F8 ${workerRuns.filter(r => r.status === 'needs_input').length} waiting</span>
+          <span class="mgr-stat" style="color: var(--status-failed)">\u2717 ${workerRuns.filter(r => r.status === 'failed').length} failed</span>
         </div>
       </div>
 
@@ -178,11 +190,11 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
                 : pmStatus === 'stopped' ? 'Stopped'
                 : pmStatus === 'failed' ? 'Failed'
                 : 'Idle';
-              const pmColor = pmStatus === 'running' ? '#3b82f6'
-                : pmStatus === 'needs_input' ? '#f59e0b'
-                : pmStatus === 'completed' ? '#22c55e'
-                : pmStatus === 'failed' ? '#ef4444'
-                : '#6b7280';
+              const pmColor = pmStatus === 'running' ? 'var(--status-running)'
+                : pmStatus === 'needs_input' ? 'var(--status-needs-input)'
+                : pmStatus === 'completed' ? 'var(--status-done)'
+                : pmStatus === 'failed' ? 'var(--status-failed)'
+                : 'var(--status-queued)';
               const pmSelected = conversationTarget === `pm:${group.key}`;
               return pm ? html`
                 <div class="pm-session-row ${pmSelected ? 'selected' : ''}" ...${clickableProps(() => onSelectPm && onSelectPm(`pm:${group.key}`))}>
@@ -210,10 +222,10 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
                   const done = taskRuns.filter(r => r.status === 'completed').length;
                   const failed = taskRuns.filter(r => r.status === 'failed').length;
                   const parts = [];
-                  if (running) parts.push(html`<span style="color:#3b82f6">${running} running</span>`);
-                  if (waiting) parts.push(html`<span style="color:#f59e0b">${waiting} waiting</span>`);
-                  if (failed) parts.push(html`<span style="color:#ef4444">${failed} failed</span>`);
-                  if (done) parts.push(html`<span style="color:#22c55e">${done} done</span>`);
+                  if (running) parts.push(html`<span style="color:var(--status-running)">${running} running</span>`);
+                  if (waiting) parts.push(html`<span style="color:var(--status-needs-input)">${waiting} waiting</span>`);
+                  if (failed) parts.push(html`<span style="color:var(--status-failed)">${failed} failed</span>`);
+                  if (done) parts.push(html`<span style="color:var(--status-done)">${done} done</span>`);
                   return html`
                     <div class="task-session-group">
                       <div class="task-session-header">

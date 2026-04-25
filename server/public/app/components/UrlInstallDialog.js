@@ -7,15 +7,14 @@ const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
 import { addToast, apiFetchWithToast } from '../lib/toast.js';
-import { useEscape } from '../lib/hooks.js';
 import { PackPreviewModal } from './PackPreviewModal.js';
+import { Modal } from './Modal.js';
 
 export function UrlInstallDialog({ open, onClose, onInstalled }) {
   const [url, setUrl] = useState('');
   const [fetching, setFetching] = useState(false);
   const [preview, setPreview] = useState(null); // { pack, hash, preview_token, source_url_display }
   const [installing, setInstalling] = useState(false);
-  useEscape(open, onClose);
 
   const resetState = () => {
     setUrl('');
@@ -93,44 +92,41 @@ export function UrlInstallDialog({ open, onClose, onInstalled }) {
 
   // URL input dialog
   return html`
-    <div class="modal-overlay">
-      <div class="modal-backdrop" onClick=${handleClose}></div>
-      <div class="modal-panel">
-        <div class="modal-header">
-          <h2 class="modal-title">Install from URL</h2>
-          <button class="ghost" onClick=${handleClose}>Close</button>
+    <${Modal} open=${open} onClose=${handleClose} labelledBy="url-install-title">
+      <div class="modal-header">
+        <h2 class="modal-title" id="url-install-title">Install from URL</h2>
+        <button class="ghost" onClick=${handleClose}>Close</button>
+      </div>
+      <div class="modal-body">
+        <div class="url-install-help">
+          Paste an <b>https://</b> URL pointing to a skill pack JSON file (e.g. GitHub raw, gist).
+          The server will fetch, validate, and preview before install.
         </div>
-        <div class="modal-body">
-          <div class="url-install-help">
-            Paste an <b>https://</b> URL pointing to a skill pack JSON file (e.g. GitHub raw, gist).
-            The server will fetch, validate, and preview before install.
-          </div>
-          <div class="form-group">
-            <label class="form-label">Skill Pack URL</label>
-            <input
-              type="url"
-              class="form-input"
-              placeholder="https://raw.githubusercontent.com/..."
-              value=${url}
-              onInput=${e => setUrl(e.target.value)}
-              onKeyDown=${e => { if (e.key === 'Enter') handleFetch(); }}
-              autoFocus
-            />
-          </div>
-          <div class="url-install-note">
-            <strong>Security:</strong> Only HTTPS accepted. Private IPs, loopback,
-            and metadata endpoints are blocked. Response size capped at 256KB.
-          </div>
+        <div class="form-group">
+          <label class="form-label" for="url-install-input">Skill Pack URL</label>
+          <input
+            id="url-install-input"
+            type="url"
+            class="form-input"
+            placeholder="https://raw.githubusercontent.com/..."
+            value=${url}
+            onInput=${e => setUrl(e.target.value)}
+            onKeyDown=${e => { if (e.key === 'Enter') handleFetch(); }}
+          />
         </div>
-        <div class="modal-footer">
-          <button
-            class="primary"
-            disabled=${fetching || !url.trim()}
-            onClick=${handleFetch}
-          >${fetching ? 'Fetching...' : 'Fetch & Preview'}</button>
-          <button class="ghost" onClick=${handleClose}>Cancel</button>
+        <div class="url-install-note">
+          <strong>Security:</strong> Only HTTPS accepted. Private IPs, loopback,
+          and metadata endpoints are blocked. Response size capped at 256KB.
         </div>
       </div>
-    </div>
+      <div class="modal-footer">
+        <button
+          class="primary"
+          disabled=${fetching || !url.trim()}
+          onClick=${handleFetch}
+        >${fetching ? 'Fetching...' : 'Fetch & Preview'}</button>
+        <button class="ghost" onClick=${handleClose}>Cancel</button>
+      </div>
+    </Modal>
   `;
 }

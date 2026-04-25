@@ -75,6 +75,10 @@
 
   /* Spacing/sizing */
   --sidebar-nav-width: 56px;
+  /* Height of the bottom nav bar on mobile (≤640px). Defined globally so
+     `.main-area { padding-bottom: var(--mobile-nav-height) }` resolves even
+     outside the media query (tests check for fallback-less var() parity). */
+  --mobile-nav-height: 56px;
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
@@ -88,4 +92,17 @@
   --midnight: var(--bg-base);
   --smoke: var(--bg-elevated);
   --glow: var(--accent-muted);
+
+  /* Drift-rescue aliases (2026-04-24) — DriftDrawer / manager-picker / other
+     older components reference these short names with fallbacks that drift
+     away from the canonical palette (#0f1116 vs --bg-base #09090b, etc).
+     Alias them to the canonical tokens so everything collapses onto a single
+     source of truth. When touching those components next, migrate them to the
+     canonical names and delete these aliases. */
+  --bg: var(--bg-base);
+  --fg: var(--text-primary);
+  --muted: var(--text-muted);
+  --surface-2: var(--bg-elevated);
+  --surface-3: var(--bg-hover);
+  --status-warning: var(--warning);
 }

@@ -6,13 +6,13 @@ import { useState, useEffect, useMemo, useCallback } from '../../vendor/hooks.mo
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
-import { useEscape } from '../lib/hooks.js';
 import { formatTime } from '../lib/format.js';
 import { clickableProps } from '../lib/a11y.js';
 import { apiFetch } from '../lib/api.js';
 import { addToast, apiFetchWithToast } from '../lib/toast.js';
 import { EmptyState } from './EmptyState.js';
 import { DirectoryPicker } from './BoardView.js';
+import { Modal } from './Modal.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal constants
@@ -150,16 +150,16 @@ function ProjectSkillPacks({ projectId }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTask }) {
-  useEscape(!!project, onClose);
-  if (!project) return null;
-
-  const projectTasks = tasks.filter(t => t.project_id === project.id);
-  const projectRuns = runs.filter(r => projectTasks.some(t => t.id === r.task_id));
-
-  const statusColor = {
-    backlog: 'var(--status-queued)', todo: 'var(--info)', in_progress: 'var(--accent)',
-    review: 'var(--status-review)', done: 'var(--success)', failed: 'var(--status-failed)',
-  };
+  // NOTE: all hooks MUST run on every render regardless of `project`. If we
+  // early-return when project is null before the useMemo below, React/Preact
+  // sees a different hook order between renders (rules-of-hooks). So filter
+  // with an empty-array guard and only branch the render at the end.
+  const projectTasks = project
+    ? tasks.filter(t => t.project_id === project.id)
+    : [];
+  const projectRuns = project
+    ? runs.filter(r => projectTasks.some(t => t.id === r.task_id))
+    : [];
 
   // Group tasks by status
   const statusGroups = useMemo(() => {
@@ -172,6 +172,13 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTa
     return groups;
   }, [projectTasks]);
 
+  if (!project) return null;
+
+  const statusColor = {
+    backlog: 'var(--status-queued)', todo: 'var(--info)', in_progress: 'var(--accent)',
+    review: 'var(--status-review)', done: 'var(--success)', failed: 'var(--status-failed)',
+  };
+
   const activeGroups = BOARD_COLUMNS.filter(col => (statusGroups[col.id] || []).length > 0);
 
   // Stats
@@ -180,16 +187,14 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTa
   const activeRuns = projectRuns.filter(r => r.status === 'running').length;
 
   return html`
-    <div class="modal-overlay">
-      <div class="modal-backdrop" onClick=${onClose}></div>
-      <div class="modal-panel wide project-detail-panel">
-        <div class="modal-header">
-          <h2 class="modal-title" style="display:flex;align-items:center;gap:8px;">
-            <span style="font-size:16px;">\u25A3</span>
-            Project Detail
-          </h2>
-          <button class="ghost" onClick=${onClose}>\u2715</button>
-        </div>
+    <${Modal} open=${!!project} onClose=${onClose} labelledBy="project-detail-title" wide panelClass="project-detail-panel">
+      <div class="modal-header">
+        <h2 class="modal-title" id="project-detail-title" style="display:flex;align-items:center;gap:8px;">
+          <span style="font-size:16px;">\u25A3</span>
+          Project Detail
+        </h2>
+        <button class="ghost" onClick=${onClose}>\u2715</button>
+      </div>
 
         <div class="modal-body" style="gap:16px;">
           <div>
@@ -272,8 +277,7 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTa
 
           <${ProjectSkillPacks} projectId=${project.id} />
         </div>
-      </div>
-    </div>
+    </Modal>
   `;
 }
 
@@ -378,72 +382,62 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
           `;
         })}
       </div>
-      ${showNew && html`
-        <div class="modal-overlay">
-          <div class="modal-backdrop" onClick=${() => setShowNew(false)}></div>
-          <div class="modal-panel">
-            <div class="modal-header">
-              <h2 class="modal-title">New Project</h2>
-              <button class="ghost" onClick=${() => setShowNew(false)}>Close</button>
-            </div>
-            <div class="modal-body">
-              <div class="form-field">
-                <label class="form-label">Name</label>
-                <input class="form-input" value=${name} onInput=${e => setName(e.target.value)} placeholder="Project name" />
-              </div>
-              <${DirectoryPicker} value=${dir} onSelect=${setDir} />
-              <div class="form-field">
-                <label class="form-label">Description</label>
-                <textarea class="form-textarea" value=${desc} onInput=${e => setDesc(e.target.value)} placeholder="Optional" rows="3"></textarea>
-              </div>
-              <div class="form-field">
-                <label class="form-label">MCP Config Path</label>
-                <input class="form-input" value=${mcpConfigPath} onInput=${e => setMcpConfigPath(e.target.value)} placeholder="/path/to/mcp-config.json (optional)" />
-                <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">Project-scoped MCP server config file for Claude CLI --mcp-config</div>
-              </div>
-            </div>
-            <div class="modal-footer">
-              <button class="ghost" onClick=${() => setShowNew(false)}>Cancel</button>
-              <button class="primary" onClick=${handleCreate} disabled=${saving || !name.trim()}>
-                ${saving ? 'Creating...' : 'Create'}
-              </button>
-            </div>
+      <${Modal} open=${showNew} onClose=${() => setShowNew(false)} labelledBy="new-project-title">
+        <div class="modal-header">
+          <h2 class="modal-title" id="new-project-title">New Project</h2>
+          <button class="ghost" onClick=${() => setShowNew(false)}>Close</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-field">
+            <label class="form-label" for="new-project-name">Name</label>
+            <input id="new-project-name" class="form-input" value=${name} onInput=${e => setName(e.target.value)} placeholder="Project name" />
+          </div>
+          <${DirectoryPicker} value=${dir} onSelect=${setDir} />
+          <div class="form-field">
+            <label class="form-label" for="new-project-desc">Description</label>
+            <textarea id="new-project-desc" class="form-textarea" value=${desc} onInput=${e => setDesc(e.target.value)} placeholder="Optional" rows="3"></textarea>
+          </div>
+          <div class="form-field">
+            <label class="form-label" for="new-project-mcp">MCP Config Path</label>
+            <input id="new-project-mcp" class="form-input" value=${mcpConfigPath} onInput=${e => setMcpConfigPath(e.target.value)} placeholder="/path/to/mcp-config.json (optional)" />
+            <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">Project-scoped MCP server config file for Claude CLI --mcp-config</div>
           </div>
         </div>
-      `}
-      ${editProject && html`
-        <div class="modal-overlay">
-          <div class="modal-backdrop" onClick=${() => setEditProject(null)}></div>
-          <div class="modal-panel">
-            <div class="modal-header">
-              <h2 class="modal-title">Edit Project</h2>
-              <button class="ghost" onClick=${() => setEditProject(null)}>Close</button>
-            </div>
-            <div class="modal-body">
-              <div class="form-field">
-                <label class="form-label">Name</label>
-                <input class="form-input" value=${editName} onInput=${e => setEditName(e.target.value)} placeholder="Project name" />
-              </div>
-              <${DirectoryPicker} value=${editDir} onSelect=${setEditDir} />
-              <div class="form-field">
-                <label class="form-label">Description</label>
-                <textarea class="form-textarea" value=${editDesc} onInput=${e => setEditDesc(e.target.value)} placeholder="Optional" rows="3"></textarea>
-              </div>
-              <div class="form-field">
-                <label class="form-label">MCP Config Path</label>
-                <input class="form-input" value=${editMcpConfigPath} onInput=${e => setEditMcpConfigPath(e.target.value)} placeholder="/path/to/mcp-config.json (optional)" />
-                <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">Project-scoped MCP server config file for Claude CLI --mcp-config</div>
-              </div>
-            </div>
-            <div class="modal-footer">
-              <button class="ghost" onClick=${() => setEditProject(null)}>Cancel</button>
-              <button class="primary" onClick=${handleUpdate} disabled=${editSaving || !editName.trim()}>
-                ${editSaving ? 'Saving...' : 'Save'}
-              </button>
-            </div>
+        <div class="modal-footer">
+          <button class="ghost" onClick=${() => setShowNew(false)}>Cancel</button>
+          <button class="primary" onClick=${handleCreate} disabled=${saving || !name.trim()}>
+            ${saving ? 'Creating...' : 'Create'}
+          </button>
+        </div>
+      </Modal>
+      <${Modal} open=${!!editProject} onClose=${() => setEditProject(null)} labelledBy="edit-project-title">
+        <div class="modal-header">
+          <h2 class="modal-title" id="edit-project-title">Edit Project</h2>
+          <button class="ghost" onClick=${() => setEditProject(null)}>Close</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-field">
+            <label class="form-label" for="edit-project-name">Name</label>
+            <input id="edit-project-name" class="form-input" value=${editName} onInput=${e => setEditName(e.target.value)} placeholder="Project name" />
+          </div>
+          <${DirectoryPicker} value=${editDir} onSelect=${setEditDir} />
+          <div class="form-field">
+            <label class="form-label" for="edit-project-desc">Description</label>
+            <textarea id="edit-project-desc" class="form-textarea" value=${editDesc} onInput=${e => setEditDesc(e.target.value)} placeholder="Optional" rows="3"></textarea>
+          </div>
+          <div class="form-field">
+            <label class="form-label" for="edit-project-mcp">MCP Config Path</label>
+            <input id="edit-project-mcp" class="form-input" value=${editMcpConfigPath} onInput=${e => setEditMcpConfigPath(e.target.value)} placeholder="/path/to/mcp-config.json (optional)" />
+            <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">Project-scoped MCP server config file for Claude CLI --mcp-config</div>
           </div>
         </div>
-      `}
+        <div class="modal-footer">
+          <button class="ghost" onClick=${() => setEditProject(null)}>Cancel</button>
+          <button class="primary" onClick=${handleUpdate} disabled=${editSaving || !editName.trim()}>
+            ${editSaving ? 'Saving...' : 'Save'}
+          </button>
+        </div>
+      </Modal>
       ${currentDetailProject && html`
         <${ProjectDetailModal}
           project=${currentDetailProject}

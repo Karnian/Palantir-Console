@@ -7,9 +7,9 @@ const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
 import { addToast, apiFetchWithToast } from '../lib/toast.js';
-import { useEscape } from '../lib/hooks.js';
 import { EmptyState } from './EmptyState.js';
 import { Dropdown } from './Dropdown.js';
+import { Modal } from './Modal.js';
 import { GalleryView } from './GalleryView.js';
 
 function Loading() {
@@ -37,7 +37,6 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
   const [injectChecklist, setInjectChecklist] = useState(false);
   const [saving, setSaving] = useState(false);
   const [activeTab, setActiveTab] = useState('prompt'); // prompt | mcp | checklist
-  useEscape(open, onClose);
 
   useEffect(() => {
     if (open && pack) {
@@ -64,8 +63,6 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
       setActiveTab('prompt');
     }
   }, [open, pack]);
-
-  if (!open) return null;
 
   const estimatedTokens = Math.ceil((promptFull || '').length / 4);
   const estimatedTokensCompact = promptCompact ? Math.ceil(promptCompact.length / 4) : null;
@@ -150,28 +147,26 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
   const availableTemplates = (templates || []).filter(t => !selectedAliases.includes(t.alias));
 
   return html`
-    <div class="modal-overlay">
-      <div class="modal-backdrop" onClick=${onClose}></div>
-      <div class="modal-panel wide">
-        <div class="modal-header">
-          <h2 class="modal-title">${pack ? 'Edit Skill Pack' : 'New Skill Pack'}</h2>
-          <button class="ghost" onClick=${onClose}>Close</button>
+    <${Modal} open=${open} onClose=${onClose} labelledBy="skill-pack-title" wide>
+      <div class="modal-header">
+        <h2 class="modal-title" id="skill-pack-title">${pack ? 'Edit Skill Pack' : 'New Skill Pack'}</h2>
+        <button class="ghost" onClick=${onClose}>Close</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-row">
+          <div class="form-field" style=${{ flex: 1 }}>
+            <label class="form-label" for="skill-pack-name">Name</label>
+            <input id="skill-pack-name" class="form-input" value=${name} onInput=${e => setName(e.target.value)} placeholder="e.g. Accessibility Expert" />
+          </div>
+          <div class="form-field" style=${{ width: '120px' }}>
+            <label class="form-label" for="skill-pack-priority">Priority</label>
+            <input id="skill-pack-priority" class="form-input" type="number" min="0" value=${priority} onInput=${e => setPriority(e.target.value)} />
+          </div>
         </div>
-        <div class="modal-body">
-          <div class="form-row">
-            <div class="form-field" style=${{ flex: 1 }}>
-              <label class="form-label">Name</label>
-              <input class="form-input" value=${name} onInput=${e => setName(e.target.value)} placeholder="e.g. Accessibility Expert" />
-            </div>
-            <div class="form-field" style=${{ width: '120px' }}>
-              <label class="form-label">Priority</label>
-              <input class="form-input" type="number" min="0" value=${priority} onInput=${e => setPriority(e.target.value)} />
-            </div>
-          </div>
-          <div class="form-field">
-            <label class="form-label">Description</label>
-            <input class="form-input" value=${description} onInput=${e => setDescription(e.target.value)} placeholder="Short description..." />
-          </div>
+        <div class="form-field">
+          <label class="form-label" for="skill-pack-desc">Description</label>
+          <input id="skill-pack-desc" class="form-input" value=${description} onInput=${e => setDescription(e.target.value)} placeholder="Short description..." />
+        </div>
           <div class="form-row">
             <div class="form-field" style=${{ flex: 1 }}>
               <label class="form-label">Scope</label>
@@ -321,8 +316,7 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
             ${saving ? 'Saving...' : pack ? 'Update' : 'Create'}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   `;
 }
 
@@ -332,8 +326,6 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
 
 function DeleteConfirm({ open, pack, onClose, onConfirm }) {
   const [deleting, setDeleting] = useState(false);
-  useEscape(open, onClose);
-  if (!open || !pack) return null;
 
   const handleDelete = async () => {
     setDeleting(true);
@@ -345,23 +337,20 @@ function DeleteConfirm({ open, pack, onClose, onConfirm }) {
   };
 
   return html`
-    <div class="modal-overlay">
-      <div class="modal-backdrop" onClick=${onClose}></div>
-      <div class="modal-panel" style=${{ maxWidth: '420px' }}>
-        <div class="modal-header">
-          <h2 class="modal-title">Delete Skill Pack</h2>
-        </div>
-        <div class="modal-body">
-          <p>Delete <strong>${pack.name}</strong>? This will remove all project and task bindings.</p>
-        </div>
-        <div class="modal-footer">
-          <button class="ghost" onClick=${onClose}>Cancel</button>
-          <button class="danger" onClick=${handleDelete} disabled=${deleting}>
-            ${deleting ? 'Deleting...' : 'Delete'}
-          </button>
-        </div>
+    <${Modal} open=${open && !!pack} onClose=${onClose} labelledBy="skill-delete-title" maxWidth="420px">
+      <div class="modal-header">
+        <h2 class="modal-title" id="skill-delete-title">Delete Skill Pack</h2>
       </div>
-    </div>
+      <div class="modal-body">
+        <p>Delete <strong>${pack?.name}</strong>? This will remove all project and task bindings.</p>
+      </div>
+      <div class="modal-footer">
+        <button class="ghost" onClick=${onClose}>Cancel</button>
+        <button class="danger" onClick=${handleDelete} disabled=${deleting}>
+          ${deleting ? 'Deleting...' : 'Delete'}
+        </button>
+      </div>
+    </Modal>
   `;
 }
 
@@ -527,16 +516,28 @@ function MyPacksView({ projects }) {
 
       <!-- Filters -->
       <div class="skill-packs-filters">
-        <select class="form-select small" value=${filterScope} onChange=${e => { setFilterScope(e.target.value); setFilterProjectId(''); }}>
-          <option value="all">All Scopes</option>
-          <option value="global">Global</option>
-          <option value="project">Project</option>
-        </select>
+        <${Dropdown}
+          wide
+          value=${filterScope}
+          onChange=${(v) => { setFilterScope(v); setFilterProjectId(''); }}
+          options=${[
+            { value: 'all', label: 'All Scopes' },
+            { value: 'global', label: 'Global' },
+            { value: 'project', label: 'Project' },
+          ]}
+          ariaLabel="Scope filter"
+        />
         ${filterScope === 'project' && html`
-          <select class="form-select small" value=${filterProjectId} onChange=${e => setFilterProjectId(e.target.value)}>
-            <option value="">All Projects</option>
-            ${(projects || []).map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
-          </select>
+          <${Dropdown}
+            wide
+            value=${filterProjectId}
+            onChange=${setFilterProjectId}
+            options=${[
+              { value: '', label: 'All Projects' },
+              ...(projects || []).map(p => ({ value: p.id, label: p.name })),
+            ]}
+            ariaLabel="Project filter"
+          />
         `}
         <span class="skill-packs-count">${filteredPacks.length} pack${filteredPacks.length !== 1 ? 's' : ''}</span>
       </div>
@@ -599,7 +600,7 @@ function MyPacksView({ projects }) {
 
       <!-- Pack list -->
       ${filteredPacks.length === 0 && html`
-        <${EmptyState} icon="\u2726" title="No Skill Packs" subtitle="Create your first skill pack to inject capabilities into agents." />
+        <${EmptyState} icon="\u2662" text="No Skill Packs" sub="Create your first skill pack to inject capabilities into agents." />
       `}
       <div class="skill-packs-list">
         ${filteredPacks.map(pack => {

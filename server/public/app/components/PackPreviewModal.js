@@ -5,11 +5,10 @@ import { useState } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
-import { useEscape } from '../lib/hooks.js';
+import { Modal } from './Modal.js';
 
 export function PackPreviewModal({ open, pack, onClose, onInstall, onUpdate, installing }) {
   const [promptExpanded, setPromptExpanded] = useState(false);
-  useEscape(open, onClose);
 
   if (!open || !pack) return null;
 
@@ -27,19 +26,17 @@ export function PackPreviewModal({ open, pack, onClose, onInstall, onUpdate, ins
   const estimatedCompact = pack.prompt_compact ? Math.ceil(pack.prompt_compact.length / 4) : 0;
 
   return html`
-    <div class="modal-overlay">
-      <div class="modal-backdrop" onClick=${onClose}></div>
-      <div class="modal-panel wide">
-        <div class="modal-header">
-          <div class="preview-header-title">
-            <span class="preview-icon" style=${colorStyle}>${pack.icon || '◉'}</span>
-            <div>
-              <h2 class="modal-title">${pack.name}</h2>
-              <span class="preview-author">${pack.author || 'Unknown'}</span>
-            </div>
+    <${Modal} open=${open} onClose=${onClose} labelledBy="pack-preview-title" wide>
+      <div class="modal-header">
+        <div class="preview-header-title">
+          <span class="preview-icon" style=${colorStyle}>${pack.icon || '◉'}</span>
+          <div>
+            <h2 class="modal-title" id="pack-preview-title">${pack.name}</h2>
+            <span class="preview-author">${pack.author || 'Unknown'}</span>
           </div>
-          <button class="ghost" onClick=${onClose}>Close</button>
         </div>
+        <button class="ghost" onClick=${onClose}>Close</button>
+      </div>
         <div class="modal-body" style=${{ maxHeight: '65vh', overflow: 'auto' }}>
           ${pack.description && html`
             <div class="preview-description">${pack.description}</div>
@@ -175,7 +172,6 @@ export function PackPreviewModal({ open, pack, onClose, onInstall, onUpdate, ins
           `}
           <button class="ghost" onClick=${onClose}>Close</button>
         </div>
-      </div>
-    </div>
+    </Modal>
   `;
 }

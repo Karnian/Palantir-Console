@@ -8,8 +8,8 @@ const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
 import { apiFetchWithToast } from '../lib/toast.js';
-import { useEscape } from '../lib/hooks.js';
 import { EmptyState } from './EmptyState.js';
+import { Modal } from './Modal.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Loading spinner — minimal inline component (avoids coupling to app.js Loading)
@@ -33,7 +33,6 @@ function AgentModal({ open, onClose, agent, onSaved }) {
   const [maxConcurrent, setMaxConcurrent] = useState(1);
   const [mcpTools, setMcpTools] = useState('');
   const [saving, setSaving] = useState(false);
-  useEscape(open, onClose);
 
   useEffect(() => {
     if (open && agent) {
@@ -53,8 +52,6 @@ function AgentModal({ open, onClose, agent, onSaved }) {
       setIcon(''); setColor(''); setMaxConcurrent(1); setMcpTools('');
     }
   }, [open, agent]);
-
-  if (!open) return null;
 
   const handleSave = async () => {
     if (!name.trim()) return;
@@ -90,17 +87,15 @@ function AgentModal({ open, onClose, agent, onSaved }) {
   };
 
   return html`
-    <div class="modal-overlay">
-      <div class="modal-backdrop" onClick=${onClose}></div>
-      <div class="modal-panel">
-        <div class="modal-header">
-          <h2 class="modal-title">${agent ? 'Edit Agent' : 'New Agent'}</h2>
-          <button class="ghost" onClick=${onClose}>Close</button>
-        </div>
-        <div class="modal-body">
-          <div class="form-field">
-            <label class="form-label">Name</label>
-            <input class="form-input" value=${name} onInput=${e => setName(e.target.value)} placeholder="Agent name" />
+    <${Modal} open=${open} onClose=${onClose} labelledBy="agent-modal-title">
+      <div class="modal-header">
+        <h2 class="modal-title" id="agent-modal-title">${agent ? 'Edit Agent' : 'New Agent'}</h2>
+        <button class="ghost" onClick=${onClose}>Close</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-field">
+          <label class="form-label" for="agent-name">Name</label>
+          <input id="agent-name" class="form-input" value=${name} onInput=${e => setName(e.target.value)} placeholder="Agent name" />
           </div>
           <div class="form-field">
             <label class="form-label">Type</label>
@@ -159,8 +154,7 @@ function AgentModal({ open, onClose, agent, onSaved }) {
             ${saving ? 'Saving...' : agent ? 'Update' : 'Create'}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   `;
 }
 
@@ -221,15 +215,14 @@ function AgentDetailModal({ agent, open, onClose, onEdit }) {
   };
 
   return html`
-    <div class="modal-overlay" onClick=${(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div class="agent-detail-panel">
-        <div class="agent-detail-header">
-          <div class="agent-detail-header-title">Agent Detail</div>
-          <div class="agent-detail-header-actions">
-            <button class="ghost" onClick=${() => onEdit(agent)}>Edit</button>
-            <button class="ghost" onClick=${onClose}>\u2715</button>
-          </div>
+    <${Modal} open=${open && !!agent} onClose=${onClose} labelledBy="agent-detail-title" panelClass="agent-detail-panel">
+      <div class="agent-detail-header">
+        <div class="agent-detail-header-title" id="agent-detail-title">Agent Detail</div>
+        <div class="agent-detail-header-actions">
+          <button class="ghost" onClick=${() => onEdit(agent)}>Edit</button>
+          <button class="ghost" onClick=${onClose}>\u2715</button>
         </div>
+      </div>
 
       <div class="agent-detail-profile">
         <div class="agent-detail-icon" style=${{ color: agent.color || undefined, borderColor: agent.color ? agent.color + '33' : undefined }}>
@@ -338,8 +331,7 @@ function AgentDetailModal({ agent, open, onClose, onEdit }) {
           </div>
         `}
         </div>
-      </div>
-    </div>
+    </Modal>
   `;
 }
 
