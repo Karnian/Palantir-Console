@@ -12,6 +12,7 @@ const html = htm.bind(h);
 import { apiFetch } from '../lib/api.js';
 import { addToast, apiFetchWithToast } from '../lib/toast.js';
 import { COMMON_ACTIONS, MCP_TEMPLATES_LABELS } from '../lib/copy.js';
+import { parseDate } from '../lib/format.js';
 import { EmptyState } from './EmptyState.js';
 import { Modal } from './Modal.js';
 
@@ -50,7 +51,9 @@ function argsPreview(raw) {
 function formatTs(ts) {
   if (!ts) return '—';
   try {
-    return new Date(ts.replace(' ', 'T') + 'Z').toLocaleString();
+    const d = parseDate(ts);
+    if (Number.isNaN(d.getTime())) return ts;
+    return d.toLocaleString();
   } catch { return ts; }
 }
 
