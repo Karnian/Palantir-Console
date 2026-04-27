@@ -8,6 +8,7 @@ const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
 import { apiFetchWithToast } from '../lib/toast.js';
+import { COMMON_ACTIONS, AGENTS_LABELS } from '../lib/copy.js';
 import { EmptyState } from './EmptyState.js';
 import { Modal } from './Modal.js';
 
@@ -16,7 +17,7 @@ import { Modal } from './Modal.js';
 // ─────────────────────────────────────────────────────────────────────────────
 
 function Loading() {
-  return html`<div class="loading">Loading...</div>`;
+  return html`<div class="loading">${COMMON_ACTIONS.loading}</div>`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -89,16 +90,16 @@ function AgentModal({ open, onClose, agent, onSaved }) {
   return html`
     <${Modal} open=${open} onClose=${onClose} labelledBy="agent-modal-title">
       <div class="modal-header">
-        <h2 class="modal-title" id="agent-modal-title">${agent ? 'Edit Agent' : 'New Agent'}</h2>
-        <button class="ghost" onClick=${onClose}>Close</button>
+        <h2 class="modal-title" id="agent-modal-title">${agent ? AGENTS_LABELS.modalEdit : AGENTS_LABELS.modalNew}</h2>
+        <button class="ghost" onClick=${onClose}>${COMMON_ACTIONS.close}</button>
       </div>
       <div class="modal-body">
         <div class="form-field">
-          <label class="form-label" for="agent-name">Name</label>
-          <input id="agent-name" class="form-input" value=${name} onInput=${e => setName(e.target.value)} placeholder="Agent name" />
+          <label class="form-label" for="agent-name">${AGENTS_LABELS.fieldName}</label>
+          <input id="agent-name" class="form-input" value=${name} onInput=${e => setName(e.target.value)} placeholder=${AGENTS_LABELS.namePlaceholder} />
           </div>
           <div class="form-field">
-            <label class="form-label" for="agent-type">Type</label>
+            <label class="form-label" for="agent-type">${AGENTS_LABELS.fieldType}</label>
             <select id="agent-type" class="form-select" value=${type} onChange=${e => {
               const t = e.target.value;
               setType(t);
@@ -121,37 +122,37 @@ function AgentModal({ open, onClose, agent, onSaved }) {
             </select>
           </div>
           <div class="form-field">
-            <label class="form-label" for="agent-command">Command</label>
-            <input id="agent-command" class="form-input" value=${command} onInput=${e => setCommand(e.target.value)} placeholder="e.g. claude" />
+            <label class="form-label" for="agent-command">${AGENTS_LABELS.fieldCommand}</label>
+            <input id="agent-command" class="form-input" value=${command} onInput=${e => setCommand(e.target.value)} placeholder=${AGENTS_LABELS.commandPlaceholder} />
           </div>
           <div class="form-field">
-            <label class="form-label" for="agent-args">Args Template</label>
-            <input id="agent-args" class="form-input" value=${argsTemplate} onInput=${e => setArgsTemplate(e.target.value)} placeholder="e.g. --model {{model}}" />
+            <label class="form-label" for="agent-args">${AGENTS_LABELS.fieldArgsTemplate}</label>
+            <input id="agent-args" class="form-input" value=${argsTemplate} onInput=${e => setArgsTemplate(e.target.value)} placeholder=${AGENTS_LABELS.argsTemplatePlaceholder} />
           </div>
           <div class="form-field">
-            <label class="form-label" for="agent-icon">Icon</label>
-            <input id="agent-icon" class="form-input" value=${icon} onInput=${e => setIcon(e.target.value)} placeholder="Emoji or symbol" />
+            <label class="form-label" for="agent-icon">${AGENTS_LABELS.fieldIcon}</label>
+            <input id="agent-icon" class="form-input" value=${icon} onInput=${e => setIcon(e.target.value)} placeholder=${AGENTS_LABELS.iconPlaceholder} />
           </div>
           <div class="form-field">
-            <label class="form-label" for="agent-color">Color</label>
+            <label class="form-label" for="agent-color">${AGENTS_LABELS.fieldColor}</label>
             <input id="agent-color" class="form-input" value=${color} onInput=${e => setColor(e.target.value)} placeholder="#6fd4a0" />
           </div>
           <div class="form-field">
-            <label class="form-label" for="agent-max-concurrent">Max Concurrent</label>
+            <label class="form-label" for="agent-max-concurrent">${AGENTS_LABELS.fieldMaxConcurrent}</label>
             <input id="agent-max-concurrent" class="form-input" type="number" min="1" value=${maxConcurrent} onInput=${e => setMaxConcurrent(e.target.value)} />
           </div>
           <div class="form-field">
-            <label class="form-label" for="agent-mcp-tools">MCP Tools</label>
+            <label class="form-label" for="agent-mcp-tools">${AGENTS_LABELS.fieldMcpTools}</label>
             <textarea id="agent-mcp-tools" class="form-input" rows="3" value=${mcpTools}
               onInput=${e => setMcpTools(e.target.value)}
               placeholder="mcp__claude_ai_Slack__*\nmcp__claude_ai_Notion__*" />
-            <small class="form-hint">One pattern per line. Supports wildcards (e.g. mcp__slack__*)</small>
+            <small class="form-hint">${AGENTS_LABELS.mcpToolsHint}</small>
           </div>
         </div>
         <div class="modal-footer">
-          <button class="ghost" onClick=${onClose}>Cancel</button>
+          <button class="ghost" onClick=${onClose}>${COMMON_ACTIONS.cancel}</button>
           <button class="primary" onClick=${handleSave} disabled=${saving || !name.trim()}>
-            ${saving ? 'Saving...' : agent ? 'Update' : 'Create'}
+            ${saving ? COMMON_ACTIONS.saving : agent ? COMMON_ACTIONS.update : COMMON_ACTIONS.create}
           </button>
         </div>
     </Modal>
@@ -194,7 +195,7 @@ function AgentDetailModal({ agent, open, onClose, onEdit }) {
     if (Number.isNaN(d.getTime())) return null;
     const now = Date.now();
     const diff = d.getTime() - now;
-    if (diff <= 0) return 'now';
+    if (diff <= 0) return AGENTS_LABELS.resetNow;
     const mins = Math.floor(diff / 60000);
     const hrs = Math.floor(mins / 60);
     const days = Math.floor(hrs / 24);
@@ -217,9 +218,9 @@ function AgentDetailModal({ agent, open, onClose, onEdit }) {
   return html`
     <${Modal} open=${open && !!agent} onClose=${onClose} labelledBy="agent-detail-title" panelClass="agent-detail-panel">
       <div class="agent-detail-header">
-        <div class="agent-detail-header-title" id="agent-detail-title">Agent Detail</div>
+        <div class="agent-detail-header-title" id="agent-detail-title">${AGENTS_LABELS.detailTitle}</div>
         <div class="agent-detail-header-actions">
-          <button class="ghost" onClick=${() => onEdit(agent)}>Edit</button>
+          <button class="ghost" onClick=${() => onEdit(agent)}>${COMMON_ACTIONS.edit}</button>
           <button class="ghost" onClick=${onClose}>\u2715</button>
         </div>
       </div>
@@ -235,26 +236,26 @@ function AgentDetailModal({ agent, open, onClose, onEdit }) {
       </div>
 
       <div class="agent-detail-section">
-        <div class="agent-detail-section-title">Configuration</div>
+        <div class="agent-detail-section-title">${AGENTS_LABELS.configurationSection}</div>
         <div class="agent-detail-grid">
           ${agent.command && html`
             <div class="agent-detail-field">
-              <span class="agent-detail-field-label">Command</span>
+              <span class="agent-detail-field-label">${AGENTS_LABELS.fieldCommand}</span>
               <span class="agent-detail-field-value mono">${agent.command}</span>
             </div>
           `}
           ${agent.args_template && html`
             <div class="agent-detail-field">
-              <span class="agent-detail-field-label">Args Template</span>
+              <span class="agent-detail-field-label">${AGENTS_LABELS.fieldArgsTemplate}</span>
               <span class="agent-detail-field-value mono">${agent.args_template}</span>
             </div>
           `}
           <div class="agent-detail-field">
-            <span class="agent-detail-field-label">Max Concurrent</span>
+            <span class="agent-detail-field-label">${AGENTS_LABELS.fieldMaxConcurrent}</span>
             <span class="agent-detail-field-value">${agent.max_concurrent || 1}</span>
           </div>
           <div class="agent-detail-field">
-            <span class="agent-detail-field-label">Running Now</span>
+            <span class="agent-detail-field-label">${AGENTS_LABELS.fieldRunningNow}</span>
             <span class="agent-detail-field-value">${runningCount}</span>
           </div>
           ${(() => {
@@ -263,7 +264,7 @@ function AgentDetailModal({ agent, open, onClose, onEdit }) {
               if (Array.isArray(caps.mcp_tools) && caps.mcp_tools.length > 0) {
                 return html`
                   <div class="agent-detail-field" style=${{ gridColumn: '1 / -1' }}>
-                    <span class="agent-detail-field-label">MCP Tools</span>
+                    <span class="agent-detail-field-label">${AGENTS_LABELS.fieldMcpTools}</span>
                     <span class="agent-detail-field-value mono" style=${{ whiteSpace: 'pre-wrap', fontSize: '0.75rem' }}>${caps.mcp_tools.join('\n')}</span>
                   </div>
                 `;
@@ -276,12 +277,12 @@ function AgentDetailModal({ agent, open, onClose, onEdit }) {
 
       <div class="agent-detail-section">
         <div class="agent-detail-section-header">
-          <div class="agent-detail-section-title">Usage & Limits</div>
+          <div class="agent-detail-section-title">${AGENTS_LABELS.usageSection}</div>
           <button class="ghost small" onClick=${loadUsage} disabled=${loadingUsage}>
-            ${loadingUsage ? 'Loading...' : 'Refresh'}
+            ${loadingUsage ? AGENTS_LABELS.usageRefreshing : AGENTS_LABELS.usageRefresh}
           </button>
         </div>
-        ${loadingUsage && !usage && html`<div class="agent-detail-loading">Loading usage data...</div>`}
+        ${loadingUsage && !usage && html`<div class="agent-detail-loading">${AGENTS_LABELS.usageLoading}</div>`}
         ${error && html`<div class="agent-detail-error">${error}</div>`}
         ${usage && html`
           <div class="agent-usage-card">
@@ -289,44 +290,44 @@ function AgentDetailModal({ agent, open, onClose, onEdit }) {
               <div class="agent-usage-account">
                 ${usage.account.email && html`
                   <div class="agent-detail-field">
-                    <span class="agent-detail-field-label">Account</span>
+                    <span class="agent-detail-field-label">${AGENTS_LABELS.usageAccountLabel}</span>
                     <span class="agent-detail-field-value">${usage.account.email}</span>
                   </div>
                 `}
                 ${usage.account.planType && html`
                   <div class="agent-detail-field">
-                    <span class="agent-detail-field-label">Plan</span>
+                    <span class="agent-detail-field-label">${AGENTS_LABELS.usagePlanLabel}</span>
                     <span class="agent-detail-field-value">${usage.account.planType}</span>
                   </div>
                 `}
                 ${usage.account.type && html`
                   <div class="agent-detail-field">
-                    <span class="agent-detail-field-label">Auth Type</span>
+                    <span class="agent-detail-field-label">${AGENTS_LABELS.usageAuthTypeLabel}</span>
                     <span class="agent-detail-field-value">${usage.account.type}</span>
                   </div>
                 `}
               </div>
             ` : ''}
             ${usage.requiresOpenaiAuth && !usage.account && html`
-              <div class="agent-detail-warning">OpenAI login required</div>
+              <div class="agent-detail-warning">${AGENTS_LABELS.usageOpenaiLoginRequired}</div>
             `}
             ${(usage.limits || []).map(limit => html`
               <div class="agent-usage-limit">
                 <div class="agent-usage-limit-header">
                   <span class="agent-usage-limit-label">${limit.label}</span>
                   ${limit.remainingPct !== null && limit.remainingPct !== undefined
-                    ? html`<span class="agent-usage-limit-pct">${Math.round(limit.remainingPct)}% remaining</span>`
+                    ? html`<span class="agent-usage-limit-pct">${Math.round(limit.remainingPct)}${AGENTS_LABELS.usageRemainingSuffix}</span>`
                     : ''}
                 </div>
                 ${renderBar(limit.remainingPct)}
                 ${limit.errorMessage ? html`<div class="agent-usage-limit-error">${limit.errorMessage}</div>` : ''}
                 ${limit.resetAt ? html`
-                  <div class="agent-usage-limit-reset">Resets in ${formatResetTime(limit.resetAt) || new Date(limit.resetAt).toLocaleString()}</div>
+                  <div class="agent-usage-limit-reset">${AGENTS_LABELS.usageResetsInPrefix} ${formatResetTime(limit.resetAt) || new Date(limit.resetAt).toLocaleString()}</div>
                 ` : ''}
               </div>
             `)}
             ${usage.updatedAt && html`
-              <div class="agent-usage-updated">Updated: ${new Date(usage.updatedAt).toLocaleString()}</div>
+              <div class="agent-usage-updated">${AGENTS_LABELS.usageUpdatedPrefix}: ${new Date(usage.updatedAt).toLocaleString()}</div>
             `}
           </div>
         `}
@@ -345,7 +346,7 @@ export function AgentsView({ agents, loading, reloadAgents }) {
   const [selectedAgent, setSelectedAgent] = useState(null);
 
   const handleDelete = async (agent) => {
-    if (!confirm(`Delete agent "${agent.name}"?`)) return;
+    if (!confirm(`${AGENTS_LABELS.deleteConfirmPrefix} "${agent.name}"${AGENTS_LABELS.deleteConfirmSuffix}`)) return;
     try {
       await apiFetchWithToast(`/api/agents/${agent.id}`, { method: 'DELETE' });
       if (selectedAgent?.id === agent.id) setSelectedAgent(null);
@@ -358,15 +359,15 @@ export function AgentsView({ agents, loading, reloadAgents }) {
   return html`
     <div class="agents-view" data-view="agents">
       <div class="agents-header">
-        <h1 class="agents-title">Agent Profiles</h1>
-        <button class="primary" onClick=${() => { setEditAgent(null); setShowModal(true); }}>+ New Agent</button>
+        <h1 class="agents-title">${AGENTS_LABELS.pageTitle}</h1>
+        <button class="primary" onClick=${() => { setEditAgent(null); setShowModal(true); }}>+ ${AGENTS_LABELS.newAgent}</button>
       </div>
       <div class="agents-list">
         ${agents.length === 0 && html`
           <${EmptyState}
             icon="\u2699"
-            text="No agent profiles yet."
-            sub="Create an agent profile to configure how tasks are executed."
+            text=${AGENTS_LABELS.emptyText}
+            sub=${AGENTS_LABELS.emptySub}
           />
         `}
         ${agents.map(a => html`
@@ -380,11 +381,11 @@ export function AgentsView({ agents, loading, reloadAgents }) {
                 <div class="agent-card-type">${a.type || 'custom'}</div>
               </div>
             </div>
-            ${a.command && html`<div class="agent-card-detail"><span class="agent-detail-label">Command:</span> ${a.command}</div>`}
-            <div class="agent-card-detail"><span class="agent-detail-label">Max Concurrent:</span> ${a.max_concurrent || 1}</div>
+            ${a.command && html`<div class="agent-card-detail"><span class="agent-detail-label">${AGENTS_LABELS.fieldCommand}:</span> ${a.command}</div>`}
+            <div class="agent-card-detail"><span class="agent-detail-label">${AGENTS_LABELS.fieldMaxConcurrent}:</span> ${a.max_concurrent || 1}</div>
             <div class="agent-card-actions">
-              <button class="ghost" onClick=${(e) => { e.stopPropagation(); setEditAgent(a); setShowModal(true); }}>Edit</button>
-              <button class="ghost danger" onClick=${(e) => { e.stopPropagation(); handleDelete(a); }}>Delete</button>
+              <button class="ghost" onClick=${(e) => { e.stopPropagation(); setEditAgent(a); setShowModal(true); }}>${COMMON_ACTIONS.edit}</button>
+              <button class="ghost danger" onClick=${(e) => { e.stopPropagation(); handleDelete(a); }}>${COMMON_ACTIONS.delete}</button>
             </div>
           </div>
         `)}

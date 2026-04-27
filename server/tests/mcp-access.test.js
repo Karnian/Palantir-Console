@@ -226,15 +226,28 @@ test('claudeAdapter.startSession — empty mcpTools array leaves base unchanged'
 //    (AgentModal was extracted to app/components/AgentsView.js in P5-4)
 // ---------------------------------------------------------------------------
 
-test('AgentModal contains "MCP Tools" label', () => {
+test('AgentModal contains "MCP Tools" label binding', () => {
   // AgentModal was extracted from app.js to AgentsView.js (P5-4).
-  // Check the canonical location — AgentsView.js.
+  // K-low-1 (2026-04-27) moved the visible label behind copy.js so
+  // the visible string changed to 'MCP 도구'. The structural invariant
+  // — that the field is wired up — is now expressed as the
+  // AGENTS_LABELS.fieldMcpTools binding in AgentsView source. The
+  // copy.js value itself is checked to retain the canonical "MCP"
+  // prefix so the wider MCP-access feature remains discoverable.
   const agentsViewPath = path.join(__dirname, '../public/app/components/AgentsView.js');
   const source = fs.readFileSync(agentsViewPath, 'utf8');
   assert.ok(
-    source.includes('MCP Tools'),
-    'AgentsView.js AgentModal must contain "MCP Tools" label (P3-5 UI)'
+    source.includes('AGENTS_LABELS.fieldMcpTools'),
+    'AgentsView.js AgentModal must wire MCP tools field through AGENTS_LABELS.fieldMcpTools'
   );
+  const copyPath = path.join(__dirname, '../public/app/lib/copy.js');
+  const copySrc = fs.readFileSync(copyPath, 'utf8');
+  // The copy still has to mention MCP so users searching for the
+  // feature can still find it; the noun ("도구"/"Tools") may evolve.
+  const fieldLine = copySrc.match(/fieldMcpTools:\s*'([^']+)'/);
+  assert.ok(fieldLine, 'AGENTS_LABELS.fieldMcpTools must be defined in copy.js');
+  assert.ok(/MCP/.test(fieldLine[1]),
+    `AGENTS_LABELS.fieldMcpTools must mention "MCP" (got: ${fieldLine[1]})`);
 });
 
 test('AgentModal contains mcp_tools textarea placeholder', () => {

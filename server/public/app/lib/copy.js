@@ -278,6 +278,149 @@ export const EXECUTE_MODAL_LABELS = {
   startAgent: '에이전트 시작',
 };
 
+// DirectoryPicker — generic, used by ProjectsView and BoardView.
+// Lifted out of view-specific groups because the picker is a small
+// reusable widget; treating it as its own group keeps the field +
+// modal copy reachable from any view that mounts the component.
+export const DIRECTORY_PICKER_LABELS = {
+  fieldLabel: '디렉터리',
+  inputPlaceholder: '프로젝트 디렉터리 선택...',
+  browse: '찾아보기',
+  clear: '디렉터리 지우기',
+  modalTitle: '디렉터리 선택',
+  showHidden: '숨김 항목 표시',
+  loading: '불러오는 중...',
+  empty: '하위 폴더가 없습니다.',
+  upHint: '상위 폴더',
+  select: '선택',
+};
+
+// ProjectsView — list page header, ProjectDetailModal, New/Edit modals,
+// and the ProjectSkillPacks subsection. Project status (`tasks.status`)
+// continues to resolve through `TASK_STATUS_LABELS`; only project-page
+// chrome lives here.
+export const PROJECTS_LABELS = {
+  pageTitle: '프로젝트',
+  newProject: '새 프로젝트',
+  emptyText: '아직 프로젝트가 없습니다.',
+  emptySub: '작업을 정리하려면 프로젝트를 생성하세요.',
+  taskCountSuffix: '개',
+  taskWord: '개 작업',
+  detailTitle: '프로젝트 상세',
+  directoryLabel: '디렉터리',
+  mcpConfigLabel: 'MCP 설정',
+  tasksLabel: '작업',
+  totalSuffix: '개',
+  activeDoneLabel: '진행 / 완료',
+  runsLabel: '실행',
+  runsTotalSuffix: '회',
+  runsRunningPrefix: '실행 중',
+  createdLabel: '생성',
+  tasksSection: '작업',
+  noTasks: '이 프로젝트에 할당된 작업이 없습니다.',
+  runSingular: '회 실행',
+  // Modal — new / edit
+  modalNew: '새 프로젝트',
+  modalEdit: '프로젝트 편집',
+  fieldName: '이름',
+  namePlaceholder: '프로젝트 이름',
+  fieldDescription: '설명',
+  descriptionPlaceholder: '선택 사항',
+  fieldMcpConfigPath: 'MCP 설정 경로',
+  mcpConfigPathPlaceholder: '/path/to/mcp-config.json (선택 사항)',
+  mcpConfigPathHint: 'Claude CLI --mcp-config 용 프로젝트 범위 MCP 서버 설정 파일',
+  creating: '생성 중...',
+  saving: '저장 중...',
+  // Skill pack bindings (subsection)
+  skillPacksTitle: '스킬 팩',
+  skillPacksLoading: '스킬 팩 불러오는 중...',
+  skillPackAddOption: '스킬 팩 추가...',
+  skillPackAddBtn: '추가',
+  skillPackAuto: '자동',
+  skillPackManual: '수동',
+  skillPackAutoToggleHint: 'auto_apply 활성화는 PM 리셋이 필요할 수 있습니다',
+  skillPackPriorityTitle: '우선순위',
+  skillPackPmActiveWarning: '⚠ PM이 활성 상태일 때 auto_apply 변경은 적용을 위해 PM 리셋이 필요할 수 있습니다.',
+};
+
+// AgentsView — list, AgentModal, AgentDetailModal. Agent type values
+// (claude-code/codex/etc.) are kept as raw enums in <option> for
+// preset-aware code paths; only chrome and form labels are localized.
+export const AGENTS_LABELS = {
+  pageTitle: '에이전트 프로필',
+  newAgent: '새 에이전트',
+  emptyText: '아직 에이전트 프로필이 없습니다.',
+  emptySub: '작업 실행 방식을 구성하려면 에이전트 프로필을 생성하세요.',
+  // Modal — new / edit
+  modalNew: '새 에이전트',
+  modalEdit: '에이전트 편집',
+  fieldName: '이름',
+  namePlaceholder: '에이전트 이름',
+  fieldType: '종류',
+  fieldCommand: '명령',
+  commandPlaceholder: '예: claude',
+  fieldArgsTemplate: '인자 템플릿',
+  argsTemplatePlaceholder: '예: --model {{model}}',
+  fieldIcon: '아이콘',
+  iconPlaceholder: '이모지 또는 기호',
+  fieldColor: '색상',
+  fieldMaxConcurrent: '동시 실행 최대',
+  fieldMcpTools: 'MCP 도구',
+  mcpToolsHint: '한 줄당 하나의 패턴. 와일드카드 지원 (예: mcp__slack__*)',
+  // Card actions — `update` / `delete` reuse COMMON_ACTIONS so the
+  // verb stays in lockstep across surfaces. Only the confirm prefix
+  // is agent-specific (it's "에이전트 삭제 …" not "삭제 …").
+  deleteConfirmPrefix: '에이전트 삭제',
+  deleteConfirmSuffix: '?',
+  // Detail modal
+  detailTitle: '에이전트 상세',
+  configurationSection: '구성',
+  fieldRunningNow: '현재 실행 중',
+  cardCommandLabel: 'Command',
+  cardMaxConcurrentLabel: 'Max Concurrent',
+  usageSection: '사용량 및 한도',
+  usageLoading: '사용량 데이터 불러오는 중...',
+  usageRefresh: '새로고침',
+  usageRefreshing: '불러오는 중...',
+  usageOpenaiLoginRequired: 'OpenAI 로그인 필요',
+  usageRemainingSuffix: '% 남음',
+  usageResetsInPrefix: '재설정',
+  usageUpdatedPrefix: '업데이트',
+  usageAccountLabel: '계정',
+  usagePlanLabel: '요금제',
+  usageAuthTypeLabel: '인증 유형',
+  // Time fragments — `formatResetTime`
+  resetNow: '곧',
+};
+
+// ManagerChat — auxiliary copy for the agent picker / auth status
+// banner (the empty-prompt branch and the diagnostic strip). The
+// dropdown <option> status text stays ASCII English on purpose: screen
+// readers cannot suppress glyphs inside <option> labels, so plain
+// English is the most reliably announced shape.
+export const MANAGER_CHAT_AUX = {
+  pickerGroupAria: '매니저 에이전트 선택',
+  agentLabel: '에이전트',
+  agentsLoading: '에이전트 프로필 불러오는 중…',
+  agentsLoadFailed: '에이전트 프로필을 불러오지 못했습니다',
+  retry: '다시 시도',
+  noManagerAgents: '등록된 Claude Code 또는 Codex 에이전트가 없습니다.',
+  goToAgentsPage: '에이전트 페이지로 이동',
+  toCreateOne: '에서 추가하세요.',
+  refreshAuth: '인증 상태 새로고침',
+  authStateOk: '인증됨',
+  authStateOkSourceSeparator: ' · ',
+  authStateUnknown: '인증 상태를 확인할 수 없습니다. 서버가 구버전일 수 있습니다 — 서버를 재시작하고 새로고침하세요.',
+  authStateMissing: '이 프로필에 대한 자격 증명이 없습니다.',
+  remediationFixPrefix: '자격 증명을 ',
+  remediationFixLink: '에이전트 페이지',
+  remediationFixSuffix: '에서 수정한 뒤, ',
+  remediationRefreshLink: '새로고침',
+  remediationFixEnd: '하세요.',
+  remediationTryRefreshLink: '새로고침',
+  remediationTryAfter: ' 해 보세요. 문제가 지속되면 서버를 재시작해 최신 코드를 반영하세요.',
+};
+
 // Drift drawer — `dispatch_audit_log.incoherence_kind` enum.
 // Server-side values are kept in English (`pm_hallucination`,
 // `user_intervention_stale`, `invalid_claim`) so the audit row JSON

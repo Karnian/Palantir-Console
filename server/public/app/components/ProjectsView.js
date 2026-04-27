@@ -10,6 +10,12 @@ import { formatTime } from '../lib/format.js';
 import { clickableProps } from '../lib/a11y.js';
 import { apiFetch } from '../lib/api.js';
 import { addToast, apiFetchWithToast } from '../lib/toast.js';
+import {
+  COMMON_ACTIONS,
+  PROJECTS_LABELS,
+  TASK_STATUS_LABELS,
+  statusLabel,
+} from '../lib/copy.js';
 import { EmptyState } from './EmptyState.js';
 import { DirectoryPicker } from './BoardView.js';
 import { Modal } from './Modal.js';
@@ -18,13 +24,16 @@ import { Modal } from './Modal.js';
 // Internal constants
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Column ids match TASK_STATUS_LABELS keys; the visible label resolves
+// through `statusLabel` so the BoardView, ProjectDetailModal, and any
+// other status-grouped surface share one source of truth.
 const BOARD_COLUMNS = [
-  { id: 'backlog', label: 'Backlog' },
-  { id: 'todo', label: 'Todo' },
-  { id: 'in_progress', label: 'In Progress' },
-  { id: 'failed', label: 'Failed' },
-  { id: 'review', label: 'Review' },
-  { id: 'done', label: 'Done' },
+  { id: 'backlog' },
+  { id: 'todo' },
+  { id: 'in_progress' },
+  { id: 'failed' },
+  { id: 'review' },
+  { id: 'done' },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -97,12 +106,12 @@ function ProjectSkillPacks({ projectId }) {
     } catch { /* toast */ }
   };
 
-  if (loading) return html`<div class="project-skills-section"><span style="font-size:12px;color:var(--text-muted);">Loading skill packs...</span></div>`;
+  if (loading) return html`<div class="project-skills-section"><span style="font-size:12px;color:var(--text-muted);">${PROJECTS_LABELS.skillPacksLoading}</span></div>`;
 
   return html`
     <div class="project-skills-section">
       <div class="project-skills-header">
-        <span class="project-skills-title">Skill Packs (${bindings.length})</span>
+        <span class="project-skills-title">${PROJECTS_LABELS.skillPacksTitle} (${bindings.length})</span>
       </div>
       ${bindings.map(b => {
         const pack = allPacks.find(p => p.id === b.skill_pack_id);
@@ -112,13 +121,13 @@ function ProjectSkillPacks({ projectId }) {
             <span class="project-skill-name">${pack?.icon || '\u2662'} ${name}</span>
             <button class="ghost small project-skill-auto ${b.auto_apply ? 'on' : 'off'}"
               onClick=${() => handleToggleAuto(b.skill_pack_id, b.auto_apply)}
-              title=${managerActive && !b.auto_apply ? 'Enabling auto_apply requires PM reset' : ''}>
-              ${b.auto_apply ? 'Auto' : 'Manual'}
+              title=${managerActive && !b.auto_apply ? PROJECTS_LABELS.skillPackAutoToggleHint : ''}>
+              ${b.auto_apply ? PROJECTS_LABELS.skillPackAuto : PROJECTS_LABELS.skillPackManual}
             </button>
             <input type="number" class="form-input" style=${{ width: '60px', padding: '2px 6px', fontSize: '11px' }}
               value=${b.priority ?? 100}
               onChange=${e => handlePriorityChange(b.skill_pack_id, e.target.value)}
-              title="Priority" />
+              title=${PROJECTS_LABELS.skillPackPriorityTitle} />
             <button class="ghost small danger-text" onClick=${() => handleRemove(b.skill_pack_id)}>\u2715</button>
           </div>
           ${managerActive && b.auto_apply === 0 && html`
@@ -130,15 +139,15 @@ function ProjectSkillPacks({ projectId }) {
         <div class="form-row" style=${{ gap: '6px', marginTop: '8px' }}>
           <select class="form-select" style=${{ flex: 1, fontSize: '12px' }} value=${addingId}
             onChange=${e => setAddingId(e.target.value)}>
-            <option value="">Add skill pack...</option>
+            <option value="">${PROJECTS_LABELS.skillPackAddOption}</option>
             ${available.map(p => html`<option key=${p.id} value=${p.id}>${p.icon || '\u2662'} ${p.name} (${p.scope})</option>`)}
           </select>
-          <button class="ghost small" onClick=${handleAdd} disabled=${!addingId}>Add</button>
+          <button class="ghost small" onClick=${handleAdd} disabled=${!addingId}>${PROJECTS_LABELS.skillPackAddBtn}</button>
         </div>
       `}
       ${managerActive && html`
         <div style=${{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '6px' }}>
-          \u26A0 Changing auto_apply while PM is active may require PM reset to take effect.
+          ${PROJECTS_LABELS.skillPackPmActiveWarning}
         </div>
       `}
     </div>
@@ -191,7 +200,7 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTa
       <div class="modal-header">
         <h2 class="modal-title" id="project-detail-title" style="display:flex;align-items:center;gap:8px;">
           <span style="font-size:16px;">\u25A3</span>
-          Project Detail
+          ${PROJECTS_LABELS.detailTitle}
         </h2>
         <button class="ghost" onClick=${onClose}>\u2715</button>
       </div>
@@ -205,38 +214,38 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTa
           <div class="task-detail-meta-grid">
             ${project.directory && html`
               <div class="task-detail-meta-item">
-                <span class="task-detail-meta-label">Directory</span>
+                <span class="task-detail-meta-label">${PROJECTS_LABELS.directoryLabel}</span>
                 <span style="color:var(--text-secondary);font-size:12px;word-break:break-all;" title=${project.directory}>${project.directory}</span>
               </div>
             `}
             ${project.mcp_config_path && html`
               <div class="task-detail-meta-item">
-                <span class="task-detail-meta-label">MCP Config</span>
+                <span class="task-detail-meta-label">${PROJECTS_LABELS.mcpConfigLabel}</span>
                 <span style="color:var(--text-secondary);font-size:12px;word-break:break-all;" title=${project.mcp_config_path}>${project.mcp_config_path}</span>
               </div>
             `}
             <div class="task-detail-meta-item">
-              <span class="task-detail-meta-label">Tasks</span>
-              <span style="color:var(--text-secondary);font-size:12px;">${projectTasks.length} total</span>
+              <span class="task-detail-meta-label">${PROJECTS_LABELS.tasksLabel}</span>
+              <span style="color:var(--text-secondary);font-size:12px;">${projectTasks.length}${PROJECTS_LABELS.totalSuffix}</span>
             </div>
             <div class="task-detail-meta-item">
-              <span class="task-detail-meta-label">Active / Done</span>
+              <span class="task-detail-meta-label">${PROJECTS_LABELS.activeDoneLabel}</span>
               <span style="color:var(--text-secondary);font-size:12px;">${activeTasks} / ${doneTasks}</span>
             </div>
             <div class="task-detail-meta-item">
-              <span class="task-detail-meta-label">Runs</span>
-              <span style="color:var(--text-secondary);font-size:12px;">${projectRuns.length} total${activeRuns > 0 ? ` (${activeRuns} running)` : ''}</span>
+              <span class="task-detail-meta-label">${PROJECTS_LABELS.runsLabel}</span>
+              <span style="color:var(--text-secondary);font-size:12px;">${projectRuns.length}${PROJECTS_LABELS.runsTotalSuffix}${activeRuns > 0 ? ` (${activeRuns} ${PROJECTS_LABELS.runsRunningPrefix})` : ''}</span>
             </div>
             <div class="task-detail-meta-item">
-              <span class="task-detail-meta-label">Created</span>
+              <span class="task-detail-meta-label">${PROJECTS_LABELS.createdLabel}</span>
               <span style="color:var(--text-secondary);font-size:12px;">${formatTime(project.created_at)}</span>
             </div>
           </div>
 
           <div class="project-detail-tasks">
-            <div class="task-detail-section-title">Tasks (${projectTasks.length})</div>
+            <div class="task-detail-section-title">${PROJECTS_LABELS.tasksSection} (${projectTasks.length})</div>
             ${projectTasks.length === 0 && html`
-              <div style="color:var(--text-muted);font-size:13px;padding:12px 0;">No tasks assigned to this project.</div>
+              <div style="color:var(--text-muted);font-size:13px;padding:12px 0;">${PROJECTS_LABELS.noTasks}</div>
             `}
             ${activeGroups.map(col => {
               const groupTasks = statusGroups[col.id];
@@ -245,7 +254,7 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTa
                 <div key=${col.id} class="project-task-group">
                   <div class="project-task-group-header">
                     <span class="project-task-status-dot" style="background:${sc};"></span>
-                    <span class="project-task-status-label" style="color:${sc};">${col.label.toUpperCase()}</span>
+                    <span class="project-task-status-label" style="color:${sc};">${statusLabel(TASK_STATUS_LABELS, col.id)}</span>
                     <span class="project-task-status-count">${groupTasks.length}</span>
                   </div>
                   <div class="project-task-group-list">
@@ -264,7 +273,7 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTa
                           }}>
                           <span class="project-task-item-title">${t.title}</span>
                           <span class="project-task-item-right">
-                            ${runCount > 0 && html`<span class="project-task-run-count">${runCount} run${runCount !== 1 ? 's' : ''}</span>`}
+                            ${runCount > 0 && html`<span class="project-task-run-count">${runCount}${PROJECTS_LABELS.runSingular}</span>`}
                           </span>
                         </div>
                       `;
@@ -353,15 +362,15 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   return html`
     <div class="projects-view" data-view="projects">
       <div class="projects-header">
-        <h1 class="projects-title">Projects</h1>
-        <button class="primary" onClick=${() => setShowNew(true)}>+ New Project</button>
+        <h1 class="projects-title">${PROJECTS_LABELS.pageTitle}</h1>
+        <button class="primary" onClick=${() => setShowNew(true)}>+ ${PROJECTS_LABELS.newProject}</button>
       </div>
       <div class="projects-list">
         ${projects.length === 0 && html`
           <${EmptyState}
             icon="\u25A3"
-            text="No projects yet."
-            sub="Create a project to organize your tasks."
+            text=${PROJECTS_LABELS.emptyText}
+            sub=${PROJECTS_LABELS.emptySub}
           />
         `}
         ${projects.map(p => {
@@ -370,13 +379,13 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
             <div key=${p.id} class="project-card clickable" ...${clickableProps(() => setDetailProject(p))}>
               <div class="project-card-header">
                 <div class="project-card-title">${p.name}</div>
-                ${taskCount > 0 && html`<span class="project-card-task-count">${taskCount} task${taskCount !== 1 ? 's' : ''}</span>`}
+                ${taskCount > 0 && html`<span class="project-card-task-count">${taskCount}${PROJECTS_LABELS.taskWord}</span>`}
               </div>
               ${p.directory && html`<div class="project-card-dir" title=${p.directory}>\u{1F4C1} ${p.directory}</div>`}
               ${p.description && html`<div class="project-card-desc">${p.description}</div>`}
-              <div class="project-card-meta">Created ${formatTime(p.created_at)}</div>
+              <div class="project-card-meta">${PROJECTS_LABELS.createdLabel} ${formatTime(p.created_at)}</div>
               <div class="project-card-actions" style="margin-top:8px;">
-                <button class="ghost small" onClick=${(e) => { e.stopPropagation(); openEdit(p); }}>Edit</button>
+                <button class="ghost small" onClick=${(e) => { e.stopPropagation(); openEdit(p); }}>${COMMON_ACTIONS.edit}</button>
               </div>
             </div>
           `;
@@ -384,57 +393,57 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
       </div>
       <${Modal} open=${showNew} onClose=${() => setShowNew(false)} labelledBy="new-project-title">
         <div class="modal-header">
-          <h2 class="modal-title" id="new-project-title">New Project</h2>
-          <button class="ghost" onClick=${() => setShowNew(false)}>Close</button>
+          <h2 class="modal-title" id="new-project-title">${PROJECTS_LABELS.modalNew}</h2>
+          <button class="ghost" onClick=${() => setShowNew(false)}>${COMMON_ACTIONS.close}</button>
         </div>
         <div class="modal-body">
           <div class="form-field">
-            <label class="form-label" for="new-project-name">Name</label>
-            <input id="new-project-name" class="form-input" value=${name} onInput=${e => setName(e.target.value)} placeholder="Project name" />
+            <label class="form-label" for="new-project-name">${PROJECTS_LABELS.fieldName}</label>
+            <input id="new-project-name" class="form-input" value=${name} onInput=${e => setName(e.target.value)} placeholder=${PROJECTS_LABELS.namePlaceholder} />
           </div>
           <${DirectoryPicker} value=${dir} onSelect=${setDir} />
           <div class="form-field">
-            <label class="form-label" for="new-project-desc">Description</label>
-            <textarea id="new-project-desc" class="form-textarea" value=${desc} onInput=${e => setDesc(e.target.value)} placeholder="Optional" rows="3"></textarea>
+            <label class="form-label" for="new-project-desc">${PROJECTS_LABELS.fieldDescription}</label>
+            <textarea id="new-project-desc" class="form-textarea" value=${desc} onInput=${e => setDesc(e.target.value)} placeholder=${PROJECTS_LABELS.descriptionPlaceholder} rows="3"></textarea>
           </div>
           <div class="form-field">
-            <label class="form-label" for="new-project-mcp">MCP Config Path</label>
-            <input id="new-project-mcp" class="form-input" value=${mcpConfigPath} onInput=${e => setMcpConfigPath(e.target.value)} placeholder="/path/to/mcp-config.json (optional)" />
-            <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">Project-scoped MCP server config file for Claude CLI --mcp-config</div>
+            <label class="form-label" for="new-project-mcp">${PROJECTS_LABELS.fieldMcpConfigPath}</label>
+            <input id="new-project-mcp" class="form-input" value=${mcpConfigPath} onInput=${e => setMcpConfigPath(e.target.value)} placeholder=${PROJECTS_LABELS.mcpConfigPathPlaceholder} />
+            <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.mcpConfigPathHint}</div>
           </div>
         </div>
         <div class="modal-footer">
-          <button class="ghost" onClick=${() => setShowNew(false)}>Cancel</button>
+          <button class="ghost" onClick=${() => setShowNew(false)}>${COMMON_ACTIONS.cancel}</button>
           <button class="primary" onClick=${handleCreate} disabled=${saving || !name.trim()}>
-            ${saving ? 'Creating...' : 'Create'}
+            ${saving ? PROJECTS_LABELS.creating : COMMON_ACTIONS.create}
           </button>
         </div>
       </Modal>
       <${Modal} open=${!!editProject} onClose=${() => setEditProject(null)} labelledBy="edit-project-title">
         <div class="modal-header">
-          <h2 class="modal-title" id="edit-project-title">Edit Project</h2>
-          <button class="ghost" onClick=${() => setEditProject(null)}>Close</button>
+          <h2 class="modal-title" id="edit-project-title">${PROJECTS_LABELS.modalEdit}</h2>
+          <button class="ghost" onClick=${() => setEditProject(null)}>${COMMON_ACTIONS.close}</button>
         </div>
         <div class="modal-body">
           <div class="form-field">
-            <label class="form-label" for="edit-project-name">Name</label>
-            <input id="edit-project-name" class="form-input" value=${editName} onInput=${e => setEditName(e.target.value)} placeholder="Project name" />
+            <label class="form-label" for="edit-project-name">${PROJECTS_LABELS.fieldName}</label>
+            <input id="edit-project-name" class="form-input" value=${editName} onInput=${e => setEditName(e.target.value)} placeholder=${PROJECTS_LABELS.namePlaceholder} />
           </div>
           <${DirectoryPicker} value=${editDir} onSelect=${setEditDir} />
           <div class="form-field">
-            <label class="form-label" for="edit-project-desc">Description</label>
-            <textarea id="edit-project-desc" class="form-textarea" value=${editDesc} onInput=${e => setEditDesc(e.target.value)} placeholder="Optional" rows="3"></textarea>
+            <label class="form-label" for="edit-project-desc">${PROJECTS_LABELS.fieldDescription}</label>
+            <textarea id="edit-project-desc" class="form-textarea" value=${editDesc} onInput=${e => setEditDesc(e.target.value)} placeholder=${PROJECTS_LABELS.descriptionPlaceholder} rows="3"></textarea>
           </div>
           <div class="form-field">
-            <label class="form-label" for="edit-project-mcp">MCP Config Path</label>
-            <input id="edit-project-mcp" class="form-input" value=${editMcpConfigPath} onInput=${e => setEditMcpConfigPath(e.target.value)} placeholder="/path/to/mcp-config.json (optional)" />
-            <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">Project-scoped MCP server config file for Claude CLI --mcp-config</div>
+            <label class="form-label" for="edit-project-mcp">${PROJECTS_LABELS.fieldMcpConfigPath}</label>
+            <input id="edit-project-mcp" class="form-input" value=${editMcpConfigPath} onInput=${e => setEditMcpConfigPath(e.target.value)} placeholder=${PROJECTS_LABELS.mcpConfigPathPlaceholder} />
+            <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.mcpConfigPathHint}</div>
           </div>
         </div>
         <div class="modal-footer">
-          <button class="ghost" onClick=${() => setEditProject(null)}>Cancel</button>
+          <button class="ghost" onClick=${() => setEditProject(null)}>${COMMON_ACTIONS.cancel}</button>
           <button class="primary" onClick=${handleUpdate} disabled=${editSaving || !editName.trim()}>
-            ${editSaving ? 'Saving...' : 'Save'}
+            ${editSaving ? PROJECTS_LABELS.saving : COMMON_ACTIONS.save}
           </button>
         </div>
       </Modal>
