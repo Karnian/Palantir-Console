@@ -309,7 +309,7 @@ async function createTestApp(t) {
   // remove dozens of fixture rows leaked from this exact oversight.
   const dbDir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-conv-db-'));
   const dbPath = path.join(dbDir, 'test.db');
-  const app = createApp({ storageRoot, fsRoot, dbPath });
+  const app = createApp({ storageRoot, fsRoot, dbPath, authToken: null });
   t.after(async () => {
     if (app.shutdown) app.shutdown();
     await fs.rm(storageRoot, { recursive: true, force: true });

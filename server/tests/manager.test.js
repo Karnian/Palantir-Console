@@ -17,7 +17,7 @@ async function createTestApp(t) {
   // dev DB at server/palantir.db.
   const dbDir = await createTempDir('palantir-mgr-db-');
   const dbPath = path.join(dbDir, 'test.db');
-  const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode', dbPath });
+  const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode', dbPath, authToken: null });
 
   t.after(async () => {
     if (app.shutdown) app.shutdown();

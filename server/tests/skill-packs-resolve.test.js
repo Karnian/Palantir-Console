@@ -15,7 +15,7 @@ async function createTestApp(t) {
   const fsRoot = await createTempDir('palantir-fs-');
   const dbPath = path.join(await createTempDir('palantir-db-'), 'test.db');
   const authResolverOpts = { hasKeychain: () => false };
-  const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode', dbPath, authResolverOpts });
+  const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode', dbPath, authResolverOpts, authToken: null });
 
   t.after(async () => {
     if (app.shutdown) app.shutdown();
