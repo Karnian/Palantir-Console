@@ -9,6 +9,7 @@ import { apiFetch } from '../lib/api.js';
 import { addToast, apiFetchWithToast } from '../lib/toast.js';
 import { PackPreviewModal } from './PackPreviewModal.js';
 import { Modal } from './Modal.js';
+import { COMMON_ACTIONS, URL_INSTALL_LABELS } from '../lib/copy.js';
 
 export function UrlInstallDialog({ open, onClose, onInstalled }) {
   const [url, setUrl] = useState('');
@@ -31,7 +32,7 @@ export function UrlInstallDialog({ open, onClose, onInstalled }) {
   const handleFetch = async () => {
     if (!url.trim()) return;
     if (!/^https:\/\//i.test(url.trim())) {
-      addToast('URL must start with https://', 'error');
+      addToast(URL_INSTALL_LABELS.invalidHttpsToast, 'error');
       return;
     }
     setFetching(true);
@@ -42,7 +43,7 @@ export function UrlInstallDialog({ open, onClose, onInstalled }) {
       });
       setPreview(data);
     } catch (err) {
-      addToast(err.message || 'Failed to fetch URL', 'error');
+      addToast(err.message || URL_INSTALL_LABELS.fetchFailedToast, 'error');
     }
     setFetching(false);
   };
@@ -59,7 +60,7 @@ export function UrlInstallDialog({ open, onClose, onInstalled }) {
           expected_hash: preview.hash,
         }),
       });
-      addToast(`Installed "${data.skill_pack.name}" from URL`, 'success');
+      addToast(`"${data.skill_pack.name}"${URL_INSTALL_LABELS.installedFromUrlToastSuffix}`, 'success');
       resetState();
       onInstalled && onInstalled();
       onClose();
@@ -94,29 +95,27 @@ export function UrlInstallDialog({ open, onClose, onInstalled }) {
   return html`
     <${Modal} open=${open} onClose=${handleClose} labelledBy="url-install-title">
       <div class="modal-header">
-        <h2 class="modal-title" id="url-install-title">Install from URL</h2>
-        <button class="ghost" onClick=${handleClose}>Close</button>
+        <h2 class="modal-title" id="url-install-title">${URL_INSTALL_LABELS.modalTitle}</h2>
+        <button class="ghost" onClick=${handleClose}>${COMMON_ACTIONS.close}</button>
       </div>
       <div class="modal-body">
         <div class="url-install-help">
-          Paste an <b>https://</b> URL pointing to a skill pack JSON file (e.g. GitHub raw, gist).
-          The server will fetch, validate, and preview before install.
+          ${URL_INSTALL_LABELS.helpText}
         </div>
         <div class="form-group">
-          <label class="form-label" for="url-install-input">Skill Pack URL</label>
+          <label class="form-label" for="url-install-input">${URL_INSTALL_LABELS.fieldUrlLabel}</label>
           <input
             id="url-install-input"
             type="url"
             class="form-input"
-            placeholder="https://raw.githubusercontent.com/..."
+            placeholder=${URL_INSTALL_LABELS.urlPlaceholder}
             value=${url}
             onInput=${e => setUrl(e.target.value)}
             onKeyDown=${e => { if (e.key === 'Enter') handleFetch(); }}
           />
         </div>
         <div class="url-install-note">
-          <strong>Security:</strong> Only HTTPS accepted. Private IPs, loopback,
-          and metadata endpoints are blocked. Response size capped at 256KB.
+          <strong>${URL_INSTALL_LABELS.securityNotePrefix}:</strong> ${URL_INSTALL_LABELS.securityNote}
         </div>
       </div>
       <div class="modal-footer">
@@ -124,8 +123,8 @@ export function UrlInstallDialog({ open, onClose, onInstalled }) {
           class="primary"
           disabled=${fetching || !url.trim()}
           onClick=${handleFetch}
-        >${fetching ? 'Fetching...' : 'Fetch & Preview'}</button>
-        <button class="ghost" onClick=${handleClose}>Cancel</button>
+        >${fetching ? URL_INSTALL_LABELS.fetching : URL_INSTALL_LABELS.fetchPreviewBtn}</button>
+        <button class="ghost" onClick=${handleClose}>${COMMON_ACTIONS.cancel}</button>
       </div>
     </Modal>
   `;
