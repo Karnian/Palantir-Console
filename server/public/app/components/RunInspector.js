@@ -23,6 +23,13 @@ import { apiFetch } from '../lib/api.js';
 import { addToast } from '../lib/toast.js';
 import { timeAgo } from '../lib/format.js';
 import { useEscape } from '../lib/hooks.js';
+import {
+  COMMON_ACTIONS,
+  RUN_INSPECTOR_LABELS,
+  RUN_STATUS_LABELS,
+  PRESET_FILE_STATUS_LABELS,
+  statusLabel,
+} from '../lib/copy.js';
 
 /**
  * R2-B.2: Colorise a unified diff string into per-line spans so +/-
@@ -108,7 +115,7 @@ function RunSkillItem({ sp, runId, acceptanceChecks, onCheckToggle }) {
         <div>
           <button class="ghost small" style=${{ fontSize: '10px', padding: '2px 6px' }}
             onClick=${() => setShowMcp(v => !v)}>
-            ${showMcp ? 'Hide MCP Config' : 'Show MCP Config'}
+            ${showMcp ? RUN_INSPECTOR_LABELS.hideMcp : RUN_INSPECTOR_LABELS.showMcp}
           </button>
           ${showMcp && html`<pre class="run-skill-mcp-snap">${typeof mcpSnap === 'string' ? mcpSnap : JSON.stringify(mcpSnap, null, 2)}</pre>`}
         </div>
@@ -365,7 +372,7 @@ export function RunInspector({ run, onClose }) {
   const hasManagerParent = !!(currentRun?.parent_run_id || run?.parent_run_id);
 
   const handleCancel = async () => {
-    if (!confirm('Cancel this run?')) return;
+    if (!confirm(RUN_INSPECTOR_LABELS.cancelConfirm)) return;
     try {
       await apiFetch(`/api/runs/${run.id}/cancel`, { method: 'POST' });
     } catch (err) {
@@ -424,42 +431,42 @@ export function RunInspector({ run, onClose }) {
         ref=${slideoverRef}
         tabIndex="-1"
         role="dialog"
-        aria-label="Run inspector"
+        aria-labelledby="run-inspector-title"
       >
         <div class="run-inspector-header">
-          <h2 class="run-inspector-title">${currentRun?.task_title || run.task_title || 'Run Inspector'}</h2>
-          <button class="ghost" onClick=${onClose}>Close</button>
+          <h2 class="run-inspector-title" id="run-inspector-title">${currentRun?.task_title || run.task_title || RUN_INSPECTOR_LABELS.unknownTitle}</h2>
+          <button class="ghost" aria-label=${RUN_INSPECTOR_LABELS.closeAria} onClick=${onClose}>${COMMON_ACTIONS.close}</button>
         </div>
         <div class="run-status-bar">
           <span class="run-status-dot ${status}"></span>
-          <span>${status}</span>
+          <span>${statusLabel(RUN_STATUS_LABELS, status)}</span>
           <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">${currentRun?.agent_name || run.agent_name || ''}</span>
           <span style="margin-left: auto; font-size: 11px; color: rgba(155,178,166,0.55);">
-            Started ${timeAgo(run.created_at)}
+            ${RUN_INSPECTOR_LABELS.startedPrefix} ${timeAgo(run.created_at)}
           </span>
           ${isActive && html`
-            <button class="ghost danger" style="font-size: 10px; padding: 3px 8px;" onClick=${handleCancel}>Cancel</button>
+            <button class="ghost danger" style="font-size: 10px; padding: 3px 8px;" onClick=${handleCancel}>${COMMON_ACTIONS.cancel}</button>
           `}
         </div>
 
         ${currentRun?.result_summary && html`
           <div class="run-result-summary" style="padding:8px 16px;background:var(--bg-secondary,rgba(0,0,0,0.15));border-bottom:1px solid var(--border-color,rgba(155,178,166,0.1));font-size:12px;color:var(--text-secondary);">
-            <span style="font-weight:600;color:var(--text-muted);margin-right:6px;">Summary:</span>
+            <span style="font-weight:600;color:var(--text-muted);margin-right:6px;">${RUN_INSPECTOR_LABELS.summary}:</span>
             ${currentRun.result_summary}
           </div>
         `}
         <div class="run-inspector-tabs">
           <button class="run-inspector-tab ${tab === 'output' ? 'active' : ''}" onClick=${() => setTab('output')}>
-            Live Output
+            ${RUN_INSPECTOR_LABELS.output}
           </button>
           <button class="run-inspector-tab ${tab === 'events' ? 'active' : ''}" onClick=${() => setTab('events')}>
-            Events (${meaningfulEvents.length})
+            ${RUN_INSPECTOR_LABELS.events} (${meaningfulEvents.length})
           </button>
           <button class="run-inspector-tab ${tab === 'diff' ? 'active' : ''}" onClick=${() => setTab('diff')}>
-            Diff
+            ${RUN_INSPECTOR_LABELS.diff}
           </button>
           <button class="run-inspector-tab ${tab === 'costs' ? 'active' : ''}" onClick=${() => setTab('costs')}>
-            Costs
+            ${RUN_INSPECTOR_LABELS.costs}
           </button>
           <button class="run-inspector-tab ${tab === 'skills' ? 'active' : ''}" onClick=${async () => {
             setTab('skills');
@@ -472,7 +479,7 @@ export function RunInspector({ run, onClose }) {
               setSkillsLoaded(true);
             }
           }}>
-            Skills${skillPacks.length > 0 ? ` (${skillPacks.length})` : ''}
+            ${RUN_INSPECTOR_LABELS.skills}${skillPacks.length > 0 ? ` (${skillPacks.length})` : ''}
           </button>
           ${currentRun?.preset_id && html`
             <button class="run-inspector-tab ${tab === 'preset' ? 'active' : ''}" onClick=${async () => {
@@ -487,22 +494,23 @@ export function RunInspector({ run, onClose }) {
                 setPresetFetchError(null);
               } catch (err) {
                 // Keep existing presetData if already loaded (transient errors shouldn't wipe valid snapshot)
-                setPresetFetchError(err.message || 'Failed to load preset');
+                setPresetFetchError(err.message || RUN_INSPECTOR_LABELS.presetRefreshFailed);
               } finally {
                 presetFetchRef.current = false;
                 setPresetFetching(false);
               }
             }}>
               ${(() => {
-                if (!presetData) return 'Preset';
+                const base = RUN_INSPECTOR_LABELS.preset;
+                if (!presetData) return base;
                 const d = presetData.drift;
-                if (!d) return 'Preset';
-                if (d.deleted) return 'Preset ⚠ deleted';
+                if (!d) return base;
+                if (d.deleted) return `${base} ⚠ 삭제됨`;
                 const totalChanges = (d.changed_fields?.length || 0) + (d.changed_files?.length || 0);
-                if (totalChanges > 0) return `Preset ⚠ ${totalChanges}`;
+                if (totalChanges > 0) return `${base} ⚠ ${totalChanges}`;
                 // drift_error present but no actual field/file changes → show bare warning
-                if (d.drift_error) return 'Preset ⚠';
-                return 'Preset';
+                if (d.drift_error) return `${base} ⚠`;
+                return base;
               })()}
             </button>
           `}
@@ -513,7 +521,7 @@ export function RunInspector({ run, onClose }) {
             ${liveOutput
               ? html`<pre class="run-output-pre">${liveOutput}</pre>`
               : html`<div style="color:var(--text-muted);text-align:center;padding:40px 0;">
-                  ${isActive ? 'Waiting for output...' : 'No output captured.'}
+                  ${isActive ? RUN_INSPECTOR_LABELS.waitingOutput : RUN_INSPECTOR_LABELS.noOutput}
                 </div>`
             }
           </div>
@@ -523,7 +531,7 @@ export function RunInspector({ run, onClose }) {
           <div class="run-events-list">
             ${meaningfulEvents.length === 0 && html`
               <div class="run-event-item" style="color: rgba(155,178,166,0.5); text-align: center;">
-                No events yet.
+                ${RUN_INSPECTOR_LABELS.noEvents}
               </div>
             `}
             ${meaningfulEvents.map((evt, i) => {
@@ -548,24 +556,24 @@ export function RunInspector({ run, onClose }) {
           <div class="run-diff-area">
             ${diffTruncated && html`
               <div class="run-diff-warning">
-                ⚠ Diff truncated at 1 MiB — showing the first portion only. Check the worktree directly for the full changeset.
+                ${RUN_INSPECTOR_LABELS.diffTruncated}
               </div>
             `}
             ${(() => {
               if (diffLoading && diff === null && !diffReason) {
-                return html`<div class="run-diff-empty">Loading diff...</div>`;
+                return html`<div class="run-diff-empty">${RUN_INSPECTOR_LABELS.loadingDiff}</div>`;
               }
               if (diffReason === 'no_worktree') {
-                return html`<div class="run-diff-empty">This run did not create an isolated git worktree.</div>`;
+                return html`<div class="run-diff-empty">${RUN_INSPECTOR_LABELS.diffNoWorktree}</div>`;
               }
               if (diffReason === 'worktree_missing') {
-                return html`<div class="run-diff-empty">Worktree directory no longer exists (it may have been cleaned up).</div>`;
+                return html`<div class="run-diff-empty">${RUN_INSPECTOR_LABELS.diffWorktreeMissing}</div>`;
               }
               if (diffReason === 'git_failed' || diffReason === 'fetch_failed') {
-                return html`<div class="run-diff-empty">Could not compute diff.</div>`;
+                return html`<div class="run-diff-empty">${RUN_INSPECTOR_LABELS.diffComputeFailed}</div>`;
               }
               if (diff === '') {
-                return html`<div class="run-diff-empty">No uncommitted changes in the worktree.</div>`;
+                return html`<div class="run-diff-empty">${RUN_INSPECTOR_LABELS.diffNoChanges}</div>`;
               }
               return html`
                 <pre class="run-diff-pre">${diffLines.map((l, i) => html`
@@ -580,45 +588,45 @@ export function RunInspector({ run, onClose }) {
           <div class="run-cost-area">
             ${!hasCostData && html`
               <div class="run-cost-empty">
-                Cost data not available for this adapter.
+                ${RUN_INSPECTOR_LABELS.costEmpty}
                 <div style=${{ fontSize: '11px', marginTop: '4px', opacity: 0.8 }}>
-                  Claude Code workers and Codex manager sessions report usage; OpenCode and other adapters do not.
+                  ${RUN_INSPECTOR_LABELS.costEmptySub}
                 </div>
               </div>
             `}
             ${showWorkerCost && html`
               <div class="run-cost-card">
-                <div class="run-cost-card-label">Worker cost</div>
+                <div class="run-cost-card-label">${RUN_INSPECTOR_LABELS.workerCost}</div>
                 <div class="run-cost-card-value">
                   ${workerCostUsd > 0 ? '$' + workerCostUsd.toFixed(4) : '—'}
                 </div>
                 ${(workerInputTokens > 0 || workerOutputTokens > 0) && html`
                   <dl class="run-cost-breakdown" style=${{ marginTop: '10px' }}>
-                    <dt>Input tokens</dt><dd>${workerInputTokens.toLocaleString()}</dd>
-                    <dt>Output tokens</dt><dd>${workerOutputTokens.toLocaleString()}</dd>
+                    <dt>${RUN_INSPECTOR_LABELS.inputTokens}</dt><dd>${workerInputTokens.toLocaleString()}</dd>
+                    <dt>${RUN_INSPECTOR_LABELS.outputTokens}</dt><dd>${workerOutputTokens.toLocaleString()}</dd>
                   </dl>
                 `}
                 <div class="run-cost-card-sub">
-                  Reported by the worker adapter on completion.
+                  ${RUN_INSPECTOR_LABELS.workerCostSub}
                 </div>
               </div>
             `}
             ${showManagerUsage && html`
               <div class="run-cost-card">
-                <div class="run-cost-card-label">Manager usage (${managerUsage.turns} turn${managerUsage.turns === 1 ? '' : 's'})</div>
+                <div class="run-cost-card-label">${RUN_INSPECTOR_LABELS.managerUsage} (${managerUsage.turns}${RUN_INSPECTOR_LABELS.managerUsageTurnSuffix})</div>
                 <div class="run-cost-card-value">
-                  ${managerUsage.costUsd > 0 ? '$' + managerUsage.costUsd.toFixed(4) : (managerUsage.inputTokens + managerUsage.outputTokens).toLocaleString() + ' tokens'}
+                  ${managerUsage.costUsd > 0 ? '$' + managerUsage.costUsd.toFixed(4) : (managerUsage.inputTokens + managerUsage.outputTokens).toLocaleString() + ' ' + RUN_INSPECTOR_LABELS.tokensUnit}
                 </div>
                 <dl class="run-cost-breakdown" style=${{ marginTop: '10px' }}>
-                  <dt>Input tokens</dt><dd>${managerUsage.inputTokens.toLocaleString()}</dd>
+                  <dt>${RUN_INSPECTOR_LABELS.inputTokens}</dt><dd>${managerUsage.inputTokens.toLocaleString()}</dd>
                   ${managerUsage.cachedInputTokens > 0 && html`
-                    <dt>Cached input</dt><dd>${managerUsage.cachedInputTokens.toLocaleString()}</dd>
+                    <dt>${RUN_INSPECTOR_LABELS.cachedInput}</dt><dd>${managerUsage.cachedInputTokens.toLocaleString()}</dd>
                   `}
-                  <dt>Output tokens</dt><dd>${managerUsage.outputTokens.toLocaleString()}</dd>
-                  ${managerUsage.costUsd > 0 && html`<dt>Cost</dt><dd>$${managerUsage.costUsd.toFixed(4)}</dd>`}
+                  <dt>${RUN_INSPECTOR_LABELS.outputTokens}</dt><dd>${managerUsage.outputTokens.toLocaleString()}</dd>
+                  ${managerUsage.costUsd > 0 && html`<dt>${RUN_INSPECTOR_LABELS.cost}</dt><dd>$${managerUsage.costUsd.toFixed(4)}</dd>`}
                 </dl>
                 <div class="run-cost-card-sub">
-                  Aggregated from <code>mgr.usage</code> run events. Codex does not report dollar cost.
+                  ${RUN_INSPECTOR_LABELS.managerUsageSub}
                 </div>
               </div>
             `}
@@ -629,7 +637,7 @@ export function RunInspector({ run, onClose }) {
           <div class="run-skills-section" style=${{ flex: 1, overflowY: 'auto' }}>
             ${skillPacks.length === 0 && html`
               <div style="color:var(--text-muted);text-align:center;padding:40px 0;">
-                ${skillsLoaded ? 'No skill packs applied to this run.' : 'Loading...'}
+                ${skillsLoaded ? RUN_INSPECTOR_LABELS.skillsEmpty : RUN_INSPECTOR_LABELS.skillsLoading}
               </div>
             `}
             ${(() => {
@@ -657,57 +665,57 @@ export function RunInspector({ run, onClose }) {
 
         ${tab === 'preset' && html`
           <div class="run-skills-section" style=${{ flex: 1, overflowY: 'auto', padding: '16px' }}>
-            ${presetFetching && html`<div style="color:var(--text-muted);">Loading preset snapshot...</div>`}
+            ${presetFetching && html`<div style="color:var(--text-muted);">${RUN_INSPECTOR_LABELS.presetLoading}</div>`}
             ${!presetFetching && presetFetchError && html`
               <div style=${{ padding: '8px', background: 'color-mix(in srgb, var(--status-failed) 15%, transparent)', color: 'var(--status-failed)', borderRadius: '4px', marginBottom: '12px' }}>
-                Failed to refresh preset snapshot: ${presetFetchError}
+                ${RUN_INSPECTOR_LABELS.presetRefreshFailed}: ${presetFetchError}
               </div>
             `}
             ${!presetFetching && !presetData?.snapshot && html`
-              <div style="color:var(--text-muted);">No preset bound to this run.</div>
+              <div style="color:var(--text-muted);">${RUN_INSPECTOR_LABELS.presetNoBinding}</div>
             `}
             ${!presetFetching && presetData?.snapshot && html`
               <div style=${{ marginBottom: '12px' }}>
                 <div style=${{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                  Preset id: <code>${presetData.snapshot.preset_id}</code>
+                  ${RUN_INSPECTOR_LABELS.presetIdLabel}: <code>${presetData.snapshot.preset_id}</code>
                 </div>
                 <div style=${{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                  Snapshot hash: <code>${(presetData.snapshot.preset_snapshot_hash || '').slice(0, 12)}…</code>
+                  ${RUN_INSPECTOR_LABELS.presetSnapshotHash}: <code>${(presetData.snapshot.preset_snapshot_hash || '').slice(0, 12)}…</code>
                 </div>
                 <div style=${{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                  Applied: ${presetData.snapshot.applied_at}
+                  ${RUN_INSPECTOR_LABELS.presetApplied}: ${presetData.snapshot.applied_at}
                 </div>
               </div>
               ${presetData.drift?.deleted && html`
                 <div style=${{ padding: '8px', background: 'color-mix(in srgb, var(--status-failed) 15%, transparent)', color: 'var(--status-failed)', borderRadius: '4px', marginBottom: '12px' }}>
-                  ⚠ The preset has been deleted since this run. Snapshot below is the only record.
+                  ${RUN_INSPECTOR_LABELS.presetDeleted}
                 </div>
               `}
               ${presetData.drift && !presetData.drift.deleted && presetData.drift.drift_error && html`
                 <div style=${{ padding: '8px', background: 'color-mix(in srgb, #f59e0b 15%, transparent)', color: '#f59e0b', borderRadius: '4px', marginBottom: '12px' }}>
-                  ⚠ Preset file drift could not be computed. Core-field drift is shown, but plugin file comparison is unavailable.
+                  ${RUN_INSPECTOR_LABELS.presetFileDriftError}
                   <div style=${{ marginTop: '4px', fontSize: '11px', opacity: 0.85 }}>
-                    Reason: ${presetData.drift.drift_error}
+                    ${RUN_INSPECTOR_LABELS.presetFileDriftReason}: ${presetData.drift.drift_error}
                   </div>
                 </div>
               `}
               ${presetData.drift && !presetData.drift.deleted && presetData.drift.has_drift && html`
                 <div style=${{ padding: '8px', background: 'color-mix(in srgb, #f59e0b 15%, transparent)', color: '#f59e0b', borderRadius: '4px', marginBottom: '12px' }}>
-                  ⚠ Preset drift detected.
+                  ${RUN_INSPECTOR_LABELS.presetDrift}
                   ${presetData.drift.changed_fields?.length > 0 && html`
                     <div style=${{ marginTop: '4px' }}>
-                      Changed fields: <strong>${presetData.drift.changed_fields.join(', ')}</strong>
+                      ${RUN_INSPECTOR_LABELS.presetChangedFields}: <strong>${presetData.drift.changed_fields.join(', ')}</strong>
                     </div>
                   `}
                   ${presetData.drift.changed_files?.length > 0 && html`
                     <div style=${{ marginTop: '6px' }}>
-                      <strong>Changed plugin files (${presetData.drift.changed_files.length}):</strong>
+                      <strong>${RUN_INSPECTOR_LABELS.presetChangedFiles} (${presetData.drift.changed_files.length}):</strong>
                       <ul style=${{ margin: '4px 0 0 0', paddingLeft: '16px', fontSize: '11px' }}>
                         ${presetData.drift.changed_files.map((f, i) => html`
                           <li key=${i}>
                             <code style=${{ marginRight: '6px' }}>${f.path}</code>
                             <span style=${{ color: f.status === 'deleted' ? 'var(--status-failed)' : f.status === 'added' ? 'var(--success)' : '#f59e0b' }}>
-                              ${f.status}
+                              ${statusLabel(PRESET_FILE_STATUS_LABELS, f.status)}
                             </span>
                           </li>
                         `)}
@@ -718,20 +726,20 @@ export function RunInspector({ run, onClose }) {
               `}
               ${presetData.drift && !presetData.drift.deleted && !presetData.drift.drift_error && !presetData.drift.has_drift && html`
                 <div style=${{ padding: '8px', background: 'color-mix(in srgb, var(--success) 15%, transparent)', color: 'var(--success)', borderRadius: '4px', marginBottom: '12px' }}>
-                  ✓ Preset matches the snapshot — no drift.
+                  ${RUN_INSPECTOR_LABELS.presetMatch}
                 </div>
               `}
               ${presetData.mcp_template_drift && presetData.mcp_template_drift.modified_count > 0 && html`
                 <div style=${{ padding: '8px', background: 'color-mix(in srgb, #f59e0b 15%, transparent)', color: '#f59e0b', borderRadius: '4px', marginBottom: '12px' }}>
-                  ⚠ ${presetData.mcp_template_drift.modified_count} MCP template${presetData.mcp_template_drift.modified_count === 1 ? '' : 's'} modified after run started.
+                  ⚠ MCP 템플릿 ${presetData.mcp_template_drift.modified_count}개가 ${RUN_INSPECTOR_LABELS.mcpDriftIntro}
                   <div style=${{ marginTop: '4px', fontSize: '11px' }}>
-                    The preset snapshot froze the template <em>ids</em>, not the template bodies. These aliases have changed since the run spawned:
+                    ${RUN_INSPECTOR_LABELS.mcpDriftDetail}
                   </div>
                   <ul style=${{ margin: '4px 0 0 0', paddingLeft: '16px', fontSize: '11px' }}>
                     ${presetData.mcp_template_drift.templates.map((t) => html`
                       <li key=${t.id}>
                         <code>${t.alias}</code>
-                        <span style=${{ opacity: 0.7, marginLeft: '6px' }}>(updated ${t.updated_at})</span>
+                        <span style=${{ opacity: 0.7, marginLeft: '6px' }}>(${RUN_INSPECTOR_LABELS.mcpDriftUpdated} ${t.updated_at})</span>
                       </li>
                     `)}
                   </ul>
@@ -739,12 +747,12 @@ export function RunInspector({ run, onClose }) {
               `}
               <div style=${{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                 <div>
-                  <div style=${{ fontWeight: 600, marginBottom: '4px' }}>Snapshot (run-time)</div>
+                  <div style=${{ fontWeight: 600, marginBottom: '4px' }}>${RUN_INSPECTOR_LABELS.snapshotRunTime}</div>
                   <pre class="run-skill-mcp-snap" style=${{ fontSize: '11px', maxHeight: '400px', overflow: 'auto' }}>${JSON.stringify(presetData.snapshot.core, null, 2)}</pre>
                 </div>
                 <div>
-                  <div style=${{ fontWeight: 600, marginBottom: '4px' }}>Current preset</div>
-                  <pre class="run-skill-mcp-snap" style=${{ fontSize: '11px', maxHeight: '400px', overflow: 'auto' }}>${presetData.current_preset ? JSON.stringify(presetData.current_preset, null, 2) : '(deleted)'}</pre>
+                  <div style=${{ fontWeight: 600, marginBottom: '4px' }}>${RUN_INSPECTOR_LABELS.currentPreset}</div>
+                  <pre class="run-skill-mcp-snap" style=${{ fontSize: '11px', maxHeight: '400px', overflow: 'auto' }}>${presetData.current_preset ? JSON.stringify(presetData.current_preset, null, 2) : RUN_INSPECTOR_LABELS.currentPresetDeleted}</pre>
                 </div>
               </div>
             `}
@@ -755,18 +763,18 @@ export function RunInspector({ run, onClose }) {
           <div class="run-input-row">
             <input
               class="form-input"
-              placeholder="Send input to agent..."
+              placeholder=${RUN_INSPECTOR_LABELS.sendPlaceholder}
               value=${inputText}
               onInput=${e => setInputText(e.target.value)}
               onKeyDown=${e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendInput(); }}}
             />
             <button class="primary" onClick=${handleSendInput} disabled=${sending || !inputText.trim()}>
-              ${sending ? '...' : 'Send'}
+              ${sending ? RUN_INSPECTOR_LABELS.sendingShort : COMMON_ACTIONS.send}
             </button>
           </div>
           ${hasManagerParent && html`
             <div class="run-input-hint" style="font-size:11px;color:var(--text-muted);padding:4px 2px 0;">
-              \u2726 Top Manager will be notified of this direct message on its next turn.
+              ${RUN_INSPECTOR_LABELS.managerNotice}
             </div>
           `}
         `}

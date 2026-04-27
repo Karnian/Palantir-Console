@@ -13,6 +13,16 @@ import { formatTime, timeAgo } from '../lib/format.js';
 import { dueDateMeta } from '../lib/dueDate.js';
 import { Dropdown } from './Dropdown.js';
 import { Modal } from './Modal.js';
+import {
+  COMMON_ACTIONS,
+  TASK_STATUS_LABELS,
+  RUN_STATUS_LABELS,
+  FILTER_LABELS,
+  TASK_DETAIL_LABELS,
+  NEW_TASK_LABELS,
+  EXECUTE_MODAL_LABELS,
+  statusLabel,
+} from '../lib/copy.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // New Task Modal
@@ -65,62 +75,62 @@ export function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
   return html`
     <${Modal} open=${open} onClose=${onClose} labelledBy="new-task-title">
       <div class="modal-header">
-        <h2 class="modal-title" id="new-task-title">New Task</h2>
-        <button class="ghost" onClick=${onClose}>Close</button>
+        <h2 class="modal-title" id="new-task-title">${NEW_TASK_LABELS.title}</h2>
+        <button class="ghost" onClick=${onClose}>${COMMON_ACTIONS.close}</button>
       </div>
       <div class="modal-body">
         <div class="form-field">
-          <label class="form-label" for="new-task-title-input">Title</label>
-          <input id="new-task-title-input" class="form-input" value=${title} onInput=${e => setTitle(e.target.value)} placeholder="Task title" />
+          <label class="form-label" for="new-task-title-input">${NEW_TASK_LABELS.fieldTitle}</label>
+          <input id="new-task-title-input" class="form-input" value=${title} onInput=${e => setTitle(e.target.value)} placeholder=${NEW_TASK_LABELS.titlePlaceholder} />
         </div>
         <div class="form-field">
-          <label class="form-label" for="new-task-desc">Description</label>
-          <textarea id="new-task-desc" class="form-textarea" value=${description} onInput=${e => setDescription(e.target.value)} placeholder="Optional description" rows="3"></textarea>
+          <label class="form-label" for="new-task-desc">${NEW_TASK_LABELS.fieldDescription}</label>
+          <textarea id="new-task-desc" class="form-textarea" value=${description} onInput=${e => setDescription(e.target.value)} placeholder=${NEW_TASK_LABELS.descriptionPlaceholder} rows="3"></textarea>
         </div>
         <div class="form-field">
-          <label class="form-label" for="new-task-project">Project</label>
+          <label class="form-label" for="new-task-project">${NEW_TASK_LABELS.fieldProject}</label>
           <select id="new-task-project" class="form-select" value=${projectId} onChange=${e => setProjectId(e.target.value)}>
-            <option value="">None</option>
+            <option value="">${NEW_TASK_LABELS.projectNone}</option>
             ${projects.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
           </select>
         </div>
         <div class="form-field">
-          <label class="form-label" for="new-task-priority">Priority</label>
+          <label class="form-label" for="new-task-priority">${NEW_TASK_LABELS.fieldPriority}</label>
           <select id="new-task-priority" class="form-select" value=${priority} onChange=${e => setPriority(e.target.value)}>
-            <option value="low">Low</option>
-            <option value="medium">Medium</option>
-            <option value="high">High</option>
-            <option value="critical">Critical</option>
+            <option value="low">${FILTER_LABELS.priorityLow}</option>
+            <option value="medium">${FILTER_LABELS.priorityMedium}</option>
+            <option value="high">${FILTER_LABELS.priorityHigh}</option>
+            <option value="critical">${FILTER_LABELS.priorityCritical}</option>
           </select>
         </div>
         <div class="form-field">
-          <label class="form-label" for="new-task-agent">Agent Profile</label>
+          <label class="form-label" for="new-task-agent">${NEW_TASK_LABELS.fieldAgent}</label>
           <select id="new-task-agent" class="form-select" value=${agentProfileId} onChange=${e => setAgentProfileId(e.target.value)}>
-            <option value="">None</option>
+            <option value="">${NEW_TASK_LABELS.agentNone}</option>
             ${agents.map(a => html`<option key=${a.id} value=${a.id}>${a.name}</option>`)}
           </select>
         </div>
         <div class="form-field">
-          <label class="form-label" for="new-task-due">Due Date</label>
+          <label class="form-label" for="new-task-due">${NEW_TASK_LABELS.fieldDueDate}</label>
           <input id="new-task-due" type="date" class="form-input" value=${dueDate}
             onInput=${e => setDueDate(e.target.value)} />
         </div>
         <div class="form-field">
-          <label class="form-label" for="new-task-recurrence">Recurrence</label>
+          <label class="form-label" for="new-task-recurrence">${NEW_TASK_LABELS.fieldRecurrence}</label>
           <select id="new-task-recurrence" class="form-select" value=${recurrence}
             onChange=${e => setRecurrence(e.target.value)}
-            title="Without a due date, the task simply respawns when marked done">
-            <option value="">None</option>
-            <option value="daily">Daily</option>
-            <option value="weekly">Weekly</option>
-            <option value="monthly">Monthly</option>
+            title=${NEW_TASK_LABELS.recurrenceTooltip}>
+            <option value="">${NEW_TASK_LABELS.recurrenceNone}</option>
+            <option value="daily">${NEW_TASK_LABELS.recurrenceDaily}</option>
+            <option value="weekly">${NEW_TASK_LABELS.recurrenceWeekly}</option>
+            <option value="monthly">${NEW_TASK_LABELS.recurrenceMonthly}</option>
           </select>
         </div>
       </div>
         <div class="modal-footer">
-          <button class="ghost" onClick=${onClose}>Cancel</button>
+          <button class="ghost" onClick=${onClose}>${COMMON_ACTIONS.cancel}</button>
           <button class="primary" onClick=${handleSubmit} disabled=${saving || !title.trim()}>
-            ${saving ? 'Creating...' : 'Create Task'}
+            ${saving ? NEW_TASK_LABELS.creating : NEW_TASK_LABELS.create}
           </button>
         </div>
     </Modal>
@@ -262,69 +272,69 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
   return html`
     <${Modal} open=${open && !!task} onClose=${onClose} labelledBy="execute-task-title" maxWidth="640px">
       <div class="modal-header">
-        <h2 class="modal-title" id="execute-task-title">Execute Task: ${task?.title}</h2>
-        <button class="ghost" onClick=${onClose}>Close</button>
+        <h2 class="modal-title" id="execute-task-title">${EXECUTE_MODAL_LABELS.titlePrefix}: ${task?.title}</h2>
+        <button class="ghost" onClick=${onClose}>${COMMON_ACTIONS.close}</button>
       </div>
       <div class="modal-body">
         <div class="form-field">
-          <label class="form-label" for="execute-agent">Agent Profile</label>
+          <label class="form-label" for="execute-agent">${EXECUTE_MODAL_LABELS.fieldAgent}</label>
           <select id="execute-agent" class="form-select" value=${agentProfileId} onChange=${e => setAgentProfileId(e.target.value)}>
-            <option value="" disabled>Select Agent...</option>
+            <option value="" disabled>${EXECUTE_MODAL_LABELS.agentSelect}</option>
             ${agents.map(a => html`<option key=${a.id} value=${a.id}>${a.name}</option>`)}
           </select>
         </div>
         <div class="form-field">
-          <label class="form-label" for="execute-prompt">Prompt / Instructions</label>
-          <textarea id="execute-prompt" class="form-textarea" value=${prompt} onInput=${e => setPrompt(e.target.value)} rows="4" placeholder="Instructions for the agent..."></textarea>
+          <label class="form-label" for="execute-prompt">${EXECUTE_MODAL_LABELS.fieldPrompt}</label>
+          <textarea id="execute-prompt" class="form-textarea" value=${prompt} onInput=${e => setPrompt(e.target.value)} rows="4" placeholder=${EXECUTE_MODAL_LABELS.promptPlaceholder}></textarea>
         </div>
 
         <!-- Worker Preset (Phase 10E) -->
         <div class="form-field">
-          <label class="form-label" for="execute-preset">Worker Preset</label>
+          <label class="form-label" for="execute-preset">${EXECUTE_MODAL_LABELS.fieldPreset}</label>
           <select id="execute-preset" class="form-select" value=${presetId} onChange=${e => setPresetId(e.target.value)}>
-              <option value="">None (default — host environment)</option>
+              <option value="">${EXECUTE_MODAL_LABELS.presetNone}</option>
               ${presets.map(p => html`
                 <option key=${p.id} value=${p.id}>
-                  ${p.name}${p.isolated ? ' (isolated)' : ''}
+                  ${p.name}${p.isolated ? EXECUTE_MODAL_LABELS.presetIsolatedSuffix : ''}
                 </option>
               `)}
             </select>
             ${task.preferred_preset_id && task.preferred_preset_id !== presetId && html`
               <div class="small" style=${{ color: 'var(--muted)', marginTop: '4px' }}>
-                Task default is <code>${task.preferred_preset_id}</code>.
+                ${EXECUTE_MODAL_LABELS.presetTaskDefaultPrefix}: <code>${task.preferred_preset_id}</code>${EXECUTE_MODAL_LABELS.presetTaskDefaultSuffix}
               </div>
             `}
           </div>
 
           <!-- Skill Pack Selection (Phase 3-3) -->
           <div class="skill-select-section">
-            <div class="skill-select-title">Skill Packs</div>
+            <div class="skill-select-title">${EXECUTE_MODAL_LABELS.skillPacksTitle}</div>
             ${!isClaudeAgent && agentProfileId && !(selectedAgent?.args_template || '').includes('{system_prompt_file}') && html`
-              <div class="skill-select-warning">This agent has no {system_prompt_file} support. Skill pack prompts will be skipped.</div>
+              <div class="skill-select-warning">${EXECUTE_MODAL_LABELS.skillPacksNoPromptSupport}</div>
             `}
             <div class="skill-select-list">
               ${sortedPacks.map(pack => {
                 const source = getSource(pack.id);
                 const isExcluded = excludedIds.has(pack.id);
                 const checked = selectedIds.has(pack.id) && !isExcluded;
-                const sourceLabel = source === 'auto' ? 'auto-apply' : source === 'task' ? 'task-bound' : '';
+                const sourceLabel = source === 'auto' ? EXECUTE_MODAL_LABELS.skillSourceAuto : source === 'task' ? EXECUTE_MODAL_LABELS.skillSourceTask : '';
                 return html`
                   <label class="skill-select-item" key=${pack.id} style=${{ opacity: isExcluded ? 0.5 : 1 }}>
                     <input type="checkbox" checked=${checked} disabled=${isExcluded}
                       onChange=${() => togglePack(pack.id)} />
                     <span class="skill-select-item-name">
                       ${pack.icon || '\u2662'} ${pack.name}
-                      ${isExcluded ? ' (excluded)' : ''}
+                      ${isExcluded ? EXECUTE_MODAL_LABELS.skillExcludedSuffix : ''}
                     </span>
                     ${sourceLabel && html`<span class="skill-select-item-source">${sourceLabel}</span>`}
-                    <span style=${{ fontSize: '10px', color: 'var(--text-muted)' }}>${pack.estimated_tokens || 0} tok</span>
+                    <span style=${{ fontSize: '10px', color: 'var(--text-muted)' }}>${pack.estimated_tokens || 0} ${EXECUTE_MODAL_LABELS.tokensUnit}</span>
                   </label>
                 `;
               })}
             </div>
             ${selectedPacks.length > 0 && html`
               <div class="skill-select-budget">
-                <span>${totalTokens} / ${SKILL_PACK_TOKEN_BUDGET} tokens</span>
+                <span>${totalTokens} ${EXECUTE_MODAL_LABELS.budgetSeparator} ${SKILL_PACK_TOKEN_BUDGET} ${EXECUTE_MODAL_LABELS.tokensUnit}</span>
                 <div class="skill-budget-bar">
                   <div class="skill-budget-fill" style=${{ width: `${budgetPct}%`, background: budgetColor }}></div>
                 </div>
@@ -334,8 +344,8 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
               <div style=${{ marginTop: '8px' }}>
                 ${mcpConflicts.map(c => html`
                   <div key=${c.alias} class="skill-select-warning" style=${{ marginTop: '4px', background: c.blocking ? 'color-mix(in srgb, var(--status-failed) 15%, transparent)' : 'color-mix(in srgb, #f59e0b 10%, transparent)', color: c.blocking ? 'var(--status-failed)' : '#f59e0b' }}>
-                    ${c.blocking ? '\u26D4' : '\u26A0'} MCP "${c.alias}" conflict: ${c.packs.join(', ')}
-                    ${c.blocking ? ' — execution blocked (fail policy)' : ' — higher priority wins'}
+                    ${c.blocking ? '\u26D4' : '\u26A0'} ${EXECUTE_MODAL_LABELS.conflictAlias.replace('{alias}', c.alias)}: ${c.packs.join(', ')}
+                    ${c.blocking ? EXECUTE_MODAL_LABELS.conflictBlocking : EXECUTE_MODAL_LABELS.conflictWarn}
                   </div>
                 `)}
               </div>
@@ -343,9 +353,9 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
           </div>
         </div>
         <div class="modal-footer">
-          <button class="ghost" onClick=${onClose}>Cancel</button>
+          <button class="ghost" onClick=${onClose}>${COMMON_ACTIONS.cancel}</button>
           <button class="primary" onClick=${handleExecute} disabled=${executing || !agentProfileId || hasBlockingConflict}>
-            ${executing ? 'Starting...' : 'Start Agent'}
+            ${executing ? EXECUTE_MODAL_LABELS.starting : EXECUTE_MODAL_LABELS.startAgent}
           </button>
         </div>
     </Modal>
@@ -477,10 +487,10 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
   };
 
   const handleDelete = async () => {
-    if (!confirm('Delete this task? This cannot be undone.')) return;
+    if (!confirm(TASK_DETAIL_LABELS.deleteConfirm)) return;
     try {
       await apiFetch(`/api/tasks/${task.id}`, { method: 'DELETE' });
-      addToast('Task deleted', 'success');
+      addToast(TASK_DETAIL_LABELS.deleteSuccess, 'success');
       reloadTasks();
       onClose();
     } catch (err) {
@@ -538,10 +548,10 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
       <div class="modal-header">
         <h2 class="modal-title" id="task-detail-title" style="display:flex;align-items:center;gap:8px;">
           <span class="task-detail-status-dot" style="background:${statusColor[task.status] || 'var(--text-muted)'};width:8px;height:8px;border-radius:50%;display:inline-block;"></span>
-          Task Detail
+          ${TASK_DETAIL_LABELS.detailTitle}
         </h2>
         <div style="display:flex;gap:6px;">
-          <button class="ghost" onClick=${onClose}>\u2715</button>
+          <button class="ghost" aria-label=${TASK_DETAIL_LABELS.closeAria} onClick=${onClose}>\u2715</button>
         </div>
       </div>
 
@@ -572,7 +582,7 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
               ` : html`
                 <button type="button" ref=${titleReadonlyRef}
                   class="task-detail-title editable editable-reset"
-                  aria-label="Edit title"
+                  aria-label=${TASK_DETAIL_LABELS.editTitleAria}
                   onPointerDown=${handleEditablePointerDown}
                   onPointerUp=${handleEditablePointerEnd}
                   onPointerCancel=${handleEditablePointerEnd}
@@ -581,7 +591,7 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
               ${editingField === 'description' ? html`
                 <textarea class="task-detail-desc-input" value=${description} autoFocus
                   style=${descEditHeightRef.current ? `height:${descEditHeightRef.current}px;` : ''}
-                  placeholder="Add a description..."
+                  placeholder=${TASK_DETAIL_LABELS.descPlaceholder}
                   onInput=${e => setDescription(e.target.value)}
                   onBlur=${() => commitField('description')}
                   onKeyDown=${e => {
@@ -592,11 +602,11 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
               ` : html`
                 <button type="button" ref=${descReadonlyRef}
                   class=${`task-detail-desc editable editable-reset ${task.description ? '' : 'placeholder'}`}
-                  aria-label="Edit description"
+                  aria-label=${TASK_DETAIL_LABELS.editDescAria}
                   onPointerDown=${handleEditablePointerDown}
                   onPointerUp=${handleEditablePointerEnd}
                   onPointerCancel=${handleEditablePointerEnd}
-                  onClick=${beginEdit('description')}>${task.description || 'Add a description...'}</button>
+                  onClick=${beginEdit('description')}>${task.description || TASK_DETAIL_LABELS.descPlaceholder}</button>
               `}
             </div>
             <div class="task-detail-meta-grid">
@@ -605,16 +615,16 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
                 const priorityColors = { low: '#6b7280', medium: '#3b82f6', high: '#f59e0b', critical: '#ef4444' };
                 const pc = priorityColors[priority] || '#6b7280';
                 const statusOpts = ['backlog','todo','in_progress','review','done','failed']
-                  .map(s => ({ value: s, label: s.replace('_', ' ') }));
-                const priorityOpts = PRIORITY_OPTIONS.map(p => ({ value: p, label: p }));
-                const projectOpts = [{ value: '', label: 'None' }, ...projects.map(p => ({ value: p.id, label: p.name }))];
+                  .map(s => ({ value: s, label: statusLabel(TASK_STATUS_LABELS, s) }));
+                const priorityOpts = PRIORITY_OPTIONS.map(p => ({ value: p, label: ({ low: FILTER_LABELS.priorityLow, medium: FILTER_LABELS.priorityMedium, high: FILTER_LABELS.priorityHigh, critical: FILTER_LABELS.priorityCritical })[p] || p }));
+                const projectOpts = [{ value: '', label: TASK_DETAIL_LABELS.noProject }, ...projects.map(p => ({ value: p.id, label: p.name }))];
                 return html`
                   <div class="task-detail-meta-item">
-                    <span class="task-detail-meta-label">Status</span>
+                    <span class="task-detail-meta-label">${TASK_DETAIL_LABELS.status}</span>
                     <${Dropdown}
                       value=${status}
                       options=${statusOpts}
-                      ariaLabel="Status"
+                      ariaLabel=${TASK_DETAIL_LABELS.status}
                       style=${`color:${sc};background:color-mix(in srgb, ${sc} 12%, transparent);border-color:color-mix(in srgb, ${sc} 30%, transparent);`}
                       onChange=${async (v) => {
                         setStatus(v);
@@ -623,11 +633,11 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
                       }} />
                   </div>
                   <div class="task-detail-meta-item">
-                    <span class="task-detail-meta-label">Priority</span>
+                    <span class="task-detail-meta-label">${TASK_DETAIL_LABELS.priority}</span>
                     <${Dropdown}
                       value=${priority}
                       options=${priorityOpts}
-                      ariaLabel="Priority"
+                      ariaLabel=${TASK_DETAIL_LABELS.priority}
                       style=${`color:${pc};background:color-mix(in srgb, ${pc} 12%, transparent);border-color:color-mix(in srgb, ${pc} 30%, transparent);`}
                       onChange=${async (v) => {
                         setPriority(v);
@@ -636,11 +646,11 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
                       }} />
                   </div>
                   <div class="task-detail-meta-item">
-                    <span class="task-detail-meta-label">Project</span>
+                    <span class="task-detail-meta-label">${TASK_DETAIL_LABELS.project}</span>
                     <${Dropdown}
                       value=${projectId}
                       options=${projectOpts}
-                      ariaLabel="Project"
+                      ariaLabel=${TASK_DETAIL_LABELS.project}
                       style="color:var(--accent-light);background:rgba(139,92,246,0.08);border-color:rgba(139,92,246,0.25);"
                       onChange=${async (v) => {
                         setProjectId(v);
@@ -651,15 +661,15 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
                 `;
               })()}
               <div class="task-detail-meta-item">
-                <span class="task-detail-meta-label">Recurrence</span>
+                <span class="task-detail-meta-label">${TASK_DETAIL_LABELS.recurrence}</span>
                 <${Dropdown}
                   value=${task.recurrence || ''}
-                  ariaLabel="Recurrence"
+                  ariaLabel=${TASK_DETAIL_LABELS.recurrence}
                   options=${[
-                    { value: '', label: 'None' },
-                    { value: 'daily', label: 'Daily' },
-                    { value: 'weekly', label: 'Weekly' },
-                    { value: 'monthly', label: 'Monthly' },
+                    { value: '', label: TASK_DETAIL_LABELS.recurrenceNone },
+                    { value: 'daily', label: TASK_DETAIL_LABELS.recurrenceDaily },
+                    { value: 'weekly', label: TASK_DETAIL_LABELS.recurrenceWeekly },
+                    { value: 'monthly', label: TASK_DETAIL_LABELS.recurrenceMonthly },
                   ]}
                   onChange=${async (v) => {
                     const next = v || null;
@@ -679,7 +689,7 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
                   : 'var(--text-secondary)';
                 return html`
                   <div class="task-detail-meta-item">
-                    <span class="task-detail-meta-label">Due Date</span>
+                    <span class="task-detail-meta-label">${TASK_DETAIL_LABELS.dueDate}</span>
                     <div style="display:flex;align-items:center;gap:6px;">
                       <input type="date" class="form-input inline-date"
                         value=${task.due_date || ''}
@@ -695,7 +705,8 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
                           } catch (err) { addToast(err.message, 'error'); }
                         }} />
                       ${task.due_date && html`
-                        <button class="ghost" title="Clear due date"
+                        <button class="ghost" title=${TASK_DETAIL_LABELS.clearDueDate}
+                          aria-label=${TASK_DETAIL_LABELS.clearDueDate}
                           style="padding:2px 6px;font-size:11px;"
                           onClick=${async () => {
                             try {
@@ -712,7 +723,7 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
                 `;
               })()}
               <div class="task-detail-meta-item">
-                <span class="task-detail-meta-label">Created</span>
+                <span class="task-detail-meta-label">${TASK_DETAIL_LABELS.created}</span>
                 <span style="color:var(--text-secondary);font-size:12px;">${formatTime(task.created_at)}</span>
               </div>
             </div>
@@ -720,14 +731,14 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
 
           ${taskRuns.length > 0 && html`
             <div class="task-detail-runs">
-              <div class="task-detail-section-title">Runs (${taskRuns.length})</div>
+              <div class="task-detail-section-title">${TASK_DETAIL_LABELS.runsSection} (${taskRuns.length})</div>
               <div class="task-detail-runs-list">
                 ${taskRuns.slice(0, 5).map(r => html`
                   <div key=${r.id} class="task-detail-run-item" onClick=${() => { onOpenRun(r); onClose(); }}>
                     <span class="run-status-dot ${r.status}"></span>
                     <span style="flex:1;min-width:0;">
-                      <span style="color:var(--text-primary);font-size:13px;">${r.agent_name || 'Agent'}</span>
-                      <span style="color:var(--text-muted);font-size:11px;margin-left:6px;">${r.status}</span>
+                      <span style="color:var(--text-primary);font-size:13px;">${r.agent_name || TASK_DETAIL_LABELS.agentFallback}</span>
+                      <span style="color:var(--text-muted);font-size:11px;margin-left:6px;">${statusLabel(RUN_STATUS_LABELS, r.status)}</span>
                     </span>
                     <span style="color:var(--text-muted);font-size:11px;">${timeAgo(r.created_at)}</span>
                   </div>
@@ -741,13 +752,13 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
             if (finishedRuns.length === 0) return null;
             return html`
               <div class="task-detail-results">
-                <div class="task-detail-section-title">Results</div>
+                <div class="task-detail-section-title">${TASK_DETAIL_LABELS.resultsSection}</div>
                 <div class="task-detail-results-list">
                   ${finishedRuns.slice(0, 5).map(r => html`
                     <div key=${r.id} class="task-detail-result-item">
                       <div class="task-detail-result-header">
                         <span class="run-status-dot ${r.status}"></span>
-                        <span style="color:var(--text-primary);font-size:12px;font-weight:500;">${r.agent_name || 'Agent'}</span>
+                        <span style="color:var(--text-primary);font-size:12px;font-weight:500;">${r.agent_name || TASK_DETAIL_LABELS.agentFallback}</span>
                         <span style="color:var(--text-muted);font-size:11px;margin-left:auto;">${timeAgo(r.ended_at || r.created_at)}</span>
                       </div>
                       <div class="task-detail-result-body">${r.status === 'failed' && r.error_message ? r.error_message : r.result_summary}</div>
@@ -762,12 +773,12 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
         <div class="modal-footer" style="justify-content:space-between;">
           <div style="display:flex;gap:6px;">
             ${activeRun ? html`
-              <button class="primary" onClick=${() => { onOpenRun(activeRun); onClose(); }}>View Run</button>
+              <button class="primary" onClick=${() => { onOpenRun(activeRun); onClose(); }}>${TASK_DETAIL_LABELS.viewRun}</button>
             ` : html`
-              <button class="primary" onClick=${() => setShowExecute(true)}>${'\u25B6'} Run Agent</button>
+              <button class="primary" onClick=${() => setShowExecute(true)}>${'\u25B6'} ${TASK_DETAIL_LABELS.runAgent}</button>
             `}
           </div>
-          <button class="ghost danger" onClick=${handleDelete}>Delete</button>
+          <button class="ghost danger" onClick=${handleDelete}>${TASK_DETAIL_LABELS.delete}</button>
         </div>
     </Modal>
     ${showExecute && !activeRun && html`

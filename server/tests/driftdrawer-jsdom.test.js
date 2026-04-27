@@ -122,7 +122,7 @@ test('DriftDrawer jsdom: open=true 시 Close 버튼 자동 포커스', async (t)
   assert.equal(active.tagName, 'BUTTON', '포커스가 버튼에 있어야 함');
   assert.equal(
     active.getAttribute('aria-label'),
-    'Close drift drawer',
+    '드리프트 패널 닫기',
     'Close 버튼이 자동 포커스 대상이어야 함',
   );
 });
