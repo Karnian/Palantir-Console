@@ -15,7 +15,14 @@ import { NewTaskModal, ExecuteModal, TaskDetailPanel } from './TaskModals.js';
 import { Dropdown } from './Dropdown.js';
 import { Modal } from './Modal.js';
 import { clickableProps } from '../lib/a11y.js';
-import { TASK_STATUS_LABELS, FILTER_LABELS, COMMON_ACTIONS, MANAGER_LABELS } from '../lib/copy.js';
+import {
+  TASK_STATUS_LABELS,
+  FILTER_LABELS,
+  COMMON_ACTIONS,
+  MANAGER_LABELS,
+  DIRECTORY_PICKER_LABELS,
+  statusLabel,
+} from '../lib/copy.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Kanban Board View — internal constants
@@ -25,13 +32,18 @@ import { TASK_STATUS_LABELS, FILTER_LABELS, COMMON_ACTIONS, MANAGER_LABELS } fro
 // inline `<select>` in TaskCard, the SessionGrid status pills, and the
 // board column headers all show the same Korean phrase. Adding a new
 // status only needs a single edit in `app/lib/copy.js`.
+//
+// K-low-1 (Codex NIT): switched the lookup to `statusLabel(map, id)`
+// so a transient status not yet present in the map (server-side state
+// machine drift) falls back to the raw key instead of `undefined`,
+// matching ProjectsView / SessionGrid call sites.
 const BOARD_COLUMNS = [
-  { id: 'backlog', label: TASK_STATUS_LABELS.backlog },
-  { id: 'todo', label: TASK_STATUS_LABELS.todo },
-  { id: 'in_progress', label: TASK_STATUS_LABELS.in_progress },
-  { id: 'failed', label: TASK_STATUS_LABELS.failed },
-  { id: 'review', label: TASK_STATUS_LABELS.review },
-  { id: 'done', label: TASK_STATUS_LABELS.done },
+  { id: 'backlog', label: statusLabel(TASK_STATUS_LABELS, 'backlog') },
+  { id: 'todo', label: statusLabel(TASK_STATUS_LABELS, 'todo') },
+  { id: 'in_progress', label: statusLabel(TASK_STATUS_LABELS, 'in_progress') },
+  { id: 'failed', label: statusLabel(TASK_STATUS_LABELS, 'failed') },
+  { id: 'review', label: statusLabel(TASK_STATUS_LABELS, 'review') },
+  { id: 'done', label: statusLabel(TASK_STATUS_LABELS, 'done') },
 ];
 
 function TaskCard({ task, projects, onDragStart, onClick, onMoveStatus }) {
@@ -635,18 +647,18 @@ export function DirectoryPicker({ value, onSelect }) {
 
   return html`
     <div class="form-field">
-      <label class="form-label">Directory</label>
+      <label class="form-label">${DIRECTORY_PICKER_LABELS.fieldLabel}</label>
       <div class="dir-picker-row">
         <input
           class="form-input dir-picker-input"
           value=${value}
           readOnly
-          placeholder="Select project directory..."
+          placeholder=${DIRECTORY_PICKER_LABELS.inputPlaceholder}
           onClick=${handleOpen}
         />
-        <button type="button" class="ghost dir-picker-btn" onClick=${handleOpen}>Browse</button>
+        <button type="button" class="ghost dir-picker-btn" onClick=${handleOpen}>${DIRECTORY_PICKER_LABELS.browse}</button>
         ${value && html`
-          <button type="button" class="ghost dir-picker-btn dir-picker-clear" onClick=${() => onSelect('')}>✕</button>
+          <button type="button" class="ghost dir-picker-btn dir-picker-clear" aria-label=${DIRECTORY_PICKER_LABELS.clear} onClick=${() => onSelect('')}>✕</button>
         `}
       </div>
     </div>
@@ -654,23 +666,23 @@ export function DirectoryPicker({ value, onSelect }) {
     <${Modal} open=${!!open} onClose=${() => setOpen(false)}
               labelledBy="dir-picker-title" panelClass="directory-panel">
       <div class="directory-header">
-        <h2 class="directory-title" id="dir-picker-title">Select Directory</h2>
-        <button class="ghost" onClick=${() => setOpen(false)}>Close</button>
+        <h2 class="directory-title" id="dir-picker-title">${DIRECTORY_PICKER_LABELS.modalTitle}</h2>
+        <button class="ghost" onClick=${() => setOpen(false)}>${COMMON_ACTIONS.close}</button>
       </div>
       <div class="directory-path">${currentPath || '...'}</div>
       <div class="directory-toggle">
         <label class="directory-toggle-label">
           <input type="checkbox" checked=${showHidden} onChange=${e => setShowHidden(e.target.checked)} />
-          Show hidden
+          ${DIRECTORY_PICKER_LABELS.showHidden}
         </label>
       </div>
       <div class="directory-list" style="max-height: 300px;">
         ${currentPath !== rootPath && html`
-          <button type="button" class="directory-item" onClick=${handleUp}>⬆ ..</button>
+          <button type="button" class="directory-item" aria-label=${DIRECTORY_PICKER_LABELS.upHint} onClick=${handleUp}>⬆ ..</button>
         `}
-        ${loading && html`<div style="color: var(--text-secondary); font-size: 13px; padding: 8px;">Loading...</div>`}
+        ${loading && html`<div style="color: var(--text-secondary); font-size: 13px; padding: 8px;">${DIRECTORY_PICKER_LABELS.loading}</div>`}
         ${!loading && dirs.length === 0 && html`
-          <div style="color: var(--text-secondary); font-size: 13px; padding: 8px;">No subfolders.</div>
+          <div style="color: var(--text-secondary); font-size: 13px; padding: 8px;">${DIRECTORY_PICKER_LABELS.empty}</div>
         `}
         ${!loading && dirs.map(d => html`
           <button key=${d.path} type="button" class="directory-item" onClick=${() => loadDir(d.path)}>
@@ -679,8 +691,8 @@ export function DirectoryPicker({ value, onSelect }) {
         `)}
       </div>
       <div style="display: flex; justify-content: flex-end; gap: 8px; padding-top: 4px;">
-        <button class="ghost" onClick=${() => setOpen(false)}>Cancel</button>
-        <button class="primary" onClick=${handleConfirm}>Select</button>
+        <button class="ghost" onClick=${() => setOpen(false)}>${COMMON_ACTIONS.cancel}</button>
+        <button class="primary" onClick=${handleConfirm}>${DIRECTORY_PICKER_LABELS.select}</button>
       </div>
     </Modal>
   `;
