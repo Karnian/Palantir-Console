@@ -13,7 +13,13 @@ import { renderMarkdown } from '../lib/markdown.js';
 import { timeAgo } from '../lib/format.js';
 import { Dropdown } from './Dropdown.js';
 import { EmptyState } from './EmptyState.js';
-import { COMMON_ACTIONS, MANAGER_LABELS, RUN_STATUS_LABELS, statusLabel } from '../lib/copy.js';
+import {
+  COMMON_ACTIONS,
+  MANAGER_LABELS,
+  MANAGER_CHAT_AUX,
+  RUN_STATUS_LABELS,
+  statusLabel,
+} from '../lib/copy.js';
 import { MentionInput } from './MentionInput.js';
 import { RunInspector } from './RunInspector.js';
 
@@ -699,21 +705,21 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
             <div class="manager-empty-icon">\u2726</div>
             <div class="manager-empty-text">매니저 세션을 시작해 에이전트를 조율하세요</div>
             ${agentsLoading && managerProfiles.length === 0 ? html`
-              <div class="manager-picker-empty">에이전트 프로필 불러오는 중\u2026</div>
+              <div class="manager-picker-empty">${MANAGER_CHAT_AUX.agentsLoading}</div>
             ` : agentsError ? html`
               <div class="manager-picker-empty" role="alert">
-                Couldn't load agent profiles: ${agentsError}.
+                ${MANAGER_CHAT_AUX.agentsLoadFailed}: ${agentsError}.
                 <br/>
-                <button type="button" class="manager-picker-link manager-picker-link-btn" onClick=${() => reloadAgents && reloadAgents()}>Retry</button>
+                <button type="button" class="manager-picker-link manager-picker-link-btn" onClick=${() => reloadAgents && reloadAgents()}>${MANAGER_CHAT_AUX.retry}</button>
               </div>
             ` : managerProfiles.length === 0 ? html`
               <div class="manager-picker-empty">
-                No Claude Code or Codex agents registered.<br/>
-                <a href="#agents" class="manager-picker-link">Go to the Agents page</a> to create one.
+                ${MANAGER_CHAT_AUX.noManagerAgents}<br/>
+                <a href="#agents" class="manager-picker-link">${MANAGER_CHAT_AUX.goToAgentsPage}</a>${MANAGER_CHAT_AUX.toCreateOne}
               </div>
             ` : html`
-              <div class="manager-picker" role="group" aria-label="Manager agent picker">
-                <label class="manager-picker-label" for="manager-profile-select">Agent</label>
+              <div class="manager-picker" role="group" aria-label=${MANAGER_CHAT_AUX.pickerGroupAria}>
+                <label class="manager-picker-label" for="manager-profile-select">${MANAGER_CHAT_AUX.agentLabel}</label>
                 <div class="manager-picker-row">
                   <select
                     id="manager-profile-select"
@@ -739,8 +745,8 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
                   <button
                     class="manager-picker-refresh"
                     type="button"
-                    title="Refresh auth status"
-                    aria-label="Refresh auth status"
+                    title=${MANAGER_CHAT_AUX.refreshAuth}
+                    aria-label=${MANAGER_CHAT_AUX.refreshAuth}
                     onClick=${() => reloadAgents && reloadAgents()}
                   >\u21BB</button>
                 </div>
@@ -752,26 +758,26 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
                   >
                     <span class="manager-picker-dot" aria-hidden="true"></span>
                     ${selectedAuthState === 'ok'
-                      ? html`<span>Authenticated${selectedProfile.auth.sources && selectedProfile.auth.sources.length > 0 ? ' \u00B7 ' + selectedProfile.auth.sources.join(', ') : ''}</span>`
+                      ? html`<span>${MANAGER_CHAT_AUX.authStateOk}${selectedProfile.auth.sources && selectedProfile.auth.sources.length > 0 ? MANAGER_CHAT_AUX.authStateOkSourceSeparator + selectedProfile.auth.sources.join(', ') : ''}</span>`
                       : selectedAuthState === 'unknown'
-                      ? html`<span>Auth status unavailable. The server may be outdated \u2014 restart the server and refresh.</span>`
-                      : html`<span>${selectedProfile.auth && selectedProfile.auth.diagnostics && selectedProfile.auth.diagnostics[0] ? selectedProfile.auth.diagnostics[0] : 'No credentials resolved for this profile.'}</span>`
+                      ? html`<span>${MANAGER_CHAT_AUX.authStateUnknown}</span>`
+                      : html`<span>${MANAGER_CHAT_AUX.authStateMissing}</span>`
                     }
                   </div>
                 `}
-                ${selectedAuthState === 'missing' && selectedProfile && selectedProfile.auth && selectedProfile.auth.diagnostics && selectedProfile.auth.diagnostics.length > 1 && html`
+                ${selectedAuthState === 'missing' && selectedProfile && selectedProfile.auth && Array.isArray(selectedProfile.auth.diagnostics) && selectedProfile.auth.diagnostics.length > 0 && html`
                   <ul class="manager-picker-diagnostics">
-                    ${selectedProfile.auth.diagnostics.slice(1).map((d, i) => html`<li key=${i}>${d}</li>`)}
+                    ${selectedProfile.auth.diagnostics.map((d, i) => html`<li key=${i}>${d}</li>`)}
                   </ul>
                 `}
                 ${selectedAuthState === 'missing' && html`
                   <div class="manager-picker-remediation">
-                    Fix credentials on the <a href="#agents" class="manager-picker-link">Agents page</a>, then <button type="button" class="manager-picker-link manager-picker-link-btn" onClick=${() => reloadAgents && reloadAgents()}>refresh</button>.
+                    ${MANAGER_CHAT_AUX.remediationFixPrefix}<a href="#agents" class="manager-picker-link">${MANAGER_CHAT_AUX.remediationFixLink}</a>${MANAGER_CHAT_AUX.remediationFixSuffix}<button type="button" class="manager-picker-link manager-picker-link-btn" onClick=${() => reloadAgents && reloadAgents()}>${MANAGER_CHAT_AUX.remediationRefreshLink}</button>${MANAGER_CHAT_AUX.remediationFixEnd}
                   </div>
                 `}
                 ${selectedAuthState === 'unknown' && html`
                   <div class="manager-picker-remediation">
-                    Try <button type="button" class="manager-picker-link manager-picker-link-btn" onClick=${() => reloadAgents && reloadAgents()}>refresh</button>. If this persists, restart the server to pick up the latest code.
+                    <button type="button" class="manager-picker-link manager-picker-link-btn" onClick=${() => reloadAgents && reloadAgents()}>${MANAGER_CHAT_AUX.remediationTryRefreshLink}</button>${MANAGER_CHAT_AUX.remediationTryAfter}
                   </div>
                 `}
               </div>

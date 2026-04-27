@@ -82,14 +82,17 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
 
     // Group tasks by status within each project. Phase K-1a: section
     // labels resolved from `TASK_STATUS_LABELS` so they match the
-    // Board column headers exactly.
+    // Board column headers exactly. K-low-1 (Codex NIT): switched to
+    // `statusLabel(map, id)` so a transient enum (server-side state
+    // machine drift) shows the raw key instead of `undefined`,
+    // matching BoardView / ProjectsView call sites.
     const STATUS_SECTIONS = [
-      { key: 'backlog', label: TASK_STATUS_LABELS.backlog, statuses: ['backlog'] },
-      { key: 'todo', label: TASK_STATUS_LABELS.todo, statuses: ['todo'] },
-      { key: 'in_progress', label: TASK_STATUS_LABELS.in_progress, statuses: ['in_progress'] },
-      { key: 'failed', label: TASK_STATUS_LABELS.failed, statuses: ['failed'] },
-      { key: 'review', label: TASK_STATUS_LABELS.review, statuses: ['review'] },
-      { key: 'done', label: TASK_STATUS_LABELS.done, statuses: ['done'] },
+      { key: 'backlog', label: statusLabel(TASK_STATUS_LABELS, 'backlog'), statuses: ['backlog'] },
+      { key: 'todo', label: statusLabel(TASK_STATUS_LABELS, 'todo'), statuses: ['todo'] },
+      { key: 'in_progress', label: statusLabel(TASK_STATUS_LABELS, 'in_progress'), statuses: ['in_progress'] },
+      { key: 'failed', label: statusLabel(TASK_STATUS_LABELS, 'failed'), statuses: ['failed'] },
+      { key: 'review', label: statusLabel(TASK_STATUS_LABELS, 'review'), statuses: ['review'] },
+      { key: 'done', label: statusLabel(TASK_STATUS_LABELS, 'done'), statuses: ['done'] },
     ];
     const STATUS_COLORS = {
       in_progress: 'var(--status-running)',
