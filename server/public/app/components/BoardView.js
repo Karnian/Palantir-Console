@@ -15,18 +15,23 @@ import { NewTaskModal, ExecuteModal, TaskDetailPanel } from './TaskModals.js';
 import { Dropdown } from './Dropdown.js';
 import { Modal } from './Modal.js';
 import { clickableProps } from '../lib/a11y.js';
+import { TASK_STATUS_LABELS, FILTER_LABELS, COMMON_ACTIONS, MANAGER_LABELS } from '../lib/copy.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Kanban Board View — internal constants
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Phase K-1a: column labels resolved from `TASK_STATUS_LABELS` so the
+// inline `<select>` in TaskCard, the SessionGrid status pills, and the
+// board column headers all show the same Korean phrase. Adding a new
+// status only needs a single edit in `app/lib/copy.js`.
 const BOARD_COLUMNS = [
-  { id: 'backlog', label: 'Backlog' },
-  { id: 'todo', label: 'Todo' },
-  { id: 'in_progress', label: 'In Progress' },
-  { id: 'failed', label: 'Failed' },
-  { id: 'review', label: 'Review' },
-  { id: 'done', label: 'Done' },
+  { id: 'backlog', label: TASK_STATUS_LABELS.backlog },
+  { id: 'todo', label: TASK_STATUS_LABELS.todo },
+  { id: 'in_progress', label: TASK_STATUS_LABELS.in_progress },
+  { id: 'failed', label: TASK_STATUS_LABELS.failed },
+  { id: 'review', label: TASK_STATUS_LABELS.review },
+  { id: 'done', label: TASK_STATUS_LABELS.done },
 ];
 
 function TaskCard({ task, projects, onDragStart, onClick, onMoveStatus }) {
@@ -88,14 +93,14 @@ function TaskCard({ task, projects, onDragStart, onClick, onMoveStatus }) {
         <button
           type="button"
           class="task-card-open"
-          aria-label=${`Open details for task "${task.title}"`}
+          aria-label=${`작업 "${task.title}" 상세 열기`}
           onClick=${(e) => { e.stopPropagation(); onClick(task); }}>
-          Open
+          ${COMMON_ACTIONS.open}
         </button>
         ${onMoveStatus && html`
           <select
             class="task-card-status-select"
-            aria-label=${`Move task "${task.title}" to a different status column`}
+            aria-label=${`작업 "${task.title}" 상태 변경`}
             value=${task.status || 'backlog'}
             onClick=${(e) => e.stopPropagation()}
             onKeyDown=${(e) => e.stopPropagation()}
@@ -125,18 +130,18 @@ function BoardModeTabs({ active }) {
   // navigation. Both buttons stay in the natural Tab order so keyboard
   // users can hit either with Tab alone.
   return html`
-    <div class="board-mode-tabs" role="group" aria-label="Tasks view">
+    <div class="board-mode-tabs" role="group" aria-label="작업 뷰">
       <button
         class="board-mode-tab ${active === 'board' ? 'active' : ''}"
         aria-current=${active === 'board' ? 'page' : undefined}
         onClick=${() => navigate('board')}>
-        \u2592 Board
+        \u2592 보드
       </button>
       <button
         class="board-mode-tab ${active === 'calendar' ? 'active' : ''}"
         aria-current=${active === 'calendar' ? 'page' : undefined}
         onClick=${() => navigate('calendar')}>
-        \u2637 Calendar
+        \u2637 캘린더
       </button>
     </div>
   `;
@@ -313,7 +318,7 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
   return html`
     <div class="board-view">
       <div class="board-toolbar">
-        <h1 class="board-toolbar-title">Tasks</h1>
+        <h1 class="board-toolbar-title">작업</h1>
         <${BoardModeTabs} active="board" />
         <div class="board-toolbar-spacer"></div>
         <div class="board-filter">
@@ -322,37 +327,37 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
             value=${filterProject}
             onChange=${setFilterProject}
             options=${[
-              { value: '', label: 'All Projects' },
+              { value: '', label: FILTER_LABELS.allProjects },
               ...projects.map(p => ({ value: p.id, label: p.name })),
             ]}
-            ariaLabel="Project filter"
+            ariaLabel="프로젝트 필터"
           />
           <${Dropdown}
             wide
             value=${filterPriority}
             onChange=${setFilterPriority}
             options=${[
-              { value: '', label: 'All Priorities' },
-              { value: 'low', label: 'Low' },
-              { value: 'medium', label: 'Medium' },
-              { value: 'high', label: 'High' },
-              { value: 'critical', label: 'Critical' },
+              { value: '', label: FILTER_LABELS.allPriorities },
+              { value: 'low', label: FILTER_LABELS.priorityLow },
+              { value: 'medium', label: FILTER_LABELS.priorityMedium },
+              { value: 'high', label: FILTER_LABELS.priorityHigh },
+              { value: 'critical', label: FILTER_LABELS.priorityCritical },
             ]}
-            ariaLabel="Priority filter"
+            ariaLabel="우선순위 필터"
           />
           <${Dropdown}
             wide
             value=${filterDue}
             onChange=${setFilterDue}
             options=${[
-              { value: '', label: '전체 마감일' },
+              { value: '', label: FILTER_LABELS.allDueDates },
               { value: 'overdue', label: '\u23F0 지난 마감' },
-              { value: 'today', label: '오늘 마감' },
-              { value: 'this-week', label: '이번 주 (7일 이내)' },
-              { value: 'no-due', label: '마감일 없음' },
+              { value: 'today', label: FILTER_LABELS.dueToday },
+              { value: 'this-week', label: FILTER_LABELS.dueThisWeek },
+              { value: 'no-due', label: FILTER_LABELS.noDueDate },
             ]}
             title="마감일 필터"
-            ariaLabel="Due date filter"
+            ariaLabel="마감일 필터"
           />
           <${Dropdown}
             wide
@@ -365,10 +370,10 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
               { value: 'priority', label: '우선순위순' },
             ]}
             title="컬럼 내 카드 정렬 (드래그는 컬럼 이동에만 사용)"
-            ariaLabel="Sort mode"
+            ariaLabel="정렬 방식"
           />
         </div>
-        <button class="primary" onClick=${() => setShowNewTask(true)}>+ New Task</button>
+        <button class="primary" onClick=${() => setShowNewTask(true)}>+ ${MANAGER_LABELS.newTask}</button>
       </div>
       <div class="board-columns">
         ${BOARD_COLUMNS.map(col => {
@@ -498,7 +503,7 @@ export function CalendarView({ tasks, projects, agents, runs, reloadTasks, onOpe
   return html`
     <div class="calendar-view">
       <div class="board-toolbar">
-        <h1 class="board-toolbar-title">Tasks</h1>
+        <h1 class="board-toolbar-title">작업</h1>
         <${BoardModeTabs} active="calendar" />
         <div class="board-toolbar-spacer"></div>
         <div class="board-filter">
@@ -507,10 +512,10 @@ export function CalendarView({ tasks, projects, agents, runs, reloadTasks, onOpe
             value=${filterProject}
             onChange=${setFilterProject}
             options=${[
-              { value: '', label: 'All Projects' },
+              { value: '', label: FILTER_LABELS.allProjects },
               ...projects.map(p => ({ value: p.id, label: p.name })),
             ]}
-            ariaLabel="Project filter"
+            ariaLabel="프로젝트 필터"
           />
         </div>
         <div class="calendar-nav">
