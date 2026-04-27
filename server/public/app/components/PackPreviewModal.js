@@ -6,13 +6,21 @@ import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
 import { Modal } from './Modal.js';
+import { COMMON_ACTIONS, PACK_PREVIEW_LABELS, GALLERY_LABELS } from '../lib/copy.js';
 
 export function PackPreviewModal({ open, pack, onClose, onInstall, onUpdate, installing }) {
   const [promptExpanded, setPromptExpanded] = useState(false);
 
   if (!open || !pack) return null;
 
-  const isInstalling = installing === pack.registry_id;
+  // K-low-2 (Codex r2 BLOCK): URL-installed packs don't carry a
+  // registry_id, so a strict id-equality check leaves the install
+  // button enabled while the request is in-flight, allowing a
+  // double-click that the server will reject with a consumed
+  // preview_token. UrlInstallDialog passes 'url' as the installing
+  // sentinel for this case; mirror it here.
+  const isInstalling = installing != null
+    && (installing === pack.registry_id || installing === 'url');
   const mcpEntries = pack.mcp_servers && typeof pack.mcp_servers === 'object'
     ? Object.entries(pack.mcp_servers)
     : [];
@@ -32,10 +40,10 @@ export function PackPreviewModal({ open, pack, onClose, onInstall, onUpdate, ins
           <span class="preview-icon" style=${colorStyle}>${pack.icon || '◉'}</span>
           <div>
             <h2 class="modal-title" id="pack-preview-title">${pack.name}</h2>
-            <span class="preview-author">${pack.author || 'Unknown'}</span>
+            <span class="preview-author">${pack.author || PACK_PREVIEW_LABELS.unknownAuthor}</span>
           </div>
         </div>
-        <button class="ghost" onClick=${onClose}>Close</button>
+        <button class="ghost" onClick=${onClose}>${COMMON_ACTIONS.close}</button>
       </div>
         <div class="modal-body" style=${{ maxHeight: '65vh', overflow: 'auto' }}>
           ${pack.description && html`
@@ -44,52 +52,52 @@ export function PackPreviewModal({ open, pack, onClose, onInstall, onUpdate, ins
 
           <div class="preview-meta-row">
             <span class="preview-meta-item">
-              <span class="preview-meta-label">Category</span>
-              <span class="preview-meta-value">${pack.category}</span>
+              <span class="preview-meta-label">${PACK_PREVIEW_LABELS.metaCategory}</span>
+              <span class="preview-meta-value">${GALLERY_LABELS.categoryLabel[pack.category] || pack.category}</span>
             </span>
             <span class="preview-meta-item">
-              <span class="preview-meta-label">Version</span>
+              <span class="preview-meta-label">${PACK_PREVIEW_LABELS.metaVersion}</span>
               <span class="preview-meta-value">${pack.registry_version || '—'}</span>
             </span>
             <span class="preview-meta-item">
-              <span class="preview-meta-label">Tokens (full)</span>
+              <span class="preview-meta-label">${PACK_PREVIEW_LABELS.metaTokensFull}</span>
               <span class="preview-meta-value">${estimatedFull}</span>
             </span>
             ${estimatedCompact > 0 && html`
               <span class="preview-meta-item">
-                <span class="preview-meta-label">Tokens (compact)</span>
+                <span class="preview-meta-label">${PACK_PREVIEW_LABELS.metaTokensCompact}</span>
                 <span class="preview-meta-value">${estimatedCompact}</span>
               </span>
             `}
             <span class="preview-meta-item">
-              <span class="preview-meta-label">Priority</span>
+              <span class="preview-meta-label">${PACK_PREVIEW_LABELS.metaPriority}</span>
               <span class="preview-meta-value">${pack.priority ?? 100}</span>
             </span>
           </div>
 
           ${pack.installed && pack.updateAvailable && html`
             <div class="preview-update-notice">
-              Update available: ${pack.localVersion || '?'} → ${pack.registry_version}
+              ${PACK_PREVIEW_LABELS.updateNoticePrefix}${pack.localVersion || '?'} → ${pack.registry_version}
             </div>
           `}
 
           ${pack.source_url_display && html`
             <div class="preview-section">
-              <div class="preview-section-header">Source (URL Installed)</div>
+              <div class="preview-section-header">${PACK_PREVIEW_LABELS.sourceSection}</div>
               <div class="preview-source-info">
                 <div class="preview-source-row">
-                  <span class="preview-source-label">URL</span>
+                  <span class="preview-source-label">${PACK_PREVIEW_LABELS.sourceUrlLabel}</span>
                   <span class="preview-source-value mono" title=${pack.source_url_display}>${pack.source_url_display}</span>
                 </div>
                 ${pack.source_fetched_at && html`
                   <div class="preview-source-row">
-                    <span class="preview-source-label">Fetched</span>
+                    <span class="preview-source-label">${PACK_PREVIEW_LABELS.sourceFetchedLabel}</span>
                     <span class="preview-source-value">${new Date(pack.source_fetched_at).toLocaleString()}</span>
                   </div>
                 `}
                 ${pack.source_hash && html`
                   <div class="preview-source-row">
-                    <span class="preview-source-label">Hash</span>
+                    <span class="preview-source-label">${PACK_PREVIEW_LABELS.sourceHashLabel}</span>
                     <span class="preview-source-value mono">${String(pack.source_hash).slice(0, 16)}…</span>
                   </div>
                 `}
@@ -104,7 +112,7 @@ export function PackPreviewModal({ open, pack, onClose, onInstall, onUpdate, ins
                 class="preview-section-header clickable"
                 onClick=${() => setPromptExpanded(v => !v)}
               >
-                <span>Prompt (Full)</span>
+                <span>${PACK_PREVIEW_LABELS.promptSection}</span>
                 <span class="preview-expand-icon">${promptExpanded ? '▾' : '▸'}</span>
               </div>
               ${promptExpanded && html`
@@ -116,13 +124,13 @@ export function PackPreviewModal({ open, pack, onClose, onInstall, onUpdate, ins
           <!-- MCP Servers -->
           ${mcpEntries.length > 0 && html`
             <div class="preview-section">
-              <div class="preview-section-header">MCP Servers</div>
+              <div class="preview-section-header">${PACK_PREVIEW_LABELS.mcpSection}</div>
               <div class="preview-mcp-list">
                 ${mcpEntries.map(([alias, config]) => html`
                   <div key=${alias} class="preview-mcp-item">
                     <span class="mono">${alias}</span>
                     ${config && config.env_overrides && Object.keys(config.env_overrides).length > 0 && html`
-                      <span class="preview-mcp-env">env: ${Object.keys(config.env_overrides).join(', ')}</span>
+                      <span class="preview-mcp-env">${PACK_PREVIEW_LABELS.mcpEnvPrefix}: ${Object.keys(config.env_overrides).join(', ')}</span>
                     `}
                   </div>
                 `)}
@@ -133,7 +141,7 @@ export function PackPreviewModal({ open, pack, onClose, onInstall, onUpdate, ins
           <!-- Checklist -->
           ${checklist.length > 0 && html`
             <div class="preview-section">
-              <div class="preview-section-header">Checklist</div>
+              <div class="preview-section-header">${PACK_PREVIEW_LABELS.checklistSection}</div>
               <ul class="preview-checklist">
                 ${checklist.map((item, i) => html`<li key=${i}>${item}</li>`)}
               </ul>
@@ -143,7 +151,7 @@ export function PackPreviewModal({ open, pack, onClose, onInstall, onUpdate, ins
           <!-- Capabilities -->
           ${capabilities.length > 0 && html`
             <div class="preview-section">
-              <div class="preview-section-header">Required Capabilities (informational)</div>
+              <div class="preview-section-header">${PACK_PREVIEW_LABELS.capabilitiesSection}</div>
               <div class="preview-caps">
                 ${capabilities.map((cap, i) => html`
                   <span key=${i} class="preview-cap-badge">${cap}</span>
@@ -158,19 +166,19 @@ export function PackPreviewModal({ open, pack, onClose, onInstall, onUpdate, ins
               class="primary"
               disabled=${isInstalling}
               onClick=${() => onInstall(pack)}
-            >${isInstalling ? 'Installing...' : 'Install'}</button>
+            >${isInstalling ? GALLERY_LABELS.installing : GALLERY_LABELS.installBtn}</button>
           `}
           ${pack.updateAvailable && html`
             <button
               class="primary"
               disabled=${isInstalling}
               onClick=${() => onUpdate(pack)}
-            >${isInstalling ? 'Updating...' : 'Update'}</button>
+            >${isInstalling ? GALLERY_LABELS.updating : GALLERY_LABELS.updateBtn}</button>
           `}
           ${pack.installed && !pack.updateAvailable && html`
-            <span class="preview-installed-label">Installed (${pack.localVersion || pack.registry_version})</span>
+            <span class="preview-installed-label">${PACK_PREVIEW_LABELS.installedLabelPrefix} (${pack.localVersion || pack.registry_version})</span>
           `}
-          <button class="ghost" onClick=${onClose}>Close</button>
+          <button class="ghost" onClick=${onClose}>${COMMON_ACTIONS.close}</button>
         </div>
     </Modal>
   `;

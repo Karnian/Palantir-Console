@@ -75,6 +75,7 @@ export const COMMON_ACTIONS = {
   saving: '저장 중...',
   starting: '시작 중...',
   sending: '보내는 중...',
+  deleting: '삭제 중...',
 };
 
 // Filter / sort placeholder copy that recurs across BoardView toolbars
@@ -419,6 +420,271 @@ export const MANAGER_CHAT_AUX = {
   remediationFixEnd: '하세요.',
   remediationTryRefreshLink: '새로고침',
   remediationTryAfter: ' 해 보세요. 문제가 지속되면 서버를 재시작해 최신 코드를 반영하세요.',
+};
+
+// PresetsView — list page header, PresetModal (create/edit), DeleteConfirm.
+// Worker preset 핵심 surface; 가급적 COMMON_ACTIONS 재사용 + preset 전용
+// 라벨만 그룹에 둠.
+export const PRESETS_LABELS = {
+  pageTitle: '워커 프리셋',
+  newPreset: '새 프리셋',
+  // Modal — new / edit
+  modalNew: '새 워커 프리셋',
+  modalEdit: '프리셋 편집',
+  fieldName: '이름',
+  namePlaceholder: '예: agent-olympus-isolated',
+  fieldDescription: '설명',
+  fieldIsolated: '격리 모드 (Tier 2 — Claude 전용)',
+  isolatedHint: 'Claude 워커에만 적용됩니다. Codex / OpenCode 는 ',
+  isolatedHintAfterCode: ' 경고를 받고 Tier 1 로 폴백합니다.',
+  fieldBasePromptPrefix: '기본 시스템 프롬프트',
+  fieldBasePromptByteSuffix: '바이트',
+  basePromptPlaceholder: '선택 사항 — 스킬 팩 섹션 앞에 prepend 됩니다.',
+  fieldPluginRefsLabel: '플러그인 참조',
+  pluginRefsEmptySuffix: ' 안에 plugin.json 을 가진 디렉터리가 없습니다.',
+  fieldMcpServers: 'MCP 서버 템플릿',
+  mcpServersEmpty: '등록된 MCP 템플릿이 없습니다.',
+  fieldMinVersion: '최소 Claude 버전 (Min Claude Version, 선택, semver)',
+  minVersionPlaceholder: '예: 2.0.0',
+  fieldSettingSources: '설정 소스 (Setting Sources, Tier 2 플래그, 기본 빈 값)',
+  settingSourcesPlaceholder: "(빈 값 = --setting-sources '')",
+  saveExceeds16kb: 'base_system_prompt 가 16KB 를 초과합니다',
+  toastUpdated: '프리셋이 업데이트되었습니다',
+  toastCreated: '프리셋이 생성되었습니다',
+  // Plugin warnings strip
+  pluginWarningsCountSuffix: '개 플러그인 디렉터리의 plugin.json 이 잘못되어 건너뜁니다:',
+  // Empty state
+  emptyText: '아직 프리셋이 없습니다',
+  emptySub: '워커 프리셋은 플러그인 디렉터리, MCP 서버, 시스템 프롬프트를 묶어 워커 실행 간에 재사용합니다. 시작하려면 하나 만드세요.',
+  // Card
+  badgeIsolated: '격리 (Tier 2)',
+  cardCountPlugin: '개 플러그인',
+  cardCountMcp: '개 MCP 서버',
+  cardMinVersionPrefix: '최소 Claude',
+  // Delete confirm
+  deleteTitle: '프리셋 삭제',
+  deleteBodySuffix: ' 을(를) 삭제할까요? 이 프리셋에 연결된 작업의 링크는 해제되며, 과거 실행 스냅샷은 보존됩니다.',
+  toastDeleted: '프리셋이 삭제되었습니다',
+};
+
+// MCP Templates — McpTemplatesView, TemplateModal, DeleteConfirm.
+export const MCP_TEMPLATES_LABELS = {
+  pageTitle: 'MCP 서버',
+  newTemplate: '새 MCP 서버',
+  // Modal
+  modalNew: '새 MCP 템플릿',
+  modalEdit: 'MCP 템플릿 편집',
+  fieldAlias: 'Alias',
+  aliasHint: '영문 / 숫자 / _ / -',
+  aliasPlaceholder: 'graphify',
+  aliasImmutableHint: 'Alias 는 변경할 수 없습니다 — 스킬 팩이 이 이름으로 템플릿을 참조합니다.',
+  fieldCommand: '명령',
+  commandPlaceholder: 'npx',
+  fieldArgs: 'Args',
+  argsHint: '문자열 JSON 배열',
+  fieldEnv: '허용된 env 키',
+  envHint: '쉼표 구분',
+  envPlaceholder: 'GRAPHIFY_ROOT, LOG_LEVEL',
+  envWarn: '인증 / 프로세스 로더 패턴 (*_KEY, NODE_OPTIONS, PATH 등) 은 전역적으로 차단됩니다.',
+  fieldDescription: '설명',
+  descriptionPlaceholder: '이 MCP 서버는 무엇을 하나요?',
+  validateAliasCommand: 'alias 와 command 는 필수입니다',
+  toastCreated: '템플릿이 생성되었습니다',
+  toastUpdated: '템플릿이 업데이트되었습니다',
+  // Empty state
+  emptyText: 'MCP 템플릿이 없습니다',
+  emptySub: '프리셋과 스킬 팩이 alias 로 참조할 수 있도록 MCP 서버를 등록하세요.',
+  // Card
+  cardUpdatedPrefix: '업데이트',
+  // Delete confirm
+  deleteTitle: 'MCP 템플릿 삭제',
+  deleteBodySuffix: ' 을(를) 삭제할까요?',
+  // Args validation toast — used inside parseJsonArrayField fallback.
+  invalidJsonArraySuffix: ' 은(는) 문자열의 JSON 배열이어야 합니다',
+  inUseTitle: '사용 중',
+  inUsePresetsLabel: '프리셋',
+  inUseSkillPacksLabel: '스킬 팩',
+  inUseRemediation: '삭제하기 전에 이 참조를 제거하세요.',
+  noReferences: '참조가 없습니다 — 안전하게 삭제할 수 있습니다.',
+  checkingReferences: '참조 확인 중…',
+  toastDeleted: '템플릿이 삭제되었습니다',
+};
+
+// SkillPacksView, MyPacksView, SkillPackModal, DeleteConfirm.
+export const SKILL_PACKS_LABELS = {
+  pageTitle: '스킬 팩',
+  // Page tabs
+  tabMyPacks: '내 스킬 팩',
+  tabGallery: '갤러리',
+  // Top actions
+  actionImport: '가져오기',
+  actionShowTemplates: 'MCP 템플릿',
+  actionHideTemplates: '템플릿 숨기기',
+  actionNew: '새 스킬 팩',
+  // Filter dropdowns
+  filterAllScopes: '모든 범위',
+  filterScopeGlobal: '전역',
+  filterScopeProject: '프로젝트',
+  filterAllProjects: '전체 프로젝트',
+  filterScopeAria: '범위 필터',
+  filterProjectAria: '프로젝트 필터',
+  packsCountSuffix: '개',
+  // Token budget
+  tokenBudget: '토큰 예산',
+  // Templates section
+  templatesTitle: 'MCP 서버 템플릿',
+  templatesAlias: 'Alias',
+  templatesCommand: '명령',
+  templatesDescription: '설명',
+  templatesAllowedEnv: '허용된 env 키',
+  // Empty state
+  emptyText: '스킬 팩이 없습니다',
+  emptySub: '에이전트에 능력을 주입할 첫 스킬 팩을 만드세요.',
+  // Card
+  originBundled: '번들 제공',
+  originUrlPrefix: 'URL',
+  originImported: '가져옴',
+  originManual: '직접 작성',
+  cardCheckUpdate: '업데이트 확인',
+  cardChecking: '확인 중...',
+  cardExport: '내보내기',
+  cardTokensSuffix: '토큰',
+  // Scope label mapping for the card chip (`pack.scope`). Card class
+  // ("global"/"project") still uses the raw enum so styling is stable;
+  // only the visible chip text resolves through this map.
+  scopeLabel: {
+    global: '전역',
+    project: '프로젝트',
+  },
+  toastInvalidJson: '유효하지 않은 JSON',
+  toastUpToDate: '은(는) 최신 상태입니다',
+  toastUpdateFailed: '업데이트 확인 실패',
+  toastUpdateApplied: '업데이트되었습니다',
+  // Update confirm — joined with `\n` at call site so copy.js stays
+  // free of formatting concerns. Each line is a single semantic chunk.
+  updateConfirmTitlePrefix: '업데이트 가능: ',
+  updateConfirmHashLabel: '해시',
+  updateConfirmFetchedLabel: '가져온 시각',
+  updateConfirmQuestion: '업데이트를 적용할까요?',
+  // Delete
+  deleteTitle: '스킬 팩 삭제',
+  deleteBodySuffix: ' 을(를) 삭제할까요? 모든 프로젝트와 작업 바인딩이 함께 제거됩니다.',
+  // SkillPackModal — fields and tabs
+  modalNew: '새 스킬 팩',
+  modalEdit: '스킬 팩 편집',
+  fieldName: '이름',
+  namePlaceholder: '예: 접근성 전문가',
+  fieldPriority: '우선순위',
+  fieldDescription: '설명',
+  descriptionPlaceholder: '간단한 설명...',
+  fieldScope: '범위',
+  scopeGlobal: '전역',
+  scopeProject: '프로젝트',
+  fieldProject: '프로젝트',
+  selectProject: '프로젝트 선택...',
+  fieldIcon: '아이콘',
+  fieldColor: '색상',
+  // tabs
+  tabPrompt: '프롬프트',
+  tabMcp: 'MCP 서버',
+  tabChecklist: '체크리스트',
+  tabPromptTokenSuffix: '토큰',
+  fieldFullPrompt: '전체 프롬프트',
+  fullPromptPlaceholder: '에이전트에 전달할 전체 스킬 지시사항...',
+  fieldCompactPrompt: '압축 프롬프트 (선택)',
+  compactPromptPlaceholder: '다중 스킬 토큰 예산을 위한 짧은 버전...',
+  // mcp tab
+  mcpAdd: 'MCP 서버 추가',
+  mcpSelectTemplate: '템플릿 선택...',
+  mcpEmpty: '구성된 MCP 서버가 없습니다',
+  mcpUnknownTemplate: '알 수 없는 템플릿',
+  mcpEnvDefault: '(기본값)',
+  mcpConflictPolicy: '충돌 정책',
+  mcpConflictWarn: '경고 (우선순위 높은 팩이 적용됨)',
+  mcpConflictFail: '실패 (실행 차단)',
+  // checklist tab
+  checklistAddPlaceholder: '체크리스트 항목 추가...',
+  checklistAddBtn: '추가',
+  checklistInjectLabel: '에이전트 프롬프트에 체크리스트 주입',
+  // adapter compat
+  adapterSupport: '어댑터 지원',
+  adapterClaudeFull: 'Claude ✔ Full',
+  adapterCodexPrompt: 'Codex ✔ Prompt',
+  adapterGeminiPrompt: 'Gemini ✔ Prompt',
+};
+
+// Skill Pack Gallery — install / browse / search.
+export const GALLERY_LABELS = {
+  searchPlaceholder: '스킬 팩 검색...',
+  installFromUrl: 'URL 에서 설치',
+  filterAll: '전체',
+  allInstalled: '모든 팩이 설치됨',
+  emptyText: '검색 결과가 없습니다',
+  loadFailed: '레지스트리를 불러오지 못했습니다',
+  loadingRegistry: '레지스트리 불러오는 중...',
+  badgeInstalled: '설치됨',
+  badgeUpdate: '업데이트 가능',
+  installBtn: '설치',
+  installing: '설치 중...',
+  updateBtn: '업데이트',
+  updating: '업데이트 중...',
+  retry: '다시 시도',
+  toastInstalled: '설치됨',
+  toastUpdated: '업데이트됨',
+  toastConflict: '이미 설치되었거나 이름 충돌',
+  tokensSuffix: '토큰',
+  // Registry category id → 한국어 display label. Categories ship from
+  // the server registry (`server/data/skill-pack-registry.json`) with
+  // English names ("Code Quality" / "Testing" / …). The id is stable
+  // across releases and is what the cat filter button + card chip key
+  // off, so we map id → label client-side. Unknown ids fall through
+  // to the registry's own `cat.name`.
+  categoryLabel: {
+    'code-quality': '코드 품질',
+    'testing': '테스트',
+    'security': '보안',
+    'devops': '데브옵스',
+    'documentation': '문서화',
+    'frontend': '프론트엔드',
+    'backend': '백엔드',
+    'general': '일반',
+  },
+};
+
+// PackPreviewModal — registry pack preview before install/update.
+export const PACK_PREVIEW_LABELS = {
+  unknownAuthor: '알 수 없음',
+  metaCategory: '카테고리',
+  metaVersion: '버전',
+  metaTokensFull: '토큰 (전체)',
+  metaTokensCompact: '토큰 (압축)',
+  metaPriority: '우선순위',
+  updateNoticePrefix: '업데이트 가능: ',
+  sourceSection: '출처 (URL 설치)',
+  sourceUrlLabel: 'URL',
+  sourceFetchedLabel: '가져온 시각',
+  sourceHashLabel: '해시',
+  promptSection: '프롬프트 (전체)',
+  mcpSection: 'MCP 서버',
+  mcpEnvPrefix: 'env',
+  checklistSection: '체크리스트',
+  capabilitiesSection: '필요 기능 (참고용)',
+  installedLabelPrefix: '설치됨',
+};
+
+// UrlInstallDialog — install-from-URL flow (gallery v1.1).
+export const URL_INSTALL_LABELS = {
+  modalTitle: 'URL 에서 설치',
+  helpText: 'https:// 로 시작하는 스킬 팩 JSON 파일 URL 을 붙여넣으세요 (예: GitHub raw, gist). 서버가 가져오기 / 검증 / 미리보기 후 설치합니다.',
+  fieldUrlLabel: '스킬 팩 URL',
+  urlPlaceholder: 'https://raw.githubusercontent.com/...',
+  securityNotePrefix: '보안',
+  securityNote: 'HTTPS 만 허용됩니다. 사설 IP, 루프백, 메타데이터 엔드포인트는 차단됩니다. 응답 크기는 256KB 로 제한됩니다.',
+  fetchPreviewBtn: '가져오기 및 미리보기',
+  fetching: '가져오는 중...',
+  invalidHttpsToast: 'URL 은 https:// 로 시작해야 합니다',
+  fetchFailedToast: 'URL 을 가져오지 못했습니다',
+  installedFromUrlToastSuffix: ' (URL 에서 설치됨)',
 };
 
 // Drift drawer — `dispatch_audit_log.incoherence_kind` enum.

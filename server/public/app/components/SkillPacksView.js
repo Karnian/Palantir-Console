@@ -7,13 +7,14 @@ const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
 import { addToast, apiFetchWithToast } from '../lib/toast.js';
+import { COMMON_ACTIONS, SKILL_PACKS_LABELS } from '../lib/copy.js';
 import { EmptyState } from './EmptyState.js';
 import { Dropdown } from './Dropdown.js';
 import { Modal } from './Modal.js';
 import { GalleryView } from './GalleryView.js';
 
 function Loading() {
-  return html`<div class="loading">Loading...</div>`;
+  return html`<div class="loading">${COMMON_ACTIONS.loading}</div>`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -149,47 +150,47 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
   return html`
     <${Modal} open=${open} onClose=${onClose} labelledBy="skill-pack-title" wide>
       <div class="modal-header">
-        <h2 class="modal-title" id="skill-pack-title">${pack ? 'Edit Skill Pack' : 'New Skill Pack'}</h2>
-        <button class="ghost" onClick=${onClose}>Close</button>
+        <h2 class="modal-title" id="skill-pack-title">${pack ? SKILL_PACKS_LABELS.modalEdit : SKILL_PACKS_LABELS.modalNew}</h2>
+        <button class="ghost" onClick=${onClose}>${COMMON_ACTIONS.close}</button>
       </div>
       <div class="modal-body">
         <div class="form-row">
           <div class="form-field" style=${{ flex: 1 }}>
-            <label class="form-label" for="skill-pack-name">Name</label>
-            <input id="skill-pack-name" class="form-input" value=${name} onInput=${e => setName(e.target.value)} placeholder="e.g. Accessibility Expert" />
+            <label class="form-label" for="skill-pack-name">${SKILL_PACKS_LABELS.fieldName}</label>
+            <input id="skill-pack-name" class="form-input" value=${name} onInput=${e => setName(e.target.value)} placeholder=${SKILL_PACKS_LABELS.namePlaceholder} />
           </div>
           <div class="form-field" style=${{ width: '120px' }}>
-            <label class="form-label" for="skill-pack-priority">Priority</label>
+            <label class="form-label" for="skill-pack-priority">${SKILL_PACKS_LABELS.fieldPriority}</label>
             <input id="skill-pack-priority" class="form-input" type="number" min="0" value=${priority} onInput=${e => setPriority(e.target.value)} />
           </div>
         </div>
         <div class="form-field">
-          <label class="form-label" for="skill-pack-desc">Description</label>
-          <input id="skill-pack-desc" class="form-input" value=${description} onInput=${e => setDescription(e.target.value)} placeholder="Short description..." />
+          <label class="form-label" for="skill-pack-desc">${SKILL_PACKS_LABELS.fieldDescription}</label>
+          <input id="skill-pack-desc" class="form-input" value=${description} onInput=${e => setDescription(e.target.value)} placeholder=${SKILL_PACKS_LABELS.descriptionPlaceholder} />
         </div>
           <div class="form-row">
             <div class="form-field" style=${{ flex: 1 }}>
-              <label class="form-label" for="skill-pack-scope">Scope</label>
+              <label class="form-label" for="skill-pack-scope">${SKILL_PACKS_LABELS.fieldScope}</label>
               <${Dropdown} id="skill-pack-scope" value=${scope} onChange=${setScope} options=${[
-                { value: 'global', label: 'Global' },
-                { value: 'project', label: 'Project' },
+                { value: 'global', label: SKILL_PACKS_LABELS.scopeGlobal },
+                { value: 'project', label: SKILL_PACKS_LABELS.scopeProject },
               ]} />
             </div>
             ${scope === 'project' && html`
               <div class="form-field" style=${{ flex: 2 }}>
-                <label class="form-label" for="skill-pack-project">Project</label>
+                <label class="form-label" for="skill-pack-project">${SKILL_PACKS_LABELS.fieldProject}</label>
                 <select id="skill-pack-project" class="form-select" value=${projectId} onChange=${e => setProjectId(e.target.value)}>
-                  <option value="" disabled>Select Project...</option>
+                  <option value="" disabled>${SKILL_PACKS_LABELS.selectProject}</option>
                   ${(projects || []).map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
                 </select>
               </div>
             `}
             <div class="form-field" style=${{ width: '80px' }}>
-              <label class="form-label" for="skill-pack-icon">Icon</label>
+              <label class="form-label" for="skill-pack-icon">${SKILL_PACKS_LABELS.fieldIcon}</label>
               <input id="skill-pack-icon" class="form-input" value=${icon} onInput=${e => setIcon(e.target.value)} placeholder="\u2726" />
             </div>
             <div class="form-field" style=${{ width: '100px' }}>
-              <label class="form-label" for="skill-pack-color">Color</label>
+              <label class="form-label" for="skill-pack-color">${SKILL_PACKS_LABELS.fieldColor}</label>
               <input id="skill-pack-color" class="form-input" value=${color} onInput=${e => setColor(e.target.value)} placeholder="#6fd4a0" />
             </div>
           </div>
@@ -197,28 +198,28 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
           <!-- Tabs -->
           <div class="skill-tabs">
             <button class="skill-tab ${activeTab === 'prompt' ? 'active' : ''}" onClick=${() => setActiveTab('prompt')}>
-              Prompt${estimatedTokens > 0 ? ` (~${estimatedTokens} tok)` : ''}
+              ${SKILL_PACKS_LABELS.tabPrompt}${estimatedTokens > 0 ? ` (~${estimatedTokens} ${SKILL_PACKS_LABELS.tabPromptTokenSuffix})` : ''}
             </button>
             <button class="skill-tab ${activeTab === 'mcp' ? 'active' : ''}" onClick=${() => setActiveTab('mcp')}>
-              MCP Servers${selectedAliases.length > 0 ? ` (${selectedAliases.length})` : ''}
+              ${SKILL_PACKS_LABELS.tabMcp}${selectedAliases.length > 0 ? ` (${selectedAliases.length})` : ''}
             </button>
             <button class="skill-tab ${activeTab === 'checklist' ? 'active' : ''}" onClick=${() => setActiveTab('checklist')}>
-              Checklist${checklist.length > 0 ? ` (${checklist.length})` : ''}
+              ${SKILL_PACKS_LABELS.tabChecklist}${checklist.length > 0 ? ` (${checklist.length})` : ''}
             </button>
           </div>
 
           ${activeTab === 'prompt' && html`
             <div class="form-field">
-              <label class="form-label" for="skill-pack-prompt-full">Full Prompt</label>
+              <label class="form-label" for="skill-pack-prompt-full">${SKILL_PACKS_LABELS.fieldFullPrompt}</label>
               <textarea id="skill-pack-prompt-full" class="form-textarea" rows="8" value=${promptFull}
                 onInput=${e => setPromptFull(e.target.value)}
-                placeholder="Full skill instructions for the agent..." />
+                placeholder=${SKILL_PACKS_LABELS.fullPromptPlaceholder} />
             </div>
             <div class="form-field">
-              <label class="form-label" for="skill-pack-prompt-compact">Compact Prompt (optional)${estimatedTokensCompact !== null ? ` (~${estimatedTokensCompact} tok)` : ''}</label>
+              <label class="form-label" for="skill-pack-prompt-compact">${SKILL_PACKS_LABELS.fieldCompactPrompt}${estimatedTokensCompact !== null ? ` (~${estimatedTokensCompact} ${SKILL_PACKS_LABELS.tabPromptTokenSuffix})` : ''}</label>
               <textarea id="skill-pack-prompt-compact" class="form-textarea" rows="3" value=${promptCompact}
                 onInput=${e => setPromptCompact(e.target.value)}
-                placeholder="Shortened version for multi-skill token budget..." />
+                placeholder=${SKILL_PACKS_LABELS.compactPromptPlaceholder} />
             </div>
           `}
 
@@ -226,15 +227,15 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
             <div class="skill-mcp-section">
               ${availableTemplates.length > 0 && html`
                 <div class="form-field">
-                  <label class="form-label" for="skill-pack-add-mcp">Add MCP Server</label>
+                  <label class="form-label" for="skill-pack-add-mcp">${SKILL_PACKS_LABELS.mcpAdd}</label>
                   <select id="skill-pack-add-mcp" class="form-select" onChange=${e => { addMcpAlias(e.target.value); e.target.value = ''; }}>
-                    <option value="">Select template...</option>
+                    <option value="">${SKILL_PACKS_LABELS.mcpSelectTemplate}</option>
                     ${availableTemplates.map(t => html`<option key=${t.alias} value=${t.alias}>${t.alias} — ${t.description || ''}</option>`)}
                   </select>
                 </div>
               `}
               ${selectedAliases.length === 0 && html`
-                <div class="skill-mcp-empty">No MCP servers configured</div>
+                <div class="skill-mcp-empty">${SKILL_PACKS_LABELS.mcpEmpty}</div>
               `}
               ${selectedAliases.map(alias => {
                 const tpl = (templates || []).find(t => t.alias === alias);
@@ -245,7 +246,7 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
                   <div class="skill-mcp-item" key=${alias}>
                     <div class="skill-mcp-item-header">
                       <span class="skill-mcp-alias">${alias}</span>
-                      <span class="skill-mcp-cmd mono">${tpl ? `${tpl.command} ${(() => { try { return JSON.parse(tpl.args || '[]'); } catch { return []; } })().join(' ')}` : 'unknown template'}</span>
+                      <span class="skill-mcp-cmd mono">${tpl ? `${tpl.command} ${(() => { try { return JSON.parse(tpl.args || '[]'); } catch { return []; } })().join(' ')}` : SKILL_PACKS_LABELS.mcpUnknownTemplate}</span>
                       <button class="ghost small" onClick=${() => removeMcpAlias(alias)}>\u2715</button>
                     </div>
                     ${allowedKeys.length > 0 && html`
@@ -256,7 +257,7 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
                             <input class="form-input" style=${{ flex: 1 }}
                               value=${envOverrides[key] || ''}
                               onInput=${e => setMcpEnv(alias, key, e.target.value)}
-                              placeholder="(default)" />
+                              placeholder=${SKILL_PACKS_LABELS.mcpEnvDefault} />
                             ${envOverrides[key] && html`
                               <button class="ghost small" onClick=${() => removeMcpEnv(alias, key)}>\u2715</button>
                             `}
@@ -268,10 +269,10 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
                 `;
               })}
               <div class="form-field" style=${{ marginTop: '8px' }}>
-                <label class="form-label" for="skill-pack-conflict">Conflict Policy</label>
+                <label class="form-label" for="skill-pack-conflict">${SKILL_PACKS_LABELS.mcpConflictPolicy}</label>
                 <select id="skill-pack-conflict" class="form-select" value=${conflictPolicy} onChange=${e => setConflictPolicy(e.target.value)}>
-                  <option value="warn">Warn (higher priority wins)</option>
-                  <option value="fail">Fail (block execution)</option>
+                  <option value="warn">${SKILL_PACKS_LABELS.mcpConflictWarn}</option>
+                  <option value="fail">${SKILL_PACKS_LABELS.mcpConflictFail}</option>
                 </select>
               </div>
             </div>
@@ -289,31 +290,31 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
                 <input class="form-input" style=${{ flex: 1 }} value=${newCheckItem}
                   onInput=${e => setNewCheckItem(e.target.value)}
                   onKeyDown=${e => { if (e.key === 'Enter') { e.preventDefault(); addCheckItem(); } }}
-                  placeholder="Add checklist item..." />
-                <button class="ghost" onClick=${addCheckItem} disabled=${!newCheckItem.trim()}>Add</button>
+                  placeholder=${SKILL_PACKS_LABELS.checklistAddPlaceholder} />
+                <button class="ghost" onClick=${addCheckItem} disabled=${!newCheckItem.trim()}>${SKILL_PACKS_LABELS.checklistAddBtn}</button>
               </div>
               <label class="skill-checklist-inject" style=${{ marginTop: '8px' }}>
                 <input type="checkbox" checked=${injectChecklist} onChange=${e => setInjectChecklist(e.target.checked)} />
-                <span>Inject checklist into agent prompt</span>
+                <span>${SKILL_PACKS_LABELS.checklistInjectLabel}</span>
               </label>
             </div>
           `}
 
           <!-- Adapter compatibility -->
           <div class="skill-adapter-compat">
-            <span class="form-label">Adapter Support</span>
+            <span class="form-label">${SKILL_PACKS_LABELS.adapterSupport}</span>
             <div class="skill-adapter-badges">
-              <span class="skill-badge skill-badge-ok">Claude \u2714 Full</span>
-              <span class="skill-badge skill-badge-ok">Codex \u2714 Prompt</span>
-              <span class="skill-badge skill-badge-ok">Gemini \u2714 Prompt</span>
+              <span class="skill-badge skill-badge-ok">${SKILL_PACKS_LABELS.adapterClaudeFull}</span>
+              <span class="skill-badge skill-badge-ok">${SKILL_PACKS_LABELS.adapterCodexPrompt}</span>
+              <span class="skill-badge skill-badge-ok">${SKILL_PACKS_LABELS.adapterGeminiPrompt}</span>
             </div>
           </div>
         </div>
         <div class="modal-footer">
-          <button class="ghost" onClick=${onClose}>Cancel</button>
+          <button class="ghost" onClick=${onClose}>${COMMON_ACTIONS.cancel}</button>
           <button class="primary" onClick=${handleSave}
             disabled=${saving || !name.trim() || (scope === 'project' && !projectId)}>
-            ${saving ? 'Saving...' : pack ? 'Update' : 'Create'}
+            ${saving ? COMMON_ACTIONS.saving : pack ? COMMON_ACTIONS.update : COMMON_ACTIONS.create}
           </button>
         </div>
     </Modal>
@@ -339,15 +340,15 @@ function DeleteConfirm({ open, pack, onClose, onConfirm }) {
   return html`
     <${Modal} open=${open && !!pack} onClose=${onClose} labelledBy="skill-delete-title" maxWidth="420px">
       <div class="modal-header">
-        <h2 class="modal-title" id="skill-delete-title">Delete Skill Pack</h2>
+        <h2 class="modal-title" id="skill-delete-title">${SKILL_PACKS_LABELS.deleteTitle}</h2>
       </div>
       <div class="modal-body">
-        <p>Delete <strong>${pack?.name}</strong>? This will remove all project and task bindings.</p>
+        <p><strong>${pack?.name}</strong>${SKILL_PACKS_LABELS.deleteBodySuffix}</p>
       </div>
       <div class="modal-footer">
-        <button class="ghost" onClick=${onClose}>Cancel</button>
+        <button class="ghost" onClick=${onClose}>${COMMON_ACTIONS.cancel}</button>
         <button class="danger" onClick=${handleDelete} disabled=${deleting}>
-          ${deleting ? 'Deleting...' : 'Delete'}
+          ${deleting ? COMMON_ACTIONS.deleting : COMMON_ACTIONS.delete}
         </button>
       </div>
     </Modal>
@@ -365,17 +366,17 @@ export function SkillPacksView({ projects }) {
   return html`
     <div class="skill-packs-view" data-view="skills">
       <div class="skill-packs-header">
-        <h1 class="skill-packs-title">Skill Packs</h1>
+        <h1 class="skill-packs-title">${SKILL_PACKS_LABELS.pageTitle}</h1>
       </div>
       <div class="gallery-page-tabs">
         <button
           class="gallery-page-tab ${activeTab === 'my-packs' ? 'active' : ''}"
           onClick=${() => setActiveTab('my-packs')}
-        >My Packs</button>
+        >${SKILL_PACKS_LABELS.tabMyPacks}</button>
         <button
           class="gallery-page-tab ${activeTab === 'gallery' ? 'active' : ''}"
           onClick=${() => setActiveTab('gallery')}
-        >Gallery</button>
+        >${SKILL_PACKS_LABELS.tabGallery}</button>
       </div>
       ${activeTab === 'my-packs' && html`<${MyPacksView} projects=${projects} />`}
       ${activeTab === 'gallery' && html`<${GalleryView} />`}
@@ -452,7 +453,7 @@ function MyPacksView({ projects }) {
           body: JSON.stringify({ skill_pack: parsed }),
         });
         loadData();
-      } catch (err) { addToast(err.message || 'Invalid JSON', 'error'); }
+      } catch (err) { addToast(err.message || SKILL_PACKS_LABELS.toastInvalidJson, 'error'); }
     };
     input.click();
   };
@@ -465,11 +466,18 @@ function MyPacksView({ projects }) {
         body: JSON.stringify({ pack_id: pack.id }),
       });
       if (!res.update_available) {
-        addToast(`"${pack.name}" is up to date`, 'info');
+        addToast(`"${pack.name}" ${SKILL_PACKS_LABELS.toastUpToDate}`, 'info');
       } else {
         // Prompt user to confirm update
         const confirmed = window.confirm(
-          `Update available for "${pack.name}"\n\nHash: ${String(res.new_hash).slice(0, 16)}…\nFetched: ${new Date(res.fetched_at).toLocaleString()}\n\nApply update?`
+          [
+          `${SKILL_PACKS_LABELS.updateConfirmTitlePrefix}"${pack.name}"`,
+          '',
+          `${SKILL_PACKS_LABELS.updateConfirmHashLabel}: ${String(res.new_hash).slice(0, 16)}…`,
+          `${SKILL_PACKS_LABELS.updateConfirmFetchedLabel}: ${new Date(res.fetched_at).toLocaleString()}`,
+          '',
+          SKILL_PACKS_LABELS.updateConfirmQuestion,
+        ].join('\n')
         );
         if (confirmed) {
           await apiFetchWithToast('/api/skill-packs/registry/update-url', {
@@ -480,26 +488,26 @@ function MyPacksView({ projects }) {
               expected_hash: res.new_hash,
             }),
           });
-          addToast(`Updated "${pack.name}"`, 'success');
+          addToast(`"${pack.name}" ${SKILL_PACKS_LABELS.toastUpdateApplied}`, 'success');
           loadData();
         }
       }
     } catch (err) {
-      addToast(err.message || 'Update check failed', 'error');
+      addToast(err.message || SKILL_PACKS_LABELS.toastUpdateFailed, 'error');
     }
     setCheckingUpdate(null);
   };
 
   const originBadge = (pack) => {
     const t = pack.origin_type;
-    if (t === 'bundled') return { label: 'Bundled', cls: 'bundled', title: pack.registry_id || '' };
+    if (t === 'bundled') return { label: SKILL_PACKS_LABELS.originBundled, cls: 'bundled', title: pack.registry_id || '' };
     if (t === 'url') {
       let host = '';
       try { host = new URL(pack.source_url_display || 'https://x').host; } catch { /* */ }
-      return { label: `URL${host ? `: ${host}` : ''}`, cls: 'url', title: pack.source_url_display || '' };
+      return { label: `${SKILL_PACKS_LABELS.originUrlPrefix}${host ? `: ${host}` : ''}`, cls: 'url', title: pack.source_url_display || '' };
     }
-    if (t === 'import') return { label: 'Imported', cls: 'import', title: '' };
-    return { label: 'Manual', cls: 'manual', title: '' };
+    if (t === 'import') return { label: SKILL_PACKS_LABELS.originImported, cls: 'import', title: '' };
+    return { label: SKILL_PACKS_LABELS.originManual, cls: 'manual', title: '' };
   };
 
   if (loading) return html`<${Loading} />`;
@@ -507,11 +515,11 @@ function MyPacksView({ projects }) {
   return html`
     <div class="my-packs-view">
       <div class="my-packs-actions">
-        <button class="ghost small" onClick=${handleImport}>Import</button>
+        <button class="ghost small" onClick=${handleImport}>${SKILL_PACKS_LABELS.actionImport}</button>
         <button class="ghost small" onClick=${() => setShowTemplates(v => !v)}>
-          ${showTemplates ? 'Hide Templates' : 'MCP Templates'}
+          ${showTemplates ? SKILL_PACKS_LABELS.actionHideTemplates : SKILL_PACKS_LABELS.actionShowTemplates}
         </button>
-        <button class="primary" onClick=${() => { setEditPack(null); setShowModal(true); }}>New Skill Pack</button>
+        <button class="primary" onClick=${() => { setEditPack(null); setShowModal(true); }}>${SKILL_PACKS_LABELS.actionNew}</button>
       </div>
 
       <!-- Filters -->
@@ -521,11 +529,11 @@ function MyPacksView({ projects }) {
           value=${filterScope}
           onChange=${(v) => { setFilterScope(v); setFilterProjectId(''); }}
           options=${[
-            { value: 'all', label: 'All Scopes' },
-            { value: 'global', label: 'Global' },
-            { value: 'project', label: 'Project' },
+            { value: 'all', label: SKILL_PACKS_LABELS.filterAllScopes },
+            { value: 'global', label: SKILL_PACKS_LABELS.filterScopeGlobal },
+            { value: 'project', label: SKILL_PACKS_LABELS.filterScopeProject },
           ]}
-          ariaLabel="Scope filter"
+          ariaLabel=${SKILL_PACKS_LABELS.filterScopeAria}
         />
         ${filterScope === 'project' && html`
           <${Dropdown}
@@ -533,13 +541,13 @@ function MyPacksView({ projects }) {
             value=${filterProjectId}
             onChange=${setFilterProjectId}
             options=${[
-              { value: '', label: 'All Projects' },
+              { value: '', label: SKILL_PACKS_LABELS.filterAllProjects },
               ...(projects || []).map(p => ({ value: p.id, label: p.name })),
             ]}
-            ariaLabel="Project filter"
+            ariaLabel=${SKILL_PACKS_LABELS.filterProjectAria}
           />
         `}
-        <span class="skill-packs-count">${filteredPacks.length} pack${filteredPacks.length !== 1 ? 's' : ''}</span>
+        <span class="skill-packs-count">${filteredPacks.length}${SKILL_PACKS_LABELS.packsCountSuffix}</span>
       </div>
 
       <!-- Token Budget Overview (Phase 4-1) -->
@@ -551,7 +559,7 @@ function MyPacksView({ projects }) {
         return html`
           <div class="skill-budget-overview">
             <div class="skill-budget-header">
-              <span class="form-label" style=${{ marginBottom: 0 }}>Token Budget</span>
+              <span class="form-label" style=${{ marginBottom: 0 }}>${SKILL_PACKS_LABELS.tokenBudget}</span>
               <span style=${{ fontSize: '11px', color: 'var(--text-muted)' }}>${totalTokens} / ${BUDGET}</span>
             </div>
             <div class="skill-budget-bar" style=${{ height: '8px' }}>
@@ -561,7 +569,7 @@ function MyPacksView({ projects }) {
               ${filteredPacks.filter(p => (p.estimated_tokens || 0) > 0).map(p => {
                 const w = Math.max(2, ((p.estimated_tokens || 0) / BUDGET) * 100);
                 return html`
-                  <div class="skill-budget-item" key=${p.id} title="${p.name}: ${p.estimated_tokens} tokens">
+                  <div class="skill-budget-item" key=${p.id} title="${p.name}: ${p.estimated_tokens} ${SKILL_PACKS_LABELS.cardTokensSuffix}">
                     <div class="skill-budget-item-bar" style=${{ width: `${w}%`, background: p.color || 'var(--accent)' }}></div>
                     <span class="skill-budget-item-label">${p.name} (${p.estimated_tokens})</span>
                   </div>
@@ -575,10 +583,10 @@ function MyPacksView({ projects }) {
       <!-- MCP Templates (collapsible) -->
       ${showTemplates && html`
         <div class="skill-templates-section">
-          <h3 class="skill-templates-title">MCP Server Templates</h3>
+          <h3 class="skill-templates-title">${SKILL_PACKS_LABELS.templatesTitle}</h3>
           <div class="skill-templates-table">
             <div class="skill-templates-row skill-templates-header-row">
-              <span>Alias</span><span>Command</span><span>Description</span><span>Allowed Env Keys</span>
+              <span>${SKILL_PACKS_LABELS.templatesAlias}</span><span>${SKILL_PACKS_LABELS.templatesCommand}</span><span>${SKILL_PACKS_LABELS.templatesDescription}</span><span>${SKILL_PACKS_LABELS.templatesAllowedEnv}</span>
             </div>
             ${templates.map(t => {
               let envKeys = [];
@@ -600,7 +608,7 @@ function MyPacksView({ projects }) {
 
       <!-- Pack list -->
       ${filteredPacks.length === 0 && html`
-        <${EmptyState} icon="\u2662" text="No Skill Packs" sub="Create your first skill pack to inject capabilities into agents." />
+        <${EmptyState} icon="\u2662" text=${SKILL_PACKS_LABELS.emptyText} sub=${SKILL_PACKS_LABELS.emptySub} />
       `}
       <div class="skill-packs-list">
         ${filteredPacks.map(pack => {
@@ -622,23 +630,23 @@ function MyPacksView({ projects }) {
               </div>
               ${pack.description && html`<div class="skill-pack-desc">${pack.description}</div>`}
               <div class="skill-pack-meta">
-                <span class="skill-pack-scope ${pack.scope}">${pack.scope}${proj ? `: ${proj.name}` : ''}</span>
+                <span class="skill-pack-scope ${pack.scope}">${SKILL_PACKS_LABELS.scopeLabel[pack.scope] || pack.scope}${proj ? `: ${proj.name}` : ''}</span>
                 <span class="skill-pack-origin ${origin.cls}" title=${origin.title}>${origin.label}</span>
-                ${tokens > 0 && html`<span class="skill-pack-tokens">${tokens} tok</span>`}
+                ${tokens > 0 && html`<span class="skill-pack-tokens">${tokens} ${SKILL_PACKS_LABELS.tabPromptTokenSuffix}</span>`}
                 ${mcpCount > 0 && html`<span class="skill-pack-mcp">${mcpCount} MCP</span>`}
                 ${checkCount > 0 && html`<span class="skill-pack-check">\u2713 ${checkCount}</span>`}
               </div>
               <div class="skill-pack-card-actions" onClick=${e => e.stopPropagation()}>
-                <button class="ghost small" onClick=${() => { setEditPack(pack); setShowModal(true); }}>Edit</button>
+                <button class="ghost small" onClick=${() => { setEditPack(pack); setShowModal(true); }}>${COMMON_ACTIONS.edit}</button>
                 ${pack.origin_type === 'url' && html`
                   <button
                     class="ghost small"
                     disabled=${isChecking}
                     onClick=${() => handleCheckUpdate(pack)}
-                  >${isChecking ? 'Checking...' : 'Check Update'}</button>
+                  >${isChecking ? SKILL_PACKS_LABELS.cardChecking : SKILL_PACKS_LABELS.cardCheckUpdate}</button>
                 `}
-                <button class="ghost small" onClick=${() => handleExport(pack)}>Export</button>
-                <button class="ghost small danger-text" onClick=${() => setDeletePack(pack)}>Delete</button>
+                <button class="ghost small" onClick=${() => handleExport(pack)}>${SKILL_PACKS_LABELS.cardExport}</button>
+                <button class="ghost small danger-text" onClick=${() => setDeletePack(pack)}>${COMMON_ACTIONS.delete}</button>
               </div>
             </div>
           `;
