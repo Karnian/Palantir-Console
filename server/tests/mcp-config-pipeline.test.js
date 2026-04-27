@@ -22,7 +22,7 @@ const { createApp } = require('../app');
 async function mkTestApp(t) {
   const dbDir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-mcp-'));
   const dbPath = path.join(dbDir, 'test.db');
-  const app = createApp({ dbPath });
+  const app = createApp({ dbPath, authToken: null });
   t.after(async () => {
     if (app.shutdown) app.shutdown();
     await fs.rm(dbDir, { recursive: true, force: true });

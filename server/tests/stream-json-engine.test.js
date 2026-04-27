@@ -131,7 +131,12 @@ function makeEngine({ runService = null, eventBus = null } = {}) {
  * spawnAgent를 실행하고 args 파일이 기록될 때까지 대기한다.
  * @returns {Promise<string[]>} CLI args (argv.slice(2))
  */
-async function spawnAndCaptureArgs(engine, runId, opts, timeoutMs = 1000) {
+async function spawnAndCaptureArgs(engine, runId, opts, timeoutMs = 2500) {
+  // Phase Test-Stabilize (2026-04-27): bumped from 1000ms → 2500ms.
+  // Under parallel test pressure (CI / sequential `npm test` with
+  // sibling tests doing tmp-dir work) the fakeClaude child sometimes
+  // took >1s to flush its args file, surfacing as
+  // 'args file not written within 1000ms' on shared disks.
   const argsFile = path.join(os.tmpdir(), `palantir-claude-args-${runId}.json`);
   process.env.CLAUDE_ARGS_FILE = argsFile;
   try {
@@ -419,6 +424,21 @@ test('engine: sendInput for worker returns false after process exits (single-sho
 
   // Wait for the worker to exit (result event)
   await waitForEvent(engine, 'run-send-wkr', e => e.type === 'result', 2000);
+
+  // Phase Test-Stabilize (2026-04-27): the `result` event fires while
+  // the child process is still in the middle of teardown — its stdin
+  // is technically still `writable` for a few event-loop ticks after
+  // the event drains. Poll engine.isAlive() until it returns false
+  // (the child's `exit` listener flips proc.exitCode away from null)
+  // so `sendInput` reliably observes the closed stdin instead of
+  // racing the exit.
+  const exitDeadline = Date.now() + 2000;
+  while (Date.now() < exitDeadline) {
+    if (!engine.isAlive('run-send-wkr')) break;
+    await new Promise(r => setTimeout(r, 20));
+  }
+  assert.equal(engine.isAlive('run-send-wkr'), false,
+    'engine should mark the run as not-alive once the worker exits');
 
   // After exit, sendInput must return false (stdin is no longer writable)
   const ok = engine.sendInput('run-send-wkr', 'late input after exit');

@@ -76,7 +76,7 @@ async function createTempApp(t) {
   const fsRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'palantir-mcp-fs-'));
   const dbDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'palantir-mcp-db-'));
   const dbPath = path.join(dbDir, 'test.db');
-  const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode', dbPath });
+  const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode', dbPath, authToken: null });
 
   t.after(async () => {
     if (app.shutdown) app.shutdown();
