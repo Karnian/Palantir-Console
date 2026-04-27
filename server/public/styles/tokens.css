@@ -81,13 +81,19 @@
   --mobile-nav-height: 56px;
   /* Phase I (2026-04-26): added `--radius-xs` so the dozens of `4px`
      border-radius literals across the codebase can collapse onto a
-     single token. `4px` was the most common hardcoded radius — `8px`
-     and `11px` are still ad-hoc and may be picked up in a later
-     pass. The existing `--radius-sm/md/lg` scale is unchanged. */
+     single token.
+     Phase Token-Cleanup (2026-04-27): added `--radius-2xs` for 3px
+     scrollbar/progress-bar surfaces, `--radius-sm-plus` for the
+     ~12 `8px` surfaces that don't quite match the `--radius-sm` (6px)
+     or `--radius-md` (10px) shapes, and `--radius-pill` for fully
+     pilled badges (attention-badge / future status pills). */
+  --radius-2xs: 3px;
   --radius-xs: 4px;
   --radius-sm: 6px;
+  --radius-sm-plus: 8px;
   --radius-md: 10px;
   --radius-lg: 14px;
+  --radius-pill: 999px;
 
   /* Legacy aliases -- DO NOT USE in new code */
   --gold: var(--accent-light);
