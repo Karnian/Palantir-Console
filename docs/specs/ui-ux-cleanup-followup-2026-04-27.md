@@ -219,4 +219,27 @@
 - 토큰 검증 테스트: `server/tests/boot.smoke.test.js:106`
 - 워크플로우 가이드: `CLAUDE.md` "Working style (autonomous mode default ON)" 절
 - 이전 brief: `docs/specs/ui-ux-cleanup-followup-2026-04-26.md` (Phase F~K-1a 정의)
-- Codex artifact: `.ao/artifacts/ask/ask-codex-2026042{6,7}-*.jsonl` (라운드별 BLOCK 사유 + fix)
+- Codex artifact: `.ao/artifacts/ask/ask-codex-2026042{6,7,8}-*.jsonl` (라운드별 BLOCK 사유 + fix)
+
+---
+
+## 7. 진행 기록 (2026-04-28 stamp)
+
+이 brief 의 구현/테스트 phase (K-1b → PostK-e2e-migrate → K-low-1/2/3 → Token-Cleanup → Test-Stabilize) 가 2026-04-27 ~ 2026-04-28 세션에 걸쳐 완료. K-2 라이트 모드는 brief 명시대로 무기한 deferred (별도 brief + Codex 사전검토 필요). Docs-Stamp phase (이 §7) 는 마지막 정리 단계라 자기 자신을 표에 포함하지 않는다 — backlog 와 두 brief 의 stamp 갱신만이 그 산출물.
+
+| Phase | PR | Codex 라운드 | 핵심 |
+|-------|-----|---------|------|
+| K-1b | #137 | 2 (BLOCK→PASS) | RunInspector 6 탭 + DriftDrawer + TaskModals 한국어화 + a11y 강화 (aria-labelledby / icon-only aria-label / Dropdown ariaLabel 키 재사용) + jsdom helper copy.js mount + import strip regex 안정화 |
+| PostK-e2e-migrate | #138 | 1 (PASS) | e2e selector 를 `data-action` / `data-state` / `data-view` / `data-stat` 으로 마이그레이션. K-low 카피 revision 에 강건. |
+| K-low-1 | #139 | 2 (BLOCK→PASS) | ProjectsView / AgentsView / ManagerChat aux / DirectoryPicker 한국어화 + missing-auth status 한국어 fallback + COMMON_ACTIONS.edit/.update/.delete 재사용 |
+| K-low-2 | #140 | 3 (BLOCK→BLOCK→PASS) | PresetsView / SkillPacksView (My + Gallery) / McpTemplatesView / PackPreviewModal / UrlInstallDialog 한국어화 + Gallery `categoryLabel` 매핑 + URL install progress race fix |
+| K-low-3 | #141 | 3 (BLOCK→BLOCK→PASS) | DashboardView 한국어화 + `timeAgo` / `formatTime` / `formatDuration` 한국어 + `parseDate` 신규 (ISO Z 중복 부착 버그 fix) — 광역 timestamp surface 영향 |
+| Token-Cleanup | #142 | 1 (PASS) | `--radius-2xs` / `--radius-sm-plus` / `--radius-pill` 신규 + `styles.css` + `login.html` 22곳 토큰화 + `MANAGER_LABELS.active|idle` 제거 (`MANAGER_STATUS_LABELS` 단일 source) |
+| Test-Stabilize | #143 | 2 (BLOCK→PASS) | boot.smoke 의 supertest auto-listen race → 명시적 `http.createServer(app).listen(0, '127.0.0.1')` + `'listening'`/`'error'` 이벤트 패턴. 11 개 테스트 파일에 `authToken: null` 명시. `engine.isAlive()` 폴링 도입. `spawnAndCaptureArgs` timeout 1s → 2.5s. `.gitignore` `build/` 추가 |
+
+후속 brief 후보 (별도 spec 작성 권장, `docs/backlog.md` 등록):
+- **K-2 라이트 모드** — brief 명시 deferred. sub-phase 분할 필수.
+- **CommandPalette / hooks 토스트 한국어화** — K-low 명시 surface 외 (`CommandPalette.js` / `app/lib/hooks/data.js` / `manager.js`).
+- **`parseDate()` zone-less ISO 처리** — `'2026-04-27T12:00:00'` 입력의 local time 해석 edge.
+- **999px pill 통합** — `styles.css` 의 `border-radius: 999px` 11곳.
+- **`jsdom-preact` regex 안정화** — `import 'side-effect.js'` 다음 named import 미래 회귀.
