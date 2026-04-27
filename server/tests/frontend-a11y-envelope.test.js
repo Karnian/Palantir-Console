@@ -275,19 +275,19 @@ test('P2-6 DriftDrawer focus-trap useEffect depends only on [open]', async () =>
 // ---- P2-7: drift badge aria-label ----
 
 test('P2-7 drift badge has aria-label announcing the count', async () => {
-  // P5-1: DashboardView (including the drift badge) was extracted from app.js
-  // into app/components/DashboardView.js. Search there first, fall back to
-  // app.js for future migrations that might restructure further.
-  const [appSrc, dashboardSrc] = await Promise.all([loadAppJs(), loadDashboardViewSource()]);
-  const src = dashboardSrc.indexOf('PM hallucination / staleness incidents') >= 0
-    ? dashboardSrc
-    : appSrc;
-  const badgeStart = src.indexOf('PM hallucination / staleness incidents');
+  // K-low-3 (2026-04-27): the drift badge tooltip and aria-label moved
+  // behind copy.js (DASHBOARD_LABELS.driftClickHint / driftAriaPrefix /
+  // driftAriaSuffix), so the locator now keys off the binding name.
+  // The structural invariant — that the badge announces a count to AT
+  // users — is verified by checking the aria-label template references
+  // both the prefix and `driftAudit.totalCount`.
+  const dashboardSrc = await loadDashboardViewSource();
+  const badgeStart = dashboardSrc.indexOf('DASHBOARD_LABELS.driftClickHint');
   assert.ok(badgeStart > 0, 'drift badge region not located');
-  const region = src.slice(badgeStart, badgeStart + 600);
+  const region = dashboardSrc.slice(badgeStart, badgeStart + 600);
   assert.match(
     region,
-    /aria-label=\$\{`Drift warnings: \$\{driftAudit\.totalCount\}/,
+    /aria-label=\$\{`\$\{DASHBOARD_LABELS\.driftAriaPrefix\}: \$\{driftAudit\.totalCount\}/,
     'drift badge must have an aria-label that announces the count to screen readers',
   );
 });

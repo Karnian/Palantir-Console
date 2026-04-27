@@ -422,6 +422,45 @@ export const MANAGER_CHAT_AUX = {
   remediationTryAfter: ' 해 보세요. 문제가 지속되면 서버를 재시작해 최신 코드를 반영하세요.',
 };
 
+// DashboardView (Attention Dashboard) — page chrome + stats bar + drift
+// chip + triage feed + active Claude sessions strip. Triage row meta
+// strings read as `'${prefix} · ${timeAgo}'` (e.g. `'실행 중 · 5분 전'`);
+// the prefix is the action verb here and `timeAgo` (now Korean per
+// K-low-3) supplies the relative time fragment.
+export const DASHBOARD_LABELS = {
+  pageTitle: '주의 대시보드',
+  statActive: '활성',
+  statNeedsInput: '입력 필요',
+  statFailed: '실패',
+  statDoneToday: '오늘 완료',
+  statDriftLabelPrefix: '드리프트',
+  // Drift chip a11y / tooltip
+  driftClickHint: 'PM 환각 / 정합성 인시던트. 클릭해서 살펴보세요.',
+  driftAriaPrefix: '드리프트 경고',
+  driftAriaSuffix: '건. 활성화하면 드리프트 패널이 열립니다.',
+  // Triage feed empty state
+  emptyText: '주의가 필요한 항목이 없습니다.',
+  emptySub: '입력이 필요한 작업과 실행이 여기 표시됩니다.',
+  // Triage row titles + meta prefix
+  triageManagerTitle: '매니저 세션',
+  triageManagerMetaActive: '활성',
+  triageNeedsInputMeta: '입력 대기 중',
+  triageFailedMeta: '실패',
+  triageRunningMeta: '실행 중',
+  triageReviewMeta: '리뷰 대기',
+  // Run fallback title — shown when no task is bound. The run id is
+  // appended after, so the result reads as `'실행 abc12345'`.
+  runFallbackPrefix: '실행',
+  // Triage action buttons
+  actionRespond: '응답',
+  actionDismiss: '숨기기',
+  actionInspect: '점검',
+  actionReview: '리뷰',
+  actionOpen: '열기',
+  // Active Claude Sessions strip
+  claudeSessionsTitle: '활성 Claude 세션',
+};
+
 // PresetsView — list page header, PresetModal (create/edit), DeleteConfirm.
 // Worker preset 핵심 surface; 가급적 COMMON_ACTIONS 재사용 + preset 전용
 // 라벨만 그룹에 둠.
