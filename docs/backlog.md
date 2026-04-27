@@ -1,6 +1,6 @@
 # Palantir Console Backlog
 
-> Last updated: 2026-04-24 (post PR #126 — R1/R3/R4 완료)
+> Last updated: 2026-04-28 (post PR #143 — Phase Test-Stabilize 완료, UI/UX cleanup follow-up 시리즈 마무리)
 >
 > 이 문서는 *현재 시점에서* 남은 작업들을 카테고리별로 정리한다.
 > 완료된 작업은 [handoff-post-scenario-review.md](./handoff-post-scenario-review.md) 및 각 spec 문서의 Implementation Log를 본다.
@@ -18,7 +18,16 @@
 
 ## Ready
 
-*(현재 비어있음 — R1/R2/R3/R4 는 2026-04-24 세션에서 모두 완료. §Non-backlog 의 "완료 항목 이동" 규율에 따라 handoff-post-scenario-review.md 로 이동됨)*
+UI/UX cleanup follow-up 시리즈가 2026-04-26 / 2026-04-27 / 2026-04-28 세션에 걸쳐 모두 완료되어 현재 비어있음. 진행 stamp 는 다음 brief 들의 §7 진행 기록 표를 본다:
+- `docs/specs/ui-ux-cleanup-followup-2026-04-26.md` — Phase F~K-1a (PRs #130~#135).
+- `docs/specs/ui-ux-cleanup-followup-2026-04-27.md` — Phase K-1b 이후 (PRs #137~#143). Phase A~E 는 04-26 brief §1 컨텍스트에 명시된 대로 그 brief 작성 이전에 별도로 완료되어 본 backlog stamp 범위 외.
+
+다음 brief 후보 (별도 spec 작성 후 등록) — single-source-of-truth 는 04-27 brief §7 의 동일 목록이며 본 항목은 전체 backlog 의 빠른 참조용 요약이다:
+- **K-2 라이트 모드** — 무기한 deferred.
+- **CommandPalette / hooks 토스트 한국어화** — K-low 명시 surface 외.
+- **`parseDate()` zone-less ISO 처리** — 입력의 local time 해석 edge.
+- **999px pill 통합** — `styles.css` 의 `border-radius: 999px` 11곳.
+- **`jsdom-preact` regex 안정화** — 미래 회귀 차단 NIT.
 
 ---
 

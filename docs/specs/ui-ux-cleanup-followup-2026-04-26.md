@@ -159,3 +159,21 @@ return html`
 - a11y 테스트: `server/tests/frontend-a11y-envelope.test.js`
 - 토큰 검증 테스트: `server/tests/boot.smoke.test.js:106`
 - 워크플로우 가이드: `CLAUDE.md` "Working style (autonomous mode default ON)" 절
+
+---
+
+## 7. 진행 기록 (2026-04-28 stamp)
+
+이 brief 의 Phase F~K-1a 는 2026-04-26 ~ 2026-04-27 세션에 걸쳐 다음과 같이 완료됨. K-1b 이후의 잔여 작업은 후속 brief
+[`docs/specs/ui-ux-cleanup-followup-2026-04-27.md`](./ui-ux-cleanup-followup-2026-04-27.md) 로 인계됨.
+
+| Phase | PR | Codex 라운드 | 핵심 |
+|-------|-----|---------|------|
+| F | #130 | 2 (BLOCK→PASS) | 잔여 5 모달 Modal primitive 마이그레이트 + ESC LIFO 일관화 (`useEscape` stack) + RunInspector / DriftDrawer / CommandPalette 가 모두 stack 합류 + palette focus trap |
+| G | #131 | 3 (BLOCK→BLOCK→PASS) | AgentModal / SkillPackModal / PresetModal 폼 라벨 연결 + Dropdown `id` prop + TaskCard 키보드 동선 + BoardModeTabs navigation 패턴 |
+| H | #132 | 3 (BLOCK→BLOCK→PASS) | `<main id="main-content" tabIndex="-1">` 랜드마크 + 스킵 링크 + nav-item 44×44 + tooltip 모바일 누출 수정 + MentionInput aria-multiline |
+| I | #133 | 1 (PASS, NEEDS-VERIFICATION 보강) | worker-card border-left → `var(--status-*)` + `--radius-xs: 4px` + Dropdown listbox aria-activedescendant |
+| J | #134 | 2 (BLOCK→PASS) | `addToast` `TOAST_STACK_CAP=5` (oldest drop) + SSE 재연결 UX + ConversationPanel `renderMarkdown` helper 통일 |
+| K-1a | #135 | 3 (BLOCK→BLOCK→PASS) | `app/lib/copy.js` semantic copy 모듈 신규 + nav.js / BoardView / SessionGrid / ManagerChat 한국어화 + e2e + jsdom 테스트 한국어 갱신 |
+
+K-1b 이후 (RunInspector / DriftDrawer / TaskModals / e2e selector 마이그레이션 / ProjectsView·AgentsView·ManagerChat aux / PresetsView·SkillPacksView·McpTemplatesView·Gallery / DashboardView + 시간 helper / 디자인 토큰 잔여 / Flaky 테스트 안정화) 는 #137~#143 로 후속 brief 에서 진행 완료.
