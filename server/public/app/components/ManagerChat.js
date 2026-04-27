@@ -666,7 +666,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
           ` : html`
             <span>${isPm ? `PM \u00B7 ${pmProject ? pmProject.name : pmProjectId}` : MANAGER_LABELS.managerSession}</span>
           `}
-          <span class="manager-status-badge ${chatBadgeClass}">${chatBadge}</span>
+          <span class="manager-status-badge ${chatBadgeClass}" data-state=${chatBadgeClass}>${chatBadge}</span>
         </div>
         <div class="manager-panel-actions">
           ${!isPm && status.active && status.usage && html`
@@ -675,6 +675,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
           ${isPm && pmRunActive && html`
             <button
               class="btn btn-sm btn-danger"
+              data-action="reset-pm"
               onClick=${handleResetPm}
               title="PM 리셋: 이 프로젝트의 PM 스레드만 종료합니다."
               aria-label="이 프로젝트의 PM 리셋"
@@ -683,6 +684,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
           ${!isPm && status.active && html`
             <button
               class="btn btn-sm btn-danger"
+              data-action="stop-top"
               onClick=${stop}
               title="Top 매니저 중지"
               aria-label="Top 매니저 중지"
@@ -774,7 +776,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
                 `}
               </div>
             `}
-            <button class="btn btn-primary" onClick=${handleStart} disabled=${startDisabled}>
+            <button class="btn btn-primary" data-action="start-manager" onClick=${handleStart} disabled=${startDisabled}>
               ${loading ? COMMON_ACTIONS.starting : MANAGER_LABELS.startManager}
             </button>
           </div>

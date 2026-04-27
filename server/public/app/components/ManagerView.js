@@ -23,7 +23,7 @@ export function ManagerView({ manager, runs, tasks, projects, agents, agentsErro
   const activePms = manager.status?.pms || [];
 
   return html`
-    <div class="manager-view">
+    <div class="manager-view" data-view="manager">
       <${ManagerChat}
         manager=${manager}
         projects=${projects}

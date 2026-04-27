@@ -351,7 +351,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   const currentDetailProject = detailProject ? projects.find(p => p.id === detailProject.id) || detailProject : null;
 
   return html`
-    <div class="projects-view">
+    <div class="projects-view" data-view="projects">
       <div class="projects-header">
         <h1 class="projects-title">Projects</h1>
         <button class="primary" onClick=${() => setShowNew(true)}>+ New Project</button>

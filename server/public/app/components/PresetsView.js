@@ -265,7 +265,7 @@ export function PresetsView() {
   useEffect(() => { reload(); }, []);
 
   return html`
-    <div class="skill-packs-view">
+    <div class="skill-packs-view" data-view="presets">
       <div class="skill-packs-header">
         <h1 class="skill-packs-title">Worker Presets</h1>
         <button class="primary" onClick=${() => { setEditTarget(null); setModalOpen(true); }}>

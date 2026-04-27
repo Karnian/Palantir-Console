@@ -356,7 +356,7 @@ export function AgentsView({ agents, loading, reloadAgents }) {
   if (loading) return html`<${Loading} />`;
 
   return html`
-    <div class="agents-view">
+    <div class="agents-view" data-view="agents">
       <div class="agents-header">
         <h1 class="agents-title">Agent Profiles</h1>
         <button class="primary" onClick=${() => { setEditAgent(null); setShowModal(true); }}>+ New Agent</button>

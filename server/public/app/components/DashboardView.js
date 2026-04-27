@@ -144,7 +144,7 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
   };
 
   return html`
-    <div class="dashboard-view">
+    <div class="dashboard-view" data-view="dashboard">
       <div class="dashboard-header">
         <h1 class="dashboard-title">Attention Dashboard</h1>
       </div>

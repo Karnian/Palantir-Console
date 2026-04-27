@@ -363,7 +363,7 @@ export function SkillPacksView({ projects }) {
   const [activeTab, setActiveTab] = useState('my-packs'); // 'my-packs' | 'gallery'
 
   return html`
-    <div class="skill-packs-view">
+    <div class="skill-packs-view" data-view="skills">
       <div class="skill-packs-header">
         <h1 class="skill-packs-title">Skill Packs</h1>
       </div>

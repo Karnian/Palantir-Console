@@ -338,7 +338,7 @@ export function McpTemplatesView() {
   useEffect(() => { reload(); }, []);
 
   return html`
-    <div class="skill-packs-view">
+    <div class="skill-packs-view" data-view="mcp-servers">
       <div class="skill-packs-header">
         <h1 class="skill-packs-title">MCP Servers</h1>
         <button
