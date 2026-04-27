@@ -7,6 +7,7 @@ const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
 import { addToast, apiFetchWithToast } from '../lib/toast.js';
+import { GALLERY_LABELS } from '../lib/copy.js';
 import { PackPreviewModal } from './PackPreviewModal.js';
 import { UrlInstallDialog } from './UrlInstallDialog.js';
 
@@ -29,7 +30,7 @@ export function GalleryView() {
       const data = await apiFetch('/api/skill-packs/registry');
       setRegistry(data);
     } catch (err) {
-      setError(err.message || 'Failed to load registry');
+      setError(err.message || GALLERY_LABELS.loadFailed);
     }
     setLoading(false);
   }, []);
@@ -74,12 +75,12 @@ export function GalleryView() {
           confirmed_preview: pack._source === 'remote' ? true : undefined,
         }),
       });
-      addToast(`Installed "${pack.name}"`, 'success');
+      addToast(`"${pack.name}" ${GALLERY_LABELS.toastInstalled}`, 'success');
       setPreviewPack(null);
       await loadRegistry();
     } catch (err) {
       if (err.status === 409) {
-        addToast(err.message || 'Already installed or name conflict', 'error');
+        addToast(err.message || GALLERY_LABELS.toastConflict, 'error');
       }
       // other errors shown by apiFetchWithToast
     }
@@ -93,7 +94,7 @@ export function GalleryView() {
         method: 'POST',
         body: JSON.stringify({ registry_id: pack.registry_id }),
       });
-      addToast(`Updated "${pack.name}"`, 'success');
+      addToast(`"${pack.name}" ${GALLERY_LABELS.toastUpdated}`, 'success');
       setPreviewPack(null);
       await loadRegistry();
     } catch { /* toast shown */ }
@@ -102,7 +103,7 @@ export function GalleryView() {
 
   // Loading state
   if (loading) {
-    return html`<div class="gallery-loading"><div class="loading">Loading registry...</div></div>`;
+    return html`<div class="gallery-loading"><div class="loading">${GALLERY_LABELS.loadingRegistry}</div></div>`;
   }
 
   // Error state
@@ -110,9 +111,9 @@ export function GalleryView() {
     return html`
       <div class="gallery-error">
         <div class="gallery-error-icon">!</div>
-        <div class="gallery-error-text">Failed to load registry</div>
+        <div class="gallery-error-text">${GALLERY_LABELS.loadFailed}</div>
         <div class="gallery-error-detail">${error}</div>
-        <button class="primary small" onClick=${loadRegistry}>Retry</button>
+        <button class="primary small" onClick=${loadRegistry}>${GALLERY_LABELS.retry}</button>
       </div>
     `;
   }
@@ -127,39 +128,39 @@ export function GalleryView() {
             <input
               type="text"
               class="form-input gallery-search"
-              placeholder="Search packs..."
+              placeholder=${GALLERY_LABELS.searchPlaceholder}
               value=${search}
               onInput=${e => setSearch(e.target.value)}
             />
           </div>
           <button class="primary small" onClick=${() => setUrlDialogOpen(true)}>
-            Install from URL
+            ${GALLERY_LABELS.installFromUrl}
           </button>
         </div>
         <div class="gallery-filters">
           <button
             class="gallery-filter-btn ${selectedCategory === 'all' ? 'active' : ''}"
             onClick=${() => setSelectedCategory('all')}
-          >All</button>
+          >${GALLERY_LABELS.filterAll}</button>
           ${categories.map(cat => html`
             <button
               key=${cat.id}
               class="gallery-filter-btn ${selectedCategory === cat.id ? 'active' : ''}"
               onClick=${() => setSelectedCategory(cat.id)}
               title=${cat.name}
-            ><span class="gallery-filter-icon">${cat.icon}</span> ${cat.name}</button>
+            ><span class="gallery-filter-icon">${cat.icon}</span> ${GALLERY_LABELS.categoryLabel[cat.id] || cat.name}</button>
           `)}
         </div>
       </div>
 
       ${allInstalled && filteredPacks.length > 0 && html`
-        <div class="gallery-all-installed">All packs installed</div>
+        <div class="gallery-all-installed">${GALLERY_LABELS.allInstalled}</div>
       `}
 
       ${filteredPacks.length === 0 && html`
         <div class="gallery-empty">
           <div class="gallery-empty-icon">◇</div>
-          <div class="gallery-empty-text">No packs found</div>
+          <div class="gallery-empty-text">${GALLERY_LABELS.emptyText}</div>
         </div>
       `}
 
@@ -177,18 +178,18 @@ export function GalleryView() {
                 <div class="gallery-card-title-wrap">
                   <span class="gallery-card-name">${pack.name}</span>
                   ${pack.installed && !pack.updateAvailable && html`
-                    <span class="gallery-badge installed">Installed</span>
+                    <span class="gallery-badge installed">${GALLERY_LABELS.badgeInstalled}</span>
                   `}
                   ${pack.updateAvailable && html`
-                    <span class="gallery-badge update">Update Available</span>
+                    <span class="gallery-badge update">${GALLERY_LABELS.badgeUpdate}</span>
                   `}
                 </div>
               </div>
               <div class="gallery-card-desc">${pack.description || ''}</div>
               <div class="gallery-card-meta">
-                <span class="gallery-card-category">${pack.category}</span>
+                <span class="gallery-card-category">${GALLERY_LABELS.categoryLabel[pack.category] || pack.category}</span>
                 ${pack.estimated_tokens > 0 && html`
-                  <span class="gallery-card-tokens">${estimateTokens(pack)} tok</span>
+                  <span class="gallery-card-tokens">${estimateTokens(pack)} ${GALLERY_LABELS.tokensSuffix}</span>
                 `}
                 ${pack.requires_capabilities && pack.requires_capabilities.length > 0 && html`
                   <span class="gallery-card-caps">${pack.requires_capabilities.join(', ')}</span>
@@ -200,17 +201,17 @@ export function GalleryView() {
                     class="primary small"
                     disabled=${isInstalling}
                     onClick=${() => handleInstall(pack)}
-                  >${isInstalling ? 'Installing...' : 'Install'}</button>
+                  >${isInstalling ? GALLERY_LABELS.installing : GALLERY_LABELS.installBtn}</button>
                 `}
                 ${pack.updateAvailable && html`
                   <button
                     class="primary small"
                     disabled=${isInstalling}
                     onClick=${() => handleUpdate(pack)}
-                  >${isInstalling ? 'Updating...' : 'Update'}</button>
+                  >${isInstalling ? GALLERY_LABELS.updating : GALLERY_LABELS.updateBtn}</button>
                 `}
                 ${pack.installed && !pack.updateAvailable && html`
-                  <button class="ghost small" disabled>Installed</button>
+                  <button class="ghost small" disabled>${GALLERY_LABELS.badgeInstalled}</button>
                 `}
               </div>
             </div>

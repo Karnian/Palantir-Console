@@ -8,10 +8,11 @@ const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
 import { addToast, apiFetchWithToast } from '../lib/toast.js';
+import { COMMON_ACTIONS, PRESETS_LABELS } from '../lib/copy.js';
 import { EmptyState } from './EmptyState.js';
 import { Modal } from './Modal.js';
 
-function Loading() { return html`<div class="loading">Loading...</div>`; }
+function Loading() { return html`<div class="loading">${COMMON_ACTIONS.loading}</div>`; }
 
 function parseMaybeJsonArray(raw) {
   if (!raw) return [];
@@ -75,7 +76,7 @@ function PresetModal({ open, onClose, preset, pluginRefs, templates, onSaved }) 
 
   const handleSave = async () => {
     if (!name.trim()) return;
-    if (promptOverLimit) { addToast('base_system_prompt exceeds 16KB', 'error'); return; }
+    if (promptOverLimit) { addToast(PRESETS_LABELS.saveExceeds16kb, 'error'); return; }
     setSaving(true);
     try {
       const body = {
@@ -92,12 +93,12 @@ function PresetModal({ open, onClose, preset, pluginRefs, templates, onSaved }) 
         await apiFetchWithToast(`/api/worker-presets/${preset.id}`, {
           method: 'PATCH', body: JSON.stringify(body),
         });
-        addToast('Preset updated', 'success');
+        addToast(PRESETS_LABELS.toastUpdated, 'success');
       } else {
         await apiFetchWithToast('/api/worker-presets', {
           method: 'POST', body: JSON.stringify(body),
         });
-        addToast('Preset created', 'success');
+        addToast(PRESETS_LABELS.toastCreated, 'success');
       }
       onSaved();
       onClose();
@@ -108,45 +109,44 @@ function PresetModal({ open, onClose, preset, pluginRefs, templates, onSaved }) 
   return html`
     <${Modal} open=${open} onClose=${onClose} labelledBy="preset-modal-title" maxWidth="640px">
       <div class="modal-header">
-        <h2 class="modal-title" id="preset-modal-title">${preset ? 'Edit Preset' : 'New Worker Preset'}</h2>
+        <h2 class="modal-title" id="preset-modal-title">${preset ? PRESETS_LABELS.modalEdit : PRESETS_LABELS.modalNew}</h2>
         <button class="modal-close" onClick=${onClose}>\u2715</button>
       </div>
       <div class="modal-body">
           <div class="form-field">
-            <label class="form-label" for="preset-name">Name</label>
+            <label class="form-label" for="preset-name">${PRESETS_LABELS.fieldName}</label>
             <input id="preset-name" class="form-input" value=${name} onInput=${e => setName(e.target.value)}
-              placeholder="e.g. agent-olympus-isolated" />
+              placeholder=${PRESETS_LABELS.namePlaceholder} />
           </div>
           <div class="form-field">
-            <label class="form-label" for="preset-description">Description</label>
+            <label class="form-label" for="preset-description">${PRESETS_LABELS.fieldDescription}</label>
             <input id="preset-description" class="form-input" value=${description} onInput=${e => setDescription(e.target.value)} />
           </div>
           <div class="form-field">
             <label style=${{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <input type="checkbox" checked=${isolated} onChange=${e => setIsolated(e.target.checked)} />
-              <span class="form-label" style=${{ marginBottom: 0 }}>Isolated (Tier 2 — Claude only)</span>
+              <span class="form-label" style=${{ marginBottom: 0 }}>${PRESETS_LABELS.fieldIsolated}</span>
             </label>
             ${isolated && html`
               <div class="small" style=${{ marginTop: '4px', color: 'var(--muted)' }}>
-                Applies only to Claude workers. Codex / OpenCode receive a
-                <code>preset:tier2_skipped</code> warning and fall back to Tier 1.
+                ${PRESETS_LABELS.isolatedHint}<code>preset:tier2_skipped</code>${PRESETS_LABELS.isolatedHintAfterCode}
               </div>
             `}
           </div>
 
           <div class="form-field">
-            <label class="form-label" for="preset-base-prompt">Base System Prompt (≤16KB, ${byteLen} bytes)</label>
+            <label class="form-label" for="preset-base-prompt">${PRESETS_LABELS.fieldBasePromptPrefix} (≤16KB, ${byteLen} ${PRESETS_LABELS.fieldBasePromptByteSuffix})</label>
             <textarea id="preset-base-prompt" class="form-textarea" rows="6" value=${basePrompt}
               onInput=${e => setBasePrompt(e.target.value)}
               style=${promptOverLimit ? { borderColor: 'var(--status-failed)' } : null}
-              placeholder="Optional preset base prompt. Prepended to skill-pack sections." />
+              placeholder=${PRESETS_LABELS.basePromptPlaceholder} />
           </div>
 
           <div class="form-field">
-            <label class="form-label">Plugin Refs (server/plugins/)</label>
+            <label class="form-label">${PRESETS_LABELS.fieldPluginRefsLabel} (<code>server/plugins/</code>)</label>
             ${pluginRefs.length === 0 && html`
               <div class="small" style=${{ color: 'var(--muted)' }}>
-                No plugin.json-bearing directories in <code>server/plugins/</code>.
+                <code>server/plugins/</code>${PRESETS_LABELS.pluginRefsEmptySuffix}
               </div>
             `}
             ${pluginRefs.map(p => html`
@@ -161,9 +161,9 @@ function PresetModal({ open, onClose, preset, pluginRefs, templates, onSaved }) 
           </div>
 
           <div class="form-field">
-            <label class="form-label">MCP Server Templates</label>
+            <label class="form-label">${PRESETS_LABELS.fieldMcpServers}</label>
             ${templates.length === 0 && html`
-              <div class="small" style=${{ color: 'var(--muted)' }}>No MCP templates registered.</div>
+              <div class="small" style=${{ color: 'var(--muted)' }}>${PRESETS_LABELS.mcpServersEmpty}</div>
             `}
             ${templates.map(t => html`
               <label key=${t.id} style=${{ display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 0' }}>
@@ -176,23 +176,23 @@ function PresetModal({ open, onClose, preset, pluginRefs, templates, onSaved }) 
           </div>
 
           <div class="form-field">
-            <label class="form-label" for="preset-min-version">Min Claude Version (optional, semver)</label>
+            <label class="form-label" for="preset-min-version">${PRESETS_LABELS.fieldMinVersion}</label>
             <input id="preset-min-version" class="form-input" value=${minVersion}
               onInput=${e => setMinVersion(e.target.value)}
-              placeholder="e.g. 2.0.0" />
+              placeholder=${PRESETS_LABELS.minVersionPlaceholder} />
           </div>
           <div class="form-field">
-            <label class="form-label" for="preset-setting-sources">Setting Sources (Tier 2 flag, default empty)</label>
+            <label class="form-label" for="preset-setting-sources">${PRESETS_LABELS.fieldSettingSources}</label>
             <input id="preset-setting-sources" class="form-input" value=${settingSources}
               onInput=${e => setSettingSources(e.target.value)}
-              placeholder="(empty = --setting-sources '')" />
+              placeholder=${PRESETS_LABELS.settingSourcesPlaceholder} />
           </div>
         </div>
         <div class="modal-footer">
-          <button class="ghost" onClick=${onClose}>Cancel</button>
+          <button class="ghost" onClick=${onClose}>${COMMON_ACTIONS.cancel}</button>
           <button class="primary" onClick=${handleSave}
             disabled=${saving || !name.trim() || promptOverLimit}>
-            ${saving ? 'Saving...' : preset ? 'Update' : 'Create'}
+            ${saving ? COMMON_ACTIONS.saving : preset ? COMMON_ACTIONS.update : COMMON_ACTIONS.create}
           </button>
         </div>
     </Modal>
@@ -210,7 +210,7 @@ function DeleteConfirm({ open, preset, onClose, onConfirm }) {
     setDeleting(true);
     try {
       await apiFetchWithToast(`/api/worker-presets/${preset.id}`, { method: 'DELETE' });
-      addToast('Preset deleted', 'success');
+      addToast(PRESETS_LABELS.toastDeleted, 'success');
       onConfirm();
     } catch { /* */ }
     setDeleting(false);
@@ -218,14 +218,14 @@ function DeleteConfirm({ open, preset, onClose, onConfirm }) {
 
   return html`
     <${Modal} open=${open && !!preset} onClose=${onClose} labelledBy="preset-delete-title" maxWidth="420px">
-      <div class="modal-header"><h2 class="modal-title" id="preset-delete-title">Delete Preset</h2></div>
+      <div class="modal-header"><h2 class="modal-title" id="preset-delete-title">${PRESETS_LABELS.deleteTitle}</h2></div>
       <div class="modal-body">
-        <p>Delete <strong>${preset?.name}</strong>? Task links to this preset will be cleared. Past run snapshots are preserved.</p>
+        <p><strong>${preset?.name}</strong>${PRESETS_LABELS.deleteBodySuffix}</p>
       </div>
       <div class="modal-footer">
-        <button class="ghost" onClick=${onClose}>Cancel</button>
+        <button class="ghost" onClick=${onClose}>${COMMON_ACTIONS.cancel}</button>
         <button class="danger" onClick=${handleDelete} disabled=${deleting}>
-          ${deleting ? 'Deleting...' : 'Delete'}
+          ${deleting ? COMMON_ACTIONS.deleting : COMMON_ACTIONS.delete}
         </button>
       </div>
     </Modal>
@@ -267,9 +267,9 @@ export function PresetsView() {
   return html`
     <div class="skill-packs-view" data-view="presets">
       <div class="skill-packs-header">
-        <h1 class="skill-packs-title">Worker Presets</h1>
+        <h1 class="skill-packs-title">${PRESETS_LABELS.pageTitle}</h1>
         <button class="primary" onClick=${() => { setEditTarget(null); setModalOpen(true); }}>
-          + New Preset
+          + ${PRESETS_LABELS.newPreset}
         </button>
       </div>
       ${!loading && pluginWarnings.length > 0 && html`
@@ -282,10 +282,10 @@ export function PresetsView() {
           marginBottom: '12px',
           fontSize: '12px',
         }}>
-          <span style=${{ color: '#f59e0b', flexShrink: 0 }} title="Malformed plugin.json detected">⚠</span>
+          <span style=${{ color: '#f59e0b', flexShrink: 0 }} title="잘못된 plugin.json 감지됨">⚠</span>
           <div>
             <span style=${{ color: '#f59e0b', fontWeight: 600 }}>
-              ${pluginWarnings.length} plugin director${pluginWarnings.length === 1 ? 'y has' : 'ies have'} a malformed plugin.json and will be skipped:
+              ${pluginWarnings.length}${PRESETS_LABELS.pluginWarningsCountSuffix}
             </span>
             <ul style=${{ margin: '4px 0 0 0', paddingLeft: '16px', color: 'var(--text-secondary)' }}>
               ${pluginWarnings.map((w, i) => {
@@ -311,8 +311,8 @@ export function PresetsView() {
       ${!loading && presets.length === 0 && html`
         <${EmptyState}
           icon="❖"
-          text="No presets yet"
-          sub="Worker presets bundle plugin directories, MCP servers, and a system prompt for reuse across worker runs. Create one to get started."
+          text=${PRESETS_LABELS.emptyText}
+          sub=${PRESETS_LABELS.emptySub}
         />
       `}
       ${!loading && presets.length > 0 && html`
@@ -321,17 +321,17 @@ export function PresetsView() {
             <div class="skill-pack-card" key=${p.id}>
               <div class="skill-pack-header">
                 <h3 class="skill-pack-name">${p.name}</h3>
-                ${p.isolated && html`<span class="skill-badge skill-badge-ok">Isolated (Tier 2)</span>`}
+                ${p.isolated && html`<span class="skill-badge skill-badge-ok">${PRESETS_LABELS.badgeIsolated}</span>`}
               </div>
               ${p.description && html`<p class="skill-pack-desc">${p.description}</p>`}
               <div class="small" style=${{ color: 'var(--muted)', marginTop: '6px' }}>
-                ${parseMaybeJsonArray(p.plugin_refs).length} plugin${parseMaybeJsonArray(p.plugin_refs).length === 1 ? '' : 's'},
-                ${parseMaybeJsonArray(p.mcp_server_ids).length} MCP server${parseMaybeJsonArray(p.mcp_server_ids).length === 1 ? '' : 's'}
-                ${p.min_claude_version ? html`, min ${p.min_claude_version}` : ''}
+                ${parseMaybeJsonArray(p.plugin_refs).length}${PRESETS_LABELS.cardCountPlugin},
+                ${parseMaybeJsonArray(p.mcp_server_ids).length}${PRESETS_LABELS.cardCountMcp}
+                ${p.min_claude_version ? html`, ${PRESETS_LABELS.cardMinVersionPrefix} ${p.min_claude_version}` : ''}
               </div>
               <div class="skill-pack-actions" style=${{ marginTop: '10px', display: 'flex', gap: '6px' }}>
-                <button class="ghost small" onClick=${() => { setEditTarget(p); setModalOpen(true); }}>Edit</button>
-                <button class="ghost small" onClick=${() => setDeleteTarget(p)}>Delete</button>
+                <button class="ghost small" onClick=${() => { setEditTarget(p); setModalOpen(true); }}>${COMMON_ACTIONS.edit}</button>
+                <button class="ghost small" onClick=${() => setDeleteTarget(p)}>${COMMON_ACTIONS.delete}</button>
               </div>
             </div>
           `)}

@@ -11,10 +11,11 @@ const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
 import { addToast, apiFetchWithToast } from '../lib/toast.js';
+import { COMMON_ACTIONS, MCP_TEMPLATES_LABELS } from '../lib/copy.js';
 import { EmptyState } from './EmptyState.js';
 import { Modal } from './Modal.js';
 
-function Loading() { return html`<div class="loading">Loading...</div>`; }
+function Loading() { return html`<div class="loading">${COMMON_ACTIONS.loading}</div>`; }
 
 function parseJsonArrayField(raw, fieldName) {
   const s = (raw || '').trim();
@@ -27,7 +28,7 @@ function parseJsonArrayField(raw, fieldName) {
     }
     return v;
   } catch (err) {
-    throw new Error(`${fieldName} must be a JSON array of strings`);
+    throw new Error(`${fieldName}${MCP_TEMPLATES_LABELS.invalidJsonArraySuffix}`);
   }
 }
 
@@ -87,7 +88,7 @@ function TemplateModal({ open, template, onClose, onSaved }) {
 
   const handleSave = async () => {
     if (!alias.trim() || !command.trim()) {
-      addToast('alias and command are required', 'error');
+      addToast(MCP_TEMPLATES_LABELS.validateAliasCommand, 'error');
       return;
     }
     let args;
@@ -111,12 +112,12 @@ function TemplateModal({ open, template, onClose, onSaved }) {
         await apiFetchWithToast(`/api/mcp-server-templates/${template.id}`, {
           method: 'PATCH', body: JSON.stringify(body),
         });
-        addToast('Template updated', 'success');
+        addToast(MCP_TEMPLATES_LABELS.toastUpdated, 'success');
       } else {
         await apiFetchWithToast('/api/mcp-server-templates', {
           method: 'POST', body: JSON.stringify(body),
         });
-        addToast('Template created', 'success');
+        addToast(MCP_TEMPLATES_LABELS.toastCreated, 'success');
       }
       onSaved();
       onClose();
@@ -132,13 +133,13 @@ function TemplateModal({ open, template, onClose, onSaved }) {
       maxWidth="560px"
     >
       <div class="modal-header">
-        <h2 class="modal-title" id="mcp-template-title">${isEdit ? 'Edit MCP Template' : 'New MCP Template'}</h2>
+        <h2 class="modal-title" id="mcp-template-title">${isEdit ? MCP_TEMPLATES_LABELS.modalEdit : MCP_TEMPLATES_LABELS.modalNew}</h2>
       </div>
       <div class="modal-body">
         <div class="form-row">
-          <label class="form-label" for="mcp-tpl-alias">Alias
+          <label class="form-label" for="mcp-tpl-alias">${MCP_TEMPLATES_LABELS.fieldAlias}
             <span style=${{ color: 'var(--text-muted)', fontWeight: 'normal', marginLeft: '6px' }}>
-              letters / digits / _ / -
+              ${MCP_TEMPLATES_LABELS.aliasHint}
             </span>
           </label>
           <input
@@ -147,28 +148,28 @@ function TemplateModal({ open, template, onClose, onSaved }) {
             value=${alias}
             onInput=${e => setAlias(e.target.value)}
             disabled=${isEdit}
-            placeholder="graphify"
+            placeholder=${MCP_TEMPLATES_LABELS.aliasPlaceholder}
           />
           ${isEdit && html`
             <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '4px' }}>
-              Alias is immutable — skill packs reference templates by this name.
+              ${MCP_TEMPLATES_LABELS.aliasImmutableHint}
             </div>
           `}
         </div>
         <div class="form-row">
-          <label class="form-label" for="mcp-tpl-command">Command</label>
+          <label class="form-label" for="mcp-tpl-command">${MCP_TEMPLATES_LABELS.fieldCommand}</label>
           <input
             id="mcp-tpl-command"
             class="form-input"
             value=${command}
             onInput=${e => setCommand(e.target.value)}
-            placeholder="npx"
+            placeholder=${MCP_TEMPLATES_LABELS.commandPlaceholder}
           />
         </div>
         <div class="form-row">
-          <label class="form-label" for="mcp-tpl-args">Args
+          <label class="form-label" for="mcp-tpl-args">${MCP_TEMPLATES_LABELS.fieldArgs}
             <span style=${{ color: 'var(--text-muted)', fontWeight: 'normal', marginLeft: '6px' }}>
-              JSON array of strings
+              ${MCP_TEMPLATES_LABELS.argsHint}
             </span>
           </label>
           <textarea
@@ -182,9 +183,9 @@ function TemplateModal({ open, template, onClose, onSaved }) {
           ></textarea>
         </div>
         <div class="form-row">
-          <label class="form-label" for="mcp-tpl-env">Allowed env keys
+          <label class="form-label" for="mcp-tpl-env">${MCP_TEMPLATES_LABELS.fieldEnv}
             <span style=${{ color: 'var(--text-muted)', fontWeight: 'normal', marginLeft: '6px' }}>
-              comma-separated
+              ${MCP_TEMPLATES_LABELS.envHint}
             </span>
           </label>
           <input
@@ -192,28 +193,28 @@ function TemplateModal({ open, template, onClose, onSaved }) {
             class="form-input"
             value=${envKeys}
             onInput=${e => setEnvKeys(e.target.value)}
-            placeholder="GRAPHIFY_ROOT, LOG_LEVEL"
+            placeholder=${MCP_TEMPLATES_LABELS.envPlaceholder}
           />
           <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '4px' }}>
-            Credential / process-loader patterns (*_KEY, NODE_OPTIONS, PATH, …) are globally denied.
+            ${MCP_TEMPLATES_LABELS.envWarn}
           </div>
         </div>
         <div class="form-row">
-          <label class="form-label" for="mcp-tpl-desc">Description</label>
+          <label class="form-label" for="mcp-tpl-desc">${MCP_TEMPLATES_LABELS.fieldDescription}</label>
           <textarea
             id="mcp-tpl-desc"
             class="form-input"
             rows="2"
             value=${description}
             onInput=${e => setDescription(e.target.value)}
-            placeholder="What does this MCP server do?"
+            placeholder=${MCP_TEMPLATES_LABELS.descriptionPlaceholder}
           ></textarea>
         </div>
       </div>
       <div class="modal-footer">
-        <button class="ghost" onClick=${onClose} disabled=${saving}>Cancel</button>
+        <button class="ghost" onClick=${onClose} disabled=${saving}>${COMMON_ACTIONS.cancel}</button>
         <button class="primary" onClick=${handleSave} disabled=${saving}>
-          ${saving ? 'Saving...' : (isEdit ? 'Save' : 'Create')}
+          ${saving ? COMMON_ACTIONS.saving : (isEdit ? COMMON_ACTIONS.save : COMMON_ACTIONS.create)}
         </button>
       </div>
     </Modal>
@@ -255,7 +256,7 @@ function DeleteConfirm({ open, template, onClose, onConfirm }) {
     setDeleting(true);
     try {
       await apiFetchWithToast(`/api/mcp-server-templates/${template.id}`, { method: 'DELETE' });
-      addToast('Template deleted', 'success');
+      addToast(MCP_TEMPLATES_LABELS.toastDeleted, 'success');
       onConfirm();
     } catch { /* toast already shown */ }
     setDeleting(false);
@@ -268,9 +269,9 @@ function DeleteConfirm({ open, template, onClose, onConfirm }) {
       labelledBy="mcp-delete-title"
       maxWidth="460px"
     >
-      <div class="modal-header"><h2 class="modal-title" id="mcp-delete-title">Delete MCP Template</h2></div>
+      <div class="modal-header"><h2 class="modal-title" id="mcp-delete-title">${MCP_TEMPLATES_LABELS.deleteTitle}</h2></div>
       <div class="modal-body">
-        <p>Delete <strong>${template?.alias}</strong>?</p>
+        <p><strong>${template?.alias}</strong>${MCP_TEMPLATES_LABELS.deleteBodySuffix}</p>
         ${hasRefs && html`
           <div style=${{
             marginTop: '12px', padding: '10px',
@@ -278,38 +279,38 @@ function DeleteConfirm({ open, template, onClose, onConfirm }) {
             border: '1px solid color-mix(in srgb, #f59e0b 40%, transparent)',
             borderRadius: '6px', fontSize: '13px',
           }}>
-            <strong style=${{ color: '#f59e0b' }}>In use</strong>
+            <strong style=${{ color: '#f59e0b' }}>${MCP_TEMPLATES_LABELS.inUseTitle}</strong>
             <div style=${{ marginTop: '6px' }}>
               ${refs.presets?.length > 0 && html`
-                <div>Presets: ${refs.presets.map(p => p.name).join(', ')}</div>
+                <div>${MCP_TEMPLATES_LABELS.inUsePresetsLabel}: ${refs.presets.map(p => p.name).join(', ')}</div>
               `}
               ${refs.skillPacks?.length > 0 && html`
-                <div>Skill packs: ${refs.skillPacks.map(p => p.name).join(', ')}</div>
+                <div>${MCP_TEMPLATES_LABELS.inUseSkillPacksLabel}: ${refs.skillPacks.map(p => p.name).join(', ')}</div>
               `}
               <div style=${{ marginTop: '6px', color: 'var(--text-muted)' }}>
-                Remove these references before deleting.
+                ${MCP_TEMPLATES_LABELS.inUseRemediation}
               </div>
             </div>
           </div>
         `}
         ${!hasRefs && refsLoaded && html`
           <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '8px' }}>
-            No references found — safe to delete.
+            ${MCP_TEMPLATES_LABELS.noReferences}
           </div>
         `}
         ${!refsLoaded && html`
           <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '8px' }}>
-            Checking references…
+            ${MCP_TEMPLATES_LABELS.checkingReferences}
           </div>
         `}
       </div>
       <div class="modal-footer">
-        <button class="ghost" onClick=${onClose} disabled=${deleting}>Cancel</button>
+        <button class="ghost" onClick=${onClose} disabled=${deleting}>${COMMON_ACTIONS.cancel}</button>
         <button
           class="danger"
           onClick=${handleDelete}
           disabled=${deleting || hasRefs || !refsLoaded}
-        >${deleting ? 'Deleting...' : 'Delete'}</button>
+        >${deleting ? COMMON_ACTIONS.deleting : COMMON_ACTIONS.delete}</button>
       </div>
     </Modal>
   `;
@@ -340,18 +341,18 @@ export function McpTemplatesView() {
   return html`
     <div class="skill-packs-view" data-view="mcp-servers">
       <div class="skill-packs-header">
-        <h1 class="skill-packs-title">MCP Servers</h1>
+        <h1 class="skill-packs-title">${MCP_TEMPLATES_LABELS.pageTitle}</h1>
         <button
           class="primary"
           onClick=${() => { setEditTarget(null); setModalOpen(true); }}
-        >+ New MCP Server</button>
+        >+ ${MCP_TEMPLATES_LABELS.newTemplate}</button>
       </div>
       ${loading && html`<${Loading} />`}
       ${!loading && templates.length === 0 && html`
         <${EmptyState}
           icon="⦿"
-          text="No MCP templates"
-          sub="Register an MCP server so presets and skill packs can reference it by alias."
+          text=${MCP_TEMPLATES_LABELS.emptyText}
+          sub=${MCP_TEMPLATES_LABELS.emptySub}
         />
       `}
       ${!loading && templates.length > 0 && html`
@@ -369,11 +370,11 @@ export function McpTemplatesView() {
                 <p class="skill-pack-desc" style=${{ marginTop: '6px' }}>${t.description}</p>
               `}
               <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '6px' }}>
-                Updated ${formatTs(t.updated_at)}
+                ${MCP_TEMPLATES_LABELS.cardUpdatedPrefix} ${formatTs(t.updated_at)}
               </div>
               <div class="skill-pack-card-actions">
-                <button class="ghost small" onClick=${() => { setEditTarget(t); setModalOpen(true); }}>Edit</button>
-                <button class="ghost small" onClick=${() => setDeleteTarget(t)}>Delete</button>
+                <button class="ghost small" onClick=${() => { setEditTarget(t); setModalOpen(true); }}>${COMMON_ACTIONS.edit}</button>
+                <button class="ghost small" onClick=${() => setDeleteTarget(t)}>${COMMON_ACTIONS.delete}</button>
               </div>
             </div>
           `)}
