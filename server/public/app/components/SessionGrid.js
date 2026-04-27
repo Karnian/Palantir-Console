@@ -11,6 +11,7 @@ import { RunInspector } from './RunInspector.js';
 import { clickableProps } from '../lib/a11y.js';
 import { TaskDetailPanel } from './TaskModals.js';
 import { AttentionStrip } from './AttentionStrip.js';
+import { TASK_STATUS_LABELS, RUN_STATUS_LABELS, MANAGER_LABELS, COMMON_ACTIONS, statusLabel } from '../lib/copy.js';
 
 const runStatusIcon = (status) => {
   switch (status) {
@@ -68,7 +69,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
     const projMap = new Map();
     for (const t of (tasks || [])) {
       const pid = t.project_id || '_none';
-      const pname = (projects || []).find(p => p.id === t.project_id)?.name || 'No Project';
+      const pname = (projects || []).find(p => p.id === t.project_id)?.name || '프로젝트 없음';
       if (!projMap.has(pid)) projMap.set(pid, { key: pid, name: pname, tasks: [] });
       const taskRuns = runsMap.get(t.id) || [];
       runsMap.delete(t.id);
@@ -79,14 +80,16 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
     const orphanRuns = runsMap.get('_orphan') || [];
     runsMap.delete('_orphan');
 
-    // Group tasks by status within each project
+    // Group tasks by status within each project. Phase K-1a: section
+    // labels resolved from `TASK_STATUS_LABELS` so they match the
+    // Board column headers exactly.
     const STATUS_SECTIONS = [
-      { key: 'backlog', label: 'Backlog', statuses: ['backlog'] },
-      { key: 'todo', label: 'Todo', statuses: ['todo'] },
-      { key: 'in_progress', label: 'In Progress', statuses: ['in_progress'] },
-      { key: 'failed', label: 'Failed', statuses: ['failed'] },
-      { key: 'review', label: 'Review', statuses: ['review'] },
-      { key: 'done', label: 'Done', statuses: ['done'] },
+      { key: 'backlog', label: TASK_STATUS_LABELS.backlog, statuses: ['backlog'] },
+      { key: 'todo', label: TASK_STATUS_LABELS.todo, statuses: ['todo'] },
+      { key: 'in_progress', label: TASK_STATUS_LABELS.in_progress, statuses: ['in_progress'] },
+      { key: 'failed', label: TASK_STATUS_LABELS.failed, statuses: ['failed'] },
+      { key: 'review', label: TASK_STATUS_LABELS.review, statuses: ['review'] },
+      { key: 'done', label: TASK_STATUS_LABELS.done, statuses: ['done'] },
     ];
     const STATUS_COLORS = {
       in_progress: 'var(--status-running)',
@@ -108,7 +111,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
       // Keep orphan tasks (no status match)
       const orphanTasks = group.tasks.filter(t => !t.task);
       if (orphanTasks.length > 0) {
-        group.sections.push({ key: '_orphan', label: 'Unassigned', color: 'var(--status-queued)', tasks: orphanTasks });
+        group.sections.push({ key: '_orphan', label: '미할당', color: 'var(--status-queued)', tasks: orphanTasks });
       }
     }
 
@@ -116,7 +119,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
 
     // Add orphan runs as a virtual group if any
     if (orphanRuns.length > 0) {
-      const noneGroup = result.find(g => g.key === '_none') || { key: '_none', name: 'No Project', tasks: [], sections: [] };
+      const noneGroup = result.find(g => g.key === '_none') || { key: '_none', name: '프로젝트 없음', tasks: [], sections: [] };
       if (!result.includes(noneGroup)) result.push(noneGroup);
       noneGroup.tasks.push({ task: null, runs: orphanRuns });
       // R2-C incidental fix: ensure the orphan-runs group gets a sections
@@ -128,7 +131,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
       if (!noneGroup.sections.some(s => s.key === '_orphan')) {
         noneGroup.sections.push({
           key: '_orphan',
-          label: 'Unassigned',
+          label: '미할당',
           color: 'var(--status-queued)',
           tasks: [{ task: null, runs: orphanRuns }],
         });
@@ -141,11 +144,11 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
   return html`
     <div class="manager-grid-side">
       <div class="manager-grid-header">
-        <h3>Task Sessions</h3>
+        <h3>${MANAGER_LABELS.taskSessions}</h3>
         <div class="manager-grid-stats">
-          <span class="mgr-stat" style="color: var(--status-running)">\u25CF ${workerRuns.filter(r => r.status === 'running').length} running</span>
-          <span class="mgr-stat" style="color: var(--status-needs-input)">\u23F8 ${workerRuns.filter(r => r.status === 'needs_input').length} waiting</span>
-          <span class="mgr-stat" style="color: var(--status-failed)">\u2717 ${workerRuns.filter(r => r.status === 'failed').length} failed</span>
+          <span class="mgr-stat" style="color: var(--status-running)">\u25CF ${workerRuns.filter(r => r.status === 'running').length} 실행 중</span>
+          <span class="mgr-stat" style="color: var(--status-needs-input)">\u23F8 ${workerRuns.filter(r => r.status === 'needs_input').length} 대기</span>
+          <span class="mgr-stat" style="color: var(--status-failed)">\u2717 ${workerRuns.filter(r => r.status === 'failed').length} 실패</span>
         </div>
       </div>
 
@@ -162,13 +165,13 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
           return html`
             <div class="manager-session-row ${isSelected ? 'selected' : ''}" ...${clickableProps(() => onSelectConversation && onSelectConversation('top'))}>
               <span class="manager-session-icon">\u2726</span>
-              <span class="manager-session-label">Manager Session</span>
-              <span class="manager-session-badge running">Active</span>
+              <span class="manager-session-label">${MANAGER_LABELS.managerSession}</span>
+              <span class="manager-session-badge running">${MANAGER_LABELS.active}</span>
             </div>
           `;
         })()}
         ${projectGroups.length === 0 && !managerStatus?.active && html`
-          <${EmptyState} icon="\u2699" text="No tasks yet" sub="Start a manager and assign tasks" />
+          <${EmptyState} icon="\u2699" text="아직 작업이 없습니다" sub="매니저를 시작하고 작업을 할당하세요" />
         `}
         ${projectGroups.map(group => {
           const projCollapsed = collapsedProjects[group.key];
@@ -178,18 +181,20 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
             <div class="worker-project-label" onClick=${() => toggleProject(group.key)} style="cursor:pointer">
               <span class="worker-project-chevron">${projCollapsed ? '\u25B6' : '\u25BC'}</span>
               <span>${group.name}</span>
-              <span class="worker-project-count">${group.tasks.length} task${group.tasks.length !== 1 ? 's' : ''}${activeCount > 0 ? ` \u00B7 ${activeCount} active` : ''}</span>
+              <span class="worker-project-count">작업 ${group.tasks.length}개${activeCount > 0 ? `\u00B7 ${activeCount}개 활성` : ''}</span>
             </div>
             ${!projCollapsed && (() => {
               const pm = activePms.find(p => p.conversationId === `pm:${group.key}`);
               const pmStatus = pm?.run?.status;
-              const pmLabel = pmStatus === 'running' ? 'Running'
-                : pmStatus === 'needs_input' ? 'Waiting'
-                : pmStatus === 'queued' ? 'Starting...'
-                : pmStatus === 'completed' ? 'Done'
-                : pmStatus === 'stopped' ? 'Stopped'
-                : pmStatus === 'failed' ? 'Failed'
-                : 'Idle';
+              // Phase K-1a (rev3): PM row label and ManagerChat header
+              // share a single source via `statusLabel(RUN_STATUS_LABELS, ...)`.
+              // The earlier hand-mapped chain diverged from ManagerChat
+              // for `queued` / `cancelled` / unknown enums; using the
+              // helper keeps both surfaces consistent and folds new
+              // states into the same map automatically.
+              const pmLabel = pmStatus
+                ? statusLabel(RUN_STATUS_LABELS, pmStatus)
+                : MANAGER_LABELS.idle;
               const pmColor = pmStatus === 'running' ? 'var(--status-running)'
                 : pmStatus === 'needs_input' ? 'var(--status-needs-input)'
                 : pmStatus === 'completed' ? 'var(--status-done)'
@@ -199,7 +204,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
               return pm ? html`
                 <div class="pm-session-row ${pmSelected ? 'selected' : ''}" ...${clickableProps(() => onSelectPm && onSelectPm(`pm:${group.key}`))}>
                   <span class="pm-session-dot" style="background:${pmColor}"></span>
-                  <span class="pm-session-label">PM Session</span>
+                  <span class="pm-session-label">PM 세션</span>
                   <span class="pm-session-status" style="color:${pmColor}">${pmLabel}${pmStatus === 'running' ? html` <span class="pm-spinner"></span>` : ''}</span>
                 </div>
               ` : null;
@@ -222,18 +227,18 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
                   const done = taskRuns.filter(r => r.status === 'completed').length;
                   const failed = taskRuns.filter(r => r.status === 'failed').length;
                   const parts = [];
-                  if (running) parts.push(html`<span style="color:var(--status-running)">${running} running</span>`);
-                  if (waiting) parts.push(html`<span style="color:var(--status-needs-input)">${waiting} waiting</span>`);
-                  if (failed) parts.push(html`<span style="color:var(--status-failed)">${failed} failed</span>`);
-                  if (done) parts.push(html`<span style="color:var(--status-done)">${done} done</span>`);
+                  if (running) parts.push(html`<span style="color:var(--status-running)">${running} 실행 중</span>`);
+                  if (waiting) parts.push(html`<span style="color:var(--status-needs-input)">${waiting} 대기</span>`);
+                  if (failed) parts.push(html`<span style="color:var(--status-failed)">${failed} 실패</span>`);
+                  if (done) parts.push(html`<span style="color:var(--status-done)">${done} 완료</span>`);
                   return html`
                     <div class="task-session-group">
                       <div class="task-session-header">
-                        <span class="task-session-title">${task?.title || 'Unassigned Runs'}</span>
+                        <span class="task-session-title">${task?.title || '미할당 런'}</span>
                         <span class="task-session-meta">
-                          ${parts.length > 0 ? parts.reduce((acc, el, i) => i === 0 ? [el] : [...acc, ', ', el], []) : (taskRuns.length > 0 ? `${taskRuns.length} run${taskRuns.length > 1 ? 's' : ''}` : '')}
+                          ${parts.length > 0 ? parts.reduce((acc, el, i) => i === 0 ? [el] : [...acc, ', ', el], []) : (taskRuns.length > 0 ? `런 ${taskRuns.length}개` : '')}
                         </span>
-                        ${task && html`<button class="task-session-detail-btn" onClick=${(e) => { e.stopPropagation(); setSelectedTask(task); }}>Detail</button>`}
+                        ${task && html`<button class="task-session-detail-btn" onClick=${(e) => { e.stopPropagation(); setSelectedTask(task); }}>상세</button>`}
                       </div>
                     </div>
                   `;

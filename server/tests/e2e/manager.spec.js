@@ -34,15 +34,15 @@ test.describe('Manager View Structure', () => {
     await page.goto('/#manager');
     const header = page.locator('.manager-chat-header');
     await expect(header).toBeVisible();
-    // Panel title shows "Manager Session" when no PM conversation is selected
-    await expect(header.locator('.manager-panel-title')).toContainText('Manager Session');
+    // Phase K-1a: panel title flipped to Korean — "매니저 세션".
+    await expect(header.locator('.manager-panel-title')).toContainText('매니저 세션');
     // Status badge reflects current state
     const badge = header.locator('.manager-status-badge');
     await expect(badge).toBeVisible();
     if (status.active) {
-      await expect(badge).toHaveText('Active');
+      await expect(badge).toHaveText('활성');
     } else {
-      await expect(badge).toHaveText('Idle');
+      await expect(badge).toHaveText('대기 중');
     }
   });
 
@@ -64,20 +64,20 @@ test.describe('Manager View Structure', () => {
       await expect(empty).toBeVisible();
       await expect(empty.locator('.manager-empty-icon')).toBeVisible();
       await expect(empty.locator('.manager-empty-text')).toContainText(
-        'Start a Manager session to orchestrate your agents'
+        '매니저 세션을 시작해 에이전트를 조율하세요'
       );
     }
     // When active, messages area is still present (may contain chat bubbles)
   });
 
-  test('session grid panel renders with "Task Sessions" header', async ({ page }) => {
+  test('session grid panel renders with "작업 세션" header', async ({ page }) => {
     await page.goto('/#manager');
     const gridSide = page.locator('.manager-grid-side');
     await expect(gridSide).toBeVisible();
-    // Header inside the grid side
+    // Header inside the grid side. Phase K-1a flipped to Korean.
     const gridHeader = gridSide.locator('.manager-grid-header');
     await expect(gridHeader).toBeVisible();
-    await expect(gridHeader.locator('h3')).toHaveText('Task Sessions');
+    await expect(gridHeader.locator('h3')).toHaveText('작업 세션');
   });
 
   test('session grid body renders (tasks or empty state)', async ({ page }) => {
@@ -95,10 +95,11 @@ test.describe('Manager View Structure', () => {
     await page.goto('/#manager');
     const stats = page.locator('.manager-grid-stats');
     await expect(stats).toBeVisible();
-    // Stats bar always shows running/waiting/failed counters
-    await expect(stats).toContainText('running');
-    await expect(stats).toContainText('waiting');
-    await expect(stats).toContainText('failed');
+    // Stats bar always shows running/waiting/failed counters.
+    // Phase K-1a: copy flipped to Korean.
+    await expect(stats).toContainText('실행 중');
+    await expect(stats).toContainText('대기');
+    await expect(stats).toContainText('실패');
   });
 });
 
@@ -122,6 +123,9 @@ test.describe('Manager Agent Picker (idle state)', () => {
       // Picker group renders with the agent select
       const picker = page.locator('.manager-picker[role="group"]');
       await expect(picker).toBeVisible({ timeout: 5000 });
+      // Phase K-1a: aria-label is now Korean. The empty-state copy still
+      // ships the original English string — `K-1a` brief scopes manager
+      // chat picker only; that downstream message moves with K-1b.
       await expect(picker).toHaveAttribute('aria-label', 'Manager agent picker');
       await expect(picker.locator('#manager-profile-select')).toBeVisible();
     } else {
@@ -147,8 +151,8 @@ test.describe('Manager Agent Picker (idle state)', () => {
     await page.goto('/#manager');
     // Wait for picker to load
     await page.locator('.manager-picker[role="group"]').waitFor({ state: 'visible', timeout: 5000 });
-    // The Start Manager button
-    const startBtn = page.locator('button', { hasText: 'Start Manager' });
+    // Phase K-1a: Start Manager button now reads "매니저 시작" in Korean.
+    const startBtn = page.locator('button', { hasText: '매니저 시작' });
     await expect(startBtn).toBeVisible();
     await expect(startBtn).toHaveClass(/btn-primary/);
   });

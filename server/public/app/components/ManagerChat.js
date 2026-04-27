@@ -13,6 +13,7 @@ import { renderMarkdown } from '../lib/markdown.js';
 import { timeAgo } from '../lib/format.js';
 import { Dropdown } from './Dropdown.js';
 import { EmptyState } from './EmptyState.js';
+import { COMMON_ACTIONS, MANAGER_LABELS, RUN_STATUS_LABELS, statusLabel } from '../lib/copy.js';
 import { MentionInput } from './MentionInput.js';
 import { RunInspector } from './RunInspector.js';
 
@@ -89,12 +90,16 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
   // running. The Top session uses status.active (legacy).
   const pmRunActive = isPm && pmConv.run && pmConv.run.status === 'running';
   const chatActive = isPm ? pmRunActive : status.active;
-  // Badge label for the header
+  // Badge label for the header. Phase K-1a: every PM run state walks
+  // through `RUN_STATUS_LABELS` so transient states (queued /
+  // needs_input / stopped / cancelled) all surface in Korean, matching
+  // the SessionGrid PM row labels. The Top session uses a binary
+  // active/idle from `MANAGER_LABELS`.
   const chatBadge = isPm
     ? (pmConv.run
-        ? (pmConv.run.status === 'running' ? 'Active' : pmConv.run.status)
-        : 'Idle')
-    : (status.active ? 'Active' : 'Idle');
+        ? statusLabel(RUN_STATUS_LABELS, pmConv.run.status)
+        : MANAGER_LABELS.idle)
+    : (status.active ? MANAGER_LABELS.active : MANAGER_LABELS.idle);
   const chatBadgeClass = isPm
     ? (pmRunActive ? 'running' : 'idle')
     : (status.active ? 'running' : 'idle');
@@ -659,7 +664,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
               className="manager-pm-picker"
             />
           ` : html`
-            <span>${isPm ? `PM \u00B7 ${pmProject ? pmProject.name : pmProjectId}` : 'Manager Session'}</span>
+            <span>${isPm ? `PM \u00B7 ${pmProject ? pmProject.name : pmProjectId}` : MANAGER_LABELS.managerSession}</span>
           `}
           <span class="manager-status-badge ${chatBadgeClass}">${chatBadge}</span>
         </div>
@@ -671,17 +676,17 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
             <button
               class="btn btn-sm btn-danger"
               onClick=${handleResetPm}
-              title="Reset PM: terminate this project's PM thread only."
-              aria-label="Reset PM for this project"
-            >Reset PM</button>
+              title="PM 리셋: 이 프로젝트의 PM 스레드만 종료합니다."
+              aria-label="이 프로젝트의 PM 리셋"
+            >${MANAGER_LABELS.resetPM}</button>
           `}
           ${!isPm && status.active && html`
             <button
               class="btn btn-sm btn-danger"
               onClick=${stop}
-              title="Stop Top manager"
-              aria-label="Stop Top manager"
-            >Stop</button>
+              title="Top 매니저 중지"
+              aria-label="Top 매니저 중지"
+            >${COMMON_ACTIONS.stop}</button>
           `}
         </div>
       </div>
@@ -690,9 +695,9 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
         ${!status.active && messages.length === 0 && html`
           <div class="manager-empty">
             <div class="manager-empty-icon">\u2726</div>
-            <div class="manager-empty-text">Start a Manager session to orchestrate your agents</div>
+            <div class="manager-empty-text">매니저 세션을 시작해 에이전트를 조율하세요</div>
             ${agentsLoading && managerProfiles.length === 0 ? html`
-              <div class="manager-picker-empty">Loading agent profiles\u2026</div>
+              <div class="manager-picker-empty">에이전트 프로필 불러오는 중\u2026</div>
             ` : agentsError ? html`
               <div class="manager-picker-empty" role="alert">
                 Couldn't load agent profiles: ${agentsError}.
@@ -770,7 +775,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
               </div>
             `}
             <button class="btn btn-primary" onClick=${handleStart} disabled=${startDisabled}>
-              ${loading ? 'Starting...' : 'Start Manager'}
+              ${loading ? COMMON_ACTIONS.starting : MANAGER_LABELS.startManager}
             </button>
           </div>
         `}

@@ -316,21 +316,25 @@ test('P2-10 app.js still references <${DriftDrawer} ... /> via direct import', a
 
 // ---- P2-9: Stop/Reset label clarity + PM selector Dropdown swap ----
 
+// Phase K-1a (2026-04-27): the Reset PM / Stop Top aria-label + title
+// strings flipped to Korean. The contract these tests guard is "PM
+// reset/Top stop have an explicit, scope-clarifying SR label" — not
+// the literal English copy. We assert the Korean strings now.
 test('P2-9 Reset PM button has explicit aria-label and scope-clarifying title', async () => {
   const src = await loadManagerViewSource();
-  const idx = src.indexOf('aria-label="Reset PM for this project"');
+  const idx = src.indexOf('aria-label="이 프로젝트의 PM 리셋"');
   assert.ok(idx > 0, 'Reset PM aria-label not found — P2-9 title/aria update missing');
   const region = src.slice(idx - 600, idx + 200);
   assert.match(
     region,
-    /title="Reset PM: terminate this project's PM thread only/,
+    /title="PM 리셋: 이 프로젝트의 PM 스레드만 종료합니다\./,
     'Reset PM title must clearly scope the action to the current project',
   );
 });
 
 test('P2-9 Stop Top button has explicit aria-label', async () => {
   const src = await loadManagerViewSource();
-  const idx = src.indexOf('aria-label="Stop Top manager"');
+  const idx = src.indexOf('aria-label="Top 매니저 중지"');
   assert.ok(idx > 0, 'Stop Top aria-label not found');
 });
 
