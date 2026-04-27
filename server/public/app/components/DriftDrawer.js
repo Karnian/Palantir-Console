@@ -8,6 +8,12 @@ const html = htm.bind(h);
 
 import { timeAgo } from '../lib/format.js';
 import { useEscape } from '../lib/hooks.js';
+import {
+  COMMON_ACTIONS,
+  DRIFT_LABELS,
+  INCOHERENCE_KIND_LABELS,
+  statusLabel,
+} from '../lib/copy.js';
 
 export function DriftDrawer({ open, onClose, driftAudit, projects }) {
   // Phase F: ESC handling joins the shared useEscape stack so a Cmd+K
@@ -95,24 +101,24 @@ export function DriftDrawer({ open, onClose, driftAudit, projects }) {
       >
         <div class="drift-drawer-header">
           <div class="drift-drawer-title" id="drift-drawer-title">
-            <span>\u26A0 Drift</span>
+            <span>${DRIFT_LABELS.title}</span>
             <span class="drift-drawer-count">${rows.length}</span>
           </div>
           <div class="drift-drawer-actions">
             ${driftAudit && driftAudit.dismissedCount > 0 && html`
               <button class="ghost" onClick=${() => driftAudit.clearDismissed()}>
-                Restore ${driftAudit.dismissedCount} dismissed
+                ${DRIFT_LABELS.restorePrefix} ${driftAudit.dismissedCount}${DRIFT_LABELS.restoreSuffix}
               </button>
             `}
-            <button class="ghost" onClick=${onClose} aria-label="Close drift drawer">Close</button>
+            <button class="ghost" onClick=${onClose} aria-label=${DRIFT_LABELS.closeAria}>${COMMON_ACTIONS.close}</button>
           </div>
         </div>
         <div class="drift-drawer-body">
           ${rows.length === 0 && html`
             <div class="drift-drawer-empty">
-              <div class="drift-drawer-empty-icon">\u2713</div>
-              <div>모든 PM 주장과 DB 상태가 일치합니다.</div>
-              <div class="drift-drawer-empty-sub">PM이 잘못된 주장을 기록하면 여기에 표시됩니다.</div>
+              <div class="drift-drawer-empty-icon">✓</div>
+              <div>${DRIFT_LABELS.empty}</div>
+              <div class="drift-drawer-empty-sub">${DRIFT_LABELS.emptySub}</div>
             </div>
           `}
           ${rows.map(row => {
@@ -123,7 +129,7 @@ export function DriftDrawer({ open, onClose, driftAudit, projects }) {
               <div key=${row.id} class="drift-row" style=${`border-left: 3px solid ${kindColor(row.incoherence_kind)}`}>
                 <div class="drift-row-header">
                   <span class="drift-row-kind" style=${`color:${kindColor(row.incoherence_kind)}`}>
-                    ${row.incoherence_kind || 'unknown'}
+                    ${statusLabel(INCOHERENCE_KIND_LABELS, row.incoherence_kind || 'unknown')}
                   </span>
                   <span class="drift-row-project">${pname}</span>
                   <span class="drift-row-time">${timeAgo(new Date(row.created_at).toISOString())}</span>
@@ -131,24 +137,24 @@ export function DriftDrawer({ open, onClose, driftAudit, projects }) {
                     class="ghost"
                     style="margin-left:auto"
                     onClick=${() => driftAudit.dismiss(row.id)}
-                    title="Hide from this client (server row is kept as history)"
-                  >Dismiss</button>
+                    title=${DRIFT_LABELS.dismissTitle}
+                  >${DRIFT_LABELS.dismiss}</button>
                 </div>
                 <div class="drift-row-diff">
                   <div class="drift-diff-col">
-                    <div class="drift-diff-label">PM claimed</div>
+                    <div class="drift-diff-label">${DRIFT_LABELS.pmClaimed}</div>
                     <pre>${JSON.stringify(claim, null, 2)}</pre>
                   </div>
                   <div class="drift-diff-col">
-                    <div class="drift-diff-label">DB truth</div>
+                    <div class="drift-diff-label">${DRIFT_LABELS.dbTruth}</div>
                     <pre>${JSON.stringify(truth, null, 2)}</pre>
                   </div>
                 </div>
                 ${row.pm_run_id && html`
-                  <div class="drift-row-meta">pm_run_id: <code>${row.pm_run_id}</code></div>
+                  <div class="drift-row-meta">${DRIFT_LABELS.pmRunIdLabel}: <code>${row.pm_run_id}</code></div>
                 `}
                 ${row.rationale && html`
-                  <div class="drift-row-meta">rationale: ${row.rationale}</div>
+                  <div class="drift-row-meta">${DRIFT_LABELS.rationaleLabel}: ${row.rationale}</div>
                 `}
               </div>
             `;
