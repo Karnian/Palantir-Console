@@ -18,3 +18,7 @@ runtime/
 # Playwright
 test-results/
 playwright-report/
+# node-gyp build artifacts (better-sqlite3 native module rebuild scratch).
+# Created when prebuild-install falls back to source build; not a shipped
+# artifact and varies per OS/Node ABI, so it must not enter version control.
+build/

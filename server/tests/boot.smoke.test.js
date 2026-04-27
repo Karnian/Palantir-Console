@@ -31,16 +31,43 @@ async function createTestApp(t) {
   const storageRoot = await createTempDir('palantir-storage-');
   const fsRoot = await createTempDir('palantir-fs-');
   const dbPath = path.join(await createTempDir('palantir-db-'), 'test.db');
-  const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode', dbPath });
+  // Phase Test-Stabilize (2026-04-27): pin `authToken: null` to keep
+  // sibling-test PALANTIR_TOKEN leaks from biasing this app — even
+  // though static assets sit before /api auth, keeping the option
+  // explicit removes one variable from the flake hunt.
+  const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode', dbPath, authToken: null });
+
+  // Phase Test-Stabilize round 2 (Codex BLOCK): the original flake was
+  // `Cannot read properties of null (reading 'port')`, surfaced when
+  // supertest fell into a race between its automatic `app.listen(0)`
+  // and the very first asset request (the address listener has not
+  // attached yet — `server.address()` returns null inside supertest's
+  // own internals). Pre-listen explicitly on 127.0.0.1 + ephemeral
+  // port and hand the bound `http.Server` to supertest so by the
+  // time any test issues a request, `address().port` is populated.
+  const http = require('node:http');
+  const server = http.createServer(app);
+  await new Promise((resolve, reject) => {
+    // Node's `server.listen(...)` callback does NOT receive an error
+    // argument — wire up `listening` + `error` events explicitly so
+    // bind failures (EADDRINUSE / EPERM in sandboxed CI) reject this
+    // helper instead of silently moving forward with an unbound server.
+    server.once('listening', resolve);
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1');
+  });
 
   t.after(async () => {
+    await new Promise((resolve) => server.close(() => resolve()));
     if (app.shutdown) app.shutdown();
     else app.closeDb();
     await fs.rm(storageRoot, { recursive: true, force: true });
     await fs.rm(fsRoot, { recursive: true, force: true });
     await fs.rm(path.dirname(dbPath), { recursive: true, force: true });
   });
-  return app;
+  // Hand the live server to supertest so callers do `request(server)`
+  // (we keep the function name `createTestApp` for compatibility).
+  return server;
 }
 
 // Every static asset the bootstrap chain depends on. If any of these 404 in

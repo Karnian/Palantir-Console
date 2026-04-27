@@ -19,7 +19,11 @@ async function createTestApp(t, opts = {}) {
   // Tests that want to exercise the keychain-positive path pass
   // { authResolverOpts: { hasKeychain: () => true } } explicitly.
   const authResolverOpts = opts.authResolverOpts || { hasKeychain: () => false };
-  const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode', dbPath, authResolverOpts });
+  // Phase Test-Stabilize (2026-04-27): pin authToken=null so a sibling
+  // test that mutates process.env.PALANTIR_TOKEN can't leak into here
+  // and turn API calls into 401s under parallel test pressure (the
+  // same root cause as the preset-route.test.js fix in PR #117).
+  const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode', dbPath, authResolverOpts, authToken: null });
 
   t.after(async () => {
     if (app.shutdown) app.shutdown();
