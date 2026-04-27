@@ -382,7 +382,7 @@ export function SessionsView() {
   const hasSelected = selectedId && sessions.some(s => s.id === selectedId);
 
   return html`
-    <div class="sessions-layout">
+    <div class="sessions-layout" data-view="sessions">
       <${SessionList} sessions=${sessions} selectedId=${selectedId}
                        onSelect=${handleSelect} onRefresh=${loadSessions} onNew=${handleNew} />
       <main class="content">
