@@ -16,6 +16,7 @@ import { EmptyState } from './EmptyState.js';
 import {
   COMMON_ACTIONS,
   MANAGER_LABELS,
+  MANAGER_STATUS_LABELS,
   MANAGER_CHAT_AUX,
   RUN_STATUS_LABELS,
   statusLabel,
@@ -100,12 +101,12 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
   // through `RUN_STATUS_LABELS` so transient states (queued /
   // needs_input / stopped / cancelled) all surface in Korean, matching
   // the SessionGrid PM row labels. The Top session uses a binary
-  // active/idle from `MANAGER_LABELS`.
+  // active/idle from `MANAGER_STATUS_LABELS` (Phase Token-Cleanup unified).
   const chatBadge = isPm
     ? (pmConv.run
         ? statusLabel(RUN_STATUS_LABELS, pmConv.run.status)
-        : MANAGER_LABELS.idle)
-    : (status.active ? MANAGER_LABELS.active : MANAGER_LABELS.idle);
+        : MANAGER_STATUS_LABELS.idle)
+    : (status.active ? MANAGER_STATUS_LABELS.active : MANAGER_STATUS_LABELS.idle);
   const chatBadgeClass = isPm
     ? (pmRunActive ? 'running' : 'idle')
     : (status.active ? 'running' : 'idle');
