@@ -37,8 +37,11 @@ test.describe('Palantir Console Smoke', () => {
   test('hash navigation to #manager', async ({ page }) => {
     await page.goto('/#manager');
     await expect(page.locator('#app')).not.toBeEmpty();
-    // Manager page renders agent/session related UI
-    await expect(page.locator('body')).toContainText(/manager|session|agent/i);
+    // Manager page renders agent/session related UI. Phase K-1a: visible
+    // copy is now Korean (매니저 / 세션 / 에이전트), so the regex accepts
+    // either locale's terms — we only care that the page actually
+    // resolved to ManagerView and not the dashboard fallback.
+    await expect(page.locator('body')).toContainText(/manager|session|agent|매니저|세션|에이전트/i);
   });
 
   test('hash navigation to #projects', async ({ page }) => {
@@ -56,8 +59,9 @@ test.describe('Palantir Console Smoke', () => {
   test('hash navigation to #board', async ({ page }) => {
     await page.goto('/#board');
     await expect(page.locator('#app')).not.toBeEmpty();
-    // Task Board page
-    await expect(page.locator('body')).toContainText(/task|board/i);
+    // Task Board page. Phase K-1a flipped the toolbar / nav copy to
+    // Korean (작업 / 보드); accept either locale.
+    await expect(page.locator('body')).toContainText(/task|board|작업|보드/i);
   });
 });
 
