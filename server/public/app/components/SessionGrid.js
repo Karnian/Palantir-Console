@@ -11,7 +11,8 @@ import { RunInspector } from './RunInspector.js';
 import { clickableProps } from '../lib/a11y.js';
 import { TaskDetailPanel } from './TaskModals.js';
 import { AttentionStrip } from './AttentionStrip.js';
-import { TASK_STATUS_LABELS, RUN_STATUS_LABELS, MANAGER_LABELS, COMMON_ACTIONS, statusLabel } from '../lib/copy.js';
+import { TASK_STATUS_LABELS, RUN_STATUS_LABELS, MANAGER_LABELS,
+  MANAGER_STATUS_LABELS, COMMON_ACTIONS, statusLabel } from '../lib/copy.js';
 
 const runStatusIcon = (status) => {
   switch (status) {
@@ -169,7 +170,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
             <div class="manager-session-row ${isSelected ? 'selected' : ''}" ...${clickableProps(() => onSelectConversation && onSelectConversation('top'))}>
               <span class="manager-session-icon">\u2726</span>
               <span class="manager-session-label">${MANAGER_LABELS.managerSession}</span>
-              <span class="manager-session-badge running">${MANAGER_LABELS.active}</span>
+              <span class="manager-session-badge running">${MANAGER_STATUS_LABELS.active}</span>
             </div>
           `;
         })()}
@@ -197,7 +198,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
               // states into the same map automatically.
               const pmLabel = pmStatus
                 ? statusLabel(RUN_STATUS_LABELS, pmStatus)
-                : MANAGER_LABELS.idle;
+                : MANAGER_STATUS_LABELS.idle;
               const pmColor = pmStatus === 'running' ? 'var(--status-running)'
                 : pmStatus === 'needs_input' ? 'var(--status-needs-input)'
                 : pmStatus === 'completed' ? 'var(--status-done)'

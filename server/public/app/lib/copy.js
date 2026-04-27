@@ -98,6 +98,13 @@ export const FILTER_LABELS = {
 // Manager / Sessions chrome — surface that doesn't fit any other map.
 // Kept narrow on purpose; if a phrase shows up only once and never
 // repeats elsewhere, leave it inline.
+//
+// Phase Token-Cleanup (2026-04-27): the `active` / `idle` keys here
+// duplicated `MANAGER_STATUS_LABELS.active|idle` and call sites
+// inconsistently referenced one or the other. Removed in favor of the
+// dedicated status map — call `MANAGER_STATUS_LABELS.active` or
+// `statusLabel(MANAGER_STATUS_LABELS, key)` for any manager status
+// rendering.
 export const MANAGER_LABELS = {
   startManager: '매니저 시작',
   stopTop: '매니저 중지',
@@ -105,8 +112,6 @@ export const MANAGER_LABELS = {
   managerSession: '매니저 세션',
   taskSessions: '작업 세션',
   newTask: '새 작업',
-  active: '활성',
-  idle: '대기 중',
 };
 
 // RunInspector — 6 tabs + cost cards + diff/output empty states.
