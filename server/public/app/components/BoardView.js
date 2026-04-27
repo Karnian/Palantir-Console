@@ -316,7 +316,7 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
   const currentDetailTask = detailTask ? tasks.find(t => t.id === detailTask.id) || detailTask : null;
 
   return html`
-    <div class="board-view">
+    <div class="board-view" data-view="board">
       <div class="board-toolbar">
         <h1 class="board-toolbar-title">작업</h1>
         <${BoardModeTabs} active="board" />

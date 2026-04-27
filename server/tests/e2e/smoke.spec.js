@@ -1,5 +1,10 @@
 const { test, expect, request } = require('@playwright/test');
 
+// PostK-e2e-migrate (2026-04-27): hash-route smoke checks switched to
+// `[data-view="<route>"]` selectors so K-low copy revisions don't
+// regress this file. Each route wrapper exposes a single data-view
+// attribute corresponding to its hash key in app/lib/nav.js.
+
 test.describe('Palantir Console Smoke', () => {
   test('dashboard loads with title and nav sidebar', async ({ page }) => {
     await page.goto('/');
@@ -12,56 +17,54 @@ test.describe('Palantir Console Smoke', () => {
     await page.goto('/');
     const nav = page.locator('nav.nav-sidebar');
     // NAV_ITEMS: Dashboard, Manager, Task Board, Projects, Agents,
-    // Skill Packs, Presets, MCP Servers (M3)
+    // Skill Packs, Presets, MCP Servers
     await expect(nav.locator('.nav-item')).toHaveCount(8);
   });
 
-  test('hash navigation to #mcp-servers shows seeded templates', async ({ page }) => {
+  test('hash navigation to #mcp-servers renders the MCP route', async ({ page }) => {
     await page.goto('/#mcp-servers');
-    await expect(page.locator('#app')).not.toBeEmpty();
+    await expect(page.locator('[data-view="mcp-servers"]')).toBeVisible();
     // Seeded templates from skillPackService.DEFAULT_MCP_TEMPLATES should
-    // render as cards. At minimum the page heading + one default alias
-    // confirms the tab is wired into app.js and the route resolves to
-    // McpTemplatesView (not a fallback Dashboard).
-    await expect(page.locator('h1', { hasText: 'MCP Servers' })).toBeVisible();
+    // render somewhere in the route. We assert at least one default
+    // alias is present so the route resolves to McpTemplatesView (not a
+    // fallback Dashboard).
     await expect(page.locator('body')).toContainText(/playwright|filesystem/);
   });
 
-  test('hash navigation to #dashboard', async ({ page }) => {
+  test('hash navigation to #dashboard renders the dashboard route', async ({ page }) => {
     await page.goto('/#dashboard');
-    // Dashboard view should render task/run-related content
-    await expect(page.locator('#app')).not.toBeEmpty();
+    await expect(page.locator('[data-view="dashboard"]')).toBeVisible();
     await expect(page.locator('nav.nav-sidebar .nav-item.active')).toBeVisible();
   });
 
-  test('hash navigation to #manager', async ({ page }) => {
+  test('hash navigation to #manager renders the manager route', async ({ page }) => {
     await page.goto('/#manager');
-    await expect(page.locator('#app')).not.toBeEmpty();
-    // Manager page renders agent/session related UI. Phase K-1a: visible
-    // copy is now Korean (매니저 / 세션 / 에이전트), so the regex accepts
-    // either locale's terms — we only care that the page actually
-    // resolved to ManagerView and not the dashboard fallback.
-    await expect(page.locator('body')).toContainText(/manager|session|agent|매니저|세션|에이전트/i);
+    await expect(page.locator('[data-view="manager"]')).toBeVisible();
   });
 
-  test('hash navigation to #projects', async ({ page }) => {
+  test('hash navigation to #projects renders the projects route', async ({ page }) => {
     await page.goto('/#projects');
-    await expect(page.locator('#app')).not.toBeEmpty();
-    await expect(page.locator('body')).toContainText(/project/i);
+    await expect(page.locator('[data-view="projects"]')).toBeVisible();
   });
 
-  test('hash navigation to #agents', async ({ page }) => {
+  test('hash navigation to #agents renders the agents route', async ({ page }) => {
     await page.goto('/#agents');
-    await expect(page.locator('#app')).not.toBeEmpty();
-    await expect(page.locator('body')).toContainText(/agent/i);
+    await expect(page.locator('[data-view="agents"]')).toBeVisible();
   });
 
-  test('hash navigation to #board', async ({ page }) => {
+  test('hash navigation to #board renders the board route', async ({ page }) => {
     await page.goto('/#board');
-    await expect(page.locator('#app')).not.toBeEmpty();
-    // Task Board page. Phase K-1a flipped the toolbar / nav copy to
-    // Korean (작업 / 보드); accept either locale.
-    await expect(page.locator('body')).toContainText(/task|board|작업|보드/i);
+    await expect(page.locator('[data-view="board"]')).toBeVisible();
+  });
+
+  test('hash navigation to #presets renders the presets route', async ({ page }) => {
+    await page.goto('/#presets');
+    await expect(page.locator('[data-view="presets"]')).toBeVisible();
+  });
+
+  test('hash navigation to #skills renders the skills route', async ({ page }) => {
+    await page.goto('/#skills');
+    await expect(page.locator('[data-view="skills"]')).toBeVisible();
   });
 });
 

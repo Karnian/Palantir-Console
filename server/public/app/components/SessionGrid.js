@@ -146,9 +146,9 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
       <div class="manager-grid-header">
         <h3>${MANAGER_LABELS.taskSessions}</h3>
         <div class="manager-grid-stats">
-          <span class="mgr-stat" style="color: var(--status-running)">\u25CF ${workerRuns.filter(r => r.status === 'running').length} 실행 중</span>
-          <span class="mgr-stat" style="color: var(--status-needs-input)">\u23F8 ${workerRuns.filter(r => r.status === 'needs_input').length} 대기</span>
-          <span class="mgr-stat" style="color: var(--status-failed)">\u2717 ${workerRuns.filter(r => r.status === 'failed').length} 실패</span>
+          <span class="mgr-stat" data-stat="running" style="color: var(--status-running)">\u25CF ${workerRuns.filter(r => r.status === 'running').length} 실행 중</span>
+          <span class="mgr-stat" data-stat="waiting" style="color: var(--status-needs-input)">\u23F8 ${workerRuns.filter(r => r.status === 'needs_input').length} 대기</span>
+          <span class="mgr-stat" data-stat="failed" style="color: var(--status-failed)">\u2717 ${workerRuns.filter(r => r.status === 'failed').length} 실패</span>
         </div>
       </div>
 
