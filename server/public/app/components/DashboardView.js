@@ -6,8 +6,9 @@ import { useState, useEffect } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
-import { timeAgo, formatDuration } from '../lib/format.js';
+import { timeAgo, formatDuration, parseDate } from '../lib/format.js';
 import { navigate } from '../lib/hooks.js';
+import { DASHBOARD_LABELS } from '../lib/copy.js';
 import { EmptyState } from './EmptyState.js';
 import { dueState, formatDueDate, useNowTick, dueDateMeta } from '../lib/dueDate.js';
 
@@ -23,7 +24,7 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
   const failedRuns = workerRuns.filter(r => r.status === 'failed');
   const completedToday = workerRuns.filter(r => {
     if (r.status !== 'completed') return false;
-    const d = new Date(r.ended_at || r.created_at);
+    const d = parseDate(r.ended_at || r.created_at);
     const now = new Date();
     return d.toDateString() === now.toDateString();
   });
@@ -37,8 +38,8 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
   const triageItems = [];
 
   const runTitle = (run, task) => {
-    if (run.is_manager) return 'Manager Session';
-    return task?.title || `Run ${run.id.slice(0, 8)}`;
+    if (run.is_manager) return DASHBOARD_LABELS.triageManagerTitle;
+    return task?.title || `${DASHBOARD_LABELS.runFallbackPrefix} ${run.id.slice(0, 8)}`;
   };
 
   if (manager?.status?.active && manager.status.run) {
@@ -46,8 +47,8 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
     triageItems.push({
       type: 'manager',
       priority: -1,
-      title: 'Manager Session',
-      meta: `Active - ${timeAgo(mrun.started_at || mrun.created_at)}`,
+      title: DASHBOARD_LABELS.triageManagerTitle,
+      meta: `${DASHBOARD_LABELS.triageManagerMetaActive} · ${timeAgo(mrun.started_at || mrun.created_at)}`,
       run: null,
       task: null,
     });
@@ -87,7 +88,7 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
       type: 'needs-input',
       priority: 0,
       title: runTitle(run, task),
-      meta: `Waiting for input - ${timeAgo(run.updated_at || run.created_at)}`,
+      meta: `${DASHBOARD_LABELS.triageNeedsInputMeta} · ${timeAgo(run.updated_at || run.created_at)}`,
       run,
       task,
     });
@@ -99,7 +100,7 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
       type: 'failed',
       priority: 1,
       title: runTitle(run, task),
-      meta: `Failed - ${timeAgo(run.updated_at || run.created_at)}`,
+      meta: `${DASHBOARD_LABELS.triageFailedMeta} · ${timeAgo(run.updated_at || run.created_at)}`,
       run,
       task,
     });
@@ -111,7 +112,7 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
       type: 'running',
       priority: 2,
       title: runTitle(run, task),
-      meta: `Running - ${timeAgo(run.created_at)}`,
+      meta: `${DASHBOARD_LABELS.triageRunningMeta} · ${timeAgo(run.created_at)}`,
       run,
       task,
     });
@@ -124,7 +125,7 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
       type: 'review',
       priority: 3,
       title: task.title,
-      meta: `Ready for review - ${timeAgo(task.updated_at || task.created_at)}`,
+      meta: `${DASHBOARD_LABELS.triageReviewMeta} · ${timeAgo(task.updated_at || task.created_at)}`,
       run: null,
       task,
     });
@@ -146,31 +147,31 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
   return html`
     <div class="dashboard-view" data-view="dashboard">
       <div class="dashboard-header">
-        <h1 class="dashboard-title">Attention Dashboard</h1>
+        <h1 class="dashboard-title">${DASHBOARD_LABELS.pageTitle}</h1>
       </div>
       <div class="stats-bar">
         <div class="stat-chip stat-running">
           <div>
             <div class="stat-value">${activeRuns.length}</div>
-            <div class="stat-label">Active</div>
+            <div class="stat-label">${DASHBOARD_LABELS.statActive}</div>
           </div>
         </div>
         <div class="stat-chip stat-queued">
           <div>
             <div class="stat-value">${needsInputRuns.length}</div>
-            <div class="stat-label">Needs Input</div>
+            <div class="stat-label">${DASHBOARD_LABELS.statNeedsInput}</div>
           </div>
         </div>
         <div class="stat-chip stat-failed">
           <div>
             <div class="stat-value">${failedRuns.length}</div>
-            <div class="stat-label">Failed</div>
+            <div class="stat-label">${DASHBOARD_LABELS.statFailed}</div>
           </div>
         </div>
         <div class="stat-chip stat-done">
           <div>
             <div class="stat-value">${completedToday.length}</div>
-            <div class="stat-label">Done Today</div>
+            <div class="stat-label">${DASHBOARD_LABELS.statDoneToday}</div>
           </div>
         </div>
         ${/* v3 Phase 7: Drift badge. Hidden when zero so the bar stays
@@ -181,14 +182,14 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
             style="cursor:pointer"
             role="button"
             tabIndex=${0}
-            title="PM hallucination / staleness incidents. Click to inspect."
-            aria-label=${`Drift warnings: ${driftAudit.totalCount}. Activate to open the drift drawer.`}
+            title=${DASHBOARD_LABELS.driftClickHint}
+            aria-label=${`${DASHBOARD_LABELS.driftAriaPrefix}: ${driftAudit.totalCount}${DASHBOARD_LABELS.driftAriaSuffix}`}
             onClick=${() => onOpenDrift && onOpenDrift()}
             onKeyDown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenDrift && onOpenDrift(); } }}
           >
             <div>
               <div class="stat-value">${driftAudit.totalCount}</div>
-              <div class="stat-label">Drift \u26A0</div>
+              <div class="stat-label">${DASHBOARD_LABELS.statDriftLabelPrefix} \u26A0</div>
             </div>
           </div>
         `}
@@ -197,8 +198,8 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
         ${triageItems.length === 0 && html`
           <${EmptyState}
             icon="\u2726"
-            text="All clear. No items need attention."
-            sub="Tasks and runs will appear here when they need your input."
+            text=${DASHBOARD_LABELS.emptyText}
+            sub=${DASHBOARD_LABELS.emptySub}
           />
         `}
         ${triageItems.map((item, i) => html`
@@ -222,32 +223,32 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
             <div class="triage-actions">
               ${item.type === 'needs-input' && html`
                 <button class="ghost" onClick=${(e) => { e.stopPropagation(); item.run && onOpenRun(item.run); }}>
-                  Respond
+                  ${DASHBOARD_LABELS.actionRespond}
                 </button>
               `}
               ${item.type === 'failed' && html`
                 <button class="ghost" onClick=${(e) => { e.stopPropagation(); item.run && onDeleteRun(item.run.id); }}>
-                  Dismiss
+                  ${DASHBOARD_LABELS.actionDismiss}
                 </button>
               `}
               ${item.type === 'running' && html`
                 <button class="ghost" onClick=${(e) => { e.stopPropagation(); item.run && onOpenRun(item.run); }}>
-                  Inspect
+                  ${DASHBOARD_LABELS.actionInspect}
                 </button>
               `}
               ${item.type === 'review' && html`
                 <button class="ghost" onClick=${(e) => { e.stopPropagation(); if (item.task && onOpenTask) onOpenTask(item.task); }}>
-                  Review
+                  ${DASHBOARD_LABELS.actionReview}
                 </button>
               `}
               ${item.type === 'manager' && html`
                 <button class="ghost" onClick=${(e) => { e.stopPropagation(); navigate('manager'); }}>
-                  Open
+                  ${DASHBOARD_LABELS.actionOpen}
                 </button>
               `}
               ${(item.type === 'overdue' || item.type === 'due-soon') && html`
                 <button class="ghost" onClick=${(e) => { e.stopPropagation(); if (item.task && onOpenTask) onOpenTask(item.task); }}>
-                  Open
+                  ${DASHBOARD_LABELS.actionOpen}
                 </button>
               `}
             </div>
@@ -256,7 +257,7 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
       </div>
       ${claudeSessions && claudeSessions.length > 0 && html`
         <div style="padding: 0 28px 28px;">
-          <div class="task-detail-section-title" style="margin-bottom:8px;">Active Claude Sessions (${claudeSessions.filter(s => s.alive).length})</div>
+          <div class="task-detail-section-title" style="margin-bottom:8px;">${DASHBOARD_LABELS.claudeSessionsTitle} (${claudeSessions.filter(s => s.alive).length})</div>
           <div style="display:flex;flex-direction:column;gap:6px;">
             ${claudeSessions.filter(s => s.alive).map(s => html`
               <div key=${s.pid} class="claude-session-item">
