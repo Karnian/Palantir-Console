@@ -146,7 +146,15 @@ test('P1-11 DriftDrawer installs focus trap + auto-focus via useEffect', async (
 
 test('P1-11 DriftDrawer Close button has aria-label', async () => {
   const body = await loadDriftDrawerSource();
-  assert.match(body, /aria-label="Close drift drawer"/, 'Close button aria-label missing');
+  // Phase K-1b: aria-label moved to copy.js (DRIFT_LABELS.closeAria).
+  // Source-level assertion now matches the binding instead of the literal
+  // English string so the test survives further i18n changes without
+  // regressing the underlying a11y guarantee.
+  assert.match(
+    body,
+    /aria-label=\$\{DRIFT_LABELS\.closeAria\}/,
+    'Close button aria-label binding missing',
+  );
 });
 
 // ---- P2-6: hardened structural/source invariants ----
@@ -520,13 +528,24 @@ test('P8-8 TaskDetailPanel has proper semantic structure', async () => {
   const start = src.indexOf('export function TaskDetailPanel');
   assert.ok(start >= 0, 'TaskDetailPanel not found');
   const body = src.slice(start);
-  // Must have inline-edit aria labels for accessibility
-  assert.match(body, /aria-label="Edit title"/, 'TaskDetailPanel must have aria-label for title editing');
-  assert.match(body, /aria-label="Edit description"/, 'TaskDetailPanel must have aria-label for description editing');
-  // Must have status/priority Dropdown components with ariaLabel
-  assert.match(body, /ariaLabel="Status"/, 'TaskDetailPanel must pass ariaLabel to Status Dropdown');
-  assert.match(body, /ariaLabel="Priority"/, 'TaskDetailPanel must pass ariaLabel to Priority Dropdown');
-  assert.match(body, /ariaLabel="Project"/, 'TaskDetailPanel must pass ariaLabel to Project Dropdown');
+  // Phase K-1b: aria labels now resolve through copy.js semantic keys.
+  // The test asserts on the binding shape, not the literal phrase, so a
+  // future copy revision (e.g. wording polish) cannot silently strip
+  // a11y wiring without also touching the binding name.
+  assert.match(body, /aria-label=\$\{TASK_DETAIL_LABELS\.editTitleAria\}/,
+    'TaskDetailPanel must have aria-label for title editing');
+  assert.match(body, /aria-label=\$\{TASK_DETAIL_LABELS\.editDescAria\}/,
+    'TaskDetailPanel must have aria-label for description editing');
+  // status/priority/project Dropdown ariaLabels reuse the same copy
+  // keys as the visible meta labels so visible label = AT label per
+  // WCAG 2.5.3 Label in Name and the two stay in lockstep across
+  // future copy revisions (Codex K-1b NIT).
+  assert.match(body, /ariaLabel=\$\{TASK_DETAIL_LABELS\.status\}/,
+    'TaskDetailPanel must pass ariaLabel to Status Dropdown');
+  assert.match(body, /ariaLabel=\$\{TASK_DETAIL_LABELS\.priority\}/,
+    'TaskDetailPanel must pass ariaLabel to Priority Dropdown');
+  assert.match(body, /ariaLabel=\$\{TASK_DETAIL_LABELS\.project\}/,
+    'TaskDetailPanel must pass ariaLabel to Project Dropdown');
 });
 
 // P9-3: TaskModals bridge test removed — app.js imports directly.

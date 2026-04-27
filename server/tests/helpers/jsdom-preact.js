@@ -13,11 +13,21 @@ const { JSDOM } = require('jsdom');
 
 const VENDOR_DIR = path.join(__dirname, '..', '..', 'public', 'vendor');
 const COMPONENTS_DIR = path.join(__dirname, '..', '..', 'public', 'app', 'components');
+const APP_LIB_DIR = path.join(__dirname, '..', '..', 'public', 'app', 'lib');
 
 // Read UMD sources once — they are reused across every createPreactEnv call.
 const preactSrc = fs.readFileSync(path.join(VENDOR_DIR, 'preact.umd.js'), 'utf8');
 const hooksSrc = fs.readFileSync(path.join(VENDOR_DIR, 'hooks.umd.js'), 'utf8');
 const htmSrc = fs.readFileSync(path.join(VENDOR_DIR, 'htm.umd.js'), 'utf8');
+
+// Phase K-1b: components increasingly read user-facing copy from
+// app/lib/copy.js (semantic key lookup pattern enforced K-1a onwards).
+// loadComponent() strips relative imports, so the named exports would
+// land as `undefined` inside the vm sandbox and components throw at
+// render time when reading e.g. `DRIFT_LABELS.title`. We pre-load the
+// copy module's named exports into every createPreactEnv() context so
+// any component using copy keys works in jsdom without per-test stubs.
+const copySrc = fs.readFileSync(path.join(APP_LIB_DIR, 'copy.js'), 'utf8');
 
 /**
  * Load an ES-module component file into a vm context by stripping `export`
@@ -50,8 +60,24 @@ function loadComponent(componentName, context) {
     // with `var htm = window.htm;`
     .replace(/^import\s+htm\s+from\s+['"][^'"]*htm\.module\.js['"];?\s*$/gm,
       'var htm = window.htm;')
-    // Strip any remaining local relative imports (e.g. from '../lib/...')
-    .replace(/^import\s+.*from\s+['"]\.\.?\/.+['"];?\s*$/gm, '// [stripped import]')
+    // Strip side-effect-only relative imports first
+    // (`import './foo.js';` / `import "../bar.js";`). Doing this before
+    // the named-import multi-line strip prevents the next regex from
+    // greedily swallowing a side-effect line plus the following named
+    // import as one match (which would leave the file syntactically
+    // broken — Codex K-1b review NIT).
+    .replace(/^import\s+['"]\.\.?\/[^'"]+['"];?\s*$/gm, '// [stripped side-effect import]')
+    // Strip remaining local relative named imports (e.g. from '../lib/...').
+    // The named-import body may span multiple lines
+    // (`import {\n  foo,\n  bar,\n} from '../lib/foo.js';`). The
+    // alternation `(?:\{[\s\S]*?\}|\w[\w$]*(?:\s*,\s*\{[\s\S]*?\})?)`
+    // restricts the match to one of:
+    //   1. brace-only:    `import { a, b } from '...';`
+    //   2. default-only:  `import foo from '...';`
+    //   3. default+named: `import foo, { bar } from '...';`
+    // and refuses bare side-effect imports (already handled above), so
+    // we never accidentally bridge two import statements.
+    .replace(/^import\s+(?:\{[\s\S]*?\}|\w[\w$]*(?:\s*,\s*\{[\s\S]*?\})?)\s+from\s+['"]\.\.?\/[^'"]+['"];?\s*$/gm, '// [stripped import]')
     + `\nthis.${componentName} = ${componentName};`;
 
   vm.runInContext(transformed, context);
@@ -84,6 +110,17 @@ function createPreactEnv() {
   // `window.preactHooks` are already accessible (set by the UMD bundles).
   // htm UMD sets `self.htm` — ensure it's also reachable as `this.htm`.
   vm.runInContext('this.htm = htm;', context);
+
+  // Mount copy.js named exports as bare globals so loadComponent()'s
+  // import-stripping doesn't leave components with undefined references.
+  // We strip `export` from `export const FOO = …` declarations and
+  // `export function …` so each top-level binding becomes a plain
+  // sandbox global. Any future copy.js export shape is supported as
+  // long as it's `export const` or `export function`.
+  const copyTransformed = copySrc
+    .replace(/^export\s+const\s+/gm, 'const ')
+    .replace(/^export\s+function\s+/gm, 'function ');
+  vm.runInContext(copyTransformed, context);
 
   const { h, render } = context.preact;
   const html = context.htm.bind(h);

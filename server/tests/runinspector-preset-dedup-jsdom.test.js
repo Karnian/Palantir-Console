@@ -113,11 +113,14 @@ function renderRunInspector(env, runOverrides = {}) {
 }
 
 /**
- * Find the Preset tab button (text starts with 'Preset' — may also include drift indicator).
+ * Find the Preset tab button by its localized label. K-1b moved tab
+ * labels behind copy.js (RUN_INSPECTOR_LABELS.preset = '프리셋'); the
+ * drift indicator is appended after the base label, so a startsWith
+ * check still survives the `프리셋 ⚠ N` shape.
  */
 function findPresetTab(root) {
   const buttons = Array.from(root.querySelectorAll('.run-inspector-tab'));
-  return buttons.find(b => b.textContent.trim().startsWith('Preset'));
+  return buttons.find(b => b.textContent.trim().startsWith('프리셋'));
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────────
@@ -232,7 +235,11 @@ test('RunInspector preset tab: run with null preset_id → preset tab button abs
 
   // Check immediately after synchronous render (before effects flush)
   const tabsBeforeEffects = Array.from(root.querySelectorAll('.run-inspector-tab'));
-  const presetTabBeforeEffects = tabsBeforeEffects.find(b => b.textContent.trim().startsWith('Preset'));
+  // K-1b: tab label is now '프리셋'. The negative-case test still passes
+  // when preset_id is null because no tab with this prefix is rendered;
+  // matching the localized prefix keeps the assertion truthful for future
+  // copy revisions instead of relying on a stale English string.
+  const presetTabBeforeEffects = tabsBeforeEffects.find(b => b.textContent.trim().startsWith('프리셋'));
   assert.equal(presetTabBeforeEffects, undefined,
     'Preset tab should not render on initial sync render when run.preset_id is null');
 });
