@@ -69,6 +69,15 @@
   --status-done: #10b981;
   --status-failed: #ef4444;
   --status-queued: #6b7280;
+  /* Phase K-3α (2026-04-29): "agent currently active" green dot —
+   * brighter than `--success` (#10b981 emerald-500) to read as live
+   * pulse rather than completed-success state. Originally inlined as
+   * `'#22c55e'` in ManagerChat.js:652; Theme γ couldn't mechanical-swap
+   * because the values differ. Kept as a separate live-activity token
+   * (NOT aliased to `--success`) so the "agent running" pulse and the
+   * "task completed" success chrome can be tuned independently across
+   * dark / light themes. */
+  --status-active-bright: #22c55e;
 
   /* Priority */
   --priority-low: #6b7280;
@@ -255,6 +264,13 @@
   --status-done: #047857;
   --status-failed: #b91c1c;
   --status-queued: #52525b;
+  /* K-3α active-bright light variant — emerald-700 #15803d gives
+   * ≈4.81:1 vs --bg-base #fafafa and ≈5.02:1 vs --bg-surface #ffffff,
+   * both satisfying WCAG AA text contrast. On --bg-hover #e4e4e7 it
+   * drops to ≈3.95:1 (text AA fails) but the only consumer today is
+   * an 8px Dropdown dot — graphical 3:1 still holds. Dark emerald-500
+   * #22c55e drops to 2.0:1 on light, so a darker hue is required. */
+  --status-active-bright: #15803d;
 
   /* Priority — same shift as status colors. */
   --priority-low: #52525b;
@@ -342,6 +358,7 @@
     --status-done: #047857;
     --status-failed: #b91c1c;
     --status-queued: #52525b;
+    --status-active-bright: #15803d;
     --priority-low: #52525b;
     --priority-medium: #1d4ed8;
     --priority-high: #b45309;

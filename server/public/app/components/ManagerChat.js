@@ -649,7 +649,9 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
         const convId = `pm:${p.id}`;
         const isActive = activePms.some(pm => pm.projectId === p.id && pm.status === 'running');
         // dot: project color if set, else a neutral grey; overlay active with green
-        const dotColor = isActive ? '#22c55e' : (p.color || null);
+        // K-3α: use --status-active-bright token so light theme maps to a darker
+        // emerald that satisfies WCAG AA against the light bg.
+        const dotColor = isActive ? 'var(--status-active-bright)' : (p.color || null);
         opts.push({ value: convId, label: p.name, dot: dotColor });
       }
     }
