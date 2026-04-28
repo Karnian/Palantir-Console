@@ -105,6 +105,46 @@
   --smoke: var(--bg-elevated);
   --glow: var(--accent-muted);
 
+  /* Theme Contract α (2026-04-28): semantic tokens for the recurring
+   * "translucent status surface" pattern — bg/border tinted with the
+   * status hue at low alpha so dark surfaces glow without overwhelming.
+   * Adopted in Phase Theme Contract β. Defining them here (dark-only
+   * values, no [data-theme="light"] block yet) gives stylesheets a
+   * single point of truth that a future K-2 light-mode launch can
+   * swap by adding a [data-theme="light"] override block. The
+   * `*-bg-subtle` / `*-border-subtle` pair mirrors `color-mix(... 8%,
+   * transparent)` / `color-mix(... 40%, var(--border))` patterns
+   * already in use across attention-strip / preset cards / drift
+   * banners. `--focus-ring` / `--field-bg` / `--surface-hover` collect
+   * three more recurring values that are scattered as inline accent
+   * rgba / bg-elevated / bg-hover today. */
+  --warning-bg-subtle: color-mix(in srgb, var(--warning) 8%, transparent);
+  --warning-border-subtle: color-mix(in srgb, var(--warning) 40%, var(--border));
+  /* Codex r1 finding: existing failed surfaces use `--status-failed`
+   * (#ef4444), not `--danger` (#f43f5e). Naming the subtle pair
+   * `--status-failed-*` lets β's mechanical swap keep the exact same
+   * hue — no visual delta. `--danger` stays for destructive-action
+   * chrome only (delete buttons / dangerous form actions). */
+  --status-failed-bg-subtle: color-mix(in srgb, var(--status-failed) 8%, transparent);
+  --status-failed-border-subtle: color-mix(in srgb, var(--status-failed) 40%, var(--border));
+  --success-bg-subtle: color-mix(in srgb, var(--success) 8%, transparent);
+  --info-bg-subtle: color-mix(in srgb, var(--info) 8%, transparent);
+  --accent-bg-subtle: color-mix(in srgb, var(--accent) 8%, transparent);
+  /* Focus ring matches the existing `0 0 0 2px var(--accent-muted)`
+   * pattern across styles.css (input :focus, command-palette tab
+   * focus, etc.) so β's mechanical swap is visually identical.
+   * Stronger accent (e.g. 60%) is reserved for `outline` use cases
+   * where the outline doesn't blend with backgrounds. */
+  --focus-ring: 0 0 0 2px var(--accent-muted);
+  --field-bg: var(--bg-elevated);
+  --surface-hover: var(--bg-hover);
+  /* Scrollbar thumb — currently inline `rgba(255,255,255,0.15)` /
+   * `0.25` across `::-webkit-scrollbar-thumb` rules. Light launch
+   * needs these flipped to dark-on-light, so they get their own
+   * tokens now even though α is dark-only. */
+  --scrollbar-thumb: rgba(255, 255, 255, 0.15);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.25);
+
   /* Drift-rescue aliases (2026-04-24) — DriftDrawer / manager-picker / other
      older components reference these short names with fallbacks that drift
      away from the canonical palette (#0f1116 vs --bg-base #09090b, etc).
