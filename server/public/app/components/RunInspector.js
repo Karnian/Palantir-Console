@@ -692,7 +692,7 @@ export function RunInspector({ run, onClose }) {
                 </div>
               `}
               ${presetData.drift && !presetData.drift.deleted && presetData.drift.drift_error && html`
-                <div style=${{ padding: '8px', background: 'color-mix(in srgb, #f59e0b 15%, transparent)', color: '#f59e0b', borderRadius: '4px', marginBottom: '12px' }}>
+                <div style=${{ padding: '8px', background: 'color-mix(in srgb, var(--warning) 15%, transparent)', color: 'var(--warning)', borderRadius: '4px', marginBottom: '12px' }}>
                   ${RUN_INSPECTOR_LABELS.presetFileDriftError}
                   <div style=${{ marginTop: '4px', fontSize: '11px', opacity: 0.85 }}>
                     ${RUN_INSPECTOR_LABELS.presetFileDriftReason}: ${presetData.drift.drift_error}
@@ -700,7 +700,7 @@ export function RunInspector({ run, onClose }) {
                 </div>
               `}
               ${presetData.drift && !presetData.drift.deleted && presetData.drift.has_drift && html`
-                <div style=${{ padding: '8px', background: 'color-mix(in srgb, #f59e0b 15%, transparent)', color: '#f59e0b', borderRadius: '4px', marginBottom: '12px' }}>
+                <div style=${{ padding: '8px', background: 'color-mix(in srgb, var(--warning) 15%, transparent)', color: 'var(--warning)', borderRadius: '4px', marginBottom: '12px' }}>
                   ${RUN_INSPECTOR_LABELS.presetDrift}
                   ${presetData.drift.changed_fields?.length > 0 && html`
                     <div style=${{ marginTop: '4px' }}>
@@ -714,7 +714,7 @@ export function RunInspector({ run, onClose }) {
                         ${presetData.drift.changed_files.map((f, i) => html`
                           <li key=${i}>
                             <code style=${{ marginRight: '6px' }}>${f.path}</code>
-                            <span style=${{ color: f.status === 'deleted' ? 'var(--status-failed)' : f.status === 'added' ? 'var(--success)' : '#f59e0b' }}>
+                            <span style=${{ color: f.status === 'deleted' ? 'var(--status-failed)' : f.status === 'added' ? 'var(--success)' : 'var(--warning)' }}>
                               ${statusLabel(PRESET_FILE_STATUS_LABELS, f.status)}
                             </span>
                           </li>
@@ -730,7 +730,7 @@ export function RunInspector({ run, onClose }) {
                 </div>
               `}
               ${presetData.mcp_template_drift && presetData.mcp_template_drift.modified_count > 0 && html`
-                <div style=${{ padding: '8px', background: 'color-mix(in srgb, #f59e0b 15%, transparent)', color: '#f59e0b', borderRadius: '4px', marginBottom: '12px' }}>
+                <div style=${{ padding: '8px', background: 'color-mix(in srgb, var(--warning) 15%, transparent)', color: 'var(--warning)', borderRadius: '4px', marginBottom: '12px' }}>
                   ⚠ MCP 템플릿 ${presetData.mcp_template_drift.modified_count}개가 ${RUN_INSPECTOR_LABELS.mcpDriftIntro}
                   <div style=${{ marginTop: '4px', fontSize: '11px' }}>
                     ${RUN_INSPECTOR_LABELS.mcpDriftDetail}

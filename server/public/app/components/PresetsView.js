@@ -276,15 +276,15 @@ export function PresetsView() {
         <div style=${{
           display: 'flex', alignItems: 'flex-start', gap: '8px',
           padding: '8px 12px',
-          background: 'color-mix(in srgb, #f59e0b 12%, transparent)',
-          border: '1px solid color-mix(in srgb, #f59e0b 40%, transparent)',
+          background: 'color-mix(in srgb, var(--warning) 12%, transparent)',
+          border: '1px solid color-mix(in srgb, var(--warning) 40%, transparent)',
           borderRadius: '6px',
           marginBottom: '12px',
           fontSize: '12px',
         }}>
-          <span style=${{ color: '#f59e0b', flexShrink: 0 }} title="잘못된 plugin.json 감지됨">⚠</span>
+          <span style=${{ color: 'var(--warning)', flexShrink: 0 }} title="잘못된 plugin.json 감지됨">⚠</span>
           <div>
-            <span style=${{ color: '#f59e0b', fontWeight: 600 }}>
+            <span style=${{ color: 'var(--warning)', fontWeight: 600 }}>
               ${pluginWarnings.length}${PRESETS_LABELS.pluginWarningsCountSuffix}
             </span>
             <ul style=${{ margin: '4px 0 0 0', paddingLeft: '16px', color: 'var(--text-secondary)' }}>

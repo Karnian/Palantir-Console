@@ -555,7 +555,7 @@ function MyPacksView({ projects }) {
         const BUDGET = 4000;
         const totalTokens = filteredPacks.reduce((s, p) => s + (p.estimated_tokens || 0), 0);
         const pct = Math.min(100, (totalTokens / BUDGET) * 100);
-        const color = pct > 90 ? 'var(--status-failed)' : pct > 70 ? '#f59e0b' : 'var(--success)';
+        const color = pct > 90 ? 'var(--status-failed)' : pct > 70 ? 'var(--warning)' : 'var(--success)';
         return html`
           <div class="skill-budget-overview">
             <div class="skill-budget-header">

@@ -209,7 +209,7 @@ export function MentionInput({ projects = [], inputRef: forwardedRef, onInput, o
             >
               <span
                 class="mention-color-dot"
-                style="display:inline-block;width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${p.color || '#3b82f6'};"
+                style="display:inline-block;width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${p.color || 'var(--info)'};"
               ></span>
               <span style="overflow:hidden;text-overflow:ellipsis;">
                 <span style="opacity:.6;margin-right:2px;">@</span>${p.name}
