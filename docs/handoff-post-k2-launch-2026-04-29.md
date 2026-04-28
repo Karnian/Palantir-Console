@@ -69,7 +69,7 @@
 
 4. **WCAG AA 자동 검증** — axe-core / pa11y CI 도입. 현재 contrast 는 Codex 측정으로 검증 (light 기준 status/priority/accent 모두 ≥4.5:1). 자동화는 별도 phase.
 
-5. **K-2 brief 업데이트** — 라이트 모드 launch 후 새 surface (예: 미래 새 컴포넌트) 가 라이트 토큰 미정의 시 회귀 위험. 새 surface 추가 시 양쪽 (`[data-theme="light"]` + `@media :root:not([data-theme])`) 모두 lock-step 갱신 가드 필요.
+5. ~~**K-2 brief 업데이트**~~ — K-3β PR #160 에서 종결. `boot.smoke.test.js` 의 새 테스트 `tokens.css light blocks lock-step (explicit override === system @media)` 가 두 light 블록 (`[data-theme="light"]` + `@media prefers-color-scheme:light :root:not([data-theme])`) 의 token key set + value 일치를 자동 검증. 한 쪽에만 추가하면 빌드 fail. CLAUDE.md / AGENT.md 의 K-2 lock-step 항목도 "테스트가 막는 계약" 으로 stamp.
 
 ## 6. 알려진 함정 / 회귀 주의점
 
