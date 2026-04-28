@@ -241,7 +241,7 @@ body {
   background: var(--bg-elevated);
   color: var(--text-secondary);
   padding: 6px 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 11px;
   letter-spacing: 0.02em;
   cursor: pointer;
@@ -324,7 +324,7 @@ body {
   align-items: center;
   gap: 6px;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 11px;
   letter-spacing: 0.02em;
   font-family: var(--font-mono);
@@ -527,7 +527,7 @@ body {
   appearance: none;
   width: 34px;
   height: 18px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--border-hover);
   background: var(--bg-base);
   position: relative;
@@ -705,7 +705,7 @@ body {
 .badge {
   display: inline-flex;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 11px;
   letter-spacing: 0.02em;
   font-family: var(--font-mono);
@@ -1016,7 +1016,7 @@ body {
   font-size: 11px;
   letter-spacing: 0.02em;
   padding: 4px 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   cursor: pointer;
   align-self: flex-start;
   transition: border-color 0.15s ease, color 0.15s ease;
@@ -1387,7 +1387,7 @@ body {
     top: max(8px, env(safe-area-inset-top, 0px));
     right: max(10px, env(safe-area-inset-right, 0px));
     padding: 4px 8px;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: var(--bg-elevated);
     border: 1px solid var(--border);
     z-index: 101;
@@ -1895,7 +1895,7 @@ body {
   color: var(--text-muted);
   background: rgba(255, 255, 255, 0.06);
   padding: 2px 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 
 .column-cards {
@@ -1949,7 +1949,7 @@ body {
   align-items: center;
   gap: 4px;
   padding: 1px 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 10px;
   letter-spacing: 0.02em;
 }
@@ -2233,7 +2233,7 @@ body {
   color: var(--text-muted);
   background: var(--bg-elevated);
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 0 6px;
   line-height: 14px;
 }
@@ -4835,7 +4835,7 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   align-items: center;
   gap: 6px;
   padding: 6px 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--border);
   background: var(--bg-base);
   color: var(--text-primary);
@@ -5117,7 +5117,7 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .drift-drawer-count {
   background: #ef4444;
   color: #fff;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 1px 8px;
   font-size: 11px;
   font-weight: 700;

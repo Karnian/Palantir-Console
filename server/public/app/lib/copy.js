@@ -427,6 +427,40 @@ export const MANAGER_CHAT_AUX = {
   remediationTryAfter: ' 해 보세요. 문제가 지속되면 서버를 재시작해 최신 코드를 반영하세요.',
 };
 
+// CommandPalette (Cmd+K) — overlay chrome + filter input + empty state.
+// Toast / loading copy from `app/lib/hooks/*.js` and `app/lib/toast.js`
+// is grouped under TOAST_LABELS for the same reason the other surfaces
+// have group lookups: a single source for "Failed to load X" patterns
+// keeps wording consistent across loaders.
+export const COMMAND_PALETTE_LABELS = {
+  ariaLabel: '명령 팔레트',
+  filterAriaLabel: '뷰 필터',
+  placeholderPrefix: '이동...',
+  placeholderShortcutSuffix: '(1-{n} 키로 빠른 이동)',
+  empty: '일치하는 뷰가 없습니다',
+};
+
+// Hook-side toasts (loaders + manager start/stop). The
+// `Failed to load X` template stays a parameterized prefix so call
+// sites can append `: ${err.message || 'unknown'}` for diagnostics.
+// `unknown` is intentionally English — it appears verbatim in
+// developer console / server logs and changing it would mask the
+// original raw error text.
+export const TOAST_LABELS = {
+  loadFailedTasks: '작업을 불러오지 못했습니다',
+  loadFailedRuns: '실행을 불러오지 못했습니다',
+  loadFailedProjects: '프로젝트를 불러오지 못했습니다',
+  loadFailedAgents: '에이전트를 불러오지 못했습니다',
+  // Synthetic fallback used only when `err.message` is empty/undefined.
+  // Raw server messages still pass through unchanged (`${prefix}: ${err.message}`),
+  // so this only surfaces when the error itself has no message at all.
+  errorFallback: '알 수 없는 오류',
+  managerStarted: '매니저 세션을 시작했습니다',
+  managerStopped: '매니저 세션을 중지했습니다',
+  managerStartFailed: '매니저를 시작하지 못했습니다',
+  managerStopFailed: '매니저를 중지하지 못했습니다',
+};
+
 // DashboardView (Attention Dashboard) — page chrome + stats bar + drift
 // chip + triage feed + active Claude sessions strip. Triage row meta
 // strings read as `'${prefix} · ${timeAgo}'` (e.g. `'실행 중 · 5분 전'`);

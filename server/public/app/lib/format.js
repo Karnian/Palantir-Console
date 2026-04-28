@@ -16,11 +16,26 @@
 // inputs without re-rolling the parser. `formatTs` in McpTemplatesView
 // used to inline a copy of this logic and broke on ISO Z input —
 // callers should reuse this helper.
+//
+// Server timestamp contract (Phase Post-K Cleanup, 2026-04-28):
+//   - Numeric inputs are unambiguous epoch ms.
+//   - String inputs without an explicit timezone marker (`Z` or `±HH:MM`)
+//     are treated as UTC. This covers two server-produced shapes:
+//       1. SQLite `YYYY-MM-DD HH:MM:SS` (no T, no zone — server writes UTC).
+//       2. Zone-less ISO `YYYY-MM-DDTHH:MM:SS` (rare, but happens when a
+//          timestamp round-trips through code that strips the zone).
+//   - Strings with explicit zones (`...Z`, `...+09:00`, `...-0530`) parse
+//     directly via `new Date(...)` and respect the embedded offset.
+//   The earlier `/[TZ]/` test treated zone-less ISO as local time,
+//   skewing logs by the runner's TZ offset (Codex K-low-3 r3 NIT).
 export function parseDate(value) {
   if (typeof value !== 'string') return new Date(value);
-  if (/[TZ]/.test(value) || /[+-]\d\d:?\d\d$/.test(value)) {
+  // Explicit zone — let `Date` honor the offset.
+  if (/Z$/.test(value) || /[+-]\d\d:?\d\d$/.test(value)) {
     return new Date(value);
   }
+  // No zone — assume UTC. Normalize `YYYY-MM-DD HH:MM:SS` → ISO and
+  // append `Z` so `Date` doesn't drift by the local offset.
   return new Date(value.replace(' ', 'T') + 'Z');
 }
 

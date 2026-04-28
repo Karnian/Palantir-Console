@@ -8,6 +8,7 @@ const html = htm.bind(h);
 
 import { NAV_ITEMS } from '../lib/nav.js';
 import { navigate, useEscape } from '../lib/hooks.js';
+import { COMMAND_PALETTE_LABELS } from '../lib/copy.js';
 
 const FOCUSABLE_SEL = [
   'a[href]',
@@ -106,15 +107,15 @@ export function CommandPalette({ open, onClose }) {
         class="command-palette"
         role="dialog"
         aria-modal="true"
-        aria-label="Command palette"
+        aria-label=${COMMAND_PALETTE_LABELS.ariaLabel}
         tabindex="-1"
         onClick=${e => e.stopPropagation()}
       >
         <input
           ref=${inputRef}
           class="command-palette-input"
-          placeholder="Navigate to... (1-${NAV_ITEMS.length} to jump)"
-          aria-label="Filter views"
+          placeholder=${`${COMMAND_PALETTE_LABELS.placeholderPrefix} ${COMMAND_PALETTE_LABELS.placeholderShortcutSuffix.replace('{n}', NAV_ITEMS.length)}`}
+          aria-label=${COMMAND_PALETTE_LABELS.filterAriaLabel}
           value=${query}
           onInput=${e => setQuery(e.target.value)}
           onKeyDown=${handleKeyDown}
@@ -132,7 +133,7 @@ export function CommandPalette({ open, onClose }) {
             </button>
           `)}
           ${items.length === 0 && html`
-            <div class="command-palette-empty">No matching views</div>
+            <div class="command-palette-empty">${COMMAND_PALETTE_LABELS.empty}</div>
           `}
         </div>
       </div>
