@@ -208,6 +208,89 @@ test('boot: styles/tokens.css defines a [data-theme="light"] override block', as
   );
 });
 
+test('boot: tokens.css light blocks lock-step (explicit override === system @media)', async (t) => {
+  const app = await createTestApp(t);
+  const res = await request(app).get('/styles/tokens.css');
+  // K-3β (2026-04-29): tokens.css emits TWO light-mode token blocks
+  // (CSS can't share a selector across an @media boundary):
+  //   1. `:root[data-theme="light"]`        — explicit user toggle
+  //   2. `@media (prefers-color-scheme: light) { :root:not([data-theme]) }`
+  //                                          — system OS auto-detect
+  //
+  // K-2 lock-step rule (CLAUDE.md Things to Watch Out For):
+  // both blocks MUST define the same token keys with the same values
+  // or the explicit-toggle and system-default themes silently diverge.
+  // This test enforces the contract automatically — adding a new
+  // semantic color token without updating BOTH blocks fails the build.
+  //
+  // Alias-only tokens (e.g. `--field-bg: var(--bg-base)`) intentionally
+  // live in `:root` only — they propagate via their underlying base
+  // when the base swaps, so they're outside this contract. The check
+  // only compares keys actually emitted inside the two light blocks.
+  const css = res.text.replace(/\/\*[\s\S]*?\*\//g, '');
+
+  function extractBlock(source, anchorRegex) {
+    const m = anchorRegex.exec(source);
+    if (!m) return null;
+    let i = m.index + m[0].length;
+    while (i < source.length && source[i] !== '{') i++;
+    if (i >= source.length) return null;
+    const start = i + 1;
+    let depth = 1;
+    i++;
+    while (i < source.length && depth > 0) {
+      if (source[i] === '{') depth++;
+      else if (source[i] === '}') depth--;
+      i++;
+    }
+    return depth === 0 ? source.slice(start, i - 1) : null;
+  }
+
+  const explicitBody = extractBlock(css, /:root\[data-theme="light"\]/);
+  assert.ok(explicitBody, ':root[data-theme="light"] block must exist');
+
+  const mediaBody = extractBlock(css, /@media\s*\(prefers-color-scheme:\s*light\)/);
+  assert.ok(mediaBody, '@media (prefers-color-scheme: light) block must exist');
+  const mediaInnerBody = extractBlock(mediaBody, /:root:not\(\[data-theme\]\)/);
+  assert.ok(mediaInnerBody, ':root:not([data-theme]) inside @media block must exist');
+
+  function parseTokens(body) {
+    const tokens = new Map();
+    const pattern = /(--[a-z][a-z0-9-]*)\s*:\s*([^;]+);/g;
+    let m;
+    while ((m = pattern.exec(body)) !== null) {
+      tokens.set(m[1], m[2].trim().replace(/\s+/g, ' '));
+    }
+    return tokens;
+  }
+
+  const explicit = parseTokens(explicitBody);
+  const media = parseTokens(mediaInnerBody);
+  const explicitKeys = [...explicit.keys()].sort();
+  const mediaKeys = [...media.keys()].sort();
+
+  const onlyInExplicit = explicitKeys.filter(k => !media.has(k));
+  const onlyInMedia = mediaKeys.filter(k => !explicit.has(k));
+  assert.deepStrictEqual(
+    mediaKeys,
+    explicitKeys,
+    `Light-mode token key sets diverge.\n` +
+    `  Only in [data-theme="light"]: ${onlyInExplicit.join(', ') || '(none)'}\n` +
+    `  Only in @media prefers-color-scheme:light: ${onlyInMedia.join(', ') || '(none)'}\n` +
+    `Add the missing tokens to BOTH blocks (K-2 lock-step contract).`
+  );
+  for (const key of explicitKeys) {
+    assert.strictEqual(
+      media.get(key),
+      explicit.get(key),
+      `Token ${key} value diverges between light blocks.\n` +
+      `  [data-theme="light"]: "${explicit.get(key)}"\n` +
+      `  @media prefers-color-scheme:light: "${media.get(key)}"\n` +
+      `Both blocks must hold the same value (K-2 lock-step contract).`
+    );
+  }
+});
+
 test('boot: styles/tokens.css defines the Theme Contract α semantic tokens', async (t) => {
   const app = await createTestApp(t);
   const res = await request(app).get('/styles/tokens.css');
