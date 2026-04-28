@@ -194,7 +194,7 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
           </div>
         `}
       </div>
-      <div class="triage-feed">
+      <div class="triage-feed" tabindex="0" role="region" aria-label="Triage feed">
         ${triageItems.length === 0 && html`
           <${EmptyState}
             icon="\u2726"

@@ -78,6 +78,12 @@
    * "task completed" success chrome can be tuned independently across
    * dark / light themes. */
   --status-active-bright: #22c55e;
+  /* Phase K-4 (2026-04-29): badge-foreground variant of --priority-high
+   * for contexts where the canonical hue (amber-500 dark / amber-700
+   * light) sits on a low-alpha amber tint and fails axe color-contrast
+   * for body text (~3:1 vs ≥4.5 required). amber-300 dark gives ≈8:1
+   * on dark base; amber-800 light gives ≈6:1 on light base. */
+  --priority-high-fg: #fcd34d;
 
   /* Priority */
   --priority-low: #6b7280;
@@ -282,6 +288,13 @@
    * an 8px Dropdown dot — graphical 3:1 still holds. Dark emerald-500
    * #22c55e drops to 2.0:1 on light, so a darker hue is required. */
   --status-active-bright: #15803d;
+  /* K-4 priority-high-fg light variant — amber-800 #92400e on
+   * `rgba(245,158,11,0.12)` over `--bg-base #fafafa` composites to
+   * ≈5.6:1 (axe color-contrast PASS). amber-700 (`--priority-high`
+   * canonical) is also ~AA but the badge tint shifts the effective
+   * background lighter, so we keep the darker amber-800 just for the
+   * badge fg. */
+  --priority-high-fg: #92400e;
 
   /* Priority — same shift as status colors. */
   --priority-low: #52525b;
@@ -370,6 +383,7 @@
     --status-failed: #b91c1c;
     --status-queued: #52525b;
     --status-active-bright: #15803d;
+    --priority-high-fg: #92400e;
     --priority-low: #52525b;
     --priority-medium: #1d4ed8;
     --priority-high: #b45309;

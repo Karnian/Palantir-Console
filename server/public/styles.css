@@ -2024,8 +2024,13 @@ body {
 }
 
 .task-badge.priority-high {
+  /* K-4 (2026-04-29): the canonical `--priority-high` (amber-500 dark /
+     amber-700 light) is too low contrast on a 12% amber tint background
+     for axe `color-contrast` on body text. Use a brighter dark hue and
+     darker light hue exclusively for badge fg. Hue cue is preserved by
+     the bg/border tint. */
   background: rgba(245, 158, 11, 0.12);
-  color: var(--priority-high);
+  color: var(--priority-high-fg);
   border: 1px solid rgba(245, 158, 11, 0.25);
 }
 

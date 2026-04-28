@@ -446,8 +446,10 @@ PATCH  /api/runs/:id/skill-packs/checks — 팩 체크 업데이트
 ## 개발
 
 ```bash
-npm test     # 전체 테스트
-npm run dev  # 개발 서버
+npm test          # 전체 테스트 (901 unit/integration)
+npm run test:e2e  # Playwright e2e (smoke + manager + a11y)
+npm run test:a11y # axe-core a11y 전용 (K-4, 32 시나리오 — 8 routes × 2 themes × 2 viewports)
+npm run dev       # 개발 서버
 ```
 
 데이터는 `palantir.db` (SQLite) 에 저장된다. 서버 시작 시 `server/db/migrations/001..021_*.sql` 자동 마이그레이션 (최근 추가: `020_mcp_template_updated_at.sql`, `021_skill_pack_origin_type_check.sql`).
