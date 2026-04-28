@@ -131,9 +131,14 @@
    * `*-bg-subtle` / `*-border-subtle` pair mirrors `color-mix(... 8%,
    * transparent)` / `color-mix(... 40%, var(--border))` patterns
    * already in use across attention-strip / preset cards / drift
-   * banners. `--focus-ring` / `--field-bg` / `--surface-hover` collect
-   * three more recurring values that are scattered as inline accent
-   * rgba / bg-elevated / bg-hover today. */
+   * banners. `--focus-ring` / `--field-bg` collect two more recurring
+   * values: focus ring shadow (inline accent rgba) and form field
+   * background. `--surface-hover` was originally introduced as a third
+   * but removed in K-3α — its only natural consumers (`.dropdown-item`
+   * + ~5 other hover surfaces) had subtly different "hover" semantics
+   * (selection vs row-highlight vs interactive-affordance), so a single
+   * alias would have broadened token meaning. Re-introduce only with a
+   * concrete, single-meaning consumer in mind. */
   --warning-bg-subtle: color-mix(in srgb, var(--warning) 8%, transparent);
   --warning-border-subtle: color-mix(in srgb, var(--warning) 40%, var(--border));
   /* Codex r1 finding: existing failed surfaces use `--status-failed`
@@ -152,8 +157,14 @@
    * Stronger accent (e.g. 60%) is reserved for `outline` use cases
    * where the outline doesn't blend with backgrounds. */
   --focus-ring: 0 0 0 2px var(--accent-muted);
-  --field-bg: var(--bg-elevated);
-  --surface-hover: var(--bg-hover);
+  /* K-3α (2026-04-29): alias points to `--bg-base`, NOT `--bg-elevated`.
+   * The α phase initial mapping was a guess that diverged from the real
+   * form input chrome (`.form-input/.form-textarea/.form-select` use
+   * `--bg-base`). Redefining as alias-only over `--bg-base` keeps light
+   * theme propagation automatic — no `:root[data-theme="light"]` /
+   * `@media prefers-color-scheme: light` override needed because the
+   * underlying base swaps in those blocks. */
+  --field-bg: var(--bg-base);
   /* Scrollbar thumb — currently inline `rgba(255,255,255,0.15)` /
    * `0.25` across `::-webkit-scrollbar-thumb` rules. Light launch
    * needs these flipped to dark-on-light, so they get their own
