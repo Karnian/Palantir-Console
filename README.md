@@ -430,7 +430,7 @@ hashes. Deleting a preset later does not erase past snapshot rows;
 - **Worker agents**: tmux session + git worktree isolation
 - **Manager agents**: Claude Code CLI (stream-json NDJSON) OR Codex CLI (`codex exec --json` + thread resume), selected per agent profile
 - **Real-time**: SSE (Server-Sent Events) with `Last-Event-ID` replay
-- **Tests**: Node.js built-in test runner + supertest + Playwright e2e (900 tests at PR #156, 2026-04-29)
+- **Tests**: Node.js built-in test runner + supertest + Playwright e2e (901 tests at PR #160, 2026-04-29)
 
 ## Development
 
