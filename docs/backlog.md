@@ -1,9 +1,9 @@
 # Palantir Console Backlog
 
-> Last updated: 2026-04-28 (post PR #153 — K-2 라이트 모드 launch 완료)
+> Last updated: 2026-04-29 (post PR #153 — K-2 라이트 모드 launch 완료, post-K2 handoff stamp)
 >
 > 이 문서는 *현재 시점에서* 남은 작업들을 카테고리별로 정리한다.
-> 완료된 작업은 [handoff-post-scenario-review.md](./handoff-post-scenario-review.md) 및 각 spec 문서의 Implementation Log를 본다.
+> 완료된 작업의 한 화면 요약 + 새 세션 재입장 prompt 는 [`handoff-post-k2-launch-2026-04-29.md`](./handoff-post-k2-launch-2026-04-29.md) 를 본다 (UI/UX cleanup + K-2 launch 시리즈). 그 이전 시리즈 (M1/M2/B3 + R1/R3/R4) 는 [`handoff-post-scenario-review.md`](./handoff-post-scenario-review.md) 에 있다.
 
 ## 카테고리 정의
 
