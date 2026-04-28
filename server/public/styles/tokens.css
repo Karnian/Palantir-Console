@@ -158,3 +158,121 @@
   --surface-3: var(--bg-hover);
   --status-warning: var(--warning);
 }
+
+/*
+ * Phase K-2a (2026-04-28): light theme palette.
+ *
+ * Selector contract (Codex K-2 r1 권장):
+ *   - `:root`                          = dark default (위 블록).
+ *   - `:root[data-theme="light"]`      = explicit light override.
+ *   - `@media (prefers-color-scheme: light) { :root:not([data-theme]) {...} }`
+ *                                      = system default (K-2d 에서 활성화).
+ *
+ * 본 phase 는 `[data-theme="light"]` 블록만 추가 — `color-scheme: dark`
+ * 단정은 유지하고 system-default media query 도 미추가. 즉 사용자가
+ * 명시적으로 `<html data-theme="light">` 설정해야만 light 가 적용됨.
+ * K-2d 에서 system 자동 감지 + toggle UI 가 활성화될 때 진짜 launch.
+ *
+ * WCAG AA 의미 토큰 분리 (Codex K-2 r1 BLOCK):
+ *   다크 status 색이 light 배경 위에서 본문 4.5:1 미달 (예: --warning
+ *   #f59e0b on white = 2.06:1). 본 블록의 light 값은 한 단계 진한
+ *   variant (예: #b45309) 로 swap 해서 AA 만족.
+ *
+ * `--*-bg-subtle` / `--*-border-subtle` 같은 의미 토큰은 위 단계에서
+ * `color-mix(var(--X) ...)` 형태라 토큰 자체 정의가 변하지 않음 — 자식
+ * 변수 swap 만으로 자동 light blend 됨.
+ */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  /* Backgrounds — flip dark layering: light gray-on-white. */
+  --bg-base: #fafafa;
+  --bg-surface: #ffffff;
+  --bg-elevated: #f4f4f5;
+  --bg-hover: #e4e4e7;
+  /* Modal backdrop — slightly stronger than the conservative 0.4
+   * Codex r1 review noted (light modal panel separation of `2.96:1`),
+   * so light-mode overlays read decisively even without backdrop blur. */
+  --bg-overlay: rgba(0, 0, 0, 0.45);
+  --bg-tertiary: var(--bg-elevated);
+
+  /* Text hierarchy — black-on-light.
+   *
+   * `--text-muted` is darker than the obvious `#71717a` zinc-500 so it
+   * passes AA on `--bg-elevated #f4f4f5` (`4.5:1`) and `--bg-hover
+   * #e4e4e7`, where muted text appears in cards / hovered rows.
+   * (Codex K-2a r1 finding — a lighter muted hue failed elevated-bg
+   * contrast.) */
+  --text-primary: #18181b;
+  --text-secondary: #52525b;
+  --text-muted: #5f5f68;
+  --text-inverse: #fafafa;
+
+  /* Accent — darker indigo so 4.5:1 vs --bg-surface holds.
+   *
+   * `--accent-light` defaults to the same `--accent` darker variant in
+   * light mode. Badge surfaces render `--accent-light` text on top of
+   * `--accent-muted` fill, and the dark-mode `#a78bfa` light hue would
+   * fail that composite at AA (Codex K-2a r1 finding). Rather than
+   * introduce a fourth accent variant, alias to `--accent` so badge
+   * text stays the same darker indigo as buttons.
+   *
+   * `--accent-muted` keeps its 12% chip fill role; `--focus-ring` no
+   * longer reuses it because alpha 12% over light bg composites to
+   * 1.21:1 (invisible focus). Light `--focus-ring` is a stronger
+   * `var(--accent)` ring instead — see the override below the
+   * accent-* block. */
+  --accent: #6d28d9;
+  --accent-hover: #5b21b6;
+  --accent-light: var(--accent);
+  --accent-muted: rgba(109, 40, 217, 0.12);
+  --accent-border: rgba(109, 40, 217, 0.4);
+
+  /* Borders — invert white-on-dark to black-on-light. */
+  --border: rgba(0, 0, 0, 0.08);
+  --border-hover: rgba(0, 0, 0, 0.16);
+  --border-active: rgba(109, 40, 217, 0.5);
+
+  /* Semantic colors — AA-satisfying variants for light backgrounds. */
+  --danger: #be123c;
+  --success: #047857;
+  --warning: #b45309;
+  --info: #1d4ed8;
+
+  /* Status colors — match the AA shifted hues so timestamp/triage
+   * surfaces stay legible. `--status-running` shares `--info`,
+   * `--status-done` shares `--success`, etc. */
+  --status-running: #1d4ed8;
+  --status-needs-input: #b45309;
+  --status-review: #6d28d9;
+  --status-done: #047857;
+  --status-failed: #b91c1c;
+  --status-queued: #52525b;
+
+  /* Priority — same shift as status colors. */
+  --priority-low: #52525b;
+  --priority-medium: #1d4ed8;
+  --priority-high: #b45309;
+  --priority-critical: #b91c1c;
+
+  /* Focus ring — light override.
+   *
+   * Dark mode reuses `--accent-muted` 15% which is visible against
+   * #09090b. In light mode the same alpha 12% composites to ~1.21:1
+   * vs `#fafafa` — effectively invisible (Codex K-2a r1 finding).
+   * Use the full `--accent` instead so focus stays clearly traceable.
+   * Box-shadow shape kept identical so call sites don't change. */
+  --focus-ring: 0 0 0 2px var(--accent);
+
+  /* Scrollbar — invert alpha sign so thumb is dark-on-light. */
+  --scrollbar-thumb: rgba(0, 0, 0, 0.15);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.25);
+
+  /* Drift-rescue aliases — recompute with the new base. */
+  --bg: var(--bg-base);
+  --fg: var(--text-primary);
+  --muted: var(--text-muted);
+  --surface-2: var(--bg-elevated);
+  --surface-3: var(--bg-hover);
+  --status-warning: var(--warning);
+}

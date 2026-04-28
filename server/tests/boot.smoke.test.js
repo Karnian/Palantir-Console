@@ -130,6 +130,26 @@ test('boot: styles/tokens.css defines the core design tokens', async (t) => {
   }
 });
 
+test('boot: styles/tokens.css defines a [data-theme="light"] override block', async (t) => {
+  const app = await createTestApp(t);
+  const res = await request(app).get('/styles/tokens.css');
+  // Phase K-2a (2026-04-28): light palette is opt-in via
+  // `<html data-theme="light">`. The selector + at least one
+  // surface token (`--bg-base`) inside the override block prove the
+  // light branch was emitted; activation (system prefers-color +
+  // toggle UI) lands in K-2c/K-2d.
+  assert.match(res.text, /:root\[data-theme="light"\]\s*\{/,
+    '[data-theme="light"] block emitted');
+  // Inside the override block the bg-base should swap to a light value
+  // (we don't pin the exact hex; we only check that some near-white
+  // value follows the selector).
+  assert.match(
+    res.text,
+    /:root\[data-theme="light"\][\s\S]*--bg-base:\s*#fafafa/,
+    '--bg-base flipped to light hex inside the override block',
+  );
+});
+
 test('boot: styles/tokens.css defines the Theme Contract α semantic tokens', async (t) => {
   const app = await createTestApp(t);
   const res = await request(app).get('/styles/tokens.css');
