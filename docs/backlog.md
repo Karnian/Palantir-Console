@@ -18,7 +18,15 @@
 
 ## Ready
 
-UI/UX cleanup follow-up 시리즈 + K-2 라이트 모드 launch + post-launch fixups + K-3 cleanup batch 가 2026-04-26 ~ 2026-04-29 세션에 걸쳐 모두 완료되어 현재 비어있음.
+### Phase K-4 — WCAG AA a11y 자동 검증 (DRAFT — spec lock-in 후 구현 진입)
+- **Spec brief**: `docs/specs/k4-wcag-a11y-automation-brief.md` (PR #162 lock-in)
+- **Trigger**: 본 brief 의 PR-2 (axe-core e2e 통합) 진입.
+- **Why**: K-3β token lock-step 가드와 직교 — runtime 의 실제 contrast / label / ARIA / focus 회귀를 자동 차단.
+- **사이즈 추정**: M~L. PR-2 단일 구현.
+
+---
+
+UI/UX cleanup follow-up 시리즈 + K-2 라이트 모드 launch + post-launch fixups + K-3 cleanup batch 가 2026-04-26 ~ 2026-04-29 세션에 걸쳐 모두 완료되어 현재 비어있음 (K-4 spec lock-in 진행 중).
 
 진행 stamp 는 다음 brief 들의 진행 기록을 본다:
 - `docs/specs/ui-ux-cleanup-followup-2026-04-26.md` §7 — Phase F~K-1a (#130~#135).
