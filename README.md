@@ -435,8 +435,10 @@ hashes. Deleting a preset later does not erase past snapshot rows;
 ## Development
 
 ```bash
-npm test     # run tests
-npm run dev  # dev server
+npm test          # run tests (901 unit/integration)
+npm run test:e2e  # Playwright e2e (smoke + manager + a11y)
+npm run test:a11y # axe-core a11y only (K-4, 32 scenarios — 8 routes × 2 themes × 2 viewports)
+npm run dev       # dev server
 ```
 
 Data is stored in `palantir.db` (SQLite). Auto-migrated on server start (`server/db/migrations/001..021_*.sql`; the latest two are `020_mcp_template_updated_at.sql` and `021_skill_pack_origin_type_check.sql`).

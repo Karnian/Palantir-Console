@@ -9,6 +9,7 @@
     "start": "node server/index.js",
     "test": "node --test",
     "test:e2e": "npx playwright test",
+    "test:a11y": "npx playwright test --grep @a11y",
     "diagnose:mcp": "node scripts/diagnose-mcp-conflicts.mjs"
   },
   "keywords": [],
@@ -21,7 +22,9 @@
     "fast-glob": "^3.3.3"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.11.2",
     "@playwright/test": "^1.59.1",
+    "axe-core": "^4.11.3",
     "jsdom": "^29.0.2",
     "supertest": "^7.0.0"
   }
