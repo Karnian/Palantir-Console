@@ -20,10 +20,32 @@
 // localStorage failures (private mode, disabled storage) are
 // silently ignored — the user still sees the dark default.
 (function () {
+  // K-2d (Codex r1 P2): mobile browser chrome color also tracks the
+  // active theme. The two media-scoped <meta name="theme-color"> tags
+  // in index.html only follow the OS preference; explicit toggle
+  // wouldn't update them and the user would see e.g. dark CSS with
+  // light mobile chrome on a light-OS device. We patch the active
+  // value here on first paint when an explicit override is loaded.
+  function applyThemeColor(mode) {
+    var color = mode === 'light' ? '#fafafa' : '#09090b';
+    var nodes = document.querySelectorAll('meta[name="theme-color"]');
+    if (!nodes || nodes.length === 0) return;
+    // Replace the two media-scoped tags with a single unscoped one
+    // so neither the dark nor light media query overrides the
+    // explicit choice. Removing media beats setContent because Safari
+    // ignores theme-color on a tag whose media doesn't match.
+    for (var i = nodes.length - 1; i >= 0; i--) nodes[i].parentNode.removeChild(nodes[i]);
+    var meta = document.createElement('meta');
+    meta.setAttribute('name', 'theme-color');
+    meta.setAttribute('content', color);
+    document.head.appendChild(meta);
+  }
+
   try {
     var v = window.localStorage && window.localStorage.getItem('palantir.theme');
     if (v === 'light' || v === 'dark') {
       document.documentElement.setAttribute('data-theme', v);
+      applyThemeColor(v);
     }
   } catch (e) {
     /* localStorage unavailable — leave default theme */

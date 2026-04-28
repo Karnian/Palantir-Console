@@ -166,6 +166,28 @@ test('boot: styles/tokens.css defines the core design tokens', async (t) => {
   }
 });
 
+test('boot: styles/tokens.css defines the K-2d cascade contract', async (t) => {
+  const app = await createTestApp(t);
+  const res = await request(app).get('/styles/tokens.css');
+  // Phase K-2d (2026-04-28): full theme cascade — three selectors in
+  // addition to the dark default.
+  //
+  // Codex K-2d r1 P2: strip /* ... */ comments before regex match so
+  // a documentation comment containing the same selectors can't
+  // false-positive the gate. Keep the rest of the source for line
+  // counting / content asserts.
+  const cssOnly = res.text.replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.match(cssOnly, /color-scheme:\s*light\s+dark/,
+    'color-scheme: light dark advertised (real declaration, not a comment)');
+  assert.match(
+    cssOnly,
+    /@media\s*\(prefers-color-scheme:\s*light\)\s*\{\s*:root:not\(\[data-theme\]\)/,
+    'prefers-color-scheme: light media with :root:not([data-theme])',
+  );
+  assert.match(cssOnly, /:root\[data-theme="dark"\]\s*\{/,
+    ':root[data-theme="dark"] override block (real declaration)');
+});
+
 test('boot: styles/tokens.css defines a [data-theme="light"] override block', async (t) => {
   const app = await createTestApp(t);
   const res = await request(app).get('/styles/tokens.css');

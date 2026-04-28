@@ -69,6 +69,37 @@ function AttentionBadge({ count, onClick }) {
 // `<html>` is the single source the CSS selector contract checks.
 const THEME_CYCLE = ['system', 'light', 'dark'];
 const THEME_ICONS = { system: '◑', light: '☀', dark: '☽' };
+function applyThemeColorMeta(mode) {
+  // K-2d (Codex r1 P2): keep `<meta name="theme-color">` in sync with
+  // the active theme so mobile chrome doesn't disagree with the
+  // toggle. `system` restores the original media-scoped pair so the
+  // OS pref drives chrome color again; `light` / `dark` collapse to
+  // a single unscoped tag with the matching color.
+  const headEl = document.head;
+  if (!headEl) return;
+  const existing = headEl.querySelectorAll('meta[name="theme-color"]');
+  for (let i = existing.length - 1; i >= 0; i--) {
+    headEl.removeChild(existing[i]);
+  }
+  if (mode === 'system') {
+    const dark = document.createElement('meta');
+    dark.setAttribute('name', 'theme-color');
+    dark.setAttribute('content', '#09090b');
+    dark.setAttribute('media', '(prefers-color-scheme: dark)');
+    headEl.appendChild(dark);
+    const light = document.createElement('meta');
+    light.setAttribute('name', 'theme-color');
+    light.setAttribute('content', '#fafafa');
+    light.setAttribute('media', '(prefers-color-scheme: light)');
+    headEl.appendChild(light);
+  } else {
+    const meta = document.createElement('meta');
+    meta.setAttribute('name', 'theme-color');
+    meta.setAttribute('content', mode === 'light' ? '#fafafa' : '#09090b');
+    headEl.appendChild(meta);
+  }
+}
+
 function applyTheme(mode) {
   const html = document.documentElement;
   if (mode === 'light' || mode === 'dark') {
@@ -83,6 +114,7 @@ function applyTheme(mode) {
       window.localStorage.setItem('palantir.theme', mode);
     }
   } catch (e) { /* localStorage unavailable — no persistence */ }
+  applyThemeColorMeta(mode);
 }
 function readTheme() {
   try {
