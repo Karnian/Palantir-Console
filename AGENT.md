@@ -7,7 +7,7 @@ Palantir Console — AI 코딩 에이전트를 3계층(Main Manager → PM → W
 ```bash
 npm install
 npm start          # http://localhost:4177
-npm test           # node --test (900 tests at PR #156, 2026-04-29)
+npm test           # node --test (901 tests at PR #160, 2026-04-29 — K-3β +1)
 npm run test:e2e   # Playwright e2e
 ```
 

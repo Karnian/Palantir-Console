@@ -1,9 +1,9 @@
 # Palantir Console Backlog
 
-> Last updated: 2026-04-29 (post PR #156 — K-2 라이트 모드 launch + post-launch fixups #154~#156 모두 머지)
+> Last updated: 2026-04-29 (post PR #160 — K-2 라이트 모드 launch + post-launch fixups #154~#156 + K-3 cleanup batch #158~#160 모두 머지)
 >
 > 이 문서는 *현재 시점에서* 남은 작업들을 카테고리별로 정리한다.
-> 완료된 작업의 한 화면 요약 + 새 세션 재입장 prompt 는 [`handoff-post-k2-launch-2026-04-29.md`](./handoff-post-k2-launch-2026-04-29.md) 를 본다 (UI/UX cleanup + K-2 launch 시리즈 + §9 post-launch fixups). 그 이전 시리즈 (M1/M2/B3 + R1/R3/R4) 는 [`handoff-post-scenario-review.md`](./handoff-post-scenario-review.md) 에 있다.
+> 완료된 작업의 한 화면 요약 + 새 세션 재입장 prompt 는 [`handoff-post-k2-launch-2026-04-29.md`](./handoff-post-k2-launch-2026-04-29.md) 를 본다 (UI/UX cleanup + K-2 launch + §9 post-launch fixups + §10 K-3 cleanup batch). 그 이전 시리즈 (M1/M2/B3 + R1/R3/R4) 는 [`handoff-post-scenario-review.md`](./handoff-post-scenario-review.md) 에 있다.
 
 ## 카테고리 정의
 
@@ -18,13 +18,14 @@
 
 ## Ready
 
-UI/UX cleanup follow-up 시리즈 + K-2 라이트 모드 launch + post-launch fixups 가 2026-04-26 ~ 2026-04-29 세션에 걸쳐 모두 완료되어 현재 비어있음.
+UI/UX cleanup follow-up 시리즈 + K-2 라이트 모드 launch + post-launch fixups + K-3 cleanup batch 가 2026-04-26 ~ 2026-04-29 세션에 걸쳐 모두 완료되어 현재 비어있음.
 
 진행 stamp 는 다음 brief 들의 진행 기록을 본다:
 - `docs/specs/ui-ux-cleanup-followup-2026-04-26.md` §7 — Phase F~K-1a (#130~#135).
 - `docs/specs/ui-ux-cleanup-followup-2026-04-27.md` §7 — Phase K-1b 이후 (#137~#143).
 - `docs/specs/light-theme-k2-brief-2026-04-28.md` (header) — Post-K Cleanup + Theme Contract α/β/γ + K-2a/b/c/d (#145~#153).
 - `docs/handoff-post-k2-launch-2026-04-29.md` §9 — Post-launch fixups (#154 handoff stamp + #155 ExecuteModal task null deref → BoardView 빈 화면 fix + #156 SkillPacksView MCP 템플릿 콜랩서블 제거).
+- `docs/handoff-post-k2-launch-2026-04-29.md` §10 — K-3 cleanup batch (K-3α #158 status-active-bright 토큰 + #159 field-bg adoption / surface-hover 삭제, K-3β #160 token lock-step 자동 가드).
 
 후속 후보 (모두 deferred / nice-to-have):
 - ~~**ManagerChat dotColor `'#22c55e'`**~~ — K-3α PR #158 에서 `--status-active-bright` 의미 토큰 신규로 종결.

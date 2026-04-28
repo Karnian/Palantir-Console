@@ -441,7 +441,7 @@ PATCH  /api/runs/:id/skill-packs/checks — 팩 체크 업데이트
 - **Worker 에이전트**: tmux 세션 + git worktree 격리
 - **Manager 에이전트**: Claude Code CLI(stream-json NDJSON) 또는 Codex CLI (`codex exec --json` + thread resume). 에이전트 프로필 단위로 선택
 - **실시간**: SSE (Server-Sent Events) + `Last-Event-ID` 재생
-- **테스트**: Node.js built-in test runner + supertest + Playwright e2e (PR #156, 2026-04-29 시점 900 tests)
+- **테스트**: Node.js built-in test runner + supertest + Playwright e2e (PR #160, 2026-04-29 시점 901 tests)
 
 ## 개발
 
