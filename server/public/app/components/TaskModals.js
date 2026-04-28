@@ -299,7 +299,7 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
                 </option>
               `)}
             </select>
-            ${task.preferred_preset_id && task.preferred_preset_id !== presetId && html`
+            ${task?.preferred_preset_id && task.preferred_preset_id !== presetId && html`
               <div class="small" style=${{ color: 'var(--muted)', marginTop: '4px' }}>
                 ${EXECUTE_MODAL_LABELS.presetTaskDefaultPrefix}: <code>${task.preferred_preset_id}</code>${EXECUTE_MODAL_LABELS.presetTaskDefaultSuffix}
               </div>
