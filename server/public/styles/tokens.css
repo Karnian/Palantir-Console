@@ -11,9 +11,16 @@
  */
 
 :root {
-  /* Tell the browser this UI is dark so native form controls
-     (date picker, select popup, scrollbars) render in dark theme. */
-  color-scheme: dark;
+  /* Phase K-2d (2026-04-28): `light dark` advertises both modes so
+   * native form controls (date picker, select popup, scrollbars)
+   * follow the resolved theme. The actual visible theme is still
+   * controlled by which selector wins:
+   *   - `:root[data-theme="light"]`        — explicit light override
+   *   - `:root[data-theme="dark"]`         — explicit dark override
+   *   - `@media (prefers-color-scheme: light) :root:not([data-theme])`
+   *                                       — system default for light OS
+   *   - `:root` block below                — final fallback (dark) */
+  color-scheme: light dark;
 
   /* Backgrounds - deep blue-gray layering */
   --bg-base: #09090b;
@@ -275,4 +282,95 @@
   --surface-2: var(--bg-elevated);
   --surface-3: var(--bg-hover);
   --status-warning: var(--warning);
+}
+
+/*
+ * Phase K-2d (2026-04-28): system-default activation.
+ *
+ * Cascade contract finalised — selectors arranged so the most
+ * specific match wins:
+ *
+ *   1. `:root` (above)                            — dark default.
+ *   2. `@media (prefers-color-scheme: light)
+ *        :root:not([data-theme])` (below)         — light OS, no toggle.
+ *   3. `:root[data-theme="light"]` (K-2a)         — explicit light.
+ *   4. `:root[data-theme="dark"]` (below)         — explicit dark
+ *                                                   wins on light OS too.
+ *
+ * `:root[data-theme="dark"]` is intentionally an empty-token block.
+ * Once the data-theme attribute is set, the light media query's
+ * `:root:not([data-theme])` no longer matches, so cascade falls
+ * back to the default `:root` dark token values. We only re-assert
+ * `color-scheme: dark` here so native form controls match the
+ * resolved theme on a light-OS device. (Codex K-2d r1 P3 — earlier
+ * comment claimed re-declaration, mismatching the real shape.)
+ *
+ * The light tokens inside the media query are an exact duplicate of
+ * the K-2a `[data-theme="light"]` block. CSS doesn't support sharing
+ * selectors across a media boundary; the duplication is unavoidable
+ * unless we add a build-time tooling step. Keep the two blocks in
+ * lock-step — any new token added to one MUST be added to the other.
+ */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+    --bg-base: #fafafa;
+    --bg-surface: #ffffff;
+    --bg-elevated: #f4f4f5;
+    --bg-hover: #e4e4e7;
+    --bg-overlay: rgba(0, 0, 0, 0.45);
+    --bg-tertiary: var(--bg-elevated);
+    --text-primary: #18181b;
+    --text-secondary: #52525b;
+    --text-muted: #5f5f68;
+    --text-inverse: #fafafa;
+    --accent: #6d28d9;
+    --accent-hover: #5b21b6;
+    --accent-light: var(--accent);
+    --accent-muted: rgba(109, 40, 217, 0.12);
+    --accent-border: rgba(109, 40, 217, 0.4);
+    --border: rgba(0, 0, 0, 0.08);
+    --border-hover: rgba(0, 0, 0, 0.16);
+    --border-active: rgba(109, 40, 217, 0.5);
+    --danger: #be123c;
+    --success: #047857;
+    --warning: #b45309;
+    --info: #1d4ed8;
+    --status-running: #1d4ed8;
+    --status-needs-input: #b45309;
+    --status-review: #6d28d9;
+    --status-done: #047857;
+    --status-failed: #b91c1c;
+    --status-queued: #52525b;
+    --priority-low: #52525b;
+    --priority-medium: #1d4ed8;
+    --priority-high: #b45309;
+    --priority-critical: #b91c1c;
+    --focus-ring: 0 0 0 2px var(--accent);
+    --scrollbar-thumb: rgba(0, 0, 0, 0.15);
+    --scrollbar-thumb-hover: rgba(0, 0, 0, 0.25);
+    --bg: var(--bg-base);
+    --fg: var(--text-primary);
+    --muted: var(--text-muted);
+    --surface-2: var(--bg-elevated);
+    --surface-3: var(--bg-hover);
+    --status-warning: var(--warning);
+  }
+}
+
+/*
+ * Explicit dark override — wins over `prefers-color-scheme: light` on
+ * light-OS devices. The default `:root` block is dark, but a
+ * light-OS user that toggles to dark needs a selector that beats the
+ * `:where(prefers-color-scheme: light) :root:not([data-theme])` rule.
+ *
+ * Re-declaring `color-scheme: dark` is sufficient because every dark
+ * token already lives in `:root` and the `:not([data-theme])` light
+ * override does NOT match this block (we set `data-theme="dark"`).
+ * That means tokens cascade from `:root` → here, leaving the dark
+ * values intact while the `color-scheme: dark` reasserts native form
+ * controls.
+ */
+:root[data-theme="dark"] {
+  color-scheme: dark;
 }

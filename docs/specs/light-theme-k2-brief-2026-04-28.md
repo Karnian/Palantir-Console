@@ -1,24 +1,37 @@
-# Light Theme (Phase K-2) Brief — DEFERRED — 2026-04-28 세션 시작
+# Light Theme (Phase K-2) Brief — LAUNCHED 2026-04-28
 
-> **Status (2026-04-28): DEFERRED — hybrid path 선택**
+> **Status (2026-04-28): LAUNCHED — hybrid path + 4 sub-phase 완료**
 >
-> Codex 2 라운드 사전검토
-> (`.ao/artifacts/ask/ask-codex-20260428-20{1333,2053}-*.jsonl`) 결과
-> "라이트 모드 launch 자체는 단일 사용자 / 야간 사용 / 라이트 요청
-> 0 환경에서 14~21 review 비용 대비 ROI 낮음" 으로 판단. 대신 다음
-> hybrid path 진행:
+> 사용자 명시 승인 후 hybrid path 의 마무리로 K-2 launch 4 sub-phase
+> 진행. 시리즈 종료 시점 기록:
 >
-> 1. **Post-K Cleanup PR** — CommandPalette / hooks 토스트 한국어화 +
->    999px pill 통합 + `parseDate()` zone-less ISO + jsdom regex 안정화.
-> 2. **Theme Contract α PR** — `--warning-bg-subtle` 등 의미 토큰
->    추가, 다크 값만 정의 (`[data-theme="light"]` 미추가).
-> 3. **Theme Contract β PR** — styles.css hardcoded color → 의미
->    토큰 교체.
+> ### hybrid path (2026-04-27 ~ 2026-04-28, 사전 작업)
+> 1. **#145 Post-K Cleanup** — 4종 low-risk 정리.
+> 2. **#146 Theme Contract α** — semantic 토큰 추가 (다크 값만).
+> 3. **#147 Theme Contract β** — styles.css mechanical swap.
+> 4. **#148 CommandPalette formatter** — 작은 cleanup.
+> 5. **#149 Theme Contract γ** — JS 인라인 색 → 의미 토큰.
 >
-> 본 brief 는 향후 라이트 모드 진입 결정 시 재사용을 위한 reference 로
-> 보존. 진입 전에는 본 문서를 다시 검토하고 brief 자체를 갱신 (Codex
-> r1 review 의 BLOCK 사항: 순서 뒤집기 + selector 전략 + CSP-safe boot
-> + WCAG gate + 의미 토큰 분리) 후 사용자 확인 받을 것.
+> ### K-2 launch (2026-04-28)
+> 1. **#150 K-2a** — `[data-theme="light"]` 블록 + 22 의미 토큰 light
+>    counterpart + WCAG AA contrast 검증.
+> 2. **#151 K-2b** — `<meta name="theme-color">` mobile chrome +
+>    login.html token contract migration.
+> 3. **#152 K-2c** — CSP-safe `theme-init.js` (FOUC 방지) + NavSidebar
+>    3-state toggle (system/light/dark) + localStorage persistence.
+> 4. **#153 K-2d** — `prefers-color-scheme: light` system 자동 감지 +
+>    `:root[data-theme="dark"]` explicit override + cascade contract
+>    가드 (boot.smoke).
+>
+> 사용자 동작 결과:
+> - **다크 OS + 미설정**: `:root` (dark) → 다크.
+> - **다크 OS + toggle="light"**: `:root[data-theme="light"]` → 라이트.
+> - **라이트 OS + 미설정**: `@media :root:not([data-theme])` → 라이트.
+> - **라이트 OS + toggle="dark"**: `:root[data-theme="dark"]` →
+>   다크 (cascade 우선).
+>
+> 본 brief 는 launch 후에도 reference 로 보존. 향후 K-2 관련 변경
+> (예: 더 많은 surface adoption / dark mode tweak) 시 진입점.
 
 ---
 
