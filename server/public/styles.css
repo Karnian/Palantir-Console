@@ -2847,7 +2847,10 @@ body {
 .form-input,
 .form-textarea,
 .form-select {
-  background: var(--bg-base);
+  /* K-3α (2026-04-29): adopt `--field-bg` semantic token (alias of
+     `--bg-base`) so future "form-only" tone tweaks stay one-line.
+     Visual delta 0 — alias resolves to the same `#09090b`/`#fafafa`. */
+  background: var(--field-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text-primary);

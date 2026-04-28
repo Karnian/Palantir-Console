@@ -61,9 +61,9 @@
 
 `docs/backlog.md` Ready 섹션에도 동일 목록 (canonical):
 
-1. **ManagerChat dotColor `'#22c55e'`** — `--success #10b981` 와 다른 green hue. Theme γ 에서 mechanical swap 불가 (값 다름). 의미 토큰 추가 (`--status-active-bright`) 또는 `--success` 통합 결정 필요. 위치: `server/public/app/components/ManagerChat.js:652`.
+1. ~~**ManagerChat dotColor `'#22c55e'`**~~ — K-3α PR #158 에서 `--status-active-bright` 의미 토큰 신규로 종결 (option B: 의미 분리).
 
-2. **`--field-bg` / `--surface-hover` adoption** — α 매핑이 form input 실제 bg (`--bg-base`) 와 정합 X. 사례별 검토 필요. δ phase 가 의도적 cancel 됨 — 토큰 자체는 tokens.css 에 alias 로 남아 있음.
+2. ~~**`--field-bg` / `--surface-hover` adoption**~~ — K-3α PR-B 에서 종결. `--field-bg` 는 alias 정정 (`var(--bg-base)`) + `.form-input/.form-textarea/.form-select` adopt. `--surface-hover` 는 ~6개 hover 사용처 의미 분화 (selection/row-highlight/interactive-affordance) 라 단일 alias 부적합 → 삭제. boot.smoke.test.js 의 토큰 가드 리스트도 동기 갱신. 단일 의미 consumer 와 함께 재도입.
 
 3. **K-2 시각 회귀 자동화** — Playwright screenshot diff (다크/라이트 양쪽). 현재는 manual smoke. 별도 phase 권장.
 

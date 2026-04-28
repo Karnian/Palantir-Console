@@ -27,8 +27,8 @@ UI/UX cleanup follow-up 시리즈 + K-2 라이트 모드 launch + post-launch fi
 - `docs/handoff-post-k2-launch-2026-04-29.md` §9 — Post-launch fixups (#154 handoff stamp + #155 ExecuteModal task null deref → BoardView 빈 화면 fix + #156 SkillPacksView MCP 템플릿 콜랩서블 제거).
 
 후속 후보 (모두 deferred / nice-to-have):
-- **ManagerChat dotColor `'#22c55e'`** — `--success` 와 다른 green hue. `--status-active-bright` 토큰 도입 또는 `--success` 통합 결정 필요.
-- **`--field-bg` / `--surface-hover` adoption** — α 매핑이 form input 실제 bg 와 정합 X. 사례별 검토 필요.
+- ~~**ManagerChat dotColor `'#22c55e'`**~~ — K-3α PR #158 에서 `--status-active-bright` 의미 토큰 신규로 종결.
+- ~~**`--field-bg` / `--surface-hover` adoption**~~ — K-3α PR-B 에서 종결. `--field-bg` 는 alias 정정 (`--bg-base`) + `.form-input/.form-textarea/.form-select` adopt. `--surface-hover` 는 ~6개 hover 사용처가 의미 분화 (selection/row-highlight/interactive) 라 단일 alias 부적합 → 삭제. 단일 의미 consumer 와 함께 재도입.
 - **K-2 시각 회귀 자동화** — Playwright screenshot diff (다크/라이트 양쪽). 현재는 manual smoke.
 - **WCAG AA 자동 검증** — axe-core / pa11y 도입은 별도 phase.
 

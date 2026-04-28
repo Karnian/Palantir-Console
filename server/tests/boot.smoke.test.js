@@ -218,6 +218,12 @@ test('boot: styles/tokens.css defines the Theme Contract α semantic tokens', as
   // adopted call site silently (var() with no fallback resolves to
   // empty), so this gate stays alongside the existing core-token
   // smoke check.
+  //
+  // K-3α (2026-04-29): `--surface-hover` removed — it was never
+  // adopted (~6 hover sites had subtly different "hover" semantics
+  // so a single alias would have broadened token meaning). Re-add
+  // here only when a concrete consumer with single-meaning hover
+  // (not selection / not row-highlight) lands.
   for (const v of [
     '--warning-bg-subtle',
     '--warning-border-subtle',
@@ -228,7 +234,6 @@ test('boot: styles/tokens.css defines the Theme Contract α semantic tokens', as
     '--accent-bg-subtle',
     '--focus-ring',
     '--field-bg',
-    '--surface-hover',
     '--scrollbar-thumb',
     '--scrollbar-thumb-hover',
   ]) {
