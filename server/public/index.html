@@ -11,6 +11,11 @@
     <meta name="theme-color" content="#09090b" media="(prefers-color-scheme: dark)" />
     <meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)" />
     <title>Palantir Console</title>
+    <!-- Phase K-2c (2026-04-28): theme bootstrap MUST run before any
+         stylesheet so the `[data-theme="..."]` selector is in place
+         on first paint (no FOUC). Sync, no-defer, ahead of every
+         <link rel="stylesheet">. CSP-safe (script-src 'self'). -->
+    <script src="theme-init.js"></script>
     <link rel="stylesheet" href="styles/fonts.css" />
     <!-- Design tokens MUST load before styles.css; the rest of the stylesheet
          consumes the CSS variables defined there. -->

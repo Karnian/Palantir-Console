@@ -76,6 +76,7 @@ const REQUIRED_ASSETS = [
   { path: '/', mime: /text\/html/ },
   { path: '/styles.css', mime: /text\/css/ },
   { path: '/styles/tokens.css', mime: /text\/css/ },
+  { path: '/theme-init.js', mime: /text\/javascript|application\/javascript/ },
   { path: '/app/main.js', mime: /text\/javascript|application\/javascript/ },
   { path: '/app.js', mime: /text\/javascript|application\/javascript/ },
   { path: '/app/lib/format.js', mime: /text\/javascript|application\/javascript/ },
@@ -105,6 +106,41 @@ test('boot: index.html loads app/main.js as a module entry', async (t) => {
   const res = await request(app).get('/');
   assert.equal(res.status, 200);
   assert.match(res.text, /<script\s+type="module"\s+src="app\/main\.js"/, 'module entry tag present');
+});
+
+test('boot: index.html loads theme-init.js before any stylesheet', async (t) => {
+  const app = await createTestApp(t);
+  const res = await request(app).get('/');
+  // Phase K-2c (2026-04-28): theme-init.js sets `<html data-theme>` from
+  // localStorage BEFORE the cascade applies, preventing a flash of
+  // dark default for users whose stored preference is light. If a
+  // future edit moves the script after `<link rel="stylesheet">`,
+  // FOUC returns silently. Lock the order.
+  // Codex K-2c r1 finding: match the actual `<script src="...">` tag,
+  // not the comment that documents it (a free-text comment containing
+  // 'theme-init.js' would falsely satisfy a plain `indexOf`).
+  const scriptMatch = /<script\s+src="theme-init\.js"\s*>/.exec(res.text);
+  assert.ok(scriptMatch, 'theme-init.js <script> tag present');
+  const initIdx = scriptMatch.index;
+  const fontsIdx = res.text.indexOf('styles/fonts.css');
+  const tokensIdx = res.text.indexOf('styles/tokens.css');
+  const stylesIdx = res.text.indexOf('"styles.css"');
+  assert.ok(initIdx < fontsIdx, 'theme-init.js must precede fonts.css');
+  assert.ok(initIdx < tokensIdx, 'theme-init.js must precede tokens.css');
+  assert.ok(initIdx < stylesIdx, 'theme-init.js must precede styles.css');
+});
+
+test('boot: login.html also loads theme-init.js before any stylesheet', async (t) => {
+  // Same FOUC-prevention guard for the script-light login page.
+  const app = await createTestApp(t);
+  const res = await request(app).get('/login.html');
+  const scriptMatch = /<script\s+src="theme-init\.js"\s*>/.exec(res.text);
+  assert.ok(scriptMatch, 'theme-init.js <script> tag present in login.html');
+  const initIdx = scriptMatch.index;
+  const fontsIdx = res.text.indexOf('styles/fonts.css');
+  const tokensIdx = res.text.indexOf('styles/tokens.css');
+  assert.ok(initIdx < fontsIdx, 'theme-init.js must precede fonts.css in login.html');
+  assert.ok(initIdx < tokensIdx, 'theme-init.js must precede tokens.css in login.html');
 });
 
 test('boot: index.html loads styles/tokens.css before styles.css', async (t) => {

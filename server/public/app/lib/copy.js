@@ -42,6 +42,33 @@ export const MANAGER_STATUS_LABELS = {
   stopping: '중지 중',
 };
 
+// Theme toggle (Phase K-2c) — three-state cycle button in NavSidebar.
+// `system` is the default; selecting it removes any persisted choice
+// and lets the OS prefers-color-scheme media query decide.
+export const THEME_TOGGLE_LABELS = {
+  ariaLabel: '테마 전환',
+  modeSystem: '시스템 기본',
+  modeLight: '라이트 모드',
+  modeDark: '다크 모드',
+  // Per-mode "...(으)로" suffix table — Korean particle depends on the
+  // final consonant of the preceding word (받침). `tooltip(current,
+  // next)` builds the full sentence; call sites only use that helper.
+  tooltipPrefix: '테마',
+  tooltipActionPrefix: '클릭하면',
+  // Building blocks: tooltip(currentMode, nextMode) →
+  //   `테마: 라이트 모드. 클릭하면 다크 모드로 전환`
+  tooltip(current, next) {
+    const label = (m) => m === 'system' ? this.modeSystem
+      : m === 'light' ? this.modeLight : this.modeDark;
+    // Korean particle "으로" attaches when the preceding noun ends in
+    // a consonant other than ㄹ (시스템 기본 ends in ㄴ). "로"
+    // attaches after vowels and ㄹ. Match per-mode so future mode
+    // additions extend this table rather than rebuild the regex.
+    const particle = (m) => m === 'system' ? '으로' : '로';
+    return `${this.tooltipPrefix}: ${label(current)}. ${this.tooltipActionPrefix} ${label(next)}${particle(next)} 전환`;
+  },
+};
+
 // Top-level navigation. Keys match `NAV_ITEMS[].hash` in app/lib/nav.js
 // so the nav module can stay a thin route table.
 export const NAV_LABELS = {

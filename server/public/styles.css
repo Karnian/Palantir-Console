@@ -1232,6 +1232,51 @@ body {
   place-items: center;
 }
 
+/* Phase K-2c (2026-04-28): theme cycle button (NavSidebar bottom).
+ * Three-state cycle (system / light / dark) — `data-mode` attr is
+ * set on the button by the React component; CSS doesn't react to
+ * it directly (icon glyph swap is handled in JSX), but exposing it
+ * gives e2e tests a `[data-mode="..."]` selector to assert state.
+ * Size matches `.nav-item` (44x44 px) so the rail stays visually
+ * consistent and the WCAG 2.5.8 minimum target size holds.
+ * (Codex K-2c r1 finding.) */
+.theme-toggle {
+  width: 44px;
+  height: 44px;
+  background: none;
+  border: none;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  border-radius: var(--radius-sm);
+  transition: color 120ms ease, background 120ms ease;
+}
+.theme-toggle:hover,
+.theme-toggle:focus-visible {
+  color: var(--text-primary);
+  background: var(--accent-muted);
+  outline: none;
+}
+.theme-toggle:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+/* Mobile (≤640px): NavSidebar collapses into a horizontal bottom bar
+ * that is already tight on space (8 nav-items × 44px). Hide the theme
+ * toggle there — desktop / tablet keep it. Codex K-2c r1 finding:
+ * leaving it in the flex row would overflow / cause cramped wrap.
+ * Mobile users can still tap into a future settings surface or the
+ * meta `prefers-color-scheme` follows OS automatically once K-2d
+ * activates. */
+@media (max-width: 640px) {
+  .theme-toggle {
+    display: none;
+  }
+}
+
 /* R2-A.1: Attention badge (NavSidebar).
    Renders nothing when attentionCount is 0 (component guard).
    Pulse animation makes new attention items draw the eye. */

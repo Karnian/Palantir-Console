@@ -15,6 +15,7 @@ import { useRoute, navigate, useEscape, useSSE, useTasks, useRuns, useProjects, 
 import { dueState, formatDueDate, useNowTick, dueDateMeta } from './app/lib/dueDate.js';
 import { requestNotificationPermission, showBrowserNotification, pulseTabTitle } from './app/lib/notifications.js';
 import { NAV_ITEMS } from './app/lib/nav.js';
+import { THEME_TOGGLE_LABELS } from './app/lib/copy.js';
 
 // Components
 import { RunInspector } from './app/components/RunInspector.js';
@@ -56,6 +57,60 @@ function AttentionBadge({ count, onClick }) {
   `;
 }
 
+// Phase K-2c (2026-04-28): theme toggle button.
+//
+// Three-state cycle: system → light → dark → system. The cycle is
+// chosen so the very first click from the historical default (no
+// preference set; matches `system`) takes a dark-OS user into light
+// mode — exposing the new theme without a hidden config dive.
+//
+// Persists to `localStorage.palantir.theme`; theme-init.js reads it
+// on the next page load to avoid FOUC. The `data-theme` attribute on
+// `<html>` is the single source the CSS selector contract checks.
+const THEME_CYCLE = ['system', 'light', 'dark'];
+const THEME_ICONS = { system: '◑', light: '☀', dark: '☽' };
+function applyTheme(mode) {
+  const html = document.documentElement;
+  if (mode === 'light' || mode === 'dark') {
+    html.setAttribute('data-theme', mode);
+  } else {
+    html.removeAttribute('data-theme');
+  }
+  try {
+    if (mode === 'system') {
+      window.localStorage.removeItem('palantir.theme');
+    } else {
+      window.localStorage.setItem('palantir.theme', mode);
+    }
+  } catch (e) { /* localStorage unavailable — no persistence */ }
+}
+function readTheme() {
+  try {
+    const v = window.localStorage.getItem('palantir.theme');
+    if (v === 'light' || v === 'dark') return v;
+  } catch (e) { /* fall through */ }
+  return 'system';
+}
+
+function ThemeToggle() {
+  const [mode, setMode] = useState(readTheme);
+  const next = THEME_CYCLE[(THEME_CYCLE.indexOf(mode) + 1) % THEME_CYCLE.length];
+  const onClick = () => {
+    applyTheme(next);
+    setMode(next);
+  };
+  return html`
+    <button
+      type="button"
+      class="theme-toggle"
+      data-mode=${mode}
+      aria-label=${THEME_TOGGLE_LABELS.ariaLabel}
+      title=${THEME_TOGGLE_LABELS.tooltip(mode, next)}
+      onClick=${onClick}
+    >${THEME_ICONS[mode]}</button>
+  `;
+}
+
 function NavSidebar({ route, connected, attentionCount, onAttentionClick }) {
   return html`
     <nav class="nav-sidebar">
@@ -76,6 +131,7 @@ function NavSidebar({ route, connected, attentionCount, onAttentionClick }) {
       <div class="nav-attention">
         <${AttentionBadge} count=${attentionCount} onClick=${onAttentionClick} />
       </div>
+      <${ThemeToggle} />
       <div class="nav-status" title=${connected ? 'SSE Connected' : 'SSE Disconnected'}>
         <span class="status-dot ${connected ? 'status-dot-ok' : 'status-dot-err'}"></span>
       </div>

@@ -12,6 +12,10 @@
   <meta name="theme-color" content="#09090b" media="(prefers-color-scheme: dark)" />
   <meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)" />
   <title>Sign in — Palantir Console</title>
+  <!-- Phase K-2c (2026-04-28): same theme bootstrap as the SPA so the
+       login screen also picks up the user's last theme choice on
+       first paint. The script is tiny and idempotent. -->
+  <script src="theme-init.js"></script>
   <link rel="stylesheet" href="styles/fonts.css" />
   <link rel="stylesheet" href="styles/tokens.css" />
   <style>
