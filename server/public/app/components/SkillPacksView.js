@@ -398,7 +398,6 @@ function MyPacksView({ projects }) {
   const [checkingUpdate, setCheckingUpdate] = useState(null); // pack_id currently being checked
   const [filterScope, setFilterScope] = useState('all'); // all | global | project
   const [filterProjectId, setFilterProjectId] = useState('');
-  const [showTemplates, setShowTemplates] = useState(false);
 
   const loadData = async () => {
     try {
@@ -516,9 +515,6 @@ function MyPacksView({ projects }) {
     <div class="my-packs-view">
       <div class="my-packs-actions">
         <button class="ghost small" onClick=${handleImport}>${SKILL_PACKS_LABELS.actionImport}</button>
-        <button class="ghost small" onClick=${() => setShowTemplates(v => !v)}>
-          ${showTemplates ? SKILL_PACKS_LABELS.actionHideTemplates : SKILL_PACKS_LABELS.actionShowTemplates}
-        </button>
         <button class="primary" onClick=${() => { setEditPack(null); setShowModal(true); }}>${SKILL_PACKS_LABELS.actionNew}</button>
       </div>
 
@@ -579,32 +575,6 @@ function MyPacksView({ projects }) {
           </div>
         `;
       })()}
-
-      <!-- MCP Templates (collapsible) -->
-      ${showTemplates && html`
-        <div class="skill-templates-section">
-          <h3 class="skill-templates-title">${SKILL_PACKS_LABELS.templatesTitle}</h3>
-          <div class="skill-templates-table">
-            <div class="skill-templates-row skill-templates-header-row">
-              <span>${SKILL_PACKS_LABELS.templatesAlias}</span><span>${SKILL_PACKS_LABELS.templatesCommand}</span><span>${SKILL_PACKS_LABELS.templatesDescription}</span><span>${SKILL_PACKS_LABELS.templatesAllowedEnv}</span>
-            </div>
-            ${templates.map(t => {
-              let envKeys = [];
-              try { envKeys = JSON.parse(t.allowed_env_keys || '[]'); } catch { /* */ }
-              let args = [];
-              try { args = JSON.parse(t.args || '[]'); } catch { /* */ }
-              return html`
-                <div class="skill-templates-row" key=${t.id}>
-                  <span class="mono">${t.alias}</span>
-                  <span class="mono">${t.command} ${args.join(' ')}</span>
-                  <span>${t.description || ''}</span>
-                  <span class="mono">${envKeys.join(', ') || '\u2013'}</span>
-                </div>
-              `;
-            })}
-          </div>
-        </div>
-      `}
 
       <!-- Pack list -->
       ${filteredPacks.length === 0 && html`

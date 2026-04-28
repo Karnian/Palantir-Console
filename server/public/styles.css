@@ -5509,42 +5509,6 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .skill-badge-ok { color: var(--success); background: color-mix(in srgb, var(--success) 15%, transparent); }
 .skill-badge-na { color: var(--text-muted); background: rgba(255, 255, 255, 0.06); }
 
-/* MCP templates table */
-.skill-templates-section {
-  margin: 0 24px 16px;
-  padding: 16px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm-plus);
-}
-.skill-templates-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin-bottom: 10px;
-}
-.skill-templates-table {
-  display: grid;
-  grid-template-columns: 100px 1fr 1fr 120px;
-  gap: 1px;
-  font-size: 12px;
-}
-.skill-templates-row {
-  display: contents;
-}
-.skill-templates-row > span {
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--border);
-  color: var(--text-secondary);
-}
-.skill-templates-header-row > span {
-  font-weight: 600;
-  color: var(--text-muted);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
 /* Form helpers */
 .form-row {
   display: flex;

@@ -630,8 +630,6 @@ export const SKILL_PACKS_LABELS = {
   tabGallery: '갤러리',
   // Top actions
   actionImport: '가져오기',
-  actionShowTemplates: 'MCP 템플릿',
-  actionHideTemplates: '템플릿 숨기기',
   actionNew: '새 스킬 팩',
   // Filter dropdowns
   filterAllScopes: '모든 범위',
@@ -643,12 +641,6 @@ export const SKILL_PACKS_LABELS = {
   packsCountSuffix: '개',
   // Token budget
   tokenBudget: '토큰 예산',
-  // Templates section
-  templatesTitle: 'MCP 서버 템플릿',
-  templatesAlias: 'Alias',
-  templatesCommand: '명령',
-  templatesDescription: '설명',
-  templatesAllowedEnv: '허용된 env 키',
   // Empty state
   emptyText: '스킬 팩이 없습니다',
   emptySub: '에이전트에 능력을 주입할 첫 스킬 팩을 만드세요.',
