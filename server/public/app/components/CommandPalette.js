@@ -114,7 +114,7 @@ export function CommandPalette({ open, onClose }) {
         <input
           ref=${inputRef}
           class="command-palette-input"
-          placeholder=${`${COMMAND_PALETTE_LABELS.placeholderPrefix} ${COMMAND_PALETTE_LABELS.placeholderShortcutSuffix.replace('{n}', NAV_ITEMS.length)}`}
+          placeholder=${COMMAND_PALETTE_LABELS.placeholder(NAV_ITEMS.length)}
           aria-label=${COMMAND_PALETTE_LABELS.filterAriaLabel}
           value=${query}
           onInput=${e => setQuery(e.target.value)}

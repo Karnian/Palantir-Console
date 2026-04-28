@@ -435,9 +435,16 @@ export const MANAGER_CHAT_AUX = {
 export const COMMAND_PALETTE_LABELS = {
   ariaLabel: '명령 팔레트',
   filterAriaLabel: '뷰 필터',
-  placeholderPrefix: '이동...',
-  placeholderShortcutSuffix: '(1-{n} 키로 빠른 이동)',
   empty: '일치하는 뷰가 없습니다',
+  // Codex Post-K NIT (2026-04-28): the prefix/suffix chunk pair was a
+  // workaround for a single dynamic value (NAV count). Inline copy
+  // formatter functions are the cleaner i18n pattern — call sites do
+  // `placeholder(NAV_ITEMS.length)` and the copy module owns word
+  // order. If another surface needs a similar dynamic-value template
+  // later, add a function here, not another `*Prefix`/`*Suffix` pair.
+  placeholder(navCount) {
+    return `이동... (1-${navCount} 키로 빠른 이동)`;
+  },
 };
 
 // Hook-side toasts (loaders + manager start/stop). The
