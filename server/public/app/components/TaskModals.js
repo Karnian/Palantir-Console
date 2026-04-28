@@ -213,7 +213,7 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
   const selectedPacks = skillPacks.filter(p => selectedIds.has(p.id));
   const totalTokens = selectedPacks.reduce((sum, p) => sum + (p.estimated_tokens || 0), 0);
   const budgetPct = Math.min(100, (totalTokens / SKILL_PACK_TOKEN_BUDGET) * 100);
-  const budgetColor = budgetPct > 90 ? 'var(--status-failed)' : budgetPct > 70 ? '#f59e0b' : 'var(--success)';
+  const budgetColor = budgetPct > 90 ? 'var(--status-failed)' : budgetPct > 70 ? 'var(--warning)' : 'var(--success)';
 
   // MCP conflict detection (Phase 4-2)
   const mcpConflicts = (() => {
@@ -343,7 +343,7 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
             ${mcpConflicts.length > 0 && html`
               <div style=${{ marginTop: '8px' }}>
                 ${mcpConflicts.map(c => html`
-                  <div key=${c.alias} class="skill-select-warning" style=${{ marginTop: '4px', background: c.blocking ? 'color-mix(in srgb, var(--status-failed) 15%, transparent)' : 'color-mix(in srgb, #f59e0b 10%, transparent)', color: c.blocking ? 'var(--status-failed)' : '#f59e0b' }}>
+                  <div key=${c.alias} class="skill-select-warning" style=${{ marginTop: '4px', background: c.blocking ? 'color-mix(in srgb, var(--status-failed) 15%, transparent)' : 'color-mix(in srgb, var(--warning) 10%, transparent)', color: c.blocking ? 'var(--status-failed)' : 'var(--warning)' }}>
                     ${c.blocking ? '\u26D4' : '\u26A0'} ${EXECUTE_MODAL_LABELS.conflictAlias.replace('{alias}', c.alias)}: ${c.packs.join(', ')}
                     ${c.blocking ? EXECUTE_MODAL_LABELS.conflictBlocking : EXECUTE_MODAL_LABELS.conflictWarn}
                   </div>
@@ -612,8 +612,13 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
             <div class="task-detail-meta-grid">
               ${(() => {
                 const sc = statusColor[status] || 'var(--text-muted)';
-                const priorityColors = { low: '#6b7280', medium: '#3b82f6', high: '#f59e0b', critical: '#ef4444' };
-                const pc = priorityColors[priority] || '#6b7280';
+                const priorityColors = {
+                  low: 'var(--priority-low)',
+                  medium: 'var(--priority-medium)',
+                  high: 'var(--priority-high)',
+                  critical: 'var(--priority-critical)',
+                };
+                const pc = priorityColors[priority] || 'var(--priority-low)';
                 const statusOpts = ['backlog','todo','in_progress','review','done','failed']
                   .map(s => ({ value: s, label: statusLabel(TASK_STATUS_LABELS, s) }));
                 const priorityOpts = PRIORITY_OPTIONS.map(p => ({ value: p, label: ({ low: FILTER_LABELS.priorityLow, medium: FILTER_LABELS.priorityMedium, high: FILTER_LABELS.priorityHigh, critical: FILTER_LABELS.priorityCritical })[p] || p }));
@@ -684,8 +689,8 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
               </div>
               ${(() => {
                 const due = dueDateMeta(task);
-                const dueColor = due?.state === 'overdue' ? '#ef4444'
-                  : due?.state === 'due-soon' ? '#f59e0b'
+                const dueColor = due?.state === 'overdue' ? 'var(--status-failed)'
+                  : due?.state === 'due-soon' ? 'var(--warning)'
                   : 'var(--text-secondary)';
                 return html`
                   <div class="task-detail-meta-item">

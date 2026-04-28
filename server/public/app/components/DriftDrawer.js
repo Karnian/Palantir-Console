@@ -83,11 +83,15 @@ export function DriftDrawer({ open, onClose, driftAudit, projects }) {
   const parseJson = (s) => {
     try { return JSON.parse(s); } catch { return null; }
   };
+  // Phase Theme Contract γ (2026-04-28): mechanical swap of inline
+  // hex values to design tokens (visual delta 0 — values are equal).
+  // pm_hallucination = --status-failed, user_intervention_stale =
+  // --warning, invalid_claim = --status-review, default = --status-queued.
   const kindColor = (kind) => {
-    if (kind === 'pm_hallucination') return '#ef4444';
-    if (kind === 'user_intervention_stale') return '#f59e0b';
-    if (kind === 'invalid_claim') return '#8b5cf6';
-    return '#6b7280';
+    if (kind === 'pm_hallucination') return 'var(--status-failed)';
+    if (kind === 'user_intervention_stale') return 'var(--warning)';
+    if (kind === 'invalid_claim') return 'var(--status-review)';
+    return 'var(--status-queued)';
   };
   return html`
     <div class="drift-drawer-backdrop" onClick=${onClose}>

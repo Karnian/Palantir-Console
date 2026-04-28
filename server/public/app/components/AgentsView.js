@@ -207,7 +207,7 @@ function AgentDetailModal({ agent, open, onClose, onEdit }) {
   const renderBar = (pct) => {
     if (pct === null || pct === undefined) return null;
     const remaining = Math.max(0, Math.min(100, pct));
-    const barColor = pct > 50 ? '#10b981' : pct > 20 ? '#3b82f6' : pct > 10 ? '#f59e0b' : '#ef4444';
+    const barColor = pct > 50 ? 'var(--success)' : pct > 20 ? 'var(--info)' : pct > 10 ? 'var(--warning)' : 'var(--status-failed)';
     return html`
       <div class="agent-usage-bar-track">
         <div class="agent-usage-bar-fill" style=${{ width: `${remaining}%`, background: barColor }} />

@@ -278,11 +278,11 @@ function DeleteConfirm({ open, template, onClose, onConfirm }) {
         ${hasRefs && html`
           <div style=${{
             marginTop: '12px', padding: '10px',
-            background: 'color-mix(in srgb, #f59e0b 12%, transparent)',
-            border: '1px solid color-mix(in srgb, #f59e0b 40%, transparent)',
+            background: 'color-mix(in srgb, var(--warning) 12%, transparent)',
+            border: '1px solid color-mix(in srgb, var(--warning) 40%, transparent)',
             borderRadius: '6px', fontSize: '13px',
           }}>
-            <strong style=${{ color: '#f59e0b' }}>${MCP_TEMPLATES_LABELS.inUseTitle}</strong>
+            <strong style=${{ color: 'var(--warning)' }}>${MCP_TEMPLATES_LABELS.inUseTitle}</strong>
             <div style=${{ marginTop: '6px' }}>
               ${refs.presets?.length > 0 && html`
                 <div>${MCP_TEMPLATES_LABELS.inUsePresetsLabel}: ${refs.presets.map(p => p.name).join(', ')}</div>
