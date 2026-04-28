@@ -3,6 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Phase K-2b (2026-04-28): mobile browser chrome color tracks
+         the active theme. Two media-scoped meta tags let the OS pick
+         the right one without JS — `dark` matches `--bg-base #09090b`,
+         `light` matches `--bg-base #fafafa`. K-2c's theme-init.js
+         updates the active value when the user explicitly toggles. -->
+    <meta name="theme-color" content="#09090b" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)" />
     <title>Palantir Console</title>
     <link rel="stylesheet" href="styles/fonts.css" />
     <!-- Design tokens MUST load before styles.css; the rest of the stylesheet
