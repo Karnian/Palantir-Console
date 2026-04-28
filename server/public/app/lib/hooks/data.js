@@ -10,6 +10,7 @@ import { addToast } from '../toast.js';
 
 import { useState, useEffect, useCallback } from '../../../vendor/hooks.module.js';
 
+import { TOAST_LABELS } from '../copy.js';
 export function useTasks() {
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -18,7 +19,7 @@ export function useTasks() {
     try {
       const data = await apiFetch('/api/tasks');
       setTasks(data.tasks || []);
-    } catch (err) { addToast('Failed to load tasks: ' + (err.message || 'unknown'), 'error'); }
+    } catch (err) { addToast(`${TOAST_LABELS.loadFailedTasks}: ${err.message || TOAST_LABELS.errorFallback}`, 'error'); }
     setLoading(false);
   }, []);
 
@@ -35,7 +36,7 @@ export function useRuns() {
     try {
       const data = await apiFetch('/api/runs');
       setRuns(data.runs || []);
-    } catch (err) { addToast('Failed to load runs: ' + (err.message || 'unknown'), 'error'); }
+    } catch (err) { addToast(`${TOAST_LABELS.loadFailedRuns}: ${err.message || TOAST_LABELS.errorFallback}`, 'error'); }
     setLoading(false);
   }, []);
 
@@ -52,7 +53,7 @@ export function useProjects() {
     try {
       const data = await apiFetch('/api/projects');
       setProjects(data.projects || []);
-    } catch (err) { addToast('Failed to load projects: ' + (err.message || 'unknown'), 'error'); }
+    } catch (err) { addToast(`${TOAST_LABELS.loadFailedProjects}: ${err.message || TOAST_LABELS.errorFallback}`, 'error'); }
     setLoading(false);
   }, []);
 
@@ -101,7 +102,7 @@ export function useAgents() {
       setError(null);
     } catch (err) {
       setError(err.message || 'unknown');
-      addToast('Failed to load agents: ' + (err.message || 'unknown'), 'error');
+      addToast(`${TOAST_LABELS.loadFailedAgents}: ${err.message || TOAST_LABELS.errorFallback}`, 'error');
     }
     setLoading(false);
   }, []);

@@ -7,6 +7,7 @@ import { addToast } from '../toast.js';
 
 import { useState, useEffect, useCallback, useRef } from '../../../vendor/hooks.module.js';
 
+import { TOAST_LABELS } from '../copy.js';
 export function useManagerLifecycle() {
   const [status, setStatus] = useState({ active: false, run: null, usage: null });
   const [loading, setLoading] = useState(false);
@@ -28,10 +29,10 @@ export function useManagerLifecycle() {
         body: JSON.stringify(opts),
       });
       setStatus({ active: true, run: data.run, usage: null });
-      addToast('Manager session started', 'success');
+      addToast(TOAST_LABELS.managerStarted, 'success');
       return data;
     } catch (err) {
-      addToast('Failed to start manager: ' + err.message, 'error');
+      addToast(`${TOAST_LABELS.managerStartFailed}: ${err.message}`, 'error');
       throw err;
     } finally {
       setLoading(false);
@@ -42,9 +43,9 @@ export function useManagerLifecycle() {
     try {
       await apiFetch('/api/manager/stop', { method: 'POST' });
       setStatus({ active: false, run: null, usage: null });
-      addToast('Manager session stopped', 'info');
+      addToast(TOAST_LABELS.managerStopped, 'info');
     } catch (err) {
-      addToast('Failed to stop manager: ' + err.message, 'error');
+      addToast(`${TOAST_LABELS.managerStopFailed}: ${err.message}`, 'error');
     }
   }, []);
 

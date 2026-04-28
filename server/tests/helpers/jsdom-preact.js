@@ -40,46 +40,50 @@ const copySrc = fs.readFileSync(path.join(APP_LIB_DIR, 'copy.js'), 'utf8');
  * @param {string} componentName  e.g. 'Dropdown', 'MentionInput'
  * @param {object} context        vm context to evaluate in
  */
+/**
+ * Pure transform of a component source for vm evaluation. Exported so
+ * regression tests can pin the import-strip behavior without spinning
+ * up a jsdom sandbox (Phase Post-K Cleanup, 2026-04-28).
+ *
+ *   - `export function Foo` → `function Foo`
+ *   - `import {…} from '…/preact.module.js'` → `const {…} = window.preact;`
+ *   - `import {…} from '…/hooks.module.js'` → `const {…} = window.preactHooks;`
+ *   - `import htm from '…/htm.module.js'` → `var htm = window.htm;`
+ *   - Side-effect-only relative imports (`import './foo.js';`) →
+ *     stripped first so the next regex never bridges two adjacent
+ *     imports.
+ *   - Named / default / default+named relative imports → stripped.
+ *
+ * Caller appends the `this.<componentName> = <componentName>;` tail
+ * before passing to `vm.runInContext`; this helper returns just the
+ * source-level transform.
+ */
+function transformComponentSource(raw) {
+  return raw
+    .replace(/^export\s+function\s+/gm, 'function ')
+    .replace(/^import\s+\{([^}]+)\}\s+from\s+['"][^'"]*preact\.module\.js['"];?\s*$/gm,
+      (_, names) => `const {${names}} = window.preact;`)
+    .replace(/^import\s+\{([^}]+)\}\s+from\s+['"][^'"]*hooks\.module\.js['"];?\s*$/gm,
+      (_, names) => `const {${names}} = window.preactHooks;`)
+    .replace(/^import\s+htm\s+from\s+['"][^'"]*htm\.module\.js['"];?\s*$/gm,
+      'var htm = window.htm;')
+    // Side-effect-only relative imports first — must precede the
+    // named-import strip so a side-effect line followed by a named
+    // import doesn't get merged into a single greedy match (Codex
+    // K-1b r1 NIT).
+    .replace(/^import\s+['"]\.\.?\/[^'"]+['"];?\s*$/gm, '// [stripped side-effect import]')
+    // Named / default / default+named relative imports. Multi-line
+    // brace bodies are handled via `[\s\S]*?`. The alternation rules
+    // out bare side-effect imports (already handled above).
+    .replace(/^import\s+(?:\{[\s\S]*?\}|\w[\w$]*(?:\s*,\s*\{[\s\S]*?\})?)\s+from\s+['"]\.\.?\/[^'"]+['"];?\s*$/gm,
+      '// [stripped import]');
+}
+
 function loadComponent(componentName, context) {
   const filePath = path.join(COMPONENTS_DIR, `${componentName}.js`);
   const raw = fs.readFileSync(filePath, 'utf8');
-
-  const transformed = raw
-    // Strip leading `export` from `export function Foo` declarations.
-    // The `g` flag handles files with multiple exported functions.
-    .replace(/^export\s+function\s+/gm, 'function ')
-    // Replace `import { h, ... } from '../../vendor/preact.module.js';`
-    // with `const { h, ... } = window.preact;`
-    .replace(/^import\s+\{([^}]+)\}\s+from\s+['"][^'"]*preact\.module\.js['"];?\s*$/gm,
-      (_, names) => `const {${names}} = window.preact;`)
-    // Replace `import { useState, ... } from '../../vendor/hooks.module.js';`
-    // with `const { useState, ... } = window.preactHooks;`
-    .replace(/^import\s+\{([^}]+)\}\s+from\s+['"][^'"]*hooks\.module\.js['"];?\s*$/gm,
-      (_, names) => `const {${names}} = window.preactHooks;`)
-    // Replace `import htm from '../../vendor/htm.module.js';`
-    // with `var htm = window.htm;`
-    .replace(/^import\s+htm\s+from\s+['"][^'"]*htm\.module\.js['"];?\s*$/gm,
-      'var htm = window.htm;')
-    // Strip side-effect-only relative imports first
-    // (`import './foo.js';` / `import "../bar.js";`). Doing this before
-    // the named-import multi-line strip prevents the next regex from
-    // greedily swallowing a side-effect line plus the following named
-    // import as one match (which would leave the file syntactically
-    // broken — Codex K-1b review NIT).
-    .replace(/^import\s+['"]\.\.?\/[^'"]+['"];?\s*$/gm, '// [stripped side-effect import]')
-    // Strip remaining local relative named imports (e.g. from '../lib/...').
-    // The named-import body may span multiple lines
-    // (`import {\n  foo,\n  bar,\n} from '../lib/foo.js';`). The
-    // alternation `(?:\{[\s\S]*?\}|\w[\w$]*(?:\s*,\s*\{[\s\S]*?\})?)`
-    // restricts the match to one of:
-    //   1. brace-only:    `import { a, b } from '...';`
-    //   2. default-only:  `import foo from '...';`
-    //   3. default+named: `import foo, { bar } from '...';`
-    // and refuses bare side-effect imports (already handled above), so
-    // we never accidentally bridge two import statements.
-    .replace(/^import\s+(?:\{[\s\S]*?\}|\w[\w$]*(?:\s*,\s*\{[\s\S]*?\})?)\s+from\s+['"]\.\.?\/[^'"]+['"];?\s*$/gm, '// [stripped import]')
+  const transformed = transformComponentSource(raw)
     + `\nthis.${componentName} = ${componentName};`;
-
   vm.runInContext(transformed, context);
 }
 
@@ -146,4 +150,4 @@ function flushEffects(ms = 100) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-module.exports = { createPreactEnv, flushEffects, loadComponent, VENDOR_DIR, COMPONENTS_DIR };
+module.exports = { createPreactEnv, flushEffects, loadComponent, transformComponentSource, VENDOR_DIR, COMPONENTS_DIR };
