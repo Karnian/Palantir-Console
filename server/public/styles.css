@@ -7,8 +7,8 @@
 /* Dark scrollbar */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: var(--radius-2xs); }
-::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: var(--radius-2xs); }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
 
 /* Global form reset — prevent white browser defaults */
 input, textarea, select, button {
@@ -2684,13 +2684,13 @@ body {
 
 .run-diff-pre .diff-add {
   color: var(--success, #22c55e);
-  background: color-mix(in srgb, var(--success, #22c55e) 8%, transparent);
+  background: var(--success-bg-subtle);
   display: block;
 }
 
 .run-diff-pre .diff-del {
   color: var(--status-failed, #ef4444);
-  background: color-mix(in srgb, var(--status-failed, #ef4444) 8%, transparent);
+  background: var(--status-failed-bg-subtle);
   display: block;
 }
 
@@ -4865,23 +4865,23 @@ input[type="date"]::-webkit-datetime-edit-day-field {
    same affordance across surfaces. needs_input = amber, failed = red,
    summary/new stay neutral (they're just prompts, not alerts). */
 .manager-suggested-chip.manager-suggested-respond {
-  border-color: color-mix(in srgb, #f59e0b 40%, var(--border));
+  border-color: var(--warning-border-subtle);
 }
 
 .manager-suggested-chip.manager-suggested-respond:hover {
   border-color: #f59e0b;
   color: #f59e0b;
-  background: color-mix(in srgb, #f59e0b 8%, transparent);
+  background: var(--warning-bg-subtle);
 }
 
 .manager-suggested-chip.manager-suggested-retry {
-  border-color: color-mix(in srgb, #ef4444 40%, var(--border));
+  border-color: var(--status-failed-border-subtle);
 }
 
 .manager-suggested-chip.manager-suggested-retry:hover {
   border-color: #ef4444;
   color: #ef4444;
-  background: color-mix(in srgb, #ef4444 8%, transparent);
+  background: var(--status-failed-bg-subtle);
 }
 
 /* Input area */
@@ -4898,7 +4898,7 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 }
 
 .manager-input-area.drag-over {
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  background: var(--accent-bg-subtle);
   border-top-color: var(--accent-border);
 }
 
@@ -5941,7 +5941,7 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   padding: 10px;
   font-size: 12px;
   color: var(--success);
-  background: color-mix(in srgb, var(--success) 8%, transparent);
+  background: var(--success-bg-subtle);
   border-radius: 6px;
   margin-bottom: 12px;
 }
