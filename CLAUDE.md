@@ -47,14 +47,15 @@ node --test server/tests/v2-api.test.js
 Express.js 5 + SQLite (WAL, better-sqlite3) + Preact/HTM (CDN 없이 vendor/ UMD) + Inter font (self-hosted woff2).
 빌드 스텝 없음 — `server/public/`의 파일이 그대로 서빙됨. 외부 CDN 의존 0개.
 
-**v3 기준 (Phase 0~10G + M1/M2 merged)**: Top manager + 프로젝트 단위 PM (lazy-spawn, conversation identity), deterministic router, annotate-only drift reconciliation, SSE 시맨틱 envelope. P8: app.js ESM 전환, hooks 분할, ManagerView 분할. P9: 전 컴포넌트 직접 ESM import (window bridge 0개), SessionsView Preact 재작성. P10: Worker Preset DB/Service (10B), Tier 1/2 spawn wiring (10C/10D), Task linkage + #presets UI (10E), Preset snapshot drift audit UI (10F), agent-olympus integration (10G). **M1 (PR #114)**: Codex worker/PM MCP 주입을 leaf-level dotted path (`-c mcp_servers.<alias>.<key>=<TOML>`) 로 교체 + fail-closed flatten. **M2 (PR #115)**: user `~/.codex/config.toml` 과의 legacy alias 충돌을 `mcp:legacy_alias_conflict` run event 로 observability. **B3 (PR #116)**: `npm run diagnose:mcp` ops 도구.
+**v3 기준 (Phase 0~10G + M1/M2/M3 + UI/UX cleanup F~K-2 merged)**: Top manager + 프로젝트 단위 PM (lazy-spawn, conversation identity), deterministic router, annotate-only drift reconciliation, SSE 시맨틱 envelope. P8: app.js ESM 전환, hooks 분할, ManagerView 분할. P9: 전 컴포넌트 직접 ESM import (window bridge 0개), SessionsView Preact 재작성. P10: Worker Preset DB/Service (10B), Tier 1/2 spawn wiring (10C/10D), Task linkage + #presets UI (10E), Preset snapshot drift audit UI (10F), agent-olympus integration (10G). **M1 (PR #114)**: Codex worker/PM MCP 주입을 leaf-level dotted path (`-c mcp_servers.<alias>.<key>=<TOML>`) 로 교체 + fail-closed flatten. **M2 (PR #115)**: user `~/.codex/config.toml` 과의 legacy alias 충돌을 `mcp:legacy_alias_conflict` run event 로 observability. **B3 (PR #116)**: `npm run diagnose:mcp` ops 도구. **M3-UI (PR #119)**: `mcp_server_templates` UI CRUD (`#mcp-servers` 탭) — `mcpTemplateService` + `routes/mcpTemplates.js` + `McpTemplatesView.js`. **UI/UX cleanup (#129~#143)**: a11y / 한국어화 / 디자인 토큰 / Modal primitive / e2e selector attribute 화. **K-2 라이트 모드 (#145~#153)**: `[data-theme="light"]` 22 의미 토큰 + CSP-safe `theme-init.js` (FOUC 방지) + NavSidebar 3-state toggle + `prefers-color-scheme` system 자동.
 
 ```
 server/
   index.js                    — 진입점, 포트/auth 설정, SIGINT/SIGTERM graceful shutdown
   app.js                      — Express 앱 조립 (라우터, 서비스, 미들웨어)
   db/database.js              — SQLite 초기화 + 자동 마이그레이션
-  db/migrations/              — 001_initial ~ 019_task_preferred_preset_idx.sql
+  db/migrations/              — 001_initial ~ 021_skill_pack_origin_type_check.sql
+                                (020: mcp_template_updated_at, 021: skill_pack origin_type CHECK trigger)
   middleware/
     auth.js                   — PALANTIR_TOKEN 쿠키/Bearer 인증
     errorHandler.js           — 중앙 에러 핸들러
@@ -70,6 +71,7 @@ server/
     sessions.js, trash.js, fs.js, usage.js, claude-sessions.js — legacy + support
     workerPresets.js          — Worker Preset CRUD (Phase 10B)
     skillPacks.js             — Skill Pack CRUD + gallery (Phase 10G)
+    mcpTemplates.js           — MCP server template CRUD (M3-UI, /api/mcp-server-templates)
   utils/
     pathGuard.js              — isWithinRoot() 경로 traversal 방어 유틸
     errors.js                 — AppError / BadRequestError / NotFoundError
@@ -105,6 +107,7 @@ server/
     presetService.js          — Worker Preset CRUD + snapshot drift 비교 (Phase 10B)
     skillPackService.js       — Skill Pack 설치/제거/resolve (Phase 10G)
     registryService.js        — Skill Pack 갤러리 레지스트리 조회
+    mcpTemplateService.js     — MCP server template CRUD + boot seed upsert (M3-UI)
     managerSystemPrompt.js    — layer='top'|'pm' 분기 시스템 프롬프트 빌더
     authResolver.js           — Claude/Codex auth preflight + 필터링 spawn env
     eventBus.js               — EventEmitter pub/sub (replay 200)
@@ -118,6 +121,8 @@ server/
     worktreeService.js        — Git worktree 관리
   public/
     app.js                    — Preact SPA 진입 (ES module, P8-2), NavSidebar + App + mount (~320줄)
+    theme-init.js             — K-2c CSP-safe 테마 부트스트랩 (FOUC 방지) — head 에서 styles 보다 먼저 로드, localStorage `palantir.theme` ∈ {light, dark, system} 읽고 `<html data-theme="...">` + `<meta name="theme-color">` 동적 갱신
+    index.html / login.html   — entry pages (login.html 은 K-2b 에서 token contract migrate)
     app/main.js               — ESM 부트스트래퍼 (~14줄): configureMarked + import app.js
     app/lib/nav.js            — NAV_ITEMS 공유 모듈 (P9-2)
     app/lib/hooks.js          — re-export barrel (→ hooks/ 디렉토리)
@@ -129,7 +134,7 @@ server/
     app/lib/toast.js          — 토스트 알림
     app/lib/notifications.js  — Browser notifications + tab pulse (P7-4)
     app/lib/a11y.js           — clickableProps() 키보드 접근성 유틸
-    app/components/
+    app/components/           — 25 ESM 컴포넌트
       ManagerView.js          — Manager 레이아웃 셸 (P8-5)
       ManagerChat.js          — Manager 채팅 패널 (P8-5)
       SessionGrid.js          — Task 세션 그리드 (P8-5)
@@ -138,11 +143,13 @@ server/
       ConversationPanel.js    — 대화 패널 (P9-4)
       TaskModals.js           — NewTaskModal, ExecuteModal, TaskDetailPanel (P7-1)
       DashboardView.js        — 대시보드 뷰
+      AttentionStrip.js       — Dashboard 상단 attention strip (UI/UX cleanup)
       BoardView.js            — Task Board 뷰 (칸반)
       ProjectsView.js         — 프로젝트 관리 뷰
       AgentsView.js           — 에이전트 프로필 관리 뷰
       PresetsView.js          — Worker Preset 관리 뷰 (P10E)
       SkillPacksView.js       — Skill Pack 관리 뷰 (P10G)
+      McpTemplatesView.js     — MCP server template 관리 뷰 (M3-UI, `#mcp-servers`)
       GalleryView.js          — Skill Pack 갤러리 브라우저
       RunInspector.js         — Run 상세 + preset drift 감사 (P10F)
       DriftDrawer.js          — Dispatch drift 서랍 패널
@@ -150,13 +157,14 @@ server/
       MentionInput.js         — @mention 자동완성 입력
       Dropdown.js             — 공통 드롭다운 컴포넌트
       EmptyState.js           — 빈 상태 표시 컴포넌트
+      Modal.js                — 공통 Modal primitive (Phase F, focus trap + ESC stack)
       PackPreviewModal.js     — Skill Pack 미리보기 모달 (P10G)
       UrlInstallDialog.js     — URL 기반 Skill Pack 설치 다이얼로그
-    styles.css                — 전체 스타일
+    styles.css                — 전체 스타일 (K-2 라이트 모드 swap 적용)
     styles/fonts.css          — Inter @font-face 정의 (self-hosted)
-    styles/tokens.css         — CSS 디자인 토큰 (색상, 간격, 타이포 변수)
+    styles/tokens.css         — CSS 디자인 토큰 (색상, 간격, 타이포 변수). K-2a 의 `[data-theme="light"]` 블록 + `@media (prefers-color-scheme: light) :root:not([data-theme])` 블록이 lock-step 으로 양쪽 정의 (CSS 가 selector 를 media 경계 가로질러 공유 못 하므로)
     vendor/                   — Preact/HTM UMD/ESM 번들 + marked + DOMPurify + Inter woff2 (빌드 불필요)
-  tests/                      — 53 테스트 파일 + e2e 2개
+  tests/                      — 59 테스트 파일 + e2e 2개
     codex-mcp-flatten.test.js — M1: flatten 유틸 unit (TOML encoding, fail-closed shape/leaf)
     codex-user-config-scan.test.js — M2: ~/.codex/config.toml alias 스캔 + 충돌 감지 unit
     conversation.test.js      — Phase 1.5/2 parent-notice + registry + rotation
@@ -180,7 +188,7 @@ server/
     helpers/                  — jsdom-preact.js 등
 ```
 
-> **835 tests** 기준 (PR #116 시점). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙.
+> **900 tests** 기준 (PR #156 시점, 2026-04-29). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙. 단독 실행 시 모두 PASS, 풀 런 시 race-y flake 1~2건 알려진 패턴 (`engine: system:init event sets sessionId` 등 — `docs/handoff-post-k2-launch-2026-04-29.md` §6 참고).
 
 ## Key Patterns
 
@@ -255,14 +263,14 @@ server/
 - 빌드 파이프라인 없음. `app.js`는 App/mount 셸. 실제 뷰/모달은 `app/components/` ESM 모듈에 있음
 - `server/public/app/main.js` 는 최소 부트스트래퍼 (~14줄): `configureMarked()` + `import('../app.js')`. window bridge 없음 (P9에서 전부 제거)
 - 모든 ESM 컴포넌트는 vendor/ 에서 직접 import (`import { h } from '../../vendor/preact.module.js'` 등)
-- 해시 라우팅: `#dashboard`, `#manager`, `#board`, `#projects`, `#agents`, `#skills`, `#presets`
+- 해시 라우팅: `#dashboard`, `#manager`, `#board`, `#projects`, `#agents`, `#skills`, `#presets`, `#mcp-servers`
 - **클라이언트 async fence 패턴** (Phase 6/7): id-change 시 `setRun(null); setEvents([])` 동기 reset + await 이전 `myId = conversationId` 캡처 + commit 전 `activeIdRef.current === myId` 비교. `useDispatchAudit` 는 `requestSeqRef` 시퀀스 토큰.
 
 ### DB
 - SQLite WAL 모드. `palantir.db` (gitignored)
-- 서버 시작 시 `db/migrations/` 자동 실행 (현재 001~019)
+- 서버 시작 시 `db/migrations/` 자동 실행 (현재 001~021)
 - `better-sqlite3` 동기 API 사용
-- `runs.manager_layer`, `runs.conversation_id` (009), `dispatch_audit_log` (010), `project_briefs` (008), `worker_presets` (018), `tasks.preferred_preset_id` index (019) 등 v3 필드 존재
+- `runs.manager_layer`, `runs.conversation_id` (009), `dispatch_audit_log` (010), `project_briefs` (008), `worker_presets` (018), `tasks.preferred_preset_id` index (019), `mcp_server_templates.updated_at` (020 — RunInspector 가 preset snapshot 캡처 이후 template 변경을 drift 로 감지하기 위함), `skill_packs.origin_type` enum CHECK trigger (021 — `bundled|url|manual|import`) 등 v3 필드 존재
 
 ## Style Guidelines
 
@@ -302,3 +310,6 @@ server/
 - **Codex MCP flatten (M1)**: `-c mcp_servers=<JSON>` 재도입 금지. 무조건 `flattenMcpToCodexArgs` 경유. 테스트 assertion 도 leaf-level dotted path 검사여야 함 (`/^mcp_servers\.<alias>\.<key>=/`)
 - **M2 legacy scan**: 새 SSE channel 또는 event consumer 만들 때 `mcp:legacy_alias_conflict` payload shape `{ alias, source, message }` 를 확장하지 말 것 — M3 (file-based transport) 때 event 자체가 사라지거나 의미 바뀔 수 있음. cardinality 규율 유지
 - **`preset-route.test.js`**: 테스트에서 `createApp` 호출 시 반드시 `authToken: null` 명시. 안 넘기면 `process.env.PALANTIR_TOKEN` 으로 fall back 해서 sibling test 가 token 설정한 상태면 401 flake 발생 (PR #117 에서 근본 해결)
+- **K-2 라이트/다크 토큰 lock-step**: `tokens.css` 의 `:root[data-theme="light"]` 블록과 `@media (prefers-color-scheme: light) :root:not([data-theme])` 블록은 중복 정의 (CSS 가 selector 를 media 경계 가로질러 공유 못 함). 새 의미 토큰 추가 시 양쪽 다 lock-step 갱신 필요. 새 컴포넌트가 색을 인라인 하드코딩 하면 라이트 모드에서 회귀 — 반드시 `var(--<token>)` 사용. K-2 launch 직후 후속 후보는 `docs/backlog.md` Ready 섹션 참고
+- **`theme-init.js` 위치 고정**: `server/public/theme-init.js` 는 반드시 `<head>` 에서 `tokens.css` 보다 먼저 로드. ESM 으로 옮기거나 defer 붙이면 FOUC 회귀. CSP `script-src 'self'` 유지를 위해 인라인 `<script>` 화 금지
+- **`mcp_server_templates` 와 preset snapshot drift**: preset snapshot 은 template **id 만** 저장. body 변경은 `mcp_server_templates.updated_at` (migration 020) 으로 감지 — RunInspector 가 snapshot 시점 vs current `updated_at` 비교. boot seed upsert 는 내용 실제 변경 시에만 `updated_at` 을 bump (no-op 변경으로 false drift 만들지 말 것)

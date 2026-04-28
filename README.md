@@ -156,6 +156,14 @@ MCP server templates and skill pack management. Browse the gallery registry, ins
 
 Worker Preset management. Bundle agent profile + plugin refs + MCP server templates + system prompt into a reusable preset. Link presets to tasks via `preferred_preset_id`. Run Inspector shows frozen snapshot vs current preset drift.
 
+### 8. MCP Servers (#mcp-servers)
+
+MCP server template CRUD UI (M3-UI, PR #119). Add / edit / delete the templates that Skill Packs and Presets reference by alias. Templates carry `command`, `args`, `env`, `allowed_env_keys`, and `updated_at` (migration 020) — RunInspector compares the snapshot's `updated_at` against the current template to surface body-level drift even though the snapshot only stores the template id.
+
+### Theme toggle
+
+Light mode launched in PR #150~#153 (K-2). The NavSidebar bottom toggle is 3-state — ◑ system (auto via `prefers-color-scheme`) / ☀ light / ☽ dark — and the choice is stored in `localStorage.palantir.theme`. `server/public/theme-init.js` runs in `<head>` before `tokens.css` to set `<html data-theme>` and patch `<meta name="theme-color">` so there is no FOUC and the mobile chrome color follows the active theme.
+
 ## API
 
 REST API for external control. When auth is enabled, include `Authorization: Bearer <token>` header.
@@ -275,6 +283,15 @@ GET    /api/worker-presets/:id         — get
 PATCH  /api/worker-presets/:id         — update
 DELETE /api/worker-presets/:id         — delete (app-level cascade: tasks.preferred_preset_id → NULL)
 GET    /api/worker-presets/plugin-refs — available plugin directories
+```
+
+### MCP Server Templates (M3-UI, PR #119)
+```
+GET    /api/mcp-server-templates       — list
+POST   /api/mcp-server-templates       — create { alias, command, args?, env?, allowed_env_keys? }
+GET    /api/mcp-server-templates/:id   — get
+PATCH  /api/mcp-server-templates/:id   — update (bumps `updated_at` so RunInspector can show drift vs preset snapshot)
+DELETE /api/mcp-server-templates/:id   — delete (rejected if a preset references it)
 ```
 
 ### Skill Packs (Phase 10G)
@@ -413,7 +430,7 @@ hashes. Deleting a preset later does not erase past snapshot rows;
 - **Worker agents**: tmux session + git worktree isolation
 - **Manager agents**: Claude Code CLI (stream-json NDJSON) OR Codex CLI (`codex exec --json` + thread resume), selected per agent profile
 - **Real-time**: SSE (Server-Sent Events) with `Last-Event-ID` replay
-- **Tests**: Node.js built-in test runner + supertest + Playwright e2e (792 tests at Phase 10G merge)
+- **Tests**: Node.js built-in test runner + supertest + Playwright e2e (900 tests at PR #156, 2026-04-29)
 
 ## Development
 
@@ -422,12 +439,14 @@ npm test     # run tests
 npm run dev  # dev server
 ```
 
-Data is stored in `palantir.db` (SQLite). Auto-migrated on server start (`server/db/migrations/001..019_*.sql`).
+Data is stored in `palantir.db` (SQLite). Auto-migrated on server start (`server/db/migrations/001..021_*.sql`; the latest two are `020_mcp_template_updated_at.sql` and `021_skill_pack_origin_type_check.sql`).
 
 See also:
 - `docs/specs/manager-v3-multilayer.md` — the v3 redesign spec (lock-in + phase history)
 - `docs/specs/worker-preset-and-plugin-injection.md` — Phase 10 Worker Preset spec
 - `docs/specs/skill-packs.md` — Skill Pack spec
+- `docs/specs/light-theme-k2-brief-2026-04-28.md` — K-2 light mode launch brief (LAUNCHED stamp)
+- `docs/handoff-post-k2-launch-2026-04-29.md` — UI/UX cleanup + K-2 launch series handoff
 - `docs/test-scenarios.md` — QA scenarios (`PRJ`, `TSK`, `BRD`, `RUN`, `INS`, `MGR`, `PM`, `DRIFT`, `ROUTER`, `SSE`, `REG`, `PRESET`, …)
 - `CLAUDE.md` — project conventions + autonomous-mode working style
 

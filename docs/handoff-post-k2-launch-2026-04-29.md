@@ -1,9 +1,10 @@
 # Handoff: UI/UX Cleanup Follow-up 시리즈 + K-2 라이트 모드 LAUNCHED
 
-> **상태: 전체 완료** — 2026-04-26 ~ 2026-04-28 세션 (총 17 PR / ~30 Codex async review).
+> **상태: 전체 완료** — 2026-04-26 ~ 2026-04-29 세션 (17 PR launch + 3 PR post-launch fixups = 총 20 PR / ~30 Codex async review).
 >
 > 이 파일은 새 세션 / 재입장 시 컨텍스트 복원을 위한 한 화면 요약이다.
 > 자세한 phase 별 산출물은 각 brief 의 §7 진행 기록을 본다.
+> Post-launch 후속 정리는 §9 참고.
 
 ---
 
@@ -47,11 +48,11 @@
 
 토글 위치: NavSidebar 하단 (◑ system / ☀ light / ☽ dark) — 모바일에서는 hide.
 
-## 4. 현재 기준선 (2026-04-29 세션 시작 시점)
+## 4. 현재 기준선 (2026-04-29 세션 종료 시점)
 
-- 브랜치: `main` HEAD = `cc0e010` (#153 K-2d)
-- 테스트: **900/900 PASS** (단일 풀 런 기준)
-  - race-y flake 1~2건은 brief Test-Stabilize 에 명시된 알려진 패턴 (단독 실행 시 항상 PASS)
+- 브랜치: `main` HEAD = `58e48ce` (#156 — SkillPacksView MCP 템플릿 콜랩서블 제거; §9 post-launch fixups 참고)
+- 테스트: **900 tests** (단독 실행 시 모두 PASS, 풀 런 시 알려진 race-y flake 1~2건)
+  - 알려진 flake: `engine: system:init event sets sessionId` 등 — brief Test-Stabilize 에 명시된 패턴, 단독 실행 시 항상 PASS
 - Open PR: 0 — 모든 작업 commit/push/squash-merge 완료
 - Local working tree: clean
 - Codex CLI: 0.120.0
@@ -111,3 +112,20 @@ docs/handoff-post-k2-launch-2026-04-29.md 참고.
 - 백로그: `docs/backlog.md`
 - Codex 교차검증 artifact: `.ao/artifacts/ask/ask-codex-2026042{6,7,8}-*.jsonl`
 - 워크플로우 가이드: `CLAUDE.md` "Working style (autonomous mode default ON)"
+
+## 9. Post-launch fixups (2026-04-29, #154~#156)
+
+K-2 launch (#153) 직후 같은 날 이어진 housekeeping 3 PR. 모두 launch 직후 발견된 작은 결함/중복으로, K-2 본 작업의 일부로 간주해 같은 handoff 에 stamp.
+
+- **#154** docs(handoff) — 본 handoff 문서 + `backlog.md` Last updated 2026-04-29 stamp. 산출물 문서뿐이라 npm test 영향 없음.
+
+- **#155** fix(board): ExecuteModal task null deref → BoardView 빈 화면 (`5569ea3`)
+  - **증상**: BoardView 본문 전체가 빈 화면 (트리 throw).
+  - **원인**: `TaskModals.js:302` 에서 `task.preferred_preset_id` 를 옵셔널 체이닝 없이 접근. htm tagged template 이 자식 `${...}` 표현식을 tag 호출 *전*에 eager evaluate 하므로 `<\${Modal} open=\${open && !!task}>` 게이트가 자식 평가를 막지 못함 — task 가 null 인 첫 mount 에서 throw.
+  - **fix**: `task?.preferred_preset_id` 로 옵셔널 체이닝. 같은 라인 두 번째 occurrence 는 첫 번째의 단축평가로 보호됨.
+  - **회귀 가드**: htm 의 자식 eager evaluation 특성상, Modal `open` 게이트는 자식 evaluation 을 막지 않는다 — 모달 내부에서 nullable prop 접근 시 항상 옵셔널 체이닝.
+
+- **#156** ui(skillpacks): MCP 템플릿 콜랩서블 제거 — `#mcp-servers` 와 중복 (`58e48ce`)
+  - **배경**: M3-UI (PR #119) 에서 `#mcp-servers` 라우트 + `McpTemplatesView` 가 별도 페이지로 추가되면서, `SkillPacksView` 본문의 "MCP 템플릿 보기" 토글 + 콜랩서블 read-only 표가 그 페이지와 완전 중복.
+  - **제거 범위** (~38 라인): `SkillPacksView.js` showTemplates state + 토글 버튼 + 콜랩서블 섹션 / `copy.js` 7개 라벨 (`actionShowTemplates`, `actionHideTemplates`, `templatesTitle`, `templatesAlias`, `templatesCommand`, `templatesDescription`, `templatesAllowedEnv`) / `styles.css` `.skill-templates-*` 6개 룰.
+  - **유지**: 편집 모달 안의 "MCP 서버" 탭 (스킬팩이 어떤 MCP alias 를 attach 하는지 + env_overrides 입력) — 의미가 다름. templates fetch 도 모달 MCP 탭 + PresetsView 에서 계속 사용되므로 유지.
