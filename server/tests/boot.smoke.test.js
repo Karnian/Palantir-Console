@@ -130,6 +130,34 @@ test('boot: styles/tokens.css defines the core design tokens', async (t) => {
   }
 });
 
+test('boot: styles/tokens.css defines the Theme Contract α semantic tokens', async (t) => {
+  const app = await createTestApp(t);
+  const res = await request(app).get('/styles/tokens.css');
+  // Phase Theme Contract α (2026-04-28): semantic surface tokens —
+  // recurring "translucent status surface" patterns get a single
+  // source of truth before Phase Theme Contract β starts adopting
+  // them across styles.css. A rename or drop here would break every
+  // adopted call site silently (var() with no fallback resolves to
+  // empty), so this gate stays alongside the existing core-token
+  // smoke check.
+  for (const v of [
+    '--warning-bg-subtle',
+    '--warning-border-subtle',
+    '--status-failed-bg-subtle',
+    '--status-failed-border-subtle',
+    '--success-bg-subtle',
+    '--info-bg-subtle',
+    '--accent-bg-subtle',
+    '--focus-ring',
+    '--field-bg',
+    '--surface-hover',
+    '--scrollbar-thumb',
+    '--scrollbar-thumb-hover',
+  ]) {
+    assert.match(res.text, new RegExp(`${v}\\s*:`), `${v} defined`);
+  }
+});
+
 test('boot: every fallback-less var() in styles.css is defined in tokens.css', async (t) => {
   // Token parity check. Codex spotted that styles.css references
   // `--bg-tertiary` and `--status-error` via var() with no fallback, but
