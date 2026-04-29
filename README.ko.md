@@ -441,12 +441,12 @@ PATCH  /api/runs/:id/skill-packs/checks — 팩 체크 업데이트
 - **Worker 에이전트**: tmux 세션 + git worktree 격리
 - **Manager 에이전트**: Claude Code CLI(stream-json NDJSON) 또는 Codex CLI (`codex exec --json` + thread resume). 에이전트 프로필 단위로 선택
 - **실시간**: SSE (Server-Sent Events) + `Last-Event-ID` 재생
-- **테스트**: Node.js built-in test runner + supertest + Playwright e2e (PR #160, 2026-04-29 시점 901 tests)
+- **테스트**: Node.js built-in test runner + supertest (902 unit/integration) + Playwright e2e (smoke + manager + a11y 32 + visual 32). PR #169, 2026-04-29 시점.
 
 ## 개발
 
 ```bash
-npm test          # 전체 테스트 (901 unit/integration)
+npm test          # 전체 테스트 (902 unit/integration)
 npm run test:e2e  # Playwright e2e (smoke + manager + a11y + visual)
 npm run test:a11y # axe-core a11y 전용 (K-4, 32 시나리오 — 8 routes × 2 themes × 2 viewports)
 npm run test:visual # Playwright screenshot diff (K-5, 동일 32 시나리오)

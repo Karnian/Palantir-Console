@@ -1,18 +1,29 @@
-# Handoff: UI/UX Cleanup Follow-up 시리즈 + K-2 라이트 모드 LAUNCHED + K-3 cleanup batch
+# Handoff: UI/UX Cleanup Follow-up + K-2 라이트 모드 LAUNCHED + K-3 + K-4 + K-5
 
-> **상태: 전체 완료** — 2026-04-26 ~ 2026-04-29 세션 (17 PR launch + 3 PR post-launch fixups + 3 PR K-3 cleanup batch = 총 23 PR / ~33 Codex async review).
+> **상태: 전체 완료** — 2026-04-26 ~ 2026-04-29 세션 (총 **41 PR** / ~60 Codex async review):
+> - UI/UX cleanup follow-up 16 PR (#129~#144)
+> - K-2 hybrid path + launch 9 PR (#145~#153)
+> - Post-launch fixups 3 PR (#154~#156)
+> - 정합화 sync 1 PR (#157)
+> - K-3α/β cleanup batch 4 PR (#158~#161)
+> - K-4 a11y automation 6 PR (#162~#167) — spec + impl + 4 PR baseline cleanup → waiver 0
+> - K-5 visual regression 2 PR (#168~#169) — spec + impl + 32 baseline
+>
+> 합: **16+9+3+1+4+6+2 = 41 PR**
 >
 > 이 파일은 새 세션 / 재입장 시 컨텍스트 복원을 위한 한 화면 요약이다.
 > 자세한 phase 별 산출물은 각 brief 의 §7 진행 기록을 본다.
-> Post-launch 후속 정리는 §9, K-3α/β cleanup batch 는 §10 참고.
+> §9 post-launch fixups, §10 K-3 cleanup batch, §11 K-4 a11y launch, §12 K-5 visual regression launch 참고.
 
 ---
 
 ## 1. 한 줄 요약
 
-다크-only Palantir Console 에 라이트 모드 (system 자동 감지 + 사용자 토글) 가 들어갔고, 그 사전 작업으로 UI 카피 한국어 통일 / e2e selector attribute 화 / 디자인 토큰 정리 / race-y 테스트 안정화 / semantic 토큰 인프라 도입 / JS 인라인 색 토큰화 가 모두 끝났다. 17 PR 모두 main merge 완료.
+다크-only Palantir Console 에 라이트 모드 (system 자동 감지 + 사용자 토글) 가 들어갔고, 그 사전 작업으로 UI 카피 한국어 통일 / e2e selector attribute 화 / 디자인 토큰 정리 / race-y 테스트 안정화 / semantic 토큰 인프라 도입 / JS 인라인 색 토큰화 가 모두 끝났다 (#129~#153, 16 + 9 = 25 PR). 그 위에 K-2 launch 후속 후보 5건이 모두 phase 화되어 종결: post-launch 3 (#154~#156) + 정합화 1 (#157) + K-3 4 (#158~#161) + K-4 6 (#162~#167) + K-5 2 (#168~#169). 합 41 PR.
 
-## 2. 전체 PR 시리즈 (17 PR)
+## 2. K-2 launch core 시리즈 (#137~#153, 8 + 5 + 4 = 17 PR)
+
+> 이 §2 는 본 handoff 의 origin scope (K-1b ~ K-2 launch). 그 이전 사전 작업 (Phase F~K-1a, #129~#136 = 8 PR) 은 brief `docs/specs/ui-ux-cleanup-followup-2026-04-26.md` §7 진행 기록. 그 이후 phase (#154~#169 = 16 PR) 는 §9 (post-launch fixups) / §10 (K-3) / §11 (K-4) / §12 (K-5) 참고.
 
 ### 2.1 UI/UX cleanup follow-up (8 PR, brief: `docs/specs/ui-ux-cleanup-followup-2026-04-27.md`)
 - **#137** K-1b — RunInspector / DriftDrawer / TaskModals 한국어화 + a11y 강화
@@ -50,26 +61,41 @@
 
 ## 4. 현재 기준선 (2026-04-29 세션 종료 시점)
 
-- 브랜치: `main` HEAD = `b3d8a2a` (#160 — K-3β tokens.css light blocks lock-step 자동 가드; §10 K-3 cleanup batch 참고)
-- 테스트: **901 tests** (단독 실행 시 모두 PASS, 풀 런 시 알려진 race-y flake 1~2건)
-  - 알려진 flake: `engine: system:init event sets sessionId` 등 — brief Test-Stabilize 에 명시된 패턴, 단독 실행 시 항상 PASS
+- 브랜치: `main` HEAD = `1e5b866` (#169 — K-5 visual regression launch; §12 참고)
+- 테스트:
+  - **node `npm test`**: **902 tests** (단독 실행 모두 PASS, 풀 런 시 race-y flake 1~2건 알려진 패턴)
+  - **e2e a11y `npm run test:a11y`**: **32/32 PASS** (waiver 0)
+  - **e2e visual `npm run test:visual`**: **32/32 PASS** (32 PNG baseline, isolated server :4189)
+  - 합 **902 + 32 + 32 = 966 tests**
 - Open PR: 0 — 모든 작업 commit/push/squash-merge 완료
 - Local working tree: clean
 - Codex CLI: 0.125.0
+- **3-layer K-2 token contract 방어 완성**:
+  1. **K-3β** (build-time) — tokens.css 두 light 블록 lock-step
+  2. **K-4** (runtime axe) — WCAG rule 검증
+  3. **K-5** (runtime visual) — Playwright screenshot diff
 
-## 5. 후속 후보 (모두 deferred / nice-to-have)
+## 5. K-2 launch 후속 후보 처리 (모두 종결)
 
-`docs/backlog.md` Ready 섹션에도 동일 목록 (canonical):
+`docs/backlog.md` 와 동기. 5건 모두 phase 화 후 종결:
 
-1. ~~**ManagerChat dotColor `'#22c55e'`**~~ — K-3α PR #158 에서 `--status-active-bright` 의미 토큰 신규로 종결 (option B: 의미 분리).
+1. ~~**ManagerChat dotColor `'#22c55e'`**~~ — K-3α PR #158 (`--status-active-bright` 의미 토큰 신규, option B: 의미 분리).
 
-2. ~~**`--field-bg` / `--surface-hover` adoption**~~ — K-3α PR-B 에서 종결. `--field-bg` 는 alias 정정 (`var(--bg-base)`) + `.form-input/.form-textarea/.form-select` adopt. `--surface-hover` 는 ~6개 hover 사용처 의미 분화 (selection/row-highlight/interactive-affordance) 라 단일 alias 부적합 → 삭제. boot.smoke.test.js 의 토큰 가드 리스트도 동기 갱신. 단일 의미 consumer 와 함께 재도입.
+2. ~~**`--field-bg` / `--surface-hover` adoption**~~ — K-3α PR #159. `--field-bg` alias 정정 (`var(--bg-base)`) + form 컨트롤 adopt. `--surface-hover` 는 hover 의미 분화로 단일 alias 부적합 → 삭제 (boot.smoke 토큰 가드 동기).
 
-3. **K-2 시각 회귀 자동화** — Playwright screenshot diff (다크/라이트 양쪽). 현재는 manual smoke. 별도 phase 권장.
+3. ~~**K-2 시각 회귀 자동화**~~ — **K-5 LAUNCH** PR #168 (spec) + #169 (impl). Playwright screenshot diff 32 시나리오, isolated webServer (:4189, fresh DB+HOME+OPENCODE+CODEX), 32 PNG baseline (920KB). §12 참고.
 
-4. **WCAG AA 자동 검증** — axe-core / pa11y CI 도입. 현재 contrast 는 Codex 측정으로 검증 (light 기준 status/priority/accent 모두 ≥4.5:1). 자동화는 별도 phase.
+4. ~~**WCAG AA 자동 검증**~~ — **K-4 LAUNCH** PR #162-#167. axe-core 32 시나리오, transitional waiver 시스템, baseline 30→0 (4 PR followup cleanup). §11 참고.
 
-5. ~~**K-2 brief 업데이트**~~ — K-3β PR #160 에서 종결. `boot.smoke.test.js` 의 새 테스트 `tokens.css light blocks lock-step (explicit override === system @media)` 가 두 light 블록 (`[data-theme="light"]` + `@media prefers-color-scheme:light :root:not([data-theme])`) 의 token key set + value 일치를 자동 검증. 한 쪽에만 추가하면 빌드 fail. CLAUDE.md / AGENT.md 의 K-2 lock-step 항목도 "테스트가 막는 계약" 으로 stamp.
+5. ~~**K-2 brief 업데이트** (lock-step 가드 문서화)~~ — K-3β PR #160. `boot.smoke.test.js` 가 두 light 블록 token key/value 일치 자동 검증.
+
+K-5 launch 후 추가로 분리된 nice-to-have (deferred, 사용자 트리거 시 별도 phase):
+- **K-5-followup**: 모달/드로어 visual regression
+- **K-5 NIT**: `data-dynamic` → `data-visual-mask` 이름 변경
+- **K-4 NIT**: moderate severity gate 승격 (현재 report-only)
+- **K-4-card-markup NIT**: heading semantics 복원 (`<h3>` 별도 위치)
+- **interactive state visual** (hover/focus/pressed)
+- **performance regression** (LCP/CLS)
 
 ## 6. 알려진 함정 / 회귀 주의점
 
@@ -88,19 +114,23 @@
 ## 7. 재입장 prompt 예시
 
 ```
-docs/handoff-post-k2-launch-2026-04-29.md 참고.
+docs/handoff-post-k2-launch-2026-04-29.md 참고. K-2 launch 후속 후보
+5건 모두 종결 (§5). K-3α/β + K-4 + K-5 phase 모두 LAUNCHED. 즉시
+착수 가능한 phase 없음. 다음 중 선택:
 
-다음 중 하나 선택:
+(1) K-5 launch 후 분리된 nice-to-have (§5 하단) 중 하나 진행
+   - K-5-followup (모달 visual regression)
+   - K-5 NIT (data-dynamic → data-visual-mask 이름 변경)
+   - K-4 NIT (moderate severity gate 승격)
+   - K-4-card-markup NIT (heading semantics 복원)
+   - interactive state visual (hover/focus/pressed)
+   - performance regression (LCP/CLS)
 
-(1) 후속 후보 (§5) 중 하나 진행
-   - ManagerChat green 토큰 통합
-   - --field-bg / --surface-hover adoption
-   - Playwright 시각 회귀 자동화 (다크/라이트)
-   - axe-core / pa11y WCAG 자동화
+(2) Data-wait / Trigger-wait 항목 (docs/backlog.md 참고)
+   - D1 M3 Codex MCP env argv leak (결정 포인트 2026-05-06~5-13)
+   - T1 Phase 3b Claude PM resume (사용자 선언 트리거)
 
-(2) 새 기능 / 다른 백로그 (M3 / Phase 3b 등 — handoff-post-scenario-review.md 참고)
-
-(3) 기타 — 사용자 지정
+(3) 새 기능 / 다른 백로그
 ```
 
 ## 8. 참고

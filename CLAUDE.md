@@ -188,7 +188,7 @@ server/
     helpers/                  — jsdom-preact.js 등
 ```
 
-> **901 tests** 기준 (PR #160 시점, 2026-04-29 — K-3β 가 boot smoke 1건 추가). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙. 단독 실행 시 모두 PASS, 풀 런 시 race-y flake 1~2건 알려진 패턴 (`engine: system:init event sets sessionId` 등 — `docs/handoff-post-k2-launch-2026-04-29.md` §6 참고).
+> **902 tests** 기준 (PR #169 시점, 2026-04-29 — K-4-fc-pr3 의 chip-token 가드 cases 확장). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙. 단독 실행 시 모두 PASS, 풀 런 시 race-y flake 1~2건 알려진 패턴 (`engine: system:init event sets sessionId` 등 — `docs/handoff-post-k2-launch-2026-04-29.md` §6 참고). e2e: a11y 32 + visual 32 (별도, 각각 `npm run test:a11y` / `test:visual`).
 
 ## Key Patterns
 
