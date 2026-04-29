@@ -1,9 +1,9 @@
 # Palantir Console Backlog
 
-> Last updated: 2026-04-29 (post PR #160 — K-2 라이트 모드 launch + post-launch fixups #154~#156 + K-3 cleanup batch #158~#160 모두 머지)
+> Last updated: 2026-04-29 (post PR #169 — K-2 launch + K-3 cleanup batch + K-4 a11y automation + K-5 visual regression 모두 머지. 본 세션 41 PR 시리즈 종료)
 >
 > 이 문서는 *현재 시점에서* 남은 작업들을 카테고리별로 정리한다.
-> 완료된 작업의 한 화면 요약 + 새 세션 재입장 prompt 는 [`handoff-post-k2-launch-2026-04-29.md`](./handoff-post-k2-launch-2026-04-29.md) 를 본다 (UI/UX cleanup + K-2 launch + §9 post-launch fixups + §10 K-3 cleanup batch). 그 이전 시리즈 (M1/M2/B3 + R1/R3/R4) 는 [`handoff-post-scenario-review.md`](./handoff-post-scenario-review.md) 에 있다.
+> 완료된 작업의 한 화면 요약 + 새 세션 재입장 prompt 는 [`handoff-post-k2-launch-2026-04-29.md`](./handoff-post-k2-launch-2026-04-29.md) 를 본다 (§9 post-launch fixups + §10 K-3 cleanup + §11 K-4 launch + §12 K-5 launch). 그 이전 시리즈 (M1/M2/B3 + R1/R3/R4) 는 [`handoff-post-scenario-review.md`](./handoff-post-scenario-review.md) 에 있다.
 
 ## 카테고리 정의
 
@@ -18,25 +18,64 @@
 
 ## Ready
 
-~~### Phase K-4 — WCAG AA a11y 자동 검증~~ — **LAUNCHED PR #163.** axe-core + a11y.spec.js (32 시나리오) + transitional waiver 시스템. `handoff-post-k2-launch-2026-04-29.md` §11 참고.
+**비어 있음.** 모든 K-2 launch 후속 후보 5건 + K-3α/β cleanup + K-4 a11y automation + K-5 visual regression 모두 종결. 신규 phase 트리거 없음.
+
+진행 가능한 후속 nice-to-have (deferred — 사용자 트리거 시):
+- **K-5-followup** — 모달/드로어 visual regression (K-5 spec §3 비범위 → 별도 phase)
+- **K-5 NIT** — `data-dynamic` → `data-visual-mask` 이름 변경 (의도 명확화) + leaf text 룰 명시
+- **K-4 NIT** — moderate severity gate 승격 (현재 report-only)
+- **K-4-card-markup NIT** — `.agent-card` / `.project-card` heading semantics 복원 (`<h3>` 별도 위치)
+- **interactive state visual** — hover/focus/pressed (Codex K-5 r1 권장 분리)
+- **performance regression** (LCP/CLS) — 별도 phase
 
 ---
 
-UI/UX cleanup follow-up 시리즈 + K-2 라이트 모드 launch + post-launch fixups + K-3 cleanup batch 가 2026-04-26 ~ 2026-04-29 세션에 걸쳐 모두 완료되어 현재 비어있음 (K-4 spec lock-in 진행 중).
+## 최근 완료된 phase 시리즈 (참고)
 
-진행 stamp 는 다음 brief 들의 진행 기록을 본다:
-- `docs/specs/ui-ux-cleanup-followup-2026-04-26.md` §7 — Phase F~K-1a (#130~#135).
-- `docs/specs/ui-ux-cleanup-followup-2026-04-27.md` §7 — Phase K-1b 이후 (#137~#143).
-- `docs/specs/light-theme-k2-brief-2026-04-28.md` (header) — Post-K Cleanup + Theme Contract α/β/γ + K-2a/b/c/d (#145~#153).
-- `docs/handoff-post-k2-launch-2026-04-29.md` §9 — Post-launch fixups (#154 handoff stamp + #155 ExecuteModal task null deref → BoardView 빈 화면 fix + #156 SkillPacksView MCP 템플릿 콜랩서블 제거).
-- `docs/handoff-post-k2-launch-2026-04-29.md` §10 — K-3 cleanup batch (K-3α #158 status-active-bright 토큰 + #159 field-bg adoption / surface-hover 삭제, K-3β #160 token lock-step 자동 가드).
+상세는 모두 `handoff-post-k2-launch-2026-04-29.md` 참고.
 
-후속 후보 (모두 deferred / nice-to-have):
-- ~~**ManagerChat dotColor `'#22c55e'`**~~ — K-3α PR #158 에서 `--status-active-bright` 의미 토큰 신규로 종결.
-- ~~**`--field-bg` / `--surface-hover` adoption**~~ — K-3α PR #159 에서 종결. `--field-bg` 는 alias 정정 (`--bg-base`) + `.form-input/.form-textarea/.form-select` adopt. `--surface-hover` 는 ~6개 hover 사용처가 의미 분화 (selection/row-highlight/interactive) 라 단일 alias 부적합 → 삭제. 단일 의미 consumer 와 함께 재도입.
-- ~~**K-2 token lock-step 자동 가드**~~ — K-3β PR #160 에서 종결. `boot.smoke.test.js` 가 두 light 블록 (`[data-theme="light"]` + `@media prefers-color-scheme:light :root:not([data-theme])`) 의 token key/value 일치 자동 검증. 한 쪽에만 추가하면 빌드 fail.
-- ~~**WCAG AA 자동 검증**~~ — K-4 PR #163 launch. axe-core + 32 시나리오 + transitional waiver 시스템. **K-4-followup 완료**: contrast 정리 (PR #164~166) + card markup 재설계 (PR #167). **waiver 0**.
-- ~~**K-2 시각 회귀 자동화**~~ — **K-5 LAUNCH** PR #169. Playwright screenshot diff (32 시나리오) + dynamic mask + animation/scrollbar 안정화. baseline 1.3MB 32 PNG, macOS arm64 lock-in. **K-2 launch 후속 후보 5건 모두 종결**.
+### K-5 visual regression (LAUNCHED 2026-04-29)
+- **PR #168** spec brief, **#169** impl
+- Playwright screenshot diff 32 시나리오 (8 routes × 2 themes × 2 viewports), isolated webServer (:4189, fresh DB+HOME+OPENCODE+CODEX), threshold `maxDiffPixels: 100, threshold: 0.2`
+- Codex 4 라운드 BLOCK→PASS (DB isolation / host state isolation / prestart bypass fix)
+
+### K-4 WCAG AA a11y automation (LAUNCHED 2026-04-29)
+- **PR #162** spec brief, **#163** impl + **#164~167** baseline cleanup (waiver 30 → **0**)
+- axe-core 32 시나리오, transitional waiver 시스템, 5 라운드 fix 통해 baseline 완전 종결
+- 신규 토큰: `--priority-high-fg`, `--button-primary-bg`, `--origin-url-fg`, `--info-light`. 카드 markup 재설계 (`<article>` + body-spanning trigger button).
+
+### K-3α/β cleanup batch (LAUNCHED 2026-04-29)
+- **PR #158** `--status-active-bright`, **#159** `--field-bg` adoption + `--surface-hover` 삭제, **#160** tokens.css light blocks lock-step 자동 가드, **#161** stamp
+- K-2 launch 후속 후보 #1, #2, #5 종결
+
+### K-2 라이트 모드 launch (LAUNCHED 2026-04-28)
+- **PR #145~#153** Post-K cleanup + Theme Contract α/β/γ + K-2a/b/c/d
+- `[data-theme="light"]` 22 의미 토큰 + system 자동 + 사용자 토글 + FOUC 방지 theme-init.js
+
+### UI/UX cleanup follow-up (LAUNCHED 2026-04-26~27)
+- **PR #129~#143** Phase F~K-1b (a11y / 한국어화 / 디자인 토큰 / Modal primitive / e2e selector attribute 화) + **#144** docs phase stamp = 16 PR
+
+### Post-launch fixups (2026-04-29)
+- **PR #154** handoff stamp, **#155** ExecuteModal task null deref BoardView 빈 화면 fix, **#156** SkillPacksView MCP 템플릿 콜랩서블 제거
+
+---
+
+## 본 세션 통계 (2026-04-26~04-29)
+
+- **41 PR 시리즈 종료**: #129~#169
+  - UI/UX cleanup follow-up 16 (#129~#144)
+  - K-2 hybrid + launch 9 (#145~#153)
+  - Post-launch fixups 3 (#154~#156)
+  - 정합화 sync 1 (#157)
+  - K-3α/β 4 (#158~#161)
+  - K-4 spec+impl+followup 6 (#162~#167)
+  - K-5 spec+impl 2 (#168~#169)
+- **테스트**: node 902 + e2e a11y 32 + visual 32 = **966 tests**
+- **3-layer K-2 token contract 방어 완성**:
+  1. K-3β (build-time) — tokens.css light blocks lock-step
+  2. K-4 (runtime axe) — WCAG rule 검증, baseline waiver 0
+  3. K-5 (runtime visual) — Playwright screenshot diff
+- **Codex 교차검증**: 모든 PR 머지 전 PASS, BLOCK 8건 모두 fix, NIT 다수 즉시 적용
 
 ---
 
@@ -90,4 +129,5 @@ UI/UX cleanup follow-up 시리즈 + K-2 라이트 모드 launch + post-launch fi
 - Skill Pack v1.0: `docs/specs/skill-pack-gallery.md`
 - Skill Pack v1.1 (draft): `docs/specs/skill-pack-gallery-v1.1.md`
 - Manager UI Proposal: `docs/specs/manager-session-ui.md`
-- 이번 세션 handoff: `docs/handoff-post-scenario-review.md`
+- 이번 세션 handoff: `docs/handoff-post-k2-launch-2026-04-29.md` (UI/UX cleanup + K-2 launch + K-3 + K-4 + K-5 시리즈 41 PR 종료 stamp)
+- 이전 세션 handoff: `docs/handoff-post-scenario-review.md` (M1/M2/B3 + R1/R3/R4)

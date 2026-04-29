@@ -430,12 +430,12 @@ hashes. Deleting a preset later does not erase past snapshot rows;
 - **Worker agents**: tmux session + git worktree isolation
 - **Manager agents**: Claude Code CLI (stream-json NDJSON) OR Codex CLI (`codex exec --json` + thread resume), selected per agent profile
 - **Real-time**: SSE (Server-Sent Events) with `Last-Event-ID` replay
-- **Tests**: Node.js built-in test runner + supertest + Playwright e2e (901 tests at PR #160, 2026-04-29)
+- **Tests**: Node.js built-in test runner + supertest (902 unit/integration) + Playwright e2e (smoke + manager + a11y 32 + visual 32) at PR #169, 2026-04-29
 
 ## Development
 
 ```bash
-npm test          # run tests (901 unit/integration)
+npm test          # run tests (902 unit/integration)
 npm run test:e2e  # Playwright e2e (smoke + manager + a11y + visual)
 npm run test:a11y # axe-core a11y only (K-4, 32 scenarios — 8 routes × 2 themes × 2 viewports)
 npm run test:visual # Playwright screenshot diff (K-5, same 32 scenarios)
