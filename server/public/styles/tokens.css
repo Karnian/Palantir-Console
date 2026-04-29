@@ -89,6 +89,15 @@
    * for body text (~3:1 vs ≥4.5 required). amber-300 dark gives ≈8:1
    * on dark base; amber-800 light gives ≈6:1 on light base. */
   --priority-high-fg: #fcd34d;
+  /* K-4-followup-contrast PR-2 (2026-04-29): button-surface variant of
+   * --accent. The canonical --accent #7c5cfc against white text yields
+   * 4.38:1 — just under the 4.5:1 axe threshold. A slightly darker
+   * `#7659fa` lifts contrast to 4.59:1 while staying within the same
+   * indigo/violet hue family (Codex measured ΔE00 ≈1.33 — perceptual
+   * shift small, brand consistency preserved). Other accent surfaces
+   * (focus rings / chips / borders) keep --accent so the brand color
+   * stays consistent across non-text surfaces. */
+  --button-primary-bg: #7659fa;
 
   /* Priority */
   --priority-low: #6b7280;
@@ -300,6 +309,11 @@
    * background lighter, so we keep the darker amber-800 just for the
    * badge fg. */
   --priority-high-fg: #92400e;
+  /* K-4-followup-contrast PR-2 light — light `--accent #6d28d9` already
+   * yields ≈7.10:1 vs white text, well above 4.5. Alias to --accent so
+   * the light theme button bg stays in lock-step with the canonical
+   * accent (no separate maintenance). */
+  --button-primary-bg: var(--accent);
 
   /* Priority — same shift as status colors. */
   --priority-low: #52525b;
@@ -389,6 +403,7 @@
     --status-queued: #52525b;
     --status-active-bright: #15803d;
     --priority-high-fg: #92400e;
+    --button-primary-bg: var(--accent);
     --priority-low: #52525b;
     --priority-medium: #1d4ed8;
     --priority-high: #b45309;
