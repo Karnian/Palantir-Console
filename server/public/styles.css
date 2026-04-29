@@ -2398,6 +2398,40 @@ body {
   border-color: var(--border-hover);
 }
 
+/* K-4-followup-card-markup (2026-04-29): card-body trigger button.
+   The card outer used to be a single div with role="button" + nested
+   <button> children for edit/delete actions, which axe flagged as
+   `nested-interactive` (serious). Outer is now <article> + a
+   transparent body-spanning <button> for the navigate-to-detail
+   click target, with action buttons living as siblings outside the
+   trigger. Reset all browser button chrome so the trigger blends
+   into the card visually. */
+.project-card-trigger,
+.agent-card-trigger {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  width: 100%;
+  text-align: inherit;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.project-card-trigger:focus-visible,
+.agent-card-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.agent-card-trigger {
+  gap: 8px;
+}
+
 .project-card-header {
   display: flex;
   align-items: center;

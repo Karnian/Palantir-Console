@@ -371,23 +371,23 @@ export function AgentsView({ agents, loading, reloadAgents }) {
           />
         `}
         ${agents.map(a => html`
-          <div key=${a.id} class="agent-card clickable" role="button" tabIndex="0"
-            onClick=${() => setSelectedAgent(a)}
-            onKeyDown=${(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedAgent(a); } }}>
-            <div class="agent-card-top">
-              <div class="agent-card-icon" style=${a.color ? `color: ${a.color}` : ''}>${a.icon || '\u2699'}</div>
-              <div class="agent-card-info">
-                <div class="agent-card-name">${a.name}</div>
-                <div class="agent-card-type">${a.type || 'custom'}</div>
-              </div>
-            </div>
-            ${a.command && html`<div class="agent-card-detail"><span class="agent-detail-label">${AGENTS_LABELS.fieldCommand}:</span> ${a.command}</div>`}
-            <div class="agent-card-detail"><span class="agent-detail-label">${AGENTS_LABELS.fieldMaxConcurrent}:</span> ${a.max_concurrent || 1}</div>
+          <article key=${a.id} class="agent-card">
+            <button class="agent-card-trigger" onClick=${() => setSelectedAgent(a)} aria-label=${a.name}>
+              <span class="agent-card-top">
+                <span class="agent-card-icon" style=${a.color ? `color: ${a.color}` : ''}>${a.icon || '\u2699'}</span>
+                <span class="agent-card-info">
+                  <span class="agent-card-name">${a.name}</span>
+                  <span class="agent-card-type">${a.type || 'custom'}</span>
+                </span>
+              </span>
+              ${a.command && html`<span class="agent-card-detail"><span class="agent-detail-label">${AGENTS_LABELS.fieldCommand}:</span> ${a.command}</span>`}
+              <span class="agent-card-detail"><span class="agent-detail-label">${AGENTS_LABELS.fieldMaxConcurrent}:</span> ${a.max_concurrent || 1}</span>
+            </button>
             <div class="agent-card-actions">
-              <button class="ghost" onClick=${(e) => { e.stopPropagation(); setEditAgent(a); setShowModal(true); }}>${COMMON_ACTIONS.edit}</button>
-              <button class="ghost danger" onClick=${(e) => { e.stopPropagation(); handleDelete(a); }}>${COMMON_ACTIONS.delete}</button>
+              <button class="ghost" onClick=${() => { setEditAgent(a); setShowModal(true); }}>${COMMON_ACTIONS.edit}</button>
+              <button class="ghost danger" onClick=${() => handleDelete(a)}>${COMMON_ACTIONS.delete}</button>
             </div>
-          </div>
+          </article>
         `)}
       </div>
       <${AgentModal}
