@@ -376,18 +376,21 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
         ${projects.map(p => {
           const taskCount = tasks.filter(t => t.project_id === p.id).length;
           return html`
-            <div key=${p.id} class="project-card clickable" ...${clickableProps(() => setDetailProject(p))}>
-              <div class="project-card-header">
-                <div class="project-card-title">${p.name}</div>
-                ${taskCount > 0 && html`<span class="project-card-task-count">${taskCount}${PROJECTS_LABELS.taskWord}</span>`}
-              </div>
-              ${p.directory && html`<div class="project-card-dir" title=${p.directory}>\u{1F4C1} ${p.directory}</div>`}
-              ${p.description && html`<div class="project-card-desc">${p.description}</div>`}
-              <div class="project-card-meta">${PROJECTS_LABELS.createdLabel} ${formatTime(p.created_at)}</div>
+            <article key=${p.id} class="project-card">
+              <button class="project-card-trigger" onClick=${() => setDetailProject(p)}
+                aria-label=${p.name}>
+                <span class="project-card-header">
+                  <span class="project-card-title">${p.name}</span>
+                  ${taskCount > 0 && html`<span class="project-card-task-count">${taskCount}${PROJECTS_LABELS.taskWord}</span>`}
+                </span>
+                ${p.directory && html`<span class="project-card-dir" title=${p.directory}>\u{1F4C1} ${p.directory}</span>`}
+                ${p.description && html`<span class="project-card-desc">${p.description}</span>`}
+                <span class="project-card-meta">${PROJECTS_LABELS.createdLabel} ${formatTime(p.created_at)}</span>
+              </button>
               <div class="project-card-actions" style="margin-top:8px;">
-                <button class="ghost small" onClick=${(e) => { e.stopPropagation(); openEdit(p); }}>${COMMON_ACTIONS.edit}</button>
+                <button class="ghost small" onClick=${() => openEdit(p)}>${COMMON_ACTIONS.edit}</button>
               </div>
-            </div>
+            </article>
           `;
         })}
       </div>
