@@ -37,7 +37,12 @@
   /* Text hierarchy */
   --text-primary: #ededef;
   --text-secondary: #a0a0ab;
-  --text-muted: #63636e;
+  /* K-4-followup-contrast (2026-04-29): bumped from #63636e (zinc-600) to
+   * #90909a so muted text passes axe color-contrast (≥4.5:1) on every
+   * dark surface from --bg-base to --bg-hover and the tinted status bgs.
+   * Kept distinct from --text-secondary #a0a0ab so the 3-tier hierarchy
+   * (primary > secondary > muted) survives. */
+  --text-muted: #90909a;
   --text-inverse: #09090b;
 
   /* Accent - indigo/violet */
