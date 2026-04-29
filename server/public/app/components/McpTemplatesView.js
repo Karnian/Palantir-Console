@@ -367,7 +367,7 @@ export function McpTemplatesView() {
               </div>
               <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '4px' }}>
                 <code>${t.command}</code>
-                ${t.args && html` <span style=${{ opacity: 0.7 }}>${argsPreview(t.args)}</span>`}
+                ${t.args && html` <span>${argsPreview(t.args)}</span>`}
               </div>
               ${t.description && html`
                 <p class="skill-pack-desc" style=${{ marginTop: '6px' }}>${t.description}</p>

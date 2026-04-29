@@ -324,6 +324,151 @@ test('boot: styles/tokens.css defines the Theme Contract α semantic tokens', as
   }
 });
 
+test('boot: K-4 skill-pack chip tokens satisfy WCAG AA contrast (closes axe coverage gap)', async (t) => {
+  // K-4-followup-contrast PR-3 r3 (Codex BLOCK fix r3): the a11y.spec.js
+  // axe sweep only renders skill packs that exist in the seed DB —
+  // typically a single `bundled` pack — so it can't catch a regression
+  // in the `.skill-pack-origin.{url,import,manual}` /
+  // `.skill-pack-scope.{global,project}` / `.skill-pack-{mcp,check,tokens}`
+  // chips because those variants never reach the DOM under fresh-DB
+  // baseline. This test computes WCAG AA contrast for each chip directly
+  // from token values + the actual chip background composite (chip tint
+  // over `--bg-elevated`, NOT `--bg-base` — the chip lives inside
+  // `.skill-pack-card { background: var(--bg-elevated) }`). Token edits
+  // that would break either theme fail the build regardless of axe
+  // fixture coverage.
+  const app = await createTestApp(t);
+  const res = await request(app).get('/styles/tokens.css');
+  const css = res.text.replace(/\/\*[\s\S]*?\*\//g, '');
+
+  function extractTokenInBlock(source, anchorRegex, name) {
+    const m = anchorRegex.exec(source);
+    if (!m) throw new Error(`block anchor not found: ${anchorRegex}`);
+    // Find the first `{` at or after the anchor start. If the anchor
+    // pattern itself includes `{`, this lands on that brace; otherwise
+    // we walk to the next one. Without the `at or after`, an anchor
+    // ending with `{` would skip its own brace and grab a nested one
+    // (giving us the wrong block body).
+    let i = m.index;
+    while (i < source.length && source[i] !== '{') i++;
+    if (i >= source.length) throw new Error('opening brace missing');
+    let depth = 1; const start = i + 1; i++;
+    while (i < source.length && depth > 0) {
+      if (source[i] === '{') depth++;
+      else if (source[i] === '}') depth--;
+      i++;
+    }
+    const body = source.slice(start, i - 1);
+    const re = new RegExp(`${name}\\s*:\\s*([^;]+);`);
+    const tokenMatch = re.exec(body);
+    if (!tokenMatch) throw new Error(`token ${name} not found in matched block`);
+    return tokenMatch[1].trim();
+  }
+
+  function rgbFromHex(hex) {
+    const h = hex.replace('#', '');
+    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+  }
+  function srgb(c) {
+    c = c / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  }
+  function lum([r, g, b]) {
+    return 0.2126 * srgb(r) + 0.7152 * srgb(g) + 0.0722 * srgb(b);
+  }
+  function ratio(a, b) {
+    const la = lum(a), lb = lum(b);
+    return ((Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05));
+  }
+  function composite(fg, alpha, bg) {
+    return fg.map((c, i) => Math.round(c * alpha + bg[i] * (1 - alpha)));
+  }
+  function resolve(token, vars) {
+    // Resolve simple `var(--name)` aliases against a vars map.
+    const m = /^var\(\s*(--[a-z0-9-]+)\s*\)$/.exec(token);
+    if (m) {
+      if (!vars[m[1]]) throw new Error(`alias ${token} → undefined`);
+      return resolve(vars[m[1]], vars);
+    }
+    return token;
+  }
+
+  // Pull every token referenced by chip rules from both dark and light blocks.
+  const tokenNames = [
+    '--bg-elevated', '--accent', '--accent-light',
+    '--text-muted', '--text-secondary',
+    '--info', '--info-light', '--success',
+    '--origin-url-fg',
+  ];
+  const darkVars = {};
+  const lightVars = {};
+  for (const n of tokenNames) {
+    darkVars[n]  = extractTokenInBlock(css, /:root\s*\{/, n);
+    lightVars[n] = extractTokenInBlock(css, /:root\[data-theme="light"\]\s*\{/, n);
+  }
+
+  // Each chip lives inside `.skill-pack-card { background: var(--bg-elevated) }`.
+  // The chip's own background is `color-mix(in srgb, <hue> <alpha>, transparent)`
+  // (or `rgba(255,255,255,0.06)` for the default chip tint), so the rendered
+  // chip bg = composite(<hue>, <alpha>, --bg-elevated). We model that exactly,
+  // NOT `--bg-base`, so axe-equivalent contrast is computed (Codex r3 BLOCK
+  // fix on the previous draft that used --bg-base). `--accent-muted` uses
+  // alpha 0.15 in dark / 0.12 in light per tokens.css; cases below pass the
+  // theme-correct alpha via a `[darkAlpha, lightAlpha]` pair for chips that
+  // share the same hue token but differ per theme.
+  const WHITE = [255, 255, 255];
+  function chipBg(vars, hueToken, alpha) {
+    const elevated = rgbFromHex(resolve(vars['--bg-elevated'], vars));
+    if (hueToken === 'WHITE_OVERLAY_06') {
+      // Default chip tint used by `.skill-pack-scope` / `.tokens` / `.mcp` / `.check`:
+      // `background: rgba(255,255,255,0.06)` over --bg-elevated.
+      return composite(WHITE, 0.06, elevated);
+    }
+    const hue = rgbFromHex(resolve(vars[hueToken], vars));
+    return composite(hue, alpha, elevated);
+  }
+  function chipRatio(vars, fgToken, hueToken, alpha) {
+    const fg = rgbFromHex(resolve(vars[fgToken], vars));
+    const bg = chipBg(vars, hueToken, alpha);
+    return ratio(fg, bg);
+  }
+
+  // Coverage matrix — every chip surface a fresh DB might miss, plus
+  // explicit dark/light pairs. Alpha is either a single number or
+  // `[darkAlpha, lightAlpha]` when the theme uses different tint
+  // strength (e.g. `--accent-muted` is 0.15 dark / 0.12 light).
+  const cases = [
+    ['.skill-pack-scope (base)',  '--text-muted',     'WHITE_OVERLAY_06', 0.06],
+    ['.skill-pack-scope.global',  '--accent-light',   '--accent',         [0.15, 0.12]],
+    ['.skill-pack-scope.project', '--info-light',     '--info',           0.15],
+    ['.skill-pack-tokens',        '--text-muted',     'WHITE_OVERLAY_06', 0.06],
+    ['.skill-pack-mcp',           '--accent-light',   'WHITE_OVERLAY_06', 0.06],
+    ['.skill-pack-check',         '--success',        'WHITE_OVERLAY_06', 0.06],
+    ['.skill-pack-priority',      '--text-muted',     'WHITE_OVERLAY_06', 0.06],
+    ['.skill-pack-origin.bundled','--accent-light',   '--accent',         0.12],
+    ['.skill-pack-origin.url',    '--origin-url-fg',  '--origin-url-fg',  0.15],
+    ['.skill-pack-origin.manual', '--text-secondary', '--text-muted',     0.15],
+    ['.skill-pack-origin.import', '--accent-light',   '--accent-light',   0.15],
+  ];
+
+  const failures = [];
+  for (const [name, fgToken, hueToken, alpha] of cases) {
+    for (const [theme, vars] of [['dark', darkVars], ['light', lightVars]]) {
+      const a = Array.isArray(alpha) ? (theme === 'dark' ? alpha[0] : alpha[1]) : alpha;
+      const r = chipRatio(vars, fgToken, hueToken, a);
+      if (r < 4.5) {
+        const fg = resolve(vars[fgToken], vars);
+        failures.push(`${name} (${theme}): ${r.toFixed(2)}:1 (expected ≥4.5:1, fg=${fg}, fgToken=${fgToken}, hue=${hueToken}@${a})`);
+      }
+    }
+  }
+  assert.deepStrictEqual(
+    failures,
+    [],
+    `WCAG AA contrast violation in skill-pack chip tokens (axe coverage gap closer):\n  ${failures.join('\n  ')}`,
+  );
+});
+
 test('boot: every fallback-less var() in styles.css is defined in tokens.css', async (t) => {
   // Token parity check. Codex spotted that styles.css references
   // `--bg-tertiary` and `--status-error` via var() with no fallback, but
