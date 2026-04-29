@@ -447,8 +447,9 @@ PATCH  /api/runs/:id/skill-packs/checks — 팩 체크 업데이트
 
 ```bash
 npm test          # 전체 테스트 (901 unit/integration)
-npm run test:e2e  # Playwright e2e (smoke + manager + a11y)
+npm run test:e2e  # Playwright e2e (smoke + manager + a11y + visual)
 npm run test:a11y # axe-core a11y 전용 (K-4, 32 시나리오 — 8 routes × 2 themes × 2 viewports)
+npm run test:visual # Playwright screenshot diff (K-5, 동일 32 시나리오)
 npm run dev       # 개발 서버
 ```
 

@@ -9,6 +9,7 @@ npm install
 npm start          # http://localhost:4177
 npm test           # node --test (901 tests at PR #160, 2026-04-29 — K-3β +1)
 npm run test:a11y  # axe-core a11y e2e (K-4, 32 시나리오)
+npm run test:visual # Playwright screenshot diff (K-5, 32 시나리오)
 npm run test:e2e   # Playwright e2e
 ```
 
@@ -109,6 +110,7 @@ runtime/mcp/            — MCP config files (Skill Pack runtime, app boot 시 m
 - **K-2 라이트/다크 토큰 lock-step (자동 가드)**: `tokens.css` 의 `:root[data-theme="light"]` 블록과 `@media (prefers-color-scheme: light) :root:not([data-theme])` 블록이 중복 정의 — 새 의미 토큰 추가 시 양쪽 다 갱신. **K-3β (PR #160) 부터 `boot.smoke.test.js` 가 두 블록 key/value 일치 자동 검증** (한 쪽만 추가하면 빌드 fail). 단 alias-only 토큰 (`--field-bg: var(--bg-base)` 등) 은 base 가 light 에서 swap 되어 자동 propagate 되므로 light 블록 명시 불필요 — 테스트는 양쪽 블록에 명시된 토큰만 비교. 새 컴포넌트가 색을 인라인 하드코딩 하면 라이트 모드 회귀 — 반드시 `var(--<token>)` 사용
 - **`theme-init.js` 위치 고정**: `server/public/theme-init.js` 는 반드시 `<head>` 에서 `tokens.css` 보다 먼저 로드 (defer/ESM 변경 시 FOUC 회귀)
 - **K-4 axe-core a11y 가드**: `npm run test:a11y` (32 시나리오 axe scan, K-4 PR #163 부터). 신규 contrast violation 은 waiver 불가 — 즉시 fix. spec: `docs/specs/k4-wcag-a11y-automation-brief.md`
+- **K-5 시각 회귀 가드**: `npm run test:visual` (32 시나리오 Playwright screenshot diff, K-5 PR #169 부터). baseline 은 git 추적, macOS arm64 lock-in. 갱신 PR 은 사유 명시. spec: `docs/specs/k5-visual-regression-brief.md`
 - 환경변수: `PALANTIR_DEFAULT_PM_ADAPTER`, `PALANTIR_CODEX_MANAGER_BYPASS`, Claude/Codex auth 키들
 
 ## 관련 문서
