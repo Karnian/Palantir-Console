@@ -24,57 +24,5 @@
     "approvedBy": "codex (K-4 r2)",
     "expiresAt": "2026-05-29",
     "kind": "structural"
-  },
-  {
-    "route": "board",
-    "theme": "*",
-    "viewport": "*",
-    "ruleId": "color-contrast",
-    "selector": ".board-mode-tab.active",
-    "reason": "K-4 baseline — active mode tab (--accent on --accent-muted text-on-accent chip). K-4-followup-contrast PR-3 (accent-on-accent chips) will fix.",
-    "ownerSurface": "BoardView .board-mode-tab.active",
-    "followupRef": "K-4-followup-contrast-PR3",
-    "approvedBy": "codex (K-4 r2 + K-4-followup r1)",
-    "expiresAt": "2026-05-13",
-    "kind": "transitional"
-  },
-  {
-    "route": "mcp-servers",
-    "theme": "*",
-    "viewport": "*",
-    "ruleId": "color-contrast",
-    "selector": ".skill-pack-card.static",
-    "reason": "K-4 baseline — light theme outlier: McpTemplatesView args span has opacity:0.7 over var(--text-muted); composite hits #8c8c92 on #f4f4f5 ≈ 3.04. Fix in K-4-followup-contrast PR-3 — drop opacity or assign a discrete color.",
-    "ownerSurface": "McpTemplatesView .skill-pack-card.static .small span (opacity composite)",
-    "followupRef": "K-4-followup-contrast-PR3",
-    "approvedBy": "codex (K-4 r2 + K-4-followup r1)",
-    "expiresAt": "2026-05-13",
-    "kind": "transitional"
-  },
-  {
-    "route": "skills",
-    "theme": "*",
-    "viewport": "*",
-    "ruleId": "color-contrast",
-    "selector": ".skill-pack-origin",
-    "reason": "K-4 baseline — likely accent-on-accent or muted-on-tinted variant. PR-3 fix.",
-    "ownerSurface": "SkillPacksView .skill-pack-origin",
-    "followupRef": "K-4-followup-contrast-PR3",
-    "approvedBy": "codex (K-4 r2 + K-4-followup r1)",
-    "expiresAt": "2026-05-13",
-    "kind": "transitional"
-  },
-  {
-    "route": "skills",
-    "theme": "*",
-    "viewport": "*",
-    "ruleId": "color-contrast",
-    "selector": ".skill-pack-scope",
-    "reason": "K-4 baseline — same pattern as .skill-pack-origin. PR-3 fix.",
-    "ownerSurface": "SkillPacksView .skill-pack-scope",
-    "followupRef": "K-4-followup-contrast-PR3",
-    "approvedBy": "codex (K-4 r2 + K-4-followup r1)",
-    "expiresAt": "2026-05-13",
-    "kind": "transitional"
   }
 ]

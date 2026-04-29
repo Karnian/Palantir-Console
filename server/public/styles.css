@@ -2174,7 +2174,10 @@ body {
 }
 
 .board-mode-tab.active {
-  background: var(--accent);
+  /* K-4-followup-contrast PR-3: use --button-primary-bg (introduced in
+     PR-2) so white text contrast clears axe ≥4.5:1 — same pattern as
+     `.primary` button (white on --accent #7c5cfc was 4.38:1). */
+  background: var(--button-primary-bg);
   color: white;
 }
 
@@ -5395,9 +5398,19 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   background: rgba(255, 255, 255, 0.06);
   color: var(--text-muted);
 }
-.skill-pack-scope.global { color: var(--accent); background: var(--accent-muted); }
-.skill-pack-scope.project { color: var(--info); background: color-mix(in srgb, var(--info) 15%, transparent); }
-.skill-pack-mcp { color: #a78bfa; }
+/* K-4-followup-contrast PR-3 (2026-04-29): accent-on-accent text was
+   3.37:1 on dark (--accent #7c5cfc on --accent-muted = ~violet 12%
+   composite). Use --accent-light (dark #a78bfa, light aliased to
+   --accent #6d28d9) for ≥5.43:1 PASS while keeping the violet hue cue. */
+.skill-pack-scope.global { color: var(--accent-light); background: var(--accent-muted); }
+.skill-pack-scope.project {
+  /* K-4-followup-contrast PR-3 r3: --info on --info-tinted bg over
+     --bg-elevated only reached 3.91:1 in dark. Use --info-light
+     (dark blue-400 #60a5fa, light alias --info) for ≥5.65:1. */
+  color: var(--info-light);
+  background: color-mix(in srgb, var(--info) 15%, transparent);
+}
+.skill-pack-mcp { color: var(--accent-light); }
 .skill-pack-check { color: var(--success); }
 .skill-pack-card-actions {
   display: flex;
@@ -6139,21 +6152,32 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* K-4-followup-contrast PR-3 (2026-04-29): origin badges use the same
+   accent-light pattern as .skill-pack-scope.global so text-on-tinted-bg
+   stays ≥4.5:1 axe PASS. */
 .skill-pack-origin.bundled {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent);
+  color: var(--accent-light);
 }
 .skill-pack-origin.url {
-  background: color-mix(in srgb, #2dd4bf 15%, transparent);
-  color: #2dd4bf;
+  /* K-4-followup-contrast PR-3 r2: theme-aware token so light theme
+     gets teal-800 (axe PASS) instead of inheriting the dark teal-400. */
+  background: color-mix(in srgb, var(--origin-url-fg) 15%, transparent);
+  color: var(--origin-url-fg);
 }
 .skill-pack-origin.manual {
+  /* K-4-followup-contrast PR-3 r3: --text-muted on muted-tint bg over
+     --bg-elevated only hits 4.39:1 dark (Codex BLOCK). Use
+     --text-secondary (one tier brighter) for 5.37:1 dark / 5.75:1
+     light. Hue cue is preserved by the muted-tint background. */
   background: color-mix(in srgb, var(--text-muted) 15%, transparent);
-  color: var(--text-muted);
+  color: var(--text-secondary);
 }
 .skill-pack-origin.import {
-  background: color-mix(in srgb, #a78bfa 15%, transparent);
-  color: #a78bfa;
+  /* K-4-followup-contrast PR-3 r2: --accent-light is already theme-aware
+     (dark a78bfa, light --accent #6d28d9). Reuse instead of hardcoding. */
+  background: color-mix(in srgb, var(--accent-light) 15%, transparent);
+  color: var(--accent-light);
 }
 
 /* ─── v1.1: Pack preview source info section ─── */

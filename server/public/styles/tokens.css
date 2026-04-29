@@ -98,6 +98,21 @@
    * (focus rings / chips / borders) keep --accent so the brand color
    * stays consistent across non-text surfaces. */
   --button-primary-bg: #7659fa;
+  /* K-4-followup-contrast PR-3 (2026-04-29): teal foreground for
+   * `.skill-pack-origin.url` chip. Dark theme keeps the teal-400 hue
+   * (#2dd4bf vs dark teal tint = 8.44:1). Light theme override below
+   * uses teal-800 #115e59 so the same chip pattern composites to
+   * ~6.58:1 instead of 1.54:1 (Codex BLOCK on the previous draft that
+   * left this surface dark-only). */
+  --origin-url-fg: #2dd4bf;
+  /* K-4-followup-contrast PR-3 r3 (2026-04-29): info-tinted chip text
+   * for `.skill-pack-scope.project`. Canonical `--info #3b82f6` on
+   * `--info` 15% over `--bg-elevated` only hits 3.91:1 (Codex BLOCK
+   * via direct math — axe never rendered this chip variant in the
+   * baseline scan). blue-400 #60a5fa lifts to 5.65:1 while keeping
+   * the brand blue. Light alias to --info because the dark fg would
+   * fail on light bg and --info already passes (4.85:1). */
+  --info-light: #60a5fa;
 
   /* Priority */
   --priority-low: #6b7280;
@@ -314,6 +329,15 @@
    * the light theme button bg stays in lock-step with the canonical
    * accent (no separate maintenance). */
   --button-primary-bg: var(--accent);
+  /* K-4-followup-contrast PR-3 light — teal-800 #115e59 on light teal
+   * tint (#dbf4f1 composite over --bg-base #fafafa) gives ≈6.58:1
+   * (axe color-contrast PASS). Dark teal-400 #2dd4bf would only hit
+   * 1.54:1 on light bg, so a darker hue is required. */
+  --origin-url-fg: #115e59;
+  /* K-4-followup-contrast PR-3 r3 light — light --info #1d4ed8 on
+   * info-tinted bg over --bg-elevated already passes (4.85:1). Alias
+   * keeps the .scope.project chip in lock-step with --info. */
+  --info-light: var(--info);
 
   /* Priority — same shift as status colors. */
   --priority-low: #52525b;
@@ -404,6 +428,8 @@
     --status-active-bright: #15803d;
     --priority-high-fg: #92400e;
     --button-primary-bg: var(--accent);
+    --origin-url-fg: #115e59;
+    --info-light: var(--info);
     --priority-low: #52525b;
     --priority-medium: #1d4ed8;
     --priority-high: #b45309;
