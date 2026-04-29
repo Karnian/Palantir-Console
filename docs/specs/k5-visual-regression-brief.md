@@ -100,6 +100,12 @@ K-4 와 동일: 8 hash routes × 2 themes (dark/light) × 2 viewports (1280×800
 - Playwright config `use: { reducedMotion: 'reduce' }` 전역 설정
 - CSS `prefers-reduced-motion` 미지원 케이스는 page.addStyleTag 로 `* { animation: none !important; transition: none !important; }`
 
+### L12. (추가 결정 — Codex K-5 r1 NIT) Browser/project pin + baseline data state
+
+- **Browser**: `chromium` 단일 (`@playwright/test` package.json devDep 으로 자연 lock). visual.spec.js 의 `test.describe.configure({ projects: ['chromium'] })` 또는 playwright.config 의 `projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }]` 로 명시 pin.
+- **Baseline data state**: dirty DB / 진행 중 work 가 시각에 영향 → **fresh DB / EmptyState fallback** 만 baseline (K-4 L1 와 동일 패턴). `playwright.config.js` 의 `webServer.reuseExistingServer: !process.env.CI` 가 visual run 에선 `false` 강제 (또는 별도 `PALANTIR_DB=:memory:` 또는 fresh `palantir.db` 분리). 명시 lock-in.
+- 현재 `playwright.config.js:12` 의 `reuseExistingServer: !process.env.CI` 는 local 에서 dirty server 재사용 위험 — 구현 PR 에서 visual.spec.js 만 별도 server 강제 옵션 검토.
+
 ---
 
 ## 3. 비범위 (K-5 launch 에 포함 X)
