@@ -35,8 +35,8 @@ UI/UX cleanup follow-up 시리즈 + K-2 라이트 모드 launch + post-launch fi
 - ~~**ManagerChat dotColor `'#22c55e'`**~~ — K-3α PR #158 에서 `--status-active-bright` 의미 토큰 신규로 종결.
 - ~~**`--field-bg` / `--surface-hover` adoption**~~ — K-3α PR #159 에서 종결. `--field-bg` 는 alias 정정 (`--bg-base`) + `.form-input/.form-textarea/.form-select` adopt. `--surface-hover` 는 ~6개 hover 사용처가 의미 분화 (selection/row-highlight/interactive) 라 단일 alias 부적합 → 삭제. 단일 의미 consumer 와 함께 재도입.
 - ~~**K-2 token lock-step 자동 가드**~~ — K-3β PR #160 에서 종결. `boot.smoke.test.js` 가 두 light 블록 (`[data-theme="light"]` + `@media prefers-color-scheme:light :root:not([data-theme])`) 의 token key/value 일치 자동 검증. 한 쪽에만 추가하면 빌드 fail.
-- ~~**WCAG AA 자동 검증**~~ — K-4 PR #163 launch. axe-core + 32 시나리오 + transitional waiver 시스템. 후속 (waiver 정리) 은 별도 phase (K-4-followup-contrast / K-4-followup-card-markup).
-- **K-2 시각 회귀 자동화** — Playwright screenshot diff (다크/라이트 양쪽). 현재는 manual smoke. spec brief 부터 필요.
+- ~~**WCAG AA 자동 검증**~~ — K-4 PR #163 launch. axe-core + 32 시나리오 + transitional waiver 시스템. **K-4-followup 완료**: contrast 정리 (PR #164~166) + card markup 재설계 (PR #167). **waiver 0**.
+- ~~**K-2 시각 회귀 자동화**~~ — K-5 phase 진입. spec brief: `docs/specs/k5-visual-regression-brief.md` (PR #168 lock-in).
 
 ---
 
