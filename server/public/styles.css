@@ -1060,7 +1060,10 @@ body {
 }
 
 .primary {
-  background: var(--accent);
+  /* K-4-followup-contrast PR-2 (2026-04-29): use button-surface-only
+     accent variant so white text contrast clears axe ≥4.5:1.
+     `var(--accent)` (#7c5cfc dark) is 4.38 with white text. */
+  background: var(--button-primary-bg);
   color: white;
   border: none;
   padding: 8px 18px;
