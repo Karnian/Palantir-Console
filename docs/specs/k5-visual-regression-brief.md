@@ -170,8 +170,8 @@ K-4 와 동일: 8 hash routes × 2 themes (dark/light) × 2 viewports (1280×800
 
 ## 7. 진행 기록 (PR merge 시 stamp)
 
-- [ ] **PR-1 K-5-spec** — 본 brief + backlog stamp.
-- [ ] **PR-2 K-5 구현** — visual.spec.js + 32 baseline + 문서 stamp.
+- [x] **PR-1 K-5-spec** (#168, 2026-04-29) — 본 brief + backlog stamp. Codex r1 NIT 1건 (L12 browser pin + baseline state) 적용 후 PASS.
+- [x] **PR-2 K-5 구현** (#169, 2026-04-29) — visual.spec.js (32 시나리오, ~100 라인) + 32 PNG baseline (1.3MB) + playwright.config (reducedMotion + chromium pin) + 문서 stamp 6 파일.
 
 ---
 

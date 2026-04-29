@@ -436,8 +436,9 @@ hashes. Deleting a preset later does not erase past snapshot rows;
 
 ```bash
 npm test          # run tests (901 unit/integration)
-npm run test:e2e  # Playwright e2e (smoke + manager + a11y)
+npm run test:e2e  # Playwright e2e (smoke + manager + a11y + visual)
 npm run test:a11y # axe-core a11y only (K-4, 32 scenarios — 8 routes × 2 themes × 2 viewports)
+npm run test:visual # Playwright screenshot diff (K-5, same 32 scenarios)
 npm run dev       # dev server
 ```
 
