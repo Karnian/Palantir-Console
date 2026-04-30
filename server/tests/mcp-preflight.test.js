@@ -271,3 +271,98 @@ test('preflight: fetchHook receives pinned IP from assertSafeUrl', async () => {
   assert.equal(r.ok, true);
   assert.equal(seenIp, '127.0.0.1');
 });
+
+// Real-server integration: the fetchHook injection covers the
+// preflightHttpAlias plumbing, but the underlying `issueHeadRequest`
+// uses Node's http.Agent `lookup` hook to pin the IP. This test stands
+// up a tiny http server, calls `_issueHeadRequest` directly with a
+// hostname that DNS would NOT normally resolve to that server, and
+// verifies the lookup hook successfully redirects the connection.
+test('preflight: _issueHeadRequest pins connection via lookup hook (real http server)', async () => {
+  const http = require('node:http');
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('ok');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  try {
+    const { _issueHeadRequest } = require('../services/mcpPreflight');
+    // Call hostname `nonexistent.invalid` (which would NOT resolve via
+    // real DNS) but pin to 127.0.0.1. If the lookup hook didn't apply,
+    // Node would try to resolve `nonexistent.invalid` and fail with
+    // ENOTFOUND. Hitting the local server proves the IP pin works.
+    const r = await _issueHeadRequest({
+      urlStr: `http://nonexistent.invalid:${port}/`,
+      hostname: 'nonexistent.invalid',
+      ip: '127.0.0.1',
+      family: 4,
+      port: String(port),
+      bearerValue: null,
+      timeoutMs: 3000,
+    });
+    assert.equal(r.ok, true);
+    assert.equal(r.status, 200);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+// Authorization header forwarded to the wire when bearer is present —
+// proves the resolveBearerForPreflight value reaches the actual
+// request, not just the fetchHook.
+test('preflight: _issueHeadRequest attaches Authorization Bearer header on real request', async () => {
+  const http = require('node:http');
+  let receivedAuth = null;
+  const server = http.createServer((req, res) => {
+    receivedAuth = req.headers.authorization || null;
+    res.writeHead(204);
+    res.end();
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  try {
+    const { _issueHeadRequest } = require('../services/mcpPreflight');
+    const r = await _issueHeadRequest({
+      urlStr: `http://localhost:${port}/`,
+      hostname: 'localhost',
+      ip: '127.0.0.1',
+      family: 4,
+      port: String(port),
+      bearerValue: 'wire-token',
+      timeoutMs: 3000,
+    });
+    assert.equal(r.ok, true);
+    assert.equal(receivedAuth, 'Bearer wire-token');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+// Redirect → fail-closed reason=redirect_blocked on a real server.
+test('preflight: _issueHeadRequest treats 302 as redirect_blocked (no follow)', async () => {
+  const http = require('node:http');
+  const server = http.createServer((req, res) => {
+    res.writeHead(302, { Location: 'http://10.0.0.1/private' });
+    res.end();
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  try {
+    const { _issueHeadRequest } = require('../services/mcpPreflight');
+    const r = await _issueHeadRequest({
+      urlStr: `http://localhost:${port}/`,
+      hostname: 'localhost',
+      ip: '127.0.0.1',
+      family: 4,
+      port: String(port),
+      bearerValue: null,
+      timeoutMs: 3000,
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'redirect_blocked');
+    assert.equal(r.status, 302);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

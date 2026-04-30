@@ -499,9 +499,14 @@ function buildManagerSpawnEnv({
   const bearer = Array.isArray(bearerEnvKeys)
     ? bearerEnvKeys.filter(k => typeof k === 'string' && k)
     : [];
+  // When no baseAllowlist is provided we keep the legacy "no credential
+  // strip" behavior — every key in baseEnv (including the bearer ones)
+  // already flows through. The bearer auto-allowlist only adds value
+  // when a baseAllowlist exists; without one, the bearer keys are
+  // already forwarded by virtue of the unfiltered baseEnv copy.
   const allowSet = baseAllowlist
     ? new Set([...baseAllowlist, ...bearer])
-    : (bearer.length > 0 ? null /* legacy: no allowlist → keep all */ : null);
+    : null;
 
   const KNOWN_CREDENTIAL_KEYS = [
     ...CLAUDE_AUTH_KEYS,
