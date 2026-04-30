@@ -311,6 +311,17 @@ function createCodexAdapter({
     // declared required. Emit TURN_FAILED + SESSION_ENDED, mark the run
     // failed, and re-throw so runTurn returns { accepted: false } to its
     // caller (routes/manager.js).
+    //
+    // M4-a note: when state.mcpConfig becomes an object that includes
+    // `http`-transport aliases (cfg.url present), the worker path runs a
+    // HEAD-based preflight before flatten via `mcpPreflight.preflightHttpMcpConfig`
+    // (lifecycleService.executeTask). The PM path here doesn't currently
+    // receive object-shaped mcpConfig (pmSpawnService passes the
+    // project.mcp_config_path string, which fails the isPlainObject guard
+    // below), so preflight is a no-op in current production. If the PM
+    // path is ever re-plumbed to read+parse that file into an object,
+    // extend this site with the same preflight call before flatten —
+    // spec §L6 fail-closed contract applies.
     if (state.mcpConfig) {
       let mcpArgs;
       try {
