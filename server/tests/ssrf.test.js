@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { canonicalizeUrl, maskSensitiveParams, _isBlockedIP, _isBlockedHostname, _inCidrV4 } = require('../services/ssrf');
+const { canonicalizeUrl, maskSensitiveParams, assertSafeUrl, _isBlockedIP, _isBlockedHostname, _inCidrV4 } = require('../services/ssrf');
 
 // ─── canonicalizeUrl ───
 
@@ -233,4 +233,141 @@ test('fetchUrlSafe handles http.Agent lookup with {all:true}', async () => {
       resolve();
     });
   });
+});
+
+// ─── M4-a: assertSafeUrl (MCP HTTP transport URL validator) ───
+//
+// assertSafeUrl is the shared SSRF policy entry point for both CRUD
+// validation (mcpTemplateService) and spawn-time preflight
+// (lifecycleService → mcpPreflight). DNS resolve happens here so the
+// caller can pin the resolved IP for connection (DNS rebinding TOCTOU
+// guard).
+
+test('assertSafeUrl: accepts http://localhost (allowlist)', async () => {
+  const r = await assertSafeUrl('http://localhost:3100/mcp');
+  assert.equal(r.hostname, 'localhost');
+  assert.equal(r.url, 'http://localhost:3100/mcp');
+  assert.ok(r.ip === '127.0.0.1' || r.ip === '::1');
+});
+
+test('assertSafeUrl: accepts http://127.0.0.1 (allowlist literal)', async () => {
+  const r = await assertSafeUrl('http://127.0.0.1:3100/mcp');
+  assert.equal(r.ip, '127.0.0.1');
+  assert.equal(r.family, 4);
+});
+
+test('assertSafeUrl: accepts public https url', async () => {
+  // Use a stable public host. Skip if DNS isn't available.
+  try {
+    const r = await assertSafeUrl('https://example.com/mcp');
+    assert.equal(r.hostname, 'example.com');
+    assert.ok(r.ip);
+  } catch (err) {
+    if (/DNS/i.test(err.message)) return; // network-disabled env
+    throw err;
+  }
+});
+
+test('assertSafeUrl: rejects RFC1918 IP literal', async () => {
+  await assert.rejects(
+    () => assertSafeUrl('http://10.0.0.1/mcp'),
+    (err) => err.status === 400 && /SSRF policy/.test(err.message),
+  );
+});
+
+test('assertSafeUrl: rejects metadata IP 169.254.169.254', async () => {
+  await assert.rejects(
+    () => assertSafeUrl('http://169.254.169.254/mcp'),
+    (err) => err.status === 400 && /SSRF policy/.test(err.message),
+  );
+});
+
+test('assertSafeUrl: rejects file:// scheme', async () => {
+  await assert.rejects(
+    () => assertSafeUrl('file:///tmp/mcp'),
+    (err) => err.status === 400 && /scheme/.test(err.message),
+  );
+});
+
+test('assertSafeUrl: rejects ws:// scheme', async () => {
+  await assert.rejects(
+    () => assertSafeUrl('ws://localhost:3100/mcp'),
+    (err) => err.status === 400 && /scheme/.test(err.message),
+  );
+});
+
+test('assertSafeUrl: rejects userinfo', async () => {
+  await assert.rejects(
+    () => assertSafeUrl('http://user:pass@localhost:3100/mcp'),
+    (err) => err.status === 400 && /userinfo/.test(err.message),
+  );
+});
+
+test('assertSafeUrl: rejects fragment', async () => {
+  await assert.rejects(
+    () => assertSafeUrl('http://localhost:3100/mcp#anchor'),
+    (err) => err.status === 400 && /fragment/.test(err.message),
+  );
+});
+
+test('assertSafeUrl: rejects URLs > 2KB', async () => {
+  const huge = 'http://localhost:3100/mcp?p=' + 'x'.repeat(2100);
+  await assert.rejects(
+    () => assertSafeUrl(huge),
+    (err) => err.status === 400 && /byte limit/.test(err.message),
+  );
+});
+
+test('assertSafeUrl: query string preserved in canonical form', async () => {
+  const r = await assertSafeUrl('http://localhost:3100/mcp?profile=read-only&team=eng');
+  // URL parser may or may not normalize — just verify both query params survived.
+  assert.ok(r.url.includes('profile=read-only'));
+  assert.ok(r.url.includes('team=eng'));
+});
+
+test('assertSafeUrl: localhost lockdown via PALANTIR_MCP_ALLOW_LOCALHOST=0', async () => {
+  const prev = process.env.PALANTIR_MCP_ALLOW_LOCALHOST;
+  process.env.PALANTIR_MCP_ALLOW_LOCALHOST = '0';
+  try {
+    await assert.rejects(
+      () => assertSafeUrl('http://127.0.0.1:3100/mcp'),
+      (err) => err.status === 400 && /SSRF policy/.test(err.message),
+    );
+    await assert.rejects(
+      () => assertSafeUrl('http://localhost:3100/mcp'),
+      (err) => err.status === 400,
+    );
+  } finally {
+    if (prev === undefined) delete process.env.PALANTIR_MCP_ALLOW_LOCALHOST;
+    else process.env.PALANTIR_MCP_ALLOW_LOCALHOST = prev;
+  }
+});
+
+test('assertSafeUrl: foo.localhost (suffix) is NOT a localhost allowlist match', async () => {
+  // Suffix matching would let attackers exploit `foo.localhost` resolving
+  // to public IPs. Spec says exact match only. DNS for `foo.localhost`
+  // typically returns NXDOMAIN; either path the assertion passes is OK.
+  await assert.rejects(
+    () => assertSafeUrl('http://foo.localhost:3100/mcp'),
+    (err) => err.status === 400,
+  );
+});
+
+test('assertSafeUrl: empty input rejected', async () => {
+  await assert.rejects(
+    () => assertSafeUrl(''),
+    (err) => err.status === 400,
+  );
+  await assert.rejects(
+    () => assertSafeUrl(null),
+    (err) => err.status === 400,
+  );
+});
+
+test('assertSafeUrl: pinned IP/family/port in result', async () => {
+  const r = await assertSafeUrl('http://127.0.0.1:3100/mcp');
+  assert.equal(r.ip, '127.0.0.1');
+  assert.equal(r.family, 4);
+  assert.equal(r.port, '3100');
+  assert.equal(r.hostname, '127.0.0.1');
 });

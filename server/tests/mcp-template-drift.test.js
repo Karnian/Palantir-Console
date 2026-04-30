@@ -110,12 +110,12 @@ test('integration: PATCH bumps updated_at past an earlier applied_at → drift',
   createSkillPackService(db);
   const svc = createMcpTemplateService(db);
 
-  const tpl = svc.createTemplate({ alias: 'int_drift', command: 'echo' });
+  const tpl = await svc.createTemplate({ alias: 'int_drift', command: 'echo' });
   const appliedAt = tpl.updated_at; // freeze "snapshot" moment
   // Datetime('now') resolution is 1s; wait long enough to observe the bump
   await new Promise((r) => setTimeout(r, 1100));
 
-  const patched = svc.updateTemplate(tpl.id, { command: 'bash' });
+  const patched = await svc.updateTemplate(tpl.id, { command: 'bash' });
   assert.ok(patched.updated_at > appliedAt, 'PATCH should bump updated_at past applied_at');
 
   const res = computeMcpTemplateDrift(

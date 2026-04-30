@@ -132,7 +132,7 @@ test('Phase 10C: Claude worker with preset — systemPrompt composed, mcpConfig 
     isolated: false,
   });
 
-  const run = lc.executeTask(task.id, {
+  const run = await lc.executeTask(task.id, {
     agentProfileId: profile.id, prompt: 'hi', presetId: preset.id,
   });
 
@@ -174,7 +174,7 @@ test('Phase 10C+M1: Codex worker with preset — injects leaf-level -c mcp_serve
     mcp_server_ids: ['tpl_ctx7'],
   });
 
-  lc.executeTask(task.id, {
+  await lc.executeTask(task.id, {
     agentProfileId: profile.id, prompt: 'hi', presetId: preset.id,
   });
 
@@ -239,7 +239,7 @@ test('M1: Codex worker with invalid MCP (direct bearer_token) — fails closed, 
     mcp_server_ids: ['tpl_ctx7'], // valid template so createPreset passes; merge shim overrides
   });
 
-  assert.throws(
+  await assert.rejects(
     () => lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id }),
     /preset MCP invalid for codex worker/,
   );
@@ -272,7 +272,7 @@ test('Phase 10C: OpenCode worker with preset — emits preset:mcp_unsupported wa
     mcp_server_ids: ['tpl_ctx7'],
   });
 
-  const run = lc.executeTask(task.id, {
+  const run = await lc.executeTask(task.id, {
     agentProfileId: profile.id, prompt: 'hi', presetId: preset.id,
   });
 
@@ -325,7 +325,7 @@ test('Phase 10C→10D: isolated preset emits tier2_active (dormant marker replac
     name: 'IsoLive', isolated: true, plugin_refs: ['xfx'],
   });
 
-  const run = lc.executeTask(task.id, {
+  const run = await lc.executeTask(task.id, {
     agentProfileId: profile.id, prompt: 'hi', presetId: preset.id,
   });
   const events = rs.getRunEvents(run.id);
@@ -364,7 +364,7 @@ test('Phase 10C: MCP precedence preset > project > skillPack when all present', 
   // Simpler: rely on ctx7 from preset being present, project adding shared/projectOnly.
   // Can't easily add a preset server that conflicts with project's 'shared' without more plumbing,
   // so just assert preset.ctx7 present + project overlays preserved.
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
   const opts = sje.spawned[0].opts;
   // Avoid reading the file path directly — parallel tests may sweep it via
   // lifecycleService.cleanupOrphanMcpConfigs. Read from the DB snapshot.
@@ -390,7 +390,7 @@ test('Phase 10C: min_claude_version mismatch fails the run', async (t) => {
   const profile = seedProfile(db, 'claude');
 
   const preset = presetService.createPreset({ name: 'VReq', min_claude_version: '2.0.0' });
-  assert.throws(
+  await assert.rejects(
     () => lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id }),
     /requires Claude CLI >= 2.0.0/,
   );
@@ -416,7 +416,7 @@ test('Phase 10C: task.preferred_preset_id is used when presetId arg omitted', as
   const task = ts.createTask({ project_id: project.id, title: 'pref', description: 'd' });
   db.prepare(`UPDATE tasks SET preferred_preset_id = ? WHERE id = ?`).run(preset.id, task.id);
 
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi' });
   assert.equal(sje.spawned.length, 1);
   assert.ok(sje.spawned[0].opts.systemPrompt.startsWith('DEFAULT'));
   assert.equal(rs.getRun(run.id).preset_id, preset.id);
@@ -451,7 +451,7 @@ test('M2: no conflict — user config has no overlapping alias → no legacy eve
   const task = seedTask(db, project.id);
   const profile = seedProfile(db, 'codex');
   const preset = presetService.createPreset({ name: 'NoConflict', mcp_server_ids: ['tpl_ctx7'] });
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
   const events = rs.getRunEvents(run.id);
   assert.equal(events.filter(e => e.event_type === 'mcp:legacy_alias_conflict').length, 0);
 });
@@ -465,7 +465,7 @@ test('M2: preset conflict — source=preset emitted with fixed {alias, source, m
   const task = seedTask(db, project.id);
   const profile = seedProfile(db, 'codex');
   const preset = presetService.createPreset({ name: 'PresetCtx7', mcp_server_ids: ['tpl_ctx7'] });
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
   const events = rs.getRunEvents(run.id).filter(e => e.event_type === 'mcp:legacy_alias_conflict');
   assert.equal(events.length, 1);
   const payload = JSON.parse(events[0].payload_json);
@@ -491,7 +491,7 @@ test('M2: project conflict — source=project when legacy alias comes from proje
   const profile = seedProfile(db, 'codex');
   // Preset without MCP so only the project file contributes the 'shared' alias.
   const preset = presetService.createPreset({ name: 'NoMcpPreset' });
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
   const events = rs.getRunEvents(run.id).filter(e => e.event_type === 'mcp:legacy_alias_conflict');
   assert.equal(events.length, 1);
   const payload = JSON.parse(events[0].payload_json);
@@ -521,7 +521,7 @@ command = "legacy-shared"
   const task = seedTask(db, project.id);
   const profile = seedProfile(db, 'codex');
   const preset = presetService.createPreset({ name: 'Both', mcp_server_ids: ['tpl_ctx7'] });
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
   const events = rs.getRunEvents(run.id).filter(e => e.event_type === 'mcp:legacy_alias_conflict');
   assert.equal(events.length, 2);
   const byAlias = {};
@@ -542,11 +542,124 @@ test('Phase 10C: no preset → legacy path unchanged (no preset_id binding, no t
   const task = seedTask(db, project.id);
   const profile = seedProfile(db, 'claude');
 
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi' });
   assert.equal(sje.spawned.length, 1);
   const persisted = rs.getRun(run.id);
   assert.equal(persisted.preset_id, null);
   assert.equal(persisted.preset_snapshot_hash, null);
   const events = rs.getRunEvents(run.id);
   assert.equal(events.filter(e => e.event_type.startsWith('preset:')).length, 0);
+});
+
+// ────────────────────────────────────────────────────────────────────
+// M4-a: HTTP transport preset wiring → flatten emits leaf-level url +
+// bearer_token_env_var args; preflight gates the spawn.
+// ────────────────────────────────────────────────────────────────────
+
+async function seedHttpTemplate(db, alias = 'bifrost') {
+  // Direct INSERT — bypass async assertSafeUrl validator. The trigger still
+  // enforces column-shape so this only succeeds for valid http rows.
+  const id = `tpl_${alias}`;
+  db.prepare(`
+    INSERT INTO mcp_server_templates (id, alias, transport, url, bearer_token_env_var, updated_at)
+    VALUES (?, ?, 'http', 'http://127.0.0.1:3100/mcp', 'PALANTIR_TEST_M4_TOKEN', datetime('now'))
+  `).run(id, alias);
+  return id;
+}
+
+test('M4-a: Codex worker with http preset → emits leaf-level url + bearer args (no transport key)', async (t) => {
+  const prevSkip = process.env.PALANTIR_MCP_ALLOW_PREFLIGHT_SKIP;
+  process.env.PALANTIR_MCP_ALLOW_PREFLIGHT_SKIP = '1';
+  process.env.PALANTIR_TEST_M4_TOKEN = 'test-token';
+  try {
+    const db = await mkdb(t);
+    const tplId = await seedHttpTemplate(db, 'bifrost');
+    const presetService = createPresetService(db, { pluginsRoot: mkPluginsRoot(t) });
+    const { lc, exec } = buildLifecycle(db, { presetService });
+
+    const project = seedProject(db);
+    const task = seedTask(db, project.id);
+    const profile = seedProfile(db, 'codex');
+
+    const preset = presetService.createPreset({
+      name: 'HttpCodex',
+      base_system_prompt: 'CODEX HTTP',
+      mcp_server_ids: [tplId],
+    });
+
+    await lc.executeTask(task.id, {
+      agentProfileId: profile.id, prompt: 'hi', presetId: preset.id,
+    });
+
+    assert.equal(exec.spawned.length, 1, 'codex worker spawned (preflight skipped)');
+    const args = exec.spawned[0].opts.args;
+    const cflags = [];
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '-c' && i + 1 < args.length) cflags.push(args[i + 1]);
+    }
+    assert.ok(
+      cflags.some(c => /^mcp_servers\.bifrost\.url=/.test(c)),
+      'http alias url leaf present',
+    );
+    assert.ok(
+      cflags.some(c => /^mcp_servers\.bifrost\.bearer_token_env_var=/.test(c)),
+      'bearer_token_env_var leaf present',
+    );
+    // Critical: NO transport key (Codex auto-detects from url)
+    assert.ok(
+      !cflags.some(c => /\.transport=/.test(c)),
+      'no transport= arg emitted',
+    );
+    // No stdio leakage
+    assert.ok(!cflags.some(c => /^mcp_servers\.bifrost\.command=/.test(c)));
+    assert.ok(!cflags.some(c => /^mcp_servers\.bifrost\.args=/.test(c)));
+    // Worker spawn env carries the bearer token (auto-allowlisted)
+    assert.equal(exec.spawned[0].opts.env.PALANTIR_TEST_M4_TOKEN, 'test-token');
+  } finally {
+    if (prevSkip === undefined) delete process.env.PALANTIR_MCP_ALLOW_PREFLIGHT_SKIP;
+    else process.env.PALANTIR_MCP_ALLOW_PREFLIGHT_SKIP = prevSkip;
+    delete process.env.PALANTIR_TEST_M4_TOKEN;
+  }
+});
+
+test('M4-a: http preset preflight failure (bearer env missing) → run failed + preset:mcp_unreachable', async (t) => {
+  // Bearer env absent — preflight short-circuits to bearer_env_missing
+  // without ever hitting the network. No skip toggle: we want preflight
+  // to actually run.
+  delete process.env.PALANTIR_TEST_M4_TOKEN_MISSING;
+  const db = await mkdb(t);
+  const tplId = `tpl_bearmiss`;
+  db.prepare(`
+    INSERT INTO mcp_server_templates (id, alias, transport, url, bearer_token_env_var, updated_at)
+    VALUES (?, 'bearmiss', 'http', 'http://127.0.0.1:3100/mcp', 'PALANTIR_TEST_M4_TOKEN_MISSING', datetime('now'))
+  `).run(tplId);
+  const presetService = createPresetService(db, { pluginsRoot: mkPluginsRoot(t) });
+  const { lc, exec, rs } = buildLifecycle(db, { presetService });
+
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, 'codex');
+
+  const preset = presetService.createPreset({
+    name: 'NoToken', mcp_server_ids: [tplId],
+  });
+
+  await assert.rejects(
+    () => lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id }),
+    /MCP preflight failed: bearmiss/,
+  );
+  assert.equal(exec.spawned.length, 0, 'spawn must not happen');
+  const runs = rs.listRuns({});
+  assert.ok(runs.length >= 1);
+  const last = runs[0];
+  assert.equal(last.status, 'failed');
+  const events = rs.getRunEvents(last.id);
+  const unreach = events.find(e => e.event_type === 'preset:mcp_unreachable');
+  assert.ok(unreach, 'preset:mcp_unreachable emitted');
+  const payload = JSON.parse(unreach.payload_json);
+  assert.equal(payload.alias, 'bearmiss');
+  assert.equal(payload.reason, 'bearer_env_missing');
+  // Payload contains env *name*, never value
+  assert.equal(payload.bearer_env, 'PALANTIR_TEST_M4_TOKEN_MISSING');
+  assert.equal(JSON.stringify(payload).includes('test-token'), false);
 });

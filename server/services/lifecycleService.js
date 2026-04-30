@@ -185,8 +185,14 @@ function createLifecycleService({
 
   /**
    * Execute a task: create a Run, spawn the agent.
+   *
+   * M4-a: async because http-MCP preflight (DNS resolve + HEAD request)
+   * is async. Pre-M4 callers that ignored the return value still work
+   * (the Promise is just dropped); callers that consumed the run row
+   * MUST `await`. Sole production caller is routes/tasks.js which is
+   * already inside an asyncHandler.
    */
-  function executeTask(taskId, { agentProfileId, prompt, skillPackIds, presetId }) {
+  async function executeTask(taskId, { agentProfileId, prompt, skillPackIds, presetId }) {
     const task = taskService.getTask(taskId);
     const profile = agentProfileService.getProfile(agentProfileId);
 
@@ -378,6 +384,50 @@ function createLifecycleService({
       }
       mergedMcp = Object.keys(servers).length > 0 ? { mcpServers: servers } : null;
     }
+    // M4-a: collect http-transport bearer env keys for auto-allowlisting
+    // into the worker spawn env. Per-alias env names are derived from the
+    // merged config (cfg.bearer_token_env_var) so a preset/skill pack can
+    // ship http aliases without the operator hand-listing the key in
+    // agent_profiles.env_allowlist.
+    const httpBearerEnvKeys = [];
+    if (mergedMcp && mergedMcp.mcpServers) {
+      for (const cfg of Object.values(mergedMcp.mcpServers)) {
+        if (cfg && typeof cfg === 'object' && typeof cfg.bearer_token_env_var === 'string'
+            && cfg.bearer_token_env_var) {
+          if (!httpBearerEnvKeys.includes(cfg.bearer_token_env_var)) {
+            httpBearerEnvKeys.push(cfg.bearer_token_env_var);
+          }
+        }
+      }
+    }
+
+    // M4-a: HTTP MCP preflight — fail-closed on bad endpoint / SSRF / dead
+    // service. stdio aliases are unaffected (collectHttpAliases filters by
+    // `cfg.url`). Preflight runs BEFORE writing the merged mcp file so a
+    // failed preflight leaves no stale config on disk.
+    if (mergedMcp) {
+      const { preflightHttpMcpConfig } = require('./mcpPreflight');
+      const pre = await preflightHttpMcpConfig(mergedMcp);
+      for (const f of pre.failures) {
+        runService.addRunEvent(run.id, 'preset:mcp_unreachable', JSON.stringify({
+          alias: f.alias,
+          url: f.url,
+          reason: f.reason,
+          ...(f.status != null ? { status: f.status } : {}),
+          ...(f.ip ? { ip: f.ip } : {}),
+          ...(f.bearer_env ? { bearer_env: f.bearer_env } : {}),
+        }));
+      }
+      if (pre.failures.length > 0) {
+        runService.updateRunStatus(run.id, 'failed', { force: true });
+        const first = pre.failures[0];
+        const msg = `MCP preflight failed: ${first.alias} (${first.reason})`;
+        runService.addRunEvent(run.id, 'error', JSON.stringify({ message: msg }));
+        _runProjectDirs.delete(run.id);
+        throw new Error(msg);
+      }
+    }
+
     if (mergedMcp) {
       const fsW = require('node:fs');
       const pathW = require('node:path');
@@ -460,7 +510,7 @@ function createLifecycleService({
         // fallback). Fail-closed: the run is marked failed and the 400
         // message surfaces in the response.
         let isolatedOpts = null;
-        let spawnEnv = parseEnvAllowlist(profile.env_allowlist);
+        let spawnEnv = parseEnvAllowlist(profile.env_allowlist, httpBearerEnvKeys);
         let presetAuthCleanup = null;
         if (presetResolution && presetResolution.isolated) {
           const auth = _authResolver.resolveClaudeAuthForIsolated({
@@ -596,7 +646,7 @@ function createLifecycleService({
           command: profile.command,
           args,
           cwd,
-          env: parseEnvAllowlist(profile.env_allowlist),
+          env: parseEnvAllowlist(profile.env_allowlist, httpBearerEnvKeys),
         });
       }
 
@@ -663,12 +713,25 @@ function createLifecycleService({
 
   /**
    * Parse env_allowlist JSON and extract allowed env vars from process.env.
+   *
+   * M4-a: optional `bearerEnvKeys` extends the allowlist with per-template
+   * bearer-token env var names so http MCP templates carry their token
+   * forwarding into the worker spawn without hand-editing agent profile
+   * env_allowlist. Keys are forwarded only if process.env has a value
+   * (resolveBearerForPreflight already enforced that, but keep the guard
+   * here so the spawn env doesn't carry noise empty entries).
    */
-  function parseEnvAllowlist(allowlistJson) {
+  function parseEnvAllowlist(allowlistJson, bearerEnvKeys) {
     try {
       const keys = JSON.parse(allowlistJson || '[]');
+      const allowed = new Set(Array.isArray(keys) ? keys : []);
+      if (Array.isArray(bearerEnvKeys)) {
+        for (const k of bearerEnvKeys) {
+          if (typeof k === 'string' && k) allowed.add(k);
+        }
+      }
       const env = {};
-      for (const key of keys) {
+      for (const key of allowed) {
         if (process.env[key]) env[key] = process.env[key];
       }
       return env;

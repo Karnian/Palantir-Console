@@ -118,11 +118,27 @@ function buildManifest(rootDir, cached) {
 /**
  * Default MCP config builder from templates. Given a list of
  * mcp_server_templates rows, return a Claude-format mcp config object:
- * { "mcpServers": { alias: { command, args, env } } }.
+ * { "mcpServers": { alias: cfg } }.
+ *
+ * Branches on `template.transport` (M4-a):
+ *   - `'stdio'` → `{ command, args }` (existing shape, env_overrides land
+ *     later via skillPackService.resolveMcpServers).
+ *   - `'http'`  → `{ url, bearer_token_env_var? }`. No transport key — Codex
+ *     CLI 0.125 infers transport from `url` presence; flattenMcpToCodexArgs
+ *     also infers and refuses unexpected keys, so emitting a `transport`
+ *     property here would be a footgun.
  */
 function buildMcpConfigFromTemplates(templates) {
   const mcpServers = {};
   for (const tpl of templates) {
+    if (tpl.transport === 'http') {
+      const cfg = { url: tpl.url };
+      if (tpl.bearer_token_env_var) cfg.bearer_token_env_var = tpl.bearer_token_env_var;
+      mcpServers[tpl.alias] = cfg;
+      continue;
+    }
+    // stdio (default for legacy / null transport rows from pre-022 DBs that
+    // somehow escaped the migration backfill).
     let args = [];
     try { args = tpl.args ? JSON.parse(tpl.args) : []; } catch { args = []; }
     mcpServers[tpl.alias] = { command: tpl.command, args };

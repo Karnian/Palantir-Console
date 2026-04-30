@@ -19,7 +19,10 @@ function createMcpTemplatesRouter({ mcpTemplateService }) {
   }));
 
   router.post('/', asyncHandler(async (req, res) => {
-    const template = mcpTemplateService.createTemplate(req.body || {});
+    // M4-a: createTemplate is async (http-transport URL goes through
+    // assertSafeUrl → DNS resolve). Drop the await and validation becomes
+    // a Promise no-op — fail-open. Tests assert this contract.
+    const template = await mcpTemplateService.createTemplate(req.body || {});
     res.status(201).json({ template });
   }));
 
@@ -37,7 +40,7 @@ function createMcpTemplatesRouter({ mcpTemplateService }) {
   }));
 
   router.patch('/:id', asyncHandler(async (req, res) => {
-    const template = mcpTemplateService.updateTemplate(req.params.id, req.body || {});
+    const template = await mcpTemplateService.updateTemplate(req.params.id, req.body || {});
     res.json({ template });
   }));
 

@@ -113,7 +113,7 @@ test('Phase 10G smoke: agent-olympus-mock preset spawns with Tier 2 wiring', asy
     base_system_prompt: 'You are an agent-olympus worker.',
   });
 
-  const run = lc.executeTask(task.id, {
+  const run = await lc.executeTask(task.id, {
     agentProfileId: profileId, prompt: 'do work', presetId: preset.id,
   });
 

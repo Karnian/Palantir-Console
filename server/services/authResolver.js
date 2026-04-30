@@ -472,10 +472,37 @@ function resolveManagerAuth(type, opts = {}) {
  *     because both CLIs rely on a lot of environment for normal operation.
  *   - Merge authCtx.env on top so any values that passed the allowlist are
  *     definitely present.
+ *
+ * M4-a: `bearerEnvKeys` is an optional list of env var names that the
+ * spawned worker NEEDS to read (Codex CLI's `bearer_token_env_var` lookup
+ * happens inside the child process, not in argv). When supplied:
+ *   - keys are auto-added to the allowlist (so the credential-strip step
+ *     leaves them alone)
+ *   - their values are forwarded from baseEnv to the child env. This is
+ *     the M4-a single auto-allowlist hook so per-template bearer env vars
+ *     don't have to be hand-listed in agent_profiles.env_allowlist.
+ *   - Hard-denied keys (ENV_HARD_DENYLIST) are STILL refused — the auto-
+ *     allowlist exemption is only for the credential-strip pass, not for
+ *     the global denylist (which runs at template create time, so a
+ *     hard-denied bearer_token_env_var never reaches this layer anyway).
  */
-function buildManagerSpawnEnv({ baseEnv = process.env, authEnv = {}, envAllowlist } = {}) {
+function buildManagerSpawnEnv({
+  baseEnv = process.env,
+  authEnv = {},
+  envAllowlist,
+  bearerEnvKeys,
+} = {}) {
   const env = { ...baseEnv };
-  const allowSet = Array.isArray(envAllowlist) ? new Set(envAllowlist) : null;
+  const baseAllowlist = Array.isArray(envAllowlist) ? envAllowlist : null;
+  // M4-a: bearerEnvKeys auto-extend the allowlist. Empty/missing list means
+  // no auto-allowlist behavior — back-compatible with PR2/PR3 callers.
+  const bearer = Array.isArray(bearerEnvKeys)
+    ? bearerEnvKeys.filter(k => typeof k === 'string' && k)
+    : [];
+  const allowSet = baseAllowlist
+    ? new Set([...baseAllowlist, ...bearer])
+    : (bearer.length > 0 ? null /* legacy: no allowlist → keep all */ : null);
+
   const KNOWN_CREDENTIAL_KEYS = [
     ...CLAUDE_AUTH_KEYS,
     ...CODEX_AUTH_KEYS,
@@ -485,11 +512,47 @@ function buildManagerSpawnEnv({ baseEnv = process.env, authEnv = {}, envAllowlis
       delete env[key];
     }
   }
+  // Forward bearer env values from base when present. Without an explicit
+  // baseAllowlist the env starts as a full copy of process.env, so the
+  // values are already there — this loop is a defensive belt-and-suspenders
+  // and a no-op in the common case.
+  for (const key of bearer) {
+    if (baseEnv[key] != null && env[key] == null) env[key] = baseEnv[key];
+  }
   // Merge resolved auth env last so it always wins.
   for (const [k, v] of Object.entries(authEnv)) {
     if (v != null) env[k] = v;
   }
   return env;
+}
+
+/**
+ * M4-a §L6.1/§L6.2: single entry point for resolving a bearer-token env
+ * value at HTTP-MCP preflight time. Returns:
+ *
+ *   { ok: true,  value: '<token>' }    — env var present + non-empty
+ *   { ok: false, reason: 'missing' }   — env var absent or empty
+ *   { ok: false, reason: 'invalid_name' }  — name is malformed
+ *
+ * The token VALUE is never logged, never echoed in SSE payloads, never
+ * included in error.message strings — only the *key name* surfaces (and
+ * even then only via the explicit `name` echoed back). `value` returned
+ * to the caller is intended for one immediate use (`Authorization: Bearer
+ * <value>` header) and MUST NOT be persisted.
+ */
+function resolveBearerForPreflight(envVarName) {
+  if (typeof envVarName !== 'string' || !envVarName) {
+    return { ok: false, reason: 'invalid_name', name: envVarName };
+  }
+  // POSIX env var name guard — same as mcpTemplateService.validateBearerTokenEnvVar.
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(envVarName)) {
+    return { ok: false, reason: 'invalid_name', name: envVarName };
+  }
+  const v = process.env[envVarName];
+  if (typeof v !== 'string' || !v) {
+    return { ok: false, reason: 'missing', name: envVarName };
+  }
+  return { ok: true, value: v, name: envVarName };
 }
 
 module.exports = {
@@ -500,6 +563,7 @@ module.exports = {
   resolveCodexAuth,
   resolveManagerAuth,
   buildManagerSpawnEnv,
+  resolveBearerForPreflight,
   hasClaudeKeychainCredentials,
   // Exposed for tests
   CLAUDE_AUTH_FILE,

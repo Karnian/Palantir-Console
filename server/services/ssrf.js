@@ -317,14 +317,153 @@ function maskSensitiveParams(urlStr) {
   }
 }
 
+// ─── M4-a: assertSafeUrl — async helper shared by mcpTemplateService validator
+//     and the worker preflight (lifecycleService). Single source of truth so
+//     CRUD validation and spawn-time preflight cannot diverge. Spec §L4.1.
+//
+// Differences from canonicalizeUrl + resolveAndValidate:
+//   - http: scheme allowed (Bifrost / loopback dev). Skill Pack URL install
+//     stays https-only (canonicalizeUrl), so Skill Pack call sites are
+//     unchanged. MCP HTTP templates can target localhost:3100/mcp etc.
+//   - localhost / 127.0.0.1 / ::1 explicit allowlist (toggled by
+//     PALANTIR_MCP_ALLOW_LOCALHOST env). Default = allow.
+//   - Returns { ip, family, hostname, port, url } so the caller can pin a
+//     subsequent fetch's connection to the resolved IP (DNS rebinding TOCTOU
+//     guard, spec §L4.1 r5).
+//   - Multi-A: rejects when ANY resolved IP is private (matches existing
+//     resolveAndValidate semantics — tightest of all answers wins).
+//   - Fragments rejected; query strings allowed; max URL length 2KB.
+
+const MCP_URL_MAX_BYTES = 2048;
+
+const ALLOWLIST_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
+
+function isMcpAllowlistHostname(hostname) {
+  if (!hostname) return false;
+  // hostname stripped of brackets — IPv6 literal already has them removed
+  // by URL parser when read via .hostname.
+  return ALLOWLIST_HOSTNAMES.has(hostname.toLowerCase());
+}
+
+function mcpUrlError(message, code) {
+  const err = new Error(message);
+  err.status = 400;
+  err.code = code || 'mcp_url_invalid';
+  return err;
+}
+
+/**
+ * Assert that a URL is safe to use as a streaming HTTP MCP target.
+ *
+ * Async because hostname resolution is async (dns.promises.lookup).
+ * Returns `{ ip, family, hostname, port, url }` on success; throws a
+ * 400-coded Error on any policy violation.
+ *
+ * Localhost allowlist:
+ *   - hostname ∈ {'localhost','127.0.0.1','::1'} bypasses the private-IP
+ *     check ONLY when PALANTIR_MCP_ALLOW_LOCALHOST is unset or '1' (default
+ *     allow). Set to '0' to lock down.
+ *   - Suffix matches like `foo.localhost` are NOT allowed — exact match only.
+ *
+ * Caller MUST `await` — losing the await silently makes validation a no-op.
+ */
+async function assertSafeUrl(rawUrl) {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) {
+    throw mcpUrlError('URL required', 'mcp_url_required');
+  }
+  if (Buffer.byteLength(rawUrl, 'utf8') > MCP_URL_MAX_BYTES) {
+    throw mcpUrlError(`URL exceeds ${MCP_URL_MAX_BYTES} byte limit`, 'mcp_url_too_long');
+  }
+  let u;
+  try {
+    u = new URL(rawUrl);
+  } catch {
+    throw mcpUrlError('Invalid URL format', 'mcp_url_invalid');
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw mcpUrlError(`URL scheme must be http: or https: (got ${u.protocol})`, 'mcp_url_scheme');
+  }
+  if (u.username || u.password) {
+    throw mcpUrlError('URL must not contain userinfo (username/password)', 'mcp_url_userinfo');
+  }
+  if (u.hash) {
+    throw mcpUrlError('URL fragment (#…) is not allowed', 'mcp_url_fragment');
+  }
+  let hostname = u.hostname;
+  if (hostname.endsWith('.')) hostname = hostname.slice(0, -1);
+  hostname = hostname.toLowerCase();
+  if (!hostname) {
+    throw mcpUrlError('URL hostname required', 'mcp_url_invalid');
+  }
+
+  const allowLocalhost = process.env.PALANTIR_MCP_ALLOW_LOCALHOST !== '0';
+  const isAllowlist = allowLocalhost && isMcpAllowlistHostname(hostname);
+
+  // IP literal short-circuit — no DNS lookup needed.
+  if (net.isIP(hostname)) {
+    const family = net.isIPv6(hostname) ? 6 : 4;
+    if (!isAllowlist && isBlockedIP(hostname, family)) {
+      throw mcpUrlError(`IP blocked by SSRF policy: ${hostname}`, 'mcp_url_blocked');
+    }
+    return {
+      ip: hostname,
+      family,
+      hostname,
+      port: u.port || (u.protocol === 'https:' ? '443' : '80'),
+      url: u.toString(),
+    };
+  }
+
+  // Hostname path. Hard-deny known internal patterns first so a localhost
+  // typo like `localhost-prod.example.com` doesn't slip through the
+  // exact-match allowlist.
+  if (!isAllowlist && isBlockedHostname(hostname)) {
+    throw mcpUrlError(`Hostname blocked by SSRF policy: ${hostname}`, 'mcp_url_blocked');
+  }
+
+  let records;
+  try {
+    records = await dns.lookup(hostname, { all: true, family: 0 });
+  } catch (err) {
+    throw mcpUrlError(`DNS lookup failed for ${hostname}: ${err.code || err.message}`, 'mcp_url_dns_failed');
+  }
+  if (!records || records.length === 0) {
+    throw mcpUrlError(`DNS returned no records for ${hostname}`, 'mcp_url_dns_failed');
+  }
+  // Multi-A defense: if any address is private/blocked, reject — matches
+  // resolveAndValidate semantics. Localhost allowlist is a hostname-level
+  // exemption, not an IP-level one — when allowlist is true the host
+  // resolved to 127.0.0.1/::1 anyway, which the IP block would catch
+  // without the exemption.
+  for (const r of records) {
+    if (!isAllowlist && isBlockedIP(r.address, r.family)) {
+      throw mcpUrlError(`IP blocked by SSRF policy: ${r.address}`, 'mcp_url_blocked');
+    }
+  }
+  // Pin to first record. The preflight uses this to override the fetch's
+  // own DNS lookup and prevent a second resolve from returning a different
+  // IP (DNS rebinding TOCTOU).
+  const pinned = records[0];
+  return {
+    ip: pinned.address,
+    family: pinned.family,
+    hostname,
+    port: u.port || (u.protocol === 'https:' ? '443' : '80'),
+    url: u.toString(),
+  };
+}
+
 module.exports = {
   canonicalizeUrl,
   resolveAndValidate,
   fetchUrlSafe,
   maskSensitiveParams,
+  // M4-a: shared SSRF policy entry point for MCP URL validator + preflight.
+  assertSafeUrl,
   // exposed for tests
   _isBlockedIP: isBlockedIP,
   _isBlockedHostname: isBlockedHostname,
   _inCidrV4: inCidrV4,
   MAX_RESPONSE_BYTES,
+  MCP_URL_MAX_BYTES,
 };

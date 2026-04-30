@@ -154,6 +154,40 @@ function flattenMcpToCodexArgs(mcp) {
         `flattenMcpToCodexArgs: alias "${alias}" uses direct bearer_token; use bearer_token_env_var instead (secrets must not appear in argv)`,
       );
     }
+    // M4-a: Streamable HTTP transport branch. Codex CLI 0.125 infers
+    // transport from the presence of `url` (no `transport` key needed in
+    // dotted config). cfg is `http` iff `url` is present; we then refuse
+    // any stdio-shaped keys (command/args/env) and any explicit
+    // `transport` key (Codex would treat it as a string literal that
+    // overrides its own auto-detection — rejecting prevents footgun).
+    if (Object.prototype.hasOwnProperty.call(cfg, 'url')) {
+      const httpAllowed = new Set(['url', 'bearer_token_env_var']);
+      for (const key of Object.keys(cfg)) {
+        if (!httpAllowed.has(key)) {
+          throw new Error(
+            `flattenMcpToCodexArgs: alias "${alias}" is http (url present) but contains stdio-only key "${key}"; ` +
+            `expected only ${[...httpAllowed].join('/')}`,
+          );
+        }
+      }
+      const url = cfg.url;
+      if (typeof url !== 'string' || !url) {
+        throw new Error(
+          `flattenMcpToCodexArgs: alias "${alias}" url must be a non-empty string`,
+        );
+      }
+      out.push('-c', `mcp_servers.${alias}.url=${encodeString(url)}`);
+      if (cfg.bearer_token_env_var !== undefined && cfg.bearer_token_env_var !== null) {
+        const envVar = cfg.bearer_token_env_var;
+        if (typeof envVar !== 'string' || !envVar) {
+          throw new Error(
+            `flattenMcpToCodexArgs: alias "${alias}" bearer_token_env_var must be a non-empty string`,
+          );
+        }
+        out.push('-c', `mcp_servers.${alias}.bearer_token_env_var=${encodeString(envVar)}`);
+      }
+      continue;
+    }
     let emittedForAlias = 0;
     for (const [key, val] of Object.entries(cfg)) {
       validateKey(`key under ${alias}`, key);
