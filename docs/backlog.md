@@ -69,7 +69,9 @@
 
 ---
 
-## 본 세션 통계 (2026-04-26~04-29)
+## 직전 세션 통계 (2026-04-26~04-29 — K-2~K-5 41 PR 시리즈)
+
+> 이 블록은 K-series 시리즈에 한정된 스냅샷이다. 본 세션 (M4 phase) 의 누적 카운트는 아래 footer 를 본다.
 
 - **41 PR 시리즈 종료**: #129~#169
   - UI/UX cleanup follow-up 16 (#129~#144)
@@ -79,12 +81,14 @@
   - K-3α/β 4 (#158~#161)
   - K-4 spec+impl+followup 6 (#162~#167)
   - K-5 spec+impl 2 (#168~#169)
-- **테스트**: node 902 + e2e a11y 32 + visual 32 = **966 tests**
+- **테스트** (직전 세션 종료 시점): node 902 + e2e a11y 32 + visual 32 = **966 tests**
 - **3-layer K-2 token contract 방어 완성**:
   1. K-3β (build-time) — tokens.css light blocks lock-step
   2. K-4 (runtime axe) — WCAG rule 검증, baseline waiver 0
   3. K-5 (runtime visual) — Playwright screenshot diff
 - **Codex 교차검증**: 모든 PR 머지 전 PASS, BLOCK 8건 모두 fix, NIT 다수 즉시 적용
+
+**M4 phase 후 누적 (2026-04-30 시점)**: node 959 + e2e a11y 32 + visual 32 = **1023 tests** (M4-a 가 +57 node tests).
 
 ---
 
@@ -93,7 +97,7 @@
 ### D1. M5 — Codex MCP `env` argv leak → file-based config transport
 - **Tracked as**: [#113](https://github.com/Karnian/Palantir-Console/issues/113). spec 의 §7 후속 백로그명 = "M5 (가칭)".
 - **Scope 추정**: Large. Codex 0.120 공식 `--config-file`급 진입점 부재 → upstream 기여 or Palantir-owned TOML fragment + 명시적 Codex 부팅 경로.
-- **M4-a 후 잔여 범위**: HTTP MCP 의 token 노출 (argv) 문제는 M4-a 가 이미 우회 (`bearer_token_env_var` 가 env-only). 본 항목의 잔여 표면은 **stdio MCP 의 env-via-argv** (skill pack 의 `env_overrides` 로 들어간 secret 이 `-c mcp_servers.<alias>.env={KEY="..."}` 로 노출). HTTP 로 마이그레이션 가능한 alias 는 그쪽으로 옮기는 것도 부분 해결책.
+- **M4-a 후 잔여 범위**: HTTP MCP 의 token 노출 (argv) 문제는 M4-a 가 이미 우회 — `bearer_token_env_var` 의 **값** 은 워커 process.env 에서만 읽혀 argv 에 안 나오고, argv 에는 env var **이름** (예: `BIFROST_MCP_TOKEN`) 만 노출됨 (이름은 secret 아님). 본 항목의 잔여 표면은 **stdio MCP 의 env-via-argv** (skill pack 의 `env_overrides` 로 들어간 secret 이 `-c mcp_servers.<alias>.env={KEY="..."}` 로 *값까지* 노출). HTTP 로 마이그레이션 가능한 alias 는 그쪽으로 옮기는 것도 부분 해결책.
 - **착수 기준** (Codex M2 권장):
   - 1-2주 실사용 관측
   - `runs` 테이블 `mcp:legacy_alias_conflict` event 빈도
