@@ -1,6 +1,6 @@
 # Palantir Console Backlog
 
-> Last updated: 2026-04-29 (post PR #169 — K-2 launch + K-3 cleanup batch + K-4 a11y automation + K-5 visual regression 모두 머지. 본 세션 41 PR 시리즈 종료)
+> Last updated: 2026-04-30 (post PR #172 — M4-a MCP Streamable HTTP transport 1급 추가 머지. 직전 세션의 K-2~K-5 41 PR 시리즈 + 본 세션의 M4 phase 2 PR 모두 종결)
 >
 > 이 문서는 *현재 시점에서* 남은 작업들을 카테고리별로 정리한다.
 > 완료된 작업의 한 화면 요약 + 새 세션 재입장 prompt 는 [`handoff-post-k2-launch-2026-04-29.md`](./handoff-post-k2-launch-2026-04-29.md) 를 본다 (§9 post-launch fixups + §10 K-3 cleanup + §11 K-4 launch + §12 K-5 launch). 그 이전 시리즈 (M1/M2/B3 + R1/R3/R4) 는 [`handoff-post-scenario-review.md`](./handoff-post-scenario-review.md) 에 있다.
@@ -32,7 +32,16 @@
 
 ## 최근 완료된 phase 시리즈 (참고)
 
-상세는 모두 `handoff-post-k2-launch-2026-04-29.md` 참고.
+상세는 모두 `handoff-post-k2-launch-2026-04-29.md` 참고 (단 M4 시리즈는 spec brief 자체가 출처).
+
+### M4-a MCP Streamable HTTP transport (LAUNCHED 2026-04-30)
+- **PR #171** spec brief (`docs/specs/m4-mcp-http-streamable-transport-brief.md`, r7 READY, Claude opus-4.7 + Codex gpt-5.5 cross-check 7회), **#172** impl
+- `mcp_server_templates.transport ∈ {stdio, http}` discriminated union (migration 022 — table rebuild + INSERT/UPDATE 정합성 trigger 2개: column-shape + transport/alias immutable). Bifrost / Linear / Notion / Sentry 같은 원격 Streamable HTTP MCP 를 워커 spawn 경로에 1급으로 등록 가능.
+- **B-lite** — transport 추상화 레이어 / Strategy 패턴 도입 안 함, `if (transport === 'http')` 두 줄 분기로 처리.
+- 신규 / 분기 모듈: `ssrf.assertSafeUrl` async helper (validator + preflight 공유, DNS resolve + IP pinning), `codexMcpFlatten` http 분기 (url + bearer_token_env_var leaf only, transport 키 미emit), `mcpPreflight` (HEAD only / 200·204·405·501 pass / 3s timeout / Authorization 첨부 / fail-closed `preset:mcp_unreachable`), `authResolver.resolveBearerForPreflight` 단일 entry point + `buildManagerSpawnEnv` bearerEnvKeys 자동 allowlist, `lifecycleService.executeTask` async 전환, `McpTemplatesView` transport selector + 동적 필드 + 카드 list 분기, `diagnose-mcp-conflicts.mjs` transport / url / bearer-env-key 출력 + `***` 마스킹.
+- **테스트**: 902 → 959 (+57). `mcp-preflight.test.js` 신규 (시나리오 매트릭스 + real http server 통합 — lookup hook IP pinning / Authorization 헤더 / 302 redirect_blocked).
+- **Codex r1 cross-check**: 0 BLOCKER, 2 SERIOUS (lookup hook 테스트 갭 / `buildManagerSpawnEnv` legacy 주석) 모두 fix 후 머지.
+- **§7 deferred**: M4-b (clone-as-other-transport + bulk repoint), M5 (file-based MCP config delivery → issue #113), `'sse'` transport, dynamic `tools/list_changed`, OAuth-aware template, egress proxy. 모두 use case 발생 시.
 
 ### K-5 visual regression (LAUNCHED 2026-04-29)
 - **PR #168** spec brief, **#169** impl
@@ -81,9 +90,10 @@
 
 ## Data-wait
 
-### D1. M3 — Codex MCP `env` argv leak → file-based config transport
-- **Tracked as**: [#113](https://github.com/Karnian/Palantir-Console/issues/113)
+### D1. M5 — Codex MCP `env` argv leak → file-based config transport
+- **Tracked as**: [#113](https://github.com/Karnian/Palantir-Console/issues/113). spec 의 §7 후속 백로그명 = "M5 (가칭)".
 - **Scope 추정**: Large. Codex 0.120 공식 `--config-file`급 진입점 부재 → upstream 기여 or Palantir-owned TOML fragment + 명시적 Codex 부팅 경로.
+- **M4-a 후 잔여 범위**: HTTP MCP 의 token 노출 (argv) 문제는 M4-a 가 이미 우회 (`bearer_token_env_var` 가 env-only). 본 항목의 잔여 표면은 **stdio MCP 의 env-via-argv** (skill pack 의 `env_overrides` 로 들어간 secret 이 `-c mcp_servers.<alias>.env={KEY="..."}` 로 노출). HTTP 로 마이그레이션 가능한 alias 는 그쪽으로 옮기는 것도 부분 해결책.
 - **착수 기준** (Codex M2 권장):
   - 1-2주 실사용 관측
   - `runs` 테이블 `mcp:legacy_alias_conflict` event 빈도
@@ -103,6 +113,12 @@
 - **Trigger**: "Claude PM use case 발생" 사용자 선언.
 - **Why deferred**: Codex PM (Phase 3a) 로 모든 use case 커버 중. Claude PM 을 쓸 실제 요구가 없는 상태에서 adapter contract / recovery / event 정규화 변경은 over-build.
 - **착수 시 참고**: manager-v3-multilayer.md §9.6 (entire), 원칙 #9 (sandbox bypass 정책), `pmSpawnService` + `pmCleanupService` 의 현재 Codex 전용 경로를 어떻게 adapter-agnostic 하게 만들지.
+
+### T2. M4-b — transport migration helper
+- **Spec**: `docs/specs/m4-mcp-http-streamable-transport-brief.md` §7
+- **Trigger**: 첫 transport 전환 시나리오 (운영 preset ~10개 넘는 환경) 또는 긴급 transport 전환 사고면.
+- **Why deferred**: M4-a 의 `transport+alias immutable` 정책이 운영 preset 1~2개에서는 §3.3 manual path (새 alias 로 새 template + preset edit) 로 충분. ~10개 넘으면 partial-migration risk + 손-편집 부담.
+- **착수 시 범위 (~100 LOC)**: (a) clone-as-other-transport 액션, (b) impacted references 표시 (worker_presets / skill_packs / 활성 run preset snapshot 목록), (c) bulk repoint (`mcp_server_ids` / `mcp_servers` 일괄 갱신 + audit event), (d) "참조 0개" 카드 표시.
 
 ---
 
