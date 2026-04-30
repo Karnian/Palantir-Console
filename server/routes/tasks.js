@@ -98,7 +98,7 @@ function createTasksRouter({ taskService, lifecycleService, presetService }) {
     if (preset_id !== undefined && preset_id !== null && typeof preset_id !== 'string') {
       return res.status(400).json({ error: 'preset_id must be a string' });
     }
-    const run = lifecycleService.executeTask(req.params.id, {
+    const run = await lifecycleService.executeTask(req.params.id, {
       agentProfileId: agent_profile_id,
       prompt: prompt || '',
       skillPackIds: skill_pack_ids || undefined,

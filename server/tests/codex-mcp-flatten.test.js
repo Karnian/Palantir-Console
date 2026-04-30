@@ -282,3 +282,128 @@ test('does NOT emit top-level mcp_servers=<JSON> blob (regression guard)', () =>
   assert.ok(!cflags.some(c => /^mcp_servers=/.test(c)));
   assert.ok(cflags.every(c => /^mcp_servers\./.test(c)));
 });
+
+// ─── M4-a: HTTP transport branch ───
+//
+// Codex CLI 0.125 infers HTTP transport from the presence of `url` in the
+// dotted config. flatten emits `url` (and optional `bearer_token_env_var`)
+// — and ONLY those — for http aliases. Stdio-shaped keys on the same alias
+// are rejected. No `transport` arg is ever emitted (Codex would treat it
+// as a string literal that overrides its own auto-detection).
+
+test('M4-a: http alias emits only mcp_servers.<alias>.url (no transport key)', () => {
+  const args = flattenMcpToCodexArgs({
+    mcpServers: {
+      bifrost: { url: 'http://localhost:3100/mcp?profile=default' },
+    },
+  });
+  const cflags = args.filter((_, i) => i % 2 === 1);
+  assert.equal(cflags.length, 1);
+  assert.equal(
+    cflags[0],
+    'mcp_servers.bifrost.url="http://localhost:3100/mcp?profile=default"',
+  );
+  // Critical regression guard: NO transport=… arg is ever emitted.
+  assert.ok(!cflags.some(c => /\.transport=/.test(c)));
+  // No stdio-shaped legs leaked through.
+  assert.ok(!cflags.some(c => /\.command=/.test(c)));
+  assert.ok(!cflags.some(c => /\.args=/.test(c)));
+  assert.ok(!cflags.some(c => /\.env=/.test(c)));
+});
+
+test('M4-a: http alias with bearer_token_env_var emits both legs', () => {
+  const args = flattenMcpToCodexArgs({
+    mcpServers: {
+      bifrost: {
+        url: 'http://localhost:3100/mcp',
+        bearer_token_env_var: 'BIFROST_MCP_TOKEN',
+      },
+    },
+  });
+  const cflags = args.filter((_, i) => i % 2 === 1);
+  assert.equal(cflags.length, 2);
+  assert.ok(cflags.includes('mcp_servers.bifrost.url="http://localhost:3100/mcp"'));
+  assert.ok(cflags.includes('mcp_servers.bifrost.bearer_token_env_var="BIFROST_MCP_TOKEN"'));
+});
+
+test('M4-a: http alias rejects stdio-only keys (silent vanish prevention)', () => {
+  assert.throws(
+    () => flattenMcpToCodexArgs({
+      mcpServers: { svc: { url: 'http://x.example/mcp', command: 'npx' } },
+    }),
+    /alias "svc" is http \(url present\) but contains stdio-only key "command"/,
+  );
+  assert.throws(
+    () => flattenMcpToCodexArgs({
+      mcpServers: { svc: { url: 'http://x.example/mcp', args: ['-y'] } },
+    }),
+    /alias "svc" is http \(url present\) but contains stdio-only key "args"/,
+  );
+  assert.throws(
+    () => flattenMcpToCodexArgs({
+      mcpServers: { svc: { url: 'http://x.example/mcp', env: { TOKEN: 't' } } },
+    }),
+    /alias "svc" is http \(url present\) but contains stdio-only key "env"/,
+  );
+});
+
+test('M4-a: http alias rejects empty / non-string url', () => {
+  assert.throws(
+    () => flattenMcpToCodexArgs({ mcpServers: { svc: { url: '' } } }),
+    /alias "svc" url must be a non-empty string/,
+  );
+  assert.throws(
+    () => flattenMcpToCodexArgs({ mcpServers: { svc: { url: 42 } } }),
+    /alias "svc" url must be a non-empty string/,
+  );
+});
+
+test('M4-a: http alias bearer_token_env_var must be non-empty string', () => {
+  assert.throws(
+    () => flattenMcpToCodexArgs({
+      mcpServers: { svc: { url: 'http://x.example/mcp', bearer_token_env_var: '' } },
+    }),
+    /alias "svc" bearer_token_env_var must be a non-empty string/,
+  );
+});
+
+test('M4-a: http alias url with TOML-special chars stays safely quoted', () => {
+  const args = flattenMcpToCodexArgs({
+    mcpServers: {
+      svc: { url: 'http://localhost:3100/mcp?profile=read-only&team=eng' },
+    },
+  });
+  const cflags = args.filter((_, i) => i % 2 === 1);
+  // JSON.stringify quotes/escapes the URL — & / = / ? all stay literal.
+  assert.equal(
+    cflags[0],
+    'mcp_servers.svc.url="http://localhost:3100/mcp?profile=read-only&team=eng"',
+  );
+});
+
+test('M4-a: http alias url with double quotes properly escaped', () => {
+  const args = flattenMcpToCodexArgs({
+    mcpServers: {
+      svc: { url: 'http://x.example/path?key="value"' },
+    },
+  });
+  const v = args[args.indexOf('-c') + 1];
+  assert.equal(v, 'mcp_servers.svc.url="http://x.example/path?key=\\"value\\""');
+});
+
+test('M4-a: mixed stdio + http aliases coexist without cross-contamination', () => {
+  const args = flattenMcpToCodexArgs({
+    mcpServers: {
+      ctx7:    { command: 'npx', args: ['-y', '@ctx7/mcp'] },
+      bifrost: { url: 'http://localhost:3100/mcp', bearer_token_env_var: 'TOK' },
+    },
+  });
+  const cflags = args.filter((_, i) => i % 2 === 1);
+  assert.ok(cflags.some(c => c === 'mcp_servers.ctx7.command="npx"'));
+  assert.ok(cflags.some(c => c === 'mcp_servers.ctx7.args=["-y","@ctx7/mcp"]'));
+  assert.ok(cflags.some(c => c === 'mcp_servers.bifrost.url="http://localhost:3100/mcp"'));
+  assert.ok(cflags.some(c => c === 'mcp_servers.bifrost.bearer_token_env_var="TOK"'));
+  // bifrost must NOT have stdio leaves; ctx7 must NOT have url.
+  assert.ok(!cflags.some(c => /^mcp_servers\.bifrost\.command=/.test(c)));
+  assert.ok(!cflags.some(c => /^mcp_servers\.ctx7\.url=/.test(c)));
+});

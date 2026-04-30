@@ -590,6 +590,19 @@ export const MCP_TEMPLATES_LABELS = {
   aliasHint: '영문 / 숫자 / _ / -',
   aliasPlaceholder: 'graphify',
   aliasImmutableHint: 'Alias 는 변경할 수 없습니다 — 스킬 팩이 이 이름으로 템플릿을 참조합니다.',
+  // M4-a: transport selector
+  fieldTransport: 'Transport',
+  transportStdio: 'stdio (로컬 프로세스)',
+  transportHttp: 'http (원격 Streamable HTTP)',
+  transportImmutableHint: 'Transport 는 변경할 수 없습니다 — 다른 transport 가 필요하면 새 alias 를 만드세요.',
+  fieldUrl: 'URL',
+  urlHint: 'http:// 또는 https:// — 사설 IP / metadata / 로컬 (옵트아웃 가능) 은 차단됩니다',
+  urlPlaceholder: 'http://localhost:3100/mcp?profile=default',
+  fieldBearerEnvVar: 'Bearer 토큰 env 변수 이름 (선택)',
+  bearerEnvVarHint: '값이 아닌 *이름* 을 입력하세요. 워커는 spawn 시 process.env 에서 값을 읽습니다.',
+  bearerEnvVarPlaceholder: 'BIFROST_MCP_TOKEN',
+  bearerEnvVarWarn: '프로세스 로더 / 경로 가로채기 패턴 (NODE_OPTIONS, PATH 등) 은 전역적으로 차단됩니다.',
+  validateHttpUrl: 'http transport 는 url 이 필수입니다',
   fieldCommand: '명령',
   commandPlaceholder: 'npx',
   fieldArgs: 'Args',
@@ -603,6 +616,8 @@ export const MCP_TEMPLATES_LABELS = {
   validateAliasCommand: 'alias 와 command 는 필수입니다',
   toastCreated: '템플릿이 생성되었습니다',
   toastUpdated: '템플릿이 업데이트되었습니다',
+  // M4-a: card view
+  cardBearerPrefix: 'bearer:',
   // Empty state
   emptyText: 'MCP 템플릿이 없습니다',
   emptySub: '프리셋과 스킬 팩이 alias 로 참조할 수 있도록 MCP 서버를 등록하세요.',

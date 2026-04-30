@@ -135,7 +135,7 @@ test('executeTask: spawns via executionEngine for non-claude agent', async (t) =
   const task = seedTask(db, project.id);
   const profile = seedProfile(db, { command: 'codex' });
 
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hello' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hello' });
 
   assert.equal(execEngine.spawned.length, 1, 'executionEngine.spawnAgent called once');
   assert.equal(sje.spawned.length, 0, 'streamJsonEngine NOT used for non-claude agent');
@@ -161,7 +161,7 @@ test('executeTask: spawns via streamJsonEngine for claude agent', async (t) => {
   const task = seedTask(db, project.id);
   const profile = seedProfile(db, { command: 'claude' });
 
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'task prompt' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'task prompt' });
 
   assert.equal(sje.spawned.length, 1, 'streamJsonEngine.spawnAgent called once');
   assert.equal(execEngine.spawned.length, 0, 'executionEngine NOT used for claude agent');
@@ -195,7 +195,7 @@ test('executeTask: passes mcpConfig from project to streamJsonEngine', async (t)
   db.prepare(`INSERT INTO tasks (id, project_id, title, status) VALUES ('t1','p1','T','backlog')`).run();
   const profile = seedProfile(db, { command: 'claude' });
 
-  lc.executeTask('t1', { agentProfileId: profile.id, prompt: 'mcp test' });
+  await lc.executeTask('t1', { agentProfileId: profile.id, prompt: 'mcp test' });
 
   assert.equal(sje.spawned[0].opts.mcpConfig, '/etc/mcp.json', 'mcpConfig passed through');
 });
@@ -224,7 +224,7 @@ test('executeTask: env_allowlist is filtered from process.env', async (t) => {
     env_allowlist: JSON.stringify(['_PALANTIR_TEST_VAR']),
   });
 
-  lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'env test' });
+  await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'env test' });
 
   const spawnedEnv = execEngine.spawned[0].opts.env;
   assert.equal(spawnedEnv._PALANTIR_TEST_VAR, 'secret', 'allowed env var is passed through');
@@ -252,7 +252,7 @@ test('executeTask: marks task as in_progress', async (t) => {
   const profile = seedProfile(db, { command: 'codex' });
 
   assert.equal(ts.getTask(task.id).status, 'backlog');
-  lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'go' });
+  await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'go' });
   assert.equal(ts.getTask(task.id).status, 'in_progress');
 });
 
@@ -275,7 +275,7 @@ test('executeTask: marks run as failed and rethrows when spawnAgent throws', asy
   const task = seedTask(db, project.id);
   const profile = seedProfile(db, { command: 'codex' });
 
-  assert.throws(() => lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'boom' }), /no tmux/);
+  await assert.rejects(() => lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'boom' }), /no tmux/);
 
   // The run row should exist and be failed
   const runs = rs.listRuns({ task_id: task.id });
@@ -304,7 +304,7 @@ test('sendAgentInput: delivers input to active run via executionEngine', async (
   const project = seedProject(db);
   const task = seedTask(db, project.id);
   const profile = seedProfile(db, { command: 'codex' });
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'start' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'start' });
 
   const sent = lc.sendAgentInput(run.id, 'user reply');
   assert.equal(sent, true);
@@ -327,7 +327,7 @@ test('sendAgentInput: throws when run is not in running/needs_input state', asyn
   const project = seedProject(db);
   const task = seedTask(db, project.id);
   const profile = seedProfile(db, { command: 'codex' });
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'start' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'start' });
 
   // Move to completed (terminal)
   rs.updateRunStatus(run.id, 'completed', { force: true });
@@ -356,7 +356,7 @@ test('sendAgentInput: prefers streamJsonEngine over executionEngine', async (t) 
   const project = seedProject(db);
   const task = seedTask(db, project.id);
   const profile = seedProfile(db, { command: 'claude' });
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'claude task' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'claude task' });
 
   lc.sendAgentInput(run.id, 'stream input');
 
@@ -411,7 +411,7 @@ test('checkHealth: detects terminated non-manager run and transitions to complet
   const project = seedProject(db);
   const task = seedTask(db, project.id);
   const profile = seedProfile(db, { command: 'codex' });
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'test' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'test' });
 
   lc.checkHealth();
 
@@ -443,7 +443,7 @@ test('checkHealth: transitions stale running run to needs_input on idle timeout 
   const project = seedProject(db);
   const task = seedTask(db, project.id);
   const profile = seedProfile(db, { command: 'codex' });
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'go' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'go' });
 
   // Backdate the run's started_at so the idle timeout fires (10 min)
   const pastTime = new Date(Date.now() - 11 * 60 * 1000).toISOString();
@@ -489,7 +489,7 @@ test('INS-02: sendAgentInput recovers needs_input run back to running', async (t
   const project = seedProject(db);
   const task = seedTask(db, project.id);
   const profile = seedProfile(db, { command: 'codex' });
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'work' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'work' });
 
   // Simulate idle timeout: backdate + double checkHealth → needs_input
   const pastTime = new Date(Date.now() - 11 * 60 * 1000).toISOString();
@@ -540,7 +540,7 @@ test('INS-02: sendAgentInput on needs_input — streamJsonEngine first, executio
   const project = seedProject(db);
   const task = seedTask(db, project.id);
   const profile = seedProfile(db, { command: 'codex' });
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'start' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'start' });
 
   // Force needs_input
   rs.updateRunStatus(run.id, 'needs_input', { force: true });
@@ -575,7 +575,7 @@ test('checkHealth: transitions task to review when all runs complete with succes
   const project = seedProject(db);
   const task = seedTask(db, project.id);
   const profile = seedProfile(db, { command: 'codex' });
-  lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'single run' });
+  await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'single run' });
 
   lc.checkHealth();
 
@@ -603,7 +603,7 @@ test('cancelRun: transitions running run to cancelled', async (t) => {
   const project = seedProject(db);
   const task = seedTask(db, project.id);
   const profile = seedProfile(db, { command: 'codex' });
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'go' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'go' });
 
   const cancelled = lc.cancelRun(run.id);
   assert.equal(cancelled.status, 'cancelled');
@@ -626,7 +626,7 @@ test('cancelRun: is a no-op for already terminal runs', async (t) => {
   const project = seedProject(db);
   const task = seedTask(db, project.id);
   const profile = seedProfile(db, { command: 'codex' });
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'go' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'go' });
   rs.updateRunStatus(run.id, 'completed', { force: true });
 
   const result = lc.cancelRun(run.id);

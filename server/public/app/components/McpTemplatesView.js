@@ -1,8 +1,15 @@
-// McpTemplatesView — MCP server template CRUD page (M3).
+// McpTemplatesView — MCP server template CRUD page (M3 + M4-a).
 // Pre-M3 the mcp_server_templates table was code-seed-only; this view exposes
 // create/edit/delete via /api/mcp-server-templates. Presets reference
 // templates by id; skill packs reference them by alias — hence alias is
 // immutable on edit (server enforces, UI reflects with disabled field).
+//
+// M4-a: discriminated transport (stdio | http). Transport is also immutable
+// after creation — the modal disables the selector on edit and shows a hint
+// that pushes users toward "make a new alias" for transport switches. The
+// list card branches on transport for the body display so http rows show
+// the URL (and bearer env *name*, value masked) while stdio rows show
+// command + args preview as before.
 
 import { h } from '../../vendor/preact.module.js';
 import { useState, useEffect } from '../../vendor/hooks.module.js';
@@ -64,9 +71,15 @@ function formatTs(ts) {
 function TemplateModal({ open, template, onClose, onSaved }) {
   const isEdit = !!template;
   const [alias, setAlias] = useState('');
+  // M4-a: transport defaults to 'stdio' on new; on edit we read back the
+  // server value and disable the selector. Same-transport echo on PATCH
+  // is accepted by the service so we always send the current value.
+  const [transport, setTransport] = useState('stdio');
   const [command, setCommand] = useState('');
   const [argsJson, setArgsJson] = useState('');
   const [envKeys, setEnvKeys] = useState('');
+  const [url, setUrl] = useState('');
+  const [bearerEnv, setBearerEnv] = useState('');
   const [description, setDescription] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -74,44 +87,64 @@ function TemplateModal({ open, template, onClose, onSaved }) {
     if (!open) return;
     if (template) {
       setAlias(template.alias || '');
+      setTransport(template.transport || 'stdio');
       setCommand(template.command || '');
       setArgsJson(template.args || '');
       let envArr = [];
       try { envArr = JSON.parse(template.allowed_env_keys || '[]') || []; } catch { envArr = []; }
       setEnvKeys(Array.isArray(envArr) ? envArr.join(', ') : '');
+      setUrl(template.url || '');
+      setBearerEnv(template.bearer_token_env_var || '');
       setDescription(template.description || '');
     } else {
       setAlias('');
+      setTransport('stdio');
       setCommand('');
       setArgsJson('');
       setEnvKeys('');
+      setUrl('');
+      setBearerEnv('');
       setDescription('');
     }
   }, [open, template]);
 
   const handleSave = async () => {
-    if (!alias.trim() || !command.trim()) {
+    if (!alias.trim()) {
       addToast(MCP_TEMPLATES_LABELS.validateAliasCommand, 'error');
       return;
     }
-    let args;
-    try { args = parseJsonArrayField(argsJson, 'args'); }
-    catch (err) { addToast(err.message, 'error'); return; }
-    const allowed = parseCommaList(envKeys);
+    if (transport === 'stdio' && !command.trim()) {
+      addToast(MCP_TEMPLATES_LABELS.validateAliasCommand, 'error');
+      return;
+    }
+    if (transport === 'http' && !url.trim()) {
+      addToast(MCP_TEMPLATES_LABELS.validateHttpUrl, 'error');
+      return;
+    }
 
     setSaving(true);
     try {
       const body = {
         alias: alias.trim(),
-        command: command.trim(),
-        args,
-        allowed_env_keys: allowed,
+        transport,
         description: description.trim() || null,
       };
+      if (transport === 'stdio') {
+        let args;
+        try { args = parseJsonArrayField(argsJson, 'args'); }
+        catch (err) { addToast(err.message, 'error'); setSaving(false); return; }
+        body.command = command.trim();
+        body.args = args;
+        body.allowed_env_keys = parseCommaList(envKeys);
+      } else {
+        body.url = url.trim();
+        body.bearer_token_env_var = bearerEnv.trim() || null;
+      }
       if (isEdit) {
-        // alias is immutable — don't send it on PATCH at all, so the server
-        // never has to do a same-alias echo accept. command/args/env/desc only.
+        // alias + transport are immutable — don't send them on PATCH at all
+        // so the server never has to do a same-value echo accept dance.
         delete body.alias;
+        delete body.transport;
         await apiFetchWithToast(`/api/mcp-server-templates/${template.id}`, {
           method: 'PATCH', body: JSON.stringify(body),
         });
@@ -160,48 +193,120 @@ function TemplateModal({ open, template, onClose, onSaved }) {
           `}
         </div>
         <div class="form-row">
-          <label class="form-label" for="mcp-tpl-command">${MCP_TEMPLATES_LABELS.fieldCommand}</label>
-          <input
-            id="mcp-tpl-command"
-            class="form-input"
-            value=${command}
-            onInput=${e => setCommand(e.target.value)}
-            placeholder=${MCP_TEMPLATES_LABELS.commandPlaceholder}
-          />
-        </div>
-        <div class="form-row">
-          <label class="form-label" for="mcp-tpl-args">${MCP_TEMPLATES_LABELS.fieldArgs}
-            <span style=${{ color: 'var(--text-muted)', fontWeight: 'normal', marginLeft: '6px' }}>
-              ${MCP_TEMPLATES_LABELS.argsHint}
-            </span>
-          </label>
-          <textarea
-            id="mcp-tpl-args"
-            class="form-input"
-            rows="2"
-            value=${argsJson}
-            onInput=${e => setArgsJson(e.target.value)}
-            placeholder=${'["-y", "@graphify/mcp"]'}
-            style=${{ fontFamily: 'ui-monospace, monospace' }}
-          ></textarea>
-        </div>
-        <div class="form-row">
-          <label class="form-label" for="mcp-tpl-env">${MCP_TEMPLATES_LABELS.fieldEnv}
-            <span style=${{ color: 'var(--text-muted)', fontWeight: 'normal', marginLeft: '6px' }}>
-              ${MCP_TEMPLATES_LABELS.envHint}
-            </span>
-          </label>
-          <input
-            id="mcp-tpl-env"
-            class="form-input"
-            value=${envKeys}
-            onInput=${e => setEnvKeys(e.target.value)}
-            placeholder=${MCP_TEMPLATES_LABELS.envPlaceholder}
-          />
-          <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '4px' }}>
-            ${MCP_TEMPLATES_LABELS.envWarn}
+          <label class="form-label" for="mcp-tpl-transport">${MCP_TEMPLATES_LABELS.fieldTransport}</label>
+          <div role="radiogroup" aria-labelledby="mcp-tpl-transport" style=${{ display: 'flex', gap: '12px', marginTop: '4px' }}>
+            <label style=${{ display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: isEdit ? 'not-allowed' : 'pointer' }}>
+              <input
+                type="radio"
+                name="mcp-tpl-transport"
+                value="stdio"
+                checked=${transport === 'stdio'}
+                onChange=${() => setTransport('stdio')}
+                disabled=${isEdit}
+              />
+              <span>${MCP_TEMPLATES_LABELS.transportStdio}</span>
+            </label>
+            <label style=${{ display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: isEdit ? 'not-allowed' : 'pointer' }}>
+              <input
+                type="radio"
+                name="mcp-tpl-transport"
+                value="http"
+                checked=${transport === 'http'}
+                onChange=${() => setTransport('http')}
+                disabled=${isEdit}
+              />
+              <span>${MCP_TEMPLATES_LABELS.transportHttp}</span>
+            </label>
           </div>
+          ${isEdit && html`
+            <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '4px' }}>
+              ${MCP_TEMPLATES_LABELS.transportImmutableHint}
+            </div>
+          `}
         </div>
+
+        ${transport === 'stdio' && html`
+          <div class="form-row">
+            <label class="form-label" for="mcp-tpl-command">${MCP_TEMPLATES_LABELS.fieldCommand}</label>
+            <input
+              id="mcp-tpl-command"
+              class="form-input"
+              value=${command}
+              onInput=${e => setCommand(e.target.value)}
+              placeholder=${MCP_TEMPLATES_LABELS.commandPlaceholder}
+            />
+          </div>
+          <div class="form-row">
+            <label class="form-label" for="mcp-tpl-args">${MCP_TEMPLATES_LABELS.fieldArgs}
+              <span style=${{ color: 'var(--text-muted)', fontWeight: 'normal', marginLeft: '6px' }}>
+                ${MCP_TEMPLATES_LABELS.argsHint}
+              </span>
+            </label>
+            <textarea
+              id="mcp-tpl-args"
+              class="form-input"
+              rows="2"
+              value=${argsJson}
+              onInput=${e => setArgsJson(e.target.value)}
+              placeholder=${'["-y", "@graphify/mcp"]'}
+              style=${{ fontFamily: 'ui-monospace, monospace' }}
+            ></textarea>
+          </div>
+          <div class="form-row">
+            <label class="form-label" for="mcp-tpl-env">${MCP_TEMPLATES_LABELS.fieldEnv}
+              <span style=${{ color: 'var(--text-muted)', fontWeight: 'normal', marginLeft: '6px' }}>
+                ${MCP_TEMPLATES_LABELS.envHint}
+              </span>
+            </label>
+            <input
+              id="mcp-tpl-env"
+              class="form-input"
+              value=${envKeys}
+              onInput=${e => setEnvKeys(e.target.value)}
+              placeholder=${MCP_TEMPLATES_LABELS.envPlaceholder}
+            />
+            <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '4px' }}>
+              ${MCP_TEMPLATES_LABELS.envWarn}
+            </div>
+          </div>
+        `}
+
+        ${transport === 'http' && html`
+          <div class="form-row">
+            <label class="form-label" for="mcp-tpl-url">${MCP_TEMPLATES_LABELS.fieldUrl}
+              <span style=${{ color: 'var(--text-muted)', fontWeight: 'normal', marginLeft: '6px' }}>
+                ${MCP_TEMPLATES_LABELS.urlHint}
+              </span>
+            </label>
+            <input
+              id="mcp-tpl-url"
+              class="form-input"
+              value=${url}
+              onInput=${e => setUrl(e.target.value)}
+              placeholder=${MCP_TEMPLATES_LABELS.urlPlaceholder}
+              style=${{ fontFamily: 'ui-monospace, monospace' }}
+            />
+          </div>
+          <div class="form-row">
+            <label class="form-label" for="mcp-tpl-bearer">${MCP_TEMPLATES_LABELS.fieldBearerEnvVar}
+              <span style=${{ color: 'var(--text-muted)', fontWeight: 'normal', marginLeft: '6px' }}>
+                ${MCP_TEMPLATES_LABELS.bearerEnvVarHint}
+              </span>
+            </label>
+            <input
+              id="mcp-tpl-bearer"
+              class="form-input"
+              value=${bearerEnv}
+              onInput=${e => setBearerEnv(e.target.value)}
+              placeholder=${MCP_TEMPLATES_LABELS.bearerEnvVarPlaceholder}
+              style=${{ fontFamily: 'ui-monospace, monospace' }}
+            />
+            <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '4px' }}>
+              ${MCP_TEMPLATES_LABELS.bearerEnvVarWarn}
+            </div>
+          </div>
+        `}
+
         <div class="form-row">
           <label class="form-label" for="mcp-tpl-desc">${MCP_TEMPLATES_LABELS.fieldDescription}</label>
           <textarea
@@ -320,6 +425,27 @@ function DeleteConfirm({ open, template, onClose, onConfirm }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Card body — branches on transport
+// ─────────────────────────────────────────────────────────────────────────────
+
+function CardBody({ template }) {
+  if (template.transport === 'http') {
+    return html`
+      <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '4px' }}>
+        <code>${template.url}</code>
+        ${template.bearer_token_env_var && html` <span>(${MCP_TEMPLATES_LABELS.cardBearerPrefix} ${template.bearer_token_env_var})</span>`}
+      </div>
+    `;
+  }
+  return html`
+    <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '4px' }}>
+      <code>${template.command}</code>
+      ${template.args && html` <span>${argsPreview(template.args)}</span>`}
+    </div>
+  `;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // McpTemplatesView — list
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -361,14 +487,12 @@ export function McpTemplatesView() {
       ${!loading && templates.length > 0 && html`
         <div class="skill-packs-list">
           ${templates.map(t => html`
-            <div class="skill-pack-card static" key=${t.id}>
+            <div class="skill-pack-card static" key=${t.id} data-transport=${t.transport || 'stdio'}>
               <div class="skill-pack-card-header">
                 <h3 class="skill-pack-name" style=${{ margin: 0 }}>${t.alias}</h3>
+                <span class="small" style=${{ color: 'var(--text-muted)', marginLeft: '8px', textTransform: 'uppercase' }}>${t.transport || 'stdio'}</span>
               </div>
-              <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '4px' }}>
-                <code>${t.command}</code>
-                ${t.args && html` <span>${argsPreview(t.args)}</span>`}
-              </div>
+              <${CardBody} template=${t} />
               ${t.description && html`
                 <p class="skill-pack-desc" style=${{ marginTop: '6px' }}>${t.description}</p>
               `}

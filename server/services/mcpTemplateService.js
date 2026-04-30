@@ -30,11 +30,38 @@
 const crypto = require('node:crypto');
 const { BadRequestError, NotFoundError, ConflictError } = require('../utils/errors');
 const { isEnvKeyDenied } = require('./envDenylist');
+const { assertSafeUrl } = require('./ssrf');
+
+// M4-a: bearer_token_env_var has a NARROWER denylist than allowed_env_keys.
+// The shared `isEnvKeyDenied` rejects credential-suffix names (`_TOKEN$`,
+// `_KEY$`) because skill packs put those into MCP `env={...}` and the
+// values would leak via argv. For `bearer_token_env_var` the value never
+// reaches argv (the worker reads `process.env[<name>]` directly at MCP
+// connect), and `_TOKEN`/`_KEY` is exactly the natural way to name
+// bearer-token env vars (e.g. `BIFROST_MCP_TOKEN`, `LINEAR_API_KEY`).
+// Only the process-loader / path-hijack patterns still apply — those would
+// hijack the worker process regardless of how the value is read.
+const BEARER_ENV_HARD_DENYLIST_PATTERNS = [
+  /^NODE_OPTIONS$/, /^NODE_EXTRA_CA_CERTS$/, /^LD_PRELOAD$/, /^LD_LIBRARY_PATH$/,
+  /^DYLD_/, /^PYTHONPATH$/, /^RUBYOPT$/, /^PERL5OPT$/, /^JAVA_TOOL_OPTIONS$/,
+  /^PATH$/, /^HOME$/, /^SHELL$/, /^GIT_CONFIG_GLOBAL$/, /^GIT_CONFIG_SYSTEM$/,
+  /^XDG_CONFIG_HOME$/,
+];
+
+function isBearerEnvKeyDenied(key) {
+  return BEARER_ENV_HARD_DENYLIST_PATTERNS.some((pattern) => pattern.test(key));
+}
 
 // Same alias regex codexMcpFlatten enforces. Keeping it here too means a
 // UI-created template cannot reach spawn time with a flatten-unsafe alias.
 const ALIAS_RE = /^[A-Za-z0-9_-]+$/;
 const MAX_ARGS_JSON_BYTES = 4 * 1024; // spec §6.3 — match the storage-doc cap
+
+// Same regex used for template alias / env keys + bearer_token_env_var name.
+// Matches `^[A-Za-z_][A-Za-z0-9_]*$` (POSIX env var convention).
+const ENV_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+const VALID_TRANSPORTS = new Set(['stdio', 'http']);
 
 function validateAlias(alias) {
   if (typeof alias !== 'string' || !alias) {
@@ -111,6 +138,59 @@ function normalizeDescription(desc) {
   return desc;
 }
 
+function normalizeTransport(t) {
+  if (t == null || t === '') return 'stdio';
+  if (typeof t !== 'string') throw new BadRequestError('transport must be a string');
+  if (!VALID_TRANSPORTS.has(t)) {
+    throw new BadRequestError(`transport must be 'stdio' or 'http' (got ${JSON.stringify(t)})`);
+  }
+  return t;
+}
+
+// http template URL is validated through the shared `assertSafeUrl` helper
+// so that CRUD validation and spawn-time preflight cannot diverge. Returns
+// the canonical URL string so DB stores a single normalized form.
+async function validateUrl(url) {
+  if (typeof url !== 'string' || !url.trim()) {
+    throw new BadRequestError('url is required for http transport');
+  }
+  if (url !== url.trim()) {
+    throw new BadRequestError('url must not have leading or trailing whitespace');
+  }
+  try {
+    const result = await assertSafeUrl(url);
+    return result.url;
+  } catch (err) {
+    // assertSafeUrl throws { status: 400, code, message } — wrap as
+    // BadRequestError so the route → errorHandler chain emits a 400 with
+    // the diagnostic message.
+    throw new BadRequestError(err.message);
+  }
+}
+
+function validateBearerTokenEnvVar(name) {
+  if (name == null || name === '') return null;
+  if (typeof name !== 'string') {
+    throw new BadRequestError('bearer_token_env_var must be a string');
+  }
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+  if (trimmed !== name) {
+    throw new BadRequestError('bearer_token_env_var must not have leading or trailing whitespace');
+  }
+  if (!ENV_VAR_NAME_RE.test(trimmed)) {
+    throw new BadRequestError(
+      `bearer_token_env_var must match ${ENV_VAR_NAME_RE} (POSIX env var name)`,
+    );
+  }
+  if (isBearerEnvKeyDenied(trimmed)) {
+    throw new BadRequestError(
+      `bearer_token_env_var is globally-denied: '${trimmed}' (process-loader / path-hijack pattern rejected)`,
+    );
+  }
+  return trimmed;
+}
+
 function createMcpTemplateService(db) {
   const stmts = {
     listAll: db.prepare('SELECT * FROM mcp_server_templates ORDER BY alias ASC'),
@@ -118,9 +198,15 @@ function createMcpTemplateService(db) {
     getByAlias: db.prepare('SELECT * FROM mcp_server_templates WHERE alias = ?'),
     insert: db.prepare(`
       INSERT INTO mcp_server_templates (
-        id, alias, command, args, allowed_env_keys, description, updated_at
+        id, alias, transport,
+        command, args, allowed_env_keys,
+        url, bearer_token_env_var,
+        description, updated_at
       ) VALUES (
-        @id, @alias, @command, @args, @allowed_env_keys, @description, datetime('now')
+        @id, @alias, @transport,
+        @command, @args, @allowed_env_keys,
+        @url, @bearer_token_env_var,
+        @description, datetime('now')
       )
     `),
     // `updated_at` is only bumped when the content actually changed. A
@@ -128,16 +214,24 @@ function createMcpTemplateService(db) {
     // NOT trigger `mcp_template_drift` in RunInspector — matches the
     // seed-upsert CASE WHEN policy in skillPackService. Codex final review
     // flagged the naive always-bump as oversensitive.
+    //
+    // M4-a: url / bearer_token_env_var join the comparison so http template
+    // edits also surface drift; transport/alias are immutable so they're
+    // not in the SET list (DB triggers ABORT on mutation regardless).
     updateContent: db.prepare(`
       UPDATE mcp_server_templates SET
         command = @command,
         args = @args,
         allowed_env_keys = @allowed_env_keys,
+        url = @url,
+        bearer_token_env_var = @bearer_token_env_var,
         description = @description,
         updated_at = CASE
-          WHEN command != @command
+          WHEN COALESCE(command, '') != COALESCE(@command, '')
             OR COALESCE(args, '') != COALESCE(@args, '')
             OR COALESCE(allowed_env_keys, '') != COALESCE(@allowed_env_keys, '')
+            OR COALESCE(url, '') != COALESCE(@url, '')
+            OR COALESCE(bearer_token_env_var, '') != COALESCE(@bearer_token_env_var, '')
             OR COALESCE(description, '') != COALESCE(@description, '')
           THEN datetime('now')
           ELSE updated_at
@@ -180,19 +274,60 @@ function createMcpTemplateService(db) {
     return row;
   }
 
-  function createTemplate(data) {
+  // M4-a: createTemplate is async because http-transport URL validation
+  // resolves DNS via assertSafeUrl. Routes (asyncHandler) and tests must
+  // `await`. The seed-upsert path in skillPackService bypasses this via
+  // direct SQL on stdio templates only, so it stays sync.
+  async function createTemplate(data) {
     const alias = validateAlias(data.alias);
-    const command = validateCommand(data.command);
-    const args = validateArgs(data.args);
-    const allowed_env_keys = validateAllowedEnvKeys(data.allowed_env_keys);
+    const transport = normalizeTransport(data.transport);
     const description = normalizeDescription(data.description);
+
+    let command = null;
+    let args = null;
+    let allowed_env_keys = null;
+    let url = null;
+    let bearer_token_env_var = null;
+
+    if (transport === 'stdio') {
+      command = validateCommand(data.command);
+      args = validateArgs(data.args);
+      allowed_env_keys = validateAllowedEnvKeys(data.allowed_env_keys);
+      // http-only fields rejected outright so the validator + trigger agree
+      // even when the operator forgets to clear them on a transport flip
+      // attempt (which itself is rejected — alias+transport immutable).
+      if (data.url != null && data.url !== '') {
+        throw new BadRequestError('url is only valid for http transport');
+      }
+      if (data.bearer_token_env_var != null && data.bearer_token_env_var !== '') {
+        throw new BadRequestError('bearer_token_env_var is only valid for http transport');
+      }
+    } else { // 'http'
+      url = await validateUrl(data.url);
+      bearer_token_env_var = validateBearerTokenEnvVar(data.bearer_token_env_var);
+      if (data.command != null && data.command !== '') {
+        throw new BadRequestError('command is only valid for stdio transport');
+      }
+      if (data.args != null && (Array.isArray(data.args) ? data.args.length > 0 : data.args !== '')) {
+        throw new BadRequestError('args is only valid for stdio transport');
+      }
+      if (data.allowed_env_keys != null && (Array.isArray(data.allowed_env_keys)
+        ? data.allowed_env_keys.length > 0 : data.allowed_env_keys !== '')) {
+        throw new BadRequestError('allowed_env_keys is only valid for stdio transport');
+      }
+    }
 
     const dup = stmts.getByAlias.get(alias);
     if (dup) throw new ConflictError(`alias already exists: ${alias}`);
 
     const id = `tpl_${crypto.randomUUID().slice(0, 12)}`;
     try {
-      stmts.insert.run({ id, alias, command, args, allowed_env_keys, description });
+      stmts.insert.run({
+        id, alias, transport,
+        command, args, allowed_env_keys,
+        url, bearer_token_env_var,
+        description,
+      });
     } catch (err) {
       // Race between getByAlias and insert; surface as 409 regardless.
       if (String(err.message).includes('UNIQUE')) {
@@ -203,7 +338,10 @@ function createMcpTemplateService(db) {
     return stmts.getById.get(id);
   }
 
-  function updateTemplate(id, data) {
+  // M4-a: updateTemplate is async (validateUrl is async). Transport is
+  // immutable; same-transport echo is accepted, different value rejected.
+  // The DB trigger is the last line of defense.
+  async function updateTemplate(id, data) {
     const existing = stmts.getById.get(id);
     if (!existing) throw new NotFoundError(`MCP template not found: ${id}`);
 
@@ -216,17 +354,56 @@ function createMcpTemplateService(db) {
         'alias is immutable (skill packs reference templates by alias — rename would orphan bindings)',
       );
     }
+    // Transport is also immutable — same lock applied for the M4-a
+    // discriminated union. Operator must create a new alias to switch.
+    if ('transport' in data && data.transport && data.transport !== existing.transport) {
+      throw new BadRequestError(
+        'transport is immutable — create a new template instead',
+      );
+    }
 
-    const command = 'command' in data ? validateCommand(data.command) : existing.command;
-    const args = 'args' in data ? validateArgs(data.args) : existing.args;
-    const allowed_env_keys = 'allowed_env_keys' in data
-      ? validateAllowedEnvKeys(data.allowed_env_keys)
-      : existing.allowed_env_keys;
+    const transport = existing.transport; // never changes post-create
     const description = 'description' in data
       ? normalizeDescription(data.description)
       : existing.description;
 
-    stmts.updateContent.run({ id, command, args, allowed_env_keys, description });
+    let command = existing.command;
+    let args = existing.args;
+    let allowed_env_keys = existing.allowed_env_keys;
+    let url = existing.url;
+    let bearer_token_env_var = existing.bearer_token_env_var;
+
+    if (transport === 'stdio') {
+      if ('command' in data) command = validateCommand(data.command);
+      if ('args' in data) args = validateArgs(data.args);
+      if ('allowed_env_keys' in data) allowed_env_keys = validateAllowedEnvKeys(data.allowed_env_keys);
+      if ('url' in data && data.url != null && data.url !== '') {
+        throw new BadRequestError('url is only valid for http transport');
+      }
+      if ('bearer_token_env_var' in data && data.bearer_token_env_var != null && data.bearer_token_env_var !== '') {
+        throw new BadRequestError('bearer_token_env_var is only valid for http transport');
+      }
+    } else { // 'http'
+      if ('url' in data) url = await validateUrl(data.url);
+      if ('bearer_token_env_var' in data) {
+        bearer_token_env_var = validateBearerTokenEnvVar(data.bearer_token_env_var);
+      }
+      if ('command' in data && data.command != null && data.command !== '') {
+        throw new BadRequestError('command is only valid for stdio transport');
+      }
+      if ('args' in data && data.args != null
+        && (Array.isArray(data.args) ? data.args.length > 0 : data.args !== '')) {
+        throw new BadRequestError('args is only valid for stdio transport');
+      }
+      if ('allowed_env_keys' in data && data.allowed_env_keys != null
+        && (Array.isArray(data.allowed_env_keys) ? data.allowed_env_keys.length > 0 : data.allowed_env_keys !== '')) {
+        throw new BadRequestError('allowed_env_keys is only valid for stdio transport');
+      }
+    }
+
+    stmts.updateContent.run({
+      id, command, args, allowed_env_keys, url, bearer_token_env_var, description,
+    });
     return stmts.getById.get(id);
   }
 

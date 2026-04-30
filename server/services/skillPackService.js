@@ -67,23 +67,33 @@ function createSkillPackService(db) {
   // we only bump updated_at when the seeded content actually changed —
   // a server restart with an unchanged DEFAULT_MCP_TEMPLATES array must
   // NOT spuriously invalidate run snapshot drift detection (§M3).
+  //
+  // M4-a: transport column (default 'stdio') + url / bearer_token_env_var
+  // join the comparison so a future http-shaped seed never silently bumps
+  // updated_at when content matches. Bundled defaults stay stdio-only;
+  // http templates are operator-created via the UI / API.
   const upsertTemplate = db.prepare(`
     INSERT INTO mcp_server_templates (
-      id, alias, command, args, allowed_env_keys, description, updated_at
+      id, alias, transport, command, args, allowed_env_keys,
+      url, bearer_token_env_var, description, updated_at
     ) VALUES (
-      @id, @alias, @command, @args, @allowed_env_keys, @description, datetime('now')
+      @id, @alias, COALESCE(@transport, 'stdio'),
+      @command, @args, @allowed_env_keys,
+      @url, @bearer_token_env_var, @description, datetime('now')
     )
     ON CONFLICT(id) DO UPDATE SET
-      alias = excluded.alias,
       command = excluded.command,
       args = excluded.args,
       allowed_env_keys = excluded.allowed_env_keys,
+      url = excluded.url,
+      bearer_token_env_var = excluded.bearer_token_env_var,
       description = excluded.description,
       updated_at = CASE
-        WHEN mcp_server_templates.alias != excluded.alias
-          OR mcp_server_templates.command != excluded.command
+        WHEN COALESCE(mcp_server_templates.command, '') != COALESCE(excluded.command, '')
           OR COALESCE(mcp_server_templates.args, '') != COALESCE(excluded.args, '')
           OR COALESCE(mcp_server_templates.allowed_env_keys, '') != COALESCE(excluded.allowed_env_keys, '')
+          OR COALESCE(mcp_server_templates.url, '') != COALESCE(excluded.url, '')
+          OR COALESCE(mcp_server_templates.bearer_token_env_var, '') != COALESCE(excluded.bearer_token_env_var, '')
           OR COALESCE(mcp_server_templates.description, '') != COALESCE(excluded.description, '')
         THEN datetime('now')
         ELSE mcp_server_templates.updated_at
@@ -91,7 +101,12 @@ function createSkillPackService(db) {
   `);
   const seedTemplates = db.transaction(() => {
     for (const tpl of DEFAULT_MCP_TEMPLATES) {
-      upsertTemplate.run(tpl);
+      upsertTemplate.run({
+        transport: 'stdio',
+        url: null,
+        bearer_token_env_var: null,
+        ...tpl,
+      });
     }
   });
   seedTemplates();
@@ -410,7 +425,14 @@ function createSkillPackService(db) {
 
   /**
    * Resolve MCP server aliases to full configs.
-   * Returns { servers: { alias: { command, args, env } }, warnings: [] }
+   * Returns { servers: { alias: cfg }, warnings: [] }
+   *
+   * stdio template: cfg = { command, args, env? }
+   * http  template: cfg = { url, bearer_token_env_var? } — env_overrides
+   *                       silently dropped (validateMcpEnvOverrides already
+   *                       rejects them at write time because http templates
+   *                       have allowed_env_keys=NULL, so this is just
+   *                       defense in depth for old skill packs).
    */
   function resolveMcpServers(mcpServersJson) {
     if (!mcpServersJson) return { servers: {}, warnings: [] };
@@ -422,6 +444,18 @@ function createSkillPackService(db) {
       const template = stmts.getTemplateByAlias.get(alias);
       if (!template) {
         warnings.push(`MCP template "${alias}" not found — skipped`);
+        continue;
+      }
+
+      if (template.transport === 'http') {
+        const cfg = { url: template.url };
+        if (template.bearer_token_env_var) cfg.bearer_token_env_var = template.bearer_token_env_var;
+        // Skill pack env_overrides on an http template is meaningless (the
+        // template owns bearer_token_env_var; tokens themselves live in
+        // process.env at spawn time). validateMcpEnvOverrides already
+        // refuses overrides because http templates have allowed_env_keys
+        // = NULL → empty array → any override fails the allowlist check.
+        servers[alias] = cfg;
         continue;
       }
 

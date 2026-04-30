@@ -140,8 +140,15 @@ function assertTable(name) {
 assertTable('mcp_server_templates');
 assertTable('worker_presets');
 
-const templates = db.prepare(`SELECT id, alias FROM mcp_server_templates`).all();
+// M4-a: include transport / url / bearer_token_env_var so http aliases are
+// visible in the diagnostic. The bearer env *name* is shown verbatim (it
+// IS the publicly-known runtime knob); the env *value* is never read here.
+const templates = db.prepare(`
+  SELECT id, alias, transport, command, url, bearer_token_env_var
+  FROM mcp_server_templates
+`).all();
 const templateAliasById = new Map(templates.map((t) => [t.id, t.alias]));
+const templateById = new Map(templates.map((t) => [t.id, t]));
 
 const presets = db.prepare(`SELECT id, name, mcp_server_ids FROM worker_presets`).all();
 
@@ -150,12 +157,23 @@ const userAliasSet = new Set(userAliases);
 const report = presets.map((preset) => {
   let ids;
   try { ids = JSON.parse(preset.mcp_server_ids || '[]'); } catch { ids = []; }
-  const presetAliases = ids
-    .map((id) => templateAliasById.get(id))
-    .filter((a) => typeof a === 'string');
+  const aliasRows = ids
+    .map((id) => templateById.get(id))
+    .filter((t) => t);
+  const presetAliases = aliasRows.map((t) => t.alias);
   const conflicts = presetAliases.filter((a) => userAliasSet.has(a));
   const clean = presetAliases.filter((a) => !userAliasSet.has(a));
-  return { id: preset.id, name: preset.name, conflicts, clean };
+  // M4-a: per-alias details for verbose / json output. URL is shown as-is
+  // (never a secret); bearer_token_env_var name visible, value masked.
+  const details = aliasRows.map((t) => ({
+    alias: t.alias,
+    transport: t.transport || 'stdio',
+    ...(t.transport === 'http'
+      ? { url: t.url, bearer_token_env_var: t.bearer_token_env_var || null,
+          bearer_token_value: t.bearer_token_env_var ? '***' : null }
+      : { command: t.command || null }),
+  }));
+  return { id: preset.id, name: preset.name, conflicts, clean, details };
 });
 
 const conflictingPresets = report.filter((r) => r.conflicts.length > 0);
@@ -196,6 +214,19 @@ if (jsonOut) {
       }
       if (r.clean.length > 0) {
         lines.push(`      ${c.dim(`clean aliases: ${r.clean.join(', ')}`)}`);
+      }
+      // M4-a: per-alias transport / url / bearer-env summary.
+      if (r.details && r.details.length > 0) {
+        for (const d of r.details) {
+          if (d.transport === 'http') {
+            const bearer = d.bearer_token_env_var
+              ? ` ${c.dim(`(bearer env: ${d.bearer_token_env_var}=${c.yellow('***')})`)}`
+              : '';
+            lines.push(`      ${c.dim(`${d.alias}: http ${d.url}${bearer}`)}`);
+          } else {
+            lines.push(`      ${c.dim(`${d.alias}: stdio ${d.command || '(no command)'}`)}`);
+          }
+        }
       }
     }
   }

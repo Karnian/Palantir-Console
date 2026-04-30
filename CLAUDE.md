@@ -47,15 +47,18 @@ node --test server/tests/v2-api.test.js
 Express.js 5 + SQLite (WAL, better-sqlite3) + Preact/HTM (CDN 없이 vendor/ UMD) + Inter font (self-hosted woff2).
 빌드 스텝 없음 — `server/public/`의 파일이 그대로 서빙됨. 외부 CDN 의존 0개.
 
-**v3 기준 (Phase 0~10G + M1/M2/M3 + UI/UX cleanup F~K-2 merged)**: Top manager + 프로젝트 단위 PM (lazy-spawn, conversation identity), deterministic router, annotate-only drift reconciliation, SSE 시맨틱 envelope. P8: app.js ESM 전환, hooks 분할, ManagerView 분할. P9: 전 컴포넌트 직접 ESM import (window bridge 0개), SessionsView Preact 재작성. P10: Worker Preset DB/Service (10B), Tier 1/2 spawn wiring (10C/10D), Task linkage + #presets UI (10E), Preset snapshot drift audit UI (10F), agent-olympus integration (10G). **M1 (PR #114)**: Codex worker/PM MCP 주입을 leaf-level dotted path (`-c mcp_servers.<alias>.<key>=<TOML>`) 로 교체 + fail-closed flatten. **M2 (PR #115)**: user `~/.codex/config.toml` 과의 legacy alias 충돌을 `mcp:legacy_alias_conflict` run event 로 observability. **B3 (PR #116)**: `npm run diagnose:mcp` ops 도구. **M3-UI (PR #119)**: `mcp_server_templates` UI CRUD (`#mcp-servers` 탭) — `mcpTemplateService` + `routes/mcpTemplates.js` + `McpTemplatesView.js`. **UI/UX cleanup (#129~#143)**: a11y / 한국어화 / 디자인 토큰 / Modal primitive / e2e selector attribute 화. **K-2 라이트 모드 (#145~#153)**: `[data-theme="light"]` 22 의미 토큰 + CSP-safe `theme-init.js` (FOUC 방지) + NavSidebar 3-state toggle + `prefers-color-scheme` system 자동.
+**v3 기준 (Phase 0~10G + M1/M2/M3 + M4-a + UI/UX cleanup F~K-2 merged)**: Top manager + 프로젝트 단위 PM (lazy-spawn, conversation identity), deterministic router, annotate-only drift reconciliation, SSE 시맨틱 envelope. P8: app.js ESM 전환, hooks 분할, ManagerView 분할. P9: 전 컴포넌트 직접 ESM import (window bridge 0개), SessionsView Preact 재작성. P10: Worker Preset DB/Service (10B), Tier 1/2 spawn wiring (10C/10D), Task linkage + #presets UI (10E), Preset snapshot drift audit UI (10F), agent-olympus integration (10G). **M1 (PR #114)**: Codex worker/PM MCP 주입을 leaf-level dotted path (`-c mcp_servers.<alias>.<key>=<TOML>`) 로 교체 + fail-closed flatten. **M2 (PR #115)**: user `~/.codex/config.toml` 과의 legacy alias 충돌을 `mcp:legacy_alias_conflict` run event 로 observability. **B3 (PR #116)**: `npm run diagnose:mcp` ops 도구. **M3-UI (PR #119)**: `mcp_server_templates` UI CRUD (`#mcp-servers` 탭) — `mcpTemplateService` + `routes/mcpTemplates.js` + `McpTemplatesView.js`. **M4-a (PR TBD)**: MCP Streamable HTTP transport 1급 추가 — `mcp_server_templates.transport` ∈ {stdio, http} discriminated union (migration 022, table rebuild + 2 trigger), `ssrf.assertSafeUrl` async helper (DNS resolve + IP pinning), `codexMcpFlatten` http 분기 (url-only emit, no transport key), `mcpPreflight` (HEAD only / 200·204·405·501 pass / 3s timeout / Authorization 첨부 / fail-closed `preset:mcp_unreachable`), `authResolver.resolveBearerForPreflight` + `buildManagerSpawnEnv` 자동 allowlist, McpTemplatesView transport selector. spec: `docs/specs/m4-mcp-http-streamable-transport-brief.md`. **UI/UX cleanup (#129~#143)**: a11y / 한국어화 / 디자인 토큰 / Modal primitive / e2e selector attribute 화. **K-2 라이트 모드 (#145~#153)**: `[data-theme="light"]` 22 의미 토큰 + CSP-safe `theme-init.js` (FOUC 방지) + NavSidebar 3-state toggle + `prefers-color-scheme` system 자동.
 
 ```
 server/
   index.js                    — 진입점, 포트/auth 설정, SIGINT/SIGTERM graceful shutdown
   app.js                      — Express 앱 조립 (라우터, 서비스, 미들웨어)
   db/database.js              — SQLite 초기화 + 자동 마이그레이션
-  db/migrations/              — 001_initial ~ 021_skill_pack_origin_type_check.sql
-                                (020: mcp_template_updated_at, 021: skill_pack origin_type CHECK trigger)
+  db/migrations/              — 001_initial ~ 022_mcp_template_http_transport.sql
+                                (020: mcp_template_updated_at, 021: skill_pack origin_type CHECK trigger,
+                                 022: M4-a — mcp_server_templates table rebuild w/ transport ∈ {stdio,http},
+                                      url + bearer_token_env_var 컬럼, INSERT/UPDATE 정합성 trigger
+                                      (column-shape + transport/alias immutable))
   middleware/
     auth.js                   — PALANTIR_TOKEN 쿠키/Bearer 인증
     errorHandler.js           — 중앙 에러 핸들러
@@ -82,7 +85,7 @@ server/
     managerAdapters/
       claudeAdapter.js        — Claude 어댑터 (stream-json persistent process)
       codexAdapter.js         — Codex 어댑터 (stateless, thread resume + M1 flatten + M2 legacy scan)
-      codexMcpFlatten.js      — M1: JSON mcpServers → `-c mcp_servers.<alias>.<key>=<TOML>` 평탄화 + fail-closed
+      codexMcpFlatten.js      — M1: JSON mcpServers → `-c mcp_servers.<alias>.<key>=<TOML>` 평탄화 + fail-closed (M4-a: http 분기 — url + bearer_token_env_var leaf 만 emit, transport 키 미emit)
       codexUserConfigScan.js  — M2: ~/.codex/config.toml alias 스캔 + legacy 충돌 감지
       eventTypes.js           — 어댑터 공통 이벤트 타입
       index.js                — 어댑터 팩토리 (type → adapter 매핑)
@@ -107,7 +110,8 @@ server/
     presetService.js          — Worker Preset CRUD + snapshot drift 비교 (Phase 10B)
     skillPackService.js       — Skill Pack 설치/제거/resolve (Phase 10G)
     registryService.js        — Skill Pack 갤러리 레지스트리 조회
-    mcpTemplateService.js     — MCP server template CRUD + boot seed upsert (M3-UI)
+    mcpTemplateService.js     — MCP server template CRUD + boot seed upsert (M3-UI). M4-a: async (validateUrl 에 ssrf.assertSafeUrl 호출). transport 분기 + alias+transport immutable. http 행은 url + bearer_token_env_var 컬럼 사용 (command/args/allowed_env_keys NULL 강제, DB trigger 가 마지막 방어선)
+    mcpPreflight.js           — M4-a: http MCP HEAD preflight + IP pinning + Authorization 첨부 + fail-closed reasons (preflight_4xx/5xx/timeout/connect_refused/redirect_blocked/ssrf_blocked/bearer_env_missing). PALANTIR_MCP_ALLOW_PREFLIGHT_SKIP=1 로 디버그 시 비활성
     managerSystemPrompt.js    — layer='top'|'pm' 분기 시스템 프롬프트 빌더
     authResolver.js           — Claude/Codex auth preflight + 필터링 spawn env
     eventBus.js               — EventEmitter pub/sub (replay 200)
@@ -167,6 +171,7 @@ server/
   tests/                      — 59 테스트 파일 + e2e 2개
     codex-mcp-flatten.test.js — M1: flatten 유틸 unit (TOML encoding, fail-closed shape/leaf)
     codex-user-config-scan.test.js — M2: ~/.codex/config.toml alias 스캔 + 충돌 감지 unit
+    mcp-preflight.test.js          — M4-a: HTTP MCP HEAD preflight (pass/4xx/5xx/timeout/redirect/bearer/SSRF/skip)
     conversation.test.js      — Phase 1.5/2 parent-notice + registry + rotation
     pm-phase3a.test.js        — Phase 3a lazy spawn + cleanup (fail-closed)
     reconciliation.test.js    — Phase 4/7 envelope binding + audit + eventBus emit
@@ -188,7 +193,7 @@ server/
     helpers/                  — jsdom-preact.js 등
 ```
 
-> **902 tests** 기준 (PR #169 시점, 2026-04-29 — K-4-fc-pr3 의 chip-token 가드 cases 확장). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙. 단독 실행 시 모두 PASS, 풀 런 시 race-y flake 1~2건 알려진 패턴 (`engine: system:init event sets sessionId` 등 — `docs/handoff-post-k2-launch-2026-04-29.md` §6 참고). e2e: a11y 32 + visual 32 (별도, 각각 `npm run test:a11y` / `test:visual`).
+> **959 tests** 기준 (M4-a 시점, 2026-04-30 — http transport branch / preflight / ssrf assertSafeUrl / migration 022 trigger 가드 cases 확장. preflight 의 lookup hook + Authorization 헤더 + 302 redirect_blocked 는 real http server 통합 테스트로도 별도 가드). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙. 단독 실행 시 모두 PASS, 풀 런 시 race-y flake 1~2건 알려진 패턴 (`engine: system:init event sets sessionId` 등 — `docs/handoff-post-k2-launch-2026-04-29.md` §6 참고). e2e: a11y 32 + visual 32 (별도, 각각 `npm run test:a11y` / `test:visual`).
 
 ## Key Patterns
 

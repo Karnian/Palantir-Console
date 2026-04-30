@@ -334,7 +334,7 @@ test('lifecycleService: isolated preset → spawn gets isolated+pluginDirs+setti
     name: 'Iso', isolated: true, plugin_refs: ['p1'], setting_sources: '',
   });
 
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
   assert.equal(sje.spawned.length, 1);
   const opts = sje.spawned[0].opts;
   assert.equal(opts.isolated, true);
@@ -384,7 +384,7 @@ test('lifecycleService: isolated preset → fail-closed when canAuth=false', asy
     name: 'IsoNoAuth', isolated: true, plugin_refs: ['p1'],
   });
 
-  assert.throws(
+  await assert.rejects(
     () => lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id }),
     /Isolated preset requires Claude auth/,
   );
@@ -417,7 +417,7 @@ test('lifecycleService: isolated + codex adapter → Tier 2 skipped (tier2_skipp
     name: 'IsoCodex', isolated: true, plugin_refs: ['p1'],
   });
 
-  const run = lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id });
   const events = rs.getRunEvents(run.id);
   assert.ok(events.some(e => e.event_type === 'preset:tier2_skipped'));
   assert.equal(events.some(e => e.event_type === 'preset:tier2_active'), false);
