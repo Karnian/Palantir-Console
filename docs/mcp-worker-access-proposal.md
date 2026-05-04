@@ -2,7 +2,13 @@
 
 > 작성일: 2026-04-09
 > 최종 수정: 2026-04-10
-> 상태: Phase 1 완료 (feat/p3-mcp-access)
+> 상태 (2026-05-05): **Superseded** — 본 proposal 의 후속이 다음 시리즈로 모두 구현됨. 본 문서는 historical reference 로 유지:
+> - Phase 1 (feat/p3-mcp-access) — 머지 완료
+> - Phase 10B~10G (Worker Preset DB/Service + Tier 1/2 spawn wiring + #presets UI + drift audit + agent-olympus integration) — 머지 완료
+> - M1 (Codex MCP leaf-level flatten, PR #114), M2 (legacy alias detection, PR #115), B3 (`npm run diagnose:mcp` ops 도구, PR #116), M3-UI (`mcp_server_templates` UI CRUD, PR #119) — 머지 완료
+> - M4-a (MCP Streamable HTTP transport, PR #172) — 머지 완료. spec [`specs/m4-mcp-http-streamable-transport-brief.md`](./specs/m4-mcp-http-streamable-transport-brief.md), runbook [`runbook-m4a-bifrost-setup.md`](./runbook-m4a-bifrost-setup.md)
+>
+> 운영자가 현재 MCP 셋업/연동 가이드를 찾는다면 위 runbook + spec 을 본다. 본 proposal 은 당시 문제 정의 / option 비교 / lock-in 사고 흐름의 사료로 보존.
 
 ## 1. 현재 상황 분석
 

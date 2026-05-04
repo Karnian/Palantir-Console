@@ -1,6 +1,6 @@
 # Palantir Console Backlog
 
-> Last updated: 2026-04-30 (post PR #172 — M4-a MCP Streamable HTTP transport 1급 추가 머지. 직전 세션의 K-2~K-5 41 PR 시리즈 + 본 세션의 M4 phase 2 PR 모두 종결)
+> Last updated: 2026-05-05 (post PR #178 — M4-a 후속 검증 사이클 4 PR 종결: #175 diagnose-mcp fix / #176 Bifrost runbook / #177 §L9.1 verification stamp / #178 §L9.1 외부 MCP 매트릭스 + Bifrost listChanged 코드 분석)
 >
 > 이 문서는 *현재 시점에서* 남은 작업들을 카테고리별로 정리한다.
 > 완료된 작업의 한 화면 요약 + 새 세션 재입장 prompt 는 [`handoff-post-k2-launch-2026-04-29.md`](./handoff-post-k2-launch-2026-04-29.md) 를 본다 (§9 post-launch fixups + §10 K-3 cleanup + §11 K-4 launch + §12 K-5 launch). 그 이전 시리즈 (M1/M2/B3 + R1/R3/R4) 는 [`handoff-post-scenario-review.md`](./handoff-post-scenario-review.md) 에 있다.
@@ -34,13 +34,19 @@
 
 상세는 모두 `handoff-post-k2-launch-2026-04-29.md` 참고 (단 M4 시리즈는 spec brief 자체가 출처).
 
-### M4-a MCP Streamable HTTP transport (LAUNCHED 2026-04-30)
+### M4-a MCP Streamable HTTP transport + 검증 사이클 (LAUNCHED 2026-04-30, 검증 종결 2026-05-05)
 - **PR #171** spec brief (`docs/specs/m4-mcp-http-streamable-transport-brief.md`, r7 READY, Claude opus-4.7 + Codex gpt-5.5 cross-check 7회), **#172** impl
 - `mcp_server_templates.transport ∈ {stdio, http}` discriminated union (migration 022 — table rebuild + INSERT/UPDATE 정합성 trigger 2개: column-shape + transport/alias immutable). Bifrost / Linear / Notion / Sentry 같은 원격 Streamable HTTP MCP 를 워커 spawn 경로에 1급으로 등록 가능.
 - **B-lite** — transport 추상화 레이어 / Strategy 패턴 도입 안 함, `if (transport === 'http')` 두 줄 분기로 처리.
 - 신규 / 분기 모듈: `ssrf.assertSafeUrl` async helper (validator + preflight 공유, DNS resolve + IP pinning), `codexMcpFlatten` http 분기 (url + bearer_token_env_var leaf only, transport 키 미emit), `mcpPreflight` (HEAD only / 200·204·405·501 pass / 3s timeout / Authorization 첨부 / fail-closed `preset:mcp_unreachable`), `authResolver.resolveBearerForPreflight` 단일 entry point + `buildManagerSpawnEnv` bearerEnvKeys 자동 allowlist, `lifecycleService.executeTask` async 전환, `McpTemplatesView` transport selector + 동적 필드 + 카드 list 분기, `diagnose-mcp-conflicts.mjs` transport / url / bearer-env-key 출력 + `***` 마스킹.
 - **테스트**: 902 → 959 (+57). `mcp-preflight.test.js` 신규 (시나리오 매트릭스 + real http server 통합 — lookup hook IP pinning / Authorization 헤더 / 302 redirect_blocked).
 - **Codex r1 cross-check**: 0 BLOCKER, 2 SERIOUS (lookup hook 테스트 갭 / `buildManagerSpawnEnv` legacy 주석) 모두 fix 후 머지.
+- **검증 사이클 (PR #173~#178, 2026-04-30~2026-05-05)**:
+  - #173 backlog M4 phase 종료 stamp / #174 codex r1 fix
+  - **#175** `diagnose-mcp` default DB path `palantir.db` → `server/palantir.db` (server/app.js:81 와 lock-step. 본 세션 발견된 false-negative 진단 fix)
+  - **#176** `docs/runbook-m4a-bifrost-setup.md` 신규 — Bifrost 연동 셋업/검증/트러블슈팅 매트릭스 (192줄)
+  - **#177** spec §L9.1 post-impl verification stamp — Bifrost end-to-end 검증 결과 (5 ✅ + 2 ⚠) inline 등록
+  - **#178** spec §L9.1 확장 — 외부 hosted MCP HEAD 매트릭스 (Linear/Notion/Sentry/GHCP/Atlassian/Cloudflare 6개 직접 probe — 5/6 = 401, 1/6 = 404) + Bifrost listChanged 코드 분석 (`/mcp` 비동기 미지원, `/sse` 만 emit). M4-c entry + completion condition 정밀화
 - **§7 deferred**: M4-b (clone-as-other-transport + bulk repoint), M5 (file-based MCP config delivery → issue #113), `'sse'` transport, dynamic `tools/list_changed`, OAuth-aware template, egress proxy. 모두 use case 발생 시.
 
 ### K-5 visual regression (LAUNCHED 2026-04-29)
@@ -150,5 +156,6 @@
 - Skill Pack v1.1 (draft): `docs/specs/skill-pack-gallery-v1.1.md`
 - Manager UI Proposal: `docs/specs/manager-session-ui.md`
 - M4-a Bifrost 연동 runbook: `docs/runbook-m4a-bifrost-setup.md` (셋업 / 검증 명령 / 트러블슈팅 매트릭스 / 운영 패턴)
-- 이번 세션 handoff: `docs/handoff-post-k2-launch-2026-04-29.md` (UI/UX cleanup + K-2 launch + K-3 + K-4 + K-5 시리즈 41 PR 종료 stamp)
+- 본 세션 handoff: `docs/handoff-post-m4a-2026-05-05.md` (M4-a + Bifrost 연동 검증 8 PR 종료 stamp)
+- 직전 세션 handoff: `docs/handoff-post-k2-launch-2026-04-29.md` (UI/UX cleanup + K-2 launch + K-3 + K-4 + K-5 시리즈 41 PR 종료 stamp)
 - 이전 세션 handoff: `docs/handoff-post-scenario-review.md` (M1/M2/B3 + R1/R3/R4)

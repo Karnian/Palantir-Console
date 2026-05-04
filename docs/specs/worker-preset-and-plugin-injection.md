@@ -1,9 +1,9 @@
 # Worker Preset & Plugin Injection — v3 Phase 10
 
-> Version 0.1-draft | 2026-04-14
-> Status: **Draft — pending Codex cross-review**
-> 관련 문서: [manager-v3-multilayer.md](./manager-v3-multilayer.md), [skill-packs.md](./skill-packs.md), [skill-pack-gallery-v1.1.md](./skill-pack-gallery-v1.1.md)
-> Memory 기반: `project_plugin_skill_injection_idea.md` (2026-04-08 검증, 보류 상태 해제)
+> Version 0.1-draft | 2026-04-14 (마지막 status 갱신: 2026-05-05)
+> Status: **Phase 10B~10G 시리즈 + M1/M2/M3-UI/M4-a 모두 merged to main.** 본 brief 는 historical lock-in 문서 (구현된 결정의 근거 출처). 후속 추가 (M-시리즈 / M4-a 의 HTTP transport) 는 별도 brief 에서 lock-in.
+> 관련 문서: [manager-v3-multilayer.md](./manager-v3-multilayer.md), [skill-packs.md](./skill-packs.md), [skill-pack-gallery-v1.1.md](./skill-pack-gallery-v1.1.md), [m4-mcp-http-streamable-transport-brief.md](./m4-mcp-http-streamable-transport-brief.md), [`../runbook-m4a-bifrost-setup.md`](../runbook-m4a-bifrost-setup.md)
+> Memory 기반: `project_plugin_skill_injection_idea.md` (2026-04-08 검증, Phase 10 시리즈로 구현 완료)
 
 ---
 
