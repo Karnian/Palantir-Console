@@ -89,7 +89,7 @@ Reports which Palantir presets will trigger mcp:legacy_alias_conflict
 events against the Codex user config.
 
 Options:
-  --db <path>             Override palantir.db location (default: ./palantir.db)
+  --db <path>             Override palantir.db location (default: ./server/palantir.db, or $PALANTIR_DB)
   --config <path>         Override ~/.codex/config.toml location
   --fail-on-conflict      Exit 2 when at least one preset conflicts
   --json                  Emit machine-readable JSON, no colors
