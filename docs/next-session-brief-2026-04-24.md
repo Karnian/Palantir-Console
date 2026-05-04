@@ -1,6 +1,11 @@
 # Next Session Brief — 2026-04-24
 
-> **목적**: 새 세션이 cold-start 에서 남은 백로그를 자율적으로 완료하기 위한 단일 진입 문서.
+> **상태 (2026-05-05): Superseded — 본 brief 가 다룬 R1/R3/R4 백로그는 모두 머지 완료**.
+> 이후 K-2~K-5 41 PR 시리즈 (handoff: [`handoff-post-k2-launch-2026-04-29.md`](./handoff-post-k2-launch-2026-04-29.md)) + M4-a + 검증 사이클 8 PR 시리즈 (handoff: [`handoff-post-m4a-2026-05-05.md`](./handoff-post-m4a-2026-05-05.md)) 도 머지 완료.
+> 다음 세션 cold-start 진입은 위 두 handoff + [`backlog.md`](./backlog.md) 의 Ready/Trigger-wait 섹션 + (M4-a 운영) [`runbook-m4a-bifrost-setup.md`](./runbook-m4a-bifrost-setup.md) 를 본다.
+> 본 brief 는 historical reference (당시 R1/R3/R4 처리 흐름 + 전제 사고) 로 유지.
+
+> **목적 (당시)**: 새 세션이 cold-start 에서 남은 백로그를 자율적으로 완료하기 위한 단일 진입 문서.
 > 이 문서 하나만 있으면 컨텍스트 재구성 없이 R1/R3/R4 를 순서대로 처리할 수 있어야 한다.
 
 ---
