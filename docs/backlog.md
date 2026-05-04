@@ -149,5 +149,6 @@
 - Skill Pack v1.0: `docs/specs/skill-pack-gallery.md`
 - Skill Pack v1.1 (draft): `docs/specs/skill-pack-gallery-v1.1.md`
 - Manager UI Proposal: `docs/specs/manager-session-ui.md`
+- M4-a Bifrost 연동 runbook: `docs/runbook-m4a-bifrost-setup.md` (셋업 / 검증 명령 / 트러블슈팅 매트릭스 / 운영 패턴)
 - 이번 세션 handoff: `docs/handoff-post-k2-launch-2026-04-29.md` (UI/UX cleanup + K-2 launch + K-3 + K-4 + K-5 시리즈 41 PR 종료 stamp)
 - 이전 세션 handoff: `docs/handoff-post-scenario-review.md` (M1/M2/B3 + R1/R3/R4)
