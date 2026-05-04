@@ -43,7 +43,17 @@ function flagValue(name) {
 }
 const hasFlag = (name) => argv.includes(name);
 
-const dbPath = flagValue('--db') || path.join(repoRoot, 'palantir.db');
+// Default DB path mirrors `server/app.js:81` exactly so the diagnostic
+// reads the SAME database the running server writes to. Without this
+// alignment a fresh-cloned repo with stale `<root>/palantir.db` (left
+// over from old dev cycles) shadowed the real `server/palantir.db`,
+// producing "schema_version 19 / no transport column" false negatives.
+// `__dirname` of `server/app.js` is `<repoRoot>/server`, so the
+// default lives at `<repoRoot>/server/palantir.db`. Operator overrides
+// (`--db <path>` or `PALANTIR_DB` env) still win, in that order.
+const dbPath = flagValue('--db')
+  || process.env.PALANTIR_DB
+  || path.join(repoRoot, 'server', 'palantir.db');
 const configPathOverride = flagValue('--config');
 const jsonOut = hasFlag('--json');
 const failOnConflict = hasFlag('--fail-on-conflict');
@@ -79,7 +89,7 @@ Reports which Palantir presets will trigger mcp:legacy_alias_conflict
 events against the Codex user config.
 
 Options:
-  --db <path>             Override palantir.db location (default: ./palantir.db)
+  --db <path>             Override palantir.db location (default: ./server/palantir.db, or $PALANTIR_DB)
   --config <path>         Override ~/.codex/config.toml location
   --fail-on-conflict      Exit 2 when at least one preset conflicts
   --json                  Emit machine-readable JSON, no colors
