@@ -1,11 +1,11 @@
 # Handoff: M4-a MCP Streamable HTTP transport + Bifrost 연동 검증 종결
 
-> **상태**: 2026-04-30 ~ 2026-05-05 세션. M4-a phase + 검증 사이클 7 PR (#171~#178) 머지 완료. 본 handoff 와 함께 머지되는 문서 정합화 PR (#179) 까지 합치면 총 **8 PR** 시리즈. (#179 머지 후 본 줄의 "본 handoff 와 함께 머지되는" 표현은 retrospective 가 됨.)
+> **상태**: 2026-04-30 ~ 2026-05-05 세션. M4-a phase + 검증 사이클 7 PR (#171~#178) + 문서 정합화 (#179) + post-handoff K-5 micro-batch (#180~#181) 합쳐 총 **10 PR** 시리즈. (#179 머지 후 §1.6 의 K-5 micro-batch 가 같은 날 추가됨.)
 > 직전 세션 handoff: [`handoff-post-k2-launch-2026-04-29.md`](./handoff-post-k2-launch-2026-04-29.md) (K-2~K-5 41 PR 시리즈 종결).
 
 ---
 
-## 1. PR 시리즈 (8개)
+## 1. PR 시리즈 (10개)
 
 ### 1.1 M4-a phase (#171, #172)
 
@@ -40,7 +40,18 @@
 
 | PR | hash | 내용 |
 |---|---|---|
-| **#179** | TBD | docs(post-m4a): backlog Last updated → 2026-05-05 + #175~#178 stamp / `manager-v3-multilayer.md` Status (M3-UI / M4-a 추가) / `worker-preset-and-plugin-injection.md` Status (Phase 10 머지 완료) / `mcp-worker-access-proposal.md` Superseded 헤더 / `next-session-brief-2026-04-24.md` Superseded 헤더 / 본 handoff 신규 |
+| **#179** | 9e6c1e0 | docs(post-m4a): backlog Last updated → 2026-05-05 + #175~#178 stamp / `manager-v3-multilayer.md` Status (M3-UI / M4-a 추가) / `worker-preset-and-plugin-injection.md` Status (Phase 10 머지 완료) / `mcp-worker-access-proposal.md` Superseded 헤더 / `next-session-brief-2026-04-24.md` Superseded 헤더 / 본 handoff 신규 |
+
+### 1.6 K-5 NIT + baseline realign 시리즈 (#180~#181, post-handoff micro-batch)
+
+같은 날 본 handoff 머지 직후 발견된 K-5 nice-to-have 1건 + 그 작업 중 발견된 M4-a (PR #172) baseline 누락 회귀.
+
+| PR | hash | 내용 |
+|---|---|---|
+| **#180** | 2201bc8 | chore(k5-nit): `data-dynamic="true"` → `data-visual-mask="true"` rename + spec §L10 leaf-text 룰 lock-in. McpTemplatesView leaf 1곳 / visual.spec.js locator + 주석 / spec / backlog / handoff 갱신. Codex r1 PASS |
+| **#181** | 5bf7871 | fix(k5-baseline): mcp-servers visual baseline 4개 realign — M4-a (#172) 가 transport label (STDIO/HTTP) + 카드 layout 변경 후 baseline 갱신 누락한 회귀. spec §L4 ("시각 변경 동반 phase PR 은 머지 전 visual run 의무") + §L5 ("corrective baseline-only PR 예외 + 3가지 필수 메타") 본문 lock-in. Codex r1 SERIOUS 1건 (L5 본문 lock-in) fix 후 PASS |
+
+**M4-a 누락 회귀 lessons learned**: M4-a 머지 (#172) 후 4 PR 검증 사이클 (#173~#178) 동안 누구도 visual run 안 돌려 baseline drift 가 4 PR 시간만큼 남아있음. spec L4 갱신으로 운영 규율 lock-in.
 
 ---
 
@@ -92,18 +103,19 @@ spec §L9.1 의 verification 표 (5 ✅ + 7 ⚠/🔬):
 
 ## 5. 본 세션 통계 (2026-04-30 ~ 2026-05-05)
 
-- **8 PR 머지**: #171~#178 (Palantir) + 1 (mcp-bifrost issue #3 / PR #4)
-- **테스트**: node 902 → **959** (+57). 신규 `mcp-preflight.test.js` (22 cases). e2e a11y 32 + visual 32 = 1023 total.
+- **10 PR 머지**: #171~#179 (M4-a + 검증 + 정합화 9 PR) + #180~#181 (post-handoff K-5 micro-batch 2 PR) + 1 (mcp-bifrost issue #3 / PR #4)
+- **테스트**: node 902 → **959** (+57). 신규 `mcp-preflight.test.js` (22 cases). e2e a11y 32 + visual 32 = 1023 total. K-5 baseline 4개 (mcp-servers) realign (#181).
 - **신규 모듈**: `server/services/mcpPreflight.js` (HTTP MCP HEAD preflight), `docs/runbook-m4a-bifrost-setup.md` (운영 가이드)
 - **신규 마이그레이션**: 022 (`mcp_server_templates` table rebuild + transport union + 2 trigger)
-- **Codex 교차검증**: 모든 PR 머지 전 r1, BLOCK 0건, SERIOUS 6건 모두 fix, NIT 다수 즉시 적용
+- **신규 운영 규율 (K-5 spec L4)**: 시각 변경을 동반한 phase PR 은 머지 전 `npm run test:visual` 실행 의무 (M4-a 누락 회귀 lessons learned)
+- **Codex 교차검증**: 모든 PR 머지 전 r1, BLOCK 0건, SERIOUS 7건 (M4-a r1 2건 + #176 1건 + #178 2건 + #181 1건 + 그 외 1건) 모두 fix, NIT 다수 즉시 적용
 
 ---
 
 ## 6. 다음 세션 재입장 prompt 후보
 
 ```
-이전 세션 (2026-04-30~05-05) 에서 M4-a + 검증 사이클 8 PR 머지됨.
+이전 세션 (2026-04-30~05-05) 에서 M4-a + 검증 사이클 + K-5 micro-batch 10 PR 머지됨.
 docs/handoff-post-m4a-2026-05-05.md 와 docs/backlog.md 부터 읽어줘.
 
 진행 옵션:
