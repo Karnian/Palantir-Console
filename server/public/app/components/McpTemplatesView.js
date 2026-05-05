@@ -496,7 +496,7 @@ export function McpTemplatesView() {
               ${t.description && html`
                 <p class="skill-pack-desc" style=${{ marginTop: '6px' }}>${t.description}</p>
               `}
-              <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '6px' }} data-dynamic="true">
+              <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '6px' }} data-visual-mask="true">
                 ${MCP_TEMPLATES_LABELS.cardUpdatedPrefix} ${formatTs(t.updated_at)}
               </div>
               <div class="skill-pack-card-actions">

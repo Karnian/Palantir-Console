@@ -91,7 +91,7 @@
 
 K-5 launch 후 추가로 분리된 nice-to-have (deferred, 사용자 트리거 시 별도 phase):
 - **K-5-followup**: 모달/드로어 visual regression
-- **K-5 NIT**: `data-dynamic` → `data-visual-mask` 이름 변경
+- ~~**K-5 NIT**: `data-dynamic` → `data-visual-mask` 이름 변경~~ — 2026-05-05 종결 (rename + spec L10 leaf-text 룰 lock-in)
 - **K-4 NIT**: moderate severity gate 승격 (현재 report-only)
 - **K-4-card-markup NIT**: heading semantics 복원 (`<h3>` 별도 위치)
 - **interactive state visual** (hover/focus/pressed)
@@ -120,7 +120,7 @@ docs/handoff-post-k2-launch-2026-04-29.md 참고. K-2 launch 후속 후보
 
 (1) K-5 launch 후 분리된 nice-to-have (§5 하단) 중 하나 진행
    - K-5-followup (모달 visual regression)
-   - K-5 NIT (data-dynamic → data-visual-mask 이름 변경)
+   - ~~K-5 NIT (data-dynamic → data-visual-mask 이름 변경)~~ — 2026-05-05 종결
    - K-4 NIT (moderate severity gate 승격)
    - K-4-card-markup NIT (heading semantics 복원)
    - interactive state visual (hover/focus/pressed)
