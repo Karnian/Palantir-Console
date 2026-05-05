@@ -91,9 +91,14 @@ K-4 와 동일: 8 hash routes × 2 themes (dark/light) × 2 viewports (1280×800
 
 ### L10. (추가 결정) Dynamic surface masking
 
-- `[data-dynamic="true"]` 또는 selector 명시 (e.g. `.claude-session-item`, `.timestamp`, `.relative-time`) 를 `toHaveScreenshot({ mask: [...] })` 에 등록
+- `[data-visual-mask="true"]` 또는 selector 명시 (e.g. `.claude-session-item`, `.timestamp`, `.relative-time`) 를 `toHaveScreenshot({ mask: [...] })` 에 등록
 - mask 영역은 black box 로 처리 — diff 무시
 - 본 phase 에서 mask 등록 후 갱신 시 spec 명시 변경 필요
+- **Leaf-text 룰** (K-5 NIT, 2026-05-05 lock-in): mask selector 는 반드시 volatile text 를 직접 렌더하는 leaf element 만 가리켜야 한다. EmptyState 같은 fallback 을 함께 swap-in 하는 container 에 mask 를 걸면 fallback 까지 가려져 visual coverage 가 사라진다.
+  - DO: `.triage-feed > .triage-item` (feed container 는 비범위)
+  - DO: `data-visual-mask="true"` 를 timestamp 를 직접 출력하는 leaf `<div>` / `<span>` 에 부여
+  - DON'T: dynamic content ↔ EmptyState 조건부 swap 이 일어나는 section 자체에 class-level mask 를 걸지 말 것
+- 속성명 history: 초기 spec L10 은 `data-dynamic="true"` 였으나 의도 (시각 회귀 mask 전용 opt-in) 가 모호 → K-5 NIT 에서 `data-visual-mask="true"` 로 rename. 이름 변경만으로 mask 영역은 동일하므로 baseline 갱신 불필요.
 
 ### L11. (추가 결정) 모든 snapshot animation disable
 
@@ -172,6 +177,7 @@ K-4 와 동일: 8 hash routes × 2 themes (dark/light) × 2 viewports (1280×800
 
 - [x] **PR-1 K-5-spec** (#168, 2026-04-29) — 본 brief + backlog stamp. Codex r1 NIT 1건 (L12 browser pin + baseline state) 적용 후 PASS.
 - [x] **PR-2 K-5 구현** (#169, 2026-04-29) — visual.spec.js (32 시나리오, ~100 라인) + 32 PNG baseline (1.3MB) + playwright.config (reducedMotion + chromium pin) + 문서 stamp 6 파일.
+- [x] **PR-3 K-5 NIT — visual-mask rename + leaf-text 룰** (#TBD, 2026-05-05) — `data-dynamic="true"` → `data-visual-mask="true"` 의도 명확화 + L10 leaf-text 룰 lock-in. McpTemplatesView.js leaf 1곳 / visual.spec.js locator 1곳 / spec L10 / backlog / handoff 갱신. 마스킹 element 동일 → PNG baseline 갱신 불필요.
 
 ---
 

@@ -1,6 +1,6 @@
 # Palantir Console Backlog
 
-> Last updated: 2026-05-05 (post PR #178 — M4-a 후속 검증 사이클 4 PR 종결: #175 diagnose-mcp fix / #176 Bifrost runbook / #177 §L9.1 verification stamp / #178 §L9.1 외부 MCP 매트릭스 + Bifrost listChanged 코드 분석)
+> Last updated: 2026-05-05 (post K-5 NIT — `data-dynamic` → `data-visual-mask` rename + spec L10 leaf-text 룰 lock-in. K-5 nice-to-have 1건 종결)
 >
 > 이 문서는 *현재 시점에서* 남은 작업들을 카테고리별로 정리한다.
 > 완료된 작업의 한 화면 요약 + 새 세션 재입장 prompt 는 [`handoff-post-k2-launch-2026-04-29.md`](./handoff-post-k2-launch-2026-04-29.md) 를 본다 (§9 post-launch fixups + §10 K-3 cleanup + §11 K-4 launch + §12 K-5 launch). 그 이전 시리즈 (M1/M2/B3 + R1/R3/R4) 는 [`handoff-post-scenario-review.md`](./handoff-post-scenario-review.md) 에 있다.
@@ -22,7 +22,6 @@
 
 진행 가능한 후속 nice-to-have (deferred — 사용자 트리거 시):
 - **K-5-followup** — 모달/드로어 visual regression (K-5 spec §3 비범위 → 별도 phase)
-- **K-5 NIT** — `data-dynamic` → `data-visual-mask` 이름 변경 (의도 명확화) + leaf text 룰 명시
 - **K-4 NIT** — moderate severity gate 승격 (현재 report-only)
 - **K-4-card-markup NIT** — `.agent-card` / `.project-card` heading semantics 복원 (`<h3>` 별도 위치)
 - **interactive state visual** — hover/focus/pressed (Codex K-5 r1 권장 분리)

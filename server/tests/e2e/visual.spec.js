@@ -71,10 +71,16 @@ async function stabilize(page) {
 // will be painted black in both baseline and actual, so timestamp drift /
 // SSE list reorder / status badge rotation never trips the diff.
 //
-// Codex K-5 r2 NIT: scope `.triage-feed` mask to `.triage-item` only,
-// otherwise the EmptyState fallback (when there are no triage rows in
-// the fresh DB) gets masked too and we'd lose its visual regression
-// coverage entirely.
+// Leaf-text rule (K-5 NIT, 2026-05-05): mask selectors must target the
+// *leaf* element that actually renders the volatile text — never the
+// container that may also render an EmptyState fallback. Otherwise the
+// fallback is masked and we lose its visual regression coverage entirely.
+// Concretely:
+//   - DO scope to children: `.triage-feed > .triage-item` (not the feed)
+//   - DO put `data-visual-mask="true"` on the leaf div / span that prints
+//     the timestamp, never on the surrounding card
+//   - DON'T add a class-level mask to a section that conditionally swaps
+//     between dynamic content and an EmptyState
 function dynamicMasks(page) {
   return [
     page.locator('.claude-session-item'),
@@ -82,11 +88,11 @@ function dynamicMasks(page) {
     page.locator('.relative-time'),
     page.locator('.manager-status-badge'),
     page.locator('.triage-feed > .triage-item'),
-    // K-5 r2: explicit `data-dynamic="true"` opt-in for surfaces that
+    // Explicit `data-visual-mask="true"` opt-in for leaf surfaces that
     // render server-time-ish values (e.g. `updated_at` in mcp-servers).
-    // Components mark these with the attribute so this list stays
-    // selector-stable as new dynamic surfaces appear.
-    page.locator('[data-dynamic="true"]'),
+    // Components mark the leaf element with the attribute so this list
+    // stays selector-stable as new dynamic surfaces appear.
+    page.locator('[data-visual-mask="true"]'),
   ];
 }
 
