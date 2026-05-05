@@ -56,12 +56,14 @@ K-4 와 동일: 8 hash routes × 2 themes (dark/light) × 2 viewports (1280×800
 - 본 phase 는 K-4 와 동일하게 **로컬 / 사람-드라이븐 PR 게이트** (CI workflow 비범위)
 - diff 발견 시 fail. 의도된 visual change 라면 `npx playwright test visual --update-snapshots` 후 PR 에 새 PNG 포함
 - snapshot PR 은 author + Codex 둘 다 PNG diff 확인
+- **시각 변경을 동반한 phase PR 은 머지 전 `npm run test:visual` 실행 + baseline 갱신 의무** (PR-4 회귀로 lock-in, 2026-05-05): McpTemplatesView 같이 visible UI 를 만지는 phase 는 visual run 을 안 돌리고 머지하면 mcp-servers 4개 baseline 이 stale 되는 시간만 늘어나고 후속 검증 사이클 PR 들이 이미 broken 한 상태에서 진행돼 발견이 늦어진다 (M4-a 머지 후 4 PR 검증 사이클 동안 발견 못 함). visible UI 를 안 만지는 phase 는 면제.
 
 ### L5. baseline 갱신 룰
 
 - **모든 snapshot 갱신 PR 은 reason 명시** — commit body 에 "K-5: snapshot updated for X reason" 명시
 - snapshot 파일 단독 변경 PR 금지 — UI 변경 코드와 같은 PR 에 묶음
 - 의도하지 않은 diff 발견 시 코드 fix 우선 (snapshot fix 금지)
+- **예외 — corrective baseline-only PR** (PR-4 회귀로 lock-in, 2026-05-05): 이미 머지된 UI PR 의 누락 baseline 을 사후 정렬하는 PR 은 baseline-only 로 허용. 단 PR body 에 (1) 어느 머지된 PR 의 누락인지 명시, (2) 갱신 전후 visual run 결과 (예: "28 PASS / 4 FAIL → 32/32 PASS") 명시, (3) 갱신된 PNG 의 시각 검증 사실 (어떤 변경이 캡처됐는지) 명시.
 
 ### L6. 비범위
 
@@ -177,7 +179,8 @@ K-4 와 동일: 8 hash routes × 2 themes (dark/light) × 2 viewports (1280×800
 
 - [x] **PR-1 K-5-spec** (#168, 2026-04-29) — 본 brief + backlog stamp. Codex r1 NIT 1건 (L12 browser pin + baseline state) 적용 후 PASS.
 - [x] **PR-2 K-5 구현** (#169, 2026-04-29) — visual.spec.js (32 시나리오, ~100 라인) + 32 PNG baseline (1.3MB) + playwright.config (reducedMotion + chromium pin) + 문서 stamp 6 파일.
-- [x] **PR-3 K-5 NIT — visual-mask rename + leaf-text 룰** (#TBD, 2026-05-05) — `data-dynamic="true"` → `data-visual-mask="true"` 의도 명확화 + L10 leaf-text 룰 lock-in. McpTemplatesView.js leaf 1곳 / visual.spec.js locator 1곳 / spec L10 / backlog / handoff 갱신. 마스킹 element 동일 → PNG baseline 갱신 불필요.
+- [x] **PR-3 K-5 NIT — visual-mask rename + leaf-text 룰** (#180, 2026-05-05) — `data-dynamic="true"` → `data-visual-mask="true"` 의도 명확화 + L10 leaf-text 룰 lock-in. McpTemplatesView.js leaf 1곳 / visual.spec.js locator 1곳 / spec L10 / backlog / handoff 갱신. 마스킹 element 동일 → PNG baseline 갱신 불필요.
+- [x] **PR-4 K-5 baseline realign — M4-a 회귀 fix** (#TBD, 2026-05-05) — M4-a (PR #172) 가 `McpTemplatesView` 카드에 transport label (STDIO/HTTP) + 카드 layout 변경을 추가하면서 K-5 baseline 4개 (mcp-servers × dark/light × desktop/mobile) 갱신을 누락한 회귀 fix. `npm run test:visual -- --update-snapshots --grep mcp-servers` 로 갱신, full visual 32/32 PASS 검증. 코드 변경 없음 (PNG only) — L5 룰 ("snapshot 단독 변경 PR 금지") 의 예외: 별도 phase 의 누락 회귀를 정렬하는 baseline-only PR 이라 본 phase 의 코드 변경과 묶을 수 없는 구조적 예외 (M4-a 머지 후 4 PR 검증 사이클 동안 누구도 visual run 을 안 돌려서 발견됨). 향후 visual fail 한 phase PR 머지 전에 baseline 갱신 의무화 운영 규율로 보완.
 
 ---
 
