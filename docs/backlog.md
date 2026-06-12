@@ -1,6 +1,6 @@
 # Palantir Console Backlog
 
-> Last updated: 2026-05-05 (post K-5 baseline realign — M4-a 회귀 fix: mcp-servers 4 baseline (#181). 2026-05-05 K-5 NIT (#180) 와 같은 날 시리즈)
+> Last updated: 2026-06-13 (P0 spawn guard #183 + H-1 Run Harvest #184 — 감독 워크플로 전환 후 첫 시리즈)
 >
 > 이 문서는 *현재 시점에서* 남은 작업들을 카테고리별로 정리한다.
 > 완료된 작업의 한 화면 요약 + 새 세션 재입장 prompt 는 [`handoff-post-k2-launch-2026-04-29.md`](./handoff-post-k2-launch-2026-04-29.md) 를 본다 (§9 post-launch fixups + §10 K-3 cleanup + §11 K-4 launch + §12 K-5 launch). 그 이전 시리즈 (M1/M2/B3 + R1/R3/R4) 는 [`handoff-post-scenario-review.md`](./handoff-post-scenario-review.md) 에 있다.
@@ -32,6 +32,20 @@
 ## 최근 완료된 phase 시리즈 (참고)
 
 상세는 모두 `handoff-post-k2-launch-2026-04-29.md` 참고 (단 M4 시리즈는 spec brief 자체가 출처).
+
+### P0 spawn guard + H-1 Run Harvest (LAUNCHED 2026-06-13)
+- **PR #183** P0 — 테스트의 실제 CLI spawn fail-closed 차단 (`server/utils/spawnGuard.js`).
+  2026-06-12 spawn storm 사고 (`docs/incident-2026-06-12-test-claude-spawn-storm.md`) 근본 수정.
+  `NODE_TEST_CONTEXT` 감지 시 fixtures 밖 실행파일 차단, call site 6곳, npm test 복원,
+  node 22 고정 (engines + .nvmrc). 968 tests (+9).
+- **PR #184** H-1 — Run Harvest (spec `docs/specs/h1-run-harvest-brief.md` r2 READY).
+  worker run terminal 시 autosave → diff 캡처 (`harvest:diff`) → opt-in `projects.test_command`
+  실행 (`harvest:test`) → worktree 제거 (autosave off). migration 023, RunInspector Harvest 섹션,
+  boot stale worktree 정리. 978 tests (+10).
+- **워크플로 전환**: 본 시리즈부터 Codex 가 구현, Claude 가 brief 작성·리뷰·보강 (감독 모드).
+  spec r1 → Codex cross-review (BLOCKER 2 검출) → r2 lock-in → Codex 구현 → Claude 리뷰 수정 2건.
+- **H-2 후보 (deferred)**: PR 자동 생성/push, branch 자동 머지, diff patch body 표시 —
+  harvest 운영 관측 후 트리거.
 
 ### M4-a MCP Streamable HTTP transport + 검증 사이클 (LAUNCHED 2026-04-30, 검증 종결 2026-05-05)
 - **PR #171** spec brief (`docs/specs/m4-mcp-http-streamable-transport-brief.md`, r7 READY, Claude opus-4.7 + Codex gpt-5.5 cross-check 7회), **#172** impl
@@ -122,6 +136,12 @@
 - **Trigger**: "Claude PM use case 발생" 사용자 선언.
 - **Why deferred**: Codex PM (Phase 3a) 로 모든 use case 커버 중. Claude PM 을 쓸 실제 요구가 없는 상태에서 adapter contract / recovery / event 정규화 변경은 over-build.
 - **착수 시 참고**: manager-v3-multilayer.md §9.6 (entire), 원칙 #9 (sandbox bypass 정책), `pmSpawnService` + `pmCleanupService` 의 현재 Codex 전용 경로를 어떻게 adapter-agnostic 하게 만들지.
+
+### T3. H-2 — Harvest 수확 루프 완성 (PR 자동 생성 / 머지)
+- **Spec**: `docs/specs/h1-run-harvest-brief.md` §4 (비범위 표)
+- **Trigger**: H-1 운영 관측 후 — harvest:diff/test 이벤트가 실제로 리뷰→머지 결정에 쓰이기 시작하면.
+- **착수 시 범위**: 프로젝트별 push/PR 정책 (remote 유무, gh auth, base branch 설정),
+  RunInspector 에서 "PR 생성" 액션, diff patch body 표시 여부 결정.
 
 ### T2. M4-b — transport migration helper
 - **Spec**: `docs/specs/m4-mcp-http-streamable-transport-brief.md` §7
