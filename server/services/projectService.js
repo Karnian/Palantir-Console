@@ -36,6 +36,18 @@ function normalizeMcpConfigPath(value) {
   return trimmed;
 }
 
+function normalizeTestCommand(value) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  if (typeof value !== 'string') throw new BadRequestError('test_command must be a string');
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.length > 500) {
+    throw new BadRequestError('test_command must be 500 characters or fewer');
+  }
+  return trimmed;
+}
+
 function createProjectService(db) {
   const stmts = {
     getAll: db.prepare('SELECT * FROM projects ORDER BY updated_at DESC'),
@@ -43,11 +55,11 @@ function createProjectService(db) {
     insert: db.prepare(`
       INSERT INTO projects (
         id, name, directory, description, color, budget_usd,
-        pm_enabled, preferred_pm_adapter, mcp_config_path
+        pm_enabled, preferred_pm_adapter, mcp_config_path, test_command
       )
       VALUES (
         @id, @name, @directory, @description, @color, @budget_usd,
-        @pm_enabled, @preferred_pm_adapter, @mcp_config_path
+        @pm_enabled, @preferred_pm_adapter, @mcp_config_path, @test_command
       )
     `),
     // update: dynamic — see updateProject() below
@@ -64,12 +76,13 @@ function createProjectService(db) {
     return project;
   }
 
-  function createProject({ name, directory, description, color, budget_usd, pm_enabled, preferred_pm_adapter, mcp_config_path }) {
+  function createProject({ name, directory, description, color, budget_usd, pm_enabled, preferred_pm_adapter, mcp_config_path, test_command }) {
     if (!name) throw new BadRequestError('Project name is required');
     const id = `proj_${crypto.randomUUID().slice(0, 8)}`;
     const normalizedPmEnabled = normalizePmEnabled(pm_enabled);
     const normalizedAdapter = normalizePmAdapter(preferred_pm_adapter);
     const normalizedMcpPath = normalizeMcpConfigPath(mcp_config_path);
+    const normalizedTestCommand = normalizeTestCommand(test_command);
     stmts.insert.run({
       id, name,
       directory: directory || null,
@@ -80,6 +93,7 @@ function createProjectService(db) {
       pm_enabled: normalizedPmEnabled === undefined ? 1 : normalizedPmEnabled,
       preferred_pm_adapter: normalizedAdapter === undefined ? null : normalizedAdapter,
       mcp_config_path: normalizedMcpPath === undefined ? null : normalizedMcpPath,
+      test_command: normalizedTestCommand === undefined ? null : normalizedTestCommand,
     });
     return stmts.getById.get(id);
   }
@@ -90,6 +104,8 @@ function createProjectService(db) {
     'pm_enabled', 'preferred_pm_adapter',
     // v3 Phase 4 (P4-2): project-scoped MCP config file path
     'mcp_config_path',
+    // H-1: opt-in harvest test command
+    'test_command',
   ];
 
   function updateProject(id, fields) {
@@ -107,6 +123,10 @@ function createProjectService(db) {
     if ('mcp_config_path' in fields) {
       const n = normalizeMcpConfigPath(fields.mcp_config_path);
       fields = { ...fields, mcp_config_path: n === undefined ? null : n };
+    }
+    if ('test_command' in fields) {
+      const n = normalizeTestCommand(fields.test_command);
+      fields = { ...fields, test_command: n === undefined ? null : n };
     }
     const setClauses = [];
     const params = { id };

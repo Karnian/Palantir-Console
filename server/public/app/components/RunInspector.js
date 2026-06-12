@@ -82,6 +82,11 @@ function aggregateManagerUsage(events) {
   return hasAny ? { inputTokens, outputTokens, cachedInputTokens, costUsd, turns } : null;
 }
 
+function parseEventPayload(evt) {
+  try { return evt?.payload_json ? JSON.parse(evt.payload_json) : {}; }
+  catch { return {}; }
+}
+
 function RunSkillItem({ sp, runId, acceptanceChecks, onCheckToggle }) {
   const [showMcp, setShowMcp] = useState(false);
   let checklist = [];
@@ -175,6 +180,9 @@ export function RunInspector({ run, onClose }) {
     setLiveOutput('');
     let cancelled = false;
     let lastEventId = 0;
+    let terminalHarvestDeadline = null;
+    let terminalHarvestTestExpected = null;
+    let bufferedEvents = [];
 
     const poll = async () => {
       while (!cancelled) {
@@ -191,6 +199,7 @@ export function RunInspector({ run, onClose }) {
           const newEvents = evtData.events || [];
           if (newEvents.length) {
             lastEventId = Math.max(...newEvents.map(e => e.id || 0));
+            bufferedEvents = [...bufferedEvents, ...newEvents].slice(-500);
             setEvents(prev => {
               const combined = [...prev, ...newEvents];
               return combined.length > 500 ? combined.slice(-500) : combined;
@@ -207,7 +216,26 @@ export function RunInspector({ run, onClose }) {
                 const finalOut = await apiFetch(`/api/runs/${run.id}/output?lines=200`);
                 if (finalOut.output) setLiveOutput(finalOut.output);
               } catch {}
-              break;
+              const hasWorktree = !!(runData.run?.worktree_path || run.worktree_path);
+              const shouldWaitForHarvest = hasWorktree && ['completed', 'failed'].includes(runData.run?.status);
+              const hasHarvestDiff = bufferedEvents.some(e => e.event_type === 'harvest:diff');
+              const hasHarvestError = bufferedEvents.some(e => e.event_type === 'harvest:error');
+              const hasHarvestTest = bufferedEvents.some(e => e.event_type === 'harvest:test');
+              if (!shouldWaitForHarvest) break;
+              if (terminalHarvestTestExpected === null && runData.run?.status === 'completed') {
+                terminalHarvestTestExpected = false;
+                if (runData.run?.project_id) {
+                  try {
+                    const projectData = await apiFetch(`/api/projects/${runData.run.project_id}`);
+                    terminalHarvestTestExpected = !!projectData.project?.test_command;
+                  } catch { terminalHarvestTestExpected = false; }
+                }
+              }
+              if (hasHarvestError) break;
+              if (runData.run?.status === 'failed' && hasHarvestDiff) break;
+              if (runData.run?.status === 'completed' && hasHarvestDiff && (!terminalHarvestTestExpected || hasHarvestTest)) break;
+              if (!terminalHarvestDeadline) terminalHarvestDeadline = Date.now() + 120000;
+              if (Date.now() >= terminalHarvestDeadline) break;
             }
           }
         } catch { /* ignore */ }
@@ -407,6 +435,12 @@ export function RunInspector({ run, onClose }) {
   // nothing has changed (React won't re-render in that case, but
   // it's cheap insurance).
   const diffLines = useMemo(() => splitDiffLines(diff), [diff]);
+  const harvestDiffEvent = [...events].reverse().find(evt => evt.event_type === 'harvest:diff');
+  const harvestTestEvent = [...events].reverse().find(evt => evt.event_type === 'harvest:test');
+  const harvestErrors = events.filter(evt => evt.event_type === 'harvest:error');
+  const harvestDiff = harvestDiffEvent ? parseEventPayload(harvestDiffEvent) : null;
+  const harvestTest = harvestTestEvent ? parseEventPayload(harvestTestEvent) : null;
+  const hasHarvest = !!harvestDiff || !!harvestTest || harvestErrors.length > 0;
 
   const isManagerRun = !!(currentRun?.is_manager || run?.is_manager);
   const workerCostUsd = typeof currentRun?.cost_usd === 'number'
@@ -454,6 +488,55 @@ export function RunInspector({ run, onClose }) {
             <span style="font-weight:600;color:var(--text-muted);margin-right:6px;">${RUN_INSPECTOR_LABELS.summary}:</span>
             ${currentRun.result_summary}
           </div>
+        `}
+        ${hasHarvest && html`
+          <section class="run-harvest-section" aria-label=${RUN_INSPECTOR_LABELS.harvest}>
+            <div class="run-harvest-header">
+              <span>${RUN_INSPECTOR_LABELS.harvest}</span>
+              ${harvestDiff?.branch && html`<code>${harvestDiff.branch}</code>`}
+            </div>
+            ${harvestDiff && html`
+              <div class="run-harvest-grid">
+                <div>
+                  <span class="run-harvest-label">${RUN_INSPECTOR_LABELS.harvestFiles}</span>
+                  <strong>${(harvestDiff.files || []).length}</strong>
+                </div>
+                <div>
+                  <span class="run-harvest-label">${RUN_INSPECTOR_LABELS.harvestCommits}</span>
+                  <strong>${(harvestDiff.commits || []).length}</strong>
+                </div>
+                <div>
+                  <span class="run-harvest-label">${RUN_INSPECTOR_LABELS.harvestBase}</span>
+                  <strong>${harvestDiff.base || '-'}</strong>
+                </div>
+              </div>
+              ${harvestDiff.stat && html`<pre class="run-harvest-stat">${harvestDiff.stat}</pre>`}
+              ${harvestDiff.truncated && html`<div class="run-harvest-note">${RUN_INSPECTOR_LABELS.harvestTruncated}</div>`}
+            `}
+            ${harvestTest && html`
+              <div class="run-harvest-test">
+                <span class="run-harvest-badge ${harvestTest.timed_out ? 'timeout' : harvestTest.passed ? 'passed' : 'failed'}">
+                  ${harvestTest.timed_out ? RUN_INSPECTOR_LABELS.harvestTestTimeout : harvestTest.passed ? RUN_INSPECTOR_LABELS.harvestTestPassed : RUN_INSPECTOR_LABELS.harvestTestFailed}
+                </span>
+                <span>${harvestTest.duration_ms || 0}ms</span>
+                <code>${harvestTest.command || ''}</code>
+              </div>
+              ${harvestTest.output_tail && html`
+                <details class="run-harvest-output">
+                  <summary>${RUN_INSPECTOR_LABELS.harvestOutput}</summary>
+                  <pre>${harvestTest.output_tail}</pre>
+                </details>
+              `}
+            `}
+            ${harvestErrors.length > 0 && html`
+              <div class="run-harvest-errors">
+                ${harvestErrors.map((evt) => {
+                  const p = parseEventPayload(evt);
+                  return html`<div key=${evt.id}><strong>${p.stage || 'harvest'}</strong>: ${p.error || RUN_INSPECTOR_LABELS.harvestUnknownError}</div>`;
+                })}
+              </div>
+            `}
+          </section>
         `}
         <div class="run-inspector-tabs">
           <button class="run-inspector-tab ${tab === 'output' ? 'active' : ''}" onClick=${() => setTab('output')}>

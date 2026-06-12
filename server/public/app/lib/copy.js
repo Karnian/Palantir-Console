@@ -214,6 +214,17 @@ export const RUN_INSPECTOR_LABELS = {
   sendPlaceholder: '에이전트에게 입력 보내기...',
   sendingShort: '...',
   managerNotice: '✦ Top Manager가 다음 턴에 이 직접 메시지에 대해 알림을 받습니다.',
+  // Harvest
+  harvest: 'Harvest',
+  harvestFiles: '파일',
+  harvestCommits: '커밋',
+  harvestBase: 'Base',
+  harvestTruncated: '표시 항목이 제한되어 일부 파일, 커밋, stat이 생략되었습니다.',
+  harvestTestPassed: '테스트 통과',
+  harvestTestFailed: '테스트 실패',
+  harvestTestTimeout: '테스트 시간초과',
+  harvestOutput: '테스트 출력',
+  harvestUnknownError: '알 수 없는 오류',
 };
 
 // DriftDrawer — header chrome + dismiss / restore actions.
@@ -342,6 +353,7 @@ export const PROJECTS_LABELS = {
   detailTitle: '프로젝트 상세',
   directoryLabel: '디렉터리',
   mcpConfigLabel: 'MCP 설정',
+  testCommandLabel: '테스트 명령',
   tasksLabel: '작업',
   totalSuffix: '개',
   activeDoneLabel: '진행 / 완료',
@@ -362,6 +374,9 @@ export const PROJECTS_LABELS = {
   fieldMcpConfigPath: 'MCP 설정 경로',
   mcpConfigPathPlaceholder: '/path/to/mcp-config.json (선택 사항)',
   mcpConfigPathHint: 'Claude CLI --mcp-config 용 프로젝트 범위 MCP 서버 설정 파일',
+  fieldTestCommand: '테스트 명령',
+  testCommandPlaceholder: '예: npm test',
+  testCommandHint: '워커가 완료되면 harvest 단계에서 워크트리 안에서 실행합니다. 비워두면 건너뜁니다.',
   creating: '생성 중...',
   saving: '저장 중...',
   // Skill pack bindings (subsection)

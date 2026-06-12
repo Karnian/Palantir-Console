@@ -35,6 +35,14 @@ function optionalString(body, field, label) {
   }
 }
 
+function optionalStringMax(body, field, max, label) {
+  optionalString(body, field, label);
+  const val = body[field];
+  if (typeof val === 'string' && val.trim().length > max) {
+    throw new BadRequestError(`${label || field} must be ${max} characters or fewer`);
+  }
+}
+
 // 선택 숫자 필드 검증: 제공된 경우 finite number 확인 (null은 허용)
 function optionalNumber(body, field, label) {
   if (!(field in body)) return;
@@ -206,6 +214,7 @@ function validateCreateProject(req, res, next) {
   optionalString(body, 'color', 'color');
   optionalString(body, 'mcp_config_path', 'mcp_config_path');
   optionalString(body, 'preferred_pm_adapter', 'preferred_pm_adapter');
+  optionalStringMax(body, 'test_command', 500, 'test_command');
   optionalNumber(body, 'budget_usd', 'budget_usd');
   optionalBoolish(body, 'pm_enabled', 'pm_enabled');
   next();
@@ -231,6 +240,7 @@ function validateUpdateProject(req, res, next) {
   optionalString(body, 'color', 'color');
   optionalString(body, 'mcp_config_path', 'mcp_config_path');
   optionalString(body, 'preferred_pm_adapter', 'preferred_pm_adapter');
+  optionalStringMax(body, 'test_command', 500, 'test_command');
   optionalNumber(body, 'budget_usd', 'budget_usd');
   optionalBoolish(body, 'pm_enabled', 'pm_enabled');
   next();

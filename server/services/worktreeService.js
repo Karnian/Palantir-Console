@@ -189,6 +189,7 @@ function createWorktreeService() {
    * @param {string} branchName - Branch name to optionally delete
    * @param {object} [opts] - Options
    * @param {string} [opts.runId] - Run ID for the auto-save commit message
+   * @param {boolean} [opts.autosave=true] - Set false to discard uncommitted changes on removal
    */
   function removeWorktree(projectDir, worktreePath, branchName, opts = {}) {
     // Validate worktreePath is within projectDir to prevent arbitrary deletion
@@ -198,8 +199,10 @@ function createWorktreeService() {
       throw new Error(`Worktree path ${worktreePath} is outside project directory ${projectDir}`);
     }
 
-    // Auto-save uncommitted changes before removal
-    if (fs.existsSync(resolvedWorktree)) {
+    // Auto-save uncommitted changes before removal unless the caller has
+    // already captured the work that should survive. Harvest uses this to
+    // discard test-generated files after it has committed agent work.
+    if (opts.autosave !== false && fs.existsSync(resolvedWorktree)) {
       autoSaveWorktree(resolvedWorktree, opts.runId);
     }
 
@@ -279,15 +282,22 @@ function createWorktreeService() {
     try {
       const safeBranch = validateBranchName(branchName);
       const baseBranch = getCurrentBranch(projectDir);
+      const gitEnv = { ...process.env, GIT_EXTERNAL_DIFF: '', GIT_TEXTCONV_DIFF: '' };
+      // Three-dot range (merge-base..branch): shows only what the branch
+      // changed. Two-dot would also pick up base-branch commits that landed
+      // after the worktree was created — noise that misattributes others'
+      // work to this run's harvest.
       const stat = execFileSync(
-        'git', ['diff', `${baseBranch}...${safeBranch}`, '--stat'],
-        { cwd: projectDir, stdio: 'pipe', encoding: 'utf-8' }
+        'git', ['diff', '--no-ext-diff', '--no-textconv', '--no-color', `${baseBranch}...${safeBranch}`, '--stat'],
+        { cwd: projectDir, stdio: 'pipe', encoding: 'utf-8', env: gitEnv }
       );
       const diffOutput = execFileSync(
-        'git', ['diff', `${baseBranch}...${safeBranch}`, '--name-only'],
-        { cwd: projectDir, stdio: 'pipe', encoding: 'utf-8' }
+        'git', ['diff', '--no-ext-diff', '--no-textconv', '--no-color', `${baseBranch}...${safeBranch}`, '--name-only'],
+        { cwd: projectDir, stdio: 'pipe', encoding: 'utf-8', env: gitEnv }
       );
       return {
+        base: baseBranch,
+        branch: safeBranch,
         stat: stat.trim(),
         files: diffOutput.trim().split('\n').filter(Boolean),
       };
@@ -296,7 +306,7 @@ function createWorktreeService() {
     }
   }
 
-  return { createWorktree, removeWorktree, listWorktrees, getWorktreeDiff, isGitRepo, hasUncommittedChanges, branchHasWork };
+  return { createWorktree, removeWorktree, listWorktrees, getWorktreeDiff, isGitRepo, hasUncommittedChanges, branchHasWork, autoSaveWorktree };
 }
 
 module.exports = { createWorktreeService };
