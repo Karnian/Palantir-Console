@@ -224,6 +224,12 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTa
                 <span style="color:var(--text-secondary);font-size:12px;word-break:break-all;" title=${project.mcp_config_path}>${project.mcp_config_path}</span>
               </div>
             `}
+            ${project.test_command && html`
+              <div class="task-detail-meta-item">
+                <span class="task-detail-meta-label">${PROJECTS_LABELS.testCommandLabel}</span>
+                <span style="color:var(--text-secondary);font-size:12px;word-break:break-all;" title=${project.test_command}>${project.test_command}</span>
+              </div>
+            `}
             <div class="task-detail-meta-item">
               <span class="task-detail-meta-label">${PROJECTS_LABELS.tasksLabel}</span>
               <span style="color:var(--text-secondary);font-size:12px;">${projectTasks.length}${PROJECTS_LABELS.totalSuffix}</span>
@@ -302,6 +308,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   const [desc, setDesc] = useState('');
   const [dir, setDir] = useState('');
   const [mcpConfigPath, setMcpConfigPath] = useState('');
+  const [testCommand, setTestCommand] = useState('');
   const [saving, setSaving] = useState(false);
 
   // Edit modal state
@@ -309,6 +316,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   const [editDesc, setEditDesc] = useState('');
   const [editDir, setEditDir] = useState('');
   const [editMcpConfigPath, setEditMcpConfigPath] = useState('');
+  const [editTestCommand, setEditTestCommand] = useState('');
   const [editSaving, setEditSaving] = useState(false);
 
   const handleCreate = async () => {
@@ -317,9 +325,15 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
     try {
       await apiFetch('/api/projects', {
         method: 'POST',
-        body: JSON.stringify({ name: name.trim(), description: desc.trim() || undefined, directory: dir.trim() || undefined, mcp_config_path: mcpConfigPath.trim() || undefined }),
+        body: JSON.stringify({
+          name: name.trim(),
+          description: desc.trim() || undefined,
+          directory: dir.trim() || undefined,
+          mcp_config_path: mcpConfigPath.trim() || undefined,
+          test_command: testCommand.trim() || undefined,
+        }),
       });
-      setName(''); setDesc(''); setDir(''); setMcpConfigPath(''); setShowNew(false);
+      setName(''); setDesc(''); setDir(''); setMcpConfigPath(''); setTestCommand(''); setShowNew(false);
       reloadProjects();
     } catch (err) {
       addToast(err.message, 'error');
@@ -333,6 +347,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
     setEditDesc(p.description || '');
     setEditDir(p.directory || '');
     setEditMcpConfigPath(p.mcp_config_path || '');
+    setEditTestCommand(p.test_command || '');
   };
 
   const handleUpdate = async () => {
@@ -346,6 +361,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
           description: editDesc.trim() || null,
           directory: editDir.trim() || null,
           mcp_config_path: editMcpConfigPath.trim() || null,
+          test_command: editTestCommand.trim() || null,
         }),
       });
       setEditProject(null);
@@ -414,6 +430,19 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
             <input id="new-project-mcp" class="form-input" value=${mcpConfigPath} onInput=${e => setMcpConfigPath(e.target.value)} placeholder=${PROJECTS_LABELS.mcpConfigPathPlaceholder} />
             <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.mcpConfigPathHint}</div>
           </div>
+          <div class="form-field">
+            <label class="form-label" for="new-project-test-command">${PROJECTS_LABELS.fieldTestCommand}</label>
+            <input
+              id="new-project-test-command"
+              data-testid="project-test-command-input"
+              class="form-input"
+              value=${testCommand}
+              onInput=${e => setTestCommand(e.target.value)}
+              placeholder=${PROJECTS_LABELS.testCommandPlaceholder}
+              maxlength="500"
+            />
+            <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.testCommandHint}</div>
+          </div>
         </div>
         <div class="modal-footer">
           <button class="ghost" onClick=${() => setShowNew(false)}>${COMMON_ACTIONS.cancel}</button>
@@ -441,6 +470,19 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
             <label class="form-label" for="edit-project-mcp">${PROJECTS_LABELS.fieldMcpConfigPath}</label>
             <input id="edit-project-mcp" class="form-input" value=${editMcpConfigPath} onInput=${e => setEditMcpConfigPath(e.target.value)} placeholder=${PROJECTS_LABELS.mcpConfigPathPlaceholder} />
             <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.mcpConfigPathHint}</div>
+          </div>
+          <div class="form-field">
+            <label class="form-label" for="edit-project-test-command">${PROJECTS_LABELS.fieldTestCommand}</label>
+            <input
+              id="edit-project-test-command"
+              data-testid="project-test-command-input"
+              class="form-input"
+              value=${editTestCommand}
+              onInput=${e => setEditTestCommand(e.target.value)}
+              placeholder=${PROJECTS_LABELS.testCommandPlaceholder}
+              maxlength="500"
+            />
+            <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.testCommandHint}</div>
           </div>
         </div>
         <div class="modal-footer">

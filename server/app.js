@@ -30,6 +30,7 @@ const { createExecutionEngine } = require('./services/executionEngine');
 const { createStreamJsonEngine } = require('./services/streamJsonEngine');
 const { createManagerAdapterFactory } = require('./services/managerAdapters');
 const { createWorktreeService } = require('./services/worktreeService');
+const { createHarvestService } = require('./services/harvestService');
 const { createLifecycleService } = require('./services/lifecycleService');
 const { createAuthMiddleware } = require('./middleware/auth');
 const { errorHandler } = require('./middleware/errorHandler');
@@ -131,9 +132,15 @@ function createApp(options = {}) {
   const streamJsonEngine = createStreamJsonEngine({ runService, eventBus });
   const managerAdapterFactory = createManagerAdapterFactory({ streamJsonEngine, runService });
   const worktreeService = createWorktreeService();
+  const harvestService = createHarvestService({
+    runService,
+    worktreeService,
+    projectService,
+    testRunner: options.harvestTestRunner,
+  });
   const lifecycleService = createLifecycleService({
     runService, taskService, agentProfileService, projectService,
-    executionEngine, streamJsonEngine, worktreeService, eventBus,
+    executionEngine, streamJsonEngine, worktreeService, harvestService, eventBus,
     skillPackService,
     presetService,
     claudeVersionResolver: options.claudeVersionResolver,
@@ -354,6 +361,10 @@ function createApp(options = {}) {
   if (recovered.length > 0) {
     console.log(`[app] Recovered ${recovered.length} orphan session(s)`);
   }
+  const staleWorktrees = lifecycleService.cleanupStaleTerminalWorktrees();
+  if (staleWorktrees > 0) {
+    console.log(`[app] Cleaned ${staleWorktrees} stale terminal worktree(s)`);
+  }
   // Skill Packs: clean up orphan MCP config files from previous runs
   const mcpCleaned = lifecycleService.cleanupOrphanMcpConfigs();
   if (mcpCleaned > 0) {
@@ -377,6 +388,8 @@ function createApp(options = {}) {
     projectService,
     presetService,
     agentProfileService,
+    harvestService,
+    worktreeService,
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at
     // (createRun() always stamps status='queued' and cost_usd=0 at now).

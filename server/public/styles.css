@@ -2748,6 +2748,120 @@ body {
   white-space: nowrap;
 }
 
+.run-harvest-section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-base);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.run-harvest-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.run-harvest-header code,
+.run-harvest-test code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-harvest-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.run-harvest-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.run-harvest-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.run-harvest-grid strong {
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-harvest-stat,
+.run-harvest-output pre {
+  margin: 0;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  max-height: 120px;
+  overflow: auto;
+}
+
+.run-harvest-test {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.run-harvest-badge {
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.run-harvest-badge.passed {
+  color: var(--success);
+  background: var(--success-bg-subtle);
+}
+
+.run-harvest-badge.failed,
+.run-harvest-badge.timeout {
+  color: var(--status-failed);
+  background: var(--status-failed-bg-subtle);
+}
+
+.run-harvest-output summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.run-harvest-note,
+.run-harvest-errors {
+  font-size: 11px;
+  color: var(--warning);
+}
+
 /* R2-B.2: Diff tab body — unified diff text with subtle coloring on
    +/- lines. Uses `pre-wrap` so long lines wrap (git diff lines are
    already rarely > 200ch, but bare `pre` would cause awkward horizontal

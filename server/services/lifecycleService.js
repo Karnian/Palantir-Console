@@ -17,6 +17,7 @@ function createLifecycleService({
   executionEngine,
   streamJsonEngine,
   worktreeService,
+  harvestService,
   eventBus,
   skillPackService,
   presetService,
@@ -156,18 +157,8 @@ function createLifecycleService({
    * Idempotent: safe to call even if no worktree was created or already removed.
    * Always clears the in-memory project-dir snapshot to avoid leaks.
    */
-  function cleanupRunWorktree(run) {
+  function cleanupRunRuntimeFiles(run) {
     if (!run?.id) return;
-    if (worktreeService && run.worktree_path && run.branch) {
-      const projectDir = resolveProjectDirForRun(run);
-      if (projectDir) {
-        try {
-          worktreeService.removeWorktree(projectDir, run.worktree_path, run.branch, { runId: run.id });
-        } catch (err) {
-          console.warn(`[lifecycle] Worktree cleanup failed for run ${run.id}: ${err.message}`);
-        }
-      }
-    }
     _runProjectDirs.delete(run.id);
 
     // Skill Packs: cleanup MCP config file
@@ -181,6 +172,21 @@ function createLifecycleService({
         console.warn(`[lifecycle] MCP config cleanup failed for run ${run.id}: ${err.message}`);
       }
     }
+  }
+
+  function cleanupRunWorktree(run) {
+    if (!run?.id) return;
+    if (worktreeService && run.worktree_path && run.branch) {
+      const projectDir = resolveProjectDirForRun(run);
+      if (projectDir) {
+        try {
+          worktreeService.removeWorktree(projectDir, run.worktree_path, run.branch, { runId: run.id });
+        } catch (err) {
+          console.warn(`[lifecycle] Worktree cleanup failed for run ${run.id}: ${err.message}`);
+        }
+      }
+    }
+    cleanupRunRuntimeFiles(run);
   }
 
   /**
@@ -1044,7 +1050,28 @@ function createLifecycleService({
         const run = event.data?.run;
         if (!run) return;
         if (run.task_id) checkTaskCompletion(run.task_id);
-        if (!run.is_manager) cleanupRunWorktree(run);
+        if (run.is_manager) return;
+
+        const toStatus = event.data?.to_status || run.status;
+        const harvestable = ['completed', 'failed'].includes(toStatus)
+          && run.worktree_path
+          && run.branch
+          && harvestService;
+        if (harvestable) {
+          const projectDir = resolveProjectDirForRun(run);
+          if (projectDir) {
+            setImmediate(() => {
+              Promise.resolve(harvestService.harvestRun(run, { projectDir }))
+                .catch((err) => {
+                  console.warn(`[lifecycle] Harvest failed for run ${run.id}: ${err.message}`);
+                })
+                .finally(() => cleanupRunRuntimeFiles(run));
+            });
+            return;
+          }
+        }
+
+        cleanupRunWorktree(run);
       });
     }
 
@@ -1142,11 +1169,43 @@ function createLifecycleService({
     return cleaned;
   }
 
+  /**
+   * Boot cleanup for terminal runs whose worktree survived a server exit.
+   * Harvest is not retried here (B-lite); the default removeWorktree autosave
+   * preserves any uncommitted agent work before pruning the stale checkout.
+   */
+  function cleanupStaleTerminalWorktrees() {
+    const fs = require('node:fs');
+    if (!worktreeService) return 0;
+    const terminalStatuses = ['completed', 'failed', 'cancelled', 'stopped'];
+    let cleaned = 0;
+    for (const status of terminalStatuses) {
+      let runs = [];
+      try { runs = runService.listRuns({ status }); } catch { runs = []; }
+      for (const run of runs) {
+        if (run.is_manager || !run.worktree_path || !run.branch) continue;
+        if (!fs.existsSync(run.worktree_path)) continue;
+        const projectDir = resolveProjectDirForRun(run);
+        if (!projectDir) continue;
+        try {
+          worktreeService.removeWorktree(projectDir, run.worktree_path, run.branch, { runId: run.id });
+          cleaned++;
+        } catch (err) {
+          console.warn(`[lifecycle] Stale terminal worktree cleanup failed for run ${run.id}: ${err.message}`);
+        } finally {
+          cleanupRunRuntimeFiles(run);
+        }
+      }
+    }
+    return cleaned;
+  }
+
   return {
     executeTask,
     checkHealth,
     recoverOrphanSessions,
     cleanupOrphanMcpConfigs,
+    cleanupStaleTerminalWorktrees,
     startMonitoring,
     stopMonitoring,
     sendAgentInput,
