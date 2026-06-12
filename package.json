@@ -7,8 +7,7 @@
     "predev": "npm rebuild better-sqlite3 --silent 2>/dev/null || true",
     "dev": "node server/index.js",
     "start": "node server/index.js",
-    "test": "echo '[DISABLED 2026-06-13] npm test 임시 차단: /execute 테스트가 실제 claude CLI 를 spawn 하는 포크밤 사고 — docs/incident-2026-06-12-test-claude-spawn-storm.md 참고. 수정 후 이 스크립트를 node --test 로 복원할 것.' && exit 1",
-    "test:UNSAFE-original": "node --test",
+    "test": "node --test",
     "test:e2e": "npx playwright test",
     "test:a11y": "npx playwright test --grep @a11y",
     "test:visual": "npx playwright test --grep @visual",
@@ -18,6 +17,9 @@
   "author": "",
   "license": "ISC",
   "description": "Central control hub for orchestrating AI coding agents through a 3-tier hierarchy (Main Manager → PM → Worker)",
+  "engines": {
+    "node": "^22"
+  },
   "dependencies": {
     "better-sqlite3": "^12.10.0",
     "express": "^5.2.1",

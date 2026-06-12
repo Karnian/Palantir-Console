@@ -1,5 +1,6 @@
-const { spawn } = require('child_process');
+const { spawn } = require('node:child_process');
 const { AppError } = require('../utils/errors');
+const { assertSpawnAllowed } = require('../utils/spawnGuard');
 
 const DEFAULT_TIMEOUT_MS = 8000;
 
@@ -91,6 +92,7 @@ class AppServerSession {
 
   start() {
     if (this.process) return;
+    assertSpawnAllowed({ command: this.command[0], source: 'codexService:app-server' });
     this.process = spawn(this.command[0], this.command.slice(1), {
       env: this.env,
       stdio: ['pipe', 'pipe', 'pipe']

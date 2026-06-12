@@ -2,6 +2,7 @@ const { execFileSync, execSync, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const { assertSpawnAllowed } = require('../utils/spawnGuard');
 
 /**
  * ExecutionEngine abstraction — TmuxEngine (primary) + SubprocessEngine (fallback).
@@ -56,6 +57,7 @@ function createTmuxEngine() {
   function spawnAgent(runId, { command, args, cwd, env }) {
     const name = sessionName(runId);
     const safeCwd = validateCwd(cwd);
+    assertSpawnAllowed({ command, source: 'executionEngine:tmux' });
 
     // SECURITY: Write the agent command to a temp script file instead of
     // interpolating into a shell string. This eliminates all injection vectors.
@@ -237,6 +239,7 @@ function createSubprocessEngine() {
 
   function spawnAgent(runId, { command, args, cwd, env }) {
     const safeCwd = validateCwd(cwd);
+    assertSpawnAllowed({ command, source: 'executionEngine:subprocess' });
 
     // Ensure common binary paths are available (e.g., homebrew, nvm, local bins)
     const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];

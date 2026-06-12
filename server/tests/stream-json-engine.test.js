@@ -35,64 +35,9 @@ after(() => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// fake-claude.js 경로
-//
-// 이 스크립트는 실행 시:
-//   1. process.argv 를 CLAUDE_ARGS_FILE 에 JSON으로 기록 (args 검사용)
-//   2. system:init 이벤트 emit
-//   3. stdin 줄을 읽어서 assistant 이벤트로 echo
-//   4. stdin close → result 이벤트 + exit(0)
-// ---------------------------------------------------------------------------
-
-const FAKE_CLAUDE_SRC = `
-#!/usr/bin/env node
-'use strict';
-const fs = require('node:fs');
-const readline = require('node:readline');
-
-const args = process.argv.slice(2);
-const argsFile = process.env.CLAUDE_ARGS_FILE;
-if (argsFile) {
-  try { fs.writeFileSync(argsFile, JSON.stringify(args)); } catch {}
-}
-
-// Manager mode: has --input-format stream-json
-// Worker mode: has -p (single-shot prompt)
-const isManager = args.includes('--input-format');
-
-const init = JSON.stringify({ type: 'system', subtype: 'init', session_id: 'fake-sess', model: 'fake', tools: [], cwd: process.cwd() });
-process.stdout.write(init + '\\n');
-
-if (!isManager) {
-  // Worker: emit assistant text for the prompt, then result, then exit
-  const pIdx = args.indexOf('-p');
-  const promptText = pIdx >= 0 ? args[pIdx + 1] : '';
-  const astEvt = JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'worker-echo:' + promptText }] } });
-  process.stdout.write(astEvt + '\\n');
-  const result = JSON.stringify({ type: 'result', is_error: false, result: 'done', total_cost_usd: 0.01, usage: { input_tokens: 10, output_tokens: 5 } });
-  process.stdout.write(result + '\\n');
-  process.exit(0);
-} else {
-  // Manager: read stdin lines, echo as assistant events + result per turn
-  const rl = readline.createInterface({ input: process.stdin });
-  rl.on('line', (line) => {
-    if (!line.trim()) return;
-    const evt = JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'echo:' + line }] } });
-    process.stdout.write(evt + '\\n');
-    // Emit a result after each turn (matching real Claude multi-turn behavior)
-    const result = JSON.stringify({ type: 'result', is_error: false, result: 'turn-done', total_cost_usd: 0.01, usage: { input_tokens: 10, output_tokens: 5 } });
-    process.stdout.write(result + '\\n');
-  });
-  rl.on('close', () => {
-    process.exit(0);
-  });
-}
-`.trimStart();
-
-// 임시 디렉터리에 fake-claude.js 작성
-const fakeClaudioPath = path.join(os.tmpdir(), 'palantir-fake-claude-test.js');
-fs.writeFileSync(fakeClaudioPath, FAKE_CLAUDE_SRC, { mode: 0o755 });
+// The fake binary must live under server/tests/fixtures/ so spawnGuard can
+// allow it while blocking real Claude/Codex CLIs during node --test.
+const fakeClaudioPath = path.join(__dirname, 'fixtures', 'bin', 'fake-claude-stream-json.js');
 
 // ---------------------------------------------------------------------------
 // 헬퍼: 엔진 생성 (매 테스트마다 독립 인스턴스)

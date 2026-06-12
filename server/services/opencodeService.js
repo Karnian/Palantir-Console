@@ -1,9 +1,11 @@
-const { spawn } = require('child_process');
+const { spawn } = require('node:child_process');
 const { AppError } = require('../utils/errors');
+const { assertSpawnAllowed } = require('../utils/spawnGuard');
 
 function createOpencodeService({ opencodeBin }) {
   function queueMessage({ sessionId, content, cwd }) {
     return new Promise((resolve, reject) => {
+      assertSpawnAllowed({ command: opencodeBin, source: 'opencodeService:queueMessage' });
       const child = spawn(opencodeBin, ['run', '--session', sessionId, content], {
         cwd,
         detached: true,

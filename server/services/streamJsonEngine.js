@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const readline = require('node:readline');
+const { assertSpawnAllowed } = require('../utils/spawnGuard');
 
 /**
  * StreamJsonEngine — Claude Code stream-json protocol engine.
@@ -187,6 +188,7 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
 
     let child;
     try {
+      assertSpawnAllowed({ command: claudeBin, source: 'streamJsonEngine' });
       child = spawn(claudeBin, args, {
         cwd: safeCwd,
         env: spawnEnv,

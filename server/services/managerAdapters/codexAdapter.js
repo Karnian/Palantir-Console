@@ -46,6 +46,7 @@ const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
+const { assertSpawnAllowed } = require('../../utils/spawnGuard');
 
 const {
   NORMALIZED_EVENT_TYPES,
@@ -345,6 +346,24 @@ function createCodexAdapter({
     // Read prompt from stdin to avoid shell-quoting issues with multi-line input.
     args.push('-');
 
+    if (spawn === realSpawn) {
+      try {
+        assertSpawnAllowed({ command: codexBin, source: 'codexAdapter:exec' });
+      } catch (err) {
+        emitNormalized(runId, NORMALIZED_EVENT_TYPES.TURN_FAILED, buildPayload({
+          turnIndex: state.turnIndex,
+          summaryText: `spawn error: ${err.message}`,
+          hasRawStored: RAW_EVENTS_ENABLED,
+          data: { kind: 'spawn_blocked', error: err.message },
+        }));
+        state.ended = true;
+        try {
+          if (runService) runService.updateRunStatus(runId, 'failed', { force: true });
+        } catch { /* ignore */ }
+        emitSessionEndedIfNeeded(runId, 'spawn-blocked');
+        throw err;
+      }
+    }
     const child = spawn(codexBin, args, {
       cwd: state.cwd,
       // PR4: use the filtered env from buildManagerSpawnEnv if the caller
