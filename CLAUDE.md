@@ -123,7 +123,7 @@ server/
     fsService.js              — 파일시스템 브라우저 서비스
     storage.js                — 스토리지 경로 관리
     worktreeService.js        — Git worktree 관리 (H-1: autoSaveWorktree export, removeWorktree { autosave } opt, getWorktreeDiff 경화)
-    harvestService.js         — H-1: run terminal 시 자동 수확 — autosave → diff 캡처 → opt-in test_command 실행 → worktree 제거. annotate-only (never throws), 이벤트 harvest:diff/test/error 3종 고정
+    harvestService.js         — H-1: run terminal 시 자동 수확 — autosave → diff 캡처 → opt-in test_command 실행 → worktree 제거. annotate-only (never throws), 이벤트 harvest:diff/test/error 3종 고정. H-1.5: eventBus 주입 + review 대상 worker run(completed/failed, !is_manager)에 exactly-once run:harvested emit (worktree/projectDir 부재·harvest 실패 무관, harvested 플래그). PM auto-review 단일 트리거
   public/
     app.js                    — Preact SPA 진입 (ES module, P8-2), NavSidebar + App + mount (~320줄)
     theme-init.js             — K-2c CSP-safe 테마 부트스트랩 (FOUC 방지) — head 에서 styles 보다 먼저 로드, localStorage `palantir.theme` ∈ {light, dark, system} 읽고 `<html data-theme="...">` + `<meta name="theme-color">` 동적 갱신
@@ -194,7 +194,7 @@ server/
     helpers/                  — jsdom-preact.js 등
 ```
 
-> **978 tests** 기준 (P0+H-1 시점, 2026-06-13 — spawn guard 9 + harvest 10 추가. **P0 (PR #183)**: `node --test` 중 실제 CLI spawn 은 spawnGuard 가 fail-closed 차단 — 테스트는 `server/tests/fixtures/bin/` 의 mock binary 또는 `process.execPath` 만 spawn 가능, 우회는 `PALANTIR_ALLOW_REAL_SPAWN=1` 명시 시에만. 2026-06-12 spawn storm 사고 (`docs/incident-2026-06-12-test-claude-spawn-storm.md`) 의 근본 수정). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙. 단독 실행 시 모두 PASS, 풀 런 시 race-y flake 1~2건 알려진 패턴 (`engine: system:init event sets sessionId` 등 — `docs/handoff-post-k2-launch-2026-04-29.md` §6 참고). e2e: a11y 32 + visual 32 (별도, 각각 `npm run test:a11y` / `test:visual`).
+> **993 tests** 기준 (P0+H-1+H-1.5 시점, 2026-06-13 — spawn guard 9 + harvest/PM-review 25 추가. **P0 (PR #183)**: `node --test` 중 실제 CLI spawn 은 spawnGuard 가 fail-closed 차단 — 테스트는 `server/tests/fixtures/bin/` 의 mock binary 또는 `process.execPath` 만 spawn 가능, 우회는 `PALANTIR_ALLOW_REAL_SPAWN=1` 명시 시에만. 2026-06-12 spawn storm 사고 (`docs/incident-2026-06-12-test-claude-spawn-storm.md`) 의 근본 수정). **H-1.5 (PR #186)**: PM auto-review 는 `run:harvested` 단일 트리거 — worker terminal 시 harvestService 가 exactly-once emit, app.js 가 harvest 요약(diff/test)을 PM 리뷰 메시지에 주입. `run:completed`/`run:result` 는 더 이상 PM review 안 함 (채널 혼재 회귀 방지). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙. 단독 실행 시 모두 PASS, 풀 런 시 race-y flake 1~2건 알려진 패턴 (`engine: system:init event sets sessionId` 등 — `docs/handoff-post-k2-launch-2026-04-29.md` §6 참고). e2e: a11y 32 + visual 32 (별도, 각각 `npm run test:a11y` / `test:visual`).
 
 ## Key Patterns
 

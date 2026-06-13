@@ -33,7 +33,7 @@
 
 상세는 모두 `handoff-post-k2-launch-2026-04-29.md` 참고 (단 M4 시리즈는 spec brief 자체가 출처).
 
-### P0 spawn guard + H-1 Run Harvest (LAUNCHED 2026-06-13)
+### P0 spawn guard + H-1 Run Harvest + H-1.5 자율 루프 폐쇄 (LAUNCHED 2026-06-13)
 - **PR #183** P0 — 테스트의 실제 CLI spawn fail-closed 차단 (`server/utils/spawnGuard.js`).
   2026-06-12 spawn storm 사고 (`docs/incident-2026-06-12-test-claude-spawn-storm.md`) 근본 수정.
   `NODE_TEST_CONTEXT` 감지 시 fixtures 밖 실행파일 차단, call site 6곳, npm test 복원,
@@ -42,10 +42,16 @@
   worker run terminal 시 autosave → diff 캡처 (`harvest:diff`) → opt-in `projects.test_command`
   실행 (`harvest:test`) → worktree 제거 (autosave off). migration 023, RunInspector Harvest 섹션,
   boot stale worktree 정리. 978 tests (+10).
+- **PR #186** H-1.5 — Harvest → PM auto-review 연결 (자율 루프 폐쇄, spec
+  `docs/specs/h1-5-harvest-pm-review-brief.md` r2 READY). worker 완료 → harvest(diff/test) →
+  PM 이 검증된 요약으로 자율 판정. PM review 트리거를 `run:harvested` 단일 채널로 통일
+  (run:ended 단일 신호 → harvestService exactly-once emit → app.js sendPmReview). 993 tests (+15).
+  **진행방향 근거**: 운영 DB 조회 — 5주 정지(worker run 4월 43 → 5월 1), D1/needs_input/conflict
+  실제 발생 0건 → speculative 기능 대신 자율 루프 폐쇄가 최대 레버리지로 판정 (Codex 자문 + 데이터 합의).
 - **워크플로 전환**: 본 시리즈부터 Codex 가 구현, Claude 가 brief 작성·리뷰·보강 (감독 모드).
-  spec r1 → Codex cross-review (BLOCKER 2 검출) → r2 lock-in → Codex 구현 → Claude 리뷰 수정 2건.
-- **H-2 후보 (deferred)**: PR 자동 생성/push, branch 자동 머지, diff patch body 표시 —
-  harvest 운영 관측 후 트리거.
+  spec r1 → Codex cross-review (BLOCKER 검출) → r2 lock-in → Codex 구현 → Claude 리뷰.
+- **H-2 후보 (deferred, T3)**: PR 자동 생성/push, branch 자동 머지, diff patch body 표시 —
+  harvest+PM review 운영 관측 후 트리거.
 
 ### M4-a MCP Streamable HTTP transport + 검증 사이클 (LAUNCHED 2026-04-30, 검증 종결 2026-05-05)
 - **PR #171** spec brief (`docs/specs/m4-mcp-http-streamable-transport-brief.md`, r7 READY, Claude opus-4.7 + Codex gpt-5.5 cross-check 7회), **#172** impl
