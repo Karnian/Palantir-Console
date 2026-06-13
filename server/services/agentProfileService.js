@@ -41,7 +41,7 @@ function createAgentProfileService(db) {
     delete: db.prepare('DELETE FROM agent_profiles WHERE id = ?'),
     countRunning: db.prepare(`
       SELECT COUNT(*) as count FROM runs
-      WHERE agent_profile_id = ? AND status IN ('queued', 'running')
+      WHERE agent_profile_id = ? AND status = 'running'
     `),
   };
 

@@ -259,7 +259,7 @@ function createApp(options = {}) {
   const mcpTemplateService = createMcpTemplateService(db);
 
   // Execution engines
-  const executionEngine = createExecutionEngine();
+  const executionEngine = options.executionEngine || createExecutionEngine();
   const streamJsonEngine = createStreamJsonEngine({ runService, eventBus });
   const managerAdapterFactory = createManagerAdapterFactory({ streamJsonEngine, runService });
   const worktreeService = createWorktreeService();
@@ -433,6 +433,15 @@ function createApp(options = {}) {
   if (recovered.length > 0) {
     console.log(`[app] Recovered ${recovered.length} orphan session(s)`);
   }
+  Promise.resolve(lifecycleService.drainAllQueues())
+    .then((started) => {
+      if (started > 0) {
+        console.log(`[app] Started ${started} queued worker run(s)`);
+      }
+    })
+    .catch((err) => {
+      console.warn(`[app] Queue boot drain failed: ${err.message}`);
+    });
   const staleWorktrees = lifecycleService.cleanupStaleTerminalWorktrees();
   if (staleWorktrees > 0) {
     console.log(`[app] Cleaned ${staleWorktrees} stale terminal worktree(s)`);
@@ -460,6 +469,7 @@ function createApp(options = {}) {
     projectService,
     presetService,
     agentProfileService,
+    lifecycleService,
     harvestService,
     worktreeService,
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
