@@ -27,8 +27,8 @@
 //   1. Add the channel name to SERVER_EMITS below.
 //   2. If the client should receive it live, also add the name to
 //      server/public/app/lib/hooks.js useSSE channels array AND register
-//      a handler in the component that cares. Otherwise leave it server-
-//      only (it will still be in replayFrom and /api/events stream).
+//      a handler in the component that cares. Otherwise leave it frontend-
+//      unsubscribed (it will still be in replayFrom and /api/events stream).
 //   3. Run `node --test server/tests/sse-channels.test.js`. The test
 //      parses hooks.js literally — do not move the array out of
 //      useSSE or rename it without updating the test's extractor.
@@ -54,6 +54,7 @@ const SERVER_EMITS = Object.freeze([
   'run:completed',
   'run:ended',
   'run:event',
+  'run:harvested',
   'run:init',
   'run:needs_input',
   'run:output',

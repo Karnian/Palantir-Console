@@ -15,6 +15,7 @@ const { createWorktreeService } = require('../services/worktreeService');
 const { createHarvestService } = require('../services/harvestService');
 const { createLifecycleService } = require('../services/lifecycleService');
 const { createEventBus } = require('../services/eventBus');
+const { createPmAutoReview } = require('../app');
 
 const fakeRunner = path.join(__dirname, 'fixtures', 'bin', 'fake-test-runner.js');
 const injectedTestRunner = { bin: process.execPath, args: [fakeRunner] };
@@ -62,6 +63,14 @@ function eventsOf(runService, runId, type) {
   return runService.getRunEvents(runId).filter(evt => evt.event_type === type);
 }
 
+function collectChannel(eventBus, channel) {
+  const events = [];
+  eventBus.subscribe((event) => {
+    if (event.channel === channel) events.push(event);
+  });
+  return events;
+}
+
 async function waitFor(predicate, { timeoutMs = 3000, intervalMs = 20 } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -80,6 +89,7 @@ function makeServices(db, { eventBus = null, worktreeService = createWorktreeSer
     runService,
     worktreeService,
     projectService,
+    eventBus,
     testRunner: injectedTestRunner,
   });
   return { runService, taskService, projectService, agentProfileService, worktreeService, harvestService };
@@ -107,6 +117,292 @@ function createRunInWorktree({ db, runService, taskService, projectService, work
   });
   return { project, task, profile, run: running, worktreePath: wt.path, branch: wt.branch };
 }
+
+function createRunWithoutWorktree({ db, runService, taskService, projectService, repoDir }) {
+  const project = projectService.createProject({
+    name: 'Harvest Project',
+    directory: repoDir,
+  });
+  const task = taskService.createTask({ project_id: project.id, title: 'Harvest task' });
+  const profile = seedProfile(db);
+  const run = runService.createRun({
+    task_id: task.id,
+    agent_profile_id: profile.id,
+    prompt: 'do work',
+  });
+  return { project, task, profile, run };
+}
+
+function createRunWithMissingProjectDir({ db, runService, taskService, projectService, worktreeService, repoDir }) {
+  const project = projectService.createProject({
+    name: 'Missing Directory Project',
+    directory: null,
+  });
+  const task = taskService.createTask({ project_id: project.id, title: 'Harvest task' });
+  const profile = seedProfile(db);
+  const queued = runService.createRun({
+    task_id: task.id,
+    agent_profile_id: profile.id,
+    prompt: 'do work',
+  });
+  const branchName = `palantir/${queued.id.replace(/_/g, '-')}`;
+  const wt = worktreeService.createWorktree(repoDir, branchName);
+  const running = runService.markRunStarted(queued.id, {
+    tmux_session: `session-${queued.id}`,
+    worktree_path: wt.path,
+    branch: wt.branch,
+  });
+  return { project, task, profile, run: running, worktreePath: wt.path, branch: wt.branch };
+}
+
+function makeAutoReviewHarness({ activeRunId = 'run_pm_1', throwOnSend = false } = {}) {
+  const eventBus = createEventBus();
+  const sent = [];
+  const warnings = [];
+  const slotClearedCallbacks = [];
+  let currentActiveRunId = activeRunId;
+  let shouldThrow = throwOnSend;
+  const managerRegistry = {
+    getActiveRunId(slot) {
+      return slot === 'pm:proj_1' ? currentActiveRunId : null;
+    },
+    onSlotCleared(cb) {
+      slotClearedCallbacks.push(cb);
+      return () => {};
+    },
+  };
+  const conversationService = {
+    sendMessage(slot, message) {
+      if (shouldThrow) throw new Error('send failed');
+      sent.push({ slot, message });
+    },
+  };
+  const controller = createPmAutoReview({
+    eventBus,
+    managerRegistry,
+    conversationService,
+    defer: (fn) => fn(),
+    logger: { warn: (msg) => warnings.push(String(msg)) },
+  });
+  return {
+    eventBus,
+    sent,
+    warnings,
+    slotClearedCallbacks,
+    controller,
+    setActiveRunId(value) { currentActiveRunId = value; },
+    setThrowOnSend(value) { shouldThrow = value; },
+  };
+}
+
+function reviewRun(overrides = {}) {
+  return {
+    id: 'run_worker_1',
+    is_manager: 0,
+    project_id: 'proj_1',
+    task_id: 'task_1',
+    status: 'completed',
+    exit_code: 0,
+    result_summary: 'worker done',
+    ...overrides,
+  };
+}
+
+function harvestedSummary(overrides = {}) {
+  return {
+    files: 2,
+    commits: 1,
+    statText: ' a.js | 1 +\n b.js | 2 ++',
+    test: {
+      passed: true,
+      timed_out: false,
+      exit_code: 0,
+      duration_ms: 123,
+      output_tail: 'tests passed',
+    },
+    errors: [],
+    harvested: true,
+    ...overrides,
+  };
+}
+
+test('harvestRun emits run:harvested once with diff and test summary for completed worktree runs', async (t) => {
+  const db = await mkdb(t);
+  const repoDir = makeRepo(t);
+  const eventBus = createEventBus();
+  const harvestEvents = collectChannel(eventBus, 'run:harvested');
+  const services = makeServices(db, { eventBus });
+  const { run, worktreePath } = createRunInWorktree({
+    db,
+    repoDir,
+    testCommand: 'pass',
+    ...services,
+  });
+  fs.writeFileSync(path.join(worktreePath, 'agent-output.txt'), 'agent work\n');
+  const completed = services.runService.updateRunStatus(run.id, 'completed', { force: true });
+
+  await services.harvestService.harvestRun(completed, { projectDir: repoDir });
+
+  assert.equal(harvestEvents.length, 1);
+  const payload = harvestEvents[0].data;
+  assert.equal(payload.run.id, run.id);
+  assert.equal(payload.summary.harvested, true);
+  assert.equal(payload.summary.files, 1);
+  assert.ok(payload.summary.commits >= 1);
+  assert.match(payload.summary.statText, /agent-output\.txt/);
+  assert.ok(payload.summary.statText.length <= 500);
+  assert.equal(payload.summary.test.passed, true);
+  assert.equal(payload.summary.test.timed_out, false);
+  assert.equal(payload.summary.test.exit_code, 0);
+  assert.match(payload.summary.test.output_tail, /fake-test-runner pass/);
+  assert.ok(payload.summary.test.output_tail.length <= 500);
+  assert.deepEqual(payload.summary.errors, []);
+});
+
+test('harvestRun emits harvested=false once when worktree metadata is absent', async (t) => {
+  const db = await mkdb(t);
+  const repoDir = makeRepo(t);
+  const eventBus = createEventBus();
+  const harvestEvents = collectChannel(eventBus, 'run:harvested');
+  const services = makeServices(db, { eventBus });
+  const { run } = createRunWithoutWorktree({ db, repoDir, ...services });
+  const completed = services.runService.updateRunStatus(run.id, 'completed', { force: true });
+
+  await services.harvestService.harvestRun(completed, { projectDir: repoDir });
+
+  assert.equal(harvestEvents.length, 1);
+  assert.equal(harvestEvents[0].data.run.id, run.id);
+  assert.deepEqual(harvestEvents[0].data.summary, {
+    files: 0,
+    commits: 0,
+    statText: '',
+    test: null,
+    errors: ['no_worktree'],
+    harvested: false,
+  });
+});
+
+test('harvestRun emits harvested=false once when projectDir cannot be resolved', async (t) => {
+  const db = await mkdb(t);
+  const repoDir = makeRepo(t);
+  const eventBus = createEventBus();
+  const harvestEvents = collectChannel(eventBus, 'run:harvested');
+  const services = makeServices(db, { eventBus });
+  const { run, worktreePath } = createRunWithMissingProjectDir({ db, repoDir, ...services });
+  fs.writeFileSync(path.join(worktreePath, 'agent-output.txt'), 'agent work\n');
+  const completed = services.runService.updateRunStatus(run.id, 'completed', { force: true });
+
+  await services.harvestService.harvestRun(completed, { projectDir: null });
+
+  assert.equal(harvestEvents.length, 1);
+  assert.equal(harvestEvents[0].data.run.id, run.id);
+  assert.deepEqual(harvestEvents[0].data.summary.errors, ['no_project_dir']);
+  assert.equal(harvestEvents[0].data.summary.harvested, false);
+  const errorEvents = eventsOf(services.runService, run.id, 'harvest:error');
+  assert.equal(errorEvents.length, 1);
+  assert.equal(parseEvent(errorEvents[0]).stage, 'preflight');
+});
+
+test('harvestRun emits harvested=false once when worktree path is already gone', async (t) => {
+  const db = await mkdb(t);
+  const repoDir = makeRepo(t);
+  const eventBus = createEventBus();
+  const harvestEvents = collectChannel(eventBus, 'run:harvested');
+  const services = makeServices(db, { eventBus });
+  const { run, worktreePath } = createRunInWorktree({ db, repoDir, ...services });
+  fs.rmSync(worktreePath, { recursive: true, force: true });
+  const completed = services.runService.updateRunStatus(run.id, 'completed', { force: true });
+
+  await services.harvestService.harvestRun(completed, { projectDir: repoDir });
+
+  assert.equal(harvestEvents.length, 1);
+  assert.equal(harvestEvents[0].data.run.id, run.id);
+  assert.deepEqual(harvestEvents[0].data.summary.errors, ['worktree_missing']);
+  assert.equal(harvestEvents[0].data.summary.harvested, false);
+});
+
+test('harvestRun emits run:harvested once for failed worktree runs without running tests', async (t) => {
+  const db = await mkdb(t);
+  const repoDir = makeRepo(t);
+  const eventBus = createEventBus();
+  const harvestEvents = collectChannel(eventBus, 'run:harvested');
+  const services = makeServices(db, { eventBus });
+  const { run, worktreePath } = createRunInWorktree({
+    db,
+    repoDir,
+    testCommand: 'fail',
+    ...services,
+  });
+  fs.writeFileSync(path.join(worktreePath, 'agent-output.txt'), 'agent work\n');
+  const failed = services.runService.updateRunStatus(run.id, 'failed', { force: true });
+
+  await services.harvestService.harvestRun(failed, { projectDir: repoDir });
+
+  assert.equal(harvestEvents.length, 1);
+  assert.equal(harvestEvents[0].data.run.id, run.id);
+  assert.equal(harvestEvents[0].data.summary.harvested, true);
+  assert.equal(harvestEvents[0].data.summary.files, 1);
+  assert.equal(harvestEvents[0].data.summary.test, null);
+});
+
+test('harvestRun does not emit run:harvested for non-review-target runs', async (t) => {
+  const db = await mkdb(t);
+  const repoDir = makeRepo(t);
+  const eventBus = createEventBus();
+  const harvestEvents = collectChannel(eventBus, 'run:harvested');
+  const services = makeServices(db, { eventBus });
+
+  const cancelledCase = createRunInWorktree({ db, repoDir, ...services });
+  const cancelled = services.runService.updateRunStatus(cancelledCase.run.id, 'cancelled', { force: true });
+  await services.harvestService.harvestRun(cancelled, { projectDir: repoDir });
+
+  const stoppedCase = createRunInWorktree({ db, repoDir, ...services });
+  const stopped = services.runService.updateRunStatus(stoppedCase.run.id, 'stopped', { force: true });
+  await services.harvestService.harvestRun(stopped, { projectDir: repoDir });
+
+  const runningCase = createRunInWorktree({ db, repoDir, ...services });
+  await services.harvestService.harvestRun(runningCase.run, { projectDir: repoDir });
+
+  const manager = services.runService.createRun({
+    is_manager: true,
+    prompt: 'manage',
+    manager_adapter: 'codex',
+    manager_layer: 'top',
+    conversation_id: 'top',
+  });
+  await services.harvestService.harvestRun({
+    ...manager,
+    status: 'completed',
+    is_manager: 1,
+    worktree_path: cancelledCase.worktreePath,
+    branch: cancelledCase.branch,
+  }, { projectDir: repoDir });
+
+  assert.equal(harvestEvents.length, 0);
+});
+
+test('harvestRun dedupe prevents duplicate run:harvested emits', async (t) => {
+  const db = await mkdb(t);
+  const repoDir = makeRepo(t);
+  const eventBus = createEventBus();
+  const harvestEvents = collectChannel(eventBus, 'run:harvested');
+  const services = makeServices(db, { eventBus });
+  const { run, worktreePath } = createRunInWorktree({ db, repoDir, ...services });
+  fs.writeFileSync(path.join(worktreePath, 'agent-output.txt'), 'agent work\n');
+  const completed = services.runService.updateRunStatus(run.id, 'completed', { force: true });
+
+  await services.harvestService.harvestRun(completed, { projectDir: repoDir });
+  await services.harvestService.harvestRun(completed, { projectDir: repoDir });
+
+  assert.equal(harvestEvents.length, 1);
+
+  const second = createRunInWorktree({ db, repoDir, ...services });
+  const secondCompleted = services.runService.updateRunStatus(second.run.id, 'completed', { force: true });
+  services.runService.addRunEvent(second.run.id, 'harvest:error', JSON.stringify({ stage: 'preexisting', error: 'done' }));
+  await services.harvestService.harvestRun(secondCompleted, { projectDir: repoDir });
+
+  assert.equal(harvestEvents.length, 1, 'preexisting DB harvest event skips run:harvested emit');
+});
 
 test('harvestRun autosaves uncommitted worker changes before diff capture', async (t) => {
   const db = await mkdb(t);
@@ -313,6 +609,7 @@ test('lifecycle run:ended subscriber runs harvest before removing worktree', asy
     runService,
     worktreeService: observingWorktreeService,
     projectService,
+    eventBus,
     testRunner: injectedTestRunner,
   });
   const lifecycleService = createLifecycleService({
@@ -343,6 +640,186 @@ test('lifecycle run:ended subscriber runs harvest before removing worktree', asy
 
   await waitFor(() => eventsOf(runService, run.id, 'harvest:diff').length === 1 && !fs.existsSync(worktreePath));
   assert.ok(observed.some(count => count > 0), 'removeWorktree observed harvest:diff already recorded');
+});
+
+test('lifecycle run:ended subscriber emits harvested=false for completed worker without worktree', async (t) => {
+  const db = await mkdb(t);
+  const repoDir = makeRepo(t);
+  const eventBus = createEventBus();
+  const harvestEvents = collectChannel(eventBus, 'run:harvested');
+  const services = makeServices(db, { eventBus });
+  const lifecycleService = createLifecycleService({
+    runService: services.runService,
+    taskService: services.taskService,
+    agentProfileService: services.agentProfileService,
+    projectService: services.projectService,
+    executionEngine: { type: 'subprocess', discoverGhostSessions: () => [] },
+    streamJsonEngine: null,
+    worktreeService: services.worktreeService,
+    harvestService: services.harvestService,
+    eventBus,
+  });
+  t.after(() => lifecycleService.stopMonitoring());
+
+  const { run } = createRunWithoutWorktree({ db, repoDir, ...services });
+  lifecycleService.startMonitoring();
+  services.runService.updateRunStatus(run.id, 'completed', { force: true });
+
+  await waitFor(() => harvestEvents.length === 1);
+  assert.equal(harvestEvents[0].data.run.id, run.id);
+  assert.deepEqual(harvestEvents[0].data.summary.errors, ['no_worktree']);
+  assert.equal(harvestEvents[0].data.summary.harvested, false);
+});
+
+test('lifecycle run:ended subscriber calls harvest when projectDir resolution fails', async (t) => {
+  const db = await mkdb(t);
+  const repoDir = makeRepo(t);
+  const eventBus = createEventBus();
+  const harvestEvents = collectChannel(eventBus, 'run:harvested');
+  const services = makeServices(db, { eventBus });
+  const lifecycleService = createLifecycleService({
+    runService: services.runService,
+    taskService: services.taskService,
+    agentProfileService: services.agentProfileService,
+    projectService: services.projectService,
+    executionEngine: { type: 'subprocess', discoverGhostSessions: () => [] },
+    streamJsonEngine: null,
+    worktreeService: services.worktreeService,
+    harvestService: services.harvestService,
+    eventBus,
+  });
+  t.after(() => lifecycleService.stopMonitoring());
+
+  const { run } = createRunWithMissingProjectDir({ db, repoDir, ...services });
+  lifecycleService.startMonitoring();
+  services.runService.updateRunStatus(run.id, 'completed', { force: true });
+
+  await waitFor(() => harvestEvents.length === 1);
+  assert.equal(harvestEvents[0].data.run.id, run.id);
+  assert.deepEqual(harvestEvents[0].data.summary.errors, ['no_project_dir']);
+  assert.equal(harvestEvents[0].data.summary.harvested, false);
+});
+
+test('PM auto-review sends one message from run:harvested with harvest summary', () => {
+  const harness = makeAutoReviewHarness();
+
+  harness.eventBus.emit('run:harvested', {
+    run: reviewRun(),
+    summary: harvestedSummary(),
+  });
+
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.sent[0].slot, 'pm:proj_1');
+  const text = harness.sent[0].message.text;
+  assert.match(text, /Worker run run_worker_1 finished/);
+  assert.match(text, /\[harvest\] files: 2, commits: 1/);
+  assert.match(text, /\[harvest\] test: PASS \(exit 0, 123ms\)/);
+  assert.match(text, /a\.js \| 1 \+/);
+  assert.match(text, /tests passed/);
+});
+
+test('PM auto-review ignores run:completed so review is single-triggered by run:harvested', () => {
+  const harness = makeAutoReviewHarness();
+
+  harness.eventBus.emit('run:completed', {
+    run: reviewRun(),
+  });
+
+  assert.equal(harness.sent.length, 0);
+});
+
+test('PM auto-review circuit breaker caps review sends at five and resets on PM clear', () => {
+  const harness = makeAutoReviewHarness();
+
+  for (let i = 0; i < 6; i++) {
+    harness.eventBus.emit('run:harvested', {
+      run: reviewRun({ id: `run_worker_${i}` }),
+      summary: harvestedSummary(),
+    });
+  }
+
+  assert.equal(harness.sent.length, 5);
+  assert.equal(harness.warnings.length, 1);
+
+  harness.slotClearedCallbacks[0]({ conversationId: 'pm:proj_1' });
+  harness.eventBus.emit('run:harvested', {
+    run: reviewRun({ id: 'run_worker_after_reset' }),
+    summary: harvestedSummary(),
+  });
+
+  assert.equal(harness.sent.length, 6);
+  assert.match(harness.sent[5].message.text, /Review round 1\/5/);
+});
+
+test('PM auto-review skips when project has no active PM', () => {
+  const harness = makeAutoReviewHarness({ activeRunId: null });
+
+  harness.eventBus.emit('run:harvested', {
+    run: reviewRun(),
+    summary: harvestedSummary(),
+  });
+
+  assert.equal(harness.sent.length, 0);
+});
+
+test('PM auto-review preserves counter rollback when sendMessage fails', () => {
+  const harness = makeAutoReviewHarness({ throwOnSend: true });
+
+  harness.eventBus.emit('run:harvested', {
+    run: reviewRun({ id: 'run_worker_failed_send' }),
+    summary: harvestedSummary(),
+  });
+  assert.equal(harness.sent.length, 0);
+  assert.equal(harness.controller.autoReviewCounts.get('proj_1:task_1'), undefined);
+
+  harness.setThrowOnSend(false);
+  harness.eventBus.emit('run:harvested', {
+    run: reviewRun({ id: 'run_worker_retry' }),
+    summary: harvestedSummary(),
+  });
+
+  assert.equal(harness.sent.length, 1);
+  assert.match(harness.sent[0].message.text, /Review round 1\/5/);
+});
+
+test('PM auto-review caps harvest text and reports harvested=false reasons', () => {
+  const harness = makeAutoReviewHarness();
+  const longText = 'x'.repeat(700);
+
+  harness.eventBus.emit('run:harvested', {
+    run: reviewRun(),
+    summary: harvestedSummary({
+      statText: longText,
+      test: {
+        passed: false,
+        timed_out: true,
+        exit_code: null,
+        duration_ms: 456,
+        output_tail: longText,
+      },
+    }),
+  });
+
+  const cappedText = harness.sent[0].message.text;
+  assert.ok(cappedText.includes('x'.repeat(500)));
+  assert.ok(!cappedText.includes('x'.repeat(501)));
+  assert.match(cappedText, /\[harvest\] test: TIMEOUT \(exit \?, 456ms\)/);
+
+  const unavailable = makeAutoReviewHarness();
+  unavailable.eventBus.emit('run:harvested', {
+    run: reviewRun(),
+    summary: harvestedSummary({
+      files: 0,
+      commits: 0,
+      statText: '',
+      test: null,
+      errors: ['no_worktree'],
+      harvested: false,
+    }),
+  });
+
+  assert.equal(unavailable.sent.length, 1);
+  assert.match(unavailable.sent[0].message.text, /\[harvest\] 수집 불가 \(no_worktree\)/);
 });
 
 test('boot stale terminal worktree cleanup autosaves remaining work', async (t) => {
