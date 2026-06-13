@@ -143,6 +143,17 @@
 - **Why deferred**: Codex PM (Phase 3a) 로 모든 use case 커버 중. Claude PM 을 쓸 실제 요구가 없는 상태에서 adapter contract / recovery / event 정규화 변경은 over-build.
 - **착수 시 참고**: manager-v3-multilayer.md §9.6 (entire), 원칙 #9 (sandbox bypass 정책), `pmSpawnService` + `pmCleanupService` 의 현재 Codex 전용 경로를 어떻게 adapter-agnostic 하게 만들지.
 
+### T4. H-1 harvest — 멀티프로젝트 per-project node 해석
+- **출처**: 2026-06-13 도그푸딩 + Codex 교차리뷰 (harvest node 버전 fix Q2/Q5).
+- **현 상태**: harvest 의 `buildHarvestEnv` 가 test_command 를 **서버를 띄운 node** 로 실행 (PR #188).
+  콘솔 자신 / 서버와 같은 node 를 쓰는 프로젝트는 ABI 일치 보장. 그러나 **서버와 다른 node 버전을
+  요구하는 워커 프로젝트** (멀티프로젝트 허브) 는 여전히 불일치 가능.
+- **Trigger**: 서로 다른 node 버전을 요구하는 프로젝트를 동시에 다루는 실제 use case 발생.
+- **착수 시 범위**: worktree 의 `.nvmrc` / `package.json engines` 를 읽어 fnm/nvm 으로 해당 node 를
+  resolve 후 PATH 구성. (현 단일 개발자 환경에서는 서버 node = 프로젝트 node 가 거의 항상 성립해 불요.)
+- **연관 관찰**: `executionEngine` / `streamJsonEngine` 도 동일한 homebrew-prepend PATH 패턴이나,
+  워커는 CLI spawn 이라 프로젝트 native 모듈(better-sqlite3)을 로드하지 않아 ABI 무관 — 현재 문제 없음.
+
 ### T3. H-2 — Harvest 수확 루프 완성 (PR 자동 생성 / 머지)
 - **Spec**: `docs/specs/h1-run-harvest-brief.md` §4 (비범위 표)
 - **Trigger**: H-1 운영 관측 후 — harvest:diff/test 이벤트가 실제로 리뷰→머지 결정에 쓰이기 시작하면.
