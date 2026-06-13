@@ -33,7 +33,7 @@
 
 상세는 모두 `handoff-post-k2-launch-2026-04-29.md` 참고 (단 M4 시리즈는 spec brief 자체가 출처).
 
-### P0 spawn guard + H-1 Run Harvest + H-1.5 자율 루프 폐쇄 (LAUNCHED 2026-06-13)
+### P0 / H-1 / H-1.5 / harvest-fix / B-lite 큐 (LAUNCHED 2026-06-13~14)
 - **PR #183** P0 — 테스트의 실제 CLI spawn fail-closed 차단 (`server/utils/spawnGuard.js`).
   2026-06-12 spawn storm 사고 (`docs/incident-2026-06-12-test-claude-spawn-storm.md`) 근본 수정.
   `NODE_TEST_CONTEXT` 감지 시 fixtures 밖 실행파일 차단, call site 6곳, npm test 복원,
@@ -48,10 +48,22 @@
   (run:ended 단일 신호 → harvestService exactly-once emit → app.js sendPmReview). 993 tests (+15).
   **진행방향 근거**: 운영 DB 조회 — 5주 정지(worker run 4월 43 → 5월 1), D1/needs_input/conflict
   실제 발생 0건 → speculative 기능 대신 자율 루프 폐쇄가 최대 레버리지로 판정 (Codex 자문 + 데이터 합의).
+- **PR #188** harvest-fix — 도그푸딩 발견 버그: harvest test_command 가 시스템 node(v26, ABI147)로
+  실행돼 프로젝트 node@22(ABI127) 와 불일치. `buildHarvestEnv` 가 서버 node 디렉터리를 PATH 앞에.
+  통합 환경에서만 드러나는 버그 (단위 테스트는 testRunner 주입으로 PATH 우회). 994 tests.
+- **도그푸딩 2회** (2026-06-13~14): 격리 서버(별도 포트/DB)로 실서버 실증. ① harvest 루프 실작동
+  (harvest:diff files=1 + harvest:test) + node 버그 발견. ② PM review end-to-end — codex Top
+  (`POST /api/manager/start {agent_profile_id:codex}` 우회, claude auth 불요) → PM(codex) → 워커 →
+  harvest:test PASS(995/995) → run:harvested → PM 이 "테스트 PASS 995/995" 판정. 자율 루프 실증 완료.
+- **PR #189** B-lite 큐 — `max_concurrent` throw → queued 유지 + FIFO 자동 spawn + failed 1회 자동
+  재시도 (spec `docs/specs/b-lite-queue-retry-brief.md` r2). migration 024 (queued_args/retry_count),
+  claimQueuedRun CAS, retry=새 attempt run(harvest 독립), countRunning worker-only(manager starvation fix),
+  boot drain. 1007 tests (+12). Codex spec r1 (BLOCKER 1) + impl 교차리뷰 (SERIOUS 2: manager-count
+  starvation / started_at 가드) 반영.
 - **워크플로 전환**: 본 시리즈부터 Codex 가 구현, Claude 가 brief 작성·리뷰·보강 (감독 모드).
-  spec r1 → Codex cross-review (BLOCKER 검출) → r2 lock-in → Codex 구현 → Claude 리뷰.
+  spec r1 → Codex cross-review (BLOCKER 검출) → r2 lock-in → Codex 구현 → Claude 리뷰 → Codex 교차리뷰.
 - **H-2 후보 (deferred, T3)**: PR 자동 생성/push, branch 자동 머지, diff patch body 표시 —
-  harvest+PM review 운영 관측 후 트리거.
+  harvest+PM review 운영 관측 후 트리거. **T4 (멀티프로젝트 node)** 도 도그푸딩에서 도출.
 
 ### M4-a MCP Streamable HTTP transport + 검증 사이클 (LAUNCHED 2026-04-30, 검증 종결 2026-05-05)
 - **PR #171** spec brief (`docs/specs/m4-mcp-http-streamable-transport-brief.md`, r7 READY, Claude opus-4.7 + Codex gpt-5.5 cross-check 7회), **#172** impl
