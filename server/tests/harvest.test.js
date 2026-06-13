@@ -12,7 +12,7 @@ const { createTaskService } = require('../services/taskService');
 const { createProjectService } = require('../services/projectService');
 const { createAgentProfileService } = require('../services/agentProfileService');
 const { createWorktreeService } = require('../services/worktreeService');
-const { createHarvestService } = require('../services/harvestService');
+const { createHarvestService, buildHarvestEnv } = require('../services/harvestService');
 const { createLifecycleService } = require('../services/lifecycleService');
 const { createEventBus } = require('../services/eventBus');
 const { createPmAutoReview } = require('../app');
@@ -225,6 +225,35 @@ function harvestedSummary(overrides = {}) {
     ...overrides,
   };
 }
+
+test('buildHarvestEnv prefixes PATH with the server node bin directory', () => {
+  const env = buildHarvestEnv();
+  const [firstPathEntry] = env.PATH.split(path.delimiter);
+
+  assert.equal(firstPathEntry, path.dirname(process.execPath));
+});
+
+// Stronger guard (Codex cross-review Q4): the string-prefix check above does
+// not prove that a shell resolving `node` on this PATH actually lands on the
+// server node. Resolve it the way `/bin/sh -c` would — walk PATH for the first
+// executable `node` — and assert it is the server's. This is the regression
+// the original bug (system node v26 winning) would re-introduce, and the
+// reason the 993 existing tests missed it (they inject testRunner=execPath,
+// bypassing PATH resolution entirely).
+test('buildHarvestEnv PATH resolves `node` to the server node', () => {
+  const env = buildHarvestEnv();
+  let resolved = null;
+  for (const dir of env.PATH.split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, 'node');
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      resolved = fs.realpathSync(candidate);
+      break;
+    } catch { /* keep walking PATH */ }
+  }
+  assert.equal(resolved, fs.realpathSync(process.execPath));
+});
 
 test('harvestRun emits run:harvested once with diff and test summary for completed worktree runs', async (t) => {
   const db = await mkdb(t);

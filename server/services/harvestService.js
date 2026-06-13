@@ -35,7 +35,23 @@ function testTimeoutMs() {
 }
 
 function buildHarvestEnv() {
-  const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
+  // Run test_command with the SAME node that launched the console server.
+  // The server only boots if its node's ABI matches the project's native
+  // modules (better-sqlite3), so reusing it keeps `npm test`/`node` ABI-
+  // consistent. A bare `/opt/homebrew/bin` prepend (the original bug, found
+  // via dogfooding) would instead pick the system node (e.g. v26) and break
+  // a node@22-built node_modules with a NODE_MODULE_VERSION mismatch.
+  //
+  // Limitation: a multi-project hub whose worker project requires a *different*
+  // node than the server still needs per-project node resolution (.nvmrc / fnm).
+  // That is deliberately out of scope — see backlog. Bare-command tools
+  // (python/pytest/make) are unaffected since they don't live in node's bin dir.
+  const extraPaths = [
+    path.dirname(process.execPath),
+    '/opt/homebrew/bin',
+    '/opt/homebrew/sbin',
+    '/usr/local/bin',
+  ];
   const currentPath = process.env.PATH || '';
   const env = {
     PATH: [...extraPaths, currentPath].filter(Boolean).join(path.delimiter),
