@@ -1053,22 +1053,17 @@ function createLifecycleService({
         if (run.is_manager) return;
 
         const toStatus = event.data?.to_status || run.status;
-        const harvestable = ['completed', 'failed'].includes(toStatus)
-          && run.worktree_path
-          && run.branch
-          && harvestService;
-        if (harvestable) {
+        const reviewTarget = ['completed', 'failed'].includes(toStatus) && harvestService;
+        if (reviewTarget) {
           const projectDir = resolveProjectDirForRun(run);
-          if (projectDir) {
-            setImmediate(() => {
-              Promise.resolve(harvestService.harvestRun(run, { projectDir }))
-                .catch((err) => {
-                  console.warn(`[lifecycle] Harvest failed for run ${run.id}: ${err.message}`);
-                })
-                .finally(() => cleanupRunRuntimeFiles(run));
-            });
-            return;
-          }
+          setImmediate(() => {
+            Promise.resolve(harvestService.harvestRun(run, { projectDir }))
+              .catch((err) => {
+                console.warn(`[lifecycle] Harvest failed for run ${run.id}: ${err.message}`);
+              })
+              .finally(() => cleanupRunRuntimeFiles(run));
+          });
+          return;
         }
 
         cleanupRunWorktree(run);

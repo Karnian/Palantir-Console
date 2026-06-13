@@ -5,6 +5,8 @@ const { assertSpawnAllowed } = require('../utils/spawnGuard');
 
 const MAX_STAT_CHARS = 8 * 1024;
 const MAX_OUTPUT_TAIL_CHARS = 8 * 1024;
+const MAX_SUMMARY_STAT_CHARS = 500;
+const MAX_SUMMARY_OUTPUT_TAIL_CHARS = 500;
 const MAX_FILES = 500;
 const MAX_COMMITS = 50;
 const DEFAULT_TEST_TIMEOUT_MS = 300_000;
@@ -99,9 +101,69 @@ function createHarvestService({
   runService,
   worktreeService,
   projectService,
+  eventBus,
   testRunner = { bin: '/bin/sh', args: ['-c'] },
 } = {}) {
   const seenRunIds = new Set();
+
+  function isReviewTargetRun(run) {
+    return Boolean(
+      run?.id
+      && !run.is_manager
+      && ['completed', 'failed'].includes(run.status)
+    );
+  }
+
+  function createSummary() {
+    return {
+      files: 0,
+      commits: 0,
+      statText: '',
+      test: null,
+      errors: [],
+      harvested: false,
+    };
+  }
+
+  function pushSummaryError(summary, stage) {
+    if (!summary.errors.includes(stage)) summary.errors.push(stage);
+  }
+
+  function latestRun(run) {
+    try {
+      return runService.getRun(run.id);
+    } catch {
+      return run;
+    }
+  }
+
+  function emitHarvested(run, summary) {
+    if (!eventBus) return;
+    try {
+      eventBus.emit('run:harvested', {
+        run: latestRun(run),
+        summary: {
+          files: Number(summary.files) || 0,
+          commits: Number(summary.commits) || 0,
+          statText: capString(summary.statText || '', MAX_SUMMARY_STAT_CHARS).value,
+          test: summary.test ? {
+            passed: Boolean(summary.test.passed),
+            timed_out: Boolean(summary.test.timed_out),
+            exit_code: summary.test.exit_code ?? null,
+            duration_ms: summary.test.duration_ms ?? null,
+            output_tail: tailString(
+              stripControlChars(summary.test.output_tail || ''),
+              MAX_SUMMARY_OUTPUT_TAIL_CHARS
+            ),
+          } : null,
+          errors: Array.isArray(summary.errors) ? [...summary.errors] : [],
+          harvested: Boolean(summary.harvested),
+        },
+      });
+    } catch {
+      // harvestRun is annotate-only; subscribers must not make it throw.
+    }
+  }
 
   function hasExistingHarvestEvent(runId) {
     try {
@@ -156,30 +218,41 @@ function createHarvestService({
   }
 
   async function harvestRun(run, { projectDir } = {}) {
-    try {
-      if (!run?.id) return;
-      if (run.is_manager) return;
-      if (!['completed', 'failed'].includes(run.status)) return;
-      if (!run.worktree_path || !run.branch) return;
-      // Worktree already gone (e.g. executeTask's spawn-failure catch runs its
-      // synchronous cleanup before this setImmediate fires) — nothing to
-      // harvest, and proceeding would only emit noise events.
-      if (!fs.existsSync(run.worktree_path)) return;
-      if (seenRunIds.has(run.id)) return;
-      seenRunIds.add(run.id);
-      if (hasExistingHarvestEvent(run.id)) return;
+    if (!isReviewTargetRun(run)) return;
+    if (seenRunIds.has(run.id)) return;
+    if (hasExistingHarvestEvent(run.id)) return;
+    seenRunIds.add(run.id);
 
+    const summary = createSummary();
+    try {
+      if (!run.worktree_path || !run.branch) {
+        pushSummaryError(summary, 'no_worktree');
+        emitHarvested(run, summary);
+        return;
+      }
+      // Worktree already gone (e.g. executeTask's spawn-failure catch runs its
+      // synchronous cleanup before this setImmediate fires). Review still needs
+      // one terminal notification, but harvest itself cannot proceed.
+      if (!fs.existsSync(run.worktree_path)) {
+        pushSummaryError(summary, 'worktree_missing');
+        emitHarvested(run, summary);
+        return;
+      }
       const resolved = resolveProject(run, projectDir);
       const resolvedProjectDir = resolved.projectDir;
       if (!resolvedProjectDir) {
         addError(run.id, 'preflight', new Error('Project directory unavailable'));
+        pushSummaryError(summary, 'no_project_dir');
+        emitHarvested(run, summary);
         return;
       }
 
+      summary.harvested = true;
       try {
         worktreeService.autoSaveWorktree(run.worktree_path, run.id);
       } catch (err) {
         addError(run.id, 'autosave', err);
+        pushSummaryError(summary, 'autosave');
       }
 
       try {
@@ -190,13 +263,17 @@ function createHarvestService({
         truncated = truncated || cappedStat.truncated;
         const files = Array.isArray(diff.files) ? diff.files : [];
         if (files.length > MAX_FILES) truncated = true;
+        summary.files = files.length;
+        summary.statText = capString(diff.stat || '', MAX_SUMMARY_STAT_CHARS).value;
         let commits = [];
         try {
           const commitResult = listCommits(resolvedProjectDir, base, run.branch);
           commits = commitResult.commits;
           truncated = truncated || commitResult.truncated;
+          summary.commits = commits.length;
         } catch (err) {
           addError(run.id, 'commits', err);
+          pushSummaryError(summary, 'commits');
         }
         addEvent(run.id, 'harvest:diff', {
           base,
@@ -208,6 +285,7 @@ function createHarvestService({
         });
       } catch (err) {
         addError(run.id, 'diff', err);
+        pushSummaryError(summary, 'diff');
       }
 
       try {
@@ -219,9 +297,17 @@ function createHarvestService({
             testRunner,
           });
           addEvent(run.id, 'harvest:test', result);
+          summary.test = {
+            passed: result.passed,
+            timed_out: result.timed_out,
+            exit_code: result.exit_code,
+            duration_ms: result.duration_ms,
+            output_tail: tailString(result.output_tail || '', MAX_SUMMARY_OUTPUT_TAIL_CHARS),
+          };
         }
       } catch (err) {
         addError(run.id, 'test', err);
+        pushSummaryError(summary, 'test');
       }
 
       try {
@@ -231,9 +317,13 @@ function createHarvestService({
         });
       } catch (err) {
         addError(run.id, 'cleanup', err);
+        pushSummaryError(summary, 'cleanup');
       }
+      emitHarvested(run, summary);
     } catch (err) {
       try { addError(run?.id, 'fatal', err); } catch { /* never throw */ }
+      pushSummaryError(summary, 'fatal');
+      emitHarvested(run, summary);
     }
   }
 

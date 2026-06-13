@@ -53,6 +53,137 @@ const { createWorkerPresetsRouter } = require('./routes/workerPresets');
 const { createMcpTemplateService } = require('./services/mcpTemplateService');
 const { createMcpTemplatesRouter } = require('./routes/mcpTemplates');
 
+const AUTO_REVIEW_MAX = 5;
+const REVIEW_TEXT_CAP = 1000;
+const HARVEST_TEXT_CAP = 500;
+
+function capText(value, maxChars) {
+  const text = String(value || '');
+  return text.length <= maxChars ? text : text.slice(0, maxChars);
+}
+
+function indentBlock(value) {
+  return capText(value, HARVEST_TEXT_CAP)
+    .split('\n')
+    .map((line) => `    ${line}`)
+    .join('\n');
+}
+
+function formatHarvestSummary(harvestSummary) {
+  if (!harvestSummary) return [];
+  const errors = Array.isArray(harvestSummary.errors) ? harvestSummary.errors : [];
+  if (!harvestSummary.harvested) {
+    return [`  [harvest] 수집 불가 (${errors.join(', ') || 'unknown'})`];
+  }
+
+  const lines = [
+    `  [harvest] files: ${Number(harvestSummary.files) || 0}, commits: ${Number(harvestSummary.commits) || 0}`,
+  ];
+  const test = harvestSummary.test;
+  if (test) {
+    const testStatus = test.timed_out ? 'TIMEOUT' : (test.passed ? 'PASS' : 'FAIL');
+    const exitCode = test.exit_code != null ? test.exit_code : '?';
+    const duration = test.duration_ms != null ? `${test.duration_ms}ms` : '?ms';
+    lines.push(`  [harvest] test: ${testStatus} (exit ${exitCode}, ${duration})`);
+  }
+  if (harvestSummary.statText) {
+    lines.push('  [harvest] stat:');
+    lines.push(indentBlock(harvestSummary.statText));
+  }
+  if (test?.output_tail) {
+    lines.push('  [harvest] test output:');
+    lines.push(indentBlock(test.output_tail));
+  }
+  if (errors.length > 0) {
+    lines.push(`  [harvest] errors: ${errors.join(', ')}`);
+  }
+  return lines;
+}
+
+function buildPmReviewText({ run, harvestSummary, count, autoReviewMax = AUTO_REVIEW_MAX }) {
+  const status = run.status || 'unknown';
+  const taskId = run.task_id || 'none';
+  const summaryRaw = (run.result_summary || '').replace(/\[system[:\s]/gi, '[info ');
+  const exitCode = run.exit_code != null ? run.exit_code : '?';
+  return [
+    `[system: worker finished — auto-review required]`,
+    `Worker run ${run.id} finished.`,
+    `  status: ${status}`,
+    `  exit_code: ${exitCode}`,
+    `  task_id: ${taskId}`,
+    summaryRaw ? `  result: ${capText(summaryRaw, REVIEW_TEXT_CAP)}` : '',
+    ...formatHarvestSummary(harvestSummary),
+    '',
+    `Review round ${count + 1}/${autoReviewMax} for this task.`,
+    'Review this worker\'s harvested output and run events (GET /api/runs/' + run.id + '/events), then:',
+    '- If the work is satisfactory, update the task status to "done".',
+    '- If additional work is needed, spawn a new worker with corrective instructions.',
+    '- If the worker failed, diagnose and retry or escalate to the user.',
+  ].filter(Boolean).join('\n');
+}
+
+function createPmAutoReview({
+  eventBus,
+  managerRegistry,
+  conversationService,
+  autoReviewMax = AUTO_REVIEW_MAX,
+  defer = setImmediate,
+  logger = console,
+} = {}) {
+  const autoReviewCounts = new Map(); // "projectId:taskId" -> count
+
+  managerRegistry.onSlotCleared(({ conversationId }) => {
+    if (!conversationId || !conversationId.startsWith('pm:')) return;
+    const projectId = conversationId.slice(3);
+    for (const key of autoReviewCounts.keys()) {
+      if (key.startsWith(`${projectId}:`)) autoReviewCounts.delete(key);
+    }
+  });
+
+  function sendPmReview({ run, harvestSummary }) {
+    if (!run || run.is_manager) return false;
+    const projectId = run.project_id;
+    if (!projectId) return false;
+    const pmSlotKey = `pm:${projectId}`;
+    const pmRunId = managerRegistry.getActiveRunId(pmSlotKey);
+    if (!pmRunId) return false;
+
+    const countKey = `${projectId}:${run.task_id || '_'}`;
+    const count = autoReviewCounts.get(countKey) || 0;
+    if (count >= autoReviewMax) {
+      logger.warn(`[pm-auto-review] Circuit breaker: ${countKey} hit ${autoReviewMax} reviews; skipping. User intervention needed.`);
+      return false;
+    }
+
+    const reviewText = buildPmReviewText({
+      run,
+      harvestSummary,
+      count,
+      autoReviewMax,
+    });
+
+    defer(() => {
+      try {
+        conversationService.sendMessage(pmSlotKey, { text: reviewText });
+        autoReviewCounts.set(countKey, count + 1);
+      } catch (err) {
+        logger.warn(`[pm-auto-review] Failed to send review to ${pmSlotKey}: ${err.message}`);
+      }
+    });
+    return true;
+  }
+
+  eventBus.subscribe((event) => {
+    if (event.channel !== 'run:harvested') return;
+    sendPmReview({
+      run: event.data?.run,
+      harvestSummary: event.data?.summary,
+    });
+  });
+
+  return { sendPmReview, autoReviewCounts };
+}
+
 function createApp(options = {}) {
   const app = express();
   // PR1: tests pass `authToken` explicitly to avoid mutating
@@ -136,6 +267,7 @@ function createApp(options = {}) {
     runService,
     worktreeService,
     projectService,
+    eventBus,
     testRunner: options.harvestTestRunner,
   });
   const lifecycleService = createLifecycleService({
@@ -193,70 +325,10 @@ function createApp(options = {}) {
     try { conversationService.clearParentNotices(runId); } catch { /* ignore */ }
   });
 
-  // PM auto-review: when a worker run completes/fails within a project
-  // that has an active PM, send the result summary to the PM so it can
-  // autonomously review and decide whether to re-run or mark the task done.
-  //
-  // Circuit breaker: track per-(project, task) review count. After
-  // AUTO_REVIEW_MAX rounds, stop auto-reviewing and let the PM sit idle
-  // so the user can intervene. Resets on PM slot cleared (session end/reset).
-  const AUTO_REVIEW_MAX = 5;
-  const _autoReviewCounts = new Map(); // "projectId:taskId" -> count
-  // Reset circuit breaker when PM slot is cleared (session end/reset).
-  managerRegistry.onSlotCleared(({ conversationId }) => {
-    if (!conversationId || !conversationId.startsWith('pm:')) return;
-    const projectId = conversationId.slice(3);
-    for (const key of _autoReviewCounts.keys()) {
-      if (key.startsWith(`${projectId}:`)) _autoReviewCounts.delete(key);
-    }
-  });
-  eventBus.subscribe((event) => {
-    if (event.channel !== 'run:completed') return;
-    const run = event.data?.run;
-    if (!run || run.is_manager) return;
-    const projectId = run.project_id;
-    if (!projectId) return;
-    const pmSlotKey = `pm:${projectId}`;
-    const pmRunId = managerRegistry.getActiveRunId(pmSlotKey);
-    if (!pmRunId) return; // no active PM for this project
-    // Circuit breaker check
-    const countKey = `${projectId}:${run.task_id || '_'}`;
-    const count = _autoReviewCounts.get(countKey) || 0;
-    if (count >= AUTO_REVIEW_MAX) {
-      console.warn(`[pm-auto-review] Circuit breaker: ${countKey} hit ${AUTO_REVIEW_MAX} reviews — skipping. User intervention needed.`);
-      return;
-    }
-    // Build review notification
-    const status = run.status || 'unknown';
-    const taskId = run.task_id || 'none';
-    const summaryRaw = (run.result_summary || '').replace(/\[system[:\s]/gi, '[info ');
-    const exitCode = run.exit_code != null ? run.exit_code : '?';
-    const reviewText = [
-      `[system: worker completed — auto-review required]`,
-      `Worker run ${run.id} finished.`,
-      `  status: ${status}`,
-      `  exit_code: ${exitCode}`,
-      `  task_id: ${taskId}`,
-      summaryRaw ? `  result: ${summaryRaw.slice(0, 1000)}` : '',
-      '',
-      `Review round ${count + 1}/${AUTO_REVIEW_MAX} for this task.`,
-      'Review this worker\'s output (GET /api/runs/' + run.id + '/events), then:',
-      '- If the work is satisfactory, update the task status to "done".',
-      '- If additional work is needed, spawn a new worker with corrective instructions.',
-      '- If the worker failed, diagnose and retry or escalate to the user.',
-    ].filter(Boolean).join('\n');
-    // Defer to next tick to avoid "previous turn still running" conflict.
-    // Counter is incremented only AFTER successful send (rollback on failure).
-    setImmediate(() => {
-      try {
-        conversationService.sendMessage(pmSlotKey, { text: reviewText });
-        _autoReviewCounts.set(countKey, count + 1); // increment only on success
-      } catch (err) {
-        console.warn(`[pm-auto-review] Failed to send review to ${pmSlotKey}: ${err.message}`);
-        // Counter NOT incremented — next completion will retry
-      }
-    });
-  });
+  // PM auto-review: harvest is the single completion gate. `run:ended`
+  // drives harvest first, and harvest emits exactly one `run:harvested`
+  // for each review-target worker run; only then do we notify the PM.
+  createPmAutoReview({ eventBus, managerRegistry, conversationService });
 
   // v3 Phase 4: annotate-only reconciliation. reconciliationService
   // reads conversationService.peekParentNotices to detect "user
@@ -442,4 +514,9 @@ function createApp(options = {}) {
   return app;
 }
 
-module.exports = { createApp };
+module.exports = {
+  createApp,
+  createPmAutoReview,
+  buildPmReviewText,
+  formatHarvestSummary,
+};
