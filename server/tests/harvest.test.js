@@ -12,7 +12,7 @@ const { createTaskService } = require('../services/taskService');
 const { createProjectService } = require('../services/projectService');
 const { createAgentProfileService } = require('../services/agentProfileService');
 const { createWorktreeService } = require('../services/worktreeService');
-const { createHarvestService } = require('../services/harvestService');
+const { createHarvestService, buildHarvestEnv } = require('../services/harvestService');
 const { createLifecycleService } = require('../services/lifecycleService');
 const { createEventBus } = require('../services/eventBus');
 const { createPmAutoReview } = require('../app');
@@ -225,6 +225,13 @@ function harvestedSummary(overrides = {}) {
     ...overrides,
   };
 }
+
+test('buildHarvestEnv prefixes PATH with the server node bin directory', () => {
+  const env = buildHarvestEnv();
+  const [firstPathEntry] = env.PATH.split(path.delimiter);
+
+  assert.equal(firstPathEntry, path.dirname(process.execPath));
+});
 
 test('harvestRun emits run:harvested once with diff and test summary for completed worktree runs', async (t) => {
   const db = await mkdb(t);

@@ -35,7 +35,12 @@ function testTimeoutMs() {
 }
 
 function buildHarvestEnv() {
-  const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
+  const extraPaths = [
+    path.dirname(process.execPath),
+    '/opt/homebrew/bin',
+    '/opt/homebrew/sbin',
+    '/usr/local/bin',
+  ];
   const currentPath = process.env.PATH || '';
   const env = {
     PATH: [...extraPaths, currentPath].filter(Boolean).join(path.delimiter),
