@@ -425,6 +425,32 @@ test('queue: manager runs are excluded from retry and queue drain', async (t) =>
   assert.equal(h.executionEngine.spawned.length, 0);
 });
 
+test('queue: manager run on same profile does not consume worker concurrency', async (t) => {
+  // Codex Top/PM can run with agent_profile_id set (POST /api/manager/start
+  // {agent_profile_id:'codex'}). If countRunning included managers, a running
+  // manager would eat a worker slot and — since manager run:ended returns
+  // before drain — starve the worker queue. countRunning must be worker-only.
+  const { db } = await mkdb(t);
+  const h = buildHarness(db, {});
+  const profile = seedProfile(db, { max: 1 });
+
+  const manager = h.runService.createRun({
+    is_manager: true,
+    agent_profile_id: profile.id,
+    prompt: 'top',
+    manager_adapter: 'codex',
+    manager_layer: 'top',
+    conversation_id: 'top',
+  });
+  h.runService.updateRunStatus(manager.id, 'running', { force: true });
+
+  assert.equal(
+    h.runService.countRunning(profile.id),
+    0,
+    'a running manager on the same profile must not count toward worker concurrency'
+  );
+});
+
 test('queue: app boot drains queued worker runs after orphan recovery', async (t) => {
   const { db, dbPath } = await mkdb(t, 'palantir-queue-app-');
   const eventBus = null;

@@ -1155,11 +1155,13 @@ function createLifecycleService({
         if (!run) return;
         const toStatus = event.data?.to_status || run.status;
 
-        // Auto-retry only runs that actually started executing. started_at is
-        // set exclusively by the spawn path (claimQueuedRun / markRunStarted),
-        // never by a bare updateStatus — so a manual PATCH that flips a run to
-        // 'failed' (tests, operator debug) does NOT spawn a retry attempt, and
-        // a run that never spawned can't loop. Real worker failures still retry.
+        // Auto-retry only runs that entered the spawn path. started_at is set
+        // exclusively by claimQueuedRun / markRunStarted, never by a bare
+        // updateStatus — so a manual PATCH to 'failed' (tests, operator debug)
+        // or a never-spawned row does NOT create a retry attempt (and can't
+        // loop). A run that claimed then failed during setup (preflight/preset)
+        // DOES retry once — that intentionally covers transient failures, and
+        // retry_count caps it at MAX_RETRY.
         if (
           toStatus === 'failed'
           && !run.is_manager

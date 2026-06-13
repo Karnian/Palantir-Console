@@ -135,7 +135,7 @@ function createRunService(db, eventBus) {
     `),
     countRunning: db.prepare(`
       SELECT COUNT(*) as count FROM runs
-      WHERE agent_profile_id = ? AND status = 'running'
+      WHERE agent_profile_id = ? AND status = 'running' AND is_manager = 0
     `),
     getOldestQueued: db.prepare(`
       SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
@@ -145,7 +145,7 @@ function createRunService(db, eventBus) {
       LEFT JOIN tasks t ON r.task_id = t.id
       LEFT JOIN projects p ON t.project_id = p.id
       WHERE r.status = 'queued' AND r.agent_profile_id = ? AND r.is_manager = 0
-      ORDER BY r.created_at ASC
+      ORDER BY r.created_at ASC, r.rowid ASC
       LIMIT 1
     `),
     claimQueued: db.prepare(`
