@@ -54,7 +54,7 @@ server/
   index.js                    — 진입점, 포트/auth 설정, SIGINT/SIGTERM graceful shutdown
   app.js                      — Express 앱 조립 (라우터, 서비스, 미들웨어)
   db/database.js              — SQLite 초기화 + 자동 마이그레이션
-  db/migrations/              — 001_initial ~ 023_project_test_command.sql
+  db/migrations/              — 001_initial ~ 024_run_queue_retry.sql
                                 (020: mcp_template_updated_at, 021: skill_pack origin_type CHECK trigger,
                                  022: M4-a — mcp_server_templates table rebuild w/ transport ∈ {stdio,http},
                                       url + bearer_token_env_var 컬럼, INSERT/UPDATE 정합성 trigger
@@ -194,7 +194,7 @@ server/
     helpers/                  — jsdom-preact.js 등
 ```
 
-> **993 tests** 기준 (P0+H-1+H-1.5 시점, 2026-06-13 — spawn guard 9 + harvest/PM-review 25 추가. **P0 (PR #183)**: `node --test` 중 실제 CLI spawn 은 spawnGuard 가 fail-closed 차단 — 테스트는 `server/tests/fixtures/bin/` 의 mock binary 또는 `process.execPath` 만 spawn 가능, 우회는 `PALANTIR_ALLOW_REAL_SPAWN=1` 명시 시에만. 2026-06-12 spawn storm 사고 (`docs/incident-2026-06-12-test-claude-spawn-storm.md`) 의 근본 수정). **H-1.5 (PR #186)**: PM auto-review 는 `run:harvested` 단일 트리거 — worker terminal 시 harvestService 가 exactly-once emit, app.js 가 harvest 요약(diff/test)을 PM 리뷰 메시지에 주입. `run:completed`/`run:result` 는 더 이상 PM review 안 함 (채널 혼재 회귀 방지). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙. 단독 실행 시 모두 PASS, 풀 런 시 race-y flake 1~2건 알려진 패턴 (`engine: system:init event sets sessionId` 등 — `docs/handoff-post-k2-launch-2026-04-29.md` §6 참고). e2e: a11y 32 + visual 32 (별도, 각각 `npm run test:a11y` / `test:visual`).
+> **1007 tests** 기준 (P0+H-1+H-1.5+harvest-fix+B-lite 시점, 2026-06-14 — spawn guard 9 + harvest/PM-review 27 + queue 12 추가. **B-lite 큐 (PR #189)**: `max_concurrent` 도달 시 throw 대신 queued 유지 → 슬롯 비면 FIFO 자동 spawn (`drainQueue`), failed worker 1회 자동 재시도(`createRetryRun` = 새 attempt run, 원 run harvest 와 독립). `claimQueuedRun` CAS(`UPDATE WHERE status='queued'`)로 동시 drain 중복 spawn 차단. `countRunning` 은 **worker-only**(`is_manager=0`) — codex Top/PM 이 같은 profile 로 떠도 worker slot 안 먹음. retry 는 `started_at` 있는(실제 spawn 경로) run 만 (수동 PATCH failed 제외). **P0 (PR #183)**: `node --test` 중 실제 CLI spawn 은 spawnGuard 가 fail-closed 차단 — 테스트는 `server/tests/fixtures/bin/` 의 mock binary 또는 `process.execPath` 만 spawn 가능, 우회는 `PALANTIR_ALLOW_REAL_SPAWN=1` 명시 시에만. 2026-06-12 spawn storm 사고 (`docs/incident-2026-06-12-test-claude-spawn-storm.md`) 의 근본 수정). **H-1.5 (PR #186)**: PM auto-review 는 `run:harvested` 단일 트리거 — worker terminal 시 harvestService 가 exactly-once emit, app.js 가 harvest 요약(diff/test)을 PM 리뷰 메시지에 주입. `run:completed`/`run:result` 는 더 이상 PM review 안 함 (채널 혼재 회귀 방지). 새 phase 추가할 때 기존 파일에 끼워넣기 vs 신규 파일 생성은 "phase 단일 주제면 신규 파일" 규칙. 단독 실행 시 모두 PASS, 풀 런 시 race-y flake 1~2건 알려진 패턴 (`engine: system:init event sets sessionId` 등 — `docs/handoff-post-k2-launch-2026-04-29.md` §6 참고). e2e: a11y 32 + visual 32 (별도, 각각 `npm run test:a11y` / `test:visual`).
 
 ## Key Patterns
 
