@@ -31,6 +31,7 @@ function createLifecycleService({
   const _authResolverOpts = authResolverOpts || {};
   const HEARTBEAT_INTERVAL_MS = 30000;  // 30s
   const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min (increased from 10 min for long-running tasks)
+  const MAX_RETRY = 1;
   let heartbeatTimer = null;
   let healthCheckRunning = false; // Re-entrancy guard
   let unsubscribeEventBus = null; // for stopMonitoring teardown
@@ -98,6 +99,30 @@ function createLifecycleService({
     if (cmd.includes('codex')) return 'codex';
     if (cmd.includes('opencode')) return 'opencode';
     return 'other';
+  }
+
+  function parseQueuedArgs(value) {
+    if (!value) return {};
+    try {
+      const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function buildQueuedArgs({ skillPackIds, presetId }) {
+    return {
+      skillPackIds: Array.isArray(skillPackIds) ? skillPackIds : null,
+      presetId: presetId || null,
+    };
+  }
+
+  function getRunningCount(profileId) {
+    if (runService && typeof runService.countRunning === 'function') {
+      return runService.countRunning(profileId);
+    }
+    return agentProfileService.getRunningCount(profileId);
   }
 
   /**
@@ -202,23 +227,46 @@ function createLifecycleService({
     const task = taskService.getTask(taskId);
     const profile = agentProfileService.getProfile(agentProfileId);
 
-    // Check concurrency limit
-    const runningCount = agentProfileService.getRunningCount(agentProfileId);
-    if (runningCount >= profile.max_concurrent) {
-      throw new Error(`Agent ${profile.name} at concurrency limit (${profile.max_concurrent})`);
-    }
-
     // Phase 10C: resolve preferred preset. Explicit argument wins over
     // task.preferred_preset_id so callers can override per-execute.
     const effectivePresetId = presetId || task.preferred_preset_id || null;
-    const adapterName = resolveAdapterName(profile);
 
-    // Create run
     const run = runService.createRun({
       task_id: taskId,
       agent_profile_id: agentProfileId,
       prompt,
+      queued_args: buildQueuedArgs({ skillPackIds, presetId: effectivePresetId }),
+      retry_count: 0,
     });
+
+    if (getRunningCount(agentProfileId) < profile.max_concurrent) {
+      return (await spawnQueuedRun(run.id)) || runService.getRun(run.id);
+    }
+
+    runService.addRunEvent(run.id, 'queue:enqueued', JSON.stringify({
+      profile_id: agentProfileId,
+    }));
+    return runService.getRun(run.id);
+  }
+
+  async function spawnQueuedRun(runId) {
+    const claimed = runService.claimQueuedRun(runId);
+    if (!claimed) return null;
+
+    const run = runService.getRun(runId);
+    const queuedArgs = parseQueuedArgs(run.queued_args);
+    const skillPackIds = Array.isArray(queuedArgs.skillPackIds) ? queuedArgs.skillPackIds : undefined;
+    const effectivePresetId = queuedArgs.presetId || null;
+    const taskId = run.task_id;
+    const agentProfileId = run.agent_profile_id;
+    const prompt = run.prompt || '';
+    const task = taskService.getTask(taskId);
+    const profile = agentProfileService.getProfile(agentProfileId);
+    const adapterName = resolveAdapterName(profile);
+
+    runService.addRunEvent(run.id, 'queue:dequeued', JSON.stringify({
+      profile_id: agentProfileId,
+    }));
 
     // Resolve project directory and MCP config for agent CWD
     let projectDir = null;
@@ -772,6 +820,62 @@ function createLifecycleService({
     }
   }
 
+  function createRetryRun(run) {
+    const retryRun = runService.createRun({
+      task_id: run.task_id,
+      agent_profile_id: run.agent_profile_id,
+      prompt: run.prompt || '',
+      queued_args: run.queued_args || null,
+      retry_count: Number(run.retry_count || 0) + 1,
+    });
+    runService.addRunEvent(retryRun.id, 'queue:retry', JSON.stringify({
+      profile_id: run.agent_profile_id,
+    }));
+    return retryRun;
+  }
+
+  async function drainQueue(profileId) {
+    if (!profileId) return 0;
+    let profile;
+    try {
+      profile = agentProfileService.getProfile(profileId);
+    } catch {
+      return 0;
+    }
+
+    let started = 0;
+    while (getRunningCount(profileId) < profile.max_concurrent) {
+      const next = runService.getOldestQueued(profileId);
+      if (!next) break;
+      const spawned = await spawnQueuedRun(next.id);
+      if (spawned) started++;
+    }
+    return started;
+  }
+
+  async function drainAllQueues() {
+    const profileIds = new Set();
+    for (const run of runService.listRuns({ status: 'queued' })) {
+      if (run.is_manager || !run.agent_profile_id) continue;
+      profileIds.add(run.agent_profile_id);
+    }
+
+    let started = 0;
+    for (const profileId of profileIds) {
+      started += await drainQueue(profileId);
+    }
+    return started;
+  }
+
+  function scheduleDrain(profileId) {
+    if (!profileId) return;
+    setImmediate(() => {
+      Promise.resolve(drainQueue(profileId)).catch((err) => {
+        console.warn(`[lifecycle] Queue drain failed for profile ${profileId}: ${err.message}`);
+      });
+    });
+  }
+
   /**
    * Check health of all running runs.
    */
@@ -1049,10 +1153,29 @@ function createLifecycleService({
         if (event.channel !== 'run:ended') return;
         const run = event.data?.run;
         if (!run) return;
+        const toStatus = event.data?.to_status || run.status;
+
+        // Auto-retry only runs that actually started executing. started_at is
+        // set exclusively by the spawn path (claimQueuedRun / markRunStarted),
+        // never by a bare updateStatus — so a manual PATCH that flips a run to
+        // 'failed' (tests, operator debug) does NOT spawn a retry attempt, and
+        // a run that never spawned can't loop. Real worker failures still retry.
+        if (
+          toStatus === 'failed'
+          && !run.is_manager
+          && run.started_at
+          && Number(run.retry_count || 0) < MAX_RETRY
+        ) {
+          try {
+            createRetryRun(run);
+          } catch (err) {
+            console.warn(`[lifecycle] Retry enqueue failed for run ${run.id}: ${err.message}`);
+          }
+        }
+
         if (run.task_id) checkTaskCompletion(run.task_id);
         if (run.is_manager) return;
 
-        const toStatus = event.data?.to_status || run.status;
         const reviewTarget = ['completed', 'failed'].includes(toStatus) && harvestService;
         if (reviewTarget) {
           const projectDir = resolveProjectDirForRun(run);
@@ -1063,10 +1186,11 @@ function createLifecycleService({
               })
               .finally(() => cleanupRunRuntimeFiles(run));
           });
-          return;
+        } else {
+          cleanupRunWorktree(run);
         }
 
-        cleanupRunWorktree(run);
+        scheduleDrain(run.agent_profile_id);
       });
     }
 
@@ -1197,6 +1321,9 @@ function createLifecycleService({
 
   return {
     executeTask,
+    spawnQueuedRun,
+    drainQueue,
+    drainAllQueues,
     checkHealth,
     recoverOrphanSessions,
     cleanupOrphanMcpConfigs,

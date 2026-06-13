@@ -110,8 +110,16 @@ function createRunService(db, eventBus) {
       WHERE r.id = ?
     `),
     insert: db.prepare(`
-      INSERT INTO runs (id, task_id, agent_profile_id, prompt, status, is_manager, parent_run_id, manager_adapter, manager_thread_id, manager_layer, conversation_id)
-      VALUES (@id, @task_id, @agent_profile_id, @prompt, @status, @is_manager, @parent_run_id, @manager_adapter, @manager_thread_id, @manager_layer, @conversation_id)
+      INSERT INTO runs (
+        id, task_id, agent_profile_id, prompt, status, is_manager,
+        parent_run_id, manager_adapter, manager_thread_id, manager_layer,
+        conversation_id, queued_args, retry_count
+      )
+      VALUES (
+        @id, @task_id, @agent_profile_id, @prompt, @status, @is_manager,
+        @parent_run_id, @manager_adapter, @manager_thread_id, @manager_layer,
+        @conversation_id, @queued_args, @retry_count
+      )
     `),
     updateManagerThread: db.prepare(`
       UPDATE runs SET manager_thread_id = ? WHERE id = ?
@@ -124,6 +132,25 @@ function createRunService(db, eventBus) {
     `),
     updateStarted: db.prepare(`
       UPDATE runs SET status = 'running', started_at = datetime('now'), tmux_session = ?, worktree_path = ?, branch = ? WHERE id = ?
+    `),
+    countRunning: db.prepare(`
+      SELECT COUNT(*) as count FROM runs
+      WHERE agent_profile_id = ? AND status = 'running'
+    `),
+    getOldestQueued: db.prepare(`
+      SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
+             t.title as task_title, t.project_id as project_id, p.name as project_name
+      FROM runs r
+      LEFT JOIN agent_profiles ap ON r.agent_profile_id = ap.id
+      LEFT JOIN tasks t ON r.task_id = t.id
+      LEFT JOIN projects p ON t.project_id = p.id
+      WHERE r.status = 'queued' AND r.agent_profile_id = ? AND r.is_manager = 0
+      ORDER BY r.created_at ASC
+      LIMIT 1
+    `),
+    claimQueued: db.prepare(`
+      UPDATE runs SET status = 'running', started_at = datetime('now')
+      WHERE id = ? AND status = 'queued'
     `),
     updateResult: db.prepare(`
       UPDATE runs SET result_summary = ?, exit_code = ?, input_tokens = ?, output_tokens = ?, cost_usd = ? WHERE id = ?
@@ -154,7 +181,30 @@ function createRunService(db, eventBus) {
     return run;
   }
 
-  function createRun({ task_id, agent_profile_id, prompt, is_manager, parent_run_id, manager_adapter, manager_thread_id, manager_layer, conversation_id }) {
+  function normalizeQueuedArgs(value) {
+    if (value === undefined || value === null) return null;
+    if (typeof value === 'string') return value || null;
+    return JSON.stringify(value);
+  }
+
+  function normalizeRetryCount(value) {
+    const n = Number(value || 0);
+    return Number.isInteger(n) && n >= 0 ? n : 0;
+  }
+
+  function createRun({
+    task_id,
+    agent_profile_id,
+    prompt,
+    is_manager,
+    parent_run_id,
+    manager_adapter,
+    manager_thread_id,
+    manager_layer,
+    conversation_id,
+    queued_args,
+    retry_count,
+  }) {
     // task_id and agent_profile_id are required for worker runs, optional for manager
     if (!is_manager && !task_id) throw new BadRequestError('task_id is required');
     if (!is_manager && !agent_profile_id) throw new BadRequestError('agent_profile_id is required');
@@ -193,6 +243,8 @@ function createRunService(db, eventBus) {
       manager_thread_id: manager_thread_id || null,
       manager_layer: effectiveLayer,
       conversation_id: effectiveConversationId,
+      queued_args: normalizeQueuedArgs(queued_args),
+      retry_count: normalizeRetryCount(retry_count),
     });
     const run = stmts.getById.get(id);
     if (eventBus) {
@@ -307,6 +359,32 @@ function createRunService(db, eventBus) {
       });
     }
     return run;
+  }
+
+  function countRunning(profileId) {
+    return stmts.countRunning.get(profileId).count;
+  }
+
+  function getOldestQueued(profileId) {
+    return stmts.getOldestQueued.get(profileId) || null;
+  }
+
+  function claimQueuedRun(id) {
+    const info = stmts.claimQueued.run(id);
+    if (info.changes === 0) return 0;
+    const run = stmts.getById.get(id);
+    addRunEvent(id, 'status:running', JSON.stringify({ reason: 'queue:claim' }));
+    if (eventBus) {
+      eventBus.emit('run:status', {
+        run,
+        from_status: 'queued',
+        to_status: 'running',
+        reason: 'queue:claim',
+        task_id: run.task_id || null,
+        project_id: derivePmProjectId(run),
+      });
+    }
+    return info.changes;
   }
 
   function updateRunResult(id, { result_summary, exit_code, input_tokens, output_tokens, cost_usd }) {
@@ -440,6 +518,7 @@ function createRunService(db, eventBus) {
   return {
     listRuns, getRun, createRun,
     updateRunStatus, markRunStarted, updateRunResult,
+    countRunning, getOldestQueued, claimQueuedRun,
     updateManagerThreadId, updateClaudeSessionId,
     updateRunMcpConfig,
     updateRunPreset,
