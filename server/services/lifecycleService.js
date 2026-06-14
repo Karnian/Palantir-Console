@@ -262,7 +262,11 @@ function createLifecycleService({
       queuedArgs = parseQueuedArgs(run.queued_args);
     } catch (err) {
       // Already claimed → running; fail it closed rather than spawn under-equipped.
+      // Exhaust the retry budget first: a retry would copy the same corrupt
+      // queued_args and fail identically, so it's pure waste (one needless
+      // failed run + PM review). Bump retry_count to MAX so run:ended skips it.
       runService.addRunEvent(runId, 'queue:args_invalid', JSON.stringify({ error: err.message }));
+      runService.setRetryCount(runId, MAX_RETRY);
       runService.updateRunStatus(runId, 'failed', { force: true, reason: 'queued_args_invalid' });
       return null;
     }

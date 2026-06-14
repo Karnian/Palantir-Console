@@ -369,6 +369,13 @@ function createRunService(db, eventBus) {
     return stmts.getOldestQueued.get(profileId) || null;
   }
 
+  // Used to exhaust the retry budget of a run whose failure is not worth
+  // retrying (e.g. corrupt queued_args — a retry would copy the same bad args
+  // and fail identically). Idempotent raw write; no state-machine transition.
+  function setRetryCount(id, n) {
+    db.prepare('UPDATE runs SET retry_count = ? WHERE id = ?').run(Number(n) || 0, id);
+  }
+
   function claimQueuedRun(id) {
     const info = stmts.claimQueued.run(id);
     if (info.changes === 0) return 0;
@@ -518,7 +525,7 @@ function createRunService(db, eventBus) {
   return {
     listRuns, getRun, createRun,
     updateRunStatus, markRunStarted, updateRunResult,
-    countRunning, getOldestQueued, claimQueuedRun,
+    countRunning, getOldestQueued, claimQueuedRun, setRetryCount,
     updateManagerThreadId, updateClaudeSessionId,
     updateRunMcpConfig,
     updateRunPreset,
