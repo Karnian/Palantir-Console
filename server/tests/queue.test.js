@@ -473,6 +473,9 @@ test('queue: app boot drains queued worker runs after orphan recovery', async (t
     dbPath,
     authToken: null,
     executionEngine,
+    // boot drain is skipped under NODE_TEST_CONTEXT by default (so other tests'
+    // createApp doesn't claim/corrupt seeded queued rows); opt in explicitly here.
+    forceBootDrain: true,
     storageRoot: path.join(os.tmpdir(), `palantir-storage-${Date.now()}`),
     fsRoot: os.tmpdir(),
   });
@@ -481,4 +484,27 @@ test('queue: app boot drains queued worker runs after orphan recovery', async (t
   await waitFor(() => executionEngine.spawned.length === 1);
   assert.equal(executionEngine.spawned[0].runId, queued.id);
   assert.equal(app.services.runService.getRun(queued.id).status, 'running');
+});
+
+test('queue: corrupt queued_args fails the run closed instead of spawning under-equipped', async (t) => {
+  const { db } = await mkdb(t);
+  const h = buildHarness(db, {});
+  const profile = seedProfile(db, { max: 1 });
+  const project = seedProject(h.projectService);
+  const task = seedTask(h.taskService, project.id);
+  // A queued run whose queued_args is not valid JSON (manual DB edit / partial write).
+  const run = h.runService.createRun({
+    task_id: task.id,
+    agent_profile_id: profile.id,
+    prompt: 'corrupt',
+    queued_args: '{not-json',
+  });
+
+  const result = await h.lifecycleService.spawnQueuedRun(run.id);
+
+  assert.equal(result, null, 'spawnQueuedRun returns null on corrupt args');
+  const after = h.runService.getRun(run.id);
+  assert.equal(after.status, 'failed', 'run is failed-closed, not spawned');
+  assert.equal(h.executionEngine.spawned.length, 0, 'no worker spawned with missing args');
+  assert.equal(eventsOf(h.runService, run.id, 'queue:args_invalid').length, 1);
 });

@@ -155,7 +155,7 @@ function createRunWithMissingProjectDir({ db, runService, taskService, projectSe
   return { project, task, profile, run: running, worktreePath: wt.path, branch: wt.branch };
 }
 
-function makeAutoReviewHarness({ activeRunId = 'run_pm_1', throwOnSend = false } = {}) {
+function makeAutoReviewHarness({ activeRunId = 'run_pm_1', throwOnSend = false, defer = (fn) => fn() } = {}) {
   const eventBus = createEventBus();
   const sent = [];
   const warnings = [];
@@ -181,7 +181,7 @@ function makeAutoReviewHarness({ activeRunId = 'run_pm_1', throwOnSend = false }
     eventBus,
     managerRegistry,
     conversationService,
-    defer: (fn) => fn(),
+    defer,
     logger: { warn: (msg) => warnings.push(String(msg)) },
   });
   return {
@@ -789,6 +789,32 @@ test('PM auto-review skips when project has no active PM', () => {
   });
 
   assert.equal(harness.sent.length, 0);
+});
+
+test('PM auto-review reserves breaker slot synchronously so a burst cannot exceed the cap', () => {
+  // defer is held (not run) to simulate many run:harvested events landing
+  // before any deferred send executes — the race the reserve-then-send fix
+  // closes. Without synchronous reservation, all 6 would read a stale count
+  // of 0 and slip past the breaker.
+  const pending = [];
+  const harness = makeAutoReviewHarness({ defer: (fn) => pending.push(fn) });
+
+  const accepted = [];
+  for (let i = 0; i < 6; i++) {
+    accepted.push(harness.controller.sendPmReview({
+      run: reviewRun({ id: `run_burst_${i}` }),
+      harvestSummary: null,
+    }));
+  }
+
+  // 5 reserved synchronously, 6th hit the breaker BEFORE any send ran.
+  assert.equal(accepted.filter(Boolean).length, 5);
+  assert.equal(accepted[5], false);
+  assert.equal(harness.controller.autoReviewCounts.get('proj_1:task_1'), 5);
+  assert.equal(harness.sent.length, 0, 'sends are still deferred');
+
+  pending.forEach((fn) => fn());
+  assert.equal(harness.sent.length, 5);
 });
 
 test('PM auto-review preserves counter rollback when sendMessage fails', () => {

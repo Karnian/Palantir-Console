@@ -119,6 +119,12 @@ function buildPmReviewText({ run, harvestSummary, count, autoReviewMax = AUTO_RE
     '- If the work is satisfactory, update the task status to "done".',
     '- If additional work is needed, spawn a new worker with corrective instructions.',
     '- If the worker failed, diagnose and retry or escalate to the user.',
+    // The system auto-retries a genuinely-failed worker once (B-lite queue).
+    // Tell the PM so it doesn't ALSO spawn a duplicate retry — check for a
+    // newer attempt run on this task first.
+    status === 'failed'
+      ? '- NOTE: the system may have already queued ONE automatic retry for this failure. Check GET /api/tasks/' + taskId + ' runs for a newer attempt before spawning another — avoid duplicate retries.'
+      : '',
   ].filter(Boolean).join('\n');
 }
 
@@ -155,6 +161,11 @@ function createPmAutoReview({
       return false;
     }
 
+    // Reserve the slot synchronously (before the deferred send) so two
+    // run:harvested events for the same task can't both read a stale count
+    // and slip past the breaker. Roll back if the send actually fails.
+    autoReviewCounts.set(countKey, count + 1);
+
     const reviewText = buildPmReviewText({
       run,
       harvestSummary,
@@ -165,8 +176,12 @@ function createPmAutoReview({
     defer(() => {
       try {
         conversationService.sendMessage(pmSlotKey, { text: reviewText });
-        autoReviewCounts.set(countKey, count + 1);
       } catch (err) {
+        // Decrement (not set-to-count) so a concurrent reservation isn't clobbered;
+        // delete at zero so the key returns to its pristine (absent) state.
+        const next = Math.max(0, (autoReviewCounts.get(countKey) || 1) - 1);
+        if (next === 0) autoReviewCounts.delete(countKey);
+        else autoReviewCounts.set(countKey, next);
         logger.warn(`[pm-auto-review] Failed to send review to ${pmSlotKey}: ${err.message}`);
       }
     });
@@ -433,15 +448,22 @@ function createApp(options = {}) {
   if (recovered.length > 0) {
     console.log(`[app] Recovered ${recovered.length} orphan session(s)`);
   }
-  Promise.resolve(lifecycleService.drainAllQueues())
-    .then((started) => {
-      if (started > 0) {
-        console.log(`[app] Started ${started} queued worker run(s)`);
-      }
-    })
-    .catch((err) => {
-      console.warn(`[app] Queue boot drain failed: ${err.message}`);
-    });
+  // Boot drain restarts queued worker runs after a restart. Skip under the
+  // node test runner by default: createApp() in tests would otherwise claim
+  // (→running) any seeded queued rows, hit the P0 spawn guard, and corrupt
+  // them to failed/retry. Tests that exercise boot drain pass forceBootDrain.
+  const shouldBootDrain = options.forceBootDrain || !process.env.NODE_TEST_CONTEXT;
+  if (shouldBootDrain) {
+    Promise.resolve(lifecycleService.drainAllQueues())
+      .then((started) => {
+        if (started > 0) {
+          console.log(`[app] Started ${started} queued worker run(s)`);
+        }
+      })
+      .catch((err) => {
+        console.warn(`[app] Queue boot drain failed: ${err.message}`);
+      });
+  }
   const staleWorktrees = lifecycleService.cleanupStaleTerminalWorktrees();
   if (staleWorktrees > 0) {
     console.log(`[app] Cleaned ${staleWorktrees} stale terminal worktree(s)`);
