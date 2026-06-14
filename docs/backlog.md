@@ -155,6 +155,17 @@
 - **Why deferred**: Codex PM (Phase 3a) 로 모든 use case 커버 중. Claude PM 을 쓸 실제 요구가 없는 상태에서 adapter contract / recovery / event 정규화 변경은 over-build.
 - **착수 시 참고**: manager-v3-multilayer.md §9.6 (entire), 원칙 #9 (sandbox bypass 정책), `pmSpawnService` + `pmCleanupService` 의 현재 Codex 전용 경로를 어떻게 adapter-agnostic 하게 만들지.
 
+### T5. B-lite/H-1.5 — 자동 retry ↔ PM auto-review de-dupe
+- **출처**: 2026-06-14 통합 교차리뷰 (Codex Q4).
+- **현 상태**: failed worker 는 B-lite 가 1회 자동 retry run 을 만들고, 동시에 H-1.5 PM auto-review 가
+  PM 에게 "실패, 재시도 판단" 을 보낸다. PM(LLM)이 자율적으로 또 worker 를 spawn 하면 **이중 재시도**
+  (자동 + PM) 가능. 현재 완화: failed review 메시지에 "시스템이 이미 1회 자동 retry 했을 수 있으니 새
+  attempt run 확인 후 spawn" advisory 문구 (`app.js buildPmReviewText`). circuit breaker(5회)가 백스톱.
+- **Trigger**: 실사용에서 이중 재시도가 실제로 자원 낭비/혼란을 일으키는 빈도 관측 후.
+- **착수 시 범위 (택1)**: (a) PM review 를 자동 retry 소진(retry_count=MAX) 후에만 발송 — 자동이 1차
+  대응, PM 은 최종 실패만 — H-1.5 sendPmReview 조건 변경. (b) backend de-dupe — PM 의 worker spawn
+  시 같은 task 에 newer queued/running attempt 있으면 거부. (a) 가 더 단순.
+
 ### T4. H-1 harvest — 멀티프로젝트 per-project node 해석
 - **출처**: 2026-06-13 도그푸딩 + Codex 교차리뷰 (harvest node 버전 fix Q2/Q5).
 - **현 상태**: harvest 의 `buildHarvestEnv` 가 test_command 를 **서버를 띄운 node** 로 실행 (PR #188).

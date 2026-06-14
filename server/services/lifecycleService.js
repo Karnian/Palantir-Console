@@ -101,14 +101,17 @@ function createLifecycleService({
     return 'other';
   }
 
+  // Fail-closed: a corrupt queued_args (manual DB edit, partial write) must
+  // NOT silently spawn a worker without its preset/skill packs. Throw so
+  // spawnQueuedRun marks the run failed instead of running it under-equipped.
+  // A genuinely empty (NULL) queued_args is the normal no-args case → {}.
   function parseQueuedArgs(value) {
     if (!value) return {};
-    try {
-      const parsed = typeof value === 'string' ? JSON.parse(value) : value;
-      return parsed && typeof parsed === 'object' ? parsed : {};
-    } catch {
-      return {};
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    if (!parsed || typeof parsed !== 'object') {
+      throw new Error('queued_args is not a JSON object');
     }
+    return parsed;
   }
 
   function buildQueuedArgs({ skillPackIds, presetId }) {
@@ -254,7 +257,19 @@ function createLifecycleService({
     if (!claimed) return null;
 
     const run = runService.getRun(runId);
-    const queuedArgs = parseQueuedArgs(run.queued_args);
+    let queuedArgs;
+    try {
+      queuedArgs = parseQueuedArgs(run.queued_args);
+    } catch (err) {
+      // Already claimed → running; fail it closed rather than spawn under-equipped.
+      // Exhaust the retry budget first: a retry would copy the same corrupt
+      // queued_args and fail identically, so it's pure waste (one needless
+      // failed run + PM review). Bump retry_count to MAX so run:ended skips it.
+      runService.addRunEvent(runId, 'queue:args_invalid', JSON.stringify({ error: err.message }));
+      runService.setRetryCount(runId, MAX_RETRY);
+      runService.updateRunStatus(runId, 'failed', { force: true, reason: 'queued_args_invalid' });
+      return null;
+    }
     const skillPackIds = Array.isArray(queuedArgs.skillPackIds) ? queuedArgs.skillPackIds : undefined;
     const effectivePresetId = queuedArgs.presetId || null;
     const taskId = run.task_id;
