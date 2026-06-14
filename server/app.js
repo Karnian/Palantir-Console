@@ -289,7 +289,9 @@ function createApp(options = {}) {
   const webhookService = createWebhookService({
     eventBus,
     runService,
-    webhookUrl: options.webhookUrl || process.env.PALANTIR_WEBHOOK_URL,
+    // ?? (not ||) so an explicit options.webhookUrl='' can disable webhooks
+    // even when PALANTIR_WEBHOOK_URL is set in the environment (test isolation).
+    webhookUrl: options.webhookUrl ?? process.env.PALANTIR_WEBHOOK_URL,
     allowPrivate: options.webhookAllowPrivate ?? (process.env.PALANTIR_WEBHOOK_ALLOW_PRIVATE === '1'),
     postImpl: options.webhookPostImpl,
     now: options.webhookNow,

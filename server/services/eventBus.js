@@ -23,7 +23,19 @@ function createEventBus() {
     if (replayBuffer.length > MAX_REPLAY) {
       replayBuffer.shift();
     }
-    emitter.emit('event', event);
+    // Isolate subscribers: a single throwing listener must not abort the
+    // emit or starve later subscribers. Without this, raw EventEmitter.emit
+    // propagates the throw to the caller and skips every listener registered
+    // after the one that threw — e.g. a webhook subscriber registered after
+    // PM auto-review would silently never fire. (async subscribers own their
+    // own rejection handling — emit only guards synchronous throws.)
+    for (const listener of emitter.listeners('event')) {
+      try {
+        listener(event);
+      } catch {
+        /* a misbehaving subscriber cannot break the bus */
+      }
+    }
   }
 
   function subscribe(callback) {

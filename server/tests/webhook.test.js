@@ -377,3 +377,15 @@ test('webhook: createApp uses options.webhookUrl before env and shutdown stops s
   await flush();
   assert.equal(posts.length, 1);
 });
+
+test('eventBus emit isolates a throwing subscriber so later subscribers still fire', () => {
+  // webhook reliability depends on this: a webhook subscriber registered
+  // AFTER a misbehaving one (e.g. PM auto-review) must still receive events.
+  const bus = createEventBus();
+  const seen = [];
+  bus.subscribe(() => { throw new Error('boom from an earlier subscriber'); });
+  bus.subscribe((event) => { seen.push(event.channel); });
+
+  assert.doesNotThrow(() => bus.emit('run:ended', { to_status: 'failed' }));
+  assert.deepEqual(seen, ['run:ended'], 'later subscriber fires despite earlier throw');
+});
