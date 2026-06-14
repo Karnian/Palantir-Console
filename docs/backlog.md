@@ -60,6 +60,15 @@
   claimQueuedRun CAS, retry=새 attempt run(harvest 독립), countRunning worker-only(manager starvation fix),
   boot drain. 1007 tests (+12). Codex spec r1 (BLOCKER 1) + impl 교차리뷰 (SERIOUS 2: manager-count
   starvation / started_at 가드) 반영.
+- **PR #191** 통합 교차리뷰 fix — 오늘 5 phase(P0~B-lite) 가 함께 작동할 때의 상호작용 결함 (개별 PR
+  리뷰에서 안 보임). Codex 통합 리뷰 SERIOUS 4: boot drain × spawn guard 테스트 변질(NODE_TEST_CONTEXT
+  skip + forceBootDrain), queued_args parse fail-closed(+ corrupt retry 차단 setRetryCount), PM breaker
+  count race(reserve-then-send), 자동 retry × PM review 이중(advisory + T5). 1009 tests.
+- **PR #192** C webhook 알림 — `PALANTIR_WEBHOOK_URL` 설정 시 run:needs_input + run:ended(failed) 외부
+  POST 통지 (부재중, 탭 무관). SSRF-safe (assertSafeUrl {allowPrivate} 옵션화 + pinned IP POST),
+  화이트리스트 payload, never-throws. **eventBus.emit 구독자별 격리** (Q4 — 앞 구독자 throw 시 webhook
+  미발화 취약점 해소, 전 구독자 보호). 1027 tests (+18). spec `docs/specs/c-webhook-notify-brief.md` r2.
+  Codex spec r1 (BLOCKER 2) + impl 교차리뷰 (Q4) + 최종 PASS.
 - **워크플로 전환**: 본 시리즈부터 Codex 가 구현, Claude 가 brief 작성·리뷰·보강 (감독 모드).
   spec r1 → Codex cross-review (BLOCKER 검출) → r2 lock-in → Codex 구현 → Claude 리뷰 → Codex 교차리뷰.
 - **H-2 후보 (deferred, T3)**: PR 자동 생성/push, branch 자동 머지, diff patch body 표시 —
