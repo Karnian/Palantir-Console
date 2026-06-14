@@ -12,13 +12,40 @@ const { createTaskService } = require('../services/taskService');
 const { createProjectService } = require('../services/projectService');
 const { createAgentProfileService } = require('../services/agentProfileService');
 const { createWorktreeService } = require('../services/worktreeService');
-const { createHarvestService, buildHarvestEnv } = require('../services/harvestService');
+const {
+  createHarvestService,
+  buildHarvestEnv,
+  defaultNodeResolver,
+  resolveDeclaredNodeMajor,
+  resolveProjectNode,
+  SERVER_NODE_MAJOR,
+  MAX_DECL_BYTES,
+} = require('../services/harvestService');
 const { createLifecycleService } = require('../services/lifecycleService');
 const { createEventBus } = require('../services/eventBus');
 const { createPmAutoReview } = require('../app');
 
 const fakeRunner = path.join(__dirname, 'fixtures', 'bin', 'fake-test-runner.js');
 const injectedTestRunner = { bin: process.execPath, args: [fakeRunner] };
+const PROJECT_NODE_MAJOR = SERVER_NODE_MAJOR === 20 ? 22 : 20;
+
+function makeTempDir(t, prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  t.after(() => {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+  return dir;
+}
+
+function makeFakeNodeBin(t, prefix = 'palantir-node-bin-') {
+  const root = makeTempDir(t, prefix);
+  const binDir = path.join(root, 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+  const nodePath = path.join(binDir, 'node');
+  fs.writeFileSync(nodePath, '#!/bin/sh\nexit 0\n');
+  fs.chmodSync(nodePath, 0o755);
+  return binDir;
+}
 
 async function mkdb(t) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'palantir-harvest-db-'));
@@ -80,7 +107,10 @@ async function waitFor(predicate, { timeoutMs = 3000, intervalMs = 20 } = {}) {
   assert.ok(predicate(), 'condition was not met before timeout');
 }
 
-function makeServices(db, { eventBus = null, worktreeService = createWorktreeService() } = {}) {
+function makeServices(
+  db,
+  { eventBus = null, worktreeService = createWorktreeService(), nodeResolver = undefined } = {}
+) {
   const runService = createRunService(db, eventBus);
   const taskService = createTaskService(db);
   const projectService = createProjectService(db);
@@ -91,6 +121,7 @@ function makeServices(db, { eventBus = null, worktreeService = createWorktreeSer
     projectService,
     eventBus,
     testRunner: injectedTestRunner,
+    nodeResolver,
   });
   return { runService, taskService, projectService, agentProfileService, worktreeService, harvestService };
 }
@@ -255,6 +286,199 @@ test('buildHarvestEnv PATH resolves `node` to the server node', () => {
   assert.equal(resolved, fs.realpathSync(process.execPath));
 });
 
+test('resolveProjectNode uses a declared .nvmrc single major when resolver finds it', (t) => {
+  const worktreePath = makeTempDir(t, 'palantir-node-nvmrc-');
+  const binDir = makeFakeNodeBin(t);
+  fs.writeFileSync(path.join(worktreePath, '.nvmrc'), `v${PROJECT_NODE_MAJOR}.1.0\n`);
+
+  const seen = [];
+  const resolved = resolveProjectNode(worktreePath, (major) => {
+    seen.push(major);
+    return major === PROJECT_NODE_MAJOR ? binDir : null;
+  });
+
+  assert.equal(resolveDeclaredNodeMajor(worktreePath), PROJECT_NODE_MAJOR);
+  assert.deepEqual(seen, [PROJECT_NODE_MAJOR]);
+  assert.deepEqual(resolved, {
+    binDir,
+    major: PROJECT_NODE_MAJOR,
+    source: 'project',
+  });
+});
+
+test('resolveDeclaredNodeMajor parses exact, caret, and tilde engines single-major declarations', (t) => {
+  for (const spec of [
+    `${PROJECT_NODE_MAJOR}`,
+    `v${PROJECT_NODE_MAJOR}.1.0`,
+    `${PROJECT_NODE_MAJOR}.x`,
+    `^${PROJECT_NODE_MAJOR}`,
+    `~v${PROJECT_NODE_MAJOR}.1`,
+  ]) {
+    const worktreePath = makeTempDir(t, 'palantir-node-engines-');
+    fs.writeFileSync(path.join(worktreePath, 'package.json'), JSON.stringify({
+      engines: { node: spec },
+    }));
+
+    assert.equal(resolveDeclaredNodeMajor(worktreePath), PROJECT_NODE_MAJOR, spec);
+  }
+});
+
+test('resolveProjectNode keeps server node when declaration matches server major', (t) => {
+  const worktreePath = makeTempDir(t, 'palantir-node-server-major-');
+  fs.writeFileSync(path.join(worktreePath, '.nvmrc'), `${SERVER_NODE_MAJOR}\n`);
+  let called = false;
+
+  const resolved = resolveProjectNode(worktreePath, () => {
+    called = true;
+    throw new Error('resolver should not be called for server major');
+  });
+
+  assert.equal(called, false);
+  assert.deepEqual(resolved, {
+    binDir: null,
+    major: SERVER_NODE_MAJOR,
+    source: 'server',
+  });
+});
+
+test('resolveProjectNode treats range and dirty declarations as server node', (t) => {
+  const cases = [
+    { name: 'foo22 nvmrc', nvmrc: 'foo22\n' },
+    { name: 'lts nvmrc', nvmrc: 'lts/*\n' },
+    { name: 'range engines', engines: `>=${PROJECT_NODE_MAJOR} <${SERVER_NODE_MAJOR + 1}` },
+    { name: 'compound engines', engines: `${PROJECT_NODE_MAJOR} || ${SERVER_NODE_MAJOR}` },
+    { name: 'hyphen range engines', engines: `${PROJECT_NODE_MAJOR} - ${SERVER_NODE_MAJOR}` },
+  ];
+
+  for (const item of cases) {
+    const worktreePath = makeTempDir(t, 'palantir-node-dirty-');
+    if (item.nvmrc) {
+      fs.writeFileSync(path.join(worktreePath, '.nvmrc'), item.nvmrc);
+    } else {
+      fs.writeFileSync(path.join(worktreePath, 'package.json'), JSON.stringify({
+        engines: { node: item.engines },
+      }));
+    }
+    let called = false;
+    const resolved = resolveProjectNode(worktreePath, () => {
+      called = true;
+      throw new Error('ambiguous declarations should not call resolver');
+    });
+
+    assert.equal(resolveDeclaredNodeMajor(worktreePath), null, item.name);
+    assert.equal(called, false, item.name);
+    assert.deepEqual(resolved, {
+      binDir: null,
+      major: SERVER_NODE_MAJOR,
+      source: 'server',
+    }, item.name);
+  }
+});
+
+test('resolveProjectNode falls back to server node when declared node is not installed', (t) => {
+  const worktreePath = makeTempDir(t, 'palantir-node-fallback-');
+  fs.writeFileSync(path.join(worktreePath, '.nvmrc'), `${PROJECT_NODE_MAJOR}\n`);
+
+  assert.deepEqual(resolveProjectNode(worktreePath, () => null), {
+    binDir: null,
+    major: PROJECT_NODE_MAJOR,
+    source: 'fallback',
+  });
+});
+
+test('resolveProjectNode keeps server node when no declaration exists', (t) => {
+  const worktreePath = makeTempDir(t, 'palantir-node-none-');
+  let called = false;
+
+  const resolved = resolveProjectNode(worktreePath, () => {
+    called = true;
+    return makeFakeNodeBin(t);
+  });
+
+  assert.equal(called, false);
+  assert.deepEqual(resolved, {
+    binDir: null,
+    major: SERVER_NODE_MAJOR,
+    source: 'server',
+  });
+});
+
+test('resolveProjectNode never throws on parse, size, symlink, and resolver failures', (t) => {
+  const malformed = makeTempDir(t, 'palantir-node-malformed-');
+  fs.writeFileSync(path.join(malformed, 'package.json'), '{"engines":');
+  assert.doesNotThrow(() => resolveDeclaredNodeMajor(malformed));
+  assert.equal(resolveDeclaredNodeMajor(malformed), null);
+  assert.equal(resolveProjectNode(malformed).source, 'server');
+
+  const huge = makeTempDir(t, 'palantir-node-huge-');
+  fs.writeFileSync(path.join(huge, '.nvmrc'), '2'.repeat(MAX_DECL_BYTES + 1));
+  assert.doesNotThrow(() => resolveDeclaredNodeMajor(huge));
+  assert.equal(resolveDeclaredNodeMajor(huge), null);
+  assert.equal(resolveProjectNode(huge).source, 'server');
+
+  const symlinked = makeTempDir(t, 'palantir-node-symlink-');
+  const target = path.join(symlinked, 'target-nvmrc');
+  fs.writeFileSync(target, `${PROJECT_NODE_MAJOR}\n`);
+  fs.symlinkSync(target, path.join(symlinked, '.nvmrc'));
+  assert.doesNotThrow(() => resolveDeclaredNodeMajor(symlinked));
+  assert.equal(resolveDeclaredNodeMajor(symlinked), null);
+  assert.equal(resolveProjectNode(symlinked).source, 'server');
+
+  const resolverThrow = makeTempDir(t, 'palantir-node-resolver-throw-');
+  fs.writeFileSync(path.join(resolverThrow, '.nvmrc'), `${PROJECT_NODE_MAJOR}\n`);
+  assert.doesNotThrow(() => resolveProjectNode(resolverThrow, () => {
+    throw new Error('resolver failed');
+  }));
+  assert.deepEqual(resolveProjectNode(resolverThrow, () => {
+    throw new Error('resolver failed');
+  }), {
+    binDir: null,
+    major: SERVER_NODE_MAJOR,
+    source: 'server',
+  });
+});
+
+test('defaultNodeResolver honors PALANTIR_NODE_PREFIX and restores env', (t) => {
+  const prefix = makeTempDir(t, 'palantir-node-prefix-');
+  const binDir = path.join(prefix, `node@${PROJECT_NODE_MAJOR}`, 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(path.join(binDir, 'node'), '#!/bin/sh\nexit 0\n');
+  fs.chmodSync(path.join(binDir, 'node'), 0o755);
+  const previous = process.env.PALANTIR_NODE_PREFIX;
+  process.env.PALANTIR_NODE_PREFIX = prefix;
+  try {
+    assert.equal(defaultNodeResolver(PROJECT_NODE_MAJOR), binDir);
+    assert.equal(defaultNodeResolver(SERVER_NODE_MAJOR + PROJECT_NODE_MAJOR + 1000), null);
+  } finally {
+    if (previous === undefined) delete process.env.PALANTIR_NODE_PREFIX;
+    else process.env.PALANTIR_NODE_PREFIX = previous;
+  }
+});
+
+test('buildHarvestEnv prefixes PATH with project node bin when resolver finds declared node', (t) => {
+  const worktreePath = makeTempDir(t, 'palantir-node-env-');
+  const binDir = makeFakeNodeBin(t);
+  fs.writeFileSync(path.join(worktreePath, '.nvmrc'), `${PROJECT_NODE_MAJOR}\n`);
+
+  const env = buildHarvestEnv(worktreePath, (major) => (
+    major === PROJECT_NODE_MAJOR ? binDir : null
+  ));
+  const [firstPathEntry] = env.PATH.split(path.delimiter);
+  assert.equal(firstPathEntry, binDir);
+
+  let resolved = null;
+  for (const dir of env.PATH.split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, 'node');
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      resolved = fs.realpathSync(candidate);
+      break;
+    } catch { /* keep walking PATH */ }
+  }
+  assert.equal(resolved, fs.realpathSync(path.join(binDir, 'node')));
+});
+
 test('harvestRun emits run:harvested once with diff and test summary for completed worktree runs', async (t) => {
   const db = await mkdb(t);
   const repoDir = makeRepo(t);
@@ -286,6 +510,9 @@ test('harvestRun emits run:harvested once with diff and test summary for complet
   assert.match(payload.summary.test.output_tail, /fake-test-runner pass/);
   assert.ok(payload.summary.test.output_tail.length <= 500);
   assert.deepEqual(payload.summary.errors, []);
+  const testPayload = parseEvent(eventsOf(services.runService, run.id, 'harvest:test')[0]);
+  assert.equal(testPayload.node_major, SERVER_NODE_MAJOR);
+  assert.equal(testPayload.node_source, 'server');
 });
 
 test('harvestRun emits harvested=false once when worktree metadata is absent', async (t) => {
@@ -477,6 +704,54 @@ test('harvestRun does not commit files created by the test command', async (t) =
   });
   assert.match(tree, /agent-output\.txt/);
   assert.doesNotMatch(tree, /test-artifact\.txt/, 'test artifact is discarded instead of committed');
+});
+
+test('harvestRun records project node payload when resolver finds declared node', async (t) => {
+  const db = await mkdb(t);
+  const repoDir = makeRepo(t);
+  const binDir = makeFakeNodeBin(t);
+  const services = makeServices(db, {
+    nodeResolver: (major) => (major === PROJECT_NODE_MAJOR ? binDir : null),
+  });
+  const { run, worktreePath } = createRunInWorktree({
+    db,
+    repoDir,
+    testCommand: 'pass',
+    ...services,
+  });
+  fs.writeFileSync(path.join(worktreePath, '.nvmrc'), `${PROJECT_NODE_MAJOR}\n`);
+  fs.writeFileSync(path.join(worktreePath, 'agent-output.txt'), 'agent work\n');
+  const completed = services.runService.updateRunStatus(run.id, 'completed', { force: true });
+
+  await services.harvestService.harvestRun(completed, { projectDir: repoDir });
+
+  const testPayload = parseEvent(eventsOf(services.runService, run.id, 'harvest:test')[0]);
+  assert.equal(testPayload.node_major, PROJECT_NODE_MAJOR);
+  assert.equal(testPayload.node_source, 'project');
+  assert.equal(eventsOf(services.runService, run.id, 'harvest:error').length, 0);
+});
+
+test('harvestRun records fallback node payload and node_unresolved warning', async (t) => {
+  const db = await mkdb(t);
+  const repoDir = makeRepo(t);
+  const services = makeServices(db, { nodeResolver: () => null });
+  const { run, worktreePath } = createRunInWorktree({
+    db,
+    repoDir,
+    testCommand: 'pass',
+    ...services,
+  });
+  fs.writeFileSync(path.join(worktreePath, '.nvmrc'), `${PROJECT_NODE_MAJOR}\n`);
+  fs.writeFileSync(path.join(worktreePath, 'agent-output.txt'), 'agent work\n');
+  const completed = services.runService.updateRunStatus(run.id, 'completed', { force: true });
+
+  await services.harvestService.harvestRun(completed, { projectDir: repoDir });
+
+  const testPayload = parseEvent(eventsOf(services.runService, run.id, 'harvest:test')[0]);
+  assert.equal(testPayload.node_major, PROJECT_NODE_MAJOR);
+  assert.equal(testPayload.node_source, 'fallback');
+  const errorStages = eventsOf(services.runService, run.id, 'harvest:error').map(evt => parseEvent(evt).stage);
+  assert.ok(errorStages.includes('node_unresolved'));
 });
 
 test('harvestRun is deduped per run and by existing DB harvest events', async (t) => {

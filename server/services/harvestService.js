@@ -10,6 +10,8 @@ const MAX_SUMMARY_OUTPUT_TAIL_CHARS = 500;
 const MAX_FILES = 500;
 const MAX_COMMITS = 50;
 const DEFAULT_TEST_TIMEOUT_MS = 300_000;
+const SERVER_NODE_MAJOR = Number.parseInt(process.versions.node, 10);
+const MAX_DECL_BYTES = 1024 * 1024;
 
 function tailString(value, maxChars) {
   const text = String(value || '');
@@ -34,20 +36,101 @@ function testTimeoutMs() {
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TEST_TIMEOUT_MS;
 }
 
-function buildHarvestEnv() {
-  // Run test_command with the SAME node that launched the console server.
-  // The server only boots if its node's ABI matches the project's native
-  // modules (better-sqlite3), so reusing it keeps `npm test`/`node` ABI-
-  // consistent. A bare `/opt/homebrew/bin` prepend (the original bug, found
-  // via dogfooding) would instead pick the system node (e.g. v26) and break
-  // a node@22-built node_modules with a NODE_MODULE_VERSION mismatch.
-  //
-  // Limitation: a multi-project hub whose worker project requires a *different*
-  // node than the server still needs per-project node resolution (.nvmrc / fnm).
-  // That is deliberately out of scope — see backlog. Bare-command tools
-  // (python/pytest/make) are unaffected since they don't live in node's bin dir.
+function parsePositiveMajor(value) {
+  const major = Number.parseInt(value, 10);
+  return Number.isSafeInteger(major) && major > 0 ? major : null;
+}
+
+function readSmallDeclarationFile(filePath) {
+  try {
+    const stat = fs.lstatSync(filePath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_DECL_BYTES) {
+      return { exists: true, text: null };
+    }
+    return { exists: true, text: fs.readFileSync(filePath, 'utf8') };
+  } catch (err) {
+    if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') {
+      return { exists: false, text: null };
+    }
+    return { exists: true, text: null };
+  }
+}
+
+function parseNvmrcMajor(value) {
+  const match = String(value || '').trim().match(/^v?(\d+)(?:\.\d+){0,2}$/);
+  return match ? parsePositiveMajor(match[1]) : null;
+}
+
+function parseEnginesNodeMajor(value) {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text || /\s/.test(text) || /[<>]/.test(text) || text.includes('||') || text.includes(' - ')) {
+    return null;
+  }
+  const match = text.match(/^(?:[\^~])?v?(\d+)(?:\.(?:\d+|x)){0,2}$/);
+  return match ? parsePositiveMajor(match[1]) : null;
+}
+
+function resolveDeclaredNodeMajor(worktreePath) {
+  try {
+    if (!worktreePath) return null;
+
+    const nvmrc = readSmallDeclarationFile(path.join(worktreePath, '.nvmrc'));
+    if (nvmrc.exists) {
+      return nvmrc.text == null ? null : parseNvmrcMajor(nvmrc.text);
+    }
+
+    const pkg = readSmallDeclarationFile(path.join(worktreePath, 'package.json'));
+    if (!pkg.exists || pkg.text == null) return null;
+    try {
+      const parsed = JSON.parse(pkg.text);
+      return parseEnginesNodeMajor(parsed?.engines?.node);
+    } catch {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+}
+
+function defaultNodeResolver(major) {
+  try {
+    const parsedMajor = parsePositiveMajor(major);
+    if (parsedMajor == null) return null;
+    const prefix = process.env.PALANTIR_NODE_PREFIX || '/opt/homebrew/opt';
+    const binDir = path.join(prefix, `node@${parsedMajor}`, 'bin');
+    fs.accessSync(path.join(binDir, 'node'), fs.constants.X_OK);
+    return binDir;
+  } catch {
+    return null;
+  }
+}
+
+function resolveProjectNode(worktreePath, nodeResolver = defaultNodeResolver) {
+  try {
+    const declared = resolveDeclaredNodeMajor(worktreePath);
+    if (declared == null) {
+      return { binDir: null, major: SERVER_NODE_MAJOR, source: 'server' };
+    }
+    if (declared === SERVER_NODE_MAJOR) {
+      return { binDir: null, major: declared, source: 'server' };
+    }
+    const binDir = nodeResolver(declared);
+    if (typeof binDir === 'string' && binDir) {
+      return { binDir, major: declared, source: 'project' };
+    }
+    return { binDir: null, major: declared, source: 'fallback' };
+  } catch {
+    return { binDir: null, major: SERVER_NODE_MAJOR, source: 'server' };
+  }
+}
+
+function buildHarvestEnvFromNode(projectNode) {
+  // Prefer the server node unless a project declares a clear, different major
+  // and the configured resolver can locate that node. Keeping the server node
+  // for missing/range/same-major declarations preserves PR #188's ABI fix.
   const extraPaths = [
-    path.dirname(process.execPath),
+    projectNode?.binDir || path.dirname(process.execPath),
     '/opt/homebrew/bin',
     '/opt/homebrew/sbin',
     '/usr/local/bin',
@@ -61,11 +144,19 @@ function buildHarvestEnv() {
   return env;
 }
 
-function runTestCommand({ command, cwd, testRunner }) {
+function buildHarvestEnv(worktreePath, nodeResolver = defaultNodeResolver) {
+  const projectNode = worktreePath
+    ? resolveProjectNode(worktreePath, nodeResolver)
+    : { binDir: null, major: SERVER_NODE_MAJOR, source: 'server' };
+  return buildHarvestEnvFromNode(projectNode);
+}
+
+function runTestCommand({ command, cwd, testRunner, nodeResolver = defaultNodeResolver }) {
   return new Promise((resolve, reject) => {
     const started = Date.now();
     const timeoutMs = testTimeoutMs();
     const args = [...(testRunner.args || []), command];
+    const projectNode = resolveProjectNode(cwd, nodeResolver);
     assertSpawnAllowed({ command: testRunner.bin, source: 'harvestService:test' });
 
     let output = '';
@@ -73,7 +164,7 @@ function runTestCommand({ command, cwd, testRunner }) {
     let settled = false;
     const child = spawn(testRunner.bin, args, {
       cwd,
-      env: buildHarvestEnv(),
+      env: buildHarvestEnvFromNode(projectNode),
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: false,
     });
@@ -108,6 +199,8 @@ function runTestCommand({ command, cwd, testRunner }) {
         timed_out: timedOut,
         duration_ms: Date.now() - started,
         output_tail: outputTail,
+        node_major: projectNode.major,
+        node_source: projectNode.source,
       });
     });
   });
@@ -119,6 +212,7 @@ function createHarvestService({
   projectService,
   eventBus,
   testRunner = { bin: '/bin/sh', args: ['-c'] },
+  nodeResolver = defaultNodeResolver,
 } = {}) {
   const seenRunIds = new Set();
 
@@ -311,8 +405,17 @@ function createHarvestService({
             command,
             cwd: run.worktree_path,
             testRunner,
+            nodeResolver,
           });
           addEvent(run.id, 'harvest:test', result);
+          if (result.node_source === 'fallback') {
+            addError(
+              run.id,
+              'node_unresolved',
+              new Error(`Declared node@${result.node_major} was not found; used server node`)
+            );
+            pushSummaryError(summary, 'node_unresolved');
+          }
           summary.test = {
             passed: result.passed,
             timed_out: result.timed_out,
@@ -350,4 +453,10 @@ module.exports = {
   createHarvestService,
   stripControlChars,
   buildHarvestEnv,
+  defaultNodeResolver,
+  resolveDeclaredNodeMajor,
+  resolveProjectNode,
+  runTestCommand,
+  SERVER_NODE_MAJOR,
+  MAX_DECL_BYTES,
 };
