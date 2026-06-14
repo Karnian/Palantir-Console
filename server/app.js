@@ -31,6 +31,7 @@ const { createStreamJsonEngine } = require('./services/streamJsonEngine');
 const { createManagerAdapterFactory } = require('./services/managerAdapters');
 const { createWorktreeService } = require('./services/worktreeService');
 const { createHarvestService } = require('./services/harvestService');
+const { createWebhookService } = require('./services/webhookService');
 const { createLifecycleService } = require('./services/lifecycleService');
 const { createAuthMiddleware } = require('./middleware/auth');
 const { errorHandler } = require('./middleware/errorHandler');
@@ -285,6 +286,15 @@ function createApp(options = {}) {
     eventBus,
     testRunner: options.harvestTestRunner,
   });
+  const webhookService = createWebhookService({
+    eventBus,
+    runService,
+    webhookUrl: options.webhookUrl || process.env.PALANTIR_WEBHOOK_URL,
+    allowPrivate: options.webhookAllowPrivate ?? (process.env.PALANTIR_WEBHOOK_ALLOW_PRIVATE === '1'),
+    postImpl: options.webhookPostImpl,
+    now: options.webhookNow,
+    logger: options.webhookLogger,
+  });
   const lifecycleService = createLifecycleService({
     runService, taskService, agentProfileService, projectService,
     executionEngine, streamJsonEngine, worktreeService, harvestService, eventBus,
@@ -493,7 +503,9 @@ function createApp(options = {}) {
     agentProfileService,
     lifecycleService,
     harvestService,
+    webhookService,
     worktreeService,
+    eventBus,
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at
     // (createRun() always stamps status='queued' and cost_usd=0 at now).
@@ -512,9 +524,11 @@ function createApp(options = {}) {
     // Order matters:
     //   1) manager dispose — uses runService + eventBus, so must
     //      happen BEFORE closeDb() severs the sqlite handle,
-    //   2) lifecycleService.stopMonitoring() — cancels the health
+    //   2) webhookService.stop() — removes eventBus subscribers before
+    //      the db-backed run event writer disappears,
+    //   3) lifecycleService.stopMonitoring() — cancels the health
     //      loop that might otherwise try to act on a closed db,
-    //   3) closeDb().
+    //   4) closeDb().
     //
     // Dispose failures are logged but do NOT re-throw; shutdown is
     // best-effort and a partial cleanup is still better than leaving
@@ -539,6 +553,7 @@ function createApp(options = {}) {
     } catch (err) {
       console.warn('[app.shutdown] manager dispose sweep failed:', err && err.message);
     }
+    try { webhookService.stop(); } catch { /* ignore */ }
     lifecycleService.stopMonitoring();
     closeDb();
   };

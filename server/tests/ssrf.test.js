@@ -282,6 +282,39 @@ test('assertSafeUrl: rejects metadata IP 169.254.169.254', async () => {
   );
 });
 
+test('assertSafeUrl: allowPrivate permits private IP literal and still returns pinned IP', async () => {
+  const r = await assertSafeUrl('http://10.0.0.1:4100/mcp', { allowPrivate: true });
+  assert.equal(r.ip, '10.0.0.1');
+  assert.equal(r.family, 4);
+  assert.equal(r.hostname, '10.0.0.1');
+  assert.equal(r.port, '4100');
+});
+
+test('assertSafeUrl: allowPrivate permits private DNS result and keeps pinning', async () => {
+  const dns = require('node:dns').promises;
+  const originalLookup = dns.lookup;
+  dns.lookup = async () => [{ address: '10.1.2.3', family: 4 }];
+  try {
+    await assert.rejects(
+      () => assertSafeUrl('http://private.example.test/mcp'),
+      (err) => err.status === 400 && /SSRF policy/.test(err.message),
+    );
+    const r = await assertSafeUrl('http://private.example.test/mcp', { allowPrivate: true });
+    assert.equal(r.ip, '10.1.2.3');
+    assert.equal(r.family, 4);
+    assert.equal(r.hostname, 'private.example.test');
+  } finally {
+    dns.lookup = originalLookup;
+  }
+});
+
+test('assertSafeUrl: allowPrivate does not bypass hostname hard-deny', async () => {
+  await assert.rejects(
+    () => assertSafeUrl('http://metadata.google.internal/mcp', { allowPrivate: true }),
+    (err) => err.status === 400 && /Hostname blocked/.test(err.message),
+  );
+});
+
 test('assertSafeUrl: rejects file:// scheme', async () => {
   await assert.rejects(
     () => assertSafeUrl('file:///tmp/mcp'),

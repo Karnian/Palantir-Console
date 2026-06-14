@@ -365,9 +365,14 @@ function mcpUrlError(message, code) {
  *     allow). Set to '0' to lock down.
  *   - Suffix matches like `foo.localhost` are NOT allowed — exact match only.
  *
+ * allowPrivate:
+ *   - skips only the private/blocked IP check for IP literals and DNS
+ *     results. URL validation, hostname hard-denies, DNS resolution, and
+ *     pinned IP return are unchanged.
+ *
  * Caller MUST `await` — losing the await silently makes validation a no-op.
  */
-async function assertSafeUrl(rawUrl) {
+async function assertSafeUrl(rawUrl, { allowPrivate = false } = {}) {
   if (typeof rawUrl !== 'string' || !rawUrl.trim()) {
     throw mcpUrlError('URL required', 'mcp_url_required');
   }
@@ -402,7 +407,7 @@ async function assertSafeUrl(rawUrl) {
   // IP literal short-circuit — no DNS lookup needed.
   if (net.isIP(hostname)) {
     const family = net.isIPv6(hostname) ? 6 : 4;
-    if (!isAllowlist && isBlockedIP(hostname, family)) {
+    if (!allowPrivate && !isAllowlist && isBlockedIP(hostname, family)) {
       throw mcpUrlError(`IP blocked by SSRF policy: ${hostname}`, 'mcp_url_blocked');
     }
     return {
@@ -436,7 +441,7 @@ async function assertSafeUrl(rawUrl) {
   // resolved to 127.0.0.1/::1 anyway, which the IP block would catch
   // without the exemption.
   for (const r of records) {
-    if (!isAllowlist && isBlockedIP(r.address, r.family)) {
+    if (!allowPrivate && !isAllowlist && isBlockedIP(r.address, r.family)) {
       throw mcpUrlError(`IP blocked by SSRF policy: ${r.address}`, 'mcp_url_blocked');
     }
   }
