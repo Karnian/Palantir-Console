@@ -347,6 +347,7 @@ test('resolveProjectNode treats range and dirty declarations as server node', (t
     { name: 'lts nvmrc', nvmrc: 'lts/*\n' },
     { name: 'range engines', engines: `>=${PROJECT_NODE_MAJOR} <${SERVER_NODE_MAJOR + 1}` },
     { name: 'compound engines', engines: `${PROJECT_NODE_MAJOR} || ${SERVER_NODE_MAJOR}` },
+    { name: 'hyphen range engines', engines: `${PROJECT_NODE_MAJOR} - ${SERVER_NODE_MAJOR}` },
   ];
 
   for (const item of cases) {
