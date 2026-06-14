@@ -186,13 +186,35 @@ function createRunWithMissingProjectDir({ db, runService, taskService, projectSe
   return { project, task, profile, run: running, worktreePath: wt.path, branch: wt.branch };
 }
 
-function makeAutoReviewHarness({ activeRunId = 'run_pm_1', throwOnSend = false, defer = (fn) => fn() } = {}) {
+function makeAutoReviewHarness({
+  activeRunId = 'run_pm_1',
+  throwOnSend = false,
+  defer = (fn) => fn(),
+  runServiceRuns = [],
+  listRunsImpl = null,
+  addRunEventImpl = null,
+  injectRunService = true,
+} = {}) {
   const eventBus = createEventBus();
   const sent = [];
+  const runEvents = [];
+  const listRunsCalls = [];
   const warnings = [];
   const slotClearedCallbacks = [];
   let currentActiveRunId = activeRunId;
   let shouldThrow = throwOnSend;
+  const fakeRunService = {
+    listRuns(query) {
+      listRunsCalls.push(query);
+      if (listRunsImpl) return listRunsImpl(query);
+      return runServiceRuns;
+    },
+    addRunEvent(runId, eventType, payloadJson) {
+      if (addRunEventImpl) return addRunEventImpl(runId, eventType, payloadJson);
+      runEvents.push({ runId, eventType, payloadJson });
+      return runEvents.length;
+    },
+  };
   const managerRegistry = {
     getActiveRunId(slot) {
       return slot === 'pm:proj_1' ? currentActiveRunId : null;
@@ -208,19 +230,24 @@ function makeAutoReviewHarness({ activeRunId = 'run_pm_1', throwOnSend = false, 
       sent.push({ slot, message });
     },
   };
-  const controller = createPmAutoReview({
+  const pmAutoReviewOptions = {
     eventBus,
     managerRegistry,
     conversationService,
     defer,
     logger: { warn: (msg) => warnings.push(String(msg)) },
-  });
+  };
+  if (injectRunService) pmAutoReviewOptions.runService = fakeRunService;
+  const controller = createPmAutoReview(pmAutoReviewOptions);
   return {
     eventBus,
     sent,
+    runEvents,
+    listRunsCalls,
     warnings,
     slotClearedCallbacks,
     controller,
+    runService: injectRunService ? fakeRunService : null,
     setActiveRunId(value) { currentActiveRunId = value; },
     setThrowOnSend(value) { shouldThrow = value; },
   };
@@ -234,6 +261,7 @@ function reviewRun(overrides = {}) {
     task_id: 'task_1',
     status: 'completed',
     exit_code: 0,
+    retry_count: 0,
     result_summary: 'worker done',
     ...overrides,
   };
@@ -1030,6 +1058,144 @@ test('PM auto-review ignores run:completed so review is single-triggered by run:
   });
 
   assert.equal(harness.sent.length, 0);
+});
+
+test('PM auto-review suppresses failed run while higher retry attempt is active', () => {
+  const failed = reviewRun({ status: 'failed', retry_count: 0 });
+  const harness = makeAutoReviewHarness({
+    runServiceRuns: [
+      reviewRun({ id: 'run_retry_1', status: 'queued', retry_count: 1 }),
+    ],
+  });
+
+  harness.eventBus.emit('run:harvested', {
+    run: failed,
+    summary: harvestedSummary(),
+  });
+
+  assert.deepEqual(harness.listRunsCalls, [{ task_id: 'task_1' }]);
+  assert.equal(harness.sent.length, 0);
+  assert.equal(harness.controller.autoReviewCounts.get('proj_1:task_1') || 0, 0);
+  assert.equal(harness.runEvents.length, 1);
+  assert.deepEqual(harness.runEvents[0], {
+    runId: failed.id,
+    eventType: 'pm_review:suppressed',
+    payloadJson: JSON.stringify({ reason: 'retry_pending' }),
+  });
+});
+
+test('PM auto-review sends final retry failure when no higher retry attempt is active', () => {
+  const harness = makeAutoReviewHarness();
+
+  harness.eventBus.emit('run:harvested', {
+    run: reviewRun({ status: 'failed', retry_count: 1 }),
+    summary: harvestedSummary(),
+  });
+
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.runEvents.length, 0);
+  assert.equal(harness.controller.autoReviewCounts.get('proj_1:task_1'), 1);
+  assert.match(harness.sent[0].message.text, /status: failed/);
+});
+
+test('PM auto-review sends completed run even when higher retry attempt is active', () => {
+  const harness = makeAutoReviewHarness({
+    runServiceRuns: [
+      reviewRun({ id: 'run_retry_1', status: 'running', retry_count: 1 }),
+    ],
+  });
+
+  harness.eventBus.emit('run:harvested', {
+    run: reviewRun({ status: 'completed', retry_count: 0 }),
+    summary: harvestedSummary(),
+  });
+
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.runEvents.length, 0);
+  assert.equal(harness.listRunsCalls.length, 0);
+});
+
+test('PM auto-review sends failed run for same retry_count active attempt', () => {
+  const harness = makeAutoReviewHarness({
+    runServiceRuns: [
+      reviewRun({ id: 'run_peer_same_retry', status: 'running', retry_count: 0 }),
+    ],
+  });
+
+  harness.eventBus.emit('run:harvested', {
+    run: reviewRun({ status: 'failed', retry_count: 0 }),
+    summary: harvestedSummary(),
+  });
+
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.runEvents.length, 0);
+  assert.equal(harness.controller.autoReviewCounts.get('proj_1:task_1'), 1);
+});
+
+test('PM auto-review sends failed run when no active retry attempt exists', () => {
+  const harness = makeAutoReviewHarness({
+    runServiceRuns: [
+      reviewRun({ id: 'run_old_completed', status: 'completed', retry_count: 1 }),
+    ],
+  });
+
+  harness.eventBus.emit('run:harvested', {
+    run: reviewRun({ status: 'failed', retry_count: 0 }),
+    summary: harvestedSummary(),
+  });
+
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.runEvents.length, 0);
+});
+
+test('PM auto-review sends failed run when listRuns throws', () => {
+  const harness = makeAutoReviewHarness({
+    listRunsImpl() {
+      throw new Error('list failed');
+    },
+  });
+
+  harness.eventBus.emit('run:harvested', {
+    run: reviewRun({ status: 'failed', retry_count: 0 }),
+    summary: harvestedSummary(),
+  });
+
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.runEvents.length, 0);
+  assert.equal(harness.controller.autoReviewCounts.get('proj_1:task_1'), 1);
+});
+
+test('PM auto-review keeps suppression when suppressed event recording throws', () => {
+  const failed = reviewRun({ status: 'failed', retry_count: 0 });
+  const harness = makeAutoReviewHarness({
+    runServiceRuns: [
+      reviewRun({ id: 'run_retry_1', status: 'queued', retry_count: 1 }),
+    ],
+    addRunEventImpl() {
+      throw new Error('event write failed');
+    },
+  });
+
+  const accepted = harness.controller.sendPmReview({
+    run: failed,
+    harvestSummary: harvestedSummary(),
+  });
+
+  assert.equal(accepted, false);
+  assert.equal(harness.sent.length, 0);
+  assert.equal(harness.controller.autoReviewCounts.get('proj_1:task_1') || 0, 0);
+});
+
+test('PM auto-review sends failed run when runService is not injected', () => {
+  const harness = makeAutoReviewHarness({ injectRunService: false });
+
+  harness.eventBus.emit('run:harvested', {
+    run: reviewRun({ status: 'failed', retry_count: 0 }),
+    summary: harvestedSummary(),
+  });
+
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.controller.autoReviewCounts.get('proj_1:task_1'), 1);
 });
 
 test('PM auto-review circuit breaker caps review sends at five and resets on PM clear', () => {

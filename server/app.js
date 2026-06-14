@@ -133,6 +133,7 @@ function createPmAutoReview({
   eventBus,
   managerRegistry,
   conversationService,
+  runService,
   autoReviewMax = AUTO_REVIEW_MAX,
   defer = setImmediate,
   logger = console,
@@ -147,8 +148,39 @@ function createPmAutoReview({
     }
   });
 
+  function hasHigherRetryAttempt(run) {
+    if (!runService || typeof runService.listRuns !== 'function' || !run?.task_id) {
+      return false;
+    }
+    try {
+      const currentRetryCount = Number(run.retry_count || 0);
+      const runs = runService.listRuns({ task_id: run.task_id }) || [];
+      return runs.some((candidate) => (
+        candidate
+        && candidate.id !== run.id
+        && !candidate.is_manager
+        && ['queued', 'running'].includes(candidate.status)
+        && Number(candidate.retry_count || 0) > currentRetryCount
+      ));
+    } catch {
+      return false;
+    }
+  }
+
   function sendPmReview({ run, harvestSummary }) {
     if (!run || run.is_manager) return false;
+    const status = harvestSummary?.status || run.status;
+    if (status === 'failed' && hasHigherRetryAttempt(run)) {
+      try {
+        if (runService && typeof runService.addRunEvent === 'function') {
+          runService.addRunEvent(run.id, 'pm_review:suppressed', JSON.stringify({
+            reason: 'retry_pending',
+          }));
+        }
+      } catch { /* ignore observability failures */ }
+      return false;
+    }
+
     const projectId = run.project_id;
     if (!projectId) return false;
     const pmSlotKey = `pm:${projectId}`;
@@ -355,7 +387,7 @@ function createApp(options = {}) {
   // PM auto-review: harvest is the single completion gate. `run:ended`
   // drives harvest first, and harvest emits exactly one `run:harvested`
   // for each review-target worker run; only then do we notify the PM.
-  createPmAutoReview({ eventBus, managerRegistry, conversationService });
+  createPmAutoReview({ eventBus, managerRegistry, conversationService, runService });
 
   // v3 Phase 4: annotate-only reconciliation. reconciliationService
   // reads conversationService.peekParentNotices to detect "user
