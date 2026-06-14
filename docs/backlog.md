@@ -69,10 +69,18 @@
   화이트리스트 payload, never-throws. **eventBus.emit 구독자별 격리** (Q4 — 앞 구독자 throw 시 webhook
   미발화 취약점 해소, 전 구독자 보호). 1027 tests (+18). spec `docs/specs/c-webhook-notify-brief.md` r2.
   Codex spec r1 (BLOCKER 2) + impl 교차리뷰 (Q4) + 최종 PASS.
+- **PR #194** T4 harvest 프로젝트별 node — 멀티프로젝트에서 서버와 다른 node 요구 프로젝트의 test_command
+  ABI 불일치 해소. **서버 node 우선 정책**: 프로젝트 선언(.nvmrc/engines major)을 서버 node 가 만족하면
+  유지(퇴행 0), 명확히 다른 단일 major 만 homebrew node@N 전환. anchored 파싱(range/오염 → server),
+  never-throws. spec `docs/specs/t4-harvest-per-project-node-brief.md` r2. Codex spec r1 (SERIOUS Q2/Q3) → impl PASS.
+- **PR #195** T5 retry↔PM review de-dupe — 자동 retry(B-lite) + PM auto-review(H-1.5) 이중 재시도 차단.
+  failed worker 의 PM review 를 자동 retry 진행 중이면 억제 (`hasHigherRetryAttempt` = task 에 더 높은
+  retry_count active). retry rc 단조 증가로 정확 식별 → 최종 failed 발송(hole 0) + 동시실행 false-positive 0.
+  spec `docs/specs/t5-retry-review-dedupe-brief.md` r2. Codex spec r1 (SERIOUS Q3) → impl PASS. **1046 tests**.
 - **워크플로 전환**: 본 시리즈부터 Codex 가 구현, Claude 가 brief 작성·리뷰·보강 (감독 모드).
   spec r1 → Codex cross-review (BLOCKER 검출) → r2 lock-in → Codex 구현 → Claude 리뷰 → Codex 교차리뷰.
 - **H-2 후보 (deferred, T3)**: PR 자동 생성/push, branch 자동 머지, diff patch body 표시 —
-  harvest+PM review 운영 관측 후 트리거. **T4 (멀티프로젝트 node)** 도 도그푸딩에서 도출.
+  harvest+PM review 운영 관측 후 트리거. (T4/T5 는 #194/#195 로 종결.)
 
 ### M4-a MCP Streamable HTTP transport + 검증 사이클 (LAUNCHED 2026-04-30, 검증 종결 2026-05-05)
 - **PR #171** spec brief (`docs/specs/m4-mcp-http-streamable-transport-brief.md`, r7 READY, Claude opus-4.7 + Codex gpt-5.5 cross-check 7회), **#172** impl
@@ -163,28 +171,6 @@
 - **Trigger**: "Claude PM use case 발생" 사용자 선언.
 - **Why deferred**: Codex PM (Phase 3a) 로 모든 use case 커버 중. Claude PM 을 쓸 실제 요구가 없는 상태에서 adapter contract / recovery / event 정규화 변경은 over-build.
 - **착수 시 참고**: manager-v3-multilayer.md §9.6 (entire), 원칙 #9 (sandbox bypass 정책), `pmSpawnService` + `pmCleanupService` 의 현재 Codex 전용 경로를 어떻게 adapter-agnostic 하게 만들지.
-
-### T5. B-lite/H-1.5 — 자동 retry ↔ PM auto-review de-dupe
-- **출처**: 2026-06-14 통합 교차리뷰 (Codex Q4).
-- **현 상태**: failed worker 는 B-lite 가 1회 자동 retry run 을 만들고, 동시에 H-1.5 PM auto-review 가
-  PM 에게 "실패, 재시도 판단" 을 보낸다. PM(LLM)이 자율적으로 또 worker 를 spawn 하면 **이중 재시도**
-  (자동 + PM) 가능. 현재 완화: failed review 메시지에 "시스템이 이미 1회 자동 retry 했을 수 있으니 새
-  attempt run 확인 후 spawn" advisory 문구 (`app.js buildPmReviewText`). circuit breaker(5회)가 백스톱.
-- **Trigger**: 실사용에서 이중 재시도가 실제로 자원 낭비/혼란을 일으키는 빈도 관측 후.
-- **착수 시 범위 (택1)**: (a) PM review 를 자동 retry 소진(retry_count=MAX) 후에만 발송 — 자동이 1차
-  대응, PM 은 최종 실패만 — H-1.5 sendPmReview 조건 변경. (b) backend de-dupe — PM 의 worker spawn
-  시 같은 task 에 newer queued/running attempt 있으면 거부. (a) 가 더 단순.
-
-### T4. H-1 harvest — 멀티프로젝트 per-project node 해석
-- **출처**: 2026-06-13 도그푸딩 + Codex 교차리뷰 (harvest node 버전 fix Q2/Q5).
-- **현 상태**: harvest 의 `buildHarvestEnv` 가 test_command 를 **서버를 띄운 node** 로 실행 (PR #188).
-  콘솔 자신 / 서버와 같은 node 를 쓰는 프로젝트는 ABI 일치 보장. 그러나 **서버와 다른 node 버전을
-  요구하는 워커 프로젝트** (멀티프로젝트 허브) 는 여전히 불일치 가능.
-- **Trigger**: 서로 다른 node 버전을 요구하는 프로젝트를 동시에 다루는 실제 use case 발생.
-- **착수 시 범위**: worktree 의 `.nvmrc` / `package.json engines` 를 읽어 fnm/nvm 으로 해당 node 를
-  resolve 후 PATH 구성. (현 단일 개발자 환경에서는 서버 node = 프로젝트 node 가 거의 항상 성립해 불요.)
-- **연관 관찰**: `executionEngine` / `streamJsonEngine` 도 동일한 homebrew-prepend PATH 패턴이나,
-  워커는 CLI spawn 이라 프로젝트 native 모듈(better-sqlite3)을 로드하지 않아 ABI 무관 — 현재 문제 없음.
 
 ### T3. H-2 — Harvest 수확 루프 완성 (PR 자동 생성 / 머지)
 - **Spec**: `docs/specs/h1-run-harvest-brief.md` §4 (비범위 표)
