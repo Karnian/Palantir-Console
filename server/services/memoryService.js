@@ -226,6 +226,66 @@ function createMemoryService(db, eventBus) {
     }
   }
 
+  // R6 (PR2a): upsert a deterministic environment fact keyed by fact_key.
+  // Supersedes the prior active fact (status='superseded', valid_to=now) and
+  // inserts a fresh active row in ONE transaction; no-op (no revision bump)
+  // when content is unchanged. origin='rule:R6'. This is the only writer that
+  // may carry a fact_key, so it owns the supersede semantics createMemoryItem
+  // deliberately refuses (it throws on fact_key conflict).
+  const getActiveFactByKeyStmt = db.prepare(
+    "SELECT * FROM memory_items WHERE project_id = ? AND fact_key = ? AND status = 'active'"
+  );
+  const supersedeFactStmt = db.prepare(
+    "UPDATE memory_items SET status='superseded', superseded_by=@newId, valid_to=datetime('now'), updated_at=datetime('now') WHERE project_id=@projectId AND fact_key=@factKey AND status='active'"
+  );
+  const upsertFactTx = db.transaction((item) => {
+    const existing = getActiveFactByKeyStmt.get(item.projectId, item.factKey);
+    if (existing && existing.content_hash === item.contentHash) {
+      return existing; // unchanged -> no-op, no revision bump
+    }
+    if (existing) {
+      supersedeFactStmt.run({ newId: item.id, projectId: item.projectId, factKey: item.factKey });
+    }
+    insertMemoryItemStmt.run(item);
+    _bumpRevision(item.projectId);
+    return getMemoryItemByIdStmt.get(item.id);
+  });
+
+  function upsertFact({ projectId, factKey, content, evidenceJson, importance } = {}) {
+    if (!projectId) throw new Error('projectId is required');
+    if (!factKey) throw new Error('factKey is required');
+    if (!content) throw new Error('content is required');
+    const finalEvidenceJson = normalizeEvidenceJson(evidenceJson);
+    const contentHash = crypto.createHash('sha256').update(content).digest('hex');
+    const item = {
+      id: crypto.randomUUID(),
+      projectId,
+      kind: 'fact',
+      factKey,
+      content,
+      contentHash,
+      evidenceJson: finalEvidenceJson,
+      origin: 'rule:R6',
+      sourceCount: 1,
+      confidence: 0.9,
+      importance: importance ?? 5,
+      status: 'active',
+    };
+    try {
+      return upsertFactTx(item);
+    } catch (err) {
+      if (isUniqueConstraint(err, 'content_hash')) {
+        // The exact content is already active under a DIFFERENT key (e.g. a
+        // human/seed memory). The transaction rolled back the supersede, so
+        // the prior fact stays intact; treat this as a no-op and return the
+        // existing holder rather than dropping the write silently (Codex
+        // cross-review SERIOUS).
+        return getActiveMemoryItemByHashStmt.get(projectId, contentHash) || null;
+      }
+      throw err;
+    }
+  }
+
   function getEffectiveLimit(limit) {
     const parsedLimit = Number.parseInt(limit, 10);
     if (!Number.isFinite(parsedLimit) || parsedLimit <= 0) {
@@ -344,6 +404,7 @@ function createMemoryService(db, eventBus) {
     _bumpRevision,
     getRevision,
     createMemoryItem,
+    upsertFact,
     retrieveForProject,
     buildInjectionBlock,
     listForProject,
