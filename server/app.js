@@ -234,6 +234,80 @@ function createPmAutoReview({
   return { sendPmReview, autoReviewCounts };
 }
 
+// ML PR2a (R6): capture deterministic environment facts from worker harvest.
+// Subscribes to run:harvested independently of PM review, re-reads the
+// harvest:test event from run_events (run:harvested.summary omits
+// command/node_major), and upserts env.test_command / env.node_resolution
+// facts. Never throws — annotate-only, like harvest itself. Excludes
+// run-specific noise (pass/fail/exit/duration/output_tail/diff/worktree).
+function createR6FactCapture({ eventBus, runService, memoryService, logger = console } = {}) {
+  if (!eventBus || !runService || !memoryService) return { capture: () => {} };
+
+  function clip(value, max) {
+    const s = String(value || '');
+    return s.length <= max ? s : s.slice(0, max);
+  }
+
+  function capture(run) {
+    if (!run || run.is_manager || !run.project_id) return;
+    let events;
+    try { events = runService.getRunEvents(run.id) || []; } catch { return; }
+    const testEvent = events.find((e) => e.event_type === 'harvest:test');
+    if (!testEvent) return;
+    let payload;
+    try { payload = JSON.parse(testEvent.payload_json || '{}'); } catch { return; }
+    const evidenceJson = JSON.stringify({
+      run_id: run.id,
+      task_id: run.task_id || null,
+      event_id: testEvent.id,
+    });
+    // env.test_command — the project's harvest test command.
+    if (payload.command) {
+      try {
+        memoryService.upsertFact({
+          projectId: run.project_id,
+          factKey: 'env.test_command',
+          content: `Project test command: ${clip(payload.command, 200)}`,
+          evidenceJson,
+          importance: 6,
+        });
+      } catch (err) { logger.warn(`[r6-fact] test_command run=${run.id}: ${err.message}`); }
+    }
+    // env.node_resolution — a resolved project node vs an unresolved fallback
+    // (the latter is NOT "runs on node N" — avoid that contamination).
+    if (payload.node_major != null) {
+      // 3-way: only source='project' is an actual resolved project requirement.
+      // 'fallback' = declared-but-unresolved, 'server' = no project declaration
+      // (or same/range/dirty) — neither must read as "the project requires N"
+      // (Codex cross-review SERIOUS: avoid server-source contamination).
+      let content;
+      if (payload.node_source === 'project') {
+        content = `Project requires Node major ${payload.node_major} (resolved)`;
+      } else if (payload.node_source === 'fallback') {
+        content = `Project declares Node major ${payload.node_major} but it is unresolved; harvest falls back to the server node`;
+      } else {
+        content = `No project-specific Node declaration; harvest uses the server Node major ${payload.node_major}`;
+      }
+      try {
+        memoryService.upsertFact({
+          projectId: run.project_id,
+          factKey: 'env.node_resolution',
+          content,
+          evidenceJson,
+          importance: 5,
+        });
+      } catch (err) { logger.warn(`[r6-fact] node_resolution run=${run.id}: ${err.message}`); }
+    }
+  }
+
+  eventBus.subscribe((event) => {
+    if (event.channel !== 'run:harvested') return;
+    capture(event.data?.run);
+  });
+
+  return { capture };
+}
+
 function createApp(options = {}) {
   const app = express();
   // PR1: tests pass `authToken` explicitly to avoid mutating
@@ -395,6 +469,8 @@ function createApp(options = {}) {
   // drives harvest first, and harvest emits exactly one `run:harvested`
   // for each review-target worker run; only then do we notify the PM.
   createPmAutoReview({ eventBus, managerRegistry, conversationService, runService });
+  // ML PR2a: R6 environment-fact capture (test_command / node resolution).
+  createR6FactCapture({ eventBus, runService, memoryService });
 
   // v3 Phase 4: annotate-only reconciliation. reconciliationService
   // reads conversationService.peekParentNotices to detect "user
@@ -607,6 +683,7 @@ function createApp(options = {}) {
 module.exports = {
   createApp,
   createPmAutoReview,
+  createR6FactCapture,
   buildPmReviewText,
   formatHarvestSummary,
 };
