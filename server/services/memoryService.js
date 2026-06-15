@@ -1,0 +1,350 @@
+const crypto = require('node:crypto');
+
+const TOP_K = 12;
+const CHAR_CAP = 2000;
+const MAX_QUERY_TERMS = 32;
+
+function createMemoryService(db, eventBus) {
+  const bumpRevisionStmt = db.prepare(`
+    INSERT INTO project_memory_revision(project_id, revision)
+    VALUES (?, 1)
+    ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1
+  `);
+
+  const getRevisionStmt = db.prepare(`
+    SELECT revision
+    FROM project_memory_revision
+    WHERE project_id = ?
+  `);
+
+  const insertMemoryItemStmt = db.prepare(`
+    INSERT INTO memory_items (
+      id,
+      project_id,
+      kind,
+      fact_key,
+      content,
+      content_hash,
+      evidence_json,
+      origin,
+      source_count,
+      confidence,
+      importance,
+      status
+    )
+    VALUES (
+      @id,
+      @projectId,
+      @kind,
+      @factKey,
+      @content,
+      @contentHash,
+      @evidenceJson,
+      @origin,
+      @sourceCount,
+      @confidence,
+      @importance,
+      @status
+    )
+  `);
+
+  const getMemoryItemByIdStmt = db.prepare(`
+    SELECT *
+    FROM memory_items
+    WHERE id = ?
+  `);
+
+  const getActiveMemoryItemByHashStmt = db.prepare(`
+    SELECT *
+    FROM memory_items
+    WHERE project_id = ?
+      AND content_hash = ?
+      AND status = 'active'
+  `);
+
+  const mergeMemoryItemByHashStmt = db.prepare(`
+    UPDATE memory_items
+    SET source_count = source_count + 1,
+        updated_at = datetime('now')
+    WHERE project_id = ?
+      AND content_hash = ?
+      AND status = 'active'
+  `);
+
+  const fallbackRetrieveStmt = db.prepare(`
+    SELECT *
+    FROM memory_items
+    WHERE project_id = @projectId
+      AND status = 'active'
+      AND (valid_to IS NULL OR valid_to > datetime('now'))
+    ORDER BY importance DESC, updated_at DESC
+    LIMIT @k
+  `);
+
+  const ftsRetrieveStmt = db.prepare(
+    [
+      'SELECT mi.*',
+      'FROM memory_items mi',
+      'JOIN memory_fts ON memory_fts.rowid = mi.rowid_pk',
+      'WHERE memory_fts MATCH @q',
+      '  AND mi.project_id = @projectId',
+      "  AND mi.status = 'active'",
+      "  AND (mi.valid_to IS NULL OR mi.valid_to > datetime('now'))",
+      // bm25: lower score = more relevant -> ASC
+      'ORDER BY bm25(memory_fts) ASC, mi.importance DESC',
+      'LIMIT @k',
+    ].join('\n'),
+  );
+
+  const listForProjectStmt = db.prepare(`
+    SELECT *
+    FROM memory_items
+    WHERE project_id = ?
+      AND status = 'active'
+      AND (valid_to IS NULL OR valid_to > datetime('now'))
+    ORDER BY importance DESC, updated_at DESC
+  `);
+
+  const getInjectionRecordStmt = db.prepare(`
+    SELECT *
+    FROM pm_memory_injection
+    WHERE pm_run_id = ?
+  `);
+
+  const recordInjectionStmt = db.prepare(`
+    INSERT INTO pm_memory_injection(pm_run_id, project_id, injected_revision, injected_at)
+    VALUES (?, ?, ?, datetime('now'))
+    ON CONFLICT(pm_run_id) DO UPDATE SET
+      injected_revision = excluded.injected_revision,
+      injected_at = excluded.injected_at
+  `);
+
+  function _bumpRevision(projectId) {
+    bumpRevisionStmt.run(projectId);
+  }
+
+  function getRevision(projectId) {
+    const row = getRevisionStmt.get(projectId);
+    return row ? row.revision : 0;
+  }
+
+  function normalizeEvidenceJson(evidenceJson) {
+    if (evidenceJson === undefined || evidenceJson === null) {
+      return '{}';
+    }
+
+    if (typeof evidenceJson === 'string') {
+      JSON.parse(evidenceJson);
+      return evidenceJson;
+    }
+
+    return JSON.stringify(evidenceJson);
+  }
+
+  function isUniqueConstraint(err, indexName) {
+    return Boolean(
+      err &&
+        err.code === 'SQLITE_CONSTRAINT_UNIQUE' &&
+        typeof err.message === 'string' &&
+        err.message.includes(indexName),
+    );
+  }
+
+  const insertMemoryItemTx = db.transaction((item) => {
+    insertMemoryItemStmt.run(item);
+    if (item.status === 'active') {
+      _bumpRevision(item.projectId);
+    }
+    return getMemoryItemByIdStmt.get(item.id);
+  });
+
+  const mergeMemoryItemByHashTx = db.transaction((projectId, contentHash) => {
+    mergeMemoryItemByHashStmt.run(projectId, contentHash);
+    return getActiveMemoryItemByHashStmt.get(projectId, contentHash);
+  });
+
+  function createMemoryItem({
+    projectId,
+    kind,
+    content,
+    factKey,
+    evidenceJson,
+    origin,
+    importance,
+    confidence,
+    sourceCount,
+    status,
+  } = {}) {
+    if (!projectId) {
+      throw new Error('projectId is required');
+    }
+    if (!kind) {
+      throw new Error('kind is required');
+    }
+    if (!content) {
+      throw new Error('content is required');
+    }
+    if (!origin) {
+      throw new Error('origin is required');
+    }
+    if (kind === 'fact' && !factKey) {
+      throw new Error('factKey is required for fact memory items');
+    }
+    if (kind !== 'fact' && factKey) {
+      throw new Error('factKey is only allowed for fact memory items');
+    }
+
+    const finalEvidenceJson = normalizeEvidenceJson(evidenceJson);
+    const finalStatus = status || 'active';
+    const contentHash = crypto.createHash('sha256').update(content).digest('hex');
+    const item = {
+      id: crypto.randomUUID(),
+      projectId,
+      kind,
+      factKey: factKey || null,
+      content,
+      contentHash,
+      evidenceJson: finalEvidenceJson,
+      origin,
+      sourceCount: sourceCount ?? 1,
+      confidence: confidence ?? 0.5,
+      importance: importance ?? 5,
+      status: finalStatus,
+    };
+
+    try {
+      return insertMemoryItemTx(item);
+    } catch (err) {
+      if (isUniqueConstraint(err, 'content_hash')) {
+        return mergeMemoryItemByHashTx(projectId, contentHash);
+      }
+      if (isUniqueConstraint(err, 'fact_key')) {
+        throw err;
+      }
+      throw err;
+    }
+  }
+
+  function getEffectiveLimit(limit) {
+    const parsedLimit = Number.parseInt(limit, 10);
+    if (!Number.isFinite(parsedLimit) || parsedLimit <= 0) {
+      return TOP_K;
+    }
+    return Math.min(parsedLimit, TOP_K);
+  }
+
+  function capRowsByContentLength(rows) {
+    const capped = [];
+    let total = 0;
+
+    for (const row of rows || []) {
+      const length = row && row.content ? row.content.length : 0;
+      if (total === 0 || total + length <= CHAR_CAP) {
+        capped.push(row);
+        total += length;
+      } else {
+        break;
+      }
+    }
+
+    return capped;
+  }
+
+  function buildMatchQuery(taskContext) {
+    const trimmed = typeof taskContext === 'string' ? taskContext.trim() : '';
+    if (!trimmed) {
+      return null;
+    }
+
+    const tokens = trimmed
+      .toLowerCase()
+      .split(/\s+/)
+      .map((token) => token.replace(/[^\p{L}\p{N}_]/gu, '').trim())
+      .filter(Boolean)
+      .slice(0, MAX_QUERY_TERMS);
+
+    if (tokens.length === 0) {
+      return null;
+    }
+
+    return tokens.map((token) => `"${token}"`).join(' OR ');
+  }
+
+  function retrieveFallback(projectId, k) {
+    return fallbackRetrieveStmt.all({ projectId, k });
+  }
+
+  function retrieveForProject(projectId, options = {}) {
+    try {
+      const { taskContext, limit } = options || {};
+      const k = getEffectiveLimit(limit);
+      const q = buildMatchQuery(taskContext);
+
+      if (!q) {
+        return capRowsByContentLength(retrieveFallback(projectId, k));
+      }
+
+      try {
+        // bm25: lower score = more relevant -> ASC
+        return capRowsByContentLength(ftsRetrieveStmt.all({ projectId, q, k }));
+      } catch (err) {
+        return capRowsByContentLength(retrieveFallback(projectId, k));
+      }
+    } catch (err) {
+      return [];
+    }
+  }
+
+  function buildInjectionBlock(rows) {
+    try {
+      if (!Array.isArray(rows) || rows.length === 0) {
+        return null;
+      }
+
+      const lines = ['## Learned Memory'];
+      for (const row of rows) {
+        if (!row) {
+          continue;
+        }
+        lines.push(`- [${row.kind}] ${row.content}`);
+      }
+
+      return lines.length > 1 ? lines.join('\n') : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function listForProject(projectId) {
+    return listForProjectStmt.all(projectId);
+  }
+
+  function getInjectionRecord(pmRunId) {
+    return getInjectionRecordStmt.get(pmRunId) || null;
+  }
+
+  function recordInjection(pmRunId, projectId, revision) {
+    recordInjectionStmt.run(pmRunId, projectId, revision);
+  }
+
+  function shouldInject(pmRunId, projectId) {
+    const revision = getRevision(projectId);
+    const rec = getInjectionRecord(pmRunId);
+    const inject = !rec || rec.injected_revision < revision;
+    return { inject, revision, block: null };
+  }
+
+  return {
+    _bumpRevision,
+    getRevision,
+    createMemoryItem,
+    retrieveForProject,
+    buildInjectionBlock,
+    listForProject,
+    getInjectionRecord,
+    recordInjection,
+    shouldInject,
+  };
+}
+
+module.exports = { createMemoryService };

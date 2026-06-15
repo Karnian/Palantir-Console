@@ -53,6 +53,8 @@ const { createPresetService } = require('./services/presetService');
 const { createWorkerPresetsRouter } = require('./routes/workerPresets');
 const { createMcpTemplateService } = require('./services/mcpTemplateService');
 const { createMcpTemplatesRouter } = require('./routes/mcpTemplates');
+const { createMemoryService } = require('./services/memoryService');
+const { createMemoryRouter } = require('./routes/memory');
 
 const AUTO_REVIEW_MAX = 5;
 const REVIEW_TEXT_CAP = 1000;
@@ -286,6 +288,10 @@ function createApp(options = {}) {
   // New services (SQLite-based)
   const projectService = createProjectService(db);
   const projectBriefService = createProjectBriefService(db); // v3 Phase 1
+  // ML PR1: L1 project memory index (CRUD + FTS5 retrieve + revision +
+  // injection ledger). Constructed here (after db + eventBus) so it can be
+  // injected into conversationService below for user-payload memory prepend.
+  const memoryService = createMemoryService(db, eventBus);
   // Phase 10B: Worker Preset service. Created before taskService so that
   // taskService can validate preferred_preset_id at the service layer (D2c).
   const presetService = createPresetService(db, {
@@ -375,6 +381,7 @@ function createApp(options = {}) {
     managerAdapterFactory,
     lifecycleService,
     pmSpawnService,
+    memoryService, // ML PR1: user-payload Learned Memory injection (PM slots)
   });
   // v3 Phase 2: whenever a manager slot (top or pm:<projectId>) is cleared
   // — by explicit stop, liveness probe, or rotation — drop any lingering
@@ -457,6 +464,7 @@ function createApp(options = {}) {
 
   // New routes (v2)
   app.use('/api/projects', createProjectsRouter({ projectService, taskService, projectBriefService, pmCleanupService }));
+  app.use('/api/projects', createMemoryRouter({ memoryService })); // ML PR1: GET /:projectId/memory
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService }));
   app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService }));
   // PR18: tests can pass options.authResolverOpts (e.g. a fake `hasKeychain`)
@@ -540,6 +548,7 @@ function createApp(options = {}) {
     webhookService,
     worktreeService,
     eventBus,
+    memoryService, // ML PR1: test seam for seeding L1 memory through the app db
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at
     // (createRun() always stamps status='queued' and cost_usd=0 at now).
