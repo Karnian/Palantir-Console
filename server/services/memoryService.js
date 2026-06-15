@@ -90,8 +90,9 @@ function createMemoryService(db, eventBus) {
       '  AND mi.project_id = @projectId',
       "  AND mi.status = 'active'",
       "  AND (mi.valid_to IS NULL OR mi.valid_to > datetime('now'))",
-      // bm25: lower score = more relevant -> ASC
-      'ORDER BY bm25(memory_fts) ASC, mi.importance DESC',
+      // bm25: lower score = more relevant -> ASC. recency tie-break keeps the
+      // FTS path consistent with the fallback path's ORDER BY (Codex NIT).
+      'ORDER BY bm25(memory_fts) ASC, mi.importance DESC, mi.updated_at DESC',
       'LIMIT @k',
     ].join('\n'),
   );
@@ -256,10 +257,15 @@ function createMemoryService(db, eventBus) {
       return null;
     }
 
+    // Split on any non-(letter/number/underscore) run so punctuation acts as a
+    // SEPARATOR (code paths / function names / `foo-bar` split into distinct
+    // tokens) rather than being stripped into one fused token. The prior
+    // `.replace(/[^\p{L}\p{N}_]/,'')` collapsed `memoryService.js` into
+    // `memoryservicejs`, which never matched the FTS index — a silent recall
+    // hole (independent Codex cross-review SERIOUS).
     const tokens = trimmed
       .toLowerCase()
-      .split(/\s+/)
-      .map((token) => token.replace(/[^\p{L}\p{N}_]/gu, '').trim())
+      .split(/[^\p{L}\p{N}_]+/u)
       .filter(Boolean)
       .slice(0, MAX_QUERY_TERMS);
 

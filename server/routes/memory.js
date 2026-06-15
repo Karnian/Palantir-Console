@@ -11,9 +11,9 @@
 
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
-const { BadRequestError } = require('../utils/errors');
+const { BadRequestError, NotFoundError } = require('../utils/errors');
 
-function createMemoryRouter({ memoryService }) {
+function createMemoryRouter({ memoryService, projectService }) {
   const router = express.Router();
 
   router.get('/:projectId/memory', asyncHandler(async (req, res) => {
@@ -22,6 +22,14 @@ function createMemoryRouter({ memoryService }) {
     }
     const { projectId } = req.params;
     if (!projectId) throw new BadRequestError('projectId is required');
+    // Verify the project exists before listing — otherwise a typo'd or
+    // deleted project id returns a misleading 200 [] (Codex cross-review
+    // SERIOUS: other project-scoped routes do this existence check too).
+    if (projectService) {
+      let project = null;
+      try { project = projectService.getProject(projectId); } catch { project = null; }
+      if (!project) throw new NotFoundError(`project not found: ${projectId}`);
+    }
     res.json({ memory: memoryService.listForProject(projectId) });
   }));
 

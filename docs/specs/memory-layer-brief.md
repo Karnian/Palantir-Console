@@ -219,6 +219,11 @@ CREATE UNIQUE INDEX idx_jobs_active ON memory_jobs(kind, project_id) WHERE statu
 - GET /api/projects/:id/memory (읽기)
 - **회귀 테스트**: 전체 PM system prompt(brief+skillpacks+pm_run_id) 불변 — **fresh spawn + boot resume 양쪽**(`manager.js:184` 중복 경로 포함)
 - **비범위**: 외부 remember 쓰기 API(R4), 규칙, batch, UI
+- **PR1 구현 후 알려진 한계 (독립 Codex 교차리뷰 반영, 후속 PR에서 해소)**:
+  - CRUD는 Create+Read(retrieve/list/revision/ledger)만 — update content / status↔active / supersede는 PR4(UI 교정)/PR5(decay). PR1 writer는 seed/test뿐이라 충분.
+  - revision 재주입 ↔ context-narrow retrieval 상호작용: 새 메모리가 *첫 매칭 turn 전에* 다른 taskContext로 그 revision이 소비되면 다음 bump까지 주입 지연 가능 → PR3 retrieval 정제(주입 memory-id 추적 또는 always-top-K)에서 해소.
+  - evidence redaction/GET 노출: PR1엔 evidence writer가 없어(seed/test만) 위험 0 → PR2(evidence 생성 시 redaction + GET 필드 화이트리스트).
+  - **PR1에서 수정 완료**: GET 라우트 project 존재검증(삭제/오타 project→404), FTS 토큰화를 punctuation-split로(코드경로/`foo-bar` recall 복원), FTS 정렬 recency tie-break.
 
 이후(PR1 후 일부 ∥):
 - **PR2(결정론 규칙)** ∥: R6 fact(fact_key 즉시active) + R1b candidate + R3 candidate + human remember(쿠키전용)/PM candidate

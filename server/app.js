@@ -464,7 +464,7 @@ function createApp(options = {}) {
 
   // New routes (v2)
   app.use('/api/projects', createProjectsRouter({ projectService, taskService, projectBriefService, pmCleanupService }));
-  app.use('/api/projects', createMemoryRouter({ memoryService })); // ML PR1: GET /:projectId/memory
+  app.use('/api/projects', createMemoryRouter({ memoryService, projectService })); // ML PR1: GET /:projectId/memory
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService }));
   app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService }));
   // PR18: tests can pass options.authResolverOpts (e.g. a fake `hasKeychain`)
