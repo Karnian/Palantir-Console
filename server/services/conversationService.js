@@ -48,6 +48,14 @@ function createConversationService({
   // returning "No active PM manager session". Tests that don't care about
   // lazy spawn can omit this dependency and keep the pre-3a behavior.
   pmSpawnService,
+  // ML PR1: optional Learned Memory injector. When wired, a message to a PM
+  // slot (NOT top) for a project gets a `## Learned Memory` block prepended
+  // to the user payload — gated by the pm_memory_injection ledger so it
+  // injects once per session OR when the project's memory revision changes.
+  // Memory is NEVER baked into the system prompt (Codex caching safety); the
+  // user-payload prepend is the single injection point. Tests that omit this
+  // dependency keep the pre-PR1 behavior byte-for-byte.
+  memoryService,
   logger,
 }) {
   // parentRunId -> array of notice strings
@@ -252,9 +260,35 @@ function createConversationService({
     // send fails — codex review findings, lock-in #2.
     const notices = peekParentNotices(run.id);
     const originalText = text || '';
-    const effectiveText = notices.length > 0
+    let effectiveText = notices.length > 0
       ? `${notices.join('\n\n')}\n\n---\n\n${originalText}`
       : originalText;
+
+    // ML PR1: Learned Memory injection. Outermost prepend (memory → parent
+    // notices → original text). PM slots only, never Top, and only when a
+    // memoryService + projectId are present. Gated by the persistent
+    // pm_memory_injection ledger (once per session / on revision change).
+    // Annotate-only: any failure degrades to "no injection" and never blocks
+    // message delivery. The ledger is written AFTER the adapter accepts the
+    // turn (mirrors the peek-then-commit notice discipline) so a failed send
+    // re-injects on the next attempt rather than recording a phantom inject.
+    let memoryInjection = null; // { revision } when an injection was actually applied
+    if (!isTop && memoryService && projectId) {
+      try {
+        const decision = memoryService.shouldInject(run.id, projectId);
+        if (decision && decision.inject) {
+          const rows = memoryService.retrieveForProject(projectId, { taskContext: originalText });
+          const block = memoryService.buildInjectionBlock(rows);
+          if (block) {
+            effectiveText = `${block}\n\n---\n\n${effectiveText}`;
+            memoryInjection = { revision: decision.revision };
+          }
+        }
+      } catch (memErr) {
+        log(`memory injection skipped for ${conversationId} (run=${run.id}): ${memErr.message}`);
+        memoryInjection = null;
+      }
+    }
 
     const validImages = Array.isArray(images)
       ? images.filter(img => img && typeof img.data === 'string' && typeof img.media_type === 'string')
@@ -286,6 +320,19 @@ function createConversationService({
     // remain queued for the next turn (codex R1 blocker fix).
     if (notices.length > 0) {
       commitDrainParentNotices(run.id, notices.length);
+    }
+
+    // ML PR1: record the injection ledger ONLY now that the turn is
+    // accepted. This is the commit half of the peek-then-commit discipline:
+    // if the send had failed above we would have thrown before reaching
+    // here, leaving the ledger untouched so the next send re-injects.
+    // Never let a ledger write break a successfully delivered message.
+    if (memoryInjection) {
+      try {
+        memoryService.recordInjection(run.id, projectId, memoryInjection.revision);
+      } catch (ledgerErr) {
+        log(`memory ledger write failed for ${conversationId} (run=${run.id}): ${ledgerErr.message}`);
+      }
     }
 
     if (run.status === 'needs_input') {
