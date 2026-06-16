@@ -6359,7 +6359,34 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 }
 
 /* ML PR4b: MemoryView — design tokens only (K-2 light/dark auto-propagate). */
+/* PR3c-1 후속 다듬기: 헤더를 타 뷰(projects-header/title)와 정렬 + native select
+   토큰화(회색 UA select → 디자인 토큰). page-header 는 MemoryView 전용이라 한정 셀렉터. */
+.memory-page .page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.25rem;
+}
+.memory-page .page-header h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-primary);
+}
 .memory-controls { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+.memory-controls select {
+  background: var(--field-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  padding: 0.4rem 0.7rem;
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
 .memory-tabs { display: inline-flex; gap: 0.25rem; }
 .memory-tab {
   padding: 0.35rem 0.75rem; border: 1px solid var(--border); background: var(--field-bg);
