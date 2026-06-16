@@ -2,8 +2,8 @@
 //
 // Spec lock-in: docs/specs/k5-visual-regression-brief.md
 //
-// Matrix: 8 hash routes × 2 themes (dark/light) × 2 viewports (1280×800 desktop,
-// 375×667 mobile) = 32 screenshot scenarios. Tagged @visual so
+// Matrix: 9 hash routes × 2 themes (dark/light) × 2 viewports (1280×800 desktop,
+// 375×667 mobile) = 36 screenshot scenarios. Tagged @visual so
 // `npm run test:visual` can grep.
 //
 // Stabilization (spec L8-L11):
@@ -27,6 +27,7 @@ const ROUTES = [
   'skills',
   'presets',
   'mcp-servers',
+  'memory',
 ];
 const THEMES = ['dark', 'light'];
 const VIEWPORTS = [
