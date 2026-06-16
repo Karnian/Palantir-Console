@@ -308,6 +308,91 @@ function createR6FactCapture({ eventBus, runService, memoryService, logger = con
   return { capture };
 }
 
+// ML PR2b (R1b): capture failure->fix pairs as memory candidates. When a
+// worker run finishes with a PASSing harvest:test AND the immediately
+// preceding same-task test run FAILed (no intervening PASS), that fail->fix
+// transition is the highest-signal learning event (ReasoningBank negative
+// constraint). Stages a candidate; PR3 batch LLM distills it into an active
+// pitfall/heuristic. Deterministic, LLM-free, never throws.
+function createR1bCapture({ eventBus, runService, memoryService, logger = console } = {}) {
+  if (!eventBus || !runService || !memoryService) return { capture: () => {} };
+
+  function testResult(events) {
+    const t = events.find((e) => e.event_type === 'harvest:test');
+    if (!t) return null;
+    try {
+      const p = JSON.parse(t.payload_json || '{}');
+      // Require a real boolean — a malformed/empty payload is NOT a result
+      // (Codex cross-review SERIOUS: {} must not read as FAIL).
+      if (typeof p.passed !== 'boolean') return null;
+      return { passed: p.passed, eventId: t.id };
+    } catch { return null; }
+  }
+
+  function capture(run) {
+    if (!run || run.is_manager || !run.project_id || !run.task_id) return;
+    let yEvents;
+    try { yEvents = runService.getRunEvents(run.id) || []; } catch { return; }
+    const y = testResult(yEvents);
+    if (!y || !y.passed) return; // the fix run must itself be a PASS
+
+    // Order ALL same-task runs by (created_at, id) — a stable run-creation
+    // contract. We inspect the IMMEDIATELY preceding RUN (not just the
+    // preceding test-run): an intervening run without a harvest:test means Y
+    // is not a direct fix of X, so we must NOT skip it (Codex cross-review
+    // BLOCKER — false fix-pairs from skipped no-test runs).
+    let taskRuns;
+    try { taskRuns = runService.listRuns({ task_id: run.task_id }) || []; } catch { return; }
+    const ordered = taskRuns.slice().sort((a, b) => {
+      const ca = a.created_at || '';
+      const cb = b.created_at || '';
+      if (ca !== cb) return ca < cb ? -1 : 1;
+      const ia = String(a.id);
+      const ib = String(b.id);
+      return ia < ib ? -1 : ia > ib ? 1 : 0;
+    });
+    const yPos = ordered.findIndex((r) => r.id === run.id);
+    if (yPos <= 0) return; // Y not found, or no prior run on this task
+    const prevRun = ordered[yPos - 1];
+    let prevEvents;
+    try { prevEvents = runService.getRunEvents(prevRun.id) || []; } catch { return; }
+    const prevTest = testResult(prevEvents);
+    if (!prevTest || prevTest.passed !== false) return; // immediate prev must be a FAILing test
+    const prev = { runId: prevRun.id };
+
+    // R1b fix pair: prev (FAIL) -> run (PASS). Capture the fix diff stat (the
+    // "what changed") but never the test output_tail (secret risk).
+    const diffEvent = yEvents.find((e) => e.event_type === 'harvest:diff');
+    let diffStat = null;
+    if (diffEvent) {
+      try { diffStat = JSON.parse(diffEvent.payload_json || '{}').stat || null; } catch { /* */ }
+    }
+    const rawJson = JSON.stringify({
+      schema_version: 1,
+      rule: 'R1b',
+      task_id: run.task_id,
+      fail_run: { id: prev.runId },
+      fix_run: { id: run.id, diff_stat: diffStat ? String(diffStat).slice(0, 500) : null },
+      selection: 'immediately_preceding_fail',
+    });
+    try {
+      memoryService.createCandidate({
+        projectId: run.project_id,
+        rule: 'R1b',
+        rawJson,
+        dedupKey: `r1b:${run.task_id}:${prev.runId}:${run.id}`,
+      });
+    } catch (err) { logger.warn(`[r1b] candidate run=${run.id}: ${err.message}`); }
+  }
+
+  eventBus.subscribe((event) => {
+    if (event.channel !== 'run:harvested') return;
+    capture(event.data?.run);
+  });
+
+  return { capture };
+}
+
 function createApp(options = {}) {
   const app = express();
   // PR1: tests pass `authToken` explicitly to avoid mutating
@@ -471,6 +556,8 @@ function createApp(options = {}) {
   createPmAutoReview({ eventBus, managerRegistry, conversationService, runService });
   // ML PR2a: R6 environment-fact capture (test_command / node resolution).
   createR6FactCapture({ eventBus, runService, memoryService });
+  // ML PR2b: R1b failure->fix pair capture (stages candidates for PR3 distill).
+  createR1bCapture({ eventBus, runService, memoryService });
 
   // v3 Phase 4: annotate-only reconciliation. reconciliationService
   // reads conversationService.peekParentNotices to detect "user
@@ -684,6 +771,7 @@ module.exports = {
   createApp,
   createPmAutoReview,
   createR6FactCapture,
+  createR1bCapture,
   buildPmReviewText,
   formatHarvestSummary,
 };

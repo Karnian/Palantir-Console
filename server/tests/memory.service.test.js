@@ -52,7 +52,7 @@ test('migration 025: memory tables + FTS + triggers + revision + ledger exist', 
   const all = new Set(
     db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name)
   );
-  assert.equal(all.has('memory_candidates'), false, 'memory_candidates is PR2 — out of scope');
+  // memory_candidates now exists (PR2b, migration 026). memory_jobs remains PR3.
   assert.equal(all.has('memory_jobs'), false, 'memory_jobs is PR3 — out of scope');
 });
 
