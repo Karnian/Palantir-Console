@@ -198,3 +198,13 @@ test('GET ?status: active (default) vs archived vs all', async (t) => {
   const bogus = await request(app).get('/api/projects/p1/memory?status=bogus').set(...COOKIE).expect(200);
   assert.equal(bogus.body.memory.length, 0);
 });
+
+test('app.shutdown is idempotent — double call is safe (Codex PR5b SERIOUS)', async (t) => {
+  const app = setupApp(t);
+  const p1 = app.shutdown();
+  const p2 = app.shutdown();
+  assert.equal(p1, p2, 'returns the same memoized promise (no double dispose/closeDb)');
+  await assert.doesNotReject(Promise.resolve(p1));
+  await assert.doesNotReject(Promise.resolve(p2));
+  // t.after will call shutdown a 3rd time — also a no-op.
+});

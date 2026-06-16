@@ -164,23 +164,25 @@ function createMemoryDistillService({ memoryService, distiller, logger = console
 
   // Periodic driver. Off unless wired (app.js gates on PALANTIR_MEMORY_DISTILL).
   // unref() so the timer never keeps the process alive; `busy` prevents
-  // overlapping ticks if a drain runs long. Returns { stop, tick }.
+  // overlapping ticks if a drain runs long. Returns { stop, tick, awaitDrain }.
   //
-  // stop() clears future ticks but does NOT abort/await an in-flight drain — a
-  // model call may still be pending when app.shutdown closes the DB. Tolerable
-  // here: drainAll/runOnce never throw (DB-after-close errors are swallowed and
-  // logged) and the timer is unref'd, so the process still exits cleanly. A
-  // graceful abort/await is deferred to PR5 (Codex follow-up NIT 3).
+  // PR5b graceful shutdown: stop() clears future ticks; awaitDrain() returns the
+  // in-flight drain promise (or null) so app.shutdown can wait for the current
+  // tick to settle before closing the DB — no write into a closed handle.
   function startScheduler({ intervalMs = 300000 } = {}) {
     let busy = false;
+    let inflight = null;
     const tick = async () => {
-      if (busy) return;
+      if (busy) return inflight;
       busy = true;
-      try { await drainAll(); } catch (err) { safeWarn(`[distill] scheduler tick: ${err?.message || err}`); } finally { busy = false; }
+      inflight = (async () => {
+        try { await drainAll(); } catch (err) { safeWarn(`[distill] scheduler tick: ${err?.message || err}`); } finally { busy = false; inflight = null; }
+      })();
+      return inflight;
     };
     const timer = setInterval(tick, intervalMs);
     if (timer && typeof timer.unref === 'function') timer.unref();
-    return { stop: () => clearInterval(timer), tick };
+    return { stop: () => clearInterval(timer), tick, awaitDrain: () => inflight };
   }
 
   return { runOnce, drainAll, startScheduler };

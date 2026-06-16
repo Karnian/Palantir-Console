@@ -500,6 +500,32 @@ test('runOnce SERIOUS2: a throwing claim never escapes (never-throws contract)',
   assert.match(r.error, /locked/);
 });
 
+test('startScheduler.awaitDrain: in-flight drain promise while running, null when idle (PR5b graceful)', async (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  seedR1b(svc);
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const distiller = createFakeDistiller(async ({ candidates }) => {
+    await gate; // block the drain mid-flight
+    return candidates.map((x) => ({ candidateId: x.id, kind: 'pitfall', content: 'a generalized lesson here', confidence: 0.5 }));
+  });
+  const sched = createMemoryDistillService({ memoryService: svc, distiller }).startScheduler({ intervalMs: 999999 });
+  try {
+    assert.equal(sched.awaitDrain(), null, 'idle -> null');
+    const tickPromise = sched.tick(); // starts a drain that blocks on the gate
+    const inflight = sched.awaitDrain();
+    assert.ok(inflight && typeof inflight.then === 'function', 'in-flight -> promise (app.shutdown awaits this)');
+    release();
+    await tickPromise;
+    assert.equal(sched.awaitDrain(), null, 'settled -> null again');
+    assert.equal(svc.listForProject('p1').length, 1, 'drain completed the promotion');
+  } finally {
+    sched.stop();
+    release();
+  }
+});
+
 test('runOnce: terminal-bad output marks candidate rejected so it leaves the pending scan (anti-starvation)', async (t) => {
   const db = setupDb(t);
   const svc = createMemoryService(db);
