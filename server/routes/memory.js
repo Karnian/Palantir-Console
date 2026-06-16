@@ -72,7 +72,11 @@ function createMemoryRouter({ memoryService, projectService }) {
       try { project = projectService.getProject(projectId); } catch { project = null; }
       if (!project) throw new NotFoundError(`project not found: ${projectId}`);
     }
-    res.json({ memory: memoryService.listForProject(projectId).map(toPublicMemory) });
+    // ?status=active(default)|archived|superseded|all — correction UI needs the
+    // non-active rows; injection always uses the default 'active'.
+    const allowed = ['active', 'archived', 'superseded', 'all'];
+    const status = allowed.includes(req.query.status) ? req.query.status : 'active';
+    res.json({ memory: memoryService.listForProject(projectId, status).map(toPublicMemory) });
   }));
 
   // ML R4: explicit "remember this" write. Actor split by how the caller

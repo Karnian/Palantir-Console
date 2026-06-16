@@ -80,6 +80,7 @@ export const NAV_LABELS = {
   skills: '스킬 팩',
   presets: '프리셋',
   'mcp-servers': 'MCP 서버',
+  memory: '메모리',
 };
 
 // Reusable verb labels — covers ~80% of button copy across modals.
