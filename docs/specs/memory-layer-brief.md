@@ -1,6 +1,6 @@
 # Memory Layer (ML) — 3계층 누적 암묵지 아키텍처 brief
 
-> **상태**: v1.1 — **PR1 MERGED (#197)** (read→inject 뼈대, 1069 tests). **PR2a(R6 환경 사실) 착수** — Codex 자문 lock-in (upsertFact supersede tx / harvest payload 재조회 / node_source 오염 구분 / GET evidence whitelist). PR2b(remember 쿠키/PM)·R1b·R3 + PR3~5 후속.
+> **상태**: v1.2 — **PR1~PR2c MERGED (#197 read→inject / #198 R6 active 자동누적 / #199 R1b candidate / #200 R3 candidate)**, 1103 tests. **다음: remember(R4) + PR3(batch LLM candidate→active 정제) + PR4(UI) + PR5(안전·decay). handoff: `docs/handoff-memory-layer-pr1-2c.md`.** R6 즉시 active 주입, R1b/R3 candidate 는 PR3 까지 적재만.
 > **작성**: 2026-06-15 (v0.1→v0.2→v0.3→v0.4)
 > **연관 spec**: `manager-v3-multilayer.md`, `h1-run-harvest-brief.md`, `h1-5-harvest-pm-review-brief.md`, `b-lite-queue-retry-brief.md`
 > **목표 한 줄**: 시스템이 **이미 결정론적으로 관측 중인 고신호 이벤트**에만 올라타 **규칙으로 후보를 포착**하고 **batch LLM으로 가끔 정제**해 **작은 승인 메모리 인덱스**를 자동 누적한다. 주입은 Codex 캐싱을 깨지 않는 **user-payload 경로로만**. evidence 스냅샷·confidence ceiling·decay·project 스코핑으로 poisoning·무한성장·드리프트·누출을 막는다.
