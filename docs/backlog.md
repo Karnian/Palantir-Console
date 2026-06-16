@@ -39,7 +39,8 @@
 - **R4 remember** ✅ `POST /memory/remember` actor split (cookie=human active / bearer·none=candidate / fact cookie-only / 전 content sanitize / `fact_key` ASCII allowlist+env. 예약 / `PALANTIR_PM_TOKEN` opt-in spoof-proof). Codex 3R 적대리뷰 PASS.
 - **PR4 사후교정** ✅ (#206 backend + UI): migration 028(archived_at/pinned) + memoryService CRUD(active-set 변경만 revision bump) + PATCH cookie-only + provenance redact(값+키) + GET ?status + `MemoryView`(#memory). Codex 적대리뷰 PASS.
 - **PR5 안전·decay** ✅ (#208~#210+): hard-cap admission control(score eviction, human/pinned 보호, restore 도 admission) + graceful shutdown(scheduler awaitDrain·app.shutdown 멱등·watchdog-first) + poisoning gate(12 안전 불변식 + injection-time re-sanitize) + decay(`valid_to` datetime() 정규화 + TTL 90일 batch_llm-only + `expireStaleMemories` maintenance + `markReviewed` re-observation refresh + `memory:decayed`). migration 029(archive_reason). **ML 레이어 완비.**
-- **남음 (선택, handoff `docs/handoff-memory-layer-pr1-2c.md`)**: PR3c(fuzzy 병합·cross-run confidence) / a11y·visual route 배열 #memory / L2(여러 PM→Master 승격). spec `docs/specs/memory-layer-brief.md` §10.
+- **a11y·visual #memory 가드** ✅ (#212): MemoryView 를 K-4 a11y + K-5 visual 매트릭스에 추가 (9 routes = 36 시나리오, `data-view="memory"` + baseline 4종, node@22/4189 fresh DB). a11y contrast 0, visual 안정.
+- **남음 (선택, handoff `docs/handoff-memory-layer-pr1-2c.md`)**: ~~PR3c(fuzzy 병합)~~ → Codex 적대자문 **NO-GO** (Jaccard 순서·극성 맹점으로 `prefer A over B`↔`B over A` 유사도 1.0 → 정반대 교훈 병합 / run_id gaming → 안전한 fuzzy 는 토큰 Jaccard 로 불가, LLM semantic 병합 별도 PR 큰 후속) / L2(여러 PM→Master 승격). spec `docs/specs/memory-layer-brief.md` §10.
 - 작업방식: 설계 Codex 4라운드 적대 리뷰 lock-in → athena 위임 PR1만 성공 → PR2a 부터 직접구현 + Codex 독립 교차리뷰(각 PR BLOCKER 까지 반복). node@22 테스트(ABI), repo-local Karnian push.
 
 ### P0 / H-1 / H-1.5 / harvest-fix / B-lite 큐 (LAUNCHED 2026-06-13~14)
