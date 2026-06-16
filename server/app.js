@@ -818,7 +818,25 @@ function createApp(options = {}) {
     // tests don't have to go hunting for a new entry point.
     _rawDb: db,
   };
+  // PR5b: app.shutdown is idempotent. A memoized promise means a double call
+  // (e.g. SIGINT then SIGTERM, or a test that shuts down twice) returns the same
+  // settling promise instead of disposing/closing twice, and _closeDbOnce guards
+  // the raw db.close() (Codex SERIOUS — double-call closeDb throws).
+  let _shutdownPromise = null;
+  let _shuttingDown = false;
+  let _dbClosed = false;
+  const _closeDbOnce = () => {
+    if (_dbClosed) return;
+    _dbClosed = true;
+    try { closeDb(); } catch (err) { console.warn('[app.shutdown] closeDb:', err && err.message); }
+  };
   app.shutdown = () => {
+    if (_shutdownPromise) return _shutdownPromise;
+    // Guard synchronous re-entry during the dispose sweep (e.g. an adapter's
+    // disposeSession() itself calling app.shutdown) so the sweep runs once
+    // (Codex PR5b NIT). _closeDbOnce is the second line of defense.
+    if (_shuttingDown) return Promise.resolve();
+    _shuttingDown = true;
     // PR2 / P1-5: walk every live manager slot (Top + every PM) and
     // dispose the adapter session before we tear the process down.
     // Without this, `app.shutdown()` left manager subprocesses and
@@ -861,7 +879,22 @@ function createApp(options = {}) {
     try { webhookService.stop(); } catch { /* ignore */ }
     try { if (memoryDistillScheduler) memoryDistillScheduler.stop(); } catch { /* ignore */ }
     lifecycleService.stopMonitoring();
-    closeDb();
+    // PR5b graceful shutdown: if a distill drain is in flight, close the DB only
+    // AFTER it settles so the drain never writes into a closed handle. With no
+    // in-flight drain (the common case, incl. every test with the scheduler
+    // off) this stays a SYNCHRONOUS close, so existing synchronous
+    // app.shutdown() callers are unaffected. Returns a promise only when waiting.
+    let inflight = null;
+    try {
+      inflight = (memoryDistillScheduler && memoryDistillScheduler.awaitDrain) ? memoryDistillScheduler.awaitDrain() : null;
+    } catch { inflight = null; }
+    if (inflight && typeof inflight.then === 'function') {
+      _shutdownPromise = inflight.then(_closeDbOnce, _closeDbOnce);
+    } else {
+      _closeDbOnce();
+      _shutdownPromise = Promise.resolve();
+    }
+    return _shutdownPromise;
   };
 
   return app;

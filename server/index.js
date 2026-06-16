@@ -40,19 +40,29 @@ const server = app.listen(port, host, () => {
 // Graceful shutdown: wire OS signals to app.shutdown() which disposes
 // manager sessions, stops lifecycle monitor, and closes the database.
 let shuttingDown = false;
-function gracefulShutdown(signal) {
+async function gracefulShutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[shutdown] ${signal} received, shutting down...`);
-  if (app.shutdown) app.shutdown();
-  server.close(() => {
-    console.log('[shutdown] HTTP server closed');
-    process.exit(0);
-  });
-  setTimeout(() => {
+  // Watchdog FIRST: installed before any await so a hung in-flight distill drain
+  // (or a rejecting app.shutdown) can never block exit (Codex BLOCKER).
+  const watchdog = setTimeout(() => {
     console.warn('[shutdown] Forcing exit after timeout');
     process.exit(1);
-  }, 10000).unref();
+  }, 10000);
+  watchdog.unref();
+  // Refuse new connections BEFORE the (possibly slow) async cleanup, so requests
+  // don't arrive against torn-down services / a closing DB (Codex SERIOUS).
+  server.close(() => console.log('[shutdown] HTTP server closed'));
+  // PR5b: app.shutdown() may return a promise (waits for an in-flight distill
+  // drain before closing the DB).
+  try {
+    if (app.shutdown) await app.shutdown();
+  } catch (err) {
+    console.warn('[shutdown] app.shutdown error:', err && err.message);
+  }
+  clearTimeout(watchdog);
+  process.exit(0);
 }
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
