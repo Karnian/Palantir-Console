@@ -199,7 +199,10 @@ test('toPublicMemory: excludes evidence_json / content_hash / superseded_by / ro
   assert.equal(pub.content_hash, undefined);
   assert.equal(pub.superseded_by, undefined);
   assert.equal(pub.rowid_pk, undefined);
-  assert.equal(pub.confidence, undefined);
+  // PR4: confidence + origin are now exposed for the correction UI (both are
+  // non-sensitive — a 0..1 score and an origin enum). evidence_json stays out.
+  assert.equal(pub.confidence, 0.9);
+  assert.equal(pub.origin, 'rule:R6');
   // whitelisted fields survive.
   assert.equal(pub.id, 'x');
   assert.equal(pub.content, 'c');
