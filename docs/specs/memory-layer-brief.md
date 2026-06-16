@@ -1,6 +1,6 @@
 # Memory Layer (ML) — 3계층 누적 암묵지 아키텍처 brief
 
-> **상태**: v1.3 — **PR1~PR2c (#197~#200) + PR3a #202(batch-distill 뼈대) MERGED**, 1151 tests. **다음: PR3b(live distiller + scheduler + app.js wiring) + remember(R4) + PR4(UI) + PR5(안전·decay). handoff: `docs/handoff-memory-layer-pr1-2c.md`.** R6 즉시 active 주입, R1b/R3 candidate 는 PR3a 정제 파이프라인 완성(fake distiller 검증)·**PR3b live distiller wiring 후 실제 active**.
+> **상태**: v1.4 — **PR1~PR2c (#197~#200) + PR3a #202 + PR3b(live distiller + scheduler) MERGED**, 1169 tests. **candidate→active 루프 닫힘** — `PALANTIR_MEMORY_DISTILL=1` + `ANTHROPIC_API_KEY` 시 scheduler가 runtime 에서 candidate→live distill→promote→active→PM 주입. **다음: remember(R4) + PR4(UI) + PR5(안전·decay·graceful shutdown) + PR3c(fuzzy 병합, optional). handoff: `docs/handoff-memory-layer-pr1-2c.md`.**
 > **작성**: 2026-06-15 (v0.1→v0.2→v0.3→v0.4)
 > **연관 spec**: `manager-v3-multilayer.md`, `h1-run-harvest-brief.md`, `h1-5-harvest-pm-review-brief.md`, `b-lite-queue-retry-brief.md`
 > **목표 한 줄**: 시스템이 **이미 결정론적으로 관측 중인 고신호 이벤트**에만 올라타 **규칙으로 후보를 포착**하고 **batch LLM으로 가끔 정제**해 **작은 승인 메모리 인덱스**를 자동 누적한다. 주입은 Codex 캐싱을 깨지 않는 **user-payload 경로로만**. evidence 스냅샷·confidence ceiling·decay·project 스코핑으로 poisoning·무한성장·드리프트·누출을 막는다.
@@ -228,7 +228,8 @@ CREATE UNIQUE INDEX idx_jobs_active ON memory_jobs(kind, project_id) WHERE statu
 이후(PR1 후 일부 ∥):
 - **PR2(결정론 규칙)** ∥: R6 fact(fact_key 즉시active) + R1b candidate + R3 candidate + human remember(쿠키전용)/PM candidate
 - **PR3a(batch-distill 뼈대) ✅ #202**: migration 027 `memory_jobs` CAS lease + `promoteCandidatesBatchTx`(단일 안전강제 tx: lease 재확인+sanitize+kind/importance/confidence clamp+evidence+createMemoryItem+candidate status) + `memorySanitize`(출력 게이트) + `memoryDistillService.runOnce`(주입형 distiller, never-throws, successor drain) + `distillers/fakeDistiller`. exact content_hash 병합, confidence ceiling(단일≤0.7), terminal-bad→rejected(starvation 방지). **fake distiller 검증, LLM 0. Codex 3R 적대리뷰 PASS. app.js 런타임 미wiring(의도).**
-- **PR3b(live distiller)**: `distillers/liveDistiller.js`(fakeDistiller 인터페이스, content 생성만 — 안전장치는 promote 가 강제) + scheduler + `PALANTIR_MEMORY_DISTILL` 플래그(기본 off) + app.js wiring + fuzzy 병합(FTS top-N Jaccard) + cross-run confidence 상향(독립 source≥2)
+- **PR3b(live distiller) ✅**: `distillers/liveDistiller.js`(Anthropic Messages API `claude-haiku-4-5`, 주입형 callModel=mock 테스트, content 생성만 — 안전장치는 promote 강제, `parseProposals` balanced-array+cap, `data.content` 가드) + `memoryDistillService` `drainAll`/`startScheduler` + `memoryService.listProjectsWithPendingCandidates` + app.js wiring(`PALANTIR_MEMORY_DISTILL=1` 기본 off + `ANTHROPIC_API_KEY`/`options.distiller`, shutdown stop). 루프 닫힘=비전 완성. Codex PASS(no blockers).
+- **PR3c(optional, 다음)**: fuzzy/semantic 병합(FTS top-N Jaccard; exact content_hash 는 PR3a) + cross-run confidence 상향(독립 source≥2) + threshold(pending≥3 or oldest≥10min)/rate cap + graceful shutdown(scheduler in-flight await, Codex NIT3)
 - **PR4(UI)** ∥: MemoryView 열람/편집/archive/supersede + provenance
 - **PR5(안전·decay·관측)**: TTL/decay/cap/observability + poisoning 통합검증
 
