@@ -399,6 +399,68 @@ function createR1bCapture({ eventBus, runService, memoryService, logger = consol
   return { capture };
 }
 
+// ML PR2c (R3): capture verified PM verdicts as memory candidates. When the PM
+// claims a task is complete AND that claim is coherent with DB truth
+// (incoherence_flag=0, task status='done'), that verdict is a trustworthy
+// signal of "how this kind of task gets done here". Stages a candidate (PR3
+// distills it). A hallucinated claim (incoherent) is NEVER captured.
+// Deterministic, LLM-free, never throws.
+function createR3Capture({ eventBus, memoryService, logger = console } = {}) {
+  if (!eventBus || !memoryService) return { capture: () => {} };
+
+  function clip(value, max) {
+    const s = String(value || '');
+    return s.length <= max ? s : s.slice(0, max);
+  }
+
+  function capture(audit) {
+    if (!audit || !audit.pm_run_id || !audit.project_id) return;
+    // Only coherent verdicts — a hallucinated claim must not become memory.
+    if (audit.incoherence_flag !== 0) return;
+    let claim;
+    let truth;
+    try { claim = JSON.parse(audit.pm_claim || '{}'); } catch { return; }
+    try { truth = JSON.parse(audit.db_truth || '{}'); } catch { return; }
+    // JSON.parse('null') succeeds but yields null — guard the shape so the
+    // field reads below cannot throw (Codex cross-review BLOCKER).
+    if (!claim || typeof claim !== 'object') return;
+    if (!truth || typeof truth !== 'object') return;
+    if (claim.kind !== 'task_complete') return;
+    if (truth.status !== 'done') return;
+    // dispatch_audit_log.task_id (envelope) is NULLABLE — a coherent
+    // task_complete carries the real id in pm_claim/db_truth, so derive it
+    // rather than dropping the candidate (Codex cross-review BLOCKER).
+    const taskId = audit.task_id || claim.task_id || truth.task_id;
+    if (!taskId) return;
+    const rawJson = JSON.stringify({
+      schema_version: 1,
+      rule: 'R3',
+      task_id: taskId,
+      pm_run_id: audit.pm_run_id,
+      verdict: 'task_complete',
+      rationale: audit.rationale ? clip(audit.rationale, 500) : null,
+      audit_id: audit.id,
+    });
+    try {
+      memoryService.createCandidate({
+        projectId: audit.project_id,
+        rule: 'R3',
+        rawJson,
+        // dedup by task+pm_run so one PM session's repeated task_complete
+        // claims collapse to a single candidate.
+        dedupKey: `r3:task_complete:${taskId}:${audit.pm_run_id}`,
+      });
+    } catch (err) { logger.warn(`[r3] candidate audit=${audit.id}: ${err.message}`); }
+  }
+
+  eventBus.subscribe((event) => {
+    if (event.channel !== 'dispatch_audit:recorded') return;
+    capture(event.data?.audit);
+  });
+
+  return { capture };
+}
+
 function createApp(options = {}) {
   const app = express();
   // PR1: tests pass `authToken` explicitly to avoid mutating
@@ -564,6 +626,8 @@ function createApp(options = {}) {
   createR6FactCapture({ eventBus, runService, memoryService });
   // ML PR2b: R1b failure->fix pair capture (stages candidates for PR3 distill).
   createR1bCapture({ eventBus, runService, memoryService });
+  // ML PR2c: R3 PM verdict capture (coherent task_complete -> candidate).
+  createR3Capture({ eventBus, memoryService });
 
   // v3 Phase 4: annotate-only reconciliation. reconciliationService
   // reads conversationService.peekParentNotices to detect "user
@@ -778,6 +842,7 @@ module.exports = {
   createPmAutoReview,
   createR6FactCapture,
   createR1bCapture,
+  createR3Capture,
   buildPmReviewText,
   formatHarvestSummary,
 };
