@@ -1,5 +1,5 @@
 const crypto = require('node:crypto');
-const { sanitizeProposalContent } = require('./memorySanitize');
+const { sanitizeProposalContent, detectInjection, redactSecrets } = require('./memorySanitize');
 
 const TOP_K = 12;
 const CHAR_CAP = 2000;
@@ -434,10 +434,23 @@ function createMemoryService(db, eventBus) {
 
       const lines = ['## Learned Memory'];
       for (const row of rows) {
-        if (!row) {
+        if (!row || !row.content) {
           continue;
         }
-        lines.push(`- [${row.kind}] ${row.content}`);
+        // Injection-time defense-in-depth (Codex PR5c BLOCKER): active content is
+        // sanitized at write, but re-guard here so no stored row (an R6 fact, or
+        // a row written before a sanitize-rule change) can break the bullet or
+        // leak a secret into the PM payload. Reject injection markers, redact
+        // secrets, collapse whitespace; skip the length floor (facts are short).
+        const raw = String(row.content);
+        if (detectInjection(raw)) {
+          continue;
+        }
+        const safe = redactSecrets(raw).text.replace(/\s+/g, ' ').trim().slice(0, CHAR_CAP);
+        if (!safe) {
+          continue;
+        }
+        lines.push(`- [${row.kind}] ${safe}`);
       }
 
       return lines.length > 1 ? lines.join('\n') : null;
