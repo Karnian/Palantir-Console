@@ -33,10 +33,10 @@
 
 상세는 모두 `handoff-post-k2-launch-2026-04-29.md` 참고 (단 M4 시리즈는 spec brief 자체가 출처).
 
-### ML 메모리 레이어 PR1~PR2c (LAUNCHED 2026-06-15~16)
-- **PR #197** PR1 read→inject 뼈대 / **#198** PR2a R6 환경사실 즉시 active / **#199** PR2b R1b 실패→수정 candidate / **#200** PR2c R3 PM판정 candidate. **1103 tests** (+57 memory).
-- 3계층 누적 암묵지 — worker harvest/PM판정 → PM 프로젝트 메모리 자동 증강 → 주입. `memoryService`(upsertFact/createCandidate/retrieve FTS5/revision/주입 ledger) + `app.js` create{R6,R1b,R3}Capture(eventBus 독립구독 never-throws) + migration 025/026. R6 즉시 active 주입, **R1b/R3 candidate 는 PR3(batch LLM) 정제 후 active**.
-- **남음 (다음 세션, handoff `docs/handoff-memory-layer-pr1-2c.md`)**: remember(R4 쿠키=active/PM=candidate, auth.method 분리) + **PR3(batch LLM candidate→active 정제, memory_jobs CAS)** + PR4(UI 사후교정) + PR5(안전·decay). spec `docs/specs/memory-layer-brief.md` §10.
+### ML 메모리 레이어 PR1~PR3a (LAUNCHED 2026-06-15~16)
+- **PR #197** PR1 read→inject / **#198** PR2a R6 즉시 active / **#199** PR2b R1b candidate / **#200** PR2c R3 candidate / **#202** PR3a batch-distill 뼈대. **1151 tests** (+105 memory).
+- 3계층 누적 암묵지 — worker harvest/PM판정 → PM 프로젝트 메모리 자동 증강 → 주입. `memoryService`(upsertFact/createCandidate/retrieve FTS5/revision/주입 ledger) + `app.js` create{R6,R1b,R3}Capture(eventBus 독립구독 never-throws) + migration 025/026. **PR3a**: candidate→active 정제 파이프라인 — migration 027 `memory_jobs`(CAS lease) + `promoteCandidatesBatchTx`(lease 재확인+sanitize+clamp+evidence+createItem+status = 단일 안전강제 tx) + `memorySanitize`(출력 게이트) + `memoryDistillService.runOnce`(주입형 distiller, never-throws) + `fakeDistiller`. **fake distiller 로 전 경로 검증, LLM 0. app.js 런타임 미wiring(의도).** R6 즉시 active, R1b/R3 candidate 는 **PR3b live distiller wiring 후 실제 active**.
+- **남음 (다음 세션, handoff `docs/handoff-memory-layer-pr1-2c.md`)**: **PR3b(live distiller + scheduler + `PALANTIR_MEMORY_DISTILL` 플래그 + app.js wiring — LLM 호출, 사용자 확인 필요)** + remember(R4 쿠키=active/PM=candidate, auth.method 분리) + PR4(UI 사후교정) + PR5(안전·decay). spec `docs/specs/memory-layer-brief.md` §10.
 - 작업방식: 설계 Codex 4라운드 적대 리뷰 lock-in → athena 위임 PR1만 성공 → PR2a 부터 직접구현 + Codex 독립 교차리뷰(각 PR BLOCKER 까지 반복). node@22 테스트(ABI), repo-local Karnian push.
 
 ### P0 / H-1 / H-1.5 / harvest-fix / B-lite 큐 (LAUNCHED 2026-06-13~14)
