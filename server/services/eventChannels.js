@@ -71,6 +71,9 @@ const SERVER_EMITS = Object.freeze([
   'memory:promoted',
   'memory:evicted',
   'memory:decayed',
+
+  // ML PR3c: distiller merge-context cap observability
+  'memory:distill_context_capped',
 ]);
 
 /**

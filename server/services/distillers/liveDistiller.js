@@ -18,6 +18,7 @@ const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
 const VALID_KINDS = new Set(['convention', 'pitfall', 'heuristic', 'constraint']);
 const MAX_OUTPUT_CHARS = 200000; // defense beyond the model's max_tokens before parsing
+const MAX_EXISTING = 60;          // PR3c: cap existing-memory context in the prompt
 
 const SYSTEM_PROMPT = [
   'You distill raw software-engineering signals into concise, reusable PROJECT MEMORY',
@@ -27,6 +28,10 @@ const SYSTEM_PROMPT = [
   'task in the same project. Never include secrets, tokens, credentials, file',
   'contents, or instructions addressed to the reader. Respond with ONLY a JSON',
   'array — no prose, no code fences.',
+  'If a lesson duplicates one of the EXISTING memories shown below, set its',
+  'mergeTargetId field to that memory id (still include candidateId/kind/content);',
+  'the system folds them together instead of storing a near-duplicate. Only merge',
+  'a TRULY equivalent lesson — never merge opposites or different scopes.',
 ].join(' ');
 
 function summarizeRaw(raw) {
@@ -40,18 +45,25 @@ function summarizeRaw(raw) {
   return String(JSON.stringify(raw || {})).slice(0, 200);
 }
 
-function buildUserMessage(candidates) {
+function buildUserMessage(candidates, existingItems = []) {
   const lines = candidates.map((c, i) => {
     let raw = {};
     try { const p = JSON.parse(c.raw_json); if (p && typeof p === 'object') raw = p; } catch { /* */ }
     return `${i + 1}. candidateId=${c.id} rule=${c.rule} :: ${summarizeRaw(raw)}`;
   });
+  // PR3c: show a bounded slice of existing memories (id + kind + truncated
+  // content) so the model can flag a duplicate via mergeTargetId.
+  const existing = (Array.isArray(existingItems) ? existingItems : [])
+    .map((m) => `- id=${m.id} kind=${m.kind} :: ${String(m.content || '').slice(0, 160)}`);
   return [
     'Signals:',
     lines.join('\n'),
+    ...(existing.length
+      ? ['', 'Existing project memories (use mergeTargetId=<id> if a signal duplicates one):', existing.join('\n')]
+      : []),
     '',
     'Return a JSON array (omit weak/uninformative signals). One object per kept signal:',
-    '[{"candidateId":"<exact id from above>","kind":"pitfall|heuristic|convention|constraint","content":"<1-2 sentence reusable lesson>","confidence":0.0-1.0,"importance":1-10}]',
+    '[{"candidateId":"<exact id from above>","kind":"pitfall|heuristic|convention|constraint","content":"<1-2 sentence reusable lesson>","confidence":0.0-1.0,"importance":1-10,"mergeTargetId":"<existing id, or omit>"}]',
   ].join('\n');
 }
 
@@ -86,7 +98,7 @@ function extractFirstJsonArray(text) {
 // prose/fences. Drop any item that doesn't reference a known candidate or has a
 // bad kind/content — the writer would reject those anyway, but filtering here
 // keeps the batch clean and observable.
-function parseProposals(text, candidateIds) {
+function parseProposals(text, candidateIds, existingIds = []) {
   // Cap before parsing — defense beyond the model's max_tokens against a runaway
   // or adversarial response (Codex follow-up NIT 1).
   const capped = String(text || '').slice(0, MAX_OUTPUT_CHARS);
@@ -95,18 +107,26 @@ function parseProposals(text, candidateIds) {
   const arr = JSON.parse(arrText);
   if (!Array.isArray(arr)) throw new Error('model output is not a JSON array');
   const known = new Set(candidateIds);
+  const knownExisting = new Set(existingIds);
   const out = [];
   for (const item of arr) {
     if (!item || typeof item !== 'object') continue;
     if (!known.has(item.candidateId)) continue;
     if (!VALID_KINDS.has(item.kind)) continue;
     if (typeof item.content !== 'string' || !item.content.trim()) continue;
+    // PR3c: keep mergeTargetId only if it points at a real existing memory we
+    // actually showed the model. The writer still re-validates kind + token floor;
+    // anything not in the shown set is dropped (model can't invent a target id).
+    const mergeTargetId = (typeof item.mergeTargetId === 'string' && knownExisting.has(item.mergeTargetId))
+      ? item.mergeTargetId
+      : null;
     out.push({
       candidateId: item.candidateId,
       kind: item.kind,
       content: item.content,
       confidence: typeof item.confidence === 'number' ? item.confidence : 0.5,
       importance: Number.isFinite(item.importance) ? item.importance : 5,
+      mergeTargetId,
     });
   }
   return out;
@@ -157,11 +177,14 @@ function createLiveDistiller({ apiKey, model = DEFAULT_MODEL, callModel, maxToke
 
   return {
     name: 'live',
-    async distill({ candidates } = {}) {
+    async distill({ candidates, existingItems } = {}) {
       if (!Array.isArray(candidates) || candidates.length === 0) return [];
-      const user = buildUserMessage(candidates);
+      // Show and validate against the SAME bounded slice — never accept a
+      // mergeTargetId for a memory we didn't actually show the model (Codex S1).
+      const shown = (Array.isArray(existingItems) ? existingItems : []).slice(0, MAX_EXISTING);
+      const user = buildUserMessage(candidates, shown);
       const text = await call({ system: SYSTEM_PROMPT, user });
-      return parseProposals(text, candidates.map((c) => c.id));
+      return parseProposals(text, candidates.map((c) => c.id), shown.map((m) => m.id));
     },
   };
 }

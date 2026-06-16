@@ -7,11 +7,14 @@
 // the next slice and implements the same interface.
 //
 // Contract:
-//   distiller.distill({ projectId, candidates }) -> Promise<proposals[]>
-//   proposal = { candidateId, kind, content, confidence?, importance? }
+//   distiller.distill({ projectId, candidates, existingItems }) -> Promise<proposals[]>
+//   proposal = { candidateId, kind, content, confidence?, importance?, mergeTargetId? }
 //     - candidateId MUST be one of the input candidates' ids.
 //     - kind is a memory_items kind EXCEPT 'fact' (R6 owns facts).
 //     - content is a generalized pitfall/heuristic string (will be sanitized).
+//     - mergeTargetId (PR3c): an existingItems id this lesson duplicates. The
+//       WRITER re-validates it (active / same kind / token floor), so a fake
+//       handler may return any id to exercise that validation.
 //
 // The fake takes a handler so tests fully control the output (including
 // secret-bearing / injection content to exercise the sanitize gate). With no

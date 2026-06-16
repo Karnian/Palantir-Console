@@ -40,6 +40,32 @@ function shortId(value, max = 128) {
   return value.length <= max ? value : value.slice(0, max);
 }
 
+// PR3c: LLM-proposed semantic merge. The DISTILLER decides whether a new lesson
+// duplicates an existing memory (token Jaccard alone can't — `prefer A over B` ↔
+// `prefer B over A` score 1.0, Codex Q1 NO-GO). The WRITER never trusts that
+// blindly: it re-validates the proposed target (active / same kind / same project)
+// and additionally requires a minimum token overlap as a sanity FLOOR so a
+// hallucinated or clearly-unrelated target id can't fold two distinct lessons
+// together. Direction/polarity is the model's job; the floor only rejects the
+// obviously-wrong.
+const FUZZY_MERGE_FLOOR = 0.3; // min token Jaccard for a model-proposed merge
+const EVIDENCE_ID_CAP = 20;    // bound candidate_ids / run_ids growth on merge
+
+// Distinct word tokens of a content string (same splitter as buildMatchQuery so
+// the floor agrees with the FTS tokenization).
+function contentTokenSet(text) {
+  if (typeof text !== 'string') return new Set();
+  return new Set(text.toLowerCase().split(/[^\p{L}\p{N}_]+/u).filter(Boolean));
+}
+
+// Jaccard overlap |A∩B| / |A∪B|; 0 when either set is empty.
+function jaccardSimilarity(aSet, bSet) {
+  if (!aSet.size || !bSet.size) return 0;
+  let inter = 0;
+  for (const t of aSet) if (bSet.has(t)) inter += 1;
+  return inter / (aSet.size + bSet.size - inter);
+}
+
 // Build the L1 evidence snapshot from the candidate's raw signal (BLOCKER ③:
 // keep provenance conservatively — ids/rule/redaction, not untrusted free text).
 // `rule` comes from the TRUSTED candidate column, not untrusted raw_json; all
@@ -63,6 +89,39 @@ function buildPromotionEvidence(candidate, sanitized) {
     task_id: shortId(raw.task_id),
     run_ids: runIds.filter(Boolean),
     redacted: sanitized.redacted,
+  });
+}
+
+// PR3c: fold a merged candidate's provenance INTO an existing item's evidence
+// (exact OR fuzzy merge). Accrues candidate_ids / run_ids (deduped, capped) on
+// top of the existing snapshot so a reinforced lesson records every signal that
+// supported it. source_count is bumped by the stmt; this only grows the id
+// arrays and refreshes redaction metadata. Never raises confidence (PR3c-1).
+function mergeEvidence(existingEvidenceJson, candidate, sanitized) {
+  let base = {};
+  try { const p = JSON.parse(existingEvidenceJson); if (p && typeof p === 'object') base = p; } catch { /* keep {} */ }
+  let raw = {};
+  try { const p = JSON.parse(candidate.raw_json); if (p && typeof p === 'object') raw = p; } catch { /* keep {} */ }
+  const candRunIds = [];
+  if (raw.fail_run) candRunIds.push(shortId(raw.fail_run.id));
+  if (raw.fix_run) candRunIds.push(shortId(raw.fix_run.id));
+  if (raw.pm_run_id) candRunIds.push(shortId(raw.pm_run_id));
+  const append = (arr, add) => {
+    const out = Array.isArray(arr) ? arr.filter((v) => typeof v === 'string').slice(0, EVIDENCE_ID_CAP) : [];
+    for (const v of add.filter(Boolean)) {
+      if (out.length >= EVIDENCE_ID_CAP) break;
+      if (!out.includes(v)) out.push(v);
+    }
+    return out;
+  };
+  return JSON.stringify({
+    ...base,
+    candidate_ids: append(base.candidate_ids, [candidate.id]),
+    run_ids: append(base.run_ids, candRunIds.filter(Boolean)),
+    // preserve the higher redaction_version — never downgrade a future/external
+    // evidence schema marker (Codex NIT).
+    redaction_version: Math.max(Number(base.redaction_version) || 0, Number(sanitized.redactionVersion) || 0),
+    redacted: !!(base.redacted || sanitized.redacted),
   });
 }
 
@@ -131,6 +190,32 @@ function createMemoryService(db, eventBus) {
     WHERE project_id = ?
       AND content_hash = ?
       AND status = 'active'
+  `);
+
+  // PR3c: fold a candidate into an existing active item by id (exact OR fuzzy
+  // merge) — source_count++ and refreshed evidence. Confidence is NOT touched
+  // here (PR3c-1: accrual only). Guarded by id + status so a raced archive can't
+  // be resurrected.
+  const mergeItemByIdStmt = db.prepare(`
+    UPDATE memory_items
+    SET source_count = source_count + 1,
+        evidence_json = @evidenceJson,
+        updated_at = datetime('now')
+    WHERE id = @id
+      AND status = 'active'
+  `);
+
+  // PR3c: resolve a model-proposed fuzzy merge target. Enforces active +
+  // same-project + NOT-expired IN SQL (Codex BLOCKER 2: a TTL-expired row is
+  // hidden from listForProject/retrieve but was still merge-able via status
+  // alone). kind + token floor are checked by the caller in JS.
+  const getMergeTargetStmt = db.prepare(`
+    SELECT *
+    FROM memory_items
+    WHERE id = @id
+      AND project_id = @projectId
+      AND status = 'active'
+      AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))
   `);
 
   const fallbackRetrieveStmt = db.prepare(`
@@ -474,6 +559,34 @@ function createMemoryService(db, eventBus) {
     return listByStatusStmt.all(projectId, status);
   }
 
+  // PR3c: existing-memory context for the distiller, made SAFE to embed in an LLM
+  // prompt: secrets redacted, injection-marked rows skipped, whitespace collapsed,
+  // content truncated, capped. Mirrors buildInjectionBlock's injection-time
+  // re-sanitize (Codex BLOCKER 1: active rows — esp. R6 facts that bypass
+  // write-time sanitize — must not leak a token into the distiller prompt).
+  // Uses the unexpired/importance-ordered fallback query, so an expired row is
+  // never offered as a merge target (defense alongside getMergeTargetStmt). The
+  // cap is a KNOWN limitation — only the top-N actives are merge-eligible, so full
+  // semantic dedup across a 200-cap project is a later slice; surfaced via
+  // memory:distill_context_capped (Codex SERIOUS 3).
+  function listActiveForDistill(projectId, max = 60) {
+    const rows = fallbackRetrieveStmt.all({ projectId, k: max });
+    const out = [];
+    for (const r of rows) {
+      const raw = String(r.content || '');
+      if (detectInjection(raw)) continue; // never feed an injection-marked row to the model
+      const safe = redactSecrets(raw).text.replace(/\s+/g, ' ').trim().slice(0, 160);
+      if (!safe) continue;
+      out.push({ id: r.id, kind: r.kind, content: safe });
+    }
+    let total = out.length;
+    try { total = countActiveItemsStmt.get(projectId).n; } catch { /* */ }
+    if (total > max && eventBus) {
+      try { eventBus.emit('memory:distill_context_capped', { projectId, shown: out.length, total }); } catch { /* observability must never break distill */ }
+    }
+    return out;
+  }
+
   function getInjectionRecord(pmRunId) {
     return getInjectionRecordStmt.get(pmRunId) || null;
   }
@@ -758,7 +871,29 @@ function createMemoryService(db, eventBus) {
           continue;
         }
         const content = s.content;
-        const existing = getActiveMemoryItemByHashStmt.get(projectId, sha256(content));
+        // Exact dup first; if none, honor a DISTILLER-proposed semantic merge
+        // target — but re-validate it HERE (the writer never trusts the model):
+        // active / same project / same kind, AND a token-overlap FLOOR so a
+        // hallucinated or clearly-unrelated id can't fold two distinct lessons
+        // together (Codex Q1 defense-in-depth). The model judges polarity; the
+        // floor only rejects the obviously-wrong. Failed validation → treated as
+        // a fresh item (no merge).
+        let existing = getActiveMemoryItemByHashStmt.get(projectId, sha256(content));
+        let fuzzy = false;
+        if (!existing && p.mergeTargetId) {
+          const target = getMergeTargetStmt.get({ id: p.mergeTargetId, projectId });
+          // active + same-project + not-expired are enforced in SQL above; kind +
+          // token floor here. The floor is a SANITY check (reject a hallucinated /
+          // clearly-unrelated id), NOT a semantic guarantee — a polarity-reversed
+          // duplicate passes the floor and relies entirely on the model's judgment
+          // (Codex S4). PR3c-1 tolerates that because a merge never raises
+          // confidence; the worst case is recoverable via the correction UI.
+          if (target && target.kind === p.kind &&
+              jaccardSimilarity(contentTokenSet(content), contentTokenSet(target.content)) >= FUZZY_MERGE_FLOOR) {
+            existing = target;
+            fuzzy = true;
+          }
+        }
         const confidence = clampConfidence(p.confidence, confidenceCeiling);
         const importance = clampImportance(p.importance);
         // Hard-cap ADMISSION CONTROL (PR5a): a new active row only enters a full
@@ -780,23 +915,49 @@ function createMemoryService(db, eventBus) {
           activeCount -= 1;
           evicted.push({ itemId: victim.id, score: victim.score });
         }
-        const item = createMemoryItem({
-          projectId,
-          kind: p.kind,
-          content,
-          evidenceJson: buildPromotionEvidence(cand, s),
-          origin: 'batch_llm',
-          importance,
-          confidence,
-          sourceCount: 1,
-          status: 'active',
-        });
         const merged = !!existing;
-        if (!merged) activeCount += 1;
-        // PR5d: a freshly-promoted auto memory gets a TTL so it decays unless
-        // re-observed/pinned. A merge keeps the existing row's valid_to.
-        if (!merged && ttlDays > 0) {
-          setValidToStmt.run({ id: item.id, offset: `+${Math.floor(ttlDays)} days` });
+        let item;
+        if (merged) {
+          // exact OR fuzzy merge: accrue provenance only (PR3c-1) — source_count++
+          // and evidence append. No new row, so the cap and the existing row's
+          // valid_to are untouched (Codex Q4). Confidence is NOT raised here;
+          // cross-run confidence is a later slice gated on the adversarial suite
+          // (Codex Q6 ⑤). The project revision is intentionally NOT bumped here: a
+          // merge leaves the injected CONTENT unchanged (only source_count +
+          // evidence grow), so the content-based PM injection cache stays valid
+          // and PMs don't re-inject for a provenance-only change (Codex 2차 NIT).
+          // mergeItemByIdStmt guards status='active'; expired-target protection is
+          // on the READ path (getMergeTargetStmt for fuzzy; exact-hash merge of a
+          // soon-to-be-archived row is harmless — maintenance archives it next tick).
+          const mres = mergeItemByIdStmt.run({ id: existing.id, evidenceJson: mergeEvidence(existing.evidence_json, cand, s) });
+          // Must have hit the still-active target. 0 rows == it raced out of active
+          // (cross-connection / WAL) between the read above and this write — roll
+          // the batch back rather than mark a candidate merged into nothing
+          // (Codex S2).
+          if (mres.changes !== 1) {
+            const e = new Error('merge target raced (not active)');
+            e.code = 'MEMORY_CANDIDATE_RACE';
+            throw e;
+          }
+          item = existing;
+        } else {
+          item = createMemoryItem({
+            projectId,
+            kind: p.kind,
+            content,
+            evidenceJson: buildPromotionEvidence(cand, s),
+            origin: 'batch_llm',
+            importance,
+            confidence,
+            sourceCount: 1,
+            status: 'active',
+          });
+          activeCount += 1;
+          // PR5d: a freshly-promoted auto memory gets a TTL so it decays unless
+          // re-observed/pinned.
+          if (ttlDays > 0) {
+            setValidToStmt.run({ id: item.id, offset: `+${Math.floor(ttlDays)} days` });
+          }
         }
         const res = setCandidateStatusStmt.run({
           status: merged ? 'merged' : 'promoted',
@@ -811,7 +972,7 @@ function createMemoryService(db, eventBus) {
           e.code = 'MEMORY_CANDIDATE_RACE';
           throw e;
         }
-        promoted.push({ candidateId: p.candidateId, itemId: item.id, merged });
+        promoted.push({ candidateId: p.candidateId, itemId: item.id, merged, fuzzy });
       }
       return { projectId, promoted, skipped, evicted };
     },
@@ -1021,6 +1182,7 @@ function createMemoryService(db, eventBus) {
     retrieveForProject,
     buildInjectionBlock,
     listForProject,
+    listActiveForDistill,
     getInjectionRecord,
     recordInjection,
     shouldInject,

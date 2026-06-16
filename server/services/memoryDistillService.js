@@ -58,9 +58,16 @@ function createMemoryDistillService({ memoryService, distiller, logger = console
 
       const candById = new Map(candidates.map((c) => [c.id, c]));
 
+      // PR3c: hand the distiller the current active memories so it can flag a new
+      // lesson as a semantic duplicate of one (proposal.mergeTargetId). HINT only
+      // — the writer (promoteCandidates) re-validates any proposed target (active
+      // / same kind / token floor) and ignores a bad/hallucinated one.
+      let existingItems = [];
+      try { existingItems = memoryService.listActiveForDistill(job.project_id); } catch { existingItems = []; }
+
       let rawProposals;
       try {
-        rawProposals = await distiller.distill({ projectId: job.project_id, candidates });
+        rawProposals = await distiller.distill({ projectId: job.project_id, candidates, existingItems });
       } catch (err) {
         // transient (network/parse): keep candidates pending, retry w/ backoff.
         memoryService.releaseDistillJob({
@@ -85,6 +92,7 @@ function createMemoryDistillService({ memoryService, distiller, logger = console
           content: rp.content,
           confidence: rp.confidence,
           importance: rp.importance,
+          mergeTargetId: rp.mergeTargetId || null, // PR3c: writer-validated hint
         });
       }
 
