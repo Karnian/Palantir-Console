@@ -88,7 +88,7 @@ export function MemoryView({ projects = [] }) {
   }
 
   return html`
-    <div class="page memory-page">
+    <div class="page memory-page" data-view="memory">
       <div class="page-header">
         <h1>메모리</h1>
         <div class="memory-controls">
