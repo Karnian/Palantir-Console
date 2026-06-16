@@ -1,6 +1,6 @@
 # Memory Layer (ML) — 3계층 누적 암묵지 아키텍처 brief
 
-> **상태**: v1.6 — **PR1~PR2c (#197~#200) + PR3a #202 + PR3b #204 + R4 + PR4(사후교정: CRUD + MemoryView) MERGED**, 1204 tests. **candidate→active 루프 닫힘** + 사후교정 surface 완성. R4: cookie=human active / bearer·none=candidate / fact cookie-only / `PALANTIR_PM_TOKEN` opt-in. PR4: memoryService CRUD(active-set 변경만 revision bump) + PATCH cookie-only + provenance redact + MemoryView(#memory). **다음: PR5(안전·decay·graceful shutdown) + PR3c(fuzzy 병합, optional) + a11y·visual #memory route. handoff: `docs/handoff-memory-layer-pr1-2c.md`.**
+> **상태**: v1.7 — **PR1~PR2c + PR3a/3b + R4 + PR4 + PR5(안전·decay·graceful shutdown, #208~#210+) MERGED**, 1235 tests. **메모리 레이어 완비**: candidate→active 루프 + remember + 사후교정 UI + cap admission(score eviction, human/pinned 보호) + decay(TTL 90일 + valid_to 정규화 + expire maintenance + markReviewed refresh) + graceful shutdown + poisoning gate(12 invariants + injection-time re-sanitize). **다음(선택): PR3c(fuzzy 병합·cross-run confidence) / a11y·visual #memory route / L2(여러 PM→Master 승격). handoff: `docs/handoff-memory-layer-pr1-2c.md`.**
 > **작성**: 2026-06-15 (v0.1→v0.2→v0.3→v0.4)
 > **연관 spec**: `manager-v3-multilayer.md`, `h1-run-harvest-brief.md`, `h1-5-harvest-pm-review-brief.md`, `b-lite-queue-retry-brief.md`
 > **목표 한 줄**: 시스템이 **이미 결정론적으로 관측 중인 고신호 이벤트**에만 올라타 **규칙으로 후보를 포착**하고 **batch LLM으로 가끔 정제**해 **작은 승인 메모리 인덱스**를 자동 누적한다. 주입은 Codex 캐싱을 깨지 않는 **user-payload 경로로만**. evidence 스냅샷·confidence ceiling·decay·project 스코핑으로 poisoning·무한성장·드리프트·누출을 막는다.

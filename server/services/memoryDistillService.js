@@ -141,6 +141,11 @@ function createMemoryDistillService({ memoryService, distiller, logger = console
   // drain all claimable jobs. One scheduler tick == one drainAll. maxJobs is a
   // runaway guard (a buggy successor-enqueue loop can't spin forever).
   async function drainAll({ maxJobs = 100 } = {}) {
+    // PR5d maintenance: expire TTL'd memories each tick (cheap + indexed) before
+    // draining new candidates, so the active set + cap stay current. never-throws.
+    try {
+      if (typeof memoryService.expireStaleMemories === 'function') memoryService.expireStaleMemories();
+    } catch (err) { safeWarn(`[distill] expire: ${err?.message || err}`); }
     let pids = [];
     try {
       pids = memoryService.listProjectsWithPendingCandidates();

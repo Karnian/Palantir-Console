@@ -67,9 +67,10 @@ const SERVER_EMITS = Object.freeze([
   'task:recurring-spawned',
   'task:updated',
 
-  // ML memory lifecycle (PR5a observability)
+  // ML memory lifecycle (PR5a/PR5d observability)
   'memory:promoted',
   'memory:evicted',
+  'memory:decayed',
 ]);
 
 /**
