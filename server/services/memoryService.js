@@ -649,6 +649,20 @@ function createMemoryService(db, eventBus) {
     "UPDATE memory_candidates SET status=@status, promoted_to=@promotedTo, updated_at=datetime('now') WHERE id=@id AND status='pending'"
   );
 
+  // PR5a hard-cap admission control. The lowest-score EVICTABLE active item:
+  // never human, never pinned (those are protected). score = confidence*importance
+  // (recency is only a tie-break — it belongs to decay, PR5d). Returns undefined
+  // when every active row is protected.
+  const lowestEvictableStmt = db.prepare(
+    "SELECT id, (COALESCE(confidence,0) * COALESCE(importance,1)) AS score " +
+    "FROM memory_items " +
+    "WHERE project_id=? AND status='active' AND pinned=0 AND origin!='human' " +
+    "ORDER BY score ASC, COALESCE(reviewed_at, created_at) ASC, id ASC LIMIT 1"
+  );
+  const archiveVictimStmt = db.prepare(
+    "UPDATE memory_items SET status='archived', archived_at=datetime('now'), archive_reason=@reason, updated_at=datetime('now') WHERE id=@id AND status='active'"
+  );
+
   // Promote distilled proposals to active memory_items in ONE transaction. This
   // writer is the SINGLE enforcement point for every safety invariant — the
   // lease, sanitize, kind, clamps, evidence — so no caller can bypass any of
@@ -675,6 +689,7 @@ function createMemoryService(db, eventBus) {
       let activeCount = countActiveItemsStmt.get(projectId).n;
       const promoted = [];
       const skipped = [];
+      const evicted = [];
 
       // Terminal failures (bad kind, sanitize reject) mark the candidate
       // 'rejected' so it leaves the pending scan; otherwise a permanently-bad
@@ -719,10 +734,26 @@ function createMemoryService(db, eventBus) {
         }
         const content = s.content;
         const existing = getActiveMemoryItemByHashStmt.get(projectId, sha256(content));
-        // Soft cap blocks only NEW active rows; a merge adds no row.
+        const confidence = clampConfidence(p.confidence, confidenceCeiling);
+        const importance = clampImportance(p.importance);
+        // Hard-cap ADMISSION CONTROL (PR5a): a new active row only enters a full
+        // project by BEATING the lowest-score evictable item — never by blind
+        // eviction (Codex BLOCKER). human/pinned are protected
+        // (lowestEvictableStmt excludes them). A merge adds no row, so it skips
+        // the cap entirely.
         if (!existing && activeCount >= activeCap) {
-          skipped.push({ candidateId: p.candidateId, reason: 'active_cap' });
-          continue;
+          const victim = lowestEvictableStmt.get(projectId);
+          if (!victim) {
+            skipped.push({ candidateId: p.candidateId, reason: 'active_cap_all_protected' });
+            continue;
+          }
+          if (confidence * importance <= victim.score) {
+            skipped.push({ candidateId: p.candidateId, reason: 'active_cap_low_score' });
+            continue;
+          }
+          archiveVictimStmt.run({ id: victim.id, reason: 'cap_evicted' });
+          activeCount -= 1;
+          evicted.push({ itemId: victim.id, score: victim.score });
         }
         const item = createMemoryItem({
           projectId,
@@ -730,8 +761,8 @@ function createMemoryService(db, eventBus) {
           content,
           evidenceJson: buildPromotionEvidence(cand, s),
           origin: 'batch_llm',
-          importance: clampImportance(p.importance),
-          confidence: clampConfidence(p.confidence, confidenceCeiling),
+          importance,
+          confidence,
           sourceCount: 1,
           status: 'active',
         });
@@ -752,13 +783,35 @@ function createMemoryService(db, eventBus) {
         }
         promoted.push({ candidateId: p.candidateId, itemId: item.id, merged });
       }
-      return { projectId, promoted, skipped };
+      return { projectId, promoted, skipped, evicted };
     },
   );
 
+  // Emit lifecycle events AFTER the tx commits (Codex: accumulate during, emit
+  // after). Summary-first when counts are large so the 200-event replay buffer
+  // isn't flooded. never-throws.
+  function emitMemoryEvents(result) {
+    if (!eventBus || !result) return;
+    try {
+      const { projectId, promoted = [], evicted = [] } = result;
+      if (promoted.length > 5) {
+        eventBus.emit('memory:promoted', { projectId, count: promoted.length, batch: true });
+      } else {
+        for (const p of promoted) eventBus.emit('memory:promoted', { projectId, memoryItemId: p.itemId, merged: p.merged });
+      }
+      if (evicted.length > 5) {
+        eventBus.emit('memory:evicted', { projectId, count: evicted.length, batch: true, reason: 'cap_evicted' });
+      } else {
+        for (const e of evicted) eventBus.emit('memory:evicted', { projectId, memoryItemId: e.itemId, score: e.score, reason: 'cap_evicted' });
+      }
+    } catch { /* observability must never break promotion */ }
+  }
+
   function promoteCandidates({ jobId, claimToken, proposals, activeCap = DEFAULT_ACTIVE_CAP, confidenceCeiling = DEFAULT_CONFIDENCE_CEILING, maxLen = DEFAULT_MAX_LEN } = {}) {
     if (!jobId || !claimToken) throw new Error('jobId and claimToken are required');
-    return promoteCandidatesBatchTx({ jobId, claimToken, proposals, activeCap, confidenceCeiling, maxLen });
+    const result = promoteCandidatesBatchTx({ jobId, claimToken, proposals, activeCap, confidenceCeiling, maxLen });
+    emitMemoryEvents(result);
+    return result;
   }
 
   // ------------------------------------------------------------------------
@@ -770,10 +823,12 @@ function createMemoryService(db, eventBus) {
     "UPDATE memory_items SET content=@content, content_hash=@contentHash, updated_at=datetime('now') WHERE id=@id AND status='active'"
   );
   const archiveStmt = db.prepare(
-    "UPDATE memory_items SET status='archived', archived_at=datetime('now'), updated_at=datetime('now') WHERE id=@id AND status='active'"
+    "UPDATE memory_items SET status='archived', archived_at=datetime('now'), archive_reason='manual', updated_at=datetime('now') WHERE id=@id AND status='active'"
   );
+  // restore clears archived_at AND archive_reason so a later re-archive doesn't
+  // retain a stale reason (e.g. 'cap_evicted') — Codex SERIOUS.
   const restoreStmt = db.prepare(
-    "UPDATE memory_items SET status='active', archived_at=NULL, updated_at=datetime('now') WHERE id=@id AND status='archived'"
+    "UPDATE memory_items SET status='active', archived_at=NULL, archive_reason=NULL, updated_at=datetime('now') WHERE id=@id AND status='archived'"
   );
   const markReviewedStmt = db.prepare(
     "UPDATE memory_items SET reviewed_at=datetime('now'), updated_at=datetime('now') WHERE id=@id"
@@ -796,12 +851,30 @@ function createMemoryService(db, eventBus) {
     _bumpRevision(before.project_id);
     return getMemoryItemByIdStmt.get(id);
   });
-  const restoreTx = db.transaction((id) => {
+  // restore re-activates an archived row, so it is ALSO an admission into the
+  // active set and must pass the hard cap (Codex: every active transition, not
+  // just new inserts). If the project is full it evicts the lowest-score
+  // evictable item iff the restored item beats it, else throws MEMORY_CAP_FULL.
+  const restoreTx = db.transaction(({ id, activeCap }) => {
     const before = getMemoryItemByIdStmt.get(id);
+    if (!before || before.status !== 'archived') return { item: null, evicted: null };
+    let evicted = null;
+    const activeCount = countActiveItemsStmt.get(before.project_id).n;
+    if (activeCount >= activeCap) {
+      const score = (before.confidence || 0) * (before.importance || 1);
+      const victim = lowestEvictableStmt.get(before.project_id);
+      if (!victim || score <= victim.score) {
+        const e = new Error('cannot restore: active memory is at capacity');
+        e.code = 'MEMORY_CAP_FULL';
+        throw e;
+      }
+      archiveVictimStmt.run({ id: victim.id, reason: 'cap_evicted' });
+      evicted = { itemId: victim.id, score: victim.score };
+    }
     const res = restoreStmt.run({ id });
-    if (res.changes !== 1) return null; // missing or not archived
+    if (res.changes !== 1) return { item: null, evicted: null };
     _bumpRevision(before.project_id);
-    return getMemoryItemByIdStmt.get(id);
+    return { item: getMemoryItemByIdStmt.get(id), evicted };
   });
 
   function getMemoryItem(id) {
@@ -828,10 +901,11 @@ function createMemoryService(db, eventBus) {
     return archiveTx(id);
   }
 
-  function restoreMemory(id) {
+  function restoreMemory(id, { activeCap = DEFAULT_ACTIVE_CAP } = {}) {
     if (!id) throw new Error('id is required');
+    let out;
     try {
-      return restoreTx(id);
+      out = restoreTx({ id, activeCap });
     } catch (err) {
       // restoring re-activates the row; if an active item now shares its
       // content_hash or fact_key the partial-unique index fires.
@@ -840,8 +914,17 @@ function createMemoryService(db, eventBus) {
         e.code = 'MEMORY_DUPLICATE';
         throw e;
       }
-      throw err;
+      throw err; // MEMORY_CAP_FULL propagates
     }
+    if (out.evicted && eventBus) {
+      try {
+        eventBus.emit('memory:evicted', {
+          projectId: out.item ? out.item.project_id : null,
+          memoryItemId: out.evicted.itemId, score: out.evicted.score, reason: 'cap_evicted',
+        });
+      } catch { /* observability must never break restore */ }
+    }
+    return out.item;
   }
 
   function markReviewed(id) {
