@@ -6360,7 +6360,12 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 
 /* ML PR4b: MemoryView — design tokens only (K-2 light/dark auto-propagate). */
 /* PR3c-1 후속 다듬기: 헤더를 타 뷰(projects-header/title)와 정렬 + native select
-   토큰화(회색 UA select → 디자인 토큰). page-header 는 MemoryView 전용이라 한정 셀렉터. */
+   토큰화(회색 UA select → 디자인 토큰). `.page` 는 스타일이 없는 클래스라 컨테이너
+   padding 을 projects-header(20px top / 28px left)와 맞춰 제목 위치를 타 뷰와 정렬.
+   page-header 는 MemoryView 전용이라 한정 셀렉터. */
+.memory-page {
+  padding: 20px 28px 28px;
+}
 .memory-page .page-header {
   display: flex;
   align-items: center;
@@ -6393,7 +6398,7 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   color: var(--text-muted); border-radius: var(--radius-sm); cursor: pointer; font-size: 0.85rem;
 }
 .memory-tab.is-active { background: var(--accent); color: var(--text-inverse); border-color: var(--accent); }
-.memory-list { display: flex; flex-direction: column; gap: 0.75rem; margin-top: 1rem; }
+.memory-list { display: flex; flex-direction: column; gap: 0.75rem; }
 .memory-card { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 0.85rem 1rem; background: var(--bg-surface); }
 .memory-card.is-archived { opacity: 0.6; }
 .memory-card-head { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.5rem; }
