@@ -244,7 +244,7 @@ function createMemoryRouter({ memoryService, projectService }) {
       try {
         result = memoryService.restoreMemory(id);
       } catch (err) {
-        if (err && err.code === 'MEMORY_DUPLICATE') throw new BadRequestError(err.message);
+        if (err && (err.code === 'MEMORY_DUPLICATE' || err.code === 'MEMORY_CAP_FULL')) throw new BadRequestError(err.message);
         throw err;
       }
     } else if (action === 'review') {

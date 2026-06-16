@@ -267,7 +267,8 @@ test('promoteCandidates: active cap blocks NEW rows but allows merges', (t) => {
   const job = svc.claimDistillJob({});
   const res = svc.promoteCandidates({ jobId: job.id, claimToken: job.claim_token, proposals: [proposal(c.id)], activeCap: 0 });
   assert.equal(res.promoted.length, 0);
-  assert.equal(res.skipped[0].reason, 'active_cap');
+  // PR5a admission control: cap=0 with no active rows -> no evictable victim.
+  assert.equal(res.skipped[0].reason, 'active_cap_all_protected');
   assert.equal(db.prepare('SELECT status FROM memory_candidates WHERE id=?').get(c.id).status, 'pending', 'candidate stays pending under cap');
 });
 
