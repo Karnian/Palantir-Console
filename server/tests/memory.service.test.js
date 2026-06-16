@@ -48,12 +48,12 @@ test('migration 025: memory tables + FTS + triggers + revision + ledger exist', 
   ]) {
     assert.ok(names.has(expected), `expected object ${expected} to exist`);
   }
-  // PR2/PR3 tables must NOT exist in PR1.
+  // PR2b (026) added memory_candidates; PR3a (027) added memory_jobs.
   const all = new Set(
     db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name)
   );
-  // memory_candidates now exists (PR2b, migration 026). memory_jobs remains PR3.
-  assert.equal(all.has('memory_jobs'), false, 'memory_jobs is PR3 — out of scope');
+  assert.ok(all.has('memory_candidates'), 'memory_candidates exists (PR2b, migration 026)');
+  assert.ok(all.has('memory_jobs'), 'memory_jobs exists (PR3a, migration 027)');
 });
 
 test('createMemoryItem: inserts active row, revision 1 on first change, 2 on second', (t) => {
