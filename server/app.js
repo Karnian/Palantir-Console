@@ -54,6 +54,8 @@ const { createWorkerPresetsRouter } = require('./routes/workerPresets');
 const { createMcpTemplateService } = require('./services/mcpTemplateService');
 const { createMcpTemplatesRouter } = require('./routes/mcpTemplates');
 const { createMemoryService } = require('./services/memoryService');
+const { createMemoryDistillService } = require('./services/memoryDistillService');
+const { createLiveDistiller } = require('./services/distillers/liveDistiller');
 const { createMemoryRouter } = require('./routes/memory');
 
 const AUTO_REVIEW_MAX = 5;
@@ -629,6 +631,33 @@ function createApp(options = {}) {
   // ML PR2c: R3 PM verdict capture (coherent task_complete -> candidate).
   createR3Capture({ eventBus, memoryService });
 
+  // ML PR3b: live distiller + periodic scheduler. OFF by default. Gated on
+  // PALANTIR_MEMORY_DISTILL=1 AND (an ANTHROPIC_API_KEY for the real model, or
+  // an injected distiller for tests). All distill safety (sanitize / clamp /
+  // evidence) lives in promoteCandidatesBatchTx, so this only wires a real
+  // model + a periodic drain of pending candidates -> active memory.
+  let memoryDistillScheduler = null;
+  {
+    const distillEnabled = options.memoryDistillEnabled ?? (process.env.PALANTIR_MEMORY_DISTILL === '1');
+    if (distillEnabled) {
+      let distiller = options.distiller || null;
+      const apiKey = process.env.ANTHROPIC_API_KEY;
+      if (!distiller && !apiKey) {
+        console.warn('[memory-distill] PALANTIR_MEMORY_DISTILL=1 but no ANTHROPIC_API_KEY and no injected distiller — scheduler NOT started');
+      } else {
+        try {
+          if (!distiller) distiller = createLiveDistiller({ apiKey });
+          const distillService = createMemoryDistillService({ memoryService, distiller });
+          const intervalMs = Number.parseInt(process.env.PALANTIR_MEMORY_DISTILL_INTERVAL_MS, 10) || 300000;
+          memoryDistillScheduler = distillService.startScheduler({ intervalMs });
+          console.log(`[memory-distill] scheduler started (interval ${intervalMs}ms, distiller=${distiller.name})`);
+        } catch (err) {
+          console.warn(`[memory-distill] failed to start scheduler: ${err && err.message}`);
+        }
+      }
+    }
+  }
+
   // v3 Phase 4: annotate-only reconciliation. reconciliationService
   // reads conversationService.peekParentNotices to detect "user
   // intervention stale" claims, so it has to be constructed AFTER
@@ -830,6 +859,7 @@ function createApp(options = {}) {
       console.warn('[app.shutdown] manager dispose sweep failed:', err && err.message);
     }
     try { webhookService.stop(); } catch { /* ignore */ }
+    try { if (memoryDistillScheduler) memoryDistillScheduler.stop(); } catch { /* ignore */ }
     lifecycleService.stopMonitoring();
     closeDb();
   };

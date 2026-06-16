@@ -493,6 +493,15 @@ function createMemoryService(db, eventBus) {
     return listCandidatesStmt.all(projectId, status);
   }
 
+  // PR3b: projects that currently have at least one pending candidate — the
+  // scheduler uses this to know which projects to enqueue a distill job for.
+  const listPendingProjectsStmt = db.prepare(
+    "SELECT DISTINCT project_id FROM memory_candidates WHERE status = 'pending'"
+  );
+  function listProjectsWithPendingCandidates() {
+    return listPendingProjectsStmt.all().map((r) => r.project_id);
+  }
+
   // ------------------------------------------------------------------------
   // PR3a: batch-distill job queue (CAS lease) + candidate -> active promotion.
   // The deterministic rules stage candidates; a batch distiller claims a durable
@@ -745,6 +754,7 @@ function createMemoryService(db, eventBus) {
     upsertFact,
     createCandidate,
     listCandidates,
+    listProjectsWithPendingCandidates,
     enqueueDistillJob,
     claimDistillJob,
     requeueStaleJobs,

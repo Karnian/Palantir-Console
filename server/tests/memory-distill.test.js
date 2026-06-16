@@ -17,6 +17,7 @@ const { createDatabase } = require('../db/database');
 const { createMemoryService } = require('../services/memoryService');
 const { createMemoryDistillService } = require('../services/memoryDistillService');
 const { createFakeDistiller } = require('../services/distillers/fakeDistiller');
+const { createLiveDistiller } = require('../services/distillers/liveDistiller');
 
 function setupDb(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-distill-'));
@@ -509,4 +510,86 @@ test('runOnce: terminal-bad output marks candidate rejected so it leaves the pen
   await createMemoryDistillService({ memoryService: svc, distiller }).runOnce({});
   assert.equal(db.prepare('SELECT status FROM memory_candidates WHERE id=?').get(c.id).status, 'rejected');
   assert.equal(svc.listCandidates('p1', 'pending').length, 0, 'rejected candidate leaves the pending scan');
+});
+
+// ===========================================================================
+// PR3b: listProjectsWithPendingCandidates + drainAll + startScheduler + live
+// ===========================================================================
+
+test('listProjectsWithPendingCandidates: distinct projects with pending only', (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  seedR1b(svc, { projectId: 'p1', dedupKey: 'r1b:t1:x:y' });
+  seedR1b(svc, { projectId: 'p2', dedupKey: 'r1b:t1:x:y' });
+  const pids = svc.listProjectsWithPendingCandidates().sort();
+  assert.deepEqual(pids, ['p1', 'p2']);
+});
+
+test('drainAll: enqueues + drains every project with pending candidates', async (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  seedR1b(svc, { projectId: 'p1', dedupKey: 'r1b:t1:x:y' });
+  seedR1b(svc, { projectId: 'p2', dedupKey: 'r1b:t1:x:y' });
+  const distill = createMemoryDistillService({ memoryService: svc, distiller: createFakeDistiller() });
+  const results = await distill.drainAll();
+  assert.ok(results.length >= 2, 'both projects produced a drained job');
+  assert.equal(svc.listForProject('p1').length, 1);
+  assert.equal(svc.listForProject('p2').length, 1);
+  assert.equal(svc.listProjectsWithPendingCandidates().length, 0, 'no pending candidates left');
+});
+
+test('drainAll: no pending candidates -> no work, returns empty', async (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  const distill = createMemoryDistillService({ memoryService: svc, distiller: createFakeDistiller() });
+  assert.deepEqual(await distill.drainAll(), []);
+});
+
+test('startScheduler: manual tick drains; stop() clears the timer', async (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  seedR1b(svc);
+  const distill = createMemoryDistillService({ memoryService: svc, distiller: createFakeDistiller() });
+  const sched = distill.startScheduler({ intervalMs: 999999 }); // long interval; we drive tick() by hand
+  try {
+    await sched.tick();
+    assert.equal(svc.listForProject('p1').length, 1, 'tick promoted the pending candidate');
+  } finally {
+    sched.stop();
+  }
+});
+
+test('liveDistiller + runOnce: end-to-end candidate -> active (mock model, zero network)', async (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  const c = seedR1b(svc);
+  svc.enqueueDistillJob('p1');
+  const callModel = async () => JSON.stringify([
+    { candidateId: c.id, kind: 'pitfall', content: 'Generalized lesson distilled from the fix pair.', confidence: 0.6, importance: 6 },
+  ]);
+  const distiller = createLiveDistiller({ callModel });
+  const r = await createMemoryDistillService({ memoryService: svc, distiller }).runOnce({});
+  assert.equal(r.promoted.length, 1);
+  const item = db.prepare('SELECT * FROM memory_items WHERE id=?').get(r.promoted[0].itemId);
+  assert.equal(item.origin, 'batch_llm');
+  assert.equal(item.kind, 'pitfall');
+  assert.match(item.content, /Generalized lesson/);
+  // and the full safety chain still applied (evidence built from candidate raw)
+  assert.equal(JSON.parse(item.evidence_json).rule, 'R1b');
+});
+
+test('liveDistiller + runOnce: model emitting a secret is still redacted by the writer', async (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  const c = seedR1b(svc);
+  svc.enqueueDistillJob('p1');
+  // a misbehaving model that leaks a token — the writer must still redact it.
+  const callModel = async () => JSON.stringify([
+    { candidateId: c.id, kind: 'pitfall', content: 'Set ghp_0123456789abcdefghijABCDEFGHIJklmnop then rebuild.', confidence: 0.6 },
+  ]);
+  const r = await createMemoryDistillService({ memoryService: svc, distiller: createLiveDistiller({ callModel }) }).runOnce({});
+  assert.equal(r.promoted.length, 1);
+  const item = db.prepare('SELECT content FROM memory_items WHERE id=?').get(r.promoted[0].itemId);
+  assert.match(item.content, /\[REDACTED\]/);
+  assert.doesNotMatch(item.content, /ghp_/);
 });

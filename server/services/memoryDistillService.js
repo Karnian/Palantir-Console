@@ -137,7 +137,53 @@ function createMemoryDistillService({ memoryService, distiller, logger = console
     }
   }
 
-  return { runOnce };
+  // Ensure a distill job exists for every project with pending candidates, then
+  // drain all claimable jobs. One scheduler tick == one drainAll. maxJobs is a
+  // runaway guard (a buggy successor-enqueue loop can't spin forever).
+  async function drainAll({ maxJobs = 100 } = {}) {
+    let pids = [];
+    try {
+      pids = memoryService.listProjectsWithPendingCandidates();
+    } catch (err) {
+      safeWarn(`[distill] listPendingProjects: ${err?.message || err}`);
+      return [];
+    }
+    for (const pid of pids) {
+      try { memoryService.enqueueDistillJob(pid); } catch (err) { safeWarn(`[distill] enqueue ${pid}: ${err?.message || err}`); }
+    }
+    const results = [];
+    let guard = 0;
+    while (guard < maxJobs) {
+      const r = await runOnce({});
+      if (!r.claimed) break;
+      results.push(r);
+      guard += 1;
+    }
+    return results;
+  }
+
+  // Periodic driver. Off unless wired (app.js gates on PALANTIR_MEMORY_DISTILL).
+  // unref() so the timer never keeps the process alive; `busy` prevents
+  // overlapping ticks if a drain runs long. Returns { stop, tick }.
+  //
+  // stop() clears future ticks but does NOT abort/await an in-flight drain — a
+  // model call may still be pending when app.shutdown closes the DB. Tolerable
+  // here: drainAll/runOnce never throw (DB-after-close errors are swallowed and
+  // logged) and the timer is unref'd, so the process still exits cleanly. A
+  // graceful abort/await is deferred to PR5 (Codex follow-up NIT 3).
+  function startScheduler({ intervalMs = 300000 } = {}) {
+    let busy = false;
+    const tick = async () => {
+      if (busy) return;
+      busy = true;
+      try { await drainAll(); } catch (err) { safeWarn(`[distill] scheduler tick: ${err?.message || err}`); } finally { busy = false; }
+    };
+    const timer = setInterval(tick, intervalMs);
+    if (timer && typeof timer.unref === 'function') timer.unref();
+    return { stop: () => clearInterval(timer), tick };
+  }
+
+  return { runOnce, drainAll, startScheduler };
 }
 
 module.exports = { createMemoryDistillService };
