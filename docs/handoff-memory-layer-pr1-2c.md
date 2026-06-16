@@ -1,9 +1,9 @@
 # Handoff — Memory Layer PR1~PR3b 완료 (candidate→active 루프 닫힘), 후속 재입장
 
 > **작성**: 2026-06-16
-> **상태**: PR1~PR2c (#197~#200) + PR3a (#202, batch-distill 뼈대) + **PR3b (live distiller + scheduler) merged**. 1169 tests.
+> **상태**: PR1~PR2c (#197~#200) + PR3a (#202) + PR3b (#204, live distiller) + **R4 (remember, actor split) merged**. 1188 tests.
 > **비전 달성**: worker harvest/PM판정 → candidate → (PR3b live distiller) → active memory → 다음 PM 세션 주입. `PALANTIR_MEMORY_DISTILL=1` + `ANTHROPIC_API_KEY` 시 runtime 자동 작동.
-> **spec**: `docs/specs/memory-layer-brief.md` (v1.x). **다음: remember(R4) / PR4(UI 사후교정) / PR5(안전·decay·graceful shutdown) / PR3c(fuzzy 병합·cross-run confidence, optional).**
+> **spec**: `docs/specs/memory-layer-brief.md` (v1.x). **다음: PR4(UI 사후교정 MemoryView) / PR5(안전·decay·graceful shutdown) / PR3c(fuzzy 병합·cross-run confidence, optional).**
 
 ## 1. 완료된 것 (main)
 
@@ -31,9 +31,11 @@
 
 ## 3. 남은 작업 (PR3~5 + remember)
 
-### remember (R4) — auth.method 분리 [LLM 0, 단순]
-- `POST /api/projects/:id/memory/remember`. **쿠키 인증=사람→즉시 active**(non-fact는 createMemoryItem origin='human', fact는 upsertFact). **bearer=PM/CLI→candidate(rule R4)**.
-- Codex BLOCKER: 현재 shared `PALANTIR_TOKEN`이라 쿠키/bearer spoof 가능 → **middleware(`middleware/auth.js`)가 `req.auth.method='cookie'|'bearer'` 설정**, bearer 있으면 cookie 있어도 bearer 판정. 완전 spoof-proof는 별도 PM token 필요(미래).
+### remember (R4) ✅ merged — actor split
+- `POST /api/projects/:id/memory/remember`. **cookie=human→active** (non-fact createMemoryItem origin='human', fact upsertFact origin='human'). **bearer/none=R4 candidate** (distiller 정제, never directly active). **fact는 cookie-only** (promoter가 fact candidate 거부).
+- 모든 content sanitize (secret redact / injection reject / cap 2000); fact는 prose length floor만 skip (injection·redact·whitespace-collapse·cap은 적용). fact_key ASCII allowlist regex(`^[a-z0-9_]+(\.[a-z0-9_]+)*$`, Unicode dot 우회 차단) + `env.*` 예약(R6 namespace 보호).
+- `req.auth.method` (auth.js, 성공 검증 후만 set, route는 fail-closed). **`PALANTIR_PM_TOKEN` opt-in** = spoof-proof bearer(cookie는 PALANTIR_TOKEN만 매칭, PM token cookie 거부). 미설정 시 shared-token best-effort(hint, not boundary — Codex 수용). 완전 분리(PM spawn env)는 "PM이 remember 호출" 기능 후속.
+- Codex 3라운드 적대리뷰 PASS (R1 shared-token BLOCKER→PM token opt-in 수용 / R2 fact injection BLOCKER→detectInjection / R3 PASS).
 
 ### PR3a — batch-distill 뼈대 ✅ (이번, merged)
 - migration 027 `memory_jobs`(CAS lease, single-flight partial unique) + memoryService CAS(enqueue/claim/requeueStale/release, token-guarded) + `promoteCandidatesBatchTx` + memorySanitize + `memoryDistillService.runOnce` + fakeDistiller.
