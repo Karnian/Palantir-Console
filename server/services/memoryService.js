@@ -400,11 +400,45 @@ function createMemoryService(db, eventBus) {
     return { inject, revision, block: null };
   }
 
+  // PR2b: rule candidates (R1b/R3/R4). Deterministic rules stage raw signals
+  // here; PR3 batch LLM promotes them to active memory_items. Idempotent via
+  // INSERT OR IGNORE against UNIQUE(rule, project_id, dedup_key).
+  // ON CONFLICT targets ONLY the dedup UNIQUE — a CHECK violation (bad rule /
+  // non-object raw_json) must surface, not be swallowed like `INSERT OR IGNORE`
+  // would (Codex cross-review SERIOUS).
+  const insertCandidateStmt = db.prepare(
+    'INSERT INTO memory_candidates (id, project_id, rule, raw_json, dedup_key) VALUES (@id, @projectId, @rule, @rawJson, @dedupKey) ON CONFLICT(rule, project_id, dedup_key) DO NOTHING'
+  );
+  const getCandidateByDedupStmt = db.prepare(
+    'SELECT * FROM memory_candidates WHERE rule = ? AND project_id = ? AND dedup_key = ?'
+  );
+  const listCandidatesStmt = db.prepare(
+    'SELECT * FROM memory_candidates WHERE project_id = ? AND status = ? ORDER BY created_at ASC, id ASC'
+  );
+
+  function createCandidate({ projectId, rule, rawJson, dedupKey } = {}) {
+    if (!projectId) throw new Error('projectId is required');
+    if (!rule) throw new Error('rule is required');
+    if (!rawJson) throw new Error('rawJson is required');
+    if (!dedupKey) throw new Error('dedupKey is required');
+    const raw = typeof rawJson === 'string' ? rawJson : JSON.stringify(rawJson);
+    JSON.parse(raw); // validate JSON shape before hitting the CHECK
+    insertCandidateStmt.run({ id: crypto.randomUUID(), projectId, rule, rawJson: raw, dedupKey });
+    // INSERT OR IGNORE -> on a dup the row is unchanged; return the holder.
+    return getCandidateByDedupStmt.get(rule, projectId, dedupKey);
+  }
+
+  function listCandidates(projectId, status = 'pending') {
+    return listCandidatesStmt.all(projectId, status);
+  }
+
   return {
     _bumpRevision,
     getRevision,
     createMemoryItem,
     upsertFact,
+    createCandidate,
+    listCandidates,
     retrieveForProject,
     buildInjectionBlock,
     listForProject,

@@ -81,7 +81,7 @@ function createRunService(db, eventBus) {
       ORDER BY r.created_at DESC
     `),
     getByTask: db.prepare(`
-      SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
+      SELECT r.*, r.rowid AS _seq, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
              t.title as task_title, t.project_id as project_id, p.name as project_name
       FROM runs r
       LEFT JOIN agent_profiles ap ON r.agent_profile_id = ap.id

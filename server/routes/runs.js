@@ -199,7 +199,8 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
   router.get('/', asyncHandler(async (req, res) => {
     const { task_id, status } = req.query;
     const runs = runService.listRuns({ task_id, status });
-    res.json({ runs });
+    // Strip the internal rowid: getByTask exposes _seq only for R1b ordering.
+    res.json({ runs: runs.map(({ _seq, ...rest }) => rest) });
   }));
 
   router.get('/:id', asyncHandler(async (req, res) => {
