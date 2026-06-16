@@ -191,6 +191,41 @@ test('R1b: same-second runs tie-break by id deterministically', (t) => {
   assert.equal(JSON.parse(cands[0].raw_json).fail_run.id, 'aaa-x');
 });
 
+test('R1b: same-second runs use rowid (_seq) creation order, NOT id sort', (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  // All share created_at. id-sort would order aaa<mmm<zzz => X,Y,Z and wrongly
+  // pair X->Y. _seq is the true creation order X(1)->Z(2)->Y(3): Y's prev RUN
+  // is Z (no harvest:test), so NO candidate (Codex r2 BLOCKER repro).
+  const runs = [
+    { id: 'run_aaa_fail', task_id: 't1', created_at: '2026-01-01 00:00:00', _seq: 1 },
+    { id: 'run_zzz_notest', task_id: 't1', created_at: '2026-01-01 00:00:00', _seq: 2 },
+    { id: 'run_mmm_pass', task_id: 't1', created_at: '2026-01-01 00:00:00', _seq: 3 },
+  ];
+  const emit = wireR1b(svc, runs, {
+    run_aaa_fail: [hTest(false, 10)],
+    run_zzz_notest: [hDiff('noop', 15)],
+    run_mmm_pass: [hTest(true, 21)],
+  });
+  emit({ id: 'run_mmm_pass', is_manager: 0, project_id: 'p1', task_id: 't1' });
+  assert.equal(svc.listCandidates('p1').length, 0, 'rowid order: same-second intervening no-test run still breaks the pair');
+});
+
+test('R1b: rowid (_seq) ordering forms the pair when prev RUN is the FAIL', (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  // Same second, _seq X(1)->Y(2): Y's prev run is the FAIL X -> candidate.
+  const runs = [
+    { id: 'run_zzz_fail', task_id: 't1', created_at: '2026-01-01 00:00:00', _seq: 1 },
+    { id: 'run_aaa_pass', task_id: 't1', created_at: '2026-01-01 00:00:00', _seq: 2 },
+  ];
+  const emit = wireR1b(svc, runs, { run_zzz_fail: [hTest(false, 10)], run_aaa_pass: [hTest(true, 21)] });
+  emit({ id: 'run_aaa_pass', is_manager: 0, project_id: 'p1', task_id: 't1' });
+  const cands = svc.listCandidates('p1');
+  assert.equal(cands.length, 1);
+  assert.equal(JSON.parse(cands[0].raw_json).fail_run.id, 'run_zzz_fail', 'pairs by rowid even when id-sort would invert');
+});
+
 test('createCandidate: invalid rule violates CHECK and throws (not swallowed)', (t) => {
   const db = setupDb(t);
   const svc = createMemoryService(db);

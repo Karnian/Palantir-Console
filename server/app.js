@@ -336,14 +336,20 @@ function createR1bCapture({ eventBus, runService, memoryService, logger = consol
     const y = testResult(yEvents);
     if (!y || !y.passed) return; // the fix run must itself be a PASS
 
-    // Order ALL same-task runs by (created_at, id) — a stable run-creation
-    // contract. We inspect the IMMEDIATELY preceding RUN (not just the
+    // Order ALL same-task runs by rowid (_seq, exposed by getByTask) = true
+    // creation order. We inspect the IMMEDIATELY preceding RUN (not just the
     // preceding test-run): an intervening run without a harvest:test means Y
     // is not a direct fix of X, so we must NOT skip it (Codex cross-review
     // BLOCKER — false fix-pairs from skipped no-test runs).
     let taskRuns;
     try { taskRuns = runService.listRuns({ task_id: run.task_id }) || []; } catch { return; }
     const ordered = taskRuns.slice().sort((a, b) => {
+      // True creation order is the runs rowid (getByTask exposes it as _seq).
+      // created_at is only second-resolution and run ids are random UUIDs, so
+      // (created_at,id) is deterministic but NOT creation order — same-second
+      // runs could mis-sort and forge a fix pair (Codex r2 BLOCKER). rowid is
+      // monotonic with INSERT order. Fallback only for callers lacking _seq.
+      if (a._seq != null && b._seq != null) return a._seq - b._seq;
       const ca = a.created_at || '';
       const cb = b.created_at || '';
       if (ca !== cb) return ca < cb ? -1 : 1;
