@@ -44,9 +44,19 @@ function timingSafeEqualStr(a, b) {
   return crypto.timingSafeEqual(aBuf, bBuf);
 }
 
-function createAuthMiddleware({ token = process.env.PALANTIR_TOKEN } = {}) {
+function createAuthMiddleware({ token = process.env.PALANTIR_TOKEN, pmToken = process.env.PALANTIR_PM_TOKEN } = {}) {
   return (req, res, next) => {
-    if (!token) return next(); // auth disabled
+    // req.auth.method records HOW the caller authenticated so routes can make
+    // actor decisions (ML R4: cookie=human→active vs bearer=PM/CLI→candidate).
+    //
+    // Actor split & spoofing: when a distinct PALANTIR_PM_TOKEN is configured,
+    // the PM/CLI authenticates with it as bearer and CANNOT present the human
+    // cookie (which only matches PALANTIR_TOKEN) — that's the spoof-proof path,
+    // PROVIDED the PM is given only PALANTIR_PM_TOKEN. Without a separate PM
+    // token the bearer/cookie split falls back to the shared PALANTIR_TOKEN and
+    // is a best-effort actor hint, NOT a security boundary (a token holder can
+    // present either form). See routes/memory.js R4 + docs.
+    if (!token) { req.auth = { method: 'none' }; return next(); } // auth disabled
 
     // Precedence: Bearer header is evaluated FIRST, and a present-but-
     // invalid Bearer header is treated as an explicit auth failure —
@@ -61,15 +71,21 @@ function createAuthMiddleware({ token = process.env.PALANTIR_TOKEN } = {}) {
     // no longer do post-PR1), so this policy doesn't affect the SPA.
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
-      if (timingSafeEqualStr(authHeader.slice(7), token)) return next();
+      const presented = authHeader.slice(7);
+      // A separate PM token (if set) is bearer-only and never matches the human
+      // cookie path below, so a PM holding only it cannot spoof a human write.
+      if (pmToken && timingSafeEqualStr(presented, pmToken)) { req.auth = { method: 'bearer' }; return next(); }
+      if (timingSafeEqualStr(presented, token)) { req.auth = { method: 'bearer' }; return next(); }
       throw new ForbiddenError('Invalid token');
     }
 
     // Cookie path (browser — required for EventSource SSE since it cannot
     // send custom headers). Set by POST /api/auth/login, never by the
-    // server automatically.
+    // server automatically. Only the human PALANTIR_TOKEN authenticates here;
+    // a PM token presented as a cookie does NOT (keeps the human path distinct).
     const cookies = parseCookies(req.headers.cookie);
     if (cookies.palantir_token && timingSafeEqualStr(cookies.palantir_token, token)) {
+      req.auth = { method: 'cookie' };
       return next();
     }
 

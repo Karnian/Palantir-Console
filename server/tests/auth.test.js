@@ -14,7 +14,7 @@ const path = require('node:path');
 const os = require('node:os');
 const request = require('supertest');
 const { createApp } = require('../app');
-const { parseCookies } = require('../middleware/auth');
+const { parseCookies, createAuthMiddleware } = require('../middleware/auth');
 
 async function createTempDir(prefix) {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -363,4 +363,64 @@ test('index.html serves marked/purify from /vendor (not jsdelivr)', async (t) =>
   assert.deepEqual(cdnSrcs, [], `<script> still loads from jsdelivr: ${cdnSrcs.join(', ')}`);
   assert.ok(scriptSrcs.some(s => s.includes('vendor/marked.min.js')), `marked self-host missing. scripts=${scriptSrcs.join(', ')}`);
   assert.ok(scriptSrcs.some(s => s.includes('vendor/purify.min.js')), `purify self-host missing. scripts=${scriptSrcs.join(', ')}`);
+});
+
+// ML R4: req.auth.method records HOW the caller authenticated so routes can
+// make actor decisions. Set ONLY after successful validation (Codex: never set
+// it merely because a bearer header is present).
+test('createAuthMiddleware: req.auth.method = bearer on valid Bearer', () => {
+  const mw = createAuthMiddleware({ token: 'tok' });
+  const req = { headers: { authorization: 'Bearer tok' } };
+  let nexted = false;
+  mw(req, {}, () => { nexted = true; });
+  assert.equal(nexted, true);
+  assert.equal(req.auth.method, 'bearer');
+});
+
+test('createAuthMiddleware: req.auth.method = cookie on valid cookie', () => {
+  const mw = createAuthMiddleware({ token: 'tok' });
+  const req = { headers: { cookie: 'palantir_token=tok' } };
+  let nexted = false;
+  mw(req, {}, () => { nexted = true; });
+  assert.equal(nexted, true);
+  assert.equal(req.auth.method, 'cookie');
+});
+
+test('createAuthMiddleware: invalid Bearer throws, does NOT fall through or set a success method', () => {
+  const mw = createAuthMiddleware({ token: 'tok' });
+  const req = { headers: { authorization: 'Bearer WRONG', cookie: 'palantir_token=tok' } };
+  let nexted = false;
+  assert.throws(() => mw(req, {}, () => { nexted = true; }));
+  assert.equal(nexted, false, 'invalid bearer must fail closed, not fall through to cookie');
+});
+
+test('createAuthMiddleware: no token configured -> method = none', () => {
+  const mw = createAuthMiddleware({ token: null });
+  const req = { headers: {} };
+  let nexted = false;
+  mw(req, {}, () => { nexted = true; });
+  assert.equal(nexted, true);
+  assert.equal(req.auth.method, 'none');
+});
+
+// ML R4 (Codex BLOCKER fix): a separate PM token authenticates as bearer and
+// CANNOT spoof the human cookie path (which only matches PALANTIR_TOKEN), so a
+// PM holding only PALANTIR_PM_TOKEN cannot make an active human write.
+test('createAuthMiddleware: separate PM token = bearer, cannot spoof human cookie', () => {
+  const mw = createAuthMiddleware({ token: 'human-tok', pmToken: 'pm-tok' });
+  const run = (headers) => { const req = { headers }; let ok = false; let threw = false; try { mw(req, {}, () => { ok = true; }); } catch { threw = true; } return { req, ok, threw }; };
+
+  let r = run({ authorization: 'Bearer pm-tok' });
+  assert.equal(r.ok, true); assert.equal(r.req.auth.method, 'bearer');
+
+  r = run({ cookie: 'palantir_token=human-tok' });
+  assert.equal(r.ok, true); assert.equal(r.req.auth.method, 'cookie');
+
+  // PM token presented as the human cookie must NOT authenticate.
+  r = run({ cookie: 'palantir_token=pm-tok' });
+  assert.equal(r.threw, true, 'PM token cannot spoof the human cookie');
+
+  // human token as bearer still works (CLI human) -> bearer.
+  r = run({ authorization: 'Bearer human-tok' });
+  assert.equal(r.ok, true); assert.equal(r.req.auth.method, 'bearer');
 });

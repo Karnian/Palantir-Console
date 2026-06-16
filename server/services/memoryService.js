@@ -312,7 +312,11 @@ function createMemoryService(db, eventBus) {
     return getMemoryItemByIdStmt.get(item.id);
   });
 
-  function upsertFact({ projectId, factKey, content, evidenceJson, importance } = {}) {
+  // origin defaults to 'rule:R6' (the deterministic env-fact rule, the original
+  // caller). R4 human remember passes origin='human' to upsert a person-authored
+  // fact through the same fact_key supersede semantics. Must be a CHECK-allowed
+  // origin ('human' is).
+  function upsertFact({ projectId, factKey, content, evidenceJson, importance, origin = 'rule:R6' } = {}) {
     if (!projectId) throw new Error('projectId is required');
     if (!factKey) throw new Error('factKey is required');
     if (!content) throw new Error('content is required');
@@ -326,7 +330,7 @@ function createMemoryService(db, eventBus) {
       content,
       contentHash,
       evidenceJson: finalEvidenceJson,
-      origin: 'rule:R6',
+      origin,
       sourceCount: 1,
       confidence: 0.9,
       importance: importance ?? 5,
