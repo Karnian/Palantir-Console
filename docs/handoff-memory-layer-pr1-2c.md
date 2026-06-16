@@ -1,9 +1,9 @@
 # Handoff — Memory Layer PR1~PR3b 완료 (candidate→active 루프 닫힘), 후속 재입장
 
 > **작성**: 2026-06-16
-> **상태**: PR1~PR2c (#197~#200) + PR3a (#202) + PR3b (#204, live distiller) + **R4 (remember, actor split) merged**. 1188 tests.
+> **상태**: PR1~PR2c (#197~#200) + PR3a (#202) + PR3b (#204) + R4 (remember) + **PR4 (사후교정: CRUD + MemoryView) merged**. 1204 tests.
 > **비전 달성**: worker harvest/PM판정 → candidate → (PR3b live distiller) → active memory → 다음 PM 세션 주입. `PALANTIR_MEMORY_DISTILL=1` + `ANTHROPIC_API_KEY` 시 runtime 자동 작동.
-> **spec**: `docs/specs/memory-layer-brief.md` (v1.x). **다음: PR4(UI 사후교정 MemoryView) / PR5(안전·decay·graceful shutdown) / PR3c(fuzzy 병합·cross-run confidence, optional).**
+> **spec**: `docs/specs/memory-layer-brief.md` (v1.x). **다음: PR5(안전·decay·graceful shutdown) / PR3c(fuzzy 병합·cross-run confidence, optional) / a11y·visual route 배열에 #memory 추가.**
 
 ## 1. 완료된 것 (main)
 
@@ -52,8 +52,10 @@
 ### PR3c — fuzzy 병합·cross-run confidence [optional, 다음]
 - exact content_hash 병합은 PR3a 완료. 남은 정교화: fuzzy/semantic 병합(FTS top-N Jaccard) + confidence cross-run 상향(독립 source≥2) + threshold(pending≥3 or oldest≥10min) + rate cap.
 
-### PR4 — UI 사후교정 [∥ PR3 후]
-- `MemoryView.js` + `#memory` 라우트: 열람/편집/archive/supersede + provenance(evidence) 표시. (U1 자동누적+사후교정의 교정 surface.)
+### PR4 ✅ merged — 사후교정 (backend CRUD + MemoryView)
+- **PR4a (#206)** backend: migration 028(archived_at, pinned) + memoryService CRUD(update/archive/restore/review/pin — **active-set 변경만 revision bump**) + PATCH(**cookie-only** actor split, R4 와 일관) + GET ?status(active/archived/superseded/all) + GET/provenance(evidence 재귀 redact 값+키, null-proto).
+- **PR4b** UI: `MemoryView`(#memory) — project selector + status tabs + 카드(kind/origin/confidence/pinned) + 액션(edit/archive/restore/review/pin + provenance modal). XSS-safe(HTM text node), 디자인 토큰만(K-2 light/dark), stale-fetch guard + 성공 시만 modal close.
+- Codex 적대리뷰 PASS (PR4a SERIOUS evidence-key redact + PATCH cookie-only / PR4b SERIOUS A2 stale-fetch + A5 modal-close 반영). 남은 NIT: a11y/visual route 배열에 `#memory` 추가(후속).
 
 ### PR5 — 안전·decay·관측
 - valid_to TTL/decay/hard cap(project당 active 200), observability 이벤트, poisoning 통합 게이트.

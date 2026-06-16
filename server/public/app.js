@@ -34,6 +34,7 @@ import { NewTaskModal, ExecuteModal, TaskDetailPanel } from './app/components/Ta
 import { SkillPacksView } from './app/components/SkillPacksView.js';
 import { PresetsView } from './app/components/PresetsView.js';
 import { McpTemplatesView } from './app/components/McpTemplatesView.js';
+import { MemoryView } from './app/components/MemoryView.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sidebar Navigation
@@ -393,6 +394,9 @@ function App() {
     }
     if (routeBase === 'mcp-servers') {
       return html`<${McpTemplatesView} />`;
+    }
+    if (routeBase === 'memory') {
+      return html`<${MemoryView} projects=${projects} />`;
     }
     if (routeBase === 'run') {
       const runId = route.split('/')[1];

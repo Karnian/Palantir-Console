@@ -446,8 +446,18 @@ function createMemoryService(db, eventBus) {
     }
   }
 
-  function listForProject(projectId) {
-    return listForProjectStmt.all(projectId);
+  const listByStatusStmt = db.prepare(
+    'SELECT * FROM memory_items WHERE project_id = ? AND status = ? ORDER BY importance DESC, updated_at DESC'
+  );
+  const listAllStatusStmt = db.prepare(
+    "SELECT * FROM memory_items WHERE project_id = ? ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'archived' THEN 1 ELSE 2 END, importance DESC, updated_at DESC"
+  );
+  // status: 'active' (default; valid_to-filtered, used by injection) / 'archived'
+  // / 'superseded' / 'all' (correction UI). Only the active path is injected.
+  function listForProject(projectId, status = 'active') {
+    if (status === 'all') return listAllStatusStmt.all(projectId);
+    if (status === 'active') return listForProjectStmt.all(projectId);
+    return listByStatusStmt.all(projectId, status);
   }
 
   function getInjectionRecord(pmRunId) {

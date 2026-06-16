@@ -18,4 +18,5 @@ export const NAV_ITEMS = [
   { hash: 'skills',      icon: '♢', label: NAV_LABELS.skills },
   { hash: 'presets',     icon: '❖', label: NAV_LABELS.presets },
   { hash: 'mcp-servers', icon: '⦿', label: NAV_LABELS['mcp-servers'] },
+  { hash: 'memory',      icon: '◈', label: NAV_LABELS.memory },
 ];

@@ -178,3 +178,23 @@ test('GET provenance: a secret appearing as an evidence KEY is redacted (Codex S
   const res = await request(app).get('/api/projects/p1/memory/provk/provenance').set(...COOKIE).expect(200);
   assert.doesNotMatch(JSON.stringify(res.body.evidence), /ghp_/, 'secret in an evidence key must be redacted');
 });
+
+test('GET ?status: active (default) vs archived vs all', async (t) => {
+  const app = setupApp(t);
+  const id = await seedActive(app, 'will be archived content here');
+  await request(app).patch(`/api/projects/p1/memory/${id}`).set(...COOKIE).send({ action: 'archive' }).expect(200);
+  // default = active -> empty
+  const active = await request(app).get('/api/projects/p1/memory').set(...COOKIE).expect(200);
+  assert.equal(active.body.memory.length, 0);
+  // archived -> the one item
+  const arch = await request(app).get('/api/projects/p1/memory?status=archived').set(...COOKIE).expect(200);
+  assert.equal(arch.body.memory.length, 1);
+  assert.equal(arch.body.memory[0].status, 'archived');
+  assert.ok(arch.body.memory[0].archived_at);
+  // all -> the one item too
+  const all = await request(app).get('/api/projects/p1/memory?status=all').set(...COOKIE).expect(200);
+  assert.equal(all.body.memory.length, 1);
+  // bogus status falls back to active
+  const bogus = await request(app).get('/api/projects/p1/memory?status=bogus').set(...COOKIE).expect(200);
+  assert.equal(bogus.body.memory.length, 0);
+});

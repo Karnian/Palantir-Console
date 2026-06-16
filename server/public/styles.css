@@ -6357,3 +6357,28 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   flex: 1;
   min-width: 0;
 }
+
+/* ML PR4b: MemoryView — design tokens only (K-2 light/dark auto-propagate). */
+.memory-controls { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+.memory-tabs { display: inline-flex; gap: 0.25rem; }
+.memory-tab {
+  padding: 0.35rem 0.75rem; border: 1px solid var(--border); background: var(--field-bg);
+  color: var(--text-muted); border-radius: var(--radius-sm); cursor: pointer; font-size: 0.85rem;
+}
+.memory-tab.is-active { background: var(--accent); color: var(--text-inverse); border-color: var(--accent); }
+.memory-list { display: flex; flex-direction: column; gap: 0.75rem; margin-top: 1rem; }
+.memory-card { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 0.85rem 1rem; background: var(--bg-surface); }
+.memory-card.is-archived { opacity: 0.6; }
+.memory-card-head { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.5rem; }
+.memory-badge { font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: var(--radius-sm); background: var(--field-bg); color: var(--text-muted); }
+.memory-card-content { white-space: pre-wrap; word-break: break-word; margin-bottom: 0.6rem; color: var(--text-primary); line-height: 1.5; }
+.memory-card-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.memory-edit-textarea {
+  width: 100%; box-sizing: border-box; padding: 0.5rem; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--field-bg); color: var(--text-primary); font-family: inherit;
+}
+.memory-provenance-origin { margin-bottom: 0.5rem; color: var(--text-primary); }
+.memory-provenance-json {
+  background: var(--field-bg); color: var(--text-primary); padding: 0.6rem; border-radius: var(--radius-sm);
+  overflow: auto; max-height: 320px; font-size: 0.78rem; white-space: pre-wrap; word-break: break-word;
+}
