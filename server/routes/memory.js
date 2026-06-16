@@ -23,7 +23,8 @@ const MAX_REMEMBER_LEN = 2000;
 // deliberately excluded (Codex cross-review BLOCKER — evidence must not leak).
 const PUBLIC_FIELDS = [
   'id', 'project_id', 'kind', 'content', 'fact_key',
-  'importance', 'source_count', 'status', 'valid_to',
+  'origin', 'importance', 'confidence', 'source_count', 'status',
+  'pinned', 'valid_to', 'archived_at',
   'created_at', 'updated_at', 'reviewed_at',
 ];
 
@@ -33,6 +34,26 @@ function toPublicMemory(row) {
     if (row && field in row) out[field] = row[field];
   }
   return out;
+}
+
+// Recursively redact secrets from an evidence snapshot before exposing it on the
+// provenance endpoint. evidence_json is otherwise whitelisted OUT of the list
+// surface (it can carry run/task provenance + excerpts); the correction UI needs
+// to show it, so redact secret-looking strings and bound size/depth (Codex).
+function redactEvidence(value, depth = 0) {
+  if (depth > 6) return null;
+  if (typeof value === 'string') return redactSecrets(value).text.slice(0, 500);
+  if (Array.isArray(value)) return value.slice(0, 50).map((v) => redactEvidence(v, depth + 1));
+  if (value && typeof value === 'object') {
+    // null-proto output + redact KEYS too: a secret can appear as an object key
+    // (e.g. {"ghp_…": true}), not just a value (Codex SERIOUS).
+    const out = Object.create(null);
+    for (const [k, v] of Object.entries(value)) {
+      out[redactSecrets(String(k)).text.slice(0, 200)] = redactEvidence(v, depth + 1);
+    }
+    return out;
+  }
+  return value;
 }
 
 function createMemoryRouter({ memoryService, projectService }) {
@@ -167,6 +188,86 @@ function createMemoryRouter({ memoryService, projectService }) {
       dedupKey: `r4:${kind}:${hash}`,
     });
     return res.status(202).json({ candidate: cand ? { id: cand.id, status: cand.status } : null, origin: method === 'bearer' ? 'pm' : 'anon' });
+  }));
+
+  // PR4: post-hoc correction. PATCH an item by id within its project.
+  //   { action: 'update', content }   -> edit active content (re-sanitized)
+  //   { action: 'archive' }           -> hide from injection (active -> archived)
+  //   { action: 'restore' }           -> archived -> active
+  //   { action: 'review' }            -> stamp reviewed_at
+  //   { action: 'pin', pinned }       -> protect from PR5 decay/cap
+  router.patch('/:projectId/memory/:id', asyncHandler(async (req, res) => {
+    if (!memoryService) {
+      return res.status(501).json({ error: 'memoryService_unavailable' });
+    }
+    // Correction mutates the active injected set — human(cookie)-only, mirroring
+    // the R4 active-write rule (bearer/none can stage candidates but must not
+    // mutate active memory). Fail closed (Codex SERIOUS — actor-split bypass).
+    if (!req.auth || req.auth.method !== 'cookie') {
+      return res.status(403).json({ error: 'memory correction requires human (cookie) auth' });
+    }
+    const { projectId, id } = req.params;
+    if (!projectId || !id) throw new BadRequestError('projectId and id are required');
+    const item = memoryService.getMemoryItem(id);
+    // not-found OR cross-project access both look like 404 (don't leak existence).
+    if (!item || item.project_id !== projectId) throw new NotFoundError('memory item not found');
+
+    const body = req.body || {};
+    const action = body.action;
+    let result;
+    if (action === 'update') {
+      const raw = typeof body.content === 'string' ? body.content : '';
+      if (!raw.trim()) throw new BadRequestError('content is required');
+      // re-sanitize edited content with the same rules as remember.
+      let content;
+      if (item.kind === 'fact') {
+        if (detectInjection(raw)) throw new BadRequestError('content rejected: injection');
+        content = redactSecrets(raw.trim()).text.replace(/\s+/g, ' ').trim().slice(0, MAX_REMEMBER_LEN);
+      } else {
+        const s = sanitizeProposalContent(raw, { maxLen: MAX_REMEMBER_LEN });
+        if (!s.ok) throw new BadRequestError(`content rejected: ${s.reasons.join(',') || 'sanitize_failed'}`);
+        content = s.content;
+      }
+      try {
+        result = memoryService.updateMemoryContent({ id, content });
+      } catch (err) {
+        if (err && err.code === 'MEMORY_DUPLICATE') throw new BadRequestError(err.message);
+        throw err;
+      }
+    } else if (action === 'archive') {
+      result = memoryService.archiveMemory(id);
+    } else if (action === 'restore') {
+      try {
+        result = memoryService.restoreMemory(id);
+      } catch (err) {
+        if (err && err.code === 'MEMORY_DUPLICATE') throw new BadRequestError(err.message);
+        throw err;
+      }
+    } else if (action === 'review') {
+      result = memoryService.markReviewed(id);
+    } else if (action === 'pin') {
+      result = memoryService.setPinned({ id, pinned: !!body.pinned });
+    } else {
+      throw new BadRequestError('action must be one of update|archive|restore|review|pin');
+    }
+    if (!result) {
+      throw new BadRequestError(`action "${action}" is not applicable to an item in status "${item.status}"`);
+    }
+    res.json({ memory: toPublicMemory(result) });
+  }));
+
+  // PR4: provenance for a single item — evidence snapshot, recursively redacted.
+  router.get('/:projectId/memory/:id/provenance', asyncHandler(async (req, res) => {
+    if (!memoryService) {
+      return res.status(501).json({ error: 'memoryService_unavailable' });
+    }
+    const { projectId, id } = req.params;
+    if (!projectId || !id) throw new BadRequestError('projectId and id are required');
+    const item = memoryService.getMemoryItem(id);
+    if (!item || item.project_id !== projectId) throw new NotFoundError('memory item not found');
+    let evidence = {};
+    try { const p = JSON.parse(item.evidence_json || '{}'); if (p && typeof p === 'object') evidence = p; } catch { evidence = {}; }
+    res.json({ id: item.id, origin: item.origin, evidence: redactEvidence(evidence) });
   }));
 
   return router;

@@ -751,6 +751,101 @@ function createMemoryService(db, eventBus) {
     return promoteCandidatesBatchTx({ jobId, claimToken, proposals, activeCap, confidenceCeiling, maxLen });
   }
 
+  // ------------------------------------------------------------------------
+  // PR4: post-hoc correction CRUD. update content / archive / restore / review
+  // / pin. Any change to the ACTIVE injected set bumps the revision so the next
+  // PM session re-injects; review/pin don't change injected text so they don't.
+  // ------------------------------------------------------------------------
+  const updateContentStmt = db.prepare(
+    "UPDATE memory_items SET content=@content, content_hash=@contentHash, updated_at=datetime('now') WHERE id=@id AND status='active'"
+  );
+  const archiveStmt = db.prepare(
+    "UPDATE memory_items SET status='archived', archived_at=datetime('now'), updated_at=datetime('now') WHERE id=@id AND status='active'"
+  );
+  const restoreStmt = db.prepare(
+    "UPDATE memory_items SET status='active', archived_at=NULL, updated_at=datetime('now') WHERE id=@id AND status='archived'"
+  );
+  const markReviewedStmt = db.prepare(
+    "UPDATE memory_items SET reviewed_at=datetime('now'), updated_at=datetime('now') WHERE id=@id"
+  );
+  const pinStmt = db.prepare(
+    "UPDATE memory_items SET pinned=@pinned, updated_at=datetime('now') WHERE id=@id"
+  );
+
+  const updateContentTx = db.transaction(({ id, content, contentHash }) => {
+    const before = getMemoryItemByIdStmt.get(id);
+    const res = updateContentStmt.run({ id, content, contentHash });
+    if (res.changes !== 1) return null; // missing or not active
+    _bumpRevision(before.project_id);
+    return getMemoryItemByIdStmt.get(id);
+  });
+  const archiveTx = db.transaction((id) => {
+    const before = getMemoryItemByIdStmt.get(id);
+    const res = archiveStmt.run({ id });
+    if (res.changes !== 1) return null; // missing or not active
+    _bumpRevision(before.project_id);
+    return getMemoryItemByIdStmt.get(id);
+  });
+  const restoreTx = db.transaction((id) => {
+    const before = getMemoryItemByIdStmt.get(id);
+    const res = restoreStmt.run({ id });
+    if (res.changes !== 1) return null; // missing or not archived
+    _bumpRevision(before.project_id);
+    return getMemoryItemByIdStmt.get(id);
+  });
+
+  function getMemoryItem(id) {
+    return getMemoryItemByIdStmt.get(id) || null;
+  }
+
+  function updateMemoryContent({ id, content } = {}) {
+    if (!id) throw new Error('id is required');
+    if (!content || typeof content !== 'string') throw new Error('content is required');
+    try {
+      return updateContentTx({ id, content, contentHash: sha256(content) });
+    } catch (err) {
+      if (isUniqueConstraint(err, 'content_hash')) {
+        const e = new Error('an active memory item with this content already exists');
+        e.code = 'MEMORY_DUPLICATE';
+        throw e;
+      }
+      throw err;
+    }
+  }
+
+  function archiveMemory(id) {
+    if (!id) throw new Error('id is required');
+    return archiveTx(id);
+  }
+
+  function restoreMemory(id) {
+    if (!id) throw new Error('id is required');
+    try {
+      return restoreTx(id);
+    } catch (err) {
+      // restoring re-activates the row; if an active item now shares its
+      // content_hash or fact_key the partial-unique index fires.
+      if (isUniqueConstraint(err, 'content_hash') || isUniqueConstraint(err, 'fact_key')) {
+        const e = new Error('cannot restore: an active item with the same content or fact_key exists');
+        e.code = 'MEMORY_DUPLICATE';
+        throw e;
+      }
+      throw err;
+    }
+  }
+
+  function markReviewed(id) {
+    if (!id) throw new Error('id is required');
+    const res = markReviewedStmt.run({ id });
+    return res.changes === 1 ? getMemoryItemByIdStmt.get(id) : null;
+  }
+
+  function setPinned({ id, pinned } = {}) {
+    if (!id) throw new Error('id is required');
+    const res = pinStmt.run({ id, pinned: pinned ? 1 : 0 });
+    return res.changes === 1 ? getMemoryItemByIdStmt.get(id) : null;
+  }
+
   return {
     _bumpRevision,
     getRevision,
@@ -764,6 +859,12 @@ function createMemoryService(db, eventBus) {
     requeueStaleJobs,
     releaseDistillJob,
     promoteCandidates,
+    getMemoryItem,
+    updateMemoryContent,
+    archiveMemory,
+    restoreMemory,
+    markReviewed,
+    setPinned,
     retrieveForProject,
     buildInjectionBlock,
     listForProject,
