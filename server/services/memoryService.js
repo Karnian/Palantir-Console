@@ -9,6 +9,7 @@ const MAX_QUERY_TERMS = 32;
 const DEFAULT_ACTIVE_CAP = 200;        // soft cap: max active items per project
 const DEFAULT_CONFIDENCE_CEILING = 0.7; // single-candidate promotions clamp here
 const DEFAULT_MAX_LEN = 500;            // promoted content character ceiling
+const DEFAULT_TTL_DAYS = 90;           // PR5d: TTL for auto (batch_llm) memories
 const DISTILL_KIND = 'distill';
 // kinds a distiller may produce — NOT 'fact' (R6 owns facts via upsertFact).
 const PROMOTABLE_KINDS = new Set(['convention', 'pitfall', 'heuristic', 'constraint']);
@@ -137,7 +138,7 @@ function createMemoryService(db, eventBus) {
     FROM memory_items
     WHERE project_id = @projectId
       AND status = 'active'
-      AND (valid_to IS NULL OR valid_to > datetime('now'))
+      AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))
     ORDER BY importance DESC, updated_at DESC
     LIMIT @k
   `);
@@ -150,7 +151,7 @@ function createMemoryService(db, eventBus) {
       'WHERE memory_fts MATCH @q',
       '  AND mi.project_id = @projectId',
       "  AND mi.status = 'active'",
-      "  AND (mi.valid_to IS NULL OR mi.valid_to > datetime('now'))",
+      "  AND (mi.valid_to IS NULL OR datetime(mi.valid_to) > datetime('now'))",
       // bm25: lower score = more relevant -> ASC. recency tie-break keeps the
       // FTS path consistent with the fallback path's ORDER BY (Codex NIT).
       'ORDER BY bm25(memory_fts) ASC, mi.importance DESC, mi.updated_at DESC',
@@ -163,7 +164,7 @@ function createMemoryService(db, eventBus) {
     FROM memory_items
     WHERE project_id = ?
       AND status = 'active'
-      AND (valid_to IS NULL OR valid_to > datetime('now'))
+      AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))
     ORDER BY importance DESC, updated_at DESC
   `);
 
@@ -675,6 +676,17 @@ function createMemoryService(db, eventBus) {
   const archiveVictimStmt = db.prepare(
     "UPDATE memory_items SET status='archived', archived_at=datetime('now'), archive_reason=@reason, updated_at=datetime('now') WHERE id=@id AND status='active'"
   );
+  // PR5d TTL: stamp a valid_to on a freshly-promoted auto memory.
+  const setValidToStmt = db.prepare(
+    "UPDATE memory_items SET valid_to = datetime('now', @offset) WHERE id = @id"
+  );
+  // PR5d decay maintenance: active rows whose TTL has passed (datetime-normalized).
+  const listExpiredStmt = db.prepare(
+    "SELECT id, project_id FROM memory_items WHERE status='active' AND valid_to IS NOT NULL AND datetime(valid_to) <= datetime('now')"
+  );
+  const archiveExpiredStmt = db.prepare(
+    "UPDATE memory_items SET status='archived', archived_at=datetime('now'), archive_reason='ttl_expired', updated_at=datetime('now') WHERE id=@id AND status='active'"
+  );
 
   // Promote distilled proposals to active memory_items in ONE transaction. This
   // writer is the SINGLE enforcement point for every safety invariant — the
@@ -691,7 +703,7 @@ function createMemoryService(db, eventBus) {
   //   - 1 proposal == 1 candidate. Exact content_hash collisions merge
   //     (source_count++) via createMemoryItem; fuzzy merge is a later slice.
   const promoteCandidatesBatchTx = db.transaction(
-    ({ jobId, claimToken, proposals, activeCap, confidenceCeiling, maxLen }) => {
+    ({ jobId, claimToken, proposals, activeCap, confidenceCeiling, maxLen, ttlDays }) => {
       const job = getJobByIdStmt.get(jobId);
       if (!job || job.status !== 'running' || job.claim_token !== claimToken) {
         const e = new Error('distill lease lost or not running');
@@ -781,6 +793,11 @@ function createMemoryService(db, eventBus) {
         });
         const merged = !!existing;
         if (!merged) activeCount += 1;
+        // PR5d: a freshly-promoted auto memory gets a TTL so it decays unless
+        // re-observed/pinned. A merge keeps the existing row's valid_to.
+        if (!merged && ttlDays > 0) {
+          setValidToStmt.run({ id: item.id, offset: `+${Math.floor(ttlDays)} days` });
+        }
         const res = setCandidateStatusStmt.run({
           status: merged ? 'merged' : 'promoted',
           promotedTo: item.id,
@@ -820,11 +837,35 @@ function createMemoryService(db, eventBus) {
     } catch { /* observability must never break promotion */ }
   }
 
-  function promoteCandidates({ jobId, claimToken, proposals, activeCap = DEFAULT_ACTIVE_CAP, confidenceCeiling = DEFAULT_CONFIDENCE_CEILING, maxLen = DEFAULT_MAX_LEN } = {}) {
+  function promoteCandidates({ jobId, claimToken, proposals, activeCap = DEFAULT_ACTIVE_CAP, confidenceCeiling = DEFAULT_CONFIDENCE_CEILING, maxLen = DEFAULT_MAX_LEN, ttlDays = DEFAULT_TTL_DAYS } = {}) {
     if (!jobId || !claimToken) throw new Error('jobId and claimToken are required');
-    const result = promoteCandidatesBatchTx({ jobId, claimToken, proposals, activeCap, confidenceCeiling, maxLen });
+    const result = promoteCandidatesBatchTx({ jobId, claimToken, proposals, activeCap, confidenceCeiling, maxLen, ttlDays });
     emitMemoryEvents(result);
     return result;
+  }
+
+  // PR5d decay maintenance: archive active rows whose TTL has passed so they
+  // stop being injected AND free cap. Skips human/pinned/fact implicitly —
+  // those are never given a valid_to (only batch_llm promotions are). One tx;
+  // revision bumps per affected project; emits a single summary event.
+  const expireStaleTx = db.transaction(() => {
+    const rows = listExpiredStmt.all();
+    const projects = new Set();
+    let archived = 0;
+    for (const r of rows) {
+      const res = archiveExpiredStmt.run({ id: r.id });
+      if (res.changes === 1) { archived += 1; projects.add(r.project_id); }
+    }
+    for (const pid of projects) _bumpRevision(pid);
+    return archived;
+  });
+  function expireStaleMemories() {
+    let count = 0;
+    try { count = expireStaleTx(); } catch { return 0; }
+    if (count > 0 && eventBus) {
+      try { eventBus.emit('memory:decayed', { count, reason: 'ttl_expired' }); } catch { /* */ }
+    }
+    return count;
   }
 
   // ------------------------------------------------------------------------
@@ -843,8 +884,13 @@ function createMemoryService(db, eventBus) {
   const restoreStmt = db.prepare(
     "UPDATE memory_items SET status='active', archived_at=NULL, archive_reason=NULL, updated_at=datetime('now') WHERE id=@id AND status='archived'"
   );
+  // PR5d: marking an item reviewed is a re-observation — it refreshes valid_to
+  // (extends the TTL) for auto memories. Permanent rows (valid_to IS NULL:
+  // human/pinned/fact) stay permanent (Codex re-observation requirement).
   const markReviewedStmt = db.prepare(
-    "UPDATE memory_items SET reviewed_at=datetime('now'), updated_at=datetime('now') WHERE id=@id"
+    "UPDATE memory_items SET reviewed_at=datetime('now'), " +
+    "valid_to = CASE WHEN valid_to IS NOT NULL THEN datetime('now', @offset) ELSE NULL END, " +
+    "updated_at=datetime('now') WHERE id=@id"
   );
   const pinStmt = db.prepare(
     "UPDATE memory_items SET pinned=@pinned, updated_at=datetime('now') WHERE id=@id"
@@ -940,9 +986,9 @@ function createMemoryService(db, eventBus) {
     return out.item;
   }
 
-  function markReviewed(id) {
+  function markReviewed(id, { ttlDays = DEFAULT_TTL_DAYS } = {}) {
     if (!id) throw new Error('id is required');
-    const res = markReviewedStmt.run({ id });
+    const res = markReviewedStmt.run({ id, offset: `+${Math.floor(ttlDays)} days` });
     return res.changes === 1 ? getMemoryItemByIdStmt.get(id) : null;
   }
 
@@ -965,6 +1011,7 @@ function createMemoryService(db, eventBus) {
     requeueStaleJobs,
     releaseDistillJob,
     promoteCandidates,
+    expireStaleMemories,
     getMemoryItem,
     updateMemoryContent,
     archiveMemory,

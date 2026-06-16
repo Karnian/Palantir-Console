@@ -1,9 +1,9 @@
 # Handoff — Memory Layer PR1~PR3b 완료 (candidate→active 루프 닫힘), 후속 재입장
 
 > **작성**: 2026-06-16
-> **상태**: PR1~PR2c (#197~#200) + PR3a (#202) + PR3b (#204) + R4 (remember) + **PR4 (사후교정: CRUD + MemoryView) merged**. 1204 tests.
+> **상태**: PR1~PR2c (#197~#200) + PR3a/3b + R4 + PR4 + **PR5 (안전·decay·graceful shutdown, #208~#210+) merged**. 1235 tests. **ML 레이어 안전·decay 완비.**
 > **비전 달성**: worker harvest/PM판정 → candidate → (PR3b live distiller) → active memory → 다음 PM 세션 주입. `PALANTIR_MEMORY_DISTILL=1` + `ANTHROPIC_API_KEY` 시 runtime 자동 작동.
-> **spec**: `docs/specs/memory-layer-brief.md` (v1.x). **다음: PR5(안전·decay·graceful shutdown) / PR3c(fuzzy 병합·cross-run confidence, optional) / a11y·visual route 배열에 #memory 추가.**
+> **spec**: `docs/specs/memory-layer-brief.md` (v1.x). **다음(선택): PR3c(fuzzy 병합·cross-run confidence, optional) / a11y·visual route 배열에 #memory 추가 / L2(여러 PM→Master 승격).**
 
 ## 1. 완료된 것 (main)
 
@@ -57,8 +57,12 @@
 - **PR4b** UI: `MemoryView`(#memory) — project selector + status tabs + 카드(kind/origin/confidence/pinned) + 액션(edit/archive/restore/review/pin + provenance modal). XSS-safe(HTM text node), 디자인 토큰만(K-2 light/dark), stale-fetch guard + 성공 시만 modal close.
 - Codex 적대리뷰 PASS (PR4a SERIOUS evidence-key redact + PATCH cookie-only / PR4b SERIOUS A2 stale-fetch + A5 modal-close 반영). 남은 NIT: a11y/visual route 배열에 `#memory` 추가(후속).
 
-### PR5 — 안전·decay·관측
-- valid_to TTL/decay/hard cap(project당 active 200), observability 이벤트, poisoning 통합 게이트.
+### PR5 ✅ merged — 안전·decay·관측 (5a~5d)
+- **PR5a (#208)** hard-cap admission control: cap 초과 시 **score(confidence×importance) 기반 eviction**(blind 아님), human/pinned 절대 보호, restore 도 admission, observability(memory:promoted/evicted, >5 batch), migration 029 archive_reason.
+- **PR5b (#209)** graceful shutdown: scheduler `awaitDrain` + `app.shutdown` 멱등(in-flight drain settle 후 closeDb), index watchdog-first + server.close-first.
+- **PR5c (#210)** poisoning gate: 12 안전 불변식 통합 테스트 + `buildInjectionBlock` **injection-time re-sanitize**(write-time + 주입시점 이중 방어).
+- **PR5d** decay: `valid_to` 정규화(`datetime()` wrap, ISO/SQLite 혼용 방어) + TTL(90일, batch_llm 만; human/pinned/fact 영구) + `expireStaleMemories` maintenance(scheduler tick) + `markReviewed` re-observation refresh(valid_to 연장) + memory:decayed.
+- Codex 적대리뷰: PR5a/b/c 각 PASS(R1 BLOCKER→fix→R2 PASS 패턴). PR5d 는 Codex 2회 응답 불안정(무거운 리뷰 timeout)→Claude 직접 상세 리뷰가 SERIOUS(markReviewed valid_to 미연장) 발견→fix, 테스트 1235 green 으로 검증.
 
 ## 4. 작업 방식 (이 시리즈에서 확립)
 
@@ -69,4 +73,4 @@
 
 ## 5. 재입장 prompt (다음 세션)
 
-> "Memory Layer 다음 단계를 진행하자. `docs/handoff-memory-layer-pr1-2c.md` + `docs/specs/memory-layer-brief.md` 참고. PR1~PR3b merged — candidate→active 루프 닫힘(`PALANTIR_MEMORY_DISTILL=1`+`ANTHROPIC_API_KEY` 시 runtime 작동). **remember(R4 쿠키-PM 분리) / PR4(UI 사후교정 MemoryView) / PR5(안전·decay·graceful shutdown=NIT3) / PR3c(fuzzy 병합, optional)** 중 택일. Codex 교차리뷰 + 직접 구현, node@22 테스트. 계속 자율 진행."
+> "Memory Layer 는 PR1~PR5 + R4 merged — candidate→active 루프 + remember + 사후교정 UI + 안전(cap admission)·decay(TTL)·graceful shutdown·poisoning gate 완비. 남은 건 선택: **PR3c(fuzzy 병합·cross-run confidence) / a11y·visual route 배열 #memory / L2(여러 PM→Master 승격)**. `docs/handoff-memory-layer-pr1-2c.md` + spec 참고. Codex 교차리뷰 + 직접 구현, node@22 테스트."
