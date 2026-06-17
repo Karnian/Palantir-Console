@@ -1,6 +1,6 @@
 # Master Memory Layer (L2) — 사용자 스코프 거버넌스 메모리 brief
 
-> **상태**: v0.3 **DRAFT** — deep-research(23소스·12 confirmed) + Codex 적대 리뷰 R1(GO-WITH-CHANGES) → R2(FAIL→6 blocker 수정) → **R3(FAIL, live SQLite 검증 → precision 수정 반영)**. **아직 lock-in 전** — §0 U3 는 "권장·확정 대기"(R2 가 원안에서 *추가 narrowing*, §0 주석). 다음: **Codex R4 검증 → PASS 시 U3/U4 확정 → P0 착수.**
+> **상태**: v1.0 **LOCK-IN** (2026-06-17) — deep-research(23소스·12 confirmed) + Codex 적대 리뷰 4R(R1 GO-WITH-CHANGES → R2/R3 FAIL→수정[R3 live SQLite] → **R4 PASS, lock-in ready**). **LOCK-IN 완료(2026-06-17, U3/U4 = 권장안 확정)** — §0 U3 는 "권장·확정 대기"(R2 가 원안에서 *추가 narrowing*, §0 주석). 다음: **P0 착수 여부 사용자 결정.**
 > **작성**: 2026-06-17
 > **연관 spec**: `memory-layer-brief.md`(L1 PM 메모리 — 패턴/거버넌스 재사용 원천), `manager-v3-multilayer.md`
 > **목표 한 줄**: Master Manager 가 **사용자의 명시 제약·선호·약속·프로젝트 사실을 근거 기반으로 인출**하고 **근거가 약하면 물어보는**(ask/act 게이트) 거버넌스 메모리. 기존 L1 안전 기계(admission·decay·poisoning-gate·user-payload 주입)를 **재사용**, **claim-canonical + FTS-first**로 시작해 **kill test 로 자격을 딴 질의 유형에만** temporal graph 로 성장.
@@ -14,14 +14,14 @@
 |---|------|------|------|
 | **U1** | 목표 | **delegation-grade** (완전 대체 ✕). capability 경계 + ask/act 게이트 §3 | 확정 권장 |
 | **U2** | substrate | 로컬 단일 `master_memory.db` + **sqlite-vec(벡터) + FTS5 + 엣지 테이블**. 외부 graph DB/호스티드 메모리 ✕ | 확정 |
-| **U3** | capture 범위 | **P0-P1: 넓은 이벤트는 metadata-only + 고신호 content 만 allowlist·cap·TTL 저장. 광범위 *원문* content 수집은 P5**(거버넌스·삭제·poisoning 입증 후). 고신호만 임베딩/distill/graph/주입 | ⚠️ **권장·확정 대기** — R2 가 "넓은 원문 로그 = 무한성장 + 로컬 exfil 표적"이라 원안에서 *추가 narrowing*. 북극성("언젠가 전부")은 P5 로 유지 |
-| **U4** | 아키텍처 | **기존 L1 코드 재사용**(sanitize/admission/decay/poisoning-gate/주입을 **db-handle 파라미터화 공유 코어 또는 `MasterMemoryService` 어댑터로 추출**) **+ 별도 db** + `scope` 차원(project\|user\|cross_project) | 확정 권장 (refactor 명시, §8 P0) |
+| **U3** | capture 범위 | **P0-P1: 넓은 이벤트는 metadata-only + 고신호 content 만 allowlist·cap·TTL 저장. 광범위 *원문* content 수집은 P5**(거버넌스·삭제·poisoning 입증 후). 고신호만 임베딩/distill/graph/주입 | ✅ **확정(2026-06-17)** — R2 가 "넓은 원문 로그 = 무한성장 + 로컬 exfil 표적"이라 원안에서 *추가 narrowing*. 북극성("언젠가 전부")은 P5 로 유지 |
+| **U4** | 아키텍처 | **기존 L1 코드 재사용**(sanitize/admission/decay/poisoning-gate/주입을 **db-handle 파라미터화 공유 코어 또는 `MasterMemoryService` 어댑터로 추출**) **+ 별도 db** + `scope` 차원(project\|user\|cross_project) | ✅ 확정(2026-06-17) (refactor 명시, §8 P0) |
 | **U5** | canonical 표면 | **claim-canonical** — source-linked claim 이 단일 진실. **wiki·edge 는 claim 의 파생/투영**(독립 진실 ✕). wiki = on-demand 렌더(무손실·claim-id 인용) | 확정 (R1 B2, R2 강화) |
 | **U6** | graph | **kill test + 벤치 통과 후에만**(deferred behind gate). FTS/wiki 가 *증명상* 못 푸는 질의(시간 반전·cross-project 의존·관계)에만 | 확정 (R1 B5 + A-MEM ablation) |
 | **U7** | 거버넌스 | **source-linked 삭제 + 재컴퓨트 + tombstone + audit/retrieval 로그**. crypto-shred/DEK/해시체인 영수증은 **P5** | 확정 (R1 과설계 cut) |
 | **U8** | 외부 LLM | **default-off + candidate-only + redact-before**. 결정론 capture + 사람 확인이 primary | 확정 (κ=0.40) |
 
-> **U3 reconcile 근거 (R2 갱신, ⚠️ 사용자 확인 요망)**: 사용자는 "모든 정보 + 완전 대체"를 원함. R1 은 "처리는 고신호만"으로 좁혔고, **R2 는 한 단계 더** — *넓은 원문 로그 자체*가 무한성장 + 로컬 exfil 표적(단일 사용자 DB 가 전체 미수정 이력 보유). 해소: **P0-P1 은 넓은 이벤트의 metadata 만 + content 는 allowlist·cap·TTL 된 고신호만**; 광범위 원문 수집 = **P5**(삭제·audit·poisoning 방어 입증 후). 북극성은 폐기 아니라 **P5 로 시퀀싱**. 이게 원안에서 추가로 좁아진 유일 지점.
+> **U3 reconcile 근거 (R2 갱신 → 2026-06-17 사용자 확정)**: 사용자는 "모든 정보 + 완전 대체"를 원함. R1 은 "처리는 고신호만"으로 좁혔고, **R2 는 한 단계 더** — *넓은 원문 로그 자체*가 무한성장 + 로컬 exfil 표적(단일 사용자 DB 가 전체 미수정 이력 보유). 해소: **P0-P1 은 넓은 이벤트의 metadata 만 + content 는 allowlist·cap·TTL 된 고신호만**; 광범위 원문 수집 = **P5**(삭제·audit·poisoning 방어 입증 후). 북극성은 폐기 아니라 **P5 로 시퀀싱**. **사용자 확정(2026-06-17): 이 narrowing 수용, 북극성=P5.**
 
 ---
 
@@ -276,7 +276,7 @@ CREATE TABLE mm_revision (scope TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFA
 | B2 PARTIAL (edge 독립 truth) | edge=claim 투영(cascade·미러) + 렌더 무손실·인용 (§2·§4·§6) |
 | B4 PARTIAL (벤치 임계 부재) | pass 임계·size cap·DDL 지연 (§8 P0·§4) |
 
-**R3 (FAIL — live SQLite 검증) → v0.3 수정**: CLOSED = blocker1(NULL dedup, 실측)·4(U4)·5(forget cascade)·6(FTS 트리거, 실측)·B2. v0.3 추가: metadata 보존 정책 수치 lock + `content_hash`/`metadata_hash` 분리(blocker2/B3) + ask/act 행 우선순위·human confidence 면제(B1 conflict) + kill 비교군 A4·A5c 추가·predicate 정규화(B5) + 벤치 수치/size cap lock(B4) + claim→backing event 불변. **R4 검증 대기.**
+**R3 (FAIL — live SQLite 검증) → v0.3 수정**: CLOSED = blocker1(NULL dedup, 실측)·4(U4)·5(forget cascade)·6(FTS 트리거, 실측)·B2. v0.3 추가: metadata 보존 정책 수치 lock + `content_hash`/`metadata_hash` 분리(blocker2/B3) + ask/act 행 우선순위·human confidence 면제(B1 conflict) + kill 비교군 A4·A5c 추가·predicate 정규화(B5) + 벤치 수치/size cap lock(B4) + claim→backing event 불변. **R4 = PASS (lock-in ready)** — 6 정밀성 수정 전부 CLOSED, 새 blocker 0, 잔여 = implementation discipline(spec→code 전환의 당연, spec 결함 ✕). **U3/U4 사용자 확정(2026-06-17, 둘 다 권장안) → v1.0 LOCK-IN.**
 
 미굽힌 2건: U3(북극성 P5 보존) / graph(A-MEM ablation 으로 gate 정당).
 
