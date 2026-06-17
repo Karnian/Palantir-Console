@@ -31,6 +31,7 @@ function buildArms(db, sc, truthId) {
     A1: '## User Memory\n' + recent.map((c) => `- ${c.subject} ${c.predicate}: ${c.object_json}`).join('\n'),
     A4: rawTop ? rawTop.text : '',
     A4k: rawTop3.map((r) => r.text).join('\n---\n'), // steelman: raw top-3 (sees stale+current; model can resolve)
+    A4cur: (sc.rawEvents && sc.rawEvents.length) ? sc.rawEvents[sc.rawEvents.length - 1] : '', // raw current-event oracle (Codex guard: if ~A7, win is salience not supersede)
     A5: render(sc.subject, sc.predicate, '[value withheld]'),
     A6: sc.truth,
     A5c: slotMate ? render(sc.subject, slotMate.predicate, slotMate.object_json) : '',

@@ -1,0 +1,2 @@
+HARD-SEP TRAP-only (decisive) tier=codex gens=3 arms=[A0,A4,A4k,A4cur,A7p,A7] scenarios=5 (~90 calls)
+scenarios: h01:test-framework h02:orm h04:deploy h06:pkg-mgr h07:lang
