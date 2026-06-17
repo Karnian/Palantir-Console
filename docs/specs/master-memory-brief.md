@@ -1,6 +1,6 @@
 # Master Memory Layer (L2) — 사용자 스코프 거버넌스 메모리 brief
 
-> **상태**: v0.2 **DRAFT** — deep-research(23소스·12 confirmed) + Codex 적대 리뷰 R1(GO-WITH-CHANGES) → **R2(FAIL → 6 blocker 수정 반영)**. **아직 lock-in 전** — §0 U3 는 "권장·확정 대기"(R2 가 원안에서 *추가 narrowing*, §0 주석). 다음: **Codex R3 검증 → PASS 시 U3/U4 확정 → P0 착수.**
+> **상태**: v0.3 **DRAFT** — deep-research(23소스·12 confirmed) + Codex 적대 리뷰 R1(GO-WITH-CHANGES) → R2(FAIL→6 blocker 수정) → **R3(FAIL, live SQLite 검증 → precision 수정 반영)**. **아직 lock-in 전** — §0 U3 는 "권장·확정 대기"(R2 가 원안에서 *추가 narrowing*, §0 주석). 다음: **Codex R4 검증 → PASS 시 U3/U4 확정 → P0 착수.**
 > **작성**: 2026-06-17
 > **연관 spec**: `memory-layer-brief.md`(L1 PM 메모리 — 패턴/거버넌스 재사용 원천), `manager-v3-multilayer.md`
 > **목표 한 줄**: Master Manager 가 **사용자의 명시 제약·선호·약속·프로젝트 사실을 근거 기반으로 인출**하고 **근거가 약하면 물어보는**(ask/act 게이트) 거버넌스 메모리. 기존 L1 안전 기계(admission·decay·poisoning-gate·user-payload 주입)를 **재사용**, **claim-canonical + FTS-first**로 시작해 **kill test 로 자격을 딴 질의 유형에만** temporal graph 로 성장.
@@ -64,6 +64,8 @@ L0 EPISODIC (Worker) ── 기존 run_events/harvest/dispatch_audit (read-only)
 | `status=candidate` ∨ `confidence<0.7` ∨ stale ∨ scope/context 불일치 | **ask** (확인 요청 또는 미주입) |
 | `kind∈{constraint,commitment}` 인데 모순 claim 존재 | **ask** (충돌 노출, 자동 선택 ✕) |
 
+**행 우선순위(R3)**: 위→아래 **첫 매칭**. `source_kind=human` active 는 confidence<0.7 규칙 **면제**(명시 진술은 default confidence 라도 act) → active+human 행과 confidence<0.7 행의 중복 해소.
+
 게이트 결정은 `mm_retrieval_log` 에 기록 → kill test correction-rate 측정 기반.
 
 **ontology (좁게 시작)**: P1~P2 = constraints·commitments·decisions·projects·corrections + repo/tool/env 사실(TTL). 확장(P3+, 증명 시) = people/orgs·domain concepts·narrow comms 선호·관계 엣지. **영구 제외**: 성격 프로파일링·건강/생체·제3자 dossier·관계 추측·상시 캡처·raw secret·글로벌 스타일 페르소나(DITTO 44/48%≈chance). Functions 축(3-0): factual/experiential/working.
@@ -86,10 +88,13 @@ CREATE TABLE mm_events (
   content_redacted TEXT,                    -- R2 B3: 넓은 이벤트=NULL(metadata-only). allowlist 고신호만 redacted content(cap+TTL). 광범위 원문=P5
   sensitivity   TEXT NOT NULL DEFAULT 'normal',  -- normal|sensitive|secret_masked
   ttl_at        TEXT,                       -- content 보존 만료 (고신호 content 에 부여)
-  content_hash  TEXT NOT NULL,
+  metadata_hash TEXT NOT NULL,              -- R3: source+type+actor+project+occurred_at 해시 (항상)
+  content_hash  TEXT,                        -- R3: 저장된 redacted content 해시만 (metadata-only=NULL; 폐기 원문 해시 ✕)
   ingested_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_mm_events_proj_time ON mm_events(project_id, occurred_at);
+-- R3 보존 정책(lock 제안): content allowlist={remember,correction,decision,constraint,commitment}; content byte cap=8KB/event(초과 truncate+flag);
+--   content TTL=미승격 30d; metadata TTL=365d + 월 compaction(count cap 1e6/scope); 일배치 purge job(L1 expireStale 재사용).
 
 -- L2.b 검색 인덱스 (redacted chunk) + FTS 트리거 (R2 B6: 없으면 P1a FTS-only silently empty)
 CREATE TABLE mm_chunks (
@@ -177,7 +182,7 @@ CREATE TABLE mm_revision (scope TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFA
 
 **재사용(U4, refactor 명시)**: `memorySanitize`·cap admission(score eviction·human/pinned 보호)·decay(`valid_to`·expire·markReviewed)·poisoning gate·candidate→promote 단일 안전강제 tx 를 **db-handle 파라미터화 공유 코어 또는 `MasterMemoryService` 어댑터로 추출** (현 `memoryService` 는 L1 테이블·project 시맨틱 하드코딩 → P0 리팩터, R2 blocker4).
 
-**forget cascade(R2 blocker5)**: event 삭제 → `mm_claim_evidence` ON DELETE CASCADE → 근거 0 된 claim 은 서비스가 recompute/archive + chunk(owner_id 매칭) purge + `mm_tombstones` 기록 + 이후 promote 가 tombstone 검사.
+**forget cascade(R2 blocker5)**: event 삭제 → `mm_claim_evidence` ON DELETE CASCADE → 근거 0 된 claim 은 서비스가 recompute/archive + chunk(owner_id 매칭) purge + `mm_tombstones` 기록 + 이후 promote 가 tombstone 검사. **불변(R3)**: 모든 claim 생성(human `remember` 포함)은 backing `mm_events` 행을 먼저 생성/링크 → `mm_claim_evidence(event_id)` FK 항상 충족.
 
 ---
 
@@ -213,7 +218,7 @@ CREATE TABLE mm_revision (scope TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFA
 
 ## 7. Kill test (반증 — 핵심 artifact, P1b 후 실행)
 
-> mnemo 가 못 가른 "관련 *내용* vs *자신만만한 앵커*"를 **claim-컴포넌트 마스크로 분리**. **R2 B5: 마스크를 코드 식별자가 아닌 claim 컴포넌트로 재설계. 임계값 사전등록.** LLM judge 회피·결정론 우선·검정력 선계산(mnemo 방법론).
+> mnemo 가 못 가른 "관련 *내용* vs *자신만만한 앵커*"를 **claim-컴포넌트 마스크로 분리**. **R2 B5: 마스크를 코드 식별자가 아닌 claim 컴포넌트로 재설계. 임계값 사전등록.** **predicate 는 정규화 vocabulary 로 제약 + object 텍스트가 subject/predicate 에 중복 인코딩 안 됨을 assert(A5 누수 방지, R3).** LLM judge 회피·결정론 우선·검정력 선계산(mnemo 방법론).
 
 **Arms**:
 | arm | 설명 |
@@ -232,7 +237,7 @@ CREATE TABLE mm_revision (scope TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFA
 
 **지표**: user-visible task 품질 + **correction rate**(재정정 필요?). **임계값 사전등록**(예: A7−best(A1,A5,A6) ≥ δ, 검정력 0.8 n 선계산).
 
-**KILL CONDITION**: **A7 이 {A1, A5, A6} 의 최선을 품질·correction rate 둘 다에서 사전등록 δ 만큼 못 이기면 → governed retrieval(A4)에서 멈춤.**
+**KILL CONDITION**: **A7 이 best(A1, A4, A5, A5c, A6) 를 품질·correction rate 둘 다에서 사전등록 δ 만큼 못 이기면 → governed retrieval(A4)에서 멈춤.** (R3: raw FTS A4 + placebo A5c 포함 — 단순 FTS·placebo 도 못 이기면 무의미.)
 **GRAPH GATE(U6)**: A8 이 cross-project/시간-반전/관계 질의 부분집합에서 A7·masked-anchor 를 둘 다 이길 때만 persistent graph API. (A-MEM ablation 3-0: 제대로면 graph 가 load-bearing → gate 는 graph 죽이기가 아니라 *필요 질의 유형 식별*.)
 **불변 테스트**: poison(틀림/stale 주입→오염률) / staleness(선호 반전→현재 이김) / forget(source 삭제→어디에도 생존 0) / privacy(가짜 secret seed→외부 0·주입 0).
 
@@ -242,7 +247,7 @@ CREATE TABLE mm_revision (scope TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFA
 
 각 PR: branch→구현→npm test→**Codex 교차검증(PASS까지)**→commit→PR→merge.
 
-- **P0** — 별도 `master_memory.db` 부트 + 마이그레이션 러너 + **sqlite-vec `load_extension`**(없으면 FTS-only degrade) + `mm_events`/`mm_chunks`(+FTS 트리거)/`mm_claims`/`mm_claim_evidence`/거버넌스 테이블. **U4 리팩터(R2 blocker4)**: L1 의 sanitize/admission/decay/injection 을 **db-handle 파라미터화 공유 코어 또는 `MasterMemoryService` 어댑터**로 추출(현 `memoryService` 는 L1 하드코딩). **벤치(R2 B4)**: recursive-CTE(합성 10⁴·10⁵·10⁶ 엣지) + sqlite-vec ANN — **pass 임계 사전설정**(예: 인출 p95 <100ms, 2홉 CTE <50ms), 미달 시 graph DDL 미착수 + **size cap**(claim/edge 상한). 임베딩 모델/차원 확정.
+- **P0** — 별도 `master_memory.db` 부트 + 마이그레이션 러너 + **sqlite-vec `load_extension`**(없으면 FTS-only degrade) + `mm_events`/`mm_chunks`(+FTS 트리거)/`mm_claims`/`mm_claim_evidence`/거버넌스 테이블. **U4 리팩터(R2 blocker4)**: L1 의 sanitize/admission/decay/injection 을 **db-handle 파라미터화 공유 코어 또는 `MasterMemoryService` 어댑터**로 추출(현 `memoryService` 는 L1 하드코딩). **벤치(R2 B4, R3 수치 lock)**: recursive-CTE(합성 10⁴·10⁵·10⁶ 엣지) + sqlite-vec ANN — **pass 임계(lock)**: 인출 p95 ≤ 80ms, 2홉 CTE ≤ 50ms @10⁶ 엣지, 임베딩 처리량 ≥ 200/s. 미달 시 graph DDL 미착수. **size cap(lock)**: active claim ≤ 50k/scope, edge ≤ 500k, chunk ≤ 200k; 초과 시 score-eviction(L1 cap admission 재사용). 임베딩 모델/차원 확정.
 - **P1a** (최소 가치 — 핵심 thesis 증명/기각) — 명시 `remember`/`delete`/retrieve/inject/log, **FTS5-only**, caching-safe 주입, `mm_retrieval_log`. **삭제·tombstone 경로 포함**(event/chunk 대상; claim 도착 시 cascade 규칙 §4 이미 정의 → retrofit 최소).
 - **P1b** — 결정론 capture(corrections/constraints/commitments/decisions + repo/tool/env TTL).
 - **★ KILL TEST**(§7) — A0~A7 + 불변. **GO/STOP 판정.**
@@ -271,7 +276,9 @@ CREATE TABLE mm_revision (scope TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFA
 | B2 PARTIAL (edge 독립 truth) | edge=claim 투영(cascade·미러) + 렌더 무손실·인용 (§2·§4·§6) |
 | B4 PARTIAL (벤치 임계 부재) | pass 임계·size cap·DDL 지연 (§8 P0·§4) |
 
-**R3 검증 대기.** 미굽힌 2건: U3(북극성 P5 보존) / graph(A-MEM ablation 으로 gate 정당).
+**R3 (FAIL — live SQLite 검증) → v0.3 수정**: CLOSED = blocker1(NULL dedup, 실측)·4(U4)·5(forget cascade)·6(FTS 트리거, 실측)·B2. v0.3 추가: metadata 보존 정책 수치 lock + `content_hash`/`metadata_hash` 분리(blocker2/B3) + ask/act 행 우선순위·human confidence 면제(B1 conflict) + kill 비교군 A4·A5c 추가·predicate 정규화(B5) + 벤치 수치/size cap lock(B4) + claim→backing event 불변. **R4 검증 대기.**
+
+미굽힌 2건: U3(북극성 P5 보존) / graph(A-MEM ablation 으로 gate 정당).
 
 ---
 
