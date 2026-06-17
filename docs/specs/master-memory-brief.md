@@ -1,5 +1,7 @@
 # Master Memory Layer (L2) — 사용자 스코프 거버넌스 메모리 brief
 
+> **⚠️ v1.1 (2026-06-17): 검증 스파이크 → DE-SCOPE.** 무거운 distillation/WikiGraph 층은 answer-influence(더 나은 답) 근거 미입증 → **mainline = governed top-K retrieval** (§12 우선). 아래 v1.0 본문은 원안 보존.
+>
 > **상태**: v1.0 **LOCK-IN** (2026-06-17) — deep-research(23소스·12 confirmed) + Codex 적대 리뷰 4R(R1 GO-WITH-CHANGES → R2/R3 FAIL→수정[R3 live SQLite] → **R4 PASS, lock-in ready**). **LOCK-IN 완료(2026-06-17, U3/U4 = 권장안 확정)** — §0 U3 는 "권장·확정 대기"(R2 가 원안에서 *추가 narrowing*, §0 주석). 다음: **P0 착수 여부 사용자 결정.**
 > **작성**: 2026-06-17
 > **연관 spec**: `memory-layer-brief.md`(L1 PM 메모리 — 패턴/거버넌스 재사용 원천), `manager-v3-multilayer.md`
@@ -17,7 +19,7 @@
 | **U3** | capture 범위 | **P0-P1: 넓은 이벤트는 metadata-only + 고신호 content 만 allowlist·cap·TTL 저장. 광범위 *원문* content 수집은 P5**(거버넌스·삭제·poisoning 입증 후). 고신호만 임베딩/distill/graph/주입 | ✅ **확정(2026-06-17)** — R2 가 "넓은 원문 로그 = 무한성장 + 로컬 exfil 표적"이라 원안에서 *추가 narrowing*. 북극성("언젠가 전부")은 P5 로 유지 |
 | **U4** | 아키텍처 | **기존 L1 코드 재사용**(sanitize/admission/decay/poisoning-gate/주입을 **db-handle 파라미터화 공유 코어 또는 `MasterMemoryService` 어댑터로 추출**) **+ 별도 db** + `scope` 차원(project\|user\|cross_project) | ✅ 확정(2026-06-17) (refactor 명시, §8 P0) |
 | **U5** | canonical 표면 | **claim-canonical** — source-linked claim 이 단일 진실. **wiki·edge 는 claim 의 파생/투영**(독립 진실 ✕). wiki = on-demand 렌더(무손실·claim-id 인용) | 확정 (R1 B2, R2 강화) |
-| **U6** | graph | **kill test + 벤치 통과 후에만**(deferred behind gate). FTS/wiki 가 *증명상* 못 푸는 질의(시간 반전·cross-project 의존·관계)에만 | 확정 (R1 B5 + A-MEM ablation) |
+| **U6** | graph | **kill test + 벤치 통과 후에만**(deferred behind gate). FTS/wiki 가 *증명상* 못 푸는 질의(시간 반전·cross-project 의존·관계)에만 | 확정 → **§12 스파이크가 answer-influence 근거 KILL → 데이터-관리 근거 입증 전까지 추가 defer** |
 | **U7** | 거버넌스 | **source-linked 삭제 + 재컴퓨트 + tombstone + audit/retrieval 로그**. crypto-shred/DEK/해시체인 영수증은 **P5** | 확정 (R1 과설계 cut) |
 | **U8** | 외부 LLM | **default-off + candidate-only + redact-before**. 결정론 capture + 사람 확인이 primary | 확정 (κ=0.40) |
 
@@ -296,3 +298,25 @@ CREATE TABLE mm_revision (scope TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFA
 **미검증(rate-limit abstain, 유망 단서)**: TG-RAG bi-level temporal graph·증분 요약·PPR(2510.13590) / sqlite-vec+FTS5 substrate·적응형 RRF·recency-스코어링 무효(2604.15484) / MemoryGraft 9%→47.9%(2512.16962, mnemo 확증).
 **killed(불신)**: Zep DMR/LongMemEval 벤더 수치(2501.13956) / "graphify 무용"(2504.19413).
 **내부**: mnemo `08-findings`·`09-retention`·`11-conclusion`·`notes/2026-06-15`.
+
+---
+
+## 12. 검증 스파이크 결과 (2026-06-17) — DE-SCOPE 결정 ★우선
+
+`experiments/mm-spike/` 에서 P0/P1 최소 구현 + kill test 2회 실행 (API $0, codex CLI ~2.5h). 각 단계 Codex 교차검증(7라운드).
+
+**구현물**: FTS-only store(4R-PASS 스키마, NULL-dedup 실측) + 12 easy + 10 hard 시나리오(pre-registered) + 결정론 leakage audit(LLM 0 선검증) + JSON-artifact scorer + arm builder(A0/A4/A4k/A4cur/A5/A5c/A7p/A7) + CLI runner. throwaway.
+
+**결과**:
+- ✅ **핵심 전제 강하게 지지**: 올바른 사실 주입이 행동을 바꾼다 — `A7p(틀린 내용)=0%` vs `A7(옳은 내용)=100%` (양 pilot). **앵커 효과 아님** (mnemo 가 못 가른 "앵커 vs 내용" 을 A7p wrong-content placebo 로 분리 달성).
+- 🛑 **distillation/WikiGraph 의 answer-influence 가치 procedural KILL**:
+  - easy-SEP: `A4(raw top-1) 83%` vs `A7 100%` (+17pp, 1 scn 노이즈)
+  - hard-SEP(temporal conflict, TRAP-only, **A4k=raw top-3 steelman**): `A7 100%` vs `best-raw 87%` = **+13pp, net +2, 1 family** → 사전등록 규칙(≥20pp or net+3, family>1) **미달**
+  - 메커니즘: `A4cur(현재 정보만 raw)=A4k=87%≈A7` → **가치는 "현재 정보가 컨텍스트에 있음"이지 정제/supersede 구조가 아님** (salience guard 발동)
+- ⚠️ **보존 요구사항**: raw **top-1(53%)** 은 부적합(충돌 시 낡은 값 인출) → **"top-K 인출 또는 distill"**, 그리고 **top-K 가 더 싼 기본값**.
+
+**결정 (Codex 7R 교차검증, lock)**:
+- **Mainline = governed top-K retrieval** 메모리 (올바른 사실 top-K 인출·주입; 모델이 해소). 가치 ~87–100% 포착.
+- **Defer (별도 bar)**: claim-distillation / temporal-supersede / entities·edges / WikiGraph. **answer-influence 근거 KILL**. 단 **데이터-관리 근거(컨텍스트 예산 초과 규모·dedup·privacy/provenance·대용량 충돌관리)는 미검증·열림** — 따로 입증되면 재도전. (procedural KILL = answer-influence 한정, A7 zero-value 증명 ✕, N=15)
+
+**phasing 영향**: §8 P1(governed retrieval, **top-K 강제**)은 유효·우선. P2(bi-temporal claim)·P3(graph)은 데이터-관리 근거 입증 전까지 **보류**.
