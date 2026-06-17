@@ -1,0 +1,22 @@
+HARD-SEP TRAP-only (decisive) tier=codex gens=3 arms=[A0,A4,A4k,A4cur,A7p,A7] scenarios=5 (~90 calls)
+scenarios: h01:test-framework h02:orm h04:deploy h06:pkg-mgr h07:lang
+  [1/5] h01 A0: 33% A4: 67% A4k: 33% A4cur: 33% A7p:  0% A7:100%
+  [2/5] h02 A0:100% A4: 67% A4k:100% A4cur:100% A7p:  0% A7:100%
+  [3/5] h04 A0:100% A4: 33% A4k:100% A4cur:100% A7p:  0% A7:100%
+  [4/5] h06 A0:100% A4:  0% A4k:100% A4cur:100% A7p:  0% A7:100%
+  [5/5] h07 A0:  0% A4:100% A4k:100% A4cur:100% A7p:  0% A7:100%
+
+=== HONORED RATE ===       A0    A4   A4k A4cur   A7p    A7
+rate                    67%   53%   87%   87%    0%  100%
+correct/15           10/15  8/15 13/15 13/15  0/15 15/15
+
+=== DECISIVE (Codex rule) ===
+  A7 100% (15/15)  vs  best raw[A4,A4k]  87% (13/15)  =>  margin 13pp, net +2
+  A4cur raw-current-oracle:  87% (13/15)  [if ~A7, win is salience/conciseness, NOT supersede resolution]
+  A7p stale claim:   0% (0/15)  [must be materially < A7]
+  families where A7 > best-raw: 1 (test-framework)  [must be >1, no single-family dominance]
+
+>>> DIRECTIONAL VERDICT: KILL (supersede/conflict-resolution layer)
+    rule: (margin>=20pp OR net>=3) AND A7>A7p AND families>1. got: margin=13pp net=+2 A7p=  0% families=1
+errors/format-fails: 1 | elapsed 3124s | results-hard-codex-g3.json
+SCOPE: conclusion applies to bi-temporal supersede/conflict-resolution only, NOT full graph memory (Codex).

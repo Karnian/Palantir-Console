@@ -1,0 +1,29 @@
+PILOT tier=codex gens=1 arms=[A0,A4,A5,A5c,A7p,A7] scenarios=12 (~72 model calls)
+  [1/12] sc01(explicit) A0:100% A4:100% A5:  0% A5c:  0% A7p:  0% A7:100%
+  [2/12] sc02(explicit) A0:100% A4:100% A5:  0% A5c:  0% A7p:  0% A7:100%
+  [3/12] sc03(explicit) A0:  0% A4:100% A5:  0% A5c:  0% A7p:  0% A7:100%
+  [4/12] sc04(explicit) A0:  0% A4:100% A5:  0% A5c:  0% A7p:  0% A7:100%
+  [5/12] sc05(explicit) A0:100% A4:100% A5:100% A5c:100% A7p:  0% A7:100%
+  [6/12] sc06(explicit) A0:  0% A4:100% A5:  0% A5c:  0% A7p:  0% A7:100%
+  [7/12] sc07(inferred) A0:  0% A4:100% A5:100% A5c:  0% A7p:  0% A7:100%
+  [8/12] sc08(inferred) A0:100% A4:100% A5:  0% A5c:  0% A7p:  0% A7:100%
+  [9/12] sc09(inferred) A0:100% A4:100% A5:100% A5c:100% A7p:  0% A7:100%
+  [10/12] sc10(inferred) A0:  0% A4:100% A5:100% A5c:100% A7p:  0% A7:100%
+  [11/12] sc11(inferred) A0:100% A4:100% A5:100% A5c:100% A7p:  0% A7:100%
+  [12/12] sc12(inferred) A0:  0% A4:  0% A5:100% A5c:  0% A7p:100% A7:100%
+
+=== HONORED RATE ===              A0   A4   A5  A5c  A7p   A7
+overall                       50%  92%  50%  33%   8% 100%
+SEP (inferred: distill test)  50%  83%  83%  50%  17% 100%
+SAT (explicit: anchor test)   50% 100%  17%  17%   0% 100%
+
+=== KEY CONTRASTS ===
+  distilled vs raw   (SEP A7-A4): 100% vs  83%
+  content vs wrong   (all A7-A7p): 100% vs   8%
+  content vs placebo (all A7-A5c): 100% vs  33%
+  masked claim       (all A5):  50% (should be low if content matters)
+  memory vs none     (all A7-A0): 100% vs  50%
+
+errors/format-fails: 4 | elapsed: 3325s | -> results-codex-g1.json
+
+NOTE: tier=codex, gens=1 — DIRECTIONAL/plumbing only (single tier or low gens); not the frozen verdict.
