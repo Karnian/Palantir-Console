@@ -54,9 +54,11 @@ const { createWorkerPresetsRouter } = require('./routes/workerPresets');
 const { createMcpTemplateService } = require('./services/mcpTemplateService');
 const { createMcpTemplatesRouter } = require('./routes/mcpTemplates');
 const { createMemoryService } = require('./services/memoryService');
+const { createMasterMemoryService } = require('./services/masterMemoryService');
 const { createMemoryDistillService } = require('./services/memoryDistillService');
 const { createLiveDistiller } = require('./services/distillers/liveDistiller');
 const { createMemoryRouter } = require('./routes/memory');
+const { createMasterMemoryRouter } = require('./routes/masterMemory');
 
 const AUTO_REVIEW_MAX = 5;
 const REVIEW_TEXT_CAP = 1000;
@@ -521,6 +523,9 @@ function createApp(options = {}) {
   // injection ledger). Constructed here (after db + eventBus) so it can be
   // injected into conversationService below for user-payload memory prepend.
   const memoryService = createMemoryService(db, eventBus);
+  // L2 P1b: user-scoped Master memory (governed top-K retrieval). Injected into
+  // conversationService for Top-manager user-payload prepend + the /api/master-memory router.
+  const masterMemoryService = createMasterMemoryService(db, eventBus);
   // Phase 10B: Worker Preset service. Created before taskService so that
   // taskService can validate preferred_preset_id at the service layer (D2c).
   const presetService = createPresetService(db, {
@@ -611,6 +616,7 @@ function createApp(options = {}) {
     lifecycleService,
     pmSpawnService,
     memoryService, // ML PR1: user-payload Learned Memory injection (PM slots)
+    masterMemoryService, // L2 P1b: user-payload Master memory injection (Top slot)
   });
   // v3 Phase 2: whenever a manager slot (top or pm:<projectId>) is cleared
   // — by explicit stop, liveness probe, or rotation — drop any lingering
@@ -727,6 +733,7 @@ function createApp(options = {}) {
   // New routes (v2)
   app.use('/api/projects', createProjectsRouter({ projectService, taskService, projectBriefService, pmCleanupService }));
   app.use('/api/projects', createMemoryRouter({ memoryService, projectService })); // ML PR1: GET /:projectId/memory
+  app.use('/api/master-memory', createMasterMemoryRouter({ masterMemoryService })); // L2 P1b: GET / + POST /remember
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService }));
   app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService }));
   // PR18: tests can pass options.authResolverOpts (e.g. a fake `hasKeychain`)
@@ -811,6 +818,7 @@ function createApp(options = {}) {
     worktreeService,
     eventBus,
     memoryService, // ML PR1: test seam for seeding L1 memory through the app db
+    masterMemoryService, // L2 P1b: test seam for seeding/asserting Master memory
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at
     // (createRun() always stamps status='queued' and cost_usd=0 at now).

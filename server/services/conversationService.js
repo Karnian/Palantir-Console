@@ -56,6 +56,7 @@ function createConversationService({
   // user-payload prepend is the single injection point. Tests that omit this
   // dependency keep the pre-PR1 behavior byte-for-byte.
   memoryService,
+  masterMemoryService,
   logger,
 }) {
   // parentRunId -> array of notice strings
@@ -290,6 +291,28 @@ function createConversationService({
       }
     }
 
+    // L2 P1b: Master (user-scope) memory injection — the Top-slot analogue of the PM block above.
+    // Top slots ONLY (scope='user'), keyed by the Top run id. Same peek-then-commit ledger discipline:
+    // the masterMemoryInjection ledger is written AFTER the adapter accepts the turn (below). Outermost
+    // prepend (memory → original). Annotate-only: any failure degrades to "no injection", never blocks.
+    let masterMemoryInjection = null;
+    if (isTop && masterMemoryService) {
+      try {
+        const decision = masterMemoryService.shouldInject(run.id, 'user');
+        if (decision && decision.inject) {
+          const rows = masterMemoryService.retrieve('user', { taskContext: originalText });
+          const block = masterMemoryService.buildInjectionBlock(rows);
+          if (block) {
+            effectiveText = `${block}\n\n---\n\n${effectiveText}`;
+            masterMemoryInjection = { revision: decision.revision };
+          }
+        }
+      } catch (memErr) {
+        log(`master memory injection skipped for ${conversationId} (run=${run.id}): ${memErr.message}`);
+        masterMemoryInjection = null;
+      }
+    }
+
     const validImages = Array.isArray(images)
       ? images.filter(img => img && typeof img.data === 'string' && typeof img.media_type === 'string')
       : undefined;
@@ -332,6 +355,14 @@ function createConversationService({
         memoryService.recordInjection(run.id, projectId, memoryInjection.revision);
       } catch (ledgerErr) {
         log(`memory ledger write failed for ${conversationId} (run=${run.id}): ${ledgerErr.message}`);
+      }
+    }
+    // L2 P1b: commit the Master memory injection ledger (Top slot), same peek-then-commit discipline.
+    if (masterMemoryInjection) {
+      try {
+        masterMemoryService.recordInjection(run.id, 'user', masterMemoryInjection.revision);
+      } catch (ledgerErr) {
+        log(`master memory ledger write failed for ${conversationId} (run=${run.id}): ${ledgerErr.message}`);
       }
     }
 
