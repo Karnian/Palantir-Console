@@ -22,13 +22,15 @@ function seedScenario(db, sc) {
 const render = (subj, pred, obj) => `## User Memory\n- ${subj} ${pred}: ${obj}`;
 
 function buildArms(db, sc, truthId) {
-  const rawTop = store.retrieveRaw(db, sc.task, 1)[0];
+  const rawTop3 = store.retrieveRaw(db, sc.task, 3);
+  const rawTop = rawTop3[0];
   const slotMate = store.claimsBySlot(db, sc.page, sc.slot, truthId)[0];
   const recent = store.recentClaims(db, 3);
   return {
     A0: '',
     A1: '## User Memory\n' + recent.map((c) => `- ${c.subject} ${c.predicate}: ${c.object_json}`).join('\n'),
     A4: rawTop ? rawTop.text : '',
+    A4k: rawTop3.map((r) => r.text).join('\n---\n'), // steelman: raw top-3 (sees stale+current; model can resolve)
     A5: render(sc.subject, sc.predicate, '[value withheld]'),
     A6: sc.truth,
     A5c: slotMate ? render(sc.subject, slotMate.predicate, slotMate.object_json) : '',
