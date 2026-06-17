@@ -6405,6 +6405,28 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .memory-badge { font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: var(--radius-sm); background: var(--field-bg); color: var(--text-muted); }
 .memory-card-content { white-space: pre-wrap; word-break: break-word; margin-bottom: 0.6rem; color: var(--text-primary); line-height: 1.5; }
 .memory-card-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+/* 카드 액션 버튼(수정/보관/검토/고정/출처): 작게 + 버튼 티 — 카드(bg-surface)보다
+   한 톤 밝은 bg-elevated + 명확한 border + hover/focus 로 버튼임을 분명히. */
+.memory-card-actions .btn {
+  padding: 0.2rem 0.55rem;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+.memory-card-actions .btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+.memory-card-actions .btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 .memory-edit-textarea {
   width: 100%; box-sizing: border-box; padding: 0.5rem; border: 1px solid var(--border);
   border-radius: var(--radius-sm); background: var(--field-bg); color: var(--text-primary); font-family: inherit;
