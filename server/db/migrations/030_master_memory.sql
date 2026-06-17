@@ -39,7 +39,8 @@ CREATE TABLE master_memory_items (
   CHECK (confidence BETWEEN 0 AND 1),
   CHECK (importance BETWEEN 1 AND 10),
   CHECK (json_valid(evidence_json)),
-  CHECK ((kind='fact') = (fact_key IS NOT NULL))     -- fact ⇔ fact_key (both directions)
+  CHECK ((kind='fact') = (fact_key IS NOT NULL)),    -- fact ⇔ fact_key (both directions)
+  CHECK (pinned IN (0,1))
 );
 -- scope is NOT NULL so these partial-unique indexes dedup correctly (no NULL-distinct hole).
 CREATE UNIQUE INDEX idx_master_memory_factkey ON master_memory_items(scope, fact_key)
@@ -69,13 +70,17 @@ INSERT INTO master_memory_fts(master_memory_fts) VALUES('rebuild');
 -- active change = 1 (a default-0 insert would make an injected_revision=0 session miss the first memory).
 CREATE TABLE master_memory_revision (
   scope    TEXT PRIMARY KEY,
-  revision INTEGER NOT NULL DEFAULT 0
+  revision INTEGER NOT NULL DEFAULT 0,
+  CHECK (scope IN ('user','cross_project'))
 );
 
 -- Injection ledger (caching-safe once-per-session / per-revision injection into the Master manager).
+-- Scope-keyed (Codex BLOCKER): composite PK so a 'user' injection record does not suppress
+-- 'cross_project' injection for the same master run.
 CREATE TABLE master_memory_injection (
-  master_run_id     TEXT PRIMARY KEY,
+  master_run_id     TEXT NOT NULL,
   scope             TEXT NOT NULL,
   injected_revision INTEGER NOT NULL DEFAULT 0,
-  injected_at       TEXT
+  injected_at       TEXT,
+  PRIMARY KEY (master_run_id, scope)
 );

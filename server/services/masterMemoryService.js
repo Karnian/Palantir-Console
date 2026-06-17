@@ -88,14 +88,14 @@ function createMasterMemoryService(db, eventBus) {
     "UPDATE master_memory_items SET status='archived', archived_at=datetime('now'), archive_reason=@reason, updated_at=datetime('now') WHERE id=@id AND status='active'"
   );
 
-  const getInjectionStmt = db.prepare('SELECT * FROM master_memory_injection WHERE master_run_id = ?');
+  const getInjectionStmt = db.prepare('SELECT * FROM master_memory_injection WHERE master_run_id = ? AND scope = ?');
   const recordInjectionStmt = db.prepare(`
     INSERT INTO master_memory_injection(master_run_id, scope, injected_revision, injected_at)
     VALUES (?, ?, ?, datetime('now'))
-    ON CONFLICT(master_run_id) DO UPDATE SET injected_revision = excluded.injected_revision, injected_at = excluded.injected_at
+    ON CONFLICT(master_run_id, scope) DO UPDATE SET injected_revision = excluded.injected_revision, injected_at = excluded.injected_at
   `);
 
-  function _bumpRevision(scope) { bumpRevisionStmt.run(scope); }
+  function _bumpRevision(scope) { bumpRevisionStmt.run(normScope(scope)); }
   function getRevision(scope) {
     const row = getRevisionStmt.get(scope);
     return row ? row.revision : 0;
@@ -113,6 +113,20 @@ function createMasterMemoryService(db, eventBus) {
     const s = scope || 'user';
     if (!VALID_SCOPES.has(s)) throw new Error(`invalid scope: ${s}`);
     return s;
+  }
+
+  // Write-time sanitize (Codex SERIOUS): redact secrets ALWAYS; reject injection for untrusted origins
+  // (human / llm_candidate) so a raw secret / injection string never persists to be returned by
+  // retrieve()/listForScope()/getMemoryItem(). Skips the MIN_LEN floor so short legit memories
+  // ('node 22') persist — mirrors L1 R4 "secret redact·injection reject·cap; length floor skip".
+  // deterministic = system-generated facts (redact only). buildInjectionBlock re-checks at inject time.
+  function sanitizeForStore(content, origin) {
+    if (origin !== 'deterministic' && detectInjection(content)) {
+      const e = new Error('content rejected: injection marker'); e.code = 'MEMORY_CONTENT_REJECTED'; throw e;
+    }
+    const out = redactSecrets(content).text.replace(/\s+/g, ' ').trim().slice(0, CHAR_CAP);
+    if (!out) { const e = new Error('content rejected: empty after redaction'); e.code = 'MEMORY_CONTENT_REJECTED'; throw e; }
+    return out;
   }
 
   const insertItemTx = db.transaction((item) => {
@@ -133,14 +147,15 @@ function createMasterMemoryService(db, eventBus) {
     if (kind === 'fact' && !factKey) throw new Error('factKey is required for fact items');
     if (kind !== 'fact' && factKey) throw new Error('factKey is only allowed for fact items');
 
+    const safeContent = sanitizeForStore(content, origin);
     const item = {
       id: crypto.randomUUID(),
       scope: s,
       projectId: projectId || null,
       kind,
       factKey: factKey || null,
-      content,
-      contentHash: sha256(content),
+      content: safeContent,
+      contentHash: sha256(safeContent),
       evidenceJson: normalizeEvidenceJson(evidenceJson),
       origin,
       sourceCount: sourceCount ?? 1,
@@ -174,9 +189,10 @@ function createMasterMemoryService(db, eventBus) {
     const s = normScope(scope);
     if (!factKey) throw new Error('factKey is required');
     if (!content) throw new Error('content is required');
+    const safeContent = sanitizeForStore(content, origin);
     const item = {
       id: crypto.randomUUID(), scope: s, projectId: null, kind: 'fact', factKey,
-      content, contentHash: sha256(content), evidenceJson: normalizeEvidenceJson(evidenceJson),
+      content: safeContent, contentHash: sha256(safeContent), evidenceJson: normalizeEvidenceJson(evidenceJson),
       origin, sourceCount: 1, confidence: 0.9, importance: importance ?? 5, status: 'active',
     };
     try {
@@ -270,12 +286,13 @@ function createMasterMemoryService(db, eventBus) {
     return archiveTx(id);
   }
 
-  function getInjectionRecord(masterRunId) { return getInjectionStmt.get(masterRunId) || null; }
+  function getInjectionRecord(masterRunId, scope) { return getInjectionStmt.get(masterRunId, normScope(scope)) || null; }
   function recordInjection(masterRunId, scope, revision) { recordInjectionStmt.run(masterRunId, normScope(scope), revision); }
-  // Caching-safe gate: inject only once per (masterRunId) until the scope's revision advances.
+  // Caching-safe gate: inject only once per (masterRunId, scope) until THAT scope's revision advances.
   function shouldInject(masterRunId, scope) {
-    const revision = getRevision(normScope(scope));
-    const rec = getInjectionRecord(masterRunId);
+    const s = normScope(scope);
+    const revision = getRevision(s);
+    const rec = getInjectionRecord(masterRunId, s);
     return { inject: !rec || rec.injected_revision < revision, revision, block: null };
   }
 
