@@ -322,3 +322,14 @@ CREATE TABLE mm_revision (scope TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFA
 **phasing 영향**: §8 P1(governed retrieval, **top-K 강제**)은 유효·우선. P2(bi-temporal claim)·P3(graph)은 데이터-관리 근거 입증 전까지 **보류**.
 
 **scale/dedup 정당화 추가 검증 (Codex gatekeep, 2026-06-17)**: 큰-history regime도 테스트 시도 → **공정한 PASS 테스트 불가(스파이크 범위 밖)**. 이유: (a) 12~16 이벤트는 context 에 다 들어가 'scale' 아님 — `A4all`(전체 주입)이 현재 사실 항상 포함 → dedup 무의미; (b) 공정한 PASS 엔 **A7R**(claim 스토어서 retrieved, hand-fed ✕) + **cheap current-aware raw baseline**(raw+recency/authority rerank) + budget-초과 history + 20+/family·3+ family + bootstrap CI 필요 = codex-CLI 스파이크로 불가; (c) naive FTS top-5 만 이기면 "FTS 가 churn 에 약함"이지 "heavy 층이 값함"이 아님. **dedup/scale 정당화 = cheaply·fairly 미검증, 별도 대규모 실험 필요**(production 대용량 코퍼스 + 위 기준). **결론 불변: de-scope.** kill test 는 cheaply-testable 한 두 정당화(answer-influence KILL / 소규모-dedup moot)에서 모두 heavy 층을 정당화 못 함 → governed top-K retrieval 확정.
+
+---
+
+## 13. 구현 현황 (2026-06-17)
+
+de-scoped lean 버전을 실제 구현, main merge 완료. 감독 모드(Claude 구현 + Codex 적대 리뷰 PASS까지) + phase 체인.
+
+- **P1a (merge 3109f9e)**: `migration 030_master_memory.sql`(master_memory_items + FTS5 + scope-keyed revision/injection ledger; scope NOT NULL dedup) + `services/masterMemoryService.js`(governed **top-K** FTS retrieval·write-time sanitize·dedup merge·upsertFact supersede·archive) + 15 tests. Codex R1 FIX-FIRST(scope-keyed ledger BLOCKER + write-time sanitize SERIOUS)→R2 PASS.
+- **P1b (merge d427447)**: `services/conversationService.js` **Top-slot** user-payload 주입(L1 PM 블록 대칭 — top-only, peek-then-commit ledger, annotate-only) + `routes/masterMemory.js`(GET / + POST /remember, cookie-only active, scope fail-closed) + app.js 와이어링 + 4 tests. Codex R1 FIX-FIRST(scope fail-open SERIOUS)→R2 PASS. 전체 1269 green.
+- **남음**: **P1c**(결정론 capture 규칙 + bearer/none candidate 경로 + 거버넌스 cap-admission/decay), **P2**(sqlite-vec 시맨틱 검색 — heavy graph는 여전히 별도 bar 뒤).
+- spike 코드: `experiments/mm-spike/` (kill-test 재현 evidence).
