@@ -1,0 +1,104 @@
+{
+  "tier": "codex",
+  "gens": 3,
+  "arms": [
+    "A0",
+    "A4",
+    "A4k",
+    "A4cur",
+    "A7p",
+    "A7"
+  ],
+  "scope": "TRAP-only",
+  "overall": {
+    "A0": 0.6666666666666666,
+    "A4": 0.5333333333333333,
+    "A4k": 0.8666666666666667,
+    "A4cur": 0.8666666666666667,
+    "A7p": 0,
+    "A7": 1
+  },
+  "correct": {
+    "A0": 10,
+    "A4": 8,
+    "A4k": 13,
+    "A4cur": 13,
+    "A7p": 0,
+    "A7": 15
+  },
+  "N": 15,
+  "marginPP": 13,
+  "net": 2,
+  "winFamilies": [
+    "test-framework"
+  ],
+  "perScenario": [
+    {
+      "id": "h01",
+      "kind": "inferred",
+      "byArm": {
+        "A0": 0.3333333333333333,
+        "A4": 0.6666666666666666,
+        "A4k": 0.3333333333333333,
+        "A4cur": 0.3333333333333333,
+        "A7p": 0,
+        "A7": 1
+      },
+      "family": "test-framework"
+    },
+    {
+      "id": "h02",
+      "kind": "inferred",
+      "byArm": {
+        "A0": 1,
+        "A4": 0.6666666666666666,
+        "A4k": 1,
+        "A4cur": 1,
+        "A7p": 0,
+        "A7": 1
+      },
+      "family": "orm"
+    },
+    {
+      "id": "h04",
+      "kind": "inferred",
+      "byArm": {
+        "A0": 1,
+        "A4": 0.3333333333333333,
+        "A4k": 1,
+        "A4cur": 1,
+        "A7p": 0,
+        "A7": 1
+      },
+      "family": "deploy"
+    },
+    {
+      "id": "h06",
+      "kind": "inferred",
+      "byArm": {
+        "A0": 1,
+        "A4": 0,
+        "A4k": 1,
+        "A4cur": 1,
+        "A7p": 0,
+        "A7": 1
+      },
+      "family": "pkg-mgr"
+    },
+    {
+      "id": "h07",
+      "kind": "inferred",
+      "byArm": {
+        "A0": 0,
+        "A4": 1,
+        "A4k": 1,
+        "A4cur": 1,
+        "A7p": 0,
+        "A7": 1
+      },
+      "family": "lang"
+    }
+  ],
+  "errors": 1,
+  "ms": 3124461
+}
