@@ -1,1 +1,4 @@
 PILOT tier=codex gens=1 arms=[A0,A4,A5,A5c,A7p,A7] scenarios=12 (~72 model calls)
+  [1/12] sc01(explicit) A0:100% A4:100% A5:  0% A5c:  0% A7p:  0% A7:100%
+  [2/12] sc02(explicit) A0:100% A4:100% A5:  0% A5c:  0% A7p:  0% A7:100%
+  [3/12] sc03(explicit) A0:  0% A4:100% A5:  0% A5c:  0% A7p:  0% A7:100%
