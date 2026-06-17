@@ -6359,20 +6359,74 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 }
 
 /* ML PR4b: MemoryView — design tokens only (K-2 light/dark auto-propagate). */
+/* PR3c-1 후속 다듬기: 헤더를 타 뷰(projects-header/title)와 정렬 + native select
+   토큰화(회색 UA select → 디자인 토큰). `.page` 는 스타일이 없는 클래스라 컨테이너
+   padding 을 projects-header(20px top / 28px left)와 맞춰 제목 위치를 타 뷰와 정렬.
+   page-header 는 MemoryView 전용이라 한정 셀렉터. */
+.memory-page {
+  padding: 20px 28px 28px;
+}
+.memory-page .page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.25rem;
+}
+.memory-page .page-header h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-primary);
+}
 .memory-controls { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+.memory-controls select {
+  background: var(--field-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  padding: 0.4rem 0.7rem;
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
 .memory-tabs { display: inline-flex; gap: 0.25rem; }
 .memory-tab {
   padding: 0.35rem 0.75rem; border: 1px solid var(--border); background: var(--field-bg);
   color: var(--text-muted); border-radius: var(--radius-sm); cursor: pointer; font-size: 0.85rem;
 }
 .memory-tab.is-active { background: var(--accent); color: var(--text-inverse); border-color: var(--accent); }
-.memory-list { display: flex; flex-direction: column; gap: 0.75rem; margin-top: 1rem; }
+.memory-list { display: flex; flex-direction: column; gap: 0.75rem; }
 .memory-card { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 0.85rem 1rem; background: var(--bg-surface); }
 .memory-card.is-archived { opacity: 0.6; }
 .memory-card-head { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.5rem; }
 .memory-badge { font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: var(--radius-sm); background: var(--field-bg); color: var(--text-muted); }
 .memory-card-content { white-space: pre-wrap; word-break: break-word; margin-bottom: 0.6rem; color: var(--text-primary); line-height: 1.5; }
 .memory-card-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+/* 카드 액션 버튼(수정/보관/검토/고정/출처): 작게 + 버튼 티 — 카드(bg-surface)보다
+   한 톤 밝은 bg-elevated + 명확한 border + hover/focus 로 버튼임을 분명히. */
+.memory-card-actions .btn {
+  padding: 0.2rem 0.55rem;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+.memory-card-actions .btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+.memory-card-actions .btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 .memory-edit-textarea {
   width: 100%; box-sizing: border-box; padding: 0.5rem; border: 1px solid var(--border);
   border-radius: var(--radius-sm); background: var(--field-bg); color: var(--text-primary); font-family: inherit;
