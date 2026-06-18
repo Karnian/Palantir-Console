@@ -106,3 +106,7 @@ P1c 머지 후. option **C plumbing-first**: **sqlite-vec 는 optional initializ
 4. P2: RRF 융합 vs 가중합 — mnemo의 "recency 스코어링 무효" 단서 고려 시?
 5. 병렬: athena 2-worktree 병렬(머지 1충돌) vs 순차 — 어느 쪽?
 6. 슬라이스 분할/순서 + 빠뜨린 위험?
+
+## P1c 완료
+
+Slices 1-4 merged: PR #217, PR #218, PR #219, and this Slice 4 close-out. The cross-project loop is now closed end to end: L1 scan -> cross_project XPROJECT candidate -> cookie promotion -> user-scope active Master memory -> Top `## User Memory` injection. P2 (`sqlite-vec`) remains deferred until a real embedder decision is made.
