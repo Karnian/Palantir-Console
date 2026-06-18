@@ -141,8 +141,10 @@ function createMasterMemoryRouter({ masterMemoryService }) {
 
     try {
       const content = sanitizeMasterContent(rawContent);
-      const fk = kind === 'fact' ? validateFactKey(factKey) : null;
       if (!isHumanActive) {
+        if (kind === 'fact') {
+          throw new BadRequestError('facts require human (cookie) auth and cannot be staged as a candidate');
+        }
         const hash = crypto.createHash('sha256').update(content).digest('hex').slice(0, 32);
         const candidate = masterMemoryService.createCandidate({
           scope,
@@ -152,10 +154,10 @@ function createMasterMemoryRouter({ masterMemoryService }) {
             rule: 'R4',
             kind,
             content,
-            factKey: fk,
+            factKey: null,
             importance: importance ?? null,
           },
-          dedupKey: `r4:${kind}:${fk || ''}:${hash}`,
+          dedupKey: `r4:${kind}::${hash}`,
         });
         return res.status(202).json({
           candidate: toPublicCandidate(candidate),
@@ -163,6 +165,7 @@ function createMasterMemoryRouter({ masterMemoryService }) {
         });
       }
 
+      const fk = kind === 'fact' ? validateFactKey(factKey) : null;
       let item;
       if (kind === 'fact') {
         // human fact through the fact_key supersede path (origin='human').

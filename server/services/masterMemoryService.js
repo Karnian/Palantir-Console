@@ -240,14 +240,6 @@ function createMasterMemoryService(db, eventBus) {
     return L1_KIND_TO_MASTER_KIND.get(k) || k;
   }
 
-  function normalizeFactKey(factKey) {
-    const fk = typeof factKey === 'string' ? factKey.trim() : '';
-    if (!fk) return null;
-    if (!/^[a-z0-9_]+(\.[a-z0-9_]+)*$/i.test(fk)) return null;
-    if (fk.toLowerCase().startsWith('env.')) return null;
-    return fk;
-  }
-
   function validContentHash(value) {
     return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value);
   }
@@ -363,16 +355,13 @@ function createMasterMemoryService(db, eventBus) {
     if (!kind || !VALID_MASTER_KINDS.has(kind)) {
       return rejectPendingCandidate(candidate.id, 'bad_kind');
     }
+    if (kind === 'fact') {
+      return rejectPendingCandidate(candidate.id, 'fact_not_allowed');
+    }
 
     const content = typeof raw.content === 'string' ? raw.content : '';
     if (!content.trim()) return rejectPendingCandidate(candidate.id, 'bad_content');
     if (detectInjection(content)) return rejectPendingCandidate(candidate.id, 'injection');
-
-    let factKey = null;
-    if (kind === 'fact') {
-      factKey = normalizeFactKey(raw.factKey ?? raw.fact_key);
-      if (!factKey) return rejectPendingCandidate(candidate.id, 'bad_fact_key');
-    }
 
     let safeContent;
     try {
@@ -417,7 +406,7 @@ function createMasterMemoryService(db, eventBus) {
       item = createMemoryItem({
         scope: promoteScope,
         kind,
-        factKey,
+        factKey: null,
         content: safeContent,
         evidenceJson: {
           schema_version: 1,

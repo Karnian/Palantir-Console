@@ -161,6 +161,30 @@ test('promoteCandidate rejects injection content even when a candidate already e
   assert.equal(db.prepare('SELECT COUNT(*) n FROM master_memory_items').get().n, 0);
 });
 
+test('promoteCandidate rejects directly-created fact candidates as terminal', (t) => {
+  const db = setupDb(t);
+  const svc = createMasterMemoryService(db);
+  svc.upsertFact({ scope: 'user', factKey: 'deploy.region', content: 'Deploys to nrt region.', origin: 'human' });
+  const cand = svc.createCandidate({
+    scope: 'user',
+    rule: 'R4',
+    rawJson: {
+      schema_version: 1,
+      kind: 'fact',
+      factKey: 'deploy.region',
+      content: 'Deploys to iad region.',
+    },
+    dedupKey: 'fact-candidate-direct',
+  });
+
+  const result = svc.promoteCandidate({ candidateId: cand.id });
+  assert.equal(result.promoted, false);
+  assert.equal(result.reason, 'fact_not_allowed');
+  assert.equal(db.prepare('SELECT status FROM master_memory_candidates WHERE id=?').get(cand.id).status, 'rejected');
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE fact_key='deploy.region' AND status='active'").get().n, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_candidates WHERE status='pending'").get().n, 0);
+});
+
 test('promoteCandidate marks exact content_hash collisions as merged', (t) => {
   const db = setupDb(t);
   const svc = createMasterMemoryService(db);
@@ -287,4 +311,52 @@ test('routes: bearer remember creates candidate; candidates are cookie-only; coo
   assert.equal(promoted.body.memory.status, 'active');
   assert.equal(promoted.body.memory.origin, 'deterministic');
   assert.equal(promoted.body.candidate.status, 'promoted');
+});
+
+test('routes: bearer remember refuses fact candidates', async (t) => {
+  const app = await setupApp(t);
+
+  const res = await invokeApp(app, {
+    method: 'POST',
+    path: '/api/master-memory/remember',
+    headers: BEARER,
+    body: {
+      scope: 'user',
+      kind: 'fact',
+      factKey: 'deploy.region',
+      content: 'Deploys to nrt region.',
+    },
+  });
+  assert.equal(res.status, 400);
+  assert.equal(res.body.error, 'facts require human (cookie) auth and cannot be staged as a candidate');
+  assert.equal(app.services._rawDb.prepare('SELECT COUNT(*) n FROM master_memory_candidates').get().n, 0);
+  assert.equal(app.services._rawDb.prepare('SELECT COUNT(*) n FROM master_memory_items').get().n, 0);
+});
+
+test('routes: directly-created fact candidate promotion returns 409 fact_not_allowed', async (t) => {
+  const app = await setupApp(t);
+  const svc = app.services.masterMemoryService;
+  svc.upsertFact({ scope: 'user', factKey: 'deploy.region', content: 'Deploys to nrt region.', origin: 'human' });
+  const cand = svc.createCandidate({
+    scope: 'user',
+    rule: 'R4',
+    rawJson: {
+      schema_version: 1,
+      kind: 'fact',
+      factKey: 'deploy.region',
+      content: 'Deploys to iad region.',
+    },
+    dedupKey: 'fact-candidate-route',
+  });
+
+  const rejected = await invokeApp(app, {
+    method: 'POST',
+    path: `/api/master-memory/candidates/${cand.id}/promote`,
+    headers: COOKIE,
+  });
+  assert.equal(rejected.status, 409);
+  assert.equal(rejected.body.reason, 'fact_not_allowed');
+  assert.deepEqual(rejected.body.candidate, { id: cand.id, status: 'rejected' });
+  assert.equal(app.services._rawDb.prepare('SELECT status FROM master_memory_candidates WHERE id=?').get(cand.id).status, 'rejected');
+  assert.equal(app.services._rawDb.prepare("SELECT COUNT(*) n FROM master_memory_candidates WHERE status='pending'").get().n, 0);
 });
