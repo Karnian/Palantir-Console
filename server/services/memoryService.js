@@ -462,18 +462,27 @@ function createMemoryService(db, eventBus) {
     return capped;
   }
 
-  function buildMatchQuery(taskContext) {
-    const trimmed = typeof taskContext === 'string' ? taskContext.trim() : '';
+  // FTS5 MATCH builder. Default = exact-quoted tokens (the original behavior).
+  // With { prefix: true } each token becomes a prefix term (`"tok"*`) so Korean
+  // 조사-inflected forms are reachable (조사 attach as suffixes — 메모리+를 — so the
+  // stem is a PREFIX of the inflected token; `"메모리"` misses `메모리를`, `"메모리"*`
+  // catches it). NFC-normalized so canonical-equivalent 한글 compares equal (stored
+  // app/LLM text is NFC; NFD content would need write-side NFC — out of A1 scope).
+  // NOTE: a prefix term is a superset at the MATCH-SET level but NOT at the top-K
+  // retrieval level — a short over-matching prefix can outrank exact hits in bm25.
+  // retrieveForProject therefore runs exact-first then prefix-fill (see there).
+  // A1 / docs/specs/memory-augmentation-brief.md §2-①.
+  function buildMatchQuery(taskContext, opts = {}) {
+    const raw = typeof taskContext === 'string' ? taskContext : '';
+    const trimmed = raw.normalize('NFC').trim();
     if (!trimmed) {
       return null;
     }
 
     // Split on any non-(letter/number/underscore) run so punctuation acts as a
-    // SEPARATOR (code paths / function names / `foo-bar` split into distinct
-    // tokens) rather than being stripped into one fused token. The prior
-    // `.replace(/[^\p{L}\p{N}_]/,'')` collapsed `memoryService.js` into
-    // `memoryservicejs`, which never matched the FTS index — a silent recall
-    // hole (independent Codex cross-review SERIOUS).
+    // SEPARATOR (code paths / `foo-bar` split into distinct tokens) rather than
+    // being stripped into one fused token. The prior `.replace(...)` collapsed
+    // `memoryService.js` into `memoryservicejs`, a silent recall hole.
     const tokens = trimmed
       .toLowerCase()
       .split(/[^\p{L}\p{N}_]+/u)
@@ -484,7 +493,8 @@ function createMemoryService(db, eventBus) {
       return null;
     }
 
-    return tokens.map((token) => `"${token}"`).join(' OR ');
+    const star = opts.prefix ? '*' : '';
+    return tokens.map((token) => `"${token}"${star}`).join(' OR ');
   }
 
   function retrieveFallback(projectId, k) {
@@ -495,15 +505,29 @@ function createMemoryService(db, eventBus) {
     try {
       const { taskContext, limit } = options || {};
       const k = getEffectiveLimit(limit);
-      const q = buildMatchQuery(taskContext);
+      const exactQ = buildMatchQuery(taskContext);
 
-      if (!q) {
+      if (!exactQ) {
         return capRowsByContentLength(retrieveFallback(projectId, k));
       }
 
       try {
-        // bm25: lower score = more relevant -> ASC
-        return capRowsByContentLength(ftsRetrieveStmt.all({ projectId, q, k }));
+        // Two-pass (A1): exact hits first — identical ranking to pre-A1, so an
+        // exact hit keeps its top-K position ahead of any prefix-only hit (the
+        // existing char-cap budget still applies; NOT a strict returned-set superset).
+        // Only when exact under-fills K do we prefix-fill the remaining slots,
+        // making Korean 조사-inflected forms reachable without a short over-matching
+        // prefix dominating. bm25: lower = more relevant -> ASC.
+        const exactRows = ftsRetrieveStmt.all({ projectId, q: exactQ, k });
+        if (exactRows.length >= k) {
+          return capRowsByContentLength(exactRows);
+        }
+        const prefixQ = buildMatchQuery(taskContext, { prefix: true });
+        const seen = new Set(exactRows.map((r) => r.id));
+        const prefixRows = ftsRetrieveStmt
+          .all({ projectId, q: prefixQ, k })
+          .filter((r) => !seen.has(r.id));
+        return capRowsByContentLength(exactRows.concat(prefixRows).slice(0, k));
       } catch (err) {
         return capRowsByContentLength(retrieveFallback(projectId, k));
       }
