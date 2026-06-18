@@ -489,6 +489,110 @@ function startMasterMemoryDecayScheduler({ masterMemoryService, intervalMs = 6 *
   };
 }
 
+function startMasterMemoryXprojectScanner({
+  masterMemoryService,
+  eventBus,
+  intervalMs = 6 * 60 * 60 * 1000,
+  debounceMs = 1000,
+  limit,
+  logger = console,
+} = {}) {
+  const safeIntervalMs = Number.parseInt(intervalMs, 10);
+  const safeDebounceMs = Number.parseInt(debounceMs, 10);
+  const scanIntervalMs = Number.isFinite(safeIntervalMs) && safeIntervalMs > 0
+    ? safeIntervalMs
+    : 6 * 60 * 60 * 1000;
+  const scanDebounceMs = Number.isFinite(safeDebounceMs) && safeDebounceMs >= 0
+    ? safeDebounceMs
+    : 1000;
+  const hintChannels = new Set(['memory:promoted', 'memory:decayed', 'memory:evicted']);
+
+  let interval = null;
+  let timer = null;
+  let busy = false;
+  let dirty = false;
+  let stopped = false;
+
+  const warn = (message) => {
+    try { logger.warn(`[master-memory-xproject-scan] ${message}`); } catch { /* */ }
+  };
+
+  const run = () => {
+    if (stopped) return null;
+    if (busy) {
+      dirty = true;
+      return null;
+    }
+    busy = true;
+    try {
+      if (masterMemoryService && typeof masterMemoryService.scanCrossProjectCandidates === 'function') {
+        return masterMemoryService.scanCrossProjectCandidates({ limit });
+      }
+      return null;
+    } catch (err) {
+      warn(`tick failed: ${err && err.message}`);
+      return null;
+    } finally {
+      busy = false;
+      if (dirty && !stopped) {
+        dirty = false;
+        schedule(0);
+      }
+    }
+  };
+
+  function schedule(delayMs = scanDebounceMs) {
+    if (stopped) return false;
+    if (busy) {
+      dirty = true;
+      return false;
+    }
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      run();
+    }, delayMs);
+    try { if (timer && typeof timer.unref === 'function') timer.unref(); } catch { /* */ }
+    return true;
+  }
+
+  const unsubscribe = eventBus && typeof eventBus.subscribe === 'function'
+    ? eventBus.subscribe((event) => {
+      if (!event || !hintChannels.has(event.channel)) return;
+      schedule();
+    })
+    : null;
+
+  run();
+  interval = setInterval(run, scanIntervalMs);
+  try { if (interval && typeof interval.unref === 'function') interval.unref(); } catch { /* */ }
+
+  const api = {
+    tick: run,
+    schedule,
+    stop() {
+      stopped = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (interval) {
+        clearInterval(interval);
+        interval = null;
+      }
+      try { if (typeof unsubscribe === 'function') unsubscribe(); } catch { /* */ }
+    },
+    clearInterval() {
+      api.stop();
+    },
+    get interval() { return interval; },
+    get timer() { return timer; },
+    get busy() { return busy; },
+    get dirty() { return dirty; },
+  };
+  return api;
+}
+
 function createApp(options = {}) {
   const app = express();
   // PR1: tests pass `authToken` explicitly to avoid mutating
@@ -551,6 +655,25 @@ function createApp(options = {}) {
   // conversationService for Top-manager user-payload prepend + the /api/master-memory router.
   const masterMemoryService = createMasterMemoryService(db, eventBus);
   const masterMemoryDecayScheduler = startMasterMemoryDecayScheduler({ masterMemoryService });
+  const xprojectScanEnabled = options.masterMemoryXprojectScanEnabled
+    ?? (process.env.PALANTIR_MASTER_XPROJECT_SCAN !== '0');
+  const masterMemoryXprojectScanner = xprojectScanEnabled
+    ? startMasterMemoryXprojectScanner({
+      masterMemoryService,
+      eventBus,
+      intervalMs: options.masterMemoryXprojectScanIntervalMs ?? process.env.PALANTIR_MASTER_XPROJECT_SCAN_INTERVAL_MS,
+      debounceMs: options.masterMemoryXprojectScanDebounceMs ?? process.env.PALANTIR_MASTER_XPROJECT_SCAN_DEBOUNCE_MS,
+      limit: options.masterMemoryXprojectScanLimit,
+    })
+    : {
+      disabled: true,
+      tick: () => null,
+      schedule: () => false,
+      stop() {},
+      clearInterval() {},
+      get interval() { return null; },
+      get timer() { return null; },
+    };
   // Phase 10B: Worker Preset service. Created before taskService so that
   // taskService can validate preferred_preset_id at the service layer (D2c).
   const presetService = createPresetService(db, {
@@ -845,6 +968,7 @@ function createApp(options = {}) {
     memoryService, // ML PR1: test seam for seeding L1 memory through the app db
     masterMemoryService, // L2 P1b: test seam for seeding/asserting Master memory
     masterMemoryDecayScheduler,
+    masterMemoryXprojectScanner,
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at
     // (createRun() always stamps status='queued' and cost_usd=0 at now).
@@ -883,9 +1007,10 @@ function createApp(options = {}) {
     //      happen BEFORE closeDb() severs the sqlite handle,
     //   2) webhookService.stop() — removes eventBus subscribers before
     //      the db-backed run event writer disappears,
-    //   3) lifecycleService.stopMonitoring() — cancels the health
+    //   3) master memory schedulers stop before closeDb(),
+    //   4) lifecycleService.stopMonitoring() — cancels the health
     //      loop that might otherwise try to act on a closed db,
-    //   4) closeDb().
+    //   5) closeDb().
     //
     // Dispose failures are logged but do NOT re-throw; shutdown is
     // best-effort and a partial cleanup is still better than leaving
@@ -911,6 +1036,7 @@ function createApp(options = {}) {
       console.warn('[app.shutdown] manager dispose sweep failed:', err && err.message);
     }
     try { webhookService.stop(); } catch { /* ignore */ }
+    try { if (masterMemoryXprojectScanner) masterMemoryXprojectScanner.stop(); } catch { /* ignore */ }
     try { if (masterMemoryDecayScheduler) masterMemoryDecayScheduler.stop(); } catch { /* ignore */ }
     try { if (memoryDistillScheduler) memoryDistillScheduler.stop(); } catch { /* ignore */ }
     lifecycleService.stopMonitoring();
@@ -942,6 +1068,7 @@ module.exports = {
   createR1bCapture,
   createR3Capture,
   startMasterMemoryDecayScheduler,
+  startMasterMemoryXprojectScanner,
   buildPmReviewText,
   formatHarvestSummary,
 };
