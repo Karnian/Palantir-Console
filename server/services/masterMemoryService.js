@@ -175,7 +175,54 @@ function createMasterMemoryService(db, eventBus) {
     FROM memory_items
     WHERE content_hash = ?
       AND status = 'active'
+      AND kind != 'fact'
       AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))
+  `);
+  const scanCrossProjectHashesStmt = db.prepare(`
+    SELECT content_hash, COUNT(DISTINCT project_id) AS projects
+    FROM memory_items
+    WHERE status = 'active'
+      AND kind != 'fact'
+      AND project_id IS NOT NULL
+      AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))
+    GROUP BY content_hash
+    HAVING COUNT(DISTINCT project_id) >= 2
+    ORDER BY MAX(datetime(updated_at)) DESC, content_hash ASC
+  `);
+  const scanCrossProjectHashesLimitedStmt = db.prepare(`
+    SELECT content_hash, COUNT(DISTINCT project_id) AS projects
+    FROM memory_items
+    WHERE status = 'active'
+      AND kind != 'fact'
+      AND project_id IS NOT NULL
+      AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))
+    GROUP BY content_hash
+    HAVING COUNT(DISTINCT project_id) >= 2
+    ORDER BY MAX(datetime(updated_at)) DESC, content_hash ASC
+    LIMIT @limit
+  `);
+  const scanCrossProjectContentStmt = db.prepare(`
+    SELECT content
+    FROM memory_items
+    WHERE content_hash = @contentHash
+      AND status = 'active'
+      AND kind != 'fact'
+      AND project_id IS NOT NULL
+      AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))
+    ORDER BY datetime(updated_at) DESC, rowid_pk DESC
+    LIMIT 1
+  `);
+  const scanCrossProjectKindStmt = db.prepare(`
+    SELECT kind, COUNT(DISTINCT project_id) AS projects, MAX(datetime(updated_at)) AS latest
+    FROM memory_items
+    WHERE content_hash = @contentHash
+      AND status = 'active'
+      AND kind != 'fact'
+      AND project_id IS NOT NULL
+      AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))
+    GROUP BY kind
+    ORDER BY projects DESC, datetime(latest) DESC, kind ASC
+    LIMIT 1
   `);
 
   function _bumpRevision(scope) { bumpRevisionStmt.run(normScope(scope)); }
@@ -461,6 +508,80 @@ function createMasterMemoryService(db, eventBus) {
       dedupKey: key,
     });
     return toPublicCandidate(getCandidateByDedupStmt.get(r, s, key));
+  }
+
+  function emitScanSkipped(contentHash, reason) {
+    if (!eventBus) return;
+    try { eventBus.emit('master_memory:scan_skipped', { content_hash: contentHash, reason }); } catch { /* */ }
+  }
+
+  function emitScanned(summary) {
+    if (!eventBus) return;
+    try { eventBus.emit('master_memory:scanned', summary); } catch { /* */ }
+  }
+
+  function scanCrossProjectCandidates({ limit } = {}) {
+    const summary = { created: 0, skipped: 0, scanned: 0 };
+    try {
+      const parsedLimit = Number.parseInt(limit, 10);
+      const rows = Number.isFinite(parsedLimit) && parsedLimit > 0
+        ? scanCrossProjectHashesLimitedStmt.all({ limit: Math.floor(parsedLimit) })
+        : scanCrossProjectHashesStmt.all();
+
+      for (const row of rows) {
+        const contentHash = row && typeof row.content_hash === 'string' ? row.content_hash : '';
+        summary.scanned += 1;
+
+        const contentRow = scanCrossProjectContentStmt.get({ contentHash });
+        const kindRow = scanCrossProjectKindStmt.get({ contentHash });
+        const content = contentRow && typeof contentRow.content === 'string' ? contentRow.content : '';
+        const kind = kindRow && typeof kindRow.kind === 'string' ? kindRow.kind : '';
+        if (!content || !kind) {
+          summary.skipped += 1;
+          emitScanSkipped(contentHash, 'missing_representative');
+          continue;
+        }
+
+        let safe;
+        try {
+          safe = sanitizeForStore(content, 'deterministic');
+        } catch {
+          summary.skipped += 1;
+          emitScanSkipped(contentHash, 'not_l2_fixed_point');
+          continue;
+        }
+        if (safe !== content || sha256(content) !== contentHash) {
+          summary.skipped += 1;
+          emitScanSkipped(contentHash, 'not_l2_fixed_point');
+          continue;
+        }
+
+        try {
+          const existing = getCandidateByDedupStmt.get('XPROJECT', 'cross_project', contentHash);
+          const candidate = createCandidate({
+            scope: 'cross_project',
+            rule: 'XPROJECT',
+            rawJson: {
+              schema_version: 1,
+              rule: 'XPROJECT',
+              kind,
+              content,
+              content_hash: contentHash,
+              projects: Number(row.projects) || 0,
+            },
+            dedupKey: contentHash,
+          });
+          if (!existing && candidate) summary.created += 1;
+        } catch {
+          summary.skipped += 1;
+          emitScanSkipped(contentHash, 'candidate_rejected');
+        }
+      }
+    } catch {
+      // never-throw: periodic scan is a maintenance signal, not a request path.
+    }
+    emitScanned(summary);
+    return summary;
   }
 
   function listCandidates(scope, status = 'pending') {
@@ -923,6 +1044,7 @@ function createMasterMemoryService(db, eventBus) {
     getRevision,
     createMemoryItem,
     createCandidate,
+    scanCrossProjectCandidates,
     listCandidates,
     promoteCandidate,
     remember,
