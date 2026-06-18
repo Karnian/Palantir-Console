@@ -1,0 +1,1179 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Master · Operator · Worker 메모리 구조</title>
+<style>
+/* ─── Design Tokens ────────────────────────────────────────────── */
+:root {
+  --bg:           #f0f4f8;
+  --bg-subtle:    #e8edf3;
+  --card:         #ffffff;
+  --card-hover:   #fafcff;
+  --ink:          #0d1b2a;
+  --ink-2:        #253347;
+  --ink-3:        #3d5166;
+  --muted:        #5a7082;
+  --muted-2:      #7f96a8;
+  --line:         #d8e2ec;
+  --line-2:       #c5d3df;
+
+  /* Scope accent — AA-compliant text on white bg */
+  --user:         #1d56b4;
+  --user-bg:      #eef4ff;
+  --user-border:  #b3cdf5;
+
+  --profile:      #6728c9;
+  --profile-bg:   #f3eeff;
+  --profile-border:#c9b4f0;
+
+  --workspace:    #0a7a5a;
+  --workspace-bg: #eafaf4;
+  --workspace-border:#8ed6bc;
+
+  --archive:      #b05c00;
+  --archive-bg:   #fff8ee;
+  --archive-border:#f0c77a;
+
+  --danger:       #c0152a;
+  --danger-bg:    #fff2f3;
+  --danger-border:#f5a8af;
+
+  --ok:           #0d8a7a;
+
+  --hero-from:    #0d1b2a;
+  --hero-to:      #1e3a5f;
+  --hero-accent:  #3057a7;
+
+  --shadow-xs:    0 1px 2px rgba(13,27,42,.07);
+  --shadow-sm:    0 1px 4px rgba(13,27,42,.09), 0 4px 12px -4px rgba(13,27,42,.12);
+  --shadow-md:    0 2px 8px rgba(13,27,42,.09), 0 12px 32px -8px rgba(13,27,42,.16);
+
+  --radius-sm:    8px;
+  --radius-md:    12px;
+  --radius-lg:    16px;
+
+  --font-sans:    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  --font-mono:    "SF Mono", ui-monospace, Menlo, Consolas, "Courier New", monospace;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:           #0d1b2a;
+    --bg-subtle:    #111f30;
+    --card:         #162033;
+    --card-hover:   #1a2640;
+    --ink:          #e8f0f8;
+    --ink-2:        #c4d4e4;
+    --ink-3:        #96afc5;
+    --muted:        #7593ad;
+    --muted-2:      #557088;
+    --line:         #1e3347;
+    --line-2:       #253d55;
+
+    --user:         #5b93e8;
+    --user-bg:      #0f1e35;
+    --user-border:  #1e3d6a;
+
+    --profile:      #a97cf0;
+    --profile-bg:   #16102b;
+    --profile-border:#2f1e5a;
+
+    --workspace:    #3dc49a;
+    --workspace-bg: #0a1f19;
+    --workspace-border:#0e3d2e;
+
+    --archive:      #e89a3c;
+    --archive-bg:   #1e1407;
+    --archive-border:#3d2a00;
+
+    --danger:       #f06a75;
+    --danger-bg:    #1f0a0e;
+    --danger-border:#4d1520;
+
+    --ok:           #2ec4aa;
+
+    --hero-from:    #060e18;
+    --hero-to:      #0f2240;
+    --hero-accent:  #1e3a72;
+
+    --shadow-xs:    0 1px 2px rgba(0,0,0,.3);
+    --shadow-sm:    0 1px 4px rgba(0,0,0,.3), 0 4px 12px -4px rgba(0,0,0,.4);
+    --shadow-md:    0 2px 8px rgba(0,0,0,.35), 0 12px 32px -8px rgba(0,0,0,.5);
+  }
+}
+
+/* ─── Reset & Base ─────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── Layout ───────────────────────────────────────────────────── */
+.wrap {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 0 var(--space-5) var(--space-16);
+}
+
+/* ─── Typography ───────────────────────────────────────────────── */
+code, .mono {
+  font-family: var(--font-mono);
+  font-size: .875em;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  padding: 2px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+/* ─── Hero Header ──────────────────────────────────────────────── */
+header.hero {
+  background: linear-gradient(140deg, var(--hero-from) 0%, var(--hero-to) 60%, var(--hero-accent) 100%);
+  color: #fff;
+  padding: var(--space-12) var(--space-5) var(--space-10);
+  margin-bottom: var(--space-8);
+  position: relative;
+  overflow: hidden;
+}
+header.hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 60% 80% at 85% 50%, rgba(80,120,200,.15) 0%, transparent 70%),
+    repeating-linear-gradient(
+      -45deg,
+      transparent 0,
+      transparent 20px,
+      rgba(255,255,255,.018) 20px,
+      rgba(255,255,255,.018) 21px
+    );
+  pointer-events: none;
+}
+.hero-inner {
+  max-width: 1080px;
+  margin: 0 auto;
+  position: relative;
+  z-index: 1;
+}
+.hero h1 {
+  font-size: clamp(22px, 4vw, 32px);
+  font-weight: 800;
+  letter-spacing: -.6px;
+  line-height: 1.25;
+  margin-bottom: var(--space-2);
+  color: #f0f6ff;
+}
+.hero .subtitle {
+  color: #9bb8d8;
+  font-size: 14.5px;
+  line-height: 1.5;
+}
+.hero .subtitle b { color: #c5dcf5; }
+.badges {
+  margin-top: var(--space-5);
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.badge {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.1);
+  border: 1px solid rgba(255,255,255,.18);
+  color: #cde0f5;
+  letter-spacing: .2px;
+}
+.badge.go {
+  background: rgba(40,190,150,.15);
+  border-color: rgba(60,210,170,.3);
+  color: #5de8c8;
+}
+
+/* ─── Section Headings ─────────────────────────────────────────── */
+h2 {
+  font-size: 18px;
+  font-weight: 700;
+  margin: var(--space-12) 0 var(--space-4);
+  padding-bottom: var(--space-3);
+  border-bottom: 1.5px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--ink-2);
+  letter-spacing: -.3px;
+}
+h2 .n {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  background: var(--ink-2);
+  color: #fff;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  letter-spacing: 0;
+  box-shadow: var(--shadow-xs);
+}
+h2 small {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  letter-spacing: 0;
+}
+h3 {
+  font-size: 15px;
+  font-weight: 700;
+  margin: var(--space-6) 0 var(--space-3);
+  color: var(--ink-2);
+}
+p.lead {
+  color: var(--ink-3);
+  font-size: 14.5px;
+  line-height: 1.7;
+  margin-bottom: var(--space-4);
+}
+
+/* ─── Cards ────────────────────────────────────────────────────── */
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5) var(--space-6);
+  box-shadow: var(--shadow-sm);
+  margin: var(--space-4) 0;
+}
+
+/* ─── Legend / Chips ───────────────────────────────────────────── */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 700;
+  border: 1.5px solid;
+  white-space: nowrap;
+  letter-spacing: .1px;
+  line-height: 1.4;
+}
+.chip .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: currentColor;
+  flex: none;
+}
+.c-user     { color: var(--user);      background: var(--user-bg);      border-color: var(--user-border); }
+.c-profile  { color: var(--profile);   background: var(--profile-bg);   border-color: var(--profile-border); }
+.c-workspace{ color: var(--workspace); background: var(--workspace-bg); border-color: var(--workspace-border); }
+.c-archive  { color: var(--archive);   background: var(--archive-bg);   border-color: var(--archive-border); }
+.legend {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+/* ─── Legend Banner ────────────────────────────────────────────── */
+.legend-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4) var(--space-6);
+  box-shadow: var(--shadow-sm);
+  margin: 0 0 var(--space-4);
+}
+.legend-label {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .8px;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: var(--space-3);
+}
+.legend-summary {
+  margin-top: var(--space-4);
+  font-size: 14px;
+  color: var(--ink-3);
+  line-height: 1.65;
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-3);
+}
+.legend-summary b { color: var(--ink-2); }
+
+/* ─── SVG Diagram ──────────────────────────────────────────────── */
+.diagram-wrap {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  padding: var(--space-6);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.diagram-svg {
+  display: block;
+  min-width: 580px;
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+  height: auto;
+}
+
+/* ─── Callouts ─────────────────────────────────────────────────── */
+.callout {
+  border-left: 4px solid var(--user);
+  background: color-mix(in srgb, var(--user-bg) 60%, var(--card));
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  padding: var(--space-4) var(--space-5);
+  margin: var(--space-5) 0;
+}
+.callout.warn {
+  border-color: var(--archive);
+  background: color-mix(in srgb, var(--archive-bg) 60%, var(--card));
+}
+.callout.danger {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger-bg) 60%, var(--card));
+}
+.callout h3 {
+  font-size: 14.5px;
+  font-weight: 700;
+  margin: 0 0 var(--space-2);
+  color: var(--user);
+}
+.callout.warn h3  { color: var(--archive); }
+.callout.danger h3 { color: var(--danger); }
+.callout p { font-size: 14px; color: var(--ink-3); margin-top: var(--space-2); }
+.callout p:first-of-type { margin-top: 0; }
+ul.tight {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-5);
+}
+ul.tight li {
+  margin: var(--space-2) 0;
+  font-size: 14px;
+  color: var(--ink-3);
+  line-height: 1.65;
+}
+ul.tight li b { color: var(--ink-2); }
+
+/* ─── Tables ───────────────────────────────────────────────────── */
+.table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  margin: var(--space-4) 0;
+  border: 1px solid var(--line);
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+  background: var(--card);
+  border-radius: var(--radius-lg);
+  min-width: 500px;
+}
+th, td {
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+  line-height: 1.55;
+}
+th {
+  background: var(--bg-subtle);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--muted);
+  border-bottom: 1.5px solid var(--line-2);
+  white-space: nowrap;
+}
+tr:last-child td { border-bottom: none; }
+td small { color: var(--muted); }
+.star { color: var(--profile); font-weight: 700; }
+.deny { color: var(--danger); font-weight: 700; }
+
+/* ─── Two-Column Flow ──────────────────────────────────────────── */
+.cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+  margin: var(--space-4) 0;
+}
+.flowcard {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  box-shadow: var(--shadow-sm);
+}
+.flowcard h3 { margin-top: 0; }
+.flowcard.up {
+  border-top: 3px solid var(--workspace);
+}
+.flowcard.down {
+  border-top: 3px solid var(--user);
+}
+.arrowlist {
+  list-style: none;
+  padding: 0;
+  margin: var(--space-3) 0 0;
+  font-size: 13.5px;
+}
+.arrowlist li {
+  padding: var(--space-2) 0;
+  border-bottom: 1px dashed var(--line);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  color: var(--ink-3);
+}
+.arrowlist li:last-child { border: none; }
+
+/* ─── Composer Pill Row ────────────────────────────────────────── */
+.pill-row {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin: var(--space-2) 0;
+}
+.pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 500;
+  background: var(--bg-subtle);
+  border: 1px solid var(--line-2);
+  color: var(--ink-3);
+}
+
+/* ─── Phase Stepper ────────────────────────────────────────────── */
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: var(--space-4) 0;
+  position: relative;
+}
+.steps::before {
+  content: "";
+  position: absolute;
+  left: 14px;
+  top: 30px;
+  bottom: 10px;
+  width: 2px;
+  background: var(--line-2);
+}
+.step {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-start;
+  padding: var(--space-3) 0;
+  position: relative;
+  z-index: 1;
+}
+.step .dot {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--ink-2);
+  color: #fff;
+  font-weight: 800;
+  font-size: 11.5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 0 3px var(--bg);
+  letter-spacing: -.3px;
+}
+.step.a0   .dot { background: var(--danger); }
+.step.arch .dot { background: var(--archive); }
+.step.def  .dot { background: var(--muted-2); }
+.step .b { flex: 1; padding-top: 4px; }
+.step .b b { font-size: 14px; color: var(--ink-2); }
+.step .b p { margin: 4px 0 0; font-size: 13px; color: var(--muted); line-height: 1.55; }
+
+/* ─── Blockers List ────────────────────────────────────────────── */
+.blockers { counter-reset: bk; }
+.blockers li {
+  margin: var(--space-3) 0;
+  font-size: 14px;
+  color: var(--ink-3);
+  line-height: 1.6;
+}
+.blockers li b { color: var(--ink-2); }
+.blocker-card {
+  background: color-mix(in srgb, var(--danger-bg) 40%, var(--card));
+  border: 1.5px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-5) var(--space-6);
+  margin: var(--space-3) 0;
+}
+
+/* ─── Footer ───────────────────────────────────────────────────── */
+footer {
+  margin-top: var(--space-10);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--line);
+  color: var(--muted-2);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+/* ─── Responsive ───────────────────────────────────────────────── */
+@media (max-width: 760px) {
+  .cols { grid-template-columns: 1fr; }
+  .card { padding: var(--space-4) var(--space-4); }
+  .diagram-wrap { padding: var(--space-4); }
+}
+
+/* ─── Print ────────────────────────────────────────────────────── */
+@media print {
+  body { background: #fff; color: #000; font-size: 12px; }
+  header.hero {
+    background: #0d1b2a !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .diagram-wrap { box-shadow: none; overflow: visible; }
+  .diagram-svg { min-width: auto; max-width: 100%; }
+  .card, .callout, .flowcard { box-shadow: none; }
+  h2 { page-break-after: avoid; }
+  .steps::before { display: none; }
+  table { min-width: auto; font-size: 11px; }
+}
+
+/* ─── Focus States (WCAG 2.4.7) ───────────────────────────────── */
+:focus-visible {
+  outline: 3px solid var(--user);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+</style>
+</head>
+<body>
+
+<!-- ═══ HERO ═══════════════════════════════════════════════════════ -->
+<header class="hero">
+  <div class="hero-inner">
+    <h1>Master · Operator · Worker 메모리 구조</h1>
+    <p class="subtitle">PM → <b>Operator</b> 일반화 + <b>2-tier</b>(Raw 아카이브 + Governed 주입) 전면 개편</p>
+    <div class="badges">
+      <span class="badge">draft / for-review</span>
+      <span class="badge go">Codex 교차검토 · guarded GO</span>
+      <span class="badge">2026-06-18</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- ─── LEGEND ────────────────────────────────────────────────── -->
+  <div class="legend-card">
+    <div class="legend-label">메모리 색상 범례</div>
+    <div class="legend">
+      <span class="chip c-archive"><span class="dot"></span>▤ Raw 아카이브 — 흡수(전부)</span>
+      <span class="chip c-user"><span class="dot"></span>▣ User — 사용자 전역</span>
+      <span class="chip c-profile"><span class="dot"></span>▣ Profile — 에이전트 전문성</span>
+      <span class="chip c-workspace"><span class="dot"></span>▣ Workspace — 코드베이스 사실</span>
+    </div>
+    <p class="legend-summary">
+      핵심 한 줄: <b>"다 기억해"(흡수)와 "잘 행동해"(주입)를 분리한다.</b>
+      모든 건 <b>Raw 아카이브</b>에 쌓고, 컨텍스트에 들어가는 건 거기서 <b>선별된 governed 메모리</b>뿐.
+      흡수는 아카이브가, 정밀도는 주입이 담당.
+    </p>
+  </div>
+
+
+  <!-- ═══ §1 큰 그림 ═══════════════════════════════════════════════ -->
+  <h2 id="s1"><span class="n">1</span>큰 그림 — 두 평면</h2>
+
+  <!-- SVG DIAGRAM — the centerpiece -->
+  <div class="diagram-wrap">
+    <svg class="diagram-svg" viewBox="0 0 820 540" xmlns="http://www.w3.org/2000/svg"
+         role="img" aria-label="두 평면 메모리 아키텍처 다이어그램: Raw 아카이브 평면에서 acceptance 게이트를 통해 Working 평면의 Master → Operator → Worker 계층으로 흐름">
+      <defs>
+        <!-- Arrow markers -->
+        <marker id="arr-dk" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#3d5166"/>
+        </marker>
+        <marker id="arr-user" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#1d56b4"/>
+        </marker>
+        <marker id="arr-ws" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#0a7a5a"/>
+        </marker>
+        <marker id="arr-arch" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#b05c00"/>
+        </marker>
+        <!-- Grid/texture for archive plane -->
+        <pattern id="hatch" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(45)">
+          <line x1="0" y1="0" x2="0" y2="8" stroke="#d97706" stroke-width=".5" stroke-opacity=".25"/>
+        </pattern>
+        <!-- Drop shadow filter -->
+        <filter id="drop-sm" x="-10%" y="-10%" width="120%" height="120%">
+          <feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity=".1"/>
+        </filter>
+      </defs>
+
+      <!-- ── PLANE BACKGROUNDS ──────────────────────────────────── -->
+      <!-- Archive plane -->
+      <rect x="12" y="12" width="796" height="128" rx="14"
+            fill="url(#hatch)" stroke="#f0c77a" stroke-width="1.5"/>
+      <rect x="12" y="12" width="796" height="128" rx="14"
+            fill="#fff8ee" fill-opacity=".82" stroke="#e8a833" stroke-width="1.5"/>
+
+      <!-- Working plane -->
+      <rect x="12" y="188" width="796" height="338" rx="14"
+            fill="#f5f8fc" fill-opacity=".7" stroke="#cdd8e8" stroke-width="1.5"/>
+
+      <!-- ── PLANE LABELS ───────────────────────────────────────── -->
+      <text x="28" y="34" font-size="10" font-weight="800" letter-spacing=".7"
+            fill="#b05c00" font-family="-apple-system,BlinkMacSystemFont,sans-serif"
+            text-anchor="start">▤  아카이브 평면 — 흡수</text>
+
+      <text x="28" y="206" font-size="10" font-weight="800" letter-spacing=".7"
+            fill="#3d5166" font-family="-apple-system,BlinkMacSystemFont,sans-serif"
+            text-anchor="start">▣  WORKING 평면 — 주입 (Composer 합성)</text>
+
+      <!-- ── ARCHIVE BOX ─────────────────────────────────────────── -->
+      <rect x="28" y="44" width="462" height="82" rx="11"
+            fill="#fffaf0" stroke="#f0c77a" stroke-width="1.5" filter="url(#drop-sm)"/>
+      <text x="46" y="68" font-size="14.5" font-weight="800" fill="#b05c00"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">▤ RAW 아카이브 · "흡수 = 모든 것"</text>
+      <text x="46" y="87" font-size="12" fill="#8a5c20"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">대화 이력 · 활동 로그 · 산출물</text>
+      <text x="46" y="103" font-size="11.5" fill="#9e6d30" font-style="italic"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">append-only</text>
+
+      <!-- RAG callout box -->
+      <rect x="514" y="38" width="282" height="94" rx="10"
+            fill="#fff" stroke="#f0c77a" stroke-dasharray="5,3" stroke-width="1.5"/>
+      <text x="528" y="60" font-size="11.5" fill="#b05c00" font-weight="700"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">↺  온디맨드 검색 (RAG)</text>
+      <text x="528" y="78" font-size="11" fill="#92400e"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">→ governed 요약으로만</text>
+      <text x="528" y="95" font-size="11" fill="#7c3010" font-weight="600"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">검색 결과 = untrusted 입력</text>
+      <text x="528" y="112" font-size="10.5" fill="#92400e"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">(prompt-injection 취급)</text>
+
+      <!-- RAG arrow back to archive -->
+      <line x1="514" y1="80" x2="492" y2="80" stroke="#e8a833" stroke-width="1.5"
+            stroke-dasharray="4,3" marker-end="url(#arr-arch)"/>
+
+      <!-- ── ACCEPTANCE GATE ─────────────────────────────────────── -->
+      <!-- Gate connector line -->
+      <line x1="258" y1="126" x2="258" y2="148" stroke="#3d5166" stroke-width="1.5"
+            stroke-dasharray="4,3"/>
+      <!-- Gate box -->
+      <rect x="148" y="148" width="220" height="34" rx="8"
+            fill="#e8f0f8" stroke="#b0c4d8" stroke-width="1.5"/>
+      <text x="258" y="170" text-anchor="middle" font-size="12" font-weight="700"
+            fill="#253347" font-family="-apple-system,BlinkMacSystemFont,sans-serif">선별 + acceptance 게이트 ▼</text>
+      <!-- Gate small note -->
+      <text x="258" y="186" text-anchor="middle" font-size="10" fill="#7f96a8"
+            font-style="italic" font-family="-apple-system,BlinkMacSystemFont,sans-serif">(자동 bulk 아님)</text>
+
+      <!-- ── MASTER LAYER ────────────────────────────────────────── -->
+      <rect x="28" y="222" width="764" height="78" rx="11"
+            fill="#fff" stroke="#c5d3df" stroke-width="1.5" filter="url(#drop-sm)"/>
+      <!-- Master label -->
+      <text x="56" y="253" font-size="15" font-weight="800" fill="#0d1b2a"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">MASTER</text>
+      <text x="56" y="270" font-size="11" fill="#7f96a8"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">사용자 총괄 1명</text>
+      <!-- Divider -->
+      <line x1="175" y1="228" x2="175" y2="294" stroke="#d8e2ec" stroke-width="1"/>
+      <!-- Read chips -->
+      <text x="192" y="249" font-size="11" font-weight="700" fill="#7f96a8"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">읽기</text>
+      <!-- User chip -->
+      <rect x="228" y="236" width="70" height="22" rx="11"
+            fill="#eef4ff" stroke="#b3cdf5" stroke-width="1.5"/>
+      <text x="263" y="251" text-anchor="middle" font-size="11" font-weight="700"
+            fill="#1d56b4" font-family="-apple-system,BlinkMacSystemFont,sans-serif">▣ User</text>
+      <!-- Write -->
+      <text x="192" y="279" font-size="11" font-weight="700" fill="#7f96a8"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">쓰기</text>
+      <text x="228" y="279" font-size="11.5" fill="#3d5166"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">/remember → User · 아카이브 검색(governed 요약)</text>
+
+      <!-- ── DISPATCH ARROW M→O ──────────────────────────────────── -->
+      <line x1="258" y1="300" x2="258" y2="322" stroke="#3d5166" stroke-width="2"
+            marker-end="url(#arr-dk)"/>
+      <text x="272" y="315" font-size="10.5" fill="#5a7082" font-weight="700"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">dispatch ▼</text>
+
+      <!-- ── OPERATOR LAYER ──────────────────────────────────────── -->
+      <rect x="28" y="322" width="764" height="88" rx="11"
+            fill="#f8f7ff" stroke="#c7d2fe" stroke-width="1.5" filter="url(#drop-sm)"/>
+      <!-- Operator label -->
+      <text x="56" y="355" font-size="15" font-weight="800" fill="#0d1b2a"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">OPERATOR</text>
+      <text x="56" y="372" font-size="11" fill="#7f96a8"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">전 PM</text>
+      <!-- Divider -->
+      <line x1="175" y1="328" x2="175" y2="404" stroke="#d8e2ec" stroke-width="1"/>
+      <!-- Read label -->
+      <text x="192" y="351" font-size="11" font-weight="700" fill="#7f96a8"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">읽기</text>
+      <!-- User chip -->
+      <rect x="228" y="338" width="70" height="22" rx="11"
+            fill="#eef4ff" stroke="#b3cdf5" stroke-width="1.5"/>
+      <text x="263" y="353" text-anchor="middle" font-size="11" font-weight="700"
+            fill="#1d56b4" font-family="-apple-system,BlinkMacSystemFont,sans-serif">▣ User</text>
+      <!-- Profile chip -->
+      <rect x="306" y="338" width="76" height="22" rx="11"
+            fill="#f3eeff" stroke="#c9b4f0" stroke-width="1.5"/>
+      <text x="344" y="353" text-anchor="middle" font-size="11" font-weight="700"
+            fill="#6728c9" font-family="-apple-system,BlinkMacSystemFont,sans-serif">▣ Profile</text>
+      <!-- Workspace chip -->
+      <rect x="390" y="338" width="96" height="22" rx="11"
+            fill="#eafaf4" stroke="#8ed6bc" stroke-width="1.5"/>
+      <text x="438" y="353" text-anchor="middle" font-size="11" font-weight="700"
+            fill="#0a7a5a" font-family="-apple-system,BlinkMacSystemFont,sans-serif">▣ Workspace</text>
+      <!-- Write -->
+      <text x="192" y="385" font-size="11" font-weight="700" fill="#7f96a8"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">쓰기</text>
+      <text x="228" y="385" font-size="11.5" fill="#3d5166"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">Workspace ← Worker harvest(R6/R1b) + 판정(R3)</text>
+
+      <!-- ── DISPATCH ARROW O→W ──────────────────────────────────── -->
+      <line x1="258" y1="410" x2="258" y2="432" stroke="#3d5166" stroke-width="2"
+            marker-end="url(#arr-dk)"/>
+      <text x="272" y="425" font-size="10.5" fill="#5a7082" font-weight="700"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">dispatch ▼</text>
+
+      <!-- ── WORKER LAYER ────────────────────────────────────────── -->
+      <rect x="28" y="432" width="764" height="82" rx="11"
+            fill="#fff" stroke="#c5d3df" stroke-width="1.5" filter="url(#drop-sm)"/>
+      <!-- Worker label -->
+      <text x="56" y="464" font-size="15" font-weight="800" fill="#0d1b2a"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">WORKER</text>
+      <text x="56" y="481" font-size="11" fill="#7f96a8"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">worktree · 일회성</text>
+      <!-- Divider -->
+      <line x1="175" y1="438" x2="175" y2="508" stroke="#d8e2ec" stroke-width="1"/>
+      <!-- Read -->
+      <text x="192" y="463" font-size="11" font-weight="700" fill="#7f96a8"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">읽기</text>
+      <text x="228" y="463" font-size="11.5" fill="#3d5166"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">작업지시만 — 메모리 직접 읽지 않음</text>
+      <!-- Write -->
+      <text x="192" y="488" font-size="11" font-weight="700" fill="#7f96a8"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">쓰기</text>
+      <text x="228" y="488" font-size="11.5" fill="#3d5166"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">harvest(diff·test) ──▶</text>
+      <!-- Workspace write chip -->
+      <rect x="377" y="476" width="96" height="22" rx="11"
+            fill="#eafaf4" stroke="#8ed6bc" stroke-width="1.5"/>
+      <text x="425" y="491" text-anchor="middle" font-size="11" font-weight="700"
+            fill="#0a7a5a" font-family="-apple-system,BlinkMacSystemFont,sans-serif">▣ Workspace</text>
+
+      <!-- ── CAPTURE ARROW (right side, upward) ─────────────────── -->
+      <!-- Upward capture flow on right -->
+      <line x1="783" y1="490" x2="783" y2="224" stroke="#0a7a5a" stroke-width="1.5"
+            stroke-dasharray="5,3" marker-end="url(#arr-ws)"/>
+      <text x="804" y="400" font-size="10" font-weight="700" fill="#0a7a5a"
+            writing-mode="tb" letter-spacing=".5"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">캡처 ↑</text>
+      <!-- Inject arrow on left -->
+      <line x1="19" y1="220" x2="19" y2="498" stroke="#1d56b4" stroke-width="1.5"
+            stroke-dasharray="5,3" marker-end="url(#arr-user)"/>
+      <text x="9" y="400" font-size="10" font-weight="700" fill="#1d56b4"
+            writing-mode="tb" letter-spacing=".5"
+            font-family="-apple-system,BlinkMacSystemFont,sans-serif">주입 ↓</text>
+    </svg>
+  </div>
+
+  <div class="callout">
+    <h3>이 그림이 지키는 규칙 (불변식)</h3>
+    <ul class="tight">
+      <li><b>흡수는 아카이브, 주입은 governed</b> — 컨텍스트에 들어가는 건 선별된 것뿐.</li>
+      <li><b>아카이브는 통째로 주입되지 않는다</b> — 온디맨드 검색으로만, 결과도 governed 요약. (raw bulk 주입 = kill-test가 죽인 길.)</li>
+      <li><b>아카이브 내용은 untrusted 입력</b> — prompt-injection·낡은 지시 섞일 수 있음 → 주입 전 살균.</li>
+      <li><b>주입은 아래로, 캡처는 위로</b> · Worker는 메모리 직접 안 읽음 · 상위는 하위 메모리 raw 안 읽음(governed 요약만).</li>
+      <li><b>모든 주입(Master 포함)은 Composer 경유</b> + user-payload prepend (<b>system-prompt bake 금지</b>).</li>
+      <li><b>owner(저장 정체성) ≠ capture policy(누가·어떻게 쓰나)</b> — 별개.</li>
+    </ul>
+  </div>
+
+
+  <!-- ═══ §2 두 평면 ════════════════════════════════════════════════ -->
+  <h2 id="s2"><span class="n">2</span>두 평면 — Raw 아카이브 + Governed working 메모리</h2>
+  <p class="lead">핵심: <b>"다 기억해"(흡수)와 "잘 행동해"(주입)를 분리한다.</b> kill-test(<code>mm-spike</code>)는 모든 걸 흡수·정제·graph화해도 <b>답변 품질</b>이 "올바른 현재 사실 top-K"를 못 이긴다고 했다. 그래서 흡수는 하되, 주입은 governed로 유지.</p>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>평면</th><th>무엇</th><th>가치</th><th>어떻게 쓰나</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="chip c-archive"><span class="dot"></span>▤ Raw 아카이브</span></td>
+          <td>대화·활동·산출물 <b>전부</b> (append-only)</td>
+          <td><b>recall + 데이터관리</b><br><small>(답변품질 아님 — Codex)</small></td>
+          <td><b>온디맨드 검색</b>(RAG). 기본 주입 ✕</td>
+        </tr>
+        <tr>
+          <td><b>▣ Governed working</b></td>
+          <td>선별된 사실/선호/제약 (User/Profile/Workspace)</td>
+          <td><b>정밀한 행동</b> <small>(좁고 신뢰 가능)</small></td>
+          <td>spawn/턴마다 <b>Composer</b> 주입</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <ul class="tight" style="margin:var(--space-4) 0">
+    <li>아카이브의 정당화는 <b>recall/데이터-관리</b>지 답변 개선이 아니다(명시). 무거운 distill/WikiGraph/temporal-supersede 머신 <b>재도입 금지</b>.</li>
+    <li>아카이브 1차 owner는 <b>User</b>(사용자 raw 스트림). Workspace는 자체 캡처(harvest), Profile은 curated.</li>
+  </ul>
+
+  <div class="callout warn">
+    <h3>모듈식 — 단, 아키텍처상 옵션이지 운영상 무료 분리가 아니다</h3>
+    <p>온디맨드 검색을 빼면 에이전트가 보는 건 governed working뿐(= §3 형태 그대로), 아카이브는 수동 저장소로만 남는다. 하지만 <b>한번 켜지면</b> 캡처·소유권·삭제·감사·redaction·보존·인덱싱·provenance에 얽힌다. 모듈성을 지키려면 명시적 flag/인터페이스 뒤에:</p>
+    <ul class="tight">
+      <li>governed 메모리는 아카이브 ID/검색에 <b>의존 ✕</b></li>
+      <li>Composer는 아카이브 꺼도 <b>동일 동작</b></li>
+      <li>아카이브 캡처/인덱싱은 governed 쓰기 막지 않고 <b>fail-closed</b></li>
+      <li>아카이브 파생 요약은 provenance + <b>삭제 lineage</b> 보유</li>
+    </ul>
+    <p>도입 순서 = <b>governed-only → +아카이브(수동) → +온디맨드 검색</b>, 각 단계 additive. ⚠️ 온디맨드가 빠지면 에이전트는 전체 아카이브를 <b>못 꺼낸다</b>(distill된 것만) — 온디맨드가 "흡수"를 실제로 활용하게 만드는 조각.</p>
+  </div>
+
+
+  <!-- ═══ §3 Governed 저장소 ═══════════════════════════════════════ -->
+  <h2 id="s3"><span class="n">3</span>Governed 저장소 3개 (working 평면)</h2>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>저장소</th><th>한 줄</th><th>예시</th><th>owner 키</th><th>= 오늘</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="chip c-user"><span class="dot"></span>▣ User</span></td>
+          <td>사용자 그 자체</td>
+          <td>"한국어로 답해", "PR은 작게"</td>
+          <td><code>싱글턴(user)</code></td>
+          <td><code>L2 scope=user</code></td>
+        </tr>
+        <tr>
+          <td><span class="chip c-profile"><span class="dot"></span>▣ Profile</span> <span class="star">★</span></td>
+          <td>에이전트의 <i>전이성</i> 전문성</td>
+          <td>"보안리뷰는 OWASP Top10 우선"</td>
+          <td><code>(profile, owner_id)</code></td>
+          <td><b>신규</b></td>
+        </tr>
+        <tr>
+          <td><span class="chip c-workspace"><span class="dot"></span>▣ Workspace</span></td>
+          <td><i>이 코드베이스</i> 사실</td>
+          <td>"이 repo는 node@22"</td>
+          <td><code>project_id</code></td>
+          <td><code>L1</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="callout">
+    <p><b>Workspace = 오늘 project-scoped L1 그대로</b>(<code>project_id NOT NULL</code>) 재명명 — 새 owner 아님. 신규 working owner는 <b>Profile 하나</b>.</p>
+    <p><b>왜 Profile 분리</b>: 옛 PM은 <code>PM=project=폴더=정체성</code> 융합 → L1이 "repo 사실"+"에이전트 지식"을 겸함. Operator가 정체성을 폴더에서 떼면 분리 필요.</p>
+  </div>
+
+
+  <!-- ═══ §4 계층별 메모리 ══════════════════════════════════════════ -->
+  <h2 id="s4"><span class="n">4</span>계층별 메모리</h2>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>계층</th><th>정체성</th><th>읽기(주입)</th><th>쓰기</th><th>아카이브</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><b>Master</b></td>
+          <td>사용자 총괄 1명</td>
+          <td><span class="chip c-user"><span class="dot"></span>User</span></td>
+          <td>/remember→User</td>
+          <td>온디맨드 검색(governed 요약)</td>
+        </tr>
+        <tr>
+          <td><b>Operator · coder</b></td>
+          <td>Profile+폴더+dispatcher</td>
+          <td>
+            <span class="chip c-user"><span class="dot"></span>User</span>
+            <span class="chip c-profile"><span class="dot"></span>Profile</span>
+            <span class="chip c-workspace"><span class="dot"></span>Workspace</span>
+          </td>
+          <td>Workspace ← harvest(R6/R1b)+판정(R3)</td>
+          <td>검색(governed 요약)</td>
+        </tr>
+        <tr>
+          <td><b>Operator · specialist</b></td>
+          <td>Profile+폴더없음+doer</td>
+          <td>
+            <span class="chip c-user"><span class="dot"></span>User</span>
+            <span class="chip c-profile"><span class="dot"></span>Profile</span>
+            <small>(MVP: User만)</small>
+          </td>
+          <td><i>MVP 없음</i></td>
+          <td>검색(governed 요약)</td>
+        </tr>
+        <tr>
+          <td><b>Worker</b></td>
+          <td>일회성 실행자(worktree)</td>
+          <td>작업지시만</td>
+          <td>harvest→<span class="chip c-workspace"><span class="dot"></span>Workspace</span></td>
+          <td>✕</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout">
+    <h3>Master는 바뀌나? — 내용 거의 그대로, 배관은 개편 포함</h3>
+    <ul class="tight">
+      <li><b>저장 정체성</b>: User 읽기(불변). 사용자당 1명이라 "Master 정체성=User" 수렴 → Master 전용 Profile 불필요. ⚠️ <i>저장 단순화</i>지 행동 동일성 아님 (<b>owner ≠ capture policy</b>).</li>
+      <li><b>배관</b>: Composer 경유 + User가 <code>owner_type='user'</code> 재키잉 + User 캡처 지점 유지.</li>
+      <li><b>통일 모델</b>: Master = 루트 Operator(coordinator × 폴더없음 × dispatcher). <code>workspace=none</code> 안전규칙은 "워크스페이스 <i>메모리</i> 차단"이지 <b>dispatch 권한 박탈 아님</b>(생성·라우팅·메타데이터·아카이브 검색 보유).</li>
+    </ul>
+  </div>
+
+
+  <!-- ═══ §5 흐름 ═══════════════════════════════════════════════════ -->
+  <h2 id="s5"><span class="n">5</span>흐름</h2>
+  <div class="cols">
+    <div class="card flowcard up">
+      <h3>⬆ 캡처 (관찰 → 지식)</h3>
+      <ul class="arrowlist">
+        <li>모든 대화·활동 ─append─▶ <span class="chip c-archive"><span class="dot"></span>▤ 아카이브</span></li>
+        <li>Worker harvest ─R6·R1b─▶ <span class="chip c-workspace"><span class="dot"></span>Workspace</span></li>
+        <li>Operator 판정 ─R3─▶ <span class="chip c-workspace"><span class="dot"></span>Workspace</span></li>
+        <li>Workspace(공통) ─XPROJECT─▶ <span class="chip c-user"><span class="dot"></span>User</span></li>
+        <li>아카이브·사람 ─선별+게이트─▶ <span class="chip c-user"><span class="dot"></span>User</span> (또는 Profile, 후속)</li>
+      </ul>
+      <p style="font-size:13px;margin:var(--space-3) 0 0;color:var(--muted)"><b>자기 출력은 증거가 아니다</b> — 신뢰 가능한 acceptance 신호가 있어야 governed (promote tx 강제).</p>
+    </div>
+    <div class="card flowcard down">
+      <h3>⬇ 주입 (지식 → 행동)</h3>
+      <p style="font-size:14px;color:var(--ink-3)">Composer가 계층 owner의 governed 메모리를 합성 → <b>user-payload prepend</b> (system-prompt bake ✕ = 캐시·thread-resume 안전).</p>
+      <p style="margin-top:var(--space-3);font-size:14px;color:var(--ink-3)">아카이브는 <b>필요할 때만</b> 검색해서 <b>governed 요약</b>으로 끌어옴 (bulk 주입 ✕).</p>
+    </div>
+  </div>
+
+
+  <!-- ═══ §6 Memory Composer ════════════════════════════════════════ -->
+  <h2 id="s6"><span class="n">6</span>Memory Composer <small>(새 핵심 부품)</small></h2>
+  <div class="card">
+    <ul class="tight" style="padding-left:var(--space-5);margin-top:0">
+      <li><b>단일 진입점</b>: 모든 주입(Master 포함) Composer 경유.</li>
+      <li>
+        <b>우선순위 = 모드·종류별</b>:
+        <div class="pill-row">
+          <span class="pill">coder: 요청 &gt; User제약 &gt; Workspace사실 &gt; Profile휴리스틱</span>
+          <span class="pill">specialist: 요청 &gt; User제약 &gt; Profile</span>
+        </div>
+        종류 우선: <b>제약 &gt; 사실 &gt; 휴리스틱</b>
+      </li>
+      <li><b>owner별 토큰 예산</b> + 충돌 정책 + dedup.</li>
+      <li><b>추적성(필수)</b>: "왜 주입/억제됐나" plan + 테스트.</li>
+    </ul>
+  </div>
+
+
+  <!-- ═══ §7 무엇이 바뀌나 ══════════════════════════════════════════ -->
+  <h2 id="s7"><span class="n">7</span>무엇이 바뀌나 <small>(오늘 → 목표)</small></h2>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>항목</th><th>오늘</th><th>목표</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>중간 계층</td>
+          <td>PM (repo 1:1)</td>
+          <td><b>Operator</b> (Profile × 폴더 × dispatcher/doer)</td>
+        </tr>
+        <tr>
+          <td><b>흡수 평면</b></td>
+          <td>없음</td>
+          <td><span class="chip c-archive"><span class="dot"></span>▤ Raw 아카이브</span> 신설 (전부 보존 + 온디맨드 검색, 권한적 접근)</td>
+        </tr>
+        <tr>
+          <td>L1 메모리</td>
+          <td>project 융합</td>
+          <td><span class="chip c-workspace"><span class="dot"></span>Workspace</span> scope 분리 (저장은 오늘 L1 그대로)</td>
+        </tr>
+        <tr>
+          <td>정체성 메모리</td>
+          <td>없음</td>
+          <td><span class="chip c-profile"><span class="dot"></span>Profile</span> scope 신설 (owner-keyed)</td>
+        </tr>
+        <tr>
+          <td>주입</td>
+          <td>Top=L2 / PM=L1 분리</td>
+          <td><b>Composer</b> 1곳 합성</td>
+        </tr>
+        <tr>
+          <td>specialist</td>
+          <td>없음</td>
+          <td>folder-less doer, 메모리 stateless + 안전차단</td>
+        </tr>
+        <tr>
+          <td>저장 키</td>
+          <td><code>scope</code></td>
+          <td><code><b>(owner_type, owner_id)</b></code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+
+  <!-- ═══ §8 안전 · 단계 · 블로커 ════════════════════════════════════ -->
+  <h2 id="s8"><span class="n">8</span>안전 · 단계 · 블로커</h2>
+
+  <div class="callout danger">
+    <h3>아카이브 = "권한적 데이터 접근"으로 다룬다 (일반 메모리 아님 — Codex)</h3>
+    <p>최대 위험 = 아카이브가 <b>만능 메모리 백도어</b>가 되어 "더 검색·더 요약·더 승격·더 주입" 압력으로 <b>제품 드리프트</b>가 kill된 흡수 시스템을 되살리는 것. default-safe로 막아야 함.</p>
+  </div>
+
+  <h3>8a. 아카이브 프라이버시/거버넌스 (활성화 전 하드 선행)</h3>
+  <div class="card" style="margin-top:var(--space-2)">
+    <p style="margin-bottom:var(--space-3)">redaction · 보존정책 · <b>삭제권(+파생데이터 무효화)</b> · 접근통제 · 감사 — 시작 surface. 여기에 Codex 추가:</p>
+    <ul class="tight" style="padding-left:var(--space-5);margin-top:0">
+      <li><b style="color:var(--danger)">파생데이터 삭제 생애주기 (최대 공백)</b>: raw 삭제 시 chunk·embedding·요약·trace·승격된 governed 사실·캐시·백업까지 삭제/무효화.</li>
+      <li>동의·데이터 최소화 / 저장·전송 암호화 / <b>테넌트·user·workspace 격리</b> / ACL 상속(raw→chunk→embedding→summary).</li>
+      <li>DSAR 식 내보내기 / legal-hold vs 삭제 충돌 정책 / <b>secret 탐지·격리·로테이션</b> / 모델-프로바이더 prompt-retention 경계 / break-glass 관리자 접근 / 다중-사용자 authorship 규칙.</li>
+    </ul>
+  </div>
+
+  <h3>8b. 검색 규율 ("governed 요약만"은 필요조건일 뿐)</h3>
+  <div class="card" style="margin-top:var(--space-2)">
+    <ul class="tight" style="padding-left:var(--space-5);margin-top:0">
+      <li><b>하드 예산</b>: top-K · 토큰 캡 · owner별 캡 · 재귀확장 ✕ · bulk recall ✕ · Composer 가시 trace.</li>
+      <li><b>요약 전후 정책</b>: 사용 전 chunk 분류 → secret/PII redact → 요약. raw 발췌는 명시 승인 없이 prompt 금지. 요약에 민감도 라벨.</li>
+      <li><span class="deny">민감도 &gt; 대상 에이전트 capability면 주입 차단.</span> 모든 검색 감사(actor·목적·owner·source·주입 토큰). 검색 결과 = <b>untrusted</b>(injection 처리).</li>
+    </ul>
+  </div>
+
+  <h3>8c. specialist 안전 (folder-less)</h3>
+  <div class="card" style="margin-top:var(--space-2)">
+    <p style="margin:0;font-size:14px;color:var(--ink-3)"><code>workspace=none ⇒ shell·직접 FS 없음</code> + <b>deny-by-default 툴</b>(MCP/browser/network/env/artifacts/상속 run context). Workspace 메모리 읽기·쓰기 차단 + real <code>projects</code>행 생성 금지. (dispatch 권한은 별개.)</p>
+  </div>
+
+  <h3>단계화</h3>
+  <div class="steps">
+    <div class="step a0">
+      <div class="dot">A0</div>
+      <div class="b">
+        <b>하드 선행</b>
+        <p>folder-less가 projects행/cwd/shell·FS/XPROJECT/L1 capture/project-route에 안 닿게 + capability deny.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="dot">A</div>
+      <div class="b">
+        <b>Composer + owner-keyed governed 저장</b>
+        <p>아카이브 검색보다 <b>먼저</b> — 요약이 내려앉을 규율된 자리 필요(Codex).</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="dot">B</div>
+      <div class="b">
+        <b>specialist stateless 주입</b>
+        <p>User만 주입 + Profile owner 스키마 예약.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="dot">C</div>
+      <div class="b">
+        <b>Profile 메모리 읽기 + human 쓰기</b>
+      </div>
+    </div>
+    <div class="step arch">
+      <div class="dot">▤</div>
+      <div class="b">
+        <b>Archive 트랙 (병행)</b>
+        <p>8a 충족 <b>후</b> 활성. 그 전엔 "전부→아카이브" 금지 · manual/opt-in/local-only 프로토타입만(Codex).</p>
+      </div>
+    </div>
+    <div class="step def">
+      <div class="dot">D</div>
+      <div class="b">
+        <b>deferred</b>
+        <p>Profile 자동 학습 · mapped workspace · 아카이브→working 자동 distill(데이터-관리 정당화 시).</p>
+      </div>
+    </div>
+  </div>
+
+  <h3>🔴 구현 전 NO-GO 블로커 (테스트로 증명)</h3>
+  <div class="blocker-card">
+    <ol class="blockers" style="padding-left:var(--space-5)">
+      <li><b>owner-keyed 저장</b> — <code>scope</code> 키 <i>모든</i> L2 불변식(unique index·fact_key·dedup·cap·revision·injection ledger·candidate·route) → <code>(owner_type, owner_id)</code>. partial = profile 교차오염.</li>
+      <li><b>virtual 배제 + capability deny</b> — A0, specialist 이전.</li>
+      <li><b>추적성</b> — 주입/억제·검색 추적 + 테스트.</li>
+      <li><b>자동 학습 OFF</b> — Workspace→Profile 누수 분류규칙 + trust 기준 전까지(쓰기 게이트 강제).</li>
+      <li><b>아카이브 프라이버시 게이트</b> — 8a(특히 파생데이터 삭제)+8b 없이 raw 아카이브 활성 금지. 검색은 governed 요약만, 예산 강제.</li>
+    </ol>
+  </div>
+
+
+  <!-- ═══ §9 Open Questions ══════════════════════════════════════════ -->
+  <h2 id="s9"><span class="n">9</span>Open Questions / 잔존 블라인드스팟</h2>
+  <div class="card">
+    <ul class="tight" style="padding-left:var(--space-5);margin:0">
+      <li>파생데이터 삭제·무효화 전파(raw→chunk→embedding→summary→promoted fact→cache→backup).</li>
+      <li>다중-사용자/공유 workspace 소유권·authorship 시맨틱.</li>
+      <li>secret 처리(redaction 너머 격리/로테이션) + 검색 결과 prompt-injection 방어.</li>
+      <li>raw 검색 / governed 요약 / Composer 주입 사이 강제 경계 구체화.</li>
+      <li>아카이브 볼륨 증가 시 비용·지연·인덱스 생애주기 + retrieval 엔진(FTS/벡터/그래프 — P2 sqlite-vec 후보, 별도 검증).</li>
+      <li>아카이브 → working 선별 정책(acceptance 신호; trust 모델).</li>
+      <li>Profile lifecycle(clone/rename/delete/version) 시 메모리 처리 / 동일 Profile 다중 인스턴스 동시 쓰기.</li>
+      <li>Composer 우선순위·예산 실측 튜닝.</li>
+    </ul>
+  </div>
+
+
+  <footer>
+    출처: <span class="mono">docs/specs/operator-memory-architecture.md</span> · Codex 적대 교차검토 반영(guarded GO) ·
+    근거 <span class="mono">master-memory-brief.md</span>(kill-test→governed top-K), <span class="mono">memory-augmentation-brief.md</span>(직교).
+    구현 전 §8 블로커 충족 필수. 자족형 HTML — 외부 의존 0.
+  </footer>
+
+</div>
+</body>
+</html>
