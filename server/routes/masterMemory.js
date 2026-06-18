@@ -42,6 +42,8 @@ function toPublicCandidate(row) {
     status: row.status,
     promoted_to: row.promoted_to,
     created_at: row.created_at,
+    kind: row.kind ?? null,
+    preview: row.preview ?? '',
   };
 }
 
@@ -108,7 +110,7 @@ function createMasterMemoryRouter({ masterMemoryService }) {
     }
     res.json({
       memory: toPublic(result.item),
-      candidate: { id: result.candidateId, status: 'promoted', promoted_to: result.item.id },
+      candidate: { id: result.candidateId, status: result.merged ? 'merged' : 'promoted', promoted_to: result.item.id },
     });
   }));
 

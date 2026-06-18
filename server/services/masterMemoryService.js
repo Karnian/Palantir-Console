@@ -24,6 +24,7 @@ const L1_KIND_TO_MASTER_KIND = new Map([
 const PUBLIC_CANDIDATE_FIELDS = [
   'id', 'scope', 'rule', 'dedup_key', 'status', 'promoted_to', 'created_at',
 ];
+const CANDIDATE_PREVIEW_CAP = 120;
 
 function sha256(text) {
   return crypto.createHash('sha256').update(text).digest('hex');
@@ -119,7 +120,7 @@ function createMasterMemoryService(db, eventBus) {
     WHERE rule = ? AND scope = ? AND dedup_key = ?
   `);
   const listCandidatesStmt = db.prepare(`
-    SELECT id, scope, rule, dedup_key, status, promoted_to, created_at
+    SELECT id, scope, rule, dedup_key, status, promoted_to, created_at, raw_json
     FROM master_memory_candidates
     WHERE scope = ? AND status = ?
     ORDER BY created_at ASC, id ASC
@@ -177,7 +178,27 @@ function createMasterMemoryService(db, eventBus) {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new Error('rawJson must be a JSON object');
     }
-    return { raw, parsed };
+    const sanitized = { ...parsed };
+    if ('content' in sanitized) {
+      if (typeof sanitized.content !== 'string') {
+        const e = new Error('rawJson.content rejected: not a string');
+        e.code = 'MEMORY_CONTENT_REJECTED';
+        throw e;
+      }
+      if (detectInjection(sanitized.content)) {
+        const e = new Error('rawJson.content rejected: injection');
+        e.code = 'MEMORY_CONTENT_REJECTED';
+        throw e;
+      }
+      const content = redactSecrets(sanitized.content).text.replace(/\s+/g, ' ').trim().slice(0, CHAR_CAP);
+      if (!content) {
+        const e = new Error('rawJson.content rejected: empty after redaction');
+        e.code = 'MEMORY_CONTENT_REJECTED';
+        throw e;
+      }
+      sanitized.content = content;
+    }
+    return { raw: JSON.stringify(sanitized), parsed: sanitized };
   }
 
   function parseCandidateRaw(candidate) {
@@ -195,6 +216,10 @@ function createMasterMemoryService(db, eventBus) {
     for (const field of PUBLIC_CANDIDATE_FIELDS) {
       if (field in row) out[field] = row[field];
     }
+    const raw = parseCandidateRaw(row);
+    out.kind = raw && typeof raw.kind === 'string' ? raw.kind.trim().slice(0, 64) : null;
+    const content = raw && typeof raw.content === 'string' ? raw.content : '';
+    out.preview = redactSecrets(content).text.replace(/\s+/g, ' ').trim().slice(0, CANDIDATE_PREVIEW_CAP);
     return out;
   }
 
@@ -318,7 +343,7 @@ function createMasterMemoryService(db, eventBus) {
       rawJson: raw,
       dedupKey: key,
     });
-    return getCandidateByDedupStmt.get(r, s, key);
+    return toPublicCandidate(getCandidateByDedupStmt.get(r, s, key));
   }
 
   function listCandidates(scope, status = 'pending') {
@@ -341,6 +366,7 @@ function createMasterMemoryService(db, eventBus) {
 
     const content = typeof raw.content === 'string' ? raw.content : '';
     if (!content.trim()) return rejectPendingCandidate(candidate.id, 'bad_content');
+    if (detectInjection(content)) return rejectPendingCandidate(candidate.id, 'injection');
 
     let factKey = null;
     if (kind === 'fact') {
@@ -348,23 +374,51 @@ function createMasterMemoryService(db, eventBus) {
       if (!factKey) return rejectPendingCandidate(candidate.id, 'bad_fact_key');
     }
 
-    const sourceContentHash = validContentHash(raw.content_hash)
-      ? raw.content_hash.toLowerCase()
-      : sha256(content);
+    let safeContent;
+    try {
+      safeContent = sanitizeForStore(content, 'deterministic');
+    } catch (err) {
+      if (err && err.code === 'MEMORY_CONTENT_REJECTED') {
+        return rejectPendingCandidate(candidate.id, 'sanitize_rejected');
+      }
+      throw err;
+    }
+    const contentHash = sha256(safeContent);
+    let sourceContentHash = contentHash;
     if (candidate.rule === 'XPROJECT') {
+      const rawContentHash = validContentHash(raw.content_hash) ? raw.content_hash.toLowerCase() : null;
+      if (!rawContentHash || sha256(content) !== rawContentHash || contentHash !== rawContentHash) {
+        return rejectPendingCandidate(candidate.id, 'xproject_content_hash_mismatch');
+      }
+      sourceContentHash = rawContentHash;
       const activeProjects = countActiveL1ProjectsByHashStmt.get(sourceContentHash).n;
       if (activeProjects < 2) {
         return rejectPendingCandidate(candidate.id, 'xproject_recheck_failed');
       }
     }
 
+    const promoteScope = candidate.rule === 'XPROJECT' ? 'user' : candidate.scope;
+    // Pre-check exact collisions so approval records distinguish "created" from
+    // "folded into an existing active item"; createMemoryItem still guards a late
+    // UNIQUE race, but that path does not expose a merge signal without changing
+    // its public API.
+    const existing = getActiveByHashStmt.get(promoteScope, contentHash);
+    const merged = !!existing;
     let item;
-    try {
+    if (merged) {
+      mergeByHashStmt.run(promoteScope, contentHash);
+      item = getActiveByHashStmt.get(promoteScope, contentHash);
+      if (!item) {
+        const e = new Error('merge target raced (not active)');
+        e.code = 'MASTER_MEMORY_CANDIDATE_RACE';
+        throw e;
+      }
+    } else {
       item = createMemoryItem({
-        scope: candidate.scope,
+        scope: promoteScope,
         kind,
         factKey,
-        content,
+        content: safeContent,
         evidenceJson: {
           schema_version: 1,
           origin: 'deterministic',
@@ -379,15 +433,10 @@ function createMasterMemoryService(db, eventBus) {
         sourceCount: 1,
         status: 'active',
       });
-    } catch (err) {
-      if (err && err.code === 'MEMORY_CONTENT_REJECTED') {
-        return rejectPendingCandidate(candidate.id, 'sanitize_rejected');
-      }
-      throw err;
     }
 
     const res = setCandidateStatusStmt.run({
-      status: 'promoted',
+      status: merged ? 'merged' : 'promoted',
       promotedTo: item.id,
       id: candidate.id,
     });
@@ -396,13 +445,13 @@ function createMasterMemoryService(db, eventBus) {
       e.code = 'MASTER_MEMORY_CANDIDATE_RACE';
       throw e;
     }
-    return { candidateId: candidate.id, promoted: true, item };
+    return { candidateId: candidate.id, promoted: true, merged, item };
   });
 
   function promoteCandidate({ candidateId } = {}) {
     const result = promoteCandidateTx(candidateId);
     if (result && result.promoted && eventBus) {
-      try { eventBus.emit('master_memory:promoted', { scope: result.item.scope, memoryItemId: result.item.id, candidateId }); } catch { /* */ }
+      try { eventBus.emit('master_memory:promoted', { scope: result.item.scope, memoryItemId: result.item.id, candidateId, merged: result.merged }); } catch { /* */ }
     }
     return result;
   }
