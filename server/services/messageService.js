@@ -1,4 +1,5 @@
 const fs = require('fs/promises');
+const { resolveSpawnCwd } = require('../utils/spawnCwd');
 
 function createMessageService(storage) {
   function truncateText(text, limit = 1200) {
@@ -120,12 +121,14 @@ function createMessageService(storage) {
   }
 
   async function resolveCwd(sessionDir) {
-    if (!sessionDir) return process.cwd();
+    if (!sessionDir) return resolveSpawnCwd({});
     try {
       await fs.access(sessionDir);
-      return sessionDir;
+      return resolveSpawnCwd({ workspaceDir: sessionDir });
     } catch (error) {
-      return process.cwd();
+      // sessionDir provided but inaccessible → fall back to server cwd
+      // (preserves prior behavior).
+      return resolveSpawnCwd({});
     }
   }
 

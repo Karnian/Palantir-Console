@@ -28,6 +28,7 @@ function createLifecycleService({
   // Lazy-require default authResolver so tests that don't use Tier 2 don't
   // force a load of the real keychain probe.
   const _authResolver = authResolver || require('./authResolver');
+  const { resolveSpawnCwd } = require('../utils/spawnCwd');
   const _authResolverOpts = authResolverOpts || {};
   const HEARTBEAT_INTERVAL_MS = 30000;  // 30s
   const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min (increased from 10 min for long-running tasks)
@@ -554,7 +555,7 @@ function createLifecycleService({
       }
     }
 
-    const cwd = worktreePath || projectDir || process.cwd();
+    const cwd = resolveSpawnCwd({ workspaceDir: worktreePath || projectDir });
     console.log(`[lifecycle] Executing task ${taskId} in cwd: ${cwd} (project: ${task.project_id || 'none'})`);
 
     // Route Claude Code workers through streamJsonEngine for rich event parsing.

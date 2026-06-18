@@ -59,6 +59,7 @@ const {
   detectLegacyAliasConflicts,
   resolveCodexUserConfigPath,
 } = require('./codexUserConfigScan');
+const { resolveSpawnCwd } = require('../../utils/spawnCwd');
 
 // P2-2: vendor item.type='error' classification constants. Kept at
 // module scope so the exported helper `classifyCodexErrorAsNotice` (below
@@ -203,7 +204,7 @@ function createCodexAdapter({
       threadId: resumeThreadId || null,
       instructionsPath,
       tmpDir,
-      cwd: cwd || process.cwd(),
+      cwd: resolveSpawnCwd({ workspaceDir: cwd }),
       model: model || null,
       env: env || null, // PR4: filtered subprocess env from routes/manager.js
       role: role || 'manager', // v3 Phase 0: default to manager (tightened)
