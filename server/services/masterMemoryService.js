@@ -588,7 +588,7 @@ function createMasterMemoryService(db, eventBus) {
   }
 
   // fact_key upsert with supersede semantics (mirrors L1 upsertFact). origin must be CHECK-allowed.
-  const upsertFactTx = db.transaction((item) => {
+  const upsertFactTx = db.transaction((item, activeCap = HARD_CAP) => {
     const existing = getActiveFactByKeyStmt.get(item.scope, item.factKey);
     if (existing && existing.content_hash === item.contentHash) {
       if (item.origin === 'human' && existing.origin !== 'human') {
@@ -596,14 +596,35 @@ function createMasterMemoryService(db, eventBus) {
       } else if (item.origin !== 'human' && existing.origin !== 'human') {
         refreshFactObservationStmt.run({ id: existing.id, offset: `+${DEFAULT_TTL_DAYS} days` });
       }
-      return getItemByIdStmt.get(existing.id);
+      return { item: getItemByIdStmt.get(existing.id), evicted: null, skipped: false };
+    }
+    if (existing && existing.origin === 'human' && item.origin !== 'human') {
+      return { item: existing, evicted: null, skipped: false };
+    }
+    let evicted = null;
+    if (!existing) {
+      const duplicate = getActiveByHashStmt.get(item.scope, item.contentHash);
+      if (duplicate) {
+        const merged = mergeActiveByHash(item.scope, item.contentHash, item.origin);
+        if (!merged) {
+          const e = new Error('fact merge target raced (not active)');
+          e.code = 'MASTER_MEMORY_RACE';
+          throw e;
+        }
+        return { item: merged, evicted: null, skipped: false };
+      }
+      const admission = admitNewActiveItem(item, activeCap);
+      if (!admission.admitted) {
+        return { item: null, evicted: null, skipped: true, reason: admission.skipped.reason };
+      }
+      evicted = admission.evicted;
     }
     if (existing) supersedeFactStmt.run({ newId: item.id, scope: item.scope, factKey: item.factKey });
     insertItemStmt.run(item);
     _bumpRevision(item.scope);
-    return getItemByIdStmt.get(item.id);
+    return { item: getItemByIdStmt.get(item.id), evicted, skipped: false };
   });
-  function upsertFact({ scope, factKey, content, evidenceJson, importance, origin = 'deterministic' } = {}) {
+  function upsertFact({ scope, factKey, content, evidenceJson, importance, origin = 'deterministic', activeCap = HARD_CAP } = {}) {
     const s = normScope(scope);
     if (!factKey) throw new Error('factKey is required');
     if (!content) throw new Error('content is required');
@@ -614,12 +635,15 @@ function createMasterMemoryService(db, eventBus) {
       origin, sourceCount: 1, confidence: 0.9, importance: importance ?? 5, pinned: 0,
       status: 'active', validTo: validToForOrigin(origin, 'active'),
     };
+    let out;
     try {
-      return upsertFactTx(item);
+      out = upsertFactTx(item, activeCap);
     } catch (err) {
       if (isUniqueConstraint(err, 'content_hash')) return mergeByHashTx(s, item.contentHash, item.origin);
       throw err;
     }
+    emitEvicted(out.evicted);
+    return out.skipped ? skippedAdmission(s, out.reason) : out.item;
   }
 
   // FTS5 MATCH builder: punctuation acts as a SEPARATOR (code paths / foo-bar split into tokens), each
@@ -844,7 +868,7 @@ function createMasterMemoryService(db, eventBus) {
     try {
       out = restoreTx({ id, activeCap });
     } catch (err) {
-      if (isUniqueConstraint(err, 'content_hash') || isUniqueConstraint(err, 'factkey')) {
+      if (isUniqueConstraint(err, 'content_hash') || isUniqueConstraint(err, 'fact_key')) {
         const e = new Error('cannot restore: an active item with the same content or fact_key exists');
         e.code = 'MEMORY_DUPLICATE';
         throw e;

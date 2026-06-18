@@ -119,6 +119,33 @@ test('cap admission: non-human must beat lowest evictable; human and other scope
   assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE scope='cross_project' AND status='active'").get().n, 1);
 });
 
+test('upsertFact cap admission: new deterministic fact is not a free 501st active row, human fact still admits', (t) => {
+  const db = setupDb(t);
+  const svc = createMasterMemoryService(db);
+  fillScope(svc, 'user', 500, { prefix: 'hard cap deterministic', confidence: 0.9, importance: 10 });
+
+  const rejected = svc.upsertFact({
+    scope: 'user',
+    factKey: 'cap.deterministic',
+    content: 'deterministic fact should not bypass cap',
+    origin: 'deterministic',
+  });
+  assert.deepEqual(rejected, { skipped: true, reason: 'cap_rejected', scope: 'user' });
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE scope='user' AND status='active'").get().n, 500);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE fact_key='cap.deterministic'").get().n, 0);
+
+  const human = svc.upsertFact({
+    scope: 'user',
+    factKey: 'cap.human',
+    content: 'human fact still admits at cap',
+    origin: 'human',
+  });
+  assert.equal(human.status, 'active');
+  assert.equal(human.origin, 'human');
+  assert.equal(human.valid_to, null);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE scope='user' AND status='active'").get().n, 501);
+});
+
 test('cap admission: exact merge bypasses cap and human merge upgrades deterministic row to permanent', (t) => {
   const db = setupDb(t);
   const svc = createMasterMemoryService(db);
@@ -207,6 +234,34 @@ test('upsertFact: human facts are permanent; deterministic unchanged refreshes T
   assert.equal(human.valid_to, null);
 });
 
+test('upsertFact: deterministic write cannot supersede an active human fact with the same fact_key', (t) => {
+  const db = setupDb(t);
+  const svc = createMasterMemoryService(db);
+  const human = svc.upsertFact({
+    scope: 'user',
+    factKey: 'deploy.region',
+    content: 'Deploys to nrt.',
+    origin: 'human',
+  });
+  const rev0 = svc.getRevision('user');
+
+  const deterministic = svc.upsertFact({
+    scope: 'user',
+    factKey: 'deploy.region',
+    content: 'Deploys to iad.',
+    origin: 'deterministic',
+  });
+
+  assert.equal(deterministic.id, human.id);
+  assert.equal(deterministic.origin, 'human');
+  assert.equal(deterministic.content, 'Deploys to nrt.');
+  assert.equal(svc.getMemoryItem(human.id).status, 'active');
+  assert.equal(svc.getMemoryItem(human.id).content, 'Deploys to nrt.');
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE scope='user' AND fact_key='deploy.region' AND status='active'").get().n, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE scope='user' AND fact_key='deploy.region' AND status='superseded'").get().n, 0);
+  assert.equal(svc.getRevision('user'), rev0);
+});
+
 test('correction service: update sanitizes and bumps; pin/review no-bump; restore folds before cap', (t) => {
   const db = setupDb(t);
   const svc = createMasterMemoryService(db);
@@ -236,6 +291,54 @@ test('correction service: update sanitizes and bumps; pin/review no-bump; restor
   assert.equal(folded.valid_to, null);
   assert.equal(svc.getMemoryItem(archived.id).status, 'archived');
   assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE scope='user' AND status='active'").get().n, 500);
+});
+
+test('restoreMemory: active fact_key collision surfaces as MEMORY_DUPLICATE and PATCH restore returns 400', async (t) => {
+  const db = setupDb(t);
+  const svc = createMasterMemoryService(db);
+  const archived = svc.upsertFact({
+    scope: 'user',
+    factKey: 'restore.fact_key_collision',
+    content: 'archived fact value',
+    origin: 'human',
+  });
+  svc.archiveMemory(archived.id);
+  const active = svc.upsertFact({
+    scope: 'user',
+    factKey: 'restore.fact_key_collision',
+    content: 'active fact value',
+    origin: 'human',
+  });
+  assert.notEqual(active.id, archived.id);
+  assert.throws(
+    () => svc.restoreMemory(archived.id),
+    (err) => err && err.code === 'MEMORY_DUPLICATE'
+  );
+  assert.equal(svc.getMemoryItem(archived.id).status, 'archived');
+  assert.equal(svc.getMemoryItem(active.id).status, 'active');
+
+  const app = await setupApp(t);
+  const routeArchived = app.services.masterMemoryService.upsertFact({
+    scope: 'user',
+    factKey: 'restore.route_collision',
+    content: 'route archived fact',
+    origin: 'human',
+  });
+  app.services.masterMemoryService.archiveMemory(routeArchived.id);
+  app.services.masterMemoryService.upsertFact({
+    scope: 'user',
+    factKey: 'restore.route_collision',
+    content: 'route active fact',
+    origin: 'human',
+  });
+
+  const restored = await invokeApp(app, {
+    method: 'PATCH',
+    path: `/api/master-memory/${routeArchived.id}`,
+    headers: COOKIE,
+    body: { action: 'restore' },
+  });
+  assert.equal(restored.status, 400);
 });
 
 test('PATCH /api/master-memory/:id is cookie-only and update re-sanitizes', async (t) => {
