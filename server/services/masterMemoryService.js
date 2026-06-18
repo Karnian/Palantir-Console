@@ -769,12 +769,19 @@ function createMasterMemoryService(db, eventBus) {
 
   // FTS5 MATCH builder: punctuation acts as a SEPARATOR (code paths / foo-bar split into tokens), each
   // token quoted, OR-joined. escape-safe; empty -> null fallback. (Copied from L1 memoryService.)
-  function buildMatchQuery(taskContext) {
-    const trimmed = typeof taskContext === 'string' ? taskContext.trim() : '';
+  // FTS5 MATCH builder — mirrors L1 memoryService.buildMatchQuery. Default =
+  // exact-quoted tokens; { prefix: true } makes each a prefix term (`"tok"*`) for
+  // Korean 조사 recall. NFC-normalized. Prefix is a match-set superset but NOT a
+  // top-K retrieval superset, so retrieve() runs exact-first then prefix-fill.
+  // A1 / docs/specs/memory-augmentation-brief.md §2-①.
+  function buildMatchQuery(taskContext, opts = {}) {
+    const raw = typeof taskContext === 'string' ? taskContext : '';
+    const trimmed = raw.normalize('NFC').trim();
     if (!trimmed) return null;
     const tokens = trimmed.toLowerCase().split(/[^\p{L}\p{N}_]+/u).filter(Boolean).slice(0, MAX_QUERY_TERMS);
     if (tokens.length === 0) return null;
-    return tokens.map((t) => `"${t}"`).join(' OR ');
+    const star = opts.prefix ? '*' : '';
+    return tokens.map((t) => `"${t}"${star}`).join(' OR ');
   }
   function getEffectiveLimit(limit) {
     const n = Number.parseInt(limit, 10);
@@ -797,10 +804,18 @@ function createMasterMemoryService(db, eventBus) {
       const s = normScope(scope);
       const { taskContext, limit } = options || {};
       const k = getEffectiveLimit(limit);
-      const q = buildMatchQuery(taskContext);
-      if (!q) return capRowsByContentLength(fallbackRetrieveStmt.all({ scope: s, k }));
+      const exactQ = buildMatchQuery(taskContext);
+      if (!exactQ) return capRowsByContentLength(fallbackRetrieveStmt.all({ scope: s, k }));
       try {
-        return capRowsByContentLength(ftsRetrieveStmt.all({ scope: s, q, k }));
+        // Two-pass (A1): exact hits first — an exact hit keeps its top-K position
+        // ahead of any prefix-only hit (char-cap budget still applies), then
+        // prefix-fill remaining slots for Korean 조사 recall. Mirrors L1.
+        const exactRows = ftsRetrieveStmt.all({ scope: s, q: exactQ, k });
+        if (exactRows.length >= k) return capRowsByContentLength(exactRows);
+        const prefixQ = buildMatchQuery(taskContext, { prefix: true });
+        const seen = new Set(exactRows.map((r) => r.id));
+        const prefixRows = ftsRetrieveStmt.all({ scope: s, q: prefixQ, k }).filter((r) => !seen.has(r.id));
+        return capRowsByContentLength(exactRows.concat(prefixRows).slice(0, k));
       } catch {
         return capRowsByContentLength(fallbackRetrieveStmt.all({ scope: s, k }));
       }
