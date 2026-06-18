@@ -59,6 +59,7 @@ const {
   buildManagerSystemPrompt,
   buildInitialUserContext,
 } = require('./managerSystemPrompt');
+const { resolveSpawnCwd } = require('../utils/spawnCwd');
 
 function createPmSpawnService({
   runService,
@@ -306,7 +307,7 @@ function createPmSpawnService({
     // returns. No seed runTurn is issued here (codex R1 finding #1: a
     // seed would race with the user send against codexAdapter's
     // single-turn guard).
-    const cwd = project.directory || process.cwd();
+    const cwd = resolveSpawnCwd({ workspaceDir: project.directory });
     try {
       adapter.startSession(runId, {
         systemPrompt,

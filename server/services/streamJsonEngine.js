@@ -4,6 +4,7 @@ const path = require('node:path');
 const os = require('node:os');
 const readline = require('node:readline');
 const { assertSpawnAllowed } = require('../utils/spawnGuard');
+const { resolveSpawnCwd } = require('../utils/spawnCwd');
 
 /**
  * StreamJsonEngine — Claude Code stream-json protocol engine.
@@ -155,7 +156,7 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
     const currentPath = process.env.PATH || '';
     const augmentedPath = [...extraPaths, currentPath].join(path.delimiter);
 
-    const safeCwd = cwd || process.cwd();
+    const safeCwd = resolveSpawnCwd({ workspaceDir: cwd });
     if (!fs.existsSync(safeCwd)) {
       // Phase 10D: clean up apiKeyHelper temp artifacts before rethrowing so
       // validation failures before spawn don't leak the token on disk.

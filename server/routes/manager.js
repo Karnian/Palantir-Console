@@ -6,6 +6,7 @@ const {
   buildManagerSystemPrompt: buildManagerSystemPromptModule,
   buildInitialUserContext,
 } = require('../services/managerSystemPrompt');
+const { resolveSpawnCwd } = require('../utils/spawnCwd');
 
 /**
  * Manager Session API routes.
@@ -127,7 +128,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           const authCtx = resolveManagerAuth(adapterType, authResolverOpts);
           if (authCtx.canAuth) {
             const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env });
-            const safeCwd = process.cwd();
+            const safeCwd = resolveSpawnCwd({});
             adapter.startSession(r.id, {
               cwd: safeCwd,
               systemPrompt,
@@ -205,7 +206,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 const authCtx = resolveManagerAuth('codex', authResolverOpts);
                 if (authCtx.canAuth) {
                   const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env });
-                  const cwd = project.directory || process.cwd();
+                  const cwd = resolveSpawnCwd({ workspaceDir: project.directory });
                   adapter.startSession(r.id, {
                     systemPrompt,
                     cwd,
@@ -313,7 +314,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     }
 
     // Validate cwd if provided — must be under home directory or current working dir
-    let safeCwd = cwd || process.cwd();
+    let safeCwd = resolveSpawnCwd({ workspaceDir: cwd });
     if (cwd) {
       const path = require('node:path');
       const os = require('node:os');
