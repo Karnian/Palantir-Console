@@ -110,3 +110,33 @@ P1c 머지 후. option **C plumbing-first**: **sqlite-vec 는 optional initializ
 ## P1c 완료
 
 Slices 1-4 merged: PR #217, PR #218, PR #219, and this Slice 4 close-out. The cross-project loop is now closed end to end: L1 scan -> cross_project XPROJECT candidate -> cookie promotion -> user-scope active Master memory -> Top `## User Memory` injection. P2 (`sqlite-vec`) remains deferred until a real embedder decision is made.
+
+---
+
+## 후속 작업 (다음 세션 착수 가이드)
+
+P1c 는 완료(#217~#220). 아래는 미수행 후속 — 다른 세션이 이 문서만 보고 이어받을 수 있도록 정리.
+
+### A. P2 — sqlite-vec 하이브리드 검색 (메인, DEFER 중)
+선행 결정(lock-in):
+1. **실 embedder 선택** — transformers.js(로컬) / API / 기타.
+2. **P2 자체 검증 필수** — kill test 가 governed FTS top-K 의 강함을 이미 입증(hard-SEP A4k/A4cur=87%, A7=100%). 따라서 vec+RRF 가 **답 품질(answer-influence)** 에서 FTS-only 를 실제로 능가하는지 사전등록 bar 로 먼저 증명해야 함 (retrieval 지표만으로 채택 ✕). `experiments/mm-spike/` 의 방법론(masked anchor / wrong-content placebo A7p / 결정론 leakage audit / pre-registered threshold) 재사용. mnemo "lexical 주효·recency 무효" 단서와 정합 확인.
+
+구현(option C plumbing-first):
+3. sqlite-vec 는 **optional initializer** — 정규 migration 경로에 넣지 말 것(pre-v1, 부팅 abort 위험). 부재 시 FTS-only 로 degrade.
+4. RRF + lexical guard 융합.
+5. FTS-only degrade 경로 테스트 증명.
+6. archive/delete 시 best-effort vec 삭제 + backfill/reconcile.
+7. 충돌점: `masterMemoryService.createMemoryItem`(embed-on-write) + export. migration 번호는 033+.
+
+### B. P1c 선택 후속 (필수 아님)
+1. **명시적 cross_project-scope 주입** — Slice 4 에서 defer. 현재 XPROJECT 는 user scope 로 승격되어 주입되므로 불필요. cross_project scope 항목 자체를 Top 에 직접 주입하려면 dual-scope 주입 추가(주입 중복 주의).
+2. **L2 correction UI** (`#master-memory` 뷰) — L1 MemoryView(`#memory`) 대응. 현재 L2 는 PATCH route 만 있고 UI 없음.
+3. **Master→PM 주입 정책** — 현재 L2 는 Top-only. cross-project 지식을 PM 에도 주입할지.
+4. NIT: scanner 이벤트 필드 `scanned` → `scanned_hashes` 정합(cosmetic).
+
+### C. 원 비전 대비 (참고)
+"digital twin / 모든 활동 로그 내재화" 원 비전은 kill test 가 무거운 distillation/WikiGraph 를 de-scope 했으므로 **새 증거 없이 재개 ✕**. 현재 lean(governed top-K + 사람 게이트 + 결정론 cross-project 신호)이 검증된 mainline. 재개하려면 새 가설로 kill-test 스파이크 선행.
+
+### 작업 규약 (변경 없음)
+각 구현 슬라이스: Codex 구현 → Claude 교차리뷰 → npm test green → Codex 적대리뷰 PASS → merge. codex exec 는 커스텀 백그라운드 스크립트에서 `< /dev/null` 필수(stdin hang 방지) + macOS watchdog 패턴. 런타임 node@22(better-sqlite3 ABI). PR 은 repo-local Karnian 토큰(`gh auth token --user Karnian`)으로 생성·squash merge(`--subject` 로 메시지 제어).
