@@ -360,3 +360,41 @@ test('routes: directly-created fact candidate promotion returns 409 fact_not_all
   assert.equal(app.services._rawDb.prepare('SELECT status FROM master_memory_candidates WHERE id=?').get(cand.id).status, 'rejected');
   assert.equal(app.services._rawDb.prepare("SELECT COUNT(*) n FROM master_memory_candidates WHERE status='pending'").get().n, 0);
 });
+
+test('routes: cap-rejected candidate promotion returns 409 and stays pending', async (t) => {
+  const app = await setupApp(t);
+  const svc = app.services.masterMemoryService;
+  for (let i = 0; i < 500; i += 1) {
+    const item = svc.createMemoryItem({
+      scope: 'user',
+      kind: 'pattern',
+      content: `candidate cap filler ${i}`,
+      origin: 'deterministic',
+      confidence: 0.9,
+      importance: 1,
+    });
+    assert.equal(item.skipped, undefined);
+  }
+  const cand = svc.createCandidate({
+    scope: 'user',
+    rule: 'R4',
+    rawJson: {
+      schema_version: 1,
+      kind: 'preference',
+      content: 'weak candidate cannot beat cap victim',
+      confidence: 0.1,
+      importance: 1,
+    },
+    dedupKey: 'cap-rejected-route',
+  });
+
+  const rejected = await invokeApp(app, {
+    method: 'POST',
+    path: `/api/master-memory/candidates/${cand.id}/promote`,
+    headers: COOKIE,
+  });
+  assert.equal(rejected.status, 409);
+  assert.equal(rejected.body.reason, 'cap_rejected');
+  assert.deepEqual(rejected.body.candidate, { id: cand.id, status: 'pending' });
+  assert.equal(app.services._rawDb.prepare('SELECT status FROM master_memory_candidates WHERE id=?').get(cand.id).status, 'pending');
+});

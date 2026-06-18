@@ -106,12 +106,74 @@ function createMasterMemoryRouter({ masterMemoryService }) {
     const result = masterMemoryService.promoteCandidate({ candidateId: req.params.id });
     if (!result) throw new NotFoundError('master memory candidate not found');
     if (!result.promoted) {
-      return res.status(409).json({ candidate: { id: result.candidateId, status: 'rejected' }, reason: result.reason });
+      const status = result.reason === 'cap_rejected' ? 'pending' : 'rejected';
+      return res.status(409).json({ candidate: { id: result.candidateId, status }, reason: result.reason });
     }
     res.json({
       memory: toPublic(result.item),
       candidate: { id: result.candidateId, status: result.merged ? 'merged' : 'promoted', promoted_to: result.item.id },
     });
+  }));
+
+  // Post-hoc correction CRUD for master memory. Cookie-only: bearer/none can
+  // stage candidates, but cannot mutate the active injected user-memory set.
+  router.patch('/:id', asyncHandler(async (req, res) => {
+    if (!masterMemoryService) return res.status(501).json({ error: 'masterMemoryService_unavailable' });
+    if (!req.auth || req.auth.method !== 'cookie') {
+      return res.status(403).json({ error: 'master memory correction requires human (cookie) auth' });
+    }
+    const { id } = req.params;
+    const item = masterMemoryService.getMemoryItem(id);
+    if (!item) throw new NotFoundError('master memory item not found');
+
+    const body = req.body || {};
+    const action = body.action;
+    let result;
+    try {
+      if (action === 'update') {
+        const patch = {};
+        if (body.content !== undefined) {
+          if (typeof body.content !== 'string' || !body.content.trim()) throw new BadRequestError('content is required');
+          patch.content = body.content;
+        }
+        if (body.importance !== undefined) {
+          const importance = Number(body.importance);
+          if (!Number.isInteger(importance) || importance < 1 || importance > 10) {
+            throw new BadRequestError('importance must be an integer 1-10');
+          }
+          patch.importance = importance;
+        }
+        if (body.pinned !== undefined) patch.pinned = !!body.pinned;
+        if (!Object.keys(patch).length) throw new BadRequestError('at least one of content|importance|pinned is required');
+        result = masterMemoryService.updateMemory(id, patch);
+      } else if (action === 'archive') {
+        result = masterMemoryService.archiveMemory(id);
+      } else if (action === 'restore') {
+        result = masterMemoryService.restoreMemory(id);
+        if (result && result.skipped && result.reason === 'cap_rejected') {
+          return res.status(409).json({ memory: null, reason: 'cap_rejected' });
+        }
+      } else if (action === 'pin') {
+        if (body.pinned === undefined) throw new BadRequestError('pinned is required');
+        result = masterMemoryService.pinMemory(id, !!body.pinned);
+      } else if (action === 'review') {
+        result = masterMemoryService.markReviewed(id);
+      } else {
+        throw new BadRequestError('action must be one of update|archive|restore|pin|review');
+      }
+    } catch (err) {
+      if (err && err.code === 'MEMORY_CONTENT_REJECTED') {
+        throw new BadRequestError(`content rejected: ${err.message.replace(/^content rejected:\s*/, '')}`);
+      }
+      if (err && err.code === 'MEMORY_DUPLICATE') {
+        throw new BadRequestError(err.message);
+      }
+      throw err;
+    }
+    if (!result) {
+      throw new BadRequestError(`action "${action}" is not applicable to an item in status "${item.status}"`);
+    }
+    res.json({ memory: toPublic(result) });
   }));
 
   // Explicit "remember this" — cookie (human) writes ACTIVE user memory; bearer/none stage a sanitized

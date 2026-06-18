@@ -465,6 +465,30 @@ function createR3Capture({ eventBus, memoryService, logger = console } = {}) {
   return { capture };
 }
 
+function startMasterMemoryDecayScheduler({ masterMemoryService, intervalMs = 6 * 60 * 60 * 1000, logger = console } = {}) {
+  const tick = () => {
+    try {
+      if (masterMemoryService && typeof masterMemoryService.expireStaleMemories === 'function') {
+        masterMemoryService.expireStaleMemories();
+      }
+    } catch (err) {
+      try { logger.warn(`[master-memory-decay] tick failed: ${err && err.message}`); } catch { /* */ }
+    }
+  };
+  tick();
+  let interval = setInterval(tick, intervalMs);
+  try { if (interval && typeof interval.unref === 'function') interval.unref(); } catch { /* */ }
+  return {
+    tick,
+    stop() {
+      if (!interval) return;
+      clearInterval(interval);
+      interval = null;
+    },
+    get interval() { return interval; },
+  };
+}
+
 function createApp(options = {}) {
   const app = express();
   // PR1: tests pass `authToken` explicitly to avoid mutating
@@ -526,6 +550,7 @@ function createApp(options = {}) {
   // L2 P1b: user-scoped Master memory (governed top-K retrieval). Injected into
   // conversationService for Top-manager user-payload prepend + the /api/master-memory router.
   const masterMemoryService = createMasterMemoryService(db, eventBus);
+  const masterMemoryDecayScheduler = startMasterMemoryDecayScheduler({ masterMemoryService });
   // Phase 10B: Worker Preset service. Created before taskService so that
   // taskService can validate preferred_preset_id at the service layer (D2c).
   const presetService = createPresetService(db, {
@@ -819,6 +844,7 @@ function createApp(options = {}) {
     eventBus,
     memoryService, // ML PR1: test seam for seeding L1 memory through the app db
     masterMemoryService, // L2 P1b: test seam for seeding/asserting Master memory
+    masterMemoryDecayScheduler,
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at
     // (createRun() always stamps status='queued' and cost_usd=0 at now).
@@ -885,6 +911,7 @@ function createApp(options = {}) {
       console.warn('[app.shutdown] manager dispose sweep failed:', err && err.message);
     }
     try { webhookService.stop(); } catch { /* ignore */ }
+    try { if (masterMemoryDecayScheduler) masterMemoryDecayScheduler.stop(); } catch { /* ignore */ }
     try { if (memoryDistillScheduler) memoryDistillScheduler.stop(); } catch { /* ignore */ }
     lifecycleService.stopMonitoring();
     // PR5b graceful shutdown: if a distill drain is in flight, close the DB only
@@ -914,6 +941,7 @@ module.exports = {
   createR6FactCapture,
   createR1bCapture,
   createR3Capture,
+  startMasterMemoryDecayScheduler,
   buildPmReviewText,
   formatHarvestSummary,
 };
