@@ -1,6 +1,7 @@
 # Memory Augmentation (L1 PM / L2 Master) — Hermes 벤치마크 기반 보완 설계 brief
 
-> **상태**: v0.2 DRAFT (2026-06-18) — Hermes Agent 지식증강 비교 + **Codex 적대 교차리뷰 R1(실측) 반영** + 2024~26 SOTA 웹검증 + A1 경험 검증. **각 보완안을 L1(PM)/L2(Master) 구조 차이에 맞춰 per-layer 상세 명세.**
+> **상태**: v0.3 DRAFT — reconciled (2026-06-18). **⚠️ 최종 메모리 아키텍처 `operator-memory-architecture.md` 확정으로 본 brief 의 L1/L2 프레이밍은 superseded.** **A1**(한국어 FTS, #222 merged)은 owner-agnostic 라 유지. 나머지 보완안은 Operator 리팩터로 **흡수**(§5). 매핑: **L1→Workspace · L2→User · +Profile · +Raw archive · +Composer**. 본 brief 는 A1 근거 + 보완 카탈로그로 보존.
+> (이력) v0.2 — Hermes Agent 지식증강 비교 + Codex 적대 교차리뷰 R1(실측) + 2024~26 SOTA 웹검증 + A1 경험 검증. 각 보완안을 L1(PM)/L2(Master) per-layer 명세.
 > **연관 spec**: `memory-layer-brief.md`(L1 PM 메모리), `master-memory-brief.md`(L2 Master, governed top-K de-scope), `manager-v3-multilayer.md`
 > **외부 리서치 원천**: `/Volumes/HH/Work/SK/ContextualAI/Hermes_Benchmark/` — `Hermes_학습·진화_메커니즘.md`(코드 file:line + 웹 + 적대검증 + Codex 교차), `02_c2_vs_hermes_차별점.md`. 본 문서는 그 리서치를 **우리 시스템에 적용**하는 내부 설계.
 > **목표 한 줄**: Hermes 의 좋은 패턴(절차적 기억·일화 검색)을 **우리 review-gate 원칙 위에서** 흡수하고, 우리 약점(memory blind spot·correlated evidence·truth laundering·한국어 recall·능동 모순해소 부재)을 닫되, **L1 과 L2 의 구조 차이를 존중해 각각 다르게** 설계한다.
@@ -183,7 +184,7 @@ L2 의 `project_id` 가 **FK 없는 provenance** 라서 생기는 구조 이슈:
 
 | PR | 보완 | 범위 | 위험 | 비고 |
 |----|------|------|------|------|
-| **A1** | ① 한국어 FTS | L1+L2 **prefix(`"t"*`) 한 줄** + 공유 helper + 회귀테스트 | 저(strict superset) | **시작 추천**. trigram NO-GO 회피 |
+| **A1** ✅ | ① 한국어 FTS | L1+L2 **two-pass exact-first + prefix-fill** + 회귀테스트 | 저(exact top-K 보존) | **merged #222**. trigram NO-GO 회피 |
 | **A2** | ④+⑤ 정직성 패치 | L1 극성소실 reject·부정어 human-flag·독립성 distinct (promote tx) | 저 | ⚠️ A3 전까지 모순해소 불완전 |
 | **A3** | ③ 모순해소 L1 | write-time supersede(**merge 와 배타** + self/kind/expired 가드) + 저빈도 sweep | 중 | PR3c-1 충돌주의 |
 | **A4.0** | §3.A L2 게이트 | masterMemoryService 에 ask/act 게이트 **구현**(spec→code) | 중 | **A4 선행 필수** |
@@ -195,7 +196,12 @@ L2 의 `project_id` 가 **FK 없는 provenance** 라서 생기는 구조 이슈:
 | **A8** | §3.B/C/D | dangling evidence 정책 + post-delete 재검증 + scope revision 문서 | 저~중 | 구조 정합 |
 | (defer) | ② L2 cross-project 절차 | A5 검증 후 | — | 보수영역 |
 
-**권장 순서**: **A1**(prefix, 양 레이어, 즉효·strict superset) → A2(정직성, 국소) → A3(L1 모순) → A4.0(L2 게이트) → A4 → A8(구조정책) → A5.0 → A5. A6/A7 는 A4.0 후 형편.
+**권장 순서 (reconciled — Codex 호환성 리뷰 반영)**: **A1 ✅ merged.** 나머지는 `operator-memory-architecture.md` 의 owner-keying(`scope→(owner_type,owner_id)`) + Composer 리팩터로 **흡수**:
+- **A2-④**(극성/부정어 게이트, promote tx 내부) = owner-agnostic → **standalone 가능**(원하면 지금).
+- **A2-⑤**(correlated-evidence confidence·independence)·**A3**(L1 모순)·**A4.0/A4**(L2 게이트·모순)·**A8**(구조정책) = owner-coupled(project_id/scope) → **Operator 리팩터에서 owner-aware 재구현**.
+- **⑥**→Raw archive tier(거버넌스 선행) / **②**→3-owner(일반절차=Profile·프로젝트고유=Workspace·사용자선호=User) 분배.
+- ⚠️ 별건: `conversationService` L1/L2 직접 prepend 주입은 Composer 단일주입 불변식과 충돌 → 리팩터 때 흡수.
+→ **standalone 로드맵 종료, Operator 일반화 brief 로 이관.**
 
 ---
 
