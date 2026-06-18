@@ -13,6 +13,17 @@ const TOP_K = 12;          // governed top-K — NEVER top-1 (spike: raw top-1 =
 const CHAR_CAP = 2000;
 const MAX_QUERY_TERMS = 32;
 const VALID_SCOPES = new Set(['user', 'cross_project']);
+const VALID_MASTER_KINDS = new Set(['constraint', 'preference', 'commitment', 'decision', 'fact', 'pattern']);
+const VALID_CANDIDATE_RULES = new Set(['R4', 'XPROJECT']);
+const VALID_CANDIDATE_STATUSES = new Set(['pending', 'promoted', 'rejected', 'merged']);
+const L1_KIND_TO_MASTER_KIND = new Map([
+  ['convention', 'pattern'],
+  ['pitfall', 'pattern'],
+  ['heuristic', 'pattern'],
+]);
+const PUBLIC_CANDIDATE_FIELDS = [
+  'id', 'scope', 'rule', 'dedup_key', 'status', 'promoted_to', 'created_at',
+];
 
 function sha256(text) {
   return crypto.createHash('sha256').update(text).digest('hex');
@@ -95,6 +106,45 @@ function createMasterMemoryService(db, eventBus) {
     ON CONFLICT(master_run_id, scope) DO UPDATE SET injected_revision = excluded.injected_revision, injected_at = excluded.injected_at
   `);
 
+  // P1c Slice 1: Master candidates. Use ON CONFLICT against only the dedup
+  // UNIQUE so CHECK violations (bad rule/scope/raw_json) still surface.
+  const insertCandidateStmt = db.prepare(`
+    INSERT INTO master_memory_candidates (id, scope, rule, raw_json, dedup_key)
+    VALUES (@id, @scope, @rule, @rawJson, @dedupKey)
+    ON CONFLICT(rule, scope, dedup_key) DO NOTHING
+  `);
+  const getCandidateByDedupStmt = db.prepare(`
+    SELECT *
+    FROM master_memory_candidates
+    WHERE rule = ? AND scope = ? AND dedup_key = ?
+  `);
+  const listCandidatesStmt = db.prepare(`
+    SELECT id, scope, rule, dedup_key, status, promoted_to, created_at
+    FROM master_memory_candidates
+    WHERE scope = ? AND status = ?
+    ORDER BY created_at ASC, id ASC
+  `);
+  const getPendingCandidateStmt = db.prepare(`
+    SELECT *
+    FROM master_memory_candidates
+    WHERE id = ? AND status = 'pending'
+  `);
+  const setCandidateStatusStmt = db.prepare(`
+    UPDATE master_memory_candidates
+    SET status = @status,
+        promoted_to = @promotedTo,
+        updated_at = datetime('now')
+    WHERE id = @id
+      AND status = 'pending'
+  `);
+  const countActiveL1ProjectsByHashStmt = db.prepare(`
+    SELECT COUNT(DISTINCT project_id) AS n
+    FROM memory_items
+    WHERE content_hash = ?
+      AND status = 'active'
+      AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))
+  `);
+
   function _bumpRevision(scope) { bumpRevisionStmt.run(normScope(scope)); }
   function getRevision(scope) {
     const row = getRevisionStmt.get(scope);
@@ -113,6 +163,90 @@ function createMasterMemoryService(db, eventBus) {
     const s = scope || 'user';
     if (!VALID_SCOPES.has(s)) throw new Error(`invalid scope: ${s}`);
     return s;
+  }
+
+  function normalizeCandidateRawJson(rawJson) {
+    if (rawJson === undefined || rawJson === null) throw new Error('rawJson is required');
+    const raw = typeof rawJson === 'string' ? rawJson : JSON.stringify(rawJson);
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error('rawJson must be valid JSON');
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('rawJson must be a JSON object');
+    }
+    return { raw, parsed };
+  }
+
+  function parseCandidateRaw(candidate) {
+    try {
+      const parsed = JSON.parse(candidate.raw_json);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function toPublicCandidate(row) {
+    if (!row) return null;
+    const out = {};
+    for (const field of PUBLIC_CANDIDATE_FIELDS) {
+      if (field in row) out[field] = row[field];
+    }
+    return out;
+  }
+
+  function normalizeCandidateRule(rule) {
+    if (!VALID_CANDIDATE_RULES.has(rule)) throw new Error(`rule must be one of ${Array.from(VALID_CANDIDATE_RULES).join('|')}`);
+    return rule;
+  }
+
+  function normalizeCandidateStatus(status) {
+    const s = status || 'pending';
+    if (!VALID_CANDIDATE_STATUSES.has(s)) throw new Error(`status must be one of ${Array.from(VALID_CANDIDATE_STATUSES).join('|')}`);
+    return s;
+  }
+
+  function mapCandidateKind(kind) {
+    if (typeof kind !== 'string' || !kind.trim()) return null;
+    const k = kind.trim();
+    return L1_KIND_TO_MASTER_KIND.get(k) || k;
+  }
+
+  function normalizeFactKey(factKey) {
+    const fk = typeof factKey === 'string' ? factKey.trim() : '';
+    if (!fk) return null;
+    if (!/^[a-z0-9_]+(\.[a-z0-9_]+)*$/i.test(fk)) return null;
+    if (fk.toLowerCase().startsWith('env.')) return null;
+    return fk;
+  }
+
+  function validContentHash(value) {
+    return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value);
+  }
+
+  function normalizeImportance(value) {
+    const n = Number.parseInt(value, 10);
+    if (!Number.isFinite(n)) return 5;
+    return Math.min(10, Math.max(1, n));
+  }
+
+  function normalizeConfidence(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0.5;
+    return Math.max(0, Math.min(1, n));
+  }
+
+  function rejectPendingCandidate(id, reason) {
+    const res = setCandidateStatusStmt.run({ status: 'rejected', promotedTo: null, id });
+    if (res.changes !== 1) {
+      const e = new Error('candidate status flip raced (not pending)');
+      e.code = 'MASTER_MEMORY_CANDIDATE_RACE';
+      throw e;
+    }
+    return { candidateId: id, promoted: false, skipped: true, reason };
   }
 
   // Write-time sanitize (Codex SERIOUS): redact secrets ALWAYS; reject injection for untrusted origins
@@ -169,6 +303,108 @@ function createMasterMemoryService(db, eventBus) {
       if (isUniqueConstraint(err, 'content_hash')) return mergeByHashTx(s, item.contentHash);
       throw err;
     }
+  }
+
+  function createCandidate({ scope, rule, rawJson, dedupKey } = {}) {
+    const s = normScope(scope);
+    const r = normalizeCandidateRule(rule);
+    const key = typeof dedupKey === 'string' ? dedupKey : '';
+    if (key.length < 1 || key.length > 512) throw new Error('dedupKey length must be between 1 and 512');
+    const { raw } = normalizeCandidateRawJson(rawJson);
+    insertCandidateStmt.run({
+      id: crypto.randomUUID(),
+      scope: s,
+      rule: r,
+      rawJson: raw,
+      dedupKey: key,
+    });
+    return getCandidateByDedupStmt.get(r, s, key);
+  }
+
+  function listCandidates(scope, status = 'pending') {
+    return listCandidatesStmt.all(normScope(scope), normalizeCandidateStatus(status)).map(toPublicCandidate);
+  }
+
+  const promoteCandidateTx = db.transaction((candidateId) => {
+    if (!candidateId) throw new Error('candidateId is required');
+    const candidate = getPendingCandidateStmt.get(candidateId);
+    if (!candidate) return null;
+
+    const raw = parseCandidateRaw(candidate);
+    if (!raw) return rejectPendingCandidate(candidate.id, 'bad_raw_json');
+
+    const originalKind = typeof raw.kind === 'string' ? raw.kind.trim() : null;
+    const kind = mapCandidateKind(originalKind);
+    if (!kind || !VALID_MASTER_KINDS.has(kind)) {
+      return rejectPendingCandidate(candidate.id, 'bad_kind');
+    }
+
+    const content = typeof raw.content === 'string' ? raw.content : '';
+    if (!content.trim()) return rejectPendingCandidate(candidate.id, 'bad_content');
+
+    let factKey = null;
+    if (kind === 'fact') {
+      factKey = normalizeFactKey(raw.factKey ?? raw.fact_key);
+      if (!factKey) return rejectPendingCandidate(candidate.id, 'bad_fact_key');
+    }
+
+    const sourceContentHash = validContentHash(raw.content_hash)
+      ? raw.content_hash.toLowerCase()
+      : sha256(content);
+    if (candidate.rule === 'XPROJECT') {
+      const activeProjects = countActiveL1ProjectsByHashStmt.get(sourceContentHash).n;
+      if (activeProjects < 2) {
+        return rejectPendingCandidate(candidate.id, 'xproject_recheck_failed');
+      }
+    }
+
+    let item;
+    try {
+      item = createMemoryItem({
+        scope: candidate.scope,
+        kind,
+        factKey,
+        content,
+        evidenceJson: {
+          schema_version: 1,
+          origin: 'deterministic',
+          rule: candidate.rule,
+          candidate_ids: [candidate.id],
+          original_kind: originalKind,
+          source_content_hash: sourceContentHash,
+        },
+        origin: 'deterministic',
+        importance: normalizeImportance(raw.importance),
+        confidence: normalizeConfidence(raw.confidence),
+        sourceCount: 1,
+        status: 'active',
+      });
+    } catch (err) {
+      if (err && err.code === 'MEMORY_CONTENT_REJECTED') {
+        return rejectPendingCandidate(candidate.id, 'sanitize_rejected');
+      }
+      throw err;
+    }
+
+    const res = setCandidateStatusStmt.run({
+      status: 'promoted',
+      promotedTo: item.id,
+      id: candidate.id,
+    });
+    if (res.changes !== 1) {
+      const e = new Error('candidate status flip raced (not pending)');
+      e.code = 'MASTER_MEMORY_CANDIDATE_RACE';
+      throw e;
+    }
+    return { candidateId: candidate.id, promoted: true, item };
+  });
+
+  function promoteCandidate({ candidateId } = {}) {
+    const result = promoteCandidateTx(candidateId);
+    if (result && result.promoted && eventBus) {
+      try { eventBus.emit('master_memory:promoted', { scope: result.item.scope, memoryItemId: result.item.id, candidateId }); } catch { /* */ }
+    }
+    return result;
   }
 
   // Human "remember this" convenience → active human-origin memory.
@@ -300,6 +536,9 @@ function createMasterMemoryService(db, eventBus) {
     _bumpRevision,
     getRevision,
     createMemoryItem,
+    createCandidate,
+    listCandidates,
+    promoteCandidate,
     remember,
     upsertFact,
     retrieve,
