@@ -12,6 +12,8 @@ const { detectInjection, redactSecrets } = require('./memorySanitize');
 const TOP_K = 12;          // governed top-K — NEVER top-1 (spike: raw top-1 = 53%, top-K required)
 const CHAR_CAP = 2000;
 const MAX_QUERY_TERMS = 32;
+const HARD_CAP = 500;
+const DEFAULT_TTL_DAYS = 180;
 const VALID_SCOPES = new Set(['user', 'cross_project']);
 const VALID_MASTER_KINDS = new Set(['constraint', 'preference', 'commitment', 'decision', 'fact', 'pattern']);
 const VALID_CANDIDATE_RULES = new Set(['R4', 'XPROJECT']);
@@ -41,10 +43,10 @@ function createMasterMemoryService(db, eventBus) {
   const insertItemStmt = db.prepare(`
     INSERT INTO master_memory_items (
       id, scope, project_id, kind, fact_key, content, content_hash,
-      evidence_json, origin, source_count, confidence, importance, status
+      evidence_json, origin, source_count, confidence, importance, pinned, status, valid_to
     ) VALUES (
       @id, @scope, @projectId, @kind, @factKey, @content, @contentHash,
-      @evidenceJson, @origin, @sourceCount, @confidence, @importance, @status
+      @evidenceJson, @origin, @sourceCount, @confidence, @importance, @pinned, @status, @validTo
     )
   `);
   const getItemByIdStmt = db.prepare('SELECT * FROM master_memory_items WHERE id = ?');
@@ -52,9 +54,29 @@ function createMasterMemoryService(db, eventBus) {
     "SELECT * FROM master_memory_items WHERE scope = ? AND content_hash = ? AND status = 'active'"
   );
   const mergeByHashStmt = db.prepare(
-    "UPDATE master_memory_items SET source_count = source_count + 1, updated_at = datetime('now') " +
-    "WHERE scope = ? AND content_hash = ? AND status = 'active'"
+    "UPDATE master_memory_items " +
+    "SET source_count = source_count + 1, " +
+    "    origin = CASE WHEN @incomingOrigin = 'human' AND origin != 'human' THEN 'human' ELSE origin END, " +
+    "    valid_to = CASE WHEN @incomingOrigin = 'human' AND origin != 'human' THEN NULL ELSE valid_to END, " +
+    "    updated_at = datetime('now') " +
+    "WHERE scope = @scope AND content_hash = @contentHash AND status = 'active'"
   );
+
+  const countActiveByScopeStmt = db.prepare(
+    "SELECT COUNT(*) AS n FROM master_memory_items WHERE scope = ? AND status = 'active'"
+  );
+  const lowestEvictableStmt = db.prepare(
+    "SELECT id, scope, (COALESCE(confidence, 0) * COALESCE(importance, 1)) AS score " +
+    "FROM master_memory_items " +
+    "WHERE scope = ? AND status = 'active' AND pinned = 0 AND origin != 'human' " +
+    "ORDER BY score ASC, updated_at ASC, id ASC LIMIT 1"
+  );
+  const archiveVictimStmt = db.prepare(
+    "UPDATE master_memory_items " +
+    "SET status = 'archived', archived_at = datetime('now'), archive_reason = @reason, updated_at = datetime('now') " +
+    "WHERE id = @id AND status = 'active'"
+  );
+  const futureTimestampStmt = db.prepare("SELECT datetime('now', ?) AS ts");
 
   // top-K FTS retrieval (bm25 ASC = most relevant first) + recency/importance tie-break.
   const ftsRetrieveStmt = db.prepare([
@@ -95,6 +117,16 @@ function createMasterMemoryService(db, eventBus) {
   const supersedeFactStmt = db.prepare(
     "UPDATE master_memory_items SET status='superseded', superseded_by=@newId, valid_to=datetime('now'), updated_at=datetime('now') " +
     "WHERE scope=@scope AND fact_key=@factKey AND status='active'"
+  );
+  const refreshFactObservationStmt = db.prepare(
+    "UPDATE master_memory_items " +
+    "SET reviewed_at = datetime('now'), valid_to = datetime('now', @offset), updated_at = datetime('now') " +
+    "WHERE id = @id AND status = 'active' AND origin != 'human'"
+  );
+  const upgradeFactToHumanStmt = db.prepare(
+    "UPDATE master_memory_items " +
+    "SET origin = 'human', valid_to = NULL, source_count = source_count + 1, updated_at = datetime('now') " +
+    "WHERE id = @id AND status = 'active' AND origin != 'human'"
   );
   const archiveStmt = db.prepare(
     "UPDATE master_memory_items SET status='archived', archived_at=datetime('now'), archive_reason=@reason, updated_at=datetime('now') WHERE id=@id AND status='active'"
@@ -280,17 +312,105 @@ function createMasterMemoryService(db, eventBus) {
     return out;
   }
 
-  const insertItemTx = db.transaction((item) => {
+  function sanitizeCorrectionContent(content) {
+    if (detectInjection(content)) {
+      const e = new Error('content rejected: injection marker'); e.code = 'MEMORY_CONTENT_REJECTED'; throw e;
+    }
+    const out = redactSecrets(String(content || '').trim()).text.replace(/\s+/g, ' ').trim().slice(0, CHAR_CAP);
+    if (!out) { const e = new Error('content rejected: empty after redaction'); e.code = 'MEMORY_CONTENT_REJECTED'; throw e; }
+    return out;
+  }
+
+  function futureTimestamp(days = DEFAULT_TTL_DAYS) {
+    const n = Number.parseInt(days, 10);
+    const safeDays = Number.isFinite(n) && n > 0 ? n : DEFAULT_TTL_DAYS;
+    return futureTimestampStmt.get(`+${Math.floor(safeDays)} days`).ts;
+  }
+
+  function validToForOrigin(origin, status = 'active', ttlDays = DEFAULT_TTL_DAYS) {
+    if (status !== 'active') return null;
+    return origin === 'human' ? null : futureTimestamp(ttlDays);
+  }
+
+  function admissionScore(row) {
+    return (Number(row && row.confidence) || 0) * (Number(row && row.importance) || 1);
+  }
+
+  function skippedAdmission(scope, reason = 'cap_rejected') {
+    return { skipped: true, reason, scope };
+  }
+
+  function emitEvicted(evicted) {
+    if (!eventBus) return;
+    const rows = Array.isArray(evicted) ? evicted.filter(Boolean) : (evicted ? [evicted] : []);
+    if (!rows.length) return;
+    try {
+      if (rows.length > 5) {
+        const scopes = Array.from(new Set(rows.map((r) => r.scope).filter(Boolean)));
+        eventBus.emit('master_memory:evicted', { count: rows.length, scopes, batch: true, reason: 'cap_evicted' });
+      } else {
+        for (const row of rows) {
+          eventBus.emit('master_memory:evicted', {
+            scope: row.scope,
+            memoryItemId: row.itemId,
+            score: row.score,
+            reason: 'cap_evicted',
+          });
+        }
+      }
+    } catch { /* observability must never break memory writes */ }
+  }
+
+  function mergeActiveByHash(scope, contentHash, incomingOrigin) {
+    mergeByHashStmt.run({ scope, contentHash, incomingOrigin });
+    return getActiveByHashStmt.get(scope, contentHash) || null;
+  }
+
+  function admitNewActiveItem(item, activeCap = HARD_CAP) {
+    if (item.status !== 'active' || item.origin === 'human') return { admitted: true, evicted: null };
+    const count = countActiveByScopeStmt.get(item.scope).n;
+    if (count < activeCap) return { admitted: true, evicted: null };
+    const victim = lowestEvictableStmt.get(item.scope);
+    if (!victim) return { admitted: false, skipped: skippedAdmission(item.scope) };
+    const newScore = admissionScore(item);
+    if (newScore <= Number(victim.score || 0)) return { admitted: false, skipped: skippedAdmission(item.scope) };
+    const res = archiveVictimStmt.run({ id: victim.id, reason: 'cap_evicted' });
+    if (res.changes !== 1) {
+      const e = new Error('cap eviction target raced (not active)');
+      e.code = 'MASTER_MEMORY_CAP_RACE';
+      throw e;
+    }
+    return { admitted: true, evicted: { itemId: victim.id, scope: victim.scope || item.scope, score: victim.score } };
+  }
+
+  function insertItemWithAdmission(item, { activeCap = HARD_CAP } = {}) {
+    if (item.status === 'active') {
+      const existing = getActiveByHashStmt.get(item.scope, item.contentHash);
+      if (existing) {
+        const merged = mergeActiveByHash(item.scope, item.contentHash, item.origin);
+        if (!merged) {
+          const e = new Error('merge target raced (not active)');
+          e.code = 'MASTER_MEMORY_RACE';
+          throw e;
+        }
+        return { item: merged, merged: true, evicted: null, skipped: false };
+      }
+      const admission = admitNewActiveItem(item, activeCap);
+      if (!admission.admitted) return { item: null, merged: false, evicted: null, skipped: true, reason: admission.skipped.reason };
+      insertItemStmt.run(item);
+      _bumpRevision(item.scope);
+      return { item: getItemByIdStmt.get(item.id), merged: false, evicted: admission.evicted, skipped: false };
+    }
     insertItemStmt.run(item);
-    if (item.status === 'active') _bumpRevision(item.scope);
-    return getItemByIdStmt.get(item.id);
-  });
-  const mergeByHashTx = db.transaction((scope, contentHash) => {
-    mergeByHashStmt.run(scope, contentHash);
-    return getActiveByHashStmt.get(scope, contentHash);
+    return { item: getItemByIdStmt.get(item.id), merged: false, evicted: null, skipped: false };
+  }
+
+  const insertItemTx = db.transaction((item, options) => insertItemWithAdmission(item, options));
+  const mergeByHashTx = db.transaction((scope, contentHash, incomingOrigin) => {
+    return mergeActiveByHash(scope, contentHash, incomingOrigin);
   });
 
-  function createMemoryItem({ scope, projectId, kind, content, factKey, evidenceJson, origin, importance, confidence, sourceCount, status } = {}) {
+  function createMemoryItem({ scope, projectId, kind, content, factKey, evidenceJson, origin, importance, confidence, sourceCount, status, activeCap, pinned } = {}) {
     const s = normScope(scope);
     if (!kind) throw new Error('kind is required');
     if (!content) throw new Error('content is required');
@@ -312,14 +432,19 @@ function createMasterMemoryService(db, eventBus) {
       sourceCount: sourceCount ?? 1,
       confidence: confidence ?? 0.5,
       importance: importance ?? 5,
+      pinned: pinned ? 1 : 0,
       status: status || 'active',
+      validTo: validToForOrigin(origin, status || 'active'),
     };
+    let out;
     try {
-      return insertItemTx(item);
+      out = insertItemTx(item, { activeCap: activeCap || HARD_CAP });
     } catch (err) {
-      if (isUniqueConstraint(err, 'content_hash')) return mergeByHashTx(s, item.contentHash);
+      if (isUniqueConstraint(err, 'content_hash')) return mergeByHashTx(s, item.contentHash, item.origin);
       throw err;
     }
+    emitEvicted(out.evicted);
+    return out.skipped ? skippedAdmission(s, out.reason) : out.item;
   }
 
   function createCandidate({ scope, rule, rawJson, dedupKey } = {}) {
@@ -394,34 +519,45 @@ function createMasterMemoryService(db, eventBus) {
     const existing = getActiveByHashStmt.get(promoteScope, contentHash);
     const merged = !!existing;
     let item;
+    let evicted = null;
     if (merged) {
-      mergeByHashStmt.run(promoteScope, contentHash);
-      item = getActiveByHashStmt.get(promoteScope, contentHash);
+      item = mergeActiveByHash(promoteScope, contentHash, 'deterministic');
       if (!item) {
         const e = new Error('merge target raced (not active)');
         e.code = 'MASTER_MEMORY_CANDIDATE_RACE';
         throw e;
       }
     } else {
-      item = createMemoryItem({
+      const newItem = {
+        id: crypto.randomUUID(),
         scope: promoteScope,
+        projectId: null,
         kind,
         factKey: null,
         content: safeContent,
-        evidenceJson: {
+        contentHash,
+        evidenceJson: normalizeEvidenceJson({
           schema_version: 1,
           origin: 'deterministic',
           rule: candidate.rule,
           candidate_ids: [candidate.id],
           original_kind: originalKind,
           source_content_hash: sourceContentHash,
-        },
+        }),
         origin: 'deterministic',
         importance: normalizeImportance(raw.importance),
         confidence: normalizeConfidence(raw.confidence),
         sourceCount: 1,
+        pinned: 0,
         status: 'active',
-      });
+        validTo: validToForOrigin('deterministic', 'active'),
+      };
+      const admitted = insertItemWithAdmission(newItem, { activeCap: HARD_CAP });
+      if (admitted.skipped) {
+        return { candidateId: candidate.id, promoted: false, skipped: true, reason: 'cap_rejected', pending: true };
+      }
+      item = admitted.item;
+      evicted = admitted.evicted;
     }
 
     const res = setCandidateStatusStmt.run({
@@ -434,11 +570,12 @@ function createMasterMemoryService(db, eventBus) {
       e.code = 'MASTER_MEMORY_CANDIDATE_RACE';
       throw e;
     }
-    return { candidateId: candidate.id, promoted: true, merged, item };
+    return { candidateId: candidate.id, promoted: true, merged, item, evicted };
   });
 
   function promoteCandidate({ candidateId } = {}) {
     const result = promoteCandidateTx(candidateId);
+    if (result && result.evicted) emitEvicted(result.evicted);
     if (result && result.promoted && eventBus) {
       try { eventBus.emit('master_memory:promoted', { scope: result.item.scope, memoryItemId: result.item.id, candidateId, merged: result.merged }); } catch { /* */ }
     }
@@ -451,15 +588,43 @@ function createMasterMemoryService(db, eventBus) {
   }
 
   // fact_key upsert with supersede semantics (mirrors L1 upsertFact). origin must be CHECK-allowed.
-  const upsertFactTx = db.transaction((item) => {
+  const upsertFactTx = db.transaction((item, activeCap = HARD_CAP) => {
     const existing = getActiveFactByKeyStmt.get(item.scope, item.factKey);
-    if (existing && existing.content_hash === item.contentHash) return existing; // no-op, no bump
+    if (existing && existing.content_hash === item.contentHash) {
+      if (item.origin === 'human' && existing.origin !== 'human') {
+        upgradeFactToHumanStmt.run({ id: existing.id });
+      } else if (item.origin !== 'human' && existing.origin !== 'human') {
+        refreshFactObservationStmt.run({ id: existing.id, offset: `+${DEFAULT_TTL_DAYS} days` });
+      }
+      return { item: getItemByIdStmt.get(existing.id), evicted: null, skipped: false };
+    }
+    if (existing && existing.origin === 'human' && item.origin !== 'human') {
+      return { item: existing, evicted: null, skipped: false };
+    }
+    let evicted = null;
+    if (!existing) {
+      const duplicate = getActiveByHashStmt.get(item.scope, item.contentHash);
+      if (duplicate) {
+        const merged = mergeActiveByHash(item.scope, item.contentHash, item.origin);
+        if (!merged) {
+          const e = new Error('fact merge target raced (not active)');
+          e.code = 'MASTER_MEMORY_RACE';
+          throw e;
+        }
+        return { item: merged, evicted: null, skipped: false };
+      }
+      const admission = admitNewActiveItem(item, activeCap);
+      if (!admission.admitted) {
+        return { item: null, evicted: null, skipped: true, reason: admission.skipped.reason };
+      }
+      evicted = admission.evicted;
+    }
     if (existing) supersedeFactStmt.run({ newId: item.id, scope: item.scope, factKey: item.factKey });
     insertItemStmt.run(item);
     _bumpRevision(item.scope);
-    return getItemByIdStmt.get(item.id);
+    return { item: getItemByIdStmt.get(item.id), evicted, skipped: false };
   });
-  function upsertFact({ scope, factKey, content, evidenceJson, importance, origin = 'deterministic' } = {}) {
+  function upsertFact({ scope, factKey, content, evidenceJson, importance, origin = 'deterministic', activeCap = HARD_CAP } = {}) {
     const s = normScope(scope);
     if (!factKey) throw new Error('factKey is required');
     if (!content) throw new Error('content is required');
@@ -467,14 +632,18 @@ function createMasterMemoryService(db, eventBus) {
     const item = {
       id: crypto.randomUUID(), scope: s, projectId: null, kind: 'fact', factKey,
       content: safeContent, contentHash: sha256(safeContent), evidenceJson: normalizeEvidenceJson(evidenceJson),
-      origin, sourceCount: 1, confidence: 0.9, importance: importance ?? 5, status: 'active',
+      origin, sourceCount: 1, confidence: 0.9, importance: importance ?? 5, pinned: 0,
+      status: 'active', validTo: validToForOrigin(origin, 'active'),
     };
+    let out;
     try {
-      return upsertFactTx(item);
+      out = upsertFactTx(item, activeCap);
     } catch (err) {
-      if (isUniqueConstraint(err, 'content_hash')) return getActiveByHashStmt.get(s, item.contentHash) || null;
+      if (isUniqueConstraint(err, 'content_hash')) return mergeByHashTx(s, item.contentHash, item.origin);
       throw err;
     }
+    emitEvicted(out.evicted);
+    return out.skipped ? skippedAdmission(s, out.reason) : out.item;
   }
 
   // FTS5 MATCH builder: punctuation acts as a SEPARATOR (code paths / foo-bar split into tokens), each
@@ -548,16 +717,195 @@ function createMasterMemoryService(db, eventBus) {
 
   function getMemoryItem(id) { return getItemByIdStmt.get(id) || null; }
 
-  const archiveTx = db.transaction((id) => {
+  const updateMemoryStmt = db.prepare(
+    "UPDATE master_memory_items " +
+    "SET content = CASE WHEN @hasContent THEN @content ELSE content END, " +
+    "    content_hash = CASE WHEN @hasContent THEN @contentHash ELSE content_hash END, " +
+    "    importance = CASE WHEN @hasImportance THEN @importance ELSE importance END, " +
+    "    pinned = CASE WHEN @hasPinned THEN @pinned ELSE pinned END, " +
+    "    updated_at = datetime('now') " +
+    "WHERE id = @id"
+  );
+  const restoreStmt = db.prepare(
+    "UPDATE master_memory_items " +
+    "SET status = 'active', archived_at = NULL, archive_reason = NULL, " +
+    "    valid_to = CASE WHEN origin = 'human' THEN NULL ELSE datetime('now', @offset) END, " +
+    "    updated_at = datetime('now') " +
+    "WHERE id = @id AND status = 'archived'"
+  );
+  const markReviewedStmt = db.prepare(
+    "UPDATE master_memory_items " +
+    "SET reviewed_at = datetime('now'), " +
+    "    valid_to = CASE WHEN origin != 'human' THEN datetime('now', @offset) ELSE NULL END, " +
+    "    updated_at = datetime('now') " +
+    "WHERE id = @id AND status = 'active'"
+  );
+  const pinStmt = db.prepare(
+    "UPDATE master_memory_items SET pinned = @pinned, updated_at = datetime('now') WHERE id = @id"
+  );
+  const listExpiredStmt = db.prepare(
+    "SELECT id, scope FROM master_memory_items " +
+    "WHERE status = 'active' AND pinned = 0 AND valid_to IS NOT NULL AND datetime(valid_to) < datetime('now')"
+  );
+  const archiveExpiredStmt = db.prepare(
+    "UPDATE master_memory_items " +
+    "SET status = 'archived', archived_at = datetime('now'), archive_reason = 'ttl_expired', updated_at = datetime('now') " +
+    "WHERE id = @id AND status = 'active'"
+  );
+
+  const updateMemoryTx = db.transaction(({ id, hasContent, content, contentHash, hasImportance, importance, hasPinned, pinned }) => {
     const before = getItemByIdStmt.get(id);
-    const res = archiveStmt.run({ id, reason: 'manual' });
+    if (!before) return null;
+    const res = updateMemoryStmt.run({
+      id,
+      hasContent: hasContent ? 1 : 0,
+      content: hasContent ? content : before.content,
+      contentHash: hasContent ? contentHash : before.content_hash,
+      hasImportance: hasImportance ? 1 : 0,
+      importance: hasImportance ? importance : before.importance,
+      hasPinned: hasPinned ? 1 : 0,
+      pinned: hasPinned ? pinned : before.pinned,
+    });
+    if (res.changes !== 1) return null;
+    const activeTextChanged = before.status === 'active' && (
+      (hasContent && content !== before.content) ||
+      (hasImportance && importance !== before.importance)
+    );
+    if (activeTextChanged) _bumpRevision(before.scope);
+    return getItemByIdStmt.get(id);
+  });
+
+  const archiveTx = db.transaction(({ id, reason }) => {
+    const before = getItemByIdStmt.get(id);
+    const res = archiveStmt.run({ id, reason });
     if (res.changes !== 1) return null;
     _bumpRevision(before.scope);
     return getItemByIdStmt.get(id);
   });
-  function archiveMemory(id) {
+
+  const restoreTx = db.transaction(({ id, activeCap }) => {
+    const before = getItemByIdStmt.get(id);
+    if (!before || before.status !== 'archived') return { item: null, evicted: null, skipped: false, folded: false };
+
+    const existing = getActiveByHashStmt.get(before.scope, before.content_hash);
+    if (existing) {
+      const folded = mergeActiveByHash(before.scope, before.content_hash, before.origin);
+      if (!folded) {
+        const e = new Error('restore fold target raced (not active)');
+        e.code = 'MASTER_MEMORY_RACE';
+        throw e;
+      }
+      return { item: folded, evicted: null, skipped: false, folded: true };
+    }
+
+    const admission = admitNewActiveItem({
+      scope: before.scope,
+      status: 'active',
+      origin: before.origin,
+      confidence: before.confidence,
+      importance: before.importance,
+    }, activeCap);
+    if (!admission.admitted) return { item: null, evicted: null, skipped: true, reason: admission.skipped.reason, folded: false };
+
+    const res = restoreStmt.run({ id, offset: `+${DEFAULT_TTL_DAYS} days` });
+    if (res.changes !== 1) return { item: null, evicted: null, skipped: false, folded: false };
+    _bumpRevision(before.scope);
+    return { item: getItemByIdStmt.get(id), evicted: admission.evicted, skipped: false, folded: false };
+  });
+
+  const expireStaleTx = db.transaction(() => {
+    const rows = listExpiredStmt.all();
+    const scopes = new Set();
+    let count = 0;
+    for (const row of rows) {
+      const res = archiveExpiredStmt.run({ id: row.id });
+      if (res.changes === 1) {
+        count += 1;
+        scopes.add(row.scope);
+      }
+    }
+    for (const scope of scopes) _bumpRevision(scope);
+    return { count, scopes: Array.from(scopes) };
+  });
+
+  function updateMemory(id, { content, importance, pinned } = {}) {
     if (!id) throw new Error('id is required');
-    return archiveTx(id);
+    const hasContent = content !== undefined;
+    const hasImportance = importance !== undefined;
+    const hasPinned = pinned !== undefined;
+    if (!hasContent && !hasImportance && !hasPinned) throw new Error('at least one update field is required');
+    const safeContent = hasContent ? sanitizeCorrectionContent(content) : null;
+    const normalizedImportance = hasImportance ? normalizeImportance(importance) : null;
+    try {
+      return updateMemoryTx({
+        id,
+        hasContent,
+        content: safeContent,
+        contentHash: hasContent ? sha256(safeContent) : null,
+        hasImportance,
+        importance: normalizedImportance,
+        hasPinned,
+        pinned: pinned ? 1 : 0,
+      });
+    } catch (err) {
+      if (isUniqueConstraint(err, 'content_hash')) {
+        const e = new Error('an active master memory item with this content already exists');
+        e.code = 'MEMORY_DUPLICATE';
+        throw e;
+      }
+      throw err;
+    }
+  }
+
+  function archiveMemory(id, { reason = 'manual' } = {}) {
+    if (!id) throw new Error('id is required');
+    return archiveTx({ id, reason });
+  }
+
+  function restoreMemory(id, { activeCap = HARD_CAP } = {}) {
+    if (!id) throw new Error('id is required');
+    let out;
+    try {
+      out = restoreTx({ id, activeCap });
+    } catch (err) {
+      if (isUniqueConstraint(err, 'content_hash') || isUniqueConstraint(err, 'fact_key')) {
+        const e = new Error('cannot restore: an active item with the same content or fact_key exists');
+        e.code = 'MEMORY_DUPLICATE';
+        throw e;
+      }
+      throw err;
+    }
+    emitEvicted(out.evicted);
+    return out.skipped ? skippedAdmission(getMemoryItem(id)?.scope || 'user', out.reason) : out.item;
+  }
+
+  function markReviewed(id, { ttlDays = DEFAULT_TTL_DAYS } = {}) {
+    if (!id) throw new Error('id is required');
+    const res = markReviewedStmt.run({ id, offset: `+${Math.floor(ttlDays)} days` });
+    return res.changes === 1 ? getItemByIdStmt.get(id) : null;
+  }
+
+  function pinMemory(id, pinned) {
+    if (!id) throw new Error('id is required');
+    const res = pinStmt.run({ id, pinned: pinned ? 1 : 0 });
+    return res.changes === 1 ? getItemByIdStmt.get(id) : null;
+  }
+
+  function setPinned({ id, pinned } = {}) {
+    return pinMemory(id, pinned);
+  }
+
+  function expireStaleMemories() {
+    let result;
+    try {
+      result = expireStaleTx();
+    } catch {
+      return 0;
+    }
+    if (result.count > 0 && eventBus) {
+      try { eventBus.emit('master_memory:decayed', { count: result.count, scopes: result.scopes, reason: 'ttl_expired' }); } catch { /* */ }
+    }
+    return result.count;
   }
 
   function getInjectionRecord(masterRunId, scope) { return getInjectionStmt.get(masterRunId, normScope(scope)) || null; }
@@ -583,7 +931,13 @@ function createMasterMemoryService(db, eventBus) {
     buildInjectionBlock,
     listForScope,
     getMemoryItem,
+    updateMemory,
     archiveMemory,
+    restoreMemory,
+    markReviewed,
+    pinMemory,
+    setPinned,
+    expireStaleMemories,
     getInjectionRecord,
     recordInjection,
     shouldInject,
