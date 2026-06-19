@@ -13,7 +13,7 @@ const { normalizeOwner } = require('./ownerKey');
 const TOP_K = 12;          // governed top-K — NEVER top-1 (spike: raw top-1 = 53%, top-K required)
 const CHAR_CAP = 2000;
 const MAX_QUERY_TERMS = 32;
-const HARD_CAP = 500;
+const HARD_CAP = 1000;
 const DEFAULT_TTL_DAYS = 180;
 const VALID_SCOPES = new Set(['user', 'cross_project']);
 const VALID_MASTER_KINDS = new Set(['constraint', 'preference', 'commitment', 'decision', 'fact', 'pattern']);
@@ -34,12 +34,21 @@ function sha256(text) {
 }
 
 function createMasterMemoryService(db, eventBus) {
+  // revision counter is SCOPE-keyed, not owner-keyed. The injection gate (shouldInject)
+  // is provenance-specific: Top only injects user-provenance memory. If revision were
+  // owner-keyed, a cross_project write would bump the owner revision and re-trigger the
+  // user injection gate — a cross-scope injection escalation bug (BLOCKER).
+  // owner_type/owner_id columns are still filled for slice-1 dual-write invariant
+  // compatibility, but the PRIMARY KEY / ON CONFLICT target is `scope`.
+  // DEFERRED: if cross_project→Top injection is ever activated, revisit this gate.
   const bumpRevisionStmt = db.prepare(`
     INSERT INTO master_memory_revision(scope, revision, owner_type, owner_id)
     VALUES (?, 1, ?, ?)
     ON CONFLICT(scope) DO UPDATE SET revision = revision + 1
   `);
-  const getRevisionStmt = db.prepare('SELECT revision FROM master_memory_revision WHERE scope = ?');
+  const getRevisionStmt = db.prepare(
+    'SELECT revision FROM master_memory_revision WHERE scope = ?'
+  );
 
   const insertItemStmt = db.prepare(`
     INSERT INTO master_memory_items (
@@ -54,7 +63,7 @@ function createMasterMemoryService(db, eventBus) {
   `);
   const getItemByIdStmt = db.prepare('SELECT * FROM master_memory_items WHERE id = ?');
   const getActiveByHashStmt = db.prepare(
-    "SELECT * FROM master_memory_items WHERE scope = ? AND content_hash = ? AND status = 'active'"
+    "SELECT * FROM master_memory_items WHERE owner_type = ? AND owner_id = ? AND content_hash = ? AND status = 'active'"
   );
   const mergeByHashStmt = db.prepare(
     "UPDATE master_memory_items " +
@@ -62,16 +71,16 @@ function createMasterMemoryService(db, eventBus) {
     "    origin = CASE WHEN @incomingOrigin = 'human' AND origin != 'human' THEN 'human' ELSE origin END, " +
     "    valid_to = CASE WHEN @incomingOrigin = 'human' AND origin != 'human' THEN NULL ELSE valid_to END, " +
     "    updated_at = datetime('now') " +
-    "WHERE scope = @scope AND content_hash = @contentHash AND status = 'active'"
+    "WHERE owner_type = @ownerType AND owner_id = @ownerId AND content_hash = @contentHash AND status = 'active'"
   );
 
-  const countActiveByScopeStmt = db.prepare(
-    "SELECT COUNT(*) AS n FROM master_memory_items WHERE scope = ? AND status = 'active'"
+  const countActiveByOwnerStmt = db.prepare(
+    "SELECT COUNT(*) AS n FROM master_memory_items WHERE owner_type = ? AND owner_id = ? AND status = 'active'"
   );
   const lowestEvictableStmt = db.prepare(
     "SELECT id, scope, (COALESCE(confidence, 0) * COALESCE(importance, 1)) AS score " +
     "FROM master_memory_items " +
-    "WHERE scope = ? AND status = 'active' AND pinned = 0 AND origin != 'human' " +
+    "WHERE owner_type = ? AND owner_id = ? AND status = 'active' AND pinned = 0 AND origin != 'human' " +
     "ORDER BY score ASC, updated_at ASC, id ASC LIMIT 1"
   );
   const archiveVictimStmt = db.prepare(
@@ -87,7 +96,9 @@ function createMasterMemoryService(db, eventBus) {
     'FROM master_memory_items mi',
     'JOIN master_memory_fts ON master_memory_fts.rowid = mi.rowid_pk',
     'WHERE master_memory_fts MATCH @q',
-    '  AND mi.scope = @scope',
+    '  AND mi.owner_type = @ownerType',
+    '  AND mi.owner_id = @ownerId',
+    '  AND (@provenance IS NULL OR mi.scope = @provenance)',
     "  AND mi.status = 'active'",
     "  AND (mi.valid_to IS NULL OR datetime(mi.valid_to) > datetime('now'))",
     'ORDER BY bm25(master_memory_fts) ASC, mi.importance DESC, mi.updated_at DESC',
@@ -95,7 +106,9 @@ function createMasterMemoryService(db, eventBus) {
   ].join('\n'));
   const fallbackRetrieveStmt = db.prepare(`
     SELECT * FROM master_memory_items
-    WHERE scope = @scope AND status = 'active'
+    WHERE owner_type = @ownerType AND owner_id = @ownerId
+      AND (@provenance IS NULL OR scope = @provenance)
+      AND status = 'active'
       AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))
     ORDER BY importance DESC, updated_at DESC
     LIMIT @k
@@ -103,23 +116,25 @@ function createMasterMemoryService(db, eventBus) {
 
   const listActiveStmt = db.prepare(`
     SELECT * FROM master_memory_items
-    WHERE scope = ? AND status = 'active'
+    WHERE owner_type = @ownerType AND owner_id = @ownerId
+      AND scope = @provenance
+      AND status = 'active'
       AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))
     ORDER BY importance DESC, updated_at DESC
   `);
   const listByStatusStmt = db.prepare(
-    'SELECT * FROM master_memory_items WHERE scope = ? AND status = ? ORDER BY importance DESC, updated_at DESC'
+    'SELECT * FROM master_memory_items WHERE owner_type = @ownerType AND owner_id = @ownerId AND scope = @provenance AND status = @status ORDER BY importance DESC, updated_at DESC'
   );
   const listAllStmt = db.prepare(
-    "SELECT * FROM master_memory_items WHERE scope = ? ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'archived' THEN 1 ELSE 2 END, importance DESC, updated_at DESC"
+    "SELECT * FROM master_memory_items WHERE owner_type = @ownerType AND owner_id = @ownerId AND scope = @provenance ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'archived' THEN 1 ELSE 2 END, importance DESC, updated_at DESC"
   );
 
   const getActiveFactByKeyStmt = db.prepare(
-    "SELECT * FROM master_memory_items WHERE scope = ? AND fact_key = ? AND status = 'active'"
+    "SELECT * FROM master_memory_items WHERE owner_type = ? AND owner_id = ? AND fact_key = ? AND status = 'active'"
   );
   const supersedeFactStmt = db.prepare(
     "UPDATE master_memory_items SET status='superseded', superseded_by=@newId, valid_to=datetime('now'), updated_at=datetime('now') " +
-    "WHERE scope=@scope AND fact_key=@factKey AND status='active'"
+    "WHERE owner_type=@ownerType AND owner_id=@ownerId AND fact_key=@factKey AND status='active'"
   );
   const refreshFactObservationStmt = db.prepare(
     "UPDATE master_memory_items " +
@@ -135,11 +150,23 @@ function createMasterMemoryService(db, eventBus) {
     "UPDATE master_memory_items SET status='archived', archived_at=datetime('now'), archive_reason=@reason, updated_at=datetime('now') WHERE id=@id AND status='active'"
   );
 
-  const getInjectionStmt = db.prepare('SELECT * FROM master_memory_injection WHERE master_run_id = ? AND scope = ?');
+  // injection ledger is SCOPE-keyed for the same reason as revision: the injection gate
+  // is provenance-specific (scope='user' for Top). An owner-keyed ledger would cause
+  // a cross_project write to suppress a subsequent user injection.
+  // owner_type/owner_id columns are still written for slice-1 invariant; only the
+  // ON CONFLICT key and WHERE clause use scope.
+  // DEFERRED: revisit scope→owner promotion when cross_project→Top injection lands.
+  const getInjectionStmt = db.prepare(
+    'SELECT injected_revision FROM master_memory_injection WHERE master_run_id = ? AND scope = ?'
+  );
   const recordInjectionStmt = db.prepare(`
     INSERT INTO master_memory_injection(master_run_id, scope, injected_revision, injected_at, owner_type, owner_id)
     VALUES (?, ?, ?, datetime('now'), ?, ?)
-    ON CONFLICT(master_run_id, scope) DO UPDATE SET injected_revision = excluded.injected_revision, injected_at = excluded.injected_at
+    ON CONFLICT(master_run_id, scope) DO UPDATE SET
+      injected_revision = excluded.injected_revision,
+      injected_at = excluded.injected_at,
+      owner_type = excluded.owner_type,
+      owner_id = excluded.owner_id
   `);
 
   // P1c Slice 1: Master candidates. Use ON CONFLICT against only the dedup
@@ -149,15 +176,17 @@ function createMasterMemoryService(db, eventBus) {
     VALUES (@id, @scope, @rule, @rawJson, @dedupKey, @ownerType, @ownerId)
     ON CONFLICT(rule, scope, dedup_key) DO NOTHING
   `);
-  const getCandidateByDedupStmt = db.prepare(`
+  const getCandidateByDedupOwnerStmt = db.prepare(`
     SELECT *
     FROM master_memory_candidates
-    WHERE rule = ? AND scope = ? AND dedup_key = ?
+    WHERE owner_type = ? AND owner_id = ? AND rule = ? AND dedup_key = ?
   `);
   const listCandidatesStmt = db.prepare(`
     SELECT id, scope, rule, dedup_key, status, promoted_to, created_at, raw_json
     FROM master_memory_candidates
-    WHERE scope = ? AND status = ?
+    WHERE owner_type = @ownerType AND owner_id = @ownerId
+      AND scope = @provenance
+      AND status = @status
     ORDER BY created_at ASC, id ASC
   `);
   const getPendingCandidateStmt = db.prepare(`
@@ -228,14 +257,45 @@ function createMasterMemoryService(db, eventBus) {
     LIMIT 1
   `);
 
-  function _bumpRevision(scope) {
+  function resolveOwnerFromScope(scope) {
     const s = normScope(scope);
     const { owner_type, owner_id } = normalizeOwner({ scope: s });
-    bumpRevisionStmt.run(s, owner_type, owner_id);
+    return { scope: s, ownerType: owner_type, ownerId: owner_id };
+  }
+  function resolveOwner(ownerType, ownerId) {
+    if (typeof ownerType !== 'string' || !ownerType.trim()) throw new Error('owner_type is required');
+    if (typeof ownerId !== 'string' || !ownerId.trim()) throw new Error('owner_id is required');
+    return { ownerType, ownerId };
+  }
+  function resolveOwnerArgs(a, b) {
+    return typeof b === 'string' ? resolveOwner(a, b) : resolveOwnerFromScope(a);
+  }
+  function normProvenance(provenance) {
+    if (provenance === undefined || provenance === null) return null;
+    return normScope(provenance);
+  }
+  function resolveRetrieveArgs(a, b, c) {
+    if (typeof b === 'string') {
+      const { ownerType, ownerId } = resolveOwner(a, b);
+      const options = c || {};
+      return { ownerType, ownerId, options, provenance: normProvenance(options.provenance) };
+    }
+    const { scope, ownerType, ownerId } = resolveOwnerFromScope(a);
+    const options = b || {};
+    return { ownerType, ownerId, options, provenance: normProvenance(options.provenance ?? scope) };
+  }
+  // _bumpRevision and getRevision take a single scope argument (provenance: 'user' or
+  // 'cross_project'). owner_type/owner_id are derived from scope for the INSERT columns
+  // only; the bump/read keying is always by scope. Writers call _bumpRevision(item.scope).
+  function _bumpRevision(scope) {
+    const s = normScope(scope);
+    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ scope: s });
+    bumpRevisionStmt.run(s, ownerType, ownerId);
   }
   function getRevision(scope) {
-    const row = getRevisionStmt.get(scope);
-    return row ? row.revision : 0;
+    const s = normScope(scope);
+    const row = getRevisionStmt.get(s);
+    return row && row.revision != null ? row.revision : 0;
   }
 
   function normalizeEvidenceJson(evidenceJson) {
@@ -415,16 +475,16 @@ function createMasterMemoryService(db, eventBus) {
     } catch { /* observability must never break memory writes */ }
   }
 
-  function mergeActiveByHash(scope, contentHash, incomingOrigin) {
-    mergeByHashStmt.run({ scope, contentHash, incomingOrigin });
-    return getActiveByHashStmt.get(scope, contentHash) || null;
+  function mergeActiveByHash(ownerType, ownerId, contentHash, incomingOrigin) {
+    mergeByHashStmt.run({ ownerType, ownerId, contentHash, incomingOrigin });
+    return getActiveByHashStmt.get(ownerType, ownerId, contentHash) || null;
   }
 
   function admitNewActiveItem(item, activeCap = HARD_CAP) {
     if (item.status !== 'active' || item.origin === 'human') return { admitted: true, evicted: null };
-    const count = countActiveByScopeStmt.get(item.scope).n;
+    const count = countActiveByOwnerStmt.get(item.ownerType, item.ownerId).n;
     if (count < activeCap) return { admitted: true, evicted: null };
-    const victim = lowestEvictableStmt.get(item.scope);
+    const victim = lowestEvictableStmt.get(item.ownerType, item.ownerId);
     if (!victim) return { admitted: false, skipped: skippedAdmission(item.scope) };
     const newScore = admissionScore(item);
     if (newScore <= Number(victim.score || 0)) return { admitted: false, skipped: skippedAdmission(item.scope) };
@@ -439,9 +499,9 @@ function createMasterMemoryService(db, eventBus) {
 
   function insertItemWithAdmission(item, { activeCap = HARD_CAP } = {}) {
     if (item.status === 'active') {
-      const existing = getActiveByHashStmt.get(item.scope, item.contentHash);
+      const existing = getActiveByHashStmt.get(item.ownerType, item.ownerId, item.contentHash);
       if (existing) {
-        const merged = mergeActiveByHash(item.scope, item.contentHash, item.origin);
+        const merged = mergeActiveByHash(item.ownerType, item.ownerId, item.contentHash, item.origin);
         if (!merged) {
           const e = new Error('merge target raced (not active)');
           e.code = 'MASTER_MEMORY_RACE';
@@ -460,8 +520,8 @@ function createMasterMemoryService(db, eventBus) {
   }
 
   const insertItemTx = db.transaction((item, options) => insertItemWithAdmission(item, options));
-  const mergeByHashTx = db.transaction((scope, contentHash, incomingOrigin) => {
-    return mergeActiveByHash(scope, contentHash, incomingOrigin);
+  const mergeByHashTx = db.transaction((ownerType, ownerId, contentHash, incomingOrigin) => {
+    return mergeActiveByHash(ownerType, ownerId, contentHash, incomingOrigin);
   });
 
   function createMemoryItem({ scope, projectId, kind, content, factKey, evidenceJson, origin, importance, confidence, sourceCount, status, activeCap, pinned } = {}) {
@@ -499,12 +559,9 @@ function createMasterMemoryService(db, eventBus) {
     } catch (err) {
       // Catches both the scope-keyed index (idx_master_memory_content_hash) and the
       // owner-keyed index (idx_master_memory_owner_content_hash, added in slice 2a).
-      // When the owner-unique index fires for a cross-scope duplicate (e.g. content
-      // already active under 'user' scope and caller requests 'cross_project'),
-      // mergeByHashTx looks up by scope — finds nothing for cross_project → returns null.
-      // This is the 2a fail-safe: owner-unique blocks cross-scope duplicates cleanly.
-      // Owner-keyed read/merge (scope-transparent lookup) is deferred to slice 2b.
-      if (isUniqueConstraint(err, 'content_hash')) return mergeByHashTx(s, item.contentHash, item.origin);
+      // Slice 2b owner-keyed read/merge resolves cross-scope duplicates by folding
+      // them into the existing owner row while keeping the original scope as provenance.
+      if (isUniqueConstraint(err, 'content_hash')) return mergeByHashTx(item.ownerType, item.ownerId, item.contentHash, item.origin);
       throw err;
     }
     emitEvicted(out.evicted);
@@ -518,6 +575,16 @@ function createMasterMemoryService(db, eventBus) {
     if (key.length < 1 || key.length > 512) throw new Error('dedupKey length must be between 1 and 512');
     const { raw } = normalizeCandidateRawJson(rawJson);
     const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ scope: s });
+    // Owner-dedup cross-scope collapse (INTENTIONAL, not silent): if an existing candidate
+    // for the same (owner, rule, dedup_key) already exists — possibly with a different scope
+    // provenance — we return the existing candidate. This is the natural consequence of the
+    // slice-2a owner-unique invariant. Content is staged exactly once; the calling actor
+    // receives back the existing candidate. This is fail-safe by design: a second "remember"
+    // with the same dedup_key from a different provenance scope de-duplicates cleanly.
+    // Note: the duplicate remember's provenance is not separately recorded on the candidate
+    // row. Revisit in deferred cross_project work if provenance union tracking is needed.
+    const existing = getCandidateByDedupOwnerStmt.get(ownerType, ownerId, r, key);
+    if (existing) return toPublicCandidate(existing);
     insertCandidateStmt.run({
       id: crypto.randomUUID(),
       scope: s,
@@ -527,7 +594,7 @@ function createMasterMemoryService(db, eventBus) {
       ownerType,
       ownerId,
     });
-    return toPublicCandidate(getCandidateByDedupStmt.get(r, s, key));
+    return toPublicCandidate(getCandidateByDedupOwnerStmt.get(ownerType, ownerId, r, key));
   }
 
   function emitScanSkipped(contentHash, reason) {
@@ -577,7 +644,7 @@ function createMasterMemoryService(db, eventBus) {
         }
 
         try {
-          const existing = getCandidateByDedupStmt.get('XPROJECT', 'cross_project', contentHash);
+          const existing = getCandidateByDedupOwnerStmt.get('user', 'user', 'XPROJECT', contentHash);
           const candidate = createCandidate({
             scope: 'cross_project',
             rule: 'XPROJECT',
@@ -605,7 +672,13 @@ function createMasterMemoryService(db, eventBus) {
   }
 
   function listCandidates(scope, status = 'pending') {
-    return listCandidatesStmt.all(normScope(scope), normalizeCandidateStatus(status)).map(toPublicCandidate);
+    const { scope: provenance, ownerType, ownerId } = resolveOwnerFromScope(scope);
+    return listCandidatesStmt.all({
+      ownerType,
+      ownerId,
+      provenance,
+      status: normalizeCandidateStatus(status),
+    }).map(toPublicCandidate);
   }
 
   const promoteCandidateTx = db.transaction((candidateId) => {
@@ -653,23 +726,23 @@ function createMasterMemoryService(db, eventBus) {
     }
 
     const promoteScope = candidate.rule === 'XPROJECT' ? 'user' : candidate.scope;
+    const { owner_type: pOwnerType, owner_id: pOwnerId } = normalizeOwner({ scope: promoteScope });
     // Pre-check exact collisions so approval records distinguish "created" from
     // "folded into an existing active item"; createMemoryItem still guards a late
     // UNIQUE race, but that path does not expose a merge signal without changing
     // its public API.
-    const existing = getActiveByHashStmt.get(promoteScope, contentHash);
+    const existing = getActiveByHashStmt.get(pOwnerType, pOwnerId, contentHash);
     const merged = !!existing;
     let item;
     let evicted = null;
     if (merged) {
-      item = mergeActiveByHash(promoteScope, contentHash, 'deterministic');
+      item = mergeActiveByHash(pOwnerType, pOwnerId, contentHash, 'deterministic');
       if (!item) {
         const e = new Error('merge target raced (not active)');
         e.code = 'MASTER_MEMORY_CANDIDATE_RACE';
         throw e;
       }
     } else {
-      const { owner_type: pOwnerType, owner_id: pOwnerId } = normalizeOwner({ scope: promoteScope });
       const newItem = {
         id: crypto.randomUUID(),
         scope: promoteScope,
@@ -733,7 +806,7 @@ function createMasterMemoryService(db, eventBus) {
 
   // fact_key upsert with supersede semantics (mirrors L1 upsertFact). origin must be CHECK-allowed.
   const upsertFactTx = db.transaction((item, activeCap = HARD_CAP) => {
-    const existing = getActiveFactByKeyStmt.get(item.scope, item.factKey);
+    const existing = getActiveFactByKeyStmt.get(item.ownerType, item.ownerId, item.factKey);
     if (existing && existing.content_hash === item.contentHash) {
       if (item.origin === 'human' && existing.origin !== 'human') {
         upgradeFactToHumanStmt.run({ id: existing.id });
@@ -747,9 +820,9 @@ function createMasterMemoryService(db, eventBus) {
     }
     let evicted = null;
     if (!existing) {
-      const duplicate = getActiveByHashStmt.get(item.scope, item.contentHash);
+      const duplicate = getActiveByHashStmt.get(item.ownerType, item.ownerId, item.contentHash);
       if (duplicate) {
-        const merged = mergeActiveByHash(item.scope, item.contentHash, item.origin);
+        const merged = mergeActiveByHash(item.ownerType, item.ownerId, item.contentHash, item.origin);
         if (!merged) {
           const e = new Error('fact merge target raced (not active)');
           e.code = 'MASTER_MEMORY_RACE';
@@ -763,7 +836,14 @@ function createMasterMemoryService(db, eventBus) {
       }
       evicted = admission.evicted;
     }
-    if (existing) supersedeFactStmt.run({ newId: item.id, scope: item.scope, factKey: item.factKey });
+    if (existing) {
+      supersedeFactStmt.run({
+        newId: item.id,
+        ownerType: item.ownerType,
+        ownerId: item.ownerId,
+        factKey: item.factKey,
+      });
+    }
     insertItemStmt.run(item);
     _bumpRevision(item.scope);
     return { item: getItemByIdStmt.get(item.id), evicted, skipped: false };
@@ -785,7 +865,7 @@ function createMasterMemoryService(db, eventBus) {
     try {
       out = upsertFactTx(item, activeCap);
     } catch (err) {
-      if (isUniqueConstraint(err, 'content_hash')) return mergeByHashTx(s, item.contentHash, item.origin);
+      if (isUniqueConstraint(err, 'content_hash')) return mergeByHashTx(item.ownerType, item.ownerId, item.contentHash, item.origin);
       throw err;
     }
     emitEvicted(out.evicted);
@@ -824,25 +904,26 @@ function createMasterMemoryService(db, eventBus) {
   }
 
   // Governed TOP-K retrieval: FTS narrow on taskContext, else importance-ordered fallback. Char-capped.
-  function retrieve(scope, options = {}) {
+  function retrieve(a, b, c) {
     try {
-      const s = normScope(scope);
+      const { ownerType, ownerId, options, provenance } = resolveRetrieveArgs(a, b, c);
       const { taskContext, limit } = options || {};
       const k = getEffectiveLimit(limit);
       const exactQ = buildMatchQuery(taskContext);
-      if (!exactQ) return capRowsByContentLength(fallbackRetrieveStmt.all({ scope: s, k }));
+      const params = { ownerType, ownerId, provenance, k };
+      if (!exactQ) return capRowsByContentLength(fallbackRetrieveStmt.all(params));
       try {
         // Two-pass (A1): exact hits first — an exact hit keeps its top-K position
         // ahead of any prefix-only hit (char-cap budget still applies), then
         // prefix-fill remaining slots for Korean 조사 recall. Mirrors L1.
-        const exactRows = ftsRetrieveStmt.all({ scope: s, q: exactQ, k });
+        const exactRows = ftsRetrieveStmt.all({ ...params, q: exactQ });
         if (exactRows.length >= k) return capRowsByContentLength(exactRows);
         const prefixQ = buildMatchQuery(taskContext, { prefix: true });
         const seen = new Set(exactRows.map((r) => r.id));
-        const prefixRows = ftsRetrieveStmt.all({ scope: s, q: prefixQ, k }).filter((r) => !seen.has(r.id));
+        const prefixRows = ftsRetrieveStmt.all({ ...params, q: prefixQ }).filter((r) => !seen.has(r.id));
         return capRowsByContentLength(exactRows.concat(prefixRows).slice(0, k));
       } catch {
-        return capRowsByContentLength(fallbackRetrieveStmt.all({ scope: s, k }));
+        return capRowsByContentLength(fallbackRetrieveStmt.all(params));
       }
     } catch {
       return [];
@@ -870,10 +951,11 @@ function createMasterMemoryService(db, eventBus) {
   }
 
   function listForScope(scope, status = 'active') {
-    const s = normScope(scope);
-    if (status === 'all') return listAllStmt.all(s);
-    if (status === 'active') return listActiveStmt.all(s);
-    return listByStatusStmt.all(s, status);
+    const { scope: provenance, ownerType, ownerId } = resolveOwnerFromScope(scope);
+    const params = { ownerType, ownerId, provenance, status };
+    if (status === 'all') return listAllStmt.all(params);
+    if (status === 'active') return listActiveStmt.all(params);
+    return listByStatusStmt.all(params);
   }
 
   function getMemoryItem(id) { return getItemByIdStmt.get(id) || null; }
@@ -947,10 +1029,11 @@ function createMasterMemoryService(db, eventBus) {
   const restoreTx = db.transaction(({ id, activeCap }) => {
     const before = getItemByIdStmt.get(id);
     if (!before || before.status !== 'archived') return { item: null, evicted: null, skipped: false, folded: false };
+    const { ownerType, ownerId } = resolveOwnerFromScope(before.scope);
 
-    const existing = getActiveByHashStmt.get(before.scope, before.content_hash);
+    const existing = getActiveByHashStmt.get(ownerType, ownerId, before.content_hash);
     if (existing) {
-      const folded = mergeActiveByHash(before.scope, before.content_hash, before.origin);
+      const folded = mergeActiveByHash(ownerType, ownerId, before.content_hash, before.origin);
       if (!folded) {
         const e = new Error('restore fold target raced (not active)');
         e.code = 'MASTER_MEMORY_RACE';
@@ -965,6 +1048,8 @@ function createMasterMemoryService(db, eventBus) {
       origin: before.origin,
       confidence: before.confidence,
       importance: before.importance,
+      ownerType,
+      ownerId,
     }, activeCap);
     if (!admission.admitted) return { item: null, evicted: null, skipped: true, reason: admission.skipped.reason, folded: false };
 
@@ -985,7 +1070,9 @@ function createMasterMemoryService(db, eventBus) {
         scopes.add(row.scope);
       }
     }
-    for (const scope of scopes) _bumpRevision(scope);
+    // Bump revision once per affected scope (scope-keyed, not owner-keyed —
+    // see revision gate comment above).
+    for (const s of scopes) _bumpRevision(s);
     return { count, scopes: Array.from(scopes) };
   });
 
@@ -1069,13 +1156,22 @@ function createMasterMemoryService(db, eventBus) {
     return result.count;
   }
 
-  function getInjectionRecord(masterRunId, scope) { return getInjectionStmt.get(masterRunId, normScope(scope)) || null; }
+  // Injection ledger functions are SCOPE-keyed (not owner-keyed). The gate is
+  // provenance-specific: Top records injection under scope='user' only. A cross_project
+  // write bumps the cross_project revision, not the user revision, so user injection
+  // is not re-triggered by unrelated cross_project changes.
+  // DEFERRED: if cross_project→Top injection is activated, revisit scope→owner promotion.
+  function getInjectionRecord(masterRunId, scope) {
+    const s = normScope(scope);
+    const row = getInjectionStmt.get(masterRunId, s);
+    return row && row.injected_revision != null ? row : null;
+  }
   function recordInjection(masterRunId, scope, revision) {
     const s = normScope(scope);
-    const { owner_type, owner_id } = normalizeOwner({ scope: s });
-    recordInjectionStmt.run(masterRunId, s, revision, owner_type, owner_id);
+    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ scope: s });
+    recordInjectionStmt.run(masterRunId, s, revision, ownerType, ownerId);
   }
-  // Caching-safe gate: inject only once per (masterRunId, scope) until THAT scope's revision advances.
+  // Caching-safe gate: inject once per scope/run until that scope's revision advances.
   function shouldInject(masterRunId, scope) {
     const s = normScope(scope);
     const revision = getRevision(s);

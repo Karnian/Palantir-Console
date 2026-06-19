@@ -668,10 +668,11 @@ test('slice2a pinned winner: pinned row wins over higher-score non-pinned non-hu
   assert.equal(active.pinned, 1);
 });
 
-// MINOR: remember({scope:'cross_project'}) with content already active under 'user'
-// returns null (fail-safe) due to 2a owner-unique index blocking cross-scope duplicate.
-// No crash; existing 'user' row is unchanged. Owner-keyed merge handled in slice 2b.
-test('slice2a: remember cross_project of content active under user returns null, no crash, user row unchanged', (t) => {
+// Slice2b service logic runs on top of the slice2a owner-unique structure:
+// remember({scope:'cross_project'}) with content already active under 'user'
+// now owner-merges into the existing row instead of returning the slice2a
+// fail-safe null.
+test('slice2a owner indexes + slice2b service: cross_project remember owner-merges into user row', (t) => {
   const db = setupDbThrough033(t);
   const content = 'Dual-owner remember fail-safe content.';
 
@@ -687,16 +688,16 @@ test('slice2a: remember cross_project of content active under user returns null,
 
   applySlice2a(db); // installs owner-unique index
 
-  // After slice2a the owner-unique index (owner_type='user', owner_id='user', content_hash)
-  // blocks a second active row with the same (owner, hash) regardless of scope.
-  // 2a: owner-unique blocks cross-scope duplicates; owner-keyed merge handled in 2b.
+  // After slice2a the owner-unique index blocks a second active row with the
+  // same (owner, hash) regardless of scope; slice2b owner-keyed reads fold it
+  // into the existing row before the duplicate insert path escapes.
   const master = createMasterMemoryService(db);
   const result = master.remember({ scope: 'cross_project', content, kind: 'preference' });
 
-  // Fail-safe: returns null (no crash, no data corruption).
-  assert.equal(result, null, '2a: cross-scope remember returns null when owner already has the content');
+  assert.equal(result.id, userRow.id, 'cross-scope remember returns the existing owner row');
+  assert.equal(result.source_count, 2);
 
-  // Existing user row is untouched.
+  // Existing user row remains active and human-origin.
   const existing = db.prepare('SELECT * FROM master_memory_items WHERE id=?').get(userRow.id);
   assert.equal(existing.status, 'active');
   assert.equal(existing.scope, 'user');
