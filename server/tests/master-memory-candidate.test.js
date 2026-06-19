@@ -364,7 +364,7 @@ test('routes: directly-created fact candidate promotion returns 409 fact_not_all
 test('routes: cap-rejected candidate promotion returns 409 and stays pending', async (t) => {
   const app = await setupApp(t);
   const svc = app.services.masterMemoryService;
-  for (let i = 0; i < 500; i += 1) {
+  for (let i = 0; i < 1000; i += 1) {
     const item = svc.createMemoryItem({
       scope: 'user',
       kind: 'pattern',

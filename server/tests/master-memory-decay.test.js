@@ -62,7 +62,7 @@ function fillScope(svc, scope, n, { prefix = 'cap', confidence = 0.6, importance
 const COOKIE = { Cookie: 'palantir_token=secret-token' };
 const BEARER = { Authorization: 'Bearer secret-token' };
 
-test('cap admission: non-human must beat lowest evictable; human and other scopes bypass user cap', (t) => {
+test('cap admission: non-human must beat lowest owner evictable; human bypasses owner cap', (t) => {
   const db = setupDb(t);
   const svc = createMasterMemoryService(db);
   const victim = svc.createMemoryItem({
@@ -73,7 +73,7 @@ test('cap admission: non-human must beat lowest evictable; human and other scope
     confidence: 0.1,
     importance: 1,
   });
-  fillScope(svc, 'user', 499, { prefix: 'higher deterministic', confidence: 0.6, importance: 1 });
+  fillScope(svc, 'user', 999, { prefix: 'higher deterministic', confidence: 0.6, importance: 1 });
 
   const rejected = svc.createMemoryItem({
     scope: 'user',
@@ -84,7 +84,7 @@ test('cap admission: non-human must beat lowest evictable; human and other scope
     importance: 1,
   });
   assert.deepEqual(rejected, { skipped: true, reason: 'cap_rejected', scope: 'user' });
-  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE scope='user' AND status='active'").get().n, 500);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE owner_type='user' AND owner_id='user' AND status='active'").get().n, 1000);
 
   const winner = svc.createMemoryItem({
     scope: 'user',
@@ -97,7 +97,7 @@ test('cap admission: non-human must beat lowest evictable; human and other scope
   assert.equal(winner.status, 'active');
   assert.equal(svc.getMemoryItem(victim.id).status, 'archived');
   assert.equal(svc.getMemoryItem(victim.id).archive_reason, 'cap_evicted');
-  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE scope='user' AND status='active'").get().n, 500);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE owner_type='user' AND owner_id='user' AND status='active'").get().n, 1000);
 
   const human = svc.createMemoryItem({
     scope: 'user',
@@ -107,22 +107,23 @@ test('cap admission: non-human must beat lowest evictable; human and other scope
   });
   assert.equal(human.status, 'active');
   assert.equal(human.valid_to, null);
-  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE scope='user' AND status='active'").get().n, 501);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE owner_type='user' AND owner_id='user' AND status='active'").get().n, 1001);
 
   const cross = svc.createMemoryItem({
     scope: 'cross_project',
     kind: 'pattern',
-    content: 'cross scope has independent cap accounting',
+    content: 'cross scope shares owner cap accounting',
     origin: 'deterministic',
   });
   assert.equal(cross.status, 'active');
   assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE scope='cross_project' AND status='active'").get().n, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE owner_type='user' AND owner_id='user' AND status='active'").get().n, 1001);
 });
 
-test('upsertFact cap admission: new deterministic fact is not a free 501st active row, human fact still admits', (t) => {
+test('upsertFact cap admission: new deterministic fact is not a free 1001st active row, human fact still admits', (t) => {
   const db = setupDb(t);
   const svc = createMasterMemoryService(db);
-  fillScope(svc, 'user', 500, { prefix: 'hard cap deterministic', confidence: 0.9, importance: 10 });
+  fillScope(svc, 'user', 1000, { prefix: 'hard cap deterministic', confidence: 0.9, importance: 10 });
 
   const rejected = svc.upsertFact({
     scope: 'user',
@@ -131,7 +132,7 @@ test('upsertFact cap admission: new deterministic fact is not a free 501st activ
     origin: 'deterministic',
   });
   assert.deepEqual(rejected, { skipped: true, reason: 'cap_rejected', scope: 'user' });
-  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE scope='user' AND status='active'").get().n, 500);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE owner_type='user' AND owner_id='user' AND status='active'").get().n, 1000);
   assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE fact_key='cap.deterministic'").get().n, 0);
 
   const human = svc.upsertFact({
@@ -143,7 +144,7 @@ test('upsertFact cap admission: new deterministic fact is not a free 501st activ
   assert.equal(human.status, 'active');
   assert.equal(human.origin, 'human');
   assert.equal(human.valid_to, null);
-  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE scope='user' AND status='active'").get().n, 501);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE owner_type='user' AND owner_id='user' AND status='active'").get().n, 1001);
 });
 
 test('cap admission: exact merge bypasses cap and human merge upgrades deterministic row to permanent', (t) => {
@@ -157,7 +158,7 @@ test('cap admission: exact merge bypasses cap and human merge upgrades determini
     confidence: 0.6,
     importance: 1,
   });
-  fillScope(svc, 'user', 499, { prefix: 'cap filler', confidence: 0.6, importance: 1 });
+  fillScope(svc, 'user', 999, { prefix: 'cap filler', confidence: 0.6, importance: 1 });
 
   const merged = svc.createMemoryItem({
     scope: 'user',
@@ -169,7 +170,7 @@ test('cap admission: exact merge bypasses cap and human merge upgrades determini
   });
   assert.equal(merged.id, existing.id);
   assert.equal(merged.source_count, 2);
-  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE scope='user' AND status='active'").get().n, 500);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE owner_type='user' AND owner_id='user' AND status='active'").get().n, 1000);
 
   const upgraded = svc.createMemoryItem({
     scope: 'user',

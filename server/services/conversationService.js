@@ -300,7 +300,10 @@ function createConversationService({
       try {
         const decision = masterMemoryService.shouldInject(run.id, 'user');
         if (decision && decision.inject) {
-          const rows = masterMemoryService.retrieve('user', { taskContext: originalText });
+          // P-A1 slice2b Q3/F: owner-keyed retrieve with provenance='user'
+          // preserves current Top injection behavior; cross_project -> Top
+          // injection is a deferred product decision.
+          const rows = masterMemoryService.retrieve('user', 'user', { taskContext: originalText, provenance: 'user' });
           const block = masterMemoryService.buildInjectionBlock(rows);
           if (block) {
             effectiveText = `${block}\n\n---\n\n${effectiveText}`;

@@ -138,15 +138,17 @@ test('scope isolation + cross_project same-scope dedup', (t) => {
   assert.equal(c2.source_count, 2, 'cross_project dedup works (no NULL-distinct hole)');
 });
 
-test('injection ledger is scope-keyed (user does not suppress cross_project) — Codex BLOCKER', (t) => {
+test('injection ledger is scope-keyed (user injection does NOT suppress cross_project gate)', (t) => {
+  // scope-keyed: recording user injection only closes the user gate; the cross_project gate
+  // remains independent. This is the correct behavior — each scope is injected separately.
   const svc = createMasterMemoryService(setupDb(t));
   svc.createMemoryItem({ scope: 'user', kind: 'preference', content: 'u mem here', origin: 'human' });
   svc.createMemoryItem({ scope: 'cross_project', kind: 'preference', content: 'c mem here', origin: 'human' });
   const run = 'run-x';
   const gu = svc.shouldInject(run, 'user');
   svc.recordInjection(run, 'user', gu.revision);
-  assert.equal(svc.shouldInject(run, 'user').inject, false, 'user injected at its revision');
-  assert.equal(svc.shouldInject(run, 'cross_project').inject, true, 'cross_project NOT suppressed (scope-keyed ledger)');
+  assert.equal(svc.shouldInject(run, 'user').inject, false, 'user gate closed after user injection');
+  assert.equal(svc.shouldInject(run, 'cross_project').inject, true, 'cross_project gate is independent of user ledger');
 });
 
 test('write-time: rejects injection-marker content for untrusted (human) origin', (t) => {
