@@ -339,28 +339,68 @@ function createConversationService({
       }
     }
 
-    // L2 P1b: Master (user-scope) memory injection — the Top-slot analogue of the PM block above.
+    // L2 P1b / A2-3b: Master (user-scope) memory injection — the Top-slot analogue of the PM block above.
     // Top slots ONLY (scope='user'), keyed by the Top run id. Same peek-then-commit ledger discipline:
     // the masterMemoryInjection ledger is written AFTER the adapter accepts the turn (below). Outermost
     // prepend (memory → original). Annotate-only: any failure degrades to "no injection", never blocks.
+    // A2-3b: flag-gated composer+ledger path (mirrors PM block). OFF → current path byte-for-byte.
     let masterMemoryInjection = null;
+    let masterComposerInjection = null; // { composition, provenanceKey, revision } stash (flag ON)
     if (isTop && masterMemoryService) {
-      try {
-        const decision = masterMemoryService.shouldInject(run.id, 'user');
-        if (decision && decision.inject) {
-          // P-A1 slice2b Q3/F: owner-keyed retrieve with provenance='user'
-          // preserves current Top injection behavior; cross_project -> Top
-          // injection is a deferred product decision.
-          const rows = masterMemoryService.retrieve('user', 'user', { taskContext: originalText, provenance: 'user' });
-          const block = masterMemoryService.buildInjectionBlock(rows);
-          if (block) {
-            effectiveText = `${block}\n\n---\n\n${effectiveText}`;
-            masterMemoryInjection = { revision: decision.revision };
+      if (memoryComposerEnabled && memoryComposer && compositionLedger) {
+        // A2-3b: Composer+Ledger path (Top slot, flag ON).
+        // peek/decide: gate check → compose → stash for commit phase.
+        try {
+          const currentOwnerRevisions = [{
+            owner_type: 'user',
+            owner_id: 'user',
+            revision: masterMemoryService.getRevision('user'),
+          }];
+          const dec = compositionLedger.shouldCompose({
+            runId: run.id,
+            slotKind: 'top',
+            provenanceKey: 'user',
+            currentOwnerRevisions,
+          });
+          if (dec.compose) {
+            const { block, composition } = memoryComposer.compose({
+              owners: [{ owner_type: 'user', owner_id: 'user', provenance: 'user' }],
+              taskContext: originalText,
+            });
+            // [Q4 BLOCKER] only prepend if BOTH block and composition are non-null.
+            // block null → skip prepend AND record (gate pollution prevention).
+            if (block && composition) {
+              effectiveText = `${block}\n\n---\n\n${effectiveText}`;
+              masterComposerInjection = {
+                composition,
+                provenanceKey: 'user',
+                revision: currentOwnerRevisions[0].revision,
+              };
+            }
           }
+        } catch (memErr) {
+          log(`master composer injection skipped for ${conversationId} (run=${run.id}): ${memErr.message}`);
+          masterComposerInjection = null;
         }
-      } catch (memErr) {
-        log(`master memory injection skipped for ${conversationId} (run=${run.id}): ${memErr.message}`);
-        masterMemoryInjection = null;
+      } else {
+        // Existing path (flag OFF) — PRESERVE EXACTLY, zero changes.
+        try {
+          const decision = masterMemoryService.shouldInject(run.id, 'user');
+          if (decision && decision.inject) {
+            // P-A1 slice2b Q3/F: owner-keyed retrieve with provenance='user'
+            // preserves current Top injection behavior; cross_project -> Top
+            // injection is a deferred product decision.
+            const rows = masterMemoryService.retrieve('user', 'user', { taskContext: originalText, provenance: 'user' });
+            const block = masterMemoryService.buildInjectionBlock(rows);
+            if (block) {
+              effectiveText = `${block}\n\n---\n\n${effectiveText}`;
+              masterMemoryInjection = { revision: decision.revision };
+            }
+          }
+        } catch (memErr) {
+          log(`master memory injection skipped for ${conversationId} (run=${run.id}): ${memErr.message}`);
+          masterMemoryInjection = null;
+        }
       }
     }
 
@@ -431,8 +471,29 @@ function createConversationService({
         log(`memory ledger write failed for ${conversationId} (run=${run.id}): ${ledgerErr.message}`);
       }
     }
-    // L2 P1b: commit the Master memory injection ledger (Top slot), same peek-then-commit discipline.
-    if (masterMemoryInjection) {
+    // L2 P1b / A2-3b: commit the Master memory injection ledger (Top slot), same peek-then-commit discipline.
+    if (memoryComposerEnabled && compositionLedger && memoryComposer) {
+      // A2-3b: Composer+Ledger commit path (Top slot, flag ON).
+      // [Q3] record/accept here (commit phase), never in peek phase.
+      // [Q5] dual-write: old master_memory_injection ledger sync maintained.
+      if (masterComposerInjection) {
+        try {
+          const compId = compositionLedger.record(masterComposerInjection.composition, {
+            runId: run.id,
+            conversationId,
+            taskId: null,
+            slotKind: 'top',
+            provenanceKey: masterComposerInjection.provenanceKey,
+          });
+          if (compId) compositionLedger.accept(compId);
+          // [Q5] dual-write: old master_memory_injection ledger remains live (retire is slice5)
+          masterMemoryService.recordInjection(run.id, 'user', masterComposerInjection.revision);
+        } catch (ledgerErr) {
+          log(`master composer ledger write failed for ${conversationId} (run=${run.id}): ${ledgerErr.message}`);
+        }
+      }
+    } else if (masterMemoryInjection) {
+      // Existing path (flag OFF) — PRESERVE EXACTLY.
       try {
         masterMemoryService.recordInjection(run.id, 'user', masterMemoryInjection.revision);
       } catch (ledgerErr) {

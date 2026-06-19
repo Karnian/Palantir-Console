@@ -124,6 +124,36 @@ function makeComposer({
   };
 }
 
+// ─── MasterMemoryService mock ──────────────────────────────────────────────────
+
+function makeMasterMemoryService({
+  shouldInjectResult = null,
+  retrieveRows = [],
+  injectionBlock = null,
+  revision = 3,
+  recordedInjections = [],
+  getRevision: getRevisionOverride,
+} = {}) {
+  return {
+    shouldInject(runId, scope) {
+      return shouldInjectResult ?? { inject: true, revision };
+    },
+    retrieve(scope, ownerId, opts) {
+      return retrieveRows;
+    },
+    buildInjectionBlock(rows) {
+      return injectionBlock;
+    },
+    getRevision(scope) {
+      if (getRevisionOverride) return getRevisionOverride(scope);
+      return revision;
+    },
+    recordInjection(runId, scope, rev) {
+      recordedInjections.push({ runId, scope, revision: rev });
+    },
+  };
+}
+
 // ─── Seed helpers ─────────────────────────────────────────────────────────────
 
 function seedProject(db, projectId = 'proj1') {
@@ -610,12 +640,14 @@ test('A2-3a annotate-only: ledger.record throws → message still delivered', as
   assert.ok(sentText.includes('ledger fail test'), 'original text delivered');
 });
 
-test('A2-3a flag ON: Top slot untouched (no composer path for top)', async (t) => {
+test('A2-3a flag ON: PM slot composer path active; Top slot also uses composer (A2-3b)', async (t) => {
+  // After A2-3b, flag ON means BOTH PM and Top use composer.
+  // This test verifies PM is still called (A2-3a invariant), and top message is still delivered.
   const db = await mkdb(t);
   const rs = createRunService(db, { subscribe: () => {}, emit: () => {} });
   const registry = createManagerRegistry({ runService: rs });
   const topAdapter = makeAdapter();
-  seedTopRun(rs, registry, topAdapter);
+  const topRun = seedTopRun(rs, registry, topAdapter);
 
   const composerCalls = [];
   const composer = {
@@ -624,6 +656,7 @@ test('A2-3a flag ON: Top slot untouched (no composer path for top)', async (t) =
   const ledger = createCompositionLedger(db);
   const recordedInjections = [];
   const memService = makeMemoryService({ revision: 5, recordedInjections });
+  const masterMemSvc = makeMasterMemoryService({ revision: 3 });
 
   const svc = createConversationService({
     runService: rs,
@@ -631,6 +664,7 @@ test('A2-3a flag ON: Top slot untouched (no composer path for top)', async (t) =
     managerAdapterFactory: makeAdapterFactory(topAdapter),
     lifecycleService: makeLifecycle(),
     memoryService: memService,
+    masterMemoryService: masterMemSvc,
     memoryComposer: composer,
     compositionLedger: ledger,
     memoryComposerEnabled: true,
@@ -638,10 +672,13 @@ test('A2-3a flag ON: Top slot untouched (no composer path for top)', async (t) =
 
   svc.sendMessage('top', { text: 'top message' });
 
-  // Composer should NOT be called for Top
-  assert.equal(composerCalls.length, 0, 'composer not called for Top slot');
-  // Top message delivered
+  // With A2-3b: composer IS called for Top (with user owner)
+  assert.equal(composerCalls.length, 1, 'composer called for Top slot (A2-3b)');
+  assert.deepEqual(composerCalls[0].owners, [{ owner_type: 'user', owner_id: 'user', provenance: 'user' }]);
+  // Top message still delivered (block=null → no prepend, just original)
   assert.equal(topAdapter.calls.length, 1, 'top message delivered');
+  const sentText = topAdapter.calls[0].payload.text;
+  assert.equal(sentText.trim(), 'top message', 'original text only (null block)');
 });
 
 test('A2-3a: wiring via createApp options.memoryComposer=true', async (t) => {
@@ -667,4 +704,417 @@ test('A2-3a: wiring via createApp options.memoryComposer=true', async (t) => {
   assert.ok(services.compositionLedger, 'compositionLedger exposed in app.services');
   assert.equal(typeof services.compositionLedger.record, 'function', 'ledger.record present');
   assert.equal(typeof services.compositionLedger.shouldCompose, 'function', 'ledger.shouldCompose present');
+});
+
+// =============================================================================
+// A2-3b: Top-slot composer+ledger cutover (mirrors A2-3a PM pattern)
+// =============================================================================
+
+test('A2-3b flag OFF: Top injection uses existing shouldInject/recordInjection path', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, { subscribe: () => {}, emit: () => {} });
+  const registry = createManagerRegistry({ runService: rs });
+  const topAdapter = makeAdapter();
+  const topRun = seedTopRun(rs, registry, topAdapter);
+
+  const masterRecordedInjections = [];
+  const masterMemSvc = makeMasterMemoryService({
+    injectionBlock: '## User Memory\n- master item A',
+    recordedInjections: masterRecordedInjections,
+    revision: 9,
+  });
+
+  const svc = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory(topAdapter),
+    lifecycleService: makeLifecycle(),
+    masterMemoryService: masterMemSvc,
+    // flag OFF: no composer deps
+    memoryComposerEnabled: false,
+  });
+
+  svc.sendMessage('top', { text: 'hello top', projectId: null });
+
+  // Verify the adapter received a prepended block
+  assert.equal(topAdapter.calls.length, 1, 'adapter called once');
+  const sentText = topAdapter.calls[0].payload.text;
+  assert.ok(sentText.includes('## User Memory'), 'master injection block prepended');
+  assert.ok(sentText.includes('hello top'), 'original text present');
+
+  // Verify old ledger written (not composer ledger)
+  assert.equal(masterRecordedInjections.length, 1, 'recordInjection called once');
+  assert.equal(masterRecordedInjections[0].revision, 9, 'correct revision');
+  assert.equal(masterRecordedInjections[0].scope, 'user', 'correct scope');
+  assert.equal(masterRecordedInjections[0].runId, topRun.id, 'correct runId');
+});
+
+test('A2-3b flag OFF: no injection if shouldInject returns inject=false', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, { subscribe: () => {}, emit: () => {} });
+  const registry = createManagerRegistry({ runService: rs });
+  const topAdapter = makeAdapter();
+  seedTopRun(rs, registry, topAdapter);
+
+  const masterRecordedInjections = [];
+  const masterMemSvc = makeMasterMemoryService({
+    shouldInjectResult: { inject: false, revision: 4 },
+    injectionBlock: '## User Memory\n- master item A',
+    recordedInjections: masterRecordedInjections,
+  });
+
+  const svc = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory(topAdapter),
+    lifecycleService: makeLifecycle(),
+    masterMemoryService: masterMemSvc,
+    memoryComposerEnabled: false,
+  });
+
+  svc.sendMessage('top', { text: 'no inject top' });
+
+  const sentText = topAdapter.calls[0].payload.text;
+  assert.ok(!sentText.includes('## User Memory'), 'no injection block');
+  assert.equal(masterRecordedInjections.length, 0, 'recordInjection NOT called');
+});
+
+test('A2-3b flag ON: composer block prepended for Top slot (byte-equivalent)', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, { subscribe: () => {}, emit: () => {} });
+  const registry = createManagerRegistry({ runService: rs });
+  const topAdapter = makeAdapter();
+  const topRun = seedTopRun(rs, registry, topAdapter);
+
+  const BLOCK = '## User Memory\n- composer top block content';
+  const COMPOSITION = {
+    fingerprint: 'fp-top-test',
+    owner_states: [{ owner_type: 'user', owner_id: 'user', revision: 6 }],
+    item_edges: [],
+    composer_version: '0.1.0',
+    policy_version: '0.1.0',
+  };
+
+  const composer = makeComposer({ block: BLOCK, composition: COMPOSITION });
+  const ledger = createCompositionLedger(db);
+  const masterRecordedInjections = [];
+  const masterMemSvc = makeMasterMemoryService({ revision: 6, recordedInjections: masterRecordedInjections });
+
+  const svc = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory(topAdapter),
+    lifecycleService: makeLifecycle(),
+    masterMemoryService: masterMemSvc,
+    memoryComposer: composer,
+    compositionLedger: ledger,
+    memoryComposerEnabled: true,
+  });
+
+  svc.sendMessage('top', { text: 'hello top composer' });
+
+  assert.equal(topAdapter.calls.length, 1, 'adapter called once');
+  const sentText = topAdapter.calls[0].payload.text;
+  assert.ok(sentText.startsWith(BLOCK), 'block is outermost prepend');
+  assert.ok(sentText.includes('hello top composer'), 'original text present');
+
+  // Verify composer was called with correct owners (user owner)
+  assert.equal(composer.calls.length, 1, 'composer.compose called once');
+  assert.deepEqual(composer.calls[0].owners, [{ owner_type: 'user', owner_id: 'user', provenance: 'user' }]);
+  assert.equal(composer.calls[0].taskContext, 'hello top composer');
+});
+
+test('A2-3b flag ON: compositionLedger gets record+accept with slotKind=top provenanceKey=user', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, { subscribe: () => {}, emit: () => {} });
+  const registry = createManagerRegistry({ runService: rs });
+  const topAdapter = makeAdapter();
+  const topRun = seedTopRun(rs, registry, topAdapter);
+
+  const COMPOSITION = {
+    fingerprint: 'fp-top-accept',
+    owner_states: [{ owner_type: 'user', owner_id: 'user', provenance: null, revision: 7,
+      selected_set_hash: 'th1', suppressed_set_hash: null, selected_count: 1, suppressed_count: 0,
+      budget_limit: 1000000, budget_used: 10 }],
+    item_edges: [],
+    composer_version: '0.1.0',
+    policy_version: '0.1.0',
+    retrieval_query_hash: 'trqh',
+    token_budget: 1000000,
+    owner_vector_hash: 'tovh',
+    selected_set_hash: 'tssh',
+  };
+
+  const composer = makeComposer({ block: '## User Memory\n- top ledger test', composition: COMPOSITION });
+  const ledger = createCompositionLedger(db);
+  const masterRecordedInjections = [];
+  const masterMemSvc = makeMasterMemoryService({ revision: 7, recordedInjections: masterRecordedInjections });
+
+  const svc = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory(topAdapter),
+    lifecycleService: makeLifecycle(),
+    masterMemoryService: masterMemSvc,
+    memoryComposer: composer,
+    compositionLedger: ledger,
+    memoryComposerEnabled: true,
+  });
+
+  svc.sendMessage('top', { text: 'top ledger test' });
+
+  // Assert accepted row with slotKind='top' exists in DB
+  const row = db.prepare(
+    "SELECT * FROM memory_composition_events WHERE run_id = ? AND slot_kind = 'top' AND status = 'accepted'"
+  ).get(topRun.id);
+  assert.ok(row, 'composition event row exists with accepted status for Top slot');
+  assert.equal(row.provenance_key, 'user', 'provenanceKey=user recorded');
+  assert.equal(row.fingerprint, 'fp-top-accept', 'fingerprint recorded');
+});
+
+test('A2-3b flag ON: dual-write to old master_memory_injection ledger (recordInjection)', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, { subscribe: () => {}, emit: () => {} });
+  const registry = createManagerRegistry({ runService: rs });
+  const topAdapter = makeAdapter();
+  const topRun = seedTopRun(rs, registry, topAdapter);
+
+  const COMPOSITION = {
+    fingerprint: 'fp-top-dual',
+    owner_states: [{ owner_type: 'user', owner_id: 'user', provenance: null, revision: 11,
+      selected_set_hash: 'th2', suppressed_set_hash: null, selected_count: 0, suppressed_count: 0,
+      budget_limit: 1000000, budget_used: 0 }],
+    item_edges: [],
+    composer_version: '0.1.0',
+    policy_version: '0.1.0',
+    retrieval_query_hash: null,
+    token_budget: 1000000,
+    owner_vector_hash: null,
+    selected_set_hash: null,
+  };
+
+  const composer = makeComposer({ block: '## User Memory\n- top dual write', composition: COMPOSITION });
+  const ledger = createCompositionLedger(db);
+  const masterRecordedInjections = [];
+  const masterMemSvc = makeMasterMemoryService({ revision: 11, recordedInjections: masterRecordedInjections });
+
+  const svc = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory(topAdapter),
+    lifecycleService: makeLifecycle(),
+    masterMemoryService: masterMemSvc,
+    memoryComposer: composer,
+    compositionLedger: ledger,
+    memoryComposerEnabled: true,
+  });
+
+  svc.sendMessage('top', { text: 'top dual write test' });
+
+  // Dual-write: old master_memory_injection ledger also called
+  assert.equal(masterRecordedInjections.length, 1, 'old recordInjection called once (dual-write)');
+  assert.equal(masterRecordedInjections[0].revision, 11, 'same revision dual-written');
+  assert.equal(masterRecordedInjections[0].scope, 'user', 'scope=user');
+  assert.equal(masterRecordedInjections[0].runId, topRun.id, 'correct runId');
+});
+
+test('A2-3b flag ON: gate cadence — same revision skip, higher revision reinject (Top slot)', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, { subscribe: () => {}, emit: () => {} });
+  const registry = createManagerRegistry({ runService: rs });
+  const topAdapter = makeAdapter();
+  const topRun = seedTopRun(rs, registry, topAdapter);
+
+  let currentRevision = 4;
+  const COMPOSITION = (rev) => ({
+    fingerprint: `fp-top-gate-${rev}`,
+    owner_states: [{ owner_type: 'user', owner_id: 'user', provenance: null, revision: rev,
+      selected_set_hash: 'ths', suppressed_set_hash: null, selected_count: 0, suppressed_count: 0,
+      budget_limit: 1000000, budget_used: 0 }],
+    item_edges: [],
+    composer_version: '0.1.0',
+    policy_version: '0.1.0',
+    retrieval_query_hash: null,
+    token_budget: 1000000,
+    owner_vector_hash: null,
+    selected_set_hash: null,
+  });
+
+  const composerCalls = [];
+  const composer = {
+    compose(arg) {
+      composerCalls.push(currentRevision);
+      return { block: '## User Memory\n- top gate test', composition: COMPOSITION(currentRevision) };
+    },
+  };
+  const ledger = createCompositionLedger(db);
+  const masterRecordedInjections = [];
+  const masterMemSvc = makeMasterMemoryService({
+    revision: 4,
+    recordedInjections: masterRecordedInjections,
+    getRevision: () => currentRevision,
+  });
+
+  const svc = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory(topAdapter),
+    lifecycleService: makeLifecycle(),
+    masterMemoryService: masterMemSvc,
+    memoryComposer: composer,
+    compositionLedger: ledger,
+    memoryComposerEnabled: true,
+  });
+
+  // First send: revision=4 → should inject (no prior accepted)
+  svc.sendMessage('top', { text: 'top first send' });
+  assert.equal(composerCalls.length, 1, 'first send: composer called');
+  assert.equal(topAdapter.calls.length, 1);
+
+  // Second send: revision still 4 → gate says skip (revision unchanged)
+  svc.sendMessage('top', { text: 'top second send' });
+  assert.equal(composerCalls.length, 1, 'second send: composer NOT called (gate skip)');
+
+  // Third send: revision increased to 5 → gate says reinject
+  currentRevision = 5;
+  svc.sendMessage('top', { text: 'top third send' });
+  assert.equal(composerCalls.length, 2, 'third send: composer called again (revision increased)');
+});
+
+test('A2-3b flag ON: block null → no record/accept/dual-write for Top slot', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, { subscribe: () => {}, emit: () => {} });
+  const registry = createManagerRegistry({ runService: rs });
+  const topAdapter = makeAdapter();
+  const topRun = seedTopRun(rs, registry, topAdapter);
+
+  const composer = makeComposer({ returnNullBlock: true });
+  const ledger = createCompositionLedger(db);
+  const masterRecordedInjections = [];
+  const masterMemSvc = makeMasterMemoryService({ revision: 2, recordedInjections: masterRecordedInjections });
+
+  const svc = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory(topAdapter),
+    lifecycleService: makeLifecycle(),
+    masterMemoryService: masterMemSvc,
+    memoryComposer: composer,
+    compositionLedger: ledger,
+    memoryComposerEnabled: true,
+  });
+
+  svc.sendMessage('top', { text: 'top null block test' });
+
+  // Message delivered without block
+  assert.equal(topAdapter.calls.length, 1, 'message delivered');
+  const sentText = topAdapter.calls[0].payload.text;
+  assert.ok(!sentText.includes('## User Memory'), 'no memory block prepended');
+  assert.equal(sentText.trim(), 'top null block test', 'original text only');
+
+  // No ledger entry and no dual-write
+  const row = db.prepare(
+    "SELECT COUNT(*) as cnt FROM memory_composition_events WHERE run_id = ? AND slot_kind = 'top'"
+  ).get(topRun.id);
+  assert.equal(row.cnt, 0, 'no composition event recorded (null block)');
+  assert.equal(masterRecordedInjections.length, 0, 'no dual-write (null block)');
+});
+
+test('A2-3b annotate-only: composer throws for Top → degrade, message delivered', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, { subscribe: () => {}, emit: () => {} });
+  const registry = createManagerRegistry({ runService: rs });
+  const topAdapter = makeAdapter();
+  seedTopRun(rs, registry, topAdapter);
+
+  const throwingComposer = makeComposer({ throws: true });
+  const ledger = createCompositionLedger(db);
+  const masterRecordedInjections = [];
+  const masterMemSvc = makeMasterMemoryService({ revision: 1, recordedInjections: masterRecordedInjections });
+
+  const svc = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory(topAdapter),
+    lifecycleService: makeLifecycle(),
+    masterMemoryService: masterMemSvc,
+    memoryComposer: throwingComposer,
+    compositionLedger: ledger,
+    memoryComposerEnabled: true,
+  });
+
+  // Must not throw — annotate-only
+  assert.doesNotThrow(() => svc.sendMessage('top', { text: 'top degrade test' }));
+
+  // Message still delivered (no block, just original text)
+  assert.equal(topAdapter.calls.length, 1, 'message delivered despite composer error');
+  const sentText = topAdapter.calls[0].payload.text;
+  assert.ok(!sentText.includes('## User Memory'), 'no block on error');
+  assert.ok(sentText.includes('top degrade test'), 'original text delivered');
+
+  // No dual-write on failure
+  assert.equal(masterRecordedInjections.length, 0, 'no dual-write on composer error');
+});
+
+test('A2-3b flag ON: PM slot unaffected when Top uses composer', async (t) => {
+  // When flag=ON and both Top and PM have active runs, sending to PM should still
+  // use PM composer path (workspace owner) and NOT be confused with Top composer path (user owner).
+  const db = await mkdb(t);
+  const rs = createRunService(db, { subscribe: () => {}, emit: () => {} });
+  const registry = createManagerRegistry({ runService: rs });
+  const topAdapter = makeAdapter();
+  const topRun = seedTopRun(rs, registry, topAdapter);
+  const pmAdapter = makeAdapter();
+  const pmRun = seedPmRun(rs, registry, pmAdapter, 'proj1', topRun.id, db);
+
+  const composerCalls = [];
+  const composer = {
+    compose(arg) {
+      composerCalls.push(arg);
+      return { block: `## ${arg.owners[0].owner_type} Memory\n- item`, composition: {
+        fingerprint: `fp-${arg.owners[0].owner_type}`,
+        owner_states: [{ owner_type: arg.owners[0].owner_type, owner_id: arg.owners[0].owner_id ?? 'user',
+          provenance: null, revision: 1, selected_set_hash: 's', suppressed_set_hash: null,
+          selected_count: 0, suppressed_count: 0, budget_limit: 1000000, budget_used: 0 }],
+        item_edges: [], composer_version: '0.1.0', policy_version: '0.1.0',
+        retrieval_query_hash: null, token_budget: 1000000, owner_vector_hash: null, selected_set_hash: null,
+      }};
+    },
+  };
+  const ledger = createCompositionLedger(db);
+  const memRecorded = [];
+  const masterRecorded = [];
+  const memService = makeMemoryService({ revision: 1, recordedInjections: memRecorded });
+  const masterMemSvc = makeMasterMemoryService({ revision: 1, recordedInjections: masterRecorded });
+
+  const svc = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory(pmAdapter),
+    lifecycleService: makeLifecycle(),
+    memoryService: memService,
+    masterMemoryService: masterMemSvc,
+    memoryComposer: composer,
+    compositionLedger: ledger,
+    memoryComposerEnabled: true,
+  });
+
+  // Send to PM
+  svc.sendMessage('pm:proj1', { text: 'pm message', projectId: 'proj1' });
+
+  // Composer called with workspace owner (PM path)
+  assert.equal(composerCalls.length, 1, 'composer called once for PM');
+  assert.equal(composerCalls[0].owners[0].owner_type, 'workspace', 'PM uses workspace owner');
+
+  // PM slot record in DB: slotKind='pm'
+  const pmRow = db.prepare(
+    "SELECT * FROM memory_composition_events WHERE run_id = ? AND slot_kind = 'pm' AND status = 'accepted'"
+  ).get(pmRun.id);
+  assert.ok(pmRow, 'PM composition event accepted');
+
+  // No Top composition event
+  const topRow = db.prepare(
+    "SELECT COUNT(*) as cnt FROM memory_composition_events WHERE run_id = ? AND slot_kind = 'top'"
+  ).get(topRun.id);
+  assert.equal(topRow.cnt, 0, 'no Top composition event on PM send');
 });
