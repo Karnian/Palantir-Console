@@ -1,5 +1,6 @@
 const crypto = require('node:crypto');
 const { sanitizeProposalContent, detectInjection, redactSecrets } = require('./memorySanitize');
+const { normalizeOwner } = require('./ownerKey');
 
 const TOP_K = 12;
 const CHAR_CAP = 2000;
@@ -127,8 +128,8 @@ function mergeEvidence(existingEvidenceJson, candidate, sanitized) {
 
 function createMemoryService(db, eventBus) {
   const bumpRevisionStmt = db.prepare(`
-    INSERT INTO project_memory_revision(project_id, revision)
-    VALUES (?, 1)
+    INSERT INTO project_memory_revision(project_id, revision, owner_type, owner_id)
+    VALUES (?, 1, ?, ?)
     ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1
   `);
 
@@ -151,7 +152,9 @@ function createMemoryService(db, eventBus) {
       source_count,
       confidence,
       importance,
-      status
+      status,
+      owner_type,
+      owner_id
     )
     VALUES (
       @id,
@@ -165,7 +168,9 @@ function createMemoryService(db, eventBus) {
       @sourceCount,
       @confidence,
       @importance,
-      @status
+      @status,
+      @ownerType,
+      @ownerId
     )
   `);
 
@@ -260,15 +265,16 @@ function createMemoryService(db, eventBus) {
   `);
 
   const recordInjectionStmt = db.prepare(`
-    INSERT INTO pm_memory_injection(pm_run_id, project_id, injected_revision, injected_at)
-    VALUES (?, ?, ?, datetime('now'))
+    INSERT INTO pm_memory_injection(pm_run_id, project_id, injected_revision, injected_at, owner_type, owner_id)
+    VALUES (?, ?, ?, datetime('now'), ?, ?)
     ON CONFLICT(pm_run_id) DO UPDATE SET
       injected_revision = excluded.injected_revision,
       injected_at = excluded.injected_at
   `);
 
   function _bumpRevision(projectId) {
-    bumpRevisionStmt.run(projectId);
+    const { owner_type, owner_id } = normalizeOwner({ project_id: projectId });
+    bumpRevisionStmt.run(projectId, owner_type, owner_id);
   }
 
   function getRevision(projectId) {
@@ -345,6 +351,7 @@ function createMemoryService(db, eventBus) {
     const finalEvidenceJson = normalizeEvidenceJson(evidenceJson);
     const finalStatus = status || 'active';
     const contentHash = crypto.createHash('sha256').update(content).digest('hex');
+    const { owner_type, owner_id } = normalizeOwner({ project_id: projectId });
     const item = {
       id: crypto.randomUUID(),
       projectId,
@@ -358,6 +365,8 @@ function createMemoryService(db, eventBus) {
       confidence: confidence ?? 0.5,
       importance: importance ?? 5,
       status: finalStatus,
+      ownerType: owner_type,
+      ownerId: owner_id,
     };
 
     try {
@@ -408,6 +417,7 @@ function createMemoryService(db, eventBus) {
     if (!content) throw new Error('content is required');
     const finalEvidenceJson = normalizeEvidenceJson(evidenceJson);
     const contentHash = crypto.createHash('sha256').update(content).digest('hex');
+    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
     const item = {
       id: crypto.randomUUID(),
       projectId,
@@ -421,6 +431,8 @@ function createMemoryService(db, eventBus) {
       confidence: 0.9,
       importance: importance ?? 5,
       status: 'active',
+      ownerType,
+      ownerId,
     };
     try {
       return upsertFactTx(item);
@@ -616,7 +628,8 @@ function createMemoryService(db, eventBus) {
   }
 
   function recordInjection(pmRunId, projectId, revision) {
-    recordInjectionStmt.run(pmRunId, projectId, revision);
+    const { owner_type, owner_id } = normalizeOwner({ project_id: projectId });
+    recordInjectionStmt.run(pmRunId, projectId, revision, owner_type, owner_id);
   }
 
   function shouldInject(pmRunId, projectId) {
@@ -633,7 +646,7 @@ function createMemoryService(db, eventBus) {
   // non-object raw_json) must surface, not be swallowed like `INSERT OR IGNORE`
   // would (Codex cross-review SERIOUS).
   const insertCandidateStmt = db.prepare(
-    'INSERT INTO memory_candidates (id, project_id, rule, raw_json, dedup_key) VALUES (@id, @projectId, @rule, @rawJson, @dedupKey) ON CONFLICT(rule, project_id, dedup_key) DO NOTHING'
+    'INSERT INTO memory_candidates (id, project_id, rule, raw_json, dedup_key, owner_type, owner_id) VALUES (@id, @projectId, @rule, @rawJson, @dedupKey, @ownerType, @ownerId) ON CONFLICT(rule, project_id, dedup_key) DO NOTHING'
   );
   const getCandidateByDedupStmt = db.prepare(
     'SELECT * FROM memory_candidates WHERE rule = ? AND project_id = ? AND dedup_key = ?'
@@ -649,7 +662,8 @@ function createMemoryService(db, eventBus) {
     if (!dedupKey) throw new Error('dedupKey is required');
     const raw = typeof rawJson === 'string' ? rawJson : JSON.stringify(rawJson);
     JSON.parse(raw); // validate JSON shape before hitting the CHECK
-    insertCandidateStmt.run({ id: crypto.randomUUID(), projectId, rule, rawJson: raw, dedupKey });
+    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
+    insertCandidateStmt.run({ id: crypto.randomUUID(), projectId, rule, rawJson: raw, dedupKey, ownerType, ownerId });
     // INSERT OR IGNORE -> on a dup the row is unchanged; return the holder.
     return getCandidateByDedupStmt.get(rule, projectId, dedupKey);
   }
@@ -674,7 +688,7 @@ function createMemoryService(db, eventBus) {
   // SQL contract documented in migration 027_memory_jobs.sql.
   // ------------------------------------------------------------------------
   const insertJobStmt = db.prepare(
-    "INSERT INTO memory_jobs (id, kind, project_id, status) VALUES (?, ?, ?, 'pending')"
+    "INSERT INTO memory_jobs (id, kind, project_id, status, owner_type, owner_id) VALUES (?, ?, ?, 'pending', ?, ?)"
   );
   const getActiveJobStmt = db.prepare(
     "SELECT * FROM memory_jobs WHERE kind = ? AND project_id = ? AND status IN ('pending','running')"
@@ -736,8 +750,9 @@ function createMemoryService(db, eventBus) {
     const existing = getActiveJobStmt.get(kind, projectId);
     if (existing) return { job: existing, created: false };
     const id = crypto.randomUUID();
+    const { owner_type, owner_id } = normalizeOwner({ project_id: projectId });
     try {
-      insertJobStmt.run(id, kind, projectId);
+      insertJobStmt.run(id, kind, projectId, owner_type, owner_id);
     } catch (err) {
       // Lost the single-flight race (idx_memory_jobs_active) -> reuse the winner.
       if (err && err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
@@ -1183,6 +1198,142 @@ function createMemoryService(db, eventBus) {
     return res.changes === 1 ? getMemoryItemByIdStmt.get(id) : null;
   }
 
+  // -------------------------------------------------------------------------
+  // P-A1 slice 1: parity check + cross-scope conflict detection (slice-5 gate)
+  // -------------------------------------------------------------------------
+
+  // Scan ALL rows across the 9 owner-bearing tables and verify that
+  // (owner_type, owner_id) matches normalizeOwner(old-key) for each row.
+  // Returns a list of mismatches; empty list means parity holds.
+  // L1 old-key = project_id; L2 old-key = scope.
+  function checkOwnerParity() {
+    const mismatches = [];
+
+    // L1 tables: expected owner_type='workspace', owner_id=project_id
+    const l1Tables = [
+      { table: 'memory_items',             pk: 'id',            keyCol: 'project_id' },
+      { table: 'memory_candidates',        pk: 'id',            keyCol: 'project_id' },
+      { table: 'memory_jobs',              pk: 'id',            keyCol: 'project_id' },
+      { table: 'project_memory_revision',  pk: 'project_id',    keyCol: 'project_id' },
+      { table: 'pm_memory_injection',      pk: 'pm_run_id',     keyCol: 'project_id' },
+    ];
+
+    for (const { table, pk, keyCol } of l1Tables) {
+      const rows = db.prepare(`SELECT ${pk}, ${keyCol}, owner_type, owner_id FROM ${table}`).all();
+      for (const row of rows) {
+        let expected;
+        try {
+          expected = normalizeOwner({ project_id: row[keyCol] });
+        } catch {
+          mismatches.push({ table, pk: row[pk], expected: null, actual: { owner_type: row.owner_type, owner_id: row.owner_id }, error: 'cannot_normalize_old_key' });
+          continue;
+        }
+        if (row.owner_type !== expected.owner_type || row.owner_id !== expected.owner_id) {
+          mismatches.push({
+            table,
+            pk: row[pk],
+            expected,
+            actual: { owner_type: row.owner_type, owner_id: row.owner_id },
+          });
+        }
+      }
+    }
+
+    // L2 tables: expected owner_type='user', owner_id='user' (all scopes collapse)
+    const l2Tables = [
+      { table: 'master_memory_items',      pk: 'id',               keyCol: 'scope' },
+      { table: 'master_memory_candidates', pk: 'id',               keyCol: 'scope' },
+      { table: 'master_memory_revision',   pk: 'scope',            keyCol: 'scope' },
+      { table: 'master_memory_injection',  pk: 'master_run_id',    keyCol: 'scope' },
+    ];
+
+    for (const { table, pk, keyCol } of l2Tables) {
+      const rows = db.prepare(`SELECT ${pk}, ${keyCol}, owner_type, owner_id FROM ${table}`).all();
+      for (const row of rows) {
+        const pkVal = table === 'master_memory_injection' ? `${row.master_run_id}|${row.scope}` : row[pk];
+        let expected;
+        try {
+          expected = normalizeOwner({ scope: row[keyCol] });
+        } catch {
+          mismatches.push({ table, pk: pkVal, expected: null, actual: { owner_type: row.owner_type, owner_id: row.owner_id }, error: 'cannot_normalize_old_key' });
+          continue;
+        }
+        if (row.owner_type !== expected.owner_type || row.owner_id !== expected.owner_id) {
+          mismatches.push({
+            table,
+            pk: pkVal,
+            expected,
+            actual: { owner_type: row.owner_type, owner_id: row.owner_id },
+          });
+        }
+      }
+    }
+
+    return mismatches;
+  }
+
+  // Detect rows in master_memory_items and master_memory_candidates that WOULD
+  // collide under a future slice-5 owner-UNIQUE key, now that scope∈{user,cross_project}
+  // has been collapsed to ('user','user'). POLICY (merge/reject) is slice 5;
+  // this function only DETECTS.
+  //
+  // Returns { items: [...], candidates: [...] } where each entry describes a
+  // duplicate group: { owner_type, owner_id, key, key_value, count, ids }.
+  function detectCrossScopeConflicts() {
+    // Conflicts in master_memory_items:
+    //   (a) duplicate (owner_type, owner_id, content_hash) for active rows
+    //   (b) duplicate (owner_type, owner_id, fact_key) where fact_key NOT NULL for active rows
+    const hashConflicts = db.prepare(`
+      SELECT owner_type, owner_id, content_hash, COUNT(*) AS n, GROUP_CONCAT(id, '|') AS ids
+      FROM master_memory_items
+      WHERE owner_type IS NOT NULL AND owner_id IS NOT NULL AND status = 'active'
+      GROUP BY owner_type, owner_id, content_hash
+      HAVING COUNT(*) > 1
+    `).all();
+
+    const factKeyConflicts = db.prepare(`
+      SELECT owner_type, owner_id, fact_key, COUNT(*) AS n, GROUP_CONCAT(id, '|') AS ids
+      FROM master_memory_items
+      WHERE owner_type IS NOT NULL AND owner_id IS NOT NULL
+        AND fact_key IS NOT NULL AND status = 'active'
+      GROUP BY owner_type, owner_id, fact_key
+      HAVING COUNT(*) > 1
+    `).all();
+
+    const itemConflicts = [
+      ...hashConflicts.map(r => ({
+        owner_type: r.owner_type, owner_id: r.owner_id,
+        key: 'content_hash', key_value: r.content_hash,
+        count: r.n, ids: r.ids ? r.ids.split('|') : [],
+      })),
+      ...factKeyConflicts.map(r => ({
+        owner_type: r.owner_type, owner_id: r.owner_id,
+        key: 'fact_key', key_value: r.fact_key,
+        count: r.n, ids: r.ids ? r.ids.split('|') : [],
+      })),
+    ];
+
+    // Conflicts in master_memory_candidates:
+    //   duplicate (owner_type, owner_id, rule, dedup_key) across all statuses.
+    //   status='pending' was too narrow (missed promoted/merged/rejected rows that
+    //   would violate a future owner-UNIQUE index). rule is included so that two
+    //   different rules with the same dedup_key are NOT reported as false positives.
+    const candConflicts = db.prepare(`
+      SELECT owner_type, owner_id, rule, dedup_key, COUNT(*) AS n, GROUP_CONCAT(id, '|') AS ids
+      FROM master_memory_candidates
+      WHERE owner_type IS NOT NULL AND owner_id IS NOT NULL
+      GROUP BY owner_type, owner_id, rule, dedup_key
+      HAVING COUNT(*) > 1
+    `).all().map(r => ({
+      owner_type: r.owner_type, owner_id: r.owner_id,
+      rule: r.rule,
+      key: 'dedup_key', key_value: r.dedup_key,
+      count: r.n, ids: r.ids ? r.ids.split('|') : [],
+    }));
+
+    return { items: itemConflicts, candidates: candConflicts };
+  }
+
   return {
     _bumpRevision,
     getRevision,
@@ -1210,6 +1361,8 @@ function createMemoryService(db, eventBus) {
     getInjectionRecord,
     recordInjection,
     shouldInject,
+    checkOwnerParity,
+    detectCrossScopeConflicts,
   };
 }
 

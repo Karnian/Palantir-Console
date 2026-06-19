@@ -1,5 +1,6 @@
 const crypto = require('node:crypto');
 const { detectInjection, redactSecrets } = require('./memorySanitize');
+const { normalizeOwner } = require('./ownerKey');
 
 // L2 Master memory — cross-project, user-scoped GOVERNED TOP-K RETRIEVAL.
 // Mirrors L1 services/memoryService.js (factory(db, eventBus), prepared stmts, FTS5 top-K + fallback,
@@ -34,8 +35,8 @@ function sha256(text) {
 
 function createMasterMemoryService(db, eventBus) {
   const bumpRevisionStmt = db.prepare(`
-    INSERT INTO master_memory_revision(scope, revision)
-    VALUES (?, 1)
+    INSERT INTO master_memory_revision(scope, revision, owner_type, owner_id)
+    VALUES (?, 1, ?, ?)
     ON CONFLICT(scope) DO UPDATE SET revision = revision + 1
   `);
   const getRevisionStmt = db.prepare('SELECT revision FROM master_memory_revision WHERE scope = ?');
@@ -43,10 +44,12 @@ function createMasterMemoryService(db, eventBus) {
   const insertItemStmt = db.prepare(`
     INSERT INTO master_memory_items (
       id, scope, project_id, kind, fact_key, content, content_hash,
-      evidence_json, origin, source_count, confidence, importance, pinned, status, valid_to
+      evidence_json, origin, source_count, confidence, importance, pinned, status, valid_to,
+      owner_type, owner_id
     ) VALUES (
       @id, @scope, @projectId, @kind, @factKey, @content, @contentHash,
-      @evidenceJson, @origin, @sourceCount, @confidence, @importance, @pinned, @status, @validTo
+      @evidenceJson, @origin, @sourceCount, @confidence, @importance, @pinned, @status, @validTo,
+      @ownerType, @ownerId
     )
   `);
   const getItemByIdStmt = db.prepare('SELECT * FROM master_memory_items WHERE id = ?');
@@ -134,16 +137,16 @@ function createMasterMemoryService(db, eventBus) {
 
   const getInjectionStmt = db.prepare('SELECT * FROM master_memory_injection WHERE master_run_id = ? AND scope = ?');
   const recordInjectionStmt = db.prepare(`
-    INSERT INTO master_memory_injection(master_run_id, scope, injected_revision, injected_at)
-    VALUES (?, ?, ?, datetime('now'))
+    INSERT INTO master_memory_injection(master_run_id, scope, injected_revision, injected_at, owner_type, owner_id)
+    VALUES (?, ?, ?, datetime('now'), ?, ?)
     ON CONFLICT(master_run_id, scope) DO UPDATE SET injected_revision = excluded.injected_revision, injected_at = excluded.injected_at
   `);
 
   // P1c Slice 1: Master candidates. Use ON CONFLICT against only the dedup
   // UNIQUE so CHECK violations (bad rule/scope/raw_json) still surface.
   const insertCandidateStmt = db.prepare(`
-    INSERT INTO master_memory_candidates (id, scope, rule, raw_json, dedup_key)
-    VALUES (@id, @scope, @rule, @rawJson, @dedupKey)
+    INSERT INTO master_memory_candidates (id, scope, rule, raw_json, dedup_key, owner_type, owner_id)
+    VALUES (@id, @scope, @rule, @rawJson, @dedupKey, @ownerType, @ownerId)
     ON CONFLICT(rule, scope, dedup_key) DO NOTHING
   `);
   const getCandidateByDedupStmt = db.prepare(`
@@ -225,7 +228,11 @@ function createMasterMemoryService(db, eventBus) {
     LIMIT 1
   `);
 
-  function _bumpRevision(scope) { bumpRevisionStmt.run(normScope(scope)); }
+  function _bumpRevision(scope) {
+    const s = normScope(scope);
+    const { owner_type, owner_id } = normalizeOwner({ scope: s });
+    bumpRevisionStmt.run(s, owner_type, owner_id);
+  }
   function getRevision(scope) {
     const row = getRevisionStmt.get(scope);
     return row ? row.revision : 0;
@@ -466,6 +473,7 @@ function createMasterMemoryService(db, eventBus) {
     if (kind !== 'fact' && factKey) throw new Error('factKey is only allowed for fact items');
 
     const safeContent = sanitizeForStore(content, origin);
+    const { owner_type, owner_id } = normalizeOwner({ scope: s });
     const item = {
       id: crypto.randomUUID(),
       scope: s,
@@ -482,6 +490,8 @@ function createMasterMemoryService(db, eventBus) {
       pinned: pinned ? 1 : 0,
       status: status || 'active',
       validTo: validToForOrigin(origin, status || 'active'),
+      ownerType: owner_type,
+      ownerId: owner_id,
     };
     let out;
     try {
@@ -500,12 +510,15 @@ function createMasterMemoryService(db, eventBus) {
     const key = typeof dedupKey === 'string' ? dedupKey : '';
     if (key.length < 1 || key.length > 512) throw new Error('dedupKey length must be between 1 and 512');
     const { raw } = normalizeCandidateRawJson(rawJson);
+    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ scope: s });
     insertCandidateStmt.run({
       id: crypto.randomUUID(),
       scope: s,
       rule: r,
       rawJson: raw,
       dedupKey: key,
+      ownerType,
+      ownerId,
     });
     return toPublicCandidate(getCandidateByDedupStmt.get(r, s, key));
   }
@@ -649,6 +662,7 @@ function createMasterMemoryService(db, eventBus) {
         throw e;
       }
     } else {
+      const { owner_type: pOwnerType, owner_id: pOwnerId } = normalizeOwner({ scope: promoteScope });
       const newItem = {
         id: crypto.randomUUID(),
         scope: promoteScope,
@@ -672,6 +686,8 @@ function createMasterMemoryService(db, eventBus) {
         pinned: 0,
         status: 'active',
         validTo: validToForOrigin('deterministic', 'active'),
+        ownerType: pOwnerType,
+        ownerId: pOwnerId,
       };
       const admitted = insertItemWithAdmission(newItem, { activeCap: HARD_CAP });
       if (admitted.skipped) {
@@ -750,11 +766,13 @@ function createMasterMemoryService(db, eventBus) {
     if (!factKey) throw new Error('factKey is required');
     if (!content) throw new Error('content is required');
     const safeContent = sanitizeForStore(content, origin);
+    const { owner_type: fOwnerType, owner_id: fOwnerId } = normalizeOwner({ scope: s });
     const item = {
       id: crypto.randomUUID(), scope: s, projectId: null, kind: 'fact', factKey,
       content: safeContent, contentHash: sha256(safeContent), evidenceJson: normalizeEvidenceJson(evidenceJson),
       origin, sourceCount: 1, confidence: 0.9, importance: importance ?? 5, pinned: 0,
       status: 'active', validTo: validToForOrigin(origin, 'active'),
+      ownerType: fOwnerType, ownerId: fOwnerId,
     };
     let out;
     try {
@@ -1045,7 +1063,11 @@ function createMasterMemoryService(db, eventBus) {
   }
 
   function getInjectionRecord(masterRunId, scope) { return getInjectionStmt.get(masterRunId, normScope(scope)) || null; }
-  function recordInjection(masterRunId, scope, revision) { recordInjectionStmt.run(masterRunId, normScope(scope), revision); }
+  function recordInjection(masterRunId, scope, revision) {
+    const s = normScope(scope);
+    const { owner_type, owner_id } = normalizeOwner({ scope: s });
+    recordInjectionStmt.run(masterRunId, s, revision, owner_type, owner_id);
+  }
   // Caching-safe gate: inject only once per (masterRunId, scope) until THAT scope's revision advances.
   function shouldInject(masterRunId, scope) {
     const s = normScope(scope);
