@@ -148,8 +148,8 @@ test('GET provenance: redacts secrets in evidence', async (t) => {
   const app = setupApp(t);
   // seed an item carrying a secret-bearing evidence excerpt directly.
   app.services._rawDb.prepare(
-    "INSERT INTO memory_items (id, project_id, kind, content, content_hash, evidence_json, origin) VALUES (?,?,?,?,?,?,?)"
-  ).run('prov1', 'p1', 'pitfall', 'prov content', 'provhash', JSON.stringify({ excerpt: 'leaked ghp_0123456789abcdefghijABCDEFGHIJklmnop here', rule: 'R1b' }), 'batch_llm');
+    "INSERT INTO memory_items (id, project_id, kind, content, content_hash, evidence_json, origin, owner_type, owner_id) VALUES (?,?,?,?,?,?,?,?,?)"
+  ).run('prov1', 'p1', 'pitfall', 'prov content', 'provhash', JSON.stringify({ excerpt: 'leaked ghp_0123456789abcdefghijABCDEFGHIJklmnop here', rule: 'R1b' }), 'batch_llm', 'workspace', 'p1');
   const res = await request(app).get('/api/projects/p1/memory/prov1/provenance').set(...COOKIE).expect(200);
   assert.equal(res.body.origin, 'batch_llm');
   assert.match(res.body.evidence.excerpt, /\[REDACTED\]/);
@@ -173,8 +173,8 @@ test('PATCH: bearer (PM) cannot mutate active memory -> 403 (actor split, Codex 
 test('GET provenance: a secret appearing as an evidence KEY is redacted (Codex SERIOUS)', async (t) => {
   const app = setupApp(t);
   app.services._rawDb.prepare(
-    "INSERT INTO memory_items (id, project_id, kind, content, content_hash, evidence_json, origin) VALUES (?,?,?,?,?,?,?)"
-  ).run('provk', 'p1', 'pitfall', 'c', 'ph', JSON.stringify({ 'ghp_0123456789abcdefghijABCDEFGHIJklmnop': true, ok: 'v' }), 'batch_llm');
+    "INSERT INTO memory_items (id, project_id, kind, content, content_hash, evidence_json, origin, owner_type, owner_id) VALUES (?,?,?,?,?,?,?,?,?)"
+  ).run('provk', 'p1', 'pitfall', 'c', 'ph', JSON.stringify({ 'ghp_0123456789abcdefghijABCDEFGHIJklmnop': true, ok: 'v' }), 'batch_llm', 'workspace', 'p1');
   const res = await request(app).get('/api/projects/p1/memory/provk/provenance').set(...COOKIE).expect(200);
   assert.doesNotMatch(JSON.stringify(res.body.evidence), /ghp_/, 'secret in an evidence key must be redacted');
 });

@@ -390,8 +390,8 @@ test('app scheduler: boot tick expires stale master memory and shutdown clears i
   const { db, migrate, close } = createDatabase(dbPath);
   migrate();
   db.prepare(`
-    INSERT INTO master_memory_items (id, scope, kind, content, content_hash, evidence_json, origin, confidence, importance, status, valid_to)
-    VALUES (?, 'user', 'pattern', ?, ?, '{}', 'deterministic', 0.5, 5, 'active', datetime('now','-1 hour'))
+    INSERT INTO master_memory_items (id, scope, kind, content, content_hash, evidence_json, origin, confidence, importance, status, valid_to, owner_type, owner_id)
+    VALUES (?, 'user', 'pattern', ?, ?, '{}', 'deterministic', 0.5, 5, 'active', datetime('now','-1 hour'), 'user', 'user')
   `).run('expired-master-scheduler', 'scheduler expired content', sha256('scheduler expired content'));
   close();
 

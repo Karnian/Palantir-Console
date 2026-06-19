@@ -146,8 +146,8 @@ test('promoteCandidate rejects injection content even when a candidate already e
   const svc = createMasterMemoryService(db);
   const id = crypto.randomUUID();
   db.prepare(`
-    INSERT INTO master_memory_candidates (id, scope, rule, raw_json, dedup_key)
-    VALUES (?, 'user', 'R4', ?, 'legacy-injection')
+    INSERT INTO master_memory_candidates (id, scope, rule, raw_json, dedup_key, owner_type, owner_id)
+    VALUES (?, 'user', 'R4', ?, 'legacy-injection', 'user', 'user')
   `).run(id, JSON.stringify({
     schema_version: 1,
     kind: 'preference',
