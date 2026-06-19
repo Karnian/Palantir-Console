@@ -921,3 +921,159 @@ test('real sanitize effect: secret token redacted in composer.block', async (t) 
   assert.ok(block.includes('[REDACTED]'),
     'block must contain [REDACTED] placeholder where the secret was');
 });
+
+// ─── NEW-H: fingerprint input fields exposed on composition ──────────────────
+
+test('composition exposes retrieval_query_hash matching fingerprint input', () => {
+  const adapter = {
+    retrieve: () => [{ id: 'fh1', content: 'item A', kind: 'heuristic', revision: 1, content_hash: 'hA', fact_key: null }],
+    buildBlock: (rows) => rows.length > 0 ? '## FH\n- item A' : null,
+    getRevision: () => 1,
+  };
+  const composer = createMemoryComposer({ retrievers: { workspace: adapter } });
+
+  const taskContext = 'some retrieval query';
+  const { composition } = composer.compose({
+    owners: [{ owner_type: 'workspace', owner_id: 'proj-fh1' }],
+    taskContext,
+  });
+
+  assert.ok(composition.retrieval_query_hash != null, 'retrieval_query_hash must be present');
+  assert.strictEqual(typeof composition.retrieval_query_hash, 'string', 'must be a string');
+  assert.ok(composition.retrieval_query_hash.length > 0, 'must be non-empty');
+
+  // Different taskContext → different retrieval_query_hash
+  const { composition: c2 } = composer.compose({
+    owners: [{ owner_type: 'workspace', owner_id: 'proj-fh1' }],
+    taskContext: 'completely different context xyz',
+  });
+  assert.notStrictEqual(composition.retrieval_query_hash, c2.retrieval_query_hash,
+    'different taskContext must produce different retrieval_query_hash');
+});
+
+test('composition exposes token_budget matching totalBudget used in fingerprint', () => {
+  const adapter = {
+    retrieve: () => [],
+    buildBlock: () => null,
+    getRevision: () => 0,
+  };
+  const composer = createMemoryComposer({ retrievers: { workspace: adapter } });
+
+  // With explicit budget
+  const { composition: c1 } = composer.compose({
+    owners: [{ owner_type: 'workspace', owner_id: 'proj-tb1', budget: 500 }],
+    taskContext: '',
+  });
+  assert.strictEqual(typeof c1.token_budget, 'number', 'token_budget must be a number');
+  assert.strictEqual(c1.token_budget, 500, 'token_budget must equal the supplied budget');
+
+  // With default budget
+  const { composition: c2 } = composer.compose({
+    owners: [{ owner_type: 'workspace', owner_id: 'proj-tb2' }],
+    taskContext: '',
+  });
+  assert.strictEqual(c2.token_budget, DEFAULT_BUDGET, 'token_budget defaults to DEFAULT_BUDGET');
+
+  // Different budgets → different fingerprints
+  assert.notStrictEqual(c1.fingerprint, c2.fingerprint,
+    'different token_budget must produce different fingerprint');
+});
+
+test('composition exposes owner_vector_hash matching fingerprint input', () => {
+  const adapter = {
+    retrieve: () => [],
+    buildBlock: () => null,
+    getRevision: () => 0,
+  };
+  const composer = createMemoryComposer({ retrievers: { workspace: adapter } });
+
+  const { composition: c1 } = composer.compose({
+    owners: [{ owner_type: 'workspace', owner_id: 'proj-ovh-A' }],
+    taskContext: '',
+  });
+  const { composition: c2 } = composer.compose({
+    owners: [{ owner_type: 'workspace', owner_id: 'proj-ovh-B' }],
+    taskContext: '',
+  });
+
+  assert.ok(c1.owner_vector_hash != null, 'owner_vector_hash must be present');
+  assert.notStrictEqual(c1.owner_vector_hash, c2.owner_vector_hash,
+    'different owner_id must produce different owner_vector_hash');
+  // Verify it affects the fingerprint
+  assert.notStrictEqual(c1.fingerprint, c2.fingerprint,
+    'owner_vector_hash change must alter fingerprint');
+});
+
+test('composition exposes selected_set_hash matching fingerprint input', () => {
+  // Two adapters: one with items, one without
+  const adapterWithItem = {
+    retrieve: () => [{ id: 'ssh-item-1', content: 'item', kind: 'heuristic', revision: 1, content_hash: 'h1', fact_key: null }],
+    buildBlock: (rows) => rows.length > 0 ? '## S\n- item' : null,
+    getRevision: () => 1,
+  };
+  const adapterEmpty = {
+    retrieve: () => [],
+    buildBlock: () => null,
+    getRevision: () => 0,
+  };
+
+  const composerWith = createMemoryComposer({ retrievers: { workspace: adapterWithItem } });
+  const composerEmpty = createMemoryComposer({ retrievers: { workspace: adapterEmpty } });
+
+  const { composition: cWith } = composerWith.compose({
+    owners: [{ owner_type: 'workspace', owner_id: 'proj-ssh-1' }],
+    taskContext: '',
+  });
+  const { composition: cEmpty } = composerEmpty.compose({
+    owners: [{ owner_type: 'workspace', owner_id: 'proj-ssh-2' }],
+    taskContext: '',
+  });
+
+  assert.ok(cWith.selected_set_hash != null, 'selected_set_hash must be present');
+  assert.notStrictEqual(cWith.selected_set_hash, cEmpty.selected_set_hash,
+    'different selected set must produce different selected_set_hash');
+  // Verify fingerprint is also different
+  assert.notStrictEqual(cWith.fingerprint, cEmpty.fingerprint,
+    'different selected_set_hash must change fingerprint');
+});
+
+test('fingerprint inputs are internally consistent: same variables feed both fingerprint and exposed fields', () => {
+  const adapter = {
+    retrieve: () => [
+      { id: 'ci1', content: 'consistency item one', kind: 'constraint', revision: 2, content_hash: 'h-ci1', fact_key: null },
+      { id: 'ci2', content: 'consistency item two', kind: 'heuristic', revision: 3, content_hash: 'h-ci2', fact_key: null },
+    ],
+    buildBlock: (rows) => rows.length > 0 ? '## C\n' + rows.map(r => `- ${r.content}`).join('\n') : null,
+    getRevision: () => 5,
+  };
+
+  const crypto = require('node:crypto');
+  function sha256(text) {
+    return crypto.createHash('sha256').update(String(text ?? '')).digest('hex');
+  }
+  function hashObject(obj) {
+    return sha256(JSON.stringify(obj));
+  }
+
+  const composer = createMemoryComposer({ retrievers: { workspace: adapter } });
+  const taskContext = 'consistency check';
+  const { composition } = composer.compose({
+    owners: [{ owner_type: 'workspace', owner_id: 'proj-consistency' }],
+    taskContext,
+  });
+
+  // Re-derive the fingerprint from the exposed fields — must match composition.fingerprint
+  const COMPOSER_VERSION_TEST = composition.composer_version;
+  const POLICY_VERSION_TEST = composition.policy_version;
+  const recomputedFingerprint = sha256(JSON.stringify({
+    composer_version: COMPOSER_VERSION_TEST,
+    policy_version: POLICY_VERSION_TEST,
+    retrieval_query_hash: composition.retrieval_query_hash,
+    token_budget: composition.token_budget,
+    owner_vector_hash: composition.owner_vector_hash,
+    selected_set_hash: composition.selected_set_hash,
+  }));
+
+  assert.strictEqual(recomputedFingerprint, composition.fingerprint,
+    'fingerprint must be reproducible from the 4 exposed inputs + composer/policy versions');
+});
