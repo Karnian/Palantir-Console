@@ -59,6 +59,9 @@ const { createMemoryDistillService } = require('./services/memoryDistillService'
 const { createLiveDistiller } = require('./services/distillers/liveDistiller');
 const { createMemoryRouter } = require('./routes/memory');
 const { createMasterMemoryRouter } = require('./routes/masterMemory');
+// A2-3a: PM-slot composer+ledger cutover (flag-gated, default OFF)
+const { createMemoryComposer, buildWorkspaceAdapter, buildUserAdapter } = require('./services/memoryComposer');
+const { createCompositionLedger } = require('./services/compositionLedger');
 
 const AUTO_REVIEW_MAX = 5;
 const REVIEW_TEXT_CAP = 1000;
@@ -757,6 +760,17 @@ function createApp(options = {}) {
     runService,
     eventBus,
   });
+  // A2-3a: PM-slot composer+ledger cutover. Flag default OFF (behavior-preserving).
+  // ON: conversationService uses memoryComposer+compositionLedger for PM injection.
+  // OFF: existing shouldInject/retrieveForProject/buildInjectionBlock path unchanged.
+  const memoryComposerEnabled = options.memoryComposer ?? (process.env.PALANTIR_MEMORY_COMPOSER === '1');
+  const memoryComposer = createMemoryComposer({
+    retrievers: {
+      workspace: buildWorkspaceAdapter(memoryService),
+      user: buildUserAdapter(masterMemoryService),
+    },
+  });
+  const compositionLedger = createCompositionLedger(db);
   const conversationService = createConversationService({
     runService,
     managerRegistry,
@@ -765,6 +779,9 @@ function createApp(options = {}) {
     pmSpawnService,
     memoryService, // ML PR1: user-payload Learned Memory injection (PM slots)
     masterMemoryService, // L2 P1b: user-payload Master memory injection (Top slot)
+    memoryComposer, // A2-3a: composer (flag ON path)
+    compositionLedger, // A2-3a: ledger (flag ON path)
+    memoryComposerEnabled, // A2-3a: flag gate
   });
   // v3 Phase 2: whenever a manager slot (top or pm:<projectId>) is cleared
   // — by explicit stop, liveness probe, or rotation — drop any lingering
@@ -967,6 +984,7 @@ function createApp(options = {}) {
     eventBus,
     memoryService, // ML PR1: test seam for seeding L1 memory through the app db
     masterMemoryService, // L2 P1b: test seam for seeding/asserting Master memory
+    compositionLedger, // A2-3a: test seam for asserting composition ledger entries
     masterMemoryDecayScheduler,
     masterMemoryXprojectScanner,
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate

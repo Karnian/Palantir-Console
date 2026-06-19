@@ -57,6 +57,15 @@ function createConversationService({
   // dependency keep the pre-PR1 behavior byte-for-byte.
   memoryService,
   masterMemoryService,
+  // A2-3a: Composer+Ledger cutover (PM slot only). flag-gated default OFF.
+  // When memoryComposerEnabled=true, the PM injection path uses
+  // memoryComposer.compose() + compositionLedger (shouldCompose/record/accept)
+  // instead of the direct memoryService.shouldInject/retrieveForProject path.
+  // Dual-write to old pm_memory_injection ledger is maintained for rollback safety.
+  // Off = current behavior preserved byte-for-byte. Top slot untouched (A2-3b).
+  memoryComposer,
+  compositionLedger,
+  memoryComposerEnabled,
   logger,
 }) {
   // parentRunId -> array of notice strings
@@ -273,21 +282,60 @@ function createConversationService({
     // message delivery. The ledger is written AFTER the adapter accepts the
     // turn (mirrors the peek-then-commit notice discipline) so a failed send
     // re-injects on the next attempt rather than recording a phantom inject.
-    let memoryInjection = null; // { revision } when an injection was actually applied
+    let memoryInjection = null; // { revision } when an injection was actually applied (flag OFF)
+    let composerInjection = null; // { composition, provenanceKey, revision } stash (flag ON)
     if (!isTop && memoryService && projectId) {
-      try {
-        const decision = memoryService.shouldInject(run.id, projectId);
-        if (decision && decision.inject) {
-          const rows = memoryService.retrieveForProject(projectId, { taskContext: originalText });
-          const block = memoryService.buildInjectionBlock(rows);
-          if (block) {
-            effectiveText = `${block}\n\n---\n\n${effectiveText}`;
-            memoryInjection = { revision: decision.revision };
+      if (memoryComposerEnabled && memoryComposer && compositionLedger) {
+        // A2-3a: Composer+Ledger path (PM slot only, flag ON).
+        // peek/decide: gate check → compose → stash for commit phase.
+        try {
+          const currentOwnerRevisions = [{
+            owner_type: 'workspace',
+            owner_id: projectId,
+            revision: memoryService.getRevision(projectId),
+          }];
+          const dec = compositionLedger.shouldCompose({
+            runId: run.id,
+            slotKind: 'pm',
+            provenanceKey: projectId,
+            currentOwnerRevisions,
+          });
+          if (dec.compose) {
+            const { block, composition } = memoryComposer.compose({
+              owners: [{ owner_type: 'workspace', owner_id: projectId }],
+              taskContext: originalText,
+            });
+            // [Q4 BLOCKER] only prepend if BOTH block and composition are non-null.
+            // block null → skip prepend AND record (gate pollution prevention).
+            if (block && composition) {
+              effectiveText = `${block}\n\n---\n\n${effectiveText}`;
+              composerInjection = {
+                composition,
+                provenanceKey: projectId,
+                revision: currentOwnerRevisions[0].revision,
+              };
+            }
           }
+        } catch (memErr) {
+          log(`composer injection skipped for ${conversationId} (run=${run.id}): ${memErr.message}`);
+          composerInjection = null;
         }
-      } catch (memErr) {
-        log(`memory injection skipped for ${conversationId} (run=${run.id}): ${memErr.message}`);
-        memoryInjection = null;
+      } else {
+        // Existing path (flag OFF) — PRESERVE EXACTLY, zero changes.
+        try {
+          const decision = memoryService.shouldInject(run.id, projectId);
+          if (decision && decision.inject) {
+            const rows = memoryService.retrieveForProject(projectId, { taskContext: originalText });
+            const block = memoryService.buildInjectionBlock(rows);
+            if (block) {
+              effectiveText = `${block}\n\n---\n\n${effectiveText}`;
+              memoryInjection = { revision: decision.revision };
+            }
+          }
+        } catch (memErr) {
+          log(`memory injection skipped for ${conversationId} (run=${run.id}): ${memErr.message}`);
+          memoryInjection = null;
+        }
       }
     }
 
@@ -348,12 +396,35 @@ function createConversationService({
       commitDrainParentNotices(run.id, notices.length);
     }
 
-    // ML PR1: record the injection ledger ONLY now that the turn is
+    // ML PR1 / A2-3a: record the injection ledger ONLY now that the turn is
     // accepted. This is the commit half of the peek-then-commit discipline:
     // if the send had failed above we would have thrown before reaching
     // here, leaving the ledger untouched so the next send re-injects.
     // Never let a ledger write break a successfully delivered message.
-    if (memoryInjection) {
+    if (memoryComposerEnabled && compositionLedger && memoryComposer) {
+      // A2-3a: Composer+Ledger commit path (flag ON).
+      // [Q3] record/accept here (commit phase), never in peek phase.
+      // [Q5] dual-write: old pm_memory_injection ledger sync maintained.
+      if (composerInjection) {
+        try {
+          const compId = compositionLedger.record(composerInjection.composition, {
+            runId: run.id,
+            conversationId,
+            taskId: null, // taskId not available at this scope; A2-3b may extend
+            slotKind: 'pm',
+            provenanceKey: composerInjection.provenanceKey,
+          });
+          if (compId) compositionLedger.accept(compId);
+          // [Q5] dual-write: old ledger remains live (retire is slice5)
+          if (memoryService && projectId) {
+            memoryService.recordInjection(run.id, projectId, composerInjection.revision);
+          }
+        } catch (ledgerErr) {
+          log(`composer ledger write failed for ${conversationId} (run=${run.id}): ${ledgerErr.message}`);
+        }
+      }
+    } else if (memoryInjection) {
+      // Existing path (flag OFF) — PRESERVE EXACTLY.
       try {
         memoryService.recordInjection(run.id, projectId, memoryInjection.revision);
       } catch (ledgerErr) {
