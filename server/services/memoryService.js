@@ -660,16 +660,16 @@ function createMemoryService(db, eventBus) {
   }
 
   // PR2b: rule candidates (R1b/R3/R4). Deterministic rules stage raw signals
-  // here; PR3 batch LLM promotes them to active memory_items. Idempotent via
-  // INSERT OR IGNORE against UNIQUE(rule, project_id, dedup_key).
-  // ON CONFLICT targets ONLY the dedup UNIQUE — a CHECK violation (bad rule /
-  // non-object raw_json) must surface, not be swallowed like `INSERT OR IGNORE`
-  // would (Codex cross-review SERIOUS).
+  // here; PR3 batch LLM promotes them to active memory_items. Idempotent via an
+  // owner-keyed pre-check plus legacy UNIQUE(rule, project_id, dedup_key).
+  // ON CONFLICT targets ONLY the legacy dedup UNIQUE — a CHECK violation (bad
+  // rule / non-object raw_json) must surface, not be swallowed like
+  // `INSERT OR IGNORE` would (Codex cross-review SERIOUS).
   const insertCandidateStmt = db.prepare(
     'INSERT INTO memory_candidates (id, project_id, rule, raw_json, dedup_key, owner_type, owner_id) VALUES (@id, @projectId, @rule, @rawJson, @dedupKey, @ownerType, @ownerId) ON CONFLICT(rule, project_id, dedup_key) DO NOTHING'
   );
-  const getCandidateByDedupStmt = db.prepare(
-    'SELECT * FROM memory_candidates WHERE rule = ? AND project_id = ? AND dedup_key = ?'
+  const getCandidateByOwnerDedupStmt = db.prepare(
+    'SELECT * FROM memory_candidates WHERE owner_type = ? AND owner_id = ? AND rule = ? AND dedup_key = ?'
   );
   const listCandidatesStmt = db.prepare(
     'SELECT * FROM memory_candidates WHERE owner_type = ? AND owner_id = ? AND status = ? ORDER BY created_at ASC, id ASC'
@@ -681,11 +681,31 @@ function createMemoryService(db, eventBus) {
     if (!rawJson) throw new Error('rawJson is required');
     if (!dedupKey) throw new Error('dedupKey is required');
     const raw = typeof rawJson === 'string' ? rawJson : JSON.stringify(rawJson);
-    JSON.parse(raw); // validate JSON shape before hitting the CHECK
+    // BLOCKER fix: validate type (non-null, non-array object) BEFORE the owner-dedup
+    // pre-check so CHECK(json_type(raw_json)='object') is never swallowed by early return.
+    // Symmetric with L2 masterMemoryService.normalizeCandidateRawJson pattern.
+    const parsed = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('rawJson must be a non-null, non-array object');
+    }
     const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
-    insertCandidateStmt.run({ id: crypto.randomUUID(), projectId, rule, rawJson: raw, dedupKey, ownerType, ownerId });
-    // INSERT OR IGNORE -> on a dup the row is unchanged; return the holder.
-    return getCandidateByDedupStmt.get(rule, projectId, dedupKey);
+    // P-A1 slice3b [2]: owner-keyed dedup pre-check (common-case fast path).
+    // Dual safety: DB also has UNIQUE(rule, project_id, dedup_key) as second defense.
+    const existing = getCandidateByOwnerDedupStmt.get(ownerType, ownerId, rule, dedupKey);
+    if (existing) return existing;
+    // SERIOUS-1 fix: ON CONFLICT targets only the legacy dedup unique index; the 037
+    // owner-unique can fire first in a cross-process race and is NOT covered by DO NOTHING.
+    // Wrap in try/catch: SQLITE_CONSTRAINT_UNIQUE → return winner via owner-dedup lookup.
+    // All other errors (CHECK violations, bad rule, etc.) are rethrown so they surface.
+    try {
+      insertCandidateStmt.run({ id: crypto.randomUUID(), projectId, rule, rawJson: raw, dedupKey, ownerType, ownerId });
+    } catch (err) {
+      if (err && err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+        return getCandidateByOwnerDedupStmt.get(ownerType, ownerId, rule, dedupKey);
+      }
+      throw err;
+    }
+    return getCandidateByOwnerDedupStmt.get(ownerType, ownerId, rule, dedupKey);
   }
 
   function listCandidates(projectId, status = 'pending') {
@@ -700,6 +720,15 @@ function createMemoryService(db, eventBus) {
   );
   function listProjectsWithPendingCandidates() {
     return listPendingProjectsStmt.all().map((r) => r.project_id);
+  }
+
+  // P-A1 slice3b [5]: owner-keyed pending enumeration for distill scheduler.
+  // Returns [{ownerType, ownerId}] pairs. Workspace owner_id=project_id (behavior-preserving).
+  const listPendingOwnersStmt = db.prepare(
+    "SELECT DISTINCT owner_type, owner_id FROM memory_candidates WHERE status = 'pending'"
+  );
+  function listOwnersWithPendingCandidates() {
+    return listPendingOwnersStmt.all().map((r) => ({ ownerType: r.owner_type, ownerId: r.owner_id }));
   }
 
   // ------------------------------------------------------------------------
@@ -1366,6 +1395,7 @@ function createMemoryService(db, eventBus) {
     createCandidate,
     listCandidates,
     listProjectsWithPendingCandidates,
+    listOwnersWithPendingCandidates,
     enqueueDistillJob,
     claimDistillJob,
     requeueStaleJobs,
