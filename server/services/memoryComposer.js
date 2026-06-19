@@ -265,6 +265,10 @@ function createMemoryComposer({ retrievers = {} } = {}) {
           item_edges: itemEdges,
           composer_version: COMPOSER_VERSION,
           policy_version: POLICY_VERSION,
+          retrieval_query_hash: retrievalQueryHash,
+          token_budget: totalBudget,
+          owner_vector_hash: ownerVectorHash,
+          selected_set_hash: selectedSetHash,
         },
       };
     } catch {
