@@ -40,6 +40,11 @@ function createDatabase(dbPath) {
 
       const sql = readFileSync(join(migrationsDir, file), 'utf-8');
       db.transaction(() => {
+        if (version === 34) {
+          // Slice 2a needs procedural evidence union before owner-unique
+          // indexes are created; keep merge + DDL atomic in this migration tx.
+          require('../services/ownerMergeSlice2a').runSlice2aMerge(db);
+        }
         db.exec(sql);
         // If migration already inserts into schema_version, skip duplicate
         const exists = db.prepare(

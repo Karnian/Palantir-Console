@@ -497,6 +497,13 @@ function createMasterMemoryService(db, eventBus) {
     try {
       out = insertItemTx(item, { activeCap: activeCap || HARD_CAP });
     } catch (err) {
+      // Catches both the scope-keyed index (idx_master_memory_content_hash) and the
+      // owner-keyed index (idx_master_memory_owner_content_hash, added in slice 2a).
+      // When the owner-unique index fires for a cross-scope duplicate (e.g. content
+      // already active under 'user' scope and caller requests 'cross_project'),
+      // mergeByHashTx looks up by scope — finds nothing for cross_project → returns null.
+      // This is the 2a fail-safe: owner-unique blocks cross-scope duplicates cleanly.
+      // Owner-keyed read/merge (scope-transparent lookup) is deferred to slice 2b.
       if (isUniqueConstraint(err, 'content_hash')) return mergeByHashTx(s, item.contentHash, item.origin);
       throw err;
     }
