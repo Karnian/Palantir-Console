@@ -183,7 +183,8 @@ function createMemoryService(db, eventBus) {
   const getActiveMemoryItemByHashStmt = db.prepare(`
     SELECT *
     FROM memory_items
-    WHERE project_id = ?
+    WHERE owner_type = ?
+      AND owner_id = ?
       AND content_hash = ?
       AND status = 'active'
   `);
@@ -192,8 +193,9 @@ function createMemoryService(db, eventBus) {
     UPDATE memory_items
     SET source_count = source_count + 1,
         updated_at = datetime('now')
-    WHERE project_id = ?
-      AND content_hash = ?
+    WHERE owner_type = @ownerType
+      AND owner_id = @ownerId
+      AND content_hash = @contentHash
       AND status = 'active'
   `);
 
@@ -218,7 +220,8 @@ function createMemoryService(db, eventBus) {
     SELECT *
     FROM memory_items
     WHERE id = @id
-      AND project_id = @projectId
+      AND owner_type = @ownerType
+      AND owner_id = @ownerId
       AND status = 'active'
       AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))
   `);
@@ -226,7 +229,8 @@ function createMemoryService(db, eventBus) {
   const fallbackRetrieveStmt = db.prepare(`
     SELECT *
     FROM memory_items
-    WHERE project_id = @projectId
+    WHERE owner_type = @ownerType
+      AND owner_id = @ownerId
       AND status = 'active'
       AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))
     ORDER BY importance DESC, updated_at DESC
@@ -239,7 +243,8 @@ function createMemoryService(db, eventBus) {
       'FROM memory_items mi',
       'JOIN memory_fts ON memory_fts.rowid = mi.rowid_pk',
       'WHERE memory_fts MATCH @q',
-      '  AND mi.project_id = @projectId',
+      '  AND mi.owner_type = @ownerType',
+      '  AND mi.owner_id = @ownerId',
       "  AND mi.status = 'active'",
       "  AND (mi.valid_to IS NULL OR datetime(mi.valid_to) > datetime('now'))",
       // bm25: lower score = more relevant -> ASC. recency tie-break keeps the
@@ -252,7 +257,8 @@ function createMemoryService(db, eventBus) {
   const listForProjectStmt = db.prepare(`
     SELECT *
     FROM memory_items
-    WHERE project_id = ?
+    WHERE owner_type = ?
+      AND owner_id = ?
       AND status = 'active'
       AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))
     ORDER BY importance DESC, updated_at DESC
@@ -275,6 +281,11 @@ function createMemoryService(db, eventBus) {
   function _bumpRevision(projectId) {
     const { owner_type, owner_id } = normalizeOwner({ project_id: projectId });
     bumpRevisionStmt.run(projectId, owner_type, owner_id);
+  }
+
+  function resolveOwnerFromProject(projectId) {
+    const { owner_type, owner_id } = normalizeOwner({ project_id: projectId });
+    return { ownerType: owner_type, ownerId: owner_id };
   }
 
   function getRevision(projectId) {
@@ -313,8 +324,9 @@ function createMemoryService(db, eventBus) {
   });
 
   const mergeMemoryItemByHashTx = db.transaction((projectId, contentHash) => {
-    mergeMemoryItemByHashStmt.run(projectId, contentHash);
-    return getActiveMemoryItemByHashStmt.get(projectId, contentHash);
+    const { ownerType, ownerId } = resolveOwnerFromProject(projectId);
+    mergeMemoryItemByHashStmt.run({ ownerType, ownerId, contentHash });
+    return getActiveMemoryItemByHashStmt.get(ownerType, ownerId, contentHash);
   });
 
   function createMemoryItem({
@@ -389,18 +401,23 @@ function createMemoryService(db, eventBus) {
   // may carry a fact_key, so it owns the supersede semantics createMemoryItem
   // deliberately refuses (it throws on fact_key conflict).
   const getActiveFactByKeyStmt = db.prepare(
-    "SELECT * FROM memory_items WHERE project_id = ? AND fact_key = ? AND status = 'active'"
+    "SELECT * FROM memory_items WHERE owner_type = ? AND owner_id = ? AND fact_key = ? AND status = 'active'"
   );
   const supersedeFactStmt = db.prepare(
-    "UPDATE memory_items SET status='superseded', superseded_by=@newId, valid_to=datetime('now'), updated_at=datetime('now') WHERE project_id=@projectId AND fact_key=@factKey AND status='active'"
+    "UPDATE memory_items SET status='superseded', superseded_by=@newId, valid_to=datetime('now'), updated_at=datetime('now') WHERE owner_type=@ownerType AND owner_id=@ownerId AND fact_key=@factKey AND status='active'"
   );
   const upsertFactTx = db.transaction((item) => {
-    const existing = getActiveFactByKeyStmt.get(item.projectId, item.factKey);
+    const existing = getActiveFactByKeyStmt.get(item.ownerType, item.ownerId, item.factKey);
     if (existing && existing.content_hash === item.contentHash) {
       return existing; // unchanged -> no-op, no revision bump
     }
     if (existing) {
-      supersedeFactStmt.run({ newId: item.id, projectId: item.projectId, factKey: item.factKey });
+      supersedeFactStmt.run({
+        newId: item.id,
+        ownerType: item.ownerType,
+        ownerId: item.ownerId,
+        factKey: item.factKey,
+      });
     }
     insertMemoryItemStmt.run(item);
     _bumpRevision(item.projectId);
@@ -443,7 +460,7 @@ function createMemoryService(db, eventBus) {
         // the prior fact stays intact; treat this as a no-op and return the
         // existing holder rather than dropping the write silently (Codex
         // cross-review SERIOUS).
-        return getActiveMemoryItemByHashStmt.get(projectId, contentHash) || null;
+        return getActiveMemoryItemByHashStmt.get(ownerType, ownerId, contentHash) || null;
       }
       throw err;
     }
@@ -509,8 +526,8 @@ function createMemoryService(db, eventBus) {
     return tokens.map((token) => `"${token}"${star}`).join(' OR ');
   }
 
-  function retrieveFallback(projectId, k) {
-    return fallbackRetrieveStmt.all({ projectId, k });
+  function retrieveFallback(ownerType, ownerId, k) {
+    return fallbackRetrieveStmt.all({ ownerType, ownerId, k });
   }
 
   function retrieveForProject(projectId, options = {}) {
@@ -518,9 +535,10 @@ function createMemoryService(db, eventBus) {
       const { taskContext, limit } = options || {};
       const k = getEffectiveLimit(limit);
       const exactQ = buildMatchQuery(taskContext);
+      const { ownerType, ownerId } = resolveOwnerFromProject(projectId);
 
       if (!exactQ) {
-        return capRowsByContentLength(retrieveFallback(projectId, k));
+        return capRowsByContentLength(retrieveFallback(ownerType, ownerId, k));
       }
 
       try {
@@ -530,18 +548,18 @@ function createMemoryService(db, eventBus) {
         // Only when exact under-fills K do we prefix-fill the remaining slots,
         // making Korean 조사-inflected forms reachable without a short over-matching
         // prefix dominating. bm25: lower = more relevant -> ASC.
-        const exactRows = ftsRetrieveStmt.all({ projectId, q: exactQ, k });
+        const exactRows = ftsRetrieveStmt.all({ ownerType, ownerId, q: exactQ, k });
         if (exactRows.length >= k) {
           return capRowsByContentLength(exactRows);
         }
         const prefixQ = buildMatchQuery(taskContext, { prefix: true });
         const seen = new Set(exactRows.map((r) => r.id));
         const prefixRows = ftsRetrieveStmt
-          .all({ projectId, q: prefixQ, k })
+          .all({ ownerType, ownerId, q: prefixQ, k })
           .filter((r) => !seen.has(r.id));
         return capRowsByContentLength(exactRows.concat(prefixRows).slice(0, k));
       } catch (err) {
-        return capRowsByContentLength(retrieveFallback(projectId, k));
+        return capRowsByContentLength(retrieveFallback(ownerType, ownerId, k));
       }
     } catch (err) {
       return [];
@@ -582,17 +600,18 @@ function createMemoryService(db, eventBus) {
   }
 
   const listByStatusStmt = db.prepare(
-    'SELECT * FROM memory_items WHERE project_id = ? AND status = ? ORDER BY importance DESC, updated_at DESC'
+    'SELECT * FROM memory_items WHERE owner_type = ? AND owner_id = ? AND status = ? ORDER BY importance DESC, updated_at DESC'
   );
   const listAllStatusStmt = db.prepare(
-    "SELECT * FROM memory_items WHERE project_id = ? ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'archived' THEN 1 ELSE 2 END, importance DESC, updated_at DESC"
+    "SELECT * FROM memory_items WHERE owner_type = ? AND owner_id = ? ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'archived' THEN 1 ELSE 2 END, importance DESC, updated_at DESC"
   );
   // status: 'active' (default; valid_to-filtered, used by injection) / 'archived'
   // / 'superseded' / 'all' (correction UI). Only the active path is injected.
   function listForProject(projectId, status = 'active') {
-    if (status === 'all') return listAllStatusStmt.all(projectId);
-    if (status === 'active') return listForProjectStmt.all(projectId);
-    return listByStatusStmt.all(projectId, status);
+    const { ownerType, ownerId } = resolveOwnerFromProject(projectId);
+    if (status === 'all') return listAllStatusStmt.all(ownerType, ownerId);
+    if (status === 'active') return listForProjectStmt.all(ownerType, ownerId);
+    return listByStatusStmt.all(ownerType, ownerId, status);
   }
 
   // PR3c: existing-memory context for the distiller, made SAFE to embed in an LLM
@@ -606,7 +625,8 @@ function createMemoryService(db, eventBus) {
   // semantic dedup across a 200-cap project is a later slice; surfaced via
   // memory:distill_context_capped (Codex SERIOUS 3).
   function listActiveForDistill(projectId, max = 60) {
-    const rows = fallbackRetrieveStmt.all({ projectId, k: max });
+    const { ownerType, ownerId } = resolveOwnerFromProject(projectId);
+    const rows = fallbackRetrieveStmt.all({ ownerType, ownerId, k: max });
     const out = [];
     for (const r of rows) {
       const raw = String(r.content || '');
@@ -616,7 +636,7 @@ function createMemoryService(db, eventBus) {
       out.push({ id: r.id, kind: r.kind, content: safe });
     }
     let total = out.length;
-    try { total = countActiveItemsStmt.get(projectId).n; } catch { /* */ }
+    try { total = countActiveItemsStmt.get(ownerType, ownerId).n; } catch { /* */ }
     if (total > max && eventBus) {
       try { eventBus.emit('memory:distill_context_capped', { projectId, shown: out.length, total }); } catch { /* observability must never break distill */ }
     }
@@ -652,7 +672,7 @@ function createMemoryService(db, eventBus) {
     'SELECT * FROM memory_candidates WHERE rule = ? AND project_id = ? AND dedup_key = ?'
   );
   const listCandidatesStmt = db.prepare(
-    'SELECT * FROM memory_candidates WHERE project_id = ? AND status = ? ORDER BY created_at ASC, id ASC'
+    'SELECT * FROM memory_candidates WHERE owner_type = ? AND owner_id = ? AND status = ? ORDER BY created_at ASC, id ASC'
   );
 
   function createCandidate({ projectId, rule, rawJson, dedupKey } = {}) {
@@ -669,7 +689,8 @@ function createMemoryService(db, eventBus) {
   }
 
   function listCandidates(projectId, status = 'pending') {
-    return listCandidatesStmt.all(projectId, status);
+    const { ownerType, ownerId } = resolveOwnerFromProject(projectId);
+    return listCandidatesStmt.all(ownerType, ownerId, status);
   }
 
   // PR3b: projects that currently have at least one pending candidate — the
@@ -691,7 +712,7 @@ function createMemoryService(db, eventBus) {
     "INSERT INTO memory_jobs (id, kind, project_id, status, owner_type, owner_id) VALUES (?, ?, ?, 'pending', ?, ?)"
   );
   const getActiveJobStmt = db.prepare(
-    "SELECT * FROM memory_jobs WHERE kind = ? AND project_id = ? AND status IN ('pending','running')"
+    "SELECT * FROM memory_jobs WHERE owner_type = ? AND owner_id = ? AND kind = ? AND status IN ('pending','running')"
   );
   const getJobByIdStmt = db.prepare('SELECT * FROM memory_jobs WHERE id = ?');
   const getJobByTokenStmt = db.prepare(
@@ -718,7 +739,7 @@ function createMemoryService(db, eventBus) {
     "  SELECT id FROM memory_jobs" +
     "  WHERE kind=@kind AND status='pending'" +
     "    AND (run_after IS NULL OR run_after <= datetime('now'))" +
-    "    AND (@projectId IS NULL OR project_id = @projectId)" +
+    "    AND (@ownerType IS NULL OR (owner_type = @ownerType AND owner_id = @ownerId))" +
     "  ORDER BY created_at ASC, id ASC LIMIT 1" +
     ") AND status='pending'"
   );
@@ -747,16 +768,16 @@ function createMemoryService(db, eventBus) {
 
   function enqueueDistillJob(projectId, kind = DISTILL_KIND) {
     if (!projectId) throw new Error('projectId is required');
-    const existing = getActiveJobStmt.get(kind, projectId);
+    const { ownerType, ownerId } = resolveOwnerFromProject(projectId);
+    const existing = getActiveJobStmt.get(ownerType, ownerId, kind);
     if (existing) return { job: existing, created: false };
     const id = crypto.randomUUID();
-    const { owner_type, owner_id } = normalizeOwner({ project_id: projectId });
     try {
-      insertJobStmt.run(id, kind, projectId, owner_type, owner_id);
+      insertJobStmt.run(id, kind, projectId, ownerType, ownerId);
     } catch (err) {
       // Lost the single-flight race (idx_memory_jobs_active) -> reuse the winner.
       if (err && err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
-        return { job: getActiveJobStmt.get(kind, projectId), created: false };
+        return { job: getActiveJobStmt.get(ownerType, ownerId, kind), created: false };
       }
       throw err;
     }
@@ -776,7 +797,8 @@ function createMemoryService(db, eventBus) {
   function claimDistillJob({ kind = DISTILL_KIND, projectId = null, staleSeconds = 600, maxAttempts = 5 } = {}) {
     requeueStaleJobs({ kind, staleSeconds, maxAttempts });
     const token = crypto.randomUUID();
-    const info = claimStmt.run({ kind, token, projectId });
+    const owner = projectId ? resolveOwnerFromProject(projectId) : { ownerType: null, ownerId: null };
+    const info = claimStmt.run({ kind, token, ownerType: owner.ownerType, ownerId: owner.ownerId });
     if (info.changes !== 1) return null;
     return getJobByTokenStmt.get(kind, token);
   }
@@ -809,7 +831,7 @@ function createMemoryService(db, eventBus) {
   // --- candidate -> active promotion (single transaction) ---
   const getCandidateByIdStmt = db.prepare('SELECT * FROM memory_candidates WHERE id = ?');
   const countActiveItemsStmt = db.prepare(
-    "SELECT COUNT(*) AS n FROM memory_items WHERE project_id = ? AND status = 'active'"
+    "SELECT COUNT(*) AS n FROM memory_items WHERE owner_type = ? AND owner_id = ? AND status = 'active'"
   );
   const setCandidateStatusStmt = db.prepare(
     "UPDATE memory_candidates SET status=@status, promoted_to=@promotedTo, updated_at=datetime('now') WHERE id=@id AND status='pending'"
@@ -822,7 +844,7 @@ function createMemoryService(db, eventBus) {
   const lowestEvictableStmt = db.prepare(
     "SELECT id, (COALESCE(confidence,0) * COALESCE(importance,1)) AS score " +
     "FROM memory_items " +
-    "WHERE project_id=? AND status='active' AND pinned=0 AND origin!='human' " +
+    "WHERE owner_type=? AND owner_id=? AND status='active' AND pinned=0 AND origin!='human' " +
     "ORDER BY score ASC, COALESCE(reviewed_at, created_at) ASC, id ASC LIMIT 1"
   );
   const archiveVictimStmt = db.prepare(
@@ -863,7 +885,8 @@ function createMemoryService(db, eventBus) {
         throw e; // rolls back -> nothing written
       }
       const projectId = job.project_id;
-      let activeCount = countActiveItemsStmt.get(projectId).n;
+      const { ownerType, ownerId } = resolveOwnerFromProject(projectId);
+      let activeCount = countActiveItemsStmt.get(ownerType, ownerId).n;
       const promoted = [];
       const skipped = [];
       const evicted = [];
@@ -917,10 +940,10 @@ function createMemoryService(db, eventBus) {
         // together (Codex Q1 defense-in-depth). The model judges polarity; the
         // floor only rejects the obviously-wrong. Failed validation → treated as
         // a fresh item (no merge).
-        let existing = getActiveMemoryItemByHashStmt.get(projectId, sha256(content));
+        let existing = getActiveMemoryItemByHashStmt.get(ownerType, ownerId, sha256(content));
         let fuzzy = false;
         if (!existing && p.mergeTargetId) {
-          const target = getMergeTargetStmt.get({ id: p.mergeTargetId, projectId });
+          const target = getMergeTargetStmt.get({ id: p.mergeTargetId, ownerType, ownerId });
           // active + same-project + not-expired are enforced in SQL above; kind +
           // token floor here. The floor is a SANITY check (reject a hallucinated /
           // clearly-unrelated id), NOT a semantic guarantee — a polarity-reversed
@@ -941,7 +964,7 @@ function createMemoryService(db, eventBus) {
         // (lowestEvictableStmt excludes them). A merge adds no row, so it skips
         // the cap entirely.
         if (!existing && activeCount >= activeCap) {
-          const victim = lowestEvictableStmt.get(projectId);
+          const victim = lowestEvictableStmt.get(ownerType, ownerId);
           if (!victim) {
             skipped.push({ candidateId: p.candidateId, reason: 'active_cap_all_protected' });
             continue;
@@ -1117,11 +1140,12 @@ function createMemoryService(db, eventBus) {
   const restoreTx = db.transaction(({ id, activeCap }) => {
     const before = getMemoryItemByIdStmt.get(id);
     if (!before || before.status !== 'archived') return { item: null, evicted: null };
+    const { ownerType, ownerId } = resolveOwnerFromProject(before.project_id);
     let evicted = null;
-    const activeCount = countActiveItemsStmt.get(before.project_id).n;
+    const activeCount = countActiveItemsStmt.get(ownerType, ownerId).n;
     if (activeCount >= activeCap) {
       const score = (before.confidence || 0) * (before.importance || 1);
-      const victim = lowestEvictableStmt.get(before.project_id);
+      const victim = lowestEvictableStmt.get(ownerType, ownerId);
       if (!victim || score <= victim.score) {
         const e = new Error('cannot restore: active memory is at capacity');
         e.code = 'MEMORY_CAP_FULL';
