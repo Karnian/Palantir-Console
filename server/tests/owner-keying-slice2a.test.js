@@ -730,7 +730,8 @@ test('database migrate hook runs slice2a merge before applying migration 034 ind
   t.after(() => { try { close(); } catch { /* ignore */ } });
   migrate();
 
-  assert.equal(db.prepare('SELECT MAX(version) AS version FROM schema_version').get().version, 34);
+  // 034 was the max when slice2a landed; slice3 (036) is now also applied.
+  assert.ok(db.prepare('SELECT MAX(version) AS version FROM schema_version').get().version >= 34);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM master_memory_items WHERE content_hash=? AND status='active'").get(hash).n, 1);
   assert.equal(db.prepare("SELECT status FROM master_memory_items WHERE id='hook-cross'").get().status, 'superseded');
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM master_memory_candidates WHERE dedup_key='hook-cand'").get().n, 1);
