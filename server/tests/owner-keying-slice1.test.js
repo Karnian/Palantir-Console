@@ -41,6 +41,33 @@ async function setupDb(cleanup) {
   return db;
 }
 
+async function setupDbThroughMigration(cleanup, maxVersion) {
+  const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'palantir-ok-slice1-pre-'));
+  cleanup.push(() => fsp.rm(tmp, { recursive: true, force: true }).catch(() => {}));
+  const Database = require('better-sqlite3');
+  const db = new Database(path.join(tmp, 'test.db'));
+  cleanup.push(() => { try { db.close(); } catch { /* */ } });
+  db.exec(`CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT DEFAULT (datetime('now'))
+  )`);
+
+  const migrDir = path.join(__dirname, '../db/migrations');
+  const files = fs.readdirSync(migrDir)
+    .filter(f => /^\d+.*\.sql$/.test(f))
+    .sort();
+
+  for (const file of files) {
+    const version = parseInt(file.match(/^(\d+)/)[1], 10);
+    if (version > maxVersion) break;
+    const sql = fs.readFileSync(path.join(migrDir, file), 'utf8');
+    db.exec(sql);
+    db.prepare('INSERT OR IGNORE INTO schema_version (version) VALUES (?)').run(version);
+  }
+
+  return db;
+}
+
 // ============================================================
 // Helpers for seeding rows into each of the 9 tables
 // ============================================================
@@ -590,7 +617,9 @@ test('dual-write L2: recordInjection (master_memory_injection) sets owner user/u
 test('detectCrossScopeConflicts: same content_hash across user+cross_project scopes → conflict detected', async (t) => {
   const cleanup = [];
   try {
-    const db = await setupDb(cleanup);
+    // Slice 2a adds owner-unique indexes that correctly reject this fixture.
+    // Keep this slice-1 detector test on the through-033 schema.
+    const db = await setupDbThroughMigration(cleanup, 33);
 
     const content = 'shared pattern cross scope';
     const hash = sha256(content);
@@ -624,7 +653,9 @@ test('detectCrossScopeConflicts: same content_hash across user+cross_project sco
 test('detectCrossScopeConflicts: same fact_key across user+cross_project scopes → conflict detected', async (t) => {
   const cleanup = [];
   try {
-    const db = await setupDb(cleanup);
+    // Slice 2a adds owner-unique indexes that correctly reject this fixture.
+    // Keep this slice-1 detector test on the through-033 schema.
+    const db = await setupDbThroughMigration(cleanup, 33);
 
     const factKey = 'env.node_version';
 
@@ -714,7 +745,9 @@ test('detectCrossScopeConflicts candidates: same rule+dedup_key across different
   // must surface this pair.
   const cleanup = [];
   try {
-    const db = await setupDb(cleanup);
+    // Slice 2a adds owner-unique indexes that correctly reject this fixture.
+    // Keep this slice-1 detector test on the through-033 schema.
+    const db = await setupDbThroughMigration(cleanup, 33);
 
     const id1 = crypto.randomUUID();
     const id2 = crypto.randomUUID();
@@ -777,7 +810,9 @@ test('detectCrossScopeConflicts candidates: one row promoted → still detected 
   // has been promoted. The fixed SQL drops the status filter entirely.
   const cleanup = [];
   try {
-    const db = await setupDb(cleanup);
+    // Slice 2a adds owner-unique indexes that correctly reject this fixture.
+    // Keep this slice-1 detector test on the through-033 schema.
+    const db = await setupDbThroughMigration(cleanup, 33);
 
     const idPending = crypto.randomUUID();
     const idPromoted = crypto.randomUUID();

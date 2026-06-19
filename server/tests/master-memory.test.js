@@ -124,18 +124,17 @@ test('archiveMemory: status archived, bumps revision, excluded from active', (t)
   assert.equal(svc.listForScope('user', 'archived').length, 1);
 });
 
-test('scope isolation + cross_project dedup (NOT NULL scope avoids NULL-distinct hole)', (t) => {
+test('scope isolation + cross_project same-scope dedup', (t) => {
   const svc = createMasterMemoryService(setupDb(t));
-  svc.createMemoryItem({ scope: 'user', kind: 'preference', content: 'shared text', origin: 'human' });
-  svc.createMemoryItem({ scope: 'cross_project', kind: 'preference', content: 'shared text', origin: 'human' });
-  // different scope = different dedup partition → both active
+  svc.createMemoryItem({ scope: 'user', kind: 'preference', content: 'user scoped text', origin: 'human' });
+  svc.createMemoryItem({ scope: 'cross_project', kind: 'preference', content: 'cross scoped text', origin: 'human' });
   assert.equal(svc.listForScope('user').length, 1);
   assert.equal(svc.listForScope('cross_project').length, 1);
   // retrieve does not cross scopes
-  const u = svc.retrieve('user', { taskContext: 'shared text' });
+  const u = svc.retrieve('user', { taskContext: 'user scoped text' });
   assert.ok(u.every((r) => r.scope === 'user'));
   // two cross_project identical → dedup merges (scope NOT NULL → unique index fires)
-  const c2 = svc.createMemoryItem({ scope: 'cross_project', kind: 'preference', content: 'shared text', origin: 'human' });
+  const c2 = svc.createMemoryItem({ scope: 'cross_project', kind: 'preference', content: 'cross scoped text', origin: 'human' });
   assert.equal(c2.source_count, 2, 'cross_project dedup works (no NULL-distinct hole)');
 });
 
