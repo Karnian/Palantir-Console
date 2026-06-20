@@ -778,6 +778,10 @@ function createApp(options = {}) {
     },
   });
   const compositionLedger = createCompositionLedger(db);
+  if (memoryComposerEnabled) {
+    const seedResult = compositionLedger.seedFromLegacyLedgers();
+    console.log('[composer] flip-seed result:', seedResult);
+  }
   const conversationService = createConversationService({
     runService,
     managerRegistry,
