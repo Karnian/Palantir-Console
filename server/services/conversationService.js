@@ -332,6 +332,23 @@ function createConversationService({
             provenanceKey: projectId,
             currentOwnerRevisions,
           });
+          // Phase 1b gate parity monitor (COMPOSER-ON only — NEW ledger is
+          // maintained so comparison is meaningful). Read-only and never-throws.
+          try {
+            const oldDecision = memoryService.shouldInject(run.id, projectId);
+            const oldInject = !!(oldDecision && oldDecision.inject);
+            if (eventBus) {
+              eventBus.emit('memory:gate_parity', {
+                runId: run.id,
+                conversationId,
+                slotKind: 'pm',
+                provenanceKey: projectId,
+                newCompose: dec.compose,
+                oldInject,
+                agree: dec.compose === oldInject,
+              });
+            }
+          } catch { /* never-throws */ }
           if (dec.compose) {
             const { block, composition } = memoryComposer.compose({
               owners: [{ owner_type: 'workspace', owner_id: projectId }],
@@ -449,6 +466,23 @@ function createConversationService({
             provenanceKey: 'user',
             currentOwnerRevisions,
           });
+          // Phase 1b gate parity monitor (Top slot, COMPOSER-ON only).
+          // Read-only and never-throws.
+          try {
+            const oldDecision = masterMemoryService.shouldInject(run.id, 'user');
+            const oldInject = !!(oldDecision && oldDecision.inject);
+            if (eventBus) {
+              eventBus.emit('memory:gate_parity', {
+                runId: run.id,
+                conversationId,
+                slotKind: 'top',
+                provenanceKey: 'user',
+                newCompose: dec.compose,
+                oldInject,
+                agree: dec.compose === oldInject,
+              });
+            }
+          } catch { /* never-throws */ }
           if (dec.compose) {
             const { block, composition } = memoryComposer.compose({
               owners: [{ owner_type: 'user', owner_id: 'user', provenance: 'user' }],

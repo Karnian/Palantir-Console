@@ -17,6 +17,8 @@
  *     (memoryService.shouldInject / recordInjection) are NOT replaced here;
  *     they remain live until A2-3 parity retire.
  *   - behavior-preserving: the new ledger is unused until A2-3 wires it in.
+ *   - CONTRACT: manager-slot compositions use (run, conversation) identity.
+ *     task_id=null is by-design — manager runs are not task-bound.
  *
  * peek-then-commit pattern (caller responsibility):
  *   1. shouldCompose() — gate check (pre-compose, currentOwnerRevisions provided by caller)
