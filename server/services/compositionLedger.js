@@ -39,6 +39,20 @@ const { randomUUID } = require('node:crypto');
 function createCompositionLedger(db) {
   // ── prepared statements ───────────────────────────────────────────────────
 
+  // commitAccepted: insert event with status='accepted' directly (no pending step)
+  const stmtInsertEventAccepted = db.prepare(`
+    INSERT INTO memory_composition_events
+      (id, run_id, conversation_id, task_id, slot_kind, provenance_key, mode,
+       composer_version, policy_version, prompt_payload_hash, retrieval_query_hash,
+       token_budget, owner_vector_hash, selected_set_hash, fingerprint, block_hash,
+       status, accepted_at)
+    VALUES
+      (@id, @run_id, @conversation_id, @task_id, @slot_kind, @provenance_key, @mode,
+       @composer_version, @policy_version, @prompt_payload_hash, @retrieval_query_hash,
+       @token_budget, @owner_vector_hash, @selected_set_hash, @fingerprint, @block_hash,
+       'accepted', datetime('now'))
+  `);
+
   const stmtInsertEvent = db.prepare(`
     INSERT INTO memory_composition_events
       (id, run_id, conversation_id, task_id, slot_kind, provenance_key, mode,
@@ -208,6 +222,99 @@ function createCompositionLedger(db) {
     return id;
   });
 
+  // ── commitAccepted transaction ────────────────────────────────────────────
+  // Merges record+accept into a single db.transaction, and if legacyWriteFn
+  // is provided calls it INSIDE the same transaction so all writes are atomic.
+  // THROWS on error (by design — atomicity requires rollback on any failure).
+  const txCommitAccepted = db.transaction((composition, opts, legacyWriteFn) => {
+    const {
+      runId,
+      conversationId = null,
+      taskId = null,
+      slotKind,
+      provenanceKey,
+      mode = null,
+      promptPayloadHash = null,
+      blockHash = null,
+    } = opts;
+
+    const {
+      fingerprint,
+      owner_states = [],
+      item_edges = [],
+      composer_version = '',
+      policy_version = '',
+      retrieval_query_hash = null,
+      token_budget = null,
+      owner_vector_hash: composerOwnerVectorHash = null,
+      selected_set_hash: composerSelectedSetHash = null,
+    } = composition;
+
+    const id = randomUUID();
+
+    stmtInsertEventAccepted.run({
+      id,
+      run_id: runId,
+      conversation_id: conversationId,
+      task_id: taskId,
+      slot_kind: slotKind,
+      provenance_key: provenanceKey,
+      mode,
+      composer_version,
+      policy_version,
+      prompt_payload_hash: promptPayloadHash,
+      retrieval_query_hash,
+      token_budget,
+      owner_vector_hash: composerOwnerVectorHash,
+      selected_set_hash: composerSelectedSetHash,
+      fingerprint,
+      block_hash: blockHash,
+    });
+
+    for (const os of owner_states) {
+      stmtInsertOwnerState.run({
+        composition_id: id,
+        owner_type: os.owner_type ?? null,
+        owner_id: os.owner_id ?? null,
+        provenance_key: os.provenance ?? null,
+        revision: os.revision ?? null,
+        selected_set_hash: os.selected_set_hash ?? null,
+        suppressed_set_hash: os.suppressed_set_hash ?? null,
+        selected_count: os.selected_count ?? null,
+        suppressed_count: os.suppressed_count ?? null,
+        budget_limit: os.budget_limit ?? null,
+        budget_used: os.budget_used ?? null,
+      });
+    }
+
+    for (const edge of item_edges) {
+      stmtInsertEdge.run({
+        composition_id: id,
+        item_table: edge.item_table,
+        item_id: edge.item_id ?? null,
+        item_revision: edge.item_revision ?? null,
+        content_hash: edge.content_hash ?? null,
+        fact_key: edge.fact_key ?? null,
+        kind: edge.kind ?? null,
+        source_owner_type: edge.source_owner_type ?? null,
+        source_owner_id: edge.source_owner_id ?? null,
+        provenance_key: edge.provenance ?? null,
+        decision: edge.decision,
+        reason: edge.reason ?? null,
+        rank: edge.rank ?? null,
+        token_cost: edge.token_cost ?? null,
+      });
+    }
+
+    // Call legacyWriteFn inside the same tx so it joins the transaction.
+    // If it throws, the entire tx rolls back — including the event row above.
+    if (typeof legacyWriteFn === 'function') {
+      legacyWriteFn();
+    }
+
+    return id;
+  });
+
   // ── public API ────────────────────────────────────────────────────────────
 
   return {
@@ -236,6 +343,27 @@ function createCompositionLedger(db) {
         console.error('[compositionLedger] record failed (degraded):', err.message);
         return null;
       }
+    },
+
+    /**
+     * Atomic commit: inserts the composition event with status='accepted' directly
+     * (merges record+accept), inserts owner_state and item_edges rows, and if
+     * legacyWriteFn is a function calls it INSIDE the same db.transaction so all
+     * writes are atomic. If legacyWriteFn throws, the entire transaction rolls back
+     * (no orphan composition rows).
+     *
+     * THROWS on error — atomicity is the contract; callers must wrap in try/catch.
+     *
+     * @param {object} composition - memoryComposer.compose().composition
+     * @param {object} opts        - same shape as record() opts
+     * @param {Function|undefined} legacyWriteFn - optional sync fn called inside tx
+     * @returns {string} compositionId
+     */
+    commitAccepted(composition, opts, legacyWriteFn) {
+      if (!composition || !opts) {
+        throw new Error('commitAccepted: composition and opts are required');
+      }
+      return txCommitAccepted(composition, opts, legacyWriteFn);
     },
 
     /**

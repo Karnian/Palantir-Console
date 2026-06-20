@@ -270,6 +270,30 @@ function createConversationService({
       err.httpStatus = 404;
       throw err;
     }
+
+    // Phase 0c (B3) — binding assert: fail-closed invariant check before ANY
+    // memory read. A mismatch means the registry returned a run that does not
+    // belong to this conversation slot — injecting memory into it would cause
+    // cross-project contamination (worse than no-injection). Throw 502 so the
+    // caller surfaces a visible error rather than silently poisoning the turn.
+    // Worker sends (is_manager=0) go through sendToWorker(), never here.
+    {
+      const expectedLayer = isTop ? 'top' : 'pm';
+      if (
+        !run.is_manager ||
+        run.manager_layer !== expectedLayer ||
+        run.conversation_id !== conversationId
+      ) {
+        const bindErr = new Error(
+          `manager run binding mismatch: run.id=${run.id} run.conversation_id=${run.conversation_id} ` +
+          `run.is_manager=${run.is_manager} run.manager_layer=${run.manager_layer} ` +
+          `expected conversationId=${conversationId} layer=${expectedLayer}`
+        );
+        bindErr.httpStatus = 502;
+        throw bindErr;
+      }
+    }
+
     const adapter = managerRegistry.getActiveAdapter(conversationId)
       || managerAdapterFactory.getAdapter(run.manager_adapter || 'claude-code');
 
@@ -313,6 +337,19 @@ function createConversationService({
               owners: [{ owner_type: 'workspace', owner_id: projectId }],
               taskContext: originalText,
             });
+            // Phase 0b (S9): composition===null means compose() hit its outer catch.
+            // block===null with composition!==null is normal empty-memory — NOT a failure.
+            if (composition === null) {
+              log(`composer failed (compose() returned null) for ${conversationId} (run=${run.id})`);
+              if (eventBus) {
+                eventBus.emit('memory:composer_failed', {
+                  runId: run.id,
+                  conversationId,
+                  slotKind: 'pm',
+                  provenanceKey: projectId,
+                });
+              }
+            }
             // [Q4 BLOCKER] only prepend if BOTH block and composition are non-null.
             // block null → skip prepend AND record (gate pollution prevention).
             if (block && composition) {
@@ -417,6 +454,19 @@ function createConversationService({
               owners: [{ owner_type: 'user', owner_id: 'user', provenance: 'user' }],
               taskContext: originalText,
             });
+            // Phase 0b (S9): composition===null means compose() hit its outer catch.
+            // block===null with composition!==null is normal empty-memory — NOT a failure.
+            if (composition === null) {
+              log(`master composer failed (compose() returned null) for ${conversationId} (run=${run.id})`);
+              if (eventBus) {
+                eventBus.emit('memory:composer_failed', {
+                  runId: run.id,
+                  conversationId,
+                  slotKind: 'top',
+                  provenanceKey: 'user',
+                });
+              }
+            }
             // [Q4 BLOCKER] only prepend if BOTH block and composition are non-null.
             // block null → skip prepend AND record (gate pollution prevention).
             if (block && composition) {
@@ -534,23 +584,26 @@ function createConversationService({
     // here, leaving the ledger untouched so the next send re-injects.
     // Never let a ledger write break a successfully delivered message.
     if (memoryComposerEnabled && compositionLedger && memoryComposer) {
-      // A2-3a: Composer+Ledger commit path (flag ON).
-      // [Q3] record/accept here (commit phase), never in peek phase.
-      // [Q5] dual-write: old pm_memory_injection ledger sync maintained.
+      // A2-3a / Phase 0a (B4): Atomic Composer+Ledger commit path (flag ON).
+      // Single commitAccepted() call: event(accepted) + owner_state + edges +
+      // legacyWriteFn all in one db.transaction — if any part throws the entire
+      // tx rolls back (no orphan composition rows, no ledger desync).
       if (composerInjection) {
         try {
-          const compId = compositionLedger.record(composerInjection.composition, {
-            runId: run.id,
-            conversationId,
-            taskId: null, // taskId not available at this scope; A2-3b may extend
-            slotKind: 'pm',
-            provenanceKey: composerInjection.provenanceKey,
-          });
-          if (compId) compositionLedger.accept(compId);
-          // [Q5] dual-write: old ledger remains live (retire is slice5)
-          if (memoryService && projectId) {
-            memoryService.recordInjection(run.id, projectId, composerInjection.revision);
-          }
+          compositionLedger.commitAccepted(
+            composerInjection.composition,
+            {
+              runId: run.id,
+              conversationId,
+              taskId: null,
+              slotKind: 'pm',
+              provenanceKey: composerInjection.provenanceKey,
+            },
+            // [Q5] dual-write: old pm_memory_injection ledger inside same tx
+            memoryService && projectId
+              ? () => memoryService.recordInjection(run.id, projectId, composerInjection.revision)
+              : undefined,
+          );
         } catch (ledgerErr) {
           log(`composer ledger write failed for ${conversationId} (run=${run.id}): ${ledgerErr.message}`);
         }
@@ -565,21 +618,23 @@ function createConversationService({
     }
     // L2 P1b / A2-3b: commit the Master memory injection ledger (Top slot), same peek-then-commit discipline.
     if (memoryComposerEnabled && compositionLedger && memoryComposer) {
-      // A2-3b: Composer+Ledger commit path (Top slot, flag ON).
-      // [Q3] record/accept here (commit phase), never in peek phase.
-      // [Q5] dual-write: old master_memory_injection ledger sync maintained.
+      // A2-3b / Phase 0a (B4): Atomic Composer+Ledger commit path (Top slot, flag ON).
+      // Single commitAccepted() call: event(accepted) + owner_state + edges +
+      // legacyWriteFn all in one db.transaction — rollback on any failure.
       if (masterComposerInjection) {
         try {
-          const compId = compositionLedger.record(masterComposerInjection.composition, {
-            runId: run.id,
-            conversationId,
-            taskId: null,
-            slotKind: 'top',
-            provenanceKey: masterComposerInjection.provenanceKey,
-          });
-          if (compId) compositionLedger.accept(compId);
-          // [Q5] dual-write: old master_memory_injection ledger remains live (retire is slice5)
-          masterMemoryService.recordInjection(run.id, 'user', masterComposerInjection.revision);
+          compositionLedger.commitAccepted(
+            masterComposerInjection.composition,
+            {
+              runId: run.id,
+              conversationId,
+              taskId: null,
+              slotKind: 'top',
+              provenanceKey: masterComposerInjection.provenanceKey,
+            },
+            // [Q5] dual-write: old master_memory_injection ledger inside same tx
+            () => masterMemoryService.recordInjection(run.id, 'user', masterComposerInjection.revision),
+          );
         } catch (ledgerErr) {
           log(`master composer ledger write failed for ${conversationId} (run=${run.id}): ${ledgerErr.message}`);
         }
