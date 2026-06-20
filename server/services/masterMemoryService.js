@@ -169,13 +169,31 @@ function createMasterMemoryService(db, eventBus) {
       owner_id = excluded.owner_id
   `);
 
-  // P1c Slice 1: Master candidates. Use ON CONFLICT against only the dedup
-  // UNIQUE so CHECK violations (bad rule/scope/raw_json) still surface.
-  const insertCandidateStmt = db.prepare(`
-    INSERT INTO master_memory_candidates (id, scope, rule, raw_json, dedup_key, owner_type, owner_id)
-    VALUES (@id, @scope, @rule, @rawJson, @dedupKey, @ownerType, @ownerId)
-    ON CONFLICT(rule, scope, dedup_key) DO NOTHING
-  `);
+  // P1c Slice 1 / S5-STORAGE: Master candidates. Use ON CONFLICT against the
+  // owner-keyed dedup UNIQUE so CHECK violations (bad rule/scope/raw_json) still
+  // surface. After migration 039 rebuild, the table UNIQUE is
+  // (rule, owner_type, owner_id, dedup_key) — scope is NOT part of the dedup key.
+  // Adaptive: try the post-039 owner-keyed constraint first; fall back to the
+  // legacy scope-keyed UNIQUE if migration 039 has not yet run (partial-migration DBs).
+  let insertCandidateStmt;
+  try {
+    insertCandidateStmt = db.prepare(`
+      INSERT INTO master_memory_candidates (id, scope, rule, raw_json, dedup_key, owner_type, owner_id)
+      VALUES (@id, @scope, @rule, @rawJson, @dedupKey, @ownerType, @ownerId)
+      ON CONFLICT(rule, owner_type, owner_id, dedup_key) DO NOTHING
+    `);
+  } catch (prepErr) {
+    // Fall back ONLY when the owner-keyed UNIQUE does not exist yet (pre-039 DB).
+    // Any other prepare error (e.g. a typo'd column name) MUST surface — never
+    // silently degrade to the legacy path (Codex review SERIOUS-2).
+    if (!/ON CONFLICT clause does not match/i.test(prepErr && prepErr.message)) throw prepErr;
+    // Migration 039 not yet applied — fall back to the legacy scope-keyed constraint.
+    insertCandidateStmt = db.prepare(`
+      INSERT INTO master_memory_candidates (id, scope, rule, raw_json, dedup_key, owner_type, owner_id)
+      VALUES (@id, @scope, @rule, @rawJson, @dedupKey, @ownerType, @ownerId)
+      ON CONFLICT(rule, scope, dedup_key) DO NOTHING
+    `);
+  }
   const getCandidateByDedupOwnerStmt = db.prepare(`
     SELECT *
     FROM master_memory_candidates
@@ -583,17 +601,30 @@ function createMasterMemoryService(db, eventBus) {
     // with the same dedup_key from a different provenance scope de-duplicates cleanly.
     // Note: the duplicate remember's provenance is not separately recorded on the candidate
     // row. Revisit in deferred cross_project work if provenance union tracking is needed.
+    // S5-STORAGE: owner-keyed dedup pre-check (common-case fast path).
+    // Mirrors L1 memoryService.createCandidate race-safe pattern.
     const existing = getCandidateByDedupOwnerStmt.get(ownerType, ownerId, r, key);
     if (existing) return toPublicCandidate(existing);
-    insertCandidateStmt.run({
-      id: crypto.randomUUID(),
-      scope: s,
-      rule: r,
-      rawJson: raw,
-      dedupKey: key,
-      ownerType,
-      ownerId,
-    });
+    // Race safety: ON CONFLICT(rule, owner_type, owner_id, dedup_key) DO NOTHING handles
+    // concurrent inserts; try/catch catches residual UNIQUE constraint errors from
+    // a cross-process race window between pre-check and insert.
+    // All other errors (CHECK violations, bad rule/scope/rawJson) are rethrown.
+    try {
+      insertCandidateStmt.run({
+        id: crypto.randomUUID(),
+        scope: s,
+        rule: r,
+        rawJson: raw,
+        dedupKey: key,
+        ownerType,
+        ownerId,
+      });
+    } catch (err) {
+      if (err && err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+        return toPublicCandidate(getCandidateByDedupOwnerStmt.get(ownerType, ownerId, r, key));
+      }
+      throw err;
+    }
     return toPublicCandidate(getCandidateByDedupOwnerStmt.get(ownerType, ownerId, r, key));
   }
 

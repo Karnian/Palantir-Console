@@ -283,11 +283,6 @@ function createMemoryService(db, eventBus) {
     bumpRevisionStmt.run(projectId, owner_type, owner_id);
   }
 
-  function resolveOwnerFromProject(projectId) {
-    const { owner_type, owner_id } = normalizeOwner({ project_id: projectId });
-    return { ownerType: owner_type, ownerId: owner_id };
-  }
-
   function getRevision(projectId) {
     const row = getRevisionStmt.get(projectId);
     return row ? row.revision : 0;
@@ -323,8 +318,7 @@ function createMemoryService(db, eventBus) {
     return getMemoryItemByIdStmt.get(item.id);
   });
 
-  const mergeMemoryItemByHashTx = db.transaction((projectId, contentHash) => {
-    const { ownerType, ownerId } = resolveOwnerFromProject(projectId);
+  const mergeMemoryItemByHashTx = db.transaction((ownerType, ownerId, contentHash) => {
     mergeMemoryItemByHashStmt.run({ ownerType, ownerId, contentHash });
     return getActiveMemoryItemByHashStmt.get(ownerType, ownerId, contentHash);
   });
@@ -385,7 +379,8 @@ function createMemoryService(db, eventBus) {
       return insertMemoryItemTx(item);
     } catch (err) {
       if (isUniqueConstraint(err, 'content_hash')) {
-        return mergeMemoryItemByHashTx(projectId, contentHash);
+        // S5-STORAGE: pass owner directly (already resolved above at normalizeOwner call).
+        return mergeMemoryItemByHashTx(owner_type, owner_id, contentHash);
       }
       if (isUniqueConstraint(err, 'fact_key')) {
         throw err;
@@ -535,7 +530,7 @@ function createMemoryService(db, eventBus) {
       const { taskContext, limit } = options || {};
       const k = getEffectiveLimit(limit);
       const exactQ = buildMatchQuery(taskContext);
-      const { ownerType, ownerId } = resolveOwnerFromProject(projectId);
+      const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
 
       if (!exactQ) {
         return capRowsByContentLength(retrieveFallback(ownerType, ownerId, k));
@@ -608,7 +603,7 @@ function createMemoryService(db, eventBus) {
   // status: 'active' (default; valid_to-filtered, used by injection) / 'archived'
   // / 'superseded' / 'all' (correction UI). Only the active path is injected.
   function listForProject(projectId, status = 'active') {
-    const { ownerType, ownerId } = resolveOwnerFromProject(projectId);
+    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
     if (status === 'all') return listAllStatusStmt.all(ownerType, ownerId);
     if (status === 'active') return listForProjectStmt.all(ownerType, ownerId);
     return listByStatusStmt.all(ownerType, ownerId, status);
@@ -625,7 +620,7 @@ function createMemoryService(db, eventBus) {
   // semantic dedup across a 200-cap project is a later slice; surfaced via
   // memory:distill_context_capped (Codex SERIOUS 3).
   function listActiveForDistill(projectId, max = 60) {
-    const { ownerType, ownerId } = resolveOwnerFromProject(projectId);
+    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
     const rows = fallbackRetrieveStmt.all({ ownerType, ownerId, k: max });
     const out = [];
     for (const r of rows) {
@@ -661,13 +656,31 @@ function createMemoryService(db, eventBus) {
 
   // PR2b: rule candidates (R1b/R3/R4). Deterministic rules stage raw signals
   // here; PR3 batch LLM promotes them to active memory_items. Idempotent via an
-  // owner-keyed pre-check plus legacy UNIQUE(rule, project_id, dedup_key).
-  // ON CONFLICT targets ONLY the legacy dedup UNIQUE — a CHECK violation (bad
+  // owner-keyed pre-check plus UNIQUE(rule, owner_type, owner_id, dedup_key).
+  // ON CONFLICT targets the owner-keyed dedup UNIQUE — a CHECK violation (bad
   // rule / non-object raw_json) must surface, not be swallowed like
   // `INSERT OR IGNORE` would (Codex cross-review SERIOUS).
-  const insertCandidateStmt = db.prepare(
-    'INSERT INTO memory_candidates (id, project_id, rule, raw_json, dedup_key, owner_type, owner_id) VALUES (@id, @projectId, @rule, @rawJson, @dedupKey, @ownerType, @ownerId) ON CONFLICT(rule, project_id, dedup_key) DO NOTHING'
-  );
+  // S5-STORAGE: ON CONFLICT key updated from (rule, project_id, dedup_key) to
+  // owner-keyed (rule, owner_type, owner_id, dedup_key) after migration 039 rebuild.
+  // Adaptive: migration 039 may not have run yet (tests that stop at migration 037/038),
+  // so we try the new owner-keyed ON CONFLICT first and fall back to the legacy key
+  // (project_id-based) if the new constraint doesn't exist. The pre-check + try/catch
+  // wrapper in createCandidate() handles any residual race regardless of which key fires.
+  let insertCandidateStmt;
+  try {
+    insertCandidateStmt = db.prepare(
+      'INSERT INTO memory_candidates (id, project_id, rule, raw_json, dedup_key, owner_type, owner_id) VALUES (@id, @projectId, @rule, @rawJson, @dedupKey, @ownerType, @ownerId) ON CONFLICT(rule, owner_type, owner_id, dedup_key) DO NOTHING'
+    );
+  } catch (prepErr) {
+    // Fall back ONLY when the owner-keyed UNIQUE does not exist yet (pre-039 DB).
+    // Any other prepare error (e.g. a typo'd column name) MUST surface — never
+    // silently degrade to the legacy path (Codex review SERIOUS-2).
+    if (!/ON CONFLICT clause does not match/i.test(prepErr && prepErr.message)) throw prepErr;
+    // Migration 039 not yet applied — fall back to the legacy project_id-keyed constraint.
+    insertCandidateStmt = db.prepare(
+      'INSERT INTO memory_candidates (id, project_id, rule, raw_json, dedup_key, owner_type, owner_id) VALUES (@id, @projectId, @rule, @rawJson, @dedupKey, @ownerType, @ownerId) ON CONFLICT(rule, project_id, dedup_key) DO NOTHING'
+    );
+  }
   const getCandidateByOwnerDedupStmt = db.prepare(
     'SELECT * FROM memory_candidates WHERE owner_type = ? AND owner_id = ? AND rule = ? AND dedup_key = ?'
   );
@@ -689,13 +702,14 @@ function createMemoryService(db, eventBus) {
       throw new Error('rawJson must be a non-null, non-array object');
     }
     const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
-    // P-A1 slice3b [2]: owner-keyed dedup pre-check (common-case fast path).
-    // Dual safety: DB also has UNIQUE(rule, project_id, dedup_key) as second defense.
+    // S5-STORAGE: owner-keyed dedup pre-check (common-case fast path).
+    // DB table UNIQUE(rule, owner_type, owner_id, dedup_key) is the primary defense
+    // after migration 039 rebuilt memory_candidates with the owner-keyed constraint.
     const existing = getCandidateByOwnerDedupStmt.get(ownerType, ownerId, rule, dedupKey);
     if (existing) return existing;
-    // SERIOUS-1 fix: ON CONFLICT targets only the legacy dedup unique index; the 037
-    // owner-unique can fire first in a cross-process race and is NOT covered by DO NOTHING.
-    // Wrap in try/catch: SQLITE_CONSTRAINT_UNIQUE → return winner via owner-dedup lookup.
+    // Race safety: ON CONFLICT(rule, owner_type, owner_id, dedup_key) DO NOTHING handles
+    // concurrent inserts; try/catch catches any residual UNIQUE constraint error
+    // (e.g. from a cross-process race window between pre-check and insert).
     // All other errors (CHECK violations, bad rule, etc.) are rethrown so they surface.
     try {
       insertCandidateStmt.run({ id: crypto.randomUUID(), projectId, rule, rawJson: raw, dedupKey, ownerType, ownerId });
@@ -709,7 +723,7 @@ function createMemoryService(db, eventBus) {
   }
 
   function listCandidates(projectId, status = 'pending') {
-    const { ownerType, ownerId } = resolveOwnerFromProject(projectId);
+    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
     return listCandidatesStmt.all(ownerType, ownerId, status);
   }
 
@@ -797,7 +811,7 @@ function createMemoryService(db, eventBus) {
 
   function enqueueDistillJob(projectId, kind = DISTILL_KIND) {
     if (!projectId) throw new Error('projectId is required');
-    const { ownerType, ownerId } = resolveOwnerFromProject(projectId);
+    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
     const existing = getActiveJobStmt.get(ownerType, ownerId, kind);
     if (existing) return { job: existing, created: false };
     const id = crypto.randomUUID();
@@ -826,8 +840,14 @@ function createMemoryService(db, eventBus) {
   function claimDistillJob({ kind = DISTILL_KIND, projectId = null, staleSeconds = 600, maxAttempts = 5 } = {}) {
     requeueStaleJobs({ kind, staleSeconds, maxAttempts });
     const token = crypto.randomUUID();
-    const owner = projectId ? resolveOwnerFromProject(projectId) : { ownerType: null, ownerId: null };
-    const info = claimStmt.run({ kind, token, ownerType: owner.ownerType, ownerId: owner.ownerId });
+    let ownerType = null;
+    let ownerId = null;
+    if (projectId) {
+      const norm = normalizeOwner({ project_id: projectId });
+      ownerType = norm.owner_type;
+      ownerId = norm.owner_id;
+    }
+    const info = claimStmt.run({ kind, token, ownerType, ownerId });
     if (info.changes !== 1) return null;
     return getJobByTokenStmt.get(kind, token);
   }
@@ -914,7 +934,11 @@ function createMemoryService(db, eventBus) {
         throw e; // rolls back -> nothing written
       }
       const projectId = job.project_id;
-      const { ownerType, ownerId } = resolveOwnerFromProject(projectId);
+      // S5-STORAGE: use owner columns directly from the job row (set by migration 033/036
+      // backfill) instead of re-deriving from project_id. Falls back to normalizeOwner
+      // only when the columns are absent (e.g. test fixtures created before migration 033).
+      const ownerType = job.owner_type || normalizeOwner({ project_id: projectId }).owner_type;
+      const ownerId = job.owner_id || normalizeOwner({ project_id: projectId }).owner_id;
       let activeCount = countActiveItemsStmt.get(ownerType, ownerId).n;
       const promoted = [];
       const skipped = [];
@@ -1169,7 +1193,10 @@ function createMemoryService(db, eventBus) {
   const restoreTx = db.transaction(({ id, activeCap }) => {
     const before = getMemoryItemByIdStmt.get(id);
     if (!before || before.status !== 'archived') return { item: null, evicted: null };
-    const { ownerType, ownerId } = resolveOwnerFromProject(before.project_id);
+    // S5-STORAGE: read owner directly from the item row (backfilled by migration 033).
+    // Falls back to normalizeOwner only when columns are absent (pre-033 test fixtures).
+    const ownerType = before.owner_type || normalizeOwner({ project_id: before.project_id }).owner_type;
+    const ownerId = before.owner_id || normalizeOwner({ project_id: before.project_id }).owner_id;
     let evicted = null;
     const activeCount = countActiveItemsStmt.get(ownerType, ownerId).n;
     if (activeCount >= activeCap) {
