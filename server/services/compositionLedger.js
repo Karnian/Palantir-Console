@@ -29,6 +29,7 @@
  */
 
 const { randomUUID } = require('node:crypto');
+const { COMPOSER_VERSION, POLICY_VERSION } = require('./memoryComposer');
 
 // ─── factory ─────────────────────────────────────────────────────────────────
 
@@ -36,7 +37,7 @@ const { randomUUID } = require('node:crypto');
  * createCompositionLedger(db)
  *
  * @param {import('better-sqlite3').Database} db
- * @returns {{ record, accept, shouldCompose, cleanup }}
+ * @returns {{ record, accept, commitAccepted, shouldCompose, seedFromLegacyLedgers, cleanup }}
  */
 function createCompositionLedger(db) {
   // ── prepared statements ───────────────────────────────────────────────────
@@ -452,6 +453,135 @@ function createCompositionLedger(db) {
         // annotate-only: degrade to always compose (safe direction)
         console.error('[compositionLedger] shouldCompose failed (degraded, compose:true):', err.message);
         return { compose: true, reason: 'gate_error' };
+      }
+    },
+
+    // TRANSITION TOOL — S5-LEDGER REMOVAL TARGET
+    // Reads pm_memory_injection (025) and master_memory_injection (030).
+    // Must be REMOVED when those legacy tables are retired in S5-LEDGER,
+    // same lifecycle as the dual-write bridge. Do NOT call after migration removes those tables.
+    seedFromLegacyLedgers() {
+      try {
+        const result = { pmSeeded: 0, topSeeded: 0, skipped: 0 };
+
+        const txSeedFromLegacyLedgers = db.transaction(() => {
+          const stmtSelectPmLegacy = db.prepare(`
+            SELECT pm_run_id, project_id, injected_revision
+            FROM pm_memory_injection
+          `);
+          const stmtSelectTopLegacy = db.prepare(`
+            SELECT master_run_id, scope, injected_revision
+            FROM master_memory_injection
+            WHERE scope = 'user'
+          `);
+          const stmtHasAccepted = db.prepare(`
+            SELECT 1
+            FROM memory_composition_events
+            WHERE run_id = @run_id
+              AND slot_kind = @slot_kind
+              AND provenance_key = @provenance_key
+              AND status = 'accepted'
+            LIMIT 1
+          `);
+
+          for (const row of stmtSelectPmLegacy.all()) {
+            const hasAccepted = stmtHasAccepted.get({
+              run_id: row.pm_run_id,
+              slot_kind: 'pm',
+              provenance_key: row.project_id,
+            });
+            if (hasAccepted) {
+              result.skipped++;
+              continue;
+            }
+
+            const id = randomUUID();
+            stmtInsertEventAccepted.run({
+              id,
+              run_id: row.pm_run_id,
+              conversation_id: null,
+              task_id: null,
+              slot_kind: 'pm',
+              provenance_key: row.project_id,
+              mode: 'seed',
+              composer_version: COMPOSER_VERSION,
+              policy_version: POLICY_VERSION,
+              prompt_payload_hash: null,
+              retrieval_query_hash: null,
+              token_budget: null,
+              owner_vector_hash: null,
+              selected_set_hash: null,
+              fingerprint: `seed:${row.pm_run_id}:pm:${row.project_id}`,
+              block_hash: null,
+            });
+            stmtInsertOwnerState.run({
+              composition_id: id,
+              owner_type: 'workspace',
+              owner_id: row.project_id,
+              provenance_key: row.project_id,
+              revision: row.injected_revision,
+              selected_set_hash: null,
+              suppressed_set_hash: null,
+              selected_count: null,
+              suppressed_count: null,
+              budget_limit: null,
+              budget_used: null,
+            });
+            result.pmSeeded++;
+          }
+
+          for (const row of stmtSelectTopLegacy.all()) {
+            const hasAccepted = stmtHasAccepted.get({
+              run_id: row.master_run_id,
+              slot_kind: 'top',
+              provenance_key: 'user',
+            });
+            if (hasAccepted) {
+              result.skipped++;
+              continue;
+            }
+
+            const id = randomUUID();
+            stmtInsertEventAccepted.run({
+              id,
+              run_id: row.master_run_id,
+              conversation_id: null,
+              task_id: null,
+              slot_kind: 'top',
+              provenance_key: 'user',
+              mode: 'seed',
+              composer_version: COMPOSER_VERSION,
+              policy_version: POLICY_VERSION,
+              prompt_payload_hash: null,
+              retrieval_query_hash: null,
+              token_budget: null,
+              owner_vector_hash: null,
+              selected_set_hash: null,
+              fingerprint: `seed:${row.master_run_id}:top:user`,
+              block_hash: null,
+            });
+            stmtInsertOwnerState.run({
+              composition_id: id,
+              owner_type: 'user',
+              owner_id: 'user',
+              provenance_key: 'user',
+              revision: row.injected_revision,
+              selected_set_hash: null,
+              suppressed_set_hash: null,
+              selected_count: null,
+              suppressed_count: null,
+              budget_limit: null,
+              budget_used: null,
+            });
+            result.topSeeded++;
+          }
+        });
+
+        txSeedFromLegacyLedgers();
+        return result;
+      } catch (err) {
+        console.error('[compositionLedger] seedFromLegacyLedgers error:', err);
+        return { pmSeeded: 0, topSeeded: 0, skipped: 0 };
       }
     },
 
