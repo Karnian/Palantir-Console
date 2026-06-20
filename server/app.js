@@ -764,6 +764,13 @@ function createApp(options = {}) {
   // ON: conversationService uses memoryComposer+compositionLedger for PM injection.
   // OFF: existing shouldInject/retrieveForProject/buildInjectionBlock path unchanged.
   const memoryComposerEnabled = options.memoryComposer ?? (process.env.PALANTIR_MEMORY_COMPOSER === '1');
+  // P-A2 shadow parity burn-in: SHADOW ON + COMPOSER OFF = read-only observation.
+  // When both are true, old (live) injection path runs normally; the composer is
+  // also called read-only and a memory:composer_parity event is emitted for each
+  // slot turn. SHADOW is independent of COMPOSER; when COMPOSER is ON, shadow is
+  // irrelevant (new path is already live) so conversationService skips it.
+  const memoryComposerShadowEnabled = options.memoryComposerShadow
+    ?? (process.env.PALANTIR_MEMORY_COMPOSER_SHADOW === '1');
   const memoryComposer = createMemoryComposer({
     retrievers: {
       workspace: buildWorkspaceAdapter(memoryService),
@@ -782,6 +789,8 @@ function createApp(options = {}) {
     memoryComposer, // A2-3a: composer (flag ON path)
     compositionLedger, // A2-3a: ledger (flag ON path)
     memoryComposerEnabled, // A2-3a: flag gate
+    memoryComposerShadowEnabled, // P-A2: shadow parity burn-in (COMPOSER OFF only)
+    eventBus, // P-A2: shadow parity event bus
   });
   // v3 Phase 2: whenever a manager slot (top or pm:<projectId>) is cleared
   // — by explicit stop, liveness probe, or rotation — drop any lingering
@@ -971,6 +980,48 @@ function createApp(options = {}) {
   // Production callers have no reason to touch these, but exposing them
   // is harmless — they're the same instances already wired into the
   // routes.
+  // P-A2 shadow parity counter seam. Subscribes to memory:composer_parity events
+  // and accumulates a lightweight structured counter. Exposed on app.services so
+  // tests (and future diagnostics) can read aggregate parity statistics without
+  // scanning raw events. Never throws — annotate-only.
+  const composerParityCounter = {
+    total: 0,
+    old_injected: 0,
+    comparable: 0,
+    byte_match: 0,
+    byte_mismatch: 0,
+    old_skipped: 0,
+    shadow_error: 0,
+    reset() {
+      this.total = 0;
+      this.old_injected = 0;
+      this.comparable = 0;
+      this.byte_match = 0;
+      this.byte_mismatch = 0;
+      this.old_skipped = 0;
+      this.shadow_error = 0;
+    },
+  };
+  if (memoryComposerShadowEnabled && !memoryComposerEnabled) {
+    eventBus.subscribe((event) => {
+      if (event.channel !== 'memory:composer_parity') return;
+      try {
+        const d = event.data || {};
+        composerParityCounter.total++;
+        if (d.comparable) {
+          composerParityCounter.old_injected++;
+          composerParityCounter.comparable++;
+          if (d.blockMatch === true) composerParityCounter.byte_match++;
+          else composerParityCounter.byte_mismatch++;
+        } else if (d.reason === 'shadow_error') {
+          composerParityCounter.shadow_error++;
+        } else {
+          composerParityCounter.old_skipped++;
+        }
+      } catch { /* never throws */ }
+    });
+  }
+
   app.services = {
     runService,
     taskService,
@@ -987,6 +1038,7 @@ function createApp(options = {}) {
     compositionLedger, // A2-3a: test seam for asserting composition ledger entries
     masterMemoryDecayScheduler,
     masterMemoryXprojectScanner,
+    composerParityCounter, // P-A2: shadow parity aggregate counter (diagnostic seam)
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at
     // (createRun() always stamps status='queued' and cost_usd=0 at now).

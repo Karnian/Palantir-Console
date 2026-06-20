@@ -66,6 +66,14 @@ function createConversationService({
   memoryComposer,
   compositionLedger,
   memoryComposerEnabled,
+  // P-A2 shadow parity burn-in: when memoryComposerShadowEnabled=true AND
+  // memoryComposerEnabled=false, the old injection path emits a
+  // memory:composer_parity event comparing old block vs new composer block
+  // (read-only, no writes, no mutations to effectiveText or any ledger).
+  // SHADOW is only active when COMPOSER is OFF (COMPOSER on = new path is live,
+  // shadow is irrelevant).
+  memoryComposerShadowEnabled,
+  eventBus,
   logger,
 }) {
   // parentRunId -> array of notice strings
@@ -322,6 +330,7 @@ function createConversationService({
         }
       } else {
         // Existing path (flag OFF) — PRESERVE EXACTLY, zero changes.
+        let oldBlock = null;
         try {
           const decision = memoryService.shouldInject(run.id, projectId);
           if (decision && decision.inject) {
@@ -330,11 +339,52 @@ function createConversationService({
             if (block) {
               effectiveText = `${block}\n\n---\n\n${effectiveText}`;
               memoryInjection = { revision: decision.revision };
+              oldBlock = block;
             }
           }
         } catch (memErr) {
           log(`memory injection skipped for ${conversationId} (run=${run.id}): ${memErr.message}`);
           memoryInjection = null;
+        }
+        // P-A2 shadow parity: SHADOW ON + COMPOSER OFF only.
+        // Old path is already done; compare composer's read-only output (no writes).
+        if (memoryComposerShadowEnabled && !memoryComposerEnabled && memoryComposer && eventBus) {
+          try {
+            const { block: newBlock } = memoryComposer.compose({
+              owners: [{ owner_type: 'workspace', owner_id: projectId }],
+              taskContext: originalText,
+            });
+            const oldInjected = (oldBlock != null);
+            const comparable = oldInjected;
+            const blockMatch = comparable ? (oldBlock === newBlock) : null;
+            const reason = comparable ? (blockMatch ? 'match' : 'mismatch') : 'old_skipped';
+            eventBus.emit('memory:composer_parity', {
+              runId: run.id,
+              conversationId,
+              slotKind: 'pm',
+              provenanceKey: projectId,
+              comparable,
+              blockMatch,
+              reason,
+              oldLen: oldBlock ? oldBlock.length : 0,
+              newLen: newBlock ? newBlock.length : 0,
+            });
+          } catch (shadowErr) {
+            try {
+              eventBus.emit('memory:composer_parity', {
+                runId: run.id,
+                conversationId,
+                slotKind: 'pm',
+                provenanceKey: projectId,
+                comparable: false,
+                blockMatch: null,
+                reason: 'shadow_error',
+                message: shadowErr && shadowErr.message,
+                oldLen: 0,
+                newLen: 0,
+              });
+            } catch { /* shadow must never throw */ }
+          }
         }
       }
     }
@@ -384,6 +434,7 @@ function createConversationService({
         }
       } else {
         // Existing path (flag OFF) — PRESERVE EXACTLY, zero changes.
+        let oldMasterBlock = null;
         try {
           const decision = masterMemoryService.shouldInject(run.id, 'user');
           if (decision && decision.inject) {
@@ -395,11 +446,52 @@ function createConversationService({
             if (block) {
               effectiveText = `${block}\n\n---\n\n${effectiveText}`;
               masterMemoryInjection = { revision: decision.revision };
+              oldMasterBlock = block;
             }
           }
         } catch (memErr) {
           log(`master memory injection skipped for ${conversationId} (run=${run.id}): ${memErr.message}`);
           masterMemoryInjection = null;
+        }
+        // P-A2 shadow parity: SHADOW ON + COMPOSER OFF only.
+        // Old path is already done; compare composer's read-only output (no writes).
+        if (memoryComposerShadowEnabled && !memoryComposerEnabled && memoryComposer && eventBus) {
+          try {
+            const { block: newMasterBlock } = memoryComposer.compose({
+              owners: [{ owner_type: 'user', owner_id: 'user', provenance: 'user' }],
+              taskContext: originalText,
+            });
+            const oldInjected = (oldMasterBlock != null);
+            const comparable = oldInjected;
+            const blockMatch = comparable ? (oldMasterBlock === newMasterBlock) : null;
+            const reason = comparable ? (blockMatch ? 'match' : 'mismatch') : 'old_skipped';
+            eventBus.emit('memory:composer_parity', {
+              runId: run.id,
+              conversationId,
+              slotKind: 'top',
+              provenanceKey: 'user',
+              comparable,
+              blockMatch,
+              reason,
+              oldLen: oldMasterBlock ? oldMasterBlock.length : 0,
+              newLen: newMasterBlock ? newMasterBlock.length : 0,
+            });
+          } catch (shadowErr) {
+            try {
+              eventBus.emit('memory:composer_parity', {
+                runId: run.id,
+                conversationId,
+                slotKind: 'top',
+                provenanceKey: 'user',
+                comparable: false,
+                blockMatch: null,
+                reason: 'shadow_error',
+                message: shadowErr && shadowErr.message,
+                oldLen: 0,
+                newLen: 0,
+              });
+            } catch { /* shadow must never throw */ }
+          }
         }
       }
     }
