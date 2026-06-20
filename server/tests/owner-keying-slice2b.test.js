@@ -284,56 +284,19 @@ test('5. revision is SCOPE-keyed: cross_project write does not advance user revi
   assert.equal(svc.getRevision('user'), 1, 'user write bumps user revision');
   assert.equal(svc.getRevision('cross_project'), 0, 'user write does NOT bump cross_project revision');
 
-  // cross_project write bumps cross_project revision only — must NOT advance user gate
-  const runId = 'kill-test-run-blocker';
-  const dec = svc.shouldInject(runId, 'user');
-  assert.equal(dec.inject, true);
-  svc.recordInjection(runId, 'user', dec.revision);
-  assert.equal(svc.shouldInject(runId, 'user').inject, false, 'user gate closed after injection');
-
-  svc.createMemoryItem({ scope: 'cross_project', kind: 'pattern', content: 'cross write must not reopen user gate', origin: 'deterministic' });
+  // cross_project write bumps cross_project revision only — NOT the user revision.
+  // BLOCKER root: the revision counter is scope-keyed, so cross_project writes cannot
+  // re-trigger user injection. The injection GATE itself is now the Composer's
+  // shouldCompose (provenance-keyed via the composition ledger), covered by
+  // composition-ledger.test.js — the legacy shouldInject/recordInjection gate was
+  // retired in S5-LEDGER.
+  svc.createMemoryItem({ scope: 'cross_project', kind: 'pattern', content: 'cross write must not bump user revision', origin: 'deterministic' });
   assert.equal(svc.getRevision('cross_project'), 1, 'cross_project write bumps cross_project revision');
-  assert.equal(svc.getRevision('user'), 1, 'cross_project write does NOT change user revision');
-  // BLOCKER: this assertion proves cross_project writes do NOT re-trigger user injection
-  assert.equal(svc.shouldInject(runId, 'user').inject, false,
-    'BLOCKER: cross_project write must NOT reopen user injection gate');
+  assert.equal(svc.getRevision('user'), 1, 'BLOCKER: cross_project write must NOT change user revision');
 
-  // Only a user write re-opens the user gate
-  svc.createMemoryItem({ scope: 'user', kind: 'preference', content: 'second user write reopens gate', origin: 'human' });
-  assert.equal(svc.getRevision('user'), 2);
-  assert.equal(svc.shouldInject(runId, 'user').inject, true, 'user write does reopen user injection gate');
-});
-
-test('6. injection ledger is SCOPE-keyed: user and cross_project have independent ledger entries', (t) => {
-  const db = setupDb(t);
-  const svc = createMasterMemoryService(db);
-  svc.createMemoryItem({ scope: 'user', kind: 'preference', content: 'scope injection memory', origin: 'human' });
-  svc.createMemoryItem({ scope: 'cross_project', kind: 'pattern', content: 'cross scope injection memory', origin: 'human' });
-
-  const run = 'scope-injection-run';
-  const userDec = svc.shouldInject(run, 'user');
-  assert.equal(userDec.inject, true);
-  svc.recordInjection(run, 'user', userDec.revision);
-  assert.equal(svc.shouldInject(run, 'user').inject, false, 'user gate closed after user injection');
-
-  // cross_project gate is INDEPENDENT — recording user injection does NOT close cross_project gate
-  const crossDec = svc.shouldInject(run, 'cross_project');
-  assert.equal(crossDec.inject, true, 'cross_project gate independent of user ledger entry');
-  svc.recordInjection(run, 'cross_project', crossDec.revision);
-  assert.equal(svc.shouldInject(run, 'cross_project').inject, false);
-
-  assert.ok(svc.getInjectionRecord(run, 'user'), 'user injection record exists');
-  assert.ok(svc.getInjectionRecord(run, 'cross_project'), 'cross_project injection record exists');
-
-  // Only a user write re-opens the user gate (not cross_project writes)
-  svc.createMemoryItem({
-    scope: 'user',
-    kind: 'pattern',
-    content: 'user write reopens user gate only',
-    origin: 'human',
-  });
-  assert.equal(svc.shouldInject(run, 'user').inject, true, 'user write reopens user gate');
-  assert.equal(svc.shouldInject(run, 'cross_project').inject, false, 'user write does NOT reopen cross_project gate');
+  // Only a user write advances the user revision.
+  svc.createMemoryItem({ scope: 'user', kind: 'preference', content: 'second user write', origin: 'human' });
+  assert.equal(svc.getRevision('user'), 2, 'user write advances user revision');
 });
 
 test('7. Top injection behavior keeps user provenance and excludes cross_project rows', (t) => {

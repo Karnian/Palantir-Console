@@ -17,6 +17,8 @@ const { createConversationService } = require('../services/conversationService')
 const { createPmSpawnService } = require('../services/pmSpawnService');
 const { createMemoryService } = require('../services/memoryService');
 const { createMasterMemoryService } = require('../services/masterMemoryService');
+const { createCompositionLedger } = require('../services/compositionLedger');
+const { createMemoryComposer, buildWorkspaceAdapter, buildUserAdapter } = require('../services/memoryComposer');
 const { createApp } = require('../app');
 const { invokeApp } = require('./helpers/invokeApp');
 
@@ -66,24 +68,32 @@ function wireStack(db, { withMaster = true } = {}) {
   const rs = createRunService(db, null);
   const projectService = createProjectService(db);
   const projectBriefService = createProjectBriefService(db);
-  const registry = createManagerRegistry({ runService: rs });
-  const memoryService = createMemoryService(db);
-  const masterMemoryService = createMasterMemoryService(db);
-  const topAdapter = makeFakeCodexAdapter();
+    const registry = createManagerRegistry({ runService: rs });
+    const memoryService = createMemoryService(db);
+    const masterMemoryService = createMasterMemoryService(db);
+    const compositionLedger = createCompositionLedger(db);
+    const memoryComposer = createMemoryComposer({
+      retrievers: {
+        workspace: buildWorkspaceAdapter(memoryService),
+        user: buildUserAdapter(masterMemoryService),
+      },
+    });
+    const topAdapter = makeFakeCodexAdapter();
   const fakePm = makeFakeCodexAdapter();
   const spawn = createPmSpawnService({
     runService: rs, managerRegistry: registry, managerAdapterFactory: wireFactory(fakePm),
     projectService, projectBriefService, authResolverOpts: { hasKeychain: true },
   });
   const conv = createConversationService({
-    runService: rs, managerRegistry: registry, managerAdapterFactory: wireFactory(topAdapter),
-    lifecycleService: { sendAgentInput: () => true }, pmSpawnService: spawn,
-    memoryService, masterMemoryService: withMaster ? masterMemoryService : undefined,
-  });
-  return { rs, projectService, registry, memoryService, masterMemoryService, topAdapter, fakePm, spawn, conv };
-}
+      runService: rs, managerRegistry: registry, managerAdapterFactory: wireFactory(topAdapter),
+      lifecycleService: { sendAgentInput: () => true }, pmSpawnService: spawn,
+      memoryService, masterMemoryService: withMaster ? masterMemoryService : undefined,
+      memoryComposer, compositionLedger,
+    });
+    return { rs, projectService, registry, memoryService, masterMemoryService, compositionLedger, topAdapter, fakePm, spawn, conv };
+  }
 
-test('INTEGRATION: Top user payload carries ## User Memory on first send, NOT on second (ledger), again after revision bump', async (t) => {
+  test('INTEGRATION: Top user payload carries ## User Memory on first send, NOT on second (composition ledger), again after revision bump', async (t) => {
   const db = await mkdb(t);
   const { rs, registry, masterMemoryService, topAdapter, conv } = wireStack(db);
   masterMemoryService.createMemoryItem({ scope: 'user', kind: 'constraint', content: 'always run tests with node --test', origin: 'human', importance: 8 });
@@ -120,21 +130,27 @@ test('INTEGRATION: PM slot is NOT master-injected (Master memory is Top-only)', 
   assert.match(payload, /work on the bug/);
 });
 
-test('INTEGRATION: failed Top send does NOT record the master ledger (re-injects next)', async (t) => {
-  const db = await mkdb(t);
-  const { rs, registry, masterMemoryService, topAdapter, conv } = wireStack(db);
+  test('INTEGRATION: failed Top send does NOT record the composition ledger (re-injects next)', async (t) => {
+    const db = await mkdb(t);
+    const { rs, registry, masterMemoryService, topAdapter, conv } = wireStack(db);
   masterMemoryService.createMemoryItem({ scope: 'user', kind: 'constraint', content: 'do not regress the parser', origin: 'human' });
   const topRun = seedTop({ rs, registry, adapter: topAdapter });
   topAdapter._sessions.get(topRun.id).rejectNext = true;
 
-  assert.throws(() => conv.sendMessage('top', { text: 'fix the parser' }), /Failed to deliver/);
-  assert.equal(masterMemoryService.getInjectionRecord(topRun.id, 'user'), null, 'no ledger write on failed send');
+    assert.throws(() => conv.sendMessage('top', { text: 'fix the parser' }), /Failed to deliver/);
+    const beforeCount = db.prepare(
+      "SELECT COUNT(*) AS c FROM memory_composition_events WHERE run_id = ? AND slot_kind = 'top'"
+    ).get(topRun.id).c;
+    assert.equal(beforeCount, 0, 'no composition ledger write on failed send');
 
-  conv.sendMessage('top', { text: 'fix the parser' });
-  const last = topAdapter._runTurnCalls[topAdapter._runTurnCalls.length - 1].payload.text;
-  assert.match(last, /## User Memory/, 're-injects after the earlier failed send');
-  assert.ok(masterMemoryService.getInjectionRecord(topRun.id, 'user'), 'ledger recorded after success');
-});
+    conv.sendMessage('top', { text: 'fix the parser' });
+    const last = topAdapter._runTurnCalls[topAdapter._runTurnCalls.length - 1].payload.text;
+    assert.match(last, /## User Memory/, 're-injects after the earlier failed send');
+    const afterCount = db.prepare(
+      "SELECT COUNT(*) AS c FROM memory_composition_events WHERE run_id = ? AND slot_kind = 'top' AND status = 'accepted'"
+    ).get(topRun.id).c;
+    assert.equal(afterCount, 1, 'composition ledger recorded after success');
+  });
 
 // --------------------------------------------------------------------------
 // Route: /api/master-memory

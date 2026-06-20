@@ -48,34 +48,19 @@ function createConversationService({
   // returning "No active PM manager session". Tests that don't care about
   // lazy spawn can omit this dependency and keep the pre-3a behavior.
   pmSpawnService,
-  // ML PR1: optional Learned Memory injector. When wired, a message to a PM
-  // slot (NOT top) for a project gets a `## Learned Memory` block prepended
-  // to the user payload — gated by the pm_memory_injection ledger so it
-  // injects once per session OR when the project's memory revision changes.
+    // ML PR1: optional Learned Memory injector. When wired, a message to a PM
+    // slot (NOT top) for a project gets a `## Learned Memory` block prepended
+    // to the user payload.
   // Memory is NEVER baked into the system prompt (Codex caching safety); the
   // user-payload prepend is the single injection point. Tests that omit this
   // dependency keep the pre-PR1 behavior byte-for-byte.
-  memoryService,
-  masterMemoryService,
-  // A2-3a: Composer+Ledger cutover (PM slot only). flag-gated default OFF.
-  // When memoryComposerEnabled=true, the PM injection path uses
-  // memoryComposer.compose() + compositionLedger (shouldCompose/record/accept)
-  // instead of the direct memoryService.shouldInject/retrieveForProject path.
-  // Dual-write to old pm_memory_injection ledger is maintained for rollback safety.
-  // Off = current behavior preserved byte-for-byte. Top slot untouched (A2-3b).
-  memoryComposer,
-  compositionLedger,
-  memoryComposerEnabled,
-  // P-A2 shadow parity burn-in: when memoryComposerShadowEnabled=true AND
-  // memoryComposerEnabled=false, the old injection path emits a
-  // memory:composer_parity event comparing old block vs new composer block
-  // (read-only, no writes, no mutations to effectiveText or any ledger).
-  // SHADOW is only active when COMPOSER is OFF (COMPOSER on = new path is live,
-  // shadow is irrelevant).
-  memoryComposerShadowEnabled,
-  eventBus,
-  logger,
-}) {
+    memoryService,
+    masterMemoryService,
+    memoryComposer,
+    compositionLedger,
+    eventBus,
+    logger,
+  }) {
   // parentRunId -> array of notice strings
   const pendingNotices = new Map();
 
@@ -306,19 +291,18 @@ function createConversationService({
       ? `${notices.join('\n\n')}\n\n---\n\n${originalText}`
       : originalText;
 
-    // ML PR1: Learned Memory injection. Outermost prepend (memory → parent
-    // notices → original text). PM slots only, never Top, and only when a
-    // memoryService + projectId are present. Gated by the persistent
-    // pm_memory_injection ledger (once per session / on revision change).
-    // Annotate-only: any failure degrades to "no injection" and never blocks
-    // message delivery. The ledger is written AFTER the adapter accepts the
-    // turn (mirrors the peek-then-commit notice discipline) so a failed send
-    // re-injects on the next attempt rather than recording a phantom inject.
-    let memoryInjection = null; // { revision } when an injection was actually applied (flag OFF)
-    let composerInjection = null; // { composition, provenanceKey, revision } stash (flag ON)
-    if (!isTop && memoryService && projectId) {
-      if (memoryComposerEnabled && memoryComposer && compositionLedger) {
-        // A2-3a: Composer+Ledger path (PM slot only, flag ON).
+      // ML PR1: Learned Memory injection. Outermost prepend (memory → parent
+      // notices → original text). PM slots only, never Top, and only when a
+      // memoryService + projectId are present.
+      // Annotate-only: any failure degrades to "no injection" and never blocks
+      // message delivery. The ledger is written AFTER the adapter accepts the
+      // turn (mirrors the peek-then-commit notice discipline) so a failed send
+      // re-injects on the next attempt rather than recording a phantom inject.
+      let composerInjection = null; // { composition, provenanceKey, revision } stash
+      if (!isTop && memoryService && projectId && compositionLedger && memoryComposer) {
+        // Composer+Ledger path (PM slot only). The composer is the sole injection
+        // path (S5-LEDGER); if it is not wired (some unit harnesses), skip injection
+        // cleanly rather than throwing inside the try/catch on every send.
         // peek/decide: gate check → compose → stash for commit phase.
         try {
           const currentOwnerRevisions = [{
@@ -332,23 +316,6 @@ function createConversationService({
             provenanceKey: projectId,
             currentOwnerRevisions,
           });
-          // Phase 1b gate parity monitor (COMPOSER-ON only — NEW ledger is
-          // maintained so comparison is meaningful). Read-only and never-throws.
-          try {
-            const oldDecision = memoryService.shouldInject(run.id, projectId);
-            const oldInject = !!(oldDecision && oldDecision.inject);
-            if (eventBus) {
-              eventBus.emit('memory:gate_parity', {
-                runId: run.id,
-                conversationId,
-                slotKind: 'pm',
-                provenanceKey: projectId,
-                newCompose: dec.compose,
-                oldInject,
-                agree: dec.compose === oldInject,
-              });
-            }
-          } catch { /* never-throws */ }
           if (dec.compose) {
             const { block, composition } = memoryComposer.compose({
               owners: [{ owner_type: 'workspace', owner_id: projectId }],
@@ -382,77 +349,16 @@ function createConversationService({
           log(`composer injection skipped for ${conversationId} (run=${run.id}): ${memErr.message}`);
           composerInjection = null;
         }
-      } else {
-        // Existing path (flag OFF) — PRESERVE EXACTLY, zero changes.
-        let oldBlock = null;
-        try {
-          const decision = memoryService.shouldInject(run.id, projectId);
-          if (decision && decision.inject) {
-            const rows = memoryService.retrieveForProject(projectId, { taskContext: originalText });
-            const block = memoryService.buildInjectionBlock(rows);
-            if (block) {
-              effectiveText = `${block}\n\n---\n\n${effectiveText}`;
-              memoryInjection = { revision: decision.revision };
-              oldBlock = block;
-            }
-          }
-        } catch (memErr) {
-          log(`memory injection skipped for ${conversationId} (run=${run.id}): ${memErr.message}`);
-          memoryInjection = null;
-        }
-        // P-A2 shadow parity: SHADOW ON + COMPOSER OFF only.
-        // Old path is already done; compare composer's read-only output (no writes).
-        if (memoryComposerShadowEnabled && !memoryComposerEnabled && memoryComposer && eventBus) {
-          try {
-            const { block: newBlock } = memoryComposer.compose({
-              owners: [{ owner_type: 'workspace', owner_id: projectId }],
-              taskContext: originalText,
-            });
-            const oldInjected = (oldBlock != null);
-            const comparable = oldInjected;
-            const blockMatch = comparable ? (oldBlock === newBlock) : null;
-            const reason = comparable ? (blockMatch ? 'match' : 'mismatch') : 'old_skipped';
-            eventBus.emit('memory:composer_parity', {
-              runId: run.id,
-              conversationId,
-              slotKind: 'pm',
-              provenanceKey: projectId,
-              comparable,
-              blockMatch,
-              reason,
-              oldLen: oldBlock ? oldBlock.length : 0,
-              newLen: newBlock ? newBlock.length : 0,
-            });
-          } catch (shadowErr) {
-            try {
-              eventBus.emit('memory:composer_parity', {
-                runId: run.id,
-                conversationId,
-                slotKind: 'pm',
-                provenanceKey: projectId,
-                comparable: false,
-                blockMatch: null,
-                reason: 'shadow_error',
-                message: shadowErr && shadowErr.message,
-                oldLen: 0,
-                newLen: 0,
-              });
-            } catch { /* shadow must never throw */ }
-          }
-        }
       }
-    }
 
-    // L2 P1b / A2-3b: Master (user-scope) memory injection — the Top-slot analogue of the PM block above.
-    // Top slots ONLY (scope='user'), keyed by the Top run id. Same peek-then-commit ledger discipline:
-    // the masterMemoryInjection ledger is written AFTER the adapter accepts the turn (below). Outermost
-    // prepend (memory → original). Annotate-only: any failure degrades to "no injection", never blocks.
-    // A2-3b: flag-gated composer+ledger path (mirrors PM block). OFF → current path byte-for-byte.
-    let masterMemoryInjection = null;
-    let masterComposerInjection = null; // { composition, provenanceKey, revision } stash (flag ON)
-    if (isTop && masterMemoryService) {
-      if (memoryComposerEnabled && memoryComposer && compositionLedger) {
-        // A2-3b: Composer+Ledger path (Top slot, flag ON).
+      // L2 P1b / A2-3b: Master (user-scope) memory injection — the Top-slot analogue of the PM block above.
+      // Top slots ONLY (scope='user'), keyed by the Top run id. Same peek-then-commit ledger discipline:
+      // the composition ledger is written AFTER the adapter accepts the turn (below). Outermost
+      // prepend (memory → original). Annotate-only: any failure degrades to "no injection", never blocks.
+      let masterComposerInjection = null; // { composition, provenanceKey, revision } stash
+      if (isTop && masterMemoryService && compositionLedger && memoryComposer) {
+        // Composer+Ledger path (Top slot). Composer is the sole injection path
+        // (S5-LEDGER); skip cleanly if it is not wired (some unit harnesses).
         // peek/decide: gate check → compose → stash for commit phase.
         try {
           const currentOwnerRevisions = [{
@@ -466,23 +372,6 @@ function createConversationService({
             provenanceKey: 'user',
             currentOwnerRevisions,
           });
-          // Phase 1b gate parity monitor (Top slot, COMPOSER-ON only).
-          // Read-only and never-throws.
-          try {
-            const oldDecision = masterMemoryService.shouldInject(run.id, 'user');
-            const oldInject = !!(oldDecision && oldDecision.inject);
-            if (eventBus) {
-              eventBus.emit('memory:gate_parity', {
-                runId: run.id,
-                conversationId,
-                slotKind: 'top',
-                provenanceKey: 'user',
-                newCompose: dec.compose,
-                oldInject,
-                agree: dec.compose === oldInject,
-              });
-            }
-          } catch { /* never-throws */ }
           if (dec.compose) {
             const { block, composition } = memoryComposer.compose({
               owners: [{ owner_type: 'user', owner_id: 'user', provenance: 'user' }],
@@ -516,69 +405,7 @@ function createConversationService({
           log(`master composer injection skipped for ${conversationId} (run=${run.id}): ${memErr.message}`);
           masterComposerInjection = null;
         }
-      } else {
-        // Existing path (flag OFF) — PRESERVE EXACTLY, zero changes.
-        let oldMasterBlock = null;
-        try {
-          const decision = masterMemoryService.shouldInject(run.id, 'user');
-          if (decision && decision.inject) {
-            // P-A1 slice2b Q3/F: owner-keyed retrieve with provenance='user'
-            // preserves current Top injection behavior; cross_project -> Top
-            // injection is a deferred product decision.
-            const rows = masterMemoryService.retrieve('user', 'user', { taskContext: originalText, provenance: 'user' });
-            const block = masterMemoryService.buildInjectionBlock(rows);
-            if (block) {
-              effectiveText = `${block}\n\n---\n\n${effectiveText}`;
-              masterMemoryInjection = { revision: decision.revision };
-              oldMasterBlock = block;
-            }
-          }
-        } catch (memErr) {
-          log(`master memory injection skipped for ${conversationId} (run=${run.id}): ${memErr.message}`);
-          masterMemoryInjection = null;
-        }
-        // P-A2 shadow parity: SHADOW ON + COMPOSER OFF only.
-        // Old path is already done; compare composer's read-only output (no writes).
-        if (memoryComposerShadowEnabled && !memoryComposerEnabled && memoryComposer && eventBus) {
-          try {
-            const { block: newMasterBlock } = memoryComposer.compose({
-              owners: [{ owner_type: 'user', owner_id: 'user', provenance: 'user' }],
-              taskContext: originalText,
-            });
-            const oldInjected = (oldMasterBlock != null);
-            const comparable = oldInjected;
-            const blockMatch = comparable ? (oldMasterBlock === newMasterBlock) : null;
-            const reason = comparable ? (blockMatch ? 'match' : 'mismatch') : 'old_skipped';
-            eventBus.emit('memory:composer_parity', {
-              runId: run.id,
-              conversationId,
-              slotKind: 'top',
-              provenanceKey: 'user',
-              comparable,
-              blockMatch,
-              reason,
-              oldLen: oldMasterBlock ? oldMasterBlock.length : 0,
-              newLen: newMasterBlock ? newMasterBlock.length : 0,
-            });
-          } catch (shadowErr) {
-            try {
-              eventBus.emit('memory:composer_parity', {
-                runId: run.id,
-                conversationId,
-                slotKind: 'top',
-                provenanceKey: 'user',
-                comparable: false,
-                blockMatch: null,
-                reason: 'shadow_error',
-                message: shadowErr && shadowErr.message,
-                oldLen: 0,
-                newLen: 0,
-              });
-            } catch { /* shadow must never throw */ }
-          }
-        }
       }
-    }
 
     const validImages = Array.isArray(images)
       ? images.filter(img => img && typeof img.data === 'string' && typeof img.media_type === 'string')
@@ -617,11 +444,6 @@ function createConversationService({
     // if the send had failed above we would have thrown before reaching
     // here, leaving the ledger untouched so the next send re-injects.
     // Never let a ledger write break a successfully delivered message.
-    if (memoryComposerEnabled && compositionLedger && memoryComposer) {
-      // A2-3a / Phase 0a (B4): Atomic Composer+Ledger commit path (flag ON).
-      // Single commitAccepted() call: event(accepted) + owner_state + edges +
-      // legacyWriteFn all in one db.transaction — if any part throws the entire
-      // tx rolls back (no orphan composition rows, no ledger desync).
       if (composerInjection) {
         try {
           compositionLedger.commitAccepted(
@@ -633,28 +455,12 @@ function createConversationService({
               slotKind: 'pm',
               provenanceKey: composerInjection.provenanceKey,
             },
-            // [Q5] dual-write: old pm_memory_injection ledger inside same tx
-            memoryService && projectId
-              ? () => memoryService.recordInjection(run.id, projectId, composerInjection.revision)
-              : undefined,
           );
         } catch (ledgerErr) {
           log(`composer ledger write failed for ${conversationId} (run=${run.id}): ${ledgerErr.message}`);
         }
       }
-    } else if (memoryInjection) {
-      // Existing path (flag OFF) — PRESERVE EXACTLY.
-      try {
-        memoryService.recordInjection(run.id, projectId, memoryInjection.revision);
-      } catch (ledgerErr) {
-        log(`memory ledger write failed for ${conversationId} (run=${run.id}): ${ledgerErr.message}`);
-      }
-    }
-    // L2 P1b / A2-3b: commit the Master memory injection ledger (Top slot), same peek-then-commit discipline.
-    if (memoryComposerEnabled && compositionLedger && memoryComposer) {
-      // A2-3b / Phase 0a (B4): Atomic Composer+Ledger commit path (Top slot, flag ON).
-      // Single commitAccepted() call: event(accepted) + owner_state + edges +
-      // legacyWriteFn all in one db.transaction — rollback on any failure.
+      // L2 P1b / A2-3b: commit the Master memory injection ledger (Top slot), same peek-then-commit discipline.
       if (masterComposerInjection) {
         try {
           compositionLedger.commitAccepted(
@@ -666,21 +472,11 @@ function createConversationService({
               slotKind: 'top',
               provenanceKey: masterComposerInjection.provenanceKey,
             },
-            // [Q5] dual-write: old master_memory_injection ledger inside same tx
-            () => masterMemoryService.recordInjection(run.id, 'user', masterComposerInjection.revision),
           );
         } catch (ledgerErr) {
           log(`master composer ledger write failed for ${conversationId} (run=${run.id}): ${ledgerErr.message}`);
         }
       }
-    } else if (masterMemoryInjection) {
-      // Existing path (flag OFF) — PRESERVE EXACTLY.
-      try {
-        masterMemoryService.recordInjection(run.id, 'user', masterMemoryInjection.revision);
-      } catch (ledgerErr) {
-        log(`master memory ledger write failed for ${conversationId} (run=${run.id}): ${ledgerErr.message}`);
-      }
-    }
 
     if (run.status === 'needs_input') {
       try { runService.updateRunStatus(run.id, 'running', { force: true }); } catch {}

@@ -10,7 +10,6 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
-const request = require('supertest');
 
 const { createDatabase } = require('../db/database');
 const { createRunService } = require('../services/runService');
@@ -20,8 +19,11 @@ const { createManagerRegistry } = require('../services/managerRegistry');
 const { createConversationService } = require('../services/conversationService');
 const { createPmSpawnService } = require('../services/pmSpawnService');
 const { createMemoryService } = require('../services/memoryService');
+const { createCompositionLedger } = require('../services/compositionLedger');
+const { createMemoryComposer, buildWorkspaceAdapter } = require('../services/memoryComposer');
 const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
 const { createApp } = require('../app');
+const { invokeApp } = require('./helpers/invokeApp');
 
 async function mkdb(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-mem-inj-'));
@@ -122,12 +124,12 @@ async function createTestApp(t) {
 test('GET /api/projects/:id/memory returns the seeded memory', async (t) => {
   const app = await createTestApp(t);
 
-  const create = await request(app).post('/api/projects').send({ name: 'Mem Project' });
+  const create = await invokeApp(app, { method: 'POST', path: '/api/projects', body: { name: 'Mem Project' } });
   assert.equal(create.status, 201);
   const projectId = create.body.project.id;
 
   // Empty initially.
-  const empty = await request(app).get(`/api/projects/${projectId}/memory`);
+  const empty = await invokeApp(app, { path: `/api/projects/${projectId}/memory` });
   assert.equal(empty.status, 200);
   assert.deepEqual(empty.body.memory, []);
 
@@ -138,7 +140,7 @@ test('GET /api/projects/:id/memory returns the seeded memory', async (t) => {
   svc.createMemoryItem({ projectId, kind: 'convention', content: 'use tabs', origin: 'human', importance: 7 });
   svc.createMemoryItem({ projectId, kind: 'pitfall', content: 'never double runTurn', origin: 'human', importance: 9 });
 
-  const res = await request(app).get(`/api/projects/${projectId}/memory`);
+  const res = await invokeApp(app, { path: `/api/projects/${projectId}/memory` });
   assert.equal(res.status, 200);
   assert.equal(res.body.memory.length, 2);
   // importance DESC
@@ -349,6 +351,12 @@ function wirePmStack(db) {
   const projectBriefService = createProjectBriefService(db);
   const registry = createManagerRegistry({ runService: rs });
   const memoryService = createMemoryService(db);
+  const compositionLedger = createCompositionLedger(db);
+  const memoryComposer = createMemoryComposer({
+    retrievers: {
+      workspace: buildWorkspaceAdapter(memoryService),
+    },
+  });
   const fakePm = makeFakeCodexAdapter();
   const topAdapter = makeFakeCodexAdapter();
 
@@ -364,11 +372,13 @@ function wirePmStack(db) {
     lifecycleService: { sendAgentInput: () => true },
     pmSpawnService: spawn,
     memoryService,
+    memoryComposer,
+    compositionLedger,
   });
-  return { rs, projectService, projectBriefService, registry, memoryService, fakePm, topAdapter, spawn, conv };
+  return { rs, projectService, projectBriefService, registry, memoryService, compositionLedger, fakePm, topAdapter, spawn, conv };
 }
 
-test('INTEGRATION: PM user payload contains ## Learned Memory on first send, NOT on second (ledger), again after revision bump', async (t) => {
+  test('INTEGRATION: PM user payload contains ## Learned Memory on first send, NOT on second (composition ledger), again after revision bump', async (t) => {
   const db = await mkdb(t);
   const stack = wirePmStack(db);
   const { rs, projectService, registry, memoryService, fakePm, topAdapter, conv } = stack;
@@ -412,7 +422,7 @@ test('INTEGRATION: PM user payload contains ## Learned Memory on first send, NOT
   assert.match(third, /split big diffs/, 'retrieved the newly-added memory');
 });
 
-test('INTEGRATION: Top slot is NEVER memory-injected; ledger untouched for top', async (t) => {
+  test('INTEGRATION: Top slot is NEVER L1 memory-injected; composition ledger untouched for top', async (t) => {
   const db = await mkdb(t);
   const stack = wirePmStack(db);
   const { rs, projectService, registry, memoryService, topAdapter, conv } = stack;
@@ -428,11 +438,14 @@ test('INTEGRATION: Top slot is NEVER memory-injected; ledger untouched for top',
   const payload = topAdapter._runTurnCalls[0].payload.text;
   assert.doesNotMatch(payload, /## Learned Memory/, 'top slot never gets a memory block');
   assert.match(payload, /status please/);
-  // No ledger row should have been written for the top run.
-  assert.equal(memoryService.getInjectionRecord(topRun.id), null, 'top run has no injection ledger entry');
-});
+    // No L1 composition row should have been written for the top run.
+    const topCompositions = db.prepare(
+      "SELECT COUNT(*) AS c FROM memory_composition_events WHERE run_id = ? AND slot_kind = 'top'"
+    ).get(topRun.id).c;
+    assert.equal(topCompositions, 0, 'top run has no L1 composition ledger entry');
+  });
 
-test('INTEGRATION: a failed send does NOT record the injection ledger (re-injects next time)', async (t) => {
+  test('INTEGRATION: a failed send does NOT record the composition ledger (re-injects next time)', async (t) => {
   const db = await mkdb(t);
   const stack = wirePmStack(db);
   const { rs, projectService, registry, memoryService, fakePm, topAdapter, spawn, conv } = stack;
@@ -449,16 +462,22 @@ test('INTEGRATION: a failed send does NOT record the injection ledger (re-inject
 
   // Use a context that overlaps the memory so retrieve would yield a block.
   assert.throws(() => conv.sendMessage(`pm:${project.id}`, { text: 'fix the parser regress' }), /Failed to deliver/);
-  // Ledger must be empty because the send failed before the commit half.
-  assert.equal(memoryService.getInjectionRecord(run.id), null, 'no ledger write on failed send');
+    // Ledger must be empty because the send failed before the commit half.
+    const beforeCount = db.prepare(
+      "SELECT COUNT(*) AS c FROM memory_composition_events WHERE run_id = ? AND slot_kind = 'pm'"
+    ).get(run.id).c;
+    assert.equal(beforeCount, 0, 'no composition ledger write on failed send');
 
   // Resend -> injection happens now (rejectNext was consumed).
   conv.sendMessage(`pm:${project.id}`, { text: 'fix the parser regress' });
   const calls = fakePm._runTurnCalls;
-  const last = calls[calls.length - 1].payload.text;
-  assert.match(last, /## Learned Memory/, 're-injects after the earlier failed send');
-  assert.ok(memoryService.getInjectionRecord(run.id), 'ledger recorded after a successful send');
-});
+    const last = calls[calls.length - 1].payload.text;
+    assert.match(last, /## Learned Memory/, 're-injects after the earlier failed send');
+    const afterCount = db.prepare(
+      "SELECT COUNT(*) AS c FROM memory_composition_events WHERE run_id = ? AND slot_kind = 'pm' AND status = 'accepted'"
+    ).get(run.id).c;
+    assert.equal(afterCount, 1, 'composition ledger recorded after a successful send');
+  });
 
 test('INTEGRATION: memoryService failure degrades to no-injection (message still delivered)', async (t) => {
   const db = await mkdb(t);
@@ -469,13 +488,10 @@ test('INTEGRATION: memoryService failure degrades to no-injection (message still
   const fakePm = makeFakeCodexAdapter();
   const topAdapter = makeFakeCodexAdapter();
 
-  // A memoryService whose shouldInject throws — must NOT break delivery.
-  const explodingMemory = {
-    shouldInject() { throw new Error('boom'); },
-    retrieveForProject() { throw new Error('should not reach'); },
-    buildInjectionBlock() { return null; },
-    recordInjection() { throw new Error('should not reach'); },
-  };
+    // A memoryService whose revision read throws must NOT break delivery.
+    const explodingMemory = {
+      getRevision() { throw new Error('boom'); },
+    };
 
   const spawn = createPmSpawnService({
     runService: rs, managerRegistry: registry,

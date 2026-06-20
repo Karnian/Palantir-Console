@@ -3,7 +3,7 @@
 /**
  * Phase 0 correctness tests
  *
- * 0a — commitAccepted atomic: legacyWriteFn throw → full rollback (no orphan rows)
+ * 0a — commitAccepted API correctness: transaction failure → full rollback (no orphan rows)
  * 0b — composer failure observability: compose() returning null emits memory:composer_failed
  * 0c — binding assert: mismatched run.conversation_id → 502 before any getRevision
  */
@@ -73,35 +73,23 @@ function makeEventBus() {
   };
 }
 
-function makeMemoryService({ revision = 5, recordedInjections = [], getRevisionCalled = [] } = {}) {
-  return {
-    shouldInject: () => ({ inject: false }),
-    retrieveForProject: () => [],
-    buildInjectionBlock: () => null,
-    getRevision(projectId) {
-      getRevisionCalled.push(projectId);
-      return revision;
-    },
-    recordInjection(runId, projectId, rev) {
-      recordedInjections.push({ runId, projectId, rev });
-    },
-  };
-}
+  function makeMemoryService({ revision = 5, recordedInjections = [], getRevisionCalled = [] } = {}) {
+    return {
+      getRevision(projectId) {
+        getRevisionCalled.push(projectId);
+        return revision;
+      },
+    };
+  }
 
-function makeMasterMemoryService({ revision = 3, recordedInjections = [], getRevisionCalled = [] } = {}) {
-  return {
-    shouldInject: () => ({ inject: false }),
-    retrieve: () => [],
-    buildInjectionBlock: () => null,
-    getRevision(scope) {
-      getRevisionCalled.push(scope);
-      return revision;
-    },
-    recordInjection(runId, scope, rev) {
-      recordedInjections.push({ runId, scope, rev });
-    },
-  };
-}
+  function makeMasterMemoryService({ revision = 3, recordedInjections = [], getRevisionCalled = [] } = {}) {
+    return {
+      getRevision(scope) {
+        getRevisionCalled.push(scope);
+        return revision;
+      },
+    };
+  }
 
 function makeComposer({ block = '## Learned Memory\n- item', composition = null, returnsNullComposition = false } = {}) {
   const defaultComposition = composition ?? {
@@ -147,7 +135,7 @@ function seedPmRun(rs, registry, adapter, projectId, topRunId, db) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Phase 0a: commitAccepted atomic rollback
+  // Phase 0a: commitAccepted API correctness
 // ─────────────────────────────────────────────────────────────────────────────
 
 test('0a: commitAccepted — success path writes event+owner_state+edges atomically', async (t) => {
@@ -162,17 +150,15 @@ test('0a: commitAccepted — success path writes event+owner_state+edges atomica
     policy_version: '1.0.0',
   };
 
-  let legacyCalled = false;
   const id = ledger.commitAccepted(composition, {
     runId: 'run-atomic-ok',
     conversationId: 'pm:proj1',
     taskId: null,
     slotKind: 'pm',
     provenanceKey: 'proj1',
-  }, () => { legacyCalled = true; });
+  });
 
   assert.ok(id, 'should return a compositionId');
-  assert.ok(legacyCalled, 'legacyWriteFn should have been called');
 
   // event row should be accepted directly
   const eventRow = db.prepare('SELECT status, accepted_at FROM memory_composition_events WHERE id = ?').get(id);
@@ -191,12 +177,12 @@ test('0a: commitAccepted — success path writes event+owner_state+edges atomica
   assert.equal(edgeRow.decision, 'included');
 });
 
-test('0a: commitAccepted — legacyWriteFn throw causes full rollback (no orphan event row)', async (t) => {
+test('0a: commitAccepted — transaction failure causes full rollback (no orphan event row)', async (t) => {
   const db = await mkdb(t);
   const ledger = createCompositionLedger(db);
 
   const composition = {
-    fingerprint: 'fp-atomic-fail',
+    fingerprint: null,
     owner_states: [{ owner_type: 'workspace', owner_id: 'proj1', revision: 7, provenance: 'proj1' }],
     item_edges: [],
     composer_version: '1.0.0',
@@ -205,19 +191,19 @@ test('0a: commitAccepted — legacyWriteFn throw causes full rollback (no orphan
 
   let threwOuter = false;
   try {
-    ledger.commitAccepted(composition, {
-      runId: 'run-atomic-fail',
-      conversationId: 'pm:proj1',
-      taskId: null,
-      slotKind: 'pm',
-      provenanceKey: 'proj1',
-    }, () => { throw new Error('legacy write failed intentionally'); });
-  } catch (err) {
-    threwOuter = true;
-    assert.match(err.message, /legacy write failed intentionally/);
-  }
+      ledger.commitAccepted(composition, {
+        runId: 'run-atomic-fail',
+        conversationId: 'pm:proj1',
+        taskId: null,
+        slotKind: 'pm',
+        provenanceKey: 'proj1',
+      });
+    } catch (err) {
+      threwOuter = true;
+    assert.match(err.message, /fingerprint|NOT NULL/i);
+    }
 
-  assert.ok(threwOuter, 'commitAccepted should throw when legacyWriteFn throws');
+    assert.ok(threwOuter, 'commitAccepted should throw when a ledger write fails');
 
   // No orphan event row
   const eventRow = db.prepare(
@@ -284,15 +270,13 @@ test('0b: compose() returning {block:null,composition:null} emits memory:compose
     managerRegistry: registry,
     managerAdapterFactory: makeAdapterFactory(pmAdapter),
     lifecycleService: { sendAgentInput: () => false },
-    memoryService: memSvc,
-    masterMemoryService: null,
-    memoryComposer: composer,
-    compositionLedger: ledger,
-    memoryComposerEnabled: true,
-    memoryComposerShadowEnabled: false,
-    eventBus,
-    logger: () => {},
-  });
+      memoryService: memSvc,
+      masterMemoryService: null,
+      memoryComposer: composer,
+      compositionLedger: ledger,
+      eventBus,
+      logger: () => {},
+    });
 
   svc.sendMessage(`pm:proj1`, { text: 'hello' });
 
@@ -324,52 +308,18 @@ test('0b: compose() returning {block:null,composition:<non-null>} does NOT emit 
     managerRegistry: registry,
     managerAdapterFactory: makeAdapterFactory(pmAdapter),
     lifecycleService: { sendAgentInput: () => false },
-    memoryService: makeMemoryService({ revision: 5 }),
-    masterMemoryService: null,
-    memoryComposer: composer,
-    compositionLedger: ledger,
-    memoryComposerEnabled: true,
-    memoryComposerShadowEnabled: false,
-    eventBus,
-    logger: () => {},
-  });
+      memoryService: makeMemoryService({ revision: 5 }),
+      masterMemoryService: null,
+      memoryComposer: composer,
+      compositionLedger: ledger,
+      eventBus,
+      logger: () => {},
+    });
 
   svc.sendMessage('pm:proj1', { text: 'hello' });
 
   const failed = eventBus.emitted.filter(e => e.channel === 'memory:composer_failed');
   assert.equal(failed.length, 0, 'empty memory (composition non-null) must NOT emit composer_failed');
-});
-
-test('0b: flag OFF path does not emit composer_failed', async (t) => {
-  const db = await mkdb(t);
-  const eventBus = makeEventBus();
-  const rs = createRunService(db, { subscribe: () => {}, emit: () => {} });
-  const registry = createManagerRegistry({ runService: rs });
-
-  const topAdapter = makeAdapter();
-  const topRun = seedTopRun(rs, registry, topAdapter);
-  const pmAdapter = makeAdapter();
-  seedPmRun(rs, registry, pmAdapter, 'proj1', topRun.id, db);
-
-  const svc = createConversationService({
-    runService: rs,
-    managerRegistry: registry,
-    managerAdapterFactory: makeAdapterFactory(pmAdapter),
-    lifecycleService: { sendAgentInput: () => false },
-    memoryService: makeMemoryService({ revision: 5 }),
-    masterMemoryService: null,
-    memoryComposer: makeComposer({ returnsNullComposition: true }),
-    compositionLedger: createCompositionLedger(db),
-    memoryComposerEnabled: false, // flag OFF
-    memoryComposerShadowEnabled: false,
-    eventBus,
-    logger: () => {},
-  });
-
-  svc.sendMessage('pm:proj1', { text: 'hello' });
-
-  const failed = eventBus.emitted.filter(e => e.channel === 'memory:composer_failed');
-  assert.equal(failed.length, 0, 'flag OFF path must not emit composer_failed');
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -409,15 +359,13 @@ test('0c: mismatched run.conversation_id → 502 before any getRevision (PM)', a
     managerRegistry: registry,
     managerAdapterFactory: makeAdapterFactory(pmAdapter),
     lifecycleService: { sendAgentInput: () => false },
-    memoryService: memSvc,
-    masterMemoryService: null,
-    memoryComposer: makeComposer(),
-    compositionLedger: createCompositionLedger(db),
-    memoryComposerEnabled: true,
-    memoryComposerShadowEnabled: false,
-    eventBus: makeEventBus(),
-    logger: () => {},
-  });
+      memoryService: memSvc,
+      masterMemoryService: null,
+      memoryComposer: makeComposer(),
+      compositionLedger: createCompositionLedger(db),
+      eventBus: makeEventBus(),
+      logger: () => {},
+    });
 
   let threw = false;
   try {
@@ -446,15 +394,13 @@ test('0c: correct binding passes without error (PM)', async (t) => {
     managerRegistry: registry,
     managerAdapterFactory: makeAdapterFactory(pmAdapter),
     lifecycleService: { sendAgentInput: () => false },
-    memoryService: makeMemoryService({ revision: 5 }),
-    masterMemoryService: null,
-    memoryComposer: makeComposer(),
-    compositionLedger: createCompositionLedger(db),
-    memoryComposerEnabled: true,
-    memoryComposerShadowEnabled: false,
-    eventBus: makeEventBus(),
-    logger: () => {},
-  });
+      memoryService: makeMemoryService({ revision: 5 }),
+      masterMemoryService: null,
+      memoryComposer: makeComposer(),
+      compositionLedger: createCompositionLedger(db),
+      eventBus: makeEventBus(),
+      logger: () => {},
+    });
 
   // Should not throw
   const result = svc.sendMessage('pm:proj1', { text: 'hello' });
@@ -488,15 +434,13 @@ test('0c: mismatched run.conversation_id → 502 before getRevision (Top)', asyn
     managerRegistry: registry,
     managerAdapterFactory: makeAdapterFactory(wrongAdapter),
     lifecycleService: { sendAgentInput: () => false },
-    memoryService: null,
-    masterMemoryService: masterSvc,
-    memoryComposer: makeComposer(),
-    compositionLedger: createCompositionLedger(db),
-    memoryComposerEnabled: true,
-    memoryComposerShadowEnabled: false,
-    eventBus: makeEventBus(),
-    logger: () => {},
-  });
+      memoryService: null,
+      masterMemoryService: masterSvc,
+      memoryComposer: makeComposer(),
+      compositionLedger: createCompositionLedger(db),
+      eventBus: makeEventBus(),
+      logger: () => {},
+    });
 
   let threw = false;
   try {
@@ -538,15 +482,13 @@ test('0c: worker sends bypass the binding assert (is_manager=0)', async (t) => {
     managerRegistry: registry,
     managerAdapterFactory: makeAdapterFactory(topAdapter),
     lifecycleService: lifecycle,
-    memoryService: null,
-    masterMemoryService: null,
-    memoryComposer: null,
-    compositionLedger: null,
-    memoryComposerEnabled: false,
-    memoryComposerShadowEnabled: false,
-    eventBus: makeEventBus(),
-    logger: () => {},
-  });
+      memoryService: null,
+      masterMemoryService: null,
+      memoryComposer: null,
+      compositionLedger: null,
+      eventBus: makeEventBus(),
+      logger: () => {},
+    });
 
   // Worker send must succeed (not hit binding assert)
   const result = svc.sendMessage(`worker:${workerRun.id}`, { text: 'hello from worker' });

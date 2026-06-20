@@ -151,12 +151,11 @@ describe('slice3 - L1 owner cutover', () => {
     assert.ok(rows.every((row) => row.project_id === 'proj-2'), 'no cross-project leakage');
   });
 
-  test('conversationService PM inject gates remain project_id-keyed', () => {
+  test('project revision counter remains project_id-keyed (Composer gate reads it)', () => {
+    // The legacy shouldInject gate was retired in S5-LEDGER; the Composer's
+    // shouldCompose now gates injection, reading this project_id-keyed revision.
     const rev = svc.getRevision('proj-1');
-    assert.ok(typeof rev === 'number');
-    const fakePmRunId = `pm-run-${crypto.randomUUID()}`;
-    const decision = svc.shouldInject(fakePmRunId, 'proj-1');
-    assert.equal(decision.inject, true, 'fresh pm run should inject');
+    assert.ok(typeof rev === 'number', 'project revision is project_id-keyed');
   });
 
   test('admission control keeps human/pinned protection available through owner path', () => {

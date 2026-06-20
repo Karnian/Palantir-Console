@@ -34,10 +34,10 @@ function sha256(text) {
 }
 
 function createMasterMemoryService(db, eventBus) {
-  // revision counter is SCOPE-keyed, not owner-keyed. The injection gate (shouldInject)
-  // is provenance-specific: Top only injects user-provenance memory. If revision were
-  // owner-keyed, a cross_project write would bump the owner revision and re-trigger the
-  // user injection gate — a cross-scope injection escalation bug (BLOCKER).
+    // revision counter is SCOPE-keyed, not owner-keyed. Top-slot composition is
+    // provenance-specific: Top only injects user-provenance memory. If revision were
+    // owner-keyed, a cross_project write would bump the owner revision and re-trigger
+    // user composition — a cross-scope injection escalation bug (BLOCKER).
   // owner_type/owner_id columns are still filled for slice-1 dual-write invariant
   // compatibility, but the PRIMARY KEY / ON CONFLICT target is `scope`.
   // DEFERRED: if cross_project→Top injection is ever activated, revisit this gate.
@@ -149,25 +149,6 @@ function createMasterMemoryService(db, eventBus) {
   const archiveStmt = db.prepare(
     "UPDATE master_memory_items SET status='archived', archived_at=datetime('now'), archive_reason=@reason, updated_at=datetime('now') WHERE id=@id AND status='active'"
   );
-
-  // injection ledger is SCOPE-keyed for the same reason as revision: the injection gate
-  // is provenance-specific (scope='user' for Top). An owner-keyed ledger would cause
-  // a cross_project write to suppress a subsequent user injection.
-  // owner_type/owner_id columns are still written for slice-1 invariant; only the
-  // ON CONFLICT key and WHERE clause use scope.
-  // DEFERRED: revisit scope→owner promotion when cross_project→Top injection lands.
-  const getInjectionStmt = db.prepare(
-    'SELECT injected_revision FROM master_memory_injection WHERE master_run_id = ? AND scope = ?'
-  );
-  const recordInjectionStmt = db.prepare(`
-    INSERT INTO master_memory_injection(master_run_id, scope, injected_revision, injected_at, owner_type, owner_id)
-    VALUES (?, ?, ?, datetime('now'), ?, ?)
-    ON CONFLICT(master_run_id, scope) DO UPDATE SET
-      injected_revision = excluded.injected_revision,
-      injected_at = excluded.injected_at,
-      owner_type = excluded.owner_type,
-      owner_id = excluded.owner_id
-  `);
 
   // P1c Slice 1 / S5-STORAGE: Master candidates. Use ON CONFLICT against the
   // owner-keyed dedup UNIQUE so CHECK violations (bad rule/scope/raw_json) still
@@ -1187,30 +1168,7 @@ function createMasterMemoryService(db, eventBus) {
     return result.count;
   }
 
-  // Injection ledger functions are SCOPE-keyed (not owner-keyed). The gate is
-  // provenance-specific: Top records injection under scope='user' only. A cross_project
-  // write bumps the cross_project revision, not the user revision, so user injection
-  // is not re-triggered by unrelated cross_project changes.
-  // DEFERRED: if cross_project→Top injection is activated, revisit scope→owner promotion.
-  function getInjectionRecord(masterRunId, scope) {
-    const s = normScope(scope);
-    const row = getInjectionStmt.get(masterRunId, s);
-    return row && row.injected_revision != null ? row : null;
-  }
-  function recordInjection(masterRunId, scope, revision) {
-    const s = normScope(scope);
-    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ scope: s });
-    recordInjectionStmt.run(masterRunId, s, revision, ownerType, ownerId);
-  }
-  // Caching-safe gate: inject once per scope/run until that scope's revision advances.
-  function shouldInject(masterRunId, scope) {
-    const s = normScope(scope);
-    const revision = getRevision(s);
-    const rec = getInjectionRecord(masterRunId, s);
-    return { inject: !rec || rec.injected_revision < revision, revision, block: null };
-  }
-
-  return {
+    return {
     _bumpRevision,
     getRevision,
     createMemoryItem,
@@ -1228,13 +1186,10 @@ function createMasterMemoryService(db, eventBus) {
     archiveMemory,
     restoreMemory,
     markReviewed,
-    pinMemory,
-    setPinned,
-    expireStaleMemories,
-    getInjectionRecord,
-    recordInjection,
-    shouldInject,
-  };
+      pinMemory,
+      setPinned,
+      expireStaleMemories,
+    };
 }
 
 module.exports = { createMasterMemoryService };

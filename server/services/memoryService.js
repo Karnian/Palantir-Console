@@ -264,20 +264,6 @@ function createMemoryService(db, eventBus) {
     ORDER BY importance DESC, updated_at DESC
   `);
 
-  const getInjectionRecordStmt = db.prepare(`
-    SELECT *
-    FROM pm_memory_injection
-    WHERE pm_run_id = ?
-  `);
-
-  const recordInjectionStmt = db.prepare(`
-    INSERT INTO pm_memory_injection(pm_run_id, project_id, injected_revision, injected_at, owner_type, owner_id)
-    VALUES (?, ?, ?, datetime('now'), ?, ?)
-    ON CONFLICT(pm_run_id) DO UPDATE SET
-      injected_revision = excluded.injected_revision,
-      injected_at = excluded.injected_at
-  `);
-
   function _bumpRevision(projectId) {
     const { owner_type, owner_id } = normalizeOwner({ project_id: projectId });
     bumpRevisionStmt.run(projectId, owner_type, owner_id);
@@ -636,22 +622,6 @@ function createMemoryService(db, eventBus) {
       try { eventBus.emit('memory:distill_context_capped', { projectId, shown: out.length, total }); } catch { /* observability must never break distill */ }
     }
     return out;
-  }
-
-  function getInjectionRecord(pmRunId) {
-    return getInjectionRecordStmt.get(pmRunId) || null;
-  }
-
-  function recordInjection(pmRunId, projectId, revision) {
-    const { owner_type, owner_id } = normalizeOwner({ project_id: projectId });
-    recordInjectionStmt.run(pmRunId, projectId, revision, owner_type, owner_id);
-  }
-
-  function shouldInject(pmRunId, projectId) {
-    const revision = getRevision(projectId);
-    const rec = getInjectionRecord(pmRunId);
-    const inject = !rec || rec.injected_revision < revision;
-    return { inject, revision, block: null };
   }
 
   // PR2b: rule candidates (R1b/R3/R4). Deterministic rules stage raw signals
@@ -1439,9 +1409,6 @@ function createMemoryService(db, eventBus) {
     buildInjectionBlock,
     listForProject,
     listActiveForDistill,
-    getInjectionRecord,
-    recordInjection,
-    shouldInject,
     checkOwnerParity,
     detectCrossScopeConflicts,
   };
