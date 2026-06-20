@@ -612,11 +612,12 @@ test('A2-3a annotate-only: ledger.record throws → message still delivered', as
     composer_version: '0.1.0', policy_version: '0.1.0' };
   const composer = makeComposer({ block: BLOCK, composition: COMPOSITION });
 
-  // Ledger that throws on record
+  // Ledger that throws on commitAccepted (Phase 0a: commitAccepted replaces record+accept)
   const failingLedger = {
     shouldCompose: () => ({ compose: true, reason: 'no_prior_accepted' }),
     record: () => { throw new Error('DB is gone'); },
     accept: () => false,
+    commitAccepted: () => { throw new Error('DB is gone'); },
   };
 
   const recordedInjections = [];

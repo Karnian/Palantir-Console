@@ -1022,6 +1022,20 @@ function createApp(options = {}) {
     });
   }
 
+  // Phase 0b (S9): composer failure counter. Subscribes to memory:composer_failed
+  // events emitted when compose() returns composition===null inside a dec.compose:true
+  // branch. Always active (independent of shadow/composer flags). Never throws.
+  const composerFailureCounter = {
+    total: 0,
+    reset() { this.total = 0; },
+  };
+  eventBus.subscribe((event) => {
+    if (event.channel !== 'memory:composer_failed') return;
+    try {
+      composerFailureCounter.total++;
+    } catch { /* never throws */ }
+  });
+
   app.services = {
     runService,
     taskService,
@@ -1039,6 +1053,7 @@ function createApp(options = {}) {
     masterMemoryDecayScheduler,
     masterMemoryXprojectScanner,
     composerParityCounter, // P-A2: shadow parity aggregate counter (diagnostic seam)
+    composerFailureCounter, // Phase 0b: compose()-returned-null counter (diagnostic seam)
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at
     // (createRun() always stamps status='queued' and cost_usd=0 at now).
