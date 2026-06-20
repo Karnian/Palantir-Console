@@ -79,6 +79,10 @@ function wireStack(app) {
     lifecycleService: { sendAgentInput: () => true },
     memoryService: app.services.memoryService,
     masterMemoryService: app.services.masterMemoryService,
+    // S5-LEDGER: composer is the sole injection path — wire it (was implicit via
+    // the flag-OFF legacy path before; now required for any memory injection).
+    memoryComposer: app.services.memoryComposer,
+    compositionLedger: app.services.compositionLedger,
   });
   return {
     rs: app.services.runService,

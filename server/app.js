@@ -66,6 +66,7 @@ const { createCompositionLedger } = require('./services/compositionLedger');
 const AUTO_REVIEW_MAX = 5;
 const REVIEW_TEXT_CAP = 1000;
 const HARVEST_TEXT_CAP = 500;
+let warnedComposerFlags = false;
 
 function capText(value, maxChars) {
   const text = String(value || '');
@@ -625,6 +626,13 @@ function createApp(options = {}) {
   const dbPath = options.dbPath || process.env.PALANTIR_DB || path.join(__dirname, 'palantir.db');
   const { db, migrate, close: closeDb } = createDatabase(dbPath);
   migrate();
+  if (!warnedComposerFlags && (
+    process.env.PALANTIR_MEMORY_COMPOSER === '0'
+    || process.env.PALANTIR_MEMORY_COMPOSER_SHADOW === '1'
+  )) {
+    warnedComposerFlags = true;
+    console.warn('[composer] PALANTIR_MEMORY_COMPOSER/SHADOW flags are no longer read — composer is always active.');
+  }
 
   // Skill Packs: ensure runtime/mcp/ directory exists for MCP config files
   const fs = require('fs');
@@ -760,17 +768,6 @@ function createApp(options = {}) {
     runService,
     eventBus,
   });
-  // A2-3a: PM-slot composer+ledger cutover. Flag default OFF (behavior-preserving).
-  // ON: conversationService uses memoryComposer+compositionLedger for PM injection.
-  // OFF: existing shouldInject/retrieveForProject/buildInjectionBlock path unchanged.
-  const memoryComposerEnabled = options.memoryComposer ?? (process.env.PALANTIR_MEMORY_COMPOSER === '1');
-  // P-A2 shadow parity burn-in: SHADOW ON + COMPOSER OFF = read-only observation.
-  // When both are true, old (live) injection path runs normally; the composer is
-  // also called read-only and a memory:composer_parity event is emitted for each
-  // slot turn. SHADOW is independent of COMPOSER; when COMPOSER is ON, shadow is
-  // irrelevant (new path is already live) so conversationService skips it.
-  const memoryComposerShadowEnabled = options.memoryComposerShadow
-    ?? (process.env.PALANTIR_MEMORY_COMPOSER_SHADOW === '1');
   const memoryComposer = createMemoryComposer({
     retrievers: {
       workspace: buildWorkspaceAdapter(memoryService),
@@ -778,10 +775,8 @@ function createApp(options = {}) {
     },
   });
   const compositionLedger = createCompositionLedger(db);
-  if (memoryComposerEnabled) {
-    const seedResult = compositionLedger.seedFromLegacyLedgers();
-    console.log('[composer] flip-seed result:', seedResult);
-  }
+  const seedResult = compositionLedger.seedFromLegacyLedgers();
+  console.log('[composer] flip-seed result:', seedResult);
   const conversationService = createConversationService({
     runService,
     managerRegistry,
@@ -790,11 +785,9 @@ function createApp(options = {}) {
     pmSpawnService,
     memoryService, // ML PR1: user-payload Learned Memory injection (PM slots)
     masterMemoryService, // L2 P1b: user-payload Master memory injection (Top slot)
-    memoryComposer, // A2-3a: composer (flag ON path)
-    compositionLedger, // A2-3a: ledger (flag ON path)
-    memoryComposerEnabled, // A2-3a: flag gate
-    memoryComposerShadowEnabled, // P-A2: shadow parity burn-in (COMPOSER OFF only)
-    eventBus, // P-A2: shadow parity event bus
+    memoryComposer,
+    compositionLedger,
+    eventBus,
   });
   // v3 Phase 2: whenever a manager slot (top or pm:<projectId>) is cleared
   // — by explicit stop, liveness probe, or rotation — drop any lingering
@@ -984,51 +977,9 @@ function createApp(options = {}) {
   // Production callers have no reason to touch these, but exposing them
   // is harmless — they're the same instances already wired into the
   // routes.
-  // P-A2 shadow parity counter seam. Subscribes to memory:composer_parity events
-  // and accumulates a lightweight structured counter. Exposed on app.services so
-  // tests (and future diagnostics) can read aggregate parity statistics without
-  // scanning raw events. Never throws — annotate-only.
-  const composerParityCounter = {
-    total: 0,
-    old_injected: 0,
-    comparable: 0,
-    byte_match: 0,
-    byte_mismatch: 0,
-    old_skipped: 0,
-    shadow_error: 0,
-    reset() {
-      this.total = 0;
-      this.old_injected = 0;
-      this.comparable = 0;
-      this.byte_match = 0;
-      this.byte_mismatch = 0;
-      this.old_skipped = 0;
-      this.shadow_error = 0;
-    },
-  };
-  if (memoryComposerShadowEnabled && !memoryComposerEnabled) {
-    eventBus.subscribe((event) => {
-      if (event.channel !== 'memory:composer_parity') return;
-      try {
-        const d = event.data || {};
-        composerParityCounter.total++;
-        if (d.comparable) {
-          composerParityCounter.old_injected++;
-          composerParityCounter.comparable++;
-          if (d.blockMatch === true) composerParityCounter.byte_match++;
-          else composerParityCounter.byte_mismatch++;
-        } else if (d.reason === 'shadow_error') {
-          composerParityCounter.shadow_error++;
-        } else {
-          composerParityCounter.old_skipped++;
-        }
-      } catch { /* never throws */ }
-    });
-  }
-
   // Phase 0b (S9): composer failure counter. Subscribes to memory:composer_failed
   // events emitted when compose() returns composition===null inside a dec.compose:true
-  // branch. Always active (independent of shadow/composer flags). Never throws.
+  // branch. Always active. Never throws.
   const composerFailureCounter = {
     total: 0,
     reset() { this.total = 0; },
@@ -1038,37 +989,6 @@ function createApp(options = {}) {
     try {
       composerFailureCounter.total++;
     } catch { /* never throws */ }
-  });
-
-  // Phase 1b: runtime gate-parity counter for COMPOSER=1 burn-in. This is
-  // read-only diagnostic state fed by conversationService's OLD-vs-NEW gate
-  // comparison; it must never affect delivery.
-  const composerGateParityCounter = {
-    total: 0,
-    agree: 0,
-    disagree: 0,
-    reset() {
-      this.total = 0;
-      this.agree = 0;
-      this.disagree = 0;
-    },
-  };
-  eventBus.subscribe((event) => {
-    if (event.channel !== 'memory:gate_parity') return;
-    try {
-      const d = event.data || {};
-      composerGateParityCounter.total++;
-      if (d.agree) composerGateParityCounter.agree++;
-      else composerGateParityCounter.disagree++;
-    } catch { /* never throws */ }
-  });
-
-  app.get('/api/memory/composer-parity', auth, (req, res) => {
-    res.json({
-      parity: { ...composerParityCounter },
-      failures: { ...composerFailureCounter },
-      gateParity: { ...composerGateParityCounter },
-    });
   });
 
   app.services = {
@@ -1085,11 +1005,10 @@ function createApp(options = {}) {
     memoryService, // ML PR1: test seam for seeding L1 memory through the app db
     masterMemoryService, // L2 P1b: test seam for seeding/asserting Master memory
     compositionLedger, // A2-3a: test seam for asserting composition ledger entries
+    memoryComposer, // S5-LEDGER: test seam — composer is the sole injection path
     masterMemoryDecayScheduler,
     masterMemoryXprojectScanner,
-    composerParityCounter, // P-A2: shadow parity aggregate counter (diagnostic seam)
     composerFailureCounter, // Phase 0b: compose()-returned-null counter (diagnostic seam)
-    composerGateParityCounter, // Phase 1b: COMPOSER=1 gate parity aggregate counter
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at
     // (createRun() always stamps status='queued' and cost_usd=0 at now).

@@ -530,16 +530,18 @@ test('dual-write L1: enqueueDistillJob (memory_jobs) sets owner', async (t) => {
   }
 });
 
-test('dual-write L1: recordInjection (pm_memory_injection) sets owner', async (t) => {
+test('legacy L1 table: pm_memory_injection retains owner columns', async (t) => {
   const cleanup = [];
   try {
     const db = await setupDb(cleanup);
     const projectId = 'proj-dw-inj';
     db.prepare("INSERT OR IGNORE INTO projects (id, name, directory) VALUES (?, ?, ?)").run(projectId, 'DWInj', '/tmp/dwinj');
 
-    const svc = createMemoryService(db);
     const pmRunId = crypto.randomUUID();
-    svc.recordInjection(pmRunId, projectId, 1);
+    db.prepare(`
+      INSERT INTO pm_memory_injection(pm_run_id, project_id, injected_revision, injected_at, owner_type, owner_id)
+      VALUES (?, ?, 1, datetime('now'), 'workspace', ?)
+    `).run(pmRunId, projectId, projectId);
 
     const row = db.prepare('SELECT owner_type, owner_id FROM pm_memory_injection WHERE pm_run_id=?').get(pmRunId);
     assert.equal(row.owner_type, 'workspace');
@@ -595,13 +597,15 @@ test('dual-write L2: createCandidate (master_memory_candidates) sets owner user/
   }
 });
 
-test('dual-write L2: recordInjection (master_memory_injection) sets owner user/user', async (t) => {
+test('legacy L2 table: master_memory_injection retains owner columns user/user', async (t) => {
   const cleanup = [];
   try {
     const db = await setupDb(cleanup);
-    const svc = createMasterMemoryService(db);
     const masterRunId = crypto.randomUUID();
-    svc.recordInjection(masterRunId, 'user', 1);
+    db.prepare(`
+      INSERT INTO master_memory_injection(master_run_id, scope, injected_revision, injected_at, owner_type, owner_id)
+      VALUES (?, 'user', 1, datetime('now'), 'user', 'user')
+    `).run(masterRunId);
 
     const row = db.prepare('SELECT owner_type, owner_id FROM master_memory_injection WHERE master_run_id=?').get(masterRunId);
     assert.equal(row.owner_type, 'user');

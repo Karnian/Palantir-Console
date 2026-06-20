@@ -86,18 +86,6 @@ test('buildInjectionBlock: ## User Memory header + bullets; null on empty', (t) 
   assert.ok(block.includes('- [constraint] use node --test'));
 });
 
-test('revision + injection ledger: once-per-run, re-inject on revision bump', (t) => {
-  const svc = createMasterMemoryService(setupDb(t));
-  svc.createMemoryItem({ scope: 'user', kind: 'preference', content: 'first memory', origin: 'human' });
-  const run = 'master-run-1';
-  let g = svc.shouldInject(run, 'user');
-  assert.equal(g.inject, true, 'fresh run injects');
-  svc.recordInjection(run, 'user', g.revision);
-  assert.equal(svc.shouldInject(run, 'user').inject, false, 'already injected at this revision');
-  svc.createMemoryItem({ scope: 'user', kind: 'preference', content: 'second memory', origin: 'human' });
-  assert.equal(svc.shouldInject(run, 'user').inject, true, 're-injects after revision bump');
-});
-
 test('upsertFact: supersede on change, no-op (no bump) on unchanged', (t) => {
   const svc = createMasterMemoryService(setupDb(t));
   const v1 = svc.upsertFact({ scope: 'user', factKey: 'env.node', content: 'node 22' });
@@ -136,19 +124,6 @@ test('scope isolation + cross_project same-scope dedup', (t) => {
   // two cross_project identical → dedup merges (scope NOT NULL → unique index fires)
   const c2 = svc.createMemoryItem({ scope: 'cross_project', kind: 'preference', content: 'cross scoped text', origin: 'human' });
   assert.equal(c2.source_count, 2, 'cross_project dedup works (no NULL-distinct hole)');
-});
-
-test('injection ledger is scope-keyed (user injection does NOT suppress cross_project gate)', (t) => {
-  // scope-keyed: recording user injection only closes the user gate; the cross_project gate
-  // remains independent. This is the correct behavior — each scope is injected separately.
-  const svc = createMasterMemoryService(setupDb(t));
-  svc.createMemoryItem({ scope: 'user', kind: 'preference', content: 'u mem here', origin: 'human' });
-  svc.createMemoryItem({ scope: 'cross_project', kind: 'preference', content: 'c mem here', origin: 'human' });
-  const run = 'run-x';
-  const gu = svc.shouldInject(run, 'user');
-  svc.recordInjection(run, 'user', gu.revision);
-  assert.equal(svc.shouldInject(run, 'user').inject, false, 'user gate closed after user injection');
-  assert.equal(svc.shouldInject(run, 'cross_project').inject, true, 'cross_project gate is independent of user ledger');
 });
 
 test('write-time: rejects injection-marker content for untrusted (human) origin', (t) => {

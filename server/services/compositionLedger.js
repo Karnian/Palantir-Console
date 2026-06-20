@@ -12,11 +12,6 @@
  *     separate DB service that wraps DB writes only.
  *   - never-throws (annotate-only): record/accept/gate errors degrade
  *     gracefully — callers must never assume a non-null return.
- *   - Not wired to conversationService yet (A2-3 will do that).
- *   - The legacy pm_memory_injection / master_memory_injection ledgers
- *     (memoryService.shouldInject / recordInjection) are NOT replaced here;
- *     they remain live until A2-3 parity retire.
- *   - behavior-preserving: the new ledger is unused until A2-3 wires it in.
  *   - CONTRACT: manager-slot compositions use (run, conversation) identity.
  *     task_id=null is by-design — manager runs are not task-bound.
  *
@@ -226,10 +221,9 @@ function createCompositionLedger(db) {
   });
 
   // ── commitAccepted transaction ────────────────────────────────────────────
-  // Merges record+accept into a single db.transaction, and if legacyWriteFn
-  // is provided calls it INSIDE the same transaction so all writes are atomic.
+  // Merges record+accept into a single db.transaction.
   // THROWS on error (by design — atomicity requires rollback on any failure).
-  const txCommitAccepted = db.transaction((composition, opts, legacyWriteFn) => {
+  const txCommitAccepted = db.transaction((composition, opts) => {
     const {
       runId,
       conversationId = null,
@@ -309,12 +303,6 @@ function createCompositionLedger(db) {
       });
     }
 
-    // Call legacyWriteFn inside the same tx so it joins the transaction.
-    // If it throws, the entire tx rolls back — including the event row above.
-    if (typeof legacyWriteFn === 'function') {
-      legacyWriteFn();
-    }
-
     return id;
   });
 
@@ -350,23 +338,20 @@ function createCompositionLedger(db) {
 
     /**
      * Atomic commit: inserts the composition event with status='accepted' directly
-     * (merges record+accept), inserts owner_state and item_edges rows, and if
-     * legacyWriteFn is a function calls it INSIDE the same db.transaction so all
-     * writes are atomic. If legacyWriteFn throws, the entire transaction rolls back
-     * (no orphan composition rows).
+     * (merges record+accept), inserts owner_state and item_edges rows inside the
+     * same db.transaction.
      *
      * THROWS on error — atomicity is the contract; callers must wrap in try/catch.
      *
      * @param {object} composition - memoryComposer.compose().composition
      * @param {object} opts        - same shape as record() opts
-     * @param {Function|undefined} legacyWriteFn - optional sync fn called inside tx
      * @returns {string} compositionId
      */
-    commitAccepted(composition, opts, legacyWriteFn) {
+    commitAccepted(composition, opts) {
       if (!composition || !opts) {
         throw new Error('commitAccepted: composition and opts are required');
       }
-      return txCommitAccepted(composition, opts, legacyWriteFn);
+      return txCommitAccepted(composition, opts);
     },
 
     /**
