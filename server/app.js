@@ -1036,6 +1036,37 @@ function createApp(options = {}) {
     } catch { /* never throws */ }
   });
 
+  // Phase 1b: runtime gate-parity counter for COMPOSER=1 burn-in. This is
+  // read-only diagnostic state fed by conversationService's OLD-vs-NEW gate
+  // comparison; it must never affect delivery.
+  const composerGateParityCounter = {
+    total: 0,
+    agree: 0,
+    disagree: 0,
+    reset() {
+      this.total = 0;
+      this.agree = 0;
+      this.disagree = 0;
+    },
+  };
+  eventBus.subscribe((event) => {
+    if (event.channel !== 'memory:gate_parity') return;
+    try {
+      const d = event.data || {};
+      composerGateParityCounter.total++;
+      if (d.agree) composerGateParityCounter.agree++;
+      else composerGateParityCounter.disagree++;
+    } catch { /* never throws */ }
+  });
+
+  app.get('/api/memory/composer-parity', auth, (req, res) => {
+    res.json({
+      parity: { ...composerParityCounter },
+      failures: { ...composerFailureCounter },
+      gateParity: { ...composerGateParityCounter },
+    });
+  });
+
   app.services = {
     runService,
     taskService,
@@ -1054,6 +1085,7 @@ function createApp(options = {}) {
     masterMemoryXprojectScanner,
     composerParityCounter, // P-A2: shadow parity aggregate counter (diagnostic seam)
     composerFailureCounter, // Phase 0b: compose()-returned-null counter (diagnostic seam)
+    composerGateParityCounter, // Phase 1b: COMPOSER=1 gate parity aggregate counter
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at
     // (createRun() always stamps status='queued' and cost_usd=0 at now).
