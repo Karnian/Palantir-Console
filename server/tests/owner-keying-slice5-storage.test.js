@@ -423,3 +423,76 @@ test('pm_memory_injection ON CONFLICT(pm_run_id) still works after migration 039
   const count = db.prepare("SELECT COUNT(*) AS n FROM pm_memory_injection WHERE pm_run_id = 'run-x'").get().n;
   assert.equal(count, 1, 'ON CONFLICT(pm_run_id) upsert must not duplicate');
 });
+
+// ──────────────────────────────────────────────────────────────
+// Review fixes (Codex R-final): completeness (L2 items drop) + F1 (NULL-owner fail-closed)
+// ──────────────────────────────────────────────────────────────
+
+test('039 PART 4: old scope-unique dedup indexes dropped from master_memory_items (slice5 completeness)', (t) => {
+  const db = buildMigratedDb();
+  t.after(() => db.close());
+
+  // 030's (scope, content_hash) / (scope, fact_key) dedup uniques must be gone.
+  for (const name of ['idx_master_memory_content_hash', 'idx_master_memory_factkey']) {
+    const row = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name = ?").get(name);
+    assert.equal(row, undefined, `${name} must be dropped by migration 039 PART 4`);
+  }
+  // 034's owner-unique replacement must remain (stricter dedup).
+  assert.ok(
+    hasUniqueIndex(db, 'master_memory_items', ['owner_type', 'owner_id', 'content_hash']),
+    'owner-unique content_hash index must remain on master_memory_items'
+  );
+  // Non-unique provenance read index is KEPT.
+  assert.ok(
+    db.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_master_memory_scope_status'").get(),
+    'idx_master_memory_scope_status (read path) must be kept'
+  );
+});
+
+test('039 F1: memory_candidates owner columns are NOT NULL (NULL-owner row rejected)', (t) => {
+  const db = buildMigratedDb();
+  t.after(() => db.close());
+  insertProject(db, 'notnull-proj');
+
+  assert.throws(
+    () => db.prepare(
+      'INSERT INTO memory_candidates (id, project_id, rule, raw_json, dedup_key, status, created_at, updated_at, owner_type, owner_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run('null-owner-cand', 'notnull-proj', 'R1b', '{}', 'k', 'pending', '2026-01-01', '2026-01-01', null, null),
+    /NOT NULL/,
+    'NULL owner candidate must be rejected structurally'
+  );
+});
+
+test('039 F1: master_memory_candidates owner columns are NOT NULL', (t) => {
+  const db = buildMigratedDb();
+  t.after(() => db.close());
+
+  assert.throws(
+    () => db.prepare(
+      'INSERT INTO master_memory_candidates (id, scope, rule, raw_json, dedup_key, status, created_at, updated_at, owner_type, owner_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run('null-owner-mm', 'user', 'R4', '{}', 'k', 'pending', '2026-01-01', '2026-01-01', null, null),
+    /NOT NULL/,
+    'NULL owner master candidate must be rejected structurally'
+  );
+});
+
+test('039 F1 PART 0: a NULL-owner ACTIVE memory_items row aborts migration 039 (fail-closed)', (t) => {
+  // Build to 038 (pre-039), create a normal item (owner set), corrupt it to
+  // NULL owner, then apply 039 — PART 0 preflight must abort the migration.
+  const db = buildMigratedDb({ upTo: 38 });
+  t.after(() => db.close());
+  insertProject(db, 'preflight-proj');
+  const svc = createMemoryService(db);
+  svc.createMemoryItem({ projectId: 'preflight-proj', kind: 'convention', content: 'x', origin: 'human' });
+  db.prepare("UPDATE memory_items SET owner_type = NULL WHERE project_id = 'preflight-proj'").run();
+
+  const sql039 = fs.readFileSync(
+    path.join(__dirname, '..', 'db', 'migrations', '039_owner_keying_slice5_storage.sql'),
+    'utf8'
+  );
+  assert.throws(
+    () => db.exec(sql039),
+    /constraint failed/i,
+    'PART 0 preflight must abort when an active item has a NULL owner'
+  );
+});

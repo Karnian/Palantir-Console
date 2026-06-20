@@ -29,6 +29,24 @@
 -- concurrent writers) — no hot-lock risk for the table rebuilds.
 
 -- ============================================================
+-- PART 0: owner preflight (fail-closed) — Codex review SERIOUS-1.
+-- SQLite treats NULL as DISTINCT in UNIQUE indexes, so a NULL-owner row would
+-- silently bypass the new owner-keyed dedup once the old project/scope indexes
+-- are dropped. 033 backfilled every row, so this passes in practice; it aborts
+-- the migration (the runner wraps each file in a transaction → full rollback)
+-- if any ACTIVE item lacks an owner, rather than fail-open. Candidate tables
+-- enforce this structurally via NOT NULL owner columns in their rebuild below.
+-- ============================================================
+CREATE TEMP TABLE _m039_owner_guard (ok INTEGER NOT NULL CHECK (ok = 1));
+INSERT INTO _m039_owner_guard (ok) SELECT CASE WHEN (
+  (SELECT COUNT(*) FROM memory_items
+     WHERE status = 'active' AND (owner_type IS NULL OR owner_id IS NULL))
+  + (SELECT COUNT(*) FROM master_memory_items
+     WHERE status = 'active' AND (owner_type IS NULL OR owner_id IS NULL))
+) = 0 THEN 1 ELSE 0 END;
+DROP TABLE _m039_owner_guard;
+
+-- ============================================================
 -- PART 1: memory_items owner-unique partial indexes
 -- ============================================================
 
@@ -64,8 +82,8 @@ CREATE TABLE memory_candidates_new (
   promoted_to TEXT REFERENCES memory_items(id) ON DELETE SET NULL,
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
-  owner_type  TEXT,
-  owner_id    TEXT,
+  owner_type  TEXT NOT NULL,           -- SERIOUS-1: NULL would bypass owner dedup
+  owner_id    TEXT NOT NULL,           -- (033 backfilled; INSERT SELECT aborts on NULL)
   -- Owner-keyed dedup UNIQUE replaces the old (rule, project_id, dedup_key):
   UNIQUE (rule, owner_type, owner_id, dedup_key),
   CHECK (rule IN ('R1b','R3','R4')),
@@ -115,8 +133,8 @@ CREATE TABLE master_memory_candidates_new (
   promoted_to TEXT REFERENCES master_memory_items(id) ON DELETE SET NULL,
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
-  owner_type  TEXT,
-  owner_id    TEXT,
+  owner_type  TEXT NOT NULL,           -- SERIOUS-1: NULL would bypass owner dedup
+  owner_id    TEXT NOT NULL,           -- (033 backfilled; INSERT SELECT aborts on NULL)
   -- Owner-keyed dedup UNIQUE replaces the old (rule, scope, dedup_key):
   UNIQUE (rule, owner_type, owner_id, dedup_key),
   CHECK (scope IN ('user','cross_project')),
@@ -142,3 +160,16 @@ CREATE INDEX idx_master_memory_candidates_scope_status
 
 CREATE INDEX idx_master_memory_candidates_owner
   ON master_memory_candidates(owner_type, owner_id);
+
+-- ============================================================
+-- PART 4: drop L2 master_memory_items old scope-unique indexes (slice5 completeness).
+-- 034 added owner-unique replacements (idx_master_memory_owner_content_hash /
+-- idx_master_memory_owner_factkey); the owner-unique is STRICTER than the old
+-- scope-unique (cross_project + user collapse to owner=(user,user)), and after
+-- the slice2a merge no (owner) duplicates exist, so dropping the looser old
+-- scope dedup indexes is safe. The non-unique read index
+-- idx_master_memory_scope_status (provenance reads) is KEPT.
+-- INVARIANT (unchanged): master_memory revision/injection stay scope-keyed.
+-- ============================================================
+DROP INDEX IF EXISTS idx_master_memory_content_hash;
+DROP INDEX IF EXISTS idx_master_memory_factkey;

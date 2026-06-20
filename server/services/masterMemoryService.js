@@ -182,7 +182,11 @@ function createMasterMemoryService(db, eventBus) {
       VALUES (@id, @scope, @rule, @rawJson, @dedupKey, @ownerType, @ownerId)
       ON CONFLICT(rule, owner_type, owner_id, dedup_key) DO NOTHING
     `);
-  } catch (_prepErr) {
+  } catch (prepErr) {
+    // Fall back ONLY when the owner-keyed UNIQUE does not exist yet (pre-039 DB).
+    // Any other prepare error (e.g. a typo'd column name) MUST surface — never
+    // silently degrade to the legacy path (Codex review SERIOUS-2).
+    if (!/ON CONFLICT clause does not match/i.test(prepErr && prepErr.message)) throw prepErr;
     // Migration 039 not yet applied — fall back to the legacy scope-keyed constraint.
     insertCandidateStmt = db.prepare(`
       INSERT INTO master_memory_candidates (id, scope, rule, raw_json, dedup_key, owner_type, owner_id)
