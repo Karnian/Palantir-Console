@@ -24,10 +24,32 @@ const POLICY_VERSION = '0.1.0';   // constraint>fact>heuristic; multi-owner A2-4
 const DEFAULT_BUDGET = 1_000_000;
 
 // ─── kind 우선순위 (precedence policy — 단일 owner에서는 no-op) ──────────────
-const KIND_RANK = { constraint: 0, fact: 1, heuristic: 2 };
+const KIND_RANK = {
+  constraint: 0,
+  commitment: 1,
+  decision: 2,
+  fact: 3,
+  pattern: 4,
+  heuristic: 5,
+  preference: 6,
+};
 function kindRank(kind) {
   const k = typeof kind === 'string' ? kind.toLowerCase() : '';
   return KIND_RANK[k] ?? 99;
+}
+
+const ORIGIN_RANK = { human: 0, batch_llm: 1 };
+function originRank(origin) {
+  const k = typeof origin === 'string' ? origin.toLowerCase() : '';
+  return ORIGIN_RANK[k] ?? 2;
+}
+
+const MULTI_OWNER_BUDGET = {
+  workspace: 3000,
+  user: 1500,
+};
+function getOwnerTypeBudget(ownerType) {
+  return MULTI_OWNER_BUDGET[ownerType] ?? DEFAULT_BUDGET;
 }
 
 // ─── 해시 헬퍼 ───────────────────────────────────────────────────────────────
@@ -44,6 +66,85 @@ function hashObject(obj) {
 function estimateTokenCost(content) {
   const len = typeof content === 'string' ? content.length : 0;
   return Math.ceil(len / 4);
+}
+
+function numericOrZero(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function compareMultiOwnerRows(a, b) {
+  const kindDelta = kindRank(a && a.kind) - kindRank(b && b.kind);
+  if (kindDelta !== 0) return kindDelta;
+
+  const ownerDelta = numericOrZero(a && a._ownerIndex) - numericOrZero(b && b._ownerIndex);
+  if (ownerDelta !== 0) return ownerDelta;
+
+  const originDelta = originRank(a && a.origin) - originRank(b && b.origin);
+  if (originDelta !== 0) return originDelta;
+
+  const confidenceDelta = numericOrZero(b && b.confidence) - numericOrZero(a && a.confidence);
+  if (confidenceDelta !== 0) return confidenceDelta;
+
+  const importanceDelta = numericOrZero(b && b.importance) - numericOrZero(a && a.importance);
+  if (importanceDelta !== 0) return importanceDelta;
+
+  return numericOrZero(a && a._rank) - numericOrZero(b && b._rank);
+}
+
+function itemTableForOwner(ownerType) {
+  return ownerType === 'workspace' ? 'memory_items' : 'master_memory_items';
+}
+
+function makeItemEdge(row, decision, reason = null) {
+  const content = row && typeof row.content === 'string' ? row.content : '';
+  return {
+    item_table: itemTableForOwner(row && row._ownerType),
+    item_id: row && row.id,
+    item_revision: row && row.revision,
+    content_hash: row && row.content_hash,
+    fact_key: row && row.fact_key,
+    kind: row && row.kind,
+    source_owner_type: row && row._ownerType,
+    source_owner_id: row && row._ownerId,
+    provenance: row && row._provenance != null ? row._provenance : null,
+    decision,
+    reason,
+    rank: row && row._rank,
+    token_cost: estimateTokenCost(content),
+  };
+}
+
+function stripComposerAnnotations(row) {
+  const clean = {};
+  for (const [key, value] of Object.entries(row || {})) {
+    if (!key.startsWith('_')) clean[key] = value;
+  }
+  return clean;
+}
+
+function multiOwnerGroupKey(row) {
+  if (row && row.fact_key != null) return `fact_key:${String(row.fact_key)}`;
+  if (row && row.content_hash != null) return `content_hash:${String(row.content_hash)}`;
+  return `row:${String(row && row._ownerIndex)}:${String(row && row._rank)}:${String(row && row.id)}`;
+}
+
+function rowOwnerKey(row) {
+  return `${row && row._ownerType}:${row && row._ownerId}:${row && row._ownerIndex}`;
+}
+
+function hasSameContentHash(group) {
+  if (!Array.isArray(group) || group.length < 2) return false;
+  const firstHash = group[0] && group[0].content_hash;
+  if (firstHash == null) return false;
+  return group.every((row) => row && row.content_hash === firstHash);
+}
+
+function contentDiffers(a, b) {
+  const aHash = a && a.content_hash;
+  const bHash = b && b.content_hash;
+  const hashDiffers = (aHash != null || bHash != null) && aHash !== bHash;
+  const textDiffers = String((a && a.content) ?? '') !== String((b && b.content) ?? '');
+  return hashDiffers || textDiffers;
 }
 
 // ─── Composer factory ────────────────────────────────────────────────────────
@@ -95,7 +196,9 @@ function createMemoryComposer({ retrievers = {} } = {}) {
       const { owners = [], taskContext = '', mode, slotKind } =
         (arg != null && typeof arg === 'object') ? arg : {};
       const ownerList = Array.isArray(owners) ? owners : [];
+      const isMultiOwner = ownerList.length > 1;
 
+      if (!isMultiOwner) {
       // ── per-owner 처리 ────────────────────────────────────────────────────
       const ownerBlocks = [];
       const ownerStates = [];
@@ -271,6 +374,209 @@ function createMemoryComposer({ retrievers = {} } = {}) {
           selected_set_hash: selectedSetHash,
         },
       };
+      }
+
+      // ── multi-owner 처리 (A2-4a) ─────────────────────────────────────────
+      const ownerStates = [];
+      const itemEdges = [];
+      const ownerBlocks = [];
+      const flatRows = [];
+      const ownerMetas = [];
+      const ownerMetaByIndex = new Map();
+
+      for (let ownerIndex = 0; ownerIndex < ownerList.length; ownerIndex++) {
+        const ownerSpec = ownerList[ownerIndex] || {};
+        const { owner_type, owner_id, provenance } = ownerSpec;
+        const adapter = retrievers[owner_type];
+        if (!adapter) continue;
+
+        const effectiveBudget = getOwnerTypeBudget(owner_type);
+
+        let revision = 0;
+        try { revision = adapter.getRevision(owner_id) ?? 0; } catch { /* non-critical */ }
+
+        let rows = [];
+        try {
+          rows = adapter.retrieve(owner_id, { taskContext, provenance }) ?? [];
+        } catch {
+          rows = [];
+        }
+        if (!Array.isArray(rows)) rows = [];
+
+        const ownerMeta = {
+          owner_type,
+          owner_id,
+          provenance: provenance ?? null,
+          adapter,
+          ownerIndex,
+          revision,
+          effectiveBudget,
+          selectedRows: [],
+          suppressedIds: new Set(),
+          budgetUsed: 0,
+        };
+        ownerMetas.push(ownerMeta);
+        ownerMetaByIndex.set(ownerIndex, ownerMeta);
+
+        for (let rank = 0; rank < rows.length; rank++) {
+          const row = rows[rank];
+          const base = row != null && typeof row === 'object' ? row : {};
+          flatRows.push({
+            ...base,
+            _ownerType: owner_type,
+            _ownerId: owner_id,
+            _provenance: provenance ?? null,
+            _ownerIndex: ownerIndex,
+            _rank: rank,
+          });
+        }
+      }
+
+      flatRows.sort(compareMultiOwnerRows);
+
+      const groupedRows = new Map();
+      for (const row of flatRows) {
+        const key = multiOwnerGroupKey(row);
+        const group = groupedRows.get(key) || [];
+        group.push(row);
+        groupedRows.set(key, group);
+      }
+
+      const winnerRows = [];
+      const edgeRecords = [];
+
+      for (const group of groupedRows.values()) {
+        if (group.length <= 1) {
+          winnerRows.push(...group);
+          continue;
+        }
+
+        const ownerKeys = new Set(group.map(rowOwnerKey));
+        const shouldResolve = ownerKeys.size > 1 || hasSameContentHash(group);
+        if (!shouldResolve) {
+          winnerRows.push(...group);
+          continue;
+        }
+
+        const sortedGroup = group.slice().sort(compareMultiOwnerRows);
+        const winner = sortedGroup[0];
+        winnerRows.push(winner);
+
+        for (const loser of sortedGroup.slice(1)) {
+          const sameFactKey = winner && loser &&
+            winner.fact_key != null &&
+            loser.fact_key != null &&
+            winner.fact_key === loser.fact_key;
+          const isConflict = sameFactKey && contentDiffers(winner, loser);
+          const decision = isConflict ? 'conflicted' : 'deduped';
+          const reason = isConflict
+            ? `suppressed by winner_id=${winner && winner.id} owner=${winner && winner._ownerType}:${winner && winner._ownerId} fact_key=${winner && winner.fact_key}`
+            : `duplicate of winner_id=${winner && winner.id}`;
+          edgeRecords.push({ row: loser, edge: makeItemEdge(loser, decision, reason) });
+          const loserMeta = ownerMetaByIndex.get(loser && loser._ownerIndex);
+          if (loserMeta) loserMeta.suppressedIds.add(loser && loser.id);
+        }
+      }
+
+      winnerRows.sort(compareMultiOwnerRows);
+
+      for (const ownerMeta of ownerMetas) {
+        const rowsForOwner = winnerRows.filter((row) => row && row._ownerIndex === ownerMeta.ownerIndex);
+        let budgetBreached = false;
+
+        for (const row of rowsForOwner) {
+          const content = row && typeof row.content === 'string' ? row.content : '';
+          const cost = estimateTokenCost(content);
+
+          if (!budgetBreached && ownerMeta.budgetUsed + cost <= ownerMeta.effectiveBudget) {
+            ownerMeta.selectedRows.push(row);
+            ownerMeta.budgetUsed += cost;
+            edgeRecords.push({ row, edge: makeItemEdge(row, 'included', null) });
+          } else {
+            budgetBreached = true;
+            ownerMeta.suppressedIds.add(row && row.id);
+            edgeRecords.push({
+              row,
+              edge: makeItemEdge(
+                row,
+                'budget_exceeded',
+                `budget_limit=${ownerMeta.effectiveBudget} budget_used=${ownerMeta.budgetUsed} token_cost=${cost}`,
+              ),
+            });
+          }
+        }
+      }
+
+      edgeRecords.sort((a, b) => compareMultiOwnerRows(a && a.row, b && b.row));
+      for (const record of edgeRecords) itemEdges.push(record.edge);
+
+      for (const ownerMeta of ownerMetas) {
+        const selectedRows = ownerMeta.selectedRows.map(stripComposerAnnotations);
+        let ownerBlock = null;
+        try {
+          ownerBlock = ownerMeta.adapter.buildBlock(selectedRows);
+        } catch { /* annotate-only */ }
+
+        if (ownerBlock != null) {
+          ownerBlocks.push(ownerBlock);
+        }
+
+        const selectedSetHash = hashObject(ownerMeta.selectedRows.map((r) => r && r.id));
+        const suppressedSetHash = ownerMeta.suppressedIds.size > 0
+          ? hashObject(Array.from(ownerMeta.suppressedIds))
+          : null;
+
+        ownerStates.push({
+          owner_type: ownerMeta.owner_type,
+          owner_id: ownerMeta.owner_id,
+          provenance: ownerMeta.provenance,
+          revision: ownerMeta.revision,
+          selected_set_hash: selectedSetHash,
+          suppressed_set_hash: suppressedSetHash,
+          selected_count: ownerMeta.selectedRows.length,
+          suppressed_count: ownerMeta.suppressedIds.size,
+          budget_limit: ownerMeta.effectiveBudget,
+          budget_used: ownerMeta.budgetUsed,
+        });
+      }
+
+      let block;
+      if (ownerBlocks.length === 0) {
+        block = null;
+      } else {
+        block = ownerBlocks.join('\n\n');
+      }
+
+      const retrievalQueryHash = sha256(typeof taskContext === 'string' ? taskContext : '');
+      const totalBudget = ownerList.reduce((s, o) => s + getOwnerTypeBudget(o && o.owner_type), 0);
+      const ownerVectorHash = hashObject(ownerList.map((o) => o && [o.owner_type, o.owner_id]));
+      const selectedSetHash = hashObject(
+        itemEdges.filter((e) => e.decision === 'included').map((e) => e.item_id)
+      );
+
+      const fingerprint = sha256(JSON.stringify({
+        composer_version: COMPOSER_VERSION,
+        policy_version: POLICY_VERSION,
+        retrieval_query_hash: retrievalQueryHash,
+        token_budget: totalBudget,
+        owner_vector_hash: ownerVectorHash,
+        selected_set_hash: selectedSetHash,
+      }));
+
+      return {
+        block,
+        composition: {
+          fingerprint,
+          owner_states: ownerStates,
+          item_edges: itemEdges,
+          composer_version: COMPOSER_VERSION,
+          policy_version: POLICY_VERSION,
+          retrieval_query_hash: retrievalQueryHash,
+          token_budget: totalBudget,
+          owner_vector_hash: ownerVectorHash,
+          selected_set_hash: selectedSetHash,
+        },
+      };
     } catch {
       // never-throws contract: annotate-only (buildInjectionBlock 미러)
       return { block: null, composition: null };
@@ -323,4 +629,7 @@ module.exports = {
   COMPOSER_VERSION,
   POLICY_VERSION,
   DEFAULT_BUDGET,
+  MULTI_OWNER_BUDGET,
+  getOwnerTypeBudget,
+  kindRank,
 };

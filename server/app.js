@@ -783,6 +783,7 @@ function createApp(options = {}) {
     pmSpawnService,
     memoryService, // ML PR1: user-payload Learned Memory injection (PM slots)
     masterMemoryService, // L2 P1b: user-payload Master memory injection (Top slot)
+    memoryMultiOwner: options.memoryMultiOwner ?? (process.env.PALANTIR_MEMORY_MULTI_OWNER === '1'),
     memoryComposer,
     compositionLedger,
     eventBus,
