@@ -56,6 +56,7 @@ function createConversationService({
   // dependency keep the pre-PR1 behavior byte-for-byte.
     memoryService,
     masterMemoryService,
+    memoryMultiOwner,
     memoryComposer,
     compositionLedger,
     eventBus,
@@ -305,11 +306,15 @@ function createConversationService({
         // cleanly rather than throwing inside the try/catch on every send.
         // peek/decide: gate check → compose → stash for commit phase.
         try {
-          const currentOwnerRevisions = [{
-            owner_type: 'workspace',
-            owner_id: projectId,
-            revision: memoryService.getRevision(projectId),
-          }];
+          const useMultiOwner = memoryMultiOwner && !!masterMemoryService;
+          const currentOwnerRevisions = useMultiOwner
+            ? [
+                { owner_type: 'workspace', owner_id: projectId, revision: memoryService.getRevision(projectId) },
+                { owner_type: 'user', owner_id: 'user', revision: masterMemoryService.getRevision('user') },
+              ]
+            : [
+                { owner_type: 'workspace', owner_id: projectId, revision: memoryService.getRevision(projectId) },
+              ];
           const dec = compositionLedger.shouldCompose({
             runId: run.id,
             slotKind: 'pm',
@@ -317,8 +322,16 @@ function createConversationService({
             currentOwnerRevisions,
           });
           if (dec.compose) {
+            const owners = useMultiOwner
+              ? [
+                  { owner_type: 'user', owner_id: 'user', provenance: 'user' },
+                  { owner_type: 'workspace', owner_id: projectId },
+                ]
+              : [
+                  { owner_type: 'workspace', owner_id: projectId },
+                ];
             const { block, composition } = memoryComposer.compose({
-              owners: [{ owner_type: 'workspace', owner_id: projectId }],
+              owners,
               taskContext: originalText,
             });
             // Phase 0b (S9): composition===null means compose() hit its outer catch.
