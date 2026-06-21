@@ -942,12 +942,15 @@ function createMasterMemoryService(db, eventBus) {
     }
   }
 
-  // Caching-safe injection block: "## User Memory" + injection-time re-sanitize (reject injection markers,
+  // Caching-safe injection block: header + injection-time re-sanitize (reject injection markers,
   // redact secrets) so no stored row leaks into the Master payload. Mirrors L1 buildInjectionBlock.
-  function buildInjectionBlock(rows) {
+  function buildInjectionBlock(rows, opts = {}) {
     try {
       if (!Array.isArray(rows) || rows.length === 0) return null;
-      const lines = ['## User Memory'];
+      const header = typeof opts.header === 'string' && opts.header.trim()
+        ? opts.header
+        : '## User Memory';
+      const lines = [header];
       for (const row of rows) {
         if (!row || !row.content) continue;
         const raw = String(row.content);

@@ -25,6 +25,20 @@
 
 const { randomUUID } = require('node:crypto');
 
+function ownerStateKey(row) {
+  const ownerType = row && row.owner_type;
+  const ownerId = row && row.owner_id;
+  const provenanceKey =
+    row && row.provenance_key != null ? row.provenance_key :
+      (row && row.provenance != null ? row.provenance : '');
+  return `${ownerType}:${ownerId}:${provenanceKey}`;
+}
+
+function ownerStateProvenance(row) {
+  return row && row.provenance != null ? row.provenance :
+    (row && row.provenance_key != null ? row.provenance_key : '');
+}
+
 // ─── factory ─────────────────────────────────────────────────────────────────
 
 /**
@@ -96,15 +110,23 @@ function createCompositionLedger(db) {
   const stmtGetLastAcceptedId = db.prepare(`
     SELECT id FROM memory_composition_events
     WHERE run_id = ? AND slot_kind = ? AND provenance_key = ? AND status = 'accepted'
-    ORDER BY accepted_at DESC, created_at DESC
+    ORDER BY accepted_at DESC, created_at DESC, rowid DESC
     LIMIT 1
   `);
 
   // Gate: owner states of the last accepted composition (joined via id)
   const stmtGetLastAcceptedOwnerStates = db.prepare(`
-    SELECT os.owner_type, os.owner_id, os.revision
+    SELECT os.owner_type, os.owner_id, COALESCE(os.provenance_key, '') AS provenance_key, os.revision
     FROM memory_composition_owner_state os
     WHERE os.composition_id = ?
+  `);
+
+  const stmtGetLastAcceptedSelectedSetHash = db.prepare(`
+    SELECT id, selected_set_hash
+    FROM memory_composition_events
+    WHERE run_id = ? AND slot_kind = ? AND provenance_key = ? AND status = 'accepted'
+    ORDER BY accepted_at DESC, created_at DESC, rowid DESC
+    LIMIT 1
   `);
 
   // Retention: delete all accepted except the latest for (run_id, slot_kind, provenance_key)
@@ -120,7 +142,7 @@ function createCompositionLedger(db) {
           AND slot_kind = @slot_kind
           AND provenance_key = @provenance_key
           AND status = 'accepted'
-        ORDER BY accepted_at DESC, created_at DESC
+        ORDER BY accepted_at DESC, created_at DESC, rowid DESC
         LIMIT 1
       )
   `);
@@ -185,7 +207,7 @@ function createCompositionLedger(db) {
         owner_type: os.owner_type ?? null,
         owner_id: os.owner_id ?? null,
         // composer uses os.provenance (not os.provenance_key)
-        provenance_key: os.provenance ?? null,
+        provenance_key: ownerStateProvenance(os),
         revision: os.revision ?? null,
         selected_set_hash: os.selected_set_hash ?? null,
         suppressed_set_hash: os.suppressed_set_hash ?? null,
@@ -272,7 +294,7 @@ function createCompositionLedger(db) {
         composition_id: id,
         owner_type: os.owner_type ?? null,
         owner_id: os.owner_id ?? null,
-        provenance_key: os.provenance ?? null,
+        provenance_key: ownerStateProvenance(os),
         revision: os.revision ?? null,
         selected_set_hash: os.selected_set_hash ?? null,
         suppressed_set_hash: os.suppressed_set_hash ?? null,
@@ -383,6 +405,7 @@ function createCompositionLedger(db) {
      *   - No prior accepted composition → { compose: true,  reason: 'no_prior_accepted' }
      *   - Any owner revision increased  → { compose: true,  reason: 'revision_increased:...' }
      *   - New owner not seen before     → { compose: true,  reason: 'new_owner:...' }
+     *   - Prior owner no longer current → { compose: true,  reason: 'removed_owner:...' }
      *   - All revisions unchanged       → { compose: false, reason: 'unchanged' }
      *
      * Pending (not-yet-accepted) compositions are ignored — only accepted records count.
@@ -391,7 +414,7 @@ function createCompositionLedger(db) {
      * @param {string}  opts.runId
      * @param {string}  opts.slotKind
      * @param {string}  opts.provenanceKey
-     * @param {Array<{owner_type:string, owner_id:string, revision:number|null}>} opts.currentOwnerRevisions
+     * @param {Array<{owner_type:string, owner_id:string, provenance?:string, provenance_key?:string, revision:number|null}>} opts.currentOwnerRevisions
      *   — caller-provided, obtained BEFORE calling compose().
      * @returns {{ compose: boolean, reason: string }} (never-throws; degrades to compose:true)
      */
@@ -409,12 +432,15 @@ function createCompositionLedger(db) {
         const priorRows = stmtGetLastAcceptedOwnerStates.all(lastAccepted.id);
         const priorMap = new Map();
         for (const row of priorRows) {
-          priorMap.set(`${row.owner_type}:${row.owner_id}`, row.revision ?? null);
+          priorMap.set(ownerStateKey(row), row.revision ?? null);
         }
 
         // Compare each current owner against the prior snapshot
-        for (const cur of (Array.isArray(currentOwnerRevisions) ? currentOwnerRevisions : [])) {
-          const key = `${cur.owner_type}:${cur.owner_id}`;
+        const currentRows = Array.isArray(currentOwnerRevisions) ? currentOwnerRevisions : [];
+        const currentKeys = new Set();
+        for (const cur of currentRows) {
+          const key = ownerStateKey(cur);
+          currentKeys.add(key);
           const curRevision = cur.revision ?? null;
 
           if (!priorMap.has(key)) {
@@ -432,11 +458,37 @@ function createCompositionLedger(db) {
           }
         }
 
+        for (const priorKey of priorMap.keys()) {
+          if (!currentKeys.has(priorKey)) {
+            return { compose: true, reason: `removed_owner:${priorKey}` };
+          }
+        }
+
         return { compose: false, reason: 'unchanged' };
       } catch (err) {
         // annotate-only: degrade to always compose (safe direction)
         console.error('[compositionLedger] shouldCompose failed (degraded, compose:true):', err.message);
         return { compose: true, reason: 'gate_error' };
+      }
+    },
+
+    /**
+     * Fetch the latest accepted selected_set_hash for a composition gate tuple.
+     *
+     * @param {object} opts
+     * @param {string} opts.runId
+     * @param {string} opts.slotKind
+     * @param {string} opts.provenanceKey
+     * @returns {{ id: string, selected_set_hash: string|null }|null}
+     */
+    getLastAcceptedSelectedSetHash(arg) {
+      try {
+        const { runId, slotKind, provenanceKey } =
+          (arg != null && typeof arg === 'object') ? arg : {};
+        return stmtGetLastAcceptedSelectedSetHash.get(runId, slotKind, provenanceKey) || null;
+      } catch (err) {
+        console.error('[compositionLedger] getLastAcceptedSelectedSetHash failed (degraded):', err.message);
+        return null;
       }
     },
 

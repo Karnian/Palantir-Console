@@ -245,7 +245,7 @@ test('composer path: PM gate cadence skips unchanged revision and reinjects afte
         fingerprint: `fp-pm-${currentRevision}`,
         ownerType: 'workspace',
         ownerId: 'proj1',
-        provenance: 'proj1',
+        provenance: null,
         revision: currentRevision,
       }),
     }),
