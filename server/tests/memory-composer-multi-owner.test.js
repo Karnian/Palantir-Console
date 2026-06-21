@@ -340,7 +340,7 @@ describe('conversation service PM multi-owner wiring', () => {
     assert.equal(harness.ledgerCalls.length, 1);
     assert.deepEqual(harness.ledgerCalls[0].currentOwnerRevisions, [
       { owner_type: 'workspace', owner_id: 'proj1', revision: 3 },
-      { owner_type: 'user', owner_id: 'user', revision: 2 },
+      { owner_type: 'user', owner_id: 'user', provenance: 'user', revision: 2 },
     ]);
     assert.deepEqual(harness.composerCalls[0].owners, [
       { owner_type: 'user', owner_id: 'user', provenance: 'user' },

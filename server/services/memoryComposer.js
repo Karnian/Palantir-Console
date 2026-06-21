@@ -48,8 +48,16 @@ const MULTI_OWNER_BUDGET = {
   workspace: 3000,
   user: 1500,
 };
+const PROVENANCE_BUDGET = {
+  user: 1500,
+  cross_project: 750,
+};
 function getOwnerTypeBudget(ownerType) {
   return MULTI_OWNER_BUDGET[ownerType] ?? DEFAULT_BUDGET;
+}
+function getOwnerBudget(ownerType, provenance) {
+  const p = typeof provenance === 'string' ? provenance : '';
+  return PROVENANCE_BUDGET[p] ?? getOwnerTypeBudget(ownerType);
 }
 
 // ─── 해시 헬퍼 ───────────────────────────────────────────────────────────────
@@ -215,7 +223,7 @@ function createMemoryComposer({ retrievers = {} } = {}) {
 
         // revision (snapshot at compose time)
         let revision = 0;
-        try { revision = adapter.getRevision(owner_id) ?? 0; } catch { /* non-critical */ }
+        try { revision = adapter.getRevision(owner_id, provenance) ?? 0; } catch { /* non-critical */ }
 
         // retrieve — within-owner row 순서 불변 (재정렬 금지)
         let rows = [];
@@ -293,7 +301,7 @@ function createMemoryComposer({ retrievers = {} } = {}) {
         // buildBlock — 기존 buildInjectionBlock 재사용 (sanitize/format/header 전부 위임)
         let ownerBlock = null;
         try {
-          ownerBlock = adapter.buildBlock(selectedRows);
+          ownerBlock = adapter.buildBlock(selectedRows, { provenance });
         } catch { /* annotate-only */ }
 
         // owner 블록 수집 (null이면 push 안 함)
@@ -339,7 +347,7 @@ function createMemoryComposer({ retrievers = {} } = {}) {
         const b = o && typeof o.budget === 'number' && o.budget > 0 ? o.budget : DEFAULT_BUDGET;
         return s + b;
       }, 0);
-      const ownerVectorHash = hashObject(ownerList.map((o) => o && [o.owner_type, o.owner_id]));
+      const ownerVectorHash = hashObject(ownerList.map((o) => o && [o.owner_type, o.owner_id, o.provenance ?? null]));
       // selected_set_hash = **selection-identity**: hash of the id-set passed to
       // buildBlock. Same ids with different content → same hash (content drift is
       // tracked per-row via item_edges.content_hash). A2-2 ledger uses this to
@@ -390,10 +398,10 @@ function createMemoryComposer({ retrievers = {} } = {}) {
         const adapter = retrievers[owner_type];
         if (!adapter) continue;
 
-        const effectiveBudget = getOwnerTypeBudget(owner_type);
+        const effectiveBudget = getOwnerBudget(owner_type, provenance);
 
         let revision = 0;
-        try { revision = adapter.getRevision(owner_id) ?? 0; } catch { /* non-critical */ }
+        try { revision = adapter.getRevision(owner_id, provenance) ?? 0; } catch { /* non-critical */ }
 
         let rows = [];
         try {
@@ -514,7 +522,7 @@ function createMemoryComposer({ retrievers = {} } = {}) {
         const selectedRows = ownerMeta.selectedRows.map(stripComposerAnnotations);
         let ownerBlock = null;
         try {
-          ownerBlock = ownerMeta.adapter.buildBlock(selectedRows);
+          ownerBlock = ownerMeta.adapter.buildBlock(selectedRows, { provenance: ownerMeta.provenance });
         } catch { /* annotate-only */ }
 
         if (ownerBlock != null) {
@@ -548,8 +556,8 @@ function createMemoryComposer({ retrievers = {} } = {}) {
       }
 
       const retrievalQueryHash = sha256(typeof taskContext === 'string' ? taskContext : '');
-      const totalBudget = ownerList.reduce((s, o) => s + getOwnerTypeBudget(o && o.owner_type), 0);
-      const ownerVectorHash = hashObject(ownerList.map((o) => o && [o.owner_type, o.owner_id]));
+      const totalBudget = ownerList.reduce((s, o) => s + getOwnerBudget(o && o.owner_type, o && o.provenance), 0);
+      const ownerVectorHash = hashObject(ownerList.map((o) => o && [o.owner_type, o.owner_id, o.provenance ?? null]));
       const selectedSetHash = hashObject(
         itemEdges.filter((e) => e.decision === 'included').map((e) => e.item_id)
       );
@@ -616,8 +624,12 @@ function buildUserAdapter(masterMemoryService) {
         provenance: o.provenance ?? 'user',
       });
     },
-    buildBlock: (rows) => masterMemoryService.buildInjectionBlock(rows),
-    getRevision: (_ownerId) => masterMemoryService.getRevision('user'),
+    buildBlock: (rows, opts) => {
+      const provenance = (opts && opts.provenance) ?? 'user';
+      const header = provenance === 'cross_project' ? '## Cross-Project Memory' : '## User Memory';
+      return masterMemoryService.buildInjectionBlock(rows, { header });
+    },
+    getRevision: (_ownerId, provenance) => masterMemoryService.getRevision(provenance ?? 'user'),
   };
 }
 
@@ -630,6 +642,8 @@ module.exports = {
   POLICY_VERSION,
   DEFAULT_BUDGET,
   MULTI_OWNER_BUDGET,
+  PROVENANCE_BUDGET,
   getOwnerTypeBudget,
+  getOwnerBudget,
   kindRank,
 };

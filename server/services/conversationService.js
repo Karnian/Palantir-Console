@@ -310,7 +310,7 @@ function createConversationService({
           const currentOwnerRevisions = useMultiOwner
             ? [
                 { owner_type: 'workspace', owner_id: projectId, revision: memoryService.getRevision(projectId) },
-                { owner_type: 'user', owner_id: 'user', revision: masterMemoryService.getRevision('user') },
+                { owner_type: 'user', owner_id: 'user', provenance: 'user', revision: masterMemoryService.getRevision('user') },
               ]
             : [
                 { owner_type: 'workspace', owner_id: projectId, revision: memoryService.getRevision(projectId) },
@@ -374,11 +374,30 @@ function createConversationService({
         // (S5-LEDGER); skip cleanly if it is not wired (some unit harnesses).
         // peek/decide: gate check → compose → stash for commit phase.
         try {
-          const currentOwnerRevisions = [{
-            owner_type: 'user',
-            owner_id: 'user',
-            revision: masterMemoryService.getRevision('user'),
-          }];
+          const useMultiOwner = memoryMultiOwner && !!masterMemoryService;
+          const currentOwnerRevisions = useMultiOwner
+            ? [
+                {
+                  owner_type: 'user',
+                  owner_id: 'user',
+                  provenance: 'user',
+                  revision: masterMemoryService.getRevision('user'),
+                },
+                {
+                  owner_type: 'user',
+                  owner_id: 'user',
+                  provenance: 'cross_project',
+                  revision: masterMemoryService.getRevision('cross_project'),
+                },
+              ]
+            : [
+                {
+                  owner_type: 'user',
+                  owner_id: 'user',
+                  provenance: 'user',
+                  revision: masterMemoryService.getRevision('user'),
+                },
+              ];
           const dec = compositionLedger.shouldCompose({
             runId: run.id,
             slotKind: 'top',
@@ -386,8 +405,16 @@ function createConversationService({
             currentOwnerRevisions,
           });
           if (dec.compose) {
+            const owners = useMultiOwner
+              ? [
+                  { owner_type: 'user', owner_id: 'user', provenance: 'user' },
+                  { owner_type: 'user', owner_id: 'user', provenance: 'cross_project' },
+                ]
+              : [
+                  { owner_type: 'user', owner_id: 'user', provenance: 'user' },
+                ];
             const { block, composition } = memoryComposer.compose({
-              owners: [{ owner_type: 'user', owner_id: 'user', provenance: 'user' }],
+              owners,
               taskContext: originalText,
             });
             // Phase 0b (S9): composition===null means compose() hit its outer catch.
@@ -406,7 +433,27 @@ function createConversationService({
             // [Q4 BLOCKER] only prepend if BOTH block and composition are non-null.
             // block null → skip prepend AND record (gate pollution prevention).
             if (block && composition) {
-              effectiveText = `${block}\n\n---\n\n${effectiveText}`;
+              const priorSelected = typeof compositionLedger.getLastAcceptedSelectedSetHash === 'function'
+                ? compositionLedger.getLastAcceptedSelectedSetHash({
+                    runId: run.id,
+                    slotKind: 'top',
+                    provenanceKey: 'user',
+                  })
+                : null;
+              const unchangedSelection = priorSelected &&
+                composition.selected_set_hash != null &&
+                priorSelected.selected_set_hash === composition.selected_set_hash;
+              // Inject the block ONLY when the selection changed — this bounds
+              // cross_project write-storms (a bumped revision with an identical
+              // selection must not re-inject the same content every turn).
+              if (!unchangedSelection) {
+                effectiveText = `${block}\n\n---\n\n${effectiveText}`;
+              }
+              // ALWAYS record the accepted composition (even on the skip path) so
+              // the gate baseline advances and shouldCompose converges. Without it a
+              // churning cross_project revision recomposes EVERY turn forever
+              // (Codex A2-4b SERIOUS). block===null still skips record above
+              // (Q4 BLOCKER: gate stays open until memory appears).
               masterComposerInjection = {
                 composition,
                 provenanceKey: 'user',

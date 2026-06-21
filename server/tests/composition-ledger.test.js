@@ -246,7 +246,7 @@ test('shouldCompose: same revision as accepted → compose:false', (t) => {
     runId,
     slotKind,
     provenanceKey,
-    currentOwnerRevisions: [{ owner_type: 'workspace', owner_id: 'proj-B', revision: 3 }],
+    currentOwnerRevisions: [{ owner_type: 'workspace', owner_id: 'proj-B', provenance: provenanceKey, revision: 3 }],
   });
 
   assert.equal(result.compose, false);
@@ -284,7 +284,7 @@ test('shouldCompose: owner revision increased → compose:true', (t) => {
     runId,
     slotKind,
     provenanceKey,
-    currentOwnerRevisions: [{ owner_type: 'workspace', owner_id: 'proj-C', revision: 5 }],
+    currentOwnerRevisions: [{ owner_type: 'workspace', owner_id: 'proj-C', provenance: provenanceKey, revision: 5 }],
   });
 
   assert.equal(result.compose, true);
