@@ -1252,7 +1252,8 @@ function createMemoryService(db, eventBus) {
   // P-A1 slice 1: parity check + cross-scope conflict detection (slice-5 gate)
   // -------------------------------------------------------------------------
 
-  // Scan ALL rows across the 9 owner-bearing tables and verify that
+  // Scan ALL rows across the 7 owner-bearing tables (the 2 legacy injection
+  // ledgers were dropped in migration 040 / S5-LEDGER PR B) and verify that
   // (owner_type, owner_id) matches normalizeOwner(old-key) for each row.
   // Returns a list of mismatches; empty list means parity holds.
   // L1 old-key = project_id; L2 old-key = scope.
@@ -1265,7 +1266,6 @@ function createMemoryService(db, eventBus) {
       { table: 'memory_candidates',        pk: 'id',            keyCol: 'project_id' },
       { table: 'memory_jobs',              pk: 'id',            keyCol: 'project_id' },
       { table: 'project_memory_revision',  pk: 'project_id',    keyCol: 'project_id' },
-      { table: 'pm_memory_injection',      pk: 'pm_run_id',     keyCol: 'project_id' },
     ];
 
     for (const { table, pk, keyCol } of l1Tables) {
@@ -1294,13 +1294,12 @@ function createMemoryService(db, eventBus) {
       { table: 'master_memory_items',      pk: 'id',               keyCol: 'scope' },
       { table: 'master_memory_candidates', pk: 'id',               keyCol: 'scope' },
       { table: 'master_memory_revision',   pk: 'scope',            keyCol: 'scope' },
-      { table: 'master_memory_injection',  pk: 'master_run_id',    keyCol: 'scope' },
     ];
 
     for (const { table, pk, keyCol } of l2Tables) {
       const rows = db.prepare(`SELECT ${pk}, ${keyCol}, owner_type, owner_id FROM ${table}`).all();
       for (const row of rows) {
-        const pkVal = table === 'master_memory_injection' ? `${row.master_run_id}|${row.scope}` : row[pk];
+        const pkVal = row[pk];
         let expected;
         try {
           expected = normalizeOwner({ scope: row[keyCol] });

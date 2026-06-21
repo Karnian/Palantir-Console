@@ -404,26 +404,6 @@ test('project_memory_revision ON CONFLICT(project_id) still works after migratio
   assert.equal(row.revision, 2, 'revision must bump correctly via ON CONFLICT(project_id)');
 });
 
-test('pm_memory_injection ON CONFLICT(pm_run_id) still works after migration 039', (t) => {
-  const db = buildMigratedDb();
-  t.after(() => db.close());
-
-  insertProject(db, 'inject-test-proj');
-
-  const stmt = db.prepare(`
-    INSERT INTO pm_memory_injection(pm_run_id, project_id, injected_revision, injected_at, owner_type, owner_id)
-    VALUES ('run-x', 'inject-test-proj', 5, datetime('now'), 'workspace', 'inject-test-proj')
-    ON CONFLICT(pm_run_id) DO UPDATE SET
-      injected_revision = excluded.injected_revision,
-      injected_at = excluded.injected_at
-  `);
-  stmt.run();
-  stmt.run(); // second run should upsert
-
-  const count = db.prepare("SELECT COUNT(*) AS n FROM pm_memory_injection WHERE pm_run_id = 'run-x'").get().n;
-  assert.equal(count, 1, 'ON CONFLICT(pm_run_id) upsert must not duplicate');
-});
-
 // ──────────────────────────────────────────────────────────────
 // Review fixes (Codex R-final): completeness (L2 items drop) + F1 (NULL-owner fail-closed)
 // ──────────────────────────────────────────────────────────────

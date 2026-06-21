@@ -142,7 +142,11 @@ function seedL2Rows(db) {
 test('migration 033 applies on a fresh DB: all 9 tables gain owner_type and owner_id columns', async (t) => {
   const cleanup = [];
   try {
-    const db = await setupDb(cleanup);
+    // Pin to v33: this verifies migration 033's effect (owner cols on all 9
+    // tables of that era). The pm/master_memory_injection tables are dropped by
+    // migration 040 (S5-LEDGER PR B), so the "all 9 tables" assertion is scoped
+    // to the post-033 schema where they still existed.
+    const db = await setupDbThroughMigration(cleanup, 33);
 
     // Verify columns exist by querying table_info
     const tables = [
@@ -183,7 +187,9 @@ test('migration 033 backfill: L1 rows get workspace/project_id, L2 rows get user
   // and seed + recheck. The real backfill path is exercised by the parity test below.
   const cleanup = [];
   try {
-    const db = await setupDb(cleanup);
+    // Pin to v33 (post-033, pre-040): the injection tables still exist here so
+    // seedL1Rows/seedL2Rows can write them; migration 040 drops them later.
+    const db = await setupDbThroughMigration(cleanup, 33);
     const projectId = 'proj-backfill';
     const { itemId, candId, jobId, runId } = seedL1Rows(db, projectId);
     const { itemId: l2Id, candId: l2CandId, masterRunId } = seedL2Rows(db);
@@ -386,7 +392,10 @@ test('migration 033 backfill: pre-existing rows are correctly backfilled by the 
 test('checkOwnerParity: returns empty list when all rows have correct owner', async (t) => {
   const cleanup = [];
   try {
-    const db = await setupDb(cleanup);
+    // Pin to v33: seedL1Rows/seedL2Rows write the legacy injection tables, which
+    // migration 040 (S5-LEDGER PR B) drops. checkOwnerParity no longer checks
+    // those tables, so parity holds for the remaining owner-keyed tables.
+    const db = await setupDbThroughMigration(cleanup, 33);
     const projectId = 'proj-parity';
     seedL1Rows(db, projectId);
     seedL2Rows(db);
@@ -530,27 +539,6 @@ test('dual-write L1: enqueueDistillJob (memory_jobs) sets owner', async (t) => {
   }
 });
 
-test('legacy L1 table: pm_memory_injection retains owner columns', async (t) => {
-  const cleanup = [];
-  try {
-    const db = await setupDb(cleanup);
-    const projectId = 'proj-dw-inj';
-    db.prepare("INSERT OR IGNORE INTO projects (id, name, directory) VALUES (?, ?, ?)").run(projectId, 'DWInj', '/tmp/dwinj');
-
-    const pmRunId = crypto.randomUUID();
-    db.prepare(`
-      INSERT INTO pm_memory_injection(pm_run_id, project_id, injected_revision, injected_at, owner_type, owner_id)
-      VALUES (?, ?, 1, datetime('now'), 'workspace', ?)
-    `).run(pmRunId, projectId, projectId);
-
-    const row = db.prepare('SELECT owner_type, owner_id FROM pm_memory_injection WHERE pm_run_id=?').get(pmRunId);
-    assert.equal(row.owner_type, 'workspace');
-    assert.equal(row.owner_id, projectId);
-  } finally {
-    for (const fn of cleanup) await fn();
-  }
-});
-
 test('dual-write L2: createMemoryItem (master_memory_items) sets owner user/user', async (t) => {
   const cleanup = [];
   try {
@@ -590,24 +578,6 @@ test('dual-write L2: createCandidate (master_memory_candidates) sets owner user/
     const nullCount = db.prepare("SELECT COUNT(*) n FROM master_memory_candidates WHERE owner_type IS NULL OR owner_id IS NULL").get().n;
     assert.equal(nullCount, 0);
     const row = db.prepare("SELECT owner_type, owner_id FROM master_memory_candidates WHERE scope='cross_project'").get();
-    assert.equal(row.owner_type, 'user');
-    assert.equal(row.owner_id, 'user');
-  } finally {
-    for (const fn of cleanup) await fn();
-  }
-});
-
-test('legacy L2 table: master_memory_injection retains owner columns user/user', async (t) => {
-  const cleanup = [];
-  try {
-    const db = await setupDb(cleanup);
-    const masterRunId = crypto.randomUUID();
-    db.prepare(`
-      INSERT INTO master_memory_injection(master_run_id, scope, injected_revision, injected_at, owner_type, owner_id)
-      VALUES (?, 'user', 1, datetime('now'), 'user', 'user')
-    `).run(masterRunId);
-
-    const row = db.prepare('SELECT owner_type, owner_id FROM master_memory_injection WHERE master_run_id=?').get(masterRunId);
     assert.equal(row.owner_type, 'user');
     assert.equal(row.owner_id, 'user');
   } finally {
