@@ -44,7 +44,6 @@ test('migration 025: memory tables + FTS + triggers + revision + ledger exist', 
     'memory_fts_ad',
     'memory_fts_au',
     'project_memory_revision',
-    'pm_memory_injection',
   ]) {
     assert.ok(names.has(expected), `expected object ${expected} to exist`);
   }

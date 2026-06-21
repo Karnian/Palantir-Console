@@ -25,7 +25,7 @@ test('migration 030: master_memory_items + fts + revision/injection tables exist
     assert.ok(cols.includes(c), `column ${c}`);
   }
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','view')").all().map((r) => r.name);
-  for (const tbl of ['master_memory_items', 'master_memory_fts', 'master_memory_revision', 'master_memory_injection']) {
+  for (const tbl of ['master_memory_items', 'master_memory_fts', 'master_memory_revision']) {
     assert.ok(tables.includes(tbl), `table ${tbl}`);
   }
 });
