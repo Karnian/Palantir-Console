@@ -9,6 +9,10 @@ server/plugins/
 *.db
 *.db-wal
 *.db-shm
+# DB backup snapshots (e.g. palantir.db.bak.<timestamp>) — never commit.
+# These slipped into history once via a server boot worktree auto-save (git add -A).
+*.bak
+*.bak.*
 .claude-auth.json
 .ao/
 .playwright-mcp/
