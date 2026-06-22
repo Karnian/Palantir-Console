@@ -68,6 +68,7 @@ const SERVER_EMITS = Object.freeze([
   'task:updated',
 
   // ML memory lifecycle (PR5a/PR5d observability)
+  'memory:polarity_rejected',
   'memory:promoted',
   'memory:evicted',
   'memory:decayed',

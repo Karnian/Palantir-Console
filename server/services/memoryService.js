@@ -1,6 +1,7 @@
 const crypto = require('node:crypto');
 const { sanitizeProposalContent, detectInjection, redactSecrets } = require('./memorySanitize');
 const { normalizeOwner } = require('./ownerKey');
+const { polarityLost, summarizeR4ReferenceContent } = require('./memoryPolarity');
 
 const TOP_K = 12;
 const CHAR_CAP = 2000;
@@ -914,11 +915,13 @@ function createMemoryService(db, eventBus) {
       const skipped = [];
       const evicted = [];
 
-      // Terminal failures (bad kind, sanitize reject) mark the candidate
-      // 'rejected' so it leaves the pending scan; otherwise a permanently-bad
-      // head candidate would refill every batch (oldest-first) and starve later
-      // valid ones (Codex follow-up SERIOUS). Re-stageable conditions
-      // (active_cap) keep it pending. Rejected rows are recoverable via PR4 UI.
+      // Terminal failures (bad kind, sanitize reject, polarity-lost) mark the
+      // candidate 'rejected' so it leaves the pending scan; otherwise a
+      // permanently-bad head candidate would refill every batch (oldest-first)
+      // and starve later valid ones (Codex follow-up SERIOUS). Re-stageable
+      // conditions (active_cap) keep it pending. Note: polarity-lost reject is
+      // a LOSSY safety drop — candidates are persisted as 'rejected' in DB but
+      // there is currently no L1 candidate review UI/API to requeue them.
       const rejectCandidate = (candidateId) => {
         setCandidateStatusStmt.run({ status: 'rejected', promotedTo: null, id: candidateId });
       };
@@ -956,6 +959,24 @@ function createMemoryService(db, eventBus) {
           continue;
         }
         const content = s.content;
+        // A2-④-a polarity-loss gate (R4 only): if the raw R4 candidate content
+        // carried a single negation and the sanitized proposal has zero, the
+        // distiller likely stripped the polarity (e.g. "쓰지 마라" → "써라").
+        // Only fires for same-language, single-negation references — conservative.
+        // This is a LOSSY drop: the candidate is marked 'rejected' in DB but has
+        // no current recovery path (no L1 candidate review UI/API).
+        if (cand.rule === 'R4') {
+          let rawParsed = {};
+          try { const p2 = JSON.parse(cand.raw_json); if (p2 && typeof p2 === 'object') rawParsed = p2; } catch { /* */ }
+          const reference = typeof rawParsed.content === 'string'
+            ? summarizeR4ReferenceContent(rawParsed.content)
+            : null;
+          if (polarityLost(reference, content)) {
+            skipped.push({ candidateId: p.candidateId, reason: 'polarity_lost' });
+            rejectCandidate(p.candidateId);
+            continue;
+          }
+        }
         // Exact dup first; if none, honor a DISTILLER-proposed semantic merge
         // target — but re-validate it HERE (the writer never trusts the model):
         // active / same project / same kind, AND a token-overlap FLOOR so a
@@ -1059,7 +1080,9 @@ function createMemoryService(db, eventBus) {
         }
         promoted.push({ candidateId: p.candidateId, itemId: item.id, merged, fuzzy });
       }
-      return { projectId, promoted, skipped, evicted };
+      // Collect polarity-rejected entries for post-tx event emission.
+      const polarityRejected = skipped.filter((s) => s.reason === 'polarity_lost');
+      return { projectId, promoted, skipped, evicted, polarityRejected };
     },
   );
 
@@ -1069,7 +1092,7 @@ function createMemoryService(db, eventBus) {
   function emitMemoryEvents(result) {
     if (!eventBus || !result) return;
     try {
-      const { projectId, promoted = [], evicted = [] } = result;
+      const { projectId, promoted = [], evicted = [], polarityRejected = [] } = result;
       if (promoted.length > 5) {
         eventBus.emit('memory:promoted', { projectId, count: promoted.length, batch: true });
       } else {
@@ -1079,6 +1102,10 @@ function createMemoryService(db, eventBus) {
         eventBus.emit('memory:evicted', { projectId, count: evicted.length, batch: true, reason: 'cap_evicted' });
       } else {
         for (const e of evicted) eventBus.emit('memory:evicted', { projectId, memoryItemId: e.itemId, score: e.score, reason: 'cap_evicted' });
+      }
+      // A2-④-a: polarity-loss observability (content never included — untrusted).
+      for (const r of polarityRejected) {
+        eventBus.emit('memory:polarity_rejected', { projectId, candidateId: r.candidateId, rule: 'R4' });
       }
     } catch { /* observability must never break promotion */ }
   }
