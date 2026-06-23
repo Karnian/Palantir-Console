@@ -58,6 +58,7 @@ const { createMasterMemoryService } = require('./services/masterMemoryService');
 const { createMemoryDistillService } = require('./services/memoryDistillService');
 const { createLiveDistiller } = require('./services/distillers/liveDistiller');
 const { createMemoryRouter } = require('./routes/memory');
+const { createOperatorSpecialistRouter } = require('./routes/operatorSpecialist');
 const { createMasterMemoryRouter } = require('./routes/masterMemory');
 // A2-3a: PM-slot composer+ledger cutover (flag-gated, default OFF)
 const { createMemoryComposer, buildWorkspaceAdapter, buildUserAdapter } = require('./services/memoryComposer');
@@ -952,6 +953,12 @@ function createApp(options = {}) {
   app.use('/api/claude-sessions', createClaudeSessionsRouter());
   app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, pmSpawnService, skillPackService, authResolverOpts }));
   app.use('/api/conversations', createConversationsRouter({ conversationService, runService }));
+  // Operator P-B2c-3: specialist entry. Mounted ONLY when the feature is enabled
+  // (specialistService is null unless PALANTIR_OPERATOR_SPECIALIST=1 + a backend),
+  // so the route does not exist when off (behavior-preserving).
+  if (specialistService) {
+    app.use('/api/operator/specialist', createOperatorSpecialistRouter({ specialistService, runService }));
+  }
   app.use('/api/dispatch-audit', createDispatchAuditRouter({ reconciliationService }));
   app.use('/api/router', createRouterRouter({ routerService }));
   app.use('/api/worker-presets', createWorkerPresetsRouter({ presetService }));
