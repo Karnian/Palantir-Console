@@ -23,6 +23,8 @@ const {
   createSpecialistContext,
   assertOperatorContext,
   isEnforced,
+  enforceWorkspace,
+  enforceCapability,
   createSpecialistInvocation,
 } = require('../utils/operatorContext');
 
@@ -169,6 +171,48 @@ test('🔒 R2 SERIOUS: assertOperatorContext rejects an incoherent specialist (f
     () => assertOperatorContext({ kind: 'specialist', profileId: 'p', workspaceBinding: 'none', executionMode: 'dispatcher', capabilityGrant: realGrant }),
     /specialist must be executionMode:doer/
   );
+});
+
+// ──────────────────────────────────────────────────────────────
+// P-B2b — gate-wrapped enforcement primitives (legacy no-op / specialist deny)
+// ──────────────────────────────────────────────────────────────
+test('enforceWorkspace: legacy ctx is a no-op on every bound surface (byte-identical)', () => {
+  const legacy = deriveLegacyContext({ run: { is_manager: true }, workspaceDir: '/repo' });
+  for (const surface of ['spawn_cwd', 'shell', 'fs', 'project_scope', 'worktree', 'xproject_scan', 'l1_capture', 'project_route']) {
+    assert.doesNotThrow(() => enforceWorkspace(legacy, surface), `legacy must pass ${surface}`);
+  }
+  // even a legacy ctx whose descriptive binding is 'none' (e.g. Top) is never enforced
+  const legacyNone = deriveLegacyContext({ run: { is_manager: true } });
+  assert.doesNotThrow(() => enforceWorkspace(legacyNone, 'spawn_cwd'));
+});
+
+test('enforceWorkspace: specialist (workspace:none) throws WORKSPACE_UNBOUND on a bound surface', () => {
+  const spec = createSpecialistContext({ profileId: 'p' });
+  try {
+    enforceWorkspace(spec, 'spawn_cwd');
+    assert.fail('expected throw');
+  } catch (e) {
+    assert.equal(e.code, 'WORKSPACE_UNBOUND');
+  }
+  assert.throws(() => enforceWorkspace(spec, 'fs'), /WORKSPACE_UNBOUND|cannot access/);
+});
+
+test('enforceCapability: legacy no-op; specialist denies non-granted, allows granted', () => {
+  const legacy = deriveLegacyContext({ run: { is_manager: false }, workspaceDir: '/repo' });
+  for (const cap of ['shell', 'fs', 'dispatch_execute', 'memory_write', 'registry_metadata_search']) {
+    assert.doesNotThrow(() => enforceCapability(legacy, cap), `legacy must pass ${cap}`);
+  }
+  const spec = createSpecialistContext({ profileId: 'p' }); // default = [registry_metadata_search]
+  assert.doesNotThrow(() => enforceCapability(spec, 'registry_metadata_search'));
+  for (const cap of ['shell', 'fs', 'network', 'mcp', 'dispatch_execute', 'task_write', 'memory_write']) {
+    assert.throws(() => enforceCapability(spec, cap), /capability denied/, `specialist must deny ${cap}`);
+  }
+});
+
+test('🔒 enforce* on a forged context is fail-closed (throws, never silently skips)', () => {
+  const forged = { kind: 'legacy', profileId: null, workspaceBinding: 'none', executionMode: 'doer', capabilityGrant: { legacy: true, caps: [] } };
+  assert.throws(() => enforceWorkspace(forged, 'spawn_cwd'), /factory-issued grant/);
+  assert.throws(() => enforceCapability(forged, 'shell'), /factory-issued grant/);
 });
 
 // ──────────────────────────────────────────────────────────────

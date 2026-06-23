@@ -29,6 +29,7 @@ function createLifecycleService({
   // force a load of the real keychain probe.
   const _authResolver = authResolver || require('./authResolver');
   const { resolveSpawnCwd } = require('../utils/spawnCwd');
+  const { deriveLegacyContext, enforceWorkspace } = require('../utils/operatorContext');
   const _authResolverOpts = authResolverOpts || {};
   const HEARTBEAT_INTERVAL_MS = 30000;  // 30s
   const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min (increased from 10 min for long-running tasks)
@@ -555,6 +556,13 @@ function createLifecycleService({
       }
     }
 
+    // P-B2b: thread the operator context through the real worker spawn path and
+    // enforce the workspace surface. For every legacy run isEnforced===false, so
+    // this is a provable no-op (byte-identical). A folder-less specialist would
+    // throw WORKSPACE_UNBOUND here — but specialists don't use the CLI spawn path
+    // (B2c runs them on a dedicated backend); this is a defense-in-depth tripwire.
+    const operatorContext = deriveLegacyContext({ run, workspaceDir: worktreePath || projectDir });
+    enforceWorkspace(operatorContext, 'spawn_cwd');
     const cwd = resolveSpawnCwd({ workspaceDir: worktreePath || projectDir });
     console.log(`[lifecycle] Executing task ${taskId} in cwd: ${cwd} (project: ${task.project_id || 'none'})`);
 

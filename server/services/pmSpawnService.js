@@ -60,6 +60,7 @@ const {
   buildInitialUserContext,
 } = require('./managerSystemPrompt');
 const { resolveSpawnCwd } = require('../utils/spawnCwd');
+const { deriveLegacyContext, enforceWorkspace } = require('../utils/operatorContext');
 
 function createPmSpawnService({
   runService,
@@ -307,6 +308,12 @@ function createPmSpawnService({
     // returns. No seed runTurn is issued here (codex R1 finding #1: a
     // seed would race with the user send against codexAdapter's
     // single-turn guard).
+    // P-B2b: thread the operator context through the coder-PM spawn path and
+    // enforce the workspace surface. A coder PM is always legacy (folder +
+    // dispatcher), so isEnforced===false → provable no-op (byte-identical). The
+    // seam is proven to compose with the real run + project.directory here.
+    const operatorContext = deriveLegacyContext({ run, workspaceDir: project.directory });
+    enforceWorkspace(operatorContext, 'spawn_cwd');
     const cwd = resolveSpawnCwd({ workspaceDir: project.directory });
     try {
       adapter.startSession(runId, {

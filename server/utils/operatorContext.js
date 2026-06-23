@@ -32,8 +32,8 @@
  */
 
 const crypto = require('crypto');
-const { WORKSPACE_BINDING } = require('./workspaceBinding');
-const { createLegacyGrant, createGrant, CAPABILITIES, isRealGrant } = require('./capability');
+const { WORKSPACE_BINDING, assertWorkspaceBound } = require('./workspaceBinding');
+const { createLegacyGrant, createGrant, CAPABILITIES, isRealGrant, assertCapability } = require('./capability');
 const { EXECUTION_MODE, assertExecutionMode } = require('./executionMode');
 
 const OPERATOR_KIND = Object.freeze({ LEGACY: 'legacy', SPECIALIST: 'specialist' });
@@ -157,6 +157,30 @@ function isEnforced(ctx) {
 }
 
 /**
+ * Gate-wrapped workspace enforcement (P-B2b). For a legacy context this is a
+ * provable no-op (`isEnforced` false → returns without asserting), so wiring it
+ * into existing spawn paths is byte-identical. For a specialist (workspace:none)
+ * it throws WORKSPACE_UNBOUND on any folder-bound surface. `isEnforced` runs the
+ * full assertOperatorContext (incl. isRealGrant forgery guard) first.
+ * @param {object} ctx
+ * @param {string} surface  one of WORKSPACE_BOUND_SURFACES
+ */
+function enforceWorkspace(ctx, surface) {
+  if (isEnforced(ctx)) assertWorkspaceBound(ctx.workspaceBinding, surface);
+}
+
+/**
+ * Gate-wrapped capability enforcement (P-B2b). Legacy → no-op; specialist →
+ * throws CAPABILITY_DENIED unless the grant lists `capability`. Defined here as
+ * the enforcement primitive; B2c wires it at REST/tool surfaces.
+ * @param {object} ctx
+ * @param {string} capability
+ */
+function enforceCapability(ctx, capability) {
+  if (isEnforced(ctx)) assertCapability(ctx.capabilityGrant, capability);
+}
+
+/**
  * SpecialistInvocation — the ephemeral trace/identity span for ONE specialist
  * turn (Codex BLOCKER-1). A specialist has NO durable run, but the system's
  * observability is run-bound, so its trace hangs off the ORIGIN run (the durable
@@ -199,5 +223,7 @@ module.exports = {
   createSpecialistContext,
   assertOperatorContext,
   isEnforced,
+  enforceWorkspace,
+  enforceCapability,
   createSpecialistInvocation,
 };
