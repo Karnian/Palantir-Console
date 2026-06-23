@@ -15,11 +15,14 @@
  *   - explicit (`createGrant([...])`): deny-by-default; only listed caps allowed.
  *     A folder-less specialist gets a minimal grant (O9: registry_metadata_search).
  *
- * 🔒 Anti-forgery (Codex review SERIOUS): a grant is ONLY honored if it was made
- * by this module's factories. A plain `{ legacy: true }` is REJECTED — the
- * factories stamp a private Symbol brand and freeze the object + its cap list, so
- * a grant cannot be forged (shape spoof) nor escalated (`caps.push`). CAP_SET is
- * private (not exported) so callers can't mutate the vocabulary.
+ * 🔒 Anti-forgery (Codex review SERIOUS, R2): a grant is ONLY honored if it is
+ * the EXACT object a factory returned, tracked in a module-private WeakSet by
+ * object identity. This defeats every copy-based forgery — a plain
+ * `{ legacy:true }`, a spread/`Object.assign` clone of a real grant, or an
+ * `Object.create(realGrant)` prototype — because each is a different object not
+ * in the WeakSet. (R1 used an enumerable Symbol brand, which spread/clone copied
+ * — R2 caught that.) Grants are also frozen with a frozen cap list (no
+ * `caps.push` escalation); CAP_SET is private so the vocabulary can't be mutated.
  *
  * ⚠️ fail-open guard (Codex review): there is intentionally NO "no grant ⇒
  * legacy" default. `assertCapability(undefined, cap)` THROWS. When P-B2 wires
@@ -34,8 +37,10 @@
  * DENY baseline, NOT a closed set — P-B2 may add caps as it maps routes.
  */
 
-// Private Symbol brand — not exported, so a grant object cannot be forged.
-const GRANT_BRAND = Symbol('operator.capabilityGrant');
+// Module-private registry of factory-issued grants, keyed by object identity.
+// Identity (not a property) means a forged/cloned object is never in the set,
+// so spread/Object.assign/Object.create cannot fabricate an honored grant.
+const ISSUED_GRANTS = new WeakSet();
 
 const CAPABILITIES = Object.freeze({
   // CLI / process plane
@@ -75,7 +80,9 @@ const CAP_SET = new Set(Object.values(CAPABILITIES));
  * frozen so it can't be forged.
  */
 function createLegacyGrant() {
-  return Object.freeze({ [GRANT_BRAND]: true, legacy: true, caps: Object.freeze([]) });
+  const grant = Object.freeze({ legacy: true, caps: Object.freeze([]) });
+  ISSUED_GRANTS.add(grant);
+  return grant;
 }
 
 /**
@@ -92,7 +99,9 @@ function createGrant(capabilities = []) {
     }
     if (!caps.includes(cap)) caps.push(cap);
   }
-  return Object.freeze({ [GRANT_BRAND]: true, legacy: false, caps: Object.freeze(caps) });
+  const grant = Object.freeze({ legacy: false, caps: Object.freeze(caps) });
+  ISSUED_GRANTS.add(grant);
+  return grant;
 }
 
 /**
@@ -109,7 +118,7 @@ function assertCapability(grant, capability) {
   if (!CAP_SET.has(capability)) {
     throw new Error(`assertCapability: unknown capability "${capability}"`);
   }
-  if (!grant || typeof grant !== 'object' || grant[GRANT_BRAND] !== true) {
+  if (!grant || typeof grant !== 'object' || !ISSUED_GRANTS.has(grant)) {
     throw new Error('assertCapability: invalid or forged grant (use createGrant/createLegacyGrant)');
   }
   if (grant.legacy === true) return; // passthrough
