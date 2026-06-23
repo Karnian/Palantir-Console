@@ -163,15 +163,15 @@ function createMemoryDistillService({ memoryService, distiller, logger = console
       return [];
     }
     for (const { ownerType, ownerId } of owners) {
-      // P-B (Profile enablement): memory_jobs.project_id is NOT NULL FK → non-workspace
-      // owners cannot be enqueued until that FK is relaxed in P-B (Profile enablement).
-      // Currently all candidates are workspace (owner_type='workspace'), so this skip
-      // is a no-op today but guards against future Profile candidates arriving early.
+      // P-B1 relaxed the memory_jobs/memory_candidates project_id FK so a profile
+      // owner CAN exist in storage — but profile distill stays unwired until P-B2.
+      // Today no profile candidate is ever created (createCandidate is
+      // workspace-only) and the claim scan is workspace-only (memoryService claim
+      // guard), so this skip is a no-op. It stays so the scheduler never enqueues a
+      // profile distill job before P-B2 wires the full candidate→distill→promote
+      // path (which also relaxes memory_items + handles permanent-pending).
       if (ownerType !== 'workspace') {
-        // SERIOUS-2 (defer): P-B에서 Profile candidate 생성 경로 + job-FK 완화 시 이 skip 의
-        // 영구 pending 누적을 함께 처리(현재는 생성 불가라 무해 — Profile owner 가 없어
-        // Profile candidate 자체가 만들어지지 않음).
-        safeWarn(`[distill] skip non-workspace owner ${ownerType}:${ownerId} — enqueue deferred to P-B (FK relaxation)`);
+        safeWarn(`[distill] skip non-workspace owner ${ownerType}:${ownerId} — profile distill deferred to P-B2`);
         continue;
       }
       try { memoryService.enqueueDistillJob(ownerId); } catch (err) { safeWarn(`[distill] enqueue ${ownerId}: ${err?.message || err}`); }

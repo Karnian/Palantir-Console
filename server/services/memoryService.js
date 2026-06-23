@@ -700,8 +700,11 @@ function createMemoryService(db, eventBus) {
 
   // PR3b: projects that currently have at least one pending candidate — the
   // scheduler uses this to know which projects to enqueue a distill job for.
+  // P-B1 (Codex review S3): a profile candidate has project_id NULL (042). This is
+  // a LEGACY workspace-only enumerator (the live scheduler uses the owner-keyed
+  // listOwnersWithPendingCandidates); guard against leaking a NULL project_id.
   const listPendingProjectsStmt = db.prepare(
-    "SELECT DISTINCT project_id FROM memory_candidates WHERE status = 'pending'"
+    "SELECT DISTINCT project_id FROM memory_candidates WHERE status = 'pending' AND project_id IS NOT NULL"
   );
   function listProjectsWithPendingCandidates() {
     return listPendingProjectsStmt.all().map((r) => r.project_id);
@@ -746,6 +749,15 @@ function createMemoryService(db, eventBus) {
   );
 
   // CAS claim: flip exactly one pending+due row to running. changes()===1 => won.
+  // P-B1 (Codex review BLOCKER): the unfiltered drain path (runOnce({}) ->
+  // claimDistillJob({projectId:null}) -> @ownerType NULL) must NOT claim a
+  // non-workspace (profile) job. 042 lets a profile job EXIST in this table, but
+  // profile distill is unwired until P-B2; a claimed profile job has project_id
+  // NULL and would throw in listCandidates(NULL) -> permanent retry loop. So:
+  //   @ownerType NULL  -> claim workspace-only (paired with the enqueue-skip);
+  //   @ownerType set    -> exact owner match.
+  // Behavior-preserving today: every job is workspace, so NULL-owner drain still
+  // claims exactly the workspace jobs it always did.
   const claimStmt = db.prepare(
     "UPDATE memory_jobs " +
     "SET status='running', claim_token=@token, locked_at=datetime('now'), attempts=attempts+1, updated_at=datetime('now') " +
@@ -753,7 +765,8 @@ function createMemoryService(db, eventBus) {
     "  SELECT id FROM memory_jobs" +
     "  WHERE kind=@kind AND status='pending'" +
     "    AND (run_after IS NULL OR run_after <= datetime('now'))" +
-    "    AND (@ownerType IS NULL OR (owner_type = @ownerType AND owner_id = @ownerId))" +
+    "    AND ( (@ownerType IS NULL AND owner_type = 'workspace')" +
+    "       OR (@ownerType IS NOT NULL AND owner_type = @ownerType AND owner_id = @ownerId) )" +
     "  ORDER BY created_at ASC, id ASC LIMIT 1" +
     ") AND status='pending'"
   );
@@ -789,7 +802,9 @@ function createMemoryService(db, eventBus) {
     try {
       insertJobStmt.run(id, kind, projectId, ownerType, ownerId);
     } catch (err) {
-      // Lost the single-flight race (idx_memory_jobs_active) -> reuse the winner.
+      // Lost the single-flight race (idx_memory_jobs_owner_active) -> reuse the winner.
+      // (042 dropped the old project_id-keyed idx_memory_jobs_active; the owner-keyed
+      // index from 036 is the canonical single-flight constraint.)
       if (err && err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
         return { job: getActiveJobStmt.get(ownerType, ownerId, kind), created: false };
       }
@@ -1287,17 +1302,41 @@ function createMemoryService(db, eventBus) {
   function checkOwnerParity() {
     const mismatches = [];
 
-    // L1 tables: expected owner_type='workspace', owner_id=project_id
+    // L1 tables: expected owner_type='workspace', owner_id=project_id.
+    // P-B1: profile owner (Operator P-B) is valid ONLY in the staging tables
+    // (allowProfile). memory_items + project_memory_revision stay workspace-keyed,
+    // so a profile row there is incoherent and is correctly flagged.
     const l1Tables = [
-      { table: 'memory_items',             pk: 'id',            keyCol: 'project_id' },
-      { table: 'memory_candidates',        pk: 'id',            keyCol: 'project_id' },
-      { table: 'memory_jobs',              pk: 'id',            keyCol: 'project_id' },
-      { table: 'project_memory_revision',  pk: 'project_id',    keyCol: 'project_id' },
+      { table: 'memory_items',             pk: 'id',            keyCol: 'project_id', allowProfile: false },
+      { table: 'memory_candidates',        pk: 'id',            keyCol: 'project_id', allowProfile: true },
+      { table: 'memory_jobs',              pk: 'id',            keyCol: 'project_id', allowProfile: true },
+      { table: 'project_memory_revision',  pk: 'project_id',    keyCol: 'project_id', allowProfile: false },
     ];
 
-    for (const { table, pk, keyCol } of l1Tables) {
+    for (const { table, pk, keyCol, allowProfile } of l1Tables) {
       const rows = db.prepare(`SELECT ${pk}, ${keyCol}, owner_type, owner_id FROM ${table}`).all();
       for (const row of rows) {
+        // P-B1: a profile staging row is keyed by owner_id and must carry NULL
+        // project_id (042 coherence CHECK). Validate that shape instead of
+        // re-deriving from project_id (which is NULL for profile).
+        if (allowProfile && row.owner_type === 'profile') {
+          let expected;
+          try {
+            expected = normalizeOwner({ profile_id: row.owner_id });
+          } catch {
+            mismatches.push({ table, pk: row[pk], expected: null, actual: { owner_type: row.owner_type, owner_id: row.owner_id }, error: 'cannot_normalize_old_key' });
+            continue;
+          }
+          if (row[keyCol] != null || row.owner_type !== expected.owner_type || row.owner_id !== expected.owner_id) {
+            mismatches.push({
+              table,
+              pk: row[pk],
+              expected,
+              actual: { owner_type: row.owner_type, owner_id: row.owner_id, [keyCol]: row[keyCol] },
+            });
+          }
+          continue;
+        }
         let expected;
         try {
           expected = normalizeOwner({ project_id: row[keyCol] });
