@@ -133,4 +133,15 @@ function isCapability(value) {
   return CAP_SET.has(value);
 }
 
-module.exports = { CAPABILITIES, createLegacyGrant, createGrant, assertCapability, isCapability };
+// isRealGrant lets a higher-level contract (operatorContext) verify a grant is
+// factory-issued — i.e. tracked in the module-private WeakSet by object identity
+// — BEFORE trusting its `legacy` bit to gate enforcement, without the deny
+// semantics of assertCapability. Read-only membership check: it cannot be used to
+// forge a grant (only createGrant/createLegacyGrant add to the set). This closes
+// the gap where an enforcement GATE reads `grant.legacy` off a forged plain
+// object and skips the assertCapability WeakSet check entirely.
+function isRealGrant(grant) {
+  return !!grant && typeof grant === 'object' && ISSUED_GRANTS.has(grant);
+}
+
+module.exports = { CAPABILITIES, createLegacyGrant, createGrant, assertCapability, isCapability, isRealGrant };
