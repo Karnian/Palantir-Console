@@ -69,10 +69,50 @@ test('denied capability throw carries CAPABILITY_DENIED code', () => {
 });
 
 test('🔒 forged grant is rejected (shape spoof of {legacy:true} does NOT pass)', () => {
-  // The crux: only factory-issued (branded) grants are honored.
+  // The crux: only factory-issued grants are honored (WeakSet identity).
   assert.throws(() => assertCapability({ legacy: true }, 'shell'), /invalid or forged grant/);
   assert.throws(() => assertCapability({ legacy: true, caps: ['shell'] }, 'shell'), /invalid or forged grant/);
   assert.throws(() => assertCapability({ caps: ['shell'] }, 'shell'), /invalid or forged grant/);
+});
+
+test('🔒 R2: clone/spread/prototype of a REAL grant cannot forge (WeakSet identity)', () => {
+  // Codex R2 SERIOUS: R1 used an enumerable Symbol brand that spread /
+  // Object.assign / Object.create COPIED, so a clone of a real grant + legacy:true
+  // passed. WeakSet identity defeats every copy — only the exact factory object
+  // is honored.
+  const denyAll = createGrant([]);          // real, allows nothing
+  const legacyReal = createLegacyGrant();   // real, allows all
+
+  // spread / Object.assign clone of a real grant, forced legacy:true
+  assert.throws(() => assertCapability({ ...denyAll, legacy: true }, 'shell'), /invalid or forged grant/);
+  assert.throws(() => assertCapability(Object.assign({}, denyAll, { legacy: true }), 'shell'), /invalid or forged grant/);
+  // a plain clone of a real LEGACY grant is still a different object → rejected
+  assert.throws(() => assertCapability({ ...legacyReal }, 'shell'), /invalid or forged grant/);
+  assert.throws(() => assertCapability(Object.assign({}, legacyReal), 'shell'), /invalid or forged grant/);
+  // prototype-inherit a real LEGACY grant: the child INHERITS legacy:true via the
+  // chain (no assignment — assigning would itself throw on the frozen proto), but
+  // it is a different object not in the WeakSet → rejected.
+  const protoLegacy = Object.create(legacyReal);
+  assert.strictEqual(protoLegacy.legacy, true); // inherited
+  assert.throws(() => assertCapability(protoLegacy, 'shell'), /invalid or forged grant/);
+
+  // sanity: the REAL grants themselves still work
+  assert.doesNotThrow(() => assertCapability(legacyReal, 'shell'));
+  assert.throws(() => assertCapability(denyAll, 'shell'), /capability denied/);
+});
+
+test('🔒 R3: Proxy / structuredClone cannot forge; require-cache shares the WeakSet', () => {
+  // Codex R3 confirmed these defeat the WeakSet; lock them so a refactor can't regress.
+  const real = createLegacyGrant();
+  // A Proxy is its own identity — WeakSet does not unwrap the target.
+  assert.throws(() => assertCapability(new Proxy(real, {}), 'shell'), /invalid or forged grant/);
+  // structuredClone produces a brand-new object → not in the WeakSet.
+  assert.throws(() => assertCapability(structuredClone(createGrant([])), 'shell'), /invalid or forged grant/);
+  // Same resolved module path shares the closure WeakSet, so a real grant is
+  // honored across a second require (no false negative).
+  const mod2 = require('../utils/capability');
+  assert.strictEqual(mod2.assertCapability, assertCapability);
+  assert.doesNotThrow(() => mod2.assertCapability(real, 'shell'));
 });
 
 test('🔒 grant cannot be escalated post-hoc (caps list is frozen)', () => {
