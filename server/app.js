@@ -62,6 +62,9 @@ const { createMasterMemoryRouter } = require('./routes/masterMemory');
 // A2-3a: PM-slot composer+ledger cutover (flag-gated, default OFF)
 const { createMemoryComposer, buildWorkspaceAdapter, buildUserAdapter } = require('./services/memoryComposer');
 const { createCompositionLedger } = require('./services/compositionLedger');
+// Operator P-B2c: folder-less specialist backend + spawn service (flag-gated, unrouted)
+const { createSpecialistBackend } = require('./services/specialistBackend');
+const { createSpecialistService } = require('./services/specialistService');
 
 const AUTO_REVIEW_MAX = 5;
 const REVIEW_TEXT_CAP = 1000;
@@ -834,6 +837,39 @@ function createApp(options = {}) {
     }
   }
 
+  // Operator P-B2c-2: folder-less specialist spawn service. flag-gated + UNROUTED
+  // (no HTTP route/actor-identity until B2c-3/4) → flag-off is behavior-identical.
+  // Constructed only when PALANTIR_OPERATOR_SPECIALIST=1 + a backend is available.
+  // Receives a NARROW trace interface (getRun/addRunEvent) — NOT the full
+  // runService — so it cannot create durable runs, register a registry slot, or
+  // write the composition ledger (ephemeral by construction, Codex P-B2c-2 Q6).
+  let specialistService = null;
+  {
+    const specialistEnabled = options.operatorSpecialistEnabled ?? (process.env.PALANTIR_OPERATOR_SPECIALIST === '1');
+    if (specialistEnabled) {
+      let backend = options.specialistBackend || null;
+      const apiKey = process.env.ANTHROPIC_API_KEY;
+      if (!backend && !apiKey && !options.specialistCallModel) {
+        console.warn('[operator-specialist] PALANTIR_OPERATOR_SPECIALIST=1 but no ANTHROPIC_API_KEY / injected backend — specialist disabled');
+      } else {
+        try {
+          if (!backend) backend = createSpecialistBackend({ apiKey, callModel: options.specialistCallModel, registryService, agentProfileService });
+          specialistService = createSpecialistService({
+            specialistBackend: backend,
+            memoryComposer,
+            trace: {
+              getRun: (id) => runService.getRun(id),
+              addRunEvent: (runId, type, payload) => runService.addRunEvent(runId, type, payload),
+            },
+          });
+          console.log('[operator-specialist] specialist service constructed (unrouted)');
+        } catch (err) {
+          console.warn(`[operator-specialist] failed to construct: ${err && err.message}`);
+        }
+      }
+    }
+  }
+
   // v3 Phase 4: annotate-only reconciliation. reconciliationService
   // reads conversationService.peekParentNotices to detect "user
   // intervention stale" claims, so it has to be constructed AFTER
@@ -1008,6 +1044,7 @@ function createApp(options = {}) {
     masterMemoryDecayScheduler,
     masterMemoryXprojectScanner,
     composerFailureCounter, // Phase 0b: compose()-returned-null counter (diagnostic seam)
+    specialistService, // Operator P-B2c-2: null unless PALANTIR_OPERATOR_SPECIALIST=1 (unrouted)
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at
     // (createRun() always stamps status='queued' and cost_usd=0 at now).
@@ -1078,6 +1115,7 @@ function createApp(options = {}) {
     try { if (masterMemoryXprojectScanner) masterMemoryXprojectScanner.stop(); } catch { /* ignore */ }
     try { if (masterMemoryDecayScheduler) masterMemoryDecayScheduler.stop(); } catch { /* ignore */ }
     try { if (memoryDistillScheduler) memoryDistillScheduler.stop(); } catch { /* ignore */ }
+    try { if (specialistService && typeof specialistService.stop === 'function') specialistService.stop(); } catch { /* ignore */ }
     lifecycleService.stopMonitoring();
     // PR5b graceful shutdown: if a distill drain is in flight, close the DB only
     // AFTER it settles so the drain never writes into a closed handle. With no
