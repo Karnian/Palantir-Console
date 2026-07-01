@@ -22,6 +22,7 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { BadRequestError } = require('../utils/errors');
+const { canonicalConversationId } = require('../utils/conversationId'); // PM→Operator Phase 0: dual-read origin guard
 
 // Bound model-bound inputs to keep token cost + injection surface in check. The
 // fixed safety preamble (buildSpecialistSystemPrompt) is always prepended and is
@@ -108,7 +109,10 @@ function createOperatorSpecialistRouter({ specialistService, runService, operato
     }
     // Codex R2 SERIOUS: validate the conflict HERE (clean 400) — otherwise the
     // service throws a plain Error → errorHandler 500 leaking the internal message.
-    if (originConversationId != null && originConversationId !== originRun.conversation_id) {
+    // dual-read (PM→Operator Phase 0, Codex R3): canonical compare so a `pm:` caller
+    // and a migrated `operator:` origin run (or vice-versa) don't false-reject.
+    if (originConversationId != null
+      && canonicalConversationId(originConversationId) !== canonicalConversationId(originRun.conversation_id)) {
       throw new BadRequestError('originConversationId does not match the origin run');
     }
 
