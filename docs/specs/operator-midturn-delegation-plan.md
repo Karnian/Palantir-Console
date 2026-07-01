@@ -93,7 +93,17 @@ Architect = SOUND/APPROVE. Codex = REVISE and caught a **BLOCKER architect misse
 - **MD-2 (Claude transport + Top run-id)**: resolve the Claude POST gap (narrow POST-capable
   MCP tool hosted by Palantir, OR a narrow allowlisted POST wrapper — NOT general curl) +
   expose Top's run id (cache-aware identity section). Own design round.
-- **MD-3 (guardrail hardening)**: self-reference `originRunId` enforcement (caller identity) +
-  explicit client/route timeout contract + trace-attribution tests.
+- **MD-3 (guardrail hardening)** ✅ DONE (proportionate, user decision 2026-07-01):
+  - **timeout contract**: whole-turn/per-call deadline tagged `specialist:timeout` in
+    specialistBackend; entry maps it to **504** (vs generic 500). client curl `--max-time
+    150` > server `totalTimeoutMs 120s` (coherent). Tests: 504 on timeout / 500 on other error.
+  - **self-reference**: NOT enforced — documented as ACCEPTED trace-integrity debt (single-
+    tenant + trusted; wrong-run = observability-only, NO content leak; MD-2a mitigates the
+    accidental case). A minted per-run secret (env→header→validate) is the multi-tenant
+    forward-only fix. A test LOCKS the not-enforced behavior so a future change is conscious.
 
-MVP = MD-1 only. MD-2 (Claude/Top) + MD-3 (hardening) follow as separate slices.
+## Status
+- MD-1 #263 ✅ (Codex/PM path) · MD-2a #267 ✅ (Top run-id) · MD-3 ✅ (timeout 504 + self-ref debt).
+- **MD-2b (Claude transport) DEFERRED** by user decision — Claude-Top can't POST at all today
+  (worker-spawn included); transport (MCP host / hardened wrapper / curl) is a separate
+  initiative once the specialist feature's value is validated / multi-tenant is real.
