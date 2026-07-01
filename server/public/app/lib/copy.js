@@ -81,6 +81,7 @@ export const NAV_LABELS = {
   presets: '프리셋',
   'mcp-servers': 'MCP 서버',
   memory: '메모리',
+  specialist: '스페셜리스트',
 };
 
 // Reusable verb labels — covers ~80% of button copy across modals.

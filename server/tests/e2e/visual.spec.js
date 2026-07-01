@@ -28,6 +28,7 @@ const ROUTES = [
   'presets',
   'mcp-servers',
   'memory',
+  'specialist',
 ];
 const THEMES = ['dark', 'light'];
 const VIEWPORTS = [
