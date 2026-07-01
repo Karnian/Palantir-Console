@@ -181,7 +181,7 @@ curl -s -X DELETE ${base}/api/tasks/TASK_ID${token ? ` -H "Authorization: Bearer
   // pm_run_id in the project section; Top run-id exposure is a later slice).
   const runIdHint = layer === 'pm'
     ? 'your pm_run_id (shown in your project section)'
-    : 'your own manager run id';
+    : 'your top_run_id (shown in the Manager Identity section)';
   const specialistNote = (specialistAvailable && adapterType === 'codex')
     ? `
 ## Consulting an Operator specialist (mid-turn, read-only)
@@ -327,6 +327,19 @@ function buildManagerSystemPrompt({ adapter, port, token, layer = 'top', adapter
 }
 
 /**
+ * MD-2a: a small per-run identity section giving the Top manager its OWN run id in
+ * a machine-usable form (mirrors PM's pm_run_id). Appended AFTER buildManagerSystemPrompt
+ * output by the caller so it does NOT bust the Codex prefix cache (the shared base
+ * stays byte-stable; this section is stable per-run, not per-turn). The specialist
+ * delegation section (codex-gated) points at it via `top_run_id` so a Codex Top can
+ * pass its own run id as originRunId. Returns '' when no run id (safe no-op).
+ */
+function buildTopIdentitySection({ topRunId } = {}) {
+  if (!topRunId) return '';
+  return `## Manager Identity\ntop_run_id: ${topRunId}`;
+}
+
+/**
  * Build the first user message containing dynamic context. Sent right after
  * the system prompt so Codex's cached_input_tokens hit on the system prompt
  * is preserved across turns.
@@ -359,6 +372,7 @@ function buildInitialUserContext({ runSummary, projectList, projectBriefsSection
 
 module.exports = {
   buildManagerSystemPrompt,
+  buildTopIdentitySection,
   buildInitialUserContext,
   // Exposed for tests
   buildRoleSection,
