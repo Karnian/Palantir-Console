@@ -163,3 +163,38 @@ test('POST: emits specialist:invoked + specialist:result on the origin run', asy
   const events = app.services._rawDb.prepare('SELECT event_type FROM run_events WHERE run_id = ?').all(run.id).map((r) => r.event_type);
   assert.ok(events.includes('specialist:invoked') && events.includes('specialist:result'), events.join(','));
 });
+
+// ── MD-3: timeout contract (specialist:timeout → 504) ──
+test('POST: backend deadline (specialist:timeout) → 504, not 500', async (t) => {
+  const timeoutBackend = { runSpecialistTurn: async () => { const e = new Error('deadline'); e.code = 'specialist:timeout'; throw e; } };
+  const app = await enabledApp(t, timeoutBackend);
+  const pid = makeProfile(app, { name: 'p' });
+  const run = makeManagerRun(app);
+  const res = await request(app).post(B).send({ profileId: pid, userText: 'hi', originRunId: run.id });
+  assert.equal(res.status, 504);
+  assert.equal(res.body.error, 'specialist_timeout');
+});
+
+test('POST: non-timeout backend error → 500 (distinct from 504)', async (t) => {
+  const errBackend = { runSpecialistTurn: async () => { throw new Error('boom'); } };
+  const app = await enabledApp(t, errBackend);
+  const pid = makeProfile(app, { name: 'p' });
+  const run = makeManagerRun(app);
+  const res = await request(app).post(B).send({ profileId: pid, userText: 'hi', originRunId: run.id });
+  assert.equal(res.status, 500);
+});
+
+// ── MD-3: self-reference is NOT enforced (accepted trace-integrity debt, single-tenant) ──
+// Locks the current behavior so a future multi-tenant per-run-token change is conscious.
+// Harm is trace-attribution only (events land on the named run) — no content leak.
+test('POST: any active manager run is accepted as originRunId (self-ref NOT enforced — accepted debt)', async (t) => {
+  const app = await enabledApp(t);
+  const pid = makeProfile(app, { name: 'p' });
+  makeManagerRun(app);                 // run A (a caller could be this one)
+  const runB = makeManagerRun(app);    // a DIFFERENT active manager run
+  // Naming run B is accepted today (200); the specialist trace lands on run B.
+  const res = await request(app).post(B).send({ profileId: pid, userText: 'hi', originRunId: runB.id });
+  assert.equal(res.status, 200);
+  const evtsB = app.services._rawDb.prepare('SELECT event_type FROM run_events WHERE run_id = ?').all(runB.id).map((r) => r.event_type);
+  assert.ok(evtsB.includes('specialist:invoked'), 'trace attaches to the named run (documents the debt)');
+});

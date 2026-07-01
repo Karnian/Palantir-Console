@@ -291,6 +291,20 @@ function createSpecialistBackend({
       const e = new Error('specialist: max tool-use iterations exceeded');
       e.code = 'specialist:max_iterations';
       throw e;
+    } catch (err) {
+      // MD-3 timeout contract: surface a DISTINCT code when the deadline fired
+      // (whole-turn outer.abort() → AbortError, or per-call AbortSignal.timeout →
+      // TimeoutError, or the Anthropic SDK's APIUserAbortError) so the entry route
+      // can map it to 504 instead of a generic 500. Non-timeout errors pass through.
+      if (err && err.code === 'specialist:timeout') throw err;
+      const isTimeout = outer.signal.aborted
+        || (err && ['AbortError', 'TimeoutError', 'APIUserAbortError'].includes(err.name));
+      if (isTimeout) {
+        const e = new Error(`specialist: exceeded time budget (total ${totalTimeoutMs}ms / per-call ${timeoutMs}ms)`);
+        e.code = 'specialist:timeout';
+        throw e;
+      }
+      throw err;
     } finally {
       clearTimeout(totalTimer);
     }

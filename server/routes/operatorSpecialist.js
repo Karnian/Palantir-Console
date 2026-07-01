@@ -85,8 +85,20 @@ function createOperatorSpecialistRouter({ specialistService, runService, operato
     // ── origin-run gate ── (getRun throws NotFoundError → 404 if missing)
     // The specialist is invoked in the context of an ACTIVE MANAGER turn; events
     // are emitted onto that run's stream. A worker / terminal run is rejected.
-    // (Single-tenant: no cross-user ownership model — existence + manager + active
-    // is the correct gate; multi-tenant ownership is a forward-only concern.)
+    //
+    // ACCEPTED TRACE-INTEGRITY DEBT (MD-3, user decision 2026-07-01): the gate is
+    // "is this SOME active manager run", NOT "is this the CALLER's own run". With a
+    // shared PALANTIR_TOKEN there is no per-caller identity, so a manager COULD name
+    // another active manager's run as originRunId → the specialist trace
+    // (specialist:invoked/result) would land on THAT run's stream. This is bounded to
+    // trace-attribution confusion — NO content leak (run:event frames + event payloads
+    // carry lengths/ids, plus a capped error message on the error path, but never
+    // memory/prompt/output) — and single-tenant + trusted
+    // managers make it out of the threat model. MD-2a already mitigates the ACCIDENTAL
+    // case (each manager is told its own top_run_id/pm_run_id). Enforcing self-reference
+    // needs a minted per-run secret (env→header→validate) and is deferred to a
+    // multi-tenant initiative; the self-ref-not-enforced behavior is locked by
+    // specialist-entry.test.js so a future change is a conscious one.
     const originRun = runService.getRun(originRunId);
     if (originRun.is_manager !== 1) { // strict (SQLite 0/1); not a truthy check
       throw new BadRequestError('originRunId must reference a manager run');
@@ -109,14 +121,26 @@ function createOperatorSpecialistRouter({ specialistService, runService, operato
     // Delegate. invokeSpecialist re-validates the run, builds a specialist context,
     // injects User memory, runs the backend, and emits specialist:invoked/result/
     // error on the origin run.
-    const result = await specialistService.invokeSpecialist({
-      profileId,
-      persona: profile.persona,
-      capabilities: profile.capabilities,
-      userText,
-      originRunId,
-      originConversationId,
-    });
+    let result;
+    try {
+      result = await specialistService.invokeSpecialist({
+        profileId,
+        persona: profile.persona,
+        capabilities: profile.capabilities,
+        userText,
+        originRunId,
+        originConversationId,
+      });
+    } catch (err) {
+      // MD-3 timeout contract: the backend tags a deadline breach with
+      // code 'specialist:timeout' — surface it as 504 Gateway Timeout (a
+      // distinct, retryable signal) rather than a generic 500. Other failures
+      // propagate to the central errorHandler unchanged.
+      if (err && err.code === 'specialist:timeout') {
+        return res.status(504).json({ error: 'specialist_timeout' });
+      }
+      throw err;
+    }
 
     res.json(result);
   }));
