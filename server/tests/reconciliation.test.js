@@ -278,7 +278,7 @@ test('Phase 4: R4 fix — pmRunId envelope binding rejects foreign/top/nonexiste
     projectId: project.id,
     pmRunId: otherPm.id,
     pmClaim: { kind: 'task_complete', task_id: 'whatever' },
-  }), /belongs to pm:.+, not pm:/);
+  }), /belongs to pm:.+, not project /); // dual-read: message names the project, not a single conv form
 
   // (d) a worker run (not a manager) is not acceptable
   const task = taskService.createTask({ title: 'T', project_id: project.id });

@@ -22,6 +22,7 @@
  */
 
 const { createSpecialistContext, createSpecialistInvocation } = require('../utils/operatorContext');
+const { canonicalConversationId } = require('../utils/conversationId'); // PM→Operator Phase 0: dual-read origin guard
 
 // Fixed, NON-overridable safety preamble. B2c-1 deferred the "tool results are
 // untrusted data" instruction to here. The caller's persona is appended AFTER, so
@@ -86,7 +87,8 @@ function createSpecialistService({ specialistBackend, memoryComposer = null, tra
     // Validate the trace anchor exists FIRST (getRun throws NotFoundError if missing)
     // — never run an unobservable specialist.
     const run = trace.getRun(originRunId);
-    if (originConversationId != null && run && originConversationId !== run.conversation_id) {
+    if (originConversationId != null && run
+      && canonicalConversationId(originConversationId) !== canonicalConversationId(run.conversation_id)) {
       throw new Error('specialistService: originConversationId conflicts with origin run');
     }
     const convId = originConversationId == null ? ((run && run.conversation_id) || null) : originConversationId;

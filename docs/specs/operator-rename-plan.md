@@ -66,11 +66,27 @@ Route **ALL** of these consumers through dual-read (Codex design review — the 
 - Restart re-populates managerRegistry from migrated DB (operator: keys). Boot-resume already
   dual-reads (Phase 0), so mid-migration rows resume fine.
 
-### Phase 2 — flip PRODUCERS to `operator:`
-- `conversationIdForProject` → emit `operator:`; producers of manager_layer/slot_kind → `'operator'`.
+### Phase 2 — flip PRODUCERS to `operator:` (server + UI together)
+- `conversationIdForProject` → emit `operator:` (the single server producer seam); producers of
+  manager_layer/slot_kind → `'operator'`. canonicalConversationId auto-flips with it.
 - managerSystemPrompt CONVERSATION_ID format + `/api/conversations/operator:PROJECT_ID` examples.
-- `pm_run_id` prompt/envelope FIELD → `operator_run_id` couples to a PM-reset (live prompts bake
-  the old field) — sequence carefully or keep the field name (transient) to avoid desync.
+- **UI dual-read + producer flip (Codex R2 flagged these; they consume the CANONICAL/producer
+  form which stays `pm:` through Phase 1 thanks to registry canonicalization, so they flip HERE
+  with the producers, not in Phase 0)**: `ManagerChat.js:85` `conversationTarget.slice(3)` →
+  parse-both; `ManagerChat.js:649` build → operator:; `SessionGrid.js:191/:207` + `ProjectsView.js:61`
+  slot/target match → canonical/parse-both. Add a small client conversation-id util.
+- `pm_run_id` prompt/envelope FIELD: KEEP the name (transient; renaming desyncs live PM prompts).
+
+### Phase 0 — R2 corrections applied (this PR)
+Codex R2 found the original consumer list undercounted. FIXED in this PR: added
+**managerRegistry internal canonicalization** (setActive/probeActive/clearActive/getActiveRunId/
+getActiveAdapter key by `canonicalConversationId` — so `pm:` and `operator:` address ONE slot;
+this single change covers the whole registry-lookup class: conversationService resolve/send probes,
+pmSpawnService guard, pmCleanupService reset/dispose, app.js auto-review) + the 3 exact-compare-on-
+persisted-conversation_id sites (`conversationService` binding :277, `specialistService` origin
+guard :89, `runService.getRunByConversationId` → matches BOTH stored forms). **UI deferred to
+Phase 2** (proven safe: UI-visible form = canonical `pm:` through Phase 1). Tests lock the registry
+canon (operator: written → found via pm: → snapshot shows canonical pm:).
 
 ### Phase 3 — symbols / files / columns / UI / docs (mechanical, but column renames = migrations)
 - `pmSpawnService`→`operatorSpawnService`, `pmCleanupService`→`operatorCleanupService`,

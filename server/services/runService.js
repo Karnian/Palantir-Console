@@ -5,6 +5,8 @@ const {
   parseProjectConversationId,
   LEGACY_PM_LAYER,
   OPERATOR_LAYER,
+  LEGACY_PM_CONV_PREFIX,
+  OPERATOR_CONV_PREFIX,
 } = require('../utils/conversationId'); // PM→Operator rename Phase 0: dual-read
 
 const VALID_STATUSES = ['queued', 'running', 'paused', 'needs_input', 'completed', 'failed', 'cancelled', 'stopped'];
@@ -498,6 +500,14 @@ function createRunService(db, eventBus) {
   // back to the underlying run row for event/message operations.
   function getRunByConversationId(conversationId) {
     if (!conversationId) return null;
+    // dual-read (PM→Operator Phase 0): the STORED conversation_id may be `pm:<id>`
+    // (producer) OR `operator:<id>` (Phase 1-migrated), so match BOTH forms for a
+    // project conversation. Non-project ids (top/worker:) match exactly.
+    const parsed = parseProjectConversationId(conversationId);
+    const ids = parsed
+      ? [`${LEGACY_PM_CONV_PREFIX}${parsed.projectId}`, `${OPERATOR_CONV_PREFIX}${parsed.projectId}`]
+      : [conversationId];
+    const placeholders = ids.map(() => '?').join(', ');
     return db.prepare(`
       SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
              t.title as task_title, t.project_id as project_id, p.name as project_name
@@ -505,9 +515,9 @@ function createRunService(db, eventBus) {
       LEFT JOIN agent_profiles ap ON r.agent_profile_id = ap.id
       LEFT JOIN tasks t ON r.task_id = t.id
       LEFT JOIN projects p ON t.project_id = p.id
-      WHERE r.conversation_id = ?
+      WHERE r.conversation_id IN (${placeholders})
       ORDER BY r.created_at DESC LIMIT 1
-    `).get(conversationId) || null;
+    `).get(...ids) || null;
   }
 
   function getWorkerRuns(managerRunId) {

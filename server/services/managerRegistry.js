@@ -18,7 +18,7 @@
 // populates the 'top' slot. Enumerating PM now means the registry shape
 // doesn't have to change later.
 
-const { isProjectConversationId } = require('../utils/conversationId'); // PM→Operator Phase 0
+const { isProjectConversationId, canonicalConversationId } = require('../utils/conversationId'); // PM→Operator Phase 0
 
 function createManagerRegistry({ runService }) {
   // conversationId -> { runId, adapter }
@@ -41,6 +41,9 @@ function createManagerRegistry({ runService }) {
     if (!conversationId) throw new Error('conversationId required');
     if (!runId) throw new Error('runId required');
     if (!adapter) throw new Error('adapter required');
+    // dual-read (PM→Operator Phase 0): key slots by canonical form so `pm:<id>`
+    // and `operator:<id>` map to ONE slot regardless of which form a caller uses.
+    conversationId = canonicalConversationId(conversationId);
     // If a previous entry existed for this slot, treat the swap as a
     // clear for the OLD run id so listeners can scrub per-runId state
     // before we overwrite. This covers PM slot rotation (new PM run
@@ -72,6 +75,7 @@ function createManagerRegistry({ runService }) {
   }
 
   function clearActive(conversationId) {
+    conversationId = canonicalConversationId(conversationId); // dual-read slot key
     const entry = active.get(conversationId);
     if (!entry) return;
     active.delete(conversationId);
@@ -90,12 +94,12 @@ function createManagerRegistry({ runService }) {
   }
 
   function getActiveRunId(conversationId) {
-    const entry = active.get(conversationId);
+    const entry = active.get(canonicalConversationId(conversationId)); // dual-read slot key
     return entry ? entry.runId : null;
   }
 
   function getActiveAdapter(conversationId) {
-    const entry = active.get(conversationId);
+    const entry = active.get(canonicalConversationId(conversationId)); // dual-read slot key
     return entry ? entry.adapter : null;
   }
 
@@ -106,6 +110,7 @@ function createManagerRegistry({ runService }) {
   //   * emit a normalized session_ended event if the adapter supports it,
   //   * clear the registry slot.
   function probeActive(conversationId) {
+    conversationId = canonicalConversationId(conversationId); // dual-read slot key
     const entry = active.get(conversationId);
     if (!entry) return null;
     const { runId, adapter } = entry;

@@ -53,6 +53,17 @@ function isProjectLayer(layer) {
   return layer === LEGACY_PM_LAYER || layer === OPERATOR_LAYER;
 }
 
+// Normalize any conversation id to its CANONICAL form so `pm:<id>` and
+// `operator:<id>` collapse to the SAME string (the current producer form —
+// `pm:` in Phase 0/1, `operator:` after Phase 2). Non-project ids ('top',
+// 'worker:...', anything else) pass through unchanged. Used as the single
+// registry slot-key + comparison normalizer so a slot written in one form is
+// found by a lookup in the other during the dual-read window.
+function canonicalConversationId(id) {
+  const parsed = parseProjectConversationId(id);
+  return parsed ? conversationIdForProject(parsed.projectId) : id;
+}
+
 module.exports = {
   LEGACY_PM_CONV_PREFIX,
   OPERATOR_CONV_PREFIX,
@@ -64,4 +75,5 @@ module.exports = {
   isProjectConversationId,
   conversationIdMatchesProject,
   isProjectLayer,
+  canonicalConversationId,
 };

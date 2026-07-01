@@ -41,6 +41,7 @@ const {
   parseProjectConversationId,
   isProjectConversationId,
   isProjectLayer,
+  canonicalConversationId,
 } = require('../utils/conversationId'); // PM→Operator rename Phase 0: dual-read
 
 function createConversationService({
@@ -274,7 +275,7 @@ function createConversationService({
       if (
         !run.is_manager ||
         !layerOk ||
-        run.conversation_id !== conversationId
+        canonicalConversationId(run.conversation_id) !== canonicalConversationId(conversationId)
       ) {
         const bindErr = new Error(
           `manager run binding mismatch: run.id=${run.id} run.conversation_id=${run.conversation_id} ` +

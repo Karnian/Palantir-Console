@@ -11,6 +11,7 @@ const {
   isProjectConversationId,
   conversationIdMatchesProject,
   isProjectLayer,
+  canonicalConversationId,
   LEGACY_PM_CONV_PREFIX,
   OPERATOR_CONV_PREFIX,
 } = require('../utils/conversationId');
@@ -71,4 +72,30 @@ test('routerService.isValidConversationId accepts operator: (dual-read chokepoin
   assert.equal(svc.isValidConversationId('operator:'), false);
   assert.equal(svc.isValidConversationId('top'), true);
   assert.equal(svc.isValidConversationId('worker:r1'), true);
+});
+
+test('canonicalConversationId: collapses pm:/operator: to the current producer form (Phase 0 = pm:)', () => {
+  assert.equal(canonicalConversationId('pm:alpha'), 'pm:alpha');
+  assert.equal(canonicalConversationId('operator:alpha'), 'pm:alpha'); // canonical = producer form
+  assert.equal(canonicalConversationId('top'), 'top');
+  assert.equal(canonicalConversationId('worker:r1'), 'worker:r1');
+  assert.equal(canonicalConversationId('pm:'), 'pm:'); // non-project (empty) passes through
+});
+
+test('managerRegistry: slots are canonical — pm: and operator: address the SAME slot', () => {
+  const { createManagerRegistry } = require('../services/managerRegistry');
+  const reg = createManagerRegistry({ runService: { getRun: (id) => ({ id }) } });
+  const adapter = { isSessionAlive: () => true, disposeSession() {} };
+  reg.setActive('operator:alpha', 'run1', adapter); // written in the NEW form
+  // found via BOTH forms (the dual-read window's core guarantee):
+  assert.equal(reg.getActiveRunId('pm:alpha'), 'run1');
+  assert.equal(reg.getActiveRunId('operator:alpha'), 'run1');
+  assert.ok(reg.getActiveAdapter('pm:alpha'));
+  // snapshot exposes the canonical (Phase 0 = pm:) form — what /api/manager/status
+  // and therefore the UI sees, unchanged through Phase 1 (UI flip is Phase 2).
+  const snap = reg.snapshot();
+  assert.equal(snap.pms.length, 1);
+  assert.equal(snap.pms[0].conversationId, 'pm:alpha');
+  reg.clearActive('pm:alpha'); // clear via the OTHER form also hits the slot
+  assert.equal(reg.getActiveRunId('operator:alpha'), null);
 });
