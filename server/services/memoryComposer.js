@@ -47,6 +47,7 @@ function originRank(origin) {
 const MULTI_OWNER_BUDGET = {
   workspace: 3000,
   user: 1500,
+  profile: 1500, // R4c: operator profile owner — bounded like user (specialist injection)
 };
 const PROVENANCE_BUDGET = {
   user: 1500,
@@ -100,7 +101,9 @@ function compareMultiOwnerRows(a, b) {
 }
 
 function itemTableForOwner(ownerType) {
-  return ownerType === 'workspace' ? 'memory_items' : 'master_memory_items';
+  // R4c: workspace AND profile live in memory_items (migration 044); only user/L2
+  // lives in master_memory_items.
+  return ownerType === 'user' ? 'master_memory_items' : 'memory_items';
 }
 
 function makeItemEdge(row, decision, reason = null) {
@@ -259,7 +262,7 @@ function createMemoryComposer({ retrievers = {} } = {}) {
             selectedRows.push(row);
             budgetUsed += cost;
             itemEdges.push({
-              item_table: owner_type === 'workspace' ? 'memory_items' : 'master_memory_items',
+              item_table: itemTableForOwner(owner_type),
               item_id: row && row.id,
               item_revision: row && row.revision,
               content_hash: row && row.content_hash,
@@ -281,7 +284,7 @@ function createMemoryComposer({ retrievers = {} } = {}) {
             budgetBreached = true;
             suppressedIds.add(row && row.id);
             itemEdges.push({
-              item_table: owner_type === 'workspace' ? 'memory_items' : 'master_memory_items',
+              item_table: itemTableForOwner(owner_type),
               item_id: row && row.id,
               item_revision: row && row.revision,
               content_hash: row && row.content_hash,
@@ -633,10 +636,26 @@ function buildUserAdapter(masterMemoryService) {
   };
 }
 
+/**
+ * buildProfileAdapter(memoryService)
+ * profile owner (R4c): memoryService.retrieveForProfile + buildInjectionBlock + getRevision.
+ * 헤더 "## Profile Memory". profile 은 revision 테이블이 없어(project_memory_revision 은
+ * workspace 전용) getRevision 은 0 을 반환 — specialist 는 ephemeral(one-shot)이라 ledger
+ * 캐시 재사용이 없어 무해.
+ */
+function buildProfileAdapter(memoryService) {
+  return {
+    retrieve: (ownerId, opts) => memoryService.retrieveForProfile(ownerId, opts),
+    buildBlock: (rows) => memoryService.buildInjectionBlock(rows, { header: '## Profile Memory' }),
+    getRevision: (ownerId) => memoryService.getRevision(ownerId),
+  };
+}
+
 module.exports = {
   createMemoryComposer,
   buildWorkspaceAdapter,
   buildUserAdapter,
+  buildProfileAdapter,
   // 상수 노출 (테스트 및 A2-2 ledger persist용)
   COMPOSER_VERSION,
   POLICY_VERSION,

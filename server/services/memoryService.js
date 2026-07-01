@@ -532,12 +532,14 @@ function createMemoryService(db, eventBus) {
     return fallbackRetrieveStmt.all({ ownerType, ownerId, k });
   }
 
-  function retrieveForProject(projectId, options = {}) {
+  // Owner-generic retrieval core (R4c): the two-pass FTS + fallback body, keyed by
+  // (ownerType, ownerId). retrieveForProject/retrieveForProfile are thin owner
+  // resolvers over it, so profile owners get identical ranking to workspace.
+  function retrieveForOwner(ownerType, ownerId, options = {}) {
     try {
       const { taskContext, limit } = options || {};
       const k = getEffectiveLimit(limit);
       const exactQ = buildMatchQuery(taskContext);
-      const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
 
       if (!exactQ) {
         return capRowsByContentLength(retrieveFallback(ownerType, ownerId, k));
@@ -568,13 +570,32 @@ function createMemoryService(db, eventBus) {
     }
   }
 
-  function buildInjectionBlock(rows) {
+  function retrieveForProject(projectId, options = {}) {
+    try {
+      const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
+      return retrieveForOwner(ownerType, ownerId, options);
+    } catch (err) {
+      return [];
+    }
+  }
+
+  // R4c: profile-owned retrieval (owner_type='profile', owner_id=<operator_profiles.id>).
+  function retrieveForProfile(profileId, options = {}) {
+    try {
+      const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ profile_id: profileId });
+      return retrieveForOwner(ownerType, ownerId, options);
+    } catch (err) {
+      return [];
+    }
+  }
+
+  function buildInjectionBlock(rows, { header = '## Learned Memory' } = {}) {
     try {
       if (!Array.isArray(rows) || rows.length === 0) {
         return null;
       }
 
-      const lines = ['## Learned Memory'];
+      const lines = [header];
       for (const row of rows) {
         if (!row || !row.content) {
           continue;
@@ -1505,6 +1526,7 @@ function createMemoryService(db, eventBus) {
     markReviewed,
     setPinned,
     retrieveForProject,
+    retrieveForProfile,
     buildInjectionBlock,
     listForProject,
     listActiveForDistill,

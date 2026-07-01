@@ -35,6 +35,7 @@ const SPECIALIST_SYSTEM_PREAMBLE = [
 ].join('\n');
 
 const USER_BUDGET = 1500;   // PROVENANCE_BUDGET.user — keep the specialist's User block bounded
+const PROFILE_BUDGET = 1500; // R4c: bound the profile-memory block like User
 const ERR_MSG_CAP = 300;
 
 /**
@@ -95,10 +96,11 @@ function createSpecialistService({ specialistBackend, memoryComposer = null, tra
     const operatorContext = createSpecialistContext({ profileId, capabilities });
     const invocation = createSpecialistInvocation({ operatorContext, originRunId, originConversationId: convId });
 
-    // User-only memory injection as USER-PAYLOAD (never system-prompt bake; the
-    // codebase caching-safety invariant). Stateless specialist = User scope only
-    // (no Workspace/Profile). Graceful skip if composer absent / block null /
-    // composition null (the composer's failure signal). compose() is pure.
+    // Memory injection as USER-PAYLOAD (never system-prompt bake; the codebase
+    // caching-safety invariant). R4c: the specialist is now STATEFUL over its
+    // PROFILE — it injects User memory AND the profile's own accumulated memory
+    // (owner_type='profile', owner_id=profileId). Graceful skip if composer absent /
+    // block null / composition null (the composer's failure signal). compose() is pure.
     let effectiveText = userText;
     let memoryInjected = false;
     let memoryBlockLength = 0;
@@ -106,7 +108,10 @@ function createSpecialistService({ specialistBackend, memoryComposer = null, tra
     if (memoryComposer && typeof memoryComposer.compose === 'function') {
       try {
         const out = memoryComposer.compose({
-          owners: [{ owner_type: 'user', owner_id: 'user', provenance: 'user', budget: USER_BUDGET }],
+          owners: [
+            { owner_type: 'user', owner_id: 'user', provenance: 'user', budget: USER_BUDGET },
+            { owner_type: 'profile', owner_id: profileId, provenance: 'profile', budget: PROFILE_BUDGET },
+          ],
           taskContext: userText,
         }) || {};
         if (out.block && out.composition) {
