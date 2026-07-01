@@ -8,8 +8,9 @@
 //      (memory_jobs / memory_candidates) with project_id NULL, and the coherence
 //      CHECK rejects incoherent shapes (Codex S1: owner_id=project_id for workspace).
 //   3. Owner-unique dedup still holds for profile owners.
-//   4. checkOwnerParity is profile-aware ONLY in staging tables (Codex S2); a
-//      profile row in a non-staging table is flagged; workspace-only DB stays [].
+//   4. checkOwnerParity is profile-aware in staging tables (Codex S2) AND, since
+//      R4a (migration 044), in memory_items too (now a profile owner); a profile
+//      row in project_memory_revision stays flagged; workspace-only DB stays [].
 //   5. The distill claim is workspace-only on the unfiltered drain path so a
 //      profile job is never claimed (Codex B1).
 //   6. idx_memory_jobs_active (project_id single-flight) is dropped (Codex Q4/N1);
@@ -181,19 +182,29 @@ test('parity: coherent profile staging rows pass ([])', (t) => {
   assert.deepEqual(svc.checkOwnerParity(), []);
 });
 
-test('parity (S2): a profile row in a non-staging table (memory_items) is flagged', (t) => {
+test('parity (S2, R4a-updated): memory_items now accepts a coherent profile row; incoherent shape is CHECK-rejected', (t) => {
   const db = buildMigratedDb();
   t.after(() => db.close());
   const proj = insertProject(db, 'proj-pi');
-  // memory_items has no coherence CHECK and project_id is still NOT NULL (relaxed
-  // only in P-B2); a profile owner there is incoherent → parity must flag it.
+  // R4a (migration 044) relaxed memory_items to be a profile owner: project_id NULL
+  // + owner coherence CHECK. The OLD reservation contract ("profile in memory_items
+  // is incoherent → flagged") is superseded — the DB CHECK now enforces the shape.
+  // Incoherent (profile owner WITH a project_id) is rejected at INSERT.
+  assert.throws(
+    () => db.prepare(
+      "INSERT INTO memory_items (id, project_id, kind, content, content_hash, evidence_json, origin, owner_type, owner_id) VALUES ('mi-bad',?, 'convention','c','h','{}','human','profile','profile-x')"
+    ).run(proj),
+    /CHECK|constraint/i,
+    'profile row must have NULL project_id',
+  );
+  // Coherent profile row (project_id NULL) inserts and is NOT a parity mismatch.
   db.prepare(
-    "INSERT INTO memory_items (id, project_id, kind, content, content_hash, evidence_json, origin, owner_type, owner_id) VALUES ('mi-1',?, 'convention','c','h','{}','human','profile','profile-x')"
-  ).run(proj);
+    "INSERT INTO memory_items (id, project_id, kind, content, content_hash, evidence_json, origin, owner_type, owner_id) VALUES ('mi-ok', NULL, 'convention','c','h','{}','human','profile','profile-x')"
+  ).run();
   const mism = createMemoryService(db).checkOwnerParity();
   assert.ok(
-    mism.some((m) => m.table === 'memory_items' && m.pk === 'mi-1'),
-    `expected memory_items profile row flagged, got ${JSON.stringify(mism)}`
+    !mism.some((m) => m.table === 'memory_items'),
+    `coherent profile memory_items row must not be flagged, got ${JSON.stringify(mism)}`
   );
 });
 

@@ -682,26 +682,32 @@ test('detectCrossScopeConflicts: no conflict when rows are distinct', async (t) 
 // ============================================================
 // Test 7: checkOwnerParity detects a mismatch when introduced manually
 // ============================================================
-test('checkOwnerParity: detects a row with wrong owner_id', async (t) => {
+test('memory_items rejects a workspace row with wrong owner_id (044 coherence CHECK)', async (t) => {
   const cleanup = [];
   try {
     const db = await setupDb(cleanup);
     const projectId = 'proj-parity-bad';
     db.prepare("INSERT OR IGNORE INTO projects (id, name, directory) VALUES (?, ?, ?)").run(projectId, 'PB', '/tmp/pb');
 
-    // Insert with WRONG owner_id
+    // Migration 044 added a coherence CHECK (workspace → owner_id = project_id).
+    // A wrong owner_id is now rejected at INSERT time — a stronger guarantee than the
+    // read-only checkOwnerParity scan, which remains as defense-in-depth for any row
+    // that could bypass the CHECK (e.g. direct file edits / future ALTERs).
     const itemId = crypto.randomUUID();
+    assert.throws(
+      () => db.prepare(
+        "INSERT INTO memory_items (id, project_id, kind, content, content_hash, evidence_json, origin, owner_type, owner_id) VALUES (?, ?, 'convention', 'c', 'h', '{}', 'human', 'workspace', 'WRONG_ID')"
+      ).run(itemId, projectId),
+      /CHECK|constraint/i,
+      'coherence CHECK must reject owner_id != project_id',
+    );
+
+    // And a correctly-keyed workspace row still inserts + passes parity.
     db.prepare(
-      "INSERT INTO memory_items (id, project_id, kind, content, content_hash, evidence_json, origin, owner_type, owner_id) VALUES (?, ?, 'convention', 'c', 'h', '{}', 'human', 'workspace', 'WRONG_ID')"
-    ).run(itemId, projectId);
-
-    const svc = createMemoryService(db);
-    const mismatches = svc.checkOwnerParity();
-
-    const m = mismatches.find(r => r.table === 'memory_items' && r.pk === itemId);
-    assert.ok(m, 'Should detect the mismatch in memory_items');
-    assert.equal(m.actual.owner_id, 'WRONG_ID');
-    assert.equal(m.expected.owner_id, projectId);
+      "INSERT INTO memory_items (id, project_id, kind, content, content_hash, evidence_json, origin, owner_type, owner_id) VALUES (?, ?, 'convention', 'c2', 'h2', '{}', 'human', 'workspace', ?)"
+    ).run(crypto.randomUUID(), projectId, projectId);
+    const mismatches = createMemoryService(db).checkOwnerParity();
+    assert.ok(!mismatches.some(r => r.table === 'memory_items'), 'coherent workspace row must not be flagged');
   } finally {
     for (const fn of cleanup) await fn();
   }
