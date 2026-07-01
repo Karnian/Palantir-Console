@@ -39,6 +39,7 @@ const { createManagerRouter } = require('./routes/manager');
 const { createConversationsRouter } = require('./routes/conversations');
 const { createManagerRegistry } = require('./services/managerRegistry');
 const { createConversationService } = require('./services/conversationService');
+const { conversationIdForProject, parseProjectConversationId } = require('./utils/conversationId'); // PM→Operator Phase 0
 const { createPmCleanupService } = require('./services/pmCleanupService');
 const { createPmSpawnService } = require('./services/pmSpawnService');
 const { createReconciliationService } = require('./services/reconciliationService');
@@ -158,8 +159,9 @@ function createPmAutoReview({
   const autoReviewCounts = new Map(); // "projectId:taskId" -> count
 
   managerRegistry.onSlotCleared(({ conversationId }) => {
-    if (!conversationId || !conversationId.startsWith('pm:')) return;
-    const projectId = conversationId.slice(3);
+    const parsed = parseProjectConversationId(conversationId); // dual-read: pm:/operator:
+    if (!parsed) return;
+    const projectId = parsed.projectId;
     for (const key of autoReviewCounts.keys()) {
       if (key.startsWith(`${projectId}:`)) autoReviewCounts.delete(key);
     }
@@ -200,7 +202,7 @@ function createPmAutoReview({
 
     const projectId = run.project_id;
     if (!projectId) return false;
-    const pmSlotKey = `pm:${projectId}`;
+    const pmSlotKey = conversationIdForProject(projectId); // producer seam (pm: → operator: in Phase 2)
     const pmRunId = managerRegistry.getActiveRunId(pmSlotKey);
     if (!pmRunId) return false;
 

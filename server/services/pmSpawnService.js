@@ -60,6 +60,7 @@ const {
   buildInitialUserContext,
 } = require('./managerSystemPrompt');
 const { resolveSpawnCwd } = require('../utils/spawnCwd');
+const { conversationIdForProject } = require('../utils/conversationId'); // PM→Operator Phase 0 producer seam
 const { deriveLegacyContext, enforceWorkspace } = require('../utils/operatorContext');
 
 function createPmSpawnService({
@@ -146,7 +147,7 @@ function createPmSpawnService({
       err.httpStatus = 400;
       throw err;
     }
-    const slotKey = `pm:${projectId}`;
+    const slotKey = conversationIdForProject(projectId); // pm: → operator: in Phase 2
 
     // Fast path — already live.
     const alreadyLive = managerRegistry.probeActive(slotKey);

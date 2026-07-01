@@ -18,6 +18,8 @@
 // populates the 'top' slot. Enumerating PM now means the registry shape
 // doesn't have to change later.
 
+const { isProjectConversationId } = require('../utils/conversationId'); // PM→Operator Phase 0
+
 function createManagerRegistry({ runService }) {
   // conversationId -> { runId, adapter }
   const active = new Map();
@@ -169,7 +171,7 @@ function createManagerRegistry({ runService }) {
     for (const [key, entry] of active.entries()) {
       if (key === 'top') {
         out.top = { conversationId: 'top', runId: entry.runId };
-      } else if (key.startsWith('pm:')) {
+      } else if (isProjectConversationId(key)) { // dual-read: pm:<id> OR operator:<id>
         out.pms.push({ conversationId: key, runId: entry.runId });
       }
     }

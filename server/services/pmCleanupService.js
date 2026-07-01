@@ -25,6 +25,8 @@
 //   - pm_enabled=false toggling itself (that's projectService's job —
 //     this service only reacts to it by tearing down PM state).
 
+const { conversationIdForProject } = require('../utils/conversationId'); // PM→Operator Phase 0 producer seam
+
 function createPmCleanupService({
   projectService,
   projectBriefService,
@@ -43,7 +45,7 @@ function createPmCleanupService({
   function _terminate(projectId, reason) {
     if (!projectId) throw new Error('projectId is required');
 
-    const slotKey = `pm:${projectId}`;
+    const slotKey = conversationIdForProject(projectId); // pm: → operator: in Phase 2
     let disposed = false;
     let clearedBrief = false;
     let cancelledRunId = null;
@@ -151,7 +153,7 @@ function createPmCleanupService({
   function forceReset(projectId) {
     if (!projectId) throw new Error('projectId is required');
 
-    const slotKey = `pm:${projectId}`;
+    const slotKey = conversationIdForProject(projectId); // pm: → operator: in Phase 2
     let disposeError = null;
     let disposed = false;
     let clearedBrief = false;

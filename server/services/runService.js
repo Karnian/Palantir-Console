@@ -1,5 +1,11 @@
 const crypto = require('node:crypto');
 const { BadRequestError, NotFoundError } = require('../utils/errors');
+const {
+  isProjectLayer,
+  parseProjectConversationId,
+  LEGACY_PM_LAYER,
+  OPERATOR_LAYER,
+} = require('../utils/conversationId'); // PM→Operator rename Phase 0: dual-read
 
 const VALID_STATUSES = ['queued', 'running', 'paused', 'needs_input', 'completed', 'failed', 'cancelled', 'stopped'];
 
@@ -469,8 +475,14 @@ function createRunService(db, eventBus) {
     const params = [...live];
     let layerClause = '';
     if (layer) {
-      layerClause = 'AND r.manager_layer = ?';
-      params.push(layer);
+      // dual-read: a project-operator filter ('pm' or 'operator') matches BOTH values.
+      if (isProjectLayer(layer)) {
+        layerClause = 'AND r.manager_layer IN (?, ?)';
+        params.push(LEGACY_PM_LAYER, OPERATOR_LAYER);
+      } else {
+        layerClause = 'AND r.manager_layer = ?';
+        params.push(layer);
+      }
     }
     return db.prepare(`
       SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon

@@ -8,6 +8,11 @@ const {
   buildInitialUserContext,
 } = require('../services/managerSystemPrompt');
 const { resolveSpawnCwd } = require('../utils/spawnCwd');
+const {
+  isProjectLayer,
+  parseProjectConversationId,
+  conversationIdForProject,
+} = require('../utils/conversationId'); // PM→Operator rename Phase 0: dual-read
 
 /**
  * Manager Session API routes.
@@ -111,8 +116,9 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     // Phase 2: resume PM managers (codex with thread_id).
     // We process Tops first because PMs need an active Top for
     // parent-notice routing.
-    const tops = staleManagers.filter(r => r.manager_layer !== 'pm');
-    const pms = staleManagers.filter(r => r.manager_layer === 'pm');
+    // dual-read (PM→Operator rename Phase 0): a project-operator run is layer 'pm' OR 'operator'.
+    const pms = staleManagers.filter(r => isProjectLayer(r.manager_layer));
+    const tops = staleManagers.filter(r => !isProjectLayer(r.manager_layer));
 
     for (const r of tops) {
       _resumeResults.attempted++;
@@ -168,10 +174,9 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       let resumed = false;
       const adapterType = r.manager_adapter || 'codex';
 
-      // Extract projectId from conversation_id ('pm:<projectId>').
-      const projectId = r.conversation_id && r.conversation_id.startsWith('pm:')
-        ? r.conversation_id.slice(3)
-        : null;
+      // Extract projectId from conversation_id (dual-read: 'pm:<id>' OR 'operator:<id>').
+      const parsedConv = parseProjectConversationId(r.conversation_id);
+      const projectId = parsedConv ? parsedConv.projectId : null;
 
       if (projectId && adapterType === 'codex' && projectBriefService) {
         try {
@@ -613,7 +618,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     }
     const { text, images } = req.body || {};
     try {
-      const result = conversationService.sendMessage(`pm:${projectId}`, { text, images });
+      const result = conversationService.sendMessage(conversationIdForProject(projectId), { text, images });
       return res.json(result);
     } catch (err) {
       if (err && err.httpStatus === 400) {

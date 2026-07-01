@@ -34,6 +34,7 @@
 // without rewriting the audit history.
 
 const crypto = require('node:crypto');
+const { isProjectLayer, conversationIdMatchesProject } = require('../utils/conversationId'); // PM→Operator Phase 0
 
 const KNOWN_KINDS = new Set([
   'task_complete',
@@ -317,15 +318,18 @@ function createReconciliationService({
         err.httpStatus = 400;
         throw err;
       }
-      if (pmRun.manager_layer !== 'pm') {
-        const err = new Error(`pm_run_id ${pmRunId} is layer='${pmRun.manager_layer}', expected 'pm'`);
+      // dual-read (PM→Operator rename Phase 0): accept manager_layer 'pm' OR 'operator',
+      // and conversation_id `pm:<projectId>` OR `operator:<projectId>`. These are
+      // fail-closed cross-project guards — a wrong form here rejects EVERY claim from a
+      // migrated operator PM, so both forms must be tolerated during the transition.
+      if (!isProjectLayer(pmRun.manager_layer)) {
+        const err = new Error(`pm_run_id ${pmRunId} is layer='${pmRun.manager_layer}', expected 'pm'/'operator'`);
         err.httpStatus = 400;
         throw err;
       }
-      const expectedConvId = `pm:${projectId}`;
-      if (pmRun.conversation_id !== expectedConvId) {
+      if (!conversationIdMatchesProject(pmRun.conversation_id, projectId)) {
         const err = new Error(
-          `pm_run_id ${pmRunId} belongs to ${pmRun.conversation_id}, not ${expectedConvId}`
+          `pm_run_id ${pmRunId} belongs to ${pmRun.conversation_id}, not project ${projectId}`
         );
         err.httpStatus = 400;
         throw err;
