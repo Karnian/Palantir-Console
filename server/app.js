@@ -760,6 +760,13 @@ function createApp(options = {}) {
   // pm:<projectId> creates the PM run on demand. pmCleanupService is the
   // single termination owner for /reset, delete-project, and future
   // pm_enabled=false toggles (spec §5 책임 분담표).
+  // Operator specialist (P-B2c). Declared here — before pmSpawnService / manager
+  // router — so their prompt builders can lazily read ACTUAL route availability
+  // via the isSpecialistAvailable thunk (mid-turn delegation MD-1). The service
+  // itself is constructed below (it needs memoryComposer). null = flag off OR no
+  // backend → route unmounted → managers must NOT be told to call it.
+  let specialistService = null;
+  const isSpecialistAvailable = () => specialistService !== null;
   const pmSpawnService = createPmSpawnService({
     runService,
     managerRegistry,
@@ -768,6 +775,7 @@ function createApp(options = {}) {
     projectBriefService,
     agentProfileService,
     skillPackService,
+    isSpecialistAvailable,
     authResolverOpts: options.authResolverOpts || {},
   });
   const pmCleanupService = createPmCleanupService({
@@ -850,7 +858,6 @@ function createApp(options = {}) {
   // Receives a NARROW trace interface (getRun/addRunEvent) — NOT the full
   // runService — so it cannot create durable runs, register a registry slot, or
   // write the composition ledger (ephemeral by construction, Codex P-B2c-2 Q6).
-  let specialistService = null;
   {
     const specialistEnabled = options.operatorSpecialistEnabled ?? (process.env.PALANTIR_OPERATOR_SPECIALIST === '1');
     if (specialistEnabled) {
@@ -957,7 +964,7 @@ function createApp(options = {}) {
   app.use('/api/agents', createAgentsRouter({ agentProfileService, providerRegistry, authResolverOpts }));
   app.use('/api/events', createEventsRouter({ eventBus }));
   app.use('/api/claude-sessions', createClaudeSessionsRouter());
-  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, pmSpawnService, skillPackService, authResolverOpts }));
+  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, pmSpawnService, skillPackService, isSpecialistAvailable, authResolverOpts }));
   app.use('/api/conversations', createConversationsRouter({ conversationService, runService }));
   // Operator P-B2c-3: specialist entry. Mounted ONLY when the feature is enabled
   // (specialistService is null unless PALANTIR_OPERATOR_SPECIALIST=1 + a backend),

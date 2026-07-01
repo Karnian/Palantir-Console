@@ -46,7 +46,7 @@ function parseMcpTools(capabilitiesJson) {
 // so tests can inject `hasKeychain` (and any future DI hooks) without
 // monkey-patching child_process. Production callers leave this empty and
 // get the real keychain probe.
-function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, pmSpawnService, skillPackService, authResolverOpts = {} }) {
+function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, pmSpawnService, skillPackService, isSpecialistAvailable = () => false, authResolverOpts = {} }) {
   const router = express.Router();
 
   // PR1a: ManagerAdapter seam. The factory is the single entrypoint for
@@ -124,7 +124,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           // Rebuild system prompt + env for the resumed session.
           const port = process.env.PORT || 4177;
           const token = process.env.PALANTIR_TOKEN;
-          const systemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'top', adapterType });
+          const systemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable() });
           const authCtx = resolveManagerAuth(adapterType, authResolverOpts);
           if (authCtx.canAuth) {
             const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env });
@@ -182,7 +182,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
               if (project) {
                 const port = process.env.PORT || 4177;
                 const token = process.env.PALANTIR_TOKEN;
-                const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'pm', adapterType: 'codex' });
+                const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'pm', adapterType: 'codex', specialistAvailable: isSpecialistAvailable() });
                 // Bake project brief into the system prompt (mirrors pmSpawnService).
                 const briefSections = [];
                 briefSections.push(`## Project Scope\nname: ${project.name}\nid: ${project.id}${project.directory ? `\ndirectory: ${project.directory}` : ''}${r.id ? `\npm_run_id: ${r.id}` : ''}`);
@@ -456,7 +456,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     const adapter = managerAdapterFactory.getAdapter(adapterType);
     const port = process.env.PORT || 4177;
     const token = process.env.PALANTIR_TOKEN;
-    const systemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'top', adapterType });
+    const systemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable() });
     const initialUserContext = buildInitialUserContext({
       runSummary,
       projectList,
