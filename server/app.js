@@ -963,7 +963,7 @@ function createApp(options = {}) {
   // (specialistService is null unless PALANTIR_OPERATOR_SPECIALIST=1 + a backend),
   // so the route does not exist when off (behavior-preserving).
   if (specialistService) {
-    app.use('/api/operator/specialist', createOperatorSpecialistRouter({ specialistService, runService }));
+    app.use('/api/operator/specialist', createOperatorSpecialistRouter({ specialistService, runService, operatorProfileService }));
   }
   app.use('/api/dispatch-audit', createDispatchAuditRouter({ reconciliationService }));
   app.use('/api/router', createRouterRouter({ routerService }));
