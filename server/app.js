@@ -64,7 +64,7 @@ const { createOperatorProfileMemoryRouter } = require('./routes/operatorProfileM
 const { createOperatorProfileService } = require('./services/operatorProfileService');
 const { createMasterMemoryRouter } = require('./routes/masterMemory');
 // A2-3a: PM-slot composer+ledger cutover (flag-gated, default OFF)
-const { createMemoryComposer, buildWorkspaceAdapter, buildUserAdapter } = require('./services/memoryComposer');
+const { createMemoryComposer, buildWorkspaceAdapter, buildUserAdapter, buildProfileAdapter } = require('./services/memoryComposer');
 const { createCompositionLedger } = require('./services/compositionLedger');
 // Operator P-B2c: folder-less specialist backend + spawn service (flag-gated, unrouted)
 const { createSpecialistBackend } = require('./services/specialistBackend');
@@ -791,6 +791,7 @@ function createApp(options = {}) {
     retrievers: {
       workspace: buildWorkspaceAdapter(memoryService),
       user: buildUserAdapter(masterMemoryService),
+      profile: buildProfileAdapter(memoryService), // R4c: operator profile owner
     },
   });
   const compositionLedger = createCompositionLedger(db);

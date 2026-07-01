@@ -104,3 +104,43 @@ test('createCandidate: rejects neither / both owners (unit)', async (t) => {
   assert.throws(() => svc.createCandidate({ rule: 'R4', rawJson: {}, dedupKey: 'd' }), /required/);
   assert.throws(() => svc.createCandidate({ projectId: 'p', profileId: 'op_x', rule: 'R4', rawJson: {}, dedupKey: 'd' }), /mutually exclusive/);
 });
+
+// ── R4c: profile memory injected into the specialist (stateful) ──
+function fakeSpecialistBackend() {
+  const calls = [];
+  return { calls, runSpecialistTurn: async (args) => { calls.push(args); return { text: 'ok', toolCallCount: 0, iterations: 1 }; } };
+}
+function activeManagerRun(app) {
+  const run = app.services.runService.createRun({ is_manager: true, manager_layer: 'top', conversation_id: 'top', manager_adapter: 'codex', prompt: 'top' });
+  app.services.runService.updateRunStatus(run.id, 'running', { force: true });
+  return run;
+}
+
+test('R4c: specialist injects the profile own memory (stateful)', async (t) => {
+  const backend = fakeSpecialistBackend();
+  const app = await makeApp(t, { operatorSpecialistEnabled: true, specialistBackend: backend });
+  const pid = makeProfile(app, 'researcher');
+  // human remember → active profile memory
+  const r = await request(app).post(B(pid)).set(COOKIE).send({ kind: 'convention', content: 'PROFILE_MEMO_XYZ always verify sources' });
+  assert.equal(r.status, 201);
+  const run = activeManagerRun(app);
+  // taskContext overlaps the memory so FTS retrieves it (injection is relevance-gated)
+  const res = await request(app).post('/api/operator/specialist').set(COOKIE).send({ profileId: pid, userText: 'how should I verify sources', originRunId: run.id });
+  assert.equal(res.status, 200);
+  // the profile's memory was injected into the specialist as user-payload
+  const injected = backend.calls[0].userText;
+  assert.match(injected, /## Profile Memory/);
+  assert.match(injected, /PROFILE_MEMO_XYZ/);
+  assert.match(injected, /how should I verify sources/); // original userText preserved after the delimiter
+});
+
+test('R4c: empty profile → no profile block, raw userText', async (t) => {
+  const backend = fakeSpecialistBackend();
+  const app = await makeApp(t, { operatorSpecialistEnabled: true, specialistBackend: backend });
+  const pid = makeProfile(app, 'empty-prof');
+  const run = activeManagerRun(app);
+  const res = await request(app).post('/api/operator/specialist').set(COOKIE).send({ profileId: pid, userText: 'hello', originRunId: run.id });
+  assert.equal(res.status, 200);
+  assert.doesNotMatch(backend.calls[0].userText, /## Profile Memory/);
+  assert.equal(backend.calls[0].userText, 'hello');
+});

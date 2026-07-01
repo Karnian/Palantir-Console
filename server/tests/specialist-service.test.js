@@ -107,13 +107,16 @@ test('invokeSpecialist: backend receives a specialist context + preamble systemP
 });
 
 // ── Composer User-slot injection (user-payload) ──
-test('invokeSpecialist: User-only compose (budget 1500), block prepended as user-payload', async () => {
+test('invokeSpecialist: User + Profile compose (R4c stateful), block prepended as user-payload', async () => {
   const composer = fakeComposer();
   const backend = fakeBackend();
   const svc = createSpecialistService({ specialistBackend: backend, memoryComposer: composer, trace: fakeTrace() });
   await svc.invokeSpecialist({ ...BASE });
-  // single user owner with explicit budget
-  assert.deepEqual(composer.calls[0].owners, [{ owner_type: 'user', owner_id: 'user', provenance: 'user', budget: 1500 }]);
+  // R4c: User owner + the profile's own memory owner (owner_id=profileId), both budget 1500
+  assert.deepEqual(composer.calls[0].owners, [
+    { owner_type: 'user', owner_id: 'user', provenance: 'user', budget: 1500 },
+    { owner_type: 'profile', owner_id: 'researcher', provenance: 'profile', budget: 1500 },
+  ]);
   assert.equal(composer.calls[0].taskContext, 'analyze this');
   // block prepended to userText with the canonical delimiter; systemPrompt untouched (no bake)
   assert.equal(backend.calls[0].userText, 'USER MEMORY BLOCK\n\n---\n\nanalyze this');
