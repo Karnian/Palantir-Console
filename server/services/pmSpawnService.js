@@ -70,6 +70,7 @@ function createPmSpawnService({
   projectBriefService,
   agentProfileService, // optional — used for env_allowlist resolution
   skillPackService,    // optional — Phase 2: inject project skill pack list into PM prompt
+  isSpecialistAvailable = () => false, // MD-1: mid-turn specialist delegation prompt gate
   authResolverOpts = {},
   logger,
 }) {
@@ -249,7 +250,7 @@ function createPmSpawnService({
     // finding #1). The whole blob is still cached across turns.
     const port = process.env.PORT || 4177;
     const token = process.env.PALANTIR_TOKEN;
-    const baseSystemPrompt = buildManagerSystemPrompt({ adapter, port, token, layer: 'pm', adapterType });
+    const baseSystemPrompt = buildManagerSystemPrompt({ adapter, port, token, layer: 'pm', adapterType, specialistAvailable: isSpecialistAvailable() });
     const projectSection = buildProjectScopedSystemSection({ project, brief, pmRunId: runId });
     const systemPrompt = [baseSystemPrompt, projectSection].filter(Boolean).join('\n\n');
 
