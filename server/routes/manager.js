@@ -4,6 +4,7 @@ const { BadRequestError } = require('../utils/errors');
 const { resolveManagerAuth, buildManagerSpawnEnv } = require('../services/authResolver');
 const {
   buildManagerSystemPrompt: buildManagerSystemPromptModule,
+  buildTopIdentitySection,
   buildInitialUserContext,
 } = require('../services/managerSystemPrompt');
 const { resolveSpawnCwd } = require('../utils/spawnCwd');
@@ -124,7 +125,10 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           // Rebuild system prompt + env for the resumed session.
           const port = process.env.PORT || 4177;
           const token = process.env.PALANTIR_TOKEN;
-          const systemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable() });
+          const systemPrompt = [
+            buildManagerSystemPromptModule({ adapter, port, token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable() }),
+            buildTopIdentitySection({ topRunId: r.id }), // MD-2a: resumed Top's own run id
+          ].filter(Boolean).join('\n\n');
           const authCtx = resolveManagerAuth(adapterType, authResolverOpts);
           if (authCtx.canAuth) {
             const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env });
@@ -456,7 +460,10 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     const adapter = managerAdapterFactory.getAdapter(adapterType);
     const port = process.env.PORT || 4177;
     const token = process.env.PALANTIR_TOKEN;
-    const systemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable() });
+    const systemPrompt = [
+      buildManagerSystemPromptModule({ adapter, port, token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable() }),
+      buildTopIdentitySection({ topRunId: runId }), // MD-2a: Top's own run id (cache-safe, appended after base)
+    ].filter(Boolean).join('\n\n');
     const initialUserContext = buildInitialUserContext({
       runSummary,
       projectList,
