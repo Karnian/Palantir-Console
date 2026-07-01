@@ -2633,6 +2633,31 @@ body {
   color: var(--text-primary);
 }
 
+/* Shared modal close button (was previously unstyled across all modals —
+   aphrodite review). Touch-safe 32×32 target, token colors, visible focus. */
+.modal-close {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.modal-close:hover {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+.modal-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .modal-body {
   display: flex;
   flex-direction: column;
@@ -5691,7 +5716,10 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   padding: 5px 8px;
 }
 .danger {
-  background: var(--status-failed);
+  /* --button-danger-bg is a button-surface red that clears white-text AA ≥4.5:1
+     (Codex review: --status-failed #ef4444 was ~3.76). Mirrors the .primary /
+     --button-primary-bg K-4-followup pattern. */
+  background: var(--button-danger-bg);
   color: white;
   border: none;
   border-radius: 6px;
@@ -6559,4 +6587,140 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   margin-top: 16px;
   font-size: 13px;
   max-width: 640px;
+}
+
+/* Operator profiles view — PF-2 UI. Design tokens only (K-2 light/dark auto-propagate). */
+.operator-profiles-page {
+  padding: 20px 28px 28px;
+}
+/* Page header: title + "새 프로필" button on same row, matching memory-page / specialist-page rhythm. */
+.operator-profiles-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.5rem;
+}
+.operator-profiles-title {
+  margin: 0 0 0.25rem;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-primary);
+}
+.operator-profiles-description {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+/* Header uses the global .primary button (AA-safe: --button-primary-bg + white,
+   per K-4-followup) — no scoped btn-primary here (--text-inverse gave 4.33<4.5). */
+/* Card grid — 3-column at desktop, 2-column at tablet, 1-column at mobile. */
+.operator-profile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+/* Individual profile card. */
+.operator-profile-card {
+  background: var(--bg-elevated); /* match PresetsView cards; distinct edge in dark */
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* Capability key (secondary identifier next to the human label) + hint. */
+.operator-profile-cap-key {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.operator-profile-cap-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: 0 0 4px 22px;
+  line-height: 1.4;
+}
+.operator-profile-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.operator-profile-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+  word-break: break-word;
+}
+.operator-profile-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 0;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* Persona preview — clamped to 3 lines, muted. */
+.operator-profile-persona {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 2px 0 0;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* Capability chips row. */
+.operator-profile-caps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.operator-profile-cap {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+/* Card action buttons row — matches .skill-pack-actions pattern. */
+.operator-profile-card-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+/* Capability checkbox row inside ProfileModal — mirrors .specialist-checkbox. */
+.operator-profile-cap-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-primary);
+  user-select: none;
+  padding: 4px 0;
+}
+.operator-profile-cap-label input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.operator-profile-cap-label:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
 }

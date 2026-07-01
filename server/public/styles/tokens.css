@@ -98,6 +98,9 @@
    * (focus rings / chips / borders) keep --accent so the brand color
    * stays consistent across non-text surfaces. */
   --button-primary-bg: #7659fa;
+  /* Destructive-action button surface — white text ≥4.5:1 AA (Codex PF-2 review;
+     --status-failed #ef4444 was ~3.76). */
+  --button-danger-bg: #b91c1c;
   /* K-4-followup-contrast PR-3 (2026-04-29): teal foreground for
    * `.skill-pack-origin.url` chip. Dark theme keeps the teal-400 hue
    * (#2dd4bf vs dark teal tint = 8.44:1). Light theme override below
@@ -329,6 +332,7 @@
    * the light theme button bg stays in lock-step with the canonical
    * accent (no separate maintenance). */
   --button-primary-bg: var(--accent);
+  --button-danger-bg: #b91c1c;
   /* K-4-followup-contrast PR-3 light — teal-800 #115e59 on light teal
    * tint (#dbf4f1 composite over --bg-base #fafafa) gives ≈6.58:1
    * (axe color-contrast PASS). Dark teal-400 #2dd4bf would only hit
@@ -428,6 +432,7 @@
     --status-active-bright: #15803d;
     --priority-high-fg: #92400e;
     --button-primary-bg: var(--accent);
+    --button-danger-bg: #b91c1c;
     --origin-url-fg: #115e59;
     --info-light: var(--info);
     --priority-low: #52525b;
