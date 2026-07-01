@@ -22,23 +22,24 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { BadRequestError } = require('../utils/errors');
-const { isCapability } = require('../utils/capability');
 
 // Bound model-bound inputs to keep token cost + injection surface in check. The
 // fixed safety preamble (buildSpecialistSystemPrompt) is always prepended and is
 // never overridable, so persona/userText cannot weaken the deny-by-default policy.
 const USER_TEXT_MAX = 8000;
-const PERSONA_MAX = 2000;
 const ID_MAX = 256; // profileId / originRunId — bounded; they reach trace payloads
 // A live manager turn is the only valid trace anchor for a specialist it delegates.
 const ACTIVE_ORIGIN_STATUSES = new Set(['running', 'needs_input']);
 
-function createOperatorSpecialistRouter({ specialistService, runService }) {
+function createOperatorSpecialistRouter({ specialistService, runService, operatorProfileService }) {
   if (!specialistService || typeof specialistService.invokeSpecialist !== 'function') {
     throw new Error('createOperatorSpecialistRouter: specialistService is required');
   }
   if (!runService || typeof runService.getRun !== 'function') {
     throw new Error('createOperatorSpecialistRouter: runService is required');
+  }
+  if (!operatorProfileService || typeof operatorProfileService.getProfile !== 'function') {
+    throw new Error('createOperatorSpecialistRouter: operatorProfileService is required');
   }
   const router = express.Router();
 
@@ -66,18 +67,16 @@ function createOperatorSpecialistRouter({ specialistService, runService }) {
     if (originRunId.length > ID_MAX) {
       throw new BadRequestError(`originRunId too long (max ${ID_MAX} chars)`);
     }
-    if (persona != null && (typeof persona !== 'string' || persona.length > PERSONA_MAX)) {
-      throw new BadRequestError(`persona must be a string of at most ${PERSONA_MAX} chars`);
+    // Contract A (PF-3): the operator profile is authoritative for persona +
+    // capabilities. Reject request-level values (rather than silently discarding)
+    // so there is no audit ambiguity about what actually ran. Use `!== undefined`
+    // (not `!= null`): JSON can only send `null`, and an explicit `"persona": null`
+    // is a PRESENT field that must be rejected, not treated as absent (Codex R2).
+    if (persona !== undefined) {
+      throw new BadRequestError('persona is defined by the operator profile, not the request');
     }
-    if (capabilities != null) {
-      if (!Array.isArray(capabilities) || !capabilities.every((c) => typeof c === 'string')) {
-        throw new BadRequestError('capabilities must be an array of strings');
-      }
-      // Known-capability check → clean 400 (createGrant would otherwise throw a 500).
-      const unknown = capabilities.filter((c) => !isCapability(c));
-      if (unknown.length > 0) {
-        throw new BadRequestError(`unknown capability: ${unknown.join(', ')}`);
-      }
+    if (capabilities !== undefined) {
+      throw new BadRequestError('capabilities are defined by the operator profile, not the request');
     }
     if (originConversationId != null && typeof originConversationId !== 'string') {
       throw new BadRequestError('originConversationId must be a string');
@@ -101,13 +100,19 @@ function createOperatorSpecialistRouter({ specialistService, runService }) {
       throw new BadRequestError('originConversationId does not match the origin run');
     }
 
-    // Delegate. invokeSpecialist re-validates the run, builds a specialist context
-    // (unknown caps fail closed), injects User memory, runs the backend, and emits
-    // specialist:invoked/result/error on the origin run.
+    // Resolve the profile (getProfile throws NotFoundError → 404 for an unknown
+    // id). Contract A: the profile's persona + capabilities are authoritative;
+    // its stored capabilities are already filtered to valid caps (PF-1), and
+    // createSpecialistContext fail-closes on anything unknown.
+    const profile = operatorProfileService.getProfile(profileId);
+
+    // Delegate. invokeSpecialist re-validates the run, builds a specialist context,
+    // injects User memory, runs the backend, and emits specialist:invoked/result/
+    // error on the origin run.
     const result = await specialistService.invokeSpecialist({
       profileId,
-      persona,
-      capabilities,
+      persona: profile.persona,
+      capabilities: profile.capabilities,
       userText,
       originRunId,
       originConversationId,

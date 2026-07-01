@@ -1,9 +1,9 @@
-// SpecialistView — B2c-4 Operator specialist one-shot invocation UI.
+// SpecialistView — Operator specialist one-shot invocation UI (PF-3: profile-based).
 //
-// Calls POST /api/operator/specialist { profileId, persona?, capabilities[],
-// userText, originRunId } and displays the returned { invocationId, text,
-// toolCallCount, iterations }.  The view is read-only / stateless on the
-// backend: no task, no run, no worktree — just a synchronous specialist turn.
+// Picks a stored operator profile (persona + capabilities come FROM the profile,
+// Contract A) and calls POST /api/operator/specialist { profileId, userText,
+// originRunId }, then displays { invocationId, text, toolCallCount, iterations }.
+// The specialist is read-only / stateless: no task, no run, no worktree.
 
 import { h } from '../../vendor/preact.module.js';
 import { useState, useMemo, useEffect } from '../../vendor/hooks.module.js';
@@ -13,26 +13,31 @@ const html = htm.bind(h);
 import { apiFetch } from '../lib/api.js';
 
 export function SpecialistView({ runs = [] }) {
-  const [profileId, setProfileId]           = useState('');
-  const [persona, setPersona]               = useState('');
-  const [userText, setUserText]             = useState('');
-  const [originRunId, setOriginRunId]       = useState('');
-  const [metadataSearch, setMetadataSearch] = useState(true);
-  const [loading, setLoading]               = useState(false);
-  const [result, setResult]                 = useState(null);
-  const [error, setError]                   = useState(null);
+  const [profileId, setProfileId]     = useState('');
+  const [userText, setUserText]       = useState('');
+  const [originRunId, setOriginRunId] = useState('');
+  const [profiles, setProfiles]       = useState([]);
+  const [loading, setLoading]         = useState(false);
+  const [result, setResult]           = useState(null);
+  const [error, setError]             = useState(null);
 
-  // Active manager runs the operator invocation can be anchored to. Truthy
-  // is_manager check matches the rest of the console (AttentionStrip/Dashboard/
-  // ManagerChat all use `!r.is_manager`); the wire type is integer 1/0.
+  // Load operator profiles for the picker (Contract A: the profile supplies
+  // persona + capabilities, so the request only carries profileId).
+  useEffect(() => {
+    let alive = true;
+    apiFetch('/api/operator/profiles')
+      .then((data) => { if (alive) setProfiles(Array.isArray(data.profiles) ? data.profiles : []); })
+      .catch(() => { if (alive) setProfiles([]); });
+    return () => { alive = false; };
+  }, []);
+
+  // Active manager runs the operator invocation can be anchored to.
   const managerRuns = useMemo(() =>
     (runs || []).filter(r => r.is_manager &&
       (r.status === 'running' || r.status === 'needs_input')),
     [runs],
   );
-
-  // Reset the selection if the chosen run leaves the active list, so originRunId
-  // never lies about what submit will do (Codex review MINOR).
+  // Reset the selection if the chosen run leaves the active list.
   useEffect(() => {
     if (originRunId && !managerRuns.some(r => r.id === originRunId)) setOriginRunId('');
   }, [managerRuns, originRunId]);
@@ -42,17 +47,10 @@ export function SpecialistView({ runs = [] }) {
     setLoading(true);
     setError(null);
     setResult(null);
-    const capabilities = metadataSearch ? ['registry_metadata_search'] : [];
     try {
       const data = await apiFetch('/api/operator/specialist', {
         method: 'POST',
-        body: JSON.stringify({
-          profileId,
-          persona: persona || undefined,
-          capabilities,
-          userText,
-          originRunId,
-        }),
+        body: JSON.stringify({ profileId, userText, originRunId }),
       });
       setResult(data);
     } catch (err) {
@@ -62,30 +60,40 @@ export function SpecialistView({ runs = [] }) {
     }
   }
 
-  const submitDisabled = loading || !profileId.trim() || !userText.trim() || !originRunId;
+  const submitDisabled = loading || !profileId || !userText.trim() || !originRunId;
+  const selectedProfile = profiles.find((p) => p.id === profileId) || null;
 
   return html`
     <div class="page specialist-page" data-view="specialist">
       <div class="page-header">
         <div>
           <h1>스페셜리스트</h1>
-          <p class="specialist-description">폴더 없는 전문 에이전트를 한 번 호출합니다 (읽기 전용 · 도구 없음)</p>
+          <p class="specialist-description">저장된 프로필로 폴더 없는 전문 에이전트를 한 번 호출합니다 (읽기 전용 · 도구 없음)</p>
         </div>
       </div>
 
       <form class="specialist-form" onSubmit=${handleSubmit} novalidate>
 
         <div class="form-field">
-          <label class="form-label" for="specialist-profile-id">프로필 ID</label>
-          <input
-            id="specialist-profile-id"
-            class="form-input"
-            type="text"
-            placeholder="예: agent-profile-uuid"
-            required
+          <label class="form-label" for="specialist-profile">프로필</label>
+          <select
+            id="specialist-profile"
+            class="form-select"
             value=${profileId}
-            onInput=${(e) => setProfileId(e.target.value)}
-          />
+            onChange=${(e) => setProfileId(e.target.value)}
+          >
+            ${profiles.length === 0
+              ? html`<option value="" disabled selected>프로필 없음</option>`
+              : html`
+                  <option value="">— 프로필 선택 —</option>
+                  ${profiles.map((p) => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
+                `}
+          </select>
+          ${profiles.length === 0
+            ? html`<p class="specialist-hint">오퍼레이터 프로필이 없습니다 — <a href="#operator-profiles">오퍼레이터 프로필</a> 화면에서 먼저 만드세요.</p>`
+            : (selectedProfile && selectedProfile.description
+              ? html`<p class="specialist-hint">${selectedProfile.description}</p>`
+              : null)}
         </div>
 
         <div class="form-field">
@@ -126,35 +134,7 @@ export function SpecialistView({ runs = [] }) {
         </div>
 
         <div class="form-field">
-          <label class="form-label" for="specialist-persona">페르소나 (선택)</label>
-          <textarea
-            id="specialist-persona"
-            class="form-textarea"
-            placeholder="선택 사항 — 비워두면 프로필 기본 페르소나를 사용합니다."
-            rows="3"
-            value=${persona}
-            onInput=${(e) => setPersona(e.target.value)}
-          ></textarea>
-        </div>
-
-        <div class="form-field">
-          <label class="specialist-checkbox">
-            <input
-              type="checkbox"
-              checked=${metadataSearch}
-              onChange=${(e) => setMetadataSearch(e.target.checked)}
-            />
-            <span>registry_metadata_search (내부 메타데이터 검색)</span>
-          </label>
-        </div>
-
-        <div class="form-field">
-          <button
-            type="submit"
-            class="btn-primary"
-            disabled=${submitDisabled}
-            aria-busy=${loading}
-          >
+          <button type="submit" class="primary" disabled=${submitDisabled} aria-busy=${loading}>
             ${loading ? '실행 중…' : '실행'}
           </button>
         </div>
