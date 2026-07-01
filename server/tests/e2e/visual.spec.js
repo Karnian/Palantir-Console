@@ -29,6 +29,7 @@ const ROUTES = [
   'mcp-servers',
   'memory',
   'specialist',
+  'operator-profiles',
 ];
 const THEMES = ['dark', 'light'];
 const VIEWPORTS = [

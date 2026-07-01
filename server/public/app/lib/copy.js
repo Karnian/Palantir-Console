@@ -82,6 +82,7 @@ export const NAV_LABELS = {
   'mcp-servers': 'MCP 서버',
   memory: '메모리',
   specialist: '스페셜리스트',
+  'operator-profiles': '오퍼레이터 프로필',
 };
 
 // Reusable verb labels — covers ~80% of button copy across modals.
@@ -851,3 +852,29 @@ export function statusLabel(map, status) {
   if (!status) return '';
   return map[status] || status;
 }
+
+// OperatorProfilesView — list, ProfileModal, DeleteConfirm.
+export const OPERATOR_PROFILES_LABELS = {
+  pageTitle: '오퍼레이터 프로필',
+  pageDescription: '스페셜리스트가 사용할 프로필(페르소나 + 권한)을 관리합니다.',
+  newProfile: '새 프로필',
+  // Modal — new / edit
+  modalNew: '새 오퍼레이터 프로필',
+  modalEdit: '프로필 편집',
+  fieldName: '이름',
+  namePlaceholder: '예: 메타데이터 분석 전문가',
+  fieldDescription: '설명',
+  descriptionPlaceholder: '선택 사항',
+  fieldPersona: '페르소나',
+  personaPlaceholder: '이 오퍼레이터의 역할과 행동 방식을 설명하세요...',
+  fieldCapabilities: '권한 (Capabilities)',
+  toastCreated: '프로필이 생성되었습니다',
+  toastUpdated: '프로필이 업데이트되었습니다',
+  toastDeleted: '프로필이 삭제되었습니다',
+  // Empty state
+  emptyText: '프로필이 없습니다',
+  emptySub: '새 프로필을 만들어 스페셜리스트에 사용하세요.',
+  // Delete confirm
+  deleteTitle: '프로필 삭제',
+  deleteBodySuffix: ' 을(를) 삭제할까요? 이 프로필을 참조하는 향후 스페셜리스트 호출은 실패합니다(404). 진행 중인 호출은 영향받지 않습니다.',
+};

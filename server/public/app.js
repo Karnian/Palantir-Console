@@ -36,6 +36,7 @@ import { PresetsView } from './app/components/PresetsView.js';
 import { McpTemplatesView } from './app/components/McpTemplatesView.js';
 import { MemoryView } from './app/components/MemoryView.js';
 import { SpecialistView } from './app/components/SpecialistView.js';
+import { OperatorProfilesView } from './app/components/OperatorProfilesView.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sidebar Navigation
@@ -401,6 +402,9 @@ function App() {
     }
     if (routeBase === 'specialist') {
       return html`<${SpecialistView} runs=${runs} />`;
+    }
+    if (routeBase === 'operator-profiles') {
+      return html`<${OperatorProfilesView} />`;
     }
     if (routeBase === 'run') {
       const runId = route.split('/')[1];
