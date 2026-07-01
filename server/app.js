@@ -60,6 +60,7 @@ const { createLiveDistiller } = require('./services/distillers/liveDistiller');
 const { createMemoryRouter } = require('./routes/memory');
 const { createOperatorSpecialistRouter } = require('./routes/operatorSpecialist');
 const { createOperatorProfilesRouter } = require('./routes/operatorProfiles');
+const { createOperatorProfileMemoryRouter } = require('./routes/operatorProfileMemory');
 const { createOperatorProfileService } = require('./services/operatorProfileService');
 const { createMasterMemoryRouter } = require('./routes/masterMemory');
 // A2-3a: PM-slot composer+ledger cutover (flag-gated, default OFF)
@@ -976,6 +977,9 @@ function createApp(options = {}) {
   app.use('/api/router', createRouterRouter({ routerService }));
   app.use('/api/worker-presets', createWorkerPresetsRouter({ presetService }));
   app.use('/api/operator/profiles', createOperatorProfilesRouter({ operatorProfileService }));
+  // R4b: profile-scoped R4 remember (POST /:id/memory/remember). Separate router on
+  // the same base — the CRUD router's /:id routes don't match the deeper path.
+  app.use('/api/operator/profiles', createOperatorProfileMemoryRouter({ memoryService, operatorProfileService }));
   app.use('/api/mcp-server-templates', createMcpTemplatesRouter({ mcpTemplateService }));
   app.use('/api/skill-packs', createSkillPacksRouter({ skillPackService, registryService }));
   app.use('/api/projects', createSkillPacksRouter.projectBindings({ skillPackService }));

@@ -342,6 +342,13 @@ function createMemoryService(db, eventBus) {
     if (!origin) {
       throw new Error('origin is required');
     }
+    // Profile owners do not support facts: fact upsert (upsertFactTx) bumps the
+    // workspace-only project revision, and the env.* fact_key namespace is
+    // workspace/system scoped. Enforce at the service layer too, not just the
+    // route (Codex R4b R2 MINOR — defense-in-depth).
+    if (isProfile && kind === 'fact') {
+      throw new Error('profile memory does not support facts');
+    }
     if (kind === 'fact' && !factKey) {
       throw new Error('factKey is required for fact memory items');
     }
@@ -672,8 +679,11 @@ function createMemoryService(db, eventBus) {
     'SELECT * FROM memory_candidates WHERE owner_type = ? AND owner_id = ? AND status = ? ORDER BY created_at ASC, id ASC'
   );
 
-  function createCandidate({ projectId, rule, rawJson, dedupKey } = {}) {
-    if (!projectId) throw new Error('projectId is required');
+  function createCandidate({ projectId, profileId, rule, rawJson, dedupKey } = {}) {
+    // R4b: candidate owner is workspace (projectId) XOR profile (profileId).
+    const isProfile = profileId != null;
+    if (!projectId && !profileId) throw new Error('projectId or profileId is required');
+    if (projectId && profileId) throw new Error('projectId and profileId are mutually exclusive');
     if (!rule) throw new Error('rule is required');
     if (!rawJson) throw new Error('rawJson is required');
     if (!dedupKey) throw new Error('dedupKey is required');
@@ -685,7 +695,10 @@ function createMemoryService(db, eventBus) {
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new Error('rawJson must be a non-null, non-array object');
     }
-    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
+    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner(
+      isProfile ? { profile_id: profileId } : { project_id: projectId },
+    );
+    const ownerProjectId = isProfile ? null : projectId; // coherence CHECK: profile → project_id NULL
     // S5-STORAGE: owner-keyed dedup pre-check (common-case fast path).
     // DB table UNIQUE(rule, owner_type, owner_id, dedup_key) is the primary defense
     // after migration 039 rebuilt memory_candidates with the owner-keyed constraint.
@@ -696,7 +709,7 @@ function createMemoryService(db, eventBus) {
     // (e.g. from a cross-process race window between pre-check and insert).
     // All other errors (CHECK violations, bad rule, etc.) are rethrown so they surface.
     try {
-      insertCandidateStmt.run({ id: crypto.randomUUID(), projectId, rule, rawJson: raw, dedupKey, ownerType, ownerId });
+      insertCandidateStmt.run({ id: crypto.randomUUID(), projectId: ownerProjectId, rule, rawJson: raw, dedupKey, ownerType, ownerId });
     } catch (err) {
       if (err && err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
         return getCandidateByOwnerDedupStmt.get(ownerType, ownerId, rule, dedupKey);
