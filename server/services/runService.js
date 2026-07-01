@@ -42,9 +42,10 @@ function derivePmProjectId(run) {
   const joinPid = run.project_id || null;
   let parsedPid = null;
   const cid = run.conversation_id;
-  if (run.manager_layer === 'pm' && typeof cid === 'string' && cid.startsWith('pm:')) {
-    const slice = cid.slice(3);
-    parsedPid = slice || null;
+  // dual-read (PM→Operator rename Phase 0): manager_layer 'pm' OR 'operator', conv id `pm:`/`operator:`.
+  if (isProjectLayer(run.manager_layer)) {
+    const parsedConv = parseProjectConversationId(cid);
+    parsedPid = parsedConv ? parsedConv.projectId : null;
   }
 
   // P2-4 diagnostic path: both present and disagreeing. The JOIN path is

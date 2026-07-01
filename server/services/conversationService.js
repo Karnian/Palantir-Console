@@ -37,6 +37,12 @@
 //   The "worker direct chat UI" in Phase 1.5 is therefore a thin wrapper
 //   over an existing backend — the NEW work is the parent notice router.
 
+const {
+  parseProjectConversationId,
+  isProjectConversationId,
+  isProjectLayer,
+} = require('../utils/conversationId'); // PM→Operator rename Phase 0: dual-read
+
 function createConversationService({
   runService,
   managerRegistry,
@@ -120,11 +126,10 @@ function createConversationService({
   function parseConversationId(id) {
     if (typeof id !== 'string' || id.length === 0) return null;
     if (id === 'top') return { kind: 'top' };
-    if (id.startsWith('pm:')) {
-      const projectId = id.slice(3);
-      if (!projectId) return null;
-      return { kind: 'pm', projectId };
-    }
+    // dual-read: accept legacy `pm:` AND new `operator:` (kind stays 'pm' so all
+    // downstream consumers of parseConversationId are unchanged in Phase 0).
+    const proj = parseProjectConversationId(id);
+    if (proj) return { kind: 'pm', projectId: proj.projectId };
     if (id.startsWith('worker:')) {
       const runId = id.slice(7);
       if (!runId) return null;
@@ -264,16 +269,17 @@ function createConversationService({
     // caller surfaces a visible error rather than silently poisoning the turn.
     // Worker sends (is_manager=0) go through sendToWorker(), never here.
     {
-      const expectedLayer = isTop ? 'top' : 'pm';
+      // dual-read: a project send matches EITHER manager_layer 'pm' or 'operator'.
+      const layerOk = isTop ? (run.manager_layer === 'top') : isProjectLayer(run.manager_layer);
       if (
         !run.is_manager ||
-        run.manager_layer !== expectedLayer ||
+        !layerOk ||
         run.conversation_id !== conversationId
       ) {
         const bindErr = new Error(
           `manager run binding mismatch: run.id=${run.id} run.conversation_id=${run.conversation_id} ` +
           `run.is_manager=${run.is_manager} run.manager_layer=${run.manager_layer} ` +
-          `expected conversationId=${conversationId} layer=${expectedLayer}`
+          `expected conversationId=${conversationId} layer=${isTop ? 'top' : 'pm|operator'}`
         );
         bindErr.httpStatus = 502;
         throw bindErr;
@@ -661,9 +667,9 @@ function createConversationService({
     } catch {
       return null;
     }
-    if (!parent || !parent.is_manager || parent.manager_layer !== 'pm') return null;
+    if (!parent || !parent.is_manager || !isProjectLayer(parent.manager_layer)) return null;
     const pmSlotKey = parent.conversation_id;
-    if (!pmSlotKey || !pmSlotKey.startsWith('pm:')) return null;
+    if (!isProjectConversationId(pmSlotKey)) return null;
     const activePmRunId = managerRegistry.getActiveRunId(pmSlotKey);
     if (activePmRunId && activePmRunId === parentRunId) return pmSlotKey;
     return null;

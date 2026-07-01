@@ -34,18 +34,27 @@ dual-read first, one Codex-validated phase per PR.**
 ## Phased plan (each = its own PR + Codex R2/R3)
 
 ### Phase 0 — helper + DUAL-READ (this PR; additive, behavior-preserving, NO persisted change)
-- Add a shared module (e.g. `utils/conversationId.js`): `conversationIdForProject(projectId)`
-  (returns `pm:` STILL — producers unchanged), `parseProjectConversationId(id)` (accepts BOTH
-  `pm:` and `operator:` → `{projectId}`), `OPERATOR_LAYER`/`LEGACY_PM_LAYER` constants, and an
-  `isProjectConversationId`/prefix set.
-- Route ALL consumers through dual-read: the 2 chokepoints + the 5 bypass sites accept BOTH
-  `pm:` and `operator:` (and manager_layer/slot_kind accept both `'pm'` and `'operator'`).
-- reconciliationService: change the EQUALITY to accept EITHER `pm:${id}` or `operator:${id}`.
-- Producers still emit `pm:` / `'pm'`. No migration. **Result: system understands `operator:`
-  everywhere but still writes `pm:` → 100% behavior-preserving; verifiable by asserting both
-  prefixes route/bind/parse identically.**
-- Tests: dual-read equivalence (pm: and operator: → same routing/binding/parse); existing
-  `pm:` tests stay green untouched.
+Add `utils/conversationId.js`: `conversationIdForProject(projectId)` (returns `pm:` STILL),
+`parseProjectConversationId(id)` (accepts BOTH `pm:`/`operator:` → `{projectId}` else null),
+`isProjectLayer(layer)` (`'pm'` OR `'operator'`), `OPERATOR_*`/`LEGACY_PM_*` constants + prefix set.
+Route **ALL** of these consumers through dual-read (Codex design review — the plan's original
+5-site count was undercounted; these are the verified complete set):
+- `conversationService.parseConversationId` (~120-134) — accept `pm:` and `operator:`  [chokepoint 1]
+- `routerService.isValidConversationId` + `VALID_TARGET_PREFIXES` (~47-54)               [chokepoint 2]
+- `reconciliationService` **:320 `manager_layer!=='pm'`** AND **:325-326 conv_id equality** — TWO
+  separate fail-closed checks; both accept operator form (else migrated PM's every claim 400s)
+- `conversationService.resolveParentSlot` :664 (`manager_layer!=='pm'` + `pmSlotKey.startsWith('pm:')`)
+- `runService.derivePmProjectId` :45 (`manager_layer==='pm'` + `startsWith('pm:')`/slice)
+- `managerRegistry.snapshot()` :172 (`key.startsWith('pm:')` → `pms[]`) — **restart does NOT fix;
+    after migration all keys are `operator:` → empty pms → /api/manager/status silently breaks**
+- `app.js onSlotCleared` :161 (`startsWith('pm:')` early-return) — else autoReviewCounts cleanup
+    skips `operator:` slots (memory leak / stale suppression)
+- `routes/manager.js` boot-resume **:114 `!=='pm'` AND :115 `==='pm'`** (layer split) **AND :172
+    `startsWith('pm:')`** (projectId extract) — else migrated PMs classified wrong + not resumed
+- `conversationService.js:267` `expectedLayer` + `runService.js:462` listRuns filter (accept both layer values)
+- Producers still emit `pm:`/`'pm'`. No migration. **Result: understands `operator:` everywhere,
+  still writes `pm:` → 100% behavior-preserving.** Tests: dual-read equivalence (both prefixes →
+  identical parse/route/bind/snapshot/resume); existing `pm:` tests stay green untouched.
 
 ### Phase 1 — enum CHECK relaxation + data migration (persisted flip)
 - Migration: relax CHECKs to include `'operator'` (table rebuilds for runs [mig 009+012 shape],
@@ -80,10 +89,33 @@ dual-read first, one Codex-validated phase per PR.**
 - Each phase `npm test` green + Codex R2/R3 GO before merge.
 - Additive/reversible until Phase 4.
 
-## For Codex design review
-- Is the dual-read-first ordering sufficient to prevent ALL silent breakage (esp. reconciliation
-  equality + boot-resume + registry Map)? Any consumer the footprint missed?
-- Phase 1 migration on a single-deploy system: is "Phase 0 merged+deployed, THEN Phase 1 migration"
-  safe, or must dual-read + migration ship together (same deploy) with the migration idempotent?
-- `pm_memory_injection` + column renames — worth the churn now, or leave internal names?
-- Smallest safe Phase 0 slice.
+## Codex design review outcome (2026-07-01) — REVISE applied
+- **Phase 0 bypass list corrected** above (reconciliation :320 + :325 as TWO checks; snapshot();
+  onSlotCleared; boot-resume :114/:115/:172; resolveParentSlot; expectedLayer; listRuns filter).
+- **Single-deploy rule (tightened)**: dual-read code MUST be in the SAME deploy as (or earlier
+  than) the data migration, migration idempotent. "Old code + migrated data = immediate breakage."
+  Phase 1 migration ships only after Phase 0 is fully complete + live.
+- **slot_kind ordering (Phase 1)**: relax CHECK → update code to query BOTH values → THEN migrate
+  data. Migrating slot_kind before the gate code reads both makes `shouldCompose` miss prior
+  accepted rows → unexpected recompose/reinjection. (Phase 0 already makes consumers read both.)
+- **runs rebuild (Phase 1)**: use the CURRENT full `runs` schema, NOT the mig-012 shape — later
+  migrations added mcp_config_path / mcp_config_snapshot / preset_id / preset_snapshot_hash /
+  queued_args / retry_count. Rebuilding from the stale shape drops columns.
+- **managerSystemPrompt `layer==='pm'` (6+ conditionals, Phase 2)**: flip ATOMICALLY with the
+  callers that pass `layer` — else PM-specific prompt sections silently vanish.
+- **pm_run_id prompt/envelope FIELD**: KEEP the name (transient; renaming desyncs live PM prompts).
+
+## SCOPE decision (Codex recommendation — narrow "full" to the wire-format + role name)
+Rename: the `pm:` **conversation-id wire-format**, the `manager_layer`/`slot_kind` **stored enums**,
+service **symbols/files** (pmSpawnService→operatorSpawnService …), **UI labels/copy**, **docs**, and
+the `pm:force_reset` **event** (dual-emit in Phase 3).
+LEAVE (internal, zero user/wire value; rename = migration/API-shape churn for no gain):
+- `pm_memory_injection` — **already dropped by migration 040** (nothing to rename).
+- columns `projects.pm_enabled` / `preferred_pm_adapter` / `project_briefs.pm_adapter` /
+  `pm_thread_id` (vendor thread) / `dispatch_audit.pm_run_id` — internal columns; renaming changes
+  the projects/audit API response shape + needs migration+service+validate+UI+tests for 0 gain.
+- role identifiers `skillPackService.callerType==='pm'` + `pinned_by CHECK('pm','user')` — a role
+  flag, not the conversation-id/layer; unrelated to the wire-format.
+*(User asked for "전면/full". This narrowing keeps everything user- or wire-visible as Operator
+while sparing pure-internal, API-shape-breaking column churn. Flagged for the user to override if
+they truly want the column renames too — that would be an extra Phase 3b of column migrations.)*

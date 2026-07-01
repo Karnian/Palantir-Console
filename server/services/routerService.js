@@ -44,12 +44,18 @@
 //     candidates?: [{projectId, name}],  // set on ambiguous
 //   }
 
-const VALID_TARGET_PREFIXES = ['top', 'pm:', 'worker:'];
+const {
+  isProjectConversationId,
+  conversationIdForProject,
+} = require('../utils/conversationId'); // PM→Operator rename Phase 0
+
+// dual-read (PM→Operator rename Phase 0): accept legacy `pm:` AND new `operator:`.
+const VALID_TARGET_PREFIXES = ['top', 'pm:', 'operator:', 'worker:'];
 
 function isValidConversationId(id) {
   if (typeof id !== 'string' || id.length === 0) return false;
   if (id === 'top') return true;
-  if (id.startsWith('pm:') && id.length > 3) return true;
+  if (isProjectConversationId(id)) return true; // pm:<id> or operator:<id>, non-empty
   if (id.startsWith('worker:') && id.length > 7) return true;
   return false;
 }
@@ -103,7 +109,7 @@ function createRouterService({ projectService, logger } = {}) {
       if (hit) {
         const rewritten = mention.rest.trim();
         return {
-          target: `pm:${hit.id}`,
+          target: conversationIdForProject(hit.id),
           text: rewritten.length > 0 ? rewritten : original, // keep body if strip leaves nothing
           matchedRule: '1_explicit',
         };
@@ -135,7 +141,7 @@ function createRouterService({ projectService, logger } = {}) {
       const hits = projects.filter(p => tokenSet.has(norm(p.name)));
       if (hits.length === 1) {
         return {
-          target: `pm:${hits[0].id}`,
+          target: conversationIdForProject(hits[0].id),
           text: original,
           matchedRule: '3_namematch',
         };
