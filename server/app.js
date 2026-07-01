@@ -59,6 +59,8 @@ const { createMemoryDistillService } = require('./services/memoryDistillService'
 const { createLiveDistiller } = require('./services/distillers/liveDistiller');
 const { createMemoryRouter } = require('./routes/memory');
 const { createOperatorSpecialistRouter } = require('./routes/operatorSpecialist');
+const { createOperatorProfilesRouter } = require('./routes/operatorProfiles');
+const { createOperatorProfileService } = require('./services/operatorProfileService');
 const { createMasterMemoryRouter } = require('./routes/masterMemory');
 // A2-3a: PM-slot composer+ledger cutover (flag-gated, default OFF)
 const { createMemoryComposer, buildWorkspaceAdapter, buildUserAdapter } = require('./services/memoryComposer');
@@ -700,6 +702,10 @@ function createApp(options = {}) {
   });
   const runService = createRunService(db, eventBus);
   const agentProfileService = createAgentProfileService(db);
+  // Operator Profile entity (PF-1): stored {name, persona, capabilities} bundle
+  // resolved by the specialist (PF-3). Plain config CRUD — always constructed +
+  // mounted (harmless without the specialist flag; only invocation is gated).
+  const operatorProfileService = createOperatorProfileService(db);
   const skillPackService = createSkillPackService(db);
   const registryService = createRegistryService();
   // M3: UI-driven mcp_server_templates CRUD. Constructed AFTER
@@ -962,6 +968,7 @@ function createApp(options = {}) {
   app.use('/api/dispatch-audit', createDispatchAuditRouter({ reconciliationService }));
   app.use('/api/router', createRouterRouter({ routerService }));
   app.use('/api/worker-presets', createWorkerPresetsRouter({ presetService }));
+  app.use('/api/operator/profiles', createOperatorProfilesRouter({ operatorProfileService }));
   app.use('/api/mcp-server-templates', createMcpTemplatesRouter({ mcpTemplateService }));
   app.use('/api/skill-packs', createSkillPacksRouter({ skillPackService, registryService }));
   app.use('/api/projects', createSkillPacksRouter.projectBindings({ skillPackService }));
@@ -1052,6 +1059,7 @@ function createApp(options = {}) {
     masterMemoryXprojectScanner,
     composerFailureCounter, // Phase 0b: compose()-returned-null counter (diagnostic seam)
     specialistService, // Operator P-B2c-2: null unless PALANTIR_OPERATOR_SPECIALIST=1 (unrouted)
+    operatorProfileService, // Operator Profile entity (PF-1)
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at
     // (createRun() always stamps status='queued' and cost_usd=0 at now).
