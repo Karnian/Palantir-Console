@@ -67,7 +67,7 @@ test('resolveSpawnCwd: helper is imported by call sites (import-graph sanity)', 
   // level without spinning up the full service factory.
   assert.doesNotThrow(() => require('../utils/spawnCwd'));
   assert.doesNotThrow(() => require('../services/streamJsonEngine'));
-  assert.doesNotThrow(() => require('../services/pmSpawnService'));
+  assert.doesNotThrow(() => require('../services/operatorSpawnService'));
   assert.doesNotThrow(() => require('../services/messageService'));
   assert.doesNotThrow(() => require('../services/managerAdapters/codexAdapter'));
   // lifecycleService and routes/manager require injectable dependencies; skip

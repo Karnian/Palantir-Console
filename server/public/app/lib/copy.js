@@ -34,7 +34,7 @@ export const RUN_STATUS_LABELS = {
   cancelled: '취소됨',
 };
 
-// Manager lifecycle (Top + PM).
+// Manager lifecycle (Top + Operator).
 export const MANAGER_STATUS_LABELS = {
   active: '활성',
   idle: '대기 중',
@@ -138,7 +138,7 @@ export const FILTER_LABELS = {
 export const MANAGER_LABELS = {
   startManager: '매니저 시작',
   stopTop: '매니저 중지',
-  resetPM: 'PM 리셋',
+  resetPM: '오퍼레이터 리셋',
   managerSession: '매니저 세션',
   taskSessions: '작업 세션',
   newTask: '새 작업',
@@ -389,9 +389,9 @@ export const PROJECTS_LABELS = {
   skillPackAddBtn: '추가',
   skillPackAuto: '자동',
   skillPackManual: '수동',
-  skillPackAutoToggleHint: 'auto_apply 활성화는 PM 리셋이 필요할 수 있습니다',
+  skillPackAutoToggleHint: 'auto_apply 활성화는 오퍼레이터 리셋이 필요할 수 있습니다',
   skillPackPriorityTitle: '우선순위',
-  skillPackPmActiveWarning: '⚠ PM이 활성 상태일 때 auto_apply 변경은 적용을 위해 PM 리셋이 필요할 수 있습니다.',
+  skillPackPmActiveWarning: '⚠ 오퍼레이터가 활성 상태일 때 auto_apply 변경은 적용을 위해 오퍼레이터 리셋이 필요할 수 있습니다.',
 };
 
 // AgentsView — list, AgentModal, AgentDetailModal. Agent type values

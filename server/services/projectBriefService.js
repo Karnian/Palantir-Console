@@ -80,7 +80,7 @@ function createProjectBriefService(db) {
 
   /**
    * Update brief content (conventions / known_pitfalls). Does NOT touch
-   * PM thread fields — those are managed by setPmThread / clearPmThread.
+   * Operator thread fields — those are managed by setPmThread / clearPmThread.
    */
   function updateBrief(projectId, fields) {
     ensureBrief(projectId);
@@ -101,7 +101,7 @@ function createProjectBriefService(db) {
   }
 
   /**
-   * Record a newly-created PM thread for this project. Called by the
+   * Record a newly-created Operator thread for this project. Called by the
    * lazy-creation path in the router (Phase 3a). Writes both pm_thread_id
    * and the actual adapter that owns that thread.
    */
@@ -116,7 +116,7 @@ function createProjectBriefService(db) {
   }
 
   /**
-   * Clear the PM thread reference. Called by pmCleanupService (Phase 3a)
+   * Clear the Operator thread reference. Called by operatorCleanupService (Phase 3a)
    * on disable / adapter switch / project delete / manual reset.
    * Idempotent.
    */

@@ -209,7 +209,7 @@ function createCodexAdapter({
       env: env || null, // PR4: filtered subprocess env from routes/manager.js
       role: role || 'manager', // v3 Phase 0: default to manager (tightened)
       // v3 Phase 3a: fires exactly once when thread.started arrives or on
-      // synthetic emission for resumes. pmSpawnService uses this to
+      // synthetic emission for resumes. operatorSpawnService uses this to
       // persist pm_thread_id into project_briefs.
       onThreadStarted: typeof onThreadStarted === 'function' ? onThreadStarted : null,
       threadStartedFired: false,
@@ -309,7 +309,7 @@ function createCodexAdapter({
     // arg parser treats everything after `-` as prompt input.
     //
     // Fail-closed on invalid input (per Codex M1 review): silently dropping
-    // the MCP block would let a PM run proceed without tools a preset
+    // the MCP block would let an Operator run proceed without tools a preset
     // declared required. Emit TURN_FAILED + SESSION_ENDED, mark the run
     // failed, and re-throw so runTurn returns { accepted: false } to its
     // caller (routes/manager.js).
@@ -318,7 +318,7 @@ function createCodexAdapter({
     // `http`-transport aliases (cfg.url present), the worker path runs a
     // HEAD-based preflight before flatten via `mcpPreflight.preflightHttpMcpConfig`
     // (lifecycleService.executeTask). The PM path here doesn't currently
-    // receive object-shaped mcpConfig (pmSpawnService passes the
+    // receive object-shaped mcpConfig (operatorSpawnService passes the
     // project.mcp_config_path string, which fails the isPlainObject guard
     // below), so preflight is a no-op in current production. If the PM
     // path is ever re-plumbed to read+parse that file into an object,
@@ -467,7 +467,7 @@ function createCodexAdapter({
           if (runService) runService.updateManagerThreadId(runId, state.threadId);
         } catch { /* ignore */ }
       }
-      // v3 Phase 3a: notify the PM spawn service exactly once so it can
+      // v3 Phase 3a: notify the Operator spawn service exactly once so it can
       // persist the fresh thread id into project_briefs.pm_thread_id.
       // Guarded by threadStartedFired so we don't double-fire on multiple
       // thread.started vendor emissions (codex has been known to re-emit

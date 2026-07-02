@@ -46,12 +46,12 @@ function createManagerRegistry({ runService }) {
     conversationId = canonicalConversationId(conversationId);
     // If a previous entry existed for this slot, treat the swap as a
     // clear for the OLD run id so listeners can scrub per-runId state
-    // before we overwrite. This covers PM slot rotation (new PM run
+    // before we overwrite. This covers Operator slot rotation (new Operator run
     // replaces an old one without anyone calling clearActive first).
     //
     // PR2 / P1-4: also dispose the previous adapter session. Prior to
     // this, a setActive() that implicitly replaced an earlier run (e.g.
-    // PM re-spawn through pmSpawnService) left the old subprocess + its
+    // Operator re-spawn through operatorSpawnService) left the old subprocess + its
     // working tmp dir behind. The registry is the only component that
     // actually sees the rotation, so disposal has to happen here.
     // Wrap in try/catch — dispose failure must NOT prevent the new run

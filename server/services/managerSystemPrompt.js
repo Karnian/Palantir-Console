@@ -314,7 +314,7 @@ Always query the actual Palantir API to get real data — never guess or assume.
  * omitted — pass it as the first user message via buildInitialUserContext().
  *
  * v3 Phase 2: accepts optional `layer` ('top' | 'operator', default 'top'). Operator layer
- * is used by PM/operator activation via pmSpawnService and the resume path in manager.js.
+ * is used by Operator activation via operatorSpawnService and the resume path in manager.js.
  * See docs/specs/manager-v3-multilayer.md principle 8.
  */
 function buildManagerSystemPrompt({ adapter, port, token, layer = 'top', adapterType, specialistAvailable = false }) {

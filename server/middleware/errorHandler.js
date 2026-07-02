@@ -11,8 +11,8 @@ function errorHandler(err, req, res, next) {
   }
 
   // PR3a / P1-8: recognize `.status` (Express / http-errors convention),
-  // `.httpStatus` (the repo-native convention — pmCleanupService,
-  // pmSpawnService, conversationService, reconciliationService all set it),
+  // `.httpStatus` (the repo-native convention — operatorCleanupService,
+  // operatorSpawnService, conversationService, reconciliationService all set it),
   // and `.statusCode` (fetch / node http errors). Precedence order matters:
   //   1) `.status`     — highest because Express uses it idiomatically
   //   2) `.httpStatus` — the repo convention; Codex R1 flagged that

@@ -1,11 +1,11 @@
-// server/services/pmSpawnService.js
+// server/services/operatorSpawnService.js
 //
 // v3 Phase 3a: lazy spawn + resume for project-scoped PM manager runs.
 // Spec §7 (PM Lazy 생성 모델) + §9.5 (Phase 3a 작업 목록).
 //
 // Contract:
 //
-//   ensureLivePm({ projectId, activeTopRun })
+//   ensureLiveOperator({ projectId, activeTopRun })
 //     → Returns the live PM run row for this project, spawning a fresh
 //       one if none is registered. Callers (conversationService) invoke
 //       this before `sendToManagerSlot('pm:<projectId>')` so the slot is
@@ -63,7 +63,7 @@ const { resolveSpawnCwd } = require('../utils/spawnCwd');
 const { conversationIdForProject } = require('../utils/conversationId'); // PM→Operator Phase 0 producer seam
 const { deriveLegacyContext, enforceWorkspace } = require('../utils/operatorContext');
 
-function createPmSpawnService({
+function createOperatorSpawnService({
   runService,
   managerRegistry,
   managerAdapterFactory,
@@ -79,7 +79,7 @@ function createPmSpawnService({
 
   // Resolve the adapter type to actually spawn for this project. Spec §7.2
   // fallback. 'claude' preference falls through to 'codex' until Phase 3b.
-  function resolvePmAdapterType(project) {
+  function resolveOperatorAdapterType(project) {
     const preferred = project && project.preferred_pm_adapter
       ? project.preferred_pm_adapter
       : null;
@@ -100,17 +100,17 @@ function createPmSpawnService({
   //
   // Putting the brief HERE (not in a seed runTurn) is the codex-R1 fix
   // for the "previous turn still running" race: we must not call
-  // adapter.runTurn from pmSpawnService because the caller
+  // adapter.runTurn from operatorSpawnService because the caller
   // (conversationService.sendToManagerSlot) is about to call runTurn
   // with the user's actual message. Two back-to-back turns on the same
   // Codex run id hit the single-turn guard at codexAdapter:spawnOneTurn.
-  function buildProjectScopedSystemSection({ project, brief, pmRunId }) {
+  function buildProjectScopedSystemSection({ project, brief, operatorRunId }) {
     const sections = [];
-    // Include pmRunId so the PM can self-identify when calling
+    // Include operatorRunId so the PM can self-identify when calling
     // /api/dispatch-audit (codex R3 blocker: the audit route requires
     // pm_run_id for staleness attribution but the PM previously had no
     // way to obtain its own run id).
-    sections.push(`## Project Scope\nname: ${project.name}\nid: ${project.id}${project.directory ? `\ndirectory: ${project.directory}` : ''}${pmRunId ? `\npm_run_id: ${pmRunId}` : ''}`);
+    sections.push(`## Project Scope\nname: ${project.name}\nid: ${project.id}${project.directory ? `\ndirectory: ${project.directory}` : ''}${operatorRunId ? `\npm_run_id: ${operatorRunId}` : ''}`);
     if (brief && brief.conventions) {
       sections.push(`## Project Conventions\n${brief.conventions}`);
     }
@@ -141,7 +141,7 @@ function createPmSpawnService({
   // fresh run was created in this call, `resumed` is true iff we passed
   // a persisted thread id to the adapter (i.e. reused an existing Codex
   // vendor thread).
-  function ensureLivePm({ projectId, seedText }) {
+  function ensureLiveOperator({ projectId, seedText }) {
     if (!projectId) {
       const err = new Error('projectId is required');
       err.httpStatus = 400;
@@ -180,7 +180,7 @@ function createPmSpawnService({
       throw err;
     }
 
-    const adapterType = resolvePmAdapterType(project);
+    const adapterType = resolveOperatorAdapterType(project);
     const adapter = managerAdapterFactory.getAdapter(adapterType);
 
     // Resolve env_allowlist and mcp_tools from the agent profile of the same
@@ -252,7 +252,7 @@ function createPmSpawnService({
     const port = process.env.PORT || 4177;
     const token = process.env.PALANTIR_TOKEN;
     const baseSystemPrompt = buildManagerSystemPrompt({ adapter, port, token, layer: 'operator', adapterType, specialistAvailable: isSpecialistAvailable() });
-    const projectSection = buildProjectScopedSystemSection({ project, brief, pmRunId: runId });
+    const projectSection = buildProjectScopedSystemSection({ project, brief, operatorRunId: runId });
     const systemPrompt = [baseSystemPrompt, projectSection].filter(Boolean).join('\n\n');
 
     // Hook that persists a freshly captured thread id into the brief AND
@@ -306,7 +306,7 @@ function createPmSpawnService({
     // Spawn. Codex is stateless, so startSession writes the instructions
     // file and records metadata; the first actual `codex exec` runs on
     // the first runTurn call — which is the user's own message, made by
-    // conversationService.sendToManagerSlot right after ensureLivePm
+    // conversationService.sendToManagerSlot right after ensureLiveOperator
     // returns. No seed runTurn is issued here (codex R1 finding #1: a
     // seed would race with the user send against codexAdapter's
     // single-turn guard).
@@ -359,7 +359,7 @@ function createPmSpawnService({
     return { run: registered, spawned: true, resumed: !!resumeThreadId };
   }
 
-  return { ensureLivePm, resolvePmAdapterType };
+  return { ensureLiveOperator, resolveOperatorAdapterType };
 }
 
-module.exports = { createPmSpawnService };
+module.exports = { createOperatorSpawnService };

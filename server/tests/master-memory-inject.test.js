@@ -14,7 +14,7 @@ const { createProjectService } = require('../services/projectService');
 const { createProjectBriefService } = require('../services/projectBriefService');
 const { createManagerRegistry } = require('../services/managerRegistry');
 const { createConversationService } = require('../services/conversationService');
-const { createPmSpawnService } = require('../services/pmSpawnService');
+const { createOperatorSpawnService } = require('../services/operatorSpawnService');
 const { createMemoryService } = require('../services/memoryService');
 const { createMasterMemoryService } = require('../services/masterMemoryService');
 const { createCompositionLedger } = require('../services/compositionLedger');
@@ -80,13 +80,13 @@ function wireStack(db, { withMaster = true } = {}) {
     });
     const topAdapter = makeFakeCodexAdapter();
   const fakePm = makeFakeCodexAdapter();
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs, managerRegistry: registry, managerAdapterFactory: wireFactory(fakePm),
     projectService, projectBriefService, authResolverOpts: { hasKeychain: true },
   });
   const conv = createConversationService({
       runService: rs, managerRegistry: registry, managerAdapterFactory: wireFactory(topAdapter),
-      lifecycleService: { sendAgentInput: () => true }, pmSpawnService: spawn,
+      lifecycleService: { sendAgentInput: () => true }, operatorSpawnService: spawn,
       memoryService, masterMemoryService: withMaster ? masterMemoryService : undefined,
       memoryComposer, compositionLedger,
     });

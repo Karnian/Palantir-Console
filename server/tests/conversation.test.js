@@ -759,7 +759,7 @@ test('Phase 2: PM send drain is NOT committed when adapter rejects', async (t) =
 
 test('Phase 2: POST /api/manager/pm/:projectId/message returns 404 when project missing', async (t) => {
   // v3 Phase 3a delta: conversationService now delegates PM misses to
-  // pmSpawnService (lazy spawn). When the project itself doesn't exist,
+  // operatorSpawnService (lazy spawn). When the project itself doesn't exist,
   // the spawn service throws with httpStatus=404 and the error message
   // changes shape accordingly. The original Phase 2 expectation (no PM
   // → 404) still holds — just the error text moved from the registry

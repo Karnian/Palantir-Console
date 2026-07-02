@@ -5,7 +5,7 @@
  * (managers, PMs, workers, opencode sessions).
  *
  * This is the SINGLE source of truth for spawn-cwd resolution. All spawn
- * paths (streamJsonEngine, lifecycleService worker exec, pmSpawnService,
+ * paths (streamJsonEngine, lifecycleService worker exec, operatorSpawnService,
  * codexAdapter, routes/manager boot resume + manager start, messageService
  * → opencode) MUST route through here so that the no-dir policy is defined
  * in exactly one place.
@@ -15,7 +15,7 @@
  *   no project_id, or projects whose `directory` is null) are an allowed,
  *   pre-existing mode — they spawn in the SERVER cwd (process.cwd()). This
  *   matches the historical fallback (e.g. lifecycleService worker exec and
- *   pmSpawnService both did `project.directory || process.cwd()`), which the
+ *   operatorSpawnService both did `project.directory || process.cwd()`), which the
  *   existing test suite treats as correct behavior. Do NOT change this.
  *
  * Folder-less fail-closed hook (P-A0, structure only — NOT wired yet):

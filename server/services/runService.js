@@ -33,19 +33,19 @@ const VALID_TRANSITIONS = {
 // P2-4: both sources of truth (the JOIN path via task_id → project_id
 // and the parsed conversation_id 'pm:<id>') can theoretically disagree
 // if a run was created with a mismatched conversation_id and task — a
-// bug that was silent before because derivePmProjectId simply preferred
+// bug that was silent before because deriveOperatorProjectId simply preferred
 // the JOIN path without complaint. This function now logs a warn via
 // the optional logger when both are present and disagree, and via the
 // optional diagnostics callback records it on the run event stream.
 // Pure-ish: emits side effects only when a logger / diagnostics hook is
 // provided. Behavior (return value) is unchanged.
-let _derivePmProjectIdDiagnostics = null;
+let _deriveOperatorProjectIdDiagnostics = null;
 
-function setDerivePmProjectIdDiagnostics(fn) {
-  _derivePmProjectIdDiagnostics = typeof fn === 'function' ? fn : null;
+function setDeriveOperatorProjectIdDiagnostics(fn) {
+  _deriveOperatorProjectIdDiagnostics = typeof fn === 'function' ? fn : null;
 }
 
-function derivePmProjectId(run) {
+function deriveOperatorProjectId(run) {
   if (!run) return null;
   const joinPid = run.project_id || null;
   let parsedPid = null;
@@ -61,15 +61,15 @@ function derivePmProjectId(run) {
   // the DB), so we still return joinPid, but we shout about the drift.
   if (joinPid && parsedPid && joinPid !== parsedPid) {
     try {
-      if (_derivePmProjectIdDiagnostics) {
-        _derivePmProjectIdDiagnostics({
+      if (_deriveOperatorProjectIdDiagnostics) {
+        _deriveOperatorProjectIdDiagnostics({
           runId: run.id,
           joinPid,
           parsedPid,
           conversationId: cid,
         });
       } else {
-        console.warn(`[runService] derivePmProjectId mismatch run=${run.id} joinPid=${joinPid} parsedPid=${parsedPid} cid=${cid}`);
+        console.warn(`[runService] deriveOperatorProjectId mismatch run=${run.id} joinPid=${joinPid} parsedPid=${parsedPid} cid=${cid}`);
       }
     } catch { /* ignore diagnostic failures */ }
   }
@@ -271,7 +271,7 @@ function createRunService(db, eventBus) {
         to_status: run.status,
         reason: 'created',
         task_id: run.task_id || null,
-        project_id: derivePmProjectId(run),
+        project_id: deriveOperatorProjectId(run),
       });
     }
     return run;
@@ -328,7 +328,7 @@ function createRunService(db, eventBus) {
         to_status: status,
         reason: reason || null,
         task_id: run.task_id || null,
-        project_id: derivePmProjectId(run),
+        project_id: deriveOperatorProjectId(run),
       });
     }
 
@@ -340,7 +340,7 @@ function createRunService(db, eventBus) {
         to_status: status,
         reason: reason || null,
         task_id: run.task_id || null,
-        project_id: derivePmProjectId(run),
+        project_id: deriveOperatorProjectId(run),
       });
     }
 
@@ -364,7 +364,7 @@ function createRunService(db, eventBus) {
         to_status: 'running',
         reason: 'started',
         task_id: run.task_id || null,
-        project_id: derivePmProjectId(run),
+        project_id: deriveOperatorProjectId(run),
       });
     }
     return run;
@@ -397,7 +397,7 @@ function createRunService(db, eventBus) {
         to_status: 'running',
         reason: 'queue:claim',
         task_id: run.task_id || null,
-        project_id: derivePmProjectId(run),
+        project_id: deriveOperatorProjectId(run),
       });
     }
     return info.changes;
@@ -434,14 +434,14 @@ function createRunService(db, eventBus) {
     return stmts.getEvents.all(runId);
   }
 
-  // P3-6: connect derivePmProjectId diagnostic to eventBus.
+  // P3-6: connect deriveOperatorProjectId diagnostic to eventBus.
   // Registered here (after addRunEvent is defined) so the callback can both
   // emit to the bus and persist to run_events in one place. Belt-and-suspenders:
   // console.warn is kept so the mismatch is always visible in server logs even
   // if the eventBus is absent. Both side effects are wrapped in try/catch so a
   // diagnostic failure never breaks the caller.
-  setDerivePmProjectIdDiagnostics(({ runId, joinPid, parsedPid, conversationId }) => {
-    console.warn(`[runService] derivePmProjectId mismatch run=${runId} joinPid=${joinPid} parsedPid=${parsedPid} cid=${conversationId}`);
+  setDeriveOperatorProjectIdDiagnostics(({ runId, joinPid, parsedPid, conversationId }) => {
+    console.warn(`[runService] deriveOperatorProjectId mismatch run=${runId} joinPid=${joinPid} parsedPid=${parsedPid} cid=${conversationId}`);
     if (eventBus) {
       try {
         eventBus.emit('diagnostic:pm_project_mismatch', {
@@ -559,6 +559,6 @@ function createRunService(db, eventBus) {
 
 module.exports = {
   createRunService,
-  derivePmProjectId,
-  setDerivePmProjectIdDiagnostics,
+  deriveOperatorProjectId,
+  setDeriveOperatorProjectIdDiagnostics,
 };
