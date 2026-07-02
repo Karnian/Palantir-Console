@@ -191,15 +191,26 @@ function createRemoteSshNodeExecutor(node, {
   let canonicalRootsPromise = null;
 
   function sshArgsFor(script) {
+    // ssh JOINS every post-destination arg with spaces and hands the single
+    // resulting string to the remote login shell (`$SHELL -c "<joined>"`).
+    // Passing `sh`,`-c`,`script` as three separate argv elements therefore
+    // becomes `sh -c <script>` on the remote, where `sh -c` captures only the
+    // FIRST token of <script> as its program and the rest become $0/$1…
+    // Found via the real-pod spike: `exec 'echo' 'ok'` ran as `sh -c exec`
+    // (a no-op) → exit 0 with EMPTY stdout, and the exposed_roots realpath
+    // guard silently returned empty too (security-critical). Fix: send the
+    // whole `sh -c '<script>'` as ONE argument so ssh forwards it intact; the
+    // remote login shell runs it via its own -c, and the inner `sh -c` then
+    // receives the real script. shq() keeps the single-quoted <script> whole
+    // across that one extra shell hop. `--` guards the (already-validated)
+    // destination against option-smuggling.
     return [
       '-o', 'BatchMode=yes',
       '-o', `ConnectTimeout=${connectTimeoutSeconds}`,
       '-o', 'StrictHostKeyChecking=accept-new',
-      `${node.ssh_user}@${node.ssh_host}`,
       '--',
-      'sh',
-      '-c',
-      script,
+      `${node.ssh_user}@${node.ssh_host}`,
+      `sh -c ${shq(script)}`,
     ];
   }
 
