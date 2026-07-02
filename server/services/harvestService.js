@@ -322,14 +322,21 @@ function createHarvestService({
     return { project: null, projectDir: projectDir || null };
   }
 
-  function listCommits(projectDir, base, branch) {
+  async function listCommits(projectDir, base, branch) {
     const gitEnv = { ...process.env, GIT_EXTERNAL_DIFF: '', GIT_TEXTCONV_DIFF: '' };
-    const output = nodeExecutor.execFileSync(
+    const res = await nodeExecutor.exec(
       'git',
       ['log', '--no-color', '--oneline', `--max-count=${MAX_COMMITS + 1}`, `${base}..${branch}`],
-      { cwd: projectDir, stdio: 'pipe', encoding: 'utf-8', env: gitEnv },
+      { cwd: projectDir, env: gitEnv },
     );
-    const lines = output.trim().split('\n').filter(Boolean);
+    if (res.code !== 0) {
+      const err = new Error(res.stderr || res.stdout || `git log failed with code ${res.code}`);
+      err.code = res.code;
+      err.stdout = res.stdout;
+      err.stderr = res.stderr;
+      throw err;
+    }
+    const lines = res.stdout.trim().split('\n').filter(Boolean);
     return {
       commits: lines.slice(0, MAX_COMMITS),
       truncated: lines.length > MAX_COMMITS,
@@ -352,7 +359,7 @@ function createHarvestService({
       // Worktree already gone (e.g. executeTask's spawn-failure catch runs its
       // synchronous cleanup before this setImmediate fires). Review still needs
       // one terminal notification, but harvest itself cannot proceed.
-      if (!nodeExecutor.existsSync(run.worktree_path)) {
+      if (!await nodeExecutor.fileExists(run.worktree_path)) {
         pushSummaryError(summary, 'worktree_missing');
         emitHarvested(run, summary);
         return;
@@ -368,14 +375,14 @@ function createHarvestService({
 
       summary.harvested = true;
       try {
-        worktreeService.autoSaveWorktree(run.worktree_path, run.id);
+        await worktreeService.autoSaveWorktree(run.worktree_path, run.id);
       } catch (err) {
         addError(run.id, 'autosave', err);
         pushSummaryError(summary, 'autosave');
       }
 
       try {
-        const diff = worktreeService.getWorktreeDiff(resolvedProjectDir, run.branch);
+        const diff = await worktreeService.getWorktreeDiff(resolvedProjectDir, run.branch);
         const base = diff.base || 'HEAD';
         let truncated = false;
         const cappedStat = capString(diff.stat || '', MAX_STAT_CHARS);
@@ -386,7 +393,7 @@ function createHarvestService({
         summary.statText = capString(diff.stat || '', MAX_SUMMARY_STAT_CHARS).value;
         let commits = [];
         try {
-          const commitResult = listCommits(resolvedProjectDir, base, run.branch);
+          const commitResult = await listCommits(resolvedProjectDir, base, run.branch);
           commits = commitResult.commits;
           truncated = truncated || commitResult.truncated;
           summary.commits = commits.length;
@@ -439,7 +446,7 @@ function createHarvestService({
       }
 
       try {
-        worktreeService.removeWorktree(resolvedProjectDir, run.worktree_path, run.branch, {
+        await worktreeService.removeWorktree(resolvedProjectDir, run.worktree_path, run.branch, {
           runId: run.id,
           autosave: false,
         });

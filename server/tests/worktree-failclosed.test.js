@@ -145,30 +145,31 @@ function parsePayload(evt) {
 
 function fakeClassifyExecutor(mode, seenOpts = []) {
   return {
-    execFileSync(_command, args, opts) {
+    async exec(_command, args, opts) {
       if (args[0] === 'rev-parse' && args[1] === '--git-dir') {
         seenOpts.push(opts);
-        if (mode === 'git') return '.git\n';
+        if (mode === 'git') return { code: 0, stdout: '.git\n', stderr: '' };
         if (mode === 'non_git') {
-          const err = new Error('fatal: not a git repository');
-          err.status = 128;
-          err.stderr = 'fatal: not a git repository (or any of the parent directories): .git';
-          throw err;
+          return {
+            code: 128,
+            stdout: '',
+            stderr: 'fatal: not a git repository (or any of the parent directories): .git',
+          };
         }
         const err = new Error('spawn git ENOENT');
         err.code = 'ENOENT';
         throw err;
       }
-      return '';
+      return { code: 0, stdout: '', stderr: '' };
     },
   };
 }
 
-test('classifyProjectDir reports git, non_git, and unknown via injected nodeExecutor', () => {
+test('classifyProjectDir reports git, non_git, and unknown via injected nodeExecutor', async () => {
   const seenOpts = [];
-  assert.equal(createWorktreeService({ nodeExecutor: fakeClassifyExecutor('git', seenOpts) }).classifyProjectDir('/repo'), 'git');
-  assert.equal(createWorktreeService({ nodeExecutor: fakeClassifyExecutor('non_git', seenOpts) }).classifyProjectDir('/plain'), 'non_git');
-  assert.equal(createWorktreeService({ nodeExecutor: fakeClassifyExecutor('unknown', seenOpts) }).classifyProjectDir('/repo'), 'unknown');
+  assert.equal(await createWorktreeService({ nodeExecutor: fakeClassifyExecutor('git', seenOpts) }).classifyProjectDir('/repo'), 'git');
+  assert.equal(await createWorktreeService({ nodeExecutor: fakeClassifyExecutor('non_git', seenOpts) }).classifyProjectDir('/plain'), 'non_git');
+  assert.equal(await createWorktreeService({ nodeExecutor: fakeClassifyExecutor('unknown', seenOpts) }).classifyProjectDir('/repo'), 'unknown');
   // Lock the locale override: stderr matching breaks on non-English git
   // (found live on this ko_KR host) — every classify exec must force C locale.
   assert.equal(seenOpts.length, 3);
@@ -187,33 +188,33 @@ test('classifyProjectDir classifies real git and real non-git directories', asyn
   execFileSync('git', ['init', '-b', 'main'], { cwd: repoDir, stdio: 'pipe' });
 
   const ws = createWorktreeService();
-  assert.equal(ws.classifyProjectDir(repoDir), 'git');
-  assert.equal(ws.classifyProjectDir(plainDir), 'non_git');
+  assert.equal(await ws.classifyProjectDir(repoDir), 'git');
+  assert.equal(await ws.classifyProjectDir(plainDir), 'non_git');
 });
 
-test('createWorktree throws on non-git directories', () => {
+test('createWorktree throws on non-git directories', async () => {
   const ws = createWorktreeService({ nodeExecutor: fakeClassifyExecutor('non_git') });
-  assert.throws(() => ws.createWorktree('/plain', 'palantir/non-git'), /non_git project directory/);
+  await assert.rejects(() => ws.createWorktree('/plain', 'palantir/non-git'), /non_git project directory/);
 });
 
-test('createWorktree throws on worktree add failure and attempts branch rollback', () => {
+test('createWorktree throws on worktree add failure and attempts branch rollback', async () => {
   const calls = [];
   const fake = {
-    execFileSync(_command, args) {
+    async exec(_command, args) {
       calls.push(args);
-      if (args[0] === 'rev-parse' && args[1] === '--git-dir') return '.git\n';
-      if (args[0] === 'branch' && args[1] === '--show-current') return 'main\n';
-      if (args[0] === 'branch' && args[1] === 'palantir/add-fail') return '';
-      if (args[0] === 'worktree' && args[1] === 'add') throw new Error('add failed');
-      if (args[0] === 'branch' && args[1] === '-D') return '';
-      return '';
+      if (args[0] === 'rev-parse' && args[1] === '--git-dir') return { code: 0, stdout: '.git\n', stderr: '' };
+      if (args[0] === 'branch' && args[1] === '--show-current') return { code: 0, stdout: 'main\n', stderr: '' };
+      if (args[0] === 'branch' && args[1] === 'palantir/add-fail') return { code: 0, stdout: '', stderr: '' };
+      if (args[0] === 'worktree' && args[1] === 'add') return { code: 1, stdout: '', stderr: 'add failed' };
+      if (args[0] === 'branch' && args[1] === '-D') return { code: 0, stdout: '', stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
     },
-    existsSync() { return false; },
-    mkdirSync() {},
+    async fileExists() { return false; },
+    async mkdir() {},
   };
   const ws = createWorktreeService({ nodeExecutor: fake });
 
-  assert.throws(() => ws.createWorktree('/repo', 'palantir/add-fail'), /add failed/);
+  await assert.rejects(() => ws.createWorktree('/repo', 'palantir/add-fail'), /add failed/);
   assert.ok(calls.some((args) => args[0] === 'branch' && args[1] === '-D' && args[2] === 'palantir/add-fail'));
 });
 

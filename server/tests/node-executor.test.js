@@ -1,6 +1,5 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const childProcess = require('node:child_process');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
@@ -39,39 +38,33 @@ test('LocalNodeExecutor.exec rejects missing binary as spawn-level failure', asy
   );
 });
 
-test('LocalNodeExecutor.execFileSync delegates success return semantics', () => {
+test('LocalNodeExecutor.exec passes maxBuffer through for successful output', async () => {
   const executor = createLocalNodeExecutor();
-  const args = ['-e', 'process.stdout.write("sync-ok")'];
-  const opts = { encoding: 'utf-8', stdio: 'pipe' };
-
-  assert.equal(
-    executor.execFileSync(process.execPath, args, opts),
-    childProcess.execFileSync(process.execPath, args, opts),
+  const result = await executor.exec(
+    process.execPath,
+    ['-e', 'process.stdout.write("x".repeat(4096))'],
+    { maxBuffer: 8192 },
   );
+
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout.length, 4096);
+  assert.equal(result.stderr, '');
 });
 
-test('LocalNodeExecutor.execFileSync delegates nonzero error shape', () => {
+test('LocalNodeExecutor.exec rejects maxBuffer overflow with partial stdout attached', async () => {
   const executor = createLocalNodeExecutor();
-  const args = ['-e', 'process.exit(9)'];
-  const opts = { encoding: 'utf-8' };
-  let nativeErr;
-  let executorErr;
 
-  try {
-    childProcess.execFileSync(process.execPath, args, opts);
-  } catch (err) {
-    nativeErr = err;
-  }
-  try {
-    executor.execFileSync(process.execPath, args, opts);
-  } catch (err) {
-    executorErr = err;
-  }
-
-  assert.equal(executorErr.status, nativeErr.status);
-  assert.equal(executorErr.stderr, nativeErr.stderr);
-  assert.ok(Object.prototype.hasOwnProperty.call(executorErr, 'status'));
-  assert.ok(Object.prototype.hasOwnProperty.call(executorErr, 'stderr'));
+  await assert.rejects(
+    () => executor.exec(
+      process.execPath,
+      ['-e', 'process.stdout.write("x".repeat(1024 * 1024))'],
+      { maxBuffer: 1024 },
+    ),
+    (err) => err?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+      && typeof err.stdout === 'string'
+      && err.stdout.length > 0
+      && typeof err.stderr === 'string',
+  );
 });
 
 test('LocalNodeExecutor async fs operations round-trip in a tmpdir', async (t) => {
@@ -82,13 +75,16 @@ test('LocalNodeExecutor async fs operations round-trip in a tmpdir', async (t) =
   });
 
   const regular = path.join(root, 'regular.txt');
+  const nested = path.join(root, 'nested');
   await fsp.writeFile(regular, 'regular');
+  await executor.mkdir(nested, { recursive: true });
 
   assert.equal(await executor.fileExists(regular), true);
   assert.equal(await executor.fileExists(path.join(root, 'missing.txt')), false);
   assert.equal(await executor.realpath(root), fs.realpathSync(root));
+  assert.equal((await executor.stat(nested)).isDirectory(), true);
   assert.equal(await executor.readFile(regular), 'regular');
-  assert.deepEqual((await executor.readdir(root)).sort(), ['regular.txt']);
+  assert.deepEqual((await executor.readdir(root)).sort(), ['nested', 'regular.txt']);
 
   const tempFile = await executor.writeTempFile(path.join(root, 'tmp-'), 'secret.txt', 'secret', 0o600);
   assert.equal(await executor.readFile(tempFile), 'secret');
@@ -98,29 +94,29 @@ test('LocalNodeExecutor async fs operations round-trip in a tmpdir', async (t) =
   assert.equal(await executor.fileExists(tempFile), false);
 });
 
-test('createWorktreeService routes git calls through injected executor', () => {
+test('createWorktreeService routes git calls through injected executor', async () => {
   const calls = [];
   const fake = {
-    execFileSync(command, args, opts) {
-      calls.push({ type: 'execFileSync', command, args, cwd: opts?.cwd });
-      if (args[0] === 'rev-parse' && args[1] === '--git-dir') return '.git\n';
-      if (args[0] === 'branch' && args[1] === '--show-current') return 'main\n';
-      return '';
+    async exec(command, args, opts) {
+      calls.push({ type: 'exec', command, args, cwd: opts?.cwd });
+      if (args[0] === 'rev-parse' && args[1] === '--git-dir') return { code: 0, stdout: '.git\n', stderr: '' };
+      if (args[0] === 'branch' && args[1] === '--show-current') return { code: 0, stdout: 'main\n', stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
     },
-    existsSync(p) {
-      calls.push({ type: 'existsSync', path: p });
+    async fileExists(p) {
+      calls.push({ type: 'fileExists', path: p });
       return false;
     },
-    mkdirSync(p, opts) {
-      calls.push({ type: 'mkdirSync', path: p, opts });
+    async mkdir(p, opts) {
+      calls.push({ type: 'mkdir', path: p, opts });
     },
   };
   const service = createWorktreeService({ nodeExecutor: fake });
-  const result = service.createWorktree('/repo', 'palantir/test');
+  const result = await service.createWorktree('/repo', 'palantir/test');
 
   assert.equal(result.created, true);
   assert.deepEqual(
-    calls.filter((call) => call.type === 'execFileSync').map((call) => call.args),
+    calls.filter((call) => call.type === 'exec').map((call) => call.args),
     [
       ['rev-parse', '--git-dir'],
       ['branch', '--show-current'],
@@ -128,7 +124,7 @@ test('createWorktreeService routes git calls through injected executor', () => {
       ['worktree', 'add', path.join('/repo', '.palantir-worktrees', 'palantir/test'), 'palantir/test'],
     ],
   );
-  assert.ok(calls.some((call) => call.type === 'mkdirSync'));
+  assert.ok(calls.some((call) => call.type === 'mkdir'));
 });
 
 test('LocalNodeExecutor.exec rejects timeout kills instead of faking an exit code', async () => {
@@ -151,7 +147,7 @@ test('createHarvestService routes worktree existence through injected executor',
   const { createHarvestService } = require('../services/harvestService');
   const calls = [];
   const events = [];
-  const fake = { existsSync(p) { calls.push(p); return false; } };
+  const fake = { async fileExists(p) { calls.push(p); return false; } };
   const run = { id: 'rh1', is_manager: 0, status: 'completed', worktree_path: '/gone', branch: 'palantir/run-rh1' };
   const harvest = createHarvestService({
     runService: { getRunEvents: () => [], addRunEvent() {}, getRun: () => run },
@@ -175,7 +171,7 @@ test('runs diff route consults injected executor for worktree existence', async 
   const request = require('supertest');
   const { createRunsRouter } = require('../routes/runs');
   const calls = [];
-  const fake = { existsSync(p) { calls.push(p); return false; }, realpathSync(p) { return p; } };
+  const fake = { async fileExists(p) { calls.push(p); return false; }, async realpath(p) { return p; } };
   const app = express();
   app.use('/api/runs', createRunsRouter({
     runService: { getRun: () => ({ id: 'r1', worktree_path: '/nope' }) },

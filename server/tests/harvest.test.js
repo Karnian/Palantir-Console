@@ -127,7 +127,7 @@ function makeServices(
   return { runService, taskService, projectService, agentProfileService, worktreeService, harvestService };
 }
 
-function createRunInWorktree({ db, runService, taskService, projectService, worktreeService, repoDir, testCommand = null }) {
+async function createRunInWorktree({ db, runService, taskService, projectService, worktreeService, repoDir, testCommand = null }) {
   const project = projectService.createProject({
     name: 'Harvest Project',
     directory: repoDir,
@@ -141,7 +141,7 @@ function createRunInWorktree({ db, runService, taskService, projectService, work
     prompt: 'do work',
   });
   const branchName = `palantir/${queued.id.replace(/_/g, '-')}`;
-  const wt = worktreeService.createWorktree(repoDir, branchName);
+  const wt = await worktreeService.createWorktree(repoDir, branchName);
   const running = runService.markRunStarted(queued.id, {
     tmux_session: `session-${queued.id}`,
     worktree_path: wt.path,
@@ -165,7 +165,7 @@ function createRunWithoutWorktree({ db, runService, taskService, projectService,
   return { project, task, profile, run };
 }
 
-function createRunWithMissingProjectDir({ db, runService, taskService, projectService, worktreeService, repoDir }) {
+async function createRunWithMissingProjectDir({ db, runService, taskService, projectService, worktreeService, repoDir }) {
   const project = projectService.createProject({
     name: 'Missing Directory Project',
     directory: null,
@@ -178,7 +178,7 @@ function createRunWithMissingProjectDir({ db, runService, taskService, projectSe
     prompt: 'do work',
   });
   const branchName = `palantir/${queued.id.replace(/_/g, '-')}`;
-  const wt = worktreeService.createWorktree(repoDir, branchName);
+  const wt = await worktreeService.createWorktree(repoDir, branchName);
   const running = runService.markRunStarted(queued.id, {
     tmux_session: `session-${queued.id}`,
     worktree_path: wt.path,
@@ -515,7 +515,7 @@ test('harvestRun emits run:harvested once with diff and test summary for complet
   const eventBus = createEventBus();
   const harvestEvents = collectChannel(eventBus, 'run:harvested');
   const services = makeServices(db, { eventBus });
-  const { run, worktreePath } = createRunInWorktree({
+  const { run, worktreePath } = await createRunInWorktree({
     db,
     repoDir,
     testCommand: 'pass',
@@ -574,7 +574,7 @@ test('harvestRun emits harvested=false once when projectDir cannot be resolved',
   const eventBus = createEventBus();
   const harvestEvents = collectChannel(eventBus, 'run:harvested');
   const services = makeServices(db, { eventBus });
-  const { run, worktreePath } = createRunWithMissingProjectDir({ db, repoDir, ...services });
+  const { run, worktreePath } = await createRunWithMissingProjectDir({ db, repoDir, ...services });
   fs.writeFileSync(path.join(worktreePath, 'agent-output.txt'), 'agent work\n');
   const completed = services.runService.updateRunStatus(run.id, 'completed', { force: true });
 
@@ -595,7 +595,7 @@ test('harvestRun emits harvested=false once when worktree path is already gone',
   const eventBus = createEventBus();
   const harvestEvents = collectChannel(eventBus, 'run:harvested');
   const services = makeServices(db, { eventBus });
-  const { run, worktreePath } = createRunInWorktree({ db, repoDir, ...services });
+  const { run, worktreePath } = await createRunInWorktree({ db, repoDir, ...services });
   fs.rmSync(worktreePath, { recursive: true, force: true });
   const completed = services.runService.updateRunStatus(run.id, 'completed', { force: true });
 
@@ -613,7 +613,7 @@ test('harvestRun emits run:harvested once for failed worktree runs without runni
   const eventBus = createEventBus();
   const harvestEvents = collectChannel(eventBus, 'run:harvested');
   const services = makeServices(db, { eventBus });
-  const { run, worktreePath } = createRunInWorktree({
+  const { run, worktreePath } = await createRunInWorktree({
     db,
     repoDir,
     testCommand: 'fail',
@@ -638,15 +638,15 @@ test('harvestRun does not emit run:harvested for non-review-target runs', async 
   const harvestEvents = collectChannel(eventBus, 'run:harvested');
   const services = makeServices(db, { eventBus });
 
-  const cancelledCase = createRunInWorktree({ db, repoDir, ...services });
+  const cancelledCase = await createRunInWorktree({ db, repoDir, ...services });
   const cancelled = services.runService.updateRunStatus(cancelledCase.run.id, 'cancelled', { force: true });
   await services.harvestService.harvestRun(cancelled, { projectDir: repoDir });
 
-  const stoppedCase = createRunInWorktree({ db, repoDir, ...services });
+  const stoppedCase = await createRunInWorktree({ db, repoDir, ...services });
   const stopped = services.runService.updateRunStatus(stoppedCase.run.id, 'stopped', { force: true });
   await services.harvestService.harvestRun(stopped, { projectDir: repoDir });
 
-  const runningCase = createRunInWorktree({ db, repoDir, ...services });
+  const runningCase = await createRunInWorktree({ db, repoDir, ...services });
   await services.harvestService.harvestRun(runningCase.run, { projectDir: repoDir });
 
   const manager = services.runService.createRun({
@@ -673,7 +673,7 @@ test('harvestRun dedupe prevents duplicate run:harvested emits', async (t) => {
   const eventBus = createEventBus();
   const harvestEvents = collectChannel(eventBus, 'run:harvested');
   const services = makeServices(db, { eventBus });
-  const { run, worktreePath } = createRunInWorktree({ db, repoDir, ...services });
+  const { run, worktreePath } = await createRunInWorktree({ db, repoDir, ...services });
   fs.writeFileSync(path.join(worktreePath, 'agent-output.txt'), 'agent work\n');
   const completed = services.runService.updateRunStatus(run.id, 'completed', { force: true });
 
@@ -682,7 +682,7 @@ test('harvestRun dedupe prevents duplicate run:harvested emits', async (t) => {
 
   assert.equal(harvestEvents.length, 1);
 
-  const second = createRunInWorktree({ db, repoDir, ...services });
+  const second = await createRunInWorktree({ db, repoDir, ...services });
   const secondCompleted = services.runService.updateRunStatus(second.run.id, 'completed', { force: true });
   services.runService.addRunEvent(second.run.id, 'harvest:error', JSON.stringify({ stage: 'preexisting', error: 'done' }));
   await services.harvestService.harvestRun(secondCompleted, { projectDir: repoDir });
@@ -694,7 +694,7 @@ test('harvestRun autosaves uncommitted worker changes before diff capture', asyn
   const db = await mkdb(t);
   const repoDir = makeRepo(t);
   const services = makeServices(db);
-  const { run, worktreePath, branch } = createRunInWorktree({ db, repoDir, ...services });
+  const { run, worktreePath, branch } = await createRunInWorktree({ db, repoDir, ...services });
   fs.writeFileSync(path.join(worktreePath, 'agent-output.txt'), 'agent work\n');
   const completed = services.runService.updateRunStatus(run.id, 'completed', { force: true });
 
@@ -713,7 +713,7 @@ test('harvestRun does not commit files created by the test command', async (t) =
   const db = await mkdb(t);
   const repoDir = makeRepo(t);
   const services = makeServices(db);
-  const { run, worktreePath, branch } = createRunInWorktree({
+  const { run, worktreePath, branch } = await createRunInWorktree({
     db,
     repoDir,
     testCommand: 'write:test-artifact.txt pass',
@@ -743,7 +743,7 @@ test('harvestRun records project node payload when resolver finds declared node'
   const services = makeServices(db, {
     nodeResolver: (major) => (major === PROJECT_NODE_MAJOR ? binDir : null),
   });
-  const { run, worktreePath } = createRunInWorktree({
+  const { run, worktreePath } = await createRunInWorktree({
     db,
     repoDir,
     testCommand: 'pass',
@@ -765,7 +765,7 @@ test('harvestRun records fallback node payload and node_unresolved warning', asy
   const db = await mkdb(t);
   const repoDir = makeRepo(t);
   const services = makeServices(db, { nodeResolver: () => null });
-  const { run, worktreePath } = createRunInWorktree({
+  const { run, worktreePath } = await createRunInWorktree({
     db,
     repoDir,
     testCommand: 'pass',
@@ -788,7 +788,7 @@ test('harvestRun is deduped per run and by existing DB harvest events', async (t
   const db = await mkdb(t);
   const repoDir = makeRepo(t);
   const services = makeServices(db);
-  const { run, worktreePath } = createRunInWorktree({ db, repoDir, ...services });
+  const { run, worktreePath } = await createRunInWorktree({ db, repoDir, ...services });
   fs.writeFileSync(path.join(worktreePath, 'agent-output.txt'), 'agent work\n');
   const completed = services.runService.updateRunStatus(run.id, 'completed', { force: true });
 
@@ -798,7 +798,7 @@ test('harvestRun is deduped per run and by existing DB harvest events', async (t
   assert.equal(eventsOf(services.runService, run.id, 'harvest:diff').length, 1);
   assert.equal(eventsOf(services.runService, run.id, 'harvest:error').length, 0);
 
-  const second = createRunInWorktree({ db, repoDir, ...services });
+  const second = await createRunInWorktree({ db, repoDir, ...services });
   const secondCompleted = services.runService.updateRunStatus(second.run.id, 'completed', { force: true });
   services.runService.addRunEvent(second.run.id, 'harvest:error', JSON.stringify({ stage: 'preexisting', error: 'done' }));
   await services.harvestService.harvestRun(secondCompleted, { projectDir: repoDir });
@@ -821,7 +821,7 @@ test('harvestRun never throws when stages fail', async (t) => {
     projectService: real.projectService,
     testRunner: injectedTestRunner,
   });
-  const { run } = createRunInWorktree({ db, repoDir, ...real });
+  const { run } = await createRunInWorktree({ db, repoDir, ...real });
   const completed = real.runService.updateRunStatus(run.id, 'completed', { force: true });
 
   await assert.doesNotReject(() => harvestService.harvestRun(completed, { projectDir: repoDir }));
@@ -836,7 +836,7 @@ test('harvestRun skips cancelled and manager runs', async (t) => {
   const db = await mkdb(t);
   const repoDir = makeRepo(t);
   const services = makeServices(db);
-  const { run, worktreePath, branch } = createRunInWorktree({ db, repoDir, ...services });
+  const { run, worktreePath, branch } = await createRunInWorktree({ db, repoDir, ...services });
   const cancelled = services.runService.updateRunStatus(run.id, 'cancelled', { force: true });
 
   await services.harvestService.harvestRun(cancelled, { projectDir: repoDir });
@@ -864,7 +864,7 @@ test('harvestRun tolerates DELETE race without throwing', async (t) => {
   const db = await mkdb(t);
   const repoDir = makeRepo(t);
   const services = makeServices(db);
-  const { run, worktreePath } = createRunInWorktree({ db, repoDir, ...services });
+  const { run, worktreePath } = await createRunInWorktree({ db, repoDir, ...services });
   fs.writeFileSync(path.join(worktreePath, 'agent-output.txt'), 'agent work\n');
   const completed = services.runService.updateRunStatus(run.id, 'completed', { force: true });
   services.runService.deleteRun(run.id);
@@ -877,7 +877,7 @@ test('harvestRun records timed-out test results', async (t) => {
   const db = await mkdb(t);
   const repoDir = makeRepo(t);
   const services = makeServices(db);
-  const { run, worktreePath } = createRunInWorktree({
+  const { run, worktreePath } = await createRunInWorktree({
     db,
     repoDir,
     testCommand: 'sleep:250 pass',
@@ -904,7 +904,7 @@ test('failed runs capture diff but skip test execution', async (t) => {
   const db = await mkdb(t);
   const repoDir = makeRepo(t);
   const services = makeServices(db);
-  const { run, worktreePath } = createRunInWorktree({
+  const { run, worktreePath } = await createRunInWorktree({
     db,
     repoDir,
     testCommand: 'write:should-not-exist.txt pass',
@@ -959,7 +959,7 @@ test('lifecycle run:ended subscriber runs harvest before removing worktree', asy
   });
   t.after(() => lifecycleService.stopMonitoring());
 
-  const { run, worktreePath } = createRunInWorktree({
+  const { run, worktreePath } = await createRunInWorktree({
     db,
     runService,
     taskService,
@@ -1024,7 +1024,7 @@ test('lifecycle run:ended subscriber calls harvest when projectDir resolution fa
   });
   t.after(() => lifecycleService.stopMonitoring());
 
-  const { run } = createRunWithMissingProjectDir({ db, repoDir, ...services });
+  const { run } = await createRunWithMissingProjectDir({ db, repoDir, ...services });
   lifecycleService.startMonitoring();
   services.runService.updateRunStatus(run.id, 'completed', { force: true });
 
@@ -1324,7 +1324,7 @@ test('boot stale terminal worktree cleanup autosaves remaining work', async (t) 
   const db = await mkdb(t);
   const repoDir = makeRepo(t);
   const services = makeServices(db);
-  const { run, worktreePath, branch } = createRunInWorktree({ db, repoDir, ...services });
+  const { run, worktreePath, branch } = await createRunInWorktree({ db, repoDir, ...services });
   fs.writeFileSync(path.join(worktreePath, 'boot-leftover.txt'), 'leftover work\n');
   services.runService.updateRunStatus(run.id, 'completed', { force: true });
   const lifecycleService = createLifecycleService({
@@ -1339,7 +1339,7 @@ test('boot stale terminal worktree cleanup autosaves remaining work', async (t) 
     eventBus: null,
   });
 
-  const cleaned = lifecycleService.cleanupStaleTerminalWorktrees();
+  const cleaned = await lifecycleService.cleanupStaleTerminalWorktrees();
 
   assert.equal(cleaned, 1);
   assert.ok(!fs.existsSync(worktreePath), 'stale worktree removed');
