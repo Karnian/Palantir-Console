@@ -178,17 +178,24 @@ Backlog  →  Todo  →  In Progress  →  Review  →  Done
 
 커스텀 에이전트 추가 가능. `capabilities_json`, `max_concurrent`, `env_allowlist` 는 매니저 dispatch 추론과 lifecycleService 동시성 게이트에 연결된다. 보안: 허용된 명령어만 실행 가능 (allowlist). `PALANTIR_ALLOWED_COMMANDS` 로 추가 허용.
 
-### 6. Skill Packs (♢)
+### 6. Resources (❖) — `#resources`
 
-MCP 서버 템플릿과 스킬 팩 관리. 갤러리 레지스트리 브라우즈, 레지스트리/URL 설치, JSON import/export. 팩은 프로젝트, 태스크, run 에 바인딩 가능.
+Nav-consolidation 으로 합쳐진 탭 그룹. 하위 탭 3개:
 
-### 7. Presets (❖)
+- **Skill Packs** (`#resources/skills`, 구 `#skills`) — MCP 서버 템플릿과 스킬 팩 관리. 갤러리 레지스트리 브라우즈, 레지스트리/URL 설치, JSON import/export. 팩은 프로젝트, 태스크, run 에 바인딩 가능.
+- **Presets** (`#resources/presets`, 구 `#presets`) — Worker Preset 관리. 에이전트 프로필 + 플러그인 refs + MCP 서버 템플릿 + 시스템 프롬프트를 재사용 가능한 프리셋으로 묶음. `preferred_preset_id` 로 태스크에 연결. Run Inspector 에서 frozen snapshot vs 현재 preset drift 감사 가능.
+- **MCP Servers** (`#resources/mcp-servers`, 구 `#mcp-servers`) — MCP 서버 템플릿 CRUD UI (M3-UI, PR #119). Skill Pack / Preset 이 alias 로 참조하는 템플릿을 추가/수정/삭제. 템플릿은 `command`, `args`, `env`, `allowed_env_keys`, `updated_at` (migration 020) 을 갖고, RunInspector 가 snapshot 시점 `updated_at` 과 현재 값을 비교해 body-level drift 를 노출 (snapshot 자체는 template id 만 저장).
 
-Worker Preset 관리. 에이전트 프로필 + 플러그인 refs + MCP 서버 템플릿 + 시스템 프롬프트를 재사용 가능한 프리셋으로 묶음. `preferred_preset_id` 로 태스크에 연결. Run Inspector 에서 frozen snapshot vs 현재 preset drift 감사 가능.
+> 레거시 해시 `#skills`, `#presets`, `#mcp-servers` 는 app.js redirect map 을 통해 정규 서브라우트로 리다이렉트됨.
 
-### 8. MCP Servers (#mcp-servers)
+### 7. Memory (◈) — `#memory`
 
-MCP 서버 템플릿 CRUD UI (M3-UI, PR #119). Skill Pack / Preset 이 alias 로 참조하는 템플릿을 추가/수정/삭제. 템플릿은 `command`, `args`, `env`, `allowed_env_keys`, `updated_at` (migration 020) 을 갖고, RunInspector 가 snapshot 시점 `updated_at` 과 현재 값을 비교해 body-level drift 를 노출 (snapshot 자체는 template id 만 저장).
+### 8. Operator (✸) — `#operator`
+
+Nav-consolidation 으로 합쳐진 탭 그룹. 하위 탭 2개:
+
+- **Operator Profiles** (`#operator/profiles`, 구 `#operator-profiles`) — Operator 프로필 CRUD (PF-1/PF-2).
+- **Specialist** (`#operator/specialist`) — 활성 매니저 run 에 folder-less specialist 워커 호출.
 
 ### 테마 토글 (라이트/다크)
 

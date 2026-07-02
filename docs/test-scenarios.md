@@ -1073,8 +1073,8 @@
 
 ### KBD-04 — Command Palette에서 숫자키로 빠른 뷰 전환
 - **Given** Command Palette 열림
-- **When** 숫자키 1~N (N = `NAV_ITEMS.length`, 현재 8 — M3 에서 `MCP Servers` 추가)
-- **Then** NAV_ITEMS 순서대로 해당 뷰로 전환 (1=Dashboard, 2=Manager, 3=Task Board, 4=Projects, 5=Agents, 6=Skill Packs, 7=Presets, 8=MCP Servers — `NAV_ITEMS.length`만큼 매핑). 숫자키는 검색 query 가 비어있을 때만 동작 (타이핑 충돌 방지)
+- **When** 숫자키 1~N (N = `NAV_ITEMS.length`, 현재 8 — nav-consolidation 에서 Resources/Memory/Operator 으로 재편)
+- **Then** NAV_ITEMS 순서대로 해당 뷰로 전환 (1=Dashboard, 2=Manager, 3=Task Board, 4=Projects, 5=Agents, 6=Resources(`#resources/skills`), 7=Memory, 8=Operator(`#operator/specialist`) — `NAV_ITEMS.length`만큼 매핑). 숫자키는 검색 query 가 비어있을 때만 동작 (타이핑 충돌 방지)
 
 ---
 

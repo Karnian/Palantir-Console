@@ -83,6 +83,9 @@ export const NAV_LABELS = {
   memory: '메모리',
   specialist: '스페셜리스트',
   'operator-profiles': '오퍼레이터 프로필',
+  // Tab group labels (nav consolidation)
+  resources: '리소스',
+  operator: '오퍼레이터',
 };
 
 // Reusable verb labels — covers ~80% of button copy across modals.

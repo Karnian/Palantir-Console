@@ -6,7 +6,7 @@ import { useState, useEffect, useRef } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
-import { NAV_ITEMS } from '../lib/nav.js';
+import { NAV_ITEMS, NAV_SUB_ITEMS } from '../lib/nav.js';
 import { navigate, useEscape } from '../lib/hooks.js';
 import { COMMAND_PALETTE_LABELS } from '../lib/copy.js';
 
@@ -77,9 +77,18 @@ export function CommandPalette({ open, onClose }) {
 
   if (!open) return null;
 
-  const items = NAV_ITEMS.filter(item =>
-    !query || item.label.toLowerCase().includes(query.toLowerCase())
-  );
+  // When a query is typed, search over NAV_ITEMS + NAV_SUB_ITEMS combined
+  // so users can jump directly to e.g. "스킬 팩" or "MCP 서버".
+  // When the query is empty, show only NAV_ITEMS (top-level groups) so
+  // the number-key shortcuts map 1:1 to the displayed rows.
+  const allItems = query
+    ? [...NAV_ITEMS, ...NAV_SUB_ITEMS].filter(item =>
+        item.label.toLowerCase().includes(query.toLowerCase())
+      )
+    : NAV_ITEMS;
+
+  // For keyboard navigation we always use `allItems`.
+  const items = allItems;
 
   const handleSelect = (hash) => {
     navigate(hash);
@@ -90,12 +99,13 @@ export function CommandPalette({ open, onClose }) {
     if (e.key === 'ArrowDown') { e.preventDefault(); setSelectedIndex(i => Math.min(i + 1, items.length - 1)); return; }
     if (e.key === 'ArrowUp') { e.preventDefault(); setSelectedIndex(i => Math.max(i - 1, 0)); return; }
     if (e.key === 'Enter') { e.preventDefault(); if (items[selectedIndex]) handleSelect(items[selectedIndex].hash); return; }
-    // Number keys 1-5 only when query is empty (avoid conflict with typing)
+    // Number keys 1–N only when query is empty (avoid conflict with typing)
+    // and only over NAV_ITEMS (the top-level group list).
     if (!query) {
       const num = parseInt(e.key, 10);
-      if (num >= 1 && num <= items.length) {
+      if (num >= 1 && num <= NAV_ITEMS.length) {
         e.preventDefault();
-        handleSelect(items[num - 1].hash);
+        handleSelect(NAV_ITEMS[num - 1].hash);
       }
     }
   };
@@ -129,7 +139,7 @@ export function CommandPalette({ open, onClose }) {
             >
               <span class="command-palette-icon">${item.icon}</span>
               <span class="command-palette-label">${item.label}</span>
-              <span class="command-palette-hint">${i + 1}</span>
+              ${!query && html`<span class="command-palette-hint">${i + 1}</span>`}
             </button>
           `)}
           ${items.length === 0 && html`

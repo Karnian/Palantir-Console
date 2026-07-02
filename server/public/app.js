@@ -15,7 +15,7 @@ import { useRoute, navigate, useEscape, useSSE, useTasks, useRuns, useProjects, 
 import { dueState, formatDueDate, useNowTick, dueDateMeta } from './app/lib/dueDate.js';
 import { requestNotificationPermission, showBrowserNotification, pulseTabTitle } from './app/lib/notifications.js';
 import { NAV_ITEMS } from './app/lib/nav.js';
-import { THEME_TOGGLE_LABELS } from './app/lib/copy.js';
+import { THEME_TOGGLE_LABELS, NAV_LABELS } from './app/lib/copy.js';
 
 // Components
 import { RunInspector } from './app/components/RunInspector.js';
@@ -37,6 +37,7 @@ import { McpTemplatesView } from './app/components/McpTemplatesView.js';
 import { MemoryView } from './app/components/MemoryView.js';
 import { SpecialistView } from './app/components/SpecialistView.js';
 import { OperatorProfilesView } from './app/components/OperatorProfilesView.js';
+import { TabGroupView } from './app/components/TabGroupView.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sidebar Navigation
@@ -340,6 +341,24 @@ function App() {
 
   const routeBase = route.split('/')[0];
 
+  // Legacy hash redirect — map old top-level hashes to their new canonical
+  // sub-route form so bookmarks / external links don't break.
+  // Only the 5 exact legacy bases are redirected; no wildcard to avoid loops.
+  useEffect(() => {
+    const LEGACY_MAP = {
+      'skills':            'resources/skills',
+      'presets':           'resources/presets',
+      'mcp-servers':       'resources/mcp-servers',
+      'specialist':        'operator/specialist',
+      'operator-profiles': 'operator/profiles',
+    };
+    const current = (window.location.hash.slice(1) || '').split('/');
+    const base = current[0];
+    if (Object.prototype.hasOwnProperty.call(LEGACY_MAP, base) && current.length === 1) {
+      window.location.replace('#' + LEGACY_MAP[base]);
+    }
+  }, [route]);
+
   // R2-A.1: attention count = needs_input + failed across worker runs only.
   // v3 multi-layer note: is_manager=1 (Top + PM sessions) are excluded so
   // only worker runs contribute — aligns with DashboardView.workerRuns filter.
@@ -388,23 +407,31 @@ function App() {
     if (routeBase === 'agents') {
       return html`<${AgentsView} agents=${agents} loading=${agentsLoading} reloadAgents=${reloadAgents} />`;
     }
-    if (routeBase === 'skills') {
-      return html`<${SkillPacksView} projects=${projects} />`;
-    }
-    if (routeBase === 'presets') {
-      return html`<${PresetsView} />`;
-    }
-    if (routeBase === 'mcp-servers') {
-      return html`<${McpTemplatesView} />`;
+    if (routeBase === 'resources') {
+      const sub = route.split('/')[1] || 'skills';
+      return html`<${TabGroupView}
+        groupHash="resources"
+        subRoute=${sub}
+        tabs=${[
+          { key: 'skills',      label: NAV_LABELS.skills,          render: () => html`<${SkillPacksView} projects=${projects} />` },
+          { key: 'presets',     label: NAV_LABELS.presets,         render: () => html`<${PresetsView} />` },
+          { key: 'mcp-servers', label: NAV_LABELS['mcp-servers'],  render: () => html`<${McpTemplatesView} />` },
+        ]}
+      />`;
     }
     if (routeBase === 'memory') {
       return html`<${MemoryView} projects=${projects} />`;
     }
-    if (routeBase === 'specialist') {
-      return html`<${SpecialistView} runs=${runs} />`;
-    }
-    if (routeBase === 'operator-profiles') {
-      return html`<${OperatorProfilesView} />`;
+    if (routeBase === 'operator') {
+      const sub = route.split('/')[1] || 'profiles';
+      return html`<${TabGroupView}
+        groupHash="operator"
+        subRoute=${sub}
+        tabs=${[
+          { key: 'profiles',   label: NAV_LABELS['operator-profiles'], render: () => html`<${OperatorProfilesView} />` },
+          { key: 'specialist', label: NAV_LABELS.specialist,           render: () => html`<${SpecialistView} runs=${runs} />` },
+        ]}
+      />`;
     }
     if (routeBase === 'run') {
       const runId = route.split('/')[1];
