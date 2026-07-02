@@ -24,6 +24,7 @@ function createLifecycleService({
   claudeVersionResolver,
   authResolver,               // Phase 10D: injectable for tests
   authResolverOpts,           // { hasKeychain, readKeychainToken, prefer, tmpRoot }
+  nodeService,
 }) {
   // Lazy-require default authResolver so tests that don't use Tier 2 don't
   // force a load of the real keychain probe.
@@ -130,6 +131,63 @@ function createLifecycleService({
     return agentProfileService.getRunningCount(profileId);
   }
 
+  const localDispatchableNode = {
+    id: 'local',
+    reachable: 1,
+    can_execute: 1,
+    files_only: 0,
+    max_concurrent: null,
+  };
+
+  function resolveProjectNode(project) {
+    if (nodeService && typeof nodeService.resolveNode === 'function') {
+      return nodeService.resolveNode(project);
+    }
+    return project?.node_id || 'local';
+  }
+
+  function getDispatchNode(nodeId) {
+    const id = nodeId || 'local';
+    if (!nodeService || typeof nodeService.getNode !== 'function') {
+      return { ...localDispatchableNode, id };
+    }
+    try {
+      return nodeService.getNode(id);
+    } catch {
+      if (id === 'local') return localDispatchableNode;
+      return null;
+    }
+  }
+
+  function countRunningOnNode(nodeId, profileId) {
+    if (runService && typeof runService.countRunningOnNode === 'function') {
+      return runService.countRunningOnNode(nodeId || 'local', profileId);
+    }
+    return getRunningCount(profileId);
+  }
+
+  function countRunningTotalOnNode(nodeId) {
+    if (runService && typeof runService.countRunningTotalOnNode === 'function') {
+      return runService.countRunningTotalOnNode(nodeId || 'local');
+    }
+    return 0;
+  }
+
+  function canDispatchOnNode(nodeId, profileId, profile) {
+    const node = getDispatchNode(nodeId);
+    if (!node || Number(node.reachable) !== 1) return false;
+    // Capability can be downgraded AFTER a project bound to the node enqueued
+    // work (nodeService.updateNode) — bind-time validation alone is not enough.
+    // A node that cannot host execution must never receive dispatch.
+    if (Number(node.can_execute) !== 1 || Number(node.files_only) === 1) return false;
+    const id = node.id || nodeId || 'local';
+    if (countRunningOnNode(id, profileId) >= profile.max_concurrent) return false;
+    if (node.max_concurrent != null && countRunningTotalOnNode(id) >= node.max_concurrent) {
+      return false;
+    }
+    return true;
+  }
+
   /**
    * Run `claude --version` and return the raw semver portion, or null on
    * any failure. The gate is enforced only when the preset declares
@@ -231,6 +289,11 @@ function createLifecycleService({
   async function executeTask(taskId, { agentProfileId, prompt, skillPackIds, presetId }) {
     const task = taskService.getTask(taskId);
     const profile = agentProfileService.getProfile(agentProfileId);
+    let nodeId = 'local';
+    if (task.project_id) {
+      const project = projectService.getProject(task.project_id);
+      nodeId = resolveProjectNode(project);
+    }
 
     // Phase 10C: resolve preferred preset. Explicit argument wins over
     // task.preferred_preset_id so callers can override per-execute.
@@ -240,16 +303,18 @@ function createLifecycleService({
       task_id: taskId,
       agent_profile_id: agentProfileId,
       prompt,
+      node_id: nodeId,
       queued_args: buildQueuedArgs({ skillPackIds, presetId: effectivePresetId }),
       retry_count: 0,
     });
 
-    if (getRunningCount(agentProfileId) < profile.max_concurrent) {
+    if (canDispatchOnNode(nodeId, agentProfileId, profile)) {
       return (await spawnQueuedRun(run.id)) || runService.getRun(run.id);
     }
 
     runService.addRunEvent(run.id, 'queue:enqueued', JSON.stringify({
       profile_id: agentProfileId,
+      node_id: nodeId,
     }));
     return runService.getRun(run.id);
   }
@@ -849,6 +914,7 @@ function createLifecycleService({
       task_id: run.task_id,
       agent_profile_id: run.agent_profile_id,
       prompt: run.prompt || '',
+      node_id: run.node_id || 'local',
       queued_args: run.queued_args || null,
       retry_count: Number(run.retry_count || 0) + 1,
     });
@@ -868,11 +934,26 @@ function createLifecycleService({
     }
 
     let started = 0;
-    while (getRunningCount(profileId) < profile.max_concurrent) {
-      const next = runService.getOldestQueued(profileId);
-      if (!next) break;
-      const spawned = await spawnQueuedRun(next.id);
-      if (spawned) started++;
+    const nodeIds = [];
+    const seen = new Set();
+    for (const run of runService.listRuns({ status: 'queued' })) {
+      if (run.is_manager || run.agent_profile_id !== profileId) continue;
+      const nodeId = run.node_id || 'local';
+      if (!seen.has(nodeId)) {
+        seen.add(nodeId);
+        nodeIds.push(nodeId);
+      }
+    }
+
+    for (const nodeId of nodeIds) {
+      while (canDispatchOnNode(nodeId, profileId, profile)) {
+        const next = typeof runService.getOldestQueuedOnNode === 'function'
+          ? runService.getOldestQueuedOnNode(nodeId, profileId)
+          : runService.getOldestQueued(profileId);
+        if (!next) break;
+        const spawned = await spawnQueuedRun(next.id);
+        if (spawned) started++;
+      }
     }
     return started;
   }

@@ -48,18 +48,44 @@ function normalizeTestCommand(value) {
   return trimmed;
 }
 
+function normalizeNodeId(value) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  if (typeof value !== 'string') throw new BadRequestError('node_id must be a string or null');
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function normalizeAllowNonGitDir(value) {
+  if (value === undefined) return undefined;
+  if (value === true || value === 1 || value === '1') return 1;
+  if (value === false || value === 0 || value === '0' || value === null) return 0;
+  throw new BadRequestError('allow_non_git_dir must be boolean or 0/1');
+}
+
 function createProjectService(db) {
   const stmts = {
     getAll: db.prepare('SELECT * FROM projects ORDER BY updated_at DESC'),
     getById: db.prepare('SELECT * FROM projects WHERE id = ?'),
+    getNodeById: db.prepare('SELECT * FROM nodes WHERE id = ?'),
+    getBriefThread: db.prepare('SELECT pm_thread_id FROM project_briefs WHERE project_id = ?'),
+    countLiveOperatorRuns: db.prepare(`
+      SELECT COUNT(*) AS count FROM runs
+      WHERE conversation_id = ?
+        AND manager_layer = 'operator'
+        AND is_manager = 1
+        AND status IN ('queued', 'running', 'needs_input')
+    `),
     insert: db.prepare(`
       INSERT INTO projects (
         id, name, directory, description, color, budget_usd,
-        pm_enabled, preferred_pm_adapter, mcp_config_path, test_command
+        pm_enabled, preferred_pm_adapter, mcp_config_path, test_command,
+        node_id, allow_non_git_dir
       )
       VALUES (
         @id, @name, @directory, @description, @color, @budget_usd,
-        @pm_enabled, @preferred_pm_adapter, @mcp_config_path, @test_command
+        @pm_enabled, @preferred_pm_adapter, @mcp_config_path, @test_command,
+        @node_id, @allow_non_git_dir
       )
     `),
     // update: dynamic — see updateProject() below
@@ -76,13 +102,25 @@ function createProjectService(db) {
     return project;
   }
 
-  function createProject({ name, directory, description, color, budget_usd, pm_enabled, preferred_pm_adapter, mcp_config_path, test_command }) {
+  function validateExecutableNode(nodeId) {
+    if (nodeId === undefined || nodeId === null) return nodeId;
+    const node = stmts.getNodeById.get(nodeId);
+    if (!node) throw new BadRequestError(`Unknown node_id: ${nodeId}`);
+    if (Number(node.can_execute) !== 1 || Number(node.files_only) === 1) {
+      throw new BadRequestError(`Node ${nodeId} cannot host execution`);
+    }
+    return nodeId;
+  }
+
+  function createProject({ name, directory, description, color, budget_usd, pm_enabled, preferred_pm_adapter, mcp_config_path, test_command, node_id, allow_non_git_dir }) {
     if (!name) throw new BadRequestError('Project name is required');
     const id = `proj_${crypto.randomUUID().slice(0, 8)}`;
     const normalizedPmEnabled = normalizePmEnabled(pm_enabled);
     const normalizedAdapter = normalizePmAdapter(preferred_pm_adapter);
     const normalizedMcpPath = normalizeMcpConfigPath(mcp_config_path);
     const normalizedTestCommand = normalizeTestCommand(test_command);
+    const normalizedNodeId = validateExecutableNode(normalizeNodeId(node_id));
+    const normalizedAllowNonGitDir = normalizeAllowNonGitDir(allow_non_git_dir);
     stmts.insert.run({
       id, name,
       directory: directory || null,
@@ -94,6 +132,8 @@ function createProjectService(db) {
       preferred_pm_adapter: normalizedAdapter === undefined ? null : normalizedAdapter,
       mcp_config_path: normalizedMcpPath === undefined ? null : normalizedMcpPath,
       test_command: normalizedTestCommand === undefined ? null : normalizedTestCommand,
+      node_id: normalizedNodeId === undefined ? null : normalizedNodeId,
+      allow_non_git_dir: normalizedAllowNonGitDir === undefined ? 0 : normalizedAllowNonGitDir,
     });
     return stmts.getById.get(id);
   }
@@ -106,10 +146,12 @@ function createProjectService(db) {
     'mcp_config_path',
     // H-1: opt-in harvest test command
     'test_command',
+    // Fleet P1a
+    'node_id', 'allow_non_git_dir',
   ];
 
   function updateProject(id, fields) {
-    getProject(id);
+    const current = getProject(id);
     // v3 Phase 1: normalize PM fields
     if ('pm_enabled' in fields) {
       const n = normalizePmEnabled(fields.pm_enabled);
@@ -127,6 +169,31 @@ function createProjectService(db) {
     if ('test_command' in fields) {
       const n = normalizeTestCommand(fields.test_command);
       fields = { ...fields, test_command: n === undefined ? null : n };
+    }
+    if ('node_id' in fields) {
+      const n = validateExecutableNode(normalizeNodeId(fields.node_id));
+      const nextNode = n === undefined ? null : n;
+      const currentResolved = current.node_id || 'local';
+      const nextResolved = nextNode || 'local';
+      if (currentResolved !== nextResolved) {
+        // Stored thread affinity (survives restarts)…
+        const brief = stmts.getBriefThread.get(id);
+        // …AND live Operator runs. Operator spawn registers the manager run
+        // BEFORE pm_thread_id is persisted (thread id arrives on thread.started),
+        // so a brief-only check has a window where a live Operator escapes the
+        // guard (Codex P1a review, SERIOUS #2).
+        const liveOps = stmts.countLiveOperatorRuns.get(`operator:${id}`).count;
+        if (brief?.pm_thread_id || liveOps > 0) {
+          const err = new Error('operator thread is bound to the current node — reset the operator before rebinding');
+          err.httpStatus = 409;
+          throw err;
+        }
+      }
+      fields = { ...fields, node_id: n === undefined ? null : n };
+    }
+    if ('allow_non_git_dir' in fields) {
+      const n = normalizeAllowNonGitDir(fields.allow_non_git_dir);
+      fields = { ...fields, allow_non_git_dir: n === undefined ? 0 : n };
     }
     const setClauses = [];
     const params = { id };

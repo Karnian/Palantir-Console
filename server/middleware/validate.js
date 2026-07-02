@@ -214,9 +214,11 @@ function validateCreateProject(req, res, next) {
   optionalString(body, 'color', 'color');
   optionalString(body, 'mcp_config_path', 'mcp_config_path');
   optionalString(body, 'preferred_pm_adapter', 'preferred_pm_adapter');
+  optionalString(body, 'node_id', 'node_id');
   optionalStringMax(body, 'test_command', 500, 'test_command');
   optionalNumber(body, 'budget_usd', 'budget_usd');
   optionalBoolish(body, 'pm_enabled', 'pm_enabled');
+  optionalBoolish(body, 'allow_non_git_dir', 'allow_non_git_dir');
   next();
 }
 
@@ -240,9 +242,11 @@ function validateUpdateProject(req, res, next) {
   optionalString(body, 'color', 'color');
   optionalString(body, 'mcp_config_path', 'mcp_config_path');
   optionalString(body, 'preferred_pm_adapter', 'preferred_pm_adapter');
+  optionalString(body, 'node_id', 'node_id');
   optionalStringMax(body, 'test_command', 500, 'test_command');
   optionalNumber(body, 'budget_usd', 'budget_usd');
   optionalBoolish(body, 'pm_enabled', 'pm_enabled');
+  optionalBoolish(body, 'allow_non_git_dir', 'allow_non_git_dir');
   next();
 }
 

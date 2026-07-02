@@ -42,6 +42,8 @@ const RUN_COLUMNS = [
   'preset_snapshot_hash',
   'queued_args',
   'retry_count',
+  // Fleet P1a (migration 047): worker-run node snapshot — ALTER ADD appends at end.
+  'node_id',
 ];
 
 const COMPOSITION_EVENT_COLUMNS = [
@@ -258,8 +260,10 @@ test('(1) runs rebuild preserves all inbound child rows and parent links', (t) =
   assert.equal(db.prepare("SELECT COUNT(*) AS c FROM runs WHERE id IN ('run-a', 'run-b')").get().c, 2);
   assert.deepEqual(db.pragma('foreign_key_check'), []);
   assert.equal(fkOn(db), 1);
-  // migrate() applies all migrations in the dir; Phase 4 adds 046 (tighten).
-  assert.equal(db.prepare('SELECT MAX(version) AS v FROM schema_version').get().v, 46);
+  // migrate() applies all migrations in the dir. This guard only needs the
+  // rename migrations (045+046) applied — later migrations (047 fleet nodes, …)
+  // legitimately advance the version, so assert a floor, not an exact match.
+  assert.ok(db.prepare('SELECT MAX(version) AS v FROM schema_version').get().v >= 46);
 });
 
 test('(2) composition events, owner state, and item edges are preserved while slot_kind migrates', (t) => {
