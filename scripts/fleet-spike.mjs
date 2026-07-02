@@ -19,6 +19,8 @@ function parseArgs(args) {
     nodeId: null,
     dbPath: defaultDbPath(),
     withWorktree: false,
+    withWorker: false,
+    workerPath: null,
     jsonOut: false,
     help: false,
   };
@@ -31,6 +33,13 @@ function parseArgs(args) {
       i += 1;
     } else if (arg === '--with-worktree') {
       parsed.withWorktree = true;
+    } else if (arg === '--with-worker') {
+      parsed.withWorker = true;
+    } else if (arg === '--worker-path') {
+      const value = args[i + 1];
+      if (!value || value.startsWith('-')) throw new Error('--worker-path requires a path value');
+      parsed.workerPath = value;
+      i += 1;
     } else if (arg === '--json') {
       parsed.jsonOut = true;
     } else if (arg === '-h' || arg === '--help') {
@@ -42,6 +51,9 @@ function parseArgs(args) {
     } else {
       throw new Error(`Unexpected positional argument: ${arg}`);
     }
+  }
+  if (parsed.withWorker && !parsed.workerPath) {
+    throw new Error('--with-worker requires --worker-path so the remote worker PATH is explicit');
   }
   return parsed;
 }
@@ -56,12 +68,14 @@ try {
     nodeId: null,
     dbPath: defaultDbPath(),
     withWorktree: false,
+    withWorker: false,
+    workerPath: null,
     jsonOut: argv.includes('--json'),
     help: false,
   };
 }
 
-const { nodeId, dbPath, withWorktree, jsonOut } = parsedArgs;
+const { nodeId, dbPath, withWorktree, withWorker, workerPath, jsonOut } = parsedArgs;
 
 const useColor = !jsonOut && process.stdout.isTTY;
 const c = {
@@ -81,6 +95,8 @@ Runs a live SSH-node smoke test. This tool intentionally performs real ssh.
 Options:
   --db <path>        Override palantir.db (default: ./server/palantir.db, or $PALANTIR_DB)
   --with-worktree    Also git-init a temporary repo and round-trip worktreeService
+  --with-worker      Spawn a real codex worker through the remote tmux channel
+  --worker-path <p>  Remote PATH directory containing codex; required with --with-worker
   --json             Emit machine-readable JSON
   -h, --help         Show this help
 `);
@@ -200,6 +216,39 @@ async function main() {
         await remote.rmrf(dir);
       }
     });
+
+    if (withWorker) {
+      await step('remote codex worker channel', async () => {
+        const runId = `fleet-spike-worker-${Date.now()}`;
+        let spawned = false;
+        try {
+          await remote.spawnWorker(runId, {
+            command: 'codex',
+            args: ['--version'],
+            cwd: root,
+            workerPath,
+          });
+          spawned = true;
+          for (let i = 0; i < 30; i += 1) {
+            if (!(await remote.isAlive(runId))) break;
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+          if (await remote.isAlive(runId)) throw new Error('codex worker still alive after 30s');
+          const output = await remote.getOutput(runId, 200);
+          const exitCode = await remote.detectExitCode(runId);
+          if (!output.toLowerCase().includes('codex')) {
+            throw new Error(`codex worker output did not include codex: ${JSON.stringify(output)}`);
+          }
+          if (exitCode !== 0) throw new Error(`codex worker exited ${exitCode}; output=${JSON.stringify(output)}`);
+          return output.trim().split('\n').find(Boolean) || 'codex --version';
+        } finally {
+          if (spawned) {
+            try { await remote.kill(runId); } catch { /* ignore cleanup best effort */ }
+            try { await remote.cleanupRun(runId); } catch { /* ignore cleanup best effort */ }
+          }
+        }
+      });
+    }
 
     if (withWorktree) {
       await step('worktreeService remote round trip', async () => {
