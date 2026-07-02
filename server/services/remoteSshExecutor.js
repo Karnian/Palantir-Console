@@ -1,6 +1,9 @@
 const childProcess = require('node:child_process');
 const path = require('node:path');
 
+const WORKER_OUTPUT_MAX_LINES = 500;
+const WORKER_OUTPUT_MAX_BUFFER = 256 * 1024;
+
 /**
  * POSIX single-quote escaping for remote shell insertion. Every string placed
  * into the remote script flows through this function so command, argument,
@@ -128,16 +131,66 @@ function buildCommandScript(command, args = [], { cwd, env } = {}) {
   return cwd ? `cd ${shq(cwd)} && ${script}` : script;
 }
 
+function validateRunId(runId) {
+  if (typeof runId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(runId)) {
+    throw new Error(`runId is not a safe token: ${runId}`);
+  }
+  return runId;
+}
+
+function normalizeLineLimit(lines) {
+  const parsed = Number(lines);
+  if (!Number.isFinite(parsed)) return 200;
+  return Math.min(Math.max(1, Math.trunc(parsed)), 2000);
+}
+
+function normalizeWorkerOutputLineLimit(lines) {
+  return Math.min(normalizeLineLimit(lines), WORKER_OUTPUT_MAX_LINES);
+}
+
+function lastLines(output, lines = 200) {
+  const cappedLines = normalizeLineLimit(lines);
+  const text = String(output || '');
+  const hadTrailingNewline = text.endsWith('\n');
+  const allLines = hadTrailingNewline ? text.slice(0, -1).split('\n') : text.split('\n');
+  const selected = allLines.slice(-cappedLines).join('\n');
+  return hadTrailingNewline && selected ? `${selected}\n` : selected;
+}
+
+function validateWorkerSpec(spec) {
+  if (!spec || typeof spec !== 'object') throw new Error('spawnWorker requires a spec object');
+  if (typeof spec.command !== 'string' || spec.command.length === 0) {
+    throw new Error('spawnWorker requires a non-empty command');
+  }
+  if (spec.args !== undefined && !Array.isArray(spec.args)) throw new Error('spawnWorker args must be an array');
+  if (typeof spec.cwd !== 'string' || spec.cwd.length === 0) {
+    throw new Error('spawnWorker requires a cwd');
+  }
+  if (
+    spec.workerPath !== undefined
+    && spec.workerPath !== null
+    && typeof spec.workerPath !== 'string'
+  ) {
+    throw new Error('spawnWorker workerPath must be a string when provided');
+  }
+  if (spec.workerPath !== undefined && spec.workerPath !== null) {
+    if (
+      spec.workerPath.length === 0
+      || !path.posix.isAbsolute(spec.workerPath)
+      || /[\x00-\x1F\x7F]/.test(spec.workerPath)
+    ) {
+      throw new Error('spawnWorker workerPath must be an absolute POSIX path without control characters');
+    }
+  }
+}
+
 /**
  * Create the SSH implementation of the canonical async NodeExecutor API.
  *
- * P2 fleet note: nodeService.pickExecutor can create this executor, but actual
- * run dispatch is intentionally not wired to remote spawn until P3. SSH nodes
- * have no heartbeat source in P2, so they remain reachable=0 and the P1a queue
- * guard naturally prevents dispatch. Worker/session channel methods
- * (spawnWorker/ownerOf/etc.) are absent by design, following the P0a rule that
- * unimplemented capabilities are represented by absence rather than throwing
- * stubs.
+ * P2/P3 fleet note: nodeService.pickExecutor can create this executor, but
+ * lifecycle run dispatch to the remote worker channel is intentionally wired in
+ * P3b, not here. SSH nodes have no heartbeat source yet, so the dispatch gate
+ * remains a lifecycle concern.
  *
  * Environment handling intentionally differs from local execFile: process.env
  * is never merged automatically. Only env keys explicitly supplied by the
@@ -152,6 +205,14 @@ function buildCommandScript(command, args = [], { cwd, env } = {}) {
  * This allowlist guards public exec only. Trusted executor-owned filesystem
  * primitives build their own scripts and do not go through the public exec
  * allowlist.
+ *
+ * Remote worker channel: spawnWorker/isAlive/getOutput/detectExitCode/kill are
+ * the remote counterpart of executionEngine's tmux worker contract for P3b
+ * lifecycle routing through pickExecutor. Status capture is file-based by
+ * design: tmux capture-pane can be empty after a detached remote session exits,
+ * so stdout and exit status are harvested from per-run files under the first
+ * exposed_root. Worker binaries such as codex/claude may live outside the pod
+ * login PATH, so callers must pass workerPath when PATH prepending is needed.
  *
  * SSH exit code 255 is treated as transport failure and rejects with
  * err.code='SSH_TRANSPORT'. A remote command that genuinely exits 255 is
@@ -168,8 +229,9 @@ function buildCommandScript(command, args = [], { cwd, env } = {}) {
  * refuses to delete an exposed root itself.
  *
  * Remote requirements: /bin/sh, coreutils-compatible realpath, find, mktemp,
- * chmod, cat, test, mkdir, and rm. readdir implements names only via find and
- * does not support withFileTypes or other readdir options.
+ * chmod, cat, test, mkdir, rm, and tail (getOutput), plus tmux (worker channel
+ * spawn/isAlive/kill). readdir implements names only via find and does not
+ * support withFileTypes or other readdir options.
  */
 function createRemoteSshNodeExecutor(node, {
   spawnFn = childProcess.spawn,
@@ -498,8 +560,108 @@ function createRemoteSshNodeExecutor(node, {
     if (res.code !== 0) throw commandError('rm', ['-rf', checked.canonical], res);
   }
 
+  function workerPaths(runId) {
+    const safeRunId = validateRunId(runId);
+    const firstRoot = exposedRoots[0].replace(/\/+$/, '') || '/';
+    const runsRoot = path.posix.join(firstRoot, '.palantir-runs');
+    const statusDir = path.posix.join(runsRoot, safeRunId);
+    return {
+      safeRunId,
+      sessionName: `palantir-run-${safeRunId}`,
+      runsRoot,
+      statusDir,
+      stdoutLog: path.posix.join(statusDir, 'stdout.log'),
+      exitSentinel: path.posix.join(statusDir, 'exit.code'),
+    };
+  }
+
+  function buildWorkerInvocation({ command, args = [], env, workerPath }) {
+    const envParts = normalizeEnv(env);
+    const list = Array.isArray(args) ? args : [];
+    const argv = [shq(command), ...list.map((arg) => shq(arg))];
+    const invocation = ['env', ...envParts, ...argv].join(' ');
+    return workerPath ? `PATH=${shq(workerPath)}:$PATH ${invocation}` : invocation;
+  }
+
+  async function ensureWorkerStatusDir(paths) {
+    await mkdir(paths.runsRoot, { recursive: true });
+    await mkdir(paths.statusDir, { recursive: true });
+  }
+
+  async function spawnWorker(runId, spec) {
+    validateWorkerSpec(spec);
+    const paths = workerPaths(runId);
+    const safeCwd = (await assertWithinRoots(spec.cwd)).canonical;
+    await ensureWorkerStatusDir(paths);
+
+    const workerInvocation = buildWorkerInvocation(spec);
+    const innerScript = `${workerInvocation} > ${shq(paths.stdoutLog)} 2>&1; echo $? > ${shq(paths.exitSentinel)}`;
+    const script = `cd ${shq(safeCwd)} && tmux new-session -d -s ${shq(paths.sessionName)} ${shq(innerScript)}`;
+    const res = await runRemoteScript(script);
+    if (res.code !== 0) {
+      throw commandError('tmux', ['new-session', '-d', '-s', paths.sessionName], res);
+    }
+    return { sessionName: paths.sessionName };
+  }
+
+  async function isAlive(runId) {
+    const paths = workerPaths(runId);
+    const res = await runRemoteCommand('tmux', ['has-session', '-t', paths.sessionName]);
+    return res.code === 0;
+  }
+
+  async function getOutput(runId, lines = 200) {
+    const paths = workerPaths(runId);
+    const cappedLines = normalizeWorkerOutputLineLimit(lines);
+    try {
+      const checked = await assertWithinRoots(paths.stdoutLog, { allowMissing: true });
+      const tailPath = checked.exists ? checked.canonical : paths.stdoutLog;
+      const res = await runRemoteCommand('tail', ['-n', String(cappedLines), tailPath], {
+        maxBuffer: WORKER_OUTPUT_MAX_BUFFER,
+      });
+      if (res.code !== 0) return '';
+      return res.stdout;
+    } catch (err) {
+      if (err.code === 'SSH_TRANSPORT' || err.code === 'EXPOSED_ROOTS') throw err;
+      return '';
+    }
+  }
+
+  async function detectExitCode(runId) {
+    const paths = workerPaths(runId);
+    let text;
+    try {
+      text = await readFile(paths.exitSentinel);
+    } catch (err) {
+      if (err.code === 'SSH_TRANSPORT' || err.code === 'EXPOSED_ROOTS') throw err;
+      return null;
+    }
+    const trimmed = String(text || '').trim();
+    if (!trimmed) return null;
+    if (!/^\d+$/.test(trimmed)) return null;
+    const code = Number.parseInt(trimmed, 10);
+    return code >= 0 && code <= 255 ? code : null;
+  }
+
+  async function kill(runId) {
+    const paths = workerPaths(runId);
+    const res = await runRemoteCommand('tmux', ['kill-session', '-t', paths.sessionName]);
+    return res.code === 0;
+  }
+
+  async function cleanupRun(runId) {
+    const paths = workerPaths(runId);
+    await rmrf(paths.statusDir);
+  }
+
   return {
     exec,
+    spawnWorker,
+    isAlive,
+    getOutput,
+    detectExitCode,
+    kill,
+    cleanupRun,
     fileExists,
     realpath,
     stat,
