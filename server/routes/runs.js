@@ -1,8 +1,8 @@
 const express = require('express');
 const path = require('node:path');
-const fs = require('node:fs');
 const { execFile } = require('node:child_process');
 const { asyncHandler } = require('../middleware/asyncHandler');
+const { createLocalNodeExecutor } = require('../services/nodeExecutor');
 
 // R2-B.2: maximum unified-diff payload size, in bytes. Diffs larger than
 // this are truncated and the client is warned via a `truncated` flag so
@@ -193,7 +193,7 @@ function computeMcpTemplateDrift(snapshotCore, snapshotAppliedAt, mcpTemplateSer
   return { templates: drifted, modified_count: drifted.length };
 }
 
-function createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService }) {
+function createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService, nodeExecutor = createLocalNodeExecutor() }) {
   const router = express.Router();
 
   router.get('/', asyncHandler(async (req, res) => {
@@ -290,7 +290,7 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
     if (!run.worktree_path) {
       return res.json({ diff: null, reason: 'no_worktree' });
     }
-    if (!fs.existsSync(run.worktree_path)) {
+    if (!nodeExecutor.existsSync(run.worktree_path)) {
       return res.json({ diff: null, reason: 'worktree_missing' });
     }
 
@@ -324,8 +324,8 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
       // mode is narrow.
       let resolvedProject = path.resolve(projectDir);
       let resolvedWorktree = path.resolve(run.worktree_path);
-      try { resolvedProject = fs.realpathSync(resolvedProject); } catch { /* fall through */ }
-      try { resolvedWorktree = fs.realpathSync(resolvedWorktree); } catch { /* fall through */ }
+      try { resolvedProject = nodeExecutor.realpathSync(resolvedProject); } catch { /* fall through */ }
+      try { resolvedWorktree = nodeExecutor.realpathSync(resolvedWorktree); } catch { /* fall through */ }
       // The worktree must be under the project root OR the project root
       // itself (non-git-worktree runs share the base cwd). Anything else
       // is either a bug or a malicious payload.

@@ -1,7 +1,8 @@
-const { spawn, execFileSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { assertSpawnAllowed } = require('../utils/spawnGuard');
+const { createLocalNodeExecutor } = require('./nodeExecutor');
 
 const MAX_STAT_CHARS = 8 * 1024;
 const MAX_OUTPUT_TAIL_CHARS = 8 * 1024;
@@ -93,6 +94,13 @@ function resolveDeclaredNodeMajor(worktreePath) {
   }
 }
 
+// NOTE (fleet P0a): node-version detection (readSmallDeclarationFile /
+// defaultNodeResolver) and the test-command spawn below intentionally stay
+// control-plane-local. They move to the execution node together with the
+// whole harvest step in fleet P2/P3 (docs/specs/fleet-remote-nodes-brief.md
+// §4.3) — routing only these reads through NodeExecutor now would resolve
+// node binaries against the wrong host. In P0a only worktree existence and
+// git calls go through the injected nodeExecutor.
 function defaultNodeResolver(major) {
   try {
     const parsedMajor = parsePositiveMajor(major);
@@ -213,6 +221,7 @@ function createHarvestService({
   eventBus,
   testRunner = { bin: '/bin/sh', args: ['-c'] },
   nodeResolver = defaultNodeResolver,
+  nodeExecutor = createLocalNodeExecutor(),
 } = {}) {
   const seenRunIds = new Set();
 
@@ -315,7 +324,7 @@ function createHarvestService({
 
   function listCommits(projectDir, base, branch) {
     const gitEnv = { ...process.env, GIT_EXTERNAL_DIFF: '', GIT_TEXTCONV_DIFF: '' };
-    const output = execFileSync(
+    const output = nodeExecutor.execFileSync(
       'git',
       ['log', '--no-color', '--oneline', `--max-count=${MAX_COMMITS + 1}`, `${base}..${branch}`],
       { cwd: projectDir, stdio: 'pipe', encoding: 'utf-8', env: gitEnv },
@@ -343,7 +352,7 @@ function createHarvestService({
       // Worktree already gone (e.g. executeTask's spawn-failure catch runs its
       // synchronous cleanup before this setImmediate fires). Review still needs
       // one terminal notification, but harvest itself cannot proceed.
-      if (!fs.existsSync(run.worktree_path)) {
+      if (!nodeExecutor.existsSync(run.worktree_path)) {
         pushSummaryError(summary, 'worktree_missing');
         emitHarvested(run, summary);
         return;
