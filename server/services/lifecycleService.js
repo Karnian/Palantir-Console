@@ -9,7 +9,7 @@
  * - Status transitions (run completes → task moves to review)
  */
 
-const { createLocalNodeExecutor } = require('./nodeExecutor');
+const { createLocalNodeExecutor, createLocalWorkerChannel } = require('./nodeExecutor');
 
 function createLifecycleService({
   runService,
@@ -27,8 +27,12 @@ function createLifecycleService({
   authResolver,               // Phase 10D: injectable for tests
   authResolverOpts,           // { hasKeychain, readKeychainToken, prefer, tmpRoot }
   nodeService,
-  nodeExecutor = createLocalNodeExecutor(),
+  nodeExecutor,
 }) {
+  nodeExecutor = nodeExecutor || createLocalNodeExecutor({ executionEngine, streamJsonEngine });
+  const workerChannel = (nodeExecutor && typeof nodeExecutor.spawnWorker === 'function')
+    ? nodeExecutor
+    : createLocalWorkerChannel({ streamJsonEngine, executionEngine });
   // Lazy-require default authResolver so tests that don't use Tier 2 don't
   // force a load of the real keychain probe.
   const _authResolver = authResolver || require('./authResolver');
@@ -714,16 +718,19 @@ function createLifecycleService({
         }
 
         try {
-          result = streamJsonEngine.spawnAgent(run.id, {
-            prompt,
-            cwd,
-            env: spawnEnv,
-            systemPrompt,
-            permissionMode: 'bypassPermissions',
-            allowedTools: mcpTools.length > 0 ? mcpTools : undefined,
-            mcpConfig: effectiveMcpConfig,
-            isManager: false,
-            ...(isolatedOpts || {}),
+          result = workerChannel.spawnWorker(run.id, {
+            engine: 'stream-json',
+            spec: {
+              prompt,
+              cwd,
+              env: spawnEnv,
+              systemPrompt,
+              permissionMode: 'bypassPermissions',
+              allowedTools: mcpTools.length > 0 ? mcpTools : undefined,
+              mcpConfig: effectiveMcpConfig,
+              isManager: false,
+              ...(isolatedOpts || {}),
+            },
           });
         } catch (spawnErr) {
           // spawnAgent itself invokes its onCleanup before rethrow when
@@ -818,11 +825,14 @@ function createLifecycleService({
         }
         const baseArgs = buildAgentArgs(profile, prompt, placeholders);
         const args = adapterName === 'codex' ? [...extraArgs, ...baseArgs] : baseArgs;
-        result = executionEngine.spawnAgent(run.id, {
-          command: profile.command,
-          args,
-          cwd,
-          env: parseEnvAllowlist(profile.env_allowlist, httpBearerEnvKeys),
+        result = workerChannel.spawnWorker(run.id, {
+          engine: 'cli',
+          spec: {
+            command: profile.command,
+            args,
+            cwd,
+            env: parseEnvAllowlist(profile.env_allowlist, httpBearerEnvKeys),
+          },
         });
       }
 
@@ -1036,11 +1046,12 @@ function createLifecycleService({
     for (const run of runningRuns) {
       // Skip manager runs and streamJsonEngine workers — they manage their own lifecycle
       if (run.is_manager) continue;
-      if (streamJsonEngine && streamJsonEngine.hasProcess(run.id)) {
+      const owner = workerChannel.ownerOf(run.id);
+      if (owner === 'stream-json') {
         // streamJsonEngine handles exit via its own event handler (result → updateRunStatus)
         // Just check for orphaned processes where exit was missed
-        if (!streamJsonEngine.isAlive(run.id)) {
-          const exitCode = streamJsonEngine.detectExitCode(run.id);
+        if (!workerChannel.isAlive(run.id, 'stream-json')) {
+          const exitCode = workerChannel.detectExitCode(run.id, 'stream-json');
           if (exitCode !== null) {
             const status = exitCode === 0 ? 'completed' : 'failed';
             try { runService.updateRunStatus(run.id, status, { force: true }); } catch {}
@@ -1049,9 +1060,13 @@ function createLifecycleService({
         }
         continue;
       }
+      // Anything that is not stream-json-owned falls through to the cli
+      // handling — the pre-channel code's else-default. Do NOT gate this on
+      // ownerOf(...)==='cli': a dead/unknown run must still be terminalized
+      // here, and skipping it would strand the run in 'running' forever.
 
-      const alive = executionEngine.isAlive(run.id);
-      const exitCode = executionEngine.detectExitCode(run.id);
+      const alive = workerChannel.isAlive(run.id, 'cli');
+      const exitCode = workerChannel.detectExitCode(run.id, 'cli');
 
       if (!alive || exitCode !== null) {
         // Agent has terminated
@@ -1070,7 +1085,7 @@ function createLifecycleService({
         }
 
         // Capture final output
-        const output = executionEngine.getOutput(run.id, 200);
+        const output = workerChannel.getOutput(run.id, 200);
         if (output) {
           runService.addRunEvent(run.id, 'final_output', JSON.stringify({ output: output.slice(-2000) }));
         }
@@ -1081,7 +1096,7 @@ function createLifecycleService({
         }
 
         // Cleanup tmux session and output tracking
-        executionEngine.kill(run.id);
+        workerChannel.kill(run.id, 'cli');
         _outputHashes.delete(run.id);
 
         if (eventBus) {
@@ -1100,7 +1115,7 @@ function createLifecycleService({
         }
       } else {
         // Still alive — check if tmux output has changed (real activity indicator)
-        const currentOutput = executionEngine.getOutput(run.id, 10);
+        const currentOutput = workerChannel.getOutput(run.id, 10);
         const outputHash = currentOutput ? currentOutput.length + ':' + currentOutput.slice(-100) : '';
         const prevHash = _outputHashes.get(run.id);
         _outputHashes.set(run.id, outputHash);
@@ -1127,14 +1142,14 @@ function createLifecycleService({
 
             if (idleTime > IDLE_TIMEOUT_MS) {
               // Double-check: is the process truly dead or just idle?
-              const alive = executionEngine.isAlive(run.id);
+              const alive = workerChannel.isAlive(run.id, 'cli');
               if (!alive) {
                 // Process is dead — finalize as completed/failed
-                const exitCode = executionEngine.detectExitCode(run.id);
+                const exitCode = workerChannel.detectExitCode(run.id, 'cli');
                 const status = (exitCode === 0) ? 'completed' : 'failed';
                 runService.updateRunStatus(run.id, status, { force: true, reason: 'process_dead_after_idle' });
                 if (run.task_id) checkTaskCompletion(run.task_id);
-                executionEngine.kill(run.id);
+                workerChannel.kill(run.id, 'cli');
                 _outputHashes.delete(run.id);
               } else {
                 // Process alive but truly idle for too long — mark needs_input
@@ -1169,13 +1184,15 @@ function createLifecycleService({
     const needsInputRuns = runService.listRuns({ status: 'needs_input' });
     for (const run of needsInputRuns) {
       if (run.is_manager) continue;
-      // Skip streamJsonEngine runs
-      if (streamJsonEngine && streamJsonEngine.hasProcess(run.id)) continue;
+      // Skip streamJsonEngine runs — everything else falls through to the
+      // cli handling (pre-channel else-default; see health loop note above).
+      const owner = workerChannel.ownerOf(run.id);
+      if (owner === 'stream-json') continue;
 
-      const alive = executionEngine.isAlive(run.id);
+      const alive = workerChannel.isAlive(run.id, 'cli');
       if (alive) {
         // Check if output changed — agent may still be working
-        const currentOutput = executionEngine.getOutput(run.id, 10);
+        const currentOutput = workerChannel.getOutput(run.id, 10);
         const outputHash = currentOutput ? currentOutput.length + ':' + currentOutput.slice(-100) : '';
         const prevHash = _outputHashes.get(run.id);
         _outputHashes.set(run.id, outputHash);
@@ -1187,11 +1204,11 @@ function createLifecycleService({
         }
       } else {
         // Process died while in needs_input
-        const exitCode = executionEngine.detectExitCode(run.id);
+        const exitCode = workerChannel.detectExitCode(run.id, 'cli');
         const status = (exitCode === 0) ? 'completed' : 'failed';
         runService.updateRunStatus(run.id, status, { force: true });
         if (run.task_id) checkTaskCompletion(run.task_id);
-        executionEngine.kill(run.id);
+        workerChannel.kill(run.id, 'cli');
         _outputHashes.delete(run.id);
       }
     }
@@ -1220,6 +1237,8 @@ function createLifecycleService({
    * Crash recovery — detect orphan tmux sessions on startup.
    */
   function recoverOrphanSessions() {
+    // Boot orphan discovery remains executionEngine-direct until P3 makes the
+    // worker channel node-aware.
     if (executionEngine.type !== 'tmux') return [];
 
     const ghostSessions = executionEngine.discoverGhostSessions();
@@ -1234,7 +1253,7 @@ function createLifecycleService({
 
         // If run is still marked as running in DB, it's a valid orphan
         if (run.status === 'running' || run.status === 'queued') {
-          const alive = executionEngine.isAlive(runId);
+          const alive = workerChannel.isAlive(runId, 'cli');
 
           if (alive) {
             // Reattach: update DB to reflect tmux session
@@ -1249,7 +1268,7 @@ function createLifecycleService({
             recovered.push({ runId, status: 'reattached' });
           } else {
             // Session exists but agent terminated
-            const exitCode = executionEngine.detectExitCode(runId);
+            const exitCode = workerChannel.detectExitCode(runId, 'cli');
             const status = (exitCode === 0) ? 'completed' : 'failed';
             runService.updateRunStatus(runId, status, { force: true });
             runService.updateRunResult(runId, {
@@ -1258,7 +1277,7 @@ function createLifecycleService({
                 ? 'Agent completed (recovered after restart)'
                 : `Agent exited with code ${exitCode} (recovered after restart)`,
             });
-            executionEngine.kill(runId);
+            workerChannel.kill(runId, 'cli');
             // Check if task should transition
             if (run.task_id) {
               checkTaskCompletion(run.task_id);
@@ -1366,9 +1385,7 @@ function createLifecycleService({
       throw new Error(`Cannot send input to run in status: ${run.status}`);
     }
 
-    // Try streamJsonEngine first (for Claude workers), fall back to executionEngine
-    const sent = (streamJsonEngine && streamJsonEngine.sendInput(runId, text))
-      || executionEngine.sendInput(runId, text);
+    const sent = workerChannel.sendInput(runId, text);
     if (sent) {
       runService.addRunEvent(runId, 'user_input', JSON.stringify({ text }));
       if (run.status === 'needs_input') {
@@ -1387,11 +1404,7 @@ function createLifecycleService({
     if (['completed', 'failed', 'cancelled', 'stopped'].includes(run.status)) {
       return run;
     }
-    // Use correct engine: streamJsonEngine for manager + claude workers, executionEngine for others
-    const killedByStream = streamJsonEngine && streamJsonEngine.kill(runId);
-    if (!killedByStream) {
-      executionEngine.kill(runId);
-    }
+    workerChannel.kill(runId);
     runService.updateRunStatus(runId, 'cancelled', { force: true });
     if (run.task_id) {
       checkTaskCompletion(run.task_id);

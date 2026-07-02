@@ -5,9 +5,202 @@ const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 
-const { createLocalNodeExecutor } = require('../services/nodeExecutor');
+const { createLocalNodeExecutor, createLocalWorkerChannel } = require('../services/nodeExecutor');
 const { createWorktreeService } = require('../services/worktreeService');
 const { createFsService } = require('../services/fsService');
+
+test('createLocalWorkerChannel dispatches spawnWorker by engine and passes specs through', () => {
+  const calls = [];
+  const streamSpec = { prompt: 'hello' };
+  const cliSpec = { command: 'codex', args: ['run'] };
+  const channel = createLocalWorkerChannel({
+    streamJsonEngine: {
+      spawnAgent(runId, spec) {
+        calls.push({ engine: 'stream-json', runId, spec });
+        return { sessionName: null };
+      },
+    },
+    executionEngine: {
+      spawnAgent(runId, spec) {
+        calls.push({ engine: 'cli', runId, spec });
+        return { sessionName: `session-${runId}` };
+      },
+    },
+  });
+
+  assert.deepEqual(channel.spawnWorker('r-stream', { engine: 'stream-json', spec: streamSpec }), { sessionName: null });
+  assert.deepEqual(channel.spawnWorker('r-cli', { engine: 'cli', spec: cliSpec }), { sessionName: 'session-r-cli' });
+  assert.deepEqual(calls.map((call) => ({ engine: call.engine, runId: call.runId })), [
+    { engine: 'stream-json', runId: 'r-stream' },
+    { engine: 'cli', runId: 'r-cli' },
+  ]);
+  assert.strictEqual(calls[0].spec, streamSpec);
+  assert.strictEqual(calls[1].spec, cliSpec);
+});
+
+test('createLocalWorkerChannel resolves worker ownership', () => {
+  const channel = createLocalWorkerChannel({
+    streamJsonEngine: {
+      hasProcess(runId) { return runId === 'stream-run'; },
+    },
+    executionEngine: {
+      isAlive(runId) { return runId === 'cli-run'; },
+      listSessions() { return []; },
+      detectExitCode() { return null; },
+    },
+  });
+
+  assert.equal(channel.ownerOf('stream-run'), 'stream-json');
+  assert.equal(channel.ownerOf('cli-run'), 'cli');
+  assert.equal(createLocalWorkerChannel({
+    streamJsonEngine: { hasProcess() { return false; } },
+    executionEngine: {},
+  }).ownerOf('missing-run'), null);
+});
+
+test('createLocalWorkerChannel sends input through stream-json before cli fallback', () => {
+  const streamFirstCalls = [];
+  const streamFirst = createLocalWorkerChannel({
+    streamJsonEngine: {
+      sendInput(runId, text) {
+        streamFirstCalls.push({ engine: 'stream-json', runId, text });
+        return true;
+      },
+    },
+    executionEngine: {
+      sendInput(runId, text) {
+        streamFirstCalls.push({ engine: 'cli', runId, text });
+        return true;
+      },
+    },
+  });
+
+  assert.equal(streamFirst.sendInput('r1', 'hello'), true);
+  assert.deepEqual(streamFirstCalls, [{ engine: 'stream-json', runId: 'r1', text: 'hello' }]);
+
+  const fallbackCalls = [];
+  const fallback = createLocalWorkerChannel({
+    streamJsonEngine: {
+      sendInput(runId, text) {
+        fallbackCalls.push({ engine: 'stream-json', runId, text });
+        return false;
+      },
+    },
+    executionEngine: {
+      sendInput(runId, text) {
+        fallbackCalls.push({ engine: 'cli', runId, text });
+        return true;
+      },
+    },
+  });
+
+  assert.equal(fallback.sendInput('r2', 'fallback'), true);
+  assert.deepEqual(fallbackCalls, [
+    { engine: 'stream-json', runId: 'r2', text: 'fallback' },
+    { engine: 'cli', runId: 'r2', text: 'fallback' },
+  ]);
+});
+
+test('createLocalWorkerChannel kills stream-json first then cli when needed', () => {
+  const fallbackCalls = [];
+  const fallback = createLocalWorkerChannel({
+    streamJsonEngine: {
+      kill(runId) {
+        fallbackCalls.push({ engine: 'stream-json', runId });
+        return false;
+      },
+    },
+    executionEngine: {
+      kill(runId) {
+        fallbackCalls.push({ engine: 'cli', runId });
+        return true;
+      },
+    },
+  });
+
+  assert.equal(fallback.kill('r1'), true);
+  assert.deepEqual(fallbackCalls, [
+    { engine: 'stream-json', runId: 'r1' },
+    { engine: 'cli', runId: 'r1' },
+  ]);
+
+  const streamCalls = [];
+  const streamOnly = createLocalWorkerChannel({
+    streamJsonEngine: {
+      kill(runId) {
+        streamCalls.push({ engine: 'stream-json', runId });
+        return true;
+      },
+    },
+    executionEngine: {
+      kill(runId) {
+        streamCalls.push({ engine: 'cli', runId });
+        return true;
+      },
+    },
+  });
+
+  assert.equal(streamOnly.kill('r2'), true);
+  assert.deepEqual(streamCalls, [{ engine: 'stream-json', runId: 'r2' }]);
+});
+
+test('LocalNodeExecutor worker channel methods fail fast before attachEngines', () => {
+  const executor = createLocalNodeExecutor();
+  const calls = [
+    ['spawnWorker', ['r1', { engine: 'cli', spec: {} }]],
+    ['ownerOf', ['r1']],
+    ['isAlive', ['r1']],
+    ['detectExitCode', ['r1']],
+    ['getOutput', ['r1', 10]],
+    ['sendInput', ['r1', 'hello']],
+    ['kill', ['r1']],
+  ];
+
+  for (const [method, args] of calls) {
+    assert.throws(() => executor[method](...args), /worker channel is not attached/);
+  }
+});
+
+test('LocalNodeExecutor exposes worker channel after attachEngines', () => {
+  const calls = [];
+  const executor = createLocalNodeExecutor();
+  const cliSpec = { command: 'codex', args: [] };
+  executor.attachEngines({
+    streamJsonEngine: {
+      hasProcess(runId) { return runId === 'stream-run'; },
+      isAlive() { return true; },
+      detectExitCode() { return null; },
+      sendInput() { return false; },
+      kill() { return false; },
+    },
+    executionEngine: {
+      spawnAgent(runId, spec) {
+        calls.push({ type: 'spawn', runId, spec });
+        return { sessionName: `session-${runId}` };
+      },
+      isAlive(runId) { return runId === 'cli-run'; },
+      detectExitCode() { return null; },
+      getOutput(runId, lines) { return `${runId}:${lines}`; },
+      sendInput(runId, text) {
+        calls.push({ type: 'input', runId, text });
+        return true;
+      },
+      kill(runId) {
+        calls.push({ type: 'kill', runId });
+        return true;
+      },
+    },
+  });
+
+  assert.deepEqual(executor.spawnWorker('cli-run', { engine: 'cli', spec: cliSpec }), { sessionName: 'session-cli-run' });
+  assert.equal(executor.ownerOf('stream-run'), 'stream-json');
+  assert.equal(executor.ownerOf('cli-run'), 'cli');
+  assert.equal(executor.getOutput('cli-run', 5), 'cli-run:5');
+  assert.equal(executor.sendInput('cli-run', 'ok'), true);
+  assert.equal(executor.kill('cli-run'), true);
+  assert.strictEqual(calls[0].spec, cliSpec);
+  assert.deepEqual(calls.map((call) => call.type), ['spawn', 'input', 'kill']);
+});
 
 test('LocalNodeExecutor.exec resolves success with code and stdout', async () => {
   const executor = createLocalNodeExecutor();
