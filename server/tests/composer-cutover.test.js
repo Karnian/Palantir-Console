@@ -145,14 +145,14 @@ function seedPmRun(rs, registry, adapter, projectId, topRunId, db) {
   const run = rs.createRun({
     is_manager: true,
     manager_adapter: 'claude-code',
-    manager_layer: 'pm',
-    conversation_id: `pm:${projectId}`,
+    manager_layer: 'operator',
+    conversation_id: `operator:${projectId}`,
     project_id: projectId,
     parent_run_id: topRunId,
     prompt: 'pm',
   });
   rs.updateRunStatus(run.id, 'running', { force: true });
-  registry.setActive(`pm:${projectId}`, run.id, adapter);
+  registry.setActive(`operator:${projectId}`, run.id, adapter);
   return run;
 }
 
@@ -214,7 +214,7 @@ test('composer path: PM prepends composer block and commits an accepted composit
     compositionLedger: createCompositionLedger(db),
   });
 
-  svc.sendMessage('pm:proj1', { text: 'hello composer', projectId: 'proj1' });
+  svc.sendMessage('operator:proj1', { text: 'hello composer', projectId: 'proj1' });
 
   assert.equal(pmAdapter.calls.length, 1);
   assert.ok(pmAdapter.calls[0].payload.text.startsWith(block));
@@ -259,10 +259,10 @@ test('composer path: PM gate cadence skips unchanged revision and reinjects afte
     compositionLedger: createCompositionLedger(db),
   });
 
-  svc.sendMessage('pm:proj1', { text: 'first', projectId: 'proj1' });
-  svc.sendMessage('pm:proj1', { text: 'second', projectId: 'proj1' });
+  svc.sendMessage('operator:proj1', { text: 'first', projectId: 'proj1' });
+  svc.sendMessage('operator:proj1', { text: 'second', projectId: 'proj1' });
   currentRevision = 6;
-  svc.sendMessage('pm:proj1', { text: 'third', projectId: 'proj1' });
+  svc.sendMessage('operator:proj1', { text: 'third', projectId: 'proj1' });
 
   assert.equal(composer.calls.length, 2);
   assert.match(pmAdapter.calls[0].payload.text, /revision 5/);
@@ -290,7 +290,7 @@ test('composer path: PM null block does not commit ledger rows and null composit
     eventBus,
   });
 
-  svc.sendMessage('pm:proj1', { text: 'empty memory', projectId: 'proj1' });
+  svc.sendMessage('operator:proj1', { text: 'empty memory', projectId: 'proj1' });
 
   assert.equal(pmAdapter.calls.length, 1);
   assert.equal(pmAdapter.calls[0].payload.text, 'empty memory');
@@ -328,7 +328,7 @@ test('composer path: parent notice order stays memory block, notices, original t
   });
   svc.queueParentNotice(pmRun.id, '[system notice]\nworker changed state');
 
-  svc.sendMessage('pm:proj1', { text: 'continue plan', projectId: 'proj1' });
+  svc.sendMessage('operator:proj1', { text: 'continue plan', projectId: 'proj1' });
 
   const sent = pmAdapter.calls[0].payload.text;
   assert.ok(sent.indexOf(block) < sent.indexOf('[system notice]'));
@@ -352,7 +352,7 @@ test('composer path: composer and commit failures degrade after delivery', async
     memoryComposer: makeComposer({ throws: true }),
     compositionLedger: createCompositionLedger(db),
   });
-  assert.doesNotThrow(() => throwingComposerSvc.sendMessage('pm:proj1', { text: 'composer fails', projectId: 'proj1' }));
+  assert.doesNotThrow(() => throwingComposerSvc.sendMessage('operator:proj1', { text: 'composer fails', projectId: 'proj1' }));
   assert.equal(pmAdapter.calls[0].payload.text, 'composer fails');
 
   const commitThrowsLedger = {
@@ -376,7 +376,7 @@ test('composer path: composer and commit failures degrade after delivery', async
     }),
     compositionLedger: commitThrowsLedger,
   });
-  assert.doesNotThrow(() => commitFailSvc.sendMessage('pm:proj1', { text: 'commit fails', projectId: 'proj1' }));
+  assert.doesNotThrow(() => commitFailSvc.sendMessage('operator:proj1', { text: 'commit fails', projectId: 'proj1' }));
   assert.match(pmAdapter.calls[1].payload.text, /commit still delivers/);
 });
 
@@ -493,7 +493,7 @@ test('composer path: PM and Top use distinct owner vectors', async (t) => {
   });
 
   svc.sendMessage('top', { text: 'top request' });
-  svc.sendMessage('pm:proj1', { text: 'pm request', projectId: 'proj1' });
+  svc.sendMessage('operator:proj1', { text: 'pm request', projectId: 'proj1' });
 
   assert.deepEqual(composer.calls[0].owners, [{ owner_type: 'user', owner_id: 'user', provenance: 'user' }]);
   assert.deepEqual(composer.calls[1].owners, [{ owner_type: 'workspace', owner_id: 'proj1' }]);

@@ -123,14 +123,14 @@ function seedPmRun(rs, registry, adapter, projectId, topRunId, db) {
   const run = rs.createRun({
     is_manager: true,
     manager_adapter: 'claude-code',
-    manager_layer: 'pm',
-    conversation_id: `pm:${projectId}`,
+    manager_layer: 'operator',
+    conversation_id: `operator:${projectId}`,
     project_id: projectId,
     parent_run_id: topRunId,
     prompt: 'pm',
   });
   rs.updateRunStatus(run.id, 'running', { force: true });
-  registry.setActive(`pm:${projectId}`, run.id, adapter);
+  registry.setActive(`operator:${projectId}`, run.id, adapter);
   return run;
 }
 
@@ -152,9 +152,9 @@ test('0a: commitAccepted — success path writes event+owner_state+edges atomica
 
   const id = ledger.commitAccepted(composition, {
     runId: 'run-atomic-ok',
-    conversationId: 'pm:proj1',
+    conversationId: 'operator:proj1',
     taskId: null,
-    slotKind: 'pm',
+    slotKind: 'operator',
     provenanceKey: 'proj1',
   });
 
@@ -193,9 +193,9 @@ test('0a: commitAccepted — transaction failure causes full rollback (no orphan
   try {
       ledger.commitAccepted(composition, {
         runId: 'run-atomic-fail',
-        conversationId: 'pm:proj1',
+        conversationId: 'operator:proj1',
         taskId: null,
-        slotKind: 'pm',
+        slotKind: 'operator',
         provenanceKey: 'proj1',
       });
     } catch (err) {
@@ -230,7 +230,7 @@ test('0a: old record()/accept() API still works (back-compat)', async (t) => {
 
   const id = ledger.record(composition, {
     runId: 'run-compat',
-    slotKind: 'pm',
+    slotKind: 'operator',
     provenanceKey: 'proj1',
   });
   assert.ok(id, 'record() should return an id');
@@ -278,7 +278,7 @@ test('0b: compose() returning {block:null,composition:null} emits memory:compose
       logger: () => {},
     });
 
-  svc.sendMessage(`pm:proj1`, { text: 'hello' });
+  svc.sendMessage(`operator:proj1`, { text: 'hello' });
 
   const failed = eventBus.emitted.filter(e => e.channel === 'memory:composer_failed');
   assert.equal(failed.length, 1, 'should emit exactly one memory:composer_failed');
@@ -316,7 +316,7 @@ test('0b: compose() returning {block:null,composition:<non-null>} does NOT emit 
       logger: () => {},
     });
 
-  svc.sendMessage('pm:proj1', { text: 'hello' });
+  svc.sendMessage('operator:proj1', { text: 'hello' });
 
   const failed = eventBus.emitted.filter(e => e.channel === 'memory:composer_failed');
   assert.equal(failed.length, 0, 'empty memory (composition non-null) must NOT emit composer_failed');
@@ -341,15 +341,15 @@ test('0c: mismatched run.conversation_id → 502 before any getRevision (PM)', a
   const pmRun = rs.createRun({
     is_manager: true,
     manager_adapter: 'claude-code',
-    manager_layer: 'pm',
-    conversation_id: 'pm:proj1',   // real conversation_id = proj1
+    manager_layer: 'operator',
+    conversation_id: 'operator:proj1',   // real conversation_id = proj1
     project_id: 'proj1',
     parent_run_id: topRun.id,
     prompt: 'pm',
   });
   rs.updateRunStatus(pmRun.id, 'running', { force: true });
   // Register under proj2 slot — mismatch: slot says proj2, run says proj1
-  registry.setActive('pm:proj2', pmRun.id, pmAdapter);
+  registry.setActive('operator:proj2', pmRun.id, pmAdapter);
 
   const getRevisionCalled = [];
   const memSvc = makeMemoryService({ getRevisionCalled });
@@ -369,7 +369,7 @@ test('0c: mismatched run.conversation_id → 502 before any getRevision (PM)', a
 
   let threw = false;
   try {
-    svc.sendMessage('pm:proj2', { text: 'hello' });
+    svc.sendMessage('operator:proj2', { text: 'hello' });
   } catch (err) {
     threw = true;
     assert.equal(err.httpStatus, 502, 'should throw 502');
@@ -403,7 +403,7 @@ test('0c: correct binding passes without error (PM)', async (t) => {
     });
 
   // Should not throw
-  const result = svc.sendMessage('pm:proj1', { text: 'hello' });
+  const result = svc.sendMessage('operator:proj1', { text: 'hello' });
   assert.equal(result.status, 'sent');
 });
 
@@ -418,8 +418,8 @@ test('0c: mismatched run.conversation_id → 502 before getRevision (Top)', asyn
   const pmRun = rs.createRun({
     is_manager: true,
     manager_adapter: 'claude-code',
-    manager_layer: 'pm',         // layer='pm' but registered under 'top'
-    conversation_id: 'pm:proj1', // conversation_id mismatch with 'top'
+    manager_layer: 'operator',         // layer='operator' but registered under 'top'
+    conversation_id: 'operator:proj1', // conversation_id mismatch with 'top'
     project_id: 'proj1',
     prompt: 'pm',
   });

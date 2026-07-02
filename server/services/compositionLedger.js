@@ -42,16 +42,6 @@ function ownerStateProvenance(row) {
 // ─── factory ─────────────────────────────────────────────────────────────────
 
 /**
- * Returns a 2-element array for IN (?, ?) matching both legacy 'pm' and renamed 'operator'
- * forms of a project slot_kind. For 'top', returns ['top', 'top'] (matches only top).
- */
-function slotKindMatchForms(slotKind) {
-  if (slotKind === 'top') return ['top', 'top'];
-  // project slot: match both 'pm' (legacy) and 'operator' (renamed)
-  return ['pm', 'operator'];
-}
-
-/**
  * createCompositionLedger(db)
  *
  * @param {import('better-sqlite3').Database} db
@@ -119,7 +109,7 @@ function createCompositionLedger(db) {
   // Gate: last accepted composition id for (run_id, slot_kind, provenance_key)
   const stmtGetLastAcceptedId = db.prepare(`
     SELECT id FROM memory_composition_events
-    WHERE run_id = ? AND slot_kind IN (?, ?) AND provenance_key = ? AND status = 'accepted'
+    WHERE run_id = ? AND slot_kind = ? AND provenance_key = ? AND status = 'accepted'
     ORDER BY accepted_at DESC, created_at DESC, rowid DESC
     LIMIT 1
   `);
@@ -134,7 +124,7 @@ function createCompositionLedger(db) {
   const stmtGetLastAcceptedSelectedSetHash = db.prepare(`
     SELECT id, selected_set_hash
     FROM memory_composition_events
-    WHERE run_id = ? AND slot_kind IN (?, ?) AND provenance_key = ? AND status = 'accepted'
+    WHERE run_id = ? AND slot_kind = ? AND provenance_key = ? AND status = 'accepted'
     ORDER BY accepted_at DESC, created_at DESC, rowid DESC
     LIMIT 1
   `);
@@ -144,12 +134,12 @@ function createCompositionLedger(db) {
     DELETE FROM memory_composition_events
     WHERE status = 'accepted'
       AND run_id = @run_id
-      AND slot_kind IN (@sk_a, @sk_b)
+      AND slot_kind = @slot_kind
       AND provenance_key = @provenance_key
       AND id NOT IN (
         SELECT id FROM memory_composition_events
         WHERE run_id = @run_id
-          AND slot_kind IN (@sk_a, @sk_b)
+          AND slot_kind = @slot_kind
           AND provenance_key = @provenance_key
           AND status = 'accepted'
         ORDER BY accepted_at DESC, created_at DESC, rowid DESC
@@ -433,7 +423,7 @@ function createCompositionLedger(db) {
         const { runId, slotKind, provenanceKey, currentOwnerRevisions } =
           (arg != null && typeof arg === 'object') ? arg : {};
         // Find last accepted composition for this slot
-        const lastAccepted = stmtGetLastAcceptedId.get(runId, ...slotKindMatchForms(slotKind), provenanceKey);
+        const lastAccepted = stmtGetLastAcceptedId.get(runId, slotKind, provenanceKey);
         if (!lastAccepted) {
           return { compose: true, reason: 'no_prior_accepted' };
         }
@@ -495,7 +485,7 @@ function createCompositionLedger(db) {
       try {
         const { runId, slotKind, provenanceKey } =
           (arg != null && typeof arg === 'object') ? arg : {};
-        return stmtGetLastAcceptedSelectedSetHash.get(runId, ...slotKindMatchForms(slotKind), provenanceKey) || null;
+        return stmtGetLastAcceptedSelectedSetHash.get(runId, slotKind, provenanceKey) || null;
       } catch (err) {
         console.error('[compositionLedger] getLastAcceptedSelectedSetHash failed (degraded):', err.message);
         return null;
@@ -515,11 +505,9 @@ function createCompositionLedger(db) {
      */
     cleanup(runId, slotKind, provenanceKey) {
       try {
-        const [sk_a, sk_b] = slotKindMatchForms(slotKind);
         stmtCleanupOldAccepted.run({
           run_id: runId,
-          sk_a,
-          sk_b,
+          slot_kind: slotKind,
           provenance_key: provenanceKey,
         });
         stmtCleanupStalePending.run();

@@ -80,7 +80,7 @@ test('invokeSpecialist: originConversationId conflict fails closed; omitted → 
   const trace = fakeTrace();
   const backend = fakeBackend();
   const svc = createSpecialistService({ specialistBackend: backend, trace });
-  await assert.rejects(() => svc.invokeSpecialist({ ...BASE, originConversationId: 'pm:other' }), /conflicts with origin run/);
+  await assert.rejects(() => svc.invokeSpecialist({ ...BASE, originConversationId: 'operator:other' }), /conflicts with origin run/);
   // omitted → derived 'top' surfaces in the invoked event
   await svc.invokeSpecialist({ ...BASE });
   const invoked = trace.events.find((e) => e.type === 'specialist:invoked');

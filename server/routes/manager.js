@@ -668,7 +668,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
    * always freed. Intended as a last-resort operator action — prefer
    * /reset first whenever the adapter might be healthy.
    *
-   * Emits 'pm:force_reset' on eventBus for audit visibility.
+   * Emits 'operator:force_reset' on eventBus for audit visibility.
    */
   router.post('/pm/:projectId/force-reset', asyncHandler(async (req, res) => {
     const { projectId } = req.params;

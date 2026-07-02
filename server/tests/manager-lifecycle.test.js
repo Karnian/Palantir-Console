@@ -201,7 +201,7 @@ test('P1-5 app.shutdown integration: real sweep disposes every live slot', async
   const topAdapter = makeFakeAdapter();
   const pmAdapter = makeFakeAdapter({ disposeThrows: true });
   reg.setActive('top', 'int-top-1', topAdapter);
-  reg.setActive('pm:int-proj-1', 'int-pm-1', pmAdapter);
+  reg.setActive('operator:int-proj-1', 'int-pm-1', pmAdapter);
 
   // Exercise the real shutdown closure — must sweep both slots AND
   // tolerate the pm slot's dispose throwing.
@@ -241,15 +241,15 @@ test('P1-5 app.shutdown sweep iterates snapshot and disposes each slot', async (
   const db = await mkdb(t);
   const { run: topRun, runService: rs } = seedManagerRun(db);
   const { run: pmRun } = seedManagerRun(db, {
-    conversationId: 'pm:proj-1',
-    layer: 'pm',
+    conversationId: 'operator:proj-1',
+    layer: 'operator',
   });
   const reg = createManagerRegistry({ runService: rs });
 
   const topAdapter = makeFakeAdapter();
   const pmAdapter = makeFakeAdapter({ disposeThrows: true }); // hostile path
   reg.setActive('top', topRun.id, topAdapter);
-  reg.setActive('pm:proj-1', pmRun.id, pmAdapter);
+  reg.setActive('operator:proj-1', pmRun.id, pmAdapter);
 
   // Replicate the app.shutdown sweep loop verbatim. If this ever drifts
   // from server/app.js, update both places.

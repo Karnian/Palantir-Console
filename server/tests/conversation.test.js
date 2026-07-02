@@ -104,7 +104,7 @@ test('getRunByConversationId resolves worker and top', async (t) => {
   const worker = rs.createRun({ task_id: 't1', agent_profile_id: 'a1', prompt: 'w', parent_run_id: top.id });
   assert.equal(rs.getRunByConversationId('top').id, top.id);
   assert.equal(rs.getRunByConversationId(`worker:${worker.id}`).id, worker.id);
-  assert.equal(rs.getRunByConversationId('pm:nope'), null);
+  assert.equal(rs.getRunByConversationId('operator:nope'), null);
 });
 
 // --- conversationService: parent notice core behavior ---
@@ -271,10 +271,12 @@ test('parseConversationId rejects malformed ids', () => {
   assert.equal(conv.parseConversationId('')?.kind, undefined);
   assert.equal(conv.parseConversationId(''), null);
   assert.equal(conv.parseConversationId('worker:'), null);
-  assert.equal(conv.parseConversationId('pm:'), null);
+  assert.equal(conv.parseConversationId('operator:'), null);
+  // Phase 4: legacy pm: no longer parses as a project conversation.
+  assert.equal(conv.parseConversationId('pm:alpha'), null);
   assert.equal(conv.parseConversationId('bogus'), null);
   assert.deepEqual(conv.parseConversationId('top'), { kind: 'top' });
-  assert.deepEqual(conv.parseConversationId('pm:alpha'), { kind: 'pm', projectId: 'alpha' });
+  assert.deepEqual(conv.parseConversationId('operator:alpha'), { kind: 'pm', projectId: 'alpha' });
   assert.deepEqual(conv.parseConversationId('worker:abc'), { kind: 'worker', runId: 'abc' });
 });
 
@@ -482,20 +484,20 @@ test('GET /api/manager/status returns layer-aware shape (top+pms)', async (t) =>
 // v3 Phase 2 — multi-slot PM runtime + worker→PM and PM→Top notice routing
 // ---------------------------------------------------------------------------
 
-// Helper: seed a PM run in the registry under 'pm:<projectId>'. Phase 2 does
+// Helper: seed a PM run in the registry under 'operator:<projectId>'. Phase 2 does
 // not spawn real PM adapters (that lives in Phase 3a); tests use a fake
 // adapter identical to the Top fake.
 function seedPmRun({ rs, registry, adapter, projectId, parentTopRunId }) {
   const run = rs.createRun({
     is_manager: true,
     manager_adapter: 'codex',
-    manager_layer: 'pm',
-    conversation_id: `pm:${projectId}`,
+    manager_layer: 'operator',
+    conversation_id: `operator:${projectId}`,
     parent_run_id: parentTopRunId || null,
     prompt: `pm ${projectId}`,
   });
   rs.updateRunStatus(run.id, 'running', { force: true });
-  registry.setActive(`pm:${projectId}`, run.id, adapter);
+  registry.setActive(`operator:${projectId}`, run.id, adapter);
   return run;
 }
 
@@ -510,7 +512,7 @@ test('Phase 2: PM send when no active PM returns 404', async (t) => {
     lifecycleService: makeFakeLifecycle(),
   });
   assert.throws(
-    () => conv.sendMessage('pm:alpha', { text: 'hi' }),
+    () => conv.sendMessage('operator:alpha', { text: 'hi' }),
     /No active PM manager session/
   );
 });
@@ -553,7 +555,7 @@ test('Phase 2: worker→PM queues notice and PM send drains it', async (t) => {
   assert.equal(pmAdapter.calls.length, 0);
 
   // PM send drains and prepends
-  conv.sendMessage('pm:alpha', { text: '요약 보내' });
+  conv.sendMessage('operator:alpha', { text: '요약 보내' });
   assert.equal(pmAdapter.calls.length, 1);
   const pmPayload = pmAdapter.calls[0].payload.text;
   assert.match(pmPayload, /\[system notice\]/);
@@ -585,7 +587,7 @@ test('Phase 2: PM send emits PM→Top notice drained on next Top turn', async (t
   seedPmRun({ rs, registry, adapter: pmAdapter, projectId: 'alpha', parentTopRunId: top.id });
 
   // User talks directly to PM → this alone must mark Top stale
-  conv.sendMessage('pm:alpha', { text: '새 방향으로 가자' });
+  conv.sendMessage('operator:alpha', { text: '새 방향으로 가자' });
   assert.equal(pmAdapter.calls.length, 1);
   assert.doesNotMatch(pmAdapter.calls[0].payload.text, /\[system notice\]/);
 
@@ -594,7 +596,7 @@ test('Phase 2: PM send emits PM→Top notice drained on next Top turn', async (t
   assert.equal(topAdapter.calls.length, 1);
   const topPayload = topAdapter.calls[0].payload.text;
   assert.match(topPayload, /\[system notice\]/);
-  assert.match(topPayload, /pm:alpha/);
+  assert.match(topPayload, /operator:alpha/);
   assert.match(topPayload, /새 방향으로 가자/);
   assert.match(topPayload, /현재 계획 공유/);
 
@@ -630,7 +632,7 @@ test('Phase 2: PM→Top notice drops if PM parent is not the active Top', async 
   // PM still carries the OLD top as its parent
   seedPmRun({ rs, registry, adapter: pmAdapter, projectId: 'alpha', parentTopRunId: oldTop.id });
 
-  conv.sendMessage('pm:alpha', { text: '바꿔' });
+  conv.sendMessage('operator:alpha', { text: '바꿔' });
   assert.equal(pmAdapter.calls.length, 1);
 
   // Next Top turn must not carry a notice — the PM's parent is stale.
@@ -660,7 +662,7 @@ test('Phase 2: worker→PM drops notice if the PM parent is not the registered P
 
   // Stale PM run (exists in DB but NOT registered as the live pm:alpha)
   const stalePm = rs.createRun({
-    is_manager: true, manager_layer: 'pm', conversation_id: 'pm:alpha',
+    is_manager: true, manager_layer: 'operator', conversation_id: 'operator:alpha',
     parent_run_id: top.id, manager_adapter: 'codex',
   });
   rs.updateRunStatus(stalePm.id, 'completed', { force: true });
@@ -747,9 +749,9 @@ test('Phase 2: PM send drain is NOT committed when adapter rejects', async (t) =
   conv.sendMessage(`worker:${worker.id}`, { text: 'WNOTE' });
 
   // First PM send fails → queue must survive
-  assert.throws(() => conv.sendMessage('pm:alpha', { text: 'first' }), /Failed to deliver/);
+  assert.throws(() => conv.sendMessage('operator:alpha', { text: 'first' }), /Failed to deliver/);
   // Second PM send succeeds → notice delivered
-  conv.sendMessage('pm:alpha', { text: 'second' });
+  conv.sendMessage('operator:alpha', { text: 'second' });
   // Accepted call is index 1 (first was rejected but still appended)
   const acceptedPayload = flakyPm.calls[1].payload.text;
   assert.match(acceptedPayload, /\[system notice\]/);
@@ -841,7 +843,7 @@ test('Phase 2: PM slot cleared → lingering notices are dropped', async (t) => 
   const registry = createManagerRegistry({ runService: rs });
   const topAdapter = makeFakeAdapter();
   // PM adapter that reports dead on the second probeActive call — the
-  // first probe (during sendMessage('pm:alpha') below) still reports alive.
+  // first probe (during sendMessage('operator:alpha') below) still reports alive.
   let pmAlive = true;
   const dyingPm = {
     calls: [],
@@ -877,7 +879,7 @@ test('Phase 2: PM slot cleared → lingering notices are dropped', async (t) => 
 
   // Simulate PM death via probeActive — registry slot clears, listener fires
   pmAlive = false;
-  const probed = registry.probeActive('pm:alpha');
+  const probed = registry.probeActive('operator:alpha');
   assert.equal(probed, null);
 
   // A brand-new PM run takes over the same slot. If the queue had
@@ -885,7 +887,7 @@ test('Phase 2: PM slot cleared → lingering notices are dropped', async (t) => 
   pmAlive = true;
   const newPm = seedPmRun({ rs, registry, adapter: dyingPm, projectId: 'alpha', parentTopRunId: top.id });
   assert.notEqual(newPm.id, pm.id);
-  conv.sendMessage('pm:alpha', { text: 'fresh' });
+  conv.sendMessage('operator:alpha', { text: 'fresh' });
   const firstFresh = dyingPm.calls[0].payload.text;
   assert.doesNotMatch(firstFresh, /stranded/, 'old PM notice must be dropped on slot clear');
   assert.match(firstFresh, /fresh/);
@@ -921,21 +923,21 @@ test('Phase 2: setActive rotation clears notices for replaced run id', async (t)
 
   // Rotate: new PM takes the slot directly
   const newPm = rs.createRun({
-    is_manager: true, manager_layer: 'pm', conversation_id: 'pm:alpha',
+    is_manager: true, manager_layer: 'operator', conversation_id: 'operator:alpha',
     parent_run_id: top.id, manager_adapter: 'codex',
   });
   rs.updateRunStatus(newPm.id, 'running', { force: true });
-  registry.setActive('pm:alpha', newPm.id, pmAdapter);
+  registry.setActive('operator:alpha', newPm.id, pmAdapter);
 
-  conv.sendMessage('pm:alpha', { text: 'new' });
+  conv.sendMessage('operator:alpha', { text: 'new' });
   assert.equal(pmAdapter.calls.length, 1);
   assert.doesNotMatch(pmAdapter.calls[0].payload.text, /old/);
   assert.match(pmAdapter.calls[0].payload.text, /new/);
 });
 
-test('Phase 2: POST /api/conversations/pm:alpha returns null run when no PM', async (t) => {
+test('Phase 4: GET /api/conversations/operator:alpha returns null run when no PM', async (t) => {
   const app = await createTestApp(t);
-  const res = await request(app).get('/api/conversations/pm:alpha');
+  const res = await request(app).get('/api/conversations/operator:alpha');
   assert.equal(res.status, 200);
   assert.equal(res.body.conversation.kind, 'pm');
   assert.equal(res.body.conversation.projectId, 'alpha');

@@ -127,8 +127,9 @@ function createConversationService({
   function parseConversationId(id) {
     if (typeof id !== 'string' || id.length === 0) return null;
     if (id === 'top') return { kind: 'top' };
-    // dual-read: accept legacy `pm:` AND new `operator:` (kind stays 'pm' so all
-    // downstream consumers of parseConversationId are unchanged in Phase 0).
+    // Phase 4: `operator:` only (dual-read removed). The internal `kind: 'pm'`
+    // is an untouched conversationService enum — downstream consumers of
+    // parseConversationId are unchanged.
     const proj = parseProjectConversationId(id);
     if (proj) return { kind: 'pm', projectId: proj.projectId };
     if (id.startsWith('worker:')) {

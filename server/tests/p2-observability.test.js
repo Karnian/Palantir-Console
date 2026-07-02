@@ -4,7 +4,7 @@
 // hooks.js). This file covers the P2-4 deriveOperatorProjectId diagnostic
 // hook — a pure observability addition that does not change return
 // behavior but surfaces drift between the JOIN-derived project id and
-// the conversation_id 'pm:<id>' path.
+// the conversation_id 'operator:<id>' path.
 //
 // P3-6: wires the diagnostic hook (set inside createRunService) to the
 // eventBus so server-side observers and run_events get the mismatch signal.
@@ -32,8 +32,8 @@ test('P2-4: deriveOperatorProjectId returns parsed pid when only conversation_id
   const run = {
     id: 'r2',
     project_id: null,
-    manager_layer: 'pm',
-    conversation_id: 'pm:proj_b',
+    manager_layer: 'operator',
+    conversation_id: 'operator:proj_b',
   };
   assert.equal(deriveOperatorProjectId(run), 'proj_b');
 });
@@ -42,8 +42,8 @@ test('P2-4: deriveOperatorProjectId prefers JOIN path when both agree', () => {
   const run = {
     id: 'r3',
     project_id: 'proj_c',
-    manager_layer: 'pm',
-    conversation_id: 'pm:proj_c',
+    manager_layer: 'operator',
+    conversation_id: 'operator:proj_c',
   };
   assert.equal(deriveOperatorProjectId(run), 'proj_c');
 });
@@ -56,8 +56,8 @@ test('P2-4: deriveOperatorProjectId fires diagnostic hook on mismatch and still 
   const run = {
     id: 'r4',
     project_id: 'proj_join',
-    manager_layer: 'pm',
-    conversation_id: 'pm:proj_other',
+    manager_layer: 'operator',
+    conversation_id: 'operator:proj_other',
   };
   const result = deriveOperatorProjectId(run);
   assert.equal(result, 'proj_join', 'JOIN path is authoritative even on mismatch');
@@ -65,7 +65,7 @@ test('P2-4: deriveOperatorProjectId fires diagnostic hook on mismatch and still 
   assert.equal(received[0].runId, 'r4');
   assert.equal(received[0].joinPid, 'proj_join');
   assert.equal(received[0].parsedPid, 'proj_other');
-  assert.equal(received[0].conversationId, 'pm:proj_other');
+  assert.equal(received[0].conversationId, 'operator:proj_other');
 });
 
 test('P2-4: deriveOperatorProjectId does NOT fire diagnostic when only one source is present', (t) => {
@@ -74,7 +74,7 @@ test('P2-4: deriveOperatorProjectId does NOT fire diagnostic when only one sourc
   t.after(() => setDeriveOperatorProjectIdDiagnostics(null));
 
   deriveOperatorProjectId({ id: 'r5', project_id: 'p', manager_layer: null });
-  deriveOperatorProjectId({ id: 'r6', project_id: null, manager_layer: 'pm', conversation_id: 'pm:p' });
+  deriveOperatorProjectId({ id: 'r6', project_id: null, manager_layer: 'operator', conversation_id: 'operator:p' });
   deriveOperatorProjectId({ id: 'r7', project_id: null, manager_layer: null });
 
   assert.equal(received.length, 0, 'no diagnostic when sources cannot disagree');
@@ -87,8 +87,8 @@ test('P2-4: deriveOperatorProjectId tolerates a throwing diagnostic hook', (t) =
   const run = {
     id: 'r8',
     project_id: 'a',
-    manager_layer: 'pm',
-    conversation_id: 'pm:b',
+    manager_layer: 'operator',
+    conversation_id: 'operator:b',
   };
   // Must not propagate the hook's throw.
   const result = deriveOperatorProjectId(run);
@@ -99,8 +99,8 @@ test('P2-4: deriveOperatorProjectId handles null / malformed runs without throwi
   assert.equal(deriveOperatorProjectId(null), null);
   assert.equal(deriveOperatorProjectId(undefined), null);
   assert.equal(deriveOperatorProjectId({}), null);
-  assert.equal(deriveOperatorProjectId({ manager_layer: 'pm', conversation_id: 'pm:' }), null);
-  assert.equal(deriveOperatorProjectId({ manager_layer: 'pm', conversation_id: 'notpm:x' }), null);
+  assert.equal(deriveOperatorProjectId({ manager_layer: 'operator', conversation_id: 'operator:' }), null);
+  assert.equal(deriveOperatorProjectId({ manager_layer: 'operator', conversation_id: 'notoperator:x' }), null);
 });
 
 // ---------------------------------------------------------------------------
@@ -135,8 +135,8 @@ test('P3-6: createRunService wires deriveOperatorProjectId to emit diagnostic:pm
   const run = {
     id: 'r_p3_bus',
     project_id: 'proj_join',
-    manager_layer: 'pm',
-    conversation_id: 'pm:proj_other',
+    manager_layer: 'operator',
+    conversation_id: 'operator:proj_other',
   };
   deriveOperatorProjectId(run);
 
@@ -144,7 +144,7 @@ test('P3-6: createRunService wires deriveOperatorProjectId to emit diagnostic:pm
   assert.equal(received[0].runId, 'r_p3_bus');
   assert.equal(received[0].derived, 'proj_join');
   assert.equal(received[0].joined, 'proj_other');
-  assert.equal(received[0].conversationId, 'pm:proj_other');
+  assert.equal(received[0].conversationId, 'operator:proj_other');
 });
 
 test('P3-6: createRunService wires deriveOperatorProjectId to record diagnostic run_event on mismatch', async (t) => {
@@ -161,8 +161,8 @@ test('P3-6: createRunService wires deriveOperatorProjectId to record diagnostic 
   // Create a PM manager run with conversation_id matching project join
   const run = runService.createRun({
     is_manager: true,
-    manager_layer: 'pm',
-    conversation_id: 'pm:proj_p3_j',
+    manager_layer: 'operator',
+    conversation_id: 'operator:proj_p3_j',
   });
 
   // Manually trigger deriveOperatorProjectId with a mismatch between row's project_id
@@ -171,8 +171,8 @@ test('P3-6: createRunService wires deriveOperatorProjectId to record diagnostic 
   const mismatchRun = {
     id: run.id,
     project_id: 'proj_p3_j',
-    manager_layer: 'pm',
-    conversation_id: 'pm:proj_p3_o',
+    manager_layer: 'operator',
+    conversation_id: 'operator:proj_p3_o',
   };
   deriveOperatorProjectId(mismatchRun);
 
@@ -196,8 +196,8 @@ test('P3-6: diagnostic wiring is resilient — emitting on mockBus that throws d
   const run = {
     id: 'r_p3_safe',
     project_id: 'a',
-    manager_layer: 'pm',
-    conversation_id: 'pm:b',
+    manager_layer: 'operator',
+    conversation_id: 'operator:b',
   };
   // Must not throw even though the bus is broken
   const result = deriveOperatorProjectId(run);

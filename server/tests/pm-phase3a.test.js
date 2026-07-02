@@ -138,7 +138,7 @@ test('Phase 3a: lazy spawn creates a PM run when none exists', async (t) => {
   assert.ok(result1.run.parent_run_id, 'parent_run_id should be set to active Top');
 
   // Registry now has the PM slot
-  assert.equal(registry.getActiveRunId(`pm:${project.id}`), result1.run.id);
+  assert.equal(registry.getActiveRunId(`operator:${project.id}`), result1.run.id);
 
   // Phase 3a R1 fix: the brief is injected into the SYSTEM prompt, not
   // via a seed runTurn. No adapter.runTurn should fire before the user's
@@ -209,7 +209,7 @@ test('P2-1: fresh PM spawn leaves run in queued until first turn emits thread.st
   // Trigger the first real user turn via conversationService. The fake
   // adapter's runTurn synthesizes thread.started on first call, which
   // invokes onThreadStarted → markRunStarted.
-  conv.sendMessage(`pm:${project.id}`, { text: 'hello' });
+  conv.sendMessage(`operator:${project.id}`, { text: 'hello' });
 
   const runAfter = rs.getRun(result.run.id);
   assert.equal(runAfter.status, 'running', 'PM run flips to running after first turn / thread.started');
@@ -362,7 +362,7 @@ test('Phase 3a: conversationService integrates lazy PM spawn on first message', 
   seedTop({ rs, registry, adapter: topAdapter });
 
   // First call: no PM → conversationService should lazy-spawn and deliver
-  const sendResult = conv.sendMessage(`pm:${project.id}`, { text: '시작' });
+  const sendResult = conv.sendMessage(`operator:${project.id}`, { text: '시작' });
   assert.equal(sendResult.status, 'sent');
   assert.equal(sendResult.target.kind, 'pm');
 
@@ -378,7 +378,7 @@ test('Phase 3a: conversationService integrates lazy PM spawn on first message', 
   assert.equal(brief.pm_adapter, 'codex');
 
   // Second call: PM already live → direct delivery (no re-spawn)
-  conv.sendMessage(`pm:${project.id}`, { text: '두번째' });
+  conv.sendMessage(`operator:${project.id}`, { text: '두번째' });
   assert.equal(fakePm._runTurnCalls.length, 2);
 });
 
@@ -447,7 +447,7 @@ test('Phase 3a: R1 fix — no back-to-back runTurn race on cold PM spawn', async
   seedTop({ rs, registry, adapter: strictPm });
 
   // If the seed-runTurn race existed, this would throw.
-  const result = conv.sendMessage(`pm:${project.id}`, { text: 'cold start' });
+  const result = conv.sendMessage(`operator:${project.id}`, { text: 'cold start' });
   assert.equal(result.status, 'sent');
   assert.equal(strictPm.calls.length, 1, 'exactly one runTurn — the user message');
 });
@@ -496,10 +496,10 @@ test('Phase 3a: operatorCleanupService.reset disposes live PM and clears brief',
 
   // The thread id only materializes on the first real turn (R1 fix —
   // no seed runTurn inside operatorSpawnService). Trigger it via conv.
-  conv.sendMessage(`pm:${project.id}`, { text: 'first' });
+  conv.sendMessage(`operator:${project.id}`, { text: 'first' });
 
   // Pre-reset: slot is live, brief has thread id
-  assert.ok(registry.getActiveRunId(`pm:${project.id}`));
+  assert.ok(registry.getActiveRunId(`operator:${project.id}`));
   assert.ok(projectBriefService.getBrief(project.id).pm_thread_id);
 
   const result = cleanup.reset(project.id);
@@ -508,7 +508,7 @@ test('Phase 3a: operatorCleanupService.reset disposes live PM and clears brief',
   assert.equal(result.cancelledRunId, pmRunId);
 
   // Post-reset: slot cleared, brief thread id null, adapter disposeSession called
-  assert.equal(registry.getActiveRunId(`pm:${project.id}`), null);
+  assert.equal(registry.getActiveRunId(`operator:${project.id}`), null);
   assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, null);
   assert.ok(fakePm._disposeCalls.includes(pmRunId));
 
@@ -567,7 +567,7 @@ test('Phase 3a: lazy spawn after reset starts a fresh thread', async (t) => {
   // First spawn + first turn → thread id persisted (R1 fix: no seed turn,
   // thread id only appears after the first real runTurn).
   const first = spawn.ensureLiveOperator({ projectId: project.id });
-  conv.sendMessage(`pm:${project.id}`, { text: 'first message' });
+  conv.sendMessage(`operator:${project.id}`, { text: 'first message' });
   const firstThreadId = projectBriefService.getBrief(project.id).pm_thread_id;
   assert.ok(firstThreadId);
 
@@ -578,7 +578,7 @@ test('Phase 3a: lazy spawn after reset starts a fresh thread', async (t) => {
   const second = spawn.ensureLiveOperator({ projectId: project.id });
   assert.notEqual(second.run.id, first.run.id);
   assert.equal(second.resumed, false, 'second spawn is a fresh thread, not a resume');
-  conv.sendMessage(`pm:${project.id}`, { text: 'after reset' });
+  conv.sendMessage(`operator:${project.id}`, { text: 'after reset' });
   const secondThreadId = projectBriefService.getBrief(project.id).pm_thread_id;
   assert.notEqual(secondThreadId, firstThreadId);
 });
@@ -674,8 +674,8 @@ test('Phase 3a: R2 fix — operatorCleanupService.reset rethrows disposeSession 
   const project = projectService.createProject({ name: 'alpha' });
   seedTop({ rs, registry, adapter: flakyDispose });
   spawn.ensureLiveOperator({ projectId: project.id });
-  conv.sendMessage(`pm:${project.id}`, { text: 'first' });
-  const pmRunIdBefore = registry.getActiveRunId(`pm:${project.id}`);
+  conv.sendMessage(`operator:${project.id}`, { text: 'first' });
+  const pmRunIdBefore = registry.getActiveRunId(`operator:${project.id}`);
   const threadIdBefore = projectBriefService.getBrief(project.id).pm_thread_id;
   assert.ok(pmRunIdBefore);
   assert.ok(threadIdBefore);
@@ -683,7 +683,7 @@ test('Phase 3a: R2 fix — operatorCleanupService.reset rethrows disposeSession 
 
   // Reset must throw, and no state must have changed.
   assert.throws(() => cleanup.reset(project.id), /disposeSession failed/);
-  assert.equal(registry.getActiveRunId(`pm:${project.id}`), pmRunIdBefore, 'registry slot must remain');
+  assert.equal(registry.getActiveRunId(`operator:${project.id}`), pmRunIdBefore, 'registry slot must remain');
   assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, threadIdBefore, 'brief must remain');
   assert.equal(rs.getRun(pmRunIdBefore).status, statusBefore, 'run status must remain (not cancelled)');
 
@@ -691,7 +691,7 @@ test('Phase 3a: R2 fix — operatorCleanupService.reset rethrows disposeSession 
   flakyDispose.disposeSession = realDispose;
   const result = cleanup.reset(project.id);
   assert.equal(result.disposed, true);
-  assert.equal(registry.getActiveRunId(`pm:${project.id}`), null);
+  assert.equal(registry.getActiveRunId(`operator:${project.id}`), null);
 });
 
 test('Phase 3a: R1 fix — DELETE /api/projects/:id refuses on operatorCleanupService failure', async (t) => {
@@ -764,9 +764,9 @@ test('P7-2: forceReset succeeds even when disposeSession throws', async (t) => {
   const project = projectService.createProject({ name: 'alpha' });
   seedTop({ rs, registry, adapter: topAdapter });
   spawn.ensureLiveOperator({ projectId: project.id });
-  conv.sendMessage(`pm:${project.id}`, { text: 'hello' });
+  conv.sendMessage(`operator:${project.id}`, { text: 'hello' });
 
-  const pmRunId = registry.getActiveRunId(`pm:${project.id}`);
+  const pmRunId = registry.getActiveRunId(`operator:${project.id}`);
   assert.ok(pmRunId, 'PM run is live before forceReset');
   assert.ok(projectBriefService.getBrief(project.id).pm_thread_id, 'brief has thread id');
 
@@ -783,7 +783,7 @@ test('P7-2: forceReset succeeds even when disposeSession throws', async (t) => {
   assert.ok(result.disposeError, 'disposeError records the failure reason');
 
   // Registry slot must be gone
-  assert.equal(registry.getActiveRunId(`pm:${project.id}`), null, 'registry slot cleared');
+  assert.equal(registry.getActiveRunId(`operator:${project.id}`), null, 'registry slot cleared');
 
   // Brief must be cleared
   assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, null, 'pm_thread_id cleared');
@@ -792,9 +792,10 @@ test('P7-2: forceReset succeeds even when disposeSession throws', async (t) => {
   const run = rs.getRun(pmRunId);
   assert.equal(run.status, 'failed', 'run marked failed even when dispose threw');
 
-  // Audit events must have been emitted on legacy and canonical channels.
-  assert.equal(emitted.length, 2, 'dual eventBus emissions');
-  assert.ok(emitted.some(e => e.channel === 'pm:force_reset'), 'legacy pm force-reset event emitted');
+  // Audit event must have been emitted on the canonical operator channel only
+  // (Phase 4: legacy pm:force_reset dual-emit removed).
+  assert.equal(emitted.length, 1, 'single eventBus emission');
+  assert.ok(!emitted.some(e => e.channel === 'pm:force_reset'), 'legacy pm force-reset event NOT emitted');
   const operatorEvent = emitted.find(e => e.channel === 'operator:force_reset');
   assert.ok(operatorEvent, 'canonical operator force-reset event emitted');
   assert.equal(operatorEvent.data.projectId, project.id);
@@ -837,9 +838,9 @@ test('P7-2: forceReset succeeds cleanly when disposeSession works', async (t) =>
   const project = projectService.createProject({ name: 'beta' });
   seedTop({ rs, registry, adapter: topAdapter });
   spawn.ensureLiveOperator({ projectId: project.id });
-  conv.sendMessage(`pm:${project.id}`, { text: 'hello' });
+  conv.sendMessage(`operator:${project.id}`, { text: 'hello' });
 
-  const pmRunId = registry.getActiveRunId(`pm:${project.id}`);
+  const pmRunId = registry.getActiveRunId(`operator:${project.id}`);
 
   const result = cleanup.forceReset(project.id);
 
@@ -848,11 +849,11 @@ test('P7-2: forceReset succeeds cleanly when disposeSession works', async (t) =>
   assert.equal(result.cancelledRunId, pmRunId);
   assert.equal(result.disposeError, null, 'no disposeError when dispose succeeded');
 
-  assert.equal(registry.getActiveRunId(`pm:${project.id}`), null);
+  assert.equal(registry.getActiveRunId(`operator:${project.id}`), null);
   assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, null);
 
-  assert.equal(emitted.length, 2);
-  assert.ok(emitted.some(e => e.channel === 'pm:force_reset'));
+  assert.equal(emitted.length, 1);
+  assert.ok(!emitted.some(e => e.channel === 'pm:force_reset'));
   const operatorEvent = emitted.find(e => e.channel === 'operator:force_reset');
   assert.ok(operatorEvent);
   assert.equal(operatorEvent.data.disposed, true);
@@ -883,9 +884,10 @@ test('P7-2: forceReset is idempotent when no PM is live', async (t) => {
   assert.equal(result.cancelledRunId, null);
   assert.equal(result.disposeError, null);
 
-  // Audit events still fired so the operator knows the call happened.
-  assert.equal(emitted.length, 2);
-  assert.ok(emitted.some(e => e.channel === 'pm:force_reset'));
+  // Audit event still fired so the operator knows the call happened
+  // (Phase 4: single operator: emission only).
+  assert.equal(emitted.length, 1);
+  assert.ok(!emitted.some(e => e.channel === 'pm:force_reset'));
   assert.ok(emitted.some(e => e.channel === 'operator:force_reset'));
 });
 
@@ -920,16 +922,16 @@ test('P7-2: normal reset behavior is unchanged (fail-closed still applies)', asy
   const project = projectService.createProject({ name: 'delta' });
   seedTop({ rs, registry, adapter: topAdapter });
   spawn.ensureLiveOperator({ projectId: project.id });
-  conv.sendMessage(`pm:${project.id}`, { text: 'hi' });
+  conv.sendMessage(`operator:${project.id}`, { text: 'hi' });
 
-  const pmRunId = registry.getActiveRunId(`pm:${project.id}`);
+  const pmRunId = registry.getActiveRunId(`operator:${project.id}`);
   const threadId = projectBriefService.getBrief(project.id).pm_thread_id;
 
   // reset() must still throw (fail-closed unchanged)
   assert.throws(() => cleanup.reset(project.id), /disposeSession failed/);
 
   // State must remain intact after failed reset
-  assert.equal(registry.getActiveRunId(`pm:${project.id}`), pmRunId, 'slot intact after failed reset');
+  assert.equal(registry.getActiveRunId(`operator:${project.id}`), pmRunId, 'slot intact after failed reset');
   assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, threadId, 'brief intact after failed reset');
 });
 
@@ -949,13 +951,13 @@ test('P7-2: POST /api/manager/pm/:projectId/force-reset HTTP wiring', async (t) 
   assert.equal(res.body.disposeError, null);
 });
 
-test('Phase 3a: PM system prompt uses layer=pm variant', () => {
+test('Phase 3a: PM system prompt uses layer=operator variant', () => {
   const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
   const fakeAdapter = {
     buildGuardrailsSection: () => '## Adapter Guardrails\nTest.',
   };
   const topPrompt = buildManagerSystemPrompt({ adapter: fakeAdapter, port: 4177, layer: 'top' });
-  const pmPrompt = buildManagerSystemPrompt({ adapter: fakeAdapter, port: 4177, layer: 'pm' });
+  const pmPrompt = buildManagerSystemPrompt({ adapter: fakeAdapter, port: 4177, layer: 'operator' });
   assert.match(topPrompt, /top-level dispatcher/);
   assert.match(pmPrompt, /project-scoped PM/);
   // PM gets worker intervention APIs (input/cancel), Top does not

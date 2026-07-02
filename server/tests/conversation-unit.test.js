@@ -424,13 +424,13 @@ function seedPmRun(db, rs, registry, pmAdapter, { projectId = 'proj-pm1', parent
   const run = rs.createRun({
     is_manager: true,
     manager_adapter: 'codex',
-    manager_layer: 'pm',
-    conversation_id: `pm:${projectId}`,
+    manager_layer: 'operator',
+    conversation_id: `operator:${projectId}`,
     parent_run_id: parentTopRunId || null,
     prompt: `pm for ${projectId}`,
   });
   rs.updateRunStatus(run.id, 'running', { force: true });
-  registry.setActive(`pm:${projectId}`, run.id, pmAdapter);
+  registry.setActive(`operator:${projectId}`, run.id, pmAdapter);
   return rs.getRun(run.id);
 }
 
@@ -446,7 +446,7 @@ test('conv: sendMessage to pm:<id> dispatches runTurn on PM adapter', async (t) 
   });
 
   seedPmRun(db, rs, registry, pmAdapter);
-  const result = conv.sendMessage('pm:proj-pm1', { text: 'hello pm' });
+  const result = conv.sendMessage('operator:proj-pm1', { text: 'hello pm' });
 
   assert.equal(result.status, 'sent');
   assert.equal(result.target.kind, 'pm');
@@ -466,7 +466,7 @@ test('conv: sendMessage to pm:<id> throws 404 when no active PM', async (t) => {
   });
 
   let caught;
-  try { conv.sendMessage('pm:no-such-project', { text: 'hi' }); } catch (e) { caught = e; }
+  try { conv.sendMessage('operator:no-such-project', { text: 'hi' }); } catch (e) { caught = e; }
   assert.ok(caught, 'should throw');
   assert.equal(caught.httpStatus, 404);
   assert.match(caught.message, /No active PM manager session/);
@@ -498,7 +498,7 @@ test('conv: PM→Top notice queued when PM message has active parent Top', async
   });
 
   // sendMessage to PM — pmAdapter is in registry, so it gets the call
-  conv2.sendMessage(`pm:proj-pm1`, { text: 'PM task update' });
+  conv2.sendMessage(`operator:proj-pm1`, { text: 'PM task update' });
 
   // PM's parent_run_id = topRun.id, and topRun is still active Top
   // → notice should be queued for topRun.id
@@ -525,7 +525,7 @@ test('conv: PM→Top notice dropped when parent Top is no longer active', async 
   // Clear the Top slot → parent is no longer active
   registry.clearActive('top');
 
-  conv.sendMessage('pm:proj-pm1', { text: 'PM message after top gone' });
+  conv.sendMessage('operator:proj-pm1', { text: 'PM message after top gone' });
 
   // No notice should be queued — parent Top is gone
   const notices = conv.consumeParentNotices(topRun.id);
@@ -628,26 +628,26 @@ test('conv: onSlotCleared for PM slot scrubs PM notices on setActive replacement
 
   // First PM run
   const pm1 = rs.createRun({
-    is_manager: true, manager_adapter: 'codex', manager_layer: 'pm',
-    conversation_id: 'pm:proj-slot', prompt: 'pm1',
+    is_manager: true, manager_adapter: 'codex', manager_layer: 'operator',
+    conversation_id: 'operator:proj-slot', prompt: 'pm1',
   });
   rs.updateRunStatus(pm1.id, 'running', { force: true });
-  registry.setActive('pm:proj-slot', pm1.id, adapter1);
+  registry.setActive('operator:proj-slot', pm1.id, adapter1);
 
   conv.queueParentNotice(pm1.id, 'pm notice for old slot');
 
   // Spawn a new PM (rotation) — setActive fires onSlotCleared for pm1
   const pm2 = rs.createRun({
-    is_manager: true, manager_adapter: 'codex', manager_layer: 'pm',
-    conversation_id: 'pm:proj-slot', prompt: 'pm2',
+    is_manager: true, manager_adapter: 'codex', manager_layer: 'operator',
+    conversation_id: 'operator:proj-slot', prompt: 'pm2',
   });
   rs.updateRunStatus(pm2.id, 'running', { force: true });
-  registry.setActive('pm:proj-slot', pm2.id, adapter2);
+  registry.setActive('operator:proj-slot', pm2.id, adapter2);
 
   // pm1's notices should be gone
   const remaining = conv.consumeParentNotices(pm1.id);
   assert.equal(remaining.length, 0, 'old PM run notices scrubbed on PM rotation');
 
   // pm2 should be the active PM
-  assert.equal(registry.getActiveRunId('pm:proj-slot'), pm2.id);
+  assert.equal(registry.getActiveRunId('operator:proj-slot'), pm2.id);
 });

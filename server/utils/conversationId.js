@@ -3,29 +3,25 @@
 // Shared conversation-id / operator-layer helpers — the single seam for the
 // PM → Operator rename (docs/specs/operator-rename-plan.md).
 //
-// Phase 2 (FLIP PRODUCERS): conversationIdForProject now emits `operator:` and
-// manager_layer producers now emit `'operator'`. Consumers still dual-read BOTH
-// the legacy `pm:` prefix and the new `operator:` prefix, and treat manager_layer
-// `'pm'` and `'operator'` as the same project-scoped-operator role, so Phase 2 is
-// fully backward-compatible with any persisted `pm:` data still in the DB.
+// Phase 4 (FINAL CLEANUP): dual-read removed. The legacy `pm:` prefix and the
+// `'pm'` manager_layer are no longer recognized. Producers emit `operator:` /
+// `'operator'` (Phase 2), persisted data was migrated (Phase 1 + migration 046),
+// and there is no remaining source of the legacy form. Consumers now accept the
+// `operator:` prefix and the `'operator'` layer ONLY.
 
-const LEGACY_PM_CONV_PREFIX = 'pm:';
 const OPERATOR_CONV_PREFIX = 'operator:';
-// Order matters only cosmetically; both are accepted on read.
-const PROJECT_CONV_PREFIXES = [LEGACY_PM_CONV_PREFIX, OPERATOR_CONV_PREFIX];
+const PROJECT_CONV_PREFIXES = [OPERATOR_CONV_PREFIX];
 
-const LEGACY_PM_LAYER = 'pm';
 const OPERATOR_LAYER = 'operator';
 
-// PRODUCER seam: the conversation id for a project-scoped operator (today's "PM").
-// Emits `operator:` as of Phase 2. Consumers dual-read both `pm:` and `operator:`.
+// PRODUCER seam: the conversation id for a project-scoped operator.
 function conversationIdForProject(projectId) {
   return `${OPERATOR_CONV_PREFIX}${projectId}`;
 }
 
-// CONSUMER seam: parse a project-scoped conversation id (accepts both prefixes).
-// Returns { projectId } or null. An empty projectId (`pm:` / `operator:`) → null,
-// preserving the existing parseConversationId('pm:') === null contract.
+// CONSUMER seam: parse a project-scoped conversation id (operator: only).
+// Returns { projectId } or null. An empty projectId (`operator:`) → null,
+// preserving the existing parseConversationId('operator:') === null contract.
 function parseProjectConversationId(id) {
   if (typeof id !== 'string') return null;
   for (const prefix of PROJECT_CONV_PREFIXES) {
@@ -40,34 +36,30 @@ function isProjectConversationId(id) {
   return parseProjectConversationId(id) !== null;
 }
 
-// Does `id` name project-scoped-operator `projectId`? (dual-read equality — replaces
-// inline `conversation_id === \`pm:${projectId}\`` fail-closed checks.)
+// Does `id` name project-scoped-operator `projectId`? (replaces inline
+// `conversation_id === \`operator:${projectId}\`` fail-closed checks.)
 function conversationIdMatchesProject(id, projectId) {
   const parsed = parseProjectConversationId(id);
   return parsed !== null && parsed.projectId === projectId;
 }
 
-// Is this manager_layer the project-scoped operator role (legacy 'pm' or 'operator')?
+// Is this manager_layer the project-scoped operator role?
 function isProjectLayer(layer) {
-  return layer === LEGACY_PM_LAYER || layer === OPERATOR_LAYER;
+  return layer === OPERATOR_LAYER;
 }
 
-// Normalize any conversation id to its CANONICAL form so `pm:<id>` and
-// `operator:<id>` collapse to the SAME string (the current producer form —
-// `operator:` as of Phase 2). Non-project ids ('top',
-// 'worker:...', anything else) pass through unchanged. Used as the single
-// registry slot-key + comparison normalizer so a slot written in one form is
-// found by a lookup in the other during the dual-read window.
+// Normalize any conversation id to its CANONICAL form. With dual-read removed
+// this is identity for `operator:<id>`; non-project ids ('top', 'worker:...',
+// anything else) also pass through unchanged. Kept as the single registry
+// slot-key + comparison normalizer so call sites remain stable.
 function canonicalConversationId(id) {
   const parsed = parseProjectConversationId(id);
   return parsed ? conversationIdForProject(parsed.projectId) : id;
 }
 
 module.exports = {
-  LEGACY_PM_CONV_PREFIX,
   OPERATOR_CONV_PREFIX,
   PROJECT_CONV_PREFIXES,
-  LEGACY_PM_LAYER,
   OPERATOR_LAYER,
   conversationIdForProject,
   parseProjectConversationId,

@@ -632,7 +632,7 @@ test('v3 Phase 0: managerSystemPrompt top layer excludes worker intervention API
 test('v3 Phase 0: managerSystemPrompt pm layer includes worker intervention APIs', async () => {
   const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
   const prompt = buildManagerSystemPrompt({
-    adapter: null, port: 4177, token: null, layer: 'pm',
+    adapter: null, port: 4177, token: null, layer: 'operator',
   });
   assert.ok(prompt.includes('/api/runs/RUN_ID/input'),
     'pm layer must document /api/runs/:id/input');

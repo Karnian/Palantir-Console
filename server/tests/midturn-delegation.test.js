@@ -13,7 +13,7 @@ const HEADING = /## Consulting an Operator specialist/;
 const base = { port: 4177, token: 't' };
 
 test('present for codex + available (pm) — with the contract essentials', () => {
-  const p = buildManagerSystemPrompt({ ...base, layer: 'pm', adapterType: 'codex', specialistAvailable: true });
+  const p = buildManagerSystemPrompt({ ...base, layer: 'operator', adapterType: 'codex', specialistAvailable: true });
   assert.match(p, HEADING);
   assert.match(p, /\/api\/operator\/specialist/);
   assert.match(p, /\/api\/operator\/profiles/);     // profile discovery
@@ -31,7 +31,7 @@ test('present for codex + available (top) — top run-id hint (MD-2a)', () => {
 });
 
 test('ABSENT when route not available (flag off / backend missing)', () => {
-  const p = buildManagerSystemPrompt({ ...base, layer: 'pm', adapterType: 'codex', specialistAvailable: false });
+  const p = buildManagerSystemPrompt({ ...base, layer: 'operator', adapterType: 'codex', specialistAvailable: false });
   assert.doesNotMatch(p, HEADING);
   assert.doesNotMatch(p, /\/api\/operator\/specialist/);
 });
@@ -42,14 +42,14 @@ test('ABSENT for non-codex adapter even when available (Claude WebFetch cannot P
 });
 
 test('default (no specialistAvailable) → ABSENT (backward compatible / behavior-preserving)', () => {
-  const p = buildManagerSystemPrompt({ ...base, layer: 'pm', adapterType: 'codex' });
+  const p = buildManagerSystemPrompt({ ...base, layer: 'operator', adapterType: 'codex' });
   assert.doesNotMatch(p, HEADING);
 });
 
 test('the delegation section does not disturb the base worker-delegation doc', () => {
   // Regression: adding the section must not drop the pre-existing REST/worker guidance.
-  const withNote = buildManagerSystemPrompt({ ...base, layer: 'pm', adapterType: 'codex', specialistAvailable: true });
-  const without = buildManagerSystemPrompt({ ...base, layer: 'pm', adapterType: 'codex', specialistAvailable: false });
+  const withNote = buildManagerSystemPrompt({ ...base, layer: 'operator', adapterType: 'codex', specialistAvailable: true });
+  const without = buildManagerSystemPrompt({ ...base, layer: 'operator', adapterType: 'codex', specialistAvailable: false });
   for (const marker of [/How to delegate work to worker agents/, /POST .*\/api\/tasks/, /Run statuses:/]) {
     assert.match(withNote, marker);
     assert.match(without, marker);
