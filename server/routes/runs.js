@@ -56,7 +56,7 @@ async function runGitDiff(cwd, { nodeExecutor = createLocalNodeExecutor() } = {}
         cwd,
         timeoutMs: DIFF_TIMEOUT_MS,
         maxBuffer: DIFF_MAX_BYTES + 1024,
-        env: { ...process.env, GIT_EXTERNAL_DIFF: '', GIT_TEXTCONV_DIFF: '' },
+        env: { GIT_EXTERNAL_DIFF: '', GIT_TEXTCONV_DIFF: '' },
       },
     );
   } catch (err) {

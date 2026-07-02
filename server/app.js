@@ -669,7 +669,7 @@ function createApp(options = {}) {
   const providerRegistry = createProviderRegistry({ codexService, opencodeAuthPath });
 
   // New services (SQLite-based)
-  const nodeService = createNodeService(db);
+  const nodeService = createNodeService(db, { localExecutor: nodeExecutor });
   const projectService = createProjectService(db);
   const projectBriefService = createProjectBriefService(db); // v3 Phase 1
   // ML PR1: L1 project memory index (CRUD + FTS5 retrieve + revision +

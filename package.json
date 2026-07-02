@@ -11,7 +11,8 @@
     "test:e2e": "npx playwright test",
     "test:a11y": "npx playwright test --grep @a11y",
     "test:visual": "npx playwright test --grep @visual",
-    "diagnose:mcp": "node scripts/diagnose-mcp-conflicts.mjs"
+    "diagnose:mcp": "node scripts/diagnose-mcp-conflicts.mjs",
+    "fleet:spike": "node scripts/fleet-spike.mjs"
   },
   "keywords": [],
   "author": "",

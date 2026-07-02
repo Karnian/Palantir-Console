@@ -168,7 +168,7 @@ function createLocalNodeExecutor({ executionEngine, streamJsonEngine } = {}) {
         args,
         {
           cwd,
-          env,
+          env: env ? { ...process.env, ...env } : undefined,
           timeout: timeoutMs,
           maxBuffer,
           encoding: 'utf-8',

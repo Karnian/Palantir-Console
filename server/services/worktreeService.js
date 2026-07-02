@@ -56,7 +56,7 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
       // the same env override.
       const res = await nodeExecutor.exec('git', ['rev-parse', '--git-dir'], {
         cwd: dir,
-        env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+        env: { LC_ALL: 'C', LANG: 'C' },
       });
       if (res.code === 0) return 'git';
       if (res.code === 128 && /not a git repository/i.test(String(res.stderr || ''))) {
@@ -309,7 +309,7 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
     try {
       const safeBranch = validateBranchName(branchName);
       const baseBranch = await getCurrentBranch(projectDir);
-      const gitEnv = { ...process.env, GIT_EXTERNAL_DIFF: '', GIT_TEXTCONV_DIFF: '' };
+      const gitEnv = { GIT_EXTERNAL_DIFF: '', GIT_TEXTCONV_DIFF: '' };
       // Three-dot range (merge-base..branch): shows only what the branch
       // changed. Two-dot would also pick up base-branch commits that landed
       // after the worktree was created — noise that misattributes others'

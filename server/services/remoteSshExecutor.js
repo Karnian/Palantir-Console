@@ -1,0 +1,507 @@
+const childProcess = require('node:child_process');
+const path = require('node:path');
+
+/**
+ * POSIX single-quote escaping for remote shell insertion. Every string placed
+ * into the remote script flows through this function so command, argument,
+ * environment value, cwd, and path quoting has one auditable implementation.
+ */
+function shq(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+function exposedRootsError(message) {
+  const err = new Error(message);
+  err.code = 'EXPOSED_ROOTS';
+  return err;
+}
+
+function commandNotAllowedError(command) {
+  const err = new Error(`Remote exec command is not allowed: ${command}`);
+  err.code = 'COMMAND_NOT_ALLOWED';
+  return err;
+}
+
+function envKeyInvalidError(key) {
+  const err = new Error(`Invalid remote env key: ${key}`);
+  err.code = 'ENV_KEY_INVALID';
+  return err;
+}
+
+function validateSshDestinationPart(value, field) {
+  if (
+    typeof value !== 'string'
+    || value.length === 0
+    || value.startsWith('-')
+    || /[\s@]/.test(value)
+    || /[\x00-\x1F\x7F]/.test(value)
+  ) {
+    throw new Error(`${field} is not a safe ssh destination component`);
+  }
+}
+
+function parseExposedRoots(node) {
+  let roots;
+  try {
+    roots = Array.isArray(node.exposed_roots)
+      ? node.exposed_roots
+      : JSON.parse(node.exposed_roots || 'null');
+  } catch {
+    throw exposedRootsError(`SSH node ${node.id || '(unknown)'} has invalid exposed_roots JSON`);
+  }
+  if (!Array.isArray(roots) || roots.length === 0) {
+    throw exposedRootsError(`SSH node ${node.id || '(unknown)'} must declare exposed_roots`);
+  }
+  for (const root of roots) {
+    if (typeof root !== 'string' || !path.posix.isAbsolute(root)) {
+      throw exposedRootsError('exposed_roots must contain absolute remote paths');
+    }
+  }
+  return roots;
+}
+
+function validateBareFilename(name) {
+  if (
+    typeof name !== 'string'
+    || name.length === 0
+    || name !== path.posix.basename(name)
+    || name === '.'
+    || name === '..'
+  ) {
+    throw new Error(`writeTempFile: invalid file name "${name}" (must be a bare filename)`);
+  }
+}
+
+function normalizeMode(mode) {
+  if (typeof mode === 'number' && Number.isInteger(mode) && mode >= 0) {
+    return mode.toString(8);
+  }
+  if (typeof mode === 'string' && /^[0-7]{3,4}$/.test(mode)) {
+    return mode;
+  }
+  throw new Error(`writeTempFile: invalid file mode "${mode}"`);
+}
+
+function normalizeEnv(env) {
+  if (!env) return [];
+  return Object.entries(env)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+        throw envKeyInvalidError(key);
+      }
+      return `${key}=${shq(value === null ? '' : value)}`;
+    });
+}
+
+function stripOneTrailingNewline(value) {
+  return String(value || '').replace(/\n$/, '');
+}
+
+function ensureAbsoluteRemotePath(remotePath) {
+  if (typeof remotePath !== 'string' || !path.posix.isAbsolute(remotePath)) {
+    throw exposedRootsError(`Remote path is outside exposed_roots: ${remotePath}`);
+  }
+}
+
+function parentFor(remotePath) {
+  const stripped = remotePath.length > 1 ? remotePath.replace(/\/+$/, '') : remotePath;
+  return path.posix.dirname(stripped || remotePath);
+}
+
+function commandError(command, args, res) {
+  const message = res.stderr || res.stdout || `${command} ${args.join(' ')} failed with code ${res.code}`;
+  const err = new Error(message);
+  err.code = res.code;
+  err.stdout = res.stdout;
+  err.stderr = res.stderr;
+  return err;
+}
+
+function buildCommandScript(command, args = [], { cwd, env } = {}) {
+  const envParts = normalizeEnv(env);
+  const argv = [shq(command), ...(args || []).map((arg) => shq(arg))];
+  const execParts = envParts.length > 0
+    ? ['exec', 'env', ...envParts, ...argv]
+    : ['exec', ...argv];
+  const script = execParts.join(' ');
+  return cwd ? `cd ${shq(cwd)} && ${script}` : script;
+}
+
+/**
+ * Create the SSH implementation of the canonical async NodeExecutor API.
+ *
+ * P2 fleet note: nodeService.pickExecutor can create this executor, but actual
+ * run dispatch is intentionally not wired to remote spawn until P3. SSH nodes
+ * have no heartbeat source in P2, so they remain reachable=0 and the P1a queue
+ * guard naturally prevents dispatch. Worker/session channel methods
+ * (spawnWorker/ownerOf/etc.) are absent by design, following the P0a rule that
+ * unimplemented capabilities are represented by absence rather than throwing
+ * stubs.
+ *
+ * Environment handling intentionally differs from local execFile: process.env
+ * is never merged automatically. Only env keys explicitly supplied by the
+ * caller are sent to the pod, to avoid leaking controller secrets into remote
+ * environments. The remote base env comes from the pod login shell; the
+ * controller NEVER forwards process.env. Callers should pass non-secret
+ * overrides such as LC_ALL/LANG. Env keys must be shell-identifier-safe.
+ *
+ * The public exec surface is guarded by an exact command-name allowlist. The
+ * default allowlist is ['git']; shell interpreters such as sh, bash, and env
+ * are not included and are rejected unless an explicit caller opts into them.
+ * This allowlist guards public exec only. Trusted executor-owned filesystem
+ * primitives build their own scripts and do not go through the public exec
+ * allowlist.
+ *
+ * SSH exit code 255 is treated as transport failure and rejects with
+ * err.code='SSH_TRANSPORT'. A remote command that genuinely exits 255 is
+ * indistinguishable from ssh(1) transport failure through this transport.
+ *
+ * Path guard: exposed_roots are canonicalized with remote realpath on first
+ * path use. Existing path targets are checked by their own remote realpath so
+ * symlink escapes are caught. Creation targets (writeTempFile/mkdir) guard the
+ * parent directory because POSIX realpath requires the target to exist, then
+ * re-realpath and validate the created target before returning/continuing.
+ * Existing-path operations use canonical paths where feasible. The residual
+ * realpath-to-operate TOCTOU is accepted for this threat model: pods are
+ * operator-controlled, not adversarial mid-operation. rmrf additionally
+ * refuses to delete an exposed root itself.
+ *
+ * Remote requirements: /bin/sh, coreutils-compatible realpath, find, mktemp,
+ * chmod, cat, test, mkdir, and rm. readdir implements names only via find and
+ * does not support withFileTypes or other readdir options.
+ */
+function createRemoteSshNodeExecutor(node, {
+  spawnFn = childProcess.spawn,
+  connectTimeoutMs = 10000,
+  commandAllowlist = ['git'],
+} = {}) {
+  if (!node || node.kind !== 'ssh') {
+    throw new Error('createRemoteSshNodeExecutor requires an ssh node row');
+  }
+  if (!node.ssh_host || !node.ssh_user) {
+    throw new Error('SSH node requires ssh_host and ssh_user');
+  }
+  validateSshDestinationPart(node.ssh_host, 'ssh_host');
+  validateSshDestinationPart(node.ssh_user, 'ssh_user');
+
+  const exposedRoots = parseExposedRoots(node);
+  const connectTimeoutSeconds = Math.max(1, Math.ceil(Number(connectTimeoutMs || 10000) / 1000));
+  const allowedCommands = new Set((commandAllowlist || []).map(String));
+  let canonicalRootsPromise = null;
+
+  function sshArgsFor(script) {
+    return [
+      '-o', 'BatchMode=yes',
+      '-o', `ConnectTimeout=${connectTimeoutSeconds}`,
+      '-o', 'StrictHostKeyChecking=accept-new',
+      `${node.ssh_user}@${node.ssh_host}`,
+      '--',
+      'sh',
+      '-c',
+      script,
+    ];
+  }
+
+  function runRemoteScript(script, { timeoutMs, maxBuffer, input } = {}) {
+    return new Promise((resolve, reject) => {
+      const child = spawnFn('ssh', sshArgsFor(script), { stdio: ['pipe', 'pipe', 'pipe'] });
+      const stdoutChunks = [];
+      const stderrChunks = [];
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let settled = false;
+      let timer = null;
+
+      function bufferedText(which) {
+        if (which === 'stdout') return Buffer.concat(stdoutChunks, stdoutBytes).toString('utf8');
+        return Buffer.concat(stderrChunks, stderrBytes).toString('utf8');
+      }
+
+      function finishReject(err) {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        err.stdout = bufferedText('stdout');
+        err.stderr = bufferedText('stderr');
+        reject(err);
+      }
+
+      function finishResolve(value) {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve(value);
+      }
+
+      function appendOutput(which, chunk) {
+        if (settled) return;
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+        const currentBytes = which === 'stdout' ? stdoutBytes : stderrBytes;
+        const nextBytes = currentBytes + buf.length;
+        if (maxBuffer !== undefined && maxBuffer !== null && nextBytes > maxBuffer) {
+          const remaining = Math.max(0, Number(maxBuffer) - currentBytes);
+          if (which === 'stdout') {
+            if (remaining > 0) stdoutChunks.push(buf.subarray(0, remaining));
+            stdoutBytes += remaining;
+          } else {
+            if (remaining > 0) stderrChunks.push(buf.subarray(0, remaining));
+            stderrBytes += remaining;
+          }
+          const err = new Error(`${which} maxBuffer exceeded`);
+          err.code = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+          if (typeof child.kill === 'function') child.kill('SIGTERM');
+          finishReject(err);
+          return;
+        }
+        if (which === 'stdout') {
+          stdoutChunks.push(buf);
+          stdoutBytes = nextBytes;
+        } else {
+          stderrChunks.push(buf);
+          stderrBytes = nextBytes;
+        }
+      }
+
+      if (timeoutMs !== undefined && timeoutMs !== null) {
+        timer = setTimeout(() => {
+          const err = new Error(`Remote SSH command timed out after ${timeoutMs}ms`);
+          err.code = 'ETIMEDOUT';
+          err.killed = true;
+          err.signal = 'SIGTERM';
+          if (typeof child.kill === 'function') child.kill('SIGTERM');
+          finishReject(err);
+        }, Number(timeoutMs));
+      }
+
+      if (child.stdout && typeof child.stdout.on === 'function') {
+        child.stdout.on('data', (chunk) => appendOutput('stdout', chunk));
+      }
+      if (child.stderr && typeof child.stderr.on === 'function') {
+        child.stderr.on('data', (chunk) => appendOutput('stderr', chunk));
+      }
+      child.once('error', (err) => finishReject(err));
+      child.once('close', (code, signal) => {
+        if (settled) return;
+        if (signal) {
+          const err = new Error(`Remote SSH command killed by ${signal}`);
+          err.killed = true;
+          err.signal = signal;
+          finishReject(err);
+          return;
+        }
+        if (code === 255) {
+          const err = new Error('SSH transport failed');
+          err.code = 'SSH_TRANSPORT';
+          err.exitCode = 255;
+          finishReject(err);
+          return;
+        }
+        finishResolve({
+          code: Number(code || 0),
+          stdout: bufferedText('stdout'),
+          stderr: bufferedText('stderr'),
+        });
+      });
+
+      if (child.stdin && typeof child.stdin.end === 'function') {
+        child.stdin.end(input === undefined ? '' : input);
+      }
+    });
+  }
+
+  function runRemoteCommand(command, args = [], opts = {}) {
+    return runRemoteScript(buildCommandScript(command, args, opts), opts);
+  }
+
+  async function rawRealpath(remotePath) {
+    const res = await runRemoteCommand('realpath', [remotePath]);
+    if (res.code !== 0) throw commandError('realpath', [remotePath], res);
+    return stripOneTrailingNewline(res.stdout);
+  }
+
+  async function canonicalRoots() {
+    if (!canonicalRootsPromise) {
+      canonicalRootsPromise = (async () => {
+        const roots = [];
+        for (const root of exposedRoots) {
+          roots.push(await rawRealpath(root));
+        }
+        return roots;
+      })();
+    }
+    return canonicalRootsPromise;
+  }
+
+  function isWithinRoot(canonicalPath, canonicalRoot) {
+    if (canonicalRoot === '/') return path.posix.isAbsolute(canonicalPath);
+    return canonicalPath === canonicalRoot || canonicalPath.startsWith(`${canonicalRoot}/`);
+  }
+
+  async function assertCanonicalWithinRoots(canonicalPath, originalPath) {
+    const roots = await canonicalRoots();
+    if (!roots.some((root) => isWithinRoot(canonicalPath, root))) {
+      throw exposedRootsError(`Remote path is outside exposed_roots: ${originalPath}`);
+    }
+    return canonicalPath;
+  }
+
+  async function assertWithinRoots(remotePath, { allowMissing = false, parentOnly = false } = {}) {
+    ensureAbsoluteRemotePath(remotePath);
+    if (parentOnly) {
+      const parentCanonical = await rawRealpath(parentFor(remotePath));
+      await assertCanonicalWithinRoots(parentCanonical, remotePath);
+      return { canonical: parentCanonical, exists: false };
+    }
+
+    try {
+      const canonical = await rawRealpath(remotePath);
+      await assertCanonicalWithinRoots(canonical, remotePath);
+      return { canonical, exists: true };
+    } catch (err) {
+      if (err.code === 'SSH_TRANSPORT' || err.code === 'EXPOSED_ROOTS') throw err;
+      if (allowMissing) {
+        let ancestor = parentFor(remotePath);
+        while (true) {
+          try {
+            const ancestorCanonical = await rawRealpath(ancestor);
+            await assertCanonicalWithinRoots(ancestorCanonical, remotePath);
+            return { canonical: null, exists: false };
+          } catch (parentErr) {
+            if (parentErr.code === 'SSH_TRANSPORT' || parentErr.code === 'EXPOSED_ROOTS') throw parentErr;
+            const next = parentFor(ancestor);
+            if (next === ancestor) throw parentErr;
+            ancestor = next;
+          }
+        }
+      }
+      throw err;
+    }
+  }
+
+  async function cleanupCreatedPath(remotePath) {
+    if (typeof remotePath !== 'string' || !path.posix.isAbsolute(remotePath)) return;
+    try {
+      await runRemoteCommand('rm', ['-rf', remotePath]);
+    } catch {
+      // Best-effort cleanup only; preserve the root-guard failure.
+    }
+  }
+
+  async function exec(command, args = [], { cwd, env, timeoutMs, maxBuffer } = {}) {
+    if (!allowedCommands.has(String(command))) throw commandNotAllowedError(command);
+    let safeCwd = cwd;
+    if (cwd) safeCwd = (await assertWithinRoots(cwd)).canonical;
+    return runRemoteCommand(command, args, { cwd: safeCwd, env, timeoutMs, maxBuffer });
+  }
+
+  async function fileExists(remotePath) {
+    const checked = await assertWithinRoots(remotePath, { allowMissing: true });
+    if (!checked.exists) return false;
+    const res = await runRemoteCommand('test', ['-e', checked.canonical]);
+    if (res.code === 0) return true;
+    if (res.code === 1) return false;
+    throw commandError('test', ['-e', remotePath], res);
+  }
+
+  async function realpath(remotePath) {
+    const checked = await assertWithinRoots(remotePath);
+    return checked.canonical;
+  }
+
+  async function readFile(remotePath) {
+    const checked = await assertWithinRoots(remotePath);
+    const res = await runRemoteCommand('cat', [checked.canonical]);
+    if (res.code !== 0) throw commandError('cat', [checked.canonical], res);
+    return res.stdout;
+  }
+
+  async function writeTempFile(prefix, name, content, mode = 0o600) {
+    validateBareFilename(name);
+    ensureAbsoluteRemotePath(prefix);
+    await assertWithinRoots(prefix, { parentOnly: true });
+    const modeString = normalizeMode(mode);
+    const template = `${prefix}XXXXXX`;
+    const script = [
+      `tmpdir=$(mktemp -d ${shq(template)})`,
+      `cat > "$tmpdir"/${shq(name)}`,
+      `chmod ${shq(modeString)} "$tmpdir"/${shq(name)}`,
+      `printf '%s\\n' "$tmpdir"/${shq(name)}`,
+    ].join(' && ');
+    const res = await runRemoteScript(script, { input: content });
+    if (res.code !== 0) throw commandError('writeTempFile', [prefix, name], res);
+    const createdPath = stripOneTrailingNewline(res.stdout);
+    try {
+      await assertWithinRoots(createdPath);
+    } catch (err) {
+      await cleanupCreatedPath(path.posix.dirname(createdPath));
+      throw err;
+    }
+    return createdPath;
+  }
+
+  async function readdir(remotePath, options) {
+    if (options !== undefined && options !== null) {
+      throw new Error('RemoteSshNodeExecutor.readdir does not support options such as withFileTypes');
+    }
+    const checked = await assertWithinRoots(remotePath);
+    const res = await runRemoteCommand('find', [checked.canonical, '-mindepth', '1', '-maxdepth', '1', '-print']);
+    if (res.code !== 0) throw commandError('find', [checked.canonical], res);
+    return res.stdout.split('\n').filter(Boolean).map((entry) => path.posix.basename(entry));
+  }
+
+  async function stat(remotePath) {
+    const checked = await assertWithinRoots(remotePath);
+    const dirRes = await runRemoteCommand('test', ['-d', checked.canonical]);
+    if (dirRes.code !== 0 && dirRes.code !== 1) throw commandError('test', ['-d', checked.canonical], dirRes);
+    const fileRes = await runRemoteCommand('test', ['-f', checked.canonical]);
+    if (fileRes.code !== 0 && fileRes.code !== 1) throw commandError('test', ['-f', checked.canonical], fileRes);
+    const isDirectory = dirRes.code === 0;
+    const isFile = fileRes.code === 0;
+    return {
+      isDirectory: () => isDirectory,
+      isFile: () => isFile,
+    };
+  }
+
+  async function mkdir(remotePath, options = {}) {
+    await assertWithinRoots(remotePath, { parentOnly: true });
+    const args = options && options.recursive ? ['-p', remotePath] : [remotePath];
+    const res = await runRemoteCommand('mkdir', args);
+    if (res.code !== 0) throw commandError('mkdir', args, res);
+    try {
+      await assertWithinRoots(remotePath);
+    } catch (err) {
+      await cleanupCreatedPath(remotePath);
+      throw err;
+    }
+  }
+
+  async function rmrf(remotePath) {
+    const checked = await assertWithinRoots(remotePath);
+    const roots = await canonicalRoots();
+    if (roots.some((root) => checked.canonical === root)) {
+      throw exposedRootsError(`Refusing to remove exposed root: ${remotePath}`);
+    }
+    const res = await runRemoteCommand('rm', ['-rf', checked.canonical]);
+    if (res.code !== 0) throw commandError('rm', ['-rf', checked.canonical], res);
+  }
+
+  return {
+    exec,
+    fileExists,
+    realpath,
+    stat,
+    mkdir,
+    readFile,
+    readdir,
+    writeTempFile,
+    rmrf,
+    assertWithinRoots: async (remotePath) => (await assertWithinRoots(remotePath)).canonical,
+  };
+}
+
+module.exports = {
+  createRemoteSshNodeExecutor,
+  shq,
+};
