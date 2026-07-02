@@ -387,7 +387,10 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
         </div>
         <button class="primary" onClick=${() => setShowNewTask(true)}>+ ${MANAGER_LABELS.newTask}</button>
       </div>
-      <div class="board-columns">
+      <!-- scrollable-region-focusable: an EMPTY board (fresh DB) has no focusable
+           cards inside this scroll container, which axe flags as serious. Same
+           fix pattern as DashboardView .triage-feed (K-4 followup). -->
+      <div class="board-columns" tabindex="0" role="region" aria-label="작업 보드 컬럼">
         ${BOARD_COLUMNS.map(col => {
           const colTasks = columnTasks[col.id] || [];
           return html`

@@ -9,9 +9,9 @@
 //
 // Nav consolidation: 5 items (skills / presets / mcp-servers / specialist /
 // operator-profiles) collapsed into 2 tab groups:
-//   - resources (#resources) — sub-tabs: skills · presets · mcp-servers
+//   - resources (#resources) — sub-tabs: skills · presets · mcp-servers · nodes
 //   - operator  (#operator)  — sub-tabs: profiles · specialist
-// `NAV_SUB_ITEMS` exposes the 5 canonical sub-entries for CommandPalette
+// `NAV_SUB_ITEMS` exposes the canonical sub-entries for CommandPalette
 // search. Number-key shortcuts still use only NAV_ITEMS.
 
 import { NAV_LABELS } from './copy.js';
@@ -34,6 +34,7 @@ export const NAV_SUB_ITEMS = [
   { hash: 'resources/skills',      icon: '♢', label: NAV_LABELS.skills },
   { hash: 'resources/presets',     icon: '❖', label: NAV_LABELS.presets },
   { hash: 'resources/mcp-servers', icon: '⦿', label: NAV_LABELS['mcp-servers'] },
+  { hash: 'resources/nodes',       icon: '⬢', label: NAV_LABELS.nodes },
   { hash: 'operator/profiles',     icon: '⊙', label: NAV_LABELS['operator-profiles'] },
   { hash: 'operator/specialist',   icon: '✸', label: NAV_LABELS.specialist },
 ];
