@@ -125,6 +125,12 @@ function classifyCodexErrorKind(item) {
   return 'unknown_error';
 }
 
+function isPlainObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
 /**
  * v3 Phase 0: spawnFn is injectable for behavior testing. Production callers
  * omit it and get the real child_process.spawn. Tests inject a fake that
@@ -175,12 +181,13 @@ function createCodexAdapter({
    * Worker role (future) keeps the bypass because workers have legitimate
    * filesystem write needs. See docs/specs/manager-v3-multilayer.md principle 1.
    *
-   * M1 (supersedes P4-2 note): mcpConfig is now consumed. Codex 0.120.0 has
-   * no `--mcp-config` flag, but `-c mcp_servers.<alias>.<key>=<TOML>`
-   * dotted-path overrides land in the same merged config as the user's
-   * ~/.codex/config.toml. We persist the shape on the session and flatten
-   * on every turn via codexMcpFlatten.flattenMcpToCodexArgs. Worker path
-   * (lifecycleService) uses the same util so PM/worker never drift.
+   * M1 (supersedes P4-2 note): object-shaped mcpConfig is consumed. Codex
+   * 0.120.0 has no `--mcp-config` flag, but `-c
+   * mcp_servers.<alias>.<key>=<TOML>` dotted-path overrides land in the same
+   * merged config as the user's ~/.codex/config.toml. We persist only plain
+   * object shapes on the session and flatten on every turn via
+   * codexMcpFlatten.flattenMcpToCodexArgs. String config paths are for the
+   * Claude adapter's `--mcp-config` path and are skipped here.
    */
   function startSession(runId, { systemPrompt, cwd, model, env, role, resumeThreadId, onThreadStarted, mcpConfig } = {}) {
     if (sessions.has(runId)) {
@@ -193,6 +200,9 @@ function createCodexAdapter({
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `palantir-codex-${runId}-`));
     const instructionsPath = path.join(tmpDir, 'system_prompt.md');
     fs.writeFileSync(instructionsPath, systemPrompt || '', { mode: 0o600 });
+
+    const hasPlainObjectMcpConfig = isPlainObject(mcpConfig);
+    const skippedMcpConfigPath = typeof mcpConfig === 'string';
 
     sessions.set(runId, {
       // v3 Phase 3a: if the caller passes a persisted thread_id (PM lazy
@@ -214,14 +224,23 @@ function createCodexAdapter({
       onThreadStarted: typeof onThreadStarted === 'function' ? onThreadStarted : null,
       threadStartedFired: false,
       // M1: merged MCP config to flatten into -c flags per turn. null means
-      // "no MCP injection" (empty object behaves the same).
-      mcpConfig: mcpConfig || null,
+      // "no MCP injection" (empty object behaves the same). Only plain object
+      // shapes are accepted; path strings belong to Claude's --mcp-config path.
+      mcpConfig: hasPlainObjectMcpConfig ? mcpConfig : null,
       turnIndex: 0,
       usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
       currentChild: null,
       ended: false,
       sessionStartedEmitted: false,
     });
+
+    if (skippedMcpConfigPath && runService && typeof runService.addRunEvent === 'function') {
+      try {
+        runService.addRunEvent(runId, 'mcp:config_path_skipped', JSON.stringify({ adapter: 'codex' }));
+      } catch (err) {
+        console.warn(`[codexAdapter] failed to emit mcp:config_path_skipped for ${runId}: ${err.message}`);
+      }
+    }
 
     // If we're resuming from a persisted thread id, fire the callback
     // immediately so the caller can finalize any bookkeeping that would
@@ -319,8 +338,8 @@ function createCodexAdapter({
     // HEAD-based preflight before flatten via `mcpPreflight.preflightHttpMcpConfig`
     // (lifecycleService.executeTask). The PM path here doesn't currently
     // receive object-shaped mcpConfig (operatorSpawnService passes the
-    // project.mcp_config_path string, which fails the isPlainObject guard
-    // below), so preflight is a no-op in current production. If the PM
+    // project.mcp_config_path string, which startSession skips before this
+    // point), so preflight is a no-op in current production. If the PM
     // path is ever re-plumbed to read+parse that file into an object,
     // extend this site with the same preflight call before flatten —
     // spec §L6 fail-closed contract applies.
