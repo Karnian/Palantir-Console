@@ -159,7 +159,7 @@ function createPmAutoReview({
   const autoReviewCounts = new Map(); // "projectId:taskId" -> count
 
   managerRegistry.onSlotCleared(({ conversationId }) => {
-    const parsed = parseProjectConversationId(conversationId); // dual-read: pm:/operator:
+    const parsed = parseProjectConversationId(conversationId); // operator:<projectId>
     if (!parsed) return;
     const projectId = parsed.projectId;
     for (const key of autoReviewCounts.keys()) {

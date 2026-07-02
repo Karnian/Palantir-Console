@@ -318,12 +318,11 @@ function createReconciliationService({
         err.httpStatus = 400;
         throw err;
       }
-      // dual-read (PM→Operator rename Phase 0): accept manager_layer 'pm' OR 'operator',
-      // and conversation_id `pm:<projectId>` OR `operator:<projectId>`. These are
-      // fail-closed cross-project guards — a wrong form here rejects EVERY claim from a
-      // migrated operator PM, so both forms must be tolerated during the transition.
+      // fail-closed cross-project guards: the run must be a project-scoped operator
+      // (manager_layer='operator', conversation_id=`operator:<projectId>`). A wrong
+      // form here rejects EVERY claim from that operator.
       if (!isProjectLayer(pmRun.manager_layer)) {
-        const err = new Error(`pm_run_id ${pmRunId} is layer='${pmRun.manager_layer}', expected 'pm'/'operator'`);
+        const err = new Error(`pm_run_id ${pmRunId} is layer='${pmRun.manager_layer}', expected 'operator'`);
         err.httpStatus = 400;
         throw err;
       }

@@ -339,7 +339,7 @@ function createCompositionLedger(db) {
      * @param {string}  opts.runId
      * @param {string}  [opts.conversationId]
      * @param {string}  [opts.taskId]
-     * @param {string}  opts.slotKind        — 'top' | 'pm'
+     * @param {string}  opts.slotKind        — 'top' | 'operator'
      * @param {string}  opts.provenanceKey
      * @param {string}  [opts.mode]
      * @param {string}  [opts.promptPayloadHash]

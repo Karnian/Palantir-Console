@@ -269,7 +269,7 @@ test('Phase 4: R4 fix — pmRunId envelope binding rejects foreign/top/nonexiste
     projectId: project.id,
     pmRunId: top.id,
     pmClaim: { kind: 'task_complete', task_id: 'whatever' },
-  }), /expected 'pm'/);
+  }), /expected 'operator'/);
 
   // (c) a PM run from a DIFFERENT project is not acceptable
   const otherProject = projectService.createProject({ name: 'beta' });

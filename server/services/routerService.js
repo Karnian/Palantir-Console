@@ -49,13 +49,12 @@ const {
   conversationIdForProject,
 } = require('../utils/conversationId'); // PM→Operator rename Phase 0
 
-// dual-read (PM→Operator rename Phase 0): accept legacy `pm:` AND new `operator:`.
-const VALID_TARGET_PREFIXES = ['top', 'pm:', 'operator:', 'worker:'];
+const VALID_TARGET_PREFIXES = ['top', 'operator:', 'worker:'];
 
 function isValidConversationId(id) {
   if (typeof id !== 'string' || id.length === 0) return false;
   if (id === 'top') return true;
-  if (isProjectConversationId(id)) return true; // pm:<id> or operator:<id>, non-empty
+  if (isProjectConversationId(id)) return true; // operator:<id>, non-empty
   if (id.startsWith('worker:') && id.length > 7) return true;
   return false;
 }

@@ -220,8 +220,8 @@ function createRunService(db, eventBus) {
     // v3 Phase 1.5: conversation identity defaults.
     // Manager runs default to layer='top' + conversation_id='top' (the MVP
     // singleton). Worker runs default to conversation_id='worker:<id>'.
-    // Callers that spawn a PM (Phase 3a) must pass manager_layer='pm' +
-    // conversation_id='pm:<projectId>' explicitly.
+    // Callers that spawn an Operator (Phase 3a) must pass manager_layer='operator' +
+    // conversation_id='operator:<projectId>' explicitly.
     let effectiveLayer = manager_layer || null;
     let effectiveConversationId = conversation_id || null;
     if (is_manager) {
