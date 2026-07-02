@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const childProcess = require('node:child_process');
 const { EventEmitter } = require('node:events');
 const { Writable } = require('node:stream');
 const fs = require('node:fs/promises');
@@ -55,8 +56,70 @@ function makeSpawn(handler) {
   return spawn;
 }
 
+function unshq(value) {
+  assert.equal(value[0], "'");
+  assert.equal(value[value.length - 1], "'");
+  return value.slice(1, -1).replace(/'\\''/g, "'");
+}
+
+function sshDestinationIndex(args) {
+  let afterDashDash = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = String(args[i]);
+    if (afterDashDash) {
+      if (arg.includes('@')) return i;
+      throw new Error(`ssh destination after -- does not contain @: ${arg}`);
+    }
+    if (arg === '--') {
+      afterDashDash = true;
+      continue;
+    }
+    if (arg === '-o') {
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith('-')) continue;
+    if (arg.includes('@')) return i;
+  }
+  throw new Error(`ssh destination not found in args: ${JSON.stringify(args)}`);
+}
+
+function remoteCommandArgsOf(call) {
+  return call.args.slice(sshDestinationIndex(call.args) + 1);
+}
+
+function remoteCommandOf(call) {
+  const remoteArgs = remoteCommandArgsOf(call);
+  assert.equal(remoteArgs.length, 1);
+  return remoteArgs[0];
+}
+
 function scriptOf(call) {
-  return call.args[call.args.length - 1];
+  const command = remoteCommandOf(call);
+  const prefix = 'sh -c ';
+  assert.ok(command.startsWith(prefix), `unexpected ssh remote command: ${command}`);
+  return unshq(command.slice(prefix.length));
+}
+
+function loopbackSshSpawn() {
+  const calls = [];
+  function spawn(cmd, args, opts) {
+    assert.equal(cmd, 'ssh');
+    const destinationIndex = sshDestinationIndex(args);
+    const remoteCommandArgs = args.slice(destinationIndex + 1);
+    const joined = remoteCommandArgs.join(' ');
+    calls.push({
+      cmd,
+      args,
+      opts,
+      destination: args[destinationIndex],
+      remoteCommandArgs,
+      joined,
+    });
+    return childProcess.spawn('sh', ['-c', joined], { stdio: ['pipe', 'pipe', 'pipe'] });
+  }
+  spawn.calls = calls;
+  return spawn;
 }
 
 function simpleSpawn(response = { code: 0, stdout: '', stderr: '' }) {
@@ -82,6 +145,14 @@ async function mkdb(t) {
     await fs.rm(dir, { recursive: true, force: true });
   });
   return db;
+}
+
+async function mkLoopbackRoot(t) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-loopback-ssh-'));
+  t.after(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  return dir;
 }
 
 test('shq preserves shell metacharacters as single quoted literals', () => {
@@ -123,15 +194,77 @@ test('ssh argv and script quote injection attempts literally', async () => {
     '-o', 'ConnectTimeout=12',
     '-o', 'StrictHostKeyChecking=accept-new',
   ]);
-  assert.equal(call.args[6], 'runner@pod.example');
-  assert.deepEqual(call.args.slice(7, 10), ['--', 'sh', '-c']);
+  assert.equal(call.args[6], '--');
+  assert.equal(call.args[7], 'runner@pod.example');
   const script = scriptOf(call);
+  assert.deepEqual(call.args.slice(8), [`sh -c ${shq(script)}`]);
   assert.match(script, /^exec env /);
   assert.match(script, /LC_ALL='C'/);
   assert.match(script, /LANG='en'\\''US'/);
   assert.match(script, /SAFE='\$\(literal\)'/);
   assert.match(script, /'say'\\''hi'/);
   for (const arg of args) assert.ok(script.includes(shq(arg)), `missing quoted arg ${arg}`);
+});
+
+test('loopback ssh simulator preserves exec stdout across ssh argument join', async () => {
+  const spawn = loopbackSshSpawn();
+  const exec = createRemoteSshNodeExecutor(nodeRow(), {
+    spawnFn: spawn,
+    commandAllowlist: ['echo'],
+  });
+
+  const res = await exec.exec('echo', ['fleet-ok']);
+
+  assert.deepEqual(res, { code: 0, stdout: 'fleet-ok\n', stderr: '' });
+  assert.equal(spawn.calls[0].destination, 'runner@pod.example');
+  assert.deepEqual(spawn.calls[0].remoteCommandArgs, [`sh -c ${shq("exec 'echo' 'fleet-ok'")}`]);
+  assert.equal(spawn.calls[0].joined, `sh -c ${shq("exec 'echo' 'fleet-ok'")}`);
+});
+
+test('loopback ssh simulator runs git through the remote login shell model', async () => {
+  const spawn = loopbackSshSpawn();
+  const exec = createRemoteSshNodeExecutor(nodeRow(), {
+    spawnFn: spawn,
+    commandAllowlist: ['git'],
+  });
+
+  const res = await exec.exec('git', ['--version']);
+
+  assert.equal(res.code, 0);
+  assert.match(res.stdout, /git version/);
+});
+
+test('loopback ssh simulator round-trips injection-hostile args literally', async () => {
+  const hostile = "a'b;$(printf injected)`y\nz";
+  const spawn = loopbackSshSpawn();
+  const exec = createRemoteSshNodeExecutor(nodeRow(), {
+    spawnFn: spawn,
+    commandAllowlist: ['printf'],
+  });
+
+  const res = await exec.exec('printf', ['%s', hostile]);
+
+  assert.deepEqual(res, { code: 0, stdout: hostile, stderr: '' });
+});
+
+test('loopback ssh simulator writeTempFile streams stdin and stays within roots', async (t) => {
+  const root = await mkLoopbackRoot(t);
+  const content = "first line\nquote ' ; $(printf injected) `tick`\nlast line\n";
+  const spawn = loopbackSshSpawn();
+  const exec = createRemoteSshNodeExecutor(nodeRow({
+    exposed_roots: JSON.stringify([root]),
+  }), { spawnFn: spawn });
+
+  const remotePath = await exec.writeTempFile(path.join(root, 'tmp-'), 'payload.txt', content, 0o600);
+  const readBack = await exec.readFile(remotePath);
+  const canonicalRoot = await fs.realpath(root);
+  const canonicalPath = await fs.realpath(remotePath);
+  const relativePath = path.relative(canonicalRoot, canonicalPath);
+
+  assert.equal(readBack, content);
+  assert.equal(path.basename(remotePath), 'payload.txt');
+  assert.ok(relativePath && !relativePath.startsWith('..') && !path.isAbsolute(relativePath));
+  assert.ok(spawn.calls.some((call) => /cat > "\$tmpdir"\/'payload\.txt'/.test(scriptOf(call))));
 });
 
 test('exec resolves genuine exits and rejects ssh transport exit 255', async () => {
@@ -340,8 +473,10 @@ test('ssh destination components reject option smuggling and unsafe separators',
   const spawn = simpleSpawn({ code: 0, stdout: 'git version\n' });
   const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
   await exec.exec('git', ['--version']);
-  assert.equal(spawn.calls[0].args[6], 'runner@pod.example');
-  assert.deepEqual(spawn.calls[0].args.slice(7, 10), ['--', 'sh', '-c']);
+  assert.equal(spawn.calls[0].args[6], '--');
+  assert.equal(spawn.calls[0].args[7], 'runner@pod.example');
+  assert.deepEqual(remoteCommandArgsOf(spawn.calls[0]), [remoteCommandOf(spawn.calls[0])]);
+  assert.match(remoteCommandOf(spawn.calls[0]), /^sh -c '/);
 
   const db = await mkdb(t);
   const nodeService = createNodeService(db, { localExecutor: { local: true } });
