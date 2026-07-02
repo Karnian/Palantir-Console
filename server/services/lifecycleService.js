@@ -9,6 +9,8 @@
  * - Status transitions (run completes → task moves to review)
  */
 
+const { createLocalNodeExecutor } = require('./nodeExecutor');
+
 function createLifecycleService({
   runService,
   taskService,
@@ -25,6 +27,7 @@ function createLifecycleService({
   authResolver,               // Phase 10D: injectable for tests
   authResolverOpts,           // { hasKeychain, readKeychainToken, prefer, tmpRoot }
   nodeService,
+  nodeExecutor = createLocalNodeExecutor(),
 }) {
   // Lazy-require default authResolver so tests that don't use Tier 2 don't
   // force a load of the real keychain probe.
@@ -245,7 +248,7 @@ function createLifecycleService({
    * Idempotent: safe to call even if no worktree was created or already removed.
    * Always clears the in-memory project-dir snapshot to avoid leaks.
    */
-  function cleanupRunRuntimeFiles(run) {
+  async function cleanupRunRuntimeFiles(run) {
     if (!run?.id) return;
     _runProjectDirs.delete(run.id);
 
@@ -253,7 +256,7 @@ function createLifecycleService({
     if (run.mcp_config_path) {
       try {
         const fs = require('node:fs');
-        if (fs.existsSync(run.mcp_config_path)) {
+        if (await nodeExecutor.fileExists(run.mcp_config_path)) {
           fs.unlinkSync(run.mcp_config_path);
         }
       } catch (err) {
@@ -262,19 +265,19 @@ function createLifecycleService({
     }
   }
 
-  function cleanupRunWorktree(run) {
+  async function cleanupRunWorktree(run) {
     if (!run?.id) return;
     if (worktreeService && run.worktree_path && run.branch) {
       const projectDir = resolveProjectDirForRun(run);
       if (projectDir) {
         try {
-          worktreeService.removeWorktree(projectDir, run.worktree_path, run.branch, { runId: run.id });
+          await worktreeService.removeWorktree(projectDir, run.worktree_path, run.branch, { runId: run.id });
         } catch (err) {
           console.warn(`[lifecycle] Worktree cleanup failed for run ${run.id}: ${err.message}`);
         }
       }
     }
-    cleanupRunRuntimeFiles(run);
+    await cleanupRunRuntimeFiles(run);
   }
 
   /**
@@ -357,8 +360,7 @@ function createLifecycleService({
     if (task.project_id) {
       project = projectService.getProject(task.project_id);
       if (project?.directory) {
-        const fs = require('node:fs');
-        if (fs.existsSync(project.directory)) {
+        if (await nodeExecutor.fileExists(project.directory)) {
           projectDir = project.directory;
         } else {
           console.warn(`[lifecycle] Project directory not found: ${project.directory}, falling back to server cwd`);
@@ -495,6 +497,7 @@ function createLifecycleService({
     let projectMcpObj = null;
     if (projectMcpConfig && projectDir) {
       try {
+        // Control-plane-local MCP config read; worker/worktree paths use NodeExecutor.
         const fsM = require('node:fs');
         const pathM = require('node:path');
         const realRoot = fsM.realpathSync(projectDir);
@@ -566,6 +569,7 @@ function createLifecycleService({
     }
 
     if (mergedMcp) {
+      // Control-plane-local runtime MCP file; worker/worktree paths use NodeExecutor.
       const fsW = require('node:fs');
       const pathW = require('node:path');
       if (!/^[a-zA-Z0-9_-]+$/.test(run.id)) {
@@ -614,13 +618,16 @@ function createLifecycleService({
       // (app.js injects it). A missing worktreeService is a test-harness-only
       // legacy configuration, so keep the old projectDir spawn behavior there.
       if (projectDir && worktreeService) {
-        const classification = typeof worktreeService.classifyProjectDir === 'function'
-          ? worktreeService.classifyProjectDir(projectDir)
-          : (worktreeService.isGitRepo?.(projectDir) ? 'git' : 'unknown');
+        let classification = 'unknown';
+        if (typeof worktreeService.classifyProjectDir === 'function') {
+          classification = await worktreeService.classifyProjectDir(projectDir);
+        } else if (typeof worktreeService.isGitRepo === 'function' && await worktreeService.isGitRepo(projectDir)) {
+          classification = 'git';
+        }
 
         if (classification === 'git') {
           try {
-            const result = worktreeService.createWorktree(projectDir, runBranchName(run.id));
+            const result = await worktreeService.createWorktree(projectDir, runBranchName(run.id));
             if (!result?.path || !result?.branch) {
               throw new Error('worktree service returned an invalid result');
             }
@@ -835,11 +842,12 @@ function createLifecycleService({
     } catch (error) {
       runService.updateRunStatus(run.id, 'failed', { force: true });
       runService.addRunEvent(run.id, 'error', JSON.stringify({ message: error.message }));
-      // Synchronous cleanup so the worktree AND the in-memory _runProjectDirs entry
-      // are released even if monitoring/subscriber were never started or have been
-      // torn down. cleanupRunWorktree is idempotent — the run:ended subscriber that
-      // updateRunStatus may also trigger will be a safe no-op the second time.
-      cleanupRunWorktree({
+      // Awaited cleanup so the worktree AND the in-memory _runProjectDirs entry
+      // are released even if monitoring/subscriber were never started or have
+      // been torn down. cleanupRunWorktree is idempotent — the run:ended
+      // subscriber that updateRunStatus may also trigger will be a safe no-op
+      // the second time.
+      await cleanupRunWorktree({
         id: run.id,
         is_manager: false,
         worktree_path: worktreePath,
@@ -1317,10 +1325,14 @@ function createLifecycleService({
               .catch((err) => {
                 console.warn(`[lifecycle] Harvest failed for run ${run.id}: ${err.message}`);
               })
-              .finally(() => cleanupRunRuntimeFiles(run));
+              .finally(() => cleanupRunRuntimeFiles(run).catch((err) => {
+                console.warn(`[lifecycle] Runtime cleanup failed for run ${run.id}: ${err.message}`);
+              }));
           });
         } else {
-          cleanupRunWorktree(run);
+          cleanupRunWorktree(run).catch((err) => {
+            console.warn(`[lifecycle] Worktree cleanup failed for run ${run.id}: ${err.message}`);
+          });
         }
 
         scheduleDrain(run.agent_profile_id);
@@ -1426,8 +1438,7 @@ function createLifecycleService({
    * Harvest is not retried here (B-lite); the default removeWorktree autosave
    * preserves any uncommitted agent work before pruning the stale checkout.
    */
-  function cleanupStaleTerminalWorktrees() {
-    const fs = require('node:fs');
+  async function cleanupStaleTerminalWorktrees() {
     if (!worktreeService) return 0;
     const terminalStatuses = ['completed', 'failed', 'cancelled', 'stopped'];
     let cleaned = 0;
@@ -1436,16 +1447,16 @@ function createLifecycleService({
       try { runs = runService.listRuns({ status }); } catch { runs = []; }
       for (const run of runs) {
         if (run.is_manager || !run.worktree_path || !run.branch) continue;
-        if (!fs.existsSync(run.worktree_path)) continue;
+        if (!await nodeExecutor.fileExists(run.worktree_path)) continue;
         const projectDir = resolveProjectDirForRun(run);
         if (!projectDir) continue;
         try {
-          worktreeService.removeWorktree(projectDir, run.worktree_path, run.branch, { runId: run.id });
+          await worktreeService.removeWorktree(projectDir, run.worktree_path, run.branch, { runId: run.id });
           cleaned++;
         } catch (err) {
           console.warn(`[lifecycle] Stale terminal worktree cleanup failed for run ${run.id}: ${err.message}`);
         } finally {
-          cleanupRunRuntimeFiles(run);
+          await cleanupRunRuntimeFiles(run);
         }
       }
     }

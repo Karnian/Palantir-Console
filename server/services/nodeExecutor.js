@@ -1,5 +1,4 @@
 const childProcess = require('node:child_process');
-const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
@@ -8,29 +7,29 @@ const path = require('node:path');
  * NodeExecutor is the transport-neutral seam between the control plane and a
  * future execution node. The full contract from the fleet brief is:
  *
- * - exec(command, args, { cwd, env, timeoutMs }) -> { code, stdout, stderr }
+ * - exec(command, args, { cwd, env, timeoutMs, maxBuffer }) -> { code, stdout, stderr }
  * - spawnInteractive(command, args, opts) plus getOutput/sendInput/kill/detectExitCode
  * - liveness(runId) -> 'alive' | 'dead' | 'unreachable'
  * - listSessions() / discoverGhostSessions()
- * - realpath / fileExists / readFile / writeTempFile / readdir / rmrf
+ * - realpath / fileExists / stat / mkdir / readFile / writeTempFile / readdir / rmrf
  * - putSecretFile(path, content, mode = 0o600) with cleanup hooks
  *
- * P0a implements the local async exec and file APIs plus a local-only sync
- * compatibility bridge for existing file/git call sites. It intentionally does
- * not provide throwing placeholders for spawnInteractive, liveness, session
- * discovery, or putSecretFile; those methods are added in later phases.
+ * It intentionally does not provide throwing placeholders for spawnInteractive,
+ * liveness, session discovery, or putSecretFile; those methods are added in
+ * later phases.
  */
 function createLocalNodeExecutor() {
   /**
    * Run a command to completion. Resolves { code, stdout, stderr } only for
    * genuine process exits (including nonzero codes). Rejects for operational
-   * failures — spawn errors (ENOENT), timeout/signal kills, maxBuffer
-   * overflow — with partial stdout/stderr attached to the error so callers
-   * that can salvage output (e.g. truncated diffs) may do so. Collapsing
+   * failures — spawn errors (ENOENT), timeout/signal kills, maxBuffer overflow
+   * — with partial stdout/stderr attached to the error so callers that can
+   * salvage output (e.g. truncated diffs) may do so. Remote executors must
+   * emulate or cap maxBuffer with the same rejection contract. Collapsing
    * operational failures into a fake exit code would make "command failed"
    * indistinguishable from "transport/limit failed" once executors go remote.
    */
-  function exec(command, args = [], { cwd, env, timeoutMs } = {}) {
+  function exec(command, args = [], { cwd, env, timeoutMs, maxBuffer } = {}) {
     return new Promise((resolve, reject) => {
       childProcess.execFile(
         command,
@@ -39,6 +38,7 @@ function createLocalNodeExecutor() {
           cwd,
           env,
           timeout: timeoutMs,
+          maxBuffer,
           encoding: 'utf-8',
         },
         (err, stdout, stderr) => {
@@ -85,21 +85,12 @@ function createLocalNodeExecutor() {
     exec,
     fileExists,
     realpath: (p) => fsp.realpath(p),
+    stat: (p) => fsp.stat(p),
+    mkdir: (p, options) => fsp.mkdir(p, options),
     readFile: (p) => fsp.readFile(p, 'utf8'),
     readdir: (p, options) => fsp.readdir(p, options),
     writeTempFile,
     rmrf: (p) => fsp.rm(p, { recursive: true, force: true }),
-
-    /**
-     * Local-only compat bridge; remote executors will NOT implement these - the
-     * async API is canonical and call sites migrate in P0b.
-     */
-    execFileSync: (command, args, opts) => childProcess.execFileSync(command, args, opts),
-    existsSync: (p) => fs.existsSync(p),
-    realpathSync: (p) => fs.realpathSync(p),
-    statSync: (p, options) => fs.statSync(p, options),
-    mkdirSync: (p, options) => fs.mkdirSync(p, options),
-    rmSync: (p, options) => fs.rmSync(p, options),
   };
 }
 

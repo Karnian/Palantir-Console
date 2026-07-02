@@ -2,10 +2,11 @@ const path = require('node:path');
 const { createLocalNodeExecutor } = require('./nodeExecutor');
 
 /**
- * Git worktree manager — classifies project directories and creates isolated
- * worktrees for agent runs. createWorktree succeeds only for git repositories
- * and throws on classification/worktree failures; callers that intentionally
- * share a non-git directory must opt in before spawning.
+ * Async git worktree manager — classifies project directories and creates
+ * isolated worktrees for agent runs through the canonical NodeExecutor APIs.
+ * createWorktree succeeds only for git repositories and throws on
+ * classification/worktree failures; callers that intentionally share a non-git
+ * directory must opt in before spawning.
  */
 
 function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}) {
@@ -28,7 +29,24 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
     return name;
   }
 
-  function classifyProjectDir(dir) {
+  function gitError(args, res) {
+    const message = res.stderr || res.stdout || `git ${args.join(' ')} failed with code ${res.code}`;
+    const err = new Error(message);
+    err.code = res.code;
+    err.stdout = res.stdout;
+    err.stderr = res.stderr;
+    return err;
+  }
+
+  async function execGitOrThrow(cwd, args, opts = {}) {
+    const res = await nodeExecutor.exec('git', args, { cwd, ...opts });
+    if (res.code !== 0) {
+      throw gitError(args, res);
+    }
+    return res.stdout;
+  }
+
+  async function classifyProjectDir(dir) {
     try {
       // LC_ALL=C forces English git messages. Exit 128 alone cannot separate
       // "not a repository" from other fatals (dubious ownership, bad config),
@@ -36,31 +54,30 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
       // break it (found live on this ko_KR host: "깃 저장소가 아닙니다" made a
       // plain dir classify as 'unknown'). Remote executors (P2) must apply
       // the same env override.
-      nodeExecutor.execFileSync('git', ['rev-parse', '--git-dir'], {
+      const res = await nodeExecutor.exec('git', ['rev-parse', '--git-dir'], {
         cwd: dir,
-        stdio: 'pipe',
         env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
       });
-      return 'git';
-    } catch (err) {
-      const stderr = String(err?.stderr || err?.message || '');
-      if (err?.status === 128 && /not a git repository/i.test(stderr)) {
+      if (res.code === 0) return 'git';
+      if (res.code === 128 && /not a git repository/i.test(String(res.stderr || ''))) {
         return 'non_git';
       }
+      return 'unknown';
+    } catch {
       return 'unknown';
     }
   }
 
-  function isGitRepo(dir) {
+  async function isGitRepo(dir) {
     try {
-      return classifyProjectDir(dir) === 'git';
+      return await classifyProjectDir(dir) === 'git';
     } catch {
       return false;
     }
   }
 
-  function assertGitProjectDir(dir) {
-    const classification = classifyProjectDir(dir);
+  async function assertGitProjectDir(dir) {
+    const classification = await classifyProjectDir(dir);
     if (classification !== 'git') {
       throw new Error(`Cannot create worktree for ${classification} project directory`);
     }
@@ -68,17 +85,17 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
 
   /**
    * Resolve the base ref to branch a new worktree from. Falls back from the
-   * current branch name → HEAD sha (detached HEAD case) → 'main'. Returning
+   * current branch name -> HEAD sha (detached HEAD case) -> 'main'. Returning
    * something usable here is critical: an empty value would make the downstream
    * `git branch <new> ''` call fail and silently disable worktree isolation.
    */
-  function getCurrentBranch(dir) {
+  async function getCurrentBranch(dir) {
     try {
-      const branch = nodeExecutor.execFileSync('git', ['branch', '--show-current'], { cwd: dir, stdio: 'pipe', encoding: 'utf-8' }).trim();
+      const branch = (await execGitOrThrow(dir, ['branch', '--show-current'])).trim();
       if (branch) return branch;
     } catch { /* fall through */ }
     try {
-      const sha = nodeExecutor.execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, stdio: 'pipe', encoding: 'utf-8' }).trim();
+      const sha = (await execGitOrThrow(dir, ['rev-parse', 'HEAD'])).trim();
       if (sha) return sha;
     } catch { /* fall through */ }
     return 'main';
@@ -88,10 +105,10 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
    * Create a new git worktree for an agent run.
    * @param {string} projectDir - The git repository root
    * @param {string} branchName - Branch name for the worktree
-   * @returns {{ path: string, branch: string, created: boolean }}
+   * @returns {Promise<{ path: string, branch: string, created: boolean }>}
    */
-  function createWorktree(projectDir, branchName) {
-    assertGitProjectDir(projectDir);
+  async function createWorktree(projectDir, branchName) {
+    await assertGitProjectDir(projectDir);
 
     const safeBranch = validateBranchName(branchName);
     const worktreesBase = path.join(projectDir, '.palantir-worktrees');
@@ -105,7 +122,7 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
     }
 
     // If worktree already exists, return it
-    if (nodeExecutor.existsSync(worktreePath)) {
+    if (await nodeExecutor.fileExists(worktreePath)) {
       return { path: worktreePath, branch: safeBranch, created: false };
     }
 
@@ -114,21 +131,18 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
     let branchPreexisted = true;
     try {
       // Ensure base directory exists
-      nodeExecutor.mkdirSync(worktreesBase, { recursive: true });
+      await nodeExecutor.mkdir(worktreesBase, { recursive: true });
 
       // Create new branch from current HEAD — all args as arrays (no shell)
-      const baseBranch = getCurrentBranch(projectDir);
+      const baseBranch = await getCurrentBranch(projectDir);
       try {
-        nodeExecutor.execFileSync('git', ['branch', safeBranch, baseBranch], { cwd: projectDir, stdio: 'pipe' });
+        await execGitOrThrow(projectDir, ['branch', safeBranch, baseBranch]);
         branchPreexisted = false;
       } catch {
         // Branch already existed; leave it alone on rollback
       }
 
-      nodeExecutor.execFileSync('git', ['worktree', 'add', worktreePath, safeBranch], {
-        cwd: projectDir,
-        stdio: 'pipe',
-      });
+      await execGitOrThrow(projectDir, ['worktree', 'add', worktreePath, safeBranch]);
 
       return { path: worktreePath, branch: safeBranch, created: true };
     } catch (error) {
@@ -137,7 +151,7 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
       // Pre-existing branches are left untouched.
       if (!branchPreexisted) {
         try {
-          nodeExecutor.execFileSync('git', ['branch', '-D', safeBranch], { cwd: projectDir, stdio: 'pipe' });
+          await execGitOrThrow(projectDir, ['branch', '-D', safeBranch]);
         } catch { /* best effort */ }
       }
       throw error;
@@ -148,13 +162,9 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
    * Check if a worktree has uncommitted changes (staged or unstaged).
    * Returns true if there is anything that would be lost on removal.
    */
-  function hasUncommittedChanges(worktreePath) {
+  async function hasUncommittedChanges(worktreePath) {
     try {
-      const status = nodeExecutor.execFileSync('git', ['status', '--porcelain'], {
-        cwd: worktreePath,
-        stdio: 'pipe',
-        encoding: 'utf-8',
-      });
+      const status = await execGitOrThrow(worktreePath, ['status', '--porcelain']);
       return status.trim().length > 0;
     } catch {
       return false;
@@ -166,22 +176,16 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
    * Stages all changes and creates a commit so work is not lost.
    * Returns true if a commit was created.
    */
-  function autoSaveWorktree(worktreePath, runId) {
+  async function autoSaveWorktree(worktreePath, runId) {
     try {
-      if (!hasUncommittedChanges(worktreePath)) return false;
+      if (!await hasUncommittedChanges(worktreePath)) return false;
 
       // Stage all changes (new, modified, deleted)
-      nodeExecutor.execFileSync('git', ['add', '-A'], {
-        cwd: worktreePath,
-        stdio: 'pipe',
-      });
+      await execGitOrThrow(worktreePath, ['add', '-A']);
 
       // Commit with an identifiable message
       const msg = `[palantir] auto-save uncommitted changes from run ${runId || 'unknown'}`;
-      nodeExecutor.execFileSync('git', ['commit', '-m', msg, '--no-verify'], {
-        cwd: worktreePath,
-        stdio: 'pipe',
-      });
+      await execGitOrThrow(worktreePath, ['commit', '-m', msg, '--no-verify']);
       console.log(`[worktreeService] Auto-saved uncommitted changes in ${worktreePath} (run: ${runId || 'unknown'})`);
       return true;
     } catch (err) {
@@ -194,13 +198,13 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
    * Check if a branch has commits ahead of the base branch.
    * If it does, the branch should be preserved (not deleted).
    */
-  function branchHasWork(projectDir, branchName) {
+  async function branchHasWork(projectDir, branchName) {
     try {
       const safeBranch = validateBranchName(branchName);
-      const baseBranch = getCurrentBranch(projectDir);
-      const count = nodeExecutor.execFileSync(
-        'git', ['rev-list', '--count', `${baseBranch}..${safeBranch}`],
-        { cwd: projectDir, stdio: 'pipe', encoding: 'utf-8' }
+      const baseBranch = await getCurrentBranch(projectDir);
+      const count = await execGitOrThrow(
+        projectDir,
+        ['rev-list', '--count', `${baseBranch}..${safeBranch}`],
       );
       return parseInt(count.trim(), 10) > 0;
     } catch {
@@ -218,7 +222,7 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
    * @param {string} [opts.runId] - Run ID for the auto-save commit message
    * @param {boolean} [opts.autosave=true] - Set false to discard uncommitted changes on removal
    */
-  function removeWorktree(projectDir, worktreePath, branchName, opts = {}) {
+  async function removeWorktree(projectDir, worktreePath, branchName, opts = {}) {
     // Validate worktreePath is within projectDir to prevent arbitrary deletion
     const resolvedProject = path.resolve(projectDir);
     const resolvedWorktree = path.resolve(worktreePath);
@@ -229,23 +233,23 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
     // Auto-save uncommitted changes before removal unless the caller has
     // already captured the work that should survive. Harvest uses this to
     // discard test-generated files after it has committed agent work.
-    if (opts.autosave !== false && nodeExecutor.existsSync(resolvedWorktree)) {
-      autoSaveWorktree(resolvedWorktree, opts.runId);
+    if (opts.autosave !== false && await nodeExecutor.fileExists(resolvedWorktree)) {
+      await autoSaveWorktree(resolvedWorktree, opts.runId);
     }
 
     try {
-      nodeExecutor.execFileSync('git', ['worktree', 'remove', resolvedWorktree, '--force'], {
-        cwd: projectDir,
-        stdio: 'pipe',
-      });
+      await execGitOrThrow(projectDir, ['worktree', 'remove', resolvedWorktree, '--force']);
     } catch (error) {
       console.error(`[worktreeService] Failed to remove worktree: ${error.message}`);
       // Try manual cleanup — only if path is confirmed inside project dir
       try {
-        if (nodeExecutor.existsSync(resolvedWorktree) && nodeExecutor.statSync(resolvedWorktree).isDirectory()) {
-          nodeExecutor.rmSync(resolvedWorktree, { recursive: true, force: true });
+        if (await nodeExecutor.fileExists(resolvedWorktree)) {
+          const st = await nodeExecutor.stat(resolvedWorktree);
+          if (st.isDirectory()) {
+            await nodeExecutor.rmrf(resolvedWorktree);
+          }
         }
-        nodeExecutor.execFileSync('git', ['worktree', 'prune'], { cwd: projectDir, stdio: 'pipe' });
+        await execGitOrThrow(projectDir, ['worktree', 'prune']);
       } catch {
         // best effort
       }
@@ -255,11 +259,11 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
     // Branches with work are preserved so the user can review/merge them.
     if (branchName) {
       const safeBranch = validateBranchName(branchName);
-      if (branchHasWork(projectDir, safeBranch)) {
+      if (await branchHasWork(projectDir, safeBranch)) {
         console.log(`[worktreeService] Preserving branch '${safeBranch}' — has commits ahead of base`);
       } else {
         try {
-          nodeExecutor.execFileSync('git', ['branch', '-D', safeBranch], { cwd: projectDir, stdio: 'pipe' });
+          await execGitOrThrow(projectDir, ['branch', '-D', safeBranch]);
         } catch {
           // branch may have been merged or doesn't exist
         }
@@ -270,14 +274,10 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
   /**
    * List all active worktrees for a project.
    */
-  function listWorktrees(projectDir) {
-    if (!isGitRepo(projectDir)) return [];
+  async function listWorktrees(projectDir) {
+    if (!await isGitRepo(projectDir)) return [];
     try {
-      const output = nodeExecutor.execFileSync('git', ['worktree', 'list', '--porcelain'], {
-        cwd: projectDir,
-        stdio: 'pipe',
-        encoding: 'utf-8',
-      });
+      const output = await execGitOrThrow(projectDir, ['worktree', 'list', '--porcelain']);
 
       const worktrees = [];
       let current = {};
@@ -305,22 +305,24 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
   /**
    * Get diff summary for a worktree branch vs main.
    */
-  function getWorktreeDiff(projectDir, branchName) {
+  async function getWorktreeDiff(projectDir, branchName) {
     try {
       const safeBranch = validateBranchName(branchName);
-      const baseBranch = getCurrentBranch(projectDir);
+      const baseBranch = await getCurrentBranch(projectDir);
       const gitEnv = { ...process.env, GIT_EXTERNAL_DIFF: '', GIT_TEXTCONV_DIFF: '' };
       // Three-dot range (merge-base..branch): shows only what the branch
       // changed. Two-dot would also pick up base-branch commits that landed
       // after the worktree was created — noise that misattributes others'
       // work to this run's harvest.
-      const stat = nodeExecutor.execFileSync(
-        'git', ['diff', '--no-ext-diff', '--no-textconv', '--no-color', `${baseBranch}...${safeBranch}`, '--stat'],
-        { cwd: projectDir, stdio: 'pipe', encoding: 'utf-8', env: gitEnv }
+      const stat = await execGitOrThrow(
+        projectDir,
+        ['diff', '--no-ext-diff', '--no-textconv', '--no-color', `${baseBranch}...${safeBranch}`, '--stat'],
+        { env: gitEnv },
       );
-      const diffOutput = nodeExecutor.execFileSync(
-        'git', ['diff', '--no-ext-diff', '--no-textconv', '--no-color', `${baseBranch}...${safeBranch}`, '--name-only'],
-        { cwd: projectDir, stdio: 'pipe', encoding: 'utf-8', env: gitEnv }
+      const diffOutput = await execGitOrThrow(
+        projectDir,
+        ['diff', '--no-ext-diff', '--no-textconv', '--no-color', `${baseBranch}...${safeBranch}`, '--name-only'],
+        { env: gitEnv },
       );
       return {
         base: baseBranch,
@@ -333,7 +335,17 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
     }
   }
 
-  return { createWorktree, removeWorktree, listWorktrees, getWorktreeDiff, classifyProjectDir, isGitRepo, hasUncommittedChanges, branchHasWork, autoSaveWorktree };
+  return {
+    createWorktree,
+    removeWorktree,
+    listWorktrees,
+    getWorktreeDiff,
+    classifyProjectDir,
+    isGitRepo,
+    hasUncommittedChanges,
+    branchHasWork,
+    autoSaveWorktree,
+  };
 }
 
 module.exports = { createWorktreeService };

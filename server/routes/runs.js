@@ -1,6 +1,5 @@
 const express = require('express');
 const path = require('node:path');
-const { execFile } = require('node:child_process');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { createLocalNodeExecutor } = require('../services/nodeExecutor');
 
@@ -15,7 +14,7 @@ const DIFF_TIMEOUT_MS = 10 * 1000;
 
 /**
  * Run `git diff` inside a worktree and return the unified diff output
- * (stdout) as UTF-8 text. Uses `execFile` (no shell) with an explicit
+ * (stdout) as UTF-8 text. Uses NodeExecutor exec (no shell) with an explicit
  * maxBuffer so we always return a predictable shape, even when the
  * worktree's diff would exceed `DIFF_MAX_BYTES`.
  *
@@ -27,56 +26,57 @@ const DIFF_TIMEOUT_MS = 10 * 1000;
  * Rejects only on non-zero exit / git not available / timeout. Callers
  * upstream translate those into a 502 with `{ diff: null, reason }`.
  */
-function runGitDiff(cwd) {
-  return new Promise((resolve, reject) => {
-    // `git diff HEAD --no-color` covers staged + unstaged changes
-    // relative to the worktree's current commit — exactly what the
-    // user edited since the run started. `--no-color` keeps the text
-    // parseable / displayable without ANSI escapes.
-    //
-    // Security hardening (Codex R2-B review, High):
-    //   --no-ext-diff  — disables `diff.external` / `GIT_EXTERNAL_DIFF`.
-    //                    Without this, a repo carrying a hostile git
-    //                    config could have git spawn an arbitrary
-    //                    external program on every diff. The endpoint
-    //                    runs with server process privileges, so this
-    //                    is a remote-code-exec primitive for any user
-    //                    who can point a project at a malicious repo.
-    //   --no-textconv  — disables `textconv` filters configured via
-    //                    gitattributes. Same vector (arbitrary binary
-    //                    invocation on binary files like .png/.pdf).
-    // We also wipe `GIT_EXTERNAL_DIFF` from the child env as
-    // belt-and-suspenders — `--no-ext-diff` should cover it, but an
-    // older git build or a future CLI flag regression could put the
-    // door back. Explicitly clearing the env var closes both.
-    execFile(
+async function runGitDiff(cwd, { nodeExecutor = createLocalNodeExecutor() } = {}) {
+  // `git diff HEAD --no-color` covers staged + unstaged changes
+  // relative to the worktree's current commit — exactly what the
+  // user edited since the run started. `--no-color` keeps the text
+  // parseable / displayable without ANSI escapes.
+  //
+  // Security hardening (Codex R2-B review, High):
+  //   --no-ext-diff  — disables `diff.external` / `GIT_EXTERNAL_DIFF`.
+  //                    Without this, a repo carrying a hostile git
+  //                    config could have git spawn an arbitrary
+  //                    external program on every diff. The endpoint
+  //                    runs with server process privileges, so this
+  //                    is a remote-code-exec primitive for any user
+  //                    who can point a project at a malicious repo.
+  //   --no-textconv  — disables `textconv` filters configured via
+  //                    gitattributes. Same vector (arbitrary binary
+  //                    invocation on binary files like .png/.pdf).
+  // We also wipe `GIT_EXTERNAL_DIFF` from the child env as
+  // belt-and-suspenders — `--no-ext-diff` should cover it, but an
+  // older git build or a future CLI flag regression could put the
+  // door back. Explicitly clearing the env var closes both.
+  let res;
+  try {
+    res = await nodeExecutor.exec(
       'git',
       ['diff', '--no-ext-diff', '--no-textconv', '--no-color', 'HEAD'],
       {
         cwd,
-        timeout: DIFF_TIMEOUT_MS,
+        timeoutMs: DIFF_TIMEOUT_MS,
         maxBuffer: DIFF_MAX_BYTES + 1024,
-        encoding: 'utf-8',
         env: { ...process.env, GIT_EXTERNAL_DIFF: '', GIT_TEXTCONV_DIFF: '' },
       },
-      (err, stdout) => {
-        if (err) {
-          // ERR_CHILD_PROCESS_STDIO_MAXBUFFER: buffer exceeded cap.
-          // stdout may still contain a usable prefix.
-          if (err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
-            const text = String(stdout || '').slice(0, DIFF_MAX_BYTES);
-            return resolve({ diff: text, truncated: true, empty: false });
-          }
-          return reject(err);
-        }
-        const text = String(stdout || '');
-        if (text.length > DIFF_MAX_BYTES) {
-          return resolve({ diff: text.slice(0, DIFF_MAX_BYTES), truncated: true, empty: false });
-        }
-        resolve({ diff: text, truncated: false, empty: text.length === 0 });
-      },
     );
-  });
+  } catch (err) {
+    // ERR_CHILD_PROCESS_STDIO_MAXBUFFER: buffer exceeded cap.
+    // stdout may still contain a usable prefix.
+    if (err?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+      const text = String(err.stdout || '').slice(0, DIFF_MAX_BYTES);
+      return { diff: text, truncated: true, empty: false };
+    }
+    throw err;
+  }
+
+  if (res.code !== 0) {
+    throw new Error(res.stderr || res.stdout || `git diff failed with code ${res.code}`);
+  }
+  const text = String(res.stdout || '');
+  if (text.length > DIFF_MAX_BYTES) {
+    return { diff: text.slice(0, DIFF_MAX_BYTES), truncated: true, empty: false };
+  }
+  return { diff: text, truncated: false, empty: text.length === 0 };
 }
 
 /**
@@ -290,7 +290,7 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
     if (!run.worktree_path) {
       return res.json({ diff: null, reason: 'no_worktree' });
     }
-    if (!nodeExecutor.existsSync(run.worktree_path)) {
+    if (!await nodeExecutor.fileExists(run.worktree_path)) {
       return res.json({ diff: null, reason: 'worktree_missing' });
     }
 
@@ -314,18 +314,18 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
       // path.resolve alone would happily accept a worktree_path that
       // looks like `/<proj>/evil` where `evil` is a symlink to `/etc` —
       // the string prefix passes but `git diff` would then run in `/etc`.
-      // fs.realpathSync follows every component, so the startsWith check
+      // realpath follows every component, so the startsWith check
       // runs against the actual filesystem location.
       //
       // If either path isn't realpathable (deleted mid-request, perm
       // error, etc.) we fall back to the non-real variant, which at
-      // worst allows the request — but the earlier fs.existsSync on
+      // worst allows the request — but the earlier fileExists on
       // worktree_path has already enforced existence, so the failure
       // mode is narrow.
       let resolvedProject = path.resolve(projectDir);
       let resolvedWorktree = path.resolve(run.worktree_path);
-      try { resolvedProject = nodeExecutor.realpathSync(resolvedProject); } catch { /* fall through */ }
-      try { resolvedWorktree = nodeExecutor.realpathSync(resolvedWorktree); } catch { /* fall through */ }
+      try { resolvedProject = await nodeExecutor.realpath(resolvedProject); } catch { /* fall through */ }
+      try { resolvedWorktree = await nodeExecutor.realpath(resolvedWorktree); } catch { /* fall through */ }
       // The worktree must be under the project root OR the project root
       // itself (non-git-worktree runs share the base cwd). Anything else
       // is either a bug or a malicious payload.
@@ -340,7 +340,7 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
     }
 
     try {
-      const result = await runGitDiff(run.worktree_path);
+      const result = await runGitDiff(run.worktree_path, { nodeExecutor });
       return res.json({
         diff: result.diff,
         truncated: result.truncated || false,

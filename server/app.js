@@ -752,6 +752,9 @@ function createApp(options = {}) {
     executionEngine, streamJsonEngine, worktreeService, harvestService, eventBus,
     skillPackService,
     nodeService,
+    // Share the app-wide executor (P2 remote rollout swaps this per node —
+    // a default-constructed local executor here would be a forgotten seam).
+    nodeExecutor,
     presetService,
     claudeVersionResolver: options.claudeVersionResolver,
     // Phase 10D: isolated-preset auth materialization honors the same
@@ -1027,10 +1030,18 @@ function createApp(options = {}) {
         console.warn(`[app] Queue boot drain failed: ${err.message}`);
       });
   }
-  const staleWorktrees = lifecycleService.cleanupStaleTerminalWorktrees();
-  if (staleWorktrees > 0) {
-    console.log(`[app] Cleaned ${staleWorktrees} stale terminal worktree(s)`);
-  }
+  // P0b-1: cleanupStaleTerminalWorktrees is async now — fire-and-forget with
+  // observability (a bare call would compare a Promise to 0 and never log,
+  // and a rejection would be unhandled — Codex P0b-1 review, SERIOUS).
+  Promise.resolve(lifecycleService.cleanupStaleTerminalWorktrees())
+    .then((staleWorktrees) => {
+      if (staleWorktrees > 0) {
+        console.log(`[app] Cleaned ${staleWorktrees} stale terminal worktree(s)`);
+      }
+    })
+    .catch((err) => {
+      console.warn(`[app] Stale terminal worktree cleanup failed: ${err.message}`);
+    });
   // Skill Packs: clean up orphan MCP config files from previous runs
   const mcpCleaned = lifecycleService.cleanupOrphanMcpConfigs();
   if (mcpCleaned > 0) {
