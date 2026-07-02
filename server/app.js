@@ -40,8 +40,8 @@ const { createConversationsRouter } = require('./routes/conversations');
 const { createManagerRegistry } = require('./services/managerRegistry');
 const { createConversationService } = require('./services/conversationService');
 const { conversationIdForProject, parseProjectConversationId } = require('./utils/conversationId'); // PM→Operator Phase 0
-const { createPmCleanupService } = require('./services/pmCleanupService');
-const { createPmSpawnService } = require('./services/pmSpawnService');
+const { createOperatorCleanupService } = require('./services/operatorCleanupService');
+const { createOperatorSpawnService } = require('./services/operatorSpawnService');
 const { createReconciliationService } = require('./services/reconciliationService');
 const { createDispatchAuditRouter } = require('./routes/dispatchAudit');
 const { createRouterService } = require('./services/routerService');
@@ -758,19 +758,19 @@ function createApp(options = {}) {
   // queue and the unified send/resolve routing used by both the new
   // /api/conversations router and the legacy /api/manager/* routes.
   const managerRegistry = createManagerRegistry({ runService });
-  // v3 Phase 3a: lazy PM spawn + single-owner cleanup. pmSpawnService is
+  // v3 Phase 3a: lazy Operator spawn + single-owner cleanup. operatorSpawnService is
   // wired into conversationService below so a first message to
-  // pm:<projectId> creates the PM run on demand. pmCleanupService is the
+  // pm:<projectId> creates the Operator run on demand. operatorCleanupService is the
   // single termination owner for /reset, delete-project, and future
   // pm_enabled=false toggles (spec §5 책임 분담표).
-  // Operator specialist (P-B2c). Declared here — before pmSpawnService / manager
+  // Operator specialist (P-B2c). Declared here — before operatorSpawnService / manager
   // router — so their prompt builders can lazily read ACTUAL route availability
   // via the isSpecialistAvailable thunk (mid-turn delegation MD-1). The service
   // itself is constructed below (it needs memoryComposer). null = flag off OR no
   // backend → route unmounted → managers must NOT be told to call it.
   let specialistService = null;
   const isSpecialistAvailable = () => specialistService !== null;
-  const pmSpawnService = createPmSpawnService({
+  const operatorSpawnService = createOperatorSpawnService({
     runService,
     managerRegistry,
     managerAdapterFactory,
@@ -781,7 +781,7 @@ function createApp(options = {}) {
     isSpecialistAvailable,
     authResolverOpts: options.authResolverOpts || {},
   });
-  const pmCleanupService = createPmCleanupService({
+  const operatorCleanupService = createOperatorCleanupService({
     projectService,
     projectBriefService,
     managerRegistry,
@@ -802,8 +802,8 @@ function createApp(options = {}) {
     managerRegistry,
     managerAdapterFactory,
     lifecycleService,
-    pmSpawnService,
-    memoryService, // ML PR1: user-payload Learned Memory injection (PM slots)
+    operatorSpawnService,
+    memoryService, // ML PR1: user-payload Learned Memory injection (Operator slots)
     masterMemoryService, // L2 P1b: user-payload Master memory injection (Top slot)
     memoryMultiOwner: options.memoryMultiOwner ?? (process.env.PALANTIR_MEMORY_MULTI_OWNER === '1'),
     memoryComposer,
@@ -955,7 +955,7 @@ function createApp(options = {}) {
   app.use('/api/usage', createUsageRouter({ codexService, providerRegistry }));
 
   // New routes (v2)
-  app.use('/api/projects', createProjectsRouter({ projectService, taskService, projectBriefService, pmCleanupService }));
+  app.use('/api/projects', createProjectsRouter({ projectService, taskService, projectBriefService, operatorCleanupService }));
   app.use('/api/projects', createMemoryRouter({ memoryService, projectService })); // ML PR1: GET /:projectId/memory
   app.use('/api/master-memory', createMasterMemoryRouter({ masterMemoryService })); // L2 P1b: GET / + POST /remember
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService }));
@@ -968,7 +968,7 @@ function createApp(options = {}) {
   app.use('/api/agents', createAgentsRouter({ agentProfileService, providerRegistry, authResolverOpts }));
   app.use('/api/events', createEventsRouter({ eventBus }));
   app.use('/api/claude-sessions', createClaudeSessionsRouter());
-  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, pmSpawnService, skillPackService, isSpecialistAvailable, authResolverOpts }));
+  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorCleanupService, operatorSpawnService, skillPackService, isSpecialistAvailable, authResolverOpts }));
   app.use('/api/conversations', createConversationsRouter({ conversationService, runService }));
   // Operator P-B2c-3: specialist entry. Mounted ONLY when the feature is enabled
   // (specialistService is null unless PALANTIR_OPERATOR_SPECIALIST=1 + a backend),
@@ -1120,7 +1120,7 @@ function createApp(options = {}) {
     // Dispose failures are logged but do NOT re-throw; shutdown is
     // best-effort and a partial cleanup is still better than leaving
     // the db open. This is distinct from the /reset + DELETE /projects
-    // paths, which are fail-closed (pmCleanupService re-throws so the
+    // paths, which are fail-closed (operatorCleanupService re-throws so the
     // HTTP layer can 502).
     try {
       const snap = managerRegistry.snapshot();

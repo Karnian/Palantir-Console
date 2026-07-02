@@ -5,23 +5,23 @@
 AI 코딩 에이전트(Claude Code, Codex, OpenCode)를 3계층 구조로 운영하는 중앙 관제 허브.
 
 ```
-Main Manager (Top)          ← 전체 프로젝트와 PM을 총괄
- ├── PM (Project A)         ← 프로젝트 내 워커들을 관리
+Main Manager (Top)          ← 전체 프로젝트와 Operator을 총괄
+ ├── Operator (Project A)         ← 프로젝트 내 워커들을 관리
  │    ├── Worker 1          ← 실제 코딩 작업 수행
  │    ├── Worker 2
  │    └── Worker 3
- ├── PM (Project B)
+ ├── Operator (Project B)
  │    └── Worker 1
- └── PM (Project C)
+ └── Operator (Project C)
       ├── Worker 1
       └── Worker 2
 ```
 
 **Worker** — 프로젝트 안에서 실제 코딩 작업을 수행하는 AI 에이전트(Claude Code, Codex 등). 각 워커는 독립된 Git worktree에서 격리 실행되어 서로 충돌하지 않는다.
 
-**PM (Project Manager)** — 프로젝트 단위로 할당되어 해당 프로젝트의 워커들을 관리한다. 태스크를 워커에게 분배하고, 진행 상황을 추적하며, 프로젝트의 컨벤션과 맥락을 유지해 일관된 방향으로 작업을 조율한다.
+**Operator (Project Manager)** — 프로젝트 단위로 할당되어 해당 프로젝트의 워커들을 관리한다. 태스크를 워커에게 분배하고, 진행 상황을 추적하며, 프로젝트의 컨벤션과 맥락을 유지해 일관된 방향으로 작업을 조율한다.
 
-**Main Manager (Top)** — 최상위 관제자. 여러 프로젝트와 PM들을 총괄하며, 사용자의 지시를 적절한 PM에게 라우팅하고, 프로젝트 간 우선순위와 상태를 한눈에 파악할 수 있는 단일 대화 창구.
+**Main Manager (Top)** — 최상위 관제자. 여러 프로젝트와 Operator들을 총괄하며, 사용자의 지시를 적절한 Operator에게 라우팅하고, 프로젝트 간 우선순위와 상태를 한눈에 파악할 수 있는 단일 대화 창구.
 
 이 모든 계층을 웹 대시보드(`localhost:4177`)에서 실시간으로 모니터링하고 제어한다.
 
@@ -59,7 +59,7 @@ open http://localhost:4177
 # .env 파일
 PALANTIR_TOKEN=my-secret-token
 ANTHROPIC_API_KEY=sk-ant-...    # 선택: Claude 기반 Manager 용
-CODEX_API_KEY=...               # 선택: Codex 기반 Manager 또는 PM 용
+CODEX_API_KEY=...               # 선택: Codex 기반 Manager 또는 Operator 용
 
 docker compose up --build
 # → http://localhost:4177 (Authorization: Bearer my-secret-token 헤더로 호출)
@@ -97,20 +97,20 @@ SSE 가 구조적으로 막히던 문제를 수정한 결과 (NEW-S1).
 ## 핵심 개념
 
 ```
-Main Manager (Top)  →  PM (프로젝트별)  →  Worker (태스크별)
+Main Manager (Top)  →  Operator (프로젝트별)  →  Worker (태스크별)
  (총괄 관제)          (프로젝트 관리)      (AI 코딩 에이전트)
 ```
 
 | 개념 | 설명 |
 |------|------|
-| **Main Manager (Top)** | 최상위 관제자. 사용자 지시를 적절한 PM에게 라우팅하고 전체 프로젝트를 총괄 |
-| **PM (Project Manager)** | 프로젝트별 관리자. 워커를 조율하고 태스크를 분배하며 프로젝트 맥락을 유지. 첫 메시지 시 lazy-spawn |
+| **Main Manager (Top)** | 최상위 관제자. 사용자 지시를 적절한 Operator에게 라우팅하고 전체 프로젝트를 총괄 |
+| **Operator (Project Manager)** | 프로젝트별 관리자. 워커를 조율하고 태스크를 분배하며 프로젝트 맥락을 유지. 첫 메시지 시 lazy-spawn |
 | **Worker** | 실제 코딩을 수행하는 AI 에이전트 (Claude Code, Codex, OpenCode). 독립 Git worktree에서 격리 실행 |
 | **Project** | 작업 묶음. 예: "백엔드 API", "프론트엔드 리팩토링" |
 | **Task** | 구체적인 할 일. 칸반 보드에서 관리. Backlog → Todo → In Progress → Review → Done |
 | **Run** | Task에 대해 에이전트를 실행한 기록. 하나의 Task에 여러 Run 가능 |
 | **Agent Profile** | 실행할 에이전트 설정 (Claude Code, Codex CLI, OpenCode, 커스텀) |
-| **Conversation** | 모든 채팅 surface의 1급 식별자: `top`, `pm:<projectId>`, `worker:<runId>` |
+| **Conversation** | 모든 채팅 surface의 1급 식별자: `top`, `operator:<projectId>` (`pm:<projectId>`도 허용), `worker:<runId>` |
 
 ## 화면 구성
 
@@ -121,7 +121,7 @@ Main Manager (Top)  →  PM (프로젝트별)  →  Worker (태스크별)
 - **Active** — 현재 실행 중인 에이전트 수
 - **Needs Input** — 에이전트가 사용자 응답을 기다리는 중 (최우선)
 - **Done Today** — 오늘 완료된 Run 수
-- **Drift ⚠** (v3 Phase 7) — PM 이 DB 와 어긋난 주장을 기록했을 때 뜨는 annotate-only 배지. 0 이면 숨김. 클릭하면 **Drift Drawer** 가 열려 각 row 에 대해 PM 주장 vs DB truth 좌우 diff + 색상별 kind + Dismiss/Restore 동작을 제공한다.
+- **Drift ⚠** (v3 Phase 7) — Operator 이 DB 와 어긋난 주장을 기록했을 때 뜨는 annotate-only 배지. 0 이면 숨김. 클릭하면 **Drift Drawer** 가 열려 각 row 에 대해 Operator 주장 vs DB truth 좌우 diff + 색상별 kind + Dismiss/Restore 동작을 제공한다.
 
 아래의 **Triage Feed**:
 - Needs Input (최우선) — `Respond` 로 바로 응답
@@ -148,9 +148,9 @@ Backlog  →  Todo  →  In Progress  →  Review  →  Done
 프로젝트 목록. `+ New Project` 로 생성.
 
 각 프로젝트는 다음 v3 필드를 갖는다:
-- `pm_enabled` — 프로젝트가 PM 을 lazy-spawn 할 수 있는지 여부
+- `pm_enabled` — 프로젝트가 Operator를 lazy-spawn 할 수 있는지 여부
 - `preferred_pm_adapter` — `codex` 또는 `claude` 선호도 (Claude resume 은 Phase 3b 전까지 codex 로 fallback)
-- `project_brief` — conventions + known pitfalls. 이 값은 PM 시스템 프롬프트에 static 하게 주입되어 cached_input_tokens 를 유지한다.
+- `project_brief` — conventions + known pitfalls. 이 값은 Operator 시스템 프롬프트에 static 하게 주입되어 cached_input_tokens 를 유지한다.
 
 ### 4. Manager (✦)
 
@@ -158,9 +158,9 @@ Backlog  →  Todo  →  In Progress  →  Review  →  Done
 
 - **40/60 분할 레이아웃**: 왼쪽 채팅(40%) + 오른쪽 워커 세션 그리드(60%)
 - **Start Manager** — Top 매니저 세션 시작. 에이전트 프로필 드롭다운에서 Claude Code 또는 Codex 선택 가능.
-- **Conversation target 드롭다운** (v3 Phase 6) — 사용자가 Top 세션 또는 현재 활성 PM(`pm:<projectId>`) 을 선택해서 메시지 target 전환. 각 PM 옵션은 현재 활성 여부(`active`) 마커로 표시된다. `@<projectName> 메시지` 형식으로 입력하면 `/api/router/resolve` 가 해당 PM 으로 rewrite 해준다 (미스/다중 매칭 시 toast 로 명시).
-- **Reset PM** — 선택된 PM 의 Codex thread 를 종료하고 `pm_thread_id` 를 지운다. 다음 메시지부터 새 thread 로 시작.
-- **Per-PM drift 인디케이터** (v3 Phase 7) — 해당 PM 에 대기 중인 incoherent audit row 가 있으면 Reset PM 옆에 `⚠ N` 버튼이 나타나 같은 Drift Drawer 를 연다.
+- **Conversation target 드롭다운** (v3 Phase 6) — 사용자가 Top 세션 또는 현재 활성 Operator(`operator:<projectId>`, `pm:<projectId>`도 허용) 를 선택해서 메시지 target 전환. 각 Operator 옵션은 현재 활성 여부(`active`) 마커로 표시된다. `@<projectName> 메시지` 형식으로 입력하면 `/api/router/resolve` 가 해당 Operator로 rewrite 해준다 (미스/다중 매칭 시 toast 로 명시).
+- **Reset Operator** — 선택된 Operator 의 Codex thread 를 종료하고 `pm_thread_id` 를 지운다. 다음 메시지부터 새 thread 로 시작.
+- **Per-Operator drift 인디케이터** (v3 Phase 7) — 해당 Operator 에 대기 중인 incoherent audit row 가 있으면 Reset Operator 옆에 `⚠ N` 버튼이 나타나 같은 Drift Drawer 를 연다.
 - Manager 는 Palantir Console REST API 를 curl 로 직접 조회해 실제 run/task 상태를 파악한다.
 - 지원 프로토콜:
   - **Claude Code CLI**: `--print --output-format stream-json --input-format stream-json` (multi-turn)
@@ -221,7 +221,7 @@ Run 을 클릭하면 열리는 상세 패널:
 
 - **Status** — 현재 상태 (running/needs_input/completed/failed …)
 - **Events** — 상태 변경 이력 실시간 표시
-- **Send Input** — `needs_input` 상태일 때 에이전트에게 텍스트 전달. 이 호출은 내부적으로 `conversationService.sendMessage('worker:<runId>', ...)` 로 가서 **부모(Top 또는 PM) 에 parent-staleness notice 를 자동 큐잉** 한다 (v3 lock-in #2: 의도 분류 없이 무조건).
+- **Send Input** — `needs_input` 상태일 때 에이전트에게 텍스트 전달. 이 호출은 내부적으로 `conversationService.sendMessage('worker:<runId>', ...)` 로 가서 **부모(Top 또는 Operator) 에 parent-staleness notice 를 자동 큐잉** 한다 (v3 lock-in #2: 의도 분류 없이 무조건).
 - **Cancel** — 실행 중인 Run 취소
 
 ## 키보드 단축키
@@ -249,7 +249,7 @@ Run 을 클릭하면 열리는 상세 패널:
 | `run:needs_input` | **우선순위 알림** — idle timeout 감지 | 동일 + `priority: 'alert'` |
 | `run:event` | 벤더 원본 이벤트 (고volume) | — |
 | `manager:started` / `manager:stopped` | Top manager lifecycle | — |
-| `dispatch_audit:recorded` | PM 디스패치 claim 감사 기록 (annotate-only) | `audit`, `project_id`, `pm_run_id`, `incoherence_flag`, `incoherence_kind` |
+| `dispatch_audit:recorded` | Operator 디스패치 claim 감사 기록 (annotate-only) | `audit`, `project_id`, `pm_run_id`, `incoherence_flag`, `incoherence_kind` |
 
 클라이언트 패턴:
 - Drift 배지 + drawer 와 `run:needs_input` 의 탭 타이틀 pulse 는 모두 위 envelope 로 구동된다.
@@ -265,7 +265,7 @@ GET    /api/projects           — 목록
 POST   /api/projects           — 생성 { name, directory?, color?, pm_enabled?, preferred_pm_adapter? }
 GET    /api/projects/:id       — 조회
 PATCH  /api/projects/:id       — 수정
-DELETE /api/projects/:id       — 삭제 (pmCleanupService 가 live PM 정리 실패 시 fail-closed 로 abort)
+DELETE /api/projects/:id       — 삭제 (operatorCleanupService 가 live Operator 정리 실패 시 fail-closed 로 abort)
 GET    /api/projects/:id/tasks — 프로젝트의 task 목록
 GET    /api/projects/:id/brief — project brief 조회
 PATCH  /api/projects/:id/brief — 부분 수정 { conventions?, known_pitfalls? }
@@ -304,7 +304,7 @@ PATCH  /api/agents/:id         — 수정
 DELETE /api/agents/:id         — 삭제
 ```
 
-### Manager Session (Top + PM)
+### Manager Session (Top + Operator)
 ```
 POST   /api/manager/start                 — Top 매니저 시작 { prompt?, cwd?, model?, agent_profile_id? }
 POST   /api/manager/message               — Top 에 메시지 전송 (conversationService 경유)
@@ -312,13 +312,13 @@ GET    /api/manager/status                — { active, run, usage, claudeSessio
 GET    /api/manager/events                — Top 이벤트 목록 (?after=<id> 증분)
 GET    /api/manager/output                — Top 출력 텍스트
 POST   /api/manager/stop                  — Top 종료 (해당 runId 의 pending parent-notice 도 함께 정리)
-POST   /api/manager/pm/:projectId/message — 필요 시 PM lazy spawn + 메시지 전송
+POST   /api/manager/pm/:projectId/message — 필요 시 Operator lazy spawn + 메시지 전송
 POST   /api/manager/pm/:projectId/reset   — 단일 owner 정리: adapter dispose + run cancel + pm_thread_id clear + registry slot drop
 ```
 
 ### Conversations (1급) — v3 Phase 1.5+
 ```
-GET    /api/conversations/:id           — { conversation: { kind, conversationId, run? } } — id 는 'top' | 'pm:<projectId>' | 'worker:<runId>'
+GET    /api/conversations/:id           — { conversation: { kind, conversationId, run? } } — id 는 'top' | 'operator:<projectId>' | 'worker:<runId>' (`pm:<projectId>`도 허용)
 POST   /api/conversations/:id/message   — 메시지 전송 { text, images? }
 GET    /api/conversations/:id/events    — 이벤트 (?after=<id> 증분)
 ```
@@ -331,7 +331,7 @@ POST   /api/router/resolve  — { text, currentConversationId?, defaultConversat
 
 ### Dispatch Audit (v3 Phase 4 + 7) — annotate-only
 ```
-POST   /api/dispatch-audit  — PM claim 기록 { project_id, task_id?, pm_run_id?, selected_agent_profile_id?, rationale?, pm_claim }
+POST   /api/dispatch-audit  — Operator claim 기록 { project_id, task_id?, pm_run_id?, selected_agent_profile_id?, rationale?, pm_claim }
                               → 201 { audit: { ..., incoherence_flag, incoherence_kind } }
 GET    /api/dispatch-audit  — 목록 (?project_id=, ?incoherent_only=1, ?limit=<1..500>)
 ```
@@ -424,7 +424,7 @@ PATCH  /api/runs/:id/skill-packs/checks — 팩 체크 업데이트
 | `PALANTIR_TOKEN` | (없음) | Bearer/쿠키 인증 활성화 + 기본 바인딩을 `127.0.0.1` → `0.0.0.0` 으로 승격 |
 | `HOST` | 자동 | 바인딩 주소 명시적 오버라이드. 토큰 없이 `0.0.0.0` 이면 경고 로그 |
 | `PALANTIR_ALLOWED_COMMANDS` | (없음) | 추가 허용 CLI 명령어 (쉼표 구분) |
-| `PALANTIR_DEFAULT_PM_ADAPTER` | `codex` | 프로젝트 preference 미설정 시 전역 PM 어댑터 기본값. Claude preference 도 Phase 3b 전까지는 codex 로 fallback |
+| `PALANTIR_DEFAULT_PM_ADAPTER` | `codex` | 프로젝트 preference 미설정 시 전역 Operator 어댑터 기본값. Claude preference 도 Phase 3b 전까지는 codex 로 fallback |
 | `PALANTIR_CODEX_MANAGER_BYPASS` | (미설정) | `1` 로 설정하면 Codex 매니저 턴이 `--dangerously-bypass-approvals-and-sandbox` 를 붙인다. 기본값은 sandbox 정책 유지 |
 | `ANTHROPIC_BASE_URL` / `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` | — | Claude Code 인증 (서버 시작 시 감지되면 `.claude-auth.json` 에 저장) |
 | `CODEX_API_KEY` / `OPENAI_API_KEY` | — | Codex 인증 (`~/.codex/auth.json` preflight 체크) |
@@ -461,7 +461,7 @@ npm run dev       # 개발 서버
 - `docs/specs/skill-packs.md` — Skill Pack 스펙
 - `docs/specs/light-theme-k2-brief-2026-04-28.md` — K-2 라이트 모드 launch brief (LAUNCHED stamp)
 - `docs/handoff-post-k2-launch-2026-04-29.md` — UI/UX cleanup + K-2 launch 시리즈 handoff
-- `docs/test-scenarios.md` — QA 시나리오 (`PRJ`, `TSK`, `BRD`, `RUN`, `INS`, `MGR`, `PM`, `DRIFT`, `ROUTER`, `SSE`, `REG`, `PRESET`, …)
+- `docs/test-scenarios.md` — QA 시나리오 (`PRJ`, `TSK`, `BRD`, `RUN`, `INS`, `MGR`, `Operator`, `DRIFT`, `ROUTER`, `SSE`, `REG`, `PRESET`, …)
 - `CLAUDE.md` — 프로젝트 컨벤션 + 자율 모드 작업 스타일
 
 ## 보안

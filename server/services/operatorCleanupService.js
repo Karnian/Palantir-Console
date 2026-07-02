@@ -1,4 +1,4 @@
-// server/services/pmCleanupService.js
+// server/services/operatorCleanupService.js
 //
 // v3 Phase 3a: single owner of PM cleanup (spec §5 책임 분담표,
 // docs/specs/manager-v3-multilayer.md). Before 3a the responsibility was
@@ -27,7 +27,7 @@
 
 const { conversationIdForProject } = require('../utils/conversationId'); // PM→Operator Phase 0 producer seam
 
-function createPmCleanupService({
+function createOperatorCleanupService({
   projectService,
   projectBriefService,
   managerRegistry,
@@ -140,7 +140,7 @@ function createPmCleanupService({
 
   // Force-delete escape hatch (v3 Phase 7 P7-2). Unlike reset/dispose which
   // are fail-closed, forceReset swallows disposeSession errors so a stuck
-  // adapter cannot keep the PM slot locked indefinitely. The registry slot,
+  // adapter cannot keep the Operator slot locked indefinitely. The registry slot,
   // project brief, and run row are always cleaned up regardless of adapter
   // health.
   //
@@ -201,14 +201,16 @@ function createPmCleanupService({
 
     // 4. Audit log via eventBus so operators can detect misuse.
     if (eventBus) {
-      eventBus.emit('pm:force_reset', {
+      const payload = {
         projectId,
         runId: cancelledRunId,
         disposed,
         clearedBrief,
         disposeError,
         timestamp: new Date().toISOString(),
-      });
+      };
+      eventBus.emit('pm:force_reset', payload);
+      eventBus.emit('operator:force_reset', payload);
     }
 
     return { disposed, clearedBrief, cancelledRunId, disposeError };
@@ -217,4 +219,4 @@ function createPmCleanupService({
   return { reset, dispose, forceReset };
 }
 
-module.exports = { createPmCleanupService };
+module.exports = { createOperatorCleanupService };

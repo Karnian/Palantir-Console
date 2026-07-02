@@ -23,7 +23,7 @@ import {
 } from '../lib/copy.js';
 import { MentionInput } from './MentionInput.js';
 import { RunInspector } from './RunInspector.js';
-import { operatorConversationId, parseProjectConversationId } from '../lib/conversationId.js';
+import { operatorConversationId, parseProjectConversationId, conversationIdMatchesProject } from '../lib/conversationId.js';
 
 // PR5: profile types that can back a manager session. Must stay in sync
 // with PROFILE_TYPE_TO_ADAPTER in server/routes/manager.js.
@@ -580,7 +580,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     requestAnimationFrame(() => { if (inputRef.current) inputRef.current.focus(); });
   };
 
-  // v3 Phase 6 — Reset PM. Only meaningful while a PM conversation is
+  // v3 Phase 6 — Reset Operator. Only meaningful while an Operator conversation is
   // selected. Confirms first, then hits the single-owner cleanup route
   // from Phase 3a, and flips the selector back to Top on success so the
   // next message isn't stranded against a dead slot.
@@ -588,7 +588,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     if (!isPm || !pmProjectId) return;
     const label = pmProject ? pmProject.name : pmProjectId;
     const ok = confirm(
-      `Reset PM for "${label}"? 이 PM 세션은 종료되고 저장된 thread가 삭제됩니다. ` +
+      `Reset Operator for "${label}"? 이 오퍼레이터 세션은 종료되고 저장된 thread가 삭제됩니다. ` +
       `다음 메시지부터 새 thread로 시작합니다.`
     );
     if (!ok) return;
@@ -596,7 +596,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
       await apiFetch(`/api/manager/pm/${encodeURIComponent(pmProjectId)}/reset`, {
         method: 'POST',
       });
-      addToast(`PM reset: ${label}`, 'success');
+      addToast(`Operator reset: ${label}`, 'success');
       setConversationTarget('top');
     } catch (err) {
       addToast('Reset failed: ' + (err && err.message ? err.message : 'unknown'), 'error');
@@ -631,11 +631,11 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
   // 'unknown' requires server restart/refresh — neither is a green light.
   const startDisabled = loading || managerProfiles.length === 0 || !selectedProfile || !selectedCanAuth;
 
-  // PM picker — build the conversation selector options shown in the header.
+  // Operator picker — build the conversation selector options shown in the header.
   // Structure: Top entry → separator → one entry per pm_enabled project.
-  // Each PM entry shows a color dot from the project's color field (if any)
-  // and a green "active" dot when the PM run is running.
-  const activePms = status.pms || []; // array of { projectId, status } from /api/manager/status
+  // Each Operator entry shows a color dot from the project's color field (if any)
+  // and a green "active" dot when the Operator run is running.
+  const activePms = status.pms || []; // array of { conversationId, run, usage, claudeSessionId } from /api/manager/status
   const pmEnabledProjects = useMemo(
     () => (projects || []).filter(p => p.pm_enabled),
     [projects]
@@ -648,7 +648,11 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
       opts.push({ separator: true, key: '_sep' });
       for (const p of pmEnabledProjects) {
         const convId = operatorConversationId(p.id);
-        const isActive = activePms.some(pm => pm.projectId === p.id && pm.status === 'running');
+        const isActive = activePms.some(pm =>
+          conversationIdMatchesProject(pm.conversationId, p.id) &&
+          pm.run &&
+          pm.run.status === 'running'
+        );
         // dot: project color if set, else a neutral grey; overlay active with green
         // K-3α: use --status-active-bright token so light theme maps to a darker
         // emerald that satisfies WCAG AA against the light bg.
@@ -674,7 +678,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
               className="manager-pm-picker"
             />
           ` : html`
-            <span>${isPm ? `PM \u00B7 ${pmProject ? pmProject.name : pmProjectId}` : MANAGER_LABELS.managerSession}</span>
+            <span>${isPm ? `오퍼레이터 \u00B7 ${pmProject ? pmProject.name : pmProjectId}` : MANAGER_LABELS.managerSession}</span>
           `}
           <span class="manager-status-badge ${chatBadgeClass}" data-state=${chatBadgeClass}>${chatBadge}</span>
         </div>
@@ -687,8 +691,8 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
               class="btn btn-sm btn-danger"
               data-action="reset-pm"
               onClick=${handleResetPm}
-              title="PM 리셋: 이 프로젝트의 PM 스레드만 종료합니다."
-              aria-label="이 프로젝트의 PM 리셋"
+              title="오퍼레이터 리셋: 이 프로젝트의 오퍼레이터 스레드만 종료합니다."
+              aria-label="이 프로젝트의 오퍼레이터 리셋"
             >${MANAGER_LABELS.resetPM}</button>
           `}
           ${!isPm && status.active && html`

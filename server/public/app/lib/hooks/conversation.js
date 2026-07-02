@@ -64,9 +64,9 @@ export function useConversation(conversationId, { poll = true, pollMs = 10000 } 
     // v3 Phase 6 R2 fix — fence late responses. Capture the id that
     // this fetch targets BEFORE awaiting, then only commit the state
     // update if `activeIdRef.current` still matches. Without this,
-    // a slow response for PM A can land after the user switched to
-    // PM B and overwrite B's state (A→B race) — which would briefly
-    // flash the Reset PM button and stale Active badge back onto B
+    // a slow response for Operator A can land after the user switched to
+    // Operator B and overwrite B's state (A→B race) — which would briefly
+    // flash the Reset Operator button and stale Active badge back onto B
     // even though Phase 6's synchronous clear already wiped it.
     const myId = conversationId;
     try {
@@ -151,10 +151,10 @@ export function useConversation(conversationId, { poll = true, pollMs = 10000 } 
   useEffect(() => {
     // v3 Phase 6 R1 fix — clear stale run/events SYNCHRONOUSLY on
     // every id change so consumers that derive UI affordances from
-    // `run` (e.g., Phase 6 "Reset PM" button + active badge) never
-    // see the previous PM's state while the async resolve() for the
+    // `run` (e.g., Phase 6 "Reset Operator" button + active badge) never
+    // see the previous Operator's state while the async resolve() for the
     // new id is in flight. Without this, switching from an active
-    // PM A to an idle PM B would briefly render B as active and
+    // Operator A to an idle Operator B would briefly render B as active and
     // expose a Reset that then operates on B based on A's stale
     // state. resolve() will repopulate run/events asynchronously.
     //

@@ -4459,7 +4459,7 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   color: #3b82f6;
 }
 
-.pm-session-row {
+.operator-session-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -4468,42 +4468,42 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   border-radius: var(--radius-sm);
   margin-bottom: 2px;
 }
-.pm-session-row:hover {
+.operator-session-row:hover {
   background: rgba(139,92,246,0.1);
 }
-.pm-session-row.selected {
+.operator-session-row.selected {
   background: rgba(139,92,246,0.15);
   outline: 1px solid rgba(139,92,246,0.4);
 }
-.pm-session-dot {
+.operator-session-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
 }
-.pm-session-label {
+.operator-session-label {
   font-size: 12px;
   font-weight: 600;
   color: var(--accent);
   flex: 1;
 }
-.pm-session-status {
+.operator-session-status {
   font-size: 11px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 4px;
 }
-.pm-spinner {
+.operator-spinner {
   display: inline-block;
   width: 10px;
   height: 10px;
   border: 1.5px solid rgba(59,130,246,0.3);
   border-top-color: #3b82f6;
   border-radius: 50%;
-  animation: pm-spin 0.8s linear infinite;
+  animation: operator-spin 0.8s linear infinite;
 }
-@keyframes pm-spin {
+@keyframes operator-spin {
   to { transform: rotate(360deg); }
 }
 

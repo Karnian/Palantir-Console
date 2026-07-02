@@ -5,23 +5,23 @@
 Central control hub for orchestrating AI coding agents (Claude Code, Codex, OpenCode) through a 3-tier hierarchy.
 
 ```
-Main Manager (Top)          ← oversees all projects and PMs
- ├── PM (Project A)         ← manages workers within the project
+Main Manager (Top)          ← oversees all projects and Operators
+ ├── Operator (Project A)         ← manages workers within the project
  │    ├── Worker 1          ← performs actual coding tasks
  │    ├── Worker 2
  │    └── Worker 3
- ├── PM (Project B)
+ ├── Operator (Project B)
  │    └── Worker 1
- └── PM (Project C)
+ └── Operator (Project C)
       ├── Worker 1
       └── Worker 2
 ```
 
 **Worker** — AI coding agents (Claude Code, Codex, etc.) that perform actual tasks within a project. Each worker runs in an isolated git worktree so they never collide.
 
-**PM (Project Manager)** — Assigned per-project to coordinate its workers. Distributes tasks, tracks progress, and maintains project-specific conventions and context for consistent direction.
+**Operator (Project Manager)** — Assigned per-project to coordinate its workers. Distributes tasks, tracks progress, and maintains project-specific conventions and context for consistent direction.
 
-**Main Manager (Top)** — The top-level orchestrator. Routes user instructions to the right PM, manages priorities across projects, and serves as a single conversational entry point.
+**Main Manager (Top)** — The top-level orchestrator. Routes user instructions to the right Operator, manages priorities across projects, and serves as a single conversational entry point.
 
 All layers are monitored and controlled from a single web dashboard (`localhost:4177`).
 
@@ -57,7 +57,7 @@ npm start
 # .env
 PALANTIR_TOKEN=my-secret-token
 ANTHROPIC_API_KEY=sk-ant-...    # optional: for a Claude-backed Manager
-CODEX_API_KEY=...               # optional: for a Codex-backed Manager or PM
+CODEX_API_KEY=...               # optional: for a Codex-backed Manager or Operator
 
 docker compose up --build
 # → http://localhost:4177 (send Authorization: Bearer my-secret-token)
@@ -98,20 +98,20 @@ unreachable with auth enabled.
 ## Core Concepts
 
 ```
-Main Manager (Top)  →  PM (per project)  →  Worker (per task)
+Main Manager (Top)  →  Operator (per project)  →  Worker (per task)
  (orchestrator)       (project manager)     (AI coding agent)
 ```
 
 | Concept | Description |
 |---------|-------------|
-| **Main Manager (Top)** | Top-level orchestrator. Routes user instructions to the right PM, oversees all projects |
-| **PM (Project Manager)** | Per-project manager. Coordinates workers, distributes tasks, maintains project context. Lazy-spawned on first message |
+| **Main Manager (Top)** | Top-level orchestrator. Routes user instructions to the right Operator, oversees all projects |
+| **Operator (Project Manager)** | Per-project manager. Coordinates workers, distributes tasks, maintains project context. Lazy-spawned on first message |
 | **Worker** | AI agent (Claude Code, Codex, OpenCode) that executes a task. Runs in an isolated git worktree |
 | **Project** | Logical grouping of tasks. e.g. "Backend API", "Frontend Refactor" |
 | **Task** | A unit of work. Managed on a kanban board. Status: Backlog → Todo → In Progress → Review → Done |
 | **Run** | An agent execution against a Task. Multiple Runs per Task allowed |
 | **Agent Profile** | Agent configuration (Claude Code, Codex CLI, OpenCode, custom) |
-| **Conversation** | 1st-class identity for any chat surface: `top`, `pm:<projectId>`, or `worker:<runId>` |
+| **Conversation** | 1st-class identity for any chat surface: `top`, `operator:<projectId>` (`pm:<projectId>` accepted), or `worker:<runId>` |
 
 ## Views
 
@@ -119,7 +119,7 @@ Main Manager (Top)  →  PM (per project)  →  Worker (per task)
 
 **Control hub.** Shows only what needs attention right now — active agents, needs-input, failures, and the new **Drift ⚠** badge.
 
-- **Drift badge** — summary of PM dispatch-audit incoherences (annotate-only; hidden when zero). Click to open the Drift Drawer with per-row PM claim vs DB truth diffs, dismiss/restore, and kind color bar.
+- **Drift badge** — summary of Operator dispatch-audit incoherences (annotate-only; hidden when zero). Click to open the Drift Drawer with per-row Operator claim vs DB truth diffs, dismiss/restore, and kind color bar.
 
 ### 2. Task Board (⊞)
 
@@ -129,18 +129,18 @@ Main Manager (Top)  →  PM (per project)  →  Worker (per task)
 
 Project list. Tasks are grouped by project. Each project exposes:
 
-- `pm_enabled` — whether the project can lazy-spawn a PM
+- `pm_enabled` — whether the project can lazy-spawn an Operator
 - `preferred_pm_adapter` — Codex or Claude preference (Claude resume falls back to Codex until Phase 3b)
-- `project_brief` — conventions + known pitfalls injected into PM system prompt
+- `project_brief` — conventions + known pitfalls injected into Operator system prompt
 
 ### 4. Manager (✦)
 
 **Central orchestrator.** Runs a manager agent (Claude Code or Codex CLI) with multi-turn chat and v3 multi-layer routing.
 
 - 40/60 split layout: chat (left) + worker session grid (right)
-- **Conversation target dropdown** (v3 Phase 6) — lets the user send messages to the Top session or any `pm:<projectId>` slot. PM rows are marked `active` when a PM is currently spawned. `@<projectName>` in a message is rewritten to the matching PM via `/api/router/resolve`.
-- **Reset PM** button — disposes the Codex thread and clears the persisted `pm_thread_id`; the next message starts a fresh thread.
-- **Per-PM drift indicator** (v3 Phase 7) — `⚠ N` button next to Reset PM when the selected PM has pending incoherent audit rows.
+- **Conversation target dropdown** (v3 Phase 6) — lets the user send messages to the Top session or any `operator:<projectId>` slot (`pm:<projectId>` is still accepted). Operator rows are marked `active` when an Operator is currently spawned. `@<projectName>` in a message is rewritten to the matching Operator via `/api/router/resolve`.
+- **Reset Operator** button — disposes the Codex thread and clears the persisted `pm_thread_id`; the next message starts a fresh thread.
+- **Per-Operator drift indicator** (v3 Phase 7) — `⚠ N` button next to Reset Operator when the selected Operator has pending incoherent audit rows.
 - Manager queries the Palantir Console REST API via curl to report real agent/task status.
 - Supports Claude Code CLI (`--print --output-format stream-json --input-format stream-json` protocol) and Codex CLI (`codex exec --json` + resume via `codex exec resume <thread_id>`).
 
@@ -174,7 +174,7 @@ GET    /api/projects           — list
 POST   /api/projects           — create { name, directory?, color?, pm_enabled?, preferred_pm_adapter? }
 GET    /api/projects/:id       — get
 PATCH  /api/projects/:id       — update
-DELETE /api/projects/:id       — delete (fail-closed: aborts if pmCleanupService cannot dispose a live PM)
+DELETE /api/projects/:id       — delete (fail-closed: aborts if operatorCleanupService cannot dispose a live Operator)
 GET    /api/projects/:id/tasks — list tasks
 GET    /api/projects/:id/brief — read project brief (conventions + known pitfalls)
 PATCH  /api/projects/:id/brief — partial update { conventions?, known_pitfalls? }
@@ -213,7 +213,7 @@ PATCH  /api/agents/:id         — update
 DELETE /api/agents/:id         — delete
 ```
 
-### Manager Session (Top + PM)
+### Manager Session (Top + Operator)
 ```
 POST   /api/manager/start              — start the Top manager { prompt?, cwd?, model?, agent_profile_id? }
 POST   /api/manager/message            — send to Top (delegates to conversationService.sendMessage('top', ...))
@@ -221,14 +221,14 @@ GET    /api/manager/status             — { active, run, usage, claudeSessionId
 GET    /api/manager/events             — Top event list (incremental via ?after=<id>)
 GET    /api/manager/output             — Top output text
 POST   /api/manager/stop               — stop Top (also clears pending parent-notice queue for Top's runId)
-POST   /api/manager/pm/:projectId/message — lazy-spawn PM if needed, then send
+POST   /api/manager/pm/:projectId/message — lazy-spawn Operator if needed, then send
 POST   /api/manager/pm/:projectId/reset   — single-owner teardown: dispose adapter, cancel run, clear pm_thread_id, drop registry slot
 ```
 
 ### Conversations (1st-class) — v3 Phase 1.5+
 ```
 GET    /api/conversations/:id          — resolve { conversation: { kind, conversationId, run? } }
-POST   /api/conversations/:id/message  — send { text, images? } — `id` is 'top' | 'pm:<projectId>' | 'worker:<runId>'
+POST   /api/conversations/:id/message  — send { text, images? } — `id` is 'top' | 'operator:<projectId>' | 'worker:<runId>' (`pm:<projectId>` accepted)
 GET    /api/conversations/:id/events   — event list (incremental ?after=<id>)
 ```
 
@@ -240,7 +240,7 @@ POST   /api/router/resolve             — { text, currentConversationId?, defau
 
 ### Dispatch Audit (v3 Phase 4 + 7) — annotate-only reconciliation
 ```
-POST   /api/dispatch-audit             — record a PM claim
+POST   /api/dispatch-audit             — record a Operator claim
                                          { project_id, task_id?, pm_run_id?, selected_agent_profile_id?, rationale?, pm_claim: { kind, task_id? / run_id? } }
                                          → 201 { audit: { ..., incoherence_flag, incoherence_kind } }
 GET    /api/dispatch-audit             — list (?project_id=, ?incoherent_only=1, ?limit=<1..500>)
@@ -337,7 +337,7 @@ PATCH  /api/runs/:id/skill-packs/checks — update pack checks
 | `run:needs_input` | **Priority alert** — idle timeout detected | same + `priority: 'alert'` |
 | `run:event` | Per-vendor raw event (high volume) | — |
 | `manager:started` / `manager:stopped` | Top manager lifecycle | — |
-| `dispatch_audit:recorded` | New PM dispatch claim audited | `audit`, `project_id`, `pm_run_id`, `incoherence_flag`, `incoherence_kind` |
+| `dispatch_audit:recorded` | New Operator dispatch claim audited | `audit`, `project_id`, `pm_run_id`, `incoherence_flag`, `incoherence_kind` |
 
 Client pattern: the Drift badge + drawer and `run:needs_input` tab-title pulse are both wired through these semantic fields. `run:status` is a pure reload trigger and does NOT fire priority notifications — that responsibility belongs to the dedicated channels (`run:needs_input`, `run:completed`) to avoid duplicate alerts.
 
@@ -413,7 +413,7 @@ hashes. Deleting a preset later does not erase past snapshot rows;
 | `PALANTIR_TOKEN` | (none) | Enables Bearer/cookie auth and promotes bind from `127.0.0.1` to `0.0.0.0` |
 | `HOST` | auto | Override the bind address. `0.0.0.0` without a token logs a security warning |
 | `PALANTIR_ALLOWED_COMMANDS` | (none) | Additional allowed CLI commands (comma-separated) |
-| `PALANTIR_DEFAULT_PM_ADAPTER` | `codex` | Global default PM adapter when a project has no `preferred_pm_adapter`. Claude preference still falls through to Codex until Phase 3b (Claude PM resume) ships |
+| `PALANTIR_DEFAULT_PM_ADAPTER` | `codex` | Global default Operator adapter when a project has no `preferred_pm_adapter`. Claude preference still falls through to Codex until Phase 3b (Claude Operator resume) ships |
 | `PALANTIR_CODEX_MANAGER_BYPASS` | (unset) | Set to `1` to let Codex manager turns run with `--dangerously-bypass-approvals-and-sandbox`. Default (unset) keeps the manager role in the sandboxed policy |
 | `ANTHROPIC_BASE_URL` / `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` | — | Claude Code auth (persisted to `.claude-auth.json` when set at server start) |
 | `CODEX_API_KEY` / `OPENAI_API_KEY` | — | Codex auth (preflight checks `~/.codex/auth.json`) |
@@ -450,7 +450,7 @@ See also:
 - `docs/specs/skill-packs.md` — Skill Pack spec
 - `docs/specs/light-theme-k2-brief-2026-04-28.md` — K-2 light mode launch brief (LAUNCHED stamp)
 - `docs/handoff-post-k2-launch-2026-04-29.md` — UI/UX cleanup + K-2 launch series handoff
-- `docs/test-scenarios.md` — QA scenarios (`PRJ`, `TSK`, `BRD`, `RUN`, `INS`, `MGR`, `PM`, `DRIFT`, `ROUTER`, `SSE`, `REG`, `PRESET`, …)
+- `docs/test-scenarios.md` — QA scenarios (`PRJ`, `TSK`, `BRD`, `RUN`, `INS`, `MGR`, `Operator`, `DRIFT`, `ROUTER`, `SSE`, `REG`, `PRESET`, …)
 - `CLAUDE.md` — project conventions + autonomous-mode working style
 
 ## License

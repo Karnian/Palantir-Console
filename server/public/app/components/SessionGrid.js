@@ -207,10 +207,10 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
                 : 'var(--status-queued)';
               const pmSelected = conversationIdMatchesProject(conversationTarget, group.key);
               return pm ? html`
-                <div class="pm-session-row ${pmSelected ? 'selected' : ''}" ...${clickableProps(() => onSelectPm && onSelectPm(operatorConversationId(group.key)))}>
-                  <span class="pm-session-dot" style="background:${pmColor}"></span>
-                  <span class="pm-session-label">PM 세션</span>
-                  <span class="pm-session-status" style="color:${pmColor}">${pmLabel}${pmStatus === 'running' ? html` <span class="pm-spinner"></span>` : ''}</span>
+                <div class="operator-session-row ${pmSelected ? 'selected' : ''}" ...${clickableProps(() => onSelectPm && onSelectPm(operatorConversationId(group.key)))}>
+                  <span class="operator-session-dot" style="background:${pmColor}"></span>
+                  <span class="operator-session-label">오퍼레이터 세션</span>
+                  <span class="operator-session-status" style="color:${pmColor}">${pmLabel}${pmStatus === 'running' ? html` <span class="operator-spinner"></span>` : ''}</span>
                 </div>
               ` : null;
             })()}

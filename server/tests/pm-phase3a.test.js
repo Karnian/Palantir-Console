@@ -1,4 +1,4 @@
-// v3 Phase 3a — pmSpawnService (lazy PM spawn) + pmCleanupService
+// v3 Phase 3a — operatorSpawnService (lazy PM spawn) + operatorCleanupService
 // (single-owner teardown). These tests inject a fake adapter factory so
 // no real Codex subprocess is spawned — the service contracts are
 // verified end-to-end on the in-memory registry + SQLite.
@@ -16,8 +16,8 @@ const { createProjectService } = require('../services/projectService');
 const { createProjectBriefService } = require('../services/projectBriefService');
 const { createManagerRegistry } = require('../services/managerRegistry');
 const { createConversationService } = require('../services/conversationService');
-const { createPmSpawnService } = require('../services/pmSpawnService');
-const { createPmCleanupService } = require('../services/pmCleanupService');
+const { createOperatorSpawnService } = require('../services/operatorSpawnService');
+const { createOperatorCleanupService } = require('../services/operatorCleanupService');
 const { createApp } = require('../app');
 
 async function mkdb(t) {
@@ -103,7 +103,7 @@ function wireFactory(adapter) {
 }
 
 // ---------------------------------------------------------------------------
-// pmSpawnService — lazy spawn
+// operatorSpawnService — lazy spawn
 // ---------------------------------------------------------------------------
 
 test('Phase 3a: lazy spawn creates a PM run when none exists', async (t) => {
@@ -115,7 +115,7 @@ test('Phase 3a: lazy spawn creates a PM run when none exists', async (t) => {
   const fakePm = makeFakeCodexAdapter();
   const topAdapter = makeFakeCodexAdapter();
 
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs,
     managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
@@ -129,7 +129,7 @@ test('Phase 3a: lazy spawn creates a PM run when none exists', async (t) => {
   seedTop({ rs, registry, adapter: topAdapter });
 
   // First call: no PM live → spawn fresh
-  const result1 = spawn.ensureLivePm({ projectId: project.id });
+  const result1 = spawn.ensureLiveOperator({ projectId: project.id });
   assert.equal(result1.spawned, true);
   assert.equal(result1.resumed, false);
   assert.equal(result1.run.manager_layer, 'operator'); // Phase 2: flipped from 'pm'
@@ -158,13 +158,13 @@ test('Phase 3a: lazy spawn creates a PM run when none exists', async (t) => {
   assert.equal(briefAfter.pm_thread_id, null, 'thread id only persists after first real turn');
 
   // Second call: already live → fast path, no new run
-  const result2 = spawn.ensureLivePm({ projectId: project.id });
+  const result2 = spawn.ensureLiveOperator({ projectId: project.id });
   assert.equal(result2.spawned, false);
   assert.equal(result2.run.id, result1.run.id);
 });
 
 test('P2-1: fresh PM spawn leaves run in queued until first turn emits thread.started', async (t) => {
-  // Regression guard for the P2-1 fix: pmSpawnService used to call
+  // Regression guard for the P2-1 fix: operatorSpawnService used to call
   // markRunStarted unconditionally right after adapter.startSession
   // returned. For Codex (stateless — no subprocess until the first
   // runTurn) that advertised the PM as 'running' before any execution
@@ -180,7 +180,7 @@ test('P2-1: fresh PM spawn leaves run in queued until first turn emits thread.st
   const fakePm = makeFakeCodexAdapter();
   const topAdapter = makeFakeCodexAdapter();
 
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs,
     managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
@@ -191,13 +191,13 @@ test('P2-1: fresh PM spawn leaves run in queued until first turn emits thread.st
     runService: rs, managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
     lifecycleService: { sendAgentInput: () => true },
-    pmSpawnService: spawn,
+    operatorSpawnService: spawn,
   });
   const project = projectService.createProject({ name: 'alpha' });
   seedTop({ rs, registry, adapter: topAdapter });
 
   // Fresh spawn — no resumeThreadId, no runTurn yet.
-  const result = spawn.ensureLivePm({ projectId: project.id });
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
   assert.equal(result.spawned, true);
   assert.equal(result.resumed, false);
 
@@ -219,7 +219,7 @@ test('P2-1: fresh PM spawn leaves run in queued until first turn emits thread.st
 
 test('P2-1: resumed PM spawn is marked running synchronously inside startSession', async (t) => {
   // For the resume path the fake adapter fires onThreadStarted
-  // synchronously inside startSession, so ensureLivePm should return a
+  // synchronously inside startSession, so ensureLiveOperator should return a
   // run that is already 'running' — no pre-turn 'queued' window is
   // possible because the adapter semantically already has a live thread
   // as soon as resume is wired up.
@@ -230,7 +230,7 @@ test('P2-1: resumed PM spawn is marked running synchronously inside startSession
   const registry = createManagerRegistry({ runService: rs });
   const fakePm = makeFakeCodexAdapter();
 
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs, managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
     projectService, projectBriefService,
@@ -245,7 +245,7 @@ test('P2-1: resumed PM spawn is marked running synchronously inside startSession
     pm_adapter: 'codex',
   });
 
-  const result = spawn.ensureLivePm({ projectId: project.id });
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
   assert.equal(result.resumed, true);
   const run = rs.getRun(result.run.id);
   assert.equal(run.status, 'running', 'resumed PM must be running immediately');
@@ -259,7 +259,7 @@ test('Phase 3a: lazy spawn resumes a persisted pm_thread_id', async (t) => {
   const registry = createManagerRegistry({ runService: rs });
   const fakePm = makeFakeCodexAdapter();
 
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs,
     managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
@@ -278,7 +278,7 @@ test('Phase 3a: lazy spawn resumes a persisted pm_thread_id', async (t) => {
     pm_adapter: 'codex',
   });
 
-  const result = spawn.ensureLivePm({ projectId: project.id });
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
   assert.equal(result.resumed, true);
   // The adapter state has threadId pre-seeded via resumeThreadId
   const sessionState = fakePm._sessions.get(result.run.id);
@@ -295,7 +295,7 @@ test('Phase 3a: lazy spawn refuses when no active Top', async (t) => {
   const projectBriefService = createProjectBriefService(db);
   const registry = createManagerRegistry({ runService: rs });
   const fakePm = makeFakeCodexAdapter();
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs,
     managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
@@ -305,7 +305,7 @@ test('Phase 3a: lazy spawn refuses when no active Top', async (t) => {
   });
   const project = projectService.createProject({ name: 'alpha' });
   assert.throws(
-    () => spawn.ensureLivePm({ projectId: project.id }),
+    () => spawn.ensureLiveOperator({ projectId: project.id }),
     /no active Top manager/
   );
 });
@@ -317,7 +317,7 @@ test('Phase 3a: lazy spawn refuses when pm_enabled=0', async (t) => {
   const projectBriefService = createProjectBriefService(db);
   const registry = createManagerRegistry({ runService: rs });
   const fakePm = makeFakeCodexAdapter();
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs,
     managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
@@ -328,7 +328,7 @@ test('Phase 3a: lazy spawn refuses when pm_enabled=0', async (t) => {
   const project = projectService.createProject({ name: 'alpha', pm_enabled: false });
   seedTop({ rs, registry, adapter: fakePm });
   assert.throws(
-    () => spawn.ensureLivePm({ projectId: project.id }),
+    () => spawn.ensureLiveOperator({ projectId: project.id }),
     /PM is disabled/
   );
 });
@@ -342,7 +342,7 @@ test('Phase 3a: conversationService integrates lazy PM spawn on first message', 
   const fakePm = makeFakeCodexAdapter();
   const topAdapter = makeFakeCodexAdapter();
 
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs,
     managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
@@ -355,7 +355,7 @@ test('Phase 3a: conversationService integrates lazy PM spawn on first message', 
     managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
     lifecycleService: { sendAgentInput: () => true },
-    pmSpawnService: spawn,
+    operatorSpawnService: spawn,
   });
 
   const project = projectService.createProject({ name: 'alpha' });
@@ -367,7 +367,7 @@ test('Phase 3a: conversationService integrates lazy PM spawn on first message', 
   assert.equal(sendResult.target.kind, 'pm');
 
   // Phase 3a R1 fix: exactly ONE runTurn — the user's own first message.
-  // No seed turn was made by pmSpawnService.
+  // No seed turn was made by operatorSpawnService.
   assert.equal(fakePm._runTurnCalls.length, 1, 'exactly one runTurn = the user message');
   assert.match(fakePm._runTurnCalls[0].payload.text, /시작/);
 
@@ -384,7 +384,7 @@ test('Phase 3a: conversationService integrates lazy PM spawn on first message', 
 
 test('Phase 3a: R1 fix — no back-to-back runTurn race on cold PM spawn', async (t) => {
   // Regression: the original implementation called runTurn inside
-  // pmSpawnService as a "seed" turn, then conversationService called
+  // operatorSpawnService as a "seed" turn, then conversationService called
   // runTurn again with the user's message on the same runId. Real Codex
   // rejects the second call with "previous turn still running". A fake
   // adapter that enforces the single-turn guard must accept the flow.
@@ -430,7 +430,7 @@ test('Phase 3a: R1 fix — no back-to-back runTurn race on cold PM spawn', async
     disposeSession: (id) => { const s = strictPm._sessions.get(id); if (s) s.ended = true; },
     buildGuardrailsSection: () => '',
   };
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs, managerRegistry: registry,
     managerAdapterFactory: wireFactory(strictPm),
     projectService, projectBriefService,
@@ -440,7 +440,7 @@ test('Phase 3a: R1 fix — no back-to-back runTurn race on cold PM spawn', async
     runService: rs, managerRegistry: registry,
     managerAdapterFactory: wireFactory(strictPm),
     lifecycleService: { sendAgentInput: () => true },
-    pmSpawnService: spawn,
+    operatorSpawnService: spawn,
   });
 
   const project = projectService.createProject({ name: 'alpha' });
@@ -453,10 +453,10 @@ test('Phase 3a: R1 fix — no back-to-back runTurn race on cold PM spawn', async
 });
 
 // ---------------------------------------------------------------------------
-// pmCleanupService
+// operatorCleanupService
 // ---------------------------------------------------------------------------
 
-test('Phase 3a: pmCleanupService.reset disposes live PM and clears brief', async (t) => {
+test('Phase 3a: operatorCleanupService.reset disposes live PM and clears brief', async (t) => {
   const db = await mkdb(t);
   const rs = createRunService(db, null);
   const projectService = createProjectService(db);
@@ -473,7 +473,7 @@ test('Phase 3a: pmCleanupService.reset disposes live PM and clears brief', async
   // Slot-clear hook so reset also drops any queued notices
   registry.onSlotCleared(({ runId }) => { conv.clearParentNotices(runId); });
 
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs,
     managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
@@ -481,7 +481,7 @@ test('Phase 3a: pmCleanupService.reset disposes live PM and clears brief', async
     projectBriefService,
     authResolverOpts: { hasKeychain: true },
   });
-  const cleanup = createPmCleanupService({
+  const cleanup = createOperatorCleanupService({
     projectService,
     projectBriefService,
     managerRegistry: registry,
@@ -491,11 +491,11 @@ test('Phase 3a: pmCleanupService.reset disposes live PM and clears brief', async
 
   const project = projectService.createProject({ name: 'alpha' });
   seedTop({ rs, registry, adapter: topAdapter });
-  const spawnResult = spawn.ensureLivePm({ projectId: project.id });
+  const spawnResult = spawn.ensureLiveOperator({ projectId: project.id });
   const pmRunId = spawnResult.run.id;
 
   // The thread id only materializes on the first real turn (R1 fix —
-  // no seed runTurn inside pmSpawnService). Trigger it via conv.
+  // no seed runTurn inside operatorSpawnService). Trigger it via conv.
   conv.sendMessage(`pm:${project.id}`, { text: 'first' });
 
   // Pre-reset: slot is live, brief has thread id
@@ -517,14 +517,14 @@ test('Phase 3a: pmCleanupService.reset disposes live PM and clears brief', async
   assert.equal(run.status, 'cancelled');
 });
 
-test('Phase 3a: pmCleanupService.reset is idempotent when no PM is live', async (t) => {
+test('Phase 3a: operatorCleanupService.reset is idempotent when no PM is live', async (t) => {
   const db = await mkdb(t);
   const rs = createRunService(db, null);
   const projectService = createProjectService(db);
   const projectBriefService = createProjectBriefService(db);
   const registry = createManagerRegistry({ runService: rs });
   const fakePm = makeFakeCodexAdapter();
-  const cleanup = createPmCleanupService({
+  const cleanup = createOperatorCleanupService({
     projectService, projectBriefService, managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm), runService: rs,
   });
@@ -550,13 +550,13 @@ test('Phase 3a: lazy spawn after reset starts a fresh thread', async (t) => {
   });
   registry.onSlotCleared(({ runId }) => { conv.clearParentNotices(runId); });
 
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs, managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
     projectService, projectBriefService,
     authResolverOpts: { hasKeychain: true },
   });
-  const cleanup = createPmCleanupService({
+  const cleanup = createOperatorCleanupService({
     projectService, projectBriefService, managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm), runService: rs,
   });
@@ -566,7 +566,7 @@ test('Phase 3a: lazy spawn after reset starts a fresh thread', async (t) => {
 
   // First spawn + first turn → thread id persisted (R1 fix: no seed turn,
   // thread id only appears after the first real runTurn).
-  const first = spawn.ensureLivePm({ projectId: project.id });
+  const first = spawn.ensureLiveOperator({ projectId: project.id });
   conv.sendMessage(`pm:${project.id}`, { text: 'first message' });
   const firstThreadId = projectBriefService.getBrief(project.id).pm_thread_id;
   assert.ok(firstThreadId);
@@ -575,7 +575,7 @@ test('Phase 3a: lazy spawn after reset starts a fresh thread', async (t) => {
   cleanup.reset(project.id);
 
   // Second spawn + turn — should be a new run with a new thread id
-  const second = spawn.ensureLivePm({ projectId: project.id });
+  const second = spawn.ensureLiveOperator({ projectId: project.id });
   assert.notEqual(second.run.id, first.run.id);
   assert.equal(second.resumed, false, 'second spawn is a fresh thread, not a resume');
   conv.sendMessage(`pm:${project.id}`, { text: 'after reset' });
@@ -620,7 +620,7 @@ test('Phase 3a: POST /api/manager/pm/:projectId/reset on missing PM returns idem
   assert.equal(res.body.disposed, false);
 });
 
-test('Phase 3a: DELETE /api/projects/:id runs pmCleanupService.dispose before deleting', async (t) => {
+test('Phase 3a: DELETE /api/projects/:id runs operatorCleanupService.dispose before deleting', async (t) => {
   // Can't fully exercise without a real Codex, but we can verify the
   // route doesn't crash and the project is deleted.
   const app = await createTestApp(t);
@@ -634,7 +634,7 @@ test('Phase 3a: DELETE /api/projects/:id runs pmCleanupService.dispose before de
   assert.equal(getRes.status, 404);
 });
 
-test('Phase 3a: R2 fix — pmCleanupService.reset rethrows disposeSession failures and leaves state intact', async (t) => {
+test('Phase 3a: R2 fix — operatorCleanupService.reset rethrows disposeSession failures and leaves state intact', async (t) => {
   // Regression for codex R2: _terminate used to swallow disposeSession
   // errors, mark the run cancelled, clear the registry, and clear the
   // brief — returning success to the caller. That made both /reset and
@@ -660,20 +660,20 @@ test('Phase 3a: R2 fix — pmCleanupService.reset rethrows disposeSession failur
     managerAdapterFactory: wireFactory(flakyDispose),
     lifecycleService: { sendAgentInput: () => true },
   });
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs, managerRegistry: registry,
     managerAdapterFactory: wireFactory(flakyDispose),
     projectService, projectBriefService,
     authResolverOpts: { hasKeychain: true },
   });
-  const cleanup = createPmCleanupService({
+  const cleanup = createOperatorCleanupService({
     projectService, projectBriefService, managerRegistry: registry,
     managerAdapterFactory: wireFactory(flakyDispose), runService: rs,
   });
 
   const project = projectService.createProject({ name: 'alpha' });
   seedTop({ rs, registry, adapter: flakyDispose });
-  spawn.ensureLivePm({ projectId: project.id });
+  spawn.ensureLiveOperator({ projectId: project.id });
   conv.sendMessage(`pm:${project.id}`, { text: 'first' });
   const pmRunIdBefore = registry.getActiveRunId(`pm:${project.id}`);
   const threadIdBefore = projectBriefService.getBrief(project.id).pm_thread_id;
@@ -694,7 +694,7 @@ test('Phase 3a: R2 fix — pmCleanupService.reset rethrows disposeSession failur
   assert.equal(registry.getActiveRunId(`pm:${project.id}`), null);
 });
 
-test('Phase 3a: R1 fix — DELETE /api/projects/:id refuses on pmCleanupService failure', async (t) => {
+test('Phase 3a: R1 fix — DELETE /api/projects/:id refuses on operatorCleanupService failure', async (t) => {
   // Regression for codex R1 finding #2: delete must NOT proceed if
   // cleanup throws, otherwise orphaned in-memory PM state is unreachable.
   // Use a direct express mount so we can inject a failing cleanup stub.
@@ -713,7 +713,7 @@ test('Phase 3a: R1 fix — DELETE /api/projects/:id refuses on pmCleanupService 
     projectService: stubProjectService,
     taskService: { listTasks: () => [] },
     projectBriefService: null,
-    pmCleanupService: failingCleanup,
+    operatorCleanupService: failingCleanup,
   }));
   const res = await request(app).delete('/api/projects/p1');
   assert.equal(res.status, 502);
@@ -722,7 +722,7 @@ test('Phase 3a: R1 fix — DELETE /api/projects/:id refuses on pmCleanupService 
 });
 
 // ---------------------------------------------------------------------------
-// pmCleanupService.forceReset (v3 Phase 7 P7-2)
+// operatorCleanupService.forceReset (v3 Phase 7 P7-2)
 // ---------------------------------------------------------------------------
 
 test('P7-2: forceReset succeeds even when disposeSession throws', async (t) => {
@@ -744,7 +744,7 @@ test('P7-2: forceReset succeeds even when disposeSession throws', async (t) => {
     managerAdapterFactory: wireFactory(fakePm),
     lifecycleService: { sendAgentInput: () => true },
   });
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs, managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
     projectService, projectBriefService,
@@ -755,7 +755,7 @@ test('P7-2: forceReset succeeds even when disposeSession throws', async (t) => {
   const emitted = [];
   const fakeEventBus = { emit: (channel, data) => emitted.push({ channel, data }) };
 
-  const cleanup = createPmCleanupService({
+  const cleanup = createOperatorCleanupService({
     projectService, projectBriefService, managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm), runService: rs,
     eventBus: fakeEventBus,
@@ -763,7 +763,7 @@ test('P7-2: forceReset succeeds even when disposeSession throws', async (t) => {
 
   const project = projectService.createProject({ name: 'alpha' });
   seedTop({ rs, registry, adapter: topAdapter });
-  spawn.ensureLivePm({ projectId: project.id });
+  spawn.ensureLiveOperator({ projectId: project.id });
   conv.sendMessage(`pm:${project.id}`, { text: 'hello' });
 
   const pmRunId = registry.getActiveRunId(`pm:${project.id}`);
@@ -792,12 +792,14 @@ test('P7-2: forceReset succeeds even when disposeSession throws', async (t) => {
   const run = rs.getRun(pmRunId);
   assert.equal(run.status, 'failed', 'run marked failed even when dispose threw');
 
-  // Audit event must have been emitted
-  assert.equal(emitted.length, 1, 'exactly one eventBus emission');
-  assert.equal(emitted[0].channel, 'pm:force_reset');
-  assert.equal(emitted[0].data.projectId, project.id);
-  assert.equal(emitted[0].data.disposed, false);
-  assert.ok(emitted[0].data.disposeError, 'disposeError in event payload');
+  // Audit events must have been emitted on legacy and canonical channels.
+  assert.equal(emitted.length, 2, 'dual eventBus emissions');
+  assert.ok(emitted.some(e => e.channel === 'pm:force_reset'), 'legacy pm force-reset event emitted');
+  const operatorEvent = emitted.find(e => e.channel === 'operator:force_reset');
+  assert.ok(operatorEvent, 'canonical operator force-reset event emitted');
+  assert.equal(operatorEvent.data.projectId, project.id);
+  assert.equal(operatorEvent.data.disposed, false);
+  assert.ok(operatorEvent.data.disposeError, 'disposeError in event payload');
 });
 
 test('P7-2: forceReset succeeds cleanly when disposeSession works', async (t) => {
@@ -816,7 +818,7 @@ test('P7-2: forceReset succeeds cleanly when disposeSession works', async (t) =>
     managerAdapterFactory: wireFactory(fakePm),
     lifecycleService: { sendAgentInput: () => true },
   });
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs, managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
     projectService, projectBriefService,
@@ -826,7 +828,7 @@ test('P7-2: forceReset succeeds cleanly when disposeSession works', async (t) =>
   const emitted = [];
   const fakeEventBus = { emit: (channel, data) => emitted.push({ channel, data }) };
 
-  const cleanup = createPmCleanupService({
+  const cleanup = createOperatorCleanupService({
     projectService, projectBriefService, managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm), runService: rs,
     eventBus: fakeEventBus,
@@ -834,7 +836,7 @@ test('P7-2: forceReset succeeds cleanly when disposeSession works', async (t) =>
 
   const project = projectService.createProject({ name: 'beta' });
   seedTop({ rs, registry, adapter: topAdapter });
-  spawn.ensureLivePm({ projectId: project.id });
+  spawn.ensureLiveOperator({ projectId: project.id });
   conv.sendMessage(`pm:${project.id}`, { text: 'hello' });
 
   const pmRunId = registry.getActiveRunId(`pm:${project.id}`);
@@ -849,10 +851,12 @@ test('P7-2: forceReset succeeds cleanly when disposeSession works', async (t) =>
   assert.equal(registry.getActiveRunId(`pm:${project.id}`), null);
   assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, null);
 
-  assert.equal(emitted.length, 1);
-  assert.equal(emitted[0].channel, 'pm:force_reset');
-  assert.equal(emitted[0].data.disposed, true);
-  assert.equal(emitted[0].data.disposeError, null);
+  assert.equal(emitted.length, 2);
+  assert.ok(emitted.some(e => e.channel === 'pm:force_reset'));
+  const operatorEvent = emitted.find(e => e.channel === 'operator:force_reset');
+  assert.ok(operatorEvent);
+  assert.equal(operatorEvent.data.disposed, true);
+  assert.equal(operatorEvent.data.disposeError, null);
 });
 
 test('P7-2: forceReset is idempotent when no PM is live', async (t) => {
@@ -865,7 +869,7 @@ test('P7-2: forceReset is idempotent when no PM is live', async (t) => {
   const emitted = [];
   const fakeEventBus = { emit: (channel, data) => emitted.push({ channel, data }) };
 
-  const cleanup = createPmCleanupService({
+  const cleanup = createOperatorCleanupService({
     projectService, projectBriefService, managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm), runService: rs,
     eventBus: fakeEventBus,
@@ -879,9 +883,10 @@ test('P7-2: forceReset is idempotent when no PM is live', async (t) => {
   assert.equal(result.cancelledRunId, null);
   assert.equal(result.disposeError, null);
 
-  // Audit event still fired so the operator knows the call happened
-  assert.equal(emitted.length, 1);
-  assert.equal(emitted[0].channel, 'pm:force_reset');
+  // Audit events still fired so the operator knows the call happened.
+  assert.equal(emitted.length, 2);
+  assert.ok(emitted.some(e => e.channel === 'pm:force_reset'));
+  assert.ok(emitted.some(e => e.channel === 'operator:force_reset'));
 });
 
 test('P7-2: normal reset behavior is unchanged (fail-closed still applies)', async (t) => {
@@ -901,20 +906,20 @@ test('P7-2: normal reset behavior is unchanged (fail-closed still applies)', asy
     managerAdapterFactory: wireFactory(broken),
     lifecycleService: { sendAgentInput: () => true },
   });
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs, managerRegistry: registry,
     managerAdapterFactory: wireFactory(broken),
     projectService, projectBriefService,
     authResolverOpts: { hasKeychain: true },
   });
-  const cleanup = createPmCleanupService({
+  const cleanup = createOperatorCleanupService({
     projectService, projectBriefService, managerRegistry: registry,
     managerAdapterFactory: wireFactory(broken), runService: rs,
   });
 
   const project = projectService.createProject({ name: 'delta' });
   seedTop({ rs, registry, adapter: topAdapter });
-  spawn.ensureLivePm({ projectId: project.id });
+  spawn.ensureLiveOperator({ projectId: project.id });
   conv.sendMessage(`pm:${project.id}`, { text: 'hi' });
 
   const pmRunId = registry.getActiveRunId(`pm:${project.id}`);

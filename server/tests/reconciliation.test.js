@@ -552,7 +552,7 @@ test('Phase 4: R3 fix — orphan run (no task) rejected by binding', async (t) =
 });
 
 test('Phase 4: R3 fix — PM system prompt injects pm_run_id into project scope', async (t) => {
-  // Regression: pmSpawnService must bake the PM's own run id into the
+  // Regression: operatorSpawnService must bake the PM's own run id into the
   // project-scoped system prompt so the PM can self-identify when
   // calling /api/dispatch-audit. Use a fake codex adapter to capture
   // the systemPrompt passed to startSession.
@@ -582,8 +582,8 @@ test('Phase 4: R3 fix — PM system prompt injects pm_run_id into project scope'
     buildGuardrailsSection: () => '',
   };
 
-  const { createPmSpawnService } = require('../services/pmSpawnService');
-  const spawn = createPmSpawnService({
+  const { createOperatorSpawnService } = require('../services/operatorSpawnService');
+  const spawn = createOperatorSpawnService({
     runService: rs,
     managerRegistry: registry2,
     managerAdapterFactory: { getAdapter: () => fakeAdapter },
@@ -598,7 +598,7 @@ test('Phase 4: R3 fix — PM system prompt injects pm_run_id into project scope'
   rs.updateRunStatus(top.id, 'running', { force: true });
   registry2.setActive('top', top.id, fakeAdapter);
 
-  const result = spawn.ensureLivePm({ projectId: project.id });
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
   assert.ok(capturedSystemPrompt, 'systemPrompt must be captured');
   // The PM's own run id must appear in the system prompt so it can
   // self-reference when posting audit claims.

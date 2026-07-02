@@ -49,13 +49,13 @@ function createConversationService({
   managerRegistry,
   managerAdapterFactory,
   lifecycleService,
-  // v3 Phase 3a: optional PM spawn hook. When provided, sendToManagerSlot
-  // for a 'pm:<projectId>' target will call ensureLivePm() on a 404 so
-  // the first message to a project's PM lazily creates the run instead of
-  // returning "No active PM manager session". Tests that don't care about
+  // v3 Phase 3a: optional Operator spawn hook. When provided, sendToManagerSlot
+  // for a 'pm:<projectId>' target will call ensureLiveOperator() on a 404 so
+  // the first message to a project's Operator lazily creates the run instead of
+  // returning "No active Operator manager session". Tests that don't care about
   // lazy spawn can omit this dependency and keep the pre-3a behavior.
-  pmSpawnService,
-    // ML PR1: optional Learned Memory injector. When wired, a message to a PM
+  operatorSpawnService,
+    // ML PR1: optional Learned Memory injector. When wired, a message to an Operator
     // slot (NOT top) for a project gets a `## Learned Memory` block prepended
     // to the user payload.
   // Memory is NEVER baked into the system prompt (Codex caching safety); the
@@ -150,9 +150,9 @@ function createConversationService({
       return { kind: 'top', conversationId: 'top', run };
     }
     if (parsed.kind === 'pm') {
-      // v3 Phase 2: PM slot is now a 1st-class runtime target. probeActive
-      // returns the currently live PM run for this project (or null if no
-      // PM has been spawned yet — Phase 3a handles lazy spawn). The /status
+      // v3 Phase 2: Operator slot is now a 1st-class runtime target. probeActive
+      // returns the currently live Operator run for this project (or null if no
+      // Operator has been spawned yet — Phase 3a handles lazy spawn). The /status
       // endpoint gets an accurate projected slot either way.
       const run = managerRegistry.probeActive(id);
       return { kind: 'pm', conversationId: id, projectId: parsed.projectId, run };
@@ -226,12 +226,12 @@ function createConversationService({
   }
 
   // v3 Phase 2: unified manager slot sender. Handles both the Top singleton
-  // ('top') and any PM slot ('pm:<projectId>') — both share the same
+  // ('top') and any Operator slot ('pm:<projectId>') — both share the same
   // peek → deliver → commit-drain → parent-notice semantics. The only
   // layer-specific bit is how the parent is identified:
   //   * top: parent_run_id is NULL, no upward notice is queued
   //   * pm : parent_run_id points at the Top run that spawned this PM;
-  //          on success, queue a PM→Top notice on the PM run's parent
+  //          on success, queue an Operator→Top notice on the Operator run's parent
   //          (but only if that parent still matches the currently active
   //           Top, to avoid leaking stale signals into unrelated runs).
   function sendToManagerSlot(conversationId, { text, images, projectId } = {}) {
@@ -239,14 +239,14 @@ function createConversationService({
     const layerLabel = isTop ? 'Top' : 'PM';
 
     let run = managerRegistry.probeActive(conversationId);
-    // v3 Phase 3a: lazy PM spawn. If no PM is live for this project and a
+    // v3 Phase 3a: lazy Operator spawn. If no Operator is live for this project and a
     // spawn service is wired, delegate to it. The spawn service refuses
     // when no Top is active (409) or pm_enabled=0 (409) — those errors
     // bubble through unchanged. Top layer NEVER auto-spawns; /start is
     // the only legitimate entry point for Top.
-    if (!run && !isTop && pmSpawnService && projectId) {
+    if (!run && !isTop && operatorSpawnService && projectId) {
       try {
-        const spawn = pmSpawnService.ensureLivePm({ projectId });
+        const spawn = operatorSpawnService.ensureLiveOperator({ projectId });
         run = spawn.run;
       } catch (spawnErr) {
         // Preserve the spawn service's httpStatus if set so the route
@@ -300,7 +300,7 @@ function createConversationService({
       : originalText;
 
       // ML PR1: Learned Memory injection. Outermost prepend (memory → parent
-      // notices → original text). PM slots only, never Top, and only when a
+      // notices → original text). Operator slots only, never Top, and only when a
       // memoryService + projectId are present.
       // Annotate-only: any failure degrades to "no injection" and never blocks
       // message delivery. The ledger is written AFTER the adapter accepts the
@@ -308,7 +308,7 @@ function createConversationService({
       // re-injects on the next attempt rather than recording a phantom inject.
       let composerInjection = null; // { composition, provenanceKey, revision } stash
       if (!isTop && memoryService && projectId && compositionLedger && memoryComposer) {
-        // Composer+Ledger path (PM slot only). The composer is the sole injection
+        // Composer+Ledger path (Operator slot only). The composer is the sole injection
         // path (S5-LEDGER); if it is not wired (some unit harnesses), skip injection
         // cleanly rather than throwing inside the try/catch on every send.
         // peek/decide: gate check → compose → stash for commit phase.
@@ -651,17 +651,17 @@ function createConversationService({
   // ('top' | 'pm:<projectId>') if that parent is currently the live
   // occupant of that slot, or null otherwise. This is the single place
   // that decides "is this parent still the one users see?" for both Top
-  // and PM layers.
+  // and Operator layers.
   function resolveParentSlot(parentRunId) {
     if (!parentRunId) return null;
     // Fast path: Top slot
     const activeTopRunId = managerRegistry.getActiveRunId('top');
     if (activeTopRunId && activeTopRunId === parentRunId) return 'top';
 
-    // PM slot: we need to know which project the parent run belongs to so
+    // Operator slot: we need to know which project the parent run belongs to so
     // we can look up the right 'pm:<projectId>' registry key. We read the
     // parent run row to get its conversation_id (set at createRun time for
-    // PM runs: 'pm:<projectId>'). If the parent isn't a PM manager, bail.
+    // Operator runs: 'pm:<projectId>'). If the parent isn't an Operator manager, bail.
     let parent;
     try {
       parent = runService.getRun(parentRunId);

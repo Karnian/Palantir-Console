@@ -56,11 +56,15 @@ function ProjectSkillPacks({ projectId }) {
       ]);
       setBindings(bRes.bindings || []);
       setAllPacks(pRes.skill_packs || []);
-      // Check if there's an active PM for this project
+      // Check if there's an active Operator for this project.
       try {
         const mgrRes = await apiFetch('/api/manager/status');
-        const pmSlots = (mgrRes.registry || []).filter(s => conversationIdMatchesProject(s.slot, projectId) && s.active);
-        setManagerActive(pmSlots.length > 0);
+        const managerActive = (mgrRes.pms || []).some(p =>
+          conversationIdMatchesProject(p.conversationId, projectId) &&
+          p.run &&
+          p.run.status === 'running'
+        );
+        setManagerActive(managerActive);
       } catch { setManagerActive(false); }
     } catch (err) { addToast(err.message, 'error'); }
     setLoading(false);

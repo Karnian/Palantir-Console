@@ -328,15 +328,15 @@ test('P2-10 app.js still references <${DriftDrawer} ... /> via direct import', a
 // strings flipped to Korean. The contract these tests guard is "PM
 // reset/Top stop have an explicit, scope-clarifying SR label" — not
 // the literal English copy. We assert the Korean strings now.
-test('P2-9 Reset PM button has explicit aria-label and scope-clarifying title', async () => {
+test('P2-9 Reset Operator button has explicit aria-label and scope-clarifying title', async () => {
   const src = await loadManagerViewSource();
-  const idx = src.indexOf('aria-label="이 프로젝트의 PM 리셋"');
-  assert.ok(idx > 0, 'Reset PM aria-label not found — P2-9 title/aria update missing');
+  const idx = src.indexOf('aria-label="이 프로젝트의 오퍼레이터 리셋"');
+  assert.ok(idx > 0, 'Reset Operator aria-label not found — P2-9 title/aria update missing');
   const region = src.slice(idx - 600, idx + 200);
   assert.match(
     region,
-    /title="PM 리셋: 이 프로젝트의 PM 스레드만 종료합니다\./,
-    'Reset PM title must clearly scope the action to the current project',
+    /title="오퍼레이터 리셋: 이 프로젝트의 오퍼레이터 스레드만 종료합니다\./,
+    'Reset Operator title must clearly scope the action to the current project',
   );
 });
 

@@ -17,7 +17,7 @@ const { createProjectService } = require('../services/projectService');
 const { createProjectBriefService } = require('../services/projectBriefService');
 const { createManagerRegistry } = require('../services/managerRegistry');
 const { createConversationService } = require('../services/conversationService');
-const { createPmSpawnService } = require('../services/pmSpawnService');
+const { createOperatorSpawnService } = require('../services/operatorSpawnService');
 const { createMemoryService } = require('../services/memoryService');
 const { createCompositionLedger } = require('../services/compositionLedger');
 const { createMemoryComposer, buildWorkspaceAdapter } = require('../services/memoryComposer');
@@ -156,7 +156,7 @@ test('GET /api/projects/:id/memory returns the seeded memory', async (t) => {
 // revision / ledger. We prove this by exercising the REAL assembly paths
 // (NOT re-implemented helpers) and capturing the ACTUAL systemPrompt that
 // the adapter receives via startSession:
-//   * fresh-spawn  : pmSpawnService.ensureLivePm()  (services/pmSpawnService.js)
+//   * fresh-spawn  : operatorSpawnService.ensureLiveOperator()  (services/operatorSpawnService.js)
 //   * boot-resume  : the resume block in createManagerRouter()
 //                    (routes/manager.js:184-204), run at router construction.
 // If either real path ever baked memory rows into the system prompt, the
@@ -191,7 +191,7 @@ function realFreshSpawnSystemPrompt(t, db, { projectName, conventions, knownPitf
   projectBriefService.updateBrief(project.id, { conventions, known_pitfalls: knownPitfalls });
   if (seedMemory) seedMemory(memoryService, project.id);
 
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs, managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
     projectService, projectBriefService,
@@ -199,7 +199,7 @@ function realFreshSpawnSystemPrompt(t, db, { projectName, conventions, knownPitf
   });
   seedTop({ rs, registry, adapter: topAdapter });
 
-  const { run } = spawn.ensureLivePm({ projectId: project.id });
+  const { run } = spawn.ensureLiveOperator({ projectId: project.id });
   const captured = fakePm._sessions.get(run.id).systemPrompt;
   return { systemPrompt: captured, runId: run.id, projectId: project.id, memoryService };
 }
@@ -307,7 +307,7 @@ test('REGRESSION: REAL boot-resume PM system prompt is INVARIANT w.r.t. memory s
 
 test('REGRESSION: REAL fresh-spawn and boot-resume produce the SAME PM prompt for identical inputs', async (t) => {
   // Same brief + same memory (none) -> the two real assembly paths must agree
-  // (the brief-bake is duplicated across pmSpawnService and routes/manager.js;
+  // (the brief-bake is duplicated across operatorSpawnService and routes/manager.js;
   // this pins them together so they cannot drift, with or without the Part D line).
   const db1 = await mkdb(t);
   const fresh = realFreshSpawnSystemPrompt(t, db1, {
@@ -360,7 +360,7 @@ function wirePmStack(db) {
   const fakePm = makeFakeCodexAdapter();
   const topAdapter = makeFakeCodexAdapter();
 
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs, managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
     projectService, projectBriefService,
@@ -370,7 +370,7 @@ function wirePmStack(db) {
     runService: rs, managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
     lifecycleService: { sendAgentInput: () => true },
-    pmSpawnService: spawn,
+    operatorSpawnService: spawn,
     memoryService,
     memoryComposer,
     compositionLedger,
@@ -456,7 +456,7 @@ function wirePmStack(db) {
 
   // Spawn the PM, then force the adapter to reject the next turn WITHOUT
   // killing the session (so the slot is not cleared/respawned).
-  const { run } = spawn.ensureLivePm({ projectId: project.id });
+  const { run } = spawn.ensureLiveOperator({ projectId: project.id });
   const session = fakePm._sessions.get(run.id);
   session.rejectNext = true; // runTurn returns { accepted: false } -> 502
 
@@ -493,7 +493,7 @@ test('INTEGRATION: memoryService failure degrades to no-injection (message still
       getRevision() { throw new Error('boom'); },
     };
 
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs, managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
     projectService, projectBriefService,
@@ -503,7 +503,7 @@ test('INTEGRATION: memoryService failure degrades to no-injection (message still
     runService: rs, managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
     lifecycleService: { sendAgentInput: () => true },
-    pmSpawnService: spawn,
+    operatorSpawnService: spawn,
     memoryService: explodingMemory,
   });
 

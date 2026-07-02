@@ -14,7 +14,7 @@ const os = require('node:os');
 const request = require('supertest');
 
 const { createDatabase } = require('../db/database');
-const { createRunService, derivePmProjectId } = require('../services/runService');
+const { createRunService, deriveOperatorProjectId } = require('../services/runService');
 const { createEventBus } = require('../services/eventBus');
 const { createApp } = require('../app');
 
@@ -49,32 +49,32 @@ async function mkApp(t) {
   return app;
 }
 
-// ---- ADD-1: derivePmProjectId ----
+// ---- ADD-1: deriveOperatorProjectId ----
 
-test('ADD-1 derivePmProjectId: pm:<id> run derives project_id from conversation_id', () => {
+test('ADD-1 deriveOperatorProjectId: pm:<id> run derives project_id from conversation_id', () => {
   const run = { manager_layer: 'pm', conversation_id: 'pm:proj-123', project_id: null };
-  assert.equal(derivePmProjectId(run), 'proj-123');
+  assert.equal(deriveOperatorProjectId(run), 'proj-123');
 });
 
-test('ADD-1 derivePmProjectId: top manager stays null', () => {
+test('ADD-1 deriveOperatorProjectId: top manager stays null', () => {
   const run = { manager_layer: 'top', conversation_id: 'top', project_id: null };
-  assert.equal(derivePmProjectId(run), null);
+  assert.equal(deriveOperatorProjectId(run), null);
 });
 
-test('ADD-1 derivePmProjectId: worker with JOIN-derived project_id wins', () => {
+test('ADD-1 deriveOperatorProjectId: worker with JOIN-derived project_id wins', () => {
   const run = { manager_layer: null, project_id: 'proj-abc', conversation_id: null };
-  assert.equal(derivePmProjectId(run), 'proj-abc');
+  assert.equal(deriveOperatorProjectId(run), 'proj-abc');
 });
 
-test('ADD-1 derivePmProjectId: pm layer but malformed conversation_id → null', () => {
-  assert.equal(derivePmProjectId({ manager_layer: 'pm', conversation_id: 'bogus' }), null);
-  assert.equal(derivePmProjectId({ manager_layer: 'pm', conversation_id: 'pm:' }), null);
-  assert.equal(derivePmProjectId({ manager_layer: 'pm', conversation_id: null }), null);
+test('ADD-1 deriveOperatorProjectId: pm layer but malformed conversation_id → null', () => {
+  assert.equal(deriveOperatorProjectId({ manager_layer: 'pm', conversation_id: 'bogus' }), null);
+  assert.equal(deriveOperatorProjectId({ manager_layer: 'pm', conversation_id: 'pm:' }), null);
+  assert.equal(deriveOperatorProjectId({ manager_layer: 'pm', conversation_id: null }), null);
 });
 
-test('ADD-1 derivePmProjectId: null / undefined run → null', () => {
-  assert.equal(derivePmProjectId(null), null);
-  assert.equal(derivePmProjectId(undefined), null);
+test('ADD-1 deriveOperatorProjectId: null / undefined run → null', () => {
+  assert.equal(deriveOperatorProjectId(null), null);
+  assert.equal(deriveOperatorProjectId(undefined), null);
 });
 
 test('ADD-1 runService.createRun emits run:status with derived pm project_id', async (t) => {
@@ -93,10 +93,10 @@ test('ADD-1 runService.createRun emits run:status with derived pm project_id', a
   assert.equal(captured[0].project_id, 'proj-xyz', 'pm run envelope must carry derived project_id');
 });
 
-// ---- NEW-B3: pmCleanupService fail-closed brief clear ----
+// ---- NEW-B3: operatorCleanupService fail-closed brief clear ----
 
-test('NEW-B3 pmCleanupService re-throws on brief clear failure', async (t) => {
-  const { createPmCleanupService } = require('../services/pmCleanupService');
+test('NEW-B3 operatorCleanupService re-throws on brief clear failure', async (t) => {
+  const { createOperatorCleanupService } = require('../services/operatorCleanupService');
   const db = await mkdb(t);
   // Insert a project + brief with a pm_thread_id so the clear path runs.
   db.prepare("INSERT INTO projects (id, name) VALUES ('p1','P')").run();
@@ -123,7 +123,7 @@ test('NEW-B3 pmCleanupService re-throws on brief clear failure', async (t) => {
   const runService = { updateRunStatus: () => {}, getRun: () => null };
   const managerAdapterFactory = { get: () => null };
 
-  const svc = require('../services/pmCleanupService').createPmCleanupService({
+  const svc = require('../services/operatorCleanupService').createOperatorCleanupService({
     projectService, projectBriefService, managerRegistry,
     managerAdapterFactory, runService,
   });

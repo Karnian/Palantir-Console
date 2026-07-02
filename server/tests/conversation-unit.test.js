@@ -401,7 +401,7 @@ test('conv: managerRegistry.onSlotCleared listener scrubs pending notices', asyn
     lifecycleService: null,
   });
 
-  // Wire the onSlotCleared hook — this is what app.js / pmSpawnService do
+  // Wire the onSlotCleared hook — this is what app.js / operatorSpawnService do
   registry.onSlotCleared(({ runId }) => conv.clearParentNotices(runId));
 
   const topRun = seedTopRun(rs, registry, adapter);

@@ -52,7 +52,7 @@ function parseMcpTools(capabilitiesJson) {
 // so tests can inject `hasKeychain` (and any future DI hooks) without
 // monkey-patching child_process. Production callers leave this empty and
 // get the real keychain probe.
-function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, pmCleanupService, pmSpawnService, skillPackService, isSpecialistAvailable = () => false, authResolverOpts = {} }) {
+function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorCleanupService, operatorSpawnService, skillPackService, isSpecialistAvailable = () => false, authResolverOpts = {} }) {
   const router = express.Router();
 
   // PR1a: ManagerAdapter seam. The factory is the single entrypoint for
@@ -192,12 +192,12 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 const port = process.env.PORT || 4177;
                 const token = process.env.PALANTIR_TOKEN;
                 const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'operator', adapterType: 'codex', specialistAvailable: isSpecialistAvailable() });
-                // Bake project brief into the system prompt (mirrors pmSpawnService).
+                // Bake project brief into the system prompt (mirrors operatorSpawnService).
                 const briefSections = [];
                 briefSections.push(`## Project Scope\nname: ${project.name}\nid: ${project.id}${project.directory ? `\ndirectory: ${project.directory}` : ''}${r.id ? `\npm_run_id: ${r.id}` : ''}`);
                 if (brief.conventions) briefSections.push(`## Project Conventions\n${brief.conventions}`);
                 if (brief.known_pitfalls) briefSections.push(`## Known Pitfalls\n${brief.known_pitfalls}`);
-                // Phase 2: inject project auto_apply skill packs into resumed PM prompt (mirrors pmSpawnService)
+                // Phase 2: inject project auto_apply skill packs into resumed Operator prompt (mirrors operatorSpawnService)
                 if (skillPackService) {
                   try {
                     const bindings = skillPackService.listProjectBindings(projectId);
@@ -581,17 +581,17 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
    * POST /api/manager/pm/:projectId/warm
    * Pre-warm a PM session so the first message doesn't pay the lazy
    * spawn cost. Called by the client when the user switches the
-   * conversation target to a PM (dropdown select). Returns the PM run
+   * conversation target to an Operator (dropdown select). Returns the Operator run
    * if spawned, or the already-live run if one exists.
    */
   router.post('/pm/:projectId/warm', asyncHandler(async (req, res) => {
     const { projectId } = req.params;
     if (!projectId) throw new BadRequestError('projectId is required');
-    if (!pmSpawnService) {
+    if (!operatorSpawnService) {
       return res.status(501).json({ error: 'PM spawn service not available' });
     }
     try {
-      const result = pmSpawnService.ensureLivePm({ projectId });
+      const result = operatorSpawnService.ensureLiveOperator({ projectId });
       return res.json({ run: result.run, spawned: result.spawned, resumed: result.resumed });
     } catch (err) {
       if (err && err.httpStatus) {
@@ -603,12 +603,12 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
 
   /**
    * POST /api/manager/pm/:projectId/message
-   * v3 Phase 2: send a message to a project-scoped PM manager.
+   * v3 Phase 2: send a message to a project-scoped Operator manager.
    *
    * Thin alias over conversationService.sendMessage('pm:<projectId>', ...).
-   * Phase 2 wires the runtime slot + parent-notice router; lazy PM spawn
+   * Phase 2 wires the runtime slot + parent-notice router; lazy Operator spawn
    * on first message is a Phase 3a concern. Until then, callers that hit
-   * this route when no PM is active will get 404 — this is intentional.
+   * this route when no Operator is active will get 404 — this is intentional.
    */
   router.post('/pm/:projectId/message', asyncHandler(async (req, res) => {
     console.warn('[deprecation] POST /api/manager/pm/:projectId/message — use POST /api/conversations/pm:<projectId>/message instead');
@@ -633,23 +633,23 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
 
   /**
    * POST /api/manager/pm/:projectId/reset
-   * v3 Phase 3a: single-owner PM teardown (spec §5 책임 분담표). The
-   * user clicks "Reset PM" (or the client forces a reset during adapter
-   * switch) and this route delegates to pmCleanupService.reset, which
+   * v3 Phase 3a: single-owner Operator teardown (spec §5 책임 분담표). The
+   * user clicks "Reset Operator" (or the client forces a reset during adapter
+   * switch) and this route delegates to operatorCleanupService.reset, which
    * disposes the live adapter session, clears pm_thread_id/pm_adapter on
    * the project brief, and drops the managerRegistry slot. The NEXT
-   * message to this project's PM will lazy-spawn a fresh Codex thread.
+   * message to this project's Operator will lazy-spawn a fresh Codex thread.
    */
   router.post('/pm/:projectId/reset', asyncHandler(async (req, res) => {
     const { projectId } = req.params;
     if (!projectId) {
       throw new BadRequestError('projectId is required');
     }
-    if (!pmCleanupService) {
-      return res.status(501).json({ error: 'pmCleanupService not wired' });
+    if (!operatorCleanupService) {
+      return res.status(501).json({ error: 'operatorCleanupService not wired' });
     }
     try {
-      const result = pmCleanupService.reset(projectId);
+      const result = operatorCleanupService.reset(projectId);
       return res.json({ status: 'reset', projectId, ...result });
     } catch (err) {
       if (err && err.httpStatus) {
@@ -664,7 +664,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
    * v3 Phase 7 (P7-2): force-delete escape hatch for when the normal
    * fail-closed reset is stuck because disposeSession throws. Unlike the
    * normal /reset route this call swallows disposeSession failures and
-   * unconditionally clears the registry slot + brief so the PM slot is
+   * unconditionally clears the registry slot + brief so the Operator slot is
    * always freed. Intended as a last-resort operator action — prefer
    * /reset first whenever the adapter might be healthy.
    *
@@ -675,13 +675,13 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     if (!projectId) {
       throw new BadRequestError('projectId is required');
     }
-    if (!pmCleanupService) {
-      return res.status(501).json({ error: 'pmCleanupService not wired' });
+    if (!operatorCleanupService) {
+      return res.status(501).json({ error: 'operatorCleanupService not wired' });
     }
-    if (typeof pmCleanupService.forceReset !== 'function') {
-      return res.status(501).json({ error: 'forceReset not available on pmCleanupService' });
+    if (typeof operatorCleanupService.forceReset !== 'function') {
+      return res.status(501).json({ error: 'forceReset not available on operatorCleanupService' });
     }
-    const result = pmCleanupService.forceReset(projectId);
+    const result = operatorCleanupService.forceReset(projectId);
     return res.json({ status: 'force_reset', projectId, ...result });
   }));
 
@@ -690,8 +690,8 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
    * R2-C.1: Aggregate worker run stats for SuggestedActions/dashboard widgets.
    *
    * Pure DB aggregation (no LLM). Only counts worker runs (is_manager=0) so
-   * Top/PM manager rows never inflate the numbers — ManagerChat already
-   * renders Top/PM status in a dedicated header.
+   * Top/Operator manager rows never inflate the numbers — ManagerChat already
+   * renders Top/Operator status in a dedicated header.
    *
    * "today" uses the server's local timezone (SQLite `date('now','localtime')`)
    * rather than UTC so users on non-UTC hosts see a day boundary that matches
@@ -804,10 +804,10 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       claudeSessionId: sessionId,
     };
 
-    // v3 Phase 2: project-scoped PM slots are a 1st-class runtime target.
+    // v3 Phase 2: project-scoped Operator slots are a 1st-class runtime target.
     // Each entry mirrors the top snapshot shape so the client can render
     // a unified card list without branching on layer. The registry is the
-    // source of truth for "which PM run is live right now"; the DB row is
+    // source of truth for "which Operator run is live right now"; the DB row is
     // fetched for status/metadata. probeActive takes care of liveness +
     // cleanup along the way.
     const snapshot = managerRegistry.snapshot();

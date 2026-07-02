@@ -3,7 +3,7 @@
 // Verifies:
 // 1. PM system prompt includes skill pack API documentation (PM layer only)
 // 2. PM system prompt does NOT include skill pack docs for Top layer
-// 3. pmSpawnService injects project auto_apply skill pack list into PM prompt
+// 3. operatorSpawnService injects project auto_apply skill pack list into PM prompt
 // 4. /execute skill_pack_ids documented in PM layer prompt
 // 5. excluded user packs cannot be overridden via skill_pack_ids (integration)
 
@@ -19,7 +19,7 @@ const { createRunService } = require('../services/runService');
 const { createProjectService } = require('../services/projectService');
 const { createProjectBriefService } = require('../services/projectBriefService');
 const { createManagerRegistry } = require('../services/managerRegistry');
-const { createPmSpawnService } = require('../services/pmSpawnService');
+const { createOperatorSpawnService } = require('../services/operatorSpawnService');
 const { createSkillPackService } = require('../services/skillPackService');
 const {
   buildManagerSystemPrompt,
@@ -122,7 +122,7 @@ test('Top layer /execute doc does NOT include skill_pack_ids', () => {
 });
 
 // ───────────────────────────────────────────────────────────────
-// pmSpawnService — skill pack list injection into PM prompt
+// operatorSpawnService — skill pack list injection into PM prompt
 // ───────────────────────────────────────────────────────────────
 
 test('Phase 2: PM prompt includes project auto_apply skill pack list', async (t) => {
@@ -135,7 +135,7 @@ test('Phase 2: PM prompt includes project auto_apply skill pack list', async (t)
   const adapter = makeFakeAdapter();
   const topAdapter = makeFakeAdapter();
 
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs,
     managerRegistry: registry,
     managerAdapterFactory: { getAdapter: () => adapter },
@@ -160,7 +160,7 @@ test('Phase 2: PM prompt includes project auto_apply skill pack list', async (t)
   seedTop({ rs, registry, adapter: topAdapter });
 
   // Spawn PM
-  const { run, spawned } = spawn.ensureLivePm({ projectId: project.id });
+  const { run, spawned } = spawn.ensureLiveOperator({ projectId: project.id });
   assert.ok(spawned);
 
   // Inspect the system prompt that was passed to the adapter
@@ -185,7 +185,7 @@ test('Phase 2: PM prompt works gracefully when no skill packs exist', async (t) 
   const adapter = makeFakeAdapter();
   const topAdapter = makeFakeAdapter();
 
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs,
     managerRegistry: registry,
     managerAdapterFactory: { getAdapter: () => adapter },
@@ -198,7 +198,7 @@ test('Phase 2: PM prompt works gracefully when no skill packs exist', async (t) 
   const project = projectService.createProject({ name: 'beta', pm_enabled: 1 });
   seedTop({ rs, registry, adapter: topAdapter });
 
-  const { run, spawned } = spawn.ensureLivePm({ projectId: project.id });
+  const { run, spawned } = spawn.ensureLiveOperator({ projectId: project.id });
   assert.ok(spawned);
 
   const session = adapter._sessions.get(run.id);
@@ -219,7 +219,7 @@ test('Phase 2: PM prompt works when skillPackService is not injected', async (t)
   const topAdapter = makeFakeAdapter();
 
   // No skillPackService
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs,
     managerRegistry: registry,
     managerAdapterFactory: { getAdapter: () => adapter },
@@ -231,7 +231,7 @@ test('Phase 2: PM prompt works when skillPackService is not injected', async (t)
   const project = projectService.createProject({ name: 'gamma', pm_enabled: 1 });
   seedTop({ rs, registry, adapter: topAdapter });
 
-  const { run, spawned } = spawn.ensureLivePm({ projectId: project.id });
+  const { run, spawned } = spawn.ensureLiveOperator({ projectId: project.id });
   assert.ok(spawned);
 
   const session = adapter._sessions.get(run.id);
@@ -249,7 +249,7 @@ test('Phase 2: PM Role section mentions skill pack selection guidance', async (t
   const adapter = makeFakeAdapter();
   const topAdapter = makeFakeAdapter();
 
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs,
     managerRegistry: registry,
     managerAdapterFactory: { getAdapter: () => adapter },
@@ -262,7 +262,7 @@ test('Phase 2: PM Role section mentions skill pack selection guidance', async (t
   const project = projectService.createProject({ name: 'delta', pm_enabled: 1 });
   seedTop({ rs, registry, adapter: topAdapter });
 
-  const { run } = spawn.ensureLivePm({ projectId: project.id });
+  const { run } = spawn.ensureLiveOperator({ projectId: project.id });
   const session = adapter._sessions.get(run.id);
   assert.match(session.systemPrompt, /choose skill packs/i);
   assert.match(session.systemPrompt, /skill_pack_ids/);
@@ -368,7 +368,7 @@ test('Phase 2: PM prompt contains skill pack IDs for /execute usage', async (t) 
   const adapter = makeFakeAdapter();
   const topAdapter = makeFakeAdapter();
 
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs,
     managerRegistry: registry,
     managerAdapterFactory: { getAdapter: () => adapter },
@@ -385,7 +385,7 @@ test('Phase 2: PM prompt contains skill pack IDs for /execute usage', async (t) 
   skillPackService.bindToProject(project.id, { skill_pack_id: pack.id, auto_apply: 1 });
   seedTop({ rs, registry, adapter: topAdapter });
 
-  const { run } = spawn.ensureLivePm({ projectId: project.id });
+  const { run } = spawn.ensureLiveOperator({ projectId: project.id });
   const session = adapter._sessions.get(run.id);
   // The pack ID must appear in the prompt so the PM can reference it in /execute
   assert.ok(session.systemPrompt.includes(pack.id), 'Pack ID should be in PM prompt');
@@ -401,7 +401,7 @@ test('Phase 2: auto_apply packs listed in priority order', async (t) => {
   const adapter = makeFakeAdapter();
   const topAdapter = makeFakeAdapter();
 
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs,
     managerRegistry: registry,
     managerAdapterFactory: { getAdapter: () => adapter },
@@ -423,7 +423,7 @@ test('Phase 2: auto_apply packs listed in priority order', async (t) => {
   skillPackService.bindToProject(project.id, { skill_pack_id: packB.id, auto_apply: 1, priority: 50 });
   seedTop({ rs, registry, adapter: topAdapter });
 
-  const { run } = spawn.ensureLivePm({ projectId: project.id });
+  const { run } = spawn.ensureLiveOperator({ projectId: project.id });
   const session = adapter._sessions.get(run.id);
   const prompt = session.systemPrompt;
   // Pack-B (priority 50) should appear before Pack-A (priority 200)
@@ -443,7 +443,7 @@ test('Phase 2: skill pack with null description renders without colon', async (t
   const adapter = makeFakeAdapter();
   const topAdapter = makeFakeAdapter();
 
-  const spawn = createPmSpawnService({
+  const spawn = createOperatorSpawnService({
     runService: rs,
     managerRegistry: registry,
     managerAdapterFactory: { getAdapter: () => adapter },
@@ -461,7 +461,7 @@ test('Phase 2: skill pack with null description renders without colon', async (t
   skillPackService.bindToProject(project.id, { skill_pack_id: pack.id, auto_apply: 1 });
   seedTop({ rs, registry, adapter: topAdapter });
 
-  const { run } = spawn.ensureLivePm({ projectId: project.id });
+  const { run } = spawn.ensureLiveOperator({ projectId: project.id });
   const session = adapter._sessions.get(run.id);
   // Should render as "- NoDesc Pack (id: ...)" without a colon before the description
   assert.match(session.systemPrompt, /NoDesc Pack \(id:/);

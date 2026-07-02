@@ -286,7 +286,7 @@ test('clearActive fires notifySlotCleared (regression guard)', async (t) => {
 
   assert.equal(notifiedRunId, run.id);
   // clearActive is an explicit user action — does NOT dispose the adapter.
-  // Disposal on explicit clear is a separate decision; today pmCleanupService
+  // Disposal on explicit clear is a separate decision; today operatorCleanupService
   // is the single dispose owner on the delete-project / /reset path. Pinning
   // current behavior so future changes are intentional.
   assert.deepEqual(adapter.calls.dispose, []);

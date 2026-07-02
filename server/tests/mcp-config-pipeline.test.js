@@ -5,7 +5,7 @@
  *  1. Migration 011: projects.mcp_config_path column exists
  *  2. projectService CRUD includes mcp_config_path
  *  3. streamJsonEngine.spawnAgent receives --mcp-config in args when mcpConfig is set
- *  4. pmSpawnService passes mcpConfig from project
+ *  4. operatorSpawnService passes mcpConfig from project
  *  5. codexAdapter accepts mcpConfig without throwing
  *  6. claudeAdapter passes mcpConfig through to spawnAgent
  */
@@ -183,19 +183,19 @@ test('P4-2: codexAdapter.startSession accepts mcpConfig silently', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. pmSpawnService passes mcpConfig from project (source invariant)
+// 6. operatorSpawnService passes mcpConfig from project (source invariant)
 // ---------------------------------------------------------------------------
 
-test('P4-2: pmSpawnService source includes mcpConfig from project', () => {
+test('P4-2: operatorSpawnService source includes mcpConfig from project', () => {
   const fsSync = require('node:fs');
-  const src = fsSync.readFileSync(require.resolve('../services/pmSpawnService'), 'utf8');
+  const src = fsSync.readFileSync(require.resolve('../services/operatorSpawnService'), 'utf8');
   assert.ok(
     src.includes('project.mcp_config_path'),
-    'pmSpawnService should reference project.mcp_config_path'
+    'operatorSpawnService should reference project.mcp_config_path'
   );
   assert.ok(
     src.includes('mcpConfig:'),
-    'pmSpawnService should pass mcpConfig to adapter.startSession'
+    'operatorSpawnService should pass mcpConfig to adapter.startSession'
   );
 });
 
