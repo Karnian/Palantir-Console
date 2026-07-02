@@ -1,13 +1,12 @@
-const { execFileSync } = require('node:child_process');
 const path = require('node:path');
-const fs = require('node:fs');
+const { createLocalNodeExecutor } = require('./nodeExecutor');
 
 /**
  * Git worktree manager — creates isolated worktrees for agent runs.
  * Each agent executes in its own worktree to prevent file conflicts.
  */
 
-function createWorktreeService() {
+function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}) {
   /**
    * Validate branch name: only allow safe characters (alphanumeric, hyphens, underscores, slashes, dots).
    * Prevents path traversal and command injection.
@@ -29,7 +28,7 @@ function createWorktreeService() {
 
   function isGitRepo(dir) {
     try {
-      execFileSync('git', ['rev-parse', '--git-dir'], { cwd: dir, stdio: 'pipe' });
+      nodeExecutor.execFileSync('git', ['rev-parse', '--git-dir'], { cwd: dir, stdio: 'pipe' });
       return true;
     } catch {
       return false;
@@ -44,11 +43,11 @@ function createWorktreeService() {
    */
   function getCurrentBranch(dir) {
     try {
-      const branch = execFileSync('git', ['branch', '--show-current'], { cwd: dir, stdio: 'pipe', encoding: 'utf-8' }).trim();
+      const branch = nodeExecutor.execFileSync('git', ['branch', '--show-current'], { cwd: dir, stdio: 'pipe', encoding: 'utf-8' }).trim();
       if (branch) return branch;
     } catch { /* fall through */ }
     try {
-      const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, stdio: 'pipe', encoding: 'utf-8' }).trim();
+      const sha = nodeExecutor.execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, stdio: 'pipe', encoding: 'utf-8' }).trim();
       if (sha) return sha;
     } catch { /* fall through */ }
     return 'main';
@@ -77,7 +76,7 @@ function createWorktreeService() {
     }
 
     // If worktree already exists, return it
-    if (fs.existsSync(worktreePath)) {
+    if (nodeExecutor.existsSync(worktreePath)) {
       return { path: worktreePath, branch: safeBranch, created: false };
     }
 
@@ -86,18 +85,18 @@ function createWorktreeService() {
     let branchPreexisted = true;
     try {
       // Ensure base directory exists
-      fs.mkdirSync(worktreesBase, { recursive: true });
+      nodeExecutor.mkdirSync(worktreesBase, { recursive: true });
 
       // Create new branch from current HEAD — all args as arrays (no shell)
       const baseBranch = getCurrentBranch(projectDir);
       try {
-        execFileSync('git', ['branch', safeBranch, baseBranch], { cwd: projectDir, stdio: 'pipe' });
+        nodeExecutor.execFileSync('git', ['branch', safeBranch, baseBranch], { cwd: projectDir, stdio: 'pipe' });
         branchPreexisted = false;
       } catch {
         // Branch already existed; leave it alone on rollback
       }
 
-      execFileSync('git', ['worktree', 'add', worktreePath, safeBranch], {
+      nodeExecutor.execFileSync('git', ['worktree', 'add', worktreePath, safeBranch], {
         cwd: projectDir,
         stdio: 'pipe',
       });
@@ -109,7 +108,7 @@ function createWorktreeService() {
       // Pre-existing branches are left untouched.
       if (!branchPreexisted) {
         try {
-          execFileSync('git', ['branch', '-D', safeBranch], { cwd: projectDir, stdio: 'pipe' });
+          nodeExecutor.execFileSync('git', ['branch', '-D', safeBranch], { cwd: projectDir, stdio: 'pipe' });
         } catch { /* best effort */ }
       }
       // Fallback: use project directory directly
@@ -123,7 +122,7 @@ function createWorktreeService() {
    */
   function hasUncommittedChanges(worktreePath) {
     try {
-      const status = execFileSync('git', ['status', '--porcelain'], {
+      const status = nodeExecutor.execFileSync('git', ['status', '--porcelain'], {
         cwd: worktreePath,
         stdio: 'pipe',
         encoding: 'utf-8',
@@ -144,14 +143,14 @@ function createWorktreeService() {
       if (!hasUncommittedChanges(worktreePath)) return false;
 
       // Stage all changes (new, modified, deleted)
-      execFileSync('git', ['add', '-A'], {
+      nodeExecutor.execFileSync('git', ['add', '-A'], {
         cwd: worktreePath,
         stdio: 'pipe',
       });
 
       // Commit with an identifiable message
       const msg = `[palantir] auto-save uncommitted changes from run ${runId || 'unknown'}`;
-      execFileSync('git', ['commit', '-m', msg, '--no-verify'], {
+      nodeExecutor.execFileSync('git', ['commit', '-m', msg, '--no-verify'], {
         cwd: worktreePath,
         stdio: 'pipe',
       });
@@ -171,7 +170,7 @@ function createWorktreeService() {
     try {
       const safeBranch = validateBranchName(branchName);
       const baseBranch = getCurrentBranch(projectDir);
-      const count = execFileSync(
+      const count = nodeExecutor.execFileSync(
         'git', ['rev-list', '--count', `${baseBranch}..${safeBranch}`],
         { cwd: projectDir, stdio: 'pipe', encoding: 'utf-8' }
       );
@@ -202,12 +201,12 @@ function createWorktreeService() {
     // Auto-save uncommitted changes before removal unless the caller has
     // already captured the work that should survive. Harvest uses this to
     // discard test-generated files after it has committed agent work.
-    if (opts.autosave !== false && fs.existsSync(resolvedWorktree)) {
+    if (opts.autosave !== false && nodeExecutor.existsSync(resolvedWorktree)) {
       autoSaveWorktree(resolvedWorktree, opts.runId);
     }
 
     try {
-      execFileSync('git', ['worktree', 'remove', resolvedWorktree, '--force'], {
+      nodeExecutor.execFileSync('git', ['worktree', 'remove', resolvedWorktree, '--force'], {
         cwd: projectDir,
         stdio: 'pipe',
       });
@@ -215,10 +214,10 @@ function createWorktreeService() {
       console.error(`[worktreeService] Failed to remove worktree: ${error.message}`);
       // Try manual cleanup — only if path is confirmed inside project dir
       try {
-        if (fs.existsSync(resolvedWorktree) && fs.statSync(resolvedWorktree).isDirectory()) {
-          fs.rmSync(resolvedWorktree, { recursive: true, force: true });
+        if (nodeExecutor.existsSync(resolvedWorktree) && nodeExecutor.statSync(resolvedWorktree).isDirectory()) {
+          nodeExecutor.rmSync(resolvedWorktree, { recursive: true, force: true });
         }
-        execFileSync('git', ['worktree', 'prune'], { cwd: projectDir, stdio: 'pipe' });
+        nodeExecutor.execFileSync('git', ['worktree', 'prune'], { cwd: projectDir, stdio: 'pipe' });
       } catch {
         // best effort
       }
@@ -232,7 +231,7 @@ function createWorktreeService() {
         console.log(`[worktreeService] Preserving branch '${safeBranch}' — has commits ahead of base`);
       } else {
         try {
-          execFileSync('git', ['branch', '-D', safeBranch], { cwd: projectDir, stdio: 'pipe' });
+          nodeExecutor.execFileSync('git', ['branch', '-D', safeBranch], { cwd: projectDir, stdio: 'pipe' });
         } catch {
           // branch may have been merged or doesn't exist
         }
@@ -246,7 +245,7 @@ function createWorktreeService() {
   function listWorktrees(projectDir) {
     if (!isGitRepo(projectDir)) return [];
     try {
-      const output = execFileSync('git', ['worktree', 'list', '--porcelain'], {
+      const output = nodeExecutor.execFileSync('git', ['worktree', 'list', '--porcelain'], {
         cwd: projectDir,
         stdio: 'pipe',
         encoding: 'utf-8',
@@ -287,11 +286,11 @@ function createWorktreeService() {
       // changed. Two-dot would also pick up base-branch commits that landed
       // after the worktree was created — noise that misattributes others'
       // work to this run's harvest.
-      const stat = execFileSync(
+      const stat = nodeExecutor.execFileSync(
         'git', ['diff', '--no-ext-diff', '--no-textconv', '--no-color', `${baseBranch}...${safeBranch}`, '--stat'],
         { cwd: projectDir, stdio: 'pipe', encoding: 'utf-8', env: gitEnv }
       );
-      const diffOutput = execFileSync(
+      const diffOutput = nodeExecutor.execFileSync(
         'git', ['diff', '--no-ext-diff', '--no-textconv', '--no-color', `${baseBranch}...${safeBranch}`, '--name-only'],
         { cwd: projectDir, stdio: 'pipe', encoding: 'utf-8', env: gitEnv }
       );

@@ -31,6 +31,7 @@ const { createStreamJsonEngine } = require('./services/streamJsonEngine');
 const { createManagerAdapterFactory } = require('./services/managerAdapters');
 const { createWorktreeService } = require('./services/worktreeService');
 const { createHarvestService } = require('./services/harvestService');
+const { createLocalNodeExecutor } = require('./services/nodeExecutor');
 const { createWebhookService } = require('./services/webhookService');
 const { createLifecycleService } = require('./services/lifecycleService');
 const { createAuthMiddleware } = require('./middleware/auth');
@@ -649,13 +650,14 @@ function createApp(options = {}) {
 
   // Event bus for SSE
   const eventBus = createEventBus();
+  const nodeExecutor = createLocalNodeExecutor();
 
   // Existing services (filesystem-based)
   const storage = createStorageContext({ storageRoot, fsRoot });
   const sessionService = createSessionService(storage);
   const trashService = createTrashService(storage);
   const messageService = createMessageService(storage);
-  const fsService = createFsService(storage);
+  const fsService = createFsService(storage, { nodeExecutor });
   const opencodeService = createOpencodeService({ opencodeBin });
   const codexService = createCodexService({
     codexBin,
@@ -722,13 +724,14 @@ function createApp(options = {}) {
   const executionEngine = options.executionEngine || createExecutionEngine();
   const streamJsonEngine = createStreamJsonEngine({ runService, eventBus });
   const managerAdapterFactory = createManagerAdapterFactory({ streamJsonEngine, runService });
-  const worktreeService = createWorktreeService();
+  const worktreeService = createWorktreeService({ nodeExecutor });
   const harvestService = createHarvestService({
     runService,
     worktreeService,
     projectService,
     eventBus,
     testRunner: options.harvestTestRunner,
+    nodeExecutor,
   });
   const webhookService = createWebhookService({
     eventBus,
@@ -959,7 +962,7 @@ function createApp(options = {}) {
   app.use('/api/projects', createMemoryRouter({ memoryService, projectService })); // ML PR1: GET /:projectId/memory
   app.use('/api/master-memory', createMasterMemoryRouter({ masterMemoryService })); // L2 P1b: GET / + POST /remember
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService }));
-  app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService }));
+  app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService, nodeExecutor }));
   // PR18: tests can pass options.authResolverOpts (e.g. a fake `hasKeychain`)
   // so /api/agents and /api/manager preflights are deterministic across CI
   // hosts that may or may not have a Claude keychain item. Production callers
