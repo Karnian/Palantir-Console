@@ -206,6 +206,62 @@ test('M1: CodexAdapter.runTurn with mcpConfig injects leaf-level -c mcp_servers.
   adapter.disposeSession('run_mgr_codex_m1');
 });
 
+test('M1: CodexAdapter.startSession skips string mcpConfig paths without mcp_invalid failure', () => {
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const { PassThrough } = require('node:stream');
+  const { NORMALIZED_EVENT_TYPES } = require('../services/managerAdapters/eventTypes');
+  const events = [];
+  let capturedArgs = null;
+  const fakeChild = {
+    stdin: { write() {}, end() {} },
+    stderr: new PassThrough(),
+    stdout: new PassThrough(),
+    on() { return this; },
+    kill() {},
+  };
+  const fakeSpawn = (_bin, args) => {
+    capturedArgs = args;
+    return fakeChild;
+  };
+  const fakeRunService = {
+    addRunEvent(_r, t, p) { events.push({ t, p: JSON.parse(p) }); },
+    updateManagerThreadId() {},
+    updateRunResult() {},
+    updateRunStatus(_r, status) { events.push({ t: '__status', status }); },
+  };
+  const adapter = createCodexAdapter({ runService: fakeRunService, spawnFn: fakeSpawn });
+  adapter.startSession('run_mgr_codex_m1_path', {
+    systemPrompt: 'sys',
+    cwd: process.cwd(),
+    mcpConfig: '/tmp/project-mcp.json',
+  });
+  const res = adapter.runTurn('run_mgr_codex_m1_path', { text: 'hi' });
+  assert.equal(res.accepted, true);
+  assert.ok(capturedArgs, 'spawn was invoked');
+
+  const cflags = [];
+  for (let i = 0; i < capturedArgs.length; i++) {
+    if (capturedArgs[i] === '-c' && i + 1 < capturedArgs.length) cflags.push(capturedArgs[i + 1]);
+  }
+  assert.equal(
+    cflags.some(c => /^mcp_servers\./.test(c)),
+    false,
+    'string mcpConfig path must not produce mcp_servers leaves',
+  );
+  const turnFailed = events.find(e => e.t === NORMALIZED_EVENT_TYPES.TURN_FAILED);
+  assert.equal(turnFailed, undefined, 'TURN_FAILED must not be emitted');
+  assert.equal(
+    events.some(e => e.t === '__status' && e.status === 'failed'),
+    false,
+    'run must not be marked failed',
+  );
+  const skipped = events.filter(e => e.t === 'mcp:config_path_skipped');
+  assert.equal(skipped.length, 1, 'string path skip is annotated once');
+  assert.deepEqual(skipped[0].p, { adapter: 'codex' });
+
+  adapter.disposeSession('run_mgr_codex_m1_path');
+});
+
 test('M1: CodexAdapter.runTurn with invalid mcpConfig fails closed (accepted=false + TURN_FAILED + session ended)', () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
   const { PassThrough } = require('node:stream');

@@ -328,7 +328,8 @@ function createOperatorSpawnService({
         mcpTools: pmMcpTools.length > 0 ? pmMcpTools : undefined,
         // P4-2: pass project-scoped MCP config file path to the adapter.
         // Claude adapter forwards this to streamJsonEngine as --mcp-config.
-        // Codex adapter silently skips it (unsupported).
+        // Codex adapter accepts only object-shaped MCP config for dotted
+        // -c flattening, so it skips path strings and annotates the run.
         mcpConfig: project.mcp_config_path || undefined,
       });
     } catch (err) {
