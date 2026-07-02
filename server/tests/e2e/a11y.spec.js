@@ -2,8 +2,8 @@
 //
 // Spec lock-in: docs/specs/k4-wcag-a11y-automation-brief.md
 //
-// Matrix: 9 hash routes × 2 themes (dark/light) × 2 viewports (1280×800 desktop,
-// 375×667 mobile) = 36 scenarios. Tagged @a11y so `npm run test:a11y` can grep.
+// Matrix: 12 hash routes × 2 themes (dark/light) × 2 viewports (1280×800 desktop,
+// 375×667 mobile) = 48 scenarios. Tagged @a11y so `npm run test:a11y` can grep.
 //
 // Gate policy (L3):
 //   - critical / serious axe violation → fail
@@ -40,6 +40,7 @@ const ROUTES = [
   'resources/skills',
   'resources/presets',
   'resources/mcp-servers',
+  'resources/nodes',
   'memory',
   'operator/specialist',
   'operator/profiles',

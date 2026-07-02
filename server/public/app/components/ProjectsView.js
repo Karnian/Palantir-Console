@@ -37,6 +37,37 @@ const BOARD_COLUMNS = [
   { id: 'done' },
 ];
 
+function projectNodeValue(project) {
+  return project?.node_id && project.node_id !== 'local' ? project.node_id : '';
+}
+
+function ProjectNodeSelect({ id, value, onChange, nodes, loading }) {
+  const selectedMissing = value && !nodes.some(n => n.id === value);
+  // Only offer nodes that can actually host execution — projectService
+  // rejects can_execute!=1 / files_only=1 bindings with a 400 anyway
+  // (Codex P1c review NIT: don't offer invalid choices).
+  const remoteNodes = nodes.filter(node => node.id !== 'local'
+    && Number(node.can_execute) === 1
+    && Number(node.files_only) !== 1);
+  return html`
+    <select
+      id=${id}
+      class="form-select"
+      value=${value}
+      onChange=${e => onChange(e.target.value)}
+      disabled=${loading}
+    >
+      <option value="">${loading ? PROJECTS_LABELS.nodeSelectLoading : PROJECTS_LABELS.nodeDefaultOption}</option>
+      ${selectedMissing && html`<option value=${value}>${value}</option>`}
+      ${remoteNodes.map(node => html`
+        <option key=${node.id} value=${node.id}>
+          ${node.name} (${node.id})
+        </option>
+      `)}
+    </select>
+  `;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ProjectSkillPacks — skill pack bindings for a project (Phase 3-2)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -314,7 +345,11 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   const [dir, setDir] = useState('');
   const [mcpConfigPath, setMcpConfigPath] = useState('');
   const [testCommand, setTestCommand] = useState('');
+  const [nodeId, setNodeId] = useState('');
+  const [allowNonGitDir, setAllowNonGitDir] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [nodes, setNodes] = useState([]);
+  const [nodesLoading, setNodesLoading] = useState(true);
 
   // Edit modal state
   const [editName, setEditName] = useState('');
@@ -322,27 +357,43 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   const [editDir, setEditDir] = useState('');
   const [editMcpConfigPath, setEditMcpConfigPath] = useState('');
   const [editTestCommand, setEditTestCommand] = useState('');
+  const [editNodeId, setEditNodeId] = useState('');
+  const [editAllowNonGitDir, setEditAllowNonGitDir] = useState(false);
   const [editSaving, setEditSaving] = useState(false);
+
+  const loadNodes = useCallback(async () => {
+    setNodesLoading(true);
+    try {
+      const data = await apiFetch('/api/nodes');
+      setNodes(data.nodes || []);
+    } catch (err) {
+      addToast(err.message, 'error');
+    }
+    setNodesLoading(false);
+  }, []);
+
+  useEffect(() => { loadNodes(); }, [loadNodes]);
 
   const handleCreate = async () => {
     if (!name.trim()) return;
     setSaving(true);
     try {
-      await apiFetch('/api/projects', {
+      const body = {
+        name: name.trim(),
+        description: desc.trim() || undefined,
+        directory: dir.trim() || undefined,
+        mcp_config_path: mcpConfigPath.trim() || undefined,
+        test_command: testCommand.trim() || undefined,
+        allow_non_git_dir: allowNonGitDir ? 1 : 0,
+      };
+      if (nodeId.trim()) body.node_id = nodeId.trim();
+      await apiFetchWithToast('/api/projects', {
         method: 'POST',
-        body: JSON.stringify({
-          name: name.trim(),
-          description: desc.trim() || undefined,
-          directory: dir.trim() || undefined,
-          mcp_config_path: mcpConfigPath.trim() || undefined,
-          test_command: testCommand.trim() || undefined,
-        }),
+        body: JSON.stringify(body),
       });
-      setName(''); setDesc(''); setDir(''); setMcpConfigPath(''); setTestCommand(''); setShowNew(false);
+      setName(''); setDesc(''); setDir(''); setMcpConfigPath(''); setTestCommand(''); setNodeId(''); setAllowNonGitDir(false); setShowNew(false);
       reloadProjects();
-    } catch (err) {
-      addToast(err.message, 'error');
-    }
+    } catch { /* toast already shown by apiFetchWithToast */ }
     setSaving(false);
   };
 
@@ -353,13 +404,15 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
     setEditDir(p.directory || '');
     setEditMcpConfigPath(p.mcp_config_path || '');
     setEditTestCommand(p.test_command || '');
+    setEditNodeId(projectNodeValue(p));
+    setEditAllowNonGitDir(Number(p.allow_non_git_dir) === 1);
   };
 
   const handleUpdate = async () => {
     if (!editProject || !editName.trim()) return;
     setEditSaving(true);
     try {
-      await apiFetch(`/api/projects/${editProject.id}`, {
+      await apiFetchWithToast(`/api/projects/${editProject.id}`, {
         method: 'PATCH',
         body: JSON.stringify({
           name: editName.trim(),
@@ -367,13 +420,13 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
           directory: editDir.trim() || null,
           mcp_config_path: editMcpConfigPath.trim() || null,
           test_command: editTestCommand.trim() || null,
+          node_id: editNodeId.trim() || null,
+          allow_non_git_dir: editAllowNonGitDir ? 1 : 0,
         }),
       });
       setEditProject(null);
       reloadProjects();
-    } catch (err) {
-      addToast(err.message, 'error');
-    }
+    } catch { /* toast already shown by apiFetchWithToast */ }
     setEditSaving(false);
   };
 
@@ -396,6 +449,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
         `}
         ${projects.map(p => {
           const taskCount = tasks.filter(t => t.project_id === p.id).length;
+          const remoteNodeId = projectNodeValue(p);
           return html`
             <article key=${p.id} class="project-card">
               <button class="project-card-trigger" onClick=${() => setDetailProject(p)}
@@ -403,6 +457,8 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
                 <span class="project-card-header">
                   <span class="project-card-title">${p.name}</span>
                   ${taskCount > 0 && html`<span class="project-card-task-count">${taskCount}${PROJECTS_LABELS.taskWord}</span>`}
+                  ${remoteNodeId && html`<span class="project-card-task-count">${PROJECTS_LABELS.nodeBadgePrefix} ${remoteNodeId}</span>`}
+                  ${Number(p.allow_non_git_dir) === 1 && html`<span class="project-card-task-count">${PROJECTS_LABELS.sharedDirectoryBadge}</span>`}
                 </span>
                 ${p.directory && html`<span class="project-card-dir" title=${p.directory}>\u{1F4C1} ${p.directory}</span>`}
                 ${p.description && html`<span class="project-card-desc">${p.description}</span>`}
@@ -448,6 +504,28 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
             />
             <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.testCommandHint}</div>
           </div>
+          <div class="form-field">
+            <label class="form-label" for="new-project-node">${PROJECTS_LABELS.fieldNode}</label>
+            <${ProjectNodeSelect}
+              id="new-project-node"
+              value=${nodeId}
+              onChange=${setNodeId}
+              nodes=${nodes}
+              loading=${nodesLoading}
+            />
+          </div>
+          <div class="form-field">
+            <label style=${{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <input
+                id="new-project-allow-non-git-dir"
+                type="checkbox"
+                checked=${allowNonGitDir}
+                onChange=${e => setAllowNonGitDir(e.target.checked)}
+              />
+              <span>${PROJECTS_LABELS.allowNonGitDirLabel}</span>
+            </label>
+            <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.allowNonGitDirHint}</div>
+          </div>
         </div>
         <div class="modal-footer">
           <button class="ghost" onClick=${() => setShowNew(false)}>${COMMON_ACTIONS.cancel}</button>
@@ -488,6 +566,28 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
               maxlength="500"
             />
             <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.testCommandHint}</div>
+          </div>
+          <div class="form-field">
+            <label class="form-label" for="edit-project-node">${PROJECTS_LABELS.fieldNode}</label>
+            <${ProjectNodeSelect}
+              id="edit-project-node"
+              value=${editNodeId}
+              onChange=${setEditNodeId}
+              nodes=${nodes}
+              loading=${nodesLoading}
+            />
+          </div>
+          <div class="form-field">
+            <label style=${{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <input
+                id="edit-project-allow-non-git-dir"
+                type="checkbox"
+                checked=${editAllowNonGitDir}
+                onChange=${e => setEditAllowNonGitDir(e.target.checked)}
+              />
+              <span>${PROJECTS_LABELS.allowNonGitDirLabel}</span>
+            </label>
+            <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.allowNonGitDirHint}</div>
           </div>
         </div>
         <div class="modal-footer">
