@@ -18,7 +18,139 @@ const path = require('node:path');
  * liveness, session discovery, or putSecretFile; those methods are added in
  * later phases.
  */
-function createLocalNodeExecutor() {
+function createLocalWorkerChannel({ streamJsonEngine, executionEngine } = {}) {
+  function requireEngine(engineName, method) {
+    const engine = engineName === 'stream-json' ? streamJsonEngine : executionEngine;
+    if (!engine || typeof engine[method] !== 'function') {
+      throw new Error(`Local worker channel ${engineName} engine is not attached or does not implement ${method}`);
+    }
+    return engine;
+  }
+
+  function streamJsonOwns(runId) {
+    return Boolean(
+      streamJsonEngine
+      && typeof streamJsonEngine.hasProcess === 'function'
+      && streamJsonEngine.hasProcess(runId),
+    );
+  }
+
+  function executionSessionOwns(runId) {
+    if (!executionEngine || typeof executionEngine.listSessions !== 'function') return false;
+    const rawRunId = String(runId);
+    const safeRunId = rawRunId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const expectedNames = new Set([
+      `palantir-run-${safeRunId}`,
+      `subprocess-${rawRunId}`,
+      `subprocess-${safeRunId}`,
+    ]);
+    try {
+      const sessions = executionEngine.listSessions() || [];
+      return sessions.some((session) => {
+        if (!session) return false;
+        if (session.runId === runId || String(session.runId || '') === rawRunId) return true;
+        return expectedNames.has(String(session.name || ''));
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  function executionOwns(runId) {
+    if (!executionEngine) return false;
+    if (typeof executionEngine.isAlive === 'function' && executionEngine.isAlive(runId)) return true;
+    if (executionSessionOwns(runId)) return true;
+    if (executionEngine.type) return true;
+    return Boolean(
+      typeof executionEngine.detectExitCode === 'function'
+      && executionEngine.detectExitCode(runId) !== null,
+    );
+  }
+
+  function ownerOf(runId) {
+    if (streamJsonOwns(runId)) return 'stream-json';
+    if (executionOwns(runId)) return 'cli';
+    return null;
+  }
+
+  function spawnWorker(runId, { engine, spec } = {}) {
+    if (engine === 'stream-json') {
+      return requireEngine('stream-json', 'spawnAgent').spawnAgent(runId, spec);
+    }
+    if (engine === 'cli') {
+      return requireEngine('cli', 'spawnAgent').spawnAgent(runId, spec);
+    }
+    throw new Error(`Local worker channel cannot spawn unknown worker engine: ${engine}`);
+  }
+
+  function isAlive(runId, engine) {
+    const resolved = engine || ownerOf(runId);
+    if (!resolved) return false;
+    return requireEngine(resolved, 'isAlive').isAlive(runId);
+  }
+
+  function detectExitCode(runId, engine) {
+    const resolved = engine || ownerOf(runId);
+    if (!resolved) return null;
+    return requireEngine(resolved, 'detectExitCode').detectExitCode(runId);
+  }
+
+  function getOutput(runId, lines) {
+    return requireEngine('cli', 'getOutput').getOutput(runId, lines);
+  }
+
+  function sendInput(runId, text) {
+    const sentByStream = streamJsonEngine
+      ? requireEngine('stream-json', 'sendInput').sendInput(runId, text)
+      : false;
+    return sentByStream || requireEngine('cli', 'sendInput').sendInput(runId, text);
+  }
+
+  function kill(runId, engine) {
+    if (engine === 'stream-json') {
+      return requireEngine('stream-json', 'kill').kill(runId);
+    }
+    if (engine === 'cli') {
+      return requireEngine('cli', 'kill').kill(runId);
+    }
+    const killedByStream = streamJsonEngine
+      ? requireEngine('stream-json', 'kill').kill(runId)
+      : false;
+    if (!killedByStream) {
+      return requireEngine('cli', 'kill').kill(runId);
+    }
+    return killedByStream;
+  }
+
+  return {
+    spawnWorker,
+    ownerOf,
+    isAlive,
+    detectExitCode,
+    getOutput,
+    sendInput,
+    kill,
+  };
+}
+
+function createLocalNodeExecutor({ executionEngine, streamJsonEngine } = {}) {
+  let workerChannel = (executionEngine || streamJsonEngine)
+    ? createLocalWorkerChannel({ executionEngine, streamJsonEngine })
+    : null;
+  let api;
+
+  function requireWorkerChannel(method) {
+    if (!workerChannel) {
+      throw new Error(`LocalNodeExecutor worker channel is not attached; call attachEngines(...) before ${method}`);
+    }
+    return workerChannel;
+  }
+
+  function attachEngines(engines = {}) {
+    workerChannel = createLocalWorkerChannel(engines);
+    return api;
+  }
+
   /**
    * Run a command to completion. Resolves { code, stdout, stderr } only for
    * genuine process exits (including nonzero codes). Rejects for operational
@@ -81,7 +213,7 @@ function createLocalNodeExecutor() {
     return filePath;
   }
 
-  return {
+  api = {
     exec,
     fileExists,
     realpath: (p) => fsp.realpath(p),
@@ -91,9 +223,19 @@ function createLocalNodeExecutor() {
     readdir: (p, options) => fsp.readdir(p, options),
     writeTempFile,
     rmrf: (p) => fsp.rm(p, { recursive: true, force: true }),
+    attachEngines,
+    spawnWorker: (...args) => requireWorkerChannel('spawnWorker').spawnWorker(...args),
+    ownerOf: (...args) => requireWorkerChannel('ownerOf').ownerOf(...args),
+    isAlive: (...args) => requireWorkerChannel('isAlive').isAlive(...args),
+    detectExitCode: (...args) => requireWorkerChannel('detectExitCode').detectExitCode(...args),
+    getOutput: (...args) => requireWorkerChannel('getOutput').getOutput(...args),
+    sendInput: (...args) => requireWorkerChannel('sendInput').sendInput(...args),
+    kill: (...args) => requireWorkerChannel('kill').kill(...args),
   };
+  return api;
 }
 
 module.exports = {
+  createLocalWorkerChannel,
   createLocalNodeExecutor,
 };

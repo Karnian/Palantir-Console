@@ -726,6 +726,8 @@ function createApp(options = {}) {
   // Execution engines
   const executionEngine = options.executionEngine || createExecutionEngine();
   const streamJsonEngine = createStreamJsonEngine({ runService, eventBus });
+  // Fleet P3: remote executors implement this worker channel natively.
+  nodeExecutor.attachEngines({ executionEngine, streamJsonEngine });
   const managerAdapterFactory = createManagerAdapterFactory({ streamJsonEngine, runService });
   const worktreeService = createWorktreeService({ nodeExecutor });
   const harvestService = createHarvestService({
