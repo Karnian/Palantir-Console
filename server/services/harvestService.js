@@ -323,7 +323,7 @@ function createHarvestService({
   }
 
   async function listCommits(projectDir, base, branch) {
-    const gitEnv = { ...process.env, GIT_EXTERNAL_DIFF: '', GIT_TEXTCONV_DIFF: '' };
+    const gitEnv = { GIT_EXTERNAL_DIFF: '', GIT_TEXTCONV_DIFF: '' };
     const res = await nodeExecutor.exec(
       'git',
       ['log', '--no-color', '--oneline', `--max-count=${MAX_COMMITS + 1}`, `${base}..${branch}`],

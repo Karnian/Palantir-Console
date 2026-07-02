@@ -140,6 +140,7 @@ function createLifecycleService({
 
   const localDispatchableNode = {
     id: 'local',
+    kind: 'local',
     reachable: 1,
     can_execute: 1,
     files_only: 0,
@@ -183,6 +184,12 @@ function createLifecycleService({
   function canDispatchOnNode(nodeId, profileId, profile) {
     const node = getDispatchNode(nodeId);
     if (!node || Number(node.reachable) !== 1) return false;
+    if ((node.kind || 'local') !== 'local') {
+      // Fleet P2: remote nodes are not dispatchable until P3 wires pickExecutor into worker spawn.
+      // Until then an ssh node — even one manually marked reachable — keeps its runs queued
+      // rather than silently running them on the control plane.
+      return false;
+    }
     // Capability can be downgraded AFTER a project bound to the node enqueued
     // work (nodeService.updateNode) — bind-time validation alone is not enough.
     // A node that cannot host execution must never receive dispatch.

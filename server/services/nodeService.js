@@ -1,6 +1,8 @@
 const crypto = require('node:crypto');
 const path = require('node:path');
 const { BadRequestError, NotFoundError } = require('../utils/errors');
+const { createLocalNodeExecutor } = require('./nodeExecutor');
+const { createRemoteSshNodeExecutor } = require('./remoteSshExecutor');
 
 const VALID_KINDS = new Set(['local', 'ssh']);
 const NODE_FIELDS = [
@@ -61,6 +63,27 @@ function normalizeExposedRoots(value) {
   return JSON.stringify(roots);
 }
 
+function validateSshDestinationPart(value, field) {
+  if (
+    typeof value !== 'string'
+    || value.length === 0
+    || value.startsWith('-')
+    || /[\s@]/.test(value)
+    || /[\x00-\x1F\x7F]/.test(value)
+  ) {
+    throw new BadRequestError(`${field} is not a safe ssh destination component`);
+  }
+}
+
+function normalizeSshDestinationInput(value, field) {
+  if (value === undefined || value === null) return value === undefined ? undefined : null;
+  if (typeof value !== 'string') throw new BadRequestError(`${field} must be a string`);
+  if (value !== value.trim()) throw new BadRequestError(`${field} is not a safe ssh destination component`);
+  const normalized = normalizeString(value, field);
+  if (normalized !== null) validateSshDestinationPart(normalized, field);
+  return normalized;
+}
+
 function normalizeNodeInput(fields, { existing = null } = {}) {
   const input = fields || {};
   const out = {};
@@ -76,8 +99,8 @@ function normalizeNodeInput(fields, { existing = null } = {}) {
   if ('can_control' in input) out.can_control = normalizeBoolean(input.can_control, 'can_control');
   if ('files_only' in input) out.files_only = normalizeBoolean(input.files_only, 'files_only');
   if ('reachable' in input) out.reachable = normalizeBoolean(input.reachable, 'reachable');
-  if ('ssh_host' in input) out.ssh_host = normalizeString(input.ssh_host, 'ssh_host');
-  if ('ssh_user' in input) out.ssh_user = normalizeString(input.ssh_user, 'ssh_user');
+  if ('ssh_host' in input) out.ssh_host = normalizeSshDestinationInput(input.ssh_host, 'ssh_host');
+  if ('ssh_user' in input) out.ssh_user = normalizeSshDestinationInput(input.ssh_user, 'ssh_user');
   if ('node_prefix' in input) out.node_prefix = normalizeString(input.node_prefix, 'node_prefix');
   if ('exposed_roots' in input) out.exposed_roots = normalizeExposedRoots(input.exposed_roots);
   if ('max_concurrent' in input) out.max_concurrent = normalizeMaxConcurrent(input.max_concurrent);
@@ -101,6 +124,8 @@ function normalizeNodeInput(fields, { existing = null } = {}) {
   if (effective.kind === 'ssh') {
     if (!effective.ssh_host) throw new BadRequestError('ssh_host is required for ssh nodes');
     if (!effective.ssh_user) throw new BadRequestError('ssh_user is required for ssh nodes');
+    validateSshDestinationPart(effective.ssh_host, 'ssh_host');
+    validateSshDestinationPart(effective.ssh_user, 'ssh_user');
     if (!effective.exposed_roots) throw new BadRequestError('exposed_roots is required for ssh nodes');
     normalizeExposedRoots(effective.exposed_roots);
   }
@@ -114,7 +139,8 @@ function createConflict(message) {
   return err;
 }
 
-function createNodeService(db) {
+function createNodeService(db, { localExecutor = createLocalNodeExecutor(), createRemoteExecutor = createRemoteSshNodeExecutor } = {}) {
+  const remoteExecutorCache = new Map();
   const stmts = {
     list: db.prepare('SELECT * FROM nodes ORDER BY id ASC'),
     get: db.prepare('SELECT * FROM nodes WHERE id = ?'),
@@ -192,6 +218,7 @@ function createNodeService(db) {
     if (setClauses.length > 0) {
       setClauses.push("updated_at = datetime('now')");
       db.prepare(`UPDATE nodes SET ${setClauses.join(', ')} WHERE id = @id`).run(params);
+      remoteExecutorCache.delete(id);
     }
     return getNode(id);
   }
@@ -203,6 +230,7 @@ function createNodeService(db) {
     if (boundProjects > 0) {
       throw createConflict(`Cannot delete node ${id}: ${boundProjects} project(s) are bound to it`);
     }
+    remoteExecutorCache.delete(id);
     stmts.delete.run(id);
   }
 
@@ -226,6 +254,29 @@ function createNodeService(db) {
     return getNode(id);
   }
 
+  function pickExecutor(nodeId) {
+    if (nodeId === undefined || nodeId === null || nodeId === 'local') {
+      return localExecutor;
+    }
+    const node = getNode(nodeId);
+    if (!node.kind || node.kind === 'local') {
+      return localExecutor;
+    }
+    if (node.kind !== 'ssh') {
+      throw new BadRequestError(`Unsupported node kind: ${node.kind}`);
+    }
+    if (Number(node.can_execute) !== 1 || Number(node.files_only) === 1) {
+      throw new BadRequestError(`Node ${node.id} cannot host execution`);
+    }
+    const cached = remoteExecutorCache.get(node.id);
+    if (cached && cached.updated_at === node.updated_at) {
+      return cached.executor;
+    }
+    const executor = createRemoteExecutor(node);
+    remoteExecutorCache.set(node.id, { updated_at: node.updated_at, executor });
+    return executor;
+  }
+
   return {
     listNodes,
     getNode,
@@ -233,6 +284,7 @@ function createNodeService(db) {
     updateNode,
     deleteNode,
     resolveNode,
+    pickExecutor,
     setReachable,
     touchHeartbeat,
   };

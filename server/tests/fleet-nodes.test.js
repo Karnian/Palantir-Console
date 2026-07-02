@@ -444,6 +444,35 @@ test('dispatcher refuses nodes downgraded after binding (can_execute/files_only)
   assert.equal(h.runService.getRun(queued.id).status, 'queued');
 });
 
+test('dispatcher keeps ssh node runs queued even when manually marked reachable', async (t) => {
+  const { db } = await mkdb(t);
+  const h = buildHarness(db);
+  h.nodeService.createNode({
+    id: 'ssh-pod',
+    name: 'SSH Pod',
+    kind: 'ssh',
+    ssh_host: 'pod.example',
+    ssh_user: 'runner',
+    exposed_roots: ['/srv/root'],
+  });
+  h.nodeService.updateNode('ssh-pod', { reachable: true });
+  const profile = seedProfile(db, { max: 5 });
+  const project = seedProject(h.projectService, { node_id: 'ssh-pod' });
+  const task = seedTask(h.taskService, project.id);
+  const queued = h.runService.createRun({
+    task_id: task.id,
+    agent_profile_id: profile.id,
+    prompt: 'queued on ssh',
+    node_id: 'ssh-pod',
+  });
+
+  const started = await h.lifecycleService.drainQueue(profile.id);
+  assert.equal(started, 0);
+  assert.equal(h.executionEngine.spawned.length, 0);
+  assert.equal(h.streamJsonEngine.spawned.length, 0);
+  assert.equal(h.runService.getRun(queued.id).status, 'queued');
+});
+
 test('project rebind guard also blocks live Operator runs before thread persist', async (t) => {
   const { db } = await mkdb(t);
   const h = buildHarness(db);

@@ -221,6 +221,25 @@ test('LocalNodeExecutor.exec resolves nonzero exit without rejecting', async () 
   assert.equal(result.stderr, 'bad');
 });
 
+test('LocalNodeExecutor.exec merges override-only env with process.env base', async () => {
+  const oldBase = process.env.LOCAL_NODE_EXECUTOR_BASE_ENV;
+  process.env.LOCAL_NODE_EXECUTOR_BASE_ENV = 'base-visible';
+  try {
+    const executor = createLocalNodeExecutor();
+    const result = await executor.exec(
+      process.execPath,
+      ['-e', 'process.stdout.write(`${process.env.LOCAL_NODE_EXECUTOR_BASE_ENV}:${process.env.LOCAL_NODE_EXECUTOR_OVERRIDE_ENV}`)'],
+      { env: { LOCAL_NODE_EXECUTOR_OVERRIDE_ENV: 'override-visible' } },
+    );
+
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout, 'base-visible:override-visible');
+  } finally {
+    if (oldBase === undefined) delete process.env.LOCAL_NODE_EXECUTOR_BASE_ENV;
+    else process.env.LOCAL_NODE_EXECUTOR_BASE_ENV = oldBase;
+  }
+});
+
 test('LocalNodeExecutor.exec rejects missing binary as spawn-level failure', async () => {
   const executor = createLocalNodeExecutor();
   const missing = path.join(os.tmpdir(), `palantir-missing-bin-${process.pid}-${Date.now()}`);
