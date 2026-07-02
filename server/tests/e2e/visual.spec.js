@@ -24,14 +24,25 @@ const ROUTES = [
   'board',
   'projects',
   'agents',
-  'skills',
-  'presets',
-  'mcp-servers',
+  'resources/skills',
+  'resources/presets',
+  'resources/mcp-servers',
   'memory',
-  'specialist',
-  'operator-profiles',
+  'operator/specialist',
+  'operator/profiles',
 ];
 const THEMES = ['dark', 'light'];
+
+// For consolidated sub-routes the data-view attribute is set by the leaf
+// view component (still using the original short key). Extract the correct
+// data-view key from the route string.
+function viewKey(route) {
+  const seg = route.split('/');
+  if (seg.length === 1) return route;
+  const sub = seg[seg.length - 1];
+  if (seg[0] === 'operator' && sub === 'profiles') return 'operator-profiles';
+  return sub;
+}
 const VIEWPORTS = [
   { name: 'desktop', width: 1280, height: 800 },
   { name: 'mobile', width: 375, height: 667 },
@@ -106,7 +117,7 @@ for (const route of ROUTES) {
         await page.setViewportSize({ width: vp.width, height: vp.height });
         await setTheme(page, theme);
         await page.goto(`/#${route}`);
-        await page.waitForSelector(`[data-view="${route}"]`, { timeout: 10000 });
+        await page.waitForSelector(`[data-view="${viewKey(route)}"]`, { timeout: 10000 });
         await stabilize(page);
 
         await expect(page).toHaveScreenshot(

@@ -148,17 +148,24 @@ Project list. Tasks are grouped by project. Each project exposes:
 
 Agent profile management. Default profiles: Claude Code, Codex CLI, OpenCode. Agent profiles can gate dispatch via `capabilities_json` and `max_concurrent`.
 
-### 6. Skill Packs (♢)
+### 6. Resources (❖) — `#resources`
 
-MCP server templates and skill pack management. Browse the gallery registry, install from registry or URL, import/export as JSON. Packs can be bound to projects, tasks, and runs.
+Consolidated tab group (nav-consolidation). Three sub-tabs:
 
-### 7. Presets (❖)
+- **Skill Packs** (`#resources/skills`, formerly `#skills`) — MCP server templates and skill pack management. Browse the gallery registry, install from registry or URL, import/export as JSON. Packs can be bound to projects, tasks, and runs.
+- **Presets** (`#resources/presets`, formerly `#presets`) — Worker Preset management. Bundle agent profile + plugin refs + MCP server templates + system prompt into a reusable preset. Link presets to tasks via `preferred_preset_id`. Run Inspector shows frozen snapshot vs current preset drift.
+- **MCP Servers** (`#resources/mcp-servers`, formerly `#mcp-servers`) — MCP server template CRUD UI (M3-UI, PR #119). Add / edit / delete the templates that Skill Packs and Presets reference by alias. Templates carry `command`, `args`, `env`, `allowed_env_keys`, and `updated_at` (migration 020) — RunInspector compares the snapshot's `updated_at` against the current template to surface body-level drift even though the snapshot only stores the template id.
 
-Worker Preset management. Bundle agent profile + plugin refs + MCP server templates + system prompt into a reusable preset. Link presets to tasks via `preferred_preset_id`. Run Inspector shows frozen snapshot vs current preset drift.
+> Legacy hashes `#skills`, `#presets`, `#mcp-servers` redirect to their canonical sub-routes via the app.js redirect map.
 
-### 8. MCP Servers (#mcp-servers)
+### 7. Memory (◈) — `#memory`
 
-MCP server template CRUD UI (M3-UI, PR #119). Add / edit / delete the templates that Skill Packs and Presets reference by alias. Templates carry `command`, `args`, `env`, `allowed_env_keys`, and `updated_at` (migration 020) — RunInspector compares the snapshot's `updated_at` against the current template to surface body-level drift even though the snapshot only stores the template id.
+### 8. Operator (✸) — `#operator`
+
+Consolidated tab group (nav-consolidation). Two sub-tabs:
+
+- **Operator Profiles** (`#operator/profiles`, formerly `#operator-profiles`) — Operator profile CRUD (PF-1/PF-2).
+- **Specialist** (`#operator/specialist`) — Invoke a folder-less specialist worker against an active manager run.
 
 ### Theme toggle
 
@@ -369,7 +376,7 @@ machines. Spec: `docs/specs/worker-preset-and-plugin-injection.md`.
    The directory is gitignored — operators place plugins by hand. The CI
    suite uses fixtures under `server/tests/fixtures/plugins/`.
 
-2. Open the **Presets** view (`#presets`) and create a preset. Fields:
+2. Open the **Presets** view (`#resources/presets`) and create a preset. Fields:
    - **Plugin Refs** — one or more directory names from `server/plugins/`.
    - **MCP Server Templates** — pick from existing `mcp_server_templates`
      entries (managed by the Skill Pack subsystem).

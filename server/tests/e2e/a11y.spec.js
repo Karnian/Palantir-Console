@@ -37,12 +37,12 @@ const ROUTES = [
   'board',
   'projects',
   'agents',
-  'skills',
-  'presets',
-  'mcp-servers',
+  'resources/skills',
+  'resources/presets',
+  'resources/mcp-servers',
   'memory',
-  'specialist',
-  'operator-profiles',
+  'operator/specialist',
+  'operator/profiles',
 ];
 const THEMES = ['dark', 'light'];
 const VIEWPORTS = [
@@ -54,16 +54,48 @@ const WCAG_TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'];
 const FAIL_IMPACTS = new Set(['critical', 'serious']);
 const WAIVERS_PATH = path.join(__dirname, 'a11y-waivers.json');
 
-// L1 scan context: each route exposes [data-view="<route>"] root, so axe
+// L1 scan context: each route exposes [data-view="<key>"] root, so axe
 // scope follows that selector. Sidebar/header common chrome still gets
 // scanned via the dashboard scenario (where it sits inside the same
 // document but outside [data-view]) — to keep noise low we scope to
 // [data-view] for non-dashboard routes and also include nav.nav-sidebar
 // once on dashboard.
+//
+// For consolidated sub-routes (e.g. 'resources/skills') the data-view
+// attribute is set by the *leaf view* component, which still uses the
+// original short key ('skills', 'presets', etc.). We extract the last
+// path segment to resolve the correct data-view selector.
+//
+// scanContextSelector vs viewKey separation (MEDIUM fix):
+//   viewKey  — resolves the LEAF data-view for the waitForSelector wait.
+//              Must match what the leaf component renders (e.g. 'skills').
+//   scanContextSelector — selects the AXE SCOPE root, which for sub-routes
+//              is the TabGroupView wrapper (data-view="resources" /
+//              data-view="operator"). This widens the scan to include the
+//              .sub-tabs chrome (role="group" buttons) that sits OUTSIDE the
+//              leaf [data-view] element but INSIDE the group wrapper.
+function viewKey(route) {
+  // 'operator/profiles' → 'operator-profiles' (legacy data-view kept in component)
+  // 'resources/mcp-servers' → 'mcp-servers', 'resources/skills' → 'skills', etc.
+  const seg = route.split('/');
+  if (seg.length === 1) return route;
+  const sub = seg[seg.length - 1];
+  // operator/profiles maps to the component's data-view="operator-profiles"
+  if (seg[0] === 'operator' && sub === 'profiles') return 'operator-profiles';
+  return sub;
+}
 function scanContextSelector(route) {
+  // For sub-routes, scope to the TabGroupView wrapper (data-view=<group>)
+  // so the .sub-tabs chrome is included in the axe scan alongside the
+  // active leaf panel. Wait still uses viewKey (leaf) — no conflict.
+  const seg = route.split('/');
+  if (seg.length > 1) {
+    // 'resources/*' → [data-view="resources"], 'operator/*' → [data-view="operator"]
+    return `[data-view="${seg[0]}"]`;
+  }
   // Single-selector scope per route. Sidebar gets covered transitively in
   // the dashboard scan via include-list (added below).
-  return `[data-view="${route}"]`;
+  return `[data-view="${viewKey(route)}"]`;
 }
 
 function loadWaivers() {
@@ -204,7 +236,9 @@ for (const route of ROUTES) {
         await page.goto(`/#${route}`);
         // Wait for the route root to render. K-4 baseline (L1) — we scan
         // the empty / EmptyState fallback for state-bearing routes.
-        await page.waitForSelector(`[data-view="${route}"]`, { timeout: 10000 });
+        // Sub-routes (e.g. 'resources/skills') resolve via the leaf view's
+        // data-view attribute (viewKey extracts the correct key).
+        await page.waitForSelector(`[data-view="${viewKey(route)}"]`, { timeout: 10000 });
 
         const builder = new AxeBuilder({ page })
           .withTags(WCAG_TAGS)

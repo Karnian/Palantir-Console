@@ -90,7 +90,7 @@ export function SpecialistView({ runs = [] }) {
                 `}
           </select>
           ${profiles.length === 0
-            ? html`<p class="specialist-hint">오퍼레이터 프로필이 없습니다 — <a href="#operator-profiles">오퍼레이터 프로필</a> 화면에서 먼저 만드세요.</p>`
+            ? html`<p class="specialist-hint">오퍼레이터 프로필이 없습니다 — <a href="#operator/profiles">오퍼레이터 프로필</a> 화면에서 먼저 만드세요.</p>`
             : (selectedProfile && selectedProfile.description
               ? html`<p class="specialist-hint">${selectedProfile.description}</p>`
               : null)}
