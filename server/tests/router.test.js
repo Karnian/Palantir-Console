@@ -31,7 +31,7 @@ test('Phase 6 router: rule 1 — @mention by exact project name strips prefix', 
     ]),
   });
   const r = svc.resolveTarget({ text: '@alpha 지금 상태 요약해줘' });
-  assert.equal(r.target, 'pm:proj_alpha');
+  assert.equal(r.target, 'operator:proj_alpha'); // Phase 2: producer flipped
   assert.equal(r.text, '지금 상태 요약해줘');
   assert.equal(r.matchedRule, '1_explicit');
 });
@@ -43,7 +43,7 @@ test('Phase 6 router: rule 1 — @mention by project id', () => {
     ]),
   });
   const r = svc.resolveTarget({ text: '@proj_alpha hi' });
-  assert.equal(r.target, 'pm:proj_alpha');
+  assert.equal(r.target, 'operator:proj_alpha'); // Phase 2: producer flipped
   assert.equal(r.matchedRule, '1_explicit');
 });
 
@@ -54,7 +54,7 @@ test('Phase 6 router: rule 1 — @mention is case-insensitive by name', () => {
     ]),
   });
   const r = svc.resolveTarget({ text: '@ALPHA hello' });
-  assert.equal(r.target, 'pm:proj_alpha');
+  assert.equal(r.target, 'operator:proj_alpha'); // Phase 2: producer flipped
 });
 
 test('Phase 6 router: rule 1 — @mention falls through if project disabled', () => {
@@ -116,7 +116,7 @@ test('Phase 6 router: rule 3 — fuzzy name match when no current context', () =
     ]),
   });
   const r = svc.resolveTarget({ text: 'please check alpha status' });
-  assert.equal(r.target, 'pm:proj_alpha');
+  assert.equal(r.target, 'operator:proj_alpha'); // Phase 2: producer flipped
   assert.equal(r.matchedRule, '3_namematch');
 });
 
@@ -165,7 +165,7 @@ test('Phase 6 router: @mention with empty body keeps original text', () => {
   // Rare edge: user typed just "@alpha" with nothing after. Keep the
   // original so the downstream turn sees SOME text.
   const r = svc.resolveTarget({ text: '@alpha' });
-  assert.equal(r.target, 'pm:proj_alpha');
+  assert.equal(r.target, 'operator:proj_alpha'); // Phase 2: producer flipped
   assert.equal(r.text, '@alpha');
 });
 
@@ -202,7 +202,7 @@ test('Phase 6 router HTTP: POST /api/router/resolve honors @mention', async (t) 
     text: '@alpha 상태',
   });
   assert.equal(res.status, 200);
-  assert.equal(res.body.target, `pm:${project.id}`);
+  assert.equal(res.body.target, `operator:${project.id}`); // Phase 2: producer flipped
   assert.equal(res.body.matchedRule, '1_explicit');
   assert.equal(res.body.text, '상태');
 });

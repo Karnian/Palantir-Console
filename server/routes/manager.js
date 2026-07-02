@@ -191,7 +191,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
               if (project) {
                 const port = process.env.PORT || 4177;
                 const token = process.env.PALANTIR_TOKEN;
-                const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'pm', adapterType: 'codex', specialistAvailable: isSpecialistAvailable() });
+                const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'operator', adapterType: 'codex', specialistAvailable: isSpecialistAvailable() });
                 // Bake project brief into the system prompt (mirrors pmSpawnService).
                 const briefSections = [];
                 briefSections.push(`## Project Scope\nname: ${project.name}\nid: ${project.id}${project.directory ? `\ndirectory: ${project.directory}` : ''}${r.id ? `\npm_run_id: ${r.id}` : ''}`);

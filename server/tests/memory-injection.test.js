@@ -464,7 +464,7 @@ function wirePmStack(db) {
   assert.throws(() => conv.sendMessage(`pm:${project.id}`, { text: 'fix the parser regress' }), /Failed to deliver/);
     // Ledger must be empty because the send failed before the commit half.
     const beforeCount = db.prepare(
-      "SELECT COUNT(*) AS c FROM memory_composition_events WHERE run_id = ? AND slot_kind = 'pm'"
+      "SELECT COUNT(*) AS c FROM memory_composition_events WHERE run_id = ? AND slot_kind = 'operator'"
     ).get(run.id).c;
     assert.equal(beforeCount, 0, 'no composition ledger write on failed send');
 
@@ -474,7 +474,7 @@ function wirePmStack(db) {
     const last = calls[calls.length - 1].payload.text;
     assert.match(last, /## Learned Memory/, 're-injects after the earlier failed send');
     const afterCount = db.prepare(
-      "SELECT COUNT(*) AS c FROM memory_composition_events WHERE run_id = ? AND slot_kind = 'pm' AND status = 'accepted'"
+      "SELECT COUNT(*) AS c FROM memory_composition_events WHERE run_id = ? AND slot_kind = 'operator' AND status = 'accepted'"
     ).get(run.id).c;
     assert.equal(afterCount, 1, 'composition ledger recorded after a successful send');
   });

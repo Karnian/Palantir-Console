@@ -222,7 +222,7 @@ test('composer path: PM prepends composer block and commits an accepted composit
   assert.deepEqual(composer.calls[0].owners, [{ owner_type: 'workspace', owner_id: 'proj1' }]);
 
   const row = db.prepare(
-    "SELECT * FROM memory_composition_events WHERE run_id = ? AND slot_kind = 'pm' AND status = 'accepted'"
+    "SELECT * FROM memory_composition_events WHERE run_id = ? AND slot_kind = 'operator' AND status = 'accepted'"
   ).get(pmRun.id);
   assert.ok(row);
   assert.equal(row.provenance_key, 'proj1');
@@ -294,10 +294,10 @@ test('composer path: PM null block does not commit ledger rows and null composit
 
   assert.equal(pmAdapter.calls.length, 1);
   assert.equal(pmAdapter.calls[0].payload.text, 'empty memory');
-  assert.equal(countAccepted(db, pmRun.id, 'pm'), 0);
+  assert.equal(countAccepted(db, pmRun.id, 'operator'), 0);
   const failed = eventBus.emitted.filter((e) => e.channel === 'memory:composer_failed');
   assert.equal(failed.length, 1);
-  assert.equal(failed[0].data.slotKind, 'pm');
+  assert.equal(failed[0].data.slotKind, 'operator');
 });
 
 test('composer path: parent notice order stays memory block, notices, original text', async (t) => {
@@ -498,5 +498,5 @@ test('composer path: PM and Top use distinct owner vectors', async (t) => {
   assert.deepEqual(composer.calls[0].owners, [{ owner_type: 'user', owner_id: 'user', provenance: 'user' }]);
   assert.deepEqual(composer.calls[1].owners, [{ owner_type: 'workspace', owner_id: 'proj1' }]);
   assert.equal(countAccepted(db, topRun.id, 'top'), 1);
-  assert.equal(countAccepted(db, pmRun.id, 'pm'), 1);
+  assert.equal(countAccepted(db, pmRun.id, 'operator'), 1);
 });

@@ -3,12 +3,11 @@
 // Shared conversation-id / operator-layer helpers — the single seam for the
 // PM → Operator rename (docs/specs/operator-rename-plan.md).
 //
-// Phase 0 (DUAL-READ): every consumer parses BOTH the legacy `pm:` prefix and the
-// new `operator:` prefix, and treats manager_layer `'pm'` and `'operator'` as the
-// same project-scoped-operator role. PRODUCERS still emit the legacy `pm:` / `'pm'`
-// (conversationIdForProject returns `pm:` until Phase 2), so Phase 0 is 100%
-// behavior-preserving — the system merely *understands* `operator:` before it ever
-// *writes* it. This lets the Phase 1 data migration flip persisted values safely.
+// Phase 2 (FLIP PRODUCERS): conversationIdForProject now emits `operator:` and
+// manager_layer producers now emit `'operator'`. Consumers still dual-read BOTH
+// the legacy `pm:` prefix and the new `operator:` prefix, and treat manager_layer
+// `'pm'` and `'operator'` as the same project-scoped-operator role, so Phase 2 is
+// fully backward-compatible with any persisted `pm:` data still in the DB.
 
 const LEGACY_PM_CONV_PREFIX = 'pm:';
 const OPERATOR_CONV_PREFIX = 'operator:';
@@ -19,9 +18,9 @@ const LEGACY_PM_LAYER = 'pm';
 const OPERATOR_LAYER = 'operator';
 
 // PRODUCER seam: the conversation id for a project-scoped operator (today's "PM").
-// Still emits `pm:` in Phase 0/1; flips to `operator:` in Phase 2 at THIS one point.
+// Emits `operator:` as of Phase 2. Consumers dual-read both `pm:` and `operator:`.
 function conversationIdForProject(projectId) {
-  return `${LEGACY_PM_CONV_PREFIX}${projectId}`;
+  return `${OPERATOR_CONV_PREFIX}${projectId}`;
 }
 
 // CONSUMER seam: parse a project-scoped conversation id (accepts both prefixes).
@@ -55,7 +54,7 @@ function isProjectLayer(layer) {
 
 // Normalize any conversation id to its CANONICAL form so `pm:<id>` and
 // `operator:<id>` collapse to the SAME string (the current producer form —
-// `pm:` in Phase 0/1, `operator:` after Phase 2). Non-project ids ('top',
+// `operator:` as of Phase 2). Non-project ids ('top',
 // 'worker:...', anything else) pass through unchanged. Used as the single
 // registry slot-key + comparison normalizer so a slot written in one form is
 // found by a lookup in the other during the dual-read window.

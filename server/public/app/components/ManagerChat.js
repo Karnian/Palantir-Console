@@ -23,6 +23,7 @@ import {
 } from '../lib/copy.js';
 import { MentionInput } from './MentionInput.js';
 import { RunInspector } from './RunInspector.js';
+import { operatorConversationId, parseProjectConversationId } from '../lib/conversationId.js';
 
 // PR5: profile types that can back a manager session. Must stay in sync
 // with PROFILE_TYPE_TO_ADAPTER in server/routes/manager.js.
@@ -82,7 +83,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
   const pmConversationId = conversationTarget !== 'top' ? conversationTarget : null;
   const pmConv = useConversation(pmConversationId); // null-safe in hook
   const isPm = conversationTarget !== 'top';
-  const pmProjectId = isPm ? conversationTarget.slice(3) : null;
+  const pmProjectId = isPm ? (parseProjectConversationId(conversationTarget)?.projectId ?? null) : null;
   const pmProject = isPm ? (projects || []).find(p => p.id === pmProjectId) || null : null;
 
   // Unified event source + send path + run + active flag. The PM hook
@@ -646,7 +647,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     if (pmEnabledProjects.length > 0) {
       opts.push({ separator: true, key: '_sep' });
       for (const p of pmEnabledProjects) {
-        const convId = `pm:${p.id}`;
+        const convId = operatorConversationId(p.id);
         const isActive = activePms.some(pm => pm.projectId === p.id && pm.status === 'running');
         // dot: project color if set, else a neutral grey; overlay active with green
         // K-3α: use --status-active-bright token so light theme maps to a darker

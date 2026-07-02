@@ -13,6 +13,8 @@
  * a stable system prompt → cached_input_tokens hit on every turn.
  */
 
+const { isProjectLayer } = require('../utils/conversationId');
+
 function buildRoleSection() {
   return `You are the Palantir Manager — a central orchestration agent for the Palantir Console.
 
@@ -31,8 +33,8 @@ Your role:
  * - layer='top' (default): pure dispatcher. Only 5 dispatch APIs exposed.
  *   Does NOT know about worker cancel/input/status-patch — those are worker
  *   internal intervention and belong to PM layer in v3 PM track.
- * - layer='pm': project-scoped dispatcher + worker plan modifier. Knows worker
- *   cancel/input/status-patch because PM is responsible for in-flight worker
+ * - layer='operator': project-scoped dispatcher + worker plan modifier. Knows worker
+ *   cancel/input/status-patch because the operator is responsible for in-flight worker
  *   plan changes within its project.
  *
  * Both layers: same capability(tool) diet (Bash/Read/Glob/Grep/Web* only).
@@ -76,7 +78,7 @@ function _buildCommonBaseInner({ base, token, layer, adapterType, specialistAvai
   // P4-7: auth variable kept for backward-compat with PM layer docs
   // but curl examples are replaced with WebFetch-friendly format.
 
-  const layerNote = layer === 'pm'
+  const layerNote = isProjectLayer(layer)
     ? `\n\nYou are running as a **project-scoped PM**. You own dispatch decisions within your project, and you may modify in-flight worker plans via the worker intervention APIs (cancel, input, status patch) when the user or conditions require a plan change.
 
 ## Autonomous Worker Review Loop
@@ -105,7 +107,7 @@ When a user request is related to a specific project (pm_enabled project), you M
 
 **How to delegate to a PM:**
 Send your message to the PM conversation endpoint:
-POST ${base}/api/conversations/pm:PROJECT_ID/message  body: {"text":"your instructions here"}
+POST ${base}/api/conversations/operator:PROJECT_ID/message  body: {"text":"your instructions here"}
 
 **Workflow:**
 1. Identify which project the request belongs to (check GET ${base}/api/projects)
@@ -120,7 +122,7 @@ POST ${base}/api/conversations/pm:PROJECT_ID/message  body: {"text":"your instru
 
   // Worker intervention APIs — only documented for PM layer. Top does not know
   // about these, so it cannot drift into modifying workers via prompt.
-  const workerInterventionSection = layer === 'pm'
+  const workerInterventionSection = isProjectLayer(layer)
     ? `\n\n### Dispatch Audit (PM-only, v3 Phase 4 annotate-only reconciliation)
 Every time you make a definitive claim about a task or worker state —
 "I just spawned worker X for task Y", "task Z is done", "worker W is
@@ -151,7 +153,7 @@ do not confuse them:
     : '';
 
   // Approval gate differs by layer: Top asks user, PM acts autonomously
-  const approvalNote = layer === 'pm'
+  const approvalNote = isProjectLayer(layer)
     ? `As PM, you may call /execute autonomously when reviewing worker results or following user instructions. No additional user confirmation is needed for corrective re-runs within your project scope.`
     : `IMPORTANT: NEVER call /execute without explicit user approval. Always confirm before spawning workers.
 Do NOT auto-execute tasks just because their status is in_progress — status alone does not mean "run an agent".`;
@@ -179,7 +181,7 @@ curl -s -X DELETE ${base}/api/tasks/TASK_ID${token ? ` -H "Authorization: Bearer
   // only the curl-capable Codex adapter, since Claude's WebFetch cannot POST a
   // JSON body. `originRunId` = this manager's OWN run id (PM already has its
   // pm_run_id in the project section; Top run-id exposure is a later slice).
-  const runIdHint = layer === 'pm'
+  const runIdHint = isProjectLayer(layer)
     ? 'your pm_run_id (shown in your project section)'
     : 'your top_run_id (shown in the Manager Identity section)';
   const specialistNote = (specialistAvailable && adapterType === 'codex')
@@ -243,7 +245,7 @@ ${token && adapterType !== 'codex' ? `\nIMPORTANT: All API requests require auth
 - Filter by task: GET ${base}/api/runs?task_id=TASK_ID
 - Get single run: GET ${base}/api/runs/RUN_ID
 - Get run events: GET ${base}/api/runs/RUN_ID/events
-- Get run output: GET ${base}/api/runs/RUN_ID/output${layer === 'pm' ? `
+- Get run output: GET ${base}/api/runs/RUN_ID/output${isProjectLayer(layer) ? `
 - Send input to run: POST ${base}/api/runs/RUN_ID/input  body: {"text":"..."}
 - Cancel run: POST ${base}/api/runs/RUN_ID/cancel` : ''}
 
@@ -256,7 +258,7 @@ ${token && adapterType !== 'codex' ? `\nIMPORTANT: All API requests require auth
 - Update task: PATCH ${base}/api/tasks/TASK_ID  body: {"title":"...","description":"...","priority":"high"}
 - Update task status: PATCH ${base}/api/tasks/TASK_ID/status  body: {"status":"done"}
 - Delete task: DELETE ${base}/api/tasks/TASK_ID
-- Execute task with agent: POST ${base}/api/tasks/TASK_ID/execute  body: {"agent_profile_id":"AGENT_ID","prompt":"detailed work instructions here"${layer === 'pm' ? ',"skill_pack_ids":["PACK_ID",...]' : ''}}${layer === 'pm' ? `
+- Execute task with agent: POST ${base}/api/tasks/TASK_ID/execute  body: {"agent_profile_id":"AGENT_ID","prompt":"detailed work instructions here"${isProjectLayer(layer) ? ',"skill_pack_ids":["PACK_ID",...]' : ''}}${isProjectLayer(layer) ? `
   skill_pack_ids (optional): array of skill pack IDs to equip on the worker for this run. These are per-run ephemeral — they do NOT persist as task bindings. Omit to use only project auto_apply + task persistent bindings.` : ''}
 
 ### Projects
@@ -268,9 +270,9 @@ ${token && adapterType !== 'codex' ? `\nIMPORTANT: All API requests require auth
 
 ### Conversations (for PM delegation from Top)
 - Send message to conversation: POST ${base}/api/conversations/CONVERSATION_ID/message  body: {"text":"..."}
-  CONVERSATION_ID format: "top" | "pm:PROJECT_ID" | "worker:RUN_ID"
+  CONVERSATION_ID format: "top" | "operator:PROJECT_ID" | "worker:RUN_ID"
 - Get conversation events: GET ${base}/api/conversations/CONVERSATION_ID/events
-${workerInterventionSection}${layer === 'pm' ? `
+${workerInterventionSection}${isProjectLayer(layer) ? `
 
 ### Skill Packs (PM-only, worker capability injection)
 Skill packs equip workers with specialized knowledge (prompt overlays), tools (MCP servers), and acceptance checklists. As PM, you should choose skill packs that match the task's nature.
@@ -311,8 +313,8 @@ Always query the actual Palantir API to get real data — never guess or assume.
  * Dynamic context (runSummary, projectList, agentList) is intentionally
  * omitted — pass it as the first user message via buildInitialUserContext().
  *
- * v3 Phase 0: accepts optional `layer` ('top' | 'pm', default 'top'). PM layer
- * is only used by Phase 3a PM activation; today all callers pass 'top' (or omit).
+ * v3 Phase 2: accepts optional `layer` ('top' | 'operator', default 'top'). Operator layer
+ * is used by PM/operator activation via pmSpawnService and the resume path in manager.js.
  * See docs/specs/manager-v3-multilayer.md principle 8.
  */
 function buildManagerSystemPrompt({ adapter, port, token, layer = 'top', adapterType, specialistAvailable = false }) {

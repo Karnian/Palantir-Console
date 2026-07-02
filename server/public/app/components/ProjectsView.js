@@ -19,6 +19,7 @@ import {
 import { EmptyState } from './EmptyState.js';
 import { DirectoryPicker } from './BoardView.js';
 import { Modal } from './Modal.js';
+import { conversationIdMatchesProject } from '../lib/conversationId.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal constants
@@ -58,7 +59,7 @@ function ProjectSkillPacks({ projectId }) {
       // Check if there's an active PM for this project
       try {
         const mgrRes = await apiFetch('/api/manager/status');
-        const pmSlots = (mgrRes.registry || []).filter(s => s.slot === `pm:${projectId}` && s.active);
+        const pmSlots = (mgrRes.registry || []).filter(s => conversationIdMatchesProject(s.slot, projectId) && s.active);
         setManagerActive(pmSlots.length > 0);
       } catch { setManagerActive(false); }
     } catch (err) { addToast(err.message, 'error'); }

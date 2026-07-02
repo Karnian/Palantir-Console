@@ -324,7 +324,7 @@ function createConversationService({
               ];
           const dec = compositionLedger.shouldCompose({
             runId: run.id,
-            slotKind: 'pm',
+            slotKind: 'operator',
             provenanceKey: projectId,
             currentOwnerRevisions,
           });
@@ -349,7 +349,7 @@ function createConversationService({
                 eventBus.emit('memory:composer_failed', {
                   runId: run.id,
                   conversationId,
-                  slotKind: 'pm',
+                  slotKind: 'operator',
                   provenanceKey: projectId,
                 });
               }
@@ -519,7 +519,7 @@ function createConversationService({
               runId: run.id,
               conversationId,
               taskId: null,
-              slotKind: 'pm',
+              slotKind: 'operator',
               provenanceKey: composerInjection.provenanceKey,
             },
           );
