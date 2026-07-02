@@ -2,8 +2,10 @@ const path = require('node:path');
 const { createLocalNodeExecutor } = require('./nodeExecutor');
 
 /**
- * Git worktree manager — creates isolated worktrees for agent runs.
- * Each agent executes in its own worktree to prevent file conflicts.
+ * Git worktree manager — classifies project directories and creates isolated
+ * worktrees for agent runs. createWorktree succeeds only for git repositories
+ * and throws on classification/worktree failures; callers that intentionally
+ * share a non-git directory must opt in before spawning.
  */
 
 function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}) {
@@ -26,12 +28,41 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
     return name;
   }
 
+  function classifyProjectDir(dir) {
+    try {
+      // LC_ALL=C forces English git messages. Exit 128 alone cannot separate
+      // "not a repository" from other fatals (dubious ownership, bad config),
+      // so stderr matching is required — and the host/pod locale must not
+      // break it (found live on this ko_KR host: "깃 저장소가 아닙니다" made a
+      // plain dir classify as 'unknown'). Remote executors (P2) must apply
+      // the same env override.
+      nodeExecutor.execFileSync('git', ['rev-parse', '--git-dir'], {
+        cwd: dir,
+        stdio: 'pipe',
+        env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+      });
+      return 'git';
+    } catch (err) {
+      const stderr = String(err?.stderr || err?.message || '');
+      if (err?.status === 128 && /not a git repository/i.test(stderr)) {
+        return 'non_git';
+      }
+      return 'unknown';
+    }
+  }
+
   function isGitRepo(dir) {
     try {
-      nodeExecutor.execFileSync('git', ['rev-parse', '--git-dir'], { cwd: dir, stdio: 'pipe' });
-      return true;
+      return classifyProjectDir(dir) === 'git';
     } catch {
       return false;
+    }
+  }
+
+  function assertGitProjectDir(dir) {
+    const classification = classifyProjectDir(dir);
+    if (classification !== 'git') {
+      throw new Error(`Cannot create worktree for ${classification} project directory`);
     }
   }
 
@@ -60,9 +91,7 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
    * @returns {{ path: string, branch: string, created: boolean }}
    */
   function createWorktree(projectDir, branchName) {
-    if (!isGitRepo(projectDir)) {
-      return { path: projectDir, branch: null, created: false };
-    }
+    assertGitProjectDir(projectDir);
 
     const safeBranch = validateBranchName(branchName);
     const worktreesBase = path.join(projectDir, '.palantir-worktrees');
@@ -111,8 +140,7 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
           nodeExecutor.execFileSync('git', ['branch', '-D', safeBranch], { cwd: projectDir, stdio: 'pipe' });
         } catch { /* best effort */ }
       }
-      // Fallback: use project directory directly
-      return { path: projectDir, branch: null, created: false };
+      throw error;
     }
   }
 
@@ -305,7 +333,7 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
     }
   }
 
-  return { createWorktree, removeWorktree, listWorktrees, getWorktreeDiff, isGitRepo, hasUncommittedChanges, branchHasWork, autoSaveWorktree };
+  return { createWorktree, removeWorktree, listWorktrees, getWorktreeDiff, classifyProjectDir, isGitRepo, hasUncommittedChanges, branchHasWork, autoSaveWorktree };
 }
 
 module.exports = { createWorktreeService };

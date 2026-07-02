@@ -353,8 +353,9 @@ function createLifecycleService({
     // Resolve project directory and MCP config for agent CWD
     let projectDir = null;
     let projectMcpConfig = null;
+    let project = null;
     if (task.project_id) {
-      const project = projectService.getProject(task.project_id);
+      project = projectService.getProject(task.project_id);
       if (project?.directory) {
         const fs = require('node:fs');
         if (fs.existsSync(project.directory)) {
@@ -571,6 +572,7 @@ function createLifecycleService({
         throw new Error(`Invalid run id for MCP config path: ${run.id}`);
       }
       const mcpConfigFilePath = pathW.resolve(process.cwd(), 'runtime', 'mcp', `${run.id}.json`);
+      fsW.mkdirSync(pathW.dirname(mcpConfigFilePath), { recursive: true, mode: 0o700 });
       fsW.writeFileSync(mcpConfigFilePath, JSON.stringify(mergedMcp, null, 2), { mode: 0o600 });
       skillPackMcpConfigPath = mcpConfigFilePath;
       runService.updateRunMcpConfig(run.id, {
@@ -603,39 +605,62 @@ function createLifecycleService({
       }) || null;
     })();
 
-    // Create an isolated git worktree for this run, when the project is a git repo.
-    // Each run gets its own branch (palantir/run-<id>) so concurrent agents don't
-    // collide on shared files. Falls back to projectDir if worktree creation fails
-    // or the project isn't under git.
     let worktreePath = null;
     let branch = null;
-    if (projectDir && worktreeService && worktreeService.isGitRepo(projectDir)) {
-      try {
-        const result = worktreeService.createWorktree(projectDir, runBranchName(run.id));
-        if (result?.branch) {
-          worktreePath = result.path;
-          branch = result.branch;
-        }
-      } catch (err) {
-        console.warn(`[lifecycle] Worktree creation failed for run ${run.id}: ${err.message}`);
-      }
-    }
-
-    // P-B2b: thread the operator context through the real worker spawn path and
-    // enforce the workspace surface. For every legacy run isEnforced===false, so
-    // this is a provable no-op (byte-identical). A folder-less specialist would
-    // throw WORKSPACE_UNBOUND here — but specialists don't use the CLI spawn path
-    // (B2c runs them on a dedicated backend); this is a defense-in-depth tripwire.
-    const operatorContext = deriveLegacyContext({ run, workspaceDir: worktreePath || projectDir });
-    enforceWorkspace(operatorContext, 'spawn_cwd');
-    const cwd = resolveSpawnCwd({ workspaceDir: worktreePath || projectDir });
-    console.log(`[lifecycle] Executing task ${taskId} in cwd: ${cwd} (project: ${task.project_id || 'none'})`);
-
-    // Route Claude Code workers through streamJsonEngine for rich event parsing.
-    // Other agents (codex, gemini, etc.) use the tmux/subprocess executionEngine.
-    const isClaude = (profile.command || '').includes('claude');
 
     try {
+      // Create an isolated git worktree for this run when the project is a git
+      // repo. When production has a projectDir it also has worktreeService
+      // (app.js injects it). A missing worktreeService is a test-harness-only
+      // legacy configuration, so keep the old projectDir spawn behavior there.
+      if (projectDir && worktreeService) {
+        const classification = typeof worktreeService.classifyProjectDir === 'function'
+          ? worktreeService.classifyProjectDir(projectDir)
+          : (worktreeService.isGitRepo?.(projectDir) ? 'git' : 'unknown');
+
+        if (classification === 'git') {
+          try {
+            const result = worktreeService.createWorktree(projectDir, runBranchName(run.id));
+            if (!result?.path || !result?.branch) {
+              throw new Error('worktree service returned an invalid result');
+            }
+            worktreePath = result.path;
+            branch = result.branch;
+          } catch (err) {
+            runService.addRunEvent(run.id, 'worktree:create_failed', JSON.stringify({ reason: 'worktree_add_failed' }));
+            throw new Error(`Worktree creation failed: ${err.message}`);
+          }
+        } else if (classification === 'unknown') {
+          runService.addRunEvent(run.id, 'worktree:create_failed', JSON.stringify({ reason: 'git_classify_failed' }));
+          throw new Error('Git project classification failed');
+        } else if (classification === 'non_git') {
+          if (Number(project?.allow_non_git_dir || 0) === 1) {
+            runService.addRunEvent(run.id, 'worktree:shared_dir_optin', JSON.stringify({}));
+          } else {
+            runService.addRunEvent(run.id, 'worktree:create_failed', JSON.stringify({ reason: 'non_git_not_allowed' }));
+            runService.setRetryCount(run.id, MAX_RETRY);
+            throw new Error('Non-git project directory is not allowed for worker spawn');
+          }
+        } else {
+          runService.addRunEvent(run.id, 'worktree:create_failed', JSON.stringify({ reason: 'git_classify_failed' }));
+          throw new Error(`Unknown git project classification: ${classification}`);
+        }
+      }
+
+      // P-B2b: thread the operator context through the real worker spawn path and
+      // enforce the workspace surface. For every legacy run isEnforced===false, so
+      // this is a provable no-op (byte-identical). A folder-less specialist would
+      // throw WORKSPACE_UNBOUND here — but specialists don't use the CLI spawn path
+      // (B2c runs them on a dedicated backend); this is a defense-in-depth tripwire.
+      const operatorContext = deriveLegacyContext({ run, workspaceDir: worktreePath || projectDir });
+      enforceWorkspace(operatorContext, 'spawn_cwd');
+      const cwd = resolveSpawnCwd({ workspaceDir: worktreePath || projectDir });
+      console.log(`[lifecycle] Executing task ${taskId} in cwd: ${cwd} (project: ${task.project_id || 'none'})`);
+
+      // Route Claude Code workers through streamJsonEngine for rich event parsing.
+      // Other agents (codex, gemini, etc.) use the tmux/subprocess executionEngine.
+      const isClaude = (profile.command || '').includes('claude');
+
       let result;
       if (isClaude && streamJsonEngine) {
         // Use streamJsonEngine — same as Manager but isManager=false (single-shot worker)
@@ -714,6 +739,7 @@ function createLifecycleService({
           const fs = require('node:fs');
           const path = require('node:path');
           const promptFilePath = path.resolve(process.cwd(), 'runtime', 'mcp', `${run.id}-system-prompt.md`);
+          fs.mkdirSync(path.dirname(promptFilePath), { recursive: true, mode: 0o700 });
           fs.writeFileSync(promptFilePath, composedSystemPrompt, { mode: 0o600 });
           placeholders.system_prompt_file = promptFilePath;
         }
