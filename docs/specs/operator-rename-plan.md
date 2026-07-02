@@ -56,6 +56,95 @@ Route **ALL** of these consumers through dual-read (Codex design review — the 
   still writes `pm:` → 100% behavior-preserving.** Tests: dual-read equivalence (both prefixes →
   identical parse/route/bind/snapshot/resume); existing `pm:` tests stay green untouched.
 
+### Phase 1 DETAILED DESIGN (user chose full incl. enum rebuild via runner FK-off)
+**Hazard**: `runs` has 6 inbound CASCADE FKs (run_events, approvals, external_sessions,
+run_skill_packs, run_acceptance_checks, run_preset_snapshots) + self-ref parent_run_id (SET NULL);
+`memory_composition_events` has 2 (item_edges, owner_state). The migration runner runs each file
+in `db.transaction()` with `foreign_keys=ON`, and `PRAGMA foreign_keys` is a no-op inside a
+transaction → a naive `DROP TABLE runs` would CASCADE-DELETE all children = mass data loss.
+
+**P1a — runner FK-off support (`server/db/database.js` migrate())**: a migration whose SQL starts
+with the marker `-- migrate:no-foreign-keys` runs OUTSIDE `db.transaction()` via the SQLite-
+recommended safe-alter sequence: `pragma('foreign_keys=OFF')` → `exec('BEGIN')` → `exec(sql)` →
+`pragma('foreign_key_check')` (throw + ROLLBACK if any violation — fail-closed) → insert
+schema_version → `exec('COMMIT')` → `finally pragma('foreign_keys=ON')`. Normal (non-marker)
+migrations keep the exact existing transaction path (byte-identical). Only opt-in migrations use
+FK-off. Test: a marker migration that rebuilds a table with a CASCADE child preserves the child.
+
+**P1b — migration 045 (`-- migrate:no-foreign-keys`)**, in order:
+1. Rebuild `runs`: CREATE runs_new with the CURRENT FULL schema (all cols incl mcp_config_path/
+   mcp_config_snapshot/preset_id/preset_snapshot_hash/queued_args/retry_count) but
+   `manager_layer CHECK (... IN ('top','pm','operator'))`; `INSERT INTO runs_new SELECT * FROM runs`
+   (preserve every row + id[TEXT PK, inbound FKs key on id]); DROP runs; RENAME; recreate the 7
+   indexes (idx_runs_task/status/parent/manager/manager_adapter/manager_layer/conversation_id).
+   No triggers on runs. FK-off ⇒ DROP does NOT cascade; foreign_key_check after verifies every
+   child ref + parent_run_id still resolves.
+2. Rebuild `memory_composition_events`: same pattern, `slot_kind CHECK IN ('top','pm','operator')`,
+   recreate its indexes.
+3. Data migration (now the CHECKs allow 'operator'):
+   - `UPDATE runs SET conversation_id='operator:'||substr(conversation_id,4) WHERE conversation_id LIKE 'pm:%'`
+   - `UPDATE runs SET manager_layer='operator' WHERE manager_layer='pm'`
+   - `UPDATE memory_composition_events SET conversation_id='operator:'||substr(conversation_id,4) WHERE conversation_id LIKE 'pm:%'`
+   - `UPDATE memory_composition_events SET slot_kind='operator' WHERE slot_kind='pm'`
+   (dual-read from Phase 0 already reads both, so mid-migration + post-migration-with-pm:-producers
+   are both safe; producers flip in Phase 2.)
+Seeded preservation test: seed runs + ALL 6 cascade children (+ a parent_run_id chain) + a
+composition_event with edges/owner_state, run 045, assert NOTHING lost + values migrated + CHECK
+now accepts 'operator' + rejects garbage.
+
+### Phase 1 — Codex design review outcome (REVISE → validated recipe, 2026-07-02)
+Codex (live-probed better-sqlite3 12.10) returned REVISE with **3 blockers + corrections**. Apply
+ALL before/while implementing:
+- **B1 (SERIOUS, Phase-0 gap): `compositionLedger.js` slot_kind is NOT dual-read.** Queries
+  `slot_kind = ?` at `:112` (stmtGetLastAcceptedId), `:127` (stmtGetLastAcceptedSelectedSetHash),
+  `:137/:142` (stmtCleanupOldAccepted DELETE + nested). After 045 rewrites old rows to
+  `slot_kind='operator'` while the producer still passes `'pm'` (until Phase 2), `shouldCompose`
+  misses prior accepted rows → **re-composition/re-injection every send** + cleanup won't prune
+  across forms. FIX (do WITH 045, it's a prerequisite): make these 3 queries match BOTH forms for a
+  project slot_kind — e.g. `slot_kind IN (?, ?)` passing `['pm','operator']` (and `['top','top']`
+  for top), via a `slotKindMatchForms(slotKind)` helper; update the 3 stmts + their call sites.
+  INSERTs (producers) stay `'pm'` until Phase 2. Test #8 below.
+- **B2 (BLOCKER): `db.pragma('foreign_keys', false)` THROWS in better-sqlite3 12.10.** Use the
+  string form `db.pragma('foreign_keys = OFF')` / `'foreign_keys = ON'` (or `db.exec('PRAGMA …')`).
+- **B3 (BLOCKER): explicit column lists** in both rebuilt tables' `INSERT INTO x_new (...) SELECT
+  (...)` — never `SELECT *` (silent column-shift corruption under SQLite dynamic typing).
+- **Runner FK-off pattern (exact, endorsed)**:
+  ```
+  if (db.inTransaction) throw new Error('unexpected open txn before FK-off migration');
+  db.pragma('foreign_keys = OFF');
+  try {
+    db.exec('BEGIN');
+    db.exec(sql);
+    const v = db.pragma('foreign_key_check');            // inside txn = checks uncommitted state (correct)
+    if (v.length) throw new Error('FK violation: ' + JSON.stringify(v[0]));
+    if (!existsVersion) db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(version);
+    db.exec('COMMIT');
+  } catch (err) {
+    if (db.inTransaction) { try { db.exec('ROLLBACK'); } catch (e) { err.rollbackError = e; } }  // raw BEGIN doesn't auto-rollback on JS throw
+    throw err;
+  } finally {
+    if (!db.inTransaction) db.pragma('foreign_keys = ON');  // ON is a no-op inside a txn
+  }
+  ```
+- **Marker detection EXACT**: opt in only when the migration's first line is exactly
+  `-- migrate:no-foreign-keys` (not `startsWith` — `-…-extended` must NOT opt in). Non-marker
+  migrations keep the byte-identical existing `db.transaction()` path.
+- **Data migration exact prefix**: use `WHERE substr(conversation_id,1,3) = 'pm:'` (NOT
+  `LIKE 'pm:%'` — LIKE is case-insensitive → would wrongly rewrite `PM:x`). `substr(x,4)` off-by-one
+  confirmed correct. `manager_layer = 'pm'` / `slot_kind = 'pm'` exact already.
+- **Confirmed safe**: 7 runs indexes complete; no triggers on runs/composition; UPDATEs idempotent;
+  no other persisted `pm:`/`'pm'` (dispatch_audit_log has no conversation_id; pm_memory_injection
+  dropped by mig 040); `memory_composition_events.run_id` is NOT an FK to runs (foreign_key_check
+  won't validate it — fine).
+- **8 seeded tests that MUST pass** (see the review): (1) runs + all 6 CASCADE children +
+  parent_run_id chain preserved, FK-check empty, FK ON, schema_version=45; (2) composition + edges +
+  owner_state preserved + slot_kind migrated; (3) schema fidelity (exact cols/defaults/FKs/indexes,
+  no triggers lost); (4) CHECK accepts 'operator'+'pm', rejects garbage; (5) `pm:alpha`→`operator:alpha`,
+  `PM:alpha`(uppercase) NOT rewritten, top/worker/NULL unchanged; (6) failing FK-off migration →
+  old schema/data intact, no schema_version, inTransaction=false, FK=1; (7) FK-check failure aborts
+  pre-commit + rolls back; (8) compositionLedger dual-read (accepted `operator` row found by a `pm`
+  query; cleanup prunes both forms).
+
 ### Phase 1 — enum CHECK relaxation + data migration (persisted flip)
 - Migration: relax CHECKs to include `'operator'` (table rebuilds for runs [mig 009+012 shape],
   memory_composition_events); THEN rewrite persisted values `runs.conversation_id` pm:→operator:,

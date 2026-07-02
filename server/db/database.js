@@ -39,21 +39,48 @@ function createDatabase(dbPath) {
       if (isNaN(version) || version <= currentVersion) continue;
 
       const sql = readFileSync(join(migrationsDir, file), 'utf-8');
-      db.transaction(() => {
-        if (version === 34) {
-          // Slice 2a needs procedural evidence union before owner-unique
-          // indexes are created; keep merge + DDL atomic in this migration tx.
-          require('../services/ownerMergeSlice2a').runSlice2aMerge(db);
+      // Check if this migration opts into FK-off mode (exact first-line match only)
+      const firstLine = sql.split('\n')[0].trim();
+      const fkOff = firstLine === '-- migrate:no-foreign-keys';
+
+      if (fkOff) {
+        // FK-off safe-alter sequence (better-sqlite3 12.10 - pragma string form required)
+        if (db.inTransaction) throw new Error('unexpected open txn before FK-off migration');
+        db.pragma('foreign_keys = OFF');
+        try {
+          db.exec('BEGIN');
+          db.exec(sql);
+          const v = db.pragma('foreign_key_check');
+          if (v.length) throw new Error('FK violation: ' + JSON.stringify(v[0]));
+          if (!db.prepare('SELECT 1 FROM schema_version WHERE version = ?').get(version)) {
+            db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(version);
+          }
+          db.exec('COMMIT');
+        } catch (err) {
+          if (db.inTransaction) {
+            try { db.exec('ROLLBACK'); } catch (e) { err.rollbackError = e; }
+          }
+          throw err;
+        } finally {
+          if (!db.inTransaction) db.pragma('foreign_keys = ON');
         }
-        db.exec(sql);
-        // If migration already inserts into schema_version, skip duplicate
-        const exists = db.prepare(
-          'SELECT 1 FROM schema_version WHERE version = ?'
-        ).get(version);
-        if (!exists) {
-          db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(version);
-        }
-      })();
+      } else {
+        db.transaction(() => {
+          if (version === 34) {
+            // Slice 2a needs procedural evidence union before owner-unique
+            // indexes are created; keep merge + DDL atomic in this migration tx.
+            require('../services/ownerMergeSlice2a').runSlice2aMerge(db);
+          }
+          db.exec(sql);
+          // If migration already inserts into schema_version, skip duplicate
+          const exists = db.prepare(
+            'SELECT 1 FROM schema_version WHERE version = ?'
+          ).get(version);
+          if (!exists) {
+            db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(version);
+          }
+        })();
+      }
     }
   }
 
