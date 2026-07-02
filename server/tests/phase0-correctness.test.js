@@ -282,7 +282,7 @@ test('0b: compose() returning {block:null,composition:null} emits memory:compose
 
   const failed = eventBus.emitted.filter(e => e.channel === 'memory:composer_failed');
   assert.equal(failed.length, 1, 'should emit exactly one memory:composer_failed');
-  assert.equal(failed[0].data.slotKind, 'pm');
+  assert.equal(failed[0].data.slotKind, 'operator'); // Phase 2: producer flipped to operator
   assert.equal(failed[0].data.provenanceKey, 'proj1');
   assert.equal(failed[0].data.runId, pmRun.id);
 });

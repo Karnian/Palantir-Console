@@ -24,6 +24,7 @@ const {
 const { createLifecycleService } = require('../services/lifecycleService');
 const { createEventBus } = require('../services/eventBus');
 const { createPmAutoReview } = require('../app');
+const { conversationIdForProject } = require('../utils/conversationId');
 
 const fakeRunner = path.join(__dirname, 'fixtures', 'bin', 'fake-test-runner.js');
 const injectedTestRunner = { bin: process.execPath, args: [fakeRunner] };
@@ -215,9 +216,10 @@ function makeAutoReviewHarness({
       return runEvents.length;
     },
   };
+  const pmSlot = conversationIdForProject('proj_1'); // Phase 2: operator:proj_1
   const managerRegistry = {
     getActiveRunId(slot) {
-      return slot === 'pm:proj_1' ? currentActiveRunId : null;
+      return slot === pmSlot ? currentActiveRunId : null;
     },
     onSlotCleared(cb) {
       slotClearedCallbacks.push(cb);
@@ -1041,7 +1043,7 @@ test('PM auto-review sends one message from run:harvested with harvest summary',
   });
 
   assert.equal(harness.sent.length, 1);
-  assert.equal(harness.sent[0].slot, 'pm:proj_1');
+  assert.equal(harness.sent[0].slot, conversationIdForProject('proj_1')); // Phase 2: operator:proj_1
   const text = harness.sent[0].message.text;
   assert.match(text, /Worker run run_worker_1 finished/);
   assert.match(text, /\[harvest\] files: 2, commits: 1/);

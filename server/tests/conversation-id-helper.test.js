@@ -1,7 +1,7 @@
 'use strict';
 
-// PM→Operator rename Phase 0 — shared conversation-id helpers + dual-read.
-// Producers still emit `pm:`; consumers accept BOTH `pm:` and `operator:`.
+// PM→Operator rename Phase 2 — shared conversation-id helpers + dual-read.
+// Producers now emit `operator:`; consumers still accept BOTH `pm:` and `operator:`.
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -16,8 +16,8 @@ const {
   OPERATOR_CONV_PREFIX,
 } = require('../utils/conversationId');
 
-test('conversationIdForProject: Phase 0 still emits legacy pm: (producer seam)', () => {
-  assert.equal(conversationIdForProject('alpha'), 'pm:alpha');
+test('conversationIdForProject: Phase 2 emits operator: (producer seam flipped)', () => {
+  assert.equal(conversationIdForProject('alpha'), 'operator:alpha');
 });
 
 test('parseProjectConversationId: dual-read pm: AND operator:', () => {
@@ -74,9 +74,9 @@ test('routerService.isValidConversationId accepts operator: (dual-read chokepoin
   assert.equal(svc.isValidConversationId('worker:r1'), true);
 });
 
-test('canonicalConversationId: collapses pm:/operator: to the current producer form (Phase 0 = pm:)', () => {
-  assert.equal(canonicalConversationId('pm:alpha'), 'pm:alpha');
-  assert.equal(canonicalConversationId('operator:alpha'), 'pm:alpha'); // canonical = producer form
+test('canonicalConversationId: collapses pm:/operator: to the current producer form (Phase 2 = operator:)', () => {
+  assert.equal(canonicalConversationId('pm:alpha'), 'operator:alpha'); // canonical = producer form
+  assert.equal(canonicalConversationId('operator:alpha'), 'operator:alpha');
   assert.equal(canonicalConversationId('top'), 'top');
   assert.equal(canonicalConversationId('worker:r1'), 'worker:r1');
   assert.equal(canonicalConversationId('pm:'), 'pm:'); // non-project (empty) passes through
@@ -91,11 +91,11 @@ test('managerRegistry: slots are canonical — pm: and operator: address the SAM
   assert.equal(reg.getActiveRunId('pm:alpha'), 'run1');
   assert.equal(reg.getActiveRunId('operator:alpha'), 'run1');
   assert.ok(reg.getActiveAdapter('pm:alpha'));
-  // snapshot exposes the canonical (Phase 0 = pm:) form — what /api/manager/status
-  // and therefore the UI sees, unchanged through Phase 1 (UI flip is Phase 2).
+  // snapshot exposes the canonical (Phase 2 = operator:) form — what /api/manager/status
+  // and therefore the UI sees after the Phase 2 flip.
   const snap = reg.snapshot();
   assert.equal(snap.pms.length, 1);
-  assert.equal(snap.pms[0].conversationId, 'pm:alpha');
+  assert.equal(snap.pms[0].conversationId, 'operator:alpha');
   reg.clearActive('pm:alpha'); // clear via the OTHER form also hits the slot
   assert.equal(reg.getActiveRunId('operator:alpha'), null);
 });

@@ -13,6 +13,7 @@ import { TaskDetailPanel } from './TaskModals.js';
 import { AttentionStrip } from './AttentionStrip.js';
 import { TASK_STATUS_LABELS, RUN_STATUS_LABELS, MANAGER_LABELS,
   MANAGER_STATUS_LABELS, COMMON_ACTIONS, statusLabel } from '../lib/copy.js';
+import { operatorConversationId, conversationIdMatchesProject } from '../lib/conversationId.js';
 
 const runStatusIcon = (status) => {
   switch (status) {
@@ -188,7 +189,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
               <span class="worker-project-count">작업 ${group.tasks.length}개${activeCount > 0 ? `\u00B7 ${activeCount}개 활성` : ''}</span>
             </div>
             ${!projCollapsed && (() => {
-              const pm = activePms.find(p => p.conversationId === `pm:${group.key}`);
+              const pm = activePms.find(p => conversationIdMatchesProject(p.conversationId, group.key));
               const pmStatus = pm?.run?.status;
               // Phase K-1a (rev3): PM row label and ManagerChat header
               // share a single source via `statusLabel(RUN_STATUS_LABELS, ...)`.
@@ -204,9 +205,9 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
                 : pmStatus === 'completed' ? 'var(--status-done)'
                 : pmStatus === 'failed' ? 'var(--status-failed)'
                 : 'var(--status-queued)';
-              const pmSelected = conversationTarget === `pm:${group.key}`;
+              const pmSelected = conversationIdMatchesProject(conversationTarget, group.key);
               return pm ? html`
-                <div class="pm-session-row ${pmSelected ? 'selected' : ''}" ...${clickableProps(() => onSelectPm && onSelectPm(`pm:${group.key}`))}>
+                <div class="pm-session-row ${pmSelected ? 'selected' : ''}" ...${clickableProps(() => onSelectPm && onSelectPm(operatorConversationId(group.key)))}>
                   <span class="pm-session-dot" style="background:${pmColor}"></span>
                   <span class="pm-session-label">PM 세션</span>
                   <span class="pm-session-status" style="color:${pmColor}">${pmLabel}${pmStatus === 'running' ? html` <span class="pm-spinner"></span>` : ''}</span>

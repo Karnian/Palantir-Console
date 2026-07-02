@@ -234,7 +234,7 @@ function createPmSpawnService({
     // parent_run_id = active Top.
     const run = runService.createRun({
       is_manager: true,
-      manager_layer: 'pm',
+      manager_layer: 'operator',
       conversation_id: slotKey,
       parent_run_id: activeTopRunId,
       manager_adapter: adapterType,
@@ -251,7 +251,7 @@ function createPmSpawnService({
     // finding #1). The whole blob is still cached across turns.
     const port = process.env.PORT || 4177;
     const token = process.env.PALANTIR_TOKEN;
-    const baseSystemPrompt = buildManagerSystemPrompt({ adapter, port, token, layer: 'pm', adapterType, specialistAvailable: isSpecialistAvailable() });
+    const baseSystemPrompt = buildManagerSystemPrompt({ adapter, port, token, layer: 'operator', adapterType, specialistAvailable: isSpecialistAvailable() });
     const projectSection = buildProjectScopedSystemSection({ project, brief, pmRunId: runId });
     const systemPrompt = [baseSystemPrompt, projectSection].filter(Boolean).join('\n\n');
 

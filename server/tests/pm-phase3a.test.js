@@ -132,8 +132,8 @@ test('Phase 3a: lazy spawn creates a PM run when none exists', async (t) => {
   const result1 = spawn.ensureLivePm({ projectId: project.id });
   assert.equal(result1.spawned, true);
   assert.equal(result1.resumed, false);
-  assert.equal(result1.run.manager_layer, 'pm');
-  assert.equal(result1.run.conversation_id, `pm:${project.id}`);
+  assert.equal(result1.run.manager_layer, 'operator'); // Phase 2: flipped from 'pm'
+  assert.equal(result1.run.conversation_id, `operator:${project.id}`); // Phase 2: flipped from 'pm:'
   assert.equal(result1.run.is_manager, 1);
   assert.ok(result1.run.parent_run_id, 'parent_run_id should be set to active Top');
 
