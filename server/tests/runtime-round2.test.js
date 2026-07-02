@@ -51,8 +51,8 @@ async function mkApp(t) {
 
 // ---- ADD-1: deriveOperatorProjectId ----
 
-test('ADD-1 deriveOperatorProjectId: pm:<id> run derives project_id from conversation_id', () => {
-  const run = { manager_layer: 'pm', conversation_id: 'pm:proj-123', project_id: null };
+test('ADD-1 deriveOperatorProjectId: operator:<id> run derives project_id from conversation_id', () => {
+  const run = { manager_layer: 'operator', conversation_id: 'operator:proj-123', project_id: null };
   assert.equal(deriveOperatorProjectId(run), 'proj-123');
 });
 
@@ -66,10 +66,10 @@ test('ADD-1 deriveOperatorProjectId: worker with JOIN-derived project_id wins', 
   assert.equal(deriveOperatorProjectId(run), 'proj-abc');
 });
 
-test('ADD-1 deriveOperatorProjectId: pm layer but malformed conversation_id → null', () => {
-  assert.equal(deriveOperatorProjectId({ manager_layer: 'pm', conversation_id: 'bogus' }), null);
-  assert.equal(deriveOperatorProjectId({ manager_layer: 'pm', conversation_id: 'pm:' }), null);
-  assert.equal(deriveOperatorProjectId({ manager_layer: 'pm', conversation_id: null }), null);
+test('ADD-1 deriveOperatorProjectId: operator layer but malformed conversation_id → null', () => {
+  assert.equal(deriveOperatorProjectId({ manager_layer: 'operator', conversation_id: 'bogus' }), null);
+  assert.equal(deriveOperatorProjectId({ manager_layer: 'operator', conversation_id: 'operator:' }), null);
+  assert.equal(deriveOperatorProjectId({ manager_layer: 'operator', conversation_id: null }), null);
 });
 
 test('ADD-1 deriveOperatorProjectId: null / undefined run → null', () => {
@@ -85,12 +85,12 @@ test('ADD-1 runService.createRun emits run:status with derived pm project_id', a
   const rs = createRunService(db, bus);
   rs.createRun({
     is_manager: true,
-    manager_layer: 'pm',
-    conversation_id: 'pm:proj-xyz',
+    manager_layer: 'operator',
+    conversation_id: 'operator:proj-xyz',
     prompt: 'hi',
   });
   assert.equal(captured.length, 1);
-  assert.equal(captured[0].project_id, 'proj-xyz', 'pm run envelope must carry derived project_id');
+  assert.equal(captured[0].project_id, 'proj-xyz', 'operator run envelope must carry derived project_id');
 });
 
 // ---- NEW-B3: operatorCleanupService fail-closed brief clear ----

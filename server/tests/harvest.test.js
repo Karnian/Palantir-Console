@@ -1213,7 +1213,7 @@ test('PM auto-review circuit breaker caps review sends at five and resets on PM 
   assert.equal(harness.sent.length, 5);
   assert.equal(harness.warnings.length, 1);
 
-  harness.slotClearedCallbacks[0]({ conversationId: 'pm:proj_1' });
+  harness.slotClearedCallbacks[0]({ conversationId: 'operator:proj_1' });
   harness.eventBus.emit('run:harvested', {
     run: reviewRun({ id: 'run_worker_after_reset' }),
     summary: harvestedSummary(),

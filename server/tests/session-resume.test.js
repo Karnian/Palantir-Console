@@ -192,8 +192,8 @@ test('boot resume: Codex PM with pm_thread_id can be identified for resume', asy
     is_manager: true,
     prompt: 'PM TestProject',
     manager_adapter: 'codex',
-    manager_layer: 'pm',
-    conversation_id: `pm:${project.id}`,
+    manager_layer: 'operator',
+    conversation_id: `operator:${project.id}`,
   });
   rs.updateRunStatus(run.id, 'running', { force: true });
 
@@ -202,9 +202,9 @@ test('boot resume: Codex PM with pm_thread_id can be identified for resume', asy
   assert.equal(brief.pm_thread_id, 'thread_xyz');
 
   // Verify stale PM can be identified.
-  const stale = rs.listRuns({ status: 'running' }).filter(r => r.is_manager && r.manager_layer === 'pm');
+  const stale = rs.listRuns({ status: 'running' }).filter(r => r.is_manager && r.manager_layer === 'operator');
   assert.equal(stale.length, 1);
-  assert.equal(stale[0].conversation_id, `pm:${project.id}`);
+  assert.equal(stale[0].conversation_id, `operator:${project.id}`);
 });
 
 // --- Integration: full createManagerRouter boot resume with mock adapters ---

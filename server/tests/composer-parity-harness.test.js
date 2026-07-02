@@ -110,7 +110,7 @@ function simulatePmTurn(runId, projectId, { memSvc, ledger, composer }) {
   const currentRevision = memSvc.getRevision(projectId);
   const dec = ledger.shouldCompose({
     runId,
-    slotKind: 'pm',
+    slotKind: 'operator',
     provenanceKey: projectId,
     currentOwnerRevisions: [{ owner_type: 'workspace', owner_id: projectId, revision: currentRevision }],
   });
@@ -123,9 +123,9 @@ function simulatePmTurn(runId, projectId, { memSvc, ledger, composer }) {
     if (composed.block && composed.composition) {
       ledger.commitAccepted(composed.composition, {
         runId,
-        conversationId: `pm:${projectId}`,
+        conversationId: `operator:${projectId}`,
         taskId: null,
-        slotKind: 'pm',
+        slotKind: 'operator',
         provenanceKey: projectId,
       });
     }
@@ -187,9 +187,9 @@ function seedPmLedgerAtCurrentRevision(runId, projectId, { memSvc, ledger, compo
   assert.ok(composed.block, 'seed requires a non-null block');
   ledger.commitAccepted(composed.composition, {
     runId,
-    conversationId: `pm:${projectId}`,
+    conversationId: `operator:${projectId}`,
     taskId: null,
-    slotKind: 'pm',
+    slotKind: 'operator',
     provenanceKey: projectId,
   });
   return revision;

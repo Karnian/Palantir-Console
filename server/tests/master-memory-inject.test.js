@@ -124,7 +124,7 @@ test('INTEGRATION: PM slot is NOT master-injected (Master memory is Top-only)', 
   seedTop({ rs, registry, adapter: topAdapter });
   masterMemoryService.createMemoryItem({ scope: 'user', kind: 'constraint', content: 'pm must not see user-scope master memory', origin: 'human' });
 
-  conv.sendMessage(`pm:${project.id}`, { text: 'work on the bug' });
+  conv.sendMessage(`operator:${project.id}`, { text: 'work on the bug' });
   const payload = fakePm._runTurnCalls[0].payload.text;
   assert.doesNotMatch(payload, /## User Memory/, 'PM slot never gets the Master (user) block');
   assert.match(payload, /work on the bug/);

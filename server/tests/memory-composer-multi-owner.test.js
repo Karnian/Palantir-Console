@@ -106,8 +106,8 @@ function makePmHarness({
   const run = {
     id: 'run-pm-1',
     is_manager: true,
-    manager_layer: 'pm',
-    conversation_id: 'pm:proj1',
+    manager_layer: 'operator',
+    conversation_id: 'operator:proj1',
     manager_adapter: 'mock',
     status: 'running',
     parent_run_id: null,
@@ -309,7 +309,7 @@ describe('conversation service PM multi-owner wiring', () => {
   test('Flag OFF passes only workspace owner to compose', () => {
     const harness = makePmHarness({ memoryMultiOwner: false, workspaceRevision: 4, userRevision: 9 });
 
-    harness.svc.sendMessage('pm:proj1', { text: 'ship it' });
+    harness.svc.sendMessage('operator:proj1', { text: 'ship it' });
 
     assert.equal(harness.ledgerCalls.length, 1);
     assert.deepEqual(harness.ledgerCalls[0].currentOwnerRevisions, [
@@ -335,7 +335,7 @@ describe('conversation service PM multi-owner wiring', () => {
       },
     });
 
-    harness.svc.sendMessage('pm:proj1', { text: 'ship it' });
+    harness.svc.sendMessage('operator:proj1', { text: 'ship it' });
 
     assert.equal(harness.ledgerCalls.length, 1);
     assert.deepEqual(harness.ledgerCalls[0].currentOwnerRevisions, [

@@ -90,9 +90,9 @@ test('Phase 6 router: rule 2 — current conversation id wins over no-mention bo
   });
   const r = svc.resolveTarget({
     text: 'alpha 라는 단어가 들어있지만 mention 아님',
-    currentConversationId: 'pm:proj_alpha',
+    currentConversationId: 'operator:proj_alpha',
   });
-  assert.equal(r.target, 'pm:proj_alpha');
+  assert.equal(r.target, 'operator:proj_alpha');
   assert.equal(r.matchedRule, '2_current');
   // Text unchanged
   assert.match(r.text, /단어가 들어있지만/);
@@ -212,9 +212,9 @@ test('Phase 6 router HTTP: POST /api/router/resolve honors current context', asy
   const { project } = (await request(app).post('/api/projects').send({ name: 'beta' })).body;
   const res = await request(app).post('/api/router/resolve').send({
     text: 'hi',
-    currentConversationId: `pm:${project.id}`,
+    currentConversationId: `operator:${project.id}`,
   });
   assert.equal(res.status, 200);
-  assert.equal(res.body.target, `pm:${project.id}`);
+  assert.equal(res.body.target, `operator:${project.id}`);
   assert.equal(res.body.matchedRule, '2_current');
 });

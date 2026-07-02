@@ -84,7 +84,7 @@ function seedTop({ rs, registry, adapter }) {
 test('PM layer prompt includes Skill Packs section with API docs', () => {
   const fakeAdapter = { buildGuardrailsSection() { return ''; } };
   const prompt = buildManagerSystemPrompt({
-    adapter: fakeAdapter, port: 4177, token: null, layer: 'pm', adapterType: 'codex',
+    adapter: fakeAdapter, port: 4177, token: null, layer: 'operator', adapterType: 'codex',
   });
   assert.match(prompt, /Skill Packs.*PM-only/);
   assert.match(prompt, /skill_pack_ids/);
@@ -104,7 +104,7 @@ test('Top layer prompt does NOT include Skill Packs section', () => {
 test('PM layer /execute doc includes skill_pack_ids parameter', () => {
   const fakeAdapter = { buildGuardrailsSection() { return ''; } };
   const prompt = buildManagerSystemPrompt({
-    adapter: fakeAdapter, port: 4177, token: null, layer: 'pm', adapterType: 'codex',
+    adapter: fakeAdapter, port: 4177, token: null, layer: 'operator', adapterType: 'codex',
   });
   // The execute line should mention skill_pack_ids for PM
   assert.match(prompt, /execute.*skill_pack_ids/s);
@@ -347,7 +347,7 @@ test('Phase 2 integration: PM prompt skill pack docs accessible via full app', a
 
   const pmPrompt = build({
     adapter: { buildGuardrailsSection: () => '' },
-    port: 4177, token: 'test-tok', layer: 'pm', adapterType: 'codex',
+    port: 4177, token: 'test-tok', layer: 'operator', adapterType: 'codex',
   });
   assert.match(pmPrompt, /Skill Packs/);
   assert.match(pmPrompt, /lazy lookup/i);

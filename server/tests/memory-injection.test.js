@@ -226,8 +226,8 @@ function realBootResumeSystemPrompt(t, db, { projectName, conventions, knownPitf
 
   // Create the stale PM run that boot-resume will pick up.
   const pmRun = rs.createRun({
-    is_manager: true, manager_layer: 'pm', manager_adapter: 'codex',
-    conversation_id: `pm:${project.id}`, prompt: `PM ${projectName}`,
+    is_manager: true, manager_layer: 'operator', manager_adapter: 'codex',
+    conversation_id: `operator:${project.id}`, prompt: `PM ${projectName}`,
   });
   rs.updateRunStatus(pmRun.id, 'running', { force: true });
 
@@ -327,7 +327,7 @@ test('REGRESSION: REAL fresh-spawn and boot-resume produce the SAME PM prompt fo
 
 test('Part D: fixed Learned Memory pointer line present in PM base, ABSENT from top base, content-free', (t) => {
   const adapter = makeFakeCodexAdapter();
-  const pmBase = buildManagerSystemPrompt({ adapter, port: 4177, token: null, layer: 'pm', adapterType: 'codex' });
+  const pmBase = buildManagerSystemPrompt({ adapter, port: 4177, token: null, layer: 'operator', adapterType: 'codex' });
   const topBase = buildManagerSystemPrompt({ adapter, port: 4177, token: null, layer: 'top', adapterType: 'codex' });
 
   // The fixed informational line landed in pm.
@@ -391,7 +391,7 @@ function wirePmStack(db) {
   memoryService.createMemoryItem({ projectId: project.id, kind: 'convention', content: 'use tabs in go', origin: 'human', importance: 5 });
 
   // First send -> lazy spawn + inject.
-  conv.sendMessage(`pm:${project.id}`, { text: 'please work on the codex resume bug' });
+  conv.sendMessage(`operator:${project.id}`, { text: 'please work on the codex resume bug' });
   assert.equal(fakePm._runTurnCalls.length, 1, 'one runTurn so far');
   const first = fakePm._runTurnCalls[0].payload.text;
   assert.match(first, /## Learned Memory/, 'first send injects the Learned Memory block');
@@ -404,7 +404,7 @@ function wirePmStack(db) {
   );
 
   // Second send (same session, same revision) -> ledger suppresses re-inject.
-  conv.sendMessage(`pm:${project.id}`, { text: 'any update?' });
+  conv.sendMessage(`operator:${project.id}`, { text: 'any update?' });
   assert.equal(fakePm._runTurnCalls.length, 2);
   const second = fakePm._runTurnCalls[1].payload.text;
   assert.doesNotMatch(second, /## Learned Memory/, 'second send within the same revision does NOT re-inject');
@@ -415,7 +415,7 @@ function wirePmStack(db) {
   // non-matching context would correctly retrieve nothing — narrowing is
   // by design, exercised separately in the unit suite).
   memoryService.createMemoryItem({ projectId: project.id, kind: 'heuristic', content: 'split big diffs into small commits', origin: 'human' });
-  conv.sendMessage(`pm:${project.id}`, { text: 'how should I split big diffs?' });
+  conv.sendMessage(`operator:${project.id}`, { text: 'how should I split big diffs?' });
   assert.equal(fakePm._runTurnCalls.length, 3);
   const third = fakePm._runTurnCalls[2].payload.text;
   assert.match(third, /## Learned Memory/, 're-injects after a revision change');
@@ -461,7 +461,7 @@ function wirePmStack(db) {
   session.rejectNext = true; // runTurn returns { accepted: false } -> 502
 
   // Use a context that overlaps the memory so retrieve would yield a block.
-  assert.throws(() => conv.sendMessage(`pm:${project.id}`, { text: 'fix the parser regress' }), /Failed to deliver/);
+  assert.throws(() => conv.sendMessage(`operator:${project.id}`, { text: 'fix the parser regress' }), /Failed to deliver/);
     // Ledger must be empty because the send failed before the commit half.
     const beforeCount = db.prepare(
       "SELECT COUNT(*) AS c FROM memory_composition_events WHERE run_id = ? AND slot_kind = 'operator'"
@@ -469,7 +469,7 @@ function wirePmStack(db) {
     assert.equal(beforeCount, 0, 'no composition ledger write on failed send');
 
   // Resend -> injection happens now (rejectNext was consumed).
-  conv.sendMessage(`pm:${project.id}`, { text: 'fix the parser regress' });
+  conv.sendMessage(`operator:${project.id}`, { text: 'fix the parser regress' });
   const calls = fakePm._runTurnCalls;
     const last = calls[calls.length - 1].payload.text;
     assert.match(last, /## Learned Memory/, 're-injects after the earlier failed send');
@@ -510,7 +510,7 @@ test('INTEGRATION: memoryService failure degrades to no-injection (message still
   const project = projectService.createProject({ name: 'alpha' });
   seedTop({ rs, registry, adapter: topAdapter });
 
-  const res = conv.sendMessage(`pm:${project.id}`, { text: 'hello' });
+  const res = conv.sendMessage(`operator:${project.id}`, { text: 'hello' });
   assert.equal(res.status, 'sent');
   assert.equal(fakePm._runTurnCalls.length, 1, 'message delivered despite memory failure');
   assert.doesNotMatch(fakePm._runTurnCalls[0].payload.text, /## Learned Memory/, 'no block when memory failed');

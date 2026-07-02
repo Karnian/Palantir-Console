@@ -149,7 +149,7 @@ function createOperatorCleanupService({
   // forceReset deliberately accepts the orphan-subprocess risk documented
   // in spec §10.
   //
-  // Emits 'pm:force_reset' on eventBus so operators can audit usage.
+  // Emits 'operator:force_reset' on eventBus so operators can audit usage.
   function forceReset(projectId) {
     if (!projectId) throw new Error('projectId is required');
 
@@ -209,7 +209,6 @@ function createOperatorCleanupService({
         disposeError,
         timestamp: new Date().toISOString(),
       };
-      eventBus.emit('pm:force_reset', payload);
       eventBus.emit('operator:force_reset', payload);
     }
 

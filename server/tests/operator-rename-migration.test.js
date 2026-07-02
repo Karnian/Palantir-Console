@@ -258,7 +258,8 @@ test('(1) runs rebuild preserves all inbound child rows and parent links', (t) =
   assert.equal(db.prepare("SELECT COUNT(*) AS c FROM runs WHERE id IN ('run-a', 'run-b')").get().c, 2);
   assert.deepEqual(db.pragma('foreign_key_check'), []);
   assert.equal(fkOn(db), 1);
-  assert.equal(db.prepare('SELECT MAX(version) AS v FROM schema_version').get().v, 45);
+  // migrate() applies all migrations in the dir; Phase 4 adds 046 (tighten).
+  assert.equal(db.prepare('SELECT MAX(version) AS v FROM schema_version').get().v, 46);
 });
 
 test('(2) composition events, owner state, and item edges are preserved while slot_kind migrates', (t) => {
@@ -362,12 +363,14 @@ test('(3) schema fidelity: columns, defaults, FKs, indexes, and no triggers', (t
   assert.deepEqual(triggers, []);
 });
 
-test("(4) relaxed CHECKs accept 'operator' and 'pm' but reject garbage", (t) => {
+test("(4) tightened CHECKs accept 'operator'/'top' but reject legacy 'pm' and garbage", (t) => {
+  // Phase 4 (migration 046) drops 'pm' from both CHECKs.
   const db = migratedThrough045(t);
 
   const insertRunLayer = db.prepare('INSERT INTO runs(id, manager_layer) VALUES(?, ?)');
   insertRunLayer.run('run-operator', 'operator');
-  insertRunLayer.run('run-pm', 'pm');
+  insertRunLayer.run('run-top', 'top');
+  assert.throws(() => insertRunLayer.run('run-pm', 'pm'), /CHECK|constraint/i);
   assert.throws(() => insertRunLayer.run('run-garbage', 'garbage'), /CHECK|constraint/i);
 
   const insertEventSlot = db.prepare(`
@@ -376,8 +379,9 @@ test("(4) relaxed CHECKs accept 'operator' and 'pm' but reject garbage", (t) => 
     VALUES (?, ?, ?, 'pk', 'composer', 'policy', ?)
   `);
   insertEventSlot.run('event-operator', 'run-operator', 'operator', 'fp-op');
-  insertEventSlot.run('event-pm', 'run-pm', 'pm', 'fp-pm');
-  assert.throws(() => insertEventSlot.run('event-garbage', 'run-garbage', 'garbage', 'fp-bad'), /CHECK|constraint/i);
+  insertEventSlot.run('event-top', 'run-top', 'top', 'fp-top');
+  assert.throws(() => insertEventSlot.run('event-pm', 'run-operator', 'pm', 'fp-pm'), /CHECK|constraint/i);
+  assert.throws(() => insertEventSlot.run('event-garbage', 'run-operator', 'garbage', 'fp-bad'), /CHECK|constraint/i);
 });
 
 test('(5) conversation_id rewrite is lowercase pm: only and leaves other forms unchanged', (t) => {
@@ -491,10 +495,10 @@ ALTER TABLE child_new RENAME TO child;
   assert.deepEqual(db.pragma('foreign_key_check'), []);
 });
 
-test('(8) compositionLedger dual-read finds operator rows and cleanup prunes across both forms', (t) => {
+test('(8) compositionLedger reads operator rows and cleanup prunes to the latest (operator-only, Phase 4)', (t) => {
   const db = migratedThrough045(t);
   const ledger = createCompositionLedger(db);
-  const runId = 'run-ledger-dual';
+  const runId = 'run-ledger-op';
   const provenanceKey = 'workspace:p1';
 
   insertCompositionEvent(db, {
@@ -503,39 +507,39 @@ test('(8) compositionLedger dual-read finds operator rows and cleanup prunes acr
     conversationId: 'operator:p1',
     slotKind: 'operator',
     provenanceKey,
-    selectedSetHash: 'sel-operator',
+    selectedSetHash: 'sel-old',
     status: 'accepted',
     acceptedAt: '2024-01-01 00:00:00',
   });
 
   const gate = ledger.shouldCompose({
     runId,
-    slotKind: 'pm',
+    slotKind: 'operator',
     provenanceKey,
     currentOwnerRevisions: [],
   });
   assert.deepEqual(gate, { compose: false, reason: 'unchanged' });
 
-  const priorSelected = ledger.getLastAcceptedSelectedSetHash({ runId, slotKind: 'pm', provenanceKey });
-  assert.deepEqual(priorSelected, { id: 'comp-operator-old', selected_set_hash: 'sel-operator' });
+  const priorSelected = ledger.getLastAcceptedSelectedSetHash({ runId, slotKind: 'operator', provenanceKey });
+  assert.deepEqual(priorSelected, { id: 'comp-operator-old', selected_set_hash: 'sel-old' });
 
   insertCompositionEvent(db, {
-    id: 'comp-pm-new',
+    id: 'comp-operator-new',
     runId,
-    conversationId: 'pm:p1',
-    slotKind: 'pm',
+    conversationId: 'operator:p1',
+    slotKind: 'operator',
     provenanceKey,
-    selectedSetHash: 'sel-pm',
+    selectedSetHash: 'sel-new',
     status: 'accepted',
     acceptedAt: '2024-01-02 00:00:00',
   });
 
-  ledger.cleanup(runId, 'pm', provenanceKey);
+  ledger.cleanup(runId, 'operator', provenanceKey);
 
   const rows = db.prepare(`
     SELECT id, slot_kind FROM memory_composition_events
     WHERE run_id = ? AND provenance_key = ? AND status = 'accepted'
     ORDER BY id
   `).all(runId, provenanceKey);
-  assert.deepEqual(rows, [{ id: 'comp-pm-new', slot_kind: 'pm' }]);
+  assert.deepEqual(rows, [{ id: 'comp-operator-new', slot_kind: 'operator' }]);
 });

@@ -132,7 +132,7 @@ test('POST: originConversationId conflict → 400', async (t) => {
   const app = await enabledApp(t);
   const pid = makeProfile(app, { name: 'p' });
   const run = makeManagerRun(app);
-  const res = await request(app).post(B).send({ profileId: pid, userText: 'hi', originRunId: run.id, originConversationId: 'pm:other' });
+  const res = await request(app).post(B).send({ profileId: pid, userText: 'hi', originRunId: run.id, originConversationId: 'operator:other' });
   assert.equal(res.status, 400);
 });
 

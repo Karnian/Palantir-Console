@@ -185,12 +185,12 @@ test('Phase 4: unknown claim kinds are recorded without flagging', async (t) => 
 });
 
 // Helper: seed a real PM run for staleness tests. Must exist + be in
-// the pm layer + have conversation_id='pm:<projectId>' to pass R4 binding.
+// the operator layer + have conversation_id='operator:<projectId>' to pass R4 binding.
 function seedPmRun(rs, projectId) {
   const pm = rs.createRun({
     is_manager: true,
-    manager_layer: 'pm',
-    conversation_id: `pm:${projectId}`,
+    manager_layer: 'operator',
+    conversation_id: `operator:${projectId}`,
     manager_adapter: 'codex',
     prompt: `pm ${projectId}`,
   });
@@ -269,7 +269,7 @@ test('Phase 4: R4 fix — pmRunId envelope binding rejects foreign/top/nonexiste
     projectId: project.id,
     pmRunId: top.id,
     pmClaim: { kind: 'task_complete', task_id: 'whatever' },
-  }), /expected 'pm'/);
+  }), /expected 'operator'/);
 
   // (c) a PM run from a DIFFERENT project is not acceptable
   const otherProject = projectService.createProject({ name: 'beta' });
@@ -278,7 +278,7 @@ test('Phase 4: R4 fix — pmRunId envelope binding rejects foreign/top/nonexiste
     projectId: project.id,
     pmRunId: otherPm.id,
     pmClaim: { kind: 'task_complete', task_id: 'whatever' },
-  }), /belongs to pm:.+, not project /); // dual-read: message names the project, not a single conv form
+  }), /belongs to operator:.+, not project /); // Phase 4: message names the operator: conv form
 
   // (d) a worker run (not a manager) is not acceptable
   const task = taskService.createTask({ title: 'T', project_id: project.id });
@@ -417,7 +417,7 @@ test('Phase 4: R2 fix — pm_run_id and pm_claim.run_id are distinct identities'
 test('Phase 4: R2 fix — PM prompt clarifies pm_run_id vs pm_claim.run_id distinction', () => {
   const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
   const fakeAdapter = { buildGuardrailsSection: () => '' };
-  const pmPrompt = buildManagerSystemPrompt({ adapter: fakeAdapter, port: 4177, layer: 'pm' });
+  const pmPrompt = buildManagerSystemPrompt({ adapter: fakeAdapter, port: 4177, layer: 'operator' });
   // The prompt must explicitly say the two ids are DIFFERENT identities.
   assert.match(pmPrompt, /DIFFERENT identities/);
   assert.match(pmPrompt, /YOUR OWN PM MANAGER run id/);
@@ -429,7 +429,7 @@ test('Phase 4: R2 fix — PM prompt clarifies pm_run_id vs pm_claim.run_id disti
 test('Phase 4: R1 fix — PM system prompt documents POST /api/dispatch-audit', () => {
   const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
   const fakeAdapter = { buildGuardrailsSection: () => '' };
-  const pmPrompt = buildManagerSystemPrompt({ adapter: fakeAdapter, port: 4177, layer: 'pm' });
+  const pmPrompt = buildManagerSystemPrompt({ adapter: fakeAdapter, port: 4177, layer: 'operator' });
   const topPrompt = buildManagerSystemPrompt({ adapter: fakeAdapter, port: 4177, layer: 'top' });
   assert.match(pmPrompt, /\/api\/dispatch-audit/);
   assert.match(pmPrompt, /task_complete/);

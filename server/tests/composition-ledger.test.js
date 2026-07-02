@@ -57,7 +57,7 @@ function makeOpts({
   runId = 'run-001',
   conversationId = 'conv-001',
   taskId = 'task-001',
-  slotKind = 'pm',
+  slotKind = 'operator',
   provenanceKey = 'workspace:proj-001',
   mode = null,
   promptPayloadHash = null,
@@ -158,7 +158,7 @@ test('record() persists all 3 tables including fingerprint; accept() transitions
   assert.equal(evt.fingerprint, 'fp-abc-123', 'fingerprint persisted');
   assert.equal(evt.status, 'pending', 'status is pending');
   assert.equal(evt.run_id, 'run-001');
-  assert.equal(evt.slot_kind, 'pm');
+  assert.equal(evt.slot_kind, 'operator');
   assert.equal(evt.provenance_key, 'workspace:proj-001');
   assert.equal(evt.composer_version, '0.1.0');
   assert.equal(evt.policy_version, '0.1.0');
@@ -206,7 +206,7 @@ test('shouldCompose: no prior accepted → compose:true', (t) => {
 
   const result = ledger.shouldCompose({
     runId: 'run-gate-1',
-    slotKind: 'pm',
+    slotKind: 'operator',
     provenanceKey: 'workspace:proj-A',
     currentOwnerRevisions: [{ owner_type: 'workspace', owner_id: 'proj-A', revision: 1 }],
   });
@@ -220,7 +220,7 @@ test('shouldCompose: same revision as accepted → compose:false', (t) => {
   const ledger = createCompositionLedger(db);
 
   const runId = 'run-gate-2';
-  const slotKind = 'pm';
+  const slotKind = 'operator';
   const provenanceKey = 'workspace:proj-B';
 
   // Record and accept a composition with revision=3
@@ -258,7 +258,7 @@ test('shouldCompose: owner revision increased → compose:true', (t) => {
   const ledger = createCompositionLedger(db);
 
   const runId = 'run-gate-3';
-  const slotKind = 'pm';
+  const slotKind = 'operator';
   const provenanceKey = 'workspace:proj-C';
 
   // Accept a composition with revision=2
@@ -298,7 +298,7 @@ test('shouldCompose: pending (not-accepted) composition is ignored by gate', (t)
   const ledger = createCompositionLedger(db);
 
   const runId = 'run-peek-1';
-  const slotKind = 'pm';
+  const slotKind = 'operator';
   const provenanceKey = 'workspace:proj-D';
 
   // Record but do NOT accept — stays pending
@@ -353,7 +353,7 @@ test('CHECK violation: bad status throws', (t) => {
     db.prepare(`
       INSERT INTO memory_composition_events
         (id, run_id, slot_kind, provenance_key, composer_version, policy_version, fingerprint, status)
-      VALUES ('x2', 'r', 'pm', 'pk', 'v', 'v', 'fp', 'invalid_status')
+      VALUES ('x2', 'r', 'operator', 'pk', 'v', 'v', 'fp', 'invalid_status')
     `).run();
   }, /CHECK constraint failed/, 'bad status CHECK fires');
 });
@@ -365,7 +365,7 @@ test('CHECK violation: bad decision on item_edge throws', (t) => {
   db.prepare(`
     INSERT INTO memory_composition_events
       (id, run_id, slot_kind, provenance_key, composer_version, policy_version, fingerprint, status)
-    VALUES ('evt-chk-1', 'r', 'pm', 'pk', 'v', 'v', 'fp', 'pending')
+    VALUES ('evt-chk-1', 'r', 'operator', 'pk', 'v', 'v', 'fp', 'pending')
   `).run();
 
   assert.throws(() => {
@@ -458,7 +458,7 @@ test('cleanup(): keeps only latest accepted per (runId, slotKind, provenanceKey)
   const ledger = createCompositionLedger(db);
 
   const runId = 'run-cleanup-1';
-  const slotKind = 'pm';
+  const slotKind = 'operator';
   const provenanceKey = 'workspace:proj-Y';
   const opts = makeOpts({ runId, slotKind, provenanceKey });
 
@@ -498,7 +498,7 @@ test('cleanup(): stale pending events (>1 day) are removed by cleanupStalePendin
   db.prepare(`
     INSERT INTO memory_composition_events
       (id, run_id, slot_kind, provenance_key, composer_version, policy_version, fingerprint, status, created_at)
-    VALUES ('stale-1', 'run-stale', 'pm', 'pk-stale', 'v', 'v', 'fp-stale', 'pending',
+    VALUES ('stale-1', 'run-stale', 'operator', 'pk-stale', 'v', 'v', 'fp-stale', 'pending',
             datetime('now', '-2 days'))
   `).run();
 
@@ -506,11 +506,11 @@ test('cleanup(): stale pending events (>1 day) are removed by cleanupStalePendin
   db.prepare(`
     INSERT INTO memory_composition_events
       (id, run_id, slot_kind, provenance_key, composer_version, policy_version, fingerprint, status)
-    VALUES ('fresh-1', 'run-fresh', 'pm', 'pk-fresh', 'v', 'v', 'fp-fresh', 'pending')
+    VALUES ('fresh-1', 'run-fresh', 'operator', 'pk-fresh', 'v', 'v', 'fp-fresh', 'pending')
   `).run();
 
   // cleanup with some arbitrary (runId, slotKind, provenanceKey) — stale pending removal is global
-  ledger.cleanup('run-stale', 'pm', 'pk-stale');
+  ledger.cleanup('run-stale', 'operator', 'pk-stale');
 
   const stale = db.prepare("SELECT id FROM memory_composition_events WHERE id = 'stale-1'").get();
   assert.equal(stale, undefined, 'stale pending event removed');
@@ -661,7 +661,7 @@ test('shouldCompose: empty currentOwnerRevisions → compose:false when prior ac
   const ledger = createCompositionLedger(db);
 
   const runId = 'run-empty-owners';
-  const slotKind = 'pm';
+  const slotKind = 'operator';
   const provenanceKey = 'workspace:proj-E';
 
   const id = ledger.record(makeComposition({ fingerprint: 'fp-empty' }), makeOpts({ runId, slotKind, provenanceKey }));

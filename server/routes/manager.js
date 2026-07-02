@@ -605,7 +605,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
    * POST /api/manager/pm/:projectId/message
    * v3 Phase 2: send a message to a project-scoped Operator manager.
    *
-   * Thin alias over conversationService.sendMessage('pm:<projectId>', ...).
+   * Thin alias over conversationService.sendMessage('operator:<projectId>', ...).
    * Phase 2 wires the runtime slot + parent-notice router; lazy Operator spawn
    * on first message is a Phase 3a concern. Until then, callers that hit
    * this route when no Operator is active will get 404 — this is intentional.
@@ -668,7 +668,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
    * always freed. Intended as a last-resort operator action — prefer
    * /reset first whenever the adapter might be healthy.
    *
-   * Emits 'pm:force_reset' on eventBus for audit visibility.
+   * Emits 'operator:force_reset' on eventBus for audit visibility.
    */
   router.post('/pm/:projectId/force-reset', asyncHandler(async (req, res) => {
     const { projectId } = req.params;

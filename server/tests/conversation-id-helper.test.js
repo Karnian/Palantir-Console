@@ -1,7 +1,9 @@
 'use strict';
 
-// PM→Operator rename Phase 2 — shared conversation-id helpers + dual-read.
-// Producers now emit `operator:`; consumers still accept BOTH `pm:` and `operator:`.
+// PM→Operator rename Phase 4 (FINAL CLEANUP) — shared conversation-id helpers.
+// Dual-read removed: producers emit `operator:` and consumers accept
+// `operator:` ONLY. The legacy `pm:` prefix and `'pm'` layer are no longer
+// recognized.
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -12,20 +14,20 @@ const {
   conversationIdMatchesProject,
   isProjectLayer,
   canonicalConversationId,
-  LEGACY_PM_CONV_PREFIX,
   OPERATOR_CONV_PREFIX,
 } = require('../utils/conversationId');
 
-test('conversationIdForProject: Phase 2 emits operator: (producer seam flipped)', () => {
+test('conversationIdForProject: emits operator: (producer seam)', () => {
   assert.equal(conversationIdForProject('alpha'), 'operator:alpha');
 });
 
-test('parseProjectConversationId: dual-read pm: AND operator:', () => {
-  assert.deepEqual(parseProjectConversationId('pm:alpha'), { projectId: 'alpha' });
+test('parseProjectConversationId: operator: only (pm: no longer parses)', () => {
   assert.deepEqual(parseProjectConversationId('operator:alpha'), { projectId: 'alpha' });
-  // empty projectId → null (preserves parseConversationId('pm:')===null contract)
-  assert.equal(parseProjectConversationId('pm:'), null);
+  // legacy pm: is no longer a project conversation id
+  assert.equal(parseProjectConversationId('pm:alpha'), null);
+  // empty projectId → null (preserves parseConversationId('operator:')===null contract)
   assert.equal(parseProjectConversationId('operator:'), null);
+  assert.equal(parseProjectConversationId('pm:'), null);
   // non-project ids → null
   assert.equal(parseProjectConversationId('top'), null);
   assert.equal(parseProjectConversationId('worker:r1'), null);
@@ -34,68 +36,67 @@ test('parseProjectConversationId: dual-read pm: AND operator:', () => {
   assert.equal(parseProjectConversationId(42), null);
 });
 
-test('isProjectConversationId: both prefixes true, others false', () => {
-  assert.equal(isProjectConversationId('pm:x'), true);
+test('isProjectConversationId: operator: true, pm:/others false', () => {
   assert.equal(isProjectConversationId('operator:x'), true);
-  assert.equal(isProjectConversationId('pm:'), false);
+  assert.equal(isProjectConversationId('pm:x'), false);
+  assert.equal(isProjectConversationId('operator:'), false);
   assert.equal(isProjectConversationId('top'), false);
 });
 
-test('conversationIdMatchesProject: dual-read equality (replaces inline pm: compare)', () => {
-  assert.equal(conversationIdMatchesProject('pm:alpha', 'alpha'), true);
+test('conversationIdMatchesProject: operator: equality only (pm: no longer matches)', () => {
   assert.equal(conversationIdMatchesProject('operator:alpha', 'alpha'), true);
-  assert.equal(conversationIdMatchesProject('pm:beta', 'alpha'), false);
+  assert.equal(conversationIdMatchesProject('pm:alpha', 'alpha'), false);
   assert.equal(conversationIdMatchesProject('operator:beta', 'alpha'), false);
   assert.equal(conversationIdMatchesProject('top', 'alpha'), false);
-  assert.equal(conversationIdMatchesProject('pm:', 'alpha'), false);
+  assert.equal(conversationIdMatchesProject('operator:', 'alpha'), false);
 });
 
-test('isProjectLayer: pm AND operator are the project-operator role', () => {
-  assert.equal(isProjectLayer('pm'), true);
+test('isProjectLayer: only operator is the project-operator role (pm rejected)', () => {
   assert.equal(isProjectLayer('operator'), true);
+  assert.equal(isProjectLayer('pm'), false);
   assert.equal(isProjectLayer('top'), false);
   assert.equal(isProjectLayer(null), false);
   assert.equal(isProjectLayer(undefined), false);
 });
 
-test('prefix constants are the expected wire values', () => {
-  assert.equal(LEGACY_PM_CONV_PREFIX, 'pm:');
+test('prefix constant is the expected wire value', () => {
   assert.equal(OPERATOR_CONV_PREFIX, 'operator:');
 });
 
 // Dual-read at the routerService chokepoint (constructed with a stub projectService).
-test('routerService.isValidConversationId accepts operator: (dual-read chokepoint 2)', () => {
+test('routerService.isValidConversationId accepts operator: only', () => {
   const { createRouterService } = require('../services/routerService');
   const svc = createRouterService({ projectService: { listProjects: () => [] } });
-  assert.equal(svc.isValidConversationId('pm:alpha'), true);
   assert.equal(svc.isValidConversationId('operator:alpha'), true);
+  assert.equal(svc.isValidConversationId('pm:alpha'), false);
   assert.equal(svc.isValidConversationId('operator:'), false);
   assert.equal(svc.isValidConversationId('top'), true);
   assert.equal(svc.isValidConversationId('worker:r1'), true);
 });
 
-test('canonicalConversationId: collapses pm:/operator: to the current producer form (Phase 2 = operator:)', () => {
-  assert.equal(canonicalConversationId('pm:alpha'), 'operator:alpha'); // canonical = producer form
+test('canonicalConversationId: identity for operator: (dual-read removed)', () => {
   assert.equal(canonicalConversationId('operator:alpha'), 'operator:alpha');
+  // legacy pm: is no longer a project id → passes through unchanged (not collapsed)
+  assert.equal(canonicalConversationId('pm:alpha'), 'pm:alpha');
   assert.equal(canonicalConversationId('top'), 'top');
   assert.equal(canonicalConversationId('worker:r1'), 'worker:r1');
-  assert.equal(canonicalConversationId('pm:'), 'pm:'); // non-project (empty) passes through
+  assert.equal(canonicalConversationId('operator:'), 'operator:'); // non-project (empty) passes through
 });
 
-test('managerRegistry: slots are canonical — pm: and operator: address the SAME slot', () => {
+test('managerRegistry: slots are keyed by operator: (pm: no longer addresses the slot)', () => {
   const { createManagerRegistry } = require('../services/managerRegistry');
   const reg = createManagerRegistry({ runService: { getRun: (id) => ({ id }) } });
   const adapter = { isSessionAlive: () => true, disposeSession() {} };
-  reg.setActive('operator:alpha', 'run1', adapter); // written in the NEW form
-  // found via BOTH forms (the dual-read window's core guarantee):
-  assert.equal(reg.getActiveRunId('pm:alpha'), 'run1');
+  reg.setActive('operator:alpha', 'run1', adapter); // written in the operator form
+  // found via operator: ...
   assert.equal(reg.getActiveRunId('operator:alpha'), 'run1');
-  assert.ok(reg.getActiveAdapter('pm:alpha'));
-  // snapshot exposes the canonical (Phase 2 = operator:) form — what /api/manager/status
-  // and therefore the UI sees after the Phase 2 flip.
+  assert.ok(reg.getActiveAdapter('operator:alpha'));
+  // ... but NO LONGER found via the legacy pm: form (dual-read removed)
+  assert.equal(reg.getActiveRunId('pm:alpha'), null);
+  // snapshot exposes the operator: form — what /api/manager/status and the UI see.
   const snap = reg.snapshot();
   assert.equal(snap.pms.length, 1);
   assert.equal(snap.pms[0].conversationId, 'operator:alpha');
-  reg.clearActive('pm:alpha'); // clear via the OTHER form also hits the slot
+  reg.clearActive('operator:alpha');
   assert.equal(reg.getActiveRunId('operator:alpha'), null);
 });
