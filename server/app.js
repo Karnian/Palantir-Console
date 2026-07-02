@@ -13,6 +13,7 @@ const { createDatabase } = require('./db/database');
 const { createEventBus } = require('./services/eventBus');
 const { createProjectService } = require('./services/projectService');
 const { createProjectBriefService } = require('./services/projectBriefService');
+const { createNodeService } = require('./services/nodeService');
 const { createTaskService } = require('./services/taskService');
 const { createRunService } = require('./services/runService');
 const { createAgentProfileService } = require('./services/agentProfileService');
@@ -21,6 +22,7 @@ const { createTrashRouter } = require('./routes/trash');
 const { createFsRouter } = require('./routes/fs');
 const { createUsageRouter } = require('./routes/usage');
 const { createProjectsRouter } = require('./routes/projects');
+const { createNodesRouter } = require('./routes/nodes');
 const { createTasksRouter } = require('./routes/tasks');
 const { createRunsRouter } = require('./routes/runs');
 const { createAgentsRouter } = require('./routes/agents');
@@ -667,6 +669,7 @@ function createApp(options = {}) {
   const providerRegistry = createProviderRegistry({ codexService, opencodeAuthPath });
 
   // New services (SQLite-based)
+  const nodeService = createNodeService(db);
   const projectService = createProjectService(db);
   const projectBriefService = createProjectBriefService(db); // v3 Phase 1
   // ML PR1: L1 project memory index (CRUD + FTS5 retrieve + revision +
@@ -748,6 +751,7 @@ function createApp(options = {}) {
     runService, taskService, agentProfileService, projectService,
     executionEngine, streamJsonEngine, worktreeService, harvestService, eventBus,
     skillPackService,
+    nodeService,
     presetService,
     claudeVersionResolver: options.claudeVersionResolver,
     // Phase 10D: isolated-preset auth materialization honors the same
@@ -959,6 +963,7 @@ function createApp(options = {}) {
 
   // New routes (v2)
   app.use('/api/projects', createProjectsRouter({ projectService, taskService, projectBriefService, operatorCleanupService }));
+  app.use('/api/nodes', createNodesRouter({ nodeService }));
   app.use('/api/projects', createMemoryRouter({ memoryService, projectService })); // ML PR1: GET /:projectId/memory
   app.use('/api/master-memory', createMasterMemoryRouter({ masterMemoryService })); // L2 P1b: GET / + POST /remember
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService }));

@@ -120,12 +120,12 @@ function createRunService(db, eventBus) {
       INSERT INTO runs (
         id, task_id, agent_profile_id, prompt, status, is_manager,
         parent_run_id, manager_adapter, manager_thread_id, manager_layer,
-        conversation_id, queued_args, retry_count
+        conversation_id, queued_args, retry_count, node_id
       )
       VALUES (
         @id, @task_id, @agent_profile_id, @prompt, @status, @is_manager,
         @parent_run_id, @manager_adapter, @manager_thread_id, @manager_layer,
-        @conversation_id, @queued_args, @retry_count
+        @conversation_id, @queued_args, @retry_count, @node_id
       )
     `),
     updateManagerThread: db.prepare(`
@@ -144,6 +144,19 @@ function createRunService(db, eventBus) {
       SELECT COUNT(*) as count FROM runs
       WHERE agent_profile_id = ? AND status = 'running' AND is_manager = 0
     `),
+    countRunningOnNode: db.prepare(`
+      SELECT COUNT(*) as count FROM runs
+      WHERE COALESCE(node_id, 'local') = ?
+        AND agent_profile_id = ?
+        AND status = 'running'
+        AND is_manager = 0
+    `),
+    countRunningTotalOnNode: db.prepare(`
+      SELECT COUNT(*) as count FROM runs
+      WHERE COALESCE(node_id, 'local') = ?
+        AND status = 'running'
+        AND is_manager = 0
+    `),
     getOldestQueued: db.prepare(`
       SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
              t.title as task_title, t.project_id as project_id, p.name as project_name
@@ -152,6 +165,20 @@ function createRunService(db, eventBus) {
       LEFT JOIN tasks t ON r.task_id = t.id
       LEFT JOIN projects p ON t.project_id = p.id
       WHERE r.status = 'queued' AND r.agent_profile_id = ? AND r.is_manager = 0
+      ORDER BY r.created_at ASC, r.rowid ASC
+      LIMIT 1
+    `),
+    getOldestQueuedOnNode: db.prepare(`
+      SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
+             t.title as task_title, t.project_id as project_id, p.name as project_name
+      FROM runs r
+      LEFT JOIN agent_profiles ap ON r.agent_profile_id = ap.id
+      LEFT JOIN tasks t ON r.task_id = t.id
+      LEFT JOIN projects p ON t.project_id = p.id
+      WHERE r.status = 'queued'
+        AND r.agent_profile_id = ?
+        AND r.is_manager = 0
+        AND COALESCE(r.node_id, 'local') = ?
       ORDER BY r.created_at ASC, r.rowid ASC
       LIMIT 1
     `),
@@ -204,6 +231,7 @@ function createRunService(db, eventBus) {
     agent_profile_id,
     prompt,
     is_manager,
+    node_id,
     parent_run_id,
     manager_adapter,
     manager_thread_id,
@@ -252,6 +280,8 @@ function createRunService(db, eventBus) {
       conversation_id: effectiveConversationId,
       queued_args: normalizeQueuedArgs(queued_args),
       retry_count: normalizeRetryCount(retry_count),
+      // Manager runs are control-plane local in P1a; only worker runs snapshot a node.
+      node_id: is_manager ? null : (node_id || null),
     });
     const run = stmts.getById.get(id);
     if (eventBus) {
@@ -372,8 +402,20 @@ function createRunService(db, eventBus) {
     return stmts.countRunning.get(profileId).count;
   }
 
+  function countRunningOnNode(nodeId, profileId) {
+    return stmts.countRunningOnNode.get(nodeId || 'local', profileId).count;
+  }
+
+  function countRunningTotalOnNode(nodeId) {
+    return stmts.countRunningTotalOnNode.get(nodeId || 'local').count;
+  }
+
   function getOldestQueued(profileId) {
     return stmts.getOldestQueued.get(profileId) || null;
+  }
+
+  function getOldestQueuedOnNode(nodeId, profileId) {
+    return stmts.getOldestQueuedOnNode.get(profileId, nodeId || 'local') || null;
   }
 
   // Used to exhaust the retry budget of a run whose failure is not worth
@@ -540,7 +582,8 @@ function createRunService(db, eventBus) {
   return {
     listRuns, getRun, createRun,
     updateRunStatus, markRunStarted, updateRunResult,
-    countRunning, getOldestQueued, claimQueuedRun, setRetryCount,
+    countRunning, countRunningOnNode, countRunningTotalOnNode,
+    getOldestQueued, getOldestQueuedOnNode, claimQueuedRun, setRetryCount,
     updateManagerThreadId, updateClaudeSessionId,
     updateRunMcpConfig,
     updateRunPreset,
