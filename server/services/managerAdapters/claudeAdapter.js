@@ -23,7 +23,7 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
   // Per-run turn counter and pending tool_use bookkeeping for normalized events.
   // These are in-memory only — they reset on server restart, which is fine
   // because D1 forces all manager runs to 'stopped' on restart.
-  const runState = new Map(); // runId -> { turnIndex, sessionEmitted, pendingTools: Map<id, name> }
+  const runState = new Map(); // runId -> { turnIndex, sessionEmitted, pendingTools: Map<id, name>, onSessionStarted }
 
   function getState(runId) {
     let s = runState.get(runId);
@@ -78,6 +78,9 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
           cwd: event.cwd || null,
         },
       }));
+      if (typeof state.onSessionStarted === 'function') {
+        try { state.onSessionStarted(event.session_id || null); } catch { /* never throw into vendor hook */ }
+      }
       return;
     }
 
@@ -218,9 +221,11 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
    *
    * See docs/specs/manager-v3-multilayer.md principle 1.
    */
-  function startSession(runId, { prompt, cwd, systemPrompt, model, allowedTools, mcpTools, mcpConfig, permissionMode, env, resumeSessionId, executor, nodePrefix } = {}) {
+  function startSession(runId, { prompt, cwd, systemPrompt, model, allowedTools, mcpTools, mcpConfig, permissionMode, env, resumeSessionId, executor, nodePrefix, onSessionStarted } = {}) {
     // Reset normalizer state in case the runId is recycled.
     runState.delete(runId);
+    const state = getState(runId);
+    state.onSessionStarted = typeof onSessionStarted === 'function' ? onSessionStarted : null;
     const baseTools = allowedTools || [
       // Bash restricted to commands whose *primary* operation is read-only
       // and whose *typical usage* does not write files. Excluded: cat, echo,
