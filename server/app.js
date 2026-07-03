@@ -14,6 +14,7 @@ const { createEventBus } = require('./services/eventBus');
 const { createProjectService } = require('./services/projectService');
 const { createProjectBriefService } = require('./services/projectBriefService');
 const { createNodeService } = require('./services/nodeService');
+const { createNodeHeartbeatService } = require('./services/nodeHeartbeatService');
 const { createTaskService } = require('./services/taskService');
 const { createRunService } = require('./services/runService');
 const { createAgentProfileService } = require('./services/agentProfileService');
@@ -868,6 +869,22 @@ function createApp(options = {}) {
     }
   }
 
+  let nodeHeartbeatService = null;
+  {
+    const heartbeatEnabled = options.fleetHeartbeatEnabled ?? (process.env.PALANTIR_FLEET_HEARTBEAT === '1');
+    if (heartbeatEnabled) {
+      try {
+        const intervalMs = options.fleetHeartbeatIntervalMs
+          ?? (Number.parseInt(process.env.PALANTIR_FLEET_HEARTBEAT_INTERVAL_MS, 10) || 30000);
+        nodeHeartbeatService = createNodeHeartbeatService({ nodeService, intervalMs });
+        nodeHeartbeatService.start();
+        console.log(`[node-heartbeat] scheduler started (interval ${intervalMs}ms)`);
+      } catch (err) {
+        console.warn(`[node-heartbeat] failed to start scheduler: ${err && err.message}`);
+      }
+    }
+  }
+
   // Operator P-B2c-2: folder-less specialist spawn service. flag-gated + UNROUTED
   // (no HTTP route/actor-identity until B2c-3/4) → flag-off is behavior-identical.
   // Constructed only when PALANTIR_OPERATOR_SPECIALIST=1 + a backend is available.
@@ -1165,6 +1182,7 @@ function createApp(options = {}) {
     try { if (masterMemoryXprojectScanner) masterMemoryXprojectScanner.stop(); } catch { /* ignore */ }
     try { if (masterMemoryDecayScheduler) masterMemoryDecayScheduler.stop(); } catch { /* ignore */ }
     try { if (memoryDistillScheduler) memoryDistillScheduler.stop(); } catch { /* ignore */ }
+    try { if (nodeHeartbeatService) nodeHeartbeatService.stop(); } catch { /* ignore */ }
     try { if (specialistService && typeof specialistService.stop === 'function') specialistService.stop(); } catch { /* ignore */ }
     lifecycleService.stopMonitoring();
     // PR5b graceful shutdown: if a distill drain is in flight, close the DB only
