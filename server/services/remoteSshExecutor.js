@@ -25,6 +25,12 @@ function commandNotAllowedError(command) {
   return err;
 }
 
+function managerCommandNotAllowedError(command) {
+  const err = new Error(`Remote interactive command is not allowed: ${command}`);
+  err.code = 'COMMAND_NOT_ALLOWED';
+  return err;
+}
+
 function envKeyInvalidError(key) {
   const err = new Error(`Invalid remote env key: ${key}`);
   err.code = 'ENV_KEY_INVALID';
@@ -121,13 +127,23 @@ function commandError(command, args, res) {
   return err;
 }
 
-function buildCommandScript(command, args = [], { cwd, env } = {}) {
+function buildCommandScript(command, args = [], { cwd, env, pathPrefix } = {}) {
   const envParts = normalizeEnv(env);
   const argv = [shq(command), ...(args || []).map((arg) => shq(arg))];
-  const execParts = envParts.length > 0
-    ? ['exec', 'env', ...envParts, ...argv]
-    : ['exec', ...argv];
-  const script = execParts.join(' ');
+  // Optional PATH prepend for binaries that live outside the pod's minimal
+  // non-interactive-ssh PATH (codex/claude under ~/.npm-global/bin). The prefix
+  // is shq-quoted (a literal path) but `:$PATH` stays UNQUOTED so the pod's own
+  // PATH still resolves (e.g. /usr/bin/node for the codex shebang). Same proven
+  // shape as the worker channel's PATH injection.
+  const pathAssign = pathPrefix ? `PATH=${shq(pathPrefix)}:$PATH` : null;
+  const parts = ['exec'];
+  if (pathAssign || envParts.length > 0) {
+    parts.push('env');
+    if (pathAssign) parts.push(pathAssign);
+    parts.push(...envParts);
+  }
+  parts.push(...argv);
+  const script = parts.join(' ');
   return cwd ? `cd ${shq(cwd)} && ${script}` : script;
 }
 
@@ -250,6 +266,7 @@ function createRemoteSshNodeExecutor(node, {
   const exposedRoots = parseExposedRoots(node);
   const connectTimeoutSeconds = Math.max(1, Math.ceil(Number(connectTimeoutMs || 10000) / 1000));
   const allowedCommands = new Set((commandAllowlist || []).map(String));
+  const managerInteractiveCommands = new Set(['codex', 'claude']);
   let canonicalRootsPromise = null;
 
   function sshArgsFor(script) {
@@ -468,6 +485,30 @@ function createRemoteSshNodeExecutor(node, {
     return runRemoteCommand(command, args, { cwd: safeCwd, env, timeoutMs, maxBuffer });
   }
 
+  async function spawnInteractive(command, args = [], { cwd, env, pathPrefix } = {}) {
+    const commandName = String(command);
+    if (!managerInteractiveCommands.has(commandName)) throw managerCommandNotAllowedError(command);
+    // PATH-trust guard: a relative/control-char pathPrefix ('.', 'relative/bin')
+    // would let the remote cwd/project supply a fake codex/claude on PATH,
+    // defeating the manager-command allowlist. Require an absolute POSIX path
+    // without control chars — same contract as the worker channel's workerPath.
+    // (Codex P4-S1 review.)
+    if (pathPrefix !== undefined && pathPrefix !== null) {
+      if (
+        typeof pathPrefix !== 'string'
+        || pathPrefix.length === 0
+        || !path.posix.isAbsolute(pathPrefix)
+        || /[\x00-\x1F\x7F]/.test(pathPrefix)
+      ) {
+        throw new Error('spawnInteractive pathPrefix must be an absolute POSIX path without control characters');
+      }
+    }
+    let safeCwd = cwd;
+    if (cwd) safeCwd = (await assertWithinRoots(cwd)).canonical;
+    const script = buildCommandScript(commandName, args, { cwd: safeCwd, env, pathPrefix });
+    return spawnFn('ssh', sshArgsFor(script), { stdio: ['pipe', 'pipe', 'pipe'] });
+  }
+
   async function fileExists(remotePath) {
     const checked = await assertWithinRoots(remotePath, { allowMissing: true });
     if (!checked.exists) return false;
@@ -511,6 +552,12 @@ function createRemoteSshNodeExecutor(node, {
       throw err;
     }
     return createdPath;
+  }
+
+  async function putSecretFile(name, content, mode = 0o600) {
+    validateBareFilename(name);
+    const prefix = path.posix.join(exposedRoots[0], '.palantir-secret-');
+    return writeTempFile(prefix, name, content, mode);
   }
 
   async function readdir(remotePath, options) {
@@ -680,6 +727,7 @@ function createRemoteSshNodeExecutor(node, {
 
   return {
     exec,
+    spawnInteractive,
     spawnWorker,
     ownerOf,
     isAlive,
@@ -695,6 +743,7 @@ function createRemoteSshNodeExecutor(node, {
     readFile,
     readdir,
     writeTempFile,
+    putSecretFile,
     rmrf,
     assertWithinRoots: async (remotePath) => (await assertWithinRoots(remotePath)).canonical,
   };
