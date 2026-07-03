@@ -14,7 +14,7 @@
  *   - System prompt is delivered via `-c 'model_instructions_file="<path>"'`.
  *     A stable path / stable content => Codex caches the prompt and
  *     subsequent turns get a high cached_input_tokens, which we want.
- *   - The temp file is created in startSession() and deleted in
+ *   - The temp file is placed lazily on the first runTurn() and deleted in
  *     disposeSession() (the dispose hook is precisely what D1 was added for).
  *   - --skip-git-repo-check is always passed. --full-auto is the default
  *     for manager role (auto-approves tool calls, keeps filesystem sandbox).
@@ -41,8 +41,8 @@
  */
 
 const { spawn: realSpawn } = require('node:child_process');
-const fs = require('node:fs');
 const fsp = require('node:fs/promises');
+const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
@@ -131,6 +131,35 @@ function isPlainObject(value) {
   return proto === Object.prototype || proto === null;
 }
 
+function createDefaultLocalExecutor({ runId, spawnImpl }) {
+  let lastTmpDir = null;
+  return {
+    // SYNC on purpose: the local default path must place the instructions file
+    // and reach the spawn WITHOUT yielding a microtask, so existing tests that
+    // call runTurn() and inspect the captured spawn args SYNCHRONOUSLY still
+    // pass (byte-equivalence with the pre-S3a sync fs.writeFileSync path). A
+    // remote executor's putSecretFile is async — spawnOneTurn awaits only when
+    // the result is thenable.
+    putSecretFile(name, content, mode = 0o600) {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `palantir-codex-${runId}-`));
+      lastTmpDir = tmpDir;
+      const filePath = path.join(tmpDir, name);
+      fs.writeFileSync(filePath, content, { mode });
+      return filePath;
+    },
+    spawnInteractive(command, args, { cwd, env } = {}) {
+      return spawnImpl(command, args, {
+        cwd,
+        env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    },
+    async rmrf(targetPath) {
+      await fsp.rm(targetPath || lastTmpDir, { recursive: true, force: true });
+    },
+  };
+}
+
 /**
  * v3 Phase 0: spawnFn is injectable for behavior testing. Production callers
  * omit it and get the real child_process.spawn. Tests inject a fake that
@@ -171,9 +200,9 @@ function createCodexAdapter({
 
   /**
    * Start a Codex manager session. PR brief D2: this is the LIGHT path —
-   * no process spawn yet. We just write the system prompt to a temp file and
-   * record the session metadata. The first user message will trigger the
-   * first turn (which spawns `codex exec` and captures thread_id).
+   * no process spawn yet. We just record the session metadata. The first user
+   * message will lazily place the system prompt through the session executor,
+   * spawn `codex exec`, and capture thread_id.
    *
    * v3 Phase 0: accepts optional `role` ('manager' | 'worker', default 'manager').
    * Role-aware launch flags are resolved in spawnOneTurn — manager role omits
@@ -189,17 +218,12 @@ function createCodexAdapter({
    * codexMcpFlatten.flattenMcpToCodexArgs. String config paths are for the
    * Claude adapter's `--mcp-config` path and are skipped here.
    */
-  function startSession(runId, { systemPrompt, cwd, model, env, role, resumeThreadId, onThreadStarted, mcpConfig } = {}) {
+  function startSession(runId, { systemPrompt, cwd, model, env, role, resumeThreadId, onThreadStarted, mcpConfig, executor, nodePrefix } = {}) {
     if (sessions.has(runId)) {
       throw new Error(`codexAdapter: session ${runId} already started`);
     }
 
-    // Write the system prompt to a stable temp file. Path includes runId so
-    // restarts of the same runId (shouldn't happen — D1 wipes managers on
-    // restart) get a fresh file.
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `palantir-codex-${runId}-`));
-    const instructionsPath = path.join(tmpDir, 'system_prompt.md');
-    fs.writeFileSync(instructionsPath, systemPrompt || '', { mode: 0o600 });
+    const sessionExecutor = executor || createDefaultLocalExecutor({ runId, spawnImpl: spawn });
 
     const hasPlainObjectMcpConfig = isPlainObject(mcpConfig);
     const skippedMcpConfigPath = typeof mcpConfig === 'string';
@@ -212,8 +236,13 @@ function createCodexAdapter({
       // pre-3a behavior: thread_id is captured from the first vendor
       // thread.started event.
       threadId: resumeThreadId || null,
-      instructionsPath,
-      tmpDir,
+      systemPrompt: systemPrompt || '',
+      instructionsPath: null,
+      instructionsDir: null,
+      executor: sessionExecutor,
+      nodePrefix: nodePrefix || null,
+      usingDefaultLocalExecutor: !executor,
+      usingRealSpawn: spawn === realSpawn,
       cwd: resolveSpawnCwd({ workspaceDir: cwd }),
       model: model || null,
       env: env || null, // PR4: filtered subprocess env from routes/manager.js
@@ -230,6 +259,7 @@ function createCodexAdapter({
       turnIndex: 0,
       usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
       currentChild: null,
+      turnStarting: false,
       ended: false,
       sessionStartedEmitted: false,
     });
@@ -281,21 +311,48 @@ function createCodexAdapter({
       }
     }
 
-    return { sessionRef: { instructionsPath, resumedThreadId: resumeThreadId || null } };
+    return {
+      sessionRef: {
+        // The executor may be remote, so placement is lazy on first runTurn.
+        instructionsPath: null,
+        resumedThreadId: resumeThreadId || null,
+      },
+    };
   }
 
   /**
    * Spawn ONE turn. Returns a Promise that resolves when the codex process
-   * exits. Caller (runTurn) does NOT await — it returns { accepted: true }
-   * immediately and lets normalized events drive the UI.
+   * has been spawned and wired. It does not wait for the Codex process to
+   * exit; normalized events still drive the UI after acceptance.
    */
-  function spawnOneTurn(runId, userText) {
+  async function spawnOneTurn(runId, userText) {
     const state = sessions.get(runId);
     if (!state) throw new Error(`codexAdapter: no session ${runId}`);
-    if (state.currentChild) {
+    if (state.currentChild || state.turnStarting) {
       // A turn is still in flight — Codex turns are not concurrent.
       throw new Error('codexAdapter: previous turn still running');
     }
+
+    state.turnStarting = true;
+    let placedInstructionsDirThisTurn = null;
+    try {
+      if (!state.instructionsPath) {
+        // Conditional await: a remote executor returns a Promise; the default
+        // local executor returns the path SYNCHRONOUSLY so the spawn below is
+        // reached without a microtask yield (keeps sync arg-inspection tests
+        // green). Do NOT make this an unconditional `await`.
+        const placed = state.executor.putSecretFile('system_prompt.md', state.systemPrompt || '', 0o600);
+        state.instructionsPath = (placed && typeof placed.then === 'function') ? await placed : placed;
+        state.instructionsDir = path.dirname(state.instructionsPath);
+        placedInstructionsDirThisTurn = state.instructionsDir;
+      }
+      if (state.ended) {
+        state.turnStarting = false;
+        if (placedInstructionsDirThisTurn && state.executor && typeof state.executor.rmrf === 'function') {
+          try { await state.executor.rmrf(placedInstructionsDirThisTurn); } catch { /* best-effort */ }
+        }
+        return;
+      }
 
     const isFirstTurn = state.threadId == null;
     const args = [];
@@ -358,6 +415,7 @@ function createCodexAdapter({
         try {
           if (runService) runService.updateRunStatus(runId, 'failed', { force: true });
         } catch { /* ignore */ }
+        state.exitCode = 1;
         emitSessionEndedIfNeeded(runId, 'mcp-invalid');
         throw new Error(`codexAdapter: mcpConfig flatten failed: ${err.message}`);
       }
@@ -366,7 +424,7 @@ function createCodexAdapter({
     // Read prompt from stdin to avoid shell-quoting issues with multi-line input.
     args.push('-');
 
-    if (spawn === realSpawn) {
+    if (state.usingDefaultLocalExecutor && state.usingRealSpawn) {
       try {
         assertSpawnAllowed({ command: codexBin, source: 'codexAdapter:exec' });
       } catch (err) {
@@ -377,6 +435,7 @@ function createCodexAdapter({
           data: { kind: 'spawn_blocked', error: err.message },
         }));
         state.ended = true;
+        state.exitCode = 1;
         try {
           if (runService) runService.updateRunStatus(runId, 'failed', { force: true });
         } catch { /* ignore */ }
@@ -384,15 +443,25 @@ function createCodexAdapter({
         throw err;
       }
     }
-    const child = spawn(codexBin, args, {
+    // Conditional await (see putSecretFile note): local spawnInteractive returns
+    // the child synchronously so the fake spawn is invoked in this sync frame;
+    // remote returns a Promise<child>.
+    const spawned = state.executor.spawnInteractive(codexBin, args, {
       cwd: state.cwd,
       // PR4: use the filtered env from buildManagerSpawnEnv if the caller
-      // provided one. Fall back to process.env for tests that use the
-      // adapter directly.
-      env: state.env || process.env,
-      stdio: ['pipe', 'pipe', 'pipe'],
+      // provided one. Only the default local executor inherits process.env;
+      // injected executors must receive an explicit env object.
+      env: state.usingDefaultLocalExecutor ? (state.env || process.env) : (state.env || {}),
+      pathPrefix: state.nodePrefix,
     });
+    const child = (spawned && typeof spawned.then === 'function') ? await spawned : spawned;
+    if (state.ended) {
+      try { child.kill('SIGTERM'); } catch { /* ignore */ }
+      state.turnStarting = false;
+      return;
+    }
     state.currentChild = child;
+    state.turnStarting = false;
 
     // Emit a turn_started normalized event (Codex DOES have a turn boundary
     // signal, but the JSONL turn.started arrives after we spawn — emit our
@@ -435,10 +504,28 @@ function createCodexAdapter({
         data: { error: err.message },
       }));
       state.currentChild = null;
+      // A spawn-time OS error (ENOENT/EACCES) is terminal but does NOT fire the
+      // 'exit' event — surface it the same way the exit-failure path does so the
+      // session flips to not-alive and the failed status is probe-stable
+      // (Codex P4-S3a R6). Guard against double surfacing if 'exit' also fires.
+      if (!state.ended) {
+        state.exitCode = 1;
+        state.ended = true;
+        try {
+          if (runService) runService.updateRunStatus(runId, 'failed', { force: true });
+        } catch { /* ignore */ }
+        emitSessionEndedIfNeeded(runId, 'spawn-error');
+      }
     });
 
-    child.on('exit', (code) => {
+    child.on('exit', (code, signal) => {
       state.currentChild = null;
+      // Track the terminal exit code so detectExitCode() can report the ACTUAL
+      // outcome. Without this, an ended session always reports 0 and a later
+      // managerRegistry.probeActive() would overwrite a failed run to completed.
+      // A signal-killed child reports code === null — record a nonzero so it is
+      // classified as a failure, not a false 'completed' (Codex P4-S3a R5).
+      state.exitCode = (code === null || code === undefined) ? (signal ? 128 : 1) : code;
       // If the turn produced a turn.completed vendor event we already advanced
       // turnIndex; otherwise treat exit-with-error as a failed turn.
       if (code !== 0) {
@@ -461,6 +548,38 @@ function createCodexAdapter({
         emitSessionEndedIfNeeded(runId, 'codex-exit-error');
       }
     });
+    } catch (err) {
+      state.turnStarting = false;
+      // Surface an async spawn/placement failure (a REMOTE putSecretFile /
+      // spawnInteractive rejection that happens before a child exists) the same
+      // way the sync fail-closed paths do — mark the run failed, emit
+      // TURN_FAILED + SESSION_ENDED, and clean up a secret dir placed this turn.
+      // Without this, runTurn's fire-and-forget path would leave the turn
+      // {accepted:true} but never failed (isSessionAlive stays true), so the
+      // caller could commit a notice-drain for a turn that never spawned.
+      // Skip if a fail-closed path already surfaced it (it sets state.ended
+      // before throwing → avoid double-emit). Codex P4-S3a R3 review.
+      if (!state.ended) {
+        try {
+          emitNormalized(runId, NORMALIZED_EVENT_TYPES.TURN_FAILED, buildPayload({
+            turnIndex: state.turnIndex,
+            summaryText: `turn spawn failed: ${err && err.message}`,
+            hasRawStored: RAW_EVENTS_ENABLED,
+            data: { kind: 'spawn_failed', error: err && err.message },
+          }));
+        } catch { /* ignore */ }
+        state.ended = true;
+        state.exitCode = 1;
+        try {
+          if (runService) runService.updateRunStatus(runId, 'failed', { force: true });
+        } catch { /* ignore */ }
+        emitSessionEndedIfNeeded(runId, 'spawn-failed');
+        if (placedInstructionsDirThisTurn && state.executor && typeof state.executor.rmrf === 'function') {
+          Promise.resolve(state.executor.rmrf(placedInstructionsDirThisTurn)).catch(() => { /* best-effort */ });
+        }
+      }
+      throw err;
+    }
   }
 
   /**
@@ -665,26 +784,73 @@ function createCodexAdapter({
     }
   }
 
+  // runTurn is SYNC-returning {accepted} on purpose (P4-S3a). spawnOneTurn is
+  // async (a remote-pod turn awaits the ssh spawn), but every REFUSAL path is
+  // synchronously knowable — no/ended session, a turn already in flight, and an
+  // invalid mcpConfig (flatten is a pure sync function). We decide `accepted`
+  // from those sync checks and then DRIVE the (possibly-async) spawn. This keeps
+  // the sync caller contract (conversationService.sendToManagerSlot reads
+  // result.accepted synchronously and must NOT false-accept a refusal — the
+  // earlier thenable-optimistic approach did, because refusals RESOLVE
+  // {accepted:false} rather than reject, so a .catch never fired). Codex P4-S3a
+  // R2 review.
   function runTurn(runId, { text } = {}) {
     const state = sessions.get(runId);
     if (!state) return { accepted: false };
     if (state.ended) return { accepted: false };
-    try {
-      // Record user_input event BEFORE spawning the turn so the UI shows
-      // the message immediately (parity with streamJsonEngine/claudeAdapter).
-      if (runService && text) {
+    // Turn already in flight — Codex turns are not concurrent (mirrors the
+    // spawnOneTurn guard, but decided synchronously so accepted is truthful).
+    if (state.currentChild || state.turnStarting) return { accepted: false };
+    // Fail-closed mcpConfig pre-check: validate synchronously so an invalid
+    // config REFUSES the turn (accepted:false) here rather than surfacing after
+    // the caller already committed. Emission mirrors spawnOneTurn's fail-closed.
+    if (state.mcpConfig) {
+      try {
+        flattenMcpToCodexArgs(state.mcpConfig);
+      } catch (err) {
+        emitNormalized(runId, NORMALIZED_EVENT_TYPES.TURN_FAILED, buildPayload({
+          turnIndex: state.turnIndex,
+          summaryText: `mcpConfig invalid: ${err.message}`,
+          hasRawStored: RAW_EVENTS_ENABLED,
+          data: { kind: 'mcp_invalid', error: err.message },
+        }));
+        state.ended = true;
         try {
-          runService.addRunEvent(runId, 'user_input', JSON.stringify({ text: text.slice(0, 5000) }));
-        } catch (err) {
-          console.warn(`[codexAdapter] user_input event failed for ${runId}: ${err.message}`);
-        }
+          if (runService) runService.updateRunStatus(runId, 'failed', { force: true });
+        } catch { /* ignore */ }
+        state.exitCode = 1;
+        emitSessionEndedIfNeeded(runId, 'mcp-invalid');
+        return { accepted: false };
       }
-      spawnOneTurn(runId, text || '');
-      return { accepted: true };
+    }
+    // Record user_input BEFORE spawning so the UI shows the message immediately
+    // (parity with streamJsonEngine/claudeAdapter).
+    if (runService && text) {
+      try {
+        runService.addRunEvent(runId, 'user_input', JSON.stringify({ text: text.slice(0, 5000) }));
+      } catch (err) {
+        console.warn(`[codexAdapter] user_input event failed for ${runId}: ${err.message}`);
+      }
+    }
+    // Accept the turn and drive the spawn. LOCAL runs synchronously in THIS
+    // frame (the fake spawn / real child is created before we return, so sync
+    // arg-inspection tests + composer side-effects still observe it); REMOTE
+    // proceeds async and is fire-and-forget — its outcome/failure surfaces via
+    // run status + SESSION_ENDED events (spawnOneTurn already marks + emits).
+    let spawnResult;
+    try {
+      spawnResult = spawnOneTurn(runId, text || '');
     } catch (err) {
-      console.warn(`[codexAdapter] runTurn failed for ${runId}: ${err.message}`);
+      // spawnOneTurn is async so it should not throw synchronously, but guard.
+      console.warn(`[codexAdapter] runTurn spawn failed for ${runId}: ${err.message}`);
       return { accepted: false };
     }
+    if (spawnResult && typeof spawnResult.then === 'function') {
+      spawnResult.catch((err) => {
+        console.warn(`[codexAdapter] turn spawn rejected for ${runId}: ${err && err.message}`);
+      });
+    }
+    return { accepted: true };
   }
 
   function cancelTurn(runId) {
@@ -702,6 +868,11 @@ function createCodexAdapter({
   function detectExitCode(runId) {
     const state = sessions.get(runId);
     if (!state) return null;
+    // Prefer the tracked terminal exit code (nonzero on child-exit failure /
+    // mcp-flatten / remote-spawn rejection) so a probeActive() liveness sweep
+    // preserves 'failed' instead of forcing 'completed'. Fall back to 0 for a
+    // session ended without a recorded code (e.g. explicit disposeSession).
+    if (state.exitCode != null) return state.exitCode;
     return state.ended ? 0 : null;
   }
 
@@ -726,17 +897,20 @@ function createCodexAdapter({
    */
   function disposeSession(runId) {
     const state = sessions.get(runId);
-    if (!state) return;
+    if (!state) return Promise.resolve();
     state.ended = true;
     if (state.currentChild) {
       try { state.currentChild.kill('SIGTERM'); } catch { /* ignore */ }
     }
-    // Best-effort cleanup of the temp dir.
-    if (state.tmpDir) {
-      fsp.rm(state.tmpDir, { recursive: true, force: true }).catch(() => { /* ignore */ });
-    }
     emitSessionEndedIfNeeded(runId, 'dispose');
     sessions.delete(runId);
+    // Best-effort cleanup of the executor-placed instructions dir. Remote
+    // executors may implement rmrf over SSH; the default local executor uses
+    // fsp.rm.
+    if (state.instructionsDir && state.executor && typeof state.executor.rmrf === 'function') {
+      return Promise.resolve(state.executor.rmrf(state.instructionsDir)).catch(() => { /* ignore */ });
+    }
+    return Promise.resolve();
   }
 
   function getUsage(runId) {
