@@ -44,16 +44,19 @@ function withoutBaseUrl(t) {
   });
 }
 
-function makeAdapter() {
+function makeAdapter(type = 'codex') {
   const starts = [];
   const disposes = [];
   return {
-    type: 'codex',
-    capabilities: { persistentProcess: false, supportsResume: true },
+    type,
+    capabilities: { persistentProcess: type === 'claude-code', supportsResume: true },
     startSession(runId, opts) {
       starts.push({ runId, opts });
       if (opts.resumeThreadId && typeof opts.onThreadStarted === 'function') {
         opts.onThreadStarted(opts.resumeThreadId);
+      }
+      if (opts.resumeSessionId && typeof opts.onSessionStarted === 'function') {
+        opts.onSessionStarted(opts.resumeSessionId);
       }
       return { sessionRef: { resumedThreadId: opts.resumeThreadId || null } };
     },
@@ -379,6 +382,137 @@ test('boot resume uses remote node executor, nodePrefix, pod cwd, and thread aff
   assert.ok(warning, 'boot resume should record remote localhost base URL warning');
 });
 
+test('boot resume uses remote node executor, nodePrefix, pod cwd, and Claude session affinity', async (t) => {
+  withoutBaseUrl(t);
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const remoteExecutor = { remote: 'claude-boot' };
+  const realNodeService = createNodeService(db, { localExecutor: { local: true } });
+  createSshNode(realNodeService, 'nodeA');
+  const nodeService = wrapNodeService(realNodeService, { executor: remoteExecutor });
+  const registry = createManagerRegistry({ runService });
+  const adapter = makeAdapter('claude-code');
+  const factory = wireFactory(adapter);
+  const top = runService.createRun({ is_manager: true, manager_adapter: 'claude-code', prompt: 'top' });
+  runService.updateRunStatus(top.id, 'completed', { force: true });
+  registry.setActive('top', top.id, makeAdapter('claude-code'));
+  const conversationService = createConversationService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: factory,
+    lifecycleService: null,
+  });
+  const project = projectService.createProject({
+    name: 'claude-boot',
+    preferred_pm_adapter: 'claude',
+    directory: '/workspace/claude-boot',
+    node_id: 'nodeA',
+  });
+  projectBriefService.setPmThread(project.id, {
+    pm_thread_id: 'sess-boot',
+    pm_adapter: 'claude',
+    pm_thread_node_id: 'nodeA',
+    pm_thread_cwd: '/workspace/claude-boot',
+  });
+  const run = runService.createRun({
+    is_manager: true,
+    manager_adapter: 'claude-code',
+    manager_layer: 'operator',
+    conversation_id: `operator:${project.id}`,
+    prompt: 'boot resume claude',
+    node_id: 'nodeA',
+  });
+  runService.updateRunStatus(run.id, 'running', { force: true });
+
+  createManagerRouter({
+    runService,
+    managerAdapterFactory: factory,
+    managerRegistry: registry,
+    conversationService,
+    projectService,
+    projectBriefService,
+    nodeService,
+    authResolverOpts: {},
+  });
+
+  assert.equal(adapter._starts.length, 1);
+  assert.equal(adapter._starts[0].runId, run.id);
+  assert.equal(adapter._starts[0].opts.resumeSessionId, 'sess-boot');
+  assert.equal(adapter._starts[0].opts.resumeThreadId, undefined);
+  assert.equal(adapter._starts[0].opts.executor, remoteExecutor);
+  assert.equal(adapter._starts[0].opts.nodePrefix, '/opt/nodeA/bin');
+  assert.equal(adapter._starts[0].opts.cwd, '/workspace/claude-boot');
+  assert.deepEqual(adapter._starts[0].opts.env, {});
+  const warning = runService.getRunEvents(run.id).find(e => e.event_type === 'operator:remote_base_url_localhost');
+  assert.ok(warning, 'Claude boot resume should record remote localhost base URL warning');
+});
+
+test('boot resume clears a Claude session bound to a different node and leaves it for lazy fresh spawn', async (t) => {
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const baseBriefService = createProjectBriefService(db);
+  const projectBriefService = wrapBriefService(baseBriefService);
+  const realNodeService = createNodeService(db, { localExecutor: { local: true } });
+  createSshNode(realNodeService, 'nodeA');
+  createSshNode(realNodeService, 'nodeB');
+  const nodeService = wrapNodeService(realNodeService, { executor: { remote: 'nodeB' } });
+  const registry = createManagerRegistry({ runService });
+  const adapter = makeAdapter('claude-code');
+  const factory = wireFactory(adapter);
+  const top = runService.createRun({ is_manager: true, manager_adapter: 'claude-code', prompt: 'top' });
+  runService.updateRunStatus(top.id, 'completed', { force: true });
+  registry.setActive('top', top.id, makeAdapter('claude-code'));
+  const conversationService = createConversationService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: factory,
+    lifecycleService: null,
+  });
+  const project = projectService.createProject({
+    name: 'claude-boot-rebind',
+    preferred_pm_adapter: 'claude',
+    directory: '/workspace/claude-boot-rebind',
+    node_id: 'nodeB',
+  });
+  baseBriefService.setPmThread(project.id, {
+    pm_thread_id: 'sess-on-node-a',
+    pm_adapter: 'claude',
+    pm_thread_node_id: 'nodeA',
+    pm_thread_cwd: '/workspace/old',
+  });
+  const run = runService.createRun({
+    is_manager: true,
+    manager_adapter: 'claude-code',
+    manager_layer: 'operator',
+    conversation_id: `operator:${project.id}`,
+    prompt: 'boot resume claude mismatch',
+    node_id: 'nodeB',
+  });
+  runService.updateRunStatus(run.id, 'running', { force: true });
+
+  createManagerRouter({
+    runService,
+    managerAdapterFactory: factory,
+    managerRegistry: registry,
+    conversationService,
+    projectService,
+    projectBriefService,
+    nodeService,
+    authResolverOpts: {},
+  });
+
+  assert.equal(adapter._starts.length, 0);
+  assert.deepEqual(projectBriefService._clearCalls, [project.id]);
+  assert.equal(baseBriefService.getBrief(project.id).pm_thread_id, null);
+  assert.equal(runService.getRun(run.id).status, 'stopped');
+  assert.deepEqual(adapter._disposes, [run.id]);
+  const event = runService.getRunEvents(run.id).find(e => e.event_type === 'operator:thread_rebind_reset');
+  assert.deepEqual(JSON.parse(event.payload_json), { from_node: 'nodeA', to_node: 'nodeB' });
+});
+
 test('remote Operator spawns even when control-plane Codex auth is unavailable (pod authenticates)', async (t) => {
   // A remote Operator authenticates on the POD (~/.codex), not the control
   // plane, and gets env:{} — so control-plane canAuth=false must NOT block it.
@@ -420,4 +554,53 @@ test('local Operator still fails closed when control-plane Codex auth is unavail
   const noAuth = () => ({ canAuth: false, env: {}, sources: [], diagnostics: [] });
   const spawn = makeSpawn({ runService, registry, adapter, projectService, projectBriefService, nodeService, resolveManagerAuth: noAuth });
   assert.throws(() => spawn.ensureLiveOperator({ projectId: project.id }), /PM auth unavailable/);
+});
+
+test('P5-S4c: LOCAL Claude operator boot-resume uses adapter auth (not hardcoded codex) + resumeSessionId', async (t) => {
+  // The operator boot-resume loop now admits claude-code (P5-S4c); auth must be
+  // resolved for the run's ACTUAL adapter, not a hardcoded 'codex' (Codex
+  // BLOCKER). Covers the LOCAL claude boot path the remote-only tests missed
+  // (remote skips auth via isRemoteNode||canAuth, which masked the bug).
+  const prevTok = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  process.env.CLAUDE_CODE_OAUTH_TOKEN = 'test-claude-tok';
+  t.after(() => {
+    if (prevTok === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    else process.env.CLAUDE_CODE_OAUTH_TOKEN = prevTok;
+  });
+  withoutBaseUrl(t);
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const nodeService = createNodeService(db, { localExecutor: { local: true } }); // local (no ssh node)
+  const registry = createManagerRegistry({ runService });
+  const adapter = makeAdapter('claude-code');
+  const factory = wireFactory(adapter);
+  const top = runService.createRun({ is_manager: true, manager_adapter: 'claude-code', prompt: 'top' });
+  runService.updateRunStatus(top.id, 'completed', { force: true });
+  registry.setActive('top', top.id, makeAdapter('claude-code'));
+  const conversationService = createConversationService({
+    runService, managerRegistry: registry, managerAdapterFactory: factory, lifecycleService: null,
+  });
+  const project = projectService.createProject({
+    name: 'claude-boot-local', preferred_pm_adapter: 'claude', directory: '/tmp/claude-boot-local',
+  });
+  projectBriefService.setPmThread(project.id, {
+    pm_thread_id: 'sess-local', pm_adapter: 'claude', pm_thread_node_id: null,
+  });
+  const run = runService.createRun({
+    is_manager: true, manager_adapter: 'claude-code', manager_layer: 'operator',
+    conversation_id: `operator:${project.id}`, prompt: 'boot',
+  });
+  runService.updateRunStatus(run.id, 'running', { force: true });
+
+  createManagerRouter({
+    runService, managerAdapterFactory: factory, managerRegistry: registry,
+    conversationService, projectService, projectBriefService, nodeService, authResolverOpts: {},
+  });
+
+  assert.equal(adapter._starts.length, 1, 'local claude operator boot-resumed');
+  assert.equal(adapter._starts[0].opts.resumeSessionId, 'sess-local');
+  assert.equal(adapter._starts[0].opts.resumeThreadId, undefined);
+  assert.equal(Object.prototype.hasOwnProperty.call(adapter._starts[0].opts, 'executor'), false);
 });

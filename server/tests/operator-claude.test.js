@@ -11,6 +11,7 @@ const { createRunService } = require('../services/runService');
 const { createProjectService } = require('../services/projectService');
 const { createProjectBriefService } = require('../services/projectBriefService');
 const { createManagerRegistry } = require('../services/managerRegistry');
+const { createNodeService } = require('../services/nodeService');
 const { createOperatorSpawnService } = require('../services/operatorSpawnService');
 
 async function mkdb(t) {
@@ -61,6 +62,46 @@ function authOk() {
   return { canAuth: true, env: {}, sources: [], diagnostics: [] };
 }
 
+function wrapBriefService(projectBriefService) {
+  const clearCalls = [];
+  return {
+    getBrief: projectBriefService.getBrief,
+    ensureBrief: projectBriefService.ensureBrief,
+    updateBrief: projectBriefService.updateBrief,
+    setPmThread: projectBriefService.setPmThread,
+    deleteBrief: projectBriefService.deleteBrief,
+    clearPmThread(projectId) {
+      clearCalls.push(projectId);
+      return projectBriefService.clearPmThread(projectId);
+    },
+    _clearCalls: clearCalls,
+  };
+}
+
+function createSshNode(nodeService, id = 'nodeA') {
+  return nodeService.createNode({
+    id,
+    name: id,
+    kind: 'ssh',
+    ssh_host: `${id}.example`,
+    ssh_user: 'runner',
+    exposed_roots: ['/workspace'],
+    can_execute: true,
+    reachable: true,
+    node_prefix: `/opt/${id}/bin`,
+  });
+}
+
+function makeAdapterFactory({ claudeAdapter, codexAdapter }) {
+  return {
+    getAdapter(type) {
+      if (type === 'claude-code') return claudeAdapter;
+      if (type === 'codex') return codexAdapter;
+      throw new Error(`unexpected adapter type ${type}`);
+    },
+  };
+}
+
 test('P5-S4a: resolveOperatorAdapterType maps Claude preferences to claude-code', () => {
   const previousDefault = process.env.PALANTIR_DEFAULT_PM_ADAPTER;
   delete process.env.PALANTIR_DEFAULT_PM_ADAPTER;
@@ -83,7 +124,7 @@ test('P5-S4a: resolveOperatorAdapterType maps Claude preferences to claude-code'
   }
 });
 
-test('P5-S4a: Claude operator spawn marks running from onSessionStarted without persisting pm_thread', async (t) => {
+test('P5-S4c: Claude operator spawn persists local claude_session_id affinity from onSessionStarted', async (t) => {
   const db = await mkdb(t);
   const runService = createRunService(db, null);
   const projectService = createProjectService(db);
@@ -120,12 +161,184 @@ test('P5-S4a: Claude operator spawn marks running from onSessionStarted without 
   const start = claudeAdapter._starts[0];
   assert.equal(typeof start.opts.onSessionStarted, 'function');
   assert.equal(typeof start.opts.onThreadStarted, 'function');
+  assert.equal(start.opts.resumeSessionId, null);
   assert.equal(runService.getRun(result.run.id).status, 'queued');
 
   start.opts.onSessionStarted('sess_claude_1');
 
   assert.equal(runService.getRun(result.run.id).status, 'running');
-  assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, null);
+  const brief = projectBriefService.getBrief(project.id);
+  assert.equal(brief.pm_thread_id, 'sess_claude_1');
+  assert.equal(brief.pm_adapter, 'claude');
+  assert.equal(brief.pm_thread_node_id, null);
+  assert.equal(brief.pm_thread_cwd, null);
+});
+
+test('P5-S4c: Claude lazy-spawn resumes a persisted session on the matching remote node', async (t) => {
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const registry = createManagerRegistry({ runService });
+  const nodeService = createNodeService(db, { localExecutor: { local: true } });
+  createSshNode(nodeService, 'nodeA');
+  const claudeAdapter = makeFakeManagerAdapter('claude-code');
+  const codexAdapter = makeFakeManagerAdapter('codex');
+  const spawn = createOperatorSpawnService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory({ claudeAdapter, codexAdapter }),
+    projectService,
+    projectBriefService,
+    nodeService,
+    resolveManagerAuth: authOk,
+  });
+  const project = projectService.createProject({
+    name: 'claude-resume',
+    preferred_pm_adapter: 'claude',
+    node_id: 'nodeA',
+    directory: '/workspace/claude-resume',
+  });
+  projectBriefService.setPmThread(project.id, {
+    pm_thread_id: 'sessA',
+    pm_adapter: 'claude',
+    pm_thread_node_id: 'nodeA',
+    pm_thread_cwd: '/workspace/claude-resume',
+  });
+  seedTop({ runService, registry, adapter: makeFakeManagerAdapter('claude-code') });
+
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
+
+  assert.equal(result.resumed, true);
+  assert.equal(claudeAdapter._starts[0].opts.resumeSessionId, 'sessA');
+  assert.equal(claudeAdapter._starts[0].opts.resumeThreadId, null);
+  assert.equal(claudeAdapter._starts[0].opts.cwd, '/workspace/claude-resume');
+});
+
+test('P5-S4c: Claude lazy-spawn clears a persisted session bound to a different node', async (t) => {
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const baseBriefService = createProjectBriefService(db);
+  const projectBriefService = wrapBriefService(baseBriefService);
+  const registry = createManagerRegistry({ runService });
+  const nodeService = createNodeService(db, { localExecutor: { local: true } });
+  createSshNode(nodeService, 'nodeA');
+  createSshNode(nodeService, 'nodeB');
+  const claudeAdapter = makeFakeManagerAdapter('claude-code');
+  const codexAdapter = makeFakeManagerAdapter('codex');
+  const spawn = createOperatorSpawnService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory({ claudeAdapter, codexAdapter }),
+    projectService,
+    projectBriefService,
+    nodeService,
+    resolveManagerAuth: authOk,
+  });
+  const project = projectService.createProject({
+    name: 'claude-rebind',
+    preferred_pm_adapter: 'claude',
+    node_id: 'nodeB',
+    directory: '/workspace/claude-rebind',
+  });
+  baseBriefService.setPmThread(project.id, {
+    pm_thread_id: 'sessA',
+    pm_adapter: 'claude',
+    pm_thread_node_id: 'nodeA',
+    pm_thread_cwd: '/workspace/old',
+  });
+  seedTop({ runService, registry, adapter: makeFakeManagerAdapter('claude-code') });
+
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
+
+  assert.equal(result.resumed, false);
+  assert.equal(claudeAdapter._starts[0].opts.resumeSessionId, null);
+  assert.deepEqual(projectBriefService._clearCalls, [project.id]);
+  assert.equal(baseBriefService.getBrief(project.id).pm_thread_id, null);
+  const event = runService.getRunEvents(result.run.id).find(e => e.event_type === 'operator:thread_rebind_reset');
+  assert.deepEqual(JSON.parse(event.payload_json), { from_node: 'nodeA', to_node: 'nodeB' });
+});
+
+test('P5-S4c: Claude lazy-spawn clears a Codex thread instead of resuming it as a session', async (t) => {
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const baseBriefService = createProjectBriefService(db);
+  const projectBriefService = wrapBriefService(baseBriefService);
+  const registry = createManagerRegistry({ runService });
+  const claudeAdapter = makeFakeManagerAdapter('claude-code');
+  const codexAdapter = makeFakeManagerAdapter('codex');
+  const spawn = createOperatorSpawnService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory({ claudeAdapter, codexAdapter }),
+    projectService,
+    projectBriefService,
+    resolveManagerAuth: authOk,
+  });
+  const project = projectService.createProject({ name: 'claude-adapter-mismatch', preferred_pm_adapter: 'claude' });
+  baseBriefService.setPmThread(project.id, {
+    pm_thread_id: 'threadA',
+    pm_adapter: 'codex',
+    pm_thread_node_id: null,
+    pm_thread_cwd: null,
+  });
+  seedTop({ runService, registry, adapter: makeFakeManagerAdapter('claude-code') });
+
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
+
+  assert.equal(result.resumed, false);
+  assert.equal(claudeAdapter._starts[0].opts.resumeSessionId, null);
+  assert.deepEqual(projectBriefService._clearCalls, [project.id]);
+  assert.equal(baseBriefService.getBrief(project.id).pm_thread_id, null);
+});
+
+test('P5-S4c: Codex lazy-spawn resumes only Codex handles and clears Claude sessions', async (t) => {
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const baseBriefService = createProjectBriefService(db);
+  const projectBriefService = wrapBriefService(baseBriefService);
+  const registry = createManagerRegistry({ runService });
+  const claudeAdapter = makeFakeManagerAdapter('claude-code');
+  const codexAdapter = makeFakeManagerAdapter('codex');
+  const spawn = createOperatorSpawnService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory({ claudeAdapter, codexAdapter }),
+    projectService,
+    projectBriefService,
+    resolveManagerAuth: authOk,
+  });
+  seedTop({ runService, registry, adapter: makeFakeManagerAdapter('claude-code') });
+
+  const codexProject = projectService.createProject({ name: 'codex-resume' });
+  baseBriefService.setPmThread(codexProject.id, {
+    pm_thread_id: 'threadA',
+    pm_adapter: 'codex',
+    pm_thread_node_id: null,
+    pm_thread_cwd: null,
+  });
+  const codexResult = spawn.ensureLiveOperator({ projectId: codexProject.id });
+
+  assert.equal(codexResult.resumed, true);
+  assert.equal(codexAdapter._starts[0].opts.resumeThreadId, 'threadA');
+  assert.equal(codexAdapter._starts[0].opts.resumeSessionId, null);
+
+  const mismatchProject = projectService.createProject({ name: 'codex-adapter-mismatch' });
+  baseBriefService.setPmThread(mismatchProject.id, {
+    pm_thread_id: 'sessA',
+    pm_adapter: 'claude',
+    pm_thread_node_id: null,
+    pm_thread_cwd: null,
+  });
+  const mismatchResult = spawn.ensureLiveOperator({ projectId: mismatchProject.id });
+
+  assert.equal(mismatchResult.resumed, false);
+  assert.equal(codexAdapter._starts[1].opts.resumeThreadId, null);
+  assert.deepEqual(projectBriefService._clearCalls, [mismatchProject.id]);
+  assert.equal(baseBriefService.getBrief(mismatchProject.id).pm_thread_id, null);
 });
 
 test('P5-S4a: default Codex operator still starts from onThreadStarted', async (t) => {
@@ -293,4 +506,11 @@ test('P5-S4b: remote node + Claude preference spawns a remote Claude Operator (e
   assert.deepEqual(start.opts.env, {}, 'remote Operator gets a minimal env (no control-plane creds)');
   // Claude uses onSessionStarted for markRunStarted (not codex onThreadStarted).
   assert.equal(typeof start.opts.onSessionStarted, 'function');
+
+  start.opts.onSessionStarted('sess_remote_claude');
+  const brief = projectBriefService.getBrief(project.id);
+  assert.equal(brief.pm_thread_id, 'sess_remote_claude');
+  assert.equal(brief.pm_adapter, 'claude');
+  assert.equal(brief.pm_thread_node_id, 'nodeA');
+  assert.equal(brief.pm_thread_cwd, '/workspace/remote-claude');
 });

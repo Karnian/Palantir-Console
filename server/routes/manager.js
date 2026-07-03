@@ -178,11 +178,11 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       const parsedConv = parseProjectConversationId(r.conversation_id);
       const projectId = parsedConv ? parsedConv.projectId : null;
 
-      if (projectId && adapterType === 'codex' && projectBriefService) {
+      if (projectId && (adapterType === 'codex' || adapterType === 'claude-code') && projectBriefService) {
         try {
           const brief = projectBriefService.getBrief(projectId);
           if (brief && brief.pm_thread_id) {
-            const adapter = managerAdapterFactory.getAdapter('codex');
+            const adapter = managerAdapterFactory.getAdapter(adapterType);
             // We need the active Top for parent-notice routing.
             const activeTopRunId = managerRegistry.getActiveRunId('top');
             if (activeTopRunId) {
@@ -193,9 +193,11 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   ? (nodeService.resolveNode(project) || 'local')
                   : 'local';
                 const isRemoteNode = !!(nodeId && nodeId !== 'local');
+                const briefAdapter = brief.pm_adapter || null;
+                const expectedBriefAdapter = adapterType === 'codex' ? 'codex' : 'claude';
                 const threadNode = brief.pm_thread_node_id ? brief.pm_thread_node_id : null;
-                let resumeThreadId = brief.pm_thread_id;
-                if (resumeThreadId && (threadNode || 'local') !== (nodeId || 'local')) {
+                let resumeHandle = brief.pm_thread_id;
+                if (resumeHandle && (threadNode || 'local') !== (nodeId || 'local')) {
                   try {
                     if (projectBriefService && typeof projectBriefService.clearPmThread === 'function') {
                       projectBriefService.clearPmThread(projectId);
@@ -206,10 +208,20 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   try {
                     runService.addRunEvent(r.id, 'operator:thread_rebind_reset', JSON.stringify({ from_node: threadNode, to_node: nodeId || 'local' }));
                   } catch { /* ignore */ }
-                  resumeThreadId = null;
+                  resumeHandle = null;
                 }
-                if (!resumeThreadId) {
-                  throw new Error('PM thread placement no longer matches project node');
+                if (resumeHandle && briefAdapter !== expectedBriefAdapter) {
+                  try {
+                    if (projectBriefService && typeof projectBriefService.clearPmThread === 'function') {
+                      projectBriefService.clearPmThread(projectId);
+                    }
+                  } catch (err) {
+                    console.warn(`[boot] Failed to clear adapter-mismatched PM thread project=${projectId}: ${err.message}`);
+                  }
+                  resumeHandle = null;
+                }
+                if (!resumeHandle) {
+                  throw new Error('PM session handle is not resumable for this project node/adapter');
                 }
                 let executor;
                 let nodePrefix;
@@ -221,7 +233,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 }
                 const port = process.env.PORT || 4177;
                 const token = process.env.PALANTIR_TOKEN;
-                const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'operator', adapterType: 'codex', specialistAvailable: isSpecialistAvailable() });
+                const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'operator', adapterType, specialistAvailable: isSpecialistAvailable() });
                 // Bake project brief into the system prompt (mirrors operatorSpawnService).
                 const briefSections = [];
                 briefSections.push(`## Project Scope\nname: ${project.name}\nid: ${project.id}${project.directory ? `\ndirectory: ${project.directory}` : ''}${r.id ? `\npm_run_id: ${r.id}` : ''}`);
@@ -242,7 +254,11 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 }
                 briefSections.push('## PM Role\nYou are this project\'s PM (project-scoped dispatcher). Every user turn is either: answer from the brief, dispatch a worker via /execute, or modify an in-flight worker via the worker intervention APIs above. When you record a dispatch audit claim, use the pm_run_id value shown above in the Project Scope section as your pm_run_id envelope field. Stay within this project\'s scope.\n\nWhen spawning workers, choose skill packs that match the task\'s nature. Use your project\'s auto_apply skills as a baseline, and add extra skills via skill_pack_ids when the task needs specialized capabilities beyond the defaults.');
                 const systemPrompt = [baseSystemPrompt, ...briefSections].filter(Boolean).join('\n\n');
-                const authCtx = resolveManagerAuth('codex', authResolverOpts);
+                // Adapter-generic: the boot-resume loop now admits claude-code
+                // (P5-S4c) — resolve auth for the run's ACTUAL adapter, not a
+                // hardcoded 'codex' (a local Claude Operator would otherwise be
+                // stopped/misauthed via Codex auth). (Codex P5-S4c BLOCKER.)
+                const authCtx = resolveManagerAuth(adapterType, authResolverOpts);
                 // A REMOTE Operator authenticates on the pod (~/.codex), not the
                 // control plane — resume it even when control-plane Codex auth is
                 // absent (else a restart would stop a healthy pod Operator).
@@ -262,8 +278,12 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                     // (Mirror of the operatorSpawnService fix; real-Pi finding.)
                     env: isRemoteNode ? {} : spawnEnv,
                     role: 'manager',
-                    resumeThreadId,
                   };
+                  if (adapterType === 'codex') {
+                    startOpts.resumeThreadId = resumeHandle;
+                  } else {
+                    startOpts.resumeSessionId = resumeHandle;
+                  }
                   if (isRemoteNode) {
                     startOpts.executor = executor;
                     startOpts.nodePrefix = nodePrefix;
@@ -272,7 +292,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   managerRegistry.setActive(r.conversation_id, r.id, adapter);
                   try { runService.updateRunStatus(r.id, 'running', { force: true }); } catch { /* ignore */ }
                   resumed = true;
-                  console.log(`[boot] Resumed PM run=${r.id} project=${projectId} thread=${resumeThreadId}`);
+                  console.log(`[boot] Resumed PM run=${r.id} project=${projectId} ${adapterType === 'codex' ? 'thread' : 'session'}=${resumeHandle}`);
                 }
               }
             }
