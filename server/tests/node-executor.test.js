@@ -144,6 +144,12 @@ test('createLocalWorkerChannel kills stream-json first then cli when needed', ()
   assert.deepEqual(streamCalls, [{ engine: 'stream-json', runId: 'r2' }]);
 });
 
+test('createLocalWorkerChannel cleanupRun is an awaitable no-op', async () => {
+  const channel = createLocalWorkerChannel();
+
+  assert.equal(await channel.cleanupRun('r1'), undefined);
+});
+
 test('LocalNodeExecutor worker channel methods fail fast before attachEngines', () => {
   const executor = createLocalNodeExecutor();
   const calls = [
@@ -200,6 +206,13 @@ test('LocalNodeExecutor exposes worker channel after attachEngines', () => {
   assert.equal(executor.kill('cli-run'), true);
   assert.strictEqual(calls[0].spec, cliSpec);
   assert.deepEqual(calls.map((call) => call.type), ['spawn', 'input', 'kill']);
+});
+
+test('LocalNodeExecutor cleanupRun passthrough resolves when worker channel is attached', async () => {
+  const executor = createLocalNodeExecutor();
+  executor.attachEngines({});
+
+  assert.equal(await executor.cleanupRun('r1'), undefined);
 });
 
 test('LocalNodeExecutor.exec resolves success with code and stdout', async () => {

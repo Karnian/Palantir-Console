@@ -122,6 +122,10 @@ function createLocalWorkerChannel({ streamJsonEngine, executionEngine } = {}) {
     return killedByStream;
   }
 
+  function cleanupRun() {
+    return Promise.resolve();
+  }
+
   return {
     spawnWorker,
     ownerOf,
@@ -130,6 +134,7 @@ function createLocalWorkerChannel({ streamJsonEngine, executionEngine } = {}) {
     getOutput,
     sendInput,
     kill,
+    cleanupRun,
   };
 }
 
@@ -231,6 +236,7 @@ function createLocalNodeExecutor({ executionEngine, streamJsonEngine } = {}) {
     getOutput: (...args) => requireWorkerChannel('getOutput').getOutput(...args),
     sendInput: (...args) => requireWorkerChannel('sendInput').sendInput(...args),
     kill: (...args) => requireWorkerChannel('kill').kill(...args),
+    cleanupRun: (...args) => requireWorkerChannel('cleanupRun').cleanupRun(...args),
   };
   return api;
 }

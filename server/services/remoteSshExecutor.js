@@ -206,9 +206,9 @@ function validateWorkerSpec(spec) {
  * primitives build their own scripts and do not go through the public exec
  * allowlist.
  *
- * Remote worker channel: spawnWorker/isAlive/getOutput/detectExitCode/kill are
- * the remote counterpart of executionEngine's tmux worker contract for P3b
- * lifecycle routing through pickExecutor. Status capture is file-based by
+ * Remote worker channel: spawnWorker/ownerOf/isAlive/getOutput/sendInput/
+ * detectExitCode/kill are the remote counterpart of executionEngine's tmux
+ * worker contract for P3b lifecycle routing through pickExecutor. Status capture is file-based by
  * design: tmux capture-pane can be empty after a detached remote session exits,
  * so stdout and exit status are harvested from per-run files under the first
  * exposed_root. Worker binaries such as codex/claude may live outside the pod
@@ -588,7 +588,22 @@ function createRemoteSshNodeExecutor(node, {
     await mkdir(paths.statusDir, { recursive: true });
   }
 
-  async function spawnWorker(runId, spec) {
+  function resolveWorkerSpec(workerRequest) {
+    if (
+      workerRequest
+      && typeof workerRequest === 'object'
+      && Object.prototype.hasOwnProperty.call(workerRequest, 'engine')
+    ) {
+      if (workerRequest.engine !== 'cli') {
+        throw new Error('remote nodes cannot run stream-json/claude workers yet — P5');
+      }
+      return workerRequest.spec;
+    }
+    return workerRequest;
+  }
+
+  async function spawnWorker(runId, workerRequest) {
+    const spec = resolveWorkerSpec(workerRequest);
     validateWorkerSpec(spec);
     const paths = workerPaths(runId);
     const safeCwd = (await assertWithinRoots(spec.cwd)).canonical;
@@ -604,13 +619,17 @@ function createRemoteSshNodeExecutor(node, {
     return { sessionName: paths.sessionName };
   }
 
-  async function isAlive(runId) {
+  async function ownerOf(runId) {
+    return (await isAlive(runId)) ? 'cli' : null;
+  }
+
+  async function isAlive(runId, _engine) {
     const paths = workerPaths(runId);
     const res = await runRemoteCommand('tmux', ['has-session', '-t', paths.sessionName]);
     return res.code === 0;
   }
 
-  async function getOutput(runId, lines = 200) {
+  async function getOutput(runId, lines = 200, _engine) {
     const paths = workerPaths(runId);
     const cappedLines = normalizeWorkerOutputLineLimit(lines);
     try {
@@ -627,7 +646,12 @@ function createRemoteSshNodeExecutor(node, {
     }
   }
 
-  async function detectExitCode(runId) {
+  async function sendInput(_runId, _text) {
+    // Interactive remote input is deferred to P5; P3b codex workers are non-interactive.
+    return false;
+  }
+
+  async function detectExitCode(runId, _engine) {
     const paths = workerPaths(runId);
     let text;
     try {
@@ -643,7 +667,7 @@ function createRemoteSshNodeExecutor(node, {
     return code >= 0 && code <= 255 ? code : null;
   }
 
-  async function kill(runId) {
+  async function kill(runId, _engine) {
     const paths = workerPaths(runId);
     const res = await runRemoteCommand('tmux', ['kill-session', '-t', paths.sessionName]);
     return res.code === 0;
@@ -657,9 +681,11 @@ function createRemoteSshNodeExecutor(node, {
   return {
     exec,
     spawnWorker,
+    ownerOf,
     isAlive,
-    getOutput,
     detectExitCode,
+    getOutput,
+    sendInput,
     kill,
     cleanupRun,
     fileExists,
