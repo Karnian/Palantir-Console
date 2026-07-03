@@ -921,3 +921,66 @@ test('engine: local sync spawn throw leaves no phantom process', () => {
   assert.equal(engine.isAlive('run-local-throw'), false);
   assert.equal(engine.getSessionId('run-local-throw'), null);
 });
+
+test('P5-S4b: sendInput before a remote child attaches is buffered and flushed on attach', async () => {
+  // A REMOTE manager spawn is async (fire-and-forget) — a message sent right
+  // after startSession lands before the ssh child resolves. sendInput must
+  // buffer it (accepted:true) and attachChild must flush it in order. Real-Pi
+  // caught this (local sync spawn never hits it).
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const rs = makeRunService();
+  const child = createFakeRemoteChild();
+  let resolveSpawn;
+  const executor = {
+    spawnInteractive() { return new Promise((r) => { resolveSpawn = () => r(child); }); },
+  };
+  const engine = createStreamJsonEngine({ runService: rs });
+  engine.spawnAgent('run-buf', {
+    cwd: '/pod/ws', systemPrompt: 'sp', isManager: true, executor, nodePrefix: '/pod/bin',
+  });
+  await new Promise((r) => setImmediate(r)); // spawnInteractive called; child still pending
+
+  assert.equal(engine.sendInput('run-buf', 'first message'), true, 'buffered send is accepted');
+  assert.equal(child.stdin.writes.length, 0, 'nothing written before the child attaches');
+
+  resolveSpawn();
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(child.stdin.writes.length, 1, 'buffered message flushed on attach');
+  assert.deepEqual(JSON.parse(child.stdin.writes[0].trim()), {
+    type: 'user', message: { role: 'user', content: 'first message' },
+  });
+});
+
+test('P5-S4b: dispose before a remote child attaches drops buffered input (killPending terminal)', async () => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const rs = makeRunService();
+  const child = createFakeRemoteChild();
+  let resolveSpawn;
+  const executor = { spawnInteractive() { return new Promise((r) => { resolveSpawn = () => r(child); }); } };
+  const engine = createStreamJsonEngine({ runService: rs });
+  engine.spawnAgent('run-kill-buf', { cwd: '/pod/ws', systemPrompt: 'sp', isManager: true, executor, nodePrefix: '/pod/bin' });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(engine.sendInput('run-kill-buf', 'buffered'), true);       // buffered pre-attach
+  assert.equal(engine.kill('run-kill-buf'), true);                        // dispose → killPending + clears buffer
+  assert.equal(engine.sendInput('run-kill-buf', 'after kill'), false);    // killPending is terminal
+  resolveSpawn();
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(child.killSignal, 'SIGTERM');       // freshly-attached child signalled
+  assert.equal(child.stdin.writes.length, 0);      // NO buffered input flushed to a disposed operator
+});
+
+test('P5-S4b: pending input buffer is bounded on a hung remote spawn', async () => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const rs = makeRunService();
+  const executor = { spawnInteractive() { return new Promise(() => {}); } }; // never resolves (hung node)
+  const engine = createStreamJsonEngine({ runService: rs });
+  engine.spawnAgent('run-cap', { cwd: '/pod/ws', systemPrompt: 'sp', isManager: true, executor, nodePrefix: '/pod/bin' });
+  await new Promise((r) => setImmediate(r));
+  let accepted = 0;
+  for (let i = 0; i < 40; i += 1) { if (engine.sendInput('run-cap', `msg ${i}`)) accepted += 1; }
+  assert.ok(accepted > 0 && accepted <= 32, `pending buffer capped at 32 (accepted ${accepted})`);
+  assert.equal(engine.sendInput('run-cap', 'overflow'), false, 'beyond cap → rejected');
+});

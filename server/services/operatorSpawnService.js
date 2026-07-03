@@ -189,21 +189,10 @@ function createOperatorSpawnService({
       : 'local';
     const isRemoteNode = !!(nodeId && nodeId !== 'local');
 
-    // P5-S4a scope gate: a Claude Operator is validated LOCALLY only. A remote
-    // (pod) Claude Operator is S4b — the executor/nodePrefix routing below is
-    // adapter-generic (from P4-S3b), so without this gate a remote-bound project
-    // with preferred_pm_adapter='claude' would silently spawn an UNVALIDATED
-    // remote Claude manager. Fail closed until S4b enables + validates it on a
-    // real pod. (No existing deployment is remote+claude — this is a new config.)
-    if (isRemoteNode && adapterType === 'claude-code') {
-      const err = new Error(
-        `Remote Claude Operator is not yet supported (Fleet P5-S4b). `
-        + `Project ${projectId} is bound to node '${nodeId}' with preferred_pm_adapter='claude'. `
-        + `Use a local operator, or set the project's operator to Codex for remote nodes.`,
-      );
-      err.httpStatus = 409;
-      throw err;
-    }
+    // P5-S4b: remote (pod) Claude Operators are now ENABLED + validated on a real
+    // pod. The executor/nodePrefix routing below is adapter-generic (P4-S3b) and
+    // the persistent Claude stream-json runs over the ssh duplex (P5-S0); the
+    // S4a fail-closed gate that blocked isRemoteNode && 'claude-code' is removed.
 
     // Resolve env_allowlist and mcp_tools from the agent profile of the same
     // type if one exists — mirrors routes/manager.js /start behavior. We do
