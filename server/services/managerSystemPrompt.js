@@ -75,8 +75,8 @@ function buildCommonBase({ port, token, layer = 'top', adapterType, specialistAv
 }
 
 function _buildCommonBaseInner({ base, token, layer, adapterType, specialistAvailable = false }) {
-  // P4-7: auth variable kept for backward-compat with PM layer docs
-  // but curl examples are replaced with WebFetch-friendly format.
+  // P4-7 kept the auth variable for backward-compat with PM layer docs.
+  // Fleet P5 restores curl examples for curl-capable manager adapters.
 
   const layerNote = isProjectLayer(layer)
     ? `\n\nYou are running as a **project-scoped PM**. You own dispatch decisions within your project, and you may modify in-flight worker plans via the worker intervention APIs (cancel, input, status patch) when the user or conditions require a plan change.
@@ -158,8 +158,8 @@ do not confuse them:
     : `IMPORTANT: NEVER call /execute without explicit user approval. Always confirm before spawning workers.
 Do NOT auto-execute tasks just because their status is in_progress — status alone does not mean "run an agent".`;
 
-  // Curl templates for Codex adapter
-  const curlNote = adapterType === 'codex'
+  // Curl templates for curl-capable manager adapters.
+  const curlNote = (adapterType === 'codex' || adapterType === 'claude-code')
     ? `Use curl (via Bash) to query the API.
 \`\`\`
 # GET
@@ -177,10 +177,11 @@ curl -s -X DELETE ${base}/api/tasks/TASK_ID${token ? ` -H "Authorization: Bearer
     : `Use WebFetch to query it (do NOT use Bash with curl — curl is not in your tool allowlist).`;
 
   // Operator specialist mid-turn delegation (MD-1). Emitted ONLY when the route
-  // is actually mounted (specialistAvailable) AND this manager can POST — today
-  // only the curl-capable Codex adapter, since Claude's WebFetch cannot POST a
-  // JSON body. `originRunId` = this manager's OWN run id (PM already has its
-  // pm_run_id in the project section; Top run-id exposure is a later slice).
+  // is actually mounted (specialistAvailable) AND this slice's adapter gate
+  // allows it. Fleet P5 gives Claude managers curl for normal dispatch POSTs,
+  // but mid-turn specialist delegation stays Codex-only until the MD follow-up.
+  // `originRunId` = this manager's OWN run id (PM already has its pm_run_id in
+  // the project section; Top run-id exposure is a later slice).
   const runIdHint = isProjectLayer(layer)
     ? 'your pm_run_id (shown in your project section)'
     : 'your top_run_id (shown in the Manager Identity section)';
