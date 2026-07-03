@@ -306,7 +306,7 @@ test('sendAgentInput: delivers input to active run via executionEngine', async (
   const profile = seedProfile(db, { command: 'codex' });
   const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'start' });
 
-  const sent = lc.sendAgentInput(run.id, 'user reply');
+  const sent = await lc.sendAgentInput(run.id, 'user reply');
   assert.equal(sent, true);
   assert.equal(execEngine.inputs[0].text, 'user reply');
 });
@@ -358,7 +358,7 @@ test('sendAgentInput: prefers streamJsonEngine over executionEngine', async (t) 
   const profile = seedProfile(db, { command: 'claude' });
   const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'claude task' });
 
-  lc.sendAgentInput(run.id, 'stream input');
+  await lc.sendAgentInput(run.id, 'stream input');
 
   assert.equal(sje.inputs.length, 1, 'streamJsonEngine received the input');
   assert.equal(execEngine.inputs.length, 0, 'executionEngine did not receive the input');
@@ -386,7 +386,7 @@ test('checkHealth: skips manager runs (is_manager guard)', async (t) => {
   const mgrRun = rs.createRun({ is_manager: true, prompt: 'manage', manager_adapter: 'claude-code' });
   rs.updateRunStatus(mgrRun.id, 'running', { force: true });
 
-  lc.checkHealth();
+  await lc.checkHealth();
 
   // executionEngine.isAlive should NOT have been called for the manager run
   // (the guard exits early). The run should still be 'running'.
@@ -413,7 +413,7 @@ test('checkHealth: detects terminated non-manager run and transitions to complet
   const profile = seedProfile(db, { command: 'codex' });
   const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'test' });
 
-  lc.checkHealth();
+  await lc.checkHealth();
 
   const after = rs.getRun(run.id);
   assert.equal(after.status, 'completed');
@@ -453,8 +453,8 @@ test('checkHealth: transitions stale running run to needs_input on idle timeout 
 
   // First health check: records outputHash baseline (prevHash undefined → sets hash, no idle check yet)
   // Second health check: same hash as prev → checks idle timeout → triggers
-  lc.checkHealth();
-  lc.checkHealth();
+  await lc.checkHealth();
+  await lc.checkHealth();
 
   const after = rs.getRun(run.id);
   assert.equal(after.status, 'needs_input', 'idle run transitions to needs_input');
@@ -495,15 +495,15 @@ test('INS-02: sendAgentInput recovers needs_input run back to running', async (t
   const pastTime = new Date(Date.now() - 11 * 60 * 1000).toISOString();
   db.prepare(`UPDATE runs SET started_at = ? WHERE id = ?`).run(pastTime, run.id);
   db.prepare(`UPDATE run_events SET created_at = ? WHERE run_id = ?`).run(pastTime, run.id);
-  lc.checkHealth();
-  lc.checkHealth();
+  await lc.checkHealth();
+  await lc.checkHealth();
 
   const afterIdle = rs.getRun(run.id);
   assert.equal(afterIdle.status, 'needs_input', 'run is needs_input after idle timeout');
 
   // INS-02 core: send input while needs_input → should recover to running
   statusEvents.length = 0; // clear prior status events
-  const sent = lc.sendAgentInput(run.id, 'user response');
+  const sent = await lc.sendAgentInput(run.id, 'user response');
   assert.equal(sent, true, 'sendAgentInput succeeds on needs_input run');
 
   const afterInput = rs.getRun(run.id);
@@ -545,7 +545,7 @@ test('INS-02: sendAgentInput on needs_input — streamJsonEngine first, executio
   // Force needs_input
   rs.updateRunStatus(run.id, 'needs_input', { force: true });
 
-  const sent = lc.sendAgentInput(run.id, 'fallback input');
+  const sent = await lc.sendAgentInput(run.id, 'fallback input');
   assert.equal(sent, true, 'executionEngine fallback succeeds');
   assert.equal(execEngine.inputs.length, 1, 'executionEngine.sendInput was called');
   assert.equal(execEngine.inputs[0].text, 'fallback input');
@@ -577,7 +577,7 @@ test('checkHealth: transitions task to review when all runs complete with succes
   const profile = seedProfile(db, { command: 'codex' });
   await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'single run' });
 
-  lc.checkHealth();
+  await lc.checkHealth();
 
   const updatedTask = ts.getTask(task.id);
   assert.equal(updatedTask.status, 'review', 'task promoted to review after successful run');
@@ -605,7 +605,7 @@ test('cancelRun: transitions running run to cancelled', async (t) => {
   const profile = seedProfile(db, { command: 'codex' });
   const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'go' });
 
-  const cancelled = lc.cancelRun(run.id);
+  const cancelled = await lc.cancelRun(run.id);
   assert.equal(cancelled.status, 'cancelled');
   assert.ok(execEngine.killed.includes(run.id), 'executionEngine.kill was called');
 });
@@ -629,6 +629,6 @@ test('cancelRun: is a no-op for already terminal runs', async (t) => {
   const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'go' });
   rs.updateRunStatus(run.id, 'completed', { force: true });
 
-  const result = lc.cancelRun(run.id);
+  const result = await lc.cancelRun(run.id);
   assert.equal(result.status, 'completed', 'already-terminal run is returned unchanged');
 });

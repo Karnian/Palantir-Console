@@ -610,7 +610,21 @@ function createConversationService({
     // message the worker never actually saw (codex review finding).
     let delivered = false;
     try {
-      delivered = !!lifecycleService.sendAgentInput(workerRunId, text);
+      const result = lifecycleService.sendAgentInput(workerRunId, text);
+      if (result && typeof result.then === 'function') {
+        // Remote-node workers make sendAgentInput return a Promise (P3b-3). A
+        // bare `!!Promise` reads as delivered=true even though remote input is
+        // a P5 stub that resolves false — which would queue a bogus parent
+        // staleness notice for a message the worker never saw. Interactive
+        // input to a remote worker is unsupported in P3b, so fail CLOSED here
+        // (delivered stays false → the check below returns 502). The floating
+        // promise is a no-op stub; swallow any rejection defensively.
+        // (Codex P3b-3 R2 review.)
+        result.catch(() => {});
+        delivered = false;
+      } else {
+        delivered = !!result;
+      }
     } catch (deliverErr) {
       const err = new Error(`failed to deliver input to worker: ${deliverErr.message}`);
       err.httpStatus = 502;
