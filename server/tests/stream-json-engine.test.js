@@ -15,9 +15,11 @@
 const test = require('node:test');
 const { after } = require('node:test');
 const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const { PassThrough } = require('node:stream');
 
 // 모든 테스트 완료 후 남은 엔진의 모든 프로세스를 강제 종료.
 // Manager 모드 fake-claude 는 stdin 이 닫힐 때까지 살아있어서
@@ -46,16 +48,50 @@ const fakeClaudioPath = path.join(__dirname, 'fixtures', 'bin', 'fake-claude-str
 function makeRunService() {
   const events = [];
   const statusUpdates = [];
+  const claudeSessionUpdates = [];
   const runs = new Map();
   return {
     _events: events,
     _statusUpdates: statusUpdates,
+    _claudeSessionUpdates: claudeSessionUpdates,
     addRunEvent(runId, type, data) { events.push({ runId, type, data }); },
     updateRunStatus(runId, status) { statusUpdates.push({ runId, status }); },
     updateRunResult(runId, result) {},
+    updateClaudeSessionId(runId, sessionId) { claudeSessionUpdates.push({ runId, sessionId }); },
     getRun(runId) { return runs.get(runId) || null; },
     _setRun(runId, run) { runs.set(runId, run); },
   };
+}
+
+function createFakeRemoteChild() {
+  const child = new EventEmitter();
+  const stdin = {
+    writes: [],
+    endCalls: 0,
+    destroyed: false,
+    writable: true,
+    writableEnded: false,
+    write(chunk) {
+      this.writes.push(String(chunk));
+      return true;
+    },
+    end() {
+      this.endCalls += 1;
+      this.writableEnded = true;
+      this.writable = false;
+    },
+  };
+  child.pid = 424242;
+  child.stdin = stdin;
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.killSignal = null;
+  child.kill = (signal) => {
+    child.killSignal = signal;
+    child.emit('exit', null, signal);
+    return true;
+  };
+  return child;
 }
 
 /**
@@ -221,6 +257,76 @@ test('engine: spawnAgent throws when cwd does not exist', () => {
     () => engine.spawnAgent('run-bad-cwd', { prompt: 'x', cwd: '/absolutely/nonexistent/dir/12345', isManager: false }),
     (err) => err.message.includes('cwd does not exist'),
   );
+});
+
+test('engine: remote executor uses pod cwd/env/pathPrefix and preserves stream-json stdin', async () => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const rs = makeRunService();
+  const child = createFakeRemoteChild();
+  const spawnCalls = [];
+  const executor = {
+    spawnInteractive(command, args, options) {
+      spawnCalls.push({ command, args, options });
+      return child;
+    },
+  };
+  const engine = createStreamJsonEngine({ runService: rs });
+  const systemPrompt = 'Use the remote pod auth and tools.';
+
+  const result = engine.spawnAgent('run-remote-executor', {
+    cwd: '/pod/ws',
+    systemPrompt,
+    isManager: true,
+    executor,
+    nodePrefix: '/pod/bin',
+  });
+
+  // Remote spawnInteractive is async (a remote realpath guard) — spawnAgent
+  // returns synchronously with pid:null (fire-and-forget); the ssh duplex child
+  // attaches on a later microtask. Drain it before inspecting the spawn call.
+  assert.equal(result.pid, null);
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(spawnCalls.length, 1);
+  assert.equal(spawnCalls[0].command, 'claude');
+  assert.deepEqual(spawnCalls[0].options, {
+    cwd: '/pod/ws',
+    env: {},
+    pathPrefix: '/pod/bin',
+  });
+  assert.ok(spawnCalls[0].args.includes('--input-format'));
+  assert.ok(spawnCalls[0].args.includes('stream-json'));
+  const systemPromptIndex = spawnCalls[0].args.indexOf('--append-system-prompt');
+  assert.notEqual(systemPromptIndex, -1);
+  assert.equal(spawnCalls[0].args[systemPromptIndex + 1], systemPrompt);
+
+  child.stdout.write(JSON.stringify({
+    type: 'system',
+    subtype: 'init',
+    session_id: 'remote-sess',
+    model: 'claude-remote',
+    tools: ['Read'],
+    cwd: '/pod/ws',
+  }) + '\n');
+
+  await waitForEvent(engine, 'run-remote-executor', e => e.type === 'system');
+  assert.equal(engine.getSessionId('run-remote-executor'), 'remote-sess');
+  assert.deepEqual(rs._claudeSessionUpdates, [
+    { runId: 'run-remote-executor', sessionId: 'remote-sess' },
+  ]);
+
+  const ok = engine.sendInput('run-remote-executor', 'hello remote');
+  assert.equal(ok, true);
+  assert.equal(child.stdin.endCalls, 0);
+  assert.equal(child.stdin.writableEnded, false);
+  assert.equal(child.stdin.writes.length, 1);
+  assert.deepEqual(JSON.parse(child.stdin.writes[0].trim()), {
+    type: 'user',
+    message: { role: 'user', content: 'hello remote' },
+  });
+
+  assert.equal(engine.kill('run-remote-executor'), true);
+  assert.equal(child.killSignal, 'SIGTERM');
 });
 
 // ---------------------------------------------------------------------------
@@ -612,4 +718,52 @@ test('engine: isAlive returns false for unknown runId', () => {
   process.env.CLAUDE_BIN = fakeClaudioPath;
   const { engine } = makeEngine();
   assert.equal(engine.isAlive('ghost-run'), false);
+});
+
+test('engine: remote kill before child attaches signals the resolved child (no orphan)', async () => {
+  // A dispose/kill that lands while the async remote spawn is still resolving
+  // must not leave the later-attached ssh child alive and unowned. Codex P5-S0.
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const rs = makeRunService();
+  const child = createFakeRemoteChild();
+  let resolveSpawn;
+  const executor = {
+    spawnInteractive() { return new Promise((r) => { resolveSpawn = () => r(child); }); },
+  };
+  const engine = createStreamJsonEngine({ runService: rs });
+  engine.spawnAgent('run-kill-race', {
+    cwd: '/pod/ws', systemPrompt: 'x', isManager: true, prompt: 'hi', executor, nodePrefix: '/pod/bin',
+  });
+  await new Promise((r) => setImmediate(r)); // let the fire-and-forget call spawnInteractive (still pending)
+  assert.equal(engine.isAlive('run-kill-race'), true); // child not attached yet, but proc exists
+  assert.equal(engine.kill('run-kill-race'), true);    // dispose while child still pending → killPending
+  resolveSpawn();                                       // now the ssh child lands
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  // The core BLOCKER fix: the freshly-landed ssh child is OWNED and SIGNALLED
+  // (not left alive & unowned). It never received the initial prompt.
+  assert.equal(child.killSignal, 'SIGTERM');            // freshly-attached child was signalled
+  assert.equal(child.stdin.writes.length, 0);           // initial prompt skipped
+  // (isAlive after a signal-only exit is a pre-existing streamJsonEngine quirk
+  //  — code===null → exitCode null — addressed separately by S2 liveness.)
+});
+
+test('engine: local sync spawn throw leaves no phantom process', () => {
+  // The proc record is inserted up-front (so a remote async spawn can attach
+  // later); a LOCAL sync throw must remove it — byte-equivalent to before, which
+  // only inserted the record after a successful spawn. Codex P5-S0.
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const rs = makeRunService();
+  const engine = createStreamJsonEngine({ runService: rs });
+  const prev = process.env.CLAUDE_BIN;
+  process.env.CLAUDE_BIN = '/nonexistent/disallowed/claude'; // spawnGuard rejects → sync throw
+  try {
+    assert.throws(() => engine.spawnAgent('run-local-throw', {
+      cwd: process.cwd(), systemPrompt: 'x', isManager: true, prompt: 'hi',
+    }));
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_BIN; else process.env.CLAUDE_BIN = prev;
+  }
+  assert.equal(engine.isAlive('run-local-throw'), false);
+  assert.equal(engine.getSessionId('run-local-throw'), null);
 });
