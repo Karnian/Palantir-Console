@@ -47,8 +47,7 @@
 //        i. Mark the run row started.
 //
 // Not in scope (explicitly deferred to later phases):
-//   - Claude PM resume (Phase 3b — needs streamJsonEngine --resume work)
-//   - routerService deterministic 3-step matcher (Phase 3a spec lists it
+//   - Legacy routerService deterministic 3-step matcher (Phase 3a spec lists it
 //     separately; the UI today sends explicit operator:<projectId> ids so the
 //     matcher isn't on the hot path yet).
 
@@ -241,12 +240,14 @@ function createOperatorSpawnService({
     const brief = projectBriefService
       ? (projectBriefService.getBrief(projectId) || projectBriefService.ensureBrief(projectId))
       : null;
-    let resumeThreadId = brief && brief.pm_thread_id ? brief.pm_thread_id : null;
+    const briefAdapter = brief ? brief.pm_adapter : null;
+    let briefHandle = brief && brief.pm_thread_id ? brief.pm_thread_id : null;
     const threadNode = brief && brief.pm_thread_node_id ? brief.pm_thread_node_id : null;
+    const expectedBriefAdapter = adapterType === 'codex' ? 'codex' : 'claude';
     let threadRebindReset = null;
-    if (resumeThreadId && (threadNode || 'local') !== (nodeId || 'local')) {
+    if (briefHandle && (threadNode || 'local') !== (nodeId || 'local')) {
       threadRebindReset = { from_node: threadNode, to_node: nodeId || 'local' };
-      resumeThreadId = null;
+      briefHandle = null;
       try {
         if (projectBriefService && typeof projectBriefService.clearPmThread === 'function') {
           projectBriefService.clearPmThread(projectId);
@@ -255,6 +256,22 @@ function createOperatorSpawnService({
         log(`clearPmThread failed project=${projectId}: ${err.message}`);
       }
     }
+    if (briefHandle && briefAdapter !== expectedBriefAdapter) {
+      briefHandle = null;
+      try {
+        if (projectBriefService && typeof projectBriefService.clearPmThread === 'function') {
+          projectBriefService.clearPmThread(projectId);
+        }
+      } catch (err) {
+        log(`clearPmThread(adapter mismatch) failed project=${projectId}: ${err.message}`);
+      }
+    }
+    const resumeThreadId = adapterType === 'codex' && briefHandle && briefAdapter === 'codex'
+      ? briefHandle
+      : null;
+    const resumeSessionId = adapterType === 'claude-code' && briefHandle && briefAdapter === 'claude'
+      ? briefHandle
+      : null;
 
     // Create the run row FIRST so we have a stable runId. The runId is
     // baked into the project-scoped system prompt so the PM can
@@ -359,6 +376,21 @@ function createOperatorSpawnService({
     };
     const onSessionStarted = (sessionId) => {
       markPmRunStartedOnce();
+      if (!sessionId) return;
+      // Skip a redundant brief write when we just RESUMED this exact session
+      // (mirrors the codex onThreadStarted guard) — avoids a spurious
+      // updated_at bump on every resume. (Codex P5-S4c NIT.)
+      if (resumeSessionId && resumeSessionId === sessionId) return;
+      try {
+        projectBriefService.setPmThread(projectId, {
+          pm_thread_id: sessionId,
+          pm_adapter: 'claude',
+          pm_thread_node_id: isRemoteNode ? nodeId : null,
+          pm_thread_cwd: isRemoteNode ? cwd : null,
+        });
+      } catch (err) {
+        log(`setPmThread(claude) failed project=${projectId}: ${err.message}`);
+      }
     };
 
     // Spawn. Codex is stateless, so startSession writes the instructions
@@ -394,6 +426,7 @@ function createOperatorSpawnService({
         env: isRemoteNode ? {} : spawnEnv,
         role: 'manager',
         resumeThreadId,
+        resumeSessionId,
         onThreadStarted,
         onSessionStarted,
         mcpTools: pmMcpTools.length > 0 ? pmMcpTools : undefined,
@@ -433,7 +466,7 @@ function createOperatorSpawnService({
     managerRegistry.setActive(slotKey, runId, adapter);
 
     const registered = runService.getRun(runId);
-    return { run: registered, spawned: true, resumed: !!resumeThreadId };
+    return { run: registered, spawned: true, resumed: !!(resumeThreadId || resumeSessionId) };
   }
 
   return { ensureLiveOperator, resolveOperatorAdapterType };
