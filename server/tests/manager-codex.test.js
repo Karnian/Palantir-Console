@@ -750,7 +750,7 @@ test('classifyCodexErrorKind falls back to unknown_error', () => {
 
 // --- P4-7: allowedTools source invariant tests ---
 
-test('P4-7: claudeAdapter allowedTools must NOT include Bash(curl:*)', () => {
+test('Fleet P5: claudeAdapter default manager allowedTools include Bash(curl:*)', () => {
   const { createClaudeAdapter } = require('../services/managerAdapters/claudeAdapter');
   const capturedTools = [];
   const adapter = createClaudeAdapter({
@@ -767,13 +767,13 @@ test('P4-7: claudeAdapter allowedTools must NOT include Bash(curl:*)', () => {
     runService: null,
   });
   adapter.startSession('test-invariant', { prompt: 'hi', cwd: '/tmp' });
-  const hasCurl = capturedTools.some(t => /Bash\(curl/i.test(t));
-  assert.equal(hasCurl, false, 'Bash(curl:*) must not appear in default allowedTools');
-  const hasWebFetch = capturedTools.includes('WebFetch');
-  assert.equal(hasWebFetch, true, 'WebFetch must be in default allowedTools');
+  assert.ok(capturedTools.includes('Bash(curl:*)'), 'Bash(curl:*) must appear in default allowedTools');
+  assert.ok(capturedTools.includes('Bash(jq:*)'), 'Bash(jq:*) must remain in default allowedTools');
+  assert.ok(capturedTools.includes('Read'), 'Read must remain in default allowedTools');
+  assert.ok(capturedTools.includes('WebFetch'), 'WebFetch must remain in default allowedTools');
 });
 
-test('P4-7: source invariant — no Bash(curl string literal in claudeAdapter.js baseTools', () => {
+test('Fleet P5: source invariant — Bash(curl string literal exists in claudeAdapter.js baseTools', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'managerAdapters', 'claudeAdapter.js'), 'utf-8');
   // Find the baseTools array definition and extract only the string literals
   // (ignoring comments that may reference Bash(curl in historical context).
@@ -781,14 +781,41 @@ test('P4-7: source invariant — no Bash(curl string literal in claudeAdapter.js
   assert.ok(toolsSection, 'baseTools array should exist in claudeAdapter.js');
   const stringLiterals = toolsSection[1].match(/'[^']*'/g) || [];
   const hasCurlLiteral = stringLiterals.some(s => s.includes('Bash(curl'));
-  assert.equal(hasCurlLiteral, false, 'Bash(curl must not appear as a string literal in baseTools array');
+  assert.equal(hasCurlLiteral, true, 'Bash(curl must appear as a string literal in baseTools array');
 });
 
-test('P4-7: system prompt no longer uses curl examples', () => {
+test('P4-7: system prompt fallback for non-curl adapters does not use curl examples', () => {
   const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
   const out = buildManagerSystemPrompt({ adapter: null, port: 4177, token: 'tok' });
   assert.match(out, /WebFetch/, 'system prompt should mention WebFetch');
   assert.doesNotMatch(out, /curl -s/, 'system prompt should not contain curl -s examples');
+});
+
+test('Fleet P5: claude-code manager prompt emits curl POST templates', () => {
+  const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
+  const out = buildManagerSystemPrompt({ adapter: null, port: 4177, token: 'tok', layer: 'operator', adapterType: 'claude-code' });
+  assert.match(out, /curl -s -X POST .*\/api\/tasks/, 'Claude manager prompt must include task POST curl template');
+  assert.doesNotMatch(out, /do NOT use Bash with curl/, 'Claude manager prompt must not forbid curl');
+});
+
+test('Fleet P5: codex manager curl section remains byte-identical', () => {
+  const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
+  const out = buildManagerSystemPrompt({ adapter: null, port: 4177, token: 'tok', layer: 'operator', adapterType: 'codex' });
+  const expected = `Use curl (via Bash) to query the API.
+\`\`\`
+# GET
+curl -s http://localhost:4177/api/runs -H "Authorization: Bearer tok" | head -c 2000
+
+# POST (create/execute)
+curl -s -X POST http://localhost:4177/api/tasks -H "Authorization: Bearer tok" -H "Content-Type: application/json" -d '{"title":"...","project_id":"..."}'
+
+# PATCH (update)
+curl -s -X PATCH http://localhost:4177/api/tasks/TASK_ID/status -H "Authorization: Bearer tok" -H "Content-Type: application/json" -d '{"status":"done"}'
+
+# DELETE
+curl -s -X DELETE http://localhost:4177/api/tasks/TASK_ID -H "Authorization: Bearer tok"
+\`\`\``;
+  assert.ok(out.includes(expected), 'Codex curl template block must remain byte-identical');
 });
 
 test('ClaudeAdapter exposes Claude guardrails section', () => {

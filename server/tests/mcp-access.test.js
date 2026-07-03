@@ -178,8 +178,8 @@ test('claudeAdapter.startSession — mcpTools merged into base allowedTools', ()
   assert.ok(Array.isArray(capturedOpts.allowedTools), 'allowedTools should be an array');
   // Must contain base tools
   assert.ok(capturedOpts.allowedTools.includes('Read'), 'should include Read');
-  // P4-7: Bash(curl:*) removed — WebFetch covers HTTP needs
-  assert.ok(!capturedOpts.allowedTools.includes('Bash(curl:*)'), 'should NOT include Bash(curl:*)');
+  assert.ok(capturedOpts.allowedTools.includes('Bash(curl:*)'), 'should include Bash(curl:*)');
+  assert.ok(capturedOpts.allowedTools.includes('Bash(jq:*)'), 'should include Bash(jq:*)');
   assert.ok(capturedOpts.allowedTools.includes('WebFetch'), 'should include WebFetch');
   // Must contain MCP tools
   assert.ok(capturedOpts.allowedTools.includes('mcp__slack__*'), 'should include mcp__slack__*');

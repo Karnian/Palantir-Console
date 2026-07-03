@@ -3,7 +3,8 @@
 // Mid-turn specialist delegation (MD-1): the flag-gated, adapter-gated specialist
 // consultation section in the manager system prompt. Unit tests on the builder —
 // the section must appear ONLY when the route is actually available AND the manager
-// can POST (Codex/curl; Claude's WebFetch cannot POST JSON).
+// passes the slice-specific specialist gate. Fleet P5 gives Claude managers curl
+// for normal dispatch POSTs, but specialist delegation remains Codex-only.
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -36,8 +37,8 @@ test('ABSENT when route not available (flag off / backend missing)', () => {
   assert.doesNotMatch(p, /\/api\/operator\/specialist/);
 });
 
-test('ABSENT for non-codex adapter even when available (Claude WebFetch cannot POST)', () => {
-  const p = buildManagerSystemPrompt({ ...base, layer: 'top', adapterType: 'claude', specialistAvailable: true });
+test('ABSENT for non-codex adapter even when available', () => {
+  const p = buildManagerSystemPrompt({ ...base, layer: 'top', adapterType: 'claude-code', specialistAvailable: true });
   assert.doesNotMatch(p, HEADING);
 });
 

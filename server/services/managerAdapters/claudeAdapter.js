@@ -210,7 +210,7 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
    * Returns { sessionRef } where sessionRef is the spawn result (pid, etc).
    *
    * v3 Phase 0: capability diet. Manager role does NOT get Write/Edit tools,
-   * and Bash is restricted to a safe-command allowlist (curl, jq, cat, ls, pwd).
+   * and Bash is restricted to a safe-command allowlist (curl, jq, ls, pwd).
    * The manager's job is dispatch/routing, not direct file modification.
    * Substantial edit work is delegated to workers via POST /api/tasks/:id/execute.
    *
@@ -227,17 +227,16 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
     const state = getState(runId);
     state.onSessionStarted = typeof onSessionStarted === 'function' ? onSessionStarted : null;
     const baseTools = allowedTools || [
-      // Bash restricted to commands whose *primary* operation is read-only
-      // and whose *typical usage* does not write files. Excluded: cat, echo,
-      // tee, sed, awk, python, node — all commonly used with redirection or
-      // inline write flags. File reading goes through the Read tool, not Bash.
+      // Bash restricted to manager dispatch helpers. Excluded: cat, echo, tee,
+      // sed, awk, python, node — all commonly used with redirection or inline
+      // write flags. File reading goes through the Read tool, not Bash.
       //
-      // P4-7: Bash(curl:*) REMOVED. Bash(cmd:*) patterns match only on command
-      // name, not full shell string — `curl ... > file` could write arbitrary
-      // files, bypassing the capability diet. WebFetch covers HTTP needs
-      // without shell access. jq/ls/pwd are genuinely read-only in their
-      // primary operation and kept for convenience.
-      'Bash(jq:*)', 'Bash(ls:*)', 'Bash(pwd:*)',
+      // Fleet P5: Bash(curl:*) is manager-only so Top/Operator managers can
+      // POST to the console API for task create/execute, dispatch audit, and
+      // delegation. WebFetch is GET-only. The curl redirect-write risk is
+      // accepted for server-owned managers; claudeAdapter is manager-only and
+      // this is still stricter than Codex manager sandbox bypass.
+      'Bash(curl:*)', 'Bash(jq:*)', 'Bash(ls:*)', 'Bash(pwd:*)',
       'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
     ];
     // Merge MCP tool patterns (from agent profile capabilities_json.mcp_tools)
