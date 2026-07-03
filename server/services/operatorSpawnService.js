@@ -54,7 +54,7 @@
 //     separately; the UI today sends explicit pm:<projectId> ids so the
 //     matcher isn't on the hot path yet).
 
-const { resolveManagerAuth, buildManagerSpawnEnv } = require('./authResolver');
+const { resolveManagerAuth: defaultResolveManagerAuth, buildManagerSpawnEnv } = require('./authResolver');
 const {
   buildManagerSystemPrompt,
   buildInitialUserContext,
@@ -71,8 +71,10 @@ function createOperatorSpawnService({
   projectBriefService,
   agentProfileService, // optional — used for env_allowlist resolution
   skillPackService,    // optional — Phase 2: inject project skill pack list into PM prompt
+  nodeService,         // optional — Fleet P4: run Operators on the project's bound node
   isSpecialistAvailable = () => false, // MD-1: mid-turn specialist delegation prompt gate
   authResolverOpts = {},
+  resolveManagerAuth = defaultResolveManagerAuth, // optional DI — tests inject to force canAuth
   logger,
 }) {
   const log = logger || ((msg) => console.log(`[pmSpawn] ${msg}`));
@@ -182,6 +184,10 @@ function createOperatorSpawnService({
 
     const adapterType = resolveOperatorAdapterType(project);
     const adapter = managerAdapterFactory.getAdapter(adapterType);
+    const nodeId = (nodeService && typeof nodeService.resolveNode === 'function')
+      ? (nodeService.resolveNode(project) || 'local')
+      : 'local';
+    const isRemoteNode = !!(nodeId && nodeId !== 'local');
 
     // Resolve env_allowlist and mcp_tools from the agent profile of the same
     // type if one exists — mirrors routes/manager.js /start behavior. We do
@@ -213,7 +219,12 @@ function createOperatorSpawnService({
     } catch { /* ignore — fall through to defaults */ }
 
     const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
-    if (!authCtx.canAuth) {
+    // A REMOTE Operator authenticates on the POD (its own ~/.codex), not the
+    // control plane, and gets env:{} at runtime — so control-plane Codex auth is
+    // irrelevant and must NOT preflight-block a remote spawn (the pod may be
+    // logged in while the controller has no CODEX_API_KEY/~/.codex). Local
+    // Operators still require it. (Codex S3b review; matches the env:{} fix.)
+    if (!isRemoteNode && !authCtx.canAuth) {
       const err = new Error(`PM auth unavailable for adapter=${adapterType}`);
       err.httpStatus = 400;
       err.details = { sources: authCtx.sources, diagnostics: authCtx.diagnostics };
@@ -225,7 +236,20 @@ function createOperatorSpawnService({
     const brief = projectBriefService
       ? (projectBriefService.getBrief(projectId) || projectBriefService.ensureBrief(projectId))
       : null;
-    const resumeThreadId = brief && brief.pm_thread_id ? brief.pm_thread_id : null;
+    let resumeThreadId = brief && brief.pm_thread_id ? brief.pm_thread_id : null;
+    const threadNode = brief && brief.pm_thread_node_id ? brief.pm_thread_node_id : null;
+    let threadRebindReset = null;
+    if (resumeThreadId && (threadNode || 'local') !== (nodeId || 'local')) {
+      threadRebindReset = { from_node: threadNode, to_node: nodeId || 'local' };
+      resumeThreadId = null;
+      try {
+        if (projectBriefService && typeof projectBriefService.clearPmThread === 'function') {
+          projectBriefService.clearPmThread(projectId);
+        }
+      } catch (err) {
+        log(`clearPmThread failed project=${projectId}: ${err.message}`);
+      }
+    }
 
     // Create the run row FIRST so we have a stable runId. The runId is
     // baked into the project-scoped system prompt so the PM can
@@ -239,8 +263,32 @@ function createOperatorSpawnService({
       parent_run_id: activeTopRunId,
       manager_adapter: adapterType,
       prompt: `PM ${project.name}`,
+      node_id: nodeId,
     });
     const runId = run.id;
+    if (threadRebindReset) {
+      try { runService.addRunEvent(runId, 'operator:thread_rebind_reset', JSON.stringify(threadRebindReset)); } catch { /* ignore */ }
+    }
+    if (isRemoteNode && !process.env.PALANTIR_BASE_URL) {
+      try { runService.addRunEvent(runId, 'operator:remote_base_url_localhost', JSON.stringify({ node_id: nodeId })); } catch { /* ignore */ }
+    }
+
+    let executor;
+    let nodePrefix;
+    if (isRemoteNode) {
+      try {
+        const node = nodeService.getNode(nodeId);
+        executor = nodeService.pickExecutor(nodeId);
+        if (!executor) throw new Error(`No executor available for node ${nodeId}`);
+        nodePrefix = node && node.node_prefix ? node.node_prefix : undefined;
+      } catch (err) {
+        try { runService.updateRunStatus(runId, 'failed', { force: true }); } catch { /* ignore */ }
+        try { runService.addRunEvent(runId, 'error', JSON.stringify({ message: err.message })); } catch { /* ignore */ }
+        const wrap = new Error(`PM node executor unavailable: ${err.message}`);
+        wrap.httpStatus = 502;
+        throw wrap;
+      }
+    }
 
     // System prompt for the PM layer. Dynamic context (run/agent/project
     // list) is deliberately NOT included — Codex's model_instructions_file
@@ -297,6 +345,8 @@ function createOperatorSpawnService({
         projectBriefService.setPmThread(projectId, {
           pm_thread_id: threadId,
           pm_adapter: adapterType === 'codex' ? 'codex' : 'claude',
+          pm_thread_node_id: isRemoteNode ? nodeId : null,
+          pm_thread_cwd: isRemoteNode ? cwd : null,
         });
       } catch (err) {
         log(`setPmThread failed project=${projectId}: ${err.message}`);
@@ -314,14 +364,26 @@ function createOperatorSpawnService({
     // enforce the workspace surface. A coder PM is always legacy (folder +
     // dispatcher), so isEnforced===false → provable no-op (byte-identical). The
     // seam is proven to compose with the real run + project.directory here.
-    const operatorContext = deriveLegacyContext({ run, workspaceDir: project.directory });
-    enforceWorkspace(operatorContext, 'spawn_cwd');
-    const cwd = resolveSpawnCwd({ workspaceDir: project.directory });
+    let cwd;
+    if (isRemoteNode) {
+      cwd = project.directory || null;
+    } else {
+      const operatorContext = deriveLegacyContext({ run, workspaceDir: project.directory });
+      enforceWorkspace(operatorContext, 'spawn_cwd');
+      cwd = resolveSpawnCwd({ workspaceDir: project.directory });
+    }
     try {
-      adapter.startSession(runId, {
+      const startOpts = {
         systemPrompt,
         cwd,
-        env: spawnEnv,
+        // A REMOTE Operator must NOT receive the control-plane's spawnEnv
+        // (buildManagerSpawnEnv is process.env-based): shipping the Mac's PATH
+        // to the pod overrides the pathPrefix and breaks codex resolution (127
+        // 'codex: No such file or directory'), and leaks control-plane creds.
+        // The pod provides its own env + ~/.codex auth; codex is resolved via
+        // nodePrefix→PATH. Local keeps the filtered spawnEnv. (Real-Pi finding;
+        // S3a review SERIOUS-3.)
+        env: isRemoteNode ? {} : spawnEnv,
         role: 'manager',
         resumeThreadId,
         onThreadStarted,
@@ -331,7 +393,12 @@ function createOperatorSpawnService({
         // Codex adapter accepts only object-shaped MCP config for dotted
         // -c flattening, so it skips path strings and annotates the run.
         mcpConfig: project.mcp_config_path || undefined,
-      });
+      };
+      if (isRemoteNode) {
+        startOpts.executor = executor;
+        startOpts.nodePrefix = nodePrefix;
+      }
+      adapter.startSession(runId, startOpts);
     } catch (err) {
       // Adapter startup failed — mark the run as failed and bubble up
       // so conversationService can surface a 502.

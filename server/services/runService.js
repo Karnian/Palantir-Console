@@ -280,8 +280,7 @@ function createRunService(db, eventBus) {
       conversation_id: effectiveConversationId,
       queued_args: normalizeQueuedArgs(queued_args),
       retry_count: normalizeRetryCount(retry_count),
-      // Manager runs are control-plane local in P1a; only worker runs snapshot a node.
-      node_id: is_manager ? null : (node_id || null),
+      node_id: node_id || null,
     });
     const run = stmts.getById.get(id);
     if (eventBus) {
