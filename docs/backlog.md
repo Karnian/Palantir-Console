@@ -18,16 +18,13 @@
 
 ## Ready
 
-### F1. Fleet 풀 루프 검증 — 원격 Operator 가 pod 에서 워커 dispatch (마지막 end-to-end)
-- **상태**: 개별 능력은 전부 실 Pi 증명됨 (원격 Operator spawn/응답/resume + dispatch 능력). **아직 미검증인 한 조합**: 원격 pod 의 Operator 가 **컨트롤 플레인으로 curl 하여 워커를 dispatch → 워커가 (같은/다른) pod 에서 실행 → 결과 복귀** 하는 완전 루프.
-- **필요 조건 (코드 gap 아님, 운영 config)**: `PALANTIR_BASE_URL` 을 **pod 에서 도달 가능한 컨트롤 플레인 주소**(Tailscale IP 등) 로 설정. 미설정 시 원격 Operator 는 `operator:remote_base_url_localhost` 경고 + 자기 localhost 를 curl 해서 dispatch 실패.
-- **착수 시**: PALANTIR_BASE_URL 설정 후 실 Pi 에서 preferred=claude(또는 codex) 원격 Operator → "워커 하나 띄워줘" → dispatch-audit + 워커 run 생성 + 완료 복귀 확인. (P4/P5 검증 하네스 패턴 재사용.)
+### ~~F1. Fleet 풀 루프 검증 — 원격 Operator 가 pod 에서 워커 dispatch~~ ✅ 완료 (2026-07-03, 실 Pi)
+- **Mac 컨트롤 플레인(`PALANTIR_BASE_URL=http://100.120.25.112:4188`) → Pi 의 Claude Operator → Tailscale 너머 컨트롤 플레인으로 curl(POST /api/tasks + execute) → codex 워커가 Pi 에 dispatch(running@pi-f1)** 풀 루프 실증. pod → 컨트롤 플레인 역방향 도달성도 확인(Pi→Mac `MAC_REACHED`). 검증 하네스: `scratchpad/e2e-f1-full-loop.mjs`.
 
-### F2. Fleet 배포 runbook
-- **상태**: Fleet 전용 배포 문서 없음 (M4-a Bifrost runbook 만 존재). 아래 "실제 배포" 항목을 `docs/runbook-fleet-deploy.md` 로 정리.
-- **범위**: 컨트롤 플레인 기동(PALANTIR_TOKEN + PALANTIR_BASE_URL + HOST) / pod ssh 키 + agent CLI 선로그인 / `#resources` 노드 등록 / 프로젝트 node 바인딩 / heartbeat(`PALANTIR_FLEET_HEARTBEAT=1`) / 트러블슈팅.
+### ~~F2. Fleet 배포 runbook~~ ✅ 완료 (2026-07-03)
+- [`docs/runbook-fleet-deploy.md`](./runbook-fleet-deploy.md) — 컨트롤 플레인 기동(PALANTIR_TOKEN/BASE_URL/HOST) / pod ssh+CLI 선로그인 / `#resources` 노드 등록 / 프로젝트 바인딩 / 검증된 토폴로지 매트릭스 / 트러블슈팅 / 보안 요약.
 
-**나머지 Ready 비어 있음.** K-2~K-5 시리즈 전부 종결.
+**나머지 Ready 비어 있음.** K-2~K-5 시리즈 + Fleet P4/P5(F1/F2 포함) 전부 종결.
 
 진행 가능한 후속 nice-to-have (deferred — 사용자 트리거 시):
 - **K-5-followup** — 모달/드로어 visual regression (K-5 spec §3 비범위 → 별도 phase)
