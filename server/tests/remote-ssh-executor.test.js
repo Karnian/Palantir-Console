@@ -135,6 +135,26 @@ function rootGuardSpawn(routes = {}) {
   });
 }
 
+function workerSpawnHarness(runId) {
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const sessionName = `palantir-run-${runId}`;
+  return makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    const routes = {
+      "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
+      "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+      "exec 'realpath' '/srv/root/.palantir-runs'": { stdout: '/real/root/.palantir-runs\n' },
+      [`exec 'realpath' ${shq(statusDir)}`]: { stdout: `/real/root/.palantir-runs/${runId}\n` },
+      "exec 'mkdir' '-p' '/srv/root/.palantir-runs'": { code: 0 },
+      [`exec 'mkdir' '-p' ${shq(statusDir)}`]: { code: 0 },
+    };
+    const tmuxPrefix = `cd '/real/root/project' && tmux new-session -d -s ${shq(sessionName)} `;
+    if (script.startsWith(tmuxPrefix)) return complete(child, { code: 0 });
+    if (Object.hasOwn(routes, script)) return complete(child, routes[script]);
+    complete(child, { code: 255, stderr: `unexpected script: ${script}` });
+  });
+}
+
 async function mkdb(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-remote-ssh-'));
   const dbPath = path.join(dir, 'test.db');
@@ -595,6 +615,54 @@ test('spawnWorker builds file-backed tmux script through the internal runner', a
   assert.ok(spawn.calls.some((call) => scriptOf(call) === `exec 'mkdir' '-p' ${shq(statusDir)}`));
 });
 
+test('spawnWorker accepts canonical cli worker envelope', async () => {
+  const runId = 'canonical_cli';
+  const spawn = workerSpawnHarness(runId);
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  const result = await exec.spawnWorker(runId, {
+    engine: 'cli',
+    spec: {
+      command: 'codex',
+      args: ['--version'],
+      cwd: '/srv/root/project',
+      workerPath: '/home/runner/.npm-global/bin',
+    },
+  });
+
+  assert.deepEqual(result, { sessionName: `palantir-run-${runId}` });
+  assert.ok(spawn.calls.some((call) => scriptOf(call).includes(`tmux new-session -d -s ${shq(`palantir-run-${runId}`)}`)));
+});
+
+test('spawnWorker rejects stream-json worker envelope on remote nodes', async () => {
+  const spawn = simpleSpawn();
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => exec.spawnWorker('claude_remote', {
+      engine: 'stream-json',
+      spec: { command: 'claude', args: [], cwd: '/srv/root/project' },
+    }),
+    (err) => err.message === 'remote nodes cannot run stream-json/claude workers yet — P5',
+  );
+  assert.equal(spawn.calls.length, 0);
+});
+
+test('spawnWorker preserves direct spec backward compatibility', async () => {
+  const runId = 'direct_compat';
+  const spawn = workerSpawnHarness(runId);
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  const result = await exec.spawnWorker(runId, {
+    command: 'codex',
+    args: ['--version'],
+    cwd: '/srv/root/project',
+  });
+
+  assert.deepEqual(result, { sessionName: `palantir-run-${runId}` });
+  assert.ok(spawn.calls.some((call) => scriptOf(call).includes(`tmux new-session -d -s ${shq(`palantir-run-${runId}`)}`)));
+});
+
 test('spawnWorker validates runId and exposed root guards for cwd and status dir', async () => {
   const invalid = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: simpleSpawn() });
   await assert.rejects(
@@ -722,6 +790,27 @@ test('remote worker isAlive maps tmux has-session exit codes', async () => {
   assert.equal(await exec.isAlive('done'), false);
 });
 
+test('remote worker ownerOf maps live sessions to cli', async () => {
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script === "exec 'tmux' 'has-session' '-t' 'palantir-run-live'") return complete(child, { code: 0 });
+    if (script === "exec 'tmux' 'has-session' '-t' 'palantir-run-gone'") return complete(child, { code: 1 });
+    complete(child, { code: 255, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  assert.equal(await exec.ownerOf('live'), 'cli');
+  assert.equal(await exec.ownerOf('gone'), null);
+});
+
+test('remote worker sendInput resolves false without sending remote input', async () => {
+  const spawn = simpleSpawn();
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  assert.equal(await exec.sendInput('run7', 'hello'), false);
+  assert.equal(spawn.calls.length, 0);
+});
+
 test('remote worker getOutput reads stdout log and treats missing log as empty', async () => {
   const stdoutLog = '/srv/root/.palantir-runs/run4/stdout.log';
   const spawn = rootGuardSpawn({
@@ -815,6 +904,33 @@ test('remote worker detectExitCode strictly parses POSIX exit codes', async () =
 
     assert.equal(await exec.detectExitCode(runId), expected, JSON.stringify(content));
   }
+});
+
+test('remote worker methods ignore trailing engine argument', async () => {
+  const stdoutLog = '/srv/root/.palantir-runs/out/stdout.log';
+  const exitSentinel = '/srv/root/.palantir-runs/exit/exit.code';
+  const routes = {
+    "exec 'tmux' 'has-session' '-t' 'palantir-run-live'": { code: 0 },
+    "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
+    [`exec 'realpath' ${shq(stdoutLog)}`]: { stdout: '/real/root/.palantir-runs/out/stdout.log\n' },
+    "exec 'tail' '-n' '3' '/real/root/.palantir-runs/out/stdout.log'": { stdout: 'a\nb\nc\n' },
+    [`exec 'realpath' ${shq(exitSentinel)}`]: { stdout: '/real/root/.palantir-runs/exit/exit.code\n' },
+    "exec 'cat' '/real/root/.palantir-runs/exit/exit.code'": { stdout: '42\n' },
+    "exec 'tmux' 'kill-session' '-t' 'palantir-run-killme'": { code: 0 },
+  };
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (Object.hasOwn(routes, script)) return complete(child, routes[script]);
+    complete(child, { code: 255, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  assert.equal(await exec.isAlive('live', 'cli'), true);
+  assert.equal(await exec.detectExitCode('exit', 'cli'), 42);
+  assert.equal(await exec.getOutput('out', 3, 'cli'), 'a\nb\nc\n');
+  assert.equal(await exec.kill('killme', 'cli'), true);
+  assert.ok(spawn.calls.some((call) => scriptOf(call) === "exec 'tail' '-n' '3' '/real/root/.palantir-runs/out/stdout.log'"));
+  assert.ok(spawn.calls.some((call) => scriptOf(call) === "exec 'tmux' 'kill-session' '-t' 'palantir-run-killme'"));
 });
 
 test('remote worker kill uses tmux and cleanupRun removes only guarded status dir', async () => {
