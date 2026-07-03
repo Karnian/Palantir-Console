@@ -94,6 +94,34 @@ function createFakeRemoteChild() {
   return child;
 }
 
+function writeGeneratedFixtureExecutable(source) {
+  const file = path.join(
+    __dirname,
+    'fixtures',
+    'bin',
+    `generated-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.js`
+  );
+  fs.writeFileSync(file, source);
+  fs.chmodSync(file, 0o755);
+  return file;
+}
+
+async function spawnFakeRemoteManager(engine, runId, child, opts = {}) {
+  const executor = {
+    spawnInteractive() {
+      return child;
+    },
+  };
+  engine.spawnAgent(runId, {
+    cwd: '/pod/ws',
+    isManager: true,
+    executor,
+    nodePrefix: '/pod/bin',
+    ...opts,
+  });
+  await new Promise((r) => setImmediate(r));
+}
+
 /**
  * createStreamJsonEngine 인스턴스를 만들되 CLAUDE_BIN 을 fake-claude.js 로 설정.
  * CLAUDE_ARGS_FILE 을 개별 tmpfile 로 설정하여 args 캡처.
@@ -720,6 +748,132 @@ test('engine: isAlive returns false for unknown runId', () => {
   assert.equal(engine.isAlive('ghost-run'), false);
 });
 
+test('engine: remote ssh transport drop becomes unreachable without finalizing failed', async () => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const rs = makeRunService();
+  rs._setRun('run-remote-drop', { status: 'running' });
+  const child = createFakeRemoteChild();
+  const engine = createStreamJsonEngine({ runService: rs });
+
+  await spawnFakeRemoteManager(engine, 'run-remote-drop', child);
+  child.stdout.write(JSON.stringify({
+    type: 'system',
+    subtype: 'init',
+    session_id: 'remote-drop-sess',
+    model: 'claude-remote',
+    tools: [],
+    cwd: '/pod/ws',
+  }) + '\n');
+  await waitForEvent(engine, 'run-remote-drop', e => e.type === 'system');
+
+  child.emit('exit', 255, null);
+
+  assert.equal(engine.isAlive('run-remote-drop'), false);
+  assert.equal(engine.detectExitCode('run-remote-drop'), null);
+  assert.equal(engine.isUnreachable('run-remote-drop'), true);
+  assert.equal(engine.getSessionId('run-remote-drop'), 'remote-drop-sess');
+
+  const failedUpdates = rs._statusUpdates.filter(
+    u => u.runId === 'run-remote-drop' && u.status === 'failed'
+  );
+  assert.equal(failedUpdates.length, 0, 'transport drop must not finalize failed');
+
+  const transportEvents = rs._events.filter(
+    e => e.runId === 'run-remote-drop' && e.type === 'transport_lost'
+  );
+  assert.equal(transportEvents.length, 1);
+  assert.deepEqual(JSON.parse(transportEvents[0].data), {
+    node: 'remote',
+    reason: 'ssh_transport_drop',
+    code: 255,
+  });
+  assert.equal(
+    rs._events.some(e => e.runId === 'run-remote-drop' && e.type === 'exit'),
+    false,
+    'transport drop must not be reported as a definitive exit'
+  );
+
+  // Codex P5-S2 R2: sendInput must reject a write to an unreachable proc even
+  // though exitCode is still null (would otherwise write to a dead ssh child).
+  assert.equal(engine.sendInput('run-remote-drop', 'hi'), false);
+  // listSessions must not report an unreachable proc as alive (old two-state
+  // check was exitCode===null && !spawnError, which stayed true here).
+  const droppedSession = engine.listSessions().find(s => s.sessionId === 'remote-drop-sess');
+  assert.ok(droppedSession && droppedSession.alive === false, 'unreachable session not listed alive');
+});
+
+test('engine: remote natural exit finalizes completed with real exit code', async () => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const rs = makeRunService();
+  rs._setRun('run-remote-natural', { status: 'running' });
+  const child = createFakeRemoteChild();
+  const engine = createStreamJsonEngine({ runService: rs });
+
+  await spawnFakeRemoteManager(engine, 'run-remote-natural', child);
+  child.emit('exit', 0, null);
+
+  assert.equal(engine.isAlive('run-remote-natural'), false);
+  assert.equal(engine.detectExitCode('run-remote-natural'), 0);
+  assert.equal(engine.isUnreachable('run-remote-natural'), false);
+  assert.ok(
+    rs._statusUpdates.some(u => u.runId === 'run-remote-natural' && u.status === 'completed'),
+    'natural remote exit must finalize completed'
+  );
+});
+
+test('engine: signal-only exit marks process not alive without unreachable state', async () => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const child = createFakeRemoteChild();
+  const engine = createStreamJsonEngine();
+
+  await spawnFakeRemoteManager(engine, 'run-signal-exit', child);
+  child.emit('exit', null, 'SIGTERM');
+
+  assert.equal(engine.isAlive('run-signal-exit'), false);
+  assert.equal(engine.detectExitCode('run-signal-exit'), null);
+  assert.equal(engine.isUnreachable('run-signal-exit'), false);
+});
+
+test('engine: local nonzero exit behavior is unchanged', async (t) => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const rs = makeRunService();
+  rs._setRun('run-local-exit-1', { status: 'running' });
+  const exitOneBin = writeGeneratedFixtureExecutable(`#!/usr/bin/env node
+'use strict';
+process.exit(1);
+`);
+  t.after(() => {
+    try { fs.unlinkSync(exitOneBin); } catch { /* ignore */ }
+  });
+
+  const prev = process.env.CLAUDE_BIN;
+  process.env.CLAUDE_BIN = exitOneBin;
+  const engine = createStreamJsonEngine({ runService: rs });
+  _allEngines.push(engine);
+  try {
+    engine.spawnAgent('run-local-exit-1', {
+      cwd: os.tmpdir(),
+      prompt: 'x',
+      isManager: false,
+    });
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_BIN; else process.env.CLAUDE_BIN = prev;
+  }
+
+  const deadline = Date.now() + 2000;
+  while (engine.isAlive('run-local-exit-1') && Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 20));
+  }
+
+  assert.equal(engine.isAlive('run-local-exit-1'), false);
+  assert.equal(engine.detectExitCode('run-local-exit-1'), 1);
+  assert.equal(engine.isUnreachable('run-local-exit-1'), false);
+  assert.ok(
+    rs._statusUpdates.some(u => u.runId === 'run-local-exit-1' && u.status === 'failed'),
+    'local exit(1) must still finalize failed'
+  );
+});
+
 test('engine: remote kill before child attaches signals the resolved child (no orphan)', async () => {
   // A dispose/kill that lands while the async remote spawn is still resolving
   // must not leave the later-attached ssh child alive and unowned. Codex P5-S0.
@@ -744,8 +898,8 @@ test('engine: remote kill before child attaches signals the resolved child (no o
   // (not left alive & unowned). It never received the initial prompt.
   assert.equal(child.killSignal, 'SIGTERM');            // freshly-attached child was signalled
   assert.equal(child.stdin.writes.length, 0);           // initial prompt skipped
-  // (isAlive after a signal-only exit is a pre-existing streamJsonEngine quirk
-  //  — code===null → exitCode null — addressed separately by S2 liveness.)
+  assert.equal(engine.isAlive('run-kill-race'), false);  // signal-only exit is terminal
+  assert.equal(engine.isUnreachable('run-kill-race'), false);
 });
 
 test('engine: local sync spawn throw leaves no phantom process', () => {
