@@ -84,6 +84,21 @@ function sshDestinationIndex(args) {
   throw new Error(`ssh destination not found in args: ${JSON.stringify(args)}`);
 }
 
+function assertSshOptionPairsInOrder(args, optionValues) {
+  let start = 0;
+  for (const optionValue of optionValues) {
+    let found = -1;
+    for (let i = start; i < args.length - 1; i += 1) {
+      if (args[i] === '-o' && args[i + 1] === optionValue) {
+        found = i;
+        break;
+      }
+    }
+    assert.notEqual(found, -1, `missing ordered ssh option pair: -o ${optionValue}`);
+    start = found + 2;
+  }
+}
+
 function remoteCommandArgsOf(call) {
   return call.args.slice(sshDestinationIndex(call.args) + 1);
 }
@@ -216,6 +231,7 @@ test('ssh argv and script quote injection attempts literally', async () => {
   ]);
   assert.equal(call.args[6], '--');
   assert.equal(call.args[7], 'runner@pod.example');
+  assert.equal(call.args.some((arg) => String(arg).startsWith('ServerAlive')), false);
   const script = scriptOf(call);
   assert.deepEqual(call.args.slice(8), [`sh -c ${shq(script)}`]);
   assert.match(script, /^exec env /);
@@ -515,6 +531,10 @@ test('spawnInteractive builds piped ssh child with canonical cwd explicit env an
   assert.strictEqual(child, call.child);
   assert.deepEqual(call.opts.stdio, ['pipe', 'pipe', 'pipe']);
   assert.equal(call.args.includes('-n'), false);
+  assertSshOptionPairsInOrder(call.args, [
+    'ServerAliveInterval=15',
+    'ServerAliveCountMax=4',
+  ]);
   assert.equal(
     script,
     `cd ${shq('/real/root/project')} && exec env LC_ALL=${shq('C')} TOKEN=${shq("a'b")} ${shq('codex')} ${shq('exec')} ${shq(hostileArg)}`,

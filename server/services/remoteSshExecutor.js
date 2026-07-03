@@ -3,6 +3,8 @@ const path = require('node:path');
 
 const WORKER_OUTPUT_MAX_LINES = 500;
 const WORKER_OUTPUT_MAX_BUFFER = 256 * 1024;
+const SSH_SERVER_ALIVE_INTERVAL_SECONDS = 15;
+const SSH_SERVER_ALIVE_COUNT_MAX = 4;
 
 /**
  * POSIX single-quote escaping for remote shell insertion. Every string placed
@@ -269,7 +271,7 @@ function createRemoteSshNodeExecutor(node, {
   const managerInteractiveCommands = new Set(['codex', 'claude']);
   let canonicalRootsPromise = null;
 
-  function sshArgsFor(script) {
+  function sshArgsFor(script, { keepAlive } = {}) {
     // ssh JOINS every post-destination arg with spaces and hands the single
     // resulting string to the remote login shell (`$SHELL -c "<joined>"`).
     // Passing `sh`,`-c`,`script` as three separate argv elements therefore
@@ -287,6 +289,10 @@ function createRemoteSshNodeExecutor(node, {
       '-o', 'BatchMode=yes',
       '-o', `ConnectTimeout=${connectTimeoutSeconds}`,
       '-o', 'StrictHostKeyChecking=accept-new',
+      ...(keepAlive ? [
+        '-o', `ServerAliveInterval=${SSH_SERVER_ALIVE_INTERVAL_SECONDS}`,
+        '-o', `ServerAliveCountMax=${SSH_SERVER_ALIVE_COUNT_MAX}`,
+      ] : []),
       '--',
       `${node.ssh_user}@${node.ssh_host}`,
       `sh -c ${shq(script)}`,
@@ -506,7 +512,7 @@ function createRemoteSshNodeExecutor(node, {
     let safeCwd = cwd;
     if (cwd) safeCwd = (await assertWithinRoots(cwd)).canonical;
     const script = buildCommandScript(commandName, args, { cwd: safeCwd, env, pathPrefix });
-    return spawnFn('ssh', sshArgsFor(script), { stdio: ['pipe', 'pipe', 'pipe'] });
+    return spawnFn('ssh', sshArgsFor(script, { keepAlive: true }), { stdio: ['pipe', 'pipe', 'pipe'] });
   }
 
   async function fileExists(remotePath) {
