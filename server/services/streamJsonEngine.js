@@ -143,21 +143,19 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
   function spawnAgent(runId, { prompt, cwd, env, systemPrompt, permissionMode,
     allowedTools, maxBudgetUsd, model, mcpConfig, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent,
     // Phase 10D Tier 2
-    isolated, pluginDirs, settingsPath, settingSources, onCleanup }) {
+    isolated, pluginDirs, settingsPath, settingSources, onCleanup,
+    executor, nodePrefix }) {
 
-    const claudeBin = resolveClaudeBin();
+    const usingRemoteExecutor = !!executor;
+    const claudeBin = usingRemoteExecutor ? 'claude' : resolveClaudeBin();
     const args = buildArgs({
       prompt, systemPrompt, permissionMode, allowedTools,
       maxBudgetUsd, model, mcpConfig, addDir, isManager, maxTurns, resumeSessionId,
       isolated, pluginDirs, settingsPath, settingSources,
     });
 
-    const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
-    const currentPath = process.env.PATH || '';
-    const augmentedPath = [...extraPaths, currentPath].join(path.delimiter);
-
-    const safeCwd = resolveSpawnCwd({ workspaceDir: cwd });
-    if (!fs.existsSync(safeCwd)) {
+    const safeCwd = usingRemoteExecutor ? cwd : resolveSpawnCwd({ workspaceDir: cwd });
+    if (!usingRemoteExecutor && !fs.existsSync(safeCwd)) {
       // Phase 10D: clean up apiKeyHelper temp artifacts before rethrowing so
       // validation failures before spawn don't leak the token on disk.
       if (typeof onCleanup === 'function') {
@@ -166,11 +164,20 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
       throw new Error(`cwd does not exist: ${safeCwd}`);
     }
 
-    // PR4: if the caller passes a filtered env (manager adapter path), use it
-    // as the authoritative base instead of process.env. Worker/legacy callers
-    // still get the merge behavior.
-    const baseEnv = (isManager && env) ? env : { ...process.env, ...(env || {}) };
-    const spawnEnv = { ...baseEnv, PATH: augmentedPath };
+    let spawnEnv;
+    if (usingRemoteExecutor) {
+      spawnEnv = {};
+    } else {
+      const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
+      const currentPath = process.env.PATH || '';
+      const augmentedPath = [...extraPaths, currentPath].join(path.delimiter);
+
+      // PR4: if the caller passes a filtered env (manager adapter path), use it
+      // as the authoritative base instead of process.env. Worker/legacy callers
+      // still get the merge behavior.
+      const baseEnv = (isManager && env) ? env : { ...process.env, ...(env || {}) };
+      spawnEnv = { ...baseEnv, PATH: augmentedPath };
+    }
 
     console.log(`[engine] Spawning claude for ${runId} (manager=${!!isManager})`);
 
@@ -187,24 +194,10 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
       }
     };
 
-    let child;
-    try {
-      assertSpawnAllowed({ command: claudeBin, source: 'streamJsonEngine' });
-      child = spawn(claudeBin, args, {
-        cwd: safeCwd,
-        env: spawnEnv,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        detached: false,
-      });
-    } catch (err) {
-      // spawn() itself can throw synchronously (ENOENT on the binary,
-      // invalid args). Clean up the apiKeyHelper temp dir before rethrow.
-      fireCleanup();
-      throw err;
-    }
-
+    // The proc record is created BEFORE the child so a remote (async) spawn can
+    // attach its child later. child stays null until attachChild runs.
     const proc = {
-      child,
+      child: null,
       outputBuffer: [],
       events: [],
       exitCode: null,
@@ -219,88 +212,165 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
     };
     processes.set(runId, proc);
 
-    // Parse NDJSON from stdout
-    const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
-    rl.on('line', (line) => {
-      if (!line.trim()) return;
-      try {
-        const event = JSON.parse(line);
-        handleEvent(runId, proc, event);
-      } catch {
-        proc.outputBuffer.push(line);
+    // Wire a resolved child handle (local child_process OR remote ssh duplex)
+    // into the proc: NDJSON stdout, stderr, error/exit handlers, and the manager
+    // initial prompt. Handle-agnostic — the persistent Claude stdin is held open
+    // across turns (never .end()'d), same for local and remote.
+    const attachChild = (child) => {
+      proc.child = child;
+
+      // Parse NDJSON from stdout
+      const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+      rl.on('line', (line) => {
+        if (!line.trim()) return;
+        try {
+          const event = JSON.parse(line);
+          handleEvent(runId, proc, event);
+        } catch {
+          proc.outputBuffer.push(line);
+        }
+      });
+
+      // Capture stderr
+      const stderrBuf = [];
+      child.stderr.on('data', (data) => {
+        stderrBuf.push(data.toString());
+        while (stderrBuf.length > 100) stderrBuf.shift();
+      });
+
+      child.on('error', (err) => {
+        console.error(`[engine] Spawn error for ${runId}: ${err.message}`);
+        proc.spawnError = err;
+        proc.exitCode = 1;
+        proc.exitedAt = Date.now();
+        proc.status = 'failed';
+        // Phase 10D: some spawn errors do not produce a subsequent 'exit'
+        // (e.g. ENOENT on the binary), so we must fire cleanup here too.
+        fireCleanup();
+        if (runService) {
+          runService.addRunEvent(runId, 'error', JSON.stringify({
+            message: `Spawn error: ${err.message}`,
+          }));
+        }
+      });
+
+      child.on('exit', (code, signal) => {
+        console.log(`[engine] Process ${runId} exited: code=${code} signal=${signal}`);
+        fireCleanup();
+        proc.exitCode = code;
+        proc.exitedAt = Date.now();
+        if (proc.status === 'starting' || proc.status === 'running') {
+          proc.status = code === 0 ? 'completed' : 'failed';
+        }
+
+        // Finalize DB status on exit.
+        // - Worker (single-shot): only if no `result` event arrived (the result handler
+        //   already updates the DB; skipping prevents duplicate transitions).
+        // - Manager (multi-turn): `result` arrives every turn but the session keeps
+        //   running, so we MUST finalize on exit regardless of `proc.result`. Otherwise
+        //   the run row stays as 'running' forever and shows up as a stale dashboard entry.
+        // In both cases, never overwrite a terminal status (cancelled/stopped/completed/failed)
+        // — that would clobber an explicit user `stop`/`cancel` with `failed`.
+        const shouldFinalize = runService && (proc.isManager || !proc.result);
+        if (shouldFinalize) {
+          const dbStatus = code === 0 ? 'completed' : 'failed';
+          try {
+            let currentStatus = null;
+            try { currentStatus = runService.getRun(runId)?.status; } catch { /* ignore */ }
+            const terminal = ['completed', 'failed', 'cancelled', 'stopped'];
+            if (!terminal.includes(currentStatus)) {
+              runService.updateRunStatus(runId, dbStatus, { force: true });
+            }
+            runService.addRunEvent(runId, 'exit', JSON.stringify({
+              exit_code: code,
+              signal,
+              stderr: stderrBuf.join('').slice(-2000),
+            }));
+          } catch { /* ignore */ }
+        }
+      });
+
+      // A dispose/kill that arrived while the remote spawn was still resolving
+      // set proc.killPending. The handlers above are now attached (so the exit
+      // is observed) — skip the initial prompt and signal the freshly-landed
+      // child immediately so it is never left alive and unowned (orphan).
+      if (proc.killPending) {
+        try { child.kill('SIGTERM'); } catch { /* ignore */ }
+        return;
       }
-    });
 
-    // Capture stderr
-    const stderrBuf = [];
-    child.stderr.on('data', (data) => {
-      stderrBuf.push(data.toString());
-      while (stderrBuf.length > 100) stderrBuf.shift();
-    });
+      // For manager mode: send initial prompt via stdin (stream-json format)
+      // because --input-format stream-json + -p flag don't work together.
+      if (isManager && prompt) {
+        const initMsg = JSON.stringify({
+          type: 'user',
+          message: { role: 'user', content: prompt },
+        });
+        console.log(`[engine] Sending initial prompt via stdin for ${runId}`);
+        child.stdin.write(initMsg + '\n');
+      }
+    };
 
-    child.on('error', (err) => {
-      console.error(`[engine] Spawn error for ${runId}: ${err.message}`);
+    // Surface an async spawn/placement failure the same way child.on('error')
+    // does (remote spawnInteractive rejects before a child exists). Otherwise the
+    // run would sit 'starting' forever with no observable failure.
+    const surfaceSpawnFailure = (err) => {
+      console.error(`[engine] Remote spawn failed for ${runId}: ${err && err.message}`);
       proc.spawnError = err;
       proc.exitCode = 1;
       proc.exitedAt = Date.now();
       proc.status = 'failed';
-      // Phase 10D: some spawn errors do not produce a subsequent 'exit'
-      // (e.g. ENOENT on the binary), so we must fire cleanup here too.
       fireCleanup();
       if (runService) {
-        runService.addRunEvent(runId, 'error', JSON.stringify({
-          message: `Spawn error: ${err.message}`,
-        }));
-      }
-    });
-
-    child.on('exit', (code, signal) => {
-      console.log(`[engine] Process ${runId} exited: code=${code} signal=${signal}`);
-      fireCleanup();
-      proc.exitCode = code;
-      proc.exitedAt = Date.now();
-      if (proc.status === 'starting' || proc.status === 'running') {
-        proc.status = code === 0 ? 'completed' : 'failed';
-      }
-
-      // Finalize DB status on exit.
-      // - Worker (single-shot): only if no `result` event arrived (the result handler
-      //   already updates the DB; skipping prevents duplicate transitions).
-      // - Manager (multi-turn): `result` arrives every turn but the session keeps
-      //   running, so we MUST finalize on exit regardless of `proc.result`. Otherwise
-      //   the run row stays as 'running' forever and shows up as a stale dashboard entry.
-      // In both cases, never overwrite a terminal status (cancelled/stopped/completed/failed)
-      // — that would clobber an explicit user `stop`/`cancel` with `failed`.
-      const shouldFinalize = runService && (proc.isManager || !proc.result);
-      if (shouldFinalize) {
-        const dbStatus = code === 0 ? 'completed' : 'failed';
         try {
-          let currentStatus = null;
-          try { currentStatus = runService.getRun(runId)?.status; } catch { /* ignore */ }
-          const terminal = ['completed', 'failed', 'cancelled', 'stopped'];
-          if (!terminal.includes(currentStatus)) {
-            runService.updateRunStatus(runId, dbStatus, { force: true });
-          }
-          runService.addRunEvent(runId, 'exit', JSON.stringify({
-            exit_code: code,
-            signal,
-            stderr: stderrBuf.join('').slice(-2000),
+          runService.addRunEvent(runId, 'error', JSON.stringify({
+            message: `Spawn error: ${err && err.message}`,
           }));
         } catch { /* ignore */ }
+        try {
+          const current = runService.getRun(runId)?.status;
+          if (!['completed', 'failed', 'cancelled', 'stopped'].includes(current)) {
+            runService.updateRunStatus(runId, 'failed', { force: true });
+          }
+        } catch { /* ignore */ }
       }
-    });
+    };
 
-    // For manager mode: send initial prompt via stdin (stream-json format)
-    // because --input-format stream-json + -p flag don't work together.
-    if (isManager && prompt) {
-      const initMsg = JSON.stringify({
-        type: 'user',
-        message: { role: 'user', content: prompt },
-      });
-      console.log(`[engine] Sending initial prompt via stdin for ${runId}`);
-      child.stdin.write(initMsg + '\n');
+    if (usingRemoteExecutor) {
+      // Remote spawnInteractive is ASYNC (it does a remote realpath guard) and
+      // returns a Promise<child>. Resolve it fire-and-forget so spawnAgent keeps
+      // its synchronous contract; attach the ssh duplex child when it lands.
+      Promise.resolve()
+        .then(() => executor.spawnInteractive(claudeBin, args, {
+          cwd: safeCwd,
+          env: spawnEnv,
+          pathPrefix: nodePrefix,
+        }))
+        .then((child) => attachChild(child))
+        .catch(surfaceSpawnFailure);
+      return { pid: null, engine: 'stream-json', isManager };
     }
 
+    let child;
+    try {
+      assertSpawnAllowed({ command: claudeBin, source: 'streamJsonEngine' });
+      child = spawn(claudeBin, args, {
+        cwd: safeCwd,
+        env: spawnEnv,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        detached: false,
+      });
+    } catch (err) {
+      // spawn() itself can throw synchronously (ENOENT on the binary,
+      // invalid args). The proc record was inserted up-front (so a remote async
+      // spawn can attach later); remove it here so a local sync throw leaves NO
+      // phantom live process behind — byte-equivalent to the pre-seam behavior
+      // which only inserted the record after a successful spawn.
+      processes.delete(runId);
+      fireCleanup();
+      throw err;
+    }
+    attachChild(child);
     return { pid: child.pid, engine: 'stream-json', isManager };
   }
 
@@ -542,6 +612,13 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
   function kill(runId) {
     const proc = processes.get(runId);
     if (!proc) return false;
+    if (!proc.child) {
+      // A remote spawn is still resolving (proc.child not yet attached). Mark a
+      // pending kill so attachChild signals the ssh child the moment it lands —
+      // otherwise the later-resolved child would attach alive and unowned.
+      proc.killPending = true;
+      return true;
+    }
     try { proc.child.kill('SIGTERM'); return true; } catch { return false; }
   }
 

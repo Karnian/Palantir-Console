@@ -218,7 +218,7 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
    *
    * See docs/specs/manager-v3-multilayer.md principle 1.
    */
-  function startSession(runId, { prompt, cwd, systemPrompt, model, allowedTools, mcpTools, mcpConfig, permissionMode, env, resumeSessionId } = {}) {
+  function startSession(runId, { prompt, cwd, systemPrompt, model, allowedTools, mcpTools, mcpConfig, permissionMode, env, resumeSessionId, executor, nodePrefix } = {}) {
     // Reset normalizer state in case the runId is recycled.
     runState.delete(runId);
     const baseTools = allowedTools || [
@@ -252,6 +252,11 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
       model: model || undefined,
       isManager: true,
       resumeSessionId: resumeSessionId || undefined,
+      // Fleet P5: when the Claude manager runs on a remote pod, the executor +
+      // nodePrefix route the persistent process through an ssh duplex child.
+      // Local (no executor) is byte-equivalent — spawnAgent uses child_process.
+      executor: executor || undefined,
+      nodePrefix: nodePrefix || undefined,
       onVendorEvent: (event, proc) => normalizeClaudeEvent(runId, event, proc),
     });
     return { sessionRef: result };
