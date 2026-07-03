@@ -447,6 +447,131 @@ test('writeTempFile rejects non-bare names and sends content via stdin', async (
   assert.doesNotMatch(scriptOf(writeCall), /secret-content/);
 });
 
+test('putSecretFile builds temp secret flow and streams content via stdin', async () => {
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script === "exec 'realpath' '/srv/root'") {
+      complete(child, { stdout: '/real/root\n' });
+      return;
+    }
+    if (script === "exec 'realpath' '/srv/root/.palantir-secret-abc123/model_instructions_file'") {
+      complete(child, { stdout: '/real/root/.palantir-secret-abc123/model_instructions_file\n' });
+      return;
+    }
+    child.stdin.on('finish', () => {
+      complete(child, { stdout: '/srv/root/.palantir-secret-abc123/model_instructions_file\n' });
+    });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+  const remotePath = await exec.putSecretFile('model_instructions_file', 'secret-content', 0o600);
+
+  assert.equal(remotePath, '/srv/root/.palantir-secret-abc123/model_instructions_file');
+  const writeCall = spawn.calls.find((call) => /mktemp -d/.test(scriptOf(call)));
+  assert.equal(writeCall.stdin, 'secret-content');
+  assert.match(scriptOf(writeCall), /mktemp -d '\/srv\/root\/\.palantir-secret-XXXXXX'/);
+  assert.match(scriptOf(writeCall), /cat > "\$tmpdir"\/'model_instructions_file'/);
+  assert.match(scriptOf(writeCall), /chmod '600' "\$tmpdir"\/'model_instructions_file'/);
+  assert.doesNotMatch(scriptOf(writeCall), /secret-content/);
+});
+
+test('putSecretFile rejects non-bare names and revalidates created path', async () => {
+  const bad = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: simpleSpawn() });
+  await assert.rejects(() => bad.putSecretFile('../evil', 'nope'), /bare filename/);
+  await assert.rejects(() => bad.putSecretFile('a/b', 'nope'), /bare filename/);
+
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script === "exec 'realpath' '/srv/root'") return complete(child, { stdout: '/real/root\n' });
+    if (script === "exec 'realpath' '/srv/root/.palantir-secret-abc/model_instructions_file'") {
+      return complete(child, { stdout: '/escape/model_instructions_file\n' });
+    }
+    if (script === "exec 'rm' '-rf' '/srv/root/.palantir-secret-abc'") return complete(child, { code: 0 });
+    child.stdin.on('finish', () => complete(child, { stdout: '/srv/root/.palantir-secret-abc/model_instructions_file\n' }));
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => exec.putSecretFile('model_instructions_file', 'secret'),
+    (err) => err.code === 'EXPOSED_ROOTS',
+  );
+  assert.ok(spawn.calls.some((call) => scriptOf(call) === "exec 'rm' '-rf' '/srv/root/.palantir-secret-abc'"));
+});
+
+test('spawnInteractive builds piped ssh child with canonical cwd explicit env and quoted argv', async () => {
+  process.env.REMOTE_SSH_EXECUTOR_INTERACTIVE_SECRET_SHOULD_NOT_APPEAR = 'secret';
+  const hostileArg = '; rm -rf /';
+  const spawn = rootGuardSpawn({
+    "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn, commandAllowlist: ['git'] });
+  const child = await exec.spawnInteractive('codex', ['exec', hostileArg], {
+    cwd: '/srv/root/project',
+    env: { LC_ALL: 'C', TOKEN: "a'b", SKIP: undefined },
+  });
+  const call = spawn.calls.at(-1);
+  const script = scriptOf(call);
+
+  assert.equal(call.cmd, 'ssh');
+  assert.strictEqual(child, call.child);
+  assert.deepEqual(call.opts.stdio, ['pipe', 'pipe', 'pipe']);
+  assert.equal(call.args.includes('-n'), false);
+  assert.equal(
+    script,
+    `cd ${shq('/real/root/project')} && exec env LC_ALL=${shq('C')} TOKEN=${shq("a'b")} ${shq('codex')} ${shq('exec')} ${shq(hostileArg)}`,
+  );
+  assert.ok(script.includes(shq(hostileArg)));
+  assert.doesNotMatch(script, /REMOTE_SSH_EXECUTOR_INTERACTIVE_SECRET_SHOULD_NOT_APPEAR/);
+  assert.equal(child.stdin.writable, true);
+  assert.equal(typeof child.stdout.on, 'function');
+  assert.equal(typeof child.stderr.on, 'function');
+});
+
+test('spawnInteractive injects pathPrefix as PATH prepend with unquoted :$PATH', async () => {
+  // codex/claude live outside the pod's minimal non-interactive-ssh PATH
+  // (~/.npm-global/bin). pathPrefix must prepend the literal (shq-quoted) dir
+  // while keeping :$PATH UNQUOTED so the pod's own PATH still resolves the
+  // codex shebang's node. Real-Pi validated: without this the remote codex
+  // exec exits 127. (P4-S1 supervisor addition.)
+  const spawn = makeSpawn(() => {});
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+  await exec.spawnInteractive('codex', ['exec'], { pathPrefix: '/home/karnian/.npm-global/bin' });
+  const script = scriptOf(spawn.calls.at(-1));
+  assert.equal(script, `exec env PATH=${shq('/home/karnian/.npm-global/bin')}:$PATH ${shq('codex')} ${shq('exec')}`);
+  // The prefix is single-quoted (literal) but :$PATH stays outside the quotes.
+  assert.ok(script.includes(`PATH=${shq('/home/karnian/.npm-global/bin')}:$PATH`));
+});
+
+test('spawnInteractive rejects relative/control-char/non-string pathPrefix (PATH-trust guard)', async () => {
+  const spawn = makeSpawn(() => {});
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+  for (const bad of ['.', 'relative/bin', '', '/x\nety', '/x\x00y', 123, {}]) {
+    await assert.rejects(
+      () => exec.spawnInteractive('codex', ['exec'], { pathPrefix: bad }),
+      /pathPrefix must be an absolute POSIX path/,
+    );
+  }
+  // absolute + clean → accepted (no throw, spawns)
+  await exec.spawnInteractive('codex', ['exec'], { pathPrefix: '/home/karnian/.npm-global/bin' });
+});
+
+test('spawnInteractive allows only trusted manager commands independent from public exec allowlist', async () => {
+  const spawn = makeSpawn(() => {});
+  const exec = createRemoteSshNodeExecutor(nodeRow(), {
+    spawnFn: spawn,
+    commandAllowlist: ['bash', 'git'],
+  });
+
+  await exec.spawnInteractive('claude', ['--version']);
+  assert.equal(scriptOf(spawn.calls.at(-1)), "exec 'claude' '--version'");
+
+  for (const command of ['bash', 'git']) {
+    await assert.rejects(
+      () => exec.spawnInteractive(command, []),
+      (err) => err.code === 'COMMAND_NOT_ALLOWED',
+    );
+  }
+});
+
 test('readdir returns child names and rejects options', async () => {
   const spawn = rootGuardSpawn({
     "exec 'realpath' '/srv/root/dir'": { stdout: '/real/root/dir\n' },

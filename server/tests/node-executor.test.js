@@ -368,6 +368,56 @@ test('LocalNodeExecutor.writeTempFile rejects names that escape the temp dir', a
   await assert.rejects(() => executor.writeTempFile('palantir-esc-', 'a/b.txt', 'x'), /invalid file name/);
 });
 
+test('LocalNodeExecutor.putSecretFile writes 0600 secret and rejects escaping names', async (t) => {
+  const executor = createLocalNodeExecutor();
+  const secretPath = await executor.putSecretFile('model_instructions_file', 'secret', 0o600);
+  t.after(async () => {
+    await fsp.rm(path.dirname(secretPath), { recursive: true, force: true });
+  });
+
+  assert.equal(await executor.readFile(secretPath), 'secret');
+  assert.equal((fs.statSync(secretPath).mode & 0o777), 0o600);
+  assert.ok(path.dirname(secretPath).startsWith(path.join(os.tmpdir(), 'palantir-secret-')));
+  await assert.rejects(() => executor.putSecretFile('../evil', 'x'), /invalid file name/);
+  await assert.rejects(() => executor.putSecretFile('a/b', 'x'), /invalid file name/);
+});
+
+test('LocalNodeExecutor.spawnInteractive returns piped child with cwd and env', async (t) => {
+  const executor = createLocalNodeExecutor();
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'palantir-node-executor-spawn-'));
+  t.after(async () => {
+    await fsp.rm(root, { recursive: true, force: true });
+  });
+
+  const child = executor.spawnInteractive(process.execPath, [
+    '-e',
+    'process.stdout.write(JSON.stringify({ cwd: process.cwd(), flag: process.env.LOCAL_EXECUTOR_FLAG || null }));',
+  ], {
+    cwd: root,
+    env: { LOCAL_EXECUTOR_FLAG: 'present' },
+  });
+
+  assert.ok(child.stdin);
+  assert.ok(child.stdout);
+  assert.ok(child.stderr);
+  assert.equal(child.stdin.writable, true);
+  assert.equal(child.stdout.readable, true);
+  assert.equal(child.stderr.readable, true);
+
+  let stdout = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  const code = await new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', resolve);
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(JSON.parse(stdout), { cwd: fs.realpathSync(root), flag: 'present' });
+});
+
 test('createHarvestService routes worktree existence through injected executor', async () => {
   const { createHarvestService } = require('../services/harvestService');
   const calls = [];

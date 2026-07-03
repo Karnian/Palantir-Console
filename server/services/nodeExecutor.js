@@ -218,8 +218,17 @@ function createLocalNodeExecutor({ executionEngine, streamJsonEngine } = {}) {
     return filePath;
   }
 
+  function putSecretFile(name, content, mode = 0o600) {
+    return writeTempFile(path.join(os.tmpdir(), 'palantir-secret-'), name, content, mode);
+  }
+
+  function spawnInteractive(command, args = [], { cwd, env } = {}) {
+    return childProcess.spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+  }
+
   api = {
     exec,
+    spawnInteractive,
     fileExists,
     realpath: (p) => fsp.realpath(p),
     stat: (p) => fsp.stat(p),
@@ -227,6 +236,7 @@ function createLocalNodeExecutor({ executionEngine, streamJsonEngine } = {}) {
     readFile: (p) => fsp.readFile(p, 'utf8'),
     readdir: (p, options) => fsp.readdir(p, options),
     writeTempFile,
+    putSecretFile,
     rmrf: (p) => fsp.rm(p, { recursive: true, force: true }),
     attachEngines,
     spawnWorker: (...args) => requireWorkerChannel('spawnWorker').spawnWorker(...args),
