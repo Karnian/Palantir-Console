@@ -1,6 +1,6 @@
 # Palantir Console Backlog
 
-> Last updated: 2026-06-13 (P0 spawn guard #183 + H-1 Run Harvest #184 — 감독 워크플로 전환 후 첫 시리즈)
+> Last updated: 2026-07-03 (Fleet 원격 실행 — P4 Codex Operator on pod + P5 Claude persistent on pod, 11 PR #288~#298, 실 Raspberry Pi 실증 완료)
 >
 > 이 문서는 *현재 시점에서* 남은 작업들을 카테고리별로 정리한다.
 > 완료된 작업의 한 화면 요약 + 새 세션 재입장 prompt 는 [`handoff-post-k2-launch-2026-04-29.md`](./handoff-post-k2-launch-2026-04-29.md) 를 본다 (§9 post-launch fixups + §10 K-3 cleanup + §11 K-4 launch + §12 K-5 launch). 그 이전 시리즈 (M1/M2/B3 + R1/R3/R4) 는 [`handoff-post-scenario-review.md`](./handoff-post-scenario-review.md) 에 있다.
@@ -18,7 +18,16 @@
 
 ## Ready
 
-**비어 있음.** 모든 K-2 launch 후속 후보 5건 + K-3α/β cleanup + K-4 a11y automation + K-5 visual regression 모두 종결. 신규 phase 트리거 없음.
+### F1. Fleet 풀 루프 검증 — 원격 Operator 가 pod 에서 워커 dispatch (마지막 end-to-end)
+- **상태**: 개별 능력은 전부 실 Pi 증명됨 (원격 Operator spawn/응답/resume + dispatch 능력). **아직 미검증인 한 조합**: 원격 pod 의 Operator 가 **컨트롤 플레인으로 curl 하여 워커를 dispatch → 워커가 (같은/다른) pod 에서 실행 → 결과 복귀** 하는 완전 루프.
+- **필요 조건 (코드 gap 아님, 운영 config)**: `PALANTIR_BASE_URL` 을 **pod 에서 도달 가능한 컨트롤 플레인 주소**(Tailscale IP 등) 로 설정. 미설정 시 원격 Operator 는 `operator:remote_base_url_localhost` 경고 + 자기 localhost 를 curl 해서 dispatch 실패.
+- **착수 시**: PALANTIR_BASE_URL 설정 후 실 Pi 에서 preferred=claude(또는 codex) 원격 Operator → "워커 하나 띄워줘" → dispatch-audit + 워커 run 생성 + 완료 복귀 확인. (P4/P5 검증 하네스 패턴 재사용.)
+
+### F2. Fleet 배포 runbook
+- **상태**: Fleet 전용 배포 문서 없음 (M4-a Bifrost runbook 만 존재). 아래 "실제 배포" 항목을 `docs/runbook-fleet-deploy.md` 로 정리.
+- **범위**: 컨트롤 플레인 기동(PALANTIR_TOKEN + PALANTIR_BASE_URL + HOST) / pod ssh 키 + agent CLI 선로그인 / `#resources` 노드 등록 / 프로젝트 node 바인딩 / heartbeat(`PALANTIR_FLEET_HEARTBEAT=1`) / 트러블슈팅.
+
+**나머지 Ready 비어 있음.** K-2~K-5 시리즈 전부 종결.
 
 진행 가능한 후속 nice-to-have (deferred — 사용자 트리거 시):
 - **K-5-followup** — 모달/드로어 visual regression (K-5 spec §3 비범위 → 별도 phase)
@@ -32,6 +41,17 @@
 ## 최근 완료된 phase 시리즈 (참고)
 
 상세는 모두 `handoff-post-k2-launch-2026-04-29.md` 참고 (단 M4 시리즈는 spec brief 자체가 출처).
+
+### 🚀 Fleet 원격 실행 노드 — P4 + P5 (LAUNCHED 2026-07-03, 실 Raspberry Pi 실증)
+
+> spec `docs/specs/fleet-remote-nodes-brief.md` (r4 LOCKED) + `docs/specs/p5-claude-persistent-remote-brief.md`.
+> **Master→Operator→Worker 3계층 중 하위 2계층(Operator + Worker)이 원격 pod 에서 spawn+dispatch+resume 하는 것을 실 Raspberry Pi 로 완전 실증.** 컨트롤 플레인(Mac/Pi) + ssh pod(agentless). 11 PR (#288~#298).
+
+- **P0~P3 (원격 워커 dispatch, #275~#287)**: NodeExecutor seam(local/remoteSsh) + migration 047(nodes/projects.node_id/runs.node_id) + nodeService(pickExecutor/heartbeat) + 원격 워커 채널(tmux + 파일 status) + lifecycle 배선(pickExecutor 라우팅 + health async + dispatch gate). **실 Pi createApp e2e = 콘솔 codex 태스크→Pi 워커→completed 복귀(프로덕션 경로).**
+- **P4 Codex Operator on pod (#288~#291)**: executor 프리미티브(spawnInteractive/putSecretFile) + brief thread affinity + **S3a codexAdapter node-capable**(executor-driven, runTurn=SYNC-returning + 원격 spawn fire-and-forget + detectExitCode 전수 안정화, Codex 6R/7findings) + **S3b operatorSpawnService 배선**(resolveNode→executor 주입 + resume affinity + fail-closed 502 + env:{} 원격 + auth remote-skip). **실 Pi: 프로젝트 Pi 바인딩→Codex Operator 가 Pi 에서 turn.**
+- **P5 Claude persistent on pod (#292~#298)**: **S0 streamJsonEngine executor seam**(persistent Claude stream-json over ssh, spawnInteractive async→fire-and-forget attachChild) → **S1 keepalive**(ServerAliveInterval) → **S2 liveness tri-state**(transport 단절≠자연종료, unreachable+session 보존) → **S4a 로컬 Claude Operator**(resolveOperatorAdapterType claude→claude-code + onSessionStarted 콜백) → **dispatch 능력**(Bash(curl) 매니저 diet + curl 템플릿 — Claude Operator 가 실제 워커 dispatch, read-only+curl=codex full-bypass 보다 제약적) → **S4b 원격 Claude Operator on pod**(fail-closed 게이트 해제 + async-spawn 첫메시지 pendingInput 버퍼) → **S4c resume affinity**(claude_session_id↔node, project_briefs 재사용 no-migration, pm_adapter-aware). **실 Pi: preferred=claude+Pi 바인딩→Claude Operator 가 Pi 에서 persistent spawn+dispatch, app 재시작 넘어 같은 세션 resume→"42" 기억.**
+- **방법론**: 매 슬라이스 codex-goal 구현 → 실 Pi 검증 → Claude 리뷰/수정 → Codex 적대 리뷰(PASS까지 R2~R6) → 병합. **실 Pi 가 fake 테스트·리뷰가 놓친 async 파급 버그를 반복 검출**(spawnInteractive async / env leak / auth preflight / 첫메시지 레이스 / boot-resume auth 하드코딩). 전 변경 byte-equivalent, 1868 tests.
+- **Trigger-wait 였던 T1(Phase 3b — Claude PM resume) 은 P5-S4a~S4c 로 완료.**
 
 ### ML 메모리 레이어 PR1~PR3b — candidate→active 루프 닫힘 (LAUNCHED 2026-06-15~16)
 - **PR #197~#200** PR1~PR2c / **#202** PR3a batch-distill 뼈대 / **PR3b** live distiller + scheduler. **1169 tests**. **비전 완성** — `PALANTIR_MEMORY_DISTILL=1`+`ANTHROPIC_API_KEY` 시 runtime 자동 작동.
@@ -177,11 +197,8 @@
 
 ## Trigger-wait
 
-### T1. Phase 3b — Claude PM resume
-- **Spec**: `docs/specs/manager-v3-multilayer.md` §9.6
-- **Trigger**: "Claude PM use case 발생" 사용자 선언.
-- **Why deferred**: Codex PM (Phase 3a) 로 모든 use case 커버 중. Claude PM 을 쓸 실제 요구가 없는 상태에서 adapter contract / recovery / event 정규화 변경은 over-build.
-- **착수 시 참고**: manager-v3-multilayer.md §9.6 (entire), 원칙 #9 (sandbox bypass 정책), `pmSpawnService` + `pmCleanupService` 의 현재 Codex 전용 경로를 어떻게 adapter-agnostic 하게 만들지.
+### ~~T1. Phase 3b — Claude PM resume~~ ✅ 완료 (Fleet P5-S4a~S4c, #295~#298, 2026-07-03)
+- Claude Operator 활성화(resolveOperatorAdapterType claude→claude-code) + onSessionStarted 생명주기 + resume affinity(claude_session_id↔node) + boot resume claude 분기 로 종결. adapter-generic 경로 완성. 실 Pi 재시작 연속성 증명.
 
 ### T3. H-2 — Harvest 수확 루프 완성 (PR 자동 생성 / 머지)
 - **Spec**: `docs/specs/h1-run-harvest-brief.md` §4 (비범위 표)
