@@ -8,12 +8,12 @@
 //   ensureLiveOperator({ projectId, activeTopRun })
 //     → Returns the live PM run row for this project, spawning a fresh
 //       one if none is registered. Callers (conversationService) invoke
-//       this before `sendToManagerSlot('pm:<projectId>')` so the slot is
+//       this before `sendToManagerSlot('operator:<projectId>')` so the slot is
 //       guaranteed populated.
 //
 // Behavior:
 //
-//   1. If `managerRegistry.probeActive('pm:<projectId>')` already returns
+//   1. If `managerRegistry.probeActive('operator:<projectId>')` already returns
 //      a live run → return it verbatim. No work.
 //
 //   2. Otherwise:
@@ -24,34 +24,32 @@
 //           `parent_run_id` MUST point at a live Top so parent-notice
 //           routing works; allowing an orphan PM would silently break
 //           lock-in #2.
-//        c. Resolve the PM adapter: spec §7.2 fallback chain
+//        c. Resolve the operator adapter: spec §7.2 fallback chain
 //             project.preferred_pm_adapter → global default → 'codex'.
-//           Phase 3a only actually supports 'codex' as an adapter that
-//           can *spawn* a PM (claude PM requires the resume support
-//           landing in Phase 3b). If the resolved adapter is 'claude'
-//           we currently downgrade to 'codex' with a warning — this is
-//           the pragmatic middle ground so existing user preferences
-//           don't block PM activation.
-//        d. Resolve codex auth (preflight) and build the filtered
-//           subprocess env.
-//        e. Build the PM system prompt with `layer: 'pm'`, and the
+//           A 'claude' preference maps to the 'claude-code' adapter type
+//           (P5-S4a). Codex + Claude operators both spawn; a REMOTE
+//           (pod) Claude operator is gated off until P5-S4b (see the
+//           isRemoteNode/'claude-code' fail-closed check below).
+//        d. Resolve auth for the resolved adapter (preflight) and build
+//           the filtered subprocess env — using the SAME-type agent
+//           profile's env_allowlist (Claude vs Codex creds differ).
+//        e. Build the operator system prompt with `layer: 'operator'`, and the
 //           first-turn user context from project brief + any seed text.
-//        f. Create a new runs row (`is_manager=true`, `manager_layer='pm'`,
-//           `conversation_id='pm:<projectId>'`, `parent_run_id=<top>`,
-//           `manager_adapter='codex'`).
-//        g. Call `codexAdapter.startSession(runId, { ..., resumeThreadId,
-//           onThreadStarted })`. If `project_briefs.pm_thread_id` exists
-//           we pass it as `resumeThreadId` so first turn hits
-//           `codex exec resume <id>`. The `onThreadStarted` callback
-//           persists freshly-captured thread ids into
-//           `project_briefs.pm_thread_id`.
-//        h. `managerRegistry.setActive('pm:<projectId>', runId, adapter)`.
+//        f. Create a new runs row (`is_manager=true`, `manager_layer='operator'`,
+//           `conversation_id='operator:<projectId>'`, `parent_run_id=<top>`,
+//           `manager_adapter=<'codex'|'claude-code'>`).
+//        g. Call `adapter.startSession(runId, { ... })`. Codex uses
+//           `resumeThreadId`/`onThreadStarted` (thread id → pm_thread_id);
+//           Claude uses `onSessionStarted` (system:init's claude_session_id)
+//           to mark the run started. Both callbacks are passed; each adapter
+//           consumes its own.
+//        h. `managerRegistry.setActive('operator:<projectId>', runId, adapter)`.
 //        i. Mark the run row started.
 //
 // Not in scope (explicitly deferred to later phases):
 //   - Claude PM resume (Phase 3b — needs streamJsonEngine --resume work)
 //   - routerService deterministic 3-step matcher (Phase 3a spec lists it
-//     separately; the UI today sends explicit pm:<projectId> ids so the
+//     separately; the UI today sends explicit operator:<projectId> ids so the
 //     matcher isn't on the hot path yet).
 
 const { resolveManagerAuth: defaultResolveManagerAuth, buildManagerSpawnEnv } = require('./authResolver');
@@ -80,17 +78,19 @@ function createOperatorSpawnService({
   const log = logger || ((msg) => console.log(`[pmSpawn] ${msg}`));
 
   // Resolve the adapter type to actually spawn for this project. Spec §7.2
-  // fallback. 'claude' preference falls through to 'codex' until Phase 3b.
+  // fallback. Project preferences use the persisted value ('claude'|'codex'),
+  // while the adapter factory expects the concrete adapter key
+  // ('claude-code'|'codex').
   function resolveOperatorAdapterType(project) {
     const preferred = project && project.preferred_pm_adapter
       ? project.preferred_pm_adapter
       : null;
     const globalDefault = process.env.PALANTIR_DEFAULT_PM_ADAPTER || null;
     const chosen = preferred || globalDefault || 'codex';
-    if (chosen !== 'codex') {
-      log(`project=${project.id} preferred=${chosen} falls through to 'codex' (Phase 3b required for claude PM)`);
-      return 'codex';
-    }
+    if (chosen === 'codex') return 'codex';
+    if (chosen === 'claude' || chosen === 'claude-code') return 'claude-code';
+    const id = project && project.id != null ? project.id : 'unknown';
+    log(`project=${id} unknown preferred=${chosen} → codex`);
     return 'codex';
   }
 
@@ -189,6 +189,22 @@ function createOperatorSpawnService({
       : 'local';
     const isRemoteNode = !!(nodeId && nodeId !== 'local');
 
+    // P5-S4a scope gate: a Claude Operator is validated LOCALLY only. A remote
+    // (pod) Claude Operator is S4b — the executor/nodePrefix routing below is
+    // adapter-generic (from P4-S3b), so without this gate a remote-bound project
+    // with preferred_pm_adapter='claude' would silently spawn an UNVALIDATED
+    // remote Claude manager. Fail closed until S4b enables + validates it on a
+    // real pod. (No existing deployment is remote+claude — this is a new config.)
+    if (isRemoteNode && adapterType === 'claude-code') {
+      const err = new Error(
+        `Remote Claude Operator is not yet supported (Fleet P5-S4b). `
+        + `Project ${projectId} is bound to node '${nodeId}' with preferred_pm_adapter='claude'. `
+        + `Use a local operator, or set the project's operator to Codex for remote nodes.`,
+      );
+      err.httpStatus = 409;
+      throw err;
+    }
+
     // Resolve env_allowlist and mcp_tools from the agent profile of the same
     // type if one exists — mirrors routes/manager.js /start behavior. We do
     // NOT require agent_profile_id for PM spawns (the PM is a server-owned
@@ -199,16 +215,16 @@ function createOperatorSpawnService({
     try {
       if (agentProfileService) {
         const profiles = agentProfileService.listProfiles();
-        const codexProfile = profiles.find(p => p.type === 'codex');
-        if (codexProfile) {
-          if (codexProfile.env_allowlist) {
-            const parsed = JSON.parse(codexProfile.env_allowlist);
+        const managerProfile = profiles.find(p => p.type === adapterType);
+        if (managerProfile) {
+          if (managerProfile.env_allowlist) {
+            const parsed = JSON.parse(managerProfile.env_allowlist);
             if (Array.isArray(parsed)) envAllowlist = parsed;
           }
           // P3-4: extract mcp_tools for PM adapter startup
-          if (codexProfile.capabilities_json) {
+          if (managerProfile.capabilities_json) {
             try {
-              const caps = JSON.parse(codexProfile.capabilities_json);
+              const caps = JSON.parse(managerProfile.capabilities_json);
               if (Array.isArray(caps.mcp_tools)) {
                 pmMcpTools = caps.mcp_tools.filter(t => typeof t === 'string' && t.trim());
               }
@@ -352,6 +368,9 @@ function createOperatorSpawnService({
         log(`setPmThread failed project=${projectId}: ${err.message}`);
       }
     };
+    const onSessionStarted = (sessionId) => {
+      markPmRunStartedOnce();
+    };
 
     // Spawn. Codex is stateless, so startSession writes the instructions
     // file and records metadata; the first actual `codex exec` runs on
@@ -387,6 +406,7 @@ function createOperatorSpawnService({
         role: 'manager',
         resumeThreadId,
         onThreadStarted,
+        onSessionStarted,
         mcpTools: pmMcpTools.length > 0 ? pmMcpTools : undefined,
         // P4-2: pass project-scoped MCP config file path to the adapter.
         // Claude adapter forwards this to streamJsonEngine as --mcp-config.
