@@ -526,6 +526,9 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       // instructions file). The first turn is launched here so the user sees
       // the manager pick up the initial context immediately.
       if (adapter.capabilities && adapter.capabilities.persistentProcess === false) {
+        // P4-S3a: codexAdapter.runTurn is SYNC-returning again (the remote spawn
+        // is fire-and-forget inside the adapter), so the original sync try/catch
+        // is correct; the boot first-turn stays non-blocking.
         try {
           adapter.runTurn(runId, { text: initialUserContext });
         } catch (err) {

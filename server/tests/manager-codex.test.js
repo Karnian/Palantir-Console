@@ -3,6 +3,28 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
+function createFakeDuplexChild() {
+  const { EventEmitter } = require('node:events');
+  const { PassThrough, Writable } = require('node:stream');
+  const child = new EventEmitter();
+  const stdinWrites = [];
+  child.stdin = new Writable({
+    write(chunk, _encoding, callback) {
+      stdinWrites.push(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
+      callback();
+    },
+  });
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.stdinWrites = stdinWrites;
+  child.kill = (signal) => { child.killedWith = signal; };
+  return child;
+}
+
+function waitImmediate() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 // PR4: unit-level coverage for the CodexAdapter and managerSystemPrompt
 // module. We DO NOT spawn a real `codex exec` here — that requires a live
 // codex CLI plus auth, and would make the suite environment-dependent. The
@@ -62,36 +84,50 @@ test('CodexAdapter exposes Codex capabilities', () => {
   assert.match(adapter.buildGuardrailsSection(), /Codex CLI adapter notes/);
 });
 
-test('CodexAdapter.startSession writes a system prompt temp file and disposeSession cleans it up', () => {
+test('CodexAdapter lazily writes a system prompt temp file and disposeSession cleans it up', async () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const { PassThrough } = require('node:stream');
   const captured = [];
+  let capturedArgs = null;
+  const fakeChild = {
+    stdin: { write() {}, end() {} },
+    stderr: new PassThrough(),
+    stdout: new PassThrough(),
+    on() { return this; },
+    kill() {},
+  };
+  const fakeSpawn = (_bin, args) => {
+    capturedArgs = args;
+    return fakeChild;
+  };
   const fakeRunService = {
     addRunEvent(_r, t, p) { captured.push({ t, p: JSON.parse(p) }); return captured.length; },
     updateManagerThreadId() { /* unused */ },
     updateRunResult() { /* unused */ },
     updateRunStatus() { /* unused */ },
   };
-  const adapter = createCodexAdapter({ runService: fakeRunService });
+  const adapter = createCodexAdapter({ runService: fakeRunService, spawnFn: fakeSpawn });
   const { sessionRef } = adapter.startSession('run_mgr_codex1', {
     systemPrompt: 'hello system',
     cwd: process.cwd(),
     model: 'gpt-5-codex',
   });
-  assert.ok(sessionRef.instructionsPath, 'instructionsPath should be set');
-  assert.ok(fs.existsSync(sessionRef.instructionsPath), 'temp file should exist');
-  const content = fs.readFileSync(sessionRef.instructionsPath, 'utf-8');
+  assert.equal(sessionRef.instructionsPath, null, 'instructionsPath is placed lazily on first turn');
+
+  const res = await adapter.runTurn('run_mgr_codex1', { text: 'hi' });
+  assert.equal(res.accepted, true);
+  assert.ok(capturedArgs, 'spawn was invoked');
+  const instructionsFlag = capturedArgs.find((arg) => /^model_instructions_file=/.test(arg));
+  assert.ok(instructionsFlag, 'instructions file flag should be present');
+  const instructionsPath = instructionsFlag.match(/^model_instructions_file="(.+)"$/)?.[1];
+  assert.ok(instructionsPath, 'instructions path should be quoted in the flag');
+  assert.ok(fs.existsSync(instructionsPath), 'temp file should exist after first runTurn');
+  const content = fs.readFileSync(instructionsPath, 'utf-8');
   assert.equal(content, 'hello system');
 
   // Dispose: temp file (and its parent dir) should be unlinked best-effort.
-  adapter.disposeSession('run_mgr_codex1');
-  // The dispose is async-best-effort; give the fs a tick.
-  // It uses fsp.rm which returns a promise we can't await here without
-  // making the whole test async — so just check the parent dir at least
-  // becomes unreachable on a next tick.
-  return new Promise((resolve) => setTimeout(() => {
-    assert.equal(fs.existsSync(sessionRef.instructionsPath), false, 'temp file should be cleaned up after dispose');
-    resolve();
-  }, 50));
+  await adapter.disposeSession('run_mgr_codex1');
+  assert.equal(fs.existsSync(instructionsPath), false, 'temp file should be cleaned up after dispose');
 });
 
 test('M2: CodexAdapter.startSession with mcpConfig emits mcp:legacy_alias_conflict for overlapping user aliases', (t) => {
@@ -134,7 +170,7 @@ test('M2: CodexAdapter.startSession with mcpConfig emits mcp:legacy_alias_confli
   adapter.disposeSession('run_mgr_m2_conflict');
 });
 
-test('M1: CodexAdapter.runTurn with mcpConfig injects leaf-level -c mcp_servers.<alias>.<key> flags', () => {
+test('M1: CodexAdapter.runTurn with mcpConfig injects leaf-level -c mcp_servers.<alias>.<key> flags', async () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
   const { PassThrough } = require('node:stream');
   // Capture spawn args without launching a real codex process. readline in
@@ -172,7 +208,7 @@ test('M1: CodexAdapter.runTurn with mcpConfig injects leaf-level -c mcp_servers.
       },
     },
   });
-  const res = adapter.runTurn('run_mgr_codex_m1', { text: 'hi' });
+  const res = await adapter.runTurn('run_mgr_codex_m1', { text: 'hi' });
   assert.equal(res.accepted, true);
   assert.ok(capturedArgs, 'spawn was invoked');
 
@@ -206,7 +242,7 @@ test('M1: CodexAdapter.runTurn with mcpConfig injects leaf-level -c mcp_servers.
   adapter.disposeSession('run_mgr_codex_m1');
 });
 
-test('M1: CodexAdapter.startSession skips string mcpConfig paths without mcp_invalid failure', () => {
+test('M1: CodexAdapter.startSession skips string mcpConfig paths without mcp_invalid failure', async () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
   const { PassThrough } = require('node:stream');
   const { NORMALIZED_EVENT_TYPES } = require('../services/managerAdapters/eventTypes');
@@ -235,7 +271,7 @@ test('M1: CodexAdapter.startSession skips string mcpConfig paths without mcp_inv
     cwd: process.cwd(),
     mcpConfig: '/tmp/project-mcp.json',
   });
-  const res = adapter.runTurn('run_mgr_codex_m1_path', { text: 'hi' });
+  const res = await adapter.runTurn('run_mgr_codex_m1_path', { text: 'hi' });
   assert.equal(res.accepted, true);
   assert.ok(capturedArgs, 'spawn was invoked');
 
@@ -262,7 +298,7 @@ test('M1: CodexAdapter.startSession skips string mcpConfig paths without mcp_inv
   adapter.disposeSession('run_mgr_codex_m1_path');
 });
 
-test('M1: CodexAdapter.runTurn with invalid mcpConfig fails closed (accepted=false + TURN_FAILED + session ended)', () => {
+test('M1: CodexAdapter.runTurn with invalid mcpConfig fails closed (accepted=false + TURN_FAILED + session ended)', async () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
   const { PassThrough } = require('node:stream');
   const events = [];
@@ -294,7 +330,7 @@ test('M1: CodexAdapter.runTurn with invalid mcpConfig fails closed (accepted=fal
       },
     },
   });
-  const res = adapter.runTurn('run_mgr_codex_m1_bad', { text: 'hi' });
+  const res = await adapter.runTurn('run_mgr_codex_m1_bad', { text: 'hi' });
   assert.equal(res.accepted, false, 'runTurn must refuse to proceed');
   assert.equal(spawned, 0, 'spawn must not be invoked');
   // TURN_FAILED emitted with mcp_invalid kind. The normalized event type
@@ -310,6 +346,267 @@ test('M1: CodexAdapter.runTurn with invalid mcpConfig fails closed (accepted=fal
   assert.equal(adapter.isSessionAlive('run_mgr_codex_m1_bad'), false);
 
   adapter.disposeSession('run_mgr_codex_m1_bad');
+});
+
+test('P4-S3a: CodexAdapter uses injected executor for prompt placement, spawn, resume, and cleanup', async (t) => {
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const cwd = process.cwd();
+  const env = { CODEX_ENV_TEST: '1' };
+  const putSecretFileCalls = [];
+  const spawnCalls = [];
+  const rmrfCalls = [];
+  const children = [];
+  const previousNodeTestContext = process.env.NODE_TEST_CONTEXT;
+  process.env.NODE_TEST_CONTEXT = '1';
+  t.after(() => {
+    if (previousNodeTestContext === undefined) delete process.env.NODE_TEST_CONTEXT;
+    else process.env.NODE_TEST_CONTEXT = previousNodeTestContext;
+  });
+
+  const fakeExecutor = {
+    async putSecretFile(name, content, mode) {
+      putSecretFileCalls.push({ name, content, mode });
+      return `/pod/.palantir-secret-001/${name}`;
+    },
+    async spawnInteractive(command, args, opts) {
+      const child = createFakeDuplexChild();
+      children.push(child);
+      spawnCalls.push({ command, args: [...args], opts });
+      return child;
+    },
+    async rmrf(targetPath) {
+      rmrfCalls.push(targetPath);
+    },
+  };
+  const threadStarted = [];
+  const threadIds = [];
+  const events = [];
+  const fakeRunService = {
+    addRunEvent(_r, type, payload) { events.push({ type, payload: JSON.parse(payload) }); },
+    updateManagerThreadId(_r, threadId) { threadIds.push(threadId); },
+    updateRunResult() {},
+    updateRunStatus() {},
+  };
+  const adapter = createCodexAdapter({ runService: fakeRunService, codexBin: 'codex-test-bin' });
+  const { sessionRef } = adapter.startSession('run_mgr_codex_remote', {
+    systemPrompt: 'remote system prompt',
+    cwd,
+    env,
+    nodePrefix: '/pod/bin',
+    executor: fakeExecutor,
+    onThreadStarted(threadId) { threadStarted.push(threadId); },
+  });
+  assert.equal(sessionRef.instructionsPath, null);
+
+  const first = await adapter.runTurn('run_mgr_codex_remote', { text: 'first user text' });
+  assert.equal(first.accepted, true);
+  // runTurn is sync-returning + fire-and-forget for the async (remote) executor
+  // path; drain the microtasks so the awaited putSecretFile/spawnInteractive
+  // have run before we inspect their calls.
+  await waitImmediate();
+  assert.deepEqual(putSecretFileCalls, [{
+    name: 'system_prompt.md',
+    content: 'remote system prompt',
+    mode: 0o600,
+  }]);
+  assert.equal(spawnCalls.length, 1);
+  assert.equal(spawnCalls[0].command, 'codex-test-bin');
+  assert.deepEqual(spawnCalls[0].args.slice(0, 4), ['exec', '--json', '-C', cwd]);
+  assert.ok(spawnCalls[0].args.includes('--skip-git-repo-check'));
+  assert.ok(spawnCalls[0].args.includes('--dangerously-bypass-approvals-and-sandbox'));
+  assert.ok(spawnCalls[0].args.includes('model_instructions_file="/pod/.palantir-secret-001/system_prompt.md"'));
+  assert.equal(spawnCalls[0].args.at(-1), '-');
+  assert.equal(spawnCalls[0].opts.cwd, cwd);
+  assert.deepEqual(spawnCalls[0].opts.env, env);
+  assert.equal(spawnCalls[0].opts.pathPrefix, '/pod/bin');
+  assert.equal(children[0].stdinWrites.join(''), 'first user text');
+
+  children[0].stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'thread-remote-1' }) + '\n');
+  await waitImmediate();
+  assert.deepEqual(threadStarted, ['thread-remote-1']);
+  assert.deepEqual(threadIds, ['thread-remote-1']);
+  assert.equal(adapter.getSessionId('run_mgr_codex_remote'), 'thread-remote-1');
+  children[0].emit('exit', 0);
+
+  const second = await adapter.runTurn('run_mgr_codex_remote', { text: 'resume user text' });
+  assert.equal(second.accepted, true);
+  await waitImmediate();
+  assert.equal(putSecretFileCalls.length, 1, 'instructions placement is cached across turns');
+  assert.equal(spawnCalls.length, 2);
+  assert.deepEqual(spawnCalls[1].args.slice(0, 4), ['exec', 'resume', 'thread-remote-1', '--json']);
+  assert.equal(spawnCalls[1].args.includes('-C'), false, 'resume turn must omit -C');
+  assert.ok(spawnCalls[1].args.includes('model_instructions_file="/pod/.palantir-secret-001/system_prompt.md"'));
+  assert.equal(spawnCalls[1].opts.pathPrefix, '/pod/bin');
+  assert.equal(children[1].stdinWrites.join(''), 'resume user text');
+
+  await adapter.disposeSession('run_mgr_codex_remote');
+  assert.deepEqual(rmrfCalls, ['/pod/.palantir-secret-001']);
+});
+
+test('P4-S3a: remote spawn rejection surfaces the run as failed (not silently accepted)', async () => {
+  // A fire-and-forget remote turn whose spawnInteractive/putSecretFile REJECTS
+  // before a child exists must be surfaced as failed (marked failed + TURN_FAILED
+  // + SESSION_ENDED + placed secret dir cleaned up) — otherwise the caller sees
+  // accepted:true, isSessionAlive stays true, and it commits a notice-drain for
+  // a turn that never spawned. Codex P4-S3a R3.
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const statuses = [];
+  const eventTypes = [];
+  const rmrfCalls = [];
+  const fakeRunService = {
+    addRunEvent(_r, type) { eventTypes.push(type); },
+    updateManagerThreadId() {},
+    updateRunResult() {},
+    updateRunStatus(_r, status) { statuses.push(status); },
+  };
+  const fakeExecutor = {
+    async putSecretFile(name) { return `/pod/.palantir-secret-fail/${name}`; },
+    async spawnInteractive() { throw new Error('ssh connect refused'); },
+    async rmrf(target) { rmrfCalls.push(target); },
+  };
+  const adapter = createCodexAdapter({ runService: fakeRunService, codexBin: 'codex-test-bin' });
+  adapter.startSession('run_spawn_fail', {
+    systemPrompt: 'sp', cwd: process.cwd(), executor: fakeExecutor, nodePrefix: '/pod/bin',
+  });
+
+  const res = await adapter.runTurn('run_spawn_fail', { text: 'go' });
+  assert.equal(res.accepted, true, 'message accepted (fire-and-forget) synchronously');
+  await waitImmediate();
+  await waitImmediate();
+
+  assert.ok(statuses.includes('failed'), 'run marked failed after remote spawn rejection');
+  assert.equal(adapter.isSessionAlive('run_spawn_fail'), false, 'session flipped to not-alive');
+  // detectExitCode must report the FAILURE (nonzero), not 0 — otherwise a
+  // managerRegistry.probeActive() liveness sweep would force the failed run back
+  // to 'completed'. Codex P4-S3a R4.
+  assert.notEqual(adapter.detectExitCode('run_spawn_fail'), 0, 'failed session must not report exit code 0');
+  assert.deepEqual(rmrfCalls, ['/pod/.palantir-secret-fail'], 'placed secret dir cleaned up');
+});
+
+test('P4-S3a: signal-killed turn reports nonzero exit code (probe-stable failed)', async () => {
+  // A child killed by SIGNAL reports code === null. detectExitCode must NOT
+  // then fall back to 0 (which a probeActive() sweep maps to 'completed') —
+  // it must report nonzero so the failed run stays failed. Codex P4-S3a R5.
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const statuses = [];
+  const child = createFakeDuplexChild();
+  const fakeExecutor = {
+    async putSecretFile(name) { return `/pod/.sig/${name}`; },
+    async spawnInteractive() { return child; },
+    async rmrf() {},
+  };
+  const fakeRunService = {
+    addRunEvent() {}, updateManagerThreadId() {}, updateRunResult() {},
+    updateRunStatus(_r, status) { statuses.push(status); },
+  };
+  const adapter = createCodexAdapter({ runService: fakeRunService, codexBin: 'codex-test-bin' });
+  adapter.startSession('run_sig', { systemPrompt: 'sp', cwd: process.cwd(), executor: fakeExecutor });
+
+  const res = await adapter.runTurn('run_sig', { text: 'go' });
+  assert.equal(res.accepted, true);
+  await waitImmediate();
+  child.emit('exit', null, 'SIGKILL');
+  assert.notEqual(adapter.detectExitCode('run_sig'), 0, 'signal-kill must report nonzero exit code');
+  assert.ok(statuses.includes('failed'), 'signal-killed run is marked failed');
+});
+
+test('P4-S3a: spawn-time child error surfaces as failed (probe-stable, no exit event)', async () => {
+  // An OS spawn error (ENOENT/EACCES) fires 'error' but NOT 'exit'. It must still
+  // flip the session to not-alive + probe-stable failed, else probeActive() sees
+  // it alive forever. Codex P4-S3a R6.
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const statuses = [];
+  const child = createFakeDuplexChild();
+  const fakeExecutor = {
+    async putSecretFile(name) { return `/pod/.err/${name}`; },
+    async spawnInteractive() { return child; },
+    async rmrf() {},
+  };
+  const fakeRunService = {
+    addRunEvent() {}, updateManagerThreadId() {}, updateRunResult() {},
+    updateRunStatus(_r, status) { statuses.push(status); },
+  };
+  const adapter = createCodexAdapter({ runService: fakeRunService, codexBin: 'codex-test-bin' });
+  adapter.startSession('run_err', { systemPrompt: 'sp', cwd: process.cwd(), executor: fakeExecutor });
+
+  const res = await adapter.runTurn('run_err', { text: 'go' });
+  assert.equal(res.accepted, true);
+  await waitImmediate();
+  const osErr = new Error('spawn codex ENOENT');
+  osErr.code = 'ENOENT';
+  child.emit('error', osErr);
+  assert.equal(adapter.isSessionAlive('run_err'), false, 'spawn-error session must be not-alive');
+  assert.notEqual(adapter.detectExitCode('run_err'), 0, 'spawn-error must report nonzero exit code');
+  assert.ok(statuses.includes('failed'), 'spawn-error run is marked failed');
+});
+
+test('P4-S3a: injected executor without explicit env does not receive process.env', async (t) => {
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const sentinelName = 'PALANTIR_CODEX_ENV_LEAK_SENTINEL';
+  const previousSentinel = process.env[sentinelName];
+  process.env[sentinelName] = 'must-not-leak';
+  t.after(() => {
+    if (previousSentinel === undefined) delete process.env[sentinelName];
+    else process.env[sentinelName] = previousSentinel;
+  });
+
+  let capturedEnv = null;
+  const fakeExecutor = {
+    putSecretFile(name) {
+      return `/pod/.palantir-secret-env/${name}`;
+    },
+    spawnInteractive(_command, _args, opts) {
+      capturedEnv = opts.env;
+      return createFakeDuplexChild();
+    },
+    rmrf() {},
+  };
+  const adapter = createCodexAdapter({ runService: null, codexBin: 'codex-test-bin' });
+  adapter.startSession('run_mgr_codex_env_remote', {
+    systemPrompt: 'remote system prompt',
+    cwd: process.cwd(),
+    executor: fakeExecutor,
+  });
+
+  const result = await adapter.runTurn('run_mgr_codex_env_remote', { text: 'hi' });
+  assert.equal(result.accepted, true);
+  assert.deepEqual(capturedEnv, {});
+  assert.equal(capturedEnv[sentinelName], undefined);
+});
+
+test('P4-S3a: dispose during pending remote prompt placement removes created secret dir', async () => {
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  let resolvePlacement;
+  let spawnCalled = false;
+  const rmrfCalls = [];
+  const placement = new Promise((resolve) => { resolvePlacement = resolve; });
+  const fakeExecutor = {
+    putSecretFile() {
+      return placement;
+    },
+    spawnInteractive() {
+      spawnCalled = true;
+      return createFakeDuplexChild();
+    },
+    async rmrf(targetPath) {
+      rmrfCalls.push(targetPath);
+    },
+  };
+  const adapter = createCodexAdapter({ runService: null, codexBin: 'codex-test-bin' });
+  adapter.startSession('run_mgr_codex_dispose_placement', {
+    systemPrompt: 'remote system prompt',
+    cwd: process.cwd(),
+    executor: fakeExecutor,
+  });
+
+  const turnPromise = adapter.runTurn('run_mgr_codex_dispose_placement', { text: 'hi' });
+  await adapter.disposeSession('run_mgr_codex_dispose_placement');
+  resolvePlacement('/pod/.palantir-secret-race/system_prompt.md');
+
+  const result = await turnPromise;
+  assert.equal(result.accepted, true);
+  assert.equal(spawnCalled, false);
+  assert.deepEqual(rmrfCalls, ['/pod/.palantir-secret-race']);
 });
 
 test('CodexAdapter normalizes thread.started + agent_message + turn.completed', () => {

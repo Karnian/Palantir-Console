@@ -485,6 +485,10 @@ function createConversationService({
         text: effectiveText,
         images: validImages,
       });
+      // P4-S3a: codexAdapter.runTurn is now SYNC-returning {accepted} (refusals
+      // are decided synchronously; the remote spawn is fire-and-forget inside
+      // the adapter). So this stays the original sync read — a refused turn
+      // (accepted:false) correctly 502s without committing a notice drain.
       accepted = !!(result && result.accepted);
     } catch (runErr) {
       // Notice queue is untouched — next send will retry.
