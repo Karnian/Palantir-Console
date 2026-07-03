@@ -1030,9 +1030,15 @@ function createApp(options = {}) {
   // recovery path (Codex-agreed option A).
   lifecycleService.startMonitoring();
   const recovered = lifecycleService.recoverOrphanSessions();
-  if (recovered.length > 0) {
-    console.log(`[app] Recovered ${recovered.length} orphan session(s)`);
-  }
+  Promise.resolve(recovered)
+    .then((sessions) => {
+      if (sessions.length > 0) {
+        console.log(`[app] Recovered ${sessions.length} orphan session(s)`);
+      }
+    })
+    .catch((err) => {
+      console.warn(`[app] Orphan session recovery failed: ${err.message}`);
+    });
   // Boot drain restarts queued worker runs after a restart. Skip under the
   // node test runner by default: createApp() in tests would otherwise claim
   // (→running) any seeded queued rows, hit the P0 spawn guard, and corrupt

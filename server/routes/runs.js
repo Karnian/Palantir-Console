@@ -411,7 +411,7 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
     if (!lifecycleService) {
       return res.status(501).json({ error: 'Lifecycle service not configured' });
     }
-    const sent = lifecycleService.sendAgentInput(req.params.id, text);
+    const sent = await lifecycleService.sendAgentInput(req.params.id, text);
     if (!sent) return res.status(502).json({ error: 'Failed to deliver input to agent' });
     res.json({ status: 'ok' });
   }));
@@ -421,7 +421,7 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
     if (!lifecycleService) {
       return res.status(501).json({ error: 'Lifecycle service not configured' });
     }
-    lifecycleService.cancelRun(req.params.id);
+    await lifecycleService.cancelRun(req.params.id);
     res.json({ status: 'ok' });
   }));
 
@@ -442,7 +442,7 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
     const run = runService.getRun(req.params.id);
     if (['running', 'queued', 'needs_input'].includes(run.status)) {
       if (lifecycleService) {
-        try { lifecycleService.cancelRun(req.params.id); } catch {}
+        try { await lifecycleService.cancelRun(req.params.id); } catch {}
       } else if (executionEngine) {
         try { executionEngine.kill(req.params.id); } catch {}
       }

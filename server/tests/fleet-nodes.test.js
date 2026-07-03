@@ -444,7 +444,11 @@ test('dispatcher refuses nodes downgraded after binding (can_execute/files_only)
   assert.equal(h.runService.getRun(queued.id).status, 'queued');
 });
 
-test('dispatcher keeps ssh node runs queued even when manually marked reachable', async (t) => {
+test('dispatcher keeps unreachable ssh node runs queued', async (t) => {
+  // P3b-3 removed the P2 blanket "ssh is never dispatchable" gate; a reachable
+  // executable ssh node now dispatches (covered in fleet-dispatch.test.js). The
+  // remaining invariant here: an ssh node WITHOUT a heartbeat (reachable=0, the
+  // default) keeps its runs queued.
   const { db } = await mkdb(t);
   const h = buildHarness(db);
   h.nodeService.createNode({
@@ -455,7 +459,6 @@ test('dispatcher keeps ssh node runs queued even when manually marked reachable'
     ssh_user: 'runner',
     exposed_roots: ['/srv/root'],
   });
-  h.nodeService.updateNode('ssh-pod', { reachable: true });
   const profile = seedProfile(db, { max: 5 });
   const project = seedProject(h.projectService, { node_id: 'ssh-pod' });
   const task = seedTask(h.taskService, project.id);
