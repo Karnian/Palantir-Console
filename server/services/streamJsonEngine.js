@@ -201,8 +201,11 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
       outputBuffer: [],
       events: [],
       exitCode: null,
+      exited: false,
       exitedAt: null,
       spawnError: null,
+      isRemote: usingRemoteExecutor,
+      unreachable: false,
       sessionId: null,
       result: null,
       usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
@@ -257,6 +260,27 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
       child.on('exit', (code, signal) => {
         console.log(`[engine] Process ${runId} exited: code=${code} signal=${signal}`);
         fireCleanup();
+
+        if (proc.isRemote && code === 255) {
+          proc.unreachable = true;
+          // Stamp exitedAt so the TTL reaper eventually collects an unreachable
+          // proc that is never resumed/disposed (Codex P5-S2). Resumability does
+          // not depend on the in-memory proc — the DB run stays 'running' with a
+          // preserved claude_session_id, so a later respawn resumes regardless.
+          proc.exitedAt = Date.now();
+          if (runService) {
+            try {
+              runService.addRunEvent(runId, 'transport_lost', JSON.stringify({
+                node: 'remote',
+                reason: 'ssh_transport_drop',
+                code,
+              }));
+            } catch { /* ignore */ }
+          }
+          return;
+        }
+
+        proc.exited = true;
         proc.exitCode = code;
         proc.exitedAt = Date.now();
         if (proc.status === 'starting' || proc.status === 'running') {
@@ -541,7 +565,7 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
     // stdin.writable alone races (result event → sendInput → exit event,
     // in that order, is the common path for single-shot workers). The
     // exitCode check closes that race.
-    if (proc.exitCode !== null) return false;
+    if (proc.exitCode !== null || proc.unreachable || proc.exited) return false;
     const stdin = proc.child.stdin;
     if (!stdin || stdin.destroyed || stdin.writableEnded || !stdin.writable) return false;
     if ((!text || text.length > 50000) && (!images || images.length === 0)) return false;
@@ -630,21 +654,29 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
     const proc = processes.get(runId);
     if (!proc) return false;
     if (proc.spawnError) return false;
+    if (proc.unreachable) return false;
+    if (proc.exited) return false;
     return proc.exitCode === null;
   }
 
   function detectExitCode(runId) {
     const proc = processes.get(runId);
     if (!proc) return null;
+    if (proc.unreachable) return null;
     if (proc.spawnError) return 1;
     return proc.exitCode;
+  }
+
+  function isUnreachable(runId) {
+    const proc = processes.get(runId);
+    return !!proc?.unreachable;
   }
 
   function listSessions() {
     return Array.from(processes.entries()).map(([runId, proc]) => ({
       name: `claude-${runId}`,
       pid: proc.child?.pid,
-      alive: proc.exitCode === null && !proc.spawnError,
+      alive: proc.exitCode === null && !proc.spawnError && !proc.unreachable && !proc.exited,
       sessionId: proc.sessionId,
       isManager: proc.isManager,
       isPalantir: true,
@@ -666,7 +698,7 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
   return {
     type: 'stream-json',
     spawnAgent, sendInput, getOutput, getEvents, getUsage, getSessionId,
-    kill, hasProcess, isAlive, detectExitCode, listSessions, discoverGhostSessions,
+    kill, hasProcess, isAlive, detectExitCode, isUnreachable, listSessions, discoverGhostSessions,
     // Exposed for tests that need to assert argv shape without spawning.
     _buildArgs: buildArgs,
   };
