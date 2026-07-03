@@ -38,13 +38,12 @@ function createProjectBriefService(db) {
     delete: db.prepare('DELETE FROM project_briefs WHERE project_id = ?'),
     clearPmThread: db.prepare(`
       UPDATE project_briefs
-         SET pm_thread_id = NULL, pm_adapter = NULL, updated_at = datetime('now')
+         SET pm_thread_id = NULL,
+             pm_adapter = NULL,
+             pm_thread_node_id = NULL,
+             pm_thread_cwd = NULL,
+             updated_at = datetime('now')
        WHERE project_id = ?
-    `),
-    setPmThread: db.prepare(`
-      UPDATE project_briefs
-         SET pm_thread_id = @pm_thread_id, pm_adapter = @pm_adapter, updated_at = datetime('now')
-       WHERE project_id = @project_id
     `),
   };
 
@@ -105,13 +104,31 @@ function createProjectBriefService(db) {
    * lazy-creation path in the router (Phase 3a). Writes both pm_thread_id
    * and the actual adapter that owns that thread.
    */
-  function setPmThread(projectId, { pm_thread_id, pm_adapter }) {
+  function setPmThread(projectId, fields) {
+    fields = fields || {};
+    const pm_thread_id = fields.pm_thread_id;
+    const pm_adapter = fields.pm_adapter;
     if (!pm_thread_id) throw new BadRequestError('pm_thread_id is required');
     if (!VALID_PM_ADAPTERS.includes(pm_adapter)) {
       throw new BadRequestError(`Invalid pm_adapter: ${pm_adapter}`);
     }
     ensureBrief(projectId);
-    stmts.setPmThread.run({ project_id: projectId, pm_thread_id, pm_adapter });
+
+    const setClauses = [
+      'pm_thread_id = @pm_thread_id',
+      'pm_adapter = @pm_adapter',
+    ];
+    const params = { project_id: projectId, pm_thread_id, pm_adapter };
+    for (const col of ['pm_thread_node_id', 'pm_thread_cwd']) {
+      if (Object.prototype.hasOwnProperty.call(fields, col)) {
+        setClauses.push(`${col} = @${col}`);
+        params[col] = fields[col] ?? null;
+      }
+    }
+    setClauses.push("updated_at = datetime('now')");
+    db.prepare(
+      `UPDATE project_briefs SET ${setClauses.join(', ')} WHERE project_id = @project_id`
+    ).run(params);
     return stmts.getById.get(projectId);
   }
 
