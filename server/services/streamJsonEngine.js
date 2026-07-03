@@ -19,6 +19,10 @@ const { resolveSpawnCwd } = require('../utils/spawnCwd');
 function createStreamJsonEngine({ runService, eventBus } = {}) {
   const processes = new Map(); // runId → ProcessRecord
   const PROCESS_TTL_MS = 10 * 60 * 1000;
+  // Bounds for input buffered while a REMOTE manager spawn is still resolving
+  // (proc.child null). A hung node must not accumulate unbounded pending input.
+  const MAX_PENDING_INPUT_MSGS = 32;
+  const MAX_PENDING_INPUT_BYTES = 2 * 1024 * 1024;
 
   /**
    * Resolve Claude Code binary path.
@@ -333,6 +337,17 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
         console.log(`[engine] Sending initial prompt via stdin for ${runId}`);
         child.stdin.write(initMsg + '\n');
       }
+
+      // Flush any input buffered by sendInput while a REMOTE spawn was still
+      // resolving (proc.child was null). Ordered after the initial prompt so the
+      // first user turn arrives in send order. (killPending returned above, so a
+      // disposed operator never flushes.)
+      if (proc.pendingInput && proc.pendingInput.length > 0) {
+        for (const buffered of proc.pendingInput) {
+          try { child.stdin.write(buffered + '\n'); } catch { /* ignore */ }
+        }
+        proc.pendingInput = [];
+      }
     };
 
     // Surface an async spawn/placement failure the same way child.on('error')
@@ -344,6 +359,7 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
       proc.exitCode = 1;
       proc.exitedAt = Date.now();
       proc.status = 'failed';
+      proc.pendingInput = null; // buffered input can never be delivered — drop it
       fireCleanup();
       if (runService) {
         try {
@@ -559,15 +575,14 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
    */
   function sendInput(runId, text, images) {
     const proc = processes.get(runId);
-    if (!proc || !proc.child) return false;
+    if (!proc) return false;
     // Exit detection must come BEFORE stdin.writable: Node marks stdin
     // writable=false asynchronously after the child exits, so checking
     // stdin.writable alone races (result event → sendInput → exit event,
     // in that order, is the common path for single-shot workers). The
-    // exitCode check closes that race.
-    if (proc.exitCode !== null || proc.unreachable || proc.exited) return false;
-    const stdin = proc.child.stdin;
-    if (!stdin || stdin.destroyed || stdin.writableEnded || !stdin.writable) return false;
+    // exitCode check closes that race. These terminal guards hold whether or
+    // not the child is attached yet.
+    if (proc.exitCode !== null || proc.unreachable || proc.exited || proc.spawnError || proc.killPending) return false;
     if ((!text || text.length > 50000) && (!images || images.length === 0)) return false;
 
     let message;
@@ -591,18 +606,44 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
       message = text;
     }
 
+    const recordUserInput = () => {
+      if (!runService) return;
+      const eventPayload = { text: text ? text.slice(0, 5000) : '' };
+      if (images && images.length > 0) {
+        eventPayload.images = images.map(img => ({
+          media_type: img.media_type,
+          size: img.data ? img.data.length : 0,
+        }));
+      }
+      try { runService.addRunEvent(runId, 'user_input', JSON.stringify(eventPayload)); } catch { /* ignore */ }
+    };
+
+    // The child may not be attached yet: a REMOTE manager spawn is async
+    // (fire-and-forget), so a message sent right after startSession lands before
+    // the ssh duplex child resolves. Buffer it; attachChild flushes pendingInput
+    // when the child attaches (or the run is surfaced failed if the spawn fails).
+    // For LOCAL managers spawnAgent attaches synchronously, so this path is not
+    // hit — behavior is byte-equivalent.
+    if (!proc.child) {
+      if (!proc.pendingInput) proc.pendingInput = [];
+      // Bound the buffer so a hung/unreachable remote spawn cannot accumulate
+      // unbounded pending input (Codex P5-S4b).
+      const pendingBytes = proc.pendingInput.reduce((n, m) => n + m.length, 0);
+      if (proc.pendingInput.length >= MAX_PENDING_INPUT_MSGS
+        || pendingBytes + message.length > MAX_PENDING_INPUT_BYTES) {
+        return false;
+      }
+      proc.pendingInput.push(message);
+      recordUserInput();
+      return true;
+    }
+
+    const stdin = proc.child.stdin;
+    if (!stdin || stdin.destroyed || stdin.writableEnded || !stdin.writable) return false;
+
     try {
       proc.child.stdin.write(message + '\n');
-      if (runService) {
-        const eventPayload = { text: text ? text.slice(0, 5000) : '' };
-        if (images && images.length > 0) {
-          eventPayload.images = images.map(img => ({
-            media_type: img.media_type,
-            size: img.data ? img.data.length : 0,
-          }));
-        }
-        runService.addRunEvent(runId, 'user_input', JSON.stringify(eventPayload));
-      }
+      recordUserInput();
       return true;
     } catch (err) {
       console.warn(`[engine] stdin write failed for ${runId}: ${err.message}`);
@@ -640,7 +681,9 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
       // A remote spawn is still resolving (proc.child not yet attached). Mark a
       // pending kill so attachChild signals the ssh child the moment it lands —
       // otherwise the later-resolved child would attach alive and unowned.
+      // Drop any buffered input — a disposed operator must not flush it on attach.
       proc.killPending = true;
+      proc.pendingInput = null;
       return true;
     }
     try { proc.child.kill('SIGTERM'); return true; } catch { return false; }

@@ -249,7 +249,7 @@ test('P5-S4a: Claude operator preflights auth with the claude-code profile allow
   assert.ok(!capturedAllowlist.includes('CODEX_API_KEY'), 'not the codex profile allowlist');
 });
 
-test('P5-S4a: remote node + Claude preference fails closed until S4b — Codex R1 SERIOUS', async (t) => {
+test('P5-S4b: remote node + Claude preference spawns a remote Claude Operator (executor + nodePrefix + pod cwd + minimal env)', async (t) => {
   const db = await mkdb(t);
   const runService = createRunService(db, null);
   const projectService = createProjectService(db);
@@ -275,11 +275,22 @@ test('P5-S4a: remote node + Claude preference fails closed until S4b — Codex R
     projectService, projectBriefService, nodeService,
     resolveManagerAuth: authOk,
   });
-  const project = projectService.createProject({ name: 'remote-claude', preferred_pm_adapter: 'claude', node_id: 'nodeA' });
+  const project = projectService.createProject({
+    name: 'remote-claude', preferred_pm_adapter: 'claude', node_id: 'nodeA', directory: '/workspace/remote-claude',
+  });
   seedTop({ runService, registry, adapter: makeFakeManagerAdapter('claude-code') });
 
-  // Remote + claude must fail closed (S4a is local-only; remote claude is S4b).
-  assert.throws(() => spawn.ensureLiveOperator({ projectId: project.id }), /Remote Claude Operator is not yet supported/);
-  // No Claude adapter was ever spawned on the pod.
-  assert.equal(claudeAdapter._starts.length, 0);
+  // P5-S4b: remote + claude now spawns a remote Claude Operator (gate removed).
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
+  assert.equal(result.spawned, true);
+  assert.equal(result.run.manager_adapter, 'claude-code');
+  assert.equal(result.run.node_id, 'nodeA');
+  assert.equal(claudeAdapter._starts.length, 1);
+  const start = claudeAdapter._starts[0];
+  assert.ok(start.opts.executor, 'remote Claude Operator receives an executor');
+  assert.equal(start.opts.nodePrefix, '/opt/nodeA/bin');
+  assert.equal(start.opts.cwd, '/workspace/remote-claude', 'pod cwd (project.directory)');
+  assert.deepEqual(start.opts.env, {}, 'remote Operator gets a minimal env (no control-plane creds)');
+  // Claude uses onSessionStarted for markRunStarted (not codex onThreadStarted).
+  assert.equal(typeof start.opts.onSessionStarted, 'function');
 });
