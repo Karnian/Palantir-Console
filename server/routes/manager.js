@@ -52,7 +52,7 @@ function parseMcpTools(capabilitiesJson) {
 // so tests can inject `hasKeychain` (and any future DI hooks) without
 // monkey-patching child_process. Production callers leave this empty and
 // get the real keychain probe.
-function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorCleanupService, operatorSpawnService, skillPackService, isSpecialistAvailable = () => false, authResolverOpts = {} }) {
+function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, isSpecialistAvailable = () => false, authResolverOpts = {} }) {
   const router = express.Router();
 
   // PR1a: ManagerAdapter seam. The factory is the single entrypoint for
@@ -189,6 +189,36 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
               let project;
               try { project = projectService.getProject(projectId); } catch { /* ignore */ }
               if (project) {
+                const nodeId = (nodeService && typeof nodeService.resolveNode === 'function')
+                  ? (nodeService.resolveNode(project) || 'local')
+                  : 'local';
+                const isRemoteNode = !!(nodeId && nodeId !== 'local');
+                const threadNode = brief.pm_thread_node_id ? brief.pm_thread_node_id : null;
+                let resumeThreadId = brief.pm_thread_id;
+                if (resumeThreadId && (threadNode || 'local') !== (nodeId || 'local')) {
+                  try {
+                    if (projectBriefService && typeof projectBriefService.clearPmThread === 'function') {
+                      projectBriefService.clearPmThread(projectId);
+                    }
+                  } catch (err) {
+                    console.warn(`[boot] Failed to clear stale PM thread project=${projectId}: ${err.message}`);
+                  }
+                  try {
+                    runService.addRunEvent(r.id, 'operator:thread_rebind_reset', JSON.stringify({ from_node: threadNode, to_node: nodeId || 'local' }));
+                  } catch { /* ignore */ }
+                  resumeThreadId = null;
+                }
+                if (!resumeThreadId) {
+                  throw new Error('PM thread placement no longer matches project node');
+                }
+                let executor;
+                let nodePrefix;
+                if (isRemoteNode) {
+                  const node = nodeService.getNode(nodeId);
+                  executor = nodeService.pickExecutor(nodeId);
+                  if (!executor) throw new Error(`No executor available for node ${nodeId}`);
+                  nodePrefix = node && node.node_prefix ? node.node_prefix : undefined;
+                }
                 const port = process.env.PORT || 4177;
                 const token = process.env.PALANTIR_TOKEN;
                 const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'operator', adapterType: 'codex', specialistAvailable: isSpecialistAvailable() });
@@ -213,20 +243,36 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 briefSections.push('## PM Role\nYou are this project\'s PM (project-scoped dispatcher). Every user turn is either: answer from the brief, dispatch a worker via /execute, or modify an in-flight worker via the worker intervention APIs above. When you record a dispatch audit claim, use the pm_run_id value shown above in the Project Scope section as your pm_run_id envelope field. Stay within this project\'s scope.\n\nWhen spawning workers, choose skill packs that match the task\'s nature. Use your project\'s auto_apply skills as a baseline, and add extra skills via skill_pack_ids when the task needs specialized capabilities beyond the defaults.');
                 const systemPrompt = [baseSystemPrompt, ...briefSections].filter(Boolean).join('\n\n');
                 const authCtx = resolveManagerAuth('codex', authResolverOpts);
-                if (authCtx.canAuth) {
+                // A REMOTE Operator authenticates on the pod (~/.codex), not the
+                // control plane — resume it even when control-plane Codex auth is
+                // absent (else a restart would stop a healthy pod Operator).
+                // Local still requires canAuth. (Codex S3b review.)
+                if (isRemoteNode || authCtx.canAuth) {
                   const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env });
-                  const cwd = resolveSpawnCwd({ workspaceDir: project.directory });
-                  adapter.startSession(r.id, {
+                  const cwd = isRemoteNode ? (project.directory || null) : resolveSpawnCwd({ workspaceDir: project.directory });
+                  if (isRemoteNode && !process.env.PALANTIR_BASE_URL) {
+                    try { runService.addRunEvent(r.id, 'operator:remote_base_url_localhost', JSON.stringify({ node_id: nodeId })); } catch { /* ignore */ }
+                  }
+                  const startOpts = {
                     systemPrompt,
                     cwd,
-                    env: spawnEnv,
+                    // Remote Operator resume must NOT get the control-plane env
+                    // (process.env-based) — it overrides the pod pathPrefix and
+                    // leaks creds; the pod provides its own env + ~/.codex.
+                    // (Mirror of the operatorSpawnService fix; real-Pi finding.)
+                    env: isRemoteNode ? {} : spawnEnv,
                     role: 'manager',
-                    resumeThreadId: brief.pm_thread_id,
-                  });
+                    resumeThreadId,
+                  };
+                  if (isRemoteNode) {
+                    startOpts.executor = executor;
+                    startOpts.nodePrefix = nodePrefix;
+                  }
+                  adapter.startSession(r.id, startOpts);
                   managerRegistry.setActive(r.conversation_id, r.id, adapter);
                   try { runService.updateRunStatus(r.id, 'running', { force: true }); } catch { /* ignore */ }
                   resumed = true;
-                  console.log(`[boot] Resumed PM run=${r.id} project=${projectId} thread=${brief.pm_thread_id}`);
+                  console.log(`[boot] Resumed PM run=${r.id} project=${projectId} thread=${resumeThreadId}`);
                 }
               }
             }
