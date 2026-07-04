@@ -564,3 +564,93 @@ test('remote accountError is sanitized to a message-only object', async () => {
   assert.ok(!codex.usage.accountError.message.includes('abc.def'));
   assert.ok(!JSON.stringify(codex.usage).includes('secret-stack'));
 });
+
+test('ssh claude quota comes from the executor-owned pod probe when available', async () => {
+  const calls = [];
+  const executor = makeExecutor({
+    'codex --version': () => new FakeChild({ code: 127 }),
+    'claude --version': () => new FakeChild({ stdout: '2.1.179\n' }),
+    'claude auth status': () => new FakeChild({ stdout: `${JSON.stringify({ loggedIn: true, email: 'pod@example.test' })}\n` }),
+  });
+  const service = createNodeUsageService({
+    nodeService: {
+      getNode() { return { id: 'pod', name: 'Pod', kind: 'ssh', reachable: 1 }; },
+      pickExecutor() { return executor; },
+    },
+    readClaudeOAuthUsageFn: async (opts) => {
+      calls.push(opts);
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          five_hour: { utilization: 25, resets_at: '2026-07-05T05:00:00Z' },
+          seven_day: { utilization: 72 },
+          limits: { some_meta: true },
+          spend: { other_meta: 1 },
+        }),
+        stderr: '',
+      };
+    },
+  });
+
+  const snapshot = await service.getUsageSnapshot('pod');
+  const claude = snapshot.clis.find((item) => item.id === 'claude');
+  assert.equal(calls.length, 1);
+  assert.equal(claude.error, null);
+  assert.deepEqual(claude.authStatus, { loggedIn: true, email: 'pod@example.test' });
+  assert.deepEqual(claude.usage.limits.map((l) => [l.label, l.remainingPct]), [
+    ['5h limit', 75],
+    ['weekly limit', 28],
+  ]);
+});
+
+test('ssh claude quota probe maps NO_TOKEN to not_logged_in and bad JSON to probe_failed', async () => {
+  function makeService(readResult) {
+    const executor = makeExecutor({
+      'codex --version': () => new FakeChild({ code: 127 }),
+      'claude --version': () => new FakeChild({ stdout: '2.1.179\n' }),
+      'claude auth status': () => new FakeChild({ stdout: `${JSON.stringify({ loggedIn: true })}\n` }),
+    });
+    return createNodeUsageService({
+      nodeService: {
+        getNode() { return { id: 'pod', name: 'Pod', kind: 'ssh', reachable: 1 }; },
+        pickExecutor() { return executor; },
+      },
+      readClaudeOAuthUsageFn: async () => readResult,
+    });
+  }
+
+  const noToken = await makeService({ code: 3, stdout: '__NO_CLAUDE_TOKEN__\n', stderr: '' }).getUsageSnapshot('pod');
+  const noTokenClaude = noToken.clis.find((item) => item.id === 'claude');
+  assert.equal(noTokenClaude.error.code, 'not_logged_in');
+  assert.ok(noTokenClaude.authStatus, 'authStatus survives quota failure');
+
+  const badJson = await makeService({ code: 0, stdout: 'not-json', stderr: '' }).getUsageSnapshot('pod');
+  assert.equal(badJson.clis.find((item) => item.id === 'claude').error.code, 'probe_failed');
+});
+
+test('ssh claude quota exit-3 without the exact sentinel is probe_failed, and HTTP-fail exit 5 too', async () => {
+  function makeService(readResult) {
+    const executor = makeExecutor({
+      'codex --version': () => new FakeChild({ code: 127 }),
+      'claude --version': () => new FakeChild({ stdout: '2.1.179\n' }),
+      'claude auth status': () => new FakeChild({ stdout: `${JSON.stringify({ loggedIn: true })}\n` }),
+    });
+    return createNodeUsageService({
+      nodeService: {
+        getNode() { return { id: 'pod', name: 'Pod', kind: 'ssh', reachable: 1 }; },
+        pickExecutor() { return executor; },
+      },
+      readClaudeOAuthUsageFn: async () => readResult,
+    });
+  }
+
+  // exit 3 재사용 도구(예: 다른 유틸의 exit 3)와 구분 — sentinel 정확 일치 없으면 not_logged_in 금지
+  const looseThree = await makeService({ code: 3, stdout: 'something else', stderr: '' }).getUsageSnapshot('pod');
+  assert.equal(looseThree.clis.find((c) => c.id === 'claude').error.code, 'probe_failed');
+
+  // HTTP non-200: pod 쪽에서 body 를 버리고 status sentinel + exit 5
+  const httpFail = await makeService({ code: 5, stdout: '__CLAUDE_USAGE_HTTP_401__', stderr: '' }).getUsageSnapshot('pod');
+  const claude = httpFail.clis.find((c) => c.id === 'claude');
+  assert.equal(claude.error.code, 'probe_failed');
+  assert.ok(claude.authStatus, 'authStatus survives HTTP failure');
+});

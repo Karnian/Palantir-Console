@@ -6,6 +6,34 @@ const WORKER_OUTPUT_MAX_BUFFER = 256 * 1024;
 const SSH_SERVER_ALIVE_INTERVAL_SECONDS = 15;
 const SSH_SERVER_ALIVE_COUNT_MAX = 4;
 
+// Fixed pod-side probe for the claude OAuth usage endpoint (node-usage v2,
+// brief §5-1). Security contract (Codex security review R1 applied):
+//   * The script is a CONSTANT — no caller input is ever interpolated.
+//   * The pod's ~/.claude/.credentials.json is read INSIDE a single node
+//     process which also performs the HTTPS call itself — the token never
+//     appears in any argv (curl removed entirely: a pod-local ~/.curlrc such
+//     as `trace-ascii = -` could otherwise echo the Authorization header back
+//     across SSH — R1 BLOCKER). Only the usage-report JSON body (HTTP 200)
+//     crosses the transport back.
+//   * Exit codes: 3 = no readable token (paired with __NO_CLAUDE_TOKEN__ on
+//     stdout), 5 = HTTP non-200 (status-only sentinel, body deliberately
+//     dropped), 6 = oversized response, 7 = network/timeout. Callers must
+//     match code AND sentinel, not code alone.
+//   * PATH-resolved `node` is trusted per the fleet threat model (pods are
+//     operator-controlled — same trust as every other executor script that
+//     resolves sh/realpath/tmux from the pod PATH).
+const CLAUDE_OAUTH_USAGE_JS = [
+  'const https=require("https");const os=require("os");',
+  'let tok="";try{const c=require(os.homedir()+"/.claude/.credentials.json");tok=(c.claudeAiOauth&&c.claudeAiOauth.accessToken)||""}catch(e){}',
+  'if(!tok){process.stdout.write("__NO_CLAUDE_TOKEN__");process.exit(3)}',
+  'const req=https.request({host:"api.anthropic.com",path:"/api/oauth/usage",method:"GET",headers:{Authorization:"Bearer "+tok,"anthropic-beta":"oauth-2025-04-20",Accept:"application/json"},timeout:8000},(res)=>{',
+  'let b="";res.on("data",(d)=>{b+=d;if(b.length>262144){process.exit(6)}});',
+  'res.on("end",()=>{if(res.statusCode!==200){process.stdout.write("__CLAUDE_USAGE_HTTP_"+res.statusCode+"__");process.exit(5)}process.stdout.write(b);process.exit(0)});',
+  '});',
+  'req.on("timeout",()=>{req.destroy();process.exit(7)});req.on("error",()=>process.exit(7));req.end();',
+].join('');
+const CLAUDE_OAUTH_USAGE_SCRIPT = `exec node -e '${CLAUDE_OAUTH_USAGE_JS.replace(/'/g, "'\\''")}'`;
+
 /**
  * POSIX single-quote escaping for remote shell insertion. Every string placed
  * into the remote script flows through this function so command, argument,
@@ -515,6 +543,16 @@ function createRemoteSshNodeExecutor(node, {
     return spawnFn('ssh', sshArgsFor(script, { keepAlive: true }), { stdio: ['pipe', 'pipe', 'pipe'] });
   }
 
+  /**
+   * Executor-owned claude quota probe (node-usage v2). Runs the FIXED
+   * CLAUDE_OAUTH_USAGE_SCRIPT on the pod — see the constant's security
+   * contract. Resolves with { code, stdout, stderr } like runRemoteScript;
+   * SSH transport failure rejects with code='SSH_TRANSPORT'.
+   */
+  async function readClaudeOAuthUsage({ timeoutMs = 15000, maxBuffer = 256 * 1024 } = {}) {
+    return runRemoteScript(CLAUDE_OAUTH_USAGE_SCRIPT, { timeoutMs, maxBuffer });
+  }
+
   async function fileExists(remotePath) {
     const checked = await assertWithinRoots(remotePath, { allowMissing: true });
     if (!checked.exists) return false;
@@ -734,6 +772,7 @@ function createRemoteSshNodeExecutor(node, {
   return {
     exec,
     spawnInteractive,
+    readClaudeOAuthUsage,
     spawnWorker,
     ownerOf,
     isAlive,

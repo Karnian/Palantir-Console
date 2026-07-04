@@ -1243,3 +1243,37 @@ test('nodeService.pickExecutor selects local and caches ssh executors until upda
 
   assert.throws(() => nodeService.pickExecutor('missing'), /Node not found/);
 });
+
+test('readClaudeOAuthUsage runs a fixed script with no caller interpolation', async () => {
+  const captured = [];
+  const executor = createRemoteSshNodeExecutor(nodeRow(), {
+    spawnFn: (cmd, args) => {
+      captured.push({ cmd, args });
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.stdin = { end: () => {} };
+      process.nextTick(() => {
+        child.stdout.emit('data', '{"five_hour":{"utilization":10}}');
+        child.emit('close', 0, null);
+      });
+      return child;
+    },
+  });
+
+  const res = await executor.readClaudeOAuthUsage({ timeoutMs: 1000 });
+  assert.equal(res.code, 0);
+  assert.equal(captured.length, 1);
+  const script = captured[0].args[captured[0].args.length - 1];
+  // Fixed pod-side script: reads pod credentials, calls the OAuth usage
+  // endpoint from the pod. The token must never be part of the client-side
+  // command line — only the constant script is.
+  assert.ok(script.includes('api.anthropic.com'));
+  assert.ok(script.includes('/api/oauth/usage'));
+  assert.ok(script.includes('.claude/.credentials.json'));
+  assert.ok(script.includes('__NO_CLAUDE_TOKEN__'));
+  assert.ok(!script.includes('Bearer sk'), 'no literal token on the client side');
+  // R1 BLOCKER regression: the probe must not shell out to curl — a pod-local
+  // ~/.curlrc (e.g. trace-ascii) could echo the Authorization header back.
+  assert.ok(!/\bcurl\b/.test(script), 'probe must not use curl');
+});
