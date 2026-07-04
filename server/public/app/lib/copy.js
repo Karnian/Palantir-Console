@@ -729,6 +729,7 @@ export const NODES_LABELS = {
   emptyValue: '—',
   detailBack: '← 노드 목록',
   detailAction: '상세 보기',
+  usageAction: '사용량 보기',
   // Fleet list card relative heartbeat — mirrors lib/format.js `timeAgo`
   // wording. Kept as separate copy keys (not the shared helper) because the
   // jsdom test harness only pre-seeds specific format.js exports into its

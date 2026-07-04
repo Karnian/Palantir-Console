@@ -5830,11 +5830,38 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .node-card-footer {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
   gap: 6px;
   margin-top: 2px;
   padding-top: 8px;
   border-top: 1px solid var(--border);
+}
+
+.node-card-footer-spacer { flex: 1; }
+
+/* 상세(사용량) 진입의 명시적 1차 액션 — 이름 링크만으로는 발견성이 부족
+   (사용자 피드백: '상세' 버튼이 사라진 것으로 인지). */
+.node-card-usage-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  /* 텍스트/보더는 --accent-light — badge 용 AA-safe accent 텍스트 토큰
+     (dark #a78bfa on card bg 통과, light 는 --accent 로 스왑).
+     --button-primary-bg 텍스트는 dark 에서 3.78:1 미달 (axe 실측). */
+  border: 1px solid var(--accent-light);
+  border-radius: var(--radius-sm);
+  color: var(--accent-light);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.node-card-usage-button:hover,
+.node-card-usage-button:focus-visible {
+  background: var(--button-primary-bg);
+  color: white;
+  text-decoration: none;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
