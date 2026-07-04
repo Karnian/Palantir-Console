@@ -898,6 +898,12 @@ export function NodesView({ detailId = null } = {}) {
                   <div class="node-card-ssh-line">${node.ssh_user || NODES_LABELS.emptyValue}@${node.ssh_host || NODES_LABELS.emptyValue} · ${rootsCount}${NODES_LABELS.rootsCountSuffix}</div>
                 `}
                 <div class="node-card-footer">
+                  <a
+                    class="node-card-usage-button"
+                    data-role="node-detail-open"
+                    href=${detailHref}
+                  >${NODES_LABELS.usageAction}</a>
+                  <span class="node-card-footer-spacer" aria-hidden="true"></span>
                   <button class="ghost small" onClick=${() => { setEditTarget(node); setModalOpen(true); }}>
                     ${COMMON_ACTIONS.edit}
                   </button>
