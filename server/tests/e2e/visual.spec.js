@@ -28,6 +28,8 @@ const ROUTES = [
   'resources/presets',
   'resources/mcp-servers',
   'resources/nodes',
+  // U-2: node detail not-found state — deterministic (no probe, no data)
+  'resources/nodes/ghost-e2e',
   'memory',
   'operator/specialist',
   'operator/profiles',
@@ -42,6 +44,7 @@ function viewKey(route) {
   if (seg.length === 1) return route;
   const sub = seg[seg.length - 1];
   if (seg[0] === 'operator' && sub === 'profiles') return 'operator-profiles';
+  if (seg[0] === 'resources' && seg[1] === 'nodes' && seg.length === 3) return 'nodes';
   return sub;
 }
 const VIEWPORTS = [

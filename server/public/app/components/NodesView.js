@@ -3,14 +3,14 @@
 // JSON-array textarea parsing, and modal-based destructive confirmation.
 
 import { h } from '../../vendor/preact.module.js';
-import { useCallback, useEffect, useState } from '../../vendor/hooks.module.js';
+import { useCallback, useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
 import { addToast, apiFetchWithToast } from '../lib/toast.js';
 import { COMMON_ACTIONS, NODES_LABELS } from '../lib/copy.js';
-import { parseDate } from '../lib/format.js';
+import { formatTime, parseDate } from '../lib/format.js';
 import { EmptyState } from './EmptyState.js';
 import { Modal } from './Modal.js';
 
@@ -59,6 +59,43 @@ function capabilityLabels(node) {
   if (Number(node.can_control) === 1) labels.push(NODES_LABELS.capabilities.can_control);
   if (Number(node.files_only) === 1) labels.push(NODES_LABELS.capabilities.files_only);
   return labels.length ? labels : [NODES_LABELS.capabilities.none];
+}
+
+function errorLabel(error) {
+  if (!error?.code) return '';
+  return NODES_LABELS.usageErrorLabels[error.code] || error.code;
+}
+
+// quota_unsupported is a designed v1 state (brief §3.1), not a failure — a
+// danger tone would read as "something broke" on every healthy claude card.
+const INFO_ERROR_CODES = new Set(['quota_unsupported']);
+
+function errorTone(error) {
+  return error && INFO_ERROR_CODES.has(error.code) ? 'info' : 'error';
+}
+
+function isNotFoundError(err) {
+  // apiFetch throws plain Errors today (message only), but keep status/code
+  // checks so a future structured error shape doesn't silently downgrade the
+  // not-found screen to the generic error screen (Codex U-2 review S2).
+  const code = String(err?.code || err?.error?.code || err?.error || '');
+  const msg = String(err?.message || '');
+  return err?.status === 404
+    || /^(not_found|node_not_found)$/i.test(code)
+    || /404|not[ _-]?found|찾을 수 없습니다/i.test(msg);
+}
+
+function percentTone(pct) {
+  if (pct > 50) return 'ok';
+  if (pct > 20) return 'info';
+  if (pct > 10) return 'warn';
+  return 'danger';
+}
+
+function formatResetAt(resetAt) {
+  if (!resetAt) return '';
+  const formatted = formatTime(resetAt);
+  return formatted === '알 수 없음' ? resetAt : formatted;
 }
 
 function buildNodeBody({
@@ -431,7 +468,293 @@ function DeleteConfirm({ open, node, onClose, onDeleted }) {
   `;
 }
 
-export function NodesView() {
+function NodeUsageLimit({ limit }) {
+  const rawPct = Number(limit?.remainingPct);
+  const hasPct = Number.isFinite(rawPct);
+  const pct = hasPct ? Math.max(0, Math.min(100, rawPct)) : null;
+  const pctText = hasPct ? `${Math.round(pct)}${NODES_LABELS.usageRemainingSuffix}` : '';
+
+  return html`
+    <div class="node-usage-limit" data-role="node-usage-limit">
+      <div class="node-usage-limit-header">
+        <span class="node-usage-limit-label">${limit?.label || NODES_LABELS.emptyValue}</span>
+        ${pctText && html`<span class="node-usage-limit-pct">${pctText}</span>`}
+      </div>
+      ${hasPct && html`
+        <div class="node-usage-bar-track" aria-hidden="true">
+          <div class=${`node-usage-bar-fill ${percentTone(pct)}`} style=${{ width: `${pct}%` }}></div>
+        </div>
+      `}
+      ${limit?.errorMessage && html`<div class="node-usage-limit-error">${limit.errorMessage}</div>`}
+      ${limit?.resetAt && html`
+        <div class="node-usage-limit-reset">
+          ${NODES_LABELS.usageResetAtPrefix}: ${formatResetAt(limit.resetAt)}
+        </div>
+      `}
+    </div>
+  `;
+}
+
+function NodeUsageCard({ cli }) {
+  const usage = cli?.usage || null;
+  const auth = cli?.authStatus || null;
+  const account = usage?.account || null;
+  const limits = Array.isArray(usage?.limits) ? usage.limits : [];
+  const err = cli?.error || null;
+  const installed = cli?.installed === true;
+  const statusLabel = err ? errorLabel(err) : (installed ? NODES_LABELS.usageInstalled : NODES_LABELS.usageNotInstalled);
+  const updatedAt = cli?.updatedAt || usage?.updatedAt;
+
+  const tone = errorTone(err);
+
+  return html`
+    <article
+      class=${`node-usage-card ${err ? (tone === 'info' ? 'has-info' : 'has-error') : ''}`}
+      data-role="node-usage-card"
+      data-cli-id=${cli?.id || ''}
+    >
+      <div class="node-usage-card-header">
+        <div>
+          <div class="node-usage-cli">${cli?.id || NODES_LABELS.emptyValue}</div>
+          <div class="node-usage-meta">
+            ${installed ? NODES_LABELS.usageInstalled : NODES_LABELS.usageNotInstalled}
+            · ${NODES_LABELS.usageVersionLabel}: ${cli?.version || NODES_LABELS.emptyValue}
+          </div>
+        </div>
+        <span class=${`node-usage-card-status ${err ? (tone === 'info' ? 'info' : 'error') : ''}`}>${statusLabel}</span>
+      </div>
+
+      ${(account?.email || account?.planType || account?.type) && html`
+        <div class="node-usage-info-grid" data-role="node-usage-account">
+          ${account.email && html`
+            <div class="node-usage-field">
+              <span class="node-usage-field-label">${NODES_LABELS.usageAccountLabel}</span>
+              <span class="node-usage-field-value">${account.email}</span>
+            </div>
+          `}
+          ${account.planType && html`
+            <div class="node-usage-field">
+              <span class="node-usage-field-label">${NODES_LABELS.usagePlanLabel}</span>
+              <span class="node-usage-field-value">${account.planType}</span>
+            </div>
+          `}
+          ${account.type && html`
+            <div class="node-usage-field">
+              <span class="node-usage-field-label">type</span>
+              <span class="node-usage-field-value">${account.type}</span>
+            </div>
+          `}
+        </div>
+      `}
+
+      ${auth && html`
+        <div class="node-usage-info-grid" data-role="node-usage-auth">
+          ${typeof auth.loggedIn === 'boolean' && html`
+            <div class="node-usage-field">
+              <span class="node-usage-field-label">${NODES_LABELS.usageAuthLabel}</span>
+              <span class="node-usage-field-value">${auth.loggedIn ? NODES_LABELS.usageLoggedIn : NODES_LABELS.usageLoggedOut}</span>
+            </div>
+          `}
+          ${auth.email && html`
+            <div class="node-usage-field">
+              <span class="node-usage-field-label">${NODES_LABELS.usageAccountLabel}</span>
+              <span class="node-usage-field-value">${auth.email}</span>
+            </div>
+          `}
+          ${auth.planType && html`
+            <div class="node-usage-field">
+              <span class="node-usage-field-label">${NODES_LABELS.usagePlanLabel}</span>
+              <span class="node-usage-field-value">${auth.planType}</span>
+            </div>
+          `}
+          ${auth.orgName && html`
+            <div class="node-usage-field">
+              <span class="node-usage-field-label">${NODES_LABELS.usageOrgLabel}</span>
+              <span class="node-usage-field-value">${auth.orgName}</span>
+            </div>
+          `}
+        </div>
+      `}
+
+      ${err && html`
+        <div class=${`node-usage-error ${tone === 'info' ? 'is-info' : ''}`} data-role="node-usage-error">
+          <div class="node-usage-error-title">${errorLabel(err)}</div>
+          ${err.message && html`<div class="node-usage-error-message">${err.message}</div>`}
+        </div>
+      `}
+
+      ${limits.length > 0
+        ? html`<div class="node-usage-limits">${limits.map((limit, i) => html`<${NodeUsageLimit} key=${`${cli?.id || 'cli'}-${i}`} limit=${limit} />`)}</div>`
+        : (!err && html`<div class="node-usage-empty">${NODES_LABELS.usageNoLimits}</div>`)}
+
+      ${updatedAt && html`
+        <div class="node-usage-updated">
+          ${NODES_LABELS.usageUpdatedPrefix}: ${formatTs(updatedAt)}
+        </div>
+      `}
+    </article>
+  `;
+}
+
+function NodeDetail({ detailId, node, nodesLoading }) {
+  const [usageData, setUsageData] = useState(null);
+  const [loadingUsage, setLoadingUsage] = useState(true);
+  const [usageError, setUsageError] = useState(null);
+  const [usageNotFound, setUsageNotFound] = useState(false);
+  const activeDetailRef = useRef(detailId);
+  const requestSeqRef = useRef(0);
+  activeDetailRef.current = detailId;
+
+  const loadUsage = useCallback(async () => {
+    if (!detailId || !node) return;
+    const myId = detailId;
+    const requestSeq = requestSeqRef.current + 1;
+    requestSeqRef.current = requestSeq;
+    setLoadingUsage(true);
+    setUsageError(null);
+    setUsageNotFound(false);
+    setUsageData(null);
+    try {
+      const data = await apiFetch(`/api/nodes/${encodeURIComponent(myId)}/usage`);
+      if (activeDetailRef.current !== myId || requestSeqRef.current !== requestSeq) return;
+      setUsageData(data);
+    } catch (err) {
+      if (activeDetailRef.current !== myId || requestSeqRef.current !== requestSeq) return;
+      if (isNotFoundError(err)) {
+        setUsageNotFound(true);
+      } else {
+        setUsageError(err.message || String(err));
+      }
+      setUsageData(null);
+    } finally {
+      if (activeDetailRef.current === myId && requestSeqRef.current === requestSeq) {
+        setLoadingUsage(false);
+      }
+    }
+  }, [detailId, node]);
+
+  useEffect(() => {
+    if (!node) {
+      requestSeqRef.current += 1;
+      setUsageData(null);
+      setUsageError(null);
+      setUsageNotFound(false);
+      setLoadingUsage(false);
+      return;
+    }
+    loadUsage();
+  }, [node, loadUsage]);
+
+  const renderBack = () => html`
+    <a class="node-detail-back" data-role="node-detail-back" href="#resources/nodes">
+      ${NODES_LABELS.detailBack}
+    </a>
+  `;
+
+  if (nodesLoading) {
+    return html`
+      <section class="node-detail-view" data-role="node-detail">
+        ${renderBack()}
+        <${Loading} />
+      </section>
+    `;
+  }
+
+  if (!node || usageNotFound) {
+    return html`
+      <section class="node-detail-view" data-role="node-detail">
+        ${renderBack()}
+        <div class="node-detail-not-found" data-role="node-detail-not-found">
+          ${NODES_LABELS.detailNotFound}
+        </div>
+      </section>
+    `;
+  }
+
+  const clis = Array.isArray(usageData?.clis) ? usageData.clis : [];
+  const reachable = Number(node.reachable) === 1;
+  const rootsCount = exposedRootCount(node.exposed_roots);
+
+  return html`
+    <section class="node-detail-view" data-role="node-detail">
+      ${renderBack()}
+
+      <div class="node-detail-header" data-role="node-detail-header">
+        <div class="node-detail-header-main">
+          <div>
+            <div class="node-detail-title-row">
+              <h1 class="node-detail-title">${node.name || detailId}</h1>
+              <span class="node-detail-id">${node.id}</span>
+            </div>
+            <div class="node-detail-meta">
+              <span class="node-detail-chip">${node.kind === 'ssh' ? NODES_LABELS.kindSsh : NODES_LABELS.kindLocal}</span>
+              <span class=${`node-detail-chip ${reachable ? 'reachable' : 'unreachable'}`}>
+                ${reachable ? NODES_LABELS.reachable : NODES_LABELS.unreachable}
+              </span>
+              ${capabilityLabels(node).map(label => html`<span class="node-detail-chip" key=${label}>${label}</span>`)}
+            </div>
+          </div>
+          <button
+            class="ghost"
+            data-role="node-usage-refresh"
+            onClick=${loadUsage}
+            disabled=${loadingUsage}
+          >
+            ${loadingUsage ? NODES_LABELS.detailRefreshing : NODES_LABELS.detailRefresh}
+          </button>
+        </div>
+        <div class="node-detail-grid">
+          ${node.kind === 'ssh' && html`
+            <div class="node-detail-field">
+              <span class="node-detail-field-label">${NODES_LABELS.sshTargetLabel}</span>
+              <span class="node-detail-field-value">${node.ssh_user || NODES_LABELS.emptyValue}@${node.ssh_host || NODES_LABELS.emptyValue} · ${rootsCount}${NODES_LABELS.rootsCountSuffix}</span>
+            </div>
+          `}
+          <div class="node-detail-field">
+            <span class="node-detail-field-label">${NODES_LABELS.nodePrefixLabel}</span>
+            <span class="node-detail-field-value">${node.node_prefix || NODES_LABELS.emptyValue}</span>
+          </div>
+          <div class="node-detail-field">
+            <span class="node-detail-field-label">${NODES_LABELS.maxConcurrentLabel}</span>
+            <span class="node-detail-field-value">${node.max_concurrent == null ? NODES_LABELS.unlimited : node.max_concurrent}</span>
+          </div>
+          <div class="node-detail-field">
+            <span class="node-detail-field-label">${NODES_LABELS.lastHeartbeatLabel}</span>
+            <span class="node-detail-field-value">${formatTs(node.last_heartbeat_at) || NODES_LABELS.emptyValue}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="node-usage-section">
+        <div class="node-usage-section-header">
+          <h2 class="node-usage-section-title">${NODES_LABELS.detailUsageTitle}</h2>
+          ${usageData?.updatedAt && html`
+            <span class="node-usage-section-updated">
+              ${NODES_LABELS.usageUpdatedPrefix}: ${formatTs(usageData.updatedAt)}
+            </span>
+          `}
+        </div>
+        ${loadingUsage && !usageData && html`<div class="loading">${NODES_LABELS.detailLoading}</div>`}
+        ${usageError && html`
+          <div class="node-detail-error" data-role="node-detail-error">
+            <span>${usageError}</span>
+            <button class="ghost small" data-role="node-usage-retry" onClick=${loadUsage} disabled=${loadingUsage}>
+              ${NODES_LABELS.detailRetry}
+            </button>
+          </div>
+        `}
+        ${!loadingUsage && !usageError && usageData && html`
+          ${clis.length === 0 && html`<div class="node-usage-empty" data-role="node-usage-no-clis">${NODES_LABELS.usageNoClis}</div>`}
+          <div class="node-usage-grid" data-role="node-usage-grid">
+            ${clis.map(cli => html`<${NodeUsageCard} key=${cli.id} cli=${cli} />`)}
+          </div>
+        `}
+      </div>
+    </section>
+  `;
+}
+
+export function NodesView({ detailId = null } = {}) {
   const [nodes, setNodes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
@@ -450,6 +773,16 @@ export function NodesView() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  const detailNode = detailId ? nodes.find(node => node.id === detailId) : null;
+
+  if (detailId) {
+    return html`
+      <div class="skill-packs-view" data-view="nodes">
+        <${NodeDetail} detailId=${detailId} node=${detailNode} nodesLoading=${loading} />
+      </div>
+    `;
+  }
 
   return html`
     <div class="skill-packs-view" data-view="nodes">
@@ -507,6 +840,13 @@ export function NodesView() {
                   `}
                 </div>
                 <div class="skill-pack-card-actions">
+                  <a
+                    class="ghost small"
+                    data-role="node-detail-link"
+                    href=${`#resources/nodes/${encodeURIComponent(node.id)}`}
+                  >
+                    ${NODES_LABELS.detailAction}
+                  </a>
                   <button class="ghost small" onClick=${() => { setEditTarget(node); setModalOpen(true); }}>
                     ${COMMON_ACTIONS.edit}
                   </button>
