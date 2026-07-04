@@ -410,7 +410,17 @@ function App() {
       return html`<${AgentsView} agents=${agents} loading=${agentsLoading} reloadAgents=${reloadAgents} />`;
     }
     if (routeBase === 'resources') {
-      const sub = route.split('/')[1] || 'skills';
+      const routeParts = route.split('/');
+      const sub = routeParts[1] || 'skills';
+      // Detail links encode node.id (encodeURIComponent), so the route part
+      // must be decoded before DB-id comparison / re-encoding in apiFetch —
+      // ids with space/%/slash would otherwise miss or double-encode
+      // (Codex U-2 review S1). Malformed escapes fall back to the raw part.
+      const rawDetailId = sub === 'nodes' ? (routeParts.slice(2).join('/') || null) : null;
+      let nodeDetailId = rawDetailId;
+      if (rawDetailId) {
+        try { nodeDetailId = decodeURIComponent(rawDetailId); } catch { nodeDetailId = rawDetailId; }
+      }
       return html`<${TabGroupView}
         groupHash="resources"
         subRoute=${sub}
@@ -418,7 +428,7 @@ function App() {
           { key: 'skills',      label: NAV_LABELS.skills,          render: () => html`<${SkillPacksView} projects=${projects} />` },
           { key: 'presets',     label: NAV_LABELS.presets,         render: () => html`<${PresetsView} />` },
           { key: 'mcp-servers', label: NAV_LABELS['mcp-servers'],  render: () => html`<${McpTemplatesView} />` },
-          { key: 'nodes',       label: NAV_LABELS.nodes,           render: () => html`<${NodesView} />` },
+          { key: 'nodes',       label: NAV_LABELS.nodes,           render: () => html`<${NodesView} detailId=${nodeDetailId} />` },
         ]}
       />`;
     }
