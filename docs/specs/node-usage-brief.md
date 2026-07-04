@@ -100,9 +100,20 @@ Fleet (P1~P5) 이후 실체가 바뀌었다: **pod 마다 `~/.codex` / `~/.claud
   (`codex app-server` / `codex --version` / `claude --version` / `claude auth status`).
   사용자 입력은 command/args 에 절대 불류입 (nodeId 는 DB lookup 전용).
 - **CLI 설치/버전 감지 (ssh, S3)**: `--version` 한 턴도 단발 probe primitive 경유
-  (timeout/cap/exit-code 해석 동일 규율). exit 127 또는 spawn 실패 = `not_installed`,
+  (timeout/cap/exit-code 해석 동일 규율). **exit 127 만** `not_installed` — spawn/전송측
+  throw 는 CLI 부재의 증거가 아니므로 `probe_failed` (R2 수정: 오분류 방지).
   timeout = `timeout`, 그 외 nonzero = `probe_failed`. `pathPrefix: node.node_prefix`
   전달 필수 — pod 의 codex/claude 는 login PATH 밖 (false negative 방지).
+- **구현 R2 반영 명시 사항**: ①output cap 256KB 는 **stdout+stderr 합산** ②`node_prefix` 는
+  고정 command+args 원칙의 유일한 가변 인자 예외 — executor 의 spawnInteractive 가
+  절대 POSIX 경로 + control-char 거부 검증(P4-S1) + shq 인용을 보장하므로 수용
+  ③진짜 not-logged-in pod 는 v1 에서 `probe_failed` 로 표면화 (codex JSON-RPC 에
+  안정적 auth error code 가 없고 `requiresOpenaiAuth` 단독 매핑은 false positive —
+  실 Pi 실증: ChatGPT 로그인 pod 가 true + 정상 limits. 코드 `not_logged_in` 은
+  claude 경로 전용) ④원격 probe 의 `accountError` 는 sanitized message 만 통과
+  (로컬 provider 경로는 기존 표면 동일 수위 유지) ⑤`pickExecutor` throw 도 카드
+  error (HTTP 500 금지) ⑥동시 ssh 는 요청당 최대 2 (카드 병렬 × 카드 내 순차) —
+  수동 새로고침 전용이라 per-node semaphore 는 v2.
 - **ssh 노드 · claude (S4)**: v1 은 pod 에서 `claude auth status` 실행 → stdout cap +
   JSON parse + **allowlisted 필드만** 반환 (`loggedIn`, `email`, `planType`, `orgName` —
   그 외 필드 drop). 쿼터 조회는 pod 토큰 반출 금지 원칙상 v1 비범위 (open question §5)

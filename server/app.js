@@ -14,6 +14,7 @@ const { createEventBus } = require('./services/eventBus');
 const { createProjectService } = require('./services/projectService');
 const { createProjectBriefService } = require('./services/projectBriefService');
 const { createNodeService } = require('./services/nodeService');
+const { createNodeUsageService } = require('./services/nodeUsageService');
 const { createNodeHeartbeatService } = require('./services/nodeHeartbeatService');
 const { createTaskService } = require('./services/taskService');
 const { createRunService } = require('./services/runService');
@@ -671,6 +672,11 @@ function createApp(options = {}) {
 
   // New services (SQLite-based)
   const nodeService = createNodeService(db, { localExecutor: nodeExecutor });
+  const nodeUsageService = options.nodeUsageService || createNodeUsageService({
+    nodeService,
+    providerRegistry,
+    probeTimeoutMs: options.nodeUsageProbeTimeoutMs,
+  });
   const projectService = createProjectService(db);
   const projectBriefService = createProjectBriefService(db); // v3 Phase 1
   // ML PR1: L1 project memory index (CRUD + FTS5 retrieve + revision +
@@ -986,7 +992,7 @@ function createApp(options = {}) {
 
   // New routes (v2)
   app.use('/api/projects', createProjectsRouter({ projectService, taskService, projectBriefService, operatorCleanupService }));
-  app.use('/api/nodes', createNodesRouter({ nodeService }));
+  app.use('/api/nodes', createNodesRouter({ nodeService, nodeUsageService }));
   app.use('/api/projects', createMemoryRouter({ memoryService, projectService })); // ML PR1: GET /:projectId/memory
   app.use('/api/master-memory', createMasterMemoryRouter({ masterMemoryService })); // L2 P1b: GET / + POST /remember
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService }));
