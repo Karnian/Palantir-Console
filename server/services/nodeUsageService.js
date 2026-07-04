@@ -1,4 +1,5 @@
 const { formatLimits } = require('./codexService');
+const { fetchClaudeCodeUsage } = require('./providers/claude-code');
 
 const DEFAULT_PROBE_TIMEOUT_MS = 15000;
 const DEFAULT_PROBE_KILL_GRACE_MS = 2000;
@@ -376,7 +377,7 @@ function providerToUsage(provider) {
   return usage;
 }
 
-async function getLocalCards(providerRegistry) {
+async function getLocalCards(providerRegistry, fetchClaudeCode) {
   if (!providerRegistry || typeof providerRegistry.fetchAllRegistered !== 'function') {
     return [
       errorCard('codex', 'no_data', 'provider registry unavailable'),
@@ -396,7 +397,7 @@ async function getLocalCards(providerRegistry) {
     ];
   }
 
-  return (providers || [])
+  const cards = (providers || [])
     .map((provider) => {
       const id = providerIdToCliId(provider?.id);
       return card(id, {
@@ -406,6 +407,28 @@ async function getLocalCards(providerRegistry) {
       });
     })
     .filter((item) => ['codex', 'claude', 'gemini'].includes(item.id));
+
+  // The registry's "registered" set comes from opencode's auth.json keys, so a
+  // local claude CLI authenticated via keychain/OAuth never appears there
+  // (only /api/agents/:id/usage reaches the claude-code adapter). Node
+  // semantics are "CLIs on this node" — mirror the ssh branch by asking the
+  // claude-code adapter directly when the registry produced no claude card.
+  if (!cards.some((item) => item.id === 'claude')) {
+    try {
+      const provider = await fetchClaudeCode();
+      if (provider) {
+        cards.push(card('claude', {
+          installed: true,
+          usage: providerToUsage(provider),
+          updatedAt: provider?.updatedAt,
+        }));
+      }
+    } catch {
+      cards.push(errorCard('claude', 'no_data', 'No rate limit data available'));
+    }
+  }
+
+  return cards;
 }
 
 async function getClaudeAuthStatus(spawnInteractive, opts) {
@@ -485,6 +508,7 @@ async function getSshClaudeCard(node, spawnInteractive, opts) {
 function createNodeUsageService({
   nodeService,
   providerRegistry,
+  fetchClaudeCodeFn = fetchClaudeCodeUsage,
   probeTimeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
   probeKillGraceMs = DEFAULT_PROBE_KILL_GRACE_MS,
   probeMaxOutputBytes = DEFAULT_OUTPUT_MAX_BYTES,
@@ -507,7 +531,7 @@ function createNodeUsageService({
     const node = nodeService.getNode(nodeId);
     let clis;
     if (!node.kind || node.kind === 'local') {
-      clis = await getLocalCards(providerRegistry);
+      clis = await getLocalCards(providerRegistry, fetchClaudeCodeFn);
     } else if (node.kind === 'ssh') {
       if (Number(node.reachable) === 0) {
         clis = [

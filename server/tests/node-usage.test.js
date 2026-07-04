@@ -181,6 +181,59 @@ test('local node usage wraps registered providers in wire-locked cards', async (
   assert.equal(snapshot.clis[1].error, null);
 });
 
+test('local claude card is augmented from the claude-code adapter when the registry lacks it', async () => {
+  // The registry's registered set = opencode auth.json keys — a keychain-authed
+  // local claude CLI is invisible to it. Node semantics are "CLIs on this
+  // node", so getLocalCards asks the claude-code adapter directly.
+  let fetchCalls = 0;
+  const service = createNodeUsageService({
+    nodeService: {
+      getNode() { return { id: 'local', name: 'Local', kind: 'local', reachable: 1 }; },
+    },
+    providerRegistry: {
+      async fetchAllRegistered() {
+        return [{ id: 'codex', limits: [{ label: 'weekly limit', remainingPct: 88, resetAt: null }], updatedAt: '2026-07-04T00:00:00.000Z' }];
+      },
+    },
+    fetchClaudeCodeFn: async () => {
+      fetchCalls += 1;
+      return {
+        id: 'anthropic',
+        name: 'claude',
+        limits: [{ label: '5h limit', remainingPct: 61, resetAt: null }],
+        account: { email: 'claude-local@example.test', planType: 'max' },
+        updatedAt: '2026-07-04T00:00:03.000Z',
+      };
+    },
+  });
+
+  const snapshot = await service.getUsageSnapshot('local');
+  assert.equal(fetchCalls, 1);
+  assert.deepEqual(snapshot.clis.map((item) => item.id), ['codex', 'claude']);
+  const claude = snapshot.clis.find((item) => item.id === 'claude');
+  assertCardShape(claude);
+  assert.equal(claude.error, null);
+  assert.equal(claude.usage.limits[0].remainingPct, 61);
+  assert.equal(claude.usage.account.email, 'claude-local@example.test');
+});
+
+test('local claude augmentation failure degrades to a no_data card, not a route error', async () => {
+  const service = createNodeUsageService({
+    nodeService: {
+      getNode() { return { id: 'local', name: 'Local', kind: 'local', reachable: 1 }; },
+    },
+    providerRegistry: {
+      async fetchAllRegistered() { return []; },
+    },
+    fetchClaudeCodeFn: async () => { throw new Error('keychain unavailable'); },
+  });
+
+  const snapshot = await service.getUsageSnapshot('local');
+  const claude = snapshot.clis.find((item) => item.id === 'claude');
+  assertCardShape(claude);
+  assert.equal(claude.error.code, 'no_data');
+});
+
 test('local provider errors stay per-card and node misses remain 404 errors', async () => {
   const nodeService = {
     getNode(id) {
