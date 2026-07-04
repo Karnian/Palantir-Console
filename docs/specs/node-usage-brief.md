@@ -1,6 +1,7 @@
 # Node Usage — 노드별 CLI 사용량 브리프 (U 트랙)
 
-> 상태: v1 draft (2026-07-04). 사용자 방향: "에이전트 사용량은 각 노드 페이지로 넘겨서, 노드 안에 설치된
+> 상태: **v1.1** (2026-07-04, Codex 적대 리뷰 REVISE 반영 — BLOCKER 2 + SERIOUS 6 + NIT 1 전부 수용).
+> 사용자 방향: "에이전트 사용량은 각 노드 페이지로 넘겨서, 노드 안에 설치된
 > CLI 들의 사용량을 보는 식으로". 의미/기존표면 결정은 권장안 자동 채택 (자율 모드):
 > ①사용량 = **한도/쿼터 스냅샷** (토큰 소비 히스토리는 비범위·후속) ②기존 usage 표면(Sessions
 > Codex Status 모달, AgentsView usage 바)은 **유지 후 후속 정리**.
@@ -36,7 +37,7 @@ Fleet (P1~P5) 이후 실체가 바뀌었다: **pod 마다 `~/.codex` / `~/.claud
 
 ### 3.1 Backend (U-1) — `nodeUsageService` + `GET /api/nodes/:id/usage`
 
-응답 shape (고정):
+응답 shape (**wire-lock** — Codex 리뷰 S5 반영, 테스트가 이 shape 를 고정):
 
 ```json
 {
@@ -47,41 +48,70 @@ Fleet (P1~P5) 이후 실체가 바뀌었다: **pod 마다 `~/.codex` / `~/.claud
       "installed": true,
       "version": "codex-cli 0.140.0",
       "usage": { "limits": [...], "account": {...}, "updatedAt": "..." },
-      "error": null
+      "authStatus": null,
+      "error": null,
+      "updatedAt": "..."
     },
     {
       "id": "claude",
       "installed": true,
       "version": "2.1.179",
       "usage": null,
-      "error": null,
-      "authStatus": { "loggedIn": true, "email": "...", "planType": "..." }
+      "authStatus": { "loggedIn": true, "email": "...", "planType": "..." },
+      "error": { "code": "quota_unsupported", "message": "claude 쿼터 조회는 후속 (v2)" },
+      "updatedAt": "..."
     }
   ],
   "updatedAt": "..."
 }
 ```
 
+- **`error` 는 항상 `null` 또는 `{ code, message }`** (string 금지). code enum 고정:
+  `not_installed` | `probe_failed` | `timeout` | `transport_lost` | `no_data` |
+  `not_logged_in` | `quota_unsupported`. message 는 sanitized — 원격 stderr 원문 금지
+  (cap 후 요약), secret/토큰 절대 미포함. `installed=false` shape 고정:
+  `{ id, installed:false, version:null, usage:null, authStatus:null,
+  error:{code:'not_installed',…}, updatedAt }`. `usage:null` = "한도 데이터 없음, 이유는
+  error 가 설명". `authStatus` 필드는 모든 카드에 존재 (codex 는 null). 카드마다
+  per-card `updatedAt`.
 - **local 노드**: `codexService.getStatus()` + providerRegistry 의 claude-code/gemini fetch 재사용.
   기존 `/api/usage/providers` 와 같은 소스 — 포장만 CLI-per-card 로.
-- **ssh 노드 · codex**: `executor.spawnInteractive('codex', ['app-server'])` — **기존 manager
-  allowlist `{codex, claude}` 안이라 executor 표면 변경 0**. JSON-RPC 두 콜
-  (`account/read`, `account/rateLimits/read`) 후 stdin 닫고 kill. `codexService` 의
-  AppServerSession 프로토콜 로직을 executor-주입 가능하게 추출(또는 최소 재구현) —
+  **로컬 서비스가 던지는 AppError(404 'No rate limit data' 등)는 라우트로 새면 안 됨** —
+  per-CLI catch 에서 `error:{code:'no_data'}` 로 변환 (S6). HTTP 404 는 오직 node 미존재.
+- **ssh 노드 · codex**: `executor.spawnInteractive('codex', ['app-server'], { env: {},
+  pathPrefix: node.node_prefix })` 로 pod 에 app-server 를 띄우고 JSON-RPC **3콜**
+  (`initialize` → `account/read` → `account/rateLimits/read` — 로컬 경로와 동일 시퀀스,
+  S2) 후 종료. limits 파싱은 codexService 의 `formatLimits` 를 export 해 공유 (재구현 금지),
   로컬 경로는 byte-equivalent 유지.
-- **ssh 노드 · claude**: v1 은 **presence + auth 상태만** (`installed`, `version`,
-  `authStatus`). 쿼터 조회는 OAuth usage 엔드포인트 호출이 필요한데 pod 토큰
-  (`~/.claude/.credentials.json`) 이 exposed_roots 밖이라 `executor.readFile` 로 못 읽고
-  (의도된 가드), 토큰 반출 금지 원칙상 pod-side curl 이 필요 → **open question §5,
-  v1 비범위**. fallback 카드: "쿼터 조회는 codex 만 지원 (claude 는 후속)".
-- **CLI 설치/버전 감지 (ssh)**: `spawnInteractive` 로 `codex --version` / `claude --version`
-  한 턴 실행 (allowlist 안). 127/spawn 실패 = not installed.
+- **단발 probe primitive (BLOCKER 1 해소)**: spawnInteractive 의 raw child 를 호출부가
+  직접 다루지 않는다. `nodeUsageService` 내부 one-shot 헬퍼가 보장:
+  timeout(기본 15s) → SIGTERM → grace 후 SIGKILL escalation, stdout/stderr cap
+  (256KB, 초과 시 kill + `probe_failed`), settle-once, exit 시 pending RPC reject,
+  stdin graceful close 후 close 대기, ssh exit 255 = `transport_lost`.
+  child cleanup 은 항상 finally (HTTP 요청 abort 포함 어떤 경로에서도 orphan ssh 금지).
+  원격 스크립트가 `exec` 치환이라 ssh 종료 시 pod 프로세스는 SIGHUP 으로 정리되지만,
+  이에 의존하지 않고 클라이언트 쪽 kill 을 항상 수행.
+- **원격 env 계약 (BLOCKER 2 해소)**: 원격 probe env 는 **기본 `{}`** — `process.env`
+  spread 절대 금지 (컨트롤 플레인 secret/PATH 유출, P4 실증 버그 클래스). 필요 시
+  `LC_ALL=C` 같은 비밀 아님 키만 명시.
+- **신규 원격 실행 표면 인지 (S1)**: public exec allowlist `['git']` 불변이지만, 이 기능은
+  `spawnInteractive` 표면의 **신규 호출자**다 — "표면 변경 0" 이라고 안심하지 않는다.
+  `nodeUsageService` 는 CLI 별 **고정 command+args 상수만** 실행
+  (`codex app-server` / `codex --version` / `claude --version` / `claude auth status`).
+  사용자 입력은 command/args 에 절대 불류입 (nodeId 는 DB lookup 전용).
+- **CLI 설치/버전 감지 (ssh, S3)**: `--version` 한 턴도 단발 probe primitive 경유
+  (timeout/cap/exit-code 해석 동일 규율). exit 127 또는 spawn 실패 = `not_installed`,
+  timeout = `timeout`, 그 외 nonzero = `probe_failed`. `pathPrefix: node.node_prefix`
+  전달 필수 — pod 의 codex/claude 는 login PATH 밖 (false negative 방지).
+- **ssh 노드 · claude (S4)**: v1 은 pod 에서 `claude auth status` 실행 → stdout cap +
+  JSON parse + **allowlisted 필드만** 반환 (`loggedIn`, `email`, `planType`, `orgName` —
+  그 외 필드 drop). 쿼터 조회는 pod 토큰 반출 금지 원칙상 v1 비범위 (open question §5)
+  → `error:{code:'quota_unsupported'}`.
 - **fail-soft 계약**: unreachable 노드 / CLI 미설치 / 미로그인 / RPC 실패 → 해당 CLI 카드의
-  `error` 필드로 표현. 라우트는 200 + partial 데이터. 단, node 자체가 없으면 404.
-  probe 는 절대 서버를 죽이거나 다른 CLI 카드를 오염시키지 않는다 (per-CLI try/catch).
-- **보안 계약 (불변식)**: public exec allowlist `['git']` **불변**. 새 원격 실행은 기존
-  `spawnInteractive` manager allowlist 안에서만. 응답에 토큰/secret 절대 미포함
-  (account email/plan 은 허용 — 기존 로컬 표면과 동일 수위). timeout 필수 (probe 당 ≤15s).
+  `error` 로 표현. 라우트는 200 + partial 데이터. HTTP 404 는 node 미존재만.
+  probe 는 절대 서버를 죽이거나 다른 CLI 카드를 오염시키지 않는다 (per-CLI try/catch,
+  카드 간 독립).
+- **라우트 순서 (NIT)**: `GET /:id/usage` 는 `GET /:id` 보다 앞에 등록 (agents 라우트 관례).
 - **캐시**: v1 없음 (수동 새로고침 버튼). 자동 폴링 금지 — spawn 비용이 실재.
 
 ### 3.2 UI (U-2) — NodesView 상세 전환
