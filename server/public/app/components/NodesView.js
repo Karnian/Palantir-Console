@@ -98,6 +98,46 @@ function formatResetAt(resetAt) {
   return formatted === '알 수 없음' ? resetAt : formatted;
 }
 
+// Relative "n분 전" formatter for the fleet list card's last-heartbeat read.
+// Deliberately NOT imported from lib/format.js's `timeAgo` — the jsdom test
+// harness (nodesview-detail-jsdom.test.js) only pre-seeds the specific
+// format.js exports it stubs (parseDate/formatTime); a new import here would
+// resolve to `undefined` inside that sandbox and throw at render time. Uses
+// the already-imported `parseDate` so behavior matches `timeAgo` exactly.
+function relativeHeartbeat(ts) {
+  if (!ts) return NODES_LABELS.heartbeatNeverLabel;
+  const d = parseDate(ts);
+  const timestamp = d.getTime();
+  if (Number.isNaN(timestamp)) return NODES_LABELS.heartbeatNeverLabel;
+  const diffMs = Date.now() - timestamp;
+  // A heartbeat meaningfully in the future = clock skew or a bad row — do
+  // not render it as "방금" (it would read as healthy, Codex 리뷰 S3).
+  if (diffMs < -60000) return NODES_LABELS.heartbeatSkewLabel;
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return NODES_LABELS.heartbeatJustNow;
+  if (mins < 60) return `${mins}${NODES_LABELS.heartbeatMinutesAgoSuffix}`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}${NODES_LABELS.heartbeatHoursAgoSuffix}`;
+  const days = Math.floor(hrs / 24);
+  return `${days}${NODES_LABELS.heartbeatDaysAgoSuffix}`;
+}
+
+// Worst (most urgent) tone across a CLI's usage limits — drives the usage
+// card's top accent bar so a near-exhausted quota is visible without opening
+// each limit row individually.
+function worstUsageTone(limits) {
+  const rank = { ok: 0, info: 1, warn: 2, danger: 3 };
+  let worst = null;
+  for (const limit of limits) {
+    const raw = Number(limit?.remainingPct);
+    if (!Number.isFinite(raw)) continue;
+    const pct = Math.max(0, Math.min(100, raw));
+    const t = percentTone(pct);
+    if (!worst || rank[t] > rank[worst]) worst = t;
+  }
+  return worst;
+}
+
 function buildNodeBody({
   id,
   name,
@@ -472,17 +512,18 @@ function NodeUsageLimit({ limit }) {
   const rawPct = Number(limit?.remainingPct);
   const hasPct = Number.isFinite(rawPct);
   const pct = hasPct ? Math.max(0, Math.min(100, rawPct)) : null;
+  const tone = hasPct ? percentTone(pct) : null;
   const pctText = hasPct ? `${Math.round(pct)}${NODES_LABELS.usageRemainingSuffix}` : '';
 
   return html`
     <div class="node-usage-limit" data-role="node-usage-limit">
       <div class="node-usage-limit-header">
         <span class="node-usage-limit-label">${limit?.label || NODES_LABELS.emptyValue}</span>
-        ${pctText && html`<span class="node-usage-limit-pct">${pctText}</span>`}
+        ${pctText && html`<span class=${`node-usage-limit-pct ${tone || ''}`}>${pctText}</span>`}
       </div>
       ${hasPct && html`
         <div class="node-usage-bar-track" aria-hidden="true">
-          <div class=${`node-usage-bar-fill ${percentTone(pct)}`} style=${{ width: `${pct}%` }}></div>
+          <div class=${`node-usage-bar-fill ${tone}`} style=${{ width: `${pct}%` }}></div>
         </div>
       `}
       ${limit?.errorMessage && html`<div class="node-usage-limit-error">${limit.errorMessage}</div>`}
@@ -506,75 +547,33 @@ function NodeUsageCard({ cli }) {
   const updatedAt = cli?.updatedAt || usage?.updatedAt;
 
   const tone = errorTone(err);
+  // Drives the card's top accent bar: an explicit error wins (danger/info per
+  // the existing quota_unsupported carve-out); otherwise the worst limit's
+  // tone surfaces even on an error-free card, so a near-exhausted quota is
+  // visible while scanning the grid rather than only after opening the card.
+  const cardTone = err ? (tone === 'info' ? 'info' : 'danger') : worstUsageTone(limits);
+  const hasAccountFields = !!(account?.email || account?.planType || account?.type);
+  const hasAuthFields = !!(auth && (typeof auth.loggedIn === 'boolean' || auth.email || auth.planType || auth.orgName));
+  const hasFooter = hasAccountFields || hasAuthFields || !!updatedAt;
 
   return html`
     <article
       class=${`node-usage-card ${err ? (tone === 'info' ? 'has-info' : 'has-error') : ''}`}
       data-role="node-usage-card"
       data-cli-id=${cli?.id || ''}
+      data-tone=${cardTone || undefined}
     >
       <div class="node-usage-card-header">
-        <div>
-          <div class="node-usage-cli">${cli?.id || NODES_LABELS.emptyValue}</div>
-          <div class="node-usage-meta">
-            ${installed ? NODES_LABELS.usageInstalled : NODES_LABELS.usageNotInstalled}
-            · ${NODES_LABELS.usageVersionLabel}: ${cli?.version || NODES_LABELS.emptyValue}
-          </div>
+        <div class="node-usage-identity">
+          <span class="node-usage-cli">${cli?.id || NODES_LABELS.emptyValue}</span>
+          <span class="node-usage-version-badge">${NODES_LABELS.usageVersionLabel}: ${cli?.version || NODES_LABELS.emptyValue}</span>
         </div>
         <span class=${`node-usage-card-status ${err ? (tone === 'info' ? 'info' : 'error') : ''}`}>${statusLabel}</span>
       </div>
 
-      ${(account?.email || account?.planType || account?.type) && html`
-        <div class="node-usage-info-grid" data-role="node-usage-account">
-          ${account.email && html`
-            <div class="node-usage-field">
-              <span class="node-usage-field-label">${NODES_LABELS.usageAccountLabel}</span>
-              <span class="node-usage-field-value">${account.email}</span>
-            </div>
-          `}
-          ${account.planType && html`
-            <div class="node-usage-field">
-              <span class="node-usage-field-label">${NODES_LABELS.usagePlanLabel}</span>
-              <span class="node-usage-field-value">${account.planType}</span>
-            </div>
-          `}
-          ${account.type && html`
-            <div class="node-usage-field">
-              <span class="node-usage-field-label">type</span>
-              <span class="node-usage-field-value">${account.type}</span>
-            </div>
-          `}
-        </div>
-      `}
-
-      ${auth && html`
-        <div class="node-usage-info-grid" data-role="node-usage-auth">
-          ${typeof auth.loggedIn === 'boolean' && html`
-            <div class="node-usage-field">
-              <span class="node-usage-field-label">${NODES_LABELS.usageAuthLabel}</span>
-              <span class="node-usage-field-value">${auth.loggedIn ? NODES_LABELS.usageLoggedIn : NODES_LABELS.usageLoggedOut}</span>
-            </div>
-          `}
-          ${auth.email && html`
-            <div class="node-usage-field">
-              <span class="node-usage-field-label">${NODES_LABELS.usageAccountLabel}</span>
-              <span class="node-usage-field-value">${auth.email}</span>
-            </div>
-          `}
-          ${auth.planType && html`
-            <div class="node-usage-field">
-              <span class="node-usage-field-label">${NODES_LABELS.usagePlanLabel}</span>
-              <span class="node-usage-field-value">${auth.planType}</span>
-            </div>
-          `}
-          ${auth.orgName && html`
-            <div class="node-usage-field">
-              <span class="node-usage-field-label">${NODES_LABELS.usageOrgLabel}</span>
-              <span class="node-usage-field-value">${auth.orgName}</span>
-            </div>
-          `}
-        </div>
-      `}
+      ${limits.length > 0
+        ? html`<div class="node-usage-limits">${limits.map((limit, i) => html`<${NodeUsageLimit} key=${`${cli?.id || 'cli'}-${i}`} limit=${limit} />`)}</div>`
+        : (!err && html`<div class="node-usage-empty">${NODES_LABELS.usageNoLimits}</div>`)}
 
       ${err && html`
         <div class=${`node-usage-error ${tone === 'info' ? 'is-info' : ''}`} data-role="node-usage-error">
@@ -583,13 +582,65 @@ function NodeUsageCard({ cli }) {
         </div>
       `}
 
-      ${limits.length > 0
-        ? html`<div class="node-usage-limits">${limits.map((limit, i) => html`<${NodeUsageLimit} key=${`${cli?.id || 'cli'}-${i}`} limit=${limit} />`)}</div>`
-        : (!err && html`<div class="node-usage-empty">${NODES_LABELS.usageNoLimits}</div>`)}
+      ${hasFooter && html`
+        <div class="node-usage-card-footer">
+          ${hasAccountFields && html`
+            <div class="node-usage-info-grid" data-role="node-usage-account">
+              ${account.email && html`
+                <div class="node-usage-field">
+                  <span class="node-usage-field-label">${NODES_LABELS.usageAccountLabel}</span>
+                  <span class="node-usage-field-value">${account.email}</span>
+                </div>
+              `}
+              ${account.planType && html`
+                <div class="node-usage-field">
+                  <span class="node-usage-field-label">${NODES_LABELS.usagePlanLabel}</span>
+                  <span class="node-usage-field-value">${account.planType}</span>
+                </div>
+              `}
+              ${account.type && html`
+                <div class="node-usage-field">
+                  <span class="node-usage-field-label">type</span>
+                  <span class="node-usage-field-value">${account.type}</span>
+                </div>
+              `}
+            </div>
+          `}
 
-      ${updatedAt && html`
-        <div class="node-usage-updated">
-          ${NODES_LABELS.usageUpdatedPrefix}: ${formatTs(updatedAt)}
+          ${hasAuthFields && html`
+            <div class="node-usage-info-grid" data-role="node-usage-auth">
+              ${typeof auth.loggedIn === 'boolean' && html`
+                <div class="node-usage-field">
+                  <span class="node-usage-field-label">${NODES_LABELS.usageAuthLabel}</span>
+                  <span class="node-usage-field-value">${auth.loggedIn ? NODES_LABELS.usageLoggedIn : NODES_LABELS.usageLoggedOut}</span>
+                </div>
+              `}
+              ${auth.email && html`
+                <div class="node-usage-field">
+                  <span class="node-usage-field-label">${NODES_LABELS.usageAccountLabel}</span>
+                  <span class="node-usage-field-value">${auth.email}</span>
+                </div>
+              `}
+              ${auth.planType && html`
+                <div class="node-usage-field">
+                  <span class="node-usage-field-label">${NODES_LABELS.usagePlanLabel}</span>
+                  <span class="node-usage-field-value">${auth.planType}</span>
+                </div>
+              `}
+              ${auth.orgName && html`
+                <div class="node-usage-field">
+                  <span class="node-usage-field-label">${NODES_LABELS.usageOrgLabel}</span>
+                  <span class="node-usage-field-value">${auth.orgName}</span>
+                </div>
+              `}
+            </div>
+          `}
+
+          ${updatedAt && html`
+            <div class="node-usage-updated">
+              ${NODES_LABELS.usageUpdatedPrefix}: ${formatTs(updatedAt)}
+            </div>
+          `}
         </div>
       `}
     </article>
@@ -681,16 +732,17 @@ function NodeDetail({ detailId, node, nodesLoading }) {
 
       <div class="node-detail-header" data-role="node-detail-header">
         <div class="node-detail-header-main">
-          <div>
+          <div class="node-detail-heading">
             <div class="node-detail-title-row">
+              <span class=${`node-status-dot ${reachable ? 'reachable' : 'unreachable'}`} aria-hidden="true"></span>
               <h1 class="node-detail-title">${node.name || detailId}</h1>
               <span class="node-detail-id">${node.id}</span>
             </div>
             <div class="node-detail-meta">
-              <span class="node-detail-chip">${node.kind === 'ssh' ? NODES_LABELS.kindSsh : NODES_LABELS.kindLocal}</span>
               <span class=${`node-detail-chip ${reachable ? 'reachable' : 'unreachable'}`}>
                 ${reachable ? NODES_LABELS.reachable : NODES_LABELS.unreachable}
               </span>
+              <span class=${`node-detail-chip ${node.kind === 'ssh' ? 'ssh' : ''}`}>${node.kind === 'ssh' ? NODES_LABELS.kindSsh : NODES_LABELS.kindLocal}</span>
               ${capabilityLabels(node).map(label => html`<span class="node-detail-chip" key=${label}>${label}</span>`)}
             </div>
           </div>
@@ -804,49 +856,48 @@ export function NodesView({ detailId = null } = {}) {
         />
       `}
       ${!loading && nodes.length > 0 && html`
-        <div class="skill-packs-list">
+        <div class="skill-packs-list node-list">
           ${nodes.map(node => {
             const isLocal = node.id === 'local';
+            const isSsh = node.kind === 'ssh';
+            const reachable = Number(node.reachable) === 1;
             const rootsCount = exposedRootCount(node.exposed_roots);
+            const detailHref = `#resources/nodes/${encodeURIComponent(node.id)}`;
+            const heartbeatLabel = relativeHeartbeat(node.last_heartbeat_at);
             return html`
-              <article class="skill-pack-card static" key=${node.id}>
-                <div class="skill-pack-card-header">
-                  <span class="skill-pack-icon">⬢</span>
-                  <span class="skill-pack-name">${node.name}</span>
-                  <span class="skill-pack-priority">${node.id}</span>
-                </div>
-                <div class="skill-pack-meta">
-                  <span class="skill-pack-scope">${node.kind === 'ssh' ? NODES_LABELS.kindSsh : NODES_LABELS.kindLocal}</span>
-                  ${isLocal && html`<span class="skill-pack-origin local">${NODES_LABELS.defaultNodeBadge}</span>`}
-                  <span class="skill-pack-origin">
-                    <span
-                      class="run-status-dot"
-                      style=${{ background: Number(node.reachable) === 1 ? 'var(--status-done)' : 'var(--text-muted)' }}
-                    ></span>
-                    ${Number(node.reachable) === 1 ? NODES_LABELS.reachable : NODES_LABELS.unreachable}
+              <article class="skill-pack-card static node-card" key=${node.id}>
+                <div class="node-card-head">
+                  <span class=${`node-status-dot ${reachable ? 'reachable' : 'unreachable'}`} aria-hidden="true"></span>
+                  <a
+                    class="node-card-title-link"
+                    data-role="node-detail-link"
+                    href=${detailHref}
+                    title=${`${node.name} ${NODES_LABELS.detailAction}`}
+                  >
+                    <span class="node-card-name">${node.name}</span>
+                    <span class="node-card-id">${node.id}</span>
+                  </a>
+                  ${isLocal && html`<span class="node-detail-chip is-default">${NODES_LABELS.defaultNodeBadge}</span>`}
+                  <span class=${`node-detail-chip node-card-kind-badge ${isSsh ? 'ssh' : ''}`}>
+                    ${isSsh ? NODES_LABELS.kindSsh : NODES_LABELS.kindLocal}
                   </span>
+                </div>
+                <div class="node-card-subline">
+                  <span class=${`node-status-text ${reachable ? 'reachable' : 'unreachable'}`}>
+                    ${reachable ? NODES_LABELS.reachable : NODES_LABELS.unreachable}
+                  </span>
+                  <span aria-hidden="true">·</span>
+                  <span class="node-card-heartbeat">${heartbeatLabel}</span>
+                </div>
+                <div class="node-card-caps">
                   ${capabilityLabels(node).map(label => html`
-                    <span class="skill-pack-mcp" key=${label}>${label}</span>
+                    <span class="node-detail-chip" key=${label}>${label}</span>
                   `)}
                 </div>
-                <div class="skill-pack-desc">
-                  ${node.kind === 'ssh' && html`
-                    <div>${NODES_LABELS.sshTargetLabel}: ${node.ssh_user || NODES_LABELS.emptyValue}@${node.ssh_host || NODES_LABELS.emptyValue} · ${rootsCount}${NODES_LABELS.rootsCountSuffix}</div>
-                  `}
-                  <div>${NODES_LABELS.nodePrefixLabel}: ${node.node_prefix || NODES_LABELS.emptyValue}</div>
-                  <div>${NODES_LABELS.maxConcurrentLabel}: ${node.max_concurrent == null ? NODES_LABELS.unlimited : node.max_concurrent}</div>
-                  ${node.last_heartbeat_at && html`
-                    <div>${NODES_LABELS.lastHeartbeatLabel}: ${formatTs(node.last_heartbeat_at)}</div>
-                  `}
-                </div>
-                <div class="skill-pack-card-actions">
-                  <a
-                    class="ghost small"
-                    data-role="node-detail-link"
-                    href=${`#resources/nodes/${encodeURIComponent(node.id)}`}
-                  >
-                    ${NODES_LABELS.detailAction}
-                  </a>
+                ${isSsh && html`
+                  <div class="node-card-ssh-line">${node.ssh_user || NODES_LABELS.emptyValue}@${node.ssh_host || NODES_LABELS.emptyValue} · ${rootsCount}${NODES_LABELS.rootsCountSuffix}</div>
+                `}
+                <div class="node-card-footer">
                   <button class="ghost small" onClick=${() => { setEditTarget(node); setModalOpen(true); }}>
                     ${COMMON_ACTIONS.edit}
                   </button>

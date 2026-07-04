@@ -411,7 +411,7 @@ function App() {
     }
     if (routeBase === 'resources') {
       const routeParts = route.split('/');
-      const sub = routeParts[1] || 'skills';
+      const sub = routeParts[1] || 'nodes';
       // Detail links encode node.id (encodeURIComponent), so the route part
       // must be decoded before DB-id comparison / re-encoding in apiFetch —
       // ids with space/%/slash would otherwise miss or double-encode
@@ -425,10 +425,10 @@ function App() {
         groupHash="resources"
         subRoute=${sub}
         tabs=${[
+          { key: 'nodes',       label: NAV_LABELS.nodes,           render: () => html`<${NodesView} detailId=${nodeDetailId} />` },
           { key: 'skills',      label: NAV_LABELS.skills,          render: () => html`<${SkillPacksView} projects=${projects} />` },
           { key: 'presets',     label: NAV_LABELS.presets,         render: () => html`<${PresetsView} />` },
           { key: 'mcp-servers', label: NAV_LABELS['mcp-servers'],  render: () => html`<${McpTemplatesView} />` },
-          { key: 'nodes',       label: NAV_LABELS.nodes,           render: () => html`<${NodesView} detailId=${nodeDetailId} />` },
         ]}
       />`;
     }
