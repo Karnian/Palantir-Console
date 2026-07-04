@@ -1,5 +1,5 @@
 const { formatLimits } = require('./codexService');
-const { fetchClaudeCodeUsage } = require('./providers/claude-code');
+const { fetchClaudeCodeUsage, parseOAuthUsageLimits } = require('./providers/claude-code');
 
 const DEFAULT_PROBE_TIMEOUT_MS = 15000;
 const DEFAULT_PROBE_KILL_GRACE_MS = 2000;
@@ -482,7 +482,7 @@ async function getSshCodexCard(node, spawnInteractive, opts) {
   }
 }
 
-async function getSshClaudeCard(node, spawnInteractive, opts) {
+async function getSshClaudeCard(node, spawnInteractive, opts, readClaudeUsage) {
   let version = null;
   try {
     version = await probeVersion(spawnInteractive, COMMANDS.claudeVersion, opts);
@@ -493,18 +493,64 @@ async function getSshClaudeCard(node, spawnInteractive, opts) {
     });
   }
 
+  let authStatus = null;
   try {
-    const authStatus = await getClaudeAuthStatus(spawnInteractive, opts);
+    authStatus = await getClaudeAuthStatus(spawnInteractive, opts);
+  } catch (err) {
+    const normalized = normalizeUsageError(err);
+    return errorCard('claude', normalized.code, normalized.message, {
+      installed: true,
+      version,
+    });
+  }
+
+  // Quota via the executor-owned pod probe (v2, brief §5-1) — the token is
+  // read and used INSIDE the pod; only the usage JSON comes back. Executors
+  // without the probe (injected fakes, future executor kinds) keep the v1
+  // quota_unsupported card.
+  if (typeof readClaudeUsage !== 'function') {
     return errorCard('claude', 'quota_unsupported', 'claude quota lookup is not supported in v1', {
       installed: true,
       version,
       authStatus,
+    });
+  }
+
+  try {
+    const res = await readClaudeUsage({ timeoutMs: opts.timeoutMs, maxBuffer: opts.maxOutputBytes });
+    // Sentinel must be PAIRED with its exit code — exit 3 alone is ambiguous
+    // (other tools reuse it) and a stray sentinel substring alone proves
+    // nothing (Codex security R1 SERIOUS 1).
+    if (res?.code === 3 && (res?.stdout || '').trim() === '__NO_CLAUDE_TOKEN__') {
+      throw new UsageProbeError('not_logged_in', 'claude has no usable token on this node');
+    }
+    if (res?.code !== 0) {
+      // Includes HTTP non-200 (exit 5 — body dropped pod-side so an error
+      // JSON can never masquerade as a successful usage report, R1 SERIOUS 2).
+      throw new UsageProbeError('probe_failed', 'claude quota probe failed');
+    }
+    let data;
+    try {
+      data = JSON.parse(res.stdout || '{}');
+    } catch {
+      throw new UsageProbeError('probe_failed', 'claude quota probe returned invalid JSON');
+    }
+    return card('claude', {
+      installed: true,
+      version,
+      authStatus,
+      usage: {
+        limits: parseOAuthUsageLimits(data),
+        account: null,
+        updatedAt: nowIso(),
+      },
     });
   } catch (err) {
     const normalized = normalizeUsageError(err);
     return errorCard('claude', normalized.code, normalized.message, {
       installed: true,
       version,
+      authStatus,
     });
   }
 }
@@ -513,6 +559,7 @@ function createNodeUsageService({
   nodeService,
   providerRegistry,
   fetchClaudeCodeFn = fetchClaudeCodeUsage,
+  readClaudeOAuthUsageFn = null,
   probeTimeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
   probeKillGraceMs = DEFAULT_PROBE_KILL_GRACE_MS,
   probeMaxOutputBytes = DEFAULT_OUTPUT_MAX_BYTES,
@@ -544,12 +591,14 @@ function createNodeUsageService({
         ];
       } else {
         let spawnInteractive = spawnInteractiveFn;
+        let executorRef = null;
         if (!spawnInteractive) {
           try {
             // pickExecutor can throw on malformed node rows (bad exposed_roots
             // JSON, …). The node exists, so this is a probe failure per card —
             // never an HTTP 500 (Codex R2 finding 6).
             const executor = nodeService.pickExecutor(node.id);
+            executorRef = executor;
             spawnInteractive = executor.spawnInteractive.bind(executor);
           } catch (err) {
             const normalized = normalizeUsageError(err, 'probe_failed', 'node executor unavailable');
@@ -561,9 +610,13 @@ function createNodeUsageService({
         }
         if (spawnInteractive) {
           const opts = probeOptionsFor(node);
+          const readClaudeUsage = readClaudeOAuthUsageFn
+            || (executorRef && typeof executorRef.readClaudeOAuthUsage === 'function'
+              ? executorRef.readClaudeOAuthUsage.bind(executorRef)
+              : null);
           clis = await Promise.all([
             getSshCodexCard(node, spawnInteractive, opts),
-            getSshClaudeCard(node, spawnInteractive, opts),
+            getSshClaudeCard(node, spawnInteractive, opts, readClaudeUsage),
           ]);
         }
       }

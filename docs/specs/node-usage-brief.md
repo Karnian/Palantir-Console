@@ -146,9 +146,13 @@ Fleet (P1~P5) 이후 실체가 바뀌었다: **pod 마다 `~/.codex` / `~/.claud
 
 ## 5. Open questions (후속)
 
-1. **claude 쿼터 on pod**: 토큰 반출 없이 pod 에서 OAuth usage 엔드포인트를 때리려면
-   executor-owned 내부 probe(스크립트) 신설이 필요 — public allowlist 확장 없이 가능하지만
-   신규 원격 실행 표면이므로 Codex 보안 리뷰 필수. v2 후보.
+1. **claude 쿼터 on pod**: ✅ **v2 구현됨** — `remoteSshExecutor.readClaudeOAuthUsage()`:
+   **고정 상수 스크립트**(caller 입력 불개입)가 pod 안에서 `~/.claude/.credentials.json` 을
+   읽고 pod 안에서 OAuth usage 엔드포인트를 curl — **토큰은 pod 밖으로 절대 안 나옴**
+   (usage JSON 만 회수, exit 3=`not_logged_in`). limits 파싱은 claude-code 어댑터의
+   `parseOAuthUsageLimits` 공유 (utilization 신호 있는 항목만 — `limits`/`spend` 메타 키
+   열거 버그도 동시 수정, 로컬/에이전트 표면 포함). reader 없는 executor(주입 fake 등)는
+   v1 `quota_unsupported` 폴백. pod 요건: node + curl (기존 문서화 요건).
 2. **토큰 소비 히스토리** (ccusage-식): pod 세션 로그 파싱 — 별도 트랙.
 3. 기존 usage 표면 (Sessions 모달 / AgentsView) 의 노드 페이지 링크 대체/제거.
 4. gemini: local 은 registry 에 이미 있음. pod 에 gemini 설치 시나리오가 생기면 동일 패턴.

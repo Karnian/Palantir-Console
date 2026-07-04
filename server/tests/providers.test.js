@@ -302,3 +302,17 @@ test('getUsageForAgent: codex stub returns null → "Provider returned no data"'
   assert.equal(result.name, 'Codex');
   assert.match(result.limits[0].errorMessage || '', /returned no data/i);
 });
+
+test('parseOAuthUsageLimits keeps only entries with a utilization signal', () => {
+  const { parseOAuthUsageLimits } = require('../services/providers/claude-code');
+  const limits = parseOAuthUsageLimits({
+    five_hour: { utilization: 25, resets_at: '2026-07-05T05:00:00Z' },
+    extra_usage: { is_enabled: true },
+    disabled_feature: { is_enabled: false },
+    limits: { meta: true },
+    spend: { currency: 'usd' },
+    not_an_object: 42,
+  });
+  // is_enabled:false = 꺼진 기능이지 리밋이 아님 — 100% 로 렌더 금지 (Codex R1 S3)
+  assert.deepEqual(limits.map((l) => l.label).sort(), ['5h limit', 'extra usage']);
+});
