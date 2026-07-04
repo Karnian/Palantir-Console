@@ -252,4 +252,4 @@ function createCodexService({ codexBin, codexHome, timeoutMs = DEFAULT_TIMEOUT_M
   return { getStatus, getProviderStatus };
 }
 
-module.exports = { createCodexService };
+module.exports = { createCodexService, formatLimits, parseRateLimits };
