@@ -1,6 +1,6 @@
 # Palantir Console Backlog
 
-> Last updated: 2026-07-03 (Fleet 원격 실행 — P4 Codex Operator on pod + P5 Claude persistent on pod, 11 PR #288~#298, 실 Raspberry Pi 실증 완료)
+> Last updated: 2026-07-05 (U 트랙 노드별 CLI 사용량 완결 #301~#306 + N 트랙 노드 퍼스트 재기획 brief 등록 #307)
 >
 > 이 문서는 *현재 시점에서* 남은 작업들을 카테고리별로 정리한다.
 > 완료된 작업의 한 화면 요약 + 새 세션 재입장 prompt 는 [`handoff-post-k2-launch-2026-04-29.md`](./handoff-post-k2-launch-2026-04-29.md) 를 본다 (§9 post-launch fixups + §10 K-3 cleanup + §11 K-4 launch + §12 K-5 launch). 그 이전 시리즈 (M1/M2/B3 + R1/R3/R4) 는 [`handoff-post-scenario-review.md`](./handoff-post-scenario-review.md) 에 있다.
@@ -213,7 +213,12 @@
 
 ## Draft-review
 
-*(현재 비어있음 — `skill-pack-gallery-v1.1.md` 는 PR #124 에서 Final / locked-in, `manager-session-ui.md` 는 PR #120 의 gap analysis + PR #121-123 R2-A/B/C 로 대부분 소화. 추후 새 spec draft 가 생기면 여기에 등록)*
+### N. 노드 퍼스트 작업보드·프로젝트 재기획
+- **Spec**: [`docs/specs/node-first-board-brief.md`](./specs/node-first-board-brief.md) (v1.2, PR #307)
+- **상태**: Codex 적대 리뷰 4라운드 수렴 (R1 3B+6S → R2 3B+3S → R3 1S → **R4 GO**). **사용자 lock-in 대기** — lock-in 시 N0(정합 수리 2 PR: tasks.status CHECK 'failed' rebuild + 노드 복구 node-scoped drain)부터 착수.
+- **구조**: N0 정합 수리 → N1 노드 문맥 1급화(envelope/SSE/배지/대기사유/플릿 스트립) → N2 노드-인지 UX(헬스 셀렉트/bind-time 검증/역링크/보드 필터) → N3 운영 semantics(cordon/stuck sweep/re-target). v2 경계(멀티노드/task override/soft affinity/글로벌 cap) brief §3 표 참조.
+
+*(기존 항목: `skill-pack-gallery-v1.1.md` 는 PR #124 에서 Final / locked-in, `manager-session-ui.md` 는 PR #120 의 gap analysis + PR #121-123 R2-A/B/C 로 대부분 소화)*
 
 ---
 
