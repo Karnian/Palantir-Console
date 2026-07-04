@@ -157,6 +157,8 @@ test('local node usage wraps registered providers in wire-locked cards', async (
             updatedAt: '2026-07-04T00:00:00.000Z',
           },
           {
+            // API-key account — must NOT become the claude CLI card (the
+            // claude-code adapter is the single source for it).
             id: 'anthropic',
             limits: [{ label: 'usage', remainingPct: null, resetAt: null }],
             updatedAt: '2026-07-04T00:00:01.000Z',
@@ -169,6 +171,13 @@ test('local node usage wraps registered providers in wire-locked cards', async (
         ];
       },
     },
+    fetchClaudeCodeFn: async () => ({
+      id: 'anthropic',
+      name: 'claude',
+      limits: [{ label: '5h limit', remainingPct: 61, resetAt: null }],
+      account: { email: 'claude-cli@example.test', planType: 'max' },
+      updatedAt: '2026-07-04T00:00:03.000Z',
+    }),
   });
 
   const snapshot = await service.getUsageSnapshot('local');
@@ -178,7 +187,63 @@ test('local node usage wraps registered providers in wire-locked cards', async (
   for (const cli of snapshot.clis) assertCardShape(cli);
   assert.equal(snapshot.clis[0].installed, true);
   assert.equal(snapshot.clis[0].usage.account.email, 'local@example.test');
-  assert.equal(snapshot.clis[1].error, null);
+  const claudeCli = snapshot.clis[1];
+  assert.equal(claudeCli.error, null);
+  // Claude card comes from the CLI adapter, not the registry anthropic entry.
+  assert.equal(claudeCli.usage.account.email, 'claude-cli@example.test');
+});
+
+test('local claude card is augmented from the claude-code adapter when the registry lacks it', async () => {
+  // The registry's registered set = opencode auth.json keys — a keychain-authed
+  // local claude CLI is invisible to it. Node semantics are "CLIs on this
+  // node", so getLocalCards asks the claude-code adapter directly.
+  let fetchCalls = 0;
+  const service = createNodeUsageService({
+    nodeService: {
+      getNode() { return { id: 'local', name: 'Local', kind: 'local', reachable: 1 }; },
+    },
+    providerRegistry: {
+      async fetchAllRegistered() {
+        return [{ id: 'codex', limits: [{ label: 'weekly limit', remainingPct: 88, resetAt: null }], updatedAt: '2026-07-04T00:00:00.000Z' }];
+      },
+    },
+    fetchClaudeCodeFn: async () => {
+      fetchCalls += 1;
+      return {
+        id: 'anthropic',
+        name: 'claude',
+        limits: [{ label: '5h limit', remainingPct: 61, resetAt: null }],
+        account: { email: 'claude-local@example.test', planType: 'max' },
+        updatedAt: '2026-07-04T00:00:03.000Z',
+      };
+    },
+  });
+
+  const snapshot = await service.getUsageSnapshot('local');
+  assert.equal(fetchCalls, 1);
+  assert.deepEqual(snapshot.clis.map((item) => item.id), ['codex', 'claude']);
+  const claude = snapshot.clis.find((item) => item.id === 'claude');
+  assertCardShape(claude);
+  assert.equal(claude.error, null);
+  assert.equal(claude.usage.limits[0].remainingPct, 61);
+  assert.equal(claude.usage.account.email, 'claude-local@example.test');
+});
+
+test('local claude augmentation failure degrades to a no_data card, not a route error', async () => {
+  const service = createNodeUsageService({
+    nodeService: {
+      getNode() { return { id: 'local', name: 'Local', kind: 'local', reachable: 1 }; },
+    },
+    providerRegistry: {
+      async fetchAllRegistered() { return []; },
+    },
+    fetchClaudeCodeFn: async () => { throw new Error('keychain unavailable'); },
+  });
+
+  const snapshot = await service.getUsageSnapshot('local');
+  const claude = snapshot.clis.find((item) => item.id === 'claude');
+  assertCardShape(claude);
+  assert.equal(claude.error.code, 'no_data');
 });
 
 test('local provider errors stay per-card and node misses remain 404 errors', async () => {
