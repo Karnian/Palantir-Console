@@ -397,6 +397,12 @@ async function getLocalCards(providerRegistry, fetchClaudeCode) {
     ];
   }
 
+  // Node semantics are "CLIs on this node", not "providers registered in
+  // opencode auth.json". The registry's anthropic entry is the API-key
+  // account (a different auth source than the claude CLI), so it never
+  // produces the claude card here — the claude-code adapter below is the
+  // single source for it (Codex review: an anthropic key must not mask the
+  // keychain-authenticated CLI).
   const cards = (providers || [])
     .map((provider) => {
       const id = providerIdToCliId(provider?.id);
@@ -406,28 +412,26 @@ async function getLocalCards(providerRegistry, fetchClaudeCode) {
         updatedAt: provider?.updatedAt,
       });
     })
-    .filter((item) => ['codex', 'claude', 'gemini'].includes(item.id));
+    .filter((item) => ['codex', 'gemini'].includes(item.id));
 
-  // The registry's "registered" set comes from opencode's auth.json keys, so a
-  // local claude CLI authenticated via keychain/OAuth never appears there
-  // (only /api/agents/:id/usage reaches the claude-code adapter). Node
-  // semantics are "CLIs on this node" — mirror the ssh branch by asking the
-  // claude-code adapter directly when the registry produced no claude card.
-  if (!cards.some((item) => item.id === 'claude')) {
-    try {
-      const provider = await fetchClaudeCode();
-      if (provider) {
-        cards.push(card('claude', {
-          installed: true,
-          usage: providerToUsage(provider),
-          updatedAt: provider?.updatedAt,
-        }));
-      }
-    } catch {
+  try {
+    const provider = await fetchClaudeCode();
+    if (provider) {
+      cards.push(card('claude', {
+        installed: true,
+        usage: providerToUsage(provider),
+        updatedAt: provider?.updatedAt,
+      }));
+    } else {
       cards.push(errorCard('claude', 'no_data', 'No rate limit data available'));
     }
+  } catch {
+    cards.push(errorCard('claude', 'no_data', 'No rate limit data available'));
   }
 
+  // Canonical card order regardless of registry/augmentation arrival order.
+  const order = { codex: 0, claude: 1, gemini: 2 };
+  cards.sort((a, b) => (order[a.id] ?? 9) - (order[b.id] ?? 9));
   return cards;
 }
 

@@ -157,6 +157,8 @@ test('local node usage wraps registered providers in wire-locked cards', async (
             updatedAt: '2026-07-04T00:00:00.000Z',
           },
           {
+            // API-key account — must NOT become the claude CLI card (the
+            // claude-code adapter is the single source for it).
             id: 'anthropic',
             limits: [{ label: 'usage', remainingPct: null, resetAt: null }],
             updatedAt: '2026-07-04T00:00:01.000Z',
@@ -169,6 +171,13 @@ test('local node usage wraps registered providers in wire-locked cards', async (
         ];
       },
     },
+    fetchClaudeCodeFn: async () => ({
+      id: 'anthropic',
+      name: 'claude',
+      limits: [{ label: '5h limit', remainingPct: 61, resetAt: null }],
+      account: { email: 'claude-cli@example.test', planType: 'max' },
+      updatedAt: '2026-07-04T00:00:03.000Z',
+    }),
   });
 
   const snapshot = await service.getUsageSnapshot('local');
@@ -178,7 +187,10 @@ test('local node usage wraps registered providers in wire-locked cards', async (
   for (const cli of snapshot.clis) assertCardShape(cli);
   assert.equal(snapshot.clis[0].installed, true);
   assert.equal(snapshot.clis[0].usage.account.email, 'local@example.test');
-  assert.equal(snapshot.clis[1].error, null);
+  const claudeCli = snapshot.clis[1];
+  assert.equal(claudeCli.error, null);
+  // Claude card comes from the CLI adapter, not the registry anthropic entry.
+  assert.equal(claudeCli.usage.account.email, 'claude-cli@example.test');
 });
 
 test('local claude card is augmented from the claude-code adapter when the registry lacks it', async () => {
