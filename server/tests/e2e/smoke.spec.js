@@ -16,9 +16,10 @@ test.describe('Palantir Console Smoke', () => {
   test('nav sidebar contains all route items', async ({ page }) => {
     await page.goto('/');
     const nav = page.locator('nav.nav-sidebar');
-    // NAV_ITEMS: Dashboard, Manager, Task Board, Projects, Agents,
-    // Skill Packs, Presets, MCP Servers
-    await expect(nav.locator('.nav-item')).toHaveCount(8);
+    // NAV_ITEMS: Dashboard, Manager, Task Board, Projects,
+    // Resources, Memory, Operator (agents 는 nav 에서 숨김 — 라우트는 유지,
+    // nodes-ui-polish 2026-07-05)
+    await expect(nav.locator('.nav-item')).toHaveCount(7);
   });
 
   test('hash navigation to #mcp-servers renders the MCP route', async ({ page }) => {

@@ -5650,11 +5650,205 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 }
 .danger-text { color: var(--status-failed) !important; }
 
-/* Node detail usage view */
+/* ─────────────────────────────────────────────────────────────────────────────
+   Fleet nodes — shared status primitives (list card + detail header)
+   ───────────────────────────────────────────────────────────────────────────── */
+
+.node-status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.node-status-dot.reachable {
+  background: var(--status-active-bright);
+  box-shadow: 0 0 0 3px var(--success-bg-subtle);
+  animation: node-dot-pulse 2.4s ease-in-out infinite;
+}
+
+.node-status-dot.unreachable {
+  background: var(--status-failed);
+  box-shadow: 0 0 0 3px var(--status-failed-bg-subtle);
+}
+
+@keyframes node-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .node-status-dot.reachable { animation: none; }
+}
+
+.node-status-text.reachable { color: var(--success); font-weight: 500; }
+.node-status-text.unreachable { color: var(--status-failed); font-weight: 500; }
+
+/* Small pill chip shared by the list card (kind/capability/default badge)
+   and the detail header (status/kind/capability chips) — tinted-chip look
+   mirrors `.skill-pack-scope` so fleet chrome matches the other resource
+   pages. */
+.node-detail-chip,
+.node-usage-card-status {
+  border: 1px solid var(--border);
+  background: var(--bg-base);
+  color: var(--text-secondary);
+  border-radius: var(--radius-xs);
+  font-size: 11px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+.node-detail-chip.reachable {
+  color: var(--success);
+  background: var(--success-bg-subtle);
+  border-color: transparent;
+}
+
+.node-detail-chip.unreachable,
+.node-usage-card-status.error,
+.node-usage-error-title {
+  color: var(--status-failed);
+}
+
+.node-detail-chip.unreachable {
+  background: var(--status-failed-bg-subtle);
+  border-color: transparent;
+}
+
+/* Remote (ssh) kind gets a tint so it reads as "different machine" at a
+   glance; local (the common/default case) stays neutral — color is spent on
+   the exception, not the rule. */
+.node-detail-chip.ssh {
+  color: var(--info-light);
+  background: var(--info-bg-subtle);
+  border-color: transparent;
+}
+
+.node-detail-chip.is-default {
+  color: var(--accent-light);
+  background: var(--accent-muted);
+  border-color: transparent;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Node list cards (Fleet resource page)
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* Narrower min-width than the shared `.skill-packs-list` — node cards carry
+   less text per card than skill packs / MCP templates, so they can pack
+   tighter and stay usable at the 320px breakpoint. */
+.node-list {
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+}
+
+.node-card {
+  gap: 10px;
+}
+
+.node-card.static:hover {
+  border-color: var(--accent-border);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.node-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.node-card-title-link {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+}
+
+.node-card-title-link::after {
+  content: '\203a';
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.node-card-title-link:hover .node-card-name,
+.node-card-title-link:focus-visible .node-card-name {
+  color: var(--accent-light);
+  text-decoration: underline;
+}
+
+.node-card-title-link:focus-visible {
+  outline: none;
+  border-radius: var(--radius-xs);
+  box-shadow: var(--focus-ring);
+}
+
+.node-card-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 0.15s;
+}
+
+.node-card-id {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  flex-shrink: 0;
+}
+
+.node-card-kind-badge {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.node-card-subline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.node-card-caps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.node-card-ssh-line {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.node-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Node detail — usage view
+   ───────────────────────────────────────────────────────────────────────────── */
+
 .node-detail-view {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  padding: 20px 24px 24px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
 }
 
 .node-detail-back {
@@ -5678,10 +5872,10 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 }
 
 .node-detail-header {
-  padding: 16px;
+  padding: 18px 20px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
 }
 
 .node-detail-header-main,
@@ -5694,22 +5888,30 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   gap: 12px;
 }
 
+.node-detail-heading {
+  min-width: 0;
+}
+
 .node-detail-title-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
+}
+
+.node-detail-title-row .node-status-dot {
+  width: 10px;
+  height: 10px;
 }
 
 .node-detail-title {
   margin: 0;
   font-size: 22px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--text-primary);
 }
 
 .node-detail-id,
-.node-usage-meta,
 .node-usage-section-updated,
 .node-usage-updated,
 .node-usage-limit-reset,
@@ -5720,42 +5922,24 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   font-size: 12px;
 }
 
+.node-detail-id {
+  font-family: var(--font-mono);
+}
+
 .node-detail-meta {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 8px;
+  margin-top: 10px;
 }
 
-.node-detail-chip,
-.node-usage-card-status {
-  border: 1px solid var(--border);
-  background: var(--bg-base);
-  color: var(--text-secondary);
-  border-radius: var(--radius-xs);
-  font-size: 11px;
-  padding: 2px 7px;
-}
-
-.node-detail-chip.reachable {
-  color: var(--success);
-}
-
-.node-detail-chip.unreachable,
-.node-usage-card-status.error,
-.node-usage-error-title {
-  color: var(--status-failed);
-}
-
-.node-detail-grid,
-.node-usage-info-grid {
+.node-detail-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 8px;
 }
 
-.node-detail-field,
-.node-usage-field {
+.node-detail-field {
   border: 1px solid var(--border);
   background: var(--bg-base);
   border-radius: var(--radius-sm);
@@ -5766,14 +5950,12 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   min-width: 0;
 }
 
-.node-detail-field-label,
-.node-usage-field-label {
+.node-detail-field-label {
   color: var(--text-muted);
   font-size: 11px;
 }
 
-.node-detail-field-value,
-.node-usage-field-value {
+.node-detail-field-value {
   color: var(--text-primary);
   font-size: 13px;
   overflow-wrap: anywhere;
@@ -5803,15 +5985,30 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  border-top: 3px solid transparent;
 }
 
+/* Worst-limit / error tone accent — the strongest at-a-glance "which CLI
+   needs attention" signal on the grid, independent of whether the card is
+   also in an explicit error state (has-error/has-info below). */
+.node-usage-card[data-tone="ok"] { border-top-color: var(--success); }
+.node-usage-card[data-tone="info"] { border-top-color: var(--info); }
+.node-usage-card[data-tone="warn"] { border-top-color: var(--warning); }
+.node-usage-card[data-tone="danger"] { border-top-color: var(--status-failed); }
+
+/* border-color shorthand 는 border-top-color 까지 리셋해 data-tone top accent 를
+   덮는다 (Codex 리뷰 S2) — 상단은 accent 소유, 나머지 3면만 상태색. */
 .node-usage-card.has-error {
-  border-color: var(--status-failed);
+  border-right-color: var(--status-failed-border-subtle);
+  border-bottom-color: var(--status-failed-border-subtle);
+  border-left-color: var(--status-failed-border-subtle);
 }
 
 /* quota_unsupported 등 정보성 상태 — danger 톤이 아니라 중립/info 톤 */
 .node-usage-card.has-info {
-  border-color: var(--border);
+  border-right-color: var(--border);
+  border-bottom-color: var(--border);
+  border-left-color: var(--border);
 }
 
 .node-usage-card-status.info {
@@ -5822,10 +6019,27 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   color: var(--text-muted);
 }
 
+.node-usage-card-header {
+  align-items: flex-start;
+}
+
+.node-usage-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
 .node-usage-cli {
   color: var(--text-primary);
   font-size: 15px;
   font-weight: 600;
+}
+
+.node-usage-version-badge {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--font-mono);
 }
 
 .node-usage-error {
@@ -5846,7 +6060,7 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .node-usage-limits {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
 .node-usage-limit {
@@ -5863,27 +6077,70 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 
 .node-usage-limit-pct {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
+.node-usage-limit-pct.ok { color: var(--success); }
+.node-usage-limit-pct.info { color: var(--info); }
+.node-usage-limit-pct.warn { color: var(--warning); }
+.node-usage-limit-pct.danger { color: var(--status-failed); }
+
+/* The bar is the star: thicker, fully rounded meter (vs. the previous 7px
+   hairline) so remaining quota is legible before reading any number. */
 .node-usage-bar-track {
   width: 100%;
-  height: 7px;
-  border-radius: var(--radius-2xs);
-  background: var(--bg-base);
+  height: 10px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-hover);
   overflow: hidden;
 }
 
 .node-usage-bar-fill {
   height: 100%;
-  border-radius: var(--radius-2xs);
+  border-radius: var(--radius-pill);
+  transition: width 0.2s ease;
 }
 
 .node-usage-bar-fill.ok { background: var(--success); }
 .node-usage-bar-fill.info { background: var(--info); }
 .node-usage-bar-fill.warn { background: var(--warning); }
 .node-usage-bar-fill.danger { background: var(--status-failed); }
+
+/* Secondary meta (account / auth / last-updated) — compact inline pairs
+   instead of boxed fields, set off from the usage bars by a hairline. */
+.node-usage-card-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.node-usage-info-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
+.node-usage-field {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+}
+
+.node-usage-field-label {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.node-usage-field-value {
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
 
 .node-usage-updated {
   text-align: right;
@@ -5903,6 +6160,10 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 }
 
 @media (max-width: 640px) {
+  .node-detail-view {
+    padding: 16px;
+  }
+
   .node-detail-header-main,
   .node-usage-section-header,
   .node-detail-error {
@@ -5912,6 +6173,10 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 
   .node-usage-grid {
     grid-template-columns: 1fr;
+  }
+
+  .node-card-footer {
+    justify-content: flex-start;
   }
 }
 

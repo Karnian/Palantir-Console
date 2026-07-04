@@ -718,8 +718,8 @@ export const NODES_LABELS = {
   deleting: '삭제 중...',
   defaultNodeBadge: '기본 노드',
   defaultNodeDeleteHint: '기본 local 노드는 삭제할 수 없습니다',
-  reachable: 'reachable',
-  unreachable: 'unreachable',
+  reachable: '연결됨',
+  unreachable: '연결 끊김',
   sshTargetLabel: 'SSH',
   rootsCountSuffix: '개 루트',
   nodePrefixLabel: 'node_prefix',
@@ -728,7 +728,17 @@ export const NODES_LABELS = {
   unlimited: '무제한',
   emptyValue: '—',
   detailBack: '← 노드 목록',
-  detailAction: '상세',
+  detailAction: '상세 보기',
+  // Fleet list card relative heartbeat — mirrors lib/format.js `timeAgo`
+  // wording. Kept as separate copy keys (not the shared helper) because the
+  // jsdom test harness only pre-seeds specific format.js exports into its
+  // sandbox; NodesView computes this locally (see relativeHeartbeat()).
+  heartbeatNeverLabel: '하트비트 없음',
+  heartbeatSkewLabel: '시간 불일치',
+  heartbeatJustNow: '방금',
+  heartbeatMinutesAgoSuffix: '분 전',
+  heartbeatHoursAgoSuffix: '시간 전',
+  heartbeatDaysAgoSuffix: '일 전',
   detailNotFound: '노드를 찾을 수 없습니다',
   detailUsageTitle: 'CLI 사용량',
   detailRefresh: '새로고침',
