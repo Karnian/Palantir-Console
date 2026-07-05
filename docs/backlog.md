@@ -214,9 +214,9 @@
 ## Draft-review
 
 ### N. 노드 퍼스트 작업보드·프로젝트 재기획
-- **Spec**: [`docs/specs/node-first-board-brief.md`](./specs/node-first-board-brief.md) (v1.2, PR #307)
-- **상태**: Codex 적대 리뷰 4라운드 수렴 (R1 3B+6S → R2 3B+3S → R3 1S → **R4 GO**). **사용자 lock-in 대기** — lock-in 시 N0(정합 수리 2 PR: tasks.status CHECK 'failed' rebuild + 노드 복구 node-scoped drain)부터 착수.
-- **구조**: N0 정합 수리 → N1 노드 문맥 1급화(envelope/SSE/배지/대기사유/플릿 스트립) → N2 노드-인지 UX(헬스 셀렉트/bind-time 검증/역링크/보드 필터) → N3 운영 semantics(cordon/stuck sweep/re-target). v2 경계(멀티노드/task override/soft affinity/글로벌 cap) brief §3 표 참조.
+- **Spec**: [`docs/specs/node-first-board-brief.md`](./specs/node-first-board-brief.md) (v1.2, PR #307). Codex 적대 리뷰 4라운드 수렴 (R1 3B+6S → R2 3B+3S → R3 1S → **R4 GO**), 사용자 lock-in 완료 (2026-07-05).
+- **N0 정합 수리 ✅ 완료 (PR #309~#311, 2026-07-05)**: ① migration 048 tasks rebuild — status CHECK 'failed' (prod 복사본 실측 + prod v48 적용) + 폼 dead-field 정합 ② 노드 복구 자동 drain (`onNodeRecovered`→`scheduleDrainForNode`, **실 Pi e2e: unreachable queued → host 교정 → flip 4초 내 자동 drain → codex 완주**) + transport_lost 실제 node_id. 각각 codex-goal 구현 + Themis PASS + Codex 적대 리뷰 GO. 1908 tests. (#311 은 #310 브랜치 조작 실수 복원 — worktree 커밋에서 PR 브랜치 만들 때 base 불일치 `reset --soft` 금지 교훈.)
+- **다음**: N1 노드 문맥 1급화(envelope/SSE/배지/대기사유/플릿 스트립) → N2 노드-인지 UX → N3 운영 semantics(cordon/stuck sweep/re-target). 트리거 대기. v2 경계는 brief §3 표.
 
 *(기존 항목: `skill-pack-gallery-v1.1.md` 는 PR #124 에서 Final / locked-in, `manager-session-ui.md` 는 PR #120 의 gap analysis + PR #121-123 R2-A/B/C 로 대부분 소화)*
 
