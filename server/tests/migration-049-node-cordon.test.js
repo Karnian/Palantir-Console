@@ -32,7 +32,7 @@ test('049 fresh migration adds nodes.cordoned with default and check constraint'
   const { db, migrate, close } = createDatabase(':memory:');
   try {
     migrate();
-    assert.equal(db.prepare('SELECT MAX(version) AS v FROM schema_version').get().v, 49);
+    assert.ok(db.prepare('SELECT MAX(version) AS v FROM schema_version').get().v >= 49, 'migration 049 applied');
 
     const column = nodeColumn(db, 'cordoned');
     assert.ok(column, 'nodes.cordoned column exists');
