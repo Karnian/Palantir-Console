@@ -24,6 +24,7 @@ function errorHandler(err, req, res, next) {
   const status = err?.status || err?.httpStatus || err?.statusCode || 500;
   const message = err?.message || 'Internal Server Error';
   const payload = { error: message };
+  if (err?.reason && status >= 400 && status < 500) payload.reason = err.reason;
   if (err?.details) payload.details = err.details;
 
   if (status === 500) {

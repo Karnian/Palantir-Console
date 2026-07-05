@@ -15,6 +15,7 @@ const { createProjectService } = require('./services/projectService');
 const { createProjectBriefService } = require('./services/projectBriefService');
 const { createNodeService } = require('./services/nodeService');
 const { createNodeBindingValidator } = require('./services/nodeBindingValidator');
+const { createRepoPreflightService } = require('./services/repoPreflightService');
 const { createNodeUsageService } = require('./services/nodeUsageService');
 const { createNodeSummaryService } = require('./services/nodeSummaryService');
 const { createNodeHeartbeatService } = require('./services/nodeHeartbeatService');
@@ -675,6 +676,7 @@ function createApp(options = {}) {
   // New services (SQLite-based)
   const nodeService = createNodeService(db, { localExecutor: nodeExecutor });
   const nodeBindingValidator = options.nodeBindingValidator || createNodeBindingValidator({ nodeService });
+  const repoPreflightService = options.repoPreflightService || createRepoPreflightService({ nodeService });
   const nodeUsageService = options.nodeUsageService || createNodeUsageService({
     nodeService,
     providerRegistry,
@@ -1011,7 +1013,7 @@ function createApp(options = {}) {
   app.use('/api/usage', createUsageRouter({ codexService, providerRegistry }));
 
   // New routes (v2)
-  app.use('/api/projects', createProjectsRouter({ projectService, taskService, runService, projectBriefService, operatorCleanupService, nodeBindingValidator, lifecycleService }));
+  app.use('/api/projects', createProjectsRouter({ projectService, taskService, runService, projectBriefService, operatorCleanupService, nodeBindingValidator, lifecycleService, repoPreflightService }));
   app.use('/api/nodes', createNodesRouter({ nodeService, nodeUsageService, nodeSummaryService, lifecycleService }));
   app.use('/api/projects', createMemoryRouter({ memoryService, projectService })); // ML PR1: GET /:projectId/memory
   app.use('/api/master-memory', createMasterMemoryRouter({ masterMemoryService })); // L2 P1b: GET / + POST /remember
@@ -1131,6 +1133,7 @@ function createApp(options = {}) {
     projectService,
     presetService,
     nodeService,
+    repoPreflightService,
     agentProfileService,
     nodeSummaryService,
     lifecycleService,

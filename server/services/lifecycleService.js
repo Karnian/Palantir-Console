@@ -414,6 +414,15 @@ function createLifecycleService({
     let project = null;
     if (task.project_id) {
       project = projectService.getProject(task.project_id);
+      if (project?.source_type === 'git') {
+        runService.addRunEvent(run.id, 'run:repo_materialize_unavailable', JSON.stringify({ project_id: project.id }));
+        runService.updateRunStatus(run.id, 'failed', { force: true, reason: 'repo_materialize_unavailable' });
+        // Return the FAILED run row (not null) to match executeTask's contract:
+        // callers (routes/tasks.js) respond `{ run }`, so the client sees the
+        // failed status + reason rather than a misleading `{ run: null }` 201
+        // (Codex R2 review NIT).
+        return runService.getRun(run.id);
+      }
       if (project?.directory) {
         if (isRemoteNode) {
           projectDir = project.directory;

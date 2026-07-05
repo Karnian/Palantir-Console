@@ -8,6 +8,89 @@ function normalizeQueueNodeId(value) {
   return normalized || 'local';
 }
 
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
+
+function normalizeProjectSourceType(value) {
+  return value === null || value === undefined || value === '' ? 'legacy_directory' : value;
+}
+
+function normalizeMcpConfigSource(value) {
+  return value === null || value === undefined || value === '' ? 'legacy_control_plane_path' : value;
+}
+
+function mergeProjectSource(current, body) {
+  const base = current || {};
+  const patch = body || {};
+  const sourceType = normalizeProjectSourceType(hasOwn(patch, 'source_type') ? patch.source_type : base.source_type);
+  const inheritedRepoRef = base.source_type === 'legacy_directory' && base.repo_ref === 'HEAD' ? null : base.repo_ref;
+  return {
+    source_type: sourceType,
+    repo_url: hasOwn(patch, 'repo_url') ? patch.repo_url : base.repo_url,
+    repo_ref: hasOwn(patch, 'repo_ref') ? patch.repo_ref : inheritedRepoRef,
+    repo_subdir: hasOwn(patch, 'repo_subdir') ? patch.repo_subdir : base.repo_subdir,
+    node_id: hasOwn(patch, 'node_id') ? patch.node_id : base.node_id,
+    directory: hasOwn(patch, 'directory') ? patch.directory : base.directory,
+    allow_non_git_dir: hasOwn(patch, 'allow_non_git_dir') ? patch.allow_non_git_dir : base.allow_non_git_dir,
+    mcp_config_path: hasOwn(patch, 'mcp_config_path') ? patch.mcp_config_path : base.mcp_config_path,
+    mcp_config_source: normalizeMcpConfigSource(
+      hasOwn(patch, 'mcp_config_source') ? patch.mcp_config_source : base.mcp_config_source,
+    ),
+    mcp_config_relpath: hasOwn(patch, 'mcp_config_relpath') ? patch.mcp_config_relpath : base.mcp_config_relpath,
+  };
+}
+
+function hasParentSegment(value) {
+  return String(value || '')
+    .split(/[\\/]+/)
+    .some((segment) => segment === '..');
+}
+
+function isPresent(value) {
+  return value !== null && value !== undefined && value !== '';
+}
+
+function assertRepoRelpath(value) {
+  if (!value || typeof value !== 'string') {
+    throw new BadRequestError('mcp_config_relpath is required when mcp_config_source is repo_relpath');
+  }
+  if (value.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(value)) {
+    throw new BadRequestError('mcp_config_relpath must be relative');
+  }
+  if (hasParentSegment(value)) {
+    throw new BadRequestError('mcp_config_relpath must not contain ..');
+  }
+  if (!value.endsWith('.json')) {
+    throw new BadRequestError('mcp_config_relpath must end with .json');
+  }
+}
+
+function assertCoherentSource(effective) {
+  const sourceType = normalizeProjectSourceType(effective?.source_type);
+  if (sourceType === 'git') {
+    if (!isPresent(effective.repo_url)) throw new BadRequestError('repo_url is required for git projects');
+    if (isPresent(effective.directory)) throw new BadRequestError('directory is not allowed when source_type is git');
+    if (Number(effective.allow_non_git_dir || 0) !== 0) {
+      throw new BadRequestError('allow_non_git_dir is not allowed when source_type is git');
+    }
+    if (effective.mcp_config_source === 'repo_relpath') {
+      assertRepoRelpath(effective.mcp_config_relpath);
+    }
+    return;
+  }
+
+  if (isPresent(effective.repo_url)) throw new BadRequestError('repo_url is not allowed when source_type is legacy_directory');
+  if (isPresent(effective.repo_ref)) throw new BadRequestError('repo_ref is not allowed when source_type is legacy_directory');
+  if (isPresent(effective.repo_subdir)) throw new BadRequestError('repo_subdir is not allowed when source_type is legacy_directory');
+  if (effective.mcp_config_source === 'repo_relpath') {
+    throw new BadRequestError('mcp_config_source repo_relpath is not allowed when source_type is legacy_directory');
+  }
+  if (isPresent(effective.mcp_config_relpath)) {
+    throw new BadRequestError('mcp_config_relpath is not allowed when source_type is legacy_directory');
+  }
+}
+
 function createProjectsRouter({
   projectService,
   taskService,
@@ -16,8 +99,24 @@ function createProjectsRouter({
   operatorCleanupService,
   nodeBindingValidator,
   lifecycleService,
+  repoPreflightService,
 }) {
   const router = express.Router();
+
+  async function preflightRepoIfNeeded(effective) {
+    if (effective.source_type !== 'git' || !repoPreflightService) return {};
+    const result = await repoPreflightService.preflight({
+      repoUrl: effective.repo_url,
+      repoRef: effective.repo_ref,
+      nodeId: effective.node_id,
+    });
+    if (result?.skipped) return {};
+    return {
+      last_repo_preflight_at: new Date().toISOString(),
+      last_repo_preflight_error: null,
+      ...(result?.fingerprint ? { repo_remote_fingerprint: result.fingerprint } : {}),
+    };
+  }
 
   router.get('/', asyncHandler(async (req, res) => {
     const projects = projectService.listProjects();
@@ -36,21 +135,29 @@ function createProjectsRouter({
   }));
 
   router.post('/', validateCreateProject, asyncHandler(async (req, res) => {
-    if (nodeBindingValidator) {
+    const body = req.body || {};
+    const effective = mergeProjectSource(null, body);
+    assertCoherentSource(effective);
+    const repoPreflightFields = await preflightRepoIfNeeded(effective);
+    if (effective.source_type !== 'git' && nodeBindingValidator) {
       await nodeBindingValidator.validateBinding({
-        nodeId: req.body?.node_id,
-        directory: req.body?.directory,
-        mcpConfigPath: req.body?.mcp_config_path,
+        nodeId: body.node_id,
+        directory: body.directory,
+        mcpConfigPath: body.mcp_config_path,
       });
     }
-    const project = projectService.createProject(req.body || {});
+    const project = projectService.createProject({ ...body, ...repoPreflightFields });
     res.status(201).json({ project });
   }));
 
   router.patch('/:id', validateUpdateProject, asyncHandler(async (req, res) => {
     const body = req.body || {};
-    if (nodeBindingValidator && (
-      'node_id' in body || 'directory' in body || 'mcp_config_path' in body
+    const current = projectService.getProject(req.params.id);
+    const effective = mergeProjectSource(current, body);
+    assertCoherentSource(effective);
+    const repoPreflightFields = await preflightRepoIfNeeded(effective);
+    if (effective.source_type !== 'git' && nodeBindingValidator && (
+      hasOwn(body, 'node_id') || hasOwn(body, 'directory') || hasOwn(body, 'mcp_config_path')
     )) {
       // Validate the EFFECTIVE binding (current row merged with the patch),
       // not just the fields present in the body. Rebinding node_id alone to a
@@ -59,14 +166,13 @@ function createProjectsRouter({
       // local↔remote path mismatch is exactly what bind-time validation exists
       // to catch. `getProject` throws 404 for a missing id before we touch the
       // executor.
-      const current = projectService.getProject(req.params.id);
       await nodeBindingValidator.validateBinding({
-        nodeId: 'node_id' in body ? body.node_id : current.node_id,
-        directory: 'directory' in body ? body.directory : current.directory,
-        mcpConfigPath: 'mcp_config_path' in body ? body.mcp_config_path : current.mcp_config_path,
+        nodeId: hasOwn(body, 'node_id') ? body.node_id : current.node_id,
+        directory: hasOwn(body, 'directory') ? body.directory : current.directory,
+        mcpConfigPath: hasOwn(body, 'mcp_config_path') ? body.mcp_config_path : current.mcp_config_path,
       });
     }
-    const project = projectService.updateProject(req.params.id, req.body || {});
+    const project = projectService.updateProject(req.params.id, { ...body, ...repoPreflightFields });
     res.json({ project });
   }));
 
@@ -103,7 +209,9 @@ function createProjectsRouter({
       return res.json({ moved: 0 });
     }
 
-    if (nodeBindingValidator) {
+    if ((project.source_type || 'legacy_directory') === 'git') {
+      await preflightRepoIfNeeded(mergeProjectSource(project, { node_id: toNodeId }));
+    } else if (nodeBindingValidator) {
       await nodeBindingValidator.validateBinding({
         nodeId: toNodeId,
         directory: project.directory,

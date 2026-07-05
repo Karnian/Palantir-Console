@@ -16,6 +16,7 @@ function createRouteApp({
   lifecycleService,
   nodeBindingValidator,
   operatorCleanupService,
+  repoPreflightService,
 } = {}) {
   const app = express();
   app.use(express.json());
@@ -27,6 +28,7 @@ function createRouteApp({
     operatorCleanupService,
     nodeBindingValidator,
     lifecycleService,
+    repoPreflightService,
   }));
   app.use(errorHandler);
   return app;
@@ -151,6 +153,130 @@ test('POST /api/projects validates node binding before sync createProject', asyn
   });
 });
 
+test('POST /api/projects preflights git repo before sync createProject', async () => {
+  const calls = [];
+  const app = createRouteApp({
+    projectService: createProjectService({
+      createProject: (body) => {
+        calls.push(['create', body]);
+        return { id: 'proj_1', ...body };
+      },
+    }),
+    nodeBindingValidator: {
+      async validateBinding() {
+        calls.push(['validate']);
+      },
+    },
+    repoPreflightService: {
+      async preflight(input) {
+        calls.push(['preflight', input]);
+        return { ok: true, fingerprint: '0123456789abcdef0123456789abcdef01234567' };
+      },
+    },
+  });
+
+  const res = await dispatch(app, 'POST', '/api/projects', {
+    name: 'Git Alpha',
+    source_type: 'git',
+    repo_url: 'git@github.com:acme/repo.git',
+    repo_ref: 'main',
+    node_id: 'node-a',
+  });
+
+  assert.equal(res.status, 201);
+  assert.deepEqual(calls.map(([kind]) => kind), ['preflight', 'create']);
+  assert.deepEqual(calls[0][1], {
+    repoUrl: 'git@github.com:acme/repo.git',
+    repoRef: 'main',
+    nodeId: 'node-a',
+  });
+  assert.equal(calls[1][1].repo_remote_fingerprint, '0123456789abcdef0123456789abcdef01234567');
+  assert.equal(typeof calls[1][1].last_repo_preflight_at, 'string');
+  assert.equal(calls[1][1].last_repo_preflight_error, null);
+});
+
+test('POST /api/projects rejects explicit git source with legacy directory fields', async () => {
+  let createCalled = false;
+  let preflightCalled = false;
+  const app = createRouteApp({
+    projectService: createProjectService({
+      createProject: () => {
+        createCalled = true;
+        return { id: 'proj_1' };
+      },
+    }),
+    repoPreflightService: {
+      async preflight() {
+        preflightCalled = true;
+      },
+    },
+  });
+
+  const res = await dispatch(app, 'POST', '/api/projects', {
+    name: 'Mixed Git',
+    source_type: 'git',
+    repo_url: 'git@github.com:acme/repo.git',
+    directory: '/srv/repo',
+  });
+
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /directory is not allowed/);
+  assert.equal(preflightCalled, false);
+  assert.equal(createCalled, false);
+});
+
+test('POST /api/projects returns git preflight 400 without calling createProject', async () => {
+  let createCalled = false;
+  const app = createRouteApp({
+    projectService: createProjectService({
+      createProject: () => {
+        createCalled = true;
+        return { id: 'proj_1' };
+      },
+    }),
+    repoPreflightService: {
+      async preflight() {
+        const err = new BadRequestError('Repository preflight failed');
+        err.reason = 'repo_auth_failed';
+        throw err;
+      },
+    },
+  });
+
+  const res = await dispatch(app, 'POST', '/api/projects', {
+    name: 'Git Alpha',
+    source_type: 'git',
+    repo_url: 'git@github.com:acme/repo.git',
+  });
+
+  assert.equal(res.status, 400);
+  assert.equal(res.body.error, 'Repository preflight failed');
+  assert.equal(res.body.reason, 'repo_auth_failed');
+  assert.equal(createCalled, false);
+});
+
+test('POST /api/projects skips repo preflight when service is not injected', async () => {
+  let createCalled = false;
+  const app = createRouteApp({
+    projectService: createProjectService({
+      createProject: (body) => {
+        createCalled = true;
+        return { id: 'proj_1', ...body };
+      },
+    }),
+  });
+
+  const res = await dispatch(app, 'POST', '/api/projects', {
+    name: 'Git Alpha',
+    source_type: 'git',
+    repo_url: 'git@github.com:acme/repo.git',
+  });
+
+  assert.equal(res.status, 201);
+  assert.equal(createCalled, true);
+  assert.equal(res.body.project.last_repo_preflight_at, undefined);
+});
+
 test('POST /api/projects returns validator 400 without calling createProject', async () => {
   let createCalled = false;
   const app = createRouteApp({
@@ -178,6 +304,110 @@ test('POST /api/projects returns validator 400 without calling createProject', a
   assert.equal(createCalled, false);
 });
 
+test('POST /api/projects legacy source uses node binding and not repo preflight', async () => {
+  const calls = [];
+  const app = createRouteApp({
+    projectService: createProjectService({
+      createProject: (body) => {
+        calls.push(['create', body]);
+        return { id: 'proj_1', ...body };
+      },
+    }),
+    nodeBindingValidator: {
+      async validateBinding(binding) {
+        calls.push(['validate', binding]);
+      },
+    },
+    repoPreflightService: {
+      async preflight() {
+        calls.push(['preflight']);
+      },
+    },
+  });
+
+  const res = await dispatch(app, 'POST', '/api/projects', {
+    name: 'Legacy Alpha',
+    source_type: 'legacy_directory',
+    node_id: 'node-a',
+    directory: '/srv/repo',
+  });
+
+  assert.equal(res.status, 201);
+  assert.deepEqual(calls.map(([kind]) => kind), ['validate', 'create']);
+  assert.deepEqual(calls[0][1], {
+    nodeId: 'node-a',
+    directory: '/srv/repo',
+    mcpConfigPath: undefined,
+  });
+});
+
+test('POST /api/projects rejects legacy source with repo fields before preflight', async () => {
+  let createCalled = false;
+  let preflightCalled = false;
+  const app = createRouteApp({
+    projectService: createProjectService({
+      createProject: () => {
+        createCalled = true;
+        return { id: 'proj_1' };
+      },
+    }),
+    repoPreflightService: {
+      async preflight() {
+        preflightCalled = true;
+      },
+    },
+  });
+
+  const res = await dispatch(app, 'POST', '/api/projects', {
+    name: 'Mixed Legacy',
+    source_type: 'legacy_directory',
+    directory: '/srv/repo',
+    repo_url: 'git@github.com:acme/repo.git',
+  });
+
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /repo_url is not allowed/);
+  assert.equal(preflightCalled, false);
+  assert.equal(createCalled, false);
+});
+
+test('POST /api/projects rejects credential-bearing repo_url', async () => {
+  let createCalled = false;
+  const app = createRouteApp({
+    projectService: createProjectService({
+      createProject: () => {
+        createCalled = true;
+        return { id: 'proj_1' };
+      },
+    }),
+  });
+
+  const res = await dispatch(app, 'POST', '/api/projects', {
+    name: 'Git Alpha',
+    source_type: 'git',
+    repo_url: 'https://user:pass@example.test/acme/repo.git',
+  });
+
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /credentials/);
+  assert.equal(createCalled, false);
+});
+
+test('POST /api/projects rejects repo_relpath MCP path traversal', async () => {
+  const app = createRouteApp({ projectService: createProjectService() });
+
+  const res = await dispatch(app, 'POST', '/api/projects', {
+    name: 'Git Alpha',
+    source_type: 'git',
+    repo_url: 'git@github.com:acme/repo.git',
+    mcp_config_source: 'repo_relpath',
+    mcp_config_relpath: '../mcp.json',
+  });
+
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /must not contain \.\./);
+});
+
 test('PATCH /api/projects/:id skips binding validator when binding fields are absent', async () => {
   let validateCalled = false;
   const app = createRouteApp({
@@ -193,6 +423,133 @@ test('PATCH /api/projects/:id skips binding validator when binding fields are ab
 
   assert.equal(res.status, 200);
   assert.equal(validateCalled, false);
+});
+
+test('PATCH /api/projects/:id preflights effective git source before sync updateProject', async () => {
+  const calls = [];
+  const app = createRouteApp({
+    projectService: createProjectService({
+      getProject: (id) => ({
+        id,
+        name: 'Git Project',
+        source_type: 'git',
+        repo_url: 'git@github.com:acme/repo.git',
+        repo_ref: 'main',
+        node_id: 'node-a',
+      }),
+      updateProject: (id, body) => {
+        calls.push(['update', id, body]);
+        return { id, ...body };
+      },
+    }),
+    repoPreflightService: {
+      async preflight(input) {
+        calls.push(['preflight', input]);
+        return { ok: true, fingerprint: null };
+      },
+    },
+  });
+
+  const res = await dispatch(app, 'PATCH', '/api/projects/proj_1', { description: 'Updated' });
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(calls.map(([kind]) => kind), ['preflight', 'update']);
+  assert.deepEqual(calls[0][1], {
+    repoUrl: 'git@github.com:acme/repo.git',
+    repoRef: 'main',
+    nodeId: 'node-a',
+  });
+  assert.equal(typeof calls[1][2].last_repo_preflight_at, 'string');
+  assert.equal(calls[1][2].last_repo_preflight_error, null);
+});
+
+test('PATCH /api/projects/:id accepts source_type-only git patch using effective repo_url', async () => {
+  const calls = [];
+  const app = createRouteApp({
+    projectService: createProjectService({
+      getProject: (id) => ({
+        id,
+        name: 'Git Project',
+        source_type: 'git',
+        repo_url: 'git@github.com:acme/repo.git',
+        repo_ref: 'main',
+        node_id: 'node-a',
+      }),
+      updateProject: (id, body) => {
+        calls.push(['update', id, body]);
+        return { id, ...body };
+      },
+    }),
+    repoPreflightService: {
+      async preflight(input) {
+        calls.push(['preflight', input]);
+        return { ok: true, fingerprint: null };
+      },
+    },
+  });
+
+  const res = await dispatch(app, 'PATCH', '/api/projects/proj_1', { source_type: 'git' });
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(calls.map(([kind]) => kind), ['preflight', 'update']);
+  assert.deepEqual(calls[0][1], {
+    repoUrl: 'git@github.com:acme/repo.git',
+    repoRef: 'main',
+    nodeId: 'node-a',
+  });
+});
+
+test('PATCH /api/projects/:id rejects effective legacy source with stale repo_url', async () => {
+  let updateCalled = false;
+  const app = createRouteApp({
+    projectService: createProjectService({
+      getProject: (id) => ({
+        id,
+        name: 'Legacy With Stale Repo',
+        source_type: 'legacy_directory',
+        repo_url: 'git@github.com:acme/repo.git',
+        repo_ref: 'HEAD',
+        directory: '/srv/legacy',
+      }),
+      updateProject: () => {
+        updateCalled = true;
+        return { id: 'proj_1' };
+      },
+    }),
+  });
+
+  const res = await dispatch(app, 'PATCH', '/api/projects/proj_1', { name: 'Renamed' });
+
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /repo_url is not allowed/);
+  assert.equal(updateCalled, false);
+});
+
+test('PATCH /api/projects/:id rejects mixed git directory before updateProject', async () => {
+  let updateCalled = false;
+  const app = createRouteApp({
+    projectService: createProjectService({
+      getProject: (id) => ({ id, name: 'Legacy', directory: '/srv/legacy', allow_non_git_dir: 0 }),
+      updateProject: () => {
+        updateCalled = true;
+        return { id: 'proj_1' };
+      },
+    }),
+    repoPreflightService: {
+      async preflight() {
+        throw new Error('should not preflight mixed source');
+      },
+    },
+  });
+
+  const res = await dispatch(app, 'PATCH', '/api/projects/proj_1', {
+    source_type: 'git',
+    repo_url: 'git@github.com:acme/repo.git',
+  });
+
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /directory is not allowed/);
+  assert.equal(updateCalled, false);
 });
 
 test('PATCH /api/projects/:id validates only submitted binding fields', async () => {
@@ -348,6 +705,60 @@ test('POST /api/projects/:id/retarget-queued collects queued worker runs for pro
     ['validate', { nodeId: 'node-new', directory: '/srv/repo' }],
     ['retarget', ['run_1', 'run_2'], 'node-old', 'node-new'],
     ['drain', 'node-new'],
+  ]);
+});
+
+test('POST /api/projects/:id/retarget-queued preflights git project on target node', async () => {
+  const calls = [];
+  const tasks = new Map([
+    ['task_1', { id: 'task_1', project_id: 'proj_1' }],
+  ]);
+  const app = createRouteApp({
+    projectService: createProjectService({
+      getProject: (id) => ({
+        id,
+        name: 'Git Project',
+        source_type: 'git',
+        repo_url: 'git@github.com:acme/repo.git',
+        repo_ref: 'main',
+        node_id: 'node-new',
+      }),
+    }),
+    taskService: {
+      listTasks: () => [],
+      getTask: (id) => tasks.get(id),
+    },
+    runService: {
+      listRuns: () => [{ id: 'run_1', task_id: 'task_1', node_id: 'node-old', status: 'queued', is_manager: 0 }],
+      retargetQueuedRuns: (ids, fromNodeId, toNodeId) => {
+        calls.push(['retarget', ids, fromNodeId, toNodeId]);
+        return { moved: ids.length };
+      },
+    },
+    nodeBindingValidator: {
+      async validateBinding(binding) {
+        calls.push(['validate', binding]);
+      },
+    },
+    repoPreflightService: {
+      async preflight(input) {
+        calls.push(['preflight', input]);
+        return { ok: true, fingerprint: null };
+      },
+    },
+  });
+
+  const res = await dispatch(app, 'POST', '/api/projects/proj_1/retarget-queued', { fromNodeId: 'node-old' });
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body, { moved: 1, runIds: ['run_1'] });
+  assert.deepEqual(calls, [
+    ['preflight', {
+      repoUrl: 'git@github.com:acme/repo.git',
+      repoRef: 'main',
+      nodeId: 'node-new',
+    }],
+    ['retarget', ['run_1'], 'node-old', 'node-new'],
   ]);
 });
 

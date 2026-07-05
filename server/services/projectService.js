@@ -2,6 +2,9 @@ const crypto = require('node:crypto');
 const { BadRequestError, NotFoundError } = require('../utils/errors');
 
 const VALID_PM_ADAPTERS = ['claude', 'codex'];
+const VALID_SOURCE_TYPES = new Set(['git', 'legacy_directory']);
+const VALID_MCP_CONFIG_SOURCES = new Set(['legacy_control_plane_path', 'repo_relpath']);
+const SOURCE_GENERATION_FIELDS = ['repo_url', 'repo_ref', 'repo_subdir', 'mcp_config_relpath'];
 
 function normalizePmAdapter(value) {
   if (value === undefined) return undefined;
@@ -63,6 +66,54 @@ function normalizeAllowNonGitDir(value) {
   throw new BadRequestError('allow_non_git_dir must be boolean or 0/1');
 }
 
+function normalizeSourceType(value) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return 'legacy_directory';
+  if (!VALID_SOURCE_TYPES.has(value)) throw new BadRequestError(`Invalid source_type: ${value}`);
+  return value;
+}
+
+function normalizeMcpConfigSource(value) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return 'legacy_control_plane_path';
+  if (!VALID_MCP_CONFIG_SOURCES.has(value)) throw new BadRequestError(`Invalid mcp_config_source: ${value}`);
+  return value;
+}
+
+function normalizeNullableText(value) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  if (typeof value !== 'string') return value;
+  return value.trim() || null;
+}
+
+function normalizeRepoRef(value) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return 'HEAD';
+  if (typeof value !== 'string') return value;
+  return value.trim() || 'HEAD';
+}
+
+function normalizeRepoFields(fields) {
+  const next = { ...fields };
+  if ('source_type' in next) next.source_type = normalizeSourceType(next.source_type);
+  if ('repo_url' in next) next.repo_url = normalizeNullableText(next.repo_url);
+  if ('repo_ref' in next) next.repo_ref = normalizeRepoRef(next.repo_ref);
+  if ('repo_subdir' in next) next.repo_subdir = normalizeNullableText(next.repo_subdir);
+  if ('repo_remote_fingerprint' in next) next.repo_remote_fingerprint = normalizeNullableText(next.repo_remote_fingerprint);
+  if ('last_repo_preflight_at' in next) next.last_repo_preflight_at = normalizeNullableText(next.last_repo_preflight_at);
+  if ('last_repo_preflight_error' in next) next.last_repo_preflight_error = normalizeNullableText(next.last_repo_preflight_error);
+  if ('mcp_config_source' in next) next.mcp_config_source = normalizeMcpConfigSource(next.mcp_config_source);
+  if ('mcp_config_relpath' in next) next.mcp_config_relpath = normalizeNullableText(next.mcp_config_relpath);
+  return next;
+}
+
+function sourceValueChanged(current, fields) {
+  return SOURCE_GENERATION_FIELDS.some((col) => (
+    col in fields && (fields[col] ?? null) !== (current[col] ?? null)
+  ));
+}
+
 function createProjectService(db) {
   const stmts = {
     getAll: db.prepare('SELECT * FROM projects ORDER BY updated_at DESC'),
@@ -80,12 +131,16 @@ function createProjectService(db) {
       INSERT INTO projects (
         id, name, directory, description, color, budget_usd,
         pm_enabled, preferred_pm_adapter, mcp_config_path, test_command,
-        node_id, allow_non_git_dir
+        node_id, allow_non_git_dir, source_type, repo_url, repo_ref,
+        repo_subdir, repo_remote_fingerprint, last_repo_preflight_at,
+        last_repo_preflight_error, mcp_config_source, mcp_config_relpath
       )
       VALUES (
         @id, @name, @directory, @description, @color, @budget_usd,
         @pm_enabled, @preferred_pm_adapter, @mcp_config_path, @test_command,
-        @node_id, @allow_non_git_dir
+        @node_id, @allow_non_git_dir, @source_type, @repo_url, @repo_ref,
+        @repo_subdir, @repo_remote_fingerprint, @last_repo_preflight_at,
+        @last_repo_preflight_error, @mcp_config_source, @mcp_config_relpath
       )
     `),
     // update: dynamic — see updateProject() below
@@ -112,8 +167,22 @@ function createProjectService(db) {
     return nodeId;
   }
 
-  function createProject({ name, directory, description, color, budget_usd, pm_enabled, preferred_pm_adapter, mcp_config_path, test_command, node_id, allow_non_git_dir }) {
+  function createProject(input = {}) {
+    const {
+      name,
+      directory,
+      description,
+      color,
+      budget_usd,
+      pm_enabled,
+      preferred_pm_adapter,
+      mcp_config_path,
+      test_command,
+      node_id,
+      allow_non_git_dir,
+    } = input;
     if (!name) throw new BadRequestError('Project name is required');
+    const repoFields = normalizeRepoFields(input);
     const id = `proj_${crypto.randomUUID().slice(0, 8)}`;
     const normalizedPmEnabled = normalizePmEnabled(pm_enabled);
     const normalizedAdapter = normalizePmAdapter(preferred_pm_adapter);
@@ -134,6 +203,15 @@ function createProjectService(db) {
       test_command: normalizedTestCommand === undefined ? null : normalizedTestCommand,
       node_id: normalizedNodeId === undefined ? null : normalizedNodeId,
       allow_non_git_dir: normalizedAllowNonGitDir === undefined ? 0 : normalizedAllowNonGitDir,
+      source_type: repoFields.source_type === undefined ? 'legacy_directory' : repoFields.source_type,
+      repo_url: repoFields.repo_url === undefined ? null : repoFields.repo_url,
+      repo_ref: repoFields.repo_ref === undefined ? 'HEAD' : repoFields.repo_ref,
+      repo_subdir: repoFields.repo_subdir === undefined ? null : repoFields.repo_subdir,
+      repo_remote_fingerprint: repoFields.repo_remote_fingerprint === undefined ? null : repoFields.repo_remote_fingerprint,
+      last_repo_preflight_at: repoFields.last_repo_preflight_at === undefined ? null : repoFields.last_repo_preflight_at,
+      last_repo_preflight_error: repoFields.last_repo_preflight_error === undefined ? null : repoFields.last_repo_preflight_error,
+      mcp_config_source: repoFields.mcp_config_source === undefined ? 'legacy_control_plane_path' : repoFields.mcp_config_source,
+      mcp_config_relpath: repoFields.mcp_config_relpath === undefined ? null : repoFields.mcp_config_relpath,
     });
     return stmts.getById.get(id);
   }
@@ -148,6 +226,10 @@ function createProjectService(db) {
     'test_command',
     // Fleet P1a
     'node_id', 'allow_non_git_dir',
+    // Repo-defined project source (PR2)
+    'source_type', 'repo_url', 'repo_ref', 'repo_subdir',
+    'repo_remote_fingerprint', 'last_repo_preflight_at',
+    'last_repo_preflight_error', 'mcp_config_source', 'mcp_config_relpath',
   ];
 
   function updateProject(id, fields) {
@@ -195,6 +277,8 @@ function createProjectService(db) {
       const n = normalizeAllowNonGitDir(fields.allow_non_git_dir);
       fields = { ...fields, allow_non_git_dir: n === undefined ? 0 : n };
     }
+    fields = normalizeRepoFields(fields);
+    const shouldBumpSourceGeneration = sourceValueChanged(current, fields);
     const setClauses = [];
     const params = { id };
     for (const col of PROJECT_UPDATABLE) {
@@ -204,6 +288,9 @@ function createProjectService(db) {
       }
     }
     if (setClauses.length > 0) {
+      if (shouldBumpSourceGeneration) {
+        setClauses.push('source_generation = COALESCE(source_generation, 0) + 1');
+      }
       setClauses.push("updated_at = datetime('now')");
       db.prepare(`UPDATE projects SET ${setClauses.join(', ')} WHERE id = @id`).run(params);
     }
