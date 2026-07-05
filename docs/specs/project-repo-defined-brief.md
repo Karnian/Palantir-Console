@@ -61,8 +61,9 @@ ALLOWED_TRANSITIONS(JS) 편집만** (N0-1 tasks.status 와 다름). v050 은 컬
 - `mcp_config_source TEXT CHECK(IN ('legacy_control_plane_path','repo_relpath')) DEFAULT 'legacy_control_plane_path'`, `mcp_config_relpath TEXT`
 - 기존 `directory`/`mcp_config_path`/`allow_non_git_dir` 는 `legacy_directory` 에서 계속 유효.
 
-**runs.status (JS)**: `materializing` 추가. 전이 `queued→materializing`, `materializing→{queued,failed,cancelled,stopped}`.
-`countRunning*` 불변(running-only). `countLiveOperatorRuns` live set 에 `materializing` 포함.
+**runs.status**: `materializing` 추가 = JS(VALID_STATUSES+VALID_TRANSITIONS) **+ DB CHECK rebuild**(v050 이
+runs 재생성해 CHECK 에 포함 — 045/046 미러). 전이 `queued→materializing`, `materializing→{queued,failed,
+cancelled,stopped}`. `countRunning*` 불변(running-only). `countLiveOperatorRuns` live set 에 `materializing` 포함.
 
 **runs 추가 (durable workspace)**: `source_type_snapshot`, `source_generation`, `repo_url_snapshot`,
 `repo_ref_snapshot`, `repo_subdir_snapshot`, `repo_cache_path`, `workspace_path`, `workspace_generation`,
@@ -167,3 +168,6 @@ clone/fetch 후 삭제. `repo_url` 은 credential 금지(저장 전 reject). `GI
 - **Claude R2 검증 (GO)**: 6 결정 타당성 확인 + 사실 확인으로 단순화 반영 — runs.status 는 CHECK 부재라
   materializing 이 rebuild 불요(JS-only), feature flag 명시, retarget 이 materializing 자연 제외,
   unreachable 노드 GC 보수적 skip. lock-in.
+- **정정 (2026-07-05, PR1 구현 중)**: R2 GO 시 "runs.status CHECK 부재 → rebuild 불요"로 판단했으나,
+  Codex 가 PR1 에서 runs.status 에 CHECK 존재(045/046)를 검출. v050 은 runs 테이블 rebuild(FK-off,
+  materializing CHECK 추가 + 신규 컬럼 동시)로 정정 — N0-1 tasks.status 와 동일 클래스.
