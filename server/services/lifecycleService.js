@@ -1011,8 +1011,9 @@ function createLifecycleService({
     return retryRun;
   }
 
-  async function drainQueue(profileId) {
+  async function drainQueue(profileId, opts = {}) {
     if (!profileId) return 0;
+    const onlyNodeId = opts && opts.nodeId ? String(opts.nodeId) : null;
     let profile;
     try {
       profile = agentProfileService.getProfile(profileId);
@@ -1026,6 +1027,7 @@ function createLifecycleService({
     for (const run of runService.listRuns({ status: 'queued' })) {
       if (run.is_manager || run.agent_profile_id !== profileId) continue;
       const nodeId = run.node_id || 'local';
+      if (onlyNodeId && nodeId !== onlyNodeId) continue;
       if (!seen.has(nodeId)) {
         seen.add(nodeId);
         nodeIds.push(nodeId);
@@ -1066,6 +1068,29 @@ function createLifecycleService({
         console.warn(`[lifecycle] Queue drain failed for profile ${profileId}: ${err.message}`);
       });
     });
+  }
+
+  function scheduleDrainForNode(nodeId) {
+    const onlyNodeId = nodeId || 'local';
+    const profileIds = new Set();
+    try {
+      for (const run of runService.listRuns({ status: 'queued' })) {
+        if (run.is_manager || !run.agent_profile_id) continue;
+        if ((run.node_id || 'local') !== onlyNodeId) continue;
+        profileIds.add(run.agent_profile_id);
+      }
+    } catch (err) {
+      console.warn(`[lifecycle] Queue drain scan failed for node ${onlyNodeId}: ${err.message}`);
+      return;
+    }
+
+    for (const profileId of profileIds) {
+      setImmediate(() => {
+        Promise.resolve(drainQueue(profileId, { nodeId: onlyNodeId })).catch((err) => {
+          console.warn(`[lifecycle] Queue drain failed for node ${onlyNodeId} profile ${profileId}: ${err.message}`);
+        });
+      });
+    }
   }
 
   /**
@@ -1549,6 +1574,7 @@ function createLifecycleService({
     spawnQueuedRun,
     drainQueue,
     drainAllQueues,
+    scheduleDrainForNode,
     checkHealth,
     recoverOrphanSessions,
     cleanupOrphanMcpConfigs,

@@ -883,7 +883,11 @@ function createApp(options = {}) {
       try {
         const intervalMs = options.fleetHeartbeatIntervalMs
           ?? (Number.parseInt(process.env.PALANTIR_FLEET_HEARTBEAT_INTERVAL_MS, 10) || 30000);
-        nodeHeartbeatService = createNodeHeartbeatService({ nodeService, intervalMs });
+        nodeHeartbeatService = createNodeHeartbeatService({
+          nodeService,
+          intervalMs,
+          onNodeRecovered: (nodeId) => lifecycleService.scheduleDrainForNode(nodeId),
+        });
         nodeHeartbeatService.start();
         console.log(`[node-heartbeat] scheduler started (interval ${intervalMs}ms)`);
       } catch (err) {

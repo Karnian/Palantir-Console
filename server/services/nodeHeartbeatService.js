@@ -3,6 +3,7 @@ function createNodeHeartbeatService({
   intervalMs = 30000,
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
+  onNodeRecovered,
 }) {
   let timer = null;
   let running = false;
@@ -41,7 +42,18 @@ function createNodeHeartbeatService({
             if (!res || res.code !== 0) {
               throw new Error(`heartbeat probe (git --version) exited ${res && res.code}`);
             }
+            const recovered = Number(node.reachable) !== 1;
             await nodeService.touchHeartbeat(node.id);
+            if (recovered && typeof onNodeRecovered === 'function') {
+              try {
+                const maybePromise = onNodeRecovered(node.id);
+                if (maybePromise && typeof maybePromise.catch === 'function') {
+                  maybePromise.catch(() => {});
+                }
+              } catch {
+                // Recovery hooks are advisory; heartbeat probing must stay best-effort.
+              }
+            }
           } catch {
             try { await nodeService.setReachable(node.id, false); } catch { /* swallow */ }
           }

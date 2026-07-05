@@ -278,6 +278,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                     // (Mirror of the operatorSpawnService fix; real-Pi finding.)
                     env: isRemoteNode ? {} : spawnEnv,
                     role: 'manager',
+                    nodeId,
                   };
                   if (adapterType === 'codex') {
                     startOpts.resumeThreadId = resumeHandle;
