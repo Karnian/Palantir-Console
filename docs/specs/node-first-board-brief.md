@@ -61,7 +61,7 @@ Fleet 트랙으로 실행 계층(Operator/Worker on pod)은 완성됐지만, 계
 
 ## 3. 기획 — Phase 구성
 
-### N0. 정합 수리 (버그 선행, 2 PR)
+### N0. 정합 수리 (버그 선행, 2 PR) — ✅ 구현 완료 (PR #309 N0-1 + #310 N0-2 + #311 복원, 2026-07-05. 실 Pi e2e: flip 4초 내 자동 drain + codex 완주. prod v48)
 
 **N0-1. tasks.status CHECK rebuild + 태스크 폼 정합** (migration 048)
 
