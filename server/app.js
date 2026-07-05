@@ -15,6 +15,7 @@ const { createProjectService } = require('./services/projectService');
 const { createProjectBriefService } = require('./services/projectBriefService');
 const { createNodeService } = require('./services/nodeService');
 const { createNodeUsageService } = require('./services/nodeUsageService');
+const { createNodeSummaryService } = require('./services/nodeSummaryService');
 const { createNodeHeartbeatService } = require('./services/nodeHeartbeatService');
 const { createTaskService } = require('./services/taskService');
 const { createRunService } = require('./services/runService');
@@ -717,6 +718,11 @@ function createApp(options = {}) {
   });
   const runService = createRunService(db, eventBus);
   const agentProfileService = createAgentProfileService(db);
+  const nodeSummaryService = options.nodeSummaryService || createNodeSummaryService({
+    nodeService,
+    runService,
+    agentProfileService,
+  });
   // Operator Profile entity (PF-1): stored {name, persona, capabilities} bundle
   // resolved by the specialist (PF-3). Plain config CRUD — always constructed +
   // mounted (harmless without the specialist flag; only invocation is gated).
@@ -1004,7 +1010,7 @@ function createApp(options = {}) {
 
   // New routes (v2)
   app.use('/api/projects', createProjectsRouter({ projectService, taskService, projectBriefService, operatorCleanupService }));
-  app.use('/api/nodes', createNodesRouter({ nodeService, nodeUsageService }));
+  app.use('/api/nodes', createNodesRouter({ nodeService, nodeUsageService, nodeSummaryService }));
   app.use('/api/projects', createMemoryRouter({ memoryService, projectService })); // ML PR1: GET /:projectId/memory
   app.use('/api/master-memory', createMasterMemoryRouter({ masterMemoryService })); // L2 P1b: GET / + POST /remember
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService }));
@@ -1122,7 +1128,9 @@ function createApp(options = {}) {
     taskService,
     projectService,
     presetService,
+    nodeService,
     agentProfileService,
+    nodeSummaryService,
     lifecycleService,
     harvestService,
     webhookService,
