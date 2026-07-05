@@ -17,6 +17,7 @@ const html = htm.bind(h);
 
 import { timeAgo } from '../lib/format.js';
 import { fleetStripModel, nodeDetailHref, nodeDisplayName } from '../lib/nodeUi.js';
+import { ATTENTION_LABELS } from '../lib/copy.js';
 
 const MAX_VISIBLE = 5;
 
@@ -27,9 +28,9 @@ const ICON = {
 };
 
 const ACTION_LABEL = {
-  'needs_input': '응답하기',
-  'failed': '재시도',
-  'node-unreachable': '노드 열기',
+  'needs_input': ATTENTION_LABELS.actionNeedsInput,
+  'failed': ATTENTION_LABELS.actionFailed,
+  'node-unreachable': ATTENTION_LABELS.actionOpenNode,
 };
 
 export function AttentionStrip({ runs, tasks, nodeSummary, onOpenRun }) {
@@ -57,11 +58,14 @@ export function AttentionStrip({ runs, tasks, nodeSummary, onOpenRun }) {
       });
 
     for (const node of fleetStripModel(nodeSummary).blockedNodes) {
+      const blockedMeta = Number(node.cordoned || 0) === 1
+        ? ATTENTION_LABELS.nodeCordonedMeta
+        : ATTENTION_LABELS.nodeUnreachableMeta;
       entries.push({
         id: `node:${node.node_id}`,
         status: 'node-unreachable',
         title: `${nodeDisplayName(node)} 노드`,
-        meta: `노드 연결 불가 · 대기 ${Number(node.queued_total || 0)}개`,
+        meta: `${blockedMeta} · 대기 ${Number(node.queued_total || 0)}개`,
         node,
       });
     }

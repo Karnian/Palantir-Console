@@ -101,11 +101,14 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
   });
 
   fleetModel.blockedNodes.forEach(node => {
+    const nodeBlockedMeta = Number(node.cordoned || 0) === 1
+      ? DASHBOARD_LABELS.triageNodeCordonedMeta
+      : DASHBOARD_LABELS.triageNodeUnreachableMeta;
     triageItems.push({
       type: 'node-unreachable',
       priority: 0.5,
       title: `${nodeDisplayName(node)} 노드`,
-      meta: `${DASHBOARD_LABELS.triageNodeUnreachableMeta} · ${DASHBOARD_LABELS.fleetQueuedLabel} ${Number(node.queued_total || 0)}`,
+      meta: `${nodeBlockedMeta} · ${DASHBOARD_LABELS.fleetQueuedLabel} ${Number(node.queued_total || 0)}`,
       run: null,
       task: null,
       node,

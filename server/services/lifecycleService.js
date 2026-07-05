@@ -29,6 +29,8 @@ function createLifecycleService({
   authResolverOpts,           // { hasKeychain, readKeychainToken, prefer, tmpRoot }
   nodeService,
   nodeExecutor,
+  queueStuckMs,
+  now,
 }) {
   nodeExecutor = nodeExecutor || createLocalNodeExecutor({ executionEngine, streamJsonEngine });
   const workerChannel = (nodeExecutor && typeof nodeExecutor.spawnWorker === 'function')
@@ -58,6 +60,14 @@ function createLifecycleService({
   const _authResolverOpts = authResolverOpts || {};
   const HEARTBEAT_INTERVAL_MS = 30000;  // 30s
   const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min (increased from 10 min for long-running tasks)
+  // Normalize BOTH the injected option and the env var through Number() so a
+  // caller passing '0' / 'abc' / a negative falls back to the 15-min default
+  // (Codex N3-2 review NIT — the option was previously trusted verbatim).
+  const QUEUE_STUCK_THRESHOLD_MS = (() => {
+    const raw = queueStuckMs !== undefined ? Number(queueStuckMs) : Number(process.env.PALANTIR_QUEUE_STUCK_MS);
+    return Number.isFinite(raw) && raw > 0 ? raw : 15 * 60 * 1000;
+  })();
+  const nowMs = typeof now === 'function' ? now : Date.now;
   const MAX_RETRY = 1;
   let heartbeatTimer = null;
   let healthCheckRunning = false; // Re-entrancy guard
@@ -1130,7 +1140,62 @@ function createLifecycleService({
       // the same tick.)
       console.warn(`[lifecycle] health check failed: ${err && err.message}`);
     } finally {
+      sweepStuckQueuedRuns();
       healthCheckRunning = false;
+    }
+  }
+
+  function sweepStuckQueuedRuns() {
+    try {
+      if (
+        !runService
+        || typeof runService.listRuns !== 'function'
+        || typeof runService.getRunEvents !== 'function'
+        || typeof runService.addRunEvent !== 'function'
+      ) {
+        return 0;
+      }
+
+      const queuedRuns = runService.listRuns({ status: 'queued' }) || [];
+      const timestamp = nowMs();
+      let annotated = 0;
+
+      for (const run of queuedRuns) {
+        try {
+          if (!run || Number(run.is_manager || 0) === 1) continue;
+
+          const nodeId = run.node_id || 'local';
+          const createdAtMs = Date.parse(run.created_at || '');
+          if (!Number.isFinite(createdAtMs)) continue;
+
+          const waitedMs = timestamp - createdAtMs;
+          if (!(waitedMs > QUEUE_STUCK_THRESHOLD_MS)) continue;
+
+          const node = getDispatchNode(nodeId);
+          if (!node) continue;
+
+          const cordoned = Number(node.cordoned || 0) === 1;
+          const reachable = Number(node.reachable) === 1;
+          if (!cordoned && reachable) continue;
+
+          const events = runService.getRunEvents(run.id) || [];
+          if (events.some((event) => event.event_type === 'queue:stuck' || event.type === 'queue:stuck')) continue;
+
+          runService.addRunEvent(run.id, 'queue:stuck', JSON.stringify({
+            node_id: nodeId,
+            reason: cordoned ? 'node_cordoned' : 'node_unreachable',
+            waited_ms: waitedMs,
+          }));
+          annotated++;
+        } catch {
+          // Stuck annotations are observability only; one bad row must not
+          // break the health loop or auto-fail a queued run.
+        }
+      }
+
+      return annotated;
+    } catch {
+      return 0;
     }
   }
 
@@ -1597,6 +1662,7 @@ function createLifecycleService({
     drainAllQueues,
     scheduleDrainForNode,
     checkHealth,
+    sweepStuckQueuedRuns,
     recoverOrphanSessions,
     cleanupOrphanMcpConfigs,
     cleanupStaleTerminalWorktrees,
