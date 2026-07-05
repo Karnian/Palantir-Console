@@ -136,3 +136,37 @@ test('Dashboard node attention item navigates to node detail and refetches on no
   item.click();
   assert.equal(env.window.location.hash, '#resources/nodes/remote-a');
 });
+
+test('Dashboard promotes cordoned queued nodes to node attention', async (t) => {
+  const summaryRef = {
+    current: {
+      nodes: [{
+        node_id: 'remote-c',
+        name: 'Remote C',
+        kind: 'ssh',
+        reachable: true,
+        cordoned: 1,
+        max_concurrent: 2,
+        running_total: 0,
+        queued_total: 2,
+      }],
+      queued: [
+        { run_id: 'q1', node_id: 'remote-c', queue_reason: 'node_cordoned' },
+        { run_id: 'q2', node_id: 'remote-c', queue_reason: 'node_cordoned' },
+      ],
+    },
+  };
+  const { env } = createDashboardEnv(summaryRef);
+  t.after(env.cleanup);
+
+  const root = renderDashboard(env);
+
+  const item = await waitFor(() => {
+    const el = root.querySelector('[data-role="node-attention-item"]');
+    assert.ok(el);
+    return el;
+  });
+
+  assert.match(item.textContent, /Remote C 노드/);
+  assert.match(item.textContent, /드레인 중 · 대기 2/);
+});

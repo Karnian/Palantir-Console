@@ -54,7 +54,10 @@ export function fleetStripModel(summary) {
   const remoteNodes = nodes.filter(isRemoteNode);
   const queuedTotal = nodeQueuedTotal(summary);
   const unreachableNodes = remoteNodes.filter(node => !isNodeReachable(node));
-  const blockedNodes = unreachableNodes.filter(node => Number(node?.queued_total || 0) > 0);
+  const blockedNodes = remoteNodes.filter(node => (
+    (!isNodeReachable(node) || Number(node?.cordoned || 0) === 1)
+    && Number(node?.queued_total || 0) > 0
+  ));
   // Strip rows: remote nodes always; the local node only when it has
   // activity (queued/running) that explains why the strip is visible.
   // An idle local-only fleet renders no rows (Codex N1-C review, SERIOUS 1).

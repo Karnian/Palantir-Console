@@ -573,6 +573,7 @@ export const DASHBOARD_LABELS = {
   triageManagerMetaActive: '활성',
   triageNeedsInputMeta: '입력 대기 중',
   triageNodeUnreachableMeta: '노드 연결 불가',
+  triageNodeCordonedMeta: '드레인 중',
   triageFailedMeta: '실패',
   triageRunningMeta: '실행 중',
   triageReviewMeta: '리뷰 대기',
@@ -596,6 +597,14 @@ export const DASHBOARD_LABELS = {
   fleetQueuedLabel: '대기',
   // Active Claude Sessions strip
   claudeSessionsTitle: '활성 Claude 세션',
+};
+
+export const ATTENTION_LABELS = {
+  actionNeedsInput: '응답하기',
+  actionFailed: '재시도',
+  actionOpenNode: '노드 열기',
+  nodeUnreachableMeta: '노드 연결 불가',
+  nodeCordonedMeta: '드레인 중',
 };
 
 // PresetsView — list page header, PresetModal (create/edit), DeleteConfirm.
