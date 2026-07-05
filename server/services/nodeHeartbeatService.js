@@ -4,10 +4,23 @@ function createNodeHeartbeatService({
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
   onNodeRecovered,
+  onReachableFlip,
 }) {
   let timer = null;
   let running = false;
   const probeTimeoutMs = Math.max(1000, Math.min(intervalMs, 15000));
+
+  function invokeHook(fn, arg) {
+    if (typeof fn !== 'function') return;
+    try {
+      const maybePromise = fn(arg);
+      if (maybePromise && typeof maybePromise.catch === 'function') {
+        maybePromise.catch(() => {});
+      }
+    } catch {
+      // Heartbeat hooks are advisory; probing must stay best-effort.
+    }
+  }
 
   async function runOnce() {
     if (running) return;
@@ -44,18 +57,16 @@ function createNodeHeartbeatService({
             }
             const recovered = Number(node.reachable) !== 1;
             await nodeService.touchHeartbeat(node.id);
-            if (recovered && typeof onNodeRecovered === 'function') {
-              try {
-                const maybePromise = onNodeRecovered(node.id);
-                if (maybePromise && typeof maybePromise.catch === 'function') {
-                  maybePromise.catch(() => {});
-                }
-              } catch {
-                // Recovery hooks are advisory; heartbeat probing must stay best-effort.
-              }
+            if (recovered) {
+              invokeHook(onReachableFlip, { nodeId: node.id, from: 0, to: 1 });
+              invokeHook(onNodeRecovered, node.id);
             }
           } catch {
+            const wasReachable = Number(node.reachable) === 1;
             try { await nodeService.setReachable(node.id, false); } catch { /* swallow */ }
+            if (wasReachable) {
+              invokeHook(onReachableFlip, { nodeId: node.id, from: 1, to: 0 });
+            }
           }
         } catch {
           // Keep probing the remaining nodes even if one row is malformed.

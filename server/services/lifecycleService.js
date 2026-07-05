@@ -1189,6 +1189,7 @@ function createLifecycleService({
             reason,
             task_id: finalRun.task_id || null,
             project_id: finalRun.project_id || null,
+            node_id: finalRun.node_id || null,
           });
         }
       } else {
@@ -1238,14 +1239,16 @@ function createLifecycleService({
                   idleMs: idleTime,
                 }));
                 if (eventBus) {
+                  const finalRun = runService.getRun(run.id);
                   eventBus.emit('run:needs_input', {
                     runId: run.id,
-                    run: runService.getRun(run.id),
+                    run: finalRun,
                     from_status: fromStatus,
                     to_status: 'needs_input',
                     reason: 'idle_timeout',
-                    task_id: run.task_id || null,
-                    project_id: run.project_id || null,
+                    task_id: finalRun.task_id || null,
+                    project_id: finalRun.project_id || null,
+                    node_id: finalRun.node_id || null,
                     priority: 'alert',
                   });
                 }

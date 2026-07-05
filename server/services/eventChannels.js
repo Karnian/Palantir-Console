@@ -50,6 +50,9 @@ const SERVER_EMITS = Object.freeze([
   'manager:started',
   'manager:stopped',
 
+  // node lifecycle
+  'node:status',
+
   // run lifecycle
   'run:completed',
   'run:ended',

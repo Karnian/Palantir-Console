@@ -887,6 +887,14 @@ function createApp(options = {}) {
           nodeService,
           intervalMs,
           onNodeRecovered: (nodeId) => lifecycleService.scheduleDrainForNode(nodeId),
+          onReachableFlip: ({ nodeId, from, to }) => {
+            eventBus.emit('node:status', {
+              node_id: nodeId,
+              from_reachable: from,
+              to_reachable: to,
+              at: new Date().toISOString(),
+            });
+          },
         });
         nodeHeartbeatService.start();
         console.log(`[node-heartbeat] scheduler started (interval ${intervalMs}ms)`);

@@ -299,6 +299,7 @@ function createRunService(db, eventBus) {
         reason: 'created',
         task_id: run.task_id || null,
         project_id: deriveOperatorProjectId(run),
+        node_id: run.node_id || null,
       });
     }
     return run;
@@ -356,6 +357,7 @@ function createRunService(db, eventBus) {
         reason: reason || null,
         task_id: run.task_id || null,
         project_id: deriveOperatorProjectId(run),
+        node_id: run.node_id || null,
       });
     }
 
@@ -368,6 +370,7 @@ function createRunService(db, eventBus) {
         reason: reason || null,
         task_id: run.task_id || null,
         project_id: deriveOperatorProjectId(run),
+        node_id: run.node_id || null,
       });
     }
 
@@ -392,6 +395,7 @@ function createRunService(db, eventBus) {
         reason: 'started',
         task_id: run.task_id || null,
         project_id: deriveOperatorProjectId(run),
+        node_id: run.node_id || null,
       });
     }
     return run;
@@ -437,6 +441,7 @@ function createRunService(db, eventBus) {
         reason: 'queue:claim',
         task_id: run.task_id || null,
         project_id: deriveOperatorProjectId(run),
+        node_id: run.node_id || null,
       });
     }
     return info.changes;
