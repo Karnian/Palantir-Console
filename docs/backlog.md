@@ -216,7 +216,8 @@
 ### N. 노드 퍼스트 작업보드·프로젝트 재기획
 - **Spec**: [`docs/specs/node-first-board-brief.md`](./specs/node-first-board-brief.md) (v1.2, PR #307). Codex 적대 리뷰 4라운드 수렴 (R1 3B+6S → R2 3B+3S → R3 1S → **R4 GO**), 사용자 lock-in 완료 (2026-07-05).
 - **N0 정합 수리 ✅ 완료 (PR #309~#311, 2026-07-05)**: ① migration 048 tasks rebuild — status CHECK 'failed' (prod 복사본 실측 + prod v48 적용) + 폼 dead-field 정합 ② 노드 복구 자동 drain (`onNodeRecovered`→`scheduleDrainForNode`, **실 Pi e2e: unreachable queued → host 교정 → flip 4초 내 자동 drain → codex 완주**) + transport_lost 실제 node_id. 각각 codex-goal 구현 + Themis PASS + Codex 적대 리뷰 GO. 1908 tests. (#311 은 #310 브랜치 조작 실수 복원 — worktree 커밋에서 PR 브랜치 만들 때 base 불일치 `reset --soft` 금지 교훈.)
-- **다음**: N1 노드 문맥 1급화(envelope/SSE/배지/대기사유/플릿 스트립) → N2 노드-인지 UX → N3 운영 semantics(cordon/stuck sweep/re-target). 트리거 대기. v2 경계는 brief §3 표.
+- **N1 관측 ✅ 완료 (PR #313~#315, 2026-07-05)**: envelope·webhook node_id hoist + `node:status` SSE(flip-only, 3-목록 lock-step) / explainDispatch 공용 정책(+`profile_missing`) + `GET /api/nodes/summary`(읽기 시점 사유) / 노드 배지 4표면 + 대기 사유 칩 + 대시보드 플릿 스트립(진짜 queued 칩, AC1 접힘) + AttentionStrip 노드다운 승격 + `useNodeSummary` 공용 훅. a11y·visual 52/52(dashboard baseline 4장 재생성), 라이브 실 Pi 스트립 시각 검증. 1937 tests.
+- **다음**: N2 노드-인지 UX(헬스 셀렉트/bind-time 검증/역링크/보드 필터) → N3 운영 semantics(cordon/stuck sweep/re-target). 트리거 대기. v2 경계는 brief §3 표.
 
 *(기존 항목: `skill-pack-gallery-v1.1.md` 는 PR #124 에서 Final / locked-in, `manager-session-ui.md` 는 PR #120 의 gap analysis + PR #121-123 R2-A/B/C 로 대부분 소화)*
 
