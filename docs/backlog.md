@@ -221,6 +221,12 @@
 - **N3 제어 ✅ 완료 (PR #319 + #320, 2026-07-05)**: cordon(migration 049 `nodes.cordoned`, explainDispatch 차단, Operator spawn 409/boot resume skip, uncordon→drain, NodesView 토글, pickExecutor 미삽입=heartbeat 보호) + queued re-target(단일 tx all-or-nothing 409, POST /:id/retarget-queued, ProjectsView 배너) + stuck sweep(checkHealth 편승, unreachable/cordoned 15분+ queued→queue:stuck annotate-only, AttentionStrip cordoned 승격). 1988 tests.
 - **🎉 N 트랙 전체 완료 (N0~N3, PR #309~#320)**: 노드 퍼스트 재기획 — 정합 수리 → 관측(envelope/SSE/summary/배지/사유칩/플릿스트립) → UX(바인딩 검증/헬스/역링크/보드 필터) → 제어(cordon/sweep/re-target). v2 후보(멀티노드/task override/soft affinity/글로벌 cap 등)는 brief §3 표 — 트리거 대기.
 
+### P. Project Repo-Defined 재정의 (C안)
+- **Spec**: [`docs/specs/project-repo-defined-brief.md`](./specs/project-repo-defined-brief.md) (v1.0 LOCKED, Codex 분석·계획 → Claude 리뷰 R2 GO).
+- **방향**: 프로젝트를 folder-bound → **코드베이스(git repo)** 로 재정의. 폴더는 각 노드가 실행 시점에 materialize(clone/fetch/worktree)하는 파생물 (CI 러너 모델). `directory` 는 legacy_directory source 로 보존(N 트랙 실 Pi 원격 directory 무손상).
+- **핵심 결정**: materialize=worker claim 이전(materializing status, running 카운트 제외) / (project,node,gen) single-flight lease(memory_jobs 미러) / workspace_refs refcount GC / live Operator repo·ref 변경 409 reset / mcp 2-source / repo_url 비유일 / preflight 필수. runs.status CHECK 부재라 rebuild 불요.
+- **상태**: **사용자 lock-in 대기** (대형 트랙, 10 PR: schema→API preflight→로컬 materialize→mcp split→Operator→원격 5a/5b/5c→UI→cleanup, feature flag `PALANTIR_PROJECT_REPO` 기본 off). 열린 결정 5개(ref HEAD vs SHA pin / clone 깊이 / workspace root / materializer TTL / subdir identity)는 구현 착수 시 lock.
+
 *(기존 항목: `skill-pack-gallery-v1.1.md` 는 PR #124 에서 Final / locked-in, `manager-session-ui.md` 는 PR #120 의 gap analysis + PR #121-123 R2-A/B/C 로 대부분 소화)*
 
 ---
