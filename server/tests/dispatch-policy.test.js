@@ -39,6 +39,7 @@ test('DISPATCH_BLOCK_REASONS preserves dispatch priority order', () => {
   assert.deepEqual(DISPATCH_BLOCK_REASONS, [
     'node_unreachable',
     'node_not_executable',
+    'node_cordoned',
     'profile_missing',
     'profile_capacity',
     'node_capacity',
@@ -60,6 +61,10 @@ test('explainDispatch reports node reasons before profile_missing', () => {
   assert.deepEqual(explain({ node: executableNode({ can_execute: 0 }), profile: null }), {
     ok: false,
     reason: 'node_not_executable',
+  });
+  assert.deepEqual(explain({ node: executableNode({ cordoned: 1 }), profile: null }), {
+    ok: false,
+    reason: 'node_cordoned',
   });
 });
 
@@ -110,6 +115,34 @@ test('explainDispatch treats files_only nodes as node_not_executable', () => {
   });
 
   assert.deepEqual(result, { ok: false, reason: 'node_not_executable' });
+});
+
+test('explainDispatch reports node_cordoned after executability and before profile/capacity', () => {
+  assert.deepEqual(explain({ node: executableNode({ cordoned: 1 }) }), {
+    ok: false,
+    reason: 'node_cordoned',
+  });
+
+  assert.deepEqual(explain({
+    node: executableNode({ reachable: 0, can_execute: 0, cordoned: 1, max_concurrent: 1 }),
+    profile: null,
+    runningOnNodeForProfile: 1,
+    runningTotalOnNode: 1,
+  }), { ok: false, reason: 'node_unreachable' });
+
+  assert.deepEqual(explain({
+    node: executableNode({ can_execute: 0, cordoned: 1, max_concurrent: 1 }),
+    profile: null,
+    runningOnNodeForProfile: 1,
+    runningTotalOnNode: 1,
+  }), { ok: false, reason: 'node_not_executable' });
+
+  assert.deepEqual(explain({
+    node: executableNode({ cordoned: 1, max_concurrent: 1 }),
+    profile: null,
+    runningOnNodeForProfile: 1,
+    runningTotalOnNode: 1,
+  }), { ok: false, reason: 'node_cordoned' });
 });
 
 test('explainDispatch reports profile_capacity before node_capacity', () => {

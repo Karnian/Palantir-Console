@@ -1,7 +1,7 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 
-function createNodesRouter({ nodeService, nodeUsageService, nodeSummaryService } = {}) {
+function createNodesRouter({ nodeService, nodeUsageService, nodeSummaryService, lifecycleService } = {}) {
   const router = express.Router();
 
   router.get('/', asyncHandler(async (req, res) => {
@@ -32,7 +32,19 @@ function createNodesRouter({ nodeService, nodeUsageService, nodeSummaryService }
   }));
 
   router.patch('/:id', asyncHandler(async (req, res) => {
+    const before = nodeService.getNode(req.params.id);
     const node = nodeService.updateNode(req.params.id, req.body || {});
+    // Uncordon (cordoned 1→0) must wake this node's queue, mirroring the
+    // heartbeat-recovery drain (N0-2). A manual PATCH is the only trigger for
+    // this transition, so without it queued runs pinned to the node stay
+    // asleep until the next run:ended or a server restart (Codex N3 review,
+    // SERIOUS). scheduleDrainForNode is node-scoped + never-throws.
+    if (lifecycleService
+        && typeof lifecycleService.scheduleDrainForNode === 'function'
+        && Number(before.cordoned) === 1
+        && Number(node.cordoned) === 0) {
+      lifecycleService.scheduleDrainForNode(node.id);
+    }
     res.json({ node });
   }));
 

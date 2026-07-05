@@ -8,7 +8,7 @@ const VALID_KINDS = new Set(['local', 'ssh']);
 const NODE_FIELDS = [
   'id', 'name', 'kind', 'can_execute', 'can_control', 'files_only',
   'ssh_host', 'ssh_user', 'exposed_roots', 'node_prefix',
-  'max_concurrent', 'reachable',
+  'max_concurrent', 'reachable', 'cordoned',
 ];
 
 function normalizeBoolean(value, field, defaultValue) {
@@ -99,6 +99,7 @@ function normalizeNodeInput(fields, { existing = null } = {}) {
   if ('can_control' in input) out.can_control = normalizeBoolean(input.can_control, 'can_control');
   if ('files_only' in input) out.files_only = normalizeBoolean(input.files_only, 'files_only');
   if ('reachable' in input) out.reachable = normalizeBoolean(input.reachable, 'reachable');
+  if ('cordoned' in input) out.cordoned = normalizeBoolean(input.cordoned, 'cordoned');
   if ('ssh_host' in input) out.ssh_host = normalizeSshDestinationInput(input.ssh_host, 'ssh_host');
   if ('ssh_user' in input) out.ssh_user = normalizeSshDestinationInput(input.ssh_user, 'ssh_user');
   if ('node_prefix' in input) out.node_prefix = normalizeString(input.node_prefix, 'node_prefix');
@@ -114,6 +115,7 @@ function normalizeNodeInput(fields, { existing = null } = {}) {
   effective.can_control = effective.can_control ?? 0;
   effective.files_only = effective.files_only ?? 0;
   effective.reachable = effective.reachable ?? 0;
+  effective.cordoned = effective.cordoned ?? 0;
 
   if (!VALID_KINDS.has(effective.kind)) {
     throw new BadRequestError(`Invalid node kind: ${effective.kind}`);
@@ -148,12 +150,12 @@ function createNodeService(db, { localExecutor = createLocalNodeExecutor(), crea
       INSERT INTO nodes (
         id, name, kind, can_execute, can_control, files_only,
         ssh_host, ssh_user, exposed_roots, node_prefix,
-        max_concurrent, reachable
+        max_concurrent, reachable, cordoned
       )
       VALUES (
         @id, @name, @kind, @can_execute, @can_control, @files_only,
         @ssh_host, @ssh_user, @exposed_roots, @node_prefix,
-        @max_concurrent, @reachable
+        @max_concurrent, @reachable, @cordoned
       )
     `),
     delete: db.prepare('DELETE FROM nodes WHERE id = ?'),
@@ -196,6 +198,7 @@ function createNodeService(db, { localExecutor = createLocalNodeExecutor(), crea
       node_prefix: effective.node_prefix || null,
       max_concurrent: effective.max_concurrent ?? null,
       reachable: effective.reachable,
+      cordoned: effective.cordoned,
     });
     return getNode(id);
   }

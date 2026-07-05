@@ -186,6 +186,13 @@ function createRunService(db, eventBus) {
       UPDATE runs SET status = 'running', started_at = datetime('now')
       WHERE id = ? AND status = 'queued'
     `),
+    retargetQueued: db.prepare(`
+      UPDATE runs
+      SET node_id = ?
+      WHERE id = ?
+        AND status = 'queued'
+        AND COALESCE(node_id, 'local') = ?
+    `),
     updateResult: db.prepare(`
       UPDATE runs SET result_summary = ?, exit_code = ?, input_tokens = ?, output_tokens = ?, cost_usd = ? WHERE id = ?
     `),
@@ -447,6 +454,44 @@ function createRunService(db, eventBus) {
     return info.changes;
   }
 
+  function normalizeQueueNodeId(value) {
+    const normalized = String(value || '').trim();
+    return normalized || 'local';
+  }
+
+  function retargetQueuedRuns(runIds, fromNodeId, toNodeId) {
+    if (!Array.isArray(runIds)) throw new BadRequestError('runIds must be an array');
+    if (runIds.length === 0) return { moved: 0 };
+
+    const fromNode = normalizeQueueNodeId(fromNodeId);
+    const toNode = normalizeQueueNodeId(toNodeId);
+    // No-op when source and target resolve to the same node — moving a run to
+    // its own node would emit a spurious queue:retargeted event (Codex N3
+    // review NIT; the UI already guards, but a direct API call could hit it).
+    if (fromNode === toNode) return { moved: 0 };
+    const tx = db.transaction((ids) => {
+      let moved = 0;
+      for (const runId of ids) {
+        const info = stmts.retargetQueued.run(toNode, runId, fromNode);
+        moved += info.changes;
+      }
+      if (moved !== ids.length) {
+        const err = new Error('Unable to retarget all queued runs; one or more runs changed state or node.');
+        err.httpStatus = 409;
+        throw err;
+      }
+      for (const runId of ids) {
+        addRunEvent(runId, 'queue:retargeted', JSON.stringify({
+          from_node: fromNode,
+          to_node: toNode,
+        }));
+      }
+      return { moved };
+    });
+
+    return tx(runIds);
+  }
+
   function updateRunResult(id, { result_summary, exit_code, input_tokens, output_tokens, cost_usd }) {
     getRun(id);
     stmts.updateResult.run(
@@ -588,6 +633,7 @@ function createRunService(db, eventBus) {
     updateRunStatus, markRunStarted, updateRunResult,
     countRunning, countRunningOnNode, countRunningTotalOnNode,
     getOldestQueued, getOldestQueuedOnNode, claimQueuedRun, setRetryCount,
+    retargetQueuedRuns,
     updateManagerThreadId, updateClaudeSessionId,
     updateRunMcpConfig,
     updateRunPreset,

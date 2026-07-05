@@ -1,8 +1,22 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { validateCreateProject, validateUpdateProject } = require('../middleware/validate');
+const { BadRequestError } = require('../utils/errors');
 
-function createProjectsRouter({ projectService, taskService, projectBriefService, operatorCleanupService, nodeBindingValidator }) {
+function normalizeQueueNodeId(value) {
+  const normalized = String(value || '').trim();
+  return normalized || 'local';
+}
+
+function createProjectsRouter({
+  projectService,
+  taskService,
+  runService,
+  projectBriefService,
+  operatorCleanupService,
+  nodeBindingValidator,
+  lifecycleService,
+}) {
   const router = express.Router();
 
   router.get('/', asyncHandler(async (req, res) => {
@@ -54,6 +68,53 @@ function createProjectsRouter({ projectService, taskService, projectBriefService
     }
     const project = projectService.updateProject(req.params.id, req.body || {});
     res.json({ project });
+  }));
+
+  router.post('/:id/retarget-queued', asyncHandler(async (req, res) => {
+    if (!runService || typeof runService.listRuns !== 'function' || typeof runService.retargetQueuedRuns !== 'function') {
+      return res.status(501).json({ error: 'runService not wired' });
+    }
+    if (!taskService || typeof taskService.getTask !== 'function') {
+      return res.status(501).json({ error: 'taskService not wired' });
+    }
+
+    const body = req.body || {};
+    if (!Object.prototype.hasOwnProperty.call(body, 'fromNodeId')) {
+      throw new BadRequestError('fromNodeId is required');
+    }
+
+    const project = projectService.getProject(req.params.id);
+    const fromNodeId = normalizeQueueNodeId(body.fromNodeId);
+    const toNodeId = normalizeQueueNodeId(project.node_id);
+    const queuedRuns = runService.listRuns({ status: 'queued' }) || [];
+    const runIds = [];
+
+    for (const run of queuedRuns) {
+      if (!run || Number(run.is_manager) !== 0) continue;
+      if (normalizeQueueNodeId(run.node_id) !== fromNodeId) continue;
+      if (!run.task_id) continue;
+      const task = taskService.getTask(run.task_id);
+      if (task && String(task.project_id || '') === String(project.id)) {
+        runIds.push(run.id);
+      }
+    }
+
+    if (runIds.length === 0) {
+      return res.json({ moved: 0 });
+    }
+
+    if (nodeBindingValidator) {
+      await nodeBindingValidator.validateBinding({
+        nodeId: toNodeId,
+        directory: project.directory,
+      });
+    }
+
+    const result = runService.retargetQueuedRuns(runIds, fromNodeId, toNodeId);
+    if (result.moved > 0 && lifecycleService && typeof lifecycleService.scheduleDrainForNode === 'function') {
+      lifecycleService.scheduleDrainForNode(toNodeId);
+    }
+    res.json({ moved: result.moved, runIds });
   }));
 
   router.post('/:id/reset', asyncHandler(async (req, res) => {

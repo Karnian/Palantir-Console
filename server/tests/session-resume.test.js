@@ -350,3 +350,131 @@ test('createManagerRouter stops top manager without session_id on boot', async (
   assert.equal(stopped.status, 'stopped');
   assert.equal(registry.getActiveRunId('top'), null);
 });
+
+test('createManagerRouter skips PM boot resume on cordoned remote node', async (t) => {
+  const dbDir = await createTempDir('palantir-router-pm-cordon-');
+  const dbPath = path.join(dbDir, 'test.db');
+  const { createDatabase } = require('../db/database');
+  const { createRunService } = require('../services/runService');
+  const { createProjectService } = require('../services/projectService');
+  const { createProjectBriefService } = require('../services/projectBriefService');
+  const { createNodeService } = require('../services/nodeService');
+  const { db, migrate, close } = createDatabase(dbPath);
+  migrate();
+  t.after(async () => {
+    close();
+    await fs.rm(dbDir, { recursive: true, force: true });
+  });
+
+  const rs = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const nodeService = createNodeService(db, { createRemoteExecutor: () => ({}) });
+
+  nodeService.createNode({
+    id: 'cordoned-pod',
+    name: 'Cordoned Pod',
+    kind: 'ssh',
+    ssh_host: 'worker.local',
+    ssh_user: 'ubuntu',
+    exposed_roots: ['/srv/workspaces'],
+    reachable: true,
+    cordoned: true,
+  });
+  const project = projectService.createProject({ name: 'alpha', node_id: 'cordoned-pod' });
+  projectBriefService.ensureBrief(project.id);
+  projectBriefService.setPmThread(project.id, {
+    pm_thread_id: 'thread_cordoned',
+    pm_adapter: 'codex',
+    pm_thread_node_id: 'cordoned-pod',
+  });
+
+  const topRun = rs.createRun({
+    is_manager: true,
+    prompt: 'top resume',
+    manager_adapter: 'claude-code',
+    manager_layer: 'top',
+    conversation_id: 'top',
+  });
+  rs.updateRunStatus(topRun.id, 'running', { force: true });
+  rs.updateClaudeSessionId(topRun.id, 'sess_top_resume');
+
+  const pmRun = rs.createRun({
+    is_manager: true,
+    prompt: 'PM alpha',
+    manager_adapter: 'codex',
+    manager_layer: 'operator',
+    conversation_id: `operator:${project.id}`,
+    node_id: 'cordoned-pod',
+  });
+  rs.updateRunStatus(pmRun.id, 'running', { force: true });
+
+  const startSessionCalls = [];
+  const disposeCalls = [];
+  const mockClaudeAdapter = {
+    type: 'claude-code',
+    capabilities: { supportsResume: true, persistentProcess: true, persistentSession: true },
+    startSession: (runId, opts) => {
+      startSessionCalls.push({ type: 'claude-code', runId, opts });
+      return { sessionRef: {} };
+    },
+    disposeSession: (runId) => { disposeCalls.push({ type: 'claude-code', runId }); },
+    emitSessionEndedIfNeeded: () => {},
+    detectExitCode: () => null,
+    getUsage: () => null,
+    getSessionId: () => null,
+    getOutput: () => null,
+    buildGuardrailsSection: () => '',
+  };
+  const mockCodexAdapter = {
+    type: 'codex',
+    capabilities: { supportsResume: true, persistentProcess: false },
+    startSession: (runId, opts) => {
+      startSessionCalls.push({ type: 'codex', runId, opts });
+      return { sessionRef: {} };
+    },
+    disposeSession: (runId) => { disposeCalls.push({ type: 'codex', runId }); },
+    emitSessionEndedIfNeeded: () => {},
+    detectExitCode: () => null,
+    getUsage: () => null,
+    getSessionId: () => null,
+    getOutput: () => null,
+    buildGuardrailsSection: () => '',
+  };
+  const mockFactory = {
+    getAdapter: (type) => type === 'codex' ? mockCodexAdapter : mockClaudeAdapter,
+  };
+
+  const { createManagerRegistry } = require('../services/managerRegistry');
+  const registry = createManagerRegistry({ runService: rs });
+  const { createConversationService } = require('../services/conversationService');
+  const convService = createConversationService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: mockFactory,
+    lifecycleService: null,
+  });
+
+  const { createManagerRouter } = require('../routes/manager');
+  createManagerRouter({
+    runService: rs,
+    projectService,
+    projectBriefService,
+    nodeService,
+    managerAdapterFactory: mockFactory,
+    managerRegistry: registry,
+    conversationService: convService,
+    authResolverOpts: { hasKeychain: () => true },
+  });
+
+  assert.equal(startSessionCalls.filter((call) => call.type === 'codex').length, 0, 'PM resume should not start on cordoned node');
+  assert.equal(startSessionCalls.filter((call) => call.type === 'claude-code').length, 1, 'top resume still starts');
+  assert.ok(disposeCalls.some((call) => call.type === 'codex' && call.runId === pmRun.id), 'cordoned PM run is disposed');
+
+  const stopped = rs.getRun(pmRun.id);
+  assert.equal(stopped.status, 'stopped');
+  assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, 'thread_cordoned');
+  const event = rs.getRunEvents(pmRun.id).find((row) => row.event_type === 'operator:resume_skipped_cordoned');
+  assert.ok(event, 'cordon skip event should be recorded on PM run');
+  assert.deepEqual(JSON.parse(event.payload_json), { node_id: 'cordoned-pod' });
+});

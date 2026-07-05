@@ -1011,8 +1011,8 @@ function createApp(options = {}) {
   app.use('/api/usage', createUsageRouter({ codexService, providerRegistry }));
 
   // New routes (v2)
-  app.use('/api/projects', createProjectsRouter({ projectService, taskService, projectBriefService, operatorCleanupService, nodeBindingValidator }));
-  app.use('/api/nodes', createNodesRouter({ nodeService, nodeUsageService, nodeSummaryService }));
+  app.use('/api/projects', createProjectsRouter({ projectService, taskService, runService, projectBriefService, operatorCleanupService, nodeBindingValidator, lifecycleService }));
+  app.use('/api/nodes', createNodesRouter({ nodeService, nodeUsageService, nodeSummaryService, lifecycleService }));
   app.use('/api/projects', createMemoryRouter({ memoryService, projectService })); // ML PR1: GET /:projectId/memory
   app.use('/api/master-memory', createMasterMemoryRouter({ masterMemoryService })); // L2 P1b: GET / + POST /remember
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService }));

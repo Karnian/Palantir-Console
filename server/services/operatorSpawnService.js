@@ -187,6 +187,22 @@ function createOperatorSpawnService({
       ? (nodeService.resolveNode(project) || 'local')
       : 'local';
     const isRemoteNode = !!(nodeId && nodeId !== 'local');
+    if (isRemoteNode && nodeService && typeof nodeService.getNode === 'function') {
+      let node = null;
+      try {
+        node = nodeService.getNode(nodeId);
+      } catch {
+        node = null;
+      }
+      if (Number(node?.cordoned) === 1) {
+        try {
+          runService.addRunEvent(activeTopRunId, 'operator:spawn_blocked_cordoned', JSON.stringify({ node_id: nodeId, project_id: projectId }));
+        } catch { /* ignore */ }
+        const err = new Error('node is cordoned — uncordon before spawning an operator');
+        err.httpStatus = 409;
+        throw err;
+      }
+    }
 
     // P5-S4b: remote (pod) Claude Operators are now ENABLED + validated on a real
     // pod. The executor/nodePrefix routing below is adapter-generic (P4-S3b) and

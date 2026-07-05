@@ -193,6 +193,18 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   ? (nodeService.resolveNode(project) || 'local')
                   : 'local';
                 const isRemoteNode = !!(nodeId && nodeId !== 'local');
+                if (isRemoteNode && nodeService && typeof nodeService.getNode === 'function') {
+                  let node = null;
+                  try {
+                    node = nodeService.getNode(nodeId);
+                  } catch {
+                    node = null;
+                  }
+                  if (Number(node?.cordoned) === 1) {
+                    try { runService.addRunEvent(r.id, 'operator:resume_skipped_cordoned', JSON.stringify({ node_id: nodeId })); } catch { /* ignore */ }
+                    throw new Error('PM node is cordoned');
+                  }
+                }
                 const briefAdapter = brief.pm_adapter || null;
                 const expectedBriefAdapter = adapterType === 'codex' ? 'codex' : 'claude';
                 const threadNode = brief.pm_thread_node_id ? brief.pm_thread_node_id : null;

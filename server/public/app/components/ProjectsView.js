@@ -41,6 +41,11 @@ function projectNodeValue(project) {
   return project?.node_id && project.node_id !== 'local' ? project.node_id : '';
 }
 
+function queueNodeIdValue(value) {
+  const normalized = String(value || '').trim();
+  return normalized || 'local';
+}
+
 function nodeReachable(node) {
   return node?.reachable === true || Number(node?.reachable) === 1;
 }
@@ -390,8 +395,11 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   const [editNodeId, setEditNodeId] = useState('');
   const [editAllowNonGitDir, setEditAllowNonGitDir] = useState(false);
   const [editSaving, setEditSaving] = useState(false);
+  const [editOriginalNodeId, setEditOriginalNodeId] = useState('local');
   const [rebindGuidance, setRebindGuidance] = useState(null);
   const [operatorResetting, setOperatorResetting] = useState(false);
+  const [retargetSuggestion, setRetargetSuggestion] = useState(null);
+  const [retargetingQueued, setRetargetingQueued] = useState(false);
 
   const loadNodes = useCallback(async () => {
     setNodesLoading(true);
@@ -432,6 +440,8 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   const openEdit = (p) => {
     setEditProject(p);
     setRebindGuidance(null);
+    setRetargetSuggestion(null);
+    setEditOriginalNodeId(queueNodeIdValue(p.node_id));
     setEditName(p.name || '');
     setEditDesc(p.description || '');
     setEditDir(p.directory || '');
@@ -444,14 +454,19 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   const closeEdit = () => {
     setEditProject(null);
     setRebindGuidance(null);
+    setRetargetSuggestion(null);
+    setEditOriginalNodeId('local');
   };
 
   const handleUpdate = async () => {
     if (!editProject || !editName.trim()) return;
     setEditSaving(true);
     setRebindGuidance(null);
+    setRetargetSuggestion(null);
     try {
-      await apiFetch(`/api/projects/${editProject.id}`, {
+      const oldNodeId = editOriginalNodeId;
+      const nextNodeId = queueNodeIdValue(editNodeId);
+      const data = await apiFetch(`/api/projects/${editProject.id}`, {
         method: 'PATCH',
         body: JSON.stringify({
           name: editName.trim(),
@@ -463,8 +478,21 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
           allow_non_git_dir: editAllowNonGitDir ? 1 : 0,
         }),
       });
-      closeEdit();
       reloadProjects();
+      const savedProject = data.project || { ...editProject, node_id: nextNodeId === 'local' ? null : nextNodeId };
+      const savedNodeId = queueNodeIdValue(savedProject.node_id);
+      if (oldNodeId !== savedNodeId) {
+        setEditProject(savedProject);
+        setEditOriginalNodeId(savedNodeId);
+        setRetargetSuggestion({
+          projectId: editProject.id,
+          fromNodeId: oldNodeId,
+          toNodeId: savedNodeId,
+          moved: null,
+        });
+      } else {
+        closeEdit();
+      }
     } catch (err) {
       if (isRebindResetConflict(err)) {
         setRebindGuidance({
@@ -497,6 +525,24 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
       addToast(err.message, 'error');
     }
     setOperatorResetting(false);
+  };
+
+  const handleRetargetQueuedRuns = async () => {
+    if (!retargetSuggestion?.projectId) return;
+    setRetargetingQueued(true);
+    try {
+      const data = await apiFetch(`/api/projects/${retargetSuggestion.projectId}/retarget-queued`, {
+        method: 'POST',
+        body: JSON.stringify({ fromNodeId: retargetSuggestion.fromNodeId }),
+      });
+      const moved = Number(data.moved || 0);
+      setRetargetSuggestion({ ...retargetSuggestion, moved });
+      addToast(`${PROJECTS_LABELS.retargetQueuedDonePrefix}${moved}${PROJECTS_LABELS.retargetQueuedDoneSuffix}`, 'success');
+      reloadProjects();
+    } catch (err) {
+      addToast(err.message, 'error');
+    }
+    setRetargetingQueued(false);
   };
 
   // Keep detailProject in sync with latest data
@@ -665,6 +711,33 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
                   ${operatorResetting ? PROJECTS_LABELS.rebindResetting : PROJECTS_LABELS.rebindResetButton}
                 </button>
               `}
+            </div>
+          `}
+          ${retargetSuggestion && html`
+            <div
+              data-role="queued-retarget-suggestion"
+              style="border:1px solid var(--border);background:var(--surface-muted, transparent);color:var(--text);padding:10px;border-radius:6px;font-size:12px;"
+            >
+              <div style="font-weight:600;">${PROJECTS_LABELS.retargetQueuedBannerTitle}</div>
+              <div style="color:var(--text-muted);margin-top:3px;">${PROJECTS_LABELS.retargetQueuedBannerDetail}</div>
+              ${retargetSuggestion.moved === null
+                ? html`
+                  <button
+                    type="button"
+                    class="ghost small"
+                    data-role="queued-retarget-button"
+                    onClick=${handleRetargetQueuedRuns}
+                    disabled=${retargetingQueued}
+                    style="margin-top:8px;"
+                  >
+                    ${retargetingQueued ? PROJECTS_LABELS.retargetQueuedMoving : PROJECTS_LABELS.retargetQueuedButton}
+                  </button>
+                `
+                : html`
+                  <div data-role="queued-retarget-result" style="color:var(--text-muted);margin-top:6px;">
+                    ${PROJECTS_LABELS.retargetQueuedDonePrefix}${retargetSuggestion.moved}${PROJECTS_LABELS.retargetQueuedDoneSuffix}
+                  </div>
+                `}
             </div>
           `}
           <div class="form-field">
