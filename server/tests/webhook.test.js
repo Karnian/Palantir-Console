@@ -48,6 +48,7 @@ function workerRun(overrides = {}) {
     id: 'run_1',
     task_id: 'task_1',
     project_id: 'project_1',
+    node_id: 'node_1',
     status: 'running',
     is_manager: 0,
     agent_profile_id: 'agent_profile_1',
@@ -136,6 +137,7 @@ test('webhook: run:needs_input posts whitelisted payload', async () => {
   assert.deepEqual(Object.keys(payload).sort(), [
     'agent',
     'event',
+    'node_id',
     'project_id',
     'reason',
     'run_id',
@@ -148,6 +150,7 @@ test('webhook: run:needs_input posts whitelisted payload', async () => {
     run_id: 'run_1',
     task_id: 'task_1',
     project_id: 'project_1',
+    node_id: 'node_1',
     status: 'needs_input',
     reason: 'idle_timeout',
     agent: 'Codex Worker',
@@ -177,6 +180,19 @@ test('webhook: run:ended failed posts', async () => {
   assert.equal(payload.event, 'failed');
   assert.equal(payload.status, 'failed');
   assert.equal(payload.reason, 'stream-json-exit-error(1)');
+});
+
+test('webhook: event node_id overrides run node_id', async () => {
+  const h = createHarness();
+
+  h.eventBus.emit('run:needs_input', needsInputData({
+    node_id: 'node_from_event',
+    run: workerRun({ status: 'needs_input', node_id: 'node_from_run' }),
+  }));
+  await waitFor(() => h.posts.length === 1);
+
+  const payload = parseBody(h.posts[0]);
+  assert.equal(payload.node_id, 'node_from_event');
 });
 
 test('webhook: run:ended completed/cancelled/stopped are skipped', async () => {

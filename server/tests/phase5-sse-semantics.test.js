@@ -1,6 +1,6 @@
 // v3 Phase 5 — SSE lifecycle event semantic enrichment.
 // Spec §9.8: run:status / run:ended / run:needs_input / run:completed
-// payloads carry from_status / to_status / reason / task_id / project_id
+// payloads carry from_status / to_status / reason / task_id / project_id / node_id
 // so clients can filter and prioritize without re-reading the DB.
 
 const test = require('node:test');
@@ -42,7 +42,7 @@ test('Phase 5: updateRunStatus emits run:status with semantic envelope', async (
   const project = ps.createProject({ name: 'alpha' });
   const task = ts.createTask({ title: 'T', project_id: project.id });
   db.prepare(`INSERT INTO agent_profiles (id, name, type, command) VALUES ('a1','A','codex','codex')`).run();
-  const run = rs.createRun({ task_id: task.id, agent_profile_id: 'a1' });
+  const run = rs.createRun({ task_id: task.id, agent_profile_id: 'a1', node_id: 'local' });
 
   const { events } = collectEvents(bus);
   rs.updateRunStatus(run.id, 'running', { force: true, reason: 'test-start' });
@@ -54,6 +54,7 @@ test('Phase 5: updateRunStatus emits run:status with semantic envelope', async (
   assert.equal(statusEvent.data.reason, 'test-start');
   assert.equal(statusEvent.data.task_id, task.id);
   assert.equal(statusEvent.data.project_id, project.id);
+  assert.equal(statusEvent.data.node_id, 'local');
   assert.equal(statusEvent.data.run.id, run.id);
 });
 
@@ -66,7 +67,7 @@ test('Phase 5: terminal transition emits run:ended with semantic envelope', asyn
   const project = ps.createProject({ name: 'alpha' });
   const task = ts.createTask({ title: 'T', project_id: project.id });
   db.prepare(`INSERT INTO agent_profiles (id, name, type, command) VALUES ('a1','A','codex','codex')`).run();
-  const run = rs.createRun({ task_id: task.id, agent_profile_id: 'a1' });
+  const run = rs.createRun({ task_id: task.id, agent_profile_id: 'a1', node_id: 'local' });
   rs.updateRunStatus(run.id, 'running', { force: true });
 
   const { events } = collectEvents(bus);
@@ -79,6 +80,7 @@ test('Phase 5: terminal transition emits run:ended with semantic envelope', asyn
   assert.equal(ended.data.reason, 'agent-exit-error(7)');
   assert.equal(ended.data.task_id, task.id);
   assert.equal(ended.data.project_id, project.id);
+  assert.equal(ended.data.node_id, 'local');
 });
 
 test('Phase 5: markRunStarted emits run:status with from_status and reason', async (t) => {

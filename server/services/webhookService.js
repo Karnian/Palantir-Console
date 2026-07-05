@@ -24,6 +24,7 @@ function buildPayload(event, now) {
     run_id: data.runId ?? run.id,
     task_id: data.task_id ?? run.task_id ?? null,
     project_id: data.project_id ?? run.project_id ?? null,
+    node_id: data.node_id ?? run.node_id ?? null,
     status: data.to_status ?? run.status ?? kind,
     reason: cap(data.reason),
     agent: cap(run.agent_name || run.agent_profile_id),

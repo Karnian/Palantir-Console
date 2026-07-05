@@ -537,12 +537,16 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
                   num_turns: event.num_turns,
                 }));
                 if (eventBus) {
+                  const finalRun = runService.getRun(runId);
                   eventBus.emit('run:needs_input', {
                     runId,
-                    run: runService.getRun(runId),
+                    run: finalRun,
                     from_status: 'running',
                     to_status: 'needs_input',
                     reason: stopReason,
+                    task_id: finalRun.task_id || null,
+                    project_id: finalRun.project_id || null,
+                    node_id: finalRun.node_id || null,
                     priority: 'alert',
                   });
                 }
