@@ -425,6 +425,7 @@ function createOperatorSpawnService({
         // S3a review SERIOUS-3.)
         env: isRemoteNode ? {} : spawnEnv,
         role: 'manager',
+        nodeId,
         resumeThreadId,
         resumeSessionId,
         onThreadStarted,

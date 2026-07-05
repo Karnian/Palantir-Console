@@ -86,6 +86,9 @@ function TaskCard({ task, projects, onDragStart, onClick, onMoveStatus }) {
         ${task.priority && task.priority !== 'medium' && html`
           <span class="task-badge priority-${task.priority}">${task.priority}</span>
         `}
+        ${task.agent_profile_id && html`
+          <span class="task-badge agent">\u2699 agent</span>
+        `}
         ${due && html`
           <span class="task-badge due-badge due-${due.state}" title=${`마감일 ${due.formatted}`}>
             \u23F0 ${due.label}

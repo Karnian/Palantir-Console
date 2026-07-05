@@ -148,7 +148,7 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
     allowedTools, maxBudgetUsd, model, mcpConfig, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent,
     // Phase 10D Tier 2
     isolated, pluginDirs, settingsPath, settingSources, onCleanup,
-    executor, nodePrefix }) {
+    executor, nodePrefix, nodeId }) {
 
     const usingRemoteExecutor = !!executor;
     const claudeBin = usingRemoteExecutor ? 'claude' : resolveClaudeBin();
@@ -275,7 +275,7 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
           if (runService) {
             try {
               runService.addRunEvent(runId, 'transport_lost', JSON.stringify({
-                node: 'remote',
+                node: nodeId || 'remote',
                 reason: 'ssh_transport_drop',
                 code,
               }));

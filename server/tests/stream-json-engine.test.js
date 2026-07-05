@@ -802,6 +802,40 @@ test('engine: remote ssh transport drop becomes unreachable without finalizing f
   assert.ok(droppedSession && droppedSession.alive === false, 'unreachable session not listed alive');
 });
 
+test('engine: remote ssh transport drop records concrete node id when provided', async () => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const rs = makeRunService();
+  const child = createFakeRemoteChild();
+  const engine = createStreamJsonEngine({ runService: rs });
+  const executor = {
+    spawnInteractive() {
+      return Promise.resolve(child);
+    },
+  };
+
+  engine.spawnAgent('run-remote-drop-node', {
+    cwd: '/pod/ws',
+    systemPrompt: 'sp',
+    isManager: true,
+    executor,
+    nodePrefix: '/pod/bin',
+    nodeId: 'pod-a',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  child.emit('exit', 255, null);
+
+  const transportEvents = rs._events.filter(
+    e => e.runId === 'run-remote-drop-node' && e.type === 'transport_lost'
+  );
+  assert.equal(transportEvents.length, 1);
+  assert.deepEqual(JSON.parse(transportEvents[0].data), {
+    node: 'pod-a',
+    reason: 'ssh_transport_drop',
+    code: 255,
+  });
+});
+
 test('engine: remote natural exit finalizes completed with real exit code', async () => {
   const { createStreamJsonEngine } = require('../services/streamJsonEngine');
   const rs = makeRunService();
