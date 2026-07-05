@@ -98,7 +98,7 @@ Fleet 트랙으로 실행 계층(Operator/Worker on pod)은 완성됐지만, 계
   (`operatorSpawnService`) 과 **boot resume** (`routes/manager.js:272` 의 adapter.startSession —
   R2 SERIOUS).
 
-### N1. 노드 문맥 1급화 — 관측 (annotate-only, 3~4 PR)
+### N1. 노드 문맥 1급화 — 관측 (annotate-only, 3~4 PR) — ✅ 구현 완료 (PR #313 N1-1/2 + #314 N1-4 + #315 N1-3/5, 2026-07-05. reason enum 에 profile_missing 추가 — Codex 리뷰 반영. a11y/visual 52/52, dashboard baseline 4장 재생성. 라이브 실 Pi 플릿 스트립 시각 검증)
 
 **N1-1. run envelope `node_id` hoist + webhook**
 `runService.js:295-302,352-359` / `lifecycleService.js:1160-1167,1216-1225` envelope 에 `node_id`
