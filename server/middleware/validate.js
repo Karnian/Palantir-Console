@@ -14,6 +14,9 @@
 
 const { BadRequestError } = require('../utils/errors');
 
+const PROJECT_SOURCE_TYPES = new Set(['git', 'legacy_directory']);
+const MCP_CONFIG_SOURCES = new Set(['legacy_control_plane_path', 'repo_relpath']);
+
 // 필수 문자열 필드 검증: null/undefined/비어있는 문자열을 모두 거절
 function requireString(body, field, label) {
   const val = body[field];
@@ -60,6 +63,81 @@ function optionalBoolish(body, field, label) {
   if (val === null || val === undefined) return;
   if (val !== true && val !== false && val !== 0 && val !== 1) {
     throw new BadRequestError(`${label || field} must be a boolean or 0/1`);
+  }
+}
+
+function hasParentSegment(value) {
+  return String(value || '')
+    .split(/[\\/]+/)
+    .some((segment) => segment === '..');
+}
+
+function repoUrlHasCredential(value) {
+  const raw = String(value || '');
+  if (/^[a-z][a-z0-9+.-]*:\/\/[^/\s@]+:[^/\s@]+@/i.test(raw)) return true;
+  try {
+    const url = new URL(raw);
+    if (url.password) return true;
+    if ((url.protocol === 'http:' || url.protocol === 'https:') && url.username) return true;
+  } catch {
+    // SCP-style SSH URLs such as git@github.com:org/repo.git are valid git
+    // remotes and are not parsed by WHATWG URL.
+  }
+  return false;
+}
+
+function optionalEnum(body, field, values, label) {
+  if (!(field in body)) return;
+  const val = body[field];
+  if (val === null || val === undefined || val === '') return;
+  if (typeof val !== 'string' || !values.has(val)) {
+    throw new BadRequestError(`${label || field} must be one of ${Array.from(values).join('|')}`);
+  }
+}
+
+function validateRepoUrl(body) {
+  if (!('repo_url' in body)) {
+    return;
+  }
+  const val = body.repo_url;
+  if (val === null || val === undefined || val === '') {
+    return;
+  }
+  if (typeof val !== 'string') throw new BadRequestError('repo_url must be a string');
+  if (repoUrlHasCredential(val)) {
+    throw new BadRequestError('repo_url must not include credentials');
+  }
+}
+
+function validateProjectRepoFields(body) {
+  optionalEnum(body, 'source_type', PROJECT_SOURCE_TYPES, 'source_type');
+  validateRepoUrl(body);
+  optionalString(body, 'repo_ref', 'repo_ref');
+  optionalString(body, 'repo_subdir', 'repo_subdir');
+  optionalEnum(body, 'mcp_config_source', MCP_CONFIG_SOURCES, 'mcp_config_source');
+  optionalString(body, 'mcp_config_relpath', 'mcp_config_relpath');
+
+  if (typeof body.repo_subdir === 'string' && body.repo_subdir.length > 0) {
+    if (body.repo_subdir.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(body.repo_subdir)) {
+      throw new BadRequestError('repo_subdir must be relative');
+    }
+    if (hasParentSegment(body.repo_subdir)) {
+      throw new BadRequestError('repo_subdir must not contain ..');
+    }
+  }
+
+  const relpath = body.mcp_config_relpath;
+  const shouldValidateRelpath = typeof relpath === 'string' && relpath.length > 0;
+  if (shouldValidateRelpath) {
+    if (relpath.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(relpath)) {
+      throw new BadRequestError('mcp_config_relpath must be relative');
+    }
+    if (hasParentSegment(relpath)) {
+      throw new BadRequestError('mcp_config_relpath must not contain ..');
+    }
+    if (!relpath.endsWith('.json')) {
+      throw new BadRequestError('mcp_config_relpath must end with .json');
+    }
   }
 }
 
@@ -219,6 +297,7 @@ function validateCreateProject(req, res, next) {
   optionalNumber(body, 'budget_usd', 'budget_usd');
   optionalBoolish(body, 'pm_enabled', 'pm_enabled');
   optionalBoolish(body, 'allow_non_git_dir', 'allow_non_git_dir');
+  validateProjectRepoFields(body);
   next();
 }
 
@@ -247,6 +326,7 @@ function validateUpdateProject(req, res, next) {
   optionalNumber(body, 'budget_usd', 'budget_usd');
   optionalBoolish(body, 'pm_enabled', 'pm_enabled');
   optionalBoolish(body, 'allow_non_git_dir', 'allow_non_git_dir');
+  validateProjectRepoFields(body);
   next();
 }
 

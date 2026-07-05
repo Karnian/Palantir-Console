@@ -37,6 +37,11 @@ const BOARD_COLUMNS = [
   { id: 'done' },
 ];
 
+const SOURCE_TYPE_GIT = 'git';
+const SOURCE_TYPE_LEGACY = 'legacy_directory';
+const MCP_SOURCE_CONTROL_PLANE = 'legacy_control_plane_path';
+const MCP_SOURCE_REPO_RELPATH = 'repo_relpath';
+
 function projectNodeValue(project) {
   return project?.node_id && project.node_id !== 'local' ? project.node_id : '';
 }
@@ -48,6 +53,82 @@ function queueNodeIdValue(value) {
 
 function nodeReachable(node) {
   return node?.reachable === true || Number(node?.reachable) === 1;
+}
+
+function projectSourceType(project) {
+  if (project?.source_type === SOURCE_TYPE_GIT) return SOURCE_TYPE_GIT;
+  return SOURCE_TYPE_LEGACY;
+}
+
+function normalizeMcpConfigSource(value) {
+  return value === MCP_SOURCE_REPO_RELPATH ? MCP_SOURCE_REPO_RELPATH : MCP_SOURCE_CONTROL_PLANE;
+}
+
+function putTrimmed(body, key, value, { clear = false, fallback = null } = {}) {
+  const trimmed = String(value || '').trim();
+  if (trimmed) {
+    body[key] = trimmed;
+  } else if (fallback !== null) {
+    body[key] = fallback;
+  } else if (clear) {
+    body[key] = null;
+  }
+}
+
+function applyProjectSourceBody(body, values, { clear = false } = {}) {
+  const sourceType = values.sourceType === SOURCE_TYPE_LEGACY ? SOURCE_TYPE_LEGACY : SOURCE_TYPE_GIT;
+  body.source_type = sourceType;
+
+  if (sourceType === SOURCE_TYPE_GIT) {
+    body.repo_url = String(values.repoUrl || '').trim();
+    putTrimmed(body, 'repo_ref', values.repoRef, { fallback: 'HEAD' });
+    putTrimmed(body, 'repo_subdir', values.repoSubdir, { clear });
+    if (clear) {
+      body.directory = null;
+      body.allow_non_git_dir = null;
+    }
+    body.mcp_config_source = normalizeMcpConfigSource(values.mcpConfigSource);
+    if (body.mcp_config_source === MCP_SOURCE_REPO_RELPATH) {
+      putTrimmed(body, 'mcp_config_relpath', values.mcpConfigRelpath, { clear });
+      if (clear) body.mcp_config_path = null;
+    } else {
+      putTrimmed(body, 'mcp_config_path', values.mcpConfigPath, { clear });
+      if (clear) body.mcp_config_relpath = null;
+    }
+    return body;
+  }
+
+  putTrimmed(body, 'directory', values.dir, { clear });
+  putTrimmed(body, 'mcp_config_path', values.mcpConfigPath, { clear });
+  body.allow_non_git_dir = values.allowNonGitDir ? 1 : 0;
+  if (clear) {
+    body.repo_url = null;
+    body.repo_ref = null;
+    body.repo_subdir = null;
+    body.mcp_config_source = MCP_SOURCE_CONTROL_PLANE;
+    body.mcp_config_relpath = null;
+  }
+  return body;
+}
+
+function repoPreflightMessage(err) {
+  const status = Number(err?.status || err?.statusCode || err?.httpStatus || 0);
+  const reason = err?.reason || err?.data?.reason || err?.body?.reason;
+  if (status !== 400 || !reason) return null;
+  return PROJECTS_LABELS.repoPreflightReasonLabels?.[reason] || null;
+}
+
+function hasRepoPreflightReason(err) {
+  return Boolean(err?.reason || err?.data?.reason || err?.body?.reason);
+}
+
+function projectLocationText(project) {
+  if (projectSourceType(project) === SOURCE_TYPE_GIT) {
+    const ref = project.repo_ref || 'HEAD';
+    const subdir = project.repo_subdir ? ` ${PROJECTS_LABELS.repoSubdirCardPrefix}${project.repo_subdir}` : '';
+    return `${project.repo_url || ''} @ ${ref}${subdir}`.trim();
+  }
+  return project.directory || '';
 }
 
 function nodeOptionLabel(node) {
@@ -94,6 +175,170 @@ function ProjectNodeSelect({ id, value, onChange, nodes, loading }) {
         </div>
       `}
     </div>
+  `;
+}
+
+function SourceTypeToggle({ id, value, onChange }) {
+  return html`
+    <div class="form-field">
+      <label class="form-label" for=${id}>${PROJECTS_LABELS.sourceTypeLabel}</label>
+      <select
+        id=${id}
+        class="form-select"
+        data-role="project-source-toggle"
+        value=${value}
+        onChange=${e => onChange(e.target.value === SOURCE_TYPE_LEGACY ? SOURCE_TYPE_LEGACY : SOURCE_TYPE_GIT)}
+      >
+        <option value=${SOURCE_TYPE_GIT}>${PROJECTS_LABELS.sourceTypeGit}</option>
+        <option value=${SOURCE_TYPE_LEGACY}>${PROJECTS_LABELS.sourceTypeLegacy}</option>
+      </select>
+    </div>
+  `;
+}
+
+function GitSourceFields({
+  prefix,
+  repoUrl,
+  repoRef,
+  repoSubdir,
+  onRepoUrl,
+  onRepoRef,
+  onRepoSubdir,
+}) {
+  return html`
+    <div class="form-field">
+      <label class="form-label" for="${prefix}-project-repo-url">${PROJECTS_LABELS.repoUrlLabel}</label>
+      <input
+        id="${prefix}-project-repo-url"
+        class="form-input"
+        data-role="project-repo-url"
+        value=${repoUrl}
+        onInput=${e => onRepoUrl(e.target.value)}
+        placeholder=${PROJECTS_LABELS.repoUrlPlaceholder}
+        required
+      />
+    </div>
+    <div class="form-field">
+      <label class="form-label" for="${prefix}-project-repo-ref">${PROJECTS_LABELS.repoRefLabel}</label>
+      <input
+        id="${prefix}-project-repo-ref"
+        class="form-input"
+        data-role="project-repo-ref"
+        value=${repoRef}
+        onInput=${e => onRepoRef(e.target.value)}
+        placeholder="HEAD"
+      />
+    </div>
+    <div class="form-field">
+      <label class="form-label" for="${prefix}-project-repo-subdir">${PROJECTS_LABELS.repoSubdirLabel}</label>
+      <input
+        id="${prefix}-project-repo-subdir"
+        class="form-input"
+        data-role="project-repo-subdir"
+        value=${repoSubdir}
+        onInput=${e => onRepoSubdir(e.target.value)}
+        placeholder=${PROJECTS_LABELS.repoSubdirPlaceholder}
+      />
+    </div>
+  `;
+}
+
+function McpSourceFields({
+  prefix,
+  mcpConfigSource,
+  mcpConfigPath,
+  mcpConfigRelpath,
+  onMcpConfigSource,
+  onMcpConfigPath,
+  onMcpConfigRelpath,
+}) {
+  const normalizedSource = normalizeMcpConfigSource(mcpConfigSource);
+  return html`
+    <div class="form-field">
+      <label class="form-label" for="${prefix}-project-mcp-source">${PROJECTS_LABELS.mcpConfigSourceLabel}</label>
+      <select
+        id="${prefix}-project-mcp-source"
+        class="form-select"
+        data-role="project-mcp-source"
+        value=${normalizedSource}
+        onChange=${e => onMcpConfigSource(normalizeMcpConfigSource(e.target.value))}
+      >
+        <option value=${MCP_SOURCE_CONTROL_PLANE}>${PROJECTS_LABELS.mcpConfigControlPlaneOption}</option>
+        <option value=${MCP_SOURCE_REPO_RELPATH}>${PROJECTS_LABELS.mcpConfigRepoRelpathOption}</option>
+      </select>
+    </div>
+    ${normalizedSource === MCP_SOURCE_REPO_RELPATH
+      ? html`
+        <div class="form-field">
+          <label class="form-label" for="${prefix}-project-mcp-relpath">${PROJECTS_LABELS.mcpConfigRelpathLabel}</label>
+          <input
+            id="${prefix}-project-mcp-relpath"
+            class="form-input"
+            data-role="project-mcp-config-relpath"
+            value=${mcpConfigRelpath}
+            onInput=${e => onMcpConfigRelpath(e.target.value)}
+            placeholder=${PROJECTS_LABELS.mcpConfigRelpathPlaceholder}
+          />
+          <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.mcpConfigRelpathHint}</div>
+        </div>
+      `
+      : html`
+        <div class="form-field">
+          <label class="form-label" for="${prefix}-project-mcp">${PROJECTS_LABELS.fieldMcpConfigPath}</label>
+          <input
+            id="${prefix}-project-mcp"
+            class="form-input"
+            data-role="project-mcp-config-path"
+            value=${mcpConfigPath}
+            onInput=${e => onMcpConfigPath(e.target.value)}
+            placeholder=${PROJECTS_LABELS.mcpConfigPathPlaceholder}
+          />
+          <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.mcpConfigPathHint}</div>
+        </div>
+      `}
+  `;
+}
+
+function LegacySourceFields({
+  prefix,
+  dir,
+  allowNonGitDir,
+  mcpConfigPath,
+  onDir,
+  onAllowNonGitDir,
+  onMcpConfigPath,
+}) {
+  return html`
+    <details class="form-field" data-role="project-legacy-source">
+      <summary class="form-label">${PROJECTS_LABELS.legacyDirectorySectionLabel}</summary>
+      <div data-role="project-legacy-directory" style="margin-top:8px;">
+        <${DirectoryPicker} value=${dir} onSelect=${onDir} />
+      </div>
+      <div class="form-field">
+        <label class="form-label" for="${prefix}-project-mcp">${PROJECTS_LABELS.fieldMcpConfigPath}</label>
+        <input
+          id="${prefix}-project-mcp"
+          class="form-input"
+          data-role="project-mcp-config-path"
+          value=${mcpConfigPath}
+          onInput=${e => onMcpConfigPath(e.target.value)}
+          placeholder=${PROJECTS_LABELS.mcpConfigPathPlaceholder}
+        />
+        <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.mcpConfigPathHint}</div>
+      </div>
+      <div class="form-field">
+        <label style=${{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <input
+            id="${prefix}-project-allow-non-git-dir"
+            type="checkbox"
+            checked=${allowNonGitDir}
+            onChange=${e => onAllowNonGitDir(e.target.checked)}
+          />
+          <span>${PROJECTS_LABELS.allowNonGitDirLabel}</span>
+        </label>
+        <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.allowNonGitDirHint}</div>
+      </div>
+    </details>
   `;
 }
 
@@ -283,7 +528,25 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTa
           </div>
 
           <div class="task-detail-meta-grid">
-            ${project.directory && html`
+            ${projectSourceType(project) === SOURCE_TYPE_GIT && project.repo_url && html`
+              <div class="task-detail-meta-item">
+                <span class="task-detail-meta-label">${PROJECTS_LABELS.repoUrlLabel}</span>
+                <span style="color:var(--text-secondary);font-size:12px;word-break:break-all;" title=${project.repo_url}>${project.repo_url}</span>
+              </div>
+            `}
+            ${projectSourceType(project) === SOURCE_TYPE_GIT && html`
+              <div class="task-detail-meta-item">
+                <span class="task-detail-meta-label">${PROJECTS_LABELS.repoRefLabel}</span>
+                <span style="color:var(--text-secondary);font-size:12px;word-break:break-all;">${project.repo_ref || 'HEAD'}</span>
+              </div>
+            `}
+            ${projectSourceType(project) === SOURCE_TYPE_GIT && project.repo_subdir && html`
+              <div class="task-detail-meta-item">
+                <span class="task-detail-meta-label">${PROJECTS_LABELS.repoSubdirLabel}</span>
+                <span style="color:var(--text-secondary);font-size:12px;word-break:break-all;" title=${project.repo_subdir}>${project.repo_subdir}</span>
+              </div>
+            `}
+            ${projectSourceType(project) === SOURCE_TYPE_LEGACY && project.directory && html`
               <div class="task-detail-meta-item">
                 <span class="task-detail-meta-label">${PROJECTS_LABELS.directoryLabel}</span>
                 <span style="color:var(--text-secondary);font-size:12px;word-break:break-all;" title=${project.directory}>${project.directory}</span>
@@ -293,6 +556,12 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTa
               <div class="task-detail-meta-item">
                 <span class="task-detail-meta-label">${PROJECTS_LABELS.mcpConfigLabel}</span>
                 <span style="color:var(--text-secondary);font-size:12px;word-break:break-all;" title=${project.mcp_config_path}>${project.mcp_config_path}</span>
+              </div>
+            `}
+            ${project.mcp_config_relpath && html`
+              <div class="task-detail-meta-item">
+                <span class="task-detail-meta-label">${PROJECTS_LABELS.mcpConfigRelpathLabel}</span>
+                <span style="color:var(--text-secondary);font-size:12px;word-break:break-all;" title=${project.mcp_config_relpath}>${project.mcp_config_relpath}</span>
               </div>
             `}
             ${project.test_command && html`
@@ -377,8 +646,14 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   const [editProject, setEditProject] = useState(null);
   const [name, setName] = useState('');
   const [desc, setDesc] = useState('');
+  const [sourceType, setSourceType] = useState(SOURCE_TYPE_GIT);
+  const [repoUrl, setRepoUrl] = useState('');
+  const [repoRef, setRepoRef] = useState('');
+  const [repoSubdir, setRepoSubdir] = useState('');
   const [dir, setDir] = useState('');
+  const [mcpConfigSource, setMcpConfigSource] = useState(MCP_SOURCE_CONTROL_PLANE);
   const [mcpConfigPath, setMcpConfigPath] = useState('');
+  const [mcpConfigRelpath, setMcpConfigRelpath] = useState('');
   const [testCommand, setTestCommand] = useState('');
   const [nodeId, setNodeId] = useState('');
   const [allowNonGitDir, setAllowNonGitDir] = useState(false);
@@ -389,8 +664,14 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   // Edit modal state
   const [editName, setEditName] = useState('');
   const [editDesc, setEditDesc] = useState('');
+  const [editSourceType, setEditSourceType] = useState(SOURCE_TYPE_GIT);
+  const [editRepoUrl, setEditRepoUrl] = useState('');
+  const [editRepoRef, setEditRepoRef] = useState('');
+  const [editRepoSubdir, setEditRepoSubdir] = useState('');
   const [editDir, setEditDir] = useState('');
+  const [editMcpConfigSource, setEditMcpConfigSource] = useState(MCP_SOURCE_CONTROL_PLANE);
   const [editMcpConfigPath, setEditMcpConfigPath] = useState('');
+  const [editMcpConfigRelpath, setEditMcpConfigRelpath] = useState('');
   const [editTestCommand, setEditTestCommand] = useState('');
   const [editNodeId, setEditNodeId] = useState('');
   const [editAllowNonGitDir, setEditAllowNonGitDir] = useState(false);
@@ -414,38 +695,78 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
 
   useEffect(() => { loadNodes(); }, [loadNodes]);
 
+  const createReady = name.trim() && (sourceType !== SOURCE_TYPE_GIT || repoUrl.trim());
+  const editReady = editName.trim() && (editSourceType !== SOURCE_TYPE_GIT || editRepoUrl.trim());
+
+  const handleProjectSaveError = (err) => {
+    const message = repoPreflightMessage(err);
+    if (!message) return false;
+    addToast(message, 'error');
+    return true;
+  };
+
   const handleCreate = async () => {
-    if (!name.trim()) return;
+    if (!createReady) return;
     setSaving(true);
     try {
       const body = {
         name: name.trim(),
         description: desc.trim() || undefined,
-        directory: dir.trim() || undefined,
-        mcp_config_path: mcpConfigPath.trim() || undefined,
         test_command: testCommand.trim() || undefined,
-        allow_non_git_dir: allowNonGitDir ? 1 : 0,
       };
+      applyProjectSourceBody(body, {
+        sourceType,
+        repoUrl,
+        repoRef,
+        repoSubdir,
+        dir,
+        mcpConfigSource,
+        mcpConfigPath,
+        mcpConfigRelpath,
+        allowNonGitDir,
+      });
       if (nodeId.trim()) body.node_id = nodeId.trim();
       await apiFetchWithToast('/api/projects', {
         method: 'POST',
         body: JSON.stringify(body),
       });
-      setName(''); setDesc(''); setDir(''); setMcpConfigPath(''); setTestCommand(''); setNodeId(''); setAllowNonGitDir(false); setShowNew(false);
+      setName('');
+      setDesc('');
+      setSourceType(SOURCE_TYPE_GIT);
+      setRepoUrl('');
+      setRepoRef('');
+      setRepoSubdir('');
+      setDir('');
+      setMcpConfigSource(MCP_SOURCE_CONTROL_PLANE);
+      setMcpConfigPath('');
+      setMcpConfigRelpath('');
+      setTestCommand('');
+      setNodeId('');
+      setAllowNonGitDir(false);
+      setShowNew(false);
       reloadProjects();
-    } catch { /* toast already shown by apiFetchWithToast */ }
+    } catch (err) {
+      if (hasRepoPreflightReason(err)) handleProjectSaveError(err);
+    }
     setSaving(false);
   };
 
   const openEdit = (p) => {
+    const nextSourceType = projectSourceType(p);
     setEditProject(p);
     setRebindGuidance(null);
     setRetargetSuggestion(null);
     setEditOriginalNodeId(queueNodeIdValue(p.node_id));
     setEditName(p.name || '');
     setEditDesc(p.description || '');
+    setEditSourceType(nextSourceType);
+    setEditRepoUrl(p.repo_url || '');
+    setEditRepoRef(p.repo_ref || '');
+    setEditRepoSubdir(p.repo_subdir || '');
     setEditDir(p.directory || '');
+    setEditMcpConfigSource(normalizeMcpConfigSource(p.mcp_config_source));
     setEditMcpConfigPath(p.mcp_config_path || '');
+    setEditMcpConfigRelpath(p.mcp_config_relpath || '');
     setEditTestCommand(p.test_command || '');
     setEditNodeId(projectNodeValue(p));
     setEditAllowNonGitDir(Number(p.allow_non_git_dir) === 1);
@@ -459,24 +780,33 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   };
 
   const handleUpdate = async () => {
-    if (!editProject || !editName.trim()) return;
+    if (!editProject || !editReady) return;
     setEditSaving(true);
     setRebindGuidance(null);
     setRetargetSuggestion(null);
     try {
       const oldNodeId = editOriginalNodeId;
       const nextNodeId = queueNodeIdValue(editNodeId);
+      const body = {
+        name: editName.trim(),
+        description: editDesc.trim() || null,
+        test_command: editTestCommand.trim() || null,
+        node_id: editNodeId.trim() || null,
+      };
+      applyProjectSourceBody(body, {
+        sourceType: editSourceType,
+        repoUrl: editRepoUrl,
+        repoRef: editRepoRef,
+        repoSubdir: editRepoSubdir,
+        dir: editDir,
+        mcpConfigSource: editMcpConfigSource,
+        mcpConfigPath: editMcpConfigPath,
+        mcpConfigRelpath: editMcpConfigRelpath,
+        allowNonGitDir: editAllowNonGitDir,
+      }, { clear: true });
       const data = await apiFetch(`/api/projects/${editProject.id}`, {
         method: 'PATCH',
-        body: JSON.stringify({
-          name: editName.trim(),
-          description: editDesc.trim() || null,
-          directory: editDir.trim() || null,
-          mcp_config_path: editMcpConfigPath.trim() || null,
-          test_command: editTestCommand.trim() || null,
-          node_id: editNodeId.trim() || null,
-          allow_non_git_dir: editAllowNonGitDir ? 1 : 0,
-        }),
+        body: JSON.stringify(body),
       });
       reloadProjects();
       const savedProject = data.project || { ...editProject, node_id: nextNodeId === 'local' ? null : nextNodeId };
@@ -502,7 +832,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
           resetDone: false,
         });
         addToast(PROJECTS_LABELS.rebindResetRequired, 'error');
-      } else {
+      } else if (!handleProjectSaveError(err)) {
         addToast(err.message, 'error');
       }
     }
@@ -565,6 +895,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
         ${projects.map(p => {
           const taskCount = tasks.filter(t => t.project_id === p.id).length;
           const remoteNodeId = projectNodeValue(p);
+          const locationText = projectLocationText(p);
           return html`
             <article key=${p.id} class="project-card">
               <button class="project-card-trigger" onClick=${() => setDetailProject(p)}
@@ -575,7 +906,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
                   ${remoteNodeId && html`<span class="project-card-task-count">${PROJECTS_LABELS.nodeBadgePrefix} ${remoteNodeId}</span>`}
                   ${Number(p.allow_non_git_dir) === 1 && html`<span class="project-card-task-count">${PROJECTS_LABELS.sharedDirectoryBadge}</span>`}
                 </span>
-                ${p.directory && html`<span class="project-card-dir" title=${p.directory}>\u{1F4C1} ${p.directory}</span>`}
+                ${locationText && html`<span class="project-card-dir" title=${locationText}>${projectSourceType(p) === SOURCE_TYPE_GIT ? '\u{1F517}' : '\u{1F4C1}'} ${locationText}</span>`}
                 ${p.description && html`<span class="project-card-desc">${p.description}</span>`}
                 <span class="project-card-meta">${PROJECTS_LABELS.createdLabel} ${formatTime(p.created_at)}</span>
               </button>
@@ -596,15 +927,46 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
             <label class="form-label" for="new-project-name">${PROJECTS_LABELS.fieldName}</label>
             <input id="new-project-name" class="form-input" value=${name} onInput=${e => setName(e.target.value)} placeholder=${PROJECTS_LABELS.namePlaceholder} />
           </div>
-          <${DirectoryPicker} value=${dir} onSelect=${setDir} />
+          <${SourceTypeToggle}
+            id="new-project-source-type"
+            value=${sourceType}
+            onChange=${setSourceType}
+          />
+          ${sourceType === SOURCE_TYPE_GIT
+            ? html`
+              <${GitSourceFields}
+                prefix="new"
+                repoUrl=${repoUrl}
+                repoRef=${repoRef}
+                repoSubdir=${repoSubdir}
+                onRepoUrl=${setRepoUrl}
+                onRepoRef=${setRepoRef}
+                onRepoSubdir=${setRepoSubdir}
+              />
+              <${McpSourceFields}
+                prefix="new"
+                mcpConfigSource=${mcpConfigSource}
+                mcpConfigPath=${mcpConfigPath}
+                mcpConfigRelpath=${mcpConfigRelpath}
+                onMcpConfigSource=${setMcpConfigSource}
+                onMcpConfigPath=${setMcpConfigPath}
+                onMcpConfigRelpath=${setMcpConfigRelpath}
+              />
+            `
+            : html`
+              <${LegacySourceFields}
+                prefix="new"
+                dir=${dir}
+                allowNonGitDir=${allowNonGitDir}
+                mcpConfigPath=${mcpConfigPath}
+                onDir=${setDir}
+                onAllowNonGitDir=${setAllowNonGitDir}
+                onMcpConfigPath=${setMcpConfigPath}
+              />
+            `}
           <div class="form-field">
             <label class="form-label" for="new-project-desc">${PROJECTS_LABELS.fieldDescription}</label>
             <textarea id="new-project-desc" class="form-textarea" value=${desc} onInput=${e => setDesc(e.target.value)} placeholder=${PROJECTS_LABELS.descriptionPlaceholder} rows="3"></textarea>
-          </div>
-          <div class="form-field">
-            <label class="form-label" for="new-project-mcp">${PROJECTS_LABELS.fieldMcpConfigPath}</label>
-            <input id="new-project-mcp" class="form-input" value=${mcpConfigPath} onInput=${e => setMcpConfigPath(e.target.value)} placeholder=${PROJECTS_LABELS.mcpConfigPathPlaceholder} />
-            <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.mcpConfigPathHint}</div>
           </div>
           <div class="form-field">
             <label class="form-label" for="new-project-test-command">${PROJECTS_LABELS.fieldTestCommand}</label>
@@ -620,7 +982,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
             <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.testCommandHint}</div>
           </div>
           <div class="form-field">
-            <label class="form-label" for="new-project-node">${PROJECTS_LABELS.fieldNode}</label>
+            <label class="form-label" for="new-project-node">${PROJECTS_LABELS.defaultExecNodeLabel}</label>
             <${ProjectNodeSelect}
               id="new-project-node"
               value=${nodeId}
@@ -629,22 +991,10 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
               loading=${nodesLoading}
             />
           </div>
-          <div class="form-field">
-            <label style=${{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <input
-                id="new-project-allow-non-git-dir"
-                type="checkbox"
-                checked=${allowNonGitDir}
-                onChange=${e => setAllowNonGitDir(e.target.checked)}
-              />
-              <span>${PROJECTS_LABELS.allowNonGitDirLabel}</span>
-            </label>
-            <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.allowNonGitDirHint}</div>
-          </div>
         </div>
         <div class="modal-footer">
           <button class="ghost" onClick=${() => setShowNew(false)}>${COMMON_ACTIONS.cancel}</button>
-          <button class="primary" onClick=${handleCreate} disabled=${saving || !name.trim()}>
+          <button class="primary" onClick=${handleCreate} disabled=${saving || !createReady}>
             ${saving ? PROJECTS_LABELS.creating : COMMON_ACTIONS.create}
           </button>
         </div>
@@ -659,15 +1009,46 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
             <label class="form-label" for="edit-project-name">${PROJECTS_LABELS.fieldName}</label>
             <input id="edit-project-name" class="form-input" value=${editName} onInput=${e => setEditName(e.target.value)} placeholder=${PROJECTS_LABELS.namePlaceholder} />
           </div>
-          <${DirectoryPicker} value=${editDir} onSelect=${setEditDir} />
+          <${SourceTypeToggle}
+            id="edit-project-source-type"
+            value=${editSourceType}
+            onChange=${setEditSourceType}
+          />
+          ${editSourceType === SOURCE_TYPE_GIT
+            ? html`
+              <${GitSourceFields}
+                prefix="edit"
+                repoUrl=${editRepoUrl}
+                repoRef=${editRepoRef}
+                repoSubdir=${editRepoSubdir}
+                onRepoUrl=${setEditRepoUrl}
+                onRepoRef=${setEditRepoRef}
+                onRepoSubdir=${setEditRepoSubdir}
+              />
+              <${McpSourceFields}
+                prefix="edit"
+                mcpConfigSource=${editMcpConfigSource}
+                mcpConfigPath=${editMcpConfigPath}
+                mcpConfigRelpath=${editMcpConfigRelpath}
+                onMcpConfigSource=${setEditMcpConfigSource}
+                onMcpConfigPath=${setEditMcpConfigPath}
+                onMcpConfigRelpath=${setEditMcpConfigRelpath}
+              />
+            `
+            : html`
+              <${LegacySourceFields}
+                prefix="edit"
+                dir=${editDir}
+                allowNonGitDir=${editAllowNonGitDir}
+                mcpConfigPath=${editMcpConfigPath}
+                onDir=${setEditDir}
+                onAllowNonGitDir=${setEditAllowNonGitDir}
+                onMcpConfigPath=${setEditMcpConfigPath}
+              />
+            `}
           <div class="form-field">
             <label class="form-label" for="edit-project-desc">${PROJECTS_LABELS.fieldDescription}</label>
             <textarea id="edit-project-desc" class="form-textarea" value=${editDesc} onInput=${e => setEditDesc(e.target.value)} placeholder=${PROJECTS_LABELS.descriptionPlaceholder} rows="3"></textarea>
-          </div>
-          <div class="form-field">
-            <label class="form-label" for="edit-project-mcp">${PROJECTS_LABELS.fieldMcpConfigPath}</label>
-            <input id="edit-project-mcp" class="form-input" value=${editMcpConfigPath} onInput=${e => setEditMcpConfigPath(e.target.value)} placeholder=${PROJECTS_LABELS.mcpConfigPathPlaceholder} />
-            <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.mcpConfigPathHint}</div>
           </div>
           <div class="form-field">
             <label class="form-label" for="edit-project-test-command">${PROJECTS_LABELS.fieldTestCommand}</label>
@@ -683,7 +1064,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
             <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.testCommandHint}</div>
           </div>
           <div class="form-field">
-            <label class="form-label" for="edit-project-node">${PROJECTS_LABELS.fieldNode}</label>
+            <label class="form-label" for="edit-project-node">${PROJECTS_LABELS.defaultExecNodeLabel}</label>
             <${ProjectNodeSelect}
               id="edit-project-node"
               value=${editNodeId}
@@ -740,22 +1121,10 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
                 `}
             </div>
           `}
-          <div class="form-field">
-            <label style=${{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <input
-                id="edit-project-allow-non-git-dir"
-                type="checkbox"
-                checked=${editAllowNonGitDir}
-                onChange=${e => setEditAllowNonGitDir(e.target.checked)}
-              />
-              <span>${PROJECTS_LABELS.allowNonGitDirLabel}</span>
-            </label>
-            <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.allowNonGitDirHint}</div>
-          </div>
         </div>
         <div class="modal-footer">
           <button class="ghost" onClick=${closeEdit}>${COMMON_ACTIONS.cancel}</button>
-          <button class="primary" onClick=${handleUpdate} disabled=${editSaving || !editName.trim()}>
+          <button class="primary" onClick=${handleUpdate} disabled=${editSaving || !editReady}>
             ${editSaving ? PROJECTS_LABELS.saving : COMMON_ACTIONS.save}
           </button>
         </div>

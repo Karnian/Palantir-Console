@@ -351,3 +351,30 @@ test('spawnQueuedRun preserves legacy projectDir behavior when worktreeService i
   assert.equal(eventsOf(h.runService, run.id, 'worktree:create_failed').length, 0);
   assert.equal(eventsOf(h.runService, run.id, 'worktree:shared_dir_optin').length, 0);
 });
+
+test('executeTask fails git source projects until repo materialization is available', async (t) => {
+  const { db } = await mkdb(t);
+  const h = buildHarness(db, { worktreeService: null });
+  const profile = seedProfile(db);
+  const project = seedProject(h.projectService, {
+    source_type: 'git',
+    repo_url: 'git@github.com:acme/repo.git',
+    repo_ref: 'main',
+  });
+  const task = seedTask(h.taskService, project.id);
+
+  const result = await h.lifecycleService.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'run',
+  });
+
+  const runs = h.runService.listRuns({ task_id: task.id });
+  assert.equal(runs.length, 1);
+  const run = h.runService.getRun(runs[0].id);
+  assert.equal(result.status, 'failed');
+  assert.equal(run.status, 'failed');
+  assert.equal(h.executionEngine.spawned.length, 0);
+  assert.deepEqual(parsePayload(eventsOf(h.runService, run.id, 'run:repo_materialize_unavailable')[0]), {
+    project_id: project.id,
+  });
+});
