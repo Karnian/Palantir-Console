@@ -6176,6 +6176,105 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   font-weight: 600;
 }
 
+.node-run-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.node-run-counts {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.node-operator-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-sm);
+  color: var(--accent-light);
+  background: var(--accent-muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.node-operator-link:hover,
+.node-operator-link:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent);
+  text-decoration: none;
+}
+
+.node-run-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.node-run-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.node-run-group-title {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.node-run-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.node-run-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: inherit;
+  text-decoration: none;
+  min-width: 0;
+}
+
+.node-run-row:hover,
+.node-run-row:focus-visible {
+  border-color: var(--border-hover);
+  text-decoration: none;
+}
+
+.node-run-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.node-run-id {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.node-run-meta {
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
 .node-usage-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -6374,6 +6473,14 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   }
 
   .node-usage-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .node-run-counts {
+    justify-content: flex-start;
+  }
+
+  .node-run-groups {
     grid-template-columns: 1fr;
   }
 

@@ -64,11 +64,46 @@ function usageResponse(nodeId = 'pi', clis = null) {
   };
 }
 
+function emptySummary() {
+  return { nodes: [], queued: [], updatedAt: '2026-07-04T00:00:00.000Z' };
+}
+
+function createBroker() {
+  const subs = new Map();
+  return {
+    subscribe(channel, cb) {
+      let set = subs.get(channel);
+      if (!set) { set = new Set(); subs.set(channel, set); }
+      set.add(cb);
+      return () => set.delete(cb);
+    },
+    publish(channel, data) {
+      const set = subs.get(channel);
+      if (!set) return;
+      for (const cb of Array.from(set)) cb(data);
+    },
+  };
+}
+
+function defaultApi(url) {
+  if (url === '/api/nodes/summary') return { body: emptySummary() };
+  if (url === '/api/runs') return { body: { runs: [] } };
+  return null;
+}
+
 function createEnv(handler) {
   const env = createPreactEnv();
 
   env.context.fetch = async (url, opts = {}) => {
-    const out = await handler(String(url), opts);
+    let out;
+    try {
+      out = await handler(String(url), opts);
+    } catch (err) {
+      out = defaultApi(String(url));
+      if (!out) throw err;
+    }
+    if (!out) out = defaultApi(String(url));
+    if (!out) throw new Error(`unexpected url ${url}`);
     const status = out.status || 200;
     return {
       ok: status >= 200 && status < 300,
@@ -91,6 +126,7 @@ function createEnv(handler) {
     const d = new Date(value);
     return Number.isNaN(d.getTime()) ? '알 수 없음' : d.toLocaleString();
   };
+  env.context.sseBroker = createBroker();
   env.context.useEscape = () => {};
   env.context.EmptyState = function EmptyState({ icon, text, sub }) {
     return env.context.preact.h('div', { class: 'empty-state' }, [
@@ -322,4 +358,92 @@ test('NodesView detail shows a section empty state for clis: []', async (t) => {
   const root = renderNodes(env, { detailId: 'pi' });
   await waitFor(() => assert.ok(root.querySelector('[data-role="node-usage-no-clis"]')));
   assert.equal(root.querySelectorAll('[data-role="node-usage-card"]').length, 0);
+});
+
+test('NodesView detail renders summary-backed running and queued runs for this node only', async (t) => {
+  const summary = {
+    nodes: [
+      { node_id: 'pi', name: 'Raspberry Pi', reachable: 1, running_total: 1, queued_total: 1 },
+      { node_id: 'other', name: 'Other', reachable: 1, running_total: 0, queued_total: 1 },
+    ],
+    queued: [
+      { run_id: 'run_pi_queued', task_id: 'task_pi', project_id: 'proj1', agent_profile_id: 'worker', node_id: 'pi', queue_reason: 'node_capacity', enqueued_at: '2026-07-04T00:00:00.000Z' },
+      { run_id: 'run_other_queued', task_id: 'task_other', project_id: 'proj1', agent_profile_id: 'worker', node_id: 'other', queue_reason: 'node_unreachable', enqueued_at: '2026-07-04T00:01:00.000Z' },
+    ],
+    updatedAt: '2026-07-04T00:02:00.000Z',
+  };
+  const env = createEnv(async (url) => {
+    if (url === '/api/nodes') return { body: { nodes: [sampleNode(), sampleNode({ id: 'other', name: 'Other' })] } };
+    if (url === '/api/runs') return { body: { runs: [
+      { id: 'run_pi_running', task_id: 'task_running', agent_profile_id: 'worker', node_id: 'pi', status: 'running', is_manager: 0, created_at: '2026-07-04T00:00:00.000Z' },
+      { id: 'run_other_running', task_id: 'task_other', agent_profile_id: 'worker', node_id: 'other', status: 'running', is_manager: 0, created_at: '2026-07-04T00:00:00.000Z' },
+    ] } };
+    if (url === '/api/nodes/pi/usage') return { body: usageResponse('pi', []) };
+    throw new Error(`unexpected url ${url}`);
+  });
+  t.after(env.cleanup);
+
+  const root = renderNodes(env, { detailId: 'pi', nodeSummary: summary });
+  await waitFor(() => assert.ok(root.querySelector('[data-role="node-run-list"]')));
+
+  assert.match(root.querySelector('[data-role="node-run-list"]').textContent, /실행 중: 1/);
+  assert.match(root.querySelector('[data-role="node-run-list"]').textContent, /대기 중: 1/);
+  assert.equal(root.querySelectorAll('[data-role="node-running-run"]').length, 1);
+  assert.equal(root.querySelector('[data-role="node-running-run"]').getAttribute('href'), '#run/run_pi_running');
+  assert.equal(root.querySelectorAll('[data-role="node-queued-run"]').length, 1);
+  assert.equal(root.querySelector('[data-role="node-queued-run"]').getAttribute('href'), '#run/run_pi_queued');
+  assert.match(root.textContent, /노드 슬롯 대기/);
+  assert.doesNotMatch(root.textContent, /task_other/);
+});
+
+test('NodesView detail shows Operator session link only for active operator manager runs on this node', async (t) => {
+  const summary = {
+    nodes: [{ node_id: 'pi', name: 'Raspberry Pi', reachable: 1, running_total: 0, queued_total: 0 }],
+    queued: [],
+    updatedAt: '2026-07-04T00:02:00.000Z',
+  };
+  const env = createEnv(async (url) => {
+    if (url === '/api/nodes') return { body: { nodes: [sampleNode()] } };
+    if (url === '/api/runs') return { body: { runs: [
+      { id: 'run_mgr_top', node_id: 'pi', status: 'running', is_manager: 1, conversation_id: 'top', manager_layer: 'top' },
+      { id: 'run_mgr_other_operator', node_id: 'other', status: 'running', is_manager: 1, conversation_id: 'operator:other', manager_layer: 'operator' },
+      { id: 'run_mgr_operator', node_id: 'pi', status: 'running', is_manager: 1, conversation_id: 'operator:proj1', manager_layer: 'operator' },
+    ] } };
+    if (url === '/api/nodes/pi/usage') return { body: usageResponse('pi', []) };
+    throw new Error(`unexpected url ${url}`);
+  });
+  t.after(env.cleanup);
+
+  const root = renderNodes(env, { detailId: 'pi', nodeSummary: summary });
+  await waitFor(() => assert.ok(root.querySelector('[data-role="node-operator-link"]')));
+
+  const link = root.querySelector('[data-role="node-operator-link"]');
+  assert.equal(link.getAttribute('href'), '#manager');
+  assert.match(link.textContent, /Operator 세션 열기/);
+  assert.equal(link.getAttribute('title'), 'operator:proj1');
+});
+
+test('NodesView detail updates reachable chip after node:status SSE refreshes summary', async (t) => {
+  let reachable = 1;
+  const env = createEnv(async (url) => {
+    if (url === '/api/nodes') return { body: { nodes: [sampleNode({ reachable })] } };
+    if (url === '/api/nodes/summary') return { body: {
+      nodes: [{ node_id: 'pi', name: 'Raspberry Pi', reachable, running_total: 0, queued_total: 0 }],
+      queued: [],
+      updatedAt: '2026-07-04T00:02:00.000Z',
+    } };
+    if (url === '/api/runs') return { body: { runs: [] } };
+    if (url === '/api/nodes/pi/usage') return { body: usageResponse('pi', []) };
+    throw new Error(`unexpected url ${url}`);
+  });
+  t.after(env.cleanup);
+
+  const root = renderNodes(env, { detailId: 'pi' });
+  await waitFor(() => assert.match(root.textContent, /연결됨/));
+
+  reachable = 0;
+  env.context.sseBroker.publish('node:status', { node_id: 'pi', from_reachable: 1, to_reachable: 0, at: '2026-07-04T00:03:00.000Z' });
+
+  await waitFor(() => assert.match(root.textContent, /연결 끊김/));
+  assert.ok(root.querySelector('.node-status-dot.unreachable'));
 });
