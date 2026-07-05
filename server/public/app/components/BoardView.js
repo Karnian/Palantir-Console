@@ -47,6 +47,18 @@ const BOARD_COLUMNS = [
   { id: 'done', label: statusLabel(TASK_STATUS_LABELS, 'done') },
 ];
 
+const LOCAL_PLACEMENT_NODE_ID = 'local';
+
+function normalizePlacementNodeId(nodeId) {
+  const value = String(nodeId ?? '').trim();
+  return value || LOCAL_PLACEMENT_NODE_ID;
+}
+
+function placementNodeOptionLabel(nodeId) {
+  if (nodeId === LOCAL_PLACEMENT_NODE_ID) return FILTER_LABELS.localPlacementNode;
+  return `${FILTER_LABELS.placementNodePrefix} ${nodeId}`;
+}
+
 function NodeBadge({ run }) {
   if (!shouldRenderNodeBadge(run)) return null;
   const nodeId = run.node_id;
@@ -178,6 +190,7 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
   const [executeTask, setExecuteTask] = useState(null);
   const [detailTask, setDetailTask] = useState(null);
   const [filterProject, setFilterProject] = useState('');
+  const [filterPlacementNode, setFilterPlacementNode] = useState('');
   const [filterPriority, setFilterPriority] = useState('');
   const [filterDue, setFilterDue] = useState('');
   const [sortMode, setSortMode] = useState('manual'); // 'manual' | 'due-asc' | 'due-desc' | 'priority'
@@ -201,9 +214,39 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
     return Math.round((d - today) / 86400000);
   };
 
+  const projectById = useMemo(() => {
+    return new Map(projects.map(project => [project.id, project]));
+  }, [projects]);
+
+  const placementNodeOptions = useMemo(() => {
+    const nodes = new Set([LOCAL_PLACEMENT_NODE_ID]);
+    projects.forEach(project => {
+      nodes.add(normalizePlacementNodeId(project.node_id));
+    });
+    // Stable order (local first, then remote ids sorted) so the filter option
+    // list doesn't reshuffle as project order changes (Codex N2 review NIT).
+    const sorted = Array.from(nodes).sort((a, b) => {
+      if (a === LOCAL_PLACEMENT_NODE_ID) return -1;
+      if (b === LOCAL_PLACEMENT_NODE_ID) return 1;
+      return a < b ? -1 : a > b ? 1 : 0;
+    });
+    return [
+      { value: '', label: FILTER_LABELS.allPlacementNodes },
+      ...sorted.map(nodeId => ({
+        value: nodeId,
+        label: placementNodeOptionLabel(nodeId),
+      })),
+    ];
+  }, [projects]);
+
   const filtered = useMemo(() => {
     return tasks.filter(t => {
       if (filterProject && t.project_id !== filterProject) return false;
+      if (filterPlacementNode) {
+        const project = t.project_id ? projectById.get(t.project_id) : null;
+        const taskPlacementNode = normalizePlacementNodeId(project?.node_id);
+        if (taskPlacementNode !== filterPlacementNode) return false;
+      }
       if (filterPriority && t.priority !== filterPriority) return false;
       if (filterDue) {
         if (filterDue === 'no-due') {
@@ -222,7 +265,7 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
     });
     // nowTick re-runs the filter at every tick so date-based filters
     // (overdue/today/this-week) update without a server reload.
-  }, [tasks, filterProject, filterPriority, filterDue, nowTick]);
+  }, [tasks, projectById, filterProject, filterPlacementNode, filterPriority, filterDue, nowTick]);
 
   const columnTasks = useMemo(() => {
     const map = {};
@@ -358,6 +401,16 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
             ]}
             ariaLabel="프로젝트 필터"
           />
+          <div data-role="node-filter" title="배치 노드 필터 (프로젝트 바인딩 기준)">
+            <${Dropdown}
+              wide
+              value=${filterPlacementNode}
+              onChange=${setFilterPlacementNode}
+              options=${placementNodeOptions}
+              title="배치 노드 필터 (프로젝트 바인딩 기준)"
+              ariaLabel="배치 노드 필터"
+            />
+          </div>
           <${Dropdown}
             wide
             value=${filterPriority}

@@ -41,8 +41,22 @@ function projectNodeValue(project) {
   return project?.node_id && project.node_id !== 'local' ? project.node_id : '';
 }
 
+function nodeReachable(node) {
+  return node?.reachable === true || Number(node?.reachable) === 1;
+}
+
+function nodeOptionLabel(node) {
+  const maxConcurrent = Number(node.max_concurrent || 0);
+  const running = Number(node.running_count ?? node.active_count ?? node.running ?? 0);
+  const available = maxConcurrent > 0 ? Math.max(0, maxConcurrent - running) : null;
+  const slotLabel = available === null ? '-' : `${available}/${maxConcurrent}`;
+  return `${nodeReachable(node) ? '●' : '○'} ${node.name} (${node.id}) · 슬롯 ${slotLabel}`;
+}
+
 function ProjectNodeSelect({ id, value, onChange, nodes, loading }) {
   const selectedMissing = value && !nodes.some(n => n.id === value);
+  const selectedNode = value ? nodes.find(n => n.id === value) : null;
+  const selectedUnreachable = selectedNode && !nodeReachable(selectedNode);
   // Only offer nodes that can actually host execution — projectService
   // rejects can_execute!=1 / files_only=1 bindings with a 400 anyway
   // (Codex P1c review NIT: don't offer invalid choices).
@@ -50,22 +64,38 @@ function ProjectNodeSelect({ id, value, onChange, nodes, loading }) {
     && Number(node.can_execute) === 1
     && Number(node.files_only) !== 1);
   return html`
-    <select
-      id=${id}
-      class="form-select"
-      value=${value}
-      onChange=${e => onChange(e.target.value)}
-      disabled=${loading}
-    >
-      <option value="">${loading ? PROJECTS_LABELS.nodeSelectLoading : PROJECTS_LABELS.nodeDefaultOption}</option>
-      ${selectedMissing && html`<option value=${value}>${value}</option>`}
-      ${remoteNodes.map(node => html`
-        <option key=${node.id} value=${node.id}>
-          ${node.name} (${node.id})
-        </option>
-      `)}
-    </select>
+    <div>
+      <select
+        id=${id}
+        class="form-select"
+        value=${value}
+        onChange=${e => onChange(e.target.value)}
+        disabled=${loading}
+      >
+        <option value="">${loading ? PROJECTS_LABELS.nodeSelectLoading : PROJECTS_LABELS.nodeDefaultOption}</option>
+        ${selectedMissing && html`<option value=${value}>${value}</option>`}
+        ${remoteNodes.map(node => html`
+          <option key=${node.id} value=${node.id}>
+            ${nodeOptionLabel(node)}
+          </option>
+        `)}
+      </select>
+      ${selectedUnreachable && html`
+        <div
+          data-role="project-node-warning"
+          style="color:var(--warning, var(--text-muted));font-size:11px;margin-top:4px;"
+        >
+          ${PROJECTS_LABELS.nodeUnreachableWarning}
+        </div>
+      `}
+    </div>
   `;
+}
+
+function isRebindResetConflict(err) {
+  const status = err?.status || err?.statusCode || err?.httpStatus;
+  const message = String(err?.message || err?.error || '');
+  return Number(status) === 409 && message.includes('reset the operator');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -360,6 +390,8 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   const [editNodeId, setEditNodeId] = useState('');
   const [editAllowNonGitDir, setEditAllowNonGitDir] = useState(false);
   const [editSaving, setEditSaving] = useState(false);
+  const [rebindGuidance, setRebindGuidance] = useState(null);
+  const [operatorResetting, setOperatorResetting] = useState(false);
 
   const loadNodes = useCallback(async () => {
     setNodesLoading(true);
@@ -399,6 +431,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
 
   const openEdit = (p) => {
     setEditProject(p);
+    setRebindGuidance(null);
     setEditName(p.name || '');
     setEditDesc(p.description || '');
     setEditDir(p.directory || '');
@@ -408,11 +441,17 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
     setEditAllowNonGitDir(Number(p.allow_non_git_dir) === 1);
   };
 
+  const closeEdit = () => {
+    setEditProject(null);
+    setRebindGuidance(null);
+  };
+
   const handleUpdate = async () => {
     if (!editProject || !editName.trim()) return;
     setEditSaving(true);
+    setRebindGuidance(null);
     try {
-      await apiFetchWithToast(`/api/projects/${editProject.id}`, {
+      await apiFetch(`/api/projects/${editProject.id}`, {
         method: 'PATCH',
         body: JSON.stringify({
           name: editName.trim(),
@@ -424,10 +463,40 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
           allow_non_git_dir: editAllowNonGitDir ? 1 : 0,
         }),
       });
-      setEditProject(null);
+      closeEdit();
       reloadProjects();
-    } catch { /* toast already shown by apiFetchWithToast */ }
+    } catch (err) {
+      if (isRebindResetConflict(err)) {
+        setRebindGuidance({
+          projectId: editProject.id,
+          message: PROJECTS_LABELS.rebindResetRequired,
+          detail: PROJECTS_LABELS.rebindResetDetail,
+          resetDone: false,
+        });
+        addToast(PROJECTS_LABELS.rebindResetRequired, 'error');
+      } else {
+        addToast(err.message, 'error');
+      }
+    }
     setEditSaving(false);
+  };
+
+  const handleResetOperatorForRebind = async () => {
+    if (!rebindGuidance?.projectId) return;
+    setOperatorResetting(true);
+    try {
+      await apiFetch(`/api/projects/${rebindGuidance.projectId}/reset`, { method: 'POST' });
+      setRebindGuidance({
+        ...rebindGuidance,
+        message: PROJECTS_LABELS.rebindResetSuccess,
+        detail: '',
+        resetDone: true,
+      });
+      addToast(PROJECTS_LABELS.rebindResetSuccess, 'success');
+    } catch (err) {
+      addToast(err.message, 'error');
+    }
+    setOperatorResetting(false);
   };
 
   // Keep detailProject in sync with latest data
@@ -534,10 +603,10 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
           </button>
         </div>
       </Modal>
-      <${Modal} open=${!!editProject} onClose=${() => setEditProject(null)} labelledBy="edit-project-title">
+      <${Modal} open=${!!editProject} onClose=${closeEdit} labelledBy="edit-project-title">
         <div class="modal-header">
           <h2 class="modal-title" id="edit-project-title">${PROJECTS_LABELS.modalEdit}</h2>
-          <button class="ghost" onClick=${() => setEditProject(null)}>${COMMON_ACTIONS.close}</button>
+          <button class="ghost" onClick=${closeEdit}>${COMMON_ACTIONS.close}</button>
         </div>
         <div class="modal-body">
           <div class="form-field">
@@ -577,6 +646,27 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
               loading=${nodesLoading}
             />
           </div>
+          ${rebindGuidance && html`
+            <div
+              data-role="operator-rebind-guidance"
+              style="border:1px solid var(--border);background:var(--surface-muted, transparent);color:var(--text);padding:10px;border-radius:6px;font-size:12px;"
+            >
+              <div style="font-weight:600;">${rebindGuidance.message}</div>
+              ${rebindGuidance.detail && html`<div style="color:var(--text-muted);margin-top:3px;">${rebindGuidance.detail}</div>`}
+              ${!rebindGuidance.resetDone && html`
+                <button
+                  type="button"
+                  class="ghost small"
+                  data-role="operator-reset-button"
+                  onClick=${handleResetOperatorForRebind}
+                  disabled=${operatorResetting}
+                  style="margin-top:8px;"
+                >
+                  ${operatorResetting ? PROJECTS_LABELS.rebindResetting : PROJECTS_LABELS.rebindResetButton}
+                </button>
+              `}
+            </div>
+          `}
           <div class="form-field">
             <label style=${{ display: 'flex', alignItems: 'center', gap: '6px' }}>
               <input
@@ -591,7 +681,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
           </div>
         </div>
         <div class="modal-footer">
-          <button class="ghost" onClick=${() => setEditProject(null)}>${COMMON_ACTIONS.cancel}</button>
+          <button class="ghost" onClick=${closeEdit}>${COMMON_ACTIONS.cancel}</button>
           <button class="primary" onClick=${handleUpdate} disabled=${editSaving || !editName.trim()}>
             ${editSaving ? PROJECTS_LABELS.saving : COMMON_ACTIONS.save}
           </button>

@@ -9,8 +9,9 @@ const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
 import { addToast, apiFetchWithToast } from '../lib/toast.js';
-import { COMMON_ACTIONS, NODES_LABELS } from '../lib/copy.js';
+import { COMMON_ACTIONS, NODES_LABELS, QUEUE_REASON_LABELS, RUN_STATUS_LABELS, statusLabel } from '../lib/copy.js';
 import { formatTime, parseDate } from '../lib/format.js';
+import { sseBroker, useNodeSummary } from '../lib/hooks.js';
 import { EmptyState } from './EmptyState.js';
 import { Modal } from './Modal.js';
 
@@ -96,6 +97,66 @@ function formatResetAt(resetAt) {
   if (!resetAt) return '';
   const formatted = formatTime(resetAt);
   return formatted === '알 수 없음' ? resetAt : formatted;
+}
+
+function normalizedNodeId(nodeId) {
+  return String(nodeId || 'local');
+}
+
+function summaryNodeId(row) {
+  return normalizedNodeId(row?.node_id || row?.id);
+}
+
+function sameNodeId(a, b) {
+  return normalizedNodeId(a) === normalizedNodeId(b);
+}
+
+function runId(run) {
+  return run?.id || run?.run_id || '';
+}
+
+function shortRunId(id) {
+  const s = String(id || '');
+  if (s.length <= 12) return s;
+  return `${s.slice(0, 12)}…`;
+}
+
+function runHref(id) {
+  return `#run/${encodeURIComponent(String(id || ''))}`;
+}
+
+function queueReasonLabel(reason) {
+  return reason ? (QUEUE_REASON_LABELS[reason] || reason) : NODES_LABELS.emptyValue;
+}
+
+function isOperatorRun(run) {
+  if (Number(run?.is_manager || 0) !== 1) return false;
+  const conversationId = String(run?.conversation_id || '');
+  return run?.manager_layer === 'operator' || conversationId.startsWith('operator:');
+}
+
+function isActiveOperatorRun(run) {
+  return isOperatorRun(run) && ['running', 'needs_input'].includes(run?.status);
+}
+
+function mergeNodeSummary(node, summaryNode) {
+  if (!summaryNode) return node;
+  return {
+    ...node,
+    reachable: summaryNode.reachable,
+    can_execute: summaryNode.can_execute,
+    files_only: summaryNode.files_only,
+    max_concurrent: summaryNode.max_concurrent,
+    running_total: summaryNode.running_total,
+    queued_total: summaryNode.queued_total,
+    running_by_profile: summaryNode.running_by_profile,
+    queued_by_profile: summaryNode.queued_by_profile,
+  };
+}
+
+function mergeNodesWithSummary(nodes, summary) {
+  const byId = new Map((summary?.nodes || []).map(row => [summaryNodeId(row), row]));
+  return (nodes || []).map(node => mergeNodeSummary(node, byId.get(normalizedNodeId(node.id))));
 }
 
 // Relative "n분 전" formatter for the fleet list card's last-heartbeat read.
@@ -647,7 +708,89 @@ function NodeUsageCard({ cli }) {
   `;
 }
 
-function NodeDetail({ detailId, node, nodesLoading }) {
+function NodeRunRow({ item, status, queued = false }) {
+  const id = runId(item);
+  const taskId = item?.task_id || null;
+  const reason = queued ? item?.queue_reason : null;
+  return html`
+    <a
+      class="node-run-row"
+      data-role=${queued ? 'node-queued-run' : 'node-running-run'}
+      href=${runHref(id)}
+      title=${id}
+    >
+      <span class=${`run-status-dot ${status}`} aria-hidden="true"></span>
+      <span class="node-run-main">
+        <span class="node-run-id">${shortRunId(id)}</span>
+        <span class="node-run-meta">
+          ${taskId ? `task ${taskId}` : NODES_LABELS.runTaskMissing}
+          ${item?.agent_profile_id ? ` · ${item.agent_profile_id}` : ''}
+        </span>
+      </span>
+      ${queued
+        ? html`<span class="task-badge queue-reason" data-role="queue-reason-chip" title=${queueReasonLabel(reason)}>${queueReasonLabel(reason)}</span>`
+        : html`<span class="node-detail-chip">${statusLabel(RUN_STATUS_LABELS, status)}</span>`}
+    </a>
+  `;
+}
+
+function NodeRunActivity({ detailId, summary, runs, runsLoading }) {
+  const summaryNode = (summary?.nodes || []).find(row => sameNodeId(summaryNodeId(row), detailId));
+  const runningTotal = Number(summaryNode?.running_total || 0);
+  const queuedTotal = Number(summaryNode?.queued_total || 0);
+  const queuedRuns = (summary?.queued || []).filter(item => sameNodeId(item?.node_id, detailId));
+  const runningRuns = (runs || []).filter(run => sameNodeId(run?.node_id, detailId)
+    && run?.status === 'running'
+    && Number(run?.is_manager || 0) === 0);
+  const operatorRun = (runs || []).find(run => sameNodeId(run?.node_id, detailId) && isActiveOperatorRun(run));
+
+  return html`
+    <section class="node-run-section" data-role="node-run-list">
+      <div class="node-usage-section-header">
+        <h2 class="node-usage-section-title">${NODES_LABELS.detailRunsTitle}</h2>
+        <div class="node-run-counts">
+          <span class="node-detail-chip reachable">${NODES_LABELS.runningCountLabel}: ${runningTotal}</span>
+          <span class="node-detail-chip">${NODES_LABELS.queuedCountLabel}: ${queuedTotal}</span>
+          ${operatorRun && html`
+            <a
+              class="node-operator-link"
+              data-role="node-operator-link"
+              href="#manager"
+              title=${operatorRun.conversation_id || operatorRun.id}
+            >${NODES_LABELS.operatorSessionAction}</a>
+          `}
+        </div>
+      </div>
+
+      ${runsLoading && runningRuns.length === 0 && queuedRuns.length === 0 && html`
+        <div class="node-usage-empty">${NODES_LABELS.runsLoading}</div>
+      `}
+
+      ${!runsLoading && runningRuns.length === 0 && queuedRuns.length === 0 && html`
+        <div class="node-usage-empty" data-role="node-run-empty">${NODES_LABELS.runsEmpty}</div>
+      `}
+
+      ${(runningRuns.length > 0 || queuedRuns.length > 0) && html`
+        <div class="node-run-groups">
+          <div class="node-run-group">
+            <div class="node-run-group-title">${NODES_LABELS.runningRunsLabel}</div>
+            ${runningRuns.length > 0
+              ? html`<div class="node-run-list">${runningRuns.map(run => html`<${NodeRunRow} key=${run.id} item=${run} status="running" />`)}</div>`
+              : html`<div class="node-usage-empty">${NODES_LABELS.runningRunsEmpty}</div>`}
+          </div>
+          <div class="node-run-group">
+            <div class="node-run-group-title">${NODES_LABELS.queuedRunsLabel}</div>
+            ${queuedRuns.length > 0
+              ? html`<div class="node-run-list">${queuedRuns.map(item => html`<${NodeRunRow} key=${item.run_id} item=${item} status="queued" queued=${true} />`)}</div>`
+              : html`<div class="node-usage-empty">${NODES_LABELS.queuedRunsEmpty}</div>`}
+          </div>
+        </div>
+      `}
+    </section>
+  `;
+}
+
+function NodeDetail({ detailId, node, nodesLoading, nodeSummary, runs, runsLoading }) {
   const [usageData, setUsageData] = useState(null);
   const [loadingUsage, setLoadingUsage] = useState(true);
   const [usageError, setUsageError] = useState(null);
@@ -777,6 +920,13 @@ function NodeDetail({ detailId, node, nodesLoading }) {
         </div>
       </div>
 
+      <${NodeRunActivity}
+        detailId=${detailId}
+        summary=${nodeSummary}
+        runs=${runs}
+        runsLoading=${runsLoading}
+      />
+
       <div class="node-usage-section">
         <div class="node-usage-section-header">
           <h2 class="node-usage-section-title">${NODES_LABELS.detailUsageTitle}</h2>
@@ -806,32 +956,71 @@ function NodeDetail({ detailId, node, nodesLoading }) {
   `;
 }
 
-export function NodesView({ detailId = null } = {}) {
+export function NodesView({ detailId = null, nodeSummary: nodeSummaryProp } = {}) {
   const [nodes, setNodes] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [runs, setRuns] = useState([]);
+  const [runsLoading, setRunsLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editTarget, setEditTarget] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const hasNodeSummaryProp = nodeSummaryProp !== undefined;
+  const fetchedNodeSummary = useNodeSummary({ enabled: !hasNodeSummaryProp, refreshKey: nodes });
+  const nodeSummary = hasNodeSummaryProp ? nodeSummaryProp : fetchedNodeSummary;
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async ({ silent = false } = {}) => {
+    if (!silent) setLoading(true);
     try {
       const data = await apiFetch('/api/nodes');
       setNodes(data.nodes || []);
     } catch (err) {
       addToast(err.message, 'error');
     }
-    setLoading(false);
+    if (!silent) setLoading(false);
+  }, []);
+
+  const loadRuns = useCallback(async () => {
+    setRunsLoading(true);
+    try {
+      const data = await apiFetch('/api/runs');
+      setRuns(data.runs || []);
+    } catch {
+      setRuns([]);
+    }
+    setRunsLoading(false);
   }, []);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (!detailId) {
+      setRuns([]);
+      setRunsLoading(false);
+      return;
+    }
+    loadRuns();
+  }, [detailId, loadRuns]);
 
-  const detailNode = detailId ? nodes.find(node => node.id === detailId) : null;
+  useEffect(() => {
+    return sseBroker.subscribe('node:status', () => {
+      load({ silent: true });
+      if (detailId) loadRuns();
+    });
+  }, [detailId, load, loadRuns]);
+
+  const displayNodes = mergeNodesWithSummary(nodes, nodeSummary);
+  const detailNode = detailId ? displayNodes.find(node => node.id === detailId) : null;
 
   if (detailId) {
     return html`
       <div class="skill-packs-view" data-view="nodes">
-        <${NodeDetail} detailId=${detailId} node=${detailNode} nodesLoading=${loading} />
+        <${NodeDetail}
+          detailId=${detailId}
+          node=${detailNode}
+          nodesLoading=${loading}
+          nodeSummary=${nodeSummary}
+          runs=${runs}
+          runsLoading=${runsLoading}
+        />
       </div>
     `;
   }
@@ -848,16 +1037,16 @@ export function NodesView({ detailId = null } = {}) {
         </button>
       </div>
       ${loading && html`<${Loading} />`}
-      ${!loading && nodes.length === 0 && html`
+      ${!loading && displayNodes.length === 0 && html`
         <${EmptyState}
           icon="⬢"
           text=${NODES_LABELS.emptyText}
           sub=${NODES_LABELS.emptySub}
         />
       `}
-      ${!loading && nodes.length > 0 && html`
+      ${!loading && displayNodes.length > 0 && html`
         <div class="skill-packs-list node-list">
-          ${nodes.map(node => {
+          ${displayNodes.map(node => {
             const isLocal = node.id === 'local';
             const isSsh = node.kind === 'ssh';
             const reachable = Number(node.reachable) === 1;

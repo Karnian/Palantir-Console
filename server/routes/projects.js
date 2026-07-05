@@ -2,7 +2,7 @@ const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { validateCreateProject, validateUpdateProject } = require('../middleware/validate');
 
-function createProjectsRouter({ projectService, taskService, projectBriefService, operatorCleanupService }) {
+function createProjectsRouter({ projectService, taskService, projectBriefService, operatorCleanupService, nodeBindingValidator }) {
   const router = express.Router();
 
   router.get('/', asyncHandler(async (req, res) => {
@@ -22,13 +22,47 @@ function createProjectsRouter({ projectService, taskService, projectBriefService
   }));
 
   router.post('/', validateCreateProject, asyncHandler(async (req, res) => {
+    if (nodeBindingValidator) {
+      await nodeBindingValidator.validateBinding({
+        nodeId: req.body?.node_id,
+        directory: req.body?.directory,
+        mcpConfigPath: req.body?.mcp_config_path,
+      });
+    }
     const project = projectService.createProject(req.body || {});
     res.status(201).json({ project });
   }));
 
   router.patch('/:id', validateUpdateProject, asyncHandler(async (req, res) => {
+    const body = req.body || {};
+    if (nodeBindingValidator && (
+      'node_id' in body || 'directory' in body || 'mcp_config_path' in body
+    )) {
+      // Validate the EFFECTIVE binding (current row merged with the patch),
+      // not just the fields present in the body. Rebinding node_id alone to a
+      // remote node while leaving the stored (local-path) directory untouched
+      // must still validate that directory against the new node — that stale
+      // local↔remote path mismatch is exactly what bind-time validation exists
+      // to catch. `getProject` throws 404 for a missing id before we touch the
+      // executor.
+      const current = projectService.getProject(req.params.id);
+      await nodeBindingValidator.validateBinding({
+        nodeId: 'node_id' in body ? body.node_id : current.node_id,
+        directory: 'directory' in body ? body.directory : current.directory,
+        mcpConfigPath: 'mcp_config_path' in body ? body.mcp_config_path : current.mcp_config_path,
+      });
+    }
     const project = projectService.updateProject(req.params.id, req.body || {});
     res.json({ project });
+  }));
+
+  router.post('/:id/reset', asyncHandler(async (req, res) => {
+    projectService.getProject(req.params.id); // verify exists
+    if (!operatorCleanupService) {
+      return res.status(501).json({ error: 'operatorCleanupService not wired' });
+    }
+    const result = operatorCleanupService.reset(req.params.id);
+    res.json({ status: 'reset', projectId: req.params.id, ...result });
   }));
 
   router.delete('/:id', asyncHandler(async (req, res) => {
