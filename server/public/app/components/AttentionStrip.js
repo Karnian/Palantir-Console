@@ -16,20 +16,23 @@ import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
 import { timeAgo } from '../lib/format.js';
+import { fleetStripModel, nodeDetailHref, nodeDisplayName } from '../lib/nodeUi.js';
 
 const MAX_VISIBLE = 5;
 
 const ICON = {
   'needs_input': '⏸', // ⏸
   'failed': '✗',      // ✗
+  'node-unreachable': '!',
 };
 
 const ACTION_LABEL = {
   'needs_input': '응답하기',
   'failed': '재시도',
+  'node-unreachable': '노드 열기',
 };
 
-export function AttentionStrip({ runs, tasks, onOpenRun }) {
+export function AttentionStrip({ runs, tasks, nodeSummary, onOpenRun }) {
   const [expanded, setExpanded] = useState(false);
 
   const items = useMemo(() => {
@@ -53,16 +56,27 @@ export function AttentionStrip({ runs, tasks, onOpenRun }) {
         };
       });
 
+    for (const node of fleetStripModel(nodeSummary).blockedNodes) {
+      entries.push({
+        id: `node:${node.node_id}`,
+        status: 'node-unreachable',
+        title: `${nodeDisplayName(node)} 노드`,
+        meta: `노드 연결 불가 · 대기 ${Number(node.queued_total || 0)}개`,
+        node,
+      });
+    }
+
     // needs_input first, then failed; within each bucket newest first
+    const rank = { needs_input: 0, 'node-unreachable': 1, failed: 2 };
     entries.sort((a, b) => {
-      if (a.status !== b.status) return a.status === 'needs_input' ? -1 : 1;
-      const at = a.run.updated_at || a.run.created_at || 0;
-      const bt = b.run.updated_at || b.run.created_at || 0;
+      if (a.status !== b.status) return (rank[a.status] ?? 9) - (rank[b.status] ?? 9);
+      const at = a.run ? (a.run.updated_at || a.run.created_at || 0) : 0;
+      const bt = b.run ? (b.run.updated_at || b.run.created_at || 0) : 0;
       return bt - at;
     });
 
     return entries;
-  }, [runs, tasks]);
+  }, [runs, tasks, nodeSummary]);
 
   if (items.length === 0) return null;
 
@@ -80,12 +94,17 @@ export function AttentionStrip({ runs, tasks, onOpenRun }) {
       ${visible.map(item => html`
         <div
           key=${item.id}
-          class="attention-item attention-${item.status === 'needs_input' ? 'input' : 'failed'}"
+          class="attention-item attention-${item.status === 'needs_input' ? 'input' : item.status === 'failed' ? 'failed' : 'node'}"
+          data-role=${item.status === 'node-unreachable' ? 'node-attention-item' : undefined}
           onClick=${(e) => {
             // Mouse/touch convenience only — keyboard users go through the
             // action button. Swallow clicks that originate on the button
             // itself so the button's own handler runs (avoids double-fire).
             if (e.target.closest('.attention-action')) return;
+            if (item.node) {
+              window.location.hash = nodeDetailHref(item.node.node_id);
+              return;
+            }
             onOpenRun && onOpenRun(item.run);
           }}
         >
@@ -98,7 +117,13 @@ export function AttentionStrip({ runs, tasks, onOpenRun }) {
             type="button"
             class="attention-action"
             aria-label=${`${ACTION_LABEL[item.status]}: ${item.title}`}
-            onClick=${() => onOpenRun && onOpenRun(item.run)}
+            onClick=${() => {
+              if (item.node) {
+                window.location.hash = nodeDetailHref(item.node.node_id);
+                return;
+              }
+              onOpenRun && onOpenRun(item.run);
+            }}
           >
             ${ACTION_LABEL[item.status]}
           </button>

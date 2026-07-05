@@ -2,21 +2,27 @@
 // Extracted from server/public/app.js as part of P5-1 (ESM phase 4a).
 
 import { h } from '../../vendor/preact.module.js';
-import { useState, useEffect } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
+import { apiFetch } from '../lib/api.js';
 import { timeAgo, formatDuration, parseDate } from '../lib/format.js';
-import { navigate } from '../lib/hooks.js';
+import { navigate, useNodeSummary } from '../lib/hooks.js';
 import { DASHBOARD_LABELS } from '../lib/copy.js';
+import { fleetStripModel, nodeDetailHref, nodeDisplayName } from '../lib/nodeUi.js';
 import { EmptyState } from './EmptyState.js';
 import { dueState, formatDueDate, useNowTick, dueDateMeta } from '../lib/dueDate.js';
 
-export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun, claudeSessions, manager, driftAudit, onOpenDrift }) {
+export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun, claudeSessions, manager, driftAudit, onOpenDrift, nodeSummary: nodeSummaryProp }) {
   // Tick every minute so overdue/due-soon triage rolls over without a reload.
   // The hook itself returns a counter we don't read; calling it is enough to
   // force a re-render at each tick.
   useNowTick(60_000);
+  const hasNodeSummaryProp = nodeSummaryProp !== undefined;
+  const fetchedNodeSummary = useNodeSummary({ enabled: !hasNodeSummaryProp, refreshKey: runs });
+  const nodeSummary = hasNodeSummaryProp ? nodeSummaryProp : fetchedNodeSummary;
+
+  const fleetModel = fleetStripModel(nodeSummary);
   // Manager session is tracked separately via /api/manager/status — exclude from worker dashboard counts
   const workerRuns = (runs || []).filter(r => !r.is_manager);
   const activeRuns = workerRuns.filter(r => r.status === 'running');
@@ -94,6 +100,18 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
     });
   });
 
+  fleetModel.blockedNodes.forEach(node => {
+    triageItems.push({
+      type: 'node-unreachable',
+      priority: 0.5,
+      title: `${nodeDisplayName(node)} 노드`,
+      meta: `${DASHBOARD_LABELS.triageNodeUnreachableMeta} · ${DASHBOARD_LABELS.fleetQueuedLabel} ${Number(node.queued_total || 0)}`,
+      run: null,
+      task: null,
+      node,
+    });
+  });
+
   failedRuns.forEach(run => {
     const task = tasks.find(t => t.id === run.task_id);
     triageItems.push({
@@ -142,6 +160,7 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
     'manager': '\u2726',
     'overdue': '\u23F0',
     'due-soon': '\u23F0',
+    'node-unreachable': '\u26A0',
   };
 
   return html`
@@ -156,7 +175,13 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
             <div class="stat-label">${DASHBOARD_LABELS.statActive}</div>
           </div>
         </div>
-        <div class="stat-chip stat-queued">
+        <div class="stat-chip stat-queued" data-role="queued-total-stat">
+          <div>
+            <div class="stat-value">${fleetModel.queuedTotal}</div>
+            <div class="stat-label">${DASHBOARD_LABELS.statQueued}</div>
+          </div>
+        </div>
+        <div class="stat-chip stat-needs-input">
           <div>
             <div class="stat-value">${needsInputRuns.length}</div>
             <div class="stat-label">${DASHBOARD_LABELS.statNeedsInput}</div>
@@ -194,6 +219,48 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
           </div>
         `}
       </div>
+      ${fleetModel.visible && html`
+        <section class="fleet-strip" data-role="fleet-strip" aria-label=${DASHBOARD_LABELS.fleetTitle}>
+          <div class="fleet-strip-head">
+            <div>
+              <div class="fleet-strip-title">${DASHBOARD_LABELS.fleetTitle}</div>
+              <div class="fleet-strip-meta">${DASHBOARD_LABELS.fleetQueuedSummary} ${fleetModel.queuedTotal}</div>
+            </div>
+            ${fleetModel.unreachableNodes.length > 0 && html`
+              <a
+                class="fleet-strip-warning"
+                data-role="fleet-unreachable-warning"
+                href=${nodeDetailHref(fleetModel.unreachableNodes[0].node_id)}
+              >
+                ${DASHBOARD_LABELS.fleetUnreachablePrefix} ${fleetModel.unreachableNodes.length}
+              </a>
+            `}
+          </div>
+          <div class="fleet-node-list">
+            ${fleetModel.rows.map(node => {
+              const running = Number(node.running_total || 0);
+              const queued = Number(node.queued_total || 0);
+              const max = node.max_concurrent == null ? null : Number(node.max_concurrent);
+              const slotLabel = max == null ? DASHBOARD_LABELS.fleetSlotsInfinite : max;
+              const pct = max && max > 0 ? Math.min(100, Math.round((running / max) * 100)) : 0;
+              return html`
+                <a
+                  key=${node.node_id}
+                  class="fleet-node-row ${node.reachable ? '' : 'unreachable'}"
+                  data-role="fleet-node-row"
+                  href=${nodeDetailHref(node.node_id)}
+                >
+                  <span class="fleet-node-name">${nodeDisplayName(node)}</span>
+                  <span class="fleet-node-slots">
+                    ${DASHBOARD_LABELS.fleetRunningLabel} ${running} · ${DASHBOARD_LABELS.fleetQueuedLabel} ${queued} / ${DASHBOARD_LABELS.fleetSlotLabel} ${slotLabel}
+                  </span>
+                  <span class="fleet-slot-bar" aria-hidden="true"><span class="fleet-slot-fill" style=${`width:${pct}%`}></span></span>
+                </a>
+              `;
+            })}
+          </div>
+        </section>
+      `}
       <div class="triage-feed" tabindex="0" role="region" aria-label="Triage feed">
         ${triageItems.length === 0 && html`
           <${EmptyState}
@@ -206,8 +273,13 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
           <div
             key=${item.run?.id || item.task?.id || `manager-${i}`}
             class="triage-item"
+            data-role=${item.type === 'node-unreachable' ? 'node-attention-item' : undefined}
             onClick=${() => {
               if (item.type === 'manager') { navigate('manager'); return; }
+              if (item.type === 'node-unreachable' && item.node) {
+                navigate(`resources/nodes/${encodeURIComponent(item.node.node_id)}`);
+                return;
+              }
               if (item.type === 'overdue' || item.type === 'due-soon' || item.type === 'review') {
                 if (item.task && onOpenTask) onOpenTask(item.task);
                 return;
@@ -244,6 +316,11 @@ export function DashboardView({ tasks, runs, onOpenRun, onOpenTask, onDeleteRun,
               ${item.type === 'manager' && html`
                 <button class="ghost" onClick=${(e) => { e.stopPropagation(); navigate('manager'); }}>
                   ${DASHBOARD_LABELS.actionOpen}
+                </button>
+              `}
+              ${item.type === 'node-unreachable' && html`
+                <button class="ghost" onClick=${(e) => { e.stopPropagation(); item.node && navigate(`resources/nodes/${encodeURIComponent(item.node.node_id)}`); }}>
+                  ${DASHBOARD_LABELS.actionOpenNode}
                 </button>
               `}
               ${(item.type === 'overdue' || item.type === 'due-soon') && html`

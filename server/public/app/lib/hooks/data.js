@@ -7,8 +7,9 @@
 
 import { apiFetch } from '../api.js';
 import { addToast } from '../toast.js';
+import { sseBroker } from './sse.js';
 
-import { useState, useEffect, useCallback } from '../../../vendor/hooks.module.js';
+import { useState, useEffect, useCallback, useRef } from '../../../vendor/hooks.module.js';
 
 import { TOAST_LABELS } from '../copy.js';
 export function useTasks() {
@@ -110,4 +111,35 @@ export function useAgents() {
   useEffect(() => { load(); }, [load]);
 
   return { agents, loading, error, reload: load };
+}
+
+// N1-C: fleet summary (GET /api/nodes/summary) shared by DashboardView and
+// ManagerView→SessionGrid→AttentionStrip. Fetches on mount, refetches when
+// `refreshKey` changes (callers pass their runs collection so run lifecycle
+// churn refreshes queue reasons) and on node:status SSE pushes. `enabled:
+// false` (a caller that received the summary as a prop — test seam) makes
+// the hook inert. Failures degrade to null; consumers must render nothing.
+export function useNodeSummary({ enabled = true, refreshKey } = {}) {
+  const [summary, setSummary] = useState(null);
+  const seqRef = useRef(0);
+
+  const reload = useCallback(async () => {
+    if (!enabled) return;
+    const seq = ++seqRef.current;
+    try {
+      const data = await apiFetch('/api/nodes/summary');
+      if (seq === seqRef.current) setSummary(data || null);
+    } catch {
+      if (seq === seqRef.current) setSummary(null);
+    }
+  }, [enabled]);
+
+  useEffect(() => { reload(); }, [reload, refreshKey]);
+
+  useEffect(() => {
+    if (!enabled) return undefined;
+    return sseBroker.subscribe('node:status', reload);
+  }, [enabled, reload]);
+
+  return summary;
 }

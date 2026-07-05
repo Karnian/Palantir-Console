@@ -13,10 +13,12 @@ import { formatTime, timeAgo } from '../lib/format.js';
 import { dueDateMeta } from '../lib/dueDate.js';
 import { Dropdown } from './Dropdown.js';
 import { Modal } from './Modal.js';
+import { nodeDetailHref, queueReasonsByRunId, shouldRenderNodeBadge } from '../lib/nodeUi.js';
 import {
   COMMON_ACTIONS,
   TASK_STATUS_LABELS,
   RUN_STATUS_LABELS,
+  QUEUE_REASON_LABELS,
   FILTER_LABELS,
   TASK_DETAIL_LABELS,
   NEW_TASK_LABELS,
@@ -369,6 +371,26 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
 const STATUS_OPTIONS = ['backlog', 'todo', 'in_progress', 'review', 'done', 'failed'];
 const PRIORITY_OPTIONS = ['low', 'medium', 'high', 'critical'];
 
+function NodeBadge({ run }) {
+  if (!shouldRenderNodeBadge(run)) return null;
+  const nodeId = run.node_id;
+  return html`
+    <a
+      class="task-badge node"
+      data-role="node-badge"
+      href=${nodeDetailHref(nodeId)}
+      title=${`노드 ${nodeId}`}
+      onClick=${(e) => e.stopPropagation()}
+    >노드 ${nodeId}</a>
+  `;
+}
+
+function QueueReasonChip({ reason }) {
+  const label = reason ? QUEUE_REASON_LABELS[reason] : null;
+  if (!label) return null;
+  return html`<span class="task-badge queue-reason" data-role="queue-reason-chip" title=${label}>${label}</span>`;
+}
+
 export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onExecute, reloadTasks }) {
   const [title, setTitle] = useState(task?.title || '');
   const [description, setDescription] = useState(task?.description || '');
@@ -391,6 +413,7 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
   const descEditHeightRef = useRef(null);
   const titleReadonlyRef = useRef(null);
   const titleEditHeightRef = useRef(null);
+  const [queueReasons, setQueueReasons] = useState({});
 
   // Sync form state when task changes
   useEffect(() => {
@@ -403,6 +426,20 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
       setEditingField(null);
     }
   }, [task?.id, task?.updated_at]);
+
+  useEffect(() => {
+    if (!task) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await apiFetch('/api/nodes/summary');
+        if (!cancelled) setQueueReasons(queueReasonsByRunId(data));
+      } catch {
+        if (!cancelled) setQueueReasons({});
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [task?.id]);
 
   if (!task) return null;
 
@@ -744,6 +781,10 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
                     <span style="flex:1;min-width:0;">
                       <span style="color:var(--text-primary);font-size:13px;">${r.agent_name || TASK_DETAIL_LABELS.agentFallback}</span>
                       <span style="color:var(--text-muted);font-size:11px;margin-left:6px;">${statusLabel(RUN_STATUS_LABELS, r.status)}</span>
+                      <span class="run-row-badges">
+                        <${NodeBadge} run=${r} />
+                        ${r.status === 'queued' && html`<${QueueReasonChip} reason=${queueReasons[r.id]} />`}
+                      </span>
                     </span>
                     <span style="color:var(--text-muted);font-size:11px;">${timeAgo(r.created_at)}</span>
                   </div>
