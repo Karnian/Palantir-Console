@@ -55,7 +55,7 @@ export function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
         description: description.trim() || undefined,
         project_id: projectId || undefined,
         priority,
-        agent_profile_id: agentProfileId || undefined,
+        suggested_agent_profile_id: agentProfileId || undefined,
         due_date: dueDate || undefined,
         recurrence: recurrence || undefined,
       };
@@ -158,7 +158,7 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
   useEffect(() => {
     if (open && task) {
       setPrompt(task.description || '');
-      setAgentProfileId(task.agent_profile_id || agents[0]?.id || '');
+      setAgentProfileId(task.suggested_agent_profile_id || agents[0]?.id || '');
       setSelectedIds(new Set());
       setPresetId(task.preferred_preset_id || '');
       // Phase 10E: load available presets (best-effort — route may be absent in older deployments)
