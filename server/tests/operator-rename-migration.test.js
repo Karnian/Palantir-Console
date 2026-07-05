@@ -44,6 +44,23 @@ const RUN_COLUMNS = [
   'retry_count',
   // Fleet P1a (migration 047): worker-run node snapshot — ALTER ADD appends at end.
   'node_id',
+  // Project Repo-Defined (migration 050): durable run workspace snapshot —
+  // runs rebuild appends these after node_id.
+  'source_type_snapshot',
+  'run_source_generation',
+  'repo_url_snapshot',
+  'repo_ref_snapshot',
+  'repo_subdir_snapshot',
+  'repo_cache_path',
+  'workspace_path',
+  'workspace_generation',
+  'resolved_commit',
+  'materialize_attempts',
+  'materialize_run_after',
+  'materialize_started_at',
+  'materialize_claim_token',
+  'materialize_last_error',
+  'workspace_ref_released_at',
 ];
 
 const COMPOSITION_EVENT_COLUMNS = [

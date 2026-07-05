@@ -7,11 +7,12 @@ const {
   OPERATOR_CONV_PREFIX,
 } = require('../utils/conversationId'); // PM→Operator rename Phase 4: operator: only
 
-const VALID_STATUSES = ['queued', 'running', 'paused', 'needs_input', 'completed', 'failed', 'cancelled', 'stopped'];
+const VALID_STATUSES = ['queued', 'materializing', 'running', 'paused', 'needs_input', 'completed', 'failed', 'cancelled', 'stopped'];
 
 // State machine: allowed transitions
 const VALID_TRANSITIONS = {
-  queued:      ['running', 'cancelled'],
+  queued:      ['materializing', 'running', 'cancelled'],
+  materializing: ['queued', 'failed', 'cancelled', 'stopped'],
   running:     ['paused', 'needs_input', 'completed', 'failed', 'cancelled', 'stopped'],
   paused:      ['running', 'cancelled', 'stopped'],
   needs_input: ['running', 'cancelled', 'failed', 'stopped'],
@@ -646,4 +647,6 @@ module.exports = {
   createRunService,
   deriveOperatorProjectId,
   setDeriveOperatorProjectIdDiagnostics,
+  VALID_STATUSES,
+  VALID_TRANSITIONS,
 };
