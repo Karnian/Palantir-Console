@@ -18,6 +18,7 @@ const { createManagerRegistry } = require('../services/managerRegistry');
 const { createConversationService } = require('../services/conversationService');
 const { createOperatorSpawnService } = require('../services/operatorSpawnService');
 const { createOperatorCleanupService } = require('../services/operatorCleanupService');
+const { createNodeService } = require('../services/nodeService');
 const { createApp } = require('../app');
 
 async function mkdb(t) {
@@ -331,6 +332,101 @@ test('Phase 3a: lazy spawn refuses when pm_enabled=0', async (t) => {
     () => spawn.ensureLiveOperator({ projectId: project.id }),
     /PM is disabled/
   );
+});
+
+test('N3-1: lazy operator spawn refuses a cordoned remote node', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const nodeService = createNodeService(db, { createRemoteExecutor: () => ({}) });
+  const registry = createManagerRegistry({ runService: rs });
+  const fakePm = makeFakeCodexAdapter();
+  const topAdapter = makeFakeCodexAdapter();
+
+  nodeService.createNode({
+    id: 'cordoned-pod',
+    name: 'Cordoned Pod',
+    kind: 'ssh',
+    ssh_host: 'worker.local',
+    ssh_user: 'ubuntu',
+    exposed_roots: ['/srv/workspaces'],
+    reachable: true,
+    cordoned: true,
+  });
+  const project = projectService.createProject({ name: 'alpha', node_id: 'cordoned-pod' });
+  const top = seedTop({ rs, registry, adapter: topAdapter });
+
+  const spawn = createOperatorSpawnService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: wireFactory(fakePm),
+    projectService,
+    projectBriefService,
+    nodeService,
+    authResolverOpts: { hasKeychain: true },
+  });
+
+  assert.throws(
+    () => spawn.ensureLiveOperator({ projectId: project.id }),
+    (err) => err.httpStatus === 409 && /node is cordoned/.test(err.message),
+  );
+  assert.equal(fakePm._sessions.size, 0, 'adapter startSession should not run');
+  assert.equal(registry.getActiveRunId(`operator:${project.id}`), null);
+
+  const event = rs.getRunEvents(top.id).find((row) => row.event_type === 'operator:spawn_blocked_cordoned');
+  assert.ok(event, 'cordon block event is recorded on the active Top run');
+  assert.deepEqual(JSON.parse(event.payload_json), { node_id: 'cordoned-pod', project_id: project.id });
+});
+
+test('N3-1: already-live operator on a cordoned node is left alone', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const nodeService = createNodeService(db, { createRemoteExecutor: () => ({}) });
+  const registry = createManagerRegistry({ runService: rs });
+  const fakePm = makeFakeCodexAdapter();
+  const topAdapter = makeFakeCodexAdapter();
+
+  nodeService.createNode({
+    id: 'cordoned-pod',
+    name: 'Cordoned Pod',
+    kind: 'ssh',
+    ssh_host: 'worker.local',
+    ssh_user: 'ubuntu',
+    exposed_roots: ['/srv/workspaces'],
+    reachable: true,
+    cordoned: true,
+  });
+  const project = projectService.createProject({ name: 'alpha', node_id: 'cordoned-pod' });
+  seedTop({ rs, registry, adapter: topAdapter });
+  const live = rs.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: `operator:${project.id}`,
+    manager_adapter: 'codex',
+    prompt: 'PM alpha',
+    node_id: 'cordoned-pod',
+  });
+  rs.updateRunStatus(live.id, 'running', { force: true });
+  fakePm._sessions.set(live.id, { threadId: 'thread_live', ended: false });
+  registry.setActive(`operator:${project.id}`, live.id, fakePm);
+
+  const spawn = createOperatorSpawnService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: wireFactory(fakePm),
+    projectService,
+    projectBriefService,
+    nodeService,
+    authResolverOpts: { hasKeychain: true },
+  });
+
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
+  assert.equal(result.spawned, false);
+  assert.equal(result.run.id, live.id);
+  assert.equal(rs.getRun(live.id).status, 'running');
 });
 
 test('Phase 3a: conversationService integrates lazy PM spawn on first message', async (t) => {

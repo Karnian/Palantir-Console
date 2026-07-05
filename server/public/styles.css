@@ -5906,6 +5906,12 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   border-color: transparent;
 }
 
+.node-detail-chip.cordoned {
+  color: var(--status-warning);
+  background: var(--warning-bg-subtle);
+  border-color: transparent;
+}
+
 /* ─────────────────────────────────────────────────────────────────────────────
    Node list cards (Fleet resource page)
    ───────────────────────────────────────────────────────────────────────────── */
@@ -6104,6 +6110,14 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .node-detail-title-row .node-status-dot {
   width: 10px;
   height: 10px;
+}
+
+.node-detail-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .node-detail-title {

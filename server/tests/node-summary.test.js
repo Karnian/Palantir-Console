@@ -137,6 +137,7 @@ test('GET /api/nodes/summary aggregates nodes and recomputes queued reasons', as
   nodeService.createNode({ id: 'down-node', name: 'Down Node', reachable: false });
   nodeService.createNode({ id: 'profile-node', name: 'Profile Node', reachable: true });
   nodeService.createNode({ id: 'node-cap', name: 'Node Cap', reachable: true, max_concurrent: 1 });
+  nodeService.createNode({ id: 'cordoned-node', name: 'Cordoned Node', reachable: true, cordoned: true });
 
   const limited = createProfile(agentProfileService, { name: 'Limited', max: 1 });
   const wide = createProfile(agentProfileService, { name: 'Wide', max: 10 });
@@ -146,6 +147,7 @@ test('GET /api/nodes/summary aggregates nodes and recomputes queued reasons', as
   const nodeRunningTask = createTask({ projectService, taskService }, 'node running').task;
   const nodeQueuedTask = createTask({ projectService, taskService }, 'node queued').task;
   const downQueuedTask = createTask({ projectService, taskService }, 'down queued').task;
+  const cordonedQueuedTask = createTask({ projectService, taskService }, 'cordoned queued').task;
 
   createRunningRun({
     runService,
@@ -184,6 +186,13 @@ test('GET /api/nodes/summary aggregates nodes and recomputes queued reasons', as
     nodeId: 'down-node',
     prompt: 'down queued',
   });
+  const cordonedQueued = createQueuedRun({
+    runService,
+    task: cordonedQueuedTask,
+    profile: wide,
+    nodeId: 'cordoned-node',
+    prompt: 'cordoned queued',
+  });
 
   runService.createRun({
     prompt: 'manager should not count',
@@ -196,6 +205,7 @@ test('GET /api/nodes/summary aggregates nodes and recomputes queued reasons', as
   const res = await request(server).get('/api/nodes/summary');
   assert.equal(res.status, 200);
   assert.equal(byRun(res.body, downQueued.id).queue_reason, 'node_unreachable');
+  assert.equal(byRun(res.body, cordonedQueued.id).queue_reason, 'node_cordoned');
   assert.equal(byRun(res.body, profileQueued.id).queue_reason, 'profile_capacity');
   assert.equal(byRun(res.body, nodeQueued.id).queue_reason, 'node_capacity');
 
@@ -215,6 +225,11 @@ test('GET /api/nodes/summary aggregates nodes and recomputes queued reasons', as
   const downNode = byNode(res.body, 'down-node');
   assert.equal(downNode.reachable, 0);
   assert.equal(downNode.queued_total, 1);
+
+  const cordonedNode = byNode(res.body, 'cordoned-node');
+  assert.equal(cordonedNode.reachable, 1);
+  assert.equal(cordonedNode.cordoned, 1);
+  assert.equal(cordonedNode.queued_total, 1);
 });
 
 test('GET /api/nodes/summary reports profile_missing for a queued run whose profile was deleted', async (t) => {

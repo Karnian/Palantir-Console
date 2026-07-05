@@ -146,6 +146,7 @@ function mergeNodeSummary(node, summaryNode) {
     reachable: summaryNode.reachable,
     can_execute: summaryNode.can_execute,
     files_only: summaryNode.files_only,
+    cordoned: summaryNode.cordoned,
     max_concurrent: summaryNode.max_concurrent,
     running_total: summaryNode.running_total,
     queued_total: summaryNode.queued_total,
@@ -790,7 +791,7 @@ function NodeRunActivity({ detailId, summary, runs, runsLoading }) {
   `;
 }
 
-function NodeDetail({ detailId, node, nodesLoading, nodeSummary, runs, runsLoading }) {
+function NodeDetail({ detailId, node, nodesLoading, nodeSummary, runs, runsLoading, onCordonToggle, togglingCordon }) {
   const [usageData, setUsageData] = useState(null);
   const [loadingUsage, setLoadingUsage] = useState(true);
   const [usageError, setUsageError] = useState(null);
@@ -867,6 +868,8 @@ function NodeDetail({ detailId, node, nodesLoading, nodeSummary, runs, runsLoadi
 
   const clis = Array.isArray(usageData?.clis) ? usageData.clis : [];
   const reachable = Number(node.reachable) === 1;
+  const cordoned = Number(node.cordoned) === 1;
+  const isSsh = node.kind === 'ssh';
   const rootsCount = exposedRootCount(node.exposed_roots);
 
   return html`
@@ -885,21 +888,36 @@ function NodeDetail({ detailId, node, nodesLoading, nodeSummary, runs, runsLoadi
               <span class=${`node-detail-chip ${reachable ? 'reachable' : 'unreachable'}`}>
                 ${reachable ? NODES_LABELS.reachable : NODES_LABELS.unreachable}
               </span>
-              <span class=${`node-detail-chip ${node.kind === 'ssh' ? 'ssh' : ''}`}>${node.kind === 'ssh' ? NODES_LABELS.kindSsh : NODES_LABELS.kindLocal}</span>
+              <span class=${`node-detail-chip ${isSsh ? 'ssh' : ''}`}>${isSsh ? NODES_LABELS.kindSsh : NODES_LABELS.kindLocal}</span>
+              ${cordoned && html`
+                <span class="node-detail-chip cordoned" data-role="node-cordoned-badge">${NODES_LABELS.cordonedBadge}</span>
+              `}
               ${capabilityLabels(node).map(label => html`<span class="node-detail-chip" key=${label}>${label}</span>`)}
             </div>
           </div>
-          <button
-            class="ghost"
-            data-role="node-usage-refresh"
-            onClick=${loadUsage}
-            disabled=${loadingUsage}
-          >
-            ${loadingUsage ? NODES_LABELS.detailRefreshing : NODES_LABELS.detailRefresh}
-          </button>
+          <div class="node-detail-actions">
+            ${isSsh && html`
+              <button
+                class="ghost"
+                data-role="node-cordon-toggle"
+                onClick=${() => onCordonToggle?.(node)}
+                disabled=${togglingCordon}
+              >
+                ${cordoned ? NODES_LABELS.uncordonAction : NODES_LABELS.cordonAction}
+              </button>
+            `}
+            <button
+              class="ghost"
+              data-role="node-usage-refresh"
+              onClick=${loadUsage}
+              disabled=${loadingUsage}
+            >
+              ${loadingUsage ? NODES_LABELS.detailRefreshing : NODES_LABELS.detailRefresh}
+            </button>
+          </div>
         </div>
         <div class="node-detail-grid">
-          ${node.kind === 'ssh' && html`
+          ${isSsh && html`
             <div class="node-detail-field">
               <span class="node-detail-field-label">${NODES_LABELS.sshTargetLabel}</span>
               <span class="node-detail-field-value">${node.ssh_user || NODES_LABELS.emptyValue}@${node.ssh_host || NODES_LABELS.emptyValue} · ${rootsCount}${NODES_LABELS.rootsCountSuffix}</span>
@@ -964,6 +982,7 @@ export function NodesView({ detailId = null, nodeSummary: nodeSummaryProp } = {}
   const [modalOpen, setModalOpen] = useState(false);
   const [editTarget, setEditTarget] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [cordonUpdatingId, setCordonUpdatingId] = useState(null);
   const hasNodeSummaryProp = nodeSummaryProp !== undefined;
   const fetchedNodeSummary = useNodeSummary({ enabled: !hasNodeSummaryProp, refreshKey: nodes });
   const nodeSummary = hasNodeSummaryProp ? nodeSummaryProp : fetchedNodeSummary;
@@ -1010,6 +1029,23 @@ export function NodesView({ detailId = null, nodeSummary: nodeSummaryProp } = {}
   const displayNodes = mergeNodesWithSummary(nodes, nodeSummary);
   const detailNode = detailId ? displayNodes.find(node => node.id === detailId) : null;
 
+  const toggleCordon = useCallback(async (node) => {
+    if (!node || node.kind !== 'ssh') return;
+    const next = Number(node.cordoned) === 1 ? 0 : 1;
+    setCordonUpdatingId(node.id);
+    try {
+      await apiFetchWithToast(`/api/nodes/${encodeURIComponent(node.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ cordoned: next }),
+      });
+      addToast(NODES_LABELS.toastUpdated, 'success');
+      await load();
+    } catch {
+      // apiFetchWithToast already surfaced the server message.
+    }
+    setCordonUpdatingId(null);
+  }, [load]);
+
   if (detailId) {
     return html`
       <div class="skill-packs-view" data-view="nodes">
@@ -1020,6 +1056,8 @@ export function NodesView({ detailId = null, nodeSummary: nodeSummaryProp } = {}
           nodeSummary=${nodeSummary}
           runs=${runs}
           runsLoading=${runsLoading}
+          onCordonToggle=${toggleCordon}
+          togglingCordon=${cordonUpdatingId === detailNode?.id}
         />
       </div>
     `;
@@ -1050,6 +1088,7 @@ export function NodesView({ detailId = null, nodeSummary: nodeSummaryProp } = {}
             const isLocal = node.id === 'local';
             const isSsh = node.kind === 'ssh';
             const reachable = Number(node.reachable) === 1;
+            const cordoned = Number(node.cordoned) === 1;
             const rootsCount = exposedRootCount(node.exposed_roots);
             const detailHref = `#resources/nodes/${encodeURIComponent(node.id)}`;
             const heartbeatLabel = relativeHeartbeat(node.last_heartbeat_at);
@@ -1070,6 +1109,9 @@ export function NodesView({ detailId = null, nodeSummary: nodeSummaryProp } = {}
                   <span class=${`node-detail-chip node-card-kind-badge ${isSsh ? 'ssh' : ''}`}>
                     ${isSsh ? NODES_LABELS.kindSsh : NODES_LABELS.kindLocal}
                   </span>
+                  ${cordoned && html`
+                    <span class="node-detail-chip cordoned" data-role="node-cordoned-badge">${NODES_LABELS.cordonedBadge}</span>
+                  `}
                 </div>
                 <div class="node-card-subline">
                   <span class=${`node-status-text ${reachable ? 'reachable' : 'unreachable'}`}>

@@ -20,7 +20,7 @@ function toSummaryNode(node) {
     reachable: Number(node.reachable) === 1 ? 1 : 0,
     can_execute: Number(node.can_execute) === 1 ? 1 : 0,
     files_only: Number(node.files_only) === 1 ? 1 : 0,
-    cordoned: 0,
+    cordoned: Number(node.cordoned) === 1 ? 1 : 0,
     max_concurrent: node.max_concurrent ?? null,
     running_total: 0,
     queued_total: 0,
@@ -36,6 +36,7 @@ function createSyntheticNode(nodeId) {
     reachable: 0,
     can_execute: 0,
     files_only: 0,
+    cordoned: 0,
     max_concurrent: null,
   });
 }
@@ -114,6 +115,7 @@ function createNodeSummaryService({ nodeService, runService, agentProfileService
           reachable: nodeRow.reachable,
           can_execute: nodeRow.can_execute,
           files_only: nodeRow.files_only,
+          cordoned: nodeRow.cordoned,
           max_concurrent: nodeRow.max_concurrent,
         } : null,
         profile,

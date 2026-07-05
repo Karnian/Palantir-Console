@@ -1,7 +1,7 @@
 const DISPATCH_BLOCK_REASONS = [
   'node_unreachable',
   'node_not_executable',
-  // N3: 'node_cordoned',
+  'node_cordoned',
   'profile_missing',
   'profile_capacity',
   'node_capacity',
@@ -19,6 +19,10 @@ function explainDispatch({
 
   if (Number(node.can_execute) !== 1 || Number(node.files_only) === 1) {
     return { ok: false, reason: 'node_not_executable' };
+  }
+
+  if (Number(node.cordoned) === 1) {
+    return { ok: false, reason: 'node_cordoned' };
   }
 
   // A queued run whose agent profile was deleted can never spawn
