@@ -1,7 +1,7 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 
-function createNodesRouter({ nodeService, nodeUsageService } = {}) {
+function createNodesRouter({ nodeService, nodeUsageService, nodeSummaryService } = {}) {
   const router = express.Router();
 
   router.get('/', asyncHandler(async (req, res) => {
@@ -12,6 +12,12 @@ function createNodesRouter({ nodeService, nodeUsageService } = {}) {
     const node = nodeService.createNode(req.body || {});
     res.status(201).json({ node });
   }));
+
+  if (nodeSummaryService) {
+    router.get('/summary', asyncHandler(async (req, res) => {
+      res.json(nodeSummaryService.getSummary());
+    }));
+  }
 
   if (nodeUsageService) {
     router.get('/:id/usage', asyncHandler(async (req, res) => {

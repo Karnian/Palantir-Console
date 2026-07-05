@@ -10,6 +10,7 @@
  */
 
 const { createLocalNodeExecutor, createLocalWorkerChannel } = require('./nodeExecutor');
+const { explainDispatch } = require('./dispatchPolicy');
 
 function createLifecycleService({
   runService,
@@ -203,17 +204,34 @@ function createLifecycleService({
 
   function canDispatchOnNode(nodeId, profileId, profile) {
     const node = getDispatchNode(nodeId);
-    if (!node || Number(node.reachable) !== 1) return false;
-    // Capability can be downgraded AFTER a project bound to the node enqueued
-    // work (nodeService.updateNode) — bind-time validation alone is not enough.
-    // A node that cannot host execution must never receive dispatch.
-    if (Number(node.can_execute) !== 1 || Number(node.files_only) === 1) return false;
+    const nodeGate = explainDispatch({
+      node,
+      profile,
+      runningOnNodeForProfile: Number.NEGATIVE_INFINITY,
+      runningTotalOnNode: Number.NEGATIVE_INFINITY,
+    });
+    if (!nodeGate.ok) return false;
+
     const id = node.id || nodeId || 'local';
-    if (countRunningOnNode(id, profileId) >= profile.max_concurrent) return false;
-    if (node.max_concurrent != null && countRunningTotalOnNode(id) >= node.max_concurrent) {
-      return false;
-    }
-    return true;
+    const runningOnNodeForProfile = countRunningOnNode(id, profileId);
+    const profileGate = explainDispatch({
+      node,
+      profile,
+      runningOnNodeForProfile,
+      runningTotalOnNode: Number.NEGATIVE_INFINITY,
+    });
+    if (!profileGate.ok) return false;
+
+    const runningTotalOnNode = node.max_concurrent != null
+      ? countRunningTotalOnNode(id)
+      : Number.NEGATIVE_INFINITY;
+    const nodeCapacityGate = explainDispatch({
+      node,
+      profile,
+      runningOnNodeForProfile,
+      runningTotalOnNode,
+    });
+    return nodeCapacityGate.ok;
   }
 
   /**
