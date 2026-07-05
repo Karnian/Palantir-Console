@@ -11,6 +11,7 @@ import { RunInspector } from './RunInspector.js';
 import { clickableProps } from '../lib/a11y.js';
 import { TaskDetailPanel } from './TaskModals.js';
 import { AttentionStrip } from './AttentionStrip.js';
+import { latestRunForTask, nodeDetailHref, shouldRenderNodeBadge } from '../lib/nodeUi.js';
 import { TASK_STATUS_LABELS, RUN_STATUS_LABELS, MANAGER_LABELS,
   MANAGER_STATUS_LABELS, COMMON_ACTIONS, statusLabel } from '../lib/copy.js';
 import { operatorConversationId, conversationIdMatchesProject } from '../lib/conversationId.js';
@@ -46,7 +47,21 @@ const runStatusColor = (status) => {
   }
 };
 
-export function SessionGrid({ tasks, runs, projects, activePms = [], managerStatus, conversationTarget, onSelectConversation }) {
+function NodeBadge({ run }) {
+  if (!shouldRenderNodeBadge(run)) return null;
+  const nodeId = run.node_id;
+  return html`
+    <a
+      class="task-badge node"
+      data-role="node-badge"
+      href=${nodeDetailHref(nodeId)}
+      title=${`노드 ${nodeId}`}
+      onClick=${(e) => e.stopPropagation()}
+    >노드 ${nodeId}</a>
+  `;
+}
+
+export function SessionGrid({ tasks, runs, projects, activePms = [], managerStatus, conversationTarget, onSelectConversation, nodeSummary }) {
   const onSelectPm = onSelectConversation;
   const [inspectRun, setInspectRun] = useState(null);
   const [selectedTask, setSelectedTask] = useState(null);
@@ -163,6 +178,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
         <${AttentionStrip}
           runs=${runs}
           tasks=${tasks}
+          nodeSummary=${nodeSummary}
           onOpenRun=${(run) => setInspectRun(run)}
         />
         ${managerStatus?.active && (() => {
@@ -231,6 +247,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
                   const waiting = taskRuns.filter(r => r.status === 'needs_input').length;
                   const done = taskRuns.filter(r => r.status === 'completed').length;
                   const failed = taskRuns.filter(r => r.status === 'failed').length;
+                  const latestRun = task ? latestRunForTask(taskRuns, task.id) : taskRuns[0];
                   const parts = [];
                   if (running) parts.push(html`<span style="color:var(--status-running)">${running} 실행 중</span>`);
                   if (waiting) parts.push(html`<span style="color:var(--status-needs-input)">${waiting} 대기</span>`);
@@ -243,6 +260,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
                         <span class="task-session-meta">
                           ${parts.length > 0 ? parts.reduce((acc, el, i) => i === 0 ? [el] : [...acc, ', ', el], []) : (taskRuns.length > 0 ? `런 ${taskRuns.length}개` : '')}
                         </span>
+                        <${NodeBadge} run=${latestRun} />
                         ${task && html`<button class="task-session-detail-btn" onClick=${(e) => { e.stopPropagation(); setSelectedTask(task); }}>상세</button>`}
                       </div>
                     </div>

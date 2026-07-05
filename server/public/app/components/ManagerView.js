@@ -9,6 +9,7 @@ import { SessionGrid } from './SessionGrid.js';
 
 import { h } from '../../vendor/preact.module.js';
 import { useState } from '../../vendor/hooks.module.js';
+import { useNodeSummary } from '../lib/hooks.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
@@ -16,7 +17,13 @@ const html = htm.bind(h);
 // still find managerProfileAuthState at the same path.
 export { managerProfileAuthState };
 
-export function ManagerView({ manager, runs, tasks, projects, agents, agentsError, agentsLoading, reloadAgents, driftAudit, onOpenDrift }) {
+export function ManagerView({ manager, runs, tasks, projects, agents, agentsError, agentsLoading, reloadAgents, driftAudit, onOpenDrift, nodeSummary: nodeSummaryProp }) {
+  // N1-C: AttentionStrip (rendered inside SessionGrid) needs the fleet
+  // summary for its node-unreachable promotion. Self-fetch unless a test
+  // injects the summary as a prop.
+  const hasNodeSummaryProp = nodeSummaryProp !== undefined;
+  const fetchedNodeSummary = useNodeSummary({ enabled: !hasNodeSummaryProp, refreshKey: runs });
+  const nodeSummary = hasNodeSummaryProp ? nodeSummaryProp : fetchedNodeSummary;
   // Lifted conversation target state — shared between ManagerChat (dropdown)
   // and SessionGrid (PM session click).
   const [conversationTarget, setConversationTarget] = useState('top');
@@ -46,6 +53,7 @@ export function ManagerView({ manager, runs, tasks, projects, agents, agentsErro
         managerStatus=${manager.status}
         conversationTarget=${conversationTarget}
         onSelectConversation=${setConversationTarget}
+        nodeSummary=${nodeSummary}
       />
     </div>
   `;

@@ -15,6 +15,7 @@ import { NewTaskModal, ExecuteModal, TaskDetailPanel } from './TaskModals.js';
 import { Dropdown } from './Dropdown.js';
 import { Modal } from './Modal.js';
 import { clickableProps } from '../lib/a11y.js';
+import { latestRunForTask, nodeDetailHref, shouldRenderNodeBadge } from '../lib/nodeUi.js';
 import {
   TASK_STATUS_LABELS,
   FILTER_LABELS,
@@ -46,9 +47,24 @@ const BOARD_COLUMNS = [
   { id: 'done', label: statusLabel(TASK_STATUS_LABELS, 'done') },
 ];
 
-function TaskCard({ task, projects, onDragStart, onClick, onMoveStatus }) {
+function NodeBadge({ run }) {
+  if (!shouldRenderNodeBadge(run)) return null;
+  const nodeId = run.node_id;
+  return html`
+    <a
+      class="task-badge node"
+      data-role="node-badge"
+      href=${nodeDetailHref(nodeId)}
+      title=${`노드 ${nodeId}`}
+      onClick=${(e) => e.stopPropagation()}
+    >노드 ${nodeId}</a>
+  `;
+}
+
+function TaskCard({ task, projects, runs, onDragStart, onClick, onMoveStatus }) {
   const project = projects.find(p => p.id === task.project_id);
   const due = dueDateMeta(task);
+  const latestRun = latestRunForTask(runs, task.id);
   // Phase G — drag-and-drop needs a keyboard equivalent (WCAG 2.1.1).
   // Earlier draft put `role="button"` on the card itself, but that
   // nests an interactive `<select>` inside a button (ARIA anti-pattern).
@@ -94,6 +110,7 @@ function TaskCard({ task, projects, onDragStart, onClick, onMoveStatus }) {
         ${task.recurrence && html`
           <span class="task-badge recurrence" title=${`반복: ${task.recurrence}`}>\u21BB ${task.recurrence}</span>
         `}
+        <${NodeBadge} run=${latestRun} />
       </div>
       ${task.updated_at && html`
         <div class="task-card-meta">${timeAgo(task.updated_at || task.created_at)}</div>
@@ -408,6 +425,7 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
                     key=${task.id}
                     task=${task}
                     projects=${projects}
+                    runs=${runs}
                     onDragStart=${() => {}}
                     onClick=${handleTaskClick}
                     onMoveStatus=${moveTaskToStatus}

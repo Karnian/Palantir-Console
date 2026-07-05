@@ -101,6 +101,7 @@ const CLIENT_REQUIRED_LIVE = Object.freeze([
   'run:event',
   'run:output',
   'run:result',
+  'node:status',
   'manager:started',
   'manager:stopped',
   'task:created',

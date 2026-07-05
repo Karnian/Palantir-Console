@@ -23,8 +23,10 @@ import { apiFetch } from '../lib/api.js';
 import { addToast } from '../lib/toast.js';
 import { timeAgo } from '../lib/format.js';
 import { useEscape } from '../lib/hooks.js';
+import { nodeDetailHref, queueReasonsByRunId, shouldRenderNodeBadge } from '../lib/nodeUi.js';
 import {
   COMMON_ACTIONS,
+  QUEUE_REASON_LABELS,
   RUN_INSPECTOR_LABELS,
   RUN_STATUS_LABELS,
   PRESET_FILE_STATUS_LABELS,
@@ -85,6 +87,26 @@ function aggregateManagerUsage(events) {
 function parseEventPayload(evt) {
   try { return evt?.payload_json ? JSON.parse(evt.payload_json) : {}; }
   catch { return {}; }
+}
+
+function NodeBadge({ run }) {
+  if (!shouldRenderNodeBadge(run)) return null;
+  const nodeId = run.node_id;
+  return html`
+    <a
+      class="task-badge node"
+      data-role="node-badge"
+      href=${nodeDetailHref(nodeId)}
+      title=${`노드 ${nodeId}`}
+      onClick=${(e) => e.stopPropagation()}
+    >노드 ${nodeId}</a>
+  `;
+}
+
+function QueueReasonChip({ reason }) {
+  const label = reason ? QUEUE_REASON_LABELS[reason] : null;
+  if (!label) return null;
+  return html`<span class="task-badge queue-reason" data-role="queue-reason-chip" title=${label}>${label}</span>`;
 }
 
 function RunSkillItem({ sp, runId, acceptanceChecks, onCheckToggle }) {
@@ -171,6 +193,7 @@ export function RunInspector({ run, onClose }) {
   const outputRef = useRef(null);
   const slideoverRef = useRef(null);
   const userScrolledUp = useRef(false);
+  const [queueReasons, setQueueReasons] = useState({});
 
   // Poll live output + events + run status
   useEffect(() => {
@@ -243,6 +266,20 @@ export function RunInspector({ run, onClose }) {
       }
     };
     poll();
+    return () => { cancelled = true; };
+  }, [run?.id]);
+
+  useEffect(() => {
+    if (!run) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await apiFetch('/api/nodes/summary');
+        if (!cancelled) setQueueReasons(queueReasonsByRunId(data));
+      } catch {
+        if (!cancelled) setQueueReasons({});
+      }
+    })();
     return () => { cancelled = true; };
   }, [run?.id]);
 
@@ -410,6 +447,7 @@ export function RunInspector({ run, onClose }) {
 
   const status = currentRun?.status || run.status;
   const isActive = status === 'running' || status === 'needs_input';
+  const headerRun = { ...run, ...(currentRun || {}) };
 
   // Filter meaningful events (skip heartbeats)
   const meaningfulEvents = events.filter(evt => {
@@ -474,8 +512,10 @@ export function RunInspector({ run, onClose }) {
         <div class="run-status-bar">
           <span class="run-status-dot ${status}"></span>
           <span>${statusLabel(RUN_STATUS_LABELS, status)}</span>
-          <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">${currentRun?.agent_name || run.agent_name || ''}</span>
-          <span style="margin-left: auto; font-size: 11px; color: rgba(155,178,166,0.55);">
+          <span class="run-status-agent">${currentRun?.agent_name || run.agent_name || ''}</span>
+          <${NodeBadge} run=${headerRun} />
+          ${status === 'queued' && html`<${QueueReasonChip} reason=${queueReasons[run.id]} />`}
+          <span class="run-status-started">
             ${RUN_INSPECTOR_LABELS.startedPrefix} ${timeAgo(run.created_at)}
           </span>
           ${isActive && html`

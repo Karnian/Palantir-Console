@@ -28,6 +28,12 @@ const htmSrc = fs.readFileSync(path.join(VENDOR_DIR, 'htm.umd.js'), 'utf8');
 // copy module's named exports into every createPreactEnv() context so
 // any component using copy keys works in jsdom without per-test stubs.
 const copySrc = fs.readFileSync(path.join(APP_LIB_DIR, 'copy.js'), 'utf8');
+const nodeUiSrc = fs.readFileSync(path.join(APP_LIB_DIR, 'nodeUi.js'), 'utf8');
+// N1-C: data hooks (useNodeSummary et al.) are referenced by DashboardView /
+// ManagerView as stripped-import free variables. Preload the module so the
+// real hook implementations exist as sandbox globals; they resolve
+// `apiFetch` / `sseBroker` at call time, so per-test stubs keep working.
+const dataHooksSrc = fs.readFileSync(path.join(APP_LIB_DIR, 'hooks', 'data.js'), 'utf8');
 
 /**
  * Load an ES-module component file into a vm context by stripping `export`
@@ -83,7 +89,7 @@ function loadComponent(componentName, context) {
   const filePath = path.join(COMPONENTS_DIR, `${componentName}.js`);
   const raw = fs.readFileSync(filePath, 'utf8');
   const transformed = transformComponentSource(raw)
-    + `\nthis.${componentName} = ${componentName};`;
+    + `\nif (typeof ${componentName} !== 'undefined') this.${componentName} = ${componentName};`;
   vm.runInContext(transformed, context);
 }
 
@@ -125,6 +131,23 @@ function createPreactEnv() {
     .replace(/^export\s+const\s+/gm, 'const ')
     .replace(/^export\s+function\s+/gm, 'function ');
   vm.runInContext(copyTransformed, context);
+  const nodeUiTransformed = nodeUiSrc
+    .replace(/^export\s+const\s+/gm, 'const ')
+    .replace(/^export\s+function\s+/gm, 'function ');
+  vm.runInContext(nodeUiTransformed, context);
+  // Data hooks preload — full component transform (vendor hooks import →
+  // window.preactHooks, relative lib imports stripped). Wrapped in an IIFE:
+  // top-level `const` in a vm script lands in the context's shared global
+  // lexical scope, so an unwrapped preload would collide with the identical
+  // `const { useState … }` declaration of the component loaded next. Only
+  // useNodeSummary is exported; its `apiFetch`/`sseBroker` references stay
+  // free variables resolved from the sandbox at call time (per-test stubs).
+  vm.runInContext(
+    '(function () {\n'
+    + transformComponentSource(dataHooksSrc)
+    + '\nthis.useNodeSummary = useNodeSummary;\n}).call(this);',
+    context,
+  );
 
   const { h, render } = context.preact;
   const html = context.htm.bind(h);

@@ -34,6 +34,14 @@ export const RUN_STATUS_LABELS = {
   cancelled: '취소됨',
 };
 
+export const QUEUE_REASON_LABELS = {
+  node_unreachable: '노드 연결 불가',
+  node_not_executable: '노드 실행 불가',
+  profile_missing: '프로필 없음',
+  profile_capacity: '프로필 슬롯 대기',
+  node_capacity: '노드 슬롯 대기',
+};
+
 // Manager lifecycle (Top + Operator).
 export const MANAGER_STATUS_LABELS = {
   active: '활성',
@@ -532,6 +540,7 @@ export const TOAST_LABELS = {
 export const DASHBOARD_LABELS = {
   pageTitle: '주의 대시보드',
   statActive: '활성',
+  statQueued: '대기열',
   statNeedsInput: '입력 필요',
   statFailed: '실패',
   statDoneToday: '오늘 완료',
@@ -547,6 +556,7 @@ export const DASHBOARD_LABELS = {
   triageManagerTitle: '매니저 세션',
   triageManagerMetaActive: '활성',
   triageNeedsInputMeta: '입력 대기 중',
+  triageNodeUnreachableMeta: '노드 연결 불가',
   triageFailedMeta: '실패',
   triageRunningMeta: '실행 중',
   triageReviewMeta: '리뷰 대기',
@@ -559,6 +569,15 @@ export const DASHBOARD_LABELS = {
   actionInspect: '점검',
   actionReview: '리뷰',
   actionOpen: '열기',
+  actionOpenNode: '노드 열기',
+  // Fleet strip
+  fleetTitle: '노드 플릿',
+  fleetQueuedSummary: '대기열',
+  fleetUnreachablePrefix: '연결 불가 노드',
+  fleetSlotsInfinite: '∞',
+  fleetSlotLabel: '슬롯',
+  fleetRunningLabel: '실행',
+  fleetQueuedLabel: '대기',
   // Active Claude Sessions strip
   claudeSessionsTitle: '활성 Claude 세션',
 };
