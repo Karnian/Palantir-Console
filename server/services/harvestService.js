@@ -14,6 +14,10 @@ const DEFAULT_TEST_TIMEOUT_MS = 300_000;
 const SERVER_NODE_MAJOR = Number.parseInt(process.versions.node, 10);
 const MAX_DECL_BYTES = 1024 * 1024;
 
+function repoFeatureEnabled() {
+  return process.env.PALANTIR_PROJECT_REPO === '1';
+}
+
 function tailString(value, maxChars) {
   const text = String(value || '');
   if (text.length <= maxChars) return text;
@@ -159,6 +163,23 @@ function buildHarvestEnv(worktreePath, nodeResolver = defaultNodeResolver) {
   return buildHarvestEnvFromNode(projectNode);
 }
 
+function normalizeRepoSubdir(subdir) {
+  if (!subdir) return null;
+  const normalized = String(subdir).trim();
+  if (!normalized) return null;
+  if (path.isAbsolute(normalized)) throw new Error('repo_subdir must be relative');
+  const parts = normalized.split(/[\\/]+/).filter(Boolean);
+  if (parts.some((part) => part === '.' || part === '..')) {
+    throw new Error('repo_subdir escapes repository root');
+  }
+  return parts.join(path.sep);
+}
+
+function materializedCwd(run) {
+  const subdir = normalizeRepoSubdir(run?.repo_subdir_snapshot || null);
+  return subdir ? path.join(run.workspace_path, subdir) : run.workspace_path;
+}
+
 function runTestCommand({ command, cwd, testRunner, nodeResolver = defaultNodeResolver }) {
   return new Promise((resolve, reject) => {
     const started = Date.now();
@@ -214,6 +235,54 @@ function runTestCommand({ command, cwd, testRunner, nodeResolver = defaultNodeRe
   });
 }
 
+async function runExecutorTestCommand({
+  command,
+  cwd,
+  testRunner,
+  executor,
+  nodeResolver = defaultNodeResolver,
+  useLocalNodeResolution = false,
+}) {
+  const started = Date.now();
+  const timeoutMs = testTimeoutMs();
+  const args = [...(testRunner.args || []), command];
+  const projectNode = useLocalNodeResolution
+    ? resolveProjectNode(cwd, nodeResolver)
+    : { binDir: null, major: null, source: 'executor' };
+  let res;
+  let timedOut = false;
+  try {
+    res = await executor.exec(testRunner.bin, args, {
+      cwd,
+      env: useLocalNodeResolution ? buildHarvestEnvFromNode(projectNode) : undefined,
+      timeoutMs,
+      maxBuffer: MAX_OUTPUT_TAIL_CHARS * 2,
+    });
+  } catch (err) {
+    if (!err?.killed && err?.code !== 'ETIMEDOUT' && !err?.signal) throw err;
+    timedOut = true;
+    res = {
+      code: null,
+      stdout: err.stdout || '',
+      stderr: err.stderr || '',
+    };
+  }
+  const outputTail = tailString(
+    stripControlChars(`${res.stdout || ''}${res.stderr || ''}`),
+    MAX_OUTPUT_TAIL_CHARS
+  );
+  return {
+    command,
+    exit_code: timedOut ? null : res.code,
+    passed: !timedOut && res.code === 0,
+    timed_out: timedOut,
+    duration_ms: Date.now() - started,
+    output_tail: outputTail,
+    node_major: projectNode.major,
+    node_source: projectNode.source,
+  };
+}
+
 function createHarvestService({
   runService,
   worktreeService,
@@ -222,6 +291,7 @@ function createHarvestService({
   testRunner = { bin: '/bin/sh', args: ['-c'] },
   nodeResolver = defaultNodeResolver,
   nodeExecutor = createLocalNodeExecutor(),
+  nodeService = null,
 } = {}) {
   const seenRunIds = new Set();
 
@@ -310,6 +380,34 @@ function createHarvestService({
     });
   }
 
+  function executorFor(run) {
+    if (nodeService && typeof nodeService.pickExecutor === 'function') {
+      return nodeService.pickExecutor(run?.node_id || 'local');
+    }
+    return nodeExecutor;
+  }
+
+  function isLocalNodeRun(run) {
+    const nodeId = run?.node_id || 'local';
+    if (nodeId === 'local') return true;
+    if (nodeService && typeof nodeService.getNode === 'function') {
+      try {
+        const node = nodeService.getNode(nodeId);
+        // Only a resolvable node explicitly marked local is local. An unknown /
+        // stale node id must NOT fall through to control-plane node resolution
+        // for a remote run (Codex PR5c review SERIOUS).
+        return Boolean(node && node.kind === 'local');
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  function isMaterializedHarvestTarget(run) {
+    return Boolean(repoFeatureEnabled() && run?.workspace_path && run.resolved_commit);
+  }
+
   function resolveProject(run, projectDir) {
     if (run?.project_id && projectService) {
       try {
@@ -320,6 +418,58 @@ function createHarvestService({
       }
     }
     return { project: null, projectDir: projectDir || null };
+  }
+
+  function gitError(args, res) {
+    const err = new Error(res.stderr || res.stdout || `git ${args.join(' ')} failed with code ${res.code}`);
+    err.code = res.code;
+    err.stdout = res.stdout;
+    err.stderr = res.stderr;
+    return err;
+  }
+
+  async function execMaterializedGit(executor, args, opts = {}) {
+    const res = await executor.exec('git', args, {
+      ...opts,
+      env: {
+        GIT_EXTERNAL_DIFF: '',
+        GIT_TEXTCONV_DIFF: '',
+        LC_ALL: 'C',
+        LANG: 'C',
+        ...(opts.env || {}),
+      },
+      maxBuffer: opts.maxBuffer || 10 * 1024 * 1024,
+    });
+    if (res.code !== 0) throw gitError(args, res);
+    return res;
+  }
+
+  // NUL-delimited parsing (git `-z`) so filenames with spaces / quotes /
+  // embedded newlines are handled verbatim instead of being split or trimmed
+  // apart (Codex PR5c review NIT). These parsers are materialized-path only;
+  // the legacy worktree path uses worktreeService.getWorktreeDiff.
+  function diffFilesFromOutput(stdout) {
+    return String(stdout || '').split('\0').filter(Boolean);
+  }
+
+  function untrackedFilesFromStatus(stdout) {
+    // `status --porcelain -z`: each record is `XY <path>` terminated by NUL.
+    // Untracked records are `?? <path>` and never carry a rename second field.
+    return String(stdout || '').split('\0')
+      .filter(entry => entry.startsWith('?? '))
+      .map(entry => entry.slice(3))
+      .filter(Boolean);
+  }
+
+  function uniqueFiles(files) {
+    const seen = new Set();
+    const out = [];
+    for (const file of files) {
+      if (seen.has(file)) continue;
+      seen.add(file);
+      out.push(file);
+    }
+    return out;
   }
 
   async function listCommits(projectDir, base, branch) {
@@ -343,6 +493,142 @@ function createHarvestService({
     };
   }
 
+  async function harvestMaterializedRun(run, summary) {
+    // executorFor(pickExecutor) + remote fileExists can throw/reject — keep the
+    // preflight inside try/catch so a transport failure becomes a stage
+    // harvest:error and never escapes harvestRun (annotate-only/never-throws
+    // contract; Codex PR5c review SERIOUS).
+    let executor;
+    try {
+      executor = executorFor(run);
+      if (!await executor.fileExists(run.workspace_path)) {
+        pushSummaryError(summary, 'worktree_missing');
+        return;
+      }
+    } catch (err) {
+      addError(run.id, 'preflight', err);
+      pushSummaryError(summary, 'preflight');
+      return;
+    }
+
+    let cwd;
+    try {
+      cwd = materializedCwd(run);
+    } catch (err) {
+      addError(run.id, 'preflight', err);
+      pushSummaryError(summary, 'preflight');
+      return;
+    }
+
+    const resolved = resolveProject(run, null);
+    summary.harvested = true;
+
+    try {
+      // Diff the working tree against resolved_commit (the commit the worker
+      // checked out). Without the base rev this only shows unstaged vs index
+      // and misses staged / committed-on-top changes, yet the payload records
+      // base=resolved_commit — Operator review would get an empty/partial diff
+      // (Codex PR5c review BLOCKER). status --porcelain still covers untracked.
+      const base = run.resolved_commit;
+      const statResult = await execMaterializedGit(
+        executor,
+        ['-C', run.workspace_path, 'diff', '--stat', base, '--', '.'],
+        { cwd: run.workspace_path },
+      );
+      const nameResult = await execMaterializedGit(
+        executor,
+        ['-C', run.workspace_path, 'diff', '--name-only', '-z', base, '--', '.'],
+        { cwd: run.workspace_path },
+      );
+      const statusResult = await execMaterializedGit(
+        executor,
+        ['-C', run.workspace_path, 'status', '--porcelain', '-z', '--', '.'],
+        { cwd: run.workspace_path },
+      );
+      let truncated = false;
+      const cappedStat = capString(statResult.stdout || '', MAX_STAT_CHARS);
+      truncated = truncated || cappedStat.truncated;
+      const files = uniqueFiles([
+        ...diffFilesFromOutput(nameResult.stdout),
+        ...untrackedFilesFromStatus(statusResult.stdout),
+      ]);
+      if (files.length > MAX_FILES) truncated = true;
+      summary.files = files.length;
+      summary.commits = 0;
+      summary.statText = capString(statResult.stdout || '', MAX_SUMMARY_STAT_CHARS).value;
+      addEvent(run.id, 'harvest:diff', {
+        base: run.resolved_commit,
+        branch: null,
+        stat: cappedStat.value,
+        files: files.slice(0, MAX_FILES),
+        commits: [],
+        truncated,
+      });
+    } catch (err) {
+      addError(run.id, 'diff', err);
+      pushSummaryError(summary, 'diff');
+    }
+
+    try {
+      const command = resolved.project?.test_command || null;
+      if (command && run.status === 'completed') {
+        const useLocalNodeResolution = isLocalNodeRun(run);
+        const result = await runExecutorTestCommand({
+          command,
+          cwd,
+          testRunner,
+          executor,
+          nodeResolver,
+          useLocalNodeResolution,
+        });
+        addEvent(run.id, 'harvest:test', result);
+        if (useLocalNodeResolution && result.node_source === 'fallback') {
+          addError(
+            run.id,
+            'node_unresolved',
+            new Error(`Declared node@${result.node_major} was not found; used server node`)
+          );
+          pushSummaryError(summary, 'node_unresolved');
+        }
+        summary.test = {
+          passed: result.passed,
+          timed_out: result.timed_out,
+          exit_code: result.exit_code,
+          duration_ms: result.duration_ms,
+          output_tail: tailString(result.output_tail || '', MAX_SUMMARY_OUTPUT_TAIL_CHARS),
+        };
+      }
+    } catch (err) {
+      addError(run.id, 'test', err);
+      pushSummaryError(summary, 'test');
+    }
+
+    try {
+      if (!run.repo_cache_path) throw new Error('repo_cache_path unavailable');
+      await execMaterializedGit(
+        executor,
+        ['-C', run.repo_cache_path, 'worktree', 'remove', '--force', '--', run.workspace_path],
+        { cwd: run.repo_cache_path },
+      );
+    } catch (err) {
+      addError(run.id, 'worktree_remove', err);
+      pushSummaryError(summary, 'worktree_remove');
+    }
+    // prune ALWAYS runs (separate try) — a failed/already-removed worktree
+    // leaves stale registration behind; pruning it keeps a later re-materialize
+    // at the same path idempotent (Codex PR5c review SERIOUS).
+    try {
+      await execMaterializedGit(
+        executor,
+        ['-C', run.repo_cache_path, 'worktree', 'prune'],
+        { cwd: run.repo_cache_path },
+      );
+    } catch (err) {
+      addError(run.id, 'worktree_prune', err);
+      pushSummaryError(summary, 'worktree_prune');
+    }
+  }
+
   async function harvestRun(run, { projectDir } = {}) {
     if (!isReviewTargetRun(run)) return;
     if (seenRunIds.has(run.id)) return;
@@ -351,8 +637,14 @@ function createHarvestService({
 
     const summary = createSummary();
     try {
-      if (!run.worktree_path || !run.branch) {
+      const materialized = isMaterializedHarvestTarget(run);
+      if (!materialized && (!run.worktree_path || !run.branch)) {
         pushSummaryError(summary, 'no_worktree');
+        emitHarvested(run, summary);
+        return;
+      }
+      if (materialized) {
+        await harvestMaterializedRun(run, summary);
         emitHarvested(run, summary);
         return;
       }
