@@ -269,6 +269,14 @@ server/
 - git worktree로 파일시스템 격리
 - `executionEngine.js`가 TmuxEngine (tmux 있을 때) / SubprocessEngine (없을 때) 자동 선택
 
+### Project Repo-Defined (git repo 프로젝트, `PALANTIR_PROJECT_REPO` — 기본 off)
+- 프로젝트를 folder-bound(`projects.directory`) 에서 **repo-defined**(git repo/ref/subdir)로 확장. 폴더는 각 노드가 실행 시점에 **materialize**(clone/fetch/worktree)하는 파생물. `projects.source_type ∈ {legacy_directory, git}`. spec `docs/specs/project-repo-defined-brief.md` (PR #323~#330, 전 구현 완료). **flag off 기본 = 프로덕션 무영향**: flag off 면 git 프로젝트 run 은 fail-closed(`run:repo_materialize_unavailable`), legacy_directory 는 flag 무관 불변(rollback 안전).
+- **상태 머신**(worker): `queued → materializing → queued(ready) → running`. `materializing` 은 worker 슬롯 미소비(countRunning* running-only) → 느린 clone 이 실행 큐 무영향. `started_at` 은 worker claim 에서만.
+- **`projectMaterializationService.ensureWorkspace`**: single-flight lease(`project_materialization_leases`, project+node+source_generation, partial-unique CAS + heartbeat + stale steal) 로 cache repo 는 clone 1회 공유, per-run worktree 는 **attempt-token(materialize_claim_token) 격리**. materializing 떠나는 모든 전이 + worktree/ref 파괴는 token+state CAS(지연 attempt 가 winner 리소스 못 건드림). fs 부작용은 `executor` 경유(로컬=nodeExecutor / 원격=remoteSshExecutor, `move` 포함). 로컬·원격 통일.
+- **원격(pod) materialize**: `canMaterializeOnNode` 원격 허용, 경로=`exposed_roots[0]/.palantir-*`, git argv 전부 옵션 종결자(`--`/`--end-of-options`), write-전 canonical 강제(assertWithinRoots), GIT_TERMINAL_PROMPT=0 + GIT_SSH_COMMAND BatchMode. **git auth=node-local only**(controller token 반출 0; askpass 2순위 미구현). 실 Pi 검증됨.
+- **consumer**: `spawnQueuedRun` git → cwd=`resolveMaterializedRepoCwd`(workspace_path+subdir). MCP(PR4) = `mcp_config_source ∈ {legacy_control_plane_path, repo_relpath}`(repo_relpath 은 원격 executor.readFile). Operator(PR5) = materialized cwd + live source-change 409 reset guard(`repoOperatorThread`). harvest(PR5c) = materialized 는 run.node_id executor 로 diff(base=resolved_commit)+test+worktree remove.
+- **watch**: git argv 는 반드시 옵션 종결자(repoUrl=`--upload-pack=` smuggling 방지). source-generation 필드(repo_url/ref/subdir/mcp_config_source/relpath) 변경 = live Operator 있으면 409. harvest 는 여전히 annotate-only/never-throws/exactly-once run:harvested.
+
 ### Frontend
 - Preact + HTM (ESM) — `server/public/vendor/`에 번들됨, CDN 의존 없음
 - 빌드 파이프라인 없음. `app.js`는 App/mount 셸. 실제 뷰/모달은 `app/components/` ESM 모듈에 있음
