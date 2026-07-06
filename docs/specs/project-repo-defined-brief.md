@@ -4,6 +4,13 @@
 > load-bearing 결정 미결 + 3 SERIOUS + 3 NIT) → Codex R2 개정(6개 결정 확정) → Claude R2 검증 GO.
 > 워크플로우: Codex 가 계획, Claude 가 리뷰 (사용자 지정). 구현은 별도 트랙 — 트리거 시 착수.
 > 관련: `node-first-board-brief.md`(N 트랙, 완료), `fleet-remote-nodes-brief.md`(r4).
+>
+> **✅ 전 구현 완료 (2026-07-06, PR #323~#330 + #324)**: PR1 schema(#323/#324) · PR2 API+preflight·PR6 UI(#325)
+> · PR3 로컬 materialize+queue(#326, Codex 5R) · PR4 MCP source split(#327) · PR5 Operator 통합+reset guard(#328)
+> · PR5a 원격 clone/auth(#329, 보안 R3 GO + 실 Pi spike 6/6) · **PR5b 원격 worker cwd = PR5a+PR3 로 배선(별도 PR
+> 불필요)** · PR5c 원격 harvest/diff/test(#330, R2 GO + 실 Pi spike 6/6) · PR7 cleanup/rollback 테스트+docs.
+> flag `PALANTIR_PROJECT_REPO` 기본 off (프로덕션 무영향). 실 Raspberry Pi 로 원격 clone/materialize/harvest 실증.
+> **남은 것(선택)**: PR5a-2 controller-token askpass 2순위(현재 node-local auth only, 부재 시 fail-closed).
 
 ## 0. 방향 (사용자 확정)
 
