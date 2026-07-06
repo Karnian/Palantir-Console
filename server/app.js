@@ -816,6 +816,7 @@ function createApp(options = {}) {
     agentProfileService,
     skillPackService,
     nodeService,
+    projectMaterializationService,
     isSpecialistAvailable,
     authResolverOpts: options.authResolverOpts || {},
   });

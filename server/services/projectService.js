@@ -4,7 +4,12 @@ const { BadRequestError, NotFoundError } = require('../utils/errors');
 const VALID_PM_ADAPTERS = ['claude', 'codex'];
 const VALID_SOURCE_TYPES = new Set(['git', 'legacy_directory']);
 const VALID_MCP_CONFIG_SOURCES = new Set(['legacy_control_plane_path', 'repo_relpath']);
-const SOURCE_GENERATION_FIELDS = ['repo_url', 'repo_ref', 'repo_subdir', 'mcp_config_relpath'];
+// mcp_config_source is a source-generation field alongside mcp_config_relpath:
+// switching the MCP source (repo_relpath ↔ legacy_control_plane_path) changes
+// how a worker/operator resolves MCP config, so it must bump the generation AND
+// trip the live-operator 409 guard — otherwise a live operator could resume with
+// a stale MCP config (Codex PR5 review SERIOUS).
+const SOURCE_GENERATION_FIELDS = ['repo_url', 'repo_ref', 'repo_subdir', 'mcp_config_source', 'mcp_config_relpath'];
 
 function normalizePmAdapter(value) {
   if (value === undefined) return undefined;
@@ -278,7 +283,19 @@ function createProjectService(db) {
       fields = { ...fields, allow_non_git_dir: n === undefined ? 0 : n };
     }
     fields = normalizeRepoFields(fields);
-    const shouldBumpSourceGeneration = sourceValueChanged(current, fields);
+    const sourceTypeChanged = 'source_type' in fields &&
+      (fields.source_type || 'legacy_directory') !== (current.source_type || 'legacy_directory');
+    const sourceFieldsChanged = sourceValueChanged(current, fields);
+    const shouldBumpSourceGeneration = sourceTypeChanged || sourceFieldsChanged;
+    if (shouldBumpSourceGeneration) {
+      const brief = stmts.getBriefThread.get(id);
+      const liveOps = stmts.countLiveOperatorRuns.get(`operator:${id}`).count;
+      if (brief?.pm_thread_id || liveOps > 0) {
+        const err = new Error('operator is bound to the current repo source — reset the operator before changing repo/ref/subdir/mcp');
+        err.httpStatus = 409;
+        throw err;
+      }
+    }
     const setClauses = [];
     const params = { id };
     for (const col of PROJECT_UPDATABLE) {

@@ -42,6 +42,9 @@ function createProjectBriefService(db) {
              pm_adapter = NULL,
              pm_thread_node_id = NULL,
              pm_thread_cwd = NULL,
+             pm_thread_source_generation = NULL,
+             pm_thread_source_hash = NULL,
+             pm_thread_workspace_path = NULL,
              updated_at = datetime('now')
        WHERE project_id = ?
     `),
@@ -119,7 +122,13 @@ function createProjectBriefService(db) {
       'pm_adapter = @pm_adapter',
     ];
     const params = { project_id: projectId, pm_thread_id, pm_adapter };
-    for (const col of ['pm_thread_node_id', 'pm_thread_cwd']) {
+    for (const col of [
+      'pm_thread_node_id',
+      'pm_thread_cwd',
+      'pm_thread_source_generation',
+      'pm_thread_source_hash',
+      'pm_thread_workspace_path',
+    ]) {
       if (Object.prototype.hasOwnProperty.call(fields, col)) {
         setClauses.push(`${col} = @${col}`);
         params[col] = fields[col] ?? null;

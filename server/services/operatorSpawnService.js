@@ -59,6 +59,19 @@ const {
 const { resolveSpawnCwd } = require('../utils/spawnCwd');
 const { conversationIdForProject } = require('../utils/conversationId'); // PM→Operator Phase 0 producer seam
 const { deriveLegacyContext, enforceWorkspace } = require('../utils/operatorContext');
+const { resolveProjectSource } = require('./projectSource');
+const {
+  repoFeatureEnabled,
+  repoSourceHash,
+  cwdFromWorkspacePath,
+  resolveMaterializedRepoCwd,
+  repoThreadSourceReset,
+} = require('../utils/repoOperatorThread');
+
+// Bounded wait for a peer's single-flight cache clone (see the pending loop in
+// ensureLiveOperator). ~10s total across growing backoff (≤1s/step) before the
+// operator spawn gives up with a 409 pending_timeout (client may retry).
+const MATERIALIZE_PENDING_MAX_ATTEMPTS = 15;
 
 function createOperatorSpawnService({
   runService,
@@ -69,12 +82,109 @@ function createOperatorSpawnService({
   agentProfileService, // optional — used for env_allowlist resolution
   skillPackService,    // optional — Phase 2: inject project skill pack list into PM prompt
   nodeService,         // optional — Fleet P4: run Operators on the project's bound node
+  projectMaterializationService,
   isSpecialistAvailable = () => false, // MD-1: mid-turn specialist delegation prompt gate
   authResolverOpts = {},
   resolveManagerAuth = defaultResolveManagerAuth, // optional DI — tests inject to force canAuth
   logger,
 }) {
   const log = logger || ((msg) => console.log(`[pmSpawn] ${msg}`));
+
+  function failOperatorRun(runId, eventType, payload, message, httpStatus = 502) {
+    try { runService.updateRunStatus(runId, 'failed', { force: true }); } catch { /* ignore */ }
+    try { runService.addRunEvent(runId, eventType, JSON.stringify(payload || {})); } catch { /* ignore */ }
+    const err = new Error(message);
+    err.httpStatus = httpStatus;
+    throw err;
+  }
+
+  async function materializeOperatorWorkspace({ runId, project, nodeId }) {
+    if (!projectMaterializationService || typeof projectMaterializationService.ensureWorkspace !== 'function') {
+      failOperatorRun(
+        runId,
+        'operator:materialize_failed',
+        { project_id: project.id, reason: 'service_unavailable' },
+        'repo materialization service is unavailable',
+      );
+    }
+    const claimed = runService.claimQueuedRunForMaterialization(runId);
+    if (!claimed?.token) {
+      failOperatorRun(
+        runId,
+        'operator:materialize_failed',
+        { project_id: project.id, reason: 'claim_failed' },
+        'repo materialization claim failed',
+      );
+    }
+    // A pending result means ANOTHER run (worker) holds the single-flight cache
+    // lease and is cloning the same (project,node,generation). A real clone can
+    // take several seconds, so a 3×100ms window would 409 the operator spawn
+    // while the peer clone is still in flight. Wait longer (bounded, growing
+    // backoff → ~10s) so the operator attaches to the freshly-cached repo once
+    // the peer finishes, instead of forcing a manual retry (Codex PR5 NIT).
+    let lastPending = null;
+    for (let attempt = 0; attempt < MATERIALIZE_PENDING_MAX_ATTEMPTS; attempt += 1) {
+      let result;
+      try {
+        result = await projectMaterializationService.ensureWorkspace({
+          project,
+          nodeId,
+          runId,
+          claimToken: claimed.token,
+        });
+      } catch (err) {
+        failOperatorRun(
+          runId,
+          'operator:materialize_failed',
+          { project_id: project.id, message: err.message },
+          `repo materialization failed: ${err.message}`,
+        );
+      }
+      if (result?.unsupported) {
+        failOperatorRun(
+          runId,
+          'operator:repo_remote_unsupported',
+          { project_id: project.id, node_id: nodeId || 'local' },
+          'repo materialization is unsupported on remote nodes',
+        );
+      }
+      if (result?.ready) {
+        const current = result.run || runService.getRun(runId);
+        const workspacePath = result.workspacePath || current.workspace_path || null;
+        const cwd = result.cwd ||
+          resolveMaterializedRepoCwd(current, project) ||
+          cwdFromWorkspacePath(workspacePath, project);
+        if (!workspacePath || !cwd) {
+          failOperatorRun(
+            runId,
+            'operator:materialize_failed',
+            { project_id: project.id, reason: 'workspace_missing' },
+            'repo materialization completed without a workspace path',
+          );
+        }
+        return { workspacePath, cwd };
+      }
+      if (result?.pending) {
+        lastPending = result;
+        const backoffMs = Math.min(Number(result.backoffMs || 100) * (attempt + 1), 1000);
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+        continue;
+      }
+      failOperatorRun(
+        runId,
+        'operator:materialize_failed',
+        { project_id: project.id, reason: 'not_ready' },
+        'repo materialization did not produce a ready workspace',
+      );
+    }
+    failOperatorRun(
+      runId,
+      'operator:materialize_failed',
+      { project_id: project.id, reason: 'pending_timeout', backoff_ms: lastPending?.backoffMs || null },
+      'repo materialization is still pending',
+      409,
+    );
+  }
 
   // Resolve the adapter type to actually spawn for this project. Spec §7.2
   // fallback. Project preferences use the persisted value ('claude'|'codex'),
@@ -187,6 +297,8 @@ function createOperatorSpawnService({
       ? (nodeService.resolveNode(project) || 'local')
       : 'local';
     const isRemoteNode = !!(nodeId && nodeId !== 'local');
+    const projectSource = resolveProjectSource(project);
+    const isRepoProject = projectSource.isRepo;
     if (isRemoteNode && nodeService && typeof nodeService.getNode === 'function') {
       let node = null;
       try {
@@ -261,6 +373,7 @@ function createOperatorSpawnService({
     const threadNode = brief && brief.pm_thread_node_id ? brief.pm_thread_node_id : null;
     const expectedBriefAdapter = adapterType === 'codex' ? 'codex' : 'claude';
     let threadRebindReset = null;
+    let threadSourceReset = null;
     if (briefHandle && (threadNode || 'local') !== (nodeId || 'local')) {
       threadRebindReset = { from_node: threadNode, to_node: nodeId || 'local' };
       briefHandle = null;
@@ -270,6 +383,19 @@ function createOperatorSpawnService({
         }
       } catch (err) {
         log(`clearPmThread failed project=${projectId}: ${err.message}`);
+      }
+    }
+    if (briefHandle && isRepoProject) {
+      threadSourceReset = repoThreadSourceReset(brief, project);
+      if (threadSourceReset) {
+        briefHandle = null;
+        try {
+          if (projectBriefService && typeof projectBriefService.clearPmThread === 'function') {
+            projectBriefService.clearPmThread(projectId);
+          }
+        } catch (err) {
+          log(`clearPmThread(source mismatch) failed project=${projectId}: ${err.message}`);
+        }
       }
     }
     if (briefHandle && briefAdapter !== expectedBriefAdapter) {
@@ -287,6 +413,12 @@ function createOperatorSpawnService({
       : null;
     const resumeSessionId = adapterType === 'claude-code' && briefHandle && briefAdapter === 'claude'
       ? briefHandle
+      : null;
+    const resumeRepoWorkspace = isRepoProject && (resumeThreadId || resumeSessionId)
+      ? {
+          workspacePath: brief.pm_thread_workspace_path,
+          cwd: brief.pm_thread_cwd || cwdFromWorkspacePath(brief.pm_thread_workspace_path, project),
+        }
       : null;
 
     // Create the run row FIRST so we have a stable runId. The runId is
@@ -307,26 +439,30 @@ function createOperatorSpawnService({
     if (threadRebindReset) {
       try { runService.addRunEvent(runId, 'operator:thread_rebind_reset', JSON.stringify(threadRebindReset)); } catch { /* ignore */ }
     }
+    if (threadSourceReset) {
+      try { runService.addRunEvent(runId, 'operator:thread_source_reset', JSON.stringify(threadSourceReset)); } catch { /* ignore */ }
+    }
     if (isRemoteNode && !process.env.PALANTIR_BASE_URL) {
       try { runService.addRunEvent(runId, 'operator:remote_base_url_localhost', JSON.stringify({ node_id: nodeId })); } catch { /* ignore */ }
     }
 
-    let executor;
-    let nodePrefix;
-    if (isRemoteNode) {
-      try {
-        const node = nodeService.getNode(nodeId);
-        executor = nodeService.pickExecutor(nodeId);
-        if (!executor) throw new Error(`No executor available for node ${nodeId}`);
-        nodePrefix = node && node.node_prefix ? node.node_prefix : undefined;
-      } catch (err) {
-        try { runService.updateRunStatus(runId, 'failed', { force: true }); } catch { /* ignore */ }
-        try { runService.addRunEvent(runId, 'error', JSON.stringify({ message: err.message })); } catch { /* ignore */ }
-        const wrap = new Error(`PM node executor unavailable: ${err.message}`);
-        wrap.httpStatus = 502;
-        throw wrap;
+    const finishSpawn = (materializedRepoWorkspace = null) => {
+      let executor;
+      let nodePrefix;
+      if (isRemoteNode) {
+        try {
+          const node = nodeService.getNode(nodeId);
+          executor = nodeService.pickExecutor(nodeId);
+          if (!executor) throw new Error(`No executor available for node ${nodeId}`);
+          nodePrefix = node && node.node_prefix ? node.node_prefix : undefined;
+        } catch (err) {
+          try { runService.updateRunStatus(runId, 'failed', { force: true }); } catch { /* ignore */ }
+          try { runService.addRunEvent(runId, 'error', JSON.stringify({ message: err.message })); } catch { /* ignore */ }
+          const wrap = new Error(`PM node executor unavailable: ${err.message}`);
+          wrap.httpStatus = 502;
+          throw wrap;
+        }
       }
-    }
 
     // System prompt for the PM layer. Dynamic context (run/agent/project
     // list) is deliberately NOT included — Codex's model_instructions_file
@@ -380,12 +516,18 @@ function createOperatorSpawnService({
       markPmRunStartedOnce();
       if (resumeThreadId && resumeThreadId === threadId) return;
       try {
-        projectBriefService.setPmThread(projectId, {
+        const fields = {
           pm_thread_id: threadId,
           pm_adapter: adapterType === 'codex' ? 'codex' : 'claude',
           pm_thread_node_id: isRemoteNode ? nodeId : null,
-          pm_thread_cwd: isRemoteNode ? cwd : null,
-        });
+          pm_thread_cwd: materializedRepoWorkspace || isRemoteNode ? cwd : null,
+        };
+        if (materializedRepoWorkspace) {
+          fields.pm_thread_source_generation = Number(project.source_generation || 0);
+          fields.pm_thread_source_hash = repoSourceHash(project);
+          fields.pm_thread_workspace_path = materializedRepoWorkspace.workspacePath;
+        }
+        projectBriefService.setPmThread(projectId, fields);
       } catch (err) {
         log(`setPmThread failed project=${projectId}: ${err.message}`);
       }
@@ -398,12 +540,18 @@ function createOperatorSpawnService({
       // updated_at bump on every resume. (Codex P5-S4c NIT.)
       if (resumeSessionId && resumeSessionId === sessionId) return;
       try {
-        projectBriefService.setPmThread(projectId, {
+        const fields = {
           pm_thread_id: sessionId,
           pm_adapter: 'claude',
           pm_thread_node_id: isRemoteNode ? nodeId : null,
-          pm_thread_cwd: isRemoteNode ? cwd : null,
-        });
+          pm_thread_cwd: materializedRepoWorkspace || isRemoteNode ? cwd : null,
+        };
+        if (materializedRepoWorkspace) {
+          fields.pm_thread_source_generation = Number(project.source_generation || 0);
+          fields.pm_thread_source_hash = repoSourceHash(project);
+          fields.pm_thread_workspace_path = materializedRepoWorkspace.workspacePath;
+        }
+        projectBriefService.setPmThread(projectId, fields);
       } catch (err) {
         log(`setPmThread(claude) failed project=${projectId}: ${err.message}`);
       }
@@ -420,53 +568,55 @@ function createOperatorSpawnService({
     // enforce the workspace surface. A coder PM is always legacy (folder +
     // dispatcher), so isEnforced===false → provable no-op (byte-identical). The
     // seam is proven to compose with the real run + project.directory here.
-    let cwd;
-    if (isRemoteNode) {
-      cwd = project.directory || null;
-    } else {
-      const operatorContext = deriveLegacyContext({ run, workspaceDir: project.directory });
-      enforceWorkspace(operatorContext, 'spawn_cwd');
-      cwd = resolveSpawnCwd({ workspaceDir: project.directory });
-    }
-    try {
-      const startOpts = {
-        systemPrompt,
-        cwd,
-        // A REMOTE Operator must NOT receive the control-plane's spawnEnv
-        // (buildManagerSpawnEnv is process.env-based): shipping the Mac's PATH
-        // to the pod overrides the pathPrefix and breaks codex resolution (127
-        // 'codex: No such file or directory'), and leaks control-plane creds.
-        // The pod provides its own env + ~/.codex auth; codex is resolved via
-        // nodePrefix→PATH. Local keeps the filtered spawnEnv. (Real-Pi finding;
-        // S3a review SERIOUS-3.)
-        env: isRemoteNode ? {} : spawnEnv,
-        role: 'manager',
-        nodeId,
-        resumeThreadId,
-        resumeSessionId,
-        onThreadStarted,
-        onSessionStarted,
-        mcpTools: pmMcpTools.length > 0 ? pmMcpTools : undefined,
-        // P4-2: pass project-scoped MCP config file path to the adapter.
-        // Claude adapter forwards this to streamJsonEngine as --mcp-config.
-        // Codex adapter accepts only object-shaped MCP config for dotted
-        // -c flattening, so it skips path strings and annotates the run.
-        mcpConfig: project.mcp_config_path || undefined,
-      };
-      if (isRemoteNode) {
-        startOpts.executor = executor;
-        startOpts.nodePrefix = nodePrefix;
+      let cwd;
+      if (materializedRepoWorkspace) {
+        cwd = materializedRepoWorkspace.cwd;
+      } else if (isRemoteNode) {
+        cwd = project.directory || null;
+      } else {
+        const operatorContext = deriveLegacyContext({ run, workspaceDir: project.directory });
+        enforceWorkspace(operatorContext, 'spawn_cwd');
+        cwd = resolveSpawnCwd({ workspaceDir: project.directory });
       }
-      adapter.startSession(runId, startOpts);
-    } catch (err) {
-      // Adapter startup failed — mark the run as failed and bubble up
-      // so conversationService can surface a 502.
-      try { runService.updateRunStatus(runId, 'failed', { force: true }); } catch { /* ignore */ }
-      try { runService.addRunEvent(runId, 'error', JSON.stringify({ message: err.message })); } catch { /* ignore */ }
-      const wrap = new Error(`PM adapter startSession failed: ${err.message}`);
-      wrap.httpStatus = 502;
-      throw wrap;
-    }
+      try {
+        const startOpts = {
+          systemPrompt,
+          cwd,
+          // A REMOTE Operator must NOT receive the control-plane's spawnEnv
+          // (buildManagerSpawnEnv is process.env-based): shipping the Mac's PATH
+          // to the pod overrides the pathPrefix and breaks codex resolution (127
+          // 'codex: No such file or directory'), and leaks control-plane creds.
+          // The pod provides its own env + ~/.codex auth; codex is resolved via
+          // nodePrefix→PATH. Local keeps the filtered spawnEnv. (Real-Pi finding;
+          // S3a review SERIOUS-3.)
+          env: isRemoteNode ? {} : spawnEnv,
+          role: 'manager',
+          nodeId,
+          resumeThreadId,
+          resumeSessionId,
+          onThreadStarted,
+          onSessionStarted,
+          mcpTools: pmMcpTools.length > 0 ? pmMcpTools : undefined,
+          // P4-2: pass project-scoped MCP config file path to the adapter.
+          // Claude adapter forwards this to streamJsonEngine as --mcp-config.
+          // Codex adapter accepts only object-shaped MCP config for dotted
+          // -c flattening, so it skips path strings and annotates the run.
+          mcpConfig: project.mcp_config_path || undefined,
+        };
+        if (isRemoteNode) {
+          startOpts.executor = executor;
+          startOpts.nodePrefix = nodePrefix;
+        }
+        adapter.startSession(runId, startOpts);
+      } catch (err) {
+        // Adapter startup failed — mark the run as failed and bubble up
+        // so conversationService can surface a 502.
+        try { runService.updateRunStatus(runId, 'failed', { force: true }); } catch { /* ignore */ }
+        try { runService.addRunEvent(runId, 'error', JSON.stringify({ message: err.message })); } catch { /* ignore */ }
+        const wrap = new Error(`PM adapter startSession failed: ${err.message}`);
+        wrap.httpStatus = 502;
+        throw wrap;
+      }
 
     // P2-1: markRunStarted is NO LONGER called here. The onThreadStarted
     // callback above now owns that transition:
@@ -480,10 +630,38 @@ function createOperatorSpawnService({
     //     'running' === adapter has a live execution context).
 
     // Register in the manager registry so sendToManagerSlot finds it.
-    managerRegistry.setActive(slotKey, runId, adapter);
+      managerRegistry.setActive(slotKey, runId, adapter);
 
-    const registered = runService.getRun(runId);
-    return { run: registered, spawned: true, resumed: !!(resumeThreadId || resumeSessionId) };
+      const registered = runService.getRun(runId);
+      return { run: registered, spawned: true, resumed: !!(resumeThreadId || resumeSessionId) };
+    };
+
+    if (isRepoProject) {
+      if (!repoFeatureEnabled()) {
+        failOperatorRun(
+          runId,
+          'operator:materialize_failed',
+          { project_id: project.id, reason: 'feature_disabled' },
+          'project repo materialization is disabled',
+          409,
+        );
+      }
+      if (isRemoteNode) {
+        failOperatorRun(
+          runId,
+          'operator:repo_remote_unsupported',
+          { project_id: project.id, node_id: nodeId || 'local' },
+          'repo materialization is unsupported on remote nodes',
+        );
+      }
+      if (resumeRepoWorkspace) {
+        return finishSpawn(resumeRepoWorkspace);
+      }
+      return materializeOperatorWorkspace({ runId, project, nodeId })
+        .then((workspace) => finishSpawn(workspace));
+    }
+
+    return finishSpawn();
   }
 
   return { ensureLiveOperator, resolveOperatorAdapterType };

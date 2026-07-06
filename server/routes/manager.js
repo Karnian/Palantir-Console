@@ -8,6 +8,12 @@ const {
   buildInitialUserContext,
 } = require('../services/managerSystemPrompt');
 const { resolveSpawnCwd } = require('../utils/spawnCwd');
+const { resolveProjectSource } = require('../services/projectSource');
+const {
+  repoFeatureEnabled,
+  cwdFromWorkspacePath,
+  repoThreadSourceReset,
+} = require('../utils/repoOperatorThread');
 const {
   isProjectLayer,
   parseProjectConversationId,
@@ -193,6 +199,8 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   ? (nodeService.resolveNode(project) || 'local')
                   : 'local';
                 const isRemoteNode = !!(nodeId && nodeId !== 'local');
+                const projectSource = resolveProjectSource(project);
+                const isRepoProject = projectSource.isRepo;
                 if (isRemoteNode && nodeService && typeof nodeService.getNode === 'function') {
                   let node = null;
                   try {
@@ -222,6 +230,22 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   } catch { /* ignore */ }
                   resumeHandle = null;
                 }
+                if (resumeHandle && isRepoProject) {
+                  const threadSourceReset = repoThreadSourceReset(brief, project);
+                  if (threadSourceReset) {
+                    try {
+                      if (projectBriefService && typeof projectBriefService.clearPmThread === 'function') {
+                        projectBriefService.clearPmThread(projectId);
+                      }
+                    } catch (err) {
+                      console.warn(`[boot] Failed to clear source-mismatched PM thread project=${projectId}: ${err.message}`);
+                    }
+                    try {
+                      runService.addRunEvent(r.id, 'operator:thread_source_reset', JSON.stringify(threadSourceReset));
+                    } catch { /* ignore */ }
+                    resumeHandle = null;
+                  }
+                }
                 if (resumeHandle && briefAdapter !== expectedBriefAdapter) {
                   try {
                     if (projectBriefService && typeof projectBriefService.clearPmThread === 'function') {
@@ -234,6 +258,18 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 }
                 if (!resumeHandle) {
                   throw new Error('PM session handle is not resumable for this project node/adapter');
+                }
+                if (isRepoProject && !repoFeatureEnabled()) {
+                  try {
+                    runService.addRunEvent(r.id, 'operator:materialize_failed', JSON.stringify({ project_id: projectId, reason: 'feature_disabled' }));
+                  } catch { /* ignore */ }
+                  throw new Error('repo Operator resume requires PALANTIR_PROJECT_REPO=1');
+                }
+                if (isRepoProject && isRemoteNode) {
+                  try {
+                    runService.addRunEvent(r.id, 'operator:repo_remote_unsupported', JSON.stringify({ project_id: projectId, node_id: nodeId || 'local' }));
+                  } catch { /* ignore */ }
+                  throw new Error('repo materialization is unsupported on remote nodes');
                 }
                 let executor;
                 let nodePrefix;
@@ -277,7 +313,12 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 // Local still requires canAuth. (Codex S3b review.)
                 if (isRemoteNode || authCtx.canAuth) {
                   const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env });
-                  const cwd = isRemoteNode ? (project.directory || null) : resolveSpawnCwd({ workspaceDir: project.directory });
+                  const cwd = isRepoProject
+                    ? (brief.pm_thread_cwd || cwdFromWorkspacePath(brief.pm_thread_workspace_path, project))
+                    : (isRemoteNode ? (project.directory || null) : resolveSpawnCwd({ workspaceDir: project.directory }));
+                  if (isRepoProject && !cwd) {
+                    throw new Error('repo Operator resume has no materialized cwd');
+                  }
                   if (isRemoteNode && !process.env.PALANTIR_BASE_URL) {
                     try { runService.addRunEvent(r.id, 'operator:remote_base_url_localhost', JSON.stringify({ node_id: nodeId })); } catch { /* ignore */ }
                   }
@@ -646,7 +687,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     // entry point the client used.
     const { text, images } = req.body || {};
     try {
-      const result = conversationService.sendMessage('top', { text, images });
+      const result = await conversationService.sendMessage('top', { text, images });
       return res.json(result);
     } catch (err) {
       if (err && err.httpStatus === 400) {
@@ -673,7 +714,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       return res.status(501).json({ error: 'PM spawn service not available' });
     }
     try {
-      const result = operatorSpawnService.ensureLiveOperator({ projectId });
+      const result = await operatorSpawnService.ensureLiveOperator({ projectId });
       return res.json({ run: result.run, spawned: result.spawned, resumed: result.resumed });
     } catch (err) {
       if (err && err.httpStatus) {
@@ -700,7 +741,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     }
     const { text, images } = req.body || {};
     try {
-      const result = conversationService.sendMessage(conversationIdForProject(projectId), { text, images });
+      const result = await conversationService.sendMessage(conversationIdForProject(projectId), { text, images });
       return res.json(result);
     } catch (err) {
       if (err && err.httpStatus === 400) {
