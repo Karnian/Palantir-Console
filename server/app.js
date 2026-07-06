@@ -761,6 +761,7 @@ function createApp(options = {}) {
     eventBus,
     testRunner: options.harvestTestRunner,
     nodeExecutor,
+    nodeService,
   });
   const webhookService = createWebhookService({
     eventBus,
