@@ -148,6 +148,11 @@ function parentFor(remotePath) {
   return path.posix.dirname(stripped || remotePath);
 }
 
+function basenameFor(remotePath) {
+  const stripped = remotePath.length > 1 ? remotePath.replace(/\/+$/, '') : remotePath;
+  return path.posix.basename(stripped);
+}
+
 function commandError(command, args, res) {
   const message = res.stderr || res.stdout || `${command} ${args.join(' ')} failed with code ${res.code}`;
   const err = new Error(message);
@@ -485,6 +490,18 @@ function createRemoteSshNodeExecutor(node, {
     } catch (err) {
       if (err.code === 'SSH_TRANSPORT' || err.code === 'EXPOSED_ROOTS') throw err;
       if (allowMissing) {
+        const immediateParent = parentFor(remotePath);
+        try {
+          const parentCanonical = await rawRealpath(immediateParent);
+          await assertCanonicalWithinRoots(parentCanonical, remotePath);
+          return {
+            canonical: path.posix.join(parentCanonical, basenameFor(remotePath)),
+            parentCanonical,
+            exists: false,
+          };
+        } catch (parentErr) {
+          if (parentErr.code === 'SSH_TRANSPORT' || parentErr.code === 'EXPOSED_ROOTS') throw parentErr;
+        }
         let ancestor = parentFor(remotePath);
         while (true) {
           try {
@@ -642,13 +659,26 @@ function createRemoteSshNodeExecutor(node, {
   }
 
   async function rmrf(remotePath) {
-    const checked = await assertWithinRoots(remotePath);
+    const checked = await assertWithinRoots(remotePath, { allowMissing: true });
+    if (!checked.exists) return;
     const roots = await canonicalRoots();
     if (roots.some((root) => checked.canonical === root)) {
       throw exposedRootsError(`Refusing to remove exposed root: ${remotePath}`);
     }
     const res = await runRemoteCommand('rm', ['-rf', checked.canonical]);
     if (res.code !== 0) throw commandError('rm', ['-rf', checked.canonical], res);
+  }
+
+  async function move(src, dst) {
+    const checkedSrc = await assertWithinRoots(src);
+    const checkedDst = await assertWithinRoots(dst, { allowMissing: true });
+    if (!checkedDst.canonical) {
+      throw exposedRootsError(`Remote destination parent is outside exposed_roots: ${dst}`);
+    }
+    const target = checkedDst.canonical;
+    const res = await runRemoteCommand('mv', [checkedSrc.canonical, target]);
+    if (res.code !== 0) throw commandError('mv', [checkedSrc.canonical, target], res);
+    await assertWithinRoots(dst);
   }
 
   function workerPaths(runId) {
@@ -790,7 +820,8 @@ function createRemoteSshNodeExecutor(node, {
     writeTempFile,
     putSecretFile,
     rmrf,
-    assertWithinRoots: async (remotePath) => (await assertWithinRoots(remotePath)).canonical,
+    move,
+    assertWithinRoots: async (remotePath, options = {}) => (await assertWithinRoots(remotePath, options)).canonical,
   };
 }
 

@@ -238,6 +238,7 @@ function createLocalNodeExecutor({ executionEngine, streamJsonEngine } = {}) {
     writeTempFile,
     putSecretFile,
     rmrf: (p) => fsp.rm(p, { recursive: true, force: true }),
+    move: (src, dst) => fsp.rename(src, dst),
     attachEngines,
     spawnWorker: (...args) => requireWorkerChannel('spawnWorker').spawnWorker(...args),
     ownerOf: (...args) => requireWorkerChannel('ownerOf').ownerOf(...args),

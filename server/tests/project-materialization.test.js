@@ -108,21 +108,21 @@ function fakeGitExecutor({ failClone = false, failFirstWorktreeAdd = false } = {
       if (command !== 'git') return { code: 127, stdout: '', stderr: 'bad command' };
       if (args[0] === 'clone') {
         if (failClone) return { code: 1, stdout: '', stderr: 'clone failed' };
-        fs.mkdirSync(path.join(args[3], '.git'), { recursive: true });
+        fs.mkdirSync(path.join(args[4], '.git'), { recursive: true });
         return { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'fetch') return { code: 0, stdout: '', stderr: '' };
       if (args[0] === 'rev-parse') return { code: 0, stdout: `${commit}\n`, stderr: '' };
       if (args[0] === 'worktree' && args[1] === 'add') {
         worktreeAdds++;
-        fs.mkdirSync(args[2], { recursive: true });
+        fs.mkdirSync(args[3], { recursive: true });
         if (failFirstWorktreeAdd && worktreeAdds === 1) {
           return { code: 1, stdout: '', stderr: 'worktree add failed' };
         }
         return { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'worktree' && args[1] === 'remove') {
-        fs.rmSync(args[3], { recursive: true, force: true });
+        fs.rmSync(args.at(-1), { recursive: true, force: true });
         return { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'ls-remote') return { code: 0, stdout: `${commit}\trefs/heads/main\n`, stderr: '' };
@@ -130,6 +130,18 @@ function fakeGitExecutor({ failClone = false, failFirstWorktreeAdd = false } = {
     },
     async fileExists(target) {
       return fs.existsSync(target);
+    },
+    async mkdir(target, options = {}) {
+      fs.mkdirSync(target, options);
+    },
+    async rmrf(target) {
+      fs.rmSync(target, { recursive: true, force: true });
+    },
+    async move(src, dst) {
+      fs.renameSync(src, dst);
+    },
+    async readFile(target) {
+      return fs.readFileSync(target, 'utf8');
     },
   };
 }
@@ -655,18 +667,22 @@ test('CAS mismatch after worktree add cleans worktree and releases ref', async (
       if (args[0] === 'rev-parse') return { code: 0, stdout: args[1] === '--git-dir' ? '.git\n' : `${commit}\n`, stderr: '' };
       if (args[0] === 'fetch') return { code: 0, stdout: '', stderr: '' };
       if (args[0] === 'worktree' && args[1] === 'add') {
-        fs.mkdirSync(args[2], { recursive: true });
+        fs.mkdirSync(args[3], { recursive: true });
         runService.updateRunStatus(run.id, 'cancelled');
         return { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'worktree' && args[1] === 'remove') return { code: 0, stdout: '', stderr: '' };
       if (args[0] === 'clone') {
-        fs.mkdirSync(path.join(args[3], '.git'), { recursive: true });
+        fs.mkdirSync(path.join(args[4], '.git'), { recursive: true });
         return { code: 0, stdout: '', stderr: '' };
       }
       return { code: 0, stdout: '', stderr: '' };
     },
     async fileExists(target) { return fs.existsSync(target); },
+    async mkdir(target, options = {}) { fs.mkdirSync(target, options); },
+    async rmrf(target) { fs.rmSync(target, { recursive: true, force: true }); },
+    async move(src, dst) { fs.renameSync(src, dst); },
+    async readFile(target) { return fs.readFileSync(target, 'utf8'); },
   };
   const nodeService = {
     pickExecutor() { return executor; },
@@ -802,7 +818,7 @@ test('non-repo claimed run returns to queued through token CAS', async (t) => {
   assert.equal(executor.calls.length, 0);
 });
 
-test('remote node materialization is unsupported and never picks executor', async (t) => {
+test('remote node without exposed_roots is unsupported and never picks executor', async (t) => {
   const root = await tempRoot(t, 'project-materialization-remote-');
   withRepoEnv(t, root);
   const db = await mkdb(t);
@@ -822,7 +838,7 @@ test('remote node materialization is unsupported and never picks executor', asyn
   let picked = 0;
   const nodeService = {
     getNode() { return { id: 'node_remote', kind: 'ssh', reachable: 1, can_execute: 1, files_only: 0, cordoned: 0 }; },
-    pickExecutor() { picked++; throw new Error('must not pick executor for remote materialization'); },
+    pickExecutor() { picked++; throw new Error('must not pick executor for malformed remote materialization'); },
   };
   const materializationService = createProjectMaterializationService({ runService, projectService, nodeService });
 

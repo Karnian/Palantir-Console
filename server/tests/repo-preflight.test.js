@@ -46,8 +46,34 @@ test('repo preflight runs git ls-remote and returns first SHA fingerprint', asyn
   assert.deepEqual(calls[0], ['pickExecutor', 'node-a']);
   assert.equal(calls[1][1], 'git');
   assert.equal(calls[1][2][0], 'ls-remote');
-  assert.deepEqual(calls[1][2], ['ls-remote', '--exit-code', 'git@github.com:acme/repo.git', 'main']);
+  assert.deepEqual(calls[1][2], ['ls-remote', '--exit-code', '--', 'git@github.com:acme/repo.git', 'main']);
   assert.equal(calls[1][3].timeoutMs, 10000);
+  // Non-interactive env so an ssh:// preflight cannot hang on a host-key /
+  // password prompt (Codex PR5a R2 NIT).
+  assert.equal(calls[1][3].env.GIT_TERMINAL_PROMPT, '0');
+  assert.match(calls[1][3].env.GIT_SSH_COMMAND, /BatchMode=yes/);
+});
+
+test('repo preflight puts option terminator before a hostile repo_url (no git option smuggling)', async () => {
+  const { service, calls } = createService(async () => ({
+    code: 0,
+    stdout: '0123456789abcdef0123456789abcdef01234567\tHEAD\n',
+    stderr: '',
+  }));
+
+  await service.preflight({
+    repoUrl: '--upload-pack=touch /tmp/pwned',
+    repoRef: '--config=core.foo=bar',
+    nodeId: 'node-a',
+  });
+
+  const args = calls[1][2];
+  const dashDash = args.indexOf('--');
+  // The `--` must precede BOTH positionals so git parses the hostile strings as
+  // a URL + ref, never as options.
+  assert.ok(dashDash >= 0, 'ls-remote args must contain an option terminator');
+  assert.ok(args.indexOf('--upload-pack=touch /tmp/pwned') > dashDash);
+  assert.ok(args.indexOf('--config=core.foo=bar') > dashDash);
 });
 
 test('repo preflight classifies auth failure without exposing stderr', async () => {

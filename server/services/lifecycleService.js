@@ -505,7 +505,6 @@ function createLifecycleService({
     if (!repoFeatureEnabled() || !materializationService) return false;
     const node = getDispatchNode(nodeId);
     if (!node) return false;
-    if ((node.kind || 'local') !== 'local') return false;
     if (Number(node.reachable) !== 1) return false;
     if (Number(node.cordoned || 0) === 1) return false;
     if (Number(node.can_execute) !== 1 || Number(node.files_only || 0) === 1) return false;
