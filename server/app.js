@@ -41,6 +41,7 @@ const { createHarvestService } = require('./services/harvestService');
 const { createLocalNodeExecutor } = require('./services/nodeExecutor');
 const { createWebhookService } = require('./services/webhookService');
 const { createLifecycleService } = require('./services/lifecycleService');
+const { createProjectMaterializationService } = require('./services/projectMaterializationService');
 const { createAuthMiddleware } = require('./middleware/auth');
 const { errorHandler } = require('./middleware/errorHandler');
 const { createManagerRouter } = require('./routes/manager');
@@ -747,6 +748,12 @@ function createApp(options = {}) {
   nodeExecutor.attachEngines({ executionEngine, streamJsonEngine });
   const managerAdapterFactory = createManagerAdapterFactory({ streamJsonEngine, runService });
   const worktreeService = createWorktreeService({ nodeExecutor });
+  const projectMaterializationService = createProjectMaterializationService({
+    runService,
+    projectService,
+    nodeService,
+    eventBus,
+  });
   const harvestService = createHarvestService({
     runService,
     worktreeService,
@@ -771,6 +778,7 @@ function createApp(options = {}) {
     executionEngine, streamJsonEngine, worktreeService, harvestService, eventBus,
     skillPackService,
     nodeService,
+    projectMaterializationService,
     // Share the app-wide executor (P2 remote rollout swaps this per node —
     // a default-constructed local executor here would be a forgotten seam).
     nodeExecutor,
@@ -1137,6 +1145,7 @@ function createApp(options = {}) {
     agentProfileService,
     nodeSummaryService,
     lifecycleService,
+    projectMaterializationService,
     harvestService,
     webhookService,
     worktreeService,

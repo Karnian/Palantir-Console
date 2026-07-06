@@ -9,8 +9,11 @@
  * - Status transitions (run completes → task moves to review)
  */
 
+const path = require('node:path');
 const { createLocalNodeExecutor, createLocalWorkerChannel } = require('./nodeExecutor');
 const { explainDispatch } = require('./dispatchPolicy');
+const { resolveProjectSource } = require('./projectSource');
+const { createProjectMaterializationService } = require('./projectMaterializationService');
 
 function createLifecycleService({
   runService,
@@ -29,6 +32,10 @@ function createLifecycleService({
   authResolverOpts,           // { hasKeychain, readKeychainToken, prefer, tmpRoot }
   nodeService,
   nodeExecutor,
+  projectMaterializationService,
+  maxMaterializingPerNode,
+  maxMaterializingGlobal,
+  materializeStuckMs,
   queueStuckMs,
   now,
 }) {
@@ -67,8 +74,21 @@ function createLifecycleService({
     const raw = queueStuckMs !== undefined ? Number(queueStuckMs) : Number(process.env.PALANTIR_QUEUE_STUCK_MS);
     return Number.isFinite(raw) && raw > 0 ? raw : 15 * 60 * 1000;
   })();
+  const MATERIALIZE_STUCK_THRESHOLD_MS = (() => {
+    const raw = materializeStuckMs !== undefined ? Number(materializeStuckMs) : Number(process.env.PALANTIR_MATERIALIZE_STUCK_MS);
+    return Number.isFinite(raw) && raw > 0 ? raw : 10 * 60 * 1000;
+  })();
+  const MAX_MATERIALIZING_PER_NODE = (() => {
+    const raw = maxMaterializingPerNode !== undefined ? Number(maxMaterializingPerNode) : Number(process.env.PALANTIR_MAX_MATERIALIZING_PER_NODE);
+    return Number.isInteger(raw) && raw > 0 ? raw : 2;
+  })();
+  const MAX_MATERIALIZING_GLOBAL = (() => {
+    const raw = maxMaterializingGlobal !== undefined ? Number(maxMaterializingGlobal) : Number(process.env.PALANTIR_MAX_MATERIALIZING_GLOBAL);
+    return Number.isInteger(raw) && raw > 0 ? raw : 4;
+  })();
   const nowMs = typeof now === 'function' ? now : Date.now;
   const MAX_RETRY = 1;
+  const MAX_MATERIALIZE_ATTEMPTS = 3;
   let heartbeatTimer = null;
   let healthCheckRunning = false; // Re-entrancy guard
   let unsubscribeEventBus = null; // for stopMonitoring teardown
@@ -77,6 +97,30 @@ function createLifecycleService({
   // for worktree cleanup when the run→task→project chain has been broken (e.g. the
   // task or project was deleted while the run was still in flight).
   const _runProjectDirs = new Map();
+  const _materializationTimers = new Set();
+  const materializationService = projectMaterializationService || (
+    nodeService
+      ? createProjectMaterializationService({
+        runService,
+        projectService,
+        nodeService,
+        eventBus,
+        logger: console,
+      })
+      : null
+  );
+
+  function repoFeatureEnabled() {
+    return process.env.PALANTIR_PROJECT_REPO === '1';
+  }
+
+  function projectIsRepo(project) {
+    try {
+      return resolveProjectSource(project || {}).isRepo;
+    } catch {
+      return false;
+    }
+  }
 
   /**
    * Check if the agent process for a tmux run is actively consuming CPU.
@@ -275,6 +319,53 @@ function createLifecycleService({
     return `palantir/${String(runId).replace(/_/g, '-')}`;
   }
 
+  function normalizeRepoSubdir(subdir) {
+    if (!subdir) return null;
+    const raw = String(subdir).trim();
+    if (!raw) return null;
+    if (path.isAbsolute(raw)) throw new Error('repo_subdir must be relative');
+    const parts = raw.split(/[\\/]+/).filter(Boolean);
+    if (parts.some((part) => part === '.' || part === '..')) {
+      throw new Error('repo_subdir escapes repository root');
+    }
+    return parts.join(path.sep);
+  }
+
+  function resolveMaterializedRepoCwd(run, project) {
+    if (!run?.workspace_path || !run.resolved_commit) return null;
+    const sourceGeneration = Number(project?.source_generation || 0);
+    if (Number(run.workspace_generation) !== sourceGeneration) return null;
+    const subdir = normalizeRepoSubdir(run.repo_subdir_snapshot || project?.repo_subdir || null);
+    return subdir ? path.join(run.workspace_path, subdir) : run.workspace_path;
+  }
+
+  function countMaterializingOnNode(nodeId) {
+    if (runService && typeof runService.countMaterializingOnNode === 'function') {
+      return runService.countMaterializingOnNode(nodeId || 'local');
+    }
+    return 0;
+  }
+
+  function countMaterializingGlobal() {
+    if (runService && typeof runService.countMaterializingGlobal === 'function') {
+      return runService.countMaterializingGlobal();
+    }
+    return 0;
+  }
+
+  function canMaterializeOnNode(nodeId) {
+    if (!repoFeatureEnabled() || !materializationService) return false;
+    const node = getDispatchNode(nodeId);
+    if (!node) return false;
+    if ((node.kind || 'local') !== 'local') return false;
+    if (Number(node.reachable) !== 1) return false;
+    if (Number(node.cordoned || 0) === 1) return false;
+    if (Number(node.can_execute) !== 1 || Number(node.files_only || 0) === 1) return false;
+    if (countMaterializingOnNode(node.id || nodeId || 'local') >= MAX_MATERIALIZING_PER_NODE) return false;
+    if (countMaterializingGlobal() >= MAX_MATERIALIZING_GLOBAL) return false;
+    return true;
+  }
+
   /**
    * Resolve the project directory associated with a run. Tries the in-memory
    * snapshot first (captured at executeTask), then falls back to walking
@@ -304,6 +395,14 @@ function createLifecycleService({
   async function cleanupRunRuntimeFiles(run) {
     if (!run?.id) return;
     _runProjectDirs.delete(run.id);
+
+    if (runService && typeof runService.releaseWorkspaceRefByRun === 'function') {
+      try {
+        runService.releaseWorkspaceRefByRun(run.id);
+      } catch (err) {
+        console.warn(`[lifecycle] Workspace ref release failed for run ${run.id}: ${err.message}`);
+      }
+    }
 
     // Skill Packs: cleanup MCP config file
     if (run.mcp_config_path) {
@@ -346,8 +445,9 @@ function createLifecycleService({
     const task = taskService.getTask(taskId);
     const profile = agentProfileService.getProfile(agentProfileId);
     let nodeId = 'local';
+    let project = null;
     if (task.project_id) {
-      const project = projectService.getProject(task.project_id);
+      project = projectService.getProject(task.project_id);
       nodeId = resolveProjectNode(project);
     }
 
@@ -363,6 +463,19 @@ function createLifecycleService({
       queued_args: buildQueuedArgs({ skillPackIds, presetId: effectivePresetId }),
       retry_count: 0,
     });
+
+    if (repoFeatureEnabled() && projectIsRepo(project)) {
+      await drainQueue(agentProfileId, { nodeId });
+      const current = runService.getRun(run.id);
+      if (current.status === 'queued') {
+        runService.addRunEvent(run.id, 'queue:enqueued', JSON.stringify({
+          profile_id: agentProfileId,
+          node_id: nodeId,
+          reason: 'repo_materialization_pending',
+        }));
+      }
+      return current;
+    }
 
     if (canDispatchOnNode(nodeId, agentProfileId, profile)) {
       return (await spawnQueuedRun(run.id)) || runService.getRun(run.id);
@@ -412,18 +525,29 @@ function createLifecycleService({
     let projectDir = null;
     let projectMcpConfig = null;
     let project = null;
+    let usesMaterializedRepoWorkspace = false;
     if (task.project_id) {
       project = projectService.getProject(task.project_id);
-      if (project?.source_type === 'git') {
-        runService.addRunEvent(run.id, 'run:repo_materialize_unavailable', JSON.stringify({ project_id: project.id }));
-        runService.updateRunStatus(run.id, 'failed', { force: true, reason: 'repo_materialize_unavailable' });
-        // Return the FAILED run row (not null) to match executeTask's contract:
-        // callers (routes/tasks.js) respond `{ run }`, so the client sees the
-        // failed status + reason rather than a misleading `{ run: null }` 201
-        // (Codex R2 review NIT).
-        return runService.getRun(run.id);
+      if (projectIsRepo(project)) {
+        if (repoFeatureEnabled()) {
+          projectDir = resolveMaterializedRepoCwd(run, project);
+          if (!projectDir) {
+            runService.addRunEvent(run.id, 'run:repo_materialize_unavailable', JSON.stringify({ project_id: project.id }));
+            runService.updateRunStatus(run.id, 'failed', { force: true, reason: 'repo_materialize_unavailable' });
+            return runService.getRun(run.id);
+          }
+          usesMaterializedRepoWorkspace = true;
+        } else {
+          runService.addRunEvent(run.id, 'run:repo_materialize_unavailable', JSON.stringify({ project_id: project.id }));
+          runService.updateRunStatus(run.id, 'failed', { force: true, reason: 'repo_materialize_unavailable' });
+          // Return the FAILED run row (not null) to match executeTask's contract:
+          // callers (routes/tasks.js) respond `{ run }`, so the client sees the
+          // failed status + reason rather than a misleading `{ run: null }` 201
+          // (Codex R2 review NIT).
+          return runService.getRun(run.id);
+        }
       }
-      if (project?.directory) {
+      if (!usesMaterializedRepoWorkspace && project?.directory) {
         if (isRemoteNode) {
           projectDir = project.directory;
         } else if (await nodeExecutor.fileExists(project.directory)) {
@@ -685,7 +809,7 @@ function createLifecycleService({
       // legacy configuration, so keep the old projectDir spawn behavior there.
       // Remote runs use the pod project directory directly for this slice;
       // pod-side worktree isolation is a follow-up.
-      if (projectDir && worktreeService && !isRemoteNode) {
+      if (projectDir && worktreeService && !isRemoteNode && !usesMaterializedRepoWorkspace) {
         let classification = 'unknown';
         if (typeof worktreeService.classifyProjectDir === 'function') {
           classification = await worktreeService.classifyProjectDir(projectDir);
@@ -1048,6 +1172,155 @@ function createLifecycleService({
     return retryRun;
   }
 
+  function scheduleMaterializeRetry(profileId, nodeId, delayMs) {
+    const timer = setTimeout(() => {
+      _materializationTimers.delete(timer);
+      scheduleDrain(profileId);
+      scheduleDrainForNode(nodeId || 'local');
+    }, Math.max(1, Number(delayMs || 1000)));
+    if (typeof timer.unref === 'function') timer.unref();
+    _materializationTimers.add(timer);
+  }
+
+  function emitMaterializeFailed(runId, nodeId, err, { transient }) {
+    const message = String(err?.message || err || 'materialization failed').slice(0, 2000);
+    let run = null;
+    try { run = runService.getRun(runId); } catch { /* ignore */ }
+    const payload = {
+      run_id: runId,
+      project_id: run?.project_id || null,
+      node_id: nodeId || run?.node_id || 'local',
+      error: message,
+      transient: Boolean(transient),
+    };
+    if (eventBus) eventBus.emit('materialize:failed', payload);
+  }
+
+  function cleanupStaleMaterializationAttempt(run, token) {
+    if (!token || !materializationService || typeof materializationService.cleanupAttemptResources !== 'function') return;
+    Promise.resolve(materializationService.cleanupAttemptResources({
+      run,
+      nodeId: run.node_id || 'local',
+      claimToken: token,
+    })).catch((err) => {
+      console.warn(`[lifecycle] Materialization cleanup failed for run ${run.id}: ${err.message}`);
+    });
+  }
+
+  function failOrRequeueMaterializingRun(runId, nodeId, err, {
+    token = null,
+    forceTokenless = false,
+    reason = 'materialize:failed',
+    eventType = 'materialize:failed',
+  } = {}) {
+    let current;
+    try {
+      current = runService.getRun(runId);
+    } catch {
+      return null;
+    }
+    // Return truthy ONLY when we actually transition the run out of
+    // materializing under our token. If the run already left materializing
+    // (the attempt won the CAS race and became a materialized winner), do NOT
+    // signal a transition — the caller (stuck sweep) must then skip the
+    // token-scoped worktree/ref cleanup so the winner's resources survive
+    // (Codex R4 review BLOCKER: cleanup must be state-scoped, not just
+    // token-scoped).
+    if (!current || current.status !== 'materializing') return null;
+
+    const message = String(err?.message || err || 'materialization failed').slice(0, 2000);
+    const attempts = Number(current.materialize_attempts || 0);
+    if (attempts < MAX_MATERIALIZE_ATTEMPTS) {
+      let requeued = null;
+      if (token && typeof runService.requeueMaterializingRun === 'function') {
+        requeued = runService.requeueMaterializingRun(runId, {
+          error: message,
+          backoffMs: 1000 * Math.max(1, attempts + 1),
+          token,
+          reason,
+          eventType,
+          transient: true,
+        });
+      } else if (forceTokenless && typeof runService.forceRequeueTokenlessMaterializingRun === 'function') {
+        requeued = runService.forceRequeueTokenlessMaterializingRun(runId, {
+          error: message,
+          backoffMs: 1000 * Math.max(1, attempts + 1),
+          reason,
+          eventType,
+          transient: true,
+        });
+      }
+      if (requeued) emitMaterializeFailed(runId, nodeId, err, { transient: true });
+      return requeued || null;
+    }
+
+    let failed = null;
+    if (token && typeof runService.failMaterializingRun === 'function') {
+      failed = runService.failMaterializingRun(runId, {
+        error: message,
+        token,
+        reason,
+        eventType,
+      });
+    } else if (forceTokenless && typeof runService.forceFailTokenlessMaterializingRun === 'function') {
+      failed = runService.forceFailTokenlessMaterializingRun(runId, {
+        error: message,
+        reason,
+        eventType,
+      });
+    }
+    if (failed) emitMaterializeFailed(runId, nodeId, err, { transient: false });
+    return failed || null;
+  }
+
+  function startMaterialization(runRow, profileId, nodeId) {
+    if (!materializationService || !runRow?.project_id) return false;
+    const runId = runRow.id;
+    const status = runRow.status;
+    let claim = null;
+    if (status === 'queued') {
+      claim = runService.claimQueuedRunForMaterialization(runId);
+    } else if (status === 'materializing') {
+      claim = typeof runService.restartMaterializationAttempt === 'function'
+        ? runService.restartMaterializationAttempt(runId)
+        : null;
+    }
+    if (!claim) return false;
+    const claimToken = claim.token || null;
+
+    setImmediate(() => {
+      Promise.resolve()
+        .then(() => {
+          const current = runService.getRun(runId);
+          const project = projectService.getProject(current.project_id);
+          return materializationService.ensureWorkspace({
+            project,
+            nodeId: nodeId || current.node_id || 'local',
+            runId,
+            claimToken,
+          });
+        })
+        .then((result) => {
+          if (result?.pending) {
+            scheduleMaterializeRetry(profileId, nodeId, result.backoffMs || 1000);
+          } else if (result?.unsupported) {
+            failOrRequeueMaterializingRun(runId, nodeId, result.error || 'repo materialization unsupported on this node', { token: claimToken });
+            scheduleMaterializeRetry(profileId, nodeId, 1000);
+          } else {
+            scheduleDrain(profileId);
+            scheduleDrainForNode(nodeId || 'local');
+          }
+        })
+        .catch((err) => {
+          console.warn(`[lifecycle] Materialization failed for run ${runId}: ${err.message}`);
+          failOrRequeueMaterializingRun(runId, nodeId, err, { token: claimToken });
+          scheduleDrain(profileId);
+          scheduleMaterializeRetry(profileId, nodeId, 1000);
+        });
+    });
+    return true;
+  }
+
   async function drainQueue(profileId, opts = {}) {
     if (!profileId) return 0;
     const onlyNodeId = opts && opts.nodeId ? String(opts.nodeId) : null;
@@ -1061,21 +1334,36 @@ function createLifecycleService({
     let started = 0;
     const nodeIds = [];
     const seen = new Set();
-    for (const run of runService.listRuns({ status: 'queued' })) {
-      if (run.is_manager || run.agent_profile_id !== profileId) continue;
-      const nodeId = run.node_id || 'local';
-      if (onlyNodeId && nodeId !== onlyNodeId) continue;
-      if (!seen.has(nodeId)) {
-        seen.add(nodeId);
-        nodeIds.push(nodeId);
+    const queueScanStatuses = repoFeatureEnabled() ? ['queued', 'materializing'] : ['queued'];
+    for (const status of queueScanStatuses) {
+      for (const run of runService.listRuns({ status })) {
+        if (run.is_manager || run.agent_profile_id !== profileId) continue;
+        const nodeId = run.node_id || 'local';
+        if (onlyNodeId && nodeId !== onlyNodeId) continue;
+        if (!seen.has(nodeId)) {
+          seen.add(nodeId);
+          nodeIds.push(nodeId);
+        }
       }
     }
 
     for (const nodeId of nodeIds) {
+      if (repoFeatureEnabled() && materializationService) {
+        while (canMaterializeOnNode(nodeId)) {
+          const nextMaterialize = typeof runService.getOldestMaterializableOnNode === 'function'
+            ? runService.getOldestMaterializableOnNode(nodeId, profileId)
+            : null;
+          if (!nextMaterialize) break;
+          if (!startMaterialization(nextMaterialize, profileId, nodeId)) break;
+        }
+      }
+
       while (canDispatchOnNode(nodeId, profileId, profile)) {
-        const next = typeof runService.getOldestQueuedOnNode === 'function'
-          ? runService.getOldestQueuedOnNode(nodeId, profileId)
-          : runService.getOldestQueued(profileId);
+        const next = repoFeatureEnabled() && typeof runService.getOldestQueuedReadyOnNode === 'function'
+          ? runService.getOldestQueuedReadyOnNode(nodeId, profileId)
+          : (typeof runService.getOldestQueuedOnNode === 'function'
+            ? runService.getOldestQueuedOnNode(nodeId, profileId)
+            : runService.getOldestQueued(profileId));
         if (!next) break;
         const spawned = await spawnQueuedRun(next.id);
         if (spawned) started++;
@@ -1086,9 +1374,12 @@ function createLifecycleService({
 
   async function drainAllQueues() {
     const profileIds = new Set();
-    for (const run of runService.listRuns({ status: 'queued' })) {
-      if (run.is_manager || !run.agent_profile_id) continue;
-      profileIds.add(run.agent_profile_id);
+    const statuses = repoFeatureEnabled() ? ['queued', 'materializing'] : ['queued'];
+    for (const status of statuses) {
+      for (const run of runService.listRuns({ status })) {
+        if (run.is_manager || !run.agent_profile_id) continue;
+        profileIds.add(run.agent_profile_id);
+      }
     }
 
     let started = 0;
@@ -1150,6 +1441,7 @@ function createLifecycleService({
       console.warn(`[lifecycle] health check failed: ${err && err.message}`);
     } finally {
       sweepStuckQueuedRuns();
+      sweepStuckMaterializations();
       healthCheckRunning = false;
     }
   }
@@ -1205,6 +1497,48 @@ function createLifecycleService({
       return annotated;
     } catch {
       return 0;
+    }
+  }
+
+  function sweepStuckMaterializations() {
+    if (!runService || typeof runService.listRuns !== 'function') return 0;
+    let changed = 0;
+    try {
+      if (typeof runService.staleMaterializationLeases === 'function') {
+        changed += runService.staleMaterializationLeases(MATERIALIZE_STUCK_THRESHOLD_MS);
+      }
+
+      const timestamp = nowMs();
+      const runs = runService.listRuns({ status: 'materializing' }) || [];
+      for (const run of runs) {
+        try {
+          if (!run || Number(run.is_manager || 0) === 1) continue;
+          const started = Date.parse(run.materialize_started_at || '');
+          if (!Number.isFinite(started)) continue;
+          if (timestamp - started <= MATERIALIZE_STUCK_THRESHOLD_MS) continue;
+          const token = run.materialize_claim_token || null;
+          // Transition FIRST (token-CAS), then clean up. failOrRequeue returns
+          // truthy only if it actually moved the run out of materializing under
+          // our token; if the attempt won the race and became a materialized
+          // winner meanwhile, the CAS is a no-op → skip cleanup so we never
+          // delete the winner's token-scoped worktree/ref (Codex R4 BLOCKER).
+          const updated = failOrRequeueMaterializingRun(run.id, run.node_id || 'local', 'materialization stuck', {
+            token,
+            forceTokenless: !token,
+            reason: 'materialize:stuck',
+            eventType: 'materialize:stuck',
+          });
+          if (updated) {
+            if (token) cleanupStaleMaterializationAttempt(run, token);
+            changed++;
+          }
+        } catch {
+          // Stuck materialization cleanup is best-effort observability.
+        }
+      }
+      return changed;
+    } catch {
+      return changed;
     }
   }
 
@@ -1548,6 +1882,10 @@ function createLifecycleService({
       try { unsubscribeEventBus(); } catch { /* ignore */ }
       unsubscribeEventBus = null;
     }
+    for (const timer of _materializationTimers) {
+      clearTimeout(timer);
+    }
+    _materializationTimers.clear();
   }
 
   /**
@@ -1672,6 +2010,7 @@ function createLifecycleService({
     scheduleDrainForNode,
     checkHealth,
     sweepStuckQueuedRuns,
+    sweepStuckMaterializations,
     recoverOrphanSessions,
     cleanupOrphanMcpConfigs,
     cleanupStaleTerminalWorktrees,

@@ -183,9 +183,280 @@ function createRunService(db, eventBus) {
       ORDER BY r.created_at ASC, r.rowid ASC
       LIMIT 1
     `),
+    getOldestQueuedReadyOnNode: db.prepare(`
+      SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
+             t.title as task_title, t.project_id as project_id, p.name as project_name
+      FROM runs r
+      LEFT JOIN agent_profiles ap ON r.agent_profile_id = ap.id
+      LEFT JOIN tasks t ON r.task_id = t.id
+      LEFT JOIN projects p ON t.project_id = p.id
+      WHERE r.status = 'queued'
+        AND r.agent_profile_id = ?
+        AND r.is_manager = 0
+        AND COALESCE(r.node_id, 'local') = ?
+        AND (
+          COALESCE(p.source_type, 'legacy_directory') <> 'git'
+          OR (
+            r.workspace_path IS NOT NULL
+            AND r.resolved_commit IS NOT NULL
+            AND r.workspace_generation = COALESCE(p.source_generation, 0)
+          )
+        )
+      ORDER BY r.created_at ASC, r.rowid ASC
+      LIMIT 1
+    `),
+    getOldestMaterializableOnNode: db.prepare(`
+      SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
+             t.title as task_title, t.project_id as project_id, p.name as project_name
+      FROM runs r
+      LEFT JOIN agent_profiles ap ON r.agent_profile_id = ap.id
+      LEFT JOIN tasks t ON r.task_id = t.id
+      LEFT JOIN projects p ON t.project_id = p.id
+      WHERE r.agent_profile_id = ?
+        AND r.is_manager = 0
+        AND COALESCE(r.node_id, 'local') = ?
+        AND COALESCE(p.source_type, 'legacy_directory') = 'git'
+        AND (
+          r.workspace_path IS NULL
+          OR r.resolved_commit IS NULL
+          OR r.workspace_generation IS NULL
+          OR r.workspace_generation <> COALESCE(p.source_generation, 0)
+        )
+        AND (
+          (r.status = 'queued' AND (r.materialize_run_after IS NULL OR datetime(r.materialize_run_after) <= datetime('now')))
+          OR (r.status = 'materializing' AND r.materialize_run_after IS NOT NULL AND datetime(r.materialize_run_after) <= datetime('now'))
+        )
+      ORDER BY r.created_at ASC, r.rowid ASC
+      LIMIT 1
+    `),
     claimQueued: db.prepare(`
       UPDATE runs SET status = 'running', started_at = datetime('now')
       WHERE id = ? AND status = 'queued'
+    `),
+    claimQueuedForMaterialization: db.prepare(`
+      UPDATE runs
+         SET status = 'materializing',
+             materialize_started_at = datetime('now'),
+             materialize_run_after = NULL,
+             materialize_claim_token = ?
+       WHERE id = ? AND status = 'queued'
+    `),
+    restartMaterializationAttempt: db.prepare(`
+      UPDATE runs
+         SET materialize_started_at = datetime('now'),
+             materialize_run_after = NULL,
+             materialize_claim_token = ?
+       WHERE id = ?
+         AND status = 'materializing'
+         AND materialize_run_after IS NOT NULL
+         AND datetime(materialize_run_after) <= datetime('now')
+    `),
+    countMaterializingOnNode: db.prepare(`
+      SELECT COUNT(*) as count FROM runs
+      WHERE COALESCE(node_id, 'local') = ?
+        AND status = 'materializing'
+        AND materialize_run_after IS NULL
+        AND is_manager = 0
+    `),
+    countMaterializingGlobal: db.prepare(`
+      SELECT COUNT(*) as count FROM runs
+      WHERE status = 'materializing'
+        AND materialize_run_after IS NULL
+        AND is_manager = 0
+    `),
+    markMaterializePending: db.prepare(`
+      UPDATE runs
+         SET materialize_run_after = datetime('now', ?),
+             materialize_last_error = NULL
+       WHERE id = ?
+         AND status = 'materializing'
+         AND materialize_claim_token = ?
+    `),
+    updateMaterializedRun: db.prepare(`
+      UPDATE runs
+         SET status = 'queued',
+             source_type_snapshot = @source_type_snapshot,
+             run_source_generation = @run_source_generation,
+             repo_url_snapshot = @repo_url_snapshot,
+             repo_ref_snapshot = @repo_ref_snapshot,
+             repo_subdir_snapshot = @repo_subdir_snapshot,
+             repo_cache_path = @repo_cache_path,
+             workspace_path = @workspace_path,
+             workspace_generation = @workspace_generation,
+             resolved_commit = @resolved_commit,
+             materialize_last_error = NULL,
+             materialize_claim_token = NULL,
+             materialize_run_after = NULL
+       WHERE id = @id
+         AND status = 'materializing'
+         AND materialize_claim_token = @materialize_claim_token
+    `),
+    markMaterializedReady: db.prepare(`
+      UPDATE runs
+         SET status = 'queued',
+             started_at = NULL,
+             materialize_started_at = NULL,
+             materialize_claim_token = NULL,
+             materialize_last_error = NULL,
+             materialize_run_after = NULL
+       WHERE id = ?
+         AND status = 'materializing'
+         AND materialize_claim_token = ?
+    `),
+    getProjectNodeWorkspace: db.prepare(`
+      SELECT * FROM project_node_workspaces
+      WHERE project_id = ? AND node_id = ? AND source_generation = ?
+    `),
+    upsertProjectNodeWorkspaceReady: db.prepare(`
+      INSERT INTO project_node_workspaces (
+        project_id, node_id, source_generation, repo_url, repo_ref,
+        resolved_commit, repo_cache_path, status, last_error,
+        materialized_at, last_used_at
+      )
+      VALUES (
+        @project_id, @node_id, @source_generation, @repo_url, @repo_ref,
+        @resolved_commit, @repo_cache_path, 'ready', NULL,
+        datetime('now'), datetime('now')
+      )
+      ON CONFLICT(project_id,node_id,source_generation) DO UPDATE SET
+        repo_url = excluded.repo_url,
+        repo_ref = excluded.repo_ref,
+        resolved_commit = excluded.resolved_commit,
+        repo_cache_path = excluded.repo_cache_path,
+        status = 'ready',
+        last_error = NULL,
+        materialized_at = datetime('now'),
+        last_used_at = datetime('now')
+    `),
+    upsertProjectNodeWorkspaceFailed: db.prepare(`
+      INSERT INTO project_node_workspaces (
+        project_id, node_id, source_generation, repo_url, repo_ref,
+        resolved_commit, repo_cache_path, status, last_error,
+        materialized_at, last_used_at
+      )
+      VALUES (
+        @project_id, @node_id, @source_generation, @repo_url, @repo_ref,
+        NULL, @repo_cache_path, 'failed', @last_error,
+        NULL, datetime('now')
+      )
+      ON CONFLICT(project_id,node_id,source_generation) DO UPDATE SET
+        repo_url = excluded.repo_url,
+        repo_ref = excluded.repo_ref,
+        repo_cache_path = excluded.repo_cache_path,
+        status = 'failed',
+        last_error = excluded.last_error,
+        last_used_at = datetime('now')
+    `),
+    touchProjectNodeWorkspace: db.prepare(`
+      UPDATE project_node_workspaces
+         SET last_used_at = datetime('now')
+       WHERE project_id = ? AND node_id = ? AND source_generation = ?
+    `),
+    stealStaleMaterializationLease: db.prepare(`
+      UPDATE project_materialization_leases
+         SET status = 'stale', last_error = 'stale materialization lease'
+      WHERE project_id = ?
+         AND node_id = ?
+         AND source_generation = ?
+         AND status IN ('pending', 'running')
+         AND locked_at IS NOT NULL
+         AND datetime(locked_at) <= datetime(?)
+    `),
+    touchMaterializationLease: db.prepare(`
+      UPDATE project_materialization_leases
+         SET locked_at = datetime('now')
+       WHERE claim_token = ? AND status IN ('pending', 'running')
+    `),
+    insertMaterializationLease: db.prepare(`
+      INSERT INTO project_materialization_leases (
+        project_id, node_id, source_generation, status, claim_token,
+        locked_at, owner_run_id, attempts, last_error
+      )
+      VALUES (?, ?, ?, 'running', ?, datetime('now'), ?, 1, NULL)
+    `),
+    releaseMaterializationLease: db.prepare(`
+      UPDATE project_materialization_leases
+         SET status = ?, last_error = ?
+       WHERE claim_token = ? AND status IN ('pending', 'running')
+    `),
+    acquireWorkspaceRef: db.prepare(`
+      INSERT INTO project_workspace_refs (
+        run_id, project_id, node_id, source_generation, repo_cache_path,
+        worktree_path, ref_type, acquired_at, heartbeat_at, released_at, expires_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL, ?)
+    `),
+    releaseWorkspaceRefByRun: db.prepare(`
+      UPDATE project_workspace_refs
+         SET released_at = COALESCE(released_at, datetime('now'))
+       WHERE run_id = ? AND released_at IS NULL
+    `),
+    releaseWorkspaceRefByRunAndPath: db.prepare(`
+      UPDATE project_workspace_refs
+         SET released_at = COALESCE(released_at, datetime('now'))
+       WHERE run_id = ? AND worktree_path = ? AND released_at IS NULL
+    `),
+    markRunWorkspaceRefReleased: db.prepare(`
+      UPDATE runs
+         SET workspace_ref_released_at = COALESCE(workspace_ref_released_at, datetime('now'))
+       WHERE id = ?
+    `),
+    requeueMaterializingRunWithToken: db.prepare(`
+      UPDATE runs
+         SET status = 'queued',
+             materialize_attempts = COALESCE(materialize_attempts, 0) + 1,
+             materialize_started_at = NULL,
+             materialize_claim_token = NULL,
+             materialize_last_error = ?,
+             materialize_run_after = datetime('now', ?)
+       WHERE id = ?
+         AND status = 'materializing'
+         AND materialize_claim_token = ?
+    `),
+    requeueTokenlessMaterializingRun: db.prepare(`
+      UPDATE runs
+         SET status = 'queued',
+             materialize_attempts = COALESCE(materialize_attempts, 0) + 1,
+             materialize_started_at = NULL,
+             materialize_claim_token = NULL,
+             materialize_last_error = ?,
+             materialize_run_after = datetime('now', ?)
+       WHERE id = ?
+         AND status = 'materializing'
+         AND materialize_claim_token IS NULL
+    `),
+    failMaterializingRunWithToken: db.prepare(`
+      UPDATE runs
+         SET status = 'failed',
+             ended_at = datetime('now'),
+             materialize_attempts = COALESCE(materialize_attempts, 0) + 1,
+             materialize_started_at = NULL,
+             materialize_claim_token = NULL,
+             materialize_last_error = ?,
+             materialize_run_after = NULL
+       WHERE id = ?
+         AND status = 'materializing'
+         AND materialize_claim_token = ?
+    `),
+    failTokenlessMaterializingRun: db.prepare(`
+      UPDATE runs
+         SET status = 'failed',
+             ended_at = datetime('now'),
+             materialize_attempts = COALESCE(materialize_attempts, 0) + 1,
+             materialize_started_at = NULL,
+             materialize_claim_token = NULL,
+             materialize_last_error = ?,
+             materialize_run_after = NULL
+       WHERE id = ?
+         AND status = 'materializing'
+         AND materialize_claim_token IS NULL
+    `),
+    staleAllMaterializationLeases: db.prepare(`
+      UPDATE project_materialization_leases
+         SET status = 'stale', last_error = 'stale materialization lease'
+       WHERE status IN ('pending', 'running')
+         AND locked_at IS NOT NULL
+         AND datetime(locked_at) <= datetime(?)
     `),
     retargetQueued: db.prepare(`
       UPDATE runs
@@ -429,6 +700,47 @@ function createRunService(db, eventBus) {
     return stmts.getOldestQueuedOnNode.get(profileId, nodeId || 'local') || null;
   }
 
+  function getOldestQueuedReadyOnNode(nodeId, profileId) {
+    return stmts.getOldestQueuedReadyOnNode.get(profileId, nodeId || 'local') || null;
+  }
+
+  function getOldestMaterializableOnNode(nodeId, profileId) {
+    return stmts.getOldestMaterializableOnNode.get(profileId, nodeId || 'local') || null;
+  }
+
+  function countMaterializingOnNode(nodeId) {
+    return stmts.countMaterializingOnNode.get(nodeId || 'local').count;
+  }
+
+  function countMaterializingGlobal() {
+    return stmts.countMaterializingGlobal.get().count;
+  }
+
+  function repoFeatureEnabled() {
+    return process.env.PALANTIR_PROJECT_REPO === '1';
+  }
+
+  function isUnreadyGitRun(run) {
+    if (!run || (run.source_type_snapshot && run.source_type_snapshot !== 'git')) return false;
+    if ((run.source_type || run.project_source_type) === 'legacy_directory') return false;
+    if (run.project_id && run.source_type === undefined) {
+      // getById joins projects without selecting p.source_type separately. When
+      // source fields are absent, ask the DB directly so claimQueuedRun's guard
+      // still protects callers that bypass drainQueue.
+      const source = db.prepare(`
+        SELECT p.source_type, p.source_generation
+        FROM tasks t
+        JOIN projects p ON t.project_id = p.id
+        WHERE t.id = ?
+      `).get(run.task_id);
+      if (!source || source.source_type !== 'git') return false;
+      return !run.workspace_path
+        || !run.resolved_commit
+        || Number(run.workspace_generation) !== Number(source.source_generation || 0);
+    }
+    return false;
+  }
+
   // Used to exhaust the retry budget of a run whose failure is not worth
   // retrying (e.g. corrupt queued_args — a retry would copy the same bad args
   // and fail identically). Idempotent raw write; no state-machine transition.
@@ -437,6 +749,10 @@ function createRunService(db, eventBus) {
   }
 
   function claimQueuedRun(id) {
+    if (repoFeatureEnabled()) {
+      const current = stmts.getById.get(id);
+      if (isUnreadyGitRun(current)) return 0;
+    }
     const info = stmts.claimQueued.run(id);
     if (info.changes === 0) return 0;
     const run = stmts.getById.get(id);
@@ -453,6 +769,324 @@ function createRunService(db, eventBus) {
       });
     }
     return info.changes;
+  }
+
+  function claimQueuedRunForMaterialization(id) {
+    const token = crypto.randomUUID();
+    const info = stmts.claimQueuedForMaterialization.run(token, id);
+    if (info.changes === 0) return null;
+    const run = stmts.getById.get(id);
+    addRunEvent(id, 'status:materializing', JSON.stringify({ reason: 'materialize:claim' }));
+    if (eventBus) {
+      eventBus.emit('run:status', {
+        run,
+        from_status: 'queued',
+        to_status: 'materializing',
+        reason: 'materialize:claim',
+        task_id: run.task_id || null,
+        project_id: deriveOperatorProjectId(run),
+        node_id: run.node_id || null,
+      });
+    }
+    return { claimed: true, token };
+  }
+
+  function restartMaterializationAttempt(id) {
+    const token = crypto.randomUUID();
+    const info = stmts.restartMaterializationAttempt.run(token, id);
+    if (info.changes > 0) {
+      addRunEvent(id, 'materialize:retry', JSON.stringify({ reason: 'run_after_elapsed' }));
+      return { claimed: true, token };
+    }
+    return null;
+  }
+
+  function markMaterializePending(id, { backoffMs = 1000, token = null } = {}) {
+    if (!token) return 0;
+    const seconds = Math.max(1, Math.ceil(Number(backoffMs || 1000) / 1000));
+    const modifier = `+${seconds} seconds`;
+    const info = stmts.markMaterializePending.run(modifier, id, token);
+    if (info.changes > 0) {
+      addRunEvent(id, 'materialize:pending', JSON.stringify({ backoff_ms: seconds * 1000 }));
+    }
+    return info.changes;
+  }
+
+  function updateRunMaterialized(id, fields = {}) {
+    const token = fields.materialize_claim_token || fields.claimToken || null;
+    if (!token) return null;
+    const prev = getRun(id);
+    const info = stmts.updateMaterializedRun.run({
+      id,
+      materialize_claim_token: token,
+      source_type_snapshot: fields.source_type_snapshot || 'git',
+      run_source_generation: Number(fields.run_source_generation || 0),
+      repo_url_snapshot: fields.repo_url_snapshot || null,
+      repo_ref_snapshot: fields.repo_ref_snapshot || 'HEAD',
+      repo_subdir_snapshot: fields.repo_subdir_snapshot || null,
+      repo_cache_path: fields.repo_cache_path || null,
+      workspace_path: fields.workspace_path || null,
+      workspace_generation: Number(fields.workspace_generation || 0),
+      resolved_commit: fields.resolved_commit || null,
+    });
+    if (info.changes === 0) return null;
+    const run = stmts.getById.get(id);
+    addRunEvent(id, 'status:queued', JSON.stringify({ reason: 'materialize:ready' }));
+    if (eventBus) {
+      eventBus.emit('run:status', {
+        run,
+        from_status: prev.status,
+        to_status: 'queued',
+        reason: 'materialize:ready',
+        task_id: run.task_id || null,
+        project_id: deriveOperatorProjectId(run),
+        node_id: run.node_id || null,
+      });
+    }
+    return run;
+  }
+
+  function markMaterializedReady(id, token) {
+    if (!token) return null;
+    const prev = getRun(id);
+    const info = stmts.markMaterializedReady.run(id, token);
+    if (info.changes === 0) return null;
+    const run = stmts.getById.get(id);
+    addRunEvent(id, 'status:queued', JSON.stringify({ reason: 'materialize:ready' }));
+    if (eventBus) {
+      eventBus.emit('run:status', {
+        run,
+        from_status: prev.status,
+        to_status: 'queued',
+        reason: 'materialize:ready',
+        task_id: run.task_id || null,
+        project_id: deriveOperatorProjectId(run),
+        node_id: run.node_id || null,
+      });
+    }
+    return run;
+  }
+
+  function getProjectNodeWorkspace(projectId, nodeId, sourceGeneration) {
+    return stmts.getProjectNodeWorkspace.get(projectId, nodeId || 'local', Number(sourceGeneration || 0)) || null;
+  }
+
+  function markProjectNodeWorkspaceReady(fields = {}) {
+    stmts.upsertProjectNodeWorkspaceReady.run({
+      project_id: fields.project_id,
+      node_id: fields.node_id || 'local',
+      source_generation: Number(fields.source_generation || 0),
+      repo_url: fields.repo_url || null,
+      repo_ref: fields.repo_ref || 'HEAD',
+      resolved_commit: fields.resolved_commit || null,
+      repo_cache_path: fields.repo_cache_path || null,
+    });
+    return getProjectNodeWorkspace(fields.project_id, fields.node_id || 'local', fields.source_generation || 0);
+  }
+
+  function markProjectNodeWorkspaceFailed(fields = {}) {
+    stmts.upsertProjectNodeWorkspaceFailed.run({
+      project_id: fields.project_id,
+      node_id: fields.node_id || 'local',
+      source_generation: Number(fields.source_generation || 0),
+      repo_url: fields.repo_url || null,
+      repo_ref: fields.repo_ref || 'HEAD',
+      repo_cache_path: fields.repo_cache_path || null,
+      last_error: String(fields.last_error || 'materialization failed').slice(0, 2000),
+    });
+  }
+
+  function touchProjectNodeWorkspace(projectId, nodeId, sourceGeneration) {
+    stmts.touchProjectNodeWorkspace.run(projectId, nodeId || 'local', Number(sourceGeneration || 0));
+  }
+
+  function acquireMaterializationLease({ projectId, nodeId = 'local', sourceGeneration = 0, ownerRunId, staleMs = 10 * 60 * 1000 } = {}) {
+    const token = crypto.randomUUID();
+    const threshold = new Date(Date.now() - Math.max(1, Number(staleMs || 0))).toISOString();
+    try {
+      stmts.stealStaleMaterializationLease.run(projectId, nodeId || 'local', Number(sourceGeneration || 0), threshold);
+      stmts.insertMaterializationLease.run(projectId, nodeId || 'local', Number(sourceGeneration || 0), token, ownerRunId || null);
+      return { acquired: true, token };
+    } catch (err) {
+      if (String(err && err.message || '').includes('UNIQUE constraint failed')) {
+        return { acquired: false, pending: true };
+      }
+      throw err;
+    }
+  }
+
+  function touchMaterializationLease(token) {
+    if (!token) return 0;
+    return stmts.touchMaterializationLease.run(token).changes;
+  }
+
+  function releaseMaterializationLease(token, { status = 'completed', error = null } = {}) {
+    if (!token) return 0;
+    const finalStatus = status || 'completed';
+    const message = error ? String(error.message || error).slice(0, 2000) : null;
+    return stmts.releaseMaterializationLease.run(finalStatus, message, token).changes;
+  }
+
+  function acquireWorkspaceRef({
+    runId,
+    projectId,
+    nodeId = 'local',
+    sourceGeneration = 0,
+    repoCachePath,
+    worktreePath,
+    refType = 'run',
+    expiresAt = null,
+  } = {}) {
+    return stmts.acquireWorkspaceRef.run(
+      runId,
+      projectId || null,
+      nodeId || 'local',
+      Number(sourceGeneration || 0),
+      repoCachePath || null,
+      worktreePath || null,
+      refType || 'run',
+      expiresAt || null,
+    ).lastInsertRowid;
+  }
+
+  function releaseWorkspaceRefByRun(runId) {
+    const info = stmts.releaseWorkspaceRefByRun.run(runId);
+    if (info.changes > 0) {
+      stmts.markRunWorkspaceRefReleased.run(runId);
+      addRunEvent(runId, 'workspace_ref:released', JSON.stringify({ released: info.changes }));
+    }
+    return info.changes;
+  }
+
+  function releaseWorkspaceRefByRunAndPath(runId, worktreePath) {
+    if (!worktreePath) return 0;
+    const info = stmts.releaseWorkspaceRefByRunAndPath.run(runId, worktreePath);
+    if (info.changes > 0) {
+      addRunEvent(runId, 'workspace_ref:released', JSON.stringify({
+        released: info.changes,
+        worktree_path: worktreePath,
+      }));
+    }
+    return info.changes;
+  }
+
+  function requeueMaterializingRun(id, {
+    error = 'materialization stuck',
+    backoffMs = 1000,
+    token = null,
+    reason = 'materialize:failed',
+    eventType = 'materialize:failed',
+    transient = true,
+  } = {}) {
+    if (!token) return null;
+    const prev = getRun(id);
+    const message = String(error || 'materialization stuck').slice(0, 2000);
+    const seconds = Math.max(1, Math.ceil(Number(backoffMs || 1000) / 1000));
+    const info = stmts.requeueMaterializingRunWithToken.run(message, `+${seconds} seconds`, id, token);
+    if (info.changes === 0) return null;
+    const run = stmts.getById.get(id);
+    addRunEvent(id, eventType, JSON.stringify({ error: message, action: 'requeued', transient: Boolean(transient) }));
+    if (eventBus) {
+      eventBus.emit('run:status', {
+        run,
+        from_status: prev.status,
+        to_status: 'queued',
+        reason,
+        task_id: run.task_id || null,
+        project_id: deriveOperatorProjectId(run),
+        node_id: run.node_id || null,
+      });
+    }
+    return run;
+  }
+
+  function forceRequeueTokenlessMaterializingRun(id, {
+    error = 'materialization stuck',
+    backoffMs = 1000,
+    reason = 'materialize:failed',
+    eventType = 'materialize:failed',
+    transient = true,
+  } = {}) {
+    const prev = getRun(id);
+    const message = String(error || 'materialization stuck').slice(0, 2000);
+    const seconds = Math.max(1, Math.ceil(Number(backoffMs || 1000) / 1000));
+    const info = stmts.requeueTokenlessMaterializingRun.run(message, `+${seconds} seconds`, id);
+    if (info.changes === 0) return null;
+    const run = stmts.getById.get(id);
+    addRunEvent(id, eventType, JSON.stringify({ error: message, action: 'requeued', transient: Boolean(transient), force_tokenless: true }));
+    if (eventBus) {
+      eventBus.emit('run:status', {
+        run,
+        from_status: prev.status,
+        to_status: 'queued',
+        reason,
+        task_id: run.task_id || null,
+        project_id: deriveOperatorProjectId(run),
+        node_id: run.node_id || null,
+      });
+    }
+    return run;
+  }
+
+  function failMaterializingRun(id, {
+    error = 'materialization failed',
+    token = null,
+    reason = 'materialize:failed',
+    eventType = 'materialize:failed',
+  } = {}) {
+    if (!token) return null;
+    const prev = getRun(id);
+    const message = String(error || 'materialization failed').slice(0, 2000);
+    const info = stmts.failMaterializingRunWithToken.run(message, id, token);
+    if (info.changes === 0) return null;
+    const run = stmts.getById.get(id);
+    addRunEvent(id, eventType, JSON.stringify({ error: message, action: 'failed', transient: false }));
+    if (eventBus) {
+      const envelope = {
+        run,
+        from_status: prev.status,
+        to_status: 'failed',
+        reason,
+        task_id: run.task_id || null,
+        project_id: deriveOperatorProjectId(run),
+        node_id: run.node_id || null,
+      };
+      eventBus.emit('run:status', envelope);
+      eventBus.emit('run:ended', envelope);
+    }
+    return run;
+  }
+
+  function forceFailTokenlessMaterializingRun(id, {
+    error = 'materialization failed',
+    reason = 'materialize:failed',
+    eventType = 'materialize:failed',
+  } = {}) {
+    const prev = getRun(id);
+    const message = String(error || 'materialization failed').slice(0, 2000);
+    const info = stmts.failTokenlessMaterializingRun.run(message, id);
+    if (info.changes === 0) return null;
+    const run = stmts.getById.get(id);
+    addRunEvent(id, eventType, JSON.stringify({ error: message, action: 'failed', transient: false, force_tokenless: true }));
+    if (eventBus) {
+      const envelope = {
+        run,
+        from_status: prev.status,
+        to_status: 'failed',
+        reason,
+        task_id: run.task_id || null,
+        project_id: deriveOperatorProjectId(run),
+        node_id: run.node_id || null,
+      };
+      eventBus.emit('run:status', envelope);
+      eventBus.emit('run:ended', envelope);
+    }
+    return run;
+  }
+
+  function staleMaterializationLeases(staleMs = 10 * 60 * 1000) {
+    const threshold = new Date(Date.now() - Math.max(1, Number(staleMs || 0))).toISOString();
+    return stmts.staleAllMaterializationLeases.run(threshold).changes;
   }
 
   function normalizeQueueNodeId(value) {
@@ -633,7 +1267,17 @@ function createRunService(db, eventBus) {
     listRuns, getRun, createRun,
     updateRunStatus, markRunStarted, updateRunResult,
     countRunning, countRunningOnNode, countRunningTotalOnNode,
-    getOldestQueued, getOldestQueuedOnNode, claimQueuedRun, setRetryCount,
+    getOldestQueued, getOldestQueuedOnNode, getOldestQueuedReadyOnNode,
+    getOldestMaterializableOnNode,
+    countMaterializingOnNode, countMaterializingGlobal,
+    claimQueuedRun, claimQueuedRunForMaterialization, restartMaterializationAttempt,
+    markMaterializePending, updateRunMaterialized, markMaterializedReady,
+    getProjectNodeWorkspace, markProjectNodeWorkspaceReady, markProjectNodeWorkspaceFailed,
+    touchProjectNodeWorkspace, acquireMaterializationLease, touchMaterializationLease, releaseMaterializationLease,
+    acquireWorkspaceRef, releaseWorkspaceRefByRun, releaseWorkspaceRefByRunAndPath,
+    requeueMaterializingRun, forceRequeueTokenlessMaterializingRun,
+    failMaterializingRun, forceFailTokenlessMaterializingRun, staleMaterializationLeases,
+    setRetryCount,
     retargetQueuedRuns,
     updateManagerThreadId, updateClaudeSessionId,
     updateRunMcpConfig,
