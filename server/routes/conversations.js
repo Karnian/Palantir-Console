@@ -47,7 +47,7 @@ function createConversationsRouter({ conversationService, runService }) {
     const { id } = req.params;
     const { text, images } = req.body || {};
     try {
-      const result = conversationService.sendMessage(id, { text, images });
+      const result = await conversationService.sendMessage(id, { text, images });
       res.json(result);
     } catch (err) {
       return mapError(err, res);

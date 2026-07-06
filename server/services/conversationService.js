@@ -248,6 +248,21 @@ function createConversationService({
     if (!run && !isTop && operatorSpawnService && projectId) {
       try {
         const spawn = operatorSpawnService.ensureLiveOperator({ projectId });
+        if (spawn && typeof spawn.then === 'function') {
+          // Wrap ONLY the spawn promise's rejection as a spawn error. The
+          // delivery recursion runs AFTER the catch, so a delivery/binding
+          // error (404 no run, 502 binding assert, runTurn failure) propagates
+          // with its own httpStatus instead of being mislabeled as a 502 "PM
+          // spawn failed" (Codex PR5 review SERIOUS — the .then/.catch order
+          // previously swallowed post-spawn delivery errors).
+          return spawn
+            .catch((spawnErr) => {
+              const err = new Error(spawnErr.message || 'PM spawn failed');
+              err.httpStatus = spawnErr.httpStatus || 502;
+              throw err;
+            })
+            .then(() => sendToManagerSlot(conversationId, { text, images, projectId }));
+        }
         run = spawn.run;
       } catch (spawnErr) {
         // Preserve the spawn service's httpStatus if set so the route

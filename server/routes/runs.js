@@ -393,7 +393,7 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
 
     if (conversationService) {
       try {
-        const result = conversationService.sendMessage(`worker:${req.params.id}`, { text });
+        const result = await conversationService.sendMessage(`worker:${req.params.id}`, { text });
         // Preserve legacy alias contract: { status: 'ok' }. The newer
         // conversationService shape ({ status: 'sent', target: {...} }) is
         // surfaced under `delivery` so callers that want the extra detail
