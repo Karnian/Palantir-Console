@@ -122,6 +122,154 @@ function createLifecycleService({
     }
   }
 
+  function isMissingFileError(err) {
+    return err && (
+      err.code === 'ENOENT'
+      || err.code === 'ENOTDIR'
+      || /no such file/i.test(err.message || '')
+      || /not found/i.test(err.message || '')
+    );
+  }
+
+  function emitRepoMcpWarning(run, type, payload) {
+    const body = { type, ...payload };
+    runService.addRunEvent(run.id, type, JSON.stringify(body));
+    console.warn(`[lifecycle] ${type}: ${payload.message || payload.relpath || payload.reason || 'repo MCP warning'}`);
+  }
+
+  function validateRepoMcpRelpath(relpath, workspaceRoot) {
+    if (!relpath || typeof relpath !== 'string') {
+      throw new Error('mcp_config_relpath is required for repo_relpath MCP config');
+    }
+    if (path.isAbsolute(relpath) || path.win32.isAbsolute(relpath)) {
+      throw new Error('mcp_config_relpath must be relative to the materialized workspace');
+    }
+    const parts = relpath.split(/[\\/]+/).filter(Boolean);
+    if (parts.some((part) => part === '..')) {
+      throw new Error('mcp_config_relpath escapes materialized workspace');
+    }
+    const joined = path.resolve(workspaceRoot, relpath);
+    if (joined !== workspaceRoot && !joined.startsWith(workspaceRoot + path.sep)) {
+      throw new Error('mcp_config_relpath escapes materialized workspace boundary');
+    }
+    return joined;
+  }
+
+  async function resolveProjectMcpObject({
+    run,
+    project,
+    projectDir,
+    projectMcpConfig,
+    usesMaterializedRepoWorkspace,
+    isRemoteNode,
+  }) {
+    if (!project) return null;
+
+    const mcpSource = project.mcp_config_source || 'legacy_control_plane_path';
+    if (mcpSource === 'legacy_control_plane_path') {
+      if (projectMcpConfig && projectDir) {
+        try {
+          // Control-plane-local MCP config read; worker/worktree paths use NodeExecutor.
+          const fsM = require('node:fs');
+          const pathM = require('node:path');
+          const realRoot = fsM.realpathSync(projectDir);
+          const realMcpPath = fsM.realpathSync(projectMcpConfig);
+          if (realMcpPath !== realRoot && !realMcpPath.startsWith(realRoot + pathM.sep)) {
+            throw new Error('mcp_config_path escapes project directory boundary');
+          }
+          return JSON.parse(fsM.readFileSync(realMcpPath, 'utf8'));
+        } catch (err) {
+          console.warn(`[lifecycle] Failed to read project MCP config: ${err.message}`);
+        }
+      }
+      return null;
+    }
+
+    if (mcpSource !== 'repo_relpath') {
+      // Unknown source (should be unreachable — projects.mcp_config_source has a
+      // DB CHECK restricting it to the two known values). A typo that somehow
+      // bypasses the CHECK must NOT silently disable a legacy mcp_config_path,
+      // so surface it explicitly (Codex PR4 review NIT).
+      emitRepoMcpWarning(run, 'mcp:unknown_source', {
+        project_id: project.id,
+        source: mcpSource,
+        reason: 'unrecognized mcp_config_source; no project MCP config applied',
+      });
+      return null;
+    }
+
+    const relpath = project.mcp_config_relpath;
+    if (!projectIsRepo(project) || !usesMaterializedRepoWorkspace || !run.workspace_path) {
+      emitRepoMcpWarning(run, 'mcp:repo_relpath_unmaterialized', {
+        project_id: project.id,
+        relpath,
+        reason: 'repo_relpath requires a materialized git workspace',
+      });
+      return null;
+    }
+
+    const workspaceRoot = path.resolve(run.workspace_path);
+    const joined = validateRepoMcpRelpath(relpath, workspaceRoot);
+
+    let text;
+    try {
+      if (isRemoteNode) {
+        if (!nodeService || typeof nodeService.pickExecutor !== 'function') {
+          throw new Error('nodeService.pickExecutor is required to read remote repo MCP config');
+        }
+        const executor = nodeService.pickExecutor(run.node_id || 'local');
+        if (!executor || typeof executor.readFile !== 'function') {
+          throw new Error('executor.readFile is required to read remote repo MCP config');
+        }
+        text = await executor.readFile(joined);
+      } else {
+        const fsM = require('node:fs');
+        const realRoot = fsM.realpathSync(workspaceRoot);
+        const realMcpPath = fsM.realpathSync(joined);
+        if (realMcpPath !== realRoot && !realMcpPath.startsWith(realRoot + path.sep)) {
+          throw new Error('mcp_config_relpath escapes materialized workspace boundary');
+        }
+        text = fsM.readFileSync(realMcpPath, 'utf8');
+      }
+    } catch (err) {
+      // Warn payloads carry only relpath + err.code — NEVER the raw err.message,
+      // which for read/ENOENT errors embeds the absolute pod/control-plane path
+      // (e.g. "ENOENT ... open '/srv/.../workspace/.mcp.json'") and would leak
+      // the pod filesystem layout into run events / DB (Codex PR4 R2 NIT).
+      if (isMissingFileError(err)) {
+        emitRepoMcpWarning(run, 'mcp:repo_relpath_missing', {
+          project_id: project.id,
+          relpath,
+          code: err.code || null,
+          message: 'repo MCP config file not found',
+        });
+        return null;
+      }
+      emitRepoMcpWarning(run, 'mcp:repo_relpath_read_failed', {
+        project_id: project.id,
+        relpath,
+        code: err.code || null,
+        message: 'failed to read repo MCP config',
+      });
+      // Re-throw a sanitized error (relpath only) so the downstream executeTask
+      // 'error' event does not surface the absolute path from the original err.
+      throw new Error(`Failed to read repo MCP config ${relpath}`);
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch (err) {
+      // JSON.parse errors are position-based (no filesystem path), so err.message
+      // is safe to surface for debugging the malformed config.
+      emitRepoMcpWarning(run, 'mcp:repo_relpath_parse_failed', {
+        project_id: project.id,
+        relpath,
+        message: err.message,
+      });
+      throw new Error(`Failed to parse repo MCP config ${relpath}: ${err.message}`);
+    }
+  }
+
   /**
    * Check if the agent process for a tmux run is actively consuming CPU.
    * Uses `tmux list-panes` to get the child PID, then checks /proc or `ps`
@@ -556,8 +704,11 @@ function createLifecycleService({
           console.warn(`[lifecycle] Project directory not found: ${project.directory}, falling back to server cwd`);
         }
       }
-      // P4-2: capture project-scoped MCP config path for worker spawn
-      if (project?.mcp_config_path) {
+      // P4-2/PR4: capture only the legacy control-plane MCP config path for
+      // worker spawn fallback. repo_relpath feeds the merged object below and
+      // is never passed to the worker as a pod/control-plane path.
+      const mcpSource = project?.mcp_config_source || 'legacy_control_plane_path';
+      if (mcpSource === 'legacy_control_plane_path' && project?.mcp_config_path) {
         projectMcpConfig = project.mcp_config_path;
       }
     }
@@ -685,20 +836,20 @@ function createLifecycleService({
     const presetMcp = presetResolution ? presetResolution.mcpConfig : null;
     const skillPackMcp = skillPackResult ? skillPackResult.mcpConfig : null;
     let projectMcpObj = null;
-    if (projectMcpConfig && projectDir) {
-      try {
-        // Control-plane-local MCP config read; worker/worktree paths use NodeExecutor.
-        const fsM = require('node:fs');
-        const pathM = require('node:path');
-        const realRoot = fsM.realpathSync(projectDir);
-        const realMcpPath = fsM.realpathSync(projectMcpConfig);
-        if (realMcpPath !== realRoot && !realMcpPath.startsWith(realRoot + pathM.sep)) {
-          throw new Error('mcp_config_path escapes project directory boundary');
-        }
-        projectMcpObj = JSON.parse(fsM.readFileSync(realMcpPath, 'utf8'));
-      } catch (err) {
-        console.warn(`[lifecycle] Failed to read project MCP config: ${err.message}`);
-      }
+    try {
+      projectMcpObj = await resolveProjectMcpObject({
+        run,
+        project,
+        projectDir,
+        projectMcpConfig,
+        usesMaterializedRepoWorkspace,
+        isRemoteNode,
+      });
+    } catch (err) {
+      runService.updateRunStatus(run.id, 'failed', { force: true, reason: 'mcp_repo_relpath_failed' });
+      runService.addRunEvent(run.id, 'error', JSON.stringify({ message: err.message }));
+      _runProjectDirs.delete(run.id);
+      throw err;
     }
     let mergedMcp = null;
     if (presetService) {
