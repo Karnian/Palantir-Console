@@ -67,12 +67,26 @@ function createRepoPreflightService({ nodeService } = {}) {
       throw new Error('node executor does not implement exec');
     }
 
-    const args = ['ls-remote', '--exit-code', repoUrl, repoRef || 'HEAD'];
+    // `--` before the positional repoUrl/ref: argv arrays stop shell injection
+    // but NOT git option smuggling — a user-supplied repoUrl like
+    // `--upload-pack=...` or ref `--config=...` would otherwise be parsed as a
+    // git option (Codex PR5a R2 review SERIOUS; same class as the materializer
+    // clone/ls-remote hardening).
+    const args = ['ls-remote', '--exit-code', '--', repoUrl, repoRef || 'HEAD'];
     let result;
     try {
       result = await executor.exec('git', args, {
         timeoutMs: PREFLIGHT_TIMEOUT_MS,
         maxBuffer: PREFLIGHT_MAX_BUFFER,
+        // Non-interactive git/ssh: GIT_TERMINAL_PROMPT=0 blocks git's own
+        // prompts; GIT_SSH_COMMAND BatchMode blocks the inner ssh host-key /
+        // password prompt for ssh:// repo URLs so a preflight can't hang.
+        env: {
+          GIT_TERMINAL_PROMPT: '0',
+          GIT_SSH_COMMAND: 'ssh -oBatchMode=yes -oStrictHostKeyChecking=accept-new',
+          LC_ALL: 'C',
+          LANG: 'C',
+        },
       });
     } catch (err) {
       const exitCode = Number(err?.exitCode ?? err?.status ?? (typeof err?.code === 'number' ? err.code : NaN));

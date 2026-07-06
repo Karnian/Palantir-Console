@@ -260,3 +260,90 @@ test('drainQueue without node filter keeps draining queued runs across all nodes
   assert.deepEqual(spawned.map((call) => call.runId), ['run-a-1', 'run-a-2', 'run-b-1']);
   assert.deepEqual(runs.map((run) => run.status), ['running', 'running', 'running']);
 });
+
+test('reachable executable ssh node can drain queued repo materialization', async (t) => {
+  const prev = process.env.PALANTIR_PROJECT_REPO;
+  process.env.PALANTIR_PROJECT_REPO = '1';
+  t.after(() => {
+    if (prev === undefined) delete process.env.PALANTIR_PROJECT_REPO;
+    else process.env.PALANTIR_PROJECT_REPO = prev;
+  });
+  const runs = [{
+    id: 'run-remote-1',
+    task_id: 'task-remote-1',
+    project_id: 'project-remote',
+    agent_profile_id: 'P1',
+    status: 'queued',
+    is_manager: 0,
+    node_id: 'pod-a',
+    prompt: 'remote',
+    queued_args: null,
+  }];
+  const calls = [];
+  const runService = {
+    listRuns(filter = {}) {
+      return runs.filter((run) => !filter.status || run.status === filter.status);
+    },
+    countMaterializingOnNode(nodeId) {
+      return runs.filter((run) => run.status === 'materializing' && run.node_id === nodeId).length;
+    },
+    countMaterializingGlobal() {
+      return runs.filter((run) => run.status === 'materializing').length;
+    },
+    getOldestMaterializableOnNode(nodeId, profileId) {
+      return runs.find((run) => run.status === 'queued' && run.node_id === nodeId && run.agent_profile_id === profileId) || null;
+    },
+    claimQueuedRunForMaterialization(runId) {
+      const run = runs.find((item) => item.id === runId);
+      if (!run || run.status !== 'queued') return null;
+      run.status = 'materializing';
+      return { claimed: true, token: 'claim-remote' };
+    },
+    getOldestQueuedReadyOnNode() {
+      return null;
+    },
+    getRun(runId) {
+      return runs.find((run) => run.id === runId) || null;
+    },
+    addRunEvent() {},
+  };
+  const lifecycleService = createLifecycleService({
+    runService,
+    taskService: { getTask() { return { id: 'task-remote-1', project_id: 'project-remote' }; } },
+    agentProfileService: {
+      getProfile() { return { id: 'P1', command: 'claude', max_concurrent: 1 }; },
+      getRunningCount() { return 0; },
+    },
+    projectService: {
+      getProject(projectId) {
+        return { id: projectId, source_type: 'git', repo_url: 'https://github.com/acme/repo.git' };
+      },
+    },
+    executionEngine: {},
+    streamJsonEngine: {},
+    nodeService: {
+      getNode(nodeId) {
+        return { id: nodeId, kind: 'ssh', reachable: 1, can_execute: 1, files_only: 0, cordoned: 0 };
+      },
+      pickExecutor() {
+        throw new Error('materialization drain should not dispatch a worker');
+      },
+    },
+    projectMaterializationService: {
+      ensureWorkspace(args) {
+        calls.push(args);
+        return Promise.resolve({ pending: true, backoffMs: 1000 });
+      },
+    },
+    nodeExecutor: { async spawnWorker() { throw new Error('should not spawn'); } },
+  });
+
+  await lifecycleService.drainQueue('P1');
+  await immediate();
+  await immediate();
+  lifecycleService.stopMonitoring();
+
+  assert.deepEqual(calls.map((call) => call.nodeId), ['pod-a']);
+  assert.equal(calls[0].claimToken, 'claim-remote');
+  assert.equal(runs[0].status, 'materializing');
+});

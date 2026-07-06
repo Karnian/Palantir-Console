@@ -392,6 +392,39 @@ test('rmrf refuses exposed root itself', async () => {
   );
 });
 
+test('move guards source and destination within exposed_roots', async () => {
+  let finalRealpathCalls = 0;
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script === "exec 'realpath' '/srv/root/tmp'") return complete(child, { stdout: '/real/root/tmp\n' });
+    if (script === "exec 'realpath' '/srv/root'") return complete(child, { stdout: '/real/root\n' });
+    if (script === "exec 'realpath' '/srv/root/final'") {
+      finalRealpathCalls += 1;
+      if (finalRealpathCalls === 1) return complete(child, { code: 1, stderr: 'missing' });
+      return complete(child, { stdout: '/real/root/final\n' });
+    }
+    if (script === "exec 'mv' '/real/root/tmp' '/real/root/final'") return complete(child, { code: 0 });
+    complete(child, { code: 255, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await exec.move('/srv/root/tmp', '/srv/root/final');
+
+  assert.ok(spawn.calls.some((call) => scriptOf(call) === "exec 'mv' '/real/root/tmp' '/real/root/final'"));
+
+  const escapeSpawn = rootGuardSpawn({
+    "exec 'realpath' '/srv/root/tmp'": { stdout: '/real/root/tmp\n' },
+    "exec 'realpath' '/etc/final'": { code: 1, stderr: 'missing' },
+    "exec 'realpath' '/etc'": { stdout: '/etc\n' },
+  });
+  const escapeExec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: escapeSpawn });
+  await assert.rejects(
+    () => escapeExec.move('/srv/root/tmp', '/etc/final'),
+    (err) => err.code === 'EXPOSED_ROOTS',
+  );
+  assert.equal(escapeSpawn.calls.some((call) => scriptOf(call).startsWith("exec 'mv'")), false);
+});
+
 test('creation targets guard their parent directory', async () => {
   const spawn = rootGuardSpawn({
     "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },

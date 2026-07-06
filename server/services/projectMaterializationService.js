@@ -2,7 +2,6 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
-const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { resolveProjectSource } = require('./projectSource');
@@ -43,6 +42,48 @@ function repoCacheRoot() {
   return process.env.PALANTIR_REPO_CACHE || homePath('repo-cache');
 }
 
+function unsupportedMaterialization(message) {
+  const err = new Error(message);
+  err.code = 'MATERIALIZE_UNSUPPORTED';
+  return err;
+}
+
+function parseExposedRoots(node) {
+  let roots;
+  try {
+    roots = Array.isArray(node?.exposed_roots)
+      ? node.exposed_roots
+      : JSON.parse(node?.exposed_roots || 'null');
+  } catch {
+    throw unsupportedMaterialization(`SSH node ${node?.id || '(unknown)'} has invalid exposed_roots JSON`);
+  }
+  if (!Array.isArray(roots) || roots.length === 0) {
+    throw unsupportedMaterialization(`SSH node ${node?.id || '(unknown)'} must declare exposed_roots`);
+  }
+  for (const root of roots) {
+    if (typeof root !== 'string' || !path.posix.isAbsolute(root)) {
+      throw unsupportedMaterialization('exposed_roots must contain absolute remote paths');
+    }
+  }
+  return roots;
+}
+
+function nodePathConfig(node) {
+  if (!node || (node.kind || 'local') === 'local') {
+    return {
+      join: path.join,
+      workspaceRoot: workspaceRoot(),
+      repoCacheRoot: repoCacheRoot(),
+    };
+  }
+  const firstRoot = parseExposedRoots(node)[0];
+  return {
+    join: path.posix.join,
+    workspaceRoot: path.posix.join(firstRoot, '.palantir-workspaces'),
+    repoCacheRoot: path.posix.join(firstRoot, '.palantir-repo-cache'),
+  };
+}
+
 function assertRelativeSubdir(subdir) {
   if (!subdir) return null;
   const normalized = String(subdir).trim();
@@ -55,17 +96,18 @@ function assertRelativeSubdir(subdir) {
   return parts.join(path.sep);
 }
 
-function buildPaths({ project, nodeId, source }) {
+function buildPaths({ project, nodeId, source, node = null }) {
   const gen = Number(project.source_generation || 0);
   const fp = fingerprint(source.repoUrl);
   const ref = safeSegment(source.repoRef || 'HEAD', 'HEAD');
   const projectSlug = safeSegment(project.id || project.name || 'project', 'project');
   const nodeSlug = safeSegment(nodeId || 'local', 'local');
-  const cachePath = path.join(repoCacheRoot(), `${projectSlug}-${nodeSlug}-${gen}-${fp}.gitcache`);
+  const pathConfig = nodePathConfig(node);
+  const cachePath = pathConfig.join(pathConfig.repoCacheRoot, `${projectSlug}-${nodeSlug}-${gen}-${fp}.gitcache`);
   const workspaceSlug = `${projectSlug}-${fp}-${ref}`;
   return {
     cachePath,
-    workspaceBase: path.join(workspaceRoot(), workspaceSlug),
+    workspaceBase: pathConfig.join(pathConfig.workspaceRoot, workspaceSlug),
   };
 }
 
@@ -80,8 +122,49 @@ function commandError(command, args, result) {
   return new Error(msg.slice(0, 2000));
 }
 
-async function ensureDir(dir) {
-  await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
+function requireExecutorMethod(executor, method) {
+  if (!executor || typeof executor[method] !== 'function') {
+    throw new Error(`Node executor is missing required method: ${method}`);
+  }
+  return executor[method].bind(executor);
+}
+
+async function ensureDir(executor, dir) {
+  await requireExecutorMethod(executor, 'mkdir')(dir, { recursive: true, mode: 0o700 });
+}
+
+async function removePath(executor, target) {
+  await requireExecutorMethod(executor, 'rmrf')(target);
+}
+
+async function movePath(executor, src, dst) {
+  await requireExecutorMethod(executor, 'move')(src, dst);
+}
+
+function pathDirnameFor(target) {
+  return target.includes('\\') ? path.dirname(target) : path.posix.dirname(target);
+}
+
+function pathJoinFor(base, subdir) {
+  return base.includes('\\') ? path.join(base, subdir) : path.posix.join(base, subdir);
+}
+
+function isRemoteNode(node) {
+  return Boolean(node && (node.kind || 'local') !== 'local');
+}
+
+function requireRemoteRootGuard(executor, node) {
+  if (isRemoteNode(node) && (!executor || typeof executor.assertWithinRoots !== 'function')) {
+    throw new Error('remote repo materialization requires executor.assertWithinRoots');
+  }
+}
+
+async function canonicalTargetForWrite(executor, node, target) {
+  if (!isRemoteNode(node)) return target;
+  requireRemoteRootGuard(executor, node);
+  const safeTarget = await executor.assertWithinRoots(target, { allowMissing: true });
+  if (!safeTarget) throw new Error(`remote write target cannot be canonicalized within exposed_roots: ${target}`);
+  return safeTarget;
 }
 
 function createProjectMaterializationService({
@@ -118,6 +201,7 @@ function createProjectMaterializationService({
       timeoutMs: gitTimeoutMs,
       env: {
         GIT_TERMINAL_PROMPT: '0',
+        GIT_SSH_COMMAND: 'ssh -oBatchMode=yes -oStrictHostKeyChecking=accept-new',
         LC_ALL: 'C',
         LANG: 'C',
       },
@@ -143,61 +227,72 @@ function createProjectMaterializationService({
     }
   }
 
-  async function cloneAtomic({ executor, repoUrl, cachePath, replaceInvalid = false }) {
-    await ensureDir(path.dirname(cachePath));
+  async function cloneAtomic({ executor, node, repoUrl, cachePath, replaceInvalid = false }) {
+    const cacheParent = pathDirnameFor(cachePath);
+    await canonicalTargetForWrite(executor, node, cacheParent);
+    await ensureDir(executor, cacheParent);
+    const safeCachePath = await canonicalTargetForWrite(executor, node, cachePath);
     const tmpPath = `${cachePath}.tmp-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
-    await fsp.rm(tmpPath, { recursive: true, force: true });
+    const safeTmpPath = await canonicalTargetForWrite(executor, node, tmpPath);
+    await removePath(executor, safeTmpPath);
     try {
-      const clone = await git(executor, ['clone', '--no-checkout', repoUrl, tmpPath], { cwd: path.dirname(cachePath) });
-      if (clone.code !== 0) throw commandError('git', ['clone', '--no-checkout', repoUrl, tmpPath], clone);
-      if (replaceInvalid && await pathExists(executor, cachePath)) {
-        if (await cacheLooksValid({ executor, cachePath })) {
-          await fsp.rm(tmpPath, { recursive: true, force: true });
-          return { cloned: false, reusedValidCache: true };
+      const cloneArgs = ['clone', '--no-checkout', '--', repoUrl, safeTmpPath];
+      const clone = await git(executor, cloneArgs, { cwd: pathDirnameFor(safeCachePath) });
+      if (clone.code !== 0) throw commandError('git', cloneArgs, clone);
+      if (replaceInvalid && await pathExists(executor, safeCachePath)) {
+        if (await cacheLooksValid({ executor, cachePath: safeCachePath })) {
+          await removePath(executor, safeTmpPath);
+          return { cloned: false, reusedValidCache: true, cachePath: safeCachePath };
         }
-        await fsp.rm(cachePath, { recursive: true, force: true });
+        await removePath(executor, safeCachePath);
       }
-      await fsp.rename(tmpPath, cachePath);
-      return { cloned: true };
+      await movePath(executor, safeTmpPath, safeCachePath);
+      return { cloned: true, cachePath: safeCachePath };
     } catch (err) {
-      await fsp.rm(tmpPath, { recursive: true, force: true });
+      await removePath(executor, safeTmpPath);
       throw err;
     }
   }
 
-  async function cloneOrFetch({ executor, repoUrl, cachePath, touchLease }) {
-    await ensureDir(path.dirname(cachePath));
-    if (await cacheLooksValid({ executor, cachePath })) {
+  async function cloneOrFetch({ executor, node, repoUrl, cachePath, touchLease }) {
+    const cacheParent = pathDirnameFor(cachePath);
+    await canonicalTargetForWrite(executor, node, cacheParent);
+    await ensureDir(executor, cacheParent);
+    const safeCachePath = await canonicalTargetForWrite(executor, node, cachePath);
+    if (await cacheLooksValid({ executor, cachePath: safeCachePath })) {
       if (touchLease) touchLease();
-      const fetch = await git(executor, ['fetch', '--all', '--tags', '--prune'], { cwd: cachePath });
+      const fetch = await git(executor, ['fetch', '--all', '--tags', '--prune'], { cwd: safeCachePath });
       if (fetch.code !== 0) throw commandError('git', ['fetch', '--all', '--tags', '--prune'], fetch);
       if (touchLease) touchLease();
-      return { cloned: false };
+      return { cloned: false, cachePath: safeCachePath };
     }
     if (touchLease) touchLease();
-    const replaceInvalid = await pathExists(executor, cachePath);
-    const cloned = await cloneAtomic({ executor, repoUrl, cachePath, replaceInvalid });
+    const replaceInvalid = await pathExists(executor, safeCachePath);
+    const cloned = await cloneAtomic({ executor, node, repoUrl, cachePath, replaceInvalid });
     if (touchLease) touchLease();
     return cloned;
   }
 
   async function resolveCommit({ executor, repoUrl, cachePath, ref }) {
     const requested = ref || 'HEAD';
-    const revParse = await git(executor, ['rev-parse', '--verify', `${requested}^{commit}`], { cwd: cachePath });
+    const revParseArgs = ['rev-parse', '--verify', '--end-of-options', `${requested}^{commit}`];
+    const revParse = await git(executor, revParseArgs, { cwd: cachePath });
     if (revParse.code === 0 && revParse.stdout.trim()) return revParse.stdout.trim().split(/\s+/)[0];
 
-    const remote = await git(executor, ['ls-remote', repoUrl, requested], { cwd: cachePath });
-    if (remote.code !== 0) throw commandError('git', ['rev-parse', '--verify', `${requested}^{commit}`], revParse);
+    const lsRemoteArgs = ['ls-remote', '--', repoUrl, requested];
+    const remote = await git(executor, lsRemoteArgs, { cwd: cachePath });
+    if (remote.code !== 0) throw commandError('git', revParseArgs, revParse);
     const first = remote.stdout.trim().split(/\s+/)[0];
     if (!/^[0-9a-fA-F]{40}$/.test(first)) {
       throw new Error(`Unable to resolve git ref: ${requested}`);
     }
-    const fetch = await git(executor, ['fetch', 'origin', first], { cwd: cachePath });
-    if (fetch.code !== 0) throw commandError('git', ['fetch', 'origin', first], fetch);
+    const fetchArgs = ['fetch', 'origin', '--', first];
+    const fetch = await git(executor, fetchArgs, { cwd: cachePath });
+    if (fetch.code !== 0) throw commandError('git', fetchArgs, fetch);
     return first;
   }
 
-  async function materializeCache({ project, nodeId, source, cachePath, executor, runId, currentReady }) {
+  async function materializeCache({ project, node, nodeId, source, cachePath, executor, runId, currentReady }) {
     const sourceGeneration = Number(project.source_generation || 0);
     const lease = runService.acquireMaterializationLease({
       projectId: project.id,
@@ -220,12 +315,19 @@ function createProjectMaterializationService({
           runService.touchMaterializationLease(lease.token);
         }
       };
-      await cloneOrFetch({ executor, repoUrl: source.repoUrl, cachePath: effectiveCachePath, touchLease });
+      const materializedCache = await cloneOrFetch({
+        executor,
+        node,
+        repoUrl: source.repoUrl,
+        cachePath: effectiveCachePath,
+        touchLease,
+      });
+      const readyCachePath = materializedCache.cachePath || effectiveCachePath;
       touchLease();
       const resolvedCommit = await resolveCommit({
         executor,
         repoUrl: source.repoUrl,
-        cachePath: effectiveCachePath,
+        cachePath: readyCachePath,
         ref: source.repoRef || 'HEAD',
       });
       touchLease();
@@ -236,7 +338,7 @@ function createProjectMaterializationService({
         repo_url: source.repoUrl,
         repo_ref: source.repoRef || 'HEAD',
         resolved_commit: resolvedCommit,
-        repo_cache_path: effectiveCachePath,
+        repo_cache_path: readyCachePath,
       });
       runService.releaseMaterializationLease(lease.token, { status: 'completed' });
       return { ready };
@@ -255,19 +357,24 @@ function createProjectMaterializationService({
     }
   }
 
-  async function addRunWorktree({ executor, cachePath, workspacePath, resolvedCommit }) {
-    await ensureDir(path.dirname(workspacePath));
+  async function addRunWorktree({ executor, node, cachePath, workspacePath, resolvedCommit }) {
+    const workspaceParent = pathDirnameFor(workspacePath);
+    await canonicalTargetForWrite(executor, node, workspaceParent);
+    await ensureDir(executor, workspaceParent);
+    const safeWorkspacePath = await canonicalTargetForWrite(executor, node, workspacePath);
     await pruneWorktrees({ executor, cachePath });
-    if (await pathExists(executor, workspacePath)) {
-      await fsp.rm(workspacePath, { recursive: true, force: true });
+    if (await pathExists(executor, safeWorkspacePath)) {
+      await removePath(executor, safeWorkspacePath);
       await pruneWorktrees({ executor, cachePath });
     }
-    const result = await git(executor, ['worktree', 'add', workspacePath, resolvedCommit], { cwd: cachePath });
+    const worktreeArgs = ['worktree', 'add', '--', safeWorkspacePath, resolvedCommit];
+    const result = await git(executor, worktreeArgs, { cwd: cachePath });
     if (result.code !== 0) {
-      const err = commandError('git', ['worktree', 'add', workspacePath, resolvedCommit], result);
-      await cleanupRunWorktree({ executor, cachePath, workspacePath });
+      const err = commandError('git', worktreeArgs, result);
+      await cleanupRunWorktree({ executor, cachePath, workspacePath: safeWorkspacePath });
       throw err;
     }
+    return safeWorkspacePath;
   }
 
   async function pruneWorktrees({ executor, cachePath }) {
@@ -288,7 +395,7 @@ function createProjectMaterializationService({
         // Fall back to filesystem cleanup below.
       }
     }
-    if (!removed) await fsp.rm(workspacePath, { recursive: true, force: true });
+    if (!removed) await removePath(executor, workspacePath);
     if (cachePath) await pruneWorktrees({ executor, cachePath });
   }
 
@@ -310,15 +417,21 @@ function createProjectMaterializationService({
         if ((nodeId || effectiveRun.node_id || 'local') !== 'local') throw err;
       }
     }
-    if (node && (node.kind || 'local') !== 'local') return false;
-
-    const executor = executorForNode(nodeId || effectiveRun.node_id || 'local');
     const sourceGeneration = Number(effectiveProject.source_generation || effectiveRun.run_source_generation || 0);
-    const { cachePath, workspaceBase } = buildPaths({
-      project: effectiveProject,
-      nodeId: nodeId || effectiveRun.node_id || 'local',
-      source,
-    });
+    let cachePath;
+    let workspaceBase;
+    try {
+      ({ cachePath, workspaceBase } = buildPaths({
+        project: effectiveProject,
+        nodeId: nodeId || effectiveRun.node_id || 'local',
+        source,
+        node,
+      }));
+    } catch (err) {
+      if (err.code === 'MATERIALIZE_UNSUPPORTED') return false;
+      throw err;
+    }
+    const executor = executorForNode(nodeId || effectiveRun.node_id || 'local');
     const ready = runService.getProjectNodeWorkspace(
       effectiveProject.id,
       nodeId || effectiveRun.node_id || 'local',
@@ -363,13 +476,19 @@ function createProjectMaterializationService({
         if ((nodeId || 'local') !== 'local') throw err;
       }
     }
-    if (node && (node.kind || 'local') !== 'local') {
-      return { pending: false, unsupported: true, error: 'repo materialization is unsupported on remote nodes' };
-    }
 
-    const executor = executorForNode(nodeId);
     const sourceGeneration = Number(effectiveProject.source_generation || 0);
-    const { cachePath, workspaceBase } = buildPaths({ project: effectiveProject, nodeId, source });
+    let cachePath;
+    let workspaceBase;
+    try {
+      ({ cachePath, workspaceBase } = buildPaths({ project: effectiveProject, nodeId, source, node }));
+    } catch (err) {
+      if (err.code === 'MATERIALIZE_UNSUPPORTED') {
+        return { pending: false, unsupported: true, error: err.message };
+      }
+      throw err;
+    }
+    const executor = executorForNode(nodeId);
     let ready = runService.getProjectNodeWorkspace(effectiveProject.id, nodeId || 'local', sourceGeneration);
 
     let workspacePath = null;
@@ -378,6 +497,7 @@ function createProjectMaterializationService({
     try {
       const cache = await materializeCache({
         project: effectiveProject,
+        node,
         nodeId: nodeId || 'local',
         source,
         cachePath,
@@ -396,8 +516,9 @@ function createProjectMaterializationService({
         runId,
         claimToken: effectiveClaimToken,
       });
-      await addRunWorktree({
+      workspacePath = await addRunWorktree({
         executor,
+        node,
         cachePath: ready.repo_cache_path,
         workspacePath,
         resolvedCommit: ready.resolved_commit,
@@ -445,7 +566,7 @@ function createProjectMaterializationService({
         ready: true,
         run: runService.getRun(runId),
         workspacePath,
-        cwd: repoSubdir ? path.join(workspacePath, repoSubdir) : workspacePath,
+        cwd: repoSubdir ? pathJoinFor(workspacePath, repoSubdir) : workspacePath,
         resolvedCommit: ready.resolved_commit,
       };
     } catch (err) {
