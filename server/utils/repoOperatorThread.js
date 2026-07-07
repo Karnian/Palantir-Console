@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 
 function repoFeatureEnabled() {
-  return process.env.PALANTIR_PROJECT_REPO === '1';
+  return process.env.PALANTIR_PROJECT_REPO !== '0';
 }
 
 function normalizeRepoSubdir(subdir) {

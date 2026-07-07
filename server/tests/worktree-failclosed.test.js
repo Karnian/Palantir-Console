@@ -352,7 +352,16 @@ test('spawnQueuedRun preserves legacy projectDir behavior when worktreeService i
   assert.equal(eventsOf(h.runService, run.id, 'worktree:shared_dir_optin').length, 0);
 });
 
-test('executeTask fails git source projects until repo materialization is available', async (t) => {
+test('executeTask fails git source projects when the repo feature is DISABLED (rollback)', async (t) => {
+  // PALANTIR_PROJECT_REPO now defaults ON; this test pins the rollback path —
+  // with the flag explicitly OFF a git-source run fails closed rather than
+  // materializing (legacy behavior preserved for operators who disable it).
+  const prevFlag = process.env.PALANTIR_PROJECT_REPO;
+  process.env.PALANTIR_PROJECT_REPO = '0';
+  t.after(() => {
+    if (prevFlag === undefined) delete process.env.PALANTIR_PROJECT_REPO;
+    else process.env.PALANTIR_PROJECT_REPO = prevFlag;
+  });
   const { db } = await mkdb(t);
   const h = buildHarness(db, { worktreeService: null });
   const profile = seedProfile(db);

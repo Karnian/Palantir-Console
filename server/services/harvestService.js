@@ -15,7 +15,7 @@ const SERVER_NODE_MAJOR = Number.parseInt(process.versions.node, 10);
 const MAX_DECL_BYTES = 1024 * 1024;
 
 function repoFeatureEnabled() {
-  return process.env.PALANTIR_PROJECT_REPO === '1';
+  return process.env.PALANTIR_PROJECT_REPO !== '0';
 }
 
 function tailString(value, maxChars) {

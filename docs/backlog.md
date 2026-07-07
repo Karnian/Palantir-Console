@@ -223,7 +223,7 @@
 
 ### ~~P. Project Repo-Defined 재정의 (C안)~~ ✅ 전 구현 완결 (2026-07-06, PR #323~#331)
 - **Spec**: [`docs/specs/project-repo-defined-brief.md`](./specs/project-repo-defined-brief.md) (v1.0 LOCKED → 전 phase 완료 스탬프).
-- **완결**: 프로젝트를 folder-bound → **코드베이스(git repo)** 로. 로컬(schema v050/API+preflight/UI/materialize+queue/MCP split/Operator+reset guard) + 원격(clone·auth/worker cwd/harvest, 실 Raspberry Pi spike 각 6/6) + cleanup/rollback. flag `PALANTIR_PROJECT_REPO` **기본 off**(프로덕션 무영향, legacy_directory 무손상). Codex 교차검증(PR3 동시성 5R·PR5a 보안 3R·PR5c 2R). 열린 결정 5개 lock: ref=per-run fetch / full clone / workspace root=exposed_roots[0]/.palantir-* / lease TTL 10min·max_materializing 2·global 4 / subdir=cwd.
+- **완결**: 프로젝트를 folder-bound → **코드베이스(git repo)** 로. 로컬(schema v050/API+preflight/UI/materialize+queue/MCP split/Operator+reset guard) + 원격(clone·auth/worker cwd/harvest, 실 Raspberry Pi spike 각 6/6) + cleanup/rollback. flag `PALANTIR_PROJECT_REPO` **기본 ON**(#333; `=0` 으로 rollback, legacy_directory 무손상). Codex 교차검증(PR3 동시성 5R·PR5a 보안 3R·PR5c 2R). 열린 결정 5개 lock: ref=per-run fetch / full clone / workspace root=exposed_roots[0]/.palantir-* / lease TTL 10min·max_materializing 2·global 4 / subdir=cwd.
 - **남은 것(선택, Trigger-wait)**: PR5a-2 controller-token askpass 2순위 — 현재 git auth=node-local only(pod 자체 자격), 부재 시 fail-closed. private repo 에 pod deploy key/gh auth 가 없는 시나리오 발생 시 착수.
 
 *(기존 항목: `skill-pack-gallery-v1.1.md` 는 PR #124 에서 Final / locked-in, `manager-session-ui.md` 는 PR #120 의 gap analysis + PR #121-123 R2-A/B/C 로 대부분 소화)*
