@@ -10,7 +10,7 @@ const DEFAULT_GIT_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_LEASE_STALE_MS = 10 * 60 * 1000;
 
 function repoFeatureEnabled() {
-  return process.env.PALANTIR_PROJECT_REPO === '1';
+  return process.env.PALANTIR_PROJECT_REPO !== '0';
 }
 
 function safeSegment(value, fallback = 'repo') {

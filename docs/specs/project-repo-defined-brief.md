@@ -9,7 +9,7 @@
 > · PR3 로컬 materialize+queue(#326, Codex 5R) · PR4 MCP source split(#327) · PR5 Operator 통합+reset guard(#328)
 > · PR5a 원격 clone/auth(#329, 보안 R3 GO + 실 Pi spike 6/6) · **PR5b 원격 worker cwd = PR5a+PR3 로 배선(별도 PR
 > 불필요)** · PR5c 원격 harvest/diff/test(#330, R2 GO + 실 Pi spike 6/6) · PR7 cleanup/rollback 테스트+docs.
-> flag `PALANTIR_PROJECT_REPO` 기본 off (프로덕션 무영향). 실 Raspberry Pi 로 원격 clone/materialize/harvest 실증.
+> flag `PALANTIR_PROJECT_REPO` 기본 ON(#333; `=0` 으로 rollback). 실 Raspberry Pi 로 원격 clone/materialize/harvest 실증.
 > **남은 것(선택)**: PR5a-2 controller-token askpass 2순위(현재 node-local auth only, 부재 시 fail-closed).
 
 ## 0. 방향 (사용자 확정)

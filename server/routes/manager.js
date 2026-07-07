@@ -263,7 +263,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   try {
                     runService.addRunEvent(r.id, 'operator:materialize_failed', JSON.stringify({ project_id: projectId, reason: 'feature_disabled' }));
                   } catch { /* ignore */ }
-                  throw new Error('repo Operator resume requires PALANTIR_PROJECT_REPO=1');
+                  throw new Error('repo Operator resume requires the repo feature enabled (PALANTIR_PROJECT_REPO must not be 0)');
                 }
                 if (isRepoProject && isRemoteNode) {
                   try {

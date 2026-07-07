@@ -111,7 +111,7 @@ function createLifecycleService({
   );
 
   function repoFeatureEnabled() {
-    return process.env.PALANTIR_PROJECT_REPO === '1';
+    return process.env.PALANTIR_PROJECT_REPO !== '0';
   }
 
   function projectIsRepo(project) {
