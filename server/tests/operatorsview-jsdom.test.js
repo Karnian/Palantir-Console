@@ -19,7 +19,9 @@ async function waitFor(assertion, timeoutMs = 1000) {
 }
 
 function installRosterStubs(env, { managerStatus, profiles }) {
-  env.context.apiFetch = async (url) => {
+  const calls = [];
+  env.context.apiFetch = async (url, opts = {}) => {
+    calls.push({ url, opts });
     if (url === '/api/manager/status') return managerStatus;
     if (url === '/api/operator/profiles') return { profiles };
     throw new Error(`unexpected url ${url}`);
@@ -35,6 +37,7 @@ function installRosterStubs(env, { managerStatus, profiles }) {
   env.context.EmptyState = function EmptyState({ text, sub }) {
     return env.context.preact.h('div', { class: 'empty-state' }, `${text} ${sub || ''}`);
   };
+  return calls;
 }
 
 function renderOperatorsView(env, props = {}) {
@@ -52,7 +55,7 @@ test('OperatorsView renders Master, Live Operators, and Available Operators as s
   const env = createPreactEnv();
   t.after(env.cleanup);
 
-  installRosterStubs(env, {
+  const apiCalls = installRosterStubs(env, {
     managerStatus: {
       active: true,
       top: {
@@ -122,14 +125,31 @@ test('OperatorsView renders Master, Live Operators, and Available Operators as s
   const availableSection = root.querySelector('[data-role="operator-roster-available-section"]');
   const available = availableSection.querySelector('[data-role="operator-roster-available-card"]');
   assert.ok(available);
-  assert.equal(available.getAttribute('href'), '#operator/profiles');
+  assert.equal(available.tagName, 'ARTICLE');
+  assert.equal(available.getAttribute('href'), null);
+  assert.equal(available.querySelector('a a'), null);
+  const availableLinks = Array.from(available.querySelectorAll('a'));
+  assert.equal(availableLinks.length, 2);
+  assert.equal(
+    available.querySelector('[data-role="operator-roster-available-invoke-link"]').getAttribute('href'),
+    '#operator/specialist/op_review',
+  );
+  assert.equal(
+    available.querySelector('[data-role="operator-roster-available-profile-link"]').getAttribute('href'),
+    '#operator/profiles',
+  );
   assert.match(available.textContent, /Review analyst/);
   assert.match(available.textContent, /Folder-less/);
   assert.match(available.textContent, /Doer/);
   assert.match(available.textContent, /On-demand \/ Stateless/);
   assert.match(available.textContent, /Ready to invoke/);
+  assert.match(available.textContent, /호출/);
+  assert.match(available.textContent, /프로필 보기/);
   assert.match(available.textContent, /registry_metadata_search/);
   assert.doesNotMatch(availableSection.textContent, /Running|Online|Live|Session|Idle/);
+  available.querySelector('[data-role="operator-roster-available-invoke-link"]').click();
+  await flushEffects(20);
+  assert.equal(apiCalls.some((call) => call.url === '/api/operator/specialist'), false);
 });
 
 test('OperatorsView renders scoped empty states for no live project operators and no available profiles', async (t) => {

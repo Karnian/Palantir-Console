@@ -453,9 +453,14 @@ function App() {
       const routeParts = route.split('/');
       const sub = routeParts[1] || 'roster';
       const rawProjectId = sub === 'codebases' ? (routeParts.slice(2).join('/') || null) : null;
+      const rawSpecialistProfileId = sub === 'specialist' ? (routeParts.slice(2).join('/') || null) : null;
       let highlightProjectId = rawProjectId;
       if (rawProjectId) {
         try { highlightProjectId = decodeURIComponent(rawProjectId); } catch { highlightProjectId = rawProjectId; }
+      }
+      let initialSpecialistProfileId = rawSpecialistProfileId;
+      if (rawSpecialistProfileId) {
+        try { initialSpecialistProfileId = decodeURIComponent(rawSpecialistProfileId); } catch { initialSpecialistProfileId = rawSpecialistProfileId; }
       }
       return html`<${TabGroupView}
         groupHash="operator"
@@ -464,7 +469,7 @@ function App() {
           { key: 'roster',     label: NAV_LABELS['operator-roster'],     render: () => html`<${OperatorsView} runs=${runs} projects=${projects} tasks=${tasks} />` },
           { key: 'codebases',  label: NAV_LABELS['operator-codebases'],  render: () => projectsLoading ? html`<${Loading} />` : html`<${ProjectsView} projects=${projects} tasks=${tasks} runs=${runs} reloadProjects=${reloadProjects} onOpenRun=${(run) => setInspectRun(run)} onOpenTask=${(task) => setInspectTask(task)} highlightProjectId=${highlightProjectId} />` },
           { key: 'profiles',   label: NAV_LABELS['operator-profiles'],   render: () => html`<${OperatorProfilesView} />` },
-          { key: 'specialist', label: NAV_LABELS.specialist,             render: () => html`<${SpecialistView} runs=${runs} />` },
+          { key: 'specialist', label: NAV_LABELS.specialist,             render: () => html`<${SpecialistView} runs=${runs} initialProfileId=${initialSpecialistProfileId} />` },
         ]}
       />`;
     }
