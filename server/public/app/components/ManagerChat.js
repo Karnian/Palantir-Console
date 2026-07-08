@@ -796,11 +796,13 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
           </div>
         `}
         ${messages.map(m => html`
-          <div key=${m.id} class="manager-msg ${m.type === 'user_input' ? 'manager-msg-user' : 'manager-msg-assistant'}">
-            ${m.type === 'user_input'
-              ? html`<div class="manager-msg-content">${m.text}</div>`
-              : html`<div class="manager-msg-content markdown-body" dangerouslySetInnerHTML=${{ __html: renderMarkdown(m.text) }}></div>`
-            }
+          <div key=${m.id} class="manager-msg-row ${m.type === 'user_input' ? 'manager-msg-row-user' : 'manager-msg-row-assistant'}">
+            <div class="manager-msg ${m.type === 'user_input' ? 'manager-msg-user' : 'manager-msg-assistant'}">
+              ${m.type === 'user_input'
+                ? html`<div class="manager-msg-content">${m.text}</div>`
+                : html`<div class="manager-msg-content markdown-body" dangerouslySetInnerHTML=${{ __html: renderMarkdown(m.text) }}></div>`
+              }
+            </div>
             <div class="manager-msg-time">${timeAgo(m.time)}</div>
           </div>
         `)}

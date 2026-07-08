@@ -48,6 +48,10 @@
   /* Accent - indigo/violet */
   --accent: #7c5cfc;
   --accent-hover: #6d4fee;
+  /* a11y-contrast-hardening (2026-07-08): user message bubble bg. Dark uses the
+   * slightly deeper accent-hover so white body text clears 4.5:1 (canonical
+   * --accent #7c5cfc only hits 4.38:1). Light keeps --accent (white ≈7:1). */
+  --msg-user-bg: #6d4fee;
   --accent-light: #a78bfa;
   --accent-muted: rgba(124, 92, 252, 0.15);
   --accent-border: rgba(124, 92, 252, 0.4);
@@ -296,6 +300,7 @@
    * accent-* block. */
   --accent: #6d28d9;
   --accent-hover: #5b21b6;
+  --msg-user-bg: #6d28d9;
   --accent-light: var(--accent);
   --accent-muted: rgba(109, 40, 217, 0.12);
   --accent-border: rgba(109, 40, 217, 0.4);
@@ -425,6 +430,7 @@
     --text-inverse: #fafafa;
     --accent: #6d28d9;
     --accent-hover: #5b21b6;
+    --msg-user-bg: #6d28d9;
     --accent-light: var(--accent);
     --accent-muted: rgba(109, 40, 217, 0.12);
     --accent-border: rgba(109, 40, 217, 0.4);
