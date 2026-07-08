@@ -495,6 +495,82 @@ test('ProjectsView warm operator action reports already-ready fast path', async 
   });
 });
 
+test('ProjectsView renders operator watch reverse index without changing warm action', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  installProjectsStubs(env, async (url) => {
+    if (url === '/api/nodes') return { nodes: [] };
+    if (url === '/api/operator-instances') {
+      return {
+        instances: [
+          {
+            id: 'oi_alpha',
+            refs: [
+              { project_id: 'proj_alpha', role: 'primary' },
+              { project_id: 'proj_beta', role: 'reference' },
+            ],
+          },
+          {
+            id: 'oi_reviewer',
+            refs: [
+              { project_id: 'proj_alpha', role: 'reference' },
+            ],
+          },
+        ],
+      };
+    }
+    return {};
+  });
+  env.loadComponent('ProjectsView');
+
+  const root = renderProjectsView(env, {
+    projects: [
+      {
+        id: 'proj_alpha',
+        name: 'Alpha Console',
+        source_type: 'git',
+        repo_url: 'https://github.com/acme/alpha.git',
+        created_at: '2026-07-05T00:00:00.000Z',
+      },
+      {
+        id: 'proj_beta',
+        name: 'Beta API',
+        source_type: 'git',
+        repo_url: 'https://github.com/acme/beta.git',
+        created_at: '2026-07-05T00:00:00.000Z',
+      },
+      {
+        id: 'proj_empty',
+        name: 'No Watchers',
+        source_type: 'git',
+        repo_url: 'https://github.com/acme/empty.git',
+        created_at: '2026-07-05T00:00:00.000Z',
+      },
+    ],
+  });
+
+  const alphaCard = await waitFor(() => {
+    const el = root.querySelector('[data-role="project-card"][data-project-id="proj_alpha"]');
+    assert.ok(el);
+    assert.match(el.textContent, /이 코드베이스를 보는 오퍼레이터 2/);
+    return el;
+  });
+  assert.match(alphaCard.querySelector('[data-role="project-operator-watch-primary"]').textContent, /담당/);
+  assert.match(alphaCard.querySelector('[data-role="project-operator-watch-reference"]').textContent, /참조/);
+  const alphaWarm = alphaCard.querySelector('[data-role="project-warm-operator"]');
+  assert.ok(alphaWarm);
+  assert.match(alphaWarm.textContent, /오퍼레이터 준비/);
+
+  const betaCard = root.querySelector('[data-role="project-card"][data-project-id="proj_beta"]');
+  assert.match(betaCard.textContent, /이 코드베이스를 보는 오퍼레이터 1/);
+  assert.equal(betaCard.querySelector('[data-role="project-operator-watch-primary"]'), null);
+  assert.match(betaCard.querySelector('[data-role="project-operator-watch-reference"]').textContent, /참조/);
+
+  const emptyCard = root.querySelector('[data-role="project-card"][data-project-id="proj_empty"]');
+  assert.ok(emptyCard);
+  assert.equal(emptyCard.querySelector('[data-role="project-operator-watchers"]'), null);
+});
+
 test('ProjectsView highlights codebase selected by #operator/codebases deep link', async (t) => {
   const env = createPreactEnv();
   t.after(env.cleanup);

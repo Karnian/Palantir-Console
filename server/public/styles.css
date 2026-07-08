@@ -2642,6 +2642,46 @@ body {
   margin-top: 4px;
 }
 
+.project-operator-watchers {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.project-operator-watchers-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.project-operator-watch-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.project-operator-watch-badge.primary {
+  border-color: var(--accent-border);
+  background: var(--accent-muted);
+  color: var(--accent-light);
+  font-weight: 600;
+}
+
+.project-operator-watch-badge.reference {
+  color: var(--text-muted);
+}
+
 /* Project Detail Modal */
 
 .project-detail-panel {
@@ -7641,7 +7681,7 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   border-radius: var(--radius-xs);
 }
 
-/* Operators roster — read-only overview. Reuses operator profile cards/chips. */
+/* Operators roster — overview and watch-list refs. Reuses operator profile cards/chips. */
 .operator-roster-page {
   padding: 20px 28px 28px;
   overflow-y: auto;
@@ -7693,6 +7733,65 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.operator-watch-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.operator-watch-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.operator-watch-badge.primary {
+  border-color: var(--accent-border);
+  background: var(--accent-muted);
+  color: var(--accent-light);
+  font-weight: 600;
+}
+
+.operator-watch-badge.reference {
+  color: var(--text-muted);
+}
+
+.operator-watch-role,
+.operator-watch-project {
+  min-width: 0;
+}
+
+.operator-watch-project {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.operator-watch-remove {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+  padding: 0 0 1px 2px;
+}
+
+.operator-watch-remove:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
 }
 
 .operator-roster-meta-grid {

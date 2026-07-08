@@ -1,6 +1,6 @@
-// OperatorsView — read-only roster slice.
+// OperatorsView — roster slice.
 // Shows the current Top manager, project-bound live Operators, and folder-less
-// available Operator profiles without adding any backend surface.
+// available Operator profiles.
 
 import { h } from '../../vendor/preact.module.js';
 import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
@@ -9,7 +9,7 @@ const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
 import { sseBroker } from '../lib/hooks/sse.js';
-import { addToast } from '../lib/toast.js';
+import { addToast, apiFetchWithToast } from '../lib/toast.js';
 import { parseProjectConversationId } from '../lib/conversationId.js';
 import {
   COMMON_ACTIONS,
@@ -26,6 +26,8 @@ import { SpecialistInvokePanel } from './SpecialistInvokePanel.js';
 const ACTIVE_WORKER_STATUSES = new Set(['running']);
 const ROSTER_LIVE_CHANNELS = ['manager:started', 'manager:stopped', 'run:status', 'run:completed'];
 const ROSTER_REFRESH_DEBOUNCE_MS = 400;
+const OPERATOR_CONVERSATION_PREFIX = 'operator:';
+const OPERATOR_INSTANCE_PREFIX = 'oi_';
 
 function Loading() {
   return html`<div class="loading">${COMMON_ACTIONS.loading}</div>`;
@@ -33,6 +35,13 @@ function Loading() {
 
 function arrayValue(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function instanceConversationId(id) {
+  if (typeof id !== 'string') return null;
+  if (!id.startsWith(OPERATOR_CONVERSATION_PREFIX)) return null;
+  const instanceId = id.slice(OPERATOR_CONVERSATION_PREFIX.length);
+  return instanceId.startsWith(OPERATOR_INSTANCE_PREFIX) ? instanceId : null;
 }
 
 function adapterName(run) {
@@ -54,6 +63,7 @@ function shortRunId(id) {
 }
 
 function parsedProjectId(entry) {
+  if (entry?.primaryProjectId) return entry.primaryProjectId;
   const fromEntry = parseProjectConversationId(entry?.conversationId);
   if (fromEntry) return fromEntry.projectId;
   // W-P5 canonical flip: snapshot conversationId is instance-form (operator:oi_*),
@@ -63,6 +73,27 @@ function parsedProjectId(entry) {
   if (fromLegacy) return fromLegacy.projectId;
   const fromRun = parseProjectConversationId(entry?.run?.conversation_id);
   return fromRun ? fromRun.projectId : null;
+}
+
+function primaryRef(instance) {
+  return arrayValue(instance?.refs).find((ref) => ref?.role === 'primary') || null;
+}
+
+function refProjectName(ref, projectsById) {
+  const projectId = ref?.project_id;
+  const project = projectId ? projectsById.get(String(projectId)) : null;
+  return ref?.project?.name || project?.name || projectId || OPERATOR_ROSTER_LABELS.unknownProject;
+}
+
+function instanceLabel(instance) {
+  const id = String(instance?.id || '');
+  return id.length > 12 ? `${id.slice(0, 12)}...` : id || OPERATOR_ROSTER_LABELS.unknownValue;
+}
+
+function refRoleLabel(role) {
+  return role === 'primary'
+    ? OPERATOR_ROSTER_LABELS.primaryRefRole
+    : OPERATOR_ROSTER_LABELS.referenceRefRole;
 }
 
 function capabilitySummary(profile) {
@@ -84,6 +115,54 @@ function countActiveWorkers({ projectId, runs, taskById }) {
       || (run?.task_id ? taskById.get(run.task_id)?.project_id : null);
     return String(runProjectId || '') === String(projectId);
   }).length;
+}
+
+function resolveLiveInstance(entry, { instancesById, primaryInstanceByProject }) {
+  const directId = entry?.instanceId
+    || entry?.run?.operator_instance_id
+    || instanceConversationId(entry?.conversationId)
+    || instanceConversationId(entry?.run?.conversation_id);
+  if (directId && instancesById.has(String(directId))) {
+    return instancesById.get(String(directId));
+  }
+  const projectId = parsedProjectId(entry);
+  if (projectId && primaryInstanceByProject.has(String(projectId))) {
+    return primaryInstanceByProject.get(String(projectId));
+  }
+  return null;
+}
+
+function WatchListBadges({ instance, projectsById, onRemoveReference }) {
+  const refs = arrayValue(instance?.refs);
+  if (refs.length === 0) return null;
+
+  return html`
+    <div class="operator-watch-list" data-role="operator-watch-list" aria-label=${OPERATOR_ROSTER_LABELS.watchListLabel}>
+      ${refs.map((ref) => {
+        const isPrimary = ref.role === 'primary';
+        const projectName = refProjectName(ref, projectsById);
+        return html`
+          <span
+            key=${`${ref.project_id}:${ref.role}`}
+            class=${`operator-watch-badge ${isPrimary ? 'primary' : 'reference'}`}
+            data-role=${isPrimary ? 'operator-watch-ref-primary' : 'operator-watch-ref-reference'}
+          >
+            <span class="operator-watch-role">${refRoleLabel(ref.role)}</span>
+            <span class="operator-watch-project">${projectName}</span>
+            ${!isPrimary && html`
+              <button
+                type="button"
+                class="operator-watch-remove"
+                data-role="operator-watch-ref-remove"
+                aria-label=${`${projectName} ${OPERATOR_ROSTER_LABELS.removeReference}`}
+                onClick=${() => onRemoveReference(instance, ref)}
+              >×</button>
+            `}
+          </span>
+        `;
+      })}
+    </div>
+  `;
 }
 
 function MasterCard({ top }) {
@@ -117,11 +196,22 @@ function MasterCard({ top }) {
   `;
 }
 
-function LiveOperatorCard({ entry, projectsById, runs, taskById }) {
+function LiveOperatorCard({
+  entry,
+  instance,
+  projectsById,
+  runs,
+  taskById,
+  onOpenRefs,
+  onRemoveReference,
+}) {
   const run = entry?.run || {};
-  const projectId = parsedProjectId(entry);
+  const primary = primaryRef(instance);
+  const projectId = parsedProjectId(entry) || primary?.project_id;
   const project = projectId ? projectsById.get(String(projectId)) : null;
-  const projectName = project?.name || run.project_name || projectId || OPERATOR_ROSTER_LABELS.unknownProject;
+  const projectName = primary
+    ? refProjectName(primary, projectsById)
+    : (project?.name || run.project_name || projectId || OPERATOR_ROSTER_LABELS.unknownProject);
   const workerCount = countActiveWorkers({ projectId, runs, taskById });
   const projectHref = projectId ? `#operator/codebases/${encodeURIComponent(String(projectId))}` : '#operator/codebases';
   const conversationHref = projectId ? `#manager/operator/${encodeURIComponent(String(projectId))}` : '#manager';
@@ -136,9 +226,18 @@ function LiveOperatorCard({ entry, projectsById, runs, taskById }) {
         <span class="skill-badge skill-badge-ok">${OPERATOR_ROSTER_LABELS.liveMode}</span>
         <span class="skill-badge skill-badge-ok">${OPERATOR_ROSTER_LABELS.liveLifecycle}</span>
       </div>
+      <${WatchListBadges}
+        instance=${instance}
+        projectsById=${projectsById}
+        onRemoveReference=${onRemoveReference}
+      />
       <div class="operator-roster-meta-grid">
         <span>${OPERATOR_ROSTER_LABELS.adapterLabel}</span>
         <strong>${adapterName(run)}</strong>
+        ${instance && html`
+          <span>${OPERATOR_ROSTER_LABELS.instanceLabel}</span>
+          <strong>${instanceLabel(instance)}</strong>
+        `}
         <span>${OPERATOR_ROSTER_LABELS.nodeLabel}</span>
         <strong>${nodeName(run)}</strong>
         <span>${OPERATOR_ROSTER_LABELS.activeWorkerRuns}</span>
@@ -157,6 +256,16 @@ function LiveOperatorCard({ entry, projectsById, runs, taskById }) {
             data-role="operator-roster-live-project-link"
             href=${projectHref}
           >${OPERATOR_ROSTER_LABELS.openProject}</a>
+          ${instance && html`
+            <button
+              type="button"
+              class="ghost small"
+              data-role="operator-roster-add-reference-button"
+              aria-haspopup="dialog"
+              aria-label=${`${projectName} ${OPERATOR_ROSTER_LABELS.addReference}`}
+              onClick=${() => onOpenRefs(instance)}
+            >${OPERATOR_ROSTER_LABELS.addReference}</button>
+          `}
         </span>
       </div>
     </article>
@@ -207,11 +316,16 @@ function AvailableOperatorCard({ profile, onInvoke }) {
 
 export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
   const [managerStatus, setManagerStatus] = useState(null);
+  const [instances, setInstances] = useState([]);
   const [profiles, setProfiles] = useState([]);
   const [loadingStatus, setLoadingStatus] = useState(true);
   const [loadingProfiles, setLoadingProfiles] = useState(true);
   const [invokeProfile, setInvokeProfile] = useState(null);
+  const [refsEditorInstance, setRefsEditorInstance] = useState(null);
+  const [selectedRefProjectId, setSelectedRefProjectId] = useState('');
+  const [refsSaving, setRefsSaving] = useState(false);
   const managerReqSeqRef = useRef(0);
+  const instancesReqSeqRef = useRef(0);
   const profilesReqSeqRef = useRef(0);
 
   useEffect(() => {
@@ -238,6 +352,20 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
       });
     };
 
+    const fetchOperatorInstances = () => {
+      const seq = ++instancesReqSeqRef.current;
+      return apiFetch('/api/operator-instances')
+      .then((data) => {
+        if (!alive || seq !== instancesReqSeqRef.current) return;
+        setInstances(arrayValue(data?.instances));
+      })
+      .catch((err) => {
+        if (!alive || seq !== instancesReqSeqRef.current) return;
+        setInstances([]);
+        addToast(err.message, 'error');
+      });
+    };
+
     const fetchProfiles = () => {
       const seq = ++profilesReqSeqRef.current;
       setLoadingProfiles(true);
@@ -256,21 +384,24 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
       });
     };
 
-    const scheduleManagerRefresh = () => {
+    const scheduleLiveRefresh = () => {
       managerReqSeqRef.current += 1;
+      instancesReqSeqRef.current += 1;
       if (refreshTimer) clearTimeout(refreshTimer);
       refreshTimer = setTimeout(() => {
         refreshTimer = null;
         fetchManagerStatus();
+        fetchOperatorInstances();
       }, ROSTER_REFRESH_DEBOUNCE_MS);
     };
 
     fetchManagerStatus({ initial: true });
+    fetchOperatorInstances();
     fetchProfiles();
 
     const broker = typeof sseBroker !== 'undefined' ? sseBroker : null;
     const unsubscribes = broker && typeof broker.subscribe === 'function'
-      ? ROSTER_LIVE_CHANNELS.map((channel) => broker.subscribe(channel, scheduleManagerRefresh))
+      ? ROSTER_LIVE_CHANNELS.map((channel) => broker.subscribe(channel, scheduleLiveRefresh))
       : [];
 
     return () => {
@@ -298,11 +429,91 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
     return map;
   }, [tasks]);
 
+  const instancesById = useMemo(() => {
+    const map = new Map();
+    for (const instance of arrayValue(instances)) {
+      if (instance?.id) map.set(String(instance.id), instance);
+    }
+    return map;
+  }, [instances]);
+
+  const primaryInstanceByProject = useMemo(() => {
+    const map = new Map();
+    for (const instance of arrayValue(instances)) {
+      const primary = primaryRef(instance);
+      if (primary?.project_id) map.set(String(primary.project_id), instance);
+    }
+    return map;
+  }, [instances]);
+
+  const refreshOperatorInstances = async () => {
+    const seq = ++instancesReqSeqRef.current;
+    try {
+      const data = await apiFetch('/api/operator-instances');
+      if (seq !== instancesReqSeqRef.current) return;
+      setInstances(arrayValue(data?.instances));
+    } catch (err) {
+      if (seq !== instancesReqSeqRef.current) return;
+      setInstances([]);
+      addToast(err.message, 'error');
+    }
+  };
+
+  const openRefsEditor = (instance) => {
+    setRefsEditorInstance(instance);
+    const existingIds = new Set(arrayValue(instance?.refs).map((ref) => String(ref.project_id)));
+    const firstAvailable = arrayValue(projects).find((project) => project?.id && !existingIds.has(String(project.id)));
+    setSelectedRefProjectId(firstAvailable?.id || '');
+  };
+
+  const closeRefsEditor = () => {
+    setRefsEditorInstance(null);
+    setSelectedRefProjectId('');
+    setRefsSaving(false);
+  };
+
+  const addReference = async () => {
+    if (!refsEditorInstance?.id || !selectedRefProjectId) return;
+    setRefsSaving(true);
+    try {
+      await apiFetchWithToast(`/api/operator-instances/${encodeURIComponent(refsEditorInstance.id)}/refs`, {
+        method: 'POST',
+        body: JSON.stringify({
+          project_id: selectedRefProjectId,
+          role: 'reference',
+        }),
+      });
+      await refreshOperatorInstances();
+      closeRefsEditor();
+    } catch (err) {
+      // apiFetchWithToast owns the error toast.
+      setRefsSaving(false);
+    }
+  };
+
+  const removeReference = async (instance, ref) => {
+    if (!instance?.id || !ref?.project_id || ref.role === 'primary') return;
+    try {
+      await apiFetchWithToast(
+        `/api/operator-instances/${encodeURIComponent(instance.id)}/refs/${encodeURIComponent(ref.project_id)}`,
+        { method: 'DELETE' },
+      );
+      await refreshOperatorInstances();
+    } catch (err) {
+      // apiFetchWithToast owns the error toast.
+    }
+  };
+
   const top = managerStatus?.top || (managerStatus?.run
     ? { conversationId: 'top', run: managerStatus.run }
     : null);
   const pms = arrayValue(managerStatus?.pms);
   const invokeModalTitleId = 'operator-roster-specialist-invoke-title';
+  const refsModalTitleId = 'operator-roster-refs-title';
+  const refsEditorLatest = refsEditorInstance?.id ? instancesById.get(String(refsEditorInstance.id)) || refsEditorInstance : null;
+  const refsEditorExistingProjectIds = new Set(arrayValue(refsEditorLatest?.refs).map((ref) => String(ref.project_id)));
+  const refsEditorAvailableProjects = arrayValue(projects)
+    .filter((project) => project?.id && !refsEditorExistingProjectIds.has(String(project.id)));
 
   return html`
     <div
@@ -346,9 +557,12 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
               <${LiveOperatorCard}
                 key=${entry.conversationId || entry.run?.id}
                 entry=${entry}
+                instance=${resolveLiveInstance(entry, { instancesById, primaryInstanceByProject })}
                 projectsById=${projectsById}
                 runs=${runs}
                 taskById=${taskById}
+                onOpenRefs=${openRefsEditor}
+                onRemoveReference=${removeReference}
               />
             `)}
           </div>
@@ -401,6 +615,60 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
           initialProfileId=${invokeProfile?.id || ''}
           runs=${runs}
         />
+      <//>
+
+      <${Modal}
+        open=${Boolean(refsEditorLatest)}
+        onClose=${closeRefsEditor}
+        labelledBy=${refsModalTitleId}
+        maxWidth="520px"
+      >
+        <div class="modal-header">
+          <div>
+            <h2 class="modal-title" id=${refsModalTitleId}>${OPERATOR_ROSTER_LABELS.addReferenceTitle}</h2>
+            <p class="modal-subtitle">${instanceLabel(refsEditorLatest)}</p>
+          </div>
+          <button
+            type="button"
+            class="ghost small"
+            onClick=${closeRefsEditor}
+          >${COMMON_ACTIONS.close}</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-field">
+            <label class="form-label" for="operator-roster-ref-project">${OPERATOR_ROSTER_LABELS.referenceProjectLabel}</label>
+            <select
+              id="operator-roster-ref-project"
+              class="form-select"
+              data-role="operator-roster-ref-project-select"
+              value=${selectedRefProjectId}
+              onChange=${(e) => setSelectedRefProjectId(e.target.value)}
+              disabled=${refsEditorAvailableProjects.length === 0 || refsSaving}
+            >
+              ${refsEditorAvailableProjects.length === 0
+                ? html`<option value="">${OPERATOR_ROSTER_LABELS.noReferenceProjects}</option>`
+                : refsEditorAvailableProjects.map((project) => html`
+                  <option key=${project.id} value=${project.id}>${project.name || project.id}</option>
+                `)}
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button
+            type="button"
+            class="ghost"
+            onClick=${closeRefsEditor}
+            disabled=${refsSaving}
+          >${COMMON_ACTIONS.cancel}</button>
+          <button
+            type="button"
+            class="primary"
+            data-role="operator-roster-ref-submit"
+            onClick=${addReference}
+            disabled=${refsSaving || !selectedRefProjectId}
+            aria-busy=${refsSaving ? 'true' : 'false'}
+          >${refsSaving ? COMMON_ACTIONS.saving : OPERATOR_ROSTER_LABELS.addReference}</button>
+        </div>
       <//>
     </div>
   `;

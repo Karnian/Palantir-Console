@@ -130,6 +130,44 @@ function operatorWarmErrorMessage(err) {
   return err?.message || PROJECTS_LABELS.operatorWarmDefaultError;
 }
 
+function arrayValue(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function operatorRefRoleLabel(role) {
+  return role === 'primary'
+    ? PROJECTS_LABELS.operatorPrimaryRole
+    : PROJECTS_LABELS.operatorReferenceRole;
+}
+
+function shortOperatorInstanceId(id) {
+  const value = String(id || '');
+  return value.length > 12 ? `${value.slice(0, 12)}...` : value;
+}
+
+function buildOperatorWatchersByProject(instances) {
+  const map = new Map();
+  for (const instance of arrayValue(instances)) {
+    for (const ref of arrayValue(instance?.refs)) {
+      if (!ref?.project_id) continue;
+      const key = String(ref.project_id);
+      const next = map.get(key) || [];
+      next.push({
+        instanceId: instance.id,
+        role: ref.role,
+      });
+      map.set(key, next);
+    }
+  }
+  for (const watchers of map.values()) {
+    watchers.sort((a, b) => {
+      if (a.role !== b.role) return a.role === 'primary' ? -1 : 1;
+      return String(a.instanceId || '').localeCompare(String(b.instanceId || ''));
+    });
+  }
+  return map;
+}
+
 function projectLocationText(project) {
   if (projectSourceType(project) === SOURCE_TYPE_GIT) {
     const ref = project.repo_ref || 'HEAD';
@@ -668,6 +706,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   const [saving, setSaving] = useState(false);
   const [nodes, setNodes] = useState([]);
   const [nodesLoading, setNodesLoading] = useState(true);
+  const [operatorInstances, setOperatorInstances] = useState([]);
 
   // Edit modal state
   const [editName, setEditName] = useState('');
@@ -714,6 +753,26 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   }, []);
 
   useEffect(() => { loadNodes(); }, [loadNodes]);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch('/api/operator-instances')
+      .then((data) => {
+        if (!cancelled) setOperatorInstances(arrayValue(data?.instances));
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setOperatorInstances([]);
+          addToast(err.message, 'error');
+        }
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const operatorWatchersByProject = useMemo(
+    () => buildOperatorWatchersByProject(operatorInstances),
+    [operatorInstances],
+  );
 
   const createReady = name.trim() && (sourceType !== SOURCE_TYPE_GIT || repoUrl.trim());
   const editReady = editName.trim() && (editSourceType !== SOURCE_TYPE_GIT || editRepoUrl.trim());
@@ -947,6 +1006,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
           const locationText = projectLocationText(p);
           const highlighted = highlightProjectId && String(p.id) === String(highlightProjectId);
           const warming = Boolean(warmingProjectIds[String(p.id)]);
+          const operatorWatchers = operatorWatchersByProject.get(String(p.id)) || [];
           return html`
             <article
               key=${p.id}
@@ -966,6 +1026,24 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
                 </span>
                 ${locationText && html`<span class="project-card-dir" title=${locationText}>${projectSourceType(p) === SOURCE_TYPE_GIT ? '\u{1F517}' : '\u{1F4C1}'} ${locationText}</span>`}
                 ${p.description && html`<span class="project-card-desc">${p.description}</span>`}
+                ${operatorWatchers.length > 0 && html`
+                  <span class="project-operator-watchers" data-role="project-operator-watchers">
+                    <span data-role="project-operator-watchers-count">
+                      ${PROJECTS_LABELS.operatorWatchersPrefix}${operatorWatchers.length}${PROJECTS_LABELS.operatorWatchersSuffix}
+                    </span>
+                    <span class="project-operator-watchers-row">
+                      ${operatorWatchers.map((watcher) => html`
+                        <span
+                          key=${`${watcher.instanceId}:${watcher.role}`}
+                          class=${`project-operator-watch-badge ${watcher.role === 'primary' ? 'primary' : 'reference'}`}
+                          data-role=${watcher.role === 'primary' ? 'project-operator-watch-primary' : 'project-operator-watch-reference'}
+                        >
+                          ${operatorRefRoleLabel(watcher.role)} ${shortOperatorInstanceId(watcher.instanceId)}
+                        </span>
+                      `)}
+                    </span>
+                  </span>
+                `}
                 <span class="project-card-meta">${PROJECTS_LABELS.createdLabel} ${formatTime(p.created_at)}</span>
               </button>
               <div class="project-card-actions" style="margin-top:8px;">
