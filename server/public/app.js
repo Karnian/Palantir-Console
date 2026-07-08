@@ -38,6 +38,7 @@ import { NodesView } from './app/components/NodesView.js';
 import { MemoryView } from './app/components/MemoryView.js';
 import { SpecialistView } from './app/components/SpecialistView.js';
 import { OperatorProfilesView } from './app/components/OperatorProfilesView.js';
+import { OperatorsView } from './app/components/OperatorsView.js';
 import { TabGroupView } from './app/components/TabGroupView.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -436,11 +437,12 @@ function App() {
       return html`<${MemoryView} projects=${projects} />`;
     }
     if (routeBase === 'operator') {
-      const sub = route.split('/')[1] || 'profiles';
+      const sub = route.split('/')[1] || 'roster';
       return html`<${TabGroupView}
         groupHash="operator"
         subRoute=${sub}
         tabs=${[
+          { key: 'roster',     label: NAV_LABELS['operator-roster'],   render: () => html`<${OperatorsView} runs=${runs} projects=${projects} tasks=${tasks} />` },
           { key: 'profiles',   label: NAV_LABELS['operator-profiles'], render: () => html`<${OperatorProfilesView} />` },
           { key: 'specialist', label: NAV_LABELS.specialist,           render: () => html`<${SpecialistView} runs=${runs} />` },
         ]}

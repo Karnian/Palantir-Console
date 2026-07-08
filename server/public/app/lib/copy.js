@@ -91,6 +91,7 @@ export const NAV_LABELS = {
   'mcp-servers': 'MCP 서버',
   nodes: '노드',
   memory: '메모리',
+  'operator-roster': '오퍼레이터 로스터',
   specialist: '스페셜리스트',
   'operator-profiles': '오퍼레이터 프로필',
   // Tab group labels (nav consolidation)
@@ -1049,6 +1050,40 @@ export function statusLabel(map, status) {
   if (!status) return '';
   return map[status] || status;
 }
+
+// OperatorsView — read-only roster.
+export const OPERATOR_ROSTER_LABELS = {
+  pageTitle: '오퍼레이터 로스터',
+  pageDescription: 'Top, 프로젝트 바인딩 오퍼레이터, 폴더 없는 호출형 오퍼레이터를 분리해서 봅니다.',
+  unknownValue: 'unknown',
+  unknownProject: 'Unknown project',
+  localNode: 'local',
+  adapterLabel: 'adapter',
+  statusLabel: '상태',
+  nodeLabel: 'node',
+  masterTitle: 'Master',
+  masterCardTitle: 'Top',
+  masterTopBadge: 'Top',
+  masterEmptyText: 'Top run이 없습니다',
+  masterEmptySub: '매니저 화면에서 Top을 시작하면 여기에 표시됩니다.',
+  liveTitle: 'Live Operators',
+  liveBinding: 'Project bound',
+  liveMode: 'Dispatcher',
+  liveLifecycle: 'Long-running',
+  activeWorkerRuns: '활성 worker run 수',
+  liveEmptyText: '프로젝트 바인딩 오퍼레이터가 없습니다',
+  liveEmptySub: '프로젝트 대화가 시작되면 이 섹션에 표시됩니다.',
+  availableTitle: 'Available Operators',
+  availableBinding: 'Folder-less',
+  availableMode: 'Doer',
+  availableLifecycle: 'On-demand / Stateless',
+  readyToInvoke: 'Ready to invoke',
+  capabilitySummaryLabel: 'capability',
+  capabilitiesEmpty: 'No capability grants',
+  personaEmpty: 'No persona summary',
+  availableEmptyText: '폴더 없는 프로필이 없습니다',
+  availableEmptySub: '프로필 화면에서 호출형 오퍼레이터 프로필을 만들 수 있습니다.',
+};
 
 // OperatorProfilesView — list, ProfileModal, DeleteConfirm.
 export const OPERATOR_PROFILES_LABELS = {
