@@ -61,6 +61,10 @@ const RUN_COLUMNS = [
   'materialize_claim_token',
   'materialize_last_error',
   'workspace_ref_released_at',
+  // Watch-list W-P1 (migration 051): inert operator-instance attribution —
+  // ADD COLUMN only, both nullable, no runtime reader/writer yet.
+  'operator_instance_id',
+  'retry_root_run_id',
 ];
 
 const COMPOSITION_EVENT_COLUMNS = [
