@@ -69,7 +69,7 @@ operator_codebase_refs (N:M watch-list)
 ### E. Thread affinity & brief
 - thread 상태의 실소유자 이전(R2): `pm_thread_id` 만이 아니라 operator thread 를 구성하는 **전체 상태 필드 세트 — thread_id + pm_adapter + node + cwd + source_generation + source_hash + workspace_path — 를 `operator_instances` 소유로**(operatorSpawnService:519 / manager.js:188 가 쓰는 필드 전부). `project_briefs.pm_thread_id` 계열은 **read-only legacy bridge**(dual-write 금지 — N:M 상호 덮어씀). brief(conventions/pitfalls)는 codebase 소속 유지 — instance 는 spawn 시 **watch-list 의 brief 들을 컨텍스트로 주입**(primary 는 bake, reference 는 요약).
 - thread invalidation = instance + watch-list version(refs 추가/제거) + primary source generation.
-- (R2) resolver 반환 필드 네이밍은 phase-safe 로: W-P2(legacy emit 유지) 동안 `canonicalId` 대신 **`legacySlotId` + `instanceConversationId`** 분리 — W-P5 flip 전까지 "canonical" 이 두 형태를 오가는 혼동 방지.
+- (R2) resolver 반환 필드 네이밍은 phase-safe 로: W-P2(legacy emit 유지) 동안 반환 필드는 **`legacySlotId` + `instanceConversationId`** 분리(단일 'canonical' 필드 없음) — W-P5 flip 전까지 "canonical" 이 두 형태를 오가는 혼동 방지.
 - (R2) W-P4 의 `hasHigherRetryAttempt` 는 suppress 키 변경(`receiverInstanceId:taskId`)에 **더해 `retry_root_run_id` lineage 필터 필수** — 같은 operator 가 동일 task 에 독립 worker 여러 개 낸 경우의 오억제 방지.
 
 ### F. 메모리 (Composer 정책 — 사전검토 반영, LOCK 대상)
