@@ -77,6 +77,8 @@ const { createOperatorProfilesRouter } = require('./routes/operatorProfiles');
 const { createOperatorProfileMemoryRouter } = require('./routes/operatorProfileMemory');
 const { createOperatorProfileService } = require('./services/operatorProfileService');
 const { createMasterMemoryRouter } = require('./routes/masterMemory');
+const { createOperatorInstanceService } = require('./services/operatorInstanceService');
+const { createOperatorInstancesRouter } = require('./routes/operatorInstances');
 // A2-3a: PM-slot composer+ledger cutover (flag-gated, default OFF)
 const { createMemoryComposer, buildWorkspaceAdapter, buildUserAdapter, buildProfileAdapter } = require('./services/memoryComposer');
 const { createCompositionLedger } = require('./services/compositionLedger');
@@ -717,6 +719,16 @@ function startMasterMemoryXprojectScanner({
 
 function createApp(options = {}) {
   const app = express();
+  // supertest 7.2.2 calls app.listen(0) and then app.address() on the original
+  // app object. Express apps do not expose server.address(), so keep a narrow
+  // bridge here; production listen() still returns the real http.Server.
+  const expressListen = app.listen.bind(app);
+  let lastServer = null;
+  app.listen = (...args) => {
+    lastServer = expressListen(...args);
+    return lastServer;
+  };
+  app.address = () => (lastServer ? lastServer.address() : null);
   // PR1: tests pass `authToken` explicitly to avoid mutating
   // process.env.PALANTIR_TOKEN (which would leak into sibling test files
   // running in parallel via `node --test`). Production code path leaves
@@ -897,6 +909,10 @@ function createApp(options = {}) {
   // queue and the unified send/resolve routing used by both the new
   // /api/conversations router and the legacy /api/manager/* routes.
   const managerRegistry = createManagerRegistry({ runService });
+  const operatorInstanceService = createOperatorInstanceService(db, {
+    runService,
+    managerRegistry,
+  });
   // v3 Phase 3a: lazy Operator spawn + single-owner cleanup. operatorSpawnService is
   // wired into conversationService below so a first message to
   // pm:<projectId> creates the Operator run on demand. operatorCleanupService is the
@@ -1065,7 +1081,7 @@ function createApp(options = {}) {
   // v3 Phase 6: deterministic conversation-target matcher. Pure,
   // projectService-only dependency, reused by both the HTTP route and
   // (future) in-process Top-layer LLM dispatch paths.
-  const routerService = createRouterService({ projectService });
+  const routerService = createRouterService({ projectService, operatorInstanceService });
 
   const reconciliationService = createReconciliationService({
     db,
@@ -1124,7 +1140,8 @@ function createApp(options = {}) {
   app.use('/api/usage', createUsageRouter({ codexService, providerRegistry }));
 
   // New routes (v2)
-  app.use('/api/projects', createProjectsRouter({ projectService, taskService, runService, projectBriefService, operatorCleanupService, nodeBindingValidator, lifecycleService, repoPreflightService }));
+  app.use('/api/projects', createProjectsRouter({ projectService, taskService, runService, projectBriefService, operatorCleanupService, operatorInstanceService, nodeBindingValidator, lifecycleService, repoPreflightService }));
+  app.use('/api/operator-instances', createOperatorInstancesRouter({ operatorInstanceService }));
   app.use('/api/nodes', createNodesRouter({ nodeService, nodeUsageService, nodeSummaryService, lifecycleService }));
   app.use('/api/projects', createMemoryRouter({ memoryService, projectService })); // ML PR1: GET /:projectId/memory
   app.use('/api/master-memory', createMasterMemoryRouter({ masterMemoryService })); // L2 P1b: GET / + POST /remember
@@ -1262,6 +1279,7 @@ function createApp(options = {}) {
     composerFailureCounter, // Phase 0b: compose()-returned-null counter (diagnostic seam)
     specialistService, // Operator P-B2c-2: null unless PALANTIR_OPERATOR_SPECIALIST=1 (unrouted)
     operatorProfileService, // Operator Profile entity (PF-1)
+    operatorInstanceService,
     resolveOperatorConversationId, // W-P2: instance-aware dual-read resolver, not yet an emit path
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at

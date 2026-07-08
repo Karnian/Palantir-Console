@@ -76,7 +76,7 @@ function norm(s) {
   return (s || '').toLowerCase().trim();
 }
 
-function createRouterService({ projectService, logger } = {}) {
+function createRouterService({ projectService, operatorInstanceService, logger } = {}) {
   const log = logger || (() => {});
 
   function listEnabledProjects() {
@@ -86,6 +86,17 @@ function createRouterService({ projectService, logger } = {}) {
     } catch {
       return [];
     }
+  }
+
+  function targetForProject(projectId) {
+    if (operatorInstanceService && typeof operatorInstanceService.getPrimaryInstanceForProject === 'function') {
+      // W-P6a R1 (Codex): no broad catch here — "no primary yet" is the null
+      // return (legacy lazy-spawn fallback below); a real DB error must NOT
+      // fail-open into the legacy slot.
+      const primary = operatorInstanceService.getPrimaryInstanceForProject(projectId);
+      if (primary?.instanceConversationId) return primary.instanceConversationId;
+    }
+    return conversationIdForProject(projectId);
   }
 
   // Core matcher. Accepts plain values so tests don't need to mock.
@@ -109,7 +120,7 @@ function createRouterService({ projectService, logger } = {}) {
       if (hit) {
         const rewritten = mention.rest.trim();
         return {
-          target: conversationIdForProject(hit.id),
+          target: targetForProject(hit.id),
           text: rewritten.length > 0 ? rewritten : original, // keep body if strip leaves nothing
           matchedRule: '1_explicit',
         };
@@ -141,7 +152,7 @@ function createRouterService({ projectService, logger } = {}) {
       const hits = projects.filter(p => tokenSet.has(norm(p.name)));
       if (hits.length === 1) {
         return {
-          target: conversationIdForProject(hits[0].id),
+          target: targetForProject(hits[0].id),
           text: original,
           matchedRule: '3_namematch',
         };
