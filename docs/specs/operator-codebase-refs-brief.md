@@ -1,6 +1,8 @@
 # Operator ↔ Codebase Refs (watch-list) — 설계 brief
 
-> **상태**: v3 LOCKED (2026-07-08) — Codex 적대 설계리뷰 R1 REVISE(5 BLOCKER+5 SERIOUS)→R2 **W-P1 GO**(문서조건 3건 반영: thread 상태 전체필드 instance 소유·resolver phase-safe 네이밍·retry_root 필터). W-P1 수용조건: id CHECK 'oi_%' + primary 이중 partial-unique + pm_enabled 백필(instance+primary ref) + pm_thread_id→instance thread 백필 + proj_ prefix 불변 테스트.
+> **상태**: W-P0~W-P7 전 구현 완결 (PR #342~#349 + 이번 W-P7 cleanup, 2026-07-09). v3 LOCKED 설계리뷰의 BLOCKER/SERIOUS 수용조건은 전 phase 에 반영 완료.
+>
+> **W-P7 cleanup 판정**: 파괴적 제거는 보류한다. `operator:<projectId>` dual-read alias 는 외부 진입 영속 지원 계약으로 유지, `project_briefs.pm_thread_id` 는 W-P1 이전 데이터용 read-only bridge 로 유지, `projects.pm_enabled` / `preferred_pm_adapter` 는 현재 spawn 정책 소스로 유지한다. instance 로 이전하거나 legacy alias 를 제거하는 작업은 후속 후보다.
 
 ## 0. R1 LOCKED DECISIONS (5 BLOCKER + 5 SERIOUS 확정)
 
@@ -96,7 +98,22 @@ operator_codebase_refs (N:M watch-list)
 | **W-P6a** | refs CRUD + router "이름→primary instance" + no-primary/ambiguous 처리 | feature |
 | **W-P6b** | reference dispatch enable + 메모리 주입 정책(turn codebase-context explicit) | feature |
 | **W-P6c** | UI roster/코드베이스 역인덱스 + refs 편집 | UI |
-| **W-P7** | cleanup: pm_enabled/preferred_pm_adapter/pm_thread_id 이전 완료 + project delete/ref 제거 정책 + legacy alias 제거 여부 | 정리 |
+| **W-P7** | cleanup: 문서/spec/backlog 정리 + legacy surface 판정. **제거하지 않는 계약**: `operator:<projectId>` dual-read alias, `project_briefs.pm_thread_id` read-only bridge, `projects.pm_enabled` / `preferred_pm_adapter` spawn 정책 소스. project delete/ref cleanup 정책은 refs 제거 + live instance invalidation 으로 구현 완료 | 정리 |
+
+**구현 PR 매핑**:
+
+| Phase | PR | 완료 범위 |
+|---|---:|---|
+| W-P0 | #342 | spec lock / 설계리뷰 조건 반영 |
+| W-P1 | #343 | inert schema, 제약, backfill |
+| W-P2 | #344 | 단일 resolver + dual-read 경유 |
+| W-P3 | #345 | attribution, retry lineage copy, thread instance 소유 전환 |
+| W-P4 | #346 | auto-review receiver chain + lineage-aware suppress/breaker |
+| W-P5 | #347 | `operator:oi_*` canonical flip + legacy route 유지 + repo 409 guard primary-ref |
+| W-P6a | #348 | refs CRUD + router primary-instance resolution |
+| W-P6b | #349 | reference dispatch + turn-context memory policy |
+| W-P6c | #349 | roster/watch-list UI + refs 편집 surface |
+| W-P7 | 이번 | 보수적 cleanup 문서화 + stale residue 정리 |
 
 ## 5. 파손 방지 불변식
 - auto-review/retry/T5 suppress: 수신자 정책 결정론(§3.B) — broadcast 0.
@@ -114,3 +131,10 @@ operator_codebase_refs (N:M watch-list)
 4. §3.E thread 이전(dual-write) 함정. §3.F ledger 선택-owner 정책의 회귀.
 5. W-P1~P6 순서/독립배포 검증. 각 phase 규모.
 6. NO-GO 요소 / 대안.
+
+## 8. 잔여 후속 후보 (선택)
+
+- `projects.pm_enabled` / `preferred_pm_adapter` 를 instance 정책으로 이전할지 결정(스키마/UX/boot policy 가 함께 움직이는 별도 큰 결정).
+- `operator:<projectId>` legacy alias 제거 여부(운영 데이터로 외부 진입 사용량 확인 후 별도 phase).
+- codebase 카드의 "이 코드베이스를 보는 Operator" 역인덱스 실시간 push/SSE 고도화.
+- reference codebase brief/메모리 요약 주입 고도화(현재 계약은 turn-context 기준 선택 주입).

@@ -908,7 +908,7 @@ function createApp(options = {}) {
 
   // v3 Phase 1.5: shared manager registry + conversation service.
   // managerRegistry tracks which manager runs are live per conversation
-  // ('top' / 'pm:<projectId>'); conversationService owns the parent-notice
+  // ('top' / operator slot); conversationService owns the parent-notice
   // queue and the unified send/resolve routing used by both the new
   // /api/conversations router and the legacy /api/manager/* routes.
   const managerRegistry = createManagerRegistry({ runService });
@@ -918,7 +918,7 @@ function createApp(options = {}) {
   });
   // v3 Phase 3a: lazy Operator spawn + single-owner cleanup. operatorSpawnService is
   // wired into conversationService below so a first message to
-  // pm:<projectId> creates the Operator run on demand. operatorCleanupService is the
+  // Operator slot creation starts the Operator run on demand. operatorCleanupService is the
   // single termination owner for /reset, delete-project, and future
   // pm_enabled=false toggles (spec §5 책임 분담표).
   // Operator specialist (P-B2c). Declared here — before operatorSpawnService / manager
@@ -970,7 +970,7 @@ function createApp(options = {}) {
     compositionLedger,
     eventBus,
   });
-  // v3 Phase 2: whenever a manager slot (top or pm:<projectId>) is cleared
+  // v3 Phase 2+: whenever a manager slot (top or Operator) is cleared
   // — by explicit stop, liveness probe, or rotation — drop any lingering
   // parent-notice queue entries keyed by the dying run id so they cannot
   // be misapplied to some future unrelated run. Codex R1 blocker fix.
@@ -1283,7 +1283,7 @@ function createApp(options = {}) {
     specialistService, // Operator P-B2c-2: null unless PALANTIR_OPERATOR_SPECIALIST=1 (unrouted)
     operatorProfileService, // Operator Profile entity (PF-1)
     operatorInstanceService,
-    resolveOperatorConversationId, // W-P2: instance-aware dual-read resolver, not yet an emit path
+    resolveOperatorConversationId, // W-P2+: instance-aware dual-read resolver (legacy alias + operator:oi_*)
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at
     // (createRun() always stamps status='queued' and cost_usd=0 at now).
