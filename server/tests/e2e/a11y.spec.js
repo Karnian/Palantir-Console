@@ -35,7 +35,7 @@ const ROUTES = [
   'dashboard',
   'manager',
   'board',
-  'projects',
+  'operator/codebases',
   'agents',
   'resources/skills',
   'resources/presets',
@@ -85,6 +85,7 @@ function viewKey(route) {
   if (seg.length === 1) return route;
   const sub = seg[seg.length - 1];
   if (seg[0] === 'operator' && sub === 'roster') return 'operator-roster';
+  if (seg[0] === 'operator' && seg[1] === 'codebases') return 'projects';
   // operator/profiles maps to the component's data-view="operator-profiles"
   if (seg[0] === 'operator' && sub === 'profiles') return 'operator-profiles';
   if (seg[0] === 'resources' && seg[1] === 'nodes' && seg.length === 3) return 'nodes';

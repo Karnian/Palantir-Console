@@ -396,7 +396,7 @@ test('ProjectsView edit clears legacy fields when switching to git source', asyn
   });
 });
 
-test('ProjectsView links cards to operator roster and highlights deep-linked codebase', async (t) => {
+test('ProjectsView highlights codebase selected by #operator/codebases deep link', async (t) => {
   const env = createPreactEnv();
   t.after(env.cleanup);
   installProjectsStubs(env, async (url) => {

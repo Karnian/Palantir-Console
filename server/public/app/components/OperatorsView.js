@@ -117,7 +117,7 @@ function LiveOperatorCard({ entry, projectsById, runs, taskById }) {
   const project = projectId ? projectsById.get(String(projectId)) : null;
   const projectName = project?.name || run.project_name || projectId || OPERATOR_ROSTER_LABELS.unknownProject;
   const workerCount = countActiveWorkers({ projectId, runs, taskById });
-  const projectHref = projectId ? `#projects/${encodeURIComponent(String(projectId))}` : '#projects';
+  const projectHref = projectId ? `#operator/codebases/${encodeURIComponent(String(projectId))}` : '#operator/codebases';
 
   return html`
     <article class="operator-profile-card operator-roster-card operator-roster-live-card" data-role="operator-roster-live-card">

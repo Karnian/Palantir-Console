@@ -92,6 +92,7 @@ export const NAV_LABELS = {
   nodes: '노드',
   memory: '메모리',
   'operator-roster': '오퍼레이터 로스터',
+  'operator-codebases': '코드베이스',
   specialist: '스페셜리스트',
   'operator-profiles': '오퍼레이터 프로필',
   // Tab group labels (nav consolidation)
