@@ -48,7 +48,11 @@ const { createManagerRouter } = require('./routes/manager');
 const { createConversationsRouter } = require('./routes/conversations');
 const { createManagerRegistry } = require('./services/managerRegistry');
 const { createConversationService } = require('./services/conversationService');
-const { conversationIdForProject, parseProjectConversationId } = require('./utils/conversationId'); // PM→Operator Phase 0
+const {
+  conversationIdForProject,
+  parseProjectConversationId,
+  createOperatorConversationIdResolver,
+} = require('./utils/conversationId'); // PM→Operator Phase 0
 const { createOperatorCleanupService } = require('./services/operatorCleanupService');
 const { createOperatorSpawnService } = require('./services/operatorSpawnService');
 const { createReconciliationService } = require('./services/reconciliationService');
@@ -722,6 +726,7 @@ function createApp(options = {}) {
     validatePresetId: (id) => presetService.getPreset(id),
   });
   const runService = createRunService(db, eventBus);
+  const resolveOperatorConversationId = createOperatorConversationIdResolver(db);
   const agentProfileService = createAgentProfileService(db);
   const nodeSummaryService = options.nodeSummaryService || createNodeSummaryService({
     nodeService,
@@ -1161,6 +1166,7 @@ function createApp(options = {}) {
     composerFailureCounter, // Phase 0b: compose()-returned-null counter (diagnostic seam)
     specialistService, // Operator P-B2c-2: null unless PALANTIR_OPERATOR_SPECIALIST=1 (unrouted)
     operatorProfileService, // Operator Profile entity (PF-1)
+    resolveOperatorConversationId, // W-P2: instance-aware dual-read resolver, not yet an emit path
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at
     // (createRun() always stamps status='queued' and cost_usd=0 at now).
