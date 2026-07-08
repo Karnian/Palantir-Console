@@ -2564,6 +2564,12 @@ body {
   cursor: pointer;
 }
 
+/* Deep-link highlight (#projects/<id>) uses the shared accent token. */
+.project-card.is-highlighted {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .project-card:hover {
   border-color: var(--border-hover);
 }

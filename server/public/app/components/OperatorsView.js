@@ -117,9 +117,10 @@ function LiveOperatorCard({ entry, projectsById, runs, taskById }) {
   const project = projectId ? projectsById.get(String(projectId)) : null;
   const projectName = project?.name || run.project_name || projectId || OPERATOR_ROSTER_LABELS.unknownProject;
   const workerCount = countActiveWorkers({ projectId, runs, taskById });
+  const projectHref = projectId ? `#projects/${encodeURIComponent(String(projectId))}` : '#projects';
 
   return html`
-    <a class="operator-profile-card operator-roster-card operator-roster-live-card" data-role="operator-roster-live-card" href="#manager">
+    <article class="operator-profile-card operator-roster-card operator-roster-live-card" data-role="operator-roster-live-card">
       <div class="operator-profile-card-header">
         <h3 class="operator-profile-name">${projectName}</h3>
         <span class="task-badge project">${OPERATOR_ROSTER_LABELS.liveBinding}</span>
@@ -138,8 +139,20 @@ function LiveOperatorCard({ entry, projectsById, runs, taskById }) {
       </div>
       <div class="operator-roster-footer">
         <span class="operator-roster-run-id">${shortRunId(run.id)}</span>
+        <span class="operator-roster-actions">
+          <a
+            class="ghost small"
+            data-role="operator-roster-live-primary-link"
+            href="#manager"
+          >${OPERATOR_ROSTER_LABELS.openConversation}</a>
+          <a
+            class="ghost small"
+            data-role="operator-roster-live-project-link"
+            href=${projectHref}
+          >${OPERATOR_ROSTER_LABELS.openProject}</a>
+        </span>
       </div>
-    </a>
+    </article>
   `;
 }
 

@@ -19,7 +19,7 @@ function installCommonStubs(env) {
       ? 'node-filter-select'
       : ariaLabel === '우선순위 필터'
         ? 'priority-filter-select'
-        : ariaLabel === '프로젝트 필터'
+        : ariaLabel === '코드베이스 필터'
           ? 'project-filter-select'
           : 'dropdown-select';
     return env.context.preact.h(
@@ -153,7 +153,7 @@ test('BoardView node filter options use distinct project placement nodes plus lo
   const select = root.querySelector('[data-role="node-filter-select"]');
   assert.ok(select, 'node filter select should render');
   assert.equal(select.getAttribute('aria-label'), '배치 노드 필터');
-  assert.match(select.getAttribute('title'), /프로젝트 바인딩 기준/);
+  assert.match(select.getAttribute('title'), /코드베이스 바인딩 기준/);
   assert.deepEqual(
     Array.from(select.options).map(option => option.value),
     ['', 'local', 'remote-a', 'remote-b'],

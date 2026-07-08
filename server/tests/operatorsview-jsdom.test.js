@@ -104,9 +104,15 @@ test('OperatorsView renders Master, Live Operators, and Available Operators as s
     assert.ok(el);
     return el;
   });
-  assert.equal(live.getAttribute('href'), '#manager');
+  assert.equal(live.tagName, 'ARTICLE');
+  assert.equal(live.getAttribute('href'), null);
+  assert.equal(live.querySelector('a a'), null);
+  const liveLinks = Array.from(live.querySelectorAll('a'));
+  assert.equal(liveLinks.length, 2);
+  assert.equal(live.querySelector('[data-role="operator-roster-live-primary-link"]').getAttribute('href'), '#manager');
+  assert.equal(live.querySelector('[data-role="operator-roster-live-project-link"]').getAttribute('href'), '#projects/proj_alpha');
   assert.match(live.textContent, /Alpha Console/);
-  assert.match(live.textContent, /Project bound/);
+  assert.match(live.textContent, /코드베이스 바인딩/);
   assert.match(live.textContent, /Dispatcher/);
   assert.match(live.textContent, /Long-running/);
   assert.match(live.textContent, /codex/);
@@ -145,7 +151,7 @@ test('OperatorsView renders scoped empty states for no live project operators an
 
   const root = renderOperatorsView(env);
   const liveSection = root.querySelector('[data-role="operator-roster-live-section"]');
-  await waitFor(() => assert.match(liveSection.textContent, /프로젝트 바인딩 오퍼레이터가 없습니다/));
+  await waitFor(() => assert.match(liveSection.textContent, /코드베이스 바인딩 오퍼레이터가 없습니다/));
 
   const availableSection = root.querySelector('[data-role="operator-roster-available-section"]');
   await waitFor(() => assert.match(availableSection.textContent, /폴더 없는 프로필이 없습니다/));
