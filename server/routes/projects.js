@@ -97,6 +97,7 @@ function createProjectsRouter({
   runService,
   projectBriefService,
   operatorCleanupService,
+  operatorInstanceService,
   nodeBindingValidator,
   lifecycleService,
   repoPreflightService,
@@ -247,6 +248,9 @@ function createProjectsRouter({
     // needed to locate and clean up the orphaned in-memory Operator state
     // later. Failing the request lets the user retry once the adapter
     // is healthy, or manually /reset first.
+    // W-P6a R1 (Codex): dispose UNCONDITIONALLY (legacy fail-closed policy) —
+    // gating on a live primary instance would let a legacy live slot
+    // (operator:<projectId>) bypass teardown when no primary ref exists.
     if (operatorCleanupService) {
       try {
         operatorCleanupService.dispose(req.params.id);
@@ -257,7 +261,18 @@ function createProjectsRouter({
         });
       }
     }
-    projectService.deleteProject(req.params.id);
+    // W-P6a R1 (Codex): refs cleanup + project delete in ONE transaction —
+    // otherwise a failed delete leaves the project row with all refs gone.
+    // better-sqlite3 nests inner db.transaction calls as savepoints.
+    if (operatorInstanceService && typeof operatorInstanceService.withTransaction === 'function'
+        && typeof operatorInstanceService.removeRefsForProject === 'function') {
+      operatorInstanceService.withTransaction(() => {
+        operatorInstanceService.removeRefsForProject(req.params.id);
+        projectService.deleteProject(req.params.id);
+      });
+    } else {
+      projectService.deleteProject(req.params.id);
+    }
     res.json({ status: 'ok' });
   }));
 
