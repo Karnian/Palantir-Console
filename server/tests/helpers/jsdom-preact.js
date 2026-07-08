@@ -82,7 +82,15 @@ function transformComponentSource(raw) {
     // brace bodies are handled via `[\s\S]*?`. The alternation rules
     // out bare side-effect imports (already handled above).
     .replace(/^import\s+(?:\{[\s\S]*?\}|\w[\w$]*(?:\s*,\s*\{[\s\S]*?\})?)\s+from\s+['"]\.\.?\/[^'"]+['"];?\s*$/gm,
-      '// [stripped import]');
+      '// [stripped import]')
+    // Top-level `const`/`let` → `var` so multiple components can share one vm
+    // context without "Identifier already declared" on their identical preamble
+    // (`const {h} = window.preact`, `const html = htm.bind(h)`, …). `var` (like
+    // function declarations) attaches to the shared global so sibling
+    // components loaded later still see it; block-scoped (indented) declarations
+    // are untouched. Enables integration tests that load a component together
+    // with its real dependencies (e.g. OperatorsView + Modal + panel).
+    .replace(/^(?:const|let)\s+/gm, 'var ');
 }
 
 function loadComponent(componentName, context) {

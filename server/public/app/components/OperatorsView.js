@@ -18,6 +18,8 @@ import {
   statusLabel,
 } from '../lib/copy.js';
 import { EmptyState } from './EmptyState.js';
+import { Modal } from './Modal.js';
+import { SpecialistInvokePanel } from './SpecialistInvokePanel.js';
 
 // Contract: count ONLY 'running' worker runs (Codex review — 'active' was too broad;
 // needs_input is waiting, not running). count-only, no run list (board 복제 방지).
@@ -53,10 +55,6 @@ function shortRunId(id) {
 
 function runHref(id) {
   return `#run/${encodeURIComponent(String(id || ''))}`;
-}
-
-function specialistHref(profileId) {
-  return `#operator/specialist/${encodeURIComponent(String(profileId || ''))}`;
 }
 
 function parsedProjectId(entry) {
@@ -164,7 +162,7 @@ function LiveOperatorCard({ entry, projectsById, runs, taskById }) {
   `;
 }
 
-function AvailableOperatorCard({ profile }) {
+function AvailableOperatorCard({ profile, onInvoke }) {
   return html`
     <article
       class="operator-profile-card operator-roster-card operator-roster-available-card"
@@ -186,12 +184,14 @@ function AvailableOperatorCard({ profile }) {
       </div>
       <div class="operator-roster-footer">
         <span class="operator-roster-actions">
-          <a
+          <button
+            type="button"
             class="ghost small"
-            data-role="operator-roster-available-invoke-link"
-            href=${specialistHref(profile.id)}
+            data-role="operator-roster-available-invoke-button"
+            aria-haspopup="dialog"
             aria-label=${`${profile.name} ${OPERATOR_ROSTER_LABELS.invokeOperator}`}
-          >${OPERATOR_ROSTER_LABELS.invokeOperator}</a>
+            onClick=${() => onInvoke(profile)}
+          >${OPERATOR_ROSTER_LABELS.invokeOperator}</button>
           <a
             class="ghost small"
             data-role="operator-roster-available-profile-link"
@@ -209,6 +209,7 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
   const [profiles, setProfiles] = useState([]);
   const [loadingStatus, setLoadingStatus] = useState(true);
   const [loadingProfiles, setLoadingProfiles] = useState(true);
+  const [invokeProfile, setInvokeProfile] = useState(null);
   const managerReqSeqRef = useRef(0);
   const profilesReqSeqRef = useRef(0);
 
@@ -300,6 +301,7 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
     ? { conversationId: 'top', run: managerStatus.run }
     : null);
   const pms = arrayValue(managerStatus?.pms);
+  const invokeModalTitleId = 'operator-roster-specialist-invoke-title';
 
   return html`
     <div
@@ -367,11 +369,38 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
         ${!loadingProfiles && profiles.length > 0 && html`
           <div class="operator-roster-grid">
             ${profiles.map((profile) => html`
-              <${AvailableOperatorCard} key=${profile.id} profile=${profile} />
+              <${AvailableOperatorCard}
+                key=${profile.id}
+                profile=${profile}
+                onInvoke=${setInvokeProfile}
+              />
             `)}
           </div>
         `}
       </section>
+
+      <${Modal}
+        open=${Boolean(invokeProfile)}
+        onClose=${() => setInvokeProfile(null)}
+        labelledBy=${invokeModalTitleId}
+        wide
+      >
+        <div class="modal-header">
+          <div>
+            <h2 id=${invokeModalTitleId}>${invokeProfile?.name || OPERATOR_ROSTER_LABELS.invokeOperator}</h2>
+            <p class="modal-subtitle">${OPERATOR_ROSTER_LABELS.availableBinding} · ${OPERATOR_ROSTER_LABELS.availableLifecycle}</p>
+          </div>
+          <button
+            type="button"
+            class="ghost small"
+            onClick=${() => setInvokeProfile(null)}
+          >닫기</button>
+        </div>
+        <${SpecialistInvokePanel}
+          initialProfileId=${invokeProfile?.id || ''}
+          runs=${runs}
+        />
+      <//>
     </div>
   `;
 }

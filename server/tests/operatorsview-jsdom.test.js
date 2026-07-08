@@ -2,7 +2,9 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createPreactEnv, flushEffects } = require('./helpers/jsdom-preact');
+const fs = require('node:fs');
+const path = require('node:path');
+const { createPreactEnv, flushEffects, COMPONENTS_DIR } = require('./helpers/jsdom-preact');
 
 async function waitFor(assertion, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;
@@ -18,7 +20,7 @@ async function waitFor(assertion, timeoutMs = 1000) {
   throw lastErr;
 }
 
-function installRosterStubs(env, { managerStatus, profiles }) {
+function installRosterStubs(env, { managerStatus, profiles, specialistResult = null }) {
   const calls = [];
   env.context.apiFetch = async (url, opts = {}) => {
     calls.push({ url, opts });
@@ -28,6 +30,14 @@ function installRosterStubs(env, { managerStatus, profiles }) {
     if (url === '/api/operator/profiles') {
       const value = typeof profiles === 'function' ? profiles({ calls, opts, url }) : profiles;
       return { profiles: value };
+    }
+    if (url === '/api/operator/specialist') {
+      return specialistResult || {
+        invocationId: 'inv_roster_1',
+        text: 'roster specialist result',
+        toolCallCount: 0,
+        iterations: 1,
+      };
     }
     throw new Error(`unexpected url ${url}`);
   };
@@ -43,6 +53,18 @@ function installRosterStubs(env, { managerStatus, profiles }) {
     return env.context.preact.h('div', { class: 'empty-state' }, `${text} ${sub || ''}`);
   };
   return calls;
+}
+
+function loadOperatorsComponents(env) {
+  env.context.useEscape = () => {};
+  env.loadComponent('Modal');
+  env.loadComponent('SpecialistInvokePanel');
+  env.loadComponent('OperatorsView');
+}
+
+function inputValue(env, el, value) {
+  el.value = value;
+  el.dispatchEvent(new env.window.Event('input', { bubbles: true }));
 }
 
 function createSseBrokerStub() {
@@ -129,7 +151,7 @@ test('OperatorsView renders Master, Live Operators, and Available Operators as s
       capabilities: ['registry_metadata_search'],
     }],
   });
-  env.loadComponent('OperatorsView');
+  loadOperatorsComponents(env);
 
   const root = renderOperatorsView(env, {
     projects: [{ id: 'proj_alpha', name: 'Alpha Console' }],
@@ -178,11 +200,12 @@ test('OperatorsView renders Master, Live Operators, and Available Operators as s
   assert.equal(available.getAttribute('href'), null);
   assert.equal(available.querySelector('a a'), null);
   const availableLinks = Array.from(available.querySelectorAll('a'));
-  assert.equal(availableLinks.length, 2);
-  assert.equal(
-    available.querySelector('[data-role="operator-roster-available-invoke-link"]').getAttribute('href'),
-    '#operator/specialist/op_review',
-  );
+  assert.equal(availableLinks.length, 1);
+  const invokeButton = available.querySelector('[data-role="operator-roster-available-invoke-button"]');
+  assert.ok(invokeButton);
+  assert.equal(invokeButton.tagName, 'BUTTON');
+  assert.equal(invokeButton.getAttribute('href'), null);
+  assert.equal(invokeButton.getAttribute('aria-haspopup'), 'dialog');
   assert.equal(
     available.querySelector('[data-role="operator-roster-available-profile-link"]').getAttribute('href'),
     '#operator/profiles',
@@ -196,9 +219,38 @@ test('OperatorsView renders Master, Live Operators, and Available Operators as s
   assert.match(available.textContent, /프로필 보기/);
   assert.match(available.textContent, /registry_metadata_search/);
   assert.doesNotMatch(availableSection.textContent, /Running|Online|Live|Session|Idle/);
-  available.querySelector('[data-role="operator-roster-available-invoke-link"]').click();
-  await flushEffects(20);
+
+  invokeButton.click();
+  const dialog = await waitFor(() => {
+    const el = root.querySelector('[role="dialog"]');
+    assert.ok(el);
+    return el;
+  });
+  assert.equal(dialog.getAttribute('aria-labelledby'), 'operator-roster-specialist-invoke-title');
+  assert.equal(dialog.querySelector('#operator-roster-specialist-invoke-title').textContent, 'Review analyst');
+  await waitFor(() => {
+    assert.equal(dialog.querySelector('#specialist-profile').value, 'op_review');
+    assert.equal(dialog.querySelector('#specialist-origin-run').value, 'manager-shadow');
+  });
   assert.equal(apiCalls.some((call) => call.url === '/api/operator/specialist'), false);
+
+  inputValue(env, dialog.querySelector('#specialist-user-text'), 'check this from roster');
+  await waitFor(() => assert.equal(dialog.querySelector('button[type="submit"]').disabled, false));
+  dialog.querySelector('form').dispatchEvent(new env.window.Event('submit', { bubbles: true, cancelable: true }));
+
+  const post = await waitFor(() => {
+    const call = apiCalls.find((entry) => entry.url === '/api/operator/specialist');
+    assert.ok(call);
+    return call;
+  });
+  assert.equal(post.opts.method, 'POST');
+  assert.deepEqual(JSON.parse(post.opts.body), {
+    profileId: 'op_review',
+    userText: 'check this from roster',
+    originRunId: 'manager-shadow',
+  });
+  await waitFor(() => assert.match(dialog.textContent, /roster specialist result/));
+  assert.ok(root.querySelector('[role="dialog"]'));
 });
 
 test('OperatorsView renders scoped empty states for no live project operators and no available profiles', async (t) => {
@@ -216,7 +268,7 @@ test('OperatorsView renders scoped empty states for no live project operators an
     },
     profiles: [],
   });
-  env.loadComponent('OperatorsView');
+  loadOperatorsComponents(env);
 
   const root = renderOperatorsView(env);
   const liveSection = root.querySelector('[data-role="operator-roster-live-section"]');
@@ -245,7 +297,7 @@ test('OperatorsView debounces live roster SSE events into one manager status ref
     },
     profiles: [],
   });
-  env.loadComponent('OperatorsView');
+  loadOperatorsComponents(env);
 
   renderOperatorsView(env);
   await waitFor(() => assert.equal(countCalls(calls, '/api/manager/status'), 1));
@@ -281,7 +333,7 @@ test('OperatorsView unsubscribes SSE roster listeners on unmount', async (t) => 
     },
     profiles: [],
   });
-  env.loadComponent('OperatorsView');
+  loadOperatorsComponents(env);
 
   const root = renderOperatorsView(env);
   await waitFor(() => assert.equal(countCalls(calls, '/api/manager/status'), 1));
@@ -353,4 +405,18 @@ test('OperatorsView ignores stale manager status responses after a newer SSE ref
 
   assert.match(root.textContent, /latest-adapter/);
   assert.doesNotMatch(root.textContent, /stale-adapter/);
+});
+
+test('OperatorsView delegates specialist invoke contract to SpecialistInvokePanel source', () => {
+  const operatorsSource = fs.readFileSync(path.join(COMPONENTS_DIR, 'OperatorsView.js'), 'utf8');
+  const specialistViewSource = fs.readFileSync(path.join(COMPONENTS_DIR, 'SpecialistView.js'), 'utf8');
+  const panelSource = fs.readFileSync(path.join(COMPONENTS_DIR, 'SpecialistInvokePanel.js'), 'utf8');
+
+  assert.equal(operatorsSource.includes('/api/operator/specialist'), false);
+  assert.equal(operatorsSource.includes('originAutoSelectedRef'), false);
+  assert.equal(operatorsSource.includes('originRunId'), false);
+  assert.equal(specialistViewSource.includes('/api/operator/specialist'), false);
+  assert.equal(specialistViewSource.includes('originAutoSelectedRef'), false);
+  assert.match(panelSource, /\/api\/operator\/specialist/);
+  assert.match(panelSource, /originAutoSelectedRef/);
 });
