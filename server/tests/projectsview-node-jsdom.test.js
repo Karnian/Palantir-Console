@@ -78,7 +78,7 @@ test('ProjectsView node select renders health and slot labels plus unreachable w
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env);
-  clickButton(root, (text) => text.includes('새 프로젝트'));
+  clickButton(root, (text) => text.includes('새 코드베이스'));
 
   const select = await waitFor(() => {
     const el = root.querySelector('#new-project-node');

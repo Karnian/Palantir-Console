@@ -18,12 +18,12 @@ import { NAV_LABELS } from './copy.js';
 
 export const NAV_ITEMS = [
   { hash: 'dashboard',   icon: '◉', label: NAV_LABELS.dashboard },
+  { hash: 'operator',    icon: '✸', label: NAV_LABELS.operator },
   { hash: 'manager',     icon: '✦', label: NAV_LABELS.manager },
   { hash: 'board',       icon: '▒', label: NAV_LABELS.board },
   { hash: 'projects',    icon: '▣', label: NAV_LABELS.projects },
   { hash: 'resources',   icon: '❖', label: NAV_LABELS.resources },
   { hash: 'memory',      icon: '◈', label: NAV_LABELS.memory },
-  { hash: 'operator',    icon: '✸', label: NAV_LABELS.operator },
 ];
 
 // Sub-items for CommandPalette search — deep-linkable canonical hashes.

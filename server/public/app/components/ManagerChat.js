@@ -532,7 +532,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
           }
           if (resolved.ambiguous && resolved.candidates && resolved.candidates.length > 0) {
             const names = resolved.candidates.map(c => c.name).join(', ');
-            addToast(`여러 프로젝트와 매칭되어 ${effectiveTarget}로 보냅니다: ${names}`, 'info');
+            addToast(`여러 코드베이스와 매칭되어 ${effectiveTarget}로 보냅니다: ${names}`, 'info');
           }
         }
       }
@@ -691,8 +691,8 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
               class="btn btn-sm btn-danger"
               data-action="reset-pm"
               onClick=${handleResetPm}
-              title="오퍼레이터 리셋: 이 프로젝트의 오퍼레이터 스레드만 종료합니다."
-              aria-label="이 프로젝트의 오퍼레이터 리셋"
+              title="오퍼레이터 리셋: 이 코드베이스의 오퍼레이터 스레드만 종료합니다."
+              aria-label="이 코드베이스의 오퍼레이터 리셋"
             >${MANAGER_LABELS.resetPM}</button>
           `}
           ${!isPm && status.active && html`

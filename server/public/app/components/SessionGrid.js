@@ -86,7 +86,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
     const projMap = new Map();
     for (const t of (tasks || [])) {
       const pid = t.project_id || '_none';
-      const pname = (projects || []).find(p => p.id === t.project_id)?.name || '프로젝트 없음';
+      const pname = (projects || []).find(p => p.id === t.project_id)?.name || '코드베이스 없음';
       if (!projMap.has(pid)) projMap.set(pid, { key: pid, name: pname, tasks: [] });
       const taskRuns = runsMap.get(t.id) || [];
       runsMap.delete(t.id);
@@ -139,7 +139,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
 
     // Add orphan runs as a virtual group if any
     if (orphanRuns.length > 0) {
-      const noneGroup = result.find(g => g.key === '_none') || { key: '_none', name: '프로젝트 없음', tasks: [], sections: [] };
+      const noneGroup = result.find(g => g.key === '_none') || { key: '_none', name: '코드베이스 없음', tasks: [], sections: [] };
       if (!result.includes(noneGroup)) result.push(noneGroup);
       noneGroup.tasks.push({ task: null, runs: orphanRuns });
       // R2-C incidental fix: ensure the orphan-runs group gets a sections

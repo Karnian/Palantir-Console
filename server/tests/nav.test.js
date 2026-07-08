@@ -24,8 +24,18 @@ function loadNavModule() {
 test('NAV_SUB_ITEMS exposes operator roster without changing top-level nav', () => {
   const { NAV_ITEMS, NAV_SUB_ITEMS } = loadNavModule();
   assert.equal(NAV_ITEMS.length, 7);
+  assert.deepEqual(Array.from(NAV_ITEMS, (item) => item.hash), [
+    'dashboard',
+    'operator',
+    'manager',
+    'board',
+    'projects',
+    'resources',
+    'memory',
+  ]);
   assert.ok(NAV_ITEMS.some((item) => item.hash === 'operator'));
   assert.ok(!NAV_ITEMS.some((item) => item.hash === 'operator/roster'));
+  assert.equal(NAV_ITEMS.find((item) => item.hash === 'projects').label, '코드베이스');
 
   const operatorSubItems = Array.from(NAV_SUB_ITEMS)
     .filter((item) => item.hash.startsWith('operator/'))

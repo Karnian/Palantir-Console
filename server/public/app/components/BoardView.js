@@ -399,15 +399,15 @@ export function BoardView({ tasks, setTasks, projects, agents, runs, onOpenRun, 
               { value: '', label: FILTER_LABELS.allProjects },
               ...projects.map(p => ({ value: p.id, label: p.name })),
             ]}
-            ariaLabel="프로젝트 필터"
+            ariaLabel="코드베이스 필터"
           />
-          <div data-role="node-filter" title="배치 노드 필터 (프로젝트 바인딩 기준)">
+          <div data-role="node-filter" title="배치 노드 필터 (코드베이스 바인딩 기준)">
             <${Dropdown}
               wide
               value=${filterPlacementNode}
               onChange=${setFilterPlacementNode}
               options=${placementNodeOptions}
-              title="배치 노드 필터 (프로젝트 바인딩 기준)"
+              title="배치 노드 필터 (코드베이스 바인딩 기준)"
               ariaLabel="배치 노드 필터"
             />
           </div>
@@ -598,7 +598,7 @@ export function CalendarView({ tasks, projects, agents, runs, reloadTasks, onOpe
               { value: '', label: FILTER_LABELS.allProjects },
               ...projects.map(p => ({ value: p.id, label: p.name })),
             ]}
-            ariaLabel="프로젝트 필터"
+            ariaLabel="코드베이스 필터"
           />
         </div>
         <div class="calendar-nav">

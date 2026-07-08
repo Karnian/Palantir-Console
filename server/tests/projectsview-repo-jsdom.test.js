@@ -83,7 +83,7 @@ test('ProjectsView project source defaults to git and toggles repo/legacy fields
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env);
-  clickButton(root, (text) => text.includes('새 프로젝트'));
+  clickButton(root, (text) => text.includes('새 코드베이스'));
 
   const sourceToggle = await waitFor(() => {
     const el = root.querySelector('[data-role="project-source-toggle"]');
@@ -125,7 +125,7 @@ test('ProjectsView create sends git source payload without legacy directory fiel
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env);
-  clickButton(root, (text) => text.includes('새 프로젝트'));
+  clickButton(root, (text) => text.includes('새 코드베이스'));
 
   await waitFor(() => assert.ok(root.querySelector('[data-role="project-repo-url"]')));
   setInput(env, root.querySelector('#new-project-name'), 'Repo Project');
@@ -168,7 +168,7 @@ test('ProjectsView create sends legacy directory payload without repo fields', a
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env);
-  clickButton(root, (text) => text.includes('새 프로젝트'));
+  clickButton(root, (text) => text.includes('새 코드베이스'));
 
   const sourceToggle = await waitFor(() => {
     const el = root.querySelector('[data-role="project-source-toggle"]');
@@ -218,7 +218,7 @@ test('ProjectsView create maps repo preflight reason to friendly toast', async (
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env);
-  clickButton(root, (text) => text.includes('새 프로젝트'));
+  clickButton(root, (text) => text.includes('새 코드베이스'));
 
   await waitFor(() => assert.ok(root.querySelector('[data-role="project-repo-url"]')));
   setInput(env, root.querySelector('#new-project-name'), 'Repo Project');
@@ -394,4 +394,36 @@ test('ProjectsView edit clears legacy fields when switching to git source', asyn
     assert.equal(patchBody.directory, null);
     assert.equal(patchBody.allow_non_git_dir, null);
   });
+});
+
+test('ProjectsView links cards to operator roster and highlights deep-linked codebase', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  installProjectsStubs(env, async (url) => {
+    if (url === '/api/nodes') return { nodes: [] };
+    return {};
+  });
+  env.loadComponent('ProjectsView');
+
+  const root = renderProjectsView(env, {
+    highlightProjectId: 'proj_alpha',
+    projects: [{
+      id: 'proj_alpha',
+      name: 'Alpha Console',
+      source_type: 'git',
+      repo_url: 'https://github.com/acme/alpha.git',
+      created_at: '2026-07-05T00:00:00.000Z',
+    }],
+  });
+
+  const card = await waitFor(() => {
+    const el = root.querySelector('[data-role="project-card"][data-project-id="proj_alpha"]');
+    assert.ok(el);
+    assert.equal(el.getAttribute('data-highlighted'), 'true');
+    return el;
+  });
+  const operatorLink = card.querySelector('[data-role="project-open-operator"]');
+  assert.ok(operatorLink);
+  assert.equal(operatorLink.getAttribute('href'), '#operator');
+  assert.match(operatorLink.textContent, /오퍼레이터 열기/);
 });

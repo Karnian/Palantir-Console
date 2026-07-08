@@ -2,7 +2,7 @@
 // Extracted from server/public/app.js as part of P5-3 (ESM phase 4b).
 
 import { h } from '../../vendor/preact.module.js';
-import { useState, useEffect, useMemo, useCallback } from '../../vendor/hooks.module.js';
+import { useState, useEffect, useMemo, useCallback, useRef } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
@@ -640,7 +640,7 @@ function ProjectDetailModal({ project, tasks, runs, onClose, onOpenRun, onOpenTa
 // ProjectsView — exported
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun, onOpenTask }) {
+export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun, onOpenTask, highlightProjectId = null }) {
   const [showNew, setShowNew] = useState(false);
   const [detailProject, setDetailProject] = useState(null);
   const [editProject, setEditProject] = useState(null);
@@ -681,6 +681,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   const [operatorResetting, setOperatorResetting] = useState(false);
   const [retargetSuggestion, setRetargetSuggestion] = useState(null);
   const [retargetingQueued, setRetargetingQueued] = useState(false);
+  const highlightedCardRef = useRef(null);
 
   const loadNodes = useCallback(async () => {
     setNodesLoading(true);
@@ -878,6 +879,13 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   // Keep detailProject in sync with latest data
   const currentDetailProject = detailProject ? projects.find(p => p.id === detailProject.id) || detailProject : null;
 
+  useEffect(() => {
+    if (!highlightProjectId || !highlightedCardRef.current) return;
+    if (typeof highlightedCardRef.current.scrollIntoView === 'function') {
+      highlightedCardRef.current.scrollIntoView({ block: 'center', behavior: 'auto' });
+    }
+  }, [highlightProjectId, projects]);
+
   return html`
     <div class="projects-view" data-view="projects">
       <div class="projects-header">
@@ -896,8 +904,16 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
           const taskCount = tasks.filter(t => t.project_id === p.id).length;
           const remoteNodeId = projectNodeValue(p);
           const locationText = projectLocationText(p);
+          const highlighted = highlightProjectId && String(p.id) === String(highlightProjectId);
           return html`
-            <article key=${p.id} class="project-card">
+            <article
+              key=${p.id}
+              ref=${highlighted ? highlightedCardRef : null}
+              class=${`project-card ${highlighted ? 'is-highlighted' : ''}`}
+              data-role="project-card"
+              data-project-id=${p.id}
+              data-highlighted=${highlighted ? 'true' : 'false'}
+            >
               <button class="project-card-trigger" onClick=${() => setDetailProject(p)}
                 aria-label=${p.name}>
                 <span class="project-card-header">
@@ -911,6 +927,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
                 <span class="project-card-meta">${PROJECTS_LABELS.createdLabel} ${formatTime(p.created_at)}</span>
               </button>
               <div class="project-card-actions" style="margin-top:8px;">
+                <a class="ghost small" data-role="project-open-operator" href="#operator">${PROJECTS_LABELS.openOperator}</a>
                 <button class="ghost small" onClick=${() => openEdit(p)}>${COMMON_ACTIONS.edit}</button>
               </div>
             </article>

@@ -405,7 +405,12 @@ function App() {
     }
     if (routeBase === 'projects') {
       if (projectsLoading) return html`<${Loading} />`;
-      return html`<${ProjectsView} projects=${projects} tasks=${tasks} runs=${runs} reloadProjects=${reloadProjects} onOpenRun=${(run) => setInspectRun(run)} onOpenTask=${(task) => setInspectTask(task)} />`;
+      const rawProjectId = route.split('/').slice(1).join('/') || null;
+      let highlightProjectId = rawProjectId;
+      if (rawProjectId) {
+        try { highlightProjectId = decodeURIComponent(rawProjectId); } catch { highlightProjectId = rawProjectId; }
+      }
+      return html`<${ProjectsView} projects=${projects} tasks=${tasks} runs=${runs} reloadProjects=${reloadProjects} onOpenRun=${(run) => setInspectRun(run)} onOpenTask=${(task) => setInspectTask(task)} highlightProjectId=${highlightProjectId} />`;
     }
     if (routeBase === 'agents') {
       return html`<${AgentsView} agents=${agents} loading=${agentsLoading} reloadAgents=${reloadAgents} />`;

@@ -195,7 +195,7 @@ export function MentionInput({ projects = [], inputRef: forwardedRef, onInput, o
               class="mention-empty"
               style="padding:10px 12px;color:var(--text-muted,#888);font-size:13px;text-align:center;"
             >
-              프로젝트 없음
+              코드베이스 없음
             </div>
           `}
           ${candidates.map((p, i) => html`
