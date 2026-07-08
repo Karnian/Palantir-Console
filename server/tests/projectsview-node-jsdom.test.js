@@ -18,10 +18,20 @@ async function waitFor(assertion, timeoutMs = 1000) {
   throw lastErr;
 }
 
-function installProjectsStubs(env, apiFetch) {
+function installProjectsStubs(env, apiFetch, toasts = []) {
   env.context.apiFetch = apiFetch || (async () => ({}));
-  env.context.apiFetchWithToast = async (url, options) => env.context.apiFetch(url, options);
-  env.context.addToast = () => {};
+  env.context.apiFetchWithToast = async (url, options = {}) => {
+    try {
+      return await env.context.apiFetch(url, options);
+    } catch (err) {
+      const message = typeof options.errorMessage === 'function'
+        ? options.errorMessage(err)
+        : options.errorMessage || err.message;
+      env.context.addToast(message, 'error');
+      throw err;
+    }
+  };
+  env.context.addToast = (message, type) => { toasts.push({ message, type }); };
   env.context.formatTime = () => '2026-07-05';
   env.context.clickableProps = (onClick) => ({ onClick, role: 'button', tabIndex: 0 });
   env.context.conversationIdMatchesProject = () => false;
@@ -140,4 +150,43 @@ test('ProjectsView shows rebind 409 guidance and reset action', async (t) => {
     assert.equal(resetCalled, true);
     assert.match(root.querySelector('[data-role="operator-rebind-guidance"]').textContent, /다시 저장하세요/);
   });
+});
+
+test('ProjectsView warm operator action maps 409, 400, and 502 errors to friendly toasts without navigating', async (t) => {
+  for (const { status, expected } of [
+    { status: 409, expected: '먼저 Top 매니저를 시작하거나 노드/설정을 확인하세요.' },
+    { status: 400, expected: '오퍼레이터 인증을 확인하세요.' },
+    { status: 502, expected: '오퍼레이터 준비에 실패했습니다. 어댑터 또는 실행기를 확인하세요.' },
+  ]) {
+    const env = createPreactEnv();
+    t.after(env.cleanup);
+    const toasts = [];
+    installProjectsStubs(env, async (url, options = {}) => {
+      if (url === '/api/nodes') return { nodes: [] };
+      if (url === '/api/manager/pm/proj_1/warm' && options.method === 'POST') {
+        const err = new Error(`warm failed ${status}`);
+        err.status = status;
+        throw err;
+      }
+      return {};
+    }, toasts);
+    env.loadComponent('ProjectsView');
+
+    const root = renderProjectsView(env, {
+      projects: [{ id: 'proj_1', name: 'Alpha', created_at: '2026-07-05T00:00:00.000Z' }],
+    });
+
+    const button = await waitFor(() => {
+      const el = root.querySelector('[data-role="project-warm-operator"]');
+      assert.ok(el);
+      return el;
+    });
+    button.click();
+
+    await waitFor(() => {
+      assert.ok(toasts.some((toast) => toast.type === 'error' && toast.message === expected));
+      assert.equal(env.window.location.hash, '');
+      assert.equal(button.disabled, false);
+    });
+  }
 });

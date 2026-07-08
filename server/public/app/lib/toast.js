@@ -67,11 +67,27 @@ export function ToastContainer() {
 // Wraps apiFetch to surface errors as toasts. Imported directly from
 // ./api.js (no window indirection) so the bundling and import graph stay
 // honest.
+function resolveToastErrorMessage(err, opts) {
+  if (typeof opts.errorMessage === 'function') {
+    return opts.errorMessage(err) || err.message || 'Request failed';
+  }
+  if (typeof opts.errorMessage === 'string') {
+    return opts.errorMessage;
+  }
+  const status = Number(err?.status || err?.statusCode || err?.httpStatus || 0);
+  const mapped = opts.errorMessagesByStatus?.[status];
+  if (typeof mapped === 'function') {
+    return mapped(err) || err.message || 'Request failed';
+  }
+  return mapped || err.message || 'Request failed';
+}
+
 export async function apiFetchWithToast(url, opts = {}) {
+  const { errorMessage, errorMessagesByStatus, ...fetchOpts } = opts;
   try {
-    return await apiFetch(url, opts);
+    return await apiFetch(url, fetchOpts);
   } catch (err) {
-    addToast(err.message || 'Request failed', 'error');
+    addToast(resolveToastErrorMessage(err, { errorMessage, errorMessagesByStatus }), 'error');
     throw err;
   }
 }
