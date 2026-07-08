@@ -4688,7 +4688,7 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 }
 .manager-session-badge.running {
   background: rgba(59,130,246,0.15);
-  color: #3b82f6;
+  color: var(--running-badge-fg);
 }
 
 .operator-session-row {
@@ -4917,7 +4917,7 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 
 .manager-status-badge.running {
   background: rgba(59, 130, 246, 0.15);
-  color: #60a5fa;
+  color: var(--running-badge-fg);
   animation: pulse-subtle 2s ease-in-out infinite;
 }
 
@@ -5177,7 +5177,9 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   font-size: 10px;
   color: var(--text-muted);
   margin-top: 4px;
-  opacity: 0.7;
+  /* a11y-contrast-hardening (2026-07-08): dropped `opacity: 0.7` — it blended
+   * --text-muted below 4.5:1 on the message panel. --text-muted alone passes
+   * (light 5.75:1, dark 5.48:1 on --bg-elevated). */
 }
 
 .manager-msg-user .manager-msg-time {
@@ -6620,7 +6622,7 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   padding: 2px 8px;
   border-radius: var(--radius-xs);
 }
-.skill-badge-ok { color: var(--success); background: color-mix(in srgb, var(--success) 15%, transparent); }
+.skill-badge-ok { color: var(--success-badge-fg); background: color-mix(in srgb, var(--success) 15%, transparent); }
 .skill-badge-na { color: var(--text-muted); background: rgba(255, 255, 255, 0.06); }
 
 /* Form helpers */

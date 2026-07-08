@@ -89,6 +89,13 @@
    * for body text (~3:1 vs ≥4.5 required). amber-300 dark gives ≈8:1
    * on dark base; amber-800 light gives ≈6:1 on light base. */
   --priority-high-fg: #fcd34d;
+  /* a11y-contrast-hardening (2026-07-08): badge fg for same-hue-on-tint
+   * badges (operator roster skill-badge-ok, manager running badges). Like
+   * --priority-high-fg: canonical --success / #3b82f6 fg on a 15% tint
+   * background falls under 4.5:1 for 10-11px body text. dark = bright hue
+   * (passes on dark tint), light = darker hue (passes on light tint). */
+  --success-badge-fg: #10b981;
+  --running-badge-fg: #60a5fa;
   /* K-4-followup-contrast PR-2 (2026-04-29): button-surface variant of
    * --accent. The canonical --accent #7c5cfc against white text yields
    * 4.38:1 — just under the 4.5:1 axe threshold. A slightly darker
@@ -327,6 +334,11 @@
    * background lighter, so we keep the darker amber-800 just for the
    * badge fg. */
   --priority-high-fg: #92400e;
+  /* a11y-contrast-hardening light — success emerald-800 #036147 on
+   * `--success` 15% tint composites to ≈5.5:1; running blue-700 #1d4ed8
+   * on blue 15% tint ≈4.8-5.6:1 (axe color-contrast PASS). */
+  --success-badge-fg: #036147;
+  --running-badge-fg: #1d4ed8;
   /* K-4-followup-contrast PR-2 light — light `--accent #6d28d9` already
    * yields ≈7.10:1 vs white text, well above 4.5. Alias to --accent so
    * the light theme button bg stays in lock-step with the canonical
@@ -431,6 +443,8 @@
     --status-queued: #52525b;
     --status-active-bright: #15803d;
     --priority-high-fg: #92400e;
+    --success-badge-fg: #036147;
+    --running-badge-fg: #1d4ed8;
     --button-primary-bg: var(--accent);
     --button-danger-bg: #b91c1c;
     --origin-url-fg: #115e59;

@@ -707,7 +707,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
         </div>
       </div>
 
-      <div class="manager-messages" ref=${messagesRef}>
+      <div class="manager-messages" ref=${messagesRef} tabindex="0" role="log" aria-label="대화 메시지">
         ${!status.active && messages.length === 0 && html`
           <div class="manager-empty">
             <div class="manager-empty-icon">\u2726</div>
