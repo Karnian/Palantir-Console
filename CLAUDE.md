@@ -213,7 +213,7 @@ server/
 ### Session Resume on Boot
 - 서버 재시작 시 이전 매니저/Operator 세션을 자동 resume (기존: 무조건 stopped)
 - **Claude (top)**: `runs.claude_session_id` 를 `--resume <id>` 로 전달하여 CLI 세션 재접속. `streamJsonEngine` 이 `system:init` 이벤트에서 session_id 를 DB 에 persist
-- **Codex (Operator)**: `project_briefs.pm_thread_id` 로 `codex exec resume <thread_id>` 재접속. 이미 persist 됨
+- **Codex (Operator)**: `operator_instances.thread_id` 로 `codex exec resume <thread_id>` 재접속. `project_briefs.pm_thread_id` 는 thread state 가 없는 legacy row 의 read-only bridge 로만 사용
 - 부팅 순서: **Top 먼저 → Operator 나중** (Operator 은 parent-notice 라우팅을 위해 active Top 필요)
 - resume 실패 시 기존 동작 fallback (`stopped` 마킹 + `disposeSession`)
 - Operator resume 시 project brief (conventions/pitfalls/pm_run_id) 를 system prompt 에 bake (operatorSpawnService 와 동일)
@@ -229,27 +229,36 @@ server/
 ### Manager Session (Codex stateless + thread resume) — v3 Phase 3a
 - `codex exec --json` 으로 첫 turn, 이후 턴은 `codex exec resume <thread_id>` — Codex 는 stateless 어댑터 (매 턴마다 subprocess 생성/종료)
 - system prompt 는 `-c 'model_instructions_file="<path>"'` — stable 파일 경로 + stable 내용이면 `cached_input_tokens` hit
-- `codexAdapter.startSession` 의 `resumeThreadId` 옵션: `project_briefs.pm_thread_id` 가 있으면 seed 해서 첫 runTurn 이 바로 resume 으로 감
-- `onThreadStarted(threadId)` 콜백: `thread.started` 이벤트 (또는 resume 시 synchronous) 때 정확히 한 번 호출 — `operatorSpawnService` 가 이걸로 `project_briefs.pm_thread_id` 를 persist
+- `codexAdapter.startSession` 의 `resumeThreadId` 옵션: `operator_instances.thread_id` 가 있으면 seed 해서 첫 runTurn 이 바로 resume 으로 감. 없을 때만 `project_briefs.pm_thread_id` bridge 를 읽음
+- `onThreadStarted(threadId)` 콜백: `thread.started` 이벤트 (또는 resume 시 synchronous) 때 정확히 한 번 호출 — `operatorSpawnService` 가 이걸로 `operator_instances.thread_id` 를 persist
 - **brief 은 static system prompt 에 bake** — 절대 seed runTurn 으로 넣지 말 것 (codex 어댑터는 단일-turn 가드가 있어서 back-to-back runTurn 이면 두 번째 turn 이 "previous turn still running" 으로 실패)
 
-### v3 Manager 계층 (top / pm:&lt;id&gt;)
-- `managerRegistry` 가 `top` / `pm:<projectId>` 슬롯별 단일 source. `setActive` / `probeActive` / `clearActive` / `snapshot` / `onSlotCleared` 리스너.
+### v3 Manager 계층 (top / operator slots)
+- `managerRegistry` 가 `top` / `operator:<slot>` 슬롯별 단일 source. live canonical slot 은 `operator:oi_*`, legacy alias 는 resolver 로 수렴한다. `setActive` / `probeActive` / `clearActive` / `snapshot` / `onSlotCleared` 리스너.
 - `conversationService` 가 모든 send 경로의 단일 엔트리. peek-then-drain parent-notice 큐 (race-safe splice, myId fence).
 - **lock-in #2 (Phase 1.5)**: 자식 타깃 사용자 메시지 = 무조건 부모 staleness notice. 의도 분류 금지.
 - `resolveParentSlot(parentRunId)` 로 worker 의 parent 가 활성 Top 인지 활성 Operator 인지 판정 → 해당 슬롯에만 notice 큐잉.
 - `operatorCleanupService.reset` / `.dispose` 는 **fail-closed**: `disposeSession` throw 시 레지스트리/brief/run 상태를 유지한 채 re-throw (Phase 3a R2).
 - `run.is_manager=1` 이면 lifecycleService health loop 가 건너뜀. Top/Operator 양쪽 모두 이 가드 하나로 커버.
 
+### Operator↔Codebase Refs (watch-list) — W-P0~W-P7
+- Operator live identity 는 instance 기준: `operator:oi_*`. `operator:<projectId>` 는 외부 진입/기존 데이터 호환용 **legacy dual-read alias** 로 계속 유지하며, 단일 resolver 가 해당 codebase 의 primary ref instance 로 수렴시킨다.
+- `operator_codebase_refs`: `primary` = codebase 당 최대 1 + instance 당 최대 1(라우터 기본 수신자, auto-review fallback, cwd 기준). `reference` = 다수 허용(컨텍스트 참조 + dispatch 권한). codebase 는 Operator 를 소유하지 않고 Operator instance 가 codebase refs 를 가진다.
+- Attribution 은 서버 derive 만 신뢰: `/execute` 는 `pm_run_id` 로 operator instance 를 찾고, `runs.operator_instance_id` / `dispatch_audit_log.operator_instance_id` 에 기록한다. client/body 의 instance 주장은 권한 근거가 아니다.
+- Auto-review 수신자 체인: ① worker 를 spawn 한 operator instance → ② worker codebase 의 primary instance → ③ Top. **watcher broadcast 금지**.
+- Thread 상태 소유자는 `operator_instances` (`thread_id`, `pm_adapter`, `node_id`, `cwd`, `source_generation`, `source_hash`, `workspace_path`). `project_briefs.pm_thread_id` 계열은 W-P1 이전 데이터용 read-only bridge 로만 읽는다.
+- Memory 주입은 turn context 기준: codebase-specific turn 은 해당 Workspace, generic turn 은 User/Profile + watch-list 요약, auto-review turn 은 worker codebase Workspace 만. ledger 는 실제 선택 주입된 owner 만 기록한다.
+- `projects.pm_enabled` / `preferred_pm_adapter` 는 현재 spawn 정책 소스다. instance 로 이전하는 것은 별도 설계 결정이며 W-P7 cleanup 에서 제거하지 않는다.
+
 ### Dispatch audit & router (v3 Phase 4/6/7)
 - Operator 이 definitive claim 을 만들 때마다 `POST /api/dispatch-audit` 로 기록 → `reconciliationService` 가 DB truth 와 비교. incoherent 시 flag + kind (`pm_hallucination`, `user_intervention_stale`, …). Annotate-only — **절대 block 안 함** (recordClaim 은 never throws except on hard envelope binding errors).
 - 클라 `useDispatchAudit` hook 이 GET 폴링 + `dispatch_audit:recorded` SSE 구독. `requestSeqRef` 모노토닉 토큰으로 stale-response fence.
 - `routerService.resolveTarget({text, currentConversationId})` 3-step:
-  1. `@<name|id>` prefix → `pm:<projectId>` + prefix strip
+  1. `@<name|id>` prefix → codebase primary Operator instance(`operator:oi_*`) + prefix strip
   2. 유효 `currentConversationId` → 그대로 유지
-  3. (현재 context 없을 때만) 프로젝트명 exact-insensitive 매칭; 다중 매칭 = ambiguous + candidates
+  3. (현재 context 없을 때만) 프로젝트명 exact-insensitive 매칭; primary 없음/다중 매칭 = no-primary/ambiguous
   4. default (`top`)
-- **envelope binding** (R5 최종): `pmRunId` 는 must-exist + `is_manager=1` + `manager_layer='pm'` + `conversation_id === 'pm:<projectId>'`. `taskId` / `run_id` cross-project 차단. `selectedAgentProfileId` must exist.
+- **envelope binding**: `pmRunId` 는 must-exist + `is_manager=1` + Operator conversation resolver 통과. `taskId` / `run_id` 는 해당 instance refs 안이어야 하고, `selectedAgentProfileId` must exist. incoherence 는 annotate-only, hard envelope 위반만 400.
 
 ### SSE semantic envelope (v3 Phase 5) — additive
 - `runService` 가 `createRun` / `updateRunStatus` / `markRunStarted` 에서 `{ run, from_status, to_status, reason, task_id, project_id }` 를 emit. Pre-Phase 5 의 `{ run }` 구독자는 그대로 동작.
@@ -320,6 +329,11 @@ server/
 - `operatorSpawnService` 에서 **seed runTurn 금지** — brief 은 static system prompt 에 bake. Codex 어댑터는 back-to-back runTurn 에서 "previous turn still running" 을 던진다
 - `operatorCleanupService` 는 fail-closed — dispose 실패 시 상태를 유지한 채 re-throw. 호출자 (DELETE /api/projects/:id, /reset) 가 502 로 거절해야 함. 절대 swallow 하지 말 것
 - `reconciliationService.recordClaim` 의 envelope binding 은 strict — `projectId`/`taskId`/`pmRunId`/`selectedAgentProfileId` 전부 존재+소유 검증. hard input error 는 400 throw, incoherence 는 flag 로만 표시 (annotate-only 원칙: Operator drift 는 기록만, block 안 함)
+- **Watch-list legacy 계약**: `operator:<projectId>` dual-read alias 는 외부 진입 호환 계약이므로 임의 제거 금지. 제거 여부는 별도 phase 에서 운영 데이터로 판정한다.
+- **Bridge fallback 기준**: `project_briefs.pm_thread_id` bridge 는 instance ROW 부재가 아니라 instance thread **STATE 부재**(`operator_instances.thread_id` null) 때만 fallback. `project_briefs` 로 dual-write 하지 말 것.
+- **watchlist_version bump**: refs 변경 bump 는 live Operator invalidation 신호다. non-live instance 는 next spawn 에서 refs 를 다시 읽으므로 live-only bump 계약을 유지한다.
+- **Auto-review broadcast 금지**: worker harvest 는 spawn instance → primary instance → Top 단일 수신자 체인만 허용. reference watcher 전체 발송은 retry/T5/breaker 중복을 만든다.
+- **`oi_` parser 계약**: `parseProjectConversationId('operator:oi_*')` 는 null 이어야 한다. project join 이 필요하면 resolver 의 `primaryProjectId` 또는 서버 snapshot 의 `legacyConversationId` 를 사용한다.
 - **Graceful shutdown**: `index.js` 가 SIGINT/SIGTERM → `app.shutdown()` 연결 (10s forced exit). `app.shutdown()` 은 매니저 dispose + lifecycle monitor 중단 + DB 닫기. 테스트에서는 `app.shutdown()` 직접 호출
 - Manager 프로세스는 stdin이 닫히면 종료됨 — stdin pipe를 열어두어야 함 (Claude adapter)
 - `result` 이벤트 처리 시 Manager/Worker 분기 확인 (`proc.isManager`)

@@ -1,6 +1,6 @@
 # Palantir Console Backlog
 
-> Last updated: 2026-07-05 (U 트랙 노드별 CLI 사용량 완결 #301~#306 + N 트랙 노드 퍼스트 재기획 brief 등록 #307)
+> Last updated: 2026-07-09 (Operator↔Codebase Refs watch-list W-P0~W-P7 완결 #342~#349 + W-P7 cleanup)
 >
 > 이 문서는 *현재 시점에서* 남은 작업들을 카테고리별로 정리한다.
 > 완료된 작업의 한 화면 요약 + 새 세션 재입장 prompt 는 [`handoff-post-k2-launch-2026-04-29.md`](./handoff-post-k2-launch-2026-04-29.md) 를 본다 (§9 post-launch fixups + §10 K-3 cleanup + §11 K-4 launch + §12 K-5 launch). 그 이전 시리즈 (M1/M2/B3 + R1/R3/R4) 는 [`handoff-post-scenario-review.md`](./handoff-post-scenario-review.md) 에 있다.
@@ -17,6 +17,10 @@
 ---
 
 ## Ready
+
+### ~~W-P7. Operator↔Codebase Refs watch-list cleanup~~ ✅ 완료 (2026-07-09)
+- `docs/specs/operator-codebase-refs-brief.md` v3 §4 W-P7: W-P0~W-P7 전 구현 완결(PR #342~#349 + 이번). 파괴적 제거 없이 legacy surface 판정 완료 — `operator:<projectId>` dual-read alias, `project_briefs.pm_thread_id` read-only bridge, `projects.pm_enabled` / `preferred_pm_adapter` spawn 정책 소스는 유지.
+- 잔여는 선택 후속 후보로만 남김: pm_enabled/preferred_pm_adapter instance 이전, legacy alias 제거 여부, 역인덱스 실시간화, reference 요약 주입 고도화.
 
 ### ~~F1. Fleet 풀 루프 검증 — 원격 Operator 가 pod 에서 워커 dispatch~~ ✅ 완료 (2026-07-03, 실 Pi)
 - **Mac 컨트롤 플레인(`PALANTIR_BASE_URL=http://100.120.25.112:4188`) → Pi 의 Claude Operator → Tailscale 너머 컨트롤 플레인으로 curl(POST /api/tasks + execute) → codex 워커가 Pi 에 dispatch(running@pi-f1)** 풀 루프 실증. pod → 컨트롤 플레인 역방향 도달성도 확인(Pi→Mac `MAC_REACHED`). 검증 하네스: `scratchpad/e2e-f1-full-loop.mjs`.

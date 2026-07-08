@@ -35,7 +35,8 @@ function isInstanceConversationId(id) {
   return isOperatorInstanceId(payload);
 }
 
-// PRODUCER seam: the conversation id for a project-scoped operator.
+// PRODUCER seam: build an operator conversation id from a chosen payload.
+// Payload can be a legacy project id or the canonical oi_* instance id.
 function conversationIdForProject(projectId) {
   return `${OPERATOR_CONV_PREFIX}${projectId}`;
 }
@@ -148,10 +149,9 @@ function isProjectLayer(layer) {
   return layer === OPERATOR_LAYER;
 }
 
-// Normalize any conversation id to its CANONICAL form. With dual-read removed
-// this is identity for `operator:<id>`; non-project ids ('top', 'worker:...',
-// anything else) also pass through unchanged. Kept as the single registry
-// slot-key + comparison normalizer so call sites remain stable.
+// Normalize legacy project aliases conservatively. Resolver-backed callers own
+// instance convergence; non-project ids ('top', 'worker:...', anything else)
+// pass through unchanged.
 function canonicalConversationId(id) {
   const parsed = parseProjectConversationId(id);
   return parsed ? conversationIdForProject(parsed.projectId) : id;
