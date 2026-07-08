@@ -23,26 +23,35 @@ function loadNavModule() {
 
 test('NAV_SUB_ITEMS exposes operator roster without changing top-level nav', () => {
   const { NAV_ITEMS, NAV_SUB_ITEMS } = loadNavModule();
-  assert.equal(NAV_ITEMS.length, 7);
+  assert.equal(NAV_ITEMS.length, 6);
   assert.deepEqual(Array.from(NAV_ITEMS, (item) => item.hash), [
     'dashboard',
     'operator',
     'manager',
     'board',
-    'projects',
     'resources',
     'memory',
   ]);
   assert.ok(NAV_ITEMS.some((item) => item.hash === 'operator'));
   assert.ok(!NAV_ITEMS.some((item) => item.hash === 'operator/roster'));
-  assert.equal(NAV_ITEMS.find((item) => item.hash === 'projects').label, '코드베이스');
+  assert.ok(!NAV_ITEMS.some((item) => item.hash === 'projects'));
 
   const operatorSubItems = Array.from(NAV_SUB_ITEMS)
     .filter((item) => item.hash.startsWith('operator/'))
-    .map((item) => item.hash);
+    .map((item) => [item.hash, item.label]);
   assert.deepEqual(operatorSubItems, [
-    'operator/roster',
-    'operator/profiles',
-    'operator/specialist',
+    ['operator/roster', '오퍼레이터 로스터'],
+    ['operator/codebases', '코드베이스'],
+    ['operator/profiles', '오퍼레이터 프로필'],
+    ['operator/specialist', '스페셜리스트'],
   ]);
+});
+
+test('app shell nests ProjectsView under operator codebases and aliases #projects', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  assert.match(src, /if \(base === 'projects'\) \{/);
+  assert.match(src, /window\.location\.replace\('#operator\/codebases' \+ projectSuffix\)/);
+  assert.match(src, /\{ key: 'codebases',\s+label: NAV_LABELS\['operator-codebases'\],[\s\S]*<\$\{ProjectsView\}[\s\S]*highlightProjectId=\$\{highlightProjectId\}/);
+  assert.match(src, /const rawProjectId = sub === 'codebases' \? \(routeParts\.slice\(2\)\.join\('\/'\) \|\| null\) : null;/);
+  assert.doesNotMatch(src, /if \(routeBase === 'projects'\) \{[\s\S]*return html`<\$\{ProjectsView\}/);
 });

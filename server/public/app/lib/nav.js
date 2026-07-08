@@ -7,10 +7,11 @@
 // `app/lib/copy.js` so a future locale flip touches one file. The
 // hash + icon stay route-shaped here.
 //
-// Nav consolidation: 5 items (skills / presets / mcp-servers / specialist /
-// operator-profiles) collapsed into 2 tab groups:
+// Nav consolidation: top-level codebases live under the operator group.
+// skills / presets / mcp-servers / specialist / operator-profiles are also
+// collapsed into 2 tab groups:
 //   - resources (#resources) — sub-tabs: nodes · skills · presets · mcp-servers
-//   - operator  (#operator)  — sub-tabs: roster · profiles · specialist
+//   - operator  (#operator)  — sub-tabs: roster · codebases · profiles · specialist
 // `NAV_SUB_ITEMS` exposes the canonical sub-entries for CommandPalette
 // search. Number-key shortcuts still use only NAV_ITEMS.
 
@@ -21,7 +22,6 @@ export const NAV_ITEMS = [
   { hash: 'operator',    icon: '✸', label: NAV_LABELS.operator },
   { hash: 'manager',     icon: '✦', label: NAV_LABELS.manager },
   { hash: 'board',       icon: '▒', label: NAV_LABELS.board },
-  { hash: 'projects',    icon: '▣', label: NAV_LABELS.projects },
   { hash: 'resources',   icon: '❖', label: NAV_LABELS.resources },
   { hash: 'memory',      icon: '◈', label: NAV_LABELS.memory },
 ];
@@ -35,6 +35,7 @@ export const NAV_SUB_ITEMS = [
   { hash: 'resources/presets',     icon: '❖', label: NAV_LABELS.presets },
   { hash: 'resources/mcp-servers', icon: '⦿', label: NAV_LABELS['mcp-servers'] },
   { hash: 'operator/roster',       icon: '✸', label: NAV_LABELS['operator-roster'] },
+  { hash: 'operator/codebases',    icon: '▣', label: NAV_LABELS['operator-codebases'] },
   { hash: 'operator/profiles',     icon: '⊙', label: NAV_LABELS['operator-profiles'] },
   { hash: 'operator/specialist',   icon: '✸', label: NAV_LABELS.specialist },
 ];

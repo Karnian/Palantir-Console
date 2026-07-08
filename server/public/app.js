@@ -357,6 +357,11 @@ function App() {
     };
     const current = (window.location.hash.slice(1) || '').split('/');
     const base = current[0];
+    if (base === 'projects') {
+      const projectSuffix = current.length > 1 ? '/' + current.slice(1).join('/') : '';
+      window.location.replace('#operator/codebases' + projectSuffix);
+      return;
+    }
     if (Object.prototype.hasOwnProperty.call(LEGACY_MAP, base) && current.length === 1) {
       window.location.replace('#' + LEGACY_MAP[base]);
     }
@@ -404,13 +409,7 @@ function App() {
       return html`<${SessionsView} />`;
     }
     if (routeBase === 'projects') {
-      if (projectsLoading) return html`<${Loading} />`;
-      const rawProjectId = route.split('/').slice(1).join('/') || null;
-      let highlightProjectId = rawProjectId;
-      if (rawProjectId) {
-        try { highlightProjectId = decodeURIComponent(rawProjectId); } catch { highlightProjectId = rawProjectId; }
-      }
-      return html`<${ProjectsView} projects=${projects} tasks=${tasks} runs=${runs} reloadProjects=${reloadProjects} onOpenRun=${(run) => setInspectRun(run)} onOpenTask=${(task) => setInspectTask(task)} highlightProjectId=${highlightProjectId} />`;
+      return html`<${Loading} />`;
     }
     if (routeBase === 'agents') {
       return html`<${AgentsView} agents=${agents} loading=${agentsLoading} reloadAgents=${reloadAgents} />`;
@@ -442,14 +441,21 @@ function App() {
       return html`<${MemoryView} projects=${projects} />`;
     }
     if (routeBase === 'operator') {
-      const sub = route.split('/')[1] || 'roster';
+      const routeParts = route.split('/');
+      const sub = routeParts[1] || 'roster';
+      const rawProjectId = sub === 'codebases' ? (routeParts.slice(2).join('/') || null) : null;
+      let highlightProjectId = rawProjectId;
+      if (rawProjectId) {
+        try { highlightProjectId = decodeURIComponent(rawProjectId); } catch { highlightProjectId = rawProjectId; }
+      }
       return html`<${TabGroupView}
         groupHash="operator"
         subRoute=${sub}
         tabs=${[
-          { key: 'roster',     label: NAV_LABELS['operator-roster'],   render: () => html`<${OperatorsView} runs=${runs} projects=${projects} tasks=${tasks} />` },
-          { key: 'profiles',   label: NAV_LABELS['operator-profiles'], render: () => html`<${OperatorProfilesView} />` },
-          { key: 'specialist', label: NAV_LABELS.specialist,           render: () => html`<${SpecialistView} runs=${runs} />` },
+          { key: 'roster',     label: NAV_LABELS['operator-roster'],     render: () => html`<${OperatorsView} runs=${runs} projects=${projects} tasks=${tasks} />` },
+          { key: 'codebases',  label: NAV_LABELS['operator-codebases'],  render: () => projectsLoading ? html`<${Loading} />` : html`<${ProjectsView} projects=${projects} tasks=${tasks} runs=${runs} reloadProjects=${reloadProjects} onOpenRun=${(run) => setInspectRun(run)} onOpenTask=${(task) => setInspectTask(task)} highlightProjectId=${highlightProjectId} />` },
+          { key: 'profiles',   label: NAV_LABELS['operator-profiles'],   render: () => html`<${OperatorProfilesView} />` },
+          { key: 'specialist', label: NAV_LABELS.specialist,             render: () => html`<${SpecialistView} runs=${runs} />` },
         ]}
       />`;
     }
