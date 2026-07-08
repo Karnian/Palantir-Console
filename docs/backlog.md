@@ -27,7 +27,7 @@
 **나머지 Ready 비어 있음.** K-2~K-5 시리즈 + Fleet P4/P5(F1/F2 포함) 전부 종결.
 
 진행 가능한 후속 nice-to-have (deferred — 사용자 트리거 시):
-- **A11y-contrast-hardening** ✅ 완료(2026-07-08, fix/a11y-contrast-hardening). 통합 리뷰가 실 prod DB 렌더에서 노출한 5 위반 해소: (a) 공유 skill-badge-ok + manager .manager-session-badge/.manager-status-badge 하드코딩색→badge 전용 fg 토큰(--success-badge-fg/--running-badge-fg, priority-high-fg 선례, 3블록 lock-step), (b) .manager-msg-time opacity:0.7 제거(muted 를 4.5 아래로 blend), (c) .manager-messages tabindex/role=log(scrollable-region-focusable). a11y 56/56(실 DB) + 전체 2115. Codex GO. **잔여(별도, 미해결): .manager-msg-user .manager-msg-time = white/accent 버블 small text 가 다크서 2.57 — 토큰 아닌 버블 재설계 필요(full white 도 dark 4.38<4.5). 플래그 5개 밖 pre-existing.**
+- **A11y-contrast-hardening** ✅ 완료(2026-07-08, fix/a11y-contrast-hardening). 통합 리뷰가 실 prod DB 렌더에서 노출한 5 위반 해소: (a) 공유 skill-badge-ok + manager .manager-session-badge/.manager-status-badge 하드코딩색→badge 전용 fg 토큰(--success-badge-fg/--running-badge-fg, priority-high-fg 선례, 3블록 lock-step), (b) .manager-msg-time opacity:0.7 제거(muted 를 4.5 아래로 blend), (c) .manager-messages tabindex/role=log(scrollable-region-focusable). a11y 56/56(실 DB) + 전체 2115. Codex GO. **잔여도 해소**: .manager-msg-user 타임스탬프는 버블 밖으로(A) + 다크 버블 --msg-user-bg 진하게(B) → assistant+user 타임스탬프·본문 전부 clean(별 커밋).
 - **K-5-followup** — 모달/드로어 visual regression (K-5 spec §3 비범위 → 별도 phase)
 - **K-4 NIT** — moderate severity gate 승격 (현재 report-only)
 - **K-4-card-markup NIT** — `.agent-card` / `.project-card` heading semantics 복원 (`<h3>` 별도 위치)
