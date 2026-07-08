@@ -20,12 +20,26 @@ async function waitFor(assertion, timeoutMs = 1000) {
   throw lastErr;
 }
 
-function installRosterStubs(env, { managerStatus, profiles, specialistResult = null }) {
+function installRosterStubs(env, {
+  managerStatus,
+  profiles,
+  instances = [],
+  specialistResult = null,
+  operatorInstancesHandler = null,
+}) {
   const calls = [];
   env.context.apiFetch = async (url, opts = {}) => {
     calls.push({ url, opts });
     if (url === '/api/manager/status') {
       return typeof managerStatus === 'function' ? managerStatus({ calls, opts, url }) : managerStatus;
+    }
+    if (url === '/api/operator-instances') {
+      const value = typeof instances === 'function' ? instances({ calls, opts, url }) : instances;
+      return { instances: value };
+    }
+    if (url.startsWith('/api/operator-instances/')) {
+      if (operatorInstancesHandler) return operatorInstancesHandler({ calls, opts, url });
+      return {};
     }
     if (url === '/api/operator/profiles') {
       const value = typeof profiles === 'function' ? profiles({ calls, opts, url }) : profiles;
@@ -41,13 +55,21 @@ function installRosterStubs(env, { managerStatus, profiles, specialistResult = n
     }
     throw new Error(`unexpected url ${url}`);
   };
+  env.context.apiFetchWithToast = async (url, opts = {}) => {
+    try {
+      return await env.context.apiFetch(url, opts);
+    } catch (err) {
+      env.context.addToast(err.message, 'error');
+      throw err;
+    }
+  };
   env.context.addToast = () => {};
   env.context.parseProjectConversationId = (id) => {
     if (typeof id !== 'string') return null;
     const prefix = 'operator:';
-    return id.startsWith(prefix) && id.length > prefix.length
-      ? { projectId: id.slice(prefix.length) }
-      : null;
+    if (!id.startsWith(prefix) || id.length <= prefix.length) return null;
+    const projectId = id.slice(prefix.length);
+    return projectId.startsWith('oi_') ? null : { projectId };
   };
   env.context.EmptyState = function EmptyState({ text, sub }) {
     return env.context.preact.h('div', { class: 'empty-state' }, `${text} ${sub || ''}`);
@@ -253,6 +275,140 @@ test('OperatorsView renders Master, Live Operators, and Available Operators as s
   assert.ok(root.querySelector('[role="dialog"]'));
 });
 
+test('OperatorsView renders watch-list badges and edits reference refs from the Live card', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+
+  let currentInstances = [{
+    id: 'oi_alpha',
+    refs: [
+      {
+        instance_id: 'oi_alpha',
+        project_id: 'proj_alpha',
+        role: 'primary',
+        project: { id: 'proj_alpha', name: 'Alpha Console' },
+      },
+      {
+        instance_id: 'oi_alpha',
+        project_id: 'proj_beta',
+        role: 'reference',
+        project: { id: 'proj_beta', name: 'Beta API' },
+      },
+    ],
+  }];
+  const apiCalls = installRosterStubs(env, {
+    managerStatus: {
+      active: true,
+      top: {
+        conversationId: 'top',
+        run: { id: 'run_mgr_top', status: 'running', manager_adapter: 'claude-code' },
+      },
+      pms: [{
+        conversationId: 'operator:oi_alpha',
+        legacyConversationId: 'operator:proj_alpha',
+        run: {
+          id: 'run_mgr_alpha',
+          status: 'running',
+          manager_adapter: 'codex',
+          conversation_id: 'operator:oi_alpha',
+          operator_instance_id: 'oi_alpha',
+        },
+      }],
+    },
+    profiles: [],
+    instances: () => currentInstances,
+    operatorInstancesHandler: ({ url, opts }) => {
+      if (url === '/api/operator-instances/oi_alpha/refs' && opts.method === 'POST') {
+        currentInstances = [{
+          ...currentInstances[0],
+          refs: [
+            ...currentInstances[0].refs,
+            {
+              instance_id: 'oi_alpha',
+              project_id: 'proj_gamma',
+              role: 'reference',
+              project: { id: 'proj_gamma', name: 'Gamma UI' },
+            },
+          ],
+        }];
+        return { instance: currentInstances[0] };
+      }
+      if (url === '/api/operator-instances/oi_alpha/refs/proj_beta' && opts.method === 'DELETE') {
+        currentInstances = [{
+          ...currentInstances[0],
+          refs: currentInstances[0].refs.filter((ref) => ref.project_id !== 'proj_beta'),
+        }];
+        return { instance: currentInstances[0] };
+      }
+      throw new Error(`unexpected operator-instances url ${url}`);
+    },
+  });
+  loadOperatorsComponents(env);
+
+  const root = renderOperatorsView(env, {
+    projects: [
+      { id: 'proj_alpha', name: 'Alpha Console' },
+      { id: 'proj_beta', name: 'Beta API' },
+      { id: 'proj_gamma', name: 'Gamma UI' },
+    ],
+  });
+
+  const live = await waitFor(() => {
+    const el = root.querySelector('[data-role="operator-roster-live-card"]');
+    assert.ok(el);
+    assert.match(el.textContent, /Alpha Console/);
+    assert.match(el.textContent, /Beta API/);
+    return el;
+  });
+  assert.equal(live.tagName, 'ARTICLE');
+  assert.equal(live.getAttribute('href'), null);
+  assert.equal(live.querySelector('a a'), null);
+  assert.equal(live.querySelectorAll('[data-role="operator-watch-ref-primary"]').length, 1);
+  assert.match(live.querySelector('[data-role="operator-watch-ref-primary"]').textContent, /담당/);
+  assert.equal(live.querySelectorAll('[data-role="operator-watch-ref-reference"]').length, 1);
+  assert.match(live.querySelector('[data-role="operator-watch-ref-reference"]').textContent, /참조/);
+  assert.equal(live.querySelector('[data-role="operator-watch-ref-primary"] [data-role="operator-watch-ref-remove"]'), null);
+
+  live.querySelector('[data-role="operator-roster-add-reference-button"]').click();
+  const dialog = await waitFor(() => {
+    const el = root.querySelector('[role="dialog"]');
+    assert.ok(el);
+    return el;
+  });
+  assert.equal(dialog.getAttribute('aria-labelledby'), 'operator-roster-refs-title');
+  const select = dialog.querySelector('[data-role="operator-roster-ref-project-select"]');
+  assert.ok(select);
+  assert.deepEqual(Array.from(select.options).map((option) => option.value), ['proj_gamma']);
+  assert.equal(select.value, 'proj_gamma');
+  dialog.querySelector('[data-role="operator-roster-ref-submit"]').click();
+
+  const post = await waitFor(() => {
+    const call = apiCalls.find((entry) => entry.url === '/api/operator-instances/oi_alpha/refs');
+    assert.ok(call);
+    return call;
+  });
+  assert.equal(post.opts.method, 'POST');
+  assert.deepEqual(JSON.parse(post.opts.body), { project_id: 'proj_gamma', role: 'reference' });
+  await waitFor(() => assert.match(root.textContent, /Gamma UI/));
+
+  const betaRemove = await waitFor(() => {
+    const buttons = Array.from(root.querySelectorAll('[data-role="operator-watch-ref-remove"]'));
+    const button = buttons.find((candidate) => candidate.getAttribute('aria-label').includes('Beta API'));
+    assert.ok(button);
+    return button;
+  });
+  betaRemove.click();
+
+  const del = await waitFor(() => {
+    const call = apiCalls.find((entry) => entry.url === '/api/operator-instances/oi_alpha/refs/proj_beta');
+    assert.ok(call);
+    return call;
+  });
+  assert.equal(del.opts.method, 'DELETE');
+  await waitFor(() => assert.doesNotMatch(root.textContent, /Beta API/));
+  assert.equal(root.querySelector('[data-role="operator-watch-ref-primary"] [data-role="operator-watch-ref-remove"]'), null);
+});
+
 test('OperatorsView renders scoped empty states for no live project operators and no available profiles', async (t) => {
   const env = createPreactEnv();
   t.after(env.cleanup);
@@ -301,6 +457,7 @@ test('OperatorsView debounces live roster SSE events into one manager status ref
 
   renderOperatorsView(env);
   await waitFor(() => assert.equal(countCalls(calls, '/api/manager/status'), 1));
+  assert.equal(countCalls(calls, '/api/operator-instances'), 1);
   assert.equal(countCalls(calls, '/api/operator/profiles'), 1);
   assert.equal(broker.listenerCount('manager:started'), 1);
   assert.equal(broker.listenerCount('manager:stopped'), 1);
@@ -312,6 +469,7 @@ test('OperatorsView debounces live roster SSE events into one manager status ref
   broker.publish('run:completed');
 
   await waitFor(() => assert.equal(countCalls(calls, '/api/manager/status'), 2), 1000);
+  assert.equal(countCalls(calls, '/api/operator-instances'), 2);
   assert.equal(countCalls(calls, '/api/operator/profiles'), 1);
 });
 
@@ -337,6 +495,7 @@ test('OperatorsView unsubscribes SSE roster listeners on unmount', async (t) => 
 
   const root = renderOperatorsView(env);
   await waitFor(() => assert.equal(countCalls(calls, '/api/manager/status'), 1));
+  assert.equal(countCalls(calls, '/api/operator-instances'), 1);
 
   env.render(null, root);
   await flushEffects(20);
@@ -345,6 +504,7 @@ test('OperatorsView unsubscribes SSE roster listeners on unmount', async (t) => 
   broker.publish('manager:stopped');
   await flushEffects(500);
   assert.equal(countCalls(calls, '/api/manager/status'), 1);
+  assert.equal(countCalls(calls, '/api/operator-instances'), 1);
 });
 
 test('OperatorsView ignores stale manager status responses after a newer SSE refetch wins', async (t) => {
@@ -357,9 +517,9 @@ test('OperatorsView ignores stale manager status responses after a newer SSE ref
   env.context.parseProjectConversationId = (id) => {
     if (typeof id !== 'string') return null;
     const prefix = 'operator:';
-    return id.startsWith(prefix) && id.length > prefix.length
-      ? { projectId: id.slice(prefix.length) }
-      : null;
+    if (!id.startsWith(prefix) || id.length <= prefix.length) return null;
+    const projectId = id.slice(prefix.length);
+    return projectId.startsWith('oi_') ? null : { projectId };
   };
   env.context.EmptyState = function EmptyState({ text, sub }) {
     return env.context.preact.h('div', { class: 'empty-state' }, `${text} ${sub || ''}`);
@@ -368,6 +528,7 @@ test('OperatorsView ignores stale manager status responses after a newer SSE ref
   const statusRequests = [];
   env.context.apiFetch = async (url) => {
     if (url === '/api/operator/profiles') return { profiles: [] };
+    if (url === '/api/operator-instances') return { instances: [] };
     if (url === '/api/manager/status') {
       const request = deferred();
       statusRequests.push(request);
@@ -375,7 +536,7 @@ test('OperatorsView ignores stale manager status responses after a newer SSE ref
     }
     throw new Error(`unexpected url ${url}`);
   };
-  env.loadComponent('OperatorsView');
+  loadOperatorsComponents(env);
 
   const root = renderOperatorsView(env);
   await waitFor(() => assert.equal(statusRequests.length, 1));
