@@ -169,16 +169,103 @@ function createPmAutoReview({
   defer = setImmediate,
   logger = console,
 } = {}) {
-  const autoReviewCounts = new Map(); // "projectId:taskId" -> count
+  const autoReviewCounts = new Map(); // "receiverInstanceId:taskId" or "project:<projectId>:taskId" -> count
+  const autoReviewCountSlots = new Map(); // countKey -> slotKey (W-P4 R1: lets a Top slot clear reset Top-fallback counts)
+
+  function resolveOperatorConversation(conversationId) {
+    if (runService && typeof runService.resolveOperatorConversationId === 'function') {
+      try {
+        return runService.resolveOperatorConversationId(conversationId) || null;
+      } catch {
+        return null;
+      }
+    }
+    const parsed = parseProjectConversationId(conversationId);
+    if (!parsed) return null;
+    return {
+      instanceId: null,
+      legacyProjectId: parsed.projectId,
+      legacySlotId: conversationIdForProject(parsed.projectId),
+      instanceConversationId: null,
+      primaryProjectId: null,
+    };
+  }
+
+  function countKeyForReceiver(receiverKey, taskId) {
+    return `${receiverKey}:${taskId || '_'}`;
+  }
+
+  function deleteCountKeysForSlot(slotKey) {
+    // W-P4 R1 (Codex): Top-fallback counts are keyed by receiver ("project:.."/instance)
+    // but their SLOT is 'top' — an operator-based reset can never reach them, so a
+    // cleared/replaced Top would leave the breaker permanently tripped.
+    for (const [key, recordedSlotKey] of autoReviewCountSlots.entries()) {
+      if (recordedSlotKey === slotKey) {
+        autoReviewCounts.delete(key);
+        autoReviewCountSlots.delete(key);
+      }
+    }
+  }
+
+  function deleteCountKeysForReceiver(receiverKey) {
+    if (!receiverKey) return;
+    for (const key of autoReviewCounts.keys()) {
+      if (key.startsWith(`${receiverKey}:`)) { autoReviewCounts.delete(key); autoReviewCountSlots.delete(key); }
+    }
+  }
+
+  function topReceiver(run, receiverInstanceId = null) {
+    const projectId = run?.project_id || null;
+    const receiverKey = receiverInstanceId || (projectId ? `project:${projectId}` : 'project:_');
+    return {
+      slotKey: 'top',
+      receiverInstanceId,
+      receiverKey,
+      countKey: countKeyForReceiver(receiverKey, run?.task_id),
+      source: receiverInstanceId ? 'attributed_instance_no_primary' : 'top_fallback',
+    };
+  }
+
+  function receiverFromResolved(run, resolved, source) {
+    if (!resolved?.instanceId || !resolved?.primaryProjectId || !resolved?.legacySlotId) {
+      return null;
+    }
+    return {
+      slotKey: resolved.legacySlotId,
+      receiverInstanceId: resolved.instanceId,
+      receiverKey: resolved.instanceId,
+      countKey: countKeyForReceiver(resolved.instanceId, run?.task_id),
+      source,
+    };
+  }
+
+  function resolveReviewReceiver(run) {
+    if (!run?.project_id) return null;
+
+    if (run.operator_instance_id) {
+      const resolved = resolveOperatorConversation(conversationIdForProject(run.operator_instance_id));
+      return receiverFromResolved(run, resolved, 'attributed_instance')
+        || topReceiver(run, run.operator_instance_id);
+    }
+
+    const resolved = resolveOperatorConversation(conversationIdForProject(run.project_id));
+    return receiverFromResolved(run, resolved, 'primary_instance')
+      || topReceiver(run);
+  }
 
   managerRegistry.onSlotCleared(({ conversationId }) => {
+    if (conversationId === 'top') deleteCountKeysForSlot('top');
+    const resolved = resolveOperatorConversation(conversationId);
+    if (resolved?.instanceId) deleteCountKeysForReceiver(resolved.instanceId);
+    if (resolved?.legacyProjectId) deleteCountKeysForReceiver(`project:${resolved.legacyProjectId}`);
+    if (resolved?.primaryProjectId) deleteCountKeysForReceiver(`project:${resolved.primaryProjectId}`);
     const parsed = parseProjectConversationId(conversationId); // operator:<projectId>
-    if (!parsed) return;
-    const projectId = parsed.projectId;
-    for (const key of autoReviewCounts.keys()) {
-      if (key.startsWith(`${projectId}:`)) autoReviewCounts.delete(key);
-    }
+    if (parsed?.projectId) deleteCountKeysForReceiver(`project:${parsed.projectId}`);
   });
+
+  function retryRootId(run) {
+    return run?.retry_root_run_id || run?.id || null;
+  }
 
   function hasHigherRetryAttempt(run) {
     if (!runService || typeof runService.listRuns !== 'function' || !run?.task_id) {
@@ -186,12 +273,15 @@ function createPmAutoReview({
     }
     try {
       const currentRetryCount = Number(run.retry_count || 0);
+      const currentRootId = retryRootId(run);
+      if (!currentRootId) return false;
       const runs = runService.listRuns({ task_id: run.task_id }) || [];
       return runs.some((candidate) => (
         candidate
         && candidate.id !== run.id
         && !candidate.is_manager
         && ['queued', 'running'].includes(candidate.status)
+        && retryRootId(candidate) === currentRootId
         && Number(candidate.retry_count || 0) > currentRetryCount
       ));
     } catch {
@@ -201,25 +291,30 @@ function createPmAutoReview({
 
   function sendPmReview({ run, harvestSummary }) {
     if (!run || run.is_manager) return false;
+    const projectId = run.project_id;
+    if (!projectId) return false;
+    const receiver = resolveReviewReceiver(run);
+    if (!receiver?.slotKey) return false;
+
     const status = harvestSummary?.status || run.status;
     if (status === 'failed' && hasHigherRetryAttempt(run)) {
       try {
         if (runService && typeof runService.addRunEvent === 'function') {
           runService.addRunEvent(run.id, 'pm_review:suppressed', JSON.stringify({
             reason: 'retry_pending',
+            retry_root_run_id: retryRootId(run),
+            receiver_instance_id: receiver.receiverInstanceId || null,
+            receiver_slot: receiver.slotKey,
           }));
         }
       } catch { /* ignore observability failures */ }
       return false;
     }
 
-    const projectId = run.project_id;
-    if (!projectId) return false;
-    const pmSlotKey = conversationIdForProject(projectId); // producer seam (pm: → operator: in Phase 2)
-    const pmRunId = managerRegistry.getActiveRunId(pmSlotKey);
+    const pmRunId = managerRegistry.getActiveRunId(receiver.slotKey);
     if (!pmRunId) return false;
 
-    const countKey = `${projectId}:${run.task_id || '_'}`;
+    const countKey = receiver.countKey;
     const count = autoReviewCounts.get(countKey) || 0;
     if (count >= autoReviewMax) {
       logger.warn(`[pm-auto-review] Circuit breaker: ${countKey} hit ${autoReviewMax} reviews; skipping. User intervention needed.`);
@@ -230,6 +325,7 @@ function createPmAutoReview({
     // run:harvested events for the same task can't both read a stale count
     // and slip past the breaker. Roll back if the send actually fails.
     autoReviewCounts.set(countKey, count + 1);
+    autoReviewCountSlots.set(countKey, receiver.slotKey);
 
     const reviewText = buildPmReviewText({
       run,
@@ -240,14 +336,14 @@ function createPmAutoReview({
 
     defer(() => {
       try {
-        conversationService.sendMessage(pmSlotKey, { text: reviewText });
+        conversationService.sendMessage(receiver.slotKey, { text: reviewText });
       } catch (err) {
         // Decrement (not set-to-count) so a concurrent reservation isn't clobbered;
         // delete at zero so the key returns to its pristine (absent) state.
         const next = Math.max(0, (autoReviewCounts.get(countKey) || 1) - 1);
-        if (next === 0) autoReviewCounts.delete(countKey);
+        if (next === 0) { autoReviewCounts.delete(countKey); autoReviewCountSlots.delete(countKey); }
         else autoReviewCounts.set(countKey, next);
-        logger.warn(`[pm-auto-review] Failed to send review to ${pmSlotKey}: ${err.message}`);
+        logger.warn(`[pm-auto-review] Failed to send review to ${receiver.slotKey}: ${err.message}`);
       }
     });
     return true;

@@ -189,12 +189,15 @@ async function createRunWithMissingProjectDir({ db, runService, taskService, pro
 
 function makeAutoReviewHarness({
   activeRunId = 'run_pm_1',
+  activeSlotRunIds = {},
   throwOnSend = false,
   defer = (fn) => fn(),
   runServiceRuns = [],
   listRunsImpl = null,
   addRunEventImpl = null,
   injectRunService = true,
+  resolverImpl = null,
+  autoReviewMax = undefined,
 } = {}) {
   const eventBus = createEventBus();
   const sent = [];
@@ -204,6 +207,50 @@ function makeAutoReviewHarness({
   const slotClearedCallbacks = [];
   let currentActiveRunId = activeRunId;
   let shouldThrow = throwOnSend;
+  const resolvedOperators = new Map([
+    [conversationIdForProject('proj_1'), {
+      instanceId: 'oi_proj_1',
+      legacyProjectId: 'proj_1',
+      legacySlotId: conversationIdForProject('proj_1'),
+      instanceConversationId: conversationIdForProject('oi_proj_1'),
+      primaryProjectId: 'proj_1',
+    }],
+    [conversationIdForProject('oi_proj_1'), {
+      instanceId: 'oi_proj_1',
+      legacyProjectId: null,
+      legacySlotId: conversationIdForProject('proj_1'),
+      instanceConversationId: conversationIdForProject('oi_proj_1'),
+      primaryProjectId: 'proj_1',
+    }],
+    [conversationIdForProject('proj_2'), {
+      instanceId: 'oi_proj_2',
+      legacyProjectId: 'proj_2',
+      legacySlotId: conversationIdForProject('proj_2'),
+      instanceConversationId: conversationIdForProject('oi_proj_2'),
+      primaryProjectId: 'proj_2',
+    }],
+    [conversationIdForProject('oi_proj_2'), {
+      instanceId: 'oi_proj_2',
+      legacyProjectId: null,
+      legacySlotId: conversationIdForProject('proj_2'),
+      instanceConversationId: conversationIdForProject('oi_proj_2'),
+      primaryProjectId: 'proj_2',
+    }],
+    [conversationIdForProject('proj_orphan'), {
+      instanceId: null,
+      legacyProjectId: 'proj_orphan',
+      legacySlotId: conversationIdForProject('proj_orphan'),
+      instanceConversationId: null,
+      primaryProjectId: null,
+    }],
+    [conversationIdForProject('oi_no_primary'), {
+      instanceId: 'oi_no_primary',
+      legacyProjectId: null,
+      legacySlotId: null,
+      instanceConversationId: conversationIdForProject('oi_no_primary'),
+      primaryProjectId: null,
+    }],
+  ]);
   const fakeRunService = {
     listRuns(query) {
       listRunsCalls.push(query);
@@ -215,11 +262,21 @@ function makeAutoReviewHarness({
       runEvents.push({ runId, eventType, payloadJson });
       return runEvents.length;
     },
+    resolveOperatorConversationId(conversationId) {
+      if (resolverImpl) return resolverImpl(conversationId);
+      return resolvedOperators.get(conversationId) || null;
+    },
   };
   const pmSlot = conversationIdForProject('proj_1'); // Phase 2: operator:proj_1
+  const activeSlots = new Map(Object.entries({
+    [conversationIdForProject('proj_2')]: 'run_pm_2',
+    top: 'run_top_1',
+    ...activeSlotRunIds,
+  }));
   const managerRegistry = {
     getActiveRunId(slot) {
-      return slot === pmSlot ? currentActiveRunId : null;
+      if (slot === pmSlot) return currentActiveRunId;
+      return activeSlots.has(slot) ? activeSlots.get(slot) : null;
     },
     onSlotCleared(cb) {
       slotClearedCallbacks.push(cb);
@@ -239,6 +296,7 @@ function makeAutoReviewHarness({
     defer,
     logger: { warn: (msg) => warnings.push(String(msg)) },
   };
+  if (autoReviewMax !== undefined) pmAutoReviewOptions.autoReviewMax = autoReviewMax;
   if (injectRunService) pmAutoReviewOptions.runService = fakeRunService;
   const controller = createPmAutoReview(pmAutoReviewOptions);
   return {
@@ -1052,6 +1110,62 @@ test('PM auto-review sends one message from run:harvested with harvest summary',
   assert.match(text, /tests passed/);
 });
 
+test('W-P4: PM auto-review sends attributed worker review to that instance primary legacy slot only', () => {
+  const harness = makeAutoReviewHarness();
+
+  harness.eventBus.emit('run:harvested', {
+    run: reviewRun({
+      operator_instance_id: 'oi_proj_2',
+      project_id: 'proj_1',
+    }),
+    summary: harvestedSummary(),
+  });
+
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.sent[0].slot, conversationIdForProject('proj_2'));
+  assert.equal(harness.controller.autoReviewCounts.get('oi_proj_2:task_1'), 1);
+  assert.equal(harness.controller.autoReviewCounts.get('oi_proj_1:task_1'), undefined);
+});
+
+test('W-P4: PM auto-review uses primary instance for unattributed run and Top when none exists', () => {
+  const harness = makeAutoReviewHarness();
+
+  harness.eventBus.emit('run:harvested', {
+    run: reviewRun({ id: 'run_primary_receiver' }),
+    summary: harvestedSummary(),
+  });
+  harness.eventBus.emit('run:harvested', {
+    run: reviewRun({
+      id: 'run_top_receiver',
+      project_id: 'proj_orphan',
+    }),
+    summary: harvestedSummary(),
+  });
+
+  assert.equal(harness.sent.length, 2);
+  assert.equal(harness.sent[0].slot, conversationIdForProject('proj_1'));
+  assert.equal(harness.sent[1].slot, 'top');
+  assert.equal(harness.controller.autoReviewCounts.get('oi_proj_1:task_1'), 1);
+  assert.equal(harness.controller.autoReviewCounts.get('project:proj_orphan:task_1'), 1);
+});
+
+test('W-P4: PM auto-review falls back to Top when attributed instance has no primary', () => {
+  const harness = makeAutoReviewHarness();
+
+  harness.eventBus.emit('run:harvested', {
+    run: reviewRun({
+      operator_instance_id: 'oi_no_primary',
+      project_id: 'proj_1',
+    }),
+    summary: harvestedSummary(),
+  });
+
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.sent[0].slot, 'top');
+  assert.equal(harness.controller.autoReviewCounts.get('oi_no_primary:task_1'), 1);
+  assert.equal(harness.controller.autoReviewCounts.get('oi_proj_1:task_1'), undefined);
+});
+
 test('PM auto-review ignores run:completed so review is single-triggered by run:harvested', () => {
   const harness = makeAutoReviewHarness();
 
@@ -1066,7 +1180,7 @@ test('PM auto-review suppresses failed run while higher retry attempt is active'
   const failed = reviewRun({ status: 'failed', retry_count: 0 });
   const harness = makeAutoReviewHarness({
     runServiceRuns: [
-      reviewRun({ id: 'run_retry_1', status: 'queued', retry_count: 1 }),
+      reviewRun({ id: 'run_retry_1', status: 'queued', retry_count: 1, retry_root_run_id: failed.id }),
     ],
   });
 
@@ -1077,13 +1191,46 @@ test('PM auto-review suppresses failed run while higher retry attempt is active'
 
   assert.deepEqual(harness.listRunsCalls, [{ task_id: 'task_1' }]);
   assert.equal(harness.sent.length, 0);
-  assert.equal(harness.controller.autoReviewCounts.get('proj_1:task_1') || 0, 0);
+  assert.equal(harness.controller.autoReviewCounts.get('oi_proj_1:task_1') || 0, 0);
   assert.equal(harness.runEvents.length, 1);
   assert.deepEqual(harness.runEvents[0], {
     runId: failed.id,
     eventType: 'pm_review:suppressed',
-    payloadJson: JSON.stringify({ reason: 'retry_pending' }),
+    payloadJson: JSON.stringify({
+      reason: 'retry_pending',
+      retry_root_run_id: failed.id,
+      receiver_instance_id: 'oi_proj_1',
+      receiver_slot: conversationIdForProject('proj_1'),
+    }),
   });
+});
+
+test('W-P4: PM auto-review does not suppress failed run for higher retry in a different root', () => {
+  const failed = reviewRun({
+    id: 'run_root_a',
+    status: 'failed',
+    retry_count: 0,
+    retry_root_run_id: 'root_a',
+  });
+  const harness = makeAutoReviewHarness({
+    runServiceRuns: [
+      reviewRun({
+        id: 'run_root_b_retry',
+        status: 'queued',
+        retry_count: 1,
+        retry_root_run_id: 'root_b',
+      }),
+    ],
+  });
+
+  harness.eventBus.emit('run:harvested', {
+    run: failed,
+    summary: harvestedSummary(),
+  });
+
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.runEvents.length, 0);
+  assert.equal(harness.controller.autoReviewCounts.get('oi_proj_1:task_1'), 1);
 });
 
 test('PM auto-review sends final retry failure when no higher retry attempt is active', () => {
@@ -1096,7 +1243,7 @@ test('PM auto-review sends final retry failure when no higher retry attempt is a
 
   assert.equal(harness.sent.length, 1);
   assert.equal(harness.runEvents.length, 0);
-  assert.equal(harness.controller.autoReviewCounts.get('proj_1:task_1'), 1);
+  assert.equal(harness.controller.autoReviewCounts.get('oi_proj_1:task_1'), 1);
   assert.match(harness.sent[0].message.text, /status: failed/);
 });
 
@@ -1131,7 +1278,7 @@ test('PM auto-review sends failed run for same retry_count active attempt', () =
 
   assert.equal(harness.sent.length, 1);
   assert.equal(harness.runEvents.length, 0);
-  assert.equal(harness.controller.autoReviewCounts.get('proj_1:task_1'), 1);
+  assert.equal(harness.controller.autoReviewCounts.get('oi_proj_1:task_1'), 1);
 });
 
 test('PM auto-review sends failed run when no active retry attempt exists', () => {
@@ -1164,14 +1311,14 @@ test('PM auto-review sends failed run when listRuns throws', () => {
 
   assert.equal(harness.sent.length, 1);
   assert.equal(harness.runEvents.length, 0);
-  assert.equal(harness.controller.autoReviewCounts.get('proj_1:task_1'), 1);
+  assert.equal(harness.controller.autoReviewCounts.get('oi_proj_1:task_1'), 1);
 });
 
 test('PM auto-review keeps suppression when suppressed event recording throws', () => {
   const failed = reviewRun({ status: 'failed', retry_count: 0 });
   const harness = makeAutoReviewHarness({
     runServiceRuns: [
-      reviewRun({ id: 'run_retry_1', status: 'queued', retry_count: 1 }),
+      reviewRun({ id: 'run_retry_1', status: 'queued', retry_count: 1, retry_root_run_id: failed.id }),
     ],
     addRunEventImpl() {
       throw new Error('event write failed');
@@ -1185,7 +1332,7 @@ test('PM auto-review keeps suppression when suppressed event recording throws', 
 
   assert.equal(accepted, false);
   assert.equal(harness.sent.length, 0);
-  assert.equal(harness.controller.autoReviewCounts.get('proj_1:task_1') || 0, 0);
+  assert.equal(harness.controller.autoReviewCounts.get('oi_proj_1:task_1') || 0, 0);
 });
 
 test('PM auto-review sends failed run when runService is not injected', () => {
@@ -1197,7 +1344,7 @@ test('PM auto-review sends failed run when runService is not injected', () => {
   });
 
   assert.equal(harness.sent.length, 1);
-  assert.equal(harness.controller.autoReviewCounts.get('proj_1:task_1'), 1);
+  assert.equal(harness.controller.autoReviewCounts.get('project:proj_1:task_1'), 1);
 });
 
 test('PM auto-review circuit breaker caps review sends at five and resets on PM clear', () => {
@@ -1223,6 +1370,26 @@ test('PM auto-review circuit breaker caps review sends at five and resets on PM 
   assert.match(harness.sent[5].message.text, /Review round 1\/5/);
 });
 
+test('W-P4: PM auto-review circuit breaker counts per receiver instance', () => {
+  const harness = makeAutoReviewHarness({ autoReviewMax: 2 });
+
+  for (let i = 0; i < 3; i++) {
+    harness.eventBus.emit('run:harvested', {
+      run: reviewRun({ id: `run_receiver_one_${i}`, operator_instance_id: 'oi_proj_1' }),
+      summary: harvestedSummary(),
+    });
+  }
+  harness.eventBus.emit('run:harvested', {
+    run: reviewRun({ id: 'run_receiver_two', operator_instance_id: 'oi_proj_2' }),
+    summary: harvestedSummary(),
+  });
+
+  assert.equal(harness.sent.length, 3);
+  assert.equal(harness.warnings.length, 1);
+  assert.equal(harness.controller.autoReviewCounts.get('oi_proj_1:task_1'), 2);
+  assert.equal(harness.controller.autoReviewCounts.get('oi_proj_2:task_1'), 1);
+});
+
 test('PM auto-review skips when project has no active PM', () => {
   const harness = makeAutoReviewHarness({ activeRunId: null });
 
@@ -1232,6 +1399,28 @@ test('PM auto-review skips when project has no active PM', () => {
   });
 
   assert.equal(harness.sent.length, 0);
+});
+
+test('W-P4 R1: Top slot clear resets Top-fallback breaker counts (orphan project)', () => {
+  // Codex W-P4 review: Top-fallback counts are keyed "project:<id>:<task>" but
+  // their SLOT is 'top' — operator-based resets can never reach them, so a
+  // cleared/replaced Top would leave the breaker permanently tripped.
+  const harness = makeAutoReviewHarness({ autoReviewMax: 1 });
+
+  const emitOrphan = (id) => harness.eventBus.emit('run:harvested', {
+    run: reviewRun({ id, project_id: 'proj_orphan' }),
+    summary: harvestedSummary(),
+  });
+
+  emitOrphan('run_top_1');
+  emitOrphan('run_top_2'); // breaker trips (max 1)
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.sent[0].slot, 'top');
+  assert.equal(harness.warnings.length, 1);
+
+  harness.slotClearedCallbacks[0]({ conversationId: 'top' });
+  emitOrphan('run_top_3');
+  assert.equal(harness.sent.length, 2, 'Top clear must reset Top-fallback breaker counts');
 });
 
 test('PM auto-review reserves breaker slot synchronously so a burst cannot exceed the cap', () => {
@@ -1253,7 +1442,7 @@ test('PM auto-review reserves breaker slot synchronously so a burst cannot excee
   // 5 reserved synchronously, 6th hit the breaker BEFORE any send ran.
   assert.equal(accepted.filter(Boolean).length, 5);
   assert.equal(accepted[5], false);
-  assert.equal(harness.controller.autoReviewCounts.get('proj_1:task_1'), 5);
+  assert.equal(harness.controller.autoReviewCounts.get('oi_proj_1:task_1'), 5);
   assert.equal(harness.sent.length, 0, 'sends are still deferred');
 
   pending.forEach((fn) => fn());
@@ -1268,7 +1457,7 @@ test('PM auto-review preserves counter rollback when sendMessage fails', () => {
     summary: harvestedSummary(),
   });
   assert.equal(harness.sent.length, 0);
-  assert.equal(harness.controller.autoReviewCounts.get('proj_1:task_1'), undefined);
+  assert.equal(harness.controller.autoReviewCounts.get('oi_proj_1:task_1'), undefined);
 
   harness.setThrowOnSend(false);
   harness.eventBus.emit('run:harvested', {
