@@ -23,16 +23,16 @@ function loadNavModule() {
 
 test('NAV_SUB_ITEMS exposes operator roster without changing top-level nav', () => {
   const { NAV_ITEMS, NAV_SUB_ITEMS } = loadNavModule();
-  assert.equal(NAV_ITEMS.length, 6);
+  assert.equal(NAV_ITEMS.length, 5);
   assert.deepEqual(Array.from(NAV_ITEMS, (item) => item.hash), [
     'dashboard',
     'operator',
-    'manager',
     'board',
     'resources',
     'memory',
   ]);
   assert.ok(NAV_ITEMS.some((item) => item.hash === 'operator'));
+  assert.ok(!NAV_ITEMS.some((item) => item.hash === 'manager'));
   assert.ok(!NAV_ITEMS.some((item) => item.hash === 'operator/roster'));
   assert.ok(!NAV_ITEMS.some((item) => item.hash === 'projects'));
 
@@ -45,6 +45,19 @@ test('NAV_SUB_ITEMS exposes operator roster without changing top-level nav', () 
     ['operator/profiles', '오퍼레이터 프로필'],
     ['operator/specialist', '스페셜리스트'],
   ]);
+});
+
+test('empty hash defaults to operator while #manager route stays deep-linkable', () => {
+  const routingSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'app', 'lib', 'hooks', 'routing.js'), 'utf8');
+  assert.match(routingSrc, /const DEFAULT_ROUTE = 'operator';/);
+  assert.doesNotMatch(routingSrc, /const DEFAULT_ROUTE = 'manager';/);
+
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  assert.match(appSrc, /import \{ operatorConversationId \} from '\.\/app\/lib\/conversationId\.js';/);
+  assert.match(appSrc, /if \(routeBase === 'manager'\) \{/);
+  assert.match(appSrc, /routeParts\[1\] === 'operator'/);
+  assert.match(appSrc, /managerInitialTarget = operatorConversationId\(projectId\);/);
+  assert.match(appSrc, /<\$\{ManagerView\}[\s\S]*initialTarget=\$\{managerInitialTarget\}/);
 });
 
 test('app shell nests ProjectsView under operator codebases and aliases #projects', () => {

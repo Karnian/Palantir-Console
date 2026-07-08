@@ -118,6 +118,7 @@ function LiveOperatorCard({ entry, projectsById, runs, taskById }) {
   const projectName = project?.name || run.project_name || projectId || OPERATOR_ROSTER_LABELS.unknownProject;
   const workerCount = countActiveWorkers({ projectId, runs, taskById });
   const projectHref = projectId ? `#operator/codebases/${encodeURIComponent(String(projectId))}` : '#operator/codebases';
+  const conversationHref = projectId ? `#manager/operator/${encodeURIComponent(String(projectId))}` : '#manager';
 
   return html`
     <article class="operator-profile-card operator-roster-card operator-roster-live-card" data-role="operator-roster-live-card">
@@ -143,7 +144,7 @@ function LiveOperatorCard({ entry, projectsById, runs, taskById }) {
           <a
             class="ghost small"
             data-role="operator-roster-live-primary-link"
-            href="#manager"
+            href=${conversationHref}
           >${OPERATOR_ROSTER_LABELS.openConversation}</a>
           <a
             class="ghost small"

@@ -20,6 +20,8 @@ const { test, expect } = require('@playwright/test');
 
 const ROUTES = [
   'dashboard',
+  // Manager is intentionally absent from top-level nav but remains routable
+  // from the Master card and operator conversation deep links.
   'manager',
   'board',
   'operator/codebases',

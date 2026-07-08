@@ -33,6 +33,8 @@ const path = require('path');
 
 const ROUTES = [
   'dashboard',
+  // Manager is intentionally absent from top-level nav but remains routable
+  // from the Master card and operator conversation deep links.
   'manager',
   'board',
   'operator/codebases',
