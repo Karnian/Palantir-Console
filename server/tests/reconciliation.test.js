@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
-const request = require('supertest');
+const { Readable, Writable } = require('node:stream');
 
 const { createDatabase } = require('../db/database');
 const { createRunService } = require('../services/runService');
@@ -25,6 +25,63 @@ async function mkdb(t) {
     await fs.rm(dir, { recursive: true, force: true });
   });
   return db;
+}
+
+function httpJson(app, method, url, body) {
+  return new Promise((resolve, reject) => {
+    const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
+    const req = new Readable({
+      read() {
+        if (payload) this.push(payload);
+        this.push(null);
+      },
+    });
+    req.method = method;
+    req.url = url;
+    req.headers = {
+      host: '127.0.0.1',
+      ...(payload ? {
+        'content-type': 'application/json',
+        'content-length': String(payload.length),
+      } : {}),
+    };
+
+    const chunks = [];
+    const res = new Writable({
+      write(chunk, _encoding, callback) {
+        chunks.push(Buffer.from(chunk));
+        callback();
+      },
+    });
+    res.statusCode = 200;
+    res.headers = {};
+    res.setHeader = (name, value) => { res.headers[String(name).toLowerCase()] = value; };
+    res.getHeader = (name) => res.headers[String(name).toLowerCase()];
+    res.removeHeader = (name) => { delete res.headers[String(name).toLowerCase()]; };
+    res.writeHead = (statusCode, headers = {}) => {
+      res.statusCode = statusCode;
+      for (const [name, value] of Object.entries(headers)) res.setHeader(name, value);
+      return res;
+    };
+    res.end = (chunk, encoding, callback) => {
+      if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding));
+      const text = Buffer.concat(chunks).toString('utf8');
+      let parsed = {};
+      if (text) {
+        try { parsed = JSON.parse(text); } catch { parsed = text; }
+      }
+      if (typeof callback === 'function') callback();
+      resolve({ status: res.statusCode, body: parsed, text });
+      return res;
+    };
+
+    try {
+      if (typeof app.handle === 'function') app.handle(req, res);
+      else app.emit('request', req, res);
+    } catch (err) {
+      reject(err);
+    }
+  });
 }
 
 function seedCore(db) {
@@ -76,6 +133,41 @@ test('Phase 7: recordClaim emits dispatch_audit:recorded event on the bus', asyn
   // Full row present (listClaims-compatible)
   assert.ok(events[1].data.audit);
   assert.ok(events[1].data.audit.id);
+});
+
+test('W-P3: recordClaim derives operator_instance_id from pm_run_id', async (t) => {
+  const db = await mkdb(t);
+  const { projectService, taskService, runService, project } = seedCore(db);
+  const resolved = runService.ensurePrimaryOperatorInstanceForProject(project.id);
+  const task = taskService.createTask({ title: 'T', project_id: project.id });
+  taskService.updateTaskStatus(task.id, 'in_progress');
+  const pmRun = runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: `operator:${project.id}`,
+    prompt: 'operator alpha',
+  });
+  const svc = createReconciliationService({
+    db,
+    runService,
+    taskService,
+    projectService,
+  });
+
+  const row = svc.recordClaim({
+    projectId: project.id,
+    taskId: task.id,
+    pmRunId: pmRun.id,
+    pmClaim: { kind: 'task_in_progress', task_id: task.id },
+  });
+  assert.equal(row.operator_instance_id, resolved.instanceId);
+
+  const legacy = svc.recordClaim({
+    projectId: project.id,
+    taskId: task.id,
+    pmClaim: { kind: 'task_in_progress', task_id: task.id },
+  });
+  assert.equal(legacy.operator_instance_id, null);
 });
 
 test('Phase 7: eventBus emit failure must not block recordClaim (annotate-only)', async (t) => {
@@ -644,18 +736,18 @@ async function createTestApp(t) {
 
 test('Phase 4: POST /api/dispatch-audit validates body', async (t) => {
   const app = await createTestApp(t);
-  const res = await request(app).post('/api/dispatch-audit').send({});
+  const res = await httpJson(app, 'POST', '/api/dispatch-audit', {});
   assert.equal(res.status, 400);
 });
 
 test('Phase 4: POST /api/dispatch-audit records and GET lists', async (t) => {
   const app = await createTestApp(t);
-  const proj = (await request(app).post('/api/projects').send({ name: 'alpha' })).body.project;
-  const task = (await request(app).post('/api/tasks').send({ title: 'T', project_id: proj.id })).body.task;
+  const proj = (await httpJson(app, 'POST', '/api/projects', { name: 'alpha' })).body.project;
+  const task = (await httpJson(app, 'POST', '/api/tasks', { title: 'T', project_id: proj.id })).body.task;
 
   // Coherent claim: PM says task in progress, task actually is in_progress
-  await request(app).patch(`/api/tasks/${task.id}/status`).send({ status: 'in_progress' });
-  const good = await request(app).post('/api/dispatch-audit').send({
+  await httpJson(app, 'PATCH', `/api/tasks/${task.id}/status`, { status: 'in_progress' });
+  const good = await httpJson(app, 'POST', '/api/dispatch-audit', {
     project_id: proj.id,
     task_id: task.id,
     pm_claim: { kind: 'task_in_progress', task_id: task.id },
@@ -664,7 +756,7 @@ test('Phase 4: POST /api/dispatch-audit records and GET lists', async (t) => {
   assert.equal(good.body.audit.incoherence_flag, 0);
 
   // Incoherent claim
-  const bad = await request(app).post('/api/dispatch-audit').send({
+  const bad = await httpJson(app, 'POST', '/api/dispatch-audit', {
     project_id: proj.id,
     task_id: task.id,
     pm_claim: { kind: 'task_complete', task_id: task.id },
@@ -673,12 +765,12 @@ test('Phase 4: POST /api/dispatch-audit records and GET lists', async (t) => {
   assert.equal(bad.body.audit.incoherence_flag, 1);
 
   // List all
-  const list = await request(app).get(`/api/dispatch-audit?project_id=${proj.id}`);
+  const list = await httpJson(app, 'GET', `/api/dispatch-audit?project_id=${proj.id}`);
   assert.equal(list.status, 200);
   assert.equal(list.body.audit.length, 2);
 
   // List incoherent only
-  const bad2 = await request(app).get(`/api/dispatch-audit?project_id=${proj.id}&incoherent_only=1`);
+  const bad2 = await httpJson(app, 'GET', `/api/dispatch-audit?project_id=${proj.id}&incoherent_only=1`);
   assert.equal(bad2.body.audit.length, 1);
   assert.equal(bad2.body.audit[0].incoherence_flag, 1);
 });

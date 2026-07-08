@@ -588,7 +588,33 @@ function createLifecycleService({
    * MUST `await`. Sole production caller is routes/tasks.js which is
    * already inside an asyncHandler.
    */
-  async function executeTask(taskId, { agentProfileId, prompt, skillPackIds, presetId }) {
+  function deriveOperatorDispatchAttribution(pmRunId, task) {
+    if (!pmRunId || typeof pmRunId !== 'string') {
+      return { operator_instance_id: null, parent_run_id: null };
+    }
+
+    let pmRun = null;
+    try {
+      pmRun = runService.getRun(pmRunId);
+    } catch {
+      return { operator_instance_id: null, parent_run_id: null };
+    }
+    if (!pmRun || Number(pmRun.is_manager || 0) !== 1 || pmRun.manager_layer !== 'operator') {
+      return { operator_instance_id: null, parent_run_id: null };
+    }
+    if (!runService || typeof runService.resolveOperatorConversationId !== 'function') {
+      return { operator_instance_id: null, parent_run_id: null };
+    }
+
+    const resolved = runService.resolveOperatorConversationId(pmRun.conversation_id);
+    const operatorProjectId = resolved?.legacyProjectId || resolved?.primaryProjectId || null;
+    if (!resolved?.instanceId || (task?.project_id && operatorProjectId !== task.project_id)) {
+      return { operator_instance_id: null, parent_run_id: null };
+    }
+    return { operator_instance_id: resolved.instanceId, parent_run_id: pmRun.id };
+  }
+
+  async function executeTask(taskId, { agentProfileId, prompt, skillPackIds, presetId, pmRunId }) {
     const task = taskService.getTask(taskId);
     const profile = agentProfileService.getProfile(agentProfileId);
     let nodeId = 'local';
@@ -601,6 +627,7 @@ function createLifecycleService({
     // Phase 10C: resolve preferred preset. Explicit argument wins over
     // task.preferred_preset_id so callers can override per-execute.
     const effectivePresetId = presetId || task.preferred_preset_id || null;
+    const operatorAttribution = deriveOperatorDispatchAttribution(pmRunId, task);
 
     const run = runService.createRun({
       task_id: taskId,
@@ -609,6 +636,8 @@ function createLifecycleService({
       node_id: nodeId,
       queued_args: buildQueuedArgs({ skillPackIds, presetId: effectivePresetId }),
       retry_count: 0,
+      operator_instance_id: operatorAttribution.operator_instance_id,
+      parent_run_id: operatorAttribution.parent_run_id,
     });
 
     if (repoFeatureEnabled() && projectIsRepo(project)) {
@@ -1315,6 +1344,9 @@ function createLifecycleService({
       node_id: run.node_id || 'local',
       queued_args: run.queued_args || null,
       retry_count: Number(run.retry_count || 0) + 1,
+      operator_instance_id: run.operator_instance_id || null,
+      parent_run_id: run.parent_run_id || null,
+      retry_root_run_id: run.retry_root_run_id || run.id,
     });
     runService.addRunEvent(retryRun.id, 'queue:retry', JSON.stringify({
       profile_id: run.agent_profile_id,

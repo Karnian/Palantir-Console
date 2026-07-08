@@ -132,6 +132,16 @@ function wrapBriefService(projectBriefService) {
   };
 }
 
+function operatorThreadRow(runService, projectId) {
+  return runService.getOperatorThreadForProject(projectId, { ensure: true });
+}
+
+function seedOperatorThread(runService, projectId, fields) {
+  const resolved = runService.ensurePrimaryOperatorInstanceForProject(projectId);
+  runService.setOperatorInstanceThread(resolved.instanceId, fields);
+  return resolved.instanceId;
+}
+
 function seedTop({ runService, registry, adapter }) {
   const run = runService.createRun({ is_manager: true, manager_adapter: 'claude-code', prompt: 'top' });
   runService.updateRunStatus(run.id, 'running', { force: true });
@@ -211,10 +221,10 @@ test('remote Operator spawn uses node executor, pod cwd, placement persistence, 
   assert.deepEqual(nodeService._calls.pickExecutor, ['nodeA']);
 
   start.opts.onThreadStarted('thread-remote');
-  const brief = projectBriefService.getBrief(project.id);
-  assert.equal(brief.pm_thread_id, 'thread-remote');
-  assert.equal(brief.pm_thread_node_id, 'nodeA');
-  assert.equal(brief.pm_thread_cwd, '/workspace/remote-project');
+  const thread = operatorThreadRow(runService, project.id);
+  assert.equal(thread.thread_id, 'thread-remote');
+  assert.equal(thread.node_id, 'nodeA');
+  assert.equal(thread.cwd, '/workspace/remote-project');
 
   const warning = runService.getRunEvents(result.run.id).find(e => e.event_type === 'operator:remote_base_url_localhost');
   assert.ok(warning, 'remote localhost base URL warning should be observable');
@@ -260,7 +270,7 @@ test('resume affinity mismatch clears stale thread and starts fresh on the curre
   const adapter = makeAdapter();
   seedTop({ runService, registry, adapter: makeAdapter() });
   const project = projectService.createProject({ name: 'rebound', directory: '/workspace/rebound', node_id: 'nodeB' });
-  baseBriefService.setPmThread(project.id, {
+  seedOperatorThread(runService, project.id, {
     pm_thread_id: 'thread-on-node-a',
     pm_adapter: 'codex',
     pm_thread_node_id: 'nodeA',
@@ -272,8 +282,7 @@ test('resume affinity mismatch clears stale thread and starts fresh on the curre
 
   assert.equal(result.resumed, false);
   assert.equal(adapter._starts[0].opts.resumeThreadId, null);
-  assert.deepEqual(projectBriefService._clearCalls, [project.id]);
-  assert.equal(baseBriefService.getBrief(project.id).pm_thread_id, null);
+  assert.equal(operatorThreadRow(runService, project.id).thread_id, null);
   const event = runService.getRunEvents(result.run.id).find(e => e.event_type === 'operator:thread_rebind_reset');
   assert.deepEqual(JSON.parse(event.payload_json), { from_node: 'nodeA', to_node: 'nodeB' });
 });
@@ -477,7 +486,7 @@ test('boot resume clears a Claude session bound to a different node and leaves i
     directory: '/workspace/claude-boot-rebind',
     node_id: 'nodeB',
   });
-  baseBriefService.setPmThread(project.id, {
+  seedOperatorThread(runService, project.id, {
     pm_thread_id: 'sess-on-node-a',
     pm_adapter: 'claude',
     pm_thread_node_id: 'nodeA',
@@ -505,8 +514,7 @@ test('boot resume clears a Claude session bound to a different node and leaves i
   });
 
   assert.equal(adapter._starts.length, 0);
-  assert.deepEqual(projectBriefService._clearCalls, [project.id]);
-  assert.equal(baseBriefService.getBrief(project.id).pm_thread_id, null);
+  assert.equal(operatorThreadRow(runService, project.id).thread_id, null);
   assert.equal(runService.getRun(run.id).status, 'stopped');
   assert.deepEqual(adapter._disposes, [run.id]);
   const event = runService.getRunEvents(run.id).find(e => e.event_type === 'operator:thread_rebind_reset');

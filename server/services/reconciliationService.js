@@ -65,10 +65,12 @@ function createReconciliationService({
     insert: db.prepare(`
       INSERT INTO dispatch_audit_log (
         id, project_id, task_id, pm_run_id, selected_agent_profile_id,
+        operator_instance_id,
         rationale, pm_claim, db_truth, incoherence_flag, incoherence_kind,
         created_at
       ) VALUES (
         @id, @project_id, @task_id, @pm_run_id, @selected_agent_profile_id,
+        @operator_instance_id,
         @rationale, @pm_claim, @db_truth, @incoherence_flag, @incoherence_kind,
         @created_at
       )
@@ -416,6 +418,30 @@ function createReconciliationService({
   // It DOES throw on envelope/entity binding violations (see
   // bindEnvelopeToClaim) because those are hard input errors, not PM
   // drift signals.
+  function deriveOperatorInstanceIdFromPmRun(pmRunId, projectId) {
+    if (!pmRunId || typeof pmRunId !== 'string') return null;
+    if (!runService || typeof runService.getRun !== 'function' || typeof runService.resolveOperatorConversationId !== 'function') {
+      return null;
+    }
+
+    let pmRun = null;
+    try {
+      pmRun = runService.getRun(pmRunId);
+    } catch {
+      return null;
+    }
+    if (!pmRun || Number(pmRun.is_manager || 0) !== 1 || pmRun.manager_layer !== 'operator') {
+      return null;
+    }
+
+    const resolved = runService.resolveOperatorConversationId(pmRun.conversation_id);
+    const operatorProjectId = resolved?.legacyProjectId || resolved?.primaryProjectId || null;
+    if (!resolved?.instanceId || (projectId && operatorProjectId !== projectId)) {
+      return null;
+    }
+    return resolved.instanceId;
+  }
+
   function recordClaim({
     projectId,
     taskId = null,
@@ -445,6 +471,8 @@ function createReconciliationService({
       pmClaim,
     });
 
+    const operatorInstanceId = deriveOperatorInstanceIdFromPmRun(pmRunId, projectId);
+
     // Primary evaluation against DB truth.
     const evaluation = evaluateClaim({ pmClaim, pmRunId });
 
@@ -468,6 +496,7 @@ function createReconciliationService({
       task_id: taskId,
       pm_run_id: pmRunId,
       selected_agent_profile_id: selectedAgentProfileId,
+      operator_instance_id: operatorInstanceId,
       rationale: rationale || null,
       pm_claim: JSON.stringify(pmClaim),
       db_truth: JSON.stringify(evaluation.truth),

@@ -187,7 +187,40 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       if (projectId && (adapterType === 'codex' || adapterType === 'claude-code') && projectBriefService) {
         try {
           const brief = projectBriefService.getBrief(projectId);
-          if (brief && brief.pm_thread_id) {
+          let operatorInstanceId = null;
+          let instanceThread = null;
+          try {
+            if (runService && typeof runService.resolveOperatorConversationId === 'function') {
+              const resolved = runService.resolveOperatorConversationId(conversationIdForProject(projectId));
+              operatorInstanceId = resolved && resolved.instanceId ? resolved.instanceId : null;
+            }
+            if (operatorInstanceId && typeof runService.getOperatorInstance === 'function') {
+              instanceThread = runService.getOperatorInstance(operatorInstanceId);
+            }
+          } catch (err) {
+            console.warn(`[boot] Failed to read operator instance thread project=${projectId}: ${err.message}`);
+          }
+          const instanceThreadState = instanceThread && instanceThread.thread_id
+            ? {
+                pm_thread_id: instanceThread.thread_id,
+                pm_adapter: instanceThread.pm_adapter,
+                pm_thread_node_id: instanceThread.node_id,
+                pm_thread_cwd: instanceThread.cwd,
+                pm_thread_source_generation: instanceThread.source_generation,
+                pm_thread_source_hash: instanceThread.source_hash,
+                pm_thread_workspace_path: instanceThread.workspace_path,
+              }
+            : null;
+          const bridgeThreadState = !instanceThreadState && brief && brief.pm_thread_id ? brief : null; // W-P3 R1 BLOCKER: instance ROW may exist (W-P1 backfill/ensure) with NULL thread — fall back on missing thread STATE, not missing row
+          const threadState = instanceThreadState || bridgeThreadState || null;
+          const threadStateSource = instanceThreadState ? 'instance' : (bridgeThreadState ? 'bridge' : null);
+          const clearPersistedThreadState = () => {
+            if (threadStateSource !== 'instance' || !operatorInstanceId) return;
+            if (runService && typeof runService.setOperatorInstanceThread === 'function') {
+              runService.setOperatorInstanceThread(operatorInstanceId, {});
+            }
+          };
+          if (threadState && threadState.pm_thread_id) {
             const adapter = managerAdapterFactory.getAdapter(adapterType);
             // We need the active Top for parent-notice routing.
             const activeTopRunId = managerRegistry.getActiveRunId('top');
@@ -213,15 +246,13 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                     throw new Error('PM node is cordoned');
                   }
                 }
-                const briefAdapter = brief.pm_adapter || null;
+                const briefAdapter = threadState.pm_adapter || null;
                 const expectedBriefAdapter = adapterType === 'codex' ? 'codex' : 'claude';
-                const threadNode = brief.pm_thread_node_id ? brief.pm_thread_node_id : null;
-                let resumeHandle = brief.pm_thread_id;
+                const threadNode = threadState.pm_thread_node_id ? threadState.pm_thread_node_id : null;
+                let resumeHandle = threadState.pm_thread_id;
                 if (resumeHandle && (threadNode || 'local') !== (nodeId || 'local')) {
                   try {
-                    if (projectBriefService && typeof projectBriefService.clearPmThread === 'function') {
-                      projectBriefService.clearPmThread(projectId);
-                    }
+                    clearPersistedThreadState();
                   } catch (err) {
                     console.warn(`[boot] Failed to clear stale PM thread project=${projectId}: ${err.message}`);
                   }
@@ -231,12 +262,10 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   resumeHandle = null;
                 }
                 if (resumeHandle && isRepoProject) {
-                  const threadSourceReset = repoThreadSourceReset(brief, project);
+                  const threadSourceReset = repoThreadSourceReset(threadState, project);
                   if (threadSourceReset) {
                     try {
-                      if (projectBriefService && typeof projectBriefService.clearPmThread === 'function') {
-                        projectBriefService.clearPmThread(projectId);
-                      }
+                      clearPersistedThreadState();
                     } catch (err) {
                       console.warn(`[boot] Failed to clear source-mismatched PM thread project=${projectId}: ${err.message}`);
                     }
@@ -248,9 +277,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 }
                 if (resumeHandle && briefAdapter !== expectedBriefAdapter) {
                   try {
-                    if (projectBriefService && typeof projectBriefService.clearPmThread === 'function') {
-                      projectBriefService.clearPmThread(projectId);
-                    }
+                    clearPersistedThreadState();
                   } catch (err) {
                     console.warn(`[boot] Failed to clear adapter-mismatched PM thread project=${projectId}: ${err.message}`);
                   }
@@ -314,7 +341,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 if (isRemoteNode || authCtx.canAuth) {
                   const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env });
                   const cwd = isRepoProject
-                    ? (brief.pm_thread_cwd || cwdFromWorkspacePath(brief.pm_thread_workspace_path, project))
+                    ? (threadState.pm_thread_cwd || cwdFromWorkspacePath(threadState.pm_thread_workspace_path, project))
                     : (isRemoteNode ? (project.directory || null) : resolveSpawnCwd({ workspaceDir: project.directory }));
                   if (isRepoProject && !cwd) {
                     throw new Error('repo Operator resume has no materialized cwd');

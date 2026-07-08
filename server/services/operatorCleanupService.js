@@ -7,7 +7,7 @@
 // risk. This module centralizes all four termination paths:
 //
 //   reset(projectId)   — manual reset OR adapter switch. Clears
-//                        pm_thread_id/pm_adapter in project_briefs,
+//                        thread metadata in operator_instances,
 //                        disposes any live adapter session for the PM,
 //                        and drops the managerRegistry slot. A follow-up
 //                        message will trigger lazy spawn → fresh thread.
@@ -92,35 +92,38 @@ function createOperatorCleanupService({
     //    this is a no-op.
     managerRegistry.clearActive(slotKey);
 
-    // 3. Clear the persisted pm_thread_id / pm_adapter on the brief row
-    //    so the next lazy spawn starts a fresh thread. Idempotent — the
-    //    brief service's clearPmThread returns null if no row exists.
+    // 3. Clear the persisted operator thread on the instance row so the next
+    //    lazy spawn starts fresh. project_briefs is a W-P3 read-only bridge.
     //
     // PR3a / NEW-B3: fail-closed. Pre-PR3a this block swallowed errors
     // via log-and-continue, which broke the single-owner teardown
     // contract: a partial cleanup (adapter disposed + slot cleared +
-    // pm_thread_id still pointing at the dead thread) would make the
+    // persisted thread still pointing at the dead thread) would make the
     // next lazy spawn resume a stale thread on a brand-new adapter.
     // Re-throwing is consistent with the rest of _terminate (disposeSession
     // also re-throws) and lets HTTP callers (/reset, DELETE /projects)
     // return a 502 the operator can investigate.
     try {
-      if (projectBriefService) {
-        const before = projectBriefService.getBrief(projectId);
-        if (before && before.pm_thread_id) {
-          projectBriefService.clearPmThread(projectId);
+      if (runService && typeof runService.resolveOperatorConversationId === 'function') {
+        const resolved = runService.resolveOperatorConversationId(slotKey);
+        const instanceId = resolved && resolved.instanceId ? resolved.instanceId : null;
+        const before = instanceId && typeof runService.getOperatorInstance === 'function'
+          ? runService.getOperatorInstance(instanceId)
+          : null;
+        if (before && before.thread_id) {
+          runService.setOperatorInstanceThread(instanceId, {});
           clearedBrief = true;
         }
       }
     } catch (err) {
-      log(`brief clear failed for ${projectId}: ${err.message}`);
+      log(`operator instance thread clear failed for ${projectId}: ${err.message}`);
       // Wrap so callers can distinguish this from a generic 500 and so
       // the original stack is preserved.
       // 503 Service Unavailable is semantically more precise than 502 for
       // a local persistence failure (Codex PR3a R1 suggestion #2). 502 is
       // reserved for failures talking to an upstream dependency; the
       // brief store is us.
-      const wrapped = new Error(`pm brief clear failed for ${projectId}: ${err.message}`);
+      const wrapped = new Error(`operator instance thread clear failed for ${projectId}: ${err.message}`);
       wrapped.httpStatus = 503;
       wrapped.cause = err;
       throw wrapped;
@@ -184,17 +187,21 @@ function createOperatorCleanupService({
     // 2. Drop the registry slot unconditionally.
     managerRegistry.clearActive(slotKey);
 
-    // 3. Clear the brief — best-effort but log failures rather than throw.
+    // 3. Clear the instance thread — best-effort but log failures rather than throw.
     try {
-      if (projectBriefService) {
-        const before = projectBriefService.getBrief(projectId);
-        if (before && before.pm_thread_id) {
-          projectBriefService.clearPmThread(projectId);
+      if (runService && typeof runService.resolveOperatorConversationId === 'function') {
+        const resolved = runService.resolveOperatorConversationId(slotKey);
+        const instanceId = resolved && resolved.instanceId ? resolved.instanceId : null;
+        const before = instanceId && typeof runService.getOperatorInstance === 'function'
+          ? runService.getOperatorInstance(instanceId)
+          : null;
+        if (before && before.thread_id) {
+          runService.setOperatorInstanceThread(instanceId, {});
           clearedBrief = true;
         }
       }
     } catch (err) {
-      log(`forceReset: brief clear failed for ${projectId}: ${err.message} — continuing anyway`);
+      log(`forceReset: operator instance thread clear failed for ${projectId}: ${err.message} — continuing anyway`);
     }
 
     log(`forceReset projectId=${projectId} disposed=${disposed} clearedBrief=${clearedBrief} disposeError=${disposeError || 'none'}`);
