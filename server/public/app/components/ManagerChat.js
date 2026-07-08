@@ -649,7 +649,8 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
       for (const p of pmEnabledProjects) {
         const convId = operatorConversationId(p.id);
         const isActive = activePms.some(pm =>
-          conversationIdMatchesProject(pm.conversationId, p.id) &&
+          (conversationIdMatchesProject(pm.conversationId, p.id)
+            || conversationIdMatchesProject(pm.legacyConversationId, p.id)) && // W-P5: snapshot id is instance-form
           pm.run &&
           pm.run.status === 'running'
         );

@@ -3,11 +3,10 @@
 // Shared conversation-id / operator-layer helpers — the single seam for the
 // PM → Operator rename (docs/specs/operator-rename-plan.md).
 //
-// Phase 4 (FINAL CLEANUP): dual-read removed. The legacy `pm:` prefix and the
-// `'pm'` manager_layer are no longer recognized. Producers emit `operator:` /
-// `'operator'` (Phase 2), persisted data was migrated (Phase 1 + migration 046),
-// and there is no remaining source of the legacy form. Consumers now accept the
-// `operator:` prefix and the `'operator'` layer ONLY.
+// W-P5: the `operator:` prefix remains the only layer prefix, but the canonical
+// live-slot payload is now an operator instance id (`oi_*`). Legacy project
+// payloads are still accepted by resolver-backed callers and converge to the
+// primary instance conversation.
 
 const OPERATOR_CONV_PREFIX = 'operator:';
 const PROJECT_CONV_PREFIXES = [OPERATOR_CONV_PREFIX];
@@ -19,6 +18,10 @@ function operatorConversationPayload(id) {
   if (typeof id !== 'string') return null;
   if (!id.startsWith(OPERATOR_CONV_PREFIX) || id.length <= OPERATOR_CONV_PREFIX.length) return null;
   return id.slice(OPERATOR_CONV_PREFIX.length);
+}
+
+function isOperatorConversationId(id) {
+  return operatorConversationPayload(id) !== null;
 }
 
 function isOperatorInstanceId(value) {
@@ -159,6 +162,8 @@ module.exports = {
   PROJECT_CONV_PREFIXES,
   OPERATOR_LAYER,
   OPERATOR_INSTANCE_ID_PREFIX,
+  operatorConversationPayload,
+  isOperatorConversationId,
   conversationIdForProject,
   parseProjectConversationId,
   resolveOperatorConversationId,

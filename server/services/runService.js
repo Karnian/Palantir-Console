@@ -1299,13 +1299,17 @@ function createRunService(db, eventBus) {
   // back to the underlying run row for event/message operations.
   function getRunByConversationId(conversationId) {
     if (!conversationId) return null;
-    // Phase 4: dual-read removed. The stored conversation_id is `operator:<id>`
-    // (producer + Phase 1/046-migrated) for project conversations; normalize a
-    // project id to its canonical operator: form. Non-project ids (top/worker:)
-    // match exactly.
-    const parsed = parseProjectConversationId(conversationId);
-    const lookupId = parsed ? `${OPERATOR_CONV_PREFIX}${parsed.projectId}` : conversationId;
-    return db.prepare(`
+    let lookupId = conversationId;
+    let fallbackId = null;
+    const resolved = resolveOperatorConversationFromDb(conversationId);
+    if (resolved?.instanceConversationId) {
+      lookupId = resolved.instanceConversationId;
+      fallbackId = resolved.legacySlotId || null;
+    } else {
+      const parsed = parseProjectConversationId(conversationId);
+      lookupId = parsed ? `${OPERATOR_CONV_PREFIX}${parsed.projectId}` : conversationId;
+    }
+    const query = db.prepare(`
       SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
              t.title as task_title, t.project_id as project_id, p.name as project_name
       FROM runs r
@@ -1314,7 +1318,20 @@ function createRunService(db, eventBus) {
       LEFT JOIN projects p ON t.project_id = p.id
       WHERE r.conversation_id = ?
       ORDER BY r.created_at DESC LIMIT 1
-    `).get(lookupId) || null;
+    `);
+    const hit = query.get(lookupId);
+    if (!fallbackId || fallbackId === lookupId) return hit || null;
+    const fallbackHit = query.get(fallbackId);
+    if (!hit) return fallbackHit || null;
+    if (!fallbackHit) return hit;
+    // W-P5 R1 (Codex): mixed-era rows — a terminal instance-form run must not
+    // shadow a legacy LIVE run (or vice versa). Prefer the live one; when both
+    // are live or both terminal, the canonical (instance-form) row wins.
+    const ACTIVE_RUN_STATUSES = new Set(['running', 'needs_input', 'queued', 'materializing']);
+    const hitActive = ACTIVE_RUN_STATUSES.has(hit.status);
+    const fallbackActive = ACTIVE_RUN_STATUSES.has(fallbackHit.status);
+    if (!hitActive && fallbackActive) return fallbackHit;
+    return hit;
   }
 
   function getWorkerRuns(managerRunId) {
