@@ -5,7 +5,7 @@
 ## 0. R1 LOCKED DECISIONS (5 BLOCKER + 5 SERIOUS 확정)
 
 **BLOCKER 반영**:
-1. **단일 resolver**: `parseProjectConversationId` 확장이 아니라 **`resolveOperatorConversationId(id) → { instanceId, legacyProjectId?, canonicalId, primaryProjectId? }` 신규 단일 resolver**. `operator:oi_x` 를 현재 파서가 `projectId=oi_x` 로 오독하므로 — 서버 파서(utils/conversationId)·클라 파서(lib/conversationId)·run envelope(runService)·boot resume(manager.js) **전부 이 resolver 경유**로 교체(W-P2).
+1. **단일 resolver**: `parseProjectConversationId` 확장이 아니라 **`resolveOperatorConversationId(id) → { instanceId, legacyProjectId?, legacySlotId, instanceConversationId, primaryProjectId? }` 신규 단일 resolver**. `operator:oi_x` 를 현재 파서가 `projectId=oi_x` 로 오독하므로 — 서버 파서(utils/conversationId)·클라 파서(lib/conversationId)·run envelope(runService)·boot resume(manager.js) **전부 이 resolver 경유**로 교체(W-P2).
 2. **spawn-instance attribution 은 `/execute` 계약부터**: 현재 `/api/tasks/:id/execute` 는 operator 정보를 안 받고 worker run 에 `parent_run_id` 미기록. W-P3 = `runs.operator_instance_id` + **`/execute` envelope(pm_run_id 로부터 서버 derive)** + **`parent_run_id=<operator run>` 기록** + **retry 시 lineage 복사**.
 3. **retry lineage + suppress 키 재정의**: T5 suppress(`hasHigherRetryAttempt`)와 circuit breaker 가 task-wide(`projectId:taskId`)라 두 operator 동시 dispatch 시 A 의 retry 가 B 의 review 를 억제. → **`retry_root_run_id` lineage 컬럼** + suppress/breaker 키를 **`receiverInstanceId:taskId`** 로(W-P4).
 4. **thread 소유자 즉시 이전(dual-write 금지)**: `project_briefs.pm_thread_id` 는 codebase 당 1개라 N:M dual-write 시 상호 덮어씀. → **`operator_instances.thread_id` 가 W-P3 전에 실소유자**, `pm_thread_id` 는 **legacy primary alias bridge(read-only)** 로만.
@@ -88,10 +88,10 @@ operator_codebase_refs (N:M watch-list)
 | Phase | 내용 | 성격 |
 |---|---|---|
 | **W-P0** | spec lock (이 brief → Codex GO) | 문서 |
-| **W-P1** | inert schema + 제약: `operator_instances`(id CHECK 'oi_%', thread_id) + `operator_codebase_refs`(primary 이중 unique) + `runs.operator_instance_id`/`retry_root_run_id`(nullable) + 백필(기존 PM=size1 primary instance). **런타임 무영향** | migration |
-| **W-P2** | `resolveOperatorConversationId` 단일 resolver 도입 + 전 파서(서버/클라/envelope/boot-resume) 경유 교체. **legacy emit 유지**(canonical 은 아직 projectId 형태) — 동작 불변 | dual-read |
+| **W-P1** | inert schema + 제약: `operator_instances`(id CHECK 'oi_%', **thread 상태 전체 nullable 컬럼**: thread_id+pm_adapter+node_id+cwd+source_generation+source_hash+workspace_path — §3.E 소유 이전분, backfill 포함) + `operator_codebase_refs`(primary 이중 unique) + `runs.operator_instance_id`/`retry_root_run_id`(nullable) + 백필(기존 PM=size1 primary instance). **런타임 무영향** | migration |
+| **W-P2** | `resolveOperatorConversationId` 단일 resolver 도입 + 전 파서(서버/클라/envelope/boot-resume) 경유 교체. **legacy emit 유지**(slot 은 legacySlotId 형태 유지, instanceConversationId 는 W-P5 flip 에서 활성) — 동작 불변 | dual-read |
 | **W-P3** | attribution: `/execute` envelope 서버 derive + `parent_run_id` 기록 + retry lineage 복사 + audit `operator_instance_id` derive + **`operator_instances.thread_id` 실소유자 전환**(pm_thread_id=read-only bridge) | 배선 |
-| **W-P4** | auto-review instance receiver 전환(①spawn instance ②primary ③Top, broadcast 0) + **T5/breaker lineage-aware**(`receiverInstanceId:taskId`) | 수신자 |
+| **W-P4** | auto-review instance receiver 전환(①spawn instance ②primary ③Top, broadcast 0) + **T5/breaker lineage-aware**(`hasHigherRetryAttempt` = `receiverInstanceId:taskId` 키 + `retry_root_run_id` lineage 필터) | 수신자 |
 | **W-P5** | canonical flip: registry/conversation 슬롯 instance 기준(`operator:oi_*`), legacy route 유지. repo 409 guard primary-ref 화 | flip |
 | **W-P6a** | refs CRUD + router "이름→primary instance" + no-primary/ambiguous 처리 | feature |
 | **W-P6b** | reference dispatch enable + 메모리 주입 정책(turn codebase-context explicit) | feature |
