@@ -2,8 +2,8 @@
 //
 // Spec lock-in: docs/specs/k5-visual-regression-brief.md
 //
-// Matrix: 12 hash routes × 2 themes (dark/light) × 2 viewports (1280×800 desktop,
-// 375×667 mobile) = 48 screenshot scenarios. Tagged @visual so
+// Matrix: 14 hash routes × 2 themes (dark/light) × 2 viewports (1280×800 desktop,
+// 375×667 mobile) = 56 screenshot scenarios. Tagged @visual so
 // `npm run test:visual` can grep.
 //
 // Stabilization (spec L8-L11):
@@ -31,6 +31,7 @@ const ROUTES = [
   // U-2: node detail not-found state — deterministic (no probe, no data)
   'resources/nodes/ghost-e2e',
   'memory',
+  'operator/roster',
   'operator/specialist',
   'operator/profiles',
 ];
@@ -43,6 +44,7 @@ function viewKey(route) {
   const seg = route.split('/');
   if (seg.length === 1) return route;
   const sub = seg[seg.length - 1];
+  if (seg[0] === 'operator' && sub === 'roster') return 'operator-roster';
   if (seg[0] === 'operator' && sub === 'profiles') return 'operator-profiles';
   if (seg[0] === 'resources' && seg[1] === 'nodes' && seg.length === 3) return 'nodes';
   return sub;

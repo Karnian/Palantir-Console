@@ -2,8 +2,8 @@
 //
 // Spec lock-in: docs/specs/k4-wcag-a11y-automation-brief.md
 //
-// Matrix: 12 hash routes × 2 themes (dark/light) × 2 viewports (1280×800 desktop,
-// 375×667 mobile) = 48 scenarios. Tagged @a11y so `npm run test:a11y` can grep.
+// Matrix: 14 hash routes × 2 themes (dark/light) × 2 viewports (1280×800 desktop,
+// 375×667 mobile) = 56 scenarios. Tagged @a11y so `npm run test:a11y` can grep.
 //
 // Gate policy (L3):
 //   - critical / serious axe violation → fail
@@ -44,6 +44,7 @@ const ROUTES = [
   // U-2: node detail not-found state — deterministic (no probe, no data)
   'resources/nodes/ghost-e2e',
   'memory',
+  'operator/roster',
   'operator/specialist',
   'operator/profiles',
 ];
@@ -83,6 +84,7 @@ function viewKey(route) {
   const seg = route.split('/');
   if (seg.length === 1) return route;
   const sub = seg[seg.length - 1];
+  if (seg[0] === 'operator' && sub === 'roster') return 'operator-roster';
   // operator/profiles maps to the component's data-view="operator-profiles"
   if (seg[0] === 'operator' && sub === 'profiles') return 'operator-profiles';
   if (seg[0] === 'resources' && seg[1] === 'nodes' && seg.length === 3) return 'nodes';
