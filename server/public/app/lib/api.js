@@ -46,7 +46,20 @@ export async function apiFetch(url, opts = {}) {
   }
   let data;
   try { data = await res.json(); }
-  catch { throw new Error(`Request failed: ${res.status}`); }
-  if (!res.ok) throw new Error(data.error || `Request failed: ${res.status}`);
+  catch {
+    const err = new Error(`Request failed: ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  if (!res.ok) {
+    // Preserve status + parsed body so callers can map specific failures to
+    // friendly messages (e.g. ProjectsView 409/400/502 warm errors,
+    // repoPreflightMessage reason codes). Message stays backward-compatible.
+    const err = new Error(data.error || `Request failed: ${res.status}`);
+    err.status = res.status;
+    err.data = data;
+    if (data && data.reason !== undefined) err.reason = data.reason;
+    throw err;
+  }
   return data;
 }

@@ -53,10 +53,6 @@ function shortRunId(id) {
   return s.length > 12 ? `${s.slice(0, 12)}...` : s;
 }
 
-function runHref(id) {
-  return `#run/${encodeURIComponent(String(id || ''))}`;
-}
-
 function parsedProjectId(entry) {
   const fromEntry = parseProjectConversationId(entry?.conversationId);
   if (fromEntry) return fromEntry.projectId;

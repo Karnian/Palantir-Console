@@ -254,11 +254,11 @@ export const DRIFT_LABELS = {
   restorePrefix: '복원',
   restoreSuffix: '항목',
   closeAria: '드리프트 패널 닫기',
-  empty: '모든 PM 주장과 DB 상태가 일치합니다.',
-  emptySub: 'PM이 잘못된 주장을 기록하면 여기에 표시됩니다.',
+  empty: '모든 오퍼레이터 주장과 DB 상태가 일치합니다.',
+  emptySub: '오퍼레이터가 잘못된 주장을 기록하면 여기에 표시됩니다.',
   dismiss: '숨기기',
   dismissTitle: '이 클라이언트에서 숨김 (서버 기록은 보존됨)',
-  pmClaimed: 'PM 주장',
+  pmClaimed: '오퍼레이터 주장',
   dbTruth: 'DB 실제',
   pmRunIdLabel: 'pm_run_id',
   rationaleLabel: '사유',
@@ -595,7 +595,7 @@ export const DASHBOARD_LABELS = {
   statDoneToday: '오늘 완료',
   statDriftLabelPrefix: '드리프트',
   // Drift chip a11y / tooltip
-  driftClickHint: 'PM 환각 / 정합성 인시던트. 클릭해서 살펴보세요.',
+  driftClickHint: '오퍼레이터 환각 / 정합성 인시던트. 클릭해서 살펴보세요.',
   driftAriaPrefix: '드리프트 경고',
   driftAriaSuffix: '건. 활성화하면 드리프트 패널이 열립니다.',
   // Triage feed empty state
@@ -1036,7 +1036,7 @@ export const URL_INSTALL_LABELS = {
 // `user_intervention_stale`, `invalid_claim`) so the audit row JSON
 // stays portable; the drawer renders the localized label.
 export const INCOHERENCE_KIND_LABELS = {
-  pm_hallucination: 'PM 환각',
+  pm_hallucination: '오퍼레이터 환각',
   user_intervention_stale: '사용자 개입 미반영',
   invalid_claim: '잘못된 주장',
   unknown: '알 수 없음',

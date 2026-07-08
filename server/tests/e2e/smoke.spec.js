@@ -16,10 +16,12 @@ test.describe('Palantir Console Smoke', () => {
   test('nav sidebar contains all route items', async ({ page }) => {
     await page.goto('/');
     const nav = page.locator('nav.nav-sidebar');
-    // NAV_ITEMS: Dashboard, Manager, Task Board, Projects,
-    // Resources, Memory, Operator (agents 는 nav 에서 숨김 — 라우트는 유지,
-    // nodes-ui-polish 2026-07-05)
-    await expect(nav.locator('.nav-item')).toHaveCount(7);
+    // NAV_ITEMS: Dashboard, Operator, Task Board, Resources, Memory.
+    // operator-centric arc: Projects nested under #operator/codebases (P1 #336),
+    // Manager reachable via roster Master/Live deep links, not top-level nav
+    // (P3 #338). agents route kept but hidden. Routes for #manager / #projects
+    // still work via alias + deep link.
+    await expect(nav.locator('.nav-item')).toHaveCount(5);
   });
 
   test('hash navigation to #mcp-servers renders the MCP route', async ({ page }) => {
