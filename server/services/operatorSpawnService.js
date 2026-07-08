@@ -364,49 +364,86 @@ function createOperatorSpawnService({
     }
     const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env, envAllowlist });
 
-    // Load brief (possibly empty row) + check for a persisted thread id.
+    // Load brief content (conventions/pitfalls) plus the thread handle. W-P3
+    // moves thread ownership to operator_instances; project_briefs remains a
+    // read-only legacy bridge when an instance has no thread value yet.
     const brief = projectBriefService
       ? (projectBriefService.getBrief(projectId) || projectBriefService.ensureBrief(projectId))
       : null;
-    const briefAdapter = brief ? brief.pm_adapter : null;
-    let briefHandle = brief && brief.pm_thread_id ? brief.pm_thread_id : null;
-    const threadNode = brief && brief.pm_thread_node_id ? brief.pm_thread_node_id : null;
+    let operatorInstanceResolution = null;
+    try {
+      if (runService && typeof runService.resolveOperatorConversationId === 'function') {
+        operatorInstanceResolution = runService.resolveOperatorConversationId(slotKey);
+      }
+    } catch (err) {
+      log(`operator instance lookup failed project=${projectId}: ${err.message}`);
+    }
+    let operatorInstanceId = operatorInstanceResolution && operatorInstanceResolution.instanceId
+      ? operatorInstanceResolution.instanceId
+      : null;
+    let instanceThread = null;
+    try {
+      instanceThread = operatorInstanceId && runService && typeof runService.getOperatorInstance === 'function'
+        ? runService.getOperatorInstance(operatorInstanceId)
+        : null;
+    } catch (err) {
+      log(`operator instance read failed instance=${operatorInstanceId}: ${err.message}`);
+    }
+    const instanceThreadState = instanceThread && instanceThread.thread_id
+      ? {
+          pm_thread_id: instanceThread.thread_id,
+          pm_adapter: instanceThread.pm_adapter,
+          pm_thread_node_id: instanceThread.node_id,
+          pm_thread_cwd: instanceThread.cwd,
+          pm_thread_source_generation: instanceThread.source_generation,
+          pm_thread_source_hash: instanceThread.source_hash,
+          pm_thread_workspace_path: instanceThread.workspace_path,
+        }
+      : null;
+    const bridgeThreadState = !instanceThreadState && brief && brief.pm_thread_id ? brief : null; // W-P3 R1 BLOCKER: instance ROW may exist (W-P1 backfill/ensure) with NULL thread — fall back on missing thread STATE, not missing row
+    const threadState = instanceThreadState || bridgeThreadState || null;
+    const threadStateSource = instanceThreadState ? 'instance' : (bridgeThreadState ? 'bridge' : null);
+    if (!operatorInstanceId) {
+      try {
+        if (runService && typeof runService.ensurePrimaryOperatorInstanceForProject === 'function') {
+          const ensured = runService.ensurePrimaryOperatorInstanceForProject(projectId);
+          operatorInstanceId = ensured && ensured.instanceId ? ensured.instanceId : null;
+        }
+      } catch (err) {
+        log(`operator instance ensure failed project=${projectId}: ${err.message}`);
+      }
+    }
+    const briefAdapter = threadState ? threadState.pm_adapter : null;
+    let briefHandle = threadState && threadState.pm_thread_id ? threadState.pm_thread_id : null;
+    const threadNode = threadState && threadState.pm_thread_node_id ? threadState.pm_thread_node_id : null;
     const expectedBriefAdapter = adapterType === 'codex' ? 'codex' : 'claude';
     let threadRebindReset = null;
     let threadSourceReset = null;
+    const clearPersistedThreadState = () => {
+      if (threadStateSource !== 'instance' || !operatorInstanceId) return;
+      try {
+        if (runService && typeof runService.setOperatorInstanceThread === 'function') {
+          runService.setOperatorInstanceThread(operatorInstanceId, {});
+        }
+      } catch (err) {
+        log(`clearOperatorInstanceThread failed instance=${operatorInstanceId}: ${err.message}`);
+      }
+    };
     if (briefHandle && (threadNode || 'local') !== (nodeId || 'local')) {
       threadRebindReset = { from_node: threadNode, to_node: nodeId || 'local' };
       briefHandle = null;
-      try {
-        if (projectBriefService && typeof projectBriefService.clearPmThread === 'function') {
-          projectBriefService.clearPmThread(projectId);
-        }
-      } catch (err) {
-        log(`clearPmThread failed project=${projectId}: ${err.message}`);
-      }
+      clearPersistedThreadState();
     }
     if (briefHandle && isRepoProject) {
-      threadSourceReset = repoThreadSourceReset(brief, project);
+      threadSourceReset = repoThreadSourceReset(threadState, project);
       if (threadSourceReset) {
         briefHandle = null;
-        try {
-          if (projectBriefService && typeof projectBriefService.clearPmThread === 'function') {
-            projectBriefService.clearPmThread(projectId);
-          }
-        } catch (err) {
-          log(`clearPmThread(source mismatch) failed project=${projectId}: ${err.message}`);
-        }
+        clearPersistedThreadState();
       }
     }
     if (briefHandle && briefAdapter !== expectedBriefAdapter) {
       briefHandle = null;
-      try {
-        if (projectBriefService && typeof projectBriefService.clearPmThread === 'function') {
-          projectBriefService.clearPmThread(projectId);
-        }
-      } catch (err) {
-        log(`clearPmThread(adapter mismatch) failed project=${projectId}: ${err.message}`);
-      }
+      clearPersistedThreadState();
     }
     const resumeThreadId = adapterType === 'codex' && briefHandle && briefAdapter === 'codex'
       ? briefHandle
@@ -416,8 +453,8 @@ function createOperatorSpawnService({
       : null;
     const resumeRepoWorkspace = isRepoProject && (resumeThreadId || resumeSessionId)
       ? {
-          workspacePath: brief.pm_thread_workspace_path,
-          cwd: brief.pm_thread_cwd || cwdFromWorkspacePath(brief.pm_thread_workspace_path, project),
+          workspacePath: threadState.pm_thread_workspace_path,
+          cwd: threadState.pm_thread_cwd || cwdFromWorkspacePath(threadState.pm_thread_workspace_path, project),
         }
       : null;
 
@@ -514,7 +551,7 @@ function createOperatorSpawnService({
     const onThreadStarted = (threadId) => {
       if (!threadId) return;
       markPmRunStartedOnce();
-      if (resumeThreadId && resumeThreadId === threadId) return;
+      if (threadStateSource === 'instance' && resumeThreadId && resumeThreadId === threadId) return;
       try {
         const fields = {
           pm_thread_id: threadId,
@@ -527,9 +564,11 @@ function createOperatorSpawnService({
           fields.pm_thread_source_hash = repoSourceHash(project);
           fields.pm_thread_workspace_path = materializedRepoWorkspace.workspacePath;
         }
-        projectBriefService.setPmThread(projectId, fields);
+        if (runService && typeof runService.setOperatorInstanceThread === 'function') {
+          runService.setOperatorInstanceThread(operatorInstanceId, fields);
+        }
       } catch (err) {
-        log(`setPmThread failed project=${projectId}: ${err.message}`);
+        log(`setOperatorInstanceThread failed instance=${operatorInstanceId}: ${err.message}`);
       }
     };
     const onSessionStarted = (sessionId) => {
@@ -538,7 +577,7 @@ function createOperatorSpawnService({
       // Skip a redundant brief write when we just RESUMED this exact session
       // (mirrors the codex onThreadStarted guard) — avoids a spurious
       // updated_at bump on every resume. (Codex P5-S4c NIT.)
-      if (resumeSessionId && resumeSessionId === sessionId) return;
+      if (threadStateSource === 'instance' && resumeSessionId && resumeSessionId === sessionId) return;
       try {
         const fields = {
           pm_thread_id: sessionId,
@@ -551,9 +590,11 @@ function createOperatorSpawnService({
           fields.pm_thread_source_hash = repoSourceHash(project);
           fields.pm_thread_workspace_path = materializedRepoWorkspace.workspacePath;
         }
-        projectBriefService.setPmThread(projectId, fields);
+        if (runService && typeof runService.setOperatorInstanceThread === 'function') {
+          runService.setOperatorInstanceThread(operatorInstanceId, fields);
+        }
       } catch (err) {
-        log(`setPmThread(claude) failed project=${projectId}: ${err.message}`);
+        log(`setOperatorInstanceThread(claude) failed instance=${operatorInstanceId}: ${err.message}`);
       }
     };
 

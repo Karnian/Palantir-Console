@@ -79,6 +79,16 @@ function seedTop({ runService, registry, adapter }) {
   return run;
 }
 
+function operatorThreadRow(runService, projectId) {
+  return runService.getOperatorThreadForProject(projectId, { ensure: true });
+}
+
+function seedOperatorThread(runService, projectId, fields) {
+  const resolved = runService.ensurePrimaryOperatorInstanceForProject(projectId);
+  runService.setOperatorInstanceThread(resolved.instanceId, fields);
+  return resolved.instanceId;
+}
+
 function createSshNode(nodeService, id = 'nodeA') {
   return nodeService.createNode({
     id,
@@ -258,7 +268,7 @@ test('source-generation mismatch clears stored thread and starts fresh', async (
   const created = projectService.createProject({ name: 'stale', source_type: 'git', repo_url: 'file:///tmp/repo.git' });
   db.prepare('UPDATE projects SET source_generation = 2 WHERE id = ?').run(created.id);
   const project = projectService.getProject(created.id);
-  projectBriefService.setPmThread(project.id, {
+  seedOperatorThread(runService, project.id, {
     pm_thread_id: 'thread-old',
     pm_adapter: 'codex',
     pm_thread_source_generation: 1,
@@ -273,6 +283,7 @@ test('source-generation mismatch clears stored thread and starts fresh', async (
 
   assert.equal(result.resumed, false);
   assert.equal(adapter._starts[0].opts.resumeThreadId, null);
+  assert.equal(operatorThreadRow(runService, project.id).thread_id, null);
   const event = runService.getRunEvents(result.run.id).find((row) => row.event_type === 'operator:thread_source_reset');
   assert.deepEqual(JSON.parse(event.payload_json), { from_generation: 1, to_generation: 2, reason: 'generation_mismatch' });
 });
@@ -294,7 +305,7 @@ test('source-generation match resumes from stored workspace without materializin
     repo_url: 'file:///tmp/repo.git',
     repo_subdir: 'svc',
   });
-  projectBriefService.setPmThread(project.id, {
+  seedOperatorThread(runService, project.id, {
     pm_thread_id: 'thread-current',
     pm_adapter: 'codex',
     pm_thread_source_generation: project.source_generation,
@@ -313,7 +324,7 @@ test('source-generation match resumes from stored workspace without materializin
   assert.equal(adapter._starts[0].opts.cwd, '/tmp/current-workspace/svc');
 });
 
-test('setPmThread persists repo generation hash and workspace path', async (t) => {
+test('operator instance thread persists repo generation hash and workspace path', async (t) => {
   withCodexAuth(t);
   withRepoFlag(t, '1');
   const db = await mkdb(t);
@@ -335,13 +346,13 @@ test('setPmThread persists repo generation hash and workspace path', async (t) =
 
   await spawn.ensureLiveOperator({ projectId: project.id });
   adapter._starts[0].opts.onThreadStarted('thread-new');
-  const brief = projectBriefService.getBrief(project.id);
+  const thread = operatorThreadRow(runService, project.id);
 
-  assert.equal(brief.pm_thread_id, 'thread-new');
-  assert.equal(brief.pm_thread_source_generation, project.source_generation);
-  assert.equal(brief.pm_thread_source_hash, repoSourceHash(project));
-  assert.equal(brief.pm_thread_workspace_path, '/tmp/persist-workspace');
-  assert.equal(brief.pm_thread_cwd, '/tmp/persist-workspace');
+  assert.equal(thread.thread_id, 'thread-new');
+  assert.equal(thread.source_generation, project.source_generation);
+  assert.equal(thread.source_hash, repoSourceHash(project));
+  assert.equal(thread.workspace_path, '/tmp/persist-workspace');
+  assert.equal(thread.cwd, '/tmp/persist-workspace');
 });
 
 test('boot resume skips stale repo thread and records source reset', async (t) => {
@@ -366,7 +377,7 @@ test('boot resume skips stale repo thread and records source reset', async (t) =
   const created = projectService.createProject({ name: 'boot-stale', source_type: 'git', repo_url: 'file:///tmp/repo.git' });
   db.prepare('UPDATE projects SET source_generation = 3 WHERE id = ?').run(created.id);
   const project = projectService.getProject(created.id);
-  projectBriefService.setPmThread(project.id, {
+  seedOperatorThread(runService, project.id, {
     pm_thread_id: 'thread-boot-old',
     pm_adapter: 'codex',
     pm_thread_source_generation: 2,
@@ -394,7 +405,7 @@ test('boot resume skips stale repo thread and records source reset', async (t) =
   });
 
   assert.equal(adapter._starts.length, 0);
-  assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, null);
+  assert.equal(operatorThreadRow(runService, project.id).thread_id, null);
   assert.equal(runService.getRun(run.id).status, 'stopped');
   const event = runService.getRunEvents(run.id).find((row) => row.event_type === 'operator:thread_source_reset');
   assert.deepEqual(JSON.parse(event.payload_json), { from_generation: 2, to_generation: 3, reason: 'generation_mismatch' });

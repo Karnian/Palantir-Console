@@ -5,6 +5,8 @@ const {
   parseProjectConversationId,
   OPERATOR_LAYER,
   OPERATOR_CONV_PREFIX,
+  conversationIdForProject,
+  createOperatorConversationIdResolver,
 } = require('../utils/conversationId'); // PM→Operator rename Phase 4: operator: only
 
 const VALID_STATUSES = ['queued', 'materializing', 'running', 'paused', 'needs_input', 'completed', 'failed', 'cancelled', 'stopped'];
@@ -121,13 +123,38 @@ function createRunService(db, eventBus) {
       INSERT INTO runs (
         id, task_id, agent_profile_id, prompt, status, is_manager,
         parent_run_id, manager_adapter, manager_thread_id, manager_layer,
-        conversation_id, queued_args, retry_count, node_id
+        conversation_id, queued_args, retry_count, node_id,
+        operator_instance_id, retry_root_run_id
       )
       VALUES (
         @id, @task_id, @agent_profile_id, @prompt, @status, @is_manager,
         @parent_run_id, @manager_adapter, @manager_thread_id, @manager_layer,
-        @conversation_id, @queued_args, @retry_count, @node_id
+        @conversation_id, @queued_args, @retry_count, @node_id,
+        @operator_instance_id, @retry_root_run_id
       )
+    `),
+    insertOperatorInstance: db.prepare(`
+      INSERT OR IGNORE INTO operator_instances (id)
+      VALUES (?)
+    `),
+    insertPrimaryOperatorRef: db.prepare(`
+      INSERT OR IGNORE INTO operator_codebase_refs (instance_id, project_id, role)
+      VALUES (?, ?, 'primary')
+    `),
+    getOperatorInstance: db.prepare(`
+      SELECT * FROM operator_instances WHERE id = ?
+    `),
+    updateOperatorThread: db.prepare(`
+      UPDATE operator_instances
+         SET thread_id = @thread_id,
+             pm_adapter = @pm_adapter,
+             node_id = @node_id,
+             cwd = @cwd,
+             source_generation = @source_generation,
+             source_hash = @source_hash,
+             workspace_path = @workspace_path,
+             updated_at = datetime('now')
+       WHERE id = @id
     `),
     updateManagerThread: db.prepare(`
       UPDATE runs SET manager_thread_id = ? WHERE id = ?
@@ -518,6 +545,8 @@ function createRunService(db, eventBus) {
     conversation_id,
     queued_args,
     retry_count,
+    operator_instance_id,
+    retry_root_run_id,
   }) {
     // task_id and agent_profile_id are required for worker runs, optional for manager
     if (!is_manager && !task_id) throw new BadRequestError('task_id is required');
@@ -560,6 +589,8 @@ function createRunService(db, eventBus) {
       queued_args: normalizeQueuedArgs(queued_args),
       retry_count: normalizeRetryCount(retry_count),
       node_id: node_id || null,
+      operator_instance_id: operator_instance_id || null,
+      retry_root_run_id: retry_root_run_id || null,
     });
     const run = stmts.getById.get(id);
     if (eventBus) {
@@ -582,6 +613,54 @@ function createRunService(db, eventBus) {
       });
     }
     return run;
+  }
+
+  const resolveOperatorConversationFromDb = createOperatorConversationIdResolver(db);
+
+  function resolveOperatorConversationIdWithDb(conversationId) {
+    return resolveOperatorConversationFromDb(conversationId);
+  }
+
+  function ensurePrimaryOperatorInstanceForProject(projectId) {
+    if (!projectId) return null;
+    const existing = resolveOperatorConversationFromDb(conversationIdForProject(projectId));
+    if (existing && existing.instanceId) return existing;
+
+    const instanceId = `oi_${projectId}`;
+    const tx = db.transaction(() => {
+      stmts.insertOperatorInstance.run(instanceId);
+      stmts.insertPrimaryOperatorRef.run(instanceId, projectId);
+    });
+    tx();
+    return resolveOperatorConversationFromDb(conversationIdForProject(projectId));
+  }
+
+  function getOperatorInstance(instanceId) {
+    if (!instanceId) return null;
+    return stmts.getOperatorInstance.get(instanceId) || null;
+  }
+
+  function getOperatorThreadForProject(projectId, { ensure = false } = {}) {
+    const resolved = ensure
+      ? ensurePrimaryOperatorInstanceForProject(projectId)
+      : resolveOperatorConversationFromDb(conversationIdForProject(projectId));
+    if (!resolved || !resolved.instanceId) return null;
+    return getOperatorInstance(resolved.instanceId);
+  }
+
+  function setOperatorInstanceThread(instanceId, fields = {}) {
+    if (!instanceId) return null;
+    stmts.updateOperatorThread.run({
+      id: instanceId,
+      thread_id: fields.thread_id ?? fields.pm_thread_id ?? null,
+      pm_adapter: fields.pm_adapter || null,
+      node_id: fields.node_id ?? fields.pm_thread_node_id ?? null,
+      cwd: fields.cwd ?? fields.pm_thread_cwd ?? null,
+      source_generation: fields.source_generation ?? fields.pm_thread_source_generation ?? null,
+      source_hash: fields.source_hash ?? fields.pm_thread_source_hash ?? null,
+      workspace_path: fields.workspace_path ?? fields.pm_thread_workspace_path ?? null,
+    });
+    return getOperatorInstance(instanceId);
   }
 
   function updateManagerThreadId(id, threadId) {
@@ -1282,6 +1361,11 @@ function createRunService(db, eventBus) {
     updateManagerThreadId, updateClaudeSessionId,
     updateRunMcpConfig,
     updateRunPreset,
+    resolveOperatorConversationId: resolveOperatorConversationIdWithDb,
+    ensurePrimaryOperatorInstanceForProject,
+    getOperatorInstance,
+    getOperatorThreadForProject,
+    setOperatorInstanceThread,
     deleteRun, addRunEvent, getRunEvents,
     getActiveManager, getActiveManagers, getRunByConversationId, getWorkerRuns,
   };

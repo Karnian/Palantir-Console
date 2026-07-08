@@ -8,17 +8,23 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
-const request = require('supertest');
+const { Readable, Writable } = require('node:stream');
+const express = require('express');
 
 const { createDatabase } = require('../db/database');
 const { createRunService } = require('../services/runService');
+const { createTaskService } = require('../services/taskService');
+const { createAgentProfileService } = require('../services/agentProfileService');
 const { createProjectService } = require('../services/projectService');
 const { createProjectBriefService } = require('../services/projectBriefService');
 const { createManagerRegistry } = require('../services/managerRegistry');
 const { createConversationService } = require('../services/conversationService');
+const { createLifecycleService } = require('../services/lifecycleService');
+const { createEventBus } = require('../services/eventBus');
 const { createOperatorSpawnService } = require('../services/operatorSpawnService');
 const { createOperatorCleanupService } = require('../services/operatorCleanupService');
 const { createNodeService } = require('../services/nodeService');
+const { createTasksRouter } = require('../routes/tasks');
 const { createApp } = require('../app');
 
 async function mkdb(t) {
@@ -90,6 +96,111 @@ function makeFakeCodexAdapter({ resumeSupport = true } = {}) {
     _runTurnCalls: runTurnCalls,
     _disposeCalls: disposeCalls,
   };
+}
+
+function operatorThreadRow(runService, projectId) {
+  return runService.getOperatorThreadForProject(projectId, { ensure: true });
+}
+
+function operatorThreadId(runService, projectId) {
+  return operatorThreadRow(runService, projectId)?.thread_id || null;
+}
+
+function stubExecEngine() {
+  return {
+    type: 'subprocess',
+    spawnAgent(runId) { return { sessionName: `session-${runId}` }; },
+    isAlive() { return true; },
+    detectExitCode() { return null; },
+    getOutput() { return ''; },
+    sendInput() { return true; },
+    kill() { return true; },
+    discoverGhostSessions() { return []; },
+    hasProcess() { return false; },
+  };
+}
+
+function stubStreamJsonEngine() {
+  return {
+    spawnAgent() { return { sessionName: null }; },
+    hasProcess() { return false; },
+    isAlive() { return true; },
+    detectExitCode() { return null; },
+    sendInput() { return true; },
+    kill() { return true; },
+  };
+}
+
+function seedWorkerProfile(db, id = `worker_${Math.random().toString(36).slice(2)}`) {
+  db.prepare(`
+    INSERT INTO agent_profiles (id, name, type, command, args_template, capabilities_json, env_allowlist, max_concurrent)
+    VALUES (?, 'Worker', 'codex', 'codex', '{prompt}', '{}', '[]', 0)
+  `).run(id);
+  return id;
+}
+
+function createExecuteRouteApp({ taskService, lifecycleService }) {
+  const app = express();
+  app.use(express.json());
+  app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService }));
+  return app;
+}
+
+function httpJson(app, method, url, body) {
+  return new Promise((resolve, reject) => {
+    const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
+    const req = new Readable({
+      read() {
+        if (payload) this.push(payload);
+        this.push(null);
+      },
+    });
+    req.method = method;
+    req.url = url;
+    req.headers = {
+      host: '127.0.0.1',
+      ...(payload ? {
+        'content-type': 'application/json',
+        'content-length': String(payload.length),
+      } : {}),
+    };
+
+    const chunks = [];
+    const res = new Writable({
+      write(chunk, _encoding, callback) {
+        chunks.push(Buffer.from(chunk));
+        callback();
+      },
+    });
+    res.statusCode = 200;
+    res.headers = {};
+    res.setHeader = (name, value) => { res.headers[String(name).toLowerCase()] = value; };
+    res.getHeader = (name) => res.headers[String(name).toLowerCase()];
+    res.removeHeader = (name) => { delete res.headers[String(name).toLowerCase()]; };
+    res.writeHead = (statusCode, headers = {}) => {
+      res.statusCode = statusCode;
+      for (const [name, value] of Object.entries(headers)) res.setHeader(name, value);
+      return res;
+    };
+    res.end = (chunk, encoding, callback) => {
+      if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding));
+      const text = Buffer.concat(chunks).toString('utf8');
+      let parsed = {};
+      if (text) {
+        try { parsed = JSON.parse(text); } catch { parsed = text; }
+      }
+      if (typeof callback === 'function') callback();
+      resolve({ status: res.statusCode, body: parsed, text });
+      return res;
+    };
+
+    try {
+      if (typeof app.handle === 'function') app.handle(req, res);
+      else app.emit('request', req, res);
+    } catch (err) {
+      reject(err);
+    }
+  });
 }
 
 function seedTop({ rs, registry, adapter }) {
@@ -287,6 +398,196 @@ test('Phase 3a: lazy spawn resumes a persisted pm_thread_id', async (t) => {
   // Brief should NOT have been overwritten (same id)
   const brief = projectBriefService.getBrief(project.id);
   assert.equal(brief.pm_thread_id, 'thread_persisted');
+  assert.equal(operatorThreadId(rs, project.id), 'thread_persisted', 'legacy bridge resume is copied to operator instance');
+});
+
+test('W-P3 R1: empty instance row (NULL thread) still falls back to legacy bridge thread', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const registry = createManagerRegistry({ runService: rs });
+  const fakePm = makeFakeCodexAdapter();
+  const spawn = createOperatorSpawnService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: wireFactory(fakePm),
+    projectService,
+    projectBriefService,
+    authResolverOpts: { hasKeychain: true },
+  });
+  const project = projectService.createProject({ name: 'staged' });
+  seedTop({ rs, registry, adapter: fakePm });
+
+  // Staged-upgrade shape (Codex W-P3 R1 BLOCKER): the instance ROW exists
+  // (W-P1 backfill / ensure) but its thread is NULL — the thread only ever
+  // landed in project_briefs. Fallback must key on missing thread STATE.
+  projectBriefService.ensureBrief(project.id);
+  projectBriefService.setPmThread(project.id, {
+    pm_thread_id: 'thread_bridge_after_wp1',
+    pm_adapter: 'codex',
+  });
+  rs.ensurePrimaryOperatorInstanceForProject(project.id);
+
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
+  assert.equal(result.resumed, true, 'bridge thread must resume when instance row has NULL thread');
+  assert.equal(fakePm._sessions.get(result.run.id).threadId, 'thread_bridge_after_wp1');
+});
+
+test('W-P3: operator_instances thread state wins over legacy project_briefs bridge', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const registry = createManagerRegistry({ runService: rs });
+  const fakePm = makeFakeCodexAdapter();
+
+  const spawn = createOperatorSpawnService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: wireFactory(fakePm),
+    projectService,
+    projectBriefService,
+    authResolverOpts: { hasKeychain: true },
+  });
+
+  const project = projectService.createProject({ name: 'alpha' });
+  seedTop({ rs, registry, adapter: fakePm });
+
+  projectBriefService.ensureBrief(project.id);
+  projectBriefService.setPmThread(project.id, {
+    pm_thread_id: 'thread_bridge',
+    pm_adapter: 'codex',
+  });
+  const resolved = rs.ensurePrimaryOperatorInstanceForProject(project.id);
+  rs.setOperatorInstanceThread(resolved.instanceId, {
+    pm_thread_id: 'thread_instance',
+    pm_adapter: 'codex',
+  });
+
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
+  assert.equal(result.resumed, true);
+  assert.equal(fakePm._sessions.get(result.run.id).threadId, 'thread_instance');
+  assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, 'thread_bridge', 'legacy bridge is read-only');
+});
+
+test('W-P3: /execute derives operator attribution from pm_run_id server-side', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const taskService = createTaskService(db, null);
+  const agentProfileService = createAgentProfileService(db);
+  const profileId = seedWorkerProfile(db);
+  const lifecycleService = createLifecycleService({
+    runService: rs,
+    taskService,
+    agentProfileService,
+    projectService,
+    executionEngine: stubExecEngine(),
+    streamJsonEngine: stubStreamJsonEngine(),
+    worktreeService: null,
+    harvestService: null,
+    eventBus: null,
+  });
+  const app = createExecuteRouteApp({ taskService, lifecycleService });
+
+  const project = projectService.createProject({ name: 'alpha' });
+  const otherProject = projectService.createProject({ name: 'beta' });
+  const resolved = rs.ensurePrimaryOperatorInstanceForProject(project.id);
+  rs.ensurePrimaryOperatorInstanceForProject(otherProject.id);
+  const pmRun = rs.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: `operator:${project.id}`,
+    prompt: 'operator alpha',
+  });
+  const otherPmRun = rs.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: `operator:${otherProject.id}`,
+    prompt: 'operator beta',
+  });
+
+  const attributedTask = taskService.createTask({ project_id: project.id, title: 'attributed' });
+  const attributed = await httpJson(app, 'POST', `/api/tasks/${attributedTask.id}/execute`, {
+    agent_profile_id: profileId,
+    prompt: 'work',
+    pm_run_id: pmRun.id,
+  });
+  assert.equal(attributed.status, 201);
+  assert.equal(attributed.body.run.operator_instance_id, resolved.instanceId);
+  assert.equal(attributed.body.run.parent_run_id, pmRun.id);
+
+  const missingTask = taskService.createTask({ project_id: project.id, title: 'missing' });
+  const missing = await httpJson(app, 'POST', `/api/tasks/${missingTask.id}/execute`, {
+    agent_profile_id: profileId,
+    prompt: 'work',
+  });
+  assert.equal(missing.status, 201);
+  assert.equal(missing.body.run.operator_instance_id, null);
+  assert.equal(missing.body.run.parent_run_id, null);
+
+  const mismatchedTask = taskService.createTask({ project_id: project.id, title: 'mismatched' });
+  const mismatched = await httpJson(app, 'POST', `/api/tasks/${mismatchedTask.id}/execute`, {
+    agent_profile_id: profileId,
+    prompt: 'work',
+    pm_run_id: otherPmRun.id,
+  });
+  assert.equal(mismatched.status, 201);
+  assert.equal(mismatched.body.run.operator_instance_id, null);
+  assert.equal(mismatched.body.run.parent_run_id, null);
+});
+
+test('W-P3: retry run copies operator lineage and sets retry root', async (t) => {
+  const db = await mkdb(t);
+  const eventBus = createEventBus();
+  const rs = createRunService(db, eventBus);
+  const projectService = createProjectService(db);
+  const taskService = createTaskService(db, null);
+  const agentProfileService = createAgentProfileService(db);
+  const profileId = seedWorkerProfile(db);
+  const lifecycleService = createLifecycleService({
+    runService: rs,
+    taskService,
+    agentProfileService,
+    projectService,
+    executionEngine: stubExecEngine(),
+    streamJsonEngine: stubStreamJsonEngine(),
+    worktreeService: null,
+    harvestService: null,
+    eventBus,
+  });
+  t.after(() => lifecycleService.stopMonitoring());
+
+  const project = projectService.createProject({ name: 'alpha' });
+  const task = taskService.createTask({ project_id: project.id, title: 'retry me' });
+  const resolved = rs.ensurePrimaryOperatorInstanceForProject(project.id);
+  const pmRun = rs.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: `operator:${project.id}`,
+    prompt: 'operator alpha',
+  });
+  const original = rs.createRun({
+    task_id: task.id,
+    agent_profile_id: profileId,
+    prompt: 'original',
+    operator_instance_id: resolved.instanceId,
+    parent_run_id: pmRun.id,
+    queued_args: { skillPackIds: null, presetId: null },
+  });
+  rs.markRunStarted(original.id, { tmux_session: `session-${original.id}` });
+
+  lifecycleService.startMonitoring();
+  rs.updateRunStatus(original.id, 'failed', { force: true });
+
+  const runs = rs.listRuns({ task_id: task.id });
+  assert.equal(runs.length, 2);
+  const retry = runs.find((run) => run.id !== original.id);
+  assert.equal(retry.operator_instance_id, resolved.instanceId);
+  assert.equal(retry.parent_run_id, pmRun.id);
+  assert.equal(retry.retry_root_run_id, original.id);
+  assert.equal(retry.retry_count, 1);
 });
 
 test('Phase 3a: lazy spawn refuses when no active Top', async (t) => {
@@ -468,10 +769,11 @@ test('Phase 3a: conversationService integrates lazy PM spawn on first message', 
   assert.match(fakePm._runTurnCalls[0].payload.text, /시작/);
 
   // After the user's message, the fake adapter's mocked thread.started
-  // handler should have fired and persisted the id into the brief.
-  const brief = projectBriefService.getBrief(project.id);
-  assert.ok(brief.pm_thread_id, 'thread id persisted after first real turn');
-  assert.equal(brief.pm_adapter, 'codex');
+  // handler should have fired and persisted the id into the operator instance.
+  const thread = operatorThreadRow(rs, project.id);
+  assert.ok(thread.thread_id, 'thread id persisted after first real turn');
+  assert.equal(thread.pm_adapter, 'codex');
+  assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, null, 'project_briefs is not written');
 
   // Second call: PM already live → direct delivery (no re-spawn)
   conv.sendMessage(`operator:${project.id}`, { text: '두번째' });
@@ -594,18 +896,19 @@ test('Phase 3a: operatorCleanupService.reset disposes live PM and clears brief',
   // no seed runTurn inside operatorSpawnService). Trigger it via conv.
   conv.sendMessage(`operator:${project.id}`, { text: 'first' });
 
-  // Pre-reset: slot is live, brief has thread id
+  // Pre-reset: slot is live, operator instance has thread id
   assert.ok(registry.getActiveRunId(`operator:${project.id}`));
-  assert.ok(projectBriefService.getBrief(project.id).pm_thread_id);
+  assert.ok(operatorThreadId(rs, project.id));
 
   const result = cleanup.reset(project.id);
   assert.equal(result.disposed, true);
   assert.equal(result.clearedBrief, true);
   assert.equal(result.cancelledRunId, pmRunId);
 
-  // Post-reset: slot cleared, brief thread id null, adapter disposeSession called
+  // Post-reset: slot cleared, instance thread id null, adapter disposeSession called
   assert.equal(registry.getActiveRunId(`operator:${project.id}`), null);
-  assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, null);
+  assert.equal(operatorThreadId(rs, project.id), null);
+  assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, null, 'project_briefs remains unchanged');
   assert.ok(fakePm._disposeCalls.includes(pmRunId));
 
   // Run row is marked cancelled
@@ -664,7 +967,7 @@ test('Phase 3a: lazy spawn after reset starts a fresh thread', async (t) => {
   // thread id only appears after the first real runTurn).
   const first = spawn.ensureLiveOperator({ projectId: project.id });
   conv.sendMessage(`operator:${project.id}`, { text: 'first message' });
-  const firstThreadId = projectBriefService.getBrief(project.id).pm_thread_id;
+  const firstThreadId = operatorThreadId(rs, project.id);
   assert.ok(firstThreadId);
 
   // Reset
@@ -675,7 +978,7 @@ test('Phase 3a: lazy spawn after reset starts a fresh thread', async (t) => {
   assert.notEqual(second.run.id, first.run.id);
   assert.equal(second.resumed, false, 'second spawn is a fresh thread, not a resume');
   conv.sendMessage(`operator:${project.id}`, { text: 'after reset' });
-  const secondThreadId = projectBriefService.getBrief(project.id).pm_thread_id;
+  const secondThreadId = operatorThreadId(rs, project.id);
   assert.notEqual(secondThreadId, firstThreadId);
 });
 
@@ -706,11 +1009,11 @@ async function createTestApp(t) {
 test('Phase 3a: POST /api/manager/pm/:projectId/reset on missing PM returns idempotent ok', async (t) => {
   const app = await createTestApp(t);
   // Create a project so we have something to reset against
-  const createRes = await request(app).post('/api/projects').send({ name: 'alpha' });
+  const createRes = await httpJson(app, 'POST', '/api/projects', { name: 'alpha' });
   assert.equal(createRes.status, 201);
   const projectId = createRes.body.project.id;
 
-  const res = await request(app).post(`/api/manager/pm/${projectId}/reset`).send({});
+  const res = await httpJson(app, 'POST', `/api/manager/pm/${projectId}/reset`, {});
   assert.equal(res.status, 200);
   assert.equal(res.body.status, 'reset');
   assert.equal(res.body.disposed, false);
@@ -720,13 +1023,13 @@ test('Phase 3a: DELETE /api/projects/:id runs operatorCleanupService.dispose bef
   // Can't fully exercise without a real Codex, but we can verify the
   // route doesn't crash and the project is deleted.
   const app = await createTestApp(t);
-  const createRes = await request(app).post('/api/projects').send({ name: 'alpha' });
+  const createRes = await httpJson(app, 'POST', '/api/projects', { name: 'alpha' });
   const projectId = createRes.body.project.id;
 
-  const delRes = await request(app).delete(`/api/projects/${projectId}`);
+  const delRes = await httpJson(app, 'DELETE', `/api/projects/${projectId}`);
   assert.equal(delRes.status, 200);
 
-  const getRes = await request(app).get(`/api/projects/${projectId}`);
+  const getRes = await httpJson(app, 'GET', `/api/projects/${projectId}`);
   assert.equal(getRes.status, 404);
 });
 
@@ -738,7 +1041,7 @@ test('Phase 3a: R2 fix — operatorCleanupService.reset rethrows disposeSession 
   // the adapter hadn't actually torn down. Now a dispose failure must:
   //   (a) throw with httpStatus 502
   //   (b) leave managerRegistry slot intact (so retry can address it)
-  //   (c) leave project_briefs.pm_thread_id intact
+  //   (c) leave persisted operator thread state intact
   //   (d) NOT mark the run as cancelled
   const db = await mkdb(t);
   const rs = createRunService(db, null);
@@ -772,7 +1075,7 @@ test('Phase 3a: R2 fix — operatorCleanupService.reset rethrows disposeSession 
   spawn.ensureLiveOperator({ projectId: project.id });
   conv.sendMessage(`operator:${project.id}`, { text: 'first' });
   const pmRunIdBefore = registry.getActiveRunId(`operator:${project.id}`);
-  const threadIdBefore = projectBriefService.getBrief(project.id).pm_thread_id;
+  const threadIdBefore = operatorThreadId(rs, project.id);
   assert.ok(pmRunIdBefore);
   assert.ok(threadIdBefore);
   const statusBefore = rs.getRun(pmRunIdBefore).status;
@@ -780,7 +1083,7 @@ test('Phase 3a: R2 fix — operatorCleanupService.reset rethrows disposeSession 
   // Reset must throw, and no state must have changed.
   assert.throws(() => cleanup.reset(project.id), /disposeSession failed/);
   assert.equal(registry.getActiveRunId(`operator:${project.id}`), pmRunIdBefore, 'registry slot must remain');
-  assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, threadIdBefore, 'brief must remain');
+  assert.equal(operatorThreadId(rs, project.id), threadIdBefore, 'operator instance thread must remain');
   assert.equal(rs.getRun(pmRunIdBefore).status, statusBefore, 'run status must remain (not cancelled)');
 
   // Restore and retry — reset now succeeds end-to-end.
@@ -811,7 +1114,7 @@ test('Phase 3a: R1 fix — DELETE /api/projects/:id refuses on operatorCleanupSe
     projectBriefService: null,
     operatorCleanupService: failingCleanup,
   }));
-  const res = await request(app).delete('/api/projects/p1');
+  const res = await httpJson(app, 'DELETE', '/api/projects/p1');
   assert.equal(res.status, 502);
   assert.equal(res.body.error, 'pm_dispose_failed');
   assert.match(res.body.message, /adapter exploded/);
@@ -864,7 +1167,7 @@ test('P7-2: forceReset succeeds even when disposeSession throws', async (t) => {
 
   const pmRunId = registry.getActiveRunId(`operator:${project.id}`);
   assert.ok(pmRunId, 'PM run is live before forceReset');
-  assert.ok(projectBriefService.getBrief(project.id).pm_thread_id, 'brief has thread id');
+  assert.ok(operatorThreadId(rs, project.id), 'operator instance has thread id');
 
   // Normal reset must fail-closed (throws)
   assert.throws(() => cleanup.reset(project.id), /disposeSession failed/);
@@ -874,15 +1177,16 @@ test('P7-2: forceReset succeeds even when disposeSession throws', async (t) => {
 
   // disposed=false because disposeSession threw, but everything else is cleaned up
   assert.equal(result.disposed, false, 'disposed=false when disposeSession threw');
-  assert.equal(result.clearedBrief, true, 'brief was cleared regardless');
+  assert.equal(result.clearedBrief, true, 'operator thread was cleared regardless');
   assert.ok(result.cancelledRunId, 'cancelledRunId captured');
   assert.ok(result.disposeError, 'disposeError records the failure reason');
 
   // Registry slot must be gone
   assert.equal(registry.getActiveRunId(`operator:${project.id}`), null, 'registry slot cleared');
 
-  // Brief must be cleared
-  assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, null, 'pm_thread_id cleared');
+  // Operator instance thread must be cleared; project_briefs is not a write target.
+  assert.equal(operatorThreadId(rs, project.id), null, 'operator instance thread cleared');
+  assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, null, 'project_briefs remains unchanged');
 
   // Run must be marked failed
   const run = rs.getRun(pmRunId);
@@ -946,6 +1250,7 @@ test('P7-2: forceReset succeeds cleanly when disposeSession works', async (t) =>
   assert.equal(result.disposeError, null, 'no disposeError when dispose succeeded');
 
   assert.equal(registry.getActiveRunId(`operator:${project.id}`), null);
+  assert.equal(operatorThreadId(rs, project.id), null);
   assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, null);
 
   assert.equal(emitted.length, 1);
@@ -1021,24 +1326,24 @@ test('P7-2: normal reset behavior is unchanged (fail-closed still applies)', asy
   conv.sendMessage(`operator:${project.id}`, { text: 'hi' });
 
   const pmRunId = registry.getActiveRunId(`operator:${project.id}`);
-  const threadId = projectBriefService.getBrief(project.id).pm_thread_id;
+  const threadId = operatorThreadId(rs, project.id);
 
   // reset() must still throw (fail-closed unchanged)
   assert.throws(() => cleanup.reset(project.id), /disposeSession failed/);
 
   // State must remain intact after failed reset
   assert.equal(registry.getActiveRunId(`operator:${project.id}`), pmRunId, 'slot intact after failed reset');
-  assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, threadId, 'brief intact after failed reset');
+  assert.equal(operatorThreadId(rs, project.id), threadId, 'operator instance thread intact after failed reset');
 });
 
 test('P7-2: POST /api/manager/pm/:projectId/force-reset HTTP wiring', async (t) => {
   const app = await createTestApp(t);
-  const createRes = await request(app).post('/api/projects').send({ name: 'force-test' });
+  const createRes = await httpJson(app, 'POST', '/api/projects', { name: 'force-test' });
   assert.equal(createRes.status, 201);
   const projectId = createRes.body.project.id;
 
   // With no PM live, force-reset should still return 200 with correct shape
-  const res = await request(app).post(`/api/manager/pm/${projectId}/force-reset`).send({});
+  const res = await httpJson(app, 'POST', `/api/manager/pm/${projectId}/force-reset`, {});
   assert.equal(res.status, 200);
   assert.equal(res.body.status, 'force_reset');
   assert.equal(res.body.projectId, projectId);

@@ -78,6 +78,16 @@ function wrapBriefService(projectBriefService) {
   };
 }
 
+function operatorThreadRow(runService, projectId) {
+  return runService.getOperatorThreadForProject(projectId, { ensure: true });
+}
+
+function seedOperatorThread(runService, projectId, fields) {
+  const resolved = runService.ensurePrimaryOperatorInstanceForProject(projectId);
+  runService.setOperatorInstanceThread(resolved.instanceId, fields);
+  return resolved.instanceId;
+}
+
 function createSshNode(nodeService, id = 'nodeA') {
   return nodeService.createNode({
     id,
@@ -167,11 +177,11 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   start.opts.onSessionStarted('sess_claude_1');
 
   assert.equal(runService.getRun(result.run.id).status, 'running');
-  const brief = projectBriefService.getBrief(project.id);
-  assert.equal(brief.pm_thread_id, 'sess_claude_1');
-  assert.equal(brief.pm_adapter, 'claude');
-  assert.equal(brief.pm_thread_node_id, null);
-  assert.equal(brief.pm_thread_cwd, null);
+  const thread = operatorThreadRow(runService, project.id);
+  assert.equal(thread.thread_id, 'sess_claude_1');
+  assert.equal(thread.pm_adapter, 'claude');
+  assert.equal(thread.node_id, null);
+  assert.equal(thread.cwd, null);
 });
 
 test('P5-S4c: Claude lazy-spawn resumes a persisted session on the matching remote node', async (t) => {
@@ -242,7 +252,7 @@ test('P5-S4c: Claude lazy-spawn clears a persisted session bound to a different 
     node_id: 'nodeB',
     directory: '/workspace/claude-rebind',
   });
-  baseBriefService.setPmThread(project.id, {
+  seedOperatorThread(runService, project.id, {
     pm_thread_id: 'sessA',
     pm_adapter: 'claude',
     pm_thread_node_id: 'nodeA',
@@ -254,8 +264,7 @@ test('P5-S4c: Claude lazy-spawn clears a persisted session bound to a different 
 
   assert.equal(result.resumed, false);
   assert.equal(claudeAdapter._starts[0].opts.resumeSessionId, null);
-  assert.deepEqual(projectBriefService._clearCalls, [project.id]);
-  assert.equal(baseBriefService.getBrief(project.id).pm_thread_id, null);
+  assert.equal(operatorThreadRow(runService, project.id).thread_id, null);
   const event = runService.getRunEvents(result.run.id).find(e => e.event_type === 'operator:thread_rebind_reset');
   assert.deepEqual(JSON.parse(event.payload_json), { from_node: 'nodeA', to_node: 'nodeB' });
 });
@@ -278,7 +287,7 @@ test('P5-S4c: Claude lazy-spawn clears a Codex thread instead of resuming it as 
     resolveManagerAuth: authOk,
   });
   const project = projectService.createProject({ name: 'claude-adapter-mismatch', preferred_pm_adapter: 'claude' });
-  baseBriefService.setPmThread(project.id, {
+  seedOperatorThread(runService, project.id, {
     pm_thread_id: 'threadA',
     pm_adapter: 'codex',
     pm_thread_node_id: null,
@@ -290,8 +299,7 @@ test('P5-S4c: Claude lazy-spawn clears a Codex thread instead of resuming it as 
 
   assert.equal(result.resumed, false);
   assert.equal(claudeAdapter._starts[0].opts.resumeSessionId, null);
-  assert.deepEqual(projectBriefService._clearCalls, [project.id]);
-  assert.equal(baseBriefService.getBrief(project.id).pm_thread_id, null);
+  assert.equal(operatorThreadRow(runService, project.id).thread_id, null);
 });
 
 test('P5-S4c: Codex lazy-spawn resumes only Codex handles and clears Claude sessions', async (t) => {
@@ -327,7 +335,7 @@ test('P5-S4c: Codex lazy-spawn resumes only Codex handles and clears Claude sess
   assert.equal(codexAdapter._starts[0].opts.resumeSessionId, null);
 
   const mismatchProject = projectService.createProject({ name: 'codex-adapter-mismatch' });
-  baseBriefService.setPmThread(mismatchProject.id, {
+  seedOperatorThread(runService, mismatchProject.id, {
     pm_thread_id: 'sessA',
     pm_adapter: 'claude',
     pm_thread_node_id: null,
@@ -337,8 +345,7 @@ test('P5-S4c: Codex lazy-spawn resumes only Codex handles and clears Claude sess
 
   assert.equal(mismatchResult.resumed, false);
   assert.equal(codexAdapter._starts[1].opts.resumeThreadId, null);
-  assert.deepEqual(projectBriefService._clearCalls, [mismatchProject.id]);
-  assert.equal(baseBriefService.getBrief(mismatchProject.id).pm_thread_id, null);
+  assert.equal(operatorThreadRow(runService, mismatchProject.id).thread_id, null);
 });
 
 test('P5-S4a: default Codex operator still starts from onThreadStarted', async (t) => {
@@ -382,7 +389,7 @@ test('P5-S4a: default Codex operator still starts from onThreadStarted', async (
   start.opts.onThreadStarted('thread_codex_1');
 
   assert.equal(runService.getRun(result.run.id).status, 'running');
-  assert.equal(projectBriefService.getBrief(project.id).pm_thread_id, 'thread_codex_1');
+  assert.equal(operatorThreadRow(runService, project.id).thread_id, 'thread_codex_1');
 });
 
 test('P5-S4a: claudeAdapter onSessionStarted fires once on system:init', () => {
@@ -508,9 +515,9 @@ test('P5-S4b: remote node + Claude preference spawns a remote Claude Operator (e
   assert.equal(typeof start.opts.onSessionStarted, 'function');
 
   start.opts.onSessionStarted('sess_remote_claude');
-  const brief = projectBriefService.getBrief(project.id);
-  assert.equal(brief.pm_thread_id, 'sess_remote_claude');
-  assert.equal(brief.pm_adapter, 'claude');
-  assert.equal(brief.pm_thread_node_id, 'nodeA');
-  assert.equal(brief.pm_thread_cwd, '/workspace/remote-claude');
+  const thread = operatorThreadRow(runService, project.id);
+  assert.equal(thread.thread_id, 'sess_remote_claude');
+  assert.equal(thread.pm_adapter, 'claude');
+  assert.equal(thread.node_id, 'nodeA');
+  assert.equal(thread.cwd, '/workspace/remote-claude');
 });
