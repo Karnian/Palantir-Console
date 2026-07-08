@@ -27,6 +27,7 @@
 **나머지 Ready 비어 있음.** K-2~K-5 시리즈 + Fleet P4/P5(F1/F2 포함) 전부 종결.
 
 진행 가능한 후속 nice-to-have (deferred — 사용자 트리거 시):
+- **A11y-contrast-hardening (operator-centric 통합 리뷰 발견, 2026-07-08)** — K-4 a11y 게이트가 `npm start`(실 prod DB, port 4177)로 띄워 **실데이터 렌더 시** pre-existing color-contrast 부채가 노출됨(빈 DB fixture 로는 미발생 → 커버리지 갭). 대상: (a) 공유 `.skill-badge-ok` 초록/연초록 light 4.05<4.5(RunInspector·operator/roster 공용), (b) manager 뷰 `.manager-msg-time`(opacity 0.7 이 muted 텍스트 죽임)·`.manager-session-badge.running`/`.manager-status-badge` 하드코딩 `#3b82f6`/`#60a5fa`(PR #81 유래, 토큰 규칙 위반). 전부 operator-centric(#334~#341) 커밋과 **무관·데이터 의존**. 근본: 공유 배지 토큰(lock-step light/dark 신규 토큰) + manager 하드코딩색→토큰 전환. **주의: skill-badge-ok 는 dark headroom 협소(X≥15% darken 시 dark 4.31<4.5) → light-만 스코프 or 신규 토큰 필수.** 별도 focused PR (Codex R2 경고: 무시 말고 명시 추적).
 - **K-5-followup** — 모달/드로어 visual regression (K-5 spec §3 비범위 → 별도 phase)
 - **K-4 NIT** — moderate severity gate 승격 (현재 report-only)
 - **K-4-card-markup NIT** — `.agent-card` / `.project-card` heading semantics 복원 (`<h3>` 별도 위치)
