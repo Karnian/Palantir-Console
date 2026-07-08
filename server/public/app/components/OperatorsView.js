@@ -8,6 +8,7 @@ import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
+import { sseBroker } from '../lib/hooks/sse.js';
 import { addToast } from '../lib/toast.js';
 import { parseProjectConversationId } from '../lib/conversationId.js';
 import {
@@ -21,6 +22,8 @@ import { EmptyState } from './EmptyState.js';
 // Contract: count ONLY 'running' worker runs (Codex review — 'active' was too broad;
 // needs_input is waiting, not running). count-only, no run list (board 복제 방지).
 const ACTIVE_WORKER_STATUSES = new Set(['running']);
+const ROSTER_LIVE_CHANNELS = ['manager:started', 'manager:stopped', 'run:status', 'run:completed'];
+const ROSTER_REFRESH_DEBOUNCE_MS = 400;
 
 function Loading() {
   return html`<div class="loading">${COMMON_ACTIONS.loading}</div>`;
@@ -206,44 +209,75 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
   const [profiles, setProfiles] = useState([]);
   const [loadingStatus, setLoadingStatus] = useState(true);
   const [loadingProfiles, setLoadingProfiles] = useState(true);
-  const reqSeqRef = useRef(0);
+  const managerReqSeqRef = useRef(0);
+  const profilesReqSeqRef = useRef(0);
 
   useEffect(() => {
     let alive = true;
-    const seq = ++reqSeqRef.current;
+    let refreshTimer = null;
 
-    setLoadingStatus(true);
-    setLoadingProfiles(true);
-
-    apiFetch('/api/manager/status')
+    const fetchManagerStatus = ({ initial = false } = {}) => {
+      const seq = ++managerReqSeqRef.current;
+      if (initial) setLoadingStatus(true);
+      return apiFetch('/api/manager/status')
       .then((data) => {
-        if (!alive || seq !== reqSeqRef.current) return;
+        if (!alive || seq !== managerReqSeqRef.current) return;
         setManagerStatus(data || null);
       })
       .catch((err) => {
-        if (!alive || seq !== reqSeqRef.current) return;
-        setManagerStatus(null);
-        addToast(err.message, 'error');
+        if (!alive || seq !== managerReqSeqRef.current) return;
+        if (initial) {
+          setManagerStatus(null);
+          addToast(err.message, 'error');
+        }
       })
       .finally(() => {
-        if (alive && seq === reqSeqRef.current) setLoadingStatus(false);
+        if (alive && seq === managerReqSeqRef.current) setLoadingStatus(false);
       });
+    };
 
-    apiFetch('/api/operator/profiles')
+    const fetchProfiles = () => {
+      const seq = ++profilesReqSeqRef.current;
+      setLoadingProfiles(true);
+      return apiFetch('/api/operator/profiles')
       .then((data) => {
-        if (!alive || seq !== reqSeqRef.current) return;
+        if (!alive || seq !== profilesReqSeqRef.current) return;
         setProfiles(arrayValue(data?.profiles));
       })
       .catch((err) => {
-        if (!alive || seq !== reqSeqRef.current) return;
+        if (!alive || seq !== profilesReqSeqRef.current) return;
         setProfiles([]);
         addToast(err.message, 'error');
       })
       .finally(() => {
-        if (alive && seq === reqSeqRef.current) setLoadingProfiles(false);
+        if (alive && seq === profilesReqSeqRef.current) setLoadingProfiles(false);
       });
+    };
 
-    return () => { alive = false; };
+    const scheduleManagerRefresh = () => {
+      managerReqSeqRef.current += 1;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        fetchManagerStatus();
+      }, ROSTER_REFRESH_DEBOUNCE_MS);
+    };
+
+    fetchManagerStatus({ initial: true });
+    fetchProfiles();
+
+    const broker = typeof sseBroker !== 'undefined' ? sseBroker : null;
+    const unsubscribes = broker && typeof broker.subscribe === 'function'
+      ? ROSTER_LIVE_CHANNELS.map((channel) => broker.subscribe(channel, scheduleManagerRefresh))
+      : [];
+
+    return () => {
+      alive = false;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      unsubscribes.forEach((unsubscribe) => {
+        if (typeof unsubscribe === 'function') unsubscribe();
+      });
+    };
   }, []);
 
   const projectsById = useMemo(() => {
