@@ -1,6 +1,8 @@
 # Resident folder-less Operator — 설계 brief (draft, Codex 설계리뷰 대기)
 
-> **상태**: v3 LOCKED (2026-07-08) — Codex R1→R2→R3 적대 설계리뷰, R3 조건부 GO(6 lock + R-P1 수용조건). R-P1(schema/registry inert) 착수 가능. 사용자 greenlight 대기.
+> **상태**: ❌ **DE-SCOPE / 미채택 (2026-07-08)** — 사용자 결정: **"folder-less operator 는 호출 시 단발(one-shot)이 맞다."** 즉 현 one-shot specialist 가 folder-less 의 올바른 모델. Resident(상주) 는 **구현하지 않음**. 이 문서는 설계리뷰 결과 + 미채택 근거로 보존(재검토 시 참고).
+> **결정 경위**: V2-C 를 "brief 먼저" 로 진행 → Codex 적대 설계리뷰 3R(R1 7 SERIOUS → R2 3 BLOCKER → R3 조건부 GO) 로 코드 0 에서 전체 설계면 검증 → **사용자가 스펙/비용을 보고 one-shot 으로 충분하다 결정.** brief-먼저가 정확히 의도대로 작동(구현 착수 전 kill).
+> **미채택 근거(one-shot 이 맞는 이유)**: **(0) ⭐리소스 비용(사용자 핵심 근거): 상주 = 프로필마다 live 세션(agent 프로세스)을 idle 에도 계속 물고 있어야 함 → 지속 리소스 소모. one-shot 은 호출 시에만 spawn → 완료 후 정리 = 효율적.** 특히 원격/pod 배포에서 프로필 수만큼 상주 프로세스는 비현실적. (1) 상주 folder-less 는 장수명 세션 × capability 도구 = one-shot 보다 권한확대 공격면 큼(R1 SERIOUS 7). (2) 새 runtime actor(신규 slot/layer/table/routing/lifecycle) = arc 수준 백엔드 비용. (3) one-shot specialist 도 이미 Profile 메모리 주입(전이성 전문성 확보) → 상주의 핵심 가치가 이미 부분 충족. (4) 로스터 UX(Available='Ready to invoke', stateless)가 one-shot 모델과 정합 — 변경 불필요.
 > **모델 소스**: [`operator-generalization-brief.md`](./operator-generalization-brief.md) — Operator = Profile × WorkspaceBinding × ExecutionMode. 계층 Master→Operator→Worker.
 
 ## 0. Codex R1 min-GO 조건 (이 개정에서 반영)
