@@ -122,6 +122,14 @@ function hasRepoPreflightReason(err) {
   return Boolean(err?.reason || err?.data?.reason || err?.body?.reason);
 }
 
+function operatorWarmErrorMessage(err) {
+  const status = Number(err?.status || err?.statusCode || err?.httpStatus || 0);
+  if (status === 409) return PROJECTS_LABELS.operatorWarmConflictError;
+  if (status === 400) return PROJECTS_LABELS.operatorWarmAuthError;
+  if (status === 502) return PROJECTS_LABELS.operatorWarmSpawnFailedError;
+  return err?.message || PROJECTS_LABELS.operatorWarmDefaultError;
+}
+
 function projectLocationText(project) {
   if (projectSourceType(project) === SOURCE_TYPE_GIT) {
     const ref = project.repo_ref || 'HEAD';
@@ -681,7 +689,18 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   const [operatorResetting, setOperatorResetting] = useState(false);
   const [retargetSuggestion, setRetargetSuggestion] = useState(null);
   const [retargetingQueued, setRetargetingQueued] = useState(false);
+  const [warmingProjectIds, setWarmingProjectIds] = useState({});
+  const warmingProjectIdsRef = useRef(new Set());
   const highlightedCardRef = useRef(null);
+
+  const setProjectWarming = (projectId, warming) => {
+    const key = String(projectId);
+    const next = new Set(warmingProjectIdsRef.current);
+    if (warming) next.add(key);
+    else next.delete(key);
+    warmingProjectIdsRef.current = next;
+    setWarmingProjectIds(Object.fromEntries(Array.from(next, id => [id, true])));
+  };
 
   const loadNodes = useCallback(async () => {
     setNodesLoading(true);
@@ -876,6 +895,28 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
     setRetargetingQueued(false);
   };
 
+  const handleWarmOperator = async (projectId) => {
+    const key = String(projectId);
+    if (warmingProjectIdsRef.current.has(key)) return;
+    setProjectWarming(projectId, true);
+    try {
+      const data = await apiFetchWithToast(`/api/manager/pm/${encodeURIComponent(projectId)}/warm`, {
+        method: 'POST',
+        errorMessage: operatorWarmErrorMessage,
+      });
+      addToast(
+        data?.spawned === false
+          ? PROJECTS_LABELS.operatorWarmAlreadyReadyToast
+          : PROJECTS_LABELS.operatorWarmReadyToast,
+        'success',
+      );
+      window.location.hash = '#operator';
+    } catch (err) {
+      // apiFetchWithToast owns the user-facing error toast.
+    }
+    setProjectWarming(projectId, false);
+  };
+
   // Keep detailProject in sync with latest data
   const currentDetailProject = detailProject ? projects.find(p => p.id === detailProject.id) || detailProject : null;
 
@@ -905,6 +946,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
           const remoteNodeId = projectNodeValue(p);
           const locationText = projectLocationText(p);
           const highlighted = highlightProjectId && String(p.id) === String(highlightProjectId);
+          const warming = Boolean(warmingProjectIds[String(p.id)]);
           return html`
             <article
               key=${p.id}
@@ -927,7 +969,18 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
                 <span class="project-card-meta">${PROJECTS_LABELS.createdLabel} ${formatTime(p.created_at)}</span>
               </button>
               <div class="project-card-actions" style="margin-top:8px;">
-                <a class="ghost small" data-role="project-open-operator" href="#operator">${PROJECTS_LABELS.openOperator}</a>
+                <button
+                  class="ghost small"
+                  type="button"
+                  data-role="project-warm-operator"
+                  onClick=${() => handleWarmOperator(p.id)}
+                  disabled=${warming}
+                  aria-busy=${warming ? 'true' : 'false'}
+                  aria-label=${warming ? PROJECTS_LABELS.preparingOperatorAria : PROJECTS_LABELS.prepareOperator}
+                >
+                  ${warming && html`<span class="operator-spinner" aria-hidden="true"></span>`}
+                  ${PROJECTS_LABELS.prepareOperator}
+                </button>
                 <button class="ghost small" onClick=${() => openEdit(p)}>${COMMON_ACTIONS.edit}</button>
               </div>
             </article>

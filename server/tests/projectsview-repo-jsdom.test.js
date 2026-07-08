@@ -20,7 +20,17 @@ async function waitFor(assertion, timeoutMs = 1000) {
 
 function installProjectsStubs(env, apiFetch, toasts = []) {
   env.context.apiFetch = apiFetch || (async () => ({}));
-  env.context.apiFetchWithToast = async (url, options) => env.context.apiFetch(url, options);
+  env.context.apiFetchWithToast = async (url, options = {}) => {
+    try {
+      return await env.context.apiFetch(url, options);
+    } catch (err) {
+      const message = typeof options.errorMessage === 'function'
+        ? options.errorMessage(err)
+        : options.errorMessage || err.message;
+      env.context.addToast(message, 'error');
+      throw err;
+    }
+  };
   env.context.addToast = (message, type) => { toasts.push({ message, type }); };
   env.context.formatTime = () => '2026-07-05';
   env.context.clickableProps = (onClick) => ({ onClick, role: 'button', tabIndex: 0 });
@@ -396,6 +406,95 @@ test('ProjectsView edit clears legacy fields when switching to git source', asyn
   });
 });
 
+test('ProjectsView warm operator action posts warm endpoint, disables in-flight, toasts, and navigates roster', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  const toasts = [];
+  let warmRequest = null;
+  let resolveWarm;
+  const warmPromise = new Promise((resolve) => { resolveWarm = resolve; });
+  installProjectsStubs(env, async (url, options = {}) => {
+    if (url === '/api/nodes') return { nodes: [] };
+    if (url === '/api/manager/pm/proj_alpha/warm' && options.method === 'POST') {
+      warmRequest = { url, options };
+      return warmPromise;
+    }
+    return {};
+  }, toasts);
+  env.loadComponent('ProjectsView');
+
+  const root = renderProjectsView(env, {
+    projects: [{
+      id: 'proj_alpha',
+      name: 'Alpha Console',
+      source_type: 'git',
+      repo_url: 'https://github.com/acme/alpha.git',
+      created_at: '2026-07-05T00:00:00.000Z',
+    }],
+  });
+
+  const button = await waitFor(() => {
+    const el = root.querySelector('[data-role="project-warm-operator"]');
+    assert.ok(el);
+    assert.match(el.textContent, /오퍼레이터 준비/);
+    return el;
+  });
+  button.click();
+
+  await waitFor(() => {
+    assert.ok(warmRequest);
+    assert.equal(warmRequest.url, '/api/manager/pm/proj_alpha/warm');
+    assert.equal(warmRequest.options.method, 'POST');
+    assert.equal(button.disabled, true);
+    assert.equal(button.getAttribute('aria-busy'), 'true');
+    assert.ok(button.querySelector('.operator-spinner'));
+  });
+
+  resolveWarm({ spawned: true });
+
+  await waitFor(() => {
+    assert.ok(toasts.some((toast) => toast.type === 'success' && toast.message === '오퍼레이터를 준비했습니다'));
+    assert.equal(env.window.location.hash, '#operator');
+    assert.equal(button.disabled, false);
+  });
+});
+
+test('ProjectsView warm operator action reports already-ready fast path', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  const toasts = [];
+  installProjectsStubs(env, async (url, options = {}) => {
+    if (url === '/api/nodes') return { nodes: [] };
+    if (url === '/api/manager/pm/proj_alpha/warm' && options.method === 'POST') {
+      return { spawned: false };
+    }
+    return {};
+  }, toasts);
+  env.loadComponent('ProjectsView');
+
+  const root = renderProjectsView(env, {
+    projects: [{
+      id: 'proj_alpha',
+      name: 'Alpha Console',
+      source_type: 'git',
+      repo_url: 'https://github.com/acme/alpha.git',
+      created_at: '2026-07-05T00:00:00.000Z',
+    }],
+  });
+
+  const button = await waitFor(() => {
+    const el = root.querySelector('[data-role="project-warm-operator"]');
+    assert.ok(el);
+    return el;
+  });
+  button.click();
+
+  await waitFor(() => {
+    assert.ok(toasts.some((toast) => toast.type === 'success' && toast.message === '이미 준비된 오퍼레이터가 있습니다'));
+    assert.equal(env.window.location.hash, '#operator');
+  });
+});
+
 test('ProjectsView highlights codebase selected by #operator/codebases deep link', async (t) => {
   const env = createPreactEnv();
   t.after(env.cleanup);
@@ -422,8 +521,8 @@ test('ProjectsView highlights codebase selected by #operator/codebases deep link
     assert.equal(el.getAttribute('data-highlighted'), 'true');
     return el;
   });
-  const operatorLink = card.querySelector('[data-role="project-open-operator"]');
-  assert.ok(operatorLink);
-  assert.equal(operatorLink.getAttribute('href'), '#operator');
-  assert.match(operatorLink.textContent, /오퍼레이터 열기/);
+  const operatorButton = card.querySelector('[data-role="project-warm-operator"]');
+  assert.ok(operatorButton);
+  assert.equal(card.querySelector('[data-role="project-open-operator"]'), null);
+  assert.match(operatorButton.textContent, /오퍼레이터 준비/);
 });
