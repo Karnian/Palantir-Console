@@ -1092,6 +1092,8 @@ export const OPERATOR_ROSTER_LABELS = {
   capabilitySummaryLabel: 'capability',
   capabilitiesEmpty: 'No capability grants',
   personaEmpty: 'No persona summary',
+  invokeOperator: '호출',
+  openProfile: '프로필 보기',
   availableEmptyText: '폴더 없는 프로필이 없습니다',
   availableEmptySub: '프로필 화면에서 호출형 오퍼레이터 프로필을 만들 수 있습니다.',
 };

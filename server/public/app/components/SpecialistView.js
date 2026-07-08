@@ -6,13 +6,13 @@
 // The specialist is read-only / stateless: no task, no run, no worktree.
 
 import { h } from '../../vendor/preact.module.js';
-import { useState, useMemo, useEffect } from '../../vendor/hooks.module.js';
+import { useState, useMemo, useEffect, useRef } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
 
-export function SpecialistView({ runs = [] }) {
+export function SpecialistView({ runs = [], initialProfileId = '' }) {
   const [profileId, setProfileId]     = useState('');
   const [userText, setUserText]       = useState('');
   const [originRunId, setOriginRunId] = useState('');
@@ -20,16 +20,27 @@ export function SpecialistView({ runs = [] }) {
   const [loading, setLoading]         = useState(false);
   const [result, setResult]           = useState(null);
   const [error, setError]             = useState(null);
+  const initialProfileSeedRef         = useRef(null);
+  const originAutoSelectedRef         = useRef(false);
+  const normalizedInitialProfileId    = String(initialProfileId || '').trim();
 
   // Load operator profiles for the picker (Contract A: the profile supplies
   // persona + capabilities, so the request only carries profileId).
   useEffect(() => {
     let alive = true;
     apiFetch('/api/operator/profiles')
-      .then((data) => { if (alive) setProfiles(Array.isArray(data.profiles) ? data.profiles : []); })
+      .then((data) => { if (alive) setProfiles(Array.isArray(data?.profiles) ? data.profiles : []); })
       .catch(() => { if (alive) setProfiles([]); });
     return () => { alive = false; };
   }, []);
+
+  useEffect(() => {
+    if (!normalizedInitialProfileId) return;
+    if (initialProfileSeedRef.current === normalizedInitialProfileId) return;
+    if (!profiles.some((p) => String(p?.id || '') === normalizedInitialProfileId)) return;
+    setProfileId(normalizedInitialProfileId);
+    initialProfileSeedRef.current = normalizedInitialProfileId;
+  }, [profiles, normalizedInitialProfileId]);
 
   // Active manager runs the operator invocation can be anchored to.
   const managerRuns = useMemo(() =>
@@ -37,8 +48,25 @@ export function SpecialistView({ runs = [] }) {
       (r.status === 'running' || r.status === 'needs_input')),
     [runs],
   );
-  // Reset the selection if the chosen run leaves the active list.
+  // Auto-anchor when there is exactly one active manager run; otherwise keep
+  // the origin-run contract explicit and reset stale selections.
   useEffect(() => {
+    if (managerRuns.length === 1) {
+      const nextRunId = managerRuns[0]?.id || '';
+      if (nextRunId && originRunId !== nextRunId) {
+        originAutoSelectedRef.current = true;
+        setOriginRunId(nextRunId);
+      }
+      return;
+    }
+    // Transitioned from the single auto-anchored run to multiple: the user
+    // never explicitly chose, so drop the auto-selection and force a pick
+    // (multiple active runs = explicit origin-run contract).
+    if (originAutoSelectedRef.current) {
+      originAutoSelectedRef.current = false;
+      if (originRunId) setOriginRunId('');
+      return;
+    }
     if (originRunId && !managerRuns.some(r => r.id === originRunId)) setOriginRunId('');
   }, [managerRuns, originRunId]);
 
@@ -61,7 +89,7 @@ export function SpecialistView({ runs = [] }) {
   }
 
   const submitDisabled = loading || !profileId || !userText.trim() || !originRunId;
-  const selectedProfile = profiles.find((p) => p.id === profileId) || null;
+  const selectedProfile = profiles.find((p) => String(p.id) === profileId) || null;
 
   return html`
     <div class="page specialist-page" data-view="specialist">
@@ -102,7 +130,7 @@ export function SpecialistView({ runs = [] }) {
             id="specialist-origin-run"
             class="form-select"
             value=${originRunId}
-            onChange=${(e) => setOriginRunId(e.target.value)}
+            onChange=${(e) => { originAutoSelectedRef.current = false; setOriginRunId(e.target.value); }}
           >
             ${managerRuns.length === 0
               ? html`<option value="" disabled selected>활성 매니저 run 없음</option>`

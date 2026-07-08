@@ -52,6 +52,10 @@ function runHref(id) {
   return `#run/${encodeURIComponent(String(id || ''))}`;
 }
 
+function specialistHref(profileId) {
+  return `#operator/specialist/${encodeURIComponent(String(profileId || ''))}`;
+}
+
 function parsedProjectId(entry) {
   const fromEntry = parseProjectConversationId(entry?.conversationId);
   if (fromEntry) return fromEntry.projectId;
@@ -159,10 +163,9 @@ function LiveOperatorCard({ entry, projectsById, runs, taskById }) {
 
 function AvailableOperatorCard({ profile }) {
   return html`
-    <a
+    <article
       class="operator-profile-card operator-roster-card operator-roster-available-card"
       data-role="operator-roster-available-card"
-      href="#operator/profiles"
     >
       <div class="operator-profile-card-header">
         <h3 class="operator-profile-name">${profile.name}</h3>
@@ -178,7 +181,23 @@ function AvailableOperatorCard({ profile }) {
         <span>${OPERATOR_ROSTER_LABELS.capabilitySummaryLabel}</span>
         <strong>${capabilitySummary(profile)}</strong>
       </div>
-    </a>
+      <div class="operator-roster-footer">
+        <span class="operator-roster-actions">
+          <a
+            class="ghost small"
+            data-role="operator-roster-available-invoke-link"
+            href=${specialistHref(profile.id)}
+            aria-label=${`${profile.name} ${OPERATOR_ROSTER_LABELS.invokeOperator}`}
+          >${OPERATOR_ROSTER_LABELS.invokeOperator}</a>
+          <a
+            class="ghost small"
+            data-role="operator-roster-available-profile-link"
+            href="#operator/profiles"
+            aria-label=${`${profile.name} ${OPERATOR_ROSTER_LABELS.openProfile}`}
+          >${OPERATOR_ROSTER_LABELS.openProfile}</a>
+        </span>
+      </div>
+    </article>
   `;
 }
 
