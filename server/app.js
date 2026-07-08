@@ -338,7 +338,10 @@ function createPmAutoReview({
 
     defer(() => {
       try {
-        conversationService.sendMessage(receiver.slotKey, { text: reviewText });
+        conversationService.sendMessage(receiver.slotKey, {
+          text: reviewText,
+          codebaseProjectId: run.project_id || null,
+        });
       } catch (err) {
         // Decrement (not set-to-count) so a concurrent reservation isn't clobbered;
         // delete at zero so the key returns to its pristine (absent) state.

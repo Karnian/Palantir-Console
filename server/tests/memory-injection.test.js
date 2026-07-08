@@ -19,8 +19,9 @@ const { createManagerRegistry } = require('../services/managerRegistry');
 const { createConversationService } = require('../services/conversationService');
 const { createOperatorSpawnService } = require('../services/operatorSpawnService');
 const { createMemoryService } = require('../services/memoryService');
+const { createMasterMemoryService } = require('../services/masterMemoryService');
 const { createCompositionLedger } = require('../services/compositionLedger');
-const { createMemoryComposer, buildWorkspaceAdapter } = require('../services/memoryComposer');
+const { createMemoryComposer, buildWorkspaceAdapter, buildUserAdapter } = require('../services/memoryComposer');
 const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
 const { createApp } = require('../app');
 const { invokeApp } = require('./helpers/invokeApp');
@@ -345,16 +346,18 @@ test('Part D: fixed Learned Memory pointer line present in PM base, ABSENT from 
 // INTEGRATION — runTurn payload carries the memory block, gated by the ledger.
 // ---------------------------------------------------------------------------
 
-function wirePmStack(db) {
+function wirePmStack(db, { memoryMultiOwner = false } = {}) {
   const rs = createRunService(db, null);
   const projectService = createProjectService(db);
   const projectBriefService = createProjectBriefService(db);
   const registry = createManagerRegistry({ runService: rs });
   const memoryService = createMemoryService(db);
+  const masterMemoryService = createMasterMemoryService(db);
   const compositionLedger = createCompositionLedger(db);
   const memoryComposer = createMemoryComposer({
     retrievers: {
       workspace: buildWorkspaceAdapter(memoryService),
+      user: buildUserAdapter(masterMemoryService),
     },
   });
   const fakePm = makeFakeCodexAdapter();
@@ -372,10 +375,16 @@ function wirePmStack(db) {
     lifecycleService: { sendAgentInput: () => true },
     operatorSpawnService: spawn,
     memoryService,
+    masterMemoryService,
+    memoryMultiOwner,
     memoryComposer,
     compositionLedger,
   });
-  return { rs, projectService, projectBriefService, registry, memoryService, compositionLedger, fakePm, topAdapter, spawn, conv };
+  return {
+    rs, projectService, projectBriefService, registry,
+    memoryService, masterMemoryService, compositionLedger,
+    fakePm, topAdapter, spawn, conv,
+  };
 }
 
   test('INTEGRATION: PM user payload contains ## Learned Memory on first send, NOT on second (composition ledger), again after revision bump', async (t) => {
@@ -515,4 +524,64 @@ test('INTEGRATION: memoryService failure degrades to no-injection (message still
   assert.equal(fakePm._runTurnCalls.length, 1, 'message delivered despite memory failure');
   assert.doesNotMatch(fakePm._runTurnCalls[0].payload.text, /## Learned Memory/, 'no block when memory failed');
   assert.match(fakePm._runTurnCalls[0].payload.text, /hello/);
+});
+
+test('W-P6b: primaryless operator turn injects User memory only and records only injected owners', async (t) => {
+  const db = await mkdb(t);
+  const stack = wirePmStack(db);
+  const {
+    rs, projectService, registry, memoryService, masterMemoryService, fakePm, conv,
+  } = stack;
+
+  const referenceProject = projectService.createProject({ name: 'reference-only' });
+  db.prepare("INSERT INTO operator_instances (id) VALUES ('oi_generic')").run();
+  db.prepare(`
+    INSERT INTO operator_codebase_refs (instance_id, project_id, role)
+    VALUES ('oi_generic', ?, 'reference')
+  `).run(referenceProject.id);
+
+  memoryService.createMemoryItem({
+    projectId: referenceProject.id,
+    kind: 'convention',
+    content: 'reference raw workspace must not leak into a generic turn',
+    origin: 'human',
+  });
+  masterMemoryService.createMemoryItem({
+    scope: 'user',
+    kind: 'constraint',
+    content: 'generic turns include user memory only',
+    origin: 'human',
+  });
+
+  const run = rs.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_generic',
+    operator_instance_id: 'oi_generic',
+    manager_adapter: 'codex',
+    prompt: 'generic operator',
+  });
+  rs.updateRunStatus(run.id, 'running', { force: true });
+  fakePm.startSession(run.id, { systemPrompt: 'pm', cwd: process.cwd() });
+  registry.setActive('operator:oi_generic', run.id, fakePm);
+
+  conv.sendMessage('operator:oi_generic', { text: 'generic guidance?' });
+
+  assert.equal(fakePm._runTurnCalls.length, 1);
+  const payload = fakePm._runTurnCalls[0].payload.text;
+  assert.match(payload, /## User Memory/, 'primaryless turn still injects User memory');
+  assert.match(payload, /generic turns include user memory only/);
+  assert.doesNotMatch(payload, /## Learned Memory/, 'primaryless generic turn must not inject workspace memory');
+  assert.doesNotMatch(payload, /reference raw workspace must not leak/);
+
+  const owners = db.prepare(`
+    SELECT os.owner_type, os.owner_id, COALESCE(os.provenance_key, '') AS provenance_key
+    FROM memory_composition_owner_state os
+    JOIN memory_composition_events e ON e.id = os.composition_id
+    WHERE e.run_id = ? AND e.slot_kind = 'operator' AND e.status = 'accepted'
+    ORDER BY os.rowid
+  `).all(run.id);
+  assert.deepEqual(owners, [
+    { owner_type: 'user', owner_id: 'user', provenance_key: 'user' },
+  ]);
 });

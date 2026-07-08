@@ -144,6 +144,12 @@ function createRunService(db, eventBus) {
     getOperatorInstance: db.prepare(`
       SELECT * FROM operator_instances WHERE id = ?
     `),
+    getOperatorRef: db.prepare(`
+      SELECT role
+      FROM operator_codebase_refs
+      WHERE instance_id = ? AND project_id = ?
+      LIMIT 1
+    `),
     updateOperatorThread: db.prepare(`
       UPDATE operator_instances
          SET thread_id = @thread_id,
@@ -638,6 +644,15 @@ function createRunService(db, eventBus) {
   function getOperatorInstance(instanceId) {
     if (!instanceId) return null;
     return stmts.getOperatorInstance.get(instanceId) || null;
+  }
+
+  function getOperatorInstanceRef(instanceId, projectId) {
+    if (!instanceId || !projectId) return null;
+    return stmts.getOperatorRef.get(instanceId, projectId) || null;
+  }
+
+  function operatorInstanceHasRef(instanceId, projectId) {
+    return Boolean(getOperatorInstanceRef(instanceId, projectId));
   }
 
   function getOperatorThreadForProject(projectId, { ensure = false } = {}) {
@@ -1381,6 +1396,8 @@ function createRunService(db, eventBus) {
     resolveOperatorConversationId: resolveOperatorConversationIdWithDb,
     ensurePrimaryOperatorInstanceForProject,
     getOperatorInstance,
+    getOperatorInstanceRef,
+    operatorInstanceHasRef,
     getOperatorThreadForProject,
     setOperatorInstanceThread,
     deleteRun, addRunEvent, getRunEvents,
