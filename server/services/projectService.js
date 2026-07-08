@@ -126,11 +126,23 @@ function createProjectService(db) {
     getNodeById: db.prepare('SELECT * FROM nodes WHERE id = ?'),
     getBriefThread: db.prepare('SELECT pm_thread_id FROM project_briefs WHERE project_id = ?'),
     countLiveOperatorRuns: db.prepare(`
-      SELECT COUNT(*) AS count FROM runs
-      WHERE conversation_id = ?
-        AND manager_layer = 'operator'
-        AND is_manager = 1
-        AND status IN ('queued', 'running', 'needs_input')
+      SELECT COUNT(*) AS count FROM runs r
+      WHERE r.manager_layer = 'operator'
+        AND r.is_manager = 1
+        AND r.status IN ('queued', 'running', 'needs_input')
+        AND (
+          r.conversation_id = 'operator:' || ?
+          OR r.conversation_id IN (
+            SELECT 'operator:' || ref.instance_id
+            FROM operator_codebase_refs ref
+            WHERE ref.project_id = ? AND ref.role = 'primary'
+          )
+          OR r.operator_instance_id IN (
+            SELECT ref.instance_id
+            FROM operator_codebase_refs ref
+            WHERE ref.project_id = ? AND ref.role = 'primary'
+          )
+        )
     `),
     insert: db.prepare(`
       INSERT INTO projects (
@@ -269,7 +281,7 @@ function createProjectService(db) {
         // BEFORE pm_thread_id is persisted (thread id arrives on thread.started),
         // so a brief-only check has a window where a live Operator escapes the
         // guard (Codex P1a review, SERIOUS #2).
-        const liveOps = stmts.countLiveOperatorRuns.get(`operator:${id}`).count;
+        const liveOps = stmts.countLiveOperatorRuns.get(id, id, id).count;
         if (brief?.pm_thread_id || liveOps > 0) {
           const err = new Error('operator thread is bound to the current node — reset the operator before rebinding');
           err.httpStatus = 409;
@@ -289,7 +301,7 @@ function createProjectService(db) {
     const shouldBumpSourceGeneration = sourceTypeChanged || sourceFieldsChanged;
     if (shouldBumpSourceGeneration) {
       const brief = stmts.getBriefThread.get(id);
-      const liveOps = stmts.countLiveOperatorRuns.get(`operator:${id}`).count;
+      const liveOps = stmts.countLiveOperatorRuns.get(id, id, id).count;
       if (brief?.pm_thread_id || liveOps > 0) {
         const err = new Error('operator is bound to the current repo source — reset the operator before changing repo/ref/subdir/mcp');
         err.httpStatus = 409;

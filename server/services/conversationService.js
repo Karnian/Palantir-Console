@@ -38,10 +38,11 @@
 //   over an existing backend — the NEW work is the parent notice router.
 
 const {
+  conversationIdForProject,
+  isInstanceConversationId,
+  isOperatorConversationId,
   parseProjectConversationId,
-  isProjectConversationId,
   isProjectLayer,
-  canonicalConversationId,
 } = require('../utils/conversationId'); // PM→Operator rename Phase 0: dual-read
 
 function createConversationService({
@@ -122,6 +123,48 @@ function createConversationService({
     return `${noticeBlock}\n\n---\n\n${original}`;
   }
 
+  function resolveOperatorConversation(conversationId) {
+    if (!isOperatorConversationId(conversationId)) return null;
+    if (runService && typeof runService.resolveOperatorConversationId === 'function') {
+      try {
+        const resolved = runService.resolveOperatorConversationId(conversationId);
+        if (resolved) return resolved;
+      } catch { /* fall through */ }
+    }
+    const parsed = parseProjectConversationId(conversationId);
+    if (parsed) {
+      return {
+        instanceId: null,
+        legacyProjectId: parsed.projectId,
+        legacySlotId: conversationIdForProject(parsed.projectId),
+        instanceConversationId: null,
+        primaryProjectId: null,
+      };
+    }
+    if (isInstanceConversationId(conversationId)) {
+      return {
+        instanceId: conversationId.slice('operator:'.length),
+        legacyProjectId: null,
+        legacySlotId: null,
+        instanceConversationId: conversationId,
+        primaryProjectId: null,
+      };
+    }
+    return null;
+  }
+
+  function parseOperatorRoute(id) {
+    const resolved = resolveOperatorConversation(id);
+    if (!resolved) return null;
+    return {
+      kind: 'pm',
+      projectId: resolved.primaryProjectId || resolved.legacyProjectId || null,
+      instanceId: resolved.instanceId || null,
+      conversationId: resolved.instanceConversationId || id,
+      legacyConversationId: resolved.legacySlotId || null,
+    };
+  }
+
   // Parse a conversation id into its structural parts. Returns null for
   // malformed ids so callers can return 404 rather than crash.
   function parseConversationId(id) {
@@ -132,6 +175,8 @@ function createConversationService({
     // parseConversationId are unchanged.
     const proj = parseProjectConversationId(id);
     if (proj) return { kind: 'pm', projectId: proj.projectId };
+    const operator = parseOperatorRoute(id);
+    if (operator) return operator;
     if (id.startsWith('worker:')) {
       const runId = id.slice(7);
       if (!runId) return null;
@@ -151,12 +196,21 @@ function createConversationService({
       return { kind: 'top', conversationId: 'top', run };
     }
     if (parsed.kind === 'pm') {
+      const operator = parseOperatorRoute(id) || parsed;
       // v3 Phase 2: Operator slot is now a 1st-class runtime target. probeActive
       // returns the currently live Operator run for this project (or null if no
       // Operator has been spawned yet — Phase 3a handles lazy spawn). The /status
       // endpoint gets an accurate projected slot either way.
-      const run = managerRegistry.probeActive(id);
-      return { kind: 'pm', conversationId: id, projectId: parsed.projectId, run };
+      const conversationKey = operator.conversationId || id;
+      const run = managerRegistry.probeActive(conversationKey);
+      return {
+        kind: 'pm',
+        conversationId: conversationKey,
+        legacyConversationId: operator.legacyConversationId || null,
+        projectId: operator.projectId || parsed.projectId || null,
+        instanceId: operator.instanceId || null,
+        run,
+      };
     }
     // Worker
     const run = runService.getRunByConversationId(id);
@@ -191,10 +245,11 @@ function createConversationService({
       return sendToWorker(parsed.runId, { text, images });
     }
     if (parsed.kind === 'pm') {
-      return sendToManagerSlot(conversationId, {
+      const operator = parseOperatorRoute(conversationId) || parsed;
+      return sendToManagerSlot(operator.conversationId || conversationId, {
         text,
         images,
-        projectId: parsed.projectId,
+        projectId: operator.projectId || parsed.projectId || null,
       });
     }
     const err = new Error('unreachable');
@@ -237,6 +292,12 @@ function createConversationService({
   //           Top, to avoid leaking stale signals into unrelated runs).
   function sendToManagerSlot(conversationId, { text, images, projectId } = {}) {
     const isTop = conversationId === 'top';
+    let operatorResolved = null;
+    if (!isTop) {
+      operatorResolved = resolveOperatorConversation(conversationId);
+      if (operatorResolved?.instanceConversationId) conversationId = operatorResolved.instanceConversationId;
+      if (!projectId) projectId = operatorResolved?.primaryProjectId || operatorResolved?.legacyProjectId || null;
+    }
     const layerLabel = isTop ? 'Top' : 'PM';
 
     let run = managerRegistry.probeActive(conversationId);
@@ -261,9 +322,13 @@ function createConversationService({
               err.httpStatus = spawnErr.httpStatus || 502;
               throw err;
             })
-            .then(() => sendToManagerSlot(conversationId, { text, images, projectId }));
+            .then((spawnResult) => sendToManagerSlot(
+              spawnResult?.run?.conversation_id || conversationId,
+              { text, images, projectId },
+            ));
         }
         run = spawn.run;
+        if (run?.conversation_id) conversationId = run.conversation_id;
       } catch (spawnErr) {
         // Preserve the spawn service's httpStatus if set so the route
         // layer returns a meaningful code (409/404/502) instead of a
@@ -288,10 +353,15 @@ function createConversationService({
     {
       // dual-read: a project send matches EITHER manager_layer 'pm' or 'operator'.
       const layerOk = isTop ? (run.manager_layer === 'top') : isProjectLayer(run.manager_layer);
+      const runResolved = isTop ? null : resolveOperatorConversation(run.conversation_id);
+      const expectedConversationId = isTop ? 'top' : conversationId;
+      const runConversationId = isTop
+        ? run.conversation_id
+        : (runResolved?.instanceConversationId || run.conversation_id);
       if (
         !run.is_manager ||
         !layerOk ||
-        canonicalConversationId(run.conversation_id) !== canonicalConversationId(conversationId)
+        runConversationId !== expectedConversationId
       ) {
         const bindErr = new Error(
           `manager run binding mismatch: run.id=${run.id} run.conversation_id=${run.conversation_id} ` +
@@ -589,7 +659,7 @@ function createConversationService({
 
     const target = isTop
       ? { kind: 'top', runId: run.id }
-      : { kind: 'pm', runId: run.id, projectId };
+      : { kind: 'pm', runId: run.id, projectId, instanceId: operatorResolved?.instanceId || run.operator_instance_id || null };
     return { status: 'sent', target };
   }
 
@@ -704,9 +774,17 @@ function createConversationService({
     }
     if (!parent || !parent.is_manager || !isProjectLayer(parent.manager_layer)) return null;
     const pmSlotKey = parent.conversation_id;
-    if (!isProjectConversationId(pmSlotKey)) return null;
-    const activePmRunId = managerRegistry.getActiveRunId(pmSlotKey);
-    if (activePmRunId && activePmRunId === parentRunId) return pmSlotKey;
+    if (!isOperatorConversationId(pmSlotKey)) return null;
+    // W-P5 R1 (Codex): a legacy parent run (conversation_id=operator:<projectId>)
+    // passes the active check via registry normalization but must RETURN the
+    // normalized instance slot — notices queued under the legacy key would land
+    // in a slot nobody drains after the flip.
+    const resolved = typeof runService.resolveOperatorConversationId === 'function'
+      ? runService.resolveOperatorConversationId(pmSlotKey)
+      : null;
+    const normalizedSlot = resolved?.instanceConversationId || pmSlotKey;
+    const activePmRunId = managerRegistry.getActiveRunId(normalizedSlot);
+    if (activePmRunId && activePmRunId === parentRunId) return normalizedSlot;
     return null;
   }
 

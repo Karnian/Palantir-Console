@@ -45,6 +45,7 @@
 //   }
 
 const {
+  isOperatorConversationId,
   isProjectConversationId,
   conversationIdForProject,
 } = require('../utils/conversationId'); // PM→Operator rename Phase 0
@@ -54,7 +55,7 @@ const VALID_TARGET_PREFIXES = ['top', 'operator:', 'worker:'];
 function isValidConversationId(id) {
   if (typeof id !== 'string' || id.length === 0) return false;
   if (id === 'top') return true;
-  if (isProjectConversationId(id)) return true; // operator:<id>, non-empty
+  if (isProjectConversationId(id) || isOperatorConversationId(id)) return true; // operator:<projectId|oi_*>, non-empty
   if (id.startsWith('worker:') && id.length > 7) return true;
   return false;
 }

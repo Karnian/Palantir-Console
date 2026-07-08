@@ -18,7 +18,13 @@
 // populates the 'top' slot. Enumerating PM now means the registry shape
 // doesn't have to change later.
 
-const { isProjectConversationId, canonicalConversationId } = require('../utils/conversationId'); // PM→Operator Phase 0
+const {
+  canonicalConversationId,
+  conversationIdForProject,
+  isOperatorConversationId,
+  isInstanceConversationId,
+  parseProjectConversationId,
+} = require('../utils/conversationId'); // PM→Operator Phase 0
 
 function createManagerRegistry({ runService }) {
   // conversationId -> { runId, adapter }
@@ -37,13 +43,57 @@ function createManagerRegistry({ runService }) {
     }
   }
 
+  function resolveOperatorSlot(conversationId, { ensure = false } = {}) {
+    if (!isOperatorConversationId(conversationId)) return null;
+    if (runService && typeof runService.resolveOperatorConversationId === 'function') {
+      try {
+        const resolved = runService.resolveOperatorConversationId(conversationId);
+        if (resolved?.instanceId) {
+          return {
+            conversationId: conversationIdForProject(resolved.instanceId),
+            legacyConversationId: resolved.legacySlotId || (resolved.primaryProjectId ? conversationIdForProject(resolved.primaryProjectId) : null),
+            primaryProjectId: resolved.primaryProjectId || resolved.legacyProjectId || null,
+            instanceId: resolved.instanceId,
+          };
+        }
+      } catch { /* fall through */ }
+    }
+    const parsed = parseProjectConversationId(conversationId);
+    if (ensure && parsed?.projectId && runService && typeof runService.ensurePrimaryOperatorInstanceForProject === 'function') {
+      try {
+        const ensured = runService.ensurePrimaryOperatorInstanceForProject(parsed.projectId);
+        if (ensured?.instanceId) {
+          return {
+            conversationId: conversationIdForProject(ensured.instanceId),
+            legacyConversationId: ensured.legacySlotId || conversationIdForProject(parsed.projectId),
+            primaryProjectId: ensured.primaryProjectId || parsed.projectId,
+            instanceId: ensured.instanceId,
+          };
+        }
+      } catch { /* fall through */ }
+    }
+    if (isInstanceConversationId(conversationId)) {
+      return {
+        conversationId,
+        legacyConversationId: null,
+        primaryProjectId: null,
+        instanceId: conversationId.slice('operator:'.length),
+      };
+    }
+    return null;
+  }
+
+  function slotKey(conversationId, opts) {
+    if (conversationId === 'top') return 'top';
+    const resolved = resolveOperatorSlot(conversationId, opts);
+    return resolved?.conversationId || canonicalConversationId(conversationId);
+  }
+
   function setActive(conversationId, runId, adapter) {
     if (!conversationId) throw new Error('conversationId required');
     if (!runId) throw new Error('runId required');
     if (!adapter) throw new Error('adapter required');
-    // dual-read (PM→Operator Phase 0): key slots by canonical form so `pm:<id>`
-    // and `operator:<id>` map to ONE slot regardless of which form a caller uses.
-    conversationId = canonicalConversationId(conversationId);
+    conversationId = slotKey(conversationId, { ensure: true });
     // If a previous entry existed for this slot, treat the swap as a
     // clear for the OLD run id so listeners can scrub per-runId state
     // before we overwrite. This covers Operator slot rotation (new Operator run
@@ -75,7 +125,7 @@ function createManagerRegistry({ runService }) {
   }
 
   function clearActive(conversationId) {
-    conversationId = canonicalConversationId(conversationId); // dual-read slot key
+    conversationId = slotKey(conversationId);
     const entry = active.get(conversationId);
     if (!entry) return;
     active.delete(conversationId);
@@ -94,12 +144,12 @@ function createManagerRegistry({ runService }) {
   }
 
   function getActiveRunId(conversationId) {
-    const entry = active.get(canonicalConversationId(conversationId)); // dual-read slot key
+    const entry = active.get(slotKey(conversationId));
     return entry ? entry.runId : null;
   }
 
   function getActiveAdapter(conversationId) {
-    const entry = active.get(canonicalConversationId(conversationId)); // dual-read slot key
+    const entry = active.get(slotKey(conversationId));
     return entry ? entry.adapter : null;
   }
 
@@ -110,7 +160,7 @@ function createManagerRegistry({ runService }) {
   //   * emit a normalized session_ended event if the adapter supports it,
   //   * clear the registry slot.
   function probeActive(conversationId) {
-    conversationId = canonicalConversationId(conversationId); // dual-read slot key
+    conversationId = slotKey(conversationId);
     const entry = active.get(conversationId);
     if (!entry) return null;
     const { runId, adapter } = entry;
@@ -176,8 +226,13 @@ function createManagerRegistry({ runService }) {
     for (const [key, entry] of active.entries()) {
       if (key === 'top') {
         out.top = { conversationId: 'top', runId: entry.runId };
-      } else if (isProjectConversationId(key)) { // dual-read: pm:<id> OR operator:<id>
-        out.pms.push({ conversationId: key, runId: entry.runId });
+      } else if (isOperatorConversationId(key)) {
+        const resolved = resolveOperatorSlot(key);
+        out.pms.push({
+          conversationId: resolved?.conversationId || key,
+          legacyConversationId: resolved?.legacyConversationId || null,
+          runId: entry.runId,
+        });
       }
     }
     return out;

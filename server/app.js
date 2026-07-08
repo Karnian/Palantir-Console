@@ -227,11 +227,11 @@ function createPmAutoReview({
   }
 
   function receiverFromResolved(run, resolved, source) {
-    if (!resolved?.instanceId || !resolved?.primaryProjectId || !resolved?.legacySlotId) {
+    if (!resolved?.instanceId || !resolved?.primaryProjectId || !resolved?.instanceConversationId) {
       return null;
     }
     return {
-      slotKey: resolved.legacySlotId,
+      slotKey: resolved.instanceConversationId,
       receiverInstanceId: resolved.instanceId,
       receiverKey: resolved.instanceId,
       countKey: countKeyForReceiver(resolved.instanceId, run?.task_id),

@@ -56,6 +56,11 @@ function shortRunId(id) {
 function parsedProjectId(entry) {
   const fromEntry = parseProjectConversationId(entry?.conversationId);
   if (fromEntry) return fromEntry.projectId;
+  // W-P5 canonical flip: snapshot conversationId is instance-form (operator:oi_*),
+  // which the project parser deliberately rejects — use the server-provided
+  // legacy alias to keep the codebase join working.
+  const fromLegacy = parseProjectConversationId(entry?.legacyConversationId);
+  if (fromLegacy) return fromLegacy.projectId;
   const fromRun = parseProjectConversationId(entry?.run?.conversation_id);
   return fromRun ? fromRun.projectId : null;
 }

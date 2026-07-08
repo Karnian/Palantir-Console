@@ -245,12 +245,14 @@ test('Phase 3a: lazy spawn creates a PM run when none exists', async (t) => {
   assert.equal(result1.spawned, true);
   assert.equal(result1.resumed, false);
   assert.equal(result1.run.manager_layer, 'operator'); // Phase 2: flipped from 'pm'
-  assert.equal(result1.run.conversation_id, `operator:${project.id}`); // Phase 2: flipped from 'pm:'
+  assert.equal(result1.run.conversation_id, `operator:oi_${project.id}`); // W-P5: canonical slot is instance-form
+  assert.equal(result1.run.operator_instance_id, `oi_${project.id}`);
   assert.equal(result1.run.is_manager, 1);
   assert.ok(result1.run.parent_run_id, 'parent_run_id should be set to active Top');
 
-  // Registry now has the PM slot
+  // Registry now has one PM slot; legacy project input resolves to it.
   assert.equal(registry.getActiveRunId(`operator:${project.id}`), result1.run.id);
+  assert.equal(registry.getActiveRunId(`operator:oi_${project.id}`), result1.run.id);
 
   // Phase 3a R1 fix: the brief is injected into the SYSTEM prompt, not
   // via a seed runTurn. No adapter.runTurn should fire before the user's

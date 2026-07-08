@@ -328,7 +328,21 @@ function createReconciliationService({
         err.httpStatus = 400;
         throw err;
       }
-      if (!conversationIdMatchesProject(pmRun.conversation_id, projectId)) {
+      let resolvedProjectId = null;
+      if (runService && typeof runService.resolveOperatorConversationId === 'function') {
+        try {
+          const resolved = runService.resolveOperatorConversationId(pmRun.conversation_id);
+          resolvedProjectId = resolved?.primaryProjectId || resolved?.legacyProjectId || null;
+        } catch { /* fall through */ }
+      }
+      // W-P5 R1 (Codex): resolver result is AUTHORITATIVE — if it points at a
+      // different project, a legacy textual match must not rescue the claim.
+      // Legacy string match is only a fallback when the resolver knows nothing.
+      const hasResolvedProject = resolvedProjectId !== null && resolvedProjectId !== undefined;
+      if (
+        (hasResolvedProject && resolvedProjectId !== projectId)
+        || (!hasResolvedProject && !conversationIdMatchesProject(pmRun.conversation_id, projectId))
+      ) {
         const err = new Error(
           `pm_run_id ${pmRunId} belongs to ${pmRun.conversation_id}, not project ${projectId}`
         );

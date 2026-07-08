@@ -250,7 +250,7 @@ test('remote pickExecutor failure marks the Operator run failed and never starts
     (err) => err.httpStatus === 502 && /node executor unavailable/.test(err.message),
   );
   assert.equal(adapter._starts.length, 0);
-  const run = db.prepare('SELECT * FROM runs WHERE conversation_id = ?').get(`operator:${project.id}`);
+  const run = db.prepare('SELECT * FROM runs WHERE conversation_id = ?').get(`operator:oi_${project.id}`); // W-P5: canonical slot is instance-form
   assert.equal(run.status, 'failed');
   assert.equal(run.node_id, 'nodeA');
 });

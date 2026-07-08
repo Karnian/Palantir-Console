@@ -258,14 +258,6 @@ function createOperatorSpawnService({
       err.httpStatus = 400;
       throw err;
     }
-    const slotKey = conversationIdForProject(projectId); // pm: → operator: in Phase 2
-
-    // Fast path — already live.
-    const alreadyLive = managerRegistry.probeActive(slotKey);
-    if (alreadyLive) {
-      return { run: alreadyLive, spawned: false, resumed: false };
-    }
-
     // Project must exist + PM must be enabled.
     let project;
     try {
@@ -279,6 +271,29 @@ function createOperatorSpawnService({
       const err = new Error(`PM is disabled for project ${projectId}`);
       err.httpStatus = 409;
       throw err;
+    }
+
+    let ensuredOperatorInstance = null;
+    try {
+      if (runService && typeof runService.ensurePrimaryOperatorInstanceForProject === 'function') {
+        ensuredOperatorInstance = runService.ensurePrimaryOperatorInstanceForProject(projectId);
+      }
+    } catch (err) {
+      log(`operator instance ensure failed project=${projectId}: ${err.message}`);
+    }
+    if (!ensuredOperatorInstance?.instanceId) {
+      const err = new Error(`operator instance unavailable for project ${projectId}`);
+      err.httpStatus = 500;
+      throw err;
+    }
+    const slotKey = ensuredOperatorInstance?.instanceConversationId
+      || conversationIdForProject(ensuredOperatorInstance.instanceId);
+
+    // Fast path — already live. Legacy callers that still probe
+    // operator:<projectId> converge to this same instance slot in managerRegistry.
+    const alreadyLive = managerRegistry.probeActive(slotKey);
+    if (alreadyLive) {
+      return { run: alreadyLive, spawned: false, resumed: false };
     }
 
     // Parent Top must exist — PM has to hang off an active Top so that
@@ -380,7 +395,7 @@ function createOperatorSpawnService({
     }
     let operatorInstanceId = operatorInstanceResolution && operatorInstanceResolution.instanceId
       ? operatorInstanceResolution.instanceId
-      : null;
+      : (ensuredOperatorInstance?.instanceId || null);
     let instanceThread = null;
     try {
       instanceThread = operatorInstanceId && runService && typeof runService.getOperatorInstance === 'function'
@@ -467,6 +482,7 @@ function createOperatorSpawnService({
       is_manager: true,
       manager_layer: 'operator',
       conversation_id: slotKey,
+      operator_instance_id: operatorInstanceId,
       parent_run_id: activeTopRunId,
       manager_adapter: adapterType,
       prompt: `PM ${project.name}`,

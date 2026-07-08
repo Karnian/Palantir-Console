@@ -267,9 +267,9 @@ function makeAutoReviewHarness({
       return resolvedOperators.get(conversationId) || null;
     },
   };
-  const pmSlot = conversationIdForProject('proj_1'); // Phase 2: operator:proj_1
+  const pmSlot = conversationIdForProject('oi_proj_1');
   const activeSlots = new Map(Object.entries({
-    [conversationIdForProject('proj_2')]: 'run_pm_2',
+    [conversationIdForProject('oi_proj_2')]: 'run_pm_2',
     top: 'run_top_1',
     ...activeSlotRunIds,
   }));
@@ -1101,7 +1101,7 @@ test('PM auto-review sends one message from run:harvested with harvest summary',
   });
 
   assert.equal(harness.sent.length, 1);
-  assert.equal(harness.sent[0].slot, conversationIdForProject('proj_1')); // Phase 2: operator:proj_1
+  assert.equal(harness.sent[0].slot, conversationIdForProject('oi_proj_1'));
   const text = harness.sent[0].message.text;
   assert.match(text, /Worker run run_worker_1 finished/);
   assert.match(text, /\[harvest\] files: 2, commits: 1/);
@@ -1110,7 +1110,7 @@ test('PM auto-review sends one message from run:harvested with harvest summary',
   assert.match(text, /tests passed/);
 });
 
-test('W-P4: PM auto-review sends attributed worker review to that instance primary legacy slot only', () => {
+test('W-P4: PM auto-review sends attributed worker review to that instance primary slot only', () => {
   const harness = makeAutoReviewHarness();
 
   harness.eventBus.emit('run:harvested', {
@@ -1122,7 +1122,7 @@ test('W-P4: PM auto-review sends attributed worker review to that instance prima
   });
 
   assert.equal(harness.sent.length, 1);
-  assert.equal(harness.sent[0].slot, conversationIdForProject('proj_2'));
+  assert.equal(harness.sent[0].slot, conversationIdForProject('oi_proj_2'));
   assert.equal(harness.controller.autoReviewCounts.get('oi_proj_2:task_1'), 1);
   assert.equal(harness.controller.autoReviewCounts.get('oi_proj_1:task_1'), undefined);
 });
@@ -1143,7 +1143,7 @@ test('W-P4: PM auto-review uses primary instance for unattributed run and Top wh
   });
 
   assert.equal(harness.sent.length, 2);
-  assert.equal(harness.sent[0].slot, conversationIdForProject('proj_1'));
+  assert.equal(harness.sent[0].slot, conversationIdForProject('oi_proj_1'));
   assert.equal(harness.sent[1].slot, 'top');
   assert.equal(harness.controller.autoReviewCounts.get('oi_proj_1:task_1'), 1);
   assert.equal(harness.controller.autoReviewCounts.get('project:proj_orphan:task_1'), 1);
@@ -1200,7 +1200,7 @@ test('PM auto-review suppresses failed run while higher retry attempt is active'
       reason: 'retry_pending',
       retry_root_run_id: failed.id,
       receiver_instance_id: 'oi_proj_1',
-      receiver_slot: conversationIdForProject('proj_1'),
+      receiver_slot: conversationIdForProject('oi_proj_1'),
     }),
   });
 });
