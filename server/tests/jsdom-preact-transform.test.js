@@ -22,13 +22,28 @@ test('transform: export function → function', () => {
 test('transform: vendor preact import → window.preact destructure', () => {
   const src = `import { h, Component } from '../../vendor/preact.module.js';`;
   const out = transformComponentSource(src);
-  assert.match(out, /const \{ h, Component \} = window\.preact;/);
+  assert.match(out, /var \{ h, Component \} = window\.preact;/);
 });
 
 test('transform: vendor hooks import → window.preactHooks destructure', () => {
   const src = `import { useState, useEffect } from '../../vendor/hooks.module.js';`;
   const out = transformComponentSource(src);
-  assert.match(out, /const \{ useState, useEffect \} = window\.preactHooks;/);
+  assert.match(out, /var \{ useState, useEffect \} = window\.preactHooks;/);
+});
+
+test('transform: top-level const/let → var (multi-load: sibling components share one vm context)', () => {
+  const src = [
+    "const html = htm.bind(h);",
+    "let counter = 0;",
+    "function Foo() { const local = 1; return local; }",
+  ].join('\n');
+  const out = transformComponentSource(src);
+  // Top-level (column-0) const/let become var so a second component loaded
+  // into the same context doesn't throw "Identifier already declared".
+  assert.match(out, /^var html = htm\.bind\(h\);/m);
+  assert.match(out, /^var counter = 0;/m);
+  // Block-scoped (indented) declarations are untouched.
+  assert.match(out, /const local = 1;/);
 });
 
 test('transform: vendor htm default import → window.htm', () => {
