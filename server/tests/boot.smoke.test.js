@@ -99,6 +99,26 @@ for (const asset of REQUIRED_ASSETS) {
   });
 }
 
+test('boot: health exposes package and boot diagnostics without auth', async (t) => {
+  const app = await createTestApp(t);
+  const res = await request(app).get('/api/health');
+  assert.equal(res.status, 200);
+  assert.equal(res.body.status, 'ok');
+  assert.equal(res.body.version, '2.0.0');
+  assert.equal(res.body.packageVersion, '1.0.0');
+  assert.match(res.body.startedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.ok(!Number.isNaN(Date.parse(res.body.startedAt)));
+  assert.match(res.body.bootId, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  assert.ok(res.body.gitSha === null || /^[0-9a-f]{4,}$/i.test(res.body.gitSha));
+});
+
+test('boot: index listen errors fail fast with diagnostic log', async () => {
+  const src = await fs.readFile(path.join(__dirname, '../index.js'), 'utf8');
+  assert.match(src, /server\.on\(['"]error['"]/);
+  assert.match(src, /\[boot\] listen failed on \$\{host\}:\$\{port\}: \$\{code\}/);
+  assert.match(src, /process\.exit\(1\)/);
+});
+
 // ---- index.html structure ----
 
 test('boot: index.html loads app/main.js as a module entry', async (t) => {

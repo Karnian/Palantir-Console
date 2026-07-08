@@ -571,6 +571,39 @@ test('ProjectsView renders operator watch reverse index without changing warm ac
   assert.equal(emptyCard.querySelector('[data-role="project-operator-watchers"]'), null);
 });
 
+test('ProjectsView hides operator watch reverse index when metadata is unavailable', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  installProjectsStubs(env, async (url) => {
+    if (url === '/api/nodes') return { nodes: [] };
+    if (url === '/api/operator-instances') throw new Error('request failed');
+    return {};
+  });
+  env.loadComponent('ProjectsView');
+
+  const root = renderProjectsView(env, {
+    projects: [{
+      id: 'proj_alpha',
+      name: 'Alpha Console',
+      source_type: 'git',
+      repo_url: 'https://github.com/acme/alpha.git',
+      created_at: '2026-07-05T00:00:00.000Z',
+    }],
+  });
+
+  await waitFor(() => assert.equal(root.querySelector('[data-view="projects"]').getAttribute('data-operator-watch-index-state'), 'unknown'));
+  const card = await waitFor(() => {
+    const el = root.querySelector('[data-role="project-card"][data-project-id="proj_alpha"]');
+    assert.ok(el);
+    assert.match(el.textContent, /Alpha Console/);
+    return el;
+  });
+  assert.equal(card.querySelector('[data-role="project-operator-watchers"]'), null);
+  const warm = card.querySelector('[data-role="project-warm-operator"]');
+  assert.ok(warm);
+  assert.match(warm.textContent, /오퍼레이터 준비/);
+});
+
 test('ProjectsView highlights codebase selected by #operator/codebases deep link', async (t) => {
   const env = createPreactEnv();
   t.after(env.cleanup);

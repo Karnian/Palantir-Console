@@ -762,16 +762,16 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
       })
       .catch((err) => {
         if (!cancelled) {
-          setOperatorInstances([]);
-          addToast(err.message, 'error');
+          setOperatorInstances('unknown');
         }
       });
     return () => { cancelled = true; };
   }, []);
 
+  const operatorInstancesKnown = operatorInstances !== 'unknown';
   const operatorWatchersByProject = useMemo(
-    () => buildOperatorWatchersByProject(operatorInstances),
-    [operatorInstances],
+    () => (operatorInstancesKnown ? buildOperatorWatchersByProject(operatorInstances) : new Map()),
+    [operatorInstances, operatorInstancesKnown],
   );
 
   const createReady = name.trim() && (sourceType !== SOURCE_TYPE_GIT || repoUrl.trim());
@@ -987,7 +987,11 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   }, [highlightProjectId, projects]);
 
   return html`
-    <div class="projects-view" data-view="projects">
+    <div
+      class="projects-view"
+      data-view="projects"
+      data-operator-watch-index-state=${operatorInstancesKnown ? 'ready' : 'unknown'}
+    >
       <div class="projects-header">
         <h1 class="projects-title">${PROJECTS_LABELS.pageTitle}</h1>
         <button class="primary" onClick=${() => setShowNew(true)}>+ ${PROJECTS_LABELS.newProject}</button>

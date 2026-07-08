@@ -199,6 +199,7 @@ function MasterCard({ top }) {
 function LiveOperatorCard({
   entry,
   instance,
+  operatorInstancesKnown,
   projectsById,
   runs,
   taskById,
@@ -226,11 +227,18 @@ function LiveOperatorCard({
         <span class="skill-badge skill-badge-ok">${OPERATOR_ROSTER_LABELS.liveMode}</span>
         <span class="skill-badge skill-badge-ok">${OPERATOR_ROSTER_LABELS.liveLifecycle}</span>
       </div>
-      <${WatchListBadges}
-        instance=${instance}
-        projectsById=${projectsById}
-        onRemoveReference=${onRemoveReference}
-      />
+      ${operatorInstancesKnown && html`
+        <${WatchListBadges}
+          instance=${instance}
+          projectsById=${projectsById}
+          onRemoveReference=${onRemoveReference}
+        />
+      `}
+      ${!operatorInstancesKnown && html`
+        <p class="form-hint" data-role="operator-watch-list-unavailable">
+          ${OPERATOR_ROSTER_LABELS.watchListUnavailable}
+        </p>
+      `}
       <div class="operator-roster-meta-grid">
         <span>${OPERATOR_ROSTER_LABELS.adapterLabel}</span>
         <strong>${adapterName(run)}</strong>
@@ -256,7 +264,7 @@ function LiveOperatorCard({
             data-role="operator-roster-live-project-link"
             href=${projectHref}
           >${OPERATOR_ROSTER_LABELS.openProject}</a>
-          ${instance && html`
+          ${operatorInstancesKnown && instance && html`
             <button
               type="button"
               class="ghost small"
@@ -361,8 +369,7 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
       })
       .catch((err) => {
         if (!alive || seq !== instancesReqSeqRef.current) return;
-        setInstances([]);
-        addToast(err.message, 'error');
+        setInstances('unknown');
       });
     };
 
@@ -429,22 +436,26 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
     return map;
   }, [tasks]);
 
+  const operatorInstancesKnown = instances !== 'unknown';
+
   const instancesById = useMemo(() => {
     const map = new Map();
+    if (!operatorInstancesKnown) return map;
     for (const instance of arrayValue(instances)) {
       if (instance?.id) map.set(String(instance.id), instance);
     }
     return map;
-  }, [instances]);
+  }, [instances, operatorInstancesKnown]);
 
   const primaryInstanceByProject = useMemo(() => {
     const map = new Map();
+    if (!operatorInstancesKnown) return map;
     for (const instance of arrayValue(instances)) {
       const primary = primaryRef(instance);
       if (primary?.project_id) map.set(String(primary.project_id), instance);
     }
     return map;
-  }, [instances]);
+  }, [instances, operatorInstancesKnown]);
 
   const refreshOperatorInstances = async () => {
     const seq = ++instancesReqSeqRef.current;
@@ -454,8 +465,7 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
       setInstances(arrayValue(data?.instances));
     } catch (err) {
       if (seq !== instancesReqSeqRef.current) return;
-      setInstances([]);
-      addToast(err.message, 'error');
+      setInstances('unknown');
     }
   };
 
@@ -519,6 +529,7 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
     <div
       class="page operator-roster-page"
       data-view="operator-roster"
+      data-operator-instances-state=${operatorInstancesKnown ? 'ready' : 'unknown'}
       tabindex="0"
       role="region"
       aria-label=${OPERATOR_ROSTER_LABELS.pageTitle}
@@ -558,6 +569,7 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
                 key=${entry.conversationId || entry.run?.id}
                 entry=${entry}
                 instance=${resolveLiveInstance(entry, { instancesById, primaryInstanceByProject })}
+                operatorInstancesKnown=${operatorInstancesKnown}
                 projectsById=${projectsById}
                 runs=${runs}
                 taskById=${taskById}

@@ -409,6 +409,58 @@ test('OperatorsView renders watch-list badges and edits reference refs from the 
   assert.equal(root.querySelector('[data-role="operator-watch-ref-primary"] [data-role="operator-watch-ref-remove"]'), null);
 });
 
+test('OperatorsView keeps roster usable when operator instance metadata is unavailable', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+
+  installRosterStubs(env, {
+    managerStatus: {
+      active: true,
+      top: {
+        conversationId: 'top',
+        run: { id: 'run_mgr_top', status: 'running', manager_adapter: 'claude-code' },
+      },
+      pms: [{
+        conversationId: 'operator:proj_alpha',
+        run: {
+          id: 'run_mgr_alpha',
+          status: 'running',
+          manager_adapter: 'codex',
+          conversation_id: 'operator:proj_alpha',
+        },
+      }],
+    },
+    profiles: [{
+      id: 'op_review',
+      name: 'Reviewer',
+      is_folderless: 1,
+      capabilities: ['review'],
+    }],
+    instances: () => {
+      throw new Error('request failed');
+    },
+  });
+  loadOperatorsComponents(env);
+
+  const root = renderOperatorsView(env, {
+    projects: [{ id: 'proj_alpha', name: 'Alpha Console' }],
+  });
+
+  await waitFor(() => assert.equal(root.querySelector('[data-view="operator-roster"]').getAttribute('data-operator-instances-state'), 'unknown'));
+  assert.ok(root.querySelector('[data-role="operator-roster-master-card"]'));
+  assert.ok(root.querySelector('[data-role="operator-roster-available-card"]'));
+
+  const live = await waitFor(() => {
+    const el = root.querySelector('[data-role="operator-roster-live-card"]');
+    assert.ok(el);
+    assert.match(el.textContent, /Alpha Console/);
+    return el;
+  });
+  assert.equal(live.querySelector('[data-role="operator-watch-list"]'), null);
+  assert.equal(live.querySelector('[data-role="operator-roster-add-reference-button"]'), null);
+  assert.match(live.textContent, /watch-list 정보를 불러오지 못했습니다/);
+});
+
 test('OperatorsView renders scoped empty states for no live project operators and no available profiles', async (t) => {
   const env = createPreactEnv();
   t.after(env.cleanup);

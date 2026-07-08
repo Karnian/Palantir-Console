@@ -1086,6 +1086,7 @@ export const OPERATOR_ROSTER_LABELS = {
   activeWorkerRuns: '활성 worker run 수',
   instanceLabel: 'instance',
   watchListLabel: 'watch-list',
+  watchListUnavailable: 'watch-list 정보를 불러오지 못했습니다(서버 구버전 가능)',
   primaryRefRole: '담당',
   referenceRefRole: '참조',
   addReference: '참조 추가',
