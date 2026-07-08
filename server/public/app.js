@@ -15,6 +15,7 @@ import { useRoute, navigate, useEscape, useSSE, useTasks, useRuns, useProjects, 
 import { dueState, formatDueDate, useNowTick, dueDateMeta } from './app/lib/dueDate.js';
 import { requestNotificationPermission, showBrowserNotification, pulseTabTitle } from './app/lib/notifications.js';
 import { NAV_ITEMS } from './app/lib/nav.js';
+import { operatorConversationId } from './app/lib/conversationId.js';
 import { THEME_TOGGLE_LABELS, NAV_LABELS } from './app/lib/copy.js';
 
 // Components
@@ -328,8 +329,8 @@ function App() {
       const isInput = tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable;
       if (!isInput && !inspectRun && !showPalette && e.key === 'n' && !e.metaKey && !e.ctrlKey && !e.altKey) {
         // Only the explicit `#board` hash enables the `n` shortcut — an
-        // empty hash no longer defaults to dashboard here (R2-C.3 landed
-        // manager as the default), but since we specifically gate on
+        // empty hash no longer defaults to dashboard here (Operator roster
+        // is the default), but since we specifically gate on
         // 'board', the empty-hash case is still a safe no-op.
         const routeBase = (location.hash.slice(1) || '').split('/')[0];
         if (routeBase === 'board') {
@@ -376,7 +377,15 @@ function App() {
 
   const renderView = () => {
     if (routeBase === 'manager') {
-      return html`<${ManagerView} manager=${manager} runs=${runs} tasks=${tasks} projects=${projects} agents=${agents} agentsError=${agentsError} agentsLoading=${agentsLoading} reloadAgents=${reloadAgents} driftAudit=${driftAudit} onOpenDrift=${() => setShowDriftDrawer(true)} />`;
+      const routeParts = route.split('/');
+      const rawProjectId = routeParts[1] === 'operator' ? (routeParts.slice(2).join('/') || null) : null;
+      let managerInitialTarget;
+      if (rawProjectId) {
+        let projectId = rawProjectId;
+        try { projectId = decodeURIComponent(rawProjectId); } catch { projectId = rawProjectId; }
+        managerInitialTarget = operatorConversationId(projectId);
+      }
+      return html`<${ManagerView} manager=${manager} runs=${runs} tasks=${tasks} projects=${projects} agents=${agents} agentsError=${agentsError} agentsLoading=${agentsLoading} reloadAgents=${reloadAgents} driftAudit=${driftAudit} onOpenDrift=${() => setShowDriftDrawer(true)} initialTarget=${managerInitialTarget} />`;
     }
     if (routeBase === 'board') {
       if (tasksLoading) return html`<${Loading} />`;

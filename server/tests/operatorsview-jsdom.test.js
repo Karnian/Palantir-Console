@@ -109,7 +109,7 @@ test('OperatorsView renders Master, Live Operators, and Available Operators as s
   assert.equal(live.querySelector('a a'), null);
   const liveLinks = Array.from(live.querySelectorAll('a'));
   assert.equal(liveLinks.length, 2);
-  assert.equal(live.querySelector('[data-role="operator-roster-live-primary-link"]').getAttribute('href'), '#manager');
+  assert.equal(live.querySelector('[data-role="operator-roster-live-primary-link"]').getAttribute('href'), '#manager/operator/proj_alpha');
   assert.equal(live.querySelector('[data-role="operator-roster-live-project-link"]').getAttribute('href'), '#operator/codebases/proj_alpha');
   assert.match(live.textContent, /Alpha Console/);
   assert.match(live.textContent, /코드베이스 바인딩/);

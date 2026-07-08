@@ -8,7 +8,7 @@ import { ManagerChat, managerProfileAuthState } from './ManagerChat.js';
 import { SessionGrid } from './SessionGrid.js';
 
 import { h } from '../../vendor/preact.module.js';
-import { useState } from '../../vendor/hooks.module.js';
+import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { useNodeSummary } from '../lib/hooks.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
@@ -17,7 +17,7 @@ const html = htm.bind(h);
 // still find managerProfileAuthState at the same path.
 export { managerProfileAuthState };
 
-export function ManagerView({ manager, runs, tasks, projects, agents, agentsError, agentsLoading, reloadAgents, driftAudit, onOpenDrift, nodeSummary: nodeSummaryProp }) {
+export function ManagerView({ manager, runs, tasks, projects, agents, agentsError, agentsLoading, reloadAgents, driftAudit, onOpenDrift, nodeSummary: nodeSummaryProp, initialTarget }) {
   // N1-C: AttentionStrip (rendered inside SessionGrid) needs the fleet
   // summary for its node-unreachable promotion. Self-fetch unless a test
   // injects the summary as a prop.
@@ -26,7 +26,10 @@ export function ManagerView({ manager, runs, tasks, projects, agents, agentsErro
   const nodeSummary = hasNodeSummaryProp ? nodeSummaryProp : fetchedNodeSummary;
   // Lifted conversation target state — shared between ManagerChat (dropdown)
   // and SessionGrid (PM session click).
-  const [conversationTarget, setConversationTarget] = useState('top');
+  const [conversationTarget, setConversationTarget] = useState(() => initialTarget || 'top');
+  useEffect(() => {
+    setConversationTarget(initialTarget || 'top');
+  }, [initialTarget]);
   const activePms = manager.status?.pms || [];
 
   return html`
