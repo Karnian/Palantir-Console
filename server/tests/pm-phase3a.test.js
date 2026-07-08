@@ -494,8 +494,13 @@ test('W-P3: /execute derives operator attribution from pm_run_id server-side', a
   const app = createExecuteRouteApp({ taskService, lifecycleService });
 
   const project = projectService.createProject({ name: 'alpha' });
+  const referenceProject = projectService.createProject({ name: 'shared-ref' });
   const otherProject = projectService.createProject({ name: 'beta' });
   const resolved = rs.ensurePrimaryOperatorInstanceForProject(project.id);
+  db.prepare(`
+    INSERT INTO operator_codebase_refs (instance_id, project_id, role)
+    VALUES (?, ?, 'reference')
+  `).run(resolved.instanceId, referenceProject.id);
   rs.ensurePrimaryOperatorInstanceForProject(otherProject.id);
   const pmRun = rs.createRun({
     is_manager: true,
@@ -520,6 +525,16 @@ test('W-P3: /execute derives operator attribution from pm_run_id server-side', a
   assert.equal(attributed.body.run.operator_instance_id, resolved.instanceId);
   assert.equal(attributed.body.run.parent_run_id, pmRun.id);
 
+  const referenceTask = taskService.createTask({ project_id: referenceProject.id, title: 'reference' });
+  const referenceAttributed = await httpJson(app, 'POST', `/api/tasks/${referenceTask.id}/execute`, {
+    agent_profile_id: profileId,
+    prompt: 'work',
+    pm_run_id: pmRun.id,
+  });
+  assert.equal(referenceAttributed.status, 201);
+  assert.equal(referenceAttributed.body.run.operator_instance_id, resolved.instanceId);
+  assert.equal(referenceAttributed.body.run.parent_run_id, pmRun.id);
+
   const missingTask = taskService.createTask({ project_id: project.id, title: 'missing' });
   const missing = await httpJson(app, 'POST', `/api/tasks/${missingTask.id}/execute`, {
     agent_profile_id: profileId,
@@ -538,6 +553,16 @@ test('W-P3: /execute derives operator attribution from pm_run_id server-side', a
   assert.equal(mismatched.status, 201);
   assert.equal(mismatched.body.run.operator_instance_id, null);
   assert.equal(mismatched.body.run.parent_run_id, null);
+  const unwatchedEvents = rs.getRunEvents(mismatched.body.run.id)
+    .filter((event) => event.event_type === 'dispatch:unwatched_codebase');
+  assert.equal(unwatchedEvents.length, 1);
+  assert.deepEqual(JSON.parse(unwatchedEvents[0].payload_json), {
+    pm_run_id: otherPmRun.id,
+    operator_instance_id: `oi_${otherProject.id}`,
+    task_id: mismatchedTask.id,
+    project_id: project.id,
+    reason: 'operator_instance_ref_missing',
+  });
 });
 
 test('W-P3: retry run copies operator lineage and sets retry root', async (t) => {

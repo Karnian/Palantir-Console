@@ -590,28 +590,48 @@ function createLifecycleService({
    */
   function deriveOperatorDispatchAttribution(pmRunId, task) {
     if (!pmRunId || typeof pmRunId !== 'string') {
-      return { operator_instance_id: null, parent_run_id: null };
+      return { operator_instance_id: null, parent_run_id: null, unwatched: null };
     }
 
     let pmRun = null;
     try {
       pmRun = runService.getRun(pmRunId);
     } catch {
-      return { operator_instance_id: null, parent_run_id: null };
+      return { operator_instance_id: null, parent_run_id: null, unwatched: null };
     }
     if (!pmRun || Number(pmRun.is_manager || 0) !== 1 || pmRun.manager_layer !== 'operator') {
-      return { operator_instance_id: null, parent_run_id: null };
+      return { operator_instance_id: null, parent_run_id: null, unwatched: null };
     }
     if (!runService || typeof runService.resolveOperatorConversationId !== 'function') {
-      return { operator_instance_id: null, parent_run_id: null };
+      return { operator_instance_id: null, parent_run_id: null, unwatched: null };
     }
 
     const resolved = runService.resolveOperatorConversationId(pmRun.conversation_id);
-    const operatorProjectId = resolved?.legacyProjectId || resolved?.primaryProjectId || null;
-    if (!resolved?.instanceId || (task?.project_id && operatorProjectId !== task.project_id)) {
-      return { operator_instance_id: null, parent_run_id: null };
+    if (!resolved?.instanceId) {
+      return { operator_instance_id: null, parent_run_id: null, unwatched: null };
     }
-    return { operator_instance_id: resolved.instanceId, parent_run_id: pmRun.id };
+
+    const taskProjectId = task?.project_id || null;
+    if (taskProjectId) {
+      const hasRef = typeof runService.operatorInstanceHasRef === 'function'
+        ? runService.operatorInstanceHasRef(resolved.instanceId, taskProjectId)
+        : (resolved.legacyProjectId || resolved.primaryProjectId || null) === taskProjectId;
+      if (!hasRef) {
+        return {
+          operator_instance_id: null,
+          parent_run_id: null,
+          unwatched: {
+            pm_run_id: pmRun.id,
+            operator_instance_id: resolved.instanceId,
+            task_id: task?.id || null,
+            project_id: taskProjectId,
+            reason: 'operator_instance_ref_missing',
+          },
+        };
+      }
+    }
+
+    return { operator_instance_id: resolved.instanceId, parent_run_id: pmRun.id, unwatched: null };
   }
 
   async function executeTask(taskId, { agentProfileId, prompt, skillPackIds, presetId, pmRunId }) {
@@ -639,6 +659,12 @@ function createLifecycleService({
       operator_instance_id: operatorAttribution.operator_instance_id,
       parent_run_id: operatorAttribution.parent_run_id,
     });
+
+    if (operatorAttribution.unwatched) {
+      try {
+        runService.addRunEvent(run.id, 'dispatch:unwatched_codebase', JSON.stringify(operatorAttribution.unwatched));
+      } catch { /* annotate-only */ }
+    }
 
     if (repoFeatureEnabled() && projectIsRepo(project)) {
       await drainQueue(agentProfileId, { nodeId });

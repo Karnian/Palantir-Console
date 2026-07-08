@@ -45,6 +45,25 @@ const {
   isProjectLayer,
 } = require('../utils/conversationId'); // PM→Operator rename Phase 0: dual-read
 
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function resolveTurnCodebaseContext(instance, message = {}) {
+  const primaryProjectId = nonEmptyString(instance?.primaryProjectId || instance?.projectId);
+  const explicitProjectId = nonEmptyString(
+    message?.codebaseProjectId || message?.turnProjectId || message?.projectId,
+  );
+  const workspaceProjectId = explicitProjectId || primaryProjectId || null;
+  return {
+    instanceId: nonEmptyString(instance?.instanceId) || null,
+    primaryProjectId,
+    explicitProjectId,
+    workspaceProjectId,
+    source: explicitProjectId ? 'explicit' : (primaryProjectId ? 'primary' : 'generic'),
+  };
+}
+
 function createConversationService({
   runService,
   managerRegistry,
@@ -222,7 +241,7 @@ function createConversationService({
   //
   // Returns { status: 'sent', target } on success, throws with a 4xx-style
   // Error otherwise. Callers should map errors to HTTP status codes.
-  function sendMessage(conversationId, { text, images } = {}) {
+  function sendMessage(conversationId, { text, images, codebaseProjectId } = {}) {
     const parsed = parseConversationId(conversationId);
     if (!parsed) {
       const err = new Error(`invalid conversation id: ${conversationId}`);
@@ -249,6 +268,7 @@ function createConversationService({
       return sendToManagerSlot(operator.conversationId || conversationId, {
         text,
         images,
+        codebaseProjectId,
         projectId: operator.projectId || parsed.projectId || null,
       });
     }
@@ -290,7 +310,7 @@ function createConversationService({
   //          on success, queue an Operator→Top notice on the Operator run's parent
   //          (but only if that parent still matches the currently active
   //           Top, to avoid leaking stale signals into unrelated runs).
-  function sendToManagerSlot(conversationId, { text, images, projectId } = {}) {
+  function sendToManagerSlot(conversationId, { text, images, projectId, codebaseProjectId } = {}) {
     const isTop = conversationId === 'top';
     let operatorResolved = null;
     if (!isTop) {
@@ -324,7 +344,7 @@ function createConversationService({
             })
             .then((spawnResult) => sendToManagerSlot(
               spawnResult?.run?.conversation_id || conversationId,
-              { text, images, projectId },
+              { text, images, projectId, codebaseProjectId },
             ));
         }
         run = spawn.run;
@@ -393,36 +413,67 @@ function createConversationService({
       // turn (mirrors the peek-then-commit notice discipline) so a failed send
       // re-injects on the next attempt rather than recording a phantom inject.
       let composerInjection = null; // { composition, provenanceKey, revision } stash
-      if (!isTop && memoryService && projectId && compositionLedger && memoryComposer) {
+      const turnCodebaseContext = !isTop
+        ? resolveTurnCodebaseContext({
+          instanceId: operatorResolved?.instanceId || run.operator_instance_id || null,
+          primaryProjectId: operatorResolved?.primaryProjectId || projectId || null,
+        }, { codebaseProjectId })
+        : null;
+      let workspaceProjectId = turnCodebaseContext?.workspaceProjectId || null;
+      const instanceId = turnCodebaseContext?.instanceId || null;
+      if (
+        workspaceProjectId &&
+        instanceId &&
+        runService &&
+        typeof runService.operatorInstanceHasRef === 'function' &&
+        !runService.operatorInstanceHasRef(instanceId, workspaceProjectId)
+      ) {
+        workspaceProjectId = null;
+      }
+      if (!isTop && compositionLedger && memoryComposer) {
         // Composer+Ledger path (Operator slot only). The composer is the sole injection
         // path (S5-LEDGER); if it is not wired (some unit harnesses), skip injection
         // cleanly rather than throwing inside the try/catch on every send.
         // peek/decide: gate check → compose → stash for commit phase.
         try {
-          const useMultiOwner = memoryMultiOwner && !!masterMemoryService;
-          const currentOwnerRevisions = useMultiOwner
-            ? [
-                { owner_type: 'workspace', owner_id: projectId, revision: memoryService.getRevision(projectId) },
-                { owner_type: 'user', owner_id: 'user', provenance: 'user', revision: masterMemoryService.getRevision('user') },
-              ]
-            : [
-                { owner_type: 'workspace', owner_id: projectId, revision: memoryService.getRevision(projectId) },
-              ];
+          const useUserOwner = !!masterMemoryService && (memoryMultiOwner || !workspaceProjectId);
+          const currentOwnerRevisions = [];
+          if (workspaceProjectId && memoryService) {
+            currentOwnerRevisions.push({
+              owner_type: 'workspace',
+              owner_id: workspaceProjectId,
+              revision: memoryService.getRevision(workspaceProjectId),
+            });
+          }
+          if (useUserOwner) {
+            currentOwnerRevisions.push({
+              owner_type: 'user',
+              owner_id: 'user',
+              provenance: 'user',
+              revision: masterMemoryService.getRevision('user'),
+            });
+          }
+          if (currentOwnerRevisions.length === 0) {
+            throw new Error('no eligible operator memory owners');
+          }
+          const provenanceKey = workspaceProjectId || 'user';
           const dec = compositionLedger.shouldCompose({
             runId: run.id,
             slotKind: 'operator',
-            provenanceKey: projectId,
+            provenanceKey,
             currentOwnerRevisions,
           });
           if (dec.compose) {
-            const owners = useMultiOwner
-              ? [
-                  { owner_type: 'user', owner_id: 'user', provenance: 'user' },
-                  { owner_type: 'workspace', owner_id: projectId },
-                ]
-              : [
-                  { owner_type: 'workspace', owner_id: projectId },
-                ];
+            const owners = [];
+            if (useUserOwner) {
+              owners.push({ owner_type: 'user', owner_id: 'user', provenance: 'user' });
+            }
+            if (workspaceProjectId && memoryService) {
+              owners.push({ owner_type: 'workspace', owner_id: workspaceProjectId });
+            }
+            if (owners.length === 0) {
+              throw new Error('no eligible operator memory owners');
+            }
             const { block, composition } = memoryComposer.compose({
               owners,
               taskContext: originalText,
@@ -446,7 +497,7 @@ function createConversationService({
               effectiveText = `${block}\n\n---\n\n${effectiveText}`;
               composerInjection = {
                 composition,
-                provenanceKey: projectId,
+                provenanceKey,
                 revision: currentOwnerRevisions[0].revision,
               };
             }
@@ -812,4 +863,4 @@ function createConversationService({
   };
 }
 
-module.exports = { createConversationService };
+module.exports = { createConversationService, resolveTurnCodebaseContext };
