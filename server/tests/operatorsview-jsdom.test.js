@@ -22,8 +22,13 @@ function installRosterStubs(env, { managerStatus, profiles }) {
   const calls = [];
   env.context.apiFetch = async (url, opts = {}) => {
     calls.push({ url, opts });
-    if (url === '/api/manager/status') return managerStatus;
-    if (url === '/api/operator/profiles') return { profiles };
+    if (url === '/api/manager/status') {
+      return typeof managerStatus === 'function' ? managerStatus({ calls, opts, url }) : managerStatus;
+    }
+    if (url === '/api/operator/profiles') {
+      const value = typeof profiles === 'function' ? profiles({ calls, opts, url }) : profiles;
+      return { profiles: value };
+    }
     throw new Error(`unexpected url ${url}`);
   };
   env.context.addToast = () => {};
@@ -38,6 +43,50 @@ function installRosterStubs(env, { managerStatus, profiles }) {
     return env.context.preact.h('div', { class: 'empty-state' }, `${text} ${sub || ''}`);
   };
   return calls;
+}
+
+function createSseBrokerStub() {
+  const subs = new Map();
+  return {
+    subscribe(channel, cb) {
+      let set = subs.get(channel);
+      if (!set) { set = new Set(); subs.set(channel, set); }
+      set.add(cb);
+      return () => {
+        const current = subs.get(channel);
+        if (!current) return;
+        current.delete(cb);
+        if (current.size === 0) subs.delete(channel);
+      };
+    },
+    publish(channel, data = {}) {
+      const set = subs.get(channel);
+      if (!set) return;
+      for (const cb of Array.from(set)) cb(data);
+    },
+    listenerCount(channel) {
+      return subs.get(channel)?.size || 0;
+    },
+    totalListeners() {
+      let total = 0;
+      for (const set of subs.values()) total += set.size;
+      return total;
+    },
+  };
+}
+
+function countCalls(calls, url) {
+  return calls.filter((call) => call.url === url).length;
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 function renderOperatorsView(env, props = {}) {
@@ -176,4 +225,132 @@ test('OperatorsView renders scoped empty states for no live project operators an
   const availableSection = root.querySelector('[data-role="operator-roster-available-section"]');
   await waitFor(() => assert.match(availableSection.textContent, /폴더 없는 프로필이 없습니다/));
   assert.doesNotMatch(availableSection.textContent, /Running|Online|Live|Session|Idle/);
+});
+
+test('OperatorsView debounces live roster SSE events into one manager status refetch', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+
+  const broker = createSseBrokerStub();
+  env.context.sseBroker = broker;
+
+  const calls = installRosterStubs(env, {
+    managerStatus: {
+      active: true,
+      top: {
+        conversationId: 'top',
+        run: { id: 'run_mgr_top', status: 'running', manager_adapter: 'claude-code' },
+      },
+      pms: [],
+    },
+    profiles: [],
+  });
+  env.loadComponent('OperatorsView');
+
+  renderOperatorsView(env);
+  await waitFor(() => assert.equal(countCalls(calls, '/api/manager/status'), 1));
+  assert.equal(countCalls(calls, '/api/operator/profiles'), 1);
+  assert.equal(broker.listenerCount('manager:started'), 1);
+  assert.equal(broker.listenerCount('manager:stopped'), 1);
+  assert.equal(broker.listenerCount('run:status'), 1);
+  assert.equal(broker.listenerCount('run:completed'), 1);
+
+  broker.publish('manager:started');
+  broker.publish('run:status');
+  broker.publish('run:completed');
+
+  await waitFor(() => assert.equal(countCalls(calls, '/api/manager/status'), 2), 1000);
+  assert.equal(countCalls(calls, '/api/operator/profiles'), 1);
+});
+
+test('OperatorsView unsubscribes SSE roster listeners on unmount', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+
+  const broker = createSseBrokerStub();
+  env.context.sseBroker = broker;
+
+  const calls = installRosterStubs(env, {
+    managerStatus: {
+      active: true,
+      top: {
+        conversationId: 'top',
+        run: { id: 'run_mgr_top', status: 'running', manager_adapter: 'claude-code' },
+      },
+      pms: [],
+    },
+    profiles: [],
+  });
+  env.loadComponent('OperatorsView');
+
+  const root = renderOperatorsView(env);
+  await waitFor(() => assert.equal(countCalls(calls, '/api/manager/status'), 1));
+
+  env.render(null, root);
+  await flushEffects(20);
+  assert.equal(broker.totalListeners(), 0);
+
+  broker.publish('manager:stopped');
+  await flushEffects(500);
+  assert.equal(countCalls(calls, '/api/manager/status'), 1);
+});
+
+test('OperatorsView ignores stale manager status responses after a newer SSE refetch wins', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+
+  const broker = createSseBrokerStub();
+  env.context.sseBroker = broker;
+  env.context.addToast = () => {};
+  env.context.parseProjectConversationId = (id) => {
+    if (typeof id !== 'string') return null;
+    const prefix = 'operator:';
+    return id.startsWith(prefix) && id.length > prefix.length
+      ? { projectId: id.slice(prefix.length) }
+      : null;
+  };
+  env.context.EmptyState = function EmptyState({ text, sub }) {
+    return env.context.preact.h('div', { class: 'empty-state' }, `${text} ${sub || ''}`);
+  };
+
+  const statusRequests = [];
+  env.context.apiFetch = async (url) => {
+    if (url === '/api/operator/profiles') return { profiles: [] };
+    if (url === '/api/manager/status') {
+      const request = deferred();
+      statusRequests.push(request);
+      return request.promise;
+    }
+    throw new Error(`unexpected url ${url}`);
+  };
+  env.loadComponent('OperatorsView');
+
+  const root = renderOperatorsView(env);
+  await waitFor(() => assert.equal(statusRequests.length, 1));
+
+  broker.publish('run:status');
+  await waitFor(() => assert.equal(statusRequests.length, 2), 1000);
+
+  statusRequests[1].resolve({
+    active: true,
+    top: {
+      conversationId: 'top',
+      run: { id: 'run_mgr_latest', status: 'running', manager_adapter: 'latest-adapter' },
+    },
+    pms: [],
+  });
+  await waitFor(() => assert.match(root.textContent, /latest-adapter/));
+
+  statusRequests[0].resolve({
+    active: true,
+    top: {
+      conversationId: 'top',
+      run: { id: 'run_mgr_stale', status: 'running', manager_adapter: 'stale-adapter' },
+    },
+    pms: [],
+  });
+  await flushEffects(20);
+
+  assert.match(root.textContent, /latest-adapter/);
+  assert.doesNotMatch(root.textContent, /stale-adapter/);
 });
