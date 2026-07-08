@@ -6,6 +6,7 @@
 // consumers accept `operator:` ONLY.
 
 const OPERATOR_PREFIX = 'operator:';
+const OPERATOR_INSTANCE_PREFIX = 'oi_';
 
 /**
  * Produce the canonical conversation id for a project-scoped operator.
@@ -22,9 +23,22 @@ export function operatorConversationId(projectId) {
 export function parseProjectConversationId(id) {
   if (typeof id !== 'string') return null;
   if (id.startsWith(OPERATOR_PREFIX) && id.length > OPERATOR_PREFIX.length) {
-    return { projectId: id.slice(OPERATOR_PREFIX.length) };
+    const projectId = id.slice(OPERATOR_PREFIX.length);
+    if (projectId.startsWith(OPERATOR_INSTANCE_PREFIX)) return null;
+    return { projectId };
   }
   return null;
+}
+
+/**
+ * Predicate for the future instance-scoped operator conversation form.
+ */
+export function isInstanceConversationId(id) {
+  if (typeof id !== 'string') return false;
+  if (!id.startsWith(OPERATOR_PREFIX) || id.length <= OPERATOR_PREFIX.length) return false;
+  const instanceId = id.slice(OPERATOR_PREFIX.length);
+  return instanceId.startsWith(OPERATOR_INSTANCE_PREFIX)
+    && instanceId.length > OPERATOR_INSTANCE_PREFIX.length;
 }
 
 /**
