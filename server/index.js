@@ -32,9 +32,17 @@ if (!hasAuth) {
   console.warn(`[security] Listening on ${host}. Set PALANTIR_TOKEN to require auth and expose on 0.0.0.0.`);
 }
 
+const bootInfo = app.bootInfo || {};
+console.log(`[boot] packageVersion=${bootInfo.packageVersion || 'null'} gitSha=${bootInfo.gitSha || 'null'} startedAt=${bootInfo.startedAt || 'null'} bootId=${bootInfo.bootId || 'null'}`);
+
 const server = app.listen(port, host, () => {
   const display = host === '0.0.0.0' || host === '::' ? 'localhost' : host;
   console.log(`Palantir Console running at http://${display}:${port}`);
+});
+server.on('error', (err) => {
+  const code = err?.code || err?.message || 'UNKNOWN';
+  console.error(`[boot] listen failed on ${host}:${port}: ${code}`);
+  process.exit(1);
 });
 
 // Graceful shutdown: wire OS signals to app.shutdown() which disposes

@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
+const http = require('node:http');
 const request = require('supertest');
 const { createApp } = require('../app');
 
@@ -20,15 +21,24 @@ async function createTestApp(t) {
   const dbDir = await createTempDir('palantir-db-');
   const dbPath = path.join(dbDir, 'test.db');
   const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode', dbPath, authToken: null });
+  const server = http.createServer(app);
+  await new Promise((resolve, reject) => {
+    server.once('listening', resolve);
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1');
+  });
 
   t.after(async () => {
+    if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+    if (typeof server.closeIdleConnections === 'function') server.closeIdleConnections();
+    try { server.close(); } catch (err) { /* already closed */ }
     if (app.shutdown) app.shutdown();
     await fs.rm(storageRoot, { recursive: true, force: true });
     await fs.rm(fsRoot, { recursive: true, force: true });
     await fs.rm(dbDir, { recursive: true, force: true });
   });
 
-  return { app, storageRoot, fsRoot };
+  return { app: server, storageRoot, fsRoot };
 }
 
 async function writeSession(storageRoot, session) {

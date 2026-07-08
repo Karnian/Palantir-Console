@@ -1,6 +1,9 @@
 const express = require('express');
 const path = require('path');
 const os = require('os');
+const { randomUUID } = require('node:crypto');
+const { spawnSync } = require('node:child_process');
+const packageJson = require('../package.json');
 const { createStorageContext } = require('./services/storage');
 const { createSessionService } = require('./services/sessionService');
 const { createTrashService } = require('./services/trashService');
@@ -79,6 +82,29 @@ const { createOperatorProfileService } = require('./services/operatorProfileServ
 const { createMasterMemoryRouter } = require('./routes/masterMemory');
 const { createOperatorInstanceService } = require('./services/operatorInstanceService');
 const { createOperatorInstancesRouter } = require('./routes/operatorInstances');
+
+function readGitSha() {
+  try {
+    const result = spawnSync('git', ['rev-parse', '--short', 'HEAD'], {
+      cwd: path.join(__dirname, '..'),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 1000,
+    });
+    if (result.error || result.status !== 0) return null;
+    const sha = String(result.stdout || '').trim();
+    return sha || null;
+  } catch (err) {
+    return null;
+  }
+}
+
+const BOOT_INFO = Object.freeze({
+  packageVersion: packageJson.version || null,
+  gitSha: readGitSha(),
+  startedAt: new Date().toISOString(),
+  bootId: randomUUID(),
+});
 // A2-3a: PM-slot composer+ledger cutover (flag-gated, default OFF)
 const { createMemoryComposer, buildWorkspaceAdapter, buildUserAdapter, buildProfileAdapter } = require('./services/memoryComposer');
 const { createCompositionLedger } = require('./services/compositionLedger');
@@ -722,6 +748,7 @@ function startMasterMemoryXprojectScanner({
 
 function createApp(options = {}) {
   const app = express();
+  app.bootInfo = BOOT_INFO;
   // supertest 7.2.2 calls app.listen(0) and then app.address() on the original
   // app object. Express apps do not expose server.address(), so keep a narrow
   // bridge here; production listen() still returns the real http.Server.
@@ -1117,7 +1144,14 @@ function createApp(options = {}) {
 
   // Health check (before auth — must be accessible without token)
   app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', version: '2.0.0' });
+    res.json({
+      status: 'ok',
+      version: '2.0.0',
+      packageVersion: BOOT_INFO.packageVersion,
+      gitSha: BOOT_INFO.gitSha,
+      startedAt: BOOT_INFO.startedAt,
+      bootId: BOOT_INFO.bootId,
+    });
   });
 
   // Auth router mounted BEFORE the global /api auth middleware — login
