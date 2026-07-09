@@ -249,6 +249,38 @@ test('NodesView detail refresh button refetches usage', async (t) => {
   assert.equal(usageCalls, 2);
 });
 
+test('NodesView detail retry recovers after a failed usage fetch', async (t) => {
+  let usageCalls = 0;
+  const env = createEnv(async (url) => {
+    if (url === '/api/nodes') return { body: { nodes: [sampleNode()] } };
+    if (url === '/api/nodes/pi/usage') {
+      usageCalls += 1;
+      if (usageCalls === 1) return { status: 500, body: { error: 'probe failed' } };
+      return { body: usageResponse('pi', [{
+        id: 'codex',
+        installed: true,
+        version: 'recovered',
+        usage: { limits: [{ label: 'recovered limit', remainingPct: 44, resetAt: null }], account: null, updatedAt: '2026-07-04T00:10:00.000Z' },
+        authStatus: null,
+        error: null,
+        updatedAt: '2026-07-04T00:10:00.000Z',
+      }]) };
+    }
+    throw new Error(`unexpected url ${url}`);
+  });
+  t.after(env.cleanup);
+
+  const root = renderNodes(env, { detailId: 'pi' });
+  await waitFor(() => assert.ok(root.querySelector('[data-role="node-detail-error"]')));
+  assert.match(root.textContent, /probe failed/);
+
+  root.querySelector('[data-role="node-usage-retry"]').click();
+  await waitFor(() => assert.match(root.textContent, /recovered limit/));
+
+  assert.equal(usageCalls, 2);
+  assert.equal(root.querySelector('[data-role="node-detail-error"]'), null);
+});
+
 test('NodesView detail async fence ignores a slow previous usage response', async (t) => {
   const slow = deferred();
   let slowStarted = false;
@@ -425,6 +457,7 @@ test('NodesView detail shows Operator session link only for active operator mana
 
 test('NodesView detail updates reachable chip after node:status SSE refreshes summary', async (t) => {
   let reachable = 1;
+  let usageCalls = 0;
   const env = createEnv(async (url) => {
     if (url === '/api/nodes') return { body: { nodes: [sampleNode({ reachable })] } };
     if (url === '/api/nodes/summary') return { body: {
@@ -433,17 +466,32 @@ test('NodesView detail updates reachable chip after node:status SSE refreshes su
       updatedAt: '2026-07-04T00:02:00.000Z',
     } };
     if (url === '/api/runs') return { body: { runs: [] } };
-    if (url === '/api/nodes/pi/usage') return { body: usageResponse('pi', []) };
+    if (url === '/api/nodes/pi/usage') {
+      usageCalls += 1;
+      return { body: usageResponse('pi', [{
+        id: 'codex',
+        installed: true,
+        version: 'stable',
+        usage: { limits: [{ label: 'stable limit', remainingPct: 66, resetAt: null }], account: null, updatedAt: '2026-07-04T00:10:00.000Z' },
+        authStatus: null,
+        error: null,
+        updatedAt: '2026-07-04T00:10:00.000Z',
+      }]) };
+    }
     throw new Error(`unexpected url ${url}`);
   });
   t.after(env.cleanup);
 
   const root = renderNodes(env, { detailId: 'pi' });
-  await waitFor(() => assert.match(root.textContent, /연결됨/));
+  await waitFor(() => assert.match(root.textContent, /stable limit/));
+  assert.match(root.textContent, /연결됨/);
+  assert.equal(usageCalls, 1);
 
   reachable = 0;
   env.context.sseBroker.publish('node:status', { node_id: 'pi', from_reachable: 1, to_reachable: 0, at: '2026-07-04T00:03:00.000Z' });
 
   await waitFor(() => assert.match(root.textContent, /연결 끊김/));
   assert.ok(root.querySelector('.node-status-dot.unreachable'));
+  assert.match(root.textContent, /stable limit/);
+  assert.equal(usageCalls, 1);
 });

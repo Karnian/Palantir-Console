@@ -799,10 +799,12 @@ function NodeDetail({ detailId, node, nodesLoading, nodeSummary, runs, runsLoadi
   const activeDetailRef = useRef(detailId);
   const requestSeqRef = useRef(0);
   activeDetailRef.current = detailId;
+  // Usage requests are keyed by the route identity; node only gates existence.
+  const usageKey = detailId && node ? detailId : null;
 
   const loadUsage = useCallback(async () => {
-    if (!detailId || !node) return;
-    const myId = detailId;
+    if (!usageKey) return;
+    const myId = usageKey;
     const requestSeq = requestSeqRef.current + 1;
     requestSeqRef.current = requestSeq;
     setLoadingUsage(true);
@@ -826,10 +828,10 @@ function NodeDetail({ detailId, node, nodesLoading, nodeSummary, runs, runsLoadi
         setLoadingUsage(false);
       }
     }
-  }, [detailId, node]);
+  }, [usageKey]);
 
   useEffect(() => {
-    if (!node) {
+    if (!usageKey) {
       requestSeqRef.current += 1;
       setUsageData(null);
       setUsageError(null);
@@ -838,7 +840,7 @@ function NodeDetail({ detailId, node, nodesLoading, nodeSummary, runs, runsLoadi
       return;
     }
     loadUsage();
-  }, [node, loadUsage]);
+  }, [usageKey, loadUsage]);
 
   const renderBack = () => html`
     <a class="node-detail-back" data-role="node-detail-back" href="#resources/nodes">
