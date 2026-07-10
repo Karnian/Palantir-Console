@@ -1,6 +1,6 @@
 # Goal Delegation (G 트랙) — 워커 완결 작업 위임 brief
 
-> **상태: DRAFT v4 — Codex R1(BLOCKER 5) → R2(BLOCKER 4 + SERIOUS 5) → R3(actor gate BLOCKER 1 + SERIOUS 6 + MINOR 1) 전부 반영. R4 확인 라운드 진행. 사용자 lock-in 전.**
+> **상태: Codex 4R 적대리뷰 완료 — R1 NO-GO(B5) → R2 NO-GO(B4+S5) → R3 NO-GO(B1+S6+M1) → R4 GO. 사용자 lock-in 대기.**
 > 작성: 2026-07-10. 근거: routes/tasks.js, lifecycleService, harvestService, worktreeService, projectMaterializationService, app.js(auto-review), auth.js, operatorSpawnService, webhookService, remoteSshExecutor, migrations 006/014/023/024/048/050/051.
 
 ## 1. 문제 정의
@@ -125,13 +125,14 @@ ALTER TABLE runs ADD COLUMN goal_retry_run_id TEXT;       -- 단일 tx 로 child
 **실행** (lifecycle 의 `run:harvested` 구독자):
 - verdict=retry → **단일 better-sqlite3 tx**: child run 생성(queued) + `UPDATE runs SET goal_retry_run_id=<child> WHERE id=<parent> AND goal_retry_run_id IS NULL` — CAS 실패 시 tx rollback (중복 이벤트/이중 구독에도 단일 child). **crash 창 제거**: parent claim 과 child 존재가 원자적 (Codex R2 BLOCKER 2 해소). spawn 은 tx 밖 — child 는 queued row 이므로 기존 queue drain 이 집는다.
 - **tx 범위 최소화 (Codex R3)**: 프롬프트 컴파일, 이전 attempt 요약/diff 읽기, attempt ref resolve 등 I/O·무거운 read 는 전부 **tx 밖에서 사전 준비**. tx 안은 source_generation 재검증 + child insert + parent CAS 만 (동기 better-sqlite3 tx 를 짧게 유지).
+- **tx 내 source_generation 불일치 (Codex R4)**: tx rollback 후 parent 를 `retry` 상태로 방치하지 않는다 — `UPDATE runs SET goal_verdict='error', goal_verdict_reason='source_changed' WHERE id=? AND goal_verdict='retry' AND goal_retry_run_id IS NULL` 교정 CAS 로 전환하고 error side effect (PM 리뷰 + `goal:error` webhook + task 전이) 를 발화. "retry verdict 인데 child 없음" 상태가 지속 불가능함을 테스트로 강제 (G3 필수 목록).
 - **boot sweeper**: 부팅 시 (a) terminal + goal-enabled + `goal_verdict IS NULL` 인 run → verdict-only 재계산 (§5f-2), (b) queued goal child run → 기존 drain 경로 합류. "claimed but lost child" 모드는 tx 통합으로 소멸. **부팅 순서 (Codex R3)**: sweeper 는 `cleanupStaleTerminalWorktrees()` 등 stale worktree 정리보다 **먼저** 실행하고, 이중 방어로 stale cleanup 은 `goal_enabled && goal_verdict IS NULL` run 의 worktree 를 제외한다 — 정리가 먼저 돌아 acceptance 기회를 없애고 `harvest_incomplete` fail-open 으로 새는 경로 차단.
 
 **verdict persist 도 CAS (Codex R3)**: `UPDATE runs SET goal_verdict=?, goal_verdict_reason=? WHERE id=? AND goal_verdict IS NULL` — **CAS 승자만** `goal:verdict` 이벤트·webhook·retry tx·task 전이 side effect 를 발생시킨다. duplicate harvest / sweeper 동시 진입에도 이중 side effect 없음.
 
 **suppression (전부 persisted verdict 기반)**:
 - PM 리뷰: verdict=retry → `pm_review:suppressed` (reason: `goal_retry`).
-- **webhook**: goal-enabled 태스크의 `run:ended`(failed) 외부 발송 suppress (webhookService 가 task goal 여부 조회) — 대신 verdict 후 `goal:exhausted` / `goal:error` 를 webhook 채널로 발송 (Codex R2 BLOCKER 3 해소). **payload 는 기존 webhook 화이트리스트 원칙 (Codex R3)**: `{ task_id, run_id, project_id, verdict, reason, attempts_used, budget }` 만 — `goal_report`·acceptance output tail·diff stat·criteria 전문은 외부 발송 금지. `run:needs_input` webhook 은 기존 그대로 (goal 비관여).
+- **webhook**: goal-enabled 태스크의 `run:ended`(failed) 외부 발송 suppress (webhookService 가 task goal 여부 조회) — 대신 verdict 후 `goal:exhausted` / `goal:error` 를 webhook 채널로 발송 (Codex R2 BLOCKER 3 해소). **payload 는 기존 webhook 화이트리스트 원칙 (Codex R3)**: `{ task_id, run_id, project_id, verdict, reason, attempts_used, budget }` 만 — `goal_report`·acceptance output tail·diff stat·criteria 전문은 외부 발송 금지. `reason` 은 raw exception 문자열이 아니라 **고정 enum code** (`source_changed`/`no_progress`/`exhausted`/`harvest_incomplete`/`non_retryable`/`runner_unavailable` 등) 만 (Codex R4). `run:needs_input` webhook 은 기존 그대로 (goal 비관여).
 - **B-lite**: `run:ended` retry 블록은 goal-enabled 면 skip. non-goal 완전 불변.
 - non-retryable 분류: 인프라성 실패 (materialize fail-closed, preflight, corrupt queued_args) 는 verdict=error.
 - 예산은 DB 계보 기반 (`retry_root_run_id` 내 `started_at` 있는 run 수) — 재시작에도 유지. `AUTO_REVIEW_MAX`(in-memory) 는 외곽 2차 안전망.
@@ -203,7 +204,7 @@ goal 이 gate2 통과 (Operator done 판정) 또는 사람이 done 처리하면:
 | G4 | Gate 2 리뷰 구조화 + TaskDetail goal UI + 산출물 브랜치 승격 (§5j) | 중간 |
 | G5 | 메모리 연계 (`harvest:acceptance` → R1b) + flag 기본 on 검토 | 낮음 |
 
-G3 테스트 필수 시나리오: failed retry 단일 소유 (B-lite 이중 spawn 0), completed+Gate1 FAIL suppression, tx 원자성 (parent claim ↔ child 존재), boot sweeper (verdict NULL 재계산 / queued child drain), harvest 중간 crash stage-resume, webhook suppression + goal:exhausted 발송, max_concurrent 큐 상호작용, needs_input 비관여, materialized autosave + ref 계승 + runner_unavailable fail-open, source_generation 변경 중단, fingerprint 조기 종료, ref GC, 전 checkTaskCompletion call-site goal 분기.
+G3 테스트 필수 시나리오: failed retry 단일 소유 (B-lite 이중 spawn 0), completed+Gate1 FAIL suppression, tx 원자성 (parent claim ↔ child 존재), **source_generation mismatch-in-retry-tx → retry→error 교정 CAS (Codex R4 필수 지정)**, boot sweeper (verdict NULL 재계산 / queued child drain / stale cleanup 선행 금지), harvest 중간 crash stage-resume, verdict CAS 이중 side effect 0, webhook suppression + goal:exhausted 발송 + payload 화이트리스트, max_concurrent 큐 상호작용, needs_input 비관여, materialized autosave + ref 계승 + runner_unavailable fail-open, fingerprint 조기 종료, ref GC (승격 성공 후에만), 전 checkTaskCompletion call-site goal 분기.
 
 ## 8. Codex 리뷰 이력 매핑
 

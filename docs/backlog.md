@@ -218,6 +218,10 @@
 
 ## Draft-review
 
+### G. Goal Delegation — 워커 완결 작업 위임
+- **Spec**: [`docs/specs/goal-delegation-brief.md`](./specs/goal-delegation-brief.md) (2026-07-10). Codex 적대 리뷰 4라운드 수렴 (R1 NO-GO 5B → R2 NO-GO 4B+5S → R3 NO-GO 1B+6S+1M → **R4 GO**). **사용자 lock-in 대기.**
+- **요지**: 워커 위임을 1회성 채팅에서 goal 계약(수락 기준 + named verify check + 반복 예산)으로. 3-Gate (프로세스 종료 → 서버 기계 검증 → Operator 의미 판단) + persisted verdict (race-free) + attempt ref 계승 + B-lite/T5/webhook 재시도 소유권 통합 + 산출물 안정 브랜치 승격. `PALANTIR_GOAL_MODE` flag-gated, 전제조건 = `PALANTIR_PM_TOKEN` 분리. 페이즈 G1(프롬프트/파서)→G2(named check+acceptance)→G3(verdict 루프, 본체)→G3b(원격 runner opt-in)→G4(UI/전달)→G5(메모리 연계).
+
 ### N. 노드 퍼스트 작업보드·프로젝트 재기획
 - **Spec**: [`docs/specs/node-first-board-brief.md`](./specs/node-first-board-brief.md) (v1.2, PR #307). Codex 적대 리뷰 4라운드 수렴 (R1 3B+6S → R2 3B+3S → R3 1S → **R4 GO**), 사용자 lock-in 완료 (2026-07-05).
 - **N0 정합 수리 ✅ 완료 (PR #309~#311, 2026-07-05)**: ① migration 048 tasks rebuild — status CHECK 'failed' (prod 복사본 실측 + prod v48 적용) + 폼 dead-field 정합 ② 노드 복구 자동 drain (`onNodeRecovered`→`scheduleDrainForNode`, **실 Pi e2e: unreachable queued → host 교정 → flip 4초 내 자동 drain → codex 완주**) + transport_lost 실제 node_id. 각각 codex-goal 구현 + Themis PASS + Codex 적대 리뷰 GO. 1908 tests. (#311 은 #310 브랜치 조작 실수 복원 — worktree 커밋에서 PR 브랜치 만들 때 base 불일치 `reset --soft` 금지 교훈.)
