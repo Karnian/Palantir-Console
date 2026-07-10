@@ -1,6 +1,6 @@
 # Goal Delegation (G 트랙) — 워커 완결 작업 위임 brief
 
-> **상태: DRAFT v3 — Codex R1 NO-GO(BLOCKER 5) → R2 NO-GO(R1 4/5 해소, 신규 BLOCKER 4 + actor gate 잔존) 전부 반영. R3 진행 중. 사용자 lock-in 전.**
+> **상태: DRAFT v4 — Codex R1(BLOCKER 5) → R2(BLOCKER 4 + SERIOUS 5) → R3(actor gate BLOCKER 1 + SERIOUS 6 + MINOR 1) 전부 반영. R4 확인 라운드 진행. 사용자 lock-in 전.**
 > 작성: 2026-07-10. 근거: routes/tasks.js, lifecycleService, harvestService, worktreeService, projectMaterializationService, app.js(auto-review), auth.js, operatorSpawnService, webhookService, remoteSshExecutor, migrations 006/014/023/024/048/050/051.
 
 ## 1. 문제 정의
@@ -123,19 +123,22 @@ ALTER TABLE runs ADD COLUMN goal_retry_run_id TEXT;       -- 단일 tx 로 child
 - verdict 계산·persist 는 `run:harvested` emit 이전. 구독자들은 persisted verdict 만 읽으므로 순서 race 없음.
 
 **실행** (lifecycle 의 `run:harvested` 구독자):
-- verdict=retry → **단일 better-sqlite3 tx**: child run 생성(queued, 컴파일된 프롬프트 + attempt base + 계보 복사) + `UPDATE runs SET goal_retry_run_id=<child> WHERE id=<parent> AND goal_retry_run_id IS NULL` — CAS 실패 시 tx rollback (중복 이벤트/이중 구독에도 단일 child). **crash 창 제거**: parent claim 과 child 존재가 원자적 (Codex R2 BLOCKER 2 해소). spawn 은 tx 밖 — child 는 queued row 이므로 기존 queue drain 이 집는다.
-- **boot sweeper**: 부팅 시 (a) terminal + goal-enabled + `goal_verdict IS NULL` 인 run → verdict-only 재계산 (§5f-2), (b) queued goal child run → 기존 drain 경로 합류. "claimed but lost child" 모드는 tx 통합으로 소멸.
+- verdict=retry → **단일 better-sqlite3 tx**: child run 생성(queued) + `UPDATE runs SET goal_retry_run_id=<child> WHERE id=<parent> AND goal_retry_run_id IS NULL` — CAS 실패 시 tx rollback (중복 이벤트/이중 구독에도 단일 child). **crash 창 제거**: parent claim 과 child 존재가 원자적 (Codex R2 BLOCKER 2 해소). spawn 은 tx 밖 — child 는 queued row 이므로 기존 queue drain 이 집는다.
+- **tx 범위 최소화 (Codex R3)**: 프롬프트 컴파일, 이전 attempt 요약/diff 읽기, attempt ref resolve 등 I/O·무거운 read 는 전부 **tx 밖에서 사전 준비**. tx 안은 source_generation 재검증 + child insert + parent CAS 만 (동기 better-sqlite3 tx 를 짧게 유지).
+- **boot sweeper**: 부팅 시 (a) terminal + goal-enabled + `goal_verdict IS NULL` 인 run → verdict-only 재계산 (§5f-2), (b) queued goal child run → 기존 drain 경로 합류. "claimed but lost child" 모드는 tx 통합으로 소멸. **부팅 순서 (Codex R3)**: sweeper 는 `cleanupStaleTerminalWorktrees()` 등 stale worktree 정리보다 **먼저** 실행하고, 이중 방어로 stale cleanup 은 `goal_enabled && goal_verdict IS NULL` run 의 worktree 를 제외한다 — 정리가 먼저 돌아 acceptance 기회를 없애고 `harvest_incomplete` fail-open 으로 새는 경로 차단.
+
+**verdict persist 도 CAS (Codex R3)**: `UPDATE runs SET goal_verdict=?, goal_verdict_reason=? WHERE id=? AND goal_verdict IS NULL` — **CAS 승자만** `goal:verdict` 이벤트·webhook·retry tx·task 전이 side effect 를 발생시킨다. duplicate harvest / sweeper 동시 진입에도 이중 side effect 없음.
 
 **suppression (전부 persisted verdict 기반)**:
 - PM 리뷰: verdict=retry → `pm_review:suppressed` (reason: `goal_retry`).
-- **webhook**: goal-enabled 태스크의 `run:ended`(failed) 외부 발송 suppress (webhookService 가 task goal 여부 조회) — 대신 verdict 후 `goal:exhausted` / `goal:error` 를 webhook 채널로 발송 (Codex R2 BLOCKER 3 해소). `run:needs_input` webhook 은 기존 그대로 (goal 비관여).
+- **webhook**: goal-enabled 태스크의 `run:ended`(failed) 외부 발송 suppress (webhookService 가 task goal 여부 조회) — 대신 verdict 후 `goal:exhausted` / `goal:error` 를 webhook 채널로 발송 (Codex R2 BLOCKER 3 해소). **payload 는 기존 webhook 화이트리스트 원칙 (Codex R3)**: `{ task_id, run_id, project_id, verdict, reason, attempts_used, budget }` 만 — `goal_report`·acceptance output tail·diff stat·criteria 전문은 외부 발송 금지. `run:needs_input` webhook 은 기존 그대로 (goal 비관여).
 - **B-lite**: `run:ended` retry 블록은 goal-enabled 면 skip. non-goal 완전 불변.
 - non-retryable 분류: 인프라성 실패 (materialize fail-closed, preflight, corrupt queued_args) 는 verdict=error.
 - 예산은 DB 계보 기반 (`retry_root_run_id` 내 `started_at` 있는 run 수) — 재시작에도 유지. `AUTO_REVIEW_MAX`(in-memory) 는 외곽 2차 안전망.
 
 ### 5e. Attempt 연속성 (ref 보존 모델)
 
-- **materialized autosave 신설** (Codex R2 SERIOUS): materialized harvest 는 현재 uncommitted diff 를 읽고 worktree 를 지운다 — ref 보존 전에 workspace 에서 `git add -A && git commit`(autosave, executor 경유) 을 먼저 수행. legacy 는 기존 autosave 그대로.
+- **materialized autosave 신설** (Codex R2 SERIOUS): materialized harvest 는 현재 uncommitted diff 를 읽고 worktree 를 지운다 — ref 보존 전에 workspace 에서 `git add -A && git commit`(autosave, executor 경유) 을 먼저 수행. legacy 는 기존 autosave 그대로. commit 은 `-c user.name=palantir -c user.email=palantir@local` 고정 author 로 실행 — git identity 미설정 노드(pod)에서의 실패 차단 (Codex R3 MINOR).
 - **attempt ref 보존**: autosave 직후 `git update-ref refs/palantir/attempts/<runId> <tip>` — legacy 는 projectDir, materialized 는 cache repo, 실행은 run.node_id executor (diff/test 와 동일 plumbing). ref 이름을 `runs.attempt_ref` 에 persist (GC 추적 근거 — `project_workspace_refs` 는 별개 모델이므로 재사용 안 함). stage-local catch — 실패 시 연속성만 포기.
 - **재attempt spawn base**: `refs/palantir/attempts/<prevRunId>` resolve 성공 시 base 로 worktree 생성 + `attempt_base_commit` 기록. 실패 시 기존 base (HEAD / resolved_commit) fallback + 피드백 블록에 "계승 실패, 백지 시작" 명시.
   - legacy: `createWorktree(projectDir, branch, { baseRef })` 옵션 추가.
@@ -174,16 +177,18 @@ ALTER TABLE runs ADD COLUMN goal_retry_run_id TEXT;       -- 단일 tx 로 child
 ### 5j. 산출물 전달 (Codex R2 큰 그림 — "완결"의 마지막 조각)
 
 goal 이 gate2 통과 (Operator done 판정) 또는 사람이 done 처리하면:
-- 최종 attempt 의 보존 ref 를 **안정 브랜치 `palantir/goal/<taskId>`** 로 승격 (`git branch -f`, executor 경유). attempt refs 는 GC (§5e).
+- 최종 attempt 의 보존 ref 를 **안정 브랜치 `palantir/goal/<taskId>`** 로 승격 (`git branch -f`, executor 경유).
 - task/UI 에 결과 브랜치명 + 최종 diff stat 노출 — 사람이 리뷰/merge 할 대상이 항상 명확하다.
 - **자동 merge 는 하지 않는다** (비목표). merge 는 human 결정 — 기존 워크플로 (PR 생성 등) 는 브랜치가 있으면 그대로 가능.
+- **실패 모드 (Codex R3)**: 승격은 annotate-only — attempt_ref 미존재·branch -f 실패·원격 executor 실패 어느 것도 **task done 전이를 막지 않는다**. 실패 시 `goal:deliver_failed` run event + UI 뱃지 + 수동 재승격 액션 제공. **GC 순서 강제: attempt refs GC 는 승격 성공 후에만** — 승격 실패 시 refs 는 보존되어 수동 복구가 항상 가능하다.
 
 ## 6. 보안/신뢰 경계 (R1#4 + R2 잔존 지적 해소)
 
 핵심 전제: **Operator 는 현재 `PALANTIR_TOKEN` bearer 를 주입받는다** (operatorSpawnService) — 이 상태에서 cookie/bearer actor split 은 스푸핑 가능 (Operator 가 토큰 값을 cookie 로 보낼 수 있음). 따라서:
 
-- **`PALANTIR_GOAL_MODE=1` 의 활성 전제조건 = `PALANTIR_PM_TOKEN` 분리 운영** (R4 remember 의 spoof-proof 계약 재사용: cookie 는 `PALANTIR_TOKEN` 만, bearer 는 PM token). 서버는 goal 모드 + PM token 미분리 조합이면 **goal 기능을 fail-closed 비활성** + 경고 로그. Operator spawn env 는 goal 모드에서 PM token 만 주입.
-- **human-only 채널 (cookie actor, fail-closed)**: `project_verify_checks` CRUD **및 task 의 `verify_check_id` 할당** (Codex R2 SERIOUS — 할당도 human-only. Operator 가 기존 check 를 임의 태스크에 붙여 오용하는 표면 차단).
+- **`PALANTIR_GOAL_MODE=1` 의 활성 전제조건 = `PALANTIR_PM_TOKEN` 분리 운영** (R4 remember 의 spoof-proof 계약 재사용: cookie 는 `PALANTIR_TOKEN` 만, bearer 는 PM token). 서버는 goal 모드 + PM token 미분리 조합이면 **goal 기능을 fail-closed 비활성** + 경고 로그.
+- **Operator-visible context 전체에서 human token 제거 (Codex R3 BLOCKER)**: goal 모드에서 Operator 가 보는 **모든** 표면 — spawn env, system prompt 의 curl 예시 (`managerSystemPrompt.js` 가 현재 `PALANTIR_TOKEN` 을 직접 인라인), API 사용 안내 텍스트 — 는 `PALANTIR_PM_TOKEN` 만 담는다. `PALANTIR_TOKEN` 이 PM-visible context 어디에든 들어가면 cookie-only gate 는 스푸핑 가능하므로, 이것은 G2 의 gate 구현과 같은 PR 에서 원자적으로 처리한다.
+- **human-only 채널 (cookie actor, fail-closed)**: `project_verify_checks` CRUD **및 task 의 `verify_check_id` 할당** (Codex R2 SERIOUS — 할당도 human-only). 할당 시 **`task.project_id == check.project_id` 서버 검증** (Codex R3 — cross-project check 참조 금지, command 실행 경계 유지).
 - **Operator 가 할 수 있는 것**: `goal_enabled`/`goal_max_attempts`/`acceptance_criteria` 설정, goal 태스크 dispatch. check 미할당 태스크는 `project_verify_checks.is_default` (human 지정) 가 있으면 그것을 사용 — Operator 발 goal 태스크도 기계 게이트를 기본으로 받는다.
 - raw `verify_command` 컬럼 없음. check command 실행 표면은 기존 `project.test_command` 와 동일 (동일 runner/timeout/output cap) — 신규 권한 상승 없음.
 
@@ -220,3 +225,11 @@ G3 테스트 필수 시나리오: failed retry 단일 소유 (B-lite 이중 spaw
 | R2-S source_generation 계보 가드 | 재시도 tx 내 DB 조건 강제 (§5e) |
 | R2-큰그림 산출물 완료 처리 | §5j 안정 브랜치 승격 + human merge |
 | R2-큰그림 의미 기준 enforcement 한계 | §2 정직한 한계 + Gate 1.5 (LLM judge) v2 유보 |
+| R3-B PM prompt 내 PALANTIR_TOKEN 인라인 | Operator-visible 전 표면 PM token 화, G2 와 원자 처리 (§6) |
+| R3-S boot sweeper vs stale cleanup 순서 | sweeper 선행 + stale cleanup 의 verdict-NULL 제외 (§5d) |
+| R3-S verdict persist 비-CAS | verdict CAS — 승자만 side effect (§5d) |
+| R3-S retry tx 범위 과다 | tx = 재검증+insert+CAS 만, 준비는 tx 밖 (§5d) |
+| R3-S webhook payload 무제한 | goal webhook 화이트리스트 명시 (§5d) |
+| R3-S cross-project check 참조 | project_id 일치 서버 검증 (§6) |
+| R3-S 승격 실패 모드 부재 | annotate-only + deliver_failed + GC 순서 강제 (§5j) |
+| R3-M autosave git identity | 고정 author config (§5e) |
