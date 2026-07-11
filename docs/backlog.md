@@ -218,6 +218,10 @@
 
 ## Draft-review
 
+### F-1. Codex Fast Mode 토글
+- **Spec**: [`docs/specs/codex-fast-mode-brief.md`](./specs/codex-fast-mode-brief.md) (2026-07-11, mini-brief). **사용자 lock-in 대기.** 소형 단일-PR.
+- **요지**: user `~/.codex/config.toml` 의 `service_tier="fast"` 가 Palantir codex spawn 전체에 암묵 상속되는 드리프트 (M2 패턴) 를 명시 emit 으로 차단 — codexAdapter 가 `-c service_tier` 를 항상 명시. 대화형 Operator 턴은 per-instance ⚡ 토글 (cookie-only PATCH) + `PALANTIR_CODEX_FAST` env, 배치 (worker/auto-review) 는 standard 고정. fast 실패 시 standard 1회 재시도 + `codex:fast_unavailable` annotate.
+
 ### G. Goal Delegation — 워커 완결 작업 위임 (전 업무)
 - **Spec**: [`docs/specs/goal-delegation-brief.md`](./specs/goal-delegation-brief.md) (2026-07-10~11, v6). Codex 적대 리뷰 6라운드 수렴 (R1~R3 NO-GO → **R4 GO** [code core] → 워크로드 전제 교정[코딩→전 업무, Operator 단위] → R5 NO-GO 4B → **R6 GO** [일반화 레이어]). **사용자 lock-in 대기.**
 - **요지**: 워커 위임을 1회성 채팅에서 goal 계약(수락 기준 + verify check + 반복 예산)으로, **워크로드 불문** (code 모드=git workspace / deliverable 모드=격리 goal workspace + artifact bundle). 게이트: Gate 0 프로세스 종료 → Gate 1 기계 검증 (command=human-only + artifact=선언적·provenance 기반 gate/advisory 분리) → Gate 1.5 judge (구조화 LLM 판정, flag 별도, 보조 판정) → Gate 2 Operator 의미 판단(최종권). persisted verdict (race-free CAS) + 단일 tx 재시도 + attempt 연속성 (code=ref 계승 / deliverable=bundle seed) + node-aware workspace provider (local/remote pod) + copy-verify-delete 수확 + 산출물 전달 (branch 승격 / bundle manifest). 외부 액션 업무(메일/티켓)는 `action` goal kind 로 **v2 명시 유보**. `PALANTIR_GOAL_MODE` flag-gated, 전제조건 = `PALANTIR_PM_TOKEN` 분리. 페이즈 G1(프롬프트/파서/출력캡처)→G2(check+workspace local+deliverable 수확)→G2b(remote provider, 실 Pi)→G3(verdict 루프, 본체)→G3b(원격 runner)→G3c(judge)→G4(UI/전달)→G5(메모리).
