@@ -367,6 +367,7 @@ function createPmAutoReview({
         conversationService.sendMessage(receiver.slotKey, {
           text: reviewText,
           codebaseProjectId: run.project_id || null,
+          source: 'auto_review', // F-1: batch review turn → codex standard tier (never 2.5×)
         });
       } catch (err) {
         // Decrement (not set-to-count) so a concurrent reservation isn't clobbered;
@@ -1192,7 +1193,7 @@ function createApp(options = {}) {
   app.use('/api/agents', createAgentsRouter({ agentProfileService, providerRegistry, authResolverOpts }));
   app.use('/api/events', createEventsRouter({ eventBus }));
   app.use('/api/claude-sessions', createClaudeSessionsRouter());
-  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, isSpecialistAvailable, authResolverOpts }));
+  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, operatorInstanceService, isSpecialistAvailable, authResolverOpts }));
   app.use('/api/conversations', createConversationsRouter({ conversationService, runService }));
   // Operator P-B2c-3: specialist entry. Mounted ONLY when the feature is enabled
   // (specialistService is null unless PALANTIR_OPERATOR_SPECIALIST=1 + a backend),

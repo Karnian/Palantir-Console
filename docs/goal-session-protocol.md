@@ -8,7 +8,7 @@
 
 | # | 작업 | spec | 상태 | 규모 |
 |---|---|---|---|---|
-| 1 | **F-1: Codex Fast Mode 토글** | `docs/specs/codex-fast-mode-brief.md` | Codex 사전 구현검토 완료, 착수 가능 | 단일 PR (파일럿 — 프로토콜 검증 겸용) |
+| 1 | **F-1: Codex Fast Mode 토글** | `docs/specs/codex-fast-mode-brief.md` | ✅ **완료·merged** (migration 053 + codexAdapter tier emit + PATCH route + ⚡ UI + 테스트 12종). codex 계획 R1 NO-GO(3 BLOCKER) → 반영, 최종 diff 리뷰 PASS. | 단일 PR (파일럿 — 프로토콜 검증 완료) |
 | 2 | **G1: goal 프롬프트 컴파일러 + goalReport 파서 + 최종 출력 전문 캡처** | `docs/specs/goal-delegation-brief.md` §5b/5c/5k-2 | v6, Codex 6R GO | PR 1개 |
 | 3 | **G2: verify_checks 스키마/CRUD + goal workspace(local) + deliverable 수확 + artifact 평가기** | 동 spec §5a/5f/5k-1~3 + §6 | 〃 | PR 1개 (PM token 전제 gate 포함) |
 | 4 | **G3: verdict 루프 본체** — stage-resume + 단일 tx 재시도 + boot sweeper + B-lite/webhook/checkTaskCompletion goal 분기 + attempt 연속성 + fingerprint | 동 spec §4/5d/5e/5g | 〃 | PR 1개, **최고 리스크** — codex 라운드 여유 있게 |

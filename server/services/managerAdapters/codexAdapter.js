@@ -131,6 +131,29 @@ function isPlainObject(value) {
   return proto === Object.prototype || proto === null;
 }
 
+/**
+ * F-1: resolve the Codex service tier for a turn.
+ *
+ * Priority (spec docs/specs/codex-fast-mode-brief.md §3):
+ *   operator_instances.fast_mode (1=fast, 0=standard, NULL=unset)
+ *     → PALANTIR_CODEX_FAST env (global default, unset/≠'1' = standard)
+ *
+ * NULL/undefined MUST be checked BEFORE any numeric coercion — Number(null)
+ * is 0, which would silently pin an unset instance to standard and skip the
+ * env fallback. Returns 'fast' | 'default'. Callers ALWAYS emit the result
+ * explicitly so the user's ~/.codex/config.toml service_tier never leaks into
+ * a Palantir-spawned codex (the drift this feature exists to close).
+ */
+function resolveCodexServiceTier(fastMode, { env = process.env } = {}) {
+  let fast;
+  if (fastMode === null || fastMode === undefined) {
+    fast = env.PALANTIR_CODEX_FAST === '1';
+  } else {
+    fast = Number(fastMode) === 1;
+  }
+  return fast ? 'fast' : 'default';
+}
+
 function createDefaultLocalExecutor({ runId, spawnImpl }) {
   let lastTmpDir = null;
   return {
@@ -218,7 +241,7 @@ function createCodexAdapter({
    * codexMcpFlatten.flattenMcpToCodexArgs. String config paths are for the
    * Claude adapter's `--mcp-config` path and are skipped here.
    */
-  function startSession(runId, { systemPrompt, cwd, model, env, role, resumeThreadId, onThreadStarted, mcpConfig, executor, nodePrefix } = {}) {
+  function startSession(runId, { systemPrompt, cwd, model, env, role, resumeThreadId, onThreadStarted, mcpConfig, executor, nodePrefix, serviceTier } = {}) {
     if (sessions.has(runId)) {
       throw new Error(`codexAdapter: session ${runId} already started`);
     }
@@ -256,6 +279,13 @@ function createCodexAdapter({
       // "no MCP injection" (empty object behaves the same). Only plain object
       // shapes are accepted; path strings belong to Claude's --mcp-config path.
       mcpConfig: hasPlainObjectMcpConfig ? mcpConfig : null,
+      // F-1: Codex Fast Mode. May be a static string ('fast'|'default', resolved
+      // once by the caller — Top uses this with an env-derived tier) OR a
+      // function returning 'fast'|'default' per turn (Operators pass a resolver
+      // that re-reads operator_instances.fast_mode, so a live toggle takes
+      // effect on the NEXT turn without a re-spawn). Unset → 'default' (we ALWAYS
+      // emit a tier so the user's ~/.codex/config.toml value never leaks in).
+      serviceTier: serviceTier || 'default',
       turnIndex: 0,
       usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
       currentChild: null,
@@ -325,13 +355,29 @@ function createCodexAdapter({
    * has been spawned and wired. It does not wait for the Codex process to
    * exit; normalized events still drive the UI after acceptance.
    */
-  async function spawnOneTurn(runId, userText) {
+  async function spawnOneTurn(runId, userText, { source } = {}) {
     const state = sessions.get(runId);
     if (!state) throw new Error(`codexAdapter: no session ${runId}`);
     if (state.currentChild || state.turnStarting) {
       // A turn is still in flight — Codex turns are not concurrent.
       throw new Error('codexAdapter: previous turn still running');
     }
+
+    // F-1: resolve the effective service tier for THIS turn. state.serviceTier
+    // is either a function (re-read per turn) or a static string. Batch turns
+    // (source==='auto_review') are forced to 'default' regardless — an
+    // auto-review turn runs on every worker harvest and must never cost 2.5×.
+    let baseTier = 'default';
+    try {
+      baseTier = (typeof state.serviceTier === 'function' ? state.serviceTier() : state.serviceTier);
+    } catch { baseTier = 'default'; }
+    if (baseTier !== 'fast') baseTier = 'default';
+    const effectiveTier = source === 'auto_review' ? 'default' : baseTier;
+    // Track the tier of the in-flight turn so the terminal failure handlers can
+    // annotate a fast-tier turn that died (observability only, v1 has no
+    // fallback retry — see spec §3 "가드/관측"). Reset the per-turn emit guard.
+    state.currentTurnTier = effectiveTier;
+    state._fastUnavailEmitted = false;
 
     state.turnStarting = true;
     let placedInstructionsDirThisTurn = null;
@@ -377,6 +423,16 @@ function createCodexAdapter({
     // also need full bypass for filesystem writes.
     args.push('--dangerously-bypass-approvals-and-sandbox');
     args.push('-c', `model_instructions_file="${state.instructionsPath}"`);
+    // F-1: ALWAYS emit the resolved service tier as a leaf `-c` override so the
+    // user's ~/.codex/config.toml service_tier never leaks into a Palantir turn.
+    // `-c` is per-invocation and is NOT baked into the vendor thread state, so
+    // this is resume-safe (verified on codex-cli 0.142.5) and does not disturb
+    // the model_instructions_file prompt cache. When fast, also enable the
+    // feature flag so a config that hasn't set features.fast_mode still routes.
+    args.push('-c', `service_tier="${effectiveTier}"`);
+    if (effectiveTier === 'fast') {
+      args.push('-c', 'features.fast_mode=true');
+    }
     if (state.model) {
       args.push('-m', state.model);
     }
@@ -470,7 +526,7 @@ function createCodexAdapter({
       turnIndex: state.turnIndex,
       summaryText: 'turn started',
       hasRawStored: RAW_EVENTS_ENABLED,
-      data: { resume: !isFirstTurn },
+      data: { resume: !isFirstTurn, tier: effectiveTier }, // F-1: record used tier
     }));
 
     // Pipe the user text in.
@@ -511,6 +567,7 @@ function createCodexAdapter({
       if (!state.ended) {
         state.exitCode = 1;
         state.ended = true;
+        emitFastUnavailableIfNeeded(runId, 'spawn-error'); // F-1
         try {
           if (runService) runService.updateRunStatus(runId, 'failed', { force: true });
         } catch { /* ignore */ }
@@ -540,6 +597,7 @@ function createCodexAdapter({
         // routes/manager.js keeps treating the run as active (it trusts
         // isSessionAlive over run.status).
         state.ended = true;
+        emitFastUnavailableIfNeeded(runId, 'codex-exit-error'); // F-1
         try {
           if (runService) {
             runService.updateRunStatus(runId, 'failed', { force: true });
@@ -570,6 +628,7 @@ function createCodexAdapter({
         } catch { /* ignore */ }
         state.ended = true;
         state.exitCode = 1;
+        emitFastUnavailableIfNeeded(runId, 'spawn-failed'); // F-1: async spawn/placement rejection of a fast turn
         try {
           if (runService) runService.updateRunStatus(runId, 'failed', { force: true });
         } catch { /* ignore */ }
@@ -794,7 +853,7 @@ function createCodexAdapter({
   // earlier thenable-optimistic approach did, because refusals RESOLVE
   // {accepted:false} rather than reject, so a .catch never fired). Codex P4-S3a
   // R2 review.
-  function runTurn(runId, { text } = {}) {
+  function runTurn(runId, { text, source } = {}) {
     const state = sessions.get(runId);
     if (!state) return { accepted: false };
     if (state.ended) return { accepted: false };
@@ -839,7 +898,7 @@ function createCodexAdapter({
     // run status + SESSION_ENDED events (spawnOneTurn already marks + emits).
     let spawnResult;
     try {
-      spawnResult = spawnOneTurn(runId, text || '');
+      spawnResult = spawnOneTurn(runId, text || '', { source });
     } catch (err) {
       // spawnOneTurn is async so it should not throw synchronously, but guard.
       console.warn(`[codexAdapter] runTurn spawn failed for ${runId}: ${err.message}`);
@@ -874,6 +933,28 @@ function createCodexAdapter({
     // session ended without a recorded code (e.g. explicit disposeSession).
     if (state.exitCode != null) return state.exitCode;
     return state.ended ? 0 : null;
+  }
+
+  // F-1: annotate-only event when a FAST-tier turn's codex process failed.
+  // Emitted at most once per turn (state._fastUnavailEmitted guard) from the
+  // terminal failure handlers. Does NOT change turn outcome — the existing
+  // TURN_FAILED / status flip owns that; this just surfaces "fast may be
+  // unavailable (auth/model/config)" so the UI can advise toggling it off.
+  function emitFastUnavailableIfNeeded(runId, reason) {
+    const state = sessions.get(runId);
+    if (!state) return;
+    if (state.currentTurnTier !== 'fast') return;
+    if (state._fastUnavailEmitted) return;
+    state._fastUnavailEmitted = true;
+    try {
+      if (runService) {
+        runService.addRunEvent(runId, 'codex:fast_unavailable', JSON.stringify({
+          tier: 'fast',
+          reason: reason || null,
+          turnIndex: state.turnIndex,
+        }));
+      }
+    } catch { /* annotate-only, never throw */ }
   }
 
   function emitSessionEndedIfNeeded(runId, reason) {
@@ -972,6 +1053,8 @@ You are running as a Codex CLI subprocess (codex exec --json). HARD RULES:
 
 module.exports = {
   createCodexAdapter,
+  // F-1: tier policy resolver (per-instance fast_mode → env → standard).
+  resolveCodexServiceTier,
   // P2-2: expose classifier + constants for vendor fixture tests.
   classifyCodexErrorAsNotice,
   NON_FATAL_SEVERITIES,

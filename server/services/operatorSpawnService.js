@@ -57,6 +57,7 @@ const {
   buildInitialUserContext,
 } = require('./managerSystemPrompt');
 const { resolveSpawnCwd } = require('../utils/spawnCwd');
+const { resolveCodexServiceTier } = require('./managerAdapters/codexAdapter'); // F-1
 const { conversationIdForProject } = require('../utils/conversationId'); // PM→Operator Phase 0 producer seam
 const { deriveLegacyContext, enforceWorkspace } = require('../utils/operatorContext');
 const { resolveProjectSource } = require('./projectSource');
@@ -651,6 +652,12 @@ function createOperatorSpawnService({
           nodeId,
           resumeThreadId,
           resumeSessionId,
+          // F-1: per-turn Codex tier resolver — re-reads this instance's
+          // fast_mode each turn so a live ⚡ toggle applies on the next turn
+          // without a re-spawn. Ignored by the Claude adapter.
+          serviceTier: operatorInstanceId
+            ? () => resolveCodexServiceTier(runService.getOperatorInstance(operatorInstanceId)?.fast_mode)
+            : resolveCodexServiceTier(null),
           onThreadStarted,
           onSessionStarted,
           mcpTools: pmMcpTools.length > 0 ? pmMcpTools : undefined,

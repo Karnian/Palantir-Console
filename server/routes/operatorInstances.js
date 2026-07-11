@@ -25,6 +25,24 @@ function createOperatorInstancesRouter({ operatorInstanceService }) {
     res.json({ instance });
   }));
 
+  // F-1: PATCH the Codex Fast Mode toggle. Cookie(human)-only — fast mode is a
+  // cost decision (2.5× credits) so an Operator must not self-promote its own
+  // tier (mirrors the R4 active-write actor split, routes/memory.js). Caveat:
+  // in a PALANTIR_PM_TOKEN-undivided deployment req.auth.method is an actor
+  // hint, not a hard security boundary — this blocks accidental cost abuse, not
+  // a determined spoof.
+  router.patch('/:id/fast-mode', asyncHandler(async (req, res) => {
+    if (!req.auth || req.auth.method !== 'cookie') {
+      return res.status(403).json({ error: 'fast-mode toggle requires human (cookie) auth' });
+    }
+    const raw = (req.body || {}).fast_mode;
+    if (raw !== 0 && raw !== 1 && raw !== null) {
+      return res.status(400).json({ error: 'fast_mode must be 0, 1, or null' });
+    }
+    const instance = operatorInstanceService.setFastMode(req.params.id, raw);
+    res.json({ instance });
+  }));
+
   return router;
 }
 

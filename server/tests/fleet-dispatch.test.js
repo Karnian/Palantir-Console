@@ -220,7 +220,10 @@ test('reachable executable ssh node dispatches through pickExecutor and remote w
   assert.equal(spawn.runId, run.id);
   assert.equal(spawn.payload.engine, 'cli');
   assert.equal(spawn.payload.spec.command, 'codex');
-  assert.deepEqual(spawn.payload.spec.args, ['run remotely']);
+  // F-1: codex workers are pinned to the standard service tier (leaf `-c`
+  // override, before the args_template) so a batch run never inherits the
+  // user's ~/.codex/config.toml service_tier="fast".
+  assert.deepEqual(spawn.payload.spec.args, ['-c', 'service_tier="default"', 'run remotely']);
   assert.equal(spawn.payload.spec.cwd, '/workspace/project');
   assert.equal(spawn.payload.spec.workerPath, '/opt/codex/bin');
   assert.equal(h.runService.getRun(run.id).tmux_session, `remote-${run.id}`);
