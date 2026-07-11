@@ -218,6 +218,8 @@
 
 ## Draft-review
 
+> **진행 프로토콜**: F-1 + G 트랙 등 후속작업 전체의 표준 진행 순서/규율은 [`docs/goal-session-protocol.md`](./goal-session-protocol.md) — 사용자가 해당 문서로 진행 지시 시 lock-in 간주 규약 포함.
+
 ### F-1. Codex Fast Mode 토글
 - **Spec**: [`docs/specs/codex-fast-mode-brief.md`](./specs/codex-fast-mode-brief.md) (2026-07-11, mini-brief). **사용자 lock-in 대기.** 소형 단일-PR.
 - **요지**: user `~/.codex/config.toml` 의 `service_tier="fast"` 가 Palantir codex spawn 전체에 암묵 상속되는 드리프트 (M2 패턴) 를 명시 emit 으로 차단 — codexAdapter 가 `-c service_tier` 를 항상 명시. 대화형 Operator 턴은 per-instance ⚡ 토글 (cookie-only PATCH) + `PALANTIR_CODEX_FAST` env, 배치 (worker/auto-review) 는 standard 고정. fast 실패 시 standard 1회 재시도 + `codex:fast_unavailable` annotate.
