@@ -1,0 +1,12 @@
+-- Goal activation unification (Codex holistic-review kickoff item #1).
+--
+-- Goal participation was inferred from multiple predicates (G1 gated on
+-- task.goal_enabled alone; G2 gated on goalFeatureActive()), and re-evaluating
+-- goalFeatureActive() at each stage risks stranding a run if PALANTIR_GOAL_MODE /
+-- PALANTIR_PM_TOKEN change between dispatch, harvest, and reboot. Persist ONE
+-- per-run activation decision at spawn time; every per-run goal surface (prompt,
+-- capture, workspace, Gate 1 acceptance, deliverable) reads this column instead.
+-- (verify_check ROUTES stay on the live goalFeatureActive() — they have no run.)
+--
+-- goal_active = 1 iff, at spawn, goalFeatureActive() AND the task was goal_enabled.
+ALTER TABLE runs ADD COLUMN goal_active INTEGER NOT NULL DEFAULT 0;

@@ -62,6 +62,7 @@ async function harness(t) {
     runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
     executionEngine: exec, streamJsonEngine: stubSJE(), worktreeService: null,
     eventBus, harvestService,
+    goalFeatureActive: () => true, // exercise goal features (unified activation)
   });
   lc.startMonitoring();
   t.after(async () => { lc.stopMonitoring(); close(); await fsp.rm(dir, { recursive: true, force: true }); });
@@ -102,6 +103,7 @@ test('captureGoalOutput persists final_output + goal_report on terminal (goal ru
   db.prepare('UPDATE tasks SET goal_enabled = 1 WHERE id = ?').run(task.id);
   const profile = seedProfile(db);
   const run = rs.createRun({ is_manager: false, task_id: task.id, agent_profile_id: profile.id, node_id: 'local', prompt: 'x' });
+  rs.setGoalActive(run.id, 1); // unified activation: stamp goal-active on the manual run
   outputByRun.set(run.id, `some worker chatter\n${REPORT}\n`);
   rs.updateRunStatus(run.id, 'completed', { force: true });
   await tick();
@@ -138,6 +140,7 @@ test('captureGoalOutput persists final_output even when no report present (null 
   db.prepare('UPDATE tasks SET goal_enabled = 1 WHERE id = ?').run(task.id);
   const profile = seedProfile(db);
   const run = rs.createRun({ is_manager: false, task_id: task.id, agent_profile_id: profile.id, node_id: 'local', prompt: 'x' });
+  rs.setGoalActive(run.id, 1); // unified activation: stamp goal-active on the manual run
   outputByRun.set(run.id, 'worker output without any report fence');
   rs.updateRunStatus(run.id, 'completed', { force: true });
   await tick();
@@ -153,6 +156,7 @@ test('captureGoalOutput prefers the file-backed tee log over channel.getOutput (
   db.prepare('UPDATE tasks SET goal_enabled = 1 WHERE id = ?').run(task.id);
   const profile = seedProfile(db);
   const run = rs.createRun({ is_manager: false, task_id: task.id, agent_profile_id: profile.id, node_id: 'local', prompt: 'x' });
+  rs.setGoalActive(run.id, 1); // unified activation: stamp goal-active on the manual run
   // getOutput would return a STALE/empty tail; the durable tee log has the real report.
   outputByRun.set(run.id, 'stale buffer with no report');
   const logPath = path.resolve(process.cwd(), 'runtime', 'goal-output', `${run.id}.log`);

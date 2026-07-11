@@ -67,6 +67,16 @@ test('goal deliverable run (no git workspace) executes in an isolated goal works
   t.after(() => { try { fs.rmSync(cwd, { recursive: true, force: true }); } catch {} });
 });
 
+test('goal_active is stamped once at spawn from goalFeatureActive() (unified activation)', async (t) => {
+  const { db, rs, ts, exec, lc } = await harness(t); // harness injects goalFeatureActive: () => true
+  const task = ts.createTask({ title: 't', description: 'd' });
+  db.prepare('UPDATE tasks SET goal_enabled = 1 WHERE id = ?').run(task.id);
+  const profile = seedProfile(db);
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'go' });
+  assert.equal(rs.getRun(run.id).goal_active, 1, 'goal_active persisted at spawn for a goal-active run');
+  t.after(() => { try { fs.rmSync(exec.spawned[0].opts.cwd, { recursive: true, force: true }); } catch {} });
+});
+
 test('goal task with goal mode OFF runs as a normal task (no goal workspace) — §6', async (t) => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'palantir-g2ws-off-'));
   const { db, migrate, close } = createDatabase(path.join(dir, 't.db'));

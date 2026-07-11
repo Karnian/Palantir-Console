@@ -298,10 +298,10 @@ function createHarvestService({
   nodeService = null,
   // G2 §5f: Gate 1 acceptance. Optional — when absent, harvest behaves exactly
   // as pre-G2 (no acceptance stage), so non-goal deployments are unaffected.
+  // The goal gate here is per-run (run.goal_active, stamped at spawn) — harvest
+  // does NOT re-evaluate goalFeatureActive() (unified activation).
   taskService = null,
   verifyCheckService = null,
-  // G2 §6 (Codex BLOCKER-1): goal features gate. Injectable for tests.
-  goalFeatureActive = require('./goalMode').goalFeatureActive,
 } = {}) {
   const seenRunIds = new Set();
 
@@ -642,11 +642,11 @@ function createHarvestService({
   // G2 §5f: resolve the run's assigned Gate 1 verify_check (or null). Guards on
   // the optional deps + goal-enabled task + a non-null assignment.
   function resolveGoalCheck(run) {
-    if (!goalFeatureActive()) return null; // §6: no Gate 1 unless goal mode active
+    if (!run.goal_active) return null; // single per-run gate (unified activation)
     if (!taskService || !verifyCheckService || !run.task_id) return null;
     let task;
     try { task = taskService.getTask(run.task_id); } catch { return null; }
-    if (!task || !task.goal_enabled || !task.verify_check_id) return null;
+    if (!task || !task.verify_check_id) return null;
     try { return verifyCheckService.getCheck(task.verify_check_id); } catch { return null; }
   }
 
@@ -855,7 +855,7 @@ function createHarvestService({
       // Runs the deliverable stage (enumerate → Gate 1 acceptance → bundle) rather
       // than falling into the no_worktree early-return. run:harvested still emits
       // exactly once below.
-      if (goalFeatureActive() && run.goal_workspace_path && !run.worktree_path && !isMaterializedHarvestTarget(run)) {
+      if (run.goal_active && run.goal_workspace_path && !run.worktree_path && !isMaterializedHarvestTarget(run)) {
         await harvestDeliverableRun(run, summary);
         emitHarvested(run, summary);
         return;
