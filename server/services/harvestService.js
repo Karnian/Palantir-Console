@@ -1,9 +1,13 @@
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { assertSpawnAllowed } = require('../utils/spawnGuard');
+const { isWithinRoot } = require('../utils/pathGuard');
 const { createLocalNodeExecutor } = require('./nodeExecutor');
+const { runAcceptance } = require('./goalAcceptance'); // G2 §5f
 
+const GOAL_MAX_FILE_BYTES = 5 * 1024 * 1024; // G2 §5k-2: per-file read/copy hard cap
 const MAX_STAT_CHARS = 8 * 1024;
 const MAX_OUTPUT_TAIL_CHARS = 8 * 1024;
 const MAX_SUMMARY_STAT_CHARS = 500;
@@ -292,6 +296,12 @@ function createHarvestService({
   nodeResolver = defaultNodeResolver,
   nodeExecutor = createLocalNodeExecutor(),
   nodeService = null,
+  // G2 §5f: Gate 1 acceptance. Optional — when absent, harvest behaves exactly
+  // as pre-G2 (no acceptance stage), so non-goal deployments are unaffected.
+  taskService = null,
+  verifyCheckService = null,
+  // G2 §6 (Codex BLOCKER-1): goal features gate. Injectable for tests.
+  goalFeatureActive = require('./goalMode').goalFeatureActive,
 } = {}) {
   const seenRunIds = new Set();
 
@@ -629,6 +639,210 @@ function createHarvestService({
     }
   }
 
+  // G2 §5f: resolve the run's assigned Gate 1 verify_check (or null). Guards on
+  // the optional deps + goal-enabled task + a non-null assignment.
+  function resolveGoalCheck(run) {
+    if (!goalFeatureActive()) return null; // §6: no Gate 1 unless goal mode active
+    if (!taskService || !verifyCheckService || !run.task_id) return null;
+    let task;
+    try { task = taskService.getTask(run.task_id); } catch { return null; }
+    if (!task || !task.goal_enabled || !task.verify_check_id) return null;
+    try { return verifyCheckService.getCheck(task.verify_check_id); } catch { return null; }
+  }
+
+  // G2 §5f: run the Gate 1 acceptance for a completed goal run against its
+  // workspace, persist runs.acceptance_json, and emit harvest:acceptance. The
+  // VERDICT (retry/gate2/…) is G3 — this is observational aggregation only.
+  // Never throws (caller wraps too); a command check reuses the harvest test
+  // runner (same runner contract §5f).
+  async function runGate1Acceptance(run, workspaceDir, summary, reportText) {
+    if (run.status !== 'completed') return;
+    const check = resolveGoalCheck(run);
+    if (!check) return;
+    try {
+      // final_output was persisted by captureGoalOutput just before harvest, so
+      // the run object here may be stale — re-read for the artifact report check.
+      let report = reportText;
+      if (report == null) { try { report = runService.getRun(run.id)?.final_output || null; } catch { report = null; } }
+      const acceptance = await runAcceptance({
+        check,
+        workspaceDir,
+        reportText: report,
+        runCommand: ({ command, cwd }) => runTestCommand({ command, cwd, testRunner, nodeResolver }),
+      });
+      try { runService.updateGoalAcceptance(run.id, acceptance); } catch { /* annotate-only */ }
+      addEvent(run.id, 'harvest:acceptance', acceptance);
+      summary.acceptance = { passed: acceptance.passed, gate: acceptance.gate, kind: acceptance.kind, status: acceptance.status };
+    } catch (err) {
+      addError(run.id, 'acceptance', err);
+      pushSummaryError(summary, 'acceptance');
+    }
+  }
+
+  // G2 §5k-2: enumerate a deliverable workspace into a bounded manifest
+  // (path/size/hash; cap 20 files / 10MB; excess flagged manifest_truncated).
+  // Symlinks are skipped (lstat), reads are within-root by construction.
+  // G2 (Codex R4): TOCTOU-safe capped file read — hashes at most `cap` bytes via
+  // a descriptor + fixed 64KB buffer, so even if the file GROWS after lstat the
+  // read is hard-bounded (never slurps the whole file into memory). Returns the
+  // sha256 of the first `cap` bytes, or null on error.
+  function hashCappedFile(abs, cap) {
+    let fd;
+    try { fd = fs.openSync(abs, 'r'); } catch { return null; }
+    try {
+      const h = crypto.createHash('sha256');
+      const buf = Buffer.allocUnsafe(64 * 1024);
+      let read = 0;
+      while (read < cap) {
+        const n = fs.readSync(fd, buf, 0, Math.min(buf.length, cap - read), null);
+        if (n <= 0) break;
+        h.update(buf.subarray(0, n));
+        read += n;
+      }
+      return h.digest('hex');
+    } catch { return null; } finally { try { fs.closeSync(fd); } catch { /* ignore */ } }
+  }
+
+  // G2 (Codex R4): TOCTOU-safe capped copy — copies at most `cap` bytes via
+  // descriptors + a fixed buffer, so a file that grows after lstat cannot make
+  // the copy unbounded. Returns true on success.
+  function copyCappedFile(src, dst, cap) {
+    let sfd; let dfd;
+    try { sfd = fs.openSync(src, 'r'); } catch { return false; }
+    try { dfd = fs.openSync(dst, 'w', 0o600); } catch { try { fs.closeSync(sfd); } catch { /* */ } return false; }
+    try {
+      const buf = Buffer.allocUnsafe(64 * 1024);
+      let written = 0;
+      while (written < cap) {
+        const n = fs.readSync(sfd, buf, 0, Math.min(buf.length, cap - written), null);
+        if (n <= 0) break;
+        fs.writeSync(dfd, buf, 0, n);
+        written += n;
+      }
+      return true;
+    } catch { return false; } finally { try { fs.closeSync(sfd); } catch { /* */ } try { fs.closeSync(dfd); } catch { /* */ } }
+  }
+
+  function enumerateDeliverable(root) {
+    const MAX_FILES = 20;
+    const MAX_TOTAL = 10 * 1024 * 1024;   // total hashed/bundled budget
+    const MAX_FILE_BYTES = 5 * 1024 * 1024; // never read a single file bigger than this
+    const MAX_ENTRIES = 5000; // Codex R2: bound the WALK itself (not just the manifest)
+    const MAX_STACK = 5000;
+    const files = [];
+    let truncated = false;
+    let total = 0;
+    let visited = 0;
+    const stack = [{ dir: root, depth: 0 }];
+    while (stack.length) {
+      if (visited >= MAX_ENTRIES) { truncated = true; break; } // stop the whole walk
+      const { dir, depth } = stack.pop();
+      if (depth > 10) continue;
+      // Codex R3: stream directory entries with opendirSync (one Dirent at a
+      // time) instead of readdirSync (which materializes the ENTIRE directory
+      // before any cap can apply). A single directory of millions of entries is
+      // now bounded by the global visit budget, not by physical memory.
+      let dh;
+      try { dh = fs.opendirSync(dir); } catch { continue; }
+      try {
+        let ent;
+        while ((ent = dh.readSync()) !== null) {
+          if (visited >= MAX_ENTRIES) { truncated = true; break; }
+          visited++;
+          const abs = path.join(dir, ent.name);
+          if (ent.isSymbolicLink()) continue;
+          if (ent.isDirectory()) {
+            if (stack.length < MAX_STACK) stack.push({ dir: abs, depth: depth + 1 });
+            else truncated = true;
+            continue;
+          }
+          if (!ent.isFile()) continue;
+          if (files.length >= MAX_FILES || total >= MAX_TOTAL) { truncated = true; continue; }
+          // Size-first (Codex BLOCKER-2): decide from lstat BEFORE any read, so a
+          // huge file is never slurped into memory and never bundled.
+          let st;
+          try { st = fs.lstatSync(abs); } catch { continue; }
+          if (!st.isFile()) continue;
+          const rel = path.relative(root, abs).split(path.sep).join('/');
+          const size = st.size;
+          if (size > MAX_FILE_BYTES || total + size > MAX_TOTAL) {
+            files.push({ path: rel, size, sha256: null, skipped: 'too_large' });
+            truncated = true;
+            continue;
+          }
+          // TOCTOU-safe: bounded descriptor read (never readFileSync the whole file).
+          const hash = hashCappedFile(abs, MAX_FILE_BYTES);
+          if (hash == null) continue;
+          total += size;
+          files.push({ path: rel, size, sha256: hash });
+        }
+      } finally {
+        try { dh.closeSync(); } catch { /* ignore */ }
+      }
+    }
+    return { files, truncated, total_bytes: total };
+  }
+
+  // G2 §5k-2: harvest a deliverable-mode goal run (no git workspace). Order per
+  // Codex SERIOUS-3: enumerate → Gate 1 acceptance (live workspace) → copy bundle
+  // → mark bundled → emit. The source workspace is removed later by lifecycle
+  // cleanup. annotate-only / never-throws. The final run:harvested is emitted by
+  // the caller (exactly-once contract preserved).
+  async function harvestDeliverableRun(run, summary) {
+    summary.harvested = true;
+    const ws = run.goal_workspace_path;
+    let manifest = null;
+    try {
+      if (ws && fs.existsSync(ws)) manifest = enumerateDeliverable(ws);
+    } catch (err) { addError(run.id, 'deliverable_enumerate', err); pushSummaryError(summary, 'deliverable_enumerate'); }
+    if (manifest) {
+      addEvent(run.id, 'harvest:deliverable', { files: manifest.files.length, total_bytes: manifest.total_bytes, manifest_truncated: manifest.truncated });
+      try { runService.setDeliverableState(run.id, 'captured'); } catch { /* annotate */ }
+    }
+
+    // Gate 1 acceptance against the LIVE workspace (before any copy/delete).
+    await runGate1Acceptance(run, ws, summary, run.final_output);
+
+    // Copy the bundle out so it survives the workspace cleanup (retention).
+    if (manifest && ws) {
+      try {
+        // Defense-in-depth: sanitize id segments to a safe filename charset so a
+        // corrupt task_id/run.id can never escape the goal-artifacts root.
+        const safeSeg = (v, fb) => (String(v || '').replace(/[^a-zA-Z0-9_-]/g, '') || fb);
+        // dest embeds the runId and harvest is exactly-once per run (seenRunIds +
+        // hasExistingHarvestEvent), so the destination is always fresh — no
+        // recursive rmSync needed (Codex R5: that pre-clear was itself unbounded
+        // I/O). mkdir is idempotent; each capped copy overwrites its own file.
+        const dest = path.resolve(process.cwd(), 'runtime', 'goal-artifacts', safeSeg(run.task_id, 'none'), safeSeg(run.id, 'run'));
+        fs.mkdirSync(dest, { recursive: true, mode: 0o700 });
+        // Copy ONLY the bounded manifest files (Codex BLOCKER-2) — NOT the whole
+        // tree — so an oversized/huge workspace can't blow up the bundle. Each
+        // destination is re-checked to stay within the bundle root.
+        let copied = 0;
+        for (const f of manifest.files) {
+          if (f.skipped) continue; // oversized file — metadata only, not bundled
+          const src = path.join(ws, f.path);
+          const dst = path.join(dest, f.path);
+          if (!isWithinRoot(dest, dst) || !isWithinRoot(ws, src)) continue;
+          try {
+            const st = fs.lstatSync(src);
+            if (!st.isFile()) continue; // never follow a symlink into a copy
+            fs.mkdirSync(path.dirname(dst), { recursive: true });
+            // TOCTOU-safe capped copy (Codex R4) — bounded even if src grows.
+            if (copyCappedFile(src, dst, GOAL_MAX_FILE_BYTES)) copied++;
+          } catch { /* skip this file */ }
+        }
+        runService.setDeliverableState(run.id, 'bundled');
+        addEvent(run.id, 'harvest:deliverable_bundled', { dest: path.relative(process.cwd(), dest), files: copied });
+        if (taskService && run.task_id) {
+          try {
+            taskService.updateTask(run.task_id, { deliverable_json: JSON.stringify({ run_id: run.id, files: manifest.files, truncated: manifest.truncated }) });
+          } catch { /* annotate */ }
+        }
+      } catch (err) { addError(run.id, 'deliverable_bundle', err); pushSummaryError(summary, 'deliverable_bundle'); }
+    }
+  }
+
   async function harvestRun(run, { projectDir } = {}) {
     if (!isReviewTargetRun(run)) return;
     if (seenRunIds.has(run.id)) return;
@@ -637,6 +851,15 @@ function createHarvestService({
 
     const summary = createSummary();
     try {
+      // G2 §5k-2: deliverable-mode goal run (isolated workspace, no git worktree).
+      // Runs the deliverable stage (enumerate → Gate 1 acceptance → bundle) rather
+      // than falling into the no_worktree early-return. run:harvested still emits
+      // exactly once below.
+      if (goalFeatureActive() && run.goal_workspace_path && !run.worktree_path && !isMaterializedHarvestTarget(run)) {
+        await harvestDeliverableRun(run, summary);
+        emitHarvested(run, summary);
+        return;
+      }
       const materialized = isMaterializedHarvestTarget(run);
       if (!materialized && (!run.worktree_path || !run.branch)) {
         pushSummaryError(summary, 'no_worktree');
@@ -736,6 +959,10 @@ function createHarvestService({
         addError(run.id, 'test', err);
         pushSummaryError(summary, 'test');
       }
+
+      // G2 §5f: Gate 1 acceptance for a code-mode goal run — runs the assigned
+      // check against the worktree AFTER the test stage, BEFORE worktree removal.
+      await runGate1Acceptance(run, run.worktree_path, summary, run.final_output);
 
       try {
         await worktreeService.removeWorktree(resolvedProjectDir, run.worktree_path, run.branch, {

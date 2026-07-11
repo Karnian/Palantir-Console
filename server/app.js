@@ -81,6 +81,8 @@ const { createOperatorProfileMemoryRouter } = require('./routes/operatorProfileM
 const { createOperatorProfileService } = require('./services/operatorProfileService');
 const { createMasterMemoryRouter } = require('./routes/masterMemory');
 const { createOperatorInstanceService } = require('./services/operatorInstanceService');
+const { createVerifyCheckService } = require('./services/verifyCheckService');
+const { createVerifyChecksRouter } = require('./routes/verifyChecks');
 const { createOperatorInstancesRouter } = require('./routes/operatorInstances');
 
 function readGitSha() {
@@ -145,6 +147,17 @@ function formatHarvestSummary(harvestSummary) {
     const exitCode = test.exit_code != null ? test.exit_code : '?';
     const duration = test.duration_ms != null ? `${test.duration_ms}ms` : '?ms';
     lines.push(`  [harvest] test: ${testStatus} (exit ${exitCode}, ${duration})`);
+  }
+  // G2 §5f/§5h: surface the Gate 1 acceptance result. gate vs advisory reflects
+  // the check's provenance (§5k-3). NOTE the caveat: G2 acceptance is observational
+  // — it does NOT yet drive task transition (the verdict loop lands in G3).
+  const acc = harvestSummary.acceptance;
+  if (acc) {
+    const accStatus = acc.status === 'skipped'
+      ? `SKIPPED (${acc.reason || 'runner_unavailable'})`
+      : (acc.passed === true ? 'PASS' : acc.passed === false ? 'FAIL' : 'RAN');
+    lines.push(`  [gate1] acceptance: ${accStatus} — ${acc.kind || '?'} check (${acc.gate ? 'gate' : 'advisory'})`);
+    lines.push('  [gate1] note: Gate 1 은 아직 task 전이를 강제하지 않습니다 (G3 예정) — 최종 판단은 리뷰어.');
   }
   if (harvestSummary.statText) {
     lines.push('  [harvest] stat:');
@@ -767,6 +780,15 @@ function createApp(options = {}) {
   const authToken = options.authToken !== undefined
     ? options.authToken
     : process.env.PALANTIR_TOKEN;
+  // G2 §6: surface the goal-mode activation state at boot. When goal mode is
+  // requested without a separated PALANTIR_PM_TOKEN it is DISABLED (fail-closed);
+  // warn loudly so the operator knows why goal features are inert.
+  try {
+    const { goalModeDiagnostic } = require('./services/goalMode');
+    const diag = goalModeDiagnostic();
+    if (diag) (diag.active ? console.log : console.warn)(diag.message);
+  } catch { /* diagnostic only */ }
+
   const storageRoot = options.storageRoot
     || process.env.OPENCODE_STORAGE
     || path.join(os.homedir(), '.local', 'share', 'opencode', 'storage');
@@ -898,6 +920,12 @@ function createApp(options = {}) {
     nodeService,
     eventBus,
   });
+  // G2: verify_checks (Gate 1) service — created before harvestService so the
+  // harvest pipeline can run the assigned Gate 1 check.
+  const verifyCheckService = createVerifyCheckService(db);
+  // G2 §6: single goal-feature gate (injectable for tests). Threaded into every
+  // goal surface so they activate in lock-step with the PALANTIR_TOKEN scrub.
+  const goalFeatureActive = options.goalFeatureActive || require('./services/goalMode').goalFeatureActive;
   const harvestService = createHarvestService({
     runService,
     worktreeService,
@@ -906,6 +934,11 @@ function createApp(options = {}) {
     testRunner: options.harvestTestRunner,
     nodeExecutor,
     nodeService,
+    // G2 §5f: Gate 1 acceptance deps. taskService resolves the run's assigned
+    // verify_check_id; verifyCheckService loads the check + provenance.
+    taskService,
+    verifyCheckService,
+    goalFeatureActive,
   });
   const webhookService = createWebhookService({
     eventBus,
@@ -932,6 +965,7 @@ function createApp(options = {}) {
     // Phase 10D: isolated-preset auth materialization honors the same
     // `authResolverOpts` tests already pass for manager-path preflight.
     authResolverOpts: options.authResolverOpts || {},
+    goalFeatureActive, // G2 §6
   });
 
   // v3 Phase 1.5: shared manager registry + conversation service.
@@ -1204,6 +1238,7 @@ function createApp(options = {}) {
   app.use('/api/dispatch-audit', createDispatchAuditRouter({ reconciliationService }));
   app.use('/api/router', createRouterRouter({ routerService }));
   app.use('/api/worker-presets', createWorkerPresetsRouter({ presetService }));
+  app.use('/api/verify-checks', createVerifyChecksRouter({ verifyCheckService, taskService, goalFeatureActive }));
   app.use('/api/operator/profiles', createOperatorProfilesRouter({ operatorProfileService }));
   // R4b: profile-scoped R4 remember (POST /:id/memory/remember). Separate router on
   // the same base — the CRUD router's /:id routes don't match the deeper path.

@@ -31,6 +31,9 @@ const TASK_COLUMNS = [
   'preferred_preset_id',
   'goal_enabled',     // migration 054 (G1)
   'goal_max_attempts', // migration 054 (G1)
+  'verify_check_id',    // migration 055 (G2)
+  'goal_judge_enabled', // migration 055 (G2)
+  'deliverable_json',   // migration 055 (G2)
 ];
 
 const TASK_INDEXES = [

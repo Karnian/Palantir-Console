@@ -58,6 +58,7 @@ const {
 } = require('./managerSystemPrompt');
 const { resolveSpawnCwd } = require('../utils/spawnCwd');
 const { resolveCodexServiceTier } = require('./managerAdapters/codexAdapter'); // F-1
+const { goalFeatureActive } = require('./goalMode'); // G2 §6
 const { conversationIdForProject } = require('../utils/conversationId'); // PM→Operator Phase 0 producer seam
 const { deriveLegacyContext, enforceWorkspace } = require('../utils/operatorContext');
 const { resolveProjectSource } = require('./projectSource');
@@ -378,7 +379,9 @@ function createOperatorSpawnService({
       err.details = { sources: authCtx.sources, diagnostics: authCtx.diagnostics };
       throw err;
     }
-    const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env, envAllowlist });
+    // G2 §6 (Codex BLOCKER-1): scrub PALANTIR_TOKEN from the Operator's spawn
+    // env in goal mode so it cannot read the human token and spoof the gate.
+    const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env, envAllowlist, scrubHumanToken: goalFeatureActive() });
 
     // Load brief content (conventions/pitfalls) plus the thread handle. W-P3
     // moves thread ownership to operator_instances; project_briefs remains a
@@ -526,7 +529,10 @@ function createOperatorSpawnService({
     // runTurn (which would race with the user's first send; codex R1
     // finding #1). The whole blob is still cached across turns.
     const port = process.env.PORT || 4177;
-    const token = process.env.PALANTIR_TOKEN;
+    // G2 §6: in goal mode the Operator's API-call examples must reference the
+    // separated PM token, never the human PALANTIR_TOKEN. Non-goal → unchanged.
+    const goalActive = goalFeatureActive();
+    const token = goalActive ? process.env.PALANTIR_PM_TOKEN : process.env.PALANTIR_TOKEN;
     const baseSystemPrompt = buildManagerSystemPrompt({ adapter, port, token, layer: 'operator', adapterType, specialistAvailable: isSpecialistAvailable() });
     const projectSection = buildProjectScopedSystemSection({ project, brief, operatorRunId: runId });
     const systemPrompt = [baseSystemPrompt, projectSection].filter(Boolean).join('\n\n');

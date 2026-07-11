@@ -505,6 +505,18 @@ function createRunService(db, eventBus) {
     updateGoalCapture: db.prepare(`
       UPDATE runs SET final_output = ?, goal_report = ? WHERE id = ?
     `),
+    // G2 §5k-1: persist the isolated deliverable-mode workspace path.
+    setGoalWorkspacePath: db.prepare(`
+      UPDATE runs SET goal_workspace_path = ? WHERE id = ?
+    `),
+    // G2 §5f: persist Gate 1 acceptance aggregate.
+    setAcceptance: db.prepare(`
+      UPDATE runs SET acceptance_json = ? WHERE id = ?
+    `),
+    // G2 §5k-2: deliverable stage marker (captured|bundled|cleaned).
+    setDeliverableState: db.prepare(`
+      UPDATE runs SET deliverable_state = ? WHERE id = ?
+    `),
     delete: db.prepare('DELETE FROM runs WHERE id = ?'),
     // Events
     insertEvent: db.prepare(`
@@ -1247,6 +1259,27 @@ function createRunService(db, eventBus) {
     return stmts.getById.get(id);
   }
 
+  // G2 §5k-1: record the deliverable-mode goal workspace path on the run.
+  function setGoalWorkspacePath(id, workspacePath) {
+    getRun(id);
+    stmts.setGoalWorkspacePath.run(workspacePath ?? null, id);
+    return stmts.getById.get(id);
+  }
+
+  // G2 §5f: persist the Gate 1 acceptance aggregate (JSON) on the run.
+  function updateGoalAcceptance(id, acceptance) {
+    getRun(id);
+    stmts.setAcceptance.run(acceptance == null ? null : JSON.stringify(acceptance), id);
+    return stmts.getById.get(id);
+  }
+
+  // G2 §5k-2: advance the deliverable stage marker.
+  function setDeliverableState(id, state) {
+    getRun(id);
+    stmts.setDeliverableState.run(state ?? null, id);
+    return stmts.getById.get(id);
+  }
+
   function deleteRun(id) {
     getRun(id);
     stmts.delete.run(id);
@@ -1389,7 +1422,8 @@ function createRunService(db, eventBus) {
 
   return {
     listRuns, getRun, createRun,
-    updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture,
+    updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture, setGoalWorkspacePath,
+    updateGoalAcceptance, setDeliverableState,
     countRunning, countRunningOnNode, countRunningTotalOnNode,
     getOldestQueued, getOldestQueuedOnNode, getOldestQueuedReadyOnNode,
     getOldestMaterializableOnNode,

@@ -45,6 +45,16 @@ function goalOutputLogPath(runId) {
   return path.resolve(process.cwd(), 'runtime', 'goal-output', `${safe}.log`);
 }
 
+// G2 §5k-1: isolated deliverable-mode workspace for a local goal run with no
+// git workspace. Server-controlled path under runtime/ with a sanitized runId
+// segment (a blank id yields null so the caller fails closed rather than
+// materializing at the runtime root).
+function goalWorkspaceDir(runId) {
+  const safe = String(runId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!safe) return null;
+  return path.resolve(process.cwd(), 'runtime', 'goal-workspaces', safe);
+}
+
 function createLifecycleService({
   runService,
   taskService,
@@ -68,6 +78,12 @@ function createLifecycleService({
   materializeStuckMs,
   queueStuckMs,
   now,
+  // G2 §6 (Codex BLOCKER-1): goal features only activate when goal mode is on
+  // AND the PM token is separated. Injectable for tests; defaults to the real
+  // env-derived gate. When it returns false, a goal_enabled task runs exactly
+  // like a normal task (no goal workspace / no acceptance) — the security
+  // precondition (token scrub) and the goal features move in lock-step.
+  goalFeatureActive = require('./goalMode').goalFeatureActive,
 }) {
   nodeExecutor = nodeExecutor || createLocalNodeExecutor({ executionEngine, streamJsonEngine });
   const workerChannel = (nodeExecutor && typeof nodeExecutor.spawnWorker === 'function')
@@ -602,6 +618,13 @@ function createLifecycleService({
     if (goalLog) {
       try { require('node:fs').unlinkSync(goalLog); } catch { /* absent → nothing to clean */ }
     }
+    // G2 §5k-1: remove the deliverable-mode goal workspace (the deliverable
+    // harvest stage copies it out FIRST, so this is the final sweep). No-op when
+    // absent. Belt-and-suspenders against interim workspace leaks.
+    const goalWs = goalWorkspaceDir(run.id);
+    if (goalWs) {
+      try { require('node:fs').rmSync(goalWs, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
   }
 
   async function cleanupRunWorktree(run) {
@@ -1108,9 +1131,40 @@ function createLifecycleService({
       // this is a provable no-op (byte-identical). A folder-less specialist would
       // throw WORKSPACE_UNBOUND here — but specialists don't use the CLI spawn path
       // (B2c runs them on a dedicated backend); this is a defense-in-depth tripwire.
-      const operatorContext = deriveLegacyContext({ run, workspaceDir: worktreePath || projectDir });
-      enforceWorkspace(operatorContext, 'spawn_cwd');
-      const cwd = resolveSpawnCwd({ workspaceDir: worktreePath || projectDir });
+      // G2 §5k-1: deliverable mode = a goal-enabled run with NO git workspace
+      // (no worktree, not materialized). Such a run gets an ISOLATED workspace as
+      // its cwd instead of the server tree, so its artifacts never land in the
+      // control-plane. fail-closed (Codex BLOCKER-2): if the workspace can't be
+      // created — or the run is remote (§5k-1 remote provider is G2b) — mark the
+      // run failed NON-retryable rather than executing in the fallback cwd.
+      let cwd;
+      const hasGitWorkspace = !!worktreePath || usesMaterializedRepoWorkspace;
+      // §6: goal features only when goalFeatureActive() — otherwise a goal_enabled
+      // task runs as a normal task (byte-identical to pre-goal).
+      if (task && task.goal_enabled && !hasGitWorkspace && goalFeatureActive()) {
+        if (isRemoteNode) {
+          runService.addRunEvent(run.id, 'goal:workspace_remote_unsupported', JSON.stringify({ node_id: run.node_id || 'local' }));
+          runService.setRetryCount(run.id, MAX_RETRY);
+          runService.updateRunStatus(run.id, 'failed', { force: true, reason: 'goal_workspace_remote_unsupported' });
+          return null;
+        }
+        const dir = goalWorkspaceDir(run.id);
+        try {
+          if (!dir) throw new Error('invalid run id for goal workspace');
+          require('node:fs').mkdirSync(dir, { recursive: true, mode: 0o700 });
+        } catch (err) {
+          runService.addRunEvent(run.id, 'goal:workspace_failed', JSON.stringify({ reason: err.message }));
+          runService.setRetryCount(run.id, MAX_RETRY); // non-retryable — a retry re-fails identically
+          runService.updateRunStatus(run.id, 'failed', { force: true, reason: 'goal_workspace_failed' });
+          return null;
+        }
+        try { runService.setGoalWorkspacePath(run.id, dir); } catch { /* annotate-only */ }
+        cwd = dir;
+      } else {
+        const operatorContext = deriveLegacyContext({ run, workspaceDir: worktreePath || projectDir });
+        enforceWorkspace(operatorContext, 'spawn_cwd');
+        cwd = resolveSpawnCwd({ workspaceDir: worktreePath || projectDir });
+      }
       console.log(`[lifecycle] Executing task ${taskId} in cwd: ${cwd} (project: ${task.project_id || 'none'})`);
 
       // Route Claude Code workers through streamJsonEngine for rich event parsing.
