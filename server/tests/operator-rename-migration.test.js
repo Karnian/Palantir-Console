@@ -68,6 +68,10 @@ const RUN_COLUMNS = [
   // G1 (migration 054): goal capture — final output 전문 + parsed goalReport.
   'goal_report',
   'final_output',
+  // G2 (migration 055): Gate 1 acceptance + deliverable-mode workspace/bundle.
+  'acceptance_json',
+  'goal_workspace_path',
+  'deliverable_state',
 ];
 
 const COMPOSITION_EVENT_COLUMNS = [
