@@ -685,19 +685,31 @@ function createHarvestService({
     const MAX_FILES = 20;
     const MAX_TOTAL = 10 * 1024 * 1024;   // total hashed/bundled budget
     const MAX_FILE_BYTES = 5 * 1024 * 1024; // never read a single file bigger than this
+    const MAX_ENTRIES = 5000; // Codex R2: bound the WALK itself (not just the manifest)
+    const MAX_STACK = 5000;
     const files = [];
     let truncated = false;
     let total = 0;
+    let visited = 0;
     const stack = [{ dir: root, depth: 0 }];
     while (stack.length) {
+      if (visited >= MAX_ENTRIES) { truncated = true; break; } // stop the whole walk
       const { dir, depth } = stack.pop();
       if (depth > 10) continue;
       let entries;
       try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
       for (const ent of entries) {
+        // Global traversal cap: stop visiting once we've seen MAX_ENTRIES nodes,
+        // so a workspace with millions of files can never exhaust memory/I/O.
+        if (visited >= MAX_ENTRIES) { truncated = true; break; }
+        visited++;
         const abs = path.join(dir, ent.name);
         if (ent.isSymbolicLink()) continue;
-        if (ent.isDirectory()) { stack.push({ dir: abs, depth: depth + 1 }); continue; }
+        if (ent.isDirectory()) {
+          if (stack.length < MAX_STACK) stack.push({ dir: abs, depth: depth + 1 });
+          else truncated = true;
+          continue;
+        }
         if (!ent.isFile()) continue;
         if (files.length >= MAX_FILES || total >= MAX_TOTAL) { truncated = true; continue; }
         // Size-first (Codex BLOCKER-2): decide from lstat BEFORE any read, so a
