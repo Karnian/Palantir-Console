@@ -809,9 +809,11 @@ function createHarvestService({
         // Defense-in-depth: sanitize id segments to a safe filename charset so a
         // corrupt task_id/run.id can never escape the goal-artifacts root.
         const safeSeg = (v, fb) => (String(v || '').replace(/[^a-zA-Z0-9_-]/g, '') || fb);
+        // dest embeds the runId and harvest is exactly-once per run (seenRunIds +
+        // hasExistingHarvestEvent), so the destination is always fresh — no
+        // recursive rmSync needed (Codex R5: that pre-clear was itself unbounded
+        // I/O). mkdir is idempotent; each capped copy overwrites its own file.
         const dest = path.resolve(process.cwd(), 'runtime', 'goal-artifacts', safeSeg(run.task_id, 'none'), safeSeg(run.id, 'run'));
-        fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 });
-        fs.rmSync(dest, { recursive: true, force: true });
         fs.mkdirSync(dest, { recursive: true, mode: 0o700 });
         // Copy ONLY the bounded manifest files (Codex BLOCKER-2) — NOT the whole
         // tree — so an oversized/huge workspace can't blow up the bundle. Each
