@@ -218,9 +218,9 @@
 
 ## Draft-review
 
-### G. Goal Delegation — 워커 완결 작업 위임
-- **Spec**: [`docs/specs/goal-delegation-brief.md`](./specs/goal-delegation-brief.md) (2026-07-10). Codex 적대 리뷰 4라운드 수렴 (R1 NO-GO 5B → R2 NO-GO 4B+5S → R3 NO-GO 1B+6S+1M → **R4 GO**). **사용자 lock-in 대기.**
-- **요지**: 워커 위임을 1회성 채팅에서 goal 계약(수락 기준 + named verify check + 반복 예산)으로. 3-Gate (프로세스 종료 → 서버 기계 검증 → Operator 의미 판단) + persisted verdict (race-free) + attempt ref 계승 + B-lite/T5/webhook 재시도 소유권 통합 + 산출물 안정 브랜치 승격. `PALANTIR_GOAL_MODE` flag-gated, 전제조건 = `PALANTIR_PM_TOKEN` 분리. 페이즈 G1(프롬프트/파서)→G2(named check+acceptance)→G3(verdict 루프, 본체)→G3b(원격 runner opt-in)→G4(UI/전달)→G5(메모리 연계).
+### G. Goal Delegation — 워커 완결 작업 위임 (전 업무)
+- **Spec**: [`docs/specs/goal-delegation-brief.md`](./specs/goal-delegation-brief.md) (2026-07-10~11, v6). Codex 적대 리뷰 6라운드 수렴 (R1~R3 NO-GO → **R4 GO** [code core] → 워크로드 전제 교정[코딩→전 업무, Operator 단위] → R5 NO-GO 4B → **R6 GO** [일반화 레이어]). **사용자 lock-in 대기.**
+- **요지**: 워커 위임을 1회성 채팅에서 goal 계약(수락 기준 + verify check + 반복 예산)으로, **워크로드 불문** (code 모드=git workspace / deliverable 모드=격리 goal workspace + artifact bundle). 게이트: Gate 0 프로세스 종료 → Gate 1 기계 검증 (command=human-only + artifact=선언적·provenance 기반 gate/advisory 분리) → Gate 1.5 judge (구조화 LLM 판정, flag 별도, 보조 판정) → Gate 2 Operator 의미 판단(최종권). persisted verdict (race-free CAS) + 단일 tx 재시도 + attempt 연속성 (code=ref 계승 / deliverable=bundle seed) + node-aware workspace provider (local/remote pod) + copy-verify-delete 수확 + 산출물 전달 (branch 승격 / bundle manifest). 외부 액션 업무(메일/티켓)는 `action` goal kind 로 **v2 명시 유보**. `PALANTIR_GOAL_MODE` flag-gated, 전제조건 = `PALANTIR_PM_TOKEN` 분리. 페이즈 G1(프롬프트/파서/출력캡처)→G2(check+workspace local+deliverable 수확)→G2b(remote provider, 실 Pi)→G3(verdict 루프, 본체)→G3b(원격 runner)→G3c(judge)→G4(UI/전달)→G5(메모리).
 
 ### N. 노드 퍼스트 작업보드·프로젝트 재기획
 - **Spec**: [`docs/specs/node-first-board-brief.md`](./specs/node-first-board-brief.md) (v1.2, PR #307). Codex 적대 리뷰 4라운드 수렴 (R1 3B+6S → R2 3B+3S → R3 1S → **R4 GO**), 사용자 lock-in 완료 (2026-07-05).
