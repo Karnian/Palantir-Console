@@ -777,11 +777,32 @@ function createLifecycleService({
     const agentProfileId = run.agent_profile_id;
     let prompt = run.prompt || '';
     const task = taskService.getTask(taskId);
-    // G1: a goal-enabled task's worker gets the deterministic goal prompt
-    // (goal + acceptance criteria + completion-report request) instead of the
-    // raw dispatch prompt. Non-goal tasks are completely unchanged. Attempt is
-    // always 1 in G1 — the retry loop that bumps it lands in G3.
-    if (task && task.goal_enabled) {
+    // Single goal-activation decision, stamped ONCE per run at spawn (Codex
+    // holistic review): goalFeatureActive() is evaluated here and persisted to
+    // runs.goal_active — every downstream per-run goal surface (capture,
+    // workspace, Gate 1 acceptance, deliverable) reads that column instead of
+    // re-evaluating the env gate, so a mid-flight config change cannot strand a
+    // run. A goal task under goal-mode-off is a normal task (goal_active=0).
+    const goalActive = !!(task && task.goal_enabled && goalFeatureActive());
+    if (goalActive) {
+      // The stamp MUST persist — capture + harvest read runs.goal_active, so a
+      // swallowed failure would run the goal prompt/workspace yet be treated as
+      // non-goal downstream (Codex review). Fail closed instead of executing in
+      // that inconsistent state. (goal_active defaults to 0, so a non-goal run
+      // needs no write.)
+      try {
+        runService.setGoalActive(run.id, 1);
+      } catch (err) {
+        runService.addRunEvent(run.id, 'goal:activation_persist_failed', JSON.stringify({ reason: err.message }));
+        runService.setRetryCount(run.id, MAX_RETRY);
+        runService.updateRunStatus(run.id, 'failed', { force: true, reason: 'goal_activation_persist_failed' });
+        return null;
+      }
+    }
+    // A goal-active worker gets the deterministic goal prompt (goal + acceptance
+    // criteria + completion-report request). Non-goal / goal-mode-off tasks are
+    // completely unchanged. Attempt is always 1 here — the retry loop is G3.
+    if (goalActive) {
       prompt = compileGoalPrompt({
         task,
         attemptNumber: 1,
@@ -1139,9 +1160,9 @@ function createLifecycleService({
       // run failed NON-retryable rather than executing in the fallback cwd.
       let cwd;
       const hasGitWorkspace = !!worktreePath || usesMaterializedRepoWorkspace;
-      // §6: goal features only when goalFeatureActive() — otherwise a goal_enabled
-      // task runs as a normal task (byte-identical to pre-goal).
-      if (task && task.goal_enabled && !hasGitWorkspace && goalFeatureActive()) {
+      // deliverable mode uses the single per-run goal-activation decision stamped
+      // above — no re-evaluation of the env gate.
+      if (goalActive && !hasGitWorkspace) {
         if (isRemoteNode) {
           runService.addRunEvent(run.id, 'goal:workspace_remote_unsupported', JSON.stringify({ node_id: run.node_id || 'local' }));
           runService.setRetryCount(run.id, MAX_RETRY);
@@ -2279,8 +2300,9 @@ function createLifecycleService({
   async function captureGoalOutput(run) {
     try {
       if (!run || run.is_manager || !run.task_id) return;
-      const task = taskService.getTask(run.task_id);
-      if (!task || !task.goal_enabled) return;
+      // Single per-run gate: only a goal-ACTIVE run captures (Codex holistic
+      // review — unified activation). goal_active was stamped at spawn.
+      if (!run.goal_active) return;
 
       let raw = readGoalOutputLogTail(run.id);
       if (raw == null) {

@@ -72,6 +72,8 @@ const RUN_COLUMNS = [
   'acceptance_json',
   'goal_workspace_path',
   'deliverable_state',
+  // Goal activation unification (migration 056): single per-run goal gate.
+  'goal_active',
 ];
 
 const COMPOSITION_EVENT_COLUMNS = [

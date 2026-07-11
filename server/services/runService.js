@@ -505,6 +505,10 @@ function createRunService(db, eventBus) {
     updateGoalCapture: db.prepare(`
       UPDATE runs SET final_output = ?, goal_report = ? WHERE id = ?
     `),
+    // Goal activation: single per-run activation decision, stamped at spawn.
+    setGoalActive: db.prepare(`
+      UPDATE runs SET goal_active = ? WHERE id = ?
+    `),
     // G2 §5k-1: persist the isolated deliverable-mode workspace path.
     setGoalWorkspacePath: db.prepare(`
       UPDATE runs SET goal_workspace_path = ? WHERE id = ?
@@ -1259,6 +1263,13 @@ function createRunService(db, eventBus) {
     return stmts.getById.get(id);
   }
 
+  // Stamp the single per-run goal-activation decision (0|1) at spawn time.
+  function setGoalActive(id, active) {
+    getRun(id);
+    stmts.setGoalActive.run(active ? 1 : 0, id);
+    return stmts.getById.get(id);
+  }
+
   // G2 §5k-1: record the deliverable-mode goal workspace path on the run.
   function setGoalWorkspacePath(id, workspacePath) {
     getRun(id);
@@ -1422,7 +1433,7 @@ function createRunService(db, eventBus) {
 
   return {
     listRuns, getRun, createRun,
-    updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture, setGoalWorkspacePath,
+    updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture, setGoalActive, setGoalWorkspacePath,
     updateGoalAcceptance, setDeliverableState,
     countRunning, countRunningOnNode, countRunningTotalOnNode,
     getOldestQueued, getOldestQueuedOnNode, getOldestQueuedReadyOnNode,

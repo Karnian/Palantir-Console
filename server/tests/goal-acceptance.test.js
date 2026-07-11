@@ -30,7 +30,6 @@ async function harness(t) {
   const hs = createHarvestService({
     runService: rs, worktreeService, projectService: ps, eventBus,
     taskService: ts, verifyCheckService: vcs,
-    goalFeatureActive: () => true, // G2 §6
   });
   const profileId = `profile-${Math.random().toString(36).slice(2)}`;
   db.prepare(`INSERT INTO agent_profiles (id, name, type, command, args_template, capabilities_json, env_allowlist, max_concurrent)
@@ -51,6 +50,7 @@ test('deliverable goal run: artifact acceptance runs + acceptance_json + harvest
   t.after(() => { try { fs.rmSync(ws, { recursive: true, force: true }); } catch {} });
   const run = rs.createRun({ is_manager: false, task_id: task.id, agent_profile_id: profileId, prompt: 'x' });
   rs.setGoalWorkspacePath(run.id, ws);
+  rs.setGoalActive(run.id, 1); // unified activation: stamp goal-active on the manual deliverable run
   rs.updateRunStatus(run.id, 'completed', { force: true });
 
   await hs.harvestRun({ ...rs.getRun(run.id) });
@@ -77,6 +77,7 @@ test('deliverable goal run: FAILED artifact check is surfaced (passed:false), st
   t.after(() => { try { fs.rmSync(ws, { recursive: true, force: true }); } catch {} });
   const run = rs.createRun({ is_manager: false, task_id: task.id, agent_profile_id: profileId, prompt: 'x' });
   rs.setGoalWorkspacePath(run.id, ws);
+  rs.setGoalActive(run.id, 1); // unified activation: stamp goal-active on the manual deliverable run
   rs.updateRunStatus(run.id, 'completed', { force: true });
   await hs.harvestRun({ ...rs.getRun(run.id) });
   const acc = JSON.parse(rs.getRun(run.id).acceptance_json);

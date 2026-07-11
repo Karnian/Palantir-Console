@@ -935,10 +935,10 @@ function createApp(options = {}) {
     nodeExecutor,
     nodeService,
     // G2 §5f: Gate 1 acceptance deps. taskService resolves the run's assigned
-    // verify_check_id; verifyCheckService loads the check + provenance.
+    // verify_check_id; verifyCheckService loads the check + provenance. The goal
+    // gate is per-run (run.goal_active) — harvest does not re-check goal mode.
     taskService,
     verifyCheckService,
-    goalFeatureActive,
   });
   const webhookService = createWebhookService({
     eventBus,
