@@ -696,38 +696,45 @@ function createHarvestService({
       if (visited >= MAX_ENTRIES) { truncated = true; break; } // stop the whole walk
       const { dir, depth } = stack.pop();
       if (depth > 10) continue;
-      let entries;
-      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
-      for (const ent of entries) {
-        // Global traversal cap: stop visiting once we've seen MAX_ENTRIES nodes,
-        // so a workspace with millions of files can never exhaust memory/I/O.
-        if (visited >= MAX_ENTRIES) { truncated = true; break; }
-        visited++;
-        const abs = path.join(dir, ent.name);
-        if (ent.isSymbolicLink()) continue;
-        if (ent.isDirectory()) {
-          if (stack.length < MAX_STACK) stack.push({ dir: abs, depth: depth + 1 });
-          else truncated = true;
-          continue;
+      // Codex R3: stream directory entries with opendirSync (one Dirent at a
+      // time) instead of readdirSync (which materializes the ENTIRE directory
+      // before any cap can apply). A single directory of millions of entries is
+      // now bounded by the global visit budget, not by physical memory.
+      let dh;
+      try { dh = fs.opendirSync(dir); } catch { continue; }
+      try {
+        let ent;
+        while ((ent = dh.readSync()) !== null) {
+          if (visited >= MAX_ENTRIES) { truncated = true; break; }
+          visited++;
+          const abs = path.join(dir, ent.name);
+          if (ent.isSymbolicLink()) continue;
+          if (ent.isDirectory()) {
+            if (stack.length < MAX_STACK) stack.push({ dir: abs, depth: depth + 1 });
+            else truncated = true;
+            continue;
+          }
+          if (!ent.isFile()) continue;
+          if (files.length >= MAX_FILES || total >= MAX_TOTAL) { truncated = true; continue; }
+          // Size-first (Codex BLOCKER-2): decide from lstat BEFORE any read, so a
+          // huge file is never slurped into memory and never bundled.
+          let st;
+          try { st = fs.lstatSync(abs); } catch { continue; }
+          if (!st.isFile()) continue;
+          const rel = path.relative(root, abs).split(path.sep).join('/');
+          const size = st.size;
+          if (size > MAX_FILE_BYTES || total + size > MAX_TOTAL) {
+            files.push({ path: rel, size, sha256: null, skipped: 'too_large' });
+            truncated = true;
+            continue;
+          }
+          let hash = null;
+          try { hash = crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex'); } catch { continue; }
+          total += size;
+          files.push({ path: rel, size, sha256: hash });
         }
-        if (!ent.isFile()) continue;
-        if (files.length >= MAX_FILES || total >= MAX_TOTAL) { truncated = true; continue; }
-        // Size-first (Codex BLOCKER-2): decide from lstat BEFORE any read, so a
-        // huge file is never slurped into memory and never bundled.
-        let st;
-        try { st = fs.lstatSync(abs); } catch { continue; }
-        if (!st.isFile()) continue;
-        const rel = path.relative(root, abs).split(path.sep).join('/');
-        const size = st.size;
-        if (size > MAX_FILE_BYTES || total + size > MAX_TOTAL) {
-          files.push({ path: rel, size, sha256: null, skipped: 'too_large' });
-          truncated = true;
-          continue;
-        }
-        let hash = null;
-        try { hash = crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex'); } catch { continue; }
-        total += size;
-        files.push({ path: rel, size, sha256: hash });
+      } finally {
+        try { dh.closeSync(); } catch { /* ignore */ }
       }
     }
     return { files, truncated, total_bytes: total };

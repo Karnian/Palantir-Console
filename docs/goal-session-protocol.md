@@ -10,7 +10,7 @@
 |---|---|---|---|---|
 | 1 | **F-1: Codex Fast Mode 토글** | `docs/specs/codex-fast-mode-brief.md` | ✅ **완료·merged** (migration 053 + codexAdapter tier emit + PATCH route + ⚡ UI + 테스트 12종). codex 계획 R1 NO-GO(3 BLOCKER) → 반영, 최종 diff 리뷰 PASS. | 단일 PR (파일럿 — 프로토콜 검증 완료) |
 | 2 | **G1: goal 프롬프트 컴파일러 + goalReport 파서 + 최종 출력 전문 캡처** | `docs/specs/goal-delegation-brief.md` §5b/5c/5k-2 | ✅ **완료·merged** (migration 054 + goalPrompt/goalReport + spawnQueuedRun 주입 + file-backed tee 캡처 + 테스트 28종). codex 최종리뷰 R1 FAIL(1B+3S)→R2 FAIL(2S)→R3 PASS. | PR 1개 |
-| 3 | **G2: verify_checks 스키마/CRUD + goal workspace(local) + deliverable 수확 + artifact 평가기** | 동 spec §5a/5f/5k-1~3 + §6 | 〃 | PR 1개 (PM token 전제 gate 포함) |
+| 3 | **G2: verify_checks 스키마/CRUD + goal workspace(local) + deliverable 수확 + artifact 평가기** | 동 spec §5a/5f/5k-1~3 + §6 | ✅ **완료·merged** (migration 055 + verifyCheckService/artifactCheck/goalMode(§6 env scrub)/goalAcceptance + verifyChecks 라우트 + goal workspace(fail-closed) + Gate 1 acceptance/deliverable 수확 + 테스트 24종). codex 계획 R1 NO-GO(2B+3S) + 최종 diff R1/R2/R3(2B→1→PASS). goalFeatureActive() 단일 게이트. | PR 1개 (PM token 전제 gate 포함) |
 | 4 | **G3: verdict 루프 본체** — stage-resume + 단일 tx 재시도 + boot sweeper + B-lite/webhook/checkTaskCompletion goal 분기 + attempt 연속성 + fingerprint | 동 spec §4/5d/5e/5g | 〃 | PR 1개, **최고 리스크** — codex 라운드 여유 있게 |
 | 5 | **G4: Gate 2 리뷰 구조화 + TaskDetail goal UI + 산출물 전달** | 동 spec §5h/5j | 〃 | PR 1개 |
 | 6 | **G5: 메모리 연계** (harvest:acceptance → R1b, project-less 캡처 검토) | 동 spec §5i | 〃 | PR 1개 |
