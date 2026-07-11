@@ -16,6 +16,8 @@ const { resolveProjectSource } = require('./projectSource');
 const { createProjectMaterializationService } = require('./projectMaterializationService');
 const { compileGoalPrompt } = require('./goalPrompt'); // G1
 const { parseGoalReport } = require('./goalReport'); // G1
+const { createGoalVerdictService } = require('./goalVerdictService'); // G3
+const { VERDICT_TO_TASK_STATUS } = require('./goalVerdict'); // G3
 
 // G1: cap a string to at most maxBytes UTF-8 bytes without splitting a
 // multi-byte codepoint (final_output is stored raw; the 64KB bound is on bytes,
@@ -1747,6 +1749,18 @@ function createLifecycleService({
     return started;
   }
 
+  // G3: the goal verdict reconciler. Wired with scheduleDrain (retry child
+  // wakeup) + taskService (transition) + eventBus (outbox effect emit). Driven
+  // at run:harvested (settle) and at boot (sweep). scheduleDrain is a function
+  // declaration (hoisted) so this construction can precede its definition.
+  const goalVerdictService = createGoalVerdictService({
+    runService,
+    taskService,
+    eventBus,
+    scheduleDrain: (profileId) => scheduleDrain(profileId),
+    verdictToTaskStatus: VERDICT_TO_TASK_STATUS,
+  });
+
   function scheduleDrain(profileId) {
     if (!profileId) return;
     setImmediate(() => {
@@ -2085,6 +2099,33 @@ function createLifecycleService({
    */
   function checkTaskCompletion(taskId) {
     const runs = runService.listRuns({ task_id: taskId });
+
+    // G3: a goal task's transition is driven STRICTLY by the newest goal run's
+    // verdict — never by naive completed/failed aggregation, which would fight
+    // the verdict (e.g. an error verdict → review, not failed) and could
+    // prematurely fail a task that is mid-retry. If the newest goal run is
+    // non-terminal, or terminal-without-a-verdict (settle still pending), we
+    // no-op and let the verdict reconciler own the transition.
+    const goalRuns = runs.filter(r => r.goal_active);
+    if (goalRuns.length > 0) {
+      // Newest by insertion order (rowid `_seq`) — deterministic across a
+      // created_at tie (retry lineage). listRuns(getByTask) carries _seq.
+      const newest = goalRuns.reduce((a, b) => (Number(b._seq || 0) > Number(a._seq || 0) ? b : a));
+      const terminal = ['completed', 'failed', 'cancelled', 'stopped'].includes(newest.status);
+      if (!terminal) return; // an attempt is still in flight
+      if (newest.status === 'cancelled' || newest.status === 'stopped') {
+        // Not an attempt (§5d matrix) → human decides.
+        try { taskService.updateTaskStatus(taskId, 'review'); } catch { /* task gone */ }
+        return;
+      }
+      if (!newest.goal_verdict) return; // verdict not settled yet — reconciler owns it
+      const target = VERDICT_TO_TASK_STATUS[newest.goal_verdict];
+      if (target) {
+        try { taskService.updateTaskStatus(taskId, target); } catch { /* task gone */ }
+      }
+      return;
+    }
+
     const allComplete = runs.every(r => ['completed', 'failed', 'cancelled', 'stopped'].includes(r.status));
 
     if (allComplete && runs.length > 0) {
@@ -2174,6 +2215,19 @@ function createLifecycleService({
     // tests that spin up multiple createApp() instances accumulate stale listeners.
     if (eventBus) {
       unsubscribeEventBus = eventBus.subscribe((event) => {
+        // G3: run:harvested is the exactly-once, post-acceptance signal for a
+        // goal attempt — harvest persisted runs.acceptance_json (or none, for a
+        // failed run) BEFORE emitting this. Settle drives the verdict + retry +
+        // task transition + outbox effects from that persisted state.
+        if (event.channel === 'run:harvested') {
+          const hr = event.data?.run;
+          if (hr && hr.goal_active && !hr.is_manager) {
+            try { goalVerdictService.settle(hr.id); } catch (err) {
+              console.warn(`[lifecycle] Goal verdict settle failed for run ${hr.id}: ${err.message}`);
+            }
+          }
+          return;
+        }
         if (event.channel !== 'run:ended') return;
         const run = event.data?.run;
         if (!run) return;
@@ -2189,6 +2243,7 @@ function createLifecycleService({
         if (
           toStatus === 'failed'
           && !run.is_manager
+          && !run.goal_active   // G3: goal runs retry via the verdict loop, not B-lite
           && run.started_at
           && Number(run.retry_count || 0) < MAX_RETRY
         ) {
@@ -2463,6 +2518,13 @@ function createLifecycleService({
     stopMonitoring,
     sendAgentInput,
     cancelRun,
+    // G3: boot sweeper — settle unverdicted terminal goal runs (crash mid-
+    // harvest) + reconcile verdicted ones (redrive undelivered outbox effects).
+    // MUST run before stale-worktree cleanup so a settle that needs a workspace
+    // is not raced by the cleanup. Never throws.
+    sweepGoalVerdicts: () => goalVerdictService.sweep(),
+    checkTaskCompletion,
+    _goalVerdictService: goalVerdictService,
   };
 }
 

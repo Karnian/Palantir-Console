@@ -32,6 +32,26 @@ function buildPayload(event, now) {
   };
 }
 
+// G3: a goal outbox effect (goal:exhausted | goal:error). The payload is emitted
+// by the verdict reconciler and carries a STABLE idempotency_key so a receiver
+// deduplicates across at-least-once re-drives (reboot / crash before 'sent').
+function buildGoalPayload(event, now) {
+  const data = event.data || {};
+  const kind = event.channel === 'goal:error' ? 'goal_error' : 'goal_exhausted';
+  return {
+    event: kind,
+    run_id: data.run_id ?? null,
+    task_id: data.task_id ?? null,
+    project_id: data.project_id ?? null,
+    node_id: data.node_id ?? null,
+    status: cap(data.verdict),
+    reason: cap(data.reason),
+    attempt: Number.isFinite(Number(data.attempt)) ? Number(data.attempt) : null,
+    idempotency_key: cap(data.idempotency_key) ?? `${data.run_id}:${event.channel}`,
+    server_ts: now(),
+  };
+}
+
 function normalizePostResult(result) {
   if (!result) return { ok: true, status: 200 };
   if (result.ok === true) return { ok: true, status: result.status };
@@ -250,10 +270,24 @@ function createWebhookService({
   const unsubscribe = eventBus.subscribe((event) => {
     try {
       if (stopped) return;
+      // G3: goal terminal outcomes notify via their dedicated outbox effects
+      // (idempotency-keyed, exactly-once-effect), NOT via the generic
+      // run:ended(failed) path — else a mid-retry attempt failure would fire a
+      // premature "failed" webhook. These carry no `run` object (payload is the
+      // whitelisted effect fields).
+      if (event.channel === 'goal:exhausted' || event.channel === 'goal:error') {
+        if (!event.data || !event.data.run_id) return;
+        void send(buildGoalPayload(event, now)).catch(() => {});
+        return;
+      }
       if (event.channel !== 'run:needs_input' && event.channel !== 'run:ended') return;
       if (event.channel === 'run:ended' && event.data?.to_status !== 'failed') return;
       const run = event.data?.run;
       if (!run || run.is_manager) return;
+      // A goal-active run's failure is a verdict-loop concern (retry/exhausted/
+      // error) — suppress the generic failed webhook; goal:exhausted/goal:error
+      // carry the terminal notification instead.
+      if (run.goal_active) return;
       void send(buildPayload(event, now)).catch(() => {});
     } catch (err) {
       warn(`[webhook] subscriber failed: ${err && err.message}`);
@@ -275,6 +309,7 @@ module.exports = {
   createWebhookService,
   issuePostRequest,
   _buildPayload: buildPayload,
+  _buildGoalPayload: buildGoalPayload,
   _cap: cap,
   WEBHOOK_TIMEOUT_MS,
 };

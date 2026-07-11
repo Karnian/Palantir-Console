@@ -521,6 +521,49 @@ function createRunService(db, eventBus) {
     setDeliverableState: db.prepare(`
       UPDATE runs SET deliverable_state = ? WHERE id = ?
     `),
+    // G3 §5d: verdict CAS — WHERE goal_verdict IS NULL makes a duplicate harvest /
+    // boot-sweeper race produce exactly one winner (changes===1) + one set of
+    // side effects. verdict+reason+fingerprint land atomically (no partial state).
+    casGoalVerdict: db.prepare(`
+      UPDATE runs SET goal_verdict = @verdict, goal_verdict_reason = @reason, goal_fingerprint = @fingerprint
+       WHERE id = @id AND goal_verdict IS NULL
+    `),
+    // G3 §5d: link the retry child to its parent, set INSIDE the verdict tx so
+    // "retry decided" and "child exists + linked" are atomic (no lost-retry window).
+    linkGoalRetry: db.prepare('UPDATE runs SET goal_retry_run_id = ? WHERE id = ?'),
+    // G3 §5d transactional outbox: durable 'pending' INTENT for a verdict's side
+    // effects, committed in the SAME tx as the verdict. INSERT OR IGNORE makes it
+    // idempotent (a redrive never duplicates the row).
+    insertGoalEffect: db.prepare(
+      "INSERT OR IGNORE INTO goal_effects (run_id, effect_type) VALUES (?, ?)"
+    ),
+    listPendingGoalEffects: db.prepare(
+      "SELECT effect_type FROM goal_effects WHERE run_id = ? AND status = 'pending' ORDER BY rowid ASC"
+    ),
+    markGoalEffectSent: db.prepare(
+      "UPDATE goal_effects SET status = 'sent', sent_at = datetime('now') WHERE run_id = ? AND effect_type = ? AND status = 'pending'"
+    ),
+    listRunIdsWithPendingGoalEffects: db.prepare(
+      "SELECT DISTINCT run_id FROM goal_effects WHERE status = 'pending'"
+    ),
+    // G3 boot sweeper: terminal goal runs still missing a verdict (crashed
+    // mid-harvest) → conservative settle; terminal goal runs with a verdict →
+    // idempotent reconcile (redrive pending effects, re-transition).
+    listUnverdictedTerminalGoalRunIds: db.prepare(`
+      SELECT id FROM runs
+       WHERE goal_active = 1 AND is_manager = 0 AND goal_verdict IS NULL
+         AND status IN ('completed', 'failed', 'cancelled', 'stopped')
+    `),
+    listVerdictedTerminalGoalRunIds: db.prepare(`
+      SELECT id FROM runs
+       WHERE goal_active = 1 AND is_manager = 0 AND goal_verdict IS NOT NULL
+         AND status IN ('completed', 'failed', 'cancelled', 'stopped')
+    `),
+    // G3 §4 fingerprint-repeat: the PREVIOUS attempt (the run that pointed its
+    // goal_retry_run_id at this one) carries the prior failure fingerprint.
+    getGoalRetryParentFingerprint: db.prepare(
+      'SELECT goal_fingerprint AS fp FROM runs WHERE goal_retry_run_id = ? LIMIT 1'
+    ),
     delete: db.prepare('DELETE FROM runs WHERE id = ?'),
     // Events
     insertEvent: db.prepare(`
@@ -1291,6 +1334,86 @@ function createRunService(db, eventBus) {
     return stmts.getById.get(id);
   }
 
+  // G3 §5d — the ONE atomic point where a goal verdict is settled. CAS the
+  // verdict (winner = changes===1); on win, optionally insert an EVENT-FREE retry
+  // child (goal_active + retry_root inherited) linked to the parent, and record
+  // the verdict's side-effect INTENTS as 'pending' outbox rows — all in a single
+  // better-sqlite3 transaction. A CAS loser rolls the whole tx back (no child, no
+  // outbox). The child is intentionally emitted WITHOUT a run:status event so an
+  // uncommitted row is never exposed (S4); the caller scheduleDrains it AFTER
+  // commit. Returns { winner, childId }.
+  const persistGoalVerdictTxRun = db.transaction((args) => {
+    const changed = stmts.casGoalVerdict.run({
+      id: args.runId,
+      verdict: args.verdict,
+      reason: args.reason ?? null,
+      fingerprint: args.fingerprint ?? null,
+    }).changes;
+    if (changed === 0) return { winner: false, childId: null };
+
+    let childId = null;
+    if (args.retryChild) {
+      const rc = args.retryChild;
+      childId = `run_${crypto.randomUUID().slice(0, 8)}`;
+      stmts.insert.run({
+        id: childId,
+        task_id: rc.task_id || null,
+        agent_profile_id: rc.agent_profile_id || null,
+        prompt: rc.prompt || null,
+        status: 'queued',
+        is_manager: 0,
+        parent_run_id: rc.parent_run_id || null,
+        manager_adapter: null,
+        manager_thread_id: null,
+        manager_layer: null,
+        conversation_id: `worker:${childId}`,
+        queued_args: normalizeQueuedArgs(rc.queued_args),
+        retry_count: normalizeRetryCount(rc.retry_count),
+        node_id: rc.node_id || null,
+        operator_instance_id: rc.operator_instance_id || null,
+        retry_root_run_id: rc.retry_root_run_id || null,
+      });
+      stmts.setGoalActive.run(1, childId); // inherit goal control (unified activation)
+      stmts.linkGoalRetry.run(childId, args.runId);
+    }
+
+    for (const et of args.effectTypes || []) {
+      stmts.insertGoalEffect.run(args.runId, et);
+    }
+    return { winner: true, childId };
+  });
+
+  function persistGoalVerdictTx(args) {
+    getRun(args.runId); // NotFound guard (mirrors sibling writers)
+    return persistGoalVerdictTxRun(args);
+  }
+
+  // G3 outbox dispatch primitives. listPending returns the still-undelivered
+  // effect types for a run (dispatch order = insertion order); markSent flips a
+  // single effect to 'sent' only if it was 'pending' (idempotent, no double flip).
+  function listPendingGoalEffects(runId) {
+    return stmts.listPendingGoalEffects.all(runId).map((r) => r.effect_type);
+  }
+  function markGoalEffectSent(runId, effectType) {
+    return stmts.markGoalEffectSent.run(runId, effectType).changes > 0;
+  }
+  function listRunIdsWithPendingGoalEffects() {
+    return stmts.listRunIdsWithPendingGoalEffects.all().map((r) => r.run_id);
+  }
+
+  // G3 boot sweeper helpers.
+  function listUnverdictedTerminalGoalRunIds() {
+    return stmts.listUnverdictedTerminalGoalRunIds.all().map((r) => r.id);
+  }
+  function listVerdictedTerminalGoalRunIds() {
+    return stmts.listVerdictedTerminalGoalRunIds.all().map((r) => r.id);
+  }
+  // G3 §4: the prior attempt's persisted failure fingerprint (or null).
+  function getGoalRetryParentFingerprint(runId) {
+    const row = stmts.getGoalRetryParentFingerprint.get(runId);
+    return row ? (row.fp ?? null) : null;
+  }
+
   function deleteRun(id) {
     getRun(id);
     stmts.delete.run(id);
@@ -1435,6 +1558,10 @@ function createRunService(db, eventBus) {
     listRuns, getRun, createRun,
     updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture, setGoalActive, setGoalWorkspacePath,
     updateGoalAcceptance, setDeliverableState,
+    persistGoalVerdictTx,
+    listPendingGoalEffects, markGoalEffectSent, listRunIdsWithPendingGoalEffects,
+    listUnverdictedTerminalGoalRunIds, listVerdictedTerminalGoalRunIds,
+    getGoalRetryParentFingerprint,
     countRunning, countRunningOnNode, countRunningTotalOnNode,
     getOldestQueued, getOldestQueuedOnNode, getOldestQueuedReadyOnNode,
     getOldestMaterializableOnNode,
