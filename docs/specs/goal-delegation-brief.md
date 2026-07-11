@@ -1,6 +1,7 @@
 # Goal Delegation (G 트랙) — 워커 완결 작업 위임 brief
 
-> **상태: Codex 4R 적대리뷰 완료 — R1 NO-GO(B5) → R2 NO-GO(B4+S5) → R3 NO-GO(B1+S6+M1) → R4 GO. 사용자 lock-in 대기.**
+> **상태: v5 — 워크로드 일반화 개정 (코드 전용 → 전 업무). v4 core 는 Codex 4R GO (R1~R4), v5 일반화 레이어는 R5 리뷰 진행. 사용자 lock-in 전.**
+> **v5 개정 사유**: 이 시스템의 워크로드는 코딩만이 아니라 사람이 하는 모든 업무 (리서치/문서/분석/운영) 이고 단위는 프로젝트가 아니라 Operator 다 (P-B folder-less specialist, Operator-중심 UI). v4 는 Gate 1·연속성·전달이 전부 git 에 결박 — 비코드 업무에 불충분.
 > 작성: 2026-07-10. 근거: routes/tasks.js, lifecycleService, harvestService, worktreeService, projectMaterializationService, app.js(auto-review), auth.js, operatorSpawnService, webhookService, remoteSshExecutor, migrations 006/014/023/024/048/050/051.
 
 ## 1. 문제 정의
@@ -13,13 +14,19 @@
 - 각 attempt 는 백지 시작: harvest 가 worktree 를 무조건 제거하고 retry 는 HEAD 에서 새로 만든다. materialized 경로는 autosave 조차 없어 uncommitted 산출물이 사라진다.
 - 유일한 품질 루프는 Operator auto-review (자연어, `AUTO_REVIEW_MAX=5` in-memory breaker) — 기계 검증이 사이에 없다.
 
+**비코드 업무의 추가 갭 (v5 조사, 코드 실측)**:
+- project 없는 태스크도 워커는 spawn 되지만 **cwd = `process.cwd()` (서버 루트)** — 파일 산출물이 서버 FS 에 방치·충돌하고 (`spawnCwd.js` no-dir policy), harvest 는 `harvested:false, errors:['no_worktree']` 만 남긴다.
+- **워커 최종 출력 전문이 어디에도 저장 안 됨** — Claude 는 `result_summary` 2000자 컷, codex/tmux 는 정적 문자열 (`'Agent completed successfully'`). goal 판정의 입력으로 쓸 수 없다.
+- folder-less specialist (B2c) 는 workspace:none + 텍스트 전용 1회 API 턴 — "산출물 있는 완결 업무"의 doer 가 될 수 없다. 실제 doer 는 워커 spawn 경로.
+- project-less run 은 메모리 캡처 (R6/R1b) 도 전부 skip 된다 (`!run.project_id` early return).
+
 ## 2. 목표 / 비목표 / 한계 명시
 
-**목표**: 태스크를 "goal 계약"(목표 + 수락 기준 + 검증 방법 + 반복 예산)으로 위임하면, 시스템이 **검증 통과까지 자율 반복**하고 예산 소진/무진전 시에만 에스컬레이션하며, **통과한 산출물이 사람이 집을 수 있는 형태로 전달**된다 (§5j).
+**목표**: 태스크를 "goal 계약"(목표 + 수락 기준 + 검증 방법 + 반복 예산)으로 위임하면, 시스템이 **검증 통과까지 자율 반복**하고 예산 소진/무진전 시에만 에스컬레이션하며, **통과한 산출물이 사람이 집을 수 있는 형태로 전달**된다 (§5j). **적용 범위는 전 업무** — 코드 작업(git workspace)과 일반 업무(리서치/문서/분석, deliverable workspace §5k) 모두. goal 계약·verdict 루프·예산·에스컬레이션은 워크로드-불문 동일하고, 검증·연속성·전달만 워크로드별 구현이 갈린다.
 
-**비목표**: 워커 CLI 개조 / 태스크 자동 분해·multi-worker orchestration / 자동 merge (산출물 merge 는 human 결정) / Operator auto-review 대체.
+**비목표**: 워커 CLI 개조 / 태스크 자동 분해·multi-worker orchestration / 자동 merge (산출물 merge/채택은 human 결정) / Operator auto-review 대체.
 
-**정직한 한계 (Codex R2 큰 그림 지적)**: 기계 check 가 지정되지 않은 태스크의 acceptance criteria 텍스트는 Gate 2 (Operator LLM 판단) 의 리뷰 재료다 — enforcement 는 named check 가 있는 태스크에서만 결정적이다. 의미 기준의 결정적 판정(독립 LLM judge Gate 1.5)은 v2 후보로 명시적 유보.
+**한계 (정직)**: 결정적 enforcement 는 command/artifact check 가 있는 태스크에서 성립한다. 순수 의미 기준은 Gate 1.5 judge (구조화 LLM 판정, flag 별도 §5k-4) 가 커버하되 LLM 판정의 본질적 불확실성은 남는다 — 그래서 Gate 2 (Operator) 와 human 에스컬레이션이 최종 방어선이다.
 
 ## 3. 설계 원칙
 
@@ -59,9 +66,10 @@ harvest 파이프라인 (annotate-only, 단일 순차 소유자, stage-resume id
 | failed + non-retryable (materialize fail-closed, preflight, corrupt queued_args) | `error` |
 | source_generation 변경 감지 (§5e) | `error` (reason: `source_changed`) |
 | failed (retryable) + 예산 내 | `retry` |
-| completed + Gate 1 FAIL + 예산 내 + fingerprint 미반복 | `retry` |
-| completed + Gate 1 FAIL + 동일 실패 fingerprint 연속 반복 | `gate2` (reason: `no_progress`) |
-| completed + Gate 1 PASS / check 미지정 / check skipped(원격 미지원 §5f) | `gate2` |
+| completed + Gate 1 FAIL (command/artifact) + 예산 내 + fingerprint 미반복 | `retry` |
+| completed + Gate 1 PASS + **Gate 1.5 judge FAIL** (§5k-4) + 예산 내 + fingerprint 미반복 | `retry` (judge reasons 피드백 주입) |
+| completed + Gate 1/1.5 FAIL + 동일 실패 fingerprint 연속 반복 | `gate2` (reason: `no_progress`) |
+| completed + 전 gate PASS / check 미지정 / check skipped(원격 미지원 §5f) / judge 오류(fail-open §5k-4) | `gate2` |
 | retry 조건인데 attemptsUsed ≥ budget | `exhausted` |
 | acceptance/verdict 단계 내부 오류 | `error` |
 
@@ -73,32 +81,40 @@ harvest 파이프라인 (annotate-only, 단일 순차 소유자, stage-resume id
 ### 5a. 스키마 (migration N, additive)
 
 ```sql
-CREATE TABLE project_verify_checks (
+-- v5: check 일반화 — kind 별 discriminated union (mcp_server_templates transport 선례)
+CREATE TABLE verify_checks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  project_id TEXT NOT NULL REFERENCES projects(id),
-  name TEXT NOT NULL,                    -- UNIQUE(project_id, name)
-  command TEXT NOT NULL,                 -- human-defined only (§6)
-  timeout_ms INTEGER NOT NULL DEFAULT 300000,
-  is_default INTEGER NOT NULL DEFAULT 0, -- 프로젝트 기본 check (§6)
+  kind TEXT NOT NULL CHECK(kind IN ('command','artifact')),
+  project_id TEXT,                       -- command: 필수 (workspace 에서 실행). artifact: NULL 허용 (워크로드 무관)
+  name TEXT NOT NULL,                    -- UNIQUE(coalesce(project_id,''), name)
+  spec_json TEXT NOT NULL,               -- command: {command, timeout_ms} / artifact: 선언적 스펙 (§5k-3)
+  is_default INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
+-- INSERT/UPDATE trigger: kind='command' → project_id NOT NULL 강제 (column-shape trigger 선례: migration 022)
 
 ALTER TABLE tasks ADD COLUMN goal_enabled INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE tasks ADD COLUMN goal_max_attempts INTEGER NOT NULL DEFAULT 3;
-ALTER TABLE tasks ADD COLUMN verify_check_id INTEGER;    -- human-only 할당 (§6)
+ALTER TABLE tasks ADD COLUMN verify_check_id INTEGER;     -- command=human-only 할당 (§6), artifact=Operator 허용 (§5k-3)
+ALTER TABLE tasks ADD COLUMN goal_judge_enabled INTEGER NOT NULL DEFAULT 0;  -- Gate 1.5 (§5k-4)
+ALTER TABLE tasks ADD COLUMN deliverable_json TEXT;       -- 최종 전달물 manifest (§5j: branch 또는 artifact bundle)
 
 ALTER TABLE runs ADD COLUMN goal_report TEXT;
-ALTER TABLE runs ADD COLUMN acceptance_json TEXT;
+ALTER TABLE runs ADD COLUMN final_output TEXT;            -- 최종 출력 전문 (goal run 만, cap 64KB — §5k-2)
+ALTER TABLE runs ADD COLUMN acceptance_json TEXT;         -- Gate 1 결과 (command+artifact 집계)
+ALTER TABLE runs ADD COLUMN judge_json TEXT;              -- Gate 1.5 결과 (§5k-4)
 ALTER TABLE runs ADD COLUMN goal_verdict TEXT;            -- retry|gate2|exhausted|error
 ALTER TABLE runs ADD COLUMN goal_verdict_reason TEXT;
-ALTER TABLE runs ADD COLUMN goal_root_commit TEXT;        -- 루프 원점 = diff base 고정
-ALTER TABLE runs ADD COLUMN attempt_base_commit TEXT;     -- 이 attempt 의 spawn base
-ALTER TABLE runs ADD COLUMN attempt_ref TEXT;             -- 보존된 ref 이름 (GC 추적 §5e)
+ALTER TABLE runs ADD COLUMN goal_root_commit TEXT;        -- code 모드: 루프 원점 = diff base 고정
+ALTER TABLE runs ADD COLUMN attempt_base_commit TEXT;     -- code 모드: 이 attempt 의 spawn base
+ALTER TABLE runs ADD COLUMN attempt_ref TEXT;             -- code 모드: 보존 ref (GC 추적 §5e)
+ALTER TABLE runs ADD COLUMN goal_workspace_path TEXT;     -- deliverable 모드: 격리 workspace (§5k-1)
 ALTER TABLE runs ADD COLUMN goal_retry_run_id TEXT;       -- 단일 tx 로 child 와 동시 기록 (§5d)
 ```
 
 - 수락 기준 텍스트는 기존 `tasks.acceptance_criteria` 재사용. 계보 루트는 기존 `retry_root_run_id` 재사용.
 - `goal_root_commit` 은 첫 attempt 에서 기록, 계보 전체 복사 — base branch 이동에도 diff/판정 원점 고정.
+- **워크로드 모드 판별은 런타임 사실 기준**: run 에 git workspace (worktree 또는 materialized) 가 있으면 **code 모드**, 없으면 **deliverable 모드** (§5k). 설정이 아니라 실제 workspace 존재로 갈린다 — non-git legacy directory 프로젝트도 자연히 deliverable 모드.
 
 ### 5b. 프롬프트 컴파일러
 
@@ -151,6 +167,7 @@ ALTER TABLE runs ADD COLUMN goal_retry_run_id TEXT;       -- 단일 tx 로 child
 ### 5f. Gate 1 — 기계 검증 (harvest 확장)
 
 - 기존 test 단계 직후, goal-enabled + check 지정 시 실행 → `acceptance_json` persist + `harvest:acceptance` run event. completed run 에서만 (test 와 동일 조건).
+- **check kind 별 평가**: `command` 는 code 모드 workspace 에서 shell 실행 (v4 그대로), `artifact` 는 deliverable/code 모드 공통 — 서버가 선언적 스펙을 pure function 으로 평가 (§5k-3). 둘 다 결과를 `acceptance_json` 에 집계. judge (Gate 1.5) 는 Gate 1 PASS 후 별도 단계 (§5k-4).
 - **runner 정책 (Codex R2 BLOCKER 4)**: Gate 1 은 **harvest test 단계와 완전히 같은 runner** 를 쓴다. 해당 노드에서 그 runner 가 불가하면 (원격 executor 의 exec allowlist 가 `sh` 를 불허하는 경우 등) **acceptance = `{skipped, reason: 'runner_unavailable'}` → verdict=gate2** (fail-open to 의미 게이트, 조용한 통과 아님 — Gate 2 리뷰 텍스트에 "기계 검증 skipped" 명시). 원격 check runner 의 allowlist 확장은 별도 opt-in PR (G3b) 로 분리 — 원격 노드 정책 (fleet 트랙) 과 함께 결정.
 - stage-local try/catch — cleanup 은 어떤 경우에도 실행 (기존 위치·순서 불변).
 
@@ -182,6 +199,34 @@ goal 이 gate2 통과 (Operator done 판정) 또는 사람이 done 처리하면:
 - task/UI 에 결과 브랜치명 + 최종 diff stat 노출 — 사람이 리뷰/merge 할 대상이 항상 명확하다.
 - **자동 merge 는 하지 않는다** (비목표). merge 는 human 결정 — 기존 워크플로 (PR 생성 등) 는 브랜치가 있으면 그대로 가능.
 - **실패 모드 (Codex R3)**: 승격은 annotate-only — attempt_ref 미존재·branch -f 실패·원격 executor 실패 어느 것도 **task done 전이를 막지 않는다**. 실패 시 `goal:deliver_failed` run event + UI 뱃지 + 수동 재승격 액션 제공. **GC 순서 강제: attempt refs GC 는 승격 성공 후에만** — 승격 실패 시 refs 는 보존되어 수동 복구가 항상 가능하다.
+- **deliverable 모드 (§5k)**: 브랜치 대신 최종 attempt 의 **artifact bundle** 이 전달물 — `tasks.deliverable_json` 에 manifest (bundle 경로, 파일 목록, report) 기록 + UI 노출/다운로드. 동일하게 annotate-only + 이전 attempt bundle GC 는 최종 bundle 확정 후에만.
+
+### 5k. 워크로드 일반화 — deliverable 모드 (v5 신설)
+
+goal 계약·verdict 루프·예산·suppression (§4, §5d) 은 워크로드-불문 동일하다. 아래 4개만 code 모드와 구현이 갈린다.
+
+**5k-1. Goal workspace (격리 cwd)** — 서버 루트 오염 해소:
+- goal-enabled run 에 git workspace 가 없으면 `storage` 경유 `<dataDir>/goal-workspaces/<runId>/` 를 생성해 **cwd 로 강제** (`spawnCwd.js` 의 기존 `requireExplicit` seam 사용 — 코드가 이미 이 정책 지점을 준비해 둠). 워커의 파일 산출물이 전부 이 안에 격리된다.
+- non-goal project-less run 은 기존 no-dir policy 그대로 (완전 불변).
+
+**5k-2. 산출물 수확 (harvest deliverable stage)** — git diff 의 대응물:
+- harvest 에 deliverable 모드 분기: (a) workspace 파일 enumerate → manifest (경로/크기, **cap: 파일 수 N·총 bytes M, 초과분은 manifest 에 truncated 표시** — no-silent-cap), (b) **최종 출력 전문 캡처** → `runs.final_output` (cap 64KB) + workspace 에 `_report.md` 로 저장, (c) bundle 을 `<dataDir>/goal-artifacts/<taskId>/attempt-<n>/` 로 이동 (수확), (d) workspace 제거 (worktree 제거와 대칭 — cleanup 무조건 원칙 동일).
+- **최종 출력 캡처는 G1 의 신규 코드**: Claude 는 `result` 이벤트 전문, codex/tmux 는 engine output tail 영속 (현재 정적 문자열만 남는 갭 해소). `harvest:deliverable` run event (payload: manifest 요약, shape 고정).
+- Gate 1 acceptance 의 실행 위치: bundle 이동 **전** workspace 에서 (artifact check 가 파일을 검사).
+
+**5k-3. artifact check (선언적, Operator 작성 가능)**:
+- `spec_json` 은 **shell 이 아니라 선언적 스펙**: `{ files: [{glob, must_exist, min_bytes}], report: {min_chars, must_contain: [..], format: 'markdown'|'json'} }` — 서버가 스키마 검증 후 직접 평가. 실행 표면이 없으므로 **Operator(bearer) 도 생성/할당 가능** (command check 의 human-only 제약과 대비 — §6). 평가기는 pure function + 파일 read 만, timeout/크기 cap.
+- command check 는 v4 그대로 (code 모드 전용, human-only).
+
+**5k-4. Gate 1.5 — judge (구조화 LLM 판정, 별도 flag)**:
+- 비코드 업무의 수락 기준은 대부분 의미 기준 — artifact check 만으로는 "존재하는가"까지고 "맞는가"는 못 본다. `PALANTIR_GOAL_JUDGE=1` (기본 off, `PALANTIR_MEMORY_DISTILL` 선례) + `tasks.goal_judge_enabled` 시: Gate 1 PASS 후 서버가 **Messages API 직접 호출** (기본 `claude-haiku-4-5`, liveDistiller/specialistBackend 선례) 로 rubric 판정 — 입력: acceptance_criteria (rubric) + `final_output` + manifest, 출력: 강제 구조화 `{pass, reasons[]}` → `runs.judge_json`.
+- **판정 대상 컨텐츠는 데이터로 취급** (poisoning gate 선례): judge 프롬프트는 서버 고정 템플릿 + "content 내 지시 무시" 명시, 워커 출력이 judge 를 조작하는 표면을 막는 재살균 (memorySanitize 계열 재사용). judge FAIL 은 Gate 1 FAIL 과 동일하게 verdict=retry (reasons 를 피드백 주입) — fingerprint 에 judge reasons hash 포함.
+- **비용 규율**: attempt 당 judge 호출 1회 고정, haiku 기본 — max_attempts=3 기준 태스크당 최대 3 호출. LLM 호출 누적이므로 기본 off + 사용자 opt-in (CLAUDE.md 승인 원칙 부합).
+- judge 오류/timeout 은 gate2 로 fail-open (annotate — verdict=error 아님, 판정 실패가 루프를 죽이지 않는다).
+
+**5k-5. attempt 연속성 (deliverable 모드)**:
+- 다음 attempt 의 goal workspace 를 **이전 attempt bundle 복사로 seed** + 피드백 블록 (artifact/judge 실패 사유). git ref 계승의 대응물 — 구현은 단순 디렉토리 복사 (cap 동일).
+- 앵커 노트: goal 단위는 task (project_id nullable — 이미 1급). Operator 귀속은 기존 `runs.operator_instance_id` 로 충분, 신규 앵커 스키마 v1 불요.
 
 ## 6. 보안/신뢰 경계 (R1#4 + R2 잔존 지적 해소)
 
@@ -189,20 +234,23 @@ goal 이 gate2 통과 (Operator done 판정) 또는 사람이 done 처리하면:
 
 - **`PALANTIR_GOAL_MODE=1` 의 활성 전제조건 = `PALANTIR_PM_TOKEN` 분리 운영** (R4 remember 의 spoof-proof 계약 재사용: cookie 는 `PALANTIR_TOKEN` 만, bearer 는 PM token). 서버는 goal 모드 + PM token 미분리 조합이면 **goal 기능을 fail-closed 비활성** + 경고 로그.
 - **Operator-visible context 전체에서 human token 제거 (Codex R3 BLOCKER)**: goal 모드에서 Operator 가 보는 **모든** 표면 — spawn env, system prompt 의 curl 예시 (`managerSystemPrompt.js` 가 현재 `PALANTIR_TOKEN` 을 직접 인라인), API 사용 안내 텍스트 — 는 `PALANTIR_PM_TOKEN` 만 담는다. `PALANTIR_TOKEN` 이 PM-visible context 어디에든 들어가면 cookie-only gate 는 스푸핑 가능하므로, 이것은 G2 의 gate 구현과 같은 PR 에서 원자적으로 처리한다.
-- **human-only 채널 (cookie actor, fail-closed)**: `project_verify_checks` CRUD **및 task 의 `verify_check_id` 할당** (Codex R2 SERIOUS — 할당도 human-only). 할당 시 **`task.project_id == check.project_id` 서버 검증** (Codex R3 — cross-project check 참조 금지, command 실행 경계 유지).
-- **Operator 가 할 수 있는 것**: `goal_enabled`/`goal_max_attempts`/`acceptance_criteria` 설정, goal 태스크 dispatch. check 미할당 태스크는 `project_verify_checks.is_default` (human 지정) 가 있으면 그것을 사용 — Operator 발 goal 태스크도 기계 게이트를 기본으로 받는다.
-- raw `verify_command` 컬럼 없음. check command 실행 표면은 기존 `project.test_command` 와 동일 (동일 runner/timeout/output cap) — 신규 권한 상승 없음.
+- **human-only 채널 (cookie actor, fail-closed)**: `command` kind check 의 CRUD **및 command check 의 task 할당** (Codex R2 SERIOUS — 할당도 human-only). 할당 시 **`task.project_id == check.project_id` 서버 검증** (Codex R3 — cross-project check 참조 금지, command 실행 경계 유지).
+- **artifact kind 는 Operator(bearer) 작성/할당 허용 (v5)**: 선언적 스펙만 있고 실행 표면이 없다 — 서버가 스키마를 fail-closed 검증하고 pure function 으로 평가하므로, prompt-injection 된 Operator 가 만들 수 있는 최악은 "잘못된 파일 기준" (임의 실행 아님). glob 평가는 workspace 루트 안으로 제한 (`isWithinRoot` 선례).
+- **judge (Gate 1.5)**: rubric 은 `acceptance_criteria` 텍스트 자체 — Operator 가 쓸 수 있는 것은 v4 와 동일 범위. judge 프롬프트 템플릿은 서버 고정, 판정 대상 컨텐츠는 데이터 취급 + 재살균 (§5k-4).
+- **Operator 가 할 수 있는 것**: `goal_enabled`/`goal_max_attempts`/`acceptance_criteria`/`goal_judge_enabled`/artifact check 설정, goal 태스크 dispatch. command check 미할당 code 태스크는 `verify_checks.is_default` (human 지정) 가 있으면 그것을 사용.
+- raw `verify_command` 컬럼 없음. command 실행 표면은 기존 `project.test_command` 와 동일 — 신규 권한 상승 없음. goal workspace (§5k-1) 는 `<dataDir>` 하위 고정 + `isWithinRoot` 검증.
 
 ## 7. 페이즈 계획
 
 | PR | 내용 | 리스크 |
 |---|---|---|
-| G1 | 프롬프트 컴파일러 + goalReport 파서 | 낮음 |
-| G2 | `project_verify_checks` 스키마/CRUD + PM token 전제 gate + harvest acceptance 단계 (annotate-only). **혼합 UX 완화**: 이 단계부터 acceptance 결과를 PM 리뷰 텍스트에 즉시 배선 (verdict 없이도 리뷰 품질 상승) | 중간 |
-| G3 | verdict 함수 + stage-resume idempotency + 단일 tx 재시도 + boot sweeper + B-lite/webhook/checkTaskCompletion goal 분기 + attempt ref 보존/계승 (materialized autosave 포함) + source_generation 가드 + fingerprint 조기 종료 | **높음** (본체) |
+| G1 | 프롬프트 컴파일러 + goalReport 파서 + **최종 출력 전문 캡처 (`runs.final_output`, 비Claude engine 포함 — §5k-2)** | 낮음 |
+| G2 | `verify_checks` 스키마 (kind union + trigger)/CRUD + PM token 전제 gate + **goal workspace (§5k-1)** + harvest acceptance/deliverable 단계 (annotate-only) + artifact 평가기. **혼합 UX 완화**: acceptance 결과를 PM 리뷰 텍스트에 즉시 배선 | 중간 |
+| G3 | verdict 함수 + stage-resume idempotency + 단일 tx 재시도 + boot sweeper + B-lite/webhook/checkTaskCompletion goal 분기 + attempt 연속성 (code=ref 보존/계승 §5e, deliverable=bundle seed §5k-5) + source_generation 가드 + fingerprint 조기 종료 | **높음** (본체) |
 | G3b | 원격 노드 check runner allowlist 확장 (opt-in, fleet 정책과 결정) | 중간 |
-| G4 | Gate 2 리뷰 구조화 + TaskDetail goal UI + 산출물 브랜치 승격 (§5j) | 중간 |
-| G5 | 메모리 연계 (`harvest:acceptance` → R1b) + flag 기본 on 검토 | 낮음 |
+| G3c | **Gate 1.5 judge (§5k-4)** — `PALANTIR_GOAL_JUDGE` flag, 서버 Messages API, 구조화 판정 + 재살균 + 비용 규율 | 중간 (LLM 비용/poisoning) |
+| G4 | Gate 2 리뷰 구조화 + TaskDetail goal UI + 산출물 전달 (code=브랜치 승격, deliverable=bundle manifest — §5j) | 중간 |
+| G5 | 메모리 연계 (`harvest:acceptance` → R1b) + **project-less goal run 의 메모리 캡처 경로 검토** (현재 `!run.project_id` early-return) + flag 기본 on 검토 | 낮음 |
 
 G3 테스트 필수 시나리오: failed retry 단일 소유 (B-lite 이중 spawn 0), completed+Gate1 FAIL suppression, tx 원자성 (parent claim ↔ child 존재), **source_generation mismatch-in-retry-tx → retry→error 교정 CAS (Codex R4 필수 지정)**, boot sweeper (verdict NULL 재계산 / queued child drain / stale cleanup 선행 금지), harvest 중간 crash stage-resume, verdict CAS 이중 side effect 0, webhook suppression + goal:exhausted 발송 + payload 화이트리스트, max_concurrent 큐 상호작용, needs_input 비관여, materialized autosave + ref 계승 + runner_unavailable fail-open, fingerprint 조기 종료, ref GC (승격 성공 후에만), 전 checkTaskCompletion call-site goal 분기.
 
