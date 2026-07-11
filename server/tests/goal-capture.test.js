@@ -96,6 +96,32 @@ test('spawnQueuedRun compiles the goal prompt for a goal-enabled task', async (t
   assert.match(args, /palantir-goal-report/, 'requests completion report');
 });
 
+test('G3: a retry child is spawned with its real attempt number + prior-attempt feedback', async (t) => {
+  const { db, rs, ts, ps, exec, lc } = await harness(t);
+  const project = ps.createProject({ name: 'P', directory: null });
+  const task = ts.createTask({ project_id: project.id, title: 'Ship it', description: 'd', acceptance_criteria: '- passes' });
+  db.prepare('UPDATE tasks SET goal_enabled = 1, goal_max_attempts = 3 WHERE id = ?').run(task.id);
+  const profile = seedProfile(db);
+  // Prior attempt (attempt 1): failed Gate 1, verdict retry, with an acceptance
+  // aggregate carrying the failure detail.
+  const parent = rs.createRun({ is_manager: false, task_id: task.id, agent_profile_id: profile.id, node_id: 'local', prompt: 'orig' });
+  rs.setGoalActive(parent.id, 1);
+  rs.markRunStarted(parent.id, {});
+  rs.updateRunStatus(parent.id, 'completed', { force: true });
+  rs.updateGoalAcceptance(parent.id, { gate: true, kind: 'command', name: 'unit', status: 'ran', passed: false, exit_code: 1, output_tail: 'AssertionError: expected 2 got 3' });
+  // The verdict layer settles it → creates the retry child (attempt 2).
+  lc._goalVerdictService.settle(parent.id);
+  const childId = rs.getRun(parent.id).goal_retry_run_id;
+  assert.ok(childId, 'retry child created');
+  assert.equal(Number(rs.getRun(childId).retry_count), 1);
+
+  exec.spawned.length = 0;
+  await lc.spawnQueuedRun(childId);
+  const args = exec.spawned[0].opts.args.join('\n');
+  assert.match(args, /\[ATTEMPT 2\/3\]/, 'real attempt number, not hardcoded 1');
+  assert.match(args, /이전 판정 사유|Gate 1 검증|AssertionError/, 'prior-attempt feedback injected');
+});
+
 test('captureGoalOutput persists final_output + goal_report on terminal (goal run)', async (t) => {
   const { db, rs, ts, ps, outputByRun, harvested } = await harness(t);
   const project = ps.createProject({ name: 'P', directory: null });

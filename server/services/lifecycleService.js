@@ -16,6 +16,8 @@ const { resolveProjectSource } = require('./projectSource');
 const { createProjectMaterializationService } = require('./projectMaterializationService');
 const { compileGoalPrompt } = require('./goalPrompt'); // G1
 const { parseGoalReport } = require('./goalReport'); // G1
+const { createGoalVerdictService } = require('./goalVerdictService'); // G3
+const { VERDICT_TO_TASK_STATUS } = require('./goalVerdict'); // G3
 
 // G1: cap a string to at most maxBytes UTF-8 bytes without splitting a
 // multi-byte codepoint (final_output is stored raw; the 64KB bound is on bytes,
@@ -139,6 +141,8 @@ function createLifecycleService({
   const GOAL_OUTPUT_LINES = 2000; // read a generous tail so the report fence is included
   const MAX_MATERIALIZE_ATTEMPTS = 3;
   let heartbeatTimer = null;
+  let goalSweepTimer = null; // G3: periodic verdict-loop self-heal
+  const GOAL_SWEEP_INTERVAL_MS = 60000; // 60s — runtime self-heal for missed settles/drains
   let healthCheckRunning = false; // Re-entrancy guard
   let unsubscribeEventBus = null; // for stopMonitoring teardown
   const _outputHashes = new Map(); // Track tmux output changes per run
@@ -753,6 +757,36 @@ function createLifecycleService({
     return runService.getRun(run.id);
   }
 
+  // G3 SERIOUS-2: compose the retry child's attempt-feedback from the PRIOR
+  // attempt (the run that pointed its goal_retry_run_id at this child) — the
+  // verdict reason + Gate 1 acceptance outcome + a bounded output tail. Returns
+  // null when there is no prior attempt or nothing useful to say. Never throws.
+  function buildGoalAttemptFeedback(childRun) {
+    let parent = null;
+    try { parent = runService.getGoalRetryParent(childRun.id); } catch { parent = null; }
+    if (!parent) return null;
+    const parts = [];
+    if (parent.goal_verdict_reason) parts.push(`이전 판정 사유: ${parent.goal_verdict_reason}`);
+    if (parent.acceptance_json) {
+      try {
+        const a = JSON.parse(parent.acceptance_json);
+        if (a && a.gate) {
+          const outcome = a.passed ? 'PASS' : (a.status === 'skipped' ? `SKIPPED(${a.reason || 'runner_unavailable'})` : 'FAIL');
+          parts.push(`Gate 1 검증 [${a.name || a.kind || 'check'}]: ${outcome}`);
+          const tail = (typeof a.output_tail === 'string' && a.output_tail) || (typeof a.reason === 'string' && !a.passed ? a.reason : null);
+          if (tail) parts.push(`검증 출력(일부):\n${String(tail).slice(-800)}`);
+        }
+      } catch { /* acceptance unparseable — reason line still helps */ }
+    }
+    // Plain process failure (no gate/reason): still give the agent a signal that
+    // it is retrying + the prior run's summary, so the loop is never fully blind.
+    if (!parts.length) {
+      if (parent.status === 'failed') parts.push('이전 시도가 실패로 종료되었습니다 (완료 기준 미충족).');
+      if (parent.result_summary) parts.push(`이전 실행 요약(일부):\n${String(parent.result_summary).slice(-800)}`);
+    }
+    return parts.length ? parts.join('\n') : null;
+  }
+
   async function spawnQueuedRun(runId) {
     const claimed = runService.claimQueuedRun(runId);
     if (!claimed) return null;
@@ -783,7 +817,11 @@ function createLifecycleService({
     // workspace, Gate 1 acceptance, deliverable) reads that column instead of
     // re-evaluating the env gate, so a mid-flight config change cannot strand a
     // run. A goal task under goal-mode-off is a normal task (goal_active=0).
-    const goalActive = !!(task && task.goal_enabled && goalFeatureActive());
+    // A retry child already carries goal_active=1 (stamped in the verdict tx);
+    // HONOR that instead of re-evaluating the live flag, so a mid-lineage
+    // PALANTIR_GOAL_MODE flip cannot strand a retry (spawn a non-goal prompt yet
+    // still route into settle via its goal_active=1 row) — codex review MINOR-5.
+    const goalActive = !!run.goal_active || !!(task && task.goal_enabled && goalFeatureActive());
     if (goalActive) {
       // The stamp MUST persist — capture + harvest read runs.goal_active, so a
       // swallowed failure would run the goal prompt/workspace yet be treated as
@@ -801,13 +839,19 @@ function createLifecycleService({
     }
     // A goal-active worker gets the deterministic goal prompt (goal + acceptance
     // criteria + completion-report request). Non-goal / goal-mode-off tasks are
-    // completely unchanged. Attempt is always 1 here — the retry loop is G3.
+    // completely unchanged. G3: a retry child (retry_count>0) is told its real
+    // attempt number and given the PRIOR attempt's failure feedback (verdict
+    // reason + gate/test outcome) so the retried agent knows it is retrying and
+    // why — otherwise the loop is blind (codex review SERIOUS-2).
     if (goalActive) {
+      const attemptNumber = Number(run.retry_count || 0) + 1;
+      const attemptFeedback = attemptNumber > 1 ? buildGoalAttemptFeedback(run) : null;
       prompt = compileGoalPrompt({
         task,
-        attemptNumber: 1,
+        attemptNumber,
         maxAttempts: task.goal_max_attempts,
         callerPrompt: run.prompt,
+        attemptFeedback,
       });
     }
     const profile = agentProfileService.getProfile(agentProfileId);
@@ -1747,6 +1791,18 @@ function createLifecycleService({
     return started;
   }
 
+  // G3: the goal verdict reconciler. Wired with scheduleDrain (retry child
+  // wakeup) + taskService (transition) + eventBus (outbox effect emit). Driven
+  // at run:harvested (settle) and at boot (sweep). scheduleDrain is a function
+  // declaration (hoisted) so this construction can precede its definition.
+  const goalVerdictService = createGoalVerdictService({
+    runService,
+    taskService,
+    eventBus,
+    scheduleDrain: (profileId) => scheduleDrain(profileId),
+    verdictToTaskStatus: VERDICT_TO_TASK_STATUS,
+  });
+
   function scheduleDrain(profileId) {
     if (!profileId) return;
     setImmediate(() => {
@@ -2085,6 +2141,16 @@ function createLifecycleService({
    */
   function checkTaskCompletion(taskId) {
     const runs = runService.listRuns({ task_id: taskId });
+
+    // G3: a goal task's transition is driven STRICTLY by the newest goal run's
+    // verdict (the lineage tip) — never by naive completed/failed aggregation,
+    // which would fight the verdict (e.g. an error verdict → review, not failed)
+    // and could prematurely fail a task that is mid-retry. Delegate to the single
+    // authority so this path and the reconciler never diverge. Only goal tasks
+    // take that path (checked from the runs we already fetched — no re-query on
+    // the hot non-goal path).
+    if (runs.some(r => r.goal_active)) { goalVerdictService.syncTaskStatus(taskId); return; }
+
     const allComplete = runs.every(r => ['completed', 'failed', 'cancelled', 'stopped'].includes(r.status));
 
     if (allComplete && runs.length > 0) {
@@ -2167,6 +2233,20 @@ function createLifecycleService({
     if (heartbeatTimer) return;
     heartbeatTimer = setInterval(checkHealth, HEARTBEAT_INTERVAL_MS);
 
+    // G3: a periodic verdict-loop sweep so a settle/drain that failed transiently
+    // (a brief DB lock, a missed post-commit drain) self-heals at runtime instead
+    // of only on the next reboot. Skipped under the node test runner (would settle
+    // seeded goal rows mid-test, as boot drain is), and unref'd so it never keeps
+    // the process alive. sweep() is idempotent + never-throws.
+    if (!process.env.NODE_TEST_CONTEXT && !goalSweepTimer) {
+      goalSweepTimer = setInterval(() => {
+        try { goalVerdictService.sweep(); } catch (err) {
+          console.warn(`[lifecycle] Goal verdict periodic sweep failed: ${err.message}`);
+        }
+      }, GOAL_SWEEP_INTERVAL_MS);
+      if (typeof goalSweepTimer.unref === 'function') goalSweepTimer.unref();
+    }
+
     // Subscribe to run:ended so task status syncs immediately (not just on next health check),
     // and so worktrees get cleaned up regardless of which engine drove the termination
     // (tmux health check, streamJsonEngine exit handler, or explicit cancelRun all funnel here).
@@ -2174,6 +2254,19 @@ function createLifecycleService({
     // tests that spin up multiple createApp() instances accumulate stale listeners.
     if (eventBus) {
       unsubscribeEventBus = eventBus.subscribe((event) => {
+        // G3: run:harvested is the exactly-once, post-acceptance signal for a
+        // goal attempt — harvest persisted runs.acceptance_json (or none, for a
+        // failed run) BEFORE emitting this. Settle drives the verdict + retry +
+        // task transition + outbox effects from that persisted state.
+        if (event.channel === 'run:harvested') {
+          const hr = event.data?.run;
+          if (hr && hr.goal_active && !hr.is_manager) {
+            try { goalVerdictService.settle(hr.id); } catch (err) {
+              console.warn(`[lifecycle] Goal verdict settle failed for run ${hr.id}: ${err.message}`);
+            }
+          }
+          return;
+        }
         if (event.channel !== 'run:ended') return;
         const run = event.data?.run;
         if (!run) return;
@@ -2189,6 +2282,7 @@ function createLifecycleService({
         if (
           toStatus === 'failed'
           && !run.is_manager
+          && !run.goal_active   // G3: goal runs retry via the verdict loop, not B-lite
           && run.started_at
           && Number(run.retry_count || 0) < MAX_RETRY
         ) {
@@ -2246,6 +2340,10 @@ function createLifecycleService({
       clearInterval(heartbeatTimer);
       heartbeatTimer = null;
       console.log('[lifecycleService] Health monitor stopped');
+    }
+    if (goalSweepTimer) {
+      clearInterval(goalSweepTimer);
+      goalSweepTimer = null;
     }
     if (unsubscribeEventBus) {
       try { unsubscribeEventBus(); } catch { /* ignore */ }
@@ -2463,6 +2561,13 @@ function createLifecycleService({
     stopMonitoring,
     sendAgentInput,
     cancelRun,
+    // G3: boot sweeper — settle unverdicted terminal goal runs (crash mid-
+    // harvest) + reconcile verdicted ones (redrive undelivered outbox effects).
+    // MUST run before stale-worktree cleanup so a settle that needs a workspace
+    // is not raced by the cleanup. Never throws.
+    sweepGoalVerdicts: () => goalVerdictService.sweep(),
+    checkTaskCompletion,
+    _goalVerdictService: goalVerdictService,
   };
 }
 

@@ -74,6 +74,11 @@ const RUN_COLUMNS = [
   'deliverable_state',
   // Goal activation unification (migration 056): single per-run goal gate.
   'goal_active',
+  // G3 verdict loop (migration 057): verdict + retry lineage + fingerprint.
+  'goal_verdict',
+  'goal_verdict_reason',
+  'goal_retry_run_id',
+  'goal_fingerprint',
 ];
 
 const COMPOSITION_EVENT_COLUMNS = [

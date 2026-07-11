@@ -1285,6 +1285,21 @@ function createApp(options = {}) {
         console.warn(`[app] Queue boot drain failed: ${err.message}`);
       });
   }
+  // G3: sweep goal verdicts BEFORE stale-worktree cleanup — settle any terminal
+  // goal run that crashed mid-harvest (no verdict) + reconcile verdicted ones to
+  // redrive undelivered outbox effects (goal:verdict/exhausted/error) and repair
+  // missed retry-child wakeups. No-op when no goal runs exist. Gated with boot
+  // drain so the node test runner doesn't settle/spawn seeded rows.
+  if (shouldBootDrain && typeof lifecycleService.sweepGoalVerdicts === 'function') {
+    try {
+      const { swept, reconciled } = lifecycleService.sweepGoalVerdicts();
+      if (swept > 0 || reconciled > 0) {
+        console.log(`[app] Goal verdict sweep: settled ${swept}, reconciled ${reconciled}`);
+      }
+    } catch (err) {
+      console.warn(`[app] Goal verdict sweep failed: ${err.message}`);
+    }
+  }
   // P0b-1: cleanupStaleTerminalWorktrees is async now — fire-and-forget with
   // observability (a bare call would compare a Promise to 0 and never log,
   // and a rejection would be unhandled — Codex P0b-1 review, SERIOUS).
