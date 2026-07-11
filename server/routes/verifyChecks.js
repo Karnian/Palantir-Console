@@ -24,8 +24,20 @@ function requireAuth(req) {
 }
 function actorFor(method) { return method === 'cookie' ? 'human' : 'operator'; }
 
-function createVerifyChecksRouter({ verifyCheckService, taskService }) {
+function createVerifyChecksRouter({ verifyCheckService, taskService, goalFeatureActive = require('../services/goalMode').goalFeatureActive }) {
   const router = express.Router();
+
+  // G2 §6 (Codex BLOCKER-1): the whole verify_check surface is inert unless goal
+  // mode is active (PALANTIR_GOAL_MODE=1 + separated PALANTIR_PM_TOKEN). The
+  // command-check cookie gate is only spoof-proof once the Operator no longer
+  // holds PALANTIR_TOKEN, which only happens when goalFeatureActive() — so gate
+  // the entire router on it to keep the security boundary consistent.
+  router.use((req, res, next) => {
+    if (!goalFeatureActive()) {
+      return res.status(503).json({ error: 'goal mode not active — set PALANTIR_GOAL_MODE=1 with a separated PALANTIR_PM_TOKEN' });
+    }
+    next();
+  });
 
   router.get('/', asyncHandler(async (req, res) => {
     const projectId = req.query.project_id;

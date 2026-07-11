@@ -923,6 +923,9 @@ function createApp(options = {}) {
   // G2: verify_checks (Gate 1) service — created before harvestService so the
   // harvest pipeline can run the assigned Gate 1 check.
   const verifyCheckService = createVerifyCheckService(db);
+  // G2 §6: single goal-feature gate (injectable for tests). Threaded into every
+  // goal surface so they activate in lock-step with the PALANTIR_TOKEN scrub.
+  const goalFeatureActive = options.goalFeatureActive || require('./services/goalMode').goalFeatureActive;
   const harvestService = createHarvestService({
     runService,
     worktreeService,
@@ -935,6 +938,7 @@ function createApp(options = {}) {
     // verify_check_id; verifyCheckService loads the check + provenance.
     taskService,
     verifyCheckService,
+    goalFeatureActive,
   });
   const webhookService = createWebhookService({
     eventBus,
@@ -961,6 +965,7 @@ function createApp(options = {}) {
     // Phase 10D: isolated-preset auth materialization honors the same
     // `authResolverOpts` tests already pass for manager-path preflight.
     authResolverOpts: options.authResolverOpts || {},
+    goalFeatureActive, // G2 §6
   });
 
   // v3 Phase 1.5: shared manager registry + conversation service.
@@ -1233,7 +1238,7 @@ function createApp(options = {}) {
   app.use('/api/dispatch-audit', createDispatchAuditRouter({ reconciliationService }));
   app.use('/api/router', createRouterRouter({ routerService }));
   app.use('/api/worker-presets', createWorkerPresetsRouter({ presetService }));
-  app.use('/api/verify-checks', createVerifyChecksRouter({ verifyCheckService, taskService }));
+  app.use('/api/verify-checks', createVerifyChecksRouter({ verifyCheckService, taskService, goalFeatureActive }));
   app.use('/api/operator/profiles', createOperatorProfilesRouter({ operatorProfileService }));
   // R4b: profile-scoped R4 remember (POST /:id/memory/remember). Separate router on
   // the same base — the CRUD router's /:id routes don't match the deeper path.

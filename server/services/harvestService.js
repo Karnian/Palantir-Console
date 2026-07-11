@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { assertSpawnAllowed } = require('../utils/spawnGuard');
+const { isWithinRoot } = require('../utils/pathGuard');
 const { createLocalNodeExecutor } = require('./nodeExecutor');
 const { runAcceptance } = require('./goalAcceptance'); // G2 §5f
 
@@ -298,6 +299,8 @@ function createHarvestService({
   // as pre-G2 (no acceptance stage), so non-goal deployments are unaffected.
   taskService = null,
   verifyCheckService = null,
+  // G2 §6 (Codex BLOCKER-1): goal features gate. Injectable for tests.
+  goalFeatureActive = require('./goalMode').goalFeatureActive,
 } = {}) {
   const seenRunIds = new Set();
 
@@ -638,6 +641,7 @@ function createHarvestService({
   // G2 §5f: resolve the run's assigned Gate 1 verify_check (or null). Guards on
   // the optional deps + goal-enabled task + a non-null assignment.
   function resolveGoalCheck(run) {
+    if (!goalFeatureActive()) return null; // §6: no Gate 1 unless goal mode active
     if (!taskService || !verifyCheckService || !run.task_id) return null;
     let task;
     try { task = taskService.getTask(run.task_id); } catch { return null; }
@@ -679,7 +683,8 @@ function createHarvestService({
   // Symlinks are skipped (lstat), reads are within-root by construction.
   function enumerateDeliverable(root) {
     const MAX_FILES = 20;
-    const MAX_TOTAL = 10 * 1024 * 1024;
+    const MAX_TOTAL = 10 * 1024 * 1024;   // total hashed/bundled budget
+    const MAX_FILE_BYTES = 5 * 1024 * 1024; // never read a single file bigger than this
     const files = [];
     let truncated = false;
     let total = 0;
@@ -695,15 +700,22 @@ function createHarvestService({
         if (ent.isDirectory()) { stack.push({ dir: abs, depth: depth + 1 }); continue; }
         if (!ent.isFile()) continue;
         if (files.length >= MAX_FILES || total >= MAX_TOTAL) { truncated = true; continue; }
-        let size = 0; let hash = null;
-        try {
-          const st = fs.lstatSync(abs);
-          size = st.size;
-          const buf = fs.readFileSync(abs);
-          hash = crypto.createHash('sha256').update(buf).digest('hex');
-        } catch { continue; }
+        // Size-first (Codex BLOCKER-2): decide from lstat BEFORE any read, so a
+        // huge file is never slurped into memory and never bundled.
+        let st;
+        try { st = fs.lstatSync(abs); } catch { continue; }
+        if (!st.isFile()) continue;
+        const rel = path.relative(root, abs).split(path.sep).join('/');
+        const size = st.size;
+        if (size > MAX_FILE_BYTES || total + size > MAX_TOTAL) {
+          files.push({ path: rel, size, sha256: null, skipped: 'too_large' });
+          truncated = true;
+          continue;
+        }
+        let hash = null;
+        try { hash = crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex'); } catch { continue; }
         total += size;
-        files.push({ path: path.relative(root, abs).split(path.sep).join('/'), size, sha256: hash });
+        files.push({ path: rel, size, sha256: hash });
       }
     }
     return { files, truncated, total_bytes: total };
@@ -732,12 +744,32 @@ function createHarvestService({
     // Copy the bundle out so it survives the workspace cleanup (retention).
     if (manifest && ws) {
       try {
-        const dest = path.resolve(process.cwd(), 'runtime', 'goal-artifacts', String(run.task_id || 'none'), String(run.id));
+        // Defense-in-depth: sanitize id segments to a safe filename charset so a
+        // corrupt task_id/run.id can never escape the goal-artifacts root.
+        const safeSeg = (v, fb) => (String(v || '').replace(/[^a-zA-Z0-9_-]/g, '') || fb);
+        const dest = path.resolve(process.cwd(), 'runtime', 'goal-artifacts', safeSeg(run.task_id, 'none'), safeSeg(run.id, 'run'));
         fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 });
         fs.rmSync(dest, { recursive: true, force: true });
-        fs.cpSync(ws, dest, { recursive: true, dereference: false });
+        fs.mkdirSync(dest, { recursive: true, mode: 0o700 });
+        // Copy ONLY the bounded manifest files (Codex BLOCKER-2) — NOT the whole
+        // tree — so an oversized/huge workspace can't blow up the bundle. Each
+        // destination is re-checked to stay within the bundle root.
+        let copied = 0;
+        for (const f of manifest.files) {
+          if (f.skipped) continue; // oversized file — metadata only, not bundled
+          const src = path.join(ws, f.path);
+          const dst = path.join(dest, f.path);
+          if (!isWithinRoot(dest, dst) || !isWithinRoot(ws, src)) continue;
+          try {
+            const st = fs.lstatSync(src);
+            if (!st.isFile()) continue; // never follow a symlink into a copy
+            fs.mkdirSync(path.dirname(dst), { recursive: true });
+            fs.copyFileSync(src, dst);
+            copied++;
+          } catch { /* skip this file */ }
+        }
         runService.setDeliverableState(run.id, 'bundled');
-        addEvent(run.id, 'harvest:deliverable_bundled', { dest: path.relative(process.cwd(), dest), files: manifest.files.length });
+        addEvent(run.id, 'harvest:deliverable_bundled', { dest: path.relative(process.cwd(), dest), files: copied });
         if (taskService && run.task_id) {
           try {
             taskService.updateTask(run.task_id, { deliverable_json: JSON.stringify({ run_id: run.id, files: manifest.files, truncated: manifest.truncated }) });
@@ -759,7 +791,7 @@ function createHarvestService({
       // Runs the deliverable stage (enumerate → Gate 1 acceptance → bundle) rather
       // than falling into the no_worktree early-return. run:harvested still emits
       // exactly once below.
-      if (run.goal_workspace_path && !run.worktree_path && !isMaterializedHarvestTarget(run)) {
+      if (goalFeatureActive() && run.goal_workspace_path && !run.worktree_path && !isMaterializedHarvestTarget(run)) {
         await harvestDeliverableRun(run, summary);
         emitHarvested(run, summary);
         return;

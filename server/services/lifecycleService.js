@@ -78,6 +78,12 @@ function createLifecycleService({
   materializeStuckMs,
   queueStuckMs,
   now,
+  // G2 §6 (Codex BLOCKER-1): goal features only activate when goal mode is on
+  // AND the PM token is separated. Injectable for tests; defaults to the real
+  // env-derived gate. When it returns false, a goal_enabled task runs exactly
+  // like a normal task (no goal workspace / no acceptance) — the security
+  // precondition (token scrub) and the goal features move in lock-step.
+  goalFeatureActive = require('./goalMode').goalFeatureActive,
 }) {
   nodeExecutor = nodeExecutor || createLocalNodeExecutor({ executionEngine, streamJsonEngine });
   const workerChannel = (nodeExecutor && typeof nodeExecutor.spawnWorker === 'function')
@@ -1133,7 +1139,9 @@ function createLifecycleService({
       // run failed NON-retryable rather than executing in the fallback cwd.
       let cwd;
       const hasGitWorkspace = !!worktreePath || usesMaterializedRepoWorkspace;
-      if (task && task.goal_enabled && !hasGitWorkspace) {
+      // §6: goal features only when goalFeatureActive() — otherwise a goal_enabled
+      // task runs as a normal task (byte-identical to pre-goal).
+      if (task && task.goal_enabled && !hasGitWorkspace && goalFeatureActive()) {
         if (isRemoteNode) {
           runService.addRunEvent(run.id, 'goal:workspace_remote_unsupported', JSON.stringify({ node_id: run.node_id || 'local' }));
           runService.setRetryCount(run.id, MAX_RETRY);

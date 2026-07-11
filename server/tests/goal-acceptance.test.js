@@ -30,6 +30,7 @@ async function harness(t) {
   const hs = createHarvestService({
     runService: rs, worktreeService, projectService: ps, eventBus,
     taskService: ts, verifyCheckService: vcs,
+    goalFeatureActive: () => true, // G2 §6
   });
   const profileId = `profile-${Math.random().toString(36).slice(2)}`;
   db.prepare(`INSERT INTO agent_profiles (id, name, type, command, args_template, capabilities_json, env_allowlist, max_concurrent)

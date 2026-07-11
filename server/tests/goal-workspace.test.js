@@ -40,6 +40,7 @@ async function harness(t) {
   const lc = createLifecycleService({
     runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
     executionEngine: exec, streamJsonEngine: stubSJE(), worktreeService: null, eventBus: null,
+    goalFeatureActive: () => true, // G2 §6: exercise goal features in tests
   });
   t.after(async () => { close(); await fsp.rm(dir, { recursive: true, force: true }); });
   return { db, rs, ts, ps, exec, lc };
@@ -64,6 +65,29 @@ test('goal deliverable run (no git workspace) executes in an isolated goal works
   assert.ok(fs.existsSync(cwd), 'workspace dir created');
   assert.equal(rs.getRun(run.id).goal_workspace_path, cwd, 'goal_workspace_path persisted');
   t.after(() => { try { fs.rmSync(cwd, { recursive: true, force: true }); } catch {} });
+});
+
+test('goal task with goal mode OFF runs as a normal task (no goal workspace) — §6', async (t) => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'palantir-g2ws-off-'));
+  const { db, migrate, close } = createDatabase(path.join(dir, 't.db'));
+  migrate();
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const exec = stubExec();
+  const lc = createLifecycleService({
+    runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+    executionEngine: exec, streamJsonEngine: stubSJE(), worktreeService: null, eventBus: null,
+    goalFeatureActive: () => false, // goal mode OFF → goal features inert
+  });
+  t.after(async () => { close(); await fsp.rm(dir, { recursive: true, force: true }); });
+  const task = ts.createTask({ title: 'goal but mode off', description: 'd' });
+  db.prepare('UPDATE tasks SET goal_enabled = 1 WHERE id = ?').run(task.id);
+  const profile = seedProfile(db);
+  await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'go' });
+  const cwd = exec.spawned[0].opts.cwd;
+  assert.ok(!/goal-workspaces/.test(cwd), 'goal mode off → no goal workspace (runs normally)');
 });
 
 test('non-goal project-less run does NOT get a goal workspace (unchanged)', async (t) => {

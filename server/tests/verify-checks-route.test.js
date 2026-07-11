@@ -15,6 +15,7 @@ function setup(t) {
   const app = createApp({
     storageRoot: tmp, fsRoot: tmp, dbPath: path.join(tmp, 'test.db'),
     authResolverOpts: { hasKeychain: () => false }, authToken: 'secret-token',
+    goalFeatureActive: () => true, // G2 §6: verify_check routes require goal mode active
   });
   t.after(() => { try { if (app.shutdown) app.shutdown(); else app.closeDb(); } catch { /* */ } fs.rmSync(tmp, { recursive: true, force: true }); });
   const db = app.services._rawDb;
@@ -67,6 +68,19 @@ test('assign: command check requires cookie + project match', async (t) => {
   const cleared = await request(app).post('/api/verify-checks/assign').set(...COOKIE)
     .send({ task_id: 't1', check_id: null }).expect(200);
   assert.equal(cleared.body.task.verify_check_id, null);
+});
+
+test('routes are 503 when goal mode is NOT active (§6 fail-closed)', async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-vc-off-'));
+  const app = createApp({
+    storageRoot: tmp, fsRoot: tmp, dbPath: path.join(tmp, 'test.db'),
+    authResolverOpts: { hasKeychain: () => false }, authToken: 'secret-token',
+    goalFeatureActive: () => false, // goal mode off
+  });
+  t.after(() => { try { if (app.shutdown) app.shutdown(); } catch {} fs.rmSync(tmp, { recursive: true, force: true }); });
+  await request(app).get('/api/verify-checks').set(...COOKIE).expect(503);
+  await request(app).post('/api/verify-checks').set(...COOKIE)
+    .send({ kind: 'artifact', name: 'a', spec_json: { report: { min_chars: 1 } } }).expect(503);
 });
 
 test('list + get + delete (command delete human-only)', async (t) => {
