@@ -501,6 +501,10 @@ function createRunService(db, eventBus) {
     updateResult: db.prepare(`
       UPDATE runs SET result_summary = ?, exit_code = ?, input_tokens = ?, output_tokens = ?, cost_usd = ? WHERE id = ?
     `),
+    // G1: goal capture — final output 전문 + parsed goalReport (goal runs only).
+    updateGoalCapture: db.prepare(`
+      UPDATE runs SET final_output = ?, goal_report = ? WHERE id = ?
+    `),
     delete: db.prepare('DELETE FROM runs WHERE id = ?'),
     // Events
     insertEvent: db.prepare(`
@@ -1234,6 +1238,15 @@ function createRunService(db, eventBus) {
     return stmts.getById.get(id);
   }
 
+  // G1: persist goal capture (final_output 전문 + goal_report JSON). Both are
+  // NULL for non-goal runs — this is only ever called for goal-enabled runs by
+  // the lifecycle capture hook. final_output is already byte-capped by the caller.
+  function updateGoalCapture(id, { final_output = null, goal_report = null } = {}) {
+    getRun(id);
+    stmts.updateGoalCapture.run(final_output, goal_report, id);
+    return stmts.getById.get(id);
+  }
+
   function deleteRun(id) {
     getRun(id);
     stmts.delete.run(id);
@@ -1376,7 +1389,7 @@ function createRunService(db, eventBus) {
 
   return {
     listRuns, getRun, createRun,
-    updateRunStatus, markRunStarted, updateRunResult,
+    updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture,
     countRunning, countRunningOnNode, countRunningTotalOnNode,
     getOldestQueued, getOldestQueuedOnNode, getOldestQueuedReadyOnNode,
     getOldestMaterializableOnNode,

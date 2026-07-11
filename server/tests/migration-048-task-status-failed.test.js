@@ -29,6 +29,8 @@ const TASK_COLUMNS = [
   'suggested_agent_profile_id',
   'acceptance_criteria',
   'preferred_preset_id',
+  'goal_enabled',     // migration 054 (G1)
+  'goal_max_attempts', // migration 054 (G1)
 ];
 
 const TASK_INDEXES = [

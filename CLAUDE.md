@@ -233,6 +233,12 @@ server/
 - **배치는 항상 standard**: codex worker 는 `lifecycleService` extraArgs 에 `-c service_tier="default"` (판별=`resolveAdapterName(profile)`, profile.type 금지). auto-review 턴은 `conversationService` `source` plumbing 으로 `runTurn(_, { source:'auto_review' })` → codexAdapter 가 default 강제. 이 외 모든 interactive 경로는 source 없이 instance/env tier 를 따른다.
 - fast 턴 실패 시 `codex:fast_unavailable` annotate (per-turn `_fastUnavailEmitted` guard, child error/exit/async-catch 3경로, fast 턴만). **v1 fallback 재시도 없음** (accepted:true 동기 반환 구조상 재시도 불안전, spec §6 기각). UI: ManagerChat ⚡ 토글은 active codex Operator 에서만, `PATCH /api/operator-instances/:id/fast-mode` **cookie-only**. migration **053** (`operator_instances.fast_mode`). spec: `docs/specs/codex-fast-mode-brief.md`.
 
+### Goal Delegation — G1 (프롬프트/파서/캡처, 후속 phase 예정)
+- **G 트랙**은 워커를 goal 계약(목표+수락기준+검증+반복예산)으로 위임 — spec `docs/specs/goal-delegation-brief.md`. **G1 은 캡처·파싱 기반만** (verdict 루프/verify_checks/workspace/judge/UI 는 G2~G5). migration **054**: `tasks.goal_enabled`/`goal_max_attempts` + `runs.goal_report`/`final_output`.
+- `services/goalPrompt.compileGoalPrompt` — 순수·결정적 컴파일러. `spawnQueuedRun` 이 goal-enabled 태스크의 worker prompt 를 이걸로 교체 (`run.prompt` 는 `[ADDITIONAL INSTRUCTIONS]` 로 verbatim 보존). **non-goal 완전 불변.** verifyCheckName/attemptFeedback 은 G2/G3 용 forward-compat 훅 (null 이면 inert, attempt 는 G1 항상 1).
+- `services/goalReport.parseGoalReport` — ` ```palantir-goal-report {json}``` ` fenced block 파서, **never-throws** (부재/malformed→null, 마지막 fence 우선). 파싱 실패는 run 실패 아님.
+- `lifecycleService.captureGoalOutput` — run terminal 시 goal-enabled worker 만 `runs.final_output`(64KB byte-cap) + `runs.goal_report` persist + `harvest:goal_capture` emit. **annotate-only/never-throws, harvestService 존재와 독립** (없어도 캡처). 출력 소스 우선순위: **file-backed tee**(§5k-2 — 로컬 SubprocessEngine write-stream / TmuxEngine `pipe-pane`, `outputLogPath` opt-in, `runtime/goal-output/<runId>.log`) → `channel.getOutput`(원격/in-process fallback). tee 는 goal 로컬 run 만, cleanup 이 unlink. **run terminal 재구조화**: `run:ended` 구독자가 completed/failed worker 에 capture→(harvest if service)→cleanup, cleanup 분기(harvest→runtime files / no-harvest→worktree)는 pre-G1 불변.
+
 ### Manager Session (Codex stateless + thread resume) — v3 Phase 3a
 - `codex exec --json` 으로 첫 turn, 이후 턴은 `codex exec resume <thread_id>` — Codex 는 stateless 어댑터 (매 턴마다 subprocess 생성/종료)
 - system prompt 는 `-c 'model_instructions_file="<path>"'` — stable 파일 경로 + stable 내용이면 `cached_input_tokens` hit

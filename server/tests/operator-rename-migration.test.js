@@ -65,6 +65,9 @@ const RUN_COLUMNS = [
   // ADD COLUMN only, both nullable, no runtime reader/writer yet.
   'operator_instance_id',
   'retry_root_run_id',
+  // G1 (migration 054): goal capture — final output 전문 + parsed goalReport.
+  'goal_report',
+  'final_output',
 ];
 
 const COMPOSITION_EVENT_COLUMNS = [
