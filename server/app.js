@@ -148,6 +148,17 @@ function formatHarvestSummary(harvestSummary) {
     const duration = test.duration_ms != null ? `${test.duration_ms}ms` : '?ms';
     lines.push(`  [harvest] test: ${testStatus} (exit ${exitCode}, ${duration})`);
   }
+  // G2 §5f/§5h: surface the Gate 1 acceptance result. gate vs advisory reflects
+  // the check's provenance (§5k-3). NOTE the caveat: G2 acceptance is observational
+  // — it does NOT yet drive task transition (the verdict loop lands in G3).
+  const acc = harvestSummary.acceptance;
+  if (acc) {
+    const accStatus = acc.status === 'skipped'
+      ? `SKIPPED (${acc.reason || 'runner_unavailable'})`
+      : (acc.passed === true ? 'PASS' : acc.passed === false ? 'FAIL' : 'RAN');
+    lines.push(`  [gate1] acceptance: ${accStatus} — ${acc.kind || '?'} check (${acc.gate ? 'gate' : 'advisory'})`);
+    lines.push('  [gate1] note: Gate 1 은 아직 task 전이를 강제하지 않습니다 (G3 예정) — 최종 판단은 리뷰어.');
+  }
   if (harvestSummary.statText) {
     lines.push('  [harvest] stat:');
     lines.push(indentBlock(harvestSummary.statText));
@@ -909,6 +920,9 @@ function createApp(options = {}) {
     nodeService,
     eventBus,
   });
+  // G2: verify_checks (Gate 1) service — created before harvestService so the
+  // harvest pipeline can run the assigned Gate 1 check.
+  const verifyCheckService = createVerifyCheckService(db);
   const harvestService = createHarvestService({
     runService,
     worktreeService,
@@ -917,6 +931,10 @@ function createApp(options = {}) {
     testRunner: options.harvestTestRunner,
     nodeExecutor,
     nodeService,
+    // G2 §5f: Gate 1 acceptance deps. taskService resolves the run's assigned
+    // verify_check_id; verifyCheckService loads the check + provenance.
+    taskService,
+    verifyCheckService,
   });
   const webhookService = createWebhookService({
     eventBus,
@@ -955,8 +973,6 @@ function createApp(options = {}) {
     runService,
     managerRegistry,
   });
-  // G2: verify_checks (Gate 1) service.
-  const verifyCheckService = createVerifyCheckService(db);
   // v3 Phase 3a: lazy Operator spawn + single-owner cleanup. operatorSpawnService is
   // wired into conversationService below so a first message to
   // Operator slot creation starts the Operator run on demand. operatorCleanupService is the

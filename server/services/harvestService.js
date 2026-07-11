@@ -1,8 +1,10 @@
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { assertSpawnAllowed } = require('../utils/spawnGuard');
 const { createLocalNodeExecutor } = require('./nodeExecutor');
+const { runAcceptance } = require('./goalAcceptance'); // G2 §5f
 
 const MAX_STAT_CHARS = 8 * 1024;
 const MAX_OUTPUT_TAIL_CHARS = 8 * 1024;
@@ -292,6 +294,10 @@ function createHarvestService({
   nodeResolver = defaultNodeResolver,
   nodeExecutor = createLocalNodeExecutor(),
   nodeService = null,
+  // G2 §5f: Gate 1 acceptance. Optional — when absent, harvest behaves exactly
+  // as pre-G2 (no acceptance stage), so non-goal deployments are unaffected.
+  taskService = null,
+  verifyCheckService = null,
 } = {}) {
   const seenRunIds = new Set();
 
@@ -629,6 +635,118 @@ function createHarvestService({
     }
   }
 
+  // G2 §5f: resolve the run's assigned Gate 1 verify_check (or null). Guards on
+  // the optional deps + goal-enabled task + a non-null assignment.
+  function resolveGoalCheck(run) {
+    if (!taskService || !verifyCheckService || !run.task_id) return null;
+    let task;
+    try { task = taskService.getTask(run.task_id); } catch { return null; }
+    if (!task || !task.goal_enabled || !task.verify_check_id) return null;
+    try { return verifyCheckService.getCheck(task.verify_check_id); } catch { return null; }
+  }
+
+  // G2 §5f: run the Gate 1 acceptance for a completed goal run against its
+  // workspace, persist runs.acceptance_json, and emit harvest:acceptance. The
+  // VERDICT (retry/gate2/…) is G3 — this is observational aggregation only.
+  // Never throws (caller wraps too); a command check reuses the harvest test
+  // runner (same runner contract §5f).
+  async function runGate1Acceptance(run, workspaceDir, summary, reportText) {
+    if (run.status !== 'completed') return;
+    const check = resolveGoalCheck(run);
+    if (!check) return;
+    try {
+      // final_output was persisted by captureGoalOutput just before harvest, so
+      // the run object here may be stale — re-read for the artifact report check.
+      let report = reportText;
+      if (report == null) { try { report = runService.getRun(run.id)?.final_output || null; } catch { report = null; } }
+      const acceptance = await runAcceptance({
+        check,
+        workspaceDir,
+        reportText: report,
+        runCommand: ({ command, cwd }) => runTestCommand({ command, cwd, testRunner, nodeResolver }),
+      });
+      try { runService.updateGoalAcceptance(run.id, acceptance); } catch { /* annotate-only */ }
+      addEvent(run.id, 'harvest:acceptance', acceptance);
+      summary.acceptance = { passed: acceptance.passed, gate: acceptance.gate, kind: acceptance.kind, status: acceptance.status };
+    } catch (err) {
+      addError(run.id, 'acceptance', err);
+      pushSummaryError(summary, 'acceptance');
+    }
+  }
+
+  // G2 §5k-2: enumerate a deliverable workspace into a bounded manifest
+  // (path/size/hash; cap 20 files / 10MB; excess flagged manifest_truncated).
+  // Symlinks are skipped (lstat), reads are within-root by construction.
+  function enumerateDeliverable(root) {
+    const MAX_FILES = 20;
+    const MAX_TOTAL = 10 * 1024 * 1024;
+    const files = [];
+    let truncated = false;
+    let total = 0;
+    const stack = [{ dir: root, depth: 0 }];
+    while (stack.length) {
+      const { dir, depth } = stack.pop();
+      if (depth > 10) continue;
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+      for (const ent of entries) {
+        const abs = path.join(dir, ent.name);
+        if (ent.isSymbolicLink()) continue;
+        if (ent.isDirectory()) { stack.push({ dir: abs, depth: depth + 1 }); continue; }
+        if (!ent.isFile()) continue;
+        if (files.length >= MAX_FILES || total >= MAX_TOTAL) { truncated = true; continue; }
+        let size = 0; let hash = null;
+        try {
+          const st = fs.lstatSync(abs);
+          size = st.size;
+          const buf = fs.readFileSync(abs);
+          hash = crypto.createHash('sha256').update(buf).digest('hex');
+        } catch { continue; }
+        total += size;
+        files.push({ path: path.relative(root, abs).split(path.sep).join('/'), size, sha256: hash });
+      }
+    }
+    return { files, truncated, total_bytes: total };
+  }
+
+  // G2 §5k-2: harvest a deliverable-mode goal run (no git workspace). Order per
+  // Codex SERIOUS-3: enumerate → Gate 1 acceptance (live workspace) → copy bundle
+  // → mark bundled → emit. The source workspace is removed later by lifecycle
+  // cleanup. annotate-only / never-throws. The final run:harvested is emitted by
+  // the caller (exactly-once contract preserved).
+  async function harvestDeliverableRun(run, summary) {
+    summary.harvested = true;
+    const ws = run.goal_workspace_path;
+    let manifest = null;
+    try {
+      if (ws && fs.existsSync(ws)) manifest = enumerateDeliverable(ws);
+    } catch (err) { addError(run.id, 'deliverable_enumerate', err); pushSummaryError(summary, 'deliverable_enumerate'); }
+    if (manifest) {
+      addEvent(run.id, 'harvest:deliverable', { files: manifest.files.length, total_bytes: manifest.total_bytes, manifest_truncated: manifest.truncated });
+      try { runService.setDeliverableState(run.id, 'captured'); } catch { /* annotate */ }
+    }
+
+    // Gate 1 acceptance against the LIVE workspace (before any copy/delete).
+    await runGate1Acceptance(run, ws, summary, run.final_output);
+
+    // Copy the bundle out so it survives the workspace cleanup (retention).
+    if (manifest && ws) {
+      try {
+        const dest = path.resolve(process.cwd(), 'runtime', 'goal-artifacts', String(run.task_id || 'none'), String(run.id));
+        fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 });
+        fs.rmSync(dest, { recursive: true, force: true });
+        fs.cpSync(ws, dest, { recursive: true, dereference: false });
+        runService.setDeliverableState(run.id, 'bundled');
+        addEvent(run.id, 'harvest:deliverable_bundled', { dest: path.relative(process.cwd(), dest), files: manifest.files.length });
+        if (taskService && run.task_id) {
+          try {
+            taskService.updateTask(run.task_id, { deliverable_json: JSON.stringify({ run_id: run.id, files: manifest.files, truncated: manifest.truncated }) });
+          } catch { /* annotate */ }
+        }
+      } catch (err) { addError(run.id, 'deliverable_bundle', err); pushSummaryError(summary, 'deliverable_bundle'); }
+    }
+  }
+
   async function harvestRun(run, { projectDir } = {}) {
     if (!isReviewTargetRun(run)) return;
     if (seenRunIds.has(run.id)) return;
@@ -637,6 +755,15 @@ function createHarvestService({
 
     const summary = createSummary();
     try {
+      // G2 §5k-2: deliverable-mode goal run (isolated workspace, no git worktree).
+      // Runs the deliverable stage (enumerate → Gate 1 acceptance → bundle) rather
+      // than falling into the no_worktree early-return. run:harvested still emits
+      // exactly once below.
+      if (run.goal_workspace_path && !run.worktree_path && !isMaterializedHarvestTarget(run)) {
+        await harvestDeliverableRun(run, summary);
+        emitHarvested(run, summary);
+        return;
+      }
       const materialized = isMaterializedHarvestTarget(run);
       if (!materialized && (!run.worktree_path || !run.branch)) {
         pushSummaryError(summary, 'no_worktree');
@@ -736,6 +863,10 @@ function createHarvestService({
         addError(run.id, 'test', err);
         pushSummaryError(summary, 'test');
       }
+
+      // G2 §5f: Gate 1 acceptance for a code-mode goal run — runs the assigned
+      // check against the worktree AFTER the test stage, BEFORE worktree removal.
+      await runGate1Acceptance(run, run.worktree_path, summary, run.final_output);
 
       try {
         await worktreeService.removeWorktree(resolvedProjectDir, run.worktree_path, run.branch, {
