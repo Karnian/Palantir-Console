@@ -7,6 +7,7 @@ const { isWithinRoot } = require('../utils/pathGuard');
 const { createLocalNodeExecutor } = require('./nodeExecutor');
 const { runAcceptance } = require('./goalAcceptance'); // G2 §5f
 
+const GOAL_MAX_FILE_BYTES = 5 * 1024 * 1024; // G2 §5k-2: per-file read/copy hard cap
 const MAX_STAT_CHARS = 8 * 1024;
 const MAX_OUTPUT_TAIL_CHARS = 8 * 1024;
 const MAX_SUMMARY_STAT_CHARS = 500;
@@ -681,6 +682,47 @@ function createHarvestService({
   // G2 §5k-2: enumerate a deliverable workspace into a bounded manifest
   // (path/size/hash; cap 20 files / 10MB; excess flagged manifest_truncated).
   // Symlinks are skipped (lstat), reads are within-root by construction.
+  // G2 (Codex R4): TOCTOU-safe capped file read — hashes at most `cap` bytes via
+  // a descriptor + fixed 64KB buffer, so even if the file GROWS after lstat the
+  // read is hard-bounded (never slurps the whole file into memory). Returns the
+  // sha256 of the first `cap` bytes, or null on error.
+  function hashCappedFile(abs, cap) {
+    let fd;
+    try { fd = fs.openSync(abs, 'r'); } catch { return null; }
+    try {
+      const h = crypto.createHash('sha256');
+      const buf = Buffer.allocUnsafe(64 * 1024);
+      let read = 0;
+      while (read < cap) {
+        const n = fs.readSync(fd, buf, 0, Math.min(buf.length, cap - read), null);
+        if (n <= 0) break;
+        h.update(buf.subarray(0, n));
+        read += n;
+      }
+      return h.digest('hex');
+    } catch { return null; } finally { try { fs.closeSync(fd); } catch { /* ignore */ } }
+  }
+
+  // G2 (Codex R4): TOCTOU-safe capped copy — copies at most `cap` bytes via
+  // descriptors + a fixed buffer, so a file that grows after lstat cannot make
+  // the copy unbounded. Returns true on success.
+  function copyCappedFile(src, dst, cap) {
+    let sfd; let dfd;
+    try { sfd = fs.openSync(src, 'r'); } catch { return false; }
+    try { dfd = fs.openSync(dst, 'w', 0o600); } catch { try { fs.closeSync(sfd); } catch { /* */ } return false; }
+    try {
+      const buf = Buffer.allocUnsafe(64 * 1024);
+      let written = 0;
+      while (written < cap) {
+        const n = fs.readSync(sfd, buf, 0, Math.min(buf.length, cap - written), null);
+        if (n <= 0) break;
+        fs.writeSync(dfd, buf, 0, n);
+        written += n;
+      }
+      return true;
+    } catch { return false; } finally { try { fs.closeSync(sfd); } catch { /* */ } try { fs.closeSync(dfd); } catch { /* */ } }
+  }
+
   function enumerateDeliverable(root) {
     const MAX_FILES = 20;
     const MAX_TOTAL = 10 * 1024 * 1024;   // total hashed/bundled budget
@@ -728,8 +770,9 @@ function createHarvestService({
             truncated = true;
             continue;
           }
-          let hash = null;
-          try { hash = crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex'); } catch { continue; }
+          // TOCTOU-safe: bounded descriptor read (never readFileSync the whole file).
+          const hash = hashCappedFile(abs, MAX_FILE_BYTES);
+          if (hash == null) continue;
           total += size;
           files.push({ path: rel, size, sha256: hash });
         }
@@ -783,8 +826,8 @@ function createHarvestService({
             const st = fs.lstatSync(src);
             if (!st.isFile()) continue; // never follow a symlink into a copy
             fs.mkdirSync(path.dirname(dst), { recursive: true });
-            fs.copyFileSync(src, dst);
-            copied++;
+            // TOCTOU-safe capped copy (Codex R4) — bounded even if src grows.
+            if (copyCappedFile(src, dst, GOAL_MAX_FILE_BYTES)) copied++;
           } catch { /* skip this file */ }
         }
         runService.setDeliverableState(run.id, 'bundled');
