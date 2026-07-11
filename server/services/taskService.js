@@ -227,6 +227,10 @@ function createTaskService(db, eventBus, opts = {}) {
     'task_kind', 'requires_capabilities', 'suggested_agent_profile_id', 'acceptance_criteria',
     // v3 Phase 10E (worker preset linkage)
     'preferred_preset_id',
+    // G1/G2 goal knobs — Operator-settable (§6). verify_check_id is DELIBERATELY
+    // excluded: its assignment is command-kind gated + project-matched via the
+    // dedicated assignVerifyCheck path, so the generic PATCH cannot bypass §6.
+    'goal_enabled', 'goal_max_attempts', 'goal_judge_enabled',
   ];
 
   function updateTask(id, fields) {
@@ -275,6 +279,19 @@ function createTaskService(db, eventBus, opts = {}) {
       setClauses.push("updated_at = datetime('now')");
       db.prepare(`UPDATE tasks SET ${setClauses.join(', ')} WHERE id = @id`).run(params);
     }
+    const task = parseRow(stmts.getById.get(id));
+    if (eventBus) eventBus.emit('task:updated', { task });
+    return task;
+  }
+
+  // G2: assign (or clear) a task's Gate 1 verify check. This is the ONLY path
+  // that writes tasks.verify_check_id (it is excluded from TASK_UPDATABLE), so
+  // the §6 gate the route enforces (command→cookie-only + project match) cannot
+  // be bypassed via the generic PATCH. checkId=null clears the assignment.
+  function assignVerifyCheck(id, checkId) {
+    getTask(id);
+    db.prepare("UPDATE tasks SET verify_check_id = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(checkId ?? null, id);
     const task = parseRow(stmts.getById.get(id));
     if (eventBus) eventBus.emit('task:updated', { task });
     return task;
@@ -332,7 +349,7 @@ function createTaskService(db, eventBus, opts = {}) {
     if (eventBus) eventBus.emit('task:updated', { taskId: id, deleted: true });
   }
 
-  return { listTasks, getTask, createTask, updateTask, updateTaskStatus, reorderTasks, deleteTask };
+  return { listTasks, getTask, createTask, updateTask, updateTaskStatus, assignVerifyCheck, reorderTasks, deleteTask };
 }
 
 module.exports = { createTaskService };

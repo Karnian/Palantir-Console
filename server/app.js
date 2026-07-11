@@ -81,6 +81,8 @@ const { createOperatorProfileMemoryRouter } = require('./routes/operatorProfileM
 const { createOperatorProfileService } = require('./services/operatorProfileService');
 const { createMasterMemoryRouter } = require('./routes/masterMemory');
 const { createOperatorInstanceService } = require('./services/operatorInstanceService');
+const { createVerifyCheckService } = require('./services/verifyCheckService');
+const { createVerifyChecksRouter } = require('./routes/verifyChecks');
 const { createOperatorInstancesRouter } = require('./routes/operatorInstances');
 
 function readGitSha() {
@@ -953,6 +955,8 @@ function createApp(options = {}) {
     runService,
     managerRegistry,
   });
+  // G2: verify_checks (Gate 1) service.
+  const verifyCheckService = createVerifyCheckService(db);
   // v3 Phase 3a: lazy Operator spawn + single-owner cleanup. operatorSpawnService is
   // wired into conversationService below so a first message to
   // Operator slot creation starts the Operator run on demand. operatorCleanupService is the
@@ -1213,6 +1217,7 @@ function createApp(options = {}) {
   app.use('/api/dispatch-audit', createDispatchAuditRouter({ reconciliationService }));
   app.use('/api/router', createRouterRouter({ routerService }));
   app.use('/api/worker-presets', createWorkerPresetsRouter({ presetService }));
+  app.use('/api/verify-checks', createVerifyChecksRouter({ verifyCheckService, taskService }));
   app.use('/api/operator/profiles', createOperatorProfilesRouter({ operatorProfileService }));
   // R4b: profile-scoped R4 remember (POST /:id/memory/remember). Separate router on
   // the same base — the CRUD router's /:id routes don't match the deeper path.
