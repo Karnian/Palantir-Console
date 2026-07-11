@@ -767,6 +767,15 @@ function createApp(options = {}) {
   const authToken = options.authToken !== undefined
     ? options.authToken
     : process.env.PALANTIR_TOKEN;
+  // G2 §6: surface the goal-mode activation state at boot. When goal mode is
+  // requested without a separated PALANTIR_PM_TOKEN it is DISABLED (fail-closed);
+  // warn loudly so the operator knows why goal features are inert.
+  try {
+    const { goalModeDiagnostic } = require('./services/goalMode');
+    const diag = goalModeDiagnostic();
+    if (diag) (diag.active ? console.log : console.warn)(diag.message);
+  } catch { /* diagnostic only */ }
+
   const storageRoot = options.storageRoot
     || process.env.OPENCODE_STORAGE
     || path.join(os.homedir(), '.local', 'share', 'opencode', 'storage');

@@ -10,6 +10,7 @@ const {
 const { resolveSpawnCwd } = require('../utils/spawnCwd');
 const { resolveProjectSource } = require('../services/projectSource');
 const { resolveCodexServiceTier } = require('../services/managerAdapters/codexAdapter'); // F-1
+const { goalFeatureActive } = require('../services/goalMode'); // G2 §6
 const {
   repoFeatureEnabled,
   cwdFromWorkspacePath,
@@ -308,7 +309,10 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   nodePrefix = node && node.node_prefix ? node.node_prefix : undefined;
                 }
                 const port = process.env.PORT || 4177;
-                const token = process.env.PALANTIR_TOKEN;
+                // G2 §6: goal mode → the resumed Operator's API examples + spawn
+                // env reference the separated PM token, never the human token.
+                const goalActive = goalFeatureActive();
+                const token = goalActive ? process.env.PALANTIR_PM_TOKEN : process.env.PALANTIR_TOKEN;
                 const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'operator', adapterType, specialistAvailable: isSpecialistAvailable() });
                 // Bake project brief into the system prompt (mirrors operatorSpawnService).
                 const briefSections = [];
@@ -340,7 +344,9 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 // absent (else a restart would stop a healthy pod Operator).
                 // Local still requires canAuth. (Codex S3b review.)
                 if (isRemoteNode || authCtx.canAuth) {
-                  const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env });
+                  // G2 §6 (Codex BLOCKER-1): scrub PALANTIR_TOKEN from the resumed
+                  // Operator's local spawn env in goal mode.
+                  const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env, scrubHumanToken: goalActive });
                   const cwd = isRepoProject
                     ? (threadState.pm_thread_cwd || cwdFromWorkspacePath(threadState.pm_thread_workspace_path, project))
                     : (isRemoteNode ? (project.directory || null) : resolveSpawnCwd({ workspaceDir: project.directory }));

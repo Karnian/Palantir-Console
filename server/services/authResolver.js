@@ -491,6 +491,7 @@ function buildManagerSpawnEnv({
   authEnv = {},
   envAllowlist,
   bearerEnvKeys,
+  scrubHumanToken = false,
 } = {}) {
   const env = { ...baseEnv };
   const baseAllowlist = Array.isArray(envAllowlist) ? envAllowlist : null;
@@ -524,10 +525,22 @@ function buildManagerSpawnEnv({
   for (const key of bearer) {
     if (baseEnv[key] != null && env[key] == null) env[key] = baseEnv[key];
   }
+  // G2 §6 (Codex BLOCKER-1): in goal mode the Operator must NOT be able to read
+  // the human PALANTIR_TOKEN from its environment — otherwise it could send that
+  // as a cookie and spoof the cookie-only human gate on command verify_checks.
+  // Strip PALANTIR_TOKEN and keep only the separated PALANTIR_PM_TOKEN as the
+  // Operator's bearer. Off by default → non-goal spawns are byte-identical.
+  if (scrubHumanToken) {
+    delete env.PALANTIR_TOKEN;
+    if (baseEnv.PALANTIR_PM_TOKEN != null) env.PALANTIR_PM_TOKEN = baseEnv.PALANTIR_PM_TOKEN;
+  }
   // Merge resolved auth env last so it always wins.
   for (const [k, v] of Object.entries(authEnv)) {
     if (v != null) env[k] = v;
   }
+  // Defense-in-depth: authEnv must never smuggle the human token back in when
+  // scrubbing (it shouldn't contain it, but enforce the invariant).
+  if (scrubHumanToken) delete env.PALANTIR_TOKEN;
   return env;
 }
 
