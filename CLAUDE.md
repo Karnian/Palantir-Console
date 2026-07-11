@@ -226,6 +226,13 @@ server/
 - **M2 legacy alias detection**: spawn 전에 `~/.codex/config.toml` 의 alias 목록을 스캔해서 preset/project/skillpack alias 와 교차검사. 충돌이면 `mcp:legacy_alias_conflict` run event emit (annotate-only, spawn 은 계속). 이벤트 payload shape 고정: `{ alias, source, message }`. Codex 가 leaf-merge 하므로 preset 이 `ctx7.command="npx"` 만 지정해도 user 의 `ctx7.args` 는 살아남아 silent drift — 이 경고가 그걸 가시화.
 - 운영자 진단: `npm run diagnose:mcp` — spawn 없이 현재 DB 의 preset 들과 user config 의 alias 교집합을 보여줌. `--fail-on-conflict` 로 CI gate, `--json` 으로 자동화.
 
+### Codex service tier / Fast Mode (F-1)
+- **모든 codex spawn 은 `-c service_tier="fast"|"default"` 를 항상 명시 emit** — user `~/.codex/config.toml` 의 `service_tier` 를 절대 상속하지 말 것 (fast=2.5× 크레딧이 배치 run 에 silent 유출되는 M2-패턴 드리프트). codexAdapter `spawnOneTurn` 이 fresh/resume 양 경로에서 `model_instructions_file` 직후·`-` 앞에 emit. fast 시 `-c features.fast_mode=true` 동시 emit.
+- tier 우선순위: `operator_instances.fast_mode` (1/0/null) → `PALANTIR_CODEX_FAST` env → standard. `resolveCodexServiceTier(fastMode, {env})` (codexAdapter export) — **null-check 를 Number 변환보다 먼저** (Number(null)===0 함정). null=env-follow.
+- `startSession({ serviceTier })` 는 **문자열|함수 오버로드**: Top 은 정적 문자열(env 1회 해석), Operator 는 함수 `() => resolveCodexServiceTier(getOperatorInstance(id)?.fast_mode)` (매 턴 재읽기 → ⚡ 토글이 재spawn 없이 다음 턴 반영). Claude 어댑터는 `serviceTier` 를 무시.
+- **배치는 항상 standard**: codex worker 는 `lifecycleService` extraArgs 에 `-c service_tier="default"` (판별=`resolveAdapterName(profile)`, profile.type 금지). auto-review 턴은 `conversationService` `source` plumbing 으로 `runTurn(_, { source:'auto_review' })` → codexAdapter 가 default 강제. 이 외 모든 interactive 경로는 source 없이 instance/env tier 를 따른다.
+- fast 턴 실패 시 `codex:fast_unavailable` annotate (per-turn `_fastUnavailEmitted` guard, child error/exit/async-catch 3경로, fast 턴만). **v1 fallback 재시도 없음** (accepted:true 동기 반환 구조상 재시도 불안전, spec §6 기각). UI: ManagerChat ⚡ 토글은 active codex Operator 에서만, `PATCH /api/operator-instances/:id/fast-mode` **cookie-only**. migration **053** (`operator_instances.fast_mode`). spec: `docs/specs/codex-fast-mode-brief.md`.
+
 ### Manager Session (Codex stateless + thread resume) — v3 Phase 3a
 - `codex exec --json` 으로 첫 turn, 이후 턴은 `codex exec resume <thread_id>` — Codex 는 stateless 어댑터 (매 턴마다 subprocess 생성/종료)
 - system prompt 는 `-c 'model_instructions_file="<path>"'` — stable 파일 경로 + stable 내용이면 `cached_input_tokens` hit

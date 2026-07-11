@@ -218,6 +218,17 @@
 
 ## Draft-review
 
+> **진행 프로토콜**: F-1 + G 트랙 등 후속작업 전체의 표준 진행 순서/규율은 [`docs/goal-session-protocol.md`](./goal-session-protocol.md) — 사용자가 해당 문서로 진행 지시 시 lock-in 간주 규약 포함.
+
+### ~~F-1. Codex Fast Mode 토글~~ ✅ 완료·merged (2026-07-11, goal-session-protocol 파일럿)
+- **Spec**: [`docs/specs/codex-fast-mode-brief.md`](./specs/codex-fast-mode-brief.md) (2026-07-11, mini-brief). **goal-session-protocol lock-in.**
+- **요지**: user `~/.codex/config.toml` 의 `service_tier="fast"` 가 Palantir codex spawn 전체에 암묵 상속되는 드리프트 (M2 패턴) 를 명시 emit 으로 차단 — codexAdapter 가 `-c service_tier` 를 항상 명시. 대화형 Operator 턴은 per-instance ⚡ 토글 (cookie-only PATCH) + `PALANTIR_CODEX_FAST` env, 배치 (worker/auto-review) 는 standard 고정.
+- **구현**: migration **053** (`operator_instances.fast_mode` INTEGER, NULL=env-follow) + `resolveCodexServiceTier` (per-instance>env 우선순위) + codexAdapter `serviceTier` (문자열|함수 오버로드 → 라이브 토글, 다음 턴 반영) fresh/resume 양 경로 `-c service_tier` (+fast 시 `features.fast_mode=true`) emit + `codex:fast_unavailable` annotate (fast 턴 실패 관측만, **v1 fallback 재시도 제거** — accepted:true 동기 반환 구조상 불안전, spec §6) + conversationService `source` plumbing → auto-review 만 `source:'auto_review'` 로 standard 강제 + lifecycleService codex worker standard 고정 + `PATCH /api/operator-instances/:id/fast-mode` (cookie-only) + ManagerChat ⚡ 토글 (디자인 토큰, aria-pressed). 테스트 12종 (spec 필수 9 + fast_unavailable dedupe + 마이그레이션). **codex 계획 R1 NO-GO(3 BLOCKER: resolveAdapterName(profile)/fast_unavailable per-turn dedupe/status wiring) → 반영, 최종 diff 리뷰 PASS(5 hotspot).** 전체 2163 tests, visual 56/56.
+
+### G. Goal Delegation — 워커 완결 작업 위임 (전 업무)
+- **Spec**: [`docs/specs/goal-delegation-brief.md`](./specs/goal-delegation-brief.md) (2026-07-10~11, v6). Codex 적대 리뷰 6라운드 수렴 (R1~R3 NO-GO → **R4 GO** [code core] → 워크로드 전제 교정[코딩→전 업무, Operator 단위] → R5 NO-GO 4B → **R6 GO** [일반화 레이어]). **사용자 lock-in 대기.**
+- **요지**: 워커 위임을 1회성 채팅에서 goal 계약(수락 기준 + verify check + 반복 예산)으로, **워크로드 불문** (code 모드=git workspace / deliverable 모드=격리 goal workspace + artifact bundle). 게이트: Gate 0 프로세스 종료 → Gate 1 기계 검증 (command=human-only + artifact=선언적·provenance 기반 gate/advisory 분리) → Gate 1.5 judge (구조화 LLM 판정, flag 별도, 보조 판정) → Gate 2 Operator 의미 판단(최종권). persisted verdict (race-free CAS) + 단일 tx 재시도 + attempt 연속성 (code=ref 계승 / deliverable=bundle seed) + node-aware workspace provider (local/remote pod) + copy-verify-delete 수확 + 산출물 전달 (branch 승격 / bundle manifest). 외부 액션 업무(메일/티켓)는 `action` goal kind 로 **v2 명시 유보**. `PALANTIR_GOAL_MODE` flag-gated, 전제조건 = `PALANTIR_PM_TOKEN` 분리. 페이즈 G1(프롬프트/파서/출력캡처)→G2(check+workspace local+deliverable 수확)→G2b(remote provider, 실 Pi)→G3(verdict 루프, 본체)→G3b(원격 runner)→G3c(judge)→G4(UI/전달)→G5(메모리).
+
 ### N. 노드 퍼스트 작업보드·프로젝트 재기획
 - **Spec**: [`docs/specs/node-first-board-brief.md`](./specs/node-first-board-brief.md) (v1.2, PR #307). Codex 적대 리뷰 4라운드 수렴 (R1 3B+6S → R2 3B+3S → R3 1S → **R4 GO**), 사용자 lock-in 완료 (2026-07-05).
 - **N0 정합 수리 ✅ 완료 (PR #309~#311, 2026-07-05)**: ① migration 048 tasks rebuild — status CHECK 'failed' (prod 복사본 실측 + prod v48 적용) + 폼 dead-field 정합 ② 노드 복구 자동 drain (`onNodeRecovered`→`scheduleDrainForNode`, **실 Pi e2e: unreachable queued → host 교정 → flip 4초 내 자동 drain → codex 완주**) + transport_lost 실제 node_id. 각각 codex-goal 구현 + Themis PASS + Codex 적대 리뷰 GO. 1908 tests. (#311 은 #310 브랜치 조작 실수 복원 — worktree 커밋에서 PR 브랜치 만들 때 base 불일치 `reset --soft` 금지 교훈.)

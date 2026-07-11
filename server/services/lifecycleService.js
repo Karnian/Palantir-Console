@@ -1231,6 +1231,15 @@ function createLifecycleService({
             reason: 'opencode CLI has no MCP config flag — prompt-only injection applied',
           }));
         }
+        // F-1: codex workers ALWAYS run at the standard service tier. Batch
+        // worker runs must never inherit the user's ~/.codex/config.toml
+        // service_tier="fast" (2.5× credits). Emit explicitly as a leaf `-c`
+        // override (same placement as MCP flatten — before baseArgs' exec/-).
+        // codex detection is command-based via resolveAdapterName (a non-codex
+        // wrapper command must not get `-c`).
+        if (adapterName === 'codex') {
+          extraArgs.push('-c', 'service_tier="default"');
+        }
         const baseArgs = buildAgentArgs(profile, prompt, placeholders);
         const args = adapterName === 'codex' ? [...extraArgs, ...baseArgs] : baseArgs;
         result = await channelForNode(run.node_id).spawnWorker(run.id, {

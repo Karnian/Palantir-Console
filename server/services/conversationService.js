@@ -241,7 +241,7 @@ function createConversationService({
   //
   // Returns { status: 'sent', target } on success, throws with a 4xx-style
   // Error otherwise. Callers should map errors to HTTP status codes.
-  function sendMessage(conversationId, { text, images, codebaseProjectId } = {}) {
+  function sendMessage(conversationId, { text, images, codebaseProjectId, source } = {}) {
     const parsed = parseConversationId(conversationId);
     if (!parsed) {
       const err = new Error(`invalid conversation id: ${conversationId}`);
@@ -258,7 +258,7 @@ function createConversationService({
     }
 
     if (parsed.kind === 'top') {
-      return sendToManagerSlot('top', { text, images });
+      return sendToManagerSlot('top', { text, images, source });
     }
     if (parsed.kind === 'worker') {
       return sendToWorker(parsed.runId, { text, images });
@@ -270,6 +270,7 @@ function createConversationService({
         images,
         codebaseProjectId,
         projectId: operator.projectId || parsed.projectId || null,
+        source, // F-1: 'auto_review' forces standard tier on the codex adapter
       });
     }
     const err = new Error('unreachable');
@@ -310,7 +311,7 @@ function createConversationService({
   //          on success, queue an Operator→Top notice on the Operator run's parent
   //          (but only if that parent still matches the currently active
   //           Top, to avoid leaking stale signals into unrelated runs).
-  function sendToManagerSlot(conversationId, { text, images, projectId, codebaseProjectId } = {}) {
+  function sendToManagerSlot(conversationId, { text, images, projectId, codebaseProjectId, source } = {}) {
     const isTop = conversationId === 'top';
     let operatorResolved = null;
     if (!isTop) {
@@ -344,7 +345,7 @@ function createConversationService({
             })
             .then((spawnResult) => sendToManagerSlot(
               spawnResult?.run?.conversation_id || conversationId,
-              { text, images, projectId, codebaseProjectId },
+              { text, images, projectId, codebaseProjectId, source },
             ));
         }
         run = spawn.run;
@@ -620,6 +621,7 @@ function createConversationService({
       const result = adapter.runTurn(run.id, {
         text: effectiveText,
         images: validImages,
+        source, // F-1: propagate turn source so codex forces standard tier on auto-review
       });
       // P4-S3a: codexAdapter.runTurn is now SYNC-returning {accepted} (refusals
       // are decided synchronously; the remote spawn is fire-and-forget inside

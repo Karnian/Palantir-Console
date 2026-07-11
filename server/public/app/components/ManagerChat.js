@@ -62,7 +62,7 @@ const SUGGESTED_ICON = {
 };
 
 export function ManagerChat({ manager, projects, runs = [], tasks = [], agents = [], agentsError = null, agentsLoading = false, reloadAgents, driftAudit, onOpenDrift, conversationTarget: externalTarget, onConversationChange }) {
-  const { status, events: topEvents, loading, start, sendMessage: topSendMessage, stop } = manager;
+  const { status, events: topEvents, loading, start, sendMessage: topSendMessage, stop, checkStatus } = manager;
   const [input, setInput] = useState('');
   // R2-C.2: local RunInspector state so clicking a SuggestedActions chip
   // opens the same slide-over used by AttentionStrip / SessionGrid /
@@ -664,6 +664,42 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     return opts;
   }, [pmEnabledProjects, activePms]);
 
+  // F-1: Codex Fast Mode ⚡ toggle. Only for an active CODEX Operator conversation
+  // that has a resolvable instance id. Match the current conversation to its
+  // status.pms snapshot entry (by live run id first, then project) so we read
+  // the server-derived fastMode without an extra fetch.
+  const currentPm = isPm
+    ? (activePms.find(pm =>
+        (pmConv.run && pm.run && pm.run.id === pmConv.run.id)
+        || conversationIdMatchesProject(pm.conversationId, pmProjectId)
+        || conversationIdMatchesProject(pm.legacyConversationId, pmProjectId)
+      ) || null)
+    : null;
+  const currentPmRun = currentPm && currentPm.run;
+  const isCodexOperator = !!(currentPmRun && currentPmRun.manager_adapter === 'codex');
+  const fastOperatorInstanceId = currentPmRun && currentPmRun.operator_instance_id;
+  const fastModeOn = !!(currentPm && Number(currentPm.fastMode) === 1);
+  const showFastToggle = isPm && pmRunActive && isCodexOperator && !!fastOperatorInstanceId;
+  const [fastToggling, setFastToggling] = useState(false);
+
+  const handleToggleFast = async () => {
+    if (!fastOperatorInstanceId || fastToggling) return;
+    const next = fastModeOn ? 0 : 1;
+    setFastToggling(true);
+    try {
+      await apiFetch(`/api/operator-instances/${encodeURIComponent(fastOperatorInstanceId)}/fast-mode`, {
+        method: 'PATCH',
+        body: JSON.stringify({ fast_mode: next }),
+      });
+      addToast(next ? '빠른 응답 켜짐 · 크레딧 2.5×' : '빠른 응답 꺼짐', 'info');
+      if (typeof checkStatus === 'function') checkStatus();
+    } catch (err) {
+      addToast('빠른 응답 토글 실패: ' + (err && err.message ? err.message : 'unknown'), 'error');
+    } finally {
+      setFastToggling(false);
+    }
+  };
+
   return html`
     <div class="manager-chat-side">
       <div class="manager-chat-header">
@@ -686,6 +722,19 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
         <div class="manager-panel-actions">
           ${!isPm && status.active && status.usage && html`
             <span class="manager-cost">$${(status.usage.costUsd || 0).toFixed(4)}</span>
+          `}
+          ${showFastToggle && html`
+            <button
+              class="btn btn-sm manager-fast-toggle"
+              type="button"
+              data-action="toggle-fast"
+              data-active=${fastModeOn ? 'true' : 'false'}
+              aria-pressed=${fastModeOn ? 'true' : 'false'}
+              disabled=${fastToggling}
+              onClick=${handleToggleFast}
+              title="빠른 응답 (~1.5× 속도) · 크레딧 2.5× · ChatGPT 인증 필요"
+              aria-label=${`빠른 응답 ${fastModeOn ? '끄기' : '켜기'} (크레딧 2.5배)`}
+            >⚡ ${fastModeOn ? 'Fast' : 'Std'}</button>
           `}
           ${isPm && pmRunActive && html`
             <button

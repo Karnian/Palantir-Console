@@ -4972,6 +4972,34 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   font-family: var(--font-mono, monospace);
 }
 
+/* F-1: Codex Fast Mode ⚡ toggle in the Operator chat header.
+   Design tokens only (no inline color) — off = neutral, on = warning accent
+   (fast tier costs 2.5× credits, so amber signals "spending faster"). */
+.manager-fast-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm-plus);
+  font-size: 12px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.manager-fast-toggle:hover:not([disabled]) {
+  color: var(--text-primary);
+  border-color: var(--border-hover);
+}
+.manager-fast-toggle[data-active="true"] {
+  color: var(--warning);
+  background: var(--warning-bg-subtle);
+  border-color: var(--warning-border-subtle);
+}
+.manager-fast-toggle[disabled] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .manager-panel-title {
   display: flex;
   align-items: center;

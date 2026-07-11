@@ -9,6 +9,7 @@ const {
 } = require('../services/managerSystemPrompt');
 const { resolveSpawnCwd } = require('../utils/spawnCwd');
 const { resolveProjectSource } = require('../services/projectSource');
+const { resolveCodexServiceTier } = require('../services/managerAdapters/codexAdapter'); // F-1
 const {
   repoFeatureEnabled,
   cwdFromWorkspacePath,
@@ -58,7 +59,7 @@ function parseMcpTools(capabilitiesJson) {
 // so tests can inject `hasKeychain` (and any future DI hooks) without
 // monkey-patching child_process. Production callers leave this empty and
 // get the real keychain probe.
-function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, isSpecialistAvailable = () => false, authResolverOpts = {} }) {
+function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, operatorInstanceService, isSpecialistAvailable = () => false, authResolverOpts = {} }) {
   const router = express.Router();
 
   // PR1a: ManagerAdapter seam. The factory is the single entrypoint for
@@ -359,6 +360,13 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                     env: isRemoteNode ? {} : spawnEnv,
                     role: 'manager',
                     nodeId,
+                    // F-1: per-turn tier resolver — re-reads this instance's
+                    // fast_mode each turn so a live toggle takes effect without a
+                    // re-spawn. Bridge resume (no instance row) → env default.
+                    // Ignored by the Claude adapter.
+                    serviceTier: operatorInstanceId
+                      ? () => resolveCodexServiceTier(runService.getOperatorInstance(operatorInstanceId)?.fast_mode)
+                      : resolveCodexServiceTier(null),
                   };
                   if (adapterType === 'codex') {
                     startOpts.resumeThreadId = resumeHandle;
@@ -655,6 +663,10 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         // (Phase 3a) will pass role='manager' with layer='pm' system prompt.
         // role='manager' is the default in codexAdapter so this is belt-and-suspenders.
         role: 'manager',
+        // F-1: Top has no operator instance, so its codex tier follows the
+        // PALANTIR_CODEX_FAST env only (static string, resolved once). Ignored
+        // by the Claude adapter.
+        serviceTier: resolveCodexServiceTier(null),
       });
       const result = sessionRef;
 
@@ -967,11 +979,22 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       if (!pmRun) continue;
       const pmAdapter = managerRegistry.getActiveAdapter(pmEntry.conversationId)
         || managerAdapterFactory.getAdapter(pmRun.manager_adapter || 'claude-code');
+      // F-1: surface this Operator's Codex Fast Mode toggle so the UI can render
+      // the ⚡ control without an extra fetch. null when unknown (no instance /
+      // service unavailable / read error) — the UI treats null as "off/unset".
+      let fastMode = null;
+      if (operatorInstanceService && pmRun.operator_instance_id) {
+        try {
+          const inst = operatorInstanceService.getInstance(pmRun.operator_instance_id);
+          fastMode = inst ? inst.fast_mode : null;
+        } catch { /* annotate-only */ }
+      }
       pms.push({
         conversationId: pmEntry.conversationId,
         run: pmRun,
         usage: pmAdapter.getUsage ? pmAdapter.getUsage(pmRun.id) : null,
         claudeSessionId: pmAdapter.getSessionId ? pmAdapter.getSessionId(pmRun.id) : null,
+        fastMode, // F-1
       });
     }
 

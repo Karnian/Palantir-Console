@@ -132,6 +132,14 @@ function createOperatorInstanceService(db, {
       ORDER BY created_at DESC, rowid DESC
       LIMIT 1
     `),
+    // F-1: Codex Fast Mode per-instance toggle. No watchlist bump — fast_mode
+    // does not invalidate refs; the tier is re-resolved per turn at spawn time.
+    setFastMode: db.prepare(`
+      UPDATE operator_instances
+         SET fast_mode = ?,
+             updated_at = datetime('now')
+       WHERE id = ?
+    `),
   };
 
   function normalizeRef(row) {
@@ -330,6 +338,19 @@ function createOperatorInstanceService(db, {
     return { removed: refs.length, affected };
   }
 
+  // F-1: set the per-instance Codex Fast Mode toggle. fastMode is normalized to
+  // 1 (fast) | 0 (standard) | null (follow PALANTIR_CODEX_FAST env). The tier is
+  // read fresh per turn by the codex adapter's resolver, so a live Operator picks
+  // up the change on its next turn without a re-spawn.
+  function setFastMode(instanceId, fastMode) {
+    const instance = assertInstance(instanceId);
+    let value;
+    if (fastMode === null || fastMode === undefined) value = null;
+    else value = fastMode ? 1 : 0;
+    stmts.setFastMode.run(value, instance.id);
+    return withRefs(stmts.getInstance.get(instance.id));
+  }
+
   return {
     withTransaction,
     listInstances,
@@ -339,6 +360,7 @@ function createOperatorInstanceService(db, {
     addRef,
     removeRef,
     removeRefsForProject,
+    setFastMode,
   };
 }
 
