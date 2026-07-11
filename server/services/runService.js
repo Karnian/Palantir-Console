@@ -564,6 +564,11 @@ function createRunService(db, eventBus) {
     getGoalRetryParentFingerprint: db.prepare(
       'SELECT goal_fingerprint AS fp FROM runs WHERE goal_retry_run_id = ? LIMIT 1'
     ),
+    // G3 SERIOUS-2: the prior attempt's verdict reason + acceptance + status, to
+    // build the retry child's attempt-feedback (why the last attempt failed).
+    getGoalRetryParent: db.prepare(
+      'SELECT id, status, goal_verdict, goal_verdict_reason, acceptance_json, result_summary FROM runs WHERE goal_retry_run_id = ? LIMIT 1'
+    ),
     delete: db.prepare('DELETE FROM runs WHERE id = ?'),
     // Events
     insertEvent: db.prepare(`
@@ -1413,6 +1418,10 @@ function createRunService(db, eventBus) {
     const row = stmts.getGoalRetryParentFingerprint.get(runId);
     return row ? (row.fp ?? null) : null;
   }
+  // G3 SERIOUS-2: the prior attempt row (verdict/reason/acceptance) for feedback.
+  function getGoalRetryParent(runId) {
+    return stmts.getGoalRetryParent.get(runId) || null;
+  }
 
   function deleteRun(id) {
     getRun(id);
@@ -1561,7 +1570,7 @@ function createRunService(db, eventBus) {
     persistGoalVerdictTx,
     listPendingGoalEffects, markGoalEffectSent, listRunIdsWithPendingGoalEffects,
     listUnverdictedTerminalGoalRunIds, listVerdictedTerminalGoalRunIds,
-    getGoalRetryParentFingerprint,
+    getGoalRetryParentFingerprint, getGoalRetryParent,
     countRunning, countRunningOnNode, countRunningTotalOnNode,
     getOldestQueued, getOldestQueuedOnNode, getOldestQueuedReadyOnNode,
     getOldestMaterializableOnNode,

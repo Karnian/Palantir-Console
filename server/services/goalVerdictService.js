@@ -26,15 +26,7 @@ const crypto = require('node:crypto');
 const { decideGoalVerdict, VERDICT_TO_TASK_STATUS } = require('./goalVerdict');
 
 const DEFAULT_BUDGET = 3;
-
-// Terminal infra failures that a fresh attempt cannot fix — a goal run carrying
-// one is non-retryable (→ error/review), never looped. Fixed set (cardinality
-// discipline): materialize fail-closed + preset preflight blockers.
-const NON_RETRYABLE_EVENT_TYPES = new Set([
-  'run:repo_materialize_unavailable',
-  'preset:mcp_invalid',
-  'preset:mcp_unreachable',
-]);
+const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled', 'stopped'];
 
 function sha256Short(str) {
   return crypto.createHash('sha256').update(String(str)).digest('hex').slice(0, 16);
@@ -79,12 +71,14 @@ function createGoalVerdictService({
   }
 
   function isNonRetryable(run) {
-    // A failure that never entered execution (no started_at) is a setup/infra
-    // failure — mirror B-lite's "only started runs retry" and route it to review.
-    if (run.status === 'failed' && !run.started_at) return true;
-    let events = [];
-    try { events = runService.getRunEvents(run.id) || []; } catch { events = []; }
-    return events.some((e) => NON_RETRYABLE_EVENT_TYPES.has(e.event_type));
+    // Only a failure that never ENTERED execution (no started_at) is non-retryable
+    // — a setup/materialize failure the agent never got to act on. This mirrors
+    // B-lite exactly (its retry is gated on run.started_at). A failure AFTER start
+    // (e.g. a transient preset/MCP-preflight blip that fires post-claim) is left
+    // RETRYABLE within budget — same as the one free retry B-lite gives a non-goal
+    // run — instead of being routed straight to error (codex review SERIOUS: the
+    // old infra-event set gave goal tasks strictly fewer retries than non-goal).
+    return run.status === 'failed' && !run.started_at;
   }
 
   function taskBudget(run) {
@@ -132,8 +126,50 @@ function createGoalVerdictService({
     return types;
   }
 
+  // The newest goal run of a task (max rowid `_seq`) — the SINGLE authority for a
+  // goal task's status. Returns null when the task has no goal run.
+  function newestGoalRun(taskId) {
+    if (!taskId) return null;
+    let runs = [];
+    try { runs = runService.listRuns({ task_id: taskId }); } catch { return null; }
+    const goalRuns = runs.filter((r) => r.goal_active);
+    if (!goalRuns.length) return null;
+    return goalRuns.reduce((a, b) => (Number(b._seq || 0) > Number(a._seq || 0) ? b : a));
+  }
+
+  // Transition a goal task STRICTLY by its newest goal run's verdict — the one
+  // authority both reconcile() and lifecycle's checkTaskCompletion route through.
+  // A non-terminal newest, or terminal-without-verdict, NO-OPs (an attempt is
+  // still in flight / settle pending). This is what prevents a boot-sweep
+  // reconcile of an OLD attempt from reverting the task to a stale verdict
+  // (codex review BLOCKER): every reconcile, regardless of which run triggered
+  // it, resolves the task from the lineage tip — never from its own verdict.
+  // Returns true when the task is goal-controlled (handled), false otherwise so a
+  // non-goal caller falls through to naive aggregation.
+  function syncTaskStatus(taskId) {
+    const newest = newestGoalRun(taskId);
+    if (!newest) return false;
+    if (!TERMINAL_STATUSES.includes(newest.status)) return true; // in flight
+    if (newest.status === 'cancelled' || newest.status === 'stopped') {
+      if (taskService) { try { taskService.updateTaskStatus(taskId, 'review'); } catch { /* task gone */ } }
+      return true;
+    }
+    if (!newest.goal_verdict) return true; // settle pending
+    const target = verdictToTaskStatus[newest.goal_verdict];
+    if (target && taskService) { try { taskService.updateTaskStatus(taskId, target); } catch { /* task gone */ } }
+    return true;
+  }
+
   // The replayable outbox pump. pending → emit → mark 'sent'. Never throws; an
   // emit that throws leaves the effect 'pending' for the next drive.
+  // GUARANTEE: this is at-least-once EMISSION to the in-process eventBus (a 'sent'
+  // row is never re-emitted; a pending one is re-driven at reconcile/boot, so an
+  // effect is never lost from the bus). It is NOT a durable-delivery guarantee for
+  // an async external subscriber: the webhook subscriber POSTs fire-and-forget, so
+  // 'sent' means "emitted", not "the HTTP POST was acked" — a transient webhook
+  // failure is logged (webhook:error) but not re-driven here. External delivery is
+  // therefore best-effort (mirrors the existing run:ended webhook), and receivers
+  // dedup on the stable idempotency_key `${run_id}:${effect_type}`.
   function dispatchEffects(runId) {
     let run = null;
     try { run = runService.getRun(runId); } catch { return; }
@@ -162,16 +198,16 @@ function createGoalVerdictService({
     }
   }
 
-  // Idempotent reconciliation from the persisted verdict.
+  // Idempotent reconciliation from the persisted verdict. The task-status write
+  // is delegated to syncTaskStatus (newest-goal-run authority) so reconciling an
+  // OLD attempt can never revert the task to a stale verdict — it always resolves
+  // to the lineage tip.
   function reconcile(runId) {
     let run = null;
     try { run = runService.getRun(runId); } catch { return; }
     if (!run.goal_verdict) return;
 
-    const target = verdictToTaskStatus[run.goal_verdict];
-    if (target && run.task_id && taskService) {
-      try { taskService.updateTaskStatus(run.task_id, target); } catch { /* task may be gone */ }
-    }
+    if (run.task_id) syncTaskStatus(run.task_id);
 
     dispatchEffects(runId);
 
@@ -194,17 +230,29 @@ function createGoalVerdictService({
     let run = null;
     try { run = runService.getRun(runId); } catch { return { settled: false }; }
     if (!run || run.is_manager || !run.goal_active || !run.task_id) return { settled: false };
-    const terminal = ['completed', 'failed', 'cancelled', 'stopped'].includes(run.status);
-    if (!terminal) return { settled: false };
+    if (!TERMINAL_STATUSES.includes(run.status)) return { settled: false };
 
     // Already settled → just (re)reconcile idempotently.
     if (run.goal_verdict) { reconcile(runId); return { settled: true, winner: false, verdict: run.goal_verdict }; }
 
-    // cancelled/stopped are NOT attempts (§5d matrix) — no verdict; the task
-    // goes to review via checkTaskCompletion. Leave goal_verdict NULL.
-    if (run.status === 'cancelled' || run.status === 'stopped') return { settled: false };
+    // cancelled/stopped are NOT attempts (§5d matrix) — no verdict is computed.
+    // Still sync the task from the newest goal run before returning: settle IS the
+    // boot/periodic sweep's entry for every unverdicted terminal goal run, so if a
+    // crash left a cancelled/stopped run un-reconciled (run:ended's synchronous
+    // checkTaskCompletion never fired), the sweep must reconcile it here or the
+    // task strands (codex final review BLOCKER). syncTaskStatus is idempotent.
+    if (run.status === 'cancelled' || run.status === 'stopped') {
+      if (run.task_id) syncTaskStatus(run.task_id);
+      return { settled: true, winner: false };
+    }
 
-    const inputs = computeInputs(run);
+    // computeInputs touches the DB (fingerprint parent, task budget); guard it so
+    // a transient read failure returns cleanly instead of throwing out of settle.
+    let inputs;
+    try { inputs = computeInputs(run); } catch (err) {
+      warn(`[goalVerdict] computeInputs failed run=${runId}: ${err && err.message}`);
+      return { settled: false };
+    }
     let decision;
     try {
       decision = decide({
@@ -285,10 +333,13 @@ function createGoalVerdictService({
     reconcile,
     dispatchEffects,
     sweep,
+    // The newest-goal-run task-status authority — lifecycle's checkTaskCompletion
+    // delegates to this for goal tasks (returns false for non-goal tasks).
+    syncTaskStatus,
     // exposed for tests
     computeInputs,
     effectTypesFor,
   };
 }
 
-module.exports = { createGoalVerdictService, NON_RETRYABLE_EVENT_TYPES };
+module.exports = { createGoalVerdictService };

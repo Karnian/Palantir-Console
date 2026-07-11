@@ -50,6 +50,9 @@ function makeGoalRun(h, { status = 'completed', acceptance = null, retryCount = 
   // verify_check_id — so no verify_checks row is needed to exercise it.
   h.db.prepare('UPDATE tasks SET goal_enabled = 1, goal_max_attempts = ? WHERE id = ?')
     .run(maxAttempts, task.id);
+  // A goal worker running means its task is in_progress — mirror that so the
+  // newest-goal-run authority (syncTaskStatus) has a realistic starting status.
+  h.ts.updateTaskStatus(task.id, 'in_progress');
   const run = h.rs.createRun({ task_id: task.id, agent_profile_id: profile.id, prompt: 'do it', node_id: 'local', retry_count: retryCount });
   h.rs.setGoalActive(run.id, 1);
   // Drive through a legal path to the requested terminal status.
@@ -199,6 +202,46 @@ test('sweep: settles an unverdicted terminal goal run and redrives a verdicted r
   assert.ok(out.swept >= 1 && out.reconciled >= 1);
   assert.ok(h.rs.getRun(unverdicted.run.id).goal_verdict, 'unverdicted run settled by sweep');
   assert.equal(h.rs.listPendingGoalEffects(stuck.run.id).length, 0, 'stuck effect redriven to sent by sweep');
+});
+
+test('boot-sweep reconciling an OLDER attempt never reverts the task from the lineage-tip verdict (codex BLOCKER)', async (t) => {
+  const h = await harness(t);
+  // Attempt A: completed + gate fail → retry (task stays in_progress), child B.
+  const { run: a, task } = makeGoalRun(h, { status: 'completed', acceptance: GATE_FAIL, retryCount: 0, maxAttempts: 3 });
+  assert.equal(h.svc.settle(a.id).verdict, 'retry');
+  const childId = h.rs.getRun(a.id).goal_retry_run_id;
+  // Attempt B (the tip): completed + gate pass → gate2 → task review.
+  h.rs.markRunStarted(childId, {});
+  h.rs.updateRunStatus(childId, 'running', { force: true });
+  h.rs.updateRunStatus(childId, 'completed', { force: true });
+  h.rs.updateGoalAcceptance(childId, GATE_PASS);
+  assert.equal(h.svc.settle(childId).verdict, 'gate2');
+  assert.equal(h.ts.getTask(task.id).status, 'review', 'tip verdict drives the task');
+
+  // A reboot sweep reconciles BOTH A (verdict=retry) and B (verdict=gate2) in
+  // arbitrary order. The task must remain 'review' (tip), never revert to
+  // in_progress from A's stale retry verdict.
+  h.svc.sweep();
+  assert.equal(h.ts.getTask(task.id).status, 'review', 'sweep of the old attempt did not revert the task');
+  // Reconciling A directly must also not revert.
+  h.svc.reconcile(a.id);
+  assert.equal(h.ts.getTask(task.id).status, 'review', 'direct reconcile of the old attempt did not revert the task');
+});
+
+test('cancelled/stopped goal run: settle (and boot sweep) syncs the task to review, never strands it (codex final BLOCKER)', async (t) => {
+  const h = await harness(t);
+  // A goal run that was cancelled after the task was left in_progress, with the
+  // synchronous checkTaskCompletion never having fired (simulated crash).
+  const { run, task } = makeGoalRun(h, { status: 'completed' });
+  h.rs.updateRunStatus(run.id, 'running', { force: true });
+  h.rs.updateRunStatus(run.id, 'cancelled', { force: true });
+  assert.equal(h.ts.getTask(task.id).status, 'in_progress', 'precondition: task not yet reconciled');
+
+  // The sweep enters via settle for this unverdicted terminal run.
+  const res = h.svc.settle(run.id);
+  assert.equal(res.settled, true);
+  assert.equal(h.rs.getRun(run.id).goal_verdict, null, 'cancelled is not an attempt — no verdict');
+  assert.equal(h.ts.getTask(task.id).status, 'review', 'task reconciled to review, not stranded');
 });
 
 test('settle no-ops for a non-goal run and a non-terminal goal run', async (t) => {

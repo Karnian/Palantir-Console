@@ -141,6 +141,8 @@ function createLifecycleService({
   const GOAL_OUTPUT_LINES = 2000; // read a generous tail so the report fence is included
   const MAX_MATERIALIZE_ATTEMPTS = 3;
   let heartbeatTimer = null;
+  let goalSweepTimer = null; // G3: periodic verdict-loop self-heal
+  const GOAL_SWEEP_INTERVAL_MS = 60000; // 60s — runtime self-heal for missed settles/drains
   let healthCheckRunning = false; // Re-entrancy guard
   let unsubscribeEventBus = null; // for stopMonitoring teardown
   const _outputHashes = new Map(); // Track tmux output changes per run
@@ -755,6 +757,36 @@ function createLifecycleService({
     return runService.getRun(run.id);
   }
 
+  // G3 SERIOUS-2: compose the retry child's attempt-feedback from the PRIOR
+  // attempt (the run that pointed its goal_retry_run_id at this child) — the
+  // verdict reason + Gate 1 acceptance outcome + a bounded output tail. Returns
+  // null when there is no prior attempt or nothing useful to say. Never throws.
+  function buildGoalAttemptFeedback(childRun) {
+    let parent = null;
+    try { parent = runService.getGoalRetryParent(childRun.id); } catch { parent = null; }
+    if (!parent) return null;
+    const parts = [];
+    if (parent.goal_verdict_reason) parts.push(`이전 판정 사유: ${parent.goal_verdict_reason}`);
+    if (parent.acceptance_json) {
+      try {
+        const a = JSON.parse(parent.acceptance_json);
+        if (a && a.gate) {
+          const outcome = a.passed ? 'PASS' : (a.status === 'skipped' ? `SKIPPED(${a.reason || 'runner_unavailable'})` : 'FAIL');
+          parts.push(`Gate 1 검증 [${a.name || a.kind || 'check'}]: ${outcome}`);
+          const tail = (typeof a.output_tail === 'string' && a.output_tail) || (typeof a.reason === 'string' && !a.passed ? a.reason : null);
+          if (tail) parts.push(`검증 출력(일부):\n${String(tail).slice(-800)}`);
+        }
+      } catch { /* acceptance unparseable — reason line still helps */ }
+    }
+    // Plain process failure (no gate/reason): still give the agent a signal that
+    // it is retrying + the prior run's summary, so the loop is never fully blind.
+    if (!parts.length) {
+      if (parent.status === 'failed') parts.push('이전 시도가 실패로 종료되었습니다 (완료 기준 미충족).');
+      if (parent.result_summary) parts.push(`이전 실행 요약(일부):\n${String(parent.result_summary).slice(-800)}`);
+    }
+    return parts.length ? parts.join('\n') : null;
+  }
+
   async function spawnQueuedRun(runId) {
     const claimed = runService.claimQueuedRun(runId);
     if (!claimed) return null;
@@ -785,7 +817,11 @@ function createLifecycleService({
     // workspace, Gate 1 acceptance, deliverable) reads that column instead of
     // re-evaluating the env gate, so a mid-flight config change cannot strand a
     // run. A goal task under goal-mode-off is a normal task (goal_active=0).
-    const goalActive = !!(task && task.goal_enabled && goalFeatureActive());
+    // A retry child already carries goal_active=1 (stamped in the verdict tx);
+    // HONOR that instead of re-evaluating the live flag, so a mid-lineage
+    // PALANTIR_GOAL_MODE flip cannot strand a retry (spawn a non-goal prompt yet
+    // still route into settle via its goal_active=1 row) — codex review MINOR-5.
+    const goalActive = !!run.goal_active || !!(task && task.goal_enabled && goalFeatureActive());
     if (goalActive) {
       // The stamp MUST persist — capture + harvest read runs.goal_active, so a
       // swallowed failure would run the goal prompt/workspace yet be treated as
@@ -803,13 +839,19 @@ function createLifecycleService({
     }
     // A goal-active worker gets the deterministic goal prompt (goal + acceptance
     // criteria + completion-report request). Non-goal / goal-mode-off tasks are
-    // completely unchanged. Attempt is always 1 here — the retry loop is G3.
+    // completely unchanged. G3: a retry child (retry_count>0) is told its real
+    // attempt number and given the PRIOR attempt's failure feedback (verdict
+    // reason + gate/test outcome) so the retried agent knows it is retrying and
+    // why — otherwise the loop is blind (codex review SERIOUS-2).
     if (goalActive) {
+      const attemptNumber = Number(run.retry_count || 0) + 1;
+      const attemptFeedback = attemptNumber > 1 ? buildGoalAttemptFeedback(run) : null;
       prompt = compileGoalPrompt({
         task,
-        attemptNumber: 1,
+        attemptNumber,
         maxAttempts: task.goal_max_attempts,
         callerPrompt: run.prompt,
+        attemptFeedback,
       });
     }
     const profile = agentProfileService.getProfile(agentProfileId);
@@ -2101,30 +2143,13 @@ function createLifecycleService({
     const runs = runService.listRuns({ task_id: taskId });
 
     // G3: a goal task's transition is driven STRICTLY by the newest goal run's
-    // verdict — never by naive completed/failed aggregation, which would fight
-    // the verdict (e.g. an error verdict → review, not failed) and could
-    // prematurely fail a task that is mid-retry. If the newest goal run is
-    // non-terminal, or terminal-without-a-verdict (settle still pending), we
-    // no-op and let the verdict reconciler own the transition.
-    const goalRuns = runs.filter(r => r.goal_active);
-    if (goalRuns.length > 0) {
-      // Newest by insertion order (rowid `_seq`) — deterministic across a
-      // created_at tie (retry lineage). listRuns(getByTask) carries _seq.
-      const newest = goalRuns.reduce((a, b) => (Number(b._seq || 0) > Number(a._seq || 0) ? b : a));
-      const terminal = ['completed', 'failed', 'cancelled', 'stopped'].includes(newest.status);
-      if (!terminal) return; // an attempt is still in flight
-      if (newest.status === 'cancelled' || newest.status === 'stopped') {
-        // Not an attempt (§5d matrix) → human decides.
-        try { taskService.updateTaskStatus(taskId, 'review'); } catch { /* task gone */ }
-        return;
-      }
-      if (!newest.goal_verdict) return; // verdict not settled yet — reconciler owns it
-      const target = VERDICT_TO_TASK_STATUS[newest.goal_verdict];
-      if (target) {
-        try { taskService.updateTaskStatus(taskId, target); } catch { /* task gone */ }
-      }
-      return;
-    }
+    // verdict (the lineage tip) — never by naive completed/failed aggregation,
+    // which would fight the verdict (e.g. an error verdict → review, not failed)
+    // and could prematurely fail a task that is mid-retry. Delegate to the single
+    // authority so this path and the reconciler never diverge. Only goal tasks
+    // take that path (checked from the runs we already fetched — no re-query on
+    // the hot non-goal path).
+    if (runs.some(r => r.goal_active)) { goalVerdictService.syncTaskStatus(taskId); return; }
 
     const allComplete = runs.every(r => ['completed', 'failed', 'cancelled', 'stopped'].includes(r.status));
 
@@ -2207,6 +2232,20 @@ function createLifecycleService({
   function startMonitoring() {
     if (heartbeatTimer) return;
     heartbeatTimer = setInterval(checkHealth, HEARTBEAT_INTERVAL_MS);
+
+    // G3: a periodic verdict-loop sweep so a settle/drain that failed transiently
+    // (a brief DB lock, a missed post-commit drain) self-heals at runtime instead
+    // of only on the next reboot. Skipped under the node test runner (would settle
+    // seeded goal rows mid-test, as boot drain is), and unref'd so it never keeps
+    // the process alive. sweep() is idempotent + never-throws.
+    if (!process.env.NODE_TEST_CONTEXT && !goalSweepTimer) {
+      goalSweepTimer = setInterval(() => {
+        try { goalVerdictService.sweep(); } catch (err) {
+          console.warn(`[lifecycle] Goal verdict periodic sweep failed: ${err.message}`);
+        }
+      }, GOAL_SWEEP_INTERVAL_MS);
+      if (typeof goalSweepTimer.unref === 'function') goalSweepTimer.unref();
+    }
 
     // Subscribe to run:ended so task status syncs immediately (not just on next health check),
     // and so worktrees get cleaned up regardless of which engine drove the termination
@@ -2301,6 +2340,10 @@ function createLifecycleService({
       clearInterval(heartbeatTimer);
       heartbeatTimer = null;
       console.log('[lifecycleService] Health monitor stopped');
+    }
+    if (goalSweepTimer) {
+      clearInterval(goalSweepTimer);
+      goalSweepTimer = null;
     }
     if (unsubscribeEventBus) {
       try { unsubscribeEventBus(); } catch { /* ignore */ }

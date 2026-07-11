@@ -24,7 +24,11 @@ CREATE TABLE IF NOT EXISTS goal_effects (
   status       TEXT NOT NULL DEFAULT 'pending',  -- pending | sent
   created_at   TEXT NOT NULL DEFAULT (datetime('now')),
   sent_at      TEXT,
-  PRIMARY KEY (run_id, effect_type)
+  PRIMARY KEY (run_id, effect_type),
+  -- ON DELETE CASCADE so deleting a run reclaims its outbox rows (no orphan
+  -- 'pending' effect rescanned forever by the boot sweeper). foreign_keys is ON
+  -- at runtime (db/database.js).
+  FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
 );
 
 -- Boot sweeper / dispatcher scan of undelivered effects across all runs.
