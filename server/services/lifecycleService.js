@@ -14,6 +14,36 @@ const { createLocalNodeExecutor, createLocalWorkerChannel } = require('./nodeExe
 const { explainDispatch } = require('./dispatchPolicy');
 const { resolveProjectSource } = require('./projectSource');
 const { createProjectMaterializationService } = require('./projectMaterializationService');
+const { compileGoalPrompt } = require('./goalPrompt'); // G1
+const { parseGoalReport } = require('./goalReport'); // G1
+
+// G1: cap a string to at most maxBytes UTF-8 bytes without splitting a
+// multi-byte codepoint (final_output is stored raw; the 64KB bound is on bytes,
+// not chars). Truncates at a real codepoint boundary \u2014 it backs the cut off
+// any trailing continuation bytes rather than letting toString emit/strip a
+// replacement char, so legitimate U+FFFD content is preserved. null \u2192 null.
+function capUtf8Bytes(value, maxBytes) {
+  if (value == null) return null;
+  const str = String(value);
+  const buf = Buffer.from(str, 'utf8');
+  if (buf.length <= maxBytes) return str;
+  // If the byte at the cut is a UTF-8 continuation byte (0b10xxxxxx), the
+  // codepoint straddles the boundary \u2014 back off until the next dropped byte
+  // starts a new codepoint, so we never split one.
+  let end = maxBytes;
+  while (end > 0 && (buf[end] & 0xC0) === 0x80) end--;
+  return buf.subarray(0, end).toString('utf8');
+}
+
+// G1: file-backed output log for a local goal worker (§5k-2 — codex/tmux/
+// subprocess tee their stdout here so capture does not depend on the volatile
+// process-local buffer and survives a restart). runId is sanitized to a safe
+// filename segment. Returns null for a blank id.
+function goalOutputLogPath(runId) {
+  const safe = String(runId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!safe) return null;
+  return path.resolve(process.cwd(), 'runtime', 'goal-output', `${safe}.log`);
+}
 
 function createLifecycleService({
   runService,
@@ -88,6 +118,9 @@ function createLifecycleService({
   })();
   const nowMs = typeof now === 'function' ? now : Date.now;
   const MAX_RETRY = 1;
+  // G1: goal final-output capture bounds (§5k-2 — final_output cap 64KB).
+  const GOAL_FINAL_OUTPUT_MAX_BYTES = 64 * 1024;
+  const GOAL_OUTPUT_LINES = 2000; // read a generous tail so the report fence is included
   const MAX_MATERIALIZE_ATTEMPTS = 3;
   let heartbeatTimer = null;
   let healthCheckRunning = false; // Re-entrancy guard
@@ -562,6 +595,13 @@ function createLifecycleService({
         console.warn(`[lifecycle] MCP config cleanup failed for run ${run.id}: ${err.message}`);
       }
     }
+
+    // G1: remove the goal output tee log (capture ran before this in the chain).
+    // No-op when absent (non-goal / remote runs never created one).
+    const goalLog = goalOutputLogPath(run.id);
+    if (goalLog) {
+      try { require('node:fs').unlinkSync(goalLog); } catch { /* absent → nothing to clean */ }
+    }
   }
 
   async function cleanupRunWorktree(run) {
@@ -712,8 +752,20 @@ function createLifecycleService({
     const effectivePresetId = queuedArgs.presetId || null;
     const taskId = run.task_id;
     const agentProfileId = run.agent_profile_id;
-    const prompt = run.prompt || '';
+    let prompt = run.prompt || '';
     const task = taskService.getTask(taskId);
+    // G1: a goal-enabled task's worker gets the deterministic goal prompt
+    // (goal + acceptance criteria + completion-report request) instead of the
+    // raw dispatch prompt. Non-goal tasks are completely unchanged. Attempt is
+    // always 1 in G1 — the retry loop that bumps it lands in G3.
+    if (task && task.goal_enabled) {
+      prompt = compileGoalPrompt({
+        task,
+        attemptNumber: 1,
+        maxAttempts: task.goal_max_attempts,
+        callerPrompt: run.prompt,
+      });
+    }
     const profile = agentProfileService.getProfile(agentProfileId);
     const adapterName = resolveAdapterName(profile);
     const node = getDispatchNode(run.node_id);
@@ -1242,6 +1294,19 @@ function createLifecycleService({
         }
         const baseArgs = buildAgentArgs(profile, prompt, placeholders);
         const args = adapterName === 'codex' ? [...extraArgs, ...baseArgs] : baseArgs;
+        // G1: for a LOCAL goal worker, tee stdout to a file so the final output
+        // survives past the process-local buffer (§5k-2). Remote workers keep
+        // their own node-side stdout log (read via executor at capture time), so
+        // outputLogPath is local-only.
+        let goalOutputLog = null;
+        if (task && task.goal_enabled && !isRemoteNode) {
+          goalOutputLog = goalOutputLogPath(run.id);
+          if (goalOutputLog) {
+            try {
+              require('node:fs').mkdirSync(path.dirname(goalOutputLog), { recursive: true, mode: 0o700 });
+            } catch { goalOutputLog = null; }
+          }
+        }
         result = await channelForNode(run.node_id).spawnWorker(run.id, {
           engine: 'cli',
           spec: {
@@ -1250,6 +1315,7 @@ function createLifecycleService({
             cwd,
             env: parseEnvAllowlist(profile.env_allowlist, httpBearerEnvKeys),
             workerPath: isRemoteNode ? (node.node_prefix || undefined) : undefined,
+            outputLogPath: goalOutputLog || undefined,
           },
         });
       }
@@ -2061,17 +2127,28 @@ function createLifecycleService({
         if (run.task_id) checkTaskCompletion(run.task_id);
         if (run.is_manager) return;
 
-        const reviewTarget = ['completed', 'failed'].includes(toStatus) && harvestService;
-        if (reviewTarget) {
+        // A terminal (completed/failed) worker run is the review + goal-capture
+        // point. Goal capture MUST run independently of harvestService being
+        // wired (§5k-2) — a deployment with no harvestService still captures a
+        // goal run's final_output. Harvest is then conditional, and cleanup
+        // preserves the pre-G1 branching (harvest path → runtime files, no-harvest
+        // path → worktree). captureGoalOutput never throws and no-ops for
+        // non-goal runs, so it can chain ahead without touching that contract.
+        const isReviewTerminal = ['completed', 'failed'].includes(toStatus);
+        if (isReviewTerminal) {
           const projectDir = resolveProjectDirForRun(run);
           setImmediate(() => {
-            Promise.resolve(harvestService.harvestRun(run, { projectDir }))
+            Promise.resolve(captureGoalOutput(run))
+              .then(() => (harvestService ? harvestService.harvestRun(run, { projectDir }) : undefined))
               .catch((err) => {
                 console.warn(`[lifecycle] Harvest failed for run ${run.id}: ${err.message}`);
               })
-              .finally(() => cleanupRunRuntimeFiles(run).catch((err) => {
-                console.warn(`[lifecycle] Runtime cleanup failed for run ${run.id}: ${err.message}`);
-              }));
+              .finally(() => {
+                const cleanup = harvestService ? cleanupRunRuntimeFiles(run) : cleanupRunWorktree(run);
+                Promise.resolve(cleanup).catch((err) => {
+                  console.warn(`[lifecycle] Cleanup failed for run ${run.id}: ${err.message}`);
+                });
+              });
           });
         } else {
           cleanupRunWorktree(run).catch((err) => {
@@ -2103,6 +2180,81 @@ function createLifecycleService({
       clearTimeout(timer);
     }
     _materializationTimers.clear();
+  }
+
+  // G1: read the tail (≤ cap bytes) of a goal worker's file-backed tee log.
+  // Returns null when the file is absent/empty/unreadable so the caller falls
+  // back to channel.getOutput. Sync + best-effort (never throws to the caller).
+  function readGoalOutputLogTail(runId) {
+    const p = goalOutputLogPath(runId);
+    if (!p) return null;
+    try {
+      const fs = require('node:fs');
+      const stat = fs.statSync(p);
+      if (!stat.isFile() || stat.size === 0) return null;
+      const readBytes = Math.min(stat.size, GOAL_FINAL_OUTPUT_MAX_BYTES);
+      const start = stat.size - readBytes;
+      const fd = fs.openSync(p, 'r');
+      try {
+        const buf = Buffer.alloc(readBytes);
+        fs.readSync(fd, buf, 0, readBytes, start);
+        // A non-zero tail offset may land inside a multi-byte codepoint — skip
+        // any leading continuation bytes (0b10xxxxxx) so decode starts clean and
+        // never emits a spurious leading U+FFFD.
+        let offset = 0;
+        if (start > 0) {
+          while (offset < buf.length && (buf[offset] & 0xC0) === 0x80) offset++;
+        }
+        return buf.subarray(offset).toString('utf8');
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  // G1: capture a goal-enabled worker's final output → runs.final_output (byte-
+  // capped) and parse its ```palantir-goal-report``` block → runs.goal_report.
+  // Runs at run-terminal (alongside harvest). Output source, in priority:
+  //   1. the file-backed tee at goalOutputLogPath (§5k-2 — restart-safe, local
+  //      codex/tmux/subprocess), read tail-first;
+  //   2. channel.getOutput (in-process buffer / remote node-side log via executor).
+  // Contract: annotate-only, NEVER throws (mirrors harvest) and ONLY touches
+  // goal-enabled runs, so every non-goal run is byte-for-byte unaffected.
+  async function captureGoalOutput(run) {
+    try {
+      if (!run || run.is_manager || !run.task_id) return;
+      const task = taskService.getTask(run.task_id);
+      if (!task || !task.goal_enabled) return;
+
+      let raw = readGoalOutputLogTail(run.id);
+      if (raw == null) {
+        try {
+          raw = await channelForNode(run.node_id).getOutput(run.id, GOAL_OUTPUT_LINES);
+        } catch (err) {
+          // getOutput can legitimately fail (buffer gone, remote unreachable) —
+          // capture is best-effort. The report parser re-runs from harvest tail.
+          raw = null;
+        }
+      }
+      const finalOutput = capUtf8Bytes(raw, GOAL_FINAL_OUTPUT_MAX_BYTES);
+      const report = parseGoalReport(finalOutput || '');
+      runService.updateGoalCapture(run.id, {
+        final_output: finalOutput,
+        goal_report: report ? JSON.stringify(report) : null,
+      });
+      try {
+        runService.addRunEvent(run.id, 'harvest:goal_capture', JSON.stringify({
+          captured: finalOutput != null,
+          bytes: finalOutput ? Buffer.byteLength(finalOutput, 'utf8') : 0,
+          has_report: !!report,
+          goal_status: report ? report.goal_status : null,
+        }));
+      } catch { /* annotate-only */ }
+    } catch (err) {
+      console.warn(`[lifecycle] Goal output capture failed for run ${run && run.id}: ${err.message}`);
+    }
   }
 
   /**

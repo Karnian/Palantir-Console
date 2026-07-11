@@ -54,7 +54,7 @@ function createTmuxEngine() {
     return sanitizeSessionName(`palantir-run-${runId}`);
   }
 
-  function spawnAgent(runId, { command, args, cwd, env }) {
+  function spawnAgent(runId, { command, args, cwd, env, outputLogPath }) {
     const name = sessionName(runId);
     const safeCwd = validateCwd(cwd);
     assertSpawnAllowed({ command, source: 'executionEngine:tmux' });
@@ -95,6 +95,18 @@ function createTmuxEngine() {
       execFileSync('tmux', ['new-session', '-d', '-s', name, '-c', safeCwd], {
         stdio: 'pipe',
       });
+
+      // G1: optional file-backed tee (§5k-2). pipe-pane duplicates the pane's
+      // output to a file so a goal worker's final output is durable (restart-safe,
+      // not just in the volatile pane scrollback). The path is server-constructed
+      // from a sanitized runId; single-quote it for the sh -c that pipe-pane runs.
+      if (outputLogPath) {
+        try {
+          fs.mkdirSync(path.dirname(outputLogPath), { recursive: true, mode: 0o700 });
+          const safeLog = String(outputLogPath).replace(/'/g, "'\\''");
+          execFileSync('tmux', ['pipe-pane', '-t', name, '-o', `cat >> '${safeLog}'`], { stdio: 'pipe' });
+        } catch { /* tee best-effort — capture falls back to capture-pane */ }
+      }
 
       // Execute the script in the tmux session
       execFileSync('tmux', ['send-keys', '-t', name, `bash '${scriptPath}'`, 'Enter'], {
@@ -237,7 +249,7 @@ function createSubprocessEngine() {
   const processes = new Map();
   const PROCESS_TTL_MS = 10 * 60 * 1000; // Cleanup dead processes after 10 min
 
-  function spawnAgent(runId, { command, args, cwd, env }) {
+  function spawnAgent(runId, { command, args, cwd, env, outputLogPath }) {
     const safeCwd = validateCwd(cwd);
     assertSpawnAllowed({ command, source: 'executionEngine:subprocess' });
 
@@ -256,19 +268,23 @@ function createSubprocessEngine() {
     const outputBuffer = [];
     const MAX_BUFFER_LINES = 500;
 
-    child.stdout.on('data', (data) => {
+    // G1: optional file-backed tee (§5k-2) — durable stdout/stderr so a goal
+    // worker's final output survives past this in-memory buffer / a restart.
+    let logStream = null;
+    if (outputLogPath) {
+      try { logStream = fs.createWriteStream(outputLogPath, { flags: 'a', mode: 0o600 }); } catch { logStream = null; }
+      if (logStream) logStream.on('error', () => { logStream = null; });
+    }
+    const appendOutput = (data) => {
       const lines = data.toString().split('\n');
       outputBuffer.push(...lines);
       while (outputBuffer.length > MAX_BUFFER_LINES) outputBuffer.shift();
-    });
+      if (logStream) { try { logStream.write(data); } catch { /* tee best-effort */ } }
+    };
+    child.stdout.on('data', appendOutput);
+    child.stderr.on('data', appendOutput);
 
-    child.stderr.on('data', (data) => {
-      const lines = data.toString().split('\n');
-      outputBuffer.push(...lines);
-      while (outputBuffer.length > MAX_BUFFER_LINES) outputBuffer.shift();
-    });
-
-    const proc = { child, outputBuffer, exitCode: null, exitedAt: null, spawnError: null };
+    const proc = { child, outputBuffer, logStream, exitCode: null, exitedAt: null, spawnError: null };
     processes.set(runId, proc);
 
     // CRITICAL: Handle spawn errors (e.g., command not found — ENOENT).
@@ -286,6 +302,13 @@ function createSubprocessEngine() {
         proc.exitedAt = Date.now();
       }
     });
+
+    // G1: end the tee on 'close' (all stdio drained), NOT 'exit' — a late
+    // stdout/stderr 'data' chunk after 'exit' would otherwise write-after-end.
+    // 'close' fires after the child's streams have fully flushed.
+    if (logStream) {
+      child.on('close', () => { try { logStream.end(); } catch { /* ignore */ } });
+    }
 
     // Periodic cleanup of dead processes
     scheduleCleanup();
