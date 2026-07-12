@@ -120,7 +120,7 @@ K-4 와 동일: 8 hash routes × 2 themes (dark/light) × 2 viewports (1280×800
 §2 L6 + 다음:
 1. **CI workflow** (GitHub Actions matrix) — 별도 phase. multi-OS 시 baseline 갱신 룰도 같이.
 2. **모달 / 드로어 / 오버레이 시각 검증** — K-5-followup
-3. **interactive state** (hover / focus / pressed) — 별도 phase
+3. ~~**interactive state** (hover / focus / pressed)~~ — **부분 완료 (2026-07-13, #368)**: NavSidebar hover(nav-item 툴팁) + keyboard-focus(skip-to-content 링크) 4 시나리오 추가(desktop×2 themes). element-bbox 스냅샷은 out-of-bbox 어포던스(툴팁 `left:100%+8px`·focus ring)를 잘라내므로 **고정 sidebar CLIP 영역** 사용, `.focus()` 는 Chromium `:focus-visible` 미매칭이라 **keyboard Tab** 으로 트리거. `pressed`(active) 는 미보류(전이적·비결정적 캡처 난이도) — 후속.
 4. **performance regression** (LCP, CLS) — 별도 phase
 
 ---

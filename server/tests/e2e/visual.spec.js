@@ -142,3 +142,56 @@ for (const route of ROUTES) {
     }
   }
 }
+
+// K-5-followup: interactive-state (hover + keyboard-focus) visual regression for
+// the NavSidebar's keyboard/pointer affordances. Both affordances render OUTSIDE
+// the triggering element's own box — the nav-item fly-out tooltip at
+// `left: calc(100% + 8px)`, and the "skip to content" link that only paints on
+// keyboard focus — so an element-bbox screenshot would clip exactly what we want
+// to guard. Instead we screenshot a FIXED top-of-sidebar CLIP region spanning
+// the rail + the fly-out zone. It is app-shell chrome, so it renders the same on
+// the fresh-DB visual server regardless of data. Route `#board` keeps the first
+// nav item (dashboard) NON-active so the hover styling isn't masked by the
+// active treatment. Desktop only — these are pointer/keyboard states, and the
+// sidebar collapses to a bottom bar on mobile.
+const SIDEBAR_CLIP = { x: 0, y: 0, width: 200, height: 220 };
+async function gotoShell(page, theme) {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await setTheme(page, theme);
+  await page.goto('/#board');
+  await page.waitForSelector('.nav-sidebar', { timeout: 10000 });
+  await stabilize(page);
+}
+for (const theme of THEMES) {
+  // Hovering a non-active nav item reveals its fly-out tooltip — the pointer
+  // affordance. Guards the tooltip position/styling + the hover background.
+  test(`@visual interactive: navitem hover [${theme}]`, async ({ page }) => {
+    await gotoShell(page, theme);
+    await page.locator('.nav-sidebar .nav-item').first().hover();
+    await expect(page).toHaveScreenshot(`interactive-navitem-hover-${theme}.png`, {
+      clip: SIDEBAR_CLIP,
+      maxDiffPixels: 100,
+      threshold: 0.2,
+    });
+  });
+
+  // The first keyboard Tab from a fresh load surfaces the "skip to content"
+  // link (`:focus-visible`; a programmatic `.focus()` would NOT match it in
+  // Chromium). Guards that keyboard-only affordance — invisible until focused,
+  // so trivially easy to regress unnoticed.
+  test(`@visual interactive: skiplink focus [${theme}]`, async ({ page }) => {
+    await gotoShell(page, theme);
+    // Park the pointer well OUTSIDE SIDEBAR_CLIP (width 200) so no stray :hover
+    // bleeds into the focus capture.
+    await page.mouse.move(900, 400);
+    await page.keyboard.press('Tab');
+    // Make the first-Tab contract explicit: the skip link must be the first
+    // focusable. Fails loudly (not just as a pixel diff) if the tab order shifts.
+    await expect(page.locator('.skip-link')).toBeFocused();
+    await expect(page).toHaveScreenshot(`interactive-skiplink-focus-${theme}.png`, {
+      clip: SIDEBAR_CLIP,
+      maxDiffPixels: 100,
+      threshold: 0.2,
+    });
+  });
+}
