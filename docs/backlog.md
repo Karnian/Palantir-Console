@@ -35,7 +35,7 @@
 - **fleet-strip contrast** ✅ 완료(2026-07-12, #365). a11y gate 가 잡은 serious 위반: `.fleet-strip-warning` = `--status-needs-input`(amber-700 #b45309) on `--warning-bg-subtle`(8% amber tint) = 4.49:1 (light, <4.5). 신규 scoped 토큰 `--warning-badge-fg`(dark #f59e0b bright / light #92400e ≈6.3:1, `--priority-high-fg`/`--success-badge-fg` 선례, 3블록 lock-step). a11y 56/56, visual 56/56(pill 미렌더=baseline 무변).
 - **K-4-card-markup NIT** ✅ 완료(2026-07-12, #366). `.agent-card`/`.project-card` 제목을 `<h2 class="card-heading">`(트리거 button 을 감싸 접근명=aria-label=카드명). `.card-heading { display:contents; font:inherit }` — display:contents 로 box 제거(zero layout, button 이 카드 flex item 유지) + font:inherit 필수(display:contents 가 box 만 제거, h2 UA font 1.5em/bold 는 trigger 의 font:inherit 로 카드 텍스트에 상속돼 agents 카드 시프트 → visual gate 가 포착). a11y 56/56, visual 56/56.
 - **K-5-followup** — 모달/드로어 visual regression (K-5 spec §3 비범위 → 별도 phase)
-- **K-4 NIT** — moderate severity gate 승격 (현재 report-only) — **K-4 spec L3 gate policy 변경 = 사용자 lock-in 필요**
+- **K-4 NIT** ✅ 완료(2026-07-13, #367). moderate 를 report-only → **hard gate** 승격(사용자 lock-in). moderate 위반 0 도달 후라 fix 부채 0. `FAIL_IMPACTS = {critical, serious, moderate}`, minor 만 report-only. spec §L3 갱신. a11y 56/56.
 - **interactive state visual** — hover/focus/pressed (Codex K-5 r1 권장 분리)
 - **performance regression** (LCP/CLS) — 별도 phase
 
