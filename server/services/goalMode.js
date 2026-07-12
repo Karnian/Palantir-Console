@@ -44,4 +44,11 @@ function goalModeDiagnostic(e) {
   };
 }
 
-module.exports = { goalModeEnabled, pmTokenSeparated, goalFeatureActive, goalModeDiagnostic };
+// G3c §5k-4: the Gate 1.5 judge is a SEPARATE opt-in flag on top of goal mode
+// (PALANTIR_MEMORY_DISTILL precedent). Default OFF. Per-task activation
+// (tasks.goal_judge_enabled) is checked at the call site.
+function goalJudgeActive(e) {
+  return goalFeatureActive(e) && pickEnv(e).PALANTIR_GOAL_JUDGE === '1';
+}
+
+module.exports = { goalModeEnabled, pmTokenSeparated, goalFeatureActive, goalJudgeActive, goalModeDiagnostic };

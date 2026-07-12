@@ -509,6 +509,23 @@ function createRunService(db, eventBus) {
     setGoalActive: db.prepare(`
       UPDATE runs SET goal_active = ? WHERE id = ?
     `),
+    // G3c §5k-4: Gate 1.5 judge activation (stamped at spawn, mirrors goal_active).
+    setGoalJudgeActive: db.prepare('UPDATE runs SET goal_judge_active = ? WHERE id = ?'),
+    // G3c: durable judge CLAIM — CAS NULL → {status:'pending',deadline} so only the
+    // winner invokes the model (at-most-once across crash/concurrency).
+    casJudgePending: db.prepare(
+      "UPDATE runs SET judge_json = @json WHERE id = @id AND judge_json IS NULL"
+    ),
+    // G3c: finalize the judge result — scoped to the caller's own 'pending' claim
+    // (a late result can't clobber a claim the sweep already expired to 'error').
+    finalizeJudge: db.prepare(
+      "UPDATE runs SET judge_json = @json WHERE id = @id AND json_extract(judge_json,'$.status') = 'pending'"
+    ),
+    // G3c: the verdict sweep expires a crashed 'pending' claim → 'error' BEFORE
+    // settling (codex SERIOUS: else a late model result finalizes after gate2).
+    casJudgeExpiredToError: db.prepare(
+      "UPDATE runs SET judge_json = @json WHERE id = @id AND json_extract(judge_json,'$.status') = 'pending' AND datetime(json_extract(judge_json,'$.deadline')) <= datetime('now')"
+    ),
     // G2 §5k-1: persist the isolated deliverable-mode workspace path.
     setGoalWorkspacePath: db.prepare(`
       UPDATE runs SET goal_workspace_path = ? WHERE id = ?
@@ -567,7 +584,7 @@ function createRunService(db, eventBus) {
     // G3 SERIOUS-2: the prior attempt's verdict reason + acceptance + status, to
     // build the retry child's attempt-feedback (why the last attempt failed).
     getGoalRetryParent: db.prepare(
-      'SELECT id, status, goal_verdict, goal_verdict_reason, acceptance_json, result_summary FROM runs WHERE goal_retry_run_id = ? LIMIT 1'
+      'SELECT id, status, goal_verdict, goal_verdict_reason, acceptance_json, result_summary, judge_json FROM runs WHERE goal_retry_run_id = ? LIMIT 1'
     ),
     // G2b §5k-1: runs whose remote deliverable workspace was retained ('captured',
     // bundle not yet complete) — the boot re-harvest re-attempts these.
@@ -1356,6 +1373,22 @@ function createRunService(db, eventBus) {
     return stmts.getById.get(id);
   }
 
+  // G3c §5k-4: judge activation stamp (spawn) + durable judge CAS primitives.
+  function setGoalJudgeActive(id, active) {
+    getRun(id);
+    stmts.setGoalJudgeActive.run(active ? 1 : 0, id);
+    return stmts.getById.get(id);
+  }
+  function casJudgePending(id, pendingJson) {
+    return stmts.casJudgePending.run({ id, json: pendingJson }).changes > 0;
+  }
+  function finalizeJudge(id, finalJson) {
+    return stmts.finalizeJudge.run({ id, json: finalJson }).changes > 0;
+  }
+  function casJudgeExpiredToError(id, errorJson) {
+    return stmts.casJudgeExpiredToError.run({ id, json: errorJson }).changes > 0;
+  }
+
   // G2 §5k-1: record the deliverable-mode goal workspace path on the run.
   function setGoalWorkspacePath(id, workspacePath) {
     getRun(id);
@@ -1617,6 +1650,7 @@ function createRunService(db, eventBus) {
     listRuns, getRun, createRun,
     updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture, setGoalActive, setGoalWorkspacePath,
     updateGoalAcceptance, setDeliverableState,
+    setGoalJudgeActive, casJudgePending, finalizeJudge, casJudgeExpiredToError,
     persistGoalVerdictTx,
     listPendingGoalEffects, markGoalEffectSent, listRunIdsWithPendingGoalEffects,
     listUnverdictedTerminalGoalRunIds, listVerdictedTerminalGoalRunIds,

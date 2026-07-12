@@ -261,3 +261,40 @@ test('settle no-ops for a non-goal run and a non-terminal goal run', async (t) =
   assert.equal(h.svc.settle(g.run.id).settled, false, 'non-terminal goal run ignored');
   assert.equal(goalChannels(h.emits).length, 0, 'no goal effects for ignored runs');
 });
+
+// --- G3c §5k-4: settle honors the Gate 1.5 judge (goal_judge_active runs) ---
+function setJudge(h, runId, judgeObj) {
+  h.db.prepare('UPDATE runs SET goal_judge_active = 1, judge_json = ? WHERE id = ?').run(judgeObj ? JSON.stringify(judgeObj) : null, runId);
+}
+
+test('G3c: judge FAIL (finalized) + Gate 1 pass → retry(judge_fail); judge PASS → gate2', async (t) => {
+  const h = await harness(t);
+  const fail = makeGoalRun(h, { status: 'completed', acceptance: GATE_PASS, retryCount: 0, maxAttempts: 3 });
+  setJudge(h, fail.run.id, { status: 'fail', reasons: ['nope'], input_fp: 'abc' });
+  const r = h.svc.settle(fail.run.id);
+  assert.equal(r.verdict, 'retry');
+  assert.equal(h.rs.getRun(fail.run.id).goal_verdict_reason, 'judge_fail');
+
+  const pass = makeGoalRun(h, { status: 'completed', acceptance: GATE_PASS });
+  setJudge(h, pass.run.id, { status: 'pass', reasons: [] });
+  assert.equal(h.svc.settle(pass.run.id).verdict, 'gate2');
+});
+
+test('G3c: a judge still PENDING (unexpired) is NOT settled yet (in flight)', async (t) => {
+  const h = await harness(t);
+  const { run } = makeGoalRun(h, { status: 'completed', acceptance: GATE_PASS });
+  setJudge(h, run.id, { status: 'pending', deadline: new Date(Date.now() + 60000).toISOString() });
+  const r = h.svc.settle(run.id);
+  assert.equal(r.settled, false);
+  assert.equal(r.pendingJudge, true);
+  assert.equal(h.rs.getRun(run.id).goal_verdict, null, 'no verdict while the judge is in flight');
+});
+
+test('G3c: a PENDING judge past its deadline (crash) is expired → error → gate2 (fail-open), never re-invoked', async (t) => {
+  const h = await harness(t);
+  const { run } = makeGoalRun(h, { status: 'completed', acceptance: GATE_PASS });
+  setJudge(h, run.id, { status: 'pending', deadline: new Date(Date.now() - 1000).toISOString() });
+  assert.equal(h.svc.settle(run.id).verdict, 'gate2', 'expired judge fails open to gate2');
+  const j = JSON.parse(h.rs.getRun(run.id).judge_json);
+  assert.equal(j.status, 'error', 'the expired claim was CAS-flipped to error (no re-invoke)');
+});
