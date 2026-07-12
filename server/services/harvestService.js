@@ -308,6 +308,11 @@ function createHarvestService({
   goalJudgeService = null,
 } = {}) {
   const seenRunIds = new Set();
+  // G3b §5f: per-run single-flight for the remote deliverable harvest (pre-clear →
+  // bundle → acceptance → rmrf) so a primary harvest can't race the boot
+  // re-harvest for the same run. A Map<flightKey, gatePromise>: a contender awaits
+  // the winner's gate (single Node process → in-memory suffices).
+  const _deliverableInFlight = new Map();
 
   function isReviewTargetRun(run) {
     return Boolean(
@@ -669,10 +674,13 @@ function createHarvestService({
     if (run.status !== 'completed') return;
     const check = resolveGoalCheck(run);
     if (!check) return;
-    // G2b §5k-1: a remote workspace's machine check can't run with the local
-    // runner — record it skipped (runner_unavailable, provider:remote) so the
-    // verdict fail-opens to gate2 (semantic review), NOT a silent pass. The
-    // remote CHECK RUNNER is G3b. §5f: a skipped check → gate2, surfaced.
+    // A remote workspace's machine check can't run with the local runner — record
+    // it skipped (runner_unavailable, provider:remote) so the verdict fail-opens to
+    // gate2 (semantic review), NOT a silent pass. §5f: a skipped check → gate2.
+    // NOTE (G3b §5f Part A): a remote *deliverable* run no longer reaches this —
+    // it takes runRemoteDeliverableAcceptance (artifact evaluated on the clean
+    // local bundle). This branch now serves only the code-mode remote worktree
+    // path (line ~1261), whose remote runner stays out of G3b scope.
     if (!isLocalNodeRun(run)) {
       const acceptance = { check_id: check.id, name: check.name, kind: check.kind, gate: check.created_by === 'human', status: 'skipped', reason: 'runner_unavailable', passed: null, provider: 'remote' };
       try { runService.updateGoalAcceptance(run.id, acceptance); } catch { /* annotate-only */ }
@@ -942,58 +950,196 @@ function createHarvestService({
     return { allOk, copied };
   }
 
-  // G2b §5k-1: remote deliverable harvest. Mirrors the local order but via the
-  // node executor + transactional bundle. rmrf the remote workspace ONLY after a
-  // fully-verified bundle (else retain 'captured' for a boot re-harvest).
-  async function harvestDeliverableRunRemote(run, summary) {
-    summary.harvested = true;
-    const ws = run.goal_workspace_path;
-    const executor = executorFor(run);
-    let manifest = null;
-    try {
-      if (ws && executor && typeof executor.listFilesWithSizes === 'function') {
-        manifest = await enumerateDeliverableRemote(executor, ws);
-      }
-    } catch (err) { addError(run.id, 'deliverable_enumerate', err); pushSummaryError(summary, 'deliverable_enumerate'); }
-    if (manifest) {
-      addEvent(run.id, 'harvest:deliverable', { files: manifest.files.length, total_bytes: manifest.total_bytes, manifest_truncated: manifest.truncated, remote: true });
-      try { runService.setDeliverableState(run.id, 'captured'); } catch { /* annotate */ }
+  // G3b §5f: refuse a symlink ANYWHERE in the artifact dest chain (codex BLOCKER).
+  // lstat(dest) alone misses a symlinked ANCESTOR (runtime / goal-artifacts /
+  // <taskId>): the intermediates are followed, so rmSync/mkdir on `dest` could
+  // escape the fixed root. We lstat each component TOP-DOWN — each check's
+  // intermediates were already proven real by the prior checks (ensureRealDir
+  // pattern). Trusted single-process local FS → an lstat chain suffices (no
+  // adversarial TOCTOU in-model). Absent components (ENOENT) are fine.
+  function assertRealArtifactChain(cwd, taskSeg, runSeg) {
+    const chain = [
+      path.join(cwd, 'runtime'),
+      path.join(cwd, 'runtime', 'goal-artifacts'),
+      path.join(cwd, 'runtime', 'goal-artifacts', taskSeg),
+      path.join(cwd, 'runtime', 'goal-artifacts', taskSeg, runSeg),
+    ];
+    for (const p of chain) {
+      let st;
+      try { st = fs.lstatSync(p); } catch (e) { if (e && e.code === 'ENOENT') continue; throw e; }
+      if (st.isSymbolicLink()) throw new Error(`refusing symlinked artifact path component: ${p}`);
     }
+  }
 
-    // Gate 1 acceptance: remote machine check is skipped (runner_unavailable) → gate2.
-    await runGate1Acceptance(run, ws, summary, run.final_output);
+  // G3b §5f Part A: record the Gate 1 acceptance for a REMOTE deliverable run
+  // AFTER its bundle. The remote workspace has no local runner, so:
+  //   - COMMAND check → skipped('runner_unavailable') → gate2. Part B (a remote
+  //     command runner) is DEFERRED: an unsandboxed pod shell is a confidentiality
+  //     hole (codex BLOCKER) — that needs a real pod sandbox, not an opt-in flag.
+  //     Unchanged from G2b.
+  //   - ARTIFACT check → evaluated against the CLEAN LOCAL bundle (pure fs eval,
+  //     no shell; declarative + isWithinRoot inside evaluateArtifactCheck). A lossy
+  //     or failed bundle (`canEvaluate` false) is NOT soundly evaluable →
+  //     skipped('incomplete_bundle') → gate2 (fail-open, NEVER a silent pass over a
+  //     partial copy). Only a complete bundle is walked.
+  // Returns TRUE when it is safe to reclaim the remote workspace w.r.t. the gate:
+  // no check assigned, or the acceptance record was durably persisted. Returns
+  // FALSE if a check was assigned but its record failed to persist / the evaluator
+  // threw (codex BLOCKER: never rmrf without a durable Gate-1 record). never-throws.
+  async function runRemoteDeliverableAcceptance(run, localDest, canEvaluate, summary) {
+    if (run.status !== 'completed') return true;
+    const check = resolveGoalCheck(run);
+    if (!check) return true; // no assigned gate → verdict handles no-check; reclaim ok
+    const gate = check.created_by === 'human';
+    // record → returns whether the acceptance row was durably written.
+    const record = (acc) => {
+      let persisted = true;
+      try { runService.updateGoalAcceptance(run.id, acc); } catch { persisted = false; }
+      addEvent(run.id, 'harvest:acceptance', acc);
+      summary.acceptance = { passed: acc.passed, gate: acc.gate, kind: acc.kind, status: acc.status };
+      return persisted;
+    };
+    if (check.kind === 'command') {
+      return record({ check_id: check.id, name: check.name, kind: check.kind, gate, status: 'skipped', reason: 'runner_unavailable', passed: null, provider: 'remote' });
+    }
+    // artifact — a partial/failed bundle cannot be soundly judged → fail-open.
+    if (!canEvaluate || !localDest) {
+      return record({ check_id: check.id, name: check.name, kind: check.kind, gate, status: 'skipped', reason: 'incomplete_bundle', passed: null, provider: 'remote' });
+    }
+    try {
+      let report = run.final_output;
+      if (report == null) { try { report = runService.getRun(run.id)?.final_output || null; } catch { report = null; } }
+      // runCommand omitted on purpose: an artifact check is a pure fs eval and
+      // never invokes it (a command check took the branch above).
+      const acceptance = await runAcceptance({ check, workspaceDir: localDest, reportText: report, runCommand: null });
+      acceptance.provider = 'remote';
+      return record(acceptance);
+    } catch (err) {
+      addError(run.id, 'acceptance', err); pushSummaryError(summary, 'acceptance');
+      return false; // evaluator threw → no durable record → do NOT reclaim
+    }
+  }
 
-    if (manifest && ws && executor) {
+  // G2b §5k-1 + G3b §5f: remote deliverable harvest. Mirrors the local order but
+  // via the node executor + transactional bundle, then (G3b Part A) runs the
+  // ARTIFACT acceptance against the clean LOCAL bundle. rmrf the remote workspace
+  // ONLY when the local replica is COMPLETE (lossless) AND durable AND its Gate-1
+  // acceptance persisted — else retain 'captured'/'bundled' + the remote (nothing
+  // that lives only on the remote is ever discarded).
+  async function harvestDeliverableRunRemote(run, summary) {
+    // G3b §5f: per-run single-flight keyed on the SAME safe segments as `dest`
+    // (codex SERIOUS: keying raw run.id while dest uses a lossy safeSeg would let
+    // two distinct ids collide on one dest). A promise-GATE (not a fire-and-return
+    // flag): a concurrent contender AWAITS the winner so its caller can't emit
+    // run:harvested before the winner's acceptance is durable (codex SERIOUS).
+    // Single Node process → an in-memory gate is a sufficient mutex.
+    const safeSeg = (v, fb) => (String(v || '').replace(/[^a-zA-Z0-9_-]/g, '') || fb);
+    const taskSeg = safeSeg(run.task_id, 'none');
+    const runSeg = safeSeg(run.id, 'run');
+    // Injectivity guard (codex BLOCKER #6): both the flightKey and dest are derived
+    // from safeSeg, which is NON-injective — two distinct ids could sanitize to one
+    // segment and then collide on a single dest (one run pre-clears the other's sole
+    // bundle after its remote was already reclaimed). Real ids are always
+    // [A-Za-z0-9_-] (identity under safeSeg); anything else is anomalous → FAIL-CLOSED
+    // rather than risk a cross-run collision.
+    if (taskSeg !== String(run.task_id ?? '') || runSeg !== String(run.id ?? '')) {
+      summary.harvested = true;
+      addError(run.id, 'deliverable_unsafe_id', new Error('run/task id is not path-safe; refusing a collidable bundle dest'));
+      pushSummaryError(summary, 'deliverable_unsafe_id');
+      return;
+    }
+    const flightKey = `${taskSeg}/${runSeg}`;
+    const inflight = _deliverableInFlight.get(flightKey);
+    if (inflight) { summary.harvested = true; try { await inflight; } catch { /* gate never rejects */ } return; }
+    let releaseGate;
+    const gate = new Promise((resolve) => { releaseGate = resolve; });
+    _deliverableInFlight.set(flightKey, gate);
+    try {
+      summary.harvested = true;
+      const ws = run.goal_workspace_path;
+      const executor = executorFor(run);
+      let manifest = null;
       try {
-        const safeSeg = (v, fb) => (String(v || '').replace(/[^a-zA-Z0-9_-]/g, '') || fb);
-        const dest = path.resolve(process.cwd(), 'runtime', 'goal-artifacts', safeSeg(run.task_id, 'none'), safeSeg(run.id, 'run'));
-        fs.mkdirSync(dest, { recursive: true, mode: 0o700 });
-        const { allOk, copied } = await bundleDeliverableRemote(executor, manifest, ws, dest);
-        if (allOk) {
-          // Persist the manifest BEFORE marking bundled + reclaiming the workspace
-          // (codex SERIOUS): a swallowed setDeliverableJson failure must not delete
-          // the sole workspace with no persisted manifest — retain 'captured' then.
-          let manifestPersisted = true;
-          if (taskService && run.task_id) {
-            try { taskService.setDeliverableJson(run.task_id, JSON.stringify({ run_id: run.id, files: manifest.files, truncated: manifest.truncated, remote: true })); }
-            catch (err) { manifestPersisted = false; addError(run.id, 'deliverable_manifest_persist', err); }
-          }
-          if (!manifestPersisted) {
-            addEvent(run.id, 'goal:deliverable_bundle_deferred', { files: copied, remote: true, reason: 'manifest_persist_failed' });
-            pushSummaryError(summary, 'deliverable_bundle_deferred');
-          } else {
-            runService.setDeliverableState(run.id, 'bundled');
-            addEvent(run.id, 'harvest:deliverable_bundled', { dest: path.relative(process.cwd(), dest), files: copied, remote: true });
-            // Success path ONLY: reclaim the remote workspace now that both the
-            // bundle AND the manifest are durable.
-            try { await executor.rmrf(ws); } catch (err) { addError(run.id, 'deliverable_workspace_rmrf', err); pushSummaryError(summary, 'deliverable_workspace_rmrf'); }
-          }
-        } else {
-          // Retain 'captured' + do NOT rmrf → a boot re-harvest re-attempts.
-          addEvent(run.id, 'goal:deliverable_bundle_deferred', { files: copied, remote: true });
-          pushSummaryError(summary, 'deliverable_bundle_deferred');
+        if (ws && executor && typeof executor.listFilesWithSizes === 'function') {
+          manifest = await enumerateDeliverableRemote(executor, ws);
         }
-      } catch (err) { addError(run.id, 'deliverable_bundle', err); pushSummaryError(summary, 'deliverable_bundle'); }
+      } catch (err) { addError(run.id, 'deliverable_enumerate', err); pushSummaryError(summary, 'deliverable_enumerate'); }
+      if (manifest) {
+        addEvent(run.id, 'harvest:deliverable', { files: manifest.files.length, total_bytes: manifest.total_bytes, manifest_truncated: manifest.truncated, remote: true });
+        try { runService.setDeliverableState(run.id, 'captured'); } catch { /* annotate */ }
+      }
+
+      let bundledOk = false;   // local replica written + manifest + state all durable
+      let complete = false;    // lossless: every listed file fully captured
+      let dest = null;
+      if (manifest && ws && executor) {
+        try {
+          const cwd = process.cwd();
+          const artifactRoot = path.resolve(cwd, 'runtime', 'goal-artifacts');
+          dest = path.join(artifactRoot, taskSeg, runSeg);
+          // dest safety: string-within-root guard + refuse a symlink at ANY chain
+          // component (codex BLOCKER) so the pre-clear can never escape the root.
+          if (!isWithinRoot(artifactRoot, dest)) throw new Error('dest escapes artifact root');
+          assertRealArtifactChain(cwd, taskSeg, runSeg);
+          // Pre-clear a STALE partial bundle (codex R2): the dest is reused across
+          // attempts, so a prior failed attempt's files must not survive into a
+          // later "complete" re-harvest and be mis-evaluated. Bounded I/O: per-run
+          // dest, ≤20 files.
+          fs.rmSync(dest, { recursive: true, force: true });
+          fs.mkdirSync(dest, { recursive: true, mode: 0o700 });
+          const { allOk, copied } = await bundleDeliverableRemote(executor, manifest, ws, dest);
+          // "complete" = every listed file fully captured locally. A lossy bundle
+          // (oversize/budget skip, grew-past-cap truncation, or manifest.truncated)
+          // keeps some bytes ONLY on the remote → must NOT be reclaimed (codex SERIOUS).
+          complete = allOk && !manifest.truncated
+            && !(Array.isArray(manifest.files) && manifest.files.some((f) => f.skipped || f.truncated));
+          if (allOk) {
+            // Persist the manifest BEFORE marking bundled + reclaiming the workspace
+            // (codex SERIOUS): a swallowed setDeliverableJson failure must not delete
+            // the sole workspace with no persisted manifest — retain 'captured' then.
+            let manifestPersisted = true;
+            if (taskService && run.task_id) {
+              try { taskService.setDeliverableJson(run.task_id, JSON.stringify({ run_id: run.id, files: manifest.files, truncated: manifest.truncated, remote: true })); }
+              catch (err) { manifestPersisted = false; addError(run.id, 'deliverable_manifest_persist', err); }
+            }
+            if (!manifestPersisted) {
+              addEvent(run.id, 'goal:deliverable_bundle_deferred', { files: copied, remote: true, reason: 'manifest_persist_failed' });
+              pushSummaryError(summary, 'deliverable_bundle_deferred');
+            } else {
+              // setDeliverableState BEFORE flipping bundledOk (codex SERIOUS): if it
+              // throws we fall to catch with bundledOk=false → no rmrf, retain remote.
+              runService.setDeliverableState(run.id, 'bundled');
+              addEvent(run.id, 'harvest:deliverable_bundled', { dest: path.relative(cwd, dest), files: copied, remote: true, complete });
+              bundledOk = true;
+            }
+          } else {
+            // Retain 'captured' + do NOT rmrf → a boot re-harvest re-attempts.
+            addEvent(run.id, 'goal:deliverable_bundle_deferred', { files: copied, remote: true });
+            pushSummaryError(summary, 'deliverable_bundle_deferred');
+          }
+        } catch (err) { addError(run.id, 'deliverable_bundle', err); pushSummaryError(summary, 'deliverable_bundle'); }
+      }
+
+      // G3b §5f Part A: Gate 1 acceptance AFTER the bundle. Artifact evaluates the
+      // clean local bundle ONLY when it is complete + durable; a lossy/failed bundle
+      // → skipped('incomplete_bundle'). Command → skipped (Part B deferred).
+      // Persisted BEFORE rmrf + run:harvested. Returns whether the gate record is durable.
+      const canEvaluate = bundledOk && complete;
+      const acceptanceDurable = await runRemoteDeliverableAcceptance(run, dest, canEvaluate, summary);
+
+      // Reclaim the remote workspace ONLY on a COMPLETE + durable local replica
+      // whose acceptance persisted (codex BLOCKER/SERIOUS): a lossy bundle, a
+      // manifest/state failure, or a lost acceptance all retain the remote so
+      // nothing that lives only there is ever discarded.
+      if (bundledOk && complete && acceptanceDurable && ws && executor) {
+        try { await executor.rmrf(ws); } catch (err) { addError(run.id, 'deliverable_workspace_rmrf', err); pushSummaryError(summary, 'deliverable_workspace_rmrf'); }
+      } else if (bundledOk && !complete) {
+        // A lossy-but-bundled run keeps its full output on the remote for inspection.
+        addEvent(run.id, 'goal:deliverable_remote_retained', { reason: 'incomplete_bundle', remote: true });
+      }
+    } finally {
+      _deliverableInFlight.delete(flightKey);
+      releaseGate();
     }
   }
 
