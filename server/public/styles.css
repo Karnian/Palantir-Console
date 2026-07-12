@@ -1623,7 +1623,7 @@ body {
   border-radius: var(--radius-pill);
   border: 1px solid var(--warning-border-subtle);
   background: var(--warning-bg-subtle);
-  color: var(--status-needs-input);
+  color: var(--warning-badge-fg);
   font-size: 11px;
   text-decoration: none;
 }
