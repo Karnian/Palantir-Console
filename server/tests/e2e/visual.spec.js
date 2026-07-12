@@ -238,3 +238,37 @@ for (const modal of MODALS) {
     });
   }
 }
+
+// K-5-followup: the drawer is data-gated, so open it via a mocked drift API;
+// `.drift-row-time` is the only dynamic surface and is masked.
+const DRIFT_FIXTURE = { audit: [{
+  id: 'drift-fixture-1',
+  incoherence_kind: 'pm_hallucination',
+  project_id: 'proj-fixture',
+  created_at: '2026-01-01T00:00:00.000Z',
+  pm_claim: JSON.stringify({ status: 'completed' }),
+  db_truth: JSON.stringify({ status: 'running' }),
+  pm_run_id: 'run-fixture-1',
+  rationale: 'Operator claimed the task was done but the run is still active.',
+}] };
+
+for (const theme of THEMES) {
+  test(`@visual drawer: drift [${theme}]`, async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.route('**/api/dispatch-audit*', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(DRIFT_FIXTURE) }));
+    await setTheme(page, theme);
+    await page.goto('/#dashboard');
+    await page.waitForSelector('[data-view="dashboard"]', { timeout: 10000 });
+    await stabilize(page);
+    await page.getByRole('button', { name: /드리프트 경고/ }).click();
+
+    const drawer = page.locator('.drift-drawer');
+    await expect(drawer).toBeVisible();
+    await expect(drawer).toHaveScreenshot(`drawer-drift-${theme}.png`, {
+      maxDiffPixels: 100,
+      threshold: 0.2,
+      mask: [drawer.locator('.drift-row-time')],
+    });
+  });
+}

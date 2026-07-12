@@ -119,7 +119,7 @@ K-4 와 동일: 8 hash routes × 2 themes (dark/light) × 2 viewports (1280×800
 
 §2 L6 + 다음:
 1. **CI workflow** (GitHub Actions matrix) — 별도 phase. multi-OS 시 baseline 갱신 룰도 같이.
-2. ~~**모달 / 드로어 / 오버레이 시각 검증**~~ — **부분완료 (2026-07-13, #369)**: 결정적으로 열 수 있는 두 모달(Command Palette=`Ctrl+K`, New Agent modal=`#agents` "새 에이전트" 버튼) 의 열린 상태를 dark/light × desktop 4 시나리오로 캡처. **element-scoped 다이얼로그 스크린샷**(배경/route 커플링 회피) + `toBeVisible()` 계약(열기 실패 시 loud fail). 드로어(DriftDrawer 등, 데이터 필요) + 나머지 모달은 후속. codex-goal 위임 구현 + 호스트 외부검증(결정성 2회 + baseline 육안 + Themis PASS).
+2. ~~**모달 / 드로어 / 오버레이 시각 검증**~~ — **부분완료**: **모달 (#369)** = 두 모달(Command Palette=`Ctrl+K`, New Agent modal=`#agents` "새 에이전트" 버튼) 열린 상태 dark/light × desktop 4 시나리오. **드로어 (#370)** = **DriftDrawer** 열린 상태 dark/light 2 시나리오. 드로어는 **data-gated**(트리거가 drift 있을 때만 노출)+fresh empty DB 라 `page.route('**/api/dispatch-audit*')` 로 drift API 를 **고정 fixture 로 mock**→트리거(`드리프트 경고` 칩) 노출→열기. **element-scoped `.drift-drawer` 스크린샷** + 유일 동적 필드 `.drift-row-time`(상대시각) **mask**. 공통: `toBeVisible()` 계약(열기 실패 loud fail). RunInspector·나머지 모달은 후속. 둘 다 codex-goal 위임 구현 + 호스트 외부검증(결정성 2회 + baseline 육안 + Themis PASS).
 3. ~~**interactive state** (hover / focus / pressed)~~ — **부분 완료 (2026-07-13, #368)**: NavSidebar hover(nav-item 툴팁) + keyboard-focus(skip-to-content 링크) 4 시나리오 추가(desktop×2 themes). element-bbox 스냅샷은 out-of-bbox 어포던스(툴팁 `left:100%+8px`·focus ring)를 잘라내므로 **고정 sidebar CLIP 영역** 사용, `.focus()` 는 Chromium `:focus-visible` 미매칭이라 **keyboard Tab** 으로 트리거. `pressed`(active) 는 미보류(전이적·비결정적 캡처 난이도) — 후속.
 4. **performance regression** (LCP, CLS) — 별도 phase
 
