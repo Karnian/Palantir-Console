@@ -6,8 +6,11 @@
 // 375×667 mobile) = 56 scenarios. Tagged @a11y so `npm run test:a11y` can grep.
 //
 // Gate policy (L3):
-//   - critical / serious axe violation → fail
-//   - moderate / minor → report-only (logged, no assert)
+//   - critical / serious / moderate axe violation → fail
+//     (moderate promoted from report-only 2026-07-13, user lock-in — the K-4
+//      baseline reached zero moderate violations so the gate tightened with no
+//      fix debt; future moderate regressions now fail fix-or-waive)
+//   - minor → report-only (logged, no assert)
 //
 // Waiver policy (L4/L5 r2 transitional baseline):
 //   - file: server/tests/e2e/a11y-waivers.json (single file)
@@ -57,7 +60,12 @@ const VIEWPORTS = [
 ];
 
 const WCAG_TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'];
-const FAIL_IMPACTS = new Set(['critical', 'serious']);
+// K-4-followup (2026-07-13): moderate promoted from report-only to a hard gate
+// (user lock-in). The K-4 baseline reached zero moderate violations across all
+// 56 scenarios, so this tightens the gate with no fix debt; future moderate
+// regressions now fail (fix-or-waive) instead of only logging. Only `minor`
+// stays report-only. Brief: docs/specs/k4-wcag-a11y-automation-brief.md §L3.
+const FAIL_IMPACTS = new Set(['critical', 'serious', 'moderate']);
 const WAIVERS_PATH = path.join(__dirname, 'a11y-waivers.json');
 
 // L1 scan context: each route exposes [data-view="<key>"] root, so axe
@@ -257,7 +265,7 @@ for (const route of ROUTES) {
 
         const ctx = { route, theme, viewport: vp.name };
         const blocking = [];
-        const moderate = [];
+        const reportOnly = [];
 
         for (const violation of results.violations) {
           for (const node of violation.nodes) {
@@ -278,9 +286,9 @@ for (const route of ROUTES) {
               failureSummary: node.failureSummary || violation.help || '',
             };
             if (FAIL_IMPACTS.has(impact)) {
-              blocking.push(entry);
-            } else if (impact === 'moderate') {
-              moderate.push(entry);
+              blocking.push(entry); // critical / serious / moderate → gate
+            } else {
+              reportOnly.push(entry); // minor → logged, non-blocking
             }
           }
         }
@@ -299,14 +307,14 @@ for (const route of ROUTES) {
           );
         }
 
-        // moderate / minor → report-only summary line (separate section so
-        // it doesn't drown the gate output).
-        if (moderate.length > 0) {
+        // minor → report-only summary line (separate section so it doesn't
+        // drown the gate output). moderate is now a blocking impact (above).
+        if (reportOnly.length > 0) {
           // eslint-disable-next-line no-console
           console.log(
             `[a11y report-only] ${route} [${theme}/${vp.name}] — ` +
-            `${moderate.length} moderate violation(s): ` +
-            moderate.map(m => `${m.ruleId}@${m.selector}`).join(', ')
+            `${reportOnly.length} minor violation(s): ` +
+            reportOnly.map(m => `${m.ruleId}@${m.selector}`).join(', ')
           );
         }
       });
