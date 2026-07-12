@@ -391,6 +391,25 @@ function QueueReasonChip({ reason }) {
   return html`<span class="task-badge queue-reason" data-role="queue-reason-chip" title=${label}>${label}</span>`;
 }
 
+// G4c §5h: goal verdict / Gate 1 badge colors — design tokens only (no inline hex).
+const GOAL_VERDICT_META = {
+  gate2: { label: '리뷰 대기', color: 'var(--accent)' },
+  retry: { label: '재시도', color: 'var(--text-muted)' },
+  exhausted: { label: '예산 소진', color: 'var(--warning)' },
+  error: { label: '오류', color: 'var(--danger)' },
+};
+function goalGate1(acc) {
+  if (!acc) return { label: '검증 미정의', color: 'var(--text-muted)' };
+  if (acc.status === 'skipped') return { label: `SKIPPED(${acc.reason || 'runner_unavailable'})`, color: 'var(--warning)' };
+  if (acc.passed === true) return { label: 'Gate1 PASS', color: 'var(--success)' };
+  if (acc.passed === false) return { label: 'Gate1 FAIL', color: 'var(--danger)' };
+  return { label: 'Gate1 RAN', color: 'var(--text-muted)' };
+}
+function GoalBadge({ label, color, ariaLabel }) {
+  return html`<span class="task-badge" aria-label=${ariaLabel || label}
+    style="border-color:${color};color:${color};">${label}</span>`;
+}
+
 export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenRun, onExecute, reloadTasks }) {
   const [title, setTitle] = useState(task?.title || '');
   const [description, setDescription] = useState(task?.description || '');
@@ -440,6 +459,27 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
     })();
     return () => { cancelled = true; };
   }, [task?.id]);
+
+  // G4c §5h: goal detail aggregate (criteria / verify_check / attempt timeline /
+  // Gate 1 / delivery). Read-only; fetched only for goal tasks.
+  const [goalDetail, setGoalDetail] = useState(null);
+  const [redelivering, setRedelivering] = useState(false);
+  // Stale fence: a ref that always tracks the CURRENTLY-rendered task id, so a
+  // late fetch resolution for a task we've navigated away from is discarded
+  // (comparing against the closure's `task` would falsely match — codex BLOCKER).
+  const currentTaskIdRef = useRef(task?.id);
+  currentTaskIdRef.current = task?.id;
+  const redeliverInFlightRef = useRef(false); // synchronous double-click guard
+  const loadGoalDetail = async (id) => {
+    try {
+      const data = await apiFetch(`/api/tasks/${id}/goal`);
+      if (id === currentTaskIdRef.current) setGoalDetail((data && data.goal) || null);
+    } catch { if (id === currentTaskIdRef.current) setGoalDetail(null); }
+  };
+  useEffect(() => {
+    if (!task?.id || !task.goal_enabled) { setGoalDetail(null); return; }
+    loadGoalDetail(task.id);
+  }, [task?.id, task?.updated_at, task?.goal_enabled]);
 
   if (!task) return null;
 
@@ -814,6 +854,87 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
               </div>
             `;
           })()}
+
+          ${task.goal_enabled && goalDetail && goalDetail.goal_enabled && html`
+            <div class="task-detail-goal" data-role="goal-section">
+              <div class="task-detail-section-title">Goal 위임</div>
+              ${goalDetail.acceptance_criteria && html`
+                <div class="task-detail-goal-criteria">
+                  <span class="task-detail-meta-label">수락 기준</span>
+                  <div style="white-space:pre-wrap;color:var(--text-secondary);font-size:12px;">${goalDetail.acceptance_criteria}</div>
+                </div>
+              `}
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0;">
+                <span class="task-detail-meta-label">검증 check</span>
+                ${goalDetail.verify_check
+                  ? html`<${GoalBadge} label=${`${goalDetail.verify_check.name} · ${goalDetail.verify_check.created_by === 'human' ? 'gate' : 'advisory'}`}
+                      color=${goalDetail.verify_check.created_by === 'human' ? 'var(--accent)' : 'var(--text-muted)'} />`
+                  : html`<span style="color:var(--text-muted);font-size:12px;">미할당 (의미 판단만)</span>`}
+              </div>
+
+              <div class="task-detail-goal-attempts">
+                <span class="task-detail-meta-label">시도 (${goalDetail.attempts.length}/${goalDetail.goal_max_attempts || '?'})</span>
+                ${goalDetail.attempts.map(a => html`
+                  <div key=${a.run_id} class="task-detail-run-item" style="align-items:flex-start;"
+                    onClick=${() => { const r = taskRuns.find(x => x.id === a.run_id); if (r) { onOpenRun(r); onClose(); } }}>
+                    <span style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;">
+                      <span style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                        <span style="color:var(--text-primary);font-size:12px;">시도 ${a.attempt}</span>
+                        ${a.verdict && GOAL_VERDICT_META[a.verdict] && html`<${GoalBadge}
+                          label=${GOAL_VERDICT_META[a.verdict].label} color=${GOAL_VERDICT_META[a.verdict].color}
+                          ariaLabel=${`판정 ${GOAL_VERDICT_META[a.verdict].label}`} />`}
+                        ${(() => { const g = goalGate1(a.acceptance); return html`<${GoalBadge} label=${g.label} color=${g.color} />`; })()}
+                      </span>
+                      ${a.goal_report && a.goal_report.summary && html`
+                        <span style="color:var(--text-muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${a.goal_report.summary}</span>`}
+                    </span>
+                  </div>
+                `)}
+              </div>
+
+              ${(() => {
+                const d = goalDetail.delivery;
+                if (!d) {
+                  const tip = goalDetail.attempts[goalDetail.attempts.length - 1];
+                  const eligible = tip && tip.verdict === 'gate2' && task.status === 'done';
+                  return html`<div style="margin-top:6px;color:var(--text-muted);font-size:12px;">전달: 미전달${eligible ? ' (전달 대기)' : ''}</div>`;
+                }
+                const mismatch = d.run_id && goalDetail.tip_run_id && d.run_id !== goalDetail.tip_run_id;
+                return html`
+                  <div class="task-detail-goal-delivery" style="margin-top:6px;">
+                    <span class="task-detail-meta-label">전달</span>
+                    ${d.state === 'delivered' ? html`
+                      <div style="color:var(--success);font-size:12px;">
+                        ${d.mode === 'branch'
+                          ? html`브랜치 <code>${d.branch}</code>${d.stat ? html` · ${d.stat.split('\n').pop()}` : ''}`
+                          : html`번들 ${d.bundle ? `${d.bundle.files} 파일${d.bundle.truncated ? ' (일부)' : ''}` : ''}`}
+                        ${mismatch && html`<span style="color:var(--warning);margin-left:6px;">(최신 시도 아님)</span>`}
+                      </div>
+                    ` : d.state === 'failed' ? html`
+                      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                        <span style="color:var(--danger);font-size:12px;">전달 실패: ${d.reason || 'unknown'}</span>
+                        <button class="ghost" style="font-size:11px;padding:2px 8px;" disabled=${redelivering}
+                          onClick=${async () => {
+                            if (redeliverInFlightRef.current) return; // synchronous double-click guard
+                            redeliverInFlightRef.current = true;
+                            setRedelivering(true);
+                            try { await apiFetch(`/api/tasks/${task.id}/goal/deliver`, { method: 'POST' }); }
+                            catch { addToast('재전달 요청 실패', 'error'); }
+                            finally {
+                              await loadGoalDetail(task.id); // always refresh (success or fail)
+                              redeliverInFlightRef.current = false;
+                              setRedelivering(false);
+                            }
+                          }}>${redelivering ? '재전달 중…' : '재전달'}</button>
+                      </div>
+                    ` : html`
+                      <span style="color:var(--text-muted);font-size:12px;">전달 중…</span>
+                    `}
+                  </div>
+                `;
+              })()}
+            </div>
+          `}
         </div>
 
         <div class="modal-footer" style="justify-content:space-between;">

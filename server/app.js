@@ -1420,7 +1420,7 @@ function createApp(options = {}) {
   app.use('/api/nodes', createNodesRouter({ nodeService, nodeUsageService, nodeSummaryService, lifecycleService }));
   app.use('/api/projects', createMemoryRouter({ memoryService, projectService })); // ML PR1: GET /:projectId/memory
   app.use('/api/master-memory', createMasterMemoryRouter({ masterMemoryService })); // L2 P1b: GET / + POST /remember
-  app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService, goalDeliveryService }));
+  app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService, goalDeliveryService, runService, verifyCheckService }));
   app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService, nodeExecutor }));
   // PR18: tests can pass options.authResolverOpts (e.g. a fake `hasKeychain`)
   // so /api/agents and /api/manager preflights are deterministic across CI
