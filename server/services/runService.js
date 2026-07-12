@@ -569,6 +569,19 @@ function createRunService(db, eventBus) {
     getGoalRetryParent: db.prepare(
       'SELECT id, status, goal_verdict, goal_verdict_reason, acceptance_json, result_summary FROM runs WHERE goal_retry_run_id = ? LIMIT 1'
     ),
+    // G4a: goal runs with a reviewable verdict (gate2/exhausted/error) that have
+    // NOT yet had their Gate 2 review delivered (no goal:gate2_review_sent marker).
+    // The Gate 2 review sweep re-drives these until the durable marker exists
+    // (at-least-once). retry is NOT reviewable (a child is retrying).
+    listReviewableGoalRunsWithoutReview: db.prepare(`
+      SELECT r.id FROM runs r
+       WHERE r.goal_active = 1 AND r.is_manager = 0
+         AND r.goal_verdict IN ('gate2', 'exhausted', 'error')
+         AND NOT EXISTS (
+           SELECT 1 FROM run_events e
+            WHERE e.run_id = r.id AND e.event_type = 'goal:gate2_review_sent'
+         )
+    `),
     delete: db.prepare('DELETE FROM runs WHERE id = ?'),
     // Events
     insertEvent: db.prepare(`
@@ -1422,6 +1435,10 @@ function createRunService(db, eventBus) {
   function getGoalRetryParent(runId) {
     return stmts.getGoalRetryParent.get(runId) || null;
   }
+  // G4a: run ids of reviewable goal runs whose Gate 2 review hasn't been delivered.
+  function listReviewableGoalRunsWithoutReview() {
+    return stmts.listReviewableGoalRunsWithoutReview.all().map((r) => r.id);
+  }
 
   function deleteRun(id) {
     getRun(id);
@@ -1571,6 +1588,7 @@ function createRunService(db, eventBus) {
     listPendingGoalEffects, markGoalEffectSent, listRunIdsWithPendingGoalEffects,
     listUnverdictedTerminalGoalRunIds, listVerdictedTerminalGoalRunIds,
     getGoalRetryParentFingerprint, getGoalRetryParent,
+    listReviewableGoalRunsWithoutReview,
     countRunning, countRunningOnNode, countRunningTotalOnNode,
     getOldestQueued, getOldestQueuedOnNode, getOldestQueuedReadyOnNode,
     getOldestMaterializableOnNode,

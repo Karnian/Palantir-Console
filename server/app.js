@@ -149,15 +149,14 @@ function formatHarvestSummary(harvestSummary) {
     lines.push(`  [harvest] test: ${testStatus} (exit ${exitCode}, ${duration})`);
   }
   // G2 §5f/§5h: surface the Gate 1 acceptance result. gate vs advisory reflects
-  // the check's provenance (§5k-3). NOTE the caveat: G2 acceptance is observational
-  // — it does NOT yet drive task transition (the verdict loop lands in G3).
+  // the check's provenance (§5k-3). Since G3, the verdict (from acceptance) drives
+  // the task transition; a goal run's full Gate 2 block is buildGoalReviewText.
   const acc = harvestSummary.acceptance;
   if (acc) {
     const accStatus = acc.status === 'skipped'
       ? `SKIPPED (${acc.reason || 'runner_unavailable'})`
       : (acc.passed === true ? 'PASS' : acc.passed === false ? 'FAIL' : 'RAN');
     lines.push(`  [gate1] acceptance: ${accStatus} — ${acc.kind || '?'} check (${acc.gate ? 'gate' : 'advisory'})`);
-    lines.push('  [gate1] note: Gate 1 은 아직 task 전이를 강제하지 않습니다 (G3 예정) — 최종 판단은 리뷰어.');
   }
   if (harvestSummary.statText) {
     lines.push('  [harvest] stat:');
@@ -201,11 +200,73 @@ function buildPmReviewText({ run, harvestSummary, count, autoReviewMax = AUTO_RE
   ].filter(Boolean).join('\n');
 }
 
+// G4a §5h: the structured Gate 2 review block for a goal run. Built from the
+// PERSISTED run state (verdict/reason/acceptance/goal_report) re-read AFTER the
+// verdict settled, plus the task's acceptance_criteria + budget. Surfaces the
+// verdict, attempt n/max, Gate 1 acceptance (PASS/FAIL/SKIPPED/NOT DEFINED), the
+// worker report, and verdict-specific guidance (exhausted → escalation).
+const GOAL_REVIEWABLE_VERDICTS = new Set(['gate2', 'exhausted', 'error']);
+
+function buildGoalReviewText({ run, task }) {
+  const verdict = run.goal_verdict || 'gate2';
+  const attempt = Number(run.retry_count || 0) + 1;
+  const max = Number(task && task.goal_max_attempts) || attempt;
+  const lines = [
+    '[system: goal 태스크 Gate 2 리뷰 필요]',
+    `Goal worker run ${run.id} — task ${run.task_id}`,
+    `  verdict: ${verdict.toUpperCase()}${run.goal_verdict_reason ? ` (${run.goal_verdict_reason})` : ''}`,
+    `  attempt: ${attempt}/${max}`,
+  ];
+
+  let acc = null;
+  try { acc = run.acceptance_json ? JSON.parse(run.acceptance_json) : null; } catch { acc = null; }
+  if (acc && typeof acc === 'object') {
+    const accStatus = acc.status === 'skipped'
+      ? `SKIPPED (${acc.reason || 'runner_unavailable'})`
+      : (acc.passed === true ? 'PASS' : acc.passed === false ? 'FAIL' : 'RAN');
+    lines.push(`  gate1 acceptance: ${accStatus} — ${acc.kind || '?'} check [${acc.name || 'unnamed'}] (${acc.gate ? 'gate' : 'advisory'})`);
+    if (acc.passed === false && acc.output_tail) {
+      lines.push('  gate1 output:');
+      lines.push(indentBlock(acc.output_tail));
+    }
+  } else {
+    lines.push('  gate1 acceptance: NOT DEFINED (검증 check 미할당 — 의미 판단만)');
+  }
+
+  if (task && task.acceptance_criteria) {
+    lines.push('  acceptance criteria:');
+    lines.push(indentBlock(task.acceptance_criteria));
+  }
+
+  let report = null;
+  try { report = run.goal_report ? JSON.parse(run.goal_report) : null; } catch { report = null; }
+  if (report && typeof report === 'object') {
+    if (report.summary) { lines.push('  worker report:'); lines.push(indentBlock(String(report.summary))); }
+    if (Array.isArray(report.blockers) && report.blockers.length) {
+      lines.push(`  worker blockers: ${report.blockers.slice(0, 5).map((b) => String(b)).join('; ')}`);
+    }
+  }
+
+  lines.push('');
+  if (verdict === 'exhausted') {
+    lines.push(`예산 소진 (${attempt}/${max} attempts) — 자율 반복이 검증을 통과하지 못했습니다. 사용자 에스컬레이션을 권고합니다.`);
+    lines.push('진단 후: 기준/검증을 조정해 재위임하거나 사용자에게 에스컬레이션하세요.');
+  } else if (verdict === 'error') {
+    lines.push(`verdict=error (${run.goal_verdict_reason || 'internal'}) — 인프라/소스 이상으로 재시도하지 않았습니다. 원인을 진단하세요 (자동 재시도 아님).`);
+  } else {
+    lines.push('Gate 1 (기계 검증) 통과 또는 미해당 — 이제 의미 판단(Gate 2)이 필요합니다.');
+    lines.push('- 목표/기준을 충족하면 task 상태를 "done" 으로 전환하세요 (→ 산출물 전달).');
+    lines.push('- 부족하면 corrective 지시로 새 워커를 /execute 하세요 (goal 루프가 다음 attempt 를 돕니다).');
+  }
+  return lines.filter((l) => l !== undefined && l !== null).join('\n');
+}
+
 function createPmAutoReview({
   eventBus,
   managerRegistry,
   conversationService,
   runService,
+  taskService = null,
   autoReviewMax = AUTO_REVIEW_MAX,
   defer = setImmediate,
   logger = console,
@@ -330,8 +391,88 @@ function createPmAutoReview({
     }
   }
 
+  // Core review dispatch: reserve the per-task circuit breaker synchronously (so
+  // two events for the same task can't both slip past it), then defer the send.
+  // buildText(count) produces the message. onSent() runs after a SUCCESSFUL send
+  // (e.g. write a durable marker); onSettled() runs in the defer finally on BOTH
+  // paths (e.g. release an in-flight claim). Returns 'dispatched' | 'no_manager'
+  // | 'breaker_max'. On failure the breaker reservation is rolled back.
+  function dispatchReview({ run, receiver, buildText, onSent = null, onSettled = null }) {
+    const pmRunId = managerRegistry.getActiveRunId(receiver.slotKey);
+    if (!pmRunId) return 'no_manager';
+
+    const countKey = receiver.countKey;
+    const count = autoReviewCounts.get(countKey) || 0;
+    if (count >= autoReviewMax) {
+      logger.warn(`[pm-auto-review] Circuit breaker: ${countKey} hit ${autoReviewMax} reviews; skipping. User intervention needed.`);
+      return 'breaker_max';
+    }
+
+    // Roll back the reservation: decrement (not set-to-count) so a concurrent
+    // reservation isn't clobbered; delete at zero to restore the pristine state.
+    // A rolled-back reservation means a later re-drive never wedges the breaker.
+    const rollbackBreaker = () => {
+      const next = Math.max(0, (autoReviewCounts.get(countKey) || 1) - 1);
+      if (next === 0) { autoReviewCounts.delete(countKey); autoReviewCountSlots.delete(countKey); }
+      else autoReviewCounts.set(countKey, next);
+    };
+
+    autoReviewCounts.set(countKey, count + 1);
+    autoReviewCountSlots.set(countKey, receiver.slotKey);
+
+    // codex BLOCKER-1: build the text AFTER reserving but roll the reservation
+    // back if construction throws (malformed acceptance/report), else each
+    // re-drive re-reserves toward breaker_max and permanently suppresses review.
+    let reviewText;
+    try {
+      reviewText = buildText(count);
+    } catch (err) {
+      rollbackBreaker();
+      try { logger.warn(`[pm-auto-review] Review text build failed for ${receiver.slotKey}: ${err.message}`); } catch { /* logger must not break */ }
+      return 'build_failed';
+    }
+
+    // codex R2: guard the defer SCHEDULING itself — if an injected defer throws
+    // synchronously after the reservation, roll it back (else re-drives accumulate
+    // toward breaker_max). The caller's finally releases the claim (result !==
+    // 'dispatched'), so nothing leaks.
+    try {
+      defer(() => {
+        // codex BLOCKER-2: onSettled (the in-flight claim release) MUST run on every
+        // path — a throwing injected logger inside the catch must not skip it. So the
+        // whole body is in try/finally and every external call is individually guarded.
+        try {
+          let sent = false;
+          try {
+            conversationService.sendMessage(receiver.slotKey, {
+              text: reviewText,
+              codebaseProjectId: run.project_id || null,
+              source: 'auto_review', // F-1: batch review turn → codex standard tier (never 2.5×)
+            });
+            sent = true;
+          } catch (err) {
+            rollbackBreaker();
+            try { logger.warn(`[pm-auto-review] Failed to send review to ${receiver.slotKey}: ${err.message}`); } catch { /* logger must not break */ }
+          }
+          if (sent && onSent) { try { onSent(); } catch { /* marker best-effort */ } }
+        } finally {
+          if (onSettled) { try { onSettled(); } catch { /* release best-effort */ } }
+        }
+      });
+    } catch (err) {
+      rollbackBreaker();
+      try { logger.warn(`[pm-auto-review] Review defer scheduling failed for ${receiver.slotKey}: ${err.message}`); } catch { /* logger must not break */ }
+      return 'defer_failed';
+    }
+    return 'dispatched';
+  }
+
   function sendPmReview({ run, harvestSummary }) {
     if (!run || run.is_manager) return false;
+    // G4a: goal-active runs review on their VERDICT (gate2/exhausted/error), NOT
+    // on raw harvest — a 'retry' verdict must not trigger an Operator review.
+    // dispatchGate2Review owns that path.
+    if (run.goal_active) return false;
     const projectId = run.project_id;
     if (!projectId) return false;
     const receiver = resolveReviewReceiver(run);
@@ -352,46 +493,81 @@ function createPmAutoReview({
       return false;
     }
 
-    const pmRunId = managerRegistry.getActiveRunId(receiver.slotKey);
-    if (!pmRunId) return false;
-
-    const countKey = receiver.countKey;
-    const count = autoReviewCounts.get(countKey) || 0;
-    if (count >= autoReviewMax) {
-      logger.warn(`[pm-auto-review] Circuit breaker: ${countKey} hit ${autoReviewMax} reviews; skipping. User intervention needed.`);
-      return false;
-    }
-
-    // Reserve the slot synchronously (before the deferred send) so two
-    // run:harvested events for the same task can't both read a stale count
-    // and slip past the breaker. Roll back if the send actually fails.
-    autoReviewCounts.set(countKey, count + 1);
-    autoReviewCountSlots.set(countKey, receiver.slotKey);
-
-    const reviewText = buildPmReviewText({
+    const result = dispatchReview({
       run,
-      harvestSummary,
-      count,
-      autoReviewMax,
+      receiver,
+      buildText: (count) => buildPmReviewText({ run, harvestSummary, count, autoReviewMax }),
     });
+    return result === 'dispatched';
+  }
 
-    defer(() => {
-      try {
-        conversationService.sendMessage(receiver.slotKey, {
-          text: reviewText,
-          codebaseProjectId: run.project_id || null,
-          source: 'auto_review', // F-1: batch review turn → codex standard tier (never 2.5×)
-        });
-      } catch (err) {
-        // Decrement (not set-to-count) so a concurrent reservation isn't clobbered;
-        // delete at zero so the key returns to its pristine (absent) state.
-        const next = Math.max(0, (autoReviewCounts.get(countKey) || 1) - 1);
-        if (next === 0) { autoReviewCounts.delete(countKey); autoReviewCountSlots.delete(countKey); }
-        else autoReviewCounts.set(countKey, next);
-        logger.warn(`[pm-auto-review] Failed to send review to ${receiver.slotKey}: ${err.message}`);
-      }
-    });
-    return true;
+  // G4a §5h: durable, at-least-once Gate 2 review for a goal run. Guards:
+  //   1. a durable `goal:gate2_review_sent` run-event marker → already reviewed;
+  //   2. an in-memory `_reviewInFlight` claim (synchronous check-add BEFORE any
+  //      defer) → closes the in-process double-dispatch race between the
+  //      goal:verdict subscriber and reviewSweep (single Node process, so no
+  //      cross-process lease is needed).
+  // The marker is written ONLY after a successful send; the claim is released in
+  // a finally on every path. A review lost to a crash (no marker) is re-driven by
+  // the periodic reviewSweep — at-least-once, never permanently lost.
+  const _reviewInFlight = new Set();
+
+  function hasGate2ReviewMarker(runId) {
+    try {
+      return (runService.getRunEvents(runId) || []).some((e) => e.event_type === 'goal:gate2_review_sent');
+    } catch { return false; }
+  }
+
+  function dispatchGate2Review(runId) {
+    let run = null;
+    try { run = runService.getRun(runId); } catch { return false; }
+    if (!run || run.is_manager || !run.goal_active || !run.task_id || !run.project_id) return false;
+    if (!GOAL_REVIEWABLE_VERDICTS.has(run.goal_verdict)) return false; // retry → no review
+    if (_reviewInFlight.has(run.id)) return false;      // in-process claim held
+    if (hasGate2ReviewMarker(run.id)) return false;     // durable: already reviewed
+    const receiver = resolveReviewReceiver(run);
+    if (!receiver?.slotKey) return false;
+    let task = null;
+    try { task = taskService && taskService.getTask(run.task_id); } catch { task = null; }
+    if (!task) return false;
+
+    _reviewInFlight.add(run.id); // claim BEFORE reserve/defer (closes the race)
+    let deferred = false;
+    try {
+      const result = dispatchReview({
+        run,
+        receiver,
+        buildText: () => buildGoalReviewText({ run, task }),
+        onSent: () => {
+          try {
+            runService.addRunEvent(run.id, 'goal:gate2_review_sent', JSON.stringify({
+              verdict: run.goal_verdict,
+              receiver_slot: receiver.slotKey,
+            }));
+          } catch { /* marker best-effort — a miss just costs one duplicate re-drive */ }
+        },
+        onSettled: () => { _reviewInFlight.delete(run.id); },
+      });
+      deferred = (result === 'dispatched');
+      return deferred;
+    } finally {
+      // No deferred send scheduled (no manager / breaker max / threw) → release the
+      // claim now so a later sweep can re-drive. When deferred, onSettled releases.
+      if (!deferred) _reviewInFlight.delete(run.id);
+    }
+  }
+
+  // At-least-once re-drive: dispatch any reviewable goal run still missing its
+  // durable marker. Runs at boot AND on a mandatory periodic timer (a runtime
+  // send-failure released its claim + rolled back the breaker, so this re-drives
+  // it within one interval — boot-only recovery would leave it stuck until
+  // restart). Never throws.
+  function reviewSweep() {
+    let ids = [];
+    try { ids = runService.listReviewableGoalRunsWithoutReview(); } catch { return; }
+    for (const id of ids) {
+      try { dispatchGate2Review(id); } catch (err) { logger.warn(`[gate2-review] sweep failed run=${id}: ${err.message}`); }
+    }
   }
 
   eventBus.subscribe((event) => {
@@ -402,7 +578,15 @@ function createPmAutoReview({
     });
   });
 
-  return { sendPmReview, autoReviewCounts };
+  // G4a: goal verdicts drive the Gate 2 review (low-latency path; the periodic
+  // reviewSweep is the durable backstop).
+  eventBus.subscribe((event) => {
+    if (event.channel !== 'goal:verdict') return;
+    const runId = event.data?.run_id;
+    if (runId) dispatchGate2Review(runId);
+  });
+
+  return { sendPmReview, dispatchGate2Review, reviewSweep, autoReviewCounts };
 }
 
 // ML PR2a (R6): capture deterministic environment facts from worker harvest.
@@ -1043,7 +1227,7 @@ function createApp(options = {}) {
   // PM auto-review: harvest is the single completion gate. `run:ended`
   // drives harvest first, and harvest emits exactly one `run:harvested`
   // for each review-target worker run; only then do we notify the PM.
-  createPmAutoReview({ eventBus, managerRegistry, conversationService, runService });
+  const pmAutoReview = createPmAutoReview({ eventBus, managerRegistry, conversationService, runService, taskService });
   // ML PR2a: R6 environment-fact capture (test_command / node resolution).
   createR6FactCapture({ eventBus, runService, memoryService });
   // ML PR2b: R1b failure->fix pair capture (stages candidates for PR3 distill).
@@ -1300,6 +1484,28 @@ function createApp(options = {}) {
       console.warn(`[app] Goal verdict sweep failed: ${err.message}`);
     }
   }
+  // G4a: Gate 2 review re-drive. Boot once + a MANDATORY periodic timer so a
+  // runtime send-failure (marker absent, claim released) is re-dispatched within
+  // one interval — boot-only recovery would leave it stuck until restart (codex
+  // plan-review BLOCKER). Gated off the node test runner (like the other sweeps);
+  // tests drive pmAutoReview.reviewSweep() directly. Timer is unref'd + cleared in
+  // shutdown.
+  // INVARIANT (codex diff-review SERIOUS): Palantir Console runs as a SINGLE
+  // server process. The _reviewInFlight claim + this scheduler are per-process;
+  // two live createApp() instances on the same DB could each pass their own Set
+  // and double-send before either marker is written. Running two writers against
+  // one DB is unsupported — the durable marker still bounds it to at-most one
+  // duplicate. Revisit if this ever runs multi-process/clustered.
+  let gate2ReviewSweepTimer = null;
+  if (shouldBootDrain && pmAutoReview && typeof pmAutoReview.reviewSweep === 'function') {
+    try { pmAutoReview.reviewSweep(); } catch (err) { console.warn(`[app] Gate 2 review boot sweep failed: ${err.message}`); }
+    if (!process.env.NODE_TEST_CONTEXT) {
+      gate2ReviewSweepTimer = setInterval(() => {
+        try { pmAutoReview.reviewSweep(); } catch (err) { console.warn(`[app] Gate 2 review periodic sweep failed: ${err.message}`); }
+      }, 60000);
+      if (typeof gate2ReviewSweepTimer.unref === 'function') gate2ReviewSweepTimer.unref();
+    }
+  }
   // P0b-1: cleanupStaleTerminalWorktrees is async now — fire-and-forget with
   // observability (a bare call would compare a Promise to 0 and never log,
   // and a rejection would be unhandled — Codex P0b-1 review, SERIOUS).
@@ -1441,6 +1647,7 @@ function createApp(options = {}) {
     try { if (memoryDistillScheduler) memoryDistillScheduler.stop(); } catch { /* ignore */ }
     try { if (nodeHeartbeatService) nodeHeartbeatService.stop(); } catch { /* ignore */ }
     try { if (specialistService && typeof specialistService.stop === 'function') specialistService.stop(); } catch { /* ignore */ }
+    try { if (gate2ReviewSweepTimer) { clearInterval(gate2ReviewSweepTimer); gate2ReviewSweepTimer = null; } } catch { /* ignore */ }
     lifecycleService.stopMonitoring();
     // PR5b graceful shutdown: if a distill drain is in flight, close the DB only
     // AFTER it settles so the drain never writes into a closed handle. With no
@@ -1472,5 +1679,6 @@ module.exports = {
   startMasterMemoryDecayScheduler,
   startMasterMemoryXprojectScanner,
   buildPmReviewText,
+  buildGoalReviewText,
   formatHarvestSummary,
 };
