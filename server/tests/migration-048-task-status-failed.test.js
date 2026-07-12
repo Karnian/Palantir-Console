@@ -34,6 +34,7 @@ const TASK_COLUMNS = [
   'verify_check_id',    // migration 055 (G2)
   'goal_judge_enabled', // migration 055 (G2)
   'deliverable_json',   // migration 055 (G2)
+  'goal_delivery_json', // migration 059 (G4b)
 ];
 
 const TASK_INDEXES = [
