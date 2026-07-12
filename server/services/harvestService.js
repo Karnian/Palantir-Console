@@ -302,6 +302,10 @@ function createHarvestService({
   // does NOT re-evaluate goalFeatureActive() (unified activation).
   taskService = null,
   verifyCheckService = null,
+  // G3c §5k-4: Gate 1.5 judge — OPTIONAL. When absent (default), the judge stage
+  // is a no-op (existing behavior). When injected + the run is goal_judge_active,
+  // harvest runs one durable, claim-guarded judge before run:harvested.
+  goalJudgeService = null,
 } = {}) {
   const seenRunIds = new Set();
 
@@ -336,7 +340,13 @@ function createHarvestService({
     }
   }
 
-  function emitHarvested(run, summary) {
+  async function emitHarvested(run, summary) {
+    // G3c §5k-4: run the Gate 1.5 judge (if active) BEFORE emitting run:harvested,
+    // so judge_json is durably persisted before the verdict settle re-reads it.
+    // No-op unless the run is goal_judge_active + the judge service is injected.
+    if (run && run.goal_judge_active) {
+      try { await runGoalJudge(run); } catch { /* judge is annotate-only */ }
+    }
     if (!eventBus) return;
     try {
       eventBus.emit('run:harvested', {
@@ -690,6 +700,76 @@ function createHarvestService({
     }
   }
 
+  // G3c §5k-4: the Gate 1.5 judge stage. Runs ONCE per attempt for a goal_judge_
+  // active run, guarded by a durable CAS claim (judge_json NULL → 'pending' →
+  // final) so a crash/concurrent/reharvest path never re-invokes the model. Only
+  // when Gate 1 did NOT fail (a Gate-1 fail is already retry — judging is moot).
+  // annotate-only / never-throws; the model call is hard-deadline-capped inside
+  // the judge service. Persisted BEFORE the caller emits run:harvested → settle.
+  async function runGoalJudge(run) {
+    let fresh; try { fresh = runService.getRun(run.id); } catch { fresh = run; }
+    if (!fresh || !fresh.goal_judge_active || fresh.is_manager || fresh.status !== 'completed') return;
+    let acc = null;
+    try { acc = fresh.acceptance_json ? JSON.parse(fresh.acceptance_json) : null; } catch { acc = null; }
+    if (acc && acc.gate && acc.status === 'ran' && acc.passed === false) return; // Gate 1 failed → skip judge
+    // Durable CLAIM: only the winner records a result (at-most-once).
+    const hasService = !!(goalJudgeService && typeof goalJudgeService.runJudge === 'function');
+    const deadlineMs = (hasService && Number(goalJudgeService.hardDeadlineMs)) || 35000;
+    const pending = JSON.stringify({ status: 'pending', deadline: new Date(Date.now() + deadlineMs).toISOString() });
+    if (!runService.casJudgePending(run.id, pending)) return; // already claimed / judged
+    let result;
+    if (!hasService) {
+      // The run was stamped goal_judge_active but no judge service is wired
+      // (enabled flag without an API key). Record an EXPLICIT error (fail-open →
+      // gate2) — NEVER a silent skip (codex BLOCKER).
+      result = { status: 'error', reason: 'judge_unavailable', reasons: [] };
+    } else {
+      try {
+        let task = null;
+        try { task = taskService ? taskService.getTask(fresh.task_id) : null; } catch { task = null; }
+        let manifest = null;
+        try { manifest = task && task.deliverable_json ? JSON.parse(task.deliverable_json) : null; } catch { manifest = null; }
+        result = await goalJudgeService.runJudge({
+          criteria: task && task.acceptance_criteria,
+          finalOutput: fresh.final_output,
+          deliverableManifest: manifest,
+          artifactExcerpts: readBundleExcerpts(fresh, manifest),
+        });
+      } catch { result = { status: 'error', reason: 'internal', reasons: [] }; }
+    }
+    const finalJson = JSON.stringify(result || { status: 'error', reason: 'internal' });
+    const persisted = runService.finalizeJudge(run.id, finalJson);
+    if (!persisted) addError(run.id, 'judge_finalize', new Error('judge finalize CAS lost (claim expired?)'));
+    addEvent(run.id, 'harvest:judge', { status: (result && result.status) || 'error', reasons_count: (result && result.reasons ? result.reasons.length : 0), model: result && result.model });
+  }
+
+  // G3c: bounded per-file head excerpts from the LOCAL deliverable bundle (§5k-2)
+  // for the judge — a small text head per manifest file, total-capped. Never throws.
+  function readBundleExcerpts(run, manifest) {
+    if (!manifest || !Array.isArray(manifest.files)) return [];
+    const safeSeg = (v, fb) => (String(v || '').replace(/[^a-zA-Z0-9_-]/g, '') || fb);
+    const dest = path.resolve(process.cwd(), 'runtime', 'goal-artifacts', safeSeg(run.task_id, 'none'), safeSeg(run.id, 'run'));
+    const PER_HEAD = 2 * 1024;
+    const MAX_TOTAL = 24 * 1024;
+    const MAX_FILES = 12;
+    const out = [];
+    let total = 0;
+    for (const f of manifest.files) {
+      if (f.skipped || out.length >= MAX_FILES || total >= MAX_TOTAL) continue;
+      const src = path.join(dest, String(f.path || ''));
+      if (!isWithinRoot(dest, src)) continue;
+      let head = null;
+      try {
+        const fd = fs.openSync(src, 'r');
+        try { const buf = Buffer.allocUnsafe(PER_HEAD); const n = fs.readSync(fd, buf, 0, PER_HEAD, 0); head = buf.subarray(0, n).toString('utf8'); }
+        finally { fs.closeSync(fd); }
+      } catch { continue; }
+      out.push({ path: f.path, head });
+      total += (head ? head.length : 0);
+    }
+    return out;
+  }
+
   // G2 §5k-2: enumerate a deliverable workspace into a bounded manifest
   // (path/size/hash; cap 20 files / 10MB; excess flagged manifest_truncated).
   // Symlinks are skipped (lstat), reads are within-root by construction.
@@ -993,18 +1073,18 @@ function createHarvestService({
       // exactly once below.
       if (run.goal_active && run.goal_workspace_path && !run.worktree_path && !isMaterializedHarvestTarget(run)) {
         await harvestDeliverableRun(run, summary);
-        emitHarvested(run, summary);
+        await emitHarvested(run, summary);
         return;
       }
       const materialized = isMaterializedHarvestTarget(run);
       if (!materialized && (!run.worktree_path || !run.branch)) {
         pushSummaryError(summary, 'no_worktree');
-        emitHarvested(run, summary);
+        await emitHarvested(run, summary);
         return;
       }
       if (materialized) {
         await harvestMaterializedRun(run, summary);
-        emitHarvested(run, summary);
+        await emitHarvested(run, summary);
         return;
       }
       // Worktree already gone (e.g. executeTask's spawn-failure catch runs its
@@ -1012,7 +1092,7 @@ function createHarvestService({
       // one terminal notification, but harvest itself cannot proceed.
       if (!await nodeExecutor.fileExists(run.worktree_path)) {
         pushSummaryError(summary, 'worktree_missing');
-        emitHarvested(run, summary);
+        await emitHarvested(run, summary);
         return;
       }
       const resolved = resolveProject(run, projectDir);
@@ -1020,7 +1100,7 @@ function createHarvestService({
       if (!resolvedProjectDir) {
         addError(run.id, 'preflight', new Error('Project directory unavailable'));
         pushSummaryError(summary, 'no_project_dir');
-        emitHarvested(run, summary);
+        await emitHarvested(run, summary);
         return;
       }
 
@@ -1109,11 +1189,11 @@ function createHarvestService({
         addError(run.id, 'cleanup', err);
         pushSummaryError(summary, 'cleanup');
       }
-      emitHarvested(run, summary);
+      await emitHarvested(run, summary);
     } catch (err) {
       try { addError(run?.id, 'fatal', err); } catch { /* never throw */ }
       pushSummaryError(summary, 'fatal');
-      emitHarvested(run, summary);
+      await emitHarvested(run, summary);
     }
   }
 

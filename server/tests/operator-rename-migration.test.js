@@ -79,6 +79,9 @@ const RUN_COLUMNS = [
   'goal_verdict_reason',
   'goal_retry_run_id',
   'goal_fingerprint',
+  // G3c Gate 1.5 judge (migration 060).
+  'goal_judge_active',
+  'judge_json',
 ];
 
 const COMPOSITION_EVENT_COLUMNS = [

@@ -86,6 +86,10 @@ function createLifecycleService({
   // like a normal task (no goal workspace / no acceptance) — the security
   // precondition (token scrub) and the goal features move in lock-step.
   goalFeatureActive = require('./goalMode').goalFeatureActive,
+  // G3c §5k-4: the Gate 1.5 judge activation gate. Default DERIVES from the SAME
+  // (injectable) goalFeatureActive + the judge flag, so an injected goal gate
+  // never diverges from the judge gate (codex MINOR). Stamped per-run at spawn.
+  goalJudgeActive = (e) => goalFeatureActive(e) && ((e || process.env).PALANTIR_GOAL_JUDGE === '1'),
 }) {
   nodeExecutor = nodeExecutor || createLocalNodeExecutor({ executionEngine, streamJsonEngine });
   const workerChannel = (nodeExecutor && typeof nodeExecutor.spawnWorker === 'function')
@@ -778,6 +782,16 @@ function createLifecycleService({
         }
       } catch { /* acceptance unparseable — reason line still helps */ }
     }
+    // G3c §5k-4: the prior attempt's Gate 1.5 judge reasons (why the rubric judge
+    // rejected the content) — the highest-signal retry feedback for content tasks.
+    if (parent.judge_json) {
+      try {
+        const j = JSON.parse(parent.judge_json);
+        if (j && j.status === 'fail' && Array.isArray(j.reasons) && j.reasons.length) {
+          parts.push(`판정(Gate 1.5) 실패 사유:\n- ${j.reasons.slice(0, 5).map((r) => String(r)).join('\n- ')}`);
+        }
+      } catch { /* judge reasons unparseable — other feedback still helps */ }
+    }
     // Plain process failure (no gate/reason): still give the agent a signal that
     // it is retrying + the prior run's summary, so the loop is never fully blind.
     if (!parts.length) {
@@ -835,6 +849,21 @@ function createLifecycleService({
         runService.setRetryCount(run.id, MAX_RETRY);
         runService.updateRunStatus(run.id, 'failed', { force: true, reason: 'goal_activation_persist_failed' });
         return null;
+      }
+      // G3c §5k-4: stamp the Gate 1.5 judge activation ONCE at spawn (mirrors
+      // goal_active) so harvest reads a durable per-run decision, not a re-evaluated
+      // flag. = goal-active + task opt-in + the judge flag. Fail-closed on a stamp
+      // failure (a run that would be judged must not silently skip it).
+      const judgeActive = !!(task && task.goal_judge_enabled) && goalJudgeActive();
+      if (judgeActive) {
+        try {
+          runService.setGoalJudgeActive(run.id, 1);
+        } catch (err) {
+          runService.addRunEvent(run.id, 'goal:activation_persist_failed', JSON.stringify({ reason: err.message, stage: 'judge' }));
+          runService.setRetryCount(run.id, MAX_RETRY);
+          runService.updateRunStatus(run.id, 'failed', { force: true, reason: 'goal_activation_persist_failed' });
+          return null;
+        }
       }
     }
     // A goal-active worker gets the deterministic goal prompt (goal + acceptance

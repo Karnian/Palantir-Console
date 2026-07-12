@@ -19,6 +19,7 @@
 function decideGoalVerdict({
   status,                 // 'completed' | 'failed'
   acceptance = null,      // { gate, status:'ran'|'skipped', passed:bool|null, reason } | null
+  judge = null,           // G3c §5k-4: { status:'pass'|'fail'|'error', ... } | null
   attemptsUsed = 1,
   budget = 3,
   fingerprintRepeat = false,
@@ -39,17 +40,25 @@ function decideGoalVerdict({
     return budgetLeft ? { verdict: 'retry', reason: null } : { verdict: 'exhausted', reason: 'exhausted' };
   }
 
-  // completed — evaluate Gate 1. Only a GATING check that RAN and FAILED counts.
+  // completed — evaluate Gate 1 (machine check) + Gate 1.5 (judge). Only a GATING
+  // check that RAN and FAILED counts for Gate 1. For the judge, ONLY status==='fail'
+  // gates — error/timeout/schema-mismatch/disabled/absent fail OPEN to Gate 2
+  // (§5k-4). judge PASS never makes 'done' — it routes to Gate 2 (→ human final).
   const gateFailed = !!(acceptance && acceptance.gate && acceptance.status === 'ran' && acceptance.passed === false);
-  if (gateFailed) {
+  const judgeFailed = !!(judge && judge.status === 'fail');
+  if (gateFailed || judgeFailed) {
     // Same failure fingerprint twice → no progress → escalate to Gate 2 early.
     if (fingerprintRepeat) return { verdict: 'gate2', reason: 'no_progress' };
-    if (budgetLeft) return { verdict: 'retry', reason: null };
+    // Judge FAIL loops retry within budget; at budget exhaustion it exhausts
+    // (→ task failed), with Gate 2 still receiving the review. Reason surfaces a
+    // judge-only failure (Gate 1 passed but the rubric judge rejected the content).
+    if (budgetLeft) return { verdict: 'retry', reason: (judgeFailed && !gateFailed) ? 'judge_fail' : null };
     return { verdict: 'exhausted', reason: 'exhausted' };
   }
 
-  // completed + (gate passed | no gate | advisory-only | check skipped) → Gate 2.
-  // A skipped machine check is surfaced (not a silent pass) via the reason.
+  // completed + (gate passed | no gate | advisory-only | check skipped) + (judge
+  // pass | error | skipped | absent) → Gate 2. A skipped machine check is surfaced
+  // (not a silent pass) via the reason.
   const reason = (acceptance && acceptance.status === 'skipped')
     ? (acceptance.reason || 'runner_unavailable')
     : null;

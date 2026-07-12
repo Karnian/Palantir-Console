@@ -59,15 +59,54 @@ function createGoalVerdictService({
     } catch { return null; }
   }
 
-  function computeFingerprint(run, acceptance) {
+  function computeFingerprint(run, acceptance, judge) {
     // The failure SIGNATURE — comparing this attempt's to the previous attempt's
     // detects "same failure twice → no progress". For a gate-failed completed run
     // the signature is the acceptance shape; for a process failure it is the
-    // terminal status + exit code.
+    // terminal status + exit code. For a JUDGE fail (§5k-4) it includes the judge
+    // INPUT fingerprint (deterministic — the same worker output judged fail twice),
+    // NOT the LLM's nondeterministic prose reasons (codex S2).
     const sig = acceptance
       ? { g: acceptance.gate ?? null, k: acceptance.kind ?? null, s: acceptance.status ?? null, p: acceptance.passed ?? null, r: acceptance.reason ?? null }
       : { st: run.status, ex: run.exit_code ?? null };
+    if (judge && judge.status === 'fail') sig.j = judge.input_fp || 'fail';
     return sha256Short(JSON.stringify(sig));
+  }
+
+  // G3c §5k-4: the judge state for the verdict. Only a FINALIZED judge (pass/fail/
+  // error) is used; a 'pending' claim that has NOT expired means the harvest is
+  // still running the judge → the run is NOT yet settleable (skip). A 'pending'
+  // claim past its deadline (a crash mid-judge) is atomically CAS'd to 'error'
+  // BEFORE settling — so a late model result can't finalize after a gate2 verdict
+  // (codex SERIOUS) — and the judge is treated as error (fail-open → gate2). Never
+  // re-invokes the model. Returns { judge, skip }.
+  function resolveJudge(run) {
+    if (!run.goal_judge_active) return { judge: null, skip: false };
+    let judge = null;
+    try { judge = run.judge_json ? JSON.parse(run.judge_json) : null; } catch { judge = null; }
+    if (!judge) return { judge: null, skip: false }; // never started (Gate-1-fail skip / pre-CAS window)
+    if (judge.status === 'pending') {
+      const expired = judge.deadline ? (Date.parse(judge.deadline) <= Date.now()) : true;
+      if (!expired) return { judge: null, skip: true }; // in-flight — wait
+      // Crashed mid-judge: expire the claim → 'error' atomically. ONLY use the
+      // fabricated error if the CAS WON (still 'pending'); if it lost, a real
+      // result finalized concurrently — re-read and resolve from that (codex
+      // BLOCKER: never discard a real fail with a fabricated error).
+      const errJson = JSON.stringify({ status: 'error', reason: 'deadline_expired' });
+      let won = false;
+      try { won = runService.casJudgeExpiredToError(run.id, errJson); } catch { won = false; }
+      if (won) return { judge: { status: 'error', reason: 'deadline_expired' }, skip: false };
+      // Lost the CAS — a real result finalized concurrently. Re-read ONCE (no
+      // recursion — codex): a finalized state is used; anything still pending →
+      // skip (a later sweep resolves it) rather than looping.
+      let fresh = null;
+      try { fresh = runService.getRun(run.id); } catch { fresh = null; }
+      let fjudge = null;
+      try { fjudge = fresh && fresh.judge_json ? JSON.parse(fresh.judge_json) : null; } catch { fjudge = null; }
+      if (fjudge && ['pass', 'fail', 'error'].includes(fjudge.status)) return { judge: fjudge, skip: false };
+      return { judge: null, skip: true };
+    }
+    return { judge, skip: false }; // pass | fail | error
   }
 
   function isNonRetryable(run) {
@@ -90,11 +129,11 @@ function createGoalVerdictService({
     } catch { return DEFAULT_BUDGET; }
   }
 
-  function computeInputs(run) {
+  function computeInputs(run, judge) {
     const acceptance = parseAcceptance(run);
     const attemptsUsed = Number(run.retry_count || 0) + 1;
     const budget = taskBudget(run);
-    const fingerprint = computeFingerprint(run, acceptance);
+    const fingerprint = computeFingerprint(run, acceptance, judge);
     const priorFp = runService.getGoalRetryParentFingerprint(run.id);
     const fingerprintRepeat = !!(priorFp && priorFp === fingerprint);
     let sourceChanged = false;
@@ -102,7 +141,7 @@ function createGoalVerdictService({
       try { sourceChanged = !!isSourceChanged(run); } catch { sourceChanged = false; }
     }
     const nonRetryable = run.status === 'failed' && isNonRetryable(run);
-    return { acceptance, attemptsUsed, budget, fingerprint, fingerprintRepeat, sourceChanged, nonRetryable };
+    return { acceptance, judge: judge || null, attemptsUsed, budget, fingerprint, fingerprintRepeat, sourceChanged, nonRetryable };
   }
 
   function buildRetryChild(run) {
@@ -246,10 +285,17 @@ function createGoalVerdictService({
       return { settled: true, winner: false };
     }
 
+    // G3c §5k-4: resolve the Gate 1.5 judge. A judge still in flight (pending +
+    // not expired) means the harvest hasn't finished judging → do NOT settle yet
+    // (the harvest's run:harvested, or a later sweep, settles once finalized).
+    let judgeResolved;
+    try { judgeResolved = resolveJudge(run); } catch { judgeResolved = { judge: null, skip: false }; }
+    if (judgeResolved.skip) return { settled: false, pendingJudge: true };
+
     // computeInputs touches the DB (fingerprint parent, task budget); guard it so
     // a transient read failure returns cleanly instead of throwing out of settle.
     let inputs;
-    try { inputs = computeInputs(run); } catch (err) {
+    try { inputs = computeInputs(run, judgeResolved.judge); } catch (err) {
       warn(`[goalVerdict] computeInputs failed run=${runId}: ${err && err.message}`);
       return { settled: false };
     }
@@ -258,6 +304,7 @@ function createGoalVerdictService({
       decision = decide({
         status: run.status,
         acceptance: inputs.acceptance,
+        judge: inputs.judge,
         attemptsUsed: inputs.attemptsUsed,
         budget: inputs.budget,
         fingerprintRepeat: inputs.fingerprintRepeat,

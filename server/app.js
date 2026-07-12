@@ -42,6 +42,7 @@ const { createManagerAdapterFactory } = require('./services/managerAdapters');
 const { createWorktreeService } = require('./services/worktreeService');
 const { createHarvestService } = require('./services/harvestService');
 const { createGoalDeliveryService } = require('./services/goalDeliveryService'); // G4b
+const { createGoalJudge } = require('./services/goalJudgeService'); // G3c
 const { createLocalNodeExecutor } = require('./services/nodeExecutor');
 const { createWebhookService } = require('./services/webhookService');
 const { createLifecycleService } = require('./services/lifecycleService');
@@ -1150,6 +1151,20 @@ function createApp(options = {}) {
   // G2 §6: single goal-feature gate (injectable for tests). Threaded into every
   // goal surface so they activate in lock-step with the PALANTIR_TOKEN scrub.
   const goalFeatureActive = options.goalFeatureActive || require('./services/goalMode').goalFeatureActive;
+  // G3c §5k-4: Gate 1.5 judge — OFF by default. Injected for tests; else built
+  // only when goal mode + PALANTIR_GOAL_JUDGE=1 + ANTHROPIC_API_KEY. When null,
+  // harvest's judge stage is a no-op (and no run is goal_judge_active anyway,
+  // since spawn gates that on goalJudgeActive()).
+  let goalJudgeService = options.goalJudgeService || null;
+  if (!goalJudgeService && require('./services/goalMode').goalJudgeActive()) {
+    const judgeApiKey = process.env.ANTHROPIC_API_KEY;
+    if (judgeApiKey) {
+      try { goalJudgeService = createGoalJudge({ apiKey: judgeApiKey }); }
+      catch (err) { console.warn(`[goal-judge] failed to create: ${err.message}`); }
+    } else {
+      console.warn('[goal-judge] PALANTIR_GOAL_JUDGE=1 but no ANTHROPIC_API_KEY and no injected judge — Gate 1.5 disabled');
+    }
+  }
   const harvestService = createHarvestService({
     runService,
     worktreeService,
@@ -1163,6 +1178,7 @@ function createApp(options = {}) {
     // gate is per-run (run.goal_active) — harvest does not re-check goal mode.
     taskService,
     verifyCheckService,
+    goalJudgeService, // G3c §5k-4
   });
   const webhookService = createWebhookService({
     eventBus,
