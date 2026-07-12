@@ -1020,7 +1020,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
               data-project-id=${p.id}
               data-highlighted=${highlighted ? 'true' : 'false'}
             >
-              <button class="project-card-trigger" onClick=${() => setDetailProject(p)}
+              <h2 class="card-heading"><button class="project-card-trigger" onClick=${() => setDetailProject(p)}
                 aria-label=${p.name}>
                 <span class="project-card-header">
                   <span class="project-card-title">${p.name}</span>
@@ -1049,7 +1049,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
                   </span>
                 `}
                 <span class="project-card-meta">${PROJECTS_LABELS.createdLabel} ${formatTime(p.created_at)}</span>
-              </button>
+              </button></h2>
               <div class="project-card-actions" style="margin-top:8px;">
                 <button
                   class="ghost small"
