@@ -195,3 +195,46 @@ for (const theme of THEMES) {
     });
   });
 }
+
+// K-5-followup: scope captures to the open dialog so backdrop/page changes do
+// not couple these baselines to the underlying route; visibility fails loudly
+// if the opening interaction ever regresses.
+const MODALS = [
+  {
+    slug: 'commandpalette',
+    dialog: '.command-palette',
+    async open(page) {
+      await page.goto('/#board');
+      await page.waitForSelector('.nav-sidebar', { timeout: 10000 });
+      await stabilize(page);
+      await page.keyboard.press('Control+k');
+    },
+  },
+  {
+    slug: 'newagent',
+    dialog: '[role="dialog"][aria-modal="true"]',
+    async open(page) {
+      await page.goto('/#agents');
+      await page.waitForSelector('[data-view="agents"]', { timeout: 10000 });
+      await stabilize(page);
+      await page.getByRole('button', { name: /새 에이전트/ }).click();
+    },
+  },
+];
+
+for (const modal of MODALS) {
+  for (const theme of THEMES) {
+    test(`@visual modal: ${modal.slug} [${theme}]`, async ({ page }) => {
+      await page.setViewportSize({ width: 1280, height: 800 });
+      await setTheme(page, theme);
+      await modal.open(page);
+
+      const dialog = page.locator(modal.dialog);
+      await expect(dialog).toBeVisible();
+      await expect(dialog).toHaveScreenshot(`modal-${modal.slug}-${theme}.png`, {
+        maxDiffPixels: 100,
+        threshold: 0.2,
+      });
+    });
+  }
+}
