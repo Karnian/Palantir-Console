@@ -32,9 +32,10 @@
 
 진행 가능한 후속 nice-to-have (deferred — 사용자 트리거 시):
 - **A11y-contrast-hardening** ✅ 완료(2026-07-08, fix/a11y-contrast-hardening). 통합 리뷰가 실 prod DB 렌더에서 노출한 5 위반 해소: (a) 공유 skill-badge-ok + manager .manager-session-badge/.manager-status-badge 하드코딩색→badge 전용 fg 토큰(--success-badge-fg/--running-badge-fg, priority-high-fg 선례, 3블록 lock-step), (b) .manager-msg-time opacity:0.7 제거(muted 를 4.5 아래로 blend), (c) .manager-messages tabindex/role=log(scrollable-region-focusable). a11y 56/56(실 DB) + 전체 2115. Codex GO. **잔여도 해소**: .manager-msg-user 타임스탬프는 버블 밖으로(A) + 다크 버블 --msg-user-bg 진하게(B) → assistant+user 타임스탬프·본문 전부 clean(별 커밋).
+- **fleet-strip contrast** ✅ 완료(2026-07-12, #365). a11y gate 가 잡은 serious 위반: `.fleet-strip-warning` = `--status-needs-input`(amber-700 #b45309) on `--warning-bg-subtle`(8% amber tint) = 4.49:1 (light, <4.5). 신규 scoped 토큰 `--warning-badge-fg`(dark #f59e0b bright / light #92400e ≈6.3:1, `--priority-high-fg`/`--success-badge-fg` 선례, 3블록 lock-step). a11y 56/56, visual 56/56(pill 미렌더=baseline 무변).
+- **K-4-card-markup NIT** ✅ 완료(2026-07-12, #366). `.agent-card`/`.project-card` 제목을 `<h2 class="card-heading">`(트리거 button 을 감싸 접근명=aria-label=카드명). `.card-heading { display:contents; font:inherit }` — display:contents 로 box 제거(zero layout, button 이 카드 flex item 유지) + font:inherit 필수(display:contents 가 box 만 제거, h2 UA font 1.5em/bold 는 trigger 의 font:inherit 로 카드 텍스트에 상속돼 agents 카드 시프트 → visual gate 가 포착). a11y 56/56, visual 56/56.
 - **K-5-followup** — 모달/드로어 visual regression (K-5 spec §3 비범위 → 별도 phase)
-- **K-4 NIT** — moderate severity gate 승격 (현재 report-only)
-- **K-4-card-markup NIT** — `.agent-card` / `.project-card` heading semantics 복원 (`<h3>` 별도 위치)
+- **K-4 NIT** — moderate severity gate 승격 (현재 report-only) — **K-4 spec L3 gate policy 변경 = 사용자 lock-in 필요**
 - **interactive state visual** — hover/focus/pressed (Codex K-5 r1 권장 분리)
 - **performance regression** (LCP/CLS) — 별도 phase
 
