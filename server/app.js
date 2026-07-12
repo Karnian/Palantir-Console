@@ -685,18 +685,48 @@ function createR1bCapture({ eventBus, runService, memoryService, logger = consol
     } catch { return null; }
   }
 
+  // G5 §5i: the goal Gate 1 acceptance as an R1b signal. Only a human-provenance
+  // (gate=true) check that actually RAN with a boolean result is definitive
+  // (§5k-3) — advisory / skipped / malformed acceptance is NOT a signal.
+  function acceptanceResult(events) {
+    // Scan ALL harvest:acceptance events and return the first VALID gating one,
+    // skipping any malformed/advisory/skipped entry — a non-gating acceptance
+    // preceding a valid gating one must NOT mask the real signal (codex BLOCKER).
+    for (const a of events) {
+      if (a.event_type !== 'harvest:acceptance') continue;
+      try {
+        const p = JSON.parse(a.payload_json || '{}');
+        if (p.gate === true && p.status === 'ran' && typeof p.passed === 'boolean') {
+          return { passed: p.passed, eventId: a.id };
+        }
+      } catch { /* skip malformed, keep scanning */ }
+    }
+    return null;
+  }
+
+  // G5 §5i: pick the R1b signal by the run's AUTHORITATIVE goal_active (not event
+  // presence — codex BLOCKER). A goal run's ONLY signal is its human-gate
+  // acceptance; it NEVER falls back to the worker-controlled test command (a
+  // missing/advisory/skipped acceptance → no signal → no forged goal pair). A
+  // non-goal run uses harvest:test exactly as before (byte-identical).
+  function getRunResult(events, run) {
+    if (run && run.goal_active) {
+      const a = acceptanceResult(events);
+      return a ? { passed: a.passed, source: 'acceptance' } : null;
+    }
+    const t = testResult(events);
+    return t ? { passed: t.passed, source: 'test' } : null;
+  }
+
   function capture(run) {
     if (!run || run.is_manager || !run.project_id || !run.task_id) return;
-    let yEvents;
-    try { yEvents = runService.getRunEvents(run.id) || []; } catch { return; }
-    const y = testResult(yEvents);
-    if (!y || !y.passed) return; // the fix run must itself be a PASS
 
     // Order ALL same-task runs by rowid (_seq, exposed by getByTask) = true
     // creation order. We inspect the IMMEDIATELY preceding RUN (not just the
-    // preceding test-run): an intervening run without a harvest:test means Y
-    // is not a direct fix of X, so we must NOT skip it (Codex cross-review
-    // BLOCKER — false fix-pairs from skipped no-test runs).
+    // preceding signalled run): an intervening run without a signal means Y is
+    // not a direct fix of X, so we must NOT skip it (Codex cross-review BLOCKER —
+    // false fix-pairs from skipped no-signal runs). Both X and Y are classified
+    // from the AUTHORITATIVE listRuns rows (goal_active), not the emitted object.
     let taskRuns;
     try { taskRuns = runService.listRuns({ task_id: run.task_id }) || []; } catch { return; }
     const ordered = taskRuns.slice().sort((a, b) => {
@@ -715,15 +745,23 @@ function createR1bCapture({ eventBus, runService, memoryService, logger = consol
     });
     const yPos = ordered.findIndex((r) => r.id === run.id);
     if (yPos <= 0) return; // Y not found, or no prior run on this task
+    const yRun = ordered[yPos];
     const prevRun = ordered[yPos - 1];
+
+    let yEvents;
+    try { yEvents = runService.getRunEvents(run.id) || []; } catch { return; }
+    const y = getRunResult(yEvents, yRun);
+    if (!y || !y.passed) return; // the fix run must itself be a PASS
+
     let prevEvents;
     try { prevEvents = runService.getRunEvents(prevRun.id) || []; } catch { return; }
-    const prevTest = testResult(prevEvents);
-    if (!prevTest || prevTest.passed !== false) return; // immediate prev must be a FAILing test
-    const prev = { runId: prevRun.id };
+    const x = getRunResult(prevEvents, prevRun);
+    if (!x || x.passed !== false) return; // immediate prev must be a FAIL
+    if (x.source !== y.source) return; // coherent signal (no mixed test/acceptance pair)
 
     // R1b fix pair: prev (FAIL) -> run (PASS). Capture the fix diff stat (the
-    // "what changed") but never the test output_tail (secret risk).
+    // "what changed") but NEVER the test/acceptance output (secret risk) — the
+    // rawJson is an explicit projection, not a payload spread.
     const diffEvent = yEvents.find((e) => e.event_type === 'harvest:diff');
     let diffStat = null;
     if (diffEvent) {
@@ -733,16 +771,17 @@ function createR1bCapture({ eventBus, runService, memoryService, logger = consol
       schema_version: 1,
       rule: 'R1b',
       task_id: run.task_id,
-      fail_run: { id: prev.runId },
+      fail_run: { id: prevRun.id },
       fix_run: { id: run.id, diff_stat: diffStat ? String(diffStat).slice(0, 500) : null },
       selection: 'immediately_preceding_fail',
+      signal: y.source, // 'acceptance' (goal Gate 1) | 'test' (project test)
     });
     try {
       memoryService.createCandidate({
         projectId: run.project_id,
         rule: 'R1b',
         rawJson,
-        dedupKey: `r1b:${run.task_id}:${prev.runId}:${run.id}`,
+        dedupKey: `r1b:${run.task_id}:${prevRun.id}:${run.id}`,
       });
     } catch (err) { logger.warn(`[r1b] candidate run=${run.id}: ${err.message}`); }
   }

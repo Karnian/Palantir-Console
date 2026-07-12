@@ -236,3 +236,93 @@ test('createCandidate: invalid rule violates CHECK and throws (not swallowed)', 
   );
   assert.equal(svc.listCandidates('p1').length, 0);
 });
+
+// --------------------------------------------------------------------------
+// G5 §5i — goal Gate 1 (harvest:acceptance) as the R1b signal for goal runs.
+// Goal-ness is authoritative (run.goal_active): a goal run's ONLY signal is a
+// human-gate acceptance; it NEVER falls back to the worker test command.
+// --------------------------------------------------------------------------
+
+function hAccept(passed, id, { gate = true, status = 'ran' } = {}) {
+  return { id, event_type: 'harvest:acceptance', payload_json: JSON.stringify({ passed, gate, status, kind: 'command', name: 'unit', reason: null }) };
+}
+const GOAL_RUNS = [
+  { id: 'gx', task_id: 'tg', goal_active: 1, created_at: '2026-01-01 00:00:00' },
+  { id: 'gy', task_id: 'tg', goal_active: 1, created_at: '2026-01-01 01:00:00' },
+];
+
+test('G5 R1b: goal Gate 1 FAIL -> PASS = acceptance-signal fix-pair candidate', (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  const emit = wireR1b(svc, GOAL_RUNS, {
+    gx: [hAccept(false, 10)],
+    gy: [hDiff('2 files changed', 20), hAccept(true, 21)],
+  });
+  emit({ id: 'gy', is_manager: 0, project_id: 'p1', task_id: 'tg', goal_active: 1 });
+  const cands = svc.listCandidates('p1');
+  assert.equal(cands.length, 1);
+  const raw = JSON.parse(cands[0].raw_json);
+  assert.equal(raw.signal, 'acceptance', 'goal pair uses the acceptance signal');
+  assert.equal(raw.fail_run.id, 'gx');
+  assert.equal(raw.fix_run.id, 'gy');
+  assert.match(raw.fix_run.diff_stat, /2 files changed/);
+  assert.doesNotMatch(cands[0].raw_json, /unit|reason/, 'acceptance name/reason not leaked');
+});
+
+test('G5 R1b: advisory (gate=false) acceptance is NOT a signal -> no candidate', (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  const emit = wireR1b(svc, GOAL_RUNS, {
+    gx: [hAccept(false, 1, { gate: false })],
+    gy: [hAccept(true, 2, { gate: false })],
+  });
+  emit({ id: 'gy', is_manager: 0, project_id: 'p1', task_id: 'tg', goal_active: 1 });
+  assert.equal(svc.listCandidates('p1').length, 0);
+});
+
+test('G5 R1b: skipped acceptance is NOT a signal -> no candidate', (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  const emit = wireR1b(svc, GOAL_RUNS, {
+    gx: [hAccept(null, 1, { status: 'skipped' })],
+    gy: [hAccept(true, 2)],
+  });
+  emit({ id: 'gy', is_manager: 0, project_id: 'p1', task_id: 'tg', goal_active: 1 });
+  assert.equal(svc.listCandidates('p1').length, 0);
+});
+
+test('G5 R1b: a goal run NEVER falls back to the worker test signal (missing acceptance -> no pair)', (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  // Both attempts have ONLY harvest:test (no acceptance) but are goal_active — a
+  // worker cannot game the test command to forge a goal fix-pair.
+  const emit = wireR1b(svc, GOAL_RUNS, { gx: [hTest(false, 1)], gy: [hTest(true, 2)] });
+  emit({ id: 'gy', is_manager: 0, project_id: 'p1', task_id: 'tg', goal_active: 1 });
+  assert.equal(svc.listCandidates('p1').length, 0, 'no test fallback for goal runs');
+});
+
+test('G5 R1b: mixed goal_active lineage (X goal, Y non-goal) -> source mismatch -> no candidate', (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  const mixed = [
+    { id: 'mx', task_id: 'tm', goal_active: 1, created_at: '2026-01-01 00:00:00' },
+    { id: 'my', task_id: 'tm', goal_active: 0, created_at: '2026-01-01 01:00:00' },
+  ];
+  const emit = wireR1b(svc, mixed, { mx: [hAccept(false, 1)], my: [hTest(true, 2)] });
+  emit({ id: 'my', is_manager: 0, project_id: 'p1', task_id: 'tm', goal_active: 0 });
+  assert.equal(svc.listCandidates('p1').length, 0, 'acceptance(FAIL) X vs test(PASS) Y is not a coherent pair');
+});
+
+test('G5 R1b: a non-gating acceptance preceding a valid gating one does NOT mask the signal', (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  const emit = wireR1b(svc, GOAL_RUNS, {
+    // Each run has an advisory (gate:false) acceptance BEFORE its real gating one.
+    gx: [hAccept(true, 9, { gate: false }), hAccept(false, 10)],
+    gy: [hDiff('1 file', 20), hAccept(false, 21, { gate: false }), hAccept(true, 22)],
+  });
+  emit({ id: 'gy', is_manager: 0, project_id: 'p1', task_id: 'tg', goal_active: 1 });
+  const cands = svc.listCandidates('p1');
+  assert.equal(cands.length, 1, 'valid gating acceptance is found past the advisory one');
+  assert.equal(JSON.parse(cands[0].raw_json).signal, 'acceptance');
+});
