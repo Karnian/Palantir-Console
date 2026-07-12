@@ -658,6 +658,85 @@ function createRemoteSshNodeExecutor(node, {
     }
   }
 
+  // G2b §5k-1: ensure a path is a REAL directory (mkdir -p + no-follow validation).
+  // `test -L` on the LITERAL path rejects a symlink where a real dir must be (a
+  // reused-node swap); `test -d` requires a directory. assertWithinRoots already
+  // rejects a realpath that escapes exposed_roots. Adversarial concurrent
+  // node-local symlink swaps are OUT of scope (an operator-trusted node — a
+  // compromised node is already game-over under the executor trust boundary).
+  async function ensureRealDir(remotePath) {
+    await mkdir(remotePath, { recursive: true });
+    const lit = shq(remotePath);
+    const res = await runRemoteScript(`if test -L ${lit}; then echo symlink; elif test -d ${lit}; then echo dir; else echo other; fi`);
+    if (res.code !== 0) throw commandError('ensureRealDir', [remotePath], res);
+    const kind = stripOneTrailingNewline(res.stdout);
+    if (kind !== 'dir') throw exposedRootsError(`Remote path is a ${kind}, not a real directory: ${remotePath}`);
+    return remotePath;
+  }
+
+  // G2b §5k-1: bounded enumerate with sizes for the remote deliverable harvest.
+  // NUL-delimited records (a filename can't forge a record); the WALK is bounded
+  // by entry count via `head -z -n MAX+1` (head closes the pipe → find stops).
+  // Regular files only (%y=='f' excludes symlinks/dirs); relPaths that are
+  // absolute / empty / contain a '..' segment are rejected.
+  async function listFilesWithSizes(root, { maxEntries = 5000 } = {}) {
+    const checked = await assertWithinRoots(root);
+    const cap = Math.max(1, Number(maxEntries) || 5000);
+    const r = shq(checked.canonical);
+    // dash has no `pipefail`, so `find | head` returns head's status (0) even when
+    // find fails — masking a partial walk (codex BLOCKER). Append a `FINDEXIT:<code>`
+    // marker AFTER find in the same group: if head SIGPIPEs the walk on truncation,
+    // find (and the marker printf) die → NO marker → truncated. If find completes,
+    // the marker carries its exit; a NONZERO find exit → reject (partial enumerate).
+    const script = `{ find ${r} -mindepth 1 -printf '%y\\t%s\\t%P\\0' 2>/dev/null; printf 'FINDEXIT:%s\\0' "$?"; } | head -z -n ${cap + 2}`;
+    const res = await runRemoteScript(script, { maxBuffer: 8 * 1024 * 1024, timeoutMs: 60000 });
+    if (res.code !== 0 && !res.stdout) throw commandError('listFilesWithSizes', [checked.canonical], res);
+    const allRecords = String(res.stdout).split('\0').filter((s) => s.length > 0);
+    // Extract the terminal FINDEXIT marker (present iff find ran to completion).
+    let findComplete = false;
+    if (allRecords.length && allRecords[allRecords.length - 1].startsWith('FINDEXIT:')) {
+      const code = Number(allRecords.pop().slice('FINDEXIT:'.length));
+      if (Number.isFinite(code) && code !== 0) {
+        throw commandError('listFilesWithSizes', [checked.canonical], { code, stdout: '', stderr: 'find exited nonzero' });
+      }
+      findComplete = true;
+    }
+    const records = allRecords;
+    const truncated = !findComplete || records.length > cap; // no marker ⇒ walk truncated
+    const files = [];
+    for (const rec of records.slice(0, cap)) {
+      const t1 = rec.indexOf('\t');
+      const t2 = rec.indexOf('\t', t1 + 1);
+      if (t1 < 0 || t2 < 0) continue;
+      const type = rec.slice(0, t1);
+      const size = Number(rec.slice(t1 + 1, t2));
+      const relPath = rec.slice(t2 + 1);
+      if (type !== 'f') continue; // regular files only
+      if (!relPath || relPath.startsWith('/') || relPath.split('/').includes('..')) continue;
+      if (!Number.isFinite(size) || size < 0) continue;
+      files.push({ relPath, size });
+    }
+    return { files, truncated };
+  }
+
+  // G2b §5k-1: capped, binary-safe remote read. `head -c cap | base64 -w0` →
+  // exact first `maxBytes` bytes (never a full-file slurp; base64 avoids UTF-8
+  // corruption). Re-guards exposed_roots at READ time (listing→read swap window).
+  async function readFileCapped(remotePath, maxBytes) {
+    const checked = await assertWithinRoots(remotePath);
+    const cap = Math.max(0, Math.floor(Number(maxBytes) || 0));
+    const p = shq(checked.canonical);
+    // dash has no pipefail, so `head | base64` masks a head failure (missing/
+    // unreadable file) as empty base64 → empty bytes (codex BLOCKER). Capture
+    // head's status by writing to a node-local temp FIRST; base64 only on success,
+    // else exit nonzero so the caller throws (→ no false-empty bundle).
+    const script = `t=$(mktemp) || exit 3; if head -c ${cap} ${p} > "$t" 2>/dev/null; then if base64 -w0 "$t"; then rc=0; else rc=5; fi; else rc=4; fi; rm -f "$t"; exit $rc`;
+    const b64Max = 4 * Math.ceil((cap + 2) / 3) + 64;
+    const res = await runRemoteScript(script, { maxBuffer: b64Max, timeoutMs: 60000 });
+    if (res.code !== 0) throw commandError('readFileCapped', [checked.canonical], res);
+    return Buffer.from(String(res.stdout).trim(), 'base64');
+  }
+
   async function rmrf(remotePath) {
     const checked = await assertWithinRoots(remotePath, { allowMissing: true });
     if (!checked.exists) return;
@@ -815,6 +894,9 @@ function createRemoteSshNodeExecutor(node, {
     realpath,
     stat,
     mkdir,
+    ensureRealDir,
+    listFilesWithSizes,
+    readFileCapped,
     readFile,
     readdir,
     writeTempFile,

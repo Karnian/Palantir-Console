@@ -569,6 +569,18 @@ function createRunService(db, eventBus) {
     getGoalRetryParent: db.prepare(
       'SELECT id, status, goal_verdict, goal_verdict_reason, acceptance_json, result_summary FROM runs WHERE goal_retry_run_id = ? LIMIT 1'
     ),
+    // G2b §5k-1: runs whose remote deliverable workspace was retained ('captured',
+    // bundle not yet complete) — the boot re-harvest re-attempts these.
+    listCapturedDeliverableRuns: db.prepare(`
+      SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
+             t.title as task_title, t.project_id as project_id, p.name as project_name
+      FROM runs r
+      LEFT JOIN agent_profiles ap ON r.agent_profile_id = ap.id
+      LEFT JOIN tasks t ON r.task_id = t.id
+      LEFT JOIN projects p ON t.project_id = p.id
+      WHERE r.goal_active = 1 AND r.is_manager = 0
+        AND r.deliverable_state = 'captured' AND r.goal_workspace_path IS NOT NULL
+    `),
     // G4b: the lineage TIP goal run for a task — newest by rowid (creation order),
     // query-backed so tip selection never depends on a JS reduce over a possibly-
     // absent _seq (codex diff-review BLOCKER: fail-closed tip).
@@ -1456,6 +1468,10 @@ function createRunService(db, eventBus) {
   function getNewestGoalRun(taskId) {
     return stmts.getNewestGoalRun.get(taskId) || null;
   }
+  // G2b: runs with a retained 'captured' remote deliverable workspace (boot re-harvest).
+  function listCapturedDeliverableRuns() {
+    return stmts.listCapturedDeliverableRuns.all();
+  }
 
   function deleteRun(id) {
     getRun(id);
@@ -1605,7 +1621,7 @@ function createRunService(db, eventBus) {
     listPendingGoalEffects, markGoalEffectSent, listRunIdsWithPendingGoalEffects,
     listUnverdictedTerminalGoalRunIds, listVerdictedTerminalGoalRunIds,
     getGoalRetryParentFingerprint, getGoalRetryParent,
-    listReviewableGoalRunsWithoutReview, getNewestGoalRun,
+    listReviewableGoalRunsWithoutReview, getNewestGoalRun, listCapturedDeliverableRuns,
     countRunning, countRunningOnNode, countRunningTotalOnNode,
     getOldestQueued, getOldestQueuedOnNode, getOldestQueuedReadyOnNode,
     getOldestMaterializableOnNode,

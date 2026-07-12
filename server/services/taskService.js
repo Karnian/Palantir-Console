@@ -371,6 +371,19 @@ function createTaskService(db, eventBus, opts = {}) {
     return info.changes > 0;
   }
 
+  // G2/G2b §5k-2: persist the SERVER-DERIVED deliverable manifest. Kept off
+  // TASK_UPDATABLE (not operator-settable via the generic PATCH) — the harvest
+  // pipeline is the only writer. (The prior harvest used updateTask({deliverable_json}),
+  // which the allowlist silently dropped, so the manifest never persisted.)
+  function setDeliverableJson(id, deliverableJson) {
+    getTask(id);
+    db.prepare("UPDATE tasks SET deliverable_json = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(deliverableJson ?? null, id);
+    const task = parseRow(stmts.getById.get(id));
+    if (eventBus) eventBus.emit('task:updated', { task });
+    return task;
+  }
+
   function reorderTasks(orderedIds) {
     if (!Array.isArray(orderedIds)) {
       throw new BadRequestError('orderedIds must be an array');
@@ -392,6 +405,7 @@ function createTaskService(db, eventBus, opts = {}) {
   return {
     listTasks, getTask, createTask, updateTask, updateTaskStatus, assignVerifyCheck, reorderTasks, deleteTask,
     claimGoalDelivery, settleGoalDelivery, recordGoalDeliveryPreFailure,
+    setDeliverableJson,
   };
 }
 
