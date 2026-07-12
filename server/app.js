@@ -1542,6 +1542,23 @@ function createApp(options = {}) {
       console.warn(`[app] Goal verdict sweep failed: ${err.message}`);
     }
   }
+  // G2b §5k-1: boot re-harvest of retained 'captured' remote deliverable
+  // workspaces (a transient bundle failure kept the workspace instead of losing
+  // the artifact). Re-attempts the bundle WITHOUT re-review; on success bundles +
+  // reclaims the remote workspace. Gated + fire-and-forget (never blocks boot).
+  if (shouldBootDrain && harvestService && typeof harvestService.reharvestRemoteDeliverable === 'function') {
+    try {
+      const captured = runService.listCapturedDeliverableRuns();
+      if (captured.length > 0) {
+        console.log(`[app] Re-harvesting ${captured.length} retained deliverable workspace(s)`);
+        for (const r of captured) {
+          Promise.resolve(harvestService.reharvestRemoteDeliverable(r)).catch((err) => {
+            console.warn(`[app] Deliverable re-harvest failed for run ${r.id}: ${err.message}`);
+          });
+        }
+      }
+    } catch (err) { console.warn(`[app] Deliverable re-harvest scan failed: ${err.message}`); }
+  }
   // G4a: Gate 2 review re-drive. Boot once + a MANDATORY periodic timer so a
   // runtime send-failure (marker absent, claim released) is re-dispatched within
   // one interval — boot-only recovery would leave it stuck until restart (codex

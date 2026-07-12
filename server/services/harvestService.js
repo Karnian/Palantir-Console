@@ -659,6 +659,17 @@ function createHarvestService({
     if (run.status !== 'completed') return;
     const check = resolveGoalCheck(run);
     if (!check) return;
+    // G2b §5k-1: a remote workspace's machine check can't run with the local
+    // runner — record it skipped (runner_unavailable, provider:remote) so the
+    // verdict fail-opens to gate2 (semantic review), NOT a silent pass. The
+    // remote CHECK RUNNER is G3b. §5f: a skipped check → gate2, surfaced.
+    if (!isLocalNodeRun(run)) {
+      const acceptance = { check_id: check.id, name: check.name, kind: check.kind, gate: check.created_by === 'human', status: 'skipped', reason: 'runner_unavailable', passed: null, provider: 'remote' };
+      try { runService.updateGoalAcceptance(run.id, acceptance); } catch { /* annotate-only */ }
+      addEvent(run.id, 'harvest:acceptance', acceptance);
+      summary.acceptance = { passed: null, gate: acceptance.gate, kind: acceptance.kind, status: 'skipped' };
+      return;
+    }
     try {
       // final_output was persisted by captureGoalOutput just before harvest, so
       // the run object here may be stale — re-read for the artifact report check.
@@ -783,12 +794,137 @@ function createHarvestService({
     return { files, truncated, total_bytes: total };
   }
 
+  // G2b §5k-1: enumerate a REMOTE deliverable workspace via the node executor
+  // (bounded listing with sizes). Same caps as the local walk. hash is deferred
+  // to the bundle step (it needs a read); size-first skip of oversize files.
+  async function enumerateDeliverableRemote(executor, ws) {
+    const MAX_FILES = 20;
+    const MAX_TOTAL = 10 * 1024 * 1024;
+    const MAX_FILE_BYTES = GOAL_MAX_FILE_BYTES;
+    const MAX_ENTRIES = 5000;
+    let listing;
+    try { listing = await executor.listFilesWithSizes(ws, { maxEntries: MAX_ENTRIES }); } catch { return null; }
+    const files = [];
+    let truncated = !!(listing && listing.truncated);
+    let total = 0;
+    for (const entry of (listing && listing.files) || []) {
+      const size = Number(entry.size) || 0;
+      if (files.length >= MAX_FILES || total >= MAX_TOTAL) { truncated = true; continue; }
+      // Size-first: oversize files are metadata-only, never read (from the listing).
+      if (size > MAX_FILE_BYTES || total + size > MAX_TOTAL) {
+        files.push({ path: entry.relPath, size, sha256: null, skipped: 'too_large' });
+        truncated = true;
+        continue;
+      }
+      total += size;
+      files.push({ path: entry.relPath, size, sha256: null }); // hash filled at bundle
+    }
+    return { files, truncated, total_bytes: total };
+  }
+
+  // G2b §5k-1: transactionally bundle a REMOTE deliverable workspace to the
+  // control plane. Each non-skipped file is capped-read (base64, budgeted by the
+  // remaining aggregate), written locally, and RE-HASHED (written == read). Only
+  // if EVERY file bundles cleanly does the caller mark 'bundled' + rmrf the remote
+  // workspace; any failure leaves 'captured' (no rmrf) so nothing is lost.
+  async function bundleDeliverableRemote(executor, manifest, ws, dest) {
+    const MAX_TOTAL = 10 * 1024 * 1024;
+    let runningTotal = 0;
+    let copied = 0;
+    let allOk = true;
+    for (const f of manifest.files) {
+      if (f.skipped) continue;
+      const remaining = MAX_TOTAL - runningTotal;
+      if (remaining <= 0) { f.skipped = 'total_budget'; manifest.truncated = true; continue; }
+      const readCap = Math.min(GOAL_MAX_FILE_BYTES, remaining);
+      const dst = path.join(dest, f.path);
+      if (!isWithinRoot(dest, dst)) { allOk = false; continue; }
+      let raw;
+      // Read cap+1 so we can PROVE EOF within budget (codex BLOCKER): if the file
+      // grew past the cap between listing and read, `head -c cap+1` returns cap+1
+      // bytes → we bundle only the first cap + flag it truncated, never claiming a
+      // complete capture of a file that exceeded the budget.
+      try { raw = await executor.readFileCapped(path.posix.join(ws, f.path), readCap + 1); } catch { allOk = false; continue; }
+      let buf = raw;
+      if (raw.length > readCap) { buf = raw.subarray(0, readCap); f.truncated = 'budget'; manifest.truncated = true; }
+      const readHash = crypto.createHash('sha256').update(buf).digest('hex');
+      try {
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.writeFileSync(dst, buf, { mode: 0o600 });
+        // Re-hash the WRITTEN bytes (integrity), not just a length compare.
+        const writtenHash = crypto.createHash('sha256').update(fs.readFileSync(dst)).digest('hex');
+        if (writtenHash !== readHash) { allOk = false; continue; }
+      } catch { allOk = false; continue; }
+      f.sha256 = readHash;
+      runningTotal += buf.length;
+      copied++;
+    }
+    return { allOk, copied };
+  }
+
+  // G2b §5k-1: remote deliverable harvest. Mirrors the local order but via the
+  // node executor + transactional bundle. rmrf the remote workspace ONLY after a
+  // fully-verified bundle (else retain 'captured' for a boot re-harvest).
+  async function harvestDeliverableRunRemote(run, summary) {
+    summary.harvested = true;
+    const ws = run.goal_workspace_path;
+    const executor = executorFor(run);
+    let manifest = null;
+    try {
+      if (ws && executor && typeof executor.listFilesWithSizes === 'function') {
+        manifest = await enumerateDeliverableRemote(executor, ws);
+      }
+    } catch (err) { addError(run.id, 'deliverable_enumerate', err); pushSummaryError(summary, 'deliverable_enumerate'); }
+    if (manifest) {
+      addEvent(run.id, 'harvest:deliverable', { files: manifest.files.length, total_bytes: manifest.total_bytes, manifest_truncated: manifest.truncated, remote: true });
+      try { runService.setDeliverableState(run.id, 'captured'); } catch { /* annotate */ }
+    }
+
+    // Gate 1 acceptance: remote machine check is skipped (runner_unavailable) → gate2.
+    await runGate1Acceptance(run, ws, summary, run.final_output);
+
+    if (manifest && ws && executor) {
+      try {
+        const safeSeg = (v, fb) => (String(v || '').replace(/[^a-zA-Z0-9_-]/g, '') || fb);
+        const dest = path.resolve(process.cwd(), 'runtime', 'goal-artifacts', safeSeg(run.task_id, 'none'), safeSeg(run.id, 'run'));
+        fs.mkdirSync(dest, { recursive: true, mode: 0o700 });
+        const { allOk, copied } = await bundleDeliverableRemote(executor, manifest, ws, dest);
+        if (allOk) {
+          // Persist the manifest BEFORE marking bundled + reclaiming the workspace
+          // (codex SERIOUS): a swallowed setDeliverableJson failure must not delete
+          // the sole workspace with no persisted manifest — retain 'captured' then.
+          let manifestPersisted = true;
+          if (taskService && run.task_id) {
+            try { taskService.setDeliverableJson(run.task_id, JSON.stringify({ run_id: run.id, files: manifest.files, truncated: manifest.truncated, remote: true })); }
+            catch (err) { manifestPersisted = false; addError(run.id, 'deliverable_manifest_persist', err); }
+          }
+          if (!manifestPersisted) {
+            addEvent(run.id, 'goal:deliverable_bundle_deferred', { files: copied, remote: true, reason: 'manifest_persist_failed' });
+            pushSummaryError(summary, 'deliverable_bundle_deferred');
+          } else {
+            runService.setDeliverableState(run.id, 'bundled');
+            addEvent(run.id, 'harvest:deliverable_bundled', { dest: path.relative(process.cwd(), dest), files: copied, remote: true });
+            // Success path ONLY: reclaim the remote workspace now that both the
+            // bundle AND the manifest are durable.
+            try { await executor.rmrf(ws); } catch (err) { addError(run.id, 'deliverable_workspace_rmrf', err); pushSummaryError(summary, 'deliverable_workspace_rmrf'); }
+          }
+        } else {
+          // Retain 'captured' + do NOT rmrf → a boot re-harvest re-attempts.
+          addEvent(run.id, 'goal:deliverable_bundle_deferred', { files: copied, remote: true });
+          pushSummaryError(summary, 'deliverable_bundle_deferred');
+        }
+      } catch (err) { addError(run.id, 'deliverable_bundle', err); pushSummaryError(summary, 'deliverable_bundle'); }
+    }
+  }
+
   // G2 §5k-2: harvest a deliverable-mode goal run (no git workspace). Order per
   // Codex SERIOUS-3: enumerate → Gate 1 acceptance (live workspace) → copy bundle
   // → mark bundled → emit. The source workspace is removed later by lifecycle
   // cleanup. annotate-only / never-throws. The final run:harvested is emitted by
   // the caller (exactly-once contract preserved).
   async function harvestDeliverableRun(run, summary) {
+    // G2b §5k-1: a remote deliverable workspace goes through the executor path.
+    if (!isLocalNodeRun(run)) return harvestDeliverableRunRemote(run, summary);
     summary.harvested = true;
     const ws = run.goal_workspace_path;
     let manifest = null;
@@ -836,7 +972,7 @@ function createHarvestService({
         addEvent(run.id, 'harvest:deliverable_bundled', { dest: path.relative(process.cwd(), dest), files: copied });
         if (taskService && run.task_id) {
           try {
-            taskService.updateTask(run.task_id, { deliverable_json: JSON.stringify({ run_id: run.id, files: manifest.files, truncated: manifest.truncated }) });
+            taskService.setDeliverableJson(run.task_id, JSON.stringify({ run_id: run.id, files: manifest.files, truncated: manifest.truncated }));
           } catch { /* annotate */ }
         }
       } catch (err) { addError(run.id, 'deliverable_bundle', err); pushSummaryError(summary, 'deliverable_bundle'); }
@@ -981,7 +1117,19 @@ function createHarvestService({
     }
   }
 
-  return { harvestRun };
+  // G2b §5k-1: re-attempt the bundle for a run whose remote deliverable workspace
+  // was retained ('captured', not yet 'bundled'). Runs WITHOUT emitting
+  // run:harvested (no re-review), so a transient bundle failure recovers on boot
+  // without a permanent artifact loss. never-throws.
+  async function reharvestRemoteDeliverable(run) {
+    if (!run || run.is_manager || !run.goal_active || !run.goal_workspace_path) return;
+    if (isLocalNodeRun(run)) return; // only remote retained workspaces
+    const summary = createSummary();
+    try { await harvestDeliverableRunRemote(run, summary); }
+    catch (err) { addError(run.id, 'deliverable_reharvest', err); }
+  }
+
+  return { harvestRun, reharvestRemoteDeliverable };
 }
 
 module.exports = {

@@ -1206,13 +1206,40 @@ function createLifecycleService({
       const hasGitWorkspace = !!worktreePath || usesMaterializedRepoWorkspace;
       // deliverable mode uses the single per-run goal-activation decision stamped
       // above — no re-evaluation of the env gate.
-      if (goalActive && !hasGitWorkspace) {
-        if (isRemoteNode) {
-          runService.addRunEvent(run.id, 'goal:workspace_remote_unsupported', JSON.stringify({ node_id: run.node_id || 'local' }));
+      if (goalActive && !hasGitWorkspace && isRemoteNode) {
+        // G2b §5k-1: remote deliverable goal workspace — created ON the node under
+        // its operator-declared exposed_roots via the executor (two-step guarded
+        // mkdir + no-follow validation). runId is a strict allowlist (server-
+        // generated `run_<uuid8>`). Any missing prerequisite / mkdir failure is
+        // fail-closed non-retryable (a retry re-fails identically), same contract
+        // as the local provider.
+        let roots = [];
+        try { roots = Array.isArray(node.exposed_roots) ? node.exposed_roots : JSON.parse(node.exposed_roots || '[]'); } catch { roots = []; }
+        const root = Array.isArray(roots) && roots[0] ? String(roots[0]).replace(/\/+$/, '') : null;
+        const safeRunId = /^[A-Za-z0-9_-]{1,128}$/.test(String(run.id)) ? String(run.id) : null;
+        const remoteExecutor = channelForNode(run.node_id);
+        const remoteWs = (root && safeRunId) ? `${root}/.palantir-goal-workspaces/${safeRunId}` : null;
+        if (!remoteWs || !remoteExecutor || typeof remoteExecutor.ensureRealDir !== 'function') {
+          runService.addRunEvent(run.id, 'goal:workspace_remote_unsupported', JSON.stringify({
+            node_id: run.node_id || 'local',
+            reason: !root ? 'no_exposed_root' : !safeRunId ? 'bad_run_id' : 'no_provider',
+          }));
           runService.setRetryCount(run.id, MAX_RETRY);
           runService.updateRunStatus(run.id, 'failed', { force: true, reason: 'goal_workspace_remote_unsupported' });
           return null;
         }
+        try {
+          await remoteExecutor.ensureRealDir(`${root}/.palantir-goal-workspaces`); // container first (B1)
+          await remoteExecutor.ensureRealDir(remoteWs);
+        } catch (err) {
+          runService.addRunEvent(run.id, 'goal:workspace_failed', JSON.stringify({ reason: err.message, remote: true }));
+          runService.setRetryCount(run.id, MAX_RETRY);
+          runService.updateRunStatus(run.id, 'failed', { force: true, reason: 'goal_workspace_failed' });
+          return null;
+        }
+        try { runService.setGoalWorkspacePath(run.id, remoteWs); } catch { /* annotate-only */ }
+        cwd = remoteWs;
+      } else if (goalActive && !hasGitWorkspace) {
         const dir = goalWorkspaceDir(run.id);
         try {
           if (!dir) throw new Error('invalid run id for goal workspace');
