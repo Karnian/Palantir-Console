@@ -2582,6 +2582,19 @@ body {
    click target, with action buttons living as siblings outside the
    trigger. Reset all browser button chrome so the trigger blends
    into the card visually. */
+/* K-4-card-markup: agent/project card titles carry an <h2> so screen-reader
+ * users can navigate the card grids by heading. display:contents removes the
+ * heading's own box → the card-trigger button stays the flex item of the card
+ * (zero layout change), while the a11y tree still exposes the h2 role. The h2's
+ * accessible name = the button's aria-label (the concise card name).
+ * `font: inherit` is REQUIRED: display:contents drops the box but the h2's
+ * inheritable UA font (1.5em / bold) would otherwise cascade into the card text
+ * via the trigger's own `font: inherit` (agents cards rely on inherited sizes). */
+.card-heading {
+  display: contents;
+  font: inherit;
+}
+
 .project-card-trigger,
 .agent-card-trigger {
   appearance: none;

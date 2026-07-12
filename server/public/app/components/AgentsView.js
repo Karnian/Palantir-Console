@@ -372,7 +372,7 @@ export function AgentsView({ agents, loading, reloadAgents }) {
         `}
         ${agents.map(a => html`
           <article key=${a.id} class="agent-card">
-            <button class="agent-card-trigger" onClick=${() => setSelectedAgent(a)} aria-label=${a.name}>
+            <h2 class="card-heading"><button class="agent-card-trigger" onClick=${() => setSelectedAgent(a)} aria-label=${a.name}>
               <span class="agent-card-top">
                 <span class="agent-card-icon" style=${a.color ? `color: ${a.color}` : ''}>${a.icon || '\u2699'}</span>
                 <span class="agent-card-info">
@@ -382,7 +382,7 @@ export function AgentsView({ agents, loading, reloadAgents }) {
               </span>
               ${a.command && html`<span class="agent-card-detail"><span class="agent-detail-label">${AGENTS_LABELS.fieldCommand}:</span> ${a.command}</span>`}
               <span class="agent-card-detail"><span class="agent-detail-label">${AGENTS_LABELS.fieldMaxConcurrent}:</span> ${a.max_concurrent || 1}</span>
-            </button>
+            </button></h2>
             <div class="agent-card-actions">
               <button class="ghost" onClick=${() => { setEditAgent(a); setShowModal(true); }}>${COMMON_ACTIONS.edit}</button>
               <button class="ghost danger" onClick=${() => handleDelete(a)}>${COMMON_ACTIONS.delete}</button>
