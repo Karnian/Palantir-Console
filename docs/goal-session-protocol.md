@@ -15,8 +15,8 @@
 | 5 | **G4: Gate 2 리뷰 구조화 + TaskDetail goal UI + 산출물 전달** | 동 spec §5h/5j | 〃 | PR 1개 |
 | 6 | **G5: 메모리 연계** (harvest:acceptance → R1b, project-less 캡처 검토) | 동 spec §5i | 〃 | PR 1개 |
 | 7 | **G2b: goal workspace remote provider** | 동 spec §5k-1 | 〃 | ⚠️ **실 Pi 검증 필요 — 착수 전 사용자 확인** |
-| 8 | **G3b: 원격 check runner** / **G3c: judge (Gate 1.5)** | 동 spec §5f/5k-4 | 〃 | G3b 는 fleet 정책 확인, G3c 는 구현만 (활성화는 사용자) |
-| 9 | backlog Ready 섹션 잔여 항목 | `docs/backlog.md` | — | 큐 소진 시 사용자와 우선순위 협의 |
+| 8 | **G3b: 원격 check runner** / **G3c: judge (Gate 1.5)** | 동 spec §5f/5k-4 | ✅ **완료·merged**. **G3c** (#363, migration 060 + goalJudgeService/harvest judge stage + decideGoalVerdict judge 분기, `PALANTIR_GOAL_JUDGE=1` 기본 off). **G3b Part A** (#364): 원격 deliverable ARTIFACT check 를 **클린 로컬 번들** 대상 평가(shell 0). rmrf 는 complete+durable+acceptance-persisted 만, 심볼릭 링크 chain 거부, promise-gate single-flight, fail-closed injectivity. codex 3R→PASS, 실 Pi 검증. **G3b Part B (원격 command runner) = DEFER** (unsandboxed pod shell 기밀 유출 = 별도 sandboxed-runner/fleet 보안 프로젝트). command check 원격 = skipped('runner_unavailable')→gate2 불변. | PR 2개 (G3c #363, G3b-A #364) |
+| 9 | backlog Ready 섹션 잔여 항목 | `docs/backlog.md` | ⏳ **큐 소진 — 사용자 우선순위 협의 대기** | 큐 소진 시 사용자와 우선순위 협의 |
 
 순서 근거: F-1 은 소형이라 이 프로토콜 자체의 파일럿. G 트랙은 페이즈 의존 순서 (G1+G2 만으로도 독립 가치, G3 가 본체). 원격/하드웨어가 필요한 것 (G2b/G3b) 은 뒤로.
 
