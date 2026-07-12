@@ -36,7 +36,7 @@
 - **K-4-card-markup NIT** ✅ 완료(2026-07-12, #366). `.agent-card`/`.project-card` 제목을 `<h2 class="card-heading">`(트리거 button 을 감싸 접근명=aria-label=카드명). `.card-heading { display:contents; font:inherit }` — display:contents 로 box 제거(zero layout, button 이 카드 flex item 유지) + font:inherit 필수(display:contents 가 box 만 제거, h2 UA font 1.5em/bold 는 trigger 의 font:inherit 로 카드 텍스트에 상속돼 agents 카드 시프트 → visual gate 가 포착). a11y 56/56, visual 56/56.
 - **K-5-followup** — 모달/드로어 visual regression (K-5 spec §3 비범위 → 별도 phase)
 - **K-4 NIT** ✅ 완료(2026-07-13, #367). moderate 를 report-only → **hard gate** 승격(사용자 lock-in). moderate 위반 0 도달 후라 fix 부채 0. `FAIL_IMPACTS = {critical, serious, moderate}`, minor 만 report-only. spec §L3 갱신. a11y 56/56.
-- **interactive state visual** — hover/focus/pressed (Codex K-5 r1 권장 분리)
+- **interactive state visual** ✅ 부분완료(2026-07-13, #368). NavSidebar hover(nav-item 툴팁)+keyboard-focus(skip-to-content 링크) 4 시나리오(desktop×2 themes). out-of-bbox 어포던스(툴팁·focus ring)는 고정 sidebar CLIP 로 캡처, `.focus()` 는 `:focus-visible` 미매칭→keyboard Tab+`toBeFocused()` 계약. `pressed`(active) 는 후속. **codex exec 위임 구현→베이스라인 육안검사로 element-bbox→clip 재설계→codex 리뷰 PASS(3 NIT 반영)**. visual 60/60.
 - **performance regression** (LCP/CLS) — 별도 phase
 
 ---
