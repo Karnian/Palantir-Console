@@ -213,6 +213,33 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
   }
 
   /**
+   * G4b §5j — promote an accepted goal attempt's (surviving) branch onto a stable
+   * `palantir/goal/<taskId>` ref so a human always has a clear, reviewable branch
+   * to merge. `git branch -f` is idempotent (force-points the ref at the same
+   * commit on a re-run). Both refs are validated (validateBranchName rejects
+   * option-injection / traversal; check-ref-format is git's own validator on the
+   * full target refname). Throws on any git failure so the caller annotates
+   * (goal:deliver_failed) — never a silent success. Returns { branch, source, base, stat }.
+   */
+  async function promoteGoalBranch(projectDir, sourceBranch, targetBranch) {
+    const safeSource = validateBranchName(sourceBranch);
+    const safeTarget = validateBranchName(targetBranch);
+    // Defense-in-depth (codex MINOR): git's own ref validator on the full refname.
+    await execGitOrThrow(projectDir, ['check-ref-format', `refs/heads/${safeTarget}`]);
+    // Force-point the stable ref at the accepted branch. `--` ends options; the
+    // value is a branch name (palantir/goal/<id>), NOT refs/heads/... (codex MINOR).
+    await execGitOrThrow(projectDir, ['branch', '-f', '--', safeTarget, safeSource]);
+    let base = null;
+    let stat = '';
+    try { base = (await execGitOrThrow(projectDir, ['merge-base', 'HEAD', safeSource])).trim() || null; } catch { base = null; }
+    try {
+      const range = base ? `${base}..${safeSource}` : safeSource;
+      stat = (await execGitOrThrow(projectDir, ['diff', '--stat', range])).trim();
+    } catch { stat = ''; }
+    return { branch: safeTarget, source: safeSource, base, stat };
+  }
+
+  /**
    * Remove a worktree. Auto-saves uncommitted changes before removal
    * and preserves the branch if it contains work (commits ahead of base).
    * @param {string} projectDir - The git repository root
@@ -345,6 +372,7 @@ function createWorktreeService({ nodeExecutor = createLocalNodeExecutor() } = {}
     hasUncommittedChanges,
     branchHasWork,
     autoSaveWorktree,
+    promoteGoalBranch,
   };
 }
 

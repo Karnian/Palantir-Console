@@ -331,6 +331,46 @@ function createTaskService(db, eventBus, opts = {}) {
     return task;
   }
 
+  // G4b §5j — goal delivery CAS primitives. The tasks.goal_delivery_json column
+  // doubles as the delivery claim (state: delivering→delivered/failed). These do
+  // NOT emit task:updated — that would re-enter the delivery trigger (the CAS
+  // guards would skip it, but the goal:delivered/goal:deliver_failed RUN EVENT is
+  // the UI signal, so a task:updated here is both unnecessary and a re-entry risk).
+  //
+  // CLAIM: capture the accepted run identity, serialize concurrent deliveries.
+  // Wins only from a fresh (null) or previously-failed record, and only while the
+  // task is still 'done' (codex B2). Returns true if this caller won the claim.
+  function claimGoalDelivery(id, payloadJson) {
+    const info = db.prepare(`
+      UPDATE tasks SET goal_delivery_json = @payload, updated_at = datetime('now')
+       WHERE id = @id AND status = 'done'
+         AND (goal_delivery_json IS NULL OR json_extract(goal_delivery_json, '$.state') = 'failed')
+    `).run({ id, payload: payloadJson });
+    return info.changes > 0;
+  }
+  // FINALIZE / FAIL: scoped to the SAME run_id + state='delivering' (codex MINOR)
+  // so a late finalize/fail can never overwrite a delivered or newly-reclaimed
+  // record. Used for both the delivered and the post-claim failed transitions.
+  function settleGoalDelivery(id, runId, payloadJson) {
+    const info = db.prepare(`
+      UPDATE tasks SET goal_delivery_json = @payload, updated_at = datetime('now')
+       WHERE id = @id
+         AND json_extract(goal_delivery_json, '$.run_id') = @runId
+         AND json_extract(goal_delivery_json, '$.state') = 'delivering'
+    `).run({ id, runId, payload: payloadJson });
+    return info.changes > 0;
+  }
+  // Pre-claim failure (no accepted gate2 tip / repo delivery deferred): record a
+  // failed marker without clobbering a delivering/delivered record.
+  function recordGoalDeliveryPreFailure(id, payloadJson) {
+    const info = db.prepare(`
+      UPDATE tasks SET goal_delivery_json = @payload, updated_at = datetime('now')
+       WHERE id = @id AND status = 'done'
+         AND (goal_delivery_json IS NULL OR json_extract(goal_delivery_json, '$.state') = 'failed')
+    `).run({ id, payload: payloadJson });
+    return info.changes > 0;
+  }
+
   function reorderTasks(orderedIds) {
     if (!Array.isArray(orderedIds)) {
       throw new BadRequestError('orderedIds must be an array');
@@ -349,7 +389,10 @@ function createTaskService(db, eventBus, opts = {}) {
     if (eventBus) eventBus.emit('task:updated', { taskId: id, deleted: true });
   }
 
-  return { listTasks, getTask, createTask, updateTask, updateTaskStatus, assignVerifyCheck, reorderTasks, deleteTask };
+  return {
+    listTasks, getTask, createTask, updateTask, updateTaskStatus, assignVerifyCheck, reorderTasks, deleteTask,
+    claimGoalDelivery, settleGoalDelivery, recordGoalDeliveryPreFailure,
+  };
 }
 
 module.exports = { createTaskService };

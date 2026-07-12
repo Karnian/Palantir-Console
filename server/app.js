@@ -41,6 +41,7 @@ const { createStreamJsonEngine } = require('./services/streamJsonEngine');
 const { createManagerAdapterFactory } = require('./services/managerAdapters');
 const { createWorktreeService } = require('./services/worktreeService');
 const { createHarvestService } = require('./services/harvestService');
+const { createGoalDeliveryService } = require('./services/goalDeliveryService'); // G4b
 const { createLocalNodeExecutor } = require('./services/nodeExecutor');
 const { createWebhookService } = require('./services/webhookService');
 const { createLifecycleService } = require('./services/lifecycleService');
@@ -1152,6 +1153,24 @@ function createApp(options = {}) {
     goalFeatureActive, // G2 §6
   });
 
+  // G4b §5j: goal 산출물 전달. Fires when a goal task is marked 'done' (the
+  // accepted gate2 attempt's branch is promoted to palantir/goal/<taskId>, or the
+  // deliverable bundle is recorded). annotate-only / never-throws — runs AFTER the
+  // done transition so it can never block or revert it. task:updated fires on
+  // every task edit; deliver() itself no-ops except the goal→done case (+ its own
+  // CAS idempotency), so subscribing to the broad channel is safe.
+  const goalDeliveryService = createGoalDeliveryService({
+    runService, taskService, projectService, worktreeService, goalFeatureActive,
+  });
+  eventBus.subscribe((event) => {
+    if (event.channel !== 'task:updated') return;
+    const task = event.data && event.data.task;
+    if (!task || !task.goal_enabled || task.status !== 'done') return;
+    Promise.resolve(goalDeliveryService.deliver(task.id)).catch((err) => {
+      console.warn(`[app] Goal delivery failed for task ${task.id}: ${err && err.message}`);
+    });
+  });
+
   // v3 Phase 1.5: shared manager registry + conversation service.
   // managerRegistry tracks which manager runs are live per conversation
   // ('top' / operator slot); conversationService owns the parent-notice
@@ -1401,7 +1420,7 @@ function createApp(options = {}) {
   app.use('/api/nodes', createNodesRouter({ nodeService, nodeUsageService, nodeSummaryService, lifecycleService }));
   app.use('/api/projects', createMemoryRouter({ memoryService, projectService })); // ML PR1: GET /:projectId/memory
   app.use('/api/master-memory', createMasterMemoryRouter({ masterMemoryService })); // L2 P1b: GET / + POST /remember
-  app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService }));
+  app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService, goalDeliveryService }));
   app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService, nodeExecutor }));
   // PR18: tests can pass options.authResolverOpts (e.g. a fake `hasKeychain`)
   // so /api/agents and /api/manager preflights are deterministic across CI

@@ -3,7 +3,7 @@ const { asyncHandler } = require('../middleware/asyncHandler');
 const { validateCreateTask, validateUpdateTask } = require('../middleware/validate');
 const { NotFoundError } = require('../utils/errors');
 
-function createTasksRouter({ taskService, lifecycleService, presetService }) {
+function createTasksRouter({ taskService, lifecycleService, presetService, goalDeliveryService = null }) {
   const router = express.Router();
 
   router.get('/', asyncHandler(async (req, res) => {
@@ -80,6 +80,22 @@ function createTasksRouter({ taskService, lifecycleService, presetService }) {
   router.delete('/:id', asyncHandler(async (req, res) => {
     taskService.deleteTask(req.params.id);
     res.json({ status: 'ok' });
+  }));
+
+  // G4b §5j: manual re-deliver (e.g. after a transient promote failure). This
+  // ONLY re-runs deliver(), which enforces the gate2-tip rule — there is NO path
+  // to promote a non-gate2 attempt (codex plan-review B3). Human (cookie) only:
+  // delivery force-points a git ref, a human-authority action.
+  router.post('/:id/goal/deliver', asyncHandler(async (req, res) => {
+    if (!goalDeliveryService) {
+      return res.status(501).json({ error: 'Goal delivery not configured' });
+    }
+    if (!req.auth || req.auth.method !== 'cookie') {
+      return res.status(403).json({ error: 'goal delivery requires human (cookie) auth' });
+    }
+    taskService.getTask(req.params.id); // 404 if missing
+    const result = await goalDeliveryService.deliver(req.params.id);
+    res.json({ result });
   }));
 
   // Execute: spawn agent for this task
