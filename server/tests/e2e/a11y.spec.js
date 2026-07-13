@@ -274,7 +274,10 @@ for (const route of ROUTES) {
               _touchedWaivers.add(waiverKey(matched));
               continue;
             }
-            const impact = node.impact || violation.impact || 'minor';
+            // Default to 'unknown' (NOT 'minor') so a null/absent impact fails
+            // CLOSED below rather than silently slipping into report-only (codex
+            // re-review). axe normally sets one of critical/serious/moderate/minor.
+            const impact = node.impact || violation.impact || 'unknown';
             const target = Array.isArray(node.target) ? node.target.join(' ') : String(node.target || '');
             const entry = {
               route,
@@ -287,8 +290,12 @@ for (const route of ROUTES) {
             };
             if (FAIL_IMPACTS.has(impact)) {
               blocking.push(entry); // critical / serious / moderate → gate
+            } else if (impact === 'minor') {
+              reportOnly.push(entry); // minor → logged, non-blocking (ONLY minor)
             } else {
-              reportOnly.push(entry); // minor → logged, non-blocking
+              // any unknown/null impact is fail-CLOSED (a violation must never
+              // slip past on a missing impact) — codex re-review of the gate.
+              blocking.push(entry);
             }
           }
         }
