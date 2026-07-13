@@ -272,3 +272,62 @@ for (const theme of THEMES) {
     });
   });
 }
+
+// K-5-followup: the panel is data-gated, so open it via mocked run APIs + the
+// `#run/:id` route; dynamic surfaces (relative times) are masked.
+const RUN_FIXTURE = {
+  run: {
+    id: 'run-fixture-1',
+    task_title: 'Deterministic completed fixture run',
+    status: 'completed',
+    agent_name: 'Fixture Agent',
+    created_at: '2026-01-01T00:00:00.000Z',
+    node_id: null,
+    result_summary: 'Completed successfully with deterministic output.',
+    worktree_path: null,
+    project_id: 'project-fixture-1',
+    parent_run_id: null,
+    preset_id: null,
+    is_manager: 0,
+    cost_usd: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+  },
+  output: 'Fixture command started.\nAll deterministic checks passed.\nRun completed successfully.',
+};
+
+for (const theme of THEMES) {
+  test(`@visual inspector: run [${theme}]`, async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.route('**/api/runs**', (route) => {
+      const url = route.request().url();
+      if (/\/api\/runs\/[^/?]+\/output/.test(url)) {
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ output: RUN_FIXTURE.output }) });
+      }
+      if (/\/api\/runs\/[^/?]+\/events/.test(url)) {
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ events: [] }) });
+      }
+      if (/\/api\/runs\/[^/?]+(\?|$)/.test(url)) {
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ run: RUN_FIXTURE.run }) });
+      }
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ runs: [RUN_FIXTURE.run] }) });
+    });
+    await page.route('**/api/nodes/summary', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ nodes: [], queued: [] }) }));
+    await page.route('**/api/projects/**', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ project: { id: RUN_FIXTURE.run.project_id, test_command: null } }) }));
+    await setTheme(page, theme);
+    await page.goto('/#run/run-fixture-1');
+    await page.waitForSelector('.run-inspector-slideover', { timeout: 10000 });
+    await stabilize(page);
+
+    const panel = page.locator('.run-inspector-slideover');
+    await expect(panel).toBeVisible();
+    await expect(panel).toContainText(RUN_FIXTURE.run.task_title);
+    await expect(panel).toHaveScreenshot(`inspector-run-${theme}.png`, {
+      maxDiffPixels: 100,
+      threshold: 0.2,
+      mask: [panel.locator('.run-status-started')],
+    });
+  });
+}
