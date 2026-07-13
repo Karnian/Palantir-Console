@@ -331,3 +331,30 @@ for (const theme of THEMES) {
     });
   });
 }
+
+// K-5-followup: the remaining deterministic form modals are opened by their
+// header "+ New" button; element-scoped dialog screenshots need no mocks/masks.
+const FORM_MODALS = [
+  { slug: 'newcodebase', route: 'operator/codebases', view: 'projects', trigger: /새 코드베이스/, dialog: '[aria-labelledby="new-project-title"]' },
+  { slug: 'newmcp', route: 'resources/mcp-servers', view: 'mcp-servers', trigger: /새 MCP 서버/, dialog: '[aria-labelledby="mcp-template-title"]' },
+  { slug: 'newtask', route: 'board', view: 'board', trigger: /새 작업/, dialog: '[aria-labelledby="new-task-title"]' },
+];
+
+for (const modal of FORM_MODALS) {
+  for (const theme of THEMES) {
+    test(`@visual formmodal: ${modal.slug} [${theme}]`, async ({ page }) => {
+      await page.setViewportSize({ width: 1280, height: 800 });
+      await setTheme(page, theme);
+      await page.goto(`/#${modal.route}`);
+      await page.waitForSelector(`[data-view="${modal.view}"]`, { timeout: 10000 });
+      await stabilize(page);
+      await page.getByRole('button', { name: modal.trigger }).click();
+      const dialog = page.locator(modal.dialog);
+      await expect(dialog).toBeVisible();
+      await expect(dialog).toHaveScreenshot(`modal-${modal.slug}-${theme}.png`, {
+        maxDiffPixels: 100,
+        threshold: 0.2,
+      });
+    });
+  }
+}
