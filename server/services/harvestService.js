@@ -1124,6 +1124,26 @@ function createHarvestService({
       // clean local bundle ONLY when it is complete + durable; a lossy/failed bundle
       // → skipped('incomplete_bundle'). Command → skipped (Part B deferred).
       // Persisted BEFORE rmrf + run:harvested. Returns whether the gate record is durable.
+      //
+      // KNOWN LIMITATIONS (codex re-review, all accepted fail-OPEN — never a silent
+      // pass or data loss; each escalates to the gate2 human review):
+      //   (1) If the acceptance EVALUATION or PERSIST throws (acceptanceDurable=
+      //       false), the remote is retained (no rmrf, below), but the caller still
+      //       emits run:harvested → the verdict settles to gate2 instead of a
+      //       machine retry.
+      //   (2) BOOT re-harvest: the primary harvest already recorded a
+      //       skipped('incomplete_bundle') acceptance → the verdict is usually
+      //       already settled (gate2, CAS-immutable) by the time re-harvest computes
+      //       the REAL artifact acceptance, so that later acceptance can't change it.
+      //   (3) A TRANSIENT getTask/getCheck error inside runRemoteDeliverableAccept-
+      //       ance resolves to "no check" → the run is reclaimed (rmrf) with no
+      //       acceptance → gate2. This is SAFE: rmrf only fires on a COMPLETE local
+      //       replica (`bundledOk && complete`), so the deliverable is fully
+      //       preserved locally — only the machine gate is skipped, not the data.
+      // Making the real/late acceptance override a settled verdict would require
+      // re-opening a CAS-committed verdict — a change to the (4-round-reviewed) G3
+      // verdict engine disproportionate to these narrow (transient-error /
+      // bundle-failure-then-restart) paths — deferred.
       const canEvaluate = bundledOk && complete;
       const acceptanceDurable = await runRemoteDeliverableAcceptance(run, dest, canEvaluate, summary);
 
