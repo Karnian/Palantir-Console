@@ -45,6 +45,7 @@ const ROUTES = [
   'resources/skills',
   'resources/presets',
   'resources/mcp-servers',
+  'resources/models',
   'resources/nodes',
   // U-2: node detail not-found state — deterministic (no probe, no data)
   'resources/nodes/ghost-e2e',
@@ -99,6 +100,7 @@ function viewKey(route) {
   // operator/profiles maps to the component's data-view="operator-profiles"
   if (seg[0] === 'operator' && sub === 'profiles') return 'operator-profiles';
   if (seg[0] === 'resources' && seg[1] === 'nodes' && seg.length === 3) return 'nodes';
+  if (seg[0] === 'resources' && sub === 'models') return 'model-policies';
   return sub;
 }
 function scanContextSelector(route) {
