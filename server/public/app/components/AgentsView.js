@@ -20,6 +20,12 @@ function Loading() {
   return html`<div class="loading">${COMMON_ACTIONS.loading}</div>`;
 }
 
+function vendorFromCommand(command) {
+  if (command.includes('codex')) return 'codex';
+  if (command.includes('claude')) return 'claude';
+  return 'other';
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AgentModal — create / edit agent profile (module-internal)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -29,6 +35,8 @@ function AgentModal({ open, onClose, agent, onSaved }) {
   const [type, setType] = useState('claude-code');
   const [command, setCommand] = useState('');
   const [argsTemplate, setArgsTemplate] = useState('');
+  const [model, setModel] = useState('');
+  const [reasoningEffort, setReasoningEffort] = useState('');
   const [icon, setIcon] = useState('');
   const [color, setColor] = useState('');
   const [maxConcurrent, setMaxConcurrent] = useState(1);
@@ -41,6 +49,8 @@ function AgentModal({ open, onClose, agent, onSaved }) {
       setType(agent.type || 'claude-code');
       setCommand(agent.command || '');
       setArgsTemplate(agent.args_template || '');
+      setModel(agent.model || '');
+      setReasoningEffort(agent.reasoning_effort || '');
       setIcon(agent.icon || '');
       setColor(agent.color || '');
       setMaxConcurrent(agent.max_concurrent || 1);
@@ -50,9 +60,12 @@ function AgentModal({ open, onClose, agent, onSaved }) {
       } catch { setMcpTools(''); }
     } else if (open) {
       setName(''); setType('claude-code'); setCommand(''); setArgsTemplate('');
+      setModel(''); setReasoningEffort('');
       setIcon(''); setColor(''); setMaxConcurrent(1); setMcpTools('');
     }
   }, [open, agent]);
+
+  const vendor = vendorFromCommand(command);
 
   const handleSave = async () => {
     if (!name.trim()) return;
@@ -65,6 +78,8 @@ function AgentModal({ open, onClose, agent, onSaved }) {
         type,
         command: command.trim() || undefined,
         args_template: argsTemplate.trim() || undefined,
+        model: model.trim() || null,
+        reasoning_effort: reasoningEffort || null,
         icon: icon.trim() || undefined,
         color: color.trim() || undefined,
         max_concurrent: parseInt(maxConcurrent, 10) || 1,
@@ -106,12 +121,13 @@ function AgentModal({ open, onClose, agent, onSaved }) {
               if (!agent) {
                 const presets = {
                   'claude-code': { cmd: 'claude', args: '-p {prompt} --permission-mode bypassPermissions' },
-                  'codex': { cmd: 'codex', args: 'exec --full-auto --skip-git-repo-check -c \'model_reasoning_effort="high"\' {prompt}' },
+                  'codex': { cmd: 'codex', args: 'exec --full-auto --skip-git-repo-check {prompt}' },
                   'gemini': { cmd: 'gemini', args: '-p {prompt} --yolo' },
                   'opencode': { cmd: 'opencode', args: '{prompt}' },
                 };
                 const p = presets[t];
                 if (p) { setCommand(p.cmd); setArgsTemplate(p.args); }
+                if (t === 'codex') { setModel(''); setReasoningEffort('high'); }
               }
             }}>
               <option value="claude-code">claude-code</option>
@@ -125,6 +141,23 @@ function AgentModal({ open, onClose, agent, onSaved }) {
             <label class="form-label" for="agent-command">${AGENTS_LABELS.fieldCommand}</label>
             <input id="agent-command" class="form-input" value=${command} onInput=${e => setCommand(e.target.value)} placeholder=${AGENTS_LABELS.commandPlaceholder} />
           </div>
+          ${(vendor === 'codex' || vendor === 'claude') && html`
+            <div class="form-field">
+              <label class="form-label" for="agent-model">Model</label>
+              <input id="agent-model" class="form-input" value=${model} onInput=${e => setModel(e.target.value)} />
+            </div>
+          `}
+          ${vendor === 'codex' && html`
+            <div class="form-field">
+              <label class="form-label" for="agent-reasoning-effort">Reasoning effort</label>
+              <select id="agent-reasoning-effort" class="form-select" value=${reasoningEffort} onChange=${e => setReasoningEffort(e.target.value)}>
+                <option value="">(none)</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+              </select>
+            </div>
+          `}
           <div class="form-field">
             <label class="form-label" for="agent-args">${AGENTS_LABELS.fieldArgsTemplate}</label>
             <input id="agent-args" class="form-input" value=${argsTemplate} onInput=${e => setArgsTemplate(e.target.value)} placeholder=${AGENTS_LABELS.argsTemplatePlaceholder} />
