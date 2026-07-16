@@ -105,10 +105,29 @@ test('spent < budget → spawns; spent ≥ budget → rejected before claim (non
     h.runService.getRunEvents(run2.id).some(e => e.event_type === 'run:budget_exceeded'),
     'run:budget_exceeded emitted',
   );
-  // non-retryable: retry_count forced to MAX (B-lite skips), goal_active never
-  // stamped (settle ignores → no goal retry). Codex P3 review #2/#3.
+  // non-retryable: retry_count forced to MAX (B-lite skips) + durable
+  // non_retryable flag (goal). Codex P3 review #2/#3.
   assert.equal(p2.retry_count, 1, 'retry_count forced to MAX_RETRY → B-lite non-retryable');
-  assert.ok(!p2.goal_active, 'goal_active=0 (rejected pre-claim, never a goal attempt) → goal settle skips');
+  assert.equal(p2.non_retryable, 1, 'durable non_retryable flag set → goal error/non_retryable');
+});
+
+test('non_retryable survives a preserved started_at on a goal-active run (Codex #3 counterexample)', async (t) => {
+  const h = await harness(t);
+  const { createGoalVerdictService } = require('../services/goalVerdictService');
+  const project = h.projectService.createProject({ name: 'P', directory: null });
+  const task = h.taskService.createTask({ project_id: project.id, title: 'T', description: 'x' });
+  // A goal retry child carries goal_active=1 at queue time and a requeue would
+  // preserve started_at — the exact path the started_at heuristic missed.
+  h.db.prepare(`INSERT INTO runs (id, task_id, status, started_at, goal_active) VALUES ('gr', ?, 'queued', '2020-01-01 00:00:00', 1)`).run(task.id);
+
+  assert.equal(h.runService.rejectQueuedRun('gr', { reason: 'budget_exceeded', retryCount: 1 }), true);
+  const run = h.runService.getRun('gr');
+  assert.equal(run.non_retryable, 1);
+  assert.ok(run.started_at, 'started_at preserved (the edge)');
+
+  const gv = createGoalVerdictService({ runService: h.runService, taskService: h.taskService });
+  assert.equal(gv.computeInputs(run).nonRetryable, true,
+    'isNonRetryable honors non_retryable despite started_at → error/non_retryable, not a within-budget retry');
 });
 
 test('budget_usd=0 caps everything (0 is a cap, not opt-out — only NULL opts out)', async (t) => {

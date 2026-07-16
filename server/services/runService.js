@@ -516,9 +516,12 @@ function createRunService(db, eventBus) {
       WHERE t.project_id = ?
     `),
     // P2/P3 review: atomic CAS reject of a still-QUEUED run (status + retry_count
-    // in one conditional UPDATE — idempotent, never fails a running/terminal run).
+    // + non_retryable in one conditional UPDATE — idempotent, never fails a
+    // running/terminal run). non_retryable=1 makes goalVerdictService route a
+    // goal-active (incl. retry-child) run to error/non_retryable regardless of a
+    // preserved started_at.
     failQueuedRun: db.prepare(`
-      UPDATE runs SET status = 'failed', retry_count = ? WHERE id = ? AND status = 'queued'
+      UPDATE runs SET status = 'failed', retry_count = ?, non_retryable = 1 WHERE id = ? AND status = 'queued'
     `),
     // Goal activation: single per-run activation decision, stamped at spawn.
     setGoalActive: db.prepare(`

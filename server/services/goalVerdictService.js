@@ -117,7 +117,13 @@ function createGoalVerdictService({
     // RETRYABLE within budget — same as the one free retry B-lite gives a non-goal
     // run — instead of being routed straight to error (codex review SERIOUS: the
     // old infra-event set gave goal tasks strictly fewer retries than non-goal).
-    return run.status === 'failed' && !run.started_at;
+    //
+    // runs.non_retryable is a DURABLE flag set by the pre-claim reject gate
+    // (worker_profile_invalid / budget_exceeded). It survives a requeue and
+    // covers a goal-active retry child (which carries goal_active=1 with a
+    // preserved started_at), which the started_at heuristic alone would miss
+    // (Codex P2/P3 review #3).
+    return run.status === 'failed' && (!run.started_at || !!run.non_retryable);
   }
 
   function taskBudget(run) {

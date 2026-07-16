@@ -86,6 +86,9 @@ const RUN_COLUMNS = [
   // appends at end. NULL = emit nothing (CLI default); boot resume reuses.
   'session_model',
   'session_effort',
+  // P2/P3 review (migration 063): durable non-retryable flag for pre-claim
+  // rejected runs (worker_profile_invalid / budget_exceeded).
+  'non_retryable',
 ];
 
 const COMPOSITION_EVENT_COLUMNS = [
