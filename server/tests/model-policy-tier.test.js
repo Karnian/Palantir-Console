@@ -184,9 +184,12 @@ test('Codex worker refuses tier tokens from args_template and accepts a normal t
     description: 'must spawn',
   });
   const safeProfileId = insertCodexProfile(db, 'exec {prompt}');
+  // Codex final-review R2: a normal template must NOT be refused just because
+  // the PROMPT (substituted into {prompt}) mentions the tier keywords — the
+  // scan targets the raw template structure, not user prompt data.
   const safeRun = await lifecycleService.executeTask(safeTask.id, {
     agentProfileId: safeProfileId,
-    prompt: 'hello',
+    prompt: 'please fix the service_tier bug and the fast_mode flag handling',
   });
 
   assert.equal(safeRun.status, 'running');

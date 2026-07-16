@@ -1468,7 +1468,7 @@ function createLifecycleService({
           extraArgs.push('-c', 'service_tier="default"');
         }
         const baseArgs = buildAgentArgs(profile, prompt, placeholders);
-        if (adapterName === 'codex' && hasForbiddenWorkerTierArg(baseArgs)) {
+        if (adapterName === 'codex' && hasForbiddenWorkerTierArg(profile.args_template)) {
           runService.addRunEvent(run.id, 'worker:tier_forbidden', JSON.stringify({
             adapter: 'codex',
             reason: 'service_tier/features.fast_mode not allowed in worker args_template (batch is always standard)',
@@ -1534,18 +1534,23 @@ function createLifecycleService({
     }
   }
 
-  function hasForbiddenWorkerTierArg(args) {
-    // Broad, case-insensitive substring denylist (Codex final-review blocker):
-    // a `-c` fragment can spell the tier as valid TOML in many shapes —
-    // `service_tier="fast"`, `'"service_tier" = "fast"'`, `features.fast_mode=true`.
-    // A tight token regex misses quoted keys / spacing, and because the
-    // template-derived baseArgs are appended AFTER the forced
-    // `service_tier="default"` (extraArgs), any surviving tier token would
-    // last-win and re-enable fast on a batch worker. No legitimate worker
-    // template ever needs to touch the service tier, so reject the substrings
-    // outright (fail-closed). extraArgs' forced default is NOT scanned (only
-    // baseArgs is passed in).
-    return args.some(a => /service_tier|fast_mode/i.test(String(a)));
+  function hasForbiddenWorkerTierArg(argsTemplate) {
+    // Scan the RAW args_template string — BEFORE {prompt}/placeholder
+    // substitution (Codex final-review R2). The tier can only be injected via
+    // the author-written template STRUCTURE (a `-c` fragment); a substituted
+    // {prompt} value is positional data that codex never parses as config, so
+    // scanning the post-substitution args would falsely refuse a normal worker
+    // whose PROMPT merely mentions "service_tier"/"fast_mode".
+    //
+    // Broad, case-insensitive substring denylist: a `-c` fragment can spell the
+    // tier as valid TOML in many shapes — `service_tier="fast"`,
+    // `'"service_tier" = "fast"'`, `features.fast_mode=true`. A tight token
+    // regex misses quoted keys / spacing, and because the template-derived
+    // baseArgs are appended AFTER the forced `service_tier="default"`
+    // (extraArgs), any surviving tier token would last-win and re-enable fast
+    // on a batch worker. No legitimate worker template ever needs to touch the
+    // service tier, so reject these substrings outright (fail-closed).
+    return /service_tier|fast_mode/i.test(String(argsTemplate || ''));
   }
 
   /**
