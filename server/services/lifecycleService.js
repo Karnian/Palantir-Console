@@ -802,22 +802,20 @@ function createLifecycleService({
     return parts.length ? parts.join('\n') : null;
   }
 
-  // Reject a worker run BEFORE it is claimed. Codex P2/P3 review hardening:
-  //   - queued-only guard: only act on a still-`queued` run so a re-invocation
-  //     (or a run already running/terminal) is not re-failed / double-`run:ended`.
-  //     Single-process sync DB → getRun+update is atomic (no await between).
-  //   - non-retryable regardless of started_at: a requeued run preserves its
-  //     started_at, so isNonRetryable(=!started_at) would let B-lite/goal retry.
-  //     setRetryCount(MAX_RETRY) makes B-lite skip; the common first-attempt
-  //     (started_at null) path is also goal-non-retryable. (A goal run rejected
-  //     here fails before goal_active is stamped → plain `failed`, acceptable for
-  //     these terminal-invalid cases.)
+  // Reject a worker run BEFORE it is claimed (Codex P2/P3 review):
+  //   - runService.rejectQueuedRun is an atomic CAS (queued→failed + retry_count
+  //     in one UPDATE): idempotent, never fails a running/terminal run, emits the
+  //     run:status/run:ended envelope. retry_count=MAX makes B-lite skip even a
+  //     requeued run whose started_at was preserved.
+  //   - A pre-claim reject leaves goal_active=0 (it is stamped only AFTER claim),
+  //     so goalVerdictService.settle() ignores the run → no goal retry either.
+  //     The run therefore never becomes a goal ATTEMPT; the specific event
+  //     (worker:profile_invalid / run:budget_exceeded) carries the reason.
+  //   Returns true iff it won the CAS (was still queued).
   function rejectQueuedWorker(runId, eventType, payload, reason) {
-    const cur = runService.getRun(runId);
-    if (!cur || cur.status !== 'queued') return;
-    runService.setRetryCount(runId, MAX_RETRY);
-    runService.addRunEvent(runId, eventType, JSON.stringify(payload));
-    runService.updateRunStatus(runId, 'failed', { force: true, reason });
+    const won = runService.rejectQueuedRun(runId, { reason, retryCount: MAX_RETRY });
+    if (won) runService.addRunEvent(runId, eventType, JSON.stringify(payload));
+    return won;
   }
 
   async function spawnQueuedRun(runId) {
@@ -843,20 +841,26 @@ function createLifecycleService({
     // LOOKUP error fails OPEN (spawn proceeds) — a budget-check bug must not halt
     // all of a project's work; only an actual over-budget state rejects.
     if (_pending && _pending.status === 'queued' && !_pending.is_manager && _pending.task_id) {
-      let _rejected = false;
+      // The LOOKUP is fail-open (a budget-check bug must not halt a project's
+      // work), but the REJECT write must NOT be swallowed by that catch — so
+      // compute over-budget inside try, then reject outside it.
+      let _over = null;
       try {
         const _task = taskService.getTask(_pending.task_id);
         const _project = _task && _task.project_id ? projectService.getProject(_task.project_id) : null;
+        // Opt-out is NULL ONLY. Any non-null budget_usd is a cap; 0 / negative
+        // caps everything (spent >= cap always true), consistent with the
+        // "NULL = no cap" invariant (Codex P3 review: `> 0` wrongly opted out 0).
         const _cap = _project && _project.budget_usd != null ? Number(_project.budget_usd) : null;
-        if (_cap != null && _cap > 0) {
+        if (_cap != null && Number.isFinite(_cap)) {
           const _spent = runService.sumProjectCost(_project.id);
-          if (_spent >= _cap) {
-            rejectQueuedWorker(runId, 'run:budget_exceeded', { project_id: _project.id, spent: _spent, budget_usd: _cap }, 'budget_exceeded');
-            _rejected = true;
-          }
+          if (_spent >= _cap) _over = { project_id: _project.id, spent: _spent, budget_usd: _cap };
         }
       } catch { /* fail-open on lookup error — never block work on a budget-check bug */ }
-      if (_rejected) return null;
+      if (_over) {
+        rejectQueuedWorker(runId, 'run:budget_exceeded', _over, 'budget_exceeded');
+        return null;
+      }
     }
     const claimed = runService.claimQueuedRun(runId);
     if (!claimed) return null;

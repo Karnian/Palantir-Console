@@ -105,4 +105,28 @@ test('spent < budget → spawns; spent ≥ budget → rejected before claim (non
     h.runService.getRunEvents(run2.id).some(e => e.event_type === 'run:budget_exceeded'),
     'run:budget_exceeded emitted',
   );
+  // non-retryable: retry_count forced to MAX (B-lite skips), goal_active never
+  // stamped (settle ignores → no goal retry). Codex P3 review #2/#3.
+  assert.equal(p2.retry_count, 1, 'retry_count forced to MAX_RETRY → B-lite non-retryable');
+  assert.ok(!p2.goal_active, 'goal_active=0 (rejected pre-claim, never a goal attempt) → goal settle skips');
+});
+
+test('budget_usd=0 caps everything (0 is a cap, not opt-out — only NULL opts out)', async (t) => {
+  const h = await harness(t);
+  const project = h.projectService.createProject({ name: 'Zero cap', directory: null, budget_usd: 0 });
+  const task = h.taskService.createTask({ project_id: project.id, title: 'T', description: 'x' });
+  const run = await h.lifecycleService.executeTask(task.id, { agentProfileId: insertCodexProfile(h.db), prompt: 'x' });
+  const p = h.runService.getRun(run.id);
+  assert.equal(p.status, 'failed', 'spent 0 >= cap 0 → rejected');
+  assert.equal(h.executionEngine.spawned.length, 0);
+});
+
+test('rejectQueuedRun is an idempotent CAS — a second call on a non-queued run loses', async (t) => {
+  const h = await harness(t);
+  const project = h.projectService.createProject({ name: 'P', directory: null });
+  const task = h.taskService.createTask({ project_id: project.id, title: 'T', description: 'x' });
+  const run = h.runService.createRun({ task_id: task.id, agent_profile_id: insertCodexProfile(h.db), prompt: 'x' });
+  assert.equal(h.runService.rejectQueuedRun(run.id, { reason: 'x', retryCount: 1 }), true, 'first CAS wins');
+  assert.equal(h.runService.getRun(run.id).status, 'failed');
+  assert.equal(h.runService.rejectQueuedRun(run.id, { reason: 'x', retryCount: 1 }), false, 'second CAS loses (not queued)');
 });

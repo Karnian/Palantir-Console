@@ -515,6 +515,11 @@ function createRunService(db, eventBus) {
       LEFT JOIN tasks t ON r.task_id = t.id
       WHERE t.project_id = ?
     `),
+    // P2/P3 review: atomic CAS reject of a still-QUEUED run (status + retry_count
+    // in one conditional UPDATE — idempotent, never fails a running/terminal run).
+    failQueuedRun: db.prepare(`
+      UPDATE runs SET status = 'failed', retry_count = ? WHERE id = ? AND status = 'queued'
+    `),
     // Goal activation: single per-run activation decision, stamped at spawn.
     setGoalActive: db.prepare(`
       UPDATE runs SET goal_active = ? WHERE id = ?
@@ -1362,6 +1367,28 @@ function createRunService(db, eventBus) {
     return Number((row && row.total) || 0);
   }
 
+  // P2/P3 review (#4): atomically reject a still-QUEUED worker run. One
+  // conditional UPDATE sets status='failed' + retry_count (CAS on queued → not a
+  // running/terminal run, idempotent on re-invocation). Emits the v3 Phase-5
+  // run:status + run:ended envelope (from_status='queued') so downstream (task
+  // sync, harvest, goal settle) reacts. retry_count=MAX makes B-lite skip it even
+  // if a requeue had preserved started_at. Returns true iff it won the CAS.
+  function rejectQueuedRun(runId, { reason = null, retryCount = 0 } = {}) {
+    const info = stmts.failQueuedRun.run(retryCount, runId);
+    if (info.changes === 0) return false;
+    const run = stmts.getById.get(runId);
+    addRunEvent(runId, 'status:failed', reason ? JSON.stringify({ reason }) : null);
+    if (eventBus) {
+      const envelope = {
+        run, from_status: 'queued', to_status: 'failed', reason: reason || null,
+        task_id: run.task_id || null, project_id: deriveOperatorProjectId(run), node_id: run.node_id || null,
+      };
+      eventBus.emit('run:status', envelope);
+      eventBus.emit('run:ended', envelope);
+    }
+    return true;
+  }
+
   function updateRunResult(id, { result_summary, exit_code, input_tokens, output_tokens, cost_usd }) {
     getRun(id);
     stmts.updateResult.run(
@@ -1672,7 +1699,7 @@ function createRunService(db, eventBus) {
 
   return {
     listRuns, getRun, createRun,
-    updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture, setSessionSnapshot, sumProjectCost, setGoalActive, setGoalWorkspacePath,
+    updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture, setSessionSnapshot, sumProjectCost, rejectQueuedRun, setGoalActive, setGoalWorkspacePath,
     updateGoalAcceptance, setDeliverableState,
     setGoalJudgeActive, casJudgePending, finalizeJudge, casJudgeExpiredToError,
     persistGoalVerdictTx,
