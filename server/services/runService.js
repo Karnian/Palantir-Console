@@ -505,6 +505,9 @@ function createRunService(db, eventBus) {
     updateGoalCapture: db.prepare(`
       UPDATE runs SET final_output = ?, goal_report = ? WHERE id = ?
     `),
+    setSessionSnapshot: db.prepare(`
+      UPDATE runs SET session_model = ?, session_effort = ? WHERE id = ?
+    `),
     // Goal activation: single per-run activation decision, stamped at spawn.
     setGoalActive: db.prepare(`
       UPDATE runs SET goal_active = ? WHERE id = ?
@@ -1366,6 +1369,12 @@ function createRunService(db, eventBus) {
     return stmts.getById.get(id);
   }
 
+  function setSessionSnapshot(id, { sessionModel = null, sessionEffort = null } = {}) {
+    getRun(id);
+    stmts.setSessionSnapshot.run(sessionModel, sessionEffort, id);
+    return stmts.getById.get(id);
+  }
+
   // Stamp the single per-run goal-activation decision (0|1) at spawn time.
   function setGoalActive(id, active) {
     getRun(id);
@@ -1648,7 +1657,7 @@ function createRunService(db, eventBus) {
 
   return {
     listRuns, getRun, createRun,
-    updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture, setGoalActive, setGoalWorkspacePath,
+    updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture, setSessionSnapshot, setGoalActive, setGoalWorkspacePath,
     updateGoalAcceptance, setDeliverableState,
     setGoalJudgeActive, casJudgePending, finalizeJudge, casJudgeExpiredToError,
     persistGoalVerdictTx,

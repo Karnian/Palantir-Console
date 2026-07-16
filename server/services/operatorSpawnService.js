@@ -85,6 +85,7 @@ function createOperatorSpawnService({
   skillPackService,    // optional — Phase 2: inject project skill pack list into PM prompt
   nodeService,         // optional — Fleet P4: run Operators on the project's bound node
   projectMaterializationService,
+  modelPolicyService,
   isSpecialistAvailable = () => false, // MD-1: mid-turn specialist delegation prompt gate
   authResolverOpts = {},
   resolveManagerAuth = defaultResolveManagerAuth, // optional DI — tests inject to force canAuth
@@ -643,9 +644,17 @@ function createOperatorSpawnService({
         cwd = resolveSpawnCwd({ workspaceDir: project.directory });
       }
       try {
+        const opVendor = adapterType === 'codex' ? 'codex' : 'claude';
+        const opEff = modelPolicyService
+          ? modelPolicyService.resolveEffective({ layer: 'operator', vendor: opVendor, projectId: project.id, env: process.env })
+          : { model: null, effort: null };
+        try { runService.setSessionSnapshot(runId, { sessionModel: opEff.model, sessionEffort: opEff.effort }); } catch { /* annotate-only */ }
+
         const startOpts = {
           systemPrompt,
           cwd,
+          model: opEff.model || undefined,
+          reasoning_effort: opEff.effort || undefined,
           // A REMOTE Operator must NOT receive the control-plane's spawnEnv
           // (buildManagerSpawnEnv is process.env-based): shipping the Mac's PATH
           // to the pod overrides the pathPrefix and breaks codex resolution (127

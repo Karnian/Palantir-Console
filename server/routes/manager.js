@@ -60,7 +60,7 @@ function parseMcpTools(capabilitiesJson) {
 // so tests can inject `hasKeychain` (and any future DI hooks) without
 // monkey-patching child_process. Production callers leave this empty and
 // get the real keychain probe.
-function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, operatorInstanceService, isSpecialistAvailable = () => false, authResolverOpts = {} }) {
+function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, operatorInstanceService, modelPolicyService, isSpecialistAvailable = () => false, authResolverOpts = {} }) {
   const router = express.Router();
 
   // PR1a: ManagerAdapter seam. The factory is the single entrypoint for
@@ -152,6 +152,8 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
               systemPrompt,
               env: spawnEnv,
               resumeSessionId: r.claude_session_id,
+              model: r.session_model || undefined,
+              reasoning_effort: r.session_effort || undefined,
             });
             managerRegistry.setActive('top', r.id, adapter);
             // Ensure run status is 'running'.
@@ -359,6 +361,8 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   const startOpts = {
                     systemPrompt,
                     cwd,
+                    model: r.session_model || undefined,
+                    reasoning_effort: r.session_effort || undefined,
                     // Remote Operator resume must NOT get the control-plane env
                     // (process.env-based) — it overrides the pod pathPrefix and
                     // leaks creds; the pod provides its own env + ~/.codex.
@@ -654,6 +658,12 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     const mcpTools = parseMcpTools(resolvedProfile && resolvedProfile.capabilities_json);
 
     try {
+      const vendor = adapterType === 'codex' ? 'codex' : 'claude';
+      const eff = modelPolicyService
+        ? modelPolicyService.resolveEffective({ layer: 'top', vendor, requestModel: model, env: process.env })
+        : { model: model || null, effort: null };
+      try { runService.setSessionSnapshot(runId, { sessionModel: eff.model, sessionEffort: eff.effort }); } catch { /* annotate-only */ }
+
       const { sessionRef } = adapter.startSession(runId, {
         // For Claude (persistent process) the prompt argument is the FIRST
         // user message piped via stdin during spawn. For Codex (stateless)
@@ -662,7 +672,8 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         prompt: initialUserContext,
         cwd: safeCwd,
         systemPrompt,
-        model: model || undefined,
+        model: eff.model || undefined,
+        reasoning_effort: eff.effort || undefined,
         env: spawnEnv,
         mcpTools: mcpTools.length > 0 ? mcpTools : undefined,
         // v3 Phase 0: all current manager starts are Top layer. PM layer

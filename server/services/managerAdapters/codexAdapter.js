@@ -241,7 +241,7 @@ function createCodexAdapter({
    * codexMcpFlatten.flattenMcpToCodexArgs. String config paths are for the
    * Claude adapter's `--mcp-config` path and are skipped here.
    */
-  function startSession(runId, { systemPrompt, cwd, model, env, role, resumeThreadId, onThreadStarted, mcpConfig, executor, nodePrefix, serviceTier } = {}) {
+  function startSession(runId, { systemPrompt, cwd, model, reasoning_effort, env, role, resumeThreadId, onThreadStarted, mcpConfig, executor, nodePrefix, serviceTier } = {}) {
     if (sessions.has(runId)) {
       throw new Error(`codexAdapter: session ${runId} already started`);
     }
@@ -268,6 +268,7 @@ function createCodexAdapter({
       usingRealSpawn: spawn === realSpawn,
       cwd: resolveSpawnCwd({ workspaceDir: cwd }),
       model: model || null,
+      effort: reasoning_effort || null,
       env: env || null, // PR4: filtered subprocess env from routes/manager.js
       role: role || 'manager', // v3 Phase 0: default to manager (tightened)
       // v3 Phase 3a: fires exactly once when thread.started arrives or on
@@ -435,6 +436,9 @@ function createCodexAdapter({
     }
     if (state.model) {
       args.push('-m', state.model);
+    }
+    if (state.effort) {
+      args.push('-c', `model_reasoning_effort="${state.effort}"`);
     }
     // M1: inject merged MCP config as leaf-level `-c mcp_servers.<alias>.<key>=<TOML>`
     // overrides. These must come BEFORE `-` (the stdin sentinel) — codex's
