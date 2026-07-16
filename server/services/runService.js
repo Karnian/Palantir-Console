@@ -521,7 +521,12 @@ function createRunService(db, eventBus) {
     // goal-active (incl. retry-child) run to error/non_retryable regardless of a
     // preserved started_at.
     failQueuedRun: db.prepare(`
-      UPDATE runs SET status = 'failed', retry_count = ?, non_retryable = 1 WHERE id = ? AND status = 'queued'
+      UPDATE runs
+         SET status = 'failed',
+             retry_count = MAX(retry_count, ?),
+             non_retryable = 1,
+             ended_at = datetime('now')
+       WHERE id = ? AND status = 'queued'
     `),
     // Goal activation: single per-run activation decision, stamped at spawn.
     setGoalActive: db.prepare(`

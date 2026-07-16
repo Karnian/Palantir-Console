@@ -146,6 +146,18 @@ test('rejectQueuedRun is an idempotent CAS — a second call on a non-queued run
   const task = h.taskService.createTask({ project_id: project.id, title: 'T', description: 'x' });
   const run = h.runService.createRun({ task_id: task.id, agent_profile_id: insertCodexProfile(h.db), prompt: 'x' });
   assert.equal(h.runService.rejectQueuedRun(run.id, { reason: 'x', retryCount: 1 }), true, 'first CAS wins');
-  assert.equal(h.runService.getRun(run.id).status, 'failed');
+  const failed = h.runService.getRun(run.id);
+  assert.equal(failed.status, 'failed');
+  assert.ok(failed.ended_at, 'terminal transition stamps ended_at');
   assert.equal(h.runService.rejectQueuedRun(run.id, { reason: 'x', retryCount: 1 }), false, 'second CAS loses (not queued)');
+});
+
+test('rejectQueuedRun never LOWERS an existing retry_count (MAX, not overwrite)', async (t) => {
+  const h = await harness(t);
+  const project = h.projectService.createProject({ name: 'P', directory: null });
+  const task = h.taskService.createTask({ project_id: project.id, title: 'T', description: 'x' });
+  // a run already on its 3rd attempt (retry_count=2), re-queued
+  h.db.prepare(`INSERT INTO runs (id, task_id, status, retry_count) VALUES ('r', ?, 'queued', 2)`).run(task.id);
+  h.runService.rejectQueuedRun('r', { reason: 'x', retryCount: 1 });
+  assert.equal(h.runService.getRun('r').retry_count, 2, 'MAX(2,1)=2 — attempt count not corrupted for review/webhook');
 });
