@@ -72,6 +72,8 @@ const { createPresetService } = require('./services/presetService');
 const { createWorkerPresetsRouter } = require('./routes/workerPresets');
 const { createMcpTemplateService } = require('./services/mcpTemplateService');
 const { createMcpTemplatesRouter } = require('./routes/mcpTemplates');
+const { createModelPolicyService } = require('./services/modelPolicyService');
+const { createModelPoliciesRouter } = require('./routes/modelPolicies');
 const { createMemoryService } = require('./services/memoryService');
 const { createMasterMemoryService } = require('./services/masterMemoryService');
 const { createMemoryDistillService } = require('./services/memoryDistillService');
@@ -1131,6 +1133,7 @@ function createApp(options = {}) {
   // the first request hit skillPackService. Must also come AFTER
   // presetService so tests can delete-then-verify reference behavior.
   const mcpTemplateService = createMcpTemplateService(db);
+  const modelPolicyService = createModelPolicyService(db);
 
   // Execution engines
   const executionEngine = options.executionEngine || createExecutionEngine();
@@ -1502,6 +1505,7 @@ function createApp(options = {}) {
   // the same base — the CRUD router's /:id routes don't match the deeper path.
   app.use('/api/operator/profiles', createOperatorProfileMemoryRouter({ memoryService, operatorProfileService }));
   app.use('/api/mcp-server-templates', createMcpTemplatesRouter({ mcpTemplateService }));
+  app.use('/api/model-policies', createModelPoliciesRouter({ modelPolicyService }));
   app.use('/api/skill-packs', createSkillPacksRouter({ skillPackService, registryService }));
   app.use('/api/projects', createSkillPacksRouter.projectBindings({ skillPackService }));
   app.use('/api/tasks', createSkillPacksRouter.taskBindings({ skillPackService }));
