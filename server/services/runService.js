@@ -508,6 +508,13 @@ function createRunService(db, eventBus) {
     setSessionSnapshot: db.prepare(`
       UPDATE runs SET session_model = ?, session_effort = ? WHERE id = ?
     `),
+    // Phase 3 (cost cap): total recorded cost of a project's task-linked runs.
+    sumProjectCost: db.prepare(`
+      SELECT COALESCE(SUM(r.cost_usd), 0) AS total
+      FROM runs r
+      LEFT JOIN tasks t ON r.task_id = t.id
+      WHERE t.project_id = ?
+    `),
     // Goal activation: single per-run activation decision, stamped at spawn.
     setGoalActive: db.prepare(`
       UPDATE runs SET goal_active = ? WHERE id = ?
@@ -1347,6 +1354,14 @@ function createRunService(db, eventBus) {
     return tx(runIds);
   }
 
+  // Phase 3 (cost cap): sum of recorded cost_usd across a project's task-linked
+  // runs (workers). Manager runs have no task_id → excluded. Returns a number.
+  function sumProjectCost(projectId) {
+    if (!projectId) return 0;
+    const row = stmts.sumProjectCost.get(projectId);
+    return Number((row && row.total) || 0);
+  }
+
   function updateRunResult(id, { result_summary, exit_code, input_tokens, output_tokens, cost_usd }) {
     getRun(id);
     stmts.updateResult.run(
@@ -1657,7 +1672,7 @@ function createRunService(db, eventBus) {
 
   return {
     listRuns, getRun, createRun,
-    updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture, setSessionSnapshot, setGoalActive, setGoalWorkspacePath,
+    updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture, setSessionSnapshot, sumProjectCost, setGoalActive, setGoalWorkspacePath,
     updateGoalAcceptance, setDeliverableState,
     setGoalJudgeActive, casJudgePending, finalizeJudge, casJudgeExpiredToError,
     persistGoalVerdictTx,

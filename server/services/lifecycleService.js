@@ -802,22 +802,61 @@ function createLifecycleService({
     return parts.length ? parts.join('\n') : null;
   }
 
+  // Reject a worker run BEFORE it is claimed. Codex P2/P3 review hardening:
+  //   - queued-only guard: only act on a still-`queued` run so a re-invocation
+  //     (or a run already running/terminal) is not re-failed / double-`run:ended`.
+  //     Single-process sync DB → getRun+update is atomic (no await between).
+  //   - non-retryable regardless of started_at: a requeued run preserves its
+  //     started_at, so isNonRetryable(=!started_at) would let B-lite/goal retry.
+  //     setRetryCount(MAX_RETRY) makes B-lite skip; the common first-attempt
+  //     (started_at null) path is also goal-non-retryable. (A goal run rejected
+  //     here fails before goal_active is stamped → plain `failed`, acceptable for
+  //     these terminal-invalid cases.)
+  function rejectQueuedWorker(runId, eventType, payload, reason) {
+    const cur = runService.getRun(runId);
+    if (!cur || cur.status !== 'queued') return;
+    runService.setRetryCount(runId, MAX_RETRY);
+    runService.addRunEvent(runId, eventType, JSON.stringify(payload));
+    runService.updateRunStatus(runId, 'failed', { force: true, reason });
+  }
+
   async function spawnQueuedRun(runId) {
-    // P2-A2: fail-closed structured-field backstop BEFORE claim → non-retryable
-    // (started_at still null). Catches raw-SQL-contaminated profiles that
-    // bypassed agentProfileService's save-time validation.
+    // P2-A2: fail-closed structured-field backstop BEFORE claim (non-retryable).
+    // Catches raw-SQL-contaminated profiles that bypassed the save-time
+    // validation.
     const _pending = runService.getRun(runId);
-    if (_pending && !_pending.is_manager && _pending.agent_profile_id) {
+    if (_pending && _pending.status === 'queued' && !_pending.is_manager && _pending.agent_profile_id) {
       let _prof = null;
       try { _prof = agentProfileService.getProfile(_pending.agent_profile_id); } catch { _prof = null; }
       if (_prof) {
         try { validateStructuredModelEffort(_prof); }
         catch (err) {
-          runService.addRunEvent(runId, 'worker:profile_invalid', JSON.stringify({ reason: err.message }));
-          runService.updateRunStatus(runId, 'failed', { force: true, reason: 'worker_profile_invalid' });
+          rejectQueuedWorker(runId, 'worker:profile_invalid', { reason: err.message }, 'worker_profile_invalid');
           return null;
         }
       }
+    }
+    // Phase 3 (cost cap): opt-in project budget constraint, enforced BEFORE claim
+    // (non-retryable). REJECT over budget — never a silent model downgrade.
+    // Opt-in: only when projects.budget_usd is a positive number → NULL is
+    // byte-identical (no check). A cap is a soft, spend-governance guard, so a
+    // LOOKUP error fails OPEN (spawn proceeds) — a budget-check bug must not halt
+    // all of a project's work; only an actual over-budget state rejects.
+    if (_pending && _pending.status === 'queued' && !_pending.is_manager && _pending.task_id) {
+      let _rejected = false;
+      try {
+        const _task = taskService.getTask(_pending.task_id);
+        const _project = _task && _task.project_id ? projectService.getProject(_task.project_id) : null;
+        const _cap = _project && _project.budget_usd != null ? Number(_project.budget_usd) : null;
+        if (_cap != null && _cap > 0) {
+          const _spent = runService.sumProjectCost(_project.id);
+          if (_spent >= _cap) {
+            rejectQueuedWorker(runId, 'run:budget_exceeded', { project_id: _project.id, spent: _spent, budget_usd: _cap }, 'budget_exceeded');
+            _rejected = true;
+          }
+        }
+      } catch { /* fail-open on lookup error — never block work on a budget-check bug */ }
+      if (_rejected) return null;
     }
     const claimed = runService.claimQueuedRun(runId);
     if (!claimed) return null;
@@ -1313,7 +1352,10 @@ function createLifecycleService({
 
       // Route Claude Code workers through streamJsonEngine for rich event parsing.
       // Other agents (codex, gemini, etc.) use the tmux/subprocess executionEngine.
-      const isClaude = (profile.command || '').includes('claude');
+      // Codex P2 review: use the same case-insensitive command-based resolver
+      // as adapterName / save-time validation (a custom `Claude` command must
+      // not fall through to the tmux branch and drop the structured model).
+      const isClaude = adapterName === 'claude';
       if (isRemoteNode && isClaude) {
         runService.addRunEvent(run.id, 'spawn:remote_claude_unsupported', JSON.stringify({
           node_id: run.node_id || 'local',

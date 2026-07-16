@@ -78,8 +78,11 @@ function AgentModal({ open, onClose, agent, onSaved }) {
         type,
         command: command.trim() || undefined,
         args_template: argsTemplate.trim() || undefined,
-        model: model.trim() || null,
-        reasoning_effort: reasoningEffort || null,
+        // Codex P2 review: null out fields the current vendor does not support
+        // (e.g. after a codex→claude/gemini switch) so a stale hidden value does
+        // not reach the server's merged-state validator and 400.
+        model: (vendor === 'codex' || vendor === 'claude') ? (model.trim() || null) : null,
+        reasoning_effort: vendor === 'codex' ? (reasoningEffort || null) : null,
         icon: icon.trim() || undefined,
         color: color.trim() || undefined,
         max_concurrent: parseInt(maxConcurrent, 10) || 1,

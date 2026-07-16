@@ -30,6 +30,15 @@ function validateCommand(command) {
   return trimmed;
 }
 
+// Codex P2 review: buildAgentArgs strips a token's surrounding double quotes at
+// EXECUTION (`part.replace(/^"(.*)"$/, '$1')`), so a template token `"--model"`
+// runs as the real `--model` flag. The conflict scanner must unquote each token
+// the SAME way before matching, else `exec "--model" baked` evades the check and
+// double-sets model at runtime.
+function unquoteToken(token) {
+  return String(token).replace(/^"(.*)"$/, '$1');
+}
+
 function normalizeConfigFragment(fragment) {
   let value = String(fragment || '').trim();
   if (value.length >= 2) {
@@ -61,7 +70,10 @@ function validateStructuredModelEffort(mergedProfile) {
   const vendor = resolveAgentVendor(mergedProfile.command);
   const { model, reasoning_effort: reasoningEffort } = mergedProfile;
   const argsTemplate = String(mergedProfile.args_template || '');
-  const tokens = argsTemplate.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
+  // Unquote each token to mirror buildAgentArgs' execution-time quote stripping
+  // (Codex P2 review) so a quoted flag like `"--model"` / `"-c"` cannot evade
+  // the conflict scan and re-inject at runtime.
+  const tokens = (argsTemplate.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(unquoteToken);
   const configFragments = getConfigFragments(tokens);
 
   if (reasoningEffort != null) {
