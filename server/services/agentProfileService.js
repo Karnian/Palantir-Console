@@ -182,4 +182,4 @@ function createAgentProfileService(db) {
   return { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, getRunningCount };
 }
 
-module.exports = { createAgentProfileService };
+module.exports = { createAgentProfileService, validateStructuredModelEffort };

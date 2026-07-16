@@ -14,6 +14,7 @@ const { createLocalNodeExecutor, createLocalWorkerChannel } = require('./nodeExe
 const { explainDispatch } = require('./dispatchPolicy');
 const { resolveProjectSource } = require('./projectSource');
 const { createProjectMaterializationService } = require('./projectMaterializationService');
+const { validateStructuredModelEffort } = require('./agentProfileService');
 const { compileGoalPrompt } = require('./goalPrompt'); // G1
 const { parseGoalReport } = require('./goalReport'); // G1
 const { createGoalVerdictService } = require('./goalVerdictService'); // G3
@@ -802,6 +803,22 @@ function createLifecycleService({
   }
 
   async function spawnQueuedRun(runId) {
+    // P2-A2: fail-closed structured-field backstop BEFORE claim → non-retryable
+    // (started_at still null). Catches raw-SQL-contaminated profiles that
+    // bypassed agentProfileService's save-time validation.
+    const _pending = runService.getRun(runId);
+    if (_pending && !_pending.is_manager && _pending.agent_profile_id) {
+      let _prof = null;
+      try { _prof = agentProfileService.getProfile(_pending.agent_profile_id); } catch { _prof = null; }
+      if (_prof) {
+        try { validateStructuredModelEffort(_prof); }
+        catch (err) {
+          runService.addRunEvent(runId, 'worker:profile_invalid', JSON.stringify({ reason: err.message }));
+          runService.updateRunStatus(runId, 'failed', { force: true, reason: 'worker_profile_invalid' });
+          return null;
+        }
+      }
+    }
     const claimed = runService.claimQueuedRun(runId);
     if (!claimed) return null;
 
@@ -884,6 +901,12 @@ function createLifecycleService({
       });
     }
     const profile = agentProfileService.getProfile(agentProfileId);
+    try {
+      runService.setSessionSnapshot(run.id, {
+        sessionModel: profile.model || null,
+        sessionEffort: profile.reasoning_effort || null,
+      });
+    } catch { /* annotate-only */ }
     const adapterName = resolveAdapterName(profile);
     const node = getDispatchNode(run.node_id);
     const isRemoteNode = node && (node.kind || 'local') !== 'local';
@@ -1359,6 +1382,7 @@ function createLifecycleService({
               prompt,
               cwd,
               env: spawnEnv,
+              model: profile.model || undefined,
               systemPrompt,
               permissionMode: 'bypassPermissions',
               allowedTools: mcpTools.length > 0 ? mcpTools : undefined,
@@ -1465,6 +1489,8 @@ function createLifecycleService({
         // codex detection is command-based via resolveAdapterName (a non-codex
         // wrapper command must not get `-c`).
         if (adapterName === 'codex') {
+          if (profile.reasoning_effort) extraArgs.push('-c', `model_reasoning_effort="${profile.reasoning_effort}"`);
+          if (profile.model) extraArgs.push('-m', profile.model);
           extraArgs.push('-c', 'service_tier="default"');
         }
         const baseArgs = buildAgentArgs(profile, prompt, placeholders);
