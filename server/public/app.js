@@ -35,6 +35,7 @@ import { NewTaskModal, ExecuteModal, TaskDetailPanel } from './app/components/Ta
 import { SkillPacksView } from './app/components/SkillPacksView.js';
 import { PresetsView } from './app/components/PresetsView.js';
 import { McpTemplatesView } from './app/components/McpTemplatesView.js';
+import { ModelPoliciesView } from './app/components/ModelPoliciesView.js';
 import { NodesView } from './app/components/NodesView.js';
 import { MemoryView } from './app/components/MemoryView.js';
 import { SpecialistView } from './app/components/SpecialistView.js';
@@ -443,6 +444,7 @@ function App() {
           { key: 'skills',      label: NAV_LABELS.skills,          render: () => html`<${SkillPacksView} projects=${projects} />` },
           { key: 'presets',     label: NAV_LABELS.presets,         render: () => html`<${PresetsView} />` },
           { key: 'mcp-servers', label: NAV_LABELS['mcp-servers'],  render: () => html`<${McpTemplatesView} />` },
+          { key: 'models',      label: NAV_LABELS.models,          render: () => html`<${ModelPoliciesView} projects=${projects} />` },
         ]}
       />`;
     }

@@ -33,6 +33,7 @@ export const NAV_SUB_ITEMS = [
   { hash: 'resources/skills',      icon: '♢', label: NAV_LABELS.skills },
   { hash: 'resources/presets',     icon: '❖', label: NAV_LABELS.presets },
   { hash: 'resources/mcp-servers', icon: '⦿', label: NAV_LABELS['mcp-servers'] },
+  { hash: 'resources/models',      icon: '⚙', label: NAV_LABELS.models },
   { hash: 'operator/roster',       icon: '✸', label: NAV_LABELS['operator-roster'] },
   { hash: 'operator/codebases',    icon: '▣', label: NAV_LABELS['operator-codebases'] },
   { hash: 'operator/profiles',     icon: '⊙', label: NAV_LABELS['operator-profiles'] },

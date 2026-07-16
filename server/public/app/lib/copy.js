@@ -89,6 +89,7 @@ export const NAV_LABELS = {
   skills: '스킬 팩',
   presets: '프리셋',
   'mcp-servers': 'MCP 서버',
+  models: '모델 정책',
   nodes: '노드',
   memory: '메모리',
   'operator-roster': '오퍼레이터 로스터',
