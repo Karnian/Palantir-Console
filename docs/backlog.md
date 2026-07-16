@@ -28,6 +28,11 @@
 ### ~~F2. Fleet 배포 runbook~~ ✅ 완료 (2026-07-03)
 - [`docs/runbook-fleet-deploy.md`](./runbook-fleet-deploy.md) — 컨트롤 플레인 기동(PALANTIR_TOKEN/BASE_URL/HOST) / pod ssh+CLI 선로그인 / `#resources` 노드 등록 / 프로젝트 바인딩 / 검증된 토폴로지 매트릭스 / 트러블슈팅 / 보안 요약.
 
+### MP. Model/Effort 정책 레이어 (설정 페이지) — 🔒 LOCKED, 착수 대기
+- **Spec**: [`docs/specs/model-policy-brief.md`](./specs/model-policy-brief.md) (2026-07-16, **LOCKED**). **Codex 설계검토 5R GO + 사용자 lock-in** — R1 축 → R2 8건 → R3 3건 → R4 3건(꼬리) → **R5 GO**(신규 모순 0). **착수 방식 = codex-goal 위임** (사용자 지정, 격리 worktree + Themis 외부검증).
+- **요지**: Palantir 가 spawn 하는 CLI(claude/codex)의 model·effort·tier 를 UI 에서 구조적으로 설정. 현재 전부 위임(Top=요청param/CLI기본, Operator=CLI기본, Worker=args_template 자유문자열, codex service_tier 만 코드 강제) → 정책 레이어로 통제. **축 = Role×Vendor + per-Codebase(operator)** (Node×CLI 아님 — 모델은 벤더 능력이라 노드 독립). **필드 단위 tri-state**(inherit/explicit/cli-default). 단일 `model_policies` 테이블(scope ∈ global/layer:top/layer:operator/codebase, params_json vendor별, non-null sentinel UNIQUE + scope↔scope_id CHECK) + 단일 tx CAS(409)/audit/`AFTER DELETE ON projects` orphan trigger. **tier=live(fast_mode 3-state), model/effort=session-snapshot(`runs.session_model/effort`)+resume 재사용**. F-1 절대우선(Worker/auto_review 강제 standard, args_template tier 토큰 refuse, argv 순서 불변→byte-identical). Origin 검증 + effective-source UI + golden test(argv/env/resume/quoting).
+- **Phase**: **Phase 1**(착수 대상) = Top/layer:operator/per-codebase/global 정책 CRUD + fast_mode 3-state 통합 + snapshot/resume + 설정 UI (**Worker 불변**). Phase 2 = Worker 구조화(agent_profiles→args_template 결정적 치환) + operator_profile 스코프 + claude thinking + gemini. Phase 3(선택) = Node feasibility 검증(actionable error) + cost cap constraint.
+
 **나머지 Ready 비어 있음.** K-2~K-5 시리즈 + Fleet P4/P5(F1/F2 포함) 전부 종결.
 
 진행 가능한 후속 nice-to-have (deferred — 사용자 트리거 시):

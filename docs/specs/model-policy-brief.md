@@ -1,6 +1,6 @@
 # Model/Effort 정책 레이어 (설정 페이지) — brief
 
-> **상태: Codex 설계검토 2R 완료 (R1 GO-WITH-CHANGES → R2 GO-WITH-CHANGES, 8건 must-fix 전부 본 개정판에 반영). 최종 재게이트 대기 → lock-in 후 구현.**
+> **상태: 🔒 LOCKED — Codex 설계검토 5R GO + 사용자 lock-in (2026-07-16). R1 GO-WITH-CHANGES(축) → R2 8건 → R3 3건 → R4 3건(꼬리) → R5 GO(신규 모순 0). 구현 착수는 보류(Ready, 다른 작업 우선). 착수 방식 = codex-goal 위임(격리 worktree + Themis 외부검증).**
 > 작성: 2026-07-16. 배경 조사: codexAdapter.js(exec args 조립), streamJsonEngine.js(--model), lifecycleService(worker args 순서), routes/manager.js(Top startSession), operatorSpawnService(Operator startSession — project 로드 확인), agent_profiles / operator_profiles / operator_instances(profile_id 대부분 NULL) / projects(preferred_pm_adapter) / nodes 스키마. Codex 검증: 축·필드단위 해석·저장·resume/cache·F-1 불변식·SQLite 유일성·보안 2라운드.
 
 ## 1. 배경 / 문제
