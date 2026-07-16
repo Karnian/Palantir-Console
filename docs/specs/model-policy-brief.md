@@ -152,4 +152,7 @@ presence-기반. 키 부재=inherit, 값=explicit, `"__cli_default__"`=cli-defau
 - Top per-entity 스코프 불요(싱글턴) — `layer:top` + `global` 만.
 
 **남은 열린 질문 (구현 착수엔 무영향, 착수 시 결정):**
-1. Phase 1 UI 위치: 새 `#settings` 탭 vs 기존 리소스/오퍼레이터 서브뷰? (스펙 무관, UI 배치만.)
+1. ~~Phase 1 UI 위치~~ → `#resources/models` 서브탭으로 구현 완료.
+
+**Phase 1 후 발견된 follow-up (스코프 밖, 별도 트랙):**
+- **codex 워커 prompt-argv 주입 하드닝 (pre-existing, broader)**: worker `args_template` 의 `{prompt}` 는 argv 위치에 치환되므로, prompt 가 `-cservice_tier="fast"` 처럼 `-` 로 시작하면 codex 파서가 옵션으로 해석 → **모든 `-c` 옵션**(tier/model/mcp) 주입 가능. MP-4b 의 템플릿-레벨 tier refuse 는 견고하나(author 템플릿 구조 차단), prompt 경로는 미커버. F-1 의 실제 목적(user config fast 의 배치 **우발** 유출)은 완전 차단됨 — 이건 **의도적 조작** 벡터라 trusted-local-operator 위협모델에서 우선순위 낮음. 근본 수정 = codex 워커 prompt 를 `--` 옵션종결자 뒤 또는 stdin 으로 전달(manager codex 경로처럼). tier 국한이 아니라 전 codex 워커 spawn argv 위생 문제이므로 별도 스코프. Codex Phase-1 final review 지적.
