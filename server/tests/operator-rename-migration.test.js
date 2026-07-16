@@ -82,6 +82,10 @@ const RUN_COLUMNS = [
   // G3c Gate 1.5 judge (migration 060).
   'goal_judge_active',
   'judge_json',
+  // MP-1 (migration 061): Model/Effort policy per-session snapshot — ALTER ADD
+  // appends at end. NULL = emit nothing (CLI default); boot resume reuses.
+  'session_model',
+  'session_effort',
 ];
 
 const COMPOSITION_EVENT_COLUMNS = [
