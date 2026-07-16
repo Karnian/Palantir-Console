@@ -1535,15 +1535,17 @@ function createLifecycleService({
   }
 
   function hasForbiddenWorkerTierArg(args) {
-    for (let i = 0; i < args.length; i++) {
-      const arg = String(args[i]);
-      if (/(?:service_tier|features\.fast_mode)=/.test(arg)) return true;
-      if (arg === '-c' && i + 1 < args.length
-        && /^(?:service_tier|features\.fast_mode)\s*=/.test(String(args[i + 1]))) {
-        return true;
-      }
-    }
-    return false;
+    // Broad, case-insensitive substring denylist (Codex final-review blocker):
+    // a `-c` fragment can spell the tier as valid TOML in many shapes —
+    // `service_tier="fast"`, `'"service_tier" = "fast"'`, `features.fast_mode=true`.
+    // A tight token regex misses quoted keys / spacing, and because the
+    // template-derived baseArgs are appended AFTER the forced
+    // `service_tier="default"` (extraArgs), any surviving tier token would
+    // last-win and re-enable fast on a batch worker. No legitimate worker
+    // template ever needs to touch the service tier, so reject the substrings
+    // outright (fail-closed). extraArgs' forced default is NOT scanned (only
+    // baseArgs is passed in).
+    return args.some(a => /service_tier|fast_mode/i.test(String(a)));
   }
 
   /**

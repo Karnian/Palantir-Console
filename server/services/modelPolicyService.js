@@ -169,6 +169,13 @@ function createModelPolicyService(db) {
     let action;
 
     if (!existing) {
+      // A supplied expectedRevision means the caller believes it is EDITING an
+      // existing row. If the row is gone (deleted mid-edit), do NOT revive it
+      // via INSERT — the caller's view is stale. Only a create (no
+      // expectedRevision) may INSERT. (Codex final-review blocker.)
+      if (expectedRevision != null) {
+        throw new NotFoundError('model policy not found');
+      }
       try {
         stmts.insert.run({ ...key, params_json: paramsJson, changed_by: actor });
       } catch (err) {

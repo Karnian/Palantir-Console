@@ -160,6 +160,24 @@ test('Codex worker refuses tier tokens from args_template and accepts a normal t
     /service_tier\/features\.fast_mode not allowed in worker args_template/,
   );
 
+  // Codex final-review blocker: valid TOML with a QUOTED key + spacing must
+  // ALSO be refused. The prior tight regex only matched `service_tier=` and
+  // missed `'"service_tier" = "fast"'` — which codex would still parse as
+  // service_tier=fast, re-overriding the forced default on a batch worker.
+  const quotedTask = taskService.createTask({
+    project_id: project.id,
+    title: 'Quoted tier worker',
+    description: 'must fail closed',
+  });
+  const quotedProfileId = insertCodexProfile(db, `-c '"service_tier" = "fast"' exec {prompt}`);
+  await assert.rejects(
+    () => lifecycleService.executeTask(quotedTask.id, {
+      agentProfileId: quotedProfileId,
+      prompt: 'hello',
+    }),
+    /worker args_template must not set service_tier\/features\.fast_mode/,
+  );
+
   const safeTask = taskService.createTask({
     project_id: project.id,
     title: 'Standard worker',
@@ -181,4 +199,38 @@ test('Codex worker refuses tier tokens from args_template and accepts a normal t
     !runService.getRunEvents(safeRun.id)
       .some((event) => event.event_type === 'worker:tier_forbidden'),
   );
+});
+
+test('putPolicy: stale edit after delete → NotFoundError, not a revived INSERT', async (t) => {
+  // Codex final-review blocker: a PUT that carries expectedRevision means the
+  // caller believes it is EDITING an existing row. If that row was deleted
+  // meanwhile, the write must 404 — it must NOT resurrect the policy via INSERT.
+  const db = await createTestDatabase(t);
+  const service = createModelPolicyService(db);
+
+  const created = service.putPolicy({
+    scope_type: 'global', scope_id: '*', vendor: 'codex',
+    params: { tier: 'fast' }, changed_by: 'human',
+  });
+  assert.equal(created.revision, 1);
+
+  service.deletePolicy({ scope_type: 'global', scope_id: '*', vendor: 'codex', changed_by: 'human' });
+
+  // stale edit (expectedRevision present) on the now-deleted row → 404
+  assert.throws(
+    () => service.putPolicy({
+      scope_type: 'global', scope_id: '*', vendor: 'codex',
+      params: { tier: 'standard' }, expectedRevision: 1, changed_by: 'human',
+    }),
+    (err) => err && err.constructor && err.constructor.name === 'NotFoundError',
+  );
+  // and it did NOT revive the row
+  assert.equal(service.getPolicy({ scope_type: 'global', scope_id: '*', vendor: 'codex' }), null);
+
+  // a genuine create (no expectedRevision) still works afterwards
+  const recreated = service.putPolicy({
+    scope_type: 'global', scope_id: '*', vendor: 'codex',
+    params: { tier: 'standard' }, changed_by: 'human',
+  });
+  assert.equal(recreated.revision, 1);
 });
