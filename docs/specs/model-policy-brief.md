@@ -81,9 +81,13 @@ CREATE UNIQUE INDEX idx_model_policies_scope
 
 - **model 명 enum 잠금 금지 (Codex R1)**: 모델 목록은 빨리 변함. UI 추천만, custom 허용, 실검증은 실행지점(Phase 3).
 - **params_json app-level 로 vendor별 엄격 검증** (허용 키/값·sentinel 형식). DB 질의 필요 커지면 vendor별 child table 로(현재 불필요).
-- **쓰기 = 낙관적 CAS (Codex R2 #7 확정)**: 서비스 계층이 read-then-write. 신규 scope = `INSERT`(revision=1). 기존 scope = 조건부 `UPDATE ... SET params_json=?, revision=revision+1, changed_by=?, updated_at=datetime('now') WHERE scope_type=? AND scope_id=? AND vendor=? AND revision=?expected`. **0행 변경 + row 존재 = 409 Conflict**(동시편집), 재조회 유도. `changed_by`/`updated_at` 은 last-writer 이지 이력 아님 → 아래 별도 감사 테이블로 이력 보존.
-- **감사 이력 (Codex R2 #7)**: append-only `model_policy_audit(id, scope_type, scope_id, vendor, params_json_after, changed_by, created_at)` — 비용영향 설정의 변경 이력. 매 쓰기마다 1행 append(정책 write 와 동일 tx).
-- **codebase orphan 원자화 (Codex R2 #7 확정, 본문↔열린질문 충돌 제거)**: model_policies 마이그레이션 안에서 `CREATE TRIGGER AFTER DELETE ON projects → DELETE FROM model_policies WHERE scope_type='codebase' AND scope_id=OLD.id` (+ audit 도 tombstone append). project 삭제와 **원자적**. 쓰기 시엔 서비스 계층이 `scope_type='codebase'` 의 scope_id 가 실존 project 인지 검증(단일 FK 불가: scope_type 혼재). Phase 1 은 codebase scope 만 orphan 대상.
+- **쓰기 = 단일 tx 낙관적 CAS (Codex R2+R4 #B 확정)**: 모든 write 를 **하나의 better-sqlite3 동기 tx** 로 감싼다(단일 프로세스 동기 API → tx 내 원자적, TOCTOU 없음). tx 내부 순서:
+  1. `scope_type='codebase'` 면 `SELECT 1 FROM projects WHERE id=?scope_id` — 없으면 **400/404**(존재 검증 + write 가 같은 tx 라 이후 삭제와 경합 없음).
+  2. 기존 row `SELECT revision` — **없으면** `INSERT`(revision=1); UNIQUE 충돌(동시 신규 INSERT 경합) = `SQLITE_CONSTRAINT` → **409**. **있으면** 조건부 `UPDATE ... revision=revision+1 ... WHERE (scope,vendor)=? AND revision=?expected`.
+  3. `UPDATE 0행` 분기: 재조회 → **row 존재 = 409**(revision mismatch, 동시편집) / **row 없음 = 404**(그 사이 삭제됨).
+  4. 같은 tx 에서 audit 1행 append. `changed_by`/`updated_at` 은 last-writer 이지 이력 아님.
+- **감사 이력 (Codex R2 #7)**: append-only `model_policy_audit(id, scope_type, scope_id, vendor, action, params_json_after, changed_by, created_at)` — 비용영향 설정 변경 이력. write/삭제(tombstone)마다 1행, 정책 write 와 동일 tx.
+- **codebase orphan 원자화 (Codex R2 #7 확정)**: model_policies 마이그레이션 안에서 `CREATE TRIGGER AFTER DELETE ON projects → DELETE FROM model_policies WHERE scope_type='codebase' AND scope_id=OLD.id`. project 삭제와 **원자적**(trigger 이므로 app-code 무의존). Phase 1 은 codebase scope 만 orphan 대상.
 
 ### 3.4 vendor별 params (Phase 1 지원 매트릭스 = §3.7)
 
@@ -104,10 +108,10 @@ presence-기반. 키 부재=inherit, 값=explicit, `"__cli_default__"`=cli-defau
 
 - **tier(fast_mode) = LIVE 유지**: 매 턴 재조회(F-1 의 ⚡ 즉시반영 계약 보존). tier 변경은 라우팅이라 mid-thread 안전.
 - **model/effort = SESSION-SNAPSHOT**: `startSession` 시점에 1회 resolve → 세션 내 고정, 매턴 재조회 금지(mid-thread 모델 변경은 CLI 버전 의존이라 위험).
-- **snapshot 저장 위치 = `operator_instances` 컬럼으로 확정** (양자택일 폐기 — resume 주체가 instance thread 이므로): migration 으로 `operator_instances.session_model TEXT NULL`, `session_effort TEXT NULL` 추가.
-  - **저장 의미 (sentinel/NULL 통합)**: 스냅샷은 리졸버가 산출한 **"emit 할 실제 argv 값"** 을 담는다. explicit → 구체 모델명/effort 문자열. cli-default(`__cli_default__`) 및 자연폴백은 **둘 다 "아무것도 emit 안 함"** 으로 귀결하므로 **NULL 로 저장**(두 경우 argv 동일하여 하류 구분 불요). 즉 `session_model=NULL ⇒ -m 미emit`, 구체값 ⇒ `-m <값>`.
-  - **생성**: 새 session 의 `startSession` 직후 1회 write. **갱신**: 오직 새 session(새 thread mint = resumeThreadId 없는 spawn, 또는 명시 reset) 시 재resolve → overwrite. **세션 중 갱신 금지**.
-  - **boot resume 복원**: resume 은 `session_model/session_effort` 를 **그대로 읽어 emit**, 리졸버 **재실행 금지**(정책이 바뀌었어도 thread 는 시작 모델로 이어짐). NULL 이면 spawn 때와 동일하게 미emit.
+- **snapshot 저장 위치 = `runs` 컬럼으로 확정 (Codex R4 #A — Top+Operator 공통 분모)**: Top(Claude persistent)은 `operator_instances` 가 없으므로 instance 컬럼은 Operator 만 커버. 매니저 run(Top·Operator 모두 `runs` 에 `is_manager=1` row 존재)이 공통 분모이고 boot resume 이 매니저 run 을 순회하므로, migration 으로 `runs.session_model TEXT NULL`, `runs.session_effort TEXT NULL` 추가. Worker run 은 Phase 1 미사용(NULL 고정).
+  - **저장 의미 (sentinel/NULL 통합)**: 스냅샷은 리졸버가 산출한 **"emit 할 실제 argv 값"** 을 담는다. explicit → 구체 모델명/effort 문자열. cli-default(`__cli_default__`) 및 자연폴백은 **둘 다 "아무것도 emit 안 함"** 으로 귀결하므로 **NULL 로 저장**(두 경우 argv 동일하여 하류 구분 불요). 즉 `session_model=NULL ⇒ -m/--model 미emit`, 구체값 ⇒ emit.
+  - **생성**: 새 session 의 `startSession` 직후, 그 매니저 run 에 1회 write. **갱신**: 오직 새 session(새 thread/claude_session mint = resume 아닌 spawn, 또는 명시 reset → 새 run) 시 재resolve → 새 run 에 write. **세션 중 갱신 금지**.
+  - **boot resume 복원 (Top·Operator 동일)**: resume 은 대상 매니저 run 의 `session_model/session_effort` 를 **그대로 읽어 emit**, 리졸버 **재실행 금지**(정책이 바뀌었어도 thread/session 은 시작 모델로 이어짐). NULL 이면 spawn 때와 동일하게 미emit.
 - `model_instructions_file` 경로 안정성은 프롬프트 입력 안정성만 보장하며 모델 변경 후 cache hit 보장 아님 — 문서 명시.
 
 ### 3.7 Phase 1 지원 매트릭스 (Codex R2 #8 — lock-in 전 확정)
@@ -135,7 +139,7 @@ presence-기반. 키 부재=inherit, 값=explicit, `"__cli_default__"`=cli-defau
 ## 6. 불변식 / 회귀 가드
 
 - **빈 테이블 = 오늘과 byte-identical**: **golden test 로 argv + env + resume + quoting 전부** 검증(Codex: argv 만으론 부족). Top/Operator/Worker/auto_review 4경로. clean template 은 argv **바이트 동일**.
-- **F-1 절대우선 + golden 모순 해소 (Codex R2 #4 + 재게이트)**: Worker·auto_review tier = 무조건 standard, 모든 정책 상위. **argv 순서는 오늘 그대로 유지**(강제 `-c service_tier="default"` 는 현행 extraArgs 선두 위치 불변 — "뒤에 append" 안 함, byte-identical 파괴 방지). last-wins 누수는 **args_template 내 `service_tier`/`features.fast_mode` 토큰을 거부**로 차단: profile 저장 시 검증(reject) + spawn 시 방어(strip/refuse). 기본 codex 워커 템플릿엔 tier 토큰이 없으므로(effort 만) 정상 템플릿은 전부 무변경. golden test = (a) clean template argv 오늘과 동일, (b) tier 토큰 삽입 템플릿은 거부됨.
+- **F-1 절대우선 + golden 모순 해소 (Codex R2 #4 + 재게이트)**: Worker·auto_review tier = 무조건 standard, 모든 정책 상위. **argv 순서는 오늘 그대로 유지**(강제 `-c service_tier="default"` 는 현행 extraArgs 선두 위치 불변 — "뒤에 append" 안 함, byte-identical 파괴 방지). last-wins 누수는 **args_template 내 `service_tier`/`features.fast_mode` 토큰을 거부(refuse)로 단일화 차단 (Codex R4 #C — strip 폐기)**: profile 저장 시 검증(reject) + spawn 시에도 동일하게 **refuse**(fail-closed run, strip 안 함 — golden "거부" 기준과 일치). 기본 codex 워커 템플릿엔 tier 토큰이 없으므로(effort 만) 정상 템플릿은 전부 무변경. golden test = (a) clean template argv 오늘과 동일, (b) tier 토큰 삽입 템플릿은 거부됨.
 - codex `service_tier` 항상 명시 emit 유지(정책은 값만 고름).
 - model/effort session-frozen + resume 스냅샷 재사용(정책 재읽기 금지).
 - Worker 경로 Phase 1 완전 불변.
@@ -143,7 +147,7 @@ presence-기반. 키 부재=inherit, 값=explicit, `"__cli_default__"`=cli-defau
 ## 7. 확정 사항 / 열린 질문
 
 **재게이트에서 확정 (전 열린질문 해소):**
-- snapshot = `operator_instances.session_model/session_effort` 컬럼, NULL=미emit, 새 session 시만 overwrite, resume 은 스냅샷 재사용(§3.6).
+- snapshot = `runs.session_model/session_effort` 컬럼(Top+Operator 매니저 run 공통), NULL=미emit, 새 session 시만 write, boot resume 은 매니저 run 스냅샷 재사용(§3.6).
 - orphan = `AFTER DELETE ON projects` trigger 원자 삭제(§3.3).
 - Top per-entity 스코프 불요(싱글턴) — `layer:top` + `global` 만.
 
