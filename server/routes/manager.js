@@ -375,8 +375,21 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                     // re-spawn. Bridge resume (no instance row) → env default.
                     // Ignored by the Claude adapter.
                     serviceTier: operatorInstanceId
-                      ? () => resolveCodexServiceTier(runService.getOperatorInstance(operatorInstanceId)?.fast_mode)
-                      : resolveCodexServiceTier(null),
+                      ? () => (modelPolicyService
+                        ? modelPolicyService.resolveServiceTier({
+                          layer: 'operator',
+                          projectId,
+                          instanceFastMode: runService.getOperatorInstance(operatorInstanceId)?.fast_mode,
+                          env: process.env,
+                        })
+                        : resolveCodexServiceTier(runService.getOperatorInstance(operatorInstanceId)?.fast_mode))
+                      : (modelPolicyService
+                        ? modelPolicyService.resolveServiceTier({
+                          layer: 'operator',
+                          projectId,
+                          env: process.env,
+                        })
+                        : resolveCodexServiceTier(null)),
                   };
                   if (adapterType === 'codex') {
                     startOpts.resumeThreadId = resumeHandle;
@@ -683,7 +696,9 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         // F-1: Top has no operator instance, so its codex tier follows the
         // PALANTIR_CODEX_FAST env only (static string, resolved once). Ignored
         // by the Claude adapter.
-        serviceTier: resolveCodexServiceTier(null),
+        serviceTier: modelPolicyService
+          ? modelPolicyService.resolveServiceTier({ layer: 'top', env: process.env })
+          : resolveCodexServiceTier(null),
       });
       const result = sessionRef;
 

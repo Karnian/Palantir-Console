@@ -671,8 +671,21 @@ function createOperatorSpawnService({
           // fast_mode each turn so a live ⚡ toggle applies on the next turn
           // without a re-spawn. Ignored by the Claude adapter.
           serviceTier: operatorInstanceId
-            ? () => resolveCodexServiceTier(runService.getOperatorInstance(operatorInstanceId)?.fast_mode)
-            : resolveCodexServiceTier(null),
+            ? () => (modelPolicyService
+              ? modelPolicyService.resolveServiceTier({
+                layer: 'operator',
+                projectId: project.id,
+                instanceFastMode: runService.getOperatorInstance(operatorInstanceId)?.fast_mode,
+                env: process.env,
+              })
+              : resolveCodexServiceTier(runService.getOperatorInstance(operatorInstanceId)?.fast_mode))
+            : (modelPolicyService
+              ? modelPolicyService.resolveServiceTier({
+                layer: 'operator',
+                projectId: project.id,
+                env: process.env,
+              })
+              : resolveCodexServiceTier(null)),
           onThreadStarted,
           onSessionStarted,
           mcpTools: pmMcpTools.length > 0 ? pmMcpTools : undefined,

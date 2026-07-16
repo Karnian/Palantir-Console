@@ -277,12 +277,24 @@ function createModelPolicyService(db) {
     });
   }
 
+  function resolveServiceTier({ layer, projectId, instanceFastMode, env } = {}) {
+    const { tier } = resolveEffective({
+      layer,
+      vendor: 'codex',
+      projectId,
+      instanceFastMode,
+      env,
+    });
+    return tier === 'fast' ? 'fast' : 'default';
+  }
+
   return {
     listPolicies,
     getPolicy,
     putPolicy,
     deletePolicy,
     resolveEffective,
+    resolveServiceTier,
   };
 }
 

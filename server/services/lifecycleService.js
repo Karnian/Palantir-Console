@@ -1468,6 +1468,13 @@ function createLifecycleService({
           extraArgs.push('-c', 'service_tier="default"');
         }
         const baseArgs = buildAgentArgs(profile, prompt, placeholders);
+        if (adapterName === 'codex' && hasForbiddenWorkerTierArg(baseArgs)) {
+          runService.addRunEvent(run.id, 'worker:tier_forbidden', JSON.stringify({
+            adapter: 'codex',
+            reason: 'service_tier/features.fast_mode not allowed in worker args_template (batch is always standard)',
+          }));
+          throw new Error('worker args_template must not set service_tier/features.fast_mode');
+        }
         const args = adapterName === 'codex' ? [...extraArgs, ...baseArgs] : baseArgs;
         // G1: for a LOCAL goal worker, tee stdout to a file so the final output
         // survives past the process-local buffer (§5k-2). Remote workers keep
@@ -1525,6 +1532,18 @@ function createLifecycleService({
       });
       throw error;
     }
+  }
+
+  function hasForbiddenWorkerTierArg(args) {
+    for (let i = 0; i < args.length; i++) {
+      const arg = String(args[i]);
+      if (/(?:service_tier|features\.fast_mode)=/.test(arg)) return true;
+      if (arg === '-c' && i + 1 < args.length
+        && /^(?:service_tier|features\.fast_mode)\s*=/.test(String(args[i + 1]))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
