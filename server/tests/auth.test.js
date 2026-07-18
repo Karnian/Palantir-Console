@@ -261,31 +261,41 @@ test('Referrer-Policy: no-referrer header is set', async (t) => {
 
 // ---- Login page exists and does NOT read ?token= ----
 
-test('/login.html is served statically and self-contained', async (t) => {
+test('/login.html + /login.js are served statically, self-contained, CSP-safe', async (t) => {
   const app = await createTestApp(t);
-  const res = await request(app).get('/login.html');
-  assert.equal(res.status, 200);
-  assert.match(res.text, /POST.*\/api\/auth\/login/s);
-  // Must NOT resurrect ?token= URL bootstrap.
-  assert.ok(!/searchParams\.get\(['"]token['"]\)/.test(res.text), 'login.html should not read token from URL');
+  const html = await request(app).get('/login.html');
+  assert.equal(html.status, 200);
+  // CSP is `script-src 'self'` (no 'unsafe-inline'/nonce), so the login logic
+  // MUST live in an external same-origin file — an inline <script> is blocked
+  // by the browser, which silently broke the form (native GET, no auth).
+  assert.match(html.text, /<script\s+src=["']login\.js["']/);
+  assert.ok(!/document\.getElementById\(['"]login['"]\)/.test(html.text),
+    'login.html must not inline the form logic (CSP script-src self)');
+
+  const js = await request(app).get('/login.js');
+  assert.equal(js.status, 200);
+  assert.match(js.text, /POST.*\/api\/auth\/login/s);
+  // Must NOT resurrect the ?token= URL bootstrap (token only ever POSTed).
+  assert.ok(!/searchParams\.get\(['"]token['"]\)/.test(js.text), 'login must not read token from URL');
   // Must contain the hardened sanitizeNext function — Codex PR1 R2 blocker fix.
-  assert.match(res.text, /function sanitizeNext/);
+  assert.match(js.text, /function sanitizeNext/);
 });
 
 // ---- sanitizeNext (Codex PR1 R2 blocker #1) ----
 //
-// login.html contains its own sanitizeNext function (it's client-side). We
-// can't import it directly, but we CAN extract it from the served HTML and
+// login.js contains its own sanitizeNext function (it's client-side). We
+// can't import it directly, but we CAN extract it from the served JS and
 // eval it inside a sandbox — that's what these tests do. Hostile `next`
 // values must always fall back to "/".
 
-test('login.html sanitizeNext rejects hostile redirects', async (t) => {
+test('login.js sanitizeNext rejects hostile redirects', async (t) => {
   const app = await createTestApp(t);
-  const res = await request(app).get('/login.html');
+  const res = await request(app).get('/login.js');
   // Extract the function source via regex. Fragile, but acceptable for a
-  // single well-known file under our own control.
-  const m = res.text.match(/function sanitizeNext\(raw\)\s*\{[\s\S]*?\n    \}\n/);
-  assert.ok(m, 'sanitizeNext source not found in login.html');
+  // single well-known file under our own control. (0-indent closing brace in
+  // the external file, vs the old inline 4-space indent.)
+  const m = res.text.match(/function sanitizeNext\(raw\)\s*\{[\s\S]*?\n\}\n/);
+  assert.ok(m, 'sanitizeNext source not found in login.js');
 
   // Evaluate in a minimal vm with a fake `location` object. Use a throwing
   // `URL` constructor for protocol-relative on our origin; Node's URL is
