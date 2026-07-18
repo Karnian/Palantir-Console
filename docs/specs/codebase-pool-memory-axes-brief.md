@@ -1,124 +1,138 @@
 # 공용 프로젝트 폴더 풀 + 직교 3축 메모리 — 후속 설계 brief
 
-> **상태**: DRAFT (검토 대기 — Codex 게이트 → 사용자 lock-in 전).
-> **부모 brief**: [`operator-codebase-refs-brief.md`](./operator-codebase-refs-brief.md) (W-P0~W-P7 구현 완결), [`memory-layer-brief.md`](./memory-layer-brief.md), [`operator-generalization-brief.md`](./operator-generalization-brief.md).
-> **성격**: 새 아키텍처가 아니라 **(A) 이미 LOCKED 된 계약을 구현이 못 따라간 갭 마감 + (B) 의도적으로 defer 됐던 오퍼레이터 페르소나 메모리 축(P-B2) 완성.**
+> **상태**: v2 DRAFT (Codex R1 **NO-GO**(6 BLOCKER/7 SERIOUS/2 NIT) 반영. Codex R2 재게이트 대기 → 사용자 lock-in 전).
+> **권한 모델 LOCKED** (사용자, 2026-07-19): **공용 풀(favorite) 모델** — refs 는 dispatch 권한이 아니라 기본값/라우팅/watch-요약. 부모 brief §3.D(reference=dispatch권한) **하향 수정**. (§4)
+> **부모 brief**: [`operator-codebase-refs-brief.md`](./operator-codebase-refs-brief.md), [`memory-layer-brief.md`](./memory-layer-brief.md), [`operator-generalization-brief.md`](./operator-generalization-brief.md).
+> **성격**: 새 아키텍처가 아니라 **(A) LOCKED 계약을 구현이 못 따라간 갭 마감 + (B) defer 됐던 오퍼레이터 페르소나 메모리 축(P-B2) 완성 + (C) 공용 풀 권한 의미 재잠금.**
 
 ## 0. 용어
 
 - **프로젝트 폴더** = 코드베이스 = `projects` 테이블 (사용자 호칭. 코드/DB 엔티티 리네임 없음 — 개념 명칭만).
-- **오퍼레이터** = `operator_instances` (identity: `oi_<nanoid>`). **매니저** = Master/Top (메모리 owner `user`).
+- **오퍼레이터** = `operator_instances` (identity `oi_<nanoid>`). **매니저** = Master/Top (메모리 owner `user`).
 - 3계층: Master(Top) → Operator → Worker.
 
 ## 1. 사용자 요구 (2026-07-19)
 
-1. **Q1 — 프로젝트 폴더 자유 참조**: "폴더를 특정 오퍼레이터에 **할당하지 않더라도** 다른 오퍼레이터가 자유롭게 참조할 수 있는 형태였으면 좋겠다." = 폴더 = 어떤 오퍼레이터든 참조·작업 가능한 **공용 풀**.
-2. **Q2 — 메모리 재스코핑**: "메모리도 프로젝트 폴더 별이 아니라 **매니저·오퍼레이터 별**로 되어야 하는 것 아닌가?"
+1. **Q1 — 폴더 자유 참조**: "폴더를 특정 오퍼레이터에 **할당하지 않더라도** 다른 오퍼레이터가 자유롭게 참조할 수 있는 형태" = 폴더 = 어떤 오퍼레이터든 참조·작업 가능한 **공용 풀**.
+2. **Q2 — 메모리 재스코핑**: "메모리도 폴더 별이 아니라 **매니저·오퍼레이터 별**로 되어야 하는 것 아닌가?"
 
-## 2. 검증된 현황 (Explore ×2 + Codex 독립 조사 3자 수렴 → 코드 확정)
+## 2. 검증된 현황 (Explore ×2 + Codex 독립조사 + Codex 게이트 3자 → 코드 확정)
 
-부모 brief 는 W-P0~W-P7 을 "전 구현 완결"로, `operator-codebase-refs-brief.md` §3.D/§3.F 를 "반영 완료"로 기재하나, **실제 코드는 두 LOCKED 계약을 지키지 않는다** (아래 file:line 은 이번 세션 직접 확인).
+부모 brief 는 W-P0~W-P7 을 "전 구현 완결", §3.D/§3.F 를 "반영 완료"로 기재하나 **코드는 두 LOCKED 계약을 안 지킨다** (file:line 직접 확인, Codex R1 재검증 CONFIRMED).
 
 ### 2.1 Q1 관련 — 현재는 "폴더 = 오퍼레이터 1:1 소유" (공용 풀 아님)
 
-| 사실 | 근거 |
-|---|---|
-| `operator_codebase_refs.role ∈ {primary, reference}` (컬럼명 `ref_type` 아님). primary = 폴더당 1 + 인스턴스당 1 (이중 partial-unique). reference = 무제한. | `db/migrations/051_operator_instances.sql:21-37` |
-| 오퍼레이터에 첫 메시지 → `oi_<projectId>` lazy 생성 + 자기 폴더 primary 물고 태어남 → **기본값 = 폴더 1개가 오퍼레이터 1명에 소유됨** | `runService.ensurePrimaryOperatorInstanceForProject`, `051…sql:63-76` |
-| `reference` ref 는 오퍼레이터 cwd/파일 접근을 **확장하지 않음** — cwd 는 항상 primary 폴더 고정 | `operatorSpawnService.js:636-655` |
-| ref 는 하드 접근 게이트도 아님 — ref 없이 dispatch 해도 실행되고 `operator_instance_id=null` "unwatched" 기록 | `lifecycleService.js:709-739` |
-| **[LOCKED §3.D 미준수]** reconciliation 이 claim 의 프로젝트를 오퍼레이터의 `primaryProjectId ‖ legacyProjectId` 와만 비교 → **reference 폴더에 대한 claim 은 400.** brief §3.D 는 "claim ∈ instance refs(any role)" 를 명시했으나 코드는 primary-only. | `reconciliationService.js:335, 342-351` |
+| 사실 | 근거 | R1 |
+|---|---|---|
+| `operator_codebase_refs.role ∈ {primary, reference}`. primary = 폴더당 1 + 인스턴스당 1(이중 partial-unique). reference = 무제한 | `051_operator_instances.sql:21-37` | — |
+| 첫 메시지 → `oi_<projectId>` lazy 생성 + 자기 폴더 primary → **기본값 = 폴더 1개가 오퍼레이터 1명 소유** | `runService.js:781`, `051…sql:63-76` | — |
+| `reference` ref 는 cwd/파일 접근 **미확장** — cwd 항상 primary 폴더 고정 | `operatorSpawnService.js:636-655` | — |
+| ref 없이 dispatch 해도 실행되나 `operator_instance_id/parent_run_id=null` "unwatched" → **harvest/auto-review 가 dispatch 오퍼레이터가 아니라 폴더 primary 로 귀환** | `lifecycleService.js:686,691,724`, `app.js:348` | CONFIRMED |
+| **[§3.D 미준수]** reconciliation 이 claim 프로젝트를 `primaryProjectId ‖ legacyProjectId` 와만 비교 → reference 폴더 claim 은 400 | `reconciliationService.js:335,342-351` | CONFIRMED (a) |
+| audit attribution 도 primary/legacy 일치 요구 → reference claim 허용해도 audit instance NULL | `reconciliationService.js:435,451` | CONFIRMED |
 
-→ **판정**: 지금은 공용 풀이 아니다. `reference` 를 붙여도 (a) 실제 작업 접근이 안 열리고 (b) 그 폴더에 대한 dispatch 가 audit 에서 거부될 수 있다. brief 가 약속한 "reference = dispatch 권한"이 reconciliation 에서 미구현.
+### 2.2 Q2 관련 — 메모리는 이미 owner-key, 단 오퍼레이터 축 미완
 
-### 2.2 Q2 관련 — 메모리는 이미 owner-key (workspace/user/profile), 단 오퍼레이터 축 미완
+| 사실 | 근거 | R1 |
+|---|---|---|
+| `owner_type ∈ {workspace(=project_id), user(=Master 전역), profile(=폴더없는 오퍼레이터)}` | `ownerKey.js:37-84`, `044_profile_memory_items.sql:30-66` | — |
+| 매니저 메모리(user, `master_memory_items`)·폴더없는 오퍼레이터 메모리(profile) 이미 존재 | `030_master_memory.sql`, `specialistService.js:101-125` | — |
+| **[§3.F 미준수]** 상주 오퍼레이터 turn 주입 owner = `workspace`(+조건부 user)뿐. profile·watch-list 요약 없음 | `conversationService.js:440,468-474` | CONFIRMED (b) |
+| **generic turn 자체가 사실상 없음** — explicit 없으면 항상 primary workspace, primary 없을 때만 generic(=비범위 refs-only) | `conversationService.js:52` | CONFIRMED |
+| profile distillation 미배선 — scheduler 가 non-workspace owner skip | `memoryDistillService.js:165,173-176` | CONFIRMED (c) |
+| **profile revision 사실상 0** — adapter 가 `getRevision(ownerId)` 호출하나 그 함수는 인자를 **workspace project_id 로 조회**하고 profile write 는 revision bump 를 생략 → 정상 profile id 는 0 반환(ID 충돌 시 엉뚱한 non-zero 위험). ⚠ "상수 0"이 아니라 **잘못된 workspace 조회**(R1 NIT 정정) | `memoryComposer.js:640,646`, `memoryService.js:273,300` | REFUTED-문언 / 효과 CONFIRMED (d) |
+| HTTP 라우트가 turn 폴더 컨텍스트(`codebaseProjectId`) 유실 — 서비스는 받으나 라우트가 `{text,images}`만 | `conversations.js:48` vs `conversationService.js:244` | CONFIRMED (e) |
 
-| 사실 | 근거 |
-|---|---|
-| 메모리는 `project_id` 단일 스코프 → `(owner_type, owner_id)` 로 리팩터링 완료. `owner_type ∈ {workspace(=project_id), user(=Master 전역), profile(=폴더 없는 오퍼레이터)}` | `services/ownerKey.js:37-84`, `db/migrations/044_profile_memory_items.sql:30-66` |
-| 매니저 메모리(user, `master_memory_items`)·폴더-없는 오퍼레이터 메모리(profile) 는 **이미 존재** | `db/migrations/030_master_memory.sql`, `044…sql`, `specialistService.js:101-125` |
-| **[LOCKED §3.F 미준수]** 상주(폴더-bound) 오퍼레이터 generic turn 주입 owner = `workspace`(+조건부 `user`)뿐. **profile 도 watch-list 요약도 주입 안 함.** brief §3.F 는 "generic turn = User/Profile + watch-list 요약"을 명시. | `conversationService.js:468-474` |
-| `user`+`workspace` 동시 주입은 `PALANTIR_MEMORY_MULTI_OWNER=1`(기본 off) 일 때만. 기본은 workspace 있으면 workspace-only. | `conversationService.js:440`, `app.js` options |
-| profile candidate distillation 미배선 — scheduler 가 non-workspace owner skip → 오퍼레이터가 remember 해도 candidate 영구 pending | `memoryDistillService.js:173-176` ("deferred to P-B2") |
-| profile revision = 항상 0 (project_memory_revision 은 workspace 전용). specialist 는 ephemeral 이라 무해하나, **상주 오퍼레이터에 붙이면 ledger 캐시 무효화가 깨짐** | `memoryComposer.js:646-651` |
-| HTTP 메시지 라우트가 turn 의 명시적 폴더 컨텍스트(`codebaseProjectId`)를 유실 — 서비스는 인자를 받으나 라우트가 `{text, images}` 만 추출 | `routes/conversations.js:48` vs `conversationService.js:421` |
+## 3. 핵심 통찰 — 직교 메모리 축 (3축 + episodic L0)
 
-→ **판정**: "매니저/오퍼레이터 별 메모리" 축은 **개념·스키마상 이미 있으나**, 폴더-bound 오퍼레이터의 **페르소나 축이 배선 미완**(distillation/revision/generic-turn 주입 전부 defer 상태).
+3자 만장일치: 폴더 공용화(Q1) + 폴더 지식까지 오퍼레이터 이동(Q2 직역) = **충돌**(A가 배운 함정을 B가 못 봄 ‖ 페르소나 섞임). 해소 = 지식을 종류별 직교 축으로.
 
-## 3. 핵심 통찰 — 두 요구는 그대로 합치면 **충돌**, 직교 3축이 해소책
-
-3자(Explore ×2 + Codex) 만장일치:
-
-> 폴더를 공용화(Q1)하면서 **폴더 지식**까지 오퍼레이터별로 옮기면(Q2 직역) → 오퍼레이터 A 가 그 폴더에서 배운 함정/빌드법을 오퍼레이터 B 가 못 본다. 반대로 전부 폴더에 묶으면 오퍼레이터 페르소나가 섞인다.
-
-**해소 = 메모리를 한 축이 아니라 직교 3축으로** (지금 owner-key 설계가 이미 의도한 구조):
-
-| 지식 종류 | owner_type | 스코프 | 근거 |
+| 지식 종류 | 축 | 스코프 | 근거 |
 |---|---|---|---|
-| **폴더 지식** (convention/함정/빌드·테스트법/env fact) | `workspace` | 폴더 = 공유 | 같은 폴더 쓰는 **모든** 오퍼레이터가 공유해야 함 → Q1(공용화)을 **뒷받침** |
-| **오퍼레이터 페르소나** (선호 접근법·보고 스타일·장기 판단) | `profile` | 오퍼레이터 | Q2 의 핵심. **배선 미완** |
-| **매니저/사용자 정책** (교차 프로젝트 선호) | `user` | 전역 | 이미 있음 |
+| **폴더 지식** (안정적 convention/함정/빌드·테스트법) | `workspace` (장기) | 폴더=공유 | 폴더 쓰는 모두 공유 → Q1 뒷받침 |
+| **오퍼레이터 페르소나** (선호 접근법·보고 스타일) | `profile` (장기) | 오퍼레이터 | Q2 핵심. 배선 미완 |
+| **매니저/사용자 정책** | `user` (장기) | 전역 | 이미 있음 |
+| **task/run/branch/node-specific 관측·가설** | **`episodic` (L0)** | 단명 | R1 SERIOUS 7 — workspace 오염 방지 |
 
-→ 사용자 직관("메모리를 오퍼레이터별로")은 **페르소나에 대해선 맞고, 폴더 지식에 대해선 폴더 공유가 맞다.** 따라서 Q2 는 "폴더 메모리를 오퍼레이터로 이동"이 아니라 **"폴더 지식은 공유 유지 + 오퍼레이터 페르소나 축 완성"** 으로 재정의한다.
+- **왜 episodic(L0) 축을 명시하나**: 현재 실행 관측(예: Node 환경)을 프로젝트 단일 `env.node_resolution` fact 로 **덮어씀**(`app.js:637,651`). branch/worktree/source-generation 별 사실이나 작업 중 가설을 workspace 장기기억으로 올리면 다른 오퍼레이터를 오염시킨다. → **workspace 승격 admission 강화**: operator·task·branch 무관한 안정 사실만 workspace 승격, 나머지는 episodic 유지(부모 메모리 모델 L0 유지).
+- 사용자 Q2 직관은 **페르소나엔 맞고 폴더 지식엔 폴더 공유가 맞다** → Q2 = "폴더 메모리 이동"이 아니라 **"폴더 지식 공유 유지 + 오퍼레이터 페르소나 축 완성 + episodic 분리"**.
 
-## 4. 설계
+## 4. LOCKED — 공용 풀 권한 모델 (favorite) — 사용자 2026-07-19
 
-리네임/파괴 없음. 전 변경 additive + 부모 brief 계약 위에서.
+부모 §3.D(reference=dispatch권한)를 **하향 수정**. (R1 BLOCKER 1 해소)
 
-### Track A — 공용 프로젝트 폴더 풀 완성 (Q1)
+- **`projects` = 공용 리소스 풀.** 폴더 row 가 존재하면 어떤 오퍼레이터든 참조·dispatch 대상으로 삼을 수 있다. ref 는 **작업 가능 여부의 하드 게이트가 아니다.**
+- **refs 의미**: `primary` = 기본 라우팅 수신자 + 기본 cwd + auto-review fallback. `reference` = favorite/watch + 컨텍스트 요약 대상. **둘 다 dispatch "권한"이 아니다.**
+- **attribution 은 refs 가 아니라 `pm_run_id` 로부터 파생**: 유효한 오퍼레이터 `pm_run_id` 가 dispatch 하면 대상 폴더에 ref 가 없어도 `runs.operator_instance_id`/`parent_run_id` 를 **유지**하고 `dispatch:unwatched_codebase` 관측 이벤트만 남긴다(하드 차단 아님). → auto-review 가 dispatch 한 오퍼레이터로 정확히 귀환.
+- **audit 은 current refs 가 아니라**: ① 서버-derive instance(`pm_run_id`→instance) + ② entity project binding(task/run→project 결합 무결성, **제거 금지**) + ③ worker 의 durable `run.operator_instance_id` 로 검증. **current-ref membership 검사 금지**(TOCTOU — dispatch 후 ref 제거 시 오귀속, R1 SERIOUS 2).
+- **refs mutation 은 favorite 편집**이라 human/operator 모두 허용(하드 게이트 모델이었다면 human-only 여야 했으나 favorite 이므로 불필요).
 
-- **A1 (reconciliation §3.D 정합)**: claim 의 `project_id/task_id/run_id` 검증을 primary-only → **오퍼레이터 instance refs(any role) 멤버십**으로. reference 폴더에 대한 정당한 claim 이 400 안 나게. **단 task/run→project 결합 무결성 검사는 유지**(권한과 별개인 데이터 경계 — 잘못된 프로젝트에 audit data 기록 방지). annotate-only 불변.
-- **A2 (turn-context 폴더 선택)**: `POST /api/conversations/:id/message` 가 `codebaseProjectId`(오퍼레이터의 watch-list ∈ 검증) 를 받아 `sendMessage` 에 전달. 오퍼레이터가 watch 중인 **N 폴더 중 이번 턴 대상 1개**를 명시. no-selection = 기존 동작(primary). router 다중 매칭 disambiguation 포함.
-- **A3 (의미 확정, 스키마 무변경)**: `primary` = 기본 라우팅 수신자 + 기본 cwd + auto-review fallback **만**. `reference` = watch/favorite + dispatch 권한. **ref 를 "작업 가능 여부"의 하드 게이트로 쓰지 않는다**(폴더 row 존재 = 참조 가능). 실제 파일 작업은 대상 폴더의 **워커**가 그 폴더 workspace 에서 수행(오퍼레이터는 오케스트레이션). = "공용성 = 언제든 선택 가능"이지 "항상 전부 주입/접근"이 아님.
+## 5. 설계
 
-### Track B — 직교 메모리 3축 완성 (Q2)
+리네임/파괴 없음. 전 변경 additive.
 
-- **B1 (generic-turn 주입 §3.F 정합)**: 상주 오퍼레이터 generic turn 에 (a) 오퍼레이터 profile 메모리 + (b) watch-list 요약을 owner 로 합성. A2 의 turn-context 와 연동: **codebase-specific turn** = 선택된 폴더 workspace 강주입(+profile+user), **generic turn** = profile+user + watch-list 요약(N workspace raw 전체 주입 금지), **auto-review turn** = 해당 워커 폴더 workspace 만. ledger vector 는 선택 주입 owner 만.
-- **B2 (profile 파이프라인 완성 = 구 deferred P-B2)**: `memoryDistillService` 의 non-workspace skip 해제 → profile candidate→distill→promote 전 경로 배선 + **profile revision 실체화**(profile 전용 revision 카운터 — `memoryComposer.buildProfileAdapter` 의 revision-0 가 상주 오퍼레이터에선 ledger 캐시 무효화를 깸). permanent-pending 처리 포함.
-- **B3 (열린 결정 — §8)**: 폴더-bound 오퍼레이터 인스턴스의 페르소나를 **profile 로 키잉**(codex 권장: 안정적 `operator_profiles.id`) vs **신규 `owner_type='operator_instance'`** 추가. 기본안 = profile 재사용, instance-owner 는 정말 instance별 자서전 상태가 필요할 때만.
+### 5.0 turnMode 계약 (R1 BLOCKER 2 해소 — 선행)
+- 오퍼레이터 send 경로에 명시적 **`turnMode ∈ {codebase, generic, auto_review}`** 도입:
+  - `codebase`: 특정 폴더 문맥(explicit `codebaseProjectId` 또는 primary). 그 폴더 workspace 강주입.
+  - `generic`: 폴더 비특정(오케스트레이션/상담). watch-list 요약 + profile + user 주입, **N workspace raw 미주입**.
+  - `auto_review`: harvest 리뷰. 해당 워커 폴더 workspace 만.
+- `resolveTurnCodebaseContext` 를 turnMode 인지로 확장(현재 "explicit 없으면 무조건 primary" 를 대체). generic 이 도달 가능해짐.
 
-### 문서 정합 (Track A/B 에 동반)
+### Track A — 공용 폴더 풀 (Q1)
+- **A1 (attribution & audit)**: (i) dispatch 시 유효 pm_run_id 면 ref 무관 attribution 유지(§4). (ii) reconciliation/`deriveOperatorInstanceIdFromPmRun` 을 refs 일치 요구에서 **서버-derive instance + entity binding + durable run id** 로 전환. cross-project 오염 방어는 entity binding 이 담당(약화 없음). annotate-only 불변.
+- **A2a (turn-context 배선)**: `POST /api/conversations/:id/message` + 클라 hook 이 `codebaseProjectId` + `turnMode` 전달. 서비스 소비.
+- **A2b (컨텍스트 실제 전달 — R1 BLOCKER 3 핵심)**: 선택 폴더를 오퍼레이터에게 **실제 전달** — outbound payload 에 "이번 턴 대상 폴더" 구조화 블록(경로/브랜치/브리프 요약) + router 응답이 "현재 오퍼레이터 유지 + codebase context" 반환(현재는 explicit 프로젝트를 그 폴더 primary 로 **재라우팅** `routerService.js:91,110`) + UI 폴더 선택기. 시스템 프롬프트의 "이 프로젝트 범위에 머물라"(`operatorSpawnService.js:249`) 를 turn-context 인지로 완화. **실제 파일 작업은 대상 폴더 워커가 수행**(오퍼레이터=오케스트레이션, 다중폴더 직접편집은 비범위).
+- **A2 out-of-watch-list 정책** (R1 rec #3): 존재하는 project row 면 허용(ref 자동생성 ✗ — hidden state mutation 금지), 없는/삭제된 project 만 fail-closed. primary fallback ✗(사용자 선택 조용히 변경 금지).
 
-- 부모 `operator-codebase-refs-brief.md` 상태줄("§3.D/§3.F 반영 완료")과 CLAUDE.md 의 해당 서술을 **실제 코드 상태에 맞게 정정**(정합 완료 시점에 갱신). = codex 가 짚은 doc-drift 2건 종결.
+### Track B — 직교 메모리 축 (Q2)
+- **B0 (profile 바인딩/백필/lifecycle — R1 BLOCKER 4 + SERIOUS 5, 신설 선행)**: `operator_instances.profile_id` 백필(legacy 인스턴스마다 private profile 생성) + assign/unassign API + profile delete **409 가드**(참조 instance 있으면) + orphan memory 정책 + persona 변경 시 thread invalidation. 최종 `profile_id` NOT NULL 지향. (B3 구 열린결정 = profile 재사용으로 확정, `operator_instance` owner 신설 ✗ — 042/044 CHECK+jobs/candidates/items/revision/Composer 전면 재migration 회피)
+- **B2a (owner-keyed profile revision — R1 BLOCKER 5, B1 앞)**: profile 전용 revision 카운터 실체화(현 `getRevision` 의 workspace 조회 → owner-keyed). profile active write 가 revision bump. **B1 앞에 배치**(안 그러면 최초 주입 후 profile 수정 영구 stale).
+- **B1 (generic-turn 주입 §3.F, flag-gated — R1 SERIOUS 3)**: turnMode 별 owner 합성 — codebase(선택 폴더 workspace + profile + user) / generic(profile + user + watch-list 요약) / auto_review(워커 폴더 workspace만). ledger vector 는 선택 주입 owner 만. **`PALANTIR_MEMORY_MULTI_OWNER` off 기본 byte-identical 유지** → 신규 주입은 flag/turn-context 게이트 하 rollout(기존 `memory-composer-multi-owner.test.js:309` 계약 불변).
+- **B2b (profile distill 파이프라인 — R1 BLOCKER 6)**: `memoryDistillService` non-workspace skip 해제 + **job/candidate/item 전 단계 `(owner_type, owner_id)` exact binding**(현 promotion 의 `cand.project_id === job.project_id` 는 profile 이 둘 다 NULL 이라 붕괴 — owner 쌍 검사로 교체) + permanent-pending 처리. 기존 `PALANTIR_MEMORY_DISTILL` off 기본 하 rollout(specialist 에도 profile memory 주입되는 건 의도된 제품변화).
+- **watch-list 요약 예산** (R1 rec #4): **metadata-only, 최대 8 ref 또는 800 tokens**. primary+explicit-selected 항상 포함, 나머지 결정론 정렬, 초과 `+N more`. 이름/id/role/node 정도만 — raw workspace memory·전체 brief 금지. selected codebase turn 에서만 그 폴더 brief 요약 + workspace memory 를 별도 capped block.
 
-## 5. Phasing (각 phase 독립 배포 + Codex 교차검증, additive)
+### 문서 정합 (P0, R1 NIT 2)
+- 부모 `operator-codebase-refs-brief.md:3` 상태줄("§3.D/§3.F 반영 완료")·CLAUDE.md 해당 서술을 **P0 에서 즉시 정정**(중간 phase 동안 거짓 상태 유지 금지). §4 로 §3.D 는 하향 수정됨을 명기.
 
-| Phase | 내용 | 성격 | 규모 |
-|---|---|---|---|
-| **P0** | 이 brief → Codex 게이트 → 사용자 lock-in | 문서 | — |
-| **A1** | reconciliation refs-membership 검증(§3.D) + 무결성 검사 유지 | 배선 | 소 |
-| **A2** | 라우트 `codebaseProjectId` + router disambiguation + watch-list ∈ 검증 | 배선 | 소~중 |
-| **B1** | generic-turn profile+watch-list 주입(§3.F) — A2 의 turn-context 소비 | 배선 | 중 |
-| **B2** | profile candidate→distill→promote + profile revision 실체화 | 서브시스템 | 중~대 |
-| **Cleanup** | 부모 brief/CLAUDE.md doc-drift 정정 + 회귀 테스트 | 정리 | 소 |
+## 6. Phasing (Codex R1 재배열, 각 phase 독립배포 broken 0, additive)
 
-- 권장 순서: A1 → A2 → B1 → B2 (A2 가 B1 의 turn-context 선행). B3 결정은 P0 lock-in 시 확정.
-- 각 phase 는 이전 phase 없이도 회귀 0(예: A1 단독 = reference-dispatch audit 만 정상화).
+| Phase | 내용 | 규모 |
+|---|---|---|
+| **P0** | 의미·문서 lock(§4 권한모델) + 부모 brief/CLAUDE.md 정정 → Codex R2 게이트 → 사용자 lock-in | — |
+| **A1** | dispatch attribution ref-무관 유지 + reconciliation/audit 서버-derive+entity-binding+durable-id 전환 | 중 |
+| **A2a** | service/HTTP `codebaseProjectId`+`turnMode` 배선 (§5.0) | 중 |
+| **A2b** | router 응답(현오퍼레이터 유지+context) + UI 선택기 + payload context block + 프롬프트 완화 | 중~대 |
+| **B0** | profile 바인딩/백필/assign API/delete 409/orphan/lifecycle | 중~대 |
+| **B2a** | owner-keyed profile revision 실체화 | 중 |
+| **B1** | flag-gated turnMode 주입(profile+watch-list) | 대 |
+| **B2b** | profile candidate→distill→promote owner-keyed exact binding | 대 |
+| **flip** | default rollout(flag on) | 소 |
 
-## 6. 파손 방지 불변식
+- 각 phase 독립배포: A1 단독 = reference-dispatch attribution 정상화, B2a 없이 B1 배포 금지(stale), B0 없이 B1 금지(profile 부재).
 
-- auto-review/retry/T5 suppress 수신자 정책 결정론 불변 — broadcast 0 (부모 §3.B).
-- harvest exactly-once `run:harvested` 불변. materialization lease / 워커 슬롯 불변.
-- reconciliation **annotate-only** 불변 (A1 은 검증 대상을 넓힐 뿐 block 아님). task/run→project 결합 무결성 검사 **제거 금지**.
-- 메모리 안전(secret redact·injection reject·clamp·admission·decay)은 promote(writer)가 강제 — B2 가 distiller 우회 불가(기존 계약 유지).
-- `PALANTIR_MEMORY_MULTI_OWNER` off 기본에서 byte-identical 회귀(주입 owner 추가는 flag/turn-context 게이트 하에서만).
-- conversationId `operator:` canonical(instance 형태) 불변, `pm:` 재도입 없음.
+## 7. 파손 방지 불변식
+- attribution 은 **durable `run.operator_instance_id`** 권위(current-ref 재조회 금지 = TOCTOU 방어, R1 SERIOUS 2).
+- auto-review/retry/T5 suppress 수신자 결정론 — **broadcast 0**(부모 §3.B).
+- reconciliation **annotate-only** 불변. task/run→project entity binding **제거 금지**(cross-project 오염 방어 — refs 완화와 무관한 데이터 경계).
+- 메모리 안전(secret redact·injection reject·clamp·admission·decay)은 promote(writer) 강제 — B2b distiller 우회 불가. **workspace 승격 admission**(operator/branch/run-무관 안정사실만, R1 SERIOUS 7).
+- `PALANTIR_MEMORY_MULTI_OWNER`/`PALANTIR_MEMORY_DISTILL` off 기본 **byte-identical** — 신규 주입/distill 은 flag 하 rollout.
+- harvest exactly-once `run:harvested` 불변. materialization lease/워커 슬롯 불변. conversationId `operator:` canonical 불변.
 
-## 7. 비범위 (이번에도 유지)
+## 8. 비범위 (유지)
+- 오퍼레이터가 여러 폴더 **직접 편집**(per-turn workspace materialization / cross-node 직접 FS). MVP = 오케스트레이션 + 워커 실행.
+- refs-only(primary 없는) folder-less dispatcher. Resident 상주 — DE-SCOPE 유지. 폴더 권한 세분(rw/ro).
+- `projects.pm_enabled`/`preferred_pm_adapter` instance 이전(부모 §8 후속).
+- `owner_type='operator_instance'` 신설(profile 재사용으로 대체, §5 B0).
 
-- 오퍼레이터가 **여러 폴더를 직접 편집**(per-turn workspace materialization / cross-node 직접 FS) — 큰 별도 설계. MVP 는 "오퍼레이터 오케스트레이션 + 워커가 대상 폴더서 실행".
-- refs-only(primary 없는) folder-less dispatcher instance. Resident(상주) — DE-SCOPE 유지.
-- 폴더 권한 세분(rw/ro role 2종 이상).
-- `projects.pm_enabled`/`preferred_pm_adapter` 의 instance 이전(부모 §8 후속 후보).
+## 9. 남은 열린 결정 (권한모델 lock 이후 축소)
+1. **B0 profile 백필 UX**: legacy 인스턴스에 자동 생성되는 private profile 을 UI 에 노출할지(공유 시 기억 공유 의미 명시 필요).
+2. **watch-list 요약 freshness**: `watchlist_version`(`operatorInstanceService.js:184`) 를 composition gate(현재 memory owner revision 만 비교)에 synthetic owner 로 넣을지, 매턴 재생성할지.
+3. **episodic(L0) 저장소 구체화**: 기존 run event/harvest 로 충분한지, 별도 단명 테이블이 필요한지(승격 admission 과 함께).
 
-## 8. 열린 결정 (Codex 게이트 질문)
-
-1. **B3**: 폴더-bound 오퍼레이터 페르소나를 profile 재사용으로 할지, `owner_type='operator_instance'` 신설할지. 폴더-bound instance 는 profile_id nullable(무프로필 legacy)인데 — 무프로필 instance 에 페르소나를 어떻게 붙이나? (profile 자동 부여 vs instance-owner 신설)
-2. **A1 정합 방향**: reconciliation 을 refs-membership 으로 넓히는 게 맞나, 아니면 부모 brief §3.D 를 primary-only 로 **하향 수정**(reference = dispatch 권한 철회)하는 게 맞나? = "reference 로 실제 dispatch 를 허용할 것인가"라는 제품 결정.
-3. **A2 watch-list ∈ 검증**: turn 이 명시한 `codebaseProjectId` 가 오퍼레이터 watch-list 밖이면 거부(fail-closed) vs 자동 reference 추가 vs 무시-후-primary. 
-4. B1 watch-list 요약 주입의 토큰 예산/오염 위험 — N 폴더 요약이 프롬프트를 오염시키지 않는 상한?
-5. A1~B2 순서/독립배포 검증. 각 phase 규모. NO-GO 요소.
-
-## 9. 참고 — 부모 brief 상태 정정 필요 (finding, 별개)
-
-`operator-codebase-refs-brief.md` 헤더의 "W-P0~W-P7 전 구현 완결 / §3.D·§3.F 반영 완료"는 §2 의 코드 근거상 **부정확**하다(reconciliation refs 검증·generic-turn profile/watch-list 주입 미구현). 이 brief 채택 여부와 무관하게 부모 brief 상태줄은 정정 대상.
+## 10. Codex R2 게이트 관점
+1. §4 favorite 모델에서 cross-project 오염 방어가 entity-binding 만으로 충분한가(refs 완화 후 구멍)?
+2. §5.0 turnMode 계약이 기존 send 경로(parent-notice/boot-resume/auto-review source) 와 충돌 없는가?
+3. A2b payload context block + 프롬프트 완화가 codex/claude 어댑터 캐싱(model_instructions_file 안정성)·thread-resume 를 깨지 않는가?
+4. B0 profile 백필/NOT NULL 전환이 기존 무프로필 legacy instance·specialist 경로 회귀 없는가?
+5. B2a/B2b owner-keyed 전환이 workspace 경로 byte-identical 유지하는가?
+6. 재배열 순서 broken 0 재검증. NO-GO 잔존 요소.
