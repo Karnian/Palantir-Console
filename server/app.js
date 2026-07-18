@@ -451,6 +451,7 @@ function createPmAutoReview({
             conversationService.sendMessage(receiver.slotKey, {
               text: reviewText,
               codebaseProjectId: run.project_id || null,
+              turnMode: 'auto_review', // A2a §5.0: auto-review is its own turnMode (B1 injects the worker codebase workspace only)
               source: 'auto_review', // F-1: batch review turn → codex standard tier (never 2.5×)
             });
             sent = true;

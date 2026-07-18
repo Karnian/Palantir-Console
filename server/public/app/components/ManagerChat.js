@@ -92,7 +92,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
   // these aliases.
   const events = isPm ? (pmConv.events || []) : topEvents;
   const sendMessage = isPm
-    ? (async (text, images) => pmConv.sendMessage(text, images))
+    ? (async (text, images, opts) => pmConv.sendMessage(text, images, opts)) // A2a: forward per-turn opts (codebaseProjectId/turnMode); selector lands in A2b
     : topSendMessage;
   // A PM conversation is "active" when its backing run exists and is
   // running. The Top session uses status.active (legacy).

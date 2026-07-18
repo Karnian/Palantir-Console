@@ -45,9 +45,13 @@ function createConversationsRouter({ conversationService, runService }) {
   // POST /api/conversations/:id/message
   router.post('/:id/message', asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const { text, images } = req.body || {};
+    // A2a: forward the per-turn codebase selection + turnMode. Previously only
+    // { text, images } was extracted, so an explicit turn codebase was silently
+    // lost (Codex A1/R3 finding). Unknown turnMode is normalized to the legacy
+    // default inside the service; Top/worker ids ignore both fields.
+    const { text, images, codebaseProjectId, turnMode } = req.body || {};
     try {
-      const result = await conversationService.sendMessage(id, { text, images });
+      const result = await conversationService.sendMessage(id, { text, images, codebaseProjectId, turnMode });
       res.json(result);
     } catch (err) {
       return mapError(err, res);

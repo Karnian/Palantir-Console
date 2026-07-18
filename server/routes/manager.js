@@ -839,7 +839,12 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     }
     const { text, images } = req.body || {};
     try {
-      const result = await conversationService.sendMessage(conversationIdForProject(projectId), { text, images });
+      // A2a §5.0 mapping: this legacy per-project route is definitively a
+      // codebase(projectId) turn — pass it explicitly so it stays correct even
+      // if the resolved Operator's primary ever differs from the route param.
+      const result = await conversationService.sendMessage(conversationIdForProject(projectId), {
+        text, images, codebaseProjectId: projectId, turnMode: 'codebase',
+      });
       return res.json(result);
     } catch (err) {
       if (err && err.httpStatus === 400) {

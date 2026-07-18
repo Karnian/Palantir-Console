@@ -49,17 +49,34 @@ function nonEmptyString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+// A2a §5.0 turnMode contract. Recognized values: 'codebase' | 'generic' |
+// 'auto_review'. Anything else (or omitted) → null = legacy default, i.e. the
+// pre-A2a behavior (codebase via explicit||primary). The ONLY new behavior is
+// that an explicit 'generic' forces a codebase-less turn even for a
+// folder-bound Operator (which otherwise always resolves to its primary) —
+// making the generic branch reachable (Codex R2 BLOCKER 2). What 'generic'
+// actually injects (profile + watch-list) lands in B1; A2a only threads the
+// signal.
+function normalizeTurnMode(raw) {
+  const v = nonEmptyString(raw);
+  return (v === 'codebase' || v === 'generic' || v === 'auto_review') ? v : null;
+}
+
 function resolveTurnCodebaseContext(instance, message = {}) {
   const primaryProjectId = nonEmptyString(instance?.primaryProjectId || instance?.projectId);
   const explicitProjectId = nonEmptyString(
     message?.codebaseProjectId || message?.turnProjectId || message?.projectId,
   );
-  const workspaceProjectId = explicitProjectId || primaryProjectId || null;
+  const turnMode = normalizeTurnMode(message?.turnMode);
+  const workspaceProjectId = turnMode === 'generic'
+    ? null
+    : (explicitProjectId || primaryProjectId || null);
   return {
     instanceId: nonEmptyString(instance?.instanceId) || null,
     primaryProjectId,
     explicitProjectId,
     workspaceProjectId,
+    turnMode,
     source: explicitProjectId ? 'explicit' : (primaryProjectId ? 'primary' : 'generic'),
   };
 }
@@ -241,7 +258,7 @@ function createConversationService({
   //
   // Returns { status: 'sent', target } on success, throws with a 4xx-style
   // Error otherwise. Callers should map errors to HTTP status codes.
-  function sendMessage(conversationId, { text, images, codebaseProjectId, source } = {}) {
+  function sendMessage(conversationId, { text, images, codebaseProjectId, turnMode, source } = {}) {
     const parsed = parseConversationId(conversationId);
     if (!parsed) {
       const err = new Error(`invalid conversation id: ${conversationId}`);
@@ -269,6 +286,7 @@ function createConversationService({
         text,
         images,
         codebaseProjectId,
+        turnMode, // A2a §5.0: 'codebase'|'generic'|'auto_review' (omitted → legacy default)
         projectId: operator.projectId || parsed.projectId || null,
         source, // F-1: 'auto_review' forces standard tier on the codex adapter
       });
@@ -311,7 +329,7 @@ function createConversationService({
   //          on success, queue an Operator→Top notice on the Operator run's parent
   //          (but only if that parent still matches the currently active
   //           Top, to avoid leaking stale signals into unrelated runs).
-  function sendToManagerSlot(conversationId, { text, images, projectId, codebaseProjectId, source } = {}) {
+  function sendToManagerSlot(conversationId, { text, images, projectId, codebaseProjectId, turnMode, source } = {}) {
     const isTop = conversationId === 'top';
     let operatorResolved = null;
     if (!isTop) {
@@ -345,7 +363,7 @@ function createConversationService({
             })
             .then((spawnResult) => sendToManagerSlot(
               spawnResult?.run?.conversation_id || conversationId,
-              { text, images, projectId, codebaseProjectId, source },
+              { text, images, projectId, codebaseProjectId, turnMode, source }, // A2a: thread turnMode through the async cold-spawn recursion too
             ));
         }
         run = spawn.run;
@@ -418,7 +436,7 @@ function createConversationService({
         ? resolveTurnCodebaseContext({
           instanceId: operatorResolved?.instanceId || run.operator_instance_id || null,
           primaryProjectId: operatorResolved?.primaryProjectId || projectId || null,
-        }, { codebaseProjectId })
+        }, { codebaseProjectId, turnMode })
         : null;
       let workspaceProjectId = turnCodebaseContext?.workspaceProjectId || null;
       const instanceId = turnCodebaseContext?.instanceId || null;

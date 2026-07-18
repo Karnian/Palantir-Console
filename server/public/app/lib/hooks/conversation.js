@@ -120,7 +120,7 @@ export function useConversation(conversationId, { poll = true, pollMs = 10000 } 
     } catch { /* ignore */ }
   }, [conversationId]);
 
-  const sendMessage = useCallback(async (text, images) => {
+  const sendMessage = useCallback(async (text, images, opts = {}) => {
     if (!conversationId) return;
     // v3 Phase 6 R3 fix — fence loading writes on the conversation id
     // captured at call time so a late resolve/finally from a previous
@@ -132,6 +132,11 @@ export function useConversation(conversationId, { poll = true, pollMs = 10000 } 
     try {
       const body = { text };
       if (images && images.length > 0) body.images = images;
+      // A2a §5.0: per-turn codebase selection + turnMode. Omitted → server-side
+      // legacy default (codebase via primary). The UI selector that sets these
+      // lands in A2b; this is the plumbing so the hook CAN carry them.
+      if (opts && opts.codebaseProjectId) body.codebaseProjectId = opts.codebaseProjectId;
+      if (opts && opts.turnMode) body.turnMode = opts.turnMode;
       const data = await apiFetch(`/api/conversations/${encodeURIComponent(myId)}/message`, {
         method: 'POST',
         body: JSON.stringify(body),
