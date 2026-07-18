@@ -276,11 +276,11 @@ server/
 
 ### Operator↔Codebase Refs (watch-list) — W-P0~W-P7
 - Operator live identity 는 instance 기준: `operator:oi_*`. `operator:<projectId>` 는 외부 진입/기존 데이터 호환용 **legacy dual-read alias** 로 계속 유지하며, 단일 resolver 가 해당 codebase 의 primary ref instance 로 수렴시킨다.
-- `operator_codebase_refs`: `primary` = codebase 당 최대 1 + instance 당 최대 1(라우터 기본 수신자, auto-review fallback, cwd 기준). `reference` = 다수 허용(컨텍스트 참조 + dispatch 권한). codebase 는 Operator 를 소유하지 않고 Operator instance 가 codebase refs 를 가진다.
+- `operator_codebase_refs`: `primary` = codebase 당 최대 1 + instance 당 최대 1(라우터 기본 수신자, auto-review fallback, cwd 기준). `reference` = 다수 허용(컨텍스트 참조 + watch/favorite; **dispatch 권한 아님** — 공용 풀 favorite 모델로 재정의됨, `docs/specs/codebase-pool-memory-axes-brief.md` §4 LOCKED. attribution 은 refs 가 아니라 pm_run_id 파생. 현 reconciliation 은 primary-only, A1 에서 favorite 정합 예정). codebase 는 Operator 를 소유하지 않고 Operator instance 가 codebase refs 를 가진다.
 - Attribution 은 서버 derive 만 신뢰: `/execute` 는 `pm_run_id` 로 operator instance 를 찾고, `runs.operator_instance_id` / `dispatch_audit_log.operator_instance_id` 에 기록한다. client/body 의 instance 주장은 권한 근거가 아니다.
 - Auto-review 수신자 체인: ① worker 를 spawn 한 operator instance → ② worker codebase 의 primary instance → ③ Top. **watcher broadcast 금지**.
 - Thread 상태 소유자는 `operator_instances` (`thread_id`, `pm_adapter`, `node_id`, `cwd`, `source_generation`, `source_hash`, `workspace_path`). `project_briefs.pm_thread_id` 계열은 W-P1 이전 데이터용 read-only bridge 로만 읽는다.
-- Memory 주입은 turn context 기준: codebase-specific turn 은 해당 Workspace, generic turn 은 User/Profile + watch-list 요약, auto-review turn 은 worker codebase Workspace 만. ledger 는 실제 선택 주입된 owner 만 기록한다.
+- Memory 주입은 turn context 기준: codebase-specific turn 은 해당 Workspace, generic turn 은 User/Profile + watch-list 요약, auto-review turn 은 worker codebase Workspace 만. ledger 는 실제 선택 주입된 owner 만 기록한다. (⚠ **현 코드**: 상주 오퍼레이터 generic-turn 주입엔 profile/watch-list 요약이 아직 없고 workspace(+조건부 user)만 — profile 축·watch-list 요약·turnMode 계약은 후속 `docs/specs/codebase-pool-memory-axes-brief.md` B1/B2 에서 배선.)
 - `projects.pm_enabled` / `preferred_pm_adapter` 는 현재 spawn 정책 소스다. instance 로 이전하는 것은 별도 설계 결정이며 W-P7 cleanup 에서 제거하지 않는다.
 
 ### Dispatch audit & router (v3 Phase 4/6/7)

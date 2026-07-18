@@ -1,6 +1,8 @@
 # Operator ↔ Codebase Refs (watch-list) — 설계 brief
 
-> **상태**: W-P0~W-P7 전 구현 완결 (PR #342~#349 + 이번 W-P7 cleanup, 2026-07-09). v3 LOCKED 설계리뷰의 BLOCKER/SERIOUS 수용조건은 전 phase 에 반영 완료.
+> **상태**: W-P0~W-P7 구현 완결 (PR #342~#349 + W-P7 cleanup, 2026-07-09).
+>
+> **정정 (2026-07-19)**: §3.D(reference=dispatch권한)·§3.F(generic-turn Profile+watch-list 주입)는 **코드에 완전 반영되지 않았음**이 후속 검토(Codex 3R)에서 확인됨 — reconciliation 은 primary-only(`reconciliationService.js:335,342-351`), 상주 오퍼레이터 generic-turn 주입엔 profile/watch-list 없음(`conversationService.js:468-474`). 이 갭 마감 + refs 권한 의미 재정의(**공용 풀 favorite** — reference 는 dispatch 권한 아님)는 후속 brief [`codebase-pool-memory-axes-brief.md`](./codebase-pool-memory-axes-brief.md)(§4 권한모델 LOCKED, A0~flip)가 담당한다.
 >
 > **W-P7 cleanup 판정**: 파괴적 제거는 보류한다. `operator:<projectId>` dual-read alias 는 외부 진입 영속 지원 계약으로 유지, `project_briefs.pm_thread_id` 는 W-P1 이전 데이터용 read-only bridge 로 유지, `projects.pm_enabled` / `preferred_pm_adapter` 는 현재 spawn 정책 소스로 유지한다. instance 로 이전하거나 legacy alias 를 제거하는 작업은 후속 후보다.
 
