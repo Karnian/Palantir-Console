@@ -92,6 +92,14 @@ function createConversationService({
   // returning "No active Operator manager session". Tests that don't care about
   // lazy spawn can omit this dependency and keep the pre-3a behavior.
   operatorSpawnService,
+  // A2b-2: optional. When wired, a turn that targets a NON-primary codebase in
+  // the shared pool gets a `## Turn Codebase` block (name/id/directory) prepended
+  // to the user payload so the Operator focuses on the right folder for the turn.
+  // Absent → the block degrades to id-only (or is skipped); never blocks send.
+  projectService,
+  // A2b-2: optional. When wired, the ## Turn Codebase block carries a truncated
+  // conventions/pitfalls summary for the turn's target codebase.
+  projectBriefService,
     // ML PR1: optional Learned Memory injector. When wired, a message to an Operator
     // slot (NOT top) for a project gets a `## Learned Memory` block prepended
     // to the user payload.
@@ -448,6 +456,53 @@ function createConversationService({
         !runService.operatorInstanceHasRef(instanceId, workspaceProjectId)
       ) {
         workspaceProjectId = null;
+      }
+      // A2b-2: per-turn codebase context block. Emit ONLY for a turn explicitly
+      // directed at a NON-primary codebase. The gate uses the context's
+      // workspaceProjectId (the pre-ref-gate value): it equals the explicit
+      // target for turnMode 'codebase'/'auto_review' but is NULL for 'generic'
+      // (codebase-less), so generic never emits a codebase block (Codex A2b-2).
+      // Rides the user payload (cache-stable), independent of the memory ref-gate.
+      const turnTargetProjectId = turnCodebaseContext?.explicitProjectId || null;
+      if (
+        turnTargetProjectId
+        && turnCodebaseContext.workspaceProjectId === turnTargetProjectId
+        && turnTargetProjectId !== turnCodebaseContext.primaryProjectId
+      ) {
+        let turnProject = null;
+        if (projectService && typeof projectService.getProject === 'function') {
+          try { turnProject = projectService.getProject(turnTargetProjectId); }
+          catch { turnProject = null; }
+          // Fail-closed (§5 A2 out-of-watch policy): an explicit turn codebase
+          // that does not resolve to a real project is a bad target — reject the
+          // send rather than silently degrading to an id-only block. Only when
+          // projectService is available to validate; unit harnesses without it
+          // keep the id-only degrade.
+          if (!turnProject) {
+            const err = new Error(`turn codebase not found: ${turnTargetProjectId}`);
+            err.httpStatus = 400;
+            throw err;
+          }
+        }
+        const blockLines = ['## Turn Codebase'];
+        blockLines.push(
+          `This turn is directed at codebase: ${turnProject?.name ? `${turnProject.name} (id: ${turnTargetProjectId})` : turnTargetProjectId}.`,
+        );
+        if (turnProject?.directory) blockLines.push(`directory: ${turnProject.directory}`);
+        // Repo-defined projects have no local directory — show repo coordinates.
+        if (turnProject?.repo_url) blockLines.push(`repo: ${turnProject.repo_url}`);
+        if (turnProject?.repo_ref) blockLines.push(`ref: ${turnProject.repo_ref}`);
+        if (turnProject?.repo_subdir) blockLines.push(`subdir: ${turnProject.repo_subdir}`);
+        // Brief summary (truncated) so the Operator carries the folder's context.
+        if (projectBriefService && typeof projectBriefService.getBrief === 'function') {
+          try {
+            const b = projectBriefService.getBrief(turnTargetProjectId);
+            if (b?.conventions) blockLines.push(`conventions: ${String(b.conventions).slice(0, 400)}`);
+            if (b?.known_pitfalls) blockLines.push(`pitfalls: ${String(b.known_pitfalls).slice(0, 400)}`);
+          } catch { /* best-effort */ }
+        }
+        blockLines.push('Focus on THIS codebase for this turn (not your primary); dispatch workers to it as needed.');
+        effectiveText = `${blockLines.join('\n')}\n\n---\n\n${effectiveText}`;
       }
       if (!isTop && compositionLedger && memoryComposer) {
         // Composer+Ledger path (Operator slot only). The composer is the sole injection

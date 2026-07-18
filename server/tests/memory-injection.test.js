@@ -374,6 +374,8 @@ function wirePmStack(db, { memoryMultiOwner = false } = {}) {
     managerAdapterFactory: wireFactory(fakePm),
     lifecycleService: { sendAgentInput: () => true },
     operatorSpawnService: spawn,
+    projectService, // A2b-2: enables the ## Turn Codebase block (name/directory)
+    projectBriefService, // A2b-2: brief summary in the block
     memoryService,
     masterMemoryService,
     memoryMultiOwner,
@@ -584,4 +586,99 @@ test('W-P6b: primaryless operator turn injects User memory only and records only
   assert.deepEqual(owners, [
     { owner_type: 'user', owner_id: 'user', provenance_key: 'user' },
   ]);
+});
+
+// --- A2b-2: per-turn ## Turn Codebase block ---------------------------------
+
+test('A2b-2: a turn directed at a NON-primary codebase gets a ## Turn Codebase block', async (t) => {
+  const db = await mkdb(t);
+  const stack = wirePmStack(db);
+  const { rs, projectService, registry, topAdapter, fakePm, conv } = stack;
+
+  const primary = projectService.createProject({ name: 'alpha', directory: '/tmp/alpha' });
+  const other = projectService.createProject({ name: 'beta', directory: '/tmp/beta' });
+  seedTop({ rs, registry, adapter: topAdapter });
+
+  conv.sendMessage(`operator:${primary.id}`, {
+    text: 'work on the shared beta repo',
+    codebaseProjectId: other.id,
+    turnMode: 'codebase',
+  });
+  const txt = fakePm._runTurnCalls[0].payload.text;
+  assert.match(txt, /## Turn Codebase/);
+  assert.match(txt, /beta \(id: /);
+  assert.match(txt, /directory: \/tmp\/beta/);
+  assert.match(txt, /work on the shared beta repo/);
+  // block precedes the original user text
+  assert.ok(txt.indexOf('## Turn Codebase') < txt.indexOf('work on the shared beta repo'));
+});
+
+test('A2b-2: a turn on the Operator primary (or omitted) gets NO ## Turn Codebase block', async (t) => {
+  const db = await mkdb(t);
+  const stack = wirePmStack(db);
+  const { rs, projectService, registry, topAdapter, fakePm, conv } = stack;
+
+  const primary = projectService.createProject({ name: 'alpha', directory: '/tmp/alpha' });
+  seedTop({ rs, registry, adapter: topAdapter });
+
+  // Explicit primary → redundant (already in system prompt), no block.
+  conv.sendMessage(`operator:${primary.id}`, { text: 'do the thing', codebaseProjectId: primary.id, turnMode: 'codebase' });
+  assert.ok(!/## Turn Codebase/.test(fakePm._runTurnCalls[0].payload.text));
+
+  // Omitted → legacy default, no block.
+  conv.sendMessage(`operator:${primary.id}`, { text: 'again' });
+  assert.ok(!/## Turn Codebase/.test(fakePm._runTurnCalls[1].payload.text));
+});
+
+test('A2b-2: turnMode generic never emits a ## Turn Codebase block (codebase-less)', async (t) => {
+  const db = await mkdb(t);
+  const stack = wirePmStack(db);
+  const { rs, projectService, registry, topAdapter, fakePm, conv } = stack;
+
+  const primary = projectService.createProject({ name: 'alpha', directory: '/tmp/alpha' });
+  const other = projectService.createProject({ name: 'beta', directory: '/tmp/beta' });
+  seedTop({ rs, registry, adapter: topAdapter });
+
+  // generic + an explicit codebase → generic wins (codebase-less), no block.
+  conv.sendMessage(`operator:${primary.id}`, {
+    text: 'general planning question',
+    codebaseProjectId: other.id,
+    turnMode: 'generic',
+  });
+  assert.ok(!/## Turn Codebase/.test(fakePm._runTurnCalls[0].payload.text));
+});
+
+test('A2b-2: a non-existent turn codebase is rejected fail-closed (400)', async (t) => {
+  const db = await mkdb(t);
+  const stack = wirePmStack(db);
+  const { rs, projectService, registry, topAdapter, conv } = stack;
+
+  const primary = projectService.createProject({ name: 'alpha', directory: '/tmp/alpha' });
+  seedTop({ rs, registry, adapter: topAdapter });
+
+  assert.throws(() => conv.sendMessage(`operator:${primary.id}`, {
+    text: 'work on ghost',
+    codebaseProjectId: 'proj_does_not_exist',
+    turnMode: 'codebase',
+  }), (err) => err && err.httpStatus === 400 && /turn codebase not found/.test(err.message));
+});
+
+test('A2b-2: the ## Turn Codebase block carries a truncated brief summary', async (t) => {
+  const db = await mkdb(t);
+  const stack = wirePmStack(db);
+  const { rs, projectService, projectBriefService, registry, topAdapter, fakePm, conv } = stack;
+
+  const primary = projectService.createProject({ name: 'alpha', directory: '/tmp/alpha' });
+  const other = projectService.createProject({ name: 'beta', directory: '/tmp/beta' });
+  projectBriefService.ensureBrief(other.id);
+  projectBriefService.updateBrief(other.id, { conventions: 'use spaces in beta', known_pitfalls: 'beta flaky net test' });
+  seedTop({ rs, registry, adapter: topAdapter });
+
+  conv.sendMessage(`operator:${primary.id}`, {
+    text: 'work beta', codebaseProjectId: other.id, turnMode: 'codebase',
+  });
+  const txt = fakePm._runTurnCalls[0].payload.text;
+  assert.match(txt, /## Turn Codebase/);
+  assert.match(txt, /conventions: use spaces in beta/);
+  assert.match(txt, /pitfalls: beta flaky net test/);
 });

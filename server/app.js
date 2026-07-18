@@ -1292,6 +1292,8 @@ function createApp(options = {}) {
     managerAdapterFactory,
     lifecycleService,
     operatorSpawnService,
+    projectService, // A2b-2: per-turn codebase context block (name/directory of a non-primary turn codebase)
+    projectBriefService, // A2b-2: brief summary in the ## Turn Codebase block
     memoryService, // ML PR1: user-payload Learned Memory injection (Operator slots)
     masterMemoryService, // L2 P1b: user-payload Master memory injection (Top slot)
     memoryMultiOwner: options.memoryMultiOwner ?? (process.env.PALANTIR_MEMORY_MULTI_OWNER === '1'),
