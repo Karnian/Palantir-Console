@@ -1,6 +1,6 @@
 # 공용 프로젝트 폴더 풀 + 직교 3축 메모리 — 후속 설계 brief
 
-> **상태**: v3 DRAFT (Codex R1 NO-GO→v2, Codex R2 **NO-GO**(2 RESOLVED / 4 PARTIAL / 1 신규 BLOCKER) 반영. Codex R3 재게이트 대기 → 사용자 lock-in 전).
+> **상태**: v4 **LOCKED** (사용자 2026-07-19 lock-in + 구현 착수). Codex R1 NO-GO→v2, R2 NO-GO→v3, **R3 REVISE→조건부 GO 충족**(6 RESOLVED/1 PARTIAL, profile PATCH invalidation 문장 §5 B0 반영). 구현: A0→P0→A1→A2a→A2b→B0→B2a→B1→B2b→B-adm→flip, phase 별 codex 교차검증.
 > **권한 모델 LOCKED** (사용자, 2026-07-19): **공용 풀(favorite)** — refs 는 dispatch 권한이 아니라 기본값/라우팅/watch-요약. 부모 §3.D(reference=dispatch권한) 하향. (§4)
 > **부모 brief**: [`operator-codebase-refs-brief.md`](./operator-codebase-refs-brief.md), [`memory-layer-brief.md`](./memory-layer-brief.md).
 > **성격**: 새 아키텍처 아님 — (A) LOCKED 계약을 구현이 못 따라간 갭 마감 + (B) defer 됐던 페르소나 메모리 축(P-B2) 완성 + (C) 공용 풀 권한 재잠금 + (D) Codex 가 발견한 pre-existing 결함 2건(canonical boot-resume / fresh·resume prompt 이중 assembly) 수정.
@@ -67,6 +67,7 @@
   - **신규 instance + private profile 을 한 tx 로 원자 생성** — 현 생성 seam(`runService.js:136,781` `ensurePrimaryOperatorInstanceForProject`)이 profile 없이 instance 만 삽입하는 문제 종결. 원자 생성 배포 **후** `profile_id` NOT NULL rebuild(순서 lock).
   - legacy 무프로필 instance 백필(private profile). assign/unassign API. **unassign 의미 LOCK**: profile 은 identity 라 unassign=새 private profile 로 교체(무프로필 상태 금지 → NOT NULL 과 정합). 
   - **reassign(profile 교체) 시 그 profile 공유하는 모든 instance thread invalidation**(persona 변화). 
+  - **(R3 SERIOUS 해소)** `operator_profiles` 의 **persona 또는 capabilities 변경(PATCH) 시** 그 `profile_id` 를 참조하는 **모든 instance** 의 persisted thread 를 clear + live canonical slot dispose/reset(`operatorInstanceService.js:102` thread-clear primitive 재사용). **name/description-only 변경은 invalidation 안 함**(불필요 재spawn 회피). 현 `operatorProfileService.js:147` PATCH 가 persona/capabilities 를 자유 변경하나 공유 instance 무효화 경로가 없어 stale identity 사용 — 이 경로 신설.
   - **orphan policy LOCK**: profile delete 는 참조 instance 있으면 **409**(현재 `operatorProfileService.js:174` 는 raw FK 오류) — 참조 0 일 때만 삭제.
   - B3 구 열린결정 = **profile 재사용 확정**(`operator_instance` owner 신설 ✗ — 042/044 CHECK+pipeline 전면 재migration 회피). specialist 는 profile ID 직접 수령(`specialistService.js:78`)이라 미영향.
 - **B2a (owner-keyed profile revision — R1 BLOCKER 5, B1 앞)**: profile 전용 revision 카운터(현 `getRevision` 의 workspace 조회 → owner-keyed). profile active write 가 bump. **B1 선행조건**(안 그러면 최초 주입 후 profile 수정 영구 stale).

@@ -184,9 +184,30 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       let resumed = false;
       const adapterType = r.manager_adapter || 'codex';
 
-      // Extract projectId from conversation_id (dual-read: 'pm:<id>' OR 'operator:<id>').
-      const parsedConv = parseProjectConversationId(r.conversation_id);
-      const projectId = parsedConv ? parsedConv.projectId : null;
+      // Extract projectId from conversation_id. Canonical operator runs store
+      // conversation_id = 'operator:oi_*' (operatorSpawnService slotKey), which
+      // parseProjectConversationId() intentionally returns null for — so
+      // resolve via the single operator resolver FIRST (handles both
+      // 'operator:oi_*' and legacy 'operator:<projectId>'), then fall back to
+      // parseProjectConversationId when the resolver is unavailable (e.g. unit
+      // harnesses) — it covers the legacy 'operator:<projectId>' form. (Very old
+      // 'pm:<id>' ids are rewritten to 'operator:' by migration 045/046, which
+      // runs before this router boots, so no residual 'pm:' reaches here — both
+      // resolver and parser return null for it, which is fine.) Without the
+      // resolver-first order, post-W-P5 canonical operators never enter the
+      // resume branch below (projectId=null) and get marked stopped on boot.
+      let bootResolved = null;
+      if (runService && typeof runService.resolveOperatorConversationId === 'function') {
+        try { bootResolved = runService.resolveOperatorConversationId(r.conversation_id); }
+        catch { bootResolved = null; }
+      }
+      let projectId = bootResolved
+        ? (bootResolved.primaryProjectId || bootResolved.legacyProjectId || null)
+        : null;
+      if (!projectId) {
+        const parsedConv = parseProjectConversationId(r.conversation_id);
+        projectId = parsedConv ? parsedConv.projectId : null;
+      }
 
       if (projectId && (adapterType === 'codex' || adapterType === 'claude-code') && projectBriefService) {
         try {
@@ -194,7 +215,13 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           let operatorInstanceId = null;
           let instanceThread = null;
           try {
-            if (runService && typeof runService.resolveOperatorConversationId === 'function') {
+            // Reuse the instance already resolved from r.conversation_id — for a
+            // canonical 'operator:oi_*' run this is the exact owning instance
+            // (more precise than re-deriving the project's primary). Fall back
+            // to a fresh resolve from the legacy conversation id otherwise.
+            if (bootResolved && bootResolved.instanceId) {
+              operatorInstanceId = bootResolved.instanceId;
+            } else if (runService && typeof runService.resolveOperatorConversationId === 'function') {
               const resolved = runService.resolveOperatorConversationId(conversationIdForProject(projectId));
               operatorInstanceId = resolved && resolved.instanceId ? resolved.instanceId : null;
             }

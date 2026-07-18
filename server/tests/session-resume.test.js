@@ -478,3 +478,119 @@ test('createManagerRouter skips PM boot resume on cordoned remote node', async (
   assert.ok(event, 'cordon skip event should be recorded on PM run');
   assert.deepEqual(JSON.parse(event.payload_json), { node_id: 'cordoned-pod' });
 });
+
+// --- Regression: canonical operator:oi_* boot resume (A0 fix) ---
+// Bug (Codex R2/R3 finding): a fresh Operator spawn stores its run
+// conversation_id as the CANONICAL slot 'operator:oi_*' (operatorSpawnService
+// slotKey). Boot resume derived projectId via parseProjectConversationId(),
+// which intentionally returns null for 'oi_*' — so every canonical Operator
+// fell out of the resume branch (projectId=null) and was marked stopped on each
+// server restart. Fix (manager.js A0): derive projectId via the single
+// resolveOperatorConversationId resolver first, with the legacy parser as
+// fallback. This test proves a canonical Operator now RESUMES instead of
+// stopping.
+test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)', async (t) => {
+  const dbDir = await createTempDir('palantir-canonical-resume-');
+  const dbPath = path.join(dbDir, 'test.db');
+  const { createDatabase } = require('../db/database');
+  const { createRunService } = require('../services/runService');
+  const { createProjectService } = require('../services/projectService');
+  const { createProjectBriefService } = require('../services/projectBriefService');
+  const { parseProjectConversationId } = require('../utils/conversationId');
+  const { db, migrate, close } = createDatabase(dbPath);
+  migrate();
+  t.after(async () => {
+    close();
+    await fs.rm(dbDir, { recursive: true, force: true });
+  });
+
+  const rs = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+
+  // Local folder project — directory must exist so resolveSpawnCwd resolves.
+  const project = projectService.createProject({ name: 'canon', directory: dbDir });
+  projectBriefService.ensureBrief(project.id);
+
+  // Canonical primary Operator instance + instance-owned thread state
+  // (claude adapter so the proven claude auth path is used, hasKeychain=true).
+  const ensured = rs.ensurePrimaryOperatorInstanceForProject(project.id);
+  const instanceId = ensured.instanceId;
+  const canonicalConvId = ensured.instanceConversationId; // 'operator:oi_<projectId>'
+  rs.setOperatorInstanceThread(instanceId, {
+    thread_id: 'sess_canon_resume',
+    pm_adapter: 'claude',
+    node_id: 'local',
+    cwd: dbDir,
+  });
+
+  // Contract the fix depends on: legacy parser is blind to oi_*, resolver is not.
+  assert.equal(
+    parseProjectConversationId(canonicalConvId), null,
+    'parseProjectConversationId must return null for oi_* (the root cause)',
+  );
+  assert.equal(
+    rs.resolveOperatorConversationId(canonicalConvId).primaryProjectId, project.id,
+    'resolveOperatorConversationId must recover projectId from canonical oi_* (the fix)',
+  );
+
+  // Stale Operator run stored with the CANONICAL conversation id.
+  const opRun = rs.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    manager_adapter: 'claude-code',
+    conversation_id: canonicalConvId,
+    operator_instance_id: instanceId,
+    prompt: 'PM canon',
+  });
+  rs.updateRunStatus(opRun.id, 'running', { force: true });
+
+  // Active Top (claude session) so the Operator loop has parent-notice routing.
+  const topRun = rs.createRun({
+    is_manager: true, manager_layer: 'top', manager_adapter: 'claude-code',
+    conversation_id: 'top', prompt: 'top',
+  });
+  rs.updateRunStatus(topRun.id, 'running', { force: true });
+  rs.updateClaudeSessionId(topRun.id, 'sess_top');
+
+  const startSessionCalls = [];
+  const mockClaudeAdapter = {
+    type: 'claude-code',
+    capabilities: { supportsResume: true, persistentProcess: true, persistentSession: true },
+    startSession: (runId, opts) => { startSessionCalls.push({ runId, opts }); return { sessionRef: {} }; },
+    runTurn: () => ({ accepted: true }),
+    isSessionAlive: () => true,
+    disposeSession: () => {},
+    emitSessionEndedIfNeeded: () => {},
+    detectExitCode: () => null,
+    getUsage: () => null,
+    getSessionId: () => null,
+    getOutput: () => null,
+    buildGuardrailsSection: () => '',
+  };
+  const mockFactory = { getAdapter: () => mockClaudeAdapter };
+
+  const { createManagerRegistry } = require('../services/managerRegistry');
+  const registry = createManagerRegistry({ runService: rs });
+  const { createConversationService } = require('../services/conversationService');
+  const convService = createConversationService({
+    runService: rs, managerRegistry: registry, managerAdapterFactory: mockFactory, lifecycleService: null,
+  });
+
+  const { createManagerRouter } = require('../routes/manager');
+  createManagerRouter({
+    runService: rs,
+    projectService,
+    projectBriefService,
+    managerAdapterFactory: mockFactory,
+    managerRegistry: registry,
+    conversationService: convService,
+    authResolverOpts: { hasKeychain: () => true },
+  });
+
+  // The canonical Operator must have been RESUMED via startSession (not stopped).
+  const opResume = startSessionCalls.find((c) => c.runId === opRun.id);
+  assert.ok(opResume, 'canonical operator:oi_* run should be resumed via startSession');
+  assert.equal(opResume.opts.resumeSessionId, 'sess_canon_resume', 'resumes the instance thread handle');
+  assert.equal(rs.getRun(opRun.id).status, 'running', 'canonical Operator stays running (not stopped)');
+});
