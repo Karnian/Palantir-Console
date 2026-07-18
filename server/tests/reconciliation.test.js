@@ -340,7 +340,7 @@ test('Phase 4: pm_hallucination takes precedence over user_intervention_stale', 
     'pm_hallucination is more informative than user_intervention_stale when both fire');
 });
 
-test('Phase 4: R4 fix — pmRunId envelope binding rejects foreign/top/nonexistent ids', async (t) => {
+test('Phase 4: pmRunId binding rejects nonexistent/top/worker; favorite model ACCEPTS foreign-project Operator', async (t) => {
   const db = await mkdb(t);
   const { projectService, taskService, runService, project } = seedCore(db);
   const svc = createReconciliationService({
@@ -363,14 +363,19 @@ test('Phase 4: R4 fix — pmRunId envelope binding rejects foreign/top/nonexiste
     pmClaim: { kind: 'task_complete', task_id: 'whatever' },
   }), /expected 'operator'/);
 
-  // (c) a PM run from a DIFFERENT project is not acceptable
+  // (c) FAVORITE MODEL (codebase-pool-memory-axes-brief §4 LOCKED): a PM run
+  // from a DIFFERENT project is now ACCEPTED — an Operator may act on ANY
+  // codebase in the shared pool, so its own primary codebase need not equal the
+  // envelope project. Cross-project DATA integrity is still fenced by the
+  // NULL-exact entity binding (see the cross-project claim test below); this
+  // only relaxes the pm_run→project ownership gate.
   const otherProject = projectService.createProject({ name: 'beta' });
   const otherPm = seedPmRun(runService, otherProject.id);
-  assert.throws(() => svc.recordClaim({
+  assert.doesNotThrow(() => svc.recordClaim({
     projectId: project.id,
     pmRunId: otherPm.id,
     pmClaim: { kind: 'task_complete', task_id: 'whatever' },
-  }), /belongs to operator:.+, not project /); // Phase 4: message names the operator: conv form
+  }));
 
   // (d) a worker run (not a manager) is not acceptable
   const task = taskService.createTask({ title: 'T', project_id: project.id });
@@ -380,6 +385,202 @@ test('Phase 4: R4 fix — pmRunId envelope binding rejects foreign/top/nonexiste
     pmRunId: worker.id,
     pmClaim: { kind: 'task_complete', task_id: task.id },
   }), /is not a manager run/);
+});
+
+test('A1 favorite: NULL-exact entity binding rejects a project-less task', async (t) => {
+  const db = await mkdb(t);
+  const { projectService, taskService, runService, project } = seedCore(db);
+  const svc = createReconciliationService({ db, runService, taskService, projectService });
+
+  // A task with NO project_id: a project-scoped claim must not bind to it.
+  // Previously a NULL project_id slipped through the entity check (the
+  // cross-project hole Codex R2/R3 flagged); now it is rejected.
+  const orphanTask = taskService.createTask({ title: 'orphan' });
+  assert.equal(orphanTask.project_id, null);
+
+  // via pmClaim.task_id
+  assert.throws(() => svc.recordClaim({
+    projectId: project.id,
+    pmClaim: { kind: 'task_complete', task_id: orphanTask.id },
+  }), /belongs to project \(none\), not /);
+
+  // via envelope taskId
+  assert.throws(() => svc.recordClaim({
+    projectId: project.id,
+    taskId: orphanTask.id,
+    pmClaim: { kind: 'task_complete', task_id: orphanTask.id },
+  }), /belongs to project \(none\)/);
+});
+
+test('A1 favorite: worker durable-id blocks claiming another Operator\'s worker run', async (t) => {
+  const db = await mkdb(t);
+  const { projectService, taskService, runService, project } = seedCore(db);
+  const svc = createReconciliationService({ db, runService, taskService, projectService });
+
+  // Operator A owns `project` primary; Operator B owns `otherProject`.
+  const instA = runService.ensurePrimaryOperatorInstanceForProject(project.id);
+  const otherProject = projectService.createProject({ name: 'beta' });
+  const instB = runService.ensurePrimaryOperatorInstanceForProject(otherProject.id);
+  const pmA = seedPmRun(runService, project.id); // resolves to instA
+
+  const task = taskService.createTask({ project_id: project.id, title: 'T' });
+  // A worker run in `project` actually dispatched BY Operator B.
+  const workerOfB = runService.createRun({
+    task_id: task.id, agent_profile_id: 'a1', operator_instance_id: instB.instanceId,
+  });
+
+  // Operator A claiming Operator B's worker run is rejected.
+  assert.throws(() => svc.recordClaim({
+    projectId: project.id,
+    pmRunId: pmA.id,
+    pmClaim: { kind: 'task_complete', task_id: task.id, run_id: workerOfB.id },
+  }), /was dispatched by operator .+, not /);
+
+  // (Codex A1b BLOCKER) OMITTING pm_run_id must NOT bypass the check: an
+  // attributed worker still rejects a null (unresolved) claimant.
+  assert.throws(() => svc.recordClaim({
+    projectId: project.id,
+    pmClaim: { kind: 'task_complete', task_id: task.id, run_id: workerOfB.id },
+  }), /was dispatched by operator .+, not \(unresolved\)/);
+
+  // A worker run dispatched by A itself binds fine (no throw).
+  const workerOfA = runService.createRun({
+    task_id: task.id, agent_profile_id: 'a1', operator_instance_id: instA.instanceId,
+  });
+  assert.doesNotThrow(() => svc.recordClaim({
+    projectId: project.id,
+    pmRunId: pmA.id,
+    pmClaim: { kind: 'task_complete', task_id: task.id, run_id: workerOfA.id },
+  }));
+});
+
+test('A1 favorite: terminal/dangling pm_run cannot claim an attributed worker run', async (t) => {
+  const db = await mkdb(t);
+  const { projectService, taskService, runService, project } = seedCore(db);
+  const svc = createReconciliationService({ db, runService, taskService, projectService });
+
+  const instA = runService.ensurePrimaryOperatorInstanceForProject(project.id);
+  const otherProject = projectService.createProject({ name: 'beta' });
+  const instB = runService.ensurePrimaryOperatorInstanceForProject(otherProject.id);
+  const task = taskService.createTask({ project_id: project.id, title: 'T' });
+  const workerOfB = runService.createRun({
+    task_id: task.id, agent_profile_id: 'a1', operator_instance_id: instB.instanceId,
+  });
+
+  // (a) A COMPLETED operator pm_run lends no attribution (brief §4 "active run")
+  //     → claiming B's attributed worker is rejected (derived instance null).
+  const terminalPm = seedPmRun(runService, project.id);
+  runService.updateRunStatus(terminalPm.id, 'completed', { force: true });
+  assert.throws(() => svc.recordClaim({
+    projectId: project.id, pmRunId: terminalPm.id,
+    pmClaim: { kind: 'task_complete', task_id: task.id, run_id: workerOfB.id },
+  }), /was dispatched by operator .+, not \(unresolved\)/);
+
+  // (b) A CANCELLED pm_run is non-active too — the allowlist (not a 3-state
+  //     denylist) rejects cancelled/paused as well (Codex A1b).
+  const cancelledPm = seedPmRun(runService, project.id);
+  runService.updateRunStatus(cancelledPm.id, 'cancelled', { force: true });
+  assert.throws(() => svc.recordClaim({
+    projectId: project.id, pmRunId: cancelledPm.id,
+    pmClaim: { kind: 'task_complete', task_id: task.id, run_id: workerOfB.id },
+  }), /was dispatched by operator .+, not \(unresolved\)/);
+
+  // (c) A DANGLING pm_run (primary ref deleted → resolves to no instance) also
+  //     cannot claim B's attributed worker — closes the null-derived bypass.
+  const danglingPm = seedPmRun(runService, project.id);
+  db.prepare('DELETE FROM operator_codebase_refs WHERE instance_id = ?').run(instA.instanceId);
+  assert.throws(() => svc.recordClaim({
+    projectId: project.id, pmRunId: danglingPm.id,
+    pmClaim: { kind: 'task_complete', task_id: task.id, run_id: workerOfB.id },
+  }), /was dispatched by operator .+, not \(unresolved\)/);
+});
+
+test('A1 favorite: registry-replaced stale pm_run lends no attribution', async (t) => {
+  const db = await mkdb(t);
+  const { createManagerRegistry } = require('../services/managerRegistry');
+  const { projectService, taskService, runService, project } = seedCore(db);
+  const registry = createManagerRegistry({ runService });
+  const svc = createReconciliationService({
+    db, runService, taskService, projectService, managerRegistry: registry,
+  });
+
+  const inst = runService.ensurePrimaryOperatorInstanceForProject(project.id);
+  const slot = inst.instanceConversationId; // 'operator:oi_<project>'
+  const task = taskService.createTask({ project_id: project.id, title: 'T' });
+  const workerOfInst = runService.createRun({
+    task_id: task.id, agent_profile_id: 'a1', operator_instance_id: inst.instanceId,
+  });
+
+  // An OLD pm_run whose row is still 'running' but whose slot was replaced by a
+  // newer PM in the registry. The stale id must not lend attribution → its claim
+  // about the attributed worker is rejected (derived instance null).
+  const oldPm = seedPmRun(runService, project.id);
+  const newPm = seedPmRun(runService, project.id);
+  const adapter = { disposeSession() {}, isSessionAlive() { return true; } };
+  registry.setActive(slot, newPm.id, adapter); // newPm now occupies the slot
+
+  assert.equal(registry.getActiveRunId(slot), newPm.id);
+  assert.equal(runService.getRun(oldPm.id).status, 'running'); // row still running
+  assert.throws(() => svc.recordClaim({
+    projectId: project.id, pmRunId: oldPm.id,
+    pmClaim: { kind: 'task_complete', task_id: task.id, run_id: workerOfInst.id },
+  }), /was dispatched by operator .+, not \(unresolved\)/);
+
+  // The CURRENT slot occupant (newPm) claims fine.
+  assert.doesNotThrow(() => svc.recordClaim({
+    projectId: project.id, pmRunId: newPm.id,
+    pmClaim: { kind: 'task_complete', task_id: task.id, run_id: workerOfInst.id },
+  }));
+});
+
+test('A1 favorite: active foreign-project Operator can claim a REAL task in the shared pool', async (t) => {
+  const db = await mkdb(t);
+  const { projectService, taskService, runService, project } = seedCore(db);
+  const svc = createReconciliationService({ db, runService, taskService, projectService });
+
+  // Operator B (owns `otherProject`) makes a coherent claim about a REAL task in
+  // `project` (the shared pool) — favorite model accepts it and records B's
+  // instance as the auditor.
+  const otherProject = projectService.createProject({ name: 'beta' });
+  const instB = runService.ensurePrimaryOperatorInstanceForProject(otherProject.id);
+  const pmB = seedPmRun(runService, otherProject.id);
+  const task = taskService.createTask({ project_id: project.id, title: 'shared' });
+  const workerOfB = runService.createRun({
+    task_id: task.id, agent_profile_id: 'a1', operator_instance_id: instB.instanceId,
+  });
+  runService.updateRunStatus(workerOfB.id, 'running', { force: true }); // matches the claim
+
+  const row = svc.recordClaim({
+    projectId: project.id, pmRunId: pmB.id,
+    pmClaim: { kind: 'worker_running', task_id: task.id, run_id: workerOfB.id },
+  });
+  assert.equal(row.operator_instance_id, instB.instanceId);
+  assert.equal(row.incoherence_flag, 0); // a genuinely coherent cross-pool claim
+});
+
+test('A1 favorite: injected registry with EMPTY slot rejects a stale running pm_run', async (t) => {
+  const db = await mkdb(t);
+  const { createManagerRegistry } = require('../services/managerRegistry');
+  const { projectService, taskService, runService, project } = seedCore(db);
+  const registry = createManagerRegistry({ runService }); // injected but slot never occupied
+  const svc = createReconciliationService({
+    db, runService, taskService, projectService, managerRegistry: registry,
+  });
+
+  const inst = runService.ensurePrimaryOperatorInstanceForProject(project.id);
+  const task = taskService.createTask({ project_id: project.id, title: 'T' });
+  const workerOfInst = runService.createRun({
+    task_id: task.id, agent_profile_id: 'a1', operator_instance_id: inst.instanceId,
+  });
+  const stalePm = seedPmRun(runService, project.id); // status 'running', but slot empty
+
+  // No fail-open: an empty slot (getActiveRunId === null) is NOT the occupant,
+  // so the stale pm_run lends no attribution and cannot claim the worker.
+  assert.equal(registry.getActiveRunId(inst.instanceConversationId), null);
+  assert.throws(() => svc.recordClaim({
+    projectId: project.id, pmRunId: stalePm.id,
+    pmClaim: { kind: 'task_complete', task_id: task.id, run_id: workerOfInst.id },
+  }), /was dispatched by operator .+, not \(unresolved\)/);
 });
 
 test('Phase 4: listClaims filters by project and incoherent_only', async (t) => {

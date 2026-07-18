@@ -1194,8 +1194,14 @@ function createApp(options = {}) {
     now: options.webhookNow,
     logger: options.webhookLogger,
   });
+  // v3 Phase 1.5: shared manager registry. Created BEFORE lifecycleService
+  // (Codex A1c) so dispatch attribution can check live slot occupancy — a stale
+  // 'running' PM run whose conversation slot was replaced must not lend
+  // attribution. It only depends on runService.
+  const managerRegistry = createManagerRegistry({ runService });
   const lifecycleService = createLifecycleService({
     runService, taskService, agentProfileService, projectService,
+    managerRegistry, // Codex A1c: live slot occupancy for dispatch attribution
     executionEngine, streamJsonEngine, worktreeService, harvestService, eventBus,
     skillPackService,
     nodeService,
@@ -1229,12 +1235,10 @@ function createApp(options = {}) {
     });
   });
 
-  // v3 Phase 1.5: shared manager registry + conversation service.
-  // managerRegistry tracks which manager runs are live per conversation
-  // ('top' / operator slot); conversationService owns the parent-notice
-  // queue and the unified send/resolve routing used by both the new
-  // /api/conversations router and the legacy /api/manager/* routes.
-  const managerRegistry = createManagerRegistry({ runService });
+  // v3 Phase 1.5: conversationService owns the parent-notice queue and the
+  // unified send/resolve routing used by both the new /api/conversations router
+  // and the legacy /api/manager/* routes. (managerRegistry is created above,
+  // before lifecycleService — Codex A1c.)
   const operatorInstanceService = createOperatorInstanceService(db, {
     runService,
     managerRegistry,
@@ -1417,6 +1421,7 @@ function createApp(options = {}) {
     projectService,
     agentProfileService,
     conversationService,
+    managerRegistry, // Codex A1b: live slot occupancy check for pm_run attribution
     eventBus, // v3 Phase 7: enables dispatch_audit:recorded SSE events
   });
 

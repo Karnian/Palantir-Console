@@ -34,7 +34,7 @@
 // without rewriting the audit history.
 
 const crypto = require('node:crypto');
-const { isProjectLayer, conversationIdMatchesProject } = require('../utils/conversationId'); // PM→Operator Phase 0
+const { isProjectLayer } = require('../utils/conversationId'); // PM→Operator Phase 0
 
 const KNOWN_KINDS = new Set([
   'task_complete',
@@ -45,6 +45,12 @@ const KNOWN_KINDS = new Set([
   'worker_failed',
 ]);
 
+// brief §4 "valid pm_run_id" = an ACTIVE operator run. Positive allowlist
+// (Codex A1b SERIOUS): only these statuses may lend attribution. Everything
+// else — completed/failed/stopped AND cancelled/paused/materializing/etc. — is
+// a stale/replayed id and must not be credited.
+const ACTIVE_MANAGER_STATUSES = new Set(['queued', 'running', 'needs_input']);
+
 function createReconciliationService({
   db,
   runService,
@@ -52,6 +58,7 @@ function createReconciliationService({
   projectService, // required for envelope/entity ownership binding (codex R1)
   agentProfileService, // optional — used to validate selected_agent_profile_id (codex R5)
   conversationService, // optional — exposes peekParentNotices for staleness check
+  managerRegistry, // optional (Codex A1b) — live slot occupancy check for pm_run attribution
   // v3 Phase 7: optional eventBus so the UI (dispatch audit badges +
   // drift drawer) can subscribe to newly recorded claims without
   // polling on a timer. We emit exactly once per recordClaim, with the
@@ -254,9 +261,13 @@ function createReconciliationService({
         err.httpStatus = 400;
         throw err;
       }
-      if (envTask.project_id && envTask.project_id !== projectId) {
+      // NULL-exact (favorite model, Codex R2/R3): a project-scoped claim must
+      // reference a task that actually belongs to that project. A NULL
+      // project_id no longer slips through — it was the cross-project hole
+      // (claim asserts project X, references a project-less task).
+      if (!envTask.project_id || envTask.project_id !== projectId) {
         const err = new Error(
-          `envelope task_id ${taskId} belongs to project ${envTask.project_id}, not ${projectId}`
+          `envelope task_id ${taskId} belongs to project ${envTask.project_id || '(none)'}, not ${projectId}`
         );
         err.httpStatus = 400;
         throw err;
@@ -328,36 +339,26 @@ function createReconciliationService({
         err.httpStatus = 400;
         throw err;
       }
-      let resolvedProjectId = null;
-      if (runService && typeof runService.resolveOperatorConversationId === 'function') {
-        try {
-          const resolved = runService.resolveOperatorConversationId(pmRun.conversation_id);
-          resolvedProjectId = resolved?.primaryProjectId || resolved?.legacyProjectId || null;
-        } catch { /* fall through */ }
-      }
-      // W-P5 R1 (Codex): resolver result is AUTHORITATIVE — if it points at a
-      // different project, a legacy textual match must not rescue the claim.
-      // Legacy string match is only a fallback when the resolver knows nothing.
-      const hasResolvedProject = resolvedProjectId !== null && resolvedProjectId !== undefined;
-      if (
-        (hasResolvedProject && resolvedProjectId !== projectId)
-        || (!hasResolvedProject && !conversationIdMatchesProject(pmRun.conversation_id, projectId))
-      ) {
-        const err = new Error(
-          `pm_run_id ${pmRunId} belongs to ${pmRun.conversation_id}, not project ${projectId}`
-        );
-        err.httpStatus = 400;
-        throw err;
-      }
+      // Public-pool (favorite) model — codebase-pool-memory-axes-brief §4 LOCKED:
+      // we no longer require the pm_run's own codebase to equal the envelope
+      // project. An Operator may act on ANY codebase in the shared pool, so the
+      // former "pm_run belongs to project X" gate (W-P5 primary/legacy match) is
+      // dropped. The pm_run is still validated as an operator manager run
+      // (above); cross-project integrity is enforced by the NULL-exact entity
+      // binding (task/run → project) below, not by the Operator's own codebase.
     }
 
     // Task-bound claim: if the task exists, it must belong to this project.
     if (pmClaim.task_id) {
       let task = null;
       try { task = taskService.getTask(pmClaim.task_id); } catch { task = null; }
-      if (task && task.project_id && task.project_id !== projectId) {
+      // NULL-exact (favorite model): an existing task must belong to the
+      // envelope project — a NULL project_id is rejected, not skipped. (A
+      // NON-existent task is still fine here; evaluateClaim flags it as
+      // pm_hallucination.)
+      if (task && (!task.project_id || task.project_id !== projectId)) {
         const err = new Error(
-          `task ${pmClaim.task_id} belongs to project ${task.project_id}, not ${projectId}`
+          `task ${pmClaim.task_id} belongs to project ${task.project_id || '(none)'}, not ${projectId}`
         );
         err.httpStatus = 400;
         throw err;
@@ -414,9 +415,11 @@ function createReconciliationService({
         }
         let runTask = null;
         try { runTask = taskService.getTask(run.task_id); } catch { runTask = null; }
-        if (runTask && runTask.project_id && runTask.project_id !== projectId) {
+        // NULL-exact (favorite model): the worker run's task must belong to the
+        // envelope project; a NULL project_id is rejected, not skipped.
+        if (runTask && (!runTask.project_id || runTask.project_id !== projectId)) {
           const err = new Error(
-            `run ${pmClaim.run_id} belongs to project ${runTask.project_id}, not ${projectId}`
+            `run ${pmClaim.run_id} belongs to project ${runTask.project_id || '(none)'}, not ${projectId}`
           );
           err.httpStatus = 400;
           throw err;
@@ -447,10 +450,38 @@ function createReconciliationService({
     if (!pmRun || Number(pmRun.is_manager || 0) !== 1 || pmRun.manager_layer !== 'operator') {
       return null;
     }
+    // brief §4 "valid pm_run_id" = an ACTIVE operator run (positive allowlist,
+    // Codex A1b). A non-active status (terminal OR cancelled/paused/…) is a
+    // stale/replayed id and must not be credited.
+    if (!ACTIVE_MANAGER_STATUSES.has(pmRun.status)) {
+      return null;
+    }
+    // Registry slot match (Codex A1b SERIOUS): even a still-'running' row is
+    // stale if a newer PM has since replaced its conversation slot. When the
+    // live registry is injected, the pm_run must BE the current occupant of its
+    // slot to lend attribution. (Optional dep — unit harnesses without the
+    // registry fall back to the status check above.)
+    if (managerRegistry && typeof managerRegistry.getActiveRunId === 'function') {
+      let activeInSlot = null;
+      try { activeInSlot = managerRegistry.getActiveRunId(pmRun.conversation_id); }
+      catch { activeInSlot = null; }
+      // Exact occupancy (Codex A1c): the pm_run must BE the current slot
+      // occupant. An empty slot (activeInSlot null) also fails — no fail-open —
+      // because a 'running' row whose slot is empty is a stale/dead PM.
+      if (activeInSlot !== pmRun.id) {
+        return null;
+      }
+    }
 
+    // Public-pool (favorite) model — codebase-pool-memory-axes-brief §4 LOCKED:
+    // the derived instance is simply the operator that owns this pm_run's
+    // conversation, regardless of which codebase it holds primary. An Operator
+    // may legitimately act on ANY codebase in the shared pool, so we no longer
+    // require the operator's primary/legacy project to equal the envelope
+    // project. Cross-project data integrity is enforced separately by the
+    // NULL-exact entity binding in bindEnvelopeToClaim (task/run → project).
     const resolved = runService.resolveOperatorConversationId(pmRun.conversation_id);
-    const operatorProjectId = resolved?.legacyProjectId || resolved?.primaryProjectId || null;
-    if (!resolved?.instanceId || (projectId && operatorProjectId !== projectId)) {
+    if (!resolved?.instanceId) {
       return null;
     }
     return resolved.instanceId;
@@ -486,6 +517,31 @@ function createReconciliationService({
     });
 
     const operatorInstanceId = deriveOperatorInstanceIdFromPmRun(pmRunId, projectId);
+
+    // Attribution integrity (favorite model, Codex R3 §10.1 + A1 probe): with
+    // refs no longer gating dispatch, cross-operator forgery is fenced by
+    // durable run attribution instead. When the claim is about a specific worker
+    // run that CARRIES an attributed dispatcher (worker.operator_instance_id set),
+    // the claimant must resolve to that SAME instance. A different instance — or
+    // a null/dangling derived instance (e.g. the claimant's pm_run resolves to no
+    // instance because its refs were deleted, or the pm_run is terminal) — is
+    // rejected, closing the "dangling pm_run bypasses the check" hole. Workers
+    // with NO attributed instance (null) carry no owner to protect and are left
+    // to evaluateClaim's coherence flags.
+    // (Codex A1b BLOCKER): the guard must NOT require pmRunId — omitting
+    // pm_run_id yields a null claimant, and an attributed worker must still
+    // reject a null (or mismatched) claimant.
+    if (pmClaim && pmClaim.run_id) {
+      let claimRun = null;
+      try { claimRun = runService.getRun(pmClaim.run_id); } catch { claimRun = null; }
+      if (claimRun && claimRun.operator_instance_id && claimRun.operator_instance_id !== operatorInstanceId) {
+        const err = new Error(
+          `pm_claim.run_id ${pmClaim.run_id} was dispatched by operator ${claimRun.operator_instance_id}, not ${operatorInstanceId || '(unresolved)'}`
+        );
+        err.httpStatus = 400;
+        throw err;
+      }
+    }
 
     // Primary evaluation against DB truth.
     const evaluation = evaluateClaim({ pmClaim, pmRunId });

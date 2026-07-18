@@ -63,6 +63,7 @@ function createLifecycleService({
   taskService,
   agentProfileService,
   projectService,
+  managerRegistry,            // optional (Codex A1c) — live slot occupancy for dispatch attribution
   executionEngine,
   streamJsonEngine,
   worktreeService,
@@ -674,6 +675,12 @@ function createLifecycleService({
     if (!pmRun || Number(pmRun.is_manager || 0) !== 1 || pmRun.manager_layer !== 'operator') {
       return { operator_instance_id: null, parent_run_id: null, unwatched: null };
     }
+    // brief §4 "valid pm_run_id" = an ACTIVE operator run (Codex A1b): a
+    // terminal/cancelled/paused PM run id reused at /execute must not lend its
+    // instance/parent attribution to the new worker.
+    if (!['queued', 'running', 'needs_input'].includes(pmRun.status)) {
+      return { operator_instance_id: null, parent_run_id: null, unwatched: null };
+    }
     if (!runService || typeof runService.resolveOperatorConversationId !== 'function') {
       return { operator_instance_id: null, parent_run_id: null, unwatched: null };
     }
@@ -682,28 +689,48 @@ function createLifecycleService({
     if (!resolved?.instanceId) {
       return { operator_instance_id: null, parent_run_id: null, unwatched: null };
     }
+    // Registry slot match (Codex A1c): a still-'running' PM row is stale if a
+    // newer PM replaced its conversation slot (or the slot was cleared). When
+    // the live registry is available, the pm_run must BE the current occupant of
+    // its slot to lend attribution — exact match (empty slot → reject, no
+    // fail-open). Unit paths without the registry fall back to the active-status
+    // allowlist above.
+    if (managerRegistry && typeof managerRegistry.getActiveRunId === 'function') {
+      let activeInSlot = null;
+      try { activeInSlot = managerRegistry.getActiveRunId(pmRun.conversation_id); }
+      catch { activeInSlot = null; }
+      if (activeInSlot !== pmRun.id) {
+        return { operator_instance_id: null, parent_run_id: null, unwatched: null };
+      }
+    }
 
+    // Public-pool (favorite) model — codebase-pool-memory-axes-brief §4 LOCKED:
+    // refs are NOT a dispatch permission gate. A valid operator pm_run KEEPS
+    // its attribution (operator_instance_id + parent_run_id) on the worker run
+    // even when the instance holds no ref to the target codebase — so
+    // auto-review returns to the Operator that actually dispatched (not the
+    // target codebase's primary). We still emit a `dispatch:unwatched_codebase`
+    // OBSERVATION when there is no ref, so cross-codebase dispatch stays visible;
+    // it is annotate-only, never a hard gate. (Pre-favorite this branch dropped
+    // attribution to null — that regressed the auto-review receiver.)
     const taskProjectId = task?.project_id || null;
+    let unwatched = null;
     if (taskProjectId) {
       const hasRef = typeof runService.operatorInstanceHasRef === 'function'
         ? runService.operatorInstanceHasRef(resolved.instanceId, taskProjectId)
         : (resolved.legacyProjectId || resolved.primaryProjectId || null) === taskProjectId;
       if (!hasRef) {
-        return {
-          operator_instance_id: null,
-          parent_run_id: null,
-          unwatched: {
-            pm_run_id: pmRun.id,
-            operator_instance_id: resolved.instanceId,
-            task_id: task?.id || null,
-            project_id: taskProjectId,
-            reason: 'operator_instance_ref_missing',
-          },
+        unwatched = {
+          pm_run_id: pmRun.id,
+          operator_instance_id: resolved.instanceId,
+          task_id: task?.id || null,
+          project_id: taskProjectId,
+          reason: 'operator_instance_ref_missing',
         };
       }
     }
 
-    return { operator_instance_id: resolved.instanceId, parent_run_id: pmRun.id, unwatched: null };
+    return { operator_instance_id: resolved.instanceId, parent_run_id: pmRun.id, unwatched };
   }
 
   async function executeTask(taskId, { agentProfileId, prompt, skillPackIds, presetId, pmRunId }) {

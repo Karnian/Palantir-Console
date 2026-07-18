@@ -551,8 +551,12 @@ test('W-P3: /execute derives operator attribution from pm_run_id server-side', a
     pm_run_id: otherPmRun.id,
   });
   assert.equal(mismatched.status, 201);
-  assert.equal(mismatched.body.run.operator_instance_id, null);
-  assert.equal(mismatched.body.run.parent_run_id, null);
+  // Favorite model (codebase-pool-memory-axes-brief §4 LOCKED): dispatching to a
+  // codebase the Operator holds NO ref to no longer drops attribution — the
+  // Operator KEEPS operator_instance_id + parent_run_id (so auto-review returns
+  // to it, not the target's primary). Only the observation event is emitted.
+  assert.equal(mismatched.body.run.operator_instance_id, `oi_${otherProject.id}`);
+  assert.equal(mismatched.body.run.parent_run_id, otherPmRun.id);
   const unwatchedEvents = rs.getRunEvents(mismatched.body.run.id)
     .filter((event) => event.event_type === 'dispatch:unwatched_codebase');
   assert.equal(unwatchedEvents.length, 1);
@@ -563,6 +567,70 @@ test('W-P3: /execute derives operator attribution from pm_run_id server-side', a
     project_id: project.id,
     reason: 'operator_instance_ref_missing',
   });
+});
+
+test('W-P3/A1c: /execute drops attribution for terminal or slot-stale pm_run', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const taskService = createTaskService(db, null);
+  const agentProfileService = createAgentProfileService(db);
+  const profileId = seedWorkerProfile(db);
+  const { createManagerRegistry } = require('../services/managerRegistry');
+  const registry = createManagerRegistry({ runService: rs });
+  const lifecycleService = createLifecycleService({
+    runService: rs,
+    taskService,
+    agentProfileService,
+    projectService,
+    managerRegistry: registry,
+    executionEngine: stubExecEngine(),
+    streamJsonEngine: stubStreamJsonEngine(),
+    worktreeService: null,
+    harvestService: null,
+    eventBus: null,
+  });
+  const app = createExecuteRouteApp({ taskService, lifecycleService });
+
+  const project = projectService.createProject({ name: 'alpha' });
+  const inst = rs.ensurePrimaryOperatorInstanceForProject(project.id);
+  const slot = inst.instanceConversationId;
+  const adapter = { disposeSession() {}, isSessionAlive() { return true; } };
+
+  // (a) a COMPLETED pm_run (non-active) lends no attribution.
+  const terminalPm = rs.createRun({ is_manager: true, manager_layer: 'operator', conversation_id: slot });
+  rs.updateRunStatus(terminalPm.id, 'completed', { force: true });
+  const t1 = taskService.createTask({ project_id: project.id, title: 'a' });
+  const r1 = await httpJson(app, 'POST', `/api/tasks/${t1.id}/execute`, {
+    agent_profile_id: profileId, prompt: 'work', pm_run_id: terminalPm.id,
+  });
+  assert.equal(r1.status, 201);
+  assert.equal(r1.body.run.operator_instance_id, null);
+  assert.equal(r1.body.run.parent_run_id, null);
+
+  // (b) a still-'running' pm_run that a newer PM has replaced in the slot →
+  //     registry mismatch drops the stale attribution.
+  const oldPm = rs.createRun({ is_manager: true, manager_layer: 'operator', conversation_id: slot });
+  rs.updateRunStatus(oldPm.id, 'running', { force: true });
+  const newPm = rs.createRun({ is_manager: true, manager_layer: 'operator', conversation_id: slot });
+  rs.updateRunStatus(newPm.id, 'running', { force: true });
+  registry.setActive(slot, newPm.id, adapter);
+  const t2 = taskService.createTask({ project_id: project.id, title: 'b' });
+  const r2 = await httpJson(app, 'POST', `/api/tasks/${t2.id}/execute`, {
+    agent_profile_id: profileId, prompt: 'work', pm_run_id: oldPm.id,
+  });
+  assert.equal(r2.status, 201);
+  assert.equal(r2.body.run.operator_instance_id, null);
+  assert.equal(r2.body.run.parent_run_id, null);
+
+  // (c) the CURRENT slot occupant attributes normally.
+  const t3 = taskService.createTask({ project_id: project.id, title: 'c' });
+  const r3 = await httpJson(app, 'POST', `/api/tasks/${t3.id}/execute`, {
+    agent_profile_id: profileId, prompt: 'work', pm_run_id: newPm.id,
+  });
+  assert.equal(r3.status, 201);
+  assert.equal(r3.body.run.operator_instance_id, inst.instanceId);
+  assert.equal(r3.body.run.parent_run_id, newPm.id);
 });
 
 test('W-P3: retry run copies operator lineage and sets retry root', async (t) => {
