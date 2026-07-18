@@ -9,6 +9,7 @@ const {
 } = require('../services/managerSystemPrompt');
 const { resolveSpawnCwd } = require('../utils/spawnCwd');
 const { resolveProjectSource } = require('../services/projectSource');
+const { buildProjectScopedSystemSection } = require('../services/operatorPromptSections'); // A2b: shared with operatorSpawnService
 const { resolveCodexServiceTier } = require('../services/managerAdapters/codexAdapter'); // F-1
 const { goalFeatureActive } = require('../services/goalMode'); // G2 §6
 const {
@@ -343,26 +344,18 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 const goalActive = goalFeatureActive();
                 const token = goalActive ? process.env.PALANTIR_PM_TOKEN : process.env.PALANTIR_TOKEN;
                 const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'operator', adapterType, specialistAvailable: isSpecialistAvailable() });
-                // Bake project brief into the system prompt (mirrors operatorSpawnService).
-                const briefSections = [];
-                briefSections.push(`## Project Scope\nname: ${project.name}\nid: ${project.id}${project.directory ? `\ndirectory: ${project.directory}` : ''}${r.id ? `\npm_run_id: ${r.id}` : ''}`);
-                if (brief.conventions) briefSections.push(`## Project Conventions\n${brief.conventions}`);
-                if (brief.known_pitfalls) briefSections.push(`## Known Pitfalls\n${brief.known_pitfalls}`);
-                // Phase 2: inject project auto_apply skill packs into resumed Operator prompt (mirrors operatorSpawnService)
-                if (skillPackService) {
-                  try {
-                    const bindings = skillPackService.listProjectBindings(projectId);
-                    const autoApply = bindings.filter(b => b.auto_apply !== 0);
-                    if (autoApply.length > 0) {
-                      const lines = autoApply.map(b =>
-                        `- ${b.skill_pack_name}${b.skill_pack_description ? `: ${b.skill_pack_description}` : ''} (id: ${b.skill_pack_id})`
-                      );
-                      briefSections.push(`## Project Skill Packs (auto_apply)\nThese skills are automatically applied to every worker in this project. You do NOT need to include them in skill_pack_ids.\n${lines.join('\n')}`);
-                    }
-                  } catch (err) { console.warn(`[boot] Failed to load skill packs for PM resume project=${projectId}: ${err.message}`); }
-                }
-                briefSections.push('## PM Role\nYou are this project\'s PM (project-scoped dispatcher). Every user turn is either: answer from the brief, dispatch a worker via /execute, or modify an in-flight worker via the worker intervention APIs above. When you record a dispatch audit claim, use the pm_run_id value shown above in the Project Scope section as your pm_run_id envelope field. Stay within this project\'s scope.\n\nWhen spawning workers, choose skill packs that match the task\'s nature. Use your project\'s auto_apply skills as a baseline, and add extra skills via skill_pack_ids when the task needs specialized capabilities beyond the defaults.');
-                const systemPrompt = [baseSystemPrompt, ...briefSections].filter(Boolean).join('\n\n');
+                // A2b: shared builder — the resumed Operator's project-scoped
+                // sections are assembled by the SAME function as fresh spawn
+                // (server/services/operatorPromptSections), so the two paths can
+                // never drift (Codex R2 BLOCKER 3).
+                const briefSection = buildProjectScopedSystemSection({
+                  project,
+                  brief,
+                  operatorRunId: r.id,
+                  skillPackService,
+                  logger: (err) => console.warn(`[boot] Failed to load skill packs for PM resume project=${projectId}: ${err.message}`),
+                });
+                const systemPrompt = [baseSystemPrompt, briefSection].filter(Boolean).join('\n\n');
                 // Adapter-generic: the boot-resume loop now admits claude-code
                 // (P5-S4c) — resolve auth for the run's ACTUAL adapter, not a
                 // hardcoded 'codex' (a local Claude Operator would otherwise be

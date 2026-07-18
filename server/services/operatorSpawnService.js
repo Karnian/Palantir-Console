@@ -62,6 +62,7 @@ const { goalFeatureActive } = require('./goalMode'); // G2 §6
 const { conversationIdForProject } = require('../utils/conversationId'); // PM→Operator Phase 0 producer seam
 const { deriveLegacyContext, enforceWorkspace } = require('../utils/operatorContext');
 const { resolveProjectSource } = require('./projectSource');
+const { buildProjectScopedSystemSection: buildSharedProjectScopedSection } = require('./operatorPromptSections'); // A2b: single source, shared with boot-resume
 const {
   repoFeatureEnabled,
   repoSourceHash,
@@ -218,36 +219,18 @@ function createOperatorSpawnService({
   // (conversationService.sendToManagerSlot) is about to call runTurn
   // with the user's actual message. Two back-to-back turns on the same
   // Codex run id hit the single-turn guard at codexAdapter:spawnOneTurn.
+  // A2b: delegate to the shared builder (server/services/operatorPromptSections)
+  // so the fresh-spawn and boot-resume paths assemble byte-identical sections
+  // from one source (Codex R2 BLOCKER 3). operatorRunId is baked so the Operator
+  // can self-identify its pm_run_id for /api/dispatch-audit.
   function buildProjectScopedSystemSection({ project, brief, operatorRunId }) {
-    const sections = [];
-    // Include operatorRunId so the PM can self-identify when calling
-    // /api/dispatch-audit (codex R3 blocker: the audit route requires
-    // pm_run_id for staleness attribution but the PM previously had no
-    // way to obtain its own run id).
-    sections.push(`## Project Scope\nname: ${project.name}\nid: ${project.id}${project.directory ? `\ndirectory: ${project.directory}` : ''}${operatorRunId ? `\npm_run_id: ${operatorRunId}` : ''}`);
-    if (brief && brief.conventions) {
-      sections.push(`## Project Conventions\n${brief.conventions}`);
-    }
-    if (brief && brief.known_pitfalls) {
-      sections.push(`## Known Pitfalls\n${brief.known_pitfalls}`);
-    }
-    // Phase 2: inject project auto_apply skill packs list (name + description)
-    // so the PM knows which skills are available and can choose task-appropriate ones.
-    // This is baked into the static system prompt (Codex caching-safe: stable per PM session).
-    if (skillPackService) {
-      try {
-        const bindings = skillPackService.listProjectBindings(project.id);
-        const autoApply = bindings.filter(b => b.auto_apply !== 0);
-        if (autoApply.length > 0) {
-          const lines = autoApply.map(b =>
-            `- ${b.skill_pack_name}${b.skill_pack_description ? `: ${b.skill_pack_description}` : ''} (id: ${b.skill_pack_id})`
-          );
-          sections.push(`## Project Skill Packs (auto_apply)\nThese skills are automatically applied to every worker in this project. You do NOT need to include them in skill_pack_ids.\n${lines.join('\n')}`);
-        }
-      } catch (err) { log(`Failed to load skill packs for project=${project.id}: ${err.message}`); }
-    }
-    sections.push('## PM Role\nYou are this project\'s PM (project-scoped dispatcher). Every user turn is either: answer from the brief, dispatch a worker via /execute, or modify an in-flight worker via the worker intervention APIs above. When you record a dispatch audit claim, use the pm_run_id value shown above in the Project Scope section as your pm_run_id envelope field. Stay within this project\'s scope.\n\nWhen spawning workers, choose skill packs that match the task\'s nature. Use your project\'s auto_apply skills as a baseline, and add extra skills via skill_pack_ids when the task needs specialized capabilities beyond the defaults.');
-    return sections.join('\n\n');
+    return buildSharedProjectScopedSection({
+      project,
+      brief,
+      operatorRunId,
+      skillPackService,
+      logger: (err) => log(`Failed to load skill packs for project=${project.id}: ${err.message}`),
+    });
   }
 
   // Main entry point. Returns { run, spawned, resumed } — `run` is the

@@ -264,6 +264,10 @@ test('Phase 3a: lazy spawn creates a PM run when none exists', async (t) => {
   const sessionState = fakePm._sessions.get(result1.run.id);
   assert.match(sessionState.systemPrompt, /Project Scope/);
   assert.match(sessionState.systemPrompt, /PM Role/);
+  // A2b: the fresh-spawn prompt uses the shared favorite-pool PM Role — names a
+  // primary but no longer hard-locks the Operator to a single project.
+  assert.match(sessionState.systemPrompt, /shared codebase pool/i);
+  assert.ok(!/Stay within this project's scope/.test(sessionState.systemPrompt));
 
   // Thread id has NOT been captured yet because no turn has run. It will
   // appear when the first user message triggers runTurn (tested below in
