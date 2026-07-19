@@ -16,6 +16,13 @@ const DISTILL_KIND = 'distill';
 // kinds a distiller may produce — NOT 'fact' (R6 owns facts via upsertFact).
 const PROMOTABLE_KINDS = new Set(['convention', 'pitfall', 'heuristic', 'constraint']);
 
+function assertDistillOwner(ownerType, ownerId) {
+  if (ownerType !== 'workspace' && ownerType !== 'profile') {
+    throw new Error("ownerType must be 'workspace' or 'profile'");
+  }
+  if (typeof ownerId !== 'string' || !ownerId) throw new Error('ownerId is required');
+}
+
 function sha256(text) {
   return crypto.createHash('sha256').update(text).digest('hex');
 }
@@ -687,8 +694,8 @@ function createMemoryService(db, eventBus) {
   // cap is a KNOWN limitation — only the top-N actives are merge-eligible, so full
   // semantic dedup across a 200-cap project is a later slice; surfaced via
   // memory:distill_context_capped (Codex SERIOUS 3).
-  function listActiveForDistill(projectId, max = 60) {
-    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
+  function listActiveForDistillForOwner(ownerType, ownerId, max = 60) {
+    assertDistillOwner(ownerType, ownerId);
     const rows = fallbackRetrieveStmt.all({ ownerType, ownerId, k: max });
     const out = [];
     for (const r of rows) {
@@ -701,9 +708,15 @@ function createMemoryService(db, eventBus) {
     let total = out.length;
     try { total = countActiveItemsStmt.get(ownerType, ownerId).n; } catch { /* */ }
     if (total > max && eventBus) {
+      const projectId = ownerType === 'workspace' ? ownerId : null;
       try { eventBus.emit('memory:distill_context_capped', { projectId, shown: out.length, total }); } catch { /* observability must never break distill */ }
     }
     return out;
+  }
+
+  function listActiveForDistill(projectId, max = 60) {
+    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
+    return listActiveForDistillForOwner(ownerType, ownerId, max);
   }
 
   // PR2b: rule candidates (R1b/R3/R4). Deterministic rules stage raw signals
@@ -780,9 +793,14 @@ function createMemoryService(db, eventBus) {
     return getCandidateByOwnerDedupStmt.get(ownerType, ownerId, rule, dedupKey);
   }
 
+  function listCandidatesForOwner(ownerType, ownerId, status = 'pending') {
+    assertDistillOwner(ownerType, ownerId);
+    return listCandidatesStmt.all(ownerType, ownerId, status);
+  }
+
   function listCandidates(projectId, status = 'pending') {
     const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
-    return listCandidatesStmt.all(ownerType, ownerId, status);
+    return listCandidatesForOwner(ownerType, ownerId, status);
   }
 
   // PR3b: projects that currently have at least one pending candidate — the
@@ -836,15 +854,8 @@ function createMemoryService(db, eventBus) {
   );
 
   // CAS claim: flip exactly one pending+due row to running. changes()===1 => won.
-  // P-B1 (Codex review BLOCKER): the unfiltered drain path (runOnce({}) ->
-  // claimDistillJob({projectId:null}) -> @ownerType NULL) must NOT claim a
-  // non-workspace (profile) job. 042 lets a profile job EXIST in this table, but
-  // profile distill is unwired until P-B2; a claimed profile job has project_id
-  // NULL and would throw in listCandidates(NULL) -> permanent retry loop. So:
-  //   @ownerType NULL  -> claim workspace-only (paired with the enqueue-skip);
-  //   @ownerType set    -> exact owner match.
-  // Behavior-preserving today: every job is workspace, so NULL-owner drain still
-  // claims exactly the workspace jobs it always did.
+  // A NULL owner filter is the drain path and claims the oldest job across every
+  // owner. A populated owner filter remains an exact owner match.
   const claimStmt = db.prepare(
     "UPDATE memory_jobs " +
     "SET status='running', claim_token=@token, locked_at=datetime('now'), attempts=attempts+1, updated_at=datetime('now') " +
@@ -852,7 +863,7 @@ function createMemoryService(db, eventBus) {
     "  SELECT id FROM memory_jobs" +
     "  WHERE kind=@kind AND status='pending'" +
     "    AND (run_after IS NULL OR run_after <= datetime('now'))" +
-    "    AND ( (@ownerType IS NULL AND owner_type = 'workspace')" +
+    "    AND ( (@ownerType IS NULL)" +
     "       OR (@ownerType IS NOT NULL AND owner_type = @ownerType AND owner_id = @ownerId) )" +
     "  ORDER BY created_at ASC, id ASC LIMIT 1" +
     ") AND status='pending'"
@@ -880,12 +891,12 @@ function createMemoryService(db, eventBus) {
     return backoffStampStmt.get(`+${s} seconds`).ts;
   }
 
-  function enqueueDistillJob(projectId, kind = DISTILL_KIND) {
-    if (!projectId) throw new Error('projectId is required');
-    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
+  function enqueueDistillJobForOwner(ownerType, ownerId, kind = DISTILL_KIND) {
+    assertDistillOwner(ownerType, ownerId);
     const existing = getActiveJobStmt.get(ownerType, ownerId, kind);
     if (existing) return { job: existing, created: false };
     const id = crypto.randomUUID();
+    const projectId = ownerType === 'workspace' ? ownerId : null;
     try {
       insertJobStmt.run(id, kind, projectId, ownerType, ownerId);
     } catch (err) {
@@ -900,6 +911,12 @@ function createMemoryService(db, eventBus) {
     return { job: getJobByIdStmt.get(id), created: true };
   }
 
+  function enqueueDistillJob(projectId, kind = DISTILL_KIND) {
+    if (!projectId) throw new Error('projectId is required');
+    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
+    return enqueueDistillJobForOwner(ownerType, ownerId, kind);
+  }
+
   function requeueStaleJobs({ kind = DISTILL_KIND, staleSeconds = 600, maxAttempts = 5 } = {}) {
     const window = `-${Math.max(1, Math.floor(staleSeconds))} seconds`;
     // Park first: an exhausted lease must go to failed, not back to pending.
@@ -910,12 +927,21 @@ function createMemoryService(db, eventBus) {
 
   // Claim one job. Runs stale recovery first so a crashed worker's lease is
   // reclaimable. Returns the claimed row (with its fresh claim_token) or null.
-  function claimDistillJob({ kind = DISTILL_KIND, projectId = null, staleSeconds = 600, maxAttempts = 5 } = {}) {
+  function claimDistillJob(options = {}) {
+    const { kind = DISTILL_KIND, projectId = null, staleSeconds = 600, maxAttempts = 5 } = options;
+    const ownerSpecified = options.ownerType != null || options.ownerId != null;
+    if (projectId != null && ownerSpecified) {
+      throw new Error('projectId and ownerType/ownerId are mutually exclusive');
+    }
     requeueStaleJobs({ kind, staleSeconds, maxAttempts });
     const token = crypto.randomUUID();
     let ownerType = null;
     let ownerId = null;
-    if (projectId) {
+    if (ownerSpecified) {
+      ownerType = options.ownerType;
+      ownerId = options.ownerId;
+      assertDistillOwner(ownerType, ownerId);
+    } else if (projectId) {
       const norm = normalizeOwner({ project_id: projectId });
       ownerType = norm.owner_type;
       ownerId = norm.owner_id;
@@ -1036,10 +1062,12 @@ function createMemoryService(db, eventBus) {
           continue;
         }
         const cand = getCandidateByIdStmt.get(p.candidateId);
-        // Candidate must still be a pending candidate of THIS project. Anything
-        // else (already promoted/merged/rejected, wrong project, missing) is
+        const candidateOwnerType = cand && (cand.owner_type || normalizeOwner({ project_id: cand.project_id }).owner_type);
+        const candidateOwnerId = cand && (cand.owner_id || normalizeOwner({ project_id: cand.project_id }).owner_id);
+        // Candidate must still be a pending candidate of THIS owner. Anything
+        // else (already promoted/merged/rejected, wrong owner, missing) is
         // skipped — never re-processed (BLOCKER ②).
-        if (!cand || cand.status !== 'pending' || cand.project_id !== projectId) {
+        if (!cand || cand.status !== 'pending' || candidateOwnerType !== ownerType || candidateOwnerId !== ownerId) {
           skipped.push({ candidateId: p.candidateId, reason: 'not_pending' });
           continue;
         }
@@ -1150,7 +1178,7 @@ function createMemoryService(db, eventBus) {
           item = existing;
         } else {
           item = createMemoryItem({
-            projectId,
+            ...(ownerType === 'profile' ? { profileId: ownerId } : { projectId }),
             kind: p.kind,
             content,
             evidenceJson: buildPromotionEvidence(cand, s),
@@ -1594,9 +1622,11 @@ function createMemoryService(db, eventBus) {
     upsertFact,
     createCandidate,
     listCandidates,
+    listCandidatesForOwner,
     listProjectsWithPendingCandidates,
     listOwnersWithPendingCandidates,
     enqueueDistillJob,
+    enqueueDistillJobForOwner,
     claimDistillJob,
     requeueStaleJobs,
     releaseDistillJob,
@@ -1613,6 +1643,7 @@ function createMemoryService(db, eventBus) {
     buildInjectionBlock,
     listForProject,
     listActiveForDistill,
+    listActiveForDistillForOwner,
     checkOwnerParity,
     detectCrossScopeConflicts,
   };

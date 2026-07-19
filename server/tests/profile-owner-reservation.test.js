@@ -209,9 +209,9 @@ test('parity (S2, R4a-updated): memory_items now accepts a coherent profile row;
 });
 
 // ──────────────────────────────────────────────────────────────
-// 5. B1: drain claim is workspace-only (profile job never claimed)
+// 5. B2b: unfiltered drain claims the oldest job across every owner
 // ──────────────────────────────────────────────────────────────
-test('B1: unfiltered drain claim (projectId=null) claims workspace, never a profile job', (t) => {
+test('B2b: unfiltered drain claim (projectId=null) claims oldest job across owners', (t) => {
   const db = buildMigratedDb();
   t.after(() => db.close());
   const svc = createMemoryService(db);
@@ -220,15 +220,20 @@ test('B1: unfiltered drain claim (projectId=null) claims workspace, never a prof
   db.prepare( // profile job (schema allows it; service path unwired)
     "INSERT INTO memory_jobs (id,kind,project_id,status,owner_type,owner_id) VALUES ('job-pf','distill',NULL,'pending','profile','pf-xyz')"
   ).run();
+  db.prepare("UPDATE memory_jobs SET created_at='2000-01-01 00:00:00' WHERE owner_type='workspace'").run();
+  db.prepare("UPDATE memory_jobs SET created_at='2000-01-02 00:00:00' WHERE id='job-pf'").run();
 
   const claimed = svc.claimDistillJob({ projectId: null });
   assert.ok(claimed, 'claims a job');
   assert.equal(claimed.owner_type, 'workspace');
   assert.equal(claimed.project_id, proj);
 
-  // profile job stays pending; no further workspace job is claimable
-  assert.equal(db.prepare("SELECT status FROM memory_jobs WHERE id='job-pf'").get().status, 'pending');
-  assert.equal(svc.claimDistillJob({ projectId: null }), null, 'profile job excluded from drain');
+  // The next unfiltered claim crosses the owner boundary and claims the profile job.
+  const profileClaim = svc.claimDistillJob({ projectId: null });
+  assert.ok(profileClaim, 'claims the remaining profile job');
+  assert.equal(profileClaim.owner_type, 'profile');
+  assert.equal(profileClaim.owner_id, 'pf-xyz');
+  assert.equal(profileClaim.project_id, null);
 });
 
 // ──────────────────────────────────────────────────────────────

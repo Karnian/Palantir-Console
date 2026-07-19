@@ -245,7 +245,7 @@ test('createCandidate race-safe: second concurrent insert returns winner (same o
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM memory_candidates').get().n, 1);
 });
 
-test('drainAll defers non-workspace owners until P-B FK relaxation', async () => {
+test('drainAll processes non-workspace (profile) owners', async () => {
   const enqueued = [];
   const warnings = [];
   const memoryService = {
@@ -259,8 +259,8 @@ test('drainAll defers non-workspace owners until P-B FK relaxation', async () =>
     listProjectsWithPendingCandidates() {
       throw new Error('legacy project enumeration should not be used');
     },
-    enqueueDistillJob(projectId) {
-      enqueued.push(projectId);
+    enqueueDistillJobForOwner(ownerType, ownerId) {
+      enqueued.push({ ownerType, ownerId });
     },
     claimDistillJob() {
       return null;
@@ -274,9 +274,13 @@ test('drainAll defers non-workspace owners until P-B FK relaxation', async () =>
   });
 
   assert.deepEqual(await distill.drainAll({ maxJobs: 1 }), []);
-  assert.deepEqual(enqueued, ['workspace-project']);
-  assert.ok(
-    warnings.some((msg) => msg.includes('skip non-workspace owner profile:profile-1')),
-    'non-workspace owner skip is logged'
+  assert.deepEqual(enqueued, [
+    { ownerType: 'workspace', ownerId: 'workspace-project' },
+    { ownerType: 'profile', ownerId: 'profile-1' },
+  ]);
+  assert.equal(
+    warnings.some((msg) => msg.includes('skip non-workspace owner')),
+    false,
+    'profile owner is not skipped',
   );
 });

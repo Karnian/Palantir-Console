@@ -47,9 +47,13 @@ function createMemoryDistillService({ memoryService, distiller, logger = console
 
     const lease = { jobId: job.id, claimToken: job.claim_token };
     try {
-      const candidates = memoryService
-        .listCandidates(job.project_id, 'pending')
-        .slice(0, batchSize);
+      const ownerType = job.owner_type;
+      const ownerId = job.owner_id;
+      const hasOwner = !!(ownerType && ownerId);
+      const listPending = () => hasOwner
+        ? memoryService.listCandidatesForOwner(ownerType, ownerId, 'pending')
+        : memoryService.listCandidates(job.project_id, 'pending');
+      const candidates = listPending().slice(0, batchSize);
 
       if (candidates.length === 0) {
         memoryService.releaseDistillJob({ ...lease, outcome: 'done' });
@@ -63,11 +67,21 @@ function createMemoryDistillService({ memoryService, distiller, logger = console
       // — the writer (promoteCandidates) re-validates any proposed target (active
       // / same kind / token floor) and ignores a bad/hallucinated one.
       let existingItems = [];
-      try { existingItems = memoryService.listActiveForDistill(job.project_id); } catch { existingItems = []; }
+      try {
+        existingItems = hasOwner
+          ? memoryService.listActiveForDistillForOwner(ownerType, ownerId)
+          : memoryService.listActiveForDistill(job.project_id);
+      } catch { existingItems = []; }
 
       let rawProposals;
       try {
-        rawProposals = await distiller.distill({ projectId: job.project_id, candidates, existingItems });
+        rawProposals = await distiller.distill({
+          projectId: job.project_id,
+          ownerType,
+          ownerId,
+          candidates,
+          existingItems,
+        });
       } catch (err) {
         // transient (network/parse): keep candidates pending, retry w/ backoff.
         memoryService.releaseDistillJob({
@@ -120,9 +134,9 @@ function createMemoryDistillService({ memoryService, distiller, logger = console
       // progress so an all-rejected batch can't spawn infinite successor jobs
       // (Codex SERIOUS 1).
       try {
-        if (result.promoted.length > 0 &&
-            memoryService.listCandidates(job.project_id, 'pending').length > 0) {
-          memoryService.enqueueDistillJob(job.project_id);
+        if (result.promoted.length > 0 && listPending().length > 0) {
+          if (hasOwner) memoryService.enqueueDistillJobForOwner(ownerType, ownerId);
+          else memoryService.enqueueDistillJob(job.project_id);
         }
       } catch (err) { safeWarn(`[distill] successor enqueue job=${job.id}: ${err?.message || err}`); }
 
@@ -145,7 +159,7 @@ function createMemoryDistillService({ memoryService, distiller, logger = console
     }
   }
 
-  // Ensure a distill job exists for every project with pending candidates, then
+  // Ensure a distill job exists for every owner with pending candidates, then
   // drain all claimable jobs. One scheduler tick == one drainAll. maxJobs is a
   // runaway guard (a buggy successor-enqueue loop can't spin forever).
   async function drainAll({ maxJobs = 100 } = {}) {
@@ -163,18 +177,19 @@ function createMemoryDistillService({ memoryService, distiller, logger = console
       return [];
     }
     for (const { ownerType, ownerId } of owners) {
-      // P-B1 relaxed the memory_jobs/memory_candidates project_id FK so a profile
-      // owner CAN exist in storage — but profile distill stays unwired until P-B2.
-      // Today no profile candidate is ever created (createCandidate is
-      // workspace-only) and the claim scan is workspace-only (memoryService claim
-      // guard), so this skip is a no-op. It stays so the scheduler never enqueues a
-      // profile distill job before P-B2 wires the full candidate→distill→promote
-      // path (which also relaxes memory_items + handles permanent-pending).
-      if (ownerType !== 'workspace') {
-        safeWarn(`[distill] skip non-workspace owner ${ownerType}:${ownerId} — profile distill deferred to P-B2`);
-        continue;
+      try {
+        if (typeof memoryService.enqueueDistillJobForOwner === 'function') {
+          memoryService.enqueueDistillJobForOwner(ownerType, ownerId);
+        } else if (ownerType === 'workspace') {
+          // Compatibility for pre-B2b fixtures; production memoryService always
+          // exposes the owner-generic entrypoint.
+          memoryService.enqueueDistillJob(ownerId);
+        } else {
+          throw new Error('enqueueDistillJobForOwner is required for non-workspace owners');
+        }
+      } catch (err) {
+        safeWarn(`[distill] enqueue ${ownerType}:${ownerId}: ${err?.message || err}`);
       }
-      try { memoryService.enqueueDistillJob(ownerId); } catch (err) { safeWarn(`[distill] enqueue ${ownerId}: ${err?.message || err}`); }
     }
     const results = [];
     let guard = 0;
