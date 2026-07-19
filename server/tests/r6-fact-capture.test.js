@@ -11,7 +11,7 @@ const os = require('node:os');
 
 const { createDatabase } = require('../db/database');
 const { createMemoryService } = require('../services/memoryService');
-const { createR6FactCapture } = require('../app');
+const { createR6FactCapture, isStableEnvFact } = require('../app');
 const { toPublicMemory } = require('../routes/memory');
 
 function setupDb(t) {
@@ -31,11 +31,11 @@ function fakeRun(over = {}) {
   return { id: 'run1', is_manager: 0, project_id: 'p1', task_id: 't1', ...over };
 }
 
-function wireCapture(svc, runEvents) {
+function wireCapture(svc, runEvents, logger) {
   const subs = [];
   const eventBus = { subscribe: (cb) => subs.push(cb) };
   const runService = { getRunEvents: () => runEvents };
-  createR6FactCapture({ eventBus, runService, memoryService: svc });
+  createR6FactCapture({ eventBus, runService, memoryService: svc, logger });
   return (run) => subs[0]({ channel: 'run:harvested', data: { run } });
 }
 
@@ -94,6 +94,16 @@ test('upsertFact: requires projectId/factKey/content', (t) => {
 // createR6FactCapture (run:harvested subscriber)
 // --------------------------------------------------------------------------
 
+test('isStableEnvFact: admits only stable R6 environment facts', () => {
+  assert.equal(isStableEnvFact('env.test_command'), true);
+  assert.equal(isStableEnvFact('env.node_resolution', { node_source: 'project' }), true);
+  for (const node_source of ['fallback', 'server', 'executor', undefined]) {
+    assert.equal(isStableEnvFact('env.node_resolution', { node_source }), false);
+  }
+  assert.equal(isStableEnvFact('env.node_resolution', null), false);
+  assert.equal(isStableEnvFact('env.unknown', { node_source: 'project' }), false);
+});
+
 test('R6 capture: harvest:test -> env.test_command + env.node_resolution, no output leak', (t) => {
   const db = setupDb(t);
   const svc = createMemoryService(db);
@@ -113,7 +123,9 @@ test('R6 capture: harvest:test -> env.test_command + env.node_resolution, no out
   assert.match(cmd.content, /npm test/);
   assert.doesNotMatch(cmd.content, /SECRET/, 'output_tail must NOT leak into fact content');
   assert.ok(node, 'node_resolution fact created');
+  assert.equal(node.content, 'Project requires Node major 22');
   assert.match(node.content, /requires Node major 22/);
+  assert.doesNotMatch(node.content, /\(resolved\)/);
   // evidence carries run provenance only — never output_tail/secret.
   const ev = JSON.parse(cmd.evidence_json);
   assert.equal(ev.run_id, 'run1');
@@ -122,16 +134,18 @@ test('R6 capture: harvest:test -> env.test_command + env.node_resolution, no out
   assert.doesNotMatch(cmd.evidence_json, /SECRET/);
 });
 
-test('R6 capture: node_source=fallback -> "unresolved" content (not "runs on N")', (t) => {
+test('R6 capture: node_source=fallback -> node fact rejected, test command retained', (t) => {
   const db = setupDb(t);
   const svc = createMemoryService(db);
+  const warnings = [];
   const emit = wireCapture(svc, [
     { id: 5, event_type: 'harvest:test', payload_json: JSON.stringify({ command: 'x', node_major: 18, node_source: 'fallback' }) },
-  ]);
+  ], { warn: (message) => warnings.push(message) });
   emit(fakeRun());
-  const node = svc.listForProject('p1').find((r) => r.fact_key === 'env.node_resolution');
-  assert.match(node.content, /unresolved|falls back/i);
-  assert.doesNotMatch(node.content, /^Project Node major: 18 \(source: fallback\)$/);
+  const rows = svc.listForProject('p1');
+  assert.ok(rows.find((r) => r.fact_key === 'env.test_command'));
+  assert.equal(rows.find((r) => r.fact_key === 'env.node_resolution'), undefined);
+  assert.ok(warnings.some((message) => /admission rejected \(episodic\).*node_source=fallback.*run=run1/.test(message)));
 });
 
 test('R6 capture: manager / no project / no harvest:test -> no fact, never throws', (t) => {
@@ -160,16 +174,28 @@ test('R6 capture: re-harvest identical env -> idempotent (no revision churn)', (
   assert.equal(svc.getRevision('p1'), rev1, 'unchanged env facts do not bump revision again');
 });
 
-test('R6 capture: node_source=server -> "no project-specific declaration" (not a requirement)', (t) => {
+test('R6 capture: node_source=server -> node fact rejected, test command retained', (t) => {
   const db = setupDb(t);
   const svc = createMemoryService(db);
   const emit = wireCapture(svc, [
     { id: 9, event_type: 'harvest:test', payload_json: JSON.stringify({ command: 'x', node_major: 22, node_source: 'server' }) },
   ]);
   emit(fakeRun());
-  const node = svc.listForProject('p1').find((r) => r.fact_key === 'env.node_resolution');
-  assert.match(node.content, /no project-specific|server Node/i);
-  assert.doesNotMatch(node.content, /requires Node major|Project requires/i, 'server source must NOT read as a project requirement');
+  const rows = svc.listForProject('p1');
+  assert.ok(rows.find((r) => r.fact_key === 'env.test_command'));
+  assert.equal(rows.find((r) => r.fact_key === 'env.node_resolution'), undefined);
+});
+
+test('R6 capture: node_source=executor -> node fact rejected as episodic', (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  const emit = wireCapture(svc, [
+    { id: 12, event_type: 'harvest:test', payload_json: JSON.stringify({ command: 'x', node_major: 22, node_source: 'executor' }) },
+  ]);
+  emit(fakeRun());
+  const rows = svc.listForProject('p1');
+  assert.ok(rows.find((r) => r.fact_key === 'env.test_command'));
+  assert.equal(rows.find((r) => r.fact_key === 'env.node_resolution'), undefined);
 });
 
 test('upsertFact: content already active under a different key -> no-op, no throw', (t) => {

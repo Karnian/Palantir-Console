@@ -607,6 +607,12 @@ function createPmAutoReview({
 // command/node_major), and upserts env.test_command / env.node_resolution
 // facts. Never throws — annotate-only, like harvest itself. Excludes
 // run-specific noise (pass/fail/exit/duration/output_tail/diff/worktree).
+function isStableEnvFact(factKey, meta) {
+  if (factKey === 'env.test_command') return true;
+  if (factKey === 'env.node_resolution') return !!(meta && meta.node_source === 'project');
+  return false;
+}
+
 function createR6FactCapture({ eventBus, runService, memoryService, logger = console } = {}) {
   if (!eventBus || !runService || !memoryService) return { capture: () => {} };
 
@@ -629,7 +635,7 @@ function createR6FactCapture({ eventBus, runService, memoryService, logger = con
       event_id: testEvent.id,
     });
     // env.test_command — the project's harvest test command.
-    if (payload.command) {
+    if (payload.command && isStableEnvFact('env.test_command')) {
       try {
         memoryService.upsertFact({
           projectId: run.project_id,
@@ -640,30 +646,23 @@ function createR6FactCapture({ eventBus, runService, memoryService, logger = con
         });
       } catch (err) { logger.warn(`[r6-fact] test_command run=${run.id}: ${err.message}`); }
     }
-    // env.node_resolution — a resolved project node vs an unresolved fallback
-    // (the latter is NOT "runs on node N" — avoid that contamination).
+    // env.node_resolution — only a project declaration is stable across
+    // operators/runs/nodes/sources. Other resolutions remain episodic in the
+    // harvest:test event and are not promoted to workspace memory.
     if (payload.node_major != null) {
-      // 3-way: only source='project' is an actual resolved project requirement.
-      // 'fallback' = declared-but-unresolved, 'server' = no project declaration
-      // (or same/range/dirty) — neither must read as "the project requires N"
-      // (Codex cross-review SERIOUS: avoid server-source contamination).
-      let content;
-      if (payload.node_source === 'project') {
-        content = `Project requires Node major ${payload.node_major} (resolved)`;
-      } else if (payload.node_source === 'fallback') {
-        content = `Project declares Node major ${payload.node_major} but it is unresolved; harvest falls back to the server node`;
+      if (isStableEnvFact('env.node_resolution', { node_source: payload.node_source })) {
+        try {
+          memoryService.upsertFact({
+            projectId: run.project_id,
+            factKey: 'env.node_resolution',
+            content: `Project requires Node major ${payload.node_major}`,
+            evidenceJson,
+            importance: 5,
+          });
+        } catch (err) { logger.warn(`[r6-fact] node_resolution run=${run.id}: ${err.message}`); }
       } else {
-        content = `No project-specific Node declaration; harvest uses the server Node major ${payload.node_major}`;
+        logger.warn(`[r6-fact] node_resolution admission rejected (episodic) node_source=${String(payload.node_source)} run=${run.id}`);
       }
-      try {
-        memoryService.upsertFact({
-          projectId: run.project_id,
-          factKey: 'env.node_resolution',
-          content,
-          evidenceJson,
-          importance: 5,
-        });
-      } catch (err) { logger.warn(`[r6-fact] node_resolution run=${run.id}: ${err.message}`); }
     }
   }
 
@@ -1794,6 +1793,7 @@ module.exports = {
   createApp,
   createPmAutoReview,
   createR6FactCapture,
+  isStableEnvFact,
   createR1bCapture,
   createR3Capture,
   startMasterMemoryDecayScheduler,
