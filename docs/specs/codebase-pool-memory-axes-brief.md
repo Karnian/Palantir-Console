@@ -66,7 +66,7 @@
 - **B0 (profile 바인딩/생성/lifecycle — R1 BLOCKER 4 + R2 조임, 선행)**: 
   - **신규 instance + private profile 을 한 tx 로 원자 생성** — 현 생성 seam(`runService.js:136,781` `ensurePrimaryOperatorInstanceForProject`)이 profile 없이 instance 만 삽입하는 문제 종결. 원자 생성 배포 **후** `profile_id` NOT NULL rebuild(순서 lock).
   - legacy 무프로필 instance 백필(private profile). assign/unassign API. **unassign 의미 LOCK**: profile 은 identity 라 unassign=새 private profile 로 교체(무프로필 상태 금지 → NOT NULL 과 정합). 
-  - **reassign(profile 교체) 시 그 profile 공유하는 모든 instance thread invalidation**(persona 변화). 
+  - **pointer reassign(instance 의 profile 교체)는 그 instance 만 invalidation / profile 콘텐츠(persona·capabilities) PATCH 는 그 profile 공유 전 instance invalidation**.
   - **(R3 SERIOUS 해소)** `operator_profiles` 의 **persona 또는 capabilities 변경(PATCH) 시** 그 `profile_id` 를 참조하는 **모든 instance** 의 persisted thread 를 clear + live canonical slot dispose/reset(`operatorInstanceService.js:102` thread-clear primitive 재사용). **name/description-only 변경은 invalidation 안 함**(불필요 재spawn 회피). 현 `operatorProfileService.js:147` PATCH 가 persona/capabilities 를 자유 변경하나 공유 instance 무효화 경로가 없어 stale identity 사용 — 이 경로 신설.
   - **orphan policy LOCK**: profile delete 는 참조 instance 있으면 **409**(현재 `operatorProfileService.js:174` 는 raw FK 오류) — 참조 0 일 때만 삭제.
   - B3 구 열린결정 = **profile 재사용 확정**(`operator_instance` owner 신설 ✗ — 042/044 CHECK+pipeline 전면 재migration 회피). specialist 는 profile ID 직접 수령(`specialistService.js:78`)이라 미영향.

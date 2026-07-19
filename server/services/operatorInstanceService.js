@@ -1,5 +1,6 @@
 'use strict';
 
+const { randomUUID } = require('crypto');
 const { BadRequestError, ConflictError, NotFoundError } = require('../utils/errors');
 const { conversationIdForProject } = require('../utils/conversationId');
 
@@ -39,6 +40,23 @@ function createOperatorInstanceService(db, {
       ORDER BY updated_at DESC, created_at DESC, id ASC
     `),
     getInstance: db.prepare('SELECT * FROM operator_instances WHERE id = ?'),
+    listInstanceIdsForProfile: db.prepare('SELECT id FROM operator_instances WHERE profile_id = ?'),
+    getPrimaryProjectIdForInstance: db.prepare(`
+      SELECT project_id
+      FROM operator_codebase_refs
+      WHERE instance_id = ? AND role = 'primary'
+      LIMIT 1
+    `),
+    getProfileById: db.prepare('SELECT id FROM operator_profiles WHERE id = ?'),
+    insertPrivateProfile: db.prepare(`
+      INSERT INTO operator_profiles (id, name, description, persona, capabilities_json, is_private)
+      VALUES (@id, @name, NULL, NULL, '[]', @is_private)
+    `),
+    updateInstanceProfile: db.prepare(`
+      UPDATE operator_instances
+      SET profile_id = ?, updated_at = datetime('now')
+      WHERE id = ?
+    `),
     getProject: db.prepare('SELECT * FROM projects WHERE id = ?'),
     listRefs: db.prepare(`
       SELECT r.instance_id,
@@ -232,6 +250,38 @@ function createOperatorInstanceService(db, {
     return withRefs(assertInstance(id));
   }
 
+  function listInstanceIdsForProfile(profileId) {
+    return stmts.listInstanceIdsForProfile.all(profileId).map((row) => row.id);
+  }
+
+  function getPrimaryProjectIdForInstance(instanceId) {
+    return stmts.getPrimaryProjectIdForInstance.get(instanceId)?.project_id || null;
+  }
+
+  function setProfileId(instanceId, profileId) {
+    const instance = assertInstance(instanceId);
+    const profile = stmts.getProfileById.get(profileId);
+    if (!profile) throw new NotFoundError(`operator profile not found: ${profileId}`);
+    stmts.updateInstanceProfile.run(profile.id, instance.id);
+    return withRefs(stmts.getInstance.get(instance.id));
+  }
+
+  function createPrivateProfileFor(instanceId) {
+    const instance = assertInstance(instanceId);
+    const newId = `op_priv_${randomUUID()}`;
+    const newName = `Private: ${instance.id} (${randomUUID().slice(0, 8)})`;
+    db.transaction(() => {
+      stmts.insertPrivateProfile.run({ id: newId, name: newName, is_private: 1 });
+      const result = stmts.updateInstanceProfile.run(newId, instance.id);
+      if (result.changes !== 1) throw new Error(`instance profile update failed for ${instance.id}`);
+    })();
+    const updated = getInstance(instance.id);
+    if (updated.profile_id !== newId) {
+      throw new Error(`postcondition: instance ${instance.id} missing private profile`);
+    }
+    return updated;
+  }
+
   function getPrimaryInstanceForProject(projectId) {
     if (!projectId) return null;
     const row = stmts.primaryForProject.get(projectId);
@@ -355,6 +405,10 @@ function createOperatorInstanceService(db, {
     withTransaction,
     listInstances,
     getInstance,
+    listInstanceIdsForProfile,
+    getPrimaryProjectIdForInstance,
+    setProfileId,
+    createPrivateProfileFor,
     getPrimaryInstanceForProject,
     getLivePrimaryInstanceForProject,
     addRef,

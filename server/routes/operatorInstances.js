@@ -3,7 +3,7 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 
-function createOperatorInstancesRouter({ operatorInstanceService }) {
+function createOperatorInstancesRouter({ operatorInstanceService, operatorIdentityLifecycleService }) {
   const router = express.Router();
 
   router.get('/', asyncHandler(async (req, res) => {
@@ -22,6 +22,26 @@ function createOperatorInstancesRouter({ operatorInstanceService }) {
 
   router.delete('/:id/refs/:projectId', asyncHandler(async (req, res) => {
     const instance = operatorInstanceService.removeRef(req.params.id, req.params.projectId);
+    res.json({ instance });
+  }));
+
+  router.patch('/:id/profile', asyncHandler(async (req, res) => {
+    if (!req.auth || req.auth.method !== 'cookie') {
+      return res.status(403).json({ error: 'profile assignment requires human (cookie) auth' });
+    }
+    const profileId = (req.body || {}).profile_id;
+    if (typeof profileId !== 'string') {
+      return res.status(400).json({ error: 'profile_id must be a string' });
+    }
+    const instance = operatorIdentityLifecycleService.assignProfile(req.params.id, profileId);
+    res.json({ instance });
+  }));
+
+  router.delete('/:id/profile', asyncHandler(async (req, res) => {
+    if (!req.auth || req.auth.method !== 'cookie') {
+      return res.status(403).json({ error: 'profile assignment requires human (cookie) auth' });
+    }
+    const instance = operatorIdentityLifecycleService.unassignProfile(req.params.id);
     res.json({ instance });
   }));
 

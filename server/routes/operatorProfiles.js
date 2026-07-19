@@ -7,9 +7,12 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 
-function createOperatorProfilesRouter({ operatorProfileService }) {
+function createOperatorProfilesRouter({ operatorProfileService, operatorIdentityLifecycleService }) {
   if (!operatorProfileService) {
     throw new Error('createOperatorProfilesRouter: operatorProfileService is required');
+  }
+  if (!operatorIdentityLifecycleService) {
+    throw new Error('createOperatorProfilesRouter: operatorIdentityLifecycleService is required');
   }
   const router = express.Router();
 
@@ -27,12 +30,12 @@ function createOperatorProfilesRouter({ operatorProfileService }) {
   }));
 
   router.patch('/:id', asyncHandler(async (req, res) => {
-    const profile = operatorProfileService.updateProfile(req.params.id, req.body || {});
+    const profile = operatorIdentityLifecycleService.updateProfileContent(req.params.id, req.body || {});
     res.json({ profile });
   }));
 
   router.delete('/:id', asyncHandler(async (req, res) => {
-    const profile = operatorProfileService.deleteProfile(req.params.id);
+    const profile = operatorIdentityLifecycleService.deleteProfile(req.params.id);
     res.json({ profile });
   }));
 

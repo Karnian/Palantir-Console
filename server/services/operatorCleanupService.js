@@ -33,6 +33,7 @@ function createOperatorCleanupService({
   managerRegistry,
   managerAdapterFactory,
   runService,
+  operatorInstanceService,
   eventBus,
   logger,
 }) {
@@ -222,7 +223,45 @@ function createOperatorCleanupService({
     return { disposed, clearedBrief, cancelledRunId, disposeError };
   }
 
-  return { reset, dispose, forceReset };
+  function resetInstance(instanceId) {
+    if (!instanceId) throw new Error('instanceId is required');
+
+    const slotKey = conversationIdForProject(instanceId);
+    let disposed = false;
+    let cancelledRunId = null;
+    const liveRunId = managerRegistry.getActiveRunId(slotKey);
+    const liveAdapter = managerRegistry.getActiveAdapter(slotKey);
+    if (liveRunId && liveAdapter) {
+      try {
+        liveAdapter.disposeSession(liveRunId);
+      } catch (err) {
+        const wrapped = new Error(`operator adapter disposeSession failed for ${slotKey} (run=${liveRunId}): ${err.message}`);
+        wrapped.httpStatus = 502;
+        wrapped.cause = err;
+        throw wrapped;
+      }
+      try {
+        if (runService) runService.updateRunStatus(liveRunId, 'cancelled', { force: true });
+      } catch { /* best-effort */ }
+      cancelledRunId = liveRunId;
+      disposed = true;
+    }
+
+    managerRegistry.clearActive(slotKey);
+    if (runService && typeof runService.setOperatorInstanceThread === 'function') {
+      runService.setOperatorInstanceThread(instanceId, {});
+    }
+    const projectId = operatorInstanceService
+      && typeof operatorInstanceService.getPrimaryProjectIdForInstance === 'function'
+      ? operatorInstanceService.getPrimaryProjectIdForInstance(instanceId)
+      : null;
+    if (projectId && projectBriefService && typeof projectBriefService.clearPmThread === 'function') {
+      projectBriefService.clearPmThread(projectId);
+    }
+    return { instanceId, disposed, cancelledRunId, clearedThread: true };
+  }
+
+  return { reset, dispose, forceReset, resetInstance };
 }
 
 module.exports = { createOperatorCleanupService };

@@ -536,7 +536,8 @@ test('W-P6b: primaryless operator turn injects User memory only and records only
   } = stack;
 
   const referenceProject = projectService.createProject({ name: 'reference-only' });
-  db.prepare("INSERT INTO operator_instances (id) VALUES ('oi_generic')").run();
+  db.prepare("INSERT INTO operator_profiles (id, name, is_private) VALUES ('op_priv_oi_generic', 'Private: oi_generic', 1)").run();
+  db.prepare("INSERT INTO operator_instances (id, profile_id) VALUES ('oi_generic', 'op_priv_oi_generic')").run();
   db.prepare(`
     INSERT INTO operator_codebase_refs (instance_id, project_id, role)
     VALUES ('oi_generic', ?, 'reference')

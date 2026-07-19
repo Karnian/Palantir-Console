@@ -36,6 +36,7 @@ function rowToProfile(row) {
     name: row.name,
     description: row.description ?? null,
     persona: row.persona ?? null,
+    is_private: !!row.is_private,
     // Codex R2 MINOR: filter to valid capability strings at read time — a direct
     // DB write could store non-string/unknown entries (the SQL CHECK only enforces
     // array shape); PF-3 must never resolve a bogus cap.
@@ -105,12 +106,13 @@ function createOperatorProfileService(db) {
     getByName: db.prepare('SELECT * FROM operator_profiles WHERE name = ?'),
     listAll: db.prepare('SELECT * FROM operator_profiles ORDER BY name ASC'),
     insert: db.prepare(
-      'INSERT INTO operator_profiles (id, name, description, persona, capabilities_json) VALUES (@id, @name, @description, @persona, @capabilities_json)'
+      'INSERT INTO operator_profiles (id, name, description, persona, capabilities_json, is_private) VALUES (@id, @name, @description, @persona, @capabilities_json, @is_private)'
     ),
     update: db.prepare(
       'UPDATE operator_profiles SET name=@name, description=@description, persona=@persona, capabilities_json=@capabilities_json WHERE id=@id'
     ),
     delete: db.prepare('DELETE FROM operator_profiles WHERE id = ?'),
+    countInstancesByProfile: db.prepare('SELECT COUNT(*) AS n FROM operator_instances WHERE profile_id = ?'),
   };
 
   function createProfile(data = {}) {
@@ -122,6 +124,7 @@ function createOperatorProfileService(db) {
       description: norm.description ?? null,
       persona: norm.persona ?? null,
       capabilities_json: norm.capabilities_json ?? '[]',
+      is_private: 0,
     };
     try {
       stmts.insert.run(row);
@@ -144,7 +147,7 @@ function createOperatorProfileService(db) {
     return stmts.listAll.all().map(rowToProfile);
   }
 
-  function updateProfile(id, data = {}) {
+  function prepareUpdate(id, data = {}) {
     const existing = stmts.getById.get(id);
     if (!existing) throw new NotFoundError(`operator profile not found: ${id}`);
     const norm = normalizeInputs(data, { partial: true });
@@ -160,6 +163,13 @@ function createOperatorProfileService(db) {
       const clash = stmts.getByName.get(merged.name);
       if (clash && clash.id !== id) throw new ConflictError(`operator profile name already exists: ${merged.name}`);
     }
+    const identityChanged = merged.persona !== existing.persona
+      || merged.capabilities_json !== existing.capabilities_json;
+    return { merged, identityChanged };
+  }
+
+  function updateProfile(id, data = {}) {
+    const { merged } = prepareUpdate(id, data);
     try {
       stmts.update.run(merged);
     } catch (err) {
@@ -172,13 +182,20 @@ function createOperatorProfileService(db) {
   }
 
   function deleteProfile(id) {
-    const existing = stmts.getById.get(id);
-    if (!existing) throw new NotFoundError(`operator profile not found: ${id}`);
-    stmts.delete.run(id);
+    let existing;
+    db.transaction(() => {
+      existing = stmts.getById.get(id);
+      if (!existing) throw new NotFoundError(`operator profile not found: ${id}`);
+      const count = Number(stmts.countInstancesByProfile.get(id)?.n) || 0;
+      if (count > 0) {
+        throw new ConflictError(`operator profile ${id} is in use by ${count} operator instance(s)`);
+      }
+      stmts.delete.run(id);
+    })();
     return rowToProfile(existing);
   }
 
-  return { createProfile, getProfile, listProfiles, updateProfile, deleteProfile };
+  return { createProfile, getProfile, listProfiles, prepareUpdate, updateProfile, deleteProfile };
 }
 
 module.exports = { createOperatorProfileService, normalizeInputs, rowToProfile };

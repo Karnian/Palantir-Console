@@ -315,7 +315,8 @@ function setupApp(t, { authToken } = {}) {
   // Seed a project + operator instance directly.
   const db = app.services._rawDb;
   db.prepare("INSERT INTO projects (id, name, pm_enabled) VALUES ('p1', 'P', 1)").run();
-  db.prepare("INSERT INTO operator_instances (id) VALUES ('oi_p1')").run();
+  db.prepare("INSERT INTO operator_profiles (id, name, is_private) VALUES ('op_priv_oi_p1', 'Private: oi_p1', 1)").run();
+  db.prepare("INSERT INTO operator_instances (id, profile_id) VALUES ('oi_p1', 'op_priv_oi_p1')").run();
   db.prepare("INSERT INTO operator_codebase_refs (instance_id, project_id, role) VALUES ('oi_p1', 'p1', 'primary')").run();
   return app;
 }

@@ -1,5 +1,5 @@
 const crypto = require('node:crypto');
-const { BadRequestError, NotFoundError } = require('../utils/errors');
+const { BadRequestError, ConflictError, NotFoundError } = require('../utils/errors');
 const {
   isProjectLayer,
   parseProjectConversationId,
@@ -133,13 +133,29 @@ function createRunService(db, eventBus) {
         @operator_instance_id, @retry_root_run_id
       )
     `),
-    insertOperatorInstance: db.prepare(`
-      INSERT OR IGNORE INTO operator_instances (id)
-      VALUES (?)
+    insertPrivateProfile: db.prepare(`
+      INSERT INTO operator_profiles (id, name, description, persona, capabilities_json, is_private)
+      VALUES (@id, @name, NULL, NULL, '[]', @is_private)
+    `),
+    getProfileById: db.prepare(`
+      SELECT * FROM operator_profiles WHERE id = ?
+    `),
+    getProfileByName: db.prepare(`
+      SELECT * FROM operator_profiles WHERE name = ?
+    `),
+    insertOperatorInstanceWithProfile: db.prepare(`
+      INSERT INTO operator_instances (id, profile_id)
+      VALUES (?, ?)
     `),
     insertPrimaryOperatorRef: db.prepare(`
-      INSERT OR IGNORE INTO operator_codebase_refs (instance_id, project_id, role)
+      INSERT INTO operator_codebase_refs (instance_id, project_id, role)
       VALUES (?, ?, 'primary')
+    `),
+    getPrimaryRefForProject: db.prepare(`
+      SELECT instance_id
+      FROM operator_codebase_refs
+      WHERE project_id = ? AND role = 'primary'
+      LIMIT 1
     `),
     getOperatorInstance: db.prepare(`
       SELECT * FROM operator_instances WHERE id = ?
@@ -780,8 +796,32 @@ function createRunService(db, eventBus) {
 
     const instanceId = `oi_${projectId}`;
     const tx = db.transaction(() => {
-      stmts.insertOperatorInstance.run(instanceId);
-      stmts.insertPrimaryOperatorRef.run(instanceId, projectId);
+      const instance = stmts.getOperatorInstance.get(instanceId);
+      if (!instance) {
+        const profileId = `op_priv_${instanceId}`;
+        const profileName = `Private: ${instanceId}`;
+        if (stmts.getProfileById.get(profileId) || stmts.getProfileByName.get(profileName)) {
+          throw new ConflictError(`reserved private profile already exists for ${instanceId}`);
+        }
+        stmts.insertPrivateProfile.run({ id: profileId, name: profileName, is_private: 1 });
+        const result = stmts.insertOperatorInstanceWithProfile.run(instanceId, profileId);
+        if (result.changes !== 1) throw new Error(`instance insert failed for ${instanceId}`);
+      }
+
+      const primaryRef = stmts.getPrimaryRefForProject.get(projectId);
+      if (!primaryRef) {
+        stmts.insertPrimaryOperatorRef.run(instanceId, projectId);
+      } else if (primaryRef.instance_id !== instanceId) {
+        throw new ConflictError(`project ${projectId} primary already owned by ${primaryRef.instance_id}`);
+      }
+
+      const final = stmts.getOperatorInstance.get(instanceId);
+      if (!final || !final.profile_id) {
+        throw new Error(`postcondition: instance ${instanceId} missing profile`);
+      }
+      if (!stmts.getOperatorRef.get(instanceId, projectId)) {
+        throw new Error('postcondition: primary ref missing');
+      }
     });
     tx();
     return resolveOperatorConversationFromDb(conversationIdForProject(projectId));

@@ -219,7 +219,8 @@ test('NEW-B3 operatorCleanupService re-throws on operator instance thread clear 
   const db = await mkdb(t);
   // Insert a project + operator instance thread so the clear path runs.
   db.prepare("INSERT INTO projects (id, name) VALUES ('p1','P')").run();
-  db.prepare("INSERT INTO operator_instances (id, thread_id, pm_adapter) VALUES ('oi_p1', 'thread-123', 'codex')").run();
+  db.prepare("INSERT INTO operator_profiles (id, name, is_private) VALUES ('op_priv_oi_p1', 'Private: oi_p1', 1)").run();
+  db.prepare("INSERT INTO operator_instances (id, profile_id, thread_id, pm_adapter) VALUES ('oi_p1', 'op_priv_oi_p1', 'thread-123', 'codex')").run();
   db.prepare("INSERT INTO operator_codebase_refs (instance_id, project_id, role) VALUES ('oi_p1', 'p1', 'primary')").run();
 
   // Build a minimal fake set of deps. The instance thread clear is the thing

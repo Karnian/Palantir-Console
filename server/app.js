@@ -85,6 +85,7 @@ const { createOperatorProfileMemoryRouter } = require('./routes/operatorProfileM
 const { createOperatorProfileService } = require('./services/operatorProfileService');
 const { createMasterMemoryRouter } = require('./routes/masterMemory');
 const { createOperatorInstanceService } = require('./services/operatorInstanceService');
+const { createOperatorIdentityLifecycleService } = require('./services/operatorIdentityLifecycleService');
 const { createVerifyCheckService } = require('./services/verifyCheckService');
 const { createVerifyChecksRouter } = require('./routes/verifyChecks');
 const { createOperatorInstancesRouter } = require('./routes/operatorInstances');
@@ -1277,6 +1278,12 @@ function createApp(options = {}) {
     managerAdapterFactory,
     runService,
     eventBus,
+    operatorInstanceService,
+  });
+  const operatorIdentityLifecycleService = createOperatorIdentityLifecycleService({
+    operatorProfileService,
+    operatorInstanceService,
+    operatorCleanupService,
   });
   const memoryComposer = createMemoryComposer({
     retrievers: {
@@ -1483,7 +1490,7 @@ function createApp(options = {}) {
 
   // New routes (v2)
   app.use('/api/projects', createProjectsRouter({ projectService, taskService, runService, projectBriefService, operatorCleanupService, operatorInstanceService, nodeBindingValidator, lifecycleService, repoPreflightService }));
-  app.use('/api/operator-instances', createOperatorInstancesRouter({ operatorInstanceService }));
+  app.use('/api/operator-instances', createOperatorInstancesRouter({ operatorInstanceService, operatorIdentityLifecycleService }));
   app.use('/api/nodes', createNodesRouter({ nodeService, nodeUsageService, nodeSummaryService, lifecycleService }));
   app.use('/api/projects', createMemoryRouter({ memoryService, projectService })); // ML PR1: GET /:projectId/memory
   app.use('/api/master-memory', createMasterMemoryRouter({ masterMemoryService })); // L2 P1b: GET / + POST /remember
@@ -1509,7 +1516,7 @@ function createApp(options = {}) {
   app.use('/api/router', createRouterRouter({ routerService }));
   app.use('/api/worker-presets', createWorkerPresetsRouter({ presetService }));
   app.use('/api/verify-checks', createVerifyChecksRouter({ verifyCheckService, taskService, goalFeatureActive }));
-  app.use('/api/operator/profiles', createOperatorProfilesRouter({ operatorProfileService }));
+  app.use('/api/operator/profiles', createOperatorProfilesRouter({ operatorProfileService, operatorIdentityLifecycleService }));
   // R4b: profile-scoped R4 remember (POST /:id/memory/remember). Separate router on
   // the same base — the CRUD router's /:id routes don't match the deeper path.
   app.use('/api/operator/profiles', createOperatorProfileMemoryRouter({ memoryService, operatorProfileService }));
@@ -1678,6 +1685,8 @@ function createApp(options = {}) {
     specialistService, // Operator P-B2c-2: null unless PALANTIR_OPERATOR_SPECIALIST=1 (unrouted)
     operatorProfileService, // Operator Profile entity (PF-1)
     operatorInstanceService,
+    operatorCleanupService,
+    operatorIdentityLifecycleService,
     resolveOperatorConversationId, // W-P2+: instance-aware dual-read resolver (legacy alias + operator:oi_*)
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at
