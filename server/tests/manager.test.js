@@ -651,8 +651,16 @@ test('favorite A-track: Operator prompt drives pm_run_id at /execute and drops t
   });
   // BLOCKER 1: the /execute guidance must instruct the Operator to include its
   // own pm_run_id so the worker is attributed to it (auto-review returns home).
-  assert.match(prompt, /pm_run_id[\s\S]{0,80}\/execute|\/execute[\s\S]{0,200}pm_run_id/i);
   assert.match(prompt, /attributes the spawned worker to YOU/);
+  // Every copyable /execute body example in the Operator prompt must carry
+  // pm_run_id — a model may copy any of them (Codex A-track2: 2 of 3 examples
+  // omitted it). Check each agent_profile_id example segment.
+  const execExamples = prompt.split('"agent_profile_id":"AGENT_ID"').slice(1);
+  assert.ok(execExamples.length >= 2, 'expected multiple /execute body examples');
+  for (const seg of execExamples) {
+    const body = seg.slice(0, 160); // the rest of that JSON body
+    assert.ok(/pm_run_id/.test(body), `an /execute example omits pm_run_id: ...${body.slice(0, 80)}`);
+  }
   // SERIOUS 2: favorite shared-pool framing present, pre-favorite hard locks gone.
   assert.match(prompt, /SHARED codebase pool/i);
   assert.ok(!prompt.includes('within your project'), 'pre-favorite "within your project" lock removed');

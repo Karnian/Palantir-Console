@@ -227,7 +227,7 @@ ${layerNote}
 **Correct workflow to spawn a worker:**
 1. List available agent profiles: GET /api/agents
 2. Create a task: POST /api/tasks
-3. Execute the task (THIS spawns the actual agent process): POST /api/tasks/TASK_ID/execute with {"agent_profile_id":"AGENT_ID","prompt":"detailed instructions"}
+3. Execute the task (THIS spawns the actual agent process): POST /api/tasks/TASK_ID/execute with {"agent_profile_id":"AGENT_ID","prompt":"detailed instructions"${isProjectLayer(layer) ? ',"pm_run_id":"YOUR_OWN_OPERATOR_RUN_ID"' : ''}}
 4. Monitor the spawned run: GET /api/runs?task_id=TASK_ID
 
 If no agent profiles exist, tell the user to create one first via the Agents page.
@@ -284,7 +284,7 @@ ${workerInterventionSection}${isProjectLayer(layer) ? `
 ### Skill Packs (PM-only, worker capability injection)
 Skill packs equip workers with specialized knowledge (prompt overlays), tools (MCP servers), and acceptance checklists. As PM, you should choose skill packs that match the task's nature.
 
-**Your project's default skills are listed in the "Project Skill Packs" section below (if any).** These auto_apply packs are automatically applied to every worker in this project — you do NOT need to specify them in skill_pack_ids.
+**Your primary codebase's default skills are listed in the "Project Skill Packs" section below (if any).** auto_apply packs are automatically applied to every worker dispatched to a codebase (resolved by the worker task's target codebase — for a turn directed elsewhere, that codebase's own auto_apply applies, not necessarily your primary's) — you do NOT need to specify them in skill_pack_ids.
 
 - Browse all available skill packs: GET ${base}/api/skill-packs
   Query global packs only: GET ${base}/api/skill-packs?scope=global
@@ -294,7 +294,7 @@ Skill packs equip workers with specialized knowledge (prompt overlays), tools (M
 
 **How to equip workers with skills:**
 When calling POST /api/tasks/TASK_ID/execute, include skill_pack_ids to add extra skills for that run:
-  {"agent_profile_id":"AGENT_ID","prompt":"...","skill_pack_ids":["pack-id-1","pack-id-2"]}
+  {"agent_profile_id":"AGENT_ID","prompt":"...","pm_run_id":"YOUR_OWN_OPERATOR_RUN_ID","skill_pack_ids":["pack-id-1","pack-id-2"]}
 
 - skill_pack_ids is additive: project auto_apply + task persistent bindings are always included.
 - skill_pack_ids is per-run ephemeral: does NOT persist as task bindings. Next run of the same task won't inherit them unless you specify again.
