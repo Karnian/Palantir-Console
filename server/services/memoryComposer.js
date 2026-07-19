@@ -11,6 +11,7 @@
  */
 
 const crypto = require('node:crypto');
+const { detectInjection, redactSecrets } = require('./memorySanitize');
 
 // ─── 버전 상수 (A2-2 ledger가 이 값으로 persist) ──────────────────────────────
 const COMPOSER_VERSION = '0.1.0'; // A2-1 skeleton
@@ -48,6 +49,7 @@ const MULTI_OWNER_BUDGET = {
   workspace: 3000,
   user: 1500,
   profile: 1500, // R4c: operator profile owner — bounded like user (specialist injection)
+  watchlist: 900,
 };
 const PROVENANCE_BUDGET = {
   user: 1500,
@@ -261,43 +263,47 @@ function createMemoryComposer({ retrievers = {} } = {}) {
             // Still within budget: include this row.
             selectedRows.push(row);
             budgetUsed += cost;
-            itemEdges.push({
-              item_table: itemTableForOwner(owner_type),
-              item_id: row && row.id,
-              item_revision: row && row.revision,
-              content_hash: row && row.content_hash,
-              fact_key: row && row.fact_key,
-              kind: row && row.kind,
-              source_owner_type: owner_type,
-              source_owner_id: owner_id,
-              provenance: provenance ?? null,
-              // 'included' = selected-for-block (passed to buildBlock).
-              // Does NOT guarantee emission — buildInjectionBlock may re-skip.
-              decision: 'included',
-              reason: null,
-              rank,
-              token_cost: cost,
-            });
+            if (owner_type !== 'watchlist') {
+              itemEdges.push({
+                item_table: itemTableForOwner(owner_type),
+                item_id: row && row.id,
+                item_revision: row && row.revision,
+                content_hash: row && row.content_hash,
+                fact_key: row && row.fact_key,
+                kind: row && row.kind,
+                source_owner_type: owner_type,
+                source_owner_id: owner_id,
+                provenance: provenance ?? null,
+                // 'included' = selected-for-block (passed to buildBlock).
+                // Does NOT guarantee emission — buildInjectionBlock may re-skip.
+                decision: 'included',
+                reason: null,
+                rank,
+                token_cost: cost,
+              });
+            }
           } else {
             // Budget first exceeded here (or already breached): suppress this row
             // and all subsequent rows (prefix-truncation, no first-fit).
             budgetBreached = true;
             suppressedIds.add(row && row.id);
-            itemEdges.push({
-              item_table: itemTableForOwner(owner_type),
-              item_id: row && row.id,
-              item_revision: row && row.revision,
-              content_hash: row && row.content_hash,
-              fact_key: row && row.fact_key,
-              kind: row && row.kind,
-              source_owner_type: owner_type,
-              source_owner_id: owner_id,
-              provenance: provenance ?? null,
-              decision: 'budget_exceeded',
-              reason: `budget_limit=${effectiveBudget} budget_used=${budgetUsed} token_cost=${cost}`,
-              rank,
-              token_cost: cost,
-            });
+            if (owner_type !== 'watchlist') {
+              itemEdges.push({
+                item_table: itemTableForOwner(owner_type),
+                item_id: row && row.id,
+                item_revision: row && row.revision,
+                content_hash: row && row.content_hash,
+                fact_key: row && row.fact_key,
+                kind: row && row.kind,
+                source_owner_type: owner_type,
+                source_owner_id: owner_id,
+                provenance: provenance ?? null,
+                decision: 'budget_exceeded',
+                reason: `budget_limit=${effectiveBudget} budget_used=${budgetUsed} token_cost=${cost}`,
+                rank,
+                token_cost: cost,
+              });
+            }
           }
         }
 
@@ -483,7 +489,9 @@ function createMemoryComposer({ retrievers = {} } = {}) {
           const reason = isConflict
             ? `suppressed by winner_id=${winner && winner.id} owner=${winner && winner._ownerType}:${winner && winner._ownerId} fact_key=${winner && winner.fact_key}`
             : `duplicate of winner_id=${winner && winner.id}`;
-          edgeRecords.push({ row: loser, edge: makeItemEdge(loser, decision, reason) });
+          if (loser && loser._ownerType !== 'watchlist') {
+            edgeRecords.push({ row: loser, edge: makeItemEdge(loser, decision, reason) });
+          }
           const loserMeta = ownerMetaByIndex.get(loser && loser._ownerIndex);
           if (loserMeta) loserMeta.suppressedIds.add(loser && loser.id);
         }
@@ -502,18 +510,22 @@ function createMemoryComposer({ retrievers = {} } = {}) {
           if (!budgetBreached && ownerMeta.budgetUsed + cost <= ownerMeta.effectiveBudget) {
             ownerMeta.selectedRows.push(row);
             ownerMeta.budgetUsed += cost;
-            edgeRecords.push({ row, edge: makeItemEdge(row, 'included', null) });
+            if (ownerMeta.owner_type !== 'watchlist') {
+              edgeRecords.push({ row, edge: makeItemEdge(row, 'included', null) });
+            }
           } else {
             budgetBreached = true;
             ownerMeta.suppressedIds.add(row && row.id);
-            edgeRecords.push({
-              row,
-              edge: makeItemEdge(
+            if (ownerMeta.owner_type !== 'watchlist') {
+              edgeRecords.push({
                 row,
-                'budget_exceeded',
-                `budget_limit=${ownerMeta.effectiveBudget} budget_used=${ownerMeta.budgetUsed} token_cost=${cost}`,
-              ),
-            });
+                edge: makeItemEdge(
+                  row,
+                  'budget_exceeded',
+                  `budget_limit=${ownerMeta.effectiveBudget} budget_used=${ownerMeta.budgetUsed} token_cost=${cost}`,
+                ),
+              });
+            }
           }
         }
       }
@@ -649,11 +661,113 @@ function buildProfileAdapter(memoryService) {
   };
 }
 
+function compareWatchlistRefs(a, b) {
+  const roleDelta = (a?.role === 'primary' ? 0 : 1) - (b?.role === 'primary' ? 0 : 1);
+  if (roleDelta !== 0) return roleDelta;
+
+  const aName = String(a?.project?.name || a?.project_id || '').toLowerCase();
+  const bName = String(b?.project?.name || b?.project_id || '').toLowerCase();
+  if (aName < bName) return -1;
+  if (aName > bName) return 1;
+
+  const aId = String(a?.project_id || '');
+  const bId = String(b?.project_id || '');
+  if (aId < bId) return -1;
+  if (aId > bId) return 1;
+  return 0;
+}
+
+function appendWatchlistRemainder(lines, initialRemaining) {
+  let remaining = initialRemaining;
+  while (remaining > 0) {
+    const marker = `- +${remaining} more`;
+    const candidate = lines.length > 0 ? `${lines.join('\n')}\n${marker}` : marker;
+    if (candidate.length <= 800) {
+      lines.push(marker);
+      return;
+    }
+    if (lines.length === 0) return;
+    lines.pop();
+    remaining += 1;
+  }
+}
+
+/**
+ * Metadata-only watch-list summary. Project names are untrusted display data,
+ * so injection-marked names degrade to an id-only line and secrets are redacted.
+ */
+function buildWatchlistSummary(refs) {
+  if (!Array.isArray(refs) || refs.length === 0) return null;
+
+  const sorted = refs.slice().sort(compareWatchlistRefs);
+  const outputCount = Math.min(sorted.length, 8);
+  const lines = [];
+
+  for (let index = 0; index < outputCount; index++) {
+    const ref = sorted[index] || {};
+    const role = String(ref.role || 'reference');
+    const projectId = String(ref.project_id || '');
+    const rawName = typeof ref.project?.name === 'string' && ref.project.name
+      ? ref.project.name
+      : null;
+    let line = `- ${role}: ${projectId}`;
+
+    if (rawName && !detectInjection(rawName)) {
+      const safeName = String(redactSecrets(rawName).text || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 80);
+      if (safeName) line = `- ${role}: ${safeName} (${projectId})`;
+    }
+
+    const candidate = lines.length > 0 ? `${lines.join('\n')}\n${line}` : line;
+    if (candidate.length > 800) {
+      appendWatchlistRemainder(lines, sorted.length - index);
+      return lines.length > 0 ? lines.join('\n') : null;
+    }
+    lines.push(line);
+  }
+
+  if (sorted.length > outputCount) {
+    appendWatchlistRemainder(lines, sorted.length - outputCount);
+  }
+  return lines.length > 0 ? lines.join('\n') : null;
+}
+
+function buildWatchlistAdapter(operatorInstanceService) {
+  return {
+    retrieve: (instanceId) => {
+      if (!operatorInstanceService?.getInstance) return [];
+      let inst;
+      try { inst = operatorInstanceService.getInstance(instanceId); } catch { return []; }
+      const refs = Array.isArray(inst?.refs) ? inst.refs : [];
+      const summary = buildWatchlistSummary(refs);
+      return summary
+        ? [{ id: `watchlist:${instanceId}`, content: summary, kind: 'watchlist' }]
+        : [];
+    },
+    buildBlock: (rows) => (Array.isArray(rows) && rows[0]?.content)
+      ? `## Watch-list\n${rows[0].content}`
+      : null,
+    getRevision: (instanceId) => {
+      try {
+        return operatorInstanceService?.getInstance
+          ? (operatorInstanceService.getInstance(instanceId)?.watchlist_version ?? 0)
+          : 0;
+      } catch {
+        return 0;
+      }
+    },
+  };
+}
+
 module.exports = {
   createMemoryComposer,
   buildWorkspaceAdapter,
   buildUserAdapter,
   buildProfileAdapter,
+  buildWatchlistSummary,
+  buildWatchlistAdapter,
   // 상수 노출 (테스트 및 A2-2 ledger persist용)
   COMPOSER_VERSION,
   POLICY_VERSION,

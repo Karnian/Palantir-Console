@@ -343,8 +343,8 @@ describe('conversation service PM multi-owner wiring', () => {
       { owner_type: 'user', owner_id: 'user', provenance: 'user', revision: 2 },
     ]);
     assert.deepEqual(harness.composerCalls[0].owners, [
-      { owner_type: 'user', owner_id: 'user', provenance: 'user' },
       { owner_type: 'workspace', owner_id: 'proj1' },
+      { owner_type: 'user', owner_id: 'user', provenance: 'user' },
     ]);
   });
 });

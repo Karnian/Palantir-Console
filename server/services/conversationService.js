@@ -510,7 +510,37 @@ function createConversationService({
         // cleanly rather than throwing inside the try/catch on every send.
         // peek/decide: gate check → compose → stash for commit phase.
         try {
-          const useUserOwner = !!masterMemoryService && (memoryMultiOwner || !workspaceProjectId);
+          const turnMode = turnCodebaseContext?.turnMode;
+          const isAutoReview = turnMode === 'auto_review';
+          const useAux = memoryMultiOwner && !isAutoReview;
+          const useUserOwner = !!masterMemoryService
+            && !isAutoReview
+            && (memoryMultiOwner || !workspaceProjectId);
+
+          let profileId = null;
+          if (useAux && instanceId && runService?.getOperatorInstance) {
+            let inst = null;
+            try { inst = runService.getOperatorInstance(instanceId); } catch { inst = null; }
+            if (inst) {
+              profileId = inst.profile_id || null;
+              if (!profileId && eventBus) {
+                try {
+                  eventBus.emit('memory:profile_axis_missing', { runId: run.id, instanceId });
+                } catch { /* annotate-only */ }
+              }
+            }
+          }
+
+          let watchlistRevision = null;
+          const useWatchlist = useAux && turnMode === 'generic' && instanceId;
+          if (useWatchlist && runService?.getOperatorInstance) {
+            try {
+              watchlistRevision = runService.getOperatorInstance(instanceId)?.watchlist_version ?? 0;
+            } catch {
+              watchlistRevision = 0;
+            }
+          }
+
           const currentOwnerRevisions = [];
           if (workspaceProjectId && memoryService) {
             currentOwnerRevisions.push({
@@ -519,12 +549,26 @@ function createConversationService({
               revision: memoryService.getRevision(workspaceProjectId),
             });
           }
+          if (profileId && memoryService) {
+            currentOwnerRevisions.push({
+              owner_type: 'profile',
+              owner_id: profileId,
+              revision: memoryService.getRevisionForOwner('profile', profileId),
+            });
+          }
           if (useUserOwner) {
             currentOwnerRevisions.push({
               owner_type: 'user',
               owner_id: 'user',
               provenance: 'user',
               revision: masterMemoryService.getRevision('user'),
+            });
+          }
+          if (useWatchlist) {
+            currentOwnerRevisions.push({
+              owner_type: 'watchlist',
+              owner_id: instanceId,
+              revision: watchlistRevision,
             });
           }
           if (currentOwnerRevisions.length === 0) {
@@ -539,11 +583,17 @@ function createConversationService({
           });
           if (dec.compose) {
             const owners = [];
+            if (workspaceProjectId && memoryService) {
+              owners.push({ owner_type: 'workspace', owner_id: workspaceProjectId });
+            }
+            if (profileId && memoryService) {
+              owners.push({ owner_type: 'profile', owner_id: profileId });
+            }
             if (useUserOwner) {
               owners.push({ owner_type: 'user', owner_id: 'user', provenance: 'user' });
             }
-            if (workspaceProjectId && memoryService) {
-              owners.push({ owner_type: 'workspace', owner_id: workspaceProjectId });
+            if (useWatchlist) {
+              owners.push({ owner_type: 'watchlist', owner_id: instanceId, budget: 900 });
             }
             if (owners.length === 0) {
               throw new Error('no eligible operator memory owners');
