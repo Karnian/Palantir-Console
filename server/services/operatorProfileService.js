@@ -113,6 +113,20 @@ function createOperatorProfileService(db) {
     ),
     delete: db.prepare('DELETE FROM operator_profiles WHERE id = ?'),
     countInstancesByProfile: db.prepare('SELECT COUNT(*) AS n FROM operator_instances WHERE profile_id = ?'),
+    // Integration review SERIOUS: a profile with a memory footprint (candidates /
+    // distill jobs / items) must NOT be deleted. profile_memory_revision has an
+    // ON DELETE CASCADE FK (065), so deleting the profile drops its revision row
+    // while the owner-keyed candidates/jobs/items survive (memory owner columns
+    // are FK-less). The next distill drain would then try to promote them, the
+    // profile-revision bump would FK-fail, the whole promote tx would roll back,
+    // and the failed job would be re-enqueued forever (a live-LLM cost loop). Block
+    // the delete instead — the profile's accumulated memory must be dealt with first.
+    countMemoryFootprintByProfile: db.prepare(
+      "SELECT "
+      + "(SELECT COUNT(*) FROM memory_candidates WHERE owner_type='profile' AND owner_id=@id) + "
+      + "(SELECT COUNT(*) FROM memory_jobs WHERE owner_type='profile' AND owner_id=@id) + "
+      + "(SELECT COUNT(*) FROM memory_items WHERE owner_type='profile' AND owner_id=@id) AS n"
+    ),
   };
 
   function createProfile(data = {}) {
@@ -189,6 +203,10 @@ function createOperatorProfileService(db) {
       const count = Number(stmts.countInstancesByProfile.get(id)?.n) || 0;
       if (count > 0) {
         throw new ConflictError(`operator profile ${id} is in use by ${count} operator instance(s)`);
+      }
+      const memoryFootprint = Number(stmts.countMemoryFootprintByProfile.get({ id })?.n) || 0;
+      if (memoryFootprint > 0) {
+        throw new ConflictError(`operator profile ${id} has ${memoryFootprint} memory record(s) (candidates/jobs/items); archive or remove them before deleting the profile`);
       }
       stmts.delete.run(id);
     })();

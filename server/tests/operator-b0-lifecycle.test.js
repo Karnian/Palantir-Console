@@ -138,6 +138,23 @@ test('profile delete protects references and deletes unreferenced profiles', asy
   await request(app).delete(`/api/operator/profiles/${unused.id}`).set(...COOKIE).expect(200);
 });
 
+test('profile delete is blocked when the profile has a memory footprint (integration-review SERIOUS)', async (t) => {
+  const app = createTestApp(t);
+  const profile = createProfile(app, 'Profile with memory');
+  // A profile-owned distill candidate (R4b remember for a bearer/none actor).
+  // Deleting the profile now would orphan the candidate: the profile_memory_revision
+  // FK cascades away while the candidate survives, so the next distill drain would
+  // FK-fail on the revision bump and re-enqueue the job forever. Must 409 instead.
+  app.services.memoryService.createCandidate({
+    profileId: profile.id,
+    rule: 'R4',
+    rawJson: { content: 'prefers concise diffs' },
+    dedupKey: 'k-footprint',
+  });
+  const res = await request(app).delete(`/api/operator/profiles/${profile.id}`).set(...COOKIE).expect(409);
+  assert.match(res.body.error || '', /memory record/i);
+});
+
 test('resetInstance clears instance and primary brief thread bridges', (t) => {
   const app = createTestApp(t);
   const { project, instanceId } = ensurePrimary(app, 'bridge-clear');
