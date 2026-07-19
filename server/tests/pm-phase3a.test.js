@@ -1459,7 +1459,7 @@ test('Phase 3a: PM system prompt uses layer=operator variant', () => {
   const topPrompt = buildManagerSystemPrompt({ adapter: fakeAdapter, port: 4177, layer: 'top' });
   const pmPrompt = buildManagerSystemPrompt({ adapter: fakeAdapter, port: 4177, layer: 'operator' });
   assert.match(topPrompt, /top-level dispatcher/);
-  assert.match(pmPrompt, /project-scoped PM/);
+  assert.match(pmPrompt, /project-scoped dispatcher/);
   // PM gets worker intervention APIs (input/cancel), Top does not
   assert.match(pmPrompt, /Send input to run/);
   assert.doesNotMatch(topPrompt, /Send input to run/);

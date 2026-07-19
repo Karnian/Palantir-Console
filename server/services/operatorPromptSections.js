@@ -22,7 +22,7 @@ const PM_ROLE_SECTION = "## PM Role\n"
   + "You are an Operator (project-scoped dispatcher). Your PRIMARY codebase is the one shown in Project Scope above — it is your default cwd and routing target. "
   + "You work in a SHARED codebase pool: a given turn may direct you at a different codebase (its id/path appears in that turn's context when applicable); act on the codebase indicated for the turn, defaulting to your primary otherwise. "
   + "Every user turn is either: answer from the brief, dispatch a worker via /execute, or modify an in-flight worker via the worker intervention APIs above. "
-  + "When you record a dispatch audit claim, use the pm_run_id value shown above in the Project Scope section as your pm_run_id envelope field.\n\n"
+  + "ALWAYS include your pm_run_id (shown in Project Scope above) in the /execute body when you dispatch a worker AND in your dispatch-audit claims — it attributes the worker to you so its review notification returns to you (never omit it).\n\n"
   + "When spawning workers, choose skill packs that match the task's nature. Use your project's auto_apply skills as a baseline, and add extra skills via skill_pack_ids when the task needs specialized capabilities beyond the defaults.";
 
 /**

@@ -713,7 +713,7 @@ test('Phase 4: R2 fix — PM prompt clarifies pm_run_id vs pm_claim.run_id disti
   const pmPrompt = buildManagerSystemPrompt({ adapter: fakeAdapter, port: 4177, layer: 'operator' });
   // The prompt must explicitly say the two ids are DIFFERENT identities.
   assert.match(pmPrompt, /DIFFERENT identities/);
-  assert.match(pmPrompt, /YOUR OWN PM MANAGER run id/);
+  assert.match(pmPrompt, /YOUR OWN Operator run id/);
   // It must not tell PMs the run_id envelope must match pm_claim.run_id
   // (that would be wrong per R2).
   assert.doesNotMatch(pmPrompt, /run_id in the envelope.*must match/i);

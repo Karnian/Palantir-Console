@@ -640,8 +640,27 @@ test('v3 Phase 0: managerSystemPrompt pm layer includes worker intervention APIs
     'pm layer must document /api/runs/:id/cancel');
   assert.ok(prompt.includes('/api/tasks/TASK_ID/status'),
     'pm layer must document PATCH /api/tasks/:id/status');
-  assert.ok(prompt.includes('project-scoped PM'),
-    'pm layer must identify itself as project-scoped PM');
+  assert.ok(prompt.includes('project-scoped dispatcher'),
+    'pm layer must identify itself as an Operator / project-scoped dispatcher');
+});
+
+test('favorite A-track: Operator prompt drives pm_run_id at /execute and drops the hard project lock', async () => {
+  const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
+  const prompt = buildManagerSystemPrompt({
+    adapter: null, port: 4177, token: null, layer: 'operator',
+  });
+  // BLOCKER 1: the /execute guidance must instruct the Operator to include its
+  // own pm_run_id so the worker is attributed to it (auto-review returns home).
+  assert.match(prompt, /pm_run_id[\s\S]{0,80}\/execute|\/execute[\s\S]{0,200}pm_run_id/i);
+  assert.match(prompt, /attributes the spawned worker to YOU/);
+  // SERIOUS 2: favorite shared-pool framing present, pre-favorite hard locks gone.
+  assert.match(prompt, /SHARED codebase pool/i);
+  assert.ok(!prompt.includes('within your project'), 'pre-favorite "within your project" lock removed');
+  assert.ok(!prompt.includes("project_id: your PM's project. MUST belong to you"),
+    'audit project_id is no longer hard-locked to the Operator primary');
+  // Top layer is unaffected (no pm_run_id-at-execute attribution semantics).
+  const top = buildManagerSystemPrompt({ adapter: null, port: 4177, token: null, layer: 'top' });
+  assert.ok(!/attributes the spawned worker to YOU/.test(top));
 });
 
 test('v3 Phase 0: routes/manager.js passes role=manager to adapter.startSession', async () => {

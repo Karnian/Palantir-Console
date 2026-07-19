@@ -79,7 +79,7 @@ function _buildCommonBaseInner({ base, token, layer, adapterType, specialistAvai
   // Fleet P5 restores curl examples for curl-capable manager adapters.
 
   const layerNote = isProjectLayer(layer)
-    ? `\n\nYou are running as a **project-scoped PM**. You own dispatch decisions within your project, and you may modify in-flight worker plans via the worker intervention APIs (cancel, input, status patch) when the user or conditions require a plan change.
+    ? `\n\nYou are running as an **Operator** (project-scoped dispatcher). Your PRIMARY codebase (shown in Project Scope) is your default cwd and routing target, but you work in a SHARED codebase pool: a turn may direct you at a DIFFERENT codebase (its id/path appears in a \`## Turn Codebase\` block in the user message when applicable) — act on the codebase indicated for the turn, defaulting to your primary otherwise. You own dispatch decisions for those codebases, and you may modify in-flight worker plans via the worker intervention APIs (cancel, input, status patch) when the user or conditions require a plan change.
 
 ## Autonomous Worker Review Loop
 
@@ -140,21 +140,26 @@ pm_claim.kind values the server understands:
 
 Envelope fields vs pm_claim fields — these are DIFFERENT identities,
 do not confuse them:
-- project_id: your PM's project. MUST belong to you.
+- project_id: the codebase THIS claim is about — the project that the
+  referenced task/run belongs to. In the shared pool this may be a
+  codebase OTHER than your primary: for a turn directed at another
+  codebase (see the \`## Turn Codebase\` block), use THAT codebase's id.
+  It must match the task/run you reference, or the server rejects the
+  claim with 400.
 - task_id (envelope, optional): the task you're making a claim about.
   If you provide it, it must equal pm_claim.task_id.
-- pm_run_id: YOUR OWN PM MANAGER run id (the run that represents
-  this PM session). The server uses it to check whether you have
-  pending parent-staleness notices queued against you. It is NOT
-  the worker run id.
+- pm_run_id: YOUR OWN Operator run id (the run that represents this
+  Operator session — shown in your Project Scope section). The server
+  derives your Operator identity from it for attribution and to check
+  pending parent-staleness notices. It is NOT the worker run id.
 - pm_claim.task_id / pm_claim.run_id: the task or WORKER run your
-  claim references. Both must belong to this project — the server
-  will reject cross-project claims with 400.`
+  claim references. Both must belong to the envelope project_id (the
+  claim's codebase) — the server rejects mismatched claims with 400.`
     : '';
 
   // Approval gate differs by layer: Top asks user, PM acts autonomously
   const approvalNote = isProjectLayer(layer)
-    ? `As PM, you may call /execute autonomously when reviewing worker results or following user instructions. No additional user confirmation is needed for corrective re-runs within your project scope.`
+    ? `As an Operator, you may call /execute autonomously when reviewing worker results or following user instructions. No additional user confirmation is needed for corrective re-runs within the shared codebase pool.`
     : `IMPORTANT: NEVER call /execute without explicit user approval. Always confirm before spawning workers.
 Do NOT auto-execute tasks just because their status is in_progress — status alone does not mean "run an agent".`;
 
@@ -259,7 +264,8 @@ ${token && adapterType !== 'codex' ? `\nIMPORTANT: All API requests require auth
 - Update task: PATCH ${base}/api/tasks/TASK_ID  body: {"title":"...","description":"...","priority":"high"}
 - Update task status: PATCH ${base}/api/tasks/TASK_ID/status  body: {"status":"done"}
 - Delete task: DELETE ${base}/api/tasks/TASK_ID
-- Execute task with agent: POST ${base}/api/tasks/TASK_ID/execute  body: {"agent_profile_id":"AGENT_ID","prompt":"detailed work instructions here"${isProjectLayer(layer) ? ',"skill_pack_ids":["PACK_ID",...]' : ''}}${isProjectLayer(layer) ? `
+- Execute task with agent: POST ${base}/api/tasks/TASK_ID/execute  body: {"agent_profile_id":"AGENT_ID","prompt":"detailed work instructions here"${isProjectLayer(layer) ? ',"pm_run_id":"YOUR_OWN_OPERATOR_RUN_ID","skill_pack_ids":["PACK_ID",...]' : ''}}${isProjectLayer(layer) ? `
+  pm_run_id (ALWAYS include this when you dispatch): YOUR OWN Operator run id (shown in your Project Scope section). It attributes the spawned worker to YOU so the worker's completion/failure review notification comes back to YOU — including for a turn directed at a codebase you don't primarily own. Omitting it leaves the worker unattributed and its review falls back to the codebase's default Operator.
   skill_pack_ids (optional): array of skill pack IDs to equip on the worker for this run. These are per-run ephemeral — they do NOT persist as task bindings. Omit to use only project auto_apply + task persistent bindings.` : ''}
 
 ### Projects
