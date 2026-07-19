@@ -140,6 +140,24 @@ function createMemoryService(db, eventBus) {
     WHERE project_id = ?
   `);
 
+  // Some migration-parity tests intentionally construct a pre-B2a schema.
+  // Keep the workspace service usable there while current schemas use the
+  // profile-only statements below.
+  const hasProfileRevisionTable = Boolean(db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='profile_memory_revision'"
+  ).get());
+  const bumpProfileRevisionStmt = hasProfileRevisionTable ? db.prepare(`
+    INSERT INTO profile_memory_revision(profile_id, revision, owner_type, owner_id)
+    VALUES (?, 1, 'profile', ?)
+    ON CONFLICT(profile_id) DO UPDATE SET revision = revision + 1
+  `) : null;
+
+  const getProfileRevisionStmt = hasProfileRevisionTable ? db.prepare(`
+    SELECT revision
+    FROM profile_memory_revision
+    WHERE profile_id = ?
+  `) : null;
+
   const insertMemoryItemStmt = db.prepare(`
     INSERT INTO memory_items (
       id,
@@ -275,6 +293,27 @@ function createMemoryService(db, eventBus) {
     return row ? row.revision : 0;
   }
 
+  function _bumpRevisionForOwner(ownerType, ownerId) {
+    if (ownerType === 'workspace') {
+      _bumpRevision(ownerId);
+    } else if (ownerType === 'profile') {
+      if (!bumpProfileRevisionStmt) throw new Error('profile_memory_revision table is required');
+      bumpProfileRevisionStmt.run(ownerId, ownerId);
+    } else {
+      throw new Error('unknown owner_type for revision: ' + ownerType);
+    }
+  }
+
+  function getRevisionForOwner(ownerType, ownerId) {
+    if (ownerType === 'workspace') return getRevision(ownerId);
+    if (ownerType === 'profile') {
+      if (!getProfileRevisionStmt) return 0;
+      const row = getProfileRevisionStmt.get(ownerId);
+      return row ? row.revision : 0;
+    }
+    return 0;
+  }
+
   function normalizeEvidenceJson(evidenceJson) {
     if (evidenceJson === undefined || evidenceJson === null) {
       return '{}';
@@ -299,11 +338,12 @@ function createMemoryService(db, eventBus) {
 
   const insertMemoryItemTx = db.transaction((item) => {
     insertMemoryItemStmt.run(item);
-    // project_memory_revision is workspace-scoped — a profile owner has no revision
-    // table (project_id is NULL), and _bumpRevision(null) would throw. Skip it for
-    // non-workspace owners (Codex R4a review BLOCKER-2).
-    if (item.status === 'active' && item.ownerType === 'workspace') {
-      _bumpRevision(item.projectId);
+    if (item.status === 'active') {
+      if (item.ownerType === 'workspace') {
+        _bumpRevision(item.projectId);
+      } else if (item.ownerType === 'profile') {
+        _bumpRevisionForOwner('profile', item.ownerId);
+      }
     }
     return getMemoryItemByIdStmt.get(item.id);
   });
@@ -938,7 +978,7 @@ function createMemoryService(db, eventBus) {
   );
   // PR5d decay maintenance: active rows whose TTL has passed (datetime-normalized).
   const listExpiredStmt = db.prepare(
-    "SELECT id, project_id FROM memory_items WHERE status='active' AND valid_to IS NOT NULL AND datetime(valid_to) <= datetime('now')"
+    "SELECT id, project_id, owner_type, owner_id FROM memory_items WHERE status='active' AND valid_to IS NOT NULL AND datetime(valid_to) <= datetime('now')"
   );
   const archiveExpiredStmt = db.prepare(
     "UPDATE memory_items SET status='archived', archived_at=datetime('now'), archive_reason='ttl_expired', updated_at=datetime('now') WHERE id=@id AND status='active'"
@@ -1186,14 +1226,21 @@ function createMemoryService(db, eventBus) {
   const expireStaleTx = db.transaction(() => {
     const rows = listExpiredStmt.all();
     const projects = new Set();
+    const profileOwners = new Set();
     let archived = 0;
     for (const r of rows) {
       const res = archiveExpiredStmt.run({ id: r.id });
-      // Only workspace rows carry a project revision (profile rows have project_id
-      // NULL); a null pid would throw in _bumpRevision below (Codex R4a R2).
-      if (res.changes === 1) { archived += 1; if (r.project_id) projects.add(r.project_id); }
+      if (res.changes === 1) {
+        archived += 1;
+        if (r.owner_type === 'profile') {
+          profileOwners.add(r.owner_id);
+        } else if (r.project_id) {
+          projects.add(r.project_id);
+        }
+      }
     }
     for (const pid of projects) _bumpRevision(pid);
+    for (const oid of profileOwners) _bumpRevisionForOwner('profile', oid);
     return archived;
   });
   function expireStaleMemories() {
@@ -1237,18 +1284,30 @@ function createMemoryService(db, eventBus) {
     const before = getMemoryItemByIdStmt.get(id);
     const res = updateContentStmt.run({ id, content, contentHash });
     if (res.changes !== 1) return null; // missing or not active
-    // project_memory_revision is workspace-scoped; profile rows (project_id NULL)
-    // have no revision table and _bumpRevision(null) throws (Codex R4a R2).
-    if (before.project_id) _bumpRevision(before.project_id);
+    const fallbackOwner = before.owner_type && before.owner_id
+      ? null
+      : normalizeOwner({ project_id: before.project_id });
+    const ot = before.owner_type || fallbackOwner.owner_type;
+    if (ot === 'workspace') {
+      _bumpRevision(before.project_id);
+    } else if (ot === 'profile') {
+      _bumpRevisionForOwner('profile', before.owner_id || fallbackOwner.owner_id);
+    }
     return getMemoryItemByIdStmt.get(id);
   });
   const archiveTx = db.transaction((id) => {
     const before = getMemoryItemByIdStmt.get(id);
     const res = archiveStmt.run({ id });
     if (res.changes !== 1) return null; // missing or not active
-    // project_memory_revision is workspace-scoped; profile rows (project_id NULL)
-    // have no revision table and _bumpRevision(null) throws (Codex R4a R2).
-    if (before.project_id) _bumpRevision(before.project_id);
+    const fallbackOwner = before.owner_type && before.owner_id
+      ? null
+      : normalizeOwner({ project_id: before.project_id });
+    const ot = before.owner_type || fallbackOwner.owner_type;
+    if (ot === 'workspace') {
+      _bumpRevision(before.project_id);
+    } else if (ot === 'profile') {
+      _bumpRevisionForOwner('profile', before.owner_id || fallbackOwner.owner_id);
+    }
     return getMemoryItemByIdStmt.get(id);
   });
   // restore re-activates an archived row, so it is ALSO an admission into the
@@ -1277,7 +1336,11 @@ function createMemoryService(db, eventBus) {
     }
     const res = restoreStmt.run({ id });
     if (res.changes !== 1) return { item: null, evicted: null };
-    if (before.project_id) _bumpRevision(before.project_id); // workspace-scoped (Codex R4a R2)
+    if (ownerType === 'workspace') {
+      _bumpRevision(before.project_id);
+    } else if (ownerType === 'profile') {
+      _bumpRevisionForOwner('profile', ownerId);
+    }
     return { item: getMemoryItemByIdStmt.get(id), evicted };
   });
 
@@ -1347,7 +1410,7 @@ function createMemoryService(db, eventBus) {
   // P-A1 slice 1: parity check + cross-scope conflict detection (slice-5 gate)
   // -------------------------------------------------------------------------
 
-  // Scan ALL rows across the 7 owner-bearing tables (the 2 legacy injection
+  // Scan ALL rows across the owner-bearing tables (the 2 legacy injection
   // ledgers were dropped in migration 040 / S5-LEDGER PR B) and verify that
   // (owner_type, owner_id) matches normalizeOwner(old-key) for each row.
   // Returns a list of mismatches; empty list means parity holds.
@@ -1359,8 +1422,8 @@ function createMemoryService(db, eventBus) {
     // R4a: memory_items now accepts profile owners (migration 044 relaxed it), so a
     // profile row there is coherent (project_id NULL, owner_id=profile). Staging
     // tables (candidates/jobs) already allow profile (042). project_memory_revision
-    // stays workspace-keyed (no profile revision table), so a profile row there is
-    // still incoherent and correctly flagged.
+    // stays workspace-keyed, so a profile row there is still incoherent and
+    // correctly flagged; the profile revision table is scanned separately below.
     const l1Tables = [
       { table: 'memory_items',             pk: 'id',            keyCol: 'project_id', allowProfile: true },
       { table: 'memory_candidates',        pk: 'id',            keyCol: 'project_id', allowProfile: true },
@@ -1404,6 +1467,24 @@ function createMemoryService(db, eventBus) {
             table,
             pk: row[pk],
             expected,
+            actual: { owner_type: row.owner_type, owner_id: row.owner_id },
+          });
+        }
+      }
+    }
+
+    // profile_memory_revision has no project_id legacy key, so it cannot use
+    // the generic L1 loop above. Validate its owner mirror independently.
+    if (hasProfileRevisionTable) {
+      const rows = db.prepare(
+        'SELECT profile_id, owner_type, owner_id FROM profile_memory_revision'
+      ).all();
+      for (const row of rows) {
+        if (row.owner_type !== 'profile' || row.owner_id !== row.profile_id) {
+          mismatches.push({
+            table: 'profile_memory_revision',
+            pk: row.profile_id,
+            expected: { owner_type: 'profile', owner_id: row.profile_id },
             actual: { owner_type: row.owner_type, owner_id: row.owner_id },
           });
         }
@@ -1507,6 +1588,8 @@ function createMemoryService(db, eventBus) {
   return {
     _bumpRevision,
     getRevision,
+    _bumpRevisionForOwner,
+    getRevisionForOwner,
     createMemoryItem,
     upsertFact,
     createCandidate,

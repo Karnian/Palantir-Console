@@ -639,15 +639,13 @@ function buildUserAdapter(masterMemoryService) {
 /**
  * buildProfileAdapter(memoryService)
  * profile owner (R4c): memoryService.retrieveForProfile + buildInjectionBlock + getRevision.
- * 헤더 "## Profile Memory". profile 은 revision 테이블이 없어(project_memory_revision 은
- * workspace 전용) getRevision 은 0 을 반환 — specialist 는 ephemeral(one-shot)이라 ledger
- * 캐시 재사용이 없어 무해.
+ * 헤더 "## Profile Memory". getRevision 은 profile 전용 revision(B2a)을 반환.
  */
 function buildProfileAdapter(memoryService) {
   return {
     retrieve: (ownerId, opts) => memoryService.retrieveForProfile(ownerId, opts),
     buildBlock: (rows) => memoryService.buildInjectionBlock(rows, { header: '## Profile Memory' }),
-    getRevision: (ownerId) => memoryService.getRevision(ownerId),
+    getRevision: (ownerId) => memoryService.getRevisionForOwner('profile', ownerId),
   };
 }
 

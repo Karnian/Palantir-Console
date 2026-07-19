@@ -22,6 +22,12 @@ function migratedService(t) {
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const h = createDatabase(path.join(dir, 't.db'));
   h.migrate();
+  h.db.prepare(`
+    INSERT INTO operator_profiles(id, name) VALUES
+      ('op_x', 'Migration profile X'),
+      ('op_p', 'Migration profile parity'),
+      ('op_m', 'Migration profile mutations')
+  `).run();
   t.after(() => h.close());
   return { db: h.db, svc: createMemoryService(h.db) };
 }
