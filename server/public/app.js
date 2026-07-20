@@ -156,9 +156,10 @@ function NavSidebar({ route, connected, attentionCount, onAttentionClick }) {
   return html`
     <nav class="nav-sidebar">
       <div
-        class="nav-brand"
+        class="nav-brand ${route.split('/')[0] === 'dashboard' ? 'active' : ''}"
         aria-label=${NAV_LABELS.dashboard}
         title=${NAV_LABELS.dashboard}
+        aria-current=${route.split('/')[0] === 'dashboard' ? 'page' : undefined}
         ...${clickableProps(() => navigate('dashboard'))}
       >\u2726</div>
       ${NAV_ITEMS.map(item => html`

@@ -21,20 +21,29 @@ function loadNavModule() {
   return context;
 }
 
-test('NAV_SUB_ITEMS exposes operator roster without changing top-level nav', () => {
+test('NAV_ITEMS swaps dashboard for manager as the top-nav slot', () => {
+  // #376/#385/#386/#387 arc, final step: manager gets manager's own
+  // persistent top-nav tab, taking the slot dashboard used to occupy.
+  // Dashboard didn't lose reachability — it's still DEFAULT_ROUTE and one
+  // click away via the sidebar brand logo (PR #387) — it just moved down
+  // into NAV_SUB_ITEMS (Cmd+K-searchable) like manager was before it.
   const { NAV_ITEMS, NAV_SUB_ITEMS } = loadNavModule();
   assert.equal(NAV_ITEMS.length, 5);
   assert.deepEqual(Array.from(NAV_ITEMS, (item) => item.hash), [
-    'dashboard',
+    'manager',
     'operator',
     'board',
     'resources',
     'memory',
   ]);
-  assert.ok(NAV_ITEMS.some((item) => item.hash === 'operator'));
-  assert.ok(!NAV_ITEMS.some((item) => item.hash === 'manager'));
+  assert.ok(NAV_ITEMS.some((item) => item.hash === 'manager'));
+  assert.ok(!NAV_ITEMS.some((item) => item.hash === 'dashboard'));
   assert.ok(!NAV_ITEMS.some((item) => item.hash === 'operator/roster'));
   assert.ok(!NAV_ITEMS.some((item) => item.hash === 'projects'));
+
+  const dashboard = NAV_SUB_ITEMS.find((item) => item.hash === 'dashboard');
+  assert.ok(dashboard, 'dashboard must be searchable via CommandPalette now that it left NAV_ITEMS');
+  assert.ok(!NAV_SUB_ITEMS.some((item) => item.hash === 'manager'), 'manager left NAV_SUB_ITEMS for a real NAV_ITEMS slot');
 
   const operatorSubItems = Array.from(NAV_SUB_ITEMS)
     .filter((item) => item.hash.startsWith('operator/'))
@@ -45,17 +54,6 @@ test('NAV_SUB_ITEMS exposes operator roster without changing top-level nav', () 
     ['operator/profiles', '오퍼레이터 프로필'],
     ['operator/specialist', '스페셜리스트'],
   ]);
-});
-
-test('#376 follow-up: NAV_SUB_ITEMS makes manager reachable from CommandPalette with a real hash', () => {
-  const { NAV_SUB_ITEMS } = loadNavModule();
-  const manager = NAV_SUB_ITEMS.find((item) => item.label === '매니저');
-  assert.ok(manager, 'manager must be searchable via CommandPalette');
-  // Bare 'manager', NOT 'operator/manager' — app.js's router keys off
-  // hash.split('/')[0], so an 'operator/…' prefix would silently land on
-  // the Operator view instead of the manager route.
-  assert.equal(manager.hash, 'manager');
-  assert.ok(!NAV_SUB_ITEMS.some((item) => item.hash === 'operator/manager'));
 });
 
 test('empty hash defaults to dashboard while #manager route stays deep-linkable', () => {
@@ -87,10 +85,23 @@ test('sidebar brand icon is a home (dashboard) shortcut, not a manager one', () 
   // LATER unrelated navigate('manager') call elsewhere in the file (e.g.
   // the attention badge's onClick) — a `[^>]*` bound would break here since
   // the arrow function `() =>` itself contains a `>` character.
-  const navBrandMatch = appSrc.match(/<div\s+class="nav-brand"[\s\S]*?<\/div>/);
+  const navBrandMatch = appSrc.match(/<div\s+class="nav-brand[\s\S]*?<\/div>/);
   assert.ok(navBrandMatch, 'nav-brand div must exist');
   assert.match(navBrandMatch[0], /clickableProps\(\(\) => navigate\('dashboard'\)\)/);
   assert.doesNotMatch(navBrandMatch[0], /navigate\('manager'\)/);
+});
+
+test('nav-brand carries dashboard current-page state now that dashboard left NAV_ITEMS', () => {
+  // Codex review of the manager top-nav swap: once dashboard left NAV_ITEMS,
+  // no .nav-item can ever show .active/aria-current while on #dashboard, and
+  // smoke.spec.js's dashboard-route assertion would silently stop checking
+  // anything real. The brand icon (the only remaining dashboard control on
+  // desktop) must carry that current-page state itself.
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const navBrandMatch = appSrc.match(/<div\s+class="nav-brand[\s\S]*?<\/div>/);
+  assert.ok(navBrandMatch, 'nav-brand div must exist');
+  assert.match(navBrandMatch[0], /class="nav-brand \$\{route\.split\('\/'\)\[0\] === 'dashboard' \? 'active' : ''\}"/);
+  assert.match(navBrandMatch[0], /aria-current=\$\{route\.split\('\/'\)\[0\] === 'dashboard' \? 'page' : undefined\}/);
 });
 
 test('app shell nests ProjectsView under operator codebases and aliases #projects', () => {

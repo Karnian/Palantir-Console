@@ -17,8 +17,19 @@
 
 import { NAV_LABELS } from './copy.js';
 
+// #376/#385/#386/#387 arc: manager had no top-level nav slot (intentional
+// 5-tab consolidation in #276/#336) and no reliable one-click entry point
+// at all — a run of follow-ups tried a CommandPalette entry, then a logo
+// shortcut, before landing here. User decision: dashboard moved to the
+// sidebar brand (logo click, PR #387) + stayed DEFAULT_ROUTE, freeing its
+// top-nav slot for manager, which gets real persistent visibility instead.
 export const NAV_ITEMS = [
-  { hash: 'dashboard',   icon: '◉', label: NAV_LABELS.dashboard },
+  // icon deliberately not ✦ — that glyph is the sidebar brand/logo (dashboard
+  // shortcut) rendered right above this list. Mobile hides tooltips
+  // (`.nav-tooltip { display: none }` at <=640px) and the brand's resting
+  // style already looks accent-highlighted, so two adjacent unlabeled ✦
+  // buttons would be indistinguishable there (Codex review catch).
+  { hash: 'manager',     icon: '◆', label: NAV_LABELS.manager },
   { hash: 'operator',    icon: '✸', label: NAV_LABELS.operator },
   { hash: 'board',       icon: '▒', label: NAV_LABELS.board },
   { hash: 'resources',   icon: '❖', label: NAV_LABELS.resources },
@@ -29,15 +40,10 @@ export const NAV_ITEMS = [
 // Number-key shortcuts in CommandPalette are NOT wired to these
 // (only NAV_ITEMS carries the numbered shortcuts).
 export const NAV_SUB_ITEMS = [
-  // #376: manager has no top-level nav slot (intentional — the 5-tab
-  // consolidation in #276/#336), but the route is real and otherwise
-  // unreachable except via the Operator-roster empty-state CTA (only shown
-  // when Top is inactive) or a live-run attention badge. hash is bare
-  // 'manager' (NOT 'operator/manager') — app.js's router keys off
-  // routeBase = hash.split('/')[0], so an 'operator/…' prefix would land on
-  // the Operator view instead. Grouped here next to the operator/* entries
-  // only for palette-listing proximity (Top sits above the Operator layer).
-  { hash: 'manager',               icon: '✦', label: NAV_LABELS.manager },
+  // Dashboard lost its top-nav slot to manager above; it's still
+  // DEFAULT_ROUTE and one click away via the sidebar brand logo, but this
+  // keeps it Cmd+K-searchable too, same as manager was before it moved up.
+  { hash: 'dashboard',             icon: '◉', label: NAV_LABELS.dashboard },
   { hash: 'resources/nodes',       icon: '⬢', label: NAV_LABELS.nodes },
   { hash: 'resources/skills',      icon: '♢', label: NAV_LABELS.skills },
   { hash: 'resources/presets',     icon: '❖', label: NAV_LABELS.presets },
