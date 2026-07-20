@@ -169,6 +169,77 @@ test('Phase 6 router: @mention with empty body keeps original text', () => {
   assert.equal(r.text, '@alpha');
 });
 
+test('A2b-3a router: canonical Operator stays selected and mention becomes turn codebase context', () => {
+  const svc = createRouterService({
+    projectService: fakeProjectService([
+      { id: 'proj_alpha', name: 'alpha', pm_enabled: 1 },
+      { id: 'proj_beta', name: 'beta', pm_enabled: 1 },
+    ]),
+  });
+  const r = svc.resolveTarget({
+    text: '@beta hi',
+    currentConversationId: 'operator:oi_x',
+  });
+  assert.deepEqual(r, {
+    target: 'operator:oi_x',
+    codebaseProjectId: 'proj_beta',
+    turnMode: 'codebase',
+    text: 'hi',
+    matchedRule: '1_explicit',
+  });
+});
+
+test('A2b-3a router: legacy Operator stays selected and own-primary mention is harmless', () => {
+  const svc = createRouterService({
+    projectService: fakeProjectService([
+      { id: 'proj_alpha', name: 'alpha', pm_enabled: 1 },
+    ]),
+  });
+  const r = svc.resolveTarget({
+    text: '@alpha check primary',
+    currentConversationId: 'operator:proj_alpha',
+  });
+  assert.deepEqual(r, {
+    target: 'operator:proj_alpha',
+    codebaseProjectId: 'proj_alpha',
+    turnMode: 'codebase',
+    text: 'check primary',
+    matchedRule: '1_explicit',
+  });
+});
+
+test('A2b-3a router: Top and worker contexts keep legacy mention rerouting without turn context', () => {
+  const svc = createRouterService({
+    projectService: fakeProjectService([
+      { id: 'proj_alpha', name: 'alpha', pm_enabled: 1 },
+      { id: 'proj_beta', name: 'beta', pm_enabled: 1 },
+    ]),
+  });
+  for (const currentConversationId of ['top', 'worker:run_x']) {
+    const r = svc.resolveTarget({ text: '@alpha hi', currentConversationId });
+    assert.equal(r.target, 'operator:proj_alpha');
+    assert.equal(r.matchedRule, '1_explicit');
+    assert.equal(r.codebaseProjectId, undefined);
+    assert.equal(r.turnMode, undefined);
+  }
+});
+
+test('A2b-3a router: unresolved or disabled mentions fall through in Operator context without turn context', () => {
+  const svc = createRouterService({
+    projectService: fakeProjectService([
+      { id: 'proj_alpha', name: 'alpha', pm_enabled: 1 },
+      { id: 'proj_disabled', name: 'disabled', pm_enabled: 0 },
+    ]),
+  });
+  for (const text of ['@missing hi', '@disabled hi']) {
+    const r = svc.resolveTarget({ text, currentConversationId: 'operator:oi_x' });
+    assert.equal(r.target, 'operator:oi_x');
+    assert.equal(r.matchedRule, '2_current');
+    assert.equal(r.codebaseProjectId, undefined);
+    assert.equal(r.turnMode, undefined);
+  }
+});
+
 // --- HTTP surface ---
 
 async function createTestApp(t) {

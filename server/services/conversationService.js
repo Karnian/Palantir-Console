@@ -448,14 +448,27 @@ function createConversationService({
         : null;
       let workspaceProjectId = turnCodebaseContext?.workspaceProjectId || null;
       const instanceId = turnCodebaseContext?.instanceId || null;
+      // A2b-3 (favorite pool, LOCKED §4): refs는 권한이 아니다. 유효한
+      // codebase가 이번 turn에 명시 타겟되면 ref 유무와 무관하게
+      // workspace를 강주입한다. ref 부재는 관측만 하고 억제하지 않는다.
+      // (존재하지 않는 codebase는 아래 ## Turn Codebase gate가 400 처리.)
       if (
         workspaceProjectId &&
         instanceId &&
         runService &&
         typeof runService.operatorInstanceHasRef === 'function' &&
-        !runService.operatorInstanceHasRef(instanceId, workspaceProjectId)
+        !runService.operatorInstanceHasRef(instanceId, workspaceProjectId) &&
+        turnCodebaseContext?.explicitProjectId === workspaceProjectId
       ) {
-        workspaceProjectId = null;
+        try {
+          if (eventBus) {
+            eventBus.emit('memory:unwatched_codebase', {
+              runId: run.id,
+              instanceId,
+              projectId: workspaceProjectId,
+            });
+          }
+        } catch { /* annotate-only */ }
       }
       // A2b-2: per-turn codebase context block. Emit ONLY for a turn explicitly
       // directed at a NON-primary codebase. The gate uses the context's

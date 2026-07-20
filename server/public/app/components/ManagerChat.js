@@ -515,6 +515,8 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     const hasExplicitMention = /^\s*@\S+/.test(text || '');
     let effectiveTarget = conversationTarget;
     let effectiveText = text;
+    let resolvedCodebaseProjectId = null;
+    let resolvedTurnMode = null;
     let resolveFailed = false;
     try {
       if (text) {
@@ -527,6 +529,8 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
         });
         if (resolved && resolved.target) {
           effectiveTarget = resolved.target;
+          resolvedCodebaseProjectId = resolved.codebaseProjectId || null;
+          resolvedTurnMode = resolved.turnMode || null;
           if (typeof resolved.text === 'string' && resolved.text.length > 0) {
             effectiveText = resolved.text;
           }
@@ -565,6 +569,8 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
           body: JSON.stringify({
             text: effectiveText,
             images: imagesToSend.length > 0 ? imagesToSend : undefined,
+            ...(resolvedCodebaseProjectId ? { codebaseProjectId: resolvedCodebaseProjectId } : {}),
+            ...(resolvedTurnMode ? { turnMode: resolvedTurnMode } : {}),
           }),
         });
         if (effectiveTarget !== conversationTarget) {

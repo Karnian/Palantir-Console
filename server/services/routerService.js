@@ -15,8 +15,11 @@
 //      If the text starts with `@<name>` (or `@<id>`), the `<name>`
 //      is resolved against the project list (case-insensitive name OR
 //      exact project id). If that resolves to a project with
-//      `pm_enabled !== 0`, the target is `pm:<projectId>` and the
-//      `@<name>` token is stripped from the rewritten text.
+//      `pm_enabled !== 0`, the `@<name>` token is stripped from the
+//      rewritten text. From Top/worker/absent context the target is the
+//      project's primary Operator (legacy behavior); from an Operator
+//      conversation the current Operator stays selected and the result
+//      carries additive per-turn codebase context.
 //
 //   2. **Current UI context.**
 //      If the caller provided a `currentConversationId` (what the
@@ -40,6 +43,8 @@
 //     target: 'top' | 'pm:<id>' | 'worker:<id>',
 //     text: <string>,              // possibly rewritten (step 1 strip)
 //     matchedRule: '1_explicit' | '2_current' | '3_namematch' | '4_default',
+//     codebaseProjectId?: <projectId>, // explicit mention while on Operator
+//     turnMode?: 'codebase',           // paired with codebaseProjectId
 //     ambiguous?: true,            // set on step 3 multi-match
 //     candidates?: [{projectId, name}],  // set on ambiguous
 //   }
@@ -119,9 +124,22 @@ function createRouterService({ projectService, operatorInstanceService, logger }
       if (!hit) hit = projects.find(p => norm(p.name) === needle);
       if (hit) {
         const rewritten = mention.rest.trim();
+        const stayText = rewritten.length > 0 ? rewritten : original;
+        // A2b-3: favorite 공용 풀. Operator 대화 중이면 현재 Operator를
+        // 유지하고 이번 turn만 멘션 codebase로 향하게 한다. Top/worker/
+        // absent context는 기존 primary Operator 재라우팅을 유지한다.
+        if (currentConversationId && isOperatorConversationId(currentConversationId)) {
+          return {
+            target: currentConversationId,
+            codebaseProjectId: hit.id,
+            turnMode: 'codebase',
+            text: stayText,
+            matchedRule: '1_explicit',
+          };
+        }
         return {
           target: targetForProject(hit.id),
-          text: rewritten.length > 0 ? rewritten : original, // keep body if strip leaves nothing
+          text: stayText, // keep body if strip leaves nothing
           matchedRule: '1_explicit',
         };
       }

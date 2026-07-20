@@ -23,6 +23,7 @@ const { createMasterMemoryService } = require('../services/masterMemoryService')
 const { createCompositionLedger } = require('../services/compositionLedger');
 const { createMemoryComposer, buildWorkspaceAdapter, buildUserAdapter } = require('../services/memoryComposer');
 const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
+const { createEventBus } = require('../services/eventBus');
 const { createApp } = require('../app');
 const { invokeApp } = require('./helpers/invokeApp');
 
@@ -362,6 +363,7 @@ function wirePmStack(db, { memoryMultiOwner = false } = {}) {
   });
   const fakePm = makeFakeCodexAdapter();
   const topAdapter = makeFakeCodexAdapter();
+  const eventBus = createEventBus();
 
   const spawn = createOperatorSpawnService({
     runService: rs, managerRegistry: registry,
@@ -381,11 +383,12 @@ function wirePmStack(db, { memoryMultiOwner = false } = {}) {
     memoryMultiOwner,
     memoryComposer,
     compositionLedger,
+    eventBus,
   });
   return {
     rs, projectService, projectBriefService, registry,
     memoryService, masterMemoryService, compositionLedger,
-    fakePm, topAdapter, spawn, conv,
+    fakePm, topAdapter, eventBus, spawn, conv,
   };
 }
 
@@ -662,6 +665,54 @@ test('A2b-2: a non-existent turn codebase is rejected fail-closed (400)', async 
     codebaseProjectId: 'proj_does_not_exist',
     turnMode: 'codebase',
   }), (err) => err && err.httpStatus === 400 && /turn codebase not found/.test(err.message));
+});
+
+test('A2b-3a: explicit non-ref codebase injects workspace memory and emits observation without creating a ref', async (t) => {
+  const db = await mkdb(t);
+  const stack = wirePmStack(db);
+  const {
+    rs, projectService, registry, memoryService,
+    topAdapter, fakePm, eventBus, conv,
+  } = stack;
+
+  const primary = projectService.createProject({ name: 'alpha', directory: '/tmp/alpha' });
+  const other = projectService.createProject({ name: 'beta', directory: '/tmp/beta' });
+  memoryService.createMemoryItem({
+    projectId: other.id,
+    kind: 'convention',
+    content: 'beta workspace uses cobalt fixtures',
+    origin: 'human',
+    importance: 9,
+  });
+  seedTop({ rs, registry, adapter: topAdapter });
+
+  const observed = [];
+  const unsubscribe = eventBus.subscribe((event) => {
+    if (event.channel === 'memory:unwatched_codebase') observed.push(event);
+  });
+  t.after(unsubscribe);
+
+  conv.sendMessage(`operator:${primary.id}`, {
+    text: 'use the beta cobalt fixtures',
+    codebaseProjectId: other.id,
+    turnMode: 'codebase',
+  });
+
+  const call = fakePm._runTurnCalls[0];
+  assert.match(call.payload.text, /## Learned Memory/);
+  assert.match(call.payload.text, /beta workspace uses cobalt fixtures/);
+  const run = rs.getRun(call.runId);
+  assert.ok(run.operator_instance_id, 'spawned Operator has an instance id');
+  assert.equal(rs.operatorInstanceHasRef(run.operator_instance_id, other.id), false, 'send does not auto-create a ref');
+  assert.equal(observed.length, 1);
+  assert.deepEqual(observed[0].data, {
+    runId: run.id,
+    instanceId: run.operator_instance_id,
+    projectId: other.id,
+  });
+
+  conv.sendMessage(`operator:${primary.id}`, { text: 'primary follow-up' });
+  assert.equal(observed.length, 1, 'primary turn does not emit unwatched observation');
 });
 
 test('A2b-2: the ## Turn Codebase block carries a truncated brief summary', async (t) => {
