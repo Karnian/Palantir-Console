@@ -1,6 +1,8 @@
 # Palantir Console Backlog
 
-> Last updated: 2026-07-09 (Operator↔Codebase Refs watch-list W-P0~W-P7 완결 #342~#349 + W-P7 cleanup)
+> Last updated: 2026-07-20 (favorite/codebase-pool 트랙 전 완료 + declared_node_major + memory-safety hardening)
+>
+> **2026-07-20 완료 (origin/main HEAD `3df7b5b`)**: favorite/codebase-pool 트랙(A0~flip) + A2b-3 + **B-adm declared_node_major staleness 근본해결**(`ccfa153`) + **공유 detectInjection/redactSecrets hardening**(`d14d188`). 상세·교훈·다른 기기 재입장은 [`handoff-2026-07-20-memory-safety.md`](./handoff-2026-07-20-memory-safety.md) + `docs/specs/codebase-pool-memory-axes-brief.md` §0. (로컬 `~/.claude` memory 는 기기 간 동기화 안 됨 — repo 문서가 authoritative.)
 >
 > 이 문서는 *현재 시점에서* 남은 작업들을 카테고리별로 정리한다.
 > 완료된 작업의 한 화면 요약 + 새 세션 재입장 prompt 는 [`handoff-post-k2-launch-2026-04-29.md`](./handoff-post-k2-launch-2026-04-29.md) 를 본다 (§9 post-launch fixups + §10 K-3 cleanup + §11 K-4 launch + §12 K-5 launch). 그 이전 시리즈 (M1/M2/B3 + R1/R3/R4) 는 [`handoff-post-scenario-review.md`](./handoff-post-scenario-review.md) 에 있다.
