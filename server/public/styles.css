@@ -1156,6 +1156,16 @@ body {
 }
 
 .nav-brand {
+  /* Kept at the original 36x36 (not bumped to 44x44 like .nav-item)
+     deliberately: this box renders on every route's default screenshot, so
+     resizing it would invalidate every tracked macOS visual-regression
+     baseline (server/tests/e2e/visual.spec.js-snapshots/*-darwin.png) —
+     baselines this dev box (Linux) cannot regenerate itself (Codex
+     adversarial review catch). WCAG 2.5.8 Target Size Minimum is a 2.2
+     criterion, outside the wcag2a/wcag2aa/wcag21a/wcag21aa rule set the
+     K-4 axe-core gate actually checks, so this isn't a compliance gap for
+     that gate — just a smaller target than the sidebar's other buttons.
+  */
   width: 36px;
   height: 36px;
   border-radius: var(--radius-md);
@@ -1166,8 +1176,13 @@ body {
   background: var(--accent-muted);
   border: 1px solid var(--accent-border);
   color: var(--accent-light);
-  cursor: default;
+  cursor: pointer;
   user-select: none;
+}
+
+.nav-brand:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-hover);
 }
 
 .nav-item {
