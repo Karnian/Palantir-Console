@@ -89,6 +89,27 @@ function createManagerRegistry({ runService }) {
     return resolved?.conversationId || canonicalConversationId(conversationId);
   }
 
+  function disposeEventually(adapter, runId, context, attempt = 0) {
+    let result;
+    try {
+      result = adapter.disposeSession(runId);
+    } catch (err) {
+      console.warn(`[managerRegistry] disposeSession failed during ${context}:`, err && err.message);
+      return;
+    }
+    Promise.resolve(result).then((cleaned) => {
+      if (cleaned !== false) return;
+      const delayMs = Math.min(250 * (2 ** Math.min(attempt, 7)), 30000);
+      const timer = setTimeout(
+        () => disposeEventually(adapter, runId, context, attempt + 1),
+        delayMs,
+      );
+      if (typeof timer.unref === 'function') timer.unref();
+    }, (err) => {
+      console.warn(`[managerRegistry] disposeSession rejected during ${context}:`, err && err.message);
+    });
+  }
+
   function setActive(conversationId, runId, adapter) {
     if (!conversationId) throw new Error('conversationId required');
     if (!runId) throw new Error('runId required');
@@ -109,15 +130,12 @@ function createManagerRegistry({ runService }) {
     // at all and half-initialized state).
     const prev = active.get(conversationId);
     if (prev && prev.runId !== runId) {
-      try {
-        if (prev.adapter && typeof prev.adapter.disposeSession === 'function') {
-          prev.adapter.disposeSession(prev.runId);
-        }
-      } catch (err) {
-        // Log-and-continue: the new run still gets the slot. If the old
-        // subprocess leaked, it will be caught by the next lifecycle
-        // sweep or by shutdown (PR2 / P1-5).
-        console.warn(`[managerRegistry] disposeSession failed during setActive replacement of ${conversationId}/${prev.runId}:`, err && err.message);
+      if (prev.adapter && typeof prev.adapter.disposeSession === 'function') {
+        disposeEventually(
+          prev.adapter,
+          prev.runId,
+          `setActive replacement of ${conversationId}/${prev.runId}`,
+        );
       }
       notifySlotCleared(conversationId, prev.runId);
     }
@@ -190,12 +208,12 @@ function createManagerRegistry({ runService }) {
       // (adapters wrap streamJsonEngine.kill in try/catch and the
       // session-ended emit has an `endedEmitted` fence) so calling it
       // after we already emitted 'natural-exit' above is safe.
-      try {
-        if (typeof adapter.disposeSession === 'function') {
-          adapter.disposeSession(runId);
-        }
-      } catch (err) {
-        console.warn(`[managerRegistry] disposeSession failed during probeActive dead-session path of ${conversationId}/${runId}:`, err && err.message);
+      if (typeof adapter.disposeSession === 'function') {
+        disposeEventually(
+          adapter,
+          runId,
+          `probeActive dead-session path of ${conversationId}/${runId}`,
+        );
       }
       active.delete(conversationId);
       // Notify listeners so they can scrub per-runId auxiliary state

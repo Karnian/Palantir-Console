@@ -116,7 +116,7 @@ function scriptOf(call) {
   return unshq(command.slice(prefix.length));
 }
 
-function loopbackSshSpawn() {
+function loopbackSshSpawn({ env } = {}) {
   const calls = [];
   function spawn(cmd, args, opts) {
     assert.equal(cmd, 'ssh');
@@ -131,7 +131,10 @@ function loopbackSshSpawn() {
       remoteCommandArgs,
       joined,
     });
-    return childProcess.spawn('sh', ['-c', joined], { stdio: ['pipe', 'pipe', 'pipe'] });
+    return childProcess.spawn('sh', ['-c', joined], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: env ? { ...process.env, ...env } : undefined,
+    });
   }
   spawn.calls = calls;
   return spawn;
@@ -301,6 +304,33 @@ test('loopback ssh simulator writeTempFile streams stdin and stays within roots'
   assert.equal(path.basename(remotePath), 'payload.txt');
   assert.ok(relativePath && !relativePath.startsWith('..') && !path.isAbsolute(relativePath));
   assert.ok(spawn.calls.some((call) => /cat > "\$tmpdir"\/'payload\.txt'/.test(scriptOf(call))));
+});
+
+test('loopback writeTempFile cleans its fresh directory when cat or chmod fails', async (t) => {
+  for (const failingCommand of ['cat', 'chmod']) {
+    await t.test(failingCommand, async (st) => {
+      const root = await mkLoopbackRoot(st);
+      const fakeBin = await mkLoopbackRoot(st);
+      const fakeCommand = path.join(fakeBin, failingCommand);
+      await fs.writeFile(fakeCommand, '#!/bin/sh\nexit 41\n', { mode: 0o700 });
+      await fs.chmod(fakeCommand, 0o700);
+      const spawn = loopbackSshSpawn({
+        env: { PATH: `${fakeBin}:${process.env.PATH}` },
+      });
+      const exec = createRemoteSshNodeExecutor(nodeRow({
+        exposed_roots: JSON.stringify([root]),
+      }), { spawnFn: spawn });
+      const secret = `must-not-appear-${failingCommand}`;
+
+      await assert.rejects(
+        () => exec.writeTempFile(path.join(root, 'secret-'), 'payload', secret, 0o600),
+        (err) => err?.code === 41,
+      );
+
+      assert.deepEqual(await fs.readdir(root), []);
+      assert.doesNotMatch(JSON.stringify(spawn.calls.map((call) => call.args)), new RegExp(secret));
+    });
+  }
 });
 
 test('exec resolves genuine exits and rejects ssh transport exit 255', async () => {
@@ -493,6 +523,15 @@ test('writeTempFile rejects non-bare names and sends content via stdin', async (
   const writeCall = spawn.calls.find((call) => /mktemp -d/.test(scriptOf(call)));
   assert.equal(writeCall.stdin, 'secret-content');
   assert.match(scriptOf(writeCall), /mktemp -d '\/srv\/root\/tmp-XXXXXX'/);
+  assert.match(scriptOf(writeCall), /trap 'rc=\$\?; cleanup; exit "\$rc"' 0/);
+  assert.match(scriptOf(writeCall), /trap 'exit 129' HUP/);
+  assert.match(scriptOf(writeCall), /trap 'exit 130' INT/);
+  assert.match(scriptOf(writeCall), /trap 'exit 143' TERM/);
+  assert.ok(
+    scriptOf(writeCall).indexOf(`printf '%s\\n' "$tmpdir"/'payload.txt'`)
+      < scriptOf(writeCall).indexOf('trap - 0 HUP INT TERM'),
+    'cleanup traps must stay armed until after the path is printed successfully',
+  );
   assert.doesNotMatch(scriptOf(writeCall), /secret-content/);
 });
 
@@ -544,6 +583,50 @@ test('putSecretFile rejects non-bare names and revalidates created path', async 
     (err) => err.code === 'EXPOSED_ROOTS',
   );
   assert.ok(spawn.calls.some((call) => scriptOf(call) === "exec 'rm' '-rf' '/srv/root/.palantir-secret-abc'"));
+});
+
+test('resolveNodeRuntime uses node_prefix, probes a canonical executable, and returns its absolute path', async () => {
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    assert.match(script, /PATH='\/opt\/codex\/bin':\$PATH command -v node/);
+    assert.match(script, /candidate=\$\(realpath "\$candidate"\)/);
+    assert.match(script, /\[ -x "\$candidate" \]/);
+    assert.match(script, /require\("node:child_process"\)/);
+    assert.match(script, /NODE_OPTIONS=''/);
+    assert.doesNotMatch(script, /runtime-secret-sentinel/);
+    complete(child, { stdout: '/usr/local/bin/node\n' });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow({ node_prefix: '/opt/codex/bin' }), {
+    spawnFn: spawn,
+  });
+  assert.equal(await exec.resolveNodeRuntime(), '/usr/local/bin/node');
+  assert.equal(spawn.calls.length, 1);
+  assert.equal(spawn.calls[0].stdin, '');
+});
+
+test('resolveNodeRuntime fails closed on missing/unsafe runtimes and preserves SSH transport errors', async () => {
+  const missingSpawn = makeSpawn((_call, child) => complete(child, { code: 127 }));
+  const missing = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: missingSpawn });
+  await assert.rejects(
+    () => missing.resolveNodeRuntime(),
+    (err) => err.code === 'MCP_WRAPPER_RUNTIME_UNAVAILABLE',
+  );
+
+  const unsafeSpawn = makeSpawn((_call, child) => complete(child, { stdout: 'relative/node\n' }));
+  const unsafe = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: unsafeSpawn });
+  await assert.rejects(() => unsafe.resolveNodeRuntime(), /unsafe path/);
+
+  const transportSpawn = makeSpawn((_call, child) => complete(child, { code: 255 }));
+  const transport = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: transportSpawn });
+  await assert.rejects(
+    () => transport.resolveNodeRuntime(),
+    (err) => err.code === 'SSH_TRANSPORT',
+  );
+
+  await assert.rejects(
+    () => missing.resolveNodeRuntime({ pathPrefix: 'relative/bin' }),
+    /absolute POSIX path/,
+  );
 });
 
 test('spawnInteractive builds piped ssh child with canonical cwd explicit env and quoted argv', async () => {

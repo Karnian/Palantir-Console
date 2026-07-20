@@ -209,6 +209,74 @@ test('Phase 10C+M1: Codex worker with preset — injects leaf-level -c mcp_serve
   assert.ok(content.startsWith('CODEX PRESET'), 'preset prompt leads composed file');
 });
 
+test('issue #113: Codex worker keeps stdio env out of argv and cleans wrapper after spawn failure', async (t) => {
+  const db = await mkdb(t);
+  const presetService = createPresetService(db, { pluginsRoot: mkPluginsRoot(t) });
+  const secret = 'worker-"quote"\n비밀-🔐';
+  const originalMerge = presetService.mergeMcp3.bind(presetService);
+  presetService.mergeMcp3 = function mergeWithSecretEnv(presetMcp, projectMcp, skillPackMcp, opts) {
+    originalMerge(presetMcp, projectMcp, skillPackMcp, opts);
+    return {
+      mcpServers: {
+        secretstdio: {
+          command: 'npx',
+          args: ['-y', '@scope/secret-mcp'],
+          env: { MCP_SECRET: secret },
+          required: true,
+        },
+      },
+    };
+  };
+
+  const { lc, exec, rs } = buildLifecycle(db, { presetService });
+  let wrapperPath = null;
+  let wrapperModeAtSpawn = null;
+  let wrapperContentAtSpawn = null;
+  let capturedArgs = null;
+  exec.spawnAgent = function failAfterCapturing(_runId, opts) {
+    capturedArgs = [...opts.args];
+    const flags = [];
+    for (let i = 0; i < capturedArgs.length; i++) {
+      if (capturedArgs[i] === '-c' && i + 1 < capturedArgs.length) flags.push(capturedArgs[i + 1]);
+    }
+    const wrapperArgsFlag = flags.find(flag => flag.startsWith('mcp_servers.secretstdio.args='));
+    assert.ok(wrapperArgsFlag, 'worker receives wrapper args leaf');
+    const wrapperArgs = JSON.parse(wrapperArgsFlag.slice('mcp_servers.secretstdio.args='.length));
+    wrapperPath = wrapperArgs[0];
+    wrapperModeAtSpawn = fs.statSync(wrapperPath).mode & 0o777;
+    wrapperContentAtSpawn = fs.readFileSync(wrapperPath, 'utf8');
+    assert.ok(flags.includes('mcp_servers.secretstdio.env.NODE_OPTIONS=""'));
+    assert.ok(flags.includes('mcp_servers.secretstdio.required=true'));
+    throw new Error('intentional worker spawn failure');
+  };
+
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, 'codex');
+  const preset = presetService.createPreset({
+    name: 'SecretWorkerMcp',
+    mcp_server_ids: ['tpl_ctx7'],
+  });
+
+  await assert.rejects(
+    () => lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'hi', presetId: preset.id }),
+    /intentional worker spawn failure/,
+  );
+
+  assert.ok(capturedArgs, 'worker spawn was reached with prepared args');
+  assert.equal(JSON.stringify(capturedArgs).includes(secret), false, 'secret occurs zero times in worker argv');
+  assert.equal(wrapperModeAtSpawn, 0o600);
+  assert.match(wrapperContentAtSpawn, /MCP_SECRET/);
+  assert.match(wrapperContentAtSpawn, /비밀-🔐/);
+  assert.equal(fs.existsSync(wrapperPath), false, 'outer spawn-failure cleanup removes wrapper dir');
+  const failedRun = rs.listRuns({})[0];
+  assert.equal(failedRun.status, 'failed');
+
+  // The control-plane forensic snapshot intentionally remains separate from
+  // the execution-node wrapper. Remove it in this eventBus-less unit harness.
+  if (failedRun.mcp_config_path) fs.rmSync(failedRun.mcp_config_path, { force: true });
+});
+
 test('M1: Codex worker with invalid MCP (direct bearer_token) — fails closed, run marked failed, preset:mcp_invalid emitted', async (t) => {
   const db = await mkdb(t);
   const presetService = createPresetService(db, { pluginsRoot: mkPluginsRoot(t) });

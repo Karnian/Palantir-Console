@@ -13,6 +13,7 @@ const path = require('node:path');
  * - listSessions() / discoverGhostSessions()
  * - realpath / fileExists / stat / mkdir / readFile / writeTempFile / readdir / rmrf
  * - putSecretFile(path, content, mode = 0o600) with cleanup hooks
+ * - resolveNodeRuntime() for execution-node MCP wrapper preflight
  *
  * It intentionally does not provide throwing placeholders for spawnInteractive,
  * liveness, session discovery, or putSecretFile; those methods are added in
@@ -213,13 +214,22 @@ function createLocalNodeExecutor({ executionEngine, streamJsonEngine } = {}) {
     }
     const dir = await fsp.mkdtemp(path.isAbsolute(prefix) ? prefix : path.join(os.tmpdir(), prefix));
     const filePath = path.join(dir, name);
-    await fsp.writeFile(filePath, content, { mode });
-    await fsp.chmod(filePath, mode);
-    return filePath;
+    try {
+      await fsp.writeFile(filePath, content, { mode });
+      await fsp.chmod(filePath, mode);
+      return filePath;
+    } catch (err) {
+      try { await fsp.rm(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+      throw err;
+    }
   }
 
   function putSecretFile(name, content, mode = 0o600) {
     return writeTempFile(path.join(os.tmpdir(), 'palantir-secret-'), name, content, mode);
+  }
+
+  function resolveNodeRuntime() {
+    return process.execPath;
   }
 
   function spawnInteractive(command, args = [], { cwd, env } = {}) {
@@ -237,6 +247,7 @@ function createLocalNodeExecutor({ executionEngine, streamJsonEngine } = {}) {
     readdir: (p, options) => fsp.readdir(p, options),
     writeTempFile,
     putSecretFile,
+    resolveNodeRuntime,
     rmrf: (p) => fsp.rm(p, { recursive: true, force: true }),
     move: (src, dst) => fsp.rename(src, dst),
     attachEngines,

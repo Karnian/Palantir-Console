@@ -1,6 +1,6 @@
 # Palantir Console Backlog
 
-> Last updated: 2026-07-20 (favorite/codebase-pool 트랙 전 완료 + declared_node_major + memory-safety hardening)
+> Last updated: 2026-07-20 (favorite/codebase-pool 트랙 전 완료 + declared_node_major + memory-safety hardening + OS scheduler draft)
 >
 > **2026-07-20 완료 (origin/main HEAD `3df7b5b`)**: favorite/codebase-pool 트랙(A0~flip) + A2b-3 + **B-adm declared_node_major staleness 근본해결**(`ccfa153`) + **공유 detectInjection/redactSecrets hardening**(`d14d188`). 상세·교훈·다른 기기 재입장은 [`handoff-2026-07-20-memory-safety.md`](./handoff-2026-07-20-memory-safety.md) + `docs/specs/codebase-pool-memory-axes-brief.md` §0. (로컬 `~/.claude` memory 는 기기 간 동기화 안 됨 — repo 문서가 authoritative.)
 >
@@ -139,7 +139,7 @@
   - **#176** `docs/runbook-m4a-bifrost-setup.md` 신규 — Bifrost 연동 셋업/검증/트러블슈팅 매트릭스 (192줄)
   - **#177** spec §L9.1 post-impl verification stamp — Bifrost end-to-end 검증 결과 (5 ✅ + 2 ⚠) inline 등록
   - **#178** spec §L9.1 확장 — 외부 hosted MCP HEAD 매트릭스 (Linear/Notion/Sentry/GHCP/Atlassian/Cloudflare 6개 직접 probe — 5/6 = 401, 1/6 = 404) + Bifrost listChanged 코드 분석 (`/mcp` 비동기 미지원, `/sse` 만 emit). M4-c entry + completion condition 정밀화
-- **§7 deferred**: M4-b (clone-as-other-transport + bulk repoint), M5 (file-based MCP config delivery → issue #113), `'sse'` transport, dynamic `tools/list_changed`, OAuth-aware template, egress proxy. 모두 use case 발생 시.
+- **§7 deferred**: M4-b (clone-as-other-transport + bulk repoint), `'sse'` transport, dynamic `tools/list_changed`, OAuth-aware template, egress proxy. 모두 use case 발생 시. stdio env file transport(issue #113)는 2026-07-20 완료.
 
 ### K-5 visual regression (LAUNCHED 2026-04-29)
 - **PR #168** spec brief, **#169** impl
@@ -192,19 +192,9 @@
 
 ## Data-wait
 
-### D1. M5 — Codex MCP `env` argv leak → file-based config transport
-- **Tracked as**: [#113](https://github.com/Karnian/Palantir-Console/issues/113). spec 의 §7 후속 백로그명 = "M5 (가칭)".
-- **Scope 추정**: Large. Codex 0.120 공식 `--config-file`급 진입점 부재 → upstream 기여 or Palantir-owned TOML fragment + 명시적 Codex 부팅 경로.
-- **M4-a 후 잔여 범위**: HTTP MCP 의 token 노출 (argv) 문제는 M4-a 가 이미 우회 — `bearer_token_env_var` 의 **값** 은 워커 process.env 에서만 읽혀 argv 에 안 나오고, argv 에는 env var **이름** (예: `BIFROST_MCP_TOKEN`) 만 노출됨 (이름은 secret 아님). 본 항목의 잔여 표면은 **stdio MCP 의 env-via-argv** (skill pack 의 `env_overrides` 로 들어간 secret 이 `-c mcp_servers.<alias>.env={KEY="..."}` 로 *값까지* 노출). HTTP 로 마이그레이션 가능한 alias 는 그쪽으로 옮기는 것도 부분 해결책.
-- **착수 기준** (Codex M2 권장):
-  - 1-2주 실사용 관측
-  - `runs` 테이블 `mcp:legacy_alias_conflict` event 빈도
-  - alias 분포 (어떤 MCP 가 주로 충돌?)
-  - 사용자 무시율 (event 발생했는데 run 이 의도대로 완료됐나?)
-- **대체 지표 (관측 불충분 시)**:
-  - 보안 정책상 argv leak 즉시 제거 필요 선언
-  - 운영자가 `npm run diagnose:mcp` 경고를 해결 못 하는 패턴이 반복
-- **관측 시작**: 2026-04-22 (PR #117 merge). 1-2주 후 = 2026-05-06 ~ 2026-05-13 사이 결정 포인트.
+### ~~D1. Codex MCP `env` argv leak → file-backed stdio wrapper~~ ✅ 완료 (2026-07-20)
+- [#113](https://github.com/Karnian/Palantir-Console/issues/113): worker + object-shaped Operator/PM MCP 경로에서 stdio env literal을 실행 노드 mode-0600 wrapper로 이동. Codex argv에는 wrapper path/alias와 비밀 없는 Node boot hardening leaf만 남고 Palantir env 값은 0회 등장한다.
+- 기존 leaf-level `-c` 우선순위, 일반 legacy alias env deep-merge, HTTP `bearer_token_env_var`, direct `bearer_token` fail-closed를 유지한다. terminal/dispose/spawn-failure cleanup 포함. 상세 계약은 `docs/specs/worker-preset-and-plugin-injection.md` §13.
 
 ---
 
@@ -235,6 +225,12 @@
 - **Spec**: [`docs/specs/codex-fast-mode-brief.md`](./specs/codex-fast-mode-brief.md) (2026-07-11, mini-brief). **goal-session-protocol lock-in.**
 - **요지**: user `~/.codex/config.toml` 의 `service_tier="fast"` 가 Palantir codex spawn 전체에 암묵 상속되는 드리프트 (M2 패턴) 를 명시 emit 으로 차단 — codexAdapter 가 `-c service_tier` 를 항상 명시. 대화형 Operator 턴은 per-instance ⚡ 토글 (cookie-only PATCH) + `PALANTIR_CODEX_FAST` env, 배치 (worker/auto-review) 는 standard 고정.
 - **구현**: migration **053** (`operator_instances.fast_mode` INTEGER, NULL=env-follow) + `resolveCodexServiceTier` (per-instance>env 우선순위) + codexAdapter `serviceTier` (문자열|함수 오버로드 → 라이브 토글, 다음 턴 반영) fresh/resume 양 경로 `-c service_tier` (+fast 시 `features.fast_mode=true`) emit + `codex:fast_unavailable` annotate (fast 턴 실패 관측만, **v1 fallback 재시도 제거** — accepted:true 동기 반환 구조상 불안전, spec §6) + conversationService `source` plumbing → auto-review 만 `source:'auto_review'` 로 standard 강제 + lifecycleService codex worker standard 고정 + `PATCH /api/operator-instances/:id/fast-mode` (cookie-only) + ManagerChat ⚡ 토글 (디자인 토큰, aria-pressed). 테스트 12종 (spec 필수 9 + fast_unavailable dedupe + 마이그레이션). **codex 계획 R1 NO-GO(3 BLOCKER: resolveAdapterName(profile)/fast_unavailable per-turn dedupe/status wiring) → 반영, 최종 diff 리뷰 PASS(5 hotspot).** 전체 2163 tests, visual 56/56.
+
+### OS. Operator Scheduler + Durable Invocation Queue
+- **Spec**: [`docs/specs/operator-scheduler-brief.md`](./specs/operator-scheduler-brief.md) (2026-07-20, r1 DRAFT-review).
+- **요지**: Operator instance별 one-shot/반복 스케줄. 단순 timer→send가 아니라 schedule→durable invocation(CAS lease/outbox)→lazy Operator delivery. Top 부재·Operator busy·remote node offline·재시작을 pending/backoff로 견디고, 중복 회차·cold-spawn race·LLM 비용을 서버 정책으로 차단한다.
+- **범위 후보**: OS-0 lock-in → OS-1 schema/service → OS-2 scheduler driver → OS-3 delivery/single-flight/turn correlation → OS-4 human-only API+Roster UI → OS-5 일반 auto-review durable queue 이관. 기존 `run:harvested` 즉시 trigger는 유지하며 cron polling으로 대체하지 않는다.
+- **핵심 정책 후보**: schedule owner=`operator_instances`, structured rule+IANA timezone, default coalesce, scheduled Codex=standard 강제, mutation cookie+Origin only, uncertain delivery 자동 replay 금지. folder-less profile schedule/reviewer placement/raw cron은 후속 lock-in.
 
 ### G. Goal Delegation — 워커 완결 작업 위임 (전 업무)
 - **Spec**: [`docs/specs/goal-delegation-brief.md`](./specs/goal-delegation-brief.md) (2026-07-10~11, v6). Codex 적대 리뷰 6라운드 수렴 (R1~R3 NO-GO → **R4 GO** [code core] → 워크로드 전제 교정[코딩→전 업무, Operator 단위] → R5 NO-GO 4B → **R6 GO** [일반화 레이어]). **goal-session-protocol lock-in.**

@@ -30,7 +30,7 @@ function createOperatorProfilesRouter({ operatorProfileService, operatorIdentity
   }));
 
   router.patch('/:id', asyncHandler(async (req, res) => {
-    const profile = operatorIdentityLifecycleService.updateProfileContent(req.params.id, req.body || {});
+    const profile = await operatorIdentityLifecycleService.updateProfileContent(req.params.id, req.body || {});
     res.json({ profile });
   }));
 

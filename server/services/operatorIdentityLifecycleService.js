@@ -6,28 +6,28 @@ function createOperatorIdentityLifecycleService({
   operatorCleanupService,
   logger,
 }) {
-  function resetSharers(profileId) {
+  async function resetSharers(profileId) {
     for (const instanceId of operatorInstanceService.listInstanceIdsForProfile(profileId)) {
-      operatorCleanupService.resetInstance(instanceId);
+      await operatorCleanupService.resetInstance(instanceId);
     }
   }
 
-  function updateProfileContent(id, data) {
+  async function updateProfileContent(id, data) {
     const { identityChanged } = operatorProfileService.prepareUpdate(id, data);
-    if (identityChanged) resetSharers(id);
+    if (identityChanged) await resetSharers(id);
     return operatorProfileService.updateProfile(id, data);
   }
 
-  function assignProfile(instanceId, profileId) {
+  async function assignProfile(instanceId, profileId) {
     operatorInstanceService.getInstance(instanceId);
     operatorProfileService.getProfile(profileId);
-    operatorCleanupService.resetInstance(instanceId);
+    await operatorCleanupService.resetInstance(instanceId);
     return operatorInstanceService.setProfileId(instanceId, profileId);
   }
 
-  function unassignProfile(instanceId) {
+  async function unassignProfile(instanceId) {
     operatorInstanceService.getInstance(instanceId);
-    operatorCleanupService.resetInstance(instanceId);
+    await operatorCleanupService.resetInstance(instanceId);
     return operatorInstanceService.createPrivateProfileFor(instanceId);
   }
 

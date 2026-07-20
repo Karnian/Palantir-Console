@@ -211,6 +211,41 @@ test('P1-5 app.shutdown integration: real sweep disposes every live slot', async
   assert.deepEqual(pmAdapter.calls.dispose, ['int-pm-1'], 'app.shutdown must still dispose pm slot even though it throws');
 });
 
+test('P1-5 app.shutdown awaits asynchronous adapter cleanup before closing', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-shutdown-async-'));
+  const dbPath = path.join(dir, 'test.db');
+  const storageRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-store-'));
+  const fsRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-fs-'));
+  const app = createApp({
+    dbPath, storageRoot, fsRoot,
+    authResolverOpts: { hasKeychain: () => false },
+  });
+  t.after(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(storageRoot, { recursive: true, force: true });
+    await fs.rm(fsRoot, { recursive: true, force: true });
+  });
+
+  let releaseCleanup;
+  const cleanupGate = new Promise((resolve) => { releaseCleanup = resolve; });
+  const adapter = makeFakeAdapter();
+  adapter.disposeSession = (runId) => {
+    adapter.calls.dispose.push(runId);
+    return cleanupGate;
+  };
+  app.managerRegistry.setActive('top', 'async-top-1', adapter);
+
+  let settled = false;
+  const shutdown = app.shutdown().then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, false, 'shutdown must remain pending while secret cleanup is running');
+
+  releaseCleanup(false);
+  await shutdown;
+  assert.equal(settled, true);
+  assert.deepEqual(adapter.calls.dispose, ['async-top-1']);
+});
+
 test('P1-5 app.shutdown is safe when no managers are active', async (t) => {
   // Smoke test the real createApp()'s shutdown path with zero live
   // managers — this is the common case and must not throw. The richer

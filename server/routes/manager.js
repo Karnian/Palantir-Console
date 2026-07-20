@@ -170,7 +170,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       if (!resumed) {
         try {
           const adapter = managerAdapterFactory.getAdapter(adapterType);
-          adapter.disposeSession(r.id);
+          Promise.resolve(adapter.disposeSession(r.id)).catch(() => { /* boot fallback */ });
         } catch { /* ignore */ }
         runService.updateRunStatus(r.id, 'stopped', { force: true });
         try { conversationService.clearParentNotices(r.id); } catch { /* ignore */ }
@@ -437,7 +437,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       if (!resumed) {
         try {
           const adapter = managerAdapterFactory.getAdapter(adapterType);
-          adapter.disposeSession(r.id);
+          Promise.resolve(adapter.disposeSession(r.id)).catch(() => { /* boot fallback */ });
         } catch { /* ignore */ }
         runService.updateRunStatus(r.id, 'stopped', { force: true });
         try { conversationService.clearParentNotices(r.id); } catch { /* ignore */ }
@@ -868,7 +868,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       return res.status(501).json({ error: 'operatorCleanupService not wired' });
     }
     try {
-      const result = operatorCleanupService.reset(projectId);
+      const result = await operatorCleanupService.reset(projectId);
       return res.json({ status: 'reset', projectId, ...result });
     } catch (err) {
       if (err && err.httpStatus) {
@@ -900,7 +900,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     if (typeof operatorCleanupService.forceReset !== 'function') {
       return res.status(501).json({ error: 'forceReset not available on operatorCleanupService' });
     }
-    const result = operatorCleanupService.forceReset(projectId);
+    const result = await operatorCleanupService.forceReset(projectId);
     return res.json({ status: 'force_reset', projectId, ...result });
   }));
 
@@ -1122,7 +1122,13 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
 
     const adapter = managerRegistry.getActiveAdapter('top')
       || managerAdapterFactory.getAdapter('claude-code');
-    adapter.disposeSession(runId);
+    const cleaned = await adapter.disposeSession(runId);
+    if (cleaned === false) {
+      return res.status(502).json({
+        error: 'manager_dispose_failed',
+        message: 'Manager secret cleanup remains pending; retry stop after the execution node recovers.',
+      });
+    }
 
     try {
       runService.updateRunStatus(runId, 'cancelled', { force: true });

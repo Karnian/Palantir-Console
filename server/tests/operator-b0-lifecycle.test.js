@@ -155,13 +155,13 @@ test('profile delete is blocked when the profile has a memory footprint (integra
   assert.match(res.body.error || '', /memory record/i);
 });
 
-test('resetInstance clears instance and primary brief thread bridges', (t) => {
+test('resetInstance clears instance and primary brief thread bridges', async (t) => {
   const app = createTestApp(t);
   const { project, instanceId } = ensurePrimary(app, 'bridge-clear');
   app.services.runService.setOperatorInstanceThread(instanceId, { thread_id: 'old-instance-thread', pm_adapter: 'codex' });
   app.services._rawDb.prepare('INSERT INTO project_briefs (project_id, pm_thread_id) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET pm_thread_id=excluded.pm_thread_id').run(project.id, 'old-brief-thread');
 
-  const result = app.services.operatorCleanupService.resetInstance(instanceId);
+  const result = await app.services.operatorCleanupService.resetInstance(instanceId);
   assert.equal(result.clearedThread, true);
   assert.equal(app.services.operatorInstanceService.getInstance(instanceId).thread_id, null);
   assert.equal(app.services._rawDb.prepare('SELECT pm_thread_id FROM project_briefs WHERE project_id = ?').get(project.id).pm_thread_id, null);

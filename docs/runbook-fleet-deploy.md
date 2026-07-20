@@ -39,6 +39,10 @@ pod 에서 직접 spawn 한다. 원격 Operator 는 컨트롤 플레인 REST API
 
 ### 1.2 각 pod
 - ssh 접속 가능 (키 기반 인증 권장 — `~/.ssh/authorized_keys` 에 컨트롤 플레인 공개키).
+- **env-bearing stdio MCP를 쓰는 pod만 Node.js runtime 필요**. Palantir이 mode-0600
+  wrapper를 실행하므로, 해당 pod의 `node_prefix` + 기본 `PATH`에서 `node`가 해석돼야 한다.
+  spawn 전에 실제 Node 실행까지 preflight하며 없으면 비밀 파일을 만들기 전에 fail-closed한다.
+  native Codex에서 HTTP MCP 또는 `env` 없는 stdio MCP만 쓰면 이 추가 요구사항은 없다.
 - `codex` 그리고/또는 `claude` CLI 설치 + **선로그인**:
   - Codex Operator/Worker → pod 의 `~/.codex/auth.json` (`codex login`).
   - Claude Operator/Worker → pod 의 `~/.claude/.credentials.json` (`claude` 로그인).
@@ -135,6 +139,7 @@ curl -s -X POST http://<IP>:4177/api/nodes -H "Authorization: Bearer $PALANTIR_T
 |---|---|---|
 | `operator:remote_base_url_localhost` 이벤트 + 원격 Operator 가 dispatch 못 함 | `PALANTIR_BASE_URL` 미설정 → Operator 가 자기 localhost curl | `PALANTIR_BASE_URL` 을 pod-도달 tailnet IP 로 설정 후 재시작 |
 | 원격 spawn `codex/claude exited 127 (No such file or directory)` | pod 에서 CLI 를 PATH 로 못 찾음 | 노드 `node_prefix` 를 pod 의 CLI bin 디렉터리로 |
+| `MCP_WRAPPER_RUNTIME_UNAVAILABLE` / stdio MCP spawn 전 Node runtime 오류 | env-bearing stdio MCP wrapper를 실행할 `node`가 pod PATH에 없음 | pod에 Node.js를 설치하거나 `node_prefix`에서 `node`가 해석되게 구성 후 재시도 |
 | 원격 run 이 `queued` 에 갇힘 | (과거 버그 — P5-S4b 에서 수정됨) async spawn 첫 메시지 레이스 | 최신 main 사용 (pendingInput 버퍼) |
 | 원격 Operator 가 auth 실패로 안 뜸 | pod CLI 미로그인 | pod 에서 `codex login` / `claude` 로그인. (컨트롤 플레인 auth 는 원격이면 skip) |
 | ssh `exit 255` | transport/연결 실패(호스트 unreachable, 키 문제) | ssh 키/네트워크 확인. (P5-S2: transport 단절은 `unreachable` 로 구분되어 resumable) |

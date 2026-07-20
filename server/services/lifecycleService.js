@@ -19,6 +19,10 @@ const { compileGoalPrompt } = require('./goalPrompt'); // G1
 const { parseGoalReport } = require('./goalReport'); // G1
 const { createGoalVerdictService } = require('./goalVerdictService'); // G3
 const { VERDICT_TO_TASK_STATUS } = require('./goalVerdict'); // G3
+const {
+  prepareCodexMcpArgs,
+  removeSecretDirWithRetry,
+} = require('./managerAdapters/codexMcpSecretTransport');
 
 // G1: cap a string to at most maxBytes UTF-8 bytes without splitting a
 // multi-byte codepoint (final_output is stored raw; the 64KB bound is on bytes,
@@ -156,6 +160,10 @@ function createLifecycleService({
   // for worktree cleanup when the run→task→project chain has been broken (e.g. the
   // task or project was deleted while the run was still in flight).
   const _runProjectDirs = new Map();
+  // runId → { executor, dirs }. Env-bearing Codex stdio MCP wrappers live on
+  // the actual execution node and must be removed on every terminal/failure
+  // cleanup path, independently of the control-plane runtime/mcp snapshot.
+  const _runCodexMcpSecretDirs = new Map();
   const _materializationTimers = new Set();
   const materializationService = projectMaterializationService || (
     nodeService
@@ -601,6 +609,25 @@ function createLifecycleService({
   async function cleanupRunRuntimeFiles(run) {
     if (!run?.id) return;
     _runProjectDirs.delete(run.id);
+
+    const mcpSecretPlacement = _runCodexMcpSecretDirs.get(run.id);
+    if (mcpSecretPlacement) {
+      for (const dir of [...mcpSecretPlacement.dirs]) {
+        try {
+          await removeSecretDirWithRetry(mcpSecretPlacement.executor, dir);
+          mcpSecretPlacement.dirs.delete(dir);
+        } catch (err) {
+          console.warn(`[lifecycle] Codex MCP secret cleanup deferred after retries for run ${run.id}: ${err.message}`);
+        }
+      }
+      // Preserve failed dirs for the service's idempotent duplicate cleanup
+      // paths (outer spawn catch + run:ended subscriber). Delete the tracking
+      // entry only after every execution-node secret dir is confirmed gone.
+      if (mcpSecretPlacement.dirs.size === 0
+          && _runCodexMcpSecretDirs.get(run.id) === mcpSecretPlacement) {
+        _runCodexMcpSecretDirs.delete(run.id);
+      }
+    }
 
     if (runService && typeof runService.releaseWorkspaceRefByRun === 'function') {
       try {
@@ -1489,14 +1516,14 @@ function createLifecycleService({
           fs.writeFileSync(promptFilePath, composedSystemPrompt, { mode: 0o600 });
           placeholders.system_prompt_file = promptFilePath;
         }
-        // Phase 10C + M1: Codex worker gets preset MCP injected as leaf-level
-        // dotted paths:
+        // Phase 10C + M1 + issue #113: Codex worker gets non-secret preset MCP
+        // leaves as dotted paths:
         //   -c mcp_servers.<alias>.<key>=<TOML-value>
         // The earlier `-c mcp_servers=<JSON>` form was rejected by Codex CLI
         // with "invalid type: string, expected a map", so it silently broke
         // the entire config load. Shared util lives in
-        // managerAdapters/codexMcpFlatten.js and is reused by codexAdapter
-        // (PM path) so worker/PM never drift.
+        // managerAdapters/codexMcpSecretTransport.js keeps worker/PM aligned;
+        // env-bearing stdio aliases are relayed through a mode-0600 wrapper.
         //
         // Fail-closed on invalid input (per Codex M1 review): silently
         // dropping an MCP block and still spawning would violate the
@@ -1539,9 +1566,37 @@ function createLifecycleService({
               message: c.message,
             }));
           }
-          const { flattenMcpToCodexArgs } = require('./managerAdapters/codexMcpFlatten');
           try {
-            extraArgs = flattenMcpToCodexArgs(mergedMcp);
+            const mcpExecutor = channelForNode(run.node_id);
+            const prepared = prepareCodexMcpArgs(mergedMcp, {
+              putSecretFile: typeof mcpExecutor.putSecretFile === 'function'
+                ? mcpExecutor.putSecretFile.bind(mcpExecutor)
+                : undefined,
+              onSecretPlaced(secretPath) {
+                const secretDir = path.dirname(secretPath);
+                let placement = _runCodexMcpSecretDirs.get(run.id);
+                if (!placement) {
+                  placement = { executor: mcpExecutor, dirs: new Set() };
+                  _runCodexMcpSecretDirs.set(run.id, placement);
+                }
+                placement.dirs.add(secretDir);
+              },
+              resolveWrapperCommand() {
+                if (typeof mcpExecutor.resolveNodeRuntime === 'function') {
+                  return mcpExecutor.resolveNodeRuntime({
+                    pathPrefix: isRemoteNode ? (node.node_prefix || undefined) : undefined,
+                  });
+                }
+                if (isRemoteNode) {
+                  throw new Error(
+                    'codexMcpSecretTransport: remote executor must resolve its Node.js runtime',
+                  );
+                }
+                return process.execPath;
+              },
+            });
+            const resolved = isThenable(prepared) ? await prepared : prepared;
+            extraArgs = resolved.args;
           } catch (err) {
             runService.addRunEvent(run.id, 'preset:mcp_invalid', JSON.stringify({
               adapter: 'codex',

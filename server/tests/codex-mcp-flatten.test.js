@@ -145,17 +145,13 @@ test('encodes arrays as TOML arrays (homogeneous string list)', () => {
   assert.equal(v, 'mcp_servers.svc.args=["-y","@ctx7/mcp"]');
 });
 
-test('encodes nested object (env) as inline table', () => {
-  const args = flattenMcpToCodexArgs({
-    mcpServers: { svc: { env: { KEY: 'val', TOKEN_VAR: 'TOK' } } },
-  });
-  const cflags = args.filter((_, i) => i % 2 === 1);
-  const envFlag = cflags.find(c => c.startsWith('mcp_servers.svc.env='));
-  assert.ok(envFlag, 'env flag emitted');
-  assert.ok(envFlag.includes('KEY="val"'));
-  assert.ok(envFlag.includes('TOKEN_VAR="TOK"'));
-  // Inline-table braces
-  assert.ok(/^mcp_servers\.svc\.env=\{.*\}$/.test(envFlag));
+test('refuses nested env values so low-level callers cannot leak them through argv', () => {
+  assert.throws(
+    () => flattenMcpToCodexArgs({
+      mcpServers: { svc: { command: 'x', env: { KEY: 'val', TOKEN_VAR: 'TOK' } } },
+    }),
+    /require file-backed secret transport.*must not appear in argv/,
+  );
 });
 
 test('rejects invalid alias (dots, shell metas)', () => {
