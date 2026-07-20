@@ -10,7 +10,7 @@
     "test": "node --test",
     "test:e2e": "npx playwright test",
     "test:a11y": "npx playwright test --grep @a11y",
-    "test:visual": "npx playwright test --grep @visual",
+    "test:visual": "PALANTIR_VISUAL_ONLY=1 npx playwright test --grep @visual",
     "diagnose:mcp": "node scripts/diagnose-mcp-conflicts.mjs",
     "fleet:spike": "node scripts/fleet-spike.mjs"
   },
@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.10.0",
+    "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "fast-glob": "^3.3.3"
   },
