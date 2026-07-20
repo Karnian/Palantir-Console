@@ -487,6 +487,36 @@ test('OperatorsView renders scoped empty states for no live project operators an
   assert.doesNotMatch(availableSection.textContent, /Running|Online|Live|Session|Idle/);
 });
 
+test('OperatorsView keeps a keyboard-accessible manager entry point when Top is inactive', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+
+  installRosterStubs(env, {
+    managerStatus: {
+      active: false,
+      top: null,
+      pms: [],
+    },
+    profiles: [],
+  });
+  loadOperatorsComponents(env);
+
+  const root = renderOperatorsView(env);
+  const empty = await waitFor(() => {
+    const el = root.querySelector('[data-role="operator-roster-master-empty"]');
+    assert.ok(el);
+    return el;
+  });
+  const cta = empty.querySelector('[data-role="operator-roster-master-cta"]');
+
+  assert.equal(root.querySelector('[data-role="operator-roster-master-card"]'), null);
+  assert.ok(cta);
+  assert.equal(cta.tagName, 'A');
+  assert.equal(cta.getAttribute('href'), '#manager');
+  assert.match(cta.textContent, /매니저 열기/);
+  assert.match(empty.textContent, /Top run이 없습니다/);
+});
+
 test('OperatorsView debounces live roster SSE events into one manager status refetch', async (t) => {
   const env = createPreactEnv();
   t.after(env.cleanup);
