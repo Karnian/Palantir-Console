@@ -103,7 +103,11 @@ function makeRemoteChannel({ alive = true, exitCode = null, output = '' } = {}) 
   return channel;
 }
 
-function buildHarness(db, { remoteChannel = makeRemoteChannel(), worktreeService = null } = {}) {
+function buildHarness(db, {
+  remoteChannel = makeRemoteChannel(),
+  worktreeService = null,
+  skillPackService = null,
+} = {}) {
   const remoteFactoryCalls = [];
   const nodeService = createNodeService(db, {
     createRemoteExecutor(node) {
@@ -136,6 +140,7 @@ function buildHarness(db, { remoteChannel = makeRemoteChannel(), worktreeService
     harvestService: null,
     eventBus: null,
     presetService: null,
+    skillPackService,
   });
 
   return {
@@ -227,6 +232,72 @@ test('reachable executable ssh node dispatches through pickExecutor and remote w
   assert.equal(spawn.payload.spec.cwd, '/workspace/project');
   assert.equal(spawn.payload.spec.workerPath, '/opt/codex/bin');
   assert.equal(h.runService.getRun(run.id).tmux_session, `remote-${run.id}`);
+});
+
+test('issue #113: remote Codex MCP secret placement and cleanup stay on selected executor', async (t) => {
+  const db = await mkdb(t);
+  const secret = 'remote-worker-secret-sentinel-🔐';
+  const putCalls = [];
+  const rmrfCalls = [];
+  const remoteChannel = makeRemoteChannel();
+  remoteChannel.putSecretFile = async (name, content, mode) => {
+    const dir = `/workspace/.palantir-secret-${putCalls.length + 1}`;
+    putCalls.push({ name, content, mode, dir });
+    return `${dir}/${name}`;
+  };
+  remoteChannel.resolveNodeRuntime = async () => '/usr/bin/node';
+  remoteChannel.rmrf = async (dir) => { rmrfCalls.push(dir); };
+  remoteChannel.spawnWorker = async (runId, payload) => {
+    remoteChannel.spawned.push({ runId, payload });
+    throw new Error('intentional remote spawn failure');
+  };
+  const skillPackService = {
+    resolveForRun() {
+      return {
+        warnings: [],
+        appliedPacks: [],
+        promptSections: [],
+        checklist: [],
+        mcpConfig: {
+          mcpServers: {
+            remoteSecret: {
+              command: 'npx', args: ['-y', '@scope/remote-mcp'], env: { TOKEN: secret },
+            },
+          },
+        },
+      };
+    },
+  };
+  const h = buildHarness(db, { remoteChannel, skillPackService });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db);
+  const project = h.projectService.createProject({
+    name: 'RemoteSecretProject', directory: '/workspace/project', node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+
+  await assert.rejects(
+    () => h.lifecycleService.executeTask(task.id, {
+      agentProfileId: profile.id,
+      prompt: 'run remote secret test',
+    }),
+    /intentional remote spawn failure/,
+  );
+
+  assert.equal(putCalls.length, 1, 'wrapper placed through selected remote executor');
+  assert.equal(putCalls[0].mode, 0o600);
+  assert.ok(putCalls[0].content.includes(secret));
+  assert.equal(remoteChannel.spawned.length, 1);
+  const args = remoteChannel.spawned[0].payload.spec.args;
+  assert.equal(JSON.stringify(args).includes(secret), false, 'remote worker argv has zero secret values');
+  assert.ok(args.includes('mcp_servers.remoteSecret.env.NODE_OPTIONS=""'));
+  assert.deepEqual(rmrfCalls, [putCalls[0].dir], 'failure cleanup uses the same remote executor');
+  assert.equal(h.executionEngine.spawned.length, 0);
+
+  const failedRun = h.runService.listRuns({})[0];
+  if (failedRun.mcp_config_path) {
+    try { await fs.rm(failedRun.mcp_config_path, { force: true }); } catch { /* ignore */ }
+  }
 });
 
 test('unreachable ssh node remains queued until heartbeat reachability', async (t) => {

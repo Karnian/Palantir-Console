@@ -231,7 +231,7 @@ function createProjectsRouter({
     if (!operatorCleanupService) {
       return res.status(501).json({ error: 'operatorCleanupService not wired' });
     }
-    const result = operatorCleanupService.reset(req.params.id);
+    const result = await operatorCleanupService.reset(req.params.id);
     res.json({ status: 'reset', projectId: req.params.id, ...result });
   }));
 
@@ -253,7 +253,7 @@ function createProjectsRouter({
     // (operator:<projectId>) bypass teardown when no primary ref exists.
     if (operatorCleanupService) {
       try {
-        operatorCleanupService.dispose(req.params.id);
+        await operatorCleanupService.dispose(req.params.id);
       } catch (err) {
         return res.status(502).json({
           error: 'pm_dispose_failed',

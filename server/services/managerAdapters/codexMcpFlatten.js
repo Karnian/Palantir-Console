@@ -9,10 +9,11 @@
  *   load aborts. The correct form is leaf-level dotted paths:
  *     -c mcp_servers.<alias>.command="npx"
  *     -c mcp_servers.<alias>.args=["-y","@ctx7/mcp"]
- *     -c mcp_servers.<alias>.env={CTX7_KEY="val"}
  *   Verified against codex-cli 0.120.0. Worker path (lifecycleService) and
- *   PM path (codexAdapter.spawnOneTurn) both call this same util so we
- *   don't drift between the two call sites.
+ *   PM path (codexAdapter.spawnOneTurn) both use this util for non-secret
+ *   leaves so we don't drift between the two call sites. Literal stdio `env`
+ *   values are deliberately refused here and routed through
+ *   codexMcpSecretTransport's mode-0600 wrapper instead.
  *
  * Fail-closed design:
  *   Any shape that would cause a declared server to silently vanish or
@@ -32,18 +33,12 @@
  *   - direct `bearer_token` values are refused; only `bearer_token_env_var`
  *     (the env-var name, not the secret) is allowed
  *
- * KNOWN LIMITATION — env values land in argv (follow-up, see docs):
- *   Every emitted arg is visible via `ps`, process listings, potentially
- *   shell history, and core dumps. That includes the inline-table form of
- *   `env`, e.g. `-c mcp_servers.<alias>.env={CTX7_TOKEN="…"}`. The
- *   `bearer_token_env_var` guard only closes the single well-known
- *   bearer-token field. Any secret placed into a plain `env` entry WILL
- *   leak through argv. Until MCP config is delivered through a file-based
- *   channel (a Palantir-owned TOML fragment merged into ~/.codex/config.toml
- *   or an alternative codex config hook), callers must treat MCP `env` as
- *   non-sensitive config only. Tracked as a follow-up to M1; see GitHub
- *   issue #113 and docs/specs/worker-preset-and-plugin-injection.md
- *   "Known limitations".
+ * SECRET BOUNDARY (issue #113):
+ *   This low-level encoder never returns a literal stdio `env` value. Direct
+ *   callers get a fail-closed error and must use codexMcpSecretTransport,
+ *   which keeps the leaf-level `-c` precedence while moving env values into a
+ *   mode-0600 file. This guard prevents a future call site from accidentally
+ *   reintroducing the argv leak fixed by issue #113.
  */
 
 const ALIAS_KEY_RE = /^[A-Za-z0-9_-]+$/;
@@ -215,6 +210,11 @@ function flattenMcpToCodexArgs(mcp) {
                 `flattenMcpToCodexArgs: env value for ${alias}.env.${envKey} must be a string (got ${typeof envVal})`,
               );
             }
+          }
+          if (Object.values(val).some(envVal => envVal !== null && envVal !== undefined)) {
+            throw new Error(
+              `flattenMcpToCodexArgs: stdio env values under ${alias} require file-backed secret transport (must not appear in argv)`,
+            );
           }
         }
       }

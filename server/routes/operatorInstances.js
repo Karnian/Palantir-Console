@@ -33,7 +33,7 @@ function createOperatorInstancesRouter({ operatorInstanceService, operatorIdenti
     if (typeof profileId !== 'string') {
       return res.status(400).json({ error: 'profile_id must be a string' });
     }
-    const instance = operatorIdentityLifecycleService.assignProfile(req.params.id, profileId);
+    const instance = await operatorIdentityLifecycleService.assignProfile(req.params.id, profileId);
     res.json({ instance });
   }));
 
@@ -41,7 +41,7 @@ function createOperatorInstancesRouter({ operatorInstanceService, operatorIdenti
     if (!req.auth || req.auth.method !== 'cookie') {
       return res.status(403).json({ error: 'profile assignment requires human (cookie) auth' });
     }
-    const instance = operatorIdentityLifecycleService.unassignProfile(req.params.id);
+    const instance = await operatorIdentityLifecycleService.unassignProfile(req.params.id);
     res.json({ instance });
   }));
 

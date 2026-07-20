@@ -9,6 +9,12 @@ const { createLocalNodeExecutor, createLocalWorkerChannel } = require('../servic
 const { createWorktreeService } = require('../services/worktreeService');
 const { createFsService } = require('../services/fsService');
 
+test('LocalNodeExecutor resolves the current absolute Node runtime for MCP wrappers', () => {
+  const executor = createLocalNodeExecutor();
+  assert.equal(executor.resolveNodeRuntime(), process.execPath);
+  assert.equal(path.isAbsolute(executor.resolveNodeRuntime()), true);
+});
+
 test('createLocalWorkerChannel dispatches spawnWorker by engine and passes specs through', () => {
   const calls = [];
   const streamSpec = { prompt: 'hello' };
@@ -366,6 +372,42 @@ test('LocalNodeExecutor.writeTempFile rejects names that escape the temp dir', a
 
   await assert.rejects(() => executor.writeTempFile('palantir-esc-', '../evil.txt', 'x'), /invalid file name/);
   await assert.rejects(() => executor.writeTempFile('palantir-esc-', 'a/b.txt', 'x'), /invalid file name/);
+});
+
+test('LocalNodeExecutor.writeTempFile removes its fresh directory when writeFile fails', async (t) => {
+  const executor = createLocalNodeExecutor();
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'palantir-temp-write-fail-'));
+  t.after(async () => {
+    await fsp.rm(root, { recursive: true, force: true });
+  });
+
+  await assert.rejects(
+    () => executor.writeTempFile(path.join(root, 'secret-'), 'payload', Symbol('invalid-content')),
+    (err) => err?.code === 'ERR_INVALID_ARG_TYPE',
+  );
+  assert.deepEqual(await fsp.readdir(root), []);
+});
+
+test('LocalNodeExecutor.writeTempFile removes its fresh directory and preserves chmod failure', async (t) => {
+  const executor = createLocalNodeExecutor();
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'palantir-temp-chmod-fail-'));
+  const originalChmod = fsp.chmod;
+  const chmodError = new Error('synthetic chmod failure');
+  t.after(async () => {
+    fsp.chmod = originalChmod;
+    await fsp.rm(root, { recursive: true, force: true });
+  });
+  fsp.chmod = async () => { throw chmodError; };
+
+  try {
+    await assert.rejects(
+      () => executor.writeTempFile(path.join(root, 'secret-'), 'payload', 'sensitive'),
+      (err) => err === chmodError,
+    );
+  } finally {
+    fsp.chmod = originalChmod;
+  }
+  assert.deepEqual(await fsp.readdir(root), []);
 });
 
 test('LocalNodeExecutor.putSecretFile writes 0600 secret and rejects escaping names', async (t) => {

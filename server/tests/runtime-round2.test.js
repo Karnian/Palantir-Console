@@ -249,7 +249,7 @@ test('NEW-B3 operatorCleanupService re-throws on operator instance thread clear 
     managerAdapterFactory, runService,
   });
 
-  assert.throws(
+  await assert.rejects(
     () => svc.reset('p1'),
     /operator instance thread clear failed/,
     'reset must re-throw on operator instance thread clear failure (fail-closed)'
@@ -260,7 +260,7 @@ test('NEW-B3 operatorCleanupService re-throws on operator instance thread clear 
   // store is a local persistence dependency, not an upstream service
   // (Codex PR3a R1 suggestion #2).
   try {
-    svc.reset('p1');
+    await svc.reset('p1');
     assert.fail('expected throw');
   } catch (err) {
     assert.equal(err.httpStatus, 503);

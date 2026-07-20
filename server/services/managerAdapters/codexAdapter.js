@@ -53,7 +53,11 @@ const {
   RAW_EVENTS_ENABLED,
   buildPayload,
 } = require('./eventTypes');
-const { flattenMcpToCodexArgs } = require('./codexMcpFlatten');
+const {
+  prepareCodexMcpArgs,
+  removeSecretDirWithRetry,
+  validateCodexMcpSecretTransport,
+} = require('./codexMcpSecretTransport');
 const {
   scanCodexUserConfigAliases,
   detectLegacyAliasConflicts,
@@ -167,8 +171,17 @@ function createDefaultLocalExecutor({ runId, spawnImpl }) {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `palantir-codex-${runId}-`));
       lastTmpDir = tmpDir;
       const filePath = path.join(tmpDir, name);
-      fs.writeFileSync(filePath, content, { mode });
-      return filePath;
+      try {
+        fs.writeFileSync(filePath, content, { mode });
+        return filePath;
+      } catch (err) {
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+        if (lastTmpDir === tmpDir) lastTmpDir = null;
+        throw err;
+      }
+    },
+    resolveNodeRuntime() {
+      return process.execPath;
     },
     spawnInteractive(command, args, { cwd, env } = {}) {
       return spawnImpl(command, args, {
@@ -237,8 +250,8 @@ function createCodexAdapter({
    * 0.120.0 has no `--mcp-config` flag, but `-c
    * mcp_servers.<alias>.<key>=<TOML>` dotted-path overrides land in the same
    * merged config as the user's ~/.codex/config.toml. We persist only plain
-   * object shapes on the session and flatten on every turn via
-   * codexMcpFlatten.flattenMcpToCodexArgs. String config paths are for the
+   * object shapes on the session and prepare non-secret leaf args on the first
+   * turn via codexMcpSecretTransport. String config paths are for the
    * Claude adapter's `--mcp-config` path and are skipped here.
    */
   function startSession(runId, { systemPrompt, cwd, model, reasoning_effort, env, role, resumeThreadId, onThreadStarted, mcpConfig, executor, nodePrefix, serviceTier } = {}) {
@@ -252,6 +265,7 @@ function createCodexAdapter({
     const skippedMcpConfigPath = typeof mcpConfig === 'string';
 
     sessions.set(runId, {
+      runId,
       // v3 Phase 3a: if the caller passes a persisted thread_id (PM lazy
       // spawn loading `project_briefs.pm_thread_id`), seed it so the first
       // runTurn goes through `codex exec resume <thread_id>` instead of
@@ -280,6 +294,14 @@ function createCodexAdapter({
       // "no MCP injection" (empty object behaves the same). Only plain object
       // shapes are accepted; path strings belong to Claude's --mcp-config path.
       mcpConfig: hasPlainObjectMcpConfig ? mcpConfig : null,
+      // Issue #113: env-bearing stdio aliases are prepared once into a mode-0600
+      // wrapper on the execution node. The resulting non-secret -c args and
+      // secret dirs stay stable across initial + resume turns.
+      mcpArgs: null,
+      mcpSecretDirs: [],
+      pendingCleanupDirs: [],
+      cleanupPromise: null,
+      disposeRequested: false,
       // F-1: Codex Fast Mode. May be a static string ('fast'|'default', resolved
       // once by the caller — Top uses this with an env-derived tier) OR a
       // function returning 'fast'|'default' per turn (Operators pass a resolver
@@ -382,6 +404,7 @@ function createCodexAdapter({
 
     state.turnStarting = true;
     let placedInstructionsDirThisTurn = null;
+    const placedMcpDirsThisTurn = [];
     try {
       if (!state.instructionsPath) {
         // Conditional await: a remote executor returns a Promise; the default
@@ -395,9 +418,7 @@ function createCodexAdapter({
       }
       if (state.ended) {
         state.turnStarting = false;
-        if (placedInstructionsDirThisTurn && state.executor && typeof state.executor.rmrf === 'function') {
-          try { await state.executor.rmrf(placedInstructionsDirThisTurn); } catch { /* best-effort */ }
-        }
+        await cleanupExecutorDirs(state, [placedInstructionsDirThisTurn]);
         return;
       }
 
@@ -461,9 +482,32 @@ function createCodexAdapter({
     // extend this site with the same preflight call before flatten —
     // spec §L6 fail-closed contract applies.
     if (state.mcpConfig) {
-      let mcpArgs;
       try {
-        mcpArgs = flattenMcpToCodexArgs(state.mcpConfig);
+        if (state.mcpArgs === null) {
+          const prepared = prepareCodexMcpArgs(state.mcpConfig, {
+            putSecretFile: typeof state.executor.putSecretFile === 'function'
+              ? state.executor.putSecretFile.bind(state.executor)
+              : undefined,
+            onSecretPlaced(secretPath) {
+              const secretDir = path.dirname(secretPath);
+              if (!state.mcpSecretDirs.includes(secretDir)) state.mcpSecretDirs.push(secretDir);
+              if (!placedMcpDirsThisTurn.includes(secretDir)) placedMcpDirsThisTurn.push(secretDir);
+            },
+            resolveWrapperCommand() {
+              if (typeof state.executor.resolveNodeRuntime === 'function') {
+                return state.executor.resolveNodeRuntime({ pathPrefix: state.nodePrefix });
+              }
+              if (state.nodePrefix) {
+                throw new Error(
+                  'codexMcpSecretTransport: remote executor must resolve its Node.js runtime',
+                );
+              }
+              return process.execPath;
+            },
+          });
+          const resolved = (prepared && typeof prepared.then === 'function') ? await prepared : prepared;
+          state.mcpArgs = resolved.args;
+        }
       } catch (err) {
         emitNormalized(runId, NORMALIZED_EVENT_TYPES.TURN_FAILED, buildPayload({
           turnIndex: state.turnIndex,
@@ -477,9 +521,14 @@ function createCodexAdapter({
         } catch { /* ignore */ }
         state.exitCode = 1;
         emitSessionEndedIfNeeded(runId, 'mcp-invalid');
-        throw new Error(`codexAdapter: mcpConfig flatten failed: ${err.message}`);
+        throw new Error(`codexAdapter: mcpConfig prepare failed: ${err.message}`);
       }
-      if (mcpArgs.length) args.push(...mcpArgs);
+      if (state.ended) {
+        state.turnStarting = false;
+        await cleanupExecutorDirs(state, [placedInstructionsDirThisTurn, ...placedMcpDirsThisTurn]);
+        return;
+      }
+      if (state.mcpArgs.length) args.push(...state.mcpArgs);
     }
     // Read prompt from stdin to avoid shell-quoting issues with multi-line input.
     args.push('-');
@@ -518,6 +567,11 @@ function createCodexAdapter({
     if (state.ended) {
       try { child.kill('SIGTERM'); } catch { /* ignore */ }
       state.turnStarting = false;
+      // disposeSession may have completed while an async remote spawn was in
+      // flight. Its first cleanup deliberately retained this state behind the
+      // turnStarting fence; run a final pass now so the disposed session can be
+      // forgotten (and any failed dirs retried) once the late child is killed.
+      await cleanupExecutorDirs(state);
       return;
     }
     state.currentChild = child;
@@ -576,6 +630,7 @@ function createCodexAdapter({
           if (runService) runService.updateRunStatus(runId, 'failed', { force: true });
         } catch { /* ignore */ }
         emitSessionEndedIfNeeded(runId, 'spawn-error');
+        Promise.resolve(cleanupExecutorDirs(state)).catch(() => { /* best-effort */ });
       }
     });
 
@@ -608,6 +663,7 @@ function createCodexAdapter({
           }
         } catch { /* ignore */ }
         emitSessionEndedIfNeeded(runId, 'codex-exit-error');
+        Promise.resolve(cleanupExecutorDirs(state)).catch(() => { /* best-effort */ });
       }
     });
     } catch (err) {
@@ -637,10 +693,11 @@ function createCodexAdapter({
           if (runService) runService.updateRunStatus(runId, 'failed', { force: true });
         } catch { /* ignore */ }
         emitSessionEndedIfNeeded(runId, 'spawn-failed');
-        if (placedInstructionsDirThisTurn && state.executor && typeof state.executor.rmrf === 'function') {
-          Promise.resolve(state.executor.rmrf(placedInstructionsDirThisTurn)).catch(() => { /* best-effort */ });
-        }
       }
+      await cleanupExecutorDirs(
+        state,
+        [placedInstructionsDirThisTurn, ...placedMcpDirsThisTurn],
+      );
       throw err;
     }
   }
@@ -869,7 +926,19 @@ function createCodexAdapter({
     // the caller already committed. Emission mirrors spawnOneTurn's fail-closed.
     if (state.mcpConfig) {
       try {
-        flattenMcpToCodexArgs(state.mcpConfig);
+        const validated = validateCodexMcpSecretTransport(state.mcpConfig);
+        if (Object.keys(validated.wrapped).length > 0
+            && (!state.executor || typeof state.executor.putSecretFile !== 'function')) {
+          throw new Error(
+            'codexMcpSecretTransport: executor.putSecretFile is required for stdio MCP env values',
+          );
+        }
+        if (Object.keys(validated.wrapped).length > 0
+            && (!state.executor || typeof state.executor.resolveNodeRuntime !== 'function')) {
+          throw new Error(
+            'codexMcpSecretTransport: executor.resolveNodeRuntime is required for stdio MCP env values',
+          );
+        }
       } catch (err) {
         emitNormalized(runId, NORMALIZED_EVENT_TYPES.TURN_FAILED, buildPayload({
           turnIndex: state.turnIndex,
@@ -974,6 +1043,78 @@ function createCodexAdapter({
     }));
   }
 
+  function maybeForgetDisposedState(state, cleaned) {
+    if (
+      cleaned
+      && state.disposeRequested
+      && !state.turnStarting
+      && sessions.get(state.runId) === state
+    ) {
+      sessions.delete(state.runId);
+    }
+    return cleaned;
+  }
+
+  async function cleanupExecutorDirs(state, extraDirs = []) {
+    if (!state) return true;
+    state.pendingCleanupDirs = [...new Set([
+      ...(state.pendingCleanupDirs || []),
+      ...extraDirs,
+    ].filter(Boolean))];
+    // Child error/exit and registry disposal can converge on cleanup. Serialize
+    // them so a stale failed snapshot cannot overwrite another caller's
+    // successful removal result. A second pass picks up dirs placed meanwhile.
+    if (state.cleanupPromise) {
+      await state.cleanupPromise;
+      return cleanupExecutorDirs(state);
+    }
+    const dirs = new Set([
+      state.instructionsDir,
+      ...(state.mcpSecretDirs || []),
+      ...(state.pendingCleanupDirs || []),
+    ].filter(Boolean));
+    state.instructionsDir = null;
+    state.instructionsPath = null;
+    state.mcpSecretDirs = [];
+    state.mcpArgs = null;
+    state.pendingCleanupDirs = [];
+    if (dirs.size === 0) {
+      return maybeForgetDisposedState(state, true);
+    }
+    if (!state.executor || typeof state.executor.rmrf !== 'function') {
+      state.pendingCleanupDirs = [...dirs];
+      return false;
+    }
+    const cleanupPromise = Promise.all([...dirs].map(async (dir) => {
+      try {
+        await removeSecretDirWithRetry(state.executor, dir);
+        return { dir, removed: true };
+      } catch {
+        return { dir, removed: false };
+      }
+    }));
+    state.cleanupPromise = cleanupPromise;
+    let outcomes;
+    try {
+      outcomes = await cleanupPromise;
+    } finally {
+      if (state.cleanupPromise === cleanupPromise) state.cleanupPromise = null;
+    }
+    state.pendingCleanupDirs = [...new Set([
+      ...(state.pendingCleanupDirs || []),
+      ...outcomes.filter(outcome => !outcome.removed).map(outcome => outcome.dir),
+    ])];
+    for (const outcome of outcomes) {
+      if (!outcome.removed) {
+        console.warn('[codexAdapter] secret cleanup deferred after bounded retries');
+      }
+    }
+    const cleaned = state.pendingCleanupDirs.length === 0
+      && !state.instructionsDir
+      && state.mcpSecretDirs.length === 0;
+    return maybeForgetDisposedState(state, cleaned);
+  }
+
   /**
    * Dispose of session resources. CRITICAL: this is the hook D1 was added
    * for — Codex's instructionsPath temp file MUST be cleaned up here, both
@@ -984,18 +1125,21 @@ function createCodexAdapter({
     const state = sessions.get(runId);
     if (!state) return Promise.resolve();
     state.ended = true;
+    state.disposeRequested = true;
     if (state.currentChild) {
       try { state.currentChild.kill('SIGTERM'); } catch { /* ignore */ }
     }
     emitSessionEndedIfNeeded(runId, 'dispose');
-    sessions.delete(runId);
-    // Best-effort cleanup of the executor-placed instructions dir. Remote
-    // executors may implement rmrf over SSH; the default local executor uses
-    // fsp.rm.
-    if (state.instructionsDir && state.executor && typeof state.executor.rmrf === 'function') {
-      return Promise.resolve(state.executor.rmrf(state.instructionsDir)).catch(() => { /* ignore */ });
-    }
-    return Promise.resolve();
+    // Remote executors may transiently fail while a node reconnects. Keep the
+    // ended state until every mode-0600 dir is confirmed gone, so a repeated
+    // dispose retries the preserved paths instead of silently orphaning them.
+    return cleanupExecutorDirs(state).then((cleaned) => {
+      if (!cleaned) {
+        console.warn(`[codexAdapter] cleanup remains pending for ${runId}; a repeated dispose will retry`);
+        return false;
+      }
+      return true;
+    });
   }
 
   function getUsage(runId) {

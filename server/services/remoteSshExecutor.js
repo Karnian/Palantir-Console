@@ -1,5 +1,8 @@
 const childProcess = require('node:child_process');
 const path = require('node:path');
+const {
+  WRAPPER_BOOT_ENV_KEYS: WRAPPER_NODE_BOOT_ENV_KEYS,
+} = require('./managerAdapters/codexMcpSecretTransport');
 
 const WORKER_OUTPUT_MAX_LINES = 500;
 const WORKER_OUTPUT_MAX_BUFFER = 256 * 1024;
@@ -598,10 +601,17 @@ function createRemoteSshNodeExecutor(node, {
     const modeString = normalizeMode(mode);
     const template = `${prefix}XXXXXX`;
     const script = [
+      `tmpdir=''`,
+      `cleanup() { if [ -n "$tmpdir" ]; then rm -rf -- "$tmpdir"; fi; }`,
+      `trap 'rc=$?; cleanup; exit "$rc"' 0`,
+      `trap 'exit 129' HUP`,
+      `trap 'exit 130' INT`,
+      `trap 'exit 143' TERM`,
       `tmpdir=$(mktemp -d ${shq(template)})`,
       `cat > "$tmpdir"/${shq(name)}`,
       `chmod ${shq(modeString)} "$tmpdir"/${shq(name)}`,
       `printf '%s\\n' "$tmpdir"/${shq(name)}`,
+      `trap - 0 HUP INT TERM`,
     ].join(' && ');
     const res = await runRemoteScript(script, { input: content });
     if (res.code !== 0) throw commandError('writeTempFile', [prefix, name], res);
@@ -619,6 +629,52 @@ function createRemoteSshNodeExecutor(node, {
     validateBareFilename(name);
     const prefix = path.posix.join(exposedRoots[0], '.palantir-secret-');
     return writeTempFile(prefix, name, content, mode);
+  }
+
+  async function resolveNodeRuntime({ pathPrefix = node.node_prefix || undefined } = {}) {
+    if (pathPrefix !== undefined && pathPrefix !== null) {
+      if (
+        typeof pathPrefix !== 'string'
+        || pathPrefix.length === 0
+        || !path.posix.isAbsolute(pathPrefix)
+        || /[\x00-\x1F\x7F]/.test(pathPrefix)
+      ) {
+        throw new Error(
+          'resolveNodeRuntime pathPrefix must be an absolute POSIX path without control characters',
+        );
+      }
+    }
+    const lookup = pathPrefix
+      ? `PATH=${shq(pathPrefix)}:$PATH command -v node`
+      : 'command -v node';
+    const cleanBootEnv = WRAPPER_NODE_BOOT_ENV_KEYS
+      .map(key => `${key}=''`)
+      .join(' ');
+    const script = [
+      `candidate=$(${lookup})`,
+      `candidate=$(realpath "$candidate")`,
+      `case "$candidate" in /*) ;; *) exit 126 ;; esac`,
+      `[ -x "$candidate" ]`,
+      `${cleanBootEnv} "$candidate" -e ${shq('require("node:child_process");require("node:os").constants.signals;')}`,
+      `printf '%s\\n' "$candidate"`,
+    ].join(' && ');
+    const res = await runRemoteScript(script, { timeoutMs: 10000, maxBuffer: 4096 });
+    if (res.code !== 0) {
+      const err = new Error(
+        'Codex MCP stdio env transport requires a working Node.js runtime on the execution node',
+      );
+      err.code = 'MCP_WRAPPER_RUNTIME_UNAVAILABLE';
+      throw err;
+    }
+    const resolved = stripOneTrailingNewline(res.stdout);
+    if (
+      !path.posix.isAbsolute(resolved)
+      || /[\x00-\x1F\x7F]/.test(resolved)
+      || path.posix.normalize(resolved) !== resolved
+    ) {
+      throw new Error('Remote Node.js runtime resolved to an unsafe path');
+    }
+    return resolved;
   }
 
   async function readdir(remotePath, options) {
@@ -901,6 +957,7 @@ function createRemoteSshNodeExecutor(node, {
     readdir,
     writeTempFile,
     putSecretFile,
+    resolveNodeRuntime,
     rmrf,
     move,
     assertWithinRoots: async (remotePath, options = {}) => (await assertWithinRoots(remotePath, options)).canonical,

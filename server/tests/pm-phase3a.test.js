@@ -999,7 +999,7 @@ test('Phase 3a: operatorCleanupService.reset disposes live PM and clears brief',
   assert.ok(registry.getActiveRunId(`operator:${project.id}`));
   assert.ok(operatorThreadId(rs, project.id));
 
-  const result = cleanup.reset(project.id);
+  const result = await cleanup.reset(project.id);
   assert.equal(result.disposed, true);
   assert.equal(result.clearedBrief, true);
   assert.equal(result.cancelledRunId, pmRunId);
@@ -1027,7 +1027,7 @@ test('Phase 3a: operatorCleanupService.reset is idempotent when no PM is live', 
     managerAdapterFactory: wireFactory(fakePm), runService: rs,
   });
   const project = projectService.createProject({ name: 'alpha' });
-  const result = cleanup.reset(project.id);
+  const result = await cleanup.reset(project.id);
   assert.equal(result.disposed, false);
   assert.equal(result.clearedBrief, false);
   assert.equal(result.cancelledRunId, null);
@@ -1070,7 +1070,7 @@ test('Phase 3a: lazy spawn after reset starts a fresh thread', async (t) => {
   assert.ok(firstThreadId);
 
   // Reset
-  cleanup.reset(project.id);
+  await cleanup.reset(project.id);
 
   // Second spawn + turn — should be a new run with a new thread id
   const second = spawn.ensureLiveOperator({ projectId: project.id });
@@ -1180,14 +1180,22 @@ test('Phase 3a: R2 fix — operatorCleanupService.reset rethrows disposeSession 
   const statusBefore = rs.getRun(pmRunIdBefore).status;
 
   // Reset must throw, and no state must have changed.
-  assert.throws(() => cleanup.reset(project.id), /disposeSession failed/);
+  await assert.rejects(() => cleanup.reset(project.id), /disposeSession failed/);
   assert.equal(registry.getActiveRunId(`operator:${project.id}`), pmRunIdBefore, 'registry slot must remain');
   assert.equal(operatorThreadId(rs, project.id), threadIdBefore, 'operator instance thread must remain');
   assert.equal(rs.getRun(pmRunIdBefore).status, statusBefore, 'run status must remain (not cancelled)');
 
+  // Async adapters report a bounded secret-cleanup failure as `false`.
+  // reset/delete must await that result and preserve the same retryable state.
+  flakyDispose.disposeSession = async () => false;
+  await assert.rejects(() => cleanup.reset(project.id), /disposeSession failed/);
+  assert.equal(registry.getActiveRunId(`operator:${project.id}`), pmRunIdBefore, 'registry slot remains after async false');
+  assert.equal(operatorThreadId(rs, project.id), threadIdBefore, 'operator thread remains after async false');
+  assert.equal(rs.getRun(pmRunIdBefore).status, statusBefore, 'run status remains after async false');
+
   // Restore and retry — reset now succeeds end-to-end.
   flakyDispose.disposeSession = realDispose;
-  const result = cleanup.reset(project.id);
+  const result = await cleanup.reset(project.id);
   assert.equal(result.disposed, true);
   assert.equal(registry.getActiveRunId(`operator:${project.id}`), null);
 });
@@ -1269,10 +1277,10 @@ test('P7-2: forceReset succeeds even when disposeSession throws', async (t) => {
   assert.ok(operatorThreadId(rs, project.id), 'operator instance has thread id');
 
   // Normal reset must fail-closed (throws)
-  assert.throws(() => cleanup.reset(project.id), /disposeSession failed/);
+  await assert.rejects(() => cleanup.reset(project.id), /disposeSession failed/);
 
   // forceReset must succeed despite the broken dispose
-  const result = cleanup.forceReset(project.id);
+  const result = await cleanup.forceReset(project.id);
 
   // disposed=false because disposeSession threw, but everything else is cleaned up
   assert.equal(result.disposed, false, 'disposed=false when disposeSession threw');
@@ -1341,7 +1349,7 @@ test('P7-2: forceReset succeeds cleanly when disposeSession works', async (t) =>
 
   const pmRunId = registry.getActiveRunId(`operator:${project.id}`);
 
-  const result = cleanup.forceReset(project.id);
+  const result = await cleanup.forceReset(project.id);
 
   assert.equal(result.disposed, true, 'disposed=true when disposeSession succeeded');
   assert.equal(result.clearedBrief, true);
@@ -1377,7 +1385,7 @@ test('P7-2: forceReset is idempotent when no PM is live', async (t) => {
   });
 
   const project = projectService.createProject({ name: 'gamma' });
-  const result = cleanup.forceReset(project.id);
+  const result = await cleanup.forceReset(project.id);
 
   assert.equal(result.disposed, false);
   assert.equal(result.clearedBrief, false);
@@ -1428,7 +1436,7 @@ test('P7-2: normal reset behavior is unchanged (fail-closed still applies)', asy
   const threadId = operatorThreadId(rs, project.id);
 
   // reset() must still throw (fail-closed unchanged)
-  assert.throws(() => cleanup.reset(project.id), /disposeSession failed/);
+  await assert.rejects(() => cleanup.reset(project.id), /disposeSession failed/);
 
   // State must remain intact after failed reset
   assert.equal(registry.getActiveRunId(`operator:${project.id}`), pmRunId, 'slot intact after failed reset');

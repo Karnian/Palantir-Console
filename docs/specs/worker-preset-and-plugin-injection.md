@@ -684,17 +684,16 @@ PoC 스크립트: `scripts/spike-bare-auth.mjs`. 4 variant 매트릭스, macOS d
 
 **Phase 10 status: GREEN** — US-007 은 정식 제외 (위 사유). 운영자가 isolated 워커 spawn 가능.
 
-## 13. Known limitations (M1 이후 follow-up)
+## 13. Codex MCP secret transport (issue #113 해결)
 
-### M1 (Codex MCP leaf-level flatten) — `env` 값 argv 노출
+### stdio `env` 값 argv 노출 — mode-0600 wrapper 로 종결
 
-- **증상**: Codex worker / PM 모두 MCP 설정을 `-c mcp_servers.<alias>.<key>=<TOML>` dotted-path 로 주입한다 (`server/services/managerAdapters/codexMcpFlatten.js`). `env` subtable 은 inline-table 형태로 함께 argv 에 실린다. 즉 `-c mcp_servers.notion.env={NOTION_TOKEN="…"}` 같은 argv 가 `ps`, process listing, 셸 히스토리, core dump 에 그대로 노출된다.
-- **현 완화**: `bearer_token` 직접 값은 거부하고 `bearer_token_env_var` (env var 이름만) 만 허용. MCP `env` 값 자체는 "비민감 설정" 용도로만 사용하는 것을 전제로 한다. Codex 0.120 교차검증 (round 4) 에서 "bearer_token 막는 것만으로는 secret 이 argv 에 안 남는다고 보장할 수 없다" 고 지적받았다. M1 에선 **알려진 한계로 명시**하고 범위 밖으로 분리.
-- **근본 해결 방향 (M3 후보)**: argv 대신 **파일 기반 설정 전달**. 옵션:
-  1. Palantir-owned TOML fragment 를 spawn 직전 임시 파일로 써서 `CODEX_CONFIG=<path>` 같은 env 경로로 주입 (Codex 가 이 훅을 지원하면).
-  2. Preset spawn 시 `~/.codex/config.toml` 의 `mcp_servers.*` 섹션을 in-place merge/unmerge (원자성 이슈 큼, 비추천).
-  3. Codex CLI 측에 `--config-file` / `--mcp-config` 류 플래그 추가 요청 (upstream 기여).
-- **범위 밖 처리 이유**: 이 이슈는 이전 broken `-c mcp_servers=<JSON>` 경로에서도 동일하게 존재했다 (JSON blob 도 argv 에 실렸음 — 단지 Codex 가 파싱 실패해 MCP 자체가 로드되지 않아 가시화되지 않았을 뿐). M1 이 새로 도입한 위험이 아니라 **기존 설계 이슈를 노출**시킨 것. M1 의 목표 (worker 경로의 broken 주입을 leaf-level 로 교체) 와 분리해야 PR 범위가 관리 가능.
+- **적용 경로**: Codex worker (`lifecycleService`)와 object-shaped MCP를 받는 Codex Operator/PM (`codexAdapter`) 모두 `codexMcpSecretTransport`를 사용한다.
+- **전송 방식**: literal `env` 값이 있는 stdio alias만 실행 노드의 mode `0600` 임시 Node wrapper로 치환한다. 원래 `command` / `args` / `env`는 wrapper 파일 안에 보관되고, Codex argv에는 preflight로 확인한 절대 Node runtime 경로, wrapper 경로, alias와 비밀 없는 wrapper-boot hardening leaf만 남는다. wrapper는 실제 MCP child를 원래 인자와 `{ ...process.env, ...env }`로 실행하고 stdio·signal·exit를 전달한다. 로컬은 현재 Palantir의 `process.execPath`, SSH node는 `node_prefix` + 원격 `PATH`에서 `node`를 해석하고 실제 실행을 검증한 뒤 파일을 배치한다.
+- **우선순위·legacy merge 보존**: 비밀이 아닌 MCP leaf는 기존 `-c mcp_servers.<alias>.<key>=<TOML>` 경로를 유지한다. Codex는 `~/.codex/config.toml`의 동일 alias env를 invocation override와 deep-merge하므로 일반 legacy env key는 wrapper의 `process.env`를 거쳐 과거처럼 실제 child에 전달된다. 단, 새 Node interpreter가 뜨기 전에 코드 실행/디버그 출력/coverage·compile cache로 secret을 노출할 수 있는 `NODE_OPTIONS`, `NODE_DEBUG`, `NODE_DEBUG_NATIVE`, `NODE_V8_COVERAGE`, `NODE_COMPILE_CACHE`는 비밀 없는 빈 dotted leaf로 중화한다. 원 Palantir env는 wrapper가 child에 overlay한다.
+- **fail-closed**: 저수준 `flattenMcpToCodexArgs`는 non-empty stdio env를 직접 인코딩하지 않는다. wrapper로 relay할 concrete `command`가 없거나 args/env schema가 잘못됐거나 `putSecretFile`을 지원하지 않는 실행기면 spawn하지 않고 실패한다. direct `bearer_token` 거부도 그대로 유지한다.
+- **수명주기**: worker는 terminal/cancel/spawn-failure cleanup에서 실행 노드의 wrapper dir을 제거하고, Operator/PM은 dispose·placement/spawn 실패·비정상 종료에서 instructions dir과 wrapper dir을 함께 제거한다. transient local/SSH 삭제 실패는 짧은 bounded retry를 적용하며, 최종 실패 dir은 상태에 보존해 중복 terminal cleanup 또는 반복 dispose가 다시 시도한다. 성공한 dir만 tracking에서 제거한다. initial turn과 resume turn은 같은 wrapper path/args를 재사용한다.
+- **HTTP MCP 무변경**: `url` + `bearer_token_env_var` 경로는 literal secret을 MCP config에 담지 않으므로 기존 leaf argv를 그대로 사용한다.
 - **트래킹**: GitHub issue [#113](https://github.com/Karnian/Palantir-Console/issues/113).
 
 ### 13.1. M2 — How to diagnose MCP conflicts before a run
@@ -735,11 +734,11 @@ Summary
 Exit: 0 정상 / 1 fatal (DB 열기 실패, 필수 테이블 누락·손상, Codex user config 접근 실패) / 2 strict mode + conflict.
 
 도구가 **하는 일**: 각 preset 이 선언한 alias 와 user config 의 alias 집합의 **교집합만** 계산.
-도구가 **하지 않는 일**: 값 (command/args/env) 비교, override 시뮬레이션, 실제 spawn. M2 detection-only 스코프 준수 (§13 "Scope discipline" 참고).
+도구가 **하지 않는 일**: 값 (command/args/env) 비교, override 시뮬레이션, 실제 spawn. M2 detection-only 스코프를 유지한다.
 
 #### M2 계측 목적
-이 도구는 M3 (argv → file-based transport, 위 §13) 착수 여부를 **데이터 기반 으로** 결정하기 위한 수단이다. 권장 운영 흐름:
+issue #113 해결 뒤에도 이 도구는 user config와 Palantir 설정의 비밀 아닌 leaf merge drift를 진단하는 용도로 유지한다. 권장 운영 흐름:
 
 1. 1–2주간 실사용하며 `npm run diagnose:mcp` + `runs` 테이블의 `mcp:legacy_alias_conflict` event 빈도를 관찰
-2. conflict noise 가 높거나 보안 정책상 argv leak 를 즉시 제거해야 하면 M3 착수
-3. 낮으면 M3 는 upstream 의 `--config-file` 급 진입점이 생길 때까지 대기
+2. 충돌 alias의 user config leaf가 의도적으로 필요한지 확인
+3. 불필요한 legacy alias는 user config에서 정리하고, 필요한 alias는 run event로 drift를 계속 관측

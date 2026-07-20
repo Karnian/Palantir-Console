@@ -1741,6 +1741,7 @@ function createApp(options = {}) {
     // (Codex PR5b NIT). _closeDbOnce is the second line of defense.
     if (_shuttingDown) return Promise.resolve();
     _shuttingDown = true;
+    const disposeWaits = [];
     // PR2 / P1-5: walk every live manager slot (Top + every PM) and
     // dispose the adapter session before we tear the process down.
     // Without this, `app.shutdown()` left manager subprocesses and
@@ -1772,7 +1773,18 @@ function createApp(options = {}) {
         try {
           const adapter = managerRegistry.getActiveAdapter(slot.conversationId);
           if (adapter && typeof adapter.disposeSession === 'function') {
-            adapter.disposeSession(slot.runId);
+            const result = adapter.disposeSession(slot.runId);
+            if (result && typeof result.then === 'function') {
+              disposeWaits.push(Promise.resolve(result).then((cleaned) => {
+                if (cleaned === false) {
+                  console.warn(`[app.shutdown] secret cleanup remains pending for ${slot.conversationId}/${slot.runId}`);
+                }
+              }, (err) => {
+                console.warn(`[app.shutdown] disposeSession failed for ${slot.conversationId}/${slot.runId}:`, err && err.message);
+              }));
+            } else if (result === false) {
+              console.warn(`[app.shutdown] secret cleanup remains pending for ${slot.conversationId}/${slot.runId}`);
+            }
           }
         } catch (err) {
           console.warn(`[app.shutdown] disposeSession failed for ${slot.conversationId}/${slot.runId}:`, err && err.message);
@@ -1790,16 +1802,18 @@ function createApp(options = {}) {
     try { if (gate2ReviewSweepTimer) { clearInterval(gate2ReviewSweepTimer); gate2ReviewSweepTimer = null; } } catch { /* ignore */ }
     lifecycleService.stopMonitoring();
     // PR5b graceful shutdown: if a distill drain is in flight, close the DB only
-    // AFTER it settles so the drain never writes into a closed handle. With no
-    // in-flight drain (the common case, incl. every test with the scheduler
-    // off) this stays a SYNCHRONOUS close, so existing synchronous
-    // app.shutdown() callers are unaffected. Returns a promise only when waiting.
+    // AFTER it settles so the drain never writes into a closed handle. Adapter
+    // disposal promises join the same barrier, ensuring file-backed MCP secret
+    // cleanup finishes before the process can complete graceful shutdown.
     let inflight = null;
     try {
       inflight = (memoryDistillScheduler && memoryDistillScheduler.awaitDrain) ? memoryDistillScheduler.awaitDrain() : null;
     } catch { inflight = null; }
     if (inflight && typeof inflight.then === 'function') {
-      _shutdownPromise = inflight.then(_closeDbOnce, _closeDbOnce);
+      disposeWaits.push(Promise.resolve(inflight));
+    }
+    if (disposeWaits.length > 0) {
+      _shutdownPromise = Promise.allSettled(disposeWaits).then(_closeDbOnce);
     } else {
       _closeDbOnce();
       _shutdownPromise = Promise.resolve();

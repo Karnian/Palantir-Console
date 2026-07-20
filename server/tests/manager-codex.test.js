@@ -170,7 +170,7 @@ test('M2: CodexAdapter.startSession with mcpConfig emits mcp:legacy_alias_confli
   adapter.disposeSession('run_mgr_m2_conflict');
 });
 
-test('M1: CodexAdapter.runTurn with mcpConfig injects leaf-level -c mcp_servers.<alias>.<key> flags', async () => {
+test('issue #113: CodexAdapter keeps leaf flags but file-backs stdio env values', async () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
   const { PassThrough } = require('node:stream');
   // Capture spawn args without launching a real codex process. readline in
@@ -203,7 +203,7 @@ test('M1: CodexAdapter.runTurn with mcpConfig injects leaf-level -c mcp_servers.
         ctx7: {
           command: 'npx',
           args: ['-y', '@ctx7/mcp'],
-          env: { CTX7_KEY: 'val' },
+          env: { CTX7_KEY: 'manager-env-secret-sentinel' },
         },
       },
     },
@@ -231,12 +231,14 @@ test('M1: CodexAdapter.runTurn with mcpConfig injects leaf-level -c mcp_servers.
     cflags.some(c => /^mcp_servers\.ctx7\.args=/.test(c)),
     'ctx7.args leaf present',
   );
-  // env subtable is emitted as inline table (a single leaf) or as env.<name> —
-  // accept either form since both are valid TOML. M1 implementation uses the
-  // inline-table form for the env object.
   assert.ok(
-    cflags.some(c => /^mcp_servers\.ctx7\.env=/.test(c)),
-    'ctx7.env leaf present',
+    cflags.includes('mcp_servers.ctx7.env.NODE_OPTIONS=""'),
+    'legacy NODE_OPTIONS is neutralized before the Node wrapper boots',
+  );
+  assert.equal(
+    JSON.stringify(capturedArgs).includes('manager-env-secret-sentinel'),
+    false,
+    'literal env value must occur zero times in Codex argv',
   );
 
   adapter.disposeSession('run_mgr_codex_m1');

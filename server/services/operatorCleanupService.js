@@ -43,7 +43,7 @@ function createOperatorCleanupService({
   // safe to call when no PM is live. Returns { disposed: boolean,
   // clearedBrief: boolean } so callers (routes/tests) can report exactly
   // what happened.
-  function _terminate(projectId, reason) {
+  async function _terminate(projectId, reason) {
     if (!projectId) throw new Error('projectId is required');
 
     const slotKey = conversationIdForProject(projectId); // pm: → operator: in Phase 2
@@ -69,7 +69,10 @@ function createOperatorCleanupService({
     const liveAdapter = managerRegistry.getActiveAdapter(slotKey);
     if (liveRunId && liveAdapter) {
       try {
-        liveAdapter.disposeSession(liveRunId);
+        const cleaned = await liveAdapter.disposeSession(liveRunId);
+        if (cleaned === false) {
+          throw new Error('secret cleanup remains pending after bounded retries');
+        }
       } catch (err) {
         log(`dispose failed for ${slotKey} (run=${liveRunId}): ${err.message}`);
         const wrap = new Error(`PM adapter disposeSession failed for ${slotKey} (run=${liveRunId}): ${err.message}`);
@@ -134,11 +137,11 @@ function createOperatorCleanupService({
     return { disposed, clearedBrief, cancelledRunId };
   }
 
-  function reset(projectId) {
+  async function reset(projectId) {
     return _terminate(projectId, 'reset');
   }
 
-  function dispose(projectId) {
+  async function dispose(projectId) {
     return _terminate(projectId, 'dispose');
   }
 
@@ -154,7 +157,7 @@ function createOperatorCleanupService({
   // in spec §10.
   //
   // Emits 'operator:force_reset' on eventBus so operators can audit usage.
-  function forceReset(projectId) {
+  async function forceReset(projectId) {
     if (!projectId) throw new Error('projectId is required');
 
     const slotKey = conversationIdForProject(projectId); // pm: → operator: in Phase 2
@@ -168,7 +171,10 @@ function createOperatorCleanupService({
     const liveAdapter = managerRegistry.getActiveAdapter(slotKey);
     if (liveRunId && liveAdapter) {
       try {
-        liveAdapter.disposeSession(liveRunId);
+        const cleaned = await liveAdapter.disposeSession(liveRunId);
+        if (cleaned === false) {
+          throw new Error('secret cleanup remains pending after bounded retries');
+        }
         disposed = true;
       } catch (err) {
         disposeError = err.message;
@@ -223,7 +229,7 @@ function createOperatorCleanupService({
     return { disposed, clearedBrief, cancelledRunId, disposeError };
   }
 
-  function resetInstance(instanceId) {
+  async function resetInstance(instanceId) {
     if (!instanceId) throw new Error('instanceId is required');
 
     const slotKey = conversationIdForProject(instanceId);
@@ -233,7 +239,10 @@ function createOperatorCleanupService({
     const liveAdapter = managerRegistry.getActiveAdapter(slotKey);
     if (liveRunId && liveAdapter) {
       try {
-        liveAdapter.disposeSession(liveRunId);
+        const cleaned = await liveAdapter.disposeSession(liveRunId);
+        if (cleaned === false) {
+          throw new Error('secret cleanup remains pending after bounded retries');
+        }
       } catch (err) {
         const wrapped = new Error(`operator adapter disposeSession failed for ${slotKey} (run=${liveRunId}): ${err.message}`);
         wrapped.httpStatus = 502;
