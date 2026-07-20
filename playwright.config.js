@@ -7,6 +7,13 @@ const { defineConfig, devices } = require('@playwright/test');
 // produce a different baseline on every checkout (Codex K-5 r1 BLOCK).
 // Non-visual e2e (smoke / a11y / manager) keep the existing 4177 server
 // because they only assert on data they create themselves.
+// `npm run test:visual` sets this — visual.spec.js only ever hits :4189, so
+// the :4177 webServer below is pure overhead for that command. Worse:
+// `reuseExistingServer: false` on it (see comment below) means a dev's
+// already-running :4177 makes `test:visual` abort trying to rebind the port,
+// even though visual tests never touch it (Codex round-4 P2 catch).
+const visualOnly = process.env.PALANTIR_VISUAL_ONLY === '1';
+
 module.exports = defineConfig({
   testDir: './server/tests/e2e',
   timeout: 30000,
@@ -33,12 +40,23 @@ module.exports = defineConfig({
     },
   ],
   webServer: [
-    {
+    ...(visualOnly ? [] : [{
       command: 'npm start',
       port: 4177,
-      reuseExistingServer: !process.env.CI,
+      // Was `!process.env.CI` (reuse locally for a faster loop). Changed to
+      // always false: reuse trusts "port answers = good" and never applies
+      // the env override below, so a developer's already-running :4177 (e.g.
+      // a manually started `npm start` that loaded PALANTIR_TOKEN from
+      // .env) gets silently reused — auth-assuming-off smoke/manager specs
+      // then fail with confusing 401s instead of a clear boot log. Safe to
+      // do unconditionally now that visual-only runs skip this entry
+      // entirely instead of fighting over the port (see `visualOnly` above).
+      reuseExistingServer: false,
       timeout: 30000,
-    },
+      // A developer's local .env (PALANTIR_TOKEN, non-default PORT, …) must
+      // not leak into this server — tests assume no-auth on :4177.
+      env: { PALANTIR_SKIP_DOTENV: '1' },
+    }]),
     {
       // K-5 isolated webServer: every input that affects rendered HTML
       // is reset to a deterministic empty state before boot —
@@ -58,7 +76,9 @@ module.exports = defineConfig({
         'npm rebuild better-sqlite3 --silent 2>/dev/null || true',
         'rm -rf /tmp/palantir-visual-db /tmp/palantir-visual-home /tmp/palantir-visual-opencode /tmp/palantir-visual-codex',
         'mkdir -p /tmp/palantir-visual-home /tmp/palantir-visual-opencode /tmp/palantir-visual-codex',
-        'HOME=/tmp/palantir-visual-home OPENCODE_STORAGE=/tmp/palantir-visual-opencode CODEX_HOME=/tmp/palantir-visual-codex PALANTIR_DB=/tmp/palantir-visual-db PORT=4189 node server/index.js',
+        // PALANTIR_SKIP_DOTENV — same leak this isolation block already
+        // guards against, just for .env instead of ~/.claude etc.
+        'HOME=/tmp/palantir-visual-home OPENCODE_STORAGE=/tmp/palantir-visual-opencode CODEX_HOME=/tmp/palantir-visual-codex PALANTIR_DB=/tmp/palantir-visual-db PORT=4189 PALANTIR_SKIP_DOTENV=1 node server/index.js',
       ].join(' && '),
       port: 4189,
       reuseExistingServer: false,

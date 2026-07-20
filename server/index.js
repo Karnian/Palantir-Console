@@ -1,3 +1,12 @@
+// quiet: true — dotenv prints a promotional "tip" line (linking an unrelated
+// third-party site) on every load by default; suppress it for clean boot logs.
+// PALANTIR_SKIP_DOTENV opts out entirely — playwright.config.js sets it for
+// both e2e webServers so a developer's local .env (PALANTIR_TOKEN, PORT,
+// etc.) can't leak into test runs that assume no-auth on the default port.
+if (!process.env.PALANTIR_SKIP_DOTENV) {
+  require('dotenv').config({ quiet: true });
+}
+
 const { createApp } = require('./app');
 const { bootstrapClaudeAuthFromEnv } = require('./services/authResolver');
 
