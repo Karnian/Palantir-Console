@@ -146,6 +146,9 @@
 
   /* Spacing/sizing */
   --sidebar-nav-width: 56px;
+  --manager-codebase-picker-width: 100%;
+  --manager-codebase-picker-gap: 8px;
+  --manager-codebase-picker-inline-padding: 16px;
   /* Height of the bottom nav bar on mobile (≤640px). Defined globally so
      `.main-area { padding-bottom: var(--mobile-nav-height) }` resolves even
      outside the media query (tests check for fallback-less var() parity). */

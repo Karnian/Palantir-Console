@@ -85,6 +85,26 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
   const isPm = conversationTarget !== 'top';
   const pmProjectId = isPm ? (parseProjectConversationId(conversationTarget)?.projectId ?? null) : null;
   const pmProject = isPm ? (projects || []).find(p => p.id === pmProjectId) || null : null;
+  const codebaseOptions = useMemo(() => {
+    const secondaries = (projects || [])
+      .filter(p => p.pm_enabled !== 0 && p.id !== pmProject?.id)
+      .slice()
+      .sort((a, b) => {
+        const aName = String(a.name || '');
+        const bName = String(b.name || '');
+        const aFolded = aName.toLocaleLowerCase('en-US');
+        const bFolded = bName.toLocaleLowerCase('en-US');
+        if (aFolded < bFolded) return -1;
+        if (aFolded > bFolded) return 1;
+        if (aName < bName) return -1;
+        if (aName > bName) return 1;
+        return String(a.id || '').localeCompare(String(b.id || ''));
+      });
+    return [
+      { value: '', label: pmProject ? `기본 · ${pmProject.name}` : '기본 코드베이스' },
+      ...secondaries.map(p => ({ value: p.id, label: p.name })),
+    ];
+  }, [projects, pmProject]);
 
   // Unified event source + send path + run + active flag. The PM hook
   // mirrors the Top hook's shape (events, run, sendMessage), so the
@@ -133,6 +153,19 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     setSelectedProfileId(fallback ? fallback.id : '');
   }, [managerProfiles, selectedProfileId]);
   const [sending, setSending] = useState(false);
+  const [selectedCodebaseId, setSelectedCodebaseId] = useState('');
+  // A codebase selection belongs to one Operator conversation only.
+  useEffect(() => {
+    setSelectedCodebaseId('');
+  }, [conversationTarget]);
+  // Never thread a stale project id after the project pool changes.
+  useEffect(() => {
+    if (selectedCodebaseId && !(projects || []).some(
+      p => p.id === selectedCodebaseId && p.pm_enabled !== 0
+    )) {
+      setSelectedCodebaseId('');
+    }
+  }, [projects, selectedCodebaseId]);
   // Codex R1 MINOR #3: in-flight ref for SuggestedActions rapid-click guard.
   // The useState-backed `sending` is captured per-render, so two quick
   // chip clicks inside one render cycle both see `sending === false` and
@@ -557,6 +590,17 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
       // No @mention → safe to fall through to the UI selection.
     }
 
+    // Treat router context as an atomic pair. Explicit @mention routing
+    // wins for this turn without mutating the persistent picker value.
+    const turnCtx = resolvedCodebaseProjectId
+      ? {
+          codebaseProjectId: resolvedCodebaseProjectId,
+          turnMode: resolvedTurnMode || 'codebase',
+        }
+      : (selectedCodebaseId
+          ? { codebaseProjectId: selectedCodebaseId, turnMode: 'codebase' }
+          : null);
+
     try {
       if (effectiveTarget === 'top') {
         await topSendMessage(effectiveText, imagesToSend.length > 0 ? imagesToSend : undefined);
@@ -569,8 +613,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
           body: JSON.stringify({
             text: effectiveText,
             images: imagesToSend.length > 0 ? imagesToSend : undefined,
-            ...(resolvedCodebaseProjectId ? { codebaseProjectId: resolvedCodebaseProjectId } : {}),
-            ...(resolvedTurnMode ? { turnMode: resolvedTurnMode } : {}),
+            ...(turnCtx || {}),
           }),
         });
         if (effectiveTarget !== conversationTarget) {
@@ -902,6 +945,18 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
                   <button class="manager-image-remove" onClick=${() => removeImage(i)} title="Remove">\u00d7</button>
                 </div>
               `)}
+            </div>
+          `}
+          ${isPm && status.active && html`
+            <div class="manager-codebase-bar">
+              <${Dropdown}
+                value=${selectedCodebaseId}
+                onChange=${setSelectedCodebaseId}
+                options=${codebaseOptions}
+                ariaLabel="대상 코드베이스"
+                className="manager-codebase-picker"
+                disabled=${sending}
+              />
             </div>
           `}
           <div class="manager-input-row">

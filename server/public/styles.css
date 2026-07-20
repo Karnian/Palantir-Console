@@ -5456,6 +5456,18 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   transition: background 0.15s;
 }
 
+.manager-codebase-bar {
+  display: flex;
+  gap: var(--manager-codebase-picker-gap);
+  width: var(--manager-codebase-picker-width);
+  box-sizing: border-box;
+  padding: var(--manager-codebase-picker-gap) var(--manager-codebase-picker-inline-padding) 0;
+}
+
+.manager-codebase-picker {
+  width: var(--manager-codebase-picker-width);
+}
+
 /* When SuggestedActions strip is present, it already owns the top border.
    Drop the input-area's so users don't see two hairlines stacked. */
 .manager-suggested-actions + .manager-input-area {
