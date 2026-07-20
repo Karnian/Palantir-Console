@@ -93,7 +93,7 @@ test('ProjectsView project source defaults to git and toggles repo/legacy fields
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env);
-  clickButton(root, (text) => text.includes('새 코드베이스'));
+  clickButton(root, (text) => text.includes('새 프로젝트 폴더'));
 
   const sourceToggle = await waitFor(() => {
     const el = root.querySelector('[data-role="project-source-toggle"]');
@@ -135,7 +135,7 @@ test('ProjectsView create sends git source payload without legacy directory fiel
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env);
-  clickButton(root, (text) => text.includes('새 코드베이스'));
+  clickButton(root, (text) => text.includes('새 프로젝트 폴더'));
 
   await waitFor(() => assert.ok(root.querySelector('[data-role="project-repo-url"]')));
   setInput(env, root.querySelector('#new-project-name'), 'Repo Project');
@@ -178,7 +178,7 @@ test('ProjectsView create sends legacy directory payload without repo fields', a
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env);
-  clickButton(root, (text) => text.includes('새 코드베이스'));
+  clickButton(root, (text) => text.includes('새 프로젝트 폴더'));
 
   const sourceToggle = await waitFor(() => {
     const el = root.querySelector('[data-role="project-source-toggle"]');
@@ -228,7 +228,7 @@ test('ProjectsView create maps repo preflight reason to friendly toast', async (
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env);
-  clickButton(root, (text) => text.includes('새 코드베이스'));
+  clickButton(root, (text) => text.includes('새 프로젝트 폴더'));
 
   await waitFor(() => assert.ok(root.querySelector('[data-role="project-repo-url"]')));
   setInput(env, root.querySelector('#new-project-name'), 'Repo Project');
@@ -552,7 +552,7 @@ test('ProjectsView renders operator watch reverse index without changing warm ac
   const alphaCard = await waitFor(() => {
     const el = root.querySelector('[data-role="project-card"][data-project-id="proj_alpha"]');
     assert.ok(el);
-    assert.match(el.textContent, /이 코드베이스를 보는 오퍼레이터 2/);
+    assert.match(el.textContent, /이 프로젝트 폴더를 보는 오퍼레이터 2/);
     return el;
   });
   assert.match(alphaCard.querySelector('[data-role="project-operator-watch-primary"]').textContent, /담당/);
@@ -562,7 +562,7 @@ test('ProjectsView renders operator watch reverse index without changing warm ac
   assert.match(alphaWarm.textContent, /오퍼레이터 준비/);
 
   const betaCard = root.querySelector('[data-role="project-card"][data-project-id="proj_beta"]');
-  assert.match(betaCard.textContent, /이 코드베이스를 보는 오퍼레이터 1/);
+  assert.match(betaCard.textContent, /이 프로젝트 폴더를 보는 오퍼레이터 1/);
   assert.equal(betaCard.querySelector('[data-role="project-operator-watch-primary"]'), null);
   assert.match(betaCard.querySelector('[data-role="project-operator-watch-reference"]').textContent, /참조/);
 

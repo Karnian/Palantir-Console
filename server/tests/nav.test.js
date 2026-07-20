@@ -41,7 +41,7 @@ test('NAV_SUB_ITEMS exposes operator roster without changing top-level nav', () 
     .map((item) => [item.hash, item.label]);
   assert.deepEqual(operatorSubItems, [
     ['operator/roster', '오퍼레이터 로스터'],
-    ['operator/codebases', '코드베이스'],
+    ['operator/codebases', '프로젝트 폴더'],
     ['operator/profiles', '오퍼레이터 프로필'],
     ['operator/specialist', '스페셜리스트'],
   ]);

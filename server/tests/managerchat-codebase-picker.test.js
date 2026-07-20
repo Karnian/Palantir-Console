@@ -98,7 +98,7 @@ function createManagerChatEnv({
 }
 
 function picker(ctx) {
-  return ctx.root.querySelector('[aria-label="대상 코드베이스"]');
+  return ctx.root.querySelector('[aria-label="대상 프로젝트 폴더"]');
 }
 
 async function selectCodebase(ctx, value) {
