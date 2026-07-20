@@ -3,27 +3,16 @@
  *
  * Distinct from anthropic.js: this path resolves the auth token from the
  * Claude Code desktop OAuth flow (CLAUDE_CODE_OAUTH_TOKEN env, then falls back
- * to ANTHROPIC_API_KEY, then macOS Keychain). It also tries `claude auth status`
+ * to ANTHROPIC_API_KEY, then the native platform credential store — macOS
+ * Keychain, or ~/.claude/.credentials.json on Linux/Windows — via
+ * authResolver's shared readers). It also tries `claude auth status`
  * to enrich the response with account info. Both paths still hit the Anthropic
  * OAuth usage endpoint, but the auth source matters — collapsing them would
  * silently break Claude Code installs that don't have ANTHROPIC_API_KEY exported.
  */
 
 const { execSync } = require('node:child_process');
-
-function readKeychainToken() {
-  if (process.platform !== 'darwin') return null;
-  try {
-    const raw = execSync('security find-generic-password -s "Claude Code-credentials" -w', {
-      encoding: 'utf-8',
-      timeout: 5000,
-    }).trim();
-    const creds = JSON.parse(raw);
-    return creds.claudeAiOauth?.accessToken || null;
-  } catch {
-    return null;
-  }
-}
+const { readClaudeKeychainToken, readClaudeLinuxCredentialsToken } = require('../authResolver');
 
 /**
  * OAuth usage 응답 → canonical limits 배열.
@@ -89,8 +78,15 @@ function fetchClaudeCodeUsage() {
     }
   } catch { /* claude CLI unavailable */ }
 
-  // Auth token resolution: env vars first, keychain on macOS as last resort
-  const token = process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY || readKeychainToken();
+  // Auth token resolution: env vars first, then native platform credential
+  // store as a last resort — macOS Keychain, or (Linux/Windows) the CLI's
+  // own ~/.claude/.credentials.json file. Delegates to authResolver's
+  // shared, platform-gated, expiry-checked readers instead of duplicating
+  // that logic here (this file used to have its own darwin-only keychain
+  // reader, which silently returned null — and this "No Claude auth token
+  // found" error — on any non-macOS box regardless of actual login state).
+  const token = process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY
+    || readClaudeKeychainToken() || readClaudeLinuxCredentialsToken();
   if (!token) {
     return {
       ...base,
