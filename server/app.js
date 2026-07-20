@@ -1309,7 +1309,7 @@ function createApp(options = {}) {
     projectBriefService, // A2b-2: brief summary in the ## Turn Codebase block
     memoryService, // ML PR1: user-payload Learned Memory injection (Operator slots)
     masterMemoryService, // L2 P1b: user-payload Master memory injection (Top slot)
-    memoryMultiOwner: options.memoryMultiOwner ?? (process.env.PALANTIR_MEMORY_MULTI_OWNER === '1'),
+    memoryMultiOwner: options.memoryMultiOwner ?? (process.env.PALANTIR_MEMORY_MULTI_OWNER !== '0'),
     memoryComposer,
     compositionLedger,
     eventBus,
@@ -1340,12 +1340,12 @@ function createApp(options = {}) {
   // model + a periodic drain of pending candidates -> active memory.
   let memoryDistillScheduler = null;
   {
-    const distillEnabled = options.memoryDistillEnabled ?? (process.env.PALANTIR_MEMORY_DISTILL === '1');
+    const distillEnabled = options.memoryDistillEnabled ?? (process.env.PALANTIR_MEMORY_DISTILL !== '0');
     if (distillEnabled) {
       let distiller = options.distiller || null;
       const apiKey = process.env.ANTHROPIC_API_KEY;
       if (!distiller && !apiKey) {
-        console.warn('[memory-distill] PALANTIR_MEMORY_DISTILL=1 but no ANTHROPIC_API_KEY and no injected distiller — scheduler NOT started');
+        console.warn('[memory-distill] memory distill is enabled but no ANTHROPIC_API_KEY and no injected distiller — scheduler NOT started (set PALANTIR_MEMORY_DISTILL=0 to silence)');
       } else {
         try {
           if (!distiller) distiller = createLiveDistiller({ apiKey });
