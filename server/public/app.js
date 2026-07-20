@@ -157,9 +157,9 @@ function NavSidebar({ route, connected, attentionCount, onAttentionClick }) {
     <nav class="nav-sidebar">
       <div
         class="nav-brand"
-        aria-label=${NAV_LABELS.manager}
-        title=${NAV_LABELS.manager}
-        ...${clickableProps(() => navigate('manager'))}
+        aria-label=${NAV_LABELS.dashboard}
+        title=${NAV_LABELS.dashboard}
+        ...${clickableProps(() => navigate('dashboard'))}
       >\u2726</div>
       ${NAV_ITEMS.map(item => html`
         <button

@@ -58,9 +58,13 @@ test('#376 follow-up: NAV_SUB_ITEMS makes manager reachable from CommandPalette 
   assert.ok(!NAV_SUB_ITEMS.some((item) => item.hash === 'operator/manager'));
 });
 
-test('empty hash defaults to operator while #manager route stays deep-linkable', () => {
+test('empty hash defaults to dashboard while #manager route stays deep-linkable', () => {
+  // User decision, superseding PR #338's operator-centric default: a
+  // control hub's landing screen should answer "does anything need me"
+  // (dashboard/triage) before "what's actively running" (operator roster).
   const routingSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'app', 'lib', 'hooks', 'routing.js'), 'utf8');
-  assert.match(routingSrc, /const DEFAULT_ROUTE = 'operator';/);
+  assert.match(routingSrc, /const DEFAULT_ROUTE = 'dashboard';/);
+  assert.doesNotMatch(routingSrc, /const DEFAULT_ROUTE = 'operator';/);
   assert.doesNotMatch(routingSrc, /const DEFAULT_ROUTE = 'manager';/);
 
   const appSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
@@ -69,6 +73,24 @@ test('empty hash defaults to operator while #manager route stays deep-linkable',
   assert.match(appSrc, /routeParts\[1\] === 'operator'/);
   assert.match(appSrc, /managerInitialTarget = operatorConversationId\(projectId\);/);
   assert.match(appSrc, /<\$\{ManagerView\}[\s\S]*initialTarget=\$\{managerInitialTarget\}/);
+});
+
+test('sidebar brand icon is a home (dashboard) shortcut, not a manager one', () => {
+  // Follow-up to the #376 nav-brand experiment (PR #386): logo-click is a
+  // "go home" convention, and home is now the dashboard — repurposing the
+  // logo for manager access would conflict with that once dashboard became
+  // DEFAULT_ROUTE. Manager stays reachable via CommandPalette (#385) and
+  // the Operator roster Master card CTA (#380).
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  // Bounded to the nav-brand div's own element (opening tag through its
+  // closing </div>, lazy match) so this doesn't accidentally match some
+  // LATER unrelated navigate('manager') call elsewhere in the file (e.g.
+  // the attention badge's onClick) — a `[^>]*` bound would break here since
+  // the arrow function `() =>` itself contains a `>` character.
+  const navBrandMatch = appSrc.match(/<div\s+class="nav-brand"[\s\S]*?<\/div>/);
+  assert.ok(navBrandMatch, 'nav-brand div must exist');
+  assert.match(navBrandMatch[0], /clickableProps\(\(\) => navigate\('dashboard'\)\)/);
+  assert.doesNotMatch(navBrandMatch[0], /navigate\('manager'\)/);
 });
 
 test('app shell nests ProjectsView under operator codebases and aliases #projects', () => {
