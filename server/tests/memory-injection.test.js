@@ -769,3 +769,23 @@ test('A2b-3: ## Turn Codebase drops injection fields and redacts secrets', async
   assert.match(txt, /pitfalls: keep \[REDACTED\] safe/);
   assert.doesNotMatch(txt, /ghp_012345678901234567890/);
 });
+
+test('A2b-3: an explicit turn codebase that is disabled is rejected server-side (pm_enabled re-check)', async (t) => {
+  const db = await mkdb(t);
+  const stack = wirePmStack(db);
+  const { rs, projectService, registry, topAdapter, conv } = stack;
+
+  const primary = projectService.createProject({ name: 'alpha', directory: '/tmp/alpha' });
+  const disabled = projectService.createProject({ name: 'beta', directory: '/tmp/beta' });
+  projectService.updateProject(disabled.id, { pm_enabled: 0 });
+  seedTop({ rs, registry, adapter: topAdapter });
+
+  // A codebase disabled between the client's send-time check and this handler must
+  // be rejected atomically (fail-closed 400), never injected.
+  assert.throws(
+    () => conv.sendMessage(`operator:${primary.id}`, {
+      text: 'work beta', codebaseProjectId: disabled.id, turnMode: 'codebase',
+    }),
+    /disabled/,
+  );
+});

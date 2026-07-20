@@ -493,8 +493,16 @@ function createConversationService({
           // send rather than silently degrading to an id-only block. Only when
           // projectService is available to validate; unit harnesses without it
           // keep the id-only degrade.
-          if (!turnProject) {
-            const err = new Error(`turn codebase not found: ${turnTargetProjectId}`);
+          //
+          // A2b-3 (final-review #3): also re-validate pm_enabled server-side so a
+          // codebase disabled between the client's send-time check and this handler
+          // is rejected atomically, rather than injecting a disabled codebase.
+          if (!turnProject || turnProject.pm_enabled === 0) {
+            const err = new Error(
+              !turnProject
+                ? `turn codebase not found: ${turnTargetProjectId}`
+                : `turn codebase is disabled: ${turnTargetProjectId}`,
+            );
             err.httpStatus = 400;
             throw err;
           }

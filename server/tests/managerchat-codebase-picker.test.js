@@ -220,17 +220,22 @@ test('A2b-3b explicit unresolved mentions fail closed instead of falling back to
   assert.equal(ctx.toasts[0][1], 'error');
 });
 
-test('A2b-3b validates a stale picker selection synchronously at send time', async (t) => {
+test('A2b-3b cancels a send when the picked codebase went stale at send time', async (t) => {
   const projects = BASE_PROJECTS.map(project => ({ ...project }));
   const ctx = createManagerChatEnv({ projects });
   t.after(ctx.env.cleanup);
   await flushEffects();
 
   await selectCodebase(ctx, 'proj_beta');
+  // Disable the picked codebase AFTER selection — simulate a pool change racing the
+  // send (the passive effect has not fired yet in this synchronous window).
   projects.find(project => project.id === 'proj_beta').pm_enabled = 0;
   await sendText(ctx, 'stale selection');
 
-  assert.deepEqual(messageRequests(ctx)[0].body, { text: 'stale selection' });
+  // Fail-closed: the send is cancelled (never silently delivered to the primary),
+  // a toast is shown, and the input is restored so the user can re-pick.
+  assert.equal(messageRequests(ctx).length, 0, 'stale selection is not delivered');
+  assert.match(ctx.toasts[0][0], /유효하지 않습니다/);
 });
 
 test('A2b-3b canonical Operator snapshot excludes and labels its primary project', async (t) => {

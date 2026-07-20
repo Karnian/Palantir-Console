@@ -1046,8 +1046,19 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           fastMode = inst ? inst.fast_mode : null;
         } catch { /* annotate-only */ }
       }
+      // A2b-3: expose the legacy `operator:<projectId>` alias so the client can
+      // recover a canonical `operator:<instanceId>` conversation's primary project
+      // (its own parser returns no projectId for oi_*). The codebase picker uses
+      // this to exclude/label the primary. null when the resolver can't map it.
+      let legacyConversationId = null;
+      if (runService && typeof runService.resolveOperatorConversationId === 'function') {
+        try {
+          legacyConversationId = runService.resolveOperatorConversationId(pmEntry.conversationId)?.legacySlotId || null;
+        } catch { /* annotate-only */ }
+      }
       pms.push({
         conversationId: pmEntry.conversationId,
+        legacyConversationId, // A2b-3: canonical→primary recovery for the codebase picker
         run: pmRun,
         usage: pmAdapter.getUsage ? pmAdapter.getUsage(pmRun.id) : null,
         claudeSessionId: pmAdapter.getSessionId ? pmAdapter.getSessionId(pmRun.id) : null,

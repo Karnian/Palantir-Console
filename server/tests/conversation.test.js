@@ -480,6 +480,36 @@ test('GET /api/manager/status returns layer-aware shape (top+pms)', async (t) =>
   assert.equal(res.body.pms.length, 0);
 });
 
+test('A2b-3: /api/manager/status exposes legacyConversationId for a canonical active operator', async (t) => {
+  const app = await createTestApp(t);
+  const rs = app.services.runService;
+  const registry = app.managerRegistry;
+  const stub = { isSessionAlive: () => true, detectExitCode: () => null, getUsage: () => null, getSessionId: () => null, disposeSession: () => {} };
+
+  const project = app.services.projectService.createProject({ name: 'alpha' });
+  const resolved = rs.ensurePrimaryOperatorInstanceForProject(project.id);
+  const instanceConv = resolved.instanceConversationId; // canonical operator:oi_<projectId>
+
+  const top = rs.createRun({ is_manager: true, manager_layer: 'top', conversation_id: 'top', manager_adapter: 'codex', prompt: 'top' });
+  rs.updateRunStatus(top.id, 'running', { force: true });
+  registry.setActive('top', top.id, stub);
+
+  const opRun = rs.createRun({
+    is_manager: true, manager_layer: 'operator', conversation_id: instanceConv,
+    operator_instance_id: resolved.instanceId, manager_adapter: 'codex', prompt: 'op',
+  });
+  rs.updateRunStatus(opRun.id, 'running', { force: true });
+  registry.setActive(instanceConv, opRun.id, stub);
+
+  const res = await request(app).get('/api/manager/status');
+  assert.equal(res.status, 200);
+  const entry = (res.body.pms || []).find(p => p.conversationId === instanceConv);
+  assert.ok(entry, 'canonical operator appears in /status pms');
+  // The picker uses this legacy alias to recover the primary project of a canonical
+  // (oi_*) conversation whose client parser returns no projectId.
+  assert.equal(entry.legacyConversationId, `operator:${project.id}`);
+});
+
 // ---------------------------------------------------------------------------
 // v3 Phase 2 — multi-slot PM runtime + worker→PM and PM→Top notice routing
 // ---------------------------------------------------------------------------

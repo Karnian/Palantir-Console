@@ -588,6 +588,20 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     // 선택기 값은 passive effect에만 의존하지 않고 전송 시점에 다시 검증한다.
     const validSelected = selectedCodebaseId
       && (projects || []).some(p => p.id === selectedCodebaseId && p.pm_enabled !== 0);
+    // A2b-3 (final-review #3): a picked codebase that went stale (removed / disabled
+    // between the passive effect and this send) must NOT silently deliver to the
+    // primary — the user's explicit picker intent takes precedence, so fail-closed
+    // like the @mention path. (@mention already won above, so this only guards the
+    // picker path.)
+    if (!hasExplicitMention && !resolvedCodebaseProjectId && selectedCodebaseId && !validSelected) {
+      addToast('선택한 코드베이스가 더 이상 유효하지 않습니다 — 다시 선택해 주세요', 'error');
+      setSelectedCodebaseId('');
+      setInput(text);
+      setAttachedImages(attachedImages);
+      setSending(false);
+      requestAnimationFrame(() => { if (inputRef.current) inputRef.current.focus(); });
+      return;
+    }
     const turnCtx = resolvedCodebaseProjectId
       ? {
           codebaseProjectId: resolvedCodebaseProjectId,
