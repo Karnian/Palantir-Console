@@ -574,7 +574,11 @@ test('ssh claude quota comes from the executor-owned pod probe when available', 
   });
   const service = createNodeUsageService({
     nodeService: {
-      getNode() { return { id: 'pod', name: 'Pod', kind: 'ssh', reachable: 1 }; },
+      // node_prefix set — asserts it actually reaches readClaudeOAuthUsageFn
+      // as pathPrefix (previously silently dropped: the pod's `node` lives
+      // outside the minimal non-interactive-ssh PATH, so without this the
+      // probe 127s regardless of node_prefix being configured).
+      getNode() { return { id: 'pod', name: 'Pod', kind: 'ssh', reachable: 1, node_prefix: '/home/agent/.npm-global/bin' }; },
       pickExecutor() { return executor; },
     },
     readClaudeOAuthUsageFn: async (opts) => {
@@ -595,6 +599,7 @@ test('ssh claude quota comes from the executor-owned pod probe when available', 
   const snapshot = await service.getUsageSnapshot('pod');
   const claude = snapshot.clis.find((item) => item.id === 'claude');
   assert.equal(calls.length, 1);
+  assert.equal(calls[0].pathPrefix, '/home/agent/.npm-global/bin');
   assert.equal(claude.error, null);
   assert.deepEqual(claude.authStatus, { loggedIn: true, email: 'pod@example.test' });
   assert.deepEqual(claude.usage.limits.map((l) => [l.label, l.remainingPct]), [

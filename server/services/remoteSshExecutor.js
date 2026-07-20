@@ -569,8 +569,39 @@ function createRemoteSshNodeExecutor(node, {
    * contract. Resolves with { code, stdout, stderr } like runRemoteScript;
    * SSH transport failure rejects with code='SSH_TRANSPORT'.
    */
-  async function readClaudeOAuthUsage({ timeoutMs = 15000, maxBuffer = 256 * 1024 } = {}) {
-    return runRemoteScript(CLAUDE_OAUTH_USAGE_SCRIPT, { timeoutMs, maxBuffer });
+  async function readClaudeOAuthUsage({ timeoutMs = 15000, maxBuffer = 256 * 1024, pathPrefix } = {}) {
+    let script = CLAUDE_OAUTH_USAGE_SCRIPT;
+    if (pathPrefix !== undefined && pathPrefix !== null) {
+      // node_prefix may be a single dir or a `:`-joined list (multiple CLIs
+      // installed in different places). path.posix.isAbsolute() only checks
+      // the FIRST character of the whole string, so '/opt/bin:relative/bin'
+      // would otherwise pass — a relative segment there resolves against the
+      // remote CWD at exec time, letting anything writable to that directory
+      // supply the `node` binary this script runs (and thus see the pod's
+      // Claude OAuth token). Every colon-separated segment must be absolute
+      // (Codex adversarial review catch).
+      const segments = typeof pathPrefix === 'string' ? pathPrefix.split(':') : null;
+      const segmentsValid = Array.isArray(segments)
+        && segments.length > 0
+        && segments.every((segment) => segment.length > 0 && path.posix.isAbsolute(segment));
+      if (
+        typeof pathPrefix !== 'string'
+        || pathPrefix.length === 0
+        || !segmentsValid
+        || /[\x00-\x1F\x7F]/.test(pathPrefix)
+      ) {
+        throw new Error('readClaudeOAuthUsage pathPrefix must be one or more absolute POSIX paths (colon-separated) without control characters');
+      }
+      // Same PATH-prepend shape as buildCommandScript — the pod's `node`
+      // often lives outside the minimal non-interactive-ssh PATH (Homebrew/
+      // nvm/npm-global installs never get sourced by a bare `ssh host cmd`).
+      // CLAUDE_OAUTH_USAGE_JS itself is untouched (constant, security-
+      // hardened per the module comment above) — only the outer `exec`
+      // wrapper gains an `env PATH=...` prefix, exactly like
+      // buildCommandScript does for every other remote command.
+      script = script.replace(/^exec /, `exec env PATH=${shq(pathPrefix)}:$PATH `);
+    }
+    return runRemoteScript(script, { timeoutMs, maxBuffer });
   }
 
   async function fileExists(remotePath) {
