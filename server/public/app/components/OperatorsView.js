@@ -13,6 +13,7 @@ import { addToast, apiFetchWithToast } from '../lib/toast.js';
 import { parseProjectConversationId } from '../lib/conversationId.js';
 import {
   COMMON_ACTIONS,
+  NAV_LABELS,
   OPERATOR_ROSTER_LABELS,
   RUN_STATUS_LABELS,
   statusLabel,
@@ -169,11 +170,18 @@ function MasterCard({ top }) {
   const run = top?.run || null;
   if (!run) {
     return html`
-      <${EmptyState}
-        icon="✦"
-        text=${OPERATOR_ROSTER_LABELS.masterEmptyText}
-        sub=${OPERATOR_ROSTER_LABELS.masterEmptySub}
-      />
+      <div class="operator-roster-master-empty" data-role="operator-roster-master-empty">
+        <${EmptyState}
+          icon="✦"
+          text=${OPERATOR_ROSTER_LABELS.masterEmptyText}
+          sub=${OPERATOR_ROSTER_LABELS.masterEmptySub}
+        />
+        <a
+          class="ghost operator-roster-master-cta"
+          data-role="operator-roster-master-cta"
+          href="#manager"
+        >${NAV_LABELS.manager} ${COMMON_ACTIONS.open}</a>
+      </div>
     `;
   }
 
