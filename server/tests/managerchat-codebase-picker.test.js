@@ -233,9 +233,11 @@ test('A2b-3b cancels a send when the picked codebase went stale at send time', a
   await sendText(ctx, 'stale selection');
 
   // Fail-closed: the send is cancelled (never silently delivered to the primary),
-  // a toast is shown, and the input is restored so the user can re-pick.
+  // a toast is shown, the stale selection is cleared, and the input is restored.
   assert.equal(messageRequests(ctx).length, 0, 'stale selection is not delivered');
   assert.match(ctx.toasts[0][0], /유효하지 않습니다/);
+  await flushEffects();
+  assert.equal(picker(ctx).value, '', 'the stale selection is reset to the default');
 });
 
 test('A2b-3b canonical Operator snapshot excludes and labels its primary project', async (t) => {
