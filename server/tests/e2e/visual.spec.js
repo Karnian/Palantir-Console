@@ -337,7 +337,7 @@ for (const theme of THEMES) {
 // K-5-followup: the remaining deterministic form modals are opened by their
 // header "+ New" button; element-scoped dialog screenshots need no mocks/masks.
 const FORM_MODALS = [
-  { slug: 'newcodebase', route: 'operator/codebases', view: 'projects', trigger: /새 코드베이스/, dialog: '[aria-labelledby="new-project-title"]' },
+  { slug: 'newcodebase', route: 'operator/codebases', view: 'projects', trigger: /새 프로젝트 폴더/, dialog: '[aria-labelledby="new-project-title"]' },
   { slug: 'newmcp', route: 'resources/mcp-servers', view: 'mcp-servers', trigger: /새 MCP 서버/, dialog: '[aria-labelledby="mcp-template-title"]' },
   { slug: 'newtask', route: 'board', view: 'board', trigger: /새 작업/, dialog: '[aria-labelledby="new-task-title"]' },
 ];

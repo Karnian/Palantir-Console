@@ -551,7 +551,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
           }
           if (resolved.ambiguous && resolved.candidates && resolved.candidates.length > 0) {
             const names = resolved.candidates.map(c => c.name).join(', ');
-            addToast(`여러 코드베이스와 매칭되어 ${effectiveTarget}로 보냅니다: ${names}`, 'info');
+            addToast(`여러 프로젝트 폴더와 매칭되어 ${effectiveTarget}로 보냅니다: ${names}`, 'info');
           }
         }
       }
@@ -575,7 +575,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     // 명시 @mention 이 codebase('1_explicit')로 해석되지 않으면 선택기로
     // 조용히 fallback 하지 않는다. 사용자의 명시 라우팅 의도가 우선이다.
     if (hasExplicitMention && !resolveFailed && resolvedMatchedRule !== '1_explicit') {
-      addToast('@mention 을 코드베이스로 해석하지 못했습니다 — 전송을 취소합니다', 'error');
+      addToast('@mention 을 프로젝트 폴더로 해석하지 못했습니다 — 전송을 취소합니다', 'error');
       setInput(text);
       setAttachedImages(attachedImages);
       setSending(false);
@@ -594,7 +594,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     // like the @mention path. (@mention already won above, so this only guards the
     // picker path.)
     if (!hasExplicitMention && !resolvedCodebaseProjectId && selectedCodebaseId && !validSelected) {
-      addToast('선택한 코드베이스가 더 이상 유효하지 않습니다 — 다시 선택해 주세요', 'error');
+      addToast('선택한 프로젝트 폴더가 더 이상 유효하지 않습니다 — 다시 선택해 주세요', 'error');
       setSelectedCodebaseId('');
       setInput(text);
       setAttachedImages(attachedImages);
@@ -761,7 +761,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
         return String(a.id || '').localeCompare(String(b.id || ''));
       });
     return [
-      { value: '', label: pickerPrimaryName ? `기본 · ${pickerPrimaryName}` : '기본 코드베이스' },
+      { value: '', label: pickerPrimaryName ? `기본 · ${pickerPrimaryName}` : '기본 프로젝트 폴더' },
       ...secondaries.map(p => ({ value: p.id, label: p.name })),
     ];
   }, [projects, pickerPrimaryId, pickerPrimaryName]);
@@ -831,8 +831,8 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
               class="btn btn-sm btn-danger"
               data-action="reset-pm"
               onClick=${handleResetPm}
-              title="오퍼레이터 리셋: 이 코드베이스의 오퍼레이터 스레드만 종료합니다."
-              aria-label="이 코드베이스의 오퍼레이터 리셋"
+              title="오퍼레이터 리셋: 이 프로젝트 폴더의 오퍼레이터 스레드만 종료합니다."
+              aria-label="이 프로젝트 폴더의 오퍼레이터 리셋"
             >${MANAGER_LABELS.resetPM}</button>
           `}
           ${!isPm && status.active && html`
@@ -994,7 +994,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
                 value=${selectedCodebaseId}
                 onChange=${setSelectedCodebaseId}
                 options=${codebaseOptions}
-                ariaLabel="대상 코드베이스"
+                ariaLabel="대상 프로젝트 폴더"
                 className="manager-codebase-picker"
                 disabled=${sending}
               />

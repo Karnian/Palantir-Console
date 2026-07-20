@@ -16,7 +16,7 @@ const SCOPE_TYPES = [
   ['global', '전역'],
   ['layer:top', 'Top 레이어'],
   ['layer:operator', 'Operator 레이어'],
-  ['codebase', '코드베이스'],
+  ['codebase', '프로젝트 폴더'],
 ];
 const VENDORS = ['codex', 'claude'];
 const FIELD_LABELS = {
@@ -180,7 +180,7 @@ function PolicyEditor({ open, policy, projects, onClose, onSaved, onConflict }) 
     event.preventDefault();
     const finalScopeId = scopeType === 'codebase' ? scopeId : '*';
     if (scopeType === 'codebase' && !finalScopeId) {
-      addToast('코드베이스를 선택하세요.', 'error');
+      addToast('프로젝트 폴더를 선택하세요.', 'error');
       return;
     }
 
@@ -255,7 +255,7 @@ function PolicyEditor({ open, policy, projects, onClose, onSaved, onConflict }) 
           </div>
           ${scopeType === 'codebase' && html`
             <div class="form-row">
-              <label class="form-label" for="model-policy-scope-id">코드베이스</label>
+              <label class="form-label" for="model-policy-scope-id">프로젝트 폴더</label>
               <select
                 id="model-policy-scope-id"
                 class="form-input"
@@ -263,7 +263,7 @@ function PolicyEditor({ open, policy, projects, onClose, onSaved, onConflict }) 
                 onChange=${event => setScopeId(event.target.value)}
                 disabled=${isEdit}
               >
-                ${(projects || []).length === 0 && html`<option value="">선택 가능한 코드베이스 없음</option>`}
+                ${(projects || []).length === 0 && html`<option value="">선택 가능한 프로젝트 폴더 없음</option>`}
                 ${(projects || []).map(project => html`<option key=${project.id} value=${project.id}>${project.name || project.id}</option>`)}
               </select>
             </div>
@@ -422,9 +422,9 @@ function EffectivePreview({ projects }) {
         </div>
         ${layer === 'operator' && html`
           <div style=${{ flex: '1 1 200px' }}>
-            <label class="form-label" for="model-policy-preview-project">코드베이스</label>
+            <label class="form-label" for="model-policy-preview-project">프로젝트 폴더</label>
             <select id="model-policy-preview-project" class="form-input" value=${projectId} onChange=${event => setProjectId(event.target.value)}>
-              ${(projects || []).length === 0 && html`<option value="">선택 가능한 코드베이스 없음</option>`}
+              ${(projects || []).length === 0 && html`<option value="">선택 가능한 프로젝트 폴더 없음</option>`}
               ${(projects || []).map(project => html`<option key=${project.id} value=${project.id}>${project.name || project.id}</option>`)}
             </select>
           </div>

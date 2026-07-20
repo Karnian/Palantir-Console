@@ -92,9 +92,9 @@ export function MemoryView({ projects = [] }) {
       <div class="page-header">
         <h1>메모리</h1>
         <div class="memory-controls">
-          <select value=${projectId} onChange=${(e) => setProjectId(e.target.value)} aria-label="코드베이스 선택">
+          <select value=${projectId} onChange=${(e) => setProjectId(e.target.value)} aria-label="프로젝트 폴더 선택">
             ${projects.length === 0
-              ? html`<option value="">코드베이스 없음</option>`
+              ? html`<option value="">프로젝트 폴더 없음</option>`
               : projects.map((p) => html`<option value=${p.id}>${p.name}</option>`)}
           </select>
           <div class="memory-tabs" role="tablist" aria-label="메모리 상태 필터">
@@ -114,7 +114,7 @@ export function MemoryView({ projects = [] }) {
       ${loading
         ? html`<div class="loading">불러오는 중…</div>`
         : (items.length === 0
-          ? html`<${EmptyState} title="메모리가 없습니다" message="이 코드베이스에 표시할 메모리가 아직 없습니다." />`
+          ? html`<${EmptyState} title="메모리가 없습니다" message="이 프로젝트 폴더에 표시할 메모리가 아직 없습니다." />`
           : html`<div class="memory-list">
               ${items.map((it) => MemoryCard({ it, patch, openEdit, openProvenance }))}
             </div>`)}

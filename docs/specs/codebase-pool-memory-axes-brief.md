@@ -6,7 +6,8 @@
 > **성격**: 새 아키텍처 아님 — (A) LOCKED 계약을 구현이 못 따라간 갭 마감 + (B) defer 됐던 페르소나 메모리 축(P-B2) 완성 + (C) 공용 풀 권한 재잠금 + (D) Codex 가 발견한 pre-existing 결함 2건(canonical boot-resume / fresh·resume prompt 이중 assembly) 수정.
 
 ## 0. 용어
-- **프로젝트 폴더** = 코드베이스 = `projects` (사용자 호칭. 엔티티 리네임 없음).
+- **프로젝트 폴더** = `projects`. **사용자 노출 문자열은 "프로젝트 폴더" 로 통일**(사용자 지시 2026-07-19: "코드베이스 명칭을 프로젝트 폴더 라고 해줘"). **엔티티/식별자 리네임 없음** — 테이블 `projects`, 라우트 `#operator/codebases`, scope enum `'codebase'`, 코드 심볼·영문 slug 는 전부 그대로.
+  - ⚠️ **이 줄은 실행 지시다** (용어 정의가 아님). 2026-07-19 지시가 이 문서에 "프로젝트 폴더 = 코드베이스" 등가 병기로만 기록되는 바람에 UI 라벨 변경으로 읽히지 않아 **~3주간 미실행**으로 남았다(7/08 `#335` 가 프로젝트→코드베이스로 바꿔놓은 상태 그대로). 되돌림 완료: **PR #377** (`copy.js` 38 + 컴포넌트 인라인 23 + 테스트 16 + visual baseline). 향후 명칭 결정은 반드시 `docs/backlog.md` 실행 항목으로도 등재할 것.
 - **오퍼레이터** = `operator_instances`(`oi_<nanoid>`). **매니저** = Master/Top(메모리 owner `user`). 3계층 Master→Operator→Worker.
 
 ## 1. 사용자 요구 (2026-07-19)
