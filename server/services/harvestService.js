@@ -80,26 +80,72 @@ function parseEnginesNodeMajor(value) {
   return match ? parsePositiveMajor(match[1]) : null;
 }
 
-function resolveDeclaredNodeMajor(worktreePath) {
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function classifyDeclaredNode(worktreePath) {
   try {
-    if (!worktreePath) return null;
+    if (!worktreePath) return { state: 'indeterminate' };
+
+    // The root must be a present directory before "neither declaration file
+    // exists" can be trusted as a genuine removal. A missing / non-directory
+    // root is abnormal (e.g. a worktree torn down mid-harvest), not a confirmed
+    // removal -> indeterminate (never a false retraction).
+    let rootStat;
+    try { rootStat = fs.statSync(worktreePath); } catch { return { state: 'indeterminate' }; }
+    if (!rootStat.isDirectory()) return { state: 'indeterminate' };
 
     const nvmrc = readSmallDeclarationFile(path.join(worktreePath, '.nvmrc'));
     if (nvmrc.exists) {
-      return nvmrc.text == null ? null : parseNvmrcMajor(nvmrc.text);
+      if (nvmrc.text == null) return { state: 'indeterminate' };
+      const major = parseNvmrcMajor(nvmrc.text);
+      return major == null ? { state: 'indeterminate' } : { state: 'exact', major };
     }
 
     const pkg = readSmallDeclarationFile(path.join(worktreePath, 'package.json'));
-    if (!pkg.exists || pkg.text == null) return null;
-    try {
-      const parsed = JSON.parse(pkg.text);
-      return parseEnginesNodeMajor(parsed?.engines?.node);
-    } catch {
-      return null;
+    if (!pkg.exists) {
+      // Both declaration files are absent. This is the only 'none' path that
+      // rests on file-absence rather than on a file we already read, so re-confirm
+      // the root is still the SAME live directory (dev/ino unchanged). A root
+      // deleted/replaced between the initial stat and these lookups would
+      // otherwise be misread as "declaration removed" -> spurious retraction.
+      let recheck;
+      try { recheck = fs.statSync(worktreePath); } catch { return { state: 'indeterminate' }; }
+      if (!recheck.isDirectory() || recheck.dev !== rootStat.dev || recheck.ino !== rootStat.ino) {
+        return { state: 'indeterminate' };
+      }
+      return { state: 'none' };
     }
+    if (pkg.text == null) return { state: 'indeterminate' };
+    let parsed;
+    try {
+      parsed = JSON.parse(pkg.text);
+    } catch {
+      return { state: 'indeterminate' };
+    }
+    // A malformed root (null / array / primitive) is not a trustworthy "no
+    // declaration" signal -> indeterminate (never a false retraction). Only a
+    // plain-object package.json that genuinely omits engines.node is 'none'.
+    if (!isPlainObject(parsed)) return { state: 'indeterminate' };
+    if (!Object.hasOwn(parsed, 'engines')) return { state: 'none' };
+    const engines = parsed.engines;
+    // engines present but a non-object (string/number/bool/null/array) is
+    // corrupt, not an intentional removal -> indeterminate.
+    if (!isPlainObject(engines)) return { state: 'indeterminate' };
+    if (!Object.hasOwn(engines, 'node')) return { state: 'none' };
+    // engines.node present but not a single parseable major (range, empty,
+    // wrong type) is ambiguous -> indeterminate, so it never falsely retracts.
+    const major = parseEnginesNodeMajor(engines.node);
+    return major == null ? { state: 'indeterminate' } : { state: 'exact', major };
   } catch {
-    return null;
+    return { state: 'indeterminate' };
   }
+}
+
+function resolveDeclaredNodeMajor(worktreePath) {
+  const c = classifyDeclaredNode(worktreePath);
+  return c.state === 'exact' ? c.major : null;
 }
 
 // NOTE (fleet P0a): node-version detection (readSmallDeclarationFile /
@@ -123,22 +169,37 @@ function defaultNodeResolver(major) {
 }
 
 function resolveProjectNode(worktreePath, nodeResolver = defaultNodeResolver) {
+  let obs;
   try {
-    const declared = resolveDeclaredNodeMajor(worktreePath);
+    obs = classifyDeclaredNode(worktreePath);
+  } catch {
+    obs = { state: 'indeterminate' };
+  }
+  try {
+    const declared = obs.state === 'exact' ? obs.major : null;
     if (declared == null) {
-      return { binDir: null, major: SERVER_NODE_MAJOR, source: 'server' };
+      return { binDir: null, major: SERVER_NODE_MAJOR, source: 'server', declaredObservation: obs };
     }
     if (declared === SERVER_NODE_MAJOR) {
-      return { binDir: null, major: declared, source: 'server' };
+      return { binDir: null, major: declared, source: 'server', declaredObservation: obs };
     }
     const binDir = nodeResolver(declared);
     if (typeof binDir === 'string' && binDir) {
-      return { binDir, major: declared, source: 'project' };
+      return { binDir, major: declared, source: 'project', declaredObservation: obs };
     }
-    return { binDir: null, major: declared, source: 'fallback' };
+    return { binDir: null, major: declared, source: 'fallback', declaredObservation: obs };
   } catch {
-    return { binDir: null, major: SERVER_NODE_MAJOR, source: 'server' };
+    return { binDir: null, major: SERVER_NODE_MAJOR, source: 'server', declaredObservation: obs };
   }
+}
+
+function declaredNodeField(projectNode) {
+  const state = projectNode?.declaredObservation?.state;
+  if (state === 'exact') {
+    return { declared_node_major: projectNode.declaredObservation.major };
+  }
+  if (state === 'none') return { declared_node_major: null };
+  return {};
 }
 
 function buildHarvestEnvFromNode(projectNode) {
@@ -234,6 +295,7 @@ function runTestCommand({ command, cwd, testRunner, nodeResolver = defaultNodeRe
         output_tail: outputTail,
         node_major: projectNode.major,
         node_source: projectNode.source,
+        ...declaredNodeField(projectNode),
       });
     });
   });
@@ -284,6 +346,7 @@ async function runExecutorTestCommand({
     output_tail: outputTail,
     node_major: projectNode.major,
     node_source: projectNode.source,
+    ...declaredNodeField(projectNode),
   };
 }
 
@@ -1383,6 +1446,7 @@ module.exports = {
   stripControlChars,
   buildHarvestEnv,
   defaultNodeResolver,
+  classifyDeclaredNode,
   resolveDeclaredNodeMajor,
   resolveProjectNode,
   runTestCommand,

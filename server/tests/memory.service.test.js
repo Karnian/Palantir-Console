@@ -124,6 +124,67 @@ test('fact <=> fact_key enforcement', (t) => {
   assert.equal(ok.fact_key, 'node_major');
 });
 
+test('retractR6Fact archives an active R6 fact and bumps revision once', (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  const fact = svc.upsertFact({
+    projectId: 'p1',
+    factKey: 'env.node_resolution',
+    content: 'Project requires Node major 22',
+  });
+  const beforeRevision = svc.getRevision('p1');
+
+  assert.deepEqual(svc.retractR6Fact('p1', 'env.node_resolution'), { retracted: true });
+
+  const row = db.prepare('SELECT * FROM memory_items WHERE id=?').get(fact.id);
+  assert.equal(row.status, 'archived');
+  assert.ok(row.archived_at);
+  assert.equal(row.archive_reason, 'b_adm_declaration_removed');
+  assert.equal(svc.getRevision('p1'), beforeRevision + 1);
+});
+
+test('retractR6Fact does not retract a human fact with the same key', (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  const fact = svc.upsertFact({
+    projectId: 'p1',
+    factKey: 'env.node_resolution',
+    content: 'Human Node requirement',
+    origin: 'human',
+  });
+  const beforeRevision = svc.getRevision('p1');
+
+  assert.deepEqual(svc.retractR6Fact('p1', 'env.node_resolution'), { retracted: false });
+  assert.equal(db.prepare('SELECT status FROM memory_items WHERE id=?').get(fact.id).status, 'active');
+  assert.equal(svc.getRevision('p1'), beforeRevision);
+});
+
+test('retractR6Fact does not retract a pinned R6 fact', (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  const fact = svc.upsertFact({
+    projectId: 'p1',
+    factKey: 'env.node_resolution',
+    content: 'Pinned Node requirement',
+  });
+  db.prepare('UPDATE memory_items SET pinned=1 WHERE id=?').run(fact.id);
+  const beforeRevision = svc.getRevision('p1');
+
+  assert.deepEqual(svc.retractR6Fact('p1', 'env.node_resolution'), { retracted: false });
+  assert.equal(db.prepare('SELECT status FROM memory_items WHERE id=?').get(fact.id).status, 'active');
+  assert.equal(svc.getRevision('p1'), beforeRevision);
+});
+
+test('retractR6Fact is a no-op without an active fact and validates its narrow inputs', (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+
+  assert.deepEqual(svc.retractR6Fact('p1', 'env.node_resolution'), { retracted: false });
+  assert.equal(svc.getRevision('p1'), 0);
+  assert.throws(() => svc.retractR6Fact(null, 'env.node_resolution'), /projectId/);
+  assert.throws(() => svc.retractR6Fact('p1', null), /factKey/);
+});
+
 test('retrieveForProject: empty/blank taskContext -> fallback, no throw, active rows by importance', (t) => {
   const db = setupDb(t);
   const svc = createMemoryService(db);

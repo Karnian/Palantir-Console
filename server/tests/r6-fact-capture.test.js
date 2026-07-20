@@ -198,6 +198,81 @@ test('R6 capture: node_source=executor -> node fact rejected as episodic', (t) =
   assert.equal(rows.find((r) => r.fact_key === 'env.node_resolution'), undefined);
 });
 
+test('R6 capture: declared_node_major promotes even when runtime source is server', (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  const emit = wireCapture(svc, [
+    { id: 13, event_type: 'harvest:test', payload_json: JSON.stringify({
+      node_major: 22,
+      node_source: 'server',
+      declared_node_major: 22,
+    }) },
+  ]);
+
+  emit(fakeRun());
+
+  const node = svc.listForProject('p1').find((r) => r.fact_key === 'env.node_resolution');
+  assert.ok(node);
+  assert.equal(node.content, 'Project requires Node major 22');
+  assert.equal(node.status, 'active');
+});
+
+test('R6 capture: declared_node_major=null retracts an existing R6 fact', (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  const fact = svc.upsertFact({
+    projectId: 'p1',
+    factKey: 'env.node_resolution',
+    content: 'Project requires Node major 22',
+  });
+  const beforeRevision = svc.getRevision('p1');
+  const emit = wireCapture(svc, [
+    { id: 14, event_type: 'harvest:test', payload_json: JSON.stringify({
+      node_major: 22,
+      node_source: 'server',
+      declared_node_major: null,
+    }) },
+  ]);
+
+  emit(fakeRun());
+
+  const row = db.prepare('SELECT * FROM memory_items WHERE id=?').get(fact.id);
+  assert.equal(row.status, 'archived');
+  assert.equal(row.archive_reason, 'b_adm_declaration_removed');
+  assert.equal(svc.getRevision('p1'), beforeRevision + 1);
+});
+
+test('R6 capture transition: exact declaration promotes, then confirmed removal retracts', (t) => {
+  const db = setupDb(t);
+  const svc = createMemoryService(db);
+  const events = [
+    { id: 15, event_type: 'harvest:test', payload_json: JSON.stringify({
+      node_major: 22,
+      node_source: 'server',
+      declared_node_major: 22,
+    }) },
+  ];
+  const emit = wireCapture(svc, events);
+
+  emit(fakeRun());
+  const promoted = svc.listForProject('p1').find((r) => r.fact_key === 'env.node_resolution');
+  assert.ok(promoted);
+  assert.equal(promoted.content, 'Project requires Node major 22');
+  const promotedRevision = svc.getRevision('p1');
+
+  events[0] = { id: 16, event_type: 'harvest:test', payload_json: JSON.stringify({
+    node_major: 22,
+    node_source: 'server',
+    declared_node_major: null,
+  }) };
+  emit(fakeRun({ id: 'run2' }));
+
+  const retracted = db.prepare('SELECT * FROM memory_items WHERE id=?').get(promoted.id);
+  assert.equal(retracted.status, 'archived');
+  assert.equal(retracted.archive_reason, 'b_adm_declaration_removed');
+  assert.equal(svc.getRevision('p1'), promotedRevision + 1);
+});
+
 test('upsertFact: content already active under a different key -> no-op, no throw', (t) => {
   const db = setupDb(t);
   const svc = createMemoryService(db);

@@ -646,10 +646,31 @@ function createR6FactCapture({ eventBus, runService, memoryService, logger = con
         });
       } catch (err) { logger.warn(`[r6-fact] test_command run=${run.id}: ${err.message}`); }
     }
-    // env.node_resolution — only a project declaration is stable across
-    // operators/runs/nodes/sources. Other resolutions remain episodic in the
-    // harvest:test event and are not promoted to workspace memory.
-    if (payload.node_major != null) {
+    if (Object.hasOwn(payload, 'declared_node_major')) {
+      const declared = payload.declared_node_major;
+      if (declared === null) {
+        // Confirmed no declaration -> retract any stale R6 requirement fact.
+        try {
+          memoryService.retractR6Fact(run.project_id, 'env.node_resolution');
+        } catch (err) {
+          logger.warn(`[r6-fact] node_resolution retract run=${run.id}: ${err.message}`);
+        }
+      } else if (Number.isSafeInteger(declared) && declared > 0) {
+        // Declared requirement is stable regardless of the runtime node that ran
+        // (server/fallback included) -> promote/supersede.
+        try {
+          memoryService.upsertFact({
+            projectId: run.project_id,
+            factKey: 'env.node_resolution',
+            content: `Project requires Node major ${declared}`,
+            evidenceJson,
+            importance: 5,
+          });
+        } catch (err) { logger.warn(`[r6-fact] node_resolution run=${run.id}: ${err.message}`); }
+      }
+      // else: malformed non-integer (never emitted by resolveProjectNode) -> defensive no-op.
+    } else if (payload.node_major != null) {
+      // Legacy event (no declared_node_major) -> original node_source gate. Byte-identical.
       if (isStableEnvFact('env.node_resolution', { node_source: payload.node_source })) {
         try {
           memoryService.upsertFact({

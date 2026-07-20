@@ -1,5 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
 const { createHarvestService } = require('../services/harvestService');
 
 const WORKSPACE = '/pod/workspaces/run-1';
@@ -161,6 +164,43 @@ test('harvestRun runs materialized test_command through the selected remote exec
   const testPayload = parseEvent(runService.events.find(evt => evt.event_type === 'harvest:test'));
   assert.equal(testPayload.node_major, null);
   assert.equal(testPayload.node_source, 'executor');
+  assert.equal('declared_node_major' in testPayload, false);
+});
+
+test('harvestRun emits 3-way declared_node_major for materialized local workspaces', async (t) => {
+  const cases = [
+    {
+      name: 'exact',
+      write(workspace) { fs.writeFileSync(path.join(workspace, '.nvmrc'), '20\n'); },
+      expected: 20,
+    },
+    { name: 'none', write() {}, expected: null },
+    {
+      name: 'indeterminate',
+      write(workspace) { fs.writeFileSync(path.join(workspace, '.nvmrc'), '>=20\n'); },
+      expected: undefined,
+    },
+  ];
+
+  for (const item of cases) {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), `palantir-materialized-${item.name}-`));
+    t.after(() => fs.rmSync(workspace, { recursive: true, force: true }));
+    item.write(workspace);
+    const { run, runService, harvestService } = createHarness(t, {
+      nodeResolver: () => '/fake/node/bin',
+      project: { id: 'project-1', test_command: 'npm test' },
+      runOverrides: { workspace_path: workspace, node_id: 'local' },
+    });
+
+    await harvestService.harvestRun(run);
+
+    const testPayload = parseEvent(runService.events.find(evt => evt.event_type === 'harvest:test'));
+    if (item.expected === undefined) {
+      assert.equal('declared_node_major' in testPayload, false, item.name);
+    } else {
+      assert.equal(testPayload.declared_node_major, item.expected, item.name);
+    }
+  }
 });
 
 test('harvestRun removes and prunes materialized worktrees through git -C cache', async (t) => {

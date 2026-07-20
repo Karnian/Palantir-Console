@@ -452,6 +452,9 @@ function createMemoryService(db, eventBus) {
   const supersedeFactStmt = db.prepare(
     "UPDATE memory_items SET status='superseded', superseded_by=@newId, valid_to=datetime('now'), updated_at=datetime('now') WHERE owner_type=@ownerType AND owner_id=@ownerId AND fact_key=@factKey AND status='active'"
   );
+  const retractR6FactStmt = db.prepare(
+    "UPDATE memory_items SET status='archived', archived_at=datetime('now'), archive_reason='b_adm_declaration_removed', updated_at=datetime('now') WHERE owner_type=@ownerType AND owner_id=@ownerId AND fact_key=@factKey AND status='active' AND origin='rule:R6' AND pinned=0"
+  );
   const upsertFactTx = db.transaction((item) => {
     const existing = getActiveFactByKeyStmt.get(item.ownerType, item.ownerId, item.factKey);
     if (existing && existing.content_hash === item.contentHash) {
@@ -471,6 +474,11 @@ function createMemoryService(db, eventBus) {
     // is the 5th _bumpRevision path). Workspace facts (project_id set) bump as before.
     if (item.projectId) _bumpRevision(item.projectId);
     return getMemoryItemByIdStmt.get(item.id);
+  });
+  const retractR6FactTx = db.transaction(({ ownerType, ownerId, factKey, projectId }) => {
+    const res = retractR6FactStmt.run({ ownerType, ownerId, factKey });
+    if (res.changes > 0 && projectId) _bumpRevision(projectId);
+    return res.changes;
   });
 
   // origin defaults to 'rule:R6' (the deterministic env-fact rule, the original
@@ -513,6 +521,14 @@ function createMemoryService(db, eventBus) {
       }
       throw err;
     }
+  }
+
+  function retractR6Fact(projectId, factKey) {
+    if (!projectId) throw new Error('projectId is required');
+    if (!factKey) throw new Error('factKey is required');
+    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
+    const changes = retractR6FactTx({ ownerType, ownerId, factKey, projectId });
+    return { retracted: changes > 0 };
   }
 
   function getEffectiveLimit(limit) {
@@ -1620,6 +1636,7 @@ function createMemoryService(db, eventBus) {
     getRevisionForOwner,
     createMemoryItem,
     upsertFact,
+    retractR6Fact,
     createCandidate,
     listCandidates,
     listCandidatesForOwner,

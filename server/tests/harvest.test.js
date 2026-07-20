@@ -16,6 +16,7 @@ const {
   createHarvestService,
   buildHarvestEnv,
   defaultNodeResolver,
+  classifyDeclaredNode,
   resolveDeclaredNodeMajor,
   resolveProjectNode,
   SERVER_NODE_MAJOR,
@@ -391,7 +392,100 @@ test('resolveProjectNode uses a declared .nvmrc single major when resolver finds
     binDir,
     major: PROJECT_NODE_MAJOR,
     source: 'project',
+    declaredObservation: { state: 'exact', major: PROJECT_NODE_MAJOR },
   });
+});
+
+test('classifyDeclaredNode distinguishes exact, none, and indeterminate declarations', (t) => {
+  const exactNvmrc = makeTempDir(t, 'palantir-classify-exact-nvmrc-');
+  fs.writeFileSync(path.join(exactNvmrc, '.nvmrc'), '20\n');
+  assert.deepEqual(classifyDeclaredNode(exactNvmrc), { state: 'exact', major: 20 });
+
+  const exactEngines = makeTempDir(t, 'palantir-classify-exact-engines-');
+  fs.writeFileSync(path.join(exactEngines, 'package.json'), JSON.stringify({ engines: { node: '^20' } }));
+  assert.deepEqual(classifyDeclaredNode(exactEngines), { state: 'exact', major: 20 });
+
+  const noFiles = makeTempDir(t, 'palantir-classify-none-files-');
+  assert.deepEqual(classifyDeclaredNode(noFiles), { state: 'none' });
+
+  const noEngines = makeTempDir(t, 'palantir-classify-none-engines-');
+  fs.writeFileSync(path.join(noEngines, 'package.json'), JSON.stringify({ name: 'no-node-engine' }));
+  assert.deepEqual(classifyDeclaredNode(noEngines), { state: 'none' });
+
+  const rangedNvmrc = makeTempDir(t, 'palantir-classify-range-nvmrc-');
+  fs.writeFileSync(path.join(rangedNvmrc, '.nvmrc'), '>=20\n');
+  assert.deepEqual(classifyDeclaredNode(rangedNvmrc), { state: 'indeterminate' });
+
+  const symlinkedNvmrc = makeTempDir(t, 'palantir-classify-symlink-nvmrc-');
+  const target = path.join(symlinkedNvmrc, 'target-nvmrc');
+  fs.writeFileSync(target, '20\n');
+  fs.symlinkSync(target, path.join(symlinkedNvmrc, '.nvmrc'));
+  assert.deepEqual(classifyDeclaredNode(symlinkedNvmrc), { state: 'indeterminate' });
+
+  const malformedPackage = makeTempDir(t, 'palantir-classify-malformed-package-');
+  fs.writeFileSync(path.join(malformedPackage, 'package.json'), '{"engines":');
+  assert.deepEqual(classifyDeclaredNode(malformedPackage), { state: 'indeterminate' });
+
+  const rangedEngines = makeTempDir(t, 'palantir-classify-range-engines-');
+  fs.writeFileSync(path.join(rangedEngines, 'package.json'), JSON.stringify({
+    engines: { node: '>=20 <23' },
+  }));
+  assert.deepEqual(classifyDeclaredNode(rangedEngines), { state: 'indeterminate' });
+
+  // engines with an empty node object key is a genuine "no node constraint".
+  const enginesNoNode = makeTempDir(t, 'palantir-classify-engines-no-node-');
+  fs.writeFileSync(path.join(enginesNoNode, 'package.json'), JSON.stringify({ engines: { npm: '>=9' } }));
+  assert.deepEqual(classifyDeclaredNode(enginesNoNode), { state: 'none' });
+
+  // A malformed engines container or package root must NOT be read as "no
+  // declaration" — that would falsely retract a still-valid R6 fact. It is
+  // indeterminate (no-op) instead.
+  for (const [label, body] of [
+    ['engines-string', '{"engines":"corrupt"}'],
+    ['engines-number', '{"engines":42}'],
+    ['engines-bool', '{"engines":false}'],
+    ['engines-null', '{"engines":null}'],
+    ['engines-array', '{"engines":[20]}'],
+    ['engines-node-empty', '{"engines":{"node":""}}'],
+    ['engines-node-number', '{"engines":{"node":20}}'],
+    ['root-null', 'null'],
+    ['root-array', '[]'],
+    ['root-string', '"just a string"'],
+  ]) {
+    const dir = makeTempDir(t, `palantir-classify-${label}-`);
+    fs.writeFileSync(path.join(dir, 'package.json'), body);
+    assert.deepEqual(classifyDeclaredNode(dir), { state: 'indeterminate' }, label);
+  }
+
+  // An empty .nvmrc is ambiguous, not a removal -> indeterminate (never 'none').
+  const emptyNvmrc = makeTempDir(t, 'palantir-classify-empty-nvmrc-');
+  fs.writeFileSync(path.join(emptyNvmrc, '.nvmrc'), '   \n');
+  assert.deepEqual(classifyDeclaredNode(emptyNvmrc), { state: 'indeterminate' });
+
+  // An absent or non-directory root is abnormal (worktree torn down mid-harvest),
+  // NOT a confirmed removal -> indeterminate, so it never falsely retracts.
+  const missingRoot = path.join(makeTempDir(t, 'palantir-classify-missing-root-'), 'does-not-exist');
+  assert.deepEqual(classifyDeclaredNode(missingRoot), { state: 'indeterminate' });
+
+  const fileRootDir = makeTempDir(t, 'palantir-classify-file-root-');
+  const fileRoot = path.join(fileRootDir, 'a-file');
+  fs.writeFileSync(fileRoot, 'not a directory');
+  assert.deepEqual(classifyDeclaredNode(fileRoot), { state: 'indeterminate' });
+});
+
+test('resolveDeclaredNodeMajor delegates 3-way observations to the legacy major-or-null result', (t) => {
+  const cases = [
+    { declaration: '.nvmrc', content: '20\n', expected: 20 },
+    { declaration: '.nvmrc', content: '>=20\n', expected: null },
+    { declaration: 'package.json', content: JSON.stringify({ engines: { node: '^20' } }), expected: 20 },
+    { declaration: 'package.json', content: JSON.stringify({ engines: { node: '>=20 <23' } }), expected: null },
+    { declaration: 'package.json', content: JSON.stringify({ name: 'none' }), expected: null },
+  ];
+  for (const item of cases) {
+    const worktreePath = makeTempDir(t, 'palantir-resolve-delegate-');
+    fs.writeFileSync(path.join(worktreePath, item.declaration), item.content);
+    assert.equal(resolveDeclaredNodeMajor(worktreePath), item.expected);
+  }
 });
 
 test('resolveDeclaredNodeMajor parses exact, caret, and tilde engines single-major declarations', (t) => {
@@ -426,6 +520,7 @@ test('resolveProjectNode keeps server node when declaration matches server major
     binDir: null,
     major: SERVER_NODE_MAJOR,
     source: 'server',
+    declaredObservation: { state: 'exact', major: SERVER_NODE_MAJOR },
   });
 });
 
@@ -459,6 +554,7 @@ test('resolveProjectNode treats range and dirty declarations as server node', (t
       binDir: null,
       major: SERVER_NODE_MAJOR,
       source: 'server',
+      declaredObservation: { state: 'indeterminate' },
     }, item.name);
   }
 });
@@ -471,6 +567,7 @@ test('resolveProjectNode falls back to server node when declared node is not ins
     binDir: null,
     major: PROJECT_NODE_MAJOR,
     source: 'fallback',
+    declaredObservation: { state: 'exact', major: PROJECT_NODE_MAJOR },
   });
 });
 
@@ -488,6 +585,7 @@ test('resolveProjectNode keeps server node when no declaration exists', (t) => {
     binDir: null,
     major: SERVER_NODE_MAJOR,
     source: 'server',
+    declaredObservation: { state: 'none' },
   });
 });
 
@@ -496,12 +594,14 @@ test('resolveProjectNode never throws on parse, size, symlink, and resolver fail
   fs.writeFileSync(path.join(malformed, 'package.json'), '{"engines":');
   assert.doesNotThrow(() => resolveDeclaredNodeMajor(malformed));
   assert.equal(resolveDeclaredNodeMajor(malformed), null);
+  assert.deepEqual(resolveProjectNode(malformed).declaredObservation, { state: 'indeterminate' });
   assert.equal(resolveProjectNode(malformed).source, 'server');
 
   const huge = makeTempDir(t, 'palantir-node-huge-');
   fs.writeFileSync(path.join(huge, '.nvmrc'), '2'.repeat(MAX_DECL_BYTES + 1));
   assert.doesNotThrow(() => resolveDeclaredNodeMajor(huge));
   assert.equal(resolveDeclaredNodeMajor(huge), null);
+  assert.deepEqual(resolveProjectNode(huge).declaredObservation, { state: 'indeterminate' });
   assert.equal(resolveProjectNode(huge).source, 'server');
 
   const symlinked = makeTempDir(t, 'palantir-node-symlink-');
@@ -510,6 +610,7 @@ test('resolveProjectNode never throws on parse, size, symlink, and resolver fail
   fs.symlinkSync(target, path.join(symlinked, '.nvmrc'));
   assert.doesNotThrow(() => resolveDeclaredNodeMajor(symlinked));
   assert.equal(resolveDeclaredNodeMajor(symlinked), null);
+  assert.deepEqual(resolveProjectNode(symlinked).declaredObservation, { state: 'indeterminate' });
   assert.equal(resolveProjectNode(symlinked).source, 'server');
 
   const resolverThrow = makeTempDir(t, 'palantir-node-resolver-throw-');
@@ -523,6 +624,7 @@ test('resolveProjectNode never throws on parse, size, symlink, and resolver fail
     binDir: null,
     major: SERVER_NODE_MAJOR,
     source: 'server',
+    declaredObservation: { state: 'exact', major: PROJECT_NODE_MAJOR },
   });
 });
 
@@ -601,6 +703,7 @@ test('harvestRun emits run:harvested once with diff and test summary for complet
   const testPayload = parseEvent(eventsOf(services.runService, run.id, 'harvest:test')[0]);
   assert.equal(testPayload.node_major, SERVER_NODE_MAJOR);
   assert.equal(testPayload.node_source, 'server');
+  assert.equal(testPayload.declared_node_major, null);
 });
 
 test('harvestRun emits harvested=false once when worktree metadata is absent', async (t) => {
@@ -816,6 +919,7 @@ test('harvestRun records project node payload when resolver finds declared node'
   const testPayload = parseEvent(eventsOf(services.runService, run.id, 'harvest:test')[0]);
   assert.equal(testPayload.node_major, PROJECT_NODE_MAJOR);
   assert.equal(testPayload.node_source, 'project');
+  assert.equal(testPayload.declared_node_major, PROJECT_NODE_MAJOR);
   assert.equal(eventsOf(services.runService, run.id, 'harvest:error').length, 0);
 });
 
@@ -838,8 +942,31 @@ test('harvestRun records fallback node payload and node_unresolved warning', asy
   const testPayload = parseEvent(eventsOf(services.runService, run.id, 'harvest:test')[0]);
   assert.equal(testPayload.node_major, PROJECT_NODE_MAJOR);
   assert.equal(testPayload.node_source, 'fallback');
+  assert.equal(testPayload.declared_node_major, PROJECT_NODE_MAJOR);
   const errorStages = eventsOf(services.runService, run.id, 'harvest:error').map(evt => parseEvent(evt).stage);
   assert.ok(errorStages.includes('node_unresolved'));
+});
+
+test('harvestRun omits declared_node_major for an indeterminate local declaration', async (t) => {
+  const db = await mkdb(t);
+  const repoDir = makeRepo(t);
+  const services = makeServices(db);
+  const { run, worktreePath } = await createRunInWorktree({
+    db,
+    repoDir,
+    testCommand: 'pass',
+    ...services,
+  });
+  fs.writeFileSync(path.join(worktreePath, '.nvmrc'), '>=20\n');
+  fs.writeFileSync(path.join(worktreePath, 'agent-output.txt'), 'agent work\n');
+  const completed = services.runService.updateRunStatus(run.id, 'completed', { force: true });
+
+  await services.harvestService.harvestRun(completed, { projectDir: repoDir });
+
+  const testPayload = parseEvent(eventsOf(services.runService, run.id, 'harvest:test')[0]);
+  assert.equal(testPayload.node_major, SERVER_NODE_MAJOR);
+  assert.equal(testPayload.node_source, 'server');
+  assert.equal('declared_node_major' in testPayload, false);
 });
 
 test('harvestRun is deduped per run and by existing DB harvest events', async (t) => {
