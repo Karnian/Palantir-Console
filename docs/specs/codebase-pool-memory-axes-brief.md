@@ -1,6 +1,6 @@
 # 공용 프로젝트 폴더 풀 + 직교 3축 메모리 — 후속 설계 brief
 
-> **상태**: v4 **LOCKED** (사용자 2026-07-19 lock-in + 구현 착수). Codex R1 NO-GO→v2, R2 NO-GO→v3, **R3 REVISE→조건부 GO 충족**(6 RESOLVED/1 PARTIAL, profile PATCH invalidation 문장 §5 B0 반영). 구현: A0→P0→A1→A2a→A2b→B0→B2a→B1→B2b→B-adm→flip, phase 별 codex 교차검증.
+> **상태**: v4 **LOCKED** → **🎉 전 구현 완료** (2026-07-20). Codex R1 NO-GO→v2, R2 NO-GO→v3, **R3 REVISE→조건부 GO 충족**. 구현: A0→P0→A1→A2a→A2b (A-트랙 merged, ~a77c0b7) → **B-트랙 전부 merged** (B0 25c7d06 / B2a 7550d05 / B1 dc2a3f9 / B2b a0b0176 / B-adm 9eee7a1 / 통합-fix eca0392 / flip 02e149d), phase 별 codex 교차검증(계획 NO-GO→반영→codex-goal 위임→호스트 npm test→Claude 리뷰). **최종 통합리뷰**: SERIOUS(profile-delete FK 루프) 수정 + BLOCKER(B-adm staleness) = migration 066 오염정리 + payload 확장 follow-up 문서화. **default rollout: `PALANTIR_MEMORY_MULTI_OWNER`/`PALANTIR_MEMORY_DISTILL` 기본 ON** (사용자 결정 2026-07-20; DISTILL 은 ANTHROPIC_API_KEY 있을 때만 스케줄러 기동). npm test 2406 그린. **남은 follow-up**: harvest `declared_node_major` payload → 안전한 project→server 전이 retraction.
 > **권한 모델 LOCKED** (사용자, 2026-07-19): **공용 풀(favorite)** — refs 는 dispatch 권한이 아니라 기본값/라우팅/watch-요약. 부모 §3.D(reference=dispatch권한) 하향. (§4)
 > **부모 brief**: [`operator-codebase-refs-brief.md`](./operator-codebase-refs-brief.md), [`memory-layer-brief.md`](./memory-layer-brief.md).
 > **성격**: 새 아키텍처 아님 — (A) LOCKED 계약을 구현이 못 따라간 갭 마감 + (B) defer 됐던 페르소나 메모리 축(P-B2) 완성 + (C) 공용 풀 권한 재잠금 + (D) Codex 가 발견한 pre-existing 결함 2건(canonical boot-resume / fresh·resume prompt 이중 assembly) 수정.
