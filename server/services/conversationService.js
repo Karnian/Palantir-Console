@@ -44,9 +44,21 @@ const {
   parseProjectConversationId,
   isProjectLayer,
 } = require('../utils/conversationId'); // PM→Operator rename Phase 0: dual-read
+const { detectInjection, redactSecrets } = require('./memorySanitize');
 
 function nonEmptyString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+// 외부 project/brief 문자열은 user payload에 들어가기 전에 줄 단위로 정화한다.
+// injection marker가 있는 필드는 통째로 버리고, secret은 마스킹한 뒤 단일 행으로 만든다.
+function sanitizeTurnCodebaseField(value, maxLen = null) {
+  if (value == null) return null;
+  const raw = String(value);
+  if (!raw.trim() || detectInjection(raw)) return null;
+  let text = redactSecrets(raw).text.replace(/\s+/g, ' ').trim();
+  if (maxLen != null && text.length > maxLen) text = text.slice(0, maxLen).trim();
+  return text || null;
 }
 
 // A2a §5.0 turnMode contract. Recognized values: 'codebase' | 'generic' |
@@ -452,24 +464,14 @@ function createConversationService({
       // codebase가 이번 turn에 명시 타겟되면 ref 유무와 무관하게
       // workspace를 강주입한다. ref 부재는 관측만 하고 억제하지 않는다.
       // (존재하지 않는 codebase는 아래 ## Turn Codebase gate가 400 처리.)
-      if (
+      const shouldEmitUnwatchedCodebase = !!(
         workspaceProjectId &&
         instanceId &&
         runService &&
         typeof runService.operatorInstanceHasRef === 'function' &&
         !runService.operatorInstanceHasRef(instanceId, workspaceProjectId) &&
         turnCodebaseContext?.explicitProjectId === workspaceProjectId
-      ) {
-        try {
-          if (eventBus) {
-            eventBus.emit('memory:unwatched_codebase', {
-              runId: run.id,
-              instanceId,
-              projectId: workspaceProjectId,
-            });
-          }
-        } catch { /* annotate-only */ }
-      }
+      );
       // A2b-2: per-turn codebase context block. Emit ONLY for a turn explicitly
       // directed at a NON-primary codebase. The gate uses the context's
       // workspaceProjectId (the pre-ref-gate value): it equals the explicit
@@ -477,12 +479,12 @@ function createConversationService({
       // (codebase-less), so generic never emits a codebase block (Codex A2b-2).
       // Rides the user payload (cache-stable), independent of the memory ref-gate.
       const turnTargetProjectId = turnCodebaseContext?.explicitProjectId || null;
-      if (
+      const isExplicitWorkspaceTurn = !!(
         turnTargetProjectId
         && turnCodebaseContext.workspaceProjectId === turnTargetProjectId
-        && turnTargetProjectId !== turnCodebaseContext.primaryProjectId
-      ) {
-        let turnProject = null;
+      );
+      let turnProject = null;
+      if (isExplicitWorkspaceTurn) {
         if (projectService && typeof projectService.getProject === 'function') {
           try { turnProject = projectService.getProject(turnTargetProjectId); }
           catch { turnProject = null; }
@@ -497,21 +499,45 @@ function createConversationService({
             throw err;
           }
         }
+        // 존재검증 뒤에만 관측 이벤트를 내보내 phantom codebase 기록을 막는다.
+        if (shouldEmitUnwatchedCodebase) {
+          try {
+            if (eventBus) {
+              eventBus.emit('memory:unwatched_codebase', {
+                runId: run.id,
+                instanceId,
+                projectId: workspaceProjectId,
+              });
+            }
+          } catch { /* annotate-only */ }
+        }
+      }
+      if (
+        isExplicitWorkspaceTurn
+        && turnTargetProjectId !== turnCodebaseContext.primaryProjectId
+      ) {
         const blockLines = ['## Turn Codebase'];
+        const safeName = sanitizeTurnCodebaseField(turnProject?.name);
         blockLines.push(
-          `This turn is directed at codebase: ${turnProject?.name ? `${turnProject.name} (id: ${turnTargetProjectId})` : turnTargetProjectId}.`,
+          `This turn is directed at codebase: ${safeName ? `${safeName} (id: ${turnTargetProjectId})` : turnTargetProjectId}.`,
         );
-        if (turnProject?.directory) blockLines.push(`directory: ${turnProject.directory}`);
+        const safeDirectory = sanitizeTurnCodebaseField(turnProject?.directory);
+        if (safeDirectory) blockLines.push(`directory: ${safeDirectory}`);
         // Repo-defined projects have no local directory — show repo coordinates.
-        if (turnProject?.repo_url) blockLines.push(`repo: ${turnProject.repo_url}`);
-        if (turnProject?.repo_ref) blockLines.push(`ref: ${turnProject.repo_ref}`);
-        if (turnProject?.repo_subdir) blockLines.push(`subdir: ${turnProject.repo_subdir}`);
+        const safeRepoUrl = sanitizeTurnCodebaseField(turnProject?.repo_url);
+        const safeRepoRef = sanitizeTurnCodebaseField(turnProject?.repo_ref);
+        const safeRepoSubdir = sanitizeTurnCodebaseField(turnProject?.repo_subdir);
+        if (safeRepoUrl) blockLines.push(`repo: ${safeRepoUrl}`);
+        if (safeRepoRef) blockLines.push(`ref: ${safeRepoRef}`);
+        if (safeRepoSubdir) blockLines.push(`subdir: ${safeRepoSubdir}`);
         // Brief summary (truncated) so the Operator carries the folder's context.
         if (projectBriefService && typeof projectBriefService.getBrief === 'function') {
           try {
             const b = projectBriefService.getBrief(turnTargetProjectId);
-            if (b?.conventions) blockLines.push(`conventions: ${String(b.conventions).slice(0, 400)}`);
-            if (b?.known_pitfalls) blockLines.push(`pitfalls: ${String(b.known_pitfalls).slice(0, 400)}`);
+            const safeConventions = sanitizeTurnCodebaseField(b?.conventions, 400);
+            const safePitfalls = sanitizeTurnCodebaseField(b?.known_pitfalls, 400);
+            if (safeConventions) blockLines.push(`conventions: ${safeConventions}`);
+            if (safePitfalls) blockLines.push(`pitfalls: ${safePitfalls}`);
           } catch { /* best-effort */ }
         }
         blockLines.push('Focus on THIS codebase for this turn (not your primary); dispatch workers to it as needed.');

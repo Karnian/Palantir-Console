@@ -16,6 +16,7 @@ function createManagerChatEnv({
   conversationTarget = 'operator:proj_primary',
   active = true,
   projects = BASE_PROJECTS,
+  pms = [],
   resolveRouter = (body) => ({
     target: body.currentConversationId,
     text: body.text,
@@ -24,6 +25,7 @@ function createManagerChatEnv({
   const env = createPreactEnv();
   const requests = [];
   const topSends = [];
+  const toasts = [];
   const pmConversation = {
     events: [],
     run: { id: 'run_operator', status: 'running' },
@@ -36,7 +38,7 @@ function createManagerChatEnv({
     if (url === '/api/router/resolve') return resolveRouter(body);
     return {};
   };
-  env.context.addToast = () => {};
+  env.context.addToast = (...args) => { toasts.push(args); };
   env.context.useConversation = () => pmConversation;
   env.context.renderMarkdown = (text) => text;
   env.context.timeAgo = () => '';
@@ -64,18 +66,18 @@ function createManagerChatEnv({
   env.context.RunInspector = () => null;
   env.context.operatorConversationId = (id) => `operator:${id}`;
   env.context.parseProjectConversationId = (id) => {
-    const match = /^operator:(.+)$/.exec(id || '');
+    const match = /^operator:(proj_.+)$/.exec(id || '');
     return match ? { projectId: match[1] } : null;
   };
   env.context.conversationIdMatchesProject = (id, projectId) => id === `operator:${projectId}`;
   env.loadComponent('ManagerChat');
 
   const root = env.document.getElementById('root');
-  let renderState = { conversationTarget, active, projects };
+  let renderState = { conversationTarget, active, projects, pms };
   const renderChat = (patch = {}) => {
     renderState = { ...renderState, ...patch };
     const manager = {
-      status: { active: renderState.active, usage: null },
+      status: { active: renderState.active, usage: null, pms: renderState.pms },
       events: [],
       loading: false,
       start: async () => {},
@@ -92,7 +94,7 @@ function createManagerChatEnv({
   };
   renderChat();
 
-  return { env, root, requests, topSends, renderChat };
+  return { env, root, requests, topSends, toasts, renderChat };
 }
 
 function picker(ctx) {
@@ -173,6 +175,7 @@ test('A2b-3b @mention overrides the picker for one turn without changing its val
           text: 'mention turn',
           codebaseProjectId: 'proj_alpha',
           turnMode: 'codebase',
+          matchedRule: '1_explicit',
         }
       : { target: body.currentConversationId, text: body.text },
   });
@@ -194,6 +197,58 @@ test('A2b-3b @mention overrides the picker for one turn without changing its val
     codebaseProjectId: 'proj_beta',
     turnMode: 'codebase',
   });
+});
+
+test('A2b-3b explicit unresolved mentions fail closed instead of falling back to the picker', async (t) => {
+  const ctx = createManagerChatEnv({
+    resolveRouter: (body) => ({
+      target: body.currentConversationId,
+      text: body.text,
+      matchedRule: '4_default',
+    }),
+  });
+  t.after(ctx.env.cleanup);
+  await flushEffects();
+
+  await selectCodebase(ctx, 'proj_beta');
+  await sendText(ctx, '@missing do this');
+  await sendText(ctx, '@disabled do this');
+
+  assert.equal(messageRequests(ctx).length, 0, 'neither unresolved mention is delivered');
+  assert.equal(ctx.toasts.length, 2);
+  assert.match(ctx.toasts[0][0], /전송을 취소/);
+  assert.equal(ctx.toasts[0][1], 'error');
+});
+
+test('A2b-3b validates a stale picker selection synchronously at send time', async (t) => {
+  const projects = BASE_PROJECTS.map(project => ({ ...project }));
+  const ctx = createManagerChatEnv({ projects });
+  t.after(ctx.env.cleanup);
+  await flushEffects();
+
+  await selectCodebase(ctx, 'proj_beta');
+  projects.find(project => project.id === 'proj_beta').pm_enabled = 0;
+  await sendText(ctx, 'stale selection');
+
+  assert.deepEqual(messageRequests(ctx)[0].body, { text: 'stale selection' });
+});
+
+test('A2b-3b canonical Operator snapshot excludes and labels its primary project', async (t) => {
+  const ctx = createManagerChatEnv({
+    conversationTarget: 'operator:oi_current',
+    pms: [{
+      conversationId: 'operator:oi_current',
+      legacyConversationId: 'operator:proj_primary',
+      run: { id: 'run_operator', status: 'running' },
+    }],
+  });
+  t.after(ctx.env.cleanup);
+  await flushEffects();
+
+  const select = picker(ctx);
+  assert.ok(select);
+  assert.equal(select.options[0].textContent, '기본 · Primary');
+  assert.equal(Array.from(select.options).some(option => option.value === 'proj_primary'), false);
 });
 
 test('A2b-3b resets on conversation changes and repairs disabled or removed selections', async (t) => {

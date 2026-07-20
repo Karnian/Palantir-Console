@@ -85,26 +85,6 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
   const isPm = conversationTarget !== 'top';
   const pmProjectId = isPm ? (parseProjectConversationId(conversationTarget)?.projectId ?? null) : null;
   const pmProject = isPm ? (projects || []).find(p => p.id === pmProjectId) || null : null;
-  const codebaseOptions = useMemo(() => {
-    const secondaries = (projects || [])
-      .filter(p => p.pm_enabled !== 0 && p.id !== pmProject?.id)
-      .slice()
-      .sort((a, b) => {
-        const aName = String(a.name || '');
-        const bName = String(b.name || '');
-        const aFolded = aName.toLocaleLowerCase('en-US');
-        const bFolded = bName.toLocaleLowerCase('en-US');
-        if (aFolded < bFolded) return -1;
-        if (aFolded > bFolded) return 1;
-        if (aName < bName) return -1;
-        if (aName > bName) return 1;
-        return String(a.id || '').localeCompare(String(b.id || ''));
-      });
-    return [
-      { value: '', label: pmProject ? `기본 · ${pmProject.name}` : '기본 코드베이스' },
-      ...secondaries.map(p => ({ value: p.id, label: p.name })),
-    ];
-  }, [projects, pmProject]);
 
   // Unified event source + send path + run + active flag. The PM hook
   // mirrors the Top hook's shape (events, run, sendMessage), so the
@@ -550,6 +530,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     let effectiveText = text;
     let resolvedCodebaseProjectId = null;
     let resolvedTurnMode = null;
+    let resolvedMatchedRule = null;
     let resolveFailed = false;
     try {
       if (text) {
@@ -564,6 +545,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
           effectiveTarget = resolved.target;
           resolvedCodebaseProjectId = resolved.codebaseProjectId || null;
           resolvedTurnMode = resolved.turnMode || null;
+          resolvedMatchedRule = resolved.matchedRule || null;
           if (typeof resolved.text === 'string' && resolved.text.length > 0) {
             effectiveText = resolved.text;
           }
@@ -590,14 +572,28 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
       // No @mention → safe to fall through to the UI selection.
     }
 
+    // 명시 @mention 이 codebase('1_explicit')로 해석되지 않으면 선택기로
+    // 조용히 fallback 하지 않는다. 사용자의 명시 라우팅 의도가 우선이다.
+    if (hasExplicitMention && !resolveFailed && resolvedMatchedRule !== '1_explicit') {
+      addToast('@mention 을 코드베이스로 해석하지 못했습니다 — 전송을 취소합니다', 'error');
+      setInput(text);
+      setAttachedImages(attachedImages);
+      setSending(false);
+      requestAnimationFrame(() => { if (inputRef.current) inputRef.current.focus(); });
+      return;
+    }
+
     // Treat router context as an atomic pair. Explicit @mention routing
     // wins for this turn without mutating the persistent picker value.
+    // 선택기 값은 passive effect에만 의존하지 않고 전송 시점에 다시 검증한다.
+    const validSelected = selectedCodebaseId
+      && (projects || []).some(p => p.id === selectedCodebaseId && p.pm_enabled !== 0);
     const turnCtx = resolvedCodebaseProjectId
       ? {
           codebaseProjectId: resolvedCodebaseProjectId,
           turnMode: resolvedTurnMode || 'codebase',
         }
-      : (selectedCodebaseId
+      : (!hasExplicitMention && validSelected
           ? { codebaseProjectId: selectedCodebaseId, turnMode: 'codebase' }
           : null);
 
@@ -724,6 +720,37 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
         || conversationIdMatchesProject(pm.legacyConversationId, pmProjectId)
       ) || null)
     : null;
+  // Canonical operator:<instanceId>는 client parser 계약상 projectId가 없다.
+  // 서버 snapshot의 legacyConversationId에서 primary를 복원해 중복을 막는다.
+  const pickerPrimaryId = pmProjectId
+    || (currentPm?.legacyConversationId
+      ? parseProjectConversationId(currentPm.legacyConversationId)?.projectId
+      : null)
+    || null;
+  const pickerPrimaryName = pmProject?.name
+    || (pickerPrimaryId
+      ? ((projects || []).find(p => p.id === pickerPrimaryId)?.name || null)
+      : null);
+  const codebaseOptions = useMemo(() => {
+    const secondaries = (projects || [])
+      .filter(p => p.pm_enabled !== 0 && p.id !== pickerPrimaryId)
+      .slice()
+      .sort((a, b) => {
+        const aName = String(a.name || '');
+        const bName = String(b.name || '');
+        const aFolded = aName.toLocaleLowerCase('en-US');
+        const bFolded = bName.toLocaleLowerCase('en-US');
+        if (aFolded < bFolded) return -1;
+        if (aFolded > bFolded) return 1;
+        if (aName < bName) return -1;
+        if (aName > bName) return 1;
+        return String(a.id || '').localeCompare(String(b.id || ''));
+      });
+    return [
+      { value: '', label: pickerPrimaryName ? `기본 · ${pickerPrimaryName}` : '기본 코드베이스' },
+      ...secondaries.map(p => ({ value: p.id, label: p.name })),
+    ];
+  }, [projects, pickerPrimaryId, pickerPrimaryName]);
   const currentPmRun = currentPm && currentPm.run;
   const isCodexOperator = !!(currentPmRun && currentPmRun.manager_adapter === 'codex');
   const fastOperatorInstanceId = currentPmRun && currentPmRun.operator_instance_id;
