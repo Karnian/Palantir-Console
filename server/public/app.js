@@ -17,6 +17,7 @@ import { requestNotificationPermission, showBrowserNotification, pulseTabTitle }
 import { NAV_ITEMS } from './app/lib/nav.js';
 import { operatorConversationId } from './app/lib/conversationId.js';
 import { THEME_TOGGLE_LABELS, NAV_LABELS } from './app/lib/copy.js';
+import { clickableProps } from './app/lib/a11y.js';
 
 // Components
 import { RunInspector } from './app/components/RunInspector.js';
@@ -154,7 +155,12 @@ function ThemeToggle() {
 function NavSidebar({ route, connected, attentionCount, onAttentionClick }) {
   return html`
     <nav class="nav-sidebar">
-      <div class="nav-brand" title="Palantir Console">\u2726</div>
+      <div
+        class="nav-brand"
+        aria-label=${NAV_LABELS.manager}
+        title=${NAV_LABELS.manager}
+        ...${clickableProps(() => navigate('manager'))}
+      >\u2726</div>
       ${NAV_ITEMS.map(item => html`
         <button
           key=${item.hash}
