@@ -14,6 +14,10 @@ server/plugins/
 *.bak
 *.bak.*
 .claude-auth.json
+# Session lock written by the ao scheduler hook — ephemeral, per-machine.
+# Tracking it made the hook emit `ao-wip(manual): remove scheduled_tasks.lock`
+# churn commits on every session.
+.claude/scheduled_tasks.lock
 .ao/
 .playwright-mcp/
 .palantir-worktrees/
