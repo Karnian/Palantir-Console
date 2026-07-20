@@ -517,7 +517,7 @@ async function getSshClaudeCard(node, spawnInteractive, opts, readClaudeUsage) {
   }
 
   try {
-    const res = await readClaudeUsage({ timeoutMs: opts.timeoutMs, maxBuffer: opts.maxOutputBytes });
+    const res = await readClaudeUsage({ timeoutMs: opts.timeoutMs, maxBuffer: opts.maxOutputBytes, pathPrefix: opts.pathPrefix });
     // Sentinel must be PAIRED with its exit code — exit 3 alone is ambiguous
     // (other tools reuse it) and a stray sentinel substring alone proves
     // nothing (Codex security R1 SERIOUS 1).

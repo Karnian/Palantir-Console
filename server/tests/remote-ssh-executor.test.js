@@ -1393,3 +1393,52 @@ test('readClaudeOAuthUsage runs a fixed script with no caller interpolation', as
   // ~/.curlrc (e.g. trace-ascii) could echo the Authorization header back.
   assert.ok(!/\bcurl\b/.test(script), 'probe must not use curl');
 });
+
+test('readClaudeOAuthUsage injects pathPrefix as PATH prepend without altering the fixed JS body', async () => {
+  // Real-node-usage regression: the pod's `node` often lives outside the
+  // minimal non-interactive-ssh PATH (Homebrew/nvm/npm-global) — without a
+  // pathPrefix the probe exits 127 even when node_prefix is configured on
+  // the node row, since this script previously never threaded pathPrefix
+  // through at all (unlike every other remote command).
+  const spawn = makeSpawn((_call, child) => complete(child, { code: 0, stdout: '{"five_hour":{"utilization":10}}' }));
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+  await exec.readClaudeOAuthUsage({ timeoutMs: 1000, pathPrefix: '/Users/K/.local/bin:/opt/homebrew/bin' });
+  const script = scriptOf(spawn.calls.at(-1));
+  assert.ok(
+    script.startsWith(`exec env PATH=${shq('/Users/K/.local/bin:/opt/homebrew/bin')}:$PATH node -e '`),
+    `expected PATH prepend before the fixed node invocation, got: ${script.slice(0, 120)}`,
+  );
+  // The security-hardened JS body itself must be byte-identical to the
+  // no-pathPrefix case — only the outer `exec` wrapper changes.
+  assert.ok(script.includes('api.anthropic.com'));
+  assert.ok(script.includes('/api/oauth/usage'));
+  assert.ok(script.includes('__NO_CLAUDE_TOKEN__'));
+  assert.ok(!/\bcurl\b/.test(script), 'probe must not use curl');
+});
+
+test('readClaudeOAuthUsage rejects relative/control-char/non-string pathPrefix (PATH-trust guard)', async () => {
+  const spawn = makeSpawn(() => {});
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+  for (const bad of [
+    '.', 'relative/bin', '', '/x\nety', '/x\x00y', 123, {},
+    // Colon-joined multi-path prefixes with a relative segment must be
+    // rejected too — isAbsolute() on the whole string only sees the first
+    // char, so '/opt/bin:relative/bin' previously slipped through and let
+    // the remote CWD supply the `node` this OAuth-token-reading script runs
+    // (Codex adversarial review catch).
+    '/opt/bin:relative/bin', '/opt/bin:.', '/opt/bin:', ':/opt/bin',
+  ]) {
+    await assert.rejects(
+      () => exec.readClaudeOAuthUsage({ timeoutMs: 1000, pathPrefix: bad }),
+      /pathPrefix must be one or more absolute POSIX paths/,
+    );
+  }
+});
+
+test('readClaudeOAuthUsage with no pathPrefix runs the script unchanged (back-compat)', async () => {
+  const spawn = makeSpawn((_call, child) => complete(child, { code: 0, stdout: '{"five_hour":{"utilization":10}}' }));
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+  await exec.readClaudeOAuthUsage({ timeoutMs: 1000 });
+  const script = scriptOf(spawn.calls.at(-1));
+  assert.ok(script.startsWith("exec node -e '"), 'no pathPrefix means the original exec form is untouched');
+});
