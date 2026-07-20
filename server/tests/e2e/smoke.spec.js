@@ -16,11 +16,11 @@ test.describe('Palantir Console Smoke', () => {
   test('nav sidebar contains all route items', async ({ page }) => {
     await page.goto('/');
     const nav = page.locator('nav.nav-sidebar');
-    // NAV_ITEMS: Dashboard, Operator, Task Board, Resources, Memory.
-    // operator-centric arc: Projects nested under #operator/codebases (P1 #336),
-    // Manager reachable via roster Master/Live deep links, not top-level nav
-    // (P3 #338). agents route kept but hidden. Routes for #manager / #projects
-    // still work via alias + deep link.
+    // NAV_ITEMS: Manager, Operator, Task Board, Resources, Memory.
+    // Dashboard moved to the sidebar brand (logo, PR #387) + NAV_SUB_ITEMS
+    // (Cmd+K) once manager took its top-nav slot (#376/#385/#386/#387 arc).
+    // operator-centric arc: Projects nested under #operator/codebases (P1 #336).
+    // agents route kept but hidden. #projects still works via alias + deep link.
     await expect(nav.locator('.nav-item')).toHaveCount(5);
   });
 
@@ -37,7 +37,9 @@ test.describe('Palantir Console Smoke', () => {
   test('hash navigation to #dashboard renders the dashboard route', async ({ page }) => {
     await page.goto('/#dashboard');
     await expect(page.locator('[data-view="dashboard"]')).toBeVisible();
-    await expect(page.locator('nav.nav-sidebar .nav-item.active')).toBeVisible();
+    // Dashboard isn't a .nav-item anymore (manager took that slot) — its
+    // current-page indicator now lives on the sidebar brand icon instead.
+    await expect(page.locator('nav.nav-sidebar .nav-brand.active')).toBeVisible();
   });
 
   test('hash navigation to #manager renders the manager route', async ({ page }) => {
