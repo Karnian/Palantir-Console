@@ -182,8 +182,10 @@ test('resolveClaudeAuth returns canAuth=false with diagnostics when no creds', a
   // 'envAllowlist: ["NOPE"]' trick was sufficient pre-PR18 because the
   // resolver only checked env vars, but now keychain is a separate path
   // that allowlist filtering does NOT cover (Claude CLI reads keychain
-  // itself, the resolver doesn't materialize the token into env).
-  const r = resolveClaudeAuth({ envAllowlist: ['NOPE'], hasKeychain: () => false });
+  // itself, the resolver doesn't materialize the token into env). Same
+  // deal for hasCredentialsFile: dev boxes running `claude login` on Linux
+  // have a real ~/.claude/.credentials.json, so stub that too.
+  const r = resolveClaudeAuth({ envAllowlist: ['NOPE'], hasKeychain: () => false, hasCredentialsFile: () => false });
   assert.equal(r.canAuth, false);
   assert.ok(r.diagnostics.length > 0);
 });
@@ -221,8 +223,10 @@ test('resolveClaudeAuth re-reads .claude-auth.json on demand', async (t) => {
     }
   });
 
-  // Step 1 — no env, no keychain, no file → canAuth false
-  let r = resolveClaudeAuth({ hasKeychain: () => false });
+  // Step 1 — no env, no keychain, no file → canAuth false. hasCredentialsFile
+  // stubbed false too, so this stays deterministic on Linux dev boxes with a
+  // real ~/.claude/.credentials.json from `claude login`.
+  let r = resolveClaudeAuth({ hasKeychain: () => false, hasCredentialsFile: () => false });
   assert.equal(r.canAuth, false);
 
   // Step 2 — drop a file in WITHOUT restarting the resolver
@@ -233,7 +237,7 @@ test('resolveClaudeAuth re-reads .claude-auth.json on demand', async (t) => {
   );
 
   // Step 3 — resolver picks it up on the next call
-  r = resolveClaudeAuth({ hasKeychain: () => false });
+  r = resolveClaudeAuth({ hasKeychain: () => false, hasCredentialsFile: () => false });
   assert.equal(r.canAuth, true);
   assert.equal(r.env.CLAUDE_CODE_OAUTH_TOKEN, 'sk-test-from-file');
   assert.ok(r.sources.includes('file:.claude-auth.json'));

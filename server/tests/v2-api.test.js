@@ -417,7 +417,7 @@ test('POST /api/manager/start: keychain-only Claude does not 400', async (t) => 
 // is meaningful.
 test('POST /api/manager/start: no creds at all still returns manager_auth_unavailable', async (t) => {
   const { app } = await createTestApp(t, {
-    authResolverOpts: { hasKeychain: () => false },
+    authResolverOpts: { hasKeychain: () => false, hasCredentialsFile: () => false },
   });
   const savedToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
   const savedKey = process.env.ANTHROPIC_API_KEY;

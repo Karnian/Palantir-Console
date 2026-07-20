@@ -128,6 +128,8 @@ test('resolveClaudeAuthForIsolated: fail-closed when no source available', (t) =
       tmpRoot,
       hasKeychain: () => false,
       readKeychainToken: () => null,
+      hasCredentialsFile: () => false,
+      readCredentialsFileToken: () => null,
     });
   });
   assert.equal(result.canAuth, false);
@@ -197,6 +199,8 @@ test('resolveClaudeAuthForIsolated: envAllowlist blocks env ANTHROPIC_API_KEY so
       envAllowlist: ['OTHER_KEY'],
       hasKeychain: () => false,
       readKeychainToken: () => null,
+      hasCredentialsFile: () => false,
+      readCredentialsFileToken: () => null,
     });
   });
   // env source denied; file absent; keychain returns null → fail-closed.
