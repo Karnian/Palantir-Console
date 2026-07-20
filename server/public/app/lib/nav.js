@@ -29,6 +29,15 @@ export const NAV_ITEMS = [
 // Number-key shortcuts in CommandPalette are NOT wired to these
 // (only NAV_ITEMS carries the numbered shortcuts).
 export const NAV_SUB_ITEMS = [
+  // #376: manager has no top-level nav slot (intentional — the 5-tab
+  // consolidation in #276/#336), but the route is real and otherwise
+  // unreachable except via the Operator-roster empty-state CTA (only shown
+  // when Top is inactive) or a live-run attention badge. hash is bare
+  // 'manager' (NOT 'operator/manager') — app.js's router keys off
+  // routeBase = hash.split('/')[0], so an 'operator/…' prefix would land on
+  // the Operator view instead. Grouped here next to the operator/* entries
+  // only for palette-listing proximity (Top sits above the Operator layer).
+  { hash: 'manager',               icon: '✦', label: NAV_LABELS.manager },
   { hash: 'resources/nodes',       icon: '⬢', label: NAV_LABELS.nodes },
   { hash: 'resources/skills',      icon: '♢', label: NAV_LABELS.skills },
   { hash: 'resources/presets',     icon: '❖', label: NAV_LABELS.presets },

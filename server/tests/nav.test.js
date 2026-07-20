@@ -47,6 +47,17 @@ test('NAV_SUB_ITEMS exposes operator roster without changing top-level nav', () 
   ]);
 });
 
+test('#376 follow-up: NAV_SUB_ITEMS makes manager reachable from CommandPalette with a real hash', () => {
+  const { NAV_SUB_ITEMS } = loadNavModule();
+  const manager = NAV_SUB_ITEMS.find((item) => item.label === '매니저');
+  assert.ok(manager, 'manager must be searchable via CommandPalette');
+  // Bare 'manager', NOT 'operator/manager' — app.js's router keys off
+  // hash.split('/')[0], so an 'operator/…' prefix would silently land on
+  // the Operator view instead of the manager route.
+  assert.equal(manager.hash, 'manager');
+  assert.ok(!NAV_SUB_ITEMS.some((item) => item.hash === 'operator/manager'));
+});
+
 test('empty hash defaults to operator while #manager route stays deep-linkable', () => {
   const routingSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'app', 'lib', 'hooks', 'routing.js'), 'utf8');
   assert.match(routingSrc, /const DEFAULT_ROUTE = 'operator';/);
