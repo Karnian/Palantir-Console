@@ -80,19 +80,30 @@ function hasClaudeKeychainCredentials() {
 
 /**
  * Existence+shape check for the Claude Code CLI's own credential file
- * (`~/.claude/.credentials.json`), the Linux counterpart to the macOS
- * Keychain item checked by hasClaudeKeychainCredentials(). A `claude login`
- * on a headless/Linux box writes credentials here instead of a system
- * keychain, and process.env never sees them (no CLAUDE_CODE_OAUTH_TOKEN
- * export) — so without this check resolveClaudeAuth() reports canAuth:false
- * even though the user is fully logged in.
+ * (`~/.claude/.credentials.json`), the file-based counterpart to the macOS
+ * Keychain item checked by hasClaudeKeychainCredentials() — used on any
+ * platform without that native keychain integration (Linux, Windows). A
+ * `claude login` on such a box writes credentials here instead, and
+ * process.env never sees them (no CLAUDE_CODE_OAUTH_TOKEN export) — so
+ * without this check resolveClaudeAuth() reports canAuth:false even though
+ * the user is fully logged in.
  *
- * Existence-only, mirroring the keychain path: we don't read the token
- * value here. The spawned `claude` subprocess inherits HOME and reads this
- * same file itself, so materializing it into our env would just be a
- * redundant secret copy.
+ * Platform-gated to non-macOS: excludes darwin specifically (covered by
+ * hasClaudeKeychainCredentials() instead, avoiding a false "logged in"
+ * positive from a stray same-shape file left over on a Mac whose CLI
+ * actually reads the keychain) — NOT gated to Linux-only, since Windows has
+ * no keychain integration here either and would otherwise be silently
+ * broken (Codex adversarial re-review of PR #374 follow-up, round 4).
+ *
+ * Existence-only, mirroring the keychain path: we don't validate expiry
+ * here. The spawned `claude` subprocess inherits HOME, reads this same
+ * file itself, and can use the refresh token — an expired accessToken
+ * doesn't mean canAuth should be false. (Expiry DOES matter for the
+ * isolated path — see readClaudeLinuxCredentialsToken(), which extracts a
+ * single static token with no refresh capability.)
  */
 function hasClaudeLinuxCredentials() {
+  if (process.platform === 'darwin') return false;
   try {
     const raw = fs.readFileSync(CLAUDE_LINUX_CREDENTIALS_FILE, 'utf-8');
     const parsed = JSON.parse(raw);
@@ -103,17 +114,28 @@ function hasClaudeLinuxCredentials() {
 }
 
 /**
- * Read the access token out of ~/.claude/.credentials.json. Linux
- * counterpart to readClaudeKeychainToken() — only called from the isolated
- * preset path (`--bare` strips the CLI's ability to read its own
- * credential file, so we must materialize the token ourselves).
+ * Read the access token out of ~/.claude/.credentials.json. File-based
+ * counterpart to readClaudeKeychainToken() (non-macOS platforms — see
+ * hasClaudeLinuxCredentials() for the gate rationale) — only called from
+ * the isolated preset path (`--bare` strips the CLI's ability to read its
+ * own credential file, so we must materialize the token ourselves, with no
+ * refresh capability once extracted).
+ *
+ * Rejects an already-expired accessToken (returns null) rather than handing
+ * a materialized token to `--bare` that's guaranteed to fail at spawn time —
+ * the normal (non-isolated) path doesn't need this because the live `claude`
+ * subprocess can refresh itself from the same file's refreshToken.
  */
 function readClaudeLinuxCredentialsToken() {
+  if (process.platform === 'darwin') return null;
   try {
     const raw = fs.readFileSync(CLAUDE_LINUX_CREDENTIALS_FILE, 'utf-8');
     const parsed = JSON.parse(raw);
-    const token = parsed?.claudeAiOauth?.accessToken;
-    return typeof token === 'string' && token ? token : null;
+    const oauth = parsed?.claudeAiOauth;
+    const token = oauth?.accessToken;
+    if (typeof token !== 'string' || !token) return null;
+    if (typeof oauth.expiresAt === 'number' && Date.now() >= oauth.expiresAt) return null;
+    return token;
   } catch {
     return null;
   }
@@ -170,35 +192,41 @@ function bootstrapClaudeAuthFromEnv({ logger = console } = {}) {
     }
   }
 
-  // Not in Claude Code session — try loading saved auth file.
+  // Not in Claude Code session — try loading saved auth file. Always
+  // attempted regardless of native-store presence: process.env.ANTHROPIC_API_KEY
+  // is also read directly (outside this resolver) by other app features
+  // (goal judge, memory distiller, specialist backend, usage provider) that
+  // have no other way to pick up a persisted key.
+  let loaded = 0;
   try {
     const auth = JSON.parse(fs.readFileSync(CLAUDE_AUTH_FILE, 'utf-8'));
-    let loaded = 0;
     for (const k of CLAUDE_AUTH_KEYS) {
       if (auth[k] && typeof auth[k] === 'string' && !process.env[k]) {
         process.env[k] = auth[k];
         loaded += 1;
       }
     }
-    if (loaded > 0) {
-      logger.log('[authResolver] Loaded saved Claude auth credentials.');
-      return true;
-    }
-    return false;
-  } catch {
-    // No .claude-auth.json yet. On Linux (no system keychain), `claude
-    // login` writes credentials straight to ~/.claude/.credentials.json —
-    // the spawned `claude` subprocess reads that file itself (HOME
-    // inherited), so there's nothing to persist here. This just avoids the
-    // misleading "no auth found" warning when the user is in fact logged in.
-    if (hasClaudeLinuxCredentials()) {
-      logger.log('[authResolver] Found Claude Code CLI credentials at ~/.claude/.credentials.json — subprocess will read them directly.');
-      return true;
-    }
-    logger.warn('[authResolver] No Claude auth found. Run server from Claude Code session first to save credentials.');
-    logger.warn('[authResolver] Or set ANTHROPIC_API_KEY env var.');
-    return false;
+  } catch { /* file missing, unreadable, or invalid JSON — fall through below */ }
+
+  if (loaded > 0) {
+    logger.log('[authResolver] Loaded saved Claude auth credentials.');
+    return true;
   }
+
+  // No usable .claude-auth.json (missing, unparseable, or present but empty
+  // of matching keys — all three land here, not just a thrown parse error).
+  // On platforms without a system keychain (Linux, Windows), `claude login`
+  // writes credentials straight to ~/.claude/.credentials.json — the spawned
+  // `claude` subprocess reads that file itself (HOME inherited), so there's
+  // nothing to persist here. This just avoids the misleading "no auth
+  // found" warning when the user is in fact logged in.
+  if (hasClaudeLinuxCredentials()) {
+    logger.log('[authResolver] Found Claude Code CLI credentials at ~/.claude/.credentials.json — subprocess will read them directly.');
+    return true;
+  }
+  logger.warn('[authResolver] No Claude auth found. Run server from Claude Code session first to save credentials.');
+  logger.warn('[authResolver] Or set ANTHROPIC_API_KEY env var.');
+  return false;
 }
 
 /**
@@ -210,11 +238,13 @@ function bootstrapClaudeAuthFromEnv({ logger = console } = {}) {
  *      file flips canAuth without a server restart)
  *   3. macOS Keychain item "Claude Code-credentials" (existence only —
  *      payload is read at spawn time by Claude CLI itself)
+ *   4. Linux ~/.claude/.credentials.json (same existence-only treatment,
+ *      for platforms without a system keychain)
  *
  * env returned in the result is what should be FORWARDED to the spawned
- * subprocess. The keychain entry is intentionally NOT materialized into
- * env: Claude CLI reads keychain itself and forwarding it would just
- * leak the secret further.
+ * subprocess. Native store entries (keychain / Linux credentials file) are
+ * intentionally NOT materialized into env: Claude CLI reads them itself
+ * and forwarding would just leak the secret further.
  *
  * @param {object} [opts]
  * @param {string[]} [opts.envAllowlist]  agent profile env_allowlist; if
@@ -222,6 +252,9 @@ function bootstrapClaudeAuthFromEnv({ logger = console } = {}) {
  *                                        forwarded to the subprocess env.
  * @param {() => boolean} [opts.hasKeychain] DI hook for tests; defaults
  *                                           to the real keychain probe.
+ * @param {() => boolean} [opts.hasCredentialsFile] DI hook for tests;
+ *                                           defaults to the real Linux
+ *                                           credentials-file probe.
  * @returns {{ canAuth: boolean, env: object, sources: string[], diagnostics: string[] }}
  */
 function resolveClaudeAuth({
@@ -283,7 +316,7 @@ function resolveClaudeAuth({
 
   const canAuth = !!(env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY || keychain || credentialsFile);
   if (!canAuth) {
-    diagnostics.push('No Claude credentials found. Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, run `claude login` (populates the macOS keychain or ~/.claude/.credentials.json on Linux), or start the server once from inside a Claude Code session to seed .claude-auth.json.');
+    diagnostics.push('No Claude credentials found. Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, run `claude login` (populates the macOS keychain, or ~/.claude/.credentials.json on Linux/Windows), or start the server once from inside a Claude Code session to seed .claude-auth.json.');
     if (Array.isArray(envAllowlist) && envAllowlist.length > 0) {
       const blocked = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']
         .filter(k => process.env[k] && !allow.has(k));
@@ -347,7 +380,15 @@ function resolveCodexAuth({ envAllowlist } = {}) {
  * itself.
  *
  * Returns the JSON-parsed `claudeAiOauth.accessToken` string, or null on
- * any failure (platform !== darwin, missing keychain item, parse error).
+ * any failure (platform !== darwin, missing keychain item, parse error, or
+ * an already-expired accessToken — see below).
+ *
+ * Rejects an already-expired accessToken (returns null) rather than handing
+ * a materialized token to `--bare` that's guaranteed to fail at spawn time
+ * — the isolated path has no refresh capability once a token is extracted,
+ * unlike a live `claude` subprocess reading the keychain itself. Only
+ * applies to the modern JSON shape, which is the only one carrying expiry
+ * data; the legacy bare-string fallback below is unaffected.
  */
 function readClaudeKeychainToken() {
   if (process.platform !== 'darwin') return null;
@@ -359,16 +400,19 @@ function readClaudeKeychainToken() {
     ).trim();
     if (!raw) return null;
     // Claude Code stores its credentials as JSON in the keychain payload.
-    // Fields of interest: claudeAiOauth.accessToken.
+    // Fields of interest: claudeAiOauth.accessToken (+ expiresAt).
     try {
       const parsed = JSON.parse(raw);
-      const token = parsed?.claudeAiOauth?.accessToken;
-      if (typeof token === 'string' && token) return token;
-      return null;
+      const oauth = parsed?.claudeAiOauth;
+      const token = oauth?.accessToken;
+      if (typeof token !== 'string' || !token) return null;
+      if (typeof oauth.expiresAt === 'number' && Date.now() >= oauth.expiresAt) return null;
+      return token;
     } catch {
       // Older schemas / test fixtures may store a bare token string instead
       // of JSON. Accept any non-empty string — the Anthropic API itself is
       // the authoritative validator of whether the value is a usable token.
+      // No structured payload here, so no expiry data to check against.
       return raw;
     }
   } catch {
@@ -384,13 +428,17 @@ function readClaudeKeychainToken() {
  * an `apiKeyHelper` script (default — token stays off `ps`/`/proc`) or an
  * env pass-through (fallback — test / temporary use).
  *
- * Token source priority (first hit wins):
+ * Token source priority (first hit wins) — normative per
+ * docs/specs/worker-preset-and-plugin-injection.md §6.9:
  *   1. env `ANTHROPIC_API_KEY`
  *   2. `.claude-auth.json` — `ANTHROPIC_API_KEY` if present, else OAuth
  *      token (API accepts OAuth access tokens in the API-key slot —
  *      confirmed by Phase 10A spike, PR #87).
  *   3. macOS keychain item "Claude Code-credentials"
  *      (JSON `claudeAiOauth.accessToken`)
+ *   4. Linux `~/.claude/.credentials.json` (same JSON shape; rejects an
+ *      already-expired accessToken since this path has no refresh
+ *      capability once extracted — see readClaudeLinuxCredentialsToken()).
  *
  * Fail-closed: when no token materializes, `{ canAuth: false, diagnostics }`.
  *
@@ -477,7 +525,7 @@ function resolveClaudeAuthForIsolated({
 
   if (!token) {
     diagnostics.push(
-      'Isolated preset requires Claude auth. Set ANTHROPIC_API_KEY, run Palantir from a Claude Code session to seed .claude-auth.json, run `claude login` (macOS keychain or ~/.claude/.credentials.json on Linux).',
+      'Isolated preset requires Claude auth. Set ANTHROPIC_API_KEY, run Palantir from a Claude Code session to seed .claude-auth.json, run `claude login` (macOS keychain, or ~/.claude/.credentials.json on Linux/Windows).',
     );
     return { canAuth: false, env: {}, sources, diagnostics };
   }
