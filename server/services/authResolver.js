@@ -33,6 +33,10 @@ const CLAUDE_AUTH_KEYS = ['ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTH
 const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials';
 const CODEX_AUTH_KEYS = ['CODEX_API_KEY', 'OPENAI_API_KEY'];
 const CODEX_AUTH_FILE = path.join(os.homedir(), '.codex', 'auth.json');
+// The Claude Code CLI's own credential store on platforms without a system
+// keychain (Linux — e.g. `claude login` on a headless box). Same JSON shape
+// as the macOS keychain payload (`claudeAiOauth.accessToken`).
+const CLAUDE_LINUX_CREDENTIALS_FILE = path.join(os.homedir(), '.claude', '.credentials.json');
 
 /**
  * Check whether the macOS Keychain has a Claude Code OAuth credentials item.
@@ -71,6 +75,47 @@ function hasClaudeKeychainCredentials() {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Existence+shape check for the Claude Code CLI's own credential file
+ * (`~/.claude/.credentials.json`), the Linux counterpart to the macOS
+ * Keychain item checked by hasClaudeKeychainCredentials(). A `claude login`
+ * on a headless/Linux box writes credentials here instead of a system
+ * keychain, and process.env never sees them (no CLAUDE_CODE_OAUTH_TOKEN
+ * export) — so without this check resolveClaudeAuth() reports canAuth:false
+ * even though the user is fully logged in.
+ *
+ * Existence-only, mirroring the keychain path: we don't read the token
+ * value here. The spawned `claude` subprocess inherits HOME and reads this
+ * same file itself, so materializing it into our env would just be a
+ * redundant secret copy.
+ */
+function hasClaudeLinuxCredentials() {
+  try {
+    const raw = fs.readFileSync(CLAUDE_LINUX_CREDENTIALS_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    return typeof parsed?.claudeAiOauth?.accessToken === 'string' && !!parsed.claudeAiOauth.accessToken;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read the access token out of ~/.claude/.credentials.json. Linux
+ * counterpart to readClaudeKeychainToken() — only called from the isolated
+ * preset path (`--bare` strips the CLI's ability to read its own
+ * credential file, so we must materialize the token ourselves).
+ */
+function readClaudeLinuxCredentialsToken() {
+  try {
+    const raw = fs.readFileSync(CLAUDE_LINUX_CREDENTIALS_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    const token = parsed?.claudeAiOauth?.accessToken;
+    return typeof token === 'string' && token ? token : null;
+  } catch {
+    return null;
   }
 }
 
@@ -141,6 +186,15 @@ function bootstrapClaudeAuthFromEnv({ logger = console } = {}) {
     }
     return false;
   } catch {
+    // No .claude-auth.json yet. On Linux (no system keychain), `claude
+    // login` writes credentials straight to ~/.claude/.credentials.json —
+    // the spawned `claude` subprocess reads that file itself (HOME
+    // inherited), so there's nothing to persist here. This just avoids the
+    // misleading "no auth found" warning when the user is in fact logged in.
+    if (hasClaudeLinuxCredentials()) {
+      logger.log('[authResolver] Found Claude Code CLI credentials at ~/.claude/.credentials.json — subprocess will read them directly.');
+      return true;
+    }
     logger.warn('[authResolver] No Claude auth found. Run server from Claude Code session first to save credentials.');
     logger.warn('[authResolver] Or set ANTHROPIC_API_KEY env var.');
     return false;
@@ -170,7 +224,11 @@ function bootstrapClaudeAuthFromEnv({ logger = console } = {}) {
  *                                           to the real keychain probe.
  * @returns {{ canAuth: boolean, env: object, sources: string[], diagnostics: string[] }}
  */
-function resolveClaudeAuth({ envAllowlist, hasKeychain = hasClaudeKeychainCredentials } = {}) {
+function resolveClaudeAuth({
+  envAllowlist,
+  hasKeychain = hasClaudeKeychainCredentials,
+  hasCredentialsFile = hasClaudeLinuxCredentials,
+} = {}) {
   const env = {};
   const sources = [];
   const diagnostics = [];
@@ -216,9 +274,16 @@ function resolveClaudeAuth({ envAllowlist, hasKeychain = hasClaudeKeychainCreden
   const keychain = hasKeychain();
   if (keychain) sources.push('keychain:Claude Code-credentials');
 
-  const canAuth = !!(env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY || keychain);
+  // (4) Linux Claude Code CLI credential file — same existence-only
+  //     treatment as the keychain. `claude login` on a headless box writes
+  //     here instead of a keychain; the spawned `claude` subprocess reads
+  //     it itself (HOME inherited), so we never materialize the token.
+  const credentialsFile = hasCredentialsFile();
+  if (credentialsFile) sources.push('file:~/.claude/.credentials.json');
+
+  const canAuth = !!(env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY || keychain || credentialsFile);
   if (!canAuth) {
-    diagnostics.push('No Claude credentials found. Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, run the Claude Code desktop app to populate the macOS keychain, or start the server once from inside a Claude Code session to seed .claude-auth.json.');
+    diagnostics.push('No Claude credentials found. Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, run `claude login` (populates the macOS keychain or ~/.claude/.credentials.json on Linux), or start the server once from inside a Claude Code session to seed .claude-auth.json.');
     if (Array.isArray(envAllowlist) && envAllowlist.length > 0) {
       const blocked = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']
         .filter(k => process.env[k] && !allow.has(k));
@@ -347,6 +412,8 @@ function resolveClaudeAuthForIsolated({
   envAllowlist,
   hasKeychain = hasClaudeKeychainCredentials,
   readKeychainToken = readClaudeKeychainToken,
+  hasCredentialsFile = hasClaudeLinuxCredentials,
+  readCredentialsFileToken = readClaudeLinuxCredentialsToken,
   prefer = 'apiKeyHelper',
   tmpRoot = os.tmpdir(),
 } = {}) {
@@ -398,8 +465,19 @@ function resolveClaudeAuthForIsolated({
   }
 
   if (!token) {
+    // Linux fallback: ~/.claude/.credentials.json (no system keychain).
+    if (hasCredentialsFile()) {
+      const fileToken = readCredentialsFileToken();
+      if (fileToken) {
+        token = fileToken;
+        sources.push('file:~/.claude/.credentials.json:claudeAiOauth.accessToken');
+      }
+    }
+  }
+
+  if (!token) {
     diagnostics.push(
-      'Isolated preset requires Claude auth. Set ANTHROPIC_API_KEY, run Palantir from a Claude Code session to seed .claude-auth.json, or ensure the macOS keychain has a "Claude Code-credentials" item.',
+      'Isolated preset requires Claude auth. Set ANTHROPIC_API_KEY, run Palantir from a Claude Code session to seed .claude-auth.json, run `claude login` (macOS keychain or ~/.claude/.credentials.json on Linux).',
     );
     return { canAuth: false, env: {}, sources, diagnostics };
   }
@@ -583,10 +661,13 @@ module.exports = {
   buildManagerSpawnEnv,
   resolveBearerForPreflight,
   hasClaudeKeychainCredentials,
+  hasClaudeLinuxCredentials,
+  readClaudeLinuxCredentialsToken,
   // Exposed for tests
   CLAUDE_AUTH_FILE,
   CODEX_AUTH_FILE,
   CLAUDE_AUTH_KEYS,
   CODEX_AUTH_KEYS,
   CLAUDE_KEYCHAIN_SERVICE,
+  CLAUDE_LINUX_CREDENTIALS_FILE,
 };
