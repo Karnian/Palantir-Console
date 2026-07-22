@@ -95,7 +95,10 @@ test('067 upgrade removes the seeded profile, nulls references, and fails safe n
       INSERT INTO runs (id, agent_profile_id, status)
       VALUES (?, 'opencode', ?)
     `);
-    const safeNonterminalStatuses = ['queued', 'paused', 'needs_input'];
+    // Only 'queued' structurally guarantees no process was ever spawned.
+    // 'paused' and 'needs_input' both transition from 'running' and can
+    // still own a live process — see the migration's own comment.
+    const safeNonterminalStatuses = ['queued'];
     for (const status of safeNonterminalStatuses) {
       insertRun.run(`run_${status}`, status);
     }
@@ -136,7 +139,7 @@ test('067 upgrade removes the seeded profile, nulls references, and fails safe n
   }
 });
 
-for (const status of ['running', 'materializing']) {
+for (const status of ['running', 'materializing', 'paused', 'needs_input']) {
   test(`067 leaves a ${status} run untouched and retains its profile`, () => {
     const db = createUpgradeDatabase();
     try {
