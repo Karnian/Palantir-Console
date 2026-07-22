@@ -192,7 +192,7 @@ export const RUN_INSPECTOR_LABELS = {
   diffNoChanges: '워크트리에 커밋되지 않은 변경이 없습니다.',
   // Costs
   costEmpty: '이 어댑터는 비용 데이터를 제공하지 않습니다.',
-  costEmptySub: 'Claude Code 워커와 Codex 매니저 세션은 사용량을 보고합니다. OpenCode 등 다른 어댑터는 미제공입니다.',
+  costEmptySub: 'Claude Code 워커와 Codex 매니저 세션은 사용량을 보고합니다. 그 외 어댑터는 비용 데이터를 제공하지 않습니다.',
   workerCost: '워커 비용',
   workerCostSub: '워커 어댑터가 완료 시 보고한 값입니다.',
   inputTokens: '입력 토큰',
@@ -658,7 +658,7 @@ export const PRESETS_LABELS = {
   namePlaceholder: '예: agent-olympus-isolated',
   fieldDescription: '설명',
   fieldIsolated: '격리 모드 (Tier 2 — Claude 전용)',
-  isolatedHint: 'Claude 워커에만 적용됩니다. Codex / OpenCode 는 ',
+  isolatedHint: 'Claude 워커에만 적용됩니다. Claude 외 워커는 ',
   isolatedHintAfterCode: ' 경고를 받고 Tier 1 로 폴백합니다.',
   fieldBasePromptPrefix: '기본 시스템 프롬프트',
   fieldBasePromptByteSuffix: '바이트',

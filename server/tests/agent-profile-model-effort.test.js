@@ -55,7 +55,7 @@ test('vendor rules reject unsupported fields and allow clean codex fields', (t) 
     () => service.createProfile(profile({ command: 'claude', type: 'claude-code', reasoning_effort: 'high' })),
     /reasoning_effort only supported for codex workers/,
   );
-  for (const command of ['gemini', 'opencode']) {
+  for (const command of ['gemini']) {
     assertBadRequest(
       () => service.createProfile(profile({ command, type: command, model: 'x' })),
       /model only supported for codex\/claude workers/,
@@ -65,6 +65,30 @@ test('vendor rules reject unsupported fields and allow clean codex fields', (t) 
   const created = service.createProfile(profile({ model: 'gpt-5', reasoning_effort: 'high' }));
   assert.equal(created.model, 'gpt-5');
   assert.equal(created.reasoning_effort, 'high');
+});
+
+test('retired opencode commands are rejected at create time', (t) => {
+  const { service } = setup(t);
+  for (const command of ['opencode', '/opt/homebrew/bin/opencode', '/usr/local/bin/opencode']) {
+    assertBadRequest(
+      () => service.createProfile(profile({ type: 'custom', command })),
+      /not in the allowlist/,
+    );
+  }
+});
+
+test('retired opencode type is rejected on create and merged-state update', (t) => {
+  const { service } = setup(t);
+  assertBadRequest(
+    () => service.createProfile(profile({ type: 'opencode', command: 'gemini' })),
+    /opencode is a retired agent type, no longer supported/,
+  );
+
+  const created = service.createProfile(profile({ type: 'custom', command: 'gemini' }));
+  assertBadRequest(
+    () => service.updateProfile(created.id, { type: 'opencode' }),
+    /opencode is a retired agent type, no longer supported/,
+  );
 });
 
 test('structured values are validated at create time', (t) => {
