@@ -1451,7 +1451,7 @@ function createLifecycleService({
         let spawnEnv = parseEnvAllowlist(profile.env_allowlist, httpBearerEnvKeys);
         let presetAuthCleanup = null;
         if (presetResolution && presetResolution.isolated) {
-          const auth = _authResolver.resolveClaudeAuthForIsolated({
+          const auth = await _authResolver.resolveClaudeAuthForIsolated({
             envAllowlist: parseEnvAllowlistArray(profile.env_allowlist),
             ..._authResolverOpts,
           });

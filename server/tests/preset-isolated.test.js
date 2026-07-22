@@ -52,18 +52,18 @@ async function mkdb(t) {
 // authResolver.resolveClaudeAuthForIsolated
 // --------------------------------------------------------------------------
 
-function withEnv(key, value, fn) {
+async function withEnv(key, value, fn) {
   const prev = process.env[key];
   if (value === undefined) delete process.env[key];
   else process.env[key] = value;
-  try { return fn(); } finally {
+  try { return await fn(); } finally {
     if (prev === undefined) delete process.env[key]; else process.env[key] = prev;
   }
 }
 
-test('resolveClaudeAuthForIsolated: env ANTHROPIC_API_KEY → apiKeyHelper by default', (t) => {
+test('resolveClaudeAuthForIsolated: env ANTHROPIC_API_KEY → apiKeyHelper by default', async (t) => {
   const tmpRoot = mkTempDir('iso-tmp-', t);
-  const result = withEnv('ANTHROPIC_API_KEY', 'sk-test-token-123', () => {
+  const result = await withEnv('ANTHROPIC_API_KEY', 'sk-test-token-123', () => {
     return authResolverModule.resolveClaudeAuthForIsolated({
       tmpRoot,
       hasKeychain: () => false,
@@ -91,9 +91,9 @@ test('resolveClaudeAuthForIsolated: env ANTHROPIC_API_KEY → apiKeyHelper by de
   assert.equal(fs.existsSync(result.apiKeyHelperSettings.tmpDir), false);
 });
 
-test('resolveClaudeAuthForIsolated: prefer="env" returns env-only, no temp files', (t) => {
+test('resolveClaudeAuthForIsolated: prefer="env" returns env-only, no temp files', async (t) => {
   const tmpRoot = mkTempDir('iso-tmp-', t);
-  const result = withEnv('ANTHROPIC_API_KEY', 'sk-e', () => {
+  const result = await withEnv('ANTHROPIC_API_KEY', 'sk-e', () => {
     return authResolverModule.resolveClaudeAuthForIsolated({
       tmpRoot, prefer: 'env', hasKeychain: () => false, readKeychainToken: () => null,
     });
@@ -104,9 +104,9 @@ test('resolveClaudeAuthForIsolated: prefer="env" returns env-only, no temp files
   assert.ok(result.sources.some(s => s === 'materialize:env:ANTHROPIC_API_KEY'));
 });
 
-test('resolveClaudeAuthForIsolated: keychain fallback when env + file absent', (t) => {
+test('resolveClaudeAuthForIsolated: keychain fallback when env + file absent', async (t) => {
   const tmpRoot = mkTempDir('iso-tmp-', t);
-  const result = withEnv('ANTHROPIC_API_KEY', undefined, () => {
+  const result = await withEnv('ANTHROPIC_API_KEY', undefined, () => {
     return authResolverModule.resolveClaudeAuthForIsolated({
       tmpRoot,
       hasKeychain: () => true,
@@ -121,9 +121,9 @@ test('resolveClaudeAuthForIsolated: keychain fallback when env + file absent', (
   result.apiKeyHelperSettings.cleanup();
 });
 
-test('resolveClaudeAuthForIsolated: fail-closed when no source available', (t) => {
+test('resolveClaudeAuthForIsolated: fail-closed when no source available', async (t) => {
   const tmpRoot = mkTempDir('iso-tmp-', t);
-  const result = withEnv('ANTHROPIC_API_KEY', undefined, () => {
+  const result = await withEnv('ANTHROPIC_API_KEY', undefined, () => {
     return authResolverModule.resolveClaudeAuthForIsolated({
       tmpRoot,
       hasKeychain: () => false,
@@ -138,17 +138,15 @@ test('resolveClaudeAuthForIsolated: fail-closed when no source available', (t) =
   assert.ok(result.diagnostics[0].includes('ANTHROPIC_API_KEY'));
 });
 
-test('readClaudeKeychainToken: older schema bare string fallback accepts any string (not just [\\w.-])', () => {
+test('readClaudeKeychainToken: older schema bare string fallback accepts any string (not just [\\w.-])', async () => {
   // Guard against the regex-too-narrow P1 — confirm the public helper now
   // returns unusual-character tokens verbatim when JSON.parse fails.
-  // We can't spawn `security`, so exercise via module-level monkeypatch of
-  // execFileSync is fragile; instead call resolveClaudeAuthForIsolated with
-  // a readKeychainToken injection and verify no character filter is imposed
-  // upstream (the helper value flows through unchanged into apiKeyHelper).
+  // Exercise the resolver's injection boundary here and verify no character
+  // filter is imposed upstream (the real async reader is covered separately).
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'p10d-'));
   try {
     const weird = 'sk-opaque+token/with%chars=';  // contains +/%=
-    const r = authResolverModule.resolveClaudeAuthForIsolated({
+    const r = await authResolverModule.resolveClaudeAuthForIsolated({
       tmpRoot,
       hasKeychain: () => true,
       readKeychainToken: () => weird,
@@ -191,9 +189,9 @@ test('apiKeyHelper cleanup fires on streamJsonEngine spawn synchronous throw (Co
   assert.equal(cleanupCalls, 1, 'onCleanup was invoked exactly once on pre-spawn validation failure');
 });
 
-test('resolveClaudeAuthForIsolated: envAllowlist blocks env ANTHROPIC_API_KEY source', (t) => {
+test('resolveClaudeAuthForIsolated: envAllowlist blocks env ANTHROPIC_API_KEY source', async (t) => {
   const tmpRoot = mkTempDir('iso-tmp-', t);
-  const result = withEnv('ANTHROPIC_API_KEY', 'sk-blocked', () => {
+  const result = await withEnv('ANTHROPIC_API_KEY', 'sk-blocked', () => {
     return authResolverModule.resolveClaudeAuthForIsolated({
       tmpRoot,
       envAllowlist: ['OTHER_KEY'],
@@ -310,7 +308,7 @@ test('lifecycleService: isolated preset → spawn gets isolated+pluginDirs+setti
   // Stub authResolver so tests are deterministic (no real keychain probe).
   const fakeAuthTmp = mkTempDir('fake-auth-', t);
   const fakeAuth = {
-    resolveClaudeAuthForIsolated: () => ({
+    resolveClaudeAuthForIsolated: async () => ({
       canAuth: true,
       env: {},
       sources: ['test'],

@@ -90,7 +90,7 @@ async function fetchClaudeCodeUsage() {
   // reader, which silently returned null — and this "No Claude auth token
   // found" error — on any non-macOS box regardless of actual login state).
   const token = process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY
-    || readClaudeKeychainToken() || readClaudeLinuxCredentialsToken();
+    || await readClaudeKeychainToken() || await readClaudeLinuxCredentialsToken();
   if (!token) {
     return {
       ...base,

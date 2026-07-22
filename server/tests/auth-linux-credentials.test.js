@@ -25,6 +25,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const fsp = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 
@@ -38,13 +39,13 @@ const {
   CLAUDE_LINUX_CREDENTIALS_FILE,
 } = authResolverModule;
 
-function withNoClaudeEnv(fn) {
+async function withNoClaudeEnv(fn) {
   const saved = {};
   for (const k of ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL']) {
     saved[k] = process.env[k];
     delete process.env[k];
   }
-  try { return fn(); } finally {
+  try { return await fn(); } finally {
     for (const k of Object.keys(saved)) {
       if (saved[k] != null) process.env[k] = saved[k];
       else delete process.env[k];
@@ -60,7 +61,7 @@ function withNoClaudeEnv(fn) {
 // here could race with that file's own save/remove/restore and either
 // leave a stray test token behind or clobber a developer's real cached
 // credentials (Codex adversarial re-review of PR #374, P1).
-function withFakeClaudeAuthFile(auth, fn) {
+async function withFakeClaudeAuthFile(auth, fn) {
   const origExists = fs.existsSync;
   const origRead = fs.readFileSync;
   fs.existsSync = function (p, ...rest) {
@@ -78,17 +79,14 @@ function withFakeClaudeAuthFile(auth, fn) {
     }
     return origRead.call(fs, p, ...rest);
   };
-  try { return fn(); } finally {
+  try { return await fn(); } finally {
     fs.existsSync = origExists;
     fs.readFileSync = origRead;
   }
 }
 
-// Monkeypatches fs.readFileSync so reads of CLAUDE_LINUX_CREDENTIALS_FILE
-// return `content` (or throw ENOENT if content is null), without ever
-// touching the real ~/.claude/.credentials.json on this dev box. Exercises
-// the actual hasClaudeLinuxCredentials/readClaudeLinuxCredentialsToken
-// implementations, not the DI stub.
+// Monkeypatches the sync/async fs reader used by each real credentials helper
+// so tests never touch ~/.claude/.credentials.json on this dev box.
 function withFakeLinuxCredsFile(content, fn) {
   const orig = fs.readFileSync;
   fs.readFileSync = function (p, ...rest) {
@@ -105,6 +103,22 @@ function withFakeLinuxCredsFile(content, fn) {
   try { return fn(); } finally { fs.readFileSync = orig; }
 }
 
+async function withFakeLinuxCredsFileAsync(content, fn) {
+  const orig = fsp.readFile;
+  fsp.readFile = async function (p, ...rest) {
+    if (p === CLAUDE_LINUX_CREDENTIALS_FILE) {
+      if (content == null) {
+        const err = new Error('ENOENT');
+        err.code = 'ENOENT';
+        throw err;
+      }
+      return content;
+    }
+    return orig.call(fsp, p, ...rest);
+  };
+  try { return await fn(); } finally { fsp.readFile = orig; }
+}
+
 function withPlatform(value, fn) {
   const orig = Object.getOwnPropertyDescriptor(process, 'platform');
   Object.defineProperty(process, 'platform', { value, configurable: true });
@@ -113,13 +127,21 @@ function withPlatform(value, fn) {
   }
 }
 
+async function withPlatformAsync(value, fn) {
+  const orig = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value, configurable: true });
+  try { return await fn(); } finally {
+    Object.defineProperty(process, 'platform', orig);
+  }
+}
+
 // --------------------------------------------------------------------------
 // resolveClaudeAuth — positive path + priority
 // --------------------------------------------------------------------------
 
-test('resolveClaudeAuth: Linux credentials file alone flips canAuth=true, existence-only', () => {
-  withNoClaudeEnv(() => {
-    withFakeClaudeAuthFile(null, () => {
+test('resolveClaudeAuth: Linux credentials file alone flips canAuth=true, existence-only', async () => {
+  await withNoClaudeEnv(async () => {
+    await withFakeClaudeAuthFile(null, () => {
       const r = resolveClaudeAuth({ hasKeychain: () => false, hasCredentialsFile: () => true });
       assert.equal(r.canAuth, true);
       assert.ok(r.sources.includes('file:~/.claude/.credentials.json'));
@@ -130,13 +152,13 @@ test('resolveClaudeAuth: Linux credentials file alone flips canAuth=true, existe
   });
 });
 
-test('resolveClaudeAuth: .claude-auth.json token is forwarded regardless of native store presence', () => {
+test('resolveClaudeAuth: .claude-auth.json token is forwarded regardless of native store presence', async () => {
   // Source priority is additive, not competitive: the cached file's token
   // is always merged into env (tier 2, unchanged from PR #374); a native
   // store existing alongside it (tier 3/4) doesn't suppress it.
   for (const hasNative of [true, false]) {
-    withNoClaudeEnv(() => {
-      withFakeClaudeAuthFile({ CLAUDE_CODE_OAUTH_TOKEN: 'cached-token' }, () => {
+    await withNoClaudeEnv(async () => {
+      await withFakeClaudeAuthFile({ CLAUDE_CODE_OAUTH_TOKEN: 'cached-token' }, () => {
         const r = resolveClaudeAuth({ hasKeychain: () => false, hasCredentialsFile: () => hasNative });
         assert.equal(r.canAuth, true);
         assert.equal(r.env.CLAUDE_CODE_OAUTH_TOKEN, 'cached-token');
@@ -146,9 +168,9 @@ test('resolveClaudeAuth: .claude-auth.json token is forwarded regardless of nati
   }
 });
 
-test('resolveClaudeAuth: ANTHROPIC_BASE_URL and its paired token both forward from the file', () => {
-  withNoClaudeEnv(() => {
-    withFakeClaudeAuthFile(
+test('resolveClaudeAuth: ANTHROPIC_BASE_URL and its paired token both forward from the file', async () => {
+  await withNoClaudeEnv(async () => {
+    await withFakeClaudeAuthFile(
       { ANTHROPIC_BASE_URL: 'https://proxy.example.invalid', ANTHROPIC_API_KEY: 'proxy-scoped-key' },
       () => {
         const r = resolveClaudeAuth({ hasKeychain: () => false, hasCredentialsFile: () => true });
@@ -164,12 +186,12 @@ test('resolveClaudeAuth: ANTHROPIC_BASE_URL and its paired token both forward fr
 // resolveClaudeAuthForIsolated — positive path + priority
 // --------------------------------------------------------------------------
 
-test('resolveClaudeAuthForIsolated: Linux credentials file alone materializes via apiKeyHelper', (t) => {
+test('resolveClaudeAuthForIsolated: Linux credentials file alone materializes via apiKeyHelper', async (t) => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'p10d-linux-'));
   t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
-  withNoClaudeEnv(() => {
-    withFakeClaudeAuthFile(null, () => {
-      const r = resolveClaudeAuthForIsolated({
+  await withNoClaudeEnv(async () => {
+    await withFakeClaudeAuthFile(null, async () => {
+      const r = await resolveClaudeAuthForIsolated({
         tmpRoot,
         hasKeychain: () => false,
         readKeychainToken: () => null,
@@ -185,15 +207,15 @@ test('resolveClaudeAuthForIsolated: Linux credentials file alone materializes vi
   });
 });
 
-test('resolveClaudeAuthForIsolated: .claude-auth.json cache wins over a native store (normative §6.9 order)', (t) => {
+test('resolveClaudeAuthForIsolated: .claude-auth.json cache wins over a native store (normative §6.9 order)', async (t) => {
   // env → .claude-auth.json → keychain → Linux file, per
   // docs/specs/worker-preset-and-plugin-injection.md §6.9. The cached file
   // is checked BEFORE native stores for the isolated path.
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'p10d-linux-priority-'));
   t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
-  withNoClaudeEnv(() => {
-    withFakeClaudeAuthFile({ CLAUDE_CODE_OAUTH_TOKEN: 'cached-token' }, () => {
-      const r = resolveClaudeAuthForIsolated({
+  await withNoClaudeEnv(async () => {
+    await withFakeClaudeAuthFile({ CLAUDE_CODE_OAUTH_TOKEN: 'cached-token' }, async () => {
+      const r = await resolveClaudeAuthForIsolated({
         tmpRoot,
         hasKeychain: () => false,
         readKeychainToken: () => null,
@@ -209,12 +231,12 @@ test('resolveClaudeAuthForIsolated: .claude-auth.json cache wins over a native s
   });
 });
 
-test('resolveClaudeAuthForIsolated: Linux native store is the last-resort fallback (no env, no file)', (t) => {
+test('resolveClaudeAuthForIsolated: Linux native store is the last-resort fallback (no env, no file)', async (t) => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'p10d-linux-fallback-'));
   t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
-  withNoClaudeEnv(() => {
-    withFakeClaudeAuthFile(null, () => {
-      const r = resolveClaudeAuthForIsolated({
+  await withNoClaudeEnv(async () => {
+    await withFakeClaudeAuthFile(null, async () => {
+      const r = await resolveClaudeAuthForIsolated({
         tmpRoot,
         hasKeychain: () => false,
         readKeychainToken: () => null,
@@ -295,47 +317,47 @@ test('hasClaudeLinuxCredentials: gated to non-macOS platforms (covers Windows to
   });
 });
 
-test('readClaudeLinuxCredentialsToken: returns the token when not expired', () => {
+test('readClaudeLinuxCredentialsToken: returns the token when not expired', async () => {
   const future = Date.now() + 60 * 60 * 1000;
-  withPlatform('linux', () => {
-    withFakeLinuxCredsFile(JSON.stringify({ claudeAiOauth: { accessToken: 'fresh-tok', expiresAt: future } }), () => {
-      assert.equal(readClaudeLinuxCredentialsToken(), 'fresh-tok');
+  await withPlatformAsync('linux', async () => {
+    await withFakeLinuxCredsFileAsync(JSON.stringify({ claudeAiOauth: { accessToken: 'fresh-tok', expiresAt: future } }), async () => {
+      assert.equal(await readClaudeLinuxCredentialsToken(), 'fresh-tok');
     });
   });
 });
 
-test('readClaudeLinuxCredentialsToken: returns null when accessToken is already expired', () => {
+test('readClaudeLinuxCredentialsToken: returns null when accessToken is already expired', async () => {
   const past = Date.now() - 60 * 60 * 1000;
-  withPlatform('linux', () => {
-    withFakeLinuxCredsFile(JSON.stringify({ claudeAiOauth: { accessToken: 'expired-tok', expiresAt: past } }), () => {
-      assert.equal(readClaudeLinuxCredentialsToken(), null);
+  await withPlatformAsync('linux', async () => {
+    await withFakeLinuxCredsFileAsync(JSON.stringify({ claudeAiOauth: { accessToken: 'expired-tok', expiresAt: past } }), async () => {
+      assert.equal(await readClaudeLinuxCredentialsToken(), null);
     });
   });
 });
 
-test('readClaudeLinuxCredentialsToken: returns the token when expiresAt is absent (no expiry info doesn\'t block)', () => {
-  withPlatform('linux', () => {
-    withFakeLinuxCredsFile(JSON.stringify({ claudeAiOauth: { accessToken: 'no-expiry-tok' } }), () => {
-      assert.equal(readClaudeLinuxCredentialsToken(), 'no-expiry-tok');
+test('readClaudeLinuxCredentialsToken: returns the token when expiresAt is absent (no expiry info doesn\'t block)', async () => {
+  await withPlatformAsync('linux', async () => {
+    await withFakeLinuxCredsFileAsync(JSON.stringify({ claudeAiOauth: { accessToken: 'no-expiry-tok' } }), async () => {
+      assert.equal(await readClaudeLinuxCredentialsToken(), 'no-expiry-tok');
     });
   });
 });
 
-test('readClaudeLinuxCredentialsToken: null on malformed JSON / missing file / macOS platform', () => {
-  withPlatform('linux', () => {
-    withFakeLinuxCredsFile('{broken', () => {
-      assert.equal(readClaudeLinuxCredentialsToken(), null);
+test('readClaudeLinuxCredentialsToken: null on malformed JSON / missing file / macOS platform', async () => {
+  await withPlatformAsync('linux', async () => {
+    await withFakeLinuxCredsFileAsync('{broken', async () => {
+      assert.equal(await readClaudeLinuxCredentialsToken(), null);
     });
-    withFakeLinuxCredsFile(null, () => {
-      assert.equal(readClaudeLinuxCredentialsToken(), null);
+    await withFakeLinuxCredsFileAsync(null, async () => {
+      assert.equal(await readClaudeLinuxCredentialsToken(), null);
     });
   });
-  withFakeLinuxCredsFile(JSON.stringify({ claudeAiOauth: { accessToken: 'tok' } }), () => {
-    withPlatform('darwin', () => {
-      assert.equal(readClaudeLinuxCredentialsToken(), null, 'darwin is covered by readClaudeKeychainToken instead');
+  await withFakeLinuxCredsFileAsync(JSON.stringify({ claudeAiOauth: { accessToken: 'tok' } }), async () => {
+    await withPlatformAsync('darwin', async () => {
+      assert.equal(await readClaudeLinuxCredentialsToken(), null, 'darwin is covered by readClaudeKeychainToken instead');
     });
-    withPlatform('win32', () => {
-      assert.equal(readClaudeLinuxCredentialsToken(), 'tok', 'Windows has no keychain path here and must not be excluded');
+    await withPlatformAsync('win32', async () => {
+      assert.equal(await readClaudeLinuxCredentialsToken(), 'tok', 'Windows has no keychain path here and must not be excluded');
     });
   });
 });

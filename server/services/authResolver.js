@@ -24,9 +24,13 @@
  */
 
 const fs = require('node:fs');
+const fsp = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
-const { execFileSync } = require('node:child_process');
+const { execFile, execFileSync } = require('node:child_process');
+const { promisify } = require('node:util');
+
+const execFileAsync = promisify(execFile);
 
 const CLAUDE_AUTH_FILE = path.join(__dirname, '..', '..', '.claude-auth.json');
 const CLAUDE_AUTH_KEYS = ['ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
@@ -116,20 +120,20 @@ function hasClaudeLinuxCredentials() {
 /**
  * Read the access token out of ~/.claude/.credentials.json. File-based
  * counterpart to readClaudeKeychainToken() (non-macOS platforms — see
- * hasClaudeLinuxCredentials() for the gate rationale) — only called from
- * the isolated preset path (`--bare` strips the CLI's ability to read its
- * own credential file, so we must materialize the token ourselves, with no
- * refresh capability once extracted).
+ * hasClaudeLinuxCredentials() for the gate rationale). Used where the token
+ * must be materialized directly: isolated preset workers and usage queries.
+ * (`--bare` strips an isolated worker's ability to read the credential file,
+ * leaving it with no refresh capability once the token is extracted.)
  *
  * Rejects an already-expired accessToken (returns null) rather than handing
  * a materialized token to `--bare` that's guaranteed to fail at spawn time —
  * the normal (non-isolated) path doesn't need this because the live `claude`
  * subprocess can refresh itself from the same file's refreshToken.
  */
-function readClaudeLinuxCredentialsToken() {
+async function readClaudeLinuxCredentialsToken() {
   if (process.platform === 'darwin') return null;
   try {
-    const raw = fs.readFileSync(CLAUDE_LINUX_CREDENTIALS_FILE, 'utf-8');
+    const raw = await fsp.readFile(CLAUDE_LINUX_CREDENTIALS_FILE, 'utf-8');
     const parsed = JSON.parse(raw);
     const oauth = parsed?.claudeAiOauth;
     const token = oauth?.accessToken;
@@ -374,10 +378,9 @@ function resolveCodexAuth({ envAllowlist } = {}) {
  * extract the OAuth access token that can be passed as ANTHROPIC_API_KEY.
  *
  * Unlike hasClaudeKeychainCredentials(), this uses `security -w` which
- * materializes the payload into our process memory. Only called from the
- * isolated preset path (Phase 10D) where token materialization is
- * intentional — the CLI is spawned with `--bare` and cannot read keychain
- * itself.
+ * materializes the payload into our process memory. Used where token
+ * materialization is intentional: isolated preset workers (the CLI is
+ * spawned with `--bare` and cannot read keychain itself) and usage queries.
  *
  * Returns the JSON-parsed `claudeAiOauth.accessToken` string, or null on
  * any failure (platform !== darwin, missing keychain item, parse error, or
@@ -390,14 +393,15 @@ function resolveCodexAuth({ envAllowlist } = {}) {
  * applies to the modern JSON shape, which is the only one carrying expiry
  * data; the legacy bare-string fallback below is unaffected.
  */
-function readClaudeKeychainToken() {
+async function readClaudeKeychainToken() {
   if (process.platform !== 'darwin') return null;
   try {
-    const raw = execFileSync(
+    const { stdout } = await execFileAsync(
       'security',
       ['find-generic-password', '-s', CLAUDE_KEYCHAIN_SERVICE, '-w'],
       { stdio: 'pipe', timeout: 3000, encoding: 'utf8' },
-    ).trim();
+    );
+    const raw = stdout.trim();
     if (!raw) return null;
     // Claude Code stores its credentials as JSON in the keychain payload.
     // Fields of interest: claudeAiOauth.accessToken (+ expiresAt).
@@ -445,18 +449,20 @@ function readClaudeKeychainToken() {
  * @param {object} [opts]
  * @param {string[]} [opts.envAllowlist]
  * @param {() => boolean} [opts.hasKeychain]
- * @param {() => string|null} [opts.readKeychainToken]
+ * @param {() => Promise<string|null>|string|null} [opts.readKeychainToken]
+ * @param {() => boolean} [opts.hasCredentialsFile]
+ * @param {() => Promise<string|null>|string|null} [opts.readCredentialsFileToken]
  * @param {'apiKeyHelper'|'env'} [opts.prefer]  Default 'apiKeyHelper'.
  * @param {string} [opts.tmpRoot]               Override (tests).
- * @returns {{
+ * @returns {Promise<{
  *   canAuth: boolean,
  *   env: Record<string,string>,
  *   sources: string[],
  *   diagnostics: string[],
  *   apiKeyHelperSettings?: { settingsPath, helperPath, tmpDir, cleanup },
- * }}
+ * }>}
  */
-function resolveClaudeAuthForIsolated({
+async function resolveClaudeAuthForIsolated({
   envAllowlist,
   hasKeychain = hasClaudeKeychainCredentials,
   readKeychainToken = readClaudeKeychainToken,
@@ -504,7 +510,7 @@ function resolveClaudeAuthForIsolated({
     if (hasKeychain()) {
       // sources note added after success only — the probe alone isn't
       // proof of extraction.
-      const kcToken = readKeychainToken();
+      const kcToken = await readKeychainToken();
       if (kcToken) {
         token = kcToken;
         sources.push('keychain:Claude Code-credentials:claudeAiOauth.accessToken');
@@ -515,7 +521,7 @@ function resolveClaudeAuthForIsolated({
   if (!token) {
     // Linux fallback: ~/.claude/.credentials.json (no system keychain).
     if (hasCredentialsFile()) {
-      const fileToken = readCredentialsFileToken();
+      const fileToken = await readCredentialsFileToken();
       if (fileToken) {
         token = fileToken;
         sources.push('file:~/.claude/.credentials.json:claudeAiOauth.accessToken');
