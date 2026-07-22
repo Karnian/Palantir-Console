@@ -124,16 +124,24 @@ test('GET /api/usage/providers always attempts known providers without auth conf
 
 test('GET /api/agents/:id/usage returns fallback shape for unknown agent type', async (t) => {
   const { app } = await createTestApp(t);
-  // Default seeded profile `opencode` has type='opencode' which has no usage provider
-  // → route returns the structured fallback object instead of throwing.
-  const res = await request(app).get('/api/agents/opencode/usage');
+
+  const created = await request(app).post('/api/agents').send({
+    name: 'Test Unknown',
+    type: 'made-up',
+    command: 'gemini',
+    args_template: '{prompt}',
+  });
+  assert.equal(created.status, 201);
+  const agentId = created.body.agent.id;
+
+  const res = await request(app).get(`/api/agents/${agentId}/usage`);
 
   assert.equal(res.status, 200);
   assert.ok(res.body.agent, 'agent included in response');
-  assert.equal(res.body.agent.id, 'opencode');
+  assert.equal(res.body.agent.id, agentId);
   assert.equal(typeof res.body.runningCount, 'number');
 
-  assertProviderShape(res.body.usage, 'opencode usage');
+  assertProviderShape(res.body.usage, 'unknown agent usage');
   // Fallback path emits an explicit errorMessage on the limit entry
   const limit = res.body.usage.limits[0];
   assert.ok(limit.errorMessage, 'fallback should include errorMessage');
