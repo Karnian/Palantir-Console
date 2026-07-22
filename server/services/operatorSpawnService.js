@@ -93,6 +93,10 @@ function createOperatorSpawnService({
   logger,
 }) {
   const log = logger || ((msg) => console.log(`[pmSpawn] ${msg}`));
+  // Async repo materialization leaves a window between the initial registry
+  // probe and setActive(). Keep one promise per canonical instance slot so a
+  // user send and a scheduler send cannot create two Operator runs.
+  const spawnFlights = new Map();
 
   function failOperatorRun(runId, eventType, payload, message, httpStatus = 502) {
     try { runService.updateRunStatus(runId, 'failed', { force: true }); } catch { /* ignore */ }
@@ -281,6 +285,8 @@ function createOperatorSpawnService({
     if (alreadyLive) {
       return { run: alreadyLive, spawned: false, resumed: false };
     }
+    const existingFlight = spawnFlights.get(slotKey);
+    if (existingFlight) return existingFlight;
 
     // Parent Top must exist — PM has to hang off an active Top so that
     // parent-notice routing (PM→Top) and `resolveParentSlot()` in
@@ -732,8 +738,14 @@ function createOperatorSpawnService({
       if (resumeRepoWorkspace) {
         return finishSpawn(resumeRepoWorkspace);
       }
-      return materializeOperatorWorkspace({ runId, project, nodeId })
-        .then((workspace) => finishSpawn(workspace));
+      let flight;
+      flight = materializeOperatorWorkspace({ runId, project, nodeId })
+        .then((workspace) => finishSpawn(workspace))
+        .finally(() => {
+          if (spawnFlights.get(slotKey) === flight) spawnFlights.delete(slotKey);
+        });
+      spawnFlights.set(slotKey, flight);
+      return flight;
     }
 
     return finishSpawn();

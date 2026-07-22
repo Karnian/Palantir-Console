@@ -114,7 +114,7 @@ test('CodexAdapter lazily writes a system prompt temp file and disposeSession cl
   });
   assert.equal(sessionRef.instructionsPath, null, 'instructionsPath is placed lazily on first turn');
 
-  const res = await adapter.runTurn('run_mgr_codex1', { text: 'hi' });
+  const res = await adapter.runTurn('run_mgr_codex1', { text: 'hi', invocationId: 'oinv_codex_test' });
   assert.equal(res.accepted, true);
   assert.ok(capturedArgs, 'spawn was invoked');
   const instructionsFlag = capturedArgs.find((arg) => /^model_instructions_file=/.test(arg));
@@ -124,6 +124,15 @@ test('CodexAdapter lazily writes a system prompt temp file and disposeSession cl
   assert.ok(fs.existsSync(instructionsPath), 'temp file should exist after first runTurn');
   const content = fs.readFileSync(instructionsPath, 'utf-8');
   assert.equal(content, 'hello system');
+
+  fakeChild.stdout.write(`${JSON.stringify({
+    type: 'turn.completed',
+    usage: { input_tokens: 2, cached_input_tokens: 1, output_tokens: 3 },
+  })}\n`);
+  await waitImmediate();
+  const scheduledTurnEvents = captured.filter(({ t }) => t === 'mgr.turn_started' || t === 'mgr.turn_completed');
+  assert.equal(scheduledTurnEvents.length, 2);
+  assert.ok(scheduledTurnEvents.every(({ p }) => p.data.invocationId === 'oinv_codex_test'));
 
   // Dispose: temp file (and its parent dir) should be unlinked best-effort.
   await adapter.disposeSession('run_mgr_codex1');

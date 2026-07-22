@@ -98,6 +98,7 @@ function createProjectsRouter({
   projectBriefService,
   operatorCleanupService,
   operatorInstanceService,
+  operatorScheduleService,
   nodeBindingValidator,
   lifecycleService,
   repoPreflightService,
@@ -264,14 +265,24 @@ function createProjectsRouter({
     // W-P6a R1 (Codex): refs cleanup + project delete in ONE transaction —
     // otherwise a failed delete leaves the project row with all refs gone.
     // better-sqlite3 nests inner db.transaction calls as savepoints.
+    let archivedScheduleIds = [];
     if (operatorInstanceService && typeof operatorInstanceService.withTransaction === 'function'
         && typeof operatorInstanceService.removeRefsForProject === 'function') {
       operatorInstanceService.withTransaction(() => {
+        if (operatorScheduleService && typeof operatorScheduleService.archiveForProjectDeletion === 'function') {
+          archivedScheduleIds = operatorScheduleService.archiveForProjectDeletion(req.params.id);
+        }
         operatorInstanceService.removeRefsForProject(req.params.id);
         projectService.deleteProject(req.params.id);
       });
     } else {
+      if (operatorScheduleService && typeof operatorScheduleService.archiveForProjectDeletion === 'function') {
+        archivedScheduleIds = operatorScheduleService.archiveForProjectDeletion(req.params.id);
+      }
       projectService.deleteProject(req.params.id);
+    }
+    if (operatorScheduleService && typeof operatorScheduleService.notifySchedulesChanged === 'function') {
+      operatorScheduleService.notifySchedulesChanged(archivedScheduleIds);
     }
     res.json({ status: 'ok' });
   }));

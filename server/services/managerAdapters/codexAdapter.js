@@ -227,6 +227,17 @@ function createCodexAdapter({
 
   function emitNormalized(runId, type, payload) {
     if (!runService) return;
+    const invocationId = sessions.get(runId)?.currentInvocationId;
+    if (invocationId && [
+      NORMALIZED_EVENT_TYPES.TURN_STARTED,
+      NORMALIZED_EVENT_TYPES.TURN_COMPLETED,
+      NORMALIZED_EVENT_TYPES.TURN_FAILED,
+    ].includes(type)) {
+      payload = {
+        ...payload,
+        data: { ...(payload?.data || {}), invocationId },
+      };
+    }
     try {
       runService.addRunEvent(runId, type, JSON.stringify(payload));
     } catch (err) {
@@ -395,7 +406,7 @@ function createCodexAdapter({
       baseTier = (typeof state.serviceTier === 'function' ? state.serviceTier() : state.serviceTier);
     } catch { baseTier = 'default'; }
     if (baseTier !== 'fast') baseTier = 'default';
-    const effectiveTier = source === 'auto_review' ? 'default' : baseTier;
+    const effectiveTier = ['auto_review', 'scheduled', 'manual_run_now'].includes(source) ? 'default' : baseTier;
     // Track the tier of the in-flight turn so the terminal failure handlers can
     // annotate a fast-tier turn that died (observability only, v1 has no
     // fallback retry — see spec §3 "가드/관측"). Reset the per-turn emit guard.
@@ -882,8 +893,10 @@ function createCodexAdapter({
         turnIndex: state.turnIndex,
         summaryText: 'turn completed',
         hasRawStored: RAW_EVENTS_ENABLED,
-        data: { isError: false },
+        data: { isError: false, invocationId: state.currentInvocationId || undefined },
       }));
+
+      state.currentInvocationId = null;
 
       // Persist accumulated usage on the run row. costUsd stays null per D5
       // (Codex doesn't report dollars).
@@ -914,7 +927,7 @@ function createCodexAdapter({
   // earlier thenable-optimistic approach did, because refusals RESOLVE
   // {accepted:false} rather than reject, so a .catch never fired). Codex P4-S3a
   // R2 review.
-  function runTurn(runId, { text, source } = {}) {
+  function runTurn(runId, { text, source, invocationId } = {}) {
     const state = sessions.get(runId);
     if (!state) return { accepted: false };
     if (state.ended) return { accepted: false };
@@ -969,6 +982,7 @@ function createCodexAdapter({
     // arg-inspection tests + composer side-effects still observe it); REMOTE
     // proceeds async and is fire-and-forget — its outcome/failure surfaces via
     // run status + SESSION_ENDED events (spawnOneTurn already marks + emits).
+    state.currentInvocationId = invocationId || null;
     let spawnResult;
     try {
       spawnResult = spawnOneTurn(runId, text || '', { source });

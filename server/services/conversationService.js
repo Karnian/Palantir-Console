@@ -278,7 +278,7 @@ function createConversationService({
   //
   // Returns { status: 'sent', target } on success, throws with a 4xx-style
   // Error otherwise. Callers should map errors to HTTP status codes.
-  function sendMessage(conversationId, { text, images, codebaseProjectId, turnMode, source } = {}) {
+  function sendMessage(conversationId, { text, images, codebaseProjectId, turnMode, source, invocationId } = {}) {
     const parsed = parseConversationId(conversationId);
     if (!parsed) {
       const err = new Error(`invalid conversation id: ${conversationId}`);
@@ -295,7 +295,7 @@ function createConversationService({
     }
 
     if (parsed.kind === 'top') {
-      return sendToManagerSlot('top', { text, images, source });
+      return sendToManagerSlot('top', { text, images, source, invocationId });
     }
     if (parsed.kind === 'worker') {
       return sendToWorker(parsed.runId, { text, images });
@@ -309,6 +309,7 @@ function createConversationService({
         turnMode, // A2a §5.0: 'codebase'|'generic'|'auto_review' (omitted → legacy default)
         projectId: operator.projectId || parsed.projectId || null,
         source, // F-1: 'auto_review' forces standard tier on the codex adapter
+        invocationId, // OS-3: durable scheduled-turn correlation
       });
     }
     const err = new Error('unreachable');
@@ -349,7 +350,7 @@ function createConversationService({
   //          on success, queue an Operator→Top notice on the Operator run's parent
   //          (but only if that parent still matches the currently active
   //           Top, to avoid leaking stale signals into unrelated runs).
-  function sendToManagerSlot(conversationId, { text, images, projectId, codebaseProjectId, turnMode, source } = {}) {
+  function sendToManagerSlot(conversationId, { text, images, projectId, codebaseProjectId, turnMode, source, invocationId } = {}) {
     const isTop = conversationId === 'top';
     let operatorResolved = null;
     if (!isTop) {
@@ -383,7 +384,7 @@ function createConversationService({
             })
             .then((spawnResult) => sendToManagerSlot(
               spawnResult?.run?.conversation_id || conversationId,
-              { text, images, projectId, codebaseProjectId, turnMode, source }, // A2a: thread turnMode through the async cold-spawn recursion too
+              { text, images, projectId, codebaseProjectId, turnMode, source, invocationId }, // A2a/OS-3: preserve turn context through async cold-spawn recursion
             ));
         }
         run = spawn.run;
@@ -792,6 +793,7 @@ function createConversationService({
         text: effectiveText,
         images: validImages,
         source, // F-1: propagate turn source so codex forces standard tier on auto-review
+        invocationId, // OS-3: adapter events carry the durable invocation id
       });
       // P4-S3a: codexAdapter.runTurn is now SYNC-returning {accepted} (refusals
       // are decided synchronously; the remote spawn is fire-and-forget inside

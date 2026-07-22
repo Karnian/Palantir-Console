@@ -53,6 +53,9 @@ const SERVER_EMITS = Object.freeze([
   // node lifecycle
   'node:status',
 
+  // Operator scheduler lifecycle
+  'operator:schedule',
+
   // run lifecycle
   'run:completed',
   'run:ended',
@@ -102,6 +105,7 @@ const CLIENT_REQUIRED_LIVE = Object.freeze([
   'run:output',
   'run:result',
   'node:status',
+  'operator:schedule',
   'manager:started',
   'manager:stopped',
   'task:created',

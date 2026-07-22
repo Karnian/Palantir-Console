@@ -36,6 +36,17 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
 
   function emitNormalized(runId, type, payload) {
     if (!runService) return;
+    const invocationId = runState.get(runId)?.currentInvocationId;
+    if (invocationId && [
+      NORMALIZED_EVENT_TYPES.TURN_STARTED,
+      NORMALIZED_EVENT_TYPES.TURN_COMPLETED,
+      NORMALIZED_EVENT_TYPES.TURN_FAILED,
+    ].includes(type)) {
+      payload = {
+        ...payload,
+        data: { ...(payload?.data || {}), invocationId },
+      };
+    }
     try {
       runService.addRunEvent(runId, type, JSON.stringify(payload));
     } catch (err) {
@@ -175,11 +186,13 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
           stopReason: event.stop_reason || null,
           durationMs: event.duration_ms || null,
           numTurns: event.num_turns || null,
+          invocationId: state.currentInvocationId || undefined,
         },
       }));
 
       // Advance turn boundary so the next assistant message belongs to turnIndex+1.
       state.turnIndex += 1;
+      state.currentInvocationId = null;
       state.pendingTools.clear();
       return;
     }
@@ -273,8 +286,11 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
    *
    * Returns { accepted: bool }.
    */
-  function runTurn(runId, { text, images } = {}) {
+  function runTurn(runId, { text, images, invocationId } = {}) {
+    const state = getState(runId);
+    state.currentInvocationId = invocationId || null;
     const accepted = streamJsonEngine.sendInput(runId, text || '', images);
+    if (!accepted) state.currentInvocationId = null;
     return { accepted };
   }
 

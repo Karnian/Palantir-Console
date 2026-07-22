@@ -89,6 +89,9 @@ const { createOperatorIdentityLifecycleService } = require('./services/operatorI
 const { createVerifyCheckService } = require('./services/verifyCheckService');
 const { createVerifyChecksRouter } = require('./routes/verifyChecks');
 const { createOperatorInstancesRouter } = require('./routes/operatorInstances');
+const { createOperatorScheduleService } = require('./services/operatorScheduleService');
+const { createOperatorScheduler } = require('./services/operatorScheduler');
+const { createOperatorSchedulesRouter } = require('./routes/operatorSchedules');
 
 function readGitSha() {
   try {
@@ -1335,6 +1338,23 @@ function createApp(options = {}) {
     compositionLedger,
     eventBus,
   });
+  // OS: Operator-owned durable schedules. The service owns persisted schedule
+  // and invocation state; the driver only materializes due rows and delivers
+  // them through conversationService so identity/memory routing stays unified.
+  const operatorScheduleService = createOperatorScheduleService(db, { eventBus, runService });
+  const operatorScheduler = createOperatorScheduler({
+    operatorScheduleService,
+    conversationService,
+    managerRegistry,
+    projectService,
+    nodeService,
+    runService,
+    eventBus,
+    intervalMs: options.operatorSchedulerIntervalMs
+      ?? (Number.parseInt(process.env.PALANTIR_OPERATOR_SCHEDULER_INTERVAL_MS, 10) || 20000),
+  });
+  const operatorSchedulerEnabled = options.operatorSchedulerEnabled ?? !process.env.NODE_TEST_CONTEXT;
+  if (operatorSchedulerEnabled) operatorScheduler.start();
   // v3 Phase 2+: whenever a manager slot (top or Operator) is cleared
   // — by explicit stop, liveness probe, or rotation — drop any lingering
   // parent-notice queue entries keyed by the dying run id so they cannot
@@ -1516,8 +1536,9 @@ function createApp(options = {}) {
   app.use('/api/usage', createUsageRouter({ codexService, providerRegistry }));
 
   // New routes (v2)
-  app.use('/api/projects', createProjectsRouter({ projectService, taskService, runService, projectBriefService, operatorCleanupService, operatorInstanceService, nodeBindingValidator, lifecycleService, repoPreflightService }));
+  app.use('/api/projects', createProjectsRouter({ projectService, taskService, runService, projectBriefService, operatorCleanupService, operatorInstanceService, operatorScheduleService, nodeBindingValidator, lifecycleService, repoPreflightService }));
   app.use('/api/operator-instances', createOperatorInstancesRouter({ operatorInstanceService, operatorIdentityLifecycleService }));
+  app.use('/api', createOperatorSchedulesRouter({ operatorScheduleService, operatorScheduler }));
   app.use('/api/nodes', createNodesRouter({ nodeService, nodeUsageService, nodeSummaryService, lifecycleService }));
   app.use('/api/projects', createMemoryRouter({ memoryService, projectService })); // ML PR1: GET /:projectId/memory
   app.use('/api/master-memory', createMasterMemoryRouter({ masterMemoryService })); // L2 P1b: GET / + POST /remember
@@ -1714,6 +1735,8 @@ function createApp(options = {}) {
     operatorInstanceService,
     operatorCleanupService,
     operatorIdentityLifecycleService,
+    operatorScheduleService,
+    operatorScheduler,
     resolveOperatorConversationId, // W-P2+: instance-aware dual-read resolver (legacy alias + operator:oi_*)
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at
@@ -1798,6 +1821,7 @@ function createApp(options = {}) {
     try { if (masterMemoryDecayScheduler) masterMemoryDecayScheduler.stop(); } catch { /* ignore */ }
     try { if (memoryDistillScheduler) memoryDistillScheduler.stop(); } catch { /* ignore */ }
     try { if (nodeHeartbeatService) nodeHeartbeatService.stop(); } catch { /* ignore */ }
+    try { if (operatorScheduler) operatorScheduler.stop(); } catch { /* ignore */ }
     try { if (specialistService && typeof specialistService.stop === 'function') specialistService.stop(); } catch { /* ignore */ }
     try { if (gate2ReviewSweepTimer) { clearInterval(gate2ReviewSweepTimer); gate2ReviewSweepTimer = null; } } catch { /* ignore */ }
     lifecycleService.stopMonitoring();
@@ -1812,6 +1836,10 @@ function createApp(options = {}) {
     if (inflight && typeof inflight.then === 'function') {
       disposeWaits.push(Promise.resolve(inflight));
     }
+    try {
+      const schedulerInflight = operatorScheduler && operatorScheduler.awaitDrain ? operatorScheduler.awaitDrain() : null;
+      if (schedulerInflight && typeof schedulerInflight.then === 'function') disposeWaits.push(Promise.resolve(schedulerInflight));
+    } catch { /* ignore */ }
     if (disposeWaits.length > 0) {
       _shutdownPromise = Promise.allSettled(disposeWaits).then(_closeDbOnce);
     } else {

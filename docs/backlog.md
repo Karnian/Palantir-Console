@@ -1,6 +1,6 @@
 # Palantir Console Backlog
 
-> Last updated: 2026-07-20 (favorite/codebase-pool 트랙 전 완료 + declared_node_major + memory-safety hardening + OS scheduler draft)
+> Last updated: 2026-07-23 (Operator-first Scheduler MVP 구현)
 >
 > **2026-07-20 완료 (origin/main HEAD `3df7b5b`)**: favorite/codebase-pool 트랙(A0~flip) + A2b-3 + **B-adm declared_node_major staleness 근본해결**(`ccfa153`) + **공유 detectInjection/redactSecrets hardening**(`d14d188`). 상세·교훈·다른 기기 재입장은 [`handoff-2026-07-20-memory-safety.md`](./handoff-2026-07-20-memory-safety.md) + `docs/specs/codebase-pool-memory-axes-brief.md` §0. (로컬 `~/.claude` memory 는 기기 간 동기화 안 됨 — repo 문서가 authoritative.)
 >
@@ -227,10 +227,9 @@
 - **구현**: migration **053** (`operator_instances.fast_mode` INTEGER, NULL=env-follow) + `resolveCodexServiceTier` (per-instance>env 우선순위) + codexAdapter `serviceTier` (문자열|함수 오버로드 → 라이브 토글, 다음 턴 반영) fresh/resume 양 경로 `-c service_tier` (+fast 시 `features.fast_mode=true`) emit + `codex:fast_unavailable` annotate (fast 턴 실패 관측만, **v1 fallback 재시도 제거** — accepted:true 동기 반환 구조상 불안전, spec §6) + conversationService `source` plumbing → auto-review 만 `source:'auto_review'` 로 standard 강제 + lifecycleService codex worker standard 고정 + `PATCH /api/operator-instances/:id/fast-mode` (cookie-only) + ManagerChat ⚡ 토글 (디자인 토큰, aria-pressed). 테스트 12종 (spec 필수 9 + fast_unavailable dedupe + 마이그레이션). **codex 계획 R1 NO-GO(3 BLOCKER: resolveAdapterName(profile)/fast_unavailable per-turn dedupe/status wiring) → 반영, 최종 diff 리뷰 PASS(5 hotspot).** 전체 2163 tests, visual 56/56.
 
 ### OS. Operator Scheduler + Durable Invocation Queue
-- **Spec**: [`docs/specs/operator-scheduler-brief.md`](./specs/operator-scheduler-brief.md) (2026-07-20, r1 DRAFT-review).
-- **요지**: Operator instance별 one-shot/반복 스케줄. 단순 timer→send가 아니라 schedule→durable invocation(CAS lease/outbox)→lazy Operator delivery. Top 부재·Operator busy·remote node offline·재시작을 pending/backoff로 견디고, 중복 회차·cold-spawn race·LLM 비용을 서버 정책으로 차단한다.
-- **범위 후보**: OS-0 lock-in → OS-1 schema/service → OS-2 scheduler driver → OS-3 delivery/single-flight/turn correlation → OS-4 human-only API+Roster UI → OS-5 일반 auto-review durable queue 이관. 기존 `run:harvested` 즉시 trigger는 유지하며 cron polling으로 대체하지 않는다.
-- **핵심 정책 후보**: schedule owner=`operator_instances`, structured rule+IANA timezone, default coalesce, scheduled Codex=standard 강제, mutation cookie+Origin only, uncertain delivery 자동 replay 금지. folder-less profile schedule/reviewer placement/raw cron은 후속 lock-in.
+- **Spec**: [`docs/specs/operator-scheduler-brief.md`](./specs/operator-scheduler-brief.md) (2026-07-23, v1 LOCKED).
+- **MVP 구현**: **Operator 생성 → primary/reference 작업 폴더 매핑 → Operator-owned schedule 등록**. migration 067 schedule/invocation durable queue, hourly/daily/weekdays/weekly/once + IANA timezone, boot recovery/coalesce/CAS claim, Top·busy·remote node 대기, ambiguous delivery `uncertain`, scheduled Codex standard, project-delete archive/cancel, human cookie+Origin API, Roster UI/SSE/history API.
+- **후속**: OS-5 일반 auto-review durable queue 이관, invocation history/retry 상세 UI, folder-less profile schedule/reviewer placement/raw cron. 기존 `run:harvested` 즉시 trigger는 유지한다.
 
 ### G. Goal Delegation — 워커 완결 작업 위임 (전 업무)
 - **Spec**: [`docs/specs/goal-delegation-brief.md`](./specs/goal-delegation-brief.md) (2026-07-10~11, v6). Codex 적대 리뷰 6라운드 수렴 (R1~R3 NO-GO → **R4 GO** [code core] → 워크로드 전제 교정[코딩→전 업무, Operator 단위] → R5 NO-GO 4B → **R6 GO** [일반화 레이어]). **goal-session-protocol lock-in.**
