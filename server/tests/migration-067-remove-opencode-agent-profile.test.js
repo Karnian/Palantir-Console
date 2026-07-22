@@ -81,7 +81,7 @@ test('067 fresh database has no seeded OpenCode profile', () => {
   }
 });
 
-test('067 upgrade removes the seeded profile, nulls references, and fails nonterminal runs', () => {
+test('067 upgrade removes the seeded profile, nulls references, and fails safe nonterminal runs', () => {
   const db = createUpgradeDatabase();
   try {
     assert.equal(db.prepare("SELECT command FROM agent_profiles WHERE id = 'opencode'").get().command, 'opencode');
@@ -95,8 +95,8 @@ test('067 upgrade removes the seeded profile, nulls references, and fails nonter
       INSERT INTO runs (id, agent_profile_id, status)
       VALUES (?, 'opencode', ?)
     `);
-    const nonterminalStatuses = ['queued', 'materializing', 'running', 'paused', 'needs_input'];
-    for (const status of nonterminalStatuses) {
+    const safeNonterminalStatuses = ['queued', 'paused', 'needs_input'];
+    for (const status of safeNonterminalStatuses) {
       insertRun.run(`run_${status}`, status);
     }
     insertRun.run('run_completed', 'completed');
@@ -109,7 +109,7 @@ test('067 upgrade removes the seeded profile, nulls references, and fails nonter
       null,
     );
 
-    for (const previousStatus of nonterminalStatuses) {
+    for (const previousStatus of safeNonterminalStatuses) {
       const run = db.prepare(`
         SELECT agent_profile_id, status, ended_at, non_retryable
         FROM runs WHERE id = ?
@@ -130,6 +130,47 @@ test('067 upgrade removes the seeded profile, nulls references, and fails nonter
       ended_at: null,
       non_retryable: 0,
     });
+    assert.deepEqual(db.pragma('foreign_key_check'), []);
+  } finally {
+    db.close();
+  }
+});
+
+for (const status of ['running', 'materializing']) {
+  test(`067 leaves a ${status} run untouched and retains its profile`, () => {
+    const db = createUpgradeDatabase();
+    try {
+      db.prepare(`
+        INSERT INTO runs (id, agent_profile_id, status)
+        VALUES (?, 'opencode', ?)
+      `).run(`run_${status}`, status);
+
+      applyMigration067(db);
+
+      assert.deepEqual(
+        db.prepare("SELECT id, command FROM agent_profiles WHERE id = 'opencode'").get(),
+        { id: 'opencode', command: 'opencode' },
+      );
+      assert.deepEqual(
+        db.prepare('SELECT agent_profile_id, status, ended_at, non_retryable FROM runs WHERE id = ?')
+          .get(`run_${status}`),
+        { agent_profile_id: 'opencode', status, ended_at: null, non_retryable: 0 },
+      );
+      assert.deepEqual(db.pragma('foreign_key_check'), []);
+    } finally {
+      db.close();
+    }
+  });
+}
+
+test('067 deletes the seeded profile when no runs reference it', () => {
+  const db = createUpgradeDatabase();
+  try {
+    assert.equal(db.prepare("SELECT command FROM agent_profiles WHERE id = 'opencode'").get().command, 'opencode');
+
+    applyMigration067(db);
+
+    assert.equal(db.prepare("SELECT id FROM agent_profiles WHERE id = 'opencode'").get(), undefined);
     assert.deepEqual(db.pragma('foreign_key_check'), []);
   } finally {
     db.close();

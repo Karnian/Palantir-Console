@@ -11,8 +11,11 @@
  * silently break Claude Code installs that don't have ANTHROPIC_API_KEY exported.
  */
 
-const { execSync } = require('node:child_process');
+const { execFile } = require('node:child_process');
+const { promisify } = require('node:util');
 const { readClaudeKeychainToken, readClaudeLinuxCredentialsToken } = require('../authResolver');
+
+const execFileAsync = promisify(execFile);
 
 /**
  * OAuth usage 응답 → canonical limits 배열.
@@ -60,14 +63,15 @@ function parseOAuthUsageLimits(data) {
   return limits;
 }
 
-function fetchClaudeCodeUsage() {
+async function fetchClaudeCodeUsage() {
   const now = new Date().toISOString();
   const base = { id: 'anthropic', name: 'claude' };
 
   // Account info via CLI (best effort — Claude CLI may be missing or return non-JSON)
   let account = null;
   try {
-    const authInfo = JSON.parse(execSync('claude auth status', { encoding: 'utf-8', timeout: 5000 }).trim());
+    const { stdout } = await execFileAsync('claude', ['auth', 'status'], { encoding: 'utf-8', timeout: 5000 });
+    const authInfo = JSON.parse(stdout.trim());
     if (authInfo.loggedIn) {
       account = {
         email: authInfo.email,
@@ -98,9 +102,19 @@ function fetchClaudeCodeUsage() {
 
   // We use curl rather than fetch() to dodge Node TLS cert issues we hit on some envs.
   try {
-    const raw = execSync(
-      `curl -s -H "Authorization: Bearer ${token}" -H "anthropic-beta: oauth-2025-04-20" -H "Accept: application/json" "https://api.anthropic.com/api/oauth/usage"`,
-      { encoding: 'utf-8', timeout: 10000 }
+    const { stdout: raw } = await execFileAsync(
+      'curl',
+      [
+        '-s',
+        '-H',
+        `Authorization: Bearer ${token}`,
+        '-H',
+        'anthropic-beta: oauth-2025-04-20',
+        '-H',
+        'Accept: application/json',
+        'https://api.anthropic.com/api/oauth/usage',
+      ],
+      { encoding: 'utf-8', timeout: 10000 },
     );
     const limits = parseOAuthUsageLimits(JSON.parse(raw));
     return { ...base, account, limits, updatedAt: now };

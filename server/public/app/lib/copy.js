@@ -844,6 +844,7 @@ export const NODES_LABELS = {
   detailRetry: '다시 시도',
   usageInstalled: '설치됨',
   usageNotInstalled: '미설치',
+  usageUnknown: '설치 여부 확인 안 됨',
   usageVersionLabel: '버전',
   usageAccountLabel: '계정',
   usagePlanLabel: '플랜',
