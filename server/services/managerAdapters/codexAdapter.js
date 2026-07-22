@@ -524,7 +524,7 @@ function createCodexAdapter({
           turnIndex: state.turnIndex,
           summaryText: `mcpConfig invalid: ${err.message}`,
           hasRawStored: RAW_EVENTS_ENABLED,
-          data: { kind: 'mcp_invalid', error: err.message },
+          data: { kind: 'mcp_invalid', error: err.message, terminal: true },
         }));
         state.ended = true;
         try {
@@ -552,7 +552,7 @@ function createCodexAdapter({
           turnIndex: state.turnIndex,
           summaryText: `spawn error: ${err.message}`,
           hasRawStored: RAW_EVENTS_ENABLED,
-          data: { kind: 'spawn_blocked', error: err.message },
+          data: { kind: 'spawn_blocked', error: err.message, terminal: true },
         }));
         state.ended = true;
         state.exitCode = 1;
@@ -626,7 +626,7 @@ function createCodexAdapter({
         turnIndex: state.turnIndex,
         summaryText: `spawn error: ${err.message}`,
         hasRawStored: RAW_EVENTS_ENABLED,
-        data: { error: err.message },
+        data: { error: err.message, terminal: true },
       }));
       state.currentChild = null;
       // A spawn-time OS error (ENOENT/EACCES) is terminal but does NOT fire the
@@ -660,7 +660,7 @@ function createCodexAdapter({
           turnIndex: state.turnIndex,
           summaryText: `codex exited code=${code}`,
           hasRawStored: RAW_EVENTS_ENABLED,
-          data: { exitCode: code, stderr: stderrChunks.join('').slice(-2000) },
+          data: { exitCode: code, stderr: stderrChunks.join('').slice(-2000), terminal: true },
         }));
         // Persist failure on the run row AND mark the session logically dead
         // so isSessionAlive flips to false. Otherwise getActiveManager() in
@@ -694,7 +694,7 @@ function createCodexAdapter({
             turnIndex: state.turnIndex,
             summaryText: `turn spawn failed: ${err && err.message}`,
             hasRawStored: RAW_EVENTS_ENABLED,
-            data: { kind: 'spawn_failed', error: err && err.message },
+            data: { kind: 'spawn_failed', error: err && err.message, terminal: true },
           }));
         } catch { /* ignore */ }
         state.ended = true;
@@ -853,7 +853,7 @@ function createCodexAdapter({
             vendorItemId: itemId,
             summaryText: `codex error [${errorKind}]: ${msg.slice(0, 140)}`,
             hasRawStored: RAW_EVENTS_ENABLED,
-            data: { kind: 'codex_error', errorKind, message: msg },
+            data: { kind: 'codex_error', errorKind, message: msg, terminal: false },
           }));
         }
         return;
@@ -893,7 +893,7 @@ function createCodexAdapter({
         turnIndex: state.turnIndex,
         summaryText: 'turn completed',
         hasRawStored: RAW_EVENTS_ENABLED,
-        data: { isError: false, invocationId: state.currentInvocationId || undefined },
+        data: { isError: false, terminal: true, invocationId: state.currentInvocationId || undefined },
       }));
 
       state.currentInvocationId = null;
@@ -957,7 +957,7 @@ function createCodexAdapter({
           turnIndex: state.turnIndex,
           summaryText: `mcpConfig invalid: ${err.message}`,
           hasRawStored: RAW_EVENTS_ENABLED,
-          data: { kind: 'mcp_invalid', error: err.message },
+          data: { kind: 'mcp_invalid', error: err.message, terminal: true },
         }));
         state.ended = true;
         try {

@@ -99,13 +99,25 @@ function createOperatorScheduler({
       if (sent && typeof sent.then === 'function') sent = await sent;
     } catch (err) {
       const status = Number(err?.httpStatus || err?.status || 0);
-      if (status === 409 || status === 404) {
-        return wait(invocation, status === 409 ? 'operator_unavailable' : 'operator_missing', err.message, 60000);
+      if (err?.retryable === true || err?.code === 'OPERATOR_BUSY') {
+        const busy = err?.code === 'OPERATOR_BUSY';
+        return wait(invocation, busy ? 'operator_busy' : 'operator_unavailable', err.message, busy ? 30000 : 60000);
       }
-      if (status === 502 && /deliver message|previous turn|in flight|busy/i.test(err.message || '')) {
-        return wait(invocation, 'operator_busy', err.message, 30000);
+      if (status === 404 || err?.code === 'OPERATOR_MISSING') {
+        return wait(invocation, 'operator_missing', err.message, 60000);
       }
-      if (status === 400 || /spawn|startSession|materializ|auth unavailable|binding mismatch/i.test(err.message || '')) {
+      if (status === 409 && !err?.code) {
+        return wait(invocation, 'operator_unavailable', err.message, 60000);
+      }
+      if (
+        status === 400
+        || [
+          'OPERATOR_BINDING_MISMATCH',
+          'OPERATOR_DELIVERY_FAILED',
+          'OPERATOR_DELIVERY_REJECTED',
+          'OPERATOR_SPAWN_FAILED',
+        ].includes(err?.code)
+      ) {
         operatorScheduleService.failClaim(invocation.id, invocation.claim_token, err.message);
         return null;
       }
@@ -118,7 +130,12 @@ function createOperatorScheduler({
 
     const managerRunId = sent?.target?.runId;
     if (!managerRunId) {
-      return wait(invocation, 'operator_busy', 'delivery did not return a manager run id', 30000);
+      operatorScheduleService.markClaimUncertain(
+        invocation.id,
+        invocation.claim_token,
+        'delivery was accepted without a manager run id',
+      );
+      return null;
     }
     const running = operatorScheduleService.markRunning(invocation.id, invocation.claim_token, managerRunId);
     try {
@@ -166,10 +183,19 @@ function createOperatorScheduler({
     const type = event.data?.eventType;
     if (type !== 'mgr.turn_completed' && type !== 'mgr.turn_failed') return;
     try {
-      operatorScheduleService.completeByManagerRun(
+      const row = runService && typeof runService.getRunEventById === 'function'
+        ? runService.getRunEventById(event.data.runId, event.data.eventId)
+        : null;
+      if (!row || row.event_type !== type) return;
+      let payload;
+      try { payload = row.payload_json ? JSON.parse(row.payload_json) : null; } catch { return; }
+      const invocationId = payload?.data?.invocationId;
+      if (!invocationId || payload?.data?.terminal !== true) return;
+      operatorScheduleService.completeInvocation(
+        invocationId,
         event.data.runId,
         type === 'mgr.turn_completed',
-        type === 'mgr.turn_failed' ? 'manager turn failed' : null,
+        type === 'mgr.turn_failed' ? (payload?.summaryText || 'manager turn failed') : null,
       );
     } catch (err) {
       log(`completion correlation failed: ${err.message}`);

@@ -516,6 +516,10 @@ test('claudeAdapter dual-emits normalized events alongside legacy ones', async (
     adapter.runTurn('run_mgr_test', { text: 'scheduled turn', invocationId: 'oinv_claude_test' }),
     { accepted: true },
   );
+  assert.deepEqual(
+    adapter.runTurn('run_mgr_test', { text: 'queued turn', invocationId: 'oinv_claude_next' }),
+    { accepted: true },
+  );
 
   const fakeProc = { usage: { inputTokens: 100, outputTokens: 50, costUsd: 0.01 } };
 
@@ -551,6 +555,7 @@ test('claudeAdapter dual-emits normalized events alongside legacy ones', async (
   assert.ok(types.includes(NORMALIZED_EVENT_TYPES.TURN_COMPLETED), 'turn_completed');
   const terminal = captured.find(c => c.eventType === NORMALIZED_EVENT_TYPES.TURN_COMPLETED);
   assert.equal(terminal.payload.data.invocationId, 'oinv_claude_test');
+  assert.equal(terminal.payload.data.terminal, true);
 
   // Payload shape: every normalized payload has turnIndex, summaryText, hasRawStored, data
   for (const ev of captured) {
@@ -569,6 +574,12 @@ test('claudeAdapter dual-emits normalized events alongside legacy ones', async (
   capturedHook({ type: 'assistant', message: { content: [{ type: 'text', text: 'turn 2' }] } }, fakeProc);
   const am2 = captured.filter(c => c.eventType === NORMALIZED_EVENT_TYPES.ASSISTANT_MESSAGE).pop();
   assert.equal(am2.payload.turnIndex, 1);
+  capturedHook({ type: 'result', is_error: false, stop_reason: 'end_turn' }, fakeProc);
+  const terminals = captured.filter(c => c.eventType === NORMALIZED_EVENT_TYPES.TURN_COMPLETED);
+  assert.deepEqual(
+    terminals.map((event) => event.payload.data.invocationId),
+    ['oinv_claude_test', 'oinv_claude_next'],
+  );
 
   // disposeSession emits session_ended.
   adapter.disposeSession('run_mgr_test');

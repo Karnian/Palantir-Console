@@ -380,6 +380,8 @@ function createConversationService({
             .catch((spawnErr) => {
               const err = new Error(spawnErr.message || 'PM spawn failed');
               err.httpStatus = spawnErr.httpStatus || 502;
+              err.code = spawnErr.code || 'OPERATOR_SPAWN_FAILED';
+              err.retryable = spawnErr.retryable === true || [404, 409].includes(Number(err.httpStatus));
               throw err;
             })
             .then((spawnResult) => sendToManagerSlot(
@@ -395,12 +397,16 @@ function createConversationService({
         // generic 500.
         const err = new Error(spawnErr.message || 'PM spawn failed');
         err.httpStatus = spawnErr.httpStatus || 502;
+        err.code = spawnErr.code || 'OPERATOR_SPAWN_FAILED';
+        err.retryable = spawnErr.retryable === true || [404, 409].includes(Number(err.httpStatus));
         throw err;
       }
     }
     if (!run) {
       const err = new Error(`No active ${layerLabel} manager session`);
       err.httpStatus = 404;
+      err.code = 'OPERATOR_MISSING';
+      err.retryable = true;
       throw err;
     }
 
@@ -429,6 +435,8 @@ function createConversationService({
           `expected conversationId=${conversationId} layer=${isTop ? 'top' : 'pm|operator'}`
         );
         bindErr.httpStatus = 502;
+        bindErr.code = 'OPERATOR_BINDING_MISMATCH';
+        bindErr.retryable = false;
         throw bindErr;
       }
     }
@@ -804,12 +812,26 @@ function createConversationService({
       // Notice queue is untouched — next send will retry.
       const err = new Error(`Failed to deliver message to ${layerLabel} manager: ${runErr.message}`);
       err.httpStatus = 502;
+      err.code = runErr.code && String(runErr.code).startsWith('OPERATOR_')
+        ? runErr.code
+        : 'OPERATOR_DELIVERY_FAILED';
+      err.retryable = runErr.retryable === true;
       throw err;
     }
     if (!accepted) {
       // Notice queue is untouched — next send will retry.
-      const err = new Error(`Failed to deliver message to ${layerLabel} manager`);
+      let sessionAlive = false;
+      try {
+        sessionAlive = typeof adapter.isSessionAlive === 'function' && adapter.isSessionAlive(run.id) === true;
+      } catch { /* an unprobeable refusal is fail-closed */ }
+      const err = new Error(
+        sessionAlive
+          ? `Failed to deliver message to ${layerLabel} manager: manager is busy with another turn`
+          : `Failed to deliver message to ${layerLabel} manager: manager rejected the turn`,
+      );
       err.httpStatus = 502;
+      err.code = sessionAlive ? 'OPERATOR_BUSY' : 'OPERATOR_DELIVERY_REJECTED';
+      err.retryable = sessionAlive;
       throw err;
     }
 
