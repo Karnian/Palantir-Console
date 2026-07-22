@@ -185,6 +185,43 @@ test('local git Operator materializes workspace and starts with workspace subdir
   assert.equal(adapter._starts[0].opts.resumeThreadId, null);
 });
 
+test('concurrent cold sends share one async Operator spawn flight', async (t) => {
+  withCodexAuth(t);
+  withRepoFlag(t, '1');
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const nodeService = makeNodeService(createNodeService(db, { localExecutor: { local: true } }));
+  const registry = createManagerRegistry({ runService });
+  const adapter = makeAdapter();
+  seedTop({ runService, registry, adapter: makeAdapter() });
+  const project = projectService.createProject({
+    name: 'single-flight-repo',
+    source_type: 'git',
+    repo_url: 'file:///tmp/repo.git',
+  });
+  let releaseMaterialization;
+  const gate = new Promise((resolve) => { releaseMaterialization = resolve; });
+  const materializationService = makeMaterializationMock({ runService });
+  const originalEnsure = materializationService.ensureWorkspace;
+  materializationService.ensureWorkspace = async (input) => {
+    await gate;
+    return originalEnsure.call(materializationService, input);
+  };
+  const spawn = makeSpawn({ runService, registry, adapter, projectService, projectBriefService, nodeService, materializationService });
+
+  const first = spawn.ensureLiveOperator({ projectId: project.id });
+  const second = spawn.ensureLiveOperator({ projectId: project.id });
+  assert.strictEqual(second, first);
+  releaseMaterialization();
+
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.equal(firstResult.run.id, secondResult.run.id);
+  assert.equal(materializationService.calls.length, 1);
+  assert.equal(adapter._starts.length, 1);
+});
+
 test('legacy_directory Operator keeps project.directory cwd and never materializes', async (t) => {
   withCodexAuth(t);
   withRepoFlag(t, '1');

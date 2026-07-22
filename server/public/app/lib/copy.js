@@ -1065,10 +1065,28 @@ export function statusLabel(map, status) {
   return map[status] || status;
 }
 
-// OperatorsView — read-only roster.
+// OperatorsView — Operator-first roster + folder mapping + schedules.
 export const OPERATOR_ROSTER_LABELS = {
   pageTitle: '오퍼레이터 로스터',
-  pageDescription: 'Top, 프로젝트 폴더 바인딩 오퍼레이터, 폴더 없는 호출형 오퍼레이터를 분리해서 봅니다.',
+  pageDescription: '오퍼레이터를 만든 뒤 작업 폴더를 매핑하고 반복 스케줄을 등록합니다.',
+  newOperator: '새 오퍼레이터',
+  configuredTitle: 'Configured Operators',
+  configuredEmptyText: '생성된 오퍼레이터가 없습니다',
+  configuredEmptySub: '오퍼레이터를 만들고 담당 프로젝트 폴더를 매핑하세요.',
+  createTitle: '새 오퍼레이터 만들기',
+  displayNameLabel: '오퍼레이터 이름',
+  displayNamePlaceholder: '예: 매시간 상태 점검 담당',
+  profileLabel: '프로필',
+  primaryFolderLabel: '담당 프로젝트 폴더',
+  primaryFolderOptional: '나중에 매핑',
+  createSubmit: '오퍼레이터 만들기',
+  folderMappings: '폴더 매핑',
+  noPrimaryFolder: '담당 폴더 미지정',
+  idleStatus: '대기',
+  liveStatus: '실행 중',
+  scheduleAction: '스케줄',
+  scheduleCountLabel: '활성 스케줄',
+  nextScheduleLabel: '다음 실행',
   unknownValue: 'unknown',
   unknownProject: '알 수 없는 프로젝트 폴더',
   localNode: 'local',
@@ -1094,6 +1112,9 @@ export const OPERATOR_ROSTER_LABELS = {
   addReferenceTitle: '참조 프로젝트 폴더 추가',
   referenceProjectLabel: '프로젝트 폴더',
   noReferenceProjects: '추가할 프로젝트 폴더가 없습니다',
+  mappingRoleLabel: '역할',
+  mappingPrimaryRole: '담당(primary)',
+  mappingReferenceRole: '참조(reference)',
   removeReference: '참조 제거',
   liveEmptyText: '프로젝트 폴더 바인딩 오퍼레이터가 없습니다',
   liveEmptySub: '프로젝트 폴더 대화가 시작되면 이 섹션에 표시됩니다.',
@@ -1111,6 +1132,37 @@ export const OPERATOR_ROSTER_LABELS = {
   openProfile: '프로필 보기',
   availableEmptyText: '폴더 없는 프로필이 없습니다',
   availableEmptySub: '프로필 화면에서 호출형 오퍼레이터 프로필을 만들 수 있습니다.',
+};
+
+export const OPERATOR_SCHEDULER_LABELS = {
+  modalTitle: '오퍼레이터 스케줄',
+  newSchedule: '새 스케줄',
+  nameLabel: '이름',
+  namePlaceholder: '예: 매시간 상태 점검',
+  promptLabel: '실행 지시',
+  promptPlaceholder: '이 스케줄이 실행될 때 오퍼레이터가 수행할 일을 입력하세요.',
+  folderLabel: '작업 프로젝트 폴더',
+  ruleKindLabel: '반복 규칙',
+  intervalKind: '간격',
+  dailyKind: '매일',
+  weekdaysKind: '평일',
+  weeklyKind: '매주',
+  onceKind: '한 번',
+  intervalMinutesLabel: '간격(분)',
+  atTimeLabel: '시각',
+  weekdayLabel: '요일',
+  weekdays: ['월', '화', '수', '목', '금', '토', '일'],
+  onceAtLabel: '실행 시각',
+  timezoneLabel: '시간대',
+  create: '스케줄 등록',
+  empty: '등록된 스케줄이 없습니다.',
+  runNow: '지금 실행',
+  disable: '끄기',
+  enable: '켜기',
+  remove: '삭제',
+  enabled: '활성',
+  disabled: '꺼짐',
+  nextFire: '다음',
 };
 
 // OperatorProfilesView — list, ProfileModal, DeleteConfirm.

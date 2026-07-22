@@ -15,6 +15,7 @@ import {
   COMMON_ACTIONS,
   NAV_LABELS,
   OPERATOR_ROSTER_LABELS,
+  OPERATOR_SCHEDULER_LABELS,
   RUN_STATUS_LABELS,
   statusLabel,
 } from '../lib/copy.js';
@@ -25,7 +26,7 @@ import { SpecialistInvokePanel } from './SpecialistInvokePanel.js';
 // Contract: count ONLY 'running' worker runs (Codex review — 'active' was too broad;
 // needs_input is waiting, not running). count-only, no run list (board 복제 방지).
 const ACTIVE_WORKER_STATUSES = new Set(['running']);
-const ROSTER_LIVE_CHANNELS = ['manager:started', 'manager:stopped', 'run:status', 'run:completed'];
+const ROSTER_LIVE_CHANNELS = ['manager:started', 'manager:stopped', 'run:status', 'run:completed', 'operator:schedule'];
 const ROSTER_REFRESH_DEBOUNCE_MS = 400;
 const OPERATOR_CONVERSATION_PREFIX = 'operator:';
 const OPERATOR_INSTANCE_PREFIX = 'oi_';
@@ -86,9 +87,28 @@ function refProjectName(ref, projectsById) {
   return ref?.project?.name || project?.name || projectId || OPERATOR_ROSTER_LABELS.unknownProject;
 }
 
+function projectPlacementLabel(project) {
+  if (!project) return OPERATOR_ROSTER_LABELS.unknownProject;
+  const name = project.name || project.id || OPERATOR_ROSTER_LABELS.unknownProject;
+  const node = project.node_id || OPERATOR_ROSTER_LABELS.localNode;
+  const folder = project.directory || project.repo_url || '';
+  return [name, node, folder].filter(Boolean).join(' · ');
+}
+
 function instanceLabel(instance) {
   const id = String(instance?.id || '');
   return id.length > 12 ? `${id.slice(0, 12)}...` : id || OPERATOR_ROSTER_LABELS.unknownValue;
+}
+
+function operatorDisplayName(instance) {
+  return instance?.display_name || instance?.profile_name || instanceLabel(instance);
+}
+
+function formatDateTime(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return value;
+  return date.toLocaleString();
 }
 
 function refRoleLabel(role) {
@@ -330,6 +350,56 @@ function AvailableOperatorCard({ profile, onInvoke }) {
   `;
 }
 
+function ConfiguredOperatorCard({ instance, liveEntry, projectsById, onOpenRefs, onRemoveReference, onOpenSchedules }) {
+  const primary = primaryRef(instance);
+  const live = Boolean(liveEntry?.run);
+  return html`
+    <article class="operator-profile-card operator-roster-card operator-configured-card" data-role="operator-configured-card">
+      <div class="operator-profile-card-header">
+        <h3 class="operator-profile-name">${operatorDisplayName(instance)}</h3>
+        <span class=${`task-badge ${live ? 'active' : 'project'}`}>
+          ${live ? OPERATOR_ROSTER_LABELS.liveStatus : OPERATOR_ROSTER_LABELS.idleStatus}
+        </span>
+      </div>
+      <p class="form-hint">${instance.profile_name || instance.profile_id || OPERATOR_ROSTER_LABELS.unknownValue}</p>
+      <${WatchListBadges}
+        instance=${instance}
+        projectsById=${projectsById}
+        onRemoveReference=${onRemoveReference}
+      />
+      ${!primary && html`<p class="operator-schedule-warning">${OPERATOR_ROSTER_LABELS.noPrimaryFolder}</p>`}
+      ${primary && html`
+        <p class="form-hint operator-placement-detail">
+          ${projectPlacementLabel(primary.project || projectsById.get(String(primary.project_id)))}
+        </p>
+      `}
+      <div class="operator-roster-meta-grid">
+        <span>${OPERATOR_ROSTER_LABELS.instanceLabel}</span>
+        <strong>${instanceLabel(instance)}</strong>
+        <span>${OPERATOR_ROSTER_LABELS.scheduleCountLabel}</span>
+        <strong>${Number(instance.schedule_count) || 0}</strong>
+        <span>${OPERATOR_ROSTER_LABELS.nextScheduleLabel}</span>
+        <strong>${formatDateTime(instance.next_schedule_at)}</strong>
+      </div>
+      <div class="operator-roster-footer">
+        <span class="operator-roster-actions">
+          <button type="button" class="ghost small" data-role="operator-folder-mapping-button" onClick=${() => onOpenRefs(instance)}>
+            ${OPERATOR_ROSTER_LABELS.folderMappings}
+          </button>
+          <button
+            type="button"
+            class="ghost small"
+            data-role="operator-schedule-button"
+            disabled=${!primary}
+            title=${!primary ? OPERATOR_ROSTER_LABELS.noPrimaryFolder : ''}
+            onClick=${() => onOpenSchedules(instance)}
+          >${OPERATOR_ROSTER_LABELS.scheduleAction}</button>
+        </span>
+      </div>
+    </article>
+  `;
+}
+
 export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
   const [managerStatus, setManagerStatus] = useState(null);
   const [instances, setInstances] = useState([]);
@@ -337,9 +407,30 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
   const [loadingStatus, setLoadingStatus] = useState(true);
   const [loadingProfiles, setLoadingProfiles] = useState(true);
   const [invokeProfile, setInvokeProfile] = useState(null);
+  const [showCreateOperator, setShowCreateOperator] = useState(false);
+  const [createDisplayName, setCreateDisplayName] = useState('');
+  const [createProfileId, setCreateProfileId] = useState('');
+  const [createPrimaryProjectId, setCreatePrimaryProjectId] = useState('');
+  const [creatingOperator, setCreatingOperator] = useState(false);
   const [refsEditorInstance, setRefsEditorInstance] = useState(null);
   const [selectedRefProjectId, setSelectedRefProjectId] = useState('');
+  const [selectedRefRole, setSelectedRefRole] = useState('reference');
   const [refsSaving, setRefsSaving] = useState(false);
+  const [scheduleInstance, setScheduleInstance] = useState(null);
+  const [schedules, setSchedules] = useState([]);
+  const [schedulesLoading, setSchedulesLoading] = useState(false);
+  const [scheduleSaving, setScheduleSaving] = useState(false);
+  const [scheduleName, setScheduleName] = useState('');
+  const [schedulePrompt, setSchedulePrompt] = useState('');
+  const [scheduleProjectId, setScheduleProjectId] = useState('');
+  const [scheduleKind, setScheduleKind] = useState('interval');
+  const [scheduleIntervalMinutes, setScheduleIntervalMinutes] = useState('60');
+  const [scheduleAt, setScheduleAt] = useState('09:00');
+  const [scheduleWeekday, setScheduleWeekday] = useState('1');
+  const [scheduleOnceAt, setScheduleOnceAt] = useState('');
+  const [scheduleTimezone, setScheduleTimezone] = useState(() => {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; }
+  });
   const managerReqSeqRef = useRef(0);
   const instancesReqSeqRef = useRef(0);
   const profilesReqSeqRef = useRef(0);
@@ -465,6 +556,16 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
     return map;
   }, [instances, operatorInstancesKnown]);
 
+  const pms = arrayValue(managerStatus?.pms);
+  const liveEntryByInstance = useMemo(() => {
+    const map = new Map();
+    for (const entry of pms) {
+      const instance = resolveLiveInstance(entry, { instancesById, primaryInstanceByProject });
+      if (instance?.id) map.set(String(instance.id), entry);
+    }
+    return map;
+  }, [pms, instancesById, primaryInstanceByProject]);
+
   const refreshOperatorInstances = async () => {
     const seq = ++instancesReqSeqRef.current;
     try {
@@ -479,14 +580,39 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
 
   const openRefsEditor = (instance) => {
     setRefsEditorInstance(instance);
+    const hasPrimary = Boolean(primaryRef(instance));
+    const role = hasPrimary ? 'reference' : 'primary';
+    setSelectedRefRole(role);
     const existingIds = new Set(arrayValue(instance?.refs).map((ref) => String(ref.project_id)));
-    const firstAvailable = arrayValue(projects).find((project) => project?.id && !existingIds.has(String(project.id)));
+    const firstAvailable = arrayValue(projects).find((project) => (
+      project?.id
+      && !existingIds.has(String(project.id))
+      && (role !== 'primary' || !primaryInstanceByProject.has(String(project.id)))
+    ));
+    setSelectedRefProjectId(firstAvailable?.id || '');
+  };
+
+  const changeRefRole = (role) => {
+    setSelectedRefRole(role);
+    const existingIds = new Set(arrayValue(refsEditorInstance?.refs).map((ref) => String(ref.project_id)));
+    const selectedStillValid = arrayValue(projects).some((project) => (
+      String(project?.id || '') === String(selectedRefProjectId)
+      && !existingIds.has(String(project.id))
+      && (role !== 'primary' || !primaryInstanceByProject.has(String(project.id)))
+    ));
+    if (selectedStillValid) return;
+    const firstAvailable = arrayValue(projects).find((project) => (
+      project?.id
+      && !existingIds.has(String(project.id))
+      && (role !== 'primary' || !primaryInstanceByProject.has(String(project.id)))
+    ));
     setSelectedRefProjectId(firstAvailable?.id || '');
   };
 
   const closeRefsEditor = () => {
     setRefsEditorInstance(null);
     setSelectedRefProjectId('');
+    setSelectedRefRole('reference');
     setRefsSaving(false);
   };
 
@@ -498,7 +624,7 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
         method: 'POST',
         body: JSON.stringify({
           project_id: selectedRefProjectId,
-          role: 'reference',
+          role: selectedRefRole,
         }),
       });
       await refreshOperatorInstances();
@@ -506,6 +632,130 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
     } catch (err) {
       // apiFetchWithToast owns the error toast.
       setRefsSaving(false);
+    }
+  };
+
+  const openCreateOperatorModal = () => {
+    setCreateProfileId(profiles[0]?.id || '');
+    setCreateDisplayName('');
+    setCreatePrimaryProjectId('');
+    setShowCreateOperator(true);
+  };
+
+  const createOperator = async () => {
+    if (!createProfileId) return;
+    setCreatingOperator(true);
+    try {
+      await apiFetchWithToast('/api/operator-instances', {
+        method: 'POST',
+        body: JSON.stringify({
+          profile_id: createProfileId,
+          display_name: createDisplayName.trim() || undefined,
+          primary_project_id: createPrimaryProjectId || undefined,
+        }),
+      });
+      await refreshOperatorInstances();
+      setShowCreateOperator(false);
+    } catch {
+      // apiFetchWithToast owns the toast.
+    } finally {
+      setCreatingOperator(false);
+    }
+  };
+
+  const fetchSchedules = async (instance) => {
+    if (!instance?.id) return;
+    setSchedulesLoading(true);
+    try {
+      const data = await apiFetch(`/api/operator-instances/${encodeURIComponent(instance.id)}/schedules`);
+      setSchedules(arrayValue(data?.schedules));
+    } catch (err) {
+      setSchedules([]);
+      addToast(err.message, 'error');
+    } finally {
+      setSchedulesLoading(false);
+    }
+  };
+
+  const openSchedules = (instance) => {
+    const primary = primaryRef(instance);
+    setScheduleInstance(instance);
+    setScheduleProjectId(primary?.project_id || '');
+    setScheduleName('');
+    setSchedulePrompt('');
+    setScheduleKind('interval');
+    setScheduleIntervalMinutes('60');
+    setScheduleAt('09:00');
+    setScheduleWeekday('1');
+    setScheduleOnceAt('');
+    fetchSchedules(instance);
+  };
+
+  const closeSchedules = () => {
+    setScheduleInstance(null);
+    setSchedules([]);
+    setScheduleSaving(false);
+  };
+
+  const buildScheduleRule = () => {
+    if (scheduleKind === 'interval') return { kind: 'interval', minutes: Number(scheduleIntervalMinutes) };
+    if (scheduleKind === 'once') return { kind: 'once', at: new Date(scheduleOnceAt).toISOString() };
+    if (scheduleKind === 'weekly') return { kind: 'weekly', weekday: Number(scheduleWeekday), at: scheduleAt };
+    return { kind: scheduleKind, at: scheduleAt };
+  };
+
+  const createSchedule = async () => {
+    if (!scheduleInstance?.id || !scheduleName.trim() || !schedulePrompt.trim() || !scheduleProjectId) return;
+    setScheduleSaving(true);
+    try {
+      await apiFetchWithToast(`/api/operator-instances/${encodeURIComponent(scheduleInstance.id)}/schedules`, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: scheduleName.trim(),
+          prompt: schedulePrompt.trim(),
+          codebase_project_id: scheduleProjectId,
+          rule: buildScheduleRule(),
+          timezone: scheduleTimezone,
+        }),
+      });
+      setScheduleName('');
+      setSchedulePrompt('');
+      await Promise.all([fetchSchedules(scheduleInstance), refreshOperatorInstances()]);
+    } catch {
+      // apiFetchWithToast owns the toast.
+    } finally {
+      setScheduleSaving(false);
+    }
+  };
+
+  const patchSchedule = async (schedule, fields) => {
+    try {
+      await apiFetchWithToast(`/api/operator-schedules/${encodeURIComponent(schedule.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ ...fields, expected_revision: schedule.revision }),
+      });
+      await Promise.all([fetchSchedules(scheduleInstance), refreshOperatorInstances()]);
+    } catch {
+      // apiFetchWithToast owns the toast.
+    }
+  };
+
+  const runScheduleNow = async (schedule) => {
+    try {
+      await apiFetchWithToast(`/api/operator-schedules/${encodeURIComponent(schedule.id)}/run-now`, { method: 'POST' });
+      await fetchSchedules(scheduleInstance);
+    } catch {
+      // apiFetchWithToast owns the toast.
+    }
+  };
+
+  const removeSchedule = async (schedule) => {
+    if (typeof window !== 'undefined' && !window.confirm(`${schedule.name} ${OPERATOR_SCHEDULER_LABELS.remove}?`)) return;
+    try {
+      await apiFetchWithToast(`/api/operator-schedules/${encodeURIComponent(schedule.id)}`, { method: 'DELETE' });
+      await Promise.all([fetchSchedules(scheduleInstance), refreshOperatorInstances()]);
+    } catch {
+      // apiFetchWithToast owns the toast.
     }
   };
 
@@ -525,13 +775,27 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
   const top = managerStatus?.top || (managerStatus?.run
     ? { conversationId: 'top', run: managerStatus.run }
     : null);
-  const pms = arrayValue(managerStatus?.pms);
   const invokeModalTitleId = 'operator-roster-specialist-invoke-title';
   const refsModalTitleId = 'operator-roster-refs-title';
+  const createModalTitleId = 'operator-roster-create-title';
+  const scheduleModalTitleId = 'operator-roster-schedules-title';
   const refsEditorLatest = refsEditorInstance?.id ? instancesById.get(String(refsEditorInstance.id)) || refsEditorInstance : null;
+  const refsEditorHasPrimary = Boolean(primaryRef(refsEditorLatest));
   const refsEditorExistingProjectIds = new Set(arrayValue(refsEditorLatest?.refs).map((ref) => String(ref.project_id)));
   const refsEditorAvailableProjects = arrayValue(projects)
-    .filter((project) => project?.id && !refsEditorExistingProjectIds.has(String(project.id)));
+    .filter((project) => project?.id && !refsEditorExistingProjectIds.has(String(project.id)))
+    .filter((project) => selectedRefRole !== 'primary' || !primaryInstanceByProject.has(String(project.id)));
+  const unownedPrimaryProjects = arrayValue(projects)
+    .filter((project) => project?.id && !primaryInstanceByProject.has(String(project.id)));
+  const scheduleMappedRefs = arrayValue(scheduleInstance?.refs);
+  const scheduleCreateReady = Boolean(
+    scheduleName.trim()
+    && schedulePrompt.trim()
+    && scheduleProjectId
+    && scheduleTimezone.trim()
+    && (scheduleKind !== 'once' || scheduleOnceAt)
+    && (scheduleKind !== 'interval' || Number(scheduleIntervalMinutes) >= 15)
+  );
 
   return html`
     <div
@@ -547,6 +811,13 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
           <h1 class="operator-profiles-title">${OPERATOR_ROSTER_LABELS.pageTitle}</h1>
           <p class="operator-profiles-description">${OPERATOR_ROSTER_LABELS.pageDescription}</p>
         </div>
+        <button
+          type="button"
+          class="primary"
+          data-role="operator-create-button"
+          onClick=${openCreateOperatorModal}
+          disabled=${loadingProfiles || profiles.length === 0}
+        >${OPERATOR_ROSTER_LABELS.newOperator}</button>
       </div>
 
       <section class="operator-roster-section" data-role="operator-roster-master-section" aria-labelledby="operator-roster-master-title">
@@ -556,6 +827,72 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
         ${loadingStatus
           ? html`<${Loading} />`
           : html`<div class="operator-roster-grid single"><${MasterCard} top=${top} /></div>`}
+      </section>
+
+      <${Modal}
+        open=${showCreateOperator}
+        onClose=${() => setShowCreateOperator(false)}
+        labelledBy=${createModalTitleId}
+        maxWidth="560px"
+      >
+        <div class="modal-header">
+          <h2 class="modal-title" id=${createModalTitleId}>${OPERATOR_ROSTER_LABELS.createTitle}</h2>
+          <button type="button" class="ghost small" onClick=${() => setShowCreateOperator(false)}>${COMMON_ACTIONS.close}</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-field">
+            <label class="form-label" for="operator-create-name">${OPERATOR_ROSTER_LABELS.displayNameLabel}</label>
+            <input id="operator-create-name" class="form-input" value=${createDisplayName} onInput=${(e) => setCreateDisplayName(e.target.value)} placeholder=${OPERATOR_ROSTER_LABELS.displayNamePlaceholder} maxlength="120" />
+          </div>
+          <div class="form-field">
+            <label class="form-label" for="operator-create-profile">${OPERATOR_ROSTER_LABELS.profileLabel}</label>
+            <select id="operator-create-profile" class="form-select" value=${createProfileId} onChange=${(e) => setCreateProfileId(e.target.value)}>
+              ${profiles.map((profile) => html`<option key=${profile.id} value=${profile.id}>${profile.name}</option>`)}
+            </select>
+          </div>
+          <div class="form-field">
+            <label class="form-label" for="operator-create-primary">${OPERATOR_ROSTER_LABELS.primaryFolderLabel}</label>
+            <select id="operator-create-primary" class="form-select" value=${createPrimaryProjectId} onChange=${(e) => setCreatePrimaryProjectId(e.target.value)}>
+              <option value="">${OPERATOR_ROSTER_LABELS.primaryFolderOptional}</option>
+              ${unownedPrimaryProjects.map((project) => html`<option key=${project.id} value=${project.id}>${projectPlacementLabel(project)}</option>`)}
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="ghost" onClick=${() => setShowCreateOperator(false)} disabled=${creatingOperator}>${COMMON_ACTIONS.cancel}</button>
+          <button type="button" class="primary" data-role="operator-create-submit" onClick=${createOperator} disabled=${creatingOperator || !createProfileId}>
+            ${creatingOperator ? COMMON_ACTIONS.saving : OPERATOR_ROSTER_LABELS.createSubmit}
+          </button>
+        </div>
+      <//>
+
+      <section class="operator-roster-section" data-role="operator-configured-section" aria-labelledby="operator-configured-title">
+        <div class="operator-roster-section-header">
+          <h2 id="operator-configured-title">${OPERATOR_ROSTER_LABELS.configuredTitle}</h2>
+        </div>
+        ${!operatorInstancesKnown && html`<${Loading} />`}
+        ${operatorInstancesKnown && arrayValue(instances).length === 0 && html`
+          <${EmptyState}
+            icon="◫"
+            text=${OPERATOR_ROSTER_LABELS.configuredEmptyText}
+            sub=${OPERATOR_ROSTER_LABELS.configuredEmptySub}
+          />
+        `}
+        ${operatorInstancesKnown && arrayValue(instances).length > 0 && html`
+          <div class="operator-roster-grid">
+            ${arrayValue(instances).map((instance) => html`
+              <${ConfiguredOperatorCard}
+                key=${instance.id}
+                instance=${instance}
+                liveEntry=${liveEntryByInstance.get(String(instance.id))}
+                projectsById=${projectsById}
+                onOpenRefs=${openRefsEditor}
+                onRemoveReference=${removeReference}
+                onOpenSchedules=${openSchedules}
+              />
+            `)}
+          </div>
+        `}
       </section>
 
       <section class="operator-roster-section" data-role="operator-roster-live-section" aria-labelledby="operator-roster-live-title">
@@ -645,8 +982,8 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
       >
         <div class="modal-header">
           <div>
-            <h2 class="modal-title" id=${refsModalTitleId}>${OPERATOR_ROSTER_LABELS.addReferenceTitle}</h2>
-            <p class="modal-subtitle">${instanceLabel(refsEditorLatest)}</p>
+            <h2 class="modal-title" id=${refsModalTitleId}>${OPERATOR_ROSTER_LABELS.folderMappings}</h2>
+            <p class="modal-subtitle">${operatorDisplayName(refsEditorLatest)} · ${instanceLabel(refsEditorLatest)}</p>
           </div>
           <button
             type="button"
@@ -655,6 +992,19 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
           >${COMMON_ACTIONS.close}</button>
         </div>
         <div class="modal-body">
+          <div class="form-field">
+            <label class="form-label" for="operator-roster-ref-role">${OPERATOR_ROSTER_LABELS.mappingRoleLabel}</label>
+            <select
+              id="operator-roster-ref-role"
+              class="form-select"
+              value=${selectedRefRole}
+              onChange=${(e) => changeRefRole(e.target.value)}
+              disabled=${refsSaving}
+            >
+              ${!refsEditorHasPrimary && html`<option value="primary">${OPERATOR_ROSTER_LABELS.mappingPrimaryRole}</option>`}
+              <option value="reference">${OPERATOR_ROSTER_LABELS.mappingReferenceRole}</option>
+            </select>
+          </div>
           <div class="form-field">
             <label class="form-label" for="operator-roster-ref-project">${OPERATOR_ROSTER_LABELS.referenceProjectLabel}</label>
             <select
@@ -668,7 +1018,7 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
               ${refsEditorAvailableProjects.length === 0
                 ? html`<option value="">${OPERATOR_ROSTER_LABELS.noReferenceProjects}</option>`
                 : refsEditorAvailableProjects.map((project) => html`
-                  <option key=${project.id} value=${project.id}>${project.name || project.id}</option>
+                  <option key=${project.id} value=${project.id}>${projectPlacementLabel(project)}</option>
                 `)}
             </select>
           </div>
@@ -687,7 +1037,116 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
             onClick=${addReference}
             disabled=${refsSaving || !selectedRefProjectId}
             aria-busy=${refsSaving ? 'true' : 'false'}
-          >${refsSaving ? COMMON_ACTIONS.saving : OPERATOR_ROSTER_LABELS.addReference}</button>
+          >${refsSaving ? COMMON_ACTIONS.saving : OPERATOR_ROSTER_LABELS.folderMappings}</button>
+        </div>
+      <//>
+
+      <${Modal}
+        open=${Boolean(scheduleInstance)}
+        onClose=${closeSchedules}
+        labelledBy=${scheduleModalTitleId}
+        maxWidth="760px"
+      >
+        <div class="modal-header">
+          <div>
+            <h2 class="modal-title" id=${scheduleModalTitleId}>${OPERATOR_SCHEDULER_LABELS.modalTitle}</h2>
+            <p class="modal-subtitle">${operatorDisplayName(scheduleInstance)}</p>
+          </div>
+          <button type="button" class="ghost small" onClick=${closeSchedules}>${COMMON_ACTIONS.close}</button>
+        </div>
+        <div class="modal-body operator-schedule-modal-body">
+          <section class="operator-schedule-list" aria-label=${OPERATOR_SCHEDULER_LABELS.modalTitle}>
+            ${schedulesLoading && html`<${Loading} />`}
+            ${!schedulesLoading && schedules.length === 0 && html`<p class="form-hint">${OPERATOR_SCHEDULER_LABELS.empty}</p>`}
+            ${!schedulesLoading && schedules.map((schedule) => html`
+              <article class="operator-schedule-row" key=${schedule.id} data-role="operator-schedule-row">
+                <div>
+                  <strong>${schedule.name}</strong>
+                  <div class="form-hint">
+                    ${schedule.enabled ? OPERATOR_SCHEDULER_LABELS.enabled : OPERATOR_SCHEDULER_LABELS.disabled}
+                    · ${schedule.rule?.kind || ''}
+                    ${schedule.rule?.minutes ? ` ${schedule.rule.minutes}m` : ''}
+                    · ${OPERATOR_SCHEDULER_LABELS.nextFire} ${formatDateTime(schedule.next_fire_at)}
+                  </div>
+                </div>
+                <div class="operator-schedule-actions">
+                  <button type="button" class="ghost small" onClick=${() => runScheduleNow(schedule)}>${OPERATOR_SCHEDULER_LABELS.runNow}</button>
+                  <button type="button" class="ghost small" onClick=${() => patchSchedule(schedule, { enabled: !schedule.enabled })}>
+                    ${schedule.enabled ? OPERATOR_SCHEDULER_LABELS.disable : OPERATOR_SCHEDULER_LABELS.enable}
+                  </button>
+                  <button type="button" class="ghost small danger-text" onClick=${() => removeSchedule(schedule)}>${OPERATOR_SCHEDULER_LABELS.remove}</button>
+                </div>
+              </article>
+            `)}
+          </section>
+
+          <section class="operator-schedule-create" aria-labelledby="operator-schedule-create-title">
+            <h3 id="operator-schedule-create-title">${OPERATOR_SCHEDULER_LABELS.newSchedule}</h3>
+            <div class="form-field">
+              <label class="form-label" for="operator-schedule-name">${OPERATOR_SCHEDULER_LABELS.nameLabel}</label>
+              <input id="operator-schedule-name" class="form-input" value=${scheduleName} onInput=${(e) => setScheduleName(e.target.value)} placeholder=${OPERATOR_SCHEDULER_LABELS.namePlaceholder} maxlength="120" />
+            </div>
+            <div class="form-field">
+              <label class="form-label" for="operator-schedule-prompt">${OPERATOR_SCHEDULER_LABELS.promptLabel}</label>
+              <textarea id="operator-schedule-prompt" class="form-textarea" value=${schedulePrompt} onInput=${(e) => setSchedulePrompt(e.target.value)} placeholder=${OPERATOR_SCHEDULER_LABELS.promptPlaceholder} rows="4" maxlength="12000"></textarea>
+            </div>
+            <div class="form-grid operator-schedule-grid">
+              <div class="form-field">
+                <label class="form-label" for="operator-schedule-folder">${OPERATOR_SCHEDULER_LABELS.folderLabel}</label>
+                <select id="operator-schedule-folder" class="form-select" value=${scheduleProjectId} onChange=${(e) => setScheduleProjectId(e.target.value)}>
+                  ${scheduleMappedRefs.map((ref) => html`
+                    <option key=${ref.project_id} value=${ref.project_id}>${projectPlacementLabel(ref.project || projectsById.get(String(ref.project_id)))} · ${refRoleLabel(ref.role)}</option>
+                  `)}
+                </select>
+              </div>
+              <div class="form-field">
+                <label class="form-label" for="operator-schedule-rule">${OPERATOR_SCHEDULER_LABELS.ruleKindLabel}</label>
+                <select id="operator-schedule-rule" class="form-select" value=${scheduleKind} onChange=${(e) => setScheduleKind(e.target.value)}>
+                  <option value="interval">${OPERATOR_SCHEDULER_LABELS.intervalKind}</option>
+                  <option value="daily">${OPERATOR_SCHEDULER_LABELS.dailyKind}</option>
+                  <option value="weekdays">${OPERATOR_SCHEDULER_LABELS.weekdaysKind}</option>
+                  <option value="weekly">${OPERATOR_SCHEDULER_LABELS.weeklyKind}</option>
+                  <option value="once">${OPERATOR_SCHEDULER_LABELS.onceKind}</option>
+                </select>
+              </div>
+              ${scheduleKind === 'interval' && html`
+                <div class="form-field">
+                  <label class="form-label" for="operator-schedule-interval">${OPERATOR_SCHEDULER_LABELS.intervalMinutesLabel}</label>
+                  <input id="operator-schedule-interval" class="form-input" type="number" min="15" max="10080" value=${scheduleIntervalMinutes} onInput=${(e) => setScheduleIntervalMinutes(e.target.value)} />
+                </div>
+              `}
+              ${['daily', 'weekdays', 'weekly'].includes(scheduleKind) && html`
+                <div class="form-field">
+                  <label class="form-label" for="operator-schedule-at">${OPERATOR_SCHEDULER_LABELS.atTimeLabel}</label>
+                  <input id="operator-schedule-at" class="form-input" type="time" value=${scheduleAt} onInput=${(e) => setScheduleAt(e.target.value)} />
+                </div>
+              `}
+              ${scheduleKind === 'weekly' && html`
+                <div class="form-field">
+                  <label class="form-label" for="operator-schedule-weekday">${OPERATOR_SCHEDULER_LABELS.weekdayLabel}</label>
+                  <select id="operator-schedule-weekday" class="form-select" value=${scheduleWeekday} onChange=${(e) => setScheduleWeekday(e.target.value)}>
+                    ${OPERATOR_SCHEDULER_LABELS.weekdays.map((label, index) => html`<option value=${String(index + 1)}>${label}</option>`)}
+                  </select>
+                </div>
+              `}
+              ${scheduleKind === 'once' && html`
+                <div class="form-field">
+                  <label class="form-label" for="operator-schedule-once">${OPERATOR_SCHEDULER_LABELS.onceAtLabel}</label>
+                  <input id="operator-schedule-once" class="form-input" type="datetime-local" value=${scheduleOnceAt} onInput=${(e) => setScheduleOnceAt(e.target.value)} />
+                </div>
+              `}
+              <div class="form-field">
+                <label class="form-label" for="operator-schedule-timezone">${OPERATOR_SCHEDULER_LABELS.timezoneLabel}</label>
+                <input id="operator-schedule-timezone" class="form-input" value=${scheduleTimezone} onInput=${(e) => setScheduleTimezone(e.target.value)} />
+              </div>
+            </div>
+          </section>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="ghost" onClick=${closeSchedules}>${COMMON_ACTIONS.close}</button>
+          <button type="button" class="primary" data-role="operator-schedule-create-submit" onClick=${createSchedule} disabled=${scheduleSaving || !scheduleCreateReady}>
+            ${scheduleSaving ? COMMON_ACTIONS.saving : OPERATOR_SCHEDULER_LABELS.create}
+          </button>
         </div>
       <//>
     </div>

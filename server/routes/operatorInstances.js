@@ -2,12 +2,30 @@
 
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
+const { ForbiddenError } = require('../utils/errors');
+
+function assertHumanSameOrigin(req) {
+  if (!req.auth || req.auth.method !== 'cookie') throw new ForbiddenError('cookie auth required');
+  const origin = req.headers.origin;
+  if (!origin) return;
+  let originHost;
+  try { originHost = new URL(origin).host; } catch { throw new ForbiddenError('cross-origin write blocked'); }
+  if (!req.headers.host || originHost.toLowerCase() !== String(req.headers.host).toLowerCase()) {
+    throw new ForbiddenError('cross-origin write blocked');
+  }
+}
 
 function createOperatorInstancesRouter({ operatorInstanceService, operatorIdentityLifecycleService }) {
   const router = express.Router();
 
   router.get('/', asyncHandler(async (req, res) => {
     res.json({ instances: operatorInstanceService.listInstances() });
+  }));
+
+  router.post('/', asyncHandler(async (req, res) => {
+    assertHumanSameOrigin(req);
+    const instance = operatorInstanceService.createInstance(req.body || {});
+    res.status(201).json({ instance });
   }));
 
   router.get('/:id', asyncHandler(async (req, res) => {

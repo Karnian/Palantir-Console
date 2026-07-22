@@ -35,11 +35,27 @@ function createOperatorInstanceService(db, {
   const log = logger || (() => {});
   const stmts = {
     listInstances: db.prepare(`
-      SELECT *
-      FROM operator_instances
-      ORDER BY updated_at DESC, created_at DESC, id ASC
+      SELECT oi.*,
+             op.name AS profile_name,
+             (SELECT COUNT(*) FROM operator_schedules os
+               WHERE os.operator_instance_id=oi.id AND os.archived_at IS NULL AND os.enabled=1) AS schedule_count,
+             (SELECT MIN(os.next_fire_at) FROM operator_schedules os
+               WHERE os.operator_instance_id=oi.id AND os.archived_at IS NULL AND os.enabled=1) AS next_schedule_at
+      FROM operator_instances oi
+      LEFT JOIN operator_profiles op ON op.id=oi.profile_id
+      ORDER BY oi.updated_at DESC, oi.created_at DESC, oi.id ASC
     `),
-    getInstance: db.prepare('SELECT * FROM operator_instances WHERE id = ?'),
+    getInstance: db.prepare(`
+      SELECT oi.*,
+             op.name AS profile_name,
+             (SELECT COUNT(*) FROM operator_schedules os
+               WHERE os.operator_instance_id=oi.id AND os.archived_at IS NULL AND os.enabled=1) AS schedule_count,
+             (SELECT MIN(os.next_fire_at) FROM operator_schedules os
+               WHERE os.operator_instance_id=oi.id AND os.archived_at IS NULL AND os.enabled=1) AS next_schedule_at
+      FROM operator_instances oi
+      LEFT JOIN operator_profiles op ON op.id=oi.profile_id
+      WHERE oi.id=?
+    `),
     listInstanceIdsForProfile: db.prepare('SELECT id FROM operator_instances WHERE profile_id = ?'),
     getPrimaryProjectIdForInstance: db.prepare(`
       SELECT project_id
@@ -47,10 +63,14 @@ function createOperatorInstanceService(db, {
       WHERE instance_id = ? AND role = 'primary'
       LIMIT 1
     `),
-    getProfileById: db.prepare('SELECT id FROM operator_profiles WHERE id = ?'),
+    getProfileById: db.prepare('SELECT id, name FROM operator_profiles WHERE id = ?'),
     insertPrivateProfile: db.prepare(`
       INSERT INTO operator_profiles (id, name, description, persona, capabilities_json, is_private)
       VALUES (@id, @name, NULL, NULL, '[]', @is_private)
+    `),
+    insertInstance: db.prepare(`
+      INSERT INTO operator_instances (id, profile_id, display_name)
+      VALUES (@id, @profile_id, @display_name)
     `),
     updateInstanceProfile: db.prepare(`
       UPDATE operator_instances
@@ -266,6 +286,32 @@ function createOperatorInstanceService(db, {
     return withRefs(stmts.getInstance.get(instance.id));
   }
 
+  function createInstance(input = {}) {
+    const profileId = requiredString(input.profile_id, 'profile_id');
+    const profile = stmts.getProfileById.get(profileId);
+    if (!profile) throw new NotFoundError(`operator profile not found: ${profileId}`);
+    const displayName = input.display_name == null || String(input.display_name).trim() === ''
+      ? profile.name
+      : requiredString(input.display_name, 'display_name');
+    if (displayName.length > 120) throw new BadRequestError('display_name must be at most 120 characters');
+    const primaryProjectId = input.primary_project_id == null || input.primary_project_id === ''
+      ? null
+      : requiredString(input.primary_project_id, 'primary_project_id');
+    if (primaryProjectId) assertProject(primaryProjectId);
+    const id = `oi_${randomUUID()}`;
+    db.transaction(() => {
+      stmts.insertInstance.run({ id, profile_id: profile.id, display_name: displayName });
+      if (primaryProjectId) {
+        try {
+          stmts.insertRef.run(id, primaryProjectId, 'primary');
+        } catch (err) {
+          uniqueConflictForRef(err);
+        }
+      }
+    })();
+    return withRefs(stmts.getInstance.get(id));
+  }
+
   function createPrivateProfileFor(instanceId) {
     const instance = assertInstance(instanceId);
     const newId = `op_priv_${randomUUID()}`;
@@ -407,6 +453,7 @@ function createOperatorInstanceService(db, {
     getInstance,
     listInstanceIdsForProfile,
     getPrimaryProjectIdForInstance,
+    createInstance,
     setProfileId,
     createPrivateProfileFor,
     getPrimaryInstanceForProject,

@@ -181,6 +181,19 @@ test('project delete removes all refs, bumps affected versions, and leaves orpha
   assert.equal(addRef.status, 201);
   assert.equal(addRef.body.instance.watchlist_version, 1);
 
+  const referenceSchedule = app.services.operatorScheduleService.createSchedule(instanceA, {
+    name: 'shared folder check',
+    prompt: 'check the shared folder',
+    codebase_project_id: deletedProject.id,
+    rule: { kind: 'interval', minutes: 60 },
+  });
+  const primarySchedule = app.services.operatorScheduleService.createSchedule(instanceB, {
+    name: 'primary folder check',
+    prompt: 'check the primary folder',
+    rule: { kind: 'interval', minutes: 60 },
+  });
+  const pendingInvocation = app.services.operatorScheduleService.runNow(referenceSchedule.id);
+
   const del = await api(app, 'DELETE', `/api/projects/${deletedProject.id}`);
   assert.equal(del.status, 200);
 
@@ -204,6 +217,14 @@ test('project delete removes all refs, bumps affected versions, and leaves orpha
   assert.equal(orphanEvents.length, 1);
   assert.equal(orphanEvents[0].action, 'project_deleted_ref_removed');
   assert.equal(orphanEvents[0].orphan, true);
+
+  assert.ok(app.services.operatorScheduleService.getSchedule(referenceSchedule.id).archived_at);
+  assert.ok(app.services.operatorScheduleService.getSchedule(primarySchedule.id).archived_at);
+  assert.equal(
+    app.services.operatorScheduleService.listInvocations(referenceSchedule.id)
+      .find((invocation) => invocation.id === pendingInvocation.id).status,
+    'cancelled',
+  );
 });
 
 test('project delete remains fail-closed when the primary instance is live and dispose fails', async (t) => {
@@ -211,6 +232,11 @@ test('project delete remains fail-closed when the primary instance is live and d
   const project = createProject(app, 'alpha');
   const { instanceId } = ensurePrimary(app, project.id);
   makeOperatorRun(app, instanceId, fakeAdapter({ failDispose: true }));
+  const schedule = app.services.operatorScheduleService.createSchedule(instanceId, {
+    name: 'hourly check',
+    prompt: 'check this folder',
+    rule: { kind: 'interval', minutes: 60 },
+  });
 
   const res = await api(app, 'DELETE', `/api/projects/${project.id}`);
   assert.equal(res.status, 502);
@@ -219,6 +245,7 @@ test('project delete remains fail-closed when the primary instance is live and d
   assert.equal((await api(app, 'GET', `/api/projects/${project.id}`)).status, 200);
   const instance = (await api(app, 'GET', `/api/operator-instances/${instanceId}`)).body.instance;
   assert.deepEqual(instance.refs.map((ref) => [ref.project_id, ref.role]), [[project.id, 'primary']]);
+  assert.equal(app.services.operatorScheduleService.getSchedule(schedule.id).archived_at, null);
 });
 
 test('router name matching targets the primary instance, preserves ambiguity, and falls back without primary', async (t) => {

@@ -512,6 +512,10 @@ test('claudeAdapter dual-emits normalized events alongside legacy ones', async (
   const adapter = createClaudeAdapter({ streamJsonEngine: fakeEngine, runService: fakeRunService });
   adapter.startSession('run_mgr_test', { prompt: 'hi', cwd: process.cwd() });
   assert.ok(typeof capturedHook === 'function', 'onVendorEvent hook should be installed');
+  assert.deepEqual(
+    adapter.runTurn('run_mgr_test', { text: 'scheduled turn', invocationId: 'oinv_claude_test' }),
+    { accepted: true },
+  );
 
   const fakeProc = { usage: { inputTokens: 100, outputTokens: 50, costUsd: 0.01 } };
 
@@ -545,6 +549,8 @@ test('claudeAdapter dual-emits normalized events alongside legacy ones', async (
   assert.ok(types.includes(NORMALIZED_EVENT_TYPES.TOOL_CALL_FINISHED), 'tool_call_finished');
   assert.ok(types.includes(NORMALIZED_EVENT_TYPES.USAGE), 'usage');
   assert.ok(types.includes(NORMALIZED_EVENT_TYPES.TURN_COMPLETED), 'turn_completed');
+  const terminal = captured.find(c => c.eventType === NORMALIZED_EVENT_TYPES.TURN_COMPLETED);
+  assert.equal(terminal.payload.data.invocationId, 'oinv_claude_test');
 
   // Payload shape: every normalized payload has turnIndex, summaryText, hasRawStored, data
   for (const ev of captured) {

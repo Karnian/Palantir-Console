@@ -7939,3 +7939,75 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   font-weight: 500;
   overflow-wrap: anywhere;
 }
+
+.operator-configured-card {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+}
+
+.operator-schedule-warning {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--warning, #d97706) 45%, var(--border));
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.operator-schedule-modal-body {
+  display: grid;
+  gap: 20px;
+}
+
+.operator-schedule-list {
+  display: grid;
+  gap: 8px;
+}
+
+.operator-schedule-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+}
+
+.operator-schedule-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.operator-schedule-create {
+  display: grid;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.operator-schedule-create h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.operator-schedule-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 720px) {
+  .operator-schedule-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .operator-schedule-actions {
+    justify-content: flex-start;
+  }
+
+  .operator-schedule-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -34,6 +34,9 @@ function installRosterStubs(env, {
       return typeof managerStatus === 'function' ? managerStatus({ calls, opts, url }) : managerStatus;
     }
     if (url === '/api/operator-instances') {
+      if (opts.method && opts.method !== 'GET' && operatorInstancesHandler) {
+        return operatorInstancesHandler({ calls, opts, url });
+      }
       const value = typeof instances === 'function' ? instances({ calls, opts, url }) : instances;
       return { instances: value };
     }
@@ -87,6 +90,11 @@ function loadOperatorsComponents(env) {
 function inputValue(env, el, value) {
   el.value = value;
   el.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+}
+
+function changeValue(env, el, value) {
+  el.value = value;
+  el.dispatchEvent(new env.window.Event('change', { bubbles: true }));
 }
 
 function createSseBrokerStub() {
@@ -648,6 +656,100 @@ test('OperatorsView ignores stale manager status responses after a newer SSE ref
 
   assert.match(root.textContent, /latest-adapter/);
   assert.doesNotMatch(root.textContent, /stale-adapter/);
+});
+
+test('OperatorsView supports Operator-first create then hourly schedule registration', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+
+  let currentInstances = [];
+  let currentSchedules = [];
+  const apiCalls = installRosterStubs(env, {
+    managerStatus: { active: false, top: null, pms: [] },
+    profiles: [{ id: 'op_hourly', name: 'Hourly profile', capabilities: [] }],
+    instances: () => currentInstances,
+    operatorInstancesHandler: ({ url, opts }) => {
+      if (url === '/api/operator-instances' && opts.method === 'POST') {
+        const body = JSON.parse(opts.body);
+        currentInstances = [{
+          id: 'oi_hourly',
+          display_name: body.display_name,
+          profile_id: body.profile_id,
+          profile_name: 'Hourly profile',
+          schedule_count: 0,
+          next_schedule_at: null,
+          refs: [{
+            instance_id: 'oi_hourly', project_id: body.primary_project_id, role: 'primary',
+            project: { id: body.primary_project_id, name: 'Remote Folder' },
+          }],
+        }];
+        return { instance: currentInstances[0] };
+      }
+      if (url === '/api/operator-instances/oi_hourly/schedules' && (!opts.method || opts.method === 'GET')) {
+        return { schedules: currentSchedules };
+      }
+      if (url === '/api/operator-instances/oi_hourly/schedules' && opts.method === 'POST') {
+        const body = JSON.parse(opts.body);
+        currentSchedules = [{
+          id: 'os_hourly', ...body, rule_json: JSON.stringify(body.rule),
+          enabled: true, revision: 1, next_fire_at: '2026-07-23T01:00:00.000Z',
+        }];
+        currentInstances = [{ ...currentInstances[0], schedule_count: 1, next_schedule_at: currentSchedules[0].next_fire_at }];
+        return { schedule: currentSchedules[0] };
+      }
+      return {};
+    },
+  });
+  loadOperatorsComponents(env);
+  const root = renderOperatorsView(env, {
+    projects: [{ id: 'proj_remote', name: 'Remote Folder', node_id: 'node-pi', directory: '/srv/work' }],
+  });
+
+  const createButton = await waitFor(() => {
+    const el = root.querySelector('[data-role="operator-create-button"]');
+    assert.ok(el && !el.disabled);
+    return el;
+  });
+  createButton.click();
+  const createDialog = await waitFor(() => {
+    const el = root.querySelector('#operator-roster-create-title')?.closest('[role="dialog"]');
+    assert.ok(el);
+    return el;
+  });
+  inputValue(env, createDialog.querySelector('#operator-create-name'), 'Remote Hourly Operator');
+  changeValue(env, createDialog.querySelector('#operator-create-primary'), 'proj_remote');
+  await flushEffects(0);
+  createDialog.querySelector('[data-role="operator-create-submit"]').click();
+
+  const card = await waitFor(() => {
+    const el = root.querySelector('[data-role="operator-configured-card"]');
+    assert.ok(el);
+    return el;
+  });
+  assert.match(card.textContent, /Remote Hourly Operator/);
+  assert.match(card.textContent, /Remote Folder/);
+
+  card.querySelector('[data-role="operator-schedule-button"]').click();
+  const scheduleDialog = await waitFor(() => {
+    const el = root.querySelector('#operator-roster-schedules-title')?.closest('[role="dialog"]');
+    assert.ok(el);
+    return el;
+  });
+  inputValue(env, scheduleDialog.querySelector('#operator-schedule-name'), 'Hourly audit');
+  inputValue(env, scheduleDialog.querySelector('#operator-schedule-prompt'), 'Inspect the mapped remote folder.');
+  await flushEffects(0);
+  await waitFor(() => assert.equal(scheduleDialog.querySelector('[data-role="operator-schedule-create-submit"]').disabled, false));
+  scheduleDialog.querySelector('[data-role="operator-schedule-create-submit"]').click();
+
+  await waitFor(() => assert.match(scheduleDialog.textContent, /Hourly audit/));
+  const createCall = apiCalls.find((call) => call.url === '/api/operator-instances' && call.opts.method === 'POST');
+  assert.deepEqual(JSON.parse(createCall.opts.body), {
+    profile_id: 'op_hourly',
+    display_name: 'Remote Hourly Operator',
+    primary_project_id: 'proj_remote',
+  });
+  const scheduleCall = apiCalls.find((call) => call.url === '/api/operator-instances/oi_hourly/schedules' && call.opts.method === 'POST');
+  assert.deepEqual(JSON.parse(scheduleCall.opts.body).rule, { kind: 'interval', minutes: 60 });
 });
 
 test('OperatorsView delegates specialist invoke contract to SpecialistInvokePanel source', () => {
