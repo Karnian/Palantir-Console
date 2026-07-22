@@ -5,6 +5,7 @@
   "scripts": {
     "prestart": "npm rebuild better-sqlite3 --silent 2>/dev/null || true",
     "predev": "npm rebuild better-sqlite3 --silent 2>/dev/null || true",
+    "pretest": "node scripts/ensure-sqlite-binding.mjs",
     "dev": "node server/index.js",
     "start": "node server/index.js",
     "test": "node --test",
@@ -33,5 +34,8 @@
     "axe-core": "^4.11.3",
     "jsdom": "^29.0.2",
     "supertest": "^7.0.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.10.0": true
   }
 }
