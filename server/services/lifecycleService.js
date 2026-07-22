@@ -393,6 +393,7 @@ function createLifecycleService({
     const cmd = (profile?.command || '').toLowerCase();
     if (cmd.includes('claude')) return 'claude';
     if (cmd.includes('codex')) return 'codex';
+    // Legacy-data-only safety net for opencode profiles created before new profiles were blocked.
     if (cmd.includes('opencode')) return 'opencode';
     return 'other';
   }

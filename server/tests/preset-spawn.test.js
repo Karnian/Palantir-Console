@@ -326,7 +326,7 @@ test('M1: Codex worker with invalid MCP (direct bearer_token) — fails closed, 
   );
 });
 
-test('Phase 10C: OpenCode worker with preset — emits preset:mcp_unsupported warning', async (t) => {
+test('legacy opencode-typed profile with preset — emits preset:mcp_unsupported warning (historical-data safety net)', async (t) => {
   const db = await mkdb(t);
   const presetService = createPresetService(db, { pluginsRoot: mkPluginsRoot(t) });
   const { lc, exec, rs } = buildLifecycle(db, { presetService });
