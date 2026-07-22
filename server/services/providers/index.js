@@ -5,52 +5,51 @@
  *   The codebase used to spread usage logic across providerService (registered
  *   provider list), externalUsageService (anthropic + gemini fetchers), inline
  *   logic in routes/agents.js (claude-code OAuth + curl), and codexService
- *   (codex provider status). The keys for "what is a provider" were also mixed:
+ *   (codex provider status). The identifiers for "what is a provider" were
+ *   also mixed:
  *
- *     - opencode auth.json keys: openai | anthropic | google | gemini | ...
- *     - agent profile types:    codex  | claude-code | gemini | opencode
- *     - response envelope ids:  codex  | anthropic   | google
+ *     - provider aliases:      openai | anthropic   | google | gemini
+ *     - agent profile types:   codex  | claude-code | gemini | opencode
+ *     - response envelope ids: codex  | anthropic   | google
  *
- *   The registry is the only place that translates between those three
- *   namespaces. Adapters (anthropic.js, claude-code.js, gemini.js, codex via
- *   codexService) have a single responsibility: fetch usage and return the
- *   canonical envelope. They MUST NOT import routes or app — the registry
- *   is the only thing they hand back to.
+ *   The registry is the only place that translates between those namespaces.
+ *   Adapters (claude-code.js, gemini.js, codex via codexService) have a single
+ *   responsibility: fetch usage and return the canonical envelope. They MUST
+ *   NOT import routes or app — the registry is the only thing they hand back
+ *   to.
  */
 
-const { fetchAnthropicUsage } = require('./anthropic');
 const { fetchClaudeCodeUsage } = require('./claude-code');
 const { fetchGeminiUsage } = require('./gemini');
-const { listRegisteredProviders } = require('./registered');
 
-// opencode auth.json key → handler config.
-// `openai` ships with the codex CLI auth in opencode parlance, so it maps to
-// the codex provider, which lives in codexService and gets injected.
+// Provider alias → handler config. `openai` maps to the codex provider, which
+// lives in codexService and gets injected.
 //
 // fallbackId/fallbackName are used when the handler throws or returns null.
-// Without them, the failure envelope would inherit the auth.json key (`openai`)
+// Without them, the failure envelope would inherit the alias (`openai`)
 // instead of the canonical provider id (`codex`), creating a subtle drift
 // between success and failure responses for the same provider.
 //
 // Aliases (`google` / `gemini` both point to gemini) MUST share the same
-// handler function reference so fetchAllRegistered() can dedupe by identity.
-// Otherwise we'd produce two duplicate provider cards when both keys live
-// in auth.json.
-const geminiHandler = () => fetchGeminiUsage(process.env.GEMINI_API_KEY || '');
-const REGISTERED_KEY_HANDLERS = {
+// handler function reference so fetchAllKnown() can dedupe by identity.
+const geminiHandler = (deps) => deps.fetchGeminiUsageFn(process.env.GEMINI_API_KEY || '');
+const PROVIDER_HANDLERS = {
   openai:    { handler: (deps) => deps.codexService?.getProviderStatus(), fallbackId: 'codex',     fallbackName: 'codex'  },
-  anthropic: { handler: () => fetchAnthropicUsage(process.env.ANTHROPIC_API_KEY || ''), fallbackId: 'anthropic', fallbackName: 'claude' },
+  anthropic: { handler: (deps) => deps.fetchClaudeCodeUsageFn(), fallbackId: 'anthropic', fallbackName: 'claude' },
   google:    { handler: geminiHandler, fallbackId: 'google', fallbackName: 'gemini' },
   gemini:    { handler: geminiHandler, fallbackId: 'google', fallbackName: 'gemini' },
 };
 
 // agent_profiles.type → adapter dispatch.
-// claude-code is intentionally separate from anthropic — different auth source.
 const AGENT_TYPE_HANDLERS = {
   codex:         (deps) => deps.codexService?.getProviderStatus(),
-  'claude-code': () => fetchClaudeCodeUsage(),
-  gemini:        () => fetchGeminiUsage(process.env.GEMINI_API_KEY || ''),
+  'claude-code': (deps) => deps.fetchClaudeCodeUsageFn(),
+  gemini:        (deps) => deps.fetchGeminiUsageFn(process.env.GEMINI_API_KEY || ''),
 };
+
+// Fixed UI order for known providers. Aliases (`google`/`gemini`) share a
+// handler reference so they dedupe naturally while preserving this order.
+const KNOWN_PROVIDER_ORDER = ['openai', 'anthropic', 'google', 'gemini'];
 
 function buildFallbackProvider(id, errorMessage, name) {
   return {
@@ -68,67 +67,36 @@ function buildFallbackProvider(id, errorMessage, name) {
   };
 }
 
-function createProviderRegistry({ codexService, opencodeAuthPath }) {
-  const deps = { codexService };
+function createProviderRegistry({
+  codexService,
+  fetchClaudeCodeUsageFn = fetchClaudeCodeUsage,
+  fetchGeminiUsageFn = fetchGeminiUsage,
+} = {}) {
+  const deps = { codexService, fetchClaudeCodeUsageFn, fetchGeminiUsageFn };
 
   /**
-   * Discover provider keys the user has configured (from opencode auth.json).
-   * Pure passthrough — kept here so callers don't need to know about the file.
+   * Fetch usage for every known provider in parallel. Promise.all preserves
+   * the input array's order, so handler completion order cannot reshuffle the
+   * UI cards.
    */
-  async function listRegistered() {
-    return listRegisteredProviders(opencodeAuthPath);
-  }
-
-  // Fixed UI order for known providers — preserves the legacy
-  // `openai → anthropic → gemini` card layout. Aliases (`google`/`gemini`) share
-  // a handler reference so they dedupe naturally via the seenHandlers set.
-  const KNOWN_PROVIDER_ORDER = ['openai', 'anthropic', 'google', 'gemini'];
-
-  /**
-   * Fetch usage for every registered provider.
-   *
-   * Behavior preserved from the pre-refactor implementation:
-   *  - Known providers render in a fixed order, regardless of how they sort in
-   *    the auth file (so the UI cards don't reshuffle).
-   *  - Aliased handlers (google/gemini → same fetcher) dedupe by reference.
-   *  - Unknown registered keys ONLY produce fallback cards when no known
-   *    provider was rendered. Mixing known + unknown would have been a behavior
-   *    drift that contract tests can't catch.
-   */
-  async function fetchAllRegistered() {
-    const keys = await listRegistered();
-    const keySet = new Set(keys);
-    const out = [];
+  async function fetchAllKnown() {
     const seenHandlers = new Set();
 
-    for (const key of KNOWN_PROVIDER_ORDER) {
-      if (!keySet.has(key)) continue;
-      const cfg = REGISTERED_KEY_HANDLERS[key];
-      if (!cfg || seenHandlers.has(cfg.handler)) continue;
+    const handlers = KNOWN_PROVIDER_ORDER.flatMap((key) => {
+      const cfg = PROVIDER_HANDLERS[key];
+      if (!cfg || seenHandlers.has(cfg.handler)) return [];
       seenHandlers.add(cfg.handler);
+      return [cfg];
+    });
+
+    return Promise.all(handlers.map(async (cfg) => {
       try {
         const result = await cfg.handler(deps);
-        if (result) out.push(result);
-        // Fallback id/name come from the handler config so failure envelopes
-        // surface the canonical provider (e.g. `codex`) rather than the raw
-        // auth-file key (e.g. `openai`) — keeping success and failure paths
-        // keyed identically.
-        else out.push(buildFallbackProvider(cfg.fallbackId, 'Provider returned no data', cfg.fallbackName));
+        return result || buildFallbackProvider(cfg.fallbackId, 'Provider returned no data', cfg.fallbackName);
       } catch (err) {
-        out.push(buildFallbackProvider(cfg.fallbackId, err?.message || 'Provider fetch failed', cfg.fallbackName));
+        return buildFallbackProvider(cfg.fallbackId, err?.message || 'Provider fetch failed', cfg.fallbackName);
       }
-    }
-
-    // Legacy semantics: only show fallback rows for unknown registered keys
-    // when nothing known was emitted. Otherwise the unknowns are silently ignored.
-    if (out.length === 0) {
-      for (const key of keys) {
-        if (REGISTERED_KEY_HANDLERS[key]) continue;
-        out.push(buildFallbackProvider(key, 'Usage provider not configured'));
-      }
-    }
-
-    return out;
+    }));
   }
 
   /**
@@ -154,8 +122,7 @@ function createProviderRegistry({ codexService, opencodeAuthPath }) {
   }
 
   return {
-    listRegistered,
-    fetchAllRegistered,
+    fetchAllKnown,
     getUsageForAgent,
   };
 }

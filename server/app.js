@@ -1053,9 +1053,6 @@ function createApp(options = {}) {
   const codexHome = options.codexHome
     || process.env.CODEX_HOME
     || path.join(os.homedir(), '.codex');
-  const opencodeAuthPath = options.opencodeAuthPath
-    || process.env.OPENCODE_AUTH_PATH
-    || path.join(os.homedir(), '.local', 'share', 'opencode', 'auth.json');
   const codexStatusTimeoutMs = Number(
     options.codexStatusTimeoutMs || process.env.CODEX_STATUS_TIMEOUT_MS || 60000
   );
@@ -1087,12 +1084,16 @@ function createApp(options = {}) {
   const messageService = createMessageService(storage);
   const fsService = createFsService(storage, { nodeExecutor });
   const opencodeService = createOpencodeService({ opencodeBin });
-  const codexService = createCodexService({
+  const codexService = options.codexService || createCodexService({
     codexBin,
     codexHome,
     timeoutMs: codexStatusTimeoutMs
   });
-  const providerRegistry = createProviderRegistry({ codexService, opencodeAuthPath });
+  const providerRegistry = createProviderRegistry({
+    codexService,
+    fetchClaudeCodeUsageFn: options.fetchClaudeCodeUsageFn,
+    fetchGeminiUsageFn: options.fetchGeminiUsageFn,
+  });
 
   // New services (SQLite-based)
   const nodeService = createNodeService(db, { localExecutor: nodeExecutor });

@@ -27,13 +27,10 @@ function createUsageRouter({ codexService, providerRegistry }) {
 
   router.get('/providers', async (req, res, next) => {
     try {
-      const registeredProviders = providerRegistry
-        ? await providerRegistry.listRegistered()
-        : [];
       const providers = providerRegistry
-        ? await providerRegistry.fetchAllRegistered()
+        ? await providerRegistry.fetchAllKnown()
         : [];
-      res.json({ status: 'ok', providers, registeredProviders });
+      res.json({ status: 'ok', providers });
     } catch (err) {
       next(err);
     }

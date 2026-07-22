@@ -1,5 +1,5 @@
 const { formatLimits } = require('./codexService');
-const { fetchClaudeCodeUsage, parseOAuthUsageLimits } = require('./providers/claude-code');
+const { parseOAuthUsageLimits } = require('./providers/claude-code');
 
 const DEFAULT_PROBE_TIMEOUT_MS = 15000;
 const DEFAULT_PROBE_KILL_GRACE_MS = 2000;
@@ -377,8 +377,8 @@ function providerToUsage(provider) {
   return usage;
 }
 
-async function getLocalCards(providerRegistry, fetchClaudeCode) {
-  if (!providerRegistry || typeof providerRegistry.fetchAllRegistered !== 'function') {
+async function getLocalCards(providerRegistry) {
+  if (!providerRegistry || typeof providerRegistry.fetchAllKnown !== 'function') {
     return [
       errorCard('codex', 'no_data', 'provider registry unavailable'),
       errorCard('claude', 'no_data', 'provider registry unavailable'),
@@ -388,7 +388,7 @@ async function getLocalCards(providerRegistry, fetchClaudeCode) {
 
   let providers;
   try {
-    providers = await providerRegistry.fetchAllRegistered();
+    providers = await providerRegistry.fetchAllKnown();
   } catch {
     return [
       errorCard('codex', 'no_data', 'No rate limit data available'),
@@ -397,39 +397,21 @@ async function getLocalCards(providerRegistry, fetchClaudeCode) {
     ];
   }
 
-  // Node semantics are "CLIs on this node", not "providers registered in
-  // opencode auth.json". The registry's anthropic entry is the API-key
-  // account (a different auth source than the claude CLI), so it never
-  // produces the claude card here — the claude-code adapter below is the
-  // single source for it (Codex review: an anthropic key must not mask the
-  // keychain-authenticated CLI).
+  // Registry presence no longer proves whether a CLI is installed, so local
+  // cards report installation as unknown. Provider aliases are normalized to
+  // their CLI ids before applying the canonical card order.
   const cards = (providers || [])
     .map((provider) => {
       const id = providerIdToCliId(provider?.id);
       return card(id, {
-        installed: true,
+        installed: null,
         usage: providerToUsage(provider),
         updatedAt: provider?.updatedAt,
       });
     })
-    .filter((item) => ['codex', 'gemini'].includes(item.id));
+    .filter((item) => ['codex', 'claude', 'gemini'].includes(item.id));
 
-  try {
-    const provider = await fetchClaudeCode();
-    if (provider) {
-      cards.push(card('claude', {
-        installed: true,
-        usage: providerToUsage(provider),
-        updatedAt: provider?.updatedAt,
-      }));
-    } else {
-      cards.push(errorCard('claude', 'no_data', 'No rate limit data available'));
-    }
-  } catch {
-    cards.push(errorCard('claude', 'no_data', 'No rate limit data available'));
-  }
-
-  // Canonical card order regardless of registry/augmentation arrival order.
+  // Canonical card order regardless of registry order.
   const order = { codex: 0, claude: 1, gemini: 2 };
   cards.sort((a, b) => (order[a.id] ?? 9) - (order[b.id] ?? 9));
   return cards;
@@ -558,7 +540,6 @@ async function getSshClaudeCard(node, spawnInteractive, opts, readClaudeUsage) {
 function createNodeUsageService({
   nodeService,
   providerRegistry,
-  fetchClaudeCodeFn = fetchClaudeCodeUsage,
   readClaudeOAuthUsageFn = null,
   probeTimeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
   probeKillGraceMs = DEFAULT_PROBE_KILL_GRACE_MS,
@@ -582,7 +563,7 @@ function createNodeUsageService({
     const node = nodeService.getNode(nodeId);
     let clis;
     if (!node.kind || node.kind === 'local') {
-      clis = await getLocalCards(providerRegistry, fetchClaudeCodeFn);
+      clis = await getLocalCards(providerRegistry);
     } else if (node.kind === 'ssh') {
       if (Number(node.reachable) === 0) {
         clis = [

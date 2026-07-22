@@ -367,13 +367,6 @@ body {
   overflow-y: auto;
 }
 
-.usage-registered {
-  font-size: 12px;
-  letter-spacing: 0.02em;
-  color: var(--text-muted);
-  margin-bottom: 10px;
-}
-
 .usage-cards {
   display: flex;
   flex-direction: column;

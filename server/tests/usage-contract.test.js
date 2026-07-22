@@ -2,10 +2,9 @@
  * Usage / provider API contract tests.
  *
  * Locks the response shape of /api/usage/providers and /api/agents/:id/usage
- * so the upcoming Phase 1 (provider/usage layer consolidation) refactor cannot
- * silently change the wire format. Each test exercises a deterministic path that
- * does NOT shell out (no `claude`, `codex`, `gemini` invocations) — the routes
- * already return structured fallback objects when credentials/binaries are missing.
+ * so provider-layer refactors cannot silently change the wire format. Every
+ * provider adapter is injected here; these tests never inspect host credentials
+ * or invoke `claude`, `codex`, or `gemini`.
  */
 
 const test = require('node:test');
@@ -20,20 +19,41 @@ async function createTempDir(prefix) {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
-async function createTestApp(t) {
+const UPDATED_AT = '2026-01-01T00:00:00.000Z';
+
+function provider(id, name, remainingPct, errorMessage) {
+  return {
+    id,
+    name,
+    limits: [{ label: 'usage', remainingPct, resetAt: null, ...(errorMessage ? { errorMessage } : {}) }],
+    updatedAt: UPDATED_AT,
+  };
+}
+
+async function createTestApp(t, {
+  codexProviderStatusFn = async () => provider('codex', 'codex', 80),
+  fetchClaudeCodeUsageFn = async () => provider('anthropic', 'claude', 70),
+  fetchGeminiUsageFn = async () => provider('google', 'gemini', null, 'GEMINI_API_KEY not set'),
+} = {}) {
   const storageRoot = await createTempDir('palantir-storage-');
   const fsRoot = await createTempDir('palantir-fs-');
   const dbPath = path.join(await createTempDir('palantir-db-'), 'test.db');
-  // Force a non-existent opencode auth path so providerService deterministically
-  // returns an empty registered-provider list (no provider-specific fetches happen).
-  const opencodeAuthPath = path.join(await createTempDir('palantir-auth-'), 'missing-auth.json');
+  const codexService = {
+    getProviderStatus: codexProviderStatusFn,
+    async getStatus() {
+      const { id, name, ...status } = await codexProviderStatusFn();
+      return status;
+    },
+  };
 
   const app = createApp({
     storageRoot,
     fsRoot,
     opencodeBin: 'opencode',
     dbPath,
-    opencodeAuthPath,
+    codexService,
+    fetchClaudeCodeUsageFn,
+    fetchGeminiUsageFn,
   });
 
   t.after(async () => {
@@ -42,7 +62,6 @@ async function createTestApp(t) {
     await fs.rm(storageRoot, { recursive: true, force: true });
     await fs.rm(fsRoot, { recursive: true, force: true });
     await fs.rm(path.dirname(dbPath), { recursive: true, force: true });
-    await fs.rm(path.dirname(opencodeAuthPath), { recursive: true, force: true });
   });
 
   return { app };
@@ -74,17 +93,31 @@ function assertProviderShape(provider, label) {
 
 // ---- /api/usage/providers ----
 
-test('GET /api/usage/providers returns canonical envelope when no auth file present', async (t) => {
-  const { app } = await createTestApp(t);
+test('GET /api/usage/providers always attempts known providers without auth configuration', async (t) => {
+  const calls = [];
+  const { app } = await createTestApp(t, {
+    codexProviderStatusFn: async () => {
+      calls.push('codex');
+      return provider('codex', 'codex', 80);
+    },
+    fetchClaudeCodeUsageFn: async () => {
+      calls.push('claude');
+      return provider('anthropic', 'claude', 70);
+    },
+    fetchGeminiUsageFn: async () => {
+      calls.push('gemini');
+      return provider('google', 'gemini', null, 'GEMINI_API_KEY not set');
+    },
+  });
   const res = await request(app).get('/api/usage/providers');
 
   assert.equal(res.status, 200);
   assert.equal(res.body.status, 'ok');
   assert.ok(Array.isArray(res.body.providers), 'providers should be an array');
-  assert.ok(Array.isArray(res.body.registeredProviders), 'registeredProviders should be an array');
-  // With a missing auth.json, providerService.listRegisteredProviders() returns []
-  assert.deepEqual(res.body.registeredProviders, []);
-  assert.deepEqual(res.body.providers, []);
+  assert.equal('registeredProviders' in res.body, false);
+  assert.deepEqual(calls.sort(), ['claude', 'codex', 'gemini']);
+  assert.deepEqual(res.body.providers.map((entry) => entry.id), ['codex', 'anthropic', 'google']);
+  res.body.providers.forEach((entry, index) => assertProviderShape(entry, `provider ${index}`));
 });
 
 // ---- /api/agents/:id/usage ----
@@ -119,13 +152,7 @@ test('GET /api/agents/:id/usage returns 404 envelope for unknown agent id', asyn
   assert.equal(typeof res.body.error, 'string');
 });
 
-test('GET /api/agents/:id/usage returns gemini fallback shape when GEMINI_API_KEY missing', async (t) => {
-  const prevKey = process.env.GEMINI_API_KEY;
-  delete process.env.GEMINI_API_KEY;
-  t.after(() => {
-    if (prevKey !== undefined) process.env.GEMINI_API_KEY = prevKey;
-  });
-
+test('GET /api/agents/:id/usage returns injected gemini fallback shape', async (t) => {
   const { app } = await createTestApp(t);
 
   // Create a gemini-typed agent profile (gemini is in the command allowlist)
@@ -141,7 +168,6 @@ test('GET /api/agents/:id/usage returns gemini fallback shape when GEMINI_API_KE
   const res = await request(app).get(`/api/agents/${agentId}/usage`);
   assert.equal(res.status, 200);
   assertProviderShape(res.body.usage, 'gemini usage');
-  // fetchGeminiUsage('') returns id='google', name='gemini' with the missing-key fallback
   assert.equal(res.body.usage.id, 'google');
   assert.equal(res.body.usage.name, 'gemini');
   assert.match(res.body.usage.limits[0].errorMessage || '', /GEMINI_API_KEY/);
