@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Palantir Console — AI 코딩 에이전트(Claude Code, Codex, OpenCode)를 3계층(Main Manager → Operator → Worker)으로 운영하는 중앙 관제 허브. Main Manager가 여러 프로젝트와 Operator을 총괄, Operator이 프로젝트 내 워커들을 관리, Worker가 실제 코딩 작업을 수행.
+Palantir Console — AI 코딩 에이전트(Claude Code, Codex)를 3계층(Main Manager → Operator → Worker)으로 운영하는 중앙 관제 허브. Main Manager가 여러 프로젝트와 Operator을 총괄, Operator이 프로젝트 내 워커들을 관리, Worker가 실제 코딩 작업을 수행.
 
 ## Working style (autonomous mode default ON)
 
@@ -121,7 +121,7 @@ server/
     messageService.js         — 메시지 처리 서비스
     ssrf.js                   — SSRF 방어 (내부 IP 차단)
     codexService.js           — Codex CLI 서비스
-    opencodeService.js        — OpenCode 서비스 (TLS 기본값 관리)
+    opencodeService.js        — legacy Sessions spawn 전용 (지원 agent vendor 아님)
     fsService.js              — 파일시스템 브라우저 서비스
     storage.js                — 스토리지 경로 관리
     worktreeService.js        — Git worktree 관리 (H-1: autoSaveWorktree export, removeWorktree { autosave } opt, getWorktreeDiff 경화)
@@ -242,7 +242,7 @@ server/
 
 ### Worker 구조화 (MP Phase 2 — agent_profiles 구조화 model/effort)
 - 워커 model/effort 를 자유문자열 `args_template` 대신 **구조화 컬럼**으로. migration **062**: `agent_profiles.model`/`reasoning_effort`(NULL=opt-out, 기존 템플릿 그대로=byte-identical). **model_policies 테이블은 워커에 미적용** — 워커는 프로필(agent_profiles) authoritative.
-- `utils/agentVendor.resolveAgentVendor(command)`: 공용 command-based vendor 판별(claude/codex/opencode/gemini/other), save·spawn 공유.
+- `utils/agentVendor.resolveAgentVendor(command)`: 공용 command-based vendor 판별(claude/codex/gemini/other), save·spawn 공유.
 - `agentProfileService.validateStructuredModelEffort(mergedProfile)`: create + update-**merged-state**(PATCH `{...existing,...fields}`) 검증. reasoning_effort=codex만(low/medium/high), model=codex+claude(비어있지 않음 ≤200, 제어문자·leading `-` 금지, 그 외 vendor 거부). **double-set = tokenizer**(`-m`/`-mX`/`-m=`/`--model`/`--model=`/`-c model=`/`-c model_reasoning_effort=` 감지, `--permission-mode`/`--mcp-config`/`--max-budget-usd` 오탐 안 함; 유니코드 escape 키는 best-effort=footgun, tier 아님). 라우트는 `req.body` 그대로 전달.
 - 주입(lifecycleService, NULL=미주입=byte-identical): **codex 워커** extraArgs 순서 `구조화(-c model_reasoning_effort / -m) → 강제 service_tier="default" → baseArgs` (F-1 tier refuse 불변). **claude 워커** stream-json `spec.model = profile.model`. 워커 실행값 `runs.session_model/effort` snapshot(관측).
 - **claim-전 fail-closed non-retryable backstop**: `spawnQueuedRun` 최상단(claimQueuedRun 전)에서 `validateStructuredModelEffort` 재검증 — raw-SQL 오염 profile(구조화+baked flag) → `worker:profile_invalid` + failed + 0 spawn. claim 전이라 `started_at` null → **B-lite 재시도 skip + goal isNonRetryable** 자연 성립. UI: `AgentsView` 구조화 필드(vendor-aware, NULL 계약, 새 codex 기본=structured effort). **DROP/DEFER**: claude thinking(CLI 플래그 없음)/gemini vendor(manager 어댑터 없음)/operator_profile 스코프(specialist=non-CLI backend) — 소비자 부재.

@@ -2,7 +2,7 @@
 
 [한국어](README.ko.md)
 
-Central control hub for orchestrating AI coding agents (Claude Code, Codex, OpenCode) through a 3-tier hierarchy.
+Central control hub for orchestrating AI coding agents (Claude Code and Codex) through a 3-tier hierarchy.
 
 ```
 Main Manager (Top)          ← oversees all projects and Operators
@@ -106,11 +106,11 @@ Main Manager (Top)  →  Operator (per project)  →  Worker (per task)
 |---------|-------------|
 | **Main Manager (Top)** | Top-level orchestrator. Routes user instructions to the right Operator, oversees all projects |
 | **Operator (Project Manager)** | Per-project manager. Coordinates workers, distributes tasks, maintains project context. Lazy-spawned on first message |
-| **Worker** | AI agent (Claude Code, Codex, OpenCode) that executes a task. Runs in an isolated git worktree |
+| **Worker** | AI agent (Claude Code or Codex) that executes a task. Runs in an isolated git worktree |
 | **Project** | Logical grouping of tasks. e.g. "Backend API", "Frontend Refactor" |
 | **Task** | A unit of work. Managed on a kanban board. Status: Backlog → Todo → In Progress → Review → Done |
 | **Run** | An agent execution against a Task. Multiple Runs per Task allowed |
-| **Agent Profile** | Agent configuration (Claude Code, Codex CLI, OpenCode, custom) |
+| **Agent Profile** | Agent configuration (Claude Code, Codex CLI, custom) |
 | **Conversation** | 1st-class identity for any chat surface: `top`, `operator:<projectId>` (`pm:<projectId>` accepted), or `worker:<runId>` |
 
 ## Views
@@ -146,7 +146,7 @@ Project list. Tasks are grouped by project. Each project exposes:
 
 ### 5. Agents (⚙)
 
-Agent profile management. Default profiles: Claude Code, Codex CLI, OpenCode. Agent profiles can gate dispatch via `capabilities_json` and `max_concurrent`.
+Agent profile management. Default profiles: Claude Code and Codex CLI. Agent profiles can gate dispatch via `capabilities_json` and `max_concurrent`.
 
 ### 6. Resources (❖) — `#resources`
 
@@ -383,7 +383,7 @@ machines. Spec: `docs/specs/worker-preset-and-plugin-injection.md`.
    - **Base System Prompt** (≤16KB) — prepended to skill-pack sections.
    - **Isolated** — Tier 2 (Claude only). Adds `--bare`,
      `--strict-mcp-config`, `--setting-sources`, and one `--plugin-dir`
-     flag per ref to the worker spawn. Codex / OpenCode get a
+     flag per ref to the worker spawn. Non-Claude workers get a
      `preset:tier2_skipped` warning and continue with Tier 1 only.
    - **Min Claude Version** — semver gate enforced before spawn.
    - **Setting Sources** — passed as `--setting-sources <value>`. Default

@@ -9,7 +9,7 @@
  *   also mixed:
  *
  *     - provider aliases:      openai | anthropic   | google | gemini
- *     - agent profile types:   codex  | claude-code | gemini | opencode
+ *     - agent profile types:   codex  | claude-code | gemini
  *     - response envelope ids: codex  | anthropic   | google
  *
  *   The registry is the only place that translates between those namespaces.

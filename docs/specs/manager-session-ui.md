@@ -2,6 +2,8 @@
 
 > Version 0.1 | 2026-04-05
 > Status: Design Proposal (구현 전 검토 필요)
+>
+> **역사 보존 메모 (2026-07-23):** 아래 persona의 OpenCode 언급은 작성 당시의 지원 범위를 기록한 자료로 보존한다. OpenCode는 이후 지원 agent vendor에서 제거되었으며, 해당 문구는 현재 지원 범위를 뜻하지 않는다.
 
 ---
 
