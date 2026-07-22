@@ -5,7 +5,7 @@
   "scripts": {
     "prestart": "npm rebuild better-sqlite3 --silent 2>/dev/null || true",
     "predev": "npm rebuild better-sqlite3 --silent 2>/dev/null || true",
-    "pretest": "npm rebuild better-sqlite3 --silent 2>/dev/null || true",
+    "pretest": "node scripts/ensure-sqlite-binding.mjs",
     "dev": "node server/index.js",
     "start": "node server/index.js",
     "test": "node --test",
