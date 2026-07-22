@@ -33,12 +33,14 @@ function createOperatorInstancesRouter({ operatorInstanceService, operatorIdenti
   }));
 
   router.post('/:id/refs', asyncHandler(async (req, res) => {
+    assertHumanSameOrigin(req);
     const instance = operatorInstanceService.addRef(req.params.id, req.body || {});
     const ref = instance.refs.find((item) => item.project_id === req.body?.project_id) || null;
     res.status(201).json({ instance, ref });
   }));
 
   router.delete('/:id/refs/:projectId', asyncHandler(async (req, res) => {
+    assertHumanSameOrigin(req);
     const instance = operatorInstanceService.removeRef(req.params.id, req.params.projectId);
     res.json({ instance });
   }));

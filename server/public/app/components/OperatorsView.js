@@ -787,7 +787,14 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
     .filter((project) => selectedRefRole !== 'primary' || !primaryInstanceByProject.has(String(project.id)));
   const unownedPrimaryProjects = arrayValue(projects)
     .filter((project) => project?.id && !primaryInstanceByProject.has(String(project.id)));
-  const scheduleMappedRefs = arrayValue(scheduleInstance?.refs);
+  const schedulePrimary = primaryRef(scheduleInstance);
+  const schedulePrimaryProject = schedulePrimary?.project
+    || projectsById.get(String(schedulePrimary?.project_id || ''));
+  const schedulePrimaryNodeId = schedulePrimaryProject?.node_id || 'local';
+  const scheduleMappedRefs = arrayValue(scheduleInstance?.refs).filter((ref) => {
+    const project = ref?.project || projectsById.get(String(ref?.project_id || ''));
+    return (project?.node_id || 'local') === schedulePrimaryNodeId;
+  });
   const scheduleCreateReady = Boolean(
     scheduleName.trim()
     && schedulePrompt.trim()

@@ -28,7 +28,12 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
   function getState(runId) {
     let s = runState.get(runId);
     if (!s) {
-      s = { turnIndex: 0, sessionEmitted: false, pendingTools: new Map() };
+      s = {
+        turnIndex: 0,
+        sessionEmitted: false,
+        pendingTools: new Map(),
+        pendingInvocationIds: [],
+      };
       runState.set(runId, s);
     }
     return s;
@@ -36,7 +41,7 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
 
   function emitNormalized(runId, type, payload) {
     if (!runService) return;
-    const invocationId = runState.get(runId)?.currentInvocationId;
+    const invocationId = runState.get(runId)?.pendingInvocationIds?.[0];
     if (invocationId && [
       NORMALIZED_EVENT_TYPES.TURN_STARTED,
       NORMALIZED_EVENT_TYPES.TURN_COMPLETED,
@@ -183,16 +188,17 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
         hasRawStored: RAW_EVENTS_ENABLED,
         data: {
           isError: !!event.is_error,
+          terminal: true,
           stopReason: event.stop_reason || null,
           durationMs: event.duration_ms || null,
           numTurns: event.num_turns || null,
-          invocationId: state.currentInvocationId || undefined,
+          invocationId: state.pendingInvocationIds[0] || undefined,
         },
       }));
 
       // Advance turn boundary so the next assistant message belongs to turnIndex+1.
       state.turnIndex += 1;
-      state.currentInvocationId = null;
+      state.pendingInvocationIds.shift();
       state.pendingTools.clear();
       return;
     }
@@ -288,9 +294,15 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
    */
   function runTurn(runId, { text, images, invocationId } = {}) {
     const state = getState(runId);
-    state.currentInvocationId = invocationId || null;
-    const accepted = streamJsonEngine.sendInput(runId, text || '', images);
-    if (!accepted) state.currentInvocationId = null;
+    state.pendingInvocationIds.push(invocationId || null);
+    let accepted;
+    try {
+      accepted = streamJsonEngine.sendInput(runId, text || '', images);
+    } catch (err) {
+      state.pendingInvocationIds.pop();
+      throw err;
+    }
+    if (!accepted) state.pendingInvocationIds.pop();
     return { accepted };
   }
 

@@ -147,6 +147,86 @@ test('due materialization coalesces missed intervals into one durable invocation
   assert.equal(h.scheduleService.getSchedule(schedule.id).next_fire_at, '2026-07-23T07:00:00.000Z');
 });
 
+test('one Operator materializes at most one active invocation across schedules', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const first = h.scheduleService.createSchedule(instance.id, {
+    name: 'First hourly', prompt: 'First', rule: { kind: 'interval', minutes: 60 }, timezone: 'UTC',
+  }, new Date('2026-07-23T00:00:00.000Z'));
+  const second = h.scheduleService.createSchedule(instance.id, {
+    name: 'Second hourly', prompt: 'Second', rule: { kind: 'interval', minutes: 60 }, timezone: 'UTC',
+  }, new Date('2026-07-23T00:00:00.000Z'));
+
+  const created = h.scheduleService.materializeDue(new Date('2026-07-23T01:00:00.000Z'));
+  assert.equal(created.length, 1);
+  assert.equal(h.db.prepare(`
+    SELECT COUNT(*) AS count FROM operator_invocations
+    WHERE operator_instance_id=? AND status IN ('pending','claimed','delivering','running')
+  `).get(instance.id).count, 1);
+  assert.throws(
+    () => h.scheduleService.runNow(created[0].schedule_id === first.id ? second.id : first.id),
+    /Operator already has an active invocation/,
+  );
+
+  h.db.prepare("UPDATE operator_invocations SET status='completed', completed_at=datetime('now') WHERE id=?").run(created[0].id);
+  const next = h.scheduleService.materializeDue(new Date('2026-07-23T01:00:01.000Z'));
+  assert.equal(next.length, 1);
+  assert.notEqual(next[0].schedule_id, created[0].schedule_id);
+});
+
+test('068 migration reconciles legacy overlapping Operator turns before adding single-flight index', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const firstSchedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Legacy running', prompt: 'First', rule: { kind: 'interval', minutes: 60 },
+  });
+  const secondSchedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Legacy delivering', prompt: 'Second', rule: { kind: 'interval', minutes: 60 },
+  });
+
+  h.db.exec('DROP INDEX idx_operator_invocations_active_operator');
+  const running = h.scheduleService.runNow(firstSchedule.id, new Date('2026-07-23T00:00:00.000Z'));
+  const delivering = h.scheduleService.runNow(secondSchedule.id, new Date('2026-07-23T00:00:00.000Z'));
+  h.db.prepare("UPDATE operator_invocations SET status='running' WHERE id=?").run(running.id);
+  h.db.prepare("UPDATE operator_invocations SET status='delivering' WHERE id=?").run(delivering.id);
+
+  const sql = fs.readFileSync(
+    path.join(__dirname, '..', 'db', 'migrations', '068_operator_scheduler_hardening.sql'),
+    'utf8',
+  );
+  h.db.exec(sql);
+
+  assert.equal(h.db.prepare('SELECT status FROM operator_invocations WHERE id=?').get(running.id).status, 'running');
+  assert.equal(h.db.prepare('SELECT status FROM operator_invocations WHERE id=?').get(delivering.id).status, 'uncertain');
+  assert.throws(
+    () => h.scheduleService.runNow(secondSchedule.id, new Date('2026-07-23T01:00:00.000Z')),
+    /Operator already has an active invocation/,
+  );
+});
+
+test('a schedule cannot target a mapped folder on a different node from its Operator', (t) => {
+  const h = harness(t);
+  h.nodeService.createNode({
+    id: 'node-a', name: 'Node A', kind: 'ssh', ssh_host: 'a.example', ssh_user: 'operator',
+    exposed_roots: ['/srv'], reachable: true,
+  });
+  h.nodeService.createNode({
+    id: 'node-b', name: 'Node B', kind: 'ssh', ssh_host: 'b.example', ssh_user: 'operator',
+    exposed_roots: ['/srv'], reachable: true,
+  });
+  const { instance } = createMappedOperator(h, { directory: '/srv/a', node_id: 'node-a' });
+  const other = h.projectService.createProject({ name: 'Other node', directory: '/srv/b', node_id: 'node-b' });
+  h.instanceService.addRef(instance.id, { project_id: other.id, role: 'reference' });
+
+  assert.throws(
+    () => h.scheduleService.createSchedule(instance.id, {
+      name: 'Cross node', prompt: 'Inspect', codebase_project_id: other.id,
+      rule: { kind: 'interval', minutes: 60 },
+    }),
+    /must be on the Operator node/,
+  );
+});
+
 test('manual run-now obeys the schedule daily cap', (t) => {
   const h = harness(t);
   const { instance } = createMappedOperator(h);
@@ -220,7 +300,24 @@ test('scheduler delivers through the instance conversation and correlates turn c
   assert.equal(sends[0].payload.invocationId, invocation.id);
   assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
 
-  h.runService.addRunEvent(operatorRun.id, 'mgr.turn_completed', JSON.stringify({ data: { invocationId: invocation.id } }));
+  const mismatchedEventId = h.runService.addRunEvent(
+    operatorRun.id,
+    'mgr.assistant_message',
+    JSON.stringify({ data: { invocationId: invocation.id, terminal: true } }),
+  );
+  h.eventBus.emit('run:event', {
+    runId: operatorRun.id,
+    eventType: 'mgr.turn_completed',
+    eventId: mismatchedEventId,
+  });
+  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
+  h.runService.addRunEvent(operatorRun.id, 'mgr.turn_completed', JSON.stringify({ data: { terminal: true } }));
+  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
+  h.runService.addRunEvent(operatorRun.id, 'mgr.turn_completed', JSON.stringify({ data: { invocationId: 'oinv_wrong', terminal: true } }));
+  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
+  h.runService.addRunEvent(operatorRun.id, 'mgr.turn_failed', JSON.stringify({ data: { invocationId: invocation.id, terminal: false } }));
+  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
+  h.runService.addRunEvent(operatorRun.id, 'mgr.turn_completed', JSON.stringify({ data: { invocationId: invocation.id, terminal: true } }));
   assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'completed');
 });
 
@@ -346,4 +443,70 @@ test('scheduler marks ambiguous delivery failures uncertain and never replays th
   const row = h.scheduleService.listInvocations(schedule.id)[0];
   assert.equal(row.status, 'uncertain');
   assert.equal(sends, 1);
+});
+
+test('scheduler fails a structured permanent rejection even when its message says deliver message', async (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Permanent', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  h.scheduleService.runNow(schedule.id);
+  const scheduler = createOperatorScheduler({
+    operatorScheduleService: h.scheduleService,
+    conversationService: {
+      sendMessage() {
+        const err = new Error('Failed to deliver message because manager rejected configuration');
+        err.httpStatus = 502;
+        err.code = 'OPERATOR_DELIVERY_REJECTED';
+        err.retryable = false;
+        throw err;
+      },
+    },
+    managerRegistry: { getActiveRunId() { return 'run_top'; } },
+    projectService: h.projectService,
+    runService: h.runService,
+    eventBus: h.eventBus,
+    intervalMs: 999999,
+  });
+  scheduler.start();
+  t.after(() => scheduler.stop());
+  await scheduler.awaitDrain();
+
+  const row = h.scheduleService.listInvocations(schedule.id)[0];
+  assert.equal(row.status, 'failed');
+  assert.equal(row.waiting_reason, null);
+});
+
+test('scheduler retries only an explicitly retryable busy rejection', async (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Busy', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  h.scheduleService.runNow(schedule.id);
+  const scheduler = createOperatorScheduler({
+    operatorScheduleService: h.scheduleService,
+    conversationService: {
+      sendMessage() {
+        const err = new Error('Manager is busy');
+        err.httpStatus = 502;
+        err.code = 'OPERATOR_BUSY';
+        err.retryable = true;
+        throw err;
+      },
+    },
+    managerRegistry: { getActiveRunId() { return 'run_top'; } },
+    projectService: h.projectService,
+    runService: h.runService,
+    eventBus: h.eventBus,
+    intervalMs: 999999,
+  });
+  scheduler.start();
+  t.after(() => scheduler.stop());
+  await scheduler.awaitDrain();
+
+  const row = h.scheduleService.listInvocations(schedule.id)[0];
+  assert.equal(row.status, 'pending');
+  assert.equal(row.waiting_reason, 'operator_busy');
 });

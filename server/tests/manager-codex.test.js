@@ -126,6 +126,10 @@ test('CodexAdapter lazily writes a system prompt temp file and disposeSession cl
   assert.equal(content, 'hello system');
 
   fakeChild.stdout.write(`${JSON.stringify({
+    type: 'item.completed',
+    item: { id: 'item_err', type: 'error', message: 'rate limit exceeded' },
+  })}\n`);
+  fakeChild.stdout.write(`${JSON.stringify({
     type: 'turn.completed',
     usage: { input_tokens: 2, cached_input_tokens: 1, output_tokens: 3 },
   })}\n`);
@@ -133,6 +137,11 @@ test('CodexAdapter lazily writes a system prompt temp file and disposeSession cl
   const scheduledTurnEvents = captured.filter(({ t }) => t === 'mgr.turn_started' || t === 'mgr.turn_completed');
   assert.equal(scheduledTurnEvents.length, 2);
   assert.ok(scheduledTurnEvents.every(({ p }) => p.data.invocationId === 'oinv_codex_test'));
+  const nonterminalError = captured.find(({ t }) => t === 'mgr.turn_failed');
+  assert.equal(nonterminalError.p.data.invocationId, 'oinv_codex_test');
+  assert.equal(nonterminalError.p.data.terminal, false);
+  const completed = captured.find(({ t }) => t === 'mgr.turn_completed');
+  assert.equal(completed.p.data.terminal, true);
 
   // Dispose: temp file (and its parent dir) should be unlinked best-effort.
   await adapter.disposeSession('run_mgr_codex1');

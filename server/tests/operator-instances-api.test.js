@@ -17,7 +17,7 @@ async function createTestApp(t) {
     storageRoot,
     fsRoot,
     dbPath: path.join(dbDir, 'test.db'),
-    authToken: null,
+    authToken: 'operator-test-secret',
     authResolverOpts: { hasKeychain: () => false },
   });
 
@@ -35,8 +35,13 @@ function createProject(app, name) {
   return app.services.projectService.createProject({ name });
 }
 
-function api(app, method, path, body) {
-  return invokeApp(app, { method, path, body });
+function api(app, method, path, body, headers = {}) {
+  return invokeApp(app, {
+    method,
+    path,
+    body,
+    headers: { cookie: 'palantir_token=operator-test-secret', ...headers },
+  });
 }
 
 function ensurePrimary(app, projectId) {
@@ -129,6 +134,46 @@ test('operator instances API exposes refs CRUD and expected conflict/404 cases',
     404,
   );
   assert.equal((await api(app, 'DELETE', `/api/operator-instances/${instanceId}/refs/${refProject.id}`)).status, 404);
+});
+
+test('operator refs mutations require human same-origin authentication', async (t) => {
+  const app = await createTestApp(t);
+  const primaryProject = createProject(app, 'alpha');
+  const refProject = createProject(app, 'beta');
+  const { instanceId } = ensurePrimary(app, primaryProject.id);
+
+  const bearer = await api(
+    app,
+    'POST',
+    `/api/operator-instances/${instanceId}/refs`,
+    { project_id: refProject.id, role: 'reference' },
+    { authorization: 'Bearer operator-test-secret' },
+  );
+  assert.equal(bearer.status, 403);
+
+  const crossOrigin = await api(
+    app,
+    'POST',
+    `/api/operator-instances/${instanceId}/refs`,
+    { project_id: refProject.id, role: 'reference' },
+    { host: 'console.local', origin: 'https://evil.example' },
+  );
+  assert.equal(crossOrigin.status, 403);
+
+  const added = await api(app, 'POST', `/api/operator-instances/${instanceId}/refs`, {
+    project_id: refProject.id,
+    role: 'reference',
+  });
+  assert.equal(added.status, 201);
+
+  const bearerDelete = await api(
+    app,
+    'DELETE',
+    `/api/operator-instances/${instanceId}/refs/${refProject.id}`,
+    undefined,
+    { authorization: 'Bearer operator-test-secret' },
+  );
+  assert.equal(bearerDelete.status, 403);
 });
 
 test('live watch-list changes bump version and annotate the active operator run', async (t) => {

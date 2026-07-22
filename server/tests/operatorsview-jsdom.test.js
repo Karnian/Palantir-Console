@@ -752,6 +752,56 @@ test('OperatorsView supports Operator-first create then hourly schedule registra
   assert.deepEqual(JSON.parse(scheduleCall.opts.body).rule, { kind: 'interval', minutes: 60 });
 });
 
+test('OperatorsView only offers scheduled folders on the Operator primary node', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+
+  const instance = {
+    id: 'oi_node_a',
+    display_name: 'Node A Operator',
+    profile_id: 'op_hourly',
+    profile_name: 'Hourly profile',
+    refs: [
+      {
+        instance_id: 'oi_node_a', project_id: 'proj_a', role: 'primary',
+        project: { id: 'proj_a', name: 'Node A folder', node_id: 'node-a' },
+      },
+      {
+        instance_id: 'oi_node_a', project_id: 'proj_b', role: 'reference',
+        project: { id: 'proj_b', name: 'Node B folder', node_id: 'node-b' },
+      },
+    ],
+  };
+  installRosterStubs(env, {
+    managerStatus: { active: false, top: null, pms: [] },
+    profiles: [{ id: 'op_hourly', name: 'Hourly profile', capabilities: [] }],
+    instances: [instance],
+    operatorInstancesHandler: ({ url }) => (
+      url === '/api/operator-instances/oi_node_a/schedules' ? { schedules: [] } : {}
+    ),
+  });
+  loadOperatorsComponents(env);
+  const root = renderOperatorsView(env, {
+    projects: [
+      { id: 'proj_a', name: 'Node A folder', node_id: 'node-a', directory: '/srv/a' },
+      { id: 'proj_b', name: 'Node B folder', node_id: 'node-b', directory: '/srv/b' },
+    ],
+  });
+
+  const card = await waitFor(() => {
+    const el = root.querySelector('[data-role="operator-configured-card"]');
+    assert.ok(el);
+    return el;
+  });
+  card.querySelector('[data-role="operator-schedule-button"]').click();
+  const select = await waitFor(() => {
+    const el = root.querySelector('#operator-schedule-folder');
+    assert.ok(el);
+    return el;
+  });
+  assert.deepEqual(Array.from(select.options).map((option) => option.value), ['proj_a']);
+});
+
 test('OperatorsView delegates specialist invoke contract to SpecialistInvokePanel source', () => {
   const operatorsSource = fs.readFileSync(path.join(COMPONENTS_DIR, 'OperatorsView.js'), 'utf8');
   const specialistViewSource = fs.readFileSync(path.join(COMPONENTS_DIR, 'SpecialistView.js'), 'utf8');

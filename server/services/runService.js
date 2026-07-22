@@ -675,6 +675,9 @@ function createRunService(db, eventBus) {
     getEventsAfter: db.prepare(`
       SELECT * FROM run_events WHERE run_id = ? AND id > ? ORDER BY id ASC LIMIT 500
     `),
+    getEventById: db.prepare(`
+      SELECT * FROM run_events WHERE run_id = ? AND id = ? LIMIT 1
+    `),
   };
 
   function listRuns({ task_id, status } = {}) {
@@ -1623,6 +1626,10 @@ function createRunService(db, eventBus) {
     return stmts.getEvents.all(runId);
   }
 
+  function getRunEventById(runId, eventId) {
+    return stmts.getEventById.get(runId, eventId) || null;
+  }
+
   // P3-6: connect deriveOperatorProjectId diagnostic to eventBus.
   // Registered here (after addRunEvent is defined) so the callback can both
   // emit to the bus and persist to run_events in one place. Belt-and-suspenders:
@@ -1778,7 +1785,7 @@ function createRunService(db, eventBus) {
     operatorInstanceHasRef,
     getOperatorThreadForProject,
     setOperatorInstanceThread,
-    deleteRun, addRunEvent, getRunEvents,
+    deleteRun, addRunEvent, getRunEvents, getRunEventById,
     getActiveManager, getActiveManagers, getRunByConversationId, getWorkerRuns,
   };
 }

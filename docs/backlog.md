@@ -228,7 +228,7 @@
 
 ### OS. Operator Scheduler + Durable Invocation Queue
 - **Spec**: [`docs/specs/operator-scheduler-brief.md`](./specs/operator-scheduler-brief.md) (2026-07-23, v1 LOCKED).
-- **MVP 구현**: **Operator 생성 → primary/reference 작업 폴더 매핑 → Operator-owned schedule 등록**. migration 067 schedule/invocation durable queue, hourly/daily/weekdays/weekly/once + IANA timezone, boot recovery/coalesce/CAS claim, Top·busy·remote node 대기, ambiguous delivery `uncertain`, scheduled Codex standard, project-delete archive/cancel, human cookie+Origin API, Roster UI/SSE/history API.
+- **MVP 구현**: **Operator 생성 → primary/reference 작업 폴더 매핑 → Operator-owned schedule 등록**. migration 067 schedule/invocation durable queue + 068 적대 리뷰 하드닝(Operator 단위 active single-flight, exact invocation terminal correlation, primary와 같은 node의 folder만 schedule 허용), hourly/daily/weekdays/weekly/once + IANA timezone, boot recovery/coalesce/CAS claim, Top·busy·remote node 대기, ambiguous delivery `uncertain`, 구조화 retry/permanent 분류, scheduled Codex standard, project-delete archive/cancel, refs/schedule human cookie+Origin API, Roster UI/SSE/history API.
 - **후속**: OS-5 일반 auto-review durable queue 이관, invocation history/retry 상세 UI, folder-less profile schedule/reviewer placement/raw cron. 기존 `run:harvested` 즉시 trigger는 유지한다.
 
 ### G. Goal Delegation — 워커 완결 작업 위임 (전 업무)

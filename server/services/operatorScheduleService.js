@@ -373,15 +373,14 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
              completed_at=datetime('now'), updated_at=datetime('now')
        WHERE id=? AND status IN ('claimed','delivering') AND claim_token=?
     `),
-    runningByManager: db.prepare(`
+    runningByInvocation: db.prepare(`
       SELECT * FROM operator_invocations
-      WHERE manager_run_id=? AND status='running'
-      ORDER BY started_at DESC LIMIT 1
+      WHERE id=? AND manager_run_id=? AND status='running'
     `),
     completeInvocation: db.prepare(`
       UPDATE operator_invocations
          SET status=?, last_error=?, completed_at=datetime('now'), updated_at=datetime('now')
-       WHERE id=? AND status='running'
+       WHERE id=? AND manager_run_id=? AND status='running'
     `),
     resetFailures: db.prepare(`
       UPDATE operator_schedules SET consecutive_failures=0, updated_at=datetime('now') WHERE id=?
@@ -436,13 +435,22 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     const primary = primaryProjectId(instanceId);
     if (!primary) throw new ConflictError('Operator must have a primary folder before a schedule can be registered');
     const target = projectId || primary;
+    const primaryProject = stmts.getProject.get(primary);
+    if (!primaryProject) throw new ConflictError(`Operator primary project not found: ${primary}`);
     const project = stmts.getProject.get(target);
     if (!project) throw new NotFoundError(`Project not found: ${target}`);
     if (Number(project.pm_enabled) === 0) throw new ConflictError(`Project ${target} is disabled`);
     const ref = stmts.getRef.get(instanceId, target);
     if (!ref) throw new ConflictError(`Project ${target} is not mapped to Operator ${instanceId}`);
     if (requirePrimary && ref.role !== 'primary') throw new ConflictError('A primary folder is required');
-    return { project, primaryProjectId: primary, role: ref.role };
+    const primaryNodeId = primaryProject.node_id || 'local';
+    const targetNodeId = project.node_id || 'local';
+    if (targetNodeId !== primaryNodeId) {
+      throw new ConflictError(
+        `Scheduled folder must be on the Operator node (${primaryNodeId}); received ${targetNodeId}`,
+      );
+    }
+    return { project, primaryProject, primaryProjectId: primary, role: ref.role };
   }
 
   function getSchedule(id) {
@@ -575,7 +583,7 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
       stmts.insertInvocation.run(invocation);
     } catch (err) {
       if (err?.code === 'SQLITE_CONSTRAINT_UNIQUE') {
-        throw new ConflictError('Schedule already has an active or duplicate invocation');
+        throw new ConflictError('Operator already has an active invocation, or this schedule occurrence is duplicated');
       }
       throw err;
     }
@@ -719,11 +727,16 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     return invocation;
   }
 
-  function completeByManagerRun(managerRunId, success, error = null) {
-    const running = stmts.runningByManager.get(managerRunId);
+  function completeInvocation(invocationId, managerRunId, success, error = null) {
+    const running = stmts.runningByInvocation.get(invocationId, managerRunId);
     if (!running) return null;
     const status = success ? 'completed' : 'failed';
-    const info = stmts.completeInvocation.run(status, error ? String(error).slice(0, 2000) : null, running.id);
+    const info = stmts.completeInvocation.run(
+      status,
+      error ? String(error).slice(0, 2000) : null,
+      running.id,
+      managerRunId,
+    );
     if (info.changes !== 1) return null;
     if (running.schedule_id) {
       if (success) stmts.resetFailures.run(running.schedule_id);
@@ -775,7 +788,7 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     failClaim,
     cancelClaim,
     markClaimUncertain,
-    completeByManagerRun,
+    completeInvocation,
     recoverAfterRestart,
     getInvocationContext,
   };
