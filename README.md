@@ -162,8 +162,10 @@ Consolidated tab group (nav-consolidation). Three sub-tabs:
 
 ### 8. Operator (✸) — `#operator`
 
-Consolidated tab group (nav-consolidation). Two sub-tabs:
+Consolidated tab group (nav-consolidation). Main sub-tabs:
 
+- **Operator Roster** (`#operator`) — create durable Operator instances, map codebases, manage schedules, and select each instance's CLI (`Codex`, `Claude Code`, or automatic fallback). Changing CLI preserves the Operator identity/profile/mappings/schedules and resets only its runtime conversation thread.
+- **Codebases** (`#operator/codebases`) — inspect and manage Operator codebase placement.
 - **Operator Profiles** (`#operator/profiles`, formerly `#operator-profiles`) — Operator profile CRUD (PF-1/PF-2).
 - **Specialist** (`#operator/specialist`) — Invoke a folder-less specialist worker against an active manager run.
 
@@ -197,6 +199,13 @@ PATCH  /api/tasks/:id/status   — change status { status }
 DELETE /api/tasks/:id          — delete
 PATCH  /api/tasks/reorder      — reorder { orderedIds: [] }
 POST   /api/tasks/:id/execute  — run agent { agent_profile_id, prompt? }
+```
+
+### Operator instances
+```
+GET    /api/operator-instances              — list durable Operator instances
+POST   /api/operator-instances              — create { profile_id, display_name?, primary_project_id?, preferred_adapter? }
+PATCH  /api/operator-instances/:id/adapter  — switch CLI { preferred_adapter: "codex" | "claude" | null }; resets only the runtime thread
 ```
 
 ### Runs
@@ -420,7 +429,7 @@ hashes. Deleting a preset later does not erase past snapshot rows;
 | `PALANTIR_TOKEN` | (none) | Enables Bearer/cookie auth and promotes bind from `127.0.0.1` to `0.0.0.0` |
 | `HOST` | auto | Override the bind address. `0.0.0.0` without a token logs a security warning |
 | `PALANTIR_ALLOWED_COMMANDS` | (none) | Additional allowed CLI commands (comma-separated) |
-| `PALANTIR_DEFAULT_PM_ADAPTER` | `codex` | Global default Operator adapter when a project has no `preferred_pm_adapter`. Claude preference still falls through to Codex until Phase 3b (Claude Operator resume) ships |
+| `PALANTIR_DEFAULT_PM_ADAPTER` | `codex` | Global Operator adapter fallback when an instance uses Auto and its project has no `preferred_pm_adapter` |
 | `PALANTIR_CODEX_MANAGER_BYPASS` | (unset) | Set to `1` to let Codex manager turns run with `--dangerously-bypass-approvals-and-sandbox`. Default (unset) keeps the manager role in the sandboxed policy |
 | `ANTHROPIC_BASE_URL` / `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` | — | Claude Code auth (persisted to `.claude-auth.json` when set at server start) |
 | `CODEX_API_KEY` / `OPENAI_API_KEY` | — | Codex auth (preflight checks `~/.codex/auth.json`) |

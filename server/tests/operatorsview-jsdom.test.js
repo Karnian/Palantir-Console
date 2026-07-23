@@ -283,6 +283,76 @@ test('OperatorsView renders Master, Live Operators, and Available Operators as s
   assert.ok(root.querySelector('[role="dialog"]'));
 });
 
+test('OperatorsView saves CLI changes independently across configured Operator cards', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  const firstGate = deferred();
+  const secondGate = deferred();
+  let currentInstances = [
+    {
+      id: 'oi_first',
+      display_name: 'First Operator',
+      profile_id: 'op_shared',
+      profile_name: 'Shared',
+      preferred_adapter: 'codex',
+      refs: [],
+    },
+    {
+      id: 'oi_second',
+      display_name: 'Second Operator',
+      profile_id: 'op_shared',
+      profile_name: 'Shared',
+      preferred_adapter: 'codex',
+      refs: [],
+    },
+  ];
+  const apiCalls = installRosterStubs(env, {
+    managerStatus: { active: false, top: null, pms: [] },
+    profiles: [{ id: 'op_shared', name: 'Shared', capabilities: [] }],
+    instances: () => currentInstances,
+    operatorInstancesHandler: async ({ url, opts }) => {
+      if (opts.method !== 'PATCH') return {};
+      const id = url.includes('oi_first') ? 'oi_first' : 'oi_second';
+      await (id === 'oi_first' ? firstGate.promise : secondGate.promise);
+      const preferredAdapter = JSON.parse(opts.body).preferred_adapter;
+      currentInstances = currentInstances.map((instance) => (
+        instance.id === id ? { ...instance, preferred_adapter: preferredAdapter } : instance
+      ));
+      return {
+        changed: true,
+        instance: currentInstances.find((instance) => instance.id === id),
+      };
+    },
+  });
+  loadOperatorsComponents(env);
+  const root = renderOperatorsView(env);
+
+  const selects = await waitFor(() => {
+    const found = root.querySelectorAll('[data-role="operator-adapter-select"]');
+    assert.equal(found.length, 2);
+    return found;
+  });
+  changeValue(env, selects[0], 'claude');
+  await waitFor(() => assert.equal(
+    apiCalls.filter((call) => call.opts.method === 'PATCH').length,
+    1,
+  ));
+  assert.equal(selects[1].disabled, false);
+  changeValue(env, selects[1], 'claude');
+  await waitFor(() => assert.equal(
+    apiCalls.filter((call) => call.opts.method === 'PATCH').length,
+    2,
+  ));
+
+  firstGate.resolve();
+  secondGate.resolve();
+  await waitFor(() => {
+    const values = Array.from(root.querySelectorAll('[data-role="operator-adapter-select"]'))
+      .map((select) => select.value);
+    assert.deepEqual(values, ['claude', 'claude']);
+  });
+});
+
 test('OperatorsView renders watch-list badges and edits reference refs from the Live card', async (t) => {
   const env = createPreactEnv();
   t.after(env.cleanup);
@@ -676,6 +746,7 @@ test('OperatorsView supports Operator-first create then hourly schedule registra
           display_name: body.display_name,
           profile_id: body.profile_id,
           profile_name: 'Hourly profile',
+          preferred_adapter: body.preferred_adapter,
           schedule_count: 0,
           next_schedule_at: null,
           refs: [{
@@ -684,6 +755,16 @@ test('OperatorsView supports Operator-first create then hourly schedule registra
           }],
         }];
         return { instance: currentInstances[0] };
+      }
+      if (url === '/api/operator-instances/oi_hourly/adapter' && opts.method === 'PATCH') {
+        const body = JSON.parse(opts.body);
+        currentInstances = [{
+          ...currentInstances[0],
+          preferred_adapter: body.preferred_adapter,
+          thread_id: null,
+          pm_adapter: null,
+        }];
+        return { instance: currentInstances[0], changed: true };
       }
       if (url === '/api/operator-instances/oi_hourly/schedules' && (!opts.method || opts.method === 'GET')) {
         return { schedules: currentSchedules };
@@ -728,6 +809,23 @@ test('OperatorsView supports Operator-first create then hourly schedule registra
   });
   assert.match(card.textContent, /Remote Hourly Operator/);
   assert.match(card.textContent, /Remote Folder/);
+  assert.equal(card.querySelector('[data-role="operator-adapter-select"]').value, 'codex');
+
+  changeValue(env, card.querySelector('[data-role="operator-adapter-select"]'), 'claude');
+  await waitFor(() => {
+    const call = apiCalls.find((entry) => (
+      entry.url === '/api/operator-instances/oi_hourly/adapter'
+      && entry.opts.method === 'PATCH'
+    ));
+    assert.ok(call);
+    assert.deepEqual(JSON.parse(call.opts.body), { preferred_adapter: 'claude' });
+  });
+  await waitFor(() => {
+    assert.equal(
+      root.querySelector('[data-role="operator-configured-card"] [data-role="operator-adapter-select"]').value,
+      'claude',
+    );
+  });
 
   card.querySelector('[data-role="operator-schedule-button"]').click();
   const scheduleDialog = await waitFor(() => {
@@ -747,6 +845,7 @@ test('OperatorsView supports Operator-first create then hourly schedule registra
     profile_id: 'op_hourly',
     display_name: 'Remote Hourly Operator',
     primary_project_id: 'proj_remote',
+    preferred_adapter: 'codex',
   });
   const scheduleCall = apiCalls.find((call) => call.url === '/api/operator-instances/oi_hourly/schedules' && call.opts.method === 'POST');
   assert.deepEqual(JSON.parse(scheduleCall.opts.body).rule, { kind: 'interval', minutes: 60 });

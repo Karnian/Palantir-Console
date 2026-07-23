@@ -119,6 +119,20 @@ test('P5-S4a: resolveOperatorAdapterType maps Claude preferences to claude-code'
   const spawn = createOperatorSpawnService({ logger: (msg) => logs.push(msg) });
 
   try {
+    assert.equal(
+      spawn.resolveOperatorAdapterType(
+        { id: 0, preferred_pm_adapter: 'codex' },
+        { preferred_adapter: 'claude' },
+      ),
+      'claude-code',
+    );
+    assert.equal(
+      spawn.resolveOperatorAdapterType(
+        { id: 0, preferred_pm_adapter: 'claude' },
+        { preferred_adapter: 'codex' },
+      ),
+      'codex',
+    );
     assert.equal(spawn.resolveOperatorAdapterType({ id: 1, preferred_pm_adapter: 'claude' }), 'claude-code');
     assert.equal(spawn.resolveOperatorAdapterType({ id: 2, preferred_pm_adapter: 'claude-code' }), 'claude-code');
     assert.equal(spawn.resolveOperatorAdapterType({ id: 3, preferred_pm_adapter: 'codex' }), 'codex');

@@ -191,8 +191,10 @@ Nav-consolidation 으로 합쳐진 탭 그룹. 하위 탭 3개:
 
 ### 8. Operator (✸) — `#operator`
 
-Nav-consolidation 으로 합쳐진 탭 그룹. 하위 탭 2개:
+Nav-consolidation 으로 합쳐진 탭 그룹. 주요 하위 탭:
 
+- **오퍼레이터 로스터** (`#operator`) — 영속 오퍼레이터 인스턴스 생성, 프로젝트 폴더 매핑, 스케줄 관리, 인스턴스별 CLI(`Codex`, `Claude Code`, 자동) 선택. CLI 변경 시 오퍼레이터 ID·프로필·매핑·스케줄은 유지하고 런타임 대화 스레드만 초기화한다.
+- **프로젝트 폴더** (`#operator/codebases`) — 오퍼레이터 프로젝트 폴더 배치 조회·관리.
 - **Operator Profiles** (`#operator/profiles`, 구 `#operator-profiles`) — Operator 프로필 CRUD (PF-1/PF-2).
 - **Specialist** (`#operator/specialist`) — 활성 매니저 run 에 folder-less specialist 워커 호출.
 
@@ -287,6 +289,13 @@ PATCH  /api/tasks/:id/status   — 상태 변경 { status }
 DELETE /api/tasks/:id          — 삭제
 PATCH  /api/tasks/reorder      — 순서 변경 { orderedIds: [] }
 POST   /api/tasks/:id/execute  — 에이전트 실행 { agent_profile_id, prompt? }
+```
+
+### Operator instances
+```
+GET    /api/operator-instances              — 영속 오퍼레이터 인스턴스 목록
+POST   /api/operator-instances              — 생성 { profile_id, display_name?, primary_project_id?, preferred_adapter? }
+PATCH  /api/operator-instances/:id/adapter  — CLI 전환 { preferred_adapter: "codex" | "claude" | null }; 런타임 스레드만 초기화
 ```
 
 ### Runs
@@ -430,7 +439,7 @@ PATCH  /api/runs/:id/skill-packs/checks — 팩 체크 업데이트
 | `PALANTIR_TOKEN` | (없음) | Bearer/쿠키 인증 활성화 + 기본 바인딩을 `127.0.0.1` → `0.0.0.0` 으로 승격 |
 | `HOST` | 자동 | 바인딩 주소 명시적 오버라이드. 토큰 없이 `0.0.0.0` 이면 경고 로그 |
 | `PALANTIR_ALLOWED_COMMANDS` | (없음) | 추가 허용 CLI 명령어 (쉼표 구분) |
-| `PALANTIR_DEFAULT_PM_ADAPTER` | `codex` | 프로젝트 preference 미설정 시 전역 Operator 어댑터 기본값. Claude preference 도 Phase 3b 전까지는 codex 로 fallback |
+| `PALANTIR_DEFAULT_PM_ADAPTER` | `codex` | 인스턴스 CLI가 자동이고 프로젝트 preference도 없을 때 사용하는 전역 Operator 어댑터 fallback |
 | `PALANTIR_CODEX_MANAGER_BYPASS` | (미설정) | `1` 로 설정하면 Codex 매니저 턴이 `--dangerously-bypass-approvals-and-sandbox` 를 붙인다. 기본값은 sandbox 정책 유지 |
 | `ANTHROPIC_BASE_URL` / `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` | — | Claude Code 인증 (서버 시작 시 감지되면 `.claude-auth.json` 에 저장) |
 | `CODEX_API_KEY` / `OPENAI_API_KEY` | — | Codex 인증 (`~/.codex/auth.json` preflight 체크) |

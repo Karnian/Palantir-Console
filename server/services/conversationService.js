@@ -357,6 +357,18 @@ function createConversationService({
       operatorResolved = resolveOperatorConversation(conversationId);
       if (operatorResolved?.instanceConversationId) conversationId = operatorResolved.instanceConversationId;
       if (!projectId) projectId = operatorResolved?.primaryProjectId || operatorResolved?.legacyProjectId || null;
+      if (
+        operatorResolved?.instanceId
+        && operatorSpawnService
+        && typeof operatorSpawnService.isInstanceTransitioning === 'function'
+        && operatorSpawnService.isInstanceTransitioning(operatorResolved.instanceId)
+      ) {
+        const err = new Error('operator identity transition in progress');
+        err.httpStatus = 409;
+        err.code = 'OPERATOR_BUSY';
+        err.retryable = true;
+        throw err;
+      }
     }
     const layerLabel = isTop ? 'Top' : 'PM';
 

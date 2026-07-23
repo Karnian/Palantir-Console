@@ -222,6 +222,84 @@ test('concurrent cold sends share one async Operator spawn flight', async (t) =>
   assert.equal(adapter._starts.length, 1);
 });
 
+test('instance transition fences new sends and waits for an in-flight Operator spawn', async (t) => {
+  withCodexAuth(t);
+  withRepoFlag(t, '1');
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const nodeService = makeNodeService(createNodeService(db, { localExecutor: { local: true } }));
+  const registry = createManagerRegistry({ runService });
+  const adapter = makeAdapter();
+  seedTop({ runService, registry, adapter: makeAdapter() });
+  const project = projectService.createProject({
+    name: 'transition-fence-repo',
+    source_type: 'git',
+    repo_url: 'file:///tmp/repo.git',
+  });
+  const { instanceId } = runService.ensurePrimaryOperatorInstanceForProject(project.id);
+  let releaseMaterialization;
+  const gate = new Promise((resolve) => { releaseMaterialization = resolve; });
+  const materializationService = makeMaterializationMock({ runService });
+  const originalEnsure = materializationService.ensureWorkspace;
+  materializationService.ensureWorkspace = async (input) => {
+    await gate;
+    return originalEnsure.call(materializationService, input);
+  };
+  const spawn = makeSpawn({
+    runService,
+    registry,
+    adapter,
+    projectService,
+    projectBriefService,
+    nodeService,
+    materializationService,
+  });
+
+  const flight = spawn.ensureLiveOperator({ projectId: project.id });
+  let transitionApplied = false;
+  let releaseTransition;
+  const transitionGate = new Promise((resolve) => { releaseTransition = resolve; });
+  const transition = spawn.withInstanceTransition(instanceId, async () => {
+    transitionApplied = true;
+    await transitionGate;
+    return 'changed';
+  });
+  await Promise.resolve();
+
+  assert.equal(transitionApplied, false);
+  assert.throws(
+    () => spawn.ensureLiveOperator({ projectId: project.id }),
+    (err) => (
+      /identity transition in progress/.test(err.message)
+      && err.httpStatus === 409
+      && err.code === 'OPERATOR_BUSY'
+      && err.retryable === true
+    ),
+  );
+
+  releaseMaterialization();
+  await flight;
+  await Promise.resolve();
+  const conversationService = createConversationService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => adapter },
+    lifecycleService: null,
+    operatorSpawnService: spawn,
+    projectService,
+    projectBriefService,
+  });
+  assert.throws(
+    () => conversationService.sendMessage(`operator:${instanceId}`, { text: 'wait for CLI change' }),
+    (err) => err.code === 'OPERATOR_BUSY' && err.retryable === true,
+  );
+  releaseTransition();
+  assert.equal(await transition, 'changed');
+  assert.equal(transitionApplied, true);
+});
+
 test('legacy_directory Operator keeps project.directory cwd and never materializes', async (t) => {
   withCodexAuth(t);
   withRepoFlag(t, '1');

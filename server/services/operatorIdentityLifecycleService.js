@@ -4,6 +4,7 @@ function createOperatorIdentityLifecycleService({
   operatorProfileService,
   operatorInstanceService,
   operatorCleanupService,
+  operatorSpawnService,
   logger,
 }) {
   async function resetSharers(profileId) {
@@ -31,11 +32,39 @@ function createOperatorIdentityLifecycleService({
     return operatorInstanceService.createPrivateProfileFor(instanceId);
   }
 
+  async function setPreferredAdapter(instanceId, preferredAdapter) {
+    const prepared = operatorInstanceService.preparePreferredAdapterUpdate(
+      instanceId,
+      preferredAdapter,
+    );
+    if (!prepared.changed) {
+      return { instance: prepared.instance, changed: false, reset: null };
+    }
+    const applyChange = async () => {
+      const reset = await operatorCleanupService.resetInstance(instanceId);
+      const instance = operatorInstanceService.setPreferredAdapter(
+        instanceId,
+        prepared.preferredAdapter,
+      );
+      return { instance, changed: true, reset };
+    };
+    if (operatorSpawnService && typeof operatorSpawnService.withInstanceTransition === 'function') {
+      return operatorSpawnService.withInstanceTransition(instanceId, applyChange);
+    }
+    return applyChange();
+  }
+
   function deleteProfile(id) {
     return operatorProfileService.deleteProfile(id);
   }
 
-  return { updateProfileContent, assignProfile, unassignProfile, deleteProfile };
+  return {
+    updateProfileContent,
+    assignProfile,
+    unassignProfile,
+    setPreferredAdapter,
+    deleteProfile,
+  };
 }
 
 module.exports = { createOperatorIdentityLifecycleService };
