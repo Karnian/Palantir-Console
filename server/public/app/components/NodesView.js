@@ -604,8 +604,14 @@ function NodeUsageCard({ cli }) {
   const account = usage?.account || null;
   const limits = Array.isArray(usage?.limits) ? usage.limits : [];
   const err = cli?.error || null;
-  const installed = cli?.installed === true;
-  const statusLabel = err ? errorLabel(err) : (installed ? NODES_LABELS.usageInstalled : NODES_LABELS.usageNotInstalled);
+  const installed = cli?.installed;
+  const statusLabel = err
+    ? errorLabel(err)
+    : installed === true
+      ? NODES_LABELS.usageInstalled
+      : installed === false
+        ? NODES_LABELS.usageNotInstalled
+        : NODES_LABELS.usageUnknown;
   const updatedAt = cli?.updatedAt || usage?.updatedAt;
 
   const tone = errorTone(err);

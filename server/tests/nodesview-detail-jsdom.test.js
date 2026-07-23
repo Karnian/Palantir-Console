@@ -221,6 +221,35 @@ test('NodesView detail renders installed=false and every node usage error label'
   assert.match(root.textContent, /버전: —/);
 });
 
+test('NodesView detail distinguishes installed, not-installed, and unknown states', async (t) => {
+  const clis = [
+    { id: 'installed-cli', installed: true },
+    { id: 'missing-cli', installed: false },
+    { id: 'unknown-cli', installed: null },
+  ].map(cli => ({
+    ...cli,
+    version: null,
+    usage: null,
+    authStatus: null,
+    error: null,
+    updatedAt: '2026-07-04T00:10:00.000Z',
+  }));
+  const env = createEnv(async (url) => {
+    if (url === '/api/nodes') return { body: { nodes: [sampleNode()] } };
+    if (url === '/api/nodes/pi/usage') return { body: usageResponse('pi', clis) };
+    throw new Error(`unexpected url ${url}`);
+  });
+  t.after(env.cleanup);
+
+  const root = renderNodes(env, { detailId: 'pi' });
+  await waitFor(() => assert.equal(root.querySelectorAll('[data-role="node-usage-card"]').length, clis.length));
+
+  const statusFor = id => root.querySelector(`[data-cli-id="${id}"] .node-usage-card-status`).textContent;
+  assert.equal(statusFor('installed-cli'), '설치됨');
+  assert.equal(statusFor('missing-cli'), '미설치');
+  assert.equal(statusFor('unknown-cli'), '설치 여부 확인 안 됨');
+});
+
 test('NodesView detail refresh button refetches usage', async (t) => {
   let usageCalls = 0;
   const env = createEnv(async (url) => {

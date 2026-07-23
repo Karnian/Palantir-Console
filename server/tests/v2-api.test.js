@@ -287,11 +287,10 @@ test('Default agent profiles exist', async (t) => {
   const { app } = await createTestApp(t);
   const res = await request(app).get('/api/agents');
   assert.equal(res.status, 200);
-  assert.ok(res.body.agents.length >= 3);
-  const names = res.body.agents.map(a => a.name);
-  assert.ok(names.includes('Claude Code'));
-  assert.ok(names.includes('Codex CLI'));
-  assert.ok(names.includes('OpenCode'));
+  assert.deepEqual(
+    res.body.agents.map((agent) => agent.id).sort(),
+    ['claude-code', 'codex'],
+  );
 });
 
 // PR5: picker consumes agents[].auth from GET /api/agents.
@@ -303,7 +302,10 @@ test('GET /api/agents attaches auth preflight for manager profile types', async 
   const res = await request(app).get('/api/agents');
   assert.equal(res.status, 200);
   assert.ok(Array.isArray(res.body.agents));
-  assert.ok(res.body.agents.length >= 3);
+  assert.deepEqual(
+    res.body.agents.map((agent) => agent.id).sort(),
+    ['claude-code', 'codex'],
+  );
   for (const a of res.body.agents) {
     // Existing fields must still be there (spot check a few).
     assert.ok(typeof a.id === 'string');

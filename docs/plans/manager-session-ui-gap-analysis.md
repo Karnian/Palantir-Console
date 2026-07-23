@@ -167,7 +167,7 @@ The original spec proposed Phase A / B / C (1w + 1w + 0.5w). Given what's alread
 - **R2-B.3** Add `Costs` tab
   - Source: `runs.cost_usd` column (Claude Code worker path, populated from `result.total_cost_usd` — see `streamJsonEngine.js:375`) + Codex manager `mgr.usage` events (see `codexAdapter.js:585`). NOT from `run_events.token_usage` — that channel does not exist.
   - Tab surfaces `runs.cost_usd` as the headline + a breakdown from manager `mgr.usage` events when present
-  - Empty state: "Cost data not available for this adapter" when `runs.cost_usd IS NULL` (OpenCode / non-emitting paths)
+  - Empty state: "Cost data not available for this adapter" when `runs.cost_usd IS NULL` (unsupported / non-emitting paths)
 
 **Deliverable**: SessionDetail matches spec §13 tab coverage; opens as slide-over.
 

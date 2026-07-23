@@ -100,6 +100,7 @@ class AppServerSession {
 
     this.process.stdout.setEncoding('utf8');
     this.process.stdout.on('data', (chunk) => this._onData(chunk));
+    this.process.on('error', (err) => this._onError(err));
     this.process.on('exit', () => this._onExit());
   }
 
@@ -117,6 +118,15 @@ class AppServerSession {
   _onExit() {
     for (const { reject } of this.pending.values()) {
       reject(new AppError('codex app-server exited', 500));
+    }
+    this.pending.clear();
+    this.process = null;
+    this.initialized = false;
+  }
+
+  _onError(err) {
+    for (const { reject } of this.pending.values()) {
+      reject(new AppError('codex app-server failed', 500, err?.message));
     }
     this.pending.clear();
     this.process = null;

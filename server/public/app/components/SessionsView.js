@@ -43,18 +43,10 @@ function buildLimitLine(limit) {
   return { label, barLine: `${formatUsageBar(percentLeft)} ${usageText}${resetSuffix}` };
 }
 
-function displayProviderLabel(id) {
-  if (id === 'openai' || id === 'codex') return 'codex';
-  if (id === 'google' || id === 'gemini') return 'gemini';
-  if (id === 'anthropic' || id === 'claude') return 'claude';
-  return id;
-}
-
 // ── UsageModal ──────────────────────────────────────────────────────────────
 
 function UsageModal({ onClose }) {
   const [providers, setProviders] = useState(null);
-  const [registered, setRegistered] = useState([]);
   const [error, setError] = useState(null);
 
   const load = useCallback(async () => {
@@ -63,23 +55,12 @@ function UsageModal({ onClose }) {
     try {
       const data = await apiFetch('/api/usage/providers');
       setProviders(data.providers || []);
-      setRegistered(data.registeredProviders || []);
     } catch (e) {
       setError(e?.message || 'Failed to load codex status');
     }
   }, []);
 
   useEffect(() => { load(); }, [load]);
-
-  const ordered = [];
-  if (Array.isArray(providers)) providers.forEach(p => {
-    const l = displayProviderLabel(p?.id || p?.name);
-    if (l && !ordered.includes(l)) ordered.push(l);
-  });
-  if (Array.isArray(registered)) registered.forEach(i => {
-    const l = displayProviderLabel(i);
-    if (!ordered.includes(l)) ordered.push(l);
-  });
 
   return html`
     <${Modal} open=${true} onClose=${onClose} labelledBy="usage-modal-title" panelClass="trash-panel">
@@ -93,11 +74,8 @@ function UsageModal({ onClose }) {
       <div class="usage-output" data-role="usage-output">
         ${error && html`<div>${error}</div>`}
         ${!error && !providers && 'Loading...'}
-        ${!error && providers && providers.length === 0 && 'No registered providers with usage data.'}
+        ${!error && providers && providers.length === 0 && 'No provider usage data.'}
         ${!error && providers && providers.length > 0 && html`
-          <div class="usage-registered">
-            ${ordered.length ? `Registered: ${ordered.join(', ')}` : 'Registered: none'}
-          </div>
           <div class="usage-cards">
             ${providers.map((provider, pi) => html`
               <${UsageCard} key=${pi} provider=${provider} />

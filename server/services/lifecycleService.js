@@ -393,6 +393,7 @@ function createLifecycleService({
     const cmd = (profile?.command || '').toLowerCase();
     if (cmd.includes('claude')) return 'claude';
     if (cmd.includes('codex')) return 'codex';
+    // Legacy-data-only safety net for opencode profiles created before new profiles were blocked.
     if (cmd.includes('opencode')) return 'opencode';
     return 'other';
   }
@@ -1450,7 +1451,7 @@ function createLifecycleService({
         let spawnEnv = parseEnvAllowlist(profile.env_allowlist, httpBearerEnvKeys);
         let presetAuthCleanup = null;
         if (presetResolution && presetResolution.isolated) {
-          const auth = _authResolver.resolveClaudeAuthForIsolated({
+          const auth = await _authResolver.resolveClaudeAuthForIsolated({
             envAllowlist: parseEnvAllowlistArray(profile.env_allowlist),
             ..._authResolverOpts,
           });

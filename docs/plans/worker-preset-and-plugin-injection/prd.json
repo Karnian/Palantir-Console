@@ -147,5 +147,11 @@
     { "id": "10F", "name": "Snapshot + audit (run_preset_snapshots + GET)", "estimate": "1-2d" },
     { "id": "10G", "name": "agent-olympus integration smoke", "estimate": "1d" }
   ],
-  "totalEstimate": "13-21 days solo"
+  "totalEstimate": "13-21 days solo",
+  "addenda": [
+    {
+      "date": "2026-07-23",
+      "note": "OpenCode support was later removed as a supported agent vendor; G4's OpenCode-specific clause no longer applies. See the 2026-07-23 OpenCode vendor-removal effort (Phases 1–5). The original acceptance criteria remain preserved as historical material."
+    }
+  ]
 }

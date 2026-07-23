@@ -608,7 +608,7 @@ function createPresetService(db, options = {}) {
    *
    * @param {Object} params
    * @param {string} params.presetId  — preset id (required)
-   * @param {'claude'|'codex'|'opencode'} params.adapter
+   * @param {'claude'|'codex'|'opencode'|'other'} params.adapter
    * @returns {{
    *   preset, systemPrompt, mcpConfig, pluginDirs, isolated,
    *   snapshot, warnings

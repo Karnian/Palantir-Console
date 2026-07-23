@@ -1,306 +1,226 @@
 /**
  * Provider registry unit tests.
  *
- * Sit one level above usage-contract.test.js: contract tests pin the wire
- * format end-to-end through the HTTP layer; these pin the dispatch table,
- * ordering rules, dedupe behavior, and fallback semantics inside the registry
- * factory itself. The point is to make refactors to providers/index.js cheap.
- *
- * What's intentionally NOT covered:
- *  - claude-code adapter direct invocation. It shells out to `claude auth status`
- *    + curl, which is non-deterministic in CI/test envs. Route-level fallback
- *    behavior is already covered by usage-contract.test.js.
- *  - anthropic / gemini real network paths. We force the fast-fail (env vars
- *    unset) so the adapters return their built-in fallback envelopes.
+ * These pin the dispatch table, parallel execution, fixed ordering, alias
+ * dedupe, and fallback semantics without reading host auth state or invoking
+ * provider CLIs.
  */
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs/promises');
-const path = require('node:path');
-const os = require('node:os');
 const { createProviderRegistry } = require('../services/providers');
 
-async function makeAuthFile(contents) {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-providers-'));
-  const filePath = path.join(dir, 'auth.json');
-  if (contents !== null) {
-    await fs.writeFile(filePath, typeof contents === 'string' ? contents : JSON.stringify(contents));
-  }
-  return { dir, filePath };
-}
+const UPDATED_AT = '2026-01-01T00:00:00.000Z';
 
-async function cleanup(dir) {
-  await fs.rm(dir, { recursive: true, force: true });
-}
-
-// Stub codexService — registry only consumes getProviderStatus()
-function makeCodexStub(impl) {
-  return { getProviderStatus: impl };
-}
-
-function withClearedEnv(t) {
-  // Both anthropic and gemini adapters short-circuit when their key env is empty.
-  const prev = {
-    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+function provider(id, name, remainingPct = 50, extra = {}) {
+  return {
+    id,
+    name,
+    limits: [{ label: 'usage', remainingPct, resetAt: null }],
+    updatedAt: UPDATED_AT,
+    ...extra,
   };
-  delete process.env.ANTHROPIC_API_KEY;
-  delete process.env.GEMINI_API_KEY;
-  t.after(() => {
-    for (const [k, v] of Object.entries(prev)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
+}
+
+function createDeferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function makeRegistry({
+  codexImpl = async () => provider('codex', 'codex', 80),
+  claudeImpl = async () => provider('anthropic', 'claude', 70),
+  geminiImpl = async () => provider('google', 'gemini', 60),
+} = {}) {
+  return createProviderRegistry({
+    codexService: { getProviderStatus: codexImpl },
+    fetchClaudeCodeUsageFn: claudeImpl,
+    fetchGeminiUsageFn: geminiImpl,
   });
 }
 
-// ---- listRegistered ----
-
-test('listRegistered: missing auth file returns []', async (t) => {
-  const registry = createProviderRegistry({
-    codexService: makeCodexStub(async () => null),
-    opencodeAuthPath: '/nonexistent/palantir-test/auth.json',
+test('fetchAllKnown always attempts every known provider without external auth state', async () => {
+  const calls = [];
+  const registry = makeRegistry({
+    codexImpl: async () => { calls.push('codex'); return provider('codex', 'codex'); },
+    claudeImpl: async () => { calls.push('claude'); return provider('anthropic', 'claude'); },
+    geminiImpl: async () => { calls.push('gemini'); return provider('google', 'gemini'); },
   });
-  const result = await registry.listRegistered();
-  assert.deepEqual(result, []);
+
+  const result = await registry.fetchAllKnown();
+
+  assert.deepEqual(calls.sort(), ['claude', 'codex', 'gemini']);
+  assert.deepEqual(result.map((entry) => entry.id), ['codex', 'anthropic', 'google']);
 });
 
-test('listRegistered: invalid JSON returns []', async (t) => {
-  const { dir, filePath } = await makeAuthFile('{ this is not json');
-  t.after(() => cleanup(dir));
-  const registry = createProviderRegistry({
-    codexService: makeCodexStub(async () => null),
-    opencodeAuthPath: filePath,
+test('fetchAllKnown starts provider handlers in parallel', async () => {
+  const gate = createDeferred();
+  const started = [];
+  const waitForGate = (name, result) => async () => {
+    started.push(name);
+    await gate.promise;
+    return result;
+  };
+  const registry = makeRegistry({
+    codexImpl: waitForGate('codex', provider('codex', 'codex')),
+    claudeImpl: waitForGate('claude', provider('anthropic', 'claude')),
+    geminiImpl: waitForGate('gemini', provider('google', 'gemini')),
   });
-  assert.deepEqual(await registry.listRegistered(), []);
-});
 
-test('listRegistered: array JSON returns [] (rejects array, not just non-object)', async (t) => {
-  // Without the Array.isArray guard, Object.keys([1,2,3]) would yield ["0","1","2"]
-  // which would surface as three bogus "providers". Lock that out.
-  const { dir, filePath } = await makeAuthFile([1, 2, 3]);
-  t.after(() => cleanup(dir));
-  const registry = createProviderRegistry({
-    codexService: makeCodexStub(async () => null),
-    opencodeAuthPath: filePath,
-  });
-  assert.deepEqual(await registry.listRegistered(), []);
-});
-
-test('listRegistered: normal object returns sorted keys', async (t) => {
-  const { dir, filePath } = await makeAuthFile({ openai: {}, anthropic: {}, google: {} });
-  t.after(() => cleanup(dir));
-  const registry = createProviderRegistry({
-    codexService: makeCodexStub(async () => null),
-    opencodeAuthPath: filePath,
-  });
-  assert.deepEqual(await registry.listRegistered(), ['anthropic', 'google', 'openai']);
-});
-
-// ---- fetchAllRegistered ----
-
-test('fetchAllRegistered: empty registered list yields empty providers', async (t) => {
-  const registry = createProviderRegistry({
-    codexService: makeCodexStub(async () => null),
-    opencodeAuthPath: '/nonexistent/auth.json',
-  });
-  const result = await registry.fetchAllRegistered();
-  assert.deepEqual(result, []);
-});
-
-test('fetchAllRegistered: openai dispatches to codexService and emits codex envelope', async (t) => {
-  withClearedEnv(t);
-  const { dir, filePath } = await makeAuthFile({ openai: {} });
-  t.after(() => cleanup(dir));
-  const registry = createProviderRegistry({
-    codexService: makeCodexStub(async () => ({
-      id: 'codex',
-      name: 'codex',
-      limits: [{ label: 'monthly', remainingPct: 80, resetAt: null }],
-      updatedAt: '2026-01-01T00:00:00.000Z',
-    })),
-    opencodeAuthPath: filePath,
-  });
-  const result = await registry.fetchAllRegistered();
-  assert.equal(result.length, 1);
-  assert.equal(result[0].id, 'codex');
-  assert.equal(result[0].name, 'codex');
-  assert.equal(result[0].limits[0].remainingPct, 80);
-});
-
-test('fetchAllRegistered: anthropic without API_KEY returns fallback envelope', async (t) => {
-  withClearedEnv(t);
-  const { dir, filePath } = await makeAuthFile({ anthropic: {} });
-  t.after(() => cleanup(dir));
-  const registry = createProviderRegistry({
-    codexService: makeCodexStub(async () => null),
-    opencodeAuthPath: filePath,
-  });
-  const result = await registry.fetchAllRegistered();
-  assert.equal(result.length, 1);
-  assert.equal(result[0].id, 'anthropic');
-  assert.equal(result[0].name, 'claude');
-  assert.match(result[0].limits[0].errorMessage, /ANTHROPIC_API_KEY/);
-});
-
-test('fetchAllRegistered: google + gemini dedupe to one entry', async (t) => {
-  withClearedEnv(t);
-  const { dir, filePath } = await makeAuthFile({ google: {}, gemini: {} });
-  t.after(() => cleanup(dir));
-  const registry = createProviderRegistry({
-    codexService: makeCodexStub(async () => null),
-    opencodeAuthPath: filePath,
-  });
-  const result = await registry.fetchAllRegistered();
-  assert.equal(result.length, 1);
-  assert.equal(result[0].id, 'google');
-  assert.equal(result[0].name, 'gemini');
-});
-
-test('fetchAllRegistered: known + unknown mixed → known only (legacy semantic)', async (t) => {
-  withClearedEnv(t);
-  const { dir, filePath } = await makeAuthFile({ openai: {}, mystery: {} });
-  t.after(() => cleanup(dir));
-  const registry = createProviderRegistry({
-    codexService: makeCodexStub(async () => ({
-      id: 'codex', name: 'codex', limits: [{ label: 'x', remainingPct: 50, resetAt: null }], updatedAt: '2026-01-01T00:00:00.000Z',
-    })),
-    opencodeAuthPath: filePath,
-  });
-  const result = await registry.fetchAllRegistered();
-  assert.equal(result.length, 1);
-  assert.equal(result[0].id, 'codex');
-});
-
-test('fetchAllRegistered: only-unknown providers emit fallback rows', async (t) => {
-  withClearedEnv(t);
-  const { dir, filePath } = await makeAuthFile({ mystery: {}, weird: {} });
-  t.after(() => cleanup(dir));
-  const registry = createProviderRegistry({
-    codexService: makeCodexStub(async () => null),
-    opencodeAuthPath: filePath,
-  });
-  const result = await registry.fetchAllRegistered();
-  assert.equal(result.length, 2);
-  for (const p of result) {
-    assert.match(p.limits[0].errorMessage, /Usage provider not configured/);
+  const pending = registry.fetchAllKnown();
+  await new Promise((resolve) => setImmediate(resolve));
+  try {
+    assert.deepEqual(started.sort(), ['claude', 'codex', 'gemini']);
+  } finally {
+    gate.resolve();
   }
+  await pending;
 });
 
-test('fetchAllRegistered: codex stub throws → error isolated and id stays canonical (codex)', async (t) => {
-  withClearedEnv(t);
-  const { dir, filePath } = await makeAuthFile({ openai: {}, anthropic: {} });
-  t.after(() => cleanup(dir));
-  const registry = createProviderRegistry({
-    codexService: makeCodexStub(async () => { throw new Error('boom'); }),
-    opencodeAuthPath: filePath,
+test('fetchAllKnown preserves fixed display order regardless of completion order', async () => {
+  const gates = {
+    codex: createDeferred(),
+    claude: createDeferred(),
+    gemini: createDeferred(),
+  };
+  const completed = [];
+  const afterGate = (name, result) => async () => {
+    await gates[name].promise;
+    completed.push(name);
+    return result;
+  };
+  const registry = makeRegistry({
+    codexImpl: afterGate('codex', provider('codex', 'codex')),
+    claudeImpl: afterGate('claude', provider('anthropic', 'claude')),
+    geminiImpl: afterGate('gemini', provider('google', 'gemini')),
   });
-  const result = await registry.fetchAllRegistered();
-  assert.equal(result.length, 2);
-  // Failure envelope must use the canonical provider id (`codex`), NOT the raw
-  // auth-file key (`openai`). Otherwise the front-end keys success vs failure
-  // responses by different ids for the same provider.
-  const codexEntry = result.find(r => r.id === 'codex');
-  assert.ok(codexEntry, 'failure path emits canonical id `codex`');
-  assert.equal(codexEntry.name, 'codex');
-  assert.match(codexEntry.limits[0].errorMessage || '', /boom/);
-  // anthropic → its own fallback (independent of codex failure)
-  const anthropicEntry = result.find(r => r.id === 'anthropic');
-  assert.ok(anthropicEntry, 'anthropic entry rendered independently');
-  assert.equal(anthropicEntry.name, 'claude');
+
+  const pending = registry.fetchAllKnown();
+  gates.gemini.resolve();
+  await Promise.resolve();
+  gates.claude.resolve();
+  await Promise.resolve();
+  gates.codex.resolve();
+
+  const result = await pending;
+  assert.deepEqual(completed, ['gemini', 'claude', 'codex']);
+  assert.deepEqual(result.map((entry) => entry.id), ['codex', 'anthropic', 'google']);
 });
 
-test('fetchAllRegistered: codex stub returns null → fallback envelope with canonical id', async (t) => {
-  withClearedEnv(t);
-  const { dir, filePath } = await makeAuthFile({ openai: {} });
-  t.after(() => cleanup(dir));
-  const registry = createProviderRegistry({
-    codexService: makeCodexStub(async () => null),
-    opencodeAuthPath: filePath,
+test('fetchAllKnown anthropic provider dispatches through injected Claude Code adapter', async () => {
+  const claudeResult = provider('anthropic', 'claude', 41, {
+    account: { email: 'claude@example.test', planType: 'max' },
   });
-  const result = await registry.fetchAllRegistered();
-  assert.equal(result.length, 1);
-  // Same canonical-id rule as the throw case
-  assert.equal(result[0].id, 'codex');
-  assert.equal(result[0].name, 'codex');
-  assert.match(result[0].limits[0].errorMessage || '', /returned no data/i);
+  let calls = 0;
+  const registry = makeRegistry({
+    claudeImpl: async () => {
+      calls += 1;
+      return claudeResult;
+    },
+  });
+
+  const result = await registry.fetchAllKnown();
+
+  assert.equal(calls, 1);
+  assert.strictEqual(result[1], claudeResult);
+  assert.equal(result[1].account.email, 'claude@example.test');
 });
 
-test('fetchAllRegistered: KNOWN_PROVIDER_ORDER preserved regardless of auth file order', async (t) => {
-  withClearedEnv(t);
-  // Sorted alphabetically by listRegistered: anthropic, google, openai.
-  // Registry must still emit in fixed order: openai → anthropic → gemini.
-  const { dir, filePath } = await makeAuthFile({ google: {}, openai: {}, anthropic: {} });
-  t.after(() => cleanup(dir));
-  const registry = createProviderRegistry({
-    codexService: makeCodexStub(async () => ({
-      id: 'codex', name: 'codex', limits: [{ label: 'x', remainingPct: 100, resetAt: null }], updatedAt: '2026-01-01T00:00:00.000Z',
-    })),
-    opencodeAuthPath: filePath,
+test('fetchAllKnown dedupes google and gemini aliases by handler identity', async () => {
+  let geminiCalls = 0;
+  const registry = makeRegistry({
+    geminiImpl: async () => {
+      geminiCalls += 1;
+      return provider('google', 'gemini');
+    },
   });
-  const result = await registry.fetchAllRegistered();
-  // Expect: codex (openai), anthropic, gemini (google) — in that order
+
+  const result = await registry.fetchAllKnown();
+
+  assert.equal(geminiCalls, 1);
+  assert.equal(result.length, 3);
+  assert.deepEqual(result.map((entry) => entry.id), ['codex', 'anthropic', 'google']);
+});
+
+test('fetchAllKnown isolates thrown handlers and keeps canonical fallback ids', async () => {
+  const registry = makeRegistry({
+    codexImpl: async () => { throw new Error('codex unavailable'); },
+  });
+
+  const result = await registry.fetchAllKnown();
+
   assert.equal(result.length, 3);
   assert.equal(result[0].id, 'codex');
+  assert.equal(result[0].name, 'codex');
+  assert.match(result[0].limits[0].errorMessage, /codex unavailable/);
   assert.equal(result[1].id, 'anthropic');
   assert.equal(result[2].id, 'google');
 });
 
-// ---- getUsageForAgent ----
+test('fetchAllKnown converts a null result to a canonical fallback envelope', async () => {
+  const registry = makeRegistry({ codexImpl: async () => null });
 
-test('getUsageForAgent: codex type dispatches to codexService stub', async (t) => {
-  withClearedEnv(t);
-  const registry = createProviderRegistry({
-    codexService: makeCodexStub(async () => ({
-      id: 'codex', name: 'codex', limits: [{ label: 'monthly', remainingPct: 42, resetAt: null }], updatedAt: '2026-01-01T00:00:00.000Z',
-    })),
-    opencodeAuthPath: '/nonexistent/auth.json',
+  const result = await registry.fetchAllKnown();
+
+  assert.equal(result[0].id, 'codex');
+  assert.equal(result[0].name, 'codex');
+  assert.match(result[0].limits[0].errorMessage, /returned no data/i);
+});
+
+test('getUsageForAgent dispatches codex type to codexService', async () => {
+  const registry = makeRegistry({
+    codexImpl: async () => provider('codex', 'codex', 42),
   });
+
   const result = await registry.getUsageForAgent({ id: 'a1', type: 'codex', name: 'My Codex' });
+
   assert.equal(result.id, 'codex');
   assert.equal(result.limits[0].remainingPct, 42);
 });
 
-test('getUsageForAgent: unknown type → fallback preserves agent.name', async (t) => {
-  const registry = createProviderRegistry({
-    codexService: makeCodexStub(async () => null),
-    opencodeAuthPath: '/nonexistent/auth.json',
+test('getUsageForAgent dispatches claude-code through the injected adapter', async () => {
+  let calls = 0;
+  const registry = makeRegistry({
+    claudeImpl: async () => {
+      calls += 1;
+      return provider('anthropic', 'claude', 33);
+    },
   });
+
+  const result = await registry.getUsageForAgent({ id: 'a1', type: 'claude-code', name: 'Claude' });
+
+  assert.equal(calls, 1);
+  assert.equal(result.id, 'anthropic');
+  assert.equal(result.limits[0].remainingPct, 33);
+});
+
+test('getUsageForAgent unknown type fallback preserves agent name', async () => {
+  const registry = makeRegistry();
   const result = await registry.getUsageForAgent({ id: 'a1', type: 'opencode', name: 'My OpenCode' });
+
   assert.equal(result.id, 'opencode');
-  assert.equal(result.name, 'My OpenCode'); // ← human label preserved
+  assert.equal(result.name, 'My OpenCode');
   assert.match(result.limits[0].errorMessage, /No usage provider for type/);
 });
 
-test('getUsageForAgent: unknown type without agent.name → fallback uses id', async (t) => {
-  const registry = createProviderRegistry({
-    codexService: makeCodexStub(async () => null),
-    opencodeAuthPath: '/nonexistent/auth.json',
-  });
+test('getUsageForAgent unknown type without agent name falls back to id', async () => {
+  const registry = makeRegistry();
   const result = await registry.getUsageForAgent({ id: 'a1', type: 'mystery' });
+
   assert.equal(result.id, 'mystery');
-  assert.equal(result.name, 'mystery'); // ← falls back to id when no name
+  assert.equal(result.name, 'mystery');
 });
 
-test('getUsageForAgent: codex stub throws → fallback envelope with error', async (t) => {
-  const registry = createProviderRegistry({
-    codexService: makeCodexStub(async () => { throw new Error('codex unavailable'); }),
-    opencodeAuthPath: '/nonexistent/auth.json',
+test('getUsageForAgent converts a thrown handler to a named fallback envelope', async () => {
+  const registry = makeRegistry({
+    codexImpl: async () => { throw new Error('codex unavailable'); },
   });
-  const result = await registry.getUsageForAgent({ id: 'a1', type: 'codex', name: 'Codex' });
-  assert.equal(result.name, 'Codex');
-  assert.match(result.limits[0].errorMessage || '', /codex unavailable/);
-});
 
-test('getUsageForAgent: codex stub returns null → "Provider returned no data"', async (t) => {
-  const registry = createProviderRegistry({
-    codexService: makeCodexStub(async () => null),
-    opencodeAuthPath: '/nonexistent/auth.json',
-  });
-  const result = await registry.getUsageForAgent({ id: 'a1', type: 'codex', name: 'Codex' });
-  assert.equal(result.name, 'Codex');
-  assert.match(result.limits[0].errorMessage || '', /returned no data/i);
+  const result = await registry.getUsageForAgent({ id: 'a1', type: 'codex', name: 'My Codex' });
+
+  assert.equal(result.name, 'My Codex');
+  assert.match(result.limits[0].errorMessage, /codex unavailable/);
 });
 
 test('parseOAuthUsageLimits keeps only entries with a utilization signal', () => {
@@ -313,6 +233,6 @@ test('parseOAuthUsageLimits keeps only entries with a utilization signal', () =>
     spend: { currency: 'usd' },
     not_an_object: 42,
   });
-  // is_enabled:false = 꺼진 기능이지 리밋이 아님 — 100% 로 렌더 금지 (Codex R1 S3)
-  assert.deepEqual(limits.map((l) => l.label).sort(), ['5h limit', 'extra usage']);
+
+  assert.deepEqual(limits.map((limit) => limit.label).sort(), ['5h limit', 'extra usage']);
 });

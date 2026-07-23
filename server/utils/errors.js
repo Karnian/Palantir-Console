@@ -30,10 +30,27 @@ class ForbiddenError extends AppError {
   }
 }
 
+function sanitizeMessage(value, secrets = []) {
+  let text = String(value || '');
+  for (const secret of secrets) {
+    if (typeof secret === 'string' && secret) {
+      text = text.split(secret).join('[redacted]');
+    }
+  }
+  text = text
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [redacted]')
+    .replace(/sk-[A-Za-z0-9_-]+/g, '[redacted]')
+    .replace(/[A-Za-z0-9._%+-]+:[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+/g, '[redacted]@')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text.length > 180 ? `${text.slice(0, 177)}...` : text;
+}
+
 module.exports = {
   AppError,
   BadRequestError,
   NotFoundError,
   ConflictError,
-  ForbiddenError
+  ForbiddenError,
+  sanitizeMessage,
 };

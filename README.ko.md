@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-AI 코딩 에이전트(Claude Code, Codex, OpenCode)를 3계층 구조로 운영하는 중앙 관제 허브.
+AI 코딩 에이전트(Claude Code, Codex)를 3계층 구조로 운영하는 중앙 관제 허브.
 
 ```
 Main Manager (Top)          ← 전체 프로젝트와 Operator을 총괄
@@ -105,11 +105,11 @@ Main Manager (Top)  →  Operator (프로젝트별)  →  Worker (태스크별)
 |------|------|
 | **Main Manager (Top)** | 최상위 관제자. 사용자 지시를 적절한 Operator에게 라우팅하고 전체 프로젝트를 총괄 |
 | **Operator (Project Manager)** | 프로젝트별 관리자. 워커를 조율하고 태스크를 분배하며 프로젝트 맥락을 유지. 첫 메시지 시 lazy-spawn |
-| **Worker** | 실제 코딩을 수행하는 AI 에이전트 (Claude Code, Codex, OpenCode). 독립 Git worktree에서 격리 실행 |
+| **Worker** | 실제 코딩을 수행하는 AI 에이전트 (Claude Code, Codex). 독립 Git worktree에서 격리 실행 |
 | **Project** | 작업 묶음. 예: "백엔드 API", "프론트엔드 리팩토링" |
 | **Task** | 구체적인 할 일. 칸반 보드에서 관리. Backlog → Todo → In Progress → Review → Done |
 | **Run** | Task에 대해 에이전트를 실행한 기록. 하나의 Task에 여러 Run 가능 |
-| **Agent Profile** | 실행할 에이전트 설정 (Claude Code, Codex CLI, OpenCode, 커스텀) |
+| **Agent Profile** | 실행할 에이전트 설정 (Claude Code, Codex CLI, 커스텀) |
 | **Conversation** | 모든 채팅 surface의 1급 식별자: `top`, `operator:<projectId>` (`pm:<projectId>`도 허용), `worker:<runId>` |
 
 ## 화면 구성
@@ -168,13 +168,12 @@ Backlog  →  Todo  →  In Progress  →  Review  →  Done
 
 ### 5. Agents (⚙)
 
-에이전트 프로필 관리. 기본 3개:
+에이전트 프로필 관리. 기본 2개:
 
 | 프로필 | 명령어 | 용도 |
 |--------|--------|------|
 | Claude Code | `claude` | Anthropic Claude Code CLI |
 | Codex CLI | `codex` | OpenAI Codex CLI |
-| OpenCode | `opencode` | OpenCode CLI |
 
 커스텀 에이전트 추가 가능. `capabilities_json`, `max_concurrent`, `env_allowlist` 는 매니저 dispatch 추론과 lifecycleService 동시성 게이트에 연결된다. 보안: 허용된 명령어만 실행 가능 (allowlist). `PALANTIR_ALLOWED_COMMANDS` 로 추가 허용.
 

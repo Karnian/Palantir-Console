@@ -4,11 +4,11 @@ const { resolveAgentVendor } = require('../utils/agentVendor');
 
 // Allowlist of safe agent commands — only these can be used as agent executables
 const ALLOWED_COMMANDS = new Set([
-  'claude', 'codex', 'opencode', 'gemini',        // known agent CLIs
+  'claude', 'codex', 'gemini', // known agent CLIs
   '/opt/homebrew/bin/claude', '/opt/homebrew/bin/codex',
-  '/opt/homebrew/bin/opencode', '/opt/homebrew/bin/gemini',
+  '/opt/homebrew/bin/gemini',
   '/usr/local/bin/claude', '/usr/local/bin/codex',
-  '/usr/local/bin/opencode', '/usr/local/bin/gemini',
+  '/usr/local/bin/gemini',
 ]);
 
 // Additional allowed commands can be set via PALANTIR_ALLOWED_COMMANDS env var (comma-separated)
@@ -28,6 +28,12 @@ function validateCommand(command) {
     );
   }
   return trimmed;
+}
+
+function rejectRetiredAgentType(type) {
+  if (type === 'opencode') {
+    throw new BadRequestError('opencode is a retired agent type, no longer supported');
+  }
 }
 
 // Codex P2 review: buildAgentArgs strips a token's surrounding double quotes at
@@ -131,7 +137,11 @@ function createAgentProfileService(db) {
   };
 
   function listProfiles() {
-    return stmts.getAll.all();
+    // A profile of a retired type (e.g. a migration-retained opencode row —
+    // see 067_remove_opencode_agent_profile.sql's live-run guard) stays in
+    // the table for FK/recovery purposes but must not be offered as a
+    // pickable choice going forward.
+    return stmts.getAll.all().filter((profile) => profile.type !== 'opencode');
   }
 
   function getProfile(id) {
@@ -143,6 +153,7 @@ function createAgentProfileService(db) {
   function createProfile({ name, type, command, args_template, capabilities_json, env_allowlist, icon, color, max_concurrent, model, reasoning_effort }) {
     if (!name) throw new BadRequestError('Agent name is required');
     if (!type) throw new BadRequestError('Agent type is required');
+    rejectRetiredAgentType(type);
     const validatedCommand = validateCommand(command);
     validateStructuredModelEffort({ command: validatedCommand, args_template, model, reasoning_effort });
     const id = `agent_${crypto.randomUUID().slice(0, 8)}`;
@@ -164,10 +175,13 @@ function createAgentProfileService(db) {
 
   function updateProfile(id, fields) {
     const existing = getProfile(id);
+    const mergedProfile = { ...existing, ...fields };
+    rejectRetiredAgentType(mergedProfile.type);
     if (fields.command) {
       fields.command = validateCommand(fields.command);
+      mergedProfile.command = fields.command;
     }
-    validateStructuredModelEffort({ ...existing, ...fields });
+    validateStructuredModelEffort(mergedProfile);
     const setClauses = [];
     const params = { id };
     for (const col of AGENT_UPDATABLE) {

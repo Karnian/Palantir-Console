@@ -457,7 +457,7 @@ export function RunInspector({ run, onClose }) {
 
   // R2-B.3: cost view data. Worker-side cost_usd comes straight off
   // the run row; manager-side usage is aggregated from events. When
-  // both are zero we render an empty state so OpenCode / unsupported
+  // both are zero we render an empty state so unsupported
   // adapters don't show a confusing "$0.0000" headline.
   //
   // Manager runs persist their aggregated usage back into the run row

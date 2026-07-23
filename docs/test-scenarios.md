@@ -202,7 +202,7 @@
 - **Then**
   - **Worker run (is_manager=0) + cost_usd 또는 토큰이 있음**: 헤드라인에 `runs.cost_usd` (예: `$0.0123`) + 입출력 토큰 표시
   - **Manager run (is_manager=1)**: worker cost 카드는 숨기고 Manager Usage breakdown 만 표시 (cached input / turn count 포함). Manager 는 행 단위 cost 와 event-level 합계가 동일하므로 중복 표시 방지
-  - **양쪽 모두 0/없음 (OpenCode / `cost_usd IS NULL`)**: 빈 상태 "Cost data not available for this adapter"
+  - **양쪽 모두 0/없음 (OpenCode / `cost_usd IS NULL`)**: 빈 상태 "Cost data not available for this adapter". **Historical note (2026-07-23):** OpenCode 프로필은 더 이상 생성할 수 없으며, 이 사례는 수동 구성한 legacy data에만 적용
   - 데이터 출처: worker = `runs.cost_usd` + `runs.input_tokens` + `runs.output_tokens` (Claude Code stream-json `result.total_cost_usd` 에서 persist), manager = `mgr.usage` 이벤트들을 `aggregateManagerUsage(events)` 로 합산
   - manager-side usage 는 10초마다 별도 polling (`costEvents` snapshot)
 - **Coverage**: `RunInspector.js` `aggregateManagerUsage` + tab render
@@ -766,7 +766,7 @@
 - **Then** `active = 1` (worker only). Manager 행은 ManagerChat header 에 별도 표시되므로 summary 에서 중복 카운트 금지
 
 ### MGRSUM-04 — `cost_usd IS NULL` 안전 처리
-- **Given** 오늘 run 들 중 일부가 `cost_usd = NULL` (OpenCode 또는 cost emit 안 한 adapter)
+- **Given** 오늘 run 들 중 일부가 `cost_usd = NULL` (OpenCode 또는 cost emit 안 한 adapter). **Historical note (2026-07-23):** OpenCode 프로필은 더 이상 생성할 수 없으며, 이 사례는 수동 구성한 legacy data에만 적용
 - **When** `GET /api/manager/summary`
 - **Then** `total_cost_today` 는 NULL/NaN/Infinity 를 모두 0 으로 취급 (`Number.isNaN`/`Number.isFinite` 가드). 합계는 유효 숫자만 누적
 - **Coverage**: `server/tests/manager-summary.test.js`
@@ -965,6 +965,9 @@
   - DB `runs.mcp_config_snapshot` 에 ctx7 포함
 
 ### PRESET-09 — OpenCode MCP 미지원 graceful degrade
+
+> **Historical note (2026-07-23):** OpenCode 프로필은 더 이상 생성할 수 없으며, 이 시나리오는 수동 구성한 legacy data에만 적용한다.
+
 - **Given** OpenCode 워커 + preset (mcp_server_ids 보유)
 - **When** Execute
 - **Then** spawn args 에 `-c` 없음, run_events 에 `preset:mcp_unsupported` 1건
@@ -1349,7 +1352,7 @@
 - **Playwright (격리 포트 4188 + 임시 DB 권장, prod 4177 금지)**:
   - 기존: `TSK-03~07`, `BRD-02/04`, `INS-01~03`, `KBD`, `SSE-02`, sessions/trash/dir picker UI
   - v3: `MGR-09` (드롭다운 노출), `MGR-10` (Manager 기본 랜딩), `PM-02/06/09` (실제 Codex CLI 경유 lazy spawn / Reset / 멀티 PM), `DRIFT-12~17` (badge, drawer, per-PM, dismiss/restore, Esc), `ROUTER-09/10` (UI 라우터 fail-closed)
-  - R2-A/B/C: `INS-05` (slide-over 위치/포커스), `INS-06` (Diff 탭 worktree 케이스), `INS-07` (Costs 탭 OpenCode 빈 상태), `ATT-01~07` (badge 카운트/hide/pulse + strip 표시/숨김 + 회귀), `MGRSUM-05~10` (SuggestedActions UI flow)
+  - R2-A/B/C: `INS-05` (slide-over 위치/포커스), `INS-06` (Diff 탭 worktree 케이스), `INS-07` (Costs 탭 OpenCode 빈 상태; historical, 2026-07-23 — OpenCode 프로필은 더 이상 생성할 수 없으며 수동 구성한 legacy data에만 적용), `ATT-01~07` (badge 카운트/hide/pulse + strip 표시/숨김 + 회귀), `MGRSUM-05~10` (SuggestedActions UI flow)
 - **자동화 부적합 (LLM 의존)**:
   - `MGR-02` (Top 응답 내용)
   - `MGR-05` (LLM 이 실제로 worker 를 spawn 하는지)
