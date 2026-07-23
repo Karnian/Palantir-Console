@@ -1314,6 +1314,7 @@ function createApp(options = {}) {
     operatorProfileService,
     operatorInstanceService,
     operatorCleanupService,
+    operatorSpawnService,
   });
   const memoryComposer = createMemoryComposer({
     retrievers: {

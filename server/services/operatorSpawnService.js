@@ -24,8 +24,10 @@
 //           `parent_run_id` MUST point at a live Top so parent-notice
 //           routing works; allowing an orphan PM would silently break
 //           lock-in #2.
-//        c. Resolve the operator adapter: spec §7.2 fallback chain
-//             project.preferred_pm_adapter → global default → 'codex'.
+//        c. Resolve the operator adapter: instance preference first, then the
+//           spec §7.2 fallback chain
+//             instance.preferred_adapter → project.preferred_pm_adapter
+//             → global default → 'codex'.
 //           A 'claude' preference maps to the 'claude-code' adapter type
 //           (P5-S4a). Codex + Claude operators both spawn; a REMOTE
 //           (pod) Claude operator is gated off until P5-S4b (see the
@@ -97,6 +99,41 @@ function createOperatorSpawnService({
   // probe and setActive(). Keep one promise per canonical instance slot so a
   // user send and a scheduler send cannot create two Operator runs.
   const spawnFlights = new Map();
+  // Identity mutations (such as changing the CLI) must not race a lazy spawn.
+  // The transition fence blocks new spawns, waits for an existing flight to
+  // settle, then lets the caller reset/persist atomically from the service's
+  // point of view.
+  const instanceTransitions = new Set();
+
+  async function withInstanceTransition(instanceId, action) {
+    if (!instanceId) throw new Error('instanceId is required');
+    if (typeof action !== 'function') throw new Error('transition action is required');
+    const slotKey = conversationIdForProject(instanceId);
+    if (instanceTransitions.has(slotKey)) {
+      const err = new Error(`operator transition already in progress: ${instanceId}`);
+      err.httpStatus = 409;
+      throw err;
+    }
+    instanceTransitions.add(slotKey);
+    try {
+      const flight = spawnFlights.get(slotKey);
+      if (flight) {
+        try {
+          await flight;
+        } catch {
+          // A failed spawn owns no usable runtime. The identity transition can
+          // still reset residual state and persist the new preference.
+        }
+      }
+      return await action();
+    } finally {
+      instanceTransitions.delete(slotKey);
+    }
+  }
+
+  function isInstanceTransitioning(instanceId) {
+    return Boolean(instanceId && instanceTransitions.has(conversationIdForProject(instanceId)));
+  }
 
   function failOperatorRun(runId, eventType, payload, message, httpStatus = 502) {
     try { runService.updateRunStatus(runId, 'failed', { force: true }); } catch { /* ignore */ }
@@ -194,16 +231,19 @@ function createOperatorSpawnService({
     );
   }
 
-  // Resolve the adapter type to actually spawn for this project. Spec §7.2
-  // fallback. Project preferences use the persisted value ('claude'|'codex'),
-  // while the adapter factory expects the concrete adapter key
-  // ('claude-code'|'codex').
-  function resolveOperatorAdapterType(project) {
-    const preferred = project && project.preferred_pm_adapter
+  // Resolve the adapter type to actually spawn. A durable Operator instance's
+  // explicit preference wins; NULL preserves the legacy project → global →
+  // Codex fallback chain. Stored preferences use 'claude'|'codex', while the
+  // adapter factory expects the concrete key 'claude-code'|'codex'.
+  function resolveOperatorAdapterType(project, operatorInstance = null) {
+    const instancePreferred = operatorInstance && operatorInstance.preferred_adapter
+      ? operatorInstance.preferred_adapter
+      : null;
+    const projectPreferred = project && project.preferred_pm_adapter
       ? project.preferred_pm_adapter
       : null;
     const globalDefault = process.env.PALANTIR_DEFAULT_PM_ADAPTER || null;
-    const chosen = preferred || globalDefault || 'codex';
+    const chosen = instancePreferred || projectPreferred || globalDefault || 'codex';
     if (chosen === 'codex') return 'codex';
     if (chosen === 'claude' || chosen === 'claude-code') return 'claude-code';
     const id = project && project.id != null ? project.id : 'unknown';
@@ -278,6 +318,13 @@ function createOperatorSpawnService({
     }
     const slotKey = ensuredOperatorInstance?.instanceConversationId
       || conversationIdForProject(ensuredOperatorInstance.instanceId);
+    if (instanceTransitions.has(slotKey)) {
+      const err = new Error('operator identity transition in progress');
+      err.httpStatus = 409;
+      err.code = 'OPERATOR_BUSY';
+      err.retryable = true;
+      throw err;
+    }
 
     // Fast path — already live. Legacy callers that still probe
     // operator:<projectId> converge to this same instance slot in managerRegistry.
@@ -298,7 +345,16 @@ function createOperatorSpawnService({
       throw err;
     }
 
-    const adapterType = resolveOperatorAdapterType(project);
+    let adapterPreferenceInstance = null;
+    try {
+      adapterPreferenceInstance = runService
+        && typeof runService.getOperatorInstance === 'function'
+        ? runService.getOperatorInstance(ensuredOperatorInstance.instanceId)
+        : null;
+    } catch (err) {
+      log(`operator adapter preference read failed instance=${ensuredOperatorInstance.instanceId}: ${err.message}`);
+    }
+    const adapterType = resolveOperatorAdapterType(project, adapterPreferenceInstance);
     const adapter = managerAdapterFactory.getAdapter(adapterType);
     const nodeId = (nodeService && typeof nodeService.resolveNode === 'function')
       ? (nodeService.resolveNode(project) || 'local')
@@ -751,7 +807,12 @@ function createOperatorSpawnService({
     return finishSpawn();
   }
 
-  return { ensureLiveOperator, resolveOperatorAdapterType };
+  return {
+    ensureLiveOperator,
+    resolveOperatorAdapterType,
+    withInstanceTransition,
+    isInstanceTransitioning,
+  };
 }
 
 module.exports = { createOperatorSpawnService };

@@ -5,6 +5,7 @@ const { BadRequestError, ConflictError, NotFoundError } = require('../utils/erro
 const { conversationIdForProject } = require('../utils/conversationId');
 
 const VALID_REF_ROLES = new Set(['primary', 'reference']);
+const VALID_PREFERRED_ADAPTERS = new Set(['codex', 'claude']);
 
 function normalizeRole(value) {
   if (typeof value !== 'string' || !VALID_REF_ROLES.has(value)) {
@@ -18,6 +19,14 @@ function requiredString(value, name) {
     throw new BadRequestError(`${name} is required`);
   }
   return value.trim();
+}
+
+function normalizePreferredAdapter(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string' || !VALID_PREFERRED_ADAPTERS.has(value)) {
+    throw new BadRequestError('preferred_adapter must be one of codex|claude|null');
+  }
+  return value;
 }
 
 function uniqueConflictForRef(err) {
@@ -69,12 +78,17 @@ function createOperatorInstanceService(db, {
       VALUES (@id, @name, NULL, NULL, '[]', @is_private)
     `),
     insertInstance: db.prepare(`
-      INSERT INTO operator_instances (id, profile_id, display_name)
-      VALUES (@id, @profile_id, @display_name)
+      INSERT INTO operator_instances (id, profile_id, display_name, preferred_adapter)
+      VALUES (@id, @profile_id, @display_name, @preferred_adapter)
     `),
     updateInstanceProfile: db.prepare(`
       UPDATE operator_instances
       SET profile_id = ?, updated_at = datetime('now')
+      WHERE id = ?
+    `),
+    updatePreferredAdapter: db.prepare(`
+      UPDATE operator_instances
+      SET preferred_adapter = ?, updated_at = datetime('now')
       WHERE id = ?
     `),
     getProject: db.prepare('SELECT * FROM projects WHERE id = ?'),
@@ -286,6 +300,23 @@ function createOperatorInstanceService(db, {
     return withRefs(stmts.getInstance.get(instance.id));
   }
 
+  function preparePreferredAdapterUpdate(instanceId, value) {
+    const instance = getInstance(instanceId);
+    const preferredAdapter = normalizePreferredAdapter(value);
+    return {
+      instance,
+      preferredAdapter,
+      changed: (instance.preferred_adapter || null) !== preferredAdapter,
+    };
+  }
+
+  function setPreferredAdapter(instanceId, value) {
+    const instance = assertInstance(instanceId);
+    const preferredAdapter = normalizePreferredAdapter(value);
+    stmts.updatePreferredAdapter.run(preferredAdapter, instance.id);
+    return withRefs(stmts.getInstance.get(instance.id));
+  }
+
   function createInstance(input = {}) {
     const profileId = requiredString(input.profile_id, 'profile_id');
     const profile = stmts.getProfileById.get(profileId);
@@ -297,10 +328,16 @@ function createOperatorInstanceService(db, {
     const primaryProjectId = input.primary_project_id == null || input.primary_project_id === ''
       ? null
       : requiredString(input.primary_project_id, 'primary_project_id');
+    const preferredAdapter = normalizePreferredAdapter(input.preferred_adapter);
     if (primaryProjectId) assertProject(primaryProjectId);
     const id = `oi_${randomUUID()}`;
     db.transaction(() => {
-      stmts.insertInstance.run({ id, profile_id: profile.id, display_name: displayName });
+      stmts.insertInstance.run({
+        id,
+        profile_id: profile.id,
+        display_name: displayName,
+        preferred_adapter: preferredAdapter,
+      });
       if (primaryProjectId) {
         try {
           stmts.insertRef.run(id, primaryProjectId, 'primary');
@@ -455,6 +492,8 @@ function createOperatorInstanceService(db, {
     getPrimaryProjectIdForInstance,
     createInstance,
     setProfileId,
+    preparePreferredAdapterUpdate,
+    setPreferredAdapter,
     createPrivateProfileFor,
     getPrimaryInstanceForProject,
     getLivePrimaryInstanceForProject,

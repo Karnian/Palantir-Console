@@ -65,6 +65,18 @@ function createOperatorInstancesRouter({ operatorInstanceService, operatorIdenti
     res.json({ instance });
   }));
 
+  router.patch('/:id/adapter', asyncHandler(async (req, res) => {
+    assertHumanSameOrigin(req);
+    if (!Object.prototype.hasOwnProperty.call(req.body || {}, 'preferred_adapter')) {
+      return res.status(400).json({ error: 'preferred_adapter is required' });
+    }
+    const result = await operatorIdentityLifecycleService.setPreferredAdapter(
+      req.params.id,
+      req.body.preferred_adapter,
+    );
+    res.json(result);
+  }));
+
   // F-1: PATCH the Codex Fast Mode toggle. Cookie(human)-only — fast mode is a
   // cost decision (2.5× credits) so an Operator must not self-promote its own
   // tier (mirrors the R4 active-write actor split, routes/memory.js). Caveat:

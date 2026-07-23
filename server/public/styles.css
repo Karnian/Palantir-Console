@@ -7903,6 +7903,13 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   overflow-wrap: anywhere;
 }
 
+.operator-adapter-select {
+  min-width: 0;
+  width: 100%;
+  padding-block: 5px;
+  font-size: 12px;
+}
+
 .operator-roster-footer {
   display: flex;
   align-items: center;

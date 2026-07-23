@@ -104,6 +104,12 @@ function operatorDisplayName(instance) {
   return instance?.display_name || instance?.profile_name || instanceLabel(instance);
 }
 
+function preferredAdapterValue(instance) {
+  return instance?.preferred_adapter === 'codex' || instance?.preferred_adapter === 'claude'
+    ? instance.preferred_adapter
+    : '';
+}
+
 function formatDateTime(value) {
   if (!value) return '—';
   const date = new Date(value);
@@ -350,9 +356,19 @@ function AvailableOperatorCard({ profile, onInvoke }) {
   `;
 }
 
-function ConfiguredOperatorCard({ instance, liveEntry, projectsById, onOpenRefs, onRemoveReference, onOpenSchedules }) {
+function ConfiguredOperatorCard({
+  instance,
+  liveEntry,
+  projectsById,
+  onOpenRefs,
+  onRemoveReference,
+  onOpenSchedules,
+  onChangeAdapter,
+  adapterSaving,
+}) {
   const primary = primaryRef(instance);
   const live = Boolean(liveEntry?.run);
+  const adapterSelectId = `operator-adapter-${instance.id}`;
   return html`
     <article class="operator-profile-card operator-roster-card operator-configured-card" data-role="operator-configured-card">
       <div class="operator-profile-card-header">
@@ -374,6 +390,24 @@ function ConfiguredOperatorCard({ instance, liveEntry, projectsById, onOpenRefs,
         </p>
       `}
       <div class="operator-roster-meta-grid">
+        <label for=${adapterSelectId}>${OPERATOR_ROSTER_LABELS.preferredAdapterLabel}</label>
+        <select
+          id=${adapterSelectId}
+          class="form-select operator-adapter-select"
+          data-role="operator-adapter-select"
+          value=${preferredAdapterValue(instance)}
+          disabled=${adapterSaving}
+          aria-busy=${adapterSaving ? 'true' : 'false'}
+          onChange=${(event) => {
+            const nextValue = event.target.value;
+            event.target.value = preferredAdapterValue(instance);
+            onChangeAdapter(instance, nextValue, live);
+          }}
+        >
+          <option value="">${OPERATOR_ROSTER_LABELS.adapterAuto}</option>
+          <option value="codex">${OPERATOR_ROSTER_LABELS.adapterCodex}</option>
+          <option value="claude">${OPERATOR_ROSTER_LABELS.adapterClaude}</option>
+        </select>
         <span>${OPERATOR_ROSTER_LABELS.instanceLabel}</span>
         <strong>${instanceLabel(instance)}</strong>
         <span>${OPERATOR_ROSTER_LABELS.scheduleCountLabel}</span>
@@ -411,7 +445,10 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
   const [createDisplayName, setCreateDisplayName] = useState('');
   const [createProfileId, setCreateProfileId] = useState('');
   const [createPrimaryProjectId, setCreatePrimaryProjectId] = useState('');
+  const [createPreferredAdapter, setCreatePreferredAdapter] = useState('codex');
   const [creatingOperator, setCreatingOperator] = useState(false);
+  const adapterSavingIdsRef = useRef(new Set());
+  const [adapterSavingIds, setAdapterSavingIds] = useState(() => new Set());
   const [refsEditorInstance, setRefsEditorInstance] = useState(null);
   const [selectedRefProjectId, setSelectedRefProjectId] = useState('');
   const [selectedRefRole, setSelectedRefRole] = useState('reference');
@@ -639,6 +676,7 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
     setCreateProfileId(profiles[0]?.id || '');
     setCreateDisplayName('');
     setCreatePrimaryProjectId('');
+    setCreatePreferredAdapter('codex');
     setShowCreateOperator(true);
   };
 
@@ -652,6 +690,7 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
           profile_id: createProfileId,
           display_name: createDisplayName.trim() || undefined,
           primary_project_id: createPrimaryProjectId || undefined,
+          preferred_adapter: createPreferredAdapter || null,
         }),
       });
       await refreshOperatorInstances();
@@ -660,6 +699,40 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
       // apiFetchWithToast owns the toast.
     } finally {
       setCreatingOperator(false);
+    }
+  };
+
+  const changeOperatorAdapter = async (instance, nextValue, live) => {
+    if (!instance?.id || adapterSavingIdsRef.current.has(instance.id)) return;
+    const preferredAdapter = nextValue || null;
+    if ((instance.preferred_adapter || null) === preferredAdapter) return;
+    const hasRuntimeContext = live || Boolean(instance.thread_id);
+    if (
+      hasRuntimeContext
+      && typeof window !== 'undefined'
+      && !window.confirm(OPERATOR_ROSTER_LABELS.adapterChangeConfirm)
+    ) {
+      return;
+    }
+    adapterSavingIdsRef.current.add(instance.id);
+    setAdapterSavingIds(new Set(adapterSavingIdsRef.current));
+    try {
+      const result = await apiFetchWithToast(
+        `/api/operator-instances/${encodeURIComponent(instance.id)}/adapter`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ preferred_adapter: preferredAdapter }),
+        },
+      );
+      await refreshOperatorInstances();
+      if (result?.changed) {
+        addToast(OPERATOR_ROSTER_LABELS.adapterChangeSuccess, 'success');
+      }
+    } catch {
+      // apiFetchWithToast owns the error toast.
+    } finally {
+      adapterSavingIdsRef.current.delete(instance.id);
+      setAdapterSavingIds(new Set(adapterSavingIdsRef.current));
     }
   };
 
@@ -858,6 +931,21 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
             </select>
           </div>
           <div class="form-field">
+            <label class="form-label" for="operator-create-adapter">${OPERATOR_ROSTER_LABELS.preferredAdapterLabel}</label>
+            <select
+              id="operator-create-adapter"
+              class="form-select"
+              data-role="operator-create-adapter"
+              value=${createPreferredAdapter}
+              onChange=${(e) => setCreatePreferredAdapter(e.target.value)}
+            >
+              <option value="codex">${OPERATOR_ROSTER_LABELS.adapterCodex}</option>
+              <option value="claude">${OPERATOR_ROSTER_LABELS.adapterClaude}</option>
+              <option value="">${OPERATOR_ROSTER_LABELS.adapterAuto}</option>
+            </select>
+            <p class="form-hint">${OPERATOR_ROSTER_LABELS.adapterHint}</p>
+          </div>
+          <div class="form-field">
             <label class="form-label" for="operator-create-primary">${OPERATOR_ROSTER_LABELS.primaryFolderLabel}</label>
             <select id="operator-create-primary" class="form-select" value=${createPrimaryProjectId} onChange=${(e) => setCreatePrimaryProjectId(e.target.value)}>
               <option value="">${OPERATOR_ROSTER_LABELS.primaryFolderOptional}</option>
@@ -896,6 +984,8 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
                 onOpenRefs=${openRefsEditor}
                 onRemoveReference=${removeReference}
                 onOpenSchedules=${openSchedules}
+                onChangeAdapter=${changeOperatorAdapter}
+                adapterSaving=${adapterSavingIds.has(instance.id)}
               />
             `)}
           </div>
