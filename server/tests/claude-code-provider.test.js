@@ -181,3 +181,20 @@ test('fetchClaudeCodeUsage returns the existing fallback envelope when curl fail
   }]);
   assert.deepEqual(harness.calls.map(call => call.command), ['claude', 'curl']);
 });
+
+test('fetchClaudeCodeUsage redacts the OAuth token from curl failure messages', async (t) => {
+  const token = '+/=oauth.literal-secret$characters';
+  withClaudeToken(t, token);
+  const harness = loadProviderWithExecFile(({ command, args }) => {
+    if (command === 'claude') return { stdout: 'not json', stderr: '' };
+    throw new Error(`Command failed: ${command} ${args.join(' ')}\nTLS handshake failed`);
+  });
+  t.after(harness.restore);
+
+  const result = await harness.fetchClaudeCodeUsage();
+  const { errorMessage } = result.limits[0];
+
+  assert.equal(errorMessage.includes(token), false);
+  assert.equal(errorMessage.includes('literal-secret$characters'), false);
+  assert.match(errorMessage, /Authorization: Bearer \[redacted\]/);
+});

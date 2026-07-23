@@ -1,5 +1,6 @@
 const { formatLimits } = require('./codexService');
 const { parseOAuthUsageLimits } = require('./providers/claude-code');
+const { sanitizeMessage } = require('../utils/errors');
 
 const DEFAULT_PROBE_TIMEOUT_MS = 15000;
 const DEFAULT_PROBE_KILL_GRACE_MS = 2000;
@@ -27,16 +28,6 @@ class UsageProbeError extends Error {
     super(sanitizeMessage(message || code));
     this.usageCode = ERROR_CODES.has(code) ? code : 'probe_failed';
   }
-}
-
-function sanitizeMessage(value) {
-  const text = String(value || '')
-    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [redacted]')
-    .replace(/sk-[A-Za-z0-9_-]+/g, '[redacted]')
-    .replace(/[A-Za-z0-9._%+-]+:[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+/g, '[redacted]@')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return text.length > 180 ? `${text.slice(0, 177)}...` : text;
 }
 
 function nowIso() {

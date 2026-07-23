@@ -14,6 +14,7 @@
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { readClaudeKeychainToken, readClaudeLinuxCredentialsToken } = require('../authResolver');
+const { sanitizeMessage } = require('../../utils/errors');
 
 const execFileAsync = promisify(execFile);
 
@@ -122,7 +123,12 @@ async function fetchClaudeCodeUsage() {
     return {
       ...base,
       account,
-      limits: [{ label: 'usage', remainingPct: null, resetAt: null, errorMessage: err.message || 'Failed to fetch usage' }],
+      limits: [{
+        label: 'usage',
+        remainingPct: null,
+        resetAt: null,
+        errorMessage: sanitizeMessage(err?.message || 'Failed to fetch usage', [token]),
+      }],
       updatedAt: now,
     };
   }
