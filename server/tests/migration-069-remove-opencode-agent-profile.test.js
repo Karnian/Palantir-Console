@@ -8,7 +8,7 @@ const path = require('node:path');
 const { createDatabase } = require('../db/database');
 
 const MIG_DIR = path.join(__dirname, '..', 'db', 'migrations');
-const MIG_067 = path.join(MIG_DIR, '067_remove_opencode_agent_profile.sql');
+const MIG_069 = path.join(MIG_DIR, '069_remove_opencode_agent_profile.sql');
 
 function applySqlMigration(db, version, sql) {
   const firstLine = sql.split('\n')[0].trim();
@@ -57,23 +57,23 @@ function applyMigrationsUpTo(db, maxVersion) {
   }
 }
 
-function applyMigration067(db) {
-  applySqlMigration(db, 67, fs.readFileSync(MIG_067, 'utf8'));
+function applyMigration069(db) {
+  applySqlMigration(db, 69, fs.readFileSync(MIG_069, 'utf8'));
 }
 
 function createUpgradeDatabase() {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
-  applyMigrationsUpTo(db, 66);
+  applyMigrationsUpTo(db, 68);
   return db;
 }
 
-test('067 fresh database has no seeded OpenCode profile', () => {
+test('069 fresh database has no seeded OpenCode profile', () => {
   const { db, migrate, close } = createDatabase(':memory:');
   try {
     migrate();
 
-    assert.ok(db.prepare('SELECT MAX(version) AS version FROM schema_version').get().version >= 67);
+    assert.ok(db.prepare('SELECT MAX(version) AS version FROM schema_version').get().version >= 69);
     assert.equal(db.prepare("SELECT id FROM agent_profiles WHERE id = 'opencode'").get(), undefined);
     assert.deepEqual(db.pragma('foreign_key_check'), []);
   } finally {
@@ -81,7 +81,7 @@ test('067 fresh database has no seeded OpenCode profile', () => {
   }
 });
 
-test('067 upgrade removes the seeded profile, nulls references, and fails safe nonterminal runs', () => {
+test('069 upgrade removes the seeded profile, nulls references, and fails safe nonterminal runs', () => {
   const db = createUpgradeDatabase();
   try {
     assert.equal(db.prepare("SELECT command FROM agent_profiles WHERE id = 'opencode'").get().command, 'opencode');
@@ -104,7 +104,7 @@ test('067 upgrade removes the seeded profile, nulls references, and fails safe n
     }
     insertRun.run('run_completed', 'completed');
 
-    applyMigration067(db);
+    applyMigration069(db);
 
     assert.equal(db.prepare("SELECT id FROM agent_profiles WHERE id = 'opencode'").get(), undefined);
     assert.equal(
@@ -140,7 +140,7 @@ test('067 upgrade removes the seeded profile, nulls references, and fails safe n
 });
 
 for (const status of ['running', 'materializing', 'paused', 'needs_input']) {
-  test(`067 leaves a ${status} run untouched and retains its profile`, () => {
+  test(`069 leaves a ${status} run untouched and retains its profile`, () => {
     const db = createUpgradeDatabase();
     try {
       db.prepare(`
@@ -148,7 +148,7 @@ for (const status of ['running', 'materializing', 'paused', 'needs_input']) {
         VALUES (?, 'opencode', ?)
       `).run(`run_${status}`, status);
 
-      applyMigration067(db);
+      applyMigration069(db);
 
       assert.deepEqual(
         db.prepare("SELECT id, command FROM agent_profiles WHERE id = 'opencode'").get(),
@@ -166,12 +166,12 @@ for (const status of ['running', 'materializing', 'paused', 'needs_input']) {
   });
 }
 
-test('067 deletes the seeded profile when no runs reference it', () => {
+test('069 deletes the seeded profile when no runs reference it', () => {
   const db = createUpgradeDatabase();
   try {
     assert.equal(db.prepare("SELECT command FROM agent_profiles WHERE id = 'opencode'").get().command, 'opencode');
 
-    applyMigration067(db);
+    applyMigration069(db);
 
     assert.equal(db.prepare("SELECT id FROM agent_profiles WHERE id = 'opencode'").get(), undefined);
     assert.deepEqual(db.pragma('foreign_key_check'), []);
@@ -180,7 +180,7 @@ test('067 deletes the seeded profile when no runs reference it', () => {
   }
 });
 
-test('067 preserves a repurposed opencode profile and its references', () => {
+test('069 preserves a repurposed opencode profile and its references', () => {
   const db = createUpgradeDatabase();
   try {
     db.prepare("UPDATE agent_profiles SET type = 'made-up', command = 'gemini' WHERE id = 'opencode'").run();
@@ -193,7 +193,7 @@ test('067 preserves a repurposed opencode profile and its references', () => {
       VALUES ('run_repurposed', 'opencode', 'queued')
     `).run();
 
-    applyMigration067(db);
+    applyMigration069(db);
 
     assert.deepEqual(
       db.prepare("SELECT id, type, command FROM agent_profiles WHERE id = 'opencode'").get(),

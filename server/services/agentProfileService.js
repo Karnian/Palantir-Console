@@ -138,7 +138,7 @@ function createAgentProfileService(db) {
 
   function listProfiles() {
     // A profile of a retired type (e.g. a migration-retained opencode row —
-    // see 067_remove_opencode_agent_profile.sql's live-run guard) stays in
+    // see 069_remove_opencode_agent_profile.sql's live-run guard) stays in
     // the table for FK/recovery purposes but must not be offered as a
     // pickable choice going forward.
     return stmts.getAll.all().filter((profile) => profile.type !== 'opencode');
