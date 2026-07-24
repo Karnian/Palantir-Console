@@ -40,6 +40,9 @@
  * within each grouping so diffs are clean.
  */
 const SERVER_EMITS = Object.freeze([
+  // durable Manager chat queue
+  'conversation:message_status',
+
   // diagnostic (server-only observability)
   'diagnostic:pm_project_mismatch',
 
@@ -98,6 +101,7 @@ const SERVER_EMITS = Object.freeze([
  * a handler in the UI starts depending on a channel being live.
  */
 const CLIENT_REQUIRED_LIVE = Object.freeze([
+  'conversation:message_status',
   'run:status',
   'run:needs_input',
   'run:completed',

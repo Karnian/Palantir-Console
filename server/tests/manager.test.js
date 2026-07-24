@@ -526,7 +526,10 @@ test('claudeAdapter dual-emits normalized events alongside legacy ones', async (
     { accepted: true },
   );
   assert.equal(sentInputs[0][1], '[system notice]\ninternal context\n\n---\n\nscheduled turn');
-  assert.deepEqual(sentInputs[0][3], { displayText: 'scheduled turn' });
+  assert.deepEqual(sentInputs[0][3], {
+    displayText: 'scheduled turn',
+    invocationId: 'oinv_claude_test',
+  });
 
   const fakeProc = { usage: { inputTokens: 100, outputTokens: 50, costUsd: 0.01 } };
 

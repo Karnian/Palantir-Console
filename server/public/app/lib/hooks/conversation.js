@@ -27,6 +27,7 @@ export function useConversation(conversationId, { poll = true, pollMs = 10000 } 
   const [events, setEvents] = useState([]);
   const [run, setRun] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [queuedMessages, setQueuedMessages] = useState([]);
   const pollRef = useRef(null);
   const lastEventIdRef = useRef(0);
   const activeIdRef = useRef(conversationId);
@@ -120,6 +121,29 @@ export function useConversation(conversationId, { poll = true, pollMs = 10000 } 
     } catch { /* ignore */ }
   }, [conversationId]);
 
+  const upsertQueuedMessage = useCallback((message) => {
+    if (!message || !message.id) return;
+    setQueuedMessages(prev => {
+      const idx = prev.findIndex(item => item.id === message.id);
+      if (idx === -1) return [...prev, message].sort((a, b) => (
+        Number(a.sequence || Number.MAX_SAFE_INTEGER) - Number(b.sequence || Number.MAX_SAFE_INTEGER)
+      ));
+      const next = prev.slice();
+      next[idx] = { ...next[idx], ...message };
+      return next;
+    });
+  }, []);
+
+  const loadQueuedMessages = useCallback(async () => {
+    if (!conversationId || conversationId.startsWith('worker:')) return;
+    const myId = conversationId;
+    try {
+      const data = await apiFetch(`/api/conversations/${encodeURIComponent(myId)}/messages?limit=100`);
+      if (!mountedRef.current || activeIdRef.current !== myId) return;
+      setQueuedMessages(Array.isArray(data.messages) ? data.messages : []);
+    } catch { /* queue projection is additive; legacy servers may not expose it */ }
+  }, [conversationId]);
+
   const sendMessage = useCallback(async (text, images, opts = {}) => {
     if (!conversationId) return;
     // v3 Phase 6 R3 fix — fence loading writes on the conversation id
@@ -128,9 +152,24 @@ export function useConversation(conversationId, { poll = true, pollMs = 10000 } 
     // stomp on B's loading state. Same class of race as resolve()/
     // loadEvents() above.
     const myId = conversationId;
+    const idempotencyKey = opts?.idempotencyKey
+      || (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function'
+        ? globalThis.crypto.randomUUID()
+        : `msg_${Date.now()}_${Math.random().toString(16).slice(2)}`);
+    const optimistic = {
+      id: idempotencyKey,
+      idempotency_key: idempotencyKey,
+      conversation_id: myId,
+      display_text: typeof text === 'string' ? text : '',
+      attachment_count: Array.isArray(images) ? images.length : 0,
+      status: 'queued',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    upsertQueuedMessage(optimistic);
     setLoading(true);
     try {
-      const body = { text };
+      const body = { text, idempotencyKey };
       if (images && images.length > 0) body.images = images;
       // A2a §5.0: per-turn codebase selection + turnMode. Omitted → server-side
       // legacy default (codebase via primary). The UI selector that sets these
@@ -141,8 +180,23 @@ export function useConversation(conversationId, { poll = true, pollMs = 10000 } 
         method: 'POST',
         body: JSON.stringify(body),
       });
+      if (mountedRef.current && activeIdRef.current === myId && data?.message) {
+        // The server id differs from the client idempotency key. Remove the
+        // optimistic placeholder before committing the authoritative row.
+        setQueuedMessages(prev => prev.filter(item => item.id !== optimistic.id));
+        upsertQueuedMessage(data.message);
+      }
       return data;
     } catch (err) {
+      if (mountedRef.current && activeIdRef.current === myId) {
+        upsertQueuedMessage({
+          ...optimistic,
+          status: 'failed',
+          last_error: err?.message || 'message enqueue failed',
+          terminal_reason: err?.code || 'enqueue_failed',
+          updated_at: new Date().toISOString(),
+        });
+      }
       addToast('Failed to send: ' + err.message, 'error');
       throw err;
     } finally {
@@ -151,7 +205,20 @@ export function useConversation(conversationId, { poll = true, pollMs = 10000 } 
         setLoading(false);
       }
     }
-  }, [conversationId]);
+  }, [conversationId, upsertQueuedMessage]);
+
+  const cancelQueuedMessage = useCallback(async (messageId) => {
+    if (!conversationId || !messageId) return null;
+    const myId = conversationId;
+    const data = await apiFetch(
+      `/api/conversations/${encodeURIComponent(myId)}/messages/${encodeURIComponent(messageId)}`,
+      { method: 'DELETE' },
+    );
+    if (mountedRef.current && activeIdRef.current === myId && data?.message) {
+      upsertQueuedMessage(data.message);
+    }
+    return data?.message || null;
+  }, [conversationId, upsertQueuedMessage]);
 
   useEffect(() => {
     // v3 Phase 6 R1 fix — clear stale run/events SYNCHRONOUSLY on
@@ -171,12 +238,14 @@ export function useConversation(conversationId, { poll = true, pollMs = 10000 } 
     // response", not a global app state.
     setRun(null);
     setEvents([]);
+    setQueuedMessages([]);
     setLoading(false);
     lastEventIdRef.current = 0;
     runIdRef.current = null;
 
     resolve();
     loadEvents({ reset: true });
+    loadQueuedMessages();
 
     // P2-8: subscribe to run:event SSE frames on the module broker and
     // filter to this conversation's current backing run id. Handler
@@ -195,10 +264,16 @@ export function useConversation(conversationId, { poll = true, pollMs = 10000 } 
       if (!runIdRef.current || runIdRef.current !== eventRunId) return;
       loadEvents();
     });
+    const unsubscribeQueue = sseBroker.subscribe('conversation:message_status', (data) => {
+      if (!data || activeIdRef.current !== conversationId) return;
+      if (data.conversationId !== conversationId || !data.message) return;
+      upsertQueuedMessage(data.message);
+    });
 
     if (!poll) {
       return () => {
         unsubscribe();
+        unsubscribeQueue();
         if (pollRef.current) clearInterval(pollRef.current);
         lastEventIdRef.current = 0;
         runIdRef.current = null;
@@ -208,14 +283,36 @@ export function useConversation(conversationId, { poll = true, pollMs = 10000 } 
       if (activeIdRef.current !== conversationId) return;
       resolve();
       loadEvents();
+      loadQueuedMessages();
     }, pollMs);
     return () => {
       unsubscribe();
+      unsubscribeQueue();
       if (pollRef.current) clearInterval(pollRef.current);
       lastEventIdRef.current = 0;
       runIdRef.current = null;
     };
-  }, [conversationId, poll, pollMs, resolve, loadEvents]);
+  }, [
+    conversationId,
+    poll,
+    pollMs,
+    resolve,
+    loadEvents,
+    loadQueuedMessages,
+    upsertQueuedMessage,
+  ]);
 
-  return { run, events, loading, sendMessage, reload: () => loadEvents({ reset: true }) };
+  return {
+    run,
+    events,
+    queuedMessages,
+    loading,
+    sendMessage,
+    cancelQueuedMessage,
+    reload: () => {
+      loadEvents({ reset: true });
+      loadQueuedMessages();
+    },
+    reloadQueue: loadQueuedMessages,
+  };
 }

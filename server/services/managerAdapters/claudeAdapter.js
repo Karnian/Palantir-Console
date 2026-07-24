@@ -297,7 +297,10 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
     state.pendingInvocationIds.push(invocationId || null);
     let accepted;
     try {
-      accepted = streamJsonEngine.sendInput(runId, text || '', images, { displayText });
+      accepted = streamJsonEngine.sendInput(runId, text || '', images, {
+        displayText,
+        invocationId,
+      });
     } catch (err) {
       state.pendingInvocationIds.pop();
       throw err;

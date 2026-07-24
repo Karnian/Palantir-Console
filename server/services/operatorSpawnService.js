@@ -295,11 +295,15 @@ function createOperatorSpawnService({
     } catch {
       const err = new Error(`project not found: ${projectId}`);
       err.httpStatus = 404;
+      err.code = 'OPERATOR_TARGET_NOT_FOUND';
+      err.retryable = false;
       throw err;
     }
     if (project.pm_enabled === 0) {
       const err = new Error(`PM is disabled for project ${projectId}`);
       err.httpStatus = 409;
+      err.code = 'OPERATOR_DISABLED';
+      err.retryable = false;
       throw err;
     }
 
@@ -342,6 +346,8 @@ function createOperatorSpawnService({
     if (!activeTopRunId) {
       const err = new Error('no active Top manager — start a Top session before invoking PM');
       err.httpStatus = 409;
+      err.code = 'OPERATOR_PARENT_MISSING';
+      err.retryable = true;
       throw err;
     }
 
@@ -375,6 +381,8 @@ function createOperatorSpawnService({
         } catch { /* ignore */ }
         const err = new Error('node is cordoned — uncordon before spawning an operator');
         err.httpStatus = 409;
+        err.code = 'OPERATOR_NODE_UNAVAILABLE';
+        err.retryable = true;
         throw err;
       }
     }

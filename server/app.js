@@ -53,6 +53,7 @@ const { createManagerRouter } = require('./routes/manager');
 const { createConversationsRouter } = require('./routes/conversations');
 const { createManagerRegistry } = require('./services/managerRegistry');
 const { createConversationService } = require('./services/conversationService');
+const { createManagerMessageQueueService } = require('./services/managerMessageQueueService');
 const {
   conversationIdForProject,
   parseProjectConversationId,
@@ -1325,6 +1326,13 @@ function createApp(options = {}) {
     },
   });
   const compositionLedger = createCompositionLedger(db);
+  const managerMessageQueueService = createManagerMessageQueueService({
+    db,
+    eventBus,
+    runService,
+    perConversationCap: options.managerMessageQueueCap,
+    tickMs: options.managerMessageQueueTickMs,
+  });
   const conversationService = createConversationService({
     runService,
     managerRegistry,
@@ -1339,7 +1347,9 @@ function createApp(options = {}) {
     memoryComposer,
     compositionLedger,
     eventBus,
+    managerMessageQueueService,
   });
+  managerMessageQueueService.start();
   // OS: Operator-owned durable schedules. The service owns persisted schedule
   // and invocation state; the driver only materializes due rows and delivers
   // them through conversationService so identity/memory routing stays unified.
@@ -1363,6 +1373,11 @@ function createApp(options = {}) {
   // be misapplied to some future unrelated run. Codex R1 blocker fix.
   managerRegistry.onSlotCleared(({ runId }) => {
     try { conversationService.clearParentNotices(runId); } catch { /* ignore */ }
+  });
+  managerRegistry.onSlotCleared(({ conversationId, runId }) => {
+    try {
+      managerMessageQueueService.handleSlotCleared({ conversationId, runId });
+    } catch { /* queue state remains recoverable by lease reconciliation */ }
   });
 
   // PM auto-review: harvest is the single completion gate. `run:ended`
@@ -1739,6 +1754,7 @@ function createApp(options = {}) {
     operatorIdentityLifecycleService,
     operatorScheduleService,
     operatorScheduler,
+    managerMessageQueueService,
     resolveOperatorConversationId, // W-P2+: instance-aware dual-read resolver (legacy alias + operator:oi_*)
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at
@@ -1767,6 +1783,13 @@ function createApp(options = {}) {
     if (_shuttingDown) return Promise.resolve();
     _shuttingDown = true;
     const disposeWaits = [];
+    // Stop queue claims/subscriptions before adapter disposal can emit terminal
+    // events. Persisted queued rows remain intact for the next server process.
+    try {
+      managerMessageQueueService.stop();
+      const queueInflight = managerMessageQueueService.awaitDrain();
+      if (queueInflight && typeof queueInflight.then === 'function') disposeWaits.push(queueInflight);
+    } catch { /* best-effort shutdown */ }
     // PR2 / P1-5: walk every live manager slot (Top + every PM) and
     // dispose the adapter session before we tear the process down.
     // Without this, `app.shutdown()` left manager subprocesses and

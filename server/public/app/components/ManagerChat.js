@@ -29,6 +29,14 @@ import { operatorConversationId, parseProjectConversationId, conversationIdMatch
 // with PROFILE_TYPE_TO_ADAPTER in server/routes/manager.js.
 const MANAGER_PROFILE_TYPES = ['claude-code', 'codex'];
 const MANAGER_PROFILE_PICK_KEY = 'palantir.manager.lastProfileId';
+const MESSAGE_QUEUE_STATUS_LABELS = Object.freeze({
+  queued: '대기 중',
+  sending: '전송 중',
+  processing: '처리 중',
+  delivered: '전달됨',
+  failed: '실패',
+  cancelled: '취소됨',
+});
 
 // 3-state auth classification for the manager picker.
 //
@@ -83,7 +91,15 @@ const SUGGESTED_ICON = {
 };
 
 export function ManagerChat({ manager, projects, runs = [], tasks = [], agents = [], agentsError = null, agentsLoading = false, reloadAgents, driftAudit, onOpenDrift, conversationTarget: externalTarget, onConversationChange }) {
-  const { status, events: topEvents, loading, start, sendMessage: topSendMessage, stop, checkStatus } = manager;
+  const {
+    status,
+    events: topEvents,
+    queuedMessages: topQueuedMessages = [],
+    loading,
+    start,
+    stop,
+    checkStatus,
+  } = manager;
   const [input, setInput] = useState('');
   // R2-C.2: local RunInspector state so clicking a SuggestedActions chip
   // opens the same slide-over used by AttentionStrip / SessionGrid /
@@ -112,9 +128,9 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
   // downstream rendering code doesn't have to branch per target beyond
   // these aliases.
   const events = isPm ? (pmConv.events || []) : topEvents;
-  const sendMessage = isPm
-    ? (async (text, images, opts) => pmConv.sendMessage(text, images, opts)) // A2a: forward per-turn opts (codebaseProjectId/turnMode); selector lands in A2b
-    : topSendMessage;
+  const serverQueuedMessages = isPm
+    ? (pmConv.queuedMessages || [])
+    : topQueuedMessages;
   // A PM conversation is "active" when its backing run exists and is
   // running. The Top session uses status.active (legacy).
   const pmRunActive = isPm && pmConv.run && pmConv.run.status === 'running';
@@ -154,6 +170,9 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     setSelectedProfileId(fallback ? fallback.id : '');
   }, [managerProfiles, selectedProfileId]);
   const [sending, setSending] = useState(false);
+  // Messages are rendered optimistically before the enqueue request returns.
+  // The authoritative DB projection/SSE replaces these rows by idempotency key.
+  const [localQueuedMessages, setLocalQueuedMessages] = useState([]);
   const [selectedCodebaseId, setSelectedCodebaseId] = useState('');
   // A codebase selection belongs to one Operator conversation only.
   useEffect(() => {
@@ -188,12 +207,36 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     }
   }, [conversationTarget]);
 
-  // Auto-scroll to bottom on new events
+  const visibleQueuedMessages = useMemo(() => {
+    const authoritativeKeys = new Set(serverQueuedMessages.map(item => item.idempotency_key));
+    const local = localQueuedMessages.filter(item => (
+      item.conversation_id === conversationTarget
+      && !authoritativeKeys.has(item.idempotency_key)
+    ));
+    return [...serverQueuedMessages, ...local];
+  }, [serverQueuedMessages, localQueuedMessages, conversationTarget]);
+
+  // Once SSE/the durable projection contains a message, retire its local
+  // optimistic copy permanently. Otherwise an old optimistic row could
+  // reappear after the bounded recent-message window rolls forward.
+  useEffect(() => {
+    if (serverQueuedMessages.length === 0) return;
+    const authoritativeIds = new Set(serverQueuedMessages.map(item => item.id));
+    const authoritativeKeys = new Set(
+      serverQueuedMessages.map(item => item.idempotency_key).filter(Boolean),
+    );
+    setLocalQueuedMessages(prev => prev.filter(item => (
+      !authoritativeIds.has(item.id)
+      && !authoritativeKeys.has(item.idempotency_key)
+    )));
+  }, [serverQueuedMessages]);
+
+  // Auto-scroll to bottom on new events/queue transitions.
   useEffect(() => {
     if (messagesRef.current) {
       messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
     }
-  }, [events]);
+  }, [events, visibleQueuedMessages]);
 
   // Read file as base64
   const readFileAsBase64 = (file) => {
@@ -327,15 +370,68 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
         const text = t === 'user_input'
           ? managerUserInputDisplayText(p)
           : (p.text || p.result || p.message || '');
-        if (!text) continue;
-        out.push({ id: e.id, type: t, text, time: e.created_at, source: 'legacy' });
+        if (!text && t !== 'user_input') continue;
+        out.push({
+          id: e.id,
+          type: t,
+          text,
+          time: e.created_at,
+          source: 'legacy',
+          clientMessageId: t === 'user_input' ? (p.client_message_id || null) : null,
+        });
       }
     }
 
-    // Stable order: by event id (server-assigned monotonic).
-    out.sort((a, b) => (a.id || 0) - (b.id || 0));
+    // Durable queue rows own the user bubble/status. Drop the adapter's
+    // correlated user_input duplicate, then add the queue projection.
+    const queueIds = new Set(visibleQueuedMessages.map(item => item.id));
+    const queueClientIds = new Set(
+      visibleQueuedMessages.map(item => item.idempotency_key).filter(Boolean),
+    );
+    const queueAdapterIds = new Set(
+      visibleQueuedMessages.map(item => item.client_message_id).filter(Boolean),
+    );
+    for (let i = out.length - 1; i >= 0; i -= 1) {
+      const item = out[i];
+      if (
+        item.type === 'user_input'
+        && item.clientMessageId
+        && (
+          queueIds.has(item.clientMessageId)
+          || queueClientIds.has(item.clientMessageId)
+          || queueAdapterIds.has(item.clientMessageId)
+        )
+      ) {
+        out.splice(i, 1);
+      }
+    }
+    for (const item of visibleQueuedMessages) {
+      const attachmentCount = Number(item.attachment_count || 0);
+      out.push({
+        id: `queue:${item.id}`,
+        type: 'user_input',
+        text: item.display_text || (attachmentCount > 0 ? `이미지 첨부 ${attachmentCount}개` : ''),
+        time: item.created_at,
+        source: 'queue',
+        queueStatus: item.status,
+        queueError: item.last_error || null,
+        queueMessageId: item.id,
+        attachmentCount,
+      });
+    }
+
+    // Queue rows and run events have independent monotonic ids. Timestamp
+    // order preserves conversational chronology; numeric event id breaks ties.
+    out.sort((a, b) => {
+      const at = Date.parse(a.time || '') || 0;
+      const bt = Date.parse(b.time || '') || 0;
+      if (at !== bt) return at - bt;
+      const ai = typeof a.id === 'number' ? a.id : Number.MAX_SAFE_INTEGER;
+      const bi = typeof b.id === 'number' ? b.id : Number.MAX_SAFE_INTEGER;
+      return ai - bi;
+    });
     return out;
-  }, [events]);
+  }, [events, visibleQueuedMessages]);
 
   // R2-C.2: SuggestedActions — context-aware chip row above ChatInput.
   //
@@ -490,6 +586,63 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     }
   };
 
+  const createClientMessageKey = () => (
+    globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function'
+      ? globalThis.crypto.randomUUID()
+      : `msg_${Date.now()}_${Math.random().toString(16).slice(2)}`
+  );
+
+  const upsertLocalQueuedMessage = (message, replaceId = null) => {
+    if (!message || !message.id) return;
+    setLocalQueuedMessages(prev => {
+      const filtered = replaceId ? prev.filter(item => item.id !== replaceId) : prev.slice();
+      const idx = filtered.findIndex(item => item.id === message.id);
+      if (idx === -1) return [...filtered, message];
+      filtered[idx] = { ...filtered[idx], ...message };
+      return filtered;
+    });
+  };
+
+  const postQueuedMessage = async (target, text, images, turnContext = null) => {
+    const idempotencyKey = createClientMessageKey();
+    const optimisticId = `optimistic:${idempotencyKey}`;
+    const optimistic = {
+      id: optimisticId,
+      idempotency_key: idempotencyKey,
+      conversation_id: target,
+      display_text: text || '',
+      attachment_count: Array.isArray(images) ? images.length : 0,
+      status: 'queued',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    upsertLocalQueuedMessage(optimistic);
+    try {
+      const data = await apiFetch(`/api/conversations/${encodeURIComponent(target)}/message`, {
+        method: 'POST',
+        headers: { 'Idempotency-Key': idempotencyKey },
+        body: JSON.stringify({
+          text,
+          images: Array.isArray(images) && images.length > 0 ? images : undefined,
+          ...(turnContext || {}),
+        }),
+      });
+      if (data?.message) {
+        upsertLocalQueuedMessage(data.message, optimisticId);
+      }
+      return data;
+    } catch (err) {
+      upsertLocalQueuedMessage({
+        ...optimistic,
+        status: 'failed',
+        last_error: err?.message || 'message enqueue failed',
+        terminal_reason: err?.data?.code || 'enqueue_failed',
+        updated_at: new Date().toISOString(),
+      });
+      throw err;
+    }
+  };
+
   // Bypass the handleSend closure-over-`input` so SuggestedActions can
   // submit an arbitrary string without racing setState. Only used for the
   // "상태 요약" chip today; factored out in case future chips want the
@@ -509,17 +662,8 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     }
     setInput('');
     try {
-      if (conversationTarget === 'top') {
-        await topSendMessage(text);
-      } else {
-        await apiFetch(`/api/conversations/${encodeURIComponent(conversationTarget)}/message`, {
-          method: 'POST',
-          body: JSON.stringify({ text }),
-        });
-      }
-    } catch (err) {
-      addToast('Failed to send: ' + (err && err.message ? err.message : 'unknown'), 'error');
-    }
+      await postQueuedMessage(conversationTarget, text);
+    } catch { /* optimistic bubble transitions to failed with its reason */ }
     setSending(false);
     submittingRef.current = false;
     requestAnimationFrame(() => { if (inputRef.current) inputRef.current.focus(); });
@@ -634,28 +778,19 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
           ? { codebaseProjectId: selectedCodebaseId, turnMode: 'codebase' }
           : null);
 
-    try {
-      if (effectiveTarget === 'top') {
-        await topSendMessage(effectiveText, imagesToSend.length > 0 ? imagesToSend : undefined);
-      } else {
-        // PM path: hit the conversation endpoint directly so the
-        // send works even if the UI selector is still pointing at
-        // Top (router rewrote to pm:<id>).
-        await apiFetch(`/api/conversations/${encodeURIComponent(effectiveTarget)}/message`, {
-          method: 'POST',
-          body: JSON.stringify({
-            text: effectiveText,
-            images: imagesToSend.length > 0 ? imagesToSend : undefined,
-            ...(turnCtx || {}),
-          }),
-        });
-        if (effectiveTarget !== conversationTarget) {
-          setConversationTarget(effectiveTarget);
-        }
-      }
-    } catch (err) {
-      addToast('Failed to send: ' + (err && err.message ? err.message : 'unknown'), 'error');
+    if (effectiveTarget !== conversationTarget) {
+      // Follow explicit routing before the enqueue request settles so the
+      // optimistic queued bubble appears in the conversation it targets.
+      setConversationTarget(effectiveTarget);
     }
+    try {
+      await postQueuedMessage(
+        effectiveTarget,
+        effectiveText,
+        imagesToSend.length > 0 ? imagesToSend : undefined,
+        turnCtx,
+      );
+    } catch { /* optimistic bubble transitions to failed with its reason */ }
     setSending(false);
     // 전송 완료 후 입력창에 포커스 복원 — rAF 로 Preact 가 disabled 속성을
     // 제거한 뒤의 프레임을 기다림 (setTimeout(0) 은 paint 전에 실행될 수 있음)
@@ -682,6 +817,21 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
       setConversationTarget('top');
     } catch (err) {
       addToast('Reset failed: ' + (err && err.message ? err.message : 'unknown'), 'error');
+    }
+  };
+
+  const handleCancelQueuedMessage = async (messageId) => {
+    if (!messageId || String(messageId).startsWith('optimistic:')) return;
+    try {
+      const data = await apiFetch(
+        `/api/conversations/${encodeURIComponent(conversationTarget)}/messages/${encodeURIComponent(messageId)}`,
+        { method: 'DELETE' },
+      );
+      if (data?.message) upsertLocalQueuedMessage(data.message);
+      if (isPm && typeof pmConv.reloadQueue === 'function') pmConv.reloadQueue();
+      if (!isPm && typeof manager.reloadQueue === 'function') manager.reloadQueue();
+    } catch (err) {
+      addToast('대기 메시지 취소 실패: ' + (err && err.message ? err.message : 'unknown'), 'error');
     }
   };
 
@@ -961,7 +1111,34 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
           <div key=${m.id} class="manager-msg-row ${m.type === 'user_input' ? 'manager-msg-row-user' : 'manager-msg-row-assistant'}">
             <div class="manager-msg ${m.type === 'user_input' ? 'manager-msg-user' : 'manager-msg-assistant'}">
               ${m.type === 'user_input'
-                ? html`<div class="manager-msg-content">${m.text}</div>`
+                ? html`
+                    <div class="manager-msg-content">${m.text}</div>
+                    ${m.attachmentCount > 0 && m.text && html`
+                      <div class="manager-msg-attachments">이미지 ${m.attachmentCount}개 첨부</div>
+                    `}
+                    ${m.queueStatus && html`
+                      <div
+                        class="manager-msg-delivery manager-msg-delivery-${m.queueStatus}"
+                        data-message-status=${m.queueStatus}
+                        role="status"
+                      >
+                        <span>${MESSAGE_QUEUE_STATUS_LABELS[m.queueStatus] || m.queueStatus}</span>
+                        ${m.queueStatus === 'queued'
+                          && m.queueMessageId
+                          && !String(m.queueMessageId).startsWith('optimistic:')
+                          && html`
+                            <button
+                              type="button"
+                              class="manager-msg-cancel"
+                              onClick=${() => handleCancelQueuedMessage(m.queueMessageId)}
+                            >취소</button>
+                          `}
+                      </div>
+                    `}
+                    ${m.queueStatus === 'failed' && m.queueError && html`
+                      <div class="manager-msg-delivery-error" role="alert">${m.queueError}</div>
+                    `}
+                  `
                 : html`<div class="manager-msg-content markdown-body" dangerouslySetInnerHTML=${{ __html: renderMarkdown(m.text) }}></div>`
               }
             </div>
