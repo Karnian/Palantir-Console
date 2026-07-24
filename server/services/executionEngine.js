@@ -47,29 +47,58 @@ function validateCwd(dir) {
 
 // ---------- TmuxEngine ----------
 
-function createTmuxEngine() {
+function createTmuxEngine({ execFileSync: runTmuxCommand = execFileSync } = {}) {
   const PATH_PREFIX = 'export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"';
 
   function sessionName(runId) {
     return sanitizeSessionName(`palantir-run-${runId}`);
   }
 
-  function spawnAgent(runId, { command, args, cwd, env, outputLogPath }) {
+  function artifactPaths(runId) {
     const name = sessionName(runId);
+    const scriptDir = path.join(os.tmpdir(), 'palantir-scripts');
+    return {
+      name,
+      scriptDir,
+      scriptPath: path.join(scriptDir, `${name}.sh`),
+      exitSentinelPath: path.join(scriptDir, `${name}.exit`),
+      exitSentinelTmpPath: path.join(scriptDir, `${name}.exit.tmp`),
+    };
+  }
+
+  function spawnAgent(runId, { command, args, cwd, env, outputLogPath }) {
+    const {
+      name,
+      scriptDir,
+      scriptPath,
+      exitSentinelPath,
+      exitSentinelTmpPath,
+    } = artifactPaths(runId);
     const safeCwd = validateCwd(cwd);
     assertSpawnAllowed({ command, source: 'executionEngine:tmux' });
 
     // SECURITY: Write the agent command to a temp script file instead of
     // interpolating into a shell string. This eliminates all injection vectors.
-    const scriptDir = path.join(os.tmpdir(), 'palantir-scripts');
-    fs.mkdirSync(scriptDir, { recursive: true });
-    const scriptPath = path.join(scriptDir, `${name}.sh`);
+    fs.mkdirSync(scriptDir, { recursive: true, mode: 0o700 });
+    // A previous server/process crash may have left a result for this sanitized
+    // session name. Never let a new worker inherit that stale exit code.
+    try { fs.unlinkSync(exitSentinelPath); } catch {}
+    try { fs.unlinkSync(exitSentinelTmpPath); } catch {}
 
-    const lines = ['#!/bin/bash', PATH_PREFIX];
+    const profileEnv = env && typeof env === 'object' ? env : {};
+    let publishPathVar = '__palantir_sentinel_publish_path';
+    while (Object.prototype.hasOwnProperty.call(profileEnv, publishPathVar)) {
+      publishPathVar += '_';
+    }
+    const lines = [
+      '#!/bin/bash',
+      PATH_PREFIX,
+      `${publishPathVar}="$PATH"`,
+    ];
 
     // Set environment variables safely (no shell interpolation)
     if (env && typeof env === 'object') {
-      for (const [k, v] of Object.entries(env)) {
+      for (const [k, v] of Object.entries(profileEnv)) {
         // Validate key is a valid env var name
         if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(k)) {
           // Use single quotes to prevent shell expansion in values
@@ -86,13 +115,20 @@ function createTmuxEngine() {
     });
     const safeCmd = String(command).replace(/'/g, "'\\''");
     lines.push(`'${safeCmd}' ${quotedArgs.join(' ')}`);
-    lines.push('echo "___EXIT_CODE_$?___"');
+    // Capture $? exactly once so the durable sentinel and scrollback marker
+    // always describe the same agent exit. Rename makes the sentinel atomic.
+    const safeSentinel = exitSentinelPath.replace(/'/g, "'\\''");
+    const safeSentinelTmp = exitSentinelTmpPath.replace(/'/g, "'\\''");
+    lines.push('agent_exit_code=$?');
+    lines.push(`printf '%s\\n' "$agent_exit_code" > '${safeSentinelTmp}'`);
+    lines.push('echo "___EXIT_CODE_${agent_exit_code}___"');
+    lines.push(`PATH="$${publishPathVar}" mv -f -- '${safeSentinelTmp}' '${safeSentinel}'`);
 
     fs.writeFileSync(scriptPath, lines.join('\n') + '\n', { mode: 0o700 });
 
     try {
       // Create tmux session — all args passed as array (no shell interpolation)
-      execFileSync('tmux', ['new-session', '-d', '-s', name, '-c', safeCwd], {
+      runTmuxCommand('tmux', ['new-session', '-d', '-s', name, '-c', safeCwd], {
         stdio: 'pipe',
       });
 
@@ -104,20 +140,22 @@ function createTmuxEngine() {
         try {
           fs.mkdirSync(path.dirname(outputLogPath), { recursive: true, mode: 0o700 });
           const safeLog = String(outputLogPath).replace(/'/g, "'\\''");
-          execFileSync('tmux', ['pipe-pane', '-t', name, '-o', `cat >> '${safeLog}'`], { stdio: 'pipe' });
+          runTmuxCommand('tmux', ['pipe-pane', '-t', name, '-o', `cat >> '${safeLog}'`], { stdio: 'pipe' });
         } catch { /* tee best-effort — capture falls back to capture-pane */ }
       }
 
       // Execute the script in the tmux session
-      execFileSync('tmux', ['send-keys', '-t', name, `bash '${scriptPath}'`, 'Enter'], {
+      runTmuxCommand('tmux', ['send-keys', '-t', name, `bash '${scriptPath}'`, 'Enter'], {
         stdio: 'pipe',
       });
 
       return { sessionName: name, engine: 'tmux' };
     } catch (error) {
-      // Cleanup script AND tmux session on failure
+      // Cleanup script, sentinel artifacts, AND tmux session on failure
       try { fs.unlinkSync(scriptPath); } catch {}
-      try { execFileSync('tmux', ['kill-session', '-t', name], { stdio: 'pipe' }); } catch {}
+      try { fs.unlinkSync(exitSentinelPath); } catch {}
+      try { fs.unlinkSync(exitSentinelTmpPath); } catch {}
+      try { runTmuxCommand('tmux', ['kill-session', '-t', name], { stdio: 'pipe' }); } catch {}
       throw new Error(`Failed to spawn tmux session: ${error.message}`);
     }
   }
@@ -127,7 +165,7 @@ function createTmuxEngine() {
     const cappedLines = Math.min(Math.max(1, lines), 2000);
     const name = sessionName(runId);
     try {
-      const output = execFileSync(
+      const output = runTmuxCommand(
         'tmux',
         ['capture-pane', '-pt', name, '-S', `-${cappedLines}`],
         { stdio: 'pipe', encoding: 'utf-8', timeout: 5000 }
@@ -145,11 +183,11 @@ function createTmuxEngine() {
     try {
       // tmux send-keys with literal flag (-l) prevents key name interpretation
       // We send the text literally, then press Enter separately
-      execFileSync('tmux', ['send-keys', '-t', name, '-l', text], {
+      runTmuxCommand('tmux', ['send-keys', '-t', name, '-l', text], {
         stdio: 'pipe',
         timeout: 5000,
       });
-      execFileSync('tmux', ['send-keys', '-t', name, 'Enter'], {
+      runTmuxCommand('tmux', ['send-keys', '-t', name, 'Enter'], {
         stdio: 'pipe',
         timeout: 5000,
       });
@@ -160,22 +198,29 @@ function createTmuxEngine() {
   }
 
   function kill(runId) {
-    const name = sessionName(runId);
+    const {
+      name,
+      scriptPath,
+      exitSentinelPath,
+      exitSentinelTmpPath,
+    } = artifactPaths(runId);
+    let killed = false;
     try {
-      execFileSync('tmux', ['kill-session', '-t', name], { stdio: 'pipe' });
-      // Cleanup temp script
-      const scriptPath = path.join(os.tmpdir(), 'palantir-scripts', `${name}.sh`);
-      try { fs.unlinkSync(scriptPath); } catch {}
-      return true;
+      runTmuxCommand('tmux', ['kill-session', '-t', name], { stdio: 'pipe' });
+      killed = true;
     } catch {
-      return false;
+      // The session may already be gone; local artifacts still need cleanup.
     }
+    try { fs.unlinkSync(scriptPath); } catch {}
+    try { fs.unlinkSync(exitSentinelPath); } catch {}
+    try { fs.unlinkSync(exitSentinelTmpPath); } catch {}
+    return killed;
   }
 
   function isAlive(runId) {
     const name = sessionName(runId);
     try {
-      execFileSync('tmux', ['has-session', '-t', name], { stdio: 'pipe', timeout: 3000 });
+      runTmuxCommand('tmux', ['has-session', '-t', name], { stdio: 'pipe', timeout: 3000 });
       return true;
     } catch {
       return false;
@@ -183,31 +228,28 @@ function createTmuxEngine() {
   }
 
   function detectExitCode(runId) {
+    const { exitSentinelPath } = artifactPaths(runId);
+    try {
+      const sentinel = fs.readFileSync(exitSentinelPath, 'utf-8');
+      if (/^\d+\n?$/.test(sentinel)) {
+        const exitCode = Number.parseInt(sentinel, 10);
+        if (exitCode >= 0 && exitCode <= 255) return exitCode;
+      }
+    } catch {
+      // Missing/unreadable sentinel: fall back to the diagnostic marker.
+    }
+
     const output = getOutput(runId, 500);
     if (!output) return null;
     const match = output.match(/___EXIT_CODE_(\d+)___/);
     if (match) return parseInt(match[1], 10);
-
-    // Fallback: check if the shell prompt appeared (agent finished, shell returned)
-    // This catches cases where exit code marker scrolled off but shell is back
-    const name = sessionName(runId);
-    try {
-      const paneCmd = execFileSync('tmux', ['display-message', '-pt', name, '#{pane_current_command}'], {
-        stdio: 'pipe', encoding: 'utf-8', timeout: 3000,
-      }).trim();
-      // If the current command is a shell (bash/zsh/sh), the agent script has finished
-      if (['bash', 'zsh', 'sh', '-bash', '-zsh'].includes(paneCmd)) {
-        // Agent finished but exit code marker not found — assume success
-        return 0;
-      }
-    } catch { /* tmux command failed, session may not exist */ }
 
     return null;
   }
 
   function listSessions() {
     try {
-      const output = execFileSync(
+      const output = runTmuxCommand(
         'tmux',
         ['list-sessions', '-F', '#{session_name}|#{session_created}|#{session_activity}'],
         { stdio: 'pipe', encoding: 'utf-8', timeout: 5000 }

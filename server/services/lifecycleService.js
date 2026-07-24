@@ -2193,6 +2193,16 @@ function createLifecycleService({
     }
   }
 
+  function agentExitReason(exitCode) {
+    if (exitCode === null) return 'agent-exit-unknown';
+    return exitCode === 0 ? 'agent-exit-success' : `agent-exit-error(${exitCode})`;
+  }
+
+  function agentExitSummary(exitCode) {
+    if (exitCode === null) return 'Agent terminated but exit code is unknown';
+    return exitCode === 0 ? 'Agent completed successfully' : `Agent exited with code ${exitCode}`;
+  }
+
   async function _doHealthCheck() {
     const runningRuns = runService.listRuns({ status: 'running' });
 
@@ -2228,14 +2238,14 @@ function createLifecycleService({
         const status = (exitCode === 0) ? 'completed' : 'failed';
         // v3 Phase 5: propagate the actual transition reason so
         // subscribers see WHY the run ended, not just that it did.
-        const reason = exitCode === 0 ? 'agent-exit-success' : `agent-exit-error(${exitCode})`;
+        const reason = agentExitReason(exitCode);
         const fromStatus = run.status;
         runService.updateRunStatus(run.id, status, { force: true, reason });
 
         if (exitCode !== null) {
           runService.updateRunResult(run.id, {
             exit_code: exitCode,
-            result_summary: status === 'completed' ? 'Agent completed successfully' : `Agent exited with code ${exitCode}`,
+            result_summary: agentExitSummary(exitCode),
           });
         }
 
@@ -2303,7 +2313,8 @@ function createLifecycleService({
                 // Process is dead — finalize as completed/failed
                 const exitCode = await channel.detectExitCode(run.id, 'cli');
                 const status = (exitCode === 0) ? 'completed' : 'failed';
-                runService.updateRunStatus(run.id, status, { force: true, reason: 'process_dead_after_idle' });
+                const reason = exitCode === null ? 'agent-exit-unknown' : 'process_dead_after_idle';
+                runService.updateRunStatus(run.id, status, { force: true, reason });
                 if (run.task_id) checkTaskCompletion(run.task_id);
                 await channel.kill(run.id, 'cli');
                 _outputHashes.delete(run.id);
@@ -2365,7 +2376,7 @@ function createLifecycleService({
         // Process died while in needs_input
         const exitCode = await channel.detectExitCode(run.id, 'cli');
         const status = (exitCode === 0) ? 'completed' : 'failed';
-        runService.updateRunStatus(run.id, status, { force: true });
+        runService.updateRunStatus(run.id, status, { force: true, reason: agentExitReason(exitCode) });
         if (run.task_id) checkTaskCompletion(run.task_id);
         await channel.kill(run.id, 'cli');
         _outputHashes.delete(run.id);
@@ -2439,13 +2450,18 @@ function createLifecycleService({
             // Session exists but agent terminated
             const exitCode = await workerChannel.detectExitCode(runId, 'cli');
             const status = (exitCode === 0) ? 'completed' : 'failed';
-            runService.updateRunStatus(runId, status, { force: true });
-            runService.updateRunResult(runId, {
-              exit_code: exitCode,
-              result_summary: status === 'completed'
-                ? 'Agent completed (recovered after restart)'
-                : `Agent exited with code ${exitCode} (recovered after restart)`,
+            runService.updateRunStatus(runId, status, {
+              force: true,
+              reason: agentExitReason(exitCode),
             });
+            if (exitCode !== null) {
+              runService.updateRunResult(runId, {
+                exit_code: exitCode,
+                result_summary: status === 'completed'
+                  ? 'Agent completed (recovered after restart)'
+                  : `Agent exited with code ${exitCode} (recovered after restart)`,
+              });
+            }
             await workerChannel.kill(runId, 'cli');
             // Check if task should transition
             if (run.task_id) {
