@@ -7970,6 +7970,9 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .operator-adapter-select {
   min-width: 0;
   width: 100%;
+}
+
+.operator-adapter-select .dropdown-button {
   padding-block: 5px;
   font-size: 12px;
 }

@@ -392,23 +392,21 @@ function ConfiguredOperatorCard({
       `}
       <div class="operator-roster-meta-grid">
         <label for=${adapterSelectId}>${OPERATOR_ROSTER_LABELS.preferredAdapterLabel}</label>
-        <select
-          id=${adapterSelectId}
-          class="form-select operator-adapter-select"
-          data-role="operator-adapter-select"
-          value=${preferredAdapterValue(instance)}
-          disabled=${adapterSaving}
-          aria-busy=${adapterSaving ? 'true' : 'false'}
-          onChange=${(event) => {
-            const nextValue = event.target.value;
-            event.target.value = preferredAdapterValue(instance);
-            onChangeAdapter(instance, nextValue, live);
-          }}
-        >
-          <option value="">${OPERATOR_ROSTER_LABELS.adapterAuto}</option>
-          <option value="codex">${OPERATOR_ROSTER_LABELS.adapterCodex}</option>
-          <option value="claude">${OPERATOR_ROSTER_LABELS.adapterClaude}</option>
-        </select>
+        <div aria-busy=${adapterSaving ? 'true' : 'false'}>
+          <${Dropdown}
+            id=${adapterSelectId}
+            className="dropdown-field operator-adapter-select"
+            dataRole="operator-adapter-select"
+            value=${preferredAdapterValue(instance)}
+            disabled=${adapterSaving}
+            onChange=${(nextValue) => onChangeAdapter(instance, nextValue, live)}
+            options=${[
+              { value: '', label: OPERATOR_ROSTER_LABELS.adapterAuto },
+              { value: 'codex', label: OPERATOR_ROSTER_LABELS.adapterCodex },
+              { value: 'claude', label: OPERATOR_ROSTER_LABELS.adapterClaude },
+            ]}
+          />
+        </div>
         <span>${OPERATOR_ROSTER_LABELS.instanceLabel}</span>
         <strong>${instanceLabel(instance)}</strong>
         <span>${OPERATOR_ROSTER_LABELS.scheduleCountLabel}</span>
@@ -937,17 +935,18 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
           </div>
           <div class="form-field">
             <label class="form-label" for="operator-create-adapter">${OPERATOR_ROSTER_LABELS.preferredAdapterLabel}</label>
-            <select
+            <${Dropdown}
               id="operator-create-adapter"
-              class="form-select"
-              data-role="operator-create-adapter"
+              className="dropdown-field"
+              dataRole="operator-create-adapter"
               value=${createPreferredAdapter}
-              onChange=${(e) => setCreatePreferredAdapter(e.target.value)}
-            >
-              <option value="codex">${OPERATOR_ROSTER_LABELS.adapterCodex}</option>
-              <option value="claude">${OPERATOR_ROSTER_LABELS.adapterClaude}</option>
-              <option value="">${OPERATOR_ROSTER_LABELS.adapterAuto}</option>
-            </select>
+              onChange=${setCreatePreferredAdapter}
+              options=${[
+                { value: 'codex', label: OPERATOR_ROSTER_LABELS.adapterCodex },
+                { value: 'claude', label: OPERATOR_ROSTER_LABELS.adapterClaude },
+                { value: '', label: OPERATOR_ROSTER_LABELS.adapterAuto },
+              ]}
+            />
             <p class="form-hint">${OPERATOR_ROSTER_LABELS.adapterHint}</p>
           </div>
           <div class="form-field">

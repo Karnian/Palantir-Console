@@ -351,7 +351,7 @@ test('OperatorsView saves CLI changes independently across configured Operator c
   secondGate.resolve();
   await waitFor(() => {
     const values = Array.from(root.querySelectorAll('[data-role="operator-adapter-select"]'))
-      .map((select) => select.value);
+      .map((select) => select.dataset.value);
     assert.deepEqual(values, ['claude', 'claude']);
   });
 });
@@ -815,7 +815,7 @@ test('OperatorsView supports Operator-first create then hourly schedule registra
   });
   assert.match(card.textContent, /Remote Hourly Operator/);
   assert.match(card.textContent, /Remote Folder/);
-  assert.equal(card.querySelector('[data-role="operator-adapter-select"]').value, 'codex');
+  assert.equal(card.querySelector('[data-role="operator-adapter-select"]').dataset.value, 'codex');
 
   changeValue(env, card.querySelector('[data-role="operator-adapter-select"]'), 'claude');
   await waitFor(() => {
@@ -828,7 +828,7 @@ test('OperatorsView supports Operator-first create then hourly schedule registra
   });
   await waitFor(() => {
     assert.equal(
-      root.querySelector('[data-role="operator-configured-card"] [data-role="operator-adapter-select"]').value,
+      root.querySelector('[data-role="operator-configured-card"] [data-role="operator-adapter-select"]').dataset.value,
       'claude',
     );
   });
