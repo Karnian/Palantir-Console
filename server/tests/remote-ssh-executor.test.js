@@ -290,6 +290,30 @@ test('loopback ssh simulator preserves exec stdout across ssh argument join', as
   assert.equal(spawn.calls[0].joined, `sh -c ${shq("exec 'echo' 'fleet-ok'")}`);
 });
 
+test('exec ignores stdin EPIPE without input and resolves from process close', async () => {
+  const spawn = makeSpawn((_call, child) => {
+    child.stdin = new Writable({
+      write(_chunk, _encoding, callback) {
+        const err = new Error('remote stdin closed before empty input');
+        err.code = 'EPIPE';
+        callback(err);
+      },
+    });
+    child.stdin.once('error', () => {
+      complete(child, { stdout: 'fleet-ok\n' });
+    });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), {
+    spawnFn: spawn,
+    commandAllowlist: ['echo'],
+  });
+
+  const res = await exec.exec('echo', ['fleet-ok']);
+
+  assert.deepEqual(res, { code: 0, stdout: 'fleet-ok\n', stderr: '' });
+  assert.equal(spawn.calls[0].killed, false);
+});
+
 test('exec waits for close and captures stdout emitted after process exit', async () => {
   const spawn = makeSpawn((_call, child) => {
     process.nextTick(() => {
