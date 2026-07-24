@@ -586,6 +586,32 @@ test('writeTempFile rejects non-bare names and sends content via stdin', async (
   assert.doesNotMatch(scriptOf(writeCall), /secret-content/);
 });
 
+test('writeTempFile handles stdin EPIPE without an unhandled stream error', async () => {
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script === "exec 'realpath' '/srv/root'") {
+      complete(child, { stdout: '/real/root\n' });
+      return;
+    }
+    child.stdin = new Writable({
+      write(_chunk, _encoding, callback) {
+        const err = new Error('remote stdin closed early');
+        err.code = 'EPIPE';
+        callback(err);
+      },
+    });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => exec.writeTempFile('/srv/root/tmp-', 'payload.txt', 'x'.repeat(64 * 1024), 0o600),
+    (err) => err.code === 'EPIPE' && err.stdout === '' && err.stderr === '',
+  );
+
+  const writeCall = spawn.calls.find((call) => /mktemp -d/.test(scriptOf(call)));
+  assert.equal(writeCall.killed, 'SIGTERM');
+});
+
 test('putSecretFile builds temp secret flow and streams content via stdin', async () => {
   const spawn = makeSpawn((call, child) => {
     const script = scriptOf(call);

@@ -413,6 +413,15 @@ function createRemoteSshNodeExecutor(node, {
         child.stderr.on('data', (chunk) => appendOutput('stderr', chunk));
       }
       child.once('error', (err) => finishReject(err));
+      if (child.stdin && typeof child.stdin.once === 'function') {
+        child.stdin.once('error', (err) => {
+          if (settled) return;
+          if (typeof child.kill === 'function') {
+            try { child.kill('SIGTERM'); } catch { /* best-effort */ }
+          }
+          finishReject(err);
+        });
+      }
       child.once('close', (code, signal) => {
         if (settled) return;
         if (signal) {
@@ -437,7 +446,14 @@ function createRemoteSshNodeExecutor(node, {
       });
 
       if (child.stdin && typeof child.stdin.end === 'function') {
-        child.stdin.end(input === undefined ? '' : input);
+        try {
+          child.stdin.end(input === undefined ? '' : input);
+        } catch (err) {
+          if (typeof child.kill === 'function') {
+            try { child.kill('SIGTERM'); } catch { /* best-effort */ }
+          }
+          finishReject(err);
+        }
       }
     });
   }

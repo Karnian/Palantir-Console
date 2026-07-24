@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { performance } = require('node:perf_hooks');
 const { spawn, spawnSync } = require('node:child_process');
 const { EventEmitter } = require('node:events');
 const { PassThrough, Writable } = require('node:stream');
@@ -41,12 +42,14 @@ function waitImmediate() {
 }
 
 async function waitFor(predicate, { timeoutMs = 3000, intervalMs = 10 } = {}) {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() >= deadline) return false;
-    await new Promise(resolve => setTimeout(resolve, intervalMs));
+  const deadline = performance.now() + timeoutMs;
+  while (performance.now() < deadline) {
+    if (predicate()) return true;
+    const remainingMs = deadline - performance.now();
+    if (remainingMs <= 0) break;
+    await new Promise(resolve => setTimeout(resolve, Math.min(intervalMs, remainingMs)));
   }
-  return true;
+  return false;
 }
 
 test('issue #113: stdio env is file-backed, argv-safe, mode 0600, and round-trips exact command/args/env', (t) => {
@@ -630,41 +633,51 @@ test('issue #113: CodexAdapter refuses before placement when executor cannot res
 });
 
 test('issue #113: default local placement write failure removes both fresh temp dirs', async () => {
-  const originalWriteFileSync = fs.writeFileSync;
   const attemptedPaths = [];
   let spawns = 0;
   let cleanupFinished = false;
-  fs.writeFileSync = function failWrapperWrite(filePath, ...args) {
-    attemptedPaths.push(String(filePath));
-    if (path.basename(String(filePath)) === WRAPPER_FILENAME) {
-      throw new Error('intentional wrapper write failure');
-    }
-    return originalWriteFileSync.call(this, filePath, ...args);
+  let failedWrapperDir = null;
+  let syncCleanupFailures = 0;
+  const localFs = {
+    mkdtempSync: fs.mkdtempSync,
+    writeFileSync(filePath, ...args) {
+      attemptedPaths.push(String(filePath));
+      if (path.basename(String(filePath)) === WRAPPER_FILENAME) {
+        failedWrapperDir = path.dirname(String(filePath));
+        throw new Error('intentional wrapper write failure');
+      }
+      return fs.writeFileSync(filePath, ...args);
+    },
+    rmSync(targetPath, ...args) {
+      if (String(targetPath) === failedWrapperDir) {
+        syncCleanupFailures += 1;
+        throw new Error('intentional synchronous cleanup failure');
+      }
+      return fs.rmSync(targetPath, ...args);
+    },
   };
 
-  try {
-    const adapter = createCodexAdapter({
-      runService: {
-        addRunEvent() {}, updateRunStatus() {}, updateManagerThreadId() {}, updateRunResult() {},
-      },
-      spawnFn() { spawns += 1; return createFakeChild(); },
-    });
-    adapter.startSession('run_local_write_failure', {
-      systemPrompt: 'system', cwd: process.cwd(),
-      mcpConfig: {
-        mcpServers: { secret: { command: 'x', env: { TOKEN: 'write-failure-secret' } } },
-      },
-    });
-    assert.equal(adapter.runTurn('run_local_write_failure', { text: 'go' }).accepted, true);
-    cleanupFinished = await waitFor(
-      () => attemptedPaths.length === 2
-        && attemptedPaths.every(filePath => !fs.existsSync(path.dirname(filePath))),
-    );
-  } finally {
-    fs.writeFileSync = originalWriteFileSync;
-  }
+  const adapter = createCodexAdapter({
+    runService: {
+      addRunEvent() {}, updateRunStatus() {}, updateManagerThreadId() {}, updateRunResult() {},
+    },
+    spawnFn() { spawns += 1; return createFakeChild(); },
+    localFs,
+  });
+  adapter.startSession('run_local_write_failure', {
+    systemPrompt: 'system', cwd: process.cwd(),
+    mcpConfig: {
+      mcpServers: { secret: { command: 'x', env: { TOKEN: 'write-failure-secret' } } },
+    },
+  });
+  assert.equal(adapter.runTurn('run_local_write_failure', { text: 'go' }).accepted, true);
+  cleanupFinished = await waitFor(
+    () => attemptedPaths.length === 2
+      && attemptedPaths.every(filePath => !fs.existsSync(path.dirname(filePath))),
+  );
 
   assert.equal(spawns, 0);
+  assert.equal(syncCleanupFailures, 1, 'write failure also exercised rmSync failure');
   assert.equal(cleanupFinished, true, 'placement failure cleanup completed before the deadline');
   assert.equal(attemptedPaths.length, 2, 'prompt write then wrapper write');
   for (const filePath of attemptedPaths) {
