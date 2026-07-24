@@ -71,6 +71,7 @@ const { resolveSpawnCwd } = require('../../utils/spawnCwd');
 // and so test fixtures can reference the same set the runtime uses.
 const NON_FATAL_SEVERITIES = new Set(['warning', 'warn', 'notice', 'info', 'deprecation']);
 const NOTICE_CODE_PREFIXES = ['deprecated_', 'deprecation_', 'notice_', 'warn_', 'warning_'];
+const LOCAL_FAILED_PLACEMENT_DIRS = Symbol('localFailedPlacementDirs');
 
 // P4-6: error classification patterns. Each entry: [regex, category].
 // Order matters — first match wins. Patterns are tested against the
@@ -158,7 +159,12 @@ function resolveCodexServiceTier(fastMode, { env = process.env } = {}) {
   return fast ? 'fast' : 'default';
 }
 
-function createDefaultLocalExecutor({ runId, spawnImpl }) {
+function createDefaultLocalExecutor({
+  runId,
+  spawnImpl,
+  fsImpl = fs,
+  fspImpl = fsp,
+}) {
   let lastTmpDir = null;
   return {
     // SYNC on purpose: the local default path must place the instructions file
@@ -168,15 +174,30 @@ function createDefaultLocalExecutor({ runId, spawnImpl }) {
     // remote executor's putSecretFile is async — spawnOneTurn awaits only when
     // the result is thenable.
     putSecretFile(name, content, mode = 0o600) {
-      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `palantir-codex-${runId}-`));
+      const tmpDir = fsImpl.mkdtempSync(path.join(os.tmpdir(), `palantir-codex-${runId}-`));
       lastTmpDir = tmpDir;
       const filePath = path.join(tmpDir, name);
       try {
-        fs.writeFileSync(filePath, content, { mode });
+        fsImpl.writeFileSync(filePath, content, { mode });
         return filePath;
       } catch (err) {
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+        let cleanupFailed = false;
+        try {
+          fsImpl.rmSync(tmpDir, { recursive: true, force: true });
+        } catch {
+          cleanupFailed = true;
+        }
         if (lastTmpDir === tmpDir) lastTmpDir = null;
+        if (cleanupFailed) {
+          const trackedError = err && typeof err === 'object' && Object.isExtensible(err)
+            ? err
+            : new Error(String(err), { cause: err });
+          trackedError[LOCAL_FAILED_PLACEMENT_DIRS] = [
+            ...(trackedError[LOCAL_FAILED_PLACEMENT_DIRS] || []),
+            tmpDir,
+          ];
+          throw trackedError;
+        }
         throw err;
       }
     },
@@ -191,7 +212,7 @@ function createDefaultLocalExecutor({ runId, spawnImpl }) {
       });
     },
     async rmrf(targetPath) {
-      await fsp.rm(targetPath || lastTmpDir, { recursive: true, force: true });
+      await fspImpl.rm(targetPath || lastTmpDir, { recursive: true, force: true });
     },
   };
 }
@@ -205,6 +226,8 @@ function createCodexAdapter({
   runService,
   codexBin = process.env.CODEX_BIN || 'codex',
   spawnFn,
+  localFs = fs,
+  localFsp = fsp,
 } = {}) {
   const spawn = spawnFn || realSpawn;
   // Per-run state. Codex sessions are NOT persistent processes, so this map
@@ -270,7 +293,12 @@ function createCodexAdapter({
       throw new Error(`codexAdapter: session ${runId} already started`);
     }
 
-    const sessionExecutor = executor || createDefaultLocalExecutor({ runId, spawnImpl: spawn });
+    const sessionExecutor = executor || createDefaultLocalExecutor({
+      runId,
+      spawnImpl: spawn,
+      fsImpl: localFs,
+      fspImpl: localFsp,
+    });
 
     const hasPlainObjectMcpConfig = isPlainObject(mcpConfig);
     const skippedMcpConfigPath = typeof mcpConfig === 'string';
@@ -532,7 +560,16 @@ function createCodexAdapter({
         } catch { /* ignore */ }
         state.exitCode = 1;
         emitSessionEndedIfNeeded(runId, 'mcp-invalid');
-        throw new Error(`codexAdapter: mcpConfig prepare failed: ${err.message}`);
+        const wrappedError = new Error(
+          `codexAdapter: mcpConfig prepare failed: ${err.message}`,
+          { cause: err },
+        );
+        if (Array.isArray(err && err[LOCAL_FAILED_PLACEMENT_DIRS])) {
+          wrappedError[LOCAL_FAILED_PLACEMENT_DIRS] = [
+            ...err[LOCAL_FAILED_PLACEMENT_DIRS],
+          ];
+        }
+        throw wrappedError;
       }
       if (state.ended) {
         state.turnStarting = false;
@@ -705,9 +742,14 @@ function createCodexAdapter({
         } catch { /* ignore */ }
         emitSessionEndedIfNeeded(runId, 'spawn-failed');
       }
+      const failedLocalPlacementDirs = err && err[LOCAL_FAILED_PLACEMENT_DIRS];
       await cleanupExecutorDirs(
         state,
-        [placedInstructionsDirThisTurn, ...placedMcpDirsThisTurn],
+        [
+          placedInstructionsDirThisTurn,
+          ...placedMcpDirsThisTurn,
+          ...(Array.isArray(failedLocalPlacementDirs) ? failedLocalPlacementDirs : []),
+        ],
       );
       throw err;
     }
