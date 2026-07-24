@@ -338,12 +338,17 @@ function createRemoteSshNodeExecutor(node, {
   function runRemoteScript(script, { timeoutMs, maxBuffer, input } = {}) {
     return new Promise((resolve, reject) => {
       const child = spawnFn('ssh', sshArgsFor(script), { stdio: ['pipe', 'pipe', 'pipe'] });
+      const hasInput = input !== undefined && input !== null && input !== '';
       const stdoutChunks = [];
       const stderrChunks = [];
       let stdoutBytes = 0;
       let stderrBytes = 0;
       let settled = false;
       let timer = null;
+
+      function isIgnorableEmptyStdinError(err) {
+        return !hasInput && ['EPIPE', 'ERR_STREAM_DESTROYED', 'EOF', 'ECONNRESET'].includes(err && err.code);
+      }
 
       function bufferedText(which) {
         if (which === 'stdout') return Buffer.concat(stdoutChunks, stdoutBytes).toString('utf8');
@@ -416,6 +421,9 @@ function createRemoteSshNodeExecutor(node, {
       if (child.stdin && typeof child.stdin.once === 'function') {
         child.stdin.once('error', (err) => {
           if (settled) return;
+          // A remote process may exit without reading empty stdin: a normal race
+          // whose exit code decides the result. #406 misclassified it as failure.
+          if (isIgnorableEmptyStdinError(err)) return;
           if (typeof child.kill === 'function') {
             try { child.kill('SIGTERM'); } catch { /* best-effort */ }
           }
@@ -449,6 +457,8 @@ function createRemoteSshNodeExecutor(node, {
         try {
           child.stdin.end(input === undefined ? '' : input);
         } catch (err) {
+          // Match the async error path for the normal empty-stdin/remote-exit race.
+          if (isIgnorableEmptyStdinError(err)) return;
           if (typeof child.kill === 'function') {
             try { child.kill('SIGTERM'); } catch { /* best-effort */ }
           }
