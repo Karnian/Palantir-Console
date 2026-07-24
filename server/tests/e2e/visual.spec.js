@@ -2,9 +2,10 @@
 //
 // Spec lock-in: docs/specs/k5-visual-regression-brief.md
 //
-// Matrix: 14 hash routes × 2 themes (dark/light) × 2 viewports (1280×800 desktop,
-// 375×667 mobile) = 56 screenshot scenarios. Tagged @visual so
-// `npm run test:visual` can grep.
+// Matrix: 15 hash routes × 2 themes (dark/light) × 2 viewports (1280×800 desktop,
+// 375×667 mobile) = 60 route screenshots, plus deterministic interactive,
+// modal, drawer, inspector, and populated Operator roster scenarios. Tagged
+// @visual so `npm run test:visual` can grep.
 //
 // Stabilization (spec L8-L11):
 //   - reducedMotion enforced via playwright.config.js
@@ -143,6 +144,167 @@ for (const route of ROUTES) {
       });
     }
   }
+}
+
+// #396 follow-up: the route matrix intentionally uses a fresh empty DB, which
+// meant the Operator roster baseline never rendered the cards or the detail
+// modal. Keep the default empty-state coverage above, then add deterministic
+// API fixtures for the populated state that users actually scan.
+const OPERATOR_ROSTER_FIXTURE = {
+  projects: [
+    {
+      id: 'proj-palantir',
+      name: 'Palantir Console',
+      node_id: 'local',
+      directory: '/workspace/Palantir-Console',
+    },
+    {
+      id: 'proj-docs',
+      name: 'Product Docs',
+      node_id: 'local',
+      directory: '/workspace/product-docs',
+    },
+  ],
+  tasks: [
+    { id: 'task-worker', project_id: 'proj-palantir', title: 'Verify compact roster cards' },
+  ],
+  runs: [
+    {
+      id: 'run-worker-fixture',
+      task_id: 'task-worker',
+      project_id: 'proj-palantir',
+      status: 'running',
+      is_manager: 0,
+    },
+  ],
+  managerStatus: {
+    active: true,
+    top: {
+      conversationId: 'top',
+      run: {
+        id: 'run-manager-top',
+        status: 'running',
+        manager_adapter: 'claude-code',
+      },
+    },
+    pms: [{
+      conversationId: 'operator:oi-palantir',
+      legacyConversationId: 'operator:proj-palantir',
+      primaryProjectId: 'proj-palantir',
+      run: {
+        id: 'run-manager-palantir',
+        status: 'running',
+        manager_adapter: 'codex',
+        conversation_id: 'operator:oi-palantir',
+        operator_instance_id: 'oi-palantir',
+        node_id: 'local',
+      },
+    }],
+  },
+  instances: [{
+    id: 'oi-palantir',
+    display_name: 'Palantir Console PM',
+    profile_id: 'profile-palantir-pm',
+    profile_name: 'Palantir Console PM',
+    preferred_adapter: 'codex',
+    schedule_count: 2,
+    next_schedule_at: '2026-08-01T00:00:00.000Z',
+    refs: [
+      {
+        instance_id: 'oi-palantir',
+        project_id: 'proj-palantir',
+        role: 'primary',
+        project: {
+          id: 'proj-palantir',
+          name: 'Palantir Console',
+          node_id: 'local',
+          directory: '/workspace/Palantir-Console',
+        },
+      },
+      {
+        instance_id: 'oi-palantir',
+        project_id: 'proj-docs',
+        role: 'reference',
+        project: {
+          id: 'proj-docs',
+          name: 'Product Docs',
+          node_id: 'local',
+          directory: '/workspace/product-docs',
+        },
+      },
+    ],
+  }],
+  profiles: [{
+    id: 'profile-review-specialist',
+    name: 'Review Specialist',
+    persona: 'Reviews implementation quality and verifies test evidence before delivery.',
+    capabilities: ['code_review', 'test_verification'],
+  }],
+};
+
+function fulfillJson(route, body) {
+  return route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify(body),
+  });
+}
+
+async function installOperatorRosterFixture(page) {
+  await page.route('**/api/projects', (route) =>
+    fulfillJson(route, { projects: OPERATOR_ROSTER_FIXTURE.projects }));
+  await page.route('**/api/tasks', (route) =>
+    fulfillJson(route, { tasks: OPERATOR_ROSTER_FIXTURE.tasks }));
+  await page.route('**/api/runs', (route) =>
+    fulfillJson(route, { runs: OPERATOR_ROSTER_FIXTURE.runs }));
+  await page.route('**/api/manager/status', (route) =>
+    fulfillJson(route, OPERATOR_ROSTER_FIXTURE.managerStatus));
+  await page.route('**/api/operator-instances', (route) =>
+    fulfillJson(route, { instances: OPERATOR_ROSTER_FIXTURE.instances }));
+  await page.route('**/api/operator/profiles', (route) =>
+    fulfillJson(route, { profiles: OPERATOR_ROSTER_FIXTURE.profiles }));
+}
+
+async function gotoPopulatedOperatorRoster(page, theme, viewport) {
+  await installOperatorRosterFixture(page);
+  await page.setViewportSize({ width: viewport.width, height: viewport.height });
+  await setTheme(page, theme);
+  await page.goto('/#operator/roster');
+  await page.waitForSelector('[data-role="operator-configured-card"]', { timeout: 10000 });
+  await expect(page.locator('[data-role="operator-roster-live-card"]')).toHaveCount(1);
+  await expect(page.locator('[data-role="operator-roster-available-card"]')).toHaveCount(1);
+  await stabilize(page);
+}
+
+for (const theme of THEMES) {
+  for (const vp of VIEWPORTS) {
+    test(`@visual operator roster: populated cards [${theme}/${vp.name}]`, async ({ page }) => {
+      await gotoPopulatedOperatorRoster(page, theme, vp);
+      if (vp.name === 'mobile') {
+        await page.locator('[data-role="operator-configured-section"]').evaluate((section) => {
+          section.scrollIntoView({ block: 'start' });
+        });
+      }
+      await expect(page).toHaveScreenshot(`operator-roster-populated-${theme}-${vp.name}.png`, {
+        fullPage: true,
+        maxDiffPixels: 100,
+        threshold: 0.2,
+        mask: dynamicMasks(page),
+      });
+    });
+  }
+
+  test(`@visual operator roster: configured detail [${theme}]`, async ({ page }) => {
+    await gotoPopulatedOperatorRoster(page, theme, VIEWPORTS[0]);
+    await page.getByRole('button', { name: 'Palantir Console PM 상세 보기' }).click();
+    const dialog = page.locator('[role="dialog"][aria-labelledby="operator-roster-detail-title"]');
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText('Product Docs');
+    await expect(dialog).toHaveScreenshot(`modal-operator-configured-detail-${theme}.png`, {
+      maxDiffPixels: 100,
+      threshold: 0.2,
+    });
+  });
 }
 
 // K-5-followup: interactive-state (hover + keyboard-focus) visual regression for
