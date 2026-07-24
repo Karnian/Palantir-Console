@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const childProcess = require('node:child_process');
 const { EventEmitter } = require('node:events');
-const { Writable } = require('node:stream');
+const { PassThrough, Writable } = require('node:stream');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
@@ -131,10 +131,40 @@ function loopbackSshSpawn({ env } = {}) {
       remoteCommandArgs,
       joined,
     });
-    return childProcess.spawn('sh', ['-c', joined], {
+    const actual = childProcess.spawn('sh', ['-c', joined], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: env ? { ...process.env, ...env } : undefined,
     });
+    const child = new EventEmitter();
+    child.stdin = actual.stdin;
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = (signal) => actual.kill(signal);
+    child.pid = actual.pid;
+
+    let closeArgs = null;
+    let stdoutFinished = false;
+    let stderrFinished = false;
+    const emitCloseWhenDrained = () => {
+      if (!closeArgs || !stdoutFinished || !stderrFinished) return;
+      child.emit('close', ...closeArgs);
+    };
+    child.stdout.once('finish', () => {
+      stdoutFinished = true;
+      emitCloseWhenDrained();
+    });
+    child.stderr.once('finish', () => {
+      stderrFinished = true;
+      emitCloseWhenDrained();
+    });
+    actual.stdout.pipe(child.stdout);
+    actual.stderr.pipe(child.stderr);
+    actual.once('error', err => child.emit('error', err));
+    actual.once('close', (code, signal) => {
+      closeArgs = [code, signal];
+      emitCloseWhenDrained();
+    });
+    return child;
   }
   spawn.calls = calls;
   return spawn;
@@ -258,6 +288,27 @@ test('loopback ssh simulator preserves exec stdout across ssh argument join', as
   assert.equal(spawn.calls[0].destination, 'runner@pod.example');
   assert.deepEqual(spawn.calls[0].remoteCommandArgs, [`sh -c ${shq("exec 'echo' 'fleet-ok'")}`]);
   assert.equal(spawn.calls[0].joined, `sh -c ${shq("exec 'echo' 'fleet-ok'")}`);
+});
+
+test('exec waits for close and captures stdout emitted after process exit', async () => {
+  const spawn = makeSpawn((_call, child) => {
+    process.nextTick(() => {
+      child.emit('exit', 0, null);
+      child.stdout.emit('data', 'fleet-');
+      setImmediate(() => {
+        child.stdout.emit('data', 'ok\n');
+        child.emit('close', 0, null);
+      });
+    });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), {
+    spawnFn: spawn,
+    commandAllowlist: ['echo'],
+  });
+
+  const res = await exec.exec('echo', ['fleet-ok']);
+
+  assert.deepEqual(res, { code: 0, stdout: 'fleet-ok\n', stderr: '' });
 });
 
 test('loopback ssh simulator runs git through the remote login shell model', async () => {
