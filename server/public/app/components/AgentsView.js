@@ -10,6 +10,7 @@ import { apiFetch } from '../lib/api.js';
 import { apiFetchWithToast } from '../lib/toast.js';
 import { COMMON_ACTIONS, AGENTS_LABELS } from '../lib/copy.js';
 import { EmptyState } from './EmptyState.js';
+import { Dropdown } from './Dropdown.js';
 import { Modal } from './Modal.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -121,25 +122,30 @@ function AgentModal({ open, onClose, agent, onSaved }) {
           </div>
           <div class="form-field">
             <label class="form-label" for="agent-type">${AGENTS_LABELS.fieldType}</label>
-            <select id="agent-type" class="form-select" value=${type} onChange=${e => {
-              const t = e.target.value;
-              setType(t);
-              if (!agent) {
-                const presets = {
-                  'claude-code': { cmd: 'claude', args: '-p {prompt} --permission-mode bypassPermissions' },
-                  'codex': { cmd: 'codex', args: 'exec --full-auto --skip-git-repo-check {prompt}' },
-                  'gemini': { cmd: 'gemini', args: '-p {prompt} --yolo' },
-                };
-                const p = presets[t];
-                if (p) { setCommand(p.cmd); setArgsTemplate(p.args); }
-                if (t === 'codex') { setModel(''); setReasoningEffort('high'); }
-              }
-            }}>
-              <option value="claude-code">claude-code</option>
-              <option value="codex">codex</option>
-              <option value="gemini">gemini</option>
-              <option value="custom">custom</option>
-            </select>
+            <${Dropdown}
+              id="agent-type"
+              className="dropdown-field"
+              value=${type}
+              onChange=${t => {
+                setType(t);
+                if (!agent) {
+                  const presets = {
+                    'claude-code': { cmd: 'claude', args: '-p {prompt} --permission-mode bypassPermissions' },
+                    'codex': { cmd: 'codex', args: 'exec --full-auto --skip-git-repo-check {prompt}' },
+                    'gemini': { cmd: 'gemini', args: '-p {prompt} --yolo' },
+                  };
+                  const p = presets[t];
+                  if (p) { setCommand(p.cmd); setArgsTemplate(p.args); }
+                  if (t === 'codex') { setModel(''); setReasoningEffort('high'); }
+                }
+              }}
+              options=${[
+                { value: 'claude-code', label: 'claude-code' },
+                { value: 'codex', label: 'codex' },
+                { value: 'gemini', label: 'gemini' },
+                { value: 'custom', label: 'custom' },
+              ]}
+            />
           </div>
           <div class="form-field">
             <label class="form-label" for="agent-command">${AGENTS_LABELS.fieldCommand}</label>
@@ -154,12 +160,18 @@ function AgentModal({ open, onClose, agent, onSaved }) {
           ${vendor === 'codex' && html`
             <div class="form-field">
               <label class="form-label" for="agent-reasoning-effort">Reasoning effort</label>
-              <select id="agent-reasoning-effort" class="form-select" value=${reasoningEffort} onChange=${e => setReasoningEffort(e.target.value)}>
-                <option value="">(none)</option>
-                <option value="low">low</option>
-                <option value="medium">medium</option>
-                <option value="high">high</option>
-              </select>
+              <${Dropdown}
+                id="agent-reasoning-effort"
+                className="dropdown-field"
+                value=${reasoningEffort}
+                onChange=${setReasoningEffort}
+                options=${[
+                  { value: '', label: '(none)' },
+                  { value: 'low', label: 'low' },
+                  { value: 'medium', label: 'medium' },
+                  { value: 'high', label: 'high' },
+                ]}
+              />
             </div>
           `}
           <div class="form-field">

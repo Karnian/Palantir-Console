@@ -179,10 +179,14 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
             ${scope === 'project' && html`
               <div class="form-field" style=${{ flex: 2 }}>
                 <label class="form-label" for="skill-pack-project">${SKILL_PACKS_LABELS.fieldProject}</label>
-                <select id="skill-pack-project" class="form-select" value=${projectId} onChange=${e => setProjectId(e.target.value)}>
-                  <option value="" disabled>${SKILL_PACKS_LABELS.selectProject}</option>
-                  ${(projects || []).map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
-                </select>
+                <${Dropdown}
+                  id="skill-pack-project"
+                  className="dropdown-field"
+                  value=${projectId}
+                  onChange=${setProjectId}
+                  placeholder=${SKILL_PACKS_LABELS.selectProject}
+                  options=${(projects || []).map(p => ({ value: p.id, label: p.name }))}
+                />
               </div>
             `}
             <div class="form-field" style=${{ width: '80px' }}>
@@ -228,10 +232,16 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
               ${availableTemplates.length > 0 && html`
                 <div class="form-field">
                   <label class="form-label" for="skill-pack-add-mcp">${SKILL_PACKS_LABELS.mcpAdd}</label>
-                  <select id="skill-pack-add-mcp" class="form-select" onChange=${e => { addMcpAlias(e.target.value); e.target.value = ''; }}>
-                    <option value="">${SKILL_PACKS_LABELS.mcpSelectTemplate}</option>
-                    ${availableTemplates.map(t => html`<option key=${t.alias} value=${t.alias}>${t.alias} — ${t.description || ''}</option>`)}
-                  </select>
+                  <${Dropdown}
+                    id="skill-pack-add-mcp"
+                    className="dropdown-field"
+                    value=""
+                    onChange=${alias => { if (alias) addMcpAlias(alias); }}
+                    options=${[
+                      { value: '', label: SKILL_PACKS_LABELS.mcpSelectTemplate },
+                      ...availableTemplates.map(t => ({ value: t.alias, label: `${t.alias} — ${t.description || ''}` })),
+                    ]}
+                  />
                 </div>
               `}
               ${selectedAliases.length === 0 && html`
@@ -270,10 +280,16 @@ function SkillPackModal({ open, onClose, pack, projects, templates, onSaved }) {
               })}
               <div class="form-field" style=${{ marginTop: '8px' }}>
                 <label class="form-label" for="skill-pack-conflict">${SKILL_PACKS_LABELS.mcpConflictPolicy}</label>
-                <select id="skill-pack-conflict" class="form-select" value=${conflictPolicy} onChange=${e => setConflictPolicy(e.target.value)}>
-                  <option value="warn">${SKILL_PACKS_LABELS.mcpConflictWarn}</option>
-                  <option value="fail">${SKILL_PACKS_LABELS.mcpConflictFail}</option>
-                </select>
+                <${Dropdown}
+                  id="skill-pack-conflict"
+                  className="dropdown-field"
+                  value=${conflictPolicy}
+                  onChange=${setConflictPolicy}
+                  options=${[
+                    { value: 'warn', label: SKILL_PACKS_LABELS.mcpConflictWarn },
+                    { value: 'fail', label: SKILL_PACKS_LABELS.mcpConflictFail },
+                  ]}
+                />
               </div>
             </div>
           `}

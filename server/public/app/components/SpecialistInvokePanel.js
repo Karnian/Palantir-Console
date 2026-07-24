@@ -10,6 +10,7 @@ import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
+import { Dropdown } from './Dropdown.js';
 
 export function SpecialistInvokePanel({ initialProfileId = '', runs = [], onCompleted = null }) {
   const [profileId, setProfileId]     = useState('');
@@ -98,19 +99,20 @@ export function SpecialistInvokePanel({ initialProfileId = '', runs = [], onComp
 
         <div class="form-field">
           <label class="form-label" for="specialist-profile">프로필</label>
-          <select
+          <${Dropdown}
             id="specialist-profile"
-            class="form-select"
+            className="dropdown-field"
             value=${profileId}
-            onChange=${(e) => setProfileId(e.target.value)}
-          >
-            ${profiles.length === 0
-              ? html`<option value="" disabled selected>프로필 없음</option>`
-              : html`
-                  <option value="">— 프로필 선택 —</option>
-                  ${profiles.map((p) => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
-                `}
-          </select>
+            onChange=${setProfileId}
+            disabled=${profiles.length === 0}
+            placeholder=${profiles.length === 0 ? '프로필 없음' : undefined}
+            options=${profiles.length === 0
+              ? []
+              : [
+                { value: '', label: '— 프로필 선택 —' },
+                ...profiles.map((p) => ({ value: p.id, label: p.name })),
+              ]}
+          />
           ${profiles.length === 0
             ? html`<p class="specialist-hint">오퍼레이터 프로필이 없습니다 — <a href="#operator/profiles">오퍼레이터 프로필</a> 화면에서 먼저 만드세요.</p>`
             : (selectedProfile && selectedProfile.description
@@ -120,23 +122,23 @@ export function SpecialistInvokePanel({ initialProfileId = '', runs = [], onComp
 
         <div class="form-field">
           <label class="form-label" for="specialist-origin-run">원본 매니저 run</label>
-          <select
+          <${Dropdown}
             id="specialist-origin-run"
-            class="form-select"
+            className="dropdown-field"
             value=${originRunId}
-            onChange=${(e) => { originAutoSelectedRef.current = false; setOriginRunId(e.target.value); }}
-          >
-            ${managerRuns.length === 0
-              ? html`<option value="" disabled selected>활성 매니저 run 없음</option>`
-              : html`
-                  <option value="">— run 선택 —</option>
-                  ${managerRuns.map((r) => html`
-                    <option key=${r.id} value=${r.id}>
-                      ${r.id.slice(0, 8)} · ${r.conversation_id || r.status}
-                    </option>
-                  `)}
-                `}
-          </select>
+            onChange=${(next) => { originAutoSelectedRef.current = false; setOriginRunId(next); }}
+            disabled=${managerRuns.length === 0}
+            placeholder=${managerRuns.length === 0 ? '활성 매니저 run 없음' : undefined}
+            options=${managerRuns.length === 0
+              ? []
+              : [
+                { value: '', label: '— run 선택 —' },
+                ...managerRuns.map((r) => ({
+                  value: r.id,
+                  label: `${r.id.slice(0, 8)} · ${r.conversation_id || r.status}`,
+                })),
+              ]}
+          />
           ${managerRuns.length === 0 && html`
             <p class="specialist-hint">활성 매니저 run이 없습니다 — 먼저 매니저를 시작하세요. (실행 버튼이 비활성화됩니다.)</p>
           `}

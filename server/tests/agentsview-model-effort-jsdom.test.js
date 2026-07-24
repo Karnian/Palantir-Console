@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createPreactEnv, flushEffects } = require('./helpers/jsdom-preact');
+const { createPreactEnv, flushEffects, pickDropdownOption } = require('./helpers/jsdom-preact');
 
 async function waitFor(assertion, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;
@@ -71,21 +71,23 @@ function setInput(env, input, value) {
   input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
 }
 
-function setSelect(env, select, value) {
-  assert.ok(select, 'expected select to exist');
-  select.value = value;
-  select.dispatchEvent(new env.window.Event('change', { bubbles: true }));
+// Dropdown unification (2026-07-23): agent type / reasoning effort are
+// shared `Dropdown` components now — open the menu and click the option.
+async function setSelect(env, trigger, value) {
+  assert.ok(trigger, 'expected dropdown trigger to exist');
+  await pickDropdownOption(env, trigger, value);
 }
 
 test('codex preset uses structured high effort without a baked args flag', async (t) => {
   const env = createPreactEnv();
   t.after(env.cleanup);
   installAgentsStubs(env);
+  env.loadComponent('Dropdown');
   env.loadComponent('AgentsView');
 
   const root = renderAgentsView(env);
   await openNewAgentModal(env, root);
-  setSelect(env, root.querySelector('#agent-type'), 'codex');
+  await setSelect(env, root.querySelector('#agent-type'), 'codex');
 
   await waitFor(() => {
     assert.equal(root.querySelector('#agent-command').value, 'codex');
@@ -94,7 +96,7 @@ test('codex preset uses structured high effort without a baked args flag', async
       'exec --full-auto --skip-git-repo-check {prompt}',
     );
     assert.doesNotMatch(root.querySelector('#agent-args').value, /model_reasoning_effort/);
-    assert.equal(root.querySelector('#agent-reasoning-effort').value, 'high');
+    assert.equal(root.querySelector('#agent-reasoning-effort').dataset.value, 'high');
   });
 });
 
@@ -102,6 +104,7 @@ test('model and reasoning effort controls follow the command vendor', async (t) 
   const env = createPreactEnv();
   t.after(env.cleanup);
   installAgentsStubs(env);
+  env.loadComponent('Dropdown');
   env.loadComponent('AgentsView');
 
   const root = renderAgentsView(env);
@@ -130,15 +133,16 @@ test('create payload includes structured model and reasoning effort', async (t) 
   const env = createPreactEnv();
   t.after(env.cleanup);
   const { calls } = installAgentsStubs(env);
+  env.loadComponent('Dropdown');
   env.loadComponent('AgentsView');
 
   const root = renderAgentsView(env);
   await openNewAgentModal(env, root);
-  setSelect(env, root.querySelector('#agent-type'), 'codex');
+  await setSelect(env, root.querySelector('#agent-type'), 'codex');
   await waitFor(() => assert.ok(root.querySelector('#agent-model')));
   setInput(env, root.querySelector('#agent-name'), 'Structured Codex');
   setInput(env, root.querySelector('#agent-model'), '  gpt-5.1-codex  ');
-  setSelect(env, root.querySelector('#agent-reasoning-effort'), 'medium');
+  await setSelect(env, root.querySelector('#agent-reasoning-effort'), 'medium');
   await flushEffects(30);
   root.querySelector('.modal-footer button.primary').click();
 
@@ -157,6 +161,7 @@ test('clearing structured fields sends explicit nulls on edit', async (t) => {
   const env = createPreactEnv();
   t.after(env.cleanup);
   const { calls } = installAgentsStubs(env);
+  env.loadComponent('Dropdown');
   env.loadComponent('AgentsView');
 
   const agent = {
@@ -175,10 +180,10 @@ test('clearing structured fields sends explicit nulls on edit', async (t) => {
 
   await waitFor(() => {
     assert.equal(root.querySelector('#agent-model').value, 'gpt-5.1-codex');
-    assert.equal(root.querySelector('#agent-reasoning-effort').value, 'high');
+    assert.equal(root.querySelector('#agent-reasoning-effort').dataset.value, 'high');
   });
   setInput(env, root.querySelector('#agent-model'), '');
-  setSelect(env, root.querySelector('#agent-reasoning-effort'), '');
+  await setSelect(env, root.querySelector('#agent-reasoning-effort'), '');
   await flushEffects(30);
   root.querySelector('.modal-footer button.primary').click();
 

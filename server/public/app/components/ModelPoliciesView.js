@@ -9,6 +9,7 @@ import { apiFetch } from '../lib/api.js';
 import { addToast } from '../lib/toast.js';
 import { COMMON_ACTIONS } from '../lib/copy.js';
 import { EmptyState } from './EmptyState.js';
+import { Dropdown } from './Dropdown.js';
 import { Modal } from './Modal.js';
 
 const CLI_DEFAULT = '__cli_default__';
@@ -88,16 +89,17 @@ function FieldEditor({ field, mode, value, onMode, onValue }) {
   return html`
     <div class="form-row" data-policy-field=${field}>
       <label class="form-label" for=${modeId}>${FIELD_LABELS[field]} 설정 방식</label>
-      <select
+      <${Dropdown}
         id=${modeId}
-        class="form-input"
+        className="dropdown-field"
         value=${mode}
-        onChange=${event => onMode(event.target.value)}
-      >
-        <option value="inherit">inherit</option>
-        <option value="explicit">explicit</option>
-        ${allowsCliDefault && html`<option value="cli-default">cli-default</option>`}
-      </select>
+        onChange=${onMode}
+        options=${[
+          { value: 'inherit', label: 'inherit' },
+          { value: 'explicit', label: 'explicit' },
+          ...(allowsCliDefault ? [{ value: 'cli-default', label: 'cli-default' }] : []),
+        ]}
+      />
       ${mode === 'explicit' && field === 'model' && html`
         <label class="form-label" for=${valueId} style=${{ marginTop: '8px' }}>model 값</label>
         <input
@@ -112,16 +114,13 @@ function FieldEditor({ field, mode, value, onMode, onValue }) {
       `}
       ${mode === 'explicit' && field !== 'model' && html`
         <label class="form-label" for=${valueId} style=${{ marginTop: '8px' }}>${FIELD_LABELS[field]} 값</label>
-        <select
+        <${Dropdown}
           id=${valueId}
-          class="form-input"
+          className="dropdown-field"
           value=${value}
-          onChange=${event => onValue(event.target.value)}
-        >
-          ${VALUE_OPTIONS[field].map(([optionValue, label]) => html`
-            <option key=${optionValue} value=${optionValue}>${label}</option>
-          `)}
-        </select>
+          onChange=${onValue}
+          options=${VALUE_OPTIONS[field].map(([optionValue, label]) => ({ value: optionValue, label }))}
+        />
       `}
     </div>
   `;
@@ -243,42 +242,40 @@ function PolicyEditor({ open, policy, projects, onClose, onSaved, onConflict }) 
         <div class="modal-body">
           <div class="form-row">
             <label class="form-label" for="model-policy-scope-type">범위</label>
-            <select
+            <${Dropdown}
               id="model-policy-scope-type"
-              class="form-input"
+              className="dropdown-field"
               value=${scopeType}
-              onChange=${event => changeScope(event.target.value)}
+              onChange=${changeScope}
               disabled=${isEdit}
-            >
-              ${SCOPE_TYPES.map(([value, label]) => html`<option key=${value} value=${value}>${label}</option>`)}
-            </select>
+              options=${SCOPE_TYPES.map(([value, label]) => ({ value, label }))}
+            />
           </div>
           ${scopeType === 'codebase' && html`
             <div class="form-row">
               <label class="form-label" for="model-policy-scope-id">프로젝트 폴더</label>
-              <select
+              <${Dropdown}
                 id="model-policy-scope-id"
-                class="form-input"
+                className="dropdown-field"
                 value=${scopeId}
-                onChange=${event => setScopeId(event.target.value)}
+                onChange=${setScopeId}
                 disabled=${isEdit}
-              >
-                ${(projects || []).length === 0 && html`<option value="">선택 가능한 프로젝트 폴더 없음</option>`}
-                ${(projects || []).map(project => html`<option key=${project.id} value=${project.id}>${project.name || project.id}</option>`)}
-              </select>
+                options=${(projects || []).length === 0
+                  ? [{ value: '', label: '선택 가능한 프로젝트 폴더 없음' }]
+                  : (projects || []).map(project => ({ value: project.id, label: project.name || project.id }))}
+              />
             </div>
           `}
           <div class="form-row">
             <label class="form-label" for="model-policy-vendor">공급자</label>
-            <select
+            <${Dropdown}
               id="model-policy-vendor"
-              class="form-input"
+              className="dropdown-field"
               value=${vendor}
-              onInput=${event => setVendor(event.target.value)}
+              onChange=${setVendor}
               disabled=${isEdit}
-            >
-              ${VENDORS.map(value => html`<option key=${value} value=${value}>${value}</option>`)}
-            </select>
+              options=${VENDORS.map(value => ({ value, label: value }))}
+            />
           </div>
           <${FieldEditor}
             field="model"
@@ -409,24 +406,39 @@ function EffectivePreview({ projects }) {
       <div style=${{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
         <div style=${{ flex: '1 1 160px' }}>
           <label class="form-label" for="model-policy-preview-layer">레이어</label>
-          <select id="model-policy-preview-layer" class="form-input" value=${layer} onChange=${event => setLayer(event.target.value)}>
-            <option value="top">top</option>
-            <option value="operator">operator</option>
-          </select>
+          <${Dropdown}
+            id="model-policy-preview-layer"
+            className="dropdown-field"
+            value=${layer}
+            onChange=${setLayer}
+            options=${[
+              { value: 'top', label: 'top' },
+              { value: 'operator', label: 'operator' },
+            ]}
+          />
         </div>
         <div style=${{ flex: '1 1 160px' }}>
           <label class="form-label" for="model-policy-preview-vendor">공급자</label>
-          <select id="model-policy-preview-vendor" class="form-input" value=${vendor} onChange=${event => setVendor(event.target.value)}>
-            ${VENDORS.map(value => html`<option key=${value} value=${value}>${value}</option>`)}
-          </select>
+          <${Dropdown}
+            id="model-policy-preview-vendor"
+            className="dropdown-field"
+            value=${vendor}
+            onChange=${setVendor}
+            options=${VENDORS.map(value => ({ value, label: value }))}
+          />
         </div>
         ${layer === 'operator' && html`
           <div style=${{ flex: '1 1 200px' }}>
             <label class="form-label" for="model-policy-preview-project">프로젝트 폴더</label>
-            <select id="model-policy-preview-project" class="form-input" value=${projectId} onChange=${event => setProjectId(event.target.value)}>
-              ${(projects || []).length === 0 && html`<option value="">선택 가능한 프로젝트 폴더 없음</option>`}
-              ${(projects || []).map(project => html`<option key=${project.id} value=${project.id}>${project.name || project.id}</option>`)}
-            </select>
+            <${Dropdown}
+              id="model-policy-preview-project"
+              className="dropdown-field"
+              value=${projectId}
+              onChange=${setProjectId}
+              options=${(projects || []).length === 0
+                ? [{ value: '', label: '선택 가능한 프로젝트 폴더 없음' }]
+                : (projects || []).map(project => ({ value: project.id, label: project.name || project.id }))}
+            />
           </div>
         `}
       </div>

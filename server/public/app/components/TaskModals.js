@@ -91,26 +91,44 @@ export function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
         </div>
         <div class="form-field">
           <label class="form-label" for="new-task-project">${NEW_TASK_LABELS.fieldProject}</label>
-          <select id="new-task-project" class="form-select" value=${projectId} onChange=${e => setProjectId(e.target.value)}>
-            <option value="">${NEW_TASK_LABELS.projectNone}</option>
-            ${projects.map(p => html`<option key=${p.id} value=${p.id}>${p.name}</option>`)}
-          </select>
+          <${Dropdown}
+            id="new-task-project"
+            className="dropdown-field"
+            value=${projectId}
+            onChange=${setProjectId}
+            options=${[
+              { value: '', label: NEW_TASK_LABELS.projectNone },
+              ...projects.map(p => ({ value: p.id, label: p.name })),
+            ]}
+          />
         </div>
         <div class="form-field">
           <label class="form-label" for="new-task-priority">${NEW_TASK_LABELS.fieldPriority}</label>
-          <select id="new-task-priority" class="form-select" value=${priority} onChange=${e => setPriority(e.target.value)}>
-            <option value="low">${FILTER_LABELS.priorityLow}</option>
-            <option value="medium">${FILTER_LABELS.priorityMedium}</option>
-            <option value="high">${FILTER_LABELS.priorityHigh}</option>
-            <option value="critical">${FILTER_LABELS.priorityCritical}</option>
-          </select>
+          <${Dropdown}
+            id="new-task-priority"
+            className="dropdown-field"
+            value=${priority}
+            onChange=${setPriority}
+            options=${[
+              { value: 'low', label: FILTER_LABELS.priorityLow },
+              { value: 'medium', label: FILTER_LABELS.priorityMedium },
+              { value: 'high', label: FILTER_LABELS.priorityHigh },
+              { value: 'critical', label: FILTER_LABELS.priorityCritical },
+            ]}
+          />
         </div>
         <div class="form-field">
           <label class="form-label" for="new-task-agent">${NEW_TASK_LABELS.fieldAgent}</label>
-          <select id="new-task-agent" class="form-select" value=${agentProfileId} onChange=${e => setAgentProfileId(e.target.value)}>
-            <option value="">${NEW_TASK_LABELS.agentNone}</option>
-            ${agents.map(a => html`<option key=${a.id} value=${a.id}>${a.name}</option>`)}
-          </select>
+          <${Dropdown}
+            id="new-task-agent"
+            className="dropdown-field"
+            value=${agentProfileId}
+            onChange=${setAgentProfileId}
+            options=${[
+              { value: '', label: NEW_TASK_LABELS.agentNone },
+              ...agents.map(a => ({ value: a.id, label: a.name })),
+            ]}
+          />
         </div>
         <div class="form-field">
           <label class="form-label" for="new-task-due">${NEW_TASK_LABELS.fieldDueDate}</label>
@@ -119,14 +137,19 @@ export function NewTaskModal({ open, onClose, projects, agents, onCreated }) {
         </div>
         <div class="form-field">
           <label class="form-label" for="new-task-recurrence">${NEW_TASK_LABELS.fieldRecurrence}</label>
-          <select id="new-task-recurrence" class="form-select" value=${recurrence}
-            onChange=${e => setRecurrence(e.target.value)}
-            title=${NEW_TASK_LABELS.recurrenceTooltip}>
-            <option value="">${NEW_TASK_LABELS.recurrenceNone}</option>
-            <option value="daily">${NEW_TASK_LABELS.recurrenceDaily}</option>
-            <option value="weekly">${NEW_TASK_LABELS.recurrenceWeekly}</option>
-            <option value="monthly">${NEW_TASK_LABELS.recurrenceMonthly}</option>
-          </select>
+          <${Dropdown}
+            id="new-task-recurrence"
+            className="dropdown-field"
+            value=${recurrence}
+            onChange=${setRecurrence}
+            title=${NEW_TASK_LABELS.recurrenceTooltip}
+            options=${[
+              { value: '', label: NEW_TASK_LABELS.recurrenceNone },
+              { value: 'daily', label: NEW_TASK_LABELS.recurrenceDaily },
+              { value: 'weekly', label: NEW_TASK_LABELS.recurrenceWeekly },
+              { value: 'monthly', label: NEW_TASK_LABELS.recurrenceMonthly },
+            ]}
+          />
         </div>
       </div>
         <div class="modal-footer">
@@ -280,10 +303,14 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
       <div class="modal-body">
         <div class="form-field">
           <label class="form-label" for="execute-agent">${EXECUTE_MODAL_LABELS.fieldAgent}</label>
-          <select id="execute-agent" class="form-select" value=${agentProfileId} onChange=${e => setAgentProfileId(e.target.value)}>
-            <option value="" disabled>${EXECUTE_MODAL_LABELS.agentSelect}</option>
-            ${agents.map(a => html`<option key=${a.id} value=${a.id}>${a.name}</option>`)}
-          </select>
+          <${Dropdown}
+            id="execute-agent"
+            className="dropdown-field"
+            value=${agentProfileId}
+            onChange=${setAgentProfileId}
+            placeholder=${EXECUTE_MODAL_LABELS.agentSelect}
+            options=${agents.map(a => ({ value: a.id, label: a.name }))}
+          />
         </div>
         <div class="form-field">
           <label class="form-label" for="execute-prompt">${EXECUTE_MODAL_LABELS.fieldPrompt}</label>
@@ -293,14 +320,19 @@ export function ExecuteModal({ open, task, agents, onClose, onExecute }) {
         <!-- Worker Preset (Phase 10E) -->
         <div class="form-field">
           <label class="form-label" for="execute-preset">${EXECUTE_MODAL_LABELS.fieldPreset}</label>
-          <select id="execute-preset" class="form-select" value=${presetId} onChange=${e => setPresetId(e.target.value)}>
-              <option value="">${EXECUTE_MODAL_LABELS.presetNone}</option>
-              ${presets.map(p => html`
-                <option key=${p.id} value=${p.id}>
-                  ${p.name}${p.isolated ? EXECUTE_MODAL_LABELS.presetIsolatedSuffix : ''}
-                </option>
-              `)}
-            </select>
+          <${Dropdown}
+            id="execute-preset"
+            className="dropdown-field"
+            value=${presetId}
+            onChange=${setPresetId}
+            options=${[
+              { value: '', label: EXECUTE_MODAL_LABELS.presetNone },
+              ...presets.map(p => ({
+                value: p.id,
+                label: `${p.name}${p.isolated ? EXECUTE_MODAL_LABELS.presetIsolatedSuffix : ''}`,
+              })),
+            ]}
+          />
             ${task?.preferred_preset_id && task.preferred_preset_id !== presetId && html`
               <div class="small" style=${{ color: 'var(--muted)', marginTop: '4px' }}>
                 ${EXECUTE_MODAL_LABELS.presetTaskDefaultPrefix}: <code>${task.preferred_preset_id}</code>${EXECUTE_MODAL_LABELS.presetTaskDefaultSuffix}

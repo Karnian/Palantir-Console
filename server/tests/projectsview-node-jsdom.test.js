@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createPreactEnv, flushEffects } = require('./helpers/jsdom-preact');
+const { createPreactEnv, flushEffects, readDropdownOptions, pickDropdownOption } = require('./helpers/jsdom-preact');
 
 async function waitFor(assertion, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;
@@ -85,6 +85,7 @@ test('ProjectsView node select renders health and slot labels plus unreachable w
     }
     return {};
   });
+  env.loadComponent('Dropdown');
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env);
@@ -93,13 +94,14 @@ test('ProjectsView node select renders health and slot labels plus unreachable w
   const select = await waitFor(() => {
     const el = root.querySelector('#new-project-node');
     assert.ok(el);
-    assert.ok(Array.from(el.options).some((option) => option.textContent.includes('● Node A (node-a) · 슬롯 2/3')));
-    assert.ok(Array.from(el.options).some((option) => option.textContent.includes('○ Node Down (node-down) · 슬롯 2/2')));
     return el;
   });
 
-  select.value = 'node-down';
-  select.dispatchEvent(new env.window.Event('change', { bubbles: true }));
+  const options = await readDropdownOptions(env, select);
+  assert.ok(options.some((option) => option.label.includes('● Node A (node-a) · 슬롯 2/3')));
+  assert.ok(options.some((option) => option.label.includes('○ Node Down (node-down) · 슬롯 2/2')));
+
+  await pickDropdownOption(env, select, 'node-down');
 
   await waitFor(() => {
     const warning = root.querySelector('[data-role="project-node-warning"]');
@@ -127,6 +129,7 @@ test('ProjectsView shows rebind 409 guidance and reset action', async (t) => {
     }
     return {};
   });
+  env.loadComponent('Dropdown');
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env, {
@@ -170,7 +173,8 @@ test('ProjectsView warm operator action maps 409, 400, and 502 errors to friendl
       }
       return {};
     }, toasts);
-    env.loadComponent('ProjectsView');
+    env.loadComponent('Dropdown');
+  env.loadComponent('ProjectsView');
 
     const root = renderProjectsView(env, {
       projects: [{ id: 'proj_1', name: 'Alpha', created_at: '2026-07-05T00:00:00.000Z' }],

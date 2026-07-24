@@ -30,7 +30,7 @@ import {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Phase K-1a: column labels resolved from `TASK_STATUS_LABELS` so the
-// inline `<select>` in TaskCard, the SessionGrid status pills, and the
+// inline status Dropdown in TaskCard, the SessionGrid status pills, and the
 // board column headers all show the same Korean phrase. Adding a new
 // status only needs a single edit in `app/lib/copy.js`.
 //
@@ -79,10 +79,10 @@ function TaskCard({ task, projects, runs, onDragStart, onClick, onMoveStatus }) 
   const latestRun = latestRunForTask(runs, task.id);
   // Phase G — drag-and-drop needs a keyboard equivalent (WCAG 2.1.1).
   // Earlier draft put `role="button"` on the card itself, but that
-  // nests an interactive `<select>` inside a button (ARIA anti-pattern).
+  // nests an interactive control inside a button (ARIA anti-pattern).
   // Instead the card stays a generic container and surfaces TWO actual
   // interactive children in the natural Tab order: an `Open` button
-  // and a status `<select>`. They are always visible (the original
+  // and a status Dropdown. They are always visible (the original
   // hover-reveal opacity trick was rejected in review — invisible
   // controls still consume hit-area/layout and broke on coarse-pointer
   // / no-hover environments). Mouse users still click anywhere on the
@@ -136,20 +136,15 @@ function TaskCard({ task, projects, runs, onDragStart, onClick, onMoveStatus }) 
           ${COMMON_ACTIONS.open}
         </button>
         ${onMoveStatus && html`
-          <select
-            class="task-card-status-select"
-            aria-label=${`작업 "${task.title}" 상태 변경`}
-            value=${task.status || 'backlog'}
-            onClick=${(e) => e.stopPropagation()}
-            onKeyDown=${(e) => e.stopPropagation()}
-            onChange=${(e) => {
-              const next = e.target.value;
-              if (next && next !== task.status) onMoveStatus(task, next);
-            }}>
-            ${BOARD_COLUMNS.map(col => html`
-              <option key=${col.id} value=${col.id}>${col.label}</option>
-            `)}
-          </select>
+          <div class="task-card-status-select" onClick=${(e) => e.stopPropagation()} onKeyDown=${(e) => e.stopPropagation()}>
+            <${Dropdown}
+              className="dropdown-compact"
+              ariaLabel=${`작업 "${task.title}" 상태 변경`}
+              value=${task.status || 'backlog'}
+              onChange=${(next) => { if (next && next !== task.status) onMoveStatus(task, next); }}
+              options=${BOARD_COLUMNS.map(col => ({ value: col.id, label: col.label }))}
+            />
+          </div>
         `}
       </div>
     </div>

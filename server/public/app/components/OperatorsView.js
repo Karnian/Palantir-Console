@@ -20,6 +20,7 @@ import {
   statusLabel,
 } from '../lib/copy.js';
 import { EmptyState } from './EmptyState.js';
+import { Dropdown } from './Dropdown.js';
 import { Modal } from './Modal.js';
 import { SpecialistInvokePanel } from './SpecialistInvokePanel.js';
 
@@ -853,16 +854,26 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
           </div>
           <div class="form-field">
             <label class="form-label" for="operator-create-profile">${OPERATOR_ROSTER_LABELS.profileLabel}</label>
-            <select id="operator-create-profile" class="form-select" value=${createProfileId} onChange=${(e) => setCreateProfileId(e.target.value)}>
-              ${profiles.map((profile) => html`<option key=${profile.id} value=${profile.id}>${profile.name}</option>`)}
-            </select>
+            <${Dropdown}
+              id="operator-create-profile"
+              className="dropdown-field"
+              value=${createProfileId}
+              onChange=${setCreateProfileId}
+              options=${profiles.map((profile) => ({ value: profile.id, label: profile.name }))}
+            />
           </div>
           <div class="form-field">
             <label class="form-label" for="operator-create-primary">${OPERATOR_ROSTER_LABELS.primaryFolderLabel}</label>
-            <select id="operator-create-primary" class="form-select" value=${createPrimaryProjectId} onChange=${(e) => setCreatePrimaryProjectId(e.target.value)}>
-              <option value="">${OPERATOR_ROSTER_LABELS.primaryFolderOptional}</option>
-              ${unownedPrimaryProjects.map((project) => html`<option key=${project.id} value=${project.id}>${projectPlacementLabel(project)}</option>`)}
-            </select>
+            <${Dropdown}
+              id="operator-create-primary"
+              className="dropdown-field"
+              value=${createPrimaryProjectId}
+              onChange=${setCreatePrimaryProjectId}
+              options=${[
+                { value: '', label: OPERATOR_ROSTER_LABELS.primaryFolderOptional },
+                ...unownedPrimaryProjects.map((project) => ({ value: project.id, label: projectPlacementLabel(project) })),
+              ]}
+            />
           </div>
         </div>
         <div class="modal-footer">
@@ -1001,33 +1012,36 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
         <div class="modal-body">
           <div class="form-field">
             <label class="form-label" for="operator-roster-ref-role">${OPERATOR_ROSTER_LABELS.mappingRoleLabel}</label>
-            <select
+            <${Dropdown}
               id="operator-roster-ref-role"
-              class="form-select"
+              className="dropdown-field"
               value=${selectedRefRole}
-              onChange=${(e) => changeRefRole(e.target.value)}
+              onChange=${changeRefRole}
               disabled=${refsSaving}
-            >
-              ${!refsEditorHasPrimary && html`<option value="primary">${OPERATOR_ROSTER_LABELS.mappingPrimaryRole}</option>`}
-              <option value="reference">${OPERATOR_ROSTER_LABELS.mappingReferenceRole}</option>
-            </select>
+              options=${[
+                ...(!refsEditorHasPrimary
+                  ? [{ value: 'primary', label: OPERATOR_ROSTER_LABELS.mappingPrimaryRole }]
+                  : []),
+                { value: 'reference', label: OPERATOR_ROSTER_LABELS.mappingReferenceRole },
+              ]}
+            />
           </div>
           <div class="form-field">
             <label class="form-label" for="operator-roster-ref-project">${OPERATOR_ROSTER_LABELS.referenceProjectLabel}</label>
-            <select
+            <${Dropdown}
               id="operator-roster-ref-project"
-              class="form-select"
-              data-role="operator-roster-ref-project-select"
+              className="dropdown-field"
+              dataRole="operator-roster-ref-project-select"
               value=${selectedRefProjectId}
-              onChange=${(e) => setSelectedRefProjectId(e.target.value)}
+              onChange=${setSelectedRefProjectId}
               disabled=${refsEditorAvailableProjects.length === 0 || refsSaving}
-            >
-              ${refsEditorAvailableProjects.length === 0
-                ? html`<option value="">${OPERATOR_ROSTER_LABELS.noReferenceProjects}</option>`
-                : refsEditorAvailableProjects.map((project) => html`
-                  <option key=${project.id} value=${project.id}>${projectPlacementLabel(project)}</option>
-                `)}
-            </select>
+              options=${refsEditorAvailableProjects.length === 0
+                ? [{ value: '', label: OPERATOR_ROSTER_LABELS.noReferenceProjects }]
+                : refsEditorAvailableProjects.map((project) => ({
+                  value: project.id,
+                  label: projectPlacementLabel(project),
+                }))}
+            />
           </div>
         </div>
         <div class="modal-footer">
@@ -1100,21 +1114,32 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
             <div class="form-grid operator-schedule-grid">
               <div class="form-field">
                 <label class="form-label" for="operator-schedule-folder">${OPERATOR_SCHEDULER_LABELS.folderLabel}</label>
-                <select id="operator-schedule-folder" class="form-select" value=${scheduleProjectId} onChange=${(e) => setScheduleProjectId(e.target.value)}>
-                  ${scheduleMappedRefs.map((ref) => html`
-                    <option key=${ref.project_id} value=${ref.project_id}>${projectPlacementLabel(ref.project || projectsById.get(String(ref.project_id)))} · ${refRoleLabel(ref.role)}</option>
-                  `)}
-                </select>
+                <${Dropdown}
+                  id="operator-schedule-folder"
+                  className="dropdown-field"
+                  value=${scheduleProjectId}
+                  onChange=${setScheduleProjectId}
+                  options=${scheduleMappedRefs.map((ref) => ({
+                    value: ref.project_id,
+                    label: `${projectPlacementLabel(ref.project || projectsById.get(String(ref.project_id)))} · ${refRoleLabel(ref.role)}`,
+                  }))}
+                />
               </div>
               <div class="form-field">
                 <label class="form-label" for="operator-schedule-rule">${OPERATOR_SCHEDULER_LABELS.ruleKindLabel}</label>
-                <select id="operator-schedule-rule" class="form-select" value=${scheduleKind} onChange=${(e) => setScheduleKind(e.target.value)}>
-                  <option value="interval">${OPERATOR_SCHEDULER_LABELS.intervalKind}</option>
-                  <option value="daily">${OPERATOR_SCHEDULER_LABELS.dailyKind}</option>
-                  <option value="weekdays">${OPERATOR_SCHEDULER_LABELS.weekdaysKind}</option>
-                  <option value="weekly">${OPERATOR_SCHEDULER_LABELS.weeklyKind}</option>
-                  <option value="once">${OPERATOR_SCHEDULER_LABELS.onceKind}</option>
-                </select>
+                <${Dropdown}
+                  id="operator-schedule-rule"
+                  className="dropdown-field"
+                  value=${scheduleKind}
+                  onChange=${setScheduleKind}
+                  options=${[
+                    { value: 'interval', label: OPERATOR_SCHEDULER_LABELS.intervalKind },
+                    { value: 'daily', label: OPERATOR_SCHEDULER_LABELS.dailyKind },
+                    { value: 'weekdays', label: OPERATOR_SCHEDULER_LABELS.weekdaysKind },
+                    { value: 'weekly', label: OPERATOR_SCHEDULER_LABELS.weeklyKind },
+                    { value: 'once', label: OPERATOR_SCHEDULER_LABELS.onceKind },
+                  ]}
+                />
               </div>
               ${scheduleKind === 'interval' && html`
                 <div class="form-field">
@@ -1131,9 +1156,16 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
               ${scheduleKind === 'weekly' && html`
                 <div class="form-field">
                   <label class="form-label" for="operator-schedule-weekday">${OPERATOR_SCHEDULER_LABELS.weekdayLabel}</label>
-                  <select id="operator-schedule-weekday" class="form-select" value=${scheduleWeekday} onChange=${(e) => setScheduleWeekday(e.target.value)}>
-                    ${OPERATOR_SCHEDULER_LABELS.weekdays.map((label, index) => html`<option value=${String(index + 1)}>${label}</option>`)}
-                  </select>
+                  <${Dropdown}
+                    id="operator-schedule-weekday"
+                    className="dropdown-field"
+                    value=${scheduleWeekday}
+                    onChange=${setScheduleWeekday}
+                    options=${OPERATOR_SCHEDULER_LABELS.weekdays.map((label, index) => ({
+                      value: String(index + 1),
+                      label,
+                    }))}
+                  />
                 </div>
               `}
               ${scheduleKind === 'once' && html`

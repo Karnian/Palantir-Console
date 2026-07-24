@@ -346,13 +346,22 @@ test('P2-9 Stop Top button has explicit aria-label', async () => {
   assert.ok(idx > 0, 'Stop Top aria-label not found');
 });
 
-test('P2-9 conversation target is driven by SessionGrid, not a dropdown in ManagerChat', async () => {
+test('P2-9 conversation target is driven by SessionGrid, not the manager picker in ManagerChat', async () => {
   const src = await loadManagerViewSource();
-  // The Dropdown-based conversation picker was removed from ManagerChat.
-  // Conversation switching is now handled by SessionGrid rows.
+  // The `manager-picker-select` control selects which manager AGENT PROFILE
+  // to spawn — it must never be re-wired to the conversation target (that
+  // regressed once and is now owned by SessionGrid rows).
+  //
+  // Checked as a scoped window rather than two global substrings: the
+  // 2026-07-23 dropdown unification ported this picker from a native
+  // `<select>` onto the shared Dropdown, so the old "class name is absent
+  // anywhere in the file" heuristic would false-positive on the port.
+  const idx = src.indexOf('manager-picker-select');
+  assert.ok(idx > 0, 'manager-picker-select control not found');
+  const block = src.slice(idx, idx + 800);
   assert.ok(
-    !src.includes('className="manager-picker-select"') || !src.includes('value=${conversationTarget}'),
-    'Dropdown conversation picker should be removed from ManagerChat',
+    !block.includes('conversationTarget'),
+    'manager-picker-select must not be bound to the conversation target',
   );
 });
 

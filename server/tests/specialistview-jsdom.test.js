@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createPreactEnv, flushEffects } = require('./helpers/jsdom-preact');
+const { createPreactEnv, flushEffects, readDropdownOptions, pickDropdownOption } = require('./helpers/jsdom-preact');
 
 async function waitFor(assertion, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;
@@ -54,9 +54,11 @@ function renderSpecialistInvokePanel(env, props = {}) {
   return root;
 }
 
-function changeValue(env, el, value) {
-  el.value = value;
-  el.dispatchEvent(new env.window.Event('change', { bubbles: true }));
+// Dropdown unification (2026-07-23): profile / origin-run pickers are shared
+// `Dropdown` components now — open the menu and click the option.
+async function changeValue(env, trigger, value) {
+  assert.ok(trigger, 'expected dropdown trigger to exist');
+  await pickDropdownOption(env, trigger, value);
 }
 
 function inputValue(env, el, value) {
@@ -74,6 +76,7 @@ test('SpecialistInvokePanel seeds initialProfileId after profiles load and auto-
   t.after(env.cleanup);
 
   installSpecialistStubs(env, { profiles: PROFILES });
+  env.loadComponent('Dropdown');
   env.loadComponent('SpecialistInvokePanel');
 
   const root = renderSpecialistInvokePanel(env, {
@@ -82,8 +85,8 @@ test('SpecialistInvokePanel seeds initialProfileId after profiles load and auto-
   });
 
   await waitFor(() => {
-    assert.equal(root.querySelector('#specialist-profile').value, 'op_review');
-    assert.equal(root.querySelector('#specialist-origin-run').value, 'run-one');
+    assert.equal(root.querySelector('#specialist-profile').dataset.value, 'op_review');
+    assert.equal(root.querySelector('#specialist-origin-run').dataset.value, 'run-one');
   });
   assert.match(root.textContent, /Reviews diffs/);
   assert.equal(root.querySelector('button[type="submit"]').disabled, true);
@@ -94,6 +97,7 @@ test('SpecialistInvokePanel ignores an initialProfileId that is not in the loade
   t.after(env.cleanup);
 
   installSpecialistStubs(env, { profiles: PROFILES });
+  env.loadComponent('Dropdown');
   env.loadComponent('SpecialistInvokePanel');
 
   const root = renderSpecialistInvokePanel(env, {
@@ -102,10 +106,11 @@ test('SpecialistInvokePanel ignores an initialProfileId that is not in the loade
   });
 
   await waitFor(() => {
-    assert.equal(root.querySelector('#specialist-profile').options.length, 3);
-    assert.equal(root.querySelector('#specialist-origin-run').value, 'run-one');
+    assert.equal(root.querySelector('#specialist-origin-run').dataset.value, 'run-one');
   });
-  assert.equal(root.querySelector('#specialist-profile').value, '');
+  // Placeholder + 2 profiles — the unknown initialProfileId must not be added.
+  assert.equal((await readDropdownOptions(env, root.querySelector('#specialist-profile'))).length, 3);
+  assert.equal(root.querySelector('#specialist-profile').dataset.value, '');
 });
 
 test('SpecialistInvokePanel keeps multiple active manager runs user-picked and posts through the invoke flow', async (t) => {
@@ -113,6 +118,7 @@ test('SpecialistInvokePanel keeps multiple active manager runs user-picked and p
   t.after(env.cleanup);
 
   const calls = installSpecialistStubs(env, { profiles: PROFILES });
+  env.loadComponent('Dropdown');
   env.loadComponent('SpecialistInvokePanel');
 
   const root = renderSpecialistInvokePanel(env, {
@@ -124,15 +130,15 @@ test('SpecialistInvokePanel keeps multiple active manager runs user-picked and p
   });
 
   await waitFor(() => {
-    assert.equal(root.querySelector('#specialist-profile').value, 'op_review');
-    assert.equal(root.querySelector('#specialist-origin-run').value, '');
+    assert.equal(root.querySelector('#specialist-profile').dataset.value, 'op_review');
+    assert.equal(root.querySelector('#specialist-origin-run').dataset.value, '');
   });
 
   inputValue(env, root.querySelector('#specialist-user-text'), 'please inspect this');
   await flushEffects(20);
   assert.equal(root.querySelector('button[type="submit"]').disabled, true);
 
-  changeValue(env, root.querySelector('#specialist-origin-run'), 'run-b');
+  await changeValue(env, root.querySelector('#specialist-origin-run'), 'run-b');
   await waitFor(() => assert.equal(root.querySelector('button[type="submit"]').disabled, false));
 
   root.querySelector('form').dispatchEvent(new env.window.Event('submit', { bubbles: true, cancelable: true }));
@@ -156,6 +162,7 @@ test('SpecialistInvokePanel drops the auto-selected origin run when the active s
   t.after(env.cleanup);
 
   installSpecialistStubs(env, { profiles: PROFILES });
+  env.loadComponent('Dropdown');
   env.loadComponent('SpecialistInvokePanel');
 
   // One active manager run → auto-anchored.
@@ -164,7 +171,7 @@ test('SpecialistInvokePanel drops the auto-selected origin run when the active s
     runs: [{ id: 'run-a', is_manager: 1, status: 'running', conversation_id: 'top' }],
   });
   const root = env.document.getElementById('root');
-  await waitFor(() => assert.equal(root.querySelector('#specialist-origin-run').value, 'run-a'));
+  await waitFor(() => assert.equal(root.querySelector('#specialist-origin-run').dataset.value, 'run-a'));
 
   // A second active manager run appears — the user never explicitly picked, so
   // the previously auto-selected run must be cleared (multiple = explicit pick).
@@ -175,7 +182,7 @@ test('SpecialistInvokePanel drops the auto-selected origin run when the active s
       { id: 'run-b', is_manager: 1, status: 'needs_input', conversation_id: 'operator:proj' },
     ],
   });
-  await waitFor(() => assert.equal(root.querySelector('#specialist-origin-run').value, ''));
+  await waitFor(() => assert.equal(root.querySelector('#specialist-origin-run').dataset.value, ''));
 
   inputValue(env, root.querySelector('#specialist-user-text'), 'please inspect this');
   await flushEffects(20);
@@ -187,6 +194,7 @@ test('SpecialistInvokePanel with zero active manager runs keeps submit disabled 
   t.after(env.cleanup);
 
   const calls = installSpecialistStubs(env, { profiles: PROFILES });
+  env.loadComponent('Dropdown');
   env.loadComponent('SpecialistInvokePanel');
 
   const root = renderSpecialistInvokePanel(env, {
@@ -198,8 +206,8 @@ test('SpecialistInvokePanel with zero active manager runs keeps submit disabled 
   });
 
   await waitFor(() => {
-    assert.equal(root.querySelector('#specialist-profile').value, 'op_review');
-    assert.equal(root.querySelector('#specialist-origin-run').value, '');
+    assert.equal(root.querySelector('#specialist-profile').dataset.value, 'op_review');
+    assert.equal(root.querySelector('#specialist-origin-run').dataset.value, '');
   });
 
   inputValue(env, root.querySelector('#specialist-user-text'), 'please inspect this');
@@ -221,6 +229,7 @@ test('SpecialistView is a thin page wrapper around SpecialistInvokePanel', async
       'data-runs': String(runs.length),
     });
   };
+  env.loadComponent('Dropdown');
   env.loadComponent('SpecialistView');
 
   const root = renderSpecialistView(env, {

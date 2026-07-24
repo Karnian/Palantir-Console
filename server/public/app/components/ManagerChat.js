@@ -869,27 +869,26 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
               <div class="manager-picker" role="group" aria-label=${MANAGER_CHAT_AUX.pickerGroupAria}>
                 <label class="manager-picker-label" for="manager-profile-select">${MANAGER_CHAT_AUX.agentLabel}</label>
                 <div class="manager-picker-row">
-                  <select
+                  <${Dropdown}
                     id="manager-profile-select"
-                    class="manager-picker-select"
+                    className="manager-picker-select"
                     value=${selectedProfileId}
-                    onChange=${(e) => setSelectedProfileId(e.target.value)}
-                    aria-describedby="manager-picker-status"
-                  >
-                    ${managerProfiles.map(p => {
+                    onChange=${setSelectedProfileId}
+                    ariaDescribedBy="manager-picker-status"
+                    options=${managerProfiles.map(p => {
                       const state = managerProfileAuthState(p);
-                      // A11y: <option> text is read verbatim by screen
-                      // readers and glyphs CANNOT be hidden inside option
-                      // labels (no aria-hidden support there), so we use
-                      // plain English status text only. 3-state:
-                      // authenticated / no credentials / auth status
-                      // unavailable (server version mismatch).
+                      // A11y: option text is read verbatim by screen readers
+                      // and glyphs CANNOT be hidden inside option labels
+                      // (no aria-hidden support there), so we use plain
+                      // English status text only. 3-state: authenticated /
+                      // no credentials / auth status unavailable (server
+                      // version mismatch).
                       const statusText = state === 'ok' ? 'authenticated'
                         : state === 'unknown' ? 'auth status unavailable'
                         : 'no credentials';
-                      return html`<option key=${p.id} value=${p.id}>${p.name} (${p.type}) \u2014 ${statusText}</option>`;
+                      return { value: p.id, label: `${p.name} (${p.type}) \u2014 ${statusText}` };
                     })}
-                  </select>
+                  />
                   <button
                     class="manager-picker-refresh"
                     type="button"
