@@ -125,6 +125,9 @@ function createConversationService({
     compositionLedger,
     eventBus,
     logger,
+    // Durable Top/Operator FIFO. Unit harnesses may omit it to retain the
+    // pre-queue synchronous delivery path; production always wires it.
+    managerMessageQueueService,
   }) {
   // parentRunId -> array of notice strings
   const pendingNotices = new Map();
@@ -278,7 +281,15 @@ function createConversationService({
   //
   // Returns { status: 'sent', target } on success, throws with a 4xx-style
   // Error otherwise. Callers should map errors to HTTP status codes.
-  function sendMessage(conversationId, { text, images, codebaseProjectId, turnMode, source, invocationId } = {}) {
+  function sendMessage(conversationId, {
+    text,
+    images,
+    codebaseProjectId,
+    turnMode,
+    source,
+    invocationId,
+    idempotencyKey,
+  } = {}) {
     const parsed = parseConversationId(conversationId);
     if (!parsed) {
       const err = new Error(`invalid conversation id: ${conversationId}`);
@@ -295,6 +306,29 @@ function createConversationService({
     }
 
     if (parsed.kind === 'top') {
+      if (managerMessageQueueService) {
+        // Backward compatibility: a brand-new message with no Top session is
+        // still rejected. Already-persisted queued rows survive a restart and
+        // the driver waits for resume, but the queue is not an offline mailbox.
+        if (!managerRegistry.probeActive('top')) {
+          const err = new Error('No active Top manager session');
+          err.httpStatus = 404;
+          err.code = 'OPERATOR_MISSING';
+          err.retryable = true;
+          throw err;
+        }
+        return managerMessageQueueService.enqueue('top', {
+          text,
+          images,
+          source,
+        }, invocationId
+          ? {
+              idempotencyKey: idempotencyKey || `invocation:${invocationId}`,
+              adapterInvocationId: invocationId,
+              requireImmediate: true,
+            }
+          : { idempotencyKey });
+      }
       return sendToManagerSlot('top', { text, images, source, invocationId });
     }
     if (parsed.kind === 'worker') {
@@ -302,12 +336,62 @@ function createConversationService({
     }
     if (parsed.kind === 'pm') {
       const operator = parseOperatorRoute(conversationId) || parsed;
-      return sendToManagerSlot(operator.conversationId || conversationId, {
+      const targetConversationId = operator.conversationId || conversationId;
+      const targetProjectId = operator.projectId || parsed.projectId || null;
+
+      // Queue admission keeps the old target validation envelope: a
+      // syntactically valid but unknown project/instance must not become an
+      // immortal durable row that can never resolve to a manager slot.
+      if (managerMessageQueueService) {
+        if (targetProjectId && projectService && typeof projectService.getProject === 'function') {
+          try {
+            projectService.getProject(targetProjectId);
+          } catch {
+            const err = new Error(`project not found: ${targetProjectId}`);
+            err.httpStatus = 404;
+            err.code = 'OPERATOR_TARGET_NOT_FOUND';
+            err.retryable = false;
+            throw err;
+          }
+        }
+        if (
+          operator.instanceId
+          && runService
+          && typeof runService.getOperatorInstance === 'function'
+        ) {
+          try {
+            const instance = runService.getOperatorInstance(operator.instanceId);
+            if (!instance) throw new Error('not found');
+          } catch {
+            const err = new Error(`operator instance not found: ${operator.instanceId}`);
+            err.httpStatus = 404;
+            err.code = 'OPERATOR_TARGET_NOT_FOUND';
+            err.retryable = false;
+            throw err;
+          }
+        }
+        return managerMessageQueueService.enqueue(targetConversationId, {
+          text,
+          images,
+          codebaseProjectId,
+          turnMode,
+          projectId: targetProjectId,
+          source,
+        }, invocationId
+          ? {
+              idempotencyKey: idempotencyKey || `invocation:${invocationId}`,
+              adapterInvocationId: invocationId,
+              requireImmediate: true,
+            }
+          : { idempotencyKey });
+      }
+
+      return sendToManagerSlot(targetConversationId, {
         text,
         images,
         codebaseProjectId,
         turnMode, // A2a §5.0: 'codebase'|'generic'|'auto_review' (omitted → legacy default)
-        projectId: operator.projectId || parsed.projectId || null,
+        projectId: targetProjectId,
         source, // F-1: 'auto_review' forces standard tier on the codex adapter
         invocationId, // OS-3: durable scheduled-turn correlation
       });
@@ -393,7 +477,9 @@ function createConversationService({
               const err = new Error(spawnErr.message || 'PM spawn failed');
               err.httpStatus = spawnErr.httpStatus || 502;
               err.code = spawnErr.code || 'OPERATOR_SPAWN_FAILED';
-              err.retryable = spawnErr.retryable === true || [404, 409].includes(Number(err.httpStatus));
+              err.retryable = typeof spawnErr.retryable === 'boolean'
+                ? spawnErr.retryable
+                : [404, 409].includes(Number(err.httpStatus));
               throw err;
             })
             .then((spawnResult) => sendToManagerSlot(
@@ -410,7 +496,9 @@ function createConversationService({
         const err = new Error(spawnErr.message || 'PM spawn failed');
         err.httpStatus = spawnErr.httpStatus || 502;
         err.code = spawnErr.code || 'OPERATOR_SPAWN_FAILED';
-        err.retryable = spawnErr.retryable === true || [404, 409].includes(Number(err.httpStatus));
+        err.retryable = typeof spawnErr.retryable === 'boolean'
+          ? spawnErr.retryable
+          : [404, 409].includes(Number(err.httpStatus));
         throw err;
       }
     }
@@ -1061,6 +1149,50 @@ function createConversationService({
     return runService.getRunEvents(resolved.run.id, afterId);
   }
 
+  function resolveManagerQueueConversationId(conversationId) {
+    const parsed = parseConversationId(conversationId);
+    if (!parsed || parsed.kind === 'worker') {
+      const err = new Error(`invalid manager conversation id: ${conversationId}`);
+      err.httpStatus = 400;
+      throw err;
+    }
+    if (parsed.kind === 'top') return 'top';
+    const operator = parseOperatorRoute(conversationId) || parsed;
+    return operator.conversationId || conversationId;
+  }
+
+  function listManagerMessages(conversationId, options) {
+    if (!managerMessageQueueService) return [];
+    return managerMessageQueueService.listMessages(
+      resolveManagerQueueConversationId(conversationId),
+      options,
+    );
+  }
+
+  function cancelManagerMessage(conversationId, messageId) {
+    if (!managerMessageQueueService) {
+      const err = new Error('manager message queue is unavailable');
+      err.httpStatus = 503;
+      throw err;
+    }
+    return managerMessageQueueService.cancel(
+      resolveManagerQueueConversationId(conversationId),
+      messageId,
+    );
+  }
+
+  // The durable driver deliberately dispatches through the exact existing
+  // manager path. Memory/codebase injection, binding checks, parent-notice
+  // peek→commit-drain, and adapter acceptance therefore stay single-sourced.
+  if (managerMessageQueueService) {
+    managerMessageQueueService.setDispatcher((conversationId, payload, messageId) => (
+      sendToManagerSlot(conversationId, {
+        ...(payload || {}),
+        invocationId: messageId,
+      })
+    ));
+  }
+
   return {
     // queue surface (exported so routes/manager.js can also consume/clear)
     queueParentNotice,
@@ -1073,6 +1205,8 @@ function createConversationService({
     resolveConversation,
     sendMessage,
     getEvents,
+    listManagerMessages,
+    cancelManagerMessage,
   };
 }
 

@@ -26,7 +26,12 @@ function createConversationsRouter({ conversationService, runService }) {
 
   function mapError(err, res) {
     if (err && err.httpStatus) {
-      return res.status(err.httpStatus).json({ error: err.message });
+      if (Number(err.httpStatus) === 429) res.set('Retry-After', '1');
+      return res.status(err.httpStatus).json({
+        error: err.message,
+        ...(err.code ? { code: err.code } : {}),
+        ...(err.retryable === true ? { retryable: true } : {}),
+      });
     }
     throw err;
   }
@@ -49,10 +54,46 @@ function createConversationsRouter({ conversationService, runService }) {
     // { text, images } was extracted, so an explicit turn codebase was silently
     // lost (Codex A1/R3 finding). Unknown turnMode is normalized to the legacy
     // default inside the service; Top/worker ids ignore both fields.
-    const { text, images, codebaseProjectId, turnMode } = req.body || {};
+    const { text, images, codebaseProjectId, turnMode, idempotencyKey: bodyKey } = req.body || {};
+    const idempotencyKey = bodyKey || req.get('Idempotency-Key') || undefined;
     try {
-      const result = await conversationService.sendMessage(id, { text, images, codebaseProjectId, turnMode });
+      const result = await conversationService.sendMessage(id, {
+        text,
+        images,
+        codebaseProjectId,
+        turnMode,
+        idempotencyKey,
+      });
       res.json(result);
+    } catch (err) {
+      return mapError(err, res);
+    }
+  }));
+
+  // GET /api/conversations/:id/messages
+  // Durable Manager queue projection. Payload blobs (including base64 image
+  // data) are intentionally never returned; only display/status metadata.
+  router.get('/:id/messages', asyncHandler(async (req, res) => {
+    try {
+      const messages = conversationService.listManagerMessages(req.params.id, {
+        limit: req.query.limit,
+      });
+      res.json({ messages });
+    } catch (err) {
+      return mapError(err, res);
+    }
+  }));
+
+  // DELETE /api/conversations/:id/messages/:messageId
+  // Cancellation is deliberately queued-only. A sending/processing turn has
+  // crossed the external adapter boundary and cannot be safely recalled.
+  router.delete('/:id/messages/:messageId', asyncHandler(async (req, res) => {
+    try {
+      const message = conversationService.cancelManagerMessage(
+        req.params.id,
+        req.params.messageId,
+      );
+      res.json({ message });
     } catch (err) {
       return mapError(err, res);
     }

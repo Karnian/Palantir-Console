@@ -776,9 +776,14 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     // semantics. If a worker direct chat left a pending notice on the
     // active Top run id, it will be consumed here regardless of which
     // entry point the client used.
-    const { text, images } = req.body || {};
+    const { text, images, idempotencyKey: bodyKey } = req.body || {};
+    const idempotencyKey = bodyKey || req.get('Idempotency-Key') || undefined;
     try {
-      const result = await conversationService.sendMessage('top', { text, images });
+      const result = await conversationService.sendMessage('top', {
+        text,
+        images,
+        idempotencyKey,
+      });
       return res.json(result);
     } catch (err) {
       if (err && err.httpStatus === 400) {
@@ -830,13 +835,18 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     if (!projectId) {
       throw new BadRequestError('projectId is required');
     }
-    const { text, images } = req.body || {};
+    const { text, images, idempotencyKey: bodyKey } = req.body || {};
+    const idempotencyKey = bodyKey || req.get('Idempotency-Key') || undefined;
     try {
       // A2a §5.0 mapping: this legacy per-project route is definitively a
       // codebase(projectId) turn — pass it explicitly so it stays correct even
       // if the resolved Operator's primary ever differs from the route param.
       const result = await conversationService.sendMessage(conversationIdForProject(projectId), {
-        text, images, codebaseProjectId: projectId, turnMode: 'codebase',
+        text,
+        images,
+        codebaseProjectId: projectId,
+        turnMode: 'codebase',
+        idempotencyKey,
       });
       return res.json(result);
     } catch (err) {

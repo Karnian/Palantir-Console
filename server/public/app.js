@@ -217,12 +217,26 @@ function App() {
   const manager = useMemo(() => ({
     status: managerLifecycle.status,
     events: topConv.events,
+    queuedMessages: topConv.queuedMessages,
     loading: managerLifecycle.loading,
     start: managerLifecycle.start,
     sendMessage: topConv.sendMessage,
+    cancelQueuedMessage: topConv.cancelQueuedMessage,
+    reloadQueue: topConv.reloadQueue,
     stop: managerLifecycle.stop,
     checkStatus: managerLifecycle.checkStatus,
-  }), [managerLifecycle.status, topConv.events, managerLifecycle.loading, managerLifecycle.start, topConv.sendMessage, managerLifecycle.stop, managerLifecycle.checkStatus]);
+  }), [
+    managerLifecycle.status,
+    topConv.events,
+    topConv.queuedMessages,
+    managerLifecycle.loading,
+    managerLifecycle.start,
+    topConv.sendMessage,
+    topConv.cancelQueuedMessage,
+    topConv.reloadQueue,
+    managerLifecycle.stop,
+    managerLifecycle.checkStatus,
+  ]);
   const driftAudit = useDispatchAudit();
   const [showDriftDrawer, setShowDriftDrawer] = useState(false);
   const [inspectRun, setInspectRun] = useState(null);

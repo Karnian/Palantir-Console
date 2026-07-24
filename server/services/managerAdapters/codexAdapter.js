@@ -976,6 +976,9 @@ function createCodexAdapter({
         if (typeof displayText === 'string') {
           eventPayload.display_text = displayText.slice(0, 5000);
         }
+        if (typeof invocationId === 'string' && invocationId) {
+          eventPayload.client_message_id = invocationId;
+        }
         runService.addRunEvent(runId, 'user_input', JSON.stringify(eventPayload));
       } catch (err) {
         console.warn(`[codexAdapter] user_input event failed for ${runId}: ${err.message}`);

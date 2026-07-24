@@ -576,9 +576,9 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
    * @param {string} runId
    * @param {string} text
    * @param {Array<{data: string, media_type: string}>} [images] - base64 images (manager only)
-   * @param {{displayText?: string}} [options] - unmodified user text stored for UI display
+   * @param {{displayText?: string, invocationId?: string}} [options] - display/correlation metadata
    */
-  function sendInput(runId, text, images, { displayText } = {}) {
+  function sendInput(runId, text, images, { displayText, invocationId } = {}) {
     const proc = processes.get(runId);
     if (!proc) return false;
     // Exit detection must come BEFORE stdin.writable: Node marks stdin
@@ -616,6 +616,9 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
       const eventPayload = { text: text ? text.slice(0, 5000) : '' };
       if (typeof displayText === 'string') {
         eventPayload.display_text = displayText.slice(0, 5000);
+      }
+      if (typeof invocationId === 'string' && invocationId) {
+        eventPayload.client_message_id = invocationId;
       }
       if (images && images.length > 0) {
         eventPayload.images = images.map(img => ({

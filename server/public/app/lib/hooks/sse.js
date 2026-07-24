@@ -65,6 +65,7 @@ export function useSSE(listeners) {
       'manager:started', 'manager:stopped', 'run:output', 'run:result',
       'node:status',
       'operator:schedule',
+      'conversation:message_status',
       // v3 Phase 5: priority-alert channel (run:needs_input). Previously
       // omitted — Phase 5 App() registered a handler but the channel
       // subscription here was never added, so the tab-title pulse path
