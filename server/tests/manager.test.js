@@ -5,6 +5,7 @@ const path = require('node:path');
 const os = require('node:os');
 const request = require('supertest');
 const { createApp } = require('../app');
+const { invokeApp } = require('./helpers/invokeApp');
 
 async function createTempDir(prefix) {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -37,6 +38,56 @@ test('GET /api/manager/status returns inactive when no session', async (t) => {
   assert.equal(res.status, 200);
   assert.equal(res.body.active, false);
   assert.equal(res.body.run, null);
+});
+
+test('GET /api/manager/status resolves Operator instance metadata when the run instance id is null', async (t) => {
+  const { app } = await createTestApp(t);
+  const runService = app.services.runService;
+  const project = app.services.projectService.createProject({ name: 'operator visibility' });
+  const resolved = runService.ensurePrimaryOperatorInstanceForProject(project.id);
+  app.services._rawDb.prepare(
+    'UPDATE operator_instances SET display_name = ?, fast_mode = ? WHERE id = ?'
+  ).run('Visibility Operator', 1, resolved.instanceId);
+
+  const adapter = {
+    isSessionAlive: () => true,
+    detectExitCode: () => null,
+    getUsage: () => null,
+    getSessionId: () => null,
+    disposeSession: () => {},
+  };
+  const top = runService.createRun({
+    is_manager: true,
+    manager_layer: 'top',
+    conversation_id: 'top',
+    manager_adapter: 'codex',
+    prompt: 'top',
+  });
+  runService.updateRunStatus(top.id, 'running', { force: true });
+  app.managerRegistry.setActive('top', top.id, adapter);
+
+  const operator = runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: resolved.instanceConversationId,
+    operator_instance_id: null,
+    manager_adapter: 'codex',
+    prompt: 'operator',
+  });
+  runService.updateRunStatus(operator.id, 'running', { force: true });
+  app.managerRegistry.setActive(resolved.instanceConversationId, operator.id, adapter);
+
+  const res = await invokeApp(app, { method: 'GET', path: '/api/manager/status' });
+  assert.equal(res.status, 200);
+  const pm = res.body.pms.find(entry => entry.conversationId === resolved.instanceConversationId);
+  assert.ok(pm, 'instance-scoped Operator must be present');
+  assert.equal(pm.legacyConversationId, `operator:${project.id}`);
+  assert.equal(pm.primaryProjectId, project.id);
+  assert.equal(pm.instanceId, resolved.instanceId);
+  assert.equal(pm.displayName, 'Visibility Operator');
+  assert.equal(pm.fastMode, 1);
+  assert.equal(pm.run.operator_instance_id, null);
+  assert.equal(pm.run.id, operator.id);
 });
 
 test('POST /api/manager/message returns 404 when no active session', async (t) => {

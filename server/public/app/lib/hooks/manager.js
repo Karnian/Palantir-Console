@@ -4,6 +4,7 @@
 
 import { apiFetch } from '../api.js';
 import { addToast } from '../toast.js';
+import { sseBroker } from './sse.js';
 
 import { useState, useEffect, useCallback, useRef } from '../../../vendor/hooks.module.js';
 
@@ -51,6 +52,28 @@ export function useManagerLifecycle() {
 
   useEffect(() => {
     checkStatus();
+  }, [checkStatus]);
+
+  // The global SSE owner stays connected even while Top is inactive. Listen
+  // for lifecycle edges here so a Top/Operator appearing in another tab or
+  // process revives the status snapshot instead of waiting for a manual page
+  // refresh. Polling below remains the steady-state fallback while active.
+  useEffect(() => {
+    const refresh = () => { checkStatus(); };
+    const refreshManagerRun = (data) => {
+      const run = data?.run || data;
+      if (run?.is_manager) checkStatus();
+    };
+    const unsubscribeStarted = sseBroker.subscribe('manager:started', refresh);
+    const unsubscribeStopped = sseBroker.subscribe('manager:stopped', refresh);
+    const unsubscribeRunStatus = sseBroker.subscribe('run:status', refreshManagerRun);
+    const unsubscribeRunCompleted = sseBroker.subscribe('run:completed', refreshManagerRun);
+    return () => {
+      unsubscribeStarted();
+      unsubscribeStopped();
+      unsubscribeRunStatus();
+      unsubscribeRunCompleted();
+    };
   }, [checkStatus]);
 
   useEffect(() => {
