@@ -1092,6 +1092,8 @@ export const OPERATOR_ROSTER_LABELS = {
   noPrimaryFolder: '담당 폴더 미지정',
   idleStatus: '대기',
   liveStatus: '실행 중',
+  detailsAction: '상세 보기',
+  detailsTitleSuffix: '상세 정보',
   scheduleAction: '스케줄',
   scheduleCountLabel: '활성 스케줄',
   nextScheduleLabel: '다음 실행',
