@@ -50,6 +50,27 @@ export function managerProfileAuthState(profile) {
   return profile.auth.canAuth ? 'ok' : 'missing';
 }
 
+// New manager events carry display_text separately from the model-facing text,
+// which may contain synthetic parent notices and memory/codebase context.
+// The legacy fallback keeps existing sessions clean too: old rows only stored
+// the composed text, so recover the original content after the notice block.
+export function managerUserInputDisplayText(payload = {}) {
+  if (Object.prototype.hasOwnProperty.call(payload, 'display_text')) {
+    return typeof payload.display_text === 'string' ? payload.display_text : '';
+  }
+  const text = typeof payload.text === 'string'
+    ? payload.text
+    : (typeof payload.result === 'string' ? payload.result : '');
+  const noticeIndex = text.indexOf('[system notice]');
+  const staleIndex = text.lastIndexOf('상태가 stale 되었을 수 있으니');
+  if (noticeIndex >= 0 && staleIndex > noticeIndex) {
+    const separator = '\n\n---\n\n';
+    const separatorIndex = text.indexOf(separator, staleIndex);
+    if (separatorIndex >= 0) return text.slice(separatorIndex + separator.length);
+  }
+  return text;
+}
+
 // R2-C.2: Suggested actions icon set — reuses AttentionStrip's glyph
 // vocabulary so a user seeing "⏸" in the nav badge, the AttentionStrip,
 // AND the SuggestedActions row recognises the same affordance across
@@ -303,7 +324,9 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
       } else if (t === 'user_input' || t === 'error') {
         let p = {};
         try { p = JSON.parse(e.payload_json || '{}'); } catch { continue; }
-        const text = p.text || p.result || p.message || '';
+        const text = t === 'user_input'
+          ? managerUserInputDisplayText(p)
+          : (p.text || p.result || p.message || '');
         if (!text) continue;
         out.push({ id: e.id, type: t, text, time: e.created_at, source: 'legacy' });
       }

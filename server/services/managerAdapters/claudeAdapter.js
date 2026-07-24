@@ -292,12 +292,12 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
    *
    * Returns { accepted: bool }.
    */
-  function runTurn(runId, { text, images, invocationId } = {}) {
+  function runTurn(runId, { text, displayText, images, invocationId } = {}) {
     const state = getState(runId);
     state.pendingInvocationIds.push(invocationId || null);
     let accepted;
     try {
-      accepted = streamJsonEngine.sendInput(runId, text || '', images);
+      accepted = streamJsonEngine.sendInput(runId, text || '', images, { displayText });
     } catch (err) {
       state.pendingInvocationIds.pop();
       throw err;

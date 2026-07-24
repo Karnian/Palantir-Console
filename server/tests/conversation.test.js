@@ -156,6 +156,11 @@ test('worker direct message queues parent notice and delivers to worker', async 
   assert.match(topPayload, new RegExp(`worker:${worker.id}`));
   assert.match(topPayload, /방향 바꿔, X 말고 Y로/);
   assert.match(topPayload, /다음 계획 알려줘/);
+  assert.equal(
+    fakeAdapter.calls[0].payload.displayText,
+    '다음 계획 알려줘',
+    'chat display text excludes synthetic parent notices',
+  );
 });
 
 test('parent notice is NOT applied on a subsequent Top send (queue drained)', async (t) => {

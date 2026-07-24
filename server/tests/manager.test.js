@@ -495,12 +495,13 @@ test('claudeAdapter dual-emits normalized events alongside legacy ones', async (
   // Fake streamJsonEngine — only spawnAgent is invoked, and we just need to
   // capture the onVendorEvent hook so we can drive it manually.
   let capturedHook = null;
+  const sentInputs = [];
   const fakeEngine = {
     spawnAgent(runId, opts) {
       capturedHook = opts.onVendorEvent;
       return { pid: 1234 };
     },
-    sendInput: () => true,
+    sendInput: (...args) => { sentInputs.push(args); return true; },
     isAlive: () => true,
     detectExitCode: () => null,
     getUsage: () => ({ inputTokens: 0, outputTokens: 0, costUsd: 0 }),
@@ -513,13 +514,19 @@ test('claudeAdapter dual-emits normalized events alongside legacy ones', async (
   adapter.startSession('run_mgr_test', { prompt: 'hi', cwd: process.cwd() });
   assert.ok(typeof capturedHook === 'function', 'onVendorEvent hook should be installed');
   assert.deepEqual(
-    adapter.runTurn('run_mgr_test', { text: 'scheduled turn', invocationId: 'oinv_claude_test' }),
+    adapter.runTurn('run_mgr_test', {
+      text: '[system notice]\ninternal context\n\n---\n\nscheduled turn',
+      displayText: 'scheduled turn',
+      invocationId: 'oinv_claude_test',
+    }),
     { accepted: true },
   );
   assert.deepEqual(
     adapter.runTurn('run_mgr_test', { text: 'queued turn', invocationId: 'oinv_claude_next' }),
     { accepted: true },
   );
+  assert.equal(sentInputs[0][1], '[system notice]\ninternal context\n\n---\n\nscheduled turn');
+  assert.deepEqual(sentInputs[0][3], { displayText: 'scheduled turn' });
 
   const fakeProc = { usage: { inputTokens: 100, outputTokens: 50, costUsd: 0.01 } };
 

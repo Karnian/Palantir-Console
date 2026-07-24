@@ -811,6 +811,11 @@ function createConversationService({
     try {
       const result = adapter.runTurn(run.id, {
         text: effectiveText,
+        // The adapter must deliver `text` to the model, but persist this
+        // unmodified user text for the chat UI. Otherwise synthetic parent
+        // notices (and memory/codebase context) render as if the user typed
+        // them.
+        displayText: originalText,
         images: validImages,
         source, // F-1: propagate turn source so codex forces standard tier on auto-review
         invocationId, // OS-3: adapter events carry the durable invocation id

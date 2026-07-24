@@ -576,8 +576,9 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
    * @param {string} runId
    * @param {string} text
    * @param {Array<{data: string, media_type: string}>} [images] - base64 images (manager only)
+   * @param {{displayText?: string}} [options] - unmodified user text stored for UI display
    */
-  function sendInput(runId, text, images) {
+  function sendInput(runId, text, images, { displayText } = {}) {
     const proc = processes.get(runId);
     if (!proc) return false;
     // Exit detection must come BEFORE stdin.writable: Node marks stdin
@@ -613,6 +614,9 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
     const recordUserInput = () => {
       if (!runService) return;
       const eventPayload = { text: text ? text.slice(0, 5000) : '' };
+      if (typeof displayText === 'string') {
+        eventPayload.display_text = displayText.slice(0, 5000);
+      }
       if (images && images.length > 0) {
         eventPayload.images = images.map(img => ({
           media_type: img.media_type,
