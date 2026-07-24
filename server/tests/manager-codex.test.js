@@ -89,8 +89,12 @@ test('CodexAdapter lazily writes a system prompt temp file and disposeSession cl
   const { PassThrough } = require('node:stream');
   const captured = [];
   let capturedArgs = null;
+  let capturedStdin = '';
   const fakeChild = {
-    stdin: { write() {}, end() {} },
+    stdin: {
+      write(value) { capturedStdin += value; },
+      end() {},
+    },
     stderr: new PassThrough(),
     stdout: new PassThrough(),
     on() { return this; },
@@ -114,9 +118,17 @@ test('CodexAdapter lazily writes a system prompt temp file and disposeSession cl
   });
   assert.equal(sessionRef.instructionsPath, null, 'instructionsPath is placed lazily on first turn');
 
-  const res = await adapter.runTurn('run_mgr_codex1', { text: 'hi', invocationId: 'oinv_codex_test' });
+  const res = await adapter.runTurn('run_mgr_codex1', {
+    text: '[system notice]\ninternal context\n\n---\n\nhi',
+    displayText: 'hi',
+    invocationId: 'oinv_codex_test',
+  });
   assert.equal(res.accepted, true);
   assert.ok(capturedArgs, 'spawn was invoked');
+  assert.equal(capturedStdin, '[system notice]\ninternal context\n\n---\n\nhi');
+  const userInput = captured.find(({ t }) => t === 'user_input');
+  assert.equal(userInput.p.text, '[system notice]\ninternal context\n\n---\n\nhi');
+  assert.equal(userInput.p.display_text, 'hi');
   const instructionsFlag = capturedArgs.find((arg) => /^model_instructions_file=/.test(arg));
   assert.ok(instructionsFlag, 'instructions file flag should be present');
   const instructionsPath = instructionsFlag.match(/^model_instructions_file="(.+)"$/)?.[1];

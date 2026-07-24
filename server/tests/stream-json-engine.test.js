@@ -574,7 +574,7 @@ test('engine: sendInput with images records image metadata in user_input event',
   assert.equal(payload.images[0].size, fakeBase64.length);
 });
 
-test('engine: sendInput text-only does not include images field in user_input event', async (t) => {
+test('engine: sendInput stores separate display text without changing model input', async (t) => {
   process.env.CLAUDE_BIN = fakeClaudioPath;
   const rs = makeRunService();
   const { engine } = makeEngine({ runService: rs });
@@ -583,14 +583,16 @@ test('engine: sendInput text-only does not include images field in user_input ev
   engine.spawnAgent('run-no-img', { cwd: os.tmpdir(), isManager: true });
   await waitForEvent(engine, 'run-no-img', e => e.type === 'system');
 
-  engine.sendInput('run-no-img', 'just text');
+  const modelText = '[system notice]\ninternal context\n\n---\n\njust text';
+  engine.sendInput('run-no-img', modelText, undefined, { displayText: 'just text' });
   await waitForEvent(engine, 'run-no-img', e => e.type === 'assistant');
 
   const userInputEvts = rs._events.filter(e => e.type === 'user_input');
   assert.ok(userInputEvts.length >= 1);
 
   const payload = JSON.parse(userInputEvts[0].data);
-  assert.equal(payload.text, 'just text');
+  assert.equal(payload.text, modelText);
+  assert.equal(payload.display_text, 'just text');
   assert.equal(payload.images, undefined, 'no images field when text-only');
 });
 

@@ -927,7 +927,7 @@ function createCodexAdapter({
   // earlier thenable-optimistic approach did, because refusals RESOLVE
   // {accepted:false} rather than reject, so a .catch never fired). Codex P4-S3a
   // R2 review.
-  function runTurn(runId, { text, source, invocationId } = {}) {
+  function runTurn(runId, { text, displayText, source, invocationId } = {}) {
     const state = sessions.get(runId);
     if (!state) return { accepted: false };
     if (state.ended) return { accepted: false };
@@ -972,7 +972,11 @@ function createCodexAdapter({
     // (parity with streamJsonEngine/claudeAdapter).
     if (runService && text) {
       try {
-        runService.addRunEvent(runId, 'user_input', JSON.stringify({ text: text.slice(0, 5000) }));
+        const eventPayload = { text: text.slice(0, 5000) };
+        if (typeof displayText === 'string') {
+          eventPayload.display_text = displayText.slice(0, 5000);
+        }
+        runService.addRunEvent(runId, 'user_input', JSON.stringify(eventPayload));
       } catch (err) {
         console.warn(`[codexAdapter] user_input event failed for ${runId}: ${err.message}`);
       }
