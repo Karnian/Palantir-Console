@@ -211,51 +211,62 @@ test('OperatorsView renders Master, Live Operators, and Available Operators as s
     assert.ok(el);
     return el;
   });
-  assert.equal(live.tagName, 'ARTICLE');
-  assert.equal(live.getAttribute('href'), null);
-  assert.equal(live.querySelector('a a'), null);
-  const liveLinks = Array.from(live.querySelectorAll('a'));
-  assert.equal(liveLinks.length, 2);
-  assert.equal(live.querySelector('[data-role="operator-roster-live-primary-link"]').getAttribute('href'), '#manager/operator/proj_alpha');
-  assert.equal(live.querySelector('[data-role="operator-roster-live-project-link"]').getAttribute('href'), '#operator/codebases/proj_alpha');
+  assert.equal(live.tagName, 'BUTTON');
+  assert.equal(live.getAttribute('aria-haspopup'), 'dialog');
+  assert.equal(live.querySelectorAll('a, button').length, 0, 'compact card has no nested actions');
   assert.match(live.textContent, /Alpha Console/);
-  assert.match(live.textContent, /프로젝트 폴더 바인딩/);
   assert.match(live.textContent, /Dispatcher/);
   assert.match(live.textContent, /Long-running/);
   assert.match(live.textContent, /codex/);
   assert.match(live.textContent, /node-a/);
   assert.equal(root.querySelector('[data-role="operator-roster-worker-count"]').textContent.trim(), '1');
+  assert.ok(live.querySelector('[data-role="operator-roster-card-open-hint"]'));
+
+  live.click();
+  const liveDialog = await waitFor(() => {
+    const el = root.querySelector('#operator-roster-detail-title')?.closest('[role="dialog"]');
+    assert.ok(el);
+    return el;
+  });
+  assert.equal(liveDialog.getAttribute('aria-labelledby'), 'operator-roster-detail-title');
+  assert.match(liveDialog.querySelector('#operator-roster-detail-title').textContent, /Alpha Console 상세 정보/);
+  assert.equal(liveDialog.querySelector('[data-role="operator-roster-live-primary-link"]').getAttribute('href'), '#manager/operator/proj_alpha');
+  assert.equal(liveDialog.querySelector('[data-role="operator-roster-live-project-link"]').getAttribute('href'), '#operator/codebases/proj_alpha');
+  assert.match(liveDialog.textContent, /프로젝트 폴더 바인딩/);
+  liveDialog.querySelector('[data-role="operator-roster-detail-close"]').click();
+  await waitFor(() => assert.equal(root.querySelector('#operator-roster-detail-title'), null));
 
   const availableSection = root.querySelector('[data-role="operator-roster-available-section"]');
   const available = availableSection.querySelector('[data-role="operator-roster-available-card"]');
   assert.ok(available);
-  assert.equal(available.tagName, 'ARTICLE');
-  assert.equal(available.getAttribute('href'), null);
-  assert.equal(available.querySelector('a a'), null);
-  const availableLinks = Array.from(available.querySelectorAll('a'));
-  assert.equal(availableLinks.length, 1);
-  const invokeButton = available.querySelector('[data-role="operator-roster-available-invoke-button"]');
-  assert.ok(invokeButton);
-  assert.equal(invokeButton.tagName, 'BUTTON');
-  assert.equal(invokeButton.getAttribute('href'), null);
-  assert.equal(invokeButton.getAttribute('aria-haspopup'), 'dialog');
-  assert.equal(
-    available.querySelector('[data-role="operator-roster-available-profile-link"]').getAttribute('href'),
-    '#operator/profiles',
-  );
+  assert.equal(available.tagName, 'BUTTON');
+  assert.equal(available.getAttribute('aria-haspopup'), 'dialog');
+  assert.equal(available.querySelectorAll('a, button').length, 0, 'compact card has no nested actions');
   assert.match(available.textContent, /Review analyst/);
   assert.match(available.textContent, /Folder-less/);
   assert.match(available.textContent, /Doer/);
   assert.match(available.textContent, /On-demand \/ Stateless/);
-  assert.match(available.textContent, /Ready to invoke/);
-  assert.match(available.textContent, /호출/);
-  assert.match(available.textContent, /프로필 보기/);
-  assert.match(available.textContent, /registry_metadata_search/);
+  assert.doesNotMatch(available.textContent, /Ready to invoke|호출|프로필 보기|registry_metadata_search/);
   assert.doesNotMatch(availableSection.textContent, /Running|Online|Live|Session|Idle/);
 
+  available.click();
+  const availableDialog = await waitFor(() => {
+    const el = root.querySelector('#operator-roster-detail-title')?.closest('[role="dialog"]');
+    assert.ok(el);
+    return el;
+  });
+  assert.match(availableDialog.textContent, /Ready to invoke/);
+  assert.match(availableDialog.textContent, /registry_metadata_search/);
+  assert.equal(
+    availableDialog.querySelector('[data-role="operator-roster-available-profile-link"]').getAttribute('href'),
+    '#operator/profiles',
+  );
+  const invokeButton = availableDialog.querySelector('[data-role="operator-roster-available-invoke-button"]');
+  assert.ok(invokeButton);
   invokeButton.click();
+
   const dialog = await waitFor(() => {
-    const el = root.querySelector('[role="dialog"]');
+    const el = root.querySelector('#operator-roster-specialist-invoke-title')?.closest('[role="dialog"]');
     assert.ok(el);
     return el;
   });
@@ -330,18 +341,36 @@ test('OperatorsView saves CLI changes independently across configured Operator c
   loadOperatorsComponents(env);
   const root = renderOperatorsView(env);
 
-  const selects = await waitFor(() => {
-    const found = root.querySelectorAll('[data-role="operator-adapter-select"]');
+  const cards = await waitFor(() => {
+    const found = root.querySelectorAll('[data-role="operator-configured-card"]');
     assert.equal(found.length, 2);
     return found;
   });
-  changeValue(env, selects[0], 'claude');
+  assert.equal(root.querySelectorAll('[data-role="operator-adapter-select"]').length, 0);
+
+  cards[0].click();
+  let detail = await waitFor(() => {
+    const el = root.querySelector('#operator-roster-detail-title')?.closest('[role="dialog"]');
+    assert.ok(el);
+    return el;
+  });
+  await changeValue(env, detail.querySelector('[data-role="operator-adapter-select"]'), 'claude');
   await waitFor(() => assert.equal(
     apiCalls.filter((call) => call.opts.method === 'PATCH').length,
     1,
   ));
-  assert.equal(selects[1].disabled, false);
-  changeValue(env, selects[1], 'claude');
+  detail.querySelector('[data-role="operator-roster-detail-close"]').click();
+  await waitFor(() => assert.equal(root.querySelector('#operator-roster-detail-title'), null));
+
+  root.querySelectorAll('[data-role="operator-configured-card"]')[1].click();
+  detail = await waitFor(() => {
+    const el = root.querySelector('#operator-roster-detail-title')?.closest('[role="dialog"]');
+    assert.ok(el);
+    return el;
+  });
+  const secondSelect = detail.querySelector('[data-role="operator-adapter-select"]');
+  assert.equal(secondSelect.disabled, false);
+  await changeValue(env, secondSelect, 'claude');
   await waitFor(() => assert.equal(
     apiCalls.filter((call) => call.opts.method === 'PATCH').length,
     2,
@@ -350,9 +379,7 @@ test('OperatorsView saves CLI changes independently across configured Operator c
   firstGate.resolve();
   secondGate.resolve();
   await waitFor(() => {
-    const values = Array.from(root.querySelectorAll('[data-role="operator-adapter-select"]'))
-      .map((select) => select.dataset.value);
-    assert.deepEqual(values, ['claude', 'claude']);
+    assert.deepEqual(currentInstances.map((instance) => instance.preferred_adapter), ['claude', 'claude']);
   });
 });
 
@@ -438,21 +465,26 @@ test('OperatorsView renders watch-list badges and edits reference refs from the 
     const el = root.querySelector('[data-role="operator-roster-live-card"]');
     assert.ok(el);
     assert.match(el.textContent, /Alpha Console/);
-    assert.match(el.textContent, /Beta API/);
     return el;
   });
-  assert.equal(live.tagName, 'ARTICLE');
-  assert.equal(live.getAttribute('href'), null);
-  assert.equal(live.querySelector('a a'), null);
-  assert.equal(live.querySelectorAll('[data-role="operator-watch-ref-primary"]').length, 1);
-  assert.match(live.querySelector('[data-role="operator-watch-ref-primary"]').textContent, /담당/);
-  assert.equal(live.querySelectorAll('[data-role="operator-watch-ref-reference"]').length, 1);
-  assert.match(live.querySelector('[data-role="operator-watch-ref-reference"]').textContent, /참조/);
-  assert.equal(live.querySelector('[data-role="operator-watch-ref-primary"] [data-role="operator-watch-ref-remove"]'), null);
+  assert.equal(live.tagName, 'BUTTON');
+  assert.doesNotMatch(live.textContent, /Beta API/);
 
-  live.querySelector('[data-role="operator-roster-add-reference-button"]').click();
+  live.click();
+  const details = await waitFor(() => {
+    const el = root.querySelector('#operator-roster-detail-title')?.closest('[role="dialog"]');
+    assert.ok(el);
+    return el;
+  });
+  assert.equal(details.querySelectorAll('[data-role="operator-watch-ref-primary"]').length, 1);
+  assert.match(details.querySelector('[data-role="operator-watch-ref-primary"]').textContent, /담당/);
+  assert.equal(details.querySelectorAll('[data-role="operator-watch-ref-reference"]').length, 1);
+  assert.match(details.querySelector('[data-role="operator-watch-ref-reference"]').textContent, /참조/);
+  assert.equal(details.querySelector('[data-role="operator-watch-ref-primary"] [data-role="operator-watch-ref-remove"]'), null);
+
+  details.querySelector('[data-role="operator-roster-add-reference-button"]').click();
   const dialog = await waitFor(() => {
-    const el = root.querySelector('[role="dialog"]');
+    const el = root.querySelector('#operator-roster-refs-title')?.closest('[role="dialog"]');
     assert.ok(el);
     return el;
   });
@@ -473,10 +505,14 @@ test('OperatorsView renders watch-list badges and edits reference refs from the 
   });
   assert.equal(post.opts.method, 'POST');
   assert.deepEqual(JSON.parse(post.opts.body), { project_id: 'proj_gamma', role: 'reference' });
-  await waitFor(() => assert.match(root.textContent, /Gamma UI/));
+  await waitFor(() => assert.equal(root.querySelector('#operator-roster-refs-title'), null));
 
+  root.querySelector('[data-role="operator-roster-live-card"]').click();
   const betaRemove = await waitFor(() => {
-    const buttons = Array.from(root.querySelectorAll('[data-role="operator-watch-ref-remove"]'));
+    const detail = root.querySelector('#operator-roster-detail-title')?.closest('[role="dialog"]');
+    assert.ok(detail);
+    assert.match(detail.textContent, /Gamma UI/);
+    const buttons = Array.from(detail.querySelectorAll('[data-role="operator-watch-ref-remove"]'));
     const button = buttons.find((candidate) => candidate.getAttribute('aria-label').includes('Beta API'));
     assert.ok(button);
     return button;
@@ -489,7 +525,10 @@ test('OperatorsView renders watch-list badges and edits reference refs from the 
     return call;
   });
   assert.equal(del.opts.method, 'DELETE');
-  await waitFor(() => assert.doesNotMatch(root.textContent, /Beta API/));
+  await waitFor(() => assert.doesNotMatch(
+    root.querySelector('#operator-roster-detail-title')?.closest('[role="dialog"]')?.textContent || '',
+    /Beta API/,
+  ));
   assert.equal(root.querySelector('[data-role="operator-watch-ref-primary"] [data-role="operator-watch-ref-remove"]'), null);
 });
 
@@ -542,7 +581,15 @@ test('OperatorsView keeps roster usable when operator instance metadata is unava
   });
   assert.equal(live.querySelector('[data-role="operator-watch-list"]'), null);
   assert.equal(live.querySelector('[data-role="operator-roster-add-reference-button"]'), null);
-  assert.match(live.textContent, /watch-list 정보를 불러오지 못했습니다/);
+  assert.doesNotMatch(live.textContent, /watch-list 정보를 불러오지 못했습니다/);
+  live.click();
+  const detail = await waitFor(() => {
+    const el = root.querySelector('#operator-roster-detail-title')?.closest('[role="dialog"]');
+    assert.ok(el);
+    return el;
+  });
+  assert.match(detail.textContent, /watch-list 정보를 불러오지 못했습니다/);
+  assert.equal(detail.querySelector('[data-role="operator-roster-add-reference-button"]'), null);
 });
 
 test('OperatorsView renders scoped empty states for no live project operators and no available profiles', async (t) => {
@@ -815,9 +862,16 @@ test('OperatorsView supports Operator-first create then hourly schedule registra
   });
   assert.match(card.textContent, /Remote Hourly Operator/);
   assert.match(card.textContent, /Remote Folder/);
-  assert.equal(card.querySelector('[data-role="operator-adapter-select"]').dataset.value, 'codex');
+  assert.equal(card.querySelector('[data-role="operator-adapter-select"]'), null);
+  card.click();
+  const detail = await waitFor(() => {
+    const el = root.querySelector('#operator-roster-detail-title')?.closest('[role="dialog"]');
+    assert.ok(el);
+    return el;
+  });
+  assert.equal(detail.querySelector('[data-role="operator-adapter-select"]').dataset.value, 'codex');
 
-  changeValue(env, card.querySelector('[data-role="operator-adapter-select"]'), 'claude');
+  await changeValue(env, detail.querySelector('[data-role="operator-adapter-select"]'), 'claude');
   await waitFor(() => {
     const call = apiCalls.find((entry) => (
       entry.url === '/api/operator-instances/oi_hourly/adapter'
@@ -828,12 +882,18 @@ test('OperatorsView supports Operator-first create then hourly schedule registra
   });
   await waitFor(() => {
     assert.equal(
-      root.querySelector('[data-role="operator-configured-card"] [data-role="operator-adapter-select"]').dataset.value,
+      root.querySelector('#operator-roster-detail-title')
+        ?.closest('[role="dialog"]')
+        ?.querySelector('[data-role="operator-adapter-select"]')
+        ?.dataset.value,
       'claude',
     );
   });
 
-  card.querySelector('[data-role="operator-schedule-button"]').click();
+  root.querySelector('#operator-roster-detail-title')
+    .closest('[role="dialog"]')
+    .querySelector('[data-role="operator-schedule-button"]')
+    .click();
   const scheduleDialog = await waitFor(() => {
     const el = root.querySelector('#operator-roster-schedules-title')?.closest('[role="dialog"]');
     assert.ok(el);
@@ -898,7 +958,13 @@ test('OperatorsView only offers scheduled folders on the Operator primary node',
     assert.ok(el);
     return el;
   });
-  card.querySelector('[data-role="operator-schedule-button"]').click();
+  card.click();
+  const detail = await waitFor(() => {
+    const el = root.querySelector('#operator-roster-detail-title')?.closest('[role="dialog"]');
+    assert.ok(el);
+    return el;
+  });
+  detail.querySelector('[data-role="operator-schedule-button"]').click();
   const select = await waitFor(() => {
     const el = root.querySelector('#operator-schedule-folder');
     assert.ok(el);

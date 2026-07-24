@@ -134,6 +134,13 @@ function personaSummary(profile) {
   return text || OPERATOR_ROSTER_LABELS.personaEmpty;
 }
 
+function preferredAdapterLabel(instance) {
+  const value = preferredAdapterValue(instance);
+  if (value === 'codex') return OPERATOR_ROSTER_LABELS.adapterCodex;
+  if (value === 'claude') return OPERATOR_ROSTER_LABELS.adapterClaude;
+  return OPERATOR_ROSTER_LABELS.adapterAuto;
+}
+
 function countActiveWorkers({ projectId, runs, taskById }) {
   if (!projectId) return 0;
   return arrayValue(runs).filter((run) => {
@@ -234,6 +241,188 @@ function MasterCard({ top }) {
 function LiveOperatorCard({
   entry,
   instance,
+  projectsById,
+  runs,
+  taskById,
+  onOpenDetails,
+}) {
+  const run = entry?.run || {};
+  const primary = primaryRef(instance);
+  const projectId = parsedProjectId(entry) || primary?.project_id;
+  const project = projectId ? projectsById.get(String(projectId)) : null;
+  const projectName = primary
+    ? refProjectName(primary, projectsById)
+    : (project?.name || run.project_name || projectId || OPERATOR_ROSTER_LABELS.unknownProject);
+  const workerCount = countActiveWorkers({ projectId, runs, taskById });
+
+  return html`
+    <button
+      type="button"
+      class="operator-profile-card operator-roster-card operator-roster-summary-card operator-roster-live-card"
+      data-role="operator-roster-live-card"
+      aria-haspopup="dialog"
+      aria-label=${`${projectName} ${OPERATOR_ROSTER_LABELS.detailsAction}`}
+      onClick=${onOpenDetails}
+    >
+      <span class="operator-profile-card-header">
+        <strong class="operator-profile-name">${projectName}</strong>
+        <span class="task-badge active">${OPERATOR_ROSTER_LABELS.liveStatus}</span>
+      </span>
+      <span class="operator-roster-summary-line">
+        ${adapterName(run)} · ${nodeName(run)}
+      </span>
+      <span class="operator-roster-badges">
+        <span class="skill-badge skill-badge-ok">${OPERATOR_ROSTER_LABELS.liveMode}</span>
+        <span class="skill-badge skill-badge-ok">${OPERATOR_ROSTER_LABELS.liveLifecycle}</span>
+      </span>
+      <span class="operator-roster-glance">
+        ${OPERATOR_ROSTER_LABELS.activeWorkerRuns}
+        <strong data-role="operator-roster-worker-count">${workerCount}</strong>
+      </span>
+      <span class="operator-roster-open-hint" data-role="operator-roster-card-open-hint">
+        ${OPERATOR_ROSTER_LABELS.detailsAction} →
+      </span>
+    </button>
+  `;
+}
+
+function AvailableOperatorCard({ profile, onOpenDetails }) {
+  return html`
+    <button
+      type="button"
+      class="operator-profile-card operator-roster-card operator-roster-summary-card operator-roster-available-card"
+      data-role="operator-roster-available-card"
+      aria-haspopup="dialog"
+      aria-label=${`${profile.name} ${OPERATOR_ROSTER_LABELS.detailsAction}`}
+      onClick=${onOpenDetails}
+    >
+      <span class="operator-profile-card-header">
+        <strong class="operator-profile-name">${profile.name}</strong>
+        <span class="task-badge project">${OPERATOR_ROSTER_LABELS.availableBinding}</span>
+      </span>
+      <span class="operator-roster-summary-line">${personaSummary(profile)}</span>
+      <span class="operator-roster-badges">
+        <span class="skill-badge skill-badge-ok">${OPERATOR_ROSTER_LABELS.availableMode}</span>
+        <span class="skill-badge skill-badge-ok">${OPERATOR_ROSTER_LABELS.availableLifecycle}</span>
+      </span>
+      <span class="operator-roster-open-hint" data-role="operator-roster-card-open-hint">
+        ${OPERATOR_ROSTER_LABELS.detailsAction} →
+      </span>
+    </button>
+  `;
+}
+
+function ConfiguredOperatorCard({
+  instance,
+  liveEntry,
+  projectsById,
+  onOpenDetails,
+}) {
+  const primary = primaryRef(instance);
+  const live = Boolean(liveEntry?.run);
+  const primaryName = primary
+    ? refProjectName(primary, projectsById)
+    : OPERATOR_ROSTER_LABELS.noPrimaryFolder;
+  return html`
+    <button
+      type="button"
+      class="operator-profile-card operator-roster-card operator-roster-summary-card operator-configured-card"
+      data-role="operator-configured-card"
+      aria-haspopup="dialog"
+      aria-label=${`${operatorDisplayName(instance)} ${OPERATOR_ROSTER_LABELS.detailsAction}`}
+      onClick=${onOpenDetails}
+    >
+      <span class="operator-profile-card-header">
+        <strong class="operator-profile-name">${operatorDisplayName(instance)}</strong>
+        <span class=${`task-badge ${live ? 'active' : 'project'}`}>
+          ${live ? OPERATOR_ROSTER_LABELS.liveStatus : OPERATOR_ROSTER_LABELS.idleStatus}
+        </span>
+      </span>
+      <span class="operator-roster-summary-line">${primaryName}</span>
+      <span class="operator-roster-glance">
+        ${preferredAdapterLabel(instance)} ·
+        ${OPERATOR_ROSTER_LABELS.scheduleCountLabel} ${Number(instance.schedule_count) || 0}
+      </span>
+      <span class="operator-roster-open-hint" data-role="operator-roster-card-open-hint">
+        ${OPERATOR_ROSTER_LABELS.detailsAction} →
+      </span>
+    </button>
+  `;
+}
+
+function ConfiguredOperatorDetails({
+  instance,
+  liveEntry,
+  projectsById,
+  onOpenRefs,
+  onRemoveReference,
+  onOpenSchedules,
+  onChangeAdapter,
+  adapterSaving,
+}) {
+  const primary = primaryRef(instance);
+  const live = Boolean(liveEntry?.run);
+  const adapterSelectId = `operator-adapter-${instance.id}`;
+  return html`
+    <div class="operator-roster-detail-content">
+      <div class="modal-body operator-roster-detail-body">
+        <p class="form-hint">${instance.profile_name || instance.profile_id || OPERATOR_ROSTER_LABELS.unknownValue}</p>
+        <${WatchListBadges}
+          instance=${instance}
+          projectsById=${projectsById}
+          onRemoveReference=${onRemoveReference}
+        />
+        ${!primary && html`<p class="operator-schedule-warning">${OPERATOR_ROSTER_LABELS.noPrimaryFolder}</p>`}
+        ${primary && html`
+          <p class="form-hint operator-placement-detail">
+            ${projectPlacementLabel(primary.project || projectsById.get(String(primary.project_id)))}
+          </p>
+        `}
+        <div class="operator-roster-meta-grid">
+          <label for=${adapterSelectId}>${OPERATOR_ROSTER_LABELS.preferredAdapterLabel}</label>
+          <div aria-busy=${adapterSaving ? 'true' : 'false'}>
+            <${Dropdown}
+              id=${adapterSelectId}
+              className="dropdown-field operator-adapter-select"
+              dataRole="operator-adapter-select"
+              value=${preferredAdapterValue(instance)}
+              disabled=${adapterSaving}
+              onChange=${(nextValue) => onChangeAdapter(instance, nextValue, live)}
+              options=${[
+                { value: '', label: OPERATOR_ROSTER_LABELS.adapterAuto },
+                { value: 'codex', label: OPERATOR_ROSTER_LABELS.adapterCodex },
+                { value: 'claude', label: OPERATOR_ROSTER_LABELS.adapterClaude },
+              ]}
+            />
+          </div>
+          <span>${OPERATOR_ROSTER_LABELS.instanceLabel}</span>
+          <strong>${instanceLabel(instance)}</strong>
+          <span>${OPERATOR_ROSTER_LABELS.scheduleCountLabel}</span>
+          <strong>${Number(instance.schedule_count) || 0}</strong>
+          <span>${OPERATOR_ROSTER_LABELS.nextScheduleLabel}</span>
+          <strong>${formatDateTime(instance.next_schedule_at)}</strong>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="ghost" data-role="operator-folder-mapping-button" onClick=${() => onOpenRefs(instance)}>
+          ${OPERATOR_ROSTER_LABELS.folderMappings}
+        </button>
+        <button
+          type="button"
+          class="primary"
+          data-role="operator-schedule-button"
+          disabled=${!primary}
+          title=${!primary ? OPERATOR_ROSTER_LABELS.noPrimaryFolder : ''}
+          onClick=${() => onOpenSchedules(instance)}
+        >${OPERATOR_ROSTER_LABELS.scheduleAction}</button>
+      </div>
+    </div>
+  `;
+}
+
+function LiveOperatorDetails({
+  entry,
+  instance,
   operatorInstancesKnown,
   projectsById,
   runs,
@@ -251,185 +440,89 @@ function LiveOperatorCard({
   const workerCount = countActiveWorkers({ projectId, runs, taskById });
   const projectHref = projectId ? `#operator/codebases/${encodeURIComponent(String(projectId))}` : '#operator/codebases';
   const conversationHref = projectId ? `#manager/operator/${encodeURIComponent(String(projectId))}` : '#manager';
-
   return html`
-    <article class="operator-profile-card operator-roster-card operator-roster-live-card" data-role="operator-roster-live-card">
-      <div class="operator-profile-card-header">
-        <h3 class="operator-profile-name">${projectName}</h3>
-        <span class="task-badge project">${OPERATOR_ROSTER_LABELS.liveBinding}</span>
-      </div>
-      <div class="operator-roster-badges">
-        <span class="skill-badge skill-badge-ok">${OPERATOR_ROSTER_LABELS.liveMode}</span>
-        <span class="skill-badge skill-badge-ok">${OPERATOR_ROSTER_LABELS.liveLifecycle}</span>
-      </div>
-      ${operatorInstancesKnown && html`
-        <${WatchListBadges}
-          instance=${instance}
-          projectsById=${projectsById}
-          onRemoveReference=${onRemoveReference}
-        />
-      `}
-      ${!operatorInstancesKnown && html`
-        <p class="form-hint" data-role="operator-watch-list-unavailable">
-          ${OPERATOR_ROSTER_LABELS.watchListUnavailable}
-        </p>
-      `}
-      <div class="operator-roster-meta-grid">
-        <span>${OPERATOR_ROSTER_LABELS.adapterLabel}</span>
-        <strong>${adapterName(run)}</strong>
-        ${instance && html`
-          <span>${OPERATOR_ROSTER_LABELS.instanceLabel}</span>
-          <strong>${instanceLabel(instance)}</strong>
-        `}
-        <span>${OPERATOR_ROSTER_LABELS.nodeLabel}</span>
-        <strong>${nodeName(run)}</strong>
-        <span>${OPERATOR_ROSTER_LABELS.activeWorkerRuns}</span>
-        <strong data-role="operator-roster-worker-count">${workerCount}</strong>
-      </div>
-      <div class="operator-roster-footer">
-        <span class="operator-roster-run-id">${shortRunId(run.id)}</span>
-        <span class="operator-roster-actions">
-          <a
-            class="ghost small"
-            data-role="operator-roster-live-primary-link"
-            href=${conversationHref}
-          >${OPERATOR_ROSTER_LABELS.openConversation}</a>
-          <a
-            class="ghost small"
-            data-role="operator-roster-live-project-link"
-            href=${projectHref}
-          >${OPERATOR_ROSTER_LABELS.openProject}</a>
-          ${operatorInstancesKnown && instance && html`
-            <button
-              type="button"
-              class="ghost small"
-              data-role="operator-roster-add-reference-button"
-              aria-haspopup="dialog"
-              aria-label=${`${projectName} ${OPERATOR_ROSTER_LABELS.addReference}`}
-              onClick=${() => onOpenRefs(instance)}
-            >${OPERATOR_ROSTER_LABELS.addReference}</button>
-          `}
-        </span>
-      </div>
-    </article>
-  `;
-}
-
-function AvailableOperatorCard({ profile, onInvoke }) {
-  return html`
-    <article
-      class="operator-profile-card operator-roster-card operator-roster-available-card"
-      data-role="operator-roster-available-card"
-    >
-      <div class="operator-profile-card-header">
-        <h3 class="operator-profile-name">${profile.name}</h3>
-        <span class="task-badge project">${OPERATOR_ROSTER_LABELS.availableBinding}</span>
-      </div>
-      <p class="operator-profile-persona">${personaSummary(profile)}</p>
-      <div class="operator-roster-badges">
-        <span class="skill-badge skill-badge-ok">${OPERATOR_ROSTER_LABELS.availableMode}</span>
-        <span class="skill-badge skill-badge-ok">${OPERATOR_ROSTER_LABELS.availableLifecycle}</span>
-        <span class="skill-badge skill-badge-ok">${OPERATOR_ROSTER_LABELS.readyToInvoke}</span>
-      </div>
-      <div class="operator-roster-capability-summary">
-        <span>${OPERATOR_ROSTER_LABELS.capabilitySummaryLabel}</span>
-        <strong>${capabilitySummary(profile)}</strong>
-      </div>
-      <div class="operator-roster-footer">
-        <span class="operator-roster-actions">
-          <button
-            type="button"
-            class="ghost small"
-            data-role="operator-roster-available-invoke-button"
-            aria-haspopup="dialog"
-            aria-label=${`${profile.name} ${OPERATOR_ROSTER_LABELS.invokeOperator}`}
-            onClick=${() => onInvoke(profile)}
-          >${OPERATOR_ROSTER_LABELS.invokeOperator}</button>
-          <a
-            class="ghost small"
-            data-role="operator-roster-available-profile-link"
-            href="#operator/profiles"
-            aria-label=${`${profile.name} ${OPERATOR_ROSTER_LABELS.openProfile}`}
-          >${OPERATOR_ROSTER_LABELS.openProfile}</a>
-        </span>
-      </div>
-    </article>
-  `;
-}
-
-function ConfiguredOperatorCard({
-  instance,
-  liveEntry,
-  projectsById,
-  onOpenRefs,
-  onRemoveReference,
-  onOpenSchedules,
-  onChangeAdapter,
-  adapterSaving,
-}) {
-  const primary = primaryRef(instance);
-  const live = Boolean(liveEntry?.run);
-  const adapterSelectId = `operator-adapter-${instance.id}`;
-  return html`
-    <article class="operator-profile-card operator-roster-card operator-configured-card" data-role="operator-configured-card">
-      <div class="operator-profile-card-header">
-        <h3 class="operator-profile-name">${operatorDisplayName(instance)}</h3>
-        <span class=${`task-badge ${live ? 'active' : 'project'}`}>
-          ${live ? OPERATOR_ROSTER_LABELS.liveStatus : OPERATOR_ROSTER_LABELS.idleStatus}
-        </span>
-      </div>
-      <p class="form-hint">${instance.profile_name || instance.profile_id || OPERATOR_ROSTER_LABELS.unknownValue}</p>
-      <${WatchListBadges}
-        instance=${instance}
-        projectsById=${projectsById}
-        onRemoveReference=${onRemoveReference}
-      />
-      ${!primary && html`<p class="operator-schedule-warning">${OPERATOR_ROSTER_LABELS.noPrimaryFolder}</p>`}
-      ${primary && html`
-        <p class="form-hint operator-placement-detail">
-          ${projectPlacementLabel(primary.project || projectsById.get(String(primary.project_id)))}
-        </p>
-      `}
-      <div class="operator-roster-meta-grid">
-        <label for=${adapterSelectId}>${OPERATOR_ROSTER_LABELS.preferredAdapterLabel}</label>
-        <div aria-busy=${adapterSaving ? 'true' : 'false'}>
-          <${Dropdown}
-            id=${adapterSelectId}
-            className="dropdown-field operator-adapter-select"
-            dataRole="operator-adapter-select"
-            value=${preferredAdapterValue(instance)}
-            disabled=${adapterSaving}
-            onChange=${(nextValue) => onChangeAdapter(instance, nextValue, live)}
-            options=${[
-              { value: '', label: OPERATOR_ROSTER_LABELS.adapterAuto },
-              { value: 'codex', label: OPERATOR_ROSTER_LABELS.adapterCodex },
-              { value: 'claude', label: OPERATOR_ROSTER_LABELS.adapterClaude },
-            ]}
-          />
+    <div class="operator-roster-detail-content">
+      <div class="modal-body operator-roster-detail-body">
+        <div class="operator-roster-badges">
+          <span class="skill-badge skill-badge-ok">${OPERATOR_ROSTER_LABELS.liveMode}</span>
+          <span class="skill-badge skill-badge-ok">${OPERATOR_ROSTER_LABELS.liveLifecycle}</span>
         </div>
-        <span>${OPERATOR_ROSTER_LABELS.instanceLabel}</span>
-        <strong>${instanceLabel(instance)}</strong>
-        <span>${OPERATOR_ROSTER_LABELS.scheduleCountLabel}</span>
-        <strong>${Number(instance.schedule_count) || 0}</strong>
-        <span>${OPERATOR_ROSTER_LABELS.nextScheduleLabel}</span>
-        <strong>${formatDateTime(instance.next_schedule_at)}</strong>
+        ${operatorInstancesKnown && html`
+          <${WatchListBadges}
+            instance=${instance}
+            projectsById=${projectsById}
+            onRemoveReference=${onRemoveReference}
+          />
+        `}
+        ${!operatorInstancesKnown && html`
+          <p class="form-hint" data-role="operator-watch-list-unavailable">
+            ${OPERATOR_ROSTER_LABELS.watchListUnavailable}
+          </p>
+        `}
+        <div class="operator-roster-meta-grid">
+          <span>${OPERATOR_ROSTER_LABELS.adapterLabel}</span>
+          <strong>${adapterName(run)}</strong>
+          ${instance && html`
+            <span>${OPERATOR_ROSTER_LABELS.instanceLabel}</span>
+            <strong>${instanceLabel(instance)}</strong>
+          `}
+          <span>${OPERATOR_ROSTER_LABELS.nodeLabel}</span>
+          <strong>${nodeName(run)}</strong>
+          <span>${OPERATOR_ROSTER_LABELS.activeWorkerRuns}</span>
+          <strong data-role="operator-roster-worker-count">${workerCount}</strong>
+          <span>run</span>
+          <strong class="operator-roster-run-id">${shortRunId(run.id)}</strong>
+        </div>
       </div>
-      <div class="operator-roster-footer">
-        <span class="operator-roster-actions">
-          <button type="button" class="ghost small" data-role="operator-folder-mapping-button" onClick=${() => onOpenRefs(instance)}>
-            ${OPERATOR_ROSTER_LABELS.folderMappings}
-          </button>
+      <div class="modal-footer">
+        ${operatorInstancesKnown && instance && html`
           <button
             type="button"
-            class="ghost small"
-            data-role="operator-schedule-button"
-            disabled=${!primary}
-            title=${!primary ? OPERATOR_ROSTER_LABELS.noPrimaryFolder : ''}
-            onClick=${() => onOpenSchedules(instance)}
-          >${OPERATOR_ROSTER_LABELS.scheduleAction}</button>
-        </span>
+            class="ghost"
+            data-role="operator-roster-add-reference-button"
+            onClick=${() => onOpenRefs(instance)}
+          >${OPERATOR_ROSTER_LABELS.addReference}</button>
+        `}
+        <a class="ghost" data-role="operator-roster-live-project-link" href=${projectHref}>
+          ${OPERATOR_ROSTER_LABELS.openProject}
+        </a>
+        <a class="primary" data-role="operator-roster-live-primary-link" href=${conversationHref}>
+          ${OPERATOR_ROSTER_LABELS.openConversation}
+        </a>
       </div>
-    </article>
+    </div>
+  `;
+}
+
+function AvailableOperatorDetails({ profile, onInvoke }) {
+  return html`
+    <div class="operator-roster-detail-content">
+      <div class="modal-body operator-roster-detail-body">
+        <p class="operator-profile-persona">${personaSummary(profile)}</p>
+        <div class="operator-roster-badges">
+          <span class="skill-badge skill-badge-ok">${OPERATOR_ROSTER_LABELS.availableMode}</span>
+          <span class="skill-badge skill-badge-ok">${OPERATOR_ROSTER_LABELS.availableLifecycle}</span>
+          <span class="skill-badge skill-badge-ok">${OPERATOR_ROSTER_LABELS.readyToInvoke}</span>
+        </div>
+        <div class="operator-roster-capability-summary">
+          <span>${OPERATOR_ROSTER_LABELS.capabilitySummaryLabel}</span>
+          <strong>${capabilitySummary(profile)}</strong>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <a
+          class="ghost"
+          data-role="operator-roster-available-profile-link"
+          href="#operator/profiles"
+        >${OPERATOR_ROSTER_LABELS.openProfile}</a>
+        <button
+          type="button"
+          class="primary"
+          data-role="operator-roster-available-invoke-button"
+          onClick=${() => onInvoke(profile)}
+        >${OPERATOR_ROSTER_LABELS.invokeOperator}</button>
+      </div>
+    </div>
   `;
 }
 
@@ -440,6 +533,7 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
   const [loadingStatus, setLoadingStatus] = useState(true);
   const [loadingProfiles, setLoadingProfiles] = useState(true);
   const [invokeProfile, setInvokeProfile] = useState(null);
+  const [detailSelection, setDetailSelection] = useState(null);
   const [showCreateOperator, setShowCreateOperator] = useState(false);
   const [createDisplayName, setCreateDisplayName] = useState('');
   const [createProfileId, setCreateProfileId] = useState('');
@@ -847,7 +941,40 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
   const top = managerStatus?.top || (managerStatus?.run
     ? { conversationId: 'top', run: managerStatus.run }
     : null);
+  const detailConfiguredInstance = detailSelection?.kind === 'configured'
+    ? instancesById.get(String(detailSelection.id)) || null
+    : null;
+  const detailLiveEntry = detailSelection?.kind === 'live'
+    ? pms.find((entry) => String(entry?.run?.id || entry?.conversationId || '') === String(detailSelection.id)) || null
+    : null;
+  const detailLiveInstance = detailLiveEntry
+    ? resolveLiveInstance(detailLiveEntry, { instancesById, primaryInstanceByProject })
+    : null;
+  const detailAvailableProfile = detailSelection?.kind === 'available'
+    ? profiles.find((profile) => String(profile?.id || '') === String(detailSelection.id)) || null
+    : null;
+  const detailLivePrimary = primaryRef(detailLiveInstance);
+  const detailLiveProjectId = parsedProjectId(detailLiveEntry) || detailLivePrimary?.project_id;
+  const detailLiveProject = detailLiveProjectId
+    ? projectsById.get(String(detailLiveProjectId))
+    : null;
+  const detailTitle = detailConfiguredInstance
+    ? operatorDisplayName(detailConfiguredInstance)
+    : detailLiveEntry
+      ? (detailLivePrimary
+          ? refProjectName(detailLivePrimary, projectsById)
+          : (detailLiveProject?.name || detailLiveEntry.run?.project_name || detailLiveProjectId || OPERATOR_ROSTER_LABELS.unknownProject))
+      : detailAvailableProfile?.name || '';
+  const detailSubtitle = detailConfiguredInstance
+    ? (detailConfiguredInstance.profile_name || detailConfiguredInstance.profile_id || OPERATOR_ROSTER_LABELS.unknownValue)
+    : detailLiveEntry
+      ? OPERATOR_ROSTER_LABELS.liveBinding
+      : detailAvailableProfile
+        ? OPERATOR_ROSTER_LABELS.availableBinding
+        : '';
+  const detailOpen = Boolean(detailConfiguredInstance || detailLiveEntry || detailAvailableProfile);
   const invokeModalTitleId = 'operator-roster-specialist-invoke-title';
+  const detailModalTitleId = 'operator-roster-detail-title';
   const refsModalTitleId = 'operator-roster-refs-title';
   const createModalTitleId = 'operator-roster-create-title';
   const scheduleModalTitleId = 'operator-roster-schedules-title';
@@ -991,11 +1118,7 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
                 instance=${instance}
                 liveEntry=${liveEntryByInstance.get(String(instance.id))}
                 projectsById=${projectsById}
-                onOpenRefs=${openRefsEditor}
-                onRemoveReference=${removeReference}
-                onOpenSchedules=${openSchedules}
-                onChangeAdapter=${changeOperatorAdapter}
-                adapterSaving=${adapterSavingIds.has(instance.id)}
+                onOpenDetails=${() => setDetailSelection({ kind: 'configured', id: instance.id })}
               />
             `)}
           </div>
@@ -1025,8 +1148,10 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
                 projectsById=${projectsById}
                 runs=${runs}
                 taskById=${taskById}
-                onOpenRefs=${openRefsEditor}
-                onRemoveReference=${removeReference}
+                onOpenDetails=${() => setDetailSelection({
+                  kind: 'live',
+                  id: entry?.run?.id || entry?.conversationId,
+                })}
               />
             `)}
           </div>
@@ -1051,12 +1176,71 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
               <${AvailableOperatorCard}
                 key=${profile.id}
                 profile=${profile}
-                onInvoke=${setInvokeProfile}
+                onOpenDetails=${() => setDetailSelection({ kind: 'available', id: profile.id })}
               />
             `)}
           </div>
         `}
       </section>
+
+      <${Modal}
+        open=${detailOpen}
+        onClose=${() => setDetailSelection(null)}
+        labelledBy=${detailModalTitleId}
+        maxWidth="640px"
+      >
+        <div class="modal-header">
+          <div>
+            <h2 class="modal-title" id=${detailModalTitleId}>${detailTitle} ${OPERATOR_ROSTER_LABELS.detailsTitleSuffix}</h2>
+            <p class="modal-subtitle">${detailSubtitle}</p>
+          </div>
+          <button type="button" class="ghost small" data-role="operator-roster-detail-close" onClick=${() => setDetailSelection(null)}>
+            ${COMMON_ACTIONS.close}
+          </button>
+        </div>
+        ${detailConfiguredInstance && html`
+          <${ConfiguredOperatorDetails}
+            instance=${detailConfiguredInstance}
+            liveEntry=${liveEntryByInstance.get(String(detailConfiguredInstance.id))}
+            projectsById=${projectsById}
+            onOpenRefs=${(instance) => {
+              setDetailSelection(null);
+              openRefsEditor(instance);
+            }}
+            onRemoveReference=${removeReference}
+            onOpenSchedules=${(instance) => {
+              setDetailSelection(null);
+              openSchedules(instance);
+            }}
+            onChangeAdapter=${changeOperatorAdapter}
+            adapterSaving=${adapterSavingIds.has(detailConfiguredInstance.id)}
+          />
+        `}
+        ${detailLiveEntry && html`
+          <${LiveOperatorDetails}
+            entry=${detailLiveEntry}
+            instance=${detailLiveInstance}
+            operatorInstancesKnown=${operatorInstancesKnown}
+            projectsById=${projectsById}
+            runs=${runs}
+            taskById=${taskById}
+            onOpenRefs=${(instance) => {
+              setDetailSelection(null);
+              openRefsEditor(instance);
+            }}
+            onRemoveReference=${removeReference}
+          />
+        `}
+        ${detailAvailableProfile && html`
+          <${AvailableOperatorDetails}
+            profile=${detailAvailableProfile}
+            onInvoke=${(profile) => {
+              setDetailSelection(null);
+              setInvokeProfile(profile);
+            }}
+          />
+        `}
+      <//>
 
       <${Modal}
         open=${Boolean(invokeProfile)}

@@ -7849,7 +7849,7 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 
 .operator-roster-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 12px;
 }
 
@@ -7884,6 +7884,62 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .operator-roster-card:hover {
   border-color: var(--accent-muted);
   background: var(--bg-hover);
+}
+
+.operator-roster-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.operator-roster-summary-card {
+  appearance: none;
+  width: 100%;
+  min-height: 124px;
+  margin: 0;
+  font: inherit;
+  text-align: left;
+  justify-content: flex-start;
+}
+
+.operator-roster-summary-card .operator-profile-card-header {
+  width: 100%;
+  justify-content: space-between;
+  flex-wrap: nowrap;
+}
+
+.operator-roster-summary-card .operator-profile-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.operator-roster-summary-line {
+  display: -webkit-box;
+  min-height: 18px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+
+.operator-roster-glance {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.operator-roster-glance strong {
+  color: var(--text-primary);
+}
+
+.operator-roster-open-hint {
+  align-self: flex-end;
+  margin-top: auto;
+  color: var(--accent-light);
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .operator-roster-badges {
@@ -8009,6 +8065,22 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 
 .operator-configured-card {
   border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+}
+
+.operator-roster-detail-content,
+.operator-roster-detail-body {
+  display: grid;
+  gap: 14px;
+}
+
+.operator-roster-detail-body .operator-profile-persona {
+  display: block;
+  margin: 0;
+  -webkit-line-clamp: unset;
+}
+
+.operator-roster-detail-body .operator-watch-list {
+  padding: 2px 0;
 }
 
 .operator-schedule-warning {
