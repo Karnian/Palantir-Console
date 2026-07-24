@@ -40,6 +40,15 @@ function waitImmediate() {
   return new Promise(resolve => setImmediate(resolve));
 }
 
+async function waitFor(predicate, { timeoutMs = 3000, intervalMs = 10 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) return false;
+    await new Promise(resolve => setTimeout(resolve, intervalMs));
+  }
+  return true;
+}
+
 test('issue #113: stdio env is file-backed, argv-safe, mode 0600, and round-trips exact command/args/env', (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-mcp-secret-test-'));
   t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
@@ -624,6 +633,7 @@ test('issue #113: default local placement write failure removes both fresh temp 
   const originalWriteFileSync = fs.writeFileSync;
   const attemptedPaths = [];
   let spawns = 0;
+  let cleanupFinished = false;
   fs.writeFileSync = function failWrapperWrite(filePath, ...args) {
     attemptedPaths.push(String(filePath));
     if (path.basename(String(filePath)) === WRAPPER_FILENAME) {
@@ -646,14 +656,16 @@ test('issue #113: default local placement write failure removes both fresh temp 
       },
     });
     assert.equal(adapter.runTurn('run_local_write_failure', { text: 'go' }).accepted, true);
-    for (let i = 0; i < 20 && attemptedPaths.some(p => fs.existsSync(path.dirname(p))); i++) {
-      await waitImmediate();
-    }
+    cleanupFinished = await waitFor(
+      () => attemptedPaths.length === 2
+        && attemptedPaths.every(filePath => !fs.existsSync(path.dirname(filePath))),
+    );
   } finally {
     fs.writeFileSync = originalWriteFileSync;
   }
 
   assert.equal(spawns, 0);
+  assert.equal(cleanupFinished, true, 'placement failure cleanup completed before the deadline');
   assert.equal(attemptedPaths.length, 2, 'prompt write then wrapper write');
   for (const filePath of attemptedPaths) {
     assert.equal(fs.existsSync(path.dirname(filePath)), false, `${path.dirname(filePath)} was removed`);
