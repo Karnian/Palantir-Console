@@ -18,6 +18,7 @@ import {
 } from '../lib/copy.js';
 import { EmptyState } from './EmptyState.js';
 import { DirectoryPicker } from './BoardView.js';
+import { Dropdown } from './Dropdown.js';
 import { Modal } from './Modal.js';
 import { conversationIdMatchesProject } from '../lib/conversationId.js';
 
@@ -197,21 +198,18 @@ function ProjectNodeSelect({ id, value, onChange, nodes, loading }) {
     && Number(node.files_only) !== 1);
   return html`
     <div>
-      <select
+      <${Dropdown}
         id=${id}
-        class="form-select"
+        className="dropdown-field"
         value=${value}
-        onChange=${e => onChange(e.target.value)}
+        onChange=${onChange}
         disabled=${loading}
-      >
-        <option value="">${loading ? PROJECTS_LABELS.nodeSelectLoading : PROJECTS_LABELS.nodeDefaultOption}</option>
-        ${selectedMissing && html`<option value=${value}>${value}</option>`}
-        ${remoteNodes.map(node => html`
-          <option key=${node.id} value=${node.id}>
-            ${nodeOptionLabel(node)}
-          </option>
-        `)}
-      </select>
+        options=${[
+          { value: '', label: loading ? PROJECTS_LABELS.nodeSelectLoading : PROJECTS_LABELS.nodeDefaultOption },
+          ...(selectedMissing ? [{ value, label: value }] : []),
+          ...remoteNodes.map(node => ({ value: node.id, label: nodeOptionLabel(node) })),
+        ]}
+      />
       ${selectedUnreachable && html`
         <div
           data-role="project-node-warning"
@@ -228,16 +226,17 @@ function SourceTypeToggle({ id, value, onChange }) {
   return html`
     <div class="form-field">
       <label class="form-label" for=${id}>${PROJECTS_LABELS.sourceTypeLabel}</label>
-      <select
+      <${Dropdown}
         id=${id}
-        class="form-select"
-        data-role="project-source-toggle"
+        className="dropdown-field"
+        dataRole="project-source-toggle"
         value=${value}
-        onChange=${e => onChange(e.target.value === SOURCE_TYPE_LEGACY ? SOURCE_TYPE_LEGACY : SOURCE_TYPE_GIT)}
-      >
-        <option value=${SOURCE_TYPE_GIT}>${PROJECTS_LABELS.sourceTypeGit}</option>
-        <option value=${SOURCE_TYPE_LEGACY}>${PROJECTS_LABELS.sourceTypeLegacy}</option>
-      </select>
+        onChange=${next => onChange(next === SOURCE_TYPE_LEGACY ? SOURCE_TYPE_LEGACY : SOURCE_TYPE_GIT)}
+        options=${[
+          { value: SOURCE_TYPE_GIT, label: PROJECTS_LABELS.sourceTypeGit },
+          { value: SOURCE_TYPE_LEGACY, label: PROJECTS_LABELS.sourceTypeLegacy },
+        ]}
+      />
     </div>
   `;
 }
@@ -302,16 +301,17 @@ function McpSourceFields({
   return html`
     <div class="form-field">
       <label class="form-label" for="${prefix}-project-mcp-source">${PROJECTS_LABELS.mcpConfigSourceLabel}</label>
-      <select
+      <${Dropdown}
         id="${prefix}-project-mcp-source"
-        class="form-select"
-        data-role="project-mcp-source"
+        className="dropdown-field"
+        dataRole="project-mcp-source"
         value=${normalizedSource}
-        onChange=${e => onMcpConfigSource(normalizeMcpConfigSource(e.target.value))}
-      >
-        <option value=${MCP_SOURCE_CONTROL_PLANE}>${PROJECTS_LABELS.mcpConfigControlPlaneOption}</option>
-        <option value=${MCP_SOURCE_REPO_RELPATH}>${PROJECTS_LABELS.mcpConfigRepoRelpathOption}</option>
-      </select>
+        onChange=${next => onMcpConfigSource(normalizeMcpConfigSource(next))}
+        options=${[
+          { value: MCP_SOURCE_CONTROL_PLANE, label: PROJECTS_LABELS.mcpConfigControlPlaneOption },
+          { value: MCP_SOURCE_REPO_RELPATH, label: PROJECTS_LABELS.mcpConfigRepoRelpathOption },
+        ]}
+      />
     </div>
     ${normalizedSource === MCP_SOURCE_REPO_RELPATH
       ? html`
@@ -499,11 +499,18 @@ function ProjectSkillPacks({ projectId }) {
       })}
       ${available.length > 0 && html`
         <div class="form-row" style=${{ gap: '6px', marginTop: '8px' }}>
-          <select class="form-select" style=${{ flex: 1, fontSize: '12px' }} value=${addingId}
-            onChange=${e => setAddingId(e.target.value)}>
-            <option value="">${PROJECTS_LABELS.skillPackAddOption}</option>
-            ${available.map(p => html`<option key=${p.id} value=${p.id}>${p.icon || '\u2662'} ${p.name} (${p.scope})</option>`)}
-          </select>
+          <div style=${{ flex: 1, minWidth: 0 }}>
+            <${Dropdown}
+              className="dropdown-field"
+              ariaLabel=${PROJECTS_LABELS.skillPackAddOption}
+              value=${addingId}
+              onChange=${setAddingId}
+              options=${[
+                { value: '', label: PROJECTS_LABELS.skillPackAddOption },
+                ...available.map(p => ({ value: p.id, label: `${p.icon || '\u2662'} ${p.name} (${p.scope})` })),
+              ]}
+            />
+          </div>
           <button class="ghost small" onClick=${handleAdd} disabled=${!addingId}>${PROJECTS_LABELS.skillPackAddBtn}</button>
         </div>
       `}

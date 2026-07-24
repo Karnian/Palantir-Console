@@ -181,4 +181,77 @@ function flushEffects(ms = 100) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-module.exports = { createPreactEnv, flushEffects, loadComponent, transformComponentSource, VENDOR_DIR, COMPONENTS_DIR };
+/**
+ * Open a Dropdown's menu (no-op if already open) and return its `.dropdown`
+ * wrapper. Idempotent so a read-then-pick sequence doesn't toggle it shut.
+ */
+async function openDropdown(env, trigger) {
+  if (!trigger) throw new Error('openDropdown: trigger element not found');
+  if (trigger.getAttribute('aria-expanded') !== 'true') {
+    trigger.click();
+    // Two flushes: the click → open re-render, then the useEffect that
+    // focuses the menu and seeds hoverIdx.
+    await flushEffects(20);
+    await flushEffects(20);
+  }
+  const wrapper = trigger.closest('.dropdown');
+  if (!wrapper) throw new Error('openDropdown: trigger is not inside a .dropdown');
+  return wrapper;
+}
+
+/** Open a Dropdown and read its options as `[{ value, label }]`. */
+async function readDropdownOptions(env, trigger) {
+  const wrapper = await openDropdown(env, trigger);
+  return Array.from(wrapper.querySelectorAll('.dropdown-item')).map(item => ({
+    value: item.dataset.value,
+    label: item.querySelector('.dropdown-item-label')?.textContent ?? '',
+  }));
+}
+
+/**
+ * Pick a value from a Dropdown — the replacement for the old
+ * `select.value = x; dispatch('change')` helper every view test used before
+ * the 2026-07-23 dropdown unification ported all native `<select>`s onto the
+ * shared component.
+ *
+ * `trigger` is the `.dropdown-button` (queryable by its `id` or `data-role`,
+ * both of which the component forwards). Opening is a real click, and the
+ * option is matched on `data-value` so tests stay value-driven exactly like
+ * they were with `<option value="…">`.
+ *
+ * Requires the test env to have loaded the Dropdown component
+ * (`env.loadComponent('Dropdown')`) before rendering the view.
+ */
+async function pickDropdownOption(env, trigger, value) {
+  if (!trigger) throw new Error('pickDropdownOption: trigger element not found');
+  const wrapper = await openDropdown(env, trigger);
+  const item = wrapper.querySelector(`.dropdown-item[data-value="${value}"]`);
+  if (!item) {
+    const available = wrapper
+      ? Array.from(wrapper.querySelectorAll('.dropdown-item')).map(el => el.dataset.value)
+      : [];
+    throw new Error(`pickDropdownOption: option "${value}" not found (available: ${available.join(', ')})`);
+  }
+  item.click();
+  await flushEffects(20);
+  return item;
+}
+
+/** Current value of a Dropdown trigger — replaces `select.value` reads. */
+function dropdownValue(trigger) {
+  if (!trigger) throw new Error('dropdownValue: trigger element not found');
+  return trigger.dataset.value ?? '';
+}
+
+module.exports = {
+  createPreactEnv,
+  flushEffects,
+  loadComponent,
+  transformComponentSource,
+  openDropdown,
+  readDropdownOptions,
+  pickDropdownOption,
+  dropdownValue,
+  VENDOR_DIR,
+  COMPONENTS_DIR,
+};

@@ -14,6 +14,7 @@ const html = htm.bind(h);
 import { apiFetch } from '../lib/api.js';
 import { addToast, apiFetchWithToast } from '../lib/toast.js';
 import { EmptyState } from './EmptyState.js';
+import { Dropdown } from './Dropdown.js';
 import { Modal } from './Modal.js';
 
 const STATUS_TABS = [
@@ -92,11 +93,15 @@ export function MemoryView({ projects = [] }) {
       <div class="page-header">
         <h1>메모리</h1>
         <div class="memory-controls">
-          <select value=${projectId} onChange=${(e) => setProjectId(e.target.value)} aria-label="프로젝트 폴더 선택">
-            ${projects.length === 0
-              ? html`<option value="">프로젝트 폴더 없음</option>`
-              : projects.map((p) => html`<option value=${p.id}>${p.name}</option>`)}
-          </select>
+          <${Dropdown}
+            wide
+            ariaLabel="프로젝트 폴더 선택"
+            value=${projectId}
+            onChange=${setProjectId}
+            options=${projects.length === 0
+              ? [{ value: '', label: '프로젝트 폴더 없음' }]
+              : projects.map((p) => ({ value: p.id, label: p.name }))}
+          />
           <div class="memory-tabs" role="tablist" aria-label="메모리 상태 필터">
             ${STATUS_TABS.map((tab) => html`
               <button

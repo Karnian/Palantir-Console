@@ -13,6 +13,7 @@ import { COMMON_ACTIONS, NODES_LABELS, QUEUE_REASON_LABELS, RUN_STATUS_LABELS, s
 import { formatTime, parseDate } from '../lib/format.js';
 import { sseBroker, useNodeSummary } from '../lib/hooks.js';
 import { EmptyState } from './EmptyState.js';
+import { Dropdown } from './Dropdown.js';
 import { Modal } from './Modal.js';
 
 function Loading() { return html`<div class="loading">${COMMON_ACTIONS.loading}</div>`; }
@@ -402,16 +403,17 @@ function NodeModal({ open, node, onClose, onSaved }) {
         </div>
         <div class="form-row">
           <label class="form-label" for="node-kind">${NODES_LABELS.fieldKind}</label>
-          <select
+          <${Dropdown}
             id="node-kind"
-            class="form-select"
+            className="dropdown-field"
             value=${kind}
-            onChange=${e => setKind(e.target.value)}
+            onChange=${setKind}
             disabled=${isEdit}
-          >
-            <option value="local">${NODES_LABELS.kindLocal}</option>
-            <option value="ssh">${NODES_LABELS.kindSsh}</option>
-          </select>
+            options=${[
+              { value: 'local', label: NODES_LABELS.kindLocal },
+              { value: 'ssh', label: NODES_LABELS.kindSsh },
+            ]}
+          />
           ${isEdit && html`
             <div class="small" style=${{ color: 'var(--text-muted)', marginTop: '4px' }}>
               ${NODES_LABELS.kindImmutableHint}

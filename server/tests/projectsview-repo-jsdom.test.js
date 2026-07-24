@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createPreactEnv, flushEffects } = require('./helpers/jsdom-preact');
+const { createPreactEnv, flushEffects, pickDropdownOption } = require('./helpers/jsdom-preact');
 
 async function waitFor(assertion, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;
@@ -77,10 +77,12 @@ function setInput(env, input, value) {
   input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
 }
 
-function setSelect(env, select, value) {
-  assert.ok(select, 'expected select to exist');
-  select.value = value;
-  select.dispatchEvent(new env.window.Event('change', { bubbles: true }));
+// Dropdown unification (2026-07-23): these controls are shared `Dropdown`
+// components now, so a value change is an open-click + option-click rather
+// than a `<select>.value` assignment.
+async function setSelect(env, trigger, value) {
+  assert.ok(trigger, 'expected dropdown trigger to exist');
+  await pickDropdownOption(env, trigger, value);
 }
 
 test('ProjectsView project source defaults to git and toggles repo/legacy fields', async (t) => {
@@ -90,6 +92,7 @@ test('ProjectsView project source defaults to git and toggles repo/legacy fields
     if (url === '/api/nodes') return { nodes: [] };
     return {};
   });
+  env.loadComponent('Dropdown');
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env);
@@ -98,13 +101,13 @@ test('ProjectsView project source defaults to git and toggles repo/legacy fields
   const sourceToggle = await waitFor(() => {
     const el = root.querySelector('[data-role="project-source-toggle"]');
     assert.ok(el);
-    assert.equal(el.value, 'git');
+    assert.equal(el.dataset.value, 'git');
     assert.ok(root.querySelector('[data-role="project-repo-url"]'));
     assert.equal(root.querySelector('[data-role="project-legacy-directory"]'), null);
     return el;
   });
 
-  setSelect(env, sourceToggle, 'legacy_directory');
+  await setSelect(env, sourceToggle, 'legacy_directory');
 
   await waitFor(() => {
     assert.equal(root.querySelector('[data-role="project-repo-url"]'), null);
@@ -112,7 +115,7 @@ test('ProjectsView project source defaults to git and toggles repo/legacy fields
     assert.ok(root.querySelector('.directory-picker-stub'));
   });
 
-  setSelect(env, root.querySelector('[data-role="project-source-toggle"]'), 'git');
+  await setSelect(env, root.querySelector('[data-role="project-source-toggle"]'), 'git');
 
   await waitFor(() => {
     assert.ok(root.querySelector('[data-role="project-repo-url"]'));
@@ -132,6 +135,7 @@ test('ProjectsView create sends git source payload without legacy directory fiel
     }
     return {};
   });
+  env.loadComponent('Dropdown');
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env);
@@ -142,7 +146,7 @@ test('ProjectsView create sends git source payload without legacy directory fiel
   setInput(env, root.querySelector('[data-role="project-repo-url"]'), 'https://github.com/acme/repo.git');
   setInput(env, root.querySelector('[data-role="project-repo-ref"]'), 'main');
   setInput(env, root.querySelector('[data-role="project-repo-subdir"]'), 'apps/web');
-  setSelect(env, root.querySelector('[data-role="project-mcp-source"]'), 'repo_relpath');
+  await setSelect(env, root.querySelector('[data-role="project-mcp-source"]'), 'repo_relpath');
 
   await waitFor(() => assert.ok(root.querySelector('[data-role="project-mcp-config-relpath"]')));
   setInput(env, root.querySelector('[data-role="project-mcp-config-relpath"]'), '.palantir/mcp.json');
@@ -175,6 +179,7 @@ test('ProjectsView create sends legacy directory payload without repo fields', a
     }
     return {};
   });
+  env.loadComponent('Dropdown');
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env);
@@ -185,7 +190,7 @@ test('ProjectsView create sends legacy directory payload without repo fields', a
     assert.ok(el);
     return el;
   });
-  setSelect(env, sourceToggle, 'legacy_directory');
+  await setSelect(env, sourceToggle, 'legacy_directory');
 
   await waitFor(() => assert.ok(root.querySelector('.directory-picker-stub')));
   setInput(env, root.querySelector('#new-project-name'), 'Legacy Project');
@@ -225,6 +230,7 @@ test('ProjectsView create maps repo preflight reason to friendly toast', async (
     }
     return {};
   }, toasts);
+  env.loadComponent('Dropdown');
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env);
@@ -255,6 +261,7 @@ test('ProjectsView edit maps repo preflight reason to friendly toast', async (t)
     }
     return {};
   }, toasts);
+  env.loadComponent('Dropdown');
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env, {
@@ -284,6 +291,7 @@ test('ProjectsView edit detects legacy source_type before stale repo_url', async
     if (url === '/api/nodes') return { nodes: [] };
     return {};
   });
+  env.loadComponent('Dropdown');
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env, {
@@ -301,7 +309,7 @@ test('ProjectsView edit detects legacy source_type before stale repo_url', async
   await waitFor(() => {
     const sourceToggle = root.querySelector('[data-role="project-source-toggle"]');
     assert.ok(sourceToggle);
-    assert.equal(sourceToggle.value, 'legacy_directory');
+    assert.equal(sourceToggle.dataset.value, 'legacy_directory');
     assert.equal(root.querySelector('[data-role="project-repo-url"]'), null);
     assert.ok(root.querySelector('.directory-picker-stub'));
   });
@@ -319,6 +327,7 @@ test('ProjectsView edit clears git fields when switching to legacy source', asyn
     }
     return {};
   });
+  env.loadComponent('Dropdown');
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env, {
@@ -341,7 +350,7 @@ test('ProjectsView edit clears git fields when switching to legacy source', asyn
     assert.ok(el);
     return el;
   });
-  setSelect(env, sourceToggle, 'legacy_directory');
+  await setSelect(env, sourceToggle, 'legacy_directory');
   await waitFor(() => assert.ok(root.querySelector('.directory-picker-stub')));
   setInput(env, root.querySelector('.directory-picker-stub'), '/srv/legacy');
   await flushEffects(20);
@@ -371,6 +380,7 @@ test('ProjectsView edit clears legacy fields when switching to git source', asyn
     }
     return {};
   });
+  env.loadComponent('Dropdown');
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env, {
@@ -391,7 +401,7 @@ test('ProjectsView edit clears legacy fields when switching to git source', asyn
     assert.ok(el);
     return el;
   });
-  setSelect(env, sourceToggle, 'git');
+  await setSelect(env, sourceToggle, 'git');
   await waitFor(() => assert.ok(root.querySelector('[data-role="project-repo-url"]')));
   setInput(env, root.querySelector('[data-role="project-repo-url"]'), 'https://github.com/acme/repo.git');
   await flushEffects(20);
@@ -421,6 +431,7 @@ test('ProjectsView warm operator action posts warm endpoint, disables in-flight,
     }
     return {};
   }, toasts);
+  env.loadComponent('Dropdown');
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env, {
@@ -470,6 +481,7 @@ test('ProjectsView warm operator action reports already-ready fast path', async 
     }
     return {};
   }, toasts);
+  env.loadComponent('Dropdown');
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env, {
@@ -521,6 +533,7 @@ test('ProjectsView renders operator watch reverse index without changing warm ac
     }
     return {};
   });
+  env.loadComponent('Dropdown');
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env, {
@@ -579,6 +592,7 @@ test('ProjectsView hides operator watch reverse index when metadata is unavailab
     if (url === '/api/operator-instances') throw new Error('request failed');
     return {};
   });
+  env.loadComponent('Dropdown');
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env, {
@@ -611,6 +625,7 @@ test('ProjectsView highlights codebase selected by #operator/codebases deep link
     if (url === '/api/nodes') return { nodes: [] };
     return {};
   });
+  env.loadComponent('Dropdown');
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env, {

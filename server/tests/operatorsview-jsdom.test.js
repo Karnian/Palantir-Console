@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { createPreactEnv, flushEffects, COMPONENTS_DIR } = require('./helpers/jsdom-preact');
+const { createPreactEnv, flushEffects, readDropdownOptions, pickDropdownOption, COMPONENTS_DIR } = require('./helpers/jsdom-preact');
 
 async function waitFor(assertion, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;
@@ -82,6 +82,7 @@ function installRosterStubs(env, {
 
 function loadOperatorsComponents(env) {
   env.context.useEscape = () => {};
+  env.loadComponent('Dropdown');
   env.loadComponent('Modal');
   env.loadComponent('SpecialistInvokePanel');
   env.loadComponent('OperatorsView');
@@ -92,9 +93,11 @@ function inputValue(env, el, value) {
   el.dispatchEvent(new env.window.Event('input', { bubbles: true }));
 }
 
-function changeValue(env, el, value) {
-  el.value = value;
-  el.dispatchEvent(new env.window.Event('change', { bubbles: true }));
+// Dropdown unification (2026-07-23): roster selects are shared `Dropdown`
+// components now — open the menu and click the option.
+async function changeValue(env, trigger, value) {
+  assert.ok(trigger, 'expected dropdown trigger to exist');
+  await pickDropdownOption(env, trigger, value);
 }
 
 function createSseBrokerStub() {
@@ -259,8 +262,8 @@ test('OperatorsView renders Master, Live Operators, and Available Operators as s
   assert.equal(dialog.getAttribute('aria-labelledby'), 'operator-roster-specialist-invoke-title');
   assert.equal(dialog.querySelector('#operator-roster-specialist-invoke-title').textContent, 'Review analyst');
   await waitFor(() => {
-    assert.equal(dialog.querySelector('#specialist-profile').value, 'op_review');
-    assert.equal(dialog.querySelector('#specialist-origin-run').value, 'manager-shadow');
+    assert.equal(dialog.querySelector('#specialist-profile').dataset.value, 'op_review');
+    assert.equal(dialog.querySelector('#specialist-origin-run').dataset.value, 'manager-shadow');
   });
   assert.equal(apiCalls.some((call) => call.url === '/api/operator/specialist'), false);
 
@@ -456,8 +459,11 @@ test('OperatorsView renders watch-list badges and edits reference refs from the 
   assert.equal(dialog.getAttribute('aria-labelledby'), 'operator-roster-refs-title');
   const select = dialog.querySelector('[data-role="operator-roster-ref-project-select"]');
   assert.ok(select);
-  assert.deepEqual(Array.from(select.options).map((option) => option.value), ['proj_gamma']);
-  assert.equal(select.value, 'proj_gamma');
+  assert.deepEqual((await readDropdownOptions(env, select)).map((option) => option.value), ['proj_gamma']);
+  assert.equal(select.dataset.value, 'proj_gamma');
+  // Close the menu again so the submit button below is not covered logically.
+  select.click();
+  await flushEffects(20);
   dialog.querySelector('[data-role="operator-roster-ref-submit"]').click();
 
   const post = await waitFor(() => {
@@ -798,7 +804,7 @@ test('OperatorsView supports Operator-first create then hourly schedule registra
     return el;
   });
   inputValue(env, createDialog.querySelector('#operator-create-name'), 'Remote Hourly Operator');
-  changeValue(env, createDialog.querySelector('#operator-create-primary'), 'proj_remote');
+  await changeValue(env, createDialog.querySelector('#operator-create-primary'), 'proj_remote');
   await flushEffects(0);
   createDialog.querySelector('[data-role="operator-create-submit"]').click();
 
@@ -898,7 +904,7 @@ test('OperatorsView only offers scheduled folders on the Operator primary node',
     assert.ok(el);
     return el;
   });
-  assert.deepEqual(Array.from(select.options).map((option) => option.value), ['proj_a']);
+  assert.deepEqual((await readDropdownOptions(env, select)).map((option) => option.value), ['proj_a']);
 });
 
 test('OperatorsView delegates specialist invoke contract to SpecialistInvokePanel source', () => {

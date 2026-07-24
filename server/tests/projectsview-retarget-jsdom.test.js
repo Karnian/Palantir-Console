@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createPreactEnv, flushEffects } = require('./helpers/jsdom-preact');
+const { createPreactEnv, flushEffects, pickDropdownOption } = require('./helpers/jsdom-preact');
 
 async function waitFor(assertion, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;
@@ -85,6 +85,7 @@ test('ProjectsView shows queued retarget banner only after node changes and post
     }
     return {};
   }, toasts);
+  env.loadComponent('Dropdown');
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env, {
@@ -96,11 +97,10 @@ test('ProjectsView shows queued retarget banner only after node changes and post
   const select = await waitFor(() => {
     const el = root.querySelector('#edit-project-node');
     assert.ok(el);
-    assert.ok(Array.from(el.options).some((option) => option.value === 'node-new'));
     return el;
   });
-  select.value = 'node-new';
-  select.dispatchEvent(new env.window.Event('change', { bubbles: true }));
+  // Throws if 'node-new' isn't offered, so this covers the old options assertion.
+  await pickDropdownOption(env, select, 'node-new');
   await flushEffects(20);
   clickButton(root, (text) => text.includes('저장'));
 
@@ -132,6 +132,7 @@ test('ProjectsView does not show queued retarget banner when node stays unchange
     }
     return {};
   });
+  env.loadComponent('Dropdown');
   env.loadComponent('ProjectsView');
 
   const root = renderProjectsView(env, {

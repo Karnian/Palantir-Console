@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createPreactEnv, flushEffects } = require('./helpers/jsdom-preact');
+const { createPreactEnv, flushEffects, pickDropdownOption } = require('./helpers/jsdom-preact');
 
 async function waitFor(assertion, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;
@@ -18,10 +18,11 @@ async function waitFor(assertion, timeoutMs = 1000) {
   throw lastError;
 }
 
-function changeValue(env, element, value) {
-  element.value = value;
-  element.dispatchEvent(new env.window.Event('input', { bubbles: true }));
-  element.dispatchEvent(new env.window.Event('change', { bubbles: true }));
+// Dropdown unification (2026-07-23): the policy editor's scope / vendor /
+// mode controls are shared `Dropdown` components now.
+async function changeValue(env, trigger, value) {
+  assert.ok(trigger, 'expected dropdown trigger to exist');
+  await pickDropdownOption(env, trigger, value);
 }
 
 function createEnv({ policies = [], effective } = {}) {
@@ -58,6 +59,7 @@ function createEnv({ policies = [], effective } = {}) {
   };
   env.context.addToast = () => {};
   env.context.useEscape = () => {};
+  env.loadComponent('Dropdown');
   env.loadComponent('EmptyState');
   env.loadComponent('Modal');
   env.loadComponent('ModelPoliciesView');
@@ -134,7 +136,7 @@ test('ModelPoliciesView editor shows only fields supported by the selected vendo
   // changing the vendor. Otherwise the queued reset can overwrite the
   // synthetic selection in jsdom even though a real click cannot race it.
   await flushEffects(50);
-  changeValue(env, dialog.querySelector('#model-policy-vendor'), 'claude');
+  await changeValue(env, dialog.querySelector('#model-policy-vendor'), 'claude');
   await waitFor(() => {
     dialog = root.querySelector('[role="dialog"]');
     assert.ok(dialog.querySelector('#model-policy-model-mode'));
@@ -167,7 +169,7 @@ test('ModelPoliciesView omits inherited fields and emits the CLI-default sentine
     assert.ok(element);
     return element;
   });
-  changeValue(env, dialog.querySelector('#model-policy-reasoning_effort-mode'), 'cli-default');
+  await changeValue(env, dialog.querySelector('#model-policy-reasoning_effort-mode'), 'cli-default');
   await flushEffects(20);
   dialog.querySelector('[data-role="model-policy-save"]').click();
 

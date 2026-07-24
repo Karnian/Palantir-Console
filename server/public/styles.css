@@ -2314,18 +2314,18 @@ body {
   outline-offset: 1px;
   border-color: var(--accent);
 }
+/* Wrapper around the status Dropdown (was a native <select> before the
+   2026-07-23 dropdown unification — it now owns only the flex sizing and
+   the click/keydown isolation from the card, while `.dropdown-compact`
+   carries the trigger's look). */
 .task-card-status-select {
   flex: 1;
-  padding: 4px 6px;
-  font-size: 11px;
-  font-family: inherit;
-  color: var(--text-secondary);
-  background: var(--bg-base);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
+  min-width: 0;
 }
-.task-card-status-select:focus-visible {
+.task-card-status-select .dropdown-button {
+  border-radius: var(--radius-sm);
+}
+.task-card-status-select .dropdown-button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
   border-color: var(--accent);
@@ -3503,6 +3503,63 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   height: 1px;
   background: var(--border, rgba(255,255,255,0.06));
   margin: 4px 4px;
+}
+
+/* Muted trigger text when `value` matches no option (ported selects whose
+   placeholder used to be a disabled/empty <option>). */
+.dropdown-label.is-placeholder {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+/* Non-selectable option (former `<option disabled>`) — visible for context
+   but skipped by keyboard nav and refused on click. */
+.dropdown-item.is-disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+.dropdown-item.is-disabled:hover {
+  background: transparent;
+}
+
+/* Field variant — dropdown unification (2026-07-23). All former native
+   `<select class="form-select">` form controls render through Dropdown now;
+   this sizes the trigger like `.form-input` so a dropdown sitting next to a
+   text input keeps the row rhythm (the base `.dropdown-button` is the
+   smaller/bolder toolbar-filter look used by the Board filters). */
+.dropdown-field .dropdown-button {
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 400;
+  border-radius: var(--radius-sm);
+  background: var(--field-bg);
+}
+
+/* Match `.form-input:focus` exactly — accent border + soft ring, no outline. */
+.dropdown-field .dropdown-button:focus-visible,
+.dropdown.is-open.dropdown-field .dropdown-button {
+  outline: none;
+  border-color: var(--border-active);
+  box-shadow: 0 0 0 2px var(--accent-muted);
+}
+
+/* Forced Colors discards box-shadow, so keep a system-painted focus ring
+   (same fallback `.form-input:focus` uses). */
+@media (forced-colors: active) {
+  .dropdown-field .dropdown-button:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 0;
+  }
+}
+
+/* Compact variant — for dense inline rows that used a shrunken select. */
+.dropdown-compact .dropdown-button {
+  padding: 4px 6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--bg-base);
 }
 
 .form-textarea {
@@ -5140,18 +5197,25 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   align-items: stretch;
 }
 
+/* Manager agent picker — a Dropdown since the 2026-07-23 unification, so
+   the metrics live on the trigger button and the wrapper only flexes. */
 .manager-picker-select {
   flex: 1;
+  min-width: 0;
+}
+
+.manager-picker-select .dropdown-button {
   padding: 8px 10px;
   border-radius: var(--radius-sm-plus);
   border: 1px solid var(--border, rgba(255,255,255,0.12));
   background: var(--surface-2, rgba(255,255,255,0.04));
   color: var(--fg, #e5e7eb);
   font-size: 13px;
+  font-weight: 500;
   line-height: 1.2;
 }
 
-.manager-picker-select:focus {
+.manager-picker-select .dropdown-button:focus-visible {
   outline: 2px solid var(--accent, #3b82f6);
   outline-offset: 1px;
 }

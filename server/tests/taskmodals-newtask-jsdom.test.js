@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createPreactEnv, flushEffects } = require('./helpers/jsdom-preact');
+const { createPreactEnv, flushEffects, pickDropdownOption } = require('./helpers/jsdom-preact');
 
 function createEnv() {
   const env = createPreactEnv();
@@ -18,6 +18,7 @@ function createEnv() {
     return open ? env.context.preact.h('div', { class: 'modal-stub' }, children) : null;
   };
 
+  env.loadComponent('Dropdown');
   env.loadComponent('TaskModals');
 
   return { env, posts, cleanup: env.cleanup };
@@ -47,9 +48,9 @@ test('NewTaskModal submits suggested_agent_profile_id for the selected agent', a
   title.value = 'New task';
   title.dispatchEvent(new ctx.env.window.Event('input', { bubbles: true }));
 
-  const agent = root.querySelector('#new-task-agent');
-  agent.value = 'agent_alpha';
-  agent.dispatchEvent(new ctx.env.window.Event('change', { bubbles: true }));
+  // Dropdown unification (2026-07-23): the agent picker is a shared
+  // `Dropdown` — open the menu and click the option.
+  await pickDropdownOption(ctx.env, root.querySelector('#new-task-agent'), 'agent_alpha');
   await flushEffects();
 
   const createButton = root.querySelector('button.primary');
