@@ -419,6 +419,142 @@ test('checkHealth: detects terminated non-manager run and transitions to complet
   assert.equal(after.status, 'completed');
 });
 
+test('checkHealth: nonzero exit code transitions a dead run to failed', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const execEngine = makeStubExecutionEngine({ alive: false, exitCode: 9 });
+
+  const lc = createLifecycleService({
+    runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+    executionEngine: execEngine, streamJsonEngine: null, worktreeService: null, eventBus: null,
+  });
+
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, { command: 'codex' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'test' });
+
+  await lc.checkHealth();
+
+  const after = rs.getRun(run.id);
+  assert.equal(after.status, 'failed');
+  assert.equal(after.exit_code, 9);
+  assert.equal(after.result_summary, 'Agent exited with code 9');
+});
+
+test('checkHealth: dead run with unknown exit code fails closed with an explicit reason', async (t) => {
+  const db = await mkdb(t);
+  const eventBus = createEventBus();
+  const rs = createRunService(db, eventBus);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const execEngine = makeStubExecutionEngine({ alive: false, exitCode: null });
+  const statusEvents = [];
+  eventBus.subscribe((event) => {
+    if (event.channel === 'run:status') statusEvents.push(event.data);
+  });
+
+  const lc = createLifecycleService({
+    runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+    executionEngine: execEngine, streamJsonEngine: null, worktreeService: null, eventBus,
+  });
+
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, { command: 'codex' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'test' });
+  statusEvents.length = 0;
+
+  await lc.checkHealth();
+
+  const after = rs.getRun(run.id);
+  assert.equal(after.status, 'failed');
+  assert.equal(after.exit_code, null);
+  assert.equal(after.result_summary, null);
+  assert.ok(statusEvents.some((event) => (
+    event.run.id === run.id
+    && event.to_status === 'failed'
+    && event.reason === 'agent-exit-unknown'
+  )));
+});
+
+test('checkHealth: unknown exit preserves previously persisted result and usage', async (t) => {
+  const db = await mkdb(t);
+  const eventBus = createEventBus();
+  const rs = createRunService(db, eventBus);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const execEngine = makeStubExecutionEngine({ alive: false, exitCode: null });
+  const statusEvents = [];
+  eventBus.subscribe((event) => {
+    if (event.channel === 'run:status') statusEvents.push(event.data);
+  });
+
+  const lc = createLifecycleService({
+    runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+    executionEngine: execEngine, streamJsonEngine: null, worktreeService: null, eventBus,
+  });
+
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, { command: 'codex' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'test' });
+  rs.updateRunResult(run.id, {
+    result_summary: 'Persisted stream-json result',
+    exit_code: 0,
+    input_tokens: 123,
+    output_tokens: 456,
+    cost_usd: 0.789,
+  });
+  statusEvents.length = 0;
+
+  await lc.checkHealth();
+
+  const after = rs.getRun(run.id);
+  assert.equal(after.status, 'failed');
+  assert.equal(after.result_summary, 'Persisted stream-json result');
+  assert.equal(after.exit_code, 0);
+  assert.equal(after.input_tokens, 123);
+  assert.equal(after.output_tokens, 456);
+  assert.equal(after.cost_usd, 0.789);
+  assert.ok(statusEvents.some((event) => (
+    event.run.id === run.id
+    && event.to_status === 'failed'
+    && event.reason === 'agent-exit-unknown'
+  )));
+});
+
+test('checkHealth: alive run with unknown exit code remains running', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const execEngine = makeStubExecutionEngine({ alive: true, exitCode: null, output: 'working' });
+
+  const lc = createLifecycleService({
+    runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+    executionEngine: execEngine, streamJsonEngine: null, worktreeService: null, eventBus: null,
+  });
+
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, { command: 'codex' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'test' });
+
+  await lc.checkHealth();
+
+  const after = rs.getRun(run.id);
+  assert.equal(after.status, 'running');
+  assert.equal(after.ended_at, null);
+  assert.equal(execEngine.killed.includes(run.id), false);
+});
+
 test('checkHealth: transitions stale running run to needs_input on idle timeout (simulated)', async (t) => {
   const db = await mkdb(t);
   const rs = createRunService(db, null);
