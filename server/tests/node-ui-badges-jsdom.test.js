@@ -153,7 +153,7 @@ test('SessionGrid task row renders latest remote node badge', async (t) => {
   t.after(env.cleanup);
   installCommonStubs(env);
   env.context.operatorConversationId = (projectId) => `operator:${projectId}`;
-  env.context.conversationIdMatchesProject = () => false;
+  env.context.parseProjectConversationId = () => null;
   env.loadComponent('SessionGrid');
 
   const root = renderComponent(env, env.context.SessionGrid, {

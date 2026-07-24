@@ -1046,29 +1046,52 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       if (!pmRun) continue;
       const pmAdapter = managerRegistry.getActiveAdapter(pmEntry.conversationId)
         || managerAdapterFactory.getAdapter(pmRun.manager_adapter || 'claude-code');
-      // F-1: surface this Operator's Codex Fast Mode toggle so the UI can render
-      // the ⚡ control without an extra fetch. null when unknown (no instance /
-      // service unavailable / read error) — the UI treats null as "off/unset".
-      let fastMode = null;
-      if (operatorInstanceService && pmRun.operator_instance_id) {
-        try {
-          const inst = operatorInstanceService.getInstance(pmRun.operator_instance_id);
-          fastMode = inst ? inst.fast_mode : null;
-        } catch { /* annotate-only */ }
-      }
       // A2b-3: expose the legacy `operator:<projectId>` alias so the client can
       // recover a canonical `operator:<instanceId>` conversation's primary project
       // (its own parser returns no projectId for oi_*). The codebase picker uses
       // this to exclude/label the primary. null when the resolver can't map it.
-      let legacyConversationId = null;
+      let legacyConversationId = pmEntry.legacyConversationId || null;
+      let primaryProjectId = null;
+      let instanceId = pmRun.operator_instance_id || null;
       if (runService && typeof runService.resolveOperatorConversationId === 'function') {
         try {
-          legacyConversationId = runService.resolveOperatorConversationId(pmEntry.conversationId)?.legacySlotId || null;
+          const resolved = runService.resolveOperatorConversationId(pmEntry.conversationId);
+          legacyConversationId = legacyConversationId || resolved?.legacySlotId || null;
+          primaryProjectId = resolved?.primaryProjectId || null;
+          instanceId = instanceId || resolved?.instanceId || null;
         } catch { /* annotate-only */ }
       }
+      // Resolve the instance id before loading metadata: resumed and
+      // pre-migration runs may not have runs.operator_instance_id populated.
+      let operatorInstance = null;
+      if (operatorInstanceService && instanceId) {
+        try {
+          operatorInstance = operatorInstanceService.getInstance(instanceId);
+        } catch { /* annotate-only */ }
+      }
+      if (
+        !primaryProjectId
+        && operatorInstanceService
+        && instanceId
+        && typeof operatorInstanceService.getPrimaryProjectIdForInstance === 'function'
+      ) {
+        try {
+          primaryProjectId = operatorInstanceService.getPrimaryProjectIdForInstance(instanceId) || null;
+        } catch { /* annotate-only */ }
+      }
+      if (!primaryProjectId && operatorInstance?.refs) {
+        primaryProjectId = operatorInstance.refs.find(ref => ref.role === 'primary')?.project_id || null;
+      }
+      // F-1: surface this Operator's Codex Fast Mode toggle so the UI can render
+      // the ⚡ control without an extra fetch. null when unknown (no instance /
+      // service unavailable / read error) — the UI treats null as "off/unset".
+      const fastMode = operatorInstance ? operatorInstance.fast_mode : null;
       pms.push({
         conversationId: pmEntry.conversationId,
         legacyConversationId, // A2b-3: canonical→primary recovery for the codebase picker
+        primaryProjectId,
+        instanceId,
+        displayName: operatorInstance?.display_name || operatorInstance?.profile_name || null,
         run: pmRun,
         usage: pmAdapter.getUsage ? pmAdapter.getUsage(pmRun.id) : null,
         claudeSessionId: pmAdapter.getSessionId ? pmAdapter.getSessionId(pmRun.id) : null,

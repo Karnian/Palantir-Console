@@ -4833,13 +4833,15 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   cursor: pointer;
   border-radius: var(--radius-sm);
   margin-bottom: 2px;
+  border: 1px solid var(--accent-border);
+  background: var(--accent-bg-subtle);
 }
 .operator-session-row:hover {
-  background: rgba(139,92,246,0.1);
+  background: var(--accent-muted);
 }
 .operator-session-row.selected {
-  background: rgba(139,92,246,0.15);
-  outline: 1px solid rgba(139,92,246,0.4);
+  background: var(--accent-muted);
+  outline: 1px solid var(--accent-border);
 }
 .operator-session-dot {
   width: 8px;
@@ -4851,7 +4853,26 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   font-size: 12px;
   font-weight: 600;
   color: var(--accent);
+}
+.operator-session-main {
+  display: flex;
   flex: 1;
+  min-width: 0;
+  flex-direction: column;
+}
+.operator-session-heading,
+.operator-session-meta {
+  display: block;
+}
+.operator-session-adapter,
+.operator-session-meta {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.operator-session-conversation {
+  color: var(--accent-light);
+  text-decoration: underline;
+  text-decoration-color: var(--accent-border);
 }
 .operator-session-status {
   font-size: 11px;
@@ -4864,8 +4885,8 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   display: inline-block;
   width: 10px;
   height: 10px;
-  border: 1.5px solid rgba(59,130,246,0.3);
-  border-top-color: #3b82f6;
+  border: 1.5px solid var(--accent-border);
+  border-top-color: var(--status-running);
   border-radius: 50%;
   animation: operator-spin 0.8s linear infinite;
 }
@@ -4964,6 +4985,14 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   font-size: 11px;
   color: var(--text-muted);
   flex-shrink: 0;
+}
+
+.task-session-workflow {
+  color: var(--text-secondary);
+}
+
+.task-session-active-count {
+  color: var(--text-primary);
 }
 
 .task-session-detail-btn {

@@ -14,7 +14,8 @@ import { AttentionStrip } from './AttentionStrip.js';
 import { latestRunForTask, nodeDetailHref, shouldRenderNodeBadge } from '../lib/nodeUi.js';
 import { TASK_STATUS_LABELS, RUN_STATUS_LABELS, MANAGER_LABELS,
   MANAGER_STATUS_LABELS, COMMON_ACTIONS, statusLabel } from '../lib/copy.js';
-import { operatorConversationId, conversationIdMatchesProject } from '../lib/conversationId.js';
+import { formatTime } from '../lib/format.js';
+import { operatorConversationId, parseProjectConversationId } from '../lib/conversationId.js';
 
 const runStatusIcon = (status) => {
   switch (status) {
@@ -47,9 +48,13 @@ const runStatusColor = (status) => {
   }
 };
 
-function NodeBadge({ run }) {
-  if (!shouldRenderNodeBadge(run)) return null;
-  const nodeId = run.node_id;
+function NodeBadge({ run, showLocal = false, link = true }) {
+  const remote = shouldRenderNodeBadge(run);
+  if (!remote && !showLocal) return null;
+  const nodeId = remote ? run.node_id : 'local';
+  if (!remote || !link) {
+    return html`<span class="task-badge node" data-role="node-badge">노드 ${nodeId}</span>`;
+  }
   return html`
     <a
       class="task-badge node"
@@ -59,6 +64,43 @@ function NodeBadge({ run }) {
       onClick=${(e) => e.stopPropagation()}
     >노드 ${nodeId}</a>
   `;
+}
+
+// Resolve a live Operator snapshot to one project without ever interpreting
+// the canonical `operator:oi_*` id as a project id. Server-provided aliases
+// are authoritative, followed by the explicit primaryProjectId metadata, with
+// legacy-shaped conversationId retained as the dual-read fallback.
+function operatorProjectId(pm) {
+  const legacy = parseProjectConversationId(pm?.legacyConversationId);
+  if (legacy) return String(legacy.projectId);
+  if (pm?.primaryProjectId !== undefined && pm?.primaryProjectId !== null) {
+    return String(pm.primaryProjectId);
+  }
+  const fallback = parseProjectConversationId(pm?.conversationId);
+  return fallback ? String(fallback.projectId) : null;
+}
+
+function operatorConversationTarget(pm, projectId) {
+  if (parseProjectConversationId(pm?.legacyConversationId)) {
+    return pm.legacyConversationId;
+  }
+  if (parseProjectConversationId(pm?.conversationId)) {
+    return pm.conversationId;
+  }
+  if (projectId !== undefined && projectId !== null && projectId !== '') {
+    return operatorConversationId(projectId);
+  }
+  return pm?.conversationId || pm?.legacyConversationId || null;
+}
+
+function operatorDisplayName(pm) {
+  const displayName = typeof pm?.displayName === 'string' ? pm.displayName.trim() : '';
+  if (displayName) return displayName;
+  const instanceId = pm?.instanceId || pm?.run?.operator_instance_id || '';
+  if (!instanceId) return 'Operator';
+  return instanceId.length > 20
+    ? `${instanceId.slice(0, 12)}\u2026${instanceId.slice(-6)}`
+    : instanceId;
 }
 
 export function SessionGrid({ tasks, runs, projects, activePms = [], managerStatus, conversationTarget, onSelectConversation, nodeSummary }) {
@@ -91,6 +133,16 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
       const taskRuns = runsMap.get(t.id) || [];
       runsMap.delete(t.id);
       projMap.get(pid).tasks.push({ task: t, runs: taskRuns });
+    }
+
+    // A manager run intentionally has no task/project columns. Its Operator
+    // instance ref arrives through /api/manager/status instead, so make sure a
+    // project group exists even when that project currently has no tasks.
+    for (const pm of (activePms || [])) {
+      const pid = operatorProjectId(pm);
+      if (!pid || projMap.has(pid)) continue;
+      const pname = (projects || []).find(p => String(p.id) === pid)?.name || pid;
+      projMap.set(pid, { key: pid, name: pname, tasks: [] });
     }
 
     // Orphan runs (no task)
@@ -159,7 +211,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
     }
 
     return result;
-  }, [tasks, workerRuns, projects]);
+  }, [tasks, workerRuns, projects, activePms]);
 
   return html`
     <div class="manager-grid-side">
@@ -169,6 +221,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
           <span class="mgr-stat" data-stat="running" style="color: var(--status-running)">\u25CF ${workerRuns.filter(r => r.status === 'running').length} 실행 중</span>
           <span class="mgr-stat" data-stat="waiting" style="color: var(--status-needs-input)">\u23F8 ${workerRuns.filter(r => r.status === 'needs_input').length} 대기</span>
           <span class="mgr-stat" data-stat="failed" style="color: var(--status-failed)">\u2717 ${workerRuns.filter(r => r.status === 'failed').length} 실패</span>
+          <span class="mgr-stat" data-stat="operators" style="color: var(--accent-light)">\u2726 ${activePms.length} Operator</span>
         </div>
       </div>
 
@@ -176,7 +229,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
         ${/* R2-A.3: AttentionStrip surfaces needs_input + failed worker runs
              above the task sessions list. Self-hiding when empty (spec §12.1). */ ''}
         <${AttentionStrip}
-          runs=${runs}
+          runs=${workerRuns}
           tasks=${tasks}
           nodeSummary=${nodeSummary}
           onOpenRun=${(run) => setInspectRun(run)}
@@ -202,10 +255,10 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
             <div class="worker-project-label" onClick=${() => toggleProject(group.key)} style="cursor:pointer">
               <span class="worker-project-chevron">${projCollapsed ? '\u25B6' : '\u25BC'}</span>
               <span>${group.name}</span>
-              <span class="worker-project-count">작업 ${group.tasks.length}개${activeCount > 0 ? `\u00B7 ${activeCount}개 활성` : ''}</span>
+              <span class="worker-project-count">작업 ${group.tasks.length}개 \u00B7 활성 실행 ${activeCount}</span>
             </div>
             ${!projCollapsed && (() => {
-              const pm = activePms.find(p => conversationIdMatchesProject(p.conversationId, group.key));
+              const pm = activePms.find(p => operatorProjectId(p) === String(group.key));
               const pmStatus = pm?.run?.status;
               // Phase K-1a (rev3): PM row label and ManagerChat header
               // share a single source via `statusLabel(RUN_STATUS_LABELS, ...)`.
@@ -216,17 +269,39 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
               const pmLabel = pmStatus
                 ? statusLabel(RUN_STATUS_LABELS, pmStatus)
                 : MANAGER_STATUS_LABELS.idle;
-              const pmColor = pmStatus === 'running' ? 'var(--status-running)'
-                : pmStatus === 'needs_input' ? 'var(--status-needs-input)'
-                : pmStatus === 'completed' ? 'var(--status-done)'
-                : pmStatus === 'failed' ? 'var(--status-failed)'
-                : 'var(--status-queued)';
-              const pmSelected = conversationIdMatchesProject(conversationTarget, group.key);
+              const pmColor = runStatusColor(pmStatus);
+              const pmTarget = operatorConversationTarget(pm, group.key);
+              const pmSelected = conversationTarget === pm?.conversationId
+                || conversationTarget === pm?.legacyConversationId
+                || (
+                  parseProjectConversationId(conversationTarget)?.projectId === String(group.key)
+                );
+              const selectPm = () => onSelectPm && onSelectPm(pmTarget);
               return pm ? html`
-                <div class="operator-session-row ${pmSelected ? 'selected' : ''}" ...${clickableProps(() => onSelectPm && onSelectPm(operatorConversationId(group.key)))}>
+                <div
+                  class="operator-session-row ${pmSelected ? 'selected' : ''}"
+                  data-role="operator-session-row"
+                  data-project-id=${group.key}
+                  ...${clickableProps(selectPm)}
+                >
                   <span class="operator-session-dot" style="background:${pmColor}"></span>
-                  <span class="operator-session-label">오퍼레이터 세션</span>
-                  <span class="operator-session-status" style="color:${pmColor}">${pmLabel}${pmStatus === 'running' ? html` <span class="operator-spinner"></span>` : ''}</span>
+                  <span class="operator-session-main">
+                    <span class="operator-session-heading">
+                      <span class="task-badge project">Operator</span>
+                      <span class="operator-session-label">${operatorDisplayName(pm)}</span>
+                      <span class="operator-session-adapter"> \u00B7 adapter ${pm.run?.manager_adapter || '알 수 없음'}</span>
+                    </span>
+                    <span class="operator-session-meta">
+                      <${NodeBadge} run=${pm.run} showLocal=${true} link=${false} />
+                      ${pm.run?.started_at && html`<span> \u00B7 시작 ${formatTime(pm.run.started_at)}</span>`}
+                      ${pm.run?.ended_at && html`<span> \u00B7 종료 ${formatTime(pm.run.ended_at)}</span>`}
+                    </span>
+                  </span>
+                  <span class="operator-session-status" data-role="operator-run-status" style="color:${pmColor}">${pmLabel}${pmStatus === 'running' ? html` <span class="operator-spinner"></span>` : ''}</span>
+                  <span
+                    class="operator-session-conversation"
+                    data-role="operator-conversation-link"
+                  >대화 열기</span>
                 </div>
               ` : null;
             })()}
@@ -247,6 +322,7 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
                   const waiting = taskRuns.filter(r => r.status === 'needs_input').length;
                   const done = taskRuns.filter(r => r.status === 'completed').length;
                   const failed = taskRuns.filter(r => r.status === 'failed').length;
+                  const activeWorkers = running + waiting;
                   const latestRun = task ? latestRunForTask(taskRuns, task.id) : taskRuns[0];
                   const parts = [];
                   if (running) parts.push(html`<span style="color:var(--status-running)">${running} 실행 중</span>`);
@@ -258,6 +334,11 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
                       <div class="task-session-header">
                         <span class="task-session-title">${task?.title || '미할당 런'}</span>
                         <span class="task-session-meta">
+                          ${task && html`
+                            <span class="task-session-workflow" data-role="task-workflow-status">워크플로 ${statusLabel(TASK_STATUS_LABELS, task.status)}</span>
+                            <span class="task-session-active-count" data-role="active-worker-count"> \u00B7 활성 실행 ${activeWorkers}</span>
+                            ${parts.length > 0 ? ' \u00B7 ' : ''}
+                          `}
                           ${parts.length > 0 ? parts.reduce((acc, el, i) => i === 0 ? [el] : [...acc, ', ', el], []) : (taskRuns.length > 0 ? `런 ${taskRuns.length}개` : '')}
                         </span>
                         <${NodeBadge} run=${latestRun} />
