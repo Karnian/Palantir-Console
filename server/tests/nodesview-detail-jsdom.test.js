@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createPreactEnv, flushEffects } = require('./helpers/jsdom-preact');
+const { createPreactEnv, flushEffects, pickDropdownOption } = require('./helpers/jsdom-preact');
 
 function deferred() {
   let resolve;
@@ -19,6 +19,7 @@ function sampleNode(overrides = {}) {
     reachable: 1,
     ssh_user: 'ubuntu',
     ssh_host: 'pi.local',
+    ssh_port: null,
     exposed_roots: '["/srv/workspaces"]',
     node_prefix: '/opt/bin',
     max_concurrent: 2,
@@ -139,6 +140,7 @@ function createEnv(handler) {
     return open ? env.context.preact.h('div', { class: 'modal-panel' }, children) : null;
   };
 
+  env.loadComponent('Dropdown');
   env.loadComponent('NodesView');
   return env;
 }
@@ -177,6 +179,7 @@ test('NodesView detail renders node usage cards with limits and error labels', a
 
   assert.ok(root.querySelector('[data-role="node-detail"]'), 'detail root should render');
   assert.equal(root.querySelector('[data-role="node-detail-back"]').getAttribute('href'), '#resources/nodes');
+  assert.equal(root.querySelector('.node-detail-field-value').textContent, 'ubuntu@pi.local · 1개 루트');
   assert.match(root.textContent, /Raspberry Pi/);
   assert.match(root.textContent, /5h window/);
   assert.match(root.textContent, /72% 남음/);
@@ -184,6 +187,64 @@ test('NodesView detail renders node usage cards with limits and error labels', a
   assert.match(root.textContent, /near limit/);
   assert.match(root.textContent, /dev@example\.com/);
   assert.match(root.textContent, /미설치/);
+});
+
+test('NodesView detail appends an explicitly configured SSH port', async (t) => {
+  const env = createEnv(async (url) => {
+    if (url === '/api/nodes') return { body: { nodes: [sampleNode({ ssh_port: 2222 })] } };
+    if (url === '/api/nodes/pi/usage') return { body: usageResponse('pi', []) };
+    throw new Error(`unexpected url ${url}`);
+  });
+  t.after(env.cleanup);
+
+  const root = renderNodes(env, { detailId: 'pi' });
+  await waitFor(() => assert.ok(root.querySelector('.node-detail-field-value')));
+
+  assert.equal(root.querySelector('.node-detail-field-value').textContent, 'ubuntu@pi.local:2222 · 1개 루트');
+});
+
+test('NodesView SSH form shows the port only for SSH and sends a blank port as NULL', async (t) => {
+  let postedBody = null;
+  const env = createEnv(async (url, opts = {}) => {
+    if (url === '/api/nodes' && opts.method === 'POST') {
+      postedBody = JSON.parse(opts.body);
+      return { status: 201, body: { node: postedBody } };
+    }
+    if (url === '/api/nodes') return { body: { nodes: [] } };
+    throw new Error(`unexpected url ${url}`);
+  });
+  t.after(env.cleanup);
+
+  const root = renderNodes(env);
+  await waitFor(() => assert.ok(root.querySelector('.skill-packs-header .primary')));
+  root.querySelector('.skill-packs-header .primary').click();
+  await flushEffects(20);
+
+  assert.equal(root.querySelector('#node-ssh-port'), null);
+  await pickDropdownOption(env, root.querySelector('#node-kind'), 'ssh');
+
+  const portInput = root.querySelector('#node-ssh-port');
+  assert.ok(portInput);
+  assert.equal(portInput.getAttribute('placeholder'), '22');
+  assert.equal(portInput.getAttribute('min'), '1');
+  assert.equal(portInput.getAttribute('max'), '65535');
+
+  for (const [selector, value] of [
+    ['#node-name', 'Custom SSH'],
+    ['#node-ssh-host', 'pod.example'],
+    ['#node-ssh-user', 'runner'],
+    ['#node-exposed-roots', '["/srv/root"]'],
+  ]) {
+    const input = root.querySelector(selector);
+    input.value = value;
+    input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+  }
+  await flushEffects(20);
+  root.querySelector('.modal-footer .primary').click();
+  await waitFor(() => assert.ok(postedBody));
+  await waitFor(() => assert.equal(root.querySelector('.modal-panel'), null));
+
+  assert.equal(postedBody.ssh_port, null);
 });
 
 test('NodesView detail renders installed=false and every node usage error label', async (t) => {
