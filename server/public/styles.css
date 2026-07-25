@@ -7625,6 +7625,99 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   color: var(--text-muted); border-radius: var(--radius-sm); cursor: pointer; font-size: 0.85rem;
 }
 .memory-tab.is-active { background: var(--accent); color: var(--text-inverse); border-color: var(--accent); }
+.memory-section {
+  margin-bottom: 1.25rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+.memory-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.85rem;
+}
+.memory-section-heading h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 600;
+}
+.memory-section-heading p {
+  margin: 0.25rem 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.memory-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+.memory-status-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+  padding: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--field-bg);
+}
+.memory-status-metric span { color: var(--text-muted); font-size: 11px; }
+.memory-status-metric strong { color: var(--text-primary); font-size: 14px; }
+.memory-status-metric.is-running strong { color: var(--success); }
+.memory-status-metric.is-missing_credential strong,
+.memory-status-metric.is-failed strong { color: var(--warning); }
+.memory-status-notice {
+  margin-top: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: var(--radius-sm);
+  background: var(--field-bg);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.memory-status-notice.is-warning {
+  border: 1px solid var(--warning);
+}
+.memory-candidate-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+.memory-candidate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+.memory-candidate-card {
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--field-bg);
+}
+.memory-candidate-ready { color: var(--success); }
+.memory-candidate-distill { color: var(--warning); }
+.memory-candidate-meta {
+  margin: -0.25rem 0 0.6rem;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.memory-candidate-empty {
+  padding: 1rem;
+  color: var(--text-muted);
+  text-align: center;
+  font-size: 13px;
+}
+.memory-candidate-more {
+  display: flex;
+  justify-content: center;
+  margin-top: 0.75rem;
+}
 .memory-list { display: flex; flex-direction: column; gap: 0.75rem; }
 .memory-card { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 0.85rem 1rem; background: var(--bg-surface); }
 .memory-card.is-archived { opacity: 0.6; }
@@ -7662,6 +7755,10 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .memory-provenance-json {
   background: var(--field-bg); color: var(--text-primary); padding: 0.6rem; border-radius: var(--radius-sm);
   overflow: auto; max-height: 320px; font-size: 0.78rem; white-space: pre-wrap; word-break: break-word;
+}
+@media (max-width: 720px) {
+  .memory-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .memory-section-heading { flex-direction: column; }
 }
 
 /* Specialist view — B2c-4. Design tokens only (K-2 light/dark auto-propagate). */

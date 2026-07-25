@@ -77,10 +77,12 @@ const SERVER_EMITS = Object.freeze([
   'task:updated',
 
   // ML memory lifecycle (PR5a/PR5d observability)
+  'memory:candidate_created',
+  'memory:candidate_rejected',
+  'memory:decayed',
+  'memory:evicted',
   'memory:polarity_rejected',
   'memory:promoted',
-  'memory:evicted',
-  'memory:decayed',
 
   // ML PR3c: distiller merge-context cap observability
   'memory:distill_context_capped',
@@ -115,6 +117,14 @@ const CLIENT_REQUIRED_LIVE = Object.freeze([
   'task:created',
   'task:updated',
   'dispatch_audit:recorded',
+  'memory:candidate_created',
+  'memory:candidate_rejected',
+  'memory:decayed',
+  'memory:evicted',
+  'memory:promoted',
+  'master_memory:decayed',
+  'master_memory:evicted',
+  'master_memory:promoted',
 ]);
 
 module.exports = {

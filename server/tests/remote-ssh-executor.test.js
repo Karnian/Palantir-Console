@@ -17,6 +17,7 @@ function nodeRow(fields = {}) {
     kind: 'ssh',
     ssh_host: 'pod.example',
     ssh_user: 'runner',
+    ssh_port: null,
     exposed_roots: JSON.stringify(['/srv/root']),
     updated_at: '2026-07-03 00:00:00',
     ...fields,
@@ -74,7 +75,7 @@ function sshDestinationIndex(args) {
       afterDashDash = true;
       continue;
     }
-    if (arg === '-o') {
+    if (arg === '-o' || arg === '-p') {
       i += 1;
       continue;
     }
@@ -264,6 +265,7 @@ test('ssh argv and script quote injection attempts literally', async () => {
   ]);
   assert.equal(call.args[6], '--');
   assert.equal(call.args[7], 'runner@pod.example');
+  assert.equal(call.args.filter((arg) => arg === '-p').length, 0);
   assert.equal(call.args.some((arg) => String(arg).startsWith('ServerAlive')), false);
   const script = scriptOf(call);
   assert.deepEqual(call.args.slice(8), [`sh -c ${shq(script)}`]);
@@ -273,6 +275,40 @@ test('ssh argv and script quote injection attempts literally', async () => {
   assert.match(script, /SAFE='\$\(literal\)'/);
   assert.match(script, /'say'\\''hi'/);
   for (const arg of args) assert.ok(script.includes(shq(arg)), `missing quoted arg ${arg}`);
+});
+
+test('custom ssh port is emitted exactly once before -- for exec and keepAlive paths', async () => {
+  const spawn = simpleSpawn({ code: 0 });
+  const exec = createRemoteSshNodeExecutor(nodeRow({ ssh_port: 2222 }), {
+    spawnFn: spawn,
+  });
+
+  await exec.exec('git', ['--version']);
+  await exec.spawnInteractive('codex', ['exec']);
+
+  assert.equal(spawn.calls.length, 2);
+  for (const call of spawn.calls) {
+    const portIndexes = call.args
+      .map((arg, index) => arg === '-p' ? index : -1)
+      .filter((index) => index !== -1);
+    assert.deepEqual(portIndexes, [call.args.indexOf('-p')]);
+    assert.equal(portIndexes.length, 1);
+    assert.equal(call.args[portIndexes[0] + 1], '2222');
+    assert.ok(portIndexes[0] < call.args.indexOf('--'));
+  }
+  assertSshOptionPairsInOrder(spawn.calls[1].args, [
+    'ServerAliveInterval=15',
+    'ServerAliveCountMax=4',
+  ]);
+});
+
+test('remote ssh executor rejects invalid raw ssh_port values', () => {
+  for (const sshPort of [0, 65536, -1, 22.5, '2222', '22 -o ProxyCommand=x', true, [2222]]) {
+    assert.throws(
+      () => createRemoteSshNodeExecutor(nodeRow({ ssh_port: sshPort })),
+      /ssh_port/,
+    );
+  }
 });
 
 test('loopback ssh simulator preserves exec stdout across ssh argument join', async () => {

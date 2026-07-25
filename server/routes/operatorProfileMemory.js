@@ -16,8 +16,13 @@
 const crypto = require('node:crypto');
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
-const { BadRequestError } = require('../utils/errors');
+const { BadRequestError, NotFoundError } = require('../utils/errors');
 const { sanitizeProposalContent } = require('../services/memorySanitize');
+const {
+  candidatePage,
+  candidateStatus,
+  requireHumanCookie,
+} = require('./memoryCandidates');
 
 const VALID_KINDS = ['convention', 'pitfall', 'heuristic', 'constraint']; // no 'fact'
 const MAX_REMEMBER_LEN = 2000;
@@ -95,6 +100,59 @@ function createOperatorProfileMemoryRouter({ memoryService, operatorProfileServi
       candidate: cand ? { id: cand.id, status: cand.status } : null,
       origin: req.auth.method === 'bearer' ? 'pm' : 'anon',
     });
+  }));
+
+  router.get('/:id/memory/candidates', asyncHandler(async (req, res) => {
+    if (!memoryService) return res.status(501).json({ error: 'memoryService_unavailable' });
+    if (!requireHumanCookie(req, res, 'profile memory candidate review')) return;
+    const profileId = req.params.id;
+    operatorProfileService.getProfile(profileId);
+    const status = candidateStatus(req.query.status);
+    res.json(candidatePage(memoryService, 'profile', profileId, status, req.query));
+  }));
+
+  router.post('/:id/memory/candidates/:candidateId/promote', asyncHandler(async (req, res) => {
+    if (!memoryService) return res.status(501).json({ error: 'memoryService_unavailable' });
+    if (!requireHumanCookie(req, res, 'profile memory candidate promotion')) return;
+    const profileId = req.params.id;
+    operatorProfileService.getProfile(profileId);
+    const result = memoryService.promoteCandidateByHuman({
+      candidateId: req.params.candidateId,
+      ownerType: 'profile',
+      ownerId: profileId,
+    });
+    if (!result) throw new NotFoundError('profile memory candidate not found');
+    if (!result.promoted) {
+      return res.status(409).json({
+        candidate: {
+          id: result.candidateId,
+          status: result.pending ? 'pending' : 'rejected',
+        },
+        reason: result.reason,
+      });
+    }
+    res.json({
+      memory: toPublicMemory(result.item),
+      candidate: {
+        id: result.candidateId,
+        status: result.merged ? 'merged' : 'promoted',
+        promoted_to: result.item.id,
+      },
+    });
+  }));
+
+  router.post('/:id/memory/candidates/:candidateId/reject', asyncHandler(async (req, res) => {
+    if (!memoryService) return res.status(501).json({ error: 'memoryService_unavailable' });
+    if (!requireHumanCookie(req, res, 'profile memory candidate rejection')) return;
+    const profileId = req.params.id;
+    operatorProfileService.getProfile(profileId);
+    const result = memoryService.rejectCandidateByHuman({
+      candidateId: req.params.candidateId,
+      ownerType: 'profile',
+      ownerId: profileId,
+    });
+    if (!result) throw new NotFoundError('profile memory candidate not found');
+    res.json({ candidate: { id: result.candidateId, status: 'rejected' } });
   }));
 
   return router;

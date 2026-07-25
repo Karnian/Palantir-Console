@@ -63,6 +63,11 @@ function capabilityLabels(node) {
   return labels.length ? labels : [NODES_LABELS.capabilities.none];
 }
 
+function formatSshTarget(node) {
+  const port = node.ssh_port == null ? '' : `:${node.ssh_port}`;
+  return `${node.ssh_user || NODES_LABELS.emptyValue}@${node.ssh_host || NODES_LABELS.emptyValue}${port}`;
+}
+
 function errorLabel(error) {
   if (!error?.code) return '';
   return NODES_LABELS.usageErrorLabels[error.code] || error.code;
@@ -207,6 +212,7 @@ function buildNodeBody({
   kind,
   sshHost,
   sshUser,
+  sshPort,
   exposedRootsJson,
   nodePrefix,
   maxConcurrent,
@@ -240,10 +246,17 @@ function buildNodeBody({
     if (!roots) throw new Error(NODES_LABELS.validateExposedRootsRequired);
     body.ssh_host = sshHost.trim();
     body.ssh_user = sshUser.trim();
+    const normalizedSshPort = sshPort.trim();
+    body.ssh_port = normalizedSshPort === '' ? null : Number(normalizedSshPort);
+    if (body.ssh_port !== null
+        && (!Number.isInteger(body.ssh_port) || body.ssh_port < 1 || body.ssh_port > 65535)) {
+      throw new Error(NODES_LABELS.validateSshPort);
+    }
     body.exposed_roots = roots;
   } else {
     body.ssh_host = null;
     body.ssh_user = null;
+    body.ssh_port = null;
     body.exposed_roots = null;
   }
 
@@ -262,6 +275,7 @@ function NodeModal({ open, node, onClose, onSaved }) {
   const [kind, setKind] = useState('local');
   const [sshHost, setSshHost] = useState('');
   const [sshUser, setSshUser] = useState('');
+  const [sshPort, setSshPort] = useState('');
   const [exposedRootsJson, setExposedRootsJson] = useState('');
   const [nodePrefix, setNodePrefix] = useState('');
   const [maxConcurrent, setMaxConcurrent] = useState('');
@@ -278,6 +292,7 @@ function NodeModal({ open, node, onClose, onSaved }) {
       setKind(node.kind || 'local');
       setSshHost(node.ssh_host || '');
       setSshUser(node.ssh_user || '');
+      setSshPort(node.ssh_port == null ? '' : String(node.ssh_port));
       setExposedRootsJson(node.exposed_roots || '');
       setNodePrefix(node.node_prefix || '');
       setMaxConcurrent(node.max_concurrent == null ? '' : String(node.max_concurrent));
@@ -290,6 +305,7 @@ function NodeModal({ open, node, onClose, onSaved }) {
       setKind('local');
       setSshHost('');
       setSshUser('');
+      setSshPort('');
       setExposedRootsJson('');
       setNodePrefix('');
       setMaxConcurrent('');
@@ -323,6 +339,7 @@ function NodeModal({ open, node, onClose, onSaved }) {
         kind,
         sshHost,
         sshUser,
+        sshPort,
         exposedRootsJson,
         nodePrefix,
         maxConcurrent,
@@ -440,6 +457,20 @@ function NodeModal({ open, node, onClose, onSaved }) {
               value=${sshUser}
               onInput=${e => setSshUser(e.target.value)}
               placeholder=${NODES_LABELS.sshUserPlaceholder}
+            />
+          </div>
+          <div class="form-row">
+            <label class="form-label" for="node-ssh-port">${NODES_LABELS.fieldSshPort}</label>
+            <input
+              id="node-ssh-port"
+              class="form-input"
+              type="number"
+              min="1"
+              max="65535"
+              step="1"
+              value=${sshPort}
+              onInput=${e => setSshPort(e.target.value)}
+              placeholder=${NODES_LABELS.sshPortPlaceholder}
             />
           </div>
           <div class="form-row">
@@ -930,7 +961,7 @@ function NodeDetail({ detailId, node, nodesLoading, nodeSummary, runs, runsLoadi
           ${isSsh && html`
             <div class="node-detail-field">
               <span class="node-detail-field-label">${NODES_LABELS.sshTargetLabel}</span>
-              <span class="node-detail-field-value">${node.ssh_user || NODES_LABELS.emptyValue}@${node.ssh_host || NODES_LABELS.emptyValue} · ${rootsCount}${NODES_LABELS.rootsCountSuffix}</span>
+              <span class="node-detail-field-value">${formatSshTarget(node)} · ${rootsCount}${NODES_LABELS.rootsCountSuffix}</span>
             </div>
           `}
           <div class="node-detail-field">
@@ -1136,7 +1167,7 @@ export function NodesView({ detailId = null, nodeSummary: nodeSummaryProp } = {}
                   `)}
                 </div>
                 ${isSsh && html`
-                  <div class="node-card-ssh-line">${node.ssh_user || NODES_LABELS.emptyValue}@${node.ssh_host || NODES_LABELS.emptyValue} · ${rootsCount}${NODES_LABELS.rootsCountSuffix}</div>
+                  <div class="node-card-ssh-line">${formatSshTarget(node)} · ${rootsCount}${NODES_LABELS.rootsCountSuffix}</div>
                 `}
                 <div class="node-card-footer">
                   <a
