@@ -188,6 +188,64 @@ test('tmux worker feeds an option-like prompt through a mode-0600 stdin file, ne
   assert.equal(fs.readFileSync(paths.sentinelPath, 'utf-8'), '0\n');
 });
 
+test('tmux worker stays valid shell when TMPDIR contains a single quote', async (t) => {
+  // The trap body is evaluated twice (script parse, then handler run), so a
+  // path quoted only once turns the handler into `unexpected EOF`. A quote in
+  // TMPDIR is pathological but reachable — os.tmpdir() is env-derived — and a
+  // broken handler silently strands prompt material on disk.
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'pal-quote-'));
+  const nastyTmp = path.join(sandbox, "tmp'dir");
+  fs.mkdirSync(nastyTmp, { recursive: true });
+  const originalTmpDir = process.env.TMPDIR;
+  process.env.TMPDIR = nastyTmp;
+  t.after(() => {
+    if (originalTmpDir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = originalTmpDir;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  });
+
+  const runId = uniqueRunId('stdin-quoted-tmpdir');
+  const prompt = '--- a/file.js\n';
+  const tmux = makeTmuxCommand();
+  createTmuxEngine({ execFileSync: tmux.execFileSync }).spawnAgent(runId, {
+    command: fakeCodexPath,
+    args: ['exec', '-'],
+    stdin: prompt,
+    cwd: nastyTmp,
+    env: {},
+  });
+
+  const paths = artifactPaths(runId);
+  assert.ok(paths.scriptPath.includes("'"), 'the generated paths must actually contain a quote');
+
+  // send-keys types into the pane's interactive shell — an unquoted path here
+  // never starts the worker at all.
+  const sendKeys = tmux.calls.find(({ args }) => args[0] === 'send-keys');
+  assert.match(sendKeys.args[3], /^bash '.*'$/);
+  assert.equal(sendKeys.args[4], 'Enter');
+
+  const output = await runBash(paths.scriptPath);
+  const payload = JSON.parse(output.split('\n').find((line) => line.startsWith('{')));
+  assert.equal(payload.stdin, prompt);
+  assert.equal(fs.existsSync(paths.stdinPath), false, 'normal-path cleanup removed the prompt');
+  assert.equal(fs.readFileSync(paths.sentinelPath, 'utf-8'), '0\n');
+
+  // The normal path disarms the trap before exiting, so exercise the handler
+  // itself: arm it, fire EXIT, and require it to delete the right file.
+  const script = fs.readFileSync(paths.scriptPath, 'utf-8');
+  const trapLine = script.split('\n').find((line) => line.startsWith('trap '));
+  assert.ok(trapLine, 'stdin worker installs a cleanup trap');
+  fs.writeFileSync(paths.stdinPath, prompt, { mode: 0o600 });
+  const trapProbe = path.join(nastyTmp, 'trap-probe.sh');
+  fs.writeFileSync(
+    trapProbe,
+    `#!/bin/bash\n__palantir_sentinel_publish_path="$PATH"\n${trapLine}\nexit 0\n`,
+    { mode: 0o700 },
+  );
+  await runBash(trapProbe);
+  assert.equal(fs.existsSync(paths.stdinPath), false, 'trap handler removed the prompt file');
+});
+
 test('tmux worker removes a partially written stdin file when prompt persistence fails', (t) => {
   const runId = uniqueRunId('stdin-write-failure');
   const paths = artifactPaths(runId);

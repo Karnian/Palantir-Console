@@ -973,8 +973,10 @@ function createRemoteSshNodeExecutor(node, {
       ? `trap ${shq(cleanupStdinCommand)} EXIT HUP INT TERM; `
       : '';
     const clearStdinTrap = canonicalStdin ? '; trap - EXIT HUP INT TERM' : '';
+    // Remove BEFORE disarming the trap: clearing it first leaves a window where
+    // a HUP/TERM arriving before the `rm` has no handler left to run.
     const exitWrite = canonicalStdin
-      ? `; agent_exit_code=$?${clearStdinTrap}${cleanupStdin}; echo "$agent_exit_code" > ${shq(paths.exitSentinel)}`
+      ? `; agent_exit_code=$?${cleanupStdin}${clearStdinTrap}; echo "$agent_exit_code" > ${shq(paths.exitSentinel)}`
       : `; echo $? > ${shq(paths.exitSentinel)}`;
     const innerScript = `${stdinTrap}${workerInvocation}${stdinRedirect} > ${shq(paths.stdoutLog)} 2>&1${exitWrite}`;
     const script = `cd ${shq(safeCwd)} && tmux new-session -d -s ${shq(paths.sessionName)} ${shq(innerScript)}`;

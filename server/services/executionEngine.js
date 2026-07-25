@@ -31,6 +31,15 @@ function sanitizeSessionName(name) {
 }
 
 /**
+ * Wrap a value in POSIX single quotes so a shell parses it as one literal
+ * argument. Nest the call to quote a value that will be evaluated twice
+ * (a `trap` body, `sh -c`), matching remoteSshExecutor's `shq`.
+ */
+function shq(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+/**
  * Validate and sanitize a directory path.
  * Must be absolute and exist on disk.
  */
@@ -136,13 +145,19 @@ function createTmuxEngine({
       return `'${safeArg}'`;
     });
     const safeCmd = String(command).replace(/'/g, "'\\''");
-    const safeStdin = stdinPath.replace(/'/g, "'\\''");
-    const stdinRedirect = stdin !== undefined ? ` < '${safeStdin}'` : '';
+    const quotedStdin = shq(stdinPath);
+    const stdinRedirect = stdin !== undefined ? ` < ${quotedStdin}` : '';
+    // The trap body is evaluated TWICE — once when the script itself is parsed,
+    // and again when the shell runs the handler. A path quoted only once has
+    // its escapes consumed by the first pass, so a `'` in TMPDIR would make the
+    // handler a syntax error. Quote the fully-formed command a second time, the
+    // same nesting the remote executor uses (shq of an already-shq'd path).
+    const stdinCleanupCommand = `PATH="$${publishPathVar}" rm -f -- ${quotedStdin}`;
     if (stdin !== undefined) {
       // Ensure signals or an unexpected script error do not strand prompt
-      // material on disk. The explicit normal-path cleanup below clears this
-      // trap before publishing the worker's exit sentinel.
-      lines.push(`trap 'PATH="$${publishPathVar}" rm -f -- '"'"'${safeStdin}'"'"'' EXIT HUP INT TERM`);
+      // material on disk. The explicit normal-path cleanup below removes the
+      // file first and only then clears this trap.
+      lines.push(`trap ${shq(stdinCleanupCommand)} EXIT HUP INT TERM`);
     }
     lines.push(`'${safeCmd}' ${quotedArgs.join(' ')}${stdinRedirect}`);
     // Capture $? exactly once so the durable sentinel and scrollback marker
@@ -151,8 +166,10 @@ function createTmuxEngine({
     const safeSentinelTmp = exitSentinelTmpPath.replace(/'/g, "'\\''");
     lines.push('agent_exit_code=$?');
     if (stdin !== undefined) {
+      // Remove BEFORE disarming: clearing the trap first leaves a window where
+      // a HUP/TERM arriving between the two lines has no handler left to run.
+      lines.push(stdinCleanupCommand);
       lines.push('trap - EXIT HUP INT TERM');
-      lines.push(`PATH="$${publishPathVar}" rm -f -- '${safeStdin}'`);
     }
     lines.push(`printf '%s\\n' "$agent_exit_code" > '${safeSentinelTmp}'`);
     lines.push('echo "___EXIT_CODE_${agent_exit_code}___"');
@@ -183,8 +200,11 @@ function createTmuxEngine({
         } catch { /* tee best-effort — capture falls back to capture-pane */ }
       }
 
-      // Execute the script in the tmux session
-      runTmuxCommand('tmux', ['send-keys', '-t', name, `bash '${scriptPath}'`, 'Enter'], {
+      // Execute the script in the tmux session. send-keys types this into the
+      // pane's interactive shell, so the path must be quoted — an unquoted
+      // scriptPath silently fails to start the worker when TMPDIR contains a
+      // quote or space, stranding the run and its prompt file.
+      runTmuxCommand('tmux', ['send-keys', '-t', name, `bash ${shq(scriptPath)}`, 'Enter'], {
         stdio: 'pipe',
       });
 
