@@ -84,7 +84,14 @@ function classifyBrowseError(error) {
   if (code === 'ETIMEDOUT') {
     return { status: 504, reason: BROWSE_REASONS.nodeTimeout, message: 'Execution node did not respond in time' };
   }
-  if (code === 'ENOENT' || code === 'ENOTDIR' || /No such file or directory|Not a directory/i.test(text)) {
+  // ENOTDIR is NOT "missing" — the path exists, it just is not a folder. Local
+  // browsing hits this through readdir(); telling the operator "path not found"
+  // for a file they can see would contradict the remote side, which answers
+  // path_not_directory for the same situation.
+  if (code === 'ENOTDIR' || /Not a directory|is not a directory/i.test(text)) {
+    return { status: 400, reason: BROWSE_REASONS.pathNotDirectory, message: 'Path is not a directory' };
+  }
+  if (code === 'ENOENT' || /No such file or directory/i.test(text)) {
     return { status: 404, reason: BROWSE_REASONS.pathNotFound, message: 'Path not found' };
   }
   if (code === 'EACCES' || code === 'EPERM' || /Permission denied|not permitted/i.test(text)) {

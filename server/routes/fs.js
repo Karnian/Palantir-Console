@@ -1,7 +1,7 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 
-function createFsRouter({ fsService }) {
+function createFsRouter({ fsService, logger = console }) {
   const router = express.Router();
 
   router.get('/', asyncHandler(async (req, res) => {
@@ -21,6 +21,15 @@ function createFsRouter({ fsService }) {
       // picker needs `reason` on 5xx too (an unreachable node is a 502), and
       // errorHandler only forwards `reason` for 4xx.
       const mapped = fsService.classifyBrowseError(error);
+      // Answering here skips the global error handler, which is where 5xx are
+      // logged. An unexpected failure (a closed SQLite handle, a bug in the
+      // executor) would otherwise leave no stack anywhere — the operator sees a
+      // 500 and the server says nothing. 4xx are expected operator input and
+      // stay quiet.
+      if (mapped.status >= 500) {
+        try { logger.error('[fs] browse failed', { status: mapped.status, reason: mapped.reason }, error); }
+        catch { /* logging must never mask the response */ }
+      }
       res.status(mapped.status).json({ error: mapped.message, reason: mapped.reason });
     }
   }));

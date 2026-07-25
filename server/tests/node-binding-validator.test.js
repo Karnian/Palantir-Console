@@ -7,8 +7,11 @@ const { createNodeBindingValidator } = require('../services/nodeBindingValidator
 function createFakeExecutor({
   realpathImpl = async (p) => p,
   fileExistsImpl = async () => true,
+  // The binding invariant is "is a DIRECTORY", not "exists": the value becomes
+  // a run's working directory. statImpl returns null for a missing path.
+  statImpl = null,
 } = {}) {
-  const calls = { realpath: [], fileExists: [] };
+  const calls = { realpath: [], fileExists: [], stat: [] };
   return {
     calls,
     async realpath(p) {
@@ -18,6 +21,13 @@ function createFakeExecutor({
     async fileExists(p) {
       calls.fileExists.push(p);
       return fileExistsImpl(p);
+    },
+    async stat(p) {
+      calls.stat.push(p);
+      if (statImpl) return statImpl(p);
+      const exists = await fileExistsImpl(p);
+      if (!exists) return null;
+      return { isDirectory: () => true, isFile: () => false };
     },
   };
 }
@@ -68,7 +78,7 @@ test('validateBinding accepts remote directory when realpath and fileExists pass
 
   assert.deepEqual(nodeService.calls, ['node-a']);
   assert.deepEqual(executor.calls.realpath, ['/srv/repo']);
-  assert.deepEqual(executor.calls.fileExists, ['/srv/repo-real']);
+  assert.deepEqual(executor.calls.stat, ['/srv/repo-real']);
 });
 
 test('validateBinding rejects remote directory when realpath fails', async () => {
@@ -209,4 +219,24 @@ test('validateBinding trims the directory before validating (NIT: leading/traili
   await validator.validateBinding({ nodeId: 'node-a', directory: '  /srv/repo  ' });
 
   assert.deepEqual(executor.calls.realpath, ['/srv/repo']);
+});
+
+// A path can be a directory on node A and an existing regular FILE at the same
+// path on node B. Existence alone would accept it and the run would only fail
+// later when the path was used as a working directory.
+test('validateBinding rejects a remote path that exists but is a regular file', async () => {
+  const executor = createFakeExecutor({
+    realpathImpl: async () => '/srv/notes.md',
+    statImpl: async () => ({ isDirectory: () => false, isFile: () => true }),
+  });
+  const nodeService = createFakeNodeService(executor);
+  const validator = createNodeBindingValidator({ nodeService });
+  await assert.rejects(
+    () => validator.validateBinding({ nodeId: 'pod-a', directory: '/srv/notes.md' }),
+    (err) => {
+      assert.equal(err.status, 400);
+      assert.equal(err.reason, 'path_not_directory');
+      return true;
+    },
+  );
 });

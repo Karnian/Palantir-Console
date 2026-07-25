@@ -671,6 +671,12 @@ const DIR_RESET_REASONS = new Set([
   'path_outside_root',
   'symlink_escape',
   'path_not_found',
+  // A path that is a directory on node A can be an existing regular FILE at the
+  // same path on node B. That is as durable an invalidation as a missing path —
+  // without it the picker would keep the stale selection and the save-time
+  // validator (which now also rejects non-directories) would be the first thing
+  // to complain.
+  'path_not_directory',
   'permission_denied',
 ]);
 

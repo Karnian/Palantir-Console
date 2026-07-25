@@ -25,6 +25,11 @@ function classifyBindingFailure(err) {
     return BROWSE_REASONS.pathOutsideRoot;
   }
   if (/Permission denied|not permitted/i.test(text)) return BROWSE_REASONS.permissionDenied;
+  if (err?.reason === BROWSE_REASONS.pathNotDirectory
+    || code === 'ENOTDIR'
+    || /Not a directory|is not a directory/i.test(text)) {
+    return BROWSE_REASONS.pathNotDirectory;
+  }
   return BROWSE_REASONS.pathNotFound;
 }
 
@@ -53,8 +58,15 @@ function createNodeBindingValidator({ nodeService } = {}) {
     const executor = nodeService.pickExecutor(nodeId);
     try {
       const resolvedDirectory = await executor.realpath(normalizedDirectory);
-      const exists = await executor.fileExists(resolvedDirectory);
-      if (!exists) throw directoryBindingError(nodeId, normalizedDirectory);
+      // Existence alone is NOT the invariant — this value becomes the run's
+      // working directory, so a regular file (or FIFO/socket) that merely
+      // exists would be accepted here and only blow up much later at spawn.
+      // stat() is the same `test -d` the executor already uses elsewhere.
+      const stats = await executor.stat(resolvedDirectory);
+      if (!stats) throw directoryBindingError(nodeId, normalizedDirectory);
+      if (!stats.isDirectory()) {
+        throw directoryBindingError(nodeId, normalizedDirectory, BROWSE_REASONS.pathNotDirectory);
+      }
     } catch (err) {
       if (err instanceof BadRequestError) throw err;
       throw directoryBindingError(nodeId, normalizedDirectory, classifyBindingFailure(err));
