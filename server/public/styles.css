@@ -499,6 +499,16 @@ body {
   font-family: var(--font-mono);
 }
 
+.directory-root-switcher {
+  display: grid;
+  gap: 4px;
+}
+
+.directory-root-switcher .dropdown-button {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
 .directory-toggle {
   display: flex;
   align-items: center;

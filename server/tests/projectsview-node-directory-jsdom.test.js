@@ -115,6 +115,7 @@ function installPickerStubs(env, apiFetch, toasts = []) {
 
 function makePickerHarness(env, apiFetch, toasts) {
   installPickerStubs(env, apiFetch, toasts);
+  env.loadComponent('Dropdown');
   env.loadComponent('BoardView');
   const root = env.document.getElementById('root');
   const selected = [];
@@ -182,6 +183,99 @@ test('DirectoryPicker browses the selected node and labels the scope', async (t)
     const items = Array.from(root.querySelectorAll('.directory-item')).map((el) => el.textContent);
     assert.ok(items.some((text) => text.includes('proj-a')));
   });
+});
+
+test('DirectoryPicker can switch to and select a directory under a secondary exposed root', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  const apiFetch = makeDeferredFetch();
+  const { root, render, selected } = makePickerHarness(env, apiFetch, []);
+
+  render({ nodeId: 'pod-a', nodeLabel: 'Pod A (pod-a)' });
+  await flushEffects(20);
+  clickBrowse(root);
+  await waitFor(() => assert.equal(apiFetch.calls.length, 1));
+  apiFetch.calls[0].resolve({
+    root: '/srv/primary',
+    roots: ['/srv/primary', '/mnt/secondary'],
+    path: '/srv/primary',
+    directories: [{ name: 'primary-app', path: '/srv/primary/primary-app' }],
+  });
+
+  const rootSelect = await waitFor(() => {
+    const trigger = root.querySelector('[data-role="dir-picker-root-select"]');
+    assert.ok(trigger, 'multiple exposed roots must render a root switcher');
+    return trigger;
+  });
+  await pickDropdownOption(env, rootSelect, '/mnt/secondary');
+  await waitFor(() => assert.equal(apiFetch.calls.length, 2));
+  assert.match(apiFetch.calls[1].url, /path=%2Fmnt%2Fsecondary/);
+  apiFetch.calls[1].resolve({
+    root: '/mnt/secondary',
+    roots: ['/srv/primary', '/mnt/secondary'],
+    path: '/mnt/secondary',
+    directories: [{ name: 'secondary-app', path: '/mnt/secondary/secondary-app' }],
+  });
+
+  const secondaryDir = await waitFor(() => {
+    const item = Array.from(root.querySelectorAll('.directory-item'))
+      .find((candidate) => candidate.textContent.includes('secondary-app'));
+    assert.ok(item, 'the secondary root listing must be reachable');
+    return item;
+  });
+  assert.equal(
+    root.querySelector('.directory-item[aria-label]'),
+    null,
+    'up navigation must stop at the currently selected secondary root',
+  );
+  secondaryDir.click();
+  await waitFor(() => assert.equal(apiFetch.calls.length, 3));
+  assert.match(apiFetch.calls[2].url, /path=%2Fmnt%2Fsecondary%2Fsecondary-app/);
+  apiFetch.calls[2].resolve({
+    root: '/mnt/secondary',
+    roots: ['/srv/primary', '/mnt/secondary'],
+    path: '/mnt/secondary/secondary-app',
+    directories: [],
+  });
+  await waitFor(() => assert.match(
+    root.querySelector('.directory-path').textContent,
+    /\/mnt\/secondary\/secondary-app/,
+  ));
+
+  Array.from(root.querySelectorAll('button'))
+    .find((candidate) => candidate.textContent.trim() === '선택')
+    .click();
+  await waitFor(() => assert.deepEqual(selected, ['/mnt/secondary/secondary-app']));
+});
+
+test('DirectoryPicker keeps the single-root node UI unchanged', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  const apiFetch = makeDeferredFetch();
+  const { root, render } = makePickerHarness(env, apiFetch, []);
+
+  render({ nodeId: 'pod-a' });
+  await flushEffects(20);
+  clickBrowse(root);
+  await waitFor(() => assert.equal(apiFetch.calls.length, 1));
+  apiFetch.calls[0].resolve({
+    root: '/srv/root',
+    roots: ['/srv/root'],
+    path: '/srv/root',
+    directories: [{ name: 'only-app', path: '/srv/root/only-app' }],
+  });
+
+  await waitFor(() => assert.match(root.querySelector('.directory-list').textContent, /only-app/));
+  assert.equal(
+    root.querySelector('[data-role="directory-root-switcher"]'),
+    null,
+    'one root must not add any root-switching chrome',
+  );
+  assert.equal(
+    root.querySelectorAll('.directory-item').length,
+    1,
+    'the original root-level listing must keep the same visible controls',
+  );
 });
 
 test('DirectoryPicker gives unreachable, unreadable, outside-root, and symlink escape distinct copy', async () => {
@@ -293,11 +387,16 @@ test('DirectoryPicker re-validates the selected directory against the new node',
   const apiFetch = makeDeferredFetch();
   const { root, render, selected } = makePickerHarness(env, apiFetch, []);
 
-  render({ nodeId: '', value: '/srv/projects/app' });
+  render({ nodeId: '', directoryNodeId: '', value: '/srv/projects/app' });
   await flushEffects(20);
   assert.equal(apiFetch.calls.length, 0, 'the initial mount must not re-validate');
 
-  render({ nodeId: 'pod-a', nodeLabel: 'Pod A (pod-a)', value: '/srv/projects/app' });
+  render({
+    nodeId: 'pod-a',
+    nodeLabel: 'Pod A (pod-a)',
+    directoryNodeId: '',
+    value: '/srv/projects/app',
+  });
   await waitFor(() => assert.equal(apiFetch.calls.length, 1));
   const [call] = apiFetch.calls;
   assert.match(call.url, /nodeId=pod-a/);
@@ -319,9 +418,14 @@ test('DirectoryPicker clears the directory when the new node rejects the path', 
     const toasts = [];
     const { root, render, selected } = makePickerHarness(env, apiFetch, toasts);
 
-    render({ nodeId: '', value: '/home/karnian/local-only' });
+    render({ nodeId: '', directoryNodeId: '', value: '/home/karnian/local-only' });
     await flushEffects(20);
-    render({ nodeId: 'pod-a', nodeLabel: 'Pod A (pod-a)', value: '/home/karnian/local-only' });
+    render({
+      nodeId: 'pod-a',
+      nodeLabel: 'Pod A (pod-a)',
+      directoryNodeId: '',
+      value: '/home/karnian/local-only',
+    });
     await waitFor(() => assert.equal(apiFetch.calls.length, 1));
     apiFetch.calls[0].reject(browseError({ status: 403, reason }));
 
@@ -346,9 +450,9 @@ test('DirectoryPicker keeps the directory when the new node is merely unreachabl
     const apiFetch = makeDeferredFetch();
     const { root, render, selected } = makePickerHarness(env, apiFetch, []);
 
-    render({ nodeId: '', value: '/srv/projects/app' });
+    render({ nodeId: '', directoryNodeId: '', value: '/srv/projects/app' });
     await flushEffects(20);
-    render({ nodeId: 'pod-a', value: '/srv/projects/app' });
+    render({ nodeId: 'pod-a', directoryNodeId: '', value: '/srv/projects/app' });
     await waitFor(() => assert.equal(apiFetch.calls.length, 1));
     apiFetch.calls[0].reject(browseError({ status: 502, reason }));
 
@@ -459,11 +563,17 @@ function installProjectsStubs(env, apiFetch, toasts = [], pickerProps = []) {
   // Records the node identity the form hands down, so the "paths belong to the
   // selected node" contract is asserted at the seam rather than inferred.
   env.context.DirectoryPicker = function DirectoryPicker(props) {
-    pickerProps.push({ value: props.value, nodeId: props.nodeId, nodeLabel: props.nodeLabel });
+    pickerProps.push({
+      value: props.value,
+      nodeId: props.nodeId,
+      nodeLabel: props.nodeLabel,
+      directoryNodeId: props.directoryNodeId,
+    });
     return env.context.preact.h('input', {
       'data-role': 'directory-picker-stub',
       'data-node-id': props.nodeId || '',
       'data-node-label': props.nodeLabel || '',
+      'data-directory-node-id': props.directoryNodeId || '',
       value: props.value || '',
       onInput: (e) => props.onSelect(e.target.value),
     });
@@ -505,6 +615,7 @@ function setInput(env, input, value) {
 
 const NODES = [
   { id: 'pod-a', name: 'Pod A', can_execute: 1, files_only: 0, reachable: 1, max_concurrent: 2, running_count: 0 },
+  { id: 'pod-b', name: 'Pod B', can_execute: 1, files_only: 0, reachable: 1, max_concurrent: 2, running_count: 0 },
 ];
 
 test('new project form places the execution node before the source and directory fields', async (t) => {
@@ -594,6 +705,89 @@ test('the directory picker is scoped to the node the form has selected', async (
     assert.equal(picker.dataset.nodeId, 'pod-a');
     assert.equal(picker.dataset.nodeLabel, 'Pod A (pod-a)');
   });
+});
+
+test('the form preserves directory ownership across source-type remounts', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  const toasts = [];
+  const browseCalls = [];
+  installProjectsStubs(env, async (url) => {
+    if (url === '/api/nodes') return { nodes: NODES };
+    if (url === '/api/operator-instances') return { instances: [] };
+    if (!url.startsWith('/api/fs?')) return {};
+
+    const parsed = new URL(url, 'http://localhost');
+    const node = parsed.searchParams.get('nodeId') || '';
+    const targetPath = parsed.searchParams.get('path') || '';
+    browseCalls.push({ node, path: targetPath });
+    if (node === 'pod-b' && targetPath === '/srv/pod-a/app') {
+      throw browseError({ status: 404, reason: 'path_not_found' });
+    }
+    if (node === 'pod-a' && targetPath === '/srv/pod-a/app') {
+      return {
+        root: '/srv/pod-a',
+        roots: ['/srv/pod-a'],
+        path: '/srv/pod-a/app',
+        directories: [],
+      };
+    }
+    return {
+      root: '/srv/pod-a',
+      roots: ['/srv/pod-a'],
+      path: '/srv/pod-a',
+      directories: [{ name: 'app', path: '/srv/pod-a/app' }],
+    };
+  }, toasts);
+  // Replace the ProjectsView seam stub with the real picker. Its parent-owned
+  // directoryNodeId must survive when the source toggle unmounts this child.
+  env.loadComponent('Dropdown');
+  env.loadComponent('BoardView');
+  env.loadComponent('ProjectsView');
+
+  const root = renderProjectsView(env);
+  clickButton(root, (text) => text.includes('새 프로젝트 폴더'));
+  await waitFor(() => assert.ok(root.querySelector('#new-project-source-type')));
+  await pickDropdownOption(env, root.querySelector('#new-project-node'), 'pod-a');
+  await pickDropdownOption(env, root.querySelector('#new-project-source-type'), 'legacy_directory');
+  await waitFor(() => assert.ok(root.querySelector('.dir-picker-input')));
+
+  clickBrowse(root);
+  const appDir = await waitFor(() => {
+    const item = Array.from(root.querySelectorAll('.directory-item'))
+      .find((candidate) => candidate.textContent.includes('app'));
+    assert.ok(item);
+    return item;
+  });
+  appDir.click();
+  await waitFor(() => assert.match(
+    root.querySelector('.directory-path').textContent,
+    /\/srv\/pod-a\/app/,
+  ));
+  Array.from(root.querySelectorAll('button'))
+    .find((candidate) => candidate.textContent.trim() === '선택')
+    .click();
+  await waitFor(() => assert.equal(root.querySelector('.dir-picker-input').value, '/srv/pod-a/app'));
+
+  // Git unmounts DirectoryPicker. The node then changes while no picker
+  // instance exists to observe the transition.
+  await pickDropdownOption(env, root.querySelector('#new-project-source-type'), 'git');
+  await waitFor(() => assert.equal(root.querySelector('.dir-picker-input'), null));
+  await pickDropdownOption(env, root.querySelector('#new-project-node'), 'pod-b');
+  await pickDropdownOption(env, root.querySelector('#new-project-source-type'), 'legacy_directory');
+
+  await waitFor(() => {
+    assert.ok(
+      browseCalls.some(call => call.node === 'pod-b' && call.path === '/srv/pod-a/app'),
+      'the remounted picker must validate the path against pod-b',
+    );
+    assert.equal(
+      root.querySelector('.dir-picker-input').value,
+      '',
+      "pod-a's rejected path must not remain displayed as pod-b's directory",
+    );
+  });
+  assert.ok(toasts.some(toast => /노드를 변경하여 선택한 디렉터리를 해제했습니다/.test(toast.message)));
 });
 
 test('create saves node_id and directory together', async (t) => {

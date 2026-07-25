@@ -359,6 +359,7 @@ export const DIRECTORY_PICKER_LABELS = {
   empty: '하위 폴더가 없습니다.',
   upHint: '상위 폴더',
   select: '선택',
+  rootsLabel: '허용된 루트',
   // task_85d43f96 — node-aware browsing. The picker browses whichever
   // execution node the project form has selected, so the failure copy has to
   // name the actual cause: an unreachable pod, a denied path, and a typo are

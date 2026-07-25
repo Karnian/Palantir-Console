@@ -366,11 +366,13 @@ function McpSourceFields({
 function LegacySourceFields({
   prefix,
   dir,
+  directoryNodeId,
   allowNonGitDir,
   mcpConfigPath,
   nodeId,
   nodeLabel,
   onDir,
+  onDirectoryNodeChange,
   onAllowNonGitDir,
   onMcpConfigPath,
 }) {
@@ -383,6 +385,8 @@ function LegacySourceFields({
           onSelect=${onDir}
           nodeId=${nodeId}
           nodeLabel=${nodeLabel}
+          directoryNodeId=${directoryNodeId}
+          onDirectoryNodeChange=${onDirectoryNodeChange}
         />
       </div>
       <div class="form-field">
@@ -729,6 +733,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   const [repoRef, setRepoRef] = useState('');
   const [repoSubdir, setRepoSubdir] = useState('');
   const [dir, setDir] = useState('');
+  const [dirNodeId, setDirNodeId] = useState('');
   const [mcpConfigSource, setMcpConfigSource] = useState(MCP_SOURCE_CONTROL_PLANE);
   const [mcpConfigPath, setMcpConfigPath] = useState('');
   const [mcpConfigRelpath, setMcpConfigRelpath] = useState('');
@@ -748,6 +753,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   const [editRepoRef, setEditRepoRef] = useState('');
   const [editRepoSubdir, setEditRepoSubdir] = useState('');
   const [editDir, setEditDir] = useState('');
+  const [editDirNodeId, setEditDirNodeId] = useState('');
   const [editMcpConfigSource, setEditMcpConfigSource] = useState(MCP_SOURCE_CONTROL_PLANE);
   const [editMcpConfigPath, setEditMcpConfigPath] = useState('');
   const [editMcpConfigRelpath, setEditMcpConfigRelpath] = useState('');
@@ -809,6 +815,16 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   const createReady = name.trim() && (sourceType !== SOURCE_TYPE_GIT || repoUrl.trim());
   const editReady = editName.trim() && (editSourceType !== SOURCE_TYPE_GIT || editRepoUrl.trim());
 
+  const selectDir = (nextDir) => {
+    setDir(nextDir);
+    setDirNodeId(nodeId);
+  };
+
+  const selectEditDir = (nextDir) => {
+    setEditDir(nextDir);
+    setEditDirNodeId(editNodeId);
+  };
+
   const handleProjectSaveError = (err) => {
     const message = projectSaveErrorMessage(err);
     if (!message) return false;
@@ -852,6 +868,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
       setRepoRef('');
       setRepoSubdir('');
       setDir('');
+      setDirNodeId('');
       setMcpConfigSource(MCP_SOURCE_CONTROL_PLANE);
       setMcpConfigPath('');
       setMcpConfigRelpath('');
@@ -881,6 +898,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
     setEditRepoRef(p.repo_ref || '');
     setEditRepoSubdir(p.repo_subdir || '');
     setEditDir(p.directory || '');
+    setEditDirNodeId(projectNodeValue(p));
     setEditMcpConfigSource(normalizeMcpConfigSource(p.mcp_config_source));
     setEditMcpConfigPath(p.mcp_config_path || '');
     setEditMcpConfigRelpath(p.mcp_config_relpath || '');
@@ -1159,11 +1177,13 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
               <${LegacySourceFields}
                 prefix="new"
                 dir=${dir}
+                directoryNodeId=${dirNodeId}
                 allowNonGitDir=${allowNonGitDir}
                 mcpConfigPath=${mcpConfigPath}
                 nodeId=${nodeId}
                 nodeLabel=${nodeDisplayLabel(nodes, nodeId)}
-                onDir=${setDir}
+                onDir=${selectDir}
+                onDirectoryNodeChange=${setDirNodeId}
                 onAllowNonGitDir=${setAllowNonGitDir}
                 onMcpConfigPath=${setMcpConfigPath}
               />
@@ -1244,11 +1264,13 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
               <${LegacySourceFields}
                 prefix="edit"
                 dir=${editDir}
+                directoryNodeId=${editDirNodeId}
                 allowNonGitDir=${editAllowNonGitDir}
                 mcpConfigPath=${editMcpConfigPath}
                 nodeId=${editNodeId}
                 nodeLabel=${nodeDisplayLabel(nodes, editNodeId)}
-                onDir=${setEditDir}
+                onDir=${selectEditDir}
+                onDirectoryNodeChange=${setEditDirNodeId}
                 onAllowNonGitDir=${setEditAllowNonGitDir}
                 onMcpConfigPath=${setEditMcpConfigPath}
               />
