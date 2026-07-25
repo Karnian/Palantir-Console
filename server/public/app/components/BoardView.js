@@ -2,7 +2,7 @@
 // Extracted from server/public/app.js as part of P5-2 (ESM phase 4a).
 
 import { h } from '../../vendor/preact.module.js';
-import { useState, useEffect, useMemo } from '../../vendor/hooks.module.js';
+import { useState, useEffect, useMemo, useRef } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
@@ -22,6 +22,7 @@ import {
   COMMON_ACTIONS,
   MANAGER_LABELS,
   DIRECTORY_PICKER_LABELS,
+  directoryPickerErrorMessage,
   statusLabel,
 } from '../lib/copy.js';
 
@@ -662,29 +663,76 @@ export function CalendarView({ tasks, projects, agents, runs, reloadTasks, onOpe
 // Directory Picker (Preact component — reuses existing directory-* CSS classes)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function DirectoryPicker({ value, onSelect }) {
+// task_85d43f96: reasons that mean "this path is not valid ON THIS NODE" and
+// therefore justify dropping the operator's selection when the execution node
+// changes. `node_unreachable` / `node_timeout` deliberately do NOT clear it —
+// a pod that is briefly down must not delete a correct directory.
+const DIR_RESET_REASONS = new Set([
+  'path_outside_root',
+  'symlink_escape',
+  'path_not_found',
+  'permission_denied',
+]);
+
+function fsBrowseUrl(targetPath, nodeId, showHidden) {
+  const params = new URLSearchParams();
+  if (targetPath) params.set('path', targetPath);
+  params.set('showHidden', showHidden ? '1' : '0');
+  // Absent nodeId keeps the control-plane (`local`) contract unchanged.
+  if (nodeId) params.set('nodeId', nodeId);
+  return `/api/fs?${params.toString()}`;
+}
+
+// /api/fs answers 403 for out-of-root and permission-denied paths, which are
+// browse outcomes rather than "you are logged out" — without this opt-in
+// apiFetch would navigate the operator to /login.html mid-browse, and the
+// node-change reset below (whose two most common reasons are exactly those
+// 403s) could never run. See api.js `allowAppForbidden`.
+const FS_FETCH_OPTS = { allowAppForbidden: true };
+
+export function DirectoryPicker({ value, onSelect, nodeId = '', nodeLabel = '' }) {
   const [open, setOpen] = useState(false);
   const [currentPath, setCurrentPath] = useState('');
   const [rootPath, setRootPath] = useState('');
   const [dirs, setDirs] = useState([]);
   const [showHidden, setShowHidden] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [truncated, setTruncated] = useState(false);
+  // Stale-response fence (same discipline as useDispatchAudit): every request
+  // captures a monotonic token and refuses to commit if a newer request — or a
+  // node switch — has happened while it was in flight. Without it a slow
+  // listing from the previous node lands on top of the new node's listing.
+  const requestSeqRef = useRef(0);
+  const activeNodeRef = useRef(nodeId);
+  const lastNodeRef = useRef(nodeId);
+  // Update during render, not only in the effect below. A promise from the old
+  // node can settle in the render→effect gap; this synchronous identity fence
+  // prevents that response from committing even in that narrow window.
+  activeNodeRef.current = nodeId;
 
   const loadDir = async (targetPath) => {
+    const seq = requestSeqRef.current + 1;
+    requestSeqRef.current = seq;
+    const requestNodeId = nodeId;
     setLoading(true);
+    setError('');
     try {
-      const hq = showHidden ? 'showHidden=1' : 'showHidden=0';
-      const url = targetPath
-        ? `/api/fs?path=${encodeURIComponent(targetPath)}&${hq}`
-        : `/api/fs?${hq}`;
-      const data = await apiFetch(url);
-      setRootPath(data.root);
-      setCurrentPath(data.path);
+      const data = await apiFetch(fsBrowseUrl(targetPath, requestNodeId, showHidden), FS_FETCH_OPTS);
+      if (seq !== requestSeqRef.current || requestNodeId !== activeNodeRef.current) return;
+      setRootPath(data.root || '');
+      setCurrentPath(data.path || '');
       setDirs(data.directories || []);
+      setTruncated(Boolean(data.truncated));
     } catch (err) {
-      addToast(err.message, 'error');
+      if (seq !== requestSeqRef.current || requestNodeId !== activeNodeRef.current) return;
+      const message = directoryPickerErrorMessage(err);
+      setDirs([]);
+      setTruncated(false);
+      setError(message);
+      addToast(message, 'error');
     }
-    setLoading(false);
+    if (seq === requestSeqRef.current && requestNodeId === activeNodeRef.current) setLoading(false);
   };
 
   const handleOpen = () => {
@@ -711,6 +759,43 @@ export function DirectoryPicker({ value, onSelect }) {
     if (open && currentPath) loadDir(currentPath);
   }, [showHidden]);
 
+  // task_85d43f96: the node is the scope of every path in this widget, so a
+  // node change invalidates in-flight listings, drops the browsed listing, and
+  // re-validates the already-selected directory against the NEW node. The
+  // selection is only cleared when the new node says the path is genuinely
+  // invalid there — see DIR_RESET_REASONS.
+  useEffect(() => {
+    if (lastNodeRef.current === nodeId) return;
+    lastNodeRef.current = nodeId;
+    requestSeqRef.current += 1;
+    const seq = requestSeqRef.current;
+    setDirs([]);
+    setCurrentPath('');
+    setRootPath('');
+    setTruncated(false);
+    setError('');
+    setLoading(false);
+    setOpen(false);
+    if (!value) return;
+    apiFetch(fsBrowseUrl(value, nodeId, showHidden), FS_FETCH_OPTS).catch((err) => {
+      if (seq !== requestSeqRef.current) return;
+      const detail = directoryPickerErrorMessage(err);
+      const reason = err?.reason || err?.data?.reason;
+      if (!DIR_RESET_REASONS.has(reason)) {
+        setError(detail);
+        return;
+      }
+      onSelect('');
+      const message = `${DIRECTORY_PICKER_LABELS.nodeChangedReset} (${detail})`;
+      setError(message);
+      addToast(message, 'error');
+    });
+  }, [nodeId]);
+
+  const scopeLabel = nodeId
+    ? `${DIRECTORY_PICKER_LABELS.nodeScopePrefix} ${nodeLabel || nodeId}`
+    : DIRECTORY_PICKER_LABELS.localNodeLabel;
+
   return html`
     <div class="form-field">
       <label class="form-label">${DIRECTORY_PICKER_LABELS.fieldLabel}</label>
@@ -727,6 +812,10 @@ export function DirectoryPicker({ value, onSelect }) {
           <button type="button" class="ghost dir-picker-btn dir-picker-clear" aria-label=${DIRECTORY_PICKER_LABELS.clear} onClick=${() => onSelect('')}>✕</button>
         `}
       </div>
+      <div class="dir-picker-scope" data-role="dir-picker-scope">${scopeLabel}</div>
+      ${!open && error && html`
+        <div class="dir-picker-error" data-role="dir-picker-error" role="status">${error}</div>
+      `}
     </div>
 
     <${Modal} open=${!!open} onClose=${() => setOpen(false)}
@@ -736,6 +825,13 @@ export function DirectoryPicker({ value, onSelect }) {
         <button class="ghost" onClick=${() => setOpen(false)}>${COMMON_ACTIONS.close}</button>
       </div>
       <div class="directory-path">${currentPath || '...'}</div>
+      <div class="dir-picker-scope" data-role="dir-picker-modal-scope">${scopeLabel}</div>
+      ${error && html`
+        <div class="dir-picker-error" data-role="dir-picker-modal-error" role="alert">${error}</div>
+      `}
+      ${truncated && html`
+        <div class="dir-picker-notice" data-role="dir-picker-truncated">${DIRECTORY_PICKER_LABELS.truncatedNotice}</div>
+      `}
       <div class="directory-toggle">
         <label class="directory-toggle-label">
           <input type="checkbox" checked=${showHidden} onChange=${e => setShowHidden(e.target.checked)} />

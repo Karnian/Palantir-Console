@@ -29,27 +29,47 @@ function redirectToLogin() {
 }
 
 export async function apiFetch(url, opts = {}) {
-  const headers = { 'Content-Type': 'application/json', ...opts.headers };
-  const res = await fetch(url, { headers, credentials: 'same-origin', ...opts });
-  // Auth failures → bounce to login. We check the status BEFORE trying to
-  // parse JSON, because middleware may respond with { error } HTML in some
-  // proxy setups.
+  // `allowAppForbidden` — opt in to distinguishing an APPLICATION 403 from an
+  // auth 403 (task_85d43f96). /api/fs answers 403 for "that path is outside
+  // the node's exposed_roots" and "permission denied on the node", which the
+  // directory picker has to render in place; bouncing the operator to the
+  // login page for a mistyped path would be nonsense. The discriminator is
+  // the machine-readable `reason` field: the auth middleware rejects before
+  // any route runs, so an auth 403 can never carry one. Stripped here so it
+  // never reaches fetch().
+  const { allowAppForbidden = false, ...fetchOpts } = opts;
+  const headers = { 'Content-Type': 'application/json', ...fetchOpts.headers };
+  const res = await fetch(url, { headers, credentials: 'same-origin', ...fetchOpts });
+  // Auth failures → bounce to login. We normally check the status BEFORE
+  // trying to parse JSON, because middleware may respond with { error } HTML
+  // in some proxy setups; the opt-in path above has to peek at the body first.
+  let data;
+  let parsed = false;
   if (res.status === 401 || res.status === 403) {
+    if (allowAppForbidden) {
+      try { data = await res.json(); parsed = true; } catch { /* unparseable ⇒ treat as auth */ }
+    }
+    const appDenial = res.status === 403
+      && parsed
+      && data
+      && typeof data.reason === 'string'
+      && data.reason.trim().length > 0;
     // Skip the redirect for the auth endpoints themselves (login/logout)
     // so login.html can handle its own error display.
-    if (!url.startsWith('/api/auth/')) {
+    if (!appDenial && !url.startsWith('/api/auth/')) {
       redirectToLogin();
       // Still throw so the caller's catch runs and the page stops trying
       // to render stale data before the navigation actually happens.
       throw new Error('Not authenticated');
     }
   }
-  let data;
-  try { data = await res.json(); }
-  catch {
-    const err = new Error(`Request failed: ${res.status}`);
-    err.status = res.status;
-    throw err;
+  if (!parsed) {
+    try { data = await res.json(); }
+    catch {
+      const err = new Error(`Request failed: ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
   }
   if (!res.ok) {
     // Preserve status + parsed body so callers can map specific failures to

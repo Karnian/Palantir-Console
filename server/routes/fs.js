@@ -1,7 +1,5 @@
 const express = require('express');
-const path = require('path');
 const { asyncHandler } = require('../middleware/asyncHandler');
-const { AppError, ForbiddenError } = require('../utils/errors');
 
 function createFsRouter({ fsService }) {
   const router = express.Router();
@@ -9,24 +7,21 @@ function createFsRouter({ fsService }) {
   router.get('/', asyncHandler(async (req, res) => {
     const requested = typeof req.query.path === 'string' && req.query.path.trim()
       ? req.query.path.trim()
-      : fsService.fsRoot;
+      : null;
     const showHidden = req.query.showHidden === '1' || req.query.showHidden === 'true';
-    const resolved = path.resolve(requested);
-    if (!fsService.isWithinRoot(fsService.fsRoot, resolved)) {
-      throw new ForbiddenError('Path not allowed');
-    }
+    // task_85d43f96: absent/`local` keeps the control-plane behaviour byte for
+    // byte; any other id browses that execution node through its executor.
+    const nodeId = typeof req.query.nodeId === 'string' ? req.query.nodeId.trim() : '';
 
     try {
-      const result = await fsService.listDirectories(resolved, showHidden);
+      const result = await fsService.browse({ nodeId, path: requested, showHidden });
       res.json(result);
     } catch (error) {
-      if (error.code === 'ENOENT') {
-        throw new AppError('Path not found', 404);
-      }
-      if (error.code === 'EACCES') {
-        throw new AppError('Access denied', 403);
-      }
-      throw new AppError('Failed to read directory', 500);
+      // Answered here rather than through the shared error handler because the
+      // picker needs `reason` on 5xx too (an unreachable node is a 502), and
+      // errorHandler only forwards `reason` for 4xx.
+      const mapped = fsService.classifyBrowseError(error);
+      res.status(mapped.status).json({ error: mapped.message, reason: mapped.reason });
     }
   }));
 

@@ -112,6 +112,68 @@ test('validateBinding rejects remote directory when fileExists is false', async 
   );
 });
 
+// task_85d43f96 — the bind failure used to be one undifferentiated 400, so the
+// project form could only say "that directory did not work". The `reason` uses
+// the same vocabulary as the /api/fs picker, and errorHandler forwards it for
+// 4xx, which is what lets ProjectsView name the actual cause on save.
+
+test('validateBinding classifies the bind failure with a picker-compatible reason', async () => {
+  const cases = [
+    { error: Object.assign(new Error('ssh: connect to host pod.example port 22: Connection refused'), { code: 'SSH_TRANSPORT' }), reason: 'node_unreachable' },
+    { error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }), reason: 'node_timeout' },
+    { error: Object.assign(new Error('refused'), { code: 'EXPOSED_ROOTS' }), reason: 'path_outside_root' },
+    {
+      error: Object.assign(new Error('link escaped'), {
+        code: 'EXPOSED_ROOTS',
+        reason: 'symlink_escape',
+      }),
+      reason: 'symlink_escape',
+    },
+    { error: new Error('path /etc/shadow is outside exposed_roots for node pod-a'), reason: 'path_outside_root' },
+    { error: Object.assign(new Error('command failed'), { stderr: 'realpath: /srv/locked: Permission denied\n' }), reason: 'permission_denied' },
+    { error: new Error('realpath: /srv/nope: No such file or directory'), reason: 'path_not_found' },
+  ];
+
+  for (const { error, reason } of cases) {
+    const executor = createFakeExecutor({ realpathImpl: async () => { throw error; } });
+    const validator = createNodeBindingValidator({
+      nodeService: createFakeNodeService(executor),
+      fs: createFakeFs(),
+    });
+
+    await assert.rejects(
+      validator.validateBinding({ nodeId: 'node-a', directory: '/srv/repo' }),
+      (err) => {
+        assert.equal(err.status, 400, `expected 400 for ${reason}`);
+        assert.equal(err.reason, reason);
+        // The historical message prefix is part of the contract — callers
+        // branch on `reason`, but log scrapers still match the text.
+        assert.match(err.message, /Directory not found or outside exposed_roots on node node-a: \/srv\/repo/);
+        return true;
+      },
+    );
+  }
+});
+
+test('validateBinding reports a resolvable-but-absent directory as path_not_found', async () => {
+  const executor = createFakeExecutor({
+    realpathImpl: async () => '/srv/repo-real',
+    fileExistsImpl: async () => false,
+  });
+  const validator = createNodeBindingValidator({
+    nodeService: createFakeNodeService(executor),
+    fs: createFakeFs(),
+  });
+
+  await assert.rejects(
+    validator.validateBinding({ nodeId: 'node-a', directory: '/srv/repo' }),
+    (err) => {
+      assert.equal(err.reason, 'path_not_found');
+      return true;
+    },
+  );
+});
+
 test('validateBinding does NOT hard-block a missing mcp_config_path', async () => {
   // mcp_config_path is control-plane + read lazily at spawn; blocking bind on a
   // not-yet-existing file breaks the configure-first flow and the P4-2 store

@@ -119,8 +119,17 @@ function repoPreflightMessage(err) {
   return PROJECTS_LABELS.repoPreflightReasonLabels?.[reason] || null;
 }
 
-function hasRepoPreflightReason(err) {
-  return Boolean(err?.reason || err?.data?.reason || err?.body?.reason);
+// task_85d43f96: the node↔directory consistency check runs server-side on
+// every save (a remote node bound to a control-plane-only path is refused),
+// and it answers with the same `reason` vocabulary the /api/fs picker uses.
+// Resolve a save rejection onto the concrete cause; null means "not one of
+// ours, let the caller fall back to err.message".
+function projectSaveErrorMessage(err) {
+  const preflight = repoPreflightMessage(err);
+  if (preflight) return preflight;
+  const reason = err?.reason || err?.data?.reason || err?.body?.reason;
+  const bindMessage = reason ? PROJECTS_LABELS.directoryBindReasons?.[reason] : null;
+  return bindMessage ? `${PROJECTS_LABELS.directoryBindErrorPrefix}: ${bindMessage}` : null;
 }
 
 function operatorWarmErrorMessage(err) {
@@ -176,6 +185,15 @@ function projectLocationText(project) {
     return `${project.repo_url || ''} @ ${ref}${subdir}`.trim();
   }
   return project.directory || '';
+}
+
+// task_85d43f96: the directory picker browses the SELECTED node, so it shows
+// which node the paths belong to. Falls back to the bare id when the node list
+// has not loaded yet (or the bound node was deleted).
+function nodeDisplayLabel(nodes, nodeId) {
+  if (!nodeId) return '';
+  const node = arrayValue(nodes).find(n => n.id === nodeId);
+  return node ? `${node.name} (${node.id})` : nodeId;
 }
 
 function nodeOptionLabel(node) {
@@ -350,6 +368,8 @@ function LegacySourceFields({
   dir,
   allowNonGitDir,
   mcpConfigPath,
+  nodeId,
+  nodeLabel,
   onDir,
   onAllowNonGitDir,
   onMcpConfigPath,
@@ -358,7 +378,12 @@ function LegacySourceFields({
     <details class="form-field" data-role="project-legacy-source">
       <summary class="form-label">${PROJECTS_LABELS.legacyDirectorySectionLabel}</summary>
       <div data-role="project-legacy-directory" style="margin-top:8px;">
-        <${DirectoryPicker} value=${dir} onSelect=${onDir} />
+        <${DirectoryPicker}
+          value=${dir}
+          onSelect=${onDir}
+          nodeId=${nodeId}
+          nodeLabel=${nodeLabel}
+        />
       </div>
       <div class="form-field">
         <label class="form-label" for="${prefix}-project-mcp">${PROJECTS_LABELS.fieldMcpConfigPath}</label>
@@ -785,7 +810,7 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
   const editReady = editName.trim() && (editSourceType !== SOURCE_TYPE_GIT || editRepoUrl.trim());
 
   const handleProjectSaveError = (err) => {
-    const message = repoPreflightMessage(err);
+    const message = projectSaveErrorMessage(err);
     if (!message) return false;
     addToast(message, 'error');
     return true;
@@ -815,6 +840,10 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
       await apiFetchWithToast('/api/projects', {
         method: 'POST',
         body: JSON.stringify(body),
+        // Without this the wrapper toasts the raw server string ("Directory
+        // not found or outside exposed_roots on node …") and the catch below
+        // then toasts the friendly one — two toasts, the louder one useless.
+        errorMessage: (err) => projectSaveErrorMessage(err) || err.message,
       });
       setName('');
       setDesc('');
@@ -831,8 +860,10 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
       setAllowNonGitDir(false);
       setShowNew(false);
       reloadProjects();
-    } catch (err) {
-      if (hasRepoPreflightReason(err)) handleProjectSaveError(err);
+    } catch {
+      // apiFetchWithToast already surfaced the message (concrete when the
+      // failure carries a reason we know, the server string otherwise), so
+      // there is nothing left to report here — only the modal stays open.
     }
     setSaving(false);
   };
@@ -1086,6 +1117,18 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
             <label class="form-label" for="new-project-name">${PROJECTS_LABELS.fieldName}</label>
             <input id="new-project-name" class="form-input" value=${name} onInput=${e => setName(e.target.value)} placeholder=${PROJECTS_LABELS.namePlaceholder} />
           </div>
+          <!-- task_85d43f96: the execution node comes BEFORE the source /
+               directory fields — you pick the machine, then browse paths on it. -->
+          <div class="form-field" data-role="project-node-field">
+            <label class="form-label" for="new-project-node">${PROJECTS_LABELS.defaultExecNodeLabel}</label>
+            <${ProjectNodeSelect}
+              id="new-project-node"
+              value=${nodeId}
+              onChange=${setNodeId}
+              nodes=${nodes}
+              loading=${nodesLoading}
+            />
+          </div>
           <${SourceTypeToggle}
             id="new-project-source-type"
             value=${sourceType}
@@ -1118,6 +1161,8 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
                 dir=${dir}
                 allowNonGitDir=${allowNonGitDir}
                 mcpConfigPath=${mcpConfigPath}
+                nodeId=${nodeId}
+                nodeLabel=${nodeDisplayLabel(nodes, nodeId)}
                 onDir=${setDir}
                 onAllowNonGitDir=${setAllowNonGitDir}
                 onMcpConfigPath=${setMcpConfigPath}
@@ -1140,16 +1185,6 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
             />
             <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.testCommandHint}</div>
           </div>
-          <div class="form-field">
-            <label class="form-label" for="new-project-node">${PROJECTS_LABELS.defaultExecNodeLabel}</label>
-            <${ProjectNodeSelect}
-              id="new-project-node"
-              value=${nodeId}
-              onChange=${setNodeId}
-              nodes=${nodes}
-              loading=${nodesLoading}
-            />
-          </div>
         </div>
         <div class="modal-footer">
           <button class="ghost" onClick=${() => setShowNew(false)}>${COMMON_ACTIONS.cancel}</button>
@@ -1167,6 +1202,17 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
           <div class="form-field">
             <label class="form-label" for="edit-project-name">${PROJECTS_LABELS.fieldName}</label>
             <input id="edit-project-name" class="form-input" value=${editName} onInput=${e => setEditName(e.target.value)} placeholder=${PROJECTS_LABELS.namePlaceholder} />
+          </div>
+          <!-- task_85d43f96: node first, then the paths that live on it. -->
+          <div class="form-field" data-role="project-node-field">
+            <label class="form-label" for="edit-project-node">${PROJECTS_LABELS.defaultExecNodeLabel}</label>
+            <${ProjectNodeSelect}
+              id="edit-project-node"
+              value=${editNodeId}
+              onChange=${setEditNodeId}
+              nodes=${nodes}
+              loading=${nodesLoading}
+            />
           </div>
           <${SourceTypeToggle}
             id="edit-project-source-type"
@@ -1200,6 +1246,8 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
                 dir=${editDir}
                 allowNonGitDir=${editAllowNonGitDir}
                 mcpConfigPath=${editMcpConfigPath}
+                nodeId=${editNodeId}
+                nodeLabel=${nodeDisplayLabel(nodes, editNodeId)}
                 onDir=${setEditDir}
                 onAllowNonGitDir=${setEditAllowNonGitDir}
                 onMcpConfigPath=${setEditMcpConfigPath}
@@ -1221,16 +1269,6 @@ export function ProjectsView({ projects, tasks, runs, reloadProjects, onOpenRun,
               maxlength="500"
             />
             <div style="color:var(--text-muted);font-size:11px;margin-top:2px;">${PROJECTS_LABELS.testCommandHint}</div>
-          </div>
-          <div class="form-field">
-            <label class="form-label" for="edit-project-node">${PROJECTS_LABELS.defaultExecNodeLabel}</label>
-            <${ProjectNodeSelect}
-              id="edit-project-node"
-              value=${editNodeId}
-              onChange=${setEditNodeId}
-              nodes=${nodes}
-              loading=${nodesLoading}
-            />
           </div>
           ${rebindGuidance && html`
             <div

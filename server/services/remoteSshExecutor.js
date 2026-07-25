@@ -46,9 +46,10 @@ function shq(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
-function exposedRootsError(message) {
+function exposedRootsError(message, reason) {
   const err = new Error(message);
   err.code = 'EXPOSED_ROOTS';
+  if (reason) err.reason = reason;
   return err;
 }
 
@@ -508,7 +509,18 @@ function createRemoteSshNodeExecutor(node, {
   async function assertCanonicalWithinRoots(canonicalPath, originalPath) {
     const roots = await canonicalRoots();
     if (!roots.some((root) => isWithinRoot(canonicalPath, root))) {
-      throw exposedRootsError(`Remote path is outside exposed_roots: ${originalPath}`);
+      // Keep EXPOSED_ROOTS as the executor-wide error code for backward
+      // compatibility, but distinguish a lexical in-root path whose realpath
+      // escaped through a symlink. /api/fs and the save validator expose this
+      // reason so operators do not confuse a dangerous link with a typo.
+      const normalizedOriginal = path.posix.normalize(originalPath);
+      const escapedViaSymlink = exposedRoots.some((root) => (
+        isWithinRoot(normalizedOriginal, path.posix.normalize(root))
+      ));
+      throw exposedRootsError(
+        `Remote path is outside exposed_roots: ${originalPath}`,
+        escapedViaSymlink ? 'symlink_escape' : undefined,
+      );
     }
     return canonicalPath;
   }
@@ -751,6 +763,62 @@ function createRemoteSshNodeExecutor(node, {
     const res = await runRemoteCommand('find', [checked.canonical, '-mindepth', '1', '-maxdepth', '1', '-print']);
     if (res.code !== 0) throw commandError('find', [checked.canonical], res);
     return res.stdout.split('\n').filter(Boolean).map((entry) => path.posix.basename(entry));
+  }
+
+  // task_85d43f96: one-round-trip directory listing for the node-aware
+  // DirectoryPicker. `readdir` above returns names only, so a picker listing
+  // would otherwise cost an extra `test -d` round-trip per child. `%y` reports
+  // the type of the entry ITSELF (find does not follow symlinks without -L),
+  // so a symlinked directory is reported as 'l' and never surfaces as a
+  // browsable child — a listed entry can never be a symlink that escapes
+  // exposed_roots. Navigating INTO any path still goes through
+  // assertWithinRoots (realpath + canonical root containment) first, so a
+  // symlink escape that was typed or stored elsewhere is rejected fail-closed.
+  async function listDirectoryEntries(remotePath, { maxEntries = 2000 } = {}) {
+    const checked = await assertWithinRoots(remotePath);
+    const cap = Math.max(1, Number(maxEntries) || 2000);
+    const p = shq(checked.canonical);
+    // Same FINDEXIT marker discipline as listFilesWithSizes: dash has no
+    // `pipefail`, so `find | head` reports head's status (0) even when find
+    // failed on an unreadable directory — a silent EMPTY listing that looks
+    // like "no subfolders". The marker is printed by the same group, so a
+    // missing marker means head truncated the walk and a nonzero marker means
+    // find itself failed.
+    const script = `{ find ${p} -mindepth 1 -maxdepth 1 -printf '%y\\t%P\\0'; printf 'FINDEXIT:%s\\0' "$?"; } | head -z -n ${cap + 2}`;
+    const res = await runRemoteScript(script, { maxBuffer: 4 * 1024 * 1024, timeoutMs: 30000 });
+    if (res.code !== 0 && !res.stdout) throw commandError('listDirectoryEntries', [checked.canonical], res);
+    const records = String(res.stdout).split('\0').filter((s) => s.length > 0);
+    let findComplete = false;
+    if (records.length && records[records.length - 1].startsWith('FINDEXIT:')) {
+      const code = Number(records.pop().slice('FINDEXIT:'.length));
+      if (Number.isFinite(code) && code !== 0) {
+        throw commandError('find', [checked.canonical], {
+          code,
+          stdout: '',
+          stderr: res.stderr || 'find exited nonzero',
+        });
+      }
+      findComplete = true;
+    }
+    const truncated = !findComplete || records.length > cap;
+    const entries = [];
+    for (const rec of records.slice(0, cap)) {
+      const tab = rec.indexOf('\t');
+      if (tab < 0) continue;
+      const type = rec.slice(0, tab);
+      const name = rec.slice(tab + 1);
+      // `%P` at -maxdepth 1 is a bare basename; anything else is a malformed
+      // record (or a forged one) and is dropped rather than joined onto a path.
+      if (!name || name === '.' || name === '..' || name.includes('/')) continue;
+      entries.push({ name, isDirectory: type === 'd' });
+    }
+    return { path: checked.canonical, entries, truncated };
+  }
+
+  // task_85d43f96: the picker needs the CANONICAL roots to decide where the
+  // "up" affordance must stop. Read-only view of the already-cached values.
+  async function canonicalExposedRoots() {
+    return [...(await canonicalRoots())];
   }
 
   async function stat(remotePath) {
@@ -1017,6 +1085,8 @@ function createRemoteSshNodeExecutor(node, {
     stat,
     mkdir,
     ensureRealDir,
+    listDirectoryEntries,
+    canonicalExposedRoots,
     listFilesWithSizes,
     readFileCapped,
     readFile,
