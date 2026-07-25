@@ -82,6 +82,13 @@ function validateSshDestinationPart(value, field) {
   }
 }
 
+function validateSshPort(value, field) {
+  if (value === undefined || value === null) return;
+  if (!Number.isInteger(value) || value < 1 || value > 65535) {
+    throw new Error(`${field} must be an integer between 1 and 65535`);
+  }
+}
+
 function parseExposedRoots(node) {
   let roots;
   try {
@@ -300,6 +307,7 @@ function createRemoteSshNodeExecutor(node, {
   }
   validateSshDestinationPart(node.ssh_host, 'ssh_host');
   validateSshDestinationPart(node.ssh_user, 'ssh_user');
+  validateSshPort(node.ssh_port, 'ssh_port');
 
   const exposedRoots = parseExposedRoots(node);
   const connectTimeoutSeconds = Math.max(1, Math.ceil(Number(connectTimeoutMs || 10000) / 1000));
@@ -325,6 +333,7 @@ function createRemoteSshNodeExecutor(node, {
       '-o', 'BatchMode=yes',
       '-o', `ConnectTimeout=${connectTimeoutSeconds}`,
       '-o', 'StrictHostKeyChecking=accept-new',
+      ...(node.ssh_port == null ? [] : ['-p', String(node.ssh_port)]),
       ...(keepAlive ? [
         '-o', `ServerAliveInterval=${SSH_SERVER_ALIVE_INTERVAL_SECONDS}`,
         '-o', `ServerAliveCountMax=${SSH_SERVER_ALIVE_COUNT_MAX}`,

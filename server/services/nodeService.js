@@ -7,7 +7,7 @@ const { createRemoteSshNodeExecutor } = require('./remoteSshExecutor');
 const VALID_KINDS = new Set(['local', 'ssh']);
 const NODE_FIELDS = [
   'id', 'name', 'kind', 'can_execute', 'can_control', 'files_only',
-  'ssh_host', 'ssh_user', 'exposed_roots', 'node_prefix',
+  'ssh_host', 'ssh_user', 'ssh_port', 'exposed_roots', 'node_prefix',
   'max_concurrent', 'reachable', 'cordoned',
 ];
 
@@ -35,6 +35,19 @@ function normalizeMaxConcurrent(value) {
   const n = Number(value);
   if (!Number.isInteger(n) || n < 1) {
     throw new BadRequestError('max_concurrent must be null or an integer >= 1');
+  }
+  return n;
+}
+
+function normalizeSshPort(value, field) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  if (typeof value !== 'number' && typeof value !== 'string') {
+    throw new BadRequestError(`${field} must be null or an integer between 1 and 65535`);
+  }
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) {
+    throw new BadRequestError(`${field} must be null or an integer between 1 and 65535`);
   }
   return n;
 }
@@ -102,6 +115,7 @@ function normalizeNodeInput(fields, { existing = null } = {}) {
   if ('cordoned' in input) out.cordoned = normalizeBoolean(input.cordoned, 'cordoned');
   if ('ssh_host' in input) out.ssh_host = normalizeSshDestinationInput(input.ssh_host, 'ssh_host');
   if ('ssh_user' in input) out.ssh_user = normalizeSshDestinationInput(input.ssh_user, 'ssh_user');
+  if ('ssh_port' in input) out.ssh_port = normalizeSshPort(input.ssh_port, 'ssh_port');
   if ('node_prefix' in input) out.node_prefix = normalizeString(input.node_prefix, 'node_prefix');
   if ('exposed_roots' in input) out.exposed_roots = normalizeExposedRoots(input.exposed_roots);
   if ('max_concurrent' in input) out.max_concurrent = normalizeMaxConcurrent(input.max_concurrent);
@@ -149,12 +163,12 @@ function createNodeService(db, { localExecutor = createLocalNodeExecutor(), crea
     insert: db.prepare(`
       INSERT INTO nodes (
         id, name, kind, can_execute, can_control, files_only,
-        ssh_host, ssh_user, exposed_roots, node_prefix,
+        ssh_host, ssh_user, ssh_port, exposed_roots, node_prefix,
         max_concurrent, reachable, cordoned
       )
       VALUES (
         @id, @name, @kind, @can_execute, @can_control, @files_only,
-        @ssh_host, @ssh_user, @exposed_roots, @node_prefix,
+        @ssh_host, @ssh_user, @ssh_port, @exposed_roots, @node_prefix,
         @max_concurrent, @reachable, @cordoned
       )
     `),
@@ -194,6 +208,7 @@ function createNodeService(db, { localExecutor = createLocalNodeExecutor(), crea
       files_only: effective.files_only,
       ssh_host: effective.ssh_host || null,
       ssh_user: effective.ssh_user || null,
+      ssh_port: effective.ssh_port ?? null,
       exposed_roots: effective.exposed_roots || null,
       node_prefix: effective.node_prefix || null,
       max_concurrent: effective.max_concurrent ?? null,
