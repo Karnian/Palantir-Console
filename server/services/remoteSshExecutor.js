@@ -217,6 +217,9 @@ function validateWorkerSpec(spec) {
     throw new Error('spawnWorker requires a non-empty command');
   }
   if (spec.args !== undefined && !Array.isArray(spec.args)) throw new Error('spawnWorker args must be an array');
+  if (spec.stdin !== undefined && typeof spec.stdin !== 'string') {
+    throw new Error('spawnWorker stdin must be a string when provided');
+  }
   if (typeof spec.cwd !== 'string' || spec.cwd.length === 0) {
     throw new Error('spawnWorker requires a cwd');
   }
@@ -885,6 +888,7 @@ function createRemoteSshNodeExecutor(node, {
       statusDir,
       stdoutLog: path.posix.join(statusDir, 'stdout.log'),
       exitSentinel: path.posix.join(statusDir, 'exit.code'),
+      stdinFile: path.posix.join(statusDir, 'stdin.txt'),
     };
   }
 
@@ -923,10 +927,53 @@ function createRemoteSshNodeExecutor(node, {
     await ensureWorkerStatusDir(paths);
 
     const workerInvocation = buildWorkerInvocation(spec);
-    const innerScript = `${workerInvocation} > ${shq(paths.stdoutLog)} 2>&1; echo $? > ${shq(paths.exitSentinel)}`;
+    let canonicalStdin = null;
+    if (spec.stdin !== undefined) {
+      const stdinScript = [
+        'umask 077',
+        `rm -f -- ${shq(paths.stdinFile)}`,
+        `cat > ${shq(paths.stdinFile)}`,
+        `chmod 600 ${shq(paths.stdinFile)}`,
+      ].join(' && ');
+      let stdinResult;
+      try {
+        stdinResult = await runRemoteScript(stdinScript, { input: spec.stdin });
+      } catch (err) {
+        // The remote cat may have created a partial prompt file before SSH
+        // rejected (EPIPE, disconnect, signal). Cleanup is best-effort because
+        // the same transport may still be unavailable.
+        try { await runRemoteCommand('rm', ['-f', paths.stdinFile]); } catch {}
+        throw err;
+      }
+      if (stdinResult.code !== 0) {
+        try { await runRemoteCommand('rm', ['-f', paths.stdinFile]); } catch {}
+        throw commandError('spawnWorker:stdin', [paths.stdinFile], stdinResult);
+      }
+      try {
+        canonicalStdin = (await assertWithinRoots(paths.stdinFile)).canonical;
+      } catch (err) {
+        try { await runRemoteCommand('rm', ['-f', paths.stdinFile]); } catch {}
+        throw err;
+      }
+    }
+
+    const stdinRedirect = canonicalStdin ? ` < ${shq(canonicalStdin)}` : '';
+    const cleanupStdinCommand = canonicalStdin ? `rm -f -- ${shq(canonicalStdin)}` : '';
+    const cleanupStdin = canonicalStdin ? `; ${cleanupStdinCommand}` : '';
+    const stdinTrap = canonicalStdin
+      ? `trap ${shq(cleanupStdinCommand)} EXIT HUP INT TERM; `
+      : '';
+    const clearStdinTrap = canonicalStdin ? '; trap - EXIT HUP INT TERM' : '';
+    const exitWrite = canonicalStdin
+      ? `; agent_exit_code=$?${clearStdinTrap}${cleanupStdin}; echo "$agent_exit_code" > ${shq(paths.exitSentinel)}`
+      : `; echo $? > ${shq(paths.exitSentinel)}`;
+    const innerScript = `${stdinTrap}${workerInvocation}${stdinRedirect} > ${shq(paths.stdoutLog)} 2>&1${exitWrite}`;
     const script = `cd ${shq(safeCwd)} && tmux new-session -d -s ${shq(paths.sessionName)} ${shq(innerScript)}`;
     const res = await runRemoteScript(script);
     if (res.code !== 0) {
+      if (canonicalStdin) {
+        try { await runRemoteCommand('rm', ['-f', canonicalStdin]); } catch {}
+      }
       throw commandError('tmux', ['new-session', '-d', '-s', paths.sessionName], res);
     }
     return { sessionName: paths.sessionName };
@@ -983,6 +1030,9 @@ function createRemoteSshNodeExecutor(node, {
   async function kill(runId, _engine) {
     const paths = workerPaths(runId);
     const res = await runRemoteCommand('tmux', ['kill-session', '-t', paths.sessionName]);
+    // A killed tmux shell may not reach its normal post-command cleanup.
+    // stdinFile is controller-owned and lives inside the validated status dir.
+    try { await runRemoteCommand('rm', ['-f', paths.stdinFile]); } catch {}
     return res.code === 0;
   }
 

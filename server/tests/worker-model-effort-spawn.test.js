@@ -129,14 +129,15 @@ test('codex worker injects structured effort/model before forced tier and snapsh
     '-c', 'model_reasoning_effort="high"',
     '-m', 'gpt-x',
     '-c', 'service_tier="default"',
-    'exec', '--full-auto', '--skip-git-repo-check', 'hello',
+    'exec', '--full-auto', '--skip-git-repo-check', '-',
   ]);
+  assert.equal(harness.executionEngine.spawned[0].opts.stdin, 'hello');
   const persisted = harness.runService.getRun(run.id);
   assert.equal(persisted.session_model, 'gpt-x');
   assert.equal(persisted.session_effort, 'high');
 });
 
-test('codex worker argv stays byte-identical when structured columns are NULL', async (t) => {
+test('codex worker keeps structured flag ordering when structured columns are NULL', async (t) => {
   const harness = await createHarness(t);
   const profileId = insertProfile(harness.db, { command: 'codex' });
 
@@ -144,8 +145,9 @@ test('codex worker argv stays byte-identical when structured columns are NULL', 
 
   assert.deepEqual(harness.executionEngine.spawned[0].opts.args, [
     '-c', 'service_tier="default"',
-    'exec', '--full-auto', '--skip-git-repo-check', 'hello',
+    'exec', '--full-auto', '--skip-git-repo-check', '-',
   ]);
+  assert.equal(harness.executionEngine.spawned[0].opts.stdin, 'hello');
 });
 
 test('claude worker forwards structured model to the stream-json spec', async (t) => {

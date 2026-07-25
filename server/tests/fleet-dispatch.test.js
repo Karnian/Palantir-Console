@@ -160,10 +160,13 @@ function buildHarness(db, {
 
 function seedProfile(db, { command = 'codex', max = 5 } = {}) {
   const id = `profile-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const argsTemplate = path.basename(command).toLowerCase().includes('codex')
+    ? 'exec {prompt}'
+    : '{prompt}';
   db.prepare(`
     INSERT INTO agent_profiles (id, name, type, command, args_template, capabilities_json, env_allowlist, max_concurrent)
-    VALUES (?, 'FleetDispatchAgent', 'codex', ?, '{prompt}', '{}', '[]', ?)
-  `).run(id, command, max);
+    VALUES (?, 'FleetDispatchAgent', 'codex', ?, ?, '{}', '[]', ?)
+  `).run(id, command, argsTemplate, max);
   return { id, command, max_concurrent: max };
 }
 
@@ -228,7 +231,8 @@ test('reachable executable ssh node dispatches through pickExecutor and remote w
   // F-1: codex workers are pinned to the standard service tier (leaf `-c`
   // override, before the args_template) so a batch run never inherits the
   // user's ~/.codex/config.toml service_tier="fast".
-  assert.deepEqual(spawn.payload.spec.args, ['-c', 'service_tier="default"', 'run remotely']);
+  assert.deepEqual(spawn.payload.spec.args, ['-c', 'service_tier="default"', 'exec', '-']);
+  assert.equal(spawn.payload.spec.stdin, 'run remotely');
   assert.equal(spawn.payload.spec.cwd, '/workspace/project');
   assert.equal(spawn.payload.spec.workerPath, '/opt/codex/bin');
   assert.equal(h.runService.getRun(run.id).tmux_session, `remote-${run.id}`);

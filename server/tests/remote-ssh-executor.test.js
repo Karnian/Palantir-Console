@@ -977,6 +977,144 @@ test('spawnWorker builds file-backed tmux script through the internal runner', a
   assert.ok(spawn.calls.some((call) => scriptOf(call) === `exec 'mkdir' '-p' ${shq(statusDir)}`));
 });
 
+test('spawnWorker transports prompt text through a guarded mode-0600 stdin file', async () => {
+  const runId = 'stdin_worker';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const stdinFile = `${statusDir}/stdin.txt`;
+  const canonicalStdin = `/real/root/.palantir-runs/${runId}/stdin.txt`;
+  const prompt = '--- a/file.js\n-c service_tier="fast"\n--help\n';
+  const stdinScript = [
+    'umask 077',
+    `rm -f -- ${shq(stdinFile)}`,
+    `cat > ${shq(stdinFile)}`,
+    `chmod 600 ${shq(stdinFile)}`,
+  ].join(' && ');
+  const routes = {
+    "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
+    "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+    "exec 'realpath' '/srv/root/.palantir-runs'": { stdout: '/real/root/.palantir-runs\n' },
+    [`exec 'realpath' ${shq(statusDir)}`]: { stdout: `/real/root/.palantir-runs/${runId}\n` },
+    [`exec 'realpath' ${shq(stdinFile)}`]: { stdout: `${canonicalStdin}\n` },
+    "exec 'mkdir' '-p' '/srv/root/.palantir-runs'": { code: 0 },
+    [`exec 'mkdir' '-p' ${shq(statusDir)}`]: { code: 0 },
+    [stdinScript]: { code: 0 },
+  };
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    const tmuxPrefix = `cd '/real/root/project' && tmux new-session -d -s ${shq(`palantir-run-${runId}`)} `;
+    if (script.startsWith(tmuxPrefix)) return complete(child, { code: 0 });
+    if (Object.hasOwn(routes, script)) return complete(child, routes[script]);
+    complete(child, { code: 1, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await exec.spawnWorker(runId, {
+    command: 'codex',
+    args: ['exec', '-'],
+    stdin: prompt,
+    cwd: '/srv/root/project',
+  });
+
+  const stdinCall = spawn.calls.find((call) => scriptOf(call) === stdinScript);
+  assert.ok(stdinCall);
+  assert.equal(stdinCall.stdin, prompt);
+  const workerScript = spawn.calls.map(scriptOf).find((script) => script.includes('tmux new-session'));
+  assert.doesNotMatch(workerScript, /service_tier="fast"|--- a\/file\.js|--help/);
+  const prefix = `cd '/real/root/project' && tmux new-session -d -s ${shq(`palantir-run-${runId}`)} `;
+  assert.equal(
+    unshq(workerScript.slice(prefix.length)),
+    [
+      'trap',
+      shq(`rm -f -- ${shq(canonicalStdin)}`),
+      'EXIT',
+      'HUP',
+      'INT',
+      'TERM;',
+      'env',
+      shq('codex'),
+      shq('exec'),
+      shq('-'),
+      '<',
+      shq(canonicalStdin),
+      '>',
+      shq(`${statusDir}/stdout.log`),
+      '2>&1;',
+      'agent_exit_code=$?;',
+      'trap',
+      '-',
+      'EXIT',
+      'HUP',
+      'INT',
+      'TERM;',
+      'rm',
+      '-f',
+      '--',
+      shq(canonicalStdin) + ';',
+      'echo',
+      '"$agent_exit_code"',
+      '>',
+      shq(`${statusDir}/exit.code`),
+    ].join(' '),
+  );
+});
+
+test('spawnWorker cleans a partial remote stdin file when SSH upload rejects', async () => {
+  const runId = 'stdin_upload_failure';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const stdinFile = `${statusDir}/stdin.txt`;
+  const stdinScript = [
+    'umask 077',
+    `rm -f -- ${shq(stdinFile)}`,
+    `cat > ${shq(stdinFile)}`,
+    `chmod 600 ${shq(stdinFile)}`,
+  ].join(' && ');
+  const cleanupScript = `exec 'rm' '-f' ${shq(stdinFile)}`;
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    const routes = {
+      "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
+      "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+      "exec 'realpath' '/srv/root/.palantir-runs'": { stdout: '/real/root/.palantir-runs\n' },
+      [`exec 'realpath' ${shq(statusDir)}`]: { stdout: `/real/root/.palantir-runs/${runId}\n` },
+      "exec 'mkdir' '-p' '/srv/root/.palantir-runs'": { code: 0 },
+      [`exec 'mkdir' '-p' ${shq(statusDir)}`]: { code: 0 },
+      [cleanupScript]: { code: 0 },
+    };
+    if (script === stdinScript) {
+      child.stdin = new Writable({
+        write(_chunk, _encoding, callback) {
+          const error = new Error('simulated upload EPIPE');
+          error.code = 'EPIPE';
+          callback(error);
+        },
+      });
+      return;
+    }
+    if (Object.hasOwn(routes, script)) return complete(child, routes[script]);
+    complete(child, { code: 1, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => exec.spawnWorker(runId, {
+      command: 'codex',
+      args: ['exec', '-'],
+      stdin: '--help\n',
+      cwd: '/srv/root/project',
+    }),
+    (error) => error.code === 'EPIPE',
+  );
+
+  assert.ok(
+    spawn.calls.some((call) => scriptOf(call) === cleanupScript),
+    'rejected upload must attempt to remove the partial remote prompt file',
+  );
+  assert.equal(
+    spawn.calls.some((call) => scriptOf(call).includes('tmux new-session')),
+    false,
+  );
+});
+
 test('spawnWorker accepts canonical cli worker envelope', async () => {
   const runId = 'canonical_cli';
   const spawn = workerSpawnHarness(runId);
@@ -1084,6 +1222,10 @@ test('spawnWorker validates args and workerPath before building the tmux script'
   await assert.rejects(
     () => invalid.spawnWorker('badargs2', { command: 'codex', args: 'x', cwd: '/srv/root' }),
     /spawnWorker args must be an array/,
+  );
+  await assert.rejects(
+    () => invalid.spawnWorker('badstdin', { command: 'codex', args: [], stdin: Buffer.from('x'), cwd: '/srv/root' }),
+    /spawnWorker stdin must be a string/,
   );
   for (const workerPath of ['relative/bin', '/x\nety', '']) {
     await assert.rejects(
