@@ -25,6 +25,7 @@ const BROWSE_REASONS = {
   pathOutsideRoot: 'path_outside_root',
   symlinkEscape: 'symlink_escape',
   pathNotFound: 'path_not_found',
+  pathNotDirectory: 'path_not_directory',
   permissionDenied: 'permission_denied',
   browseFailed: 'browse_failed',
 };
@@ -145,8 +146,15 @@ function createFsService(storage, { nodeExecutor = createLocalNodeExecutor(), no
     let node;
     try {
       node = nodeService.getNode(nodeId);
-    } catch {
-      throw browseError(`Node not found: ${nodeId}`, 404, BROWSE_REASONS.nodeNotFound);
+    } catch (err) {
+      // ONLY the expected missing-row case becomes a 404 configuration error.
+      // A blanket catch here would rewrite a control-plane outage (closed or
+      // corrupt SQLite handle) as "you picked a bad node", hiding a real
+      // incident from the operator and from 500 logging.
+      if (err && Number(err.status) === 404) {
+        throw browseError(`Node not found: ${nodeId}`, 404, BROWSE_REASONS.nodeNotFound);
+      }
+      throw err;
     }
 
     // A local-kind node IS the control plane — browse the same fsRoot the

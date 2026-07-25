@@ -90,9 +90,17 @@ function makeRemoteFs({ dirs = {}, symlinks = {}, denied = [], transportFail = f
       return;
     }
 
-    const findMatch = script.match(/^\{ find (.+?) -mindepth 1 -maxdepth 1 -printf/);
+    // listDirectoryEntries wraps `find` in a `[ ! -d ]` guard so a regular file
+    // cannot come back as a successful EMPTY listing (a file would otherwise be
+    // bindable as a project directory). Answer NOTDIR for any canonical path
+    // the fake fs does not know as a directory.
+    const findMatch = script.match(/^if \[ ! -d (.+?) \]; then printf 'NOTDIR/);
     if (findMatch) {
       const target = unshq(findMatch[1]);
+      if (!Object.prototype.hasOwnProperty.call(dirs, target)) {
+        complete(child, { code: 0, stdout: 'NOTDIR\0' });
+        return;
+      }
       if (deniedSet.has(target)) {
         complete(child, {
           code: 0,
@@ -123,9 +131,12 @@ const SSH_NODE = {
   updated_at: '2026-07-23 00:00:00',
 };
 
-function makeNodeService({ node = SSH_NODE, spawnFn, pickExecutorError = null } = {}) {
+function makeNodeService({ node = SSH_NODE, spawnFn, pickExecutorError = null, getNodeError = null } = {}) {
   return {
     getNode(id) {
+      // A non-404 failure stands in for a control-plane outage (closed/corrupt
+      // SQLite handle), which must NOT be reported as a missing node.
+      if (getNodeError) throw getNodeError;
       if (id !== node.id) {
         const err = new Error(`Node not found: ${id}`);
         err.status = 404;
@@ -173,9 +184,9 @@ function request(router) {
   };
 }
 
-function remoteApp(remoteFsOptions, { node = SSH_NODE, pickExecutorError = null } = {}) {
+function remoteApp(remoteFsOptions, { node = SSH_NODE, pickExecutorError = null, getNodeError = null } = {}) {
   const spawnFn = makeRemoteFs(remoteFsOptions);
-  const nodeService = makeNodeService({ node, spawnFn, pickExecutorError });
+  const nodeService = makeNodeService({ node, spawnFn, pickExecutorError, getNodeError });
   const fsService = createFsService({ fsRoot: '/control/plane/root' }, {
     nodeExecutor: createLocalNodeExecutor(),
     nodeService,
@@ -391,6 +402,31 @@ test('remote browsing reports an unknown node as node_not_found', async () => {
   const res = await request(app).get('/api/fs?nodeId=ghost');
   assert.equal(res.status, 404);
   assert.equal(res.body.reason, 'node_not_found');
+});
+
+// `find <regular file> -mindepth 1` exits 0 and prints NOTHING, so without the
+// NOTDIR guard a file answered as a successful empty listing. The node-change
+// validator reads a 2xx as "valid on this node" and the save-time binding check
+// only tests existence — a project directory could be rebound to a file and
+// fail much later when used as a working directory.
+test('remote browsing refuses a non-directory target as path_not_directory', async () => {
+  const { app } = remoteApp(DEFAULT_REMOTE_FS);
+  const res = await request(app).get('/api/fs?nodeId=pod-a&path=/srv/root/README.md');
+  assert.equal(res.status, 400);
+  assert.equal(res.body.reason, 'path_not_directory');
+  assert.notEqual(res.status, 200, 'a file must never answer as a browsable directory');
+});
+
+// A blanket catch around getNode() would rewrite a control-plane outage as a
+// 404 "you picked a bad node", hiding a real incident. Only the expected
+// missing-row (404) case is translated.
+test('remote browsing does not disguise an unexpected node lookup failure as node_not_found', async () => {
+  const boom = new Error('SQLITE_MISUSE: Database handle is closed');
+  const { app } = remoteApp(DEFAULT_REMOTE_FS, { getNodeError: boom });
+  const res = await request(app).get('/api/fs?nodeId=pod-a');
+  assert.equal(res.status, 500);
+  assert.notEqual(res.body.reason, 'node_not_found');
+  assert.equal(res.body.reason, 'browse_failed');
 });
 
 test('remote browsing reports a node that cannot host execution as node_not_browsable', async () => {

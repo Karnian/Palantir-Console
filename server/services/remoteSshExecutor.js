@@ -784,10 +784,26 @@ function createRemoteSshNodeExecutor(node, {
     // like "no subfolders". The marker is printed by the same group, so a
     // missing marker means head truncated the walk and a nonzero marker means
     // find itself failed.
-    const script = `{ find ${p} -mindepth 1 -maxdepth 1 -printf '%y\\t%P\\0'; printf 'FINDEXIT:%s\\0' "$?"; } | head -z -n ${cap + 2}`;
+    //
+    // NOTDIR guard, in the SAME round trip: `find <regular file> -mindepth 1`
+    // exits 0 and prints nothing, so without this a file (or FIFO/socket) came
+    // back as a successful EMPTY listing. The node-change validator reads that
+    // as "path is valid on this node" and the save-time binding check only
+    // tests existence, so a project directory could be rebound to a file and
+    // only fail much later when it is used as a working directory.
+    // assertWithinRoots already realpath'd the target, so it exists here —
+    // `! -d` therefore means "exists but is not a directory".
+    const script = `if [ ! -d ${p} ]; then printf 'NOTDIR\\0'; else { find ${p} -mindepth 1 -maxdepth 1 -printf '%y\\t%P\\0'; printf 'FINDEXIT:%s\\0' "$?"; } | head -z -n ${cap + 2}; fi`;
     const res = await runRemoteScript(script, { maxBuffer: 4 * 1024 * 1024, timeoutMs: 30000 });
     if (res.code !== 0 && !res.stdout) throw commandError('listDirectoryEntries', [checked.canonical], res);
     const records = String(res.stdout).split('\0').filter((s) => s.length > 0);
+    if (records.length === 1 && records[0] === 'NOTDIR') {
+      const err = new Error(`Remote path is not a directory: ${checked.canonical}`);
+      err.code = 'ENOTDIR';
+      err.status = 400;
+      err.reason = 'path_not_directory';
+      throw err;
+    }
     let findComplete = false;
     if (records.length && records[records.length - 1].startsWith('FINDEXIT:')) {
       const code = Number(records.pop().slice('FINDEXIT:'.length));

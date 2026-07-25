@@ -376,6 +376,7 @@ export const DIRECTORY_PICKER_LABELS = {
     path_outside_root: '노드에 허용된 경로(exposed_roots) 밖입니다.',
     symlink_escape: '심볼릭 링크가 허용된 경로 밖을 가리켜 접근을 차단했습니다.',
     path_not_found: '경로를 찾을 수 없습니다.',
+    path_not_directory: '디렉터리가 아닙니다. 폴더 경로를 선택하세요.',
     permission_denied: '경로에 접근할 권한이 없습니다.',
     browse_failed: '디렉터리를 읽지 못했습니다.',
   },
