@@ -80,6 +80,7 @@ const { createMasterMemoryService } = require('./services/masterMemoryService');
 const { createMemoryDistillService } = require('./services/memoryDistillService');
 const { createLiveDistiller } = require('./services/distillers/liveDistiller');
 const { createMemoryRouter } = require('./routes/memory');
+const { createMemoryDiagnosticsRouter } = require('./routes/memoryDiagnostics');
 const { createOperatorSpecialistRouter } = require('./routes/operatorSpecialist');
 const { createOperatorProfilesRouter } = require('./routes/operatorProfiles');
 const { createOperatorProfileMemoryRouter } = require('./routes/operatorProfileMemory');
@@ -93,6 +94,7 @@ const { createOperatorInstancesRouter } = require('./routes/operatorInstances');
 const { createOperatorScheduleService } = require('./services/operatorScheduleService');
 const { createOperatorScheduler } = require('./services/operatorScheduler');
 const { createOperatorSchedulesRouter } = require('./routes/operatorSchedules');
+const { sanitizeMessage } = require('./utils/errors');
 
 function readGitSha() {
   try {
@@ -1391,32 +1393,64 @@ function createApp(options = {}) {
   // ML PR2c: R3 PM verdict capture (coherent task_complete -> candidate).
   createR3Capture({ eventBus, memoryService });
 
-  // ML PR3b: live distiller + periodic scheduler. OFF by default. Gated on
-  // PALANTIR_MEMORY_DISTILL=1 AND (an ANTHROPIC_API_KEY for the real model, or
-  // an injected distiller for tests). All distill safety (sanitize / clamp /
+  // ML PR3b: live distiller + periodic scheduler. Enabled by default unless
+  // PALANTIR_MEMORY_DISTILL=0. A real ANTHROPIC_API_KEY (or an injected test
+  // distiller) is still required. All distill safety (sanitize / clamp /
   // evidence) lives in promoteCandidatesBatchTx, so this only wires a real
   // model + a periodic drain of pending candidates -> active memory.
   let memoryDistillScheduler = null;
+  let memoryDistillStatus = {
+    state: 'disabled',
+    enabled: false,
+    provider: null,
+    interval_ms: null,
+    last_error: null,
+  };
   {
     const distillEnabled = options.memoryDistillEnabled ?? (process.env.PALANTIR_MEMORY_DISTILL !== '0');
     if (distillEnabled) {
       let distiller = options.distiller || null;
-      const apiKey = process.env.ANTHROPIC_API_KEY;
+      const apiKey = options.memoryDistillApiKey !== undefined
+        ? options.memoryDistillApiKey
+        : process.env.ANTHROPIC_API_KEY;
       if (!distiller && !apiKey) {
+        memoryDistillStatus = {
+          state: 'missing_credential',
+          enabled: true,
+          provider: 'anthropic',
+          interval_ms: null,
+          last_error: 'ANTHROPIC_API_KEY is not configured',
+        };
         console.warn('[memory-distill] memory distill is enabled but no ANTHROPIC_API_KEY and no injected distiller — scheduler NOT started (set PALANTIR_MEMORY_DISTILL=0 to silence)');
       } else {
         try {
           if (!distiller) distiller = createLiveDistiller({ apiKey });
           const distillService = createMemoryDistillService({ memoryService, distiller });
-          const intervalMs = Number.parseInt(process.env.PALANTIR_MEMORY_DISTILL_INTERVAL_MS, 10) || 300000;
+          const intervalMs = options.memoryDistillIntervalMs
+            ?? (Number.parseInt(process.env.PALANTIR_MEMORY_DISTILL_INTERVAL_MS, 10) || 300000);
           memoryDistillScheduler = distillService.startScheduler({ intervalMs });
+          memoryDistillStatus = {
+            state: 'running',
+            enabled: true,
+            provider: distiller.name || 'injected',
+            interval_ms: intervalMs,
+            last_error: null,
+          };
           console.log(`[memory-distill] scheduler started (interval ${intervalMs}ms, distiller=${distiller.name})`);
         } catch (err) {
+          memoryDistillStatus = {
+            state: 'failed',
+            enabled: true,
+            provider: distiller && distiller.name ? distiller.name : 'unknown',
+            interval_ms: null,
+            last_error: sanitizeMessage(err && err.message ? err.message : err, [apiKey]),
+          };
           console.warn(`[memory-distill] failed to start scheduler: ${err && err.message}`);
         }
       }
     }
   }
+  const getMemoryDistillStatus = () => ({ ...memoryDistillStatus });
 
   let nodeHeartbeatService = null;
   {
@@ -1558,6 +1592,7 @@ function createApp(options = {}) {
   app.use('/api', createOperatorSchedulesRouter({ operatorScheduleService, operatorScheduler }));
   app.use('/api/nodes', createNodesRouter({ nodeService, nodeUsageService, nodeSummaryService, lifecycleService }));
   app.use('/api/projects', createMemoryRouter({ memoryService, projectService })); // ML PR1: GET /:projectId/memory
+  app.use('/api/memory', createMemoryDiagnosticsRouter({ memoryService, getDistillStatus: getMemoryDistillStatus }));
   app.use('/api/master-memory', createMasterMemoryRouter({ masterMemoryService })); // L2 P1b: GET / + POST /remember
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService, goalDeliveryService, runService, verifyCheckService }));
   app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService, nodeExecutor }));
@@ -1741,6 +1776,7 @@ function createApp(options = {}) {
     worktreeService,
     eventBus,
     memoryService, // ML PR1: test seam for seeding L1 memory through the app db
+    getMemoryDistillStatus,
     masterMemoryService, // L2 P1b: test seam for seeding/asserting Master memory
     compositionLedger, // A2-3a: test seam for asserting composition ledger entries
     memoryComposer, // S5-LEDGER: test seam — composer is the sole injection path

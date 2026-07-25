@@ -14,6 +14,11 @@ const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { BadRequestError, NotFoundError } = require('../utils/errors');
 const { sanitizeProposalContent, redactSecrets, detectInjection } = require('../services/memorySanitize');
+const {
+  candidatePage,
+  candidateStatus,
+  requireHumanCookie,
+} = require('./memoryCandidates');
 
 const VALID_KINDS = ['convention', 'pitfall', 'heuristic', 'constraint', 'fact'];
 const MAX_REMEMBER_LEN = 2000;
@@ -192,6 +197,67 @@ function createMemoryRouter({ memoryService, projectService }) {
       dedupKey: `r4:${kind}:${hash}`,
     });
     return res.status(202).json({ candidate: cand ? { id: cand.id, status: cand.status } : null, origin: method === 'bearer' ? 'pm' : 'anon' });
+  }));
+
+  router.get('/:projectId/memory/candidates', asyncHandler(async (req, res) => {
+    if (!memoryService) return res.status(501).json({ error: 'memoryService_unavailable' });
+    if (!requireHumanCookie(req, res)) return;
+    const { projectId } = req.params;
+    if (projectService) {
+      let project = null;
+      try { project = projectService.getProject(projectId); } catch { project = null; }
+      if (!project) throw new NotFoundError(`project not found: ${projectId}`);
+    }
+    const status = candidateStatus(req.query.status);
+    res.json(candidatePage(memoryService, 'workspace', projectId, status, req.query));
+  }));
+
+  router.post('/:projectId/memory/candidates/:id/promote', asyncHandler(async (req, res) => {
+    if (!memoryService) return res.status(501).json({ error: 'memoryService_unavailable' });
+    if (!requireHumanCookie(req, res, 'memory candidate promotion')) return;
+    const { projectId, id } = req.params;
+    if (projectService) {
+      let project = null;
+      try { project = projectService.getProject(projectId); } catch { project = null; }
+      if (!project) throw new NotFoundError(`project not found: ${projectId}`);
+    }
+    const result = memoryService.promoteCandidateByHuman({
+      candidateId: id, ownerType: 'workspace', ownerId: projectId,
+    });
+    if (!result) throw new NotFoundError('memory candidate not found');
+    if (!result.promoted) {
+      return res.status(409).json({
+        candidate: {
+          id: result.candidateId,
+          status: result.pending ? 'pending' : 'rejected',
+        },
+        reason: result.reason,
+      });
+    }
+    res.json({
+      memory: toPublicMemory(result.item),
+      candidate: {
+        id: result.candidateId,
+        status: result.merged ? 'merged' : 'promoted',
+        promoted_to: result.item.id,
+      },
+    });
+  }));
+
+  router.post('/:projectId/memory/candidates/:id/reject', asyncHandler(async (req, res) => {
+    if (!memoryService) return res.status(501).json({ error: 'memoryService_unavailable' });
+    if (!requireHumanCookie(req, res, 'memory candidate rejection')) return;
+    const { projectId, id } = req.params;
+    if (projectService) {
+      let project = null;
+      try { project = projectService.getProject(projectId); } catch { project = null; }
+      if (!project) throw new NotFoundError(`project not found: ${projectId}`);
+    }
+    const result = memoryService.rejectCandidateByHuman({
+      candidateId: id, ownerType: 'workspace', ownerId: projectId,
+    });
+    if (!result) throw new NotFoundError('memory candidate not found');
+    res.json({ candidate: { id: result.candidateId, status: 'rejected' } });
   }));
 
   // PR4: post-hoc correction. PATCH an item by id within its project.

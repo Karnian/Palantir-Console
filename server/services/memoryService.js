@@ -11,6 +11,7 @@ const MAX_QUERY_TERMS = 32;
 const DEFAULT_ACTIVE_CAP = 200;        // soft cap: max active items per project
 const DEFAULT_CONFIDENCE_CEILING = 0.7; // single-candidate promotions clamp here
 const DEFAULT_MAX_LEN = 500;            // promoted content character ceiling
+const HUMAN_APPROVAL_MAX_LEN = 2000;     // R4 capture ceiling; approval must not silently rewrite it
 const DEFAULT_TTL_DAYS = 90;           // PR5d: TTL for auto (batch_llm) memories
 const DISTILL_KIND = 'distill';
 // kinds a distiller may produce — NOT 'fact' (R6 owns facts via upsertFact).
@@ -768,6 +769,20 @@ function createMemoryService(db, eventBus) {
   const listCandidatesStmt = db.prepare(
     'SELECT * FROM memory_candidates WHERE owner_type = ? AND owner_id = ? AND status = ? ORDER BY created_at ASC, id ASC'
   );
+  const listCandidatePageStmt = db.prepare(`
+    SELECT *
+    FROM memory_candidates
+    WHERE owner_type = @ownerType
+      AND owner_id = @ownerId
+      AND status = @status
+      AND (
+        @afterCreatedAt IS NULL
+        OR created_at > @afterCreatedAt
+        OR (created_at = @afterCreatedAt AND id > @afterId)
+      )
+    ORDER BY created_at ASC, id ASC
+    LIMIT @limit
+  `);
 
   function createCandidate({ projectId, profileId, rule, rawJson, dedupKey } = {}) {
     // R4b: candidate owner is workspace (projectId) XOR profile (profileId).
@@ -798,20 +813,58 @@ function createMemoryService(db, eventBus) {
     // concurrent inserts; try/catch catches any residual UNIQUE constraint error
     // (e.g. from a cross-process race window between pre-check and insert).
     // All other errors (CHECK violations, bad rule, etc.) are rethrown so they surface.
+    const id = crypto.randomUUID();
+    let created = false;
     try {
-      insertCandidateStmt.run({ id: crypto.randomUUID(), projectId: ownerProjectId, rule, rawJson: raw, dedupKey, ownerType, ownerId });
+      created = insertCandidateStmt.run({
+        id, projectId: ownerProjectId, rule, rawJson: raw, dedupKey, ownerType, ownerId,
+      }).changes === 1;
     } catch (err) {
       if (err && err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
         return getCandidateByOwnerDedupStmt.get(ownerType, ownerId, rule, dedupKey);
       }
       throw err;
     }
-    return getCandidateByOwnerDedupStmt.get(ownerType, ownerId, rule, dedupKey);
+    const candidate = getCandidateByOwnerDedupStmt.get(ownerType, ownerId, rule, dedupKey);
+    if (created && candidate && eventBus) {
+      try {
+        eventBus.emit('memory:candidate_created', {
+          candidateId: candidate.id,
+          ownerType,
+          ownerId,
+          projectId: ownerType === 'workspace' ? ownerId : null,
+          rule,
+        });
+      } catch { /* observability must never break capture */ }
+    }
+    return candidate;
   }
 
   function listCandidatesForOwner(ownerType, ownerId, status = 'pending') {
     assertDistillOwner(ownerType, ownerId);
     return listCandidatesStmt.all(ownerType, ownerId, status);
+  }
+
+  function listCandidatePageForOwner(ownerType, ownerId, status = 'pending', {
+    limit = 50,
+    afterCreatedAt = null,
+    afterId = null,
+  } = {}) {
+    assertDistillOwner(ownerType, ownerId);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 101) {
+      throw new Error('candidate page limit must be an integer 1-101');
+    }
+    if ((afterCreatedAt == null) !== (afterId == null)) {
+      throw new Error('candidate page cursor requires createdAt and id');
+    }
+    return listCandidatePageStmt.all({
+      ownerType,
+      ownerId,
+      status,
+      afterCreatedAt,
+      afterId,
+      limit,
+    });
   }
 
   function listCandidates(projectId, status = 'pending') {
@@ -1000,6 +1053,216 @@ function createMemoryService(db, eventBus) {
   const setCandidateStatusStmt = db.prepare(
     "UPDATE memory_candidates SET status=@status, promoted_to=@promotedTo, updated_at=datetime('now') WHERE id=@id AND status='pending'"
   );
+  const approveExistingItemStmt = db.prepare(`
+    UPDATE memory_items
+    SET source_count = source_count + 1,
+        evidence_json = @evidenceJson,
+        origin = 'human',
+        valid_to = NULL,
+        updated_at = datetime('now')
+    WHERE id = @id
+      AND status = 'active'
+  `);
+  const candidateQueueSummaryStmt = db.prepare(`
+    SELECT
+      COUNT(*) AS pending,
+      SUM(CASE WHEN owner_type = 'workspace' THEN 1 ELSE 0 END) AS workspace_pending,
+      SUM(CASE WHEN owner_type = 'profile' THEN 1 ELSE 0 END) AS profile_pending,
+      SUM(CASE WHEN rule = 'R4' THEN 1 ELSE 0 END) AS deterministic_pending,
+      SUM(CASE WHEN rule != 'R4' THEN 1 ELSE 0 END) AS distillation_pending,
+      MIN(created_at) AS oldest_pending_at
+    FROM memory_candidates
+    WHERE status = 'pending'
+  `);
+
+  function getCandidateQueueSummary() {
+    const row = candidateQueueSummaryStmt.get() || {};
+    return {
+      pending: Number(row.pending) || 0,
+      workspace_pending: Number(row.workspace_pending) || 0,
+      profile_pending: Number(row.profile_pending) || 0,
+      deterministic_pending: Number(row.deterministic_pending) || 0,
+      distillation_pending: Number(row.distillation_pending) || 0,
+      oldest_pending_at: row.oldest_pending_at || null,
+    };
+  }
+
+  function humanApprovalEvidence(candidate, sanitized, existingEvidenceJson = null) {
+    const merged = existingEvidenceJson == null
+      ? buildPromotionEvidence(candidate, sanitized)
+      : mergeEvidence(existingEvidenceJson, candidate, sanitized);
+    let evidence = {};
+    try {
+      const parsed = JSON.parse(merged);
+      if (parsed && typeof parsed === 'object') evidence = parsed;
+    } catch { /* keep bounded empty evidence */ }
+    return JSON.stringify({
+      ...evidence,
+      origin: 'human_approved',
+      rule: candidate.rule,
+      approved_without_llm: true,
+    });
+  }
+
+  const promoteCandidateByHumanTx = db.transaction(({ candidateId, ownerType, ownerId }) => {
+    assertDistillOwner(ownerType, ownerId);
+    const candidate = getCandidateByIdStmt.get(candidateId);
+    if (!candidate || candidate.status !== 'pending' ||
+        candidate.owner_type !== ownerType || candidate.owner_id !== ownerId) {
+      return null;
+    }
+    // R1b/R3 are raw work signals, not operator-authored memory prose. They must
+    // still pass through the distiller; a click cannot turn their raw JSON into
+    // an injected lesson. R4 was already sanitized at capture and is re-checked
+    // below, so it is the only deterministic approval path.
+    if (candidate.rule !== 'R4') {
+      return {
+        candidateId,
+        promoted: false,
+        pending: true,
+        reason: 'distillation_required',
+      };
+    }
+
+    let raw;
+    try { raw = JSON.parse(candidate.raw_json); } catch { raw = null; }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      setCandidateStatusStmt.run({ status: 'rejected', promotedTo: null, id: candidateId });
+      return { candidateId, promoted: false, pending: false, reason: 'bad_raw_json' };
+    }
+    const kind = typeof raw.kind === 'string' ? raw.kind.trim() : '';
+    if (!PROMOTABLE_KINDS.has(kind)) {
+      setCandidateStatusStmt.run({ status: 'rejected', promotedTo: null, id: candidateId });
+      return { candidateId, promoted: false, pending: false, reason: kind === 'fact' ? 'fact_not_allowed' : 'bad_kind' };
+    }
+    const sanitized = sanitizeProposalContent(raw.content, { maxLen: HUMAN_APPROVAL_MAX_LEN });
+    if (!sanitized.ok) {
+      setCandidateStatusStmt.run({ status: 'rejected', promotedTo: null, id: candidateId });
+      return {
+        candidateId,
+        promoted: false,
+        pending: false,
+        reason: `sanitize:${sanitized.reasons.join(',') || 'failed'}`,
+      };
+    }
+
+    const content = sanitized.content;
+    const existing = getActiveMemoryItemByHashStmt.get(ownerType, ownerId, sha256(content));
+    if (existing && (existing.kind === 'fact' || existing.fact_key || existing.kind !== kind)) {
+      setCandidateStatusStmt.run({ status: 'rejected', promotedTo: null, id: candidateId });
+      return {
+        candidateId,
+        promoted: false,
+        pending: false,
+        reason: existing.kind === 'fact' || existing.fact_key ? 'fact_collision' : 'kind_conflict',
+      };
+    }
+    const merged = !!existing;
+    let item;
+    if (existing) {
+      const update = approveExistingItemStmt.run({
+        id: existing.id,
+        evidenceJson: humanApprovalEvidence(candidate, sanitized, existing.evidence_json),
+      });
+      if (update.changes !== 1) {
+        const err = new Error('human approval merge target raced (not active)');
+        err.code = 'MEMORY_CANDIDATE_RACE';
+        throw err;
+      }
+      // Human approval makes an auto item permanent. This can immediately
+      // re-admit an expired status='active' row to retrieval, so the owner
+      // revision must advance for composition-ledger consumers.
+      _bumpRevisionForOwner(ownerType, ownerId);
+      item = getMemoryItemByIdStmt.get(existing.id);
+    } else {
+      item = createMemoryItem({
+        ...(ownerType === 'profile' ? { profileId: ownerId } : { projectId: ownerId }),
+        kind,
+        content,
+        evidenceJson: humanApprovalEvidence(candidate, sanitized),
+        origin: 'human',
+        importance: clampImportance(raw.importance),
+        confidence: 0.9,
+        sourceCount: 1,
+        status: 'active',
+      });
+    }
+    const status = merged ? 'merged' : 'promoted';
+    const statusUpdate = setCandidateStatusStmt.run({
+      status,
+      promotedTo: item.id,
+      id: candidateId,
+    });
+    if (statusUpdate.changes !== 1) {
+      const err = new Error('candidate status flip raced (not pending)');
+      err.code = 'MEMORY_CANDIDATE_RACE';
+      throw err;
+    }
+    return { candidateId, promoted: true, merged, item };
+  });
+
+  function promoteCandidateByHuman({ candidateId, ownerType, ownerId } = {}) {
+    if (!candidateId) throw new Error('candidateId is required');
+    const result = promoteCandidateByHumanTx({ candidateId, ownerType, ownerId });
+    if (result && result.promoted && eventBus) {
+      try {
+        eventBus.emit('memory:promoted', {
+          candidateId,
+          memoryItemId: result.item.id,
+          ownerType,
+          ownerId,
+          projectId: ownerType === 'workspace' ? ownerId : null,
+          merged: result.merged,
+          approvedBy: 'human',
+        });
+      } catch { /* observability must never break approval */ }
+    } else if (result && !result.pending && eventBus) {
+      try {
+        eventBus.emit('memory:candidate_rejected', {
+          candidateId,
+          ownerType,
+          ownerId,
+          projectId: ownerType === 'workspace' ? ownerId : null,
+          reason: result.reason,
+        });
+      } catch { /* observability must never break validation rejection */ }
+    }
+    return result;
+  }
+
+  const rejectCandidateByHumanTx = db.transaction(({ candidateId, ownerType, ownerId }) => {
+    assertDistillOwner(ownerType, ownerId);
+    const candidate = getCandidateByIdStmt.get(candidateId);
+    if (!candidate || candidate.status !== 'pending' ||
+        candidate.owner_type !== ownerType || candidate.owner_id !== ownerId) {
+      return null;
+    }
+    const changed = setCandidateStatusStmt.run({
+      status: 'rejected', promotedTo: null, id: candidateId,
+    }).changes;
+    if (changed !== 1) {
+      const err = new Error('candidate rejection raced (not pending)');
+      err.code = 'MEMORY_CANDIDATE_RACE';
+      throw err;
+    }
+    return { candidateId, rejected: true };
+  });
+
+  function rejectCandidateByHuman({ candidateId, ownerType, ownerId } = {}) {
+    if (!candidateId) throw new Error('candidateId is required');
+    const result = rejectCandidateByHumanTx({ candidateId, ownerType, ownerId });
+    if (result && eventBus) {
+      try {
+        eventBus.emit('memory:candidate_rejected', {
+          candidateId,
+          ownerType,
+          ownerId,
+          projectId: ownerType === 'workspace' ? ownerId : null,
+        });
+      } catch { /* observability must never break rejection */ }
+    }
+    return result;
+  }
 
   // PR5a hard-cap admission control. The lowest-score EVICTABLE active item:
   // never human, never pinned (those are protected). score = confidence*importance
@@ -1058,16 +1321,19 @@ function createMemoryService(db, eventBus) {
       const promoted = [];
       const skipped = [];
       const evicted = [];
+      const candidateRejected = [];
 
       // Terminal failures (bad kind, sanitize reject, polarity-lost) mark the
       // candidate 'rejected' so it leaves the pending scan; otherwise a
       // permanently-bad head candidate would refill every batch (oldest-first)
       // and starve later valid ones (Codex follow-up SERIOUS). Re-stageable
-      // conditions (active_cap) keep it pending. Note: polarity-lost reject is
-      // a LOSSY safety drop — candidates are persisted as 'rejected' in DB but
-      // there is currently no L1 candidate review UI/API to requeue them.
-      const rejectCandidate = (candidateId) => {
-        setCandidateStatusStmt.run({ status: 'rejected', promotedTo: null, id: candidateId });
+      // conditions (active_cap) keep it pending. Rejected rows remain visible
+      // through the candidate review API's status filter for audit.
+      const rejectCandidate = (candidateId, reason) => {
+        const changed = setCandidateStatusStmt.run({
+          status: 'rejected', promotedTo: null, id: candidateId,
+        }).changes;
+        if (changed === 1) candidateRejected.push({ candidateId, reason });
       };
 
       for (const p of proposals || []) {
@@ -1093,7 +1359,7 @@ function createMemoryService(db, eventBus) {
         // defense-in-depth, not the last line.
         if (!PROMOTABLE_KINDS.has(p.kind)) {
           skipped.push({ candidateId: p.candidateId, reason: 'bad_kind' });
-          rejectCandidate(p.candidateId);
+          rejectCandidate(p.candidateId, 'bad_kind');
           continue;
         }
         // BLOCKER ④: redact secrets / reject injection / length on the OUTPUT,
@@ -1101,7 +1367,7 @@ function createMemoryService(db, eventBus) {
         const s = sanitizeProposalContent(p.content, { maxLen });
         if (!s.ok) {
           skipped.push({ candidateId: p.candidateId, reason: `sanitize:${s.reasons.join(',') || 'failed'}` });
-          rejectCandidate(p.candidateId);
+          rejectCandidate(p.candidateId, `sanitize:${s.reasons.join(',') || 'failed'}`);
           continue;
         }
         const content = s.content;
@@ -1109,8 +1375,8 @@ function createMemoryService(db, eventBus) {
         // carried a single negation and the sanitized proposal has zero, the
         // distiller likely stripped the polarity (e.g. "쓰지 마라" → "써라").
         // Only fires for same-language, single-negation references — conservative.
-        // This is a LOSSY drop: the candidate is marked 'rejected' in DB but has
-        // no current recovery path (no L1 candidate review UI/API).
+        // This is a safety drop: the candidate is marked rejected and remains
+        // inspectable through the review API's rejected filter.
         if (cand.rule === 'R4') {
           let rawParsed = {};
           try { const p2 = JSON.parse(cand.raw_json); if (p2 && typeof p2 === 'object') rawParsed = p2; } catch { /* */ }
@@ -1119,7 +1385,7 @@ function createMemoryService(db, eventBus) {
             : null;
           if (polarityLost(reference, content)) {
             skipped.push({ candidateId: p.candidateId, reason: 'polarity_lost' });
-            rejectCandidate(p.candidateId);
+            rejectCandidate(p.candidateId, 'polarity_lost');
             continue;
           }
         }
@@ -1228,7 +1494,16 @@ function createMemoryService(db, eventBus) {
       }
       // Collect polarity-rejected entries for post-tx event emission.
       const polarityRejected = skipped.filter((s) => s.reason === 'polarity_lost');
-      return { projectId, promoted, skipped, evicted, polarityRejected };
+      return {
+        projectId,
+        ownerType,
+        ownerId,
+        promoted,
+        skipped,
+        evicted,
+        polarityRejected,
+        candidateRejected,
+      };
     },
   );
 
@@ -1238,7 +1513,15 @@ function createMemoryService(db, eventBus) {
   function emitMemoryEvents(result) {
     if (!eventBus || !result) return;
     try {
-      const { projectId, promoted = [], evicted = [], polarityRejected = [] } = result;
+      const {
+        projectId,
+        ownerType,
+        ownerId,
+        promoted = [],
+        evicted = [],
+        polarityRejected = [],
+        candidateRejected = [],
+      } = result;
       if (promoted.length > 5) {
         eventBus.emit('memory:promoted', { projectId, count: promoted.length, batch: true });
       } else {
@@ -1252,6 +1535,15 @@ function createMemoryService(db, eventBus) {
       // A2-④-a: polarity-loss observability (content never included — untrusted).
       for (const r of polarityRejected) {
         eventBus.emit('memory:polarity_rejected', { projectId, candidateId: r.candidateId, rule: 'R4' });
+      }
+      for (const rejected of candidateRejected) {
+        eventBus.emit('memory:candidate_rejected', {
+          projectId,
+          ownerType,
+          ownerId,
+          candidateId: rejected.candidateId,
+          reason: rejected.reason,
+        });
       }
     } catch { /* observability must never break promotion */ }
   }
@@ -1640,6 +1932,10 @@ function createMemoryService(db, eventBus) {
     createCandidate,
     listCandidates,
     listCandidatesForOwner,
+    listCandidatePageForOwner,
+    getCandidateQueueSummary,
+    promoteCandidateByHuman,
+    rejectCandidateByHuman,
     listProjectsWithPendingCandidates,
     listOwnersWithPendingCandidates,
     enqueueDistillJob,
