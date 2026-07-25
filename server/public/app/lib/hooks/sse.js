@@ -74,6 +74,11 @@ export function useSSE(listeners) {
       // v3 Phase 7: dispatch audit live push so Drift badge + drawer
       // refresh without waiting for the 15s reload timer.
       'dispatch_audit:recorded',
+      // Memory Hub: candidate inbox + active-set lifecycle. MemoryView consumes
+      // these through sseBroker and refreshes the affected view/diagnostics.
+      'memory:candidate_created', 'memory:candidate_rejected',
+      'memory:promoted', 'memory:evicted', 'memory:decayed',
+      'master_memory:promoted', 'master_memory:evicted', 'master_memory:decayed',
     ];
     channels.forEach((ch) => {
       source.addEventListener(ch, (e) => {
