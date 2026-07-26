@@ -2656,46 +2656,6 @@ function createLifecycleService({
       }
     }
 
-    // Terminal remote runs can leave their guarded status directory behind.
-    // Cleanup is one-shot and annotate-on-success. Any SSH/timeout/path-guard
-    // failure is a preservation decision: no success event and no retry in this
-    // boot sweep.
-    for (const run of persistedRuns) {
-      if (
-        !run
-        || run.is_manager
-        || !terminalStatuses.has(run.status)
-        || !run.node_id
-        || run.node_id === 'local'
-      ) {
-        continue;
-      }
-      let priorEvents;
-      try { priorEvents = runService.getRunEvents(run.id); } catch { continue; }
-      if (priorEvents.some((event) => (
-        event.event_type === 'runtime:artifacts_reaped'
-        && (() => {
-          try { return JSON.parse(event.payload_json || '{}').kind === 'remote_status_dir'; } catch { return false; }
-        })()
-      ))) {
-        continue;
-      }
-      try {
-        const node = getDispatchNode(run.node_id);
-        if (!node || (node.kind || 'local') === 'local') continue;
-        const channel = channelForNode(run.node_id);
-        if (!channel || typeof channel.cleanupRun !== 'function') continue;
-        await channel.cleanupRun(run.id);
-        runService.addRunEvent(run.id, 'runtime:artifacts_reaped', JSON.stringify({
-          kind: 'remote_status_dir',
-          reason: 'terminal_run',
-          removed_count: 1,
-        }));
-      } catch {
-        // Fail-safe = preserve. SSH transport failure, timeout, and uncertain
-        // remote path state must never be converted into a deletion annotation.
-      }
-    }
 
     for (const run of persistedRuns) {
       if (
@@ -2754,6 +2714,65 @@ function createLifecycleService({
       }));
       if (run.task_id) checkTaskCompletion(run.task_id);
       recovered.push({ runId: run.id, status: 'credential_revoked' });
+    }
+
+    // Housekeeping runs AFTER the active-worker sweep above on purpose. Each
+    // cleanup is one SSH round trip and an offline node costs the full timeout,
+    // so putting this first would delay revoking capabilities on workers that
+    // are still running — the one thing here with a security deadline. Also
+    // bounded: a backlog of old runs must not stretch boot indefinitely.
+    const HOUSEKEEPING_BUDGET_MS = 30_000;
+    const housekeepingStartedAt = Date.now();
+
+    for (const run of persistedRuns) {
+      if (Date.now() - housekeepingStartedAt > HOUSEKEEPING_BUDGET_MS) break;
+      if (
+        !run
+        || run.is_manager
+        || !terminalStatuses.has(run.status)
+        || !run.node_id
+        || run.node_id === 'local'
+      ) {
+        continue;
+      }
+      let priorEvents;
+      try { priorEvents = runService.getRunEvents(run.id); } catch { continue; }
+      if (priorEvents.some((event) => (
+        event.event_type === 'runtime:artifacts_reaped'
+        && (() => {
+          try { return JSON.parse(event.payload_json || '{}').kind === 'remote_status_dir'; } catch { return false; }
+        })()
+      ))) {
+        continue;
+      }
+      // cleanupRun removes the whole status dir, stdout.log included. Terminal
+      // status is committed to the DB before capture/harvest, which run
+      // asynchronously off run:ended — so a controller that died in that window
+      // leaves the remote stdout as the ONLY copy of the result, and boot has no
+      // path that re-runs the capture. Delete only once something durable shows
+      // the output was consumed; otherwise leave it for a later boot.
+      const consumed = priorEvents.some((event) => (
+        event.event_type === 'harvest:goal_capture'
+        || event.event_type === 'harvest:diff'
+        || event.event_type === 'harvest:test'
+        || event.event_type === 'harvest:error'
+      ));
+      if (!consumed) continue;
+      try {
+        const node = getDispatchNode(run.node_id);
+        if (!node || (node.kind || 'local') === 'local') continue;
+        const channel = channelForNode(run.node_id);
+        if (!channel || typeof channel.cleanupRun !== 'function') continue;
+        await channel.cleanupRun(run.id);
+        runService.addRunEvent(run.id, 'runtime:artifacts_reaped', JSON.stringify({
+          kind: 'remote_status_dir',
+          reason: 'terminal_run',
+          removed_count: 1,
+        }));
+      } catch {
+        // Fail-safe = preserve. SSH transport failure, timeout, and uncertain
+        // remote path state must never be converted into a deletion annotation.
+      }
     }
 
     // Boot orphan discovery remains executionEngine-direct; ghost sessions are
@@ -2887,6 +2906,8 @@ function createLifecycleService({
         recovered.push({ runId, status: 'unknown_orphan', sessionName: session.name });
       }
     }
+
+
 
     return recovered;
   }

@@ -95,10 +95,14 @@ test('state 5 lifecycle sweep reaps a terminal remote statusDir and records it',
   const remoteChannel = {
     async cleanupRun(runId) { cleaned.push(runId); },
   };
+  // Reaping now requires evidence that the output was already consumed —
+  // terminal status alone is not enough, because capture/harvest run
+  // asynchronously after the status is committed.
   const h = lifecycleHarness({
     runs,
     executionEngine: { type: 'subprocess' },
     remoteChannel,
+    priorEvents: new Map([['remote-terminal', [{ event_type: 'harvest:diff', payload_json: '{}' }]]]),
   });
 
   await h.lifecycle.recoverOrphanSessions();
@@ -138,4 +142,79 @@ test('lifecycle remote sweep records no deletion when SSH cleanup is uncertain',
   await h.lifecycle.recoverOrphanSessions();
 
   assert.deepEqual(h.events, []);
+});
+
+// ---------------------------------------------------------------------------
+// Integrated adversarial review findings on the boot sweep.
+// ---------------------------------------------------------------------------
+
+test('remote statusDir is preserved until something durable shows the output was consumed', async () => {
+  // Terminal status lands in the DB before capture/harvest, which run
+  // asynchronously off run:ended. A controller that dies in that window leaves
+  // the remote stdout.log as the only copy of the result, and nothing at boot
+  // re-runs the capture — so deleting on terminal status alone destroys it.
+  const runs = [
+    { id: 'unconsumed', status: 'completed', node_id: 'remote-a', is_manager: 0 },
+    { id: 'consumed', status: 'completed', node_id: 'remote-a', is_manager: 0 },
+  ];
+  const cleaned = [];
+  const remoteChannel = {
+    cleanupRun: async (runId) => { cleaned.push(runId); },
+    kill: async () => true,
+  };
+  const priorEvents = new Map([
+    ['unconsumed', []],
+    ['consumed', [{ event_type: 'harvest:diff', payload_json: '{}' }]],
+  ]);
+  const h = lifecycleHarness({
+    runs,
+    executionEngine: { type: 'subprocess' },
+    remoteChannel,
+    priorEvents,
+  });
+
+  await h.lifecycle.recoverOrphanSessions();
+
+  assert.deepEqual(cleaned, ['consumed'], 'only a run whose output was consumed may be reaped');
+  assert.equal(
+    h.events.some((e) => e.runId === 'unconsumed' && e.eventType === 'runtime:artifacts_reaped'),
+    false,
+    'an unconsumed run must not even be annotated as reaped',
+  );
+});
+
+test('active worker capability revocation is not queued behind terminal housekeeping', async () => {
+  // Each terminal cleanup is an SSH round trip, and an offline node costs the
+  // full timeout. Revoking a capability on a worker that is still RUNNING has a
+  // security deadline; sweeping old directories does not. Order matters.
+  const runs = [
+    { id: 'old-terminal', status: 'completed', node_id: 'remote-a', is_manager: 0 },
+    { id: 'live-worker', status: 'running', node_id: 'remote-a', is_manager: 0 },
+  ];
+  const order = [];
+  const remoteChannel = {
+    cleanupRun: async (runId) => { order.push(`cleanup:${runId}`); },
+    kill: async (runId) => { order.push(`kill:${runId}`); return true; },
+    getOutput: async () => null,
+    detectExitCode: async () => null,
+    isAlive: async () => true,
+  };
+  const priorEvents = new Map([
+    ['old-terminal', [{ event_type: 'harvest:diff', payload_json: '{}' }]],
+    ['live-worker', [{ event_type: 'security:worker_capability_scoped', payload_json: '{}' }]],
+  ]);
+  const h = lifecycleHarness({
+    runs,
+    executionEngine: { type: 'subprocess' },
+    remoteChannel,
+    priorEvents,
+  });
+
+  await h.lifecycle.recoverOrphanSessions();
+
+  const killIdx = order.findIndex((entry) => entry.startsWith('kill:'));
+  const cleanupIdx = order.findIndex((entry) => entry.startsWith('cleanup:'));
+  assert.ok(killIdx >= 0, 'the expired capability must be revoked');
+  assert.ok(cleanupIdx >= 0, 'housekeeping must still run');
+  assert.ok(killIdx < cleanupIdx, 'revocation must not wait behind terminal housekeeping');
 });
