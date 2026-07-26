@@ -28,21 +28,43 @@ function unshq(value) {
   return value.slice(1, -1).replace(/'\\''/g, "'");
 }
 
-function scriptOf(call) {
+function rawScriptOf(call) {
   const last = String(call.args[call.args.length - 1]);
   assert.ok(last.startsWith('sh -c '), `expected an ssh sh -c payload, got ${last}`);
   return unshq(last.slice('sh -c '.length));
+}
+
+function hasFilesystemLocale(script) {
+  return script.startsWith(`exec env LC_ALL=${shq('C')} `)
+    || script.startsWith(`export LC_ALL=${shq('C')}; `);
+}
+
+function scriptOf(call) {
+  const script = rawScriptOf(call);
+  const commandPrefix = `exec env LC_ALL=${shq('C')} `;
+  const scriptPrefix = `export LC_ALL=${shq('C')}; `;
+  if (
+    script.startsWith(commandPrefix)
+    && /^'(?:realpath|test|find)'(?: |$)/.test(script.slice(commandPrefix.length))
+  ) {
+    return `exec ${script.slice(commandPrefix.length)}`;
+  }
+  if (script.startsWith(scriptPrefix)) return script.slice(scriptPrefix.length);
+  return script;
 }
 
 function makeSpawn(handler) {
   const calls = [];
   function spawn(cmd, args) {
     const child = new EventEmitter();
-    const call = { cmd, args, child };
+    const call = { cmd, args, child, killed: false };
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     child.stdin = new Writable({ write(_c, _e, cb) { cb(); } });
-    child.kill = () => true;
+    child.kill = (signal = 'SIGTERM') => {
+      call.killed = signal;
+      return true;
+    };
     calls.push(call);
     handler(call, child);
     return child;
@@ -65,13 +87,23 @@ function complete(child, { code = 0, stdout = '', stderr = '' } = {}) {
  *   symlinks: literal path → canonical target (what `realpath` returns)
  *   denied:   canonical dir paths whose `find` fails with EACCES
  */
-function makeRemoteFs({ dirs = {}, symlinks = {}, denied = [], transportFail = false } = {}) {
+function makeRemoteFs({
+  dirs = {},
+  symlinks = {},
+  denied = [],
+  transportFail = false,
+  neverSettles = false,
+  defaultLocale = 'en',
+} = {}) {
   const deniedSet = new Set(denied);
   return makeSpawn((call, child) => {
+    if (neverSettles) return;
     if (transportFail) {
       complete(child, { code: 255, stderr: 'ssh: connect to host pod.example port 22: Connection refused' });
       return;
     }
+    const rawScript = rawScriptOf(call);
+    const stableLocale = hasFilesystemLocale(rawScript);
     const script = scriptOf(call);
 
     const realpathMatch = script.match(/^exec 'realpath' (.+)$/);
@@ -83,7 +115,10 @@ function makeRemoteFs({ dirs = {}, symlinks = {}, denied = [], transportFail = f
           (entry) => path.posix.join(Object.keys(dirs).find((d) => dirs[d] === entries), entry.name) === resolved,
         ));
       if (!known && !Object.prototype.hasOwnProperty.call(symlinks, target)) {
-        complete(child, { code: 1, stderr: `realpath: ${target}: No such file or directory\n` });
+        const stderr = stableLocale || defaultLocale === 'en'
+          ? `realpath: ${target}: No such file or directory\n`
+          : `realpath: ${target}: 그런 파일이나 디렉터리가 없습니다\n`;
+        complete(child, { code: 1, stderr });
         return;
       }
       complete(child, { code: 0, stdout: `${resolved}\n` });
@@ -102,10 +137,13 @@ function makeRemoteFs({ dirs = {}, symlinks = {}, denied = [], transportFail = f
         return;
       }
       if (deniedSet.has(target)) {
+        const stderr = stableLocale || defaultLocale === 'en'
+          ? `find: '${target}': Permission denied\n`
+          : `find: '${target}': 허가 거부\n`;
         complete(child, {
           code: 0,
           stdout: 'FINDEXIT:1\0',
-          stderr: `find: '${target}': Permission denied\n`,
+          stderr,
         });
         return;
       }
@@ -184,12 +222,18 @@ function request(router) {
   };
 }
 
-function remoteApp(remoteFsOptions, { node = SSH_NODE, pickExecutorError = null, getNodeError = null } = {}) {
+function remoteApp(remoteFsOptions, {
+  node = SSH_NODE,
+  pickExecutorError = null,
+  getNodeError = null,
+  remoteBrowseTimeoutMs = undefined,
+} = {}) {
   const spawnFn = makeRemoteFs(remoteFsOptions);
   const nodeService = makeNodeService({ node, spawnFn, pickExecutorError, getNodeError });
   const fsService = createFsService({ fsRoot: '/control/plane/root' }, {
     nodeExecutor: createLocalNodeExecutor(),
     nodeService,
+    ...(remoteBrowseTimeoutMs === undefined ? {} : { remoteBrowseTimeoutMs }),
   });
   return { app: makeApp(fsService), spawnFn };
 }
@@ -387,6 +431,68 @@ test('remote browsing maps an unreadable directory to permission_denied', async 
   const res = await request(app).get('/api/fs?nodeId=pod-a&path=/srv/root/locked');
   assert.equal(res.status, 403);
   assert.equal(res.body.reason, 'permission_denied');
+});
+
+test('remote browsing times out a never-settling filesystem helper as node_timeout', async () => {
+  const { app, spawnFn } = remoteApp(
+    { ...DEFAULT_REMOTE_FS, neverSettles: true },
+    { remoteBrowseTimeoutMs: 25 },
+  );
+  const startedAt = Date.now();
+
+  const res = await request(app).get('/api/fs?nodeId=pod-a');
+
+  assert.equal(res.status, 504);
+  assert.equal(res.body.reason, 'node_timeout');
+  assert.equal(res.body.error, 'Execution node did not respond in time');
+  assert.ok(Date.now() - startedAt < 1000, 'browse must not remain pending');
+  assert.equal(spawnFn.calls.length, 1, 'the first blocked realpath must consume the operation deadline');
+  assert.equal(spawnFn.calls[0].killed, 'SIGTERM');
+});
+
+test('remote filesystem errors stay classifiable when the node default locale is Korean', async () => {
+  const cases = [
+    {
+      options: { ...DEFAULT_REMOTE_FS, defaultLocale: 'ko' },
+      path: '/srv/root/missing',
+      status: 404,
+      reason: 'path_not_found',
+    },
+    {
+      options: {
+        dirs: { ...DEFAULT_REMOTE_FS.dirs, '/srv/root/locked': [] },
+        denied: ['/srv/root/locked'],
+        defaultLocale: 'ko',
+      },
+      path: '/srv/root/locked',
+      status: 403,
+      reason: 'permission_denied',
+    },
+    {
+      options: { ...DEFAULT_REMOTE_FS, defaultLocale: 'ko' },
+      path: '/srv/root/README.md',
+      status: 400,
+      reason: 'path_not_directory',
+    },
+  ];
+
+  for (const item of cases) {
+    const { app, spawnFn } = remoteApp(item.options);
+    const res = await request(app).get(
+      `/api/fs?nodeId=pod-a&path=${encodeURIComponent(item.path)}`,
+    );
+
+    assert.equal(res.status, item.status, item.reason);
+    assert.equal(res.body.reason, item.reason);
+    assert.ok(spawnFn.calls.length > 0);
+    for (const call of spawnFn.calls) {
+      assert.equal(
+        hasFilesystemLocale(rawScriptOf(call)),
+        true,
+        `filesystem helper did not force LC_ALL=C: ${rawScriptOf(call)}`,
+      );
+    }
+  }
 });
 
 test('remote browsing maps ssh transport failure to node_unreachable', async () => {

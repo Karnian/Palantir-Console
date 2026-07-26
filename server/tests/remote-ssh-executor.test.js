@@ -110,11 +110,25 @@ function remoteCommandOf(call) {
   return remoteArgs[0];
 }
 
-function scriptOf(call) {
+function rawScriptOf(call) {
   const command = remoteCommandOf(call);
   const prefix = 'sh -c ';
   assert.ok(command.startsWith(prefix), `unexpected ssh remote command: ${command}`);
   return unshq(command.slice(prefix.length));
+}
+
+function scriptOf(call) {
+  const script = rawScriptOf(call);
+  const commandPrefix = `exec env LC_ALL=${shq('C')} `;
+  const scriptPrefix = `export LC_ALL=${shq('C')}; `;
+  if (
+    script.startsWith(commandPrefix)
+    && /^'(?:realpath|test|find)'(?: |$)/.test(script.slice(commandPrefix.length))
+  ) {
+    return `exec ${script.slice(commandPrefix.length)}`;
+  }
+  if (script.startsWith(scriptPrefix)) return script.slice(scriptPrefix.length);
+  return script;
 }
 
 function loopbackSshSpawn({ env } = {}) {
@@ -608,6 +622,27 @@ test('stat returns isDirectory/isFile shape', async () => {
   const stat = await createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn }).stat('/srv/root/dir');
   assert.equal(stat.isDirectory(), true);
   assert.equal(stat.isFile(), false);
+});
+
+test('internal filesystem helpers force C locale without changing public exec locale', async () => {
+  const spawn = rootGuardSpawn({
+    "exec 'realpath' '/srv/root/dir'": { stdout: '/real/root/dir\n' },
+    "exec 'test' '-d' '/real/root/dir'": { code: 0 },
+    "exec 'test' '-f' '/real/root/dir'": { code: 1 },
+  });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await executor.stat('/srv/root/dir');
+  await executor.exec('git', ['status']);
+
+  const filesystemCalls = spawn.calls.filter((call) => (
+    /^exec '(?:realpath|test)' /.test(scriptOf(call))
+  ));
+  assert.ok(filesystemCalls.length >= 4);
+  for (const call of filesystemCalls) {
+    assert.match(rawScriptOf(call), /^exec env LC_ALL='C' '(?:realpath|test)' /);
+  }
+  assert.equal(rawScriptOf(spawn.calls.at(-1)), "exec 'git' 'status'");
 });
 
 test('writeTempFile rejects non-bare names and sends content via stdin', async () => {

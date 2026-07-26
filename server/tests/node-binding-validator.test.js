@@ -2,7 +2,10 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
+const { Writable } = require('node:stream');
 const { createNodeBindingValidator } = require('../services/nodeBindingValidator');
+const { createRemoteSshNodeExecutor } = require('../services/remoteSshExecutor');
 
 function createFakeExecutor({
   realpathImpl = async (p) => p,
@@ -53,6 +56,73 @@ function createFakeFs(existingPaths = []) {
       return existing.has(p);
     },
   };
+}
+
+function unshq(value) {
+  assert.equal(value[0], "'");
+  assert.equal(value[value.length - 1], "'");
+  return value.slice(1, -1).replace(/'\\''/g, "'");
+}
+
+function createLocaleSensitiveExecutor(outcome) {
+  const calls = [];
+  const spawnFn = (_command, args) => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+    child.kill = () => true;
+    const payload = String(args.at(-1));
+    const rawScript = unshq(payload.slice('sh -c '.length));
+    const prefix = "exec env LC_ALL='C' ";
+    const localeForced = rawScript.startsWith(prefix);
+    const script = localeForced ? `exec ${rawScript.slice(prefix.length)}` : rawScript;
+    calls.push({ rawScript, localeForced });
+
+    process.nextTick(() => {
+      let response;
+      if (script === "exec 'realpath' '/srv/repo'") {
+        if (outcome === 'permission') {
+          response = {
+            code: 1,
+            stderr: localeForced
+              ? 'realpath: /srv/repo: Permission denied\n'
+              : 'realpath: /srv/repo: 허가 거부\n',
+          };
+        } else if (outcome === 'missing') {
+          response = {
+            code: 1,
+            stderr: localeForced
+              ? 'realpath: /srv/repo: No such file or directory\n'
+              : 'realpath: /srv/repo: 그런 파일이나 디렉터리가 없습니다\n',
+          };
+        } else {
+          response = { code: 0, stdout: '/srv/repo\n' };
+        }
+      } else if (script === "exec 'realpath' '/srv'") {
+        response = { code: 0, stdout: '/srv\n' };
+      } else if (script === "exec 'test' '-d' '/srv/repo'") {
+        response = { code: outcome === 'not-directory' ? 1 : 0 };
+      } else if (script === "exec 'test' '-f' '/srv/repo'") {
+        response = { code: outcome === 'not-directory' ? 0 : 1 };
+      } else {
+        response = { code: 127, stderr: `unexpected script: ${rawScript}` };
+      }
+      if (response.stdout) child.stdout.emit('data', response.stdout);
+      if (response.stderr) child.stderr.emit('data', response.stderr);
+      child.emit('close', response.code, null);
+    });
+    return child;
+  };
+
+  const executor = createRemoteSshNodeExecutor({
+    id: 'node-a',
+    kind: 'ssh',
+    ssh_host: 'pod.example',
+    ssh_user: 'runner',
+    exposed_roots: JSON.stringify(['/srv']),
+  }, { spawnFn });
+  return { executor, calls };
 }
 
 test('validateBinding skips directory validation for local bindings', async () => {
@@ -161,6 +231,32 @@ test('validateBinding classifies the bind failure with a picker-compatible reaso
         assert.match(err.message, /Directory not found or outside exposed_roots on node node-a: \/srv\/repo/);
         return true;
       },
+    );
+  }
+});
+
+test('validateBinding is locale-independent through C-locale remote filesystem helpers', async () => {
+  const cases = [
+    ['missing', 'path_not_found'],
+    ['permission', 'permission_denied'],
+    ['not-directory', 'path_not_directory'],
+  ];
+
+  for (const [outcome, reason] of cases) {
+    const { executor, calls } = createLocaleSensitiveExecutor(outcome);
+    const validator = createNodeBindingValidator({
+      nodeService: createFakeNodeService(executor),
+    });
+
+    await assert.rejects(
+      validator.validateBinding({ nodeId: 'node-a', directory: '/srv/repo' }),
+      (err) => err.reason === reason,
+    );
+    assert.ok(calls.length > 0);
+    assert.equal(
+      calls.every((call) => call.localeForced),
+      true,
+      `all ${outcome} filesystem probes must force LC_ALL=C`,
     );
   }
 });
