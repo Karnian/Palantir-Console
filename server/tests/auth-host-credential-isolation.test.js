@@ -94,13 +94,34 @@ function spyOnNativeProbes(t) {
   const calls = { exec: [], read: [] };
   const argvOf = (file, args) => [file, ...(Array.isArray(args) ? args : [])].join(' ');
 
+  // Record and STUB the credential probes — never let them reach the host.
+  // The positive controls deliberately run the unisolated path, and delegating
+  // there would execute `security find-generic-password -w`, materializing the
+  // developer's real Claude OAuth token (and risking a keychain ACL prompt).
+  // Every assertion here counts calls rather than inspecting results, so a
+  // stubbed failure preserves mutation detection exactly. Non-credential
+  // commands still pass through so nothing else in the process is disturbed.
+  const CREDENTIAL_COMMANDS = new Set(['security', 'claude']);
+  const blocked = (file, args) => {
+    const err = new Error(`[test] blocked host credential probe: ${argvOf(file, args)}`);
+    err.code = 'ENOENT';
+    return err;
+  };
+
   childProcess.execFile = function spy(file, args, ...rest) {
+    if (!CREDENTIAL_COMMANDS.has(file)) return original.execFile.call(this, file, args, ...rest);
     calls.exec.push(argvOf(file, args));
-    return original.execFile.call(this, file, args, ...rest);
+    const callback = rest[rest.length - 1];
+    if (typeof callback === 'function') {
+      process.nextTick(() => callback(blocked(file, args)));
+      return undefined;
+    }
+    throw blocked(file, args);
   };
   childProcess.execFileSync = function spy(file, args, ...rest) {
+    if (!CREDENTIAL_COMMANDS.has(file)) return original.execFileSync.call(this, file, args, ...rest);
     calls.exec.push(argvOf(file, args));
-    return original.execFileSync.call(this, file, args, ...rest);
+    throw blocked(file, args);
   };
   fsPromises.readFile = function spy(target, ...rest) {
     calls.read.push(String(target));
@@ -205,6 +226,8 @@ test('positive control (macOS): unisolated keychain probes are observable', asyn
   const probes = spyOnNativeProbes(t);
   const resolver = loadResolver();
 
+  // The spy blocks these before they reach the keychain, so the return values
+  // are meaningless here — reaching the probe at all is the whole assertion.
   resolver.hasClaudeKeychainCredentials();   // execFileSync
   await resolver.readClaudeKeychainToken();  // execFile (promisified)
   assert.equal(
