@@ -10,6 +10,8 @@
 // `server/tests/fixtures/plugins/` so we don't need a real ecosystem
 // plugin on disk.
 
+process.env.PALANTIR_SKIP_HOST_CREDENTIALS = '1';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fsp = require('node:fs/promises');
