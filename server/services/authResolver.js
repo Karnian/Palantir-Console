@@ -153,6 +153,7 @@ function hasClaudeLinuxCredentials() {
  * subprocess can refresh itself from the same file's refreshToken.
  */
 async function readClaudeLinuxCredentialsToken() {
+  if (hostCredentialDiscoveryDisabled()) return null;
   if (process.platform === 'darwin') return null;
   try {
     const raw = await fsp.readFile(CLAUDE_LINUX_CREDENTIALS_FILE, 'utf-8');
@@ -423,6 +424,7 @@ function resolveCodexAuth({ envAllowlist } = {}) {
  * data; the legacy bare-string fallback below is unaffected.
  */
 async function readClaudeKeychainToken() {
+  if (hostCredentialDiscoveryDisabled()) return null;
   if (process.platform !== 'darwin') return null;
   try {
     const { stdout } = await execFileAsync(

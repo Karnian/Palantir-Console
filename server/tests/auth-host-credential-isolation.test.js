@@ -126,6 +126,18 @@ test('isolation switch reports no ambient credentials to the resolver', (t) => {
   );
 });
 
+test('isolation switch also blocks the token-EXTRACTING native readers', async (t) => {
+  // The existence probes and the token readers are separate entry points; the
+  // isolated-worker path calls the readers directly. Gating only the probes
+  // would still hand a real host token to a spawned worker.
+  withCleanEnv(t);
+  process.env.PALANTIR_SKIP_HOST_CREDENTIALS = '1';
+  const resolver = loadResolver();
+
+  assert.equal(await resolver.readClaudeKeychainToken(), null);
+  assert.equal(await resolver.readClaudeLinuxCredentialsToken(), null);
+});
+
 test('explicit env credentials still authenticate under isolation (not a kill switch)', (t) => {
   withCleanEnv(t);
   process.env.PALANTIR_SKIP_HOST_CREDENTIALS = '1';
