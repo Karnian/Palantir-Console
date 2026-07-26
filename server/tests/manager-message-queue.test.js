@@ -89,6 +89,86 @@ test('idempotency key prevents duplicate insertion and duplicate dispatch', asyn
   );
 });
 
+test('public queue rows preserve only the validated turn codebase context', async (t) => {
+  const h = createHarness(t);
+  h.service.setDispatcher(() => ({
+    status: 'sent',
+    target: {
+      kind: 'pm',
+      runId: 'run_operator',
+      memoryOwnerType: 'workspace',
+      memoryOwnerId: 'proj_secondary',
+    },
+  }));
+
+  const queued = await h.service.enqueue('operator:oi_one', {
+    text: 'inspect the secondary codebase',
+    codebaseProjectId: 'proj_secondary',
+    turnMode: 'codebase',
+  }, { idempotencyKey: 'turn-context' });
+
+  assert.equal(queued.message.codebase_project_id, 'proj_secondary');
+  assert.equal(queued.message.memory_owner_type, 'workspace');
+  assert.equal(queued.message.memory_owner_id, 'proj_secondary');
+  assert.equal(h.service.getMessage(queued.message.id).codebase_project_id, 'proj_secondary');
+  assert.equal('payload_json' in queued.message, false);
+});
+
+test('queue ignores caller-supplied memory ownership and persists the dispatch-derived primary', async (t) => {
+  const h = createHarness(t);
+  h.service.setDispatcher(() => ({
+    status: 'sent',
+    target: {
+      kind: 'pm',
+      runId: 'run_operator',
+      memoryOwnerType: 'workspace',
+      memoryOwnerId: 'proj_primary',
+    },
+  }));
+
+  const queued = await h.service.enqueue('operator:oi_one', {
+    text: 'inspect the primary codebase',
+    _resolvedMemoryOwner: { type: 'workspace', id: 'proj_spoofed' },
+  }, { idempotencyKey: 'resolved-primary-owner' });
+
+  assert.equal(queued.message.codebase_project_id, 'proj_primary');
+  assert.equal(queued.message.memory_owner_type, 'workspace');
+  assert.equal(queued.message.memory_owner_id, 'proj_primary');
+});
+
+test('a terminal event racing dispatcher return still persists the dispatch-derived memory owner', async (t) => {
+  const h = createHarness(t);
+  h.service.setDispatcher((_conversationId, _payload, messageId) => {
+    h.service.completeFromEvent(messageId, 'run_operator', true);
+    return {
+      status: 'sent',
+      target: {
+        kind: 'pm',
+        runId: 'run_operator',
+        memoryOwnerType: 'workspace',
+        memoryOwnerId: 'proj_fast',
+      },
+    };
+  });
+
+  const queued = await h.service.enqueue('operator:oi_fast', {
+    text: 'return immediately',
+  }, { idempotencyKey: 'fast-terminal-owner' });
+
+  assert.equal(queued.status, 'sent');
+  assert.equal(queued.message.status, 'delivered');
+  assert.equal(queued.message.codebase_project_id, 'proj_fast');
+  assert.equal(queued.message.memory_owner_type, 'workspace');
+  assert.equal(queued.message.memory_owner_id, 'proj_fast');
+  assert.equal(h.service.getMessage(queued.message.id).memory_owner_id, 'proj_fast');
+  assert.deepEqual(queued.target, {
+    kind: 'pm',
+    runId: 'run_operator',
+    memoryOwnerType: 'workspace',
+    memoryOwnerId: 'proj_fast',
+  });
+});
+
 test('queue cap applies backpressure and queued-only cancellation is CAS-safe', async (t) => {
   const h = createHarness(t, { perConversationCap: 2 });
   h.service.setDispatcher(() => ({

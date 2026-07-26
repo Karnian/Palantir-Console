@@ -615,6 +615,11 @@ test('A2b-2: a turn directed at a NON-primary codebase gets a ## Turn Codebase b
   assert.match(txt, /work on the shared beta repo/);
   // block precedes the original user text
   assert.ok(txt.indexOf('## Turn Codebase') < txt.indexOf('work on the shared beta repo'));
+  assert.equal(
+    conv.getLastTurnContext(fakePm._runTurnCalls[0].runId).workspaceProjectId,
+    other.id,
+    'server-derived proposal context follows the accepted secondary-codebase turn',
+  );
 });
 
 test('A2b-2: a turn on the Operator primary (or omitted) gets NO ## Turn Codebase block', async (t) => {
@@ -626,12 +631,20 @@ test('A2b-2: a turn on the Operator primary (or omitted) gets NO ## Turn Codebas
   seedTop({ rs, registry, adapter: topAdapter });
 
   // Explicit primary → redundant (already in system prompt), no block.
-  conv.sendMessage(`operator:${primary.id}`, { text: 'do the thing', codebaseProjectId: primary.id, turnMode: 'codebase' });
+  const explicitPrimary = conv.sendMessage(`operator:${primary.id}`, {
+    text: 'do the thing',
+    codebaseProjectId: primary.id,
+    turnMode: 'codebase',
+  });
   assert.ok(!/## Turn Codebase/.test(fakePm._runTurnCalls[0].payload.text));
+  assert.equal(explicitPrimary.target.memoryOwnerType, 'workspace');
+  assert.equal(explicitPrimary.target.memoryOwnerId, primary.id);
 
   // Omitted → legacy default, no block.
-  conv.sendMessage(`operator:${primary.id}`, { text: 'again' });
+  const defaultPrimary = conv.sendMessage(`operator:${primary.id}`, { text: 'again' });
   assert.ok(!/## Turn Codebase/.test(fakePm._runTurnCalls[1].payload.text));
+  assert.equal(defaultPrimary.target.memoryOwnerType, 'workspace');
+  assert.equal(defaultPrimary.target.memoryOwnerId, primary.id);
 });
 
 test('A2b-2: turnMode generic never emits a ## Turn Codebase block (codebase-less)', async (t) => {
@@ -644,12 +657,19 @@ test('A2b-2: turnMode generic never emits a ## Turn Codebase block (codebase-les
   seedTop({ rs, registry, adapter: topAdapter });
 
   // generic + an explicit codebase → generic wins (codebase-less), no block.
-  conv.sendMessage(`operator:${primary.id}`, {
+  const result = conv.sendMessage(`operator:${primary.id}`, {
     text: 'general planning question',
     codebaseProjectId: other.id,
     turnMode: 'generic',
   });
   assert.ok(!/## Turn Codebase/.test(fakePm._runTurnCalls[0].payload.text));
+  assert.equal(
+    conv.getLastTurnContext(fakePm._runTurnCalls[0].runId).workspaceProjectId,
+    null,
+    'generic turns do not retain a workspace proposal owner',
+  );
+  assert.equal(result.target.memoryOwnerType, 'profile');
+  assert.ok(result.target.memoryOwnerId);
 });
 
 test('A2b-2: a non-existent turn codebase is rejected fail-closed (400)', async (t) => {

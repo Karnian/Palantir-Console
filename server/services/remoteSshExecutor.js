@@ -147,6 +147,19 @@ function normalizeEnv(env) {
     });
 }
 
+function normalizeTransportSecret(value, key) {
+  if (value === undefined || value === null || value === '') return null;
+  if (
+    typeof value !== 'string'
+    || /[\r\n\x00]/.test(value)
+  ) {
+    const err = new Error(`${key} must be a non-empty single-line string`);
+    err.code = 'SECRET_TRANSPORT_INVALID';
+    throw err;
+  }
+  return value;
+}
+
 function stripOneTrailingNewline(value) {
   return String(value || '').replace(/\n$/, '');
 }
@@ -666,8 +679,57 @@ function createRemoteSshNodeExecutor(node, {
     }
     let safeCwd = cwd;
     if (cwd) safeCwd = (await assertWithinRoots(cwd)).canonical;
-    const script = buildCommandScript(commandName, args, { cwd: safeCwd, env, pathPrefix });
-    return spawnFn('ssh', sshArgsFor(script, { keepAlive: true }), { stdio: ['pipe', 'pipe', 'pipe'] });
+    const explicitEnv = { ...(env || {}) };
+    const managerToken = normalizeTransportSecret(
+      explicitEnv.PALANTIR_MANAGER_TOKEN,
+      'PALANTIR_MANAGER_TOKEN',
+    );
+    delete explicitEnv.PALANTIR_TOKEN;
+    delete explicitEnv.PALANTIR_PM_TOKEN;
+    delete explicitEnv.PALANTIR_WORKER_TOKEN;
+    delete explicitEnv.PALANTIR_MANAGER_TOKEN;
+    const script = buildCommandScript(commandName, args, {
+      cwd: safeCwd,
+      // The remote login shell may have controller credentials configured.
+      // Strip global actor tokens. A run-bound Manager capability is bootstrapped
+      // from SSH stdin below, so its value never appears in the local SSH argv or
+      // the remote command string.
+      env: {
+        PALANTIR_TOKEN: null,
+        PALANTIR_PM_TOKEN: null,
+        PALANTIR_WORKER_TOKEN: null,
+        ...(managerToken ? {} : { PALANTIR_MANAGER_TOKEN: null }),
+        ...explicitEnv,
+      },
+      pathPrefix,
+    });
+    const bootstrapScript = managerToken
+      ? `IFS= read -r PALANTIR_MANAGER_TOKEN || exit 126; export PALANTIR_MANAGER_TOKEN; ${script}`
+      : script;
+    const child = spawnFn(
+      'ssh',
+      sshArgsFor(bootstrapScript, { keepAlive: true }),
+      { stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+    if (managerToken) {
+      if (!child || !child.stdin || typeof child.stdin.write !== 'function') {
+        try { child?.kill?.('SIGTERM'); } catch { /* best-effort */ }
+        throw new Error('spawnInteractive requires writable SSH stdin for manager capability transport');
+      }
+      // The caller writes the model prompt only after this async method resolves,
+      // so this framed first line is consumed by the bootstrap before the
+      // remaining stdin is handed unchanged to codex/claude.
+      if (typeof child.stdin.on === 'function') {
+        child.stdin.on('error', () => { /* child close/error is authoritative */ });
+      }
+      try {
+        child.stdin.write(`${managerToken}\n`);
+      } catch (err) {
+        try { child.kill?.('SIGTERM'); } catch { /* best-effort */ }
+        throw err;
+      }
+    }
+    return child;
   }
 
   /**
@@ -1049,12 +1111,41 @@ function createRemoteSshNodeExecutor(node, {
     };
   }
 
-  function buildWorkerInvocation({ command, args = [], env, workerPath }) {
-    const envParts = normalizeEnv(env);
+  function buildWorkerInvocation({ command, args = [], env, workerPath }, {
+    workerTokenFile = null,
+  } = {}) {
+    // `env` assignments alone preserve variables inherited from the pod login
+    // shell. Empty assignments deliberately clear both actor credentials first;
+    // an explicit server-selected value below then restores only the permitted
+    // credential for the current policy.
+    const workerEnv = { ...(env || {}) };
+    delete workerEnv.PALANTIR_TOKEN;
+    delete workerEnv.PALANTIR_PM_TOKEN;
+    delete workerEnv.PALANTIR_WORKER_TOKEN;
+    delete workerEnv.PALANTIR_MANAGER_TOKEN;
+    const envParts = normalizeEnv({
+      PALANTIR_TOKEN: null,
+      PALANTIR_PM_TOKEN: null,
+      ...(workerTokenFile ? {} : { PALANTIR_WORKER_TOKEN: null }),
+      PALANTIR_MANAGER_TOKEN: null,
+      ...workerEnv,
+    });
     const list = Array.isArray(args) ? args : [];
     const argv = [shq(command), ...list.map((arg) => shq(arg))];
     const invocation = ['env', ...envParts, ...argv].join(' ');
-    return workerPath ? `PATH=${shq(workerPath)}:$PATH ${invocation}` : invocation;
+    const commandLine = workerPath ? `PATH=${shq(workerPath)}:$PATH ${invocation}` : invocation;
+    if (!workerTokenFile) return commandLine;
+
+    const tokenDir = path.posix.dirname(workerTokenFile);
+    return [
+      `PALANTIR_WORKER_TOKEN=$(cat ${shq(workerTokenFile)})`,
+      'worker_token_rc=$?',
+      `rm -f -- ${shq(workerTokenFile)}`,
+      `rmdir -- ${shq(tokenDir)} 2>/dev/null || true`,
+      '[ "$worker_token_rc" -eq 0 ] || exit "$worker_token_rc"',
+      'export PALANTIR_WORKER_TOKEN',
+      commandLine,
+    ].join('; ');
   }
 
   async function ensureWorkerStatusDir(paths) {
@@ -1083,103 +1174,106 @@ function createRemoteSshNodeExecutor(node, {
     const safeCwd = (await assertWithinRoots(spec.cwd)).canonical;
     await ensureWorkerStatusDir(paths);
 
-    const workerInvocation = buildWorkerInvocation(spec);
-    let canonicalStdin = null;
-    if (spec.stdin !== undefined) {
-      // Resolve the prompt path BEFORE the file exists so upload and handoff can
-      // share one SSH invocation (see the crash-safety note below).
+    const workerToken = normalizeTransportSecret(
+      spec.env && spec.env.PALANTIR_WORKER_TOKEN,
+      'PALANTIR_WORKER_TOKEN',
+    );
+    let workerTokenFile = null;
+    try {
+      if (workerToken) {
+        // tmux may be a long-lived server and cannot safely receive a fresh
+        // run capability through its inherited environment. Place the token
+        // through SSH stdin in a 0600 file; the detached child reads and
+        // deletes it before exec. Only the random path enters SSH argv.
+        workerTokenFile = await putSecretFile('worker_capability', workerToken, 0o600);
+      }
+      const workerInvocation = buildWorkerInvocation(spec, { workerTokenFile });
+      let canonicalStdin = null;
+      if (spec.stdin !== undefined) {
+        // Resolve the prompt path BEFORE the file exists so upload and handoff can
+        // share one SSH invocation (see the crash-safety note below).
+        //
+        // Canonicalise the PARENT only, then append the fixed basename — never
+        // realpath the final component. Resolving it would follow a pre-existing
+        // `stdin.txt` symlink, and since a link pointing at another in-root file
+        // passes the exposed-roots check, the upload below would delete that file
+        // and overwrite it with the prompt. Naming the parent's canonical child
+        // instead means `rm` unlinks the link itself (rm never follows a final
+        // symlink) and `cat` then creates a fresh regular file.
+        const promptParent = await assertWithinRoots(paths.stdinFile, { parentOnly: true });
+        canonicalStdin = path.posix.join(promptParent.canonical, path.posix.basename(paths.stdinFile));
+      }
+
+      const stdinRedirect = canonicalStdin ? ` < ${shq(canonicalStdin)}` : '';
+      const cleanupStdinCommand = canonicalStdin ? `rm -f -- ${shq(canonicalStdin)}` : '';
+      const cleanupStdin = canonicalStdin ? `; ${cleanupStdinCommand}` : '';
+      const stdinTrap = canonicalStdin
+        ? `trap ${shq(cleanupStdinCommand)} EXIT HUP INT TERM; `
+        : '';
+      const clearStdinTrap = canonicalStdin ? '; trap - EXIT HUP INT TERM' : '';
+      // Remove BEFORE disarming the trap: clearing it first leaves a window where
+      // a HUP/TERM arriving before the `rm` has no handler left to run.
+      const exitWrite = canonicalStdin
+        ? `; agent_exit_code=$?${cleanupStdin}${clearStdinTrap}; echo "$agent_exit_code" > ${shq(paths.exitSentinel)}`
+        : `; echo $? > ${shq(paths.exitSentinel)}`;
+      const innerScript = `${stdinTrap}${workerInvocation}${stdinRedirect} > ${shq(paths.stdoutLog)} 2>&1${exitWrite}`;
+      const startWorker = `cd ${shq(safeCwd)} && tmux new-session -d -s ${shq(paths.sessionName)} ${shq(innerScript)}`;
+
+      if (!canonicalStdin) {
+        const res = await runRemoteScript(startWorker);
+        if (res.code !== 0) {
+          throw commandError('tmux', ['new-session', '-d', '-s', paths.sessionName], res);
+        }
+        return { sessionName: paths.sessionName };
+      }
+
+      // Prompt upload and tmux handoff MUST be one SSH invocation. Splitting them
+      // leaves a window where the prompt exists on disk but nothing owns it: if the
+      // controller dies in between, the JS cleanup never runs and the tmux trap does
+      // not exist yet, so a 0600 prompt is stranded for a run that never started.
       //
-      // Canonicalise the PARENT only, then append the fixed basename — never
-      // realpath the final component. Resolving it would follow a pre-existing
-      // `stdin.txt` symlink, and since a link pointing at another in-root file
-      // passes the exposed-roots check, the upload below would delete that file
-      // and overwrite it with the prompt. Naming the parent's canonical child
-      // instead means `rm` unlinks the link itself (rm never follows a final
-      // symlink) and `cat` then creates a fresh regular file.
-      const promptParent = await assertWithinRoots(paths.stdinFile, { parentOnly: true });
-      canonicalStdin = path.posix.join(promptParent.canonical, path.posix.basename(paths.stdinFile));
-    }
+      // Arming the trap before `cat` closes that window from the remote side — the
+      // controller dying drops the SSH connection, the remote shell takes SIGHUP,
+      // and the handler removes the prompt. It is disarmed only once tmux owns the
+      // file, after which the worker's own trap is responsible for it.
+      const promptBytes = Buffer.byteLength(spec.stdin, 'utf8');
+      const script = [
+        'umask 077',
+        `cleanup() { ${cleanupStdinCommand}; }`,
+        `trap 'rc=$?; cleanup; exit "$rc"' 0`,
+        `trap 'exit 129' HUP`,
+        `trap 'exit 130' INT`,
+        `trap 'exit 143' TERM`,
+        `rm -f -- ${shq(canonicalStdin)}`,
+        'set -C',
+        `cat > ${shq(canonicalStdin)}`,
+        'set +C',
+        `[ "$(wc -c < ${shq(canonicalStdin)})" -eq ${promptBytes} ]`,
+        `chmod 600 ${shq(canonicalStdin)}`,
+        startWorker,
+        'trap - 0 HUP INT TERM',
+      ].join(' && ');
 
-    const stdinRedirect = canonicalStdin ? ` < ${shq(canonicalStdin)}` : '';
-    const cleanupStdinCommand = canonicalStdin ? `rm -f -- ${shq(canonicalStdin)}` : '';
-    const cleanupStdin = canonicalStdin ? `; ${cleanupStdinCommand}` : '';
-    const stdinTrap = canonicalStdin
-      ? `trap ${shq(cleanupStdinCommand)} EXIT HUP INT TERM; `
-      : '';
-    const clearStdinTrap = canonicalStdin ? '; trap - EXIT HUP INT TERM' : '';
-    // Remove BEFORE disarming the trap: clearing it first leaves a window where
-    // a HUP/TERM arriving before the `rm` has no handler left to run.
-    const exitWrite = canonicalStdin
-      ? `; agent_exit_code=$?${cleanupStdin}${clearStdinTrap}; echo "$agent_exit_code" > ${shq(paths.exitSentinel)}`
-      : `; echo $? > ${shq(paths.exitSentinel)}`;
-    const innerScript = `${stdinTrap}${workerInvocation}${stdinRedirect} > ${shq(paths.stdoutLog)} 2>&1${exitWrite}`;
-    const startWorker = `cd ${shq(safeCwd)} && tmux new-session -d -s ${shq(paths.sessionName)} ${shq(innerScript)}`;
-
-    if (!canonicalStdin) {
-      const res = await runRemoteScript(startWorker);
+      let res;
+      try {
+        res = await runRemoteScript(script, { input: spec.stdin });
+      } catch (err) {
+        // The remote trap handles a dropped connection; this covers a local-side
+        // rejection where the remote shell may never have run at all.
+        try { await runRemoteCommand('rm', ['-f', canonicalStdin]); } catch {}
+        throw err;
+      }
       if (res.code !== 0) {
+        try { await runRemoteCommand('rm', ['-f', canonicalStdin]); } catch {}
         throw commandError('tmux', ['new-session', '-d', '-s', paths.sessionName], res);
       }
       return { sessionName: paths.sessionName };
-    }
-
-    // Prompt upload and tmux handoff MUST be one SSH invocation. Splitting them
-    // leaves a window where the prompt exists on disk but nothing owns it: if the
-    // controller dies in between, the JS cleanup never runs and the tmux trap does
-    // not exist yet, so a 0600 prompt is stranded for a run that never started.
-    //
-    // Arming the trap before `cat` closes that window from the remote side — the
-    // controller dying drops the SSH connection, the remote shell takes SIGHUP,
-    // and the handler removes the prompt. It is disarmed only once tmux owns the
-    // file, after which the worker's own trap is responsible for it. This mirrors
-    // the writeTempFile trap discipline already used for remote temp files.
-    //
-    // A dying controller also just closes stdin, which `cat` sees as a clean EOF,
-    // so a truncated upload would otherwise look like success. The byte check
-    // makes a short read fail the chain instead of launching a worker on a
-    // silently truncated prompt.
-    // Signal traps must EXIT rather than just clean up: a bare handler runs and
-    // then lets the `&&` chain continue, which would start a worker on a prompt
-    // the handler just deleted. Exiting routes through the 0 trap, so cleanup
-    // happens exactly once and the chain aborts. Same discipline as writeTempFile.
-    const promptBytes = Buffer.byteLength(spec.stdin, 'utf8');
-    const script = [
-      'umask 077',
-      `cleanup() { ${cleanupStdinCommand}; }`,
-      `trap 'rc=$?; cleanup; exit "$rc"' 0`,
-      `trap 'exit 129' HUP`,
-      `trap 'exit 130' INT`,
-      `trap 'exit 143' TERM`,
-      `rm -f -- ${shq(canonicalStdin)}`,
-      // noclobber narrows the gap between the unlink and the redirect: if the
-      // name is recreated in between as a regular file, or a symlink to one, the
-      // redirect fails instead of following it. It is not a full O_NOFOLLOW —
-      // a link to a non-regular file (/dev/null) still opens — so this bounds
-      // the window rather than closing it. Winning that race needs a node-local
-      // swap timed between two statements, which the trust boundary excludes.
-      'set -C',
-      `cat > ${shq(canonicalStdin)}`,
-      'set +C',
-      `[ "$(wc -c < ${shq(canonicalStdin)})" -eq ${promptBytes} ]`,
-      `chmod 600 ${shq(canonicalStdin)}`,
-      startWorker,
-      'trap - 0 HUP INT TERM',
-    ].join(' && ');
-
-    let res;
-    try {
-      res = await runRemoteScript(script, { input: spec.stdin });
     } catch (err) {
-      // The remote trap handles a dropped connection; this covers a local-side
-      // rejection where the remote shell may never have run at all.
-      try { await runRemoteCommand('rm', ['-f', canonicalStdin]); } catch {}
+      if (workerTokenFile) {
+        await cleanupCreatedPath(path.posix.dirname(workerTokenFile));
+      }
       throw err;
     }
-    if (res.code !== 0) {
-      try { await runRemoteCommand('rm', ['-f', canonicalStdin]); } catch {}
-      throw commandError('tmux', ['new-session', '-d', '-s', paths.sessionName], res);
-    }
-    return { sessionName: paths.sessionName };
   }
 
   async function ownerOf(runId) {

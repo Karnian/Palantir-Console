@@ -5414,6 +5414,26 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   border-bottom-right-radius: 4px;
 }
 
+.manager-msg-remember {
+  margin-top: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  opacity: 0.7;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.manager-msg-remember:hover,
+.manager-msg-remember:focus-visible {
+  opacity: 1;
+  outline: none;
+}
+
 .manager-msg-attachments {
   margin-top: 5px;
   font-size: 11px;
@@ -7640,6 +7660,75 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   letter-spacing: 0.01em;
   color: var(--text-primary);
 }
+.memory-hub-header {
+  align-items: flex-start !important;
+}
+.memory-page-subtitle {
+  margin: 0.3rem 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.memory-scope-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.45rem;
+  margin-bottom: 0.85rem;
+}
+.memory-scope-tab {
+  min-height: 42px;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+.memory-scope-tab:hover {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+.memory-scope-tab.is-active {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+  color: var(--text-primary);
+}
+.memory-hub-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.85rem;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+.memory-owner-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+.memory-owner-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+.memory-owner-summary strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.memory-owner-summary span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .memory-controls { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
 .memory-controls select {
   background: var(--field-bg);
@@ -7659,6 +7748,14 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .memory-tab.is-active { background: var(--accent); color: var(--text-inverse); border-color: var(--accent); }
 .memory-section {
   margin-bottom: 1.25rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+.memory-status-section,
+.memory-content-section {
+  margin-bottom: 1rem;
   padding: 1rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -7685,7 +7782,7 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 }
 .memory-status-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 0.65rem;
 }
 .memory-status-metric {
@@ -7714,6 +7811,11 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 }
 .memory-status-notice.is-warning {
   border: 1px solid var(--warning);
+}
+.memory-oldest-pending {
+  margin-top: 0.65rem;
+  color: var(--text-muted);
+  font-size: 11px;
 }
 .memory-candidate-controls {
   display: flex;
@@ -7756,6 +7858,14 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .memory-card-head { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.5rem; }
 .memory-badge { font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: var(--radius-sm); background: var(--field-bg); color: var(--text-muted); }
 .memory-card-content { white-space: pre-wrap; word-break: break-word; margin-bottom: 0.6rem; color: var(--text-primary); line-height: 1.5; }
+.memory-card-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: -0.2rem 0 0.65rem;
+  color: var(--text-muted);
+  font-size: 11px;
+}
 .memory-card-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
 /* 카드 액션 버튼(수정/보관/검토/고정/출처): 작게 + 버튼 티 — 카드(bg-surface)보다
    한 톤 밝은 bg-elevated + 명확한 border + hover/focus 로 버튼임을 분명히. */
@@ -7783,6 +7893,42 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   width: 100%; box-sizing: border-box; padding: 0.5rem; border: 1px solid var(--border);
   border-radius: var(--radius-sm); background: var(--field-bg); color: var(--text-primary); font-family: inherit;
 }
+.memory-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+.memory-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.memory-form input,
+.memory-form select,
+.memory-form textarea {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--field-bg);
+  color: var(--text-primary);
+  font: inherit;
+}
+.memory-form input:focus,
+.memory-form select:focus,
+.memory-form textarea:focus {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent-muted);
+}
+.memory-modal-note {
+  margin: 0 0 0.8rem;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
 .memory-provenance-origin { margin-bottom: 0.5rem; color: var(--text-primary); }
 .memory-provenance-json {
   background: var(--field-bg); color: var(--text-primary); padding: 0.6rem; border-radius: var(--radius-sm);
@@ -7791,6 +7937,10 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 @media (max-width: 720px) {
   .memory-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .memory-section-heading { flex-direction: column; }
+  .memory-scope-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .memory-hub-toolbar,
+  .memory-owner-picker { align-items: stretch; flex-direction: column; }
+  .memory-owner-summary span { white-space: normal; }
 }
 
 /* Specialist view — B2c-4. Design tokens only (K-2 light/dark auto-propagate). */

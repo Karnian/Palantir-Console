@@ -13,6 +13,7 @@ const DEFAULT_CONFIDENCE_CEILING = 0.7; // single-candidate promotions clamp her
 const DEFAULT_MAX_LEN = 500;            // promoted content character ceiling
 const HUMAN_APPROVAL_MAX_LEN = 2000;     // R4 capture ceiling; approval must not silently rewrite it
 const DEFAULT_TTL_DAYS = 90;           // PR5d: TTL for auto (batch_llm) memories
+const WORKER_CANDIDATE_LIMIT = 20;
 const DISTILL_KIND = 'distill';
 // kinds a distiller may produce — NOT 'fact' (R6 owns facts via upsertFact).
 const PROMOTABLE_KINDS = new Set(['convention', 'pitfall', 'heuristic', 'constraint']);
@@ -696,9 +697,19 @@ function createMemoryService(db, eventBus) {
   // / 'superseded' / 'all' (correction UI). Only the active path is injected.
   function listForProject(projectId, status = 'active') {
     const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
+    return listForOwner(ownerType, ownerId, status);
+  }
+
+  function listForOwner(ownerType, ownerId, status = 'active') {
+    assertDistillOwner(ownerType, ownerId);
     if (status === 'all') return listAllStatusStmt.all(ownerType, ownerId);
     if (status === 'active') return listForProjectStmt.all(ownerType, ownerId);
     return listByStatusStmt.all(ownerType, ownerId, status);
+  }
+
+  function listForProfile(profileId, status = 'active') {
+    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ profile_id: profileId });
+    return listForOwner(ownerType, ownerId, status);
   }
 
   // PR3c: existing-memory context for the distiller, made SAFE to embed in an LLM
@@ -766,6 +777,20 @@ function createMemoryService(db, eventBus) {
   const getCandidateByOwnerDedupStmt = db.prepare(
     'SELECT * FROM memory_candidates WHERE owner_type = ? AND owner_id = ? AND rule = ? AND dedup_key = ?'
   );
+  const countWorkerCandidatesByRunStmt = db.prepare(`
+    SELECT COUNT(*) AS n
+    FROM memory_candidates
+    WHERE CASE
+      WHEN json_valid(raw_json)
+      THEN json_extract(raw_json, '$.proposed_by.type')
+      ELSE NULL
+    END = 'worker'
+      AND CASE
+        WHEN json_valid(raw_json)
+        THEN json_extract(raw_json, '$.proposed_by.run_id')
+        ELSE NULL
+      END = ?
+  `);
   const listCandidatesStmt = db.prepare(
     'SELECT * FROM memory_candidates WHERE owner_type = ? AND owner_id = ? AND status = ? ORDER BY created_at ASC, id ASC'
   );
@@ -838,6 +863,47 @@ function createMemoryService(db, eventBus) {
       } catch { /* observability must never break capture */ }
     }
     return candidate;
+  }
+
+  // A run-bound worker capability is intentionally narrow, but without a
+  // durable quota a compromised worker could still fill the candidate table
+  // and distillation queue with unique payloads. Count every status so promote
+  // or reject cannot reset the allowance. Exact retries remain idempotent even
+  // after the quota is reached.
+  const createWorkerCandidateTx = db.transaction(({
+    runId,
+    projectId,
+    rule,
+    rawJson,
+    dedupKey,
+  }) => {
+    if (typeof runId !== 'string' || !runId) throw new Error('runId is required');
+    const { owner_type: ownerType, owner_id: ownerId } = normalizeOwner({ project_id: projectId });
+    const existing = getCandidateByOwnerDedupStmt.get(ownerType, ownerId, rule, dedupKey);
+    if (existing) {
+      return { candidate: existing, limited: false, deduped: true, limit: WORKER_CANDIDATE_LIMIT };
+    }
+    const count = Number(countWorkerCandidatesByRunStmt.get(runId)?.n || 0);
+    if (count >= WORKER_CANDIDATE_LIMIT) {
+      return {
+        candidate: null,
+        limited: true,
+        deduped: false,
+        count,
+        limit: WORKER_CANDIDATE_LIMIT,
+      };
+    }
+    return {
+      candidate: createCandidate({ projectId, rule, rawJson, dedupKey }),
+      limited: false,
+      deduped: false,
+      count: count + 1,
+      limit: WORKER_CANDIDATE_LIMIT,
+    };
+  });
+
+  function createWorkerCandidate(args = {}) {
+    return createWorkerCandidateTx(args);
   }
 
   function listCandidatesForOwner(ownerType, ownerId, status = 'pending') {
@@ -1057,6 +1123,7 @@ function createMemoryService(db, eventBus) {
     UPDATE memory_items
     SET source_count = source_count + 1,
         evidence_json = @evidenceJson,
+        importance = @importance,
         origin = 'human',
         valid_to = NULL,
         updated_at = datetime('now')
@@ -1104,18 +1171,19 @@ function createMemoryService(db, eventBus) {
     });
   }
 
-  const promoteCandidateByHumanTx = db.transaction(({ candidateId, ownerType, ownerId }) => {
+  const promoteCandidateByHumanTx = db.transaction(({ candidateId, ownerType, ownerId, override }) => {
     assertDistillOwner(ownerType, ownerId);
     const candidate = getCandidateByIdStmt.get(candidateId);
     if (!candidate || candidate.status !== 'pending' ||
         candidate.owner_type !== ownerType || candidate.owner_id !== ownerId) {
       return null;
     }
+    const hasOverride = override != null;
     // R1b/R3 are raw work signals, not operator-authored memory prose. They must
-    // still pass through the distiller; a click cannot turn their raw JSON into
-    // an injected lesson. R4 was already sanitized at capture and is re-checked
-    // below, so it is the only deterministic approval path.
-    if (candidate.rule !== 'R4') {
+    // still pass through the distiller unless the human explicitly authors the
+    // final kind/content. Candidate raw_json remains server-only and is never
+    // used to prefill a raw-signal override.
+    if (candidate.rule !== 'R4' && !hasOverride) {
       return {
         candidateId,
         promoted: false,
@@ -1126,16 +1194,18 @@ function createMemoryService(db, eventBus) {
 
     let raw;
     try { raw = JSON.parse(candidate.raw_json); } catch { raw = null; }
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    if ((!raw || typeof raw !== 'object' || Array.isArray(raw)) && !hasOverride) {
       setCandidateStatusStmt.run({ status: 'rejected', promotedTo: null, id: candidateId });
       return { candidateId, promoted: false, pending: false, reason: 'bad_raw_json' };
     }
-    const kind = typeof raw.kind === 'string' ? raw.kind.trim() : '';
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) raw = {};
+    const source = hasOverride ? override : raw;
+    const kind = typeof source.kind === 'string' ? source.kind.trim() : '';
     if (!PROMOTABLE_KINDS.has(kind)) {
       setCandidateStatusStmt.run({ status: 'rejected', promotedTo: null, id: candidateId });
       return { candidateId, promoted: false, pending: false, reason: kind === 'fact' ? 'fact_not_allowed' : 'bad_kind' };
     }
-    const sanitized = sanitizeProposalContent(raw.content, { maxLen: HUMAN_APPROVAL_MAX_LEN });
+    const sanitized = sanitizeProposalContent(source.content, { maxLen: HUMAN_APPROVAL_MAX_LEN });
     if (!sanitized.ok) {
       setCandidateStatusStmt.run({ status: 'rejected', promotedTo: null, id: candidateId });
       return {
@@ -1163,6 +1233,11 @@ function createMemoryService(db, eventBus) {
       const update = approveExistingItemStmt.run({
         id: existing.id,
         evidenceJson: humanApprovalEvidence(candidate, sanitized, existing.evidence_json),
+        // Edited approval owns the final importance. Preserve the existing
+        // value for direct approval or an override that omitted importance.
+        importance: hasOverride && source.importance != null
+          ? clampImportance(source.importance)
+          : existing.importance,
       });
       if (update.changes !== 1) {
         const err = new Error('human approval merge target raced (not active)');
@@ -1181,7 +1256,7 @@ function createMemoryService(db, eventBus) {
         content,
         evidenceJson: humanApprovalEvidence(candidate, sanitized),
         origin: 'human',
-        importance: clampImportance(raw.importance),
+        importance: clampImportance(source.importance),
         confidence: 0.9,
         sourceCount: 1,
         status: 'active',
@@ -1201,9 +1276,46 @@ function createMemoryService(db, eventBus) {
     return { candidateId, promoted: true, merged, item };
   });
 
-  function promoteCandidateByHuman({ candidateId, ownerType, ownerId } = {}) {
+  function normalizeHumanApprovalOverride(override) {
+    if (override == null) return null;
+    if (!override || typeof override !== 'object' || Array.isArray(override)) {
+      const err = new Error('candidate approval override must be an object');
+      err.code = 'MEMORY_CANDIDATE_OVERRIDE_INVALID';
+      throw err;
+    }
+    const kind = typeof override.kind === 'string' ? override.kind.trim() : '';
+    if (!PROMOTABLE_KINDS.has(kind)) {
+      const err = new Error(`candidate approval kind must be one of ${Array.from(PROMOTABLE_KINDS).join('|')}`);
+      err.code = 'MEMORY_CANDIDATE_OVERRIDE_INVALID';
+      throw err;
+    }
+    const sanitized = sanitizeProposalContent(override.content, { maxLen: HUMAN_APPROVAL_MAX_LEN });
+    if (!sanitized.ok) {
+      const err = new Error(`candidate approval content rejected: ${sanitized.reasons.join(',') || 'sanitize_failed'}`);
+      err.code = 'MEMORY_CANDIDATE_OVERRIDE_INVALID';
+      throw err;
+    }
+    let importance = null;
+    if (override.importance !== undefined && override.importance !== null) {
+      importance = Number(override.importance);
+      if (!Number.isInteger(importance) || importance < 1 || importance > 10) {
+        const err = new Error('candidate approval importance must be an integer 1-10');
+        err.code = 'MEMORY_CANDIDATE_OVERRIDE_INVALID';
+        throw err;
+      }
+    }
+    return { kind, content: sanitized.content, importance };
+  }
+
+  function promoteCandidateByHuman({ candidateId, ownerType, ownerId, override = null } = {}) {
     if (!candidateId) throw new Error('candidateId is required');
-    const result = promoteCandidateByHumanTx({ candidateId, ownerType, ownerId });
+    const normalizedOverride = normalizeHumanApprovalOverride(override);
+    const result = promoteCandidateByHumanTx({
+      candidateId,
+      ownerType,
+      ownerId,
+      override: normalizedOverride,
+    });
     if (result && result.promoted && eventBus) {
       try {
         eventBus.emit('memory:promoted', {
@@ -1930,6 +2042,7 @@ function createMemoryService(db, eventBus) {
     upsertFact,
     retractR6Fact,
     createCandidate,
+    createWorkerCandidate,
     listCandidates,
     listCandidatesForOwner,
     listCandidatePageForOwner,
@@ -1955,6 +2068,7 @@ function createMemoryService(db, eventBus) {
     retrieveForProfile,
     buildInjectionBlock,
     listForProject,
+    listForProfile,
     listActiveForDistill,
     listActiveForDistillForOwner,
     checkOwnerParity,
@@ -1962,4 +2076,4 @@ function createMemoryService(db, eventBus) {
   };
 }
 
-module.exports = { createMemoryService };
+module.exports = { createMemoryService, WORKER_CANDIDATE_LIMIT };

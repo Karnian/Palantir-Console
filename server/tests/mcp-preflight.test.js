@@ -200,6 +200,54 @@ test('preflight: bearer env name with bad shape → bearer_env_invalid_name', as
   assert.equal(r.reason, 'bearer_env_invalid_name');
 });
 
+test('preflight: Palantir actor credentials are reserved and never read', async () => {
+  const previous = process.env.PALANTIR_PM_TOKEN;
+  process.env.PALANTIR_PM_TOKEN = 'must-not-reach-mcp';
+  let fetched = false;
+  try {
+    const r = await preflightHttpAlias({
+      alias: 'a',
+      cfg: {
+        url: 'http://localhost:3100/mcp',
+        bearer_token_env_var: 'PALANTIR_PM_TOKEN',
+      },
+      fetchHook: async () => {
+        fetched = true;
+        return { ok: true, status: 200 };
+      },
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'bearer_env_reserved');
+    assert.equal(r.bearer_env, 'PALANTIR_PM_TOKEN');
+    assert.equal(fetched, false);
+    assert.equal(JSON.stringify(r).includes('must-not-reach-mcp'), false);
+  } finally {
+    if (previous === undefined) delete process.env.PALANTIR_PM_TOKEN;
+    else process.env.PALANTIR_PM_TOKEN = previous;
+  }
+});
+
+test('preflight: network skip cannot bypass reserved actor credential rejection', async () => {
+  const previousSkip = process.env.PALANTIR_MCP_ALLOW_PREFLIGHT_SKIP;
+  process.env.PALANTIR_MCP_ALLOW_PREFLIGHT_SKIP = '1';
+  try {
+    const out = await preflightHttpMcpConfig({
+      mcpServers: {
+        bad: {
+          url: 'http://localhost:3100/mcp',
+          bearer_token_env_var: 'palantir_worker_token',
+        },
+      },
+    });
+    assert.equal(out.skipped, false);
+    assert.equal(out.failures.length, 1);
+    assert.equal(out.failures[0].reason, 'bearer_env_reserved');
+  } finally {
+    if (previousSkip === undefined) delete process.env.PALANTIR_MCP_ALLOW_PREFLIGHT_SKIP;
+    else process.env.PALANTIR_MCP_ALLOW_PREFLIGHT_SKIP = previousSkip;
+  }
+});
+
 test('preflightHttpMcpConfig: aggregates per-alias results, surfaces failures', async () => {
   process.env.PALANTIR_TEST_MCP_TOKEN_OK = 'tok';
   try {

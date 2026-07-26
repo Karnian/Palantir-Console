@@ -54,14 +54,19 @@ npm start
 ### Docker with Auth
 
 ```bash
-# .env
+# .env (Compose consumes this on the host; it is not copied into the image)
 PALANTIR_TOKEN=my-secret-token
+PALANTIR_PM_TOKEN=my-distinct-agent-token
 ANTHROPIC_API_KEY=sk-ant-...    # optional: for a Claude-backed Manager
 CODEX_API_KEY=...               # optional: for a Codex-backed Manager or Operator
 
 docker compose up --build
 # → http://localhost:4177 (send Authorization: Bearer my-secret-token)
 ```
+
+This Compose example enables authentication, but direct environment injection
+is reported as an unverified actor split unless the agent runtime is isolated
+from the Console process by the deployment boundary.
 
 ### Binding policy (changed in PR1)
 
@@ -93,7 +98,78 @@ as a one-shot bootstrap, but that was removed after Codex review because
 the first document request would already leak the token into reverse
 proxy access logs. This is required because `EventSource` cannot send
 custom headers, so the `/api/events` SSE stream would otherwise be
-unreachable with auth enabled.
+blocked.
+
+The browser authenticates with `PALANTIR_TOKEN` through the HttpOnly cookie.
+Top/Operator and Worker processes never receive that global credential (or
+`PALANTIR_PM_TOKEN`). When agents are isolated from one another and from the
+Console by a real OS-user/container boundary, the server can issue boot-local,
+run-bound capabilities.
+Manager capabilities work only while that exact manager slot is active and only
+on the documented orchestration endpoints. Their values are delivered through
+the manager-only `PALANTIR_MANAGER_TOKEN` process environment and never rendered
+into argv or the persisted system-prompt file. Worker capabilities are accepted
+only by that run's candidate-only memory proposal endpoint. `PALANTIR_PM_TOKEN`
+is optional and retained as a distinct bearer credential for trusted external
+automation; it is not injected into agents.
+
+Authenticated installs default to `agent_capabilities_disabled`. A same-UID
+process can inspect another process's environment (or temporary launch state),
+so the built-in local tmux/subprocess topology is not a capability boundary.
+Set `PALANTIR_AGENT_PROCESS_ISOLATION=verified` only when the deployment
+actually runs every capability-bearing agent behind a separate OS account or
+container boundary that prevents peer and Console-process inspection. Without
+that explicit attestation, managers receive no orchestration credential and
+workers receive no memory-proposal credential. This is fail-closed; browser and
+trusted external bearer access continue to work.
+
+Local installs must not store either global token in the repository
+`.env` (startup rejects that configuration). For the secure path, create a
+mode-`0600`, non-symlink JSON file containing `PALANTIR_TOKEN` and optionally
+`PALANTIR_PM_TOKEN`, then start with
+`PALANTIR_ACTOR_TOKEN_FILE=/path/to/file`; the Console validates ownership,
+reads it once, and unlinks it before spawning agents. This verifies token
+bootstrap, independently from the required agent process-isolation attestation.
+Direct environment variables remain supported for compatibility but are
+reported as an unverified token-source boundary because an unsandboxed CLI may
+be able to inspect its parent environment. Use an OS/container boundary if the one-shot
+file itself cannot be protected until startup. Windows currently rejects the
+one-shot file transport because Node's portable filesystem API cannot verify
+its DACL; use application-owned options or an OS/container secret boundary
+there, which remains reported as unverified unless the embedder marks it.
+
+```json
+{"PALANTIR_TOKEN":"human-secret","PALANTIR_PM_TOKEN":"agent-secret"}
+```
+
+Save that JSON outside the repository with mode `0600`, then pass only its path
+from the launcher environment:
+
+```bash
+PALANTIR_ACTOR_TOKEN_FILE=/secure/ephemeral/palantir-actor-tokens.json npm start
+```
+
+For an executor that genuinely provides per-agent isolation:
+
+```bash
+PALANTIR_ACTOR_TOKEN_FILE=/secure/ephemeral/palantir-actor-tokens.json \
+PALANTIR_AGENT_PROCESS_ISOLATION=verified \
+npm start
+```
+
+When enabling the split on an existing installation, rotate `PALANTIR_TOKEN`
+in the same restart. This revokes the value inherited by any legacy or remote
+worker that predates the split; local orphan workers are also stopped instead
+of reattached when they lack the credential-policy marker. Project workers with
+a run-bound memory proposal grant are also stopped on Console restart because
+that boot-local grant cannot be rewritten in a live process; safely scrubbed
+project-less workers remain recoverable. The same rotation is recommended when
+upgrading an authenticated shared-token installation that may still have
+workers launched by an older version.
+For SSH/fleet workers, set `PALANTIR_BASE_URL` to a Console URL reachable from
+the remote node. Without it, remote workers intentionally receive no memory
+proposal token or loopback URL; local workers derive a reachable URL from
+`HOST` and `PORT`.
 
 ## Core Concepts
 
@@ -427,6 +503,9 @@ hashes. Deleting a preset later does not erase past snapshot rows;
 |----------|---------|-------------|
 | `PORT` | `4177` | Server port |
 | `PALANTIR_TOKEN` | (none) | Enables Bearer/cookie auth and promotes bind from `127.0.0.1` to `0.0.0.0` |
+| `PALANTIR_PM_TOKEN` | (none) | Optional distinct bearer credential for trusted external automation; never injected into agent processes |
+| `PALANTIR_ACTOR_TOKEN_FILE` | (none) | POSIX only: mode-`0600` one-shot JSON containing the two actor tokens; consumed and unlinked before agent startup (Windows fails closed because DACLs cannot be verified portably) |
+| `PALANTIR_AGENT_PROCESS_ISOLATION` | (none) | Set to `verified` only when every capability-bearing agent is isolated by a separate OS account or container; otherwise run-bound agent capabilities stay disabled |
 | `HOST` | auto | Override the bind address. `0.0.0.0` without a token logs a security warning |
 | `PALANTIR_ALLOWED_COMMANDS` | (none) | Additional allowed CLI commands (comma-separated) |
 | `PALANTIR_DEFAULT_PM_ADAPTER` | `codex` | Global Operator adapter fallback when an instance uses Auto and its project has no `preferred_pm_adapter` |

@@ -106,6 +106,174 @@ function seedProfile(db, { command = 'codex', capabilities_json = '{}', env_allo
   return { id, name: 'TestAgent', type: 'codex', command, capabilities_json, env_allowlist, max_concurrent: 5 };
 }
 
+test('recoverOrphanSessions revokes legacy tmux workers after actor-token separation', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db);
+  const run = rs.createRun({
+    task_id: task.id,
+    agent_profile_id: profile.id,
+    prompt: 'legacy worker',
+  });
+  rs.markRunStarted(run.id, { tmux_session: `palantir-run-${run.id}` });
+  rs.updateRunStatus(run.id, 'needs_input');
+
+  let alive = true;
+  const execEngine = makeStubExecutionEngine();
+  execEngine.type = 'tmux';
+  execEngine.discoverGhostSessions = () => [{
+    name: `palantir-run-${run.id}`,
+    isPalantir: true,
+  }];
+  execEngine.isAlive = () => alive;
+  execEngine.kill = (runId) => {
+    execEngine.killed.push(runId);
+    alive = false;
+    return true;
+  };
+
+  const lc = createLifecycleService({
+    runService: rs,
+    taskService: ts,
+    agentProfileService: aps,
+    projectService: ps,
+    executionEngine: execEngine,
+    streamJsonEngine: makeStubStreamJsonEngine(),
+    worktreeService: null,
+    eventBus: null,
+    actorTokens: {
+      humanToken: 'human-secret',
+      agentToken: 'agent-secret',
+      separated: true,
+      boundary: 'separated_tokens',
+    },
+  });
+
+  const recovered = await lc.recoverOrphanSessions();
+
+  assert.deepEqual(execEngine.killed, [run.id]);
+  assert.deepEqual(recovered, [{ runId: run.id, status: 'credential_revoked' }]);
+  assert.equal(rs.getRun(run.id).status, 'stopped');
+});
+
+test('recoverOrphanSessions continues revoking legacy workers after one kill fails', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const project = seedProject(db);
+  const profile = seedProfile(db);
+  const runs = ['first', 'second'].map((label) => {
+    const task = ts.createTask({ project_id: project.id, title: `Legacy ${label}` });
+    const run = rs.createRun({
+      task_id: task.id,
+      agent_profile_id: profile.id,
+      prompt: `legacy ${label}`,
+    });
+    rs.markRunStarted(run.id, { tmux_session: `palantir-run-${run.id}` });
+    return run;
+  });
+  rs.updateRunStatus(runs[1].id, 'paused');
+
+  const alive = new Map(runs.map((run) => [run.id, true]));
+  const execEngine = makeStubExecutionEngine();
+  execEngine.type = 'tmux';
+  execEngine.discoverGhostSessions = () => runs.map((run) => ({
+    name: `palantir-run-${run.id}`,
+    isPalantir: true,
+  }));
+  execEngine.isAlive = (runId) => alive.get(runId);
+  execEngine.kill = (runId) => {
+    execEngine.killed.push(runId);
+    if (runId === runs[0].id) throw new Error('simulated kill failure');
+    alive.set(runId, false);
+    return true;
+  };
+
+  const lc = createLifecycleService({
+    runService: rs,
+    taskService: ts,
+    agentProfileService: aps,
+    projectService: ps,
+    executionEngine: execEngine,
+    streamJsonEngine: makeStubStreamJsonEngine(),
+    worktreeService: null,
+    eventBus: null,
+    actorTokens: {
+      humanToken: 'human-secret',
+      agentToken: 'agent-secret',
+      separated: true,
+      boundary: 'separated_tokens',
+    },
+  });
+
+  const recovered = await lc.recoverOrphanSessions();
+
+  assert.deepEqual(execEngine.killed, runs.map((run) => run.id));
+  assert.deepEqual(recovered, [
+    { runId: runs[0].id, status: 'credential_revocation_failed' },
+    { runId: runs[1].id, status: 'credential_revoked' },
+  ]);
+  assert.equal(rs.getRun(runs[0].id).status, 'running');
+  assert.equal(rs.getRun(runs[1].id).status, 'stopped');
+  assert.ok(
+    rs.getRunEvents(runs[0].id)
+      .some((event) => event.event_type === 'security:credential_revoke_failed'),
+  );
+});
+
+test('recoverOrphanSessions preserves a completed scoped worker result before revocation', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db);
+  const run = rs.createRun({
+    task_id: task.id,
+    agent_profile_id: profile.id,
+    prompt: 'completed while Console was offline',
+  });
+  rs.markRunStarted(run.id, { tmux_session: `palantir-run-${run.id}` });
+  rs.addRunEvent(run.id, 'security:worker_capability_scoped', JSON.stringify({
+    project_id: project.id,
+  }));
+
+  const execEngine = makeStubExecutionEngine({ alive: false, exitCode: 0 });
+  execEngine.type = 'tmux';
+  execEngine.discoverGhostSessions = () => [{
+    name: `palantir-run-${run.id}`,
+    isPalantir: true,
+  }];
+
+  const lc = createLifecycleService({
+    runService: rs,
+    taskService: ts,
+    agentProfileService: aps,
+    projectService: ps,
+    executionEngine: execEngine,
+    streamJsonEngine: makeStubStreamJsonEngine(),
+    worktreeService: null,
+    eventBus: null,
+  });
+
+  const recovered = await lc.recoverOrphanSessions();
+
+  assert.deepEqual(recovered, [{ runId: run.id, status: 'terminated' }]);
+  assert.deepEqual(execEngine.killed, [run.id]);
+  assert.equal(rs.getRun(run.id).status, 'completed');
+  assert.equal(rs.getRun(run.id).exit_code, 0);
+  assert.equal(ts.getTask(task.id).status, 'review');
+});
+
 // ---------------------------------------------------------------------------
 // executeTask — spawn args
 // ---------------------------------------------------------------------------
@@ -233,6 +401,149 @@ test('executeTask: env_allowlist is filtered from process.env', async (t) => {
   delete process.env._PALANTIR_TEST_VAR;
 });
 
+test('executeTask: worker receives only a run-bound memory proposal capability', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const execEngine = makeStubExecutionEngine();
+  const minted = [];
+
+  const lc = createLifecycleService({
+    runService: rs,
+    taskService: ts,
+    agentProfileService: aps,
+    projectService: ps,
+    executionEngine: execEngine,
+    streamJsonEngine: null,
+    worktreeService: null,
+    eventBus: null,
+    actorTokens: {
+      humanToken: 'human-secret',
+      agentToken: 'manager-secret',
+      separated: true,
+      processIsolated: true,
+      capabilitiesEnabled: true,
+      boundary: 'separated_tokens',
+    },
+    workerProposalTokenService: {
+      mint: (runId, claims) => {
+        minted.push({ runId, claims });
+        return `scoped-${runId}`;
+      },
+    },
+    workerProposalBaseUrl: 'http://console.internal:4177',
+  });
+
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, { command: 'codex' });
+  const run = await lc.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'capture reusable lessons',
+  });
+
+  const spawned = execEngine.spawned[0].opts;
+  assert.equal(spawned.env.PALANTIR_WORKER_TOKEN, `scoped-${run.id}`);
+  assert.equal(spawned.env.PALANTIR_API_BASE, 'http://console.internal:4177');
+  assert.equal('PALANTIR_TOKEN' in spawned.env, false);
+  assert.equal('PALANTIR_PM_TOKEN' in spawned.env, false);
+  assert.doesNotMatch(spawned.args.join(' '), /memory\/propose/);
+  assert.match(spawned.stdin, new RegExp(`/api/runs/${run.id}/memory/propose`));
+  assert.deepEqual(minted, [{
+    runId: run.id,
+    claims: { projectId: project.id },
+  }]);
+  const capabilityEvent = rs.getRunEvents(run.id)
+    .find((event) => event.event_type === 'security:worker_capability_scoped');
+  assert.equal(JSON.parse(capabilityEvent.payload_json).project_id, project.id);
+
+  // The proposal grant is signed by a boot-local key. A restarted Console
+  // cannot reissue it into this live process, so recovery must stop rather
+  // than reattach the worker with a permanently failing grant.
+  let alive = true;
+  execEngine.type = 'tmux';
+  execEngine.discoverGhostSessions = () => [{
+    name: `palantir-run-${run.id}`,
+    isPalantir: true,
+  }];
+  execEngine.isAlive = () => alive;
+  execEngine.kill = (runId) => {
+    execEngine.killed.push(runId);
+    alive = false;
+    return true;
+  };
+
+  const recovered = await lc.recoverOrphanSessions();
+  assert.deepEqual(recovered, [{ runId: run.id, status: 'credential_revoked' }]);
+  assert.deepEqual(execEngine.killed, [run.id]);
+  assert.equal(rs.getRun(run.id).status, 'stopped');
+  const revoked = rs.getRunEvents(run.id)
+    .find((event) => event.event_type === 'security:credential_revoked');
+  assert.equal(JSON.parse(revoked.payload_json).reason, 'worker_capability_restart');
+});
+
+test('executeTask: project-less workers are marked safe for orphan recovery without a proposal token', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const execEngine = makeStubExecutionEngine();
+
+  const lc = createLifecycleService({
+    runService: rs,
+    taskService: ts,
+    agentProfileService: aps,
+    projectService: ps,
+    executionEngine: execEngine,
+    streamJsonEngine: null,
+    worktreeService: null,
+    eventBus: null,
+    actorTokens: {
+      humanToken: 'human-secret',
+      agentToken: 'manager-secret',
+      separated: true,
+      boundary: 'separated_tokens',
+    },
+    workerProposalTokenService: {
+      mint: () => {
+        throw new Error('project-less workers must not receive proposal tokens');
+      },
+    },
+    workerProposalBaseUrl: 'http://console.internal:4177',
+  });
+
+  const task = ts.createTask({ title: 'Project-less maintenance task' });
+  const profile = seedProfile(db, { command: 'codex' });
+  const run = await lc.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'perform maintenance',
+  });
+
+  const policyEvent = rs.getRunEvents(run.id)
+    .find((event) => event.event_type === 'security:worker_credential_policy_applied');
+  assert.deepEqual(JSON.parse(policyEvent.payload_json), {
+    version: 1,
+    policy: 'actor_tokens_scrubbed',
+    memory_propose: false,
+  });
+  assert.equal('PALANTIR_WORKER_TOKEN' in execEngine.spawned[0].opts.env, false);
+
+  execEngine.type = 'tmux';
+  execEngine.discoverGhostSessions = () => [{
+    name: `palantir-run-${run.id}`,
+    isPalantir: true,
+  }];
+  execEngine.isAlive = () => true;
+
+  const recovered = await lc.recoverOrphanSessions();
+  assert.deepEqual(recovered, [{ runId: run.id, status: 'reattached' }]);
+  assert.deepEqual(execEngine.killed, []);
+  assert.equal(rs.getRun(run.id).status, 'running');
+});
+
 test('executeTask: marks task as in_progress', async (t) => {
   const db = await mkdb(t);
   const rs = createRunService(db, null);
@@ -281,6 +592,12 @@ test('executeTask: marks run as failed and rethrows when spawnAgent throws', asy
   const runs = rs.listRuns({ task_id: task.id });
   assert.equal(runs.length, 1);
   assert.equal(runs[0].status, 'failed');
+  assert.equal(
+    rs.getRunEvents(runs[0].id)
+      .some((event) => event.event_type === 'security:worker_credential_policy_applied'),
+    false,
+    'a failed spawn must not be marked safe for orphan recovery',
+  );
 });
 
 // ---------------------------------------------------------------------------

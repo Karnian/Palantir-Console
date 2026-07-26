@@ -92,6 +92,19 @@ function createManagerMessageQueueService({
           updated_at = datetime('now')
       WHERE id = ? AND status = 'sending' AND claim_token = ? AND claimed_by = ?
     `),
+    persistResolvedMemoryOwner: db.prepare(`
+      UPDATE manager_message_queue
+      SET payload_json = ?,
+          updated_at = datetime('now')
+      WHERE id = ?
+        AND (
+          (status = 'sending' AND claim_token = ? AND claimed_by = ?)
+          OR (
+            status IN ('delivered', 'failed')
+            AND terminal_reason IN ('turn_completed', 'turn_failed')
+          )
+        )
+    `),
     release: db.prepare(`
       UPDATE manager_message_queue
       SET status = 'queued',
@@ -298,6 +311,23 @@ function createManagerMessageQueueService({
 
   function publicRow(row) {
     if (!row) return null;
+    let codebaseProjectId = null;
+    let memoryOwnerType = null;
+    let memoryOwnerId = null;
+    try {
+      const payload = JSON.parse(row.payload_json || '{}');
+      const resolvedOwner = payload?._resolvedMemoryOwner;
+      if (
+        resolvedOwner
+        && (resolvedOwner.type === 'workspace' || resolvedOwner.type === 'profile')
+        && typeof resolvedOwner.id === 'string'
+        && /^[A-Za-z0-9_-]{1,128}$/.test(resolvedOwner.id)
+      ) {
+        memoryOwnerType = resolvedOwner.type;
+        memoryOwnerId = resolvedOwner.id;
+        if (resolvedOwner.type === 'workspace') codebaseProjectId = resolvedOwner.id;
+      }
+    } catch { /* persisted payload validation happens in the dispatcher */ }
     return {
       id: row.id,
       conversation_id: row.conversation_id,
@@ -305,6 +335,9 @@ function createManagerMessageQueueService({
       client_message_id: row.adapter_invocation_id,
       sequence: row.sequence,
       display_text: row.display_text,
+      codebase_project_id: codebaseProjectId,
+      memory_owner_type: memoryOwnerType,
+      memory_owner_id: memoryOwnerId,
       attachment_count: row.attachment_count,
       status: row.status,
       attempt_count: row.attempt_count,
@@ -410,6 +443,35 @@ function createManagerMessageQueueService({
             false,
           );
         }
+        const memoryOwnerType = result?.target?.memoryOwnerType;
+        const memoryOwnerId = result?.target?.memoryOwnerId;
+        if (
+          result?.target?.kind === 'pm'
+          && (memoryOwnerType === 'workspace' || memoryOwnerType === 'profile')
+          && typeof memoryOwnerId === 'string'
+          && /^[A-Za-z0-9_-]{1,128}$/.test(memoryOwnerId)
+        ) {
+          payload._resolvedMemoryOwner = {
+            type: memoryOwnerType,
+            id: memoryOwnerId,
+          };
+          if (memoryOwnerType === 'workspace') payload.codebaseProjectId = memoryOwnerId;
+          else delete payload.codebaseProjectId;
+          const persisted = stmts.persistResolvedMemoryOwner.run(
+            JSON.stringify(payload),
+            claimed.id,
+            claimed.claim_token,
+            ownerId,
+          );
+          if (persisted.changes !== 1) {
+            throw createHttpError(
+              'manager message ownership changed before it could be persisted',
+              502,
+              'OPERATOR_OWNER_PERSIST_FAILED',
+              false,
+            );
+          }
+        }
         let managerAdapter = null;
         try {
           managerAdapter = runService?.getRun(runId)?.manager_adapter || null;
@@ -473,7 +535,14 @@ function createManagerMessageQueueService({
     }
     let payloadJson;
     try {
-      payloadJson = JSON.stringify(payload || {});
+      const durablePayload = payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? { ...payload }
+        : {};
+      // This field is written only from the server-derived dispatch result.
+      // Dropping caller input prevents an unaccepted/spoofed queue row from
+      // claiming a memory owner in the UI.
+      delete durablePayload._resolvedMemoryOwner;
+      payloadJson = JSON.stringify(durablePayload);
     } catch {
       throw createHttpError('message payload must be JSON serializable', 400, 'INVALID_MESSAGE_PAYLOAD');
     }

@@ -18,7 +18,9 @@ const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { BadRequestError, NotFoundError } = require('../utils/errors');
 const { sanitizeProposalContent } = require('../services/memorySanitize');
+const { redactEvidence } = require('./memory');
 const {
+  candidateApprovalOverride,
   candidatePage,
   candidateStatus,
   requireHumanCookie,
@@ -26,7 +28,11 @@ const {
 
 const VALID_KINDS = ['convention', 'pitfall', 'heuristic', 'constraint']; // no 'fact'
 const MAX_REMEMBER_LEN = 2000;
-const PUBLIC_FIELDS = ['id', 'owner_type', 'owner_id', 'kind', 'content', 'importance', 'confidence', 'status', 'origin', 'created_at'];
+const PUBLIC_FIELDS = [
+  'id', 'owner_type', 'owner_id', 'kind', 'content', 'importance',
+  'confidence', 'source_count', 'status', 'origin', 'pinned', 'valid_to',
+  'archived_at', 'created_at', 'updated_at', 'reviewed_at',
+];
 
 function toPublicMemory(row) {
   if (!row) return null;
@@ -40,6 +46,15 @@ function createOperatorProfileMemoryRouter({ memoryService, operatorProfileServi
     throw new Error('createOperatorProfileMemoryRouter: operatorProfileService is required');
   }
   const router = express.Router();
+
+  router.get('/:id/memory', asyncHandler(async (req, res) => {
+    if (!memoryService) return res.status(501).json({ error: 'memoryService_unavailable' });
+    const profileId = req.params.id;
+    operatorProfileService.getProfile(profileId);
+    const allowed = ['active', 'archived', 'superseded', 'all'];
+    const status = allowed.includes(req.query.status) ? req.query.status : 'active';
+    res.json({ memory: memoryService.listForProfile(profileId, status).map(toPublicMemory) });
+  }));
 
   router.post('/:id/memory/remember', asyncHandler(async (req, res) => {
     if (!memoryService) {
@@ -69,7 +84,7 @@ function createOperatorProfileMemoryRouter({ memoryService, operatorProfileServi
     }
     let importance;
     if (body.importance !== undefined && body.importance !== null) {
-      importance = Number.parseInt(body.importance, 10);
+      importance = Number(body.importance);
       if (!Number.isInteger(importance) || importance < 1 || importance > 10) {
         throw new BadRequestError('importance must be an integer 1-10');
       }
@@ -116,11 +131,20 @@ function createOperatorProfileMemoryRouter({ memoryService, operatorProfileServi
     if (!requireHumanCookie(req, res, 'profile memory candidate promotion')) return;
     const profileId = req.params.id;
     operatorProfileService.getProfile(profileId);
-    const result = memoryService.promoteCandidateByHuman({
-      candidateId: req.params.candidateId,
-      ownerType: 'profile',
-      ownerId: profileId,
-    });
+    let result;
+    try {
+      result = memoryService.promoteCandidateByHuman({
+        candidateId: req.params.candidateId,
+        ownerType: 'profile',
+        ownerId: profileId,
+        override: candidateApprovalOverride(req.body),
+      });
+    } catch (err) {
+      if (err && err.code === 'MEMORY_CANDIDATE_OVERRIDE_INVALID') {
+        throw new BadRequestError(err.message);
+      }
+      throw err;
+    }
     if (!result) throw new NotFoundError('profile memory candidate not found');
     if (!result.promoted) {
       return res.status(409).json({
@@ -153,6 +177,72 @@ function createOperatorProfileMemoryRouter({ memoryService, operatorProfileServi
     });
     if (!result) throw new NotFoundError('profile memory candidate not found');
     res.json({ candidate: { id: result.candidateId, status: 'rejected' } });
+  }));
+
+  router.patch('/:id/memory/:memoryId', asyncHandler(async (req, res) => {
+    if (!memoryService) return res.status(501).json({ error: 'memoryService_unavailable' });
+    if (!req.auth || req.auth.method !== 'cookie') {
+      return res.status(403).json({ error: 'profile memory correction requires human (cookie) auth' });
+    }
+    const profileId = req.params.id;
+    operatorProfileService.getProfile(profileId);
+    const item = memoryService.getMemoryItem(req.params.memoryId);
+    if (!item || item.owner_type !== 'profile' || item.owner_id !== profileId) {
+      throw new NotFoundError('profile memory item not found');
+    }
+
+    const body = req.body || {};
+    const action = body.action;
+    let result;
+    if (action === 'update') {
+      const sanitized = sanitizeProposalContent(body.content, { maxLen: MAX_REMEMBER_LEN });
+      if (!sanitized.ok) {
+        throw new BadRequestError(`content rejected: ${sanitized.reasons.join(',') || 'sanitize_failed'}`);
+      }
+      try {
+        result = memoryService.updateMemoryContent({ id: item.id, content: sanitized.content });
+      } catch (err) {
+        if (err && err.code === 'MEMORY_DUPLICATE') throw new BadRequestError(err.message);
+        throw err;
+      }
+    } else if (action === 'archive') {
+      result = memoryService.archiveMemory(item.id);
+    } else if (action === 'restore') {
+      try {
+        result = memoryService.restoreMemory(item.id);
+      } catch (err) {
+        if (err && (err.code === 'MEMORY_DUPLICATE' || err.code === 'MEMORY_CAP_FULL')) {
+          throw new BadRequestError(err.message);
+        }
+        throw err;
+      }
+    } else if (action === 'review') {
+      result = memoryService.markReviewed(item.id);
+    } else if (action === 'pin') {
+      result = memoryService.setPinned({ id: item.id, pinned: !!body.pinned });
+    } else {
+      throw new BadRequestError('action must be one of update|archive|restore|review|pin');
+    }
+    if (!result) {
+      throw new BadRequestError(`action "${action}" is not applicable to an item in status "${item.status}"`);
+    }
+    res.json({ memory: toPublicMemory(result) });
+  }));
+
+  router.get('/:id/memory/:memoryId/provenance', asyncHandler(async (req, res) => {
+    if (!memoryService) return res.status(501).json({ error: 'memoryService_unavailable' });
+    const profileId = req.params.id;
+    operatorProfileService.getProfile(profileId);
+    const item = memoryService.getMemoryItem(req.params.memoryId);
+    if (!item || item.owner_type !== 'profile' || item.owner_id !== profileId) {
+      throw new NotFoundError('profile memory item not found');
+    }
+    let evidence = {};
+    try {
+      const parsed = JSON.parse(item.evidence_json || '{}');
+      if (parsed && typeof parsed === 'object') evidence = parsed;
+    } catch { evidence = {}; }
+    res.json({ id: item.id, origin: item.origin, evidence: redactEvidence(evidence) });
   }));
 
   return router;
