@@ -1142,7 +1142,6 @@ function createApp(options = {}) {
   const sessionService = createSessionService(storage);
   const trashService = createTrashService(storage);
   const messageService = createMessageService(storage);
-  const fsService = createFsService(storage, { nodeExecutor });
   const opencodeService = createOpencodeService({ opencodeBin });
   const codexService = options.codexService || createCodexService({
     codexBin,
@@ -1157,6 +1156,10 @@ function createApp(options = {}) {
 
   // New services (SQLite-based)
   const nodeService = createNodeService(db, { localExecutor: nodeExecutor });
+  // task_85d43f96: the directory picker browses the SELECTED execution node, so
+  // fsService needs nodeService — hence it is constructed after it here rather
+  // than with the other filesystem services above.
+  const fsService = createFsService(storage, { nodeExecutor, nodeService });
   const nodeBindingValidator = options.nodeBindingValidator || createNodeBindingValidator({ nodeService });
   const repoPreflightService = options.repoPreflightService || createRepoPreflightService({ nodeService });
   const nodeUsageService = options.nodeUsageService || createNodeUsageService({

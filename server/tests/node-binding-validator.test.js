@@ -7,8 +7,11 @@ const { createNodeBindingValidator } = require('../services/nodeBindingValidator
 function createFakeExecutor({
   realpathImpl = async (p) => p,
   fileExistsImpl = async () => true,
+  // The binding invariant is "is a DIRECTORY", not "exists": the value becomes
+  // a run's working directory. statImpl returns null for a missing path.
+  statImpl = null,
 } = {}) {
-  const calls = { realpath: [], fileExists: [] };
+  const calls = { realpath: [], fileExists: [], stat: [] };
   return {
     calls,
     async realpath(p) {
@@ -18,6 +21,13 @@ function createFakeExecutor({
     async fileExists(p) {
       calls.fileExists.push(p);
       return fileExistsImpl(p);
+    },
+    async stat(p) {
+      calls.stat.push(p);
+      if (statImpl) return statImpl(p);
+      const exists = await fileExistsImpl(p);
+      if (!exists) return null;
+      return { isDirectory: () => true, isFile: () => false };
     },
   };
 }
@@ -68,7 +78,7 @@ test('validateBinding accepts remote directory when realpath and fileExists pass
 
   assert.deepEqual(nodeService.calls, ['node-a']);
   assert.deepEqual(executor.calls.realpath, ['/srv/repo']);
-  assert.deepEqual(executor.calls.fileExists, ['/srv/repo-real']);
+  assert.deepEqual(executor.calls.stat, ['/srv/repo-real']);
 });
 
 test('validateBinding rejects remote directory when realpath fails', async () => {
@@ -112,6 +122,68 @@ test('validateBinding rejects remote directory when fileExists is false', async 
   );
 });
 
+// task_85d43f96 — the bind failure used to be one undifferentiated 400, so the
+// project form could only say "that directory did not work". The `reason` uses
+// the same vocabulary as the /api/fs picker, and errorHandler forwards it for
+// 4xx, which is what lets ProjectsView name the actual cause on save.
+
+test('validateBinding classifies the bind failure with a picker-compatible reason', async () => {
+  const cases = [
+    { error: Object.assign(new Error('ssh: connect to host pod.example port 22: Connection refused'), { code: 'SSH_TRANSPORT' }), reason: 'node_unreachable' },
+    { error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }), reason: 'node_timeout' },
+    { error: Object.assign(new Error('refused'), { code: 'EXPOSED_ROOTS' }), reason: 'path_outside_root' },
+    {
+      error: Object.assign(new Error('link escaped'), {
+        code: 'EXPOSED_ROOTS',
+        reason: 'symlink_escape',
+      }),
+      reason: 'symlink_escape',
+    },
+    { error: new Error('path /etc/shadow is outside exposed_roots for node pod-a'), reason: 'path_outside_root' },
+    { error: Object.assign(new Error('command failed'), { stderr: 'realpath: /srv/locked: Permission denied\n' }), reason: 'permission_denied' },
+    { error: new Error('realpath: /srv/nope: No such file or directory'), reason: 'path_not_found' },
+  ];
+
+  for (const { error, reason } of cases) {
+    const executor = createFakeExecutor({ realpathImpl: async () => { throw error; } });
+    const validator = createNodeBindingValidator({
+      nodeService: createFakeNodeService(executor),
+      fs: createFakeFs(),
+    });
+
+    await assert.rejects(
+      validator.validateBinding({ nodeId: 'node-a', directory: '/srv/repo' }),
+      (err) => {
+        assert.equal(err.status, 400, `expected 400 for ${reason}`);
+        assert.equal(err.reason, reason);
+        // The historical message prefix is part of the contract — callers
+        // branch on `reason`, but log scrapers still match the text.
+        assert.match(err.message, /Directory not found or outside exposed_roots on node node-a: \/srv\/repo/);
+        return true;
+      },
+    );
+  }
+});
+
+test('validateBinding reports a resolvable-but-absent directory as path_not_found', async () => {
+  const executor = createFakeExecutor({
+    realpathImpl: async () => '/srv/repo-real',
+    fileExistsImpl: async () => false,
+  });
+  const validator = createNodeBindingValidator({
+    nodeService: createFakeNodeService(executor),
+    fs: createFakeFs(),
+  });
+
+  await assert.rejects(
+    validator.validateBinding({ nodeId: 'node-a', directory: '/srv/repo' }),
+    (err) => {
+      assert.equal(err.reason, 'path_not_found');
+      return true;
+    },
+  );
+});
+
 test('validateBinding does NOT hard-block a missing mcp_config_path', async () => {
   // mcp_config_path is control-plane + read lazily at spawn; blocking bind on a
   // not-yet-existing file breaks the configure-first flow and the P4-2 store
@@ -147,4 +219,24 @@ test('validateBinding trims the directory before validating (NIT: leading/traili
   await validator.validateBinding({ nodeId: 'node-a', directory: '  /srv/repo  ' });
 
   assert.deepEqual(executor.calls.realpath, ['/srv/repo']);
+});
+
+// A path can be a directory on node A and an existing regular FILE at the same
+// path on node B. Existence alone would accept it and the run would only fail
+// later when the path was used as a working directory.
+test('validateBinding rejects a remote path that exists but is a regular file', async () => {
+  const executor = createFakeExecutor({
+    realpathImpl: async () => '/srv/notes.md',
+    statImpl: async () => ({ isDirectory: () => false, isFile: () => true }),
+  });
+  const nodeService = createFakeNodeService(executor);
+  const validator = createNodeBindingValidator({ nodeService });
+  await assert.rejects(
+    () => validator.validateBinding({ nodeId: 'pod-a', directory: '/srv/notes.md' }),
+    (err) => {
+      assert.equal(err.status, 400);
+      assert.equal(err.reason, 'path_not_directory');
+      return true;
+    },
+  );
 });

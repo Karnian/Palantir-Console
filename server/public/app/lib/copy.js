@@ -359,7 +359,39 @@ export const DIRECTORY_PICKER_LABELS = {
   empty: '하위 폴더가 없습니다.',
   upHint: '상위 폴더',
   select: '선택',
+  rootsLabel: '허용된 루트',
+  // task_85d43f96 — node-aware browsing. The picker browses whichever
+  // execution node the project form has selected, so the failure copy has to
+  // name the actual cause: an unreachable pod, a denied path, and a typo are
+  // three different operator actions, not one "browse failed".
+  localNodeLabel: '컨트롤 플레인 (local)',
+  nodeScopePrefix: '노드',
+  nodeChangedReset: '노드를 변경하여 선택한 디렉터리를 해제했습니다. 새 노드에서 다시 선택하세요.',
+  truncatedNotice: '항목이 많아 일부만 표시합니다.',
+  errorReasons: {
+    node_not_found: '선택한 노드를 찾을 수 없습니다. 노드 설정을 확인하세요.',
+    node_not_browsable: '이 노드는 디렉터리 탐색을 지원하지 않습니다.',
+    node_unreachable: '노드에 연결할 수 없습니다. SSH 연결 상태를 확인하세요.',
+    node_timeout: '노드가 응답하지 않습니다. 잠시 후 다시 시도하세요.',
+    path_outside_root: '노드에 허용된 경로(exposed_roots) 밖입니다.',
+    symlink_escape: '심볼릭 링크가 허용된 경로 밖을 가리켜 접근을 차단했습니다.',
+    path_not_found: '경로를 찾을 수 없습니다.',
+    path_not_directory: '디렉터리가 아닙니다. 폴더 경로를 선택하세요.',
+    permission_denied: '경로에 접근할 권한이 없습니다.',
+    browse_failed: '디렉터리를 읽지 못했습니다.',
+  },
 };
+
+// task_85d43f96 — resolve an apiFetch error onto DirectoryPicker copy.
+// `reason` comes from /api/fs (and from the project bind validator, which
+// shares the vocabulary); an unrecognised reason falls back to the server
+// message so a new server reason degrades to "specific but untranslated"
+// rather than to a generic failure.
+export function directoryPickerErrorMessage(err) {
+  const reason = err?.reason || err?.data?.reason;
+  const mapped = reason ? DIRECTORY_PICKER_LABELS.errorReasons[reason] : null;
+  return mapped || err?.message || DIRECTORY_PICKER_LABELS.errorReasons.browse_failed;
+}
 
 // ProjectsView — list page header, ProjectDetailModal, New/Edit modals,
 // and the ProjectSkillPacks subsection. Project status (`tasks.status`)
@@ -420,6 +452,11 @@ export const PROJECTS_LABELS = {
   nodeDefaultOption: '기본 local 노드',
   nodeSelectLoading: '노드 불러오는 중...',
   nodeUnreachableWarning: '선택한 노드는 현재 연결되지 않았습니다. 값은 저장할 수 있지만 실행은 대기하거나 실패할 수 있습니다.',
+  // task_85d43f96 — a save rejected by the node↔directory binding check
+  // carries the same reason vocabulary as the /api/fs picker, so the form can
+  // name the real cause instead of echoing the raw server string.
+  directoryBindErrorPrefix: '디렉터리 확인 실패',
+  directoryBindReasons: DIRECTORY_PICKER_LABELS.errorReasons,
   repoPreflightReasonLabels: {
     repo_unreachable: '레포에 접근할 수 없습니다.',
     repo_auth_failed: '레포 인증에 실패했습니다.',

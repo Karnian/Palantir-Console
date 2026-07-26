@@ -499,6 +499,16 @@ body {
   font-family: var(--font-mono);
 }
 
+.directory-root-switcher {
+  display: grid;
+  gap: 4px;
+}
+
+.directory-root-switcher .dropdown-button {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
 .directory-toggle {
   display: flex;
   align-items: center;
@@ -607,6 +617,28 @@ body {
 .dir-picker-clear {
   padding: 6px 8px;
   color: var(--text-secondary);
+}
+
+/* task_85d43f96 — node-aware directory picker: the scope line names which
+   execution node the paths belong to, and the error line replaces the toast-
+   only failure reporting with a persistent, specific reason. Colours resolve
+   through design tokens so light mode swaps automatically. */
+.dir-picker-scope {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.dir-picker-error {
+  font-size: 11px;
+  color: var(--danger);
+  margin-top: 4px;
+}
+
+.dir-picker-notice {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 4px;
 }
 
 .project-card-dir {

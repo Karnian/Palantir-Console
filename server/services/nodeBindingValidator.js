@@ -1,4 +1,5 @@
 const { BadRequestError } = require('../utils/errors');
+const { BROWSE_REASONS } = require('./fsService');
 
 function hasValue(value) {
   return value !== undefined && value !== null && value !== '';
@@ -9,8 +10,33 @@ function normalizeOptionalPath(value) {
   return typeof value === 'string' ? value.trim() : value;
 }
 
-function directoryBindingError(nodeId, directory) {
-  return new BadRequestError(`Directory not found or outside exposed_roots on node ${nodeId}: ${directory}`);
+// task_85d43f96: the bind failure used to be one undifferentiated 400, so the
+// project form could only say "that directory did not work". The reason lets
+// the form distinguish an unreachable node from a denied or missing path — the
+// same reason vocabulary the /api/fs picker uses. The message keeps its
+// historical prefix; the reason is what callers should branch on.
+function classifyBindingFailure(err) {
+  const code = err && err.code;
+  const text = `${(err && err.stderr) || ''} ${(err && err.message) || ''}`;
+  if (code === 'SSH_TRANSPORT') return BROWSE_REASONS.nodeUnreachable;
+  if (code === 'ETIMEDOUT') return BROWSE_REASONS.nodeTimeout;
+  if (err?.reason === BROWSE_REASONS.symlinkEscape) return BROWSE_REASONS.symlinkEscape;
+  if (code === 'EXPOSED_ROOTS' || /outside exposed_roots/i.test(text)) {
+    return BROWSE_REASONS.pathOutsideRoot;
+  }
+  if (/Permission denied|not permitted/i.test(text)) return BROWSE_REASONS.permissionDenied;
+  if (err?.reason === BROWSE_REASONS.pathNotDirectory
+    || code === 'ENOTDIR'
+    || /Not a directory|is not a directory/i.test(text)) {
+    return BROWSE_REASONS.pathNotDirectory;
+  }
+  return BROWSE_REASONS.pathNotFound;
+}
+
+function directoryBindingError(nodeId, directory, reason = BROWSE_REASONS.pathNotFound) {
+  const err = new BadRequestError(`Directory not found or outside exposed_roots on node ${nodeId}: ${directory}`);
+  err.reason = reason;
+  return err;
 }
 
 function createNodeBindingValidator({ nodeService } = {}) {
@@ -32,11 +58,18 @@ function createNodeBindingValidator({ nodeService } = {}) {
     const executor = nodeService.pickExecutor(nodeId);
     try {
       const resolvedDirectory = await executor.realpath(normalizedDirectory);
-      const exists = await executor.fileExists(resolvedDirectory);
-      if (!exists) throw directoryBindingError(nodeId, normalizedDirectory);
+      // Existence alone is NOT the invariant — this value becomes the run's
+      // working directory, so a regular file (or FIFO/socket) that merely
+      // exists would be accepted here and only blow up much later at spawn.
+      // stat() is the same `test -d` the executor already uses elsewhere.
+      const stats = await executor.stat(resolvedDirectory);
+      if (!stats) throw directoryBindingError(nodeId, normalizedDirectory);
+      if (!stats.isDirectory()) {
+        throw directoryBindingError(nodeId, normalizedDirectory, BROWSE_REASONS.pathNotDirectory);
+      }
     } catch (err) {
       if (err instanceof BadRequestError) throw err;
-      throw directoryBindingError(nodeId, normalizedDirectory);
+      throw directoryBindingError(nodeId, normalizedDirectory, classifyBindingFailure(err));
     }
   }
 
