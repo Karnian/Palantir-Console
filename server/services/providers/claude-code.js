@@ -13,7 +13,11 @@
 
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
-const { readClaudeKeychainToken, readClaudeLinuxCredentialsToken } = require('../authResolver');
+const {
+  readClaudeKeychainToken,
+  readClaudeLinuxCredentialsToken,
+  hostCredentialDiscoveryDisabled,
+} = require('../authResolver');
 const { sanitizeMessage } = require('../../utils/errors');
 
 const execFileAsync = promisify(execFile);
@@ -68,9 +72,12 @@ async function fetchClaudeCodeUsage() {
   const now = new Date().toISOString();
   const base = { id: 'anthropic', name: 'claude' };
 
-  // Account info via CLI (best effort — Claude CLI may be missing or return non-JSON)
+  // Account info via CLI (best effort — Claude CLI may be missing or return non-JSON).
+  // The CLI does its own credential discovery, so it would report the host
+  // account even with every credential env var cleared — skip it under isolation.
   let account = null;
   try {
+    if (hostCredentialDiscoveryDisabled()) throw new Error('host credential discovery disabled');
     const { stdout } = await execFileAsync('claude', ['auth', 'status'], { encoding: 'utf-8', timeout: 5000 });
     const authInfo = JSON.parse(stdout.trim());
     if (authInfo.loggedIn) {

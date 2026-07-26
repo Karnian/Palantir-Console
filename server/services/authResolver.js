@@ -32,7 +32,13 @@ const { promisify } = require('node:util');
 
 const execFileAsync = promisify(execFile);
 
-const CLAUDE_AUTH_FILE = path.join(__dirname, '..', '..', '.claude-auth.json');
+// Overridable so a test can exercise the real read/write paths against its own
+// temp file. Without a seam, a test has to plant a fixture at the repo-root
+// path that manager.test.js also stashes and restores — and `node --test` runs
+// files concurrently, so the two teardowns interleave and can delete a
+// developer's real credentials. Also lets a deployment relocate the cache.
+const CLAUDE_AUTH_FILE = process.env.PALANTIR_CLAUDE_AUTH_FILE
+  || path.join(__dirname, '..', '..', '.claude-auth.json');
 const CLAUDE_AUTH_KEYS = ['ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
 const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials';
 const CODEX_AUTH_KEYS = ['CODEX_API_KEY', 'OPENAI_API_KEY'];
@@ -740,6 +746,7 @@ module.exports = {
   bootstrapClaudeAuthFromEnv,
   resolveClaudeAuth,
   resolveClaudeAuthForIsolated,
+  hostCredentialDiscoveryDisabled,
   readClaudeKeychainToken,
   resolveCodexAuth,
   resolveManagerAuth,

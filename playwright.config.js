@@ -102,6 +102,8 @@ module.exports = defineConfig({
           'CLAUDE_CODE_OAUTH_TOKEN=',
           'CODEX_API_KEY=',
           'OPENAI_API_KEY=',
+          // Changes the usage-provider error text the registry renders.
+          'GEMINI_API_KEY=',
           // Clearing the env vars is not enough on its own: `.claude-auth.json`
           // lives at the REPO root (HOME cannot move it) and the macOS keychain
           // is not path-scoped, and an empty env value is precisely the falsy
