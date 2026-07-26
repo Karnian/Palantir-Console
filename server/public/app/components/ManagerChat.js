@@ -170,6 +170,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     setSelectedProfileId(fallback ? fallback.id : '');
   }, [managerProfiles, selectedProfileId]);
   const [sending, setSending] = useState(false);
+  const [rememberingMessageId, setRememberingMessageId] = useState(null);
   // Messages are rendered optimistically before the enqueue request returns.
   // The authoritative DB projection/SSE replaces these rows by idempotency key.
   const [localQueuedMessages, setLocalQueuedMessages] = useState([]);
@@ -296,6 +297,19 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
   // dual-emitted and pass through unchanged.
   const messages = useMemo(() => {
     const out = [];
+    const memoryOwnerByInvocation = new Map();
+    for (const item of visibleQueuedMessages) {
+      const ownerType = item.memory_owner_type
+        || (item.codebase_project_id ? 'workspace' : null);
+      const ownerId = item.memory_owner_id || item.codebase_project_id || null;
+      if (!ownerType || !ownerId) continue;
+      // Normalized assistant events carry adapter_invocation_id (projected as
+      // client_message_id). Keep this namespace isolated: idempotency_key is
+      // caller-controlled and can deliberately collide with another row's UUID.
+      if (item.client_message_id) {
+        memoryOwnerByInvocation.set(item.client_message_id, { ownerType, ownerId });
+      }
+    }
 
     // Index legacy assistant_text events by their full text, in arrival order.
     // We'll pop one entry per match so each legacy row can only be paired once.
@@ -323,6 +337,12 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
       const rawText = (p.data && p.data.text) || p.summaryText || '';
       const text = rawText.trim();
       if (!text) continue;
+      const invocationId = p.data && p.data.invocationId
+        ? p.data.invocationId
+        : null;
+      const memoryOwner = invocationId
+        ? (memoryOwnerByInvocation.get(invocationId) || null)
+        : null;
       // Pair with the nearest unconsumed legacy assistant_text whose full text
       // matches and whose event id is close to ours (PR1b emits both within
       // the same vendor message handler — they land adjacent).
@@ -349,6 +369,9 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
         text,
         time: e.created_at,
         source: 'normalized',
+        clientMessageId: invocationId,
+        memoryOwnerType: memoryOwner?.ownerType || null,
+        memoryOwnerId: memoryOwner?.ownerId || null,
       });
     }
 
@@ -417,6 +440,9 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
         queueError: item.last_error || null,
         queueMessageId: item.id,
         attachmentCount,
+        memoryOwnerType: item.memory_owner_type
+          || (item.codebase_project_id ? 'workspace' : null),
+        memoryOwnerId: item.memory_owner_id || item.codebase_project_id || null,
       });
     }
 
@@ -669,9 +695,126 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     requestAnimationFrame(() => { if (inputRef.current) inputRef.current.focus(); });
   };
 
+  const rememberFromChat = async (
+    content,
+    messageId = null,
+    messageOwnerType = null,
+    messageOwnerId = null,
+  ) => {
+    const text = typeof content === 'string' ? content.trim() : '';
+    if (!text) return false;
+    const messageProjectId = messageOwnerType === 'workspace' ? messageOwnerId : null;
+    const messageProfileId = messageOwnerType === 'profile' ? messageOwnerId : null;
+    const messageProjectIsValid = messageProjectId
+      && (projects || []).some((project) => (
+        project.id === messageProjectId && project.pm_enabled !== 0
+      ));
+    // A message-bound owner is authoritative. If that project was deleted or
+    // disabled after the turn, silently falling back to the current picker or
+    // primary project would write the remembered response into an unrelated
+    // workspace.
+    if (isPm && messageProjectId && !messageProjectIsValid) {
+      addToast('이 응답의 프로젝트가 삭제되었거나 비활성화되어 기억을 저장하지 않았습니다', 'error');
+      return false;
+    }
+    const messageBound = messageId != null;
+    if (
+      isPm
+      && messageBound
+      && (
+        !['workspace', 'profile'].includes(messageOwnerType)
+        || !messageOwnerId
+      )
+    ) {
+      addToast('이 응답의 메모리 범위를 확인할 수 없어 기억을 저장하지 않았습니다', 'error');
+      return false;
+    }
+    const selectedProjectIsValid = selectedCodebaseId
+      && (projects || []).some((project) => (
+        project.id === selectedCodebaseId && project.pm_enabled !== 0
+      ));
+    const primaryProjectId = currentPm?.primaryProjectId
+      || (currentPm?.legacyConversationId
+        ? parseProjectConversationId(currentPm.legacyConversationId)?.projectId
+        : null)
+      || pmProjectId
+      || null;
+    const primaryProjectIsValid = primaryProjectId
+      && (projects || []).some((project) => (
+        project.id === primaryProjectId && project.pm_enabled !== 0
+      ));
+    const targetProjectId = isPm
+      ? (messageBound
+          ? (messageProjectIsValid ? messageProjectId : null)
+          : (selectedProjectIsValid
+              ? selectedCodebaseId
+              : (primaryProjectIsValid ? primaryProjectId : null)))
+      : null;
+    const targetProfileId = isPm && !targetProjectId
+      ? (messageBound ? messageProfileId : currentPm?.profileId)
+      : null;
+    if (isPm && !targetProjectId && !targetProfileId) {
+      addToast('Operator의 메모리 범위를 확인할 수 없어 기억을 저장하지 않았습니다', 'error');
+      return false;
+    }
+    const endpoint = targetProjectId
+      ? `/api/projects/${encodeURIComponent(targetProjectId)}/memory/remember`
+      : targetProfileId
+        ? `/api/operator/profiles/${encodeURIComponent(targetProfileId)}/memory/remember`
+        : '/api/master-memory/remember';
+    const body = targetProjectId || targetProfileId
+      ? { kind: 'convention', content: text, importance: 5 }
+      : { scope: 'user', kind: 'preference', content: text, importance: 5 };
+    if (messageId != null) setRememberingMessageId(messageId);
+    try {
+      const data = await apiFetch(endpoint, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      if (data?.memory) {
+        addToast(
+          targetProjectId
+            ? '프로젝트 메모리에 저장됨'
+            : targetProfileId
+              ? 'Operator 메모리에 저장됨'
+              : '전체 메모리에 저장됨',
+          'success',
+        );
+      } else {
+        addToast('메모리 후보로 등록됨 — Memory Hub에서 승인하세요', 'info');
+      }
+      return true;
+    } catch (err) {
+      addToast(`기억하기 실패: ${err?.message || 'unknown'}`, 'error');
+      return false;
+    } finally {
+      if (messageId != null) setRememberingMessageId(null);
+    }
+  };
+
   const handleSend = async () => {
     const text = input.trim();
     if ((!text && attachedImages.length === 0) || sending) return;
+    const rememberCommand = text.match(/^\/remember\s+([\s\S]+)$/i);
+    if (rememberCommand) {
+      if (attachedImages.length > 0) {
+        addToast('/remember는 이미지를 저장하지 않습니다. 첨부를 제거한 뒤 다시 시도하세요.', 'warning');
+        return;
+      }
+      const rememberAttachments = attachedImages;
+      setSending(true);
+      setInput('');
+      setAttachedImages([]);
+      if (inputRef.current) inputRef.current.style.height = '';
+      const remembered = await rememberFromChat(rememberCommand[1]);
+      if (!remembered) {
+        setInput(text);
+        setAttachedImages(rememberAttachments);
+      }
+      setSending(false);
+      requestAnimationFrame(() => { if (inputRef.current) inputRef.current.focus(); });
+      return;
+    }
     setSending(true);
     setInput('');
     if (inputRef.current) inputRef.current.style.height = '';
@@ -1141,6 +1284,22 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
                   `
                 : html`<div class="manager-msg-content markdown-body" dangerouslySetInnerHTML=${{ __html: renderMarkdown(m.text) }}></div>`
               }
+              ${m.text
+                && m.type !== 'error'
+                && (!isPm || (m.memoryOwnerType && m.memoryOwnerId))
+                && html`
+                <button
+                  type="button"
+                  class="manager-msg-remember"
+                  disabled=${rememberingMessageId === m.id}
+                  onClick=${() => rememberFromChat(
+                    m.text,
+                    m.id,
+                    m.memoryOwnerType,
+                    m.memoryOwnerId,
+                  )}
+                >기억하기</button>
+              `}
             </div>
             <div class="manager-msg-time">${timeAgo(m.time)}</div>
           </div>

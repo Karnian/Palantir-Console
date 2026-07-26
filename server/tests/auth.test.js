@@ -15,12 +15,17 @@ const os = require('node:os');
 const request = require('supertest');
 const { createApp } = require('../app');
 const { parseCookies, createAuthMiddleware } = require('../middleware/auth');
+const {
+  createWorkerProposalTokenService,
+  createManagerCapabilityTokenService,
+  resolveActorTokenPolicy,
+} = require('../services/actorTokenPolicy');
 
 async function createTempDir(prefix) {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
-async function createTestApp(t, { token } = {}) {
+async function createTestApp(t, { token, pmToken, agentProcessIsolation = false } = {}) {
   // IMPORTANT: never mutate process.env.PALANTIR_TOKEN here. node --test
   // runs test files in parallel workers by default, so any env mutation
   // leaks into sibling files (e.g. v2-api.test.js suddenly starts seeing
@@ -36,6 +41,8 @@ async function createTestApp(t, { token } = {}) {
     fsRoot,
     dbPath,
     authToken: token || null, // explicit null → disabled, non-empty string → enabled
+    pmToken: pmToken || null,
+    agentProcessIsolation,
     authResolverOpts: { hasKeychain: () => false },
   });
 
@@ -433,4 +440,207 @@ test('createAuthMiddleware: separate PM token = bearer, cannot spoof human cooki
   // human token as bearer still works (CLI human) -> bearer.
   r = run({ authorization: 'Bearer human-tok' });
   assert.equal(r.ok, true); assert.equal(r.req.auth.method, 'bearer');
+});
+
+test('createAuthMiddleware: worker grant is limited to its run memory proposal route', () => {
+  const workerProposalTokenService = createWorkerProposalTokenService({
+    actorTokens: resolveActorTokenPolicy({
+      PALANTIR_TOKEN: 'human-tok',
+      PALANTIR_PM_TOKEN: 'pm-tok',
+      PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
+    }),
+  });
+  const workerToken = workerProposalTokenService.mint('run_one', { projectId: 'proj_one' });
+  const mw = createAuthMiddleware({
+    token: 'human-tok',
+    pmToken: 'pm-tok',
+    workerProposalTokenService,
+  });
+  const run = ({ method = 'POST', originalUrl }) => {
+    const req = {
+      method,
+      originalUrl,
+      headers: { authorization: `Bearer ${workerToken}` },
+    };
+    let ok = false;
+    let threw = false;
+    try { mw(req, {}, () => { ok = true; }); } catch { threw = true; }
+    return { req, ok, threw };
+  };
+
+  const allowed = run({ originalUrl: '/api/runs/run_one/memory/propose' });
+  assert.equal(allowed.ok, true);
+  assert.deepEqual(allowed.req.auth, {
+    method: 'worker',
+    runId: 'run_one',
+    projectId: 'proj_one',
+  });
+  assert.equal(run({ originalUrl: '/api/runs/run_two/memory/propose' }).threw, true);
+  assert.equal(run({ method: 'GET', originalUrl: '/api/runs/run_one/memory/propose' }).threw, true);
+  assert.equal(run({ originalUrl: '/api/tasks' }).threw, true);
+});
+
+test('createAuthMiddleware: active manager capability is run-bound and endpoint-limited', () => {
+  const actorTokens = resolveActorTokenPolicy({
+    PALANTIR_TOKEN: 'human-tok',
+    PALANTIR_PM_TOKEN: 'pm-tok',
+    PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
+  });
+  const managerCapabilityTokenService = createManagerCapabilityTokenService({
+    actorTokens,
+    signingKey: Buffer.alloc(32, 5),
+  });
+  const managerToken = managerCapabilityTokenService.mint('run_top', {
+    conversationId: 'top',
+    layer: 'top',
+  });
+  let active = true;
+  const mw = createAuthMiddleware({
+    token: 'human-tok',
+    pmToken: 'pm-tok',
+    managerCapabilityTokenService,
+    isManagerCapabilityActive: (grant) => active && grant.runId === 'run_top',
+  });
+  const run = ({ method = 'GET', originalUrl }) => {
+    const req = {
+      method,
+      originalUrl,
+      headers: { authorization: `Bearer ${managerToken}` },
+    };
+    let ok = false;
+    let threw = false;
+    try { mw(req, {}, () => { ok = true; }); } catch { threw = true; }
+    return { req, ok, threw };
+  };
+
+  const allowed = run({ method: 'POST', originalUrl: '/api/tasks/task_one/execute' });
+  assert.equal(allowed.ok, true);
+  assert.deepEqual(allowed.req.auth, {
+    method: 'bearer',
+    actor: 'manager',
+    managerRunId: 'run_top',
+    conversationId: 'top',
+    layer: 'top',
+  });
+  assert.equal(run({ method: 'POST', originalUrl: '/api/master-memory/candidates/c1/approve' }).threw, true);
+  assert.equal(run({ method: 'POST', originalUrl: '/api/dispatch-audit' }).threw, true);
+  assert.equal(run({ method: 'POST', originalUrl: '/api/runs/run_worker/input' }).threw, true);
+  assert.equal(run({ method: 'POST', originalUrl: '/api/conversations/worker:run_worker/message' }).threw, true);
+  assert.equal(run({ method: 'POST', originalUrl: '/api/conversations/worker%3Arun_worker/message' }).threw, true);
+  active = false;
+  assert.equal(run({ originalUrl: '/api/runs' }).threw, true);
+});
+
+test('createAuthMiddleware: Operator capability reaches artifact verify-check CRUD only', () => {
+  const actorTokens = resolveActorTokenPolicy({
+    PALANTIR_TOKEN: 'human-tok',
+    PALANTIR_PM_TOKEN: 'pm-tok',
+    PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
+  });
+  const managerCapabilityTokenService = createManagerCapabilityTokenService({
+    actorTokens,
+    signingKey: Buffer.alloc(32, 6),
+  });
+  const operatorToken = managerCapabilityTokenService.mint('run_operator', {
+    conversationId: 'operator:project_one',
+    layer: 'operator',
+  });
+  const mw = createAuthMiddleware({
+    token: 'human-tok',
+    pmToken: 'pm-tok',
+    managerCapabilityTokenService,
+    isManagerCapabilityActive: (grant) => grant.runId === 'run_operator',
+  });
+  const allowed = (method, originalUrl) => {
+    const req = {
+      method,
+      originalUrl,
+      headers: { authorization: `Bearer ${operatorToken}` },
+    };
+    try {
+      let passed = false;
+      mw(req, {}, () => { passed = true; });
+      return passed;
+    } catch {
+      return false;
+    }
+  };
+
+  assert.equal(allowed('GET', '/api/verify-checks?project_id=project_one'), true);
+  assert.equal(allowed('POST', '/api/verify-checks'), true);
+  assert.equal(allowed('POST', '/api/verify-checks/assign'), true);
+  assert.equal(allowed('PATCH', '/api/verify-checks/42'), true);
+  assert.equal(allowed('DELETE', '/api/verify-checks/42'), true);
+  assert.equal(allowed('POST', '/api/master-memory/remember'), false);
+});
+
+test('app manager capability expires with the active registry slot', async (t) => {
+  const app = await createTestApp(t, {
+    token: 'human-global',
+    pmToken: 'automation-global',
+    agentProcessIsolation: true,
+  });
+  let managerAlive = true;
+  const adapter = {
+    isSessionAlive: () => managerAlive,
+    detectExitCode: () => null,
+    disposeSession: () => true,
+  };
+  const managerRun = app.services.runService.createRun({
+    is_manager: true,
+    manager_layer: 'top',
+    conversation_id: 'top',
+    manager_adapter: 'codex',
+    prompt: 'capability integration',
+  });
+  app.services.runService.updateRunStatus(managerRun.id, 'running', { force: true });
+  app.managerRegistry.setActive('top', managerRun.id, adapter);
+  const managerToken = app.services.managerCapabilityTokenService.mint(managerRun.id, {
+    conversationId: 'top',
+    layer: 'top',
+  });
+
+  await request(app)
+    .get('/api/runs')
+    .set('Authorization', `Bearer ${managerToken}`)
+    .expect(200);
+  await request(app)
+    .post('/api/master-memory/candidates/not-allowed/promote')
+    .set('Authorization', `Bearer ${managerToken}`)
+    .send({})
+    .expect(403);
+  await request(app)
+    .post('/api/tasks/task-not-allowed/execute')
+    .set('Authorization', `Bearer ${managerToken}`)
+    .send({ pm_run_id: 'another-manager', agent_profile_id: 'agent' })
+    .expect(403);
+
+  managerAlive = false;
+  await request(app)
+    .get('/api/runs')
+    .set('Authorization', `Bearer ${managerToken}`)
+    .expect(403);
+  assert.equal(app.managerRegistry.getActiveRunId('top'), null);
+});
+
+test('app honors an explicit agent process isolation opt-out over ambient verification', async (t) => {
+  const previousIsolation = process.env.PALANTIR_AGENT_PROCESS_ISOLATION;
+  process.env.PALANTIR_AGENT_PROCESS_ISOLATION = 'verified';
+  t.after(() => {
+    if (previousIsolation === undefined) delete process.env.PALANTIR_AGENT_PROCESS_ISOLATION;
+    else process.env.PALANTIR_AGENT_PROCESS_ISOLATION = previousIsolation;
+  });
+
+  const app = await createTestApp(t, {
+    token: 'human-global',
+    pmToken: 'automation-global',
+    agentProcessIsolation: false,
+  });
+  assert.equal(app.services.managerCapabilityTokenService.mint('run_top', {
+    conversationId: 'top',
+    layer: 'top',
+  }), null);
+  assert.equal(app.services.workerProposalTokenService.mint('run_worker', {
+    projectId: 'project_one',
+  }), null);
 });

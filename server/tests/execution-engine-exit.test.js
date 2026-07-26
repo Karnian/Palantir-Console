@@ -5,7 +5,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { createTmuxEngine, createSubprocessEngine } = require('../services/executionEngine');
+const {
+  createTmuxEngine,
+  createSubprocessEngine,
+  cleanupStaleTmuxStartupArtifacts,
+} = require('../services/executionEngine');
 
 const fakeCodexPath = path.join(__dirname, 'fixtures', 'bin', 'fake-codex-stdin.js');
 
@@ -64,6 +68,30 @@ function runBash(scriptPath) {
     });
   });
 }
+
+test('startup cleanup removes stranded prompt and capability artifacts only', (t) => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-startup-cleanup-'));
+  const scriptDir = path.join(tmpRoot, 'palantir-scripts');
+  const promptPath = path.join(scriptDir, 'palantir-run-crashed_worker.stdin');
+  const scriptPath = path.join(scriptDir, 'palantir-run-crashed_worker.sh');
+  const unrelatedPath = path.join(scriptDir, 'operator-notes.stdin');
+  const tokenDir = path.join(scriptDir, '.worker-token-crashed');
+  fs.mkdirSync(tokenDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(promptPath, 'sensitive prompt', { mode: 0o600 });
+  fs.writeFileSync(scriptPath, '#!/bin/bash\n', { mode: 0o700 });
+  fs.writeFileSync(unrelatedPath, 'keep me', { mode: 0o600 });
+  fs.writeFileSync(path.join(tokenDir, 'token'), 'scoped capability', { mode: 0o600 });
+  t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+
+  assert.deepEqual(
+    cleanupStaleTmuxStartupArtifacts({ tmpDir: tmpRoot }),
+    { prompts: 1, capabilities: 1 },
+  );
+  assert.equal(fs.existsSync(promptPath), false);
+  assert.equal(fs.existsSync(tokenDir), false);
+  assert.equal(fs.existsSync(scriptPath), true, 'non-secret diagnostic script is retained');
+  assert.equal(fs.existsSync(unrelatedPath), true, 'non-Palantir stdin file is retained');
+});
 
 test('detectExitCode does not infer success from a running bash pane without a marker', () => {
   const tmux = makeTmuxCommand({ captureOutput: 'worker is still running\n' });
@@ -143,8 +171,11 @@ test('spawnAgent publishes the sentinel when profile PATH excludes mv', async (t
   });
 
   const script = fs.readFileSync(paths.scriptPath, 'utf-8');
+  const workerInvocation = script.split('\n').find((line) => line.startsWith('env -i '));
   const markerIndex = script.indexOf('echo "___EXIT_CODE_${agent_exit_code}___"');
   const sentinelRenameIndex = script.indexOf('PATH="$__palantir_sentinel_publish_path" mv -f --');
+  assert.match(workerInvocation, /'PATH=\/opt\/homebrew\/bin:\/opt\/homebrew\/sbin:/);
+  assert.match(workerInvocation, new RegExp(`${runId}-no-binaries`));
   assert.notEqual(markerIndex, -1);
   assert.notEqual(sentinelRenameIndex, -1);
   assert.ok(markerIndex < sentinelRenameIndex, 'marker must be written before sentinel publication');
@@ -154,6 +185,80 @@ test('spawnAgent publishes the sentinel when profile PATH excludes mv', async (t
   assert.equal(fs.readFileSync(paths.sentinelPath, 'utf-8'), '37\n');
   assert.equal(fs.existsSync(paths.sentinelTmpPath), false);
   assert.match(output, /___EXIT_CODE_37___/);
+});
+
+test('spawnAgent clears stale tmux actor credentials and file-backs the current worker token', async (t) => {
+  const runId = uniqueRunId('actor-env');
+  const paths = artifactPaths(runId);
+  t.after(() => {
+    for (const filePath of Object.values(paths)) {
+      try { fs.unlinkSync(filePath); } catch {}
+    }
+  });
+
+  const tmux = makeTmuxCommand();
+  createTmuxEngine({ execFileSync: tmux.execFileSync }).spawnAgent(runId, {
+    command: process.execPath,
+    args: ['--version'],
+    cwd: os.tmpdir(),
+    env: {
+      PALANTIR_TOKEN: 'must-not-leak',
+      PALANTIR_PM_TOKEN: 'must-not-leak-either',
+      PALANTIR_WORKER_TOKEN: 'current-run-token',
+    },
+  });
+
+  const script = fs.readFileSync(paths.scriptPath, 'utf-8');
+  const unsetIndex = script.indexOf('unset PALANTIR_TOKEN PALANTIR_PM_TOKEN PALANTIR_WORKER_TOKEN PALANTIR_MANAGER_TOKEN');
+  const cleanEnvIndex = script.indexOf('env -i ');
+  const workerTokenIndex = script.indexOf('PALANTIR_WORKER_TOKEN="$__palantir_worker_token"');
+  const tokenPathMatch = script.match(/__palantir_worker_token="\$\(cat -- '([^']+)'\)"/);
+  assert.notEqual(unsetIndex, -1);
+  assert.notEqual(cleanEnvIndex, -1);
+  assert.notEqual(workerTokenIndex, -1);
+  assert.ok(tokenPathMatch);
+  assert.ok(unsetIndex < cleanEnvIndex);
+  assert.ok(cleanEnvIndex < workerTokenIndex);
+  assert.doesNotMatch(script, /'PALANTIR_TOKEN=/);
+  assert.doesNotMatch(script, /'PALANTIR_PM_TOKEN=/);
+  assert.doesNotMatch(script, /current-run-token/);
+  assert.equal(fs.readFileSync(tokenPathMatch[1], 'utf-8'), 'current-run-token');
+
+  await runBash(paths.scriptPath);
+  assert.equal(fs.existsSync(tokenPathMatch[1]), false);
+});
+
+test('spawnAgent runs tmux workers without ambient server credentials', async (t) => {
+  const runId = uniqueRunId('ambient-server-credential');
+  const paths = artifactPaths(runId);
+  const previous = process.env.CODEX_API_KEY;
+  process.env.CODEX_API_KEY = 'ambient-server-secret-must-not-leak';
+  t.after(() => {
+    if (previous === undefined) delete process.env.CODEX_API_KEY;
+    else process.env.CODEX_API_KEY = previous;
+    for (const filePath of Object.values(paths)) {
+      try { fs.unlinkSync(filePath); } catch {}
+    }
+  });
+
+  const tmux = makeTmuxCommand();
+  createTmuxEngine({ execFileSync: tmux.execFileSync }).spawnAgent(runId, {
+    command: process.execPath,
+    args: [
+      '-e',
+      "console.log(`${process.env.CODEX_API_KEY || 'missing'}|${process.env.SAFE_PROFILE_VALUE || 'missing'}`)",
+    ],
+    cwd: os.tmpdir(),
+    env: { SAFE_PROFILE_VALUE: 'ok' },
+  });
+
+  const script = fs.readFileSync(paths.scriptPath, 'utf-8');
+  assert.match(script, /env -i /);
+  assert.match(script, /'SAFE_PROFILE_VALUE=ok'/);
+  assert.doesNotMatch(script, /'CODEX_API_KEY=/);
+  assert.doesNotMatch(script, /ambient-server-secret-must-not-leak/);
+  const output = await runBash(paths.scriptPath);
+  assert.match(output, /^missing\|ok$/m);
 });
 
 test('tmux worker feeds an option-like prompt through a mode-0600 stdin file, never argv or script', async (t) => {
@@ -281,6 +386,52 @@ test('tmux worker removes a partially written stdin file when prompt persistence
   );
   assert.equal(fs.existsSync(paths.stdinPath), false);
   assert.equal(tmux.calls.length, 0, 'tmux must not start after stdin persistence fails');
+});
+
+test('tmux worker leaves no prompt or capability artifact when token persistence fails', (t) => {
+  const runId = uniqueRunId('token-write-failure');
+  const paths = artifactPaths(runId);
+  let failedTokenPath = null;
+  t.after(() => {
+    for (const filePath of Object.values(paths)) {
+      try { fs.unlinkSync(filePath); } catch {}
+    }
+    if (failedTokenPath) {
+      try { fs.unlinkSync(failedTokenPath); } catch {}
+      try { fs.rmdirSync(path.dirname(failedTokenPath)); } catch {}
+    }
+  });
+
+  const tmux = makeTmuxCommand();
+  const engine = createTmuxEngine({
+    execFileSync: tmux.execFileSync,
+    writeFileSync(filePath, data, options) {
+      if (path.basename(filePath) === 'token' && filePath.includes('.worker-token-')) {
+        failedTokenPath = filePath;
+        fs.writeFileSync(filePath, data.slice(0, 4), options);
+        const error = new Error('simulated partial token write');
+        error.code = 'ENOSPC';
+        throw error;
+      }
+      fs.writeFileSync(filePath, data, options);
+    },
+  });
+
+  assert.throws(
+    () => engine.spawnAgent(runId, {
+      command: fakeCodexPath,
+      args: ['exec', '-'],
+      stdin: 'sensitive prompt\n',
+      cwd: os.tmpdir(),
+      env: { PALANTIR_WORKER_TOKEN: 'scoped-worker-capability' },
+    }),
+    (error) => error.code === 'ENOSPC',
+  );
+  assert.ok(failedTokenPath);
+  assert.equal(fs.existsSync(paths.stdinPath), false);
+  assert.equal(fs.existsSync(failedTokenPath), false);
+  assert.equal(fs.existsSync(path.dirname(failedTokenPath)), false);
+  assert.equal(tmux.calls.length, 0, 'tmux must not start after token persistence fails');
 });
 
 test('subprocess worker writes the initial prompt to stdin and keeps it out of argv', async () => {

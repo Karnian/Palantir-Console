@@ -24,6 +24,10 @@ const { createEventBus } = require('../services/eventBus');
 const { createOperatorSpawnService } = require('../services/operatorSpawnService');
 const { createOperatorCleanupService } = require('../services/operatorCleanupService');
 const { createNodeService } = require('../services/nodeService');
+const {
+  resolveActorTokenPolicy,
+  createManagerCapabilityTokenService,
+} = require('../services/actorTokenPolicy');
 const { createTasksRouter } = require('../routes/tasks');
 const { createApp } = require('../app');
 
@@ -52,6 +56,7 @@ function makeFakeCodexAdapter({ resumeSupport = true } = {}) {
     startSession(runId, opts) {
       sessions.set(runId, {
         systemPrompt: opts.systemPrompt,
+        env: opts.env,
         cwd: opts.cwd,
         threadId: opts.resumeThreadId || null,
         onThreadStarted: opts.onThreadStarted || null,
@@ -279,6 +284,53 @@ test('Phase 3a: lazy spawn creates a PM run when none exists', async (t) => {
   const result2 = spawn.ensureLiveOperator({ projectId: project.id });
   assert.equal(result2.spawned, false);
   assert.equal(result2.run.id, result1.run.id);
+});
+
+test('Phase 3a: authenticated Operator keeps capability out of its persisted prompt', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const registry = createManagerRegistry({ runService: rs });
+  const fakePm = makeFakeCodexAdapter();
+  const topAdapter = makeFakeCodexAdapter();
+  const actorTokens = resolveActorTokenPolicy({
+    PALANTIR_TOKEN: 'human-global',
+    PALANTIR_PM_TOKEN: 'automation-global',
+    PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
+  });
+  const managerCapabilityTokenService = createManagerCapabilityTokenService({
+    actorTokens,
+    signingKey: Buffer.alloc(32, 9),
+  });
+  const spawn = createOperatorSpawnService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: wireFactory(fakePm),
+    projectService,
+    projectBriefService,
+    agentProfileService: null,
+    authResolverOpts: { hasKeychain: true },
+    actorTokens,
+    managerCapabilityTokenService,
+  });
+  const project = projectService.createProject({ name: 'secure operator' });
+  seedTop({ rs, registry, adapter: topAdapter });
+
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
+  const session = fakePm._sessions.get(result.run.id);
+  const capability = session.env.PALANTIR_MANAGER_TOKEN;
+
+  assert.ok(capability);
+  assert.deepEqual(managerCapabilityTokenService.verify(capability), {
+    runId: result.run.id,
+    conversationId: result.run.conversation_id,
+    layer: 'operator',
+  });
+  assert.match(session.systemPrompt, /Bearer \$PALANTIR_MANAGER_TOKEN/);
+  assert.equal(session.systemPrompt.includes(capability), false);
+  assert.equal(session.systemPrompt.includes('human-global'), false);
+  assert.equal(session.systemPrompt.includes('automation-global'), false);
 });
 
 test('P2-1: fresh PM spawn leaves run in queued until first turn emits thread.started', async (t) => {

@@ -426,6 +426,17 @@ test('M4-a: createTemplate transport=http rejects denylisted bearer_token_env_va
     }),
     (err) => err.status === 400 && /POSIX env var name/.test(err.message),
   );
+  for (const key of ['PALANTIR_TOKEN', 'palantir_pm_token', 'PALANTIR_WORKER_TOKEN']) {
+    await assert.rejects(
+      () => svc.createTemplate({
+        alias: `reserved_${key.toLowerCase()}`,
+        transport: 'http',
+        url: 'http://localhost:3100/mcp',
+        bearer_token_env_var: key,
+      }),
+      (err) => err.status === 400 && /reserved for Palantir actor authentication/.test(err.message),
+    );
+  }
 });
 
 test('M4-a: updateTemplate transport immutable', async (t) => {

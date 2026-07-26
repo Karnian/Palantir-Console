@@ -77,6 +77,12 @@ function buildCommonBase({ port, token, layer = 'top', adapterType, specialistAv
 function _buildCommonBaseInner({ base, token, layer, adapterType, specialistAvailable = false }) {
   // P4-7 kept the auth variable for backward-compat with PM layer docs.
   // Fleet P5 restores curl examples for curl-capable manager adapters.
+  // `token` is an availability flag only. The secret is never rendered into
+  // this persisted prompt; the manager process receives a run-bound value in
+  // PALANTIR_MANAGER_TOKEN and curl expands it at execution time.
+  const authHeader = token
+    ? ' -H "Authorization: Bearer $PALANTIR_MANAGER_TOKEN"'
+    : '';
 
   const layerNote = isProjectLayer(layer)
     ? `\n\nYou are running as an **Operator** (project-scoped dispatcher). Your PRIMARY codebase (shown in Project Scope) is your default cwd and routing target, but you work in a SHARED codebase pool: a turn may direct you at a DIFFERENT codebase (its id/path appears in a \`## Turn Codebase\` block in the user message when applicable) — act on the codebase indicated for the turn, defaulting to your primary otherwise. You own dispatch decisions for those codebases, and you may modify in-flight worker plans via the worker intervention APIs (cancel, input, status patch) when the user or conditions require a plan change.
@@ -163,21 +169,48 @@ do not confuse them:
     : `IMPORTANT: NEVER call /execute without explicit user approval. Always confirm before spawning workers.
 Do NOT auto-execute tasks just because their status is in_progress — status alone does not mean "run an agent".`;
 
+  const memoryProposalNote = isProjectLayer(layer)
+    ? `
+## Proposing durable memory
+
+When you discover a stable, reusable convention, pitfall, heuristic, or constraint,
+you MAY stage it for human review:
+POST ${base}/api/conversations/operator:PRIMARY_PROJECT_ID/memory/propose
+body: {"target":"workspace|profile","kind":"convention|pitfall|heuristic|constraint","content":"...","importance":5}
+
+- Use workspace for codebase-specific knowledge and profile for your durable working style.
+- Propose only knowledge likely to help future turns; never propose transient status, raw logs,
+  test output, secrets, or the conversation transcript.
+- This endpoint creates a candidate only. You cannot create active memory.
+`
+    : `
+## Proposing durable memory
+
+When you discover a stable user preference, shared constraint, commitment, decision, or pattern,
+you MAY stage it for human review:
+POST ${base}/api/conversations/top/memory/propose
+body: {"kind":"preference|constraint|commitment|decision|pattern","content":"...","importance":5}
+
+- Propose only knowledge likely to help future turns; never propose transient status, raw logs,
+  secrets, or the conversation transcript.
+- This endpoint creates a candidate only. You cannot create active memory.
+`;
+
   // Curl templates for curl-capable manager adapters.
   const curlNote = (adapterType === 'codex' || adapterType === 'claude-code')
     ? `Use curl (via Bash) to query the API.
 \`\`\`
 # GET
-curl -s ${base}/api/runs${token ? ` -H "Authorization: Bearer ${token}"` : ''} | head -c 2000
+curl -s ${base}/api/runs${authHeader} | head -c 2000
 
 # POST (create/execute)
-curl -s -X POST ${base}/api/tasks${token ? ` -H "Authorization: Bearer ${token}"` : ''} -H "Content-Type: application/json" -d '{"title":"...","project_id":"..."}'
+curl -s -X POST ${base}/api/tasks${authHeader} -H "Content-Type: application/json" -d '{"title":"...","project_id":"..."}'
 
 # PATCH (update)
-curl -s -X PATCH ${base}/api/tasks/TASK_ID/status${token ? ` -H "Authorization: Bearer ${token}"` : ''} -H "Content-Type: application/json" -d '{"status":"done"}'
+curl -s -X PATCH ${base}/api/tasks/TASK_ID/status${authHeader} -H "Content-Type: application/json" -d '{"status":"done"}'
 
 # DELETE
-curl -s -X DELETE ${base}/api/tasks/TASK_ID${token ? ` -H "Authorization: Bearer ${token}"` : ''}
+curl -s -X DELETE ${base}/api/tasks/TASK_ID${authHeader}
 \`\`\``
     : `Use WebFetch to query it (do NOT use Bash with curl — curl is not in your tool allowlist).`;
 
@@ -200,10 +233,10 @@ tools beyond internal registry/metadata lookup — it returns text ADVICE only. 
 work (coding, refactoring, analysis) still delegate to a worker via /execute; the specialist is for
 quick read-only consultation.
 
-1. Pick a profile id: curl -s ${base}/api/operator/profiles${token ? ` -H "Authorization: Bearer ${token}"` : ''}
+1. Pick a profile id: curl -s ${base}/api/operator/profiles${authHeader}
 2. Invoke it (blocks until it answers — allow up to ~2 min):
 \`\`\`
-curl -s --max-time 150 -X POST ${base}/api/operator/specialist${token ? ` -H "Authorization: Bearer ${token}"` : ''} -H "Content-Type: application/json" \\
+curl -s --max-time 150 -X POST ${base}/api/operator/specialist${authHeader} -H "Content-Type: application/json" \\
   -d '{"profileId":"PROFILE_ID","userText":"your focused question","originRunId":"RUN_ID"}'
 \`\`\`
    Use ${runIdHint} as originRunId. Do NOT send persona or capabilities — the profile defines them.
@@ -234,6 +267,7 @@ If no agent profiles exist, tell the user to create one first via the Agents pag
 The /execute endpoint is what actually spawns a Claude Code (or other agent) subprocess. Without it, no agent runs.
 
 ${approvalNote}
+${memoryProposalNote}
 
 You may use your own tools for quick lookups (checking status, reading files, API calls, etc.),
 but any substantial work (coding, refactoring, analysis tasks) must be delegated via the API.
@@ -243,7 +277,7 @@ Do NOT directly modify project files — file changes are a worker concern, not 
 
 The Palantir Console server runs at ${base}.
 ${curlNote}
-${token && adapterType !== 'codex' ? `\nIMPORTANT: All API requests require auth header: Authorization: Bearer ${token}` : ''}
+${token && adapterType !== 'codex' ? '\nIMPORTANT: All API requests require auth header: Authorization: Bearer $PALANTIR_MANAGER_TOKEN' : ''}
 
 ### Runs
 - List all runs: GET ${base}/api/runs

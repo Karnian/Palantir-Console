@@ -67,7 +67,8 @@ test('buildManagerSystemPrompt works with no adapter (back-compat)', () => {
   const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
   const out = buildManagerSystemPrompt({ adapter: null, port: 4177, token: 'tok' });
   assert.match(out, /Palantir Manager/);
-  assert.match(out, /Bearer tok/);
+  assert.match(out, /Bearer \$PALANTIR_MANAGER_TOKEN/);
+  assert.doesNotMatch(out, /Bearer tok/);
 });
 
 // --- CodexAdapter unit tests ---
@@ -139,6 +140,10 @@ test('CodexAdapter lazily writes a system prompt temp file and disposeSession cl
 
   fakeChild.stdout.write(`${JSON.stringify({
     type: 'item.completed',
+    item: { id: 'item_reply', type: 'agent_message', text: 'reviewed beta' },
+  })}\n`);
+  fakeChild.stdout.write(`${JSON.stringify({
+    type: 'item.completed',
     item: { id: 'item_err', type: 'error', message: 'rate limit exceeded' },
   })}\n`);
   fakeChild.stdout.write(`${JSON.stringify({
@@ -152,6 +157,8 @@ test('CodexAdapter lazily writes a system prompt temp file and disposeSession cl
   const nonterminalError = captured.find(({ t }) => t === 'mgr.turn_failed');
   assert.equal(nonterminalError.p.data.invocationId, 'oinv_codex_test');
   assert.equal(nonterminalError.p.data.terminal, false);
+  const assistant = captured.find(({ t }) => t === 'mgr.assistant_message');
+  assert.equal(assistant.p.data.invocationId, 'oinv_codex_test');
   const completed = captured.find(({ t }) => t === 'mgr.turn_completed');
   assert.equal(completed.p.data.terminal, true);
 
@@ -830,24 +837,25 @@ test('Fleet P5: claude-code manager prompt emits curl POST templates', () => {
   assert.doesNotMatch(out, /do NOT use Bash with curl/, 'Claude manager prompt must not forbid curl');
 });
 
-test('Fleet P5: codex manager curl section remains byte-identical', () => {
+test('Fleet P5: codex manager curl section references the runtime capability only', () => {
   const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
   const out = buildManagerSystemPrompt({ adapter: null, port: 4177, token: 'tok', layer: 'operator', adapterType: 'codex' });
   const expected = `Use curl (via Bash) to query the API.
 \`\`\`
 # GET
-curl -s http://localhost:4177/api/runs -H "Authorization: Bearer tok" | head -c 2000
+curl -s http://localhost:4177/api/runs -H "Authorization: Bearer $PALANTIR_MANAGER_TOKEN" | head -c 2000
 
 # POST (create/execute)
-curl -s -X POST http://localhost:4177/api/tasks -H "Authorization: Bearer tok" -H "Content-Type: application/json" -d '{"title":"...","project_id":"..."}'
+curl -s -X POST http://localhost:4177/api/tasks -H "Authorization: Bearer $PALANTIR_MANAGER_TOKEN" -H "Content-Type: application/json" -d '{"title":"...","project_id":"..."}'
 
 # PATCH (update)
-curl -s -X PATCH http://localhost:4177/api/tasks/TASK_ID/status -H "Authorization: Bearer tok" -H "Content-Type: application/json" -d '{"status":"done"}'
+curl -s -X PATCH http://localhost:4177/api/tasks/TASK_ID/status -H "Authorization: Bearer $PALANTIR_MANAGER_TOKEN" -H "Content-Type: application/json" -d '{"status":"done"}'
 
 # DELETE
-curl -s -X DELETE http://localhost:4177/api/tasks/TASK_ID -H "Authorization: Bearer tok"
+curl -s -X DELETE http://localhost:4177/api/tasks/TASK_ID -H "Authorization: Bearer $PALANTIR_MANAGER_TOKEN"
 \`\`\``;
-  assert.ok(out.includes(expected), 'Codex curl template block must remain byte-identical');
+  assert.ok(out.includes(expected), 'Codex curl template must use the runtime capability variable');
+  assert.doesNotMatch(out, /Bearer tok/);
 });
 
 test('ClaudeAdapter exposes Claude guardrails section', () => {

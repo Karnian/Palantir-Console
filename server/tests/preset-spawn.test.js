@@ -25,6 +25,9 @@ const { createAgentProfileService } = require('../services/agentProfileService')
 const { createLifecycleService } = require('../services/lifecycleService');
 const { createPresetService } = require('../services/presetService');
 
+const TEST_RUNTIME_MCP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-p10c-runtime-mcp-'));
+test.after(() => fs.rmSync(TEST_RUNTIME_MCP_DIR, { recursive: true, force: true }));
+
 async function mkdb(t) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'palantir-p10c-'));
   const dbPath = path.join(dir, 'test.db');
@@ -109,7 +112,7 @@ function buildLifecycle(db, { presetService, claudeVersionResolver } = {}) {
   const lc = createLifecycleService({
     runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
     executionEngine: exec, streamJsonEngine: sje, worktreeService: null, eventBus: null,
-    presetService, claudeVersionResolver,
+    presetService, claudeVersionResolver, runtimeMcpDir: TEST_RUNTIME_MCP_DIR,
   });
   return { rs, ts, ps, aps, exec, sje, lc };
 }

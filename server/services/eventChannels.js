@@ -88,6 +88,8 @@ const SERVER_EMITS = Object.freeze([
   'memory:distill_context_capped',
 
   // L2 Master memory lifecycle / scanner observability
+  'master_memory:candidate_created',
+  'master_memory:candidate_rejected',
   'master_memory:decayed',
   'master_memory:evicted',
   'master_memory:promoted',
@@ -122,6 +124,8 @@ const CLIENT_REQUIRED_LIVE = Object.freeze([
   'memory:decayed',
   'memory:evicted',
   'memory:promoted',
+  'master_memory:candidate_created',
+  'master_memory:candidate_rejected',
   'master_memory:decayed',
   'master_memory:evicted',
   'master_memory:promoted',

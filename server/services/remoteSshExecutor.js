@@ -8,6 +8,9 @@ const WORKER_OUTPUT_MAX_LINES = 500;
 const WORKER_OUTPUT_MAX_BUFFER = 256 * 1024;
 const SSH_SERVER_ALIVE_INTERVAL_SECONDS = 15;
 const SSH_SERVER_ALIVE_COUNT_MAX = 4;
+// Executor-owned filesystem probes need stable diagnostics for reason mapping.
+// Never apply this to public exec, worker, or manager command output.
+const FILESYSTEM_LOCALE_ENV = Object.freeze({ LC_ALL: 'C' });
 
 // Fixed pod-side probe for the claude OAuth usage endpoint (node-usage v2,
 // brief §5-1). Security contract (Codex security review R1 applied):
@@ -46,9 +49,10 @@ function shq(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
-function exposedRootsError(message) {
+function exposedRootsError(message, reason) {
   const err = new Error(message);
   err.code = 'EXPOSED_ROOTS';
+  if (reason) err.reason = reason;
   return err;
 }
 
@@ -143,6 +147,19 @@ function normalizeEnv(env) {
     });
 }
 
+function normalizeTransportSecret(value, key) {
+  if (value === undefined || value === null || value === '') return null;
+  if (
+    typeof value !== 'string'
+    || /[\r\n\x00]/.test(value)
+  ) {
+    const err = new Error(`${key} must be a non-empty single-line string`);
+    err.code = 'SECRET_TRANSPORT_INVALID';
+    throw err;
+  }
+  return value;
+}
+
 function stripOneTrailingNewline(value) {
   return String(value || '').replace(/\n$/, '');
 }
@@ -169,6 +186,12 @@ function commandError(command, args, res) {
   err.code = res.code;
   err.stdout = res.stdout;
   err.stderr = res.stderr;
+  return err;
+}
+
+function filesystemTimeoutError() {
+  const err = new Error('Remote filesystem operation timed out');
+  err.code = 'ETIMEDOUT';
   return err;
 }
 
@@ -317,6 +340,7 @@ function createRemoteSshNodeExecutor(node, {
   const allowedCommands = new Set((commandAllowlist || []).map(String));
   const managerInteractiveCommands = new Set(['codex', 'claude']);
   let canonicalRootsPromise = null;
+  let canonicalRootsValue = null;
 
   function sshArgsFor(script, { keepAlive } = {}) {
     // ssh JOINS every post-destination arg with spaces and hands the single
@@ -484,21 +508,65 @@ function createRemoteSshNodeExecutor(node, {
     return runRemoteScript(buildCommandScript(command, args, opts), opts);
   }
 
-  async function rawRealpath(remotePath) {
-    const res = await runRemoteCommand('realpath', [remotePath]);
+  function remainingTimeoutMs(deadlineAt) {
+    if (deadlineAt === undefined || deadlineAt === null) return undefined;
+    const remaining = Math.ceil(Number(deadlineAt) - Date.now());
+    if (!Number.isFinite(remaining) || remaining <= 0) throw filesystemTimeoutError();
+    return remaining;
+  }
+
+  function runFilesystemCommand(command, args = [], { deadlineAt } = {}) {
+    const timeoutMs = remainingTimeoutMs(deadlineAt);
+    return runRemoteCommand(command, args, {
+      env: FILESYSTEM_LOCALE_ENV,
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    });
+  }
+
+  function runFilesystemScript(script, { deadlineAt, ...opts } = {}) {
+    const timeoutMs = remainingTimeoutMs(deadlineAt);
+    const localizedScript = `export LC_ALL=${shq('C')}; ${script}`;
+    return runRemoteScript(localizedScript, {
+      ...opts,
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    });
+  }
+
+  async function rawRealpath(remotePath, { deadlineAt } = {}) {
+    const res = await runFilesystemCommand('realpath', [remotePath], { deadlineAt });
     if (res.code !== 0) throw commandError('realpath', [remotePath], res);
     return stripOneTrailingNewline(res.stdout);
   }
 
-  async function canonicalRoots() {
+  async function loadCanonicalRoots({ deadlineAt } = {}) {
+    const roots = [];
+    for (const root of exposedRoots) {
+      roots.push(await rawRealpath(root, { deadlineAt }));
+    }
+    return roots;
+  }
+
+  async function canonicalRoots({ deadlineAt } = {}) {
+    if (canonicalRootsValue) return canonicalRootsValue;
+
+    // A browse deadline must not poison the executor-wide cache when a stale
+    // mount times out. Timed attempts are therefore cached only after success;
+    // the intentionally unbounded worker/materialization path keeps its
+    // historical shared-promise behaviour.
+    if (deadlineAt !== undefined && deadlineAt !== null) {
+      const roots = await loadCanonicalRoots({ deadlineAt });
+      if (!canonicalRootsValue) {
+        canonicalRootsValue = roots;
+        canonicalRootsPromise = Promise.resolve(roots);
+      }
+      return canonicalRootsValue;
+    }
+
     if (!canonicalRootsPromise) {
-      canonicalRootsPromise = (async () => {
-        const roots = [];
-        for (const root of exposedRoots) {
-          roots.push(await rawRealpath(root));
-        }
+      canonicalRootsPromise = loadCanonicalRoots().then((roots) => {
+        canonicalRootsValue = roots;
         return roots;
-      })();
+      });
     }
     return canonicalRootsPromise;
   }
@@ -508,49 +576,63 @@ function createRemoteSshNodeExecutor(node, {
     return canonicalPath === canonicalRoot || canonicalPath.startsWith(`${canonicalRoot}/`);
   }
 
-  async function assertCanonicalWithinRoots(canonicalPath, originalPath) {
-    const roots = await canonicalRoots();
+  async function assertCanonicalWithinRoots(canonicalPath, originalPath, { deadlineAt } = {}) {
+    const roots = await canonicalRoots({ deadlineAt });
     if (!roots.some((root) => isWithinRoot(canonicalPath, root))) {
-      throw exposedRootsError(`Remote path is outside exposed_roots: ${originalPath}`);
+      // Keep EXPOSED_ROOTS as the executor-wide error code for backward
+      // compatibility, but distinguish a lexical in-root path whose realpath
+      // escaped through a symlink. /api/fs and the save validator expose this
+      // reason so operators do not confuse a dangerous link with a typo.
+      const normalizedOriginal = path.posix.normalize(originalPath);
+      const escapedViaSymlink = exposedRoots.some((root) => (
+        isWithinRoot(normalizedOriginal, path.posix.normalize(root))
+      ));
+      throw exposedRootsError(
+        `Remote path is outside exposed_roots: ${originalPath}`,
+        escapedViaSymlink ? 'symlink_escape' : undefined,
+      );
     }
     return canonicalPath;
   }
 
-  async function assertWithinRoots(remotePath, { allowMissing = false, parentOnly = false } = {}) {
+  async function assertWithinRoots(
+    remotePath,
+    { allowMissing = false, parentOnly = false, deadlineAt } = {},
+  ) {
     ensureAbsoluteRemotePath(remotePath);
     if (parentOnly) {
-      const parentCanonical = await rawRealpath(parentFor(remotePath));
-      await assertCanonicalWithinRoots(parentCanonical, remotePath);
+      const parentCanonical = await rawRealpath(parentFor(remotePath), { deadlineAt });
+      await assertCanonicalWithinRoots(parentCanonical, remotePath, { deadlineAt });
       return { canonical: parentCanonical, exists: false };
     }
 
     try {
-      const canonical = await rawRealpath(remotePath);
-      await assertCanonicalWithinRoots(canonical, remotePath);
+      const canonical = await rawRealpath(remotePath, { deadlineAt });
+      await assertCanonicalWithinRoots(canonical, remotePath, { deadlineAt });
       return { canonical, exists: true };
     } catch (err) {
-      if (err.code === 'SSH_TRANSPORT' || err.code === 'EXPOSED_ROOTS') throw err;
+      if (['SSH_TRANSPORT', 'EXPOSED_ROOTS', 'ETIMEDOUT'].includes(err.code)) throw err;
       if (allowMissing) {
         const immediateParent = parentFor(remotePath);
         try {
-          const parentCanonical = await rawRealpath(immediateParent);
-          await assertCanonicalWithinRoots(parentCanonical, remotePath);
+          const parentCanonical = await rawRealpath(immediateParent, { deadlineAt });
+          await assertCanonicalWithinRoots(parentCanonical, remotePath, { deadlineAt });
           return {
             canonical: path.posix.join(parentCanonical, basenameFor(remotePath)),
             parentCanonical,
             exists: false,
           };
         } catch (parentErr) {
-          if (parentErr.code === 'SSH_TRANSPORT' || parentErr.code === 'EXPOSED_ROOTS') throw parentErr;
+          if (['SSH_TRANSPORT', 'EXPOSED_ROOTS', 'ETIMEDOUT'].includes(parentErr.code)) throw parentErr;
         }
         let ancestor = parentFor(remotePath);
         while (true) {
           try {
-            const ancestorCanonical = await rawRealpath(ancestor);
-            await assertCanonicalWithinRoots(ancestorCanonical, remotePath);
+            const ancestorCanonical = await rawRealpath(ancestor, { deadlineAt });
+            await assertCanonicalWithinRoots(ancestorCanonical, remotePath, { deadlineAt });
             return { canonical: null, exists: false };
           } catch (parentErr) {
-            if (parentErr.code === 'SSH_TRANSPORT' || parentErr.code === 'EXPOSED_ROOTS') throw parentErr;
+            if (['SSH_TRANSPORT', 'EXPOSED_ROOTS', 'ETIMEDOUT'].includes(parentErr.code)) throw parentErr;
             const next = parentFor(ancestor);
             if (next === ancestor) throw parentErr;
             ancestor = next;
@@ -597,8 +679,57 @@ function createRemoteSshNodeExecutor(node, {
     }
     let safeCwd = cwd;
     if (cwd) safeCwd = (await assertWithinRoots(cwd)).canonical;
-    const script = buildCommandScript(commandName, args, { cwd: safeCwd, env, pathPrefix });
-    return spawnFn('ssh', sshArgsFor(script, { keepAlive: true }), { stdio: ['pipe', 'pipe', 'pipe'] });
+    const explicitEnv = { ...(env || {}) };
+    const managerToken = normalizeTransportSecret(
+      explicitEnv.PALANTIR_MANAGER_TOKEN,
+      'PALANTIR_MANAGER_TOKEN',
+    );
+    delete explicitEnv.PALANTIR_TOKEN;
+    delete explicitEnv.PALANTIR_PM_TOKEN;
+    delete explicitEnv.PALANTIR_WORKER_TOKEN;
+    delete explicitEnv.PALANTIR_MANAGER_TOKEN;
+    const script = buildCommandScript(commandName, args, {
+      cwd: safeCwd,
+      // The remote login shell may have controller credentials configured.
+      // Strip global actor tokens. A run-bound Manager capability is bootstrapped
+      // from SSH stdin below, so its value never appears in the local SSH argv or
+      // the remote command string.
+      env: {
+        PALANTIR_TOKEN: null,
+        PALANTIR_PM_TOKEN: null,
+        PALANTIR_WORKER_TOKEN: null,
+        ...(managerToken ? {} : { PALANTIR_MANAGER_TOKEN: null }),
+        ...explicitEnv,
+      },
+      pathPrefix,
+    });
+    const bootstrapScript = managerToken
+      ? `IFS= read -r PALANTIR_MANAGER_TOKEN || exit 126; export PALANTIR_MANAGER_TOKEN; ${script}`
+      : script;
+    const child = spawnFn(
+      'ssh',
+      sshArgsFor(bootstrapScript, { keepAlive: true }),
+      { stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+    if (managerToken) {
+      if (!child || !child.stdin || typeof child.stdin.write !== 'function') {
+        try { child?.kill?.('SIGTERM'); } catch { /* best-effort */ }
+        throw new Error('spawnInteractive requires writable SSH stdin for manager capability transport');
+      }
+      // The caller writes the model prompt only after this async method resolves,
+      // so this framed first line is consumed by the bootstrap before the
+      // remaining stdin is handed unchanged to codex/claude.
+      if (typeof child.stdin.on === 'function') {
+        child.stdin.on('error', () => { /* child close/error is authoritative */ });
+      }
+      try {
+        child.stdin.write(`${managerToken}\n`);
+      } catch (err) {
+        try { child.kill?.('SIGTERM'); } catch { /* best-effort */ }
+        throw err;
+      }
+    }
+    return child;
   }
 
   /**
@@ -645,14 +776,14 @@ function createRemoteSshNodeExecutor(node, {
   async function fileExists(remotePath) {
     const checked = await assertWithinRoots(remotePath, { allowMissing: true });
     if (!checked.exists) return false;
-    const res = await runRemoteCommand('test', ['-e', checked.canonical]);
+    const res = await runFilesystemCommand('test', ['-e', checked.canonical]);
     if (res.code === 0) return true;
     if (res.code === 1) return false;
     throw commandError('test', ['-e', remotePath], res);
   }
 
-  async function realpath(remotePath) {
-    const checked = await assertWithinRoots(remotePath);
+  async function realpath(remotePath, options = {}) {
+    const checked = await assertWithinRoots(remotePath, options);
     return checked.canonical;
   }
 
@@ -751,16 +882,95 @@ function createRemoteSshNodeExecutor(node, {
       throw new Error('RemoteSshNodeExecutor.readdir does not support options such as withFileTypes');
     }
     const checked = await assertWithinRoots(remotePath);
-    const res = await runRemoteCommand('find', [checked.canonical, '-mindepth', '1', '-maxdepth', '1', '-print']);
+    const res = await runFilesystemCommand(
+      'find',
+      [checked.canonical, '-mindepth', '1', '-maxdepth', '1', '-print'],
+    );
     if (res.code !== 0) throw commandError('find', [checked.canonical], res);
     return res.stdout.split('\n').filter(Boolean).map((entry) => path.posix.basename(entry));
   }
 
-  async function stat(remotePath) {
-    const checked = await assertWithinRoots(remotePath);
-    const dirRes = await runRemoteCommand('test', ['-d', checked.canonical]);
+  // task_85d43f96: one-round-trip directory listing for the node-aware
+  // DirectoryPicker. `readdir` above returns names only, so a picker listing
+  // would otherwise cost an extra `test -d` round-trip per child. `%y` reports
+  // the type of the entry ITSELF (find does not follow symlinks without -L),
+  // so a symlinked directory is reported as 'l' and never surfaces as a
+  // browsable child — a listed entry can never be a symlink that escapes
+  // exposed_roots. Navigating INTO any path still goes through
+  // assertWithinRoots (realpath + canonical root containment) first, so a
+  // symlink escape that was typed or stored elsewhere is rejected fail-closed.
+  async function listDirectoryEntries(remotePath, { maxEntries = 2000, deadlineAt } = {}) {
+    const checked = await assertWithinRoots(remotePath, { deadlineAt });
+    const cap = Math.max(1, Number(maxEntries) || 2000);
+    const p = shq(checked.canonical);
+    // Same FINDEXIT marker discipline as listFilesWithSizes: dash has no
+    // `pipefail`, so `find | head` reports head's status (0) even when find
+    // failed on an unreadable directory — a silent EMPTY listing that looks
+    // like "no subfolders". The marker is printed by the same group, so a
+    // missing marker means head truncated the walk and a nonzero marker means
+    // find itself failed.
+    //
+    // NOTDIR guard, in the SAME round trip: `find <regular file> -mindepth 1`
+    // exits 0 and prints nothing, so without this a file (or FIFO/socket) came
+    // back as a successful EMPTY listing. The node-change validator reads that
+    // as "path is valid on this node" and the save-time binding check only
+    // tests existence, so a project directory could be rebound to a file and
+    // only fail much later when it is used as a working directory.
+    // assertWithinRoots already realpath'd the target, so it exists here —
+    // `! -d` therefore means "exists but is not a directory".
+    const script = `if [ ! -d ${p} ]; then printf 'NOTDIR\\0'; else { find ${p} -mindepth 1 -maxdepth 1 -printf '%y\\t%P\\0'; printf 'FINDEXIT:%s\\0' "$?"; } | head -z -n ${cap + 2}; fi`;
+    const res = await runFilesystemScript(script, {
+      deadlineAt,
+      maxBuffer: 4 * 1024 * 1024,
+      ...(deadlineAt === undefined || deadlineAt === null ? { timeoutMs: 30000 } : {}),
+    });
+    if (res.code !== 0 && !res.stdout) throw commandError('listDirectoryEntries', [checked.canonical], res);
+    const records = String(res.stdout).split('\0').filter((s) => s.length > 0);
+    if (records.length === 1 && records[0] === 'NOTDIR') {
+      const err = new Error(`Remote path is not a directory: ${checked.canonical}`);
+      err.code = 'ENOTDIR';
+      err.status = 400;
+      err.reason = 'path_not_directory';
+      throw err;
+    }
+    let findComplete = false;
+    if (records.length && records[records.length - 1].startsWith('FINDEXIT:')) {
+      const code = Number(records.pop().slice('FINDEXIT:'.length));
+      if (Number.isFinite(code) && code !== 0) {
+        throw commandError('find', [checked.canonical], {
+          code,
+          stdout: '',
+          stderr: res.stderr || 'find exited nonzero',
+        });
+      }
+      findComplete = true;
+    }
+    const truncated = !findComplete || records.length > cap;
+    const entries = [];
+    for (const rec of records.slice(0, cap)) {
+      const tab = rec.indexOf('\t');
+      if (tab < 0) continue;
+      const type = rec.slice(0, tab);
+      const name = rec.slice(tab + 1);
+      // `%P` at -maxdepth 1 is a bare basename; anything else is a malformed
+      // record (or a forged one) and is dropped rather than joined onto a path.
+      if (!name || name === '.' || name === '..' || name.includes('/')) continue;
+      entries.push({ name, isDirectory: type === 'd' });
+    }
+    return { path: checked.canonical, entries, truncated };
+  }
+
+  // task_85d43f96: the picker needs the CANONICAL roots to decide where the
+  // "up" affordance must stop. Read-only view of the already-cached values.
+  async function canonicalExposedRoots({ deadlineAt } = {}) {
+    return [...(await canonicalRoots({ deadlineAt }))];
+  }
+
+  async function stat(remotePath, options = {}) {
+    const checked = await assertWithinRoots(remotePath, options);
+    const dirRes = await runFilesystemCommand('test', ['-d', checked.canonical], options);
     if (dirRes.code !== 0 && dirRes.code !== 1) throw commandError('test', ['-d', checked.canonical], dirRes);
-    const fileRes = await runRemoteCommand('test', ['-f', checked.canonical]);
+    const fileRes = await runFilesystemCommand('test', ['-f', checked.canonical], options);
     if (fileRes.code !== 0 && fileRes.code !== 1) throw commandError('test', ['-f', checked.canonical], fileRes);
     const isDirectory = dirRes.code === 0;
     const isFile = fileRes.code === 0;
@@ -901,12 +1111,41 @@ function createRemoteSshNodeExecutor(node, {
     };
   }
 
-  function buildWorkerInvocation({ command, args = [], env, workerPath }) {
-    const envParts = normalizeEnv(env);
+  function buildWorkerInvocation({ command, args = [], env, workerPath }, {
+    workerTokenFile = null,
+  } = {}) {
+    // `env` assignments alone preserve variables inherited from the pod login
+    // shell. Empty assignments deliberately clear both actor credentials first;
+    // an explicit server-selected value below then restores only the permitted
+    // credential for the current policy.
+    const workerEnv = { ...(env || {}) };
+    delete workerEnv.PALANTIR_TOKEN;
+    delete workerEnv.PALANTIR_PM_TOKEN;
+    delete workerEnv.PALANTIR_WORKER_TOKEN;
+    delete workerEnv.PALANTIR_MANAGER_TOKEN;
+    const envParts = normalizeEnv({
+      PALANTIR_TOKEN: null,
+      PALANTIR_PM_TOKEN: null,
+      ...(workerTokenFile ? {} : { PALANTIR_WORKER_TOKEN: null }),
+      PALANTIR_MANAGER_TOKEN: null,
+      ...workerEnv,
+    });
     const list = Array.isArray(args) ? args : [];
     const argv = [shq(command), ...list.map((arg) => shq(arg))];
     const invocation = ['env', ...envParts, ...argv].join(' ');
-    return workerPath ? `PATH=${shq(workerPath)}:$PATH ${invocation}` : invocation;
+    const commandLine = workerPath ? `PATH=${shq(workerPath)}:$PATH ${invocation}` : invocation;
+    if (!workerTokenFile) return commandLine;
+
+    const tokenDir = path.posix.dirname(workerTokenFile);
+    return [
+      `PALANTIR_WORKER_TOKEN=$(cat ${shq(workerTokenFile)})`,
+      'worker_token_rc=$?',
+      `rm -f -- ${shq(workerTokenFile)}`,
+      `rmdir -- ${shq(tokenDir)} 2>/dev/null || true`,
+      '[ "$worker_token_rc" -eq 0 ] || exit "$worker_token_rc"',
+      'export PALANTIR_WORKER_TOKEN',
+      commandLine,
+    ].join('; ');
   }
 
   async function ensureWorkerStatusDir(paths) {
@@ -935,103 +1174,106 @@ function createRemoteSshNodeExecutor(node, {
     const safeCwd = (await assertWithinRoots(spec.cwd)).canonical;
     await ensureWorkerStatusDir(paths);
 
-    const workerInvocation = buildWorkerInvocation(spec);
-    let canonicalStdin = null;
-    if (spec.stdin !== undefined) {
-      // Resolve the prompt path BEFORE the file exists so upload and handoff can
-      // share one SSH invocation (see the crash-safety note below).
+    const workerToken = normalizeTransportSecret(
+      spec.env && spec.env.PALANTIR_WORKER_TOKEN,
+      'PALANTIR_WORKER_TOKEN',
+    );
+    let workerTokenFile = null;
+    try {
+      if (workerToken) {
+        // tmux may be a long-lived server and cannot safely receive a fresh
+        // run capability through its inherited environment. Place the token
+        // through SSH stdin in a 0600 file; the detached child reads and
+        // deletes it before exec. Only the random path enters SSH argv.
+        workerTokenFile = await putSecretFile('worker_capability', workerToken, 0o600);
+      }
+      const workerInvocation = buildWorkerInvocation(spec, { workerTokenFile });
+      let canonicalStdin = null;
+      if (spec.stdin !== undefined) {
+        // Resolve the prompt path BEFORE the file exists so upload and handoff can
+        // share one SSH invocation (see the crash-safety note below).
+        //
+        // Canonicalise the PARENT only, then append the fixed basename — never
+        // realpath the final component. Resolving it would follow a pre-existing
+        // `stdin.txt` symlink, and since a link pointing at another in-root file
+        // passes the exposed-roots check, the upload below would delete that file
+        // and overwrite it with the prompt. Naming the parent's canonical child
+        // instead means `rm` unlinks the link itself (rm never follows a final
+        // symlink) and `cat` then creates a fresh regular file.
+        const promptParent = await assertWithinRoots(paths.stdinFile, { parentOnly: true });
+        canonicalStdin = path.posix.join(promptParent.canonical, path.posix.basename(paths.stdinFile));
+      }
+
+      const stdinRedirect = canonicalStdin ? ` < ${shq(canonicalStdin)}` : '';
+      const cleanupStdinCommand = canonicalStdin ? `rm -f -- ${shq(canonicalStdin)}` : '';
+      const cleanupStdin = canonicalStdin ? `; ${cleanupStdinCommand}` : '';
+      const stdinTrap = canonicalStdin
+        ? `trap ${shq(cleanupStdinCommand)} EXIT HUP INT TERM; `
+        : '';
+      const clearStdinTrap = canonicalStdin ? '; trap - EXIT HUP INT TERM' : '';
+      // Remove BEFORE disarming the trap: clearing it first leaves a window where
+      // a HUP/TERM arriving before the `rm` has no handler left to run.
+      const exitWrite = canonicalStdin
+        ? `; agent_exit_code=$?${cleanupStdin}${clearStdinTrap}; echo "$agent_exit_code" > ${shq(paths.exitSentinel)}`
+        : `; echo $? > ${shq(paths.exitSentinel)}`;
+      const innerScript = `${stdinTrap}${workerInvocation}${stdinRedirect} > ${shq(paths.stdoutLog)} 2>&1${exitWrite}`;
+      const startWorker = `cd ${shq(safeCwd)} && tmux new-session -d -s ${shq(paths.sessionName)} ${shq(innerScript)}`;
+
+      if (!canonicalStdin) {
+        const res = await runRemoteScript(startWorker);
+        if (res.code !== 0) {
+          throw commandError('tmux', ['new-session', '-d', '-s', paths.sessionName], res);
+        }
+        return { sessionName: paths.sessionName };
+      }
+
+      // Prompt upload and tmux handoff MUST be one SSH invocation. Splitting them
+      // leaves a window where the prompt exists on disk but nothing owns it: if the
+      // controller dies in between, the JS cleanup never runs and the tmux trap does
+      // not exist yet, so a 0600 prompt is stranded for a run that never started.
       //
-      // Canonicalise the PARENT only, then append the fixed basename — never
-      // realpath the final component. Resolving it would follow a pre-existing
-      // `stdin.txt` symlink, and since a link pointing at another in-root file
-      // passes the exposed-roots check, the upload below would delete that file
-      // and overwrite it with the prompt. Naming the parent's canonical child
-      // instead means `rm` unlinks the link itself (rm never follows a final
-      // symlink) and `cat` then creates a fresh regular file.
-      const promptParent = await assertWithinRoots(paths.stdinFile, { parentOnly: true });
-      canonicalStdin = path.posix.join(promptParent.canonical, path.posix.basename(paths.stdinFile));
-    }
+      // Arming the trap before `cat` closes that window from the remote side — the
+      // controller dying drops the SSH connection, the remote shell takes SIGHUP,
+      // and the handler removes the prompt. It is disarmed only once tmux owns the
+      // file, after which the worker's own trap is responsible for it.
+      const promptBytes = Buffer.byteLength(spec.stdin, 'utf8');
+      const script = [
+        'umask 077',
+        `cleanup() { ${cleanupStdinCommand}; }`,
+        `trap 'rc=$?; cleanup; exit "$rc"' 0`,
+        `trap 'exit 129' HUP`,
+        `trap 'exit 130' INT`,
+        `trap 'exit 143' TERM`,
+        `rm -f -- ${shq(canonicalStdin)}`,
+        'set -C',
+        `cat > ${shq(canonicalStdin)}`,
+        'set +C',
+        `[ "$(wc -c < ${shq(canonicalStdin)})" -eq ${promptBytes} ]`,
+        `chmod 600 ${shq(canonicalStdin)}`,
+        startWorker,
+        'trap - 0 HUP INT TERM',
+      ].join(' && ');
 
-    const stdinRedirect = canonicalStdin ? ` < ${shq(canonicalStdin)}` : '';
-    const cleanupStdinCommand = canonicalStdin ? `rm -f -- ${shq(canonicalStdin)}` : '';
-    const cleanupStdin = canonicalStdin ? `; ${cleanupStdinCommand}` : '';
-    const stdinTrap = canonicalStdin
-      ? `trap ${shq(cleanupStdinCommand)} EXIT HUP INT TERM; `
-      : '';
-    const clearStdinTrap = canonicalStdin ? '; trap - EXIT HUP INT TERM' : '';
-    // Remove BEFORE disarming the trap: clearing it first leaves a window where
-    // a HUP/TERM arriving before the `rm` has no handler left to run.
-    const exitWrite = canonicalStdin
-      ? `; agent_exit_code=$?${cleanupStdin}${clearStdinTrap}; echo "$agent_exit_code" > ${shq(paths.exitSentinel)}`
-      : `; echo $? > ${shq(paths.exitSentinel)}`;
-    const innerScript = `${stdinTrap}${workerInvocation}${stdinRedirect} > ${shq(paths.stdoutLog)} 2>&1${exitWrite}`;
-    const startWorker = `cd ${shq(safeCwd)} && tmux new-session -d -s ${shq(paths.sessionName)} ${shq(innerScript)}`;
-
-    if (!canonicalStdin) {
-      const res = await runRemoteScript(startWorker);
+      let res;
+      try {
+        res = await runRemoteScript(script, { input: spec.stdin });
+      } catch (err) {
+        // The remote trap handles a dropped connection; this covers a local-side
+        // rejection where the remote shell may never have run at all.
+        try { await runRemoteCommand('rm', ['-f', canonicalStdin]); } catch {}
+        throw err;
+      }
       if (res.code !== 0) {
+        try { await runRemoteCommand('rm', ['-f', canonicalStdin]); } catch {}
         throw commandError('tmux', ['new-session', '-d', '-s', paths.sessionName], res);
       }
       return { sessionName: paths.sessionName };
-    }
-
-    // Prompt upload and tmux handoff MUST be one SSH invocation. Splitting them
-    // leaves a window where the prompt exists on disk but nothing owns it: if the
-    // controller dies in between, the JS cleanup never runs and the tmux trap does
-    // not exist yet, so a 0600 prompt is stranded for a run that never started.
-    //
-    // Arming the trap before `cat` closes that window from the remote side — the
-    // controller dying drops the SSH connection, the remote shell takes SIGHUP,
-    // and the handler removes the prompt. It is disarmed only once tmux owns the
-    // file, after which the worker's own trap is responsible for it. This mirrors
-    // the writeTempFile trap discipline already used for remote temp files.
-    //
-    // A dying controller also just closes stdin, which `cat` sees as a clean EOF,
-    // so a truncated upload would otherwise look like success. The byte check
-    // makes a short read fail the chain instead of launching a worker on a
-    // silently truncated prompt.
-    // Signal traps must EXIT rather than just clean up: a bare handler runs and
-    // then lets the `&&` chain continue, which would start a worker on a prompt
-    // the handler just deleted. Exiting routes through the 0 trap, so cleanup
-    // happens exactly once and the chain aborts. Same discipline as writeTempFile.
-    const promptBytes = Buffer.byteLength(spec.stdin, 'utf8');
-    const script = [
-      'umask 077',
-      `cleanup() { ${cleanupStdinCommand}; }`,
-      `trap 'rc=$?; cleanup; exit "$rc"' 0`,
-      `trap 'exit 129' HUP`,
-      `trap 'exit 130' INT`,
-      `trap 'exit 143' TERM`,
-      `rm -f -- ${shq(canonicalStdin)}`,
-      // noclobber narrows the gap between the unlink and the redirect: if the
-      // name is recreated in between as a regular file, or a symlink to one, the
-      // redirect fails instead of following it. It is not a full O_NOFOLLOW —
-      // a link to a non-regular file (/dev/null) still opens — so this bounds
-      // the window rather than closing it. Winning that race needs a node-local
-      // swap timed between two statements, which the trust boundary excludes.
-      'set -C',
-      `cat > ${shq(canonicalStdin)}`,
-      'set +C',
-      `[ "$(wc -c < ${shq(canonicalStdin)})" -eq ${promptBytes} ]`,
-      `chmod 600 ${shq(canonicalStdin)}`,
-      startWorker,
-      'trap - 0 HUP INT TERM',
-    ].join(' && ');
-
-    let res;
-    try {
-      res = await runRemoteScript(script, { input: spec.stdin });
     } catch (err) {
-      // The remote trap handles a dropped connection; this covers a local-side
-      // rejection where the remote shell may never have run at all.
-      try { await runRemoteCommand('rm', ['-f', canonicalStdin]); } catch {}
+      if (workerTokenFile) {
+        await cleanupCreatedPath(path.posix.dirname(workerTokenFile));
+      }
       throw err;
     }
-    if (res.code !== 0) {
-      try { await runRemoteCommand('rm', ['-f', canonicalStdin]); } catch {}
-      throw commandError('tmux', ['new-session', '-d', '-s', paths.sessionName], res);
-    }
-    return { sessionName: paths.sessionName };
   }
 
   async function ownerOf(runId) {
@@ -1113,6 +1355,8 @@ function createRemoteSshNodeExecutor(node, {
     stat,
     mkdir,
     ensureRealDir,
+    listDirectoryEntries,
+    canonicalExposedRoots,
     listFilesWithSizes,
     readFileCapped,
     readFile,
