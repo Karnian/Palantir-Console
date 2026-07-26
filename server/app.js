@@ -78,7 +78,8 @@ const { createModelPoliciesRouter } = require('./routes/modelPolicies');
 const { createMemoryService } = require('./services/memoryService');
 const { createMasterMemoryService } = require('./services/masterMemoryService');
 const { createMemoryDistillService } = require('./services/memoryDistillService');
-const { createLiveDistiller } = require('./services/distillers/liveDistiller');
+const { createLiveDistiller, resolveClaudeCliBinary } = require('./services/distillers/liveDistiller');
+const { resolveClaudeAuth, CLAUDE_AUTH_KEYS } = require('./services/authResolver');
 const { createMemoryRouter } = require('./routes/memory');
 const { createMemoryDiagnosticsRouter } = require('./routes/memoryDiagnostics');
 const { createMemoryProposalsRouter } = require('./routes/memoryProposals');
@@ -1027,6 +1028,23 @@ function startMasterMemoryXprojectScanner({
   return api;
 }
 
+/**
+ * authResolverOpts is a test DI seam whose probes are documented as predicates
+ * but are passed as plain booleans in some suites. Consumers that only forward
+ * the object never notice; a consumer that invokes them does. Wrap any
+ * non-function probe so both shapes behave the same.
+ */
+function normalizeAuthProbes(opts) {
+  const out = { ...opts };
+  for (const key of ['hasKeychain', 'hasCredentialsFile']) {
+    if (key in out && typeof out[key] !== 'function') {
+      const value = !!out[key];
+      out[key] = () => value;
+    }
+  }
+  return out;
+}
+
 function createApp(options = {}) {
   const app = express();
   app.bootInfo = BOOT_INFO;
@@ -1465,16 +1483,17 @@ function createApp(options = {}) {
   createR3Capture({ eventBus, memoryService });
 
   // ML PR3b: live distiller + periodic scheduler. Enabled by default unless
-  // PALANTIR_MEMORY_DISTILL=0. A real ANTHROPIC_API_KEY (or an injected test
-  // distiller) is still required. All distill safety (sanitize / clamp /
-  // evidence) lives in promoteCandidatesBatchTx, so this only wires a real
-  // model + a periodic drain of pending candidates -> active memory.
+  // PALANTIR_MEMORY_DISTILL=0. Prefer the byte-stable Anthropic API path when
+  // an API key exists; otherwise use an authenticated Claude Code CLI. All
+  // distill safety remains in promoteCandidatesBatchTx.
   let memoryDistillScheduler = null;
   let memoryDistillStatus = {
     state: 'disabled',
     enabled: false,
     provider: null,
+    backend: null,
     interval_ms: null,
+    reason: null,
     last_error: null,
   };
   {
@@ -1484,18 +1503,64 @@ function createApp(options = {}) {
       const apiKey = options.memoryDistillApiKey !== undefined
         ? options.memoryDistillApiKey
         : process.env.ANTHROPIC_API_KEY;
-      if (!distiller && !apiKey) {
+      const requestedBackend = options.memoryDistillBackend
+        ?? process.env.PALANTIR_MEMORY_DISTILL_BACKEND
+        ?? 'auto';
+      let selectedBackend = distiller ? (distiller.backend || 'injected') : null;
+      let missingReason = null;
+
+      if (!distiller && !['auto', 'api', 'cli'].includes(requestedBackend)) {
+        missingReason = `Invalid PALANTIR_MEMORY_DISTILL_BACKEND: ${requestedBackend}`;
+      } else if (!distiller && requestedBackend !== 'cli' && apiKey) {
+        selectedBackend = 'anthropic_api';
+        distiller = createLiveDistiller({ apiKey });
+      } else if (!distiller && requestedBackend === 'api') {
+        selectedBackend = 'anthropic_api';
+        missingReason = 'ANTHROPIC_API_KEY is not configured';
+      } else if (!distiller) {
+        // resolveClaudeAuth CALLS hasKeychain/hasCredentialsFile, but tests pass
+        // authResolverOpts in two shapes — some a predicate (`() => false`), some
+        // a plain boolean (`hasKeychain: true`). Every other consumer forwards the
+        // object to a router rather than invoking it, so this is the first call
+        // site that has to care. Coerce, or a boolean becomes
+        // "hasKeychain is not a function" and takes createApp down with it.
+        const cliAuth = options.memoryDistillClaudeAuth !== undefined
+          ? options.memoryDistillClaudeAuth
+          : resolveClaudeAuth({
+              ...normalizeAuthProbes(options.authResolverOpts || {}),
+              envAllowlist: CLAUDE_AUTH_KEYS,
+            });
+        const cliBin = options.memoryDistillClaudeBin !== undefined
+          ? options.memoryDistillClaudeBin
+          : resolveClaudeCliBinary();
+        selectedBackend = 'claude_cli';
+        if (!cliBin) {
+          missingReason = 'Claude Code CLI binary is not available';
+        } else if (!cliAuth || !cliAuth.canAuth) {
+          missingReason = (cliAuth && cliAuth.diagnostics && cliAuth.diagnostics[0])
+            || 'Claude Code CLI credentials are not available';
+        } else {
+          distiller = createLiveDistiller({
+            cliBin,
+            authEnv: cliAuth.env,
+            envAllowlist: CLAUDE_AUTH_KEYS,
+          });
+        }
+      }
+
+      if (!distiller) {
         memoryDistillStatus = {
           state: 'missing_credential',
           enabled: true,
-          provider: 'anthropic',
+          provider: selectedBackend,
+          backend: selectedBackend,
           interval_ms: null,
-          last_error: 'ANTHROPIC_API_KEY is not configured',
+          reason: missingReason,
+          last_error: missingReason,
         };
-        console.warn('[memory-distill] memory distill is enabled but no ANTHROPIC_API_KEY and no injected distiller — scheduler NOT started (set PALANTIR_MEMORY_DISTILL=0 to silence)');
+        console.warn(`[memory-distill] scheduler NOT started: ${missingReason} (set PALANTIR_MEMORY_DISTILL=0 to silence)`);
       } else {
         try {
-          if (!distiller) distiller = createLiveDistiller({ apiKey });
           const distillService = createMemoryDistillService({ memoryService, distiller });
           const intervalMs = options.memoryDistillIntervalMs
             ?? (Number.parseInt(process.env.PALANTIR_MEMORY_DISTILL_INTERVAL_MS, 10) || 300000);
@@ -1504,16 +1569,20 @@ function createApp(options = {}) {
             state: 'running',
             enabled: true,
             provider: distiller.name || 'injected',
+            backend: selectedBackend || distiller.backend || 'injected',
             interval_ms: intervalMs,
+            reason: null,
             last_error: null,
           };
-          console.log(`[memory-distill] scheduler started (interval ${intervalMs}ms, distiller=${distiller.name})`);
+          console.log(`[memory-distill] scheduler started (interval ${intervalMs}ms, backend=${memoryDistillStatus.backend})`);
         } catch (err) {
           memoryDistillStatus = {
             state: 'failed',
             enabled: true,
             provider: distiller && distiller.name ? distiller.name : 'unknown',
+            backend: selectedBackend || (distiller && distiller.backend) || 'unknown',
             interval_ms: null,
+            reason: sanitizeMessage(err && err.message ? err.message : err, [apiKey]),
             last_error: sanitizeMessage(err && err.message ? err.message : err, [apiKey]),
           };
           console.warn(`[memory-distill] failed to start scheduler: ${err && err.message}`);

@@ -505,7 +505,11 @@ test('malformed R4 content is rejected at the approval boundary', async (t) => {
 });
 
 test('memory diagnostics exposes distiller state, queue counts, and review capability', async (t) => {
-  const missing = setupApp(t, { memoryDistillEnabled: true, memoryDistillApiKey: null });
+  const missing = setupApp(t, {
+    memoryDistillEnabled: true,
+    memoryDistillApiKey: null,
+    memoryDistillClaudeBin: null,
+  });
   await stageWorkspace(missing, 'p1');
   missing.services.masterMemoryService.createCandidate({
     scope: 'user',
@@ -519,6 +523,8 @@ test('memory diagnostics exposes distiller state, queue counts, and review capab
   });
   const status = await request(missing).get('/api/memory/status').set(COOKIE).expect(200);
   assert.equal(status.body.distiller.state, 'missing_credential');
+  assert.equal(status.body.distiller.backend, 'claude_cli');
+  assert.match(status.body.distiller.reason, /CLI|credentials/i);
   assert.equal(status.body.queue.pending, 2);
   assert.equal(status.body.queue.workspace_pending, 1);
   assert.equal(status.body.queue.user_pending, 1);
@@ -539,7 +545,35 @@ test('memory diagnostics exposes distiller state, queue counts, and review capab
   const runningStatus = await request(running).get('/api/memory/status').set(COOKIE).expect(200);
   assert.equal(runningStatus.body.distiller.state, 'running');
   assert.equal(runningStatus.body.distiller.provider, 'fake-distiller');
+  assert.equal(runningStatus.body.distiller.backend, 'injected');
   assert.equal(runningStatus.body.distiller.interval_ms, 60000);
+});
+
+test('memory diagnostics exposes API and Claude CLI backend selection', async (t) => {
+  const api = setupApp(t, {
+    memoryDistillEnabled: true,
+    memoryDistillApiKey: 'sk-test-api',
+    memoryDistillIntervalMs: 60000,
+  });
+  const apiStatus = await request(api).get('/api/memory/status').set(COOKIE).expect(200);
+  assert.equal(apiStatus.body.distiller.state, 'running');
+  assert.equal(apiStatus.body.distiller.backend, 'anthropic_api');
+
+  const cli = setupApp(t, {
+    memoryDistillEnabled: true,
+    memoryDistillApiKey: null,
+    memoryDistillClaudeBin: path.join(__dirname, 'fixtures', 'bin', 'fake-codex-stdin.js'),
+    memoryDistillClaudeAuth: {
+      canAuth: true,
+      env: { CLAUDE_CODE_OAUTH_TOKEN: 'subscription-test-token' },
+      sources: ['test'],
+      diagnostics: [],
+    },
+    memoryDistillIntervalMs: 60000,
+  });
+  const cliStatus = await request(cli).get('/api/memory/status').set(COOKIE).expect(200);
+  assert.equal(cliStatus.body.distiller.state, 'running');
+  assert.equal(cliStatus.body.distiller.backend, 'claude_cli');
 });
 
 test('separated PM automation token remains candidate-only under run capabilities', async (t) => {

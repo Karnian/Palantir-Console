@@ -5,13 +5,107 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const path = require('node:path');
 
-const { createLiveDistiller, parseProposals, buildUserMessage } = require('../services/distillers/liveDistiller');
+const {
+  createLiveDistiller,
+  parseProposals,
+  buildUserMessage,
+  DEFAULT_TIMEOUT_MS,
+  ANTHROPIC_URL,
+  ANTHROPIC_VERSION,
+} = require('../services/distillers/liveDistiller');
 
-test('createLiveDistiller: requires apiKey or callModel', () => {
-  assert.throws(() => createLiveDistiller({}), /apiKey or an injected callModel/);
+test('createLiveDistiller: requires apiKey, cliBin, or callModel', () => {
+  assert.throws(() => createLiveDistiller({}), /apiKey, cliBin, or an injected callModel/);
   assert.doesNotThrow(() => createLiveDistiller({ apiKey: 'sk-test-xxxxxxxxxxxxxxxxxxxx' }));
+  assert.doesNotThrow(() => createLiveDistiller({ cliBin: '/fake/claude' }));
   assert.doesNotThrow(() => createLiveDistiller({ callModel: async () => '[]' }));
+});
+
+test('Anthropic API backend golden: URL, method, header keys, and timeout stay fixed', async () => {
+  let captured;
+  let capturedTimeout = null;
+  const fetchImpl = async (url, init) => {
+    captured = { url, init };
+    return {
+      ok: true,
+      json: async () => ({
+        content: [{ text: '[{"candidateId":"c1","kind":"heuristic","content":"Keep the API contract stable."}]' }],
+      }),
+    };
+  };
+  const d = createLiveDistiller({
+    apiKey: 'sk-golden',
+    fetchImpl,
+    setTimeoutImpl: (_callback, milliseconds) => {
+      capturedTimeout = milliseconds;
+      return Symbol('timer');
+    },
+    clearTimeoutImpl: () => {},
+  });
+  await d.distill({ candidates: [{ id: 'c1', rule: 'R3', raw_json: '{}' }] });
+
+  assert.equal(captured.url, 'https://api.anthropic.com/v1/messages');
+  assert.equal(captured.url, ANTHROPIC_URL);
+  assert.equal(captured.init.method, 'POST');
+  assert.deepEqual(
+    Object.keys(captured.init.headers).sort(),
+    ['anthropic-version', 'content-type', 'x-api-key'],
+  );
+  assert.equal(captured.init.headers['anthropic-version'], ANTHROPIC_VERSION);
+  assert.equal(captured.init.headers['x-api-key'], 'sk-golden');
+  assert.equal(DEFAULT_TIMEOUT_MS, 30000);
+  assert.equal(capturedTimeout, 30000);
+  assert.ok(captured.init.signal instanceof AbortSignal);
+});
+
+test('Claude CLI backend contract: isolated argv, stdin prompt, and scrubbed child env', async () => {
+  const fixture = path.join(__dirname, 'fixtures', 'bin', 'fake-codex-stdin.js');
+  const saved = {};
+  const secretEnv = {
+    PALANTIR_TOKEN: 'human-secret',
+    PALANTIR_PM_TOKEN: 'pm-secret',
+    PALANTIR_ACTOR_TOKEN: 'actor-secret',
+    PALANTIR_ACTOR_TOKEN_RUN_1: 'run-secret',
+    PALANTIR_MANAGER_TOKEN: 'manager-secret',
+  };
+  for (const [key, value] of Object.entries(secretEnv)) {
+    saved[key] = process.env[key];
+    process.env[key] = value;
+  }
+  try {
+    const sentinel = 'prompt-must-be-stdin-only';
+    const d = createLiveDistiller({
+      cliBin: fixture,
+      authEnv: { CLAUDE_CODE_OAUTH_TOKEN: 'subscription-token' },
+      envAllowlist: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL'],
+    });
+    const [proposal] = await d.distill({
+      candidates: [{
+        id: 'c-cli',
+        rule: 'R3',
+        raw_json: JSON.stringify({ rationale: sentinel }),
+      }],
+    });
+    const contract = JSON.parse(proposal.content.slice('CONTRACT:'.length));
+    assert.equal(d.backend, 'claude_cli');
+    assert.deepEqual(contract.secretKeys, []);
+    assert.equal(contract.hasAuth, true);
+    assert.ok(contract.argv.includes('--bare'));
+    assert.ok(contract.argv.includes('--strict-mcp-config'));
+    const settingSources = contract.argv.indexOf('--setting-sources');
+    assert.ok(settingSources >= 0);
+    assert.equal(contract.argv[settingSources + 1], '');
+    assert.equal(contract.argv.some((arg) => arg.includes(sentinel)), false);
+    assert.match(contract.stdin, new RegExp(sentinel));
+    assert.match(contract.stdin, /candidateId=c-cli/);
+  } finally {
+    for (const key of Object.keys(secretEnv)) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
 });
 
 test('liveDistiller: injected callModel -> parses proposals for known candidates', async () => {
