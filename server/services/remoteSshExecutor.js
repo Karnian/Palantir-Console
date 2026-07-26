@@ -1003,9 +1003,12 @@ function createRemoteSshNodeExecutor(node, {
       `trap 'exit 130' INT`,
       `trap 'exit 143' TERM`,
       `rm -f -- ${shq(canonicalStdin)}`,
-      // noclobber closes the gap between the unlink and the redirect: if anything
-      // recreates the name (a symlink aimed at another file) in between, the
-      // redirect fails instead of following it.
+      // noclobber narrows the gap between the unlink and the redirect: if the
+      // name is recreated in between as a regular file, or a symlink to one, the
+      // redirect fails instead of following it. It is not a full O_NOFOLLOW —
+      // a link to a non-regular file (/dev/null) still opens — so this bounds
+      // the window rather than closing it. Winning that race needs a node-local
+      // swap timed between two statements, which the trust boundary excludes.
       'set -C',
       `cat > ${shq(canonicalStdin)}`,
       'set +C',
