@@ -9,15 +9,22 @@
 // that gets redacted, rejected, or clamped.
 //
 // The model call is INJECTABLE (callModel) so tests run with zero network/LLM.
-// The default call hits the Anthropic Messages API with a low-cost model; it is
-// only ever reached when app.js wires this with PALANTIR_MEMORY_DISTILL=1 AND an
-// ANTHROPIC_API_KEY present.
+// The API default hits the Anthropic Messages API with a low-cost model. When
+// there is no API key, app.js may instead wire the Claude Code CLI backend with
+// subscription credentials.
 
+const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { summarizeR4ReferenceContent } = require('../memoryPolarity');
+const { buildManagerSpawnEnv, resolveClaudeAuthForIsolated } = require('../authResolver');
+const { assertSpawnAllowed } = require('../../utils/spawnGuard');
 
 const DEFAULT_MODEL = 'claude-haiku-4-5';
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
+const DEFAULT_TIMEOUT_MS = 30000;
 const VALID_KINDS = new Set(['convention', 'pitfall', 'heuristic', 'constraint']);
 const MAX_OUTPUT_CHARS = 200000; // defense beyond the model's max_tokens before parsing
 const MAX_EXISTING = 60;          // PR3c: cap existing-memory context in the prompt
@@ -146,11 +153,21 @@ function parseProposals(text, candidateIds, existingIds = []) {
   return out;
 }
 
-async function defaultCallModel({ system, user, apiKey, model, maxTokens, fetchImpl, timeoutMs }) {
+async function defaultCallModel({
+  system,
+  user,
+  apiKey,
+  model,
+  maxTokens,
+  fetchImpl,
+  timeoutMs,
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
+}) {
   const f = fetchImpl || globalThis.fetch;
   if (typeof f !== 'function') throw new Error('fetch is unavailable');
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs || 30000);
+  const timer = setTimeoutImpl(() => controller.abort(), timeoutMs || DEFAULT_TIMEOUT_MS);
   try {
     const res = await f(ANTHROPIC_URL, {
       method: 'POST',
@@ -174,23 +191,240 @@ async function defaultCallModel({ system, user, apiKey, model, maxTokens, fetchI
     const blocks = Array.isArray(data && data.content) ? data.content : [];
     return blocks.map((b) => (b && b.text) || '').join('');
   } finally {
-    clearTimeout(timer);
+    clearTimeoutImpl(timer);
   }
 }
 
-// createLiveDistiller({ apiKey, model?, callModel?, maxTokens?, fetchImpl?, timeoutMs? })
-// - callModel({system,user}) -> text : inject to bypass the network (tests).
-// - without callModel, apiKey is required (default Anthropic call).
-function createLiveDistiller({ apiKey, model = DEFAULT_MODEL, callModel, maxTokens = 1024, fetchImpl, timeoutMs } = {}) {
-  if (!callModel && !apiKey) {
-    throw new Error('liveDistiller requires an apiKey or an injected callModel');
+function isExecutable(candidate) {
+  try {
+    fs.accessSync(candidate, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
   }
-  const call = callModel
-    ? (args) => callModel(args)
-    : (args) => defaultCallModel({ ...args, apiKey, model, maxTokens, fetchImpl, timeoutMs });
+}
+
+function resolveOnPath(command, env = process.env) {
+  for (const dir of String(env.PATH || '').split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, command);
+    if (isExecutable(candidate)) return candidate;
+  }
+  return null;
+}
+
+// Resolve once during app wiring. A missing binary is a credential-readiness
+// failure, not something deferred until the first candidate batch.
+function resolveClaudeCliBinary({ env = process.env } = {}) {
+  if (env.CLAUDE_BIN) {
+    if (path.isAbsolute(env.CLAUDE_BIN) || env.CLAUDE_BIN.includes(path.sep)) {
+      return isExecutable(env.CLAUDE_BIN) ? env.CLAUDE_BIN : null;
+    }
+    return resolveOnPath(env.CLAUDE_BIN, env);
+  }
+
+  const candidates = [
+    path.join(os.homedir(), '.claude', 'bin', 'claude'),
+    '/usr/local/bin/claude',
+    '/opt/homebrew/bin/claude',
+  ];
+  for (const candidate of candidates) {
+    if (isExecutable(candidate)) return candidate;
+  }
+  return resolveOnPath('claude', env);
+}
+
+function scrubServerTokens(env) {
+  const out = { ...env };
+  for (const key of Object.keys(out)) {
+    if (key.startsWith('PALANTIR_') && key.includes('TOKEN')) {
+      delete out[key];
+    }
+  }
+  return out;
+}
+
+async function defaultCallClaudeCli({
+  system,
+  user,
+  model,
+  cliBin,
+  envAllowlist,
+  timeoutMs,
+  spawnImpl = spawn,
+  resolveIsolatedAuth = resolveClaudeAuthForIsolated,
+}) {
+  if (!cliBin) throw new Error('Claude Code CLI binary is unavailable');
+
+  // `--bare` deliberately ignores OAuth env, the macOS keychain and the CLI
+  // credential store, so a subscription login does NOT reach the child by
+  // itself — the repo's own spike measured that (worker-preset-and-plugin-
+  // injection.md Round 6: env-token variant FAILS, apiKeyHelper PASSES).
+  // Materialize the token into an apiKeyHelper settings file instead, which
+  // also keeps it out of the child's environment and out of `ps`.
+  //
+  // Resolved per call rather than at boot: createApp is synchronous, the temp
+  // material gets a bounded lifetime, and a `claude login` performed after the
+  // server started is picked up without a restart.
+  const isolated = await resolveIsolatedAuth({ envAllowlist });
+  if (!isolated || !isolated.canAuth) {
+    const why = (isolated && isolated.diagnostics && isolated.diagnostics[0])
+      || 'Claude Code CLI credentials are not available';
+    throw new Error(`Claude Code CLI auth unavailable: ${why}`);
+  }
+  const settingsPath = isolated.apiKeyHelperSettings?.settingsPath || null;
+  const cleanupAuth = isolated.apiKeyHelperSettings?.cleanup || (() => {});
+  const authEnv = isolated.env || {};
+
+  const args = [
+    '--print',
+    '--output-format', 'text',
+    '--model', model,
+    '--bare',
+    '--strict-mcp-config',
+    '--setting-sources', '',
+    '--no-session-persistence',
+    '--max-turns', '1',
+    // Candidate text is untrusted — it comes from worker output and from
+    // whatever a user or agent typed at /remember. Distillation needs no tools
+    // at all, so leaving the built-ins enabled would hand a prompt-injection
+    // payload a file system and a shell for nothing.
+    '--allowedTools', '',
+  ];
+  // Keep the instructions in the system channel rather than concatenating them
+  // onto the candidate text. Merged into one user turn, a candidate that says
+  // "ignore the above" is competing with the instructions on equal footing.
+  if (system) args.push('--append-system-prompt', system);
+  if (settingsPath) args.push('--settings', settingsPath);
+
+  const prompt = user;
+  const filteredEnv = buildManagerSpawnEnv({ authEnv, envAllowlist });
+  const childEnv = scrubServerTokens(filteredEnv);
+
+  assertSpawnAllowed({ command: cliBin, source: 'liveDistiller:claude-cli' });
+
+  // The helper script holds the live token, so it must be removed whichever way
+  // this call ends — success, spawn failure, timeout or output cap.
+  try {
+    return await new Promise((resolve, reject) => {
+    let child;
+    try {
+      child = spawnImpl(cliBin, args, {
+        env: childEnv,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        shell: false,
+      });
+    } catch (err) {
+      reject(err);
+      return;
+    }
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let timer = null;
+    const finish = (err, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(value);
+    };
+    const failForCap = () => {
+      try { child.kill(); } catch { /* best effort */ }
+      finish(new Error('Claude Code CLI output exceeded cap'));
+    };
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      if (stdout.length > MAX_OUTPUT_CHARS) failForCap();
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+      if (stderr.length > MAX_OUTPUT_CHARS) failForCap();
+    });
+    child.on('error', (err) => finish(err));
+    child.on('close', (code, signal) => {
+      if (code !== 0) {
+        const detail = stderr.trim().slice(0, 500);
+        finish(new Error(`Claude Code CLI exited ${code ?? signal}${detail ? `: ${detail}` : ''}`));
+        return;
+      }
+      finish(null, stdout);
+    });
+    child.stdin.on('error', (err) => finish(err));
+
+    timer = setTimeout(() => {
+      try { child.kill(); } catch { /* best effort */ }
+      finish(new Error(`Claude Code CLI timed out after ${timeoutMs || DEFAULT_TIMEOUT_MS}ms`));
+    }, timeoutMs || DEFAULT_TIMEOUT_MS);
+    child.stdin.end(prompt);
+    });
+  } finally {
+    try { cleanupAuth(); } catch { /* best effort — temp dir only */ }
+  }
+}
+
+// createLiveDistiller({ apiKey?, cliBin?, authEnv?, envAllowlist?, settingsPath?,
+//   model?, callModel?, maxTokens?, fetchImpl?, timeoutMs? })
+// - settingsPath points at an apiKeyHelper settings.json from
+//   resolveClaudeAuthForIsolated(). `--bare` ignores OAuth env, the keychain and
+//   the CLI credential store, so a subscription token only authenticates when it
+//   is materialized this way (repo spike, worker-preset-and-plugin-injection.md
+//   Round 6: variant A env-token FAILS, apiKeyHelper and API-key-slot PASS).
+// - callModel({system,user}) -> text : inject to bypass the network (tests).
+// - without callModel, apiKey selects the existing Anthropic API path.
+// - without apiKey, cliBin selects the Claude Code subscription path.
+function createLiveDistiller({
+  apiKey,
+  cliBin,
+  envAllowlist,
+  resolveIsolatedAuth,
+  model = DEFAULT_MODEL,
+  callModel,
+  maxTokens = 1024,
+  fetchImpl,
+  timeoutMs,
+  spawnImpl,
+  setTimeoutImpl,
+  clearTimeoutImpl,
+} = {}) {
+  if (!callModel && !apiKey && !cliBin) {
+    throw new Error('liveDistiller requires an apiKey, cliBin, or an injected callModel');
+  }
+  let backend = 'injected';
+  let call;
+  if (callModel) {
+    call = (args) => callModel(args);
+  } else if (apiKey) {
+    backend = 'anthropic_api';
+    call = (args) => defaultCallModel({
+      ...args,
+      apiKey,
+      model,
+      maxTokens,
+      fetchImpl,
+      timeoutMs,
+      setTimeoutImpl,
+      clearTimeoutImpl,
+    });
+  } else {
+    backend = 'claude_cli';
+    call = (args) => defaultCallClaudeCli({
+      ...args,
+      model,
+      cliBin,
+      envAllowlist,
+      timeoutMs,
+      spawnImpl,
+      resolveIsolatedAuth,
+    });
+  }
 
   return {
     name: 'live',
+    backend,
     async distill({ candidates, existingItems } = {}) {
       if (!Array.isArray(candidates) || candidates.length === 0) return [];
       // Show and validate against the SAME bounded slice — never accept a
@@ -203,4 +437,14 @@ function createLiveDistiller({ apiKey, model = DEFAULT_MODEL, callModel, maxToke
   };
 }
 
-module.exports = { createLiveDistiller, parseProposals, buildUserMessage, SYSTEM_PROMPT };
+module.exports = {
+  createLiveDistiller,
+  parseProposals,
+  buildUserMessage,
+  resolveClaudeCliBinary,
+  defaultCallModel,
+  SYSTEM_PROMPT,
+  DEFAULT_TIMEOUT_MS,
+  ANTHROPIC_URL,
+  ANTHROPIC_VERSION,
+};
