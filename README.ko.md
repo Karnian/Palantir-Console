@@ -65,6 +65,10 @@ docker compose up --build
 # → http://localhost:4177 (Authorization: Bearer my-secret-token 헤더로 호출)
 ```
 
+> 이 `.env` 예시는 Docker Compose 전용이다. `.dockerignore` 가 `.env` 를 이미지에서
+> 제외하므로 `docker compose up` 은 아래 로컬 dotenv 부팅 거부와 무관하다. 같은
+> `.env` 를 둔 채 로컬에서 `npm start` 를 실행하면 부팅에 실패한다.
+
 ### 바인딩 정책 (PR1 에서 변경)
 
 기본값은 **`127.0.0.1`** 바인딩 (loopback, 인증 없음). `PALANTIR_TOKEN` 을
@@ -85,6 +89,92 @@ PALANTIR_TOKEN=my-secret-token npm start
 # → 브라우저: POST /api/auth/login 으로 palantir_token 쿠키 수립 (자동)
 # → 바인딩: 0.0.0.0
 ```
+
+### Actor token 부팅 계약 (PR #422)
+
+로컬 설치에서는 저장소의 `.env` 에 전역 토큰 `PALANTIR_TOKEN` 또는
+`PALANTIR_PM_TOKEN` 을 저장하면 안 된다. 특히 **`.env` 파일 + 로컬
+`npm start`** 조합은 `PALANTIR_ACTOR_TOKEN_IN_DOTENV` 오류로 fail-closed
+거부된다. 반면 `.dockerignore` 가 `.env` 를 제외하는 **Docker**
+(`docker compose up`)는 정상이며, 호환성을 위한 인라인 환경 변수
+(`PALANTIR_TOKEN=... npm start`)도 동작한다. 단, 직접 환경 변수 방식은
+sandbox되지 않은 CLI가 부모 환경을 검사할 수 있어
+`unverified token-source boundary` 로 보고된다.
+
+권장 경로는 저장소 밖에 현재 실행 사용자 소유의 mode-`0600` non-symlink JSON
+파일을 만들고 그 경로만 `PALANTIR_ACTOR_TOKEN_FILE` 로 전달하는 것이다.
+`PALANTIR_PM_TOKEN` 은 신뢰된 외부 자동화용 선택 토큰이다.
+
+```json
+{"PALANTIR_TOKEN":"human-secret","PALANTIR_PM_TOKEN":"agent-secret"}
+```
+
+```bash
+PALANTIR_ACTOR_TOKEN_FILE=/secure/ephemeral/palantir-actor-tokens.json npm start
+```
+
+Console은 파일의 소유권과 mode, symlink 여부를 검증하고 부팅 중 **한 번만**
+읽은 뒤 에이전트를 spawn하기 전에 `unlink`하여 삭제한다. 따라서 이 파일은
+one-shot으로 소진되며, 같은 경로로 `npm start` 만 다시 실행할 수 없다.
+다음과 같이 **매 기동마다 새 mode-0600 파일을 만드는 런처**를 사용한다.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+token_file="$(mktemp "${TMPDIR:-/tmp}/palantir-actor-tokens.XXXXXX")"
+cleanup() { rm -f -- "$token_file"; }
+trap cleanup EXIT HUP INT TERM
+
+IFS= read -r -s -p 'PALANTIR_TOKEN: ' actor_token
+printf '\n'
+printf '%s' "$actor_token" |
+  TOKEN_FILE="$token_file" node -e '
+    const fs = require("fs");
+    let token = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", chunk => { token += chunk; });
+    process.stdin.on("end", () => {
+      fs.writeFileSync(process.env.TOKEN_FILE,
+        JSON.stringify({ PALANTIR_TOKEN: token }), { mode: 0o600 });
+    });
+  '
+unset actor_token
+chmod 0600 "$token_file"
+
+PALANTIR_ACTOR_TOKEN_FILE="$token_file" npm start
+```
+
+실제로 에이전트별 OS 사용자 또는 container 격리를 제공하는 executor라면 별도의
+process-isolation attestation도 함께 지정한다. 검증된 token bootstrap과
+에이전트 process isolation은 서로 독립된 계약이다.
+
+```bash
+PALANTIR_ACTOR_TOKEN_FILE=/secure/ephemeral/palantir-actor-tokens.json \
+PALANTIR_AGENT_PROCESS_ISOLATION=verified \
+npm start
+```
+
+one-shot 파일을 부팅 때까지 보호할 수 없다면 OS/container secret boundary를
+사용한다. Windows에서는 Node의 이식 가능한 filesystem API로 DACL을 검증할 수
+없으므로 현재 one-shot 파일 전송을 거부한다. Windows에서는 애플리케이션 소유
+옵션이나 OS/container secret boundary를 사용해야 하며, embedder가 검증됨으로
+표시하지 않으면 이 경로도 unverified로 보고된다.
+
+기존 설치에서 토큰 분리를 활성화할 때는 같은 재시작에서 `PALANTIR_TOKEN` 을
+rotate한다. 그러면 분리 이전의 legacy/remote worker가 상속한 값을 폐기할 수
+있다. credential-policy marker가 없는 로컬 orphan worker는 재연결하지 않고
+중지한다. run-bound memory proposal grant가 있는 프로젝트 worker도 그
+boot-local grant를 실행 중인 프로세스에 다시 쓸 수 없으므로 Console 재시작 때
+중지하며, 안전하게 scrub된 project-less worker는 복구할 수 있다. 이전 버전이
+시작한 worker가 남아 있을 수 있는 authenticated shared-token 설치를
+업그레이드할 때도 같은 rotate를 권장한다.
+
+SSH/fleet worker는 원격 노드에서 접근 가능한 Console URL을
+`PALANTIR_BASE_URL` 로 지정한다. 지정하지 않으면 원격 worker에는 의도적으로
+memory proposal token이나 loopback URL을 전달하지 않으며, 로컬 worker는
+`HOST` 와 `PORT` 에서 접근 가능한 URL을 유도한다.
 
 **브라우저 클라이언트**는 HttpOnly 쿠키로 인증한다. `http://host:4177/login.html`
 로 접속해 POST 폼에 토큰을 입력하면 `palantir_token` 쿠키가 수립된 뒤 콘솔로

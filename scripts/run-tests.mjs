@@ -1,0 +1,53 @@
+#!/usr/bin/env node
+// Test entry point. Pins the environment inputs that would otherwise let a
+// developer's machine change the result, then hands off to `node --test`.
+//
+// Why a Node script rather than `VAR=1 node --test` in package.json: the same
+// reason scripts/ensure-sqlite-binding.mjs is one — a `VAR=value command`
+// prefix is not valid cmd.exe syntax, so the shell form silently fails to set
+// anything on Windows and the suite runs unpinned there.
+//
+// PALANTIR_SKIP_HOST_CREDENTIALS makes ambient host credential discovery inert
+// (repo .claude-auth.json, macOS keychain, the CLI credential store), so
+// resolver results come from the test's own inputs rather than from whether the
+// person running it happens to be logged in. Tests that specifically assert
+// discovery DOES happen re-enable it in their own scope.
+//
+// PALANTIR_SKIP_DOTENV keeps a developer .env (PALANTIR_TOKEN, a non-default
+// PORT) from leaking into the suite.
+//
+// Both are only defaults here: an explicit value in the environment wins, so a
+// single run can still be pointed at something else.
+
+import { spawn } from 'node:child_process';
+
+const DEFAULTS = {
+  PALANTIR_SKIP_HOST_CREDENTIALS: '1',
+  PALANTIR_SKIP_DOTENV: '1',
+};
+
+const env = { ...process.env };
+for (const [key, value] of Object.entries(DEFAULTS)) {
+  if (env[key] === undefined) env[key] = value;
+}
+
+const child = spawn(
+  process.execPath,
+  ['--test', ...process.argv.slice(2)],
+  { stdio: 'inherit', env },
+);
+
+child.on('error', (err) => {
+  console.error(`[run-tests] failed to start the test runner: ${err.message}`);
+  process.exit(1);
+});
+
+// Preserve the runner's exit signal/code so CI and `npm test` see the real
+// result rather than a flattened one.
+child.on('exit', (code, signal) => {
+  if (signal) {
+    process.kill(process.pid, signal);
+    return;
+  }
+  process.exit(code ?? 1);
+});

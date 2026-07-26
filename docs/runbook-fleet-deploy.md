@@ -65,11 +65,39 @@ ssh <pod> 'curl -s --max-time 8 http://<컨트롤플레인-tailscale-IP>:4199'  
 
 ## 2. 컨트롤 플레인 기동
 
+`PALANTIR_ACTOR_TOKEN_FILE` 은 부팅 중 읽힌 뒤 `unlink`되는 one-shot 파일이다.
+따라서 아래 런처 블록 전체를 **매 기동마다** 실행해 mode-`0600` 파일을 새로
+만든다. 운영에서는 대화형 입력 부분을 OS/container secret store 조회로
+교체할 수 있지만, `PALANTIR_TOKEN` 자체를 저장소 `.env` 에 두지 않는다.
+
 ```bash
 cd palantir_console
 npm install    # 최초 1회
+
+set -euo pipefail
+umask 077
+token_file="$(mktemp "${TMPDIR:-/tmp}/palantir-actor-tokens.XXXXXX")"
+cleanup() { rm -f -- "$token_file"; }
+trap cleanup EXIT HUP INT TERM
+
+IFS= read -r -s -p 'PALANTIR_TOKEN: ' actor_token
+printf '\n'
+printf '%s' "$actor_token" |
+  TOKEN_FILE="$token_file" node -e '
+    const fs = require("fs");
+    let token = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", chunk => { token += chunk; });
+    process.stdin.on("end", () => {
+      fs.writeFileSync(process.env.TOKEN_FILE,
+        JSON.stringify({ PALANTIR_TOKEN: token }), { mode: 0o600 });
+    });
+  '
+unset actor_token
+chmod 0600 "$token_file"
+
 PATH=/opt/homebrew/opt/node@22/bin:$PATH \
-PALANTIR_TOKEN='<강한-랜덤-시크릿>' \
+PALANTIR_ACTOR_TOKEN_FILE="$token_file" \
 PALANTIR_BASE_URL='http://<컨트롤플레인-tailscale-IP>:4177' \
 HOST=0.0.0.0 \
 npm start
@@ -77,7 +105,8 @@ npm start
 
 | env | 역할 | 필수? |
 |---|---|---|
-| `PALANTIR_TOKEN` | auth 활성 + 자동으로 `0.0.0.0` 바인딩. 미설정 시 auth 비활성(개발만). | 운영 **필수** |
+| `PALANTIR_ACTOR_TOKEN_FILE` | 현재 사용자 소유 mode-`0600`, non-symlink JSON의 경로. JSON의 `PALANTIR_TOKEN` 이 auth를 활성화하고 기본 바인딩을 `0.0.0.0` 으로 승격한다. 서버가 읽고 삭제하므로 매 기동 재생성. | 운영 **필수** |
+| `PALANTIR_TOKEN` | 직접 env 전달은 호환성을 위해 동작하지만 `unverified token-source boundary` 로 보고된다. 저장소 `.env` 에 두면 `PALANTIR_ACTOR_TOKEN_IN_DOTENV` 로 부팅 거부. | 비권장 |
 | **`PALANTIR_BASE_URL`** | **원격 Operator dispatch 의 핵심.** 원격 Operator 의 시스템 프롬프트에 이 주소가 curl 대상으로 박힌다. **pod 에서 도달 가능한 주소**여야 함(컨트롤 플레인의 tailnet IP). 미설정 시 원격 Operator 가 자기 `localhost` 를 curl → dispatch 실패 + `operator:remote_base_url_localhost` 경고. | 원격 Operator 사용 시 **필수** |
 | `HOST` | 바인딩 주소. 토큰 있으면 자동 `0.0.0.0`. 명시 가능. | 선택 |
 | `PALANTIR_FLEET_HEARTBEAT` | `=1` 이면 ssh 노드 reachable heartbeat probe(기본 off). `PALANTIR_FLEET_HEARTBEAT_INTERVAL_MS`(기본 30000). | 선택 |

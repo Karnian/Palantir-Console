@@ -24,8 +24,8 @@ function mockJudge(result = { status: 'fail', reasons: ['not good enough'], inpu
 
 async function harness(t, { judge } = {}) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'palantir-g3c-'));
-  const cwd = process.cwd();
-  process.chdir(dir);
+  const goalWorkspaceRoot = path.join(dir, 'goal-workspaces');
+  const goalArtifactsRoot = path.join(dir, 'goal-artifacts');
   const { db, migrate, close } = createDatabase(path.join(dir, 'test.db'));
   migrate();
   const eventBus = createEventBus();
@@ -33,9 +33,16 @@ async function harness(t, { judge } = {}) {
   const ts = createTaskService(db, eventBus);
   const ps = createProjectService(db);
   const aps = createAgentProfileService(db);
-  const harvest = createHarvestService({ runService: rs, eventBus, projectService: ps, taskService: ts, goalJudgeService: judge || null });
-  t.after(async () => { process.chdir(cwd); close(); await fsp.rm(dir, { recursive: true, force: true }); });
-  return { db, rs, ts, ps, aps, harvest, dir };
+  const harvest = createHarvestService({
+    runService: rs,
+    eventBus,
+    projectService: ps,
+    taskService: ts,
+    goalJudgeService: judge || null,
+    goalArtifactsRoot,
+  });
+  t.after(async () => { close(); await fsp.rm(dir, { recursive: true, force: true }); });
+  return { db, rs, ts, ps, aps, harvest, dir, goalWorkspaceRoot, goalArtifactsRoot };
 }
 
 // A completed local deliverable-mode goal run with a real workspace + one file.
@@ -51,7 +58,7 @@ function makeJudgeRun(h, { judgeActive = 1, acceptance = null } = {}) {
   h.rs.updateRunStatus(run.id, 'running', { force: true });
   h.rs.updateRunStatus(run.id, 'completed', { force: true });
   h.rs.updateGoalCapture(run.id, { final_output: 'my deliverable summary', goal_report: null });
-  const ws = path.join(h.dir, 'runtime', 'goal-workspaces', run.id);
+  const ws = path.join(h.goalWorkspaceRoot, run.id);
   fs.mkdirSync(ws, { recursive: true });
   fs.writeFileSync(path.join(ws, 'out.md'), 'deliverable body\n');
   h.rs.setGoalWorkspacePath(run.id, ws);

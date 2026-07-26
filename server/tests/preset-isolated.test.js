@@ -12,6 +12,8 @@
 //      * fail-closed when auth is unavailable (run failed, 400 thrown)
 //      * onCleanup invoked on process exit (apiKeyHelper temp dir removed)
 
+process.env.PALANTIR_SKIP_HOST_CREDENTIALS = '1';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -146,10 +148,12 @@ test('readClaudeKeychainToken: older schema bare string fallback accepts any str
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'p10d-'));
   try {
     const weird = 'sk-opaque+token/with%chars=';  // contains +/%=
-    const r = await authResolverModule.resolveClaudeAuthForIsolated({
-      tmpRoot,
-      hasKeychain: () => true,
-      readKeychainToken: () => weird,
+    const r = await withEnv('ANTHROPIC_API_KEY', undefined, () => {
+      return authResolverModule.resolveClaudeAuthForIsolated({
+        tmpRoot,
+        hasKeychain: () => true,
+        readKeychainToken: () => weird,
+      });
     });
     // With the P1 fix in the keychain helper, any non-empty raw string is a
     // valid token. Here we verify the isolated resolver forwarded it.

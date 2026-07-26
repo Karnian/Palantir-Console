@@ -22,6 +22,8 @@
 //     functions, not the DI stub): malformed JSON, missing/empty token,
 //     expired accessToken, and the process.platform gate.
 
+process.env.PALANTIR_SKIP_HOST_CREDENTIALS = '1';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -62,6 +64,8 @@ async function withNoClaudeEnv(fn) {
 // leave a stray test token behind or clobber a developer's real cached
 // credentials (Codex adversarial re-review of PR #374, P1).
 async function withFakeClaudeAuthFile(auth, fn) {
+  const savedSkipFlag = process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
+  delete process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
   const origExists = fs.existsSync;
   const origRead = fs.readFileSync;
   fs.existsSync = function (p, ...rest) {
@@ -82,12 +86,16 @@ async function withFakeClaudeAuthFile(auth, fn) {
   try { return await fn(); } finally {
     fs.existsSync = origExists;
     fs.readFileSync = origRead;
+    if (savedSkipFlag === undefined) delete process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
+    else process.env.PALANTIR_SKIP_HOST_CREDENTIALS = savedSkipFlag;
   }
 }
 
 // Monkeypatches the sync/async fs reader used by each real credentials helper
 // so tests never touch ~/.claude/.credentials.json on this dev box.
 function withFakeLinuxCredsFile(content, fn) {
+  const savedSkipFlag = process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
+  delete process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
   const orig = fs.readFileSync;
   fs.readFileSync = function (p, ...rest) {
     if (p === CLAUDE_LINUX_CREDENTIALS_FILE) {
@@ -100,10 +108,16 @@ function withFakeLinuxCredsFile(content, fn) {
     }
     return orig.call(fs, p, ...rest);
   };
-  try { return fn(); } finally { fs.readFileSync = orig; }
+  try { return fn(); } finally {
+    fs.readFileSync = orig;
+    if (savedSkipFlag === undefined) delete process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
+    else process.env.PALANTIR_SKIP_HOST_CREDENTIALS = savedSkipFlag;
+  }
 }
 
 async function withFakeLinuxCredsFileAsync(content, fn) {
+  const savedSkipFlag = process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
+  delete process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
   const orig = fsp.readFile;
   fsp.readFile = async function (p, ...rest) {
     if (p === CLAUDE_LINUX_CREDENTIALS_FILE) {
@@ -116,7 +130,11 @@ async function withFakeLinuxCredsFileAsync(content, fn) {
     }
     return orig.call(fsp, p, ...rest);
   };
-  try { return await fn(); } finally { fsp.readFile = orig; }
+  try { return await fn(); } finally {
+    fsp.readFile = orig;
+    if (savedSkipFlag === undefined) delete process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
+    else process.env.PALANTIR_SKIP_HOST_CREDENTIALS = savedSkipFlag;
+  }
 }
 
 function withPlatform(value, fn) {
