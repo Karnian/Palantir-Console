@@ -277,6 +277,87 @@ test('SessionGrid reflects queued/running/cancelled/completed live run transitio
   }
 });
 
+test('SessionGrid renders Top metadata and actual needs_input status without counting it as a worker or Operator', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  installSessionGrid(env);
+
+  const selected = [];
+  const topRun = operatorRun({
+    id: 'run_mgr_top',
+    operator_instance_id: null,
+    manager_adapter: 'claude-code',
+    status: 'needs_input',
+    node_id: 'top-node',
+    started_at: '2026-07-25T03:00:00.000Z',
+    ended_at: null,
+  });
+  const root = renderSessionGrid(env, {
+    // The general runs feed may contain Top just like an Operator run. It must
+    // remain excluded from every worker-facing aggregate.
+    runs: [topRun],
+    managerStatus: {
+      active: true,
+      run: topRun,
+      top: { conversationId: 'top', run: topRun },
+    },
+    onSelectConversation: (id) => selected.push(id),
+  });
+
+  const row = await waitFor(() => {
+    const element = root.querySelector('[data-role="top-manager-session-row"]');
+    assert.ok(element);
+    return element;
+  });
+  assert.ok(row.classList.contains('selected'), 'top conversation selection contract is preserved');
+  assert.match(row.textContent, /adapter claude-code/);
+  assert.match(row.textContent, /노드 top-node/);
+  assert.match(row.textContent, /시작 시각:2026-07-25T03:00:00.000Z/);
+  assert.doesNotMatch(row.textContent, /종료/);
+  assert.doesNotMatch(row.textContent, /알 수 없음/);
+  assert.equal(
+    row.querySelector('[data-role="top-manager-run-status"]').textContent.trim(),
+    '입력 필요',
+  );
+  assert.doesNotMatch(row.textContent, /활성/);
+
+  row.click();
+  assert.deepEqual(selected, ['top']);
+  assert.match(root.querySelector('[data-stat="running"]').textContent, /0 실행 중/);
+  assert.match(root.querySelector('[data-stat="waiting"]').textContent, /0 대기/);
+  assert.match(root.querySelector('[data-stat="failed"]').textContent, /0 실패/);
+  assert.match(root.querySelector('[data-stat="operators"]').textContent, /0 Operator/);
+  assert.deepEqual(Array.from(env.context.__attentionRuns.at(-1)), []);
+});
+
+test('SessionGrid keeps the legacy managerStatus.run alias and omits missing Top times', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  installSessionGrid(env);
+
+  const topRun = operatorRun({
+    id: 'run_mgr_top_legacy',
+    operator_instance_id: null,
+    status: 'running',
+    node_id: null,
+    started_at: null,
+    ended_at: null,
+  });
+  const root = renderSessionGrid(env, {
+    managerStatus: { active: true, run: topRun },
+  });
+
+  await waitFor(() => {
+    const row = root.querySelector('[data-role="top-manager-session-row"]');
+    assert.ok(row);
+    assert.match(row.textContent, /노드 local/);
+    assert.match(row.textContent, /실행 중/);
+    assert.doesNotMatch(row.textContent, /알 수 없음/);
+    assert.doesNotMatch(row.textContent, /시작/);
+    assert.doesNotMatch(row.textContent, /종료/);
+  });
+});
+
 function createBroker() {
   const subscriptions = new Map();
   return {
