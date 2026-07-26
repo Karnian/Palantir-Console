@@ -60,10 +60,10 @@ function goalOutputLogPath(runId) {
 // git workspace. Server-controlled path under runtime/ with a sanitized runId
 // segment (a blank id yields null so the caller fails closed rather than
 // materializing at the runtime root).
-function goalWorkspaceDir(runId) {
+function goalWorkspaceDir(runId, root = path.join(process.cwd(), 'runtime', 'goal-workspaces')) {
   const safe = String(runId || '').replace(/[^a-zA-Z0-9_-]/g, '');
   if (!safe) return null;
-  return path.resolve(process.cwd(), 'runtime', 'goal-workspaces', safe);
+  return path.resolve(root, safe);
 }
 
 function createLifecycleService({
@@ -95,6 +95,7 @@ function createLifecycleService({
   workerProposalBaseUrl = null,
   workerProposalRemoteBaseUrl = null,
   runtimeMcpDir = path.resolve(process.cwd(), 'runtime', 'mcp'),
+  goalWorkspaceRoot = path.join(process.cwd(), 'runtime', 'goal-workspaces'),
   // G2 §6 (Codex BLOCKER-1): goal features only activate when goal mode is on
   // AND the PM token is separated. Injectable for tests; defaults to the real
   // env-derived gate. When it returns false, a goal_enabled task runs exactly
@@ -106,6 +107,7 @@ function createLifecycleService({
   // never diverges from the judge gate (codex MINOR). Stamped per-run at spawn.
   goalJudgeActive = (e) => goalFeatureActive(e) && ((e || process.env).PALANTIR_GOAL_JUDGE === '1'),
 }) {
+  goalWorkspaceRoot = path.resolve(goalWorkspaceRoot);
   nodeExecutor = nodeExecutor || createLocalNodeExecutor({ executionEngine, streamJsonEngine });
   const workerChannel = (nodeExecutor && typeof nodeExecutor.spawnWorker === 'function')
     ? nodeExecutor
@@ -668,7 +670,11 @@ function createLifecycleService({
     // G2 §5k-1: remove the deliverable-mode goal workspace (the deliverable
     // harvest stage copies it out FIRST, so this is the final sweep). No-op when
     // absent. Belt-and-suspenders against interim workspace leaks.
-    const goalWs = goalWorkspaceDir(run.id);
+    // Must use the SAME root the workspace was created under (:1437). Falling
+    // back to the cwd default here would make create and cleanup asymmetric:
+    // an injected root would leave its workspaces behind forever while this
+    // deleted an unrelated path under the repo.
+    const goalWs = goalWorkspaceDir(run.id, goalWorkspaceRoot);
     if (goalWs) {
       try { require('node:fs').rmSync(goalWs, { recursive: true, force: true }); } catch { /* best-effort */ }
     }
@@ -1432,7 +1438,7 @@ function createLifecycleService({
         try { runService.setGoalWorkspacePath(run.id, remoteWs); } catch { /* annotate-only */ }
         cwd = remoteWs;
       } else if (goalActive && !hasGitWorkspace) {
-        const dir = goalWorkspaceDir(run.id);
+        const dir = goalWorkspaceDir(run.id, goalWorkspaceRoot);
         try {
           if (!dir) throw new Error('invalid run id for goal workspace');
           require('node:fs').mkdirSync(dir, { recursive: true, mode: 0o700 });
