@@ -30,6 +30,7 @@ function stubSJE() {
 
 async function harness(t) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'palantir-g2ws-'));
+  const goalWorkspaceRoot = path.join(dir, 'goal-workspaces');
   const { db, migrate, close } = createDatabase(path.join(dir, 't.db'));
   migrate();
   const rs = createRunService(db, null);
@@ -40,10 +41,11 @@ async function harness(t) {
   const lc = createLifecycleService({
     runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
     executionEngine: exec, streamJsonEngine: stubSJE(), worktreeService: null, eventBus: null,
+    goalWorkspaceRoot,
     goalFeatureActive: () => true, // G2 §6: exercise goal features in tests
   });
   t.after(async () => { close(); await fsp.rm(dir, { recursive: true, force: true }); });
-  return { db, rs, ts, ps, exec, lc };
+  return { db, rs, ts, ps, exec, lc, goalWorkspaceRoot };
 }
 function seedProfile(db) {
   const id = `profile-${Date.now()}-${Math.random().toString(36).slice(2)}`;

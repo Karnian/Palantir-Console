@@ -351,6 +351,7 @@ async function runExecutorTestCommand({
 }
 
 function createHarvestService({
+  goalArtifactsRoot = path.join(process.cwd(), 'runtime', 'goal-artifacts'),
   runService,
   worktreeService,
   projectService,
@@ -370,6 +371,7 @@ function createHarvestService({
   // harvest runs one durable, claim-guarded judge before run:harvested.
   goalJudgeService = null,
 } = {}) {
+  goalArtifactsRoot = path.resolve(goalArtifactsRoot);
   const seenRunIds = new Set();
   // G3b §5f: per-run single-flight for the remote deliverable harvest (pre-clear →
   // bundle → acceptance → rmrf) so a primary harvest can't race the boot
@@ -819,7 +821,7 @@ function createHarvestService({
   function readBundleExcerpts(run, manifest) {
     if (!manifest || !Array.isArray(manifest.files)) return [];
     const safeSeg = (v, fb) => (String(v || '').replace(/[^a-zA-Z0-9_-]/g, '') || fb);
-    const dest = path.resolve(process.cwd(), 'runtime', 'goal-artifacts', safeSeg(run.task_id, 'none'), safeSeg(run.id, 'run'));
+    const dest = path.resolve(goalArtifactsRoot, safeSeg(run.task_id, 'none'), safeSeg(run.id, 'run'));
     const PER_HEAD = 2 * 1024;
     const MAX_TOTAL = 24 * 1024;
     const MAX_FILES = 12;
@@ -1020,12 +1022,12 @@ function createHarvestService({
   // intermediates were already proven real by the prior checks (ensureRealDir
   // pattern). Trusted single-process local FS → an lstat chain suffices (no
   // adversarial TOCTOU in-model). Absent components (ENOENT) are fine.
-  function assertRealArtifactChain(cwd, taskSeg, runSeg) {
+  function assertRealArtifactChain(artifactRoot, taskSeg, runSeg) {
     const chain = [
-      path.join(cwd, 'runtime'),
-      path.join(cwd, 'runtime', 'goal-artifacts'),
-      path.join(cwd, 'runtime', 'goal-artifacts', taskSeg),
-      path.join(cwd, 'runtime', 'goal-artifacts', taskSeg, runSeg),
+      path.dirname(artifactRoot),
+      artifactRoot,
+      path.join(artifactRoot, taskSeg),
+      path.join(artifactRoot, taskSeg, runSeg),
     ];
     for (const p of chain) {
       let st;
@@ -1137,13 +1139,12 @@ function createHarvestService({
       let dest = null;
       if (manifest && ws && executor) {
         try {
-          const cwd = process.cwd();
-          const artifactRoot = path.resolve(cwd, 'runtime', 'goal-artifacts');
+          const artifactRoot = goalArtifactsRoot;
           dest = path.join(artifactRoot, taskSeg, runSeg);
           // dest safety: string-within-root guard + refuse a symlink at ANY chain
           // component (codex BLOCKER) so the pre-clear can never escape the root.
           if (!isWithinRoot(artifactRoot, dest)) throw new Error('dest escapes artifact root');
-          assertRealArtifactChain(cwd, taskSeg, runSeg);
+          assertRealArtifactChain(artifactRoot, taskSeg, runSeg);
           // Pre-clear a STALE partial bundle (codex R2): the dest is reused across
           // attempts, so a prior failed attempt's files must not survive into a
           // later "complete" re-harvest and be mis-evaluated. Bounded I/O: per-run
@@ -1172,7 +1173,7 @@ function createHarvestService({
               // setDeliverableState BEFORE flipping bundledOk (codex SERIOUS): if it
               // throws we fall to catch with bundledOk=false → no rmrf, retain remote.
               runService.setDeliverableState(run.id, 'bundled');
-              addEvent(run.id, 'harvest:deliverable_bundled', { dest: path.relative(cwd, dest), files: copied, remote: true, complete });
+              addEvent(run.id, 'harvest:deliverable_bundled', { dest: path.relative(process.cwd(), dest), files: copied, remote: true, complete });
               bundledOk = true;
             }
           } else {
@@ -1258,7 +1259,7 @@ function createHarvestService({
         // hasExistingHarvestEvent), so the destination is always fresh — no
         // recursive rmSync needed (Codex R5: that pre-clear was itself unbounded
         // I/O). mkdir is idempotent; each capped copy overwrites its own file.
-        const dest = path.resolve(process.cwd(), 'runtime', 'goal-artifacts', safeSeg(run.task_id, 'none'), safeSeg(run.id, 'run'));
+        const dest = path.resolve(goalArtifactsRoot, safeSeg(run.task_id, 'none'), safeSeg(run.id, 'run'));
         fs.mkdirSync(dest, { recursive: true, mode: 0o700 });
         // Copy ONLY the bounded manifest files (Codex BLOCKER-2) — NOT the whole
         // tree — so an oversized/huge workspace can't blow up the bundle. Each

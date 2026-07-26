@@ -28,6 +28,7 @@ async function harness(t) {
   eventBus.subscribe((e) => { if (e.channel === 'run:harvested') harvested.push(e.data); });
   const worktreeService = { async autoSaveWorktree() {}, async getWorktreeDiff() { return { base: 'HEAD', stat: '', files: [] }; }, async removeWorktree() {} };
   const hs = createHarvestService({
+    goalArtifactsRoot: path.join(dir, 'goal-artifacts'),
     runService: rs, worktreeService, projectService: ps, eventBus,
     taskService: ts, verifyCheckService: vcs,
   });

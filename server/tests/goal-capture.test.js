@@ -63,6 +63,10 @@ async function harness(t) {
     executionEngine: exec, streamJsonEngine: stubSJE(), worktreeService: null,
     eventBus, harvestService,
     goalFeatureActive: () => true, // exercise goal features (unified activation)
+    // Without this the goal workspace root falls back to the cwd default and
+    // spawnQueuedRun mkdirs into the REPO's runtime/goal-workspaces, leaving a
+    // run_* directory behind on every test run.
+    goalWorkspaceRoot: path.join(dir, 'goal-workspaces'),
   });
   lc.startMonitoring();
   t.after(async () => { lc.stopMonitoring(); close(); await fsp.rm(dir, { recursive: true, force: true }); });
