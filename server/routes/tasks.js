@@ -200,6 +200,14 @@ function createTasksRouter({ taskService, lifecycleService, presetService, goalD
       return res.json({ status: 'not_implemented', message: 'Lifecycle service not configured', task });
     }
     const { agent_profile_id, prompt, skill_pack_ids, preset_id, pm_run_id } = req.body || {};
+    if (req.auth?.actor === 'manager') {
+      if (req.auth.layer === 'top' && pm_run_id != null) {
+        return res.status(403).json({ error: 'top manager capability cannot claim an Operator run' });
+      }
+      if (req.auth.layer !== 'top' && pm_run_id !== req.auth.managerRunId) {
+        return res.status(403).json({ error: 'Operator capability must use its own pm_run_id' });
+      }
+    }
     if (!agent_profile_id) {
       return res.status(400).json({ error: 'agent_profile_id is required' });
     }

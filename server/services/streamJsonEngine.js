@@ -5,6 +5,11 @@ const os = require('node:os');
 const readline = require('node:readline');
 const { assertSpawnAllowed } = require('../utils/spawnGuard');
 const { resolveSpawnCwd } = require('../utils/spawnCwd');
+const {
+  resolveActorTokenPolicy,
+  buildWorkerProcessEnv,
+  augmentProcessPath,
+} = require('./actorTokenPolicy');
 
 /**
  * StreamJsonEngine — Claude Code stream-json protocol engine.
@@ -16,7 +21,11 @@ const { resolveSpawnCwd } = require('../utils/spawnCwd');
  * loaded from .claude-auth.json at server startup (see index.js).
  */
 
-function createStreamJsonEngine({ runService, eventBus } = {}) {
+function createStreamJsonEngine({
+  runService,
+  eventBus,
+  actorTokens = resolveActorTokenPolicy(),
+} = {}) {
   const processes = new Map(); // runId → ProcessRecord
   const PROCESS_TTL_MS = 10 * 60 * 1000;
   // Bounds for input buffered while a REMOTE manager spawn is still resolving
@@ -178,17 +187,23 @@ function createStreamJsonEngine({ runService, eventBus } = {}) {
 
     let spawnEnv;
     if (usingRemoteExecutor) {
-      spawnEnv = {};
+      // Remote executors own the pod's model credentials, so never forward the
+      // controller environment wholesale. The run-bound Manager capability is
+      // the sole exception: RemoteSshNodeExecutor transports it through the
+      // first framed stdin line and removes it from both SSH argv and the remote
+      // command string.
+      spawnEnv = (isManager && typeof env?.PALANTIR_MANAGER_TOKEN === 'string')
+        ? { PALANTIR_MANAGER_TOKEN: env.PALANTIR_MANAGER_TOKEN }
+        : {};
     } else {
-      const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
-      const currentPath = process.env.PATH || '';
-      const augmentedPath = [...extraPaths, currentPath].join(path.delimiter);
-
       // PR4: if the caller passes a filtered env (manager adapter path), use it
       // as the authoritative base instead of process.env. Worker/legacy callers
-      // still get the merge behavior.
-      const baseEnv = (isManager && env) ? env : { ...process.env, ...(env || {}) };
-      spawnEnv = { ...baseEnv, PATH: augmentedPath };
+      // receive only the safe process baseline plus their explicit allowlist.
+      const baseEnv = (isManager && env)
+        ? env
+        : buildWorkerProcessEnv(process.env, env, actorTokens);
+      const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
+      spawnEnv = augmentProcessPath(baseEnv, extraPaths);
     }
 
     console.log(`[engine] Spawning claude for ${runId} (manager=${!!isManager})`);

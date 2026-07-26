@@ -14,7 +14,16 @@ const crypto = require('node:crypto');
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { BadRequestError, NotFoundError } = require('../utils/errors');
-const { detectInjection, redactSecrets } = require('../services/memorySanitize');
+const {
+  detectInjection,
+  redactSecrets,
+} = require('../services/memorySanitize');
+const {
+  candidateApprovalOverride,
+  decodeCandidateCursor,
+  encodeCandidateCursor,
+} = require('./memoryCandidates');
+const { redactEvidence } = require('./memory');
 
 const VALID_KINDS = ['constraint', 'preference', 'commitment', 'decision', 'fact', 'pattern'];
 const PUBLIC_FIELDS = [
@@ -25,6 +34,10 @@ const PUBLIC_FIELDS = [
 const VALID_SCOPES = ['user', 'cross_project'];
 const VALID_CANDIDATE_STATUSES = ['pending', 'promoted', 'rejected', 'merged'];
 const MAX_REMEMBER_LEN = 2000;
+const PROMOTABLE_CANDIDATE_KINDS = new Set([
+  'constraint', 'preference', 'commitment', 'decision', 'pattern',
+  'convention', 'pitfall', 'heuristic',
+]);
 
 function toPublic(row) {
   const out = {};
@@ -34,6 +47,14 @@ function toPublic(row) {
 
 function toPublicCandidate(row) {
   if (!row) return null;
+  const kind = typeof row.kind === 'string' ? row.kind.trim() : '';
+  const rawPreview = typeof row.preview === 'string' ? row.preview : '';
+  const preview = detectInjection(rawPreview)
+    ? ''
+    : redactSecrets(rawPreview).text.replace(/\s+/g, ' ').trim().slice(0, MAX_REMEMBER_LEN);
+  const deterministic = row.rule === 'R4'
+    && PROMOTABLE_CANDIDATE_KINDS.has(kind)
+    && !!preview;
   return {
     id: row.id,
     scope: row.scope,
@@ -42,8 +63,15 @@ function toPublicCandidate(row) {
     status: row.status,
     promoted_to: row.promoted_to,
     created_at: row.created_at,
-    kind: row.kind ?? null,
-    preview: row.preview ?? '',
+    kind: kind || null,
+    preview,
+    importance: Number.isInteger(Number(row.importance))
+      && Number(row.importance) >= 1
+      && Number(row.importance) <= 10
+      ? Number(row.importance)
+      : 5,
+    approval_mode: deterministic ? 'deterministic' : 'review',
+    can_promote: deterministic && row.status === 'pending',
   };
 }
 
@@ -95,7 +123,22 @@ function createMasterMemoryRouter({ masterMemoryService }) {
     if (!VALID_CANDIDATE_STATUSES.includes(status)) {
       throw new BadRequestError(`status must be one of ${VALID_CANDIDATE_STATUSES.join('|')}`);
     }
-    res.json({ candidates: masterMemoryService.listCandidates(scope, status) });
+    const requestedLimit = req.query.limit === undefined ? 50 : Number(req.query.limit);
+    if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 100) {
+      throw new BadRequestError('limit must be an integer 1-100');
+    }
+    const cursor = decodeCandidateCursor(req.query.cursor);
+    const rows = masterMemoryService.listCandidatePage(scope, status, {
+      limit: requestedLimit + 1,
+      afterCreatedAt: cursor && cursor.createdAt,
+      afterId: cursor && cursor.id,
+    });
+    const hasMore = rows.length > requestedLimit;
+    const pageRows = hasMore ? rows.slice(0, requestedLimit) : rows;
+    res.json({
+      candidates: pageRows.map(toPublicCandidate),
+      next_cursor: hasMore ? encodeCandidateCursor(pageRows[pageRows.length - 1]) : null,
+    });
   }));
 
   router.post('/candidates/:id/promote', asyncHandler(async (req, res) => {
@@ -103,7 +146,20 @@ function createMasterMemoryRouter({ masterMemoryService }) {
     if (!req.auth || req.auth.method !== 'cookie') {
       return res.status(403).json({ error: 'master memory candidate promotion requires human (cookie) auth' });
     }
-    const result = masterMemoryService.promoteCandidate({ candidateId: req.params.id });
+    const scope = req.query.scope === undefined ? null : validateScope(req.query.scope);
+    let result;
+    try {
+      result = masterMemoryService.promoteCandidate({
+        candidateId: req.params.id,
+        scope,
+        override: candidateApprovalOverride(req.body),
+      });
+    } catch (err) {
+      if (err && err.code === 'MEMORY_CANDIDATE_OVERRIDE_INVALID') {
+        throw new BadRequestError(err.message);
+      }
+      throw err;
+    }
     if (!result) throw new NotFoundError('master memory candidate not found');
     if (!result.promoted) {
       const status = result.reason === 'cap_rejected' ? 'pending' : 'rejected';
@@ -113,6 +169,29 @@ function createMasterMemoryRouter({ masterMemoryService }) {
       memory: toPublic(result.item),
       candidate: { id: result.candidateId, status: result.merged ? 'merged' : 'promoted', promoted_to: result.item.id },
     });
+  }));
+
+  router.post('/candidates/:id/reject', asyncHandler(async (req, res) => {
+    if (!masterMemoryService) return res.status(501).json({ error: 'masterMemoryService_unavailable' });
+    if (!req.auth || req.auth.method !== 'cookie') {
+      return res.status(403).json({ error: 'master memory candidate rejection requires human (cookie) auth' });
+    }
+    const scope = req.query.scope === undefined ? null : validateScope(req.query.scope);
+    const result = masterMemoryService.rejectCandidate({ candidateId: req.params.id, scope });
+    if (!result) throw new NotFoundError('master memory candidate not found');
+    res.json({ candidate: { id: result.candidateId, status: 'rejected' } });
+  }));
+
+  router.get('/:id/provenance', asyncHandler(async (req, res) => {
+    if (!masterMemoryService) return res.status(501).json({ error: 'masterMemoryService_unavailable' });
+    const item = masterMemoryService.getMemoryItem(req.params.id);
+    if (!item) throw new NotFoundError('master memory item not found');
+    let evidence = {};
+    try {
+      const parsed = JSON.parse(item.evidence_json || '{}');
+      if (parsed && typeof parsed === 'object') evidence = parsed;
+    } catch { evidence = {}; }
+    res.json({ id: item.id, origin: item.origin, evidence: redactEvidence(evidence) });
   }));
 
   // Post-hoc correction CRUD for master memory. Cookie-only: bearer/none can

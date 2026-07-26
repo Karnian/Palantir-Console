@@ -27,7 +27,7 @@ const L1_KIND_TO_MASTER_KIND = new Map([
 const PUBLIC_CANDIDATE_FIELDS = [
   'id', 'scope', 'rule', 'dedup_key', 'status', 'promoted_to', 'created_at',
 ];
-const CANDIDATE_PREVIEW_CAP = 120;
+const CANDIDATE_PREVIEW_CAP = 2000;
 
 function sha256(text) {
   return crypto.createHash('sha256').update(text).digest('hex');
@@ -73,6 +73,18 @@ function createMasterMemoryService(db, eventBus) {
     "    updated_at = datetime('now') " +
     "WHERE owner_type = @ownerType AND owner_id = @ownerId AND content_hash = @contentHash AND status = 'active'"
   );
+  const approveCandidateMergeStmt = db.prepare(`
+    UPDATE master_memory_items
+    SET kind = @kind,
+        importance = @importance,
+        evidence_json = @evidenceJson,
+        origin = 'human',
+        confidence = MAX(COALESCE(confidence, 0), 0.9),
+        source_count = source_count + 1,
+        valid_to = NULL,
+        updated_at = datetime('now')
+    WHERE id = @id AND status = 'active'
+  `);
 
   const countActiveByOwnerStmt = db.prepare(
     "SELECT COUNT(*) AS n FROM master_memory_items WHERE owner_type = ? AND owner_id = ? AND status = 'active'"
@@ -187,6 +199,31 @@ function createMasterMemoryService(db, eventBus) {
       AND scope = @provenance
       AND status = @status
     ORDER BY created_at ASC, id ASC
+  `);
+  const listCandidatePageStmt = db.prepare(`
+    SELECT id, scope, rule, dedup_key, status, promoted_to, created_at, raw_json
+    FROM master_memory_candidates
+    WHERE owner_type = @ownerType AND owner_id = @ownerId
+      AND scope = @provenance
+      AND status = @status
+      AND (
+        @afterCreatedAt IS NULL
+        OR created_at > @afterCreatedAt
+        OR (created_at = @afterCreatedAt AND id > @afterId)
+      )
+    ORDER BY created_at ASC, id ASC
+    LIMIT @limit
+  `);
+  const candidateQueueSummaryStmt = db.prepare(`
+    SELECT
+      COUNT(*) AS pending,
+      SUM(CASE WHEN scope = 'user' THEN 1 ELSE 0 END) AS user_pending,
+      SUM(CASE WHEN scope = 'cross_project' THEN 1 ELSE 0 END) AS cross_project_pending,
+      SUM(CASE WHEN rule = 'R4' THEN 1 ELSE 0 END) AS deterministic_pending,
+      SUM(CASE WHEN rule NOT IN ('R4', 'XPROJECT') THEN 1 ELSE 0 END) AS distillation_pending,
+      MIN(created_at) AS oldest_pending_at
+    FROM master_memory_candidates
+    WHERE status = 'pending'
   `);
   const getPendingCandidateStmt = db.prepare(`
     SELECT *
@@ -365,6 +402,10 @@ function createMasterMemoryService(db, eventBus) {
     out.kind = raw && typeof raw.kind === 'string' ? raw.kind.trim().slice(0, 64) : null;
     const content = raw && typeof raw.content === 'string' ? raw.content : '';
     out.preview = redactSecrets(content).text.replace(/\s+/g, ' ').trim().slice(0, CANDIDATE_PREVIEW_CAP);
+    const importance = raw ? Number(raw.importance) : NaN;
+    out.importance = Number.isInteger(importance) && importance >= 1 && importance <= 10
+      ? importance
+      : 5;
     return out;
   }
 
@@ -401,14 +442,14 @@ function createMasterMemoryService(db, eventBus) {
     return Math.max(0, Math.min(1, n));
   }
 
-  function rejectPendingCandidate(id, reason) {
+  function rejectPendingCandidate(id, reason, scope = null) {
     const res = setCandidateStatusStmt.run({ status: 'rejected', promotedTo: null, id });
     if (res.changes !== 1) {
       const e = new Error('candidate status flip raced (not pending)');
       e.code = 'MASTER_MEMORY_CANDIDATE_RACE';
       throw e;
     }
-    return { candidateId: id, promoted: false, skipped: true, reason };
+    return { candidateId: id, promoted: false, skipped: true, reason, scope };
   }
 
   // Write-time sanitize (Codex SERIOUS): redact secrets ALWAYS; reject injection for untrusted origins
@@ -477,6 +518,28 @@ function createMasterMemoryService(db, eventBus) {
   function mergeActiveByHash(ownerType, ownerId, contentHash, incomingOrigin) {
     mergeByHashStmt.run({ ownerType, ownerId, contentHash, incomingOrigin });
     return getActiveByHashStmt.get(ownerType, ownerId, contentHash) || null;
+  }
+
+  function approvedCandidateEvidence(existing, candidate, originalKind, sourceContentHash) {
+    let previous = {};
+    try {
+      const parsed = JSON.parse(existing.evidence_json || '{}');
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) previous = parsed;
+    } catch { /* replace malformed legacy evidence with bounded approval evidence */ }
+    const candidateIds = Array.from(new Set([
+      ...(Array.isArray(previous.candidate_ids) ? previous.candidate_ids : []),
+      candidate.id,
+    ])).slice(-50);
+    return normalizeEvidenceJson({
+      ...previous,
+      schema_version: 1,
+      origin: 'human_approved',
+      rule: candidate.rule,
+      candidate_ids: candidateIds,
+      original_kind: originalKind,
+      source_content_hash: sourceContentHash,
+      approved_override: true,
+    });
   }
 
   function admitNewActiveItem(item, activeCap = HARD_CAP) {
@@ -606,7 +669,15 @@ function createMasterMemoryService(db, eventBus) {
       }
       throw err;
     }
-    return toPublicCandidate(getCandidateByDedupOwnerStmt.get(ownerType, ownerId, r, key));
+    const created = toPublicCandidate(getCandidateByDedupOwnerStmt.get(ownerType, ownerId, r, key));
+    try {
+      eventBus.emit('master_memory:candidate_created', {
+        candidateId: created.id,
+        scope: created.scope,
+        rule: created.rule,
+      });
+    } catch { /* observability must not fail storage */ }
+    return created;
   }
 
   function emitScanSkipped(contentHash, reason) {
@@ -693,62 +764,125 @@ function createMasterMemoryService(db, eventBus) {
     }).map(toPublicCandidate);
   }
 
-  const promoteCandidateTx = db.transaction((candidateId) => {
+  function getCandidateQueueSummary() {
+    const row = candidateQueueSummaryStmt.get() || {};
+    return {
+      pending: Number(row.pending) || 0,
+      user_pending: Number(row.user_pending) || 0,
+      cross_project_pending: Number(row.cross_project_pending) || 0,
+      deterministic_pending: Number(row.deterministic_pending) || 0,
+      distillation_pending: Number(row.distillation_pending) || 0,
+      oldest_pending_at: row.oldest_pending_at || null,
+    };
+  }
+
+  function listCandidatePage(scope, status = 'pending', {
+    limit = 50,
+    afterCreatedAt = null,
+    afterId = null,
+  } = {}) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 101) {
+      throw new Error('master candidate page limit must be an integer 1-101');
+    }
+    if ((afterCreatedAt == null) !== (afterId == null)) {
+      throw new Error('master candidate page cursor requires createdAt and id');
+    }
+    const { scope: provenance, ownerType, ownerId } = resolveOwnerFromScope(scope);
+    return listCandidatePageStmt.all({
+      ownerType,
+      ownerId,
+      provenance,
+      status: normalizeCandidateStatus(status),
+      afterCreatedAt,
+      afterId,
+      limit,
+    }).map(toPublicCandidate);
+  }
+
+  const promoteCandidateTx = db.transaction(({ candidateId, expectedScope, override }) => {
     if (!candidateId) throw new Error('candidateId is required');
     const candidate = getPendingCandidateStmt.get(candidateId);
-    if (!candidate) return null;
+    if (!candidate || (expectedScope && candidate.scope !== expectedScope)) return null;
 
-    const raw = parseCandidateRaw(candidate);
-    if (!raw) return rejectPendingCandidate(candidate.id, 'bad_raw_json');
+    const hasOverride = override != null;
+    const parsedRaw = parseCandidateRaw(candidate);
+    if (!parsedRaw && !hasOverride) return rejectPendingCandidate(candidate.id, 'bad_raw_json', candidate.scope);
+    const raw = parsedRaw || {};
+    const source = hasOverride ? override : raw;
 
-    const originalKind = typeof raw.kind === 'string' ? raw.kind.trim() : null;
+    const originalKind = typeof source.kind === 'string' ? source.kind.trim() : null;
     const kind = mapCandidateKind(originalKind);
     if (!kind || !VALID_MASTER_KINDS.has(kind)) {
-      return rejectPendingCandidate(candidate.id, 'bad_kind');
+      return rejectPendingCandidate(candidate.id, 'bad_kind', candidate.scope);
     }
     if (kind === 'fact') {
-      return rejectPendingCandidate(candidate.id, 'fact_not_allowed');
+      return rejectPendingCandidate(candidate.id, 'fact_not_allowed', candidate.scope);
     }
 
-    const content = typeof raw.content === 'string' ? raw.content : '';
-    if (!content.trim()) return rejectPendingCandidate(candidate.id, 'bad_content');
-    if (detectInjection(content)) return rejectPendingCandidate(candidate.id, 'injection');
+    const content = typeof source.content === 'string' ? source.content : '';
+    if (!content.trim()) return rejectPendingCandidate(candidate.id, 'bad_content', candidate.scope);
+    if (detectInjection(content)) return rejectPendingCandidate(candidate.id, 'injection', candidate.scope);
 
     let safeContent;
     try {
       safeContent = sanitizeForStore(content, 'deterministic');
     } catch (err) {
       if (err && err.code === 'MEMORY_CONTENT_REJECTED') {
-        return rejectPendingCandidate(candidate.id, 'sanitize_rejected');
+        return rejectPendingCandidate(candidate.id, 'sanitize_rejected', candidate.scope);
       }
       throw err;
     }
     const contentHash = sha256(safeContent);
     let sourceContentHash = contentHash;
-    if (candidate.rule === 'XPROJECT') {
+    if (candidate.rule === 'XPROJECT' && !hasOverride) {
       const rawContentHash = validContentHash(raw.content_hash) ? raw.content_hash.toLowerCase() : null;
       if (!rawContentHash || sha256(content) !== rawContentHash || contentHash !== rawContentHash) {
-        return rejectPendingCandidate(candidate.id, 'xproject_content_hash_mismatch');
+        return rejectPendingCandidate(candidate.id, 'xproject_content_hash_mismatch', candidate.scope);
       }
       sourceContentHash = rawContentHash;
       const activeProjects = countActiveL1ProjectsByHashStmt.get(sourceContentHash).n;
       if (activeProjects < 2) {
-        return rejectPendingCandidate(candidate.id, 'xproject_recheck_failed');
+        return rejectPendingCandidate(candidate.id, 'xproject_recheck_failed', candidate.scope);
       }
     }
 
     const promoteScope = candidate.rule === 'XPROJECT' ? 'user' : candidate.scope;
+    const promotionOrigin = hasOverride ? 'human' : 'deterministic';
     const { owner_type: pOwnerType, owner_id: pOwnerId } = normalizeOwner({ scope: promoteScope });
     // Pre-check exact collisions so approval records distinguish "created" from
     // "folded into an existing active item"; createMemoryItem still guards a late
     // UNIQUE race, but that path does not expose a merge signal without changing
     // its public API.
     const existing = getActiveByHashStmt.get(pOwnerType, pOwnerId, contentHash);
+    if (existing && (existing.kind === 'fact' || existing.fact_key)) {
+      return rejectPendingCandidate(candidate.id, 'fact_collision', candidate.scope);
+    }
     const merged = !!existing;
     let item;
     let evicted = null;
     if (merged) {
-      item = mergeActiveByHash(pOwnerType, pOwnerId, contentHash, 'deterministic');
+      if (hasOverride) {
+        const update = approveCandidateMergeStmt.run({
+          id: existing.id,
+          kind,
+          importance: source.importance == null
+            ? existing.importance
+            : normalizeImportance(source.importance),
+          evidenceJson: approvedCandidateEvidence(
+            existing,
+            candidate,
+            originalKind,
+            sourceContentHash,
+          ),
+        });
+        item = update.changes === 1 ? getItemByIdStmt.get(existing.id) : null;
+        // user and cross_project share one storage owner, so content dedup can
+        // fold an approval into an item whose provenance differs from the
+        // candidate. Invalidate the scope whose active row actually changed.
+        if (item) _bumpRevision(item.scope);
+      } else {
+        item = mergeActiveByHash(pOwnerType, pOwnerId, contentHash, promotionOrigin);
+      }
       if (!item) {
         const e = new Error('merge target raced (not active)');
         e.code = 'MASTER_MEMORY_CANDIDATE_RACE';
@@ -765,19 +899,20 @@ function createMasterMemoryService(db, eventBus) {
         contentHash,
         evidenceJson: normalizeEvidenceJson({
           schema_version: 1,
-          origin: 'deterministic',
+          origin: hasOverride ? 'human_approved' : 'deterministic',
           rule: candidate.rule,
           candidate_ids: [candidate.id],
           original_kind: originalKind,
           source_content_hash: sourceContentHash,
+          approved_override: hasOverride,
         }),
-        origin: 'deterministic',
-        importance: normalizeImportance(raw.importance),
-        confidence: normalizeConfidence(raw.confidence),
+        origin: promotionOrigin,
+        importance: normalizeImportance(source.importance),
+        confidence: hasOverride ? 0.9 : normalizeConfidence(raw.confidence),
         sourceCount: 1,
         pinned: 0,
         status: 'active',
-        validTo: validToForOrigin('deterministic', 'active'),
+        validTo: validToForOrigin(promotionOrigin, 'active'),
         ownerType: pOwnerType,
         ownerId: pOwnerId,
       };
@@ -802,11 +937,85 @@ function createMasterMemoryService(db, eventBus) {
     return { candidateId: candidate.id, promoted: true, merged, item, evicted };
   });
 
-  function promoteCandidate({ candidateId } = {}) {
-    const result = promoteCandidateTx(candidateId);
+  function normalizeHumanApprovalOverride(override) {
+    if (override == null) return null;
+    if (!override || typeof override !== 'object' || Array.isArray(override)) {
+      const err = new Error('candidate approval override must be an object');
+      err.code = 'MEMORY_CANDIDATE_OVERRIDE_INVALID';
+      throw err;
+    }
+    const kind = mapCandidateKind(override.kind);
+    if (!kind || !VALID_MASTER_KINDS.has(kind) || kind === 'fact') {
+      const err = new Error('candidate approval kind must be a non-fact master memory kind');
+      err.code = 'MEMORY_CANDIDATE_OVERRIDE_INVALID';
+      throw err;
+    }
+    if (typeof override.content !== 'string') {
+      const err = new Error('candidate approval content must be a string');
+      err.code = 'MEMORY_CANDIDATE_OVERRIDE_INVALID';
+      throw err;
+    }
+    let content;
+    try {
+      content = sanitizeForStore(override.content, 'human');
+    } catch (cause) {
+      const err = new Error(cause && cause.message ? cause.message : 'candidate approval content rejected');
+      err.code = 'MEMORY_CANDIDATE_OVERRIDE_INVALID';
+      throw err;
+    }
+    let importance = null;
+    if (override.importance !== undefined && override.importance !== null) {
+      importance = Number(override.importance);
+      if (!Number.isInteger(importance) || importance < 1 || importance > 10) {
+        const err = new Error('candidate approval importance must be an integer 1-10');
+        err.code = 'MEMORY_CANDIDATE_OVERRIDE_INVALID';
+        throw err;
+      }
+    }
+    return { kind, content, importance };
+  }
+
+  function promoteCandidate({ candidateId, scope = null, override = null } = {}) {
+    const normalizedOverride = normalizeHumanApprovalOverride(override);
+    const result = promoteCandidateTx({
+      candidateId,
+      expectedScope: scope,
+      override: normalizedOverride,
+    });
     if (result && result.evicted) emitEvicted(result.evicted);
     if (result && result.promoted && eventBus) {
       try { eventBus.emit('master_memory:promoted', { scope: result.item.scope, memoryItemId: result.item.id, candidateId, merged: result.merged }); } catch { /* */ }
+    }
+    if (result && result.skipped && !result.pending && eventBus) {
+      try {
+        eventBus.emit('master_memory:candidate_rejected', {
+          candidateId,
+          scope: result.scope,
+          reason: result.reason,
+        });
+      } catch { /* observability must never break rejection */ }
+    }
+    return result;
+  }
+
+  const rejectCandidateTx = db.transaction(({ candidateId, expectedScope }) => {
+    const candidate = getPendingCandidateStmt.get(candidateId);
+    if (!candidate || (expectedScope && candidate.scope !== expectedScope)) return null;
+    const result = rejectPendingCandidate(candidate.id, 'human_rejected', candidate.scope);
+    return { ...result, scope: candidate.scope };
+  });
+
+  function rejectCandidate({ candidateId, scope = null } = {}) {
+    if (!candidateId) throw new Error('candidateId is required');
+    const result = rejectCandidateTx({ candidateId, expectedScope: scope });
+    if (result && eventBus) {
+      try {
+        eventBus.emit('master_memory:candidate_rejected', {
+          candidateId,
+          scope: result.scope,
+          reason: 'human_rejected',
+        });
+      } catch { /* observability must never break rejection */ }
     }
     return result;
   }
@@ -991,6 +1200,13 @@ function createMasterMemoryService(db, eventBus) {
     "    updated_at = datetime('now') " +
     "WHERE id = @id AND status = 'archived'"
   );
+  const consumeFoldedRestoreStmt = db.prepare(
+    "UPDATE master_memory_items " +
+    "SET status = 'superseded', superseded_by = @activeId, " +
+    "    valid_to = datetime('now'), archive_reason = 'restore_folded', " +
+    "    updated_at = datetime('now') " +
+    "WHERE id = @id AND status = 'archived'"
+  );
   const markReviewedStmt = db.prepare(
     "UPDATE master_memory_items " +
     "SET reviewed_at = datetime('now'), " +
@@ -1051,6 +1267,19 @@ function createMasterMemoryService(db, eventBus) {
       const folded = mergeActiveByHash(ownerType, ownerId, before.content_hash, before.origin);
       if (!folded) {
         const e = new Error('restore fold target raced (not active)');
+        e.code = 'MASTER_MEMORY_RACE';
+        throw e;
+      }
+      // A folded restore represents one observation from this archived row.
+      // Consume the source as superseded in the same transaction so retrying
+      // Restore cannot increment source_count repeatedly from identical
+      // evidence. The all-history view keeps the consumed row auditable.
+      const consumed = consumeFoldedRestoreStmt.run({
+        id: before.id,
+        activeId: folded.id,
+      });
+      if (consumed.changes !== 1) {
+        const e = new Error('restore fold source raced (not archived)');
         e.code = 'MASTER_MEMORY_RACE';
         throw e;
       }
@@ -1178,7 +1407,10 @@ function createMasterMemoryService(db, eventBus) {
     createCandidate,
     scanCrossProjectCandidates,
     listCandidates,
+    listCandidatePage,
+    getCandidateQueueSummary,
     promoteCandidate,
+    rejectCandidate,
     remember,
     upsertFact,
     retrieve,

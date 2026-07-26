@@ -25,6 +25,17 @@ function candidateStatus(value) {
   return status;
 }
 
+function candidateApprovalOverride(body) {
+  const input = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
+  const hasOverride = ['kind', 'content', 'importance'].some((key) => Object.hasOwn(input, key));
+  if (!hasOverride) return null;
+  return {
+    kind: input.kind,
+    content: input.content,
+    importance: input.importance,
+  };
+}
+
 function decodeCandidateCursor(value) {
   if (value === undefined) return null;
   if (typeof value !== 'string' || value.length === 0 || value.length > 512 ||
@@ -80,6 +91,7 @@ function toPublicCandidate(row) {
   if (!row) return null;
   let kind = null;
   let preview = '';
+  let importance = 5;
   let approvalMode = row.rule === 'R4' ? 'invalid' : 'distillation_required';
   let canPromote = false;
   if (row.rule === 'R4') {
@@ -90,6 +102,12 @@ function toPublicCandidate(row) {
     if (PROMOTABLE_KINDS.has(candidateKind) && sanitized.ok) {
       kind = candidateKind;
       preview = sanitized.content;
+      const candidateImportance = Number(raw.importance);
+      importance = Number.isInteger(candidateImportance)
+        && candidateImportance >= 1
+        && candidateImportance <= 10
+        ? candidateImportance
+        : 5;
       approvalMode = 'deterministic';
       canPromote = row.status === 'pending';
     }
@@ -106,6 +124,7 @@ function toPublicCandidate(row) {
     updated_at: row.updated_at,
     kind,
     preview,
+    importance,
     approval_mode: approvalMode,
     can_promote: canPromote,
   };
@@ -113,7 +132,10 @@ function toPublicCandidate(row) {
 
 module.exports = {
   candidatePage,
+  candidateApprovalOverride,
   candidateStatus,
+  decodeCandidateCursor,
+  encodeCandidateCursor,
   requireHumanCookie,
   toPublicCandidate,
 };

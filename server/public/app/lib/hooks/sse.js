@@ -78,6 +78,7 @@ export function useSSE(listeners) {
       // these through sseBroker and refreshes the affected view/diagnostics.
       'memory:candidate_created', 'memory:candidate_rejected',
       'memory:promoted', 'memory:evicted', 'memory:decayed',
+      'master_memory:candidate_created', 'master_memory:candidate_rejected',
       'master_memory:promoted', 'master_memory:evicted', 'master_memory:decayed',
     ];
     channels.forEach((ch) => {

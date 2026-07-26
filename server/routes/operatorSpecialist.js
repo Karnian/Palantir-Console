@@ -21,7 +21,7 @@
 
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
-const { BadRequestError } = require('../utils/errors');
+const { BadRequestError, ForbiddenError } = require('../utils/errors');
 const { canonicalConversationId } = require('../utils/conversationId'); // PM→Operator Phase 0: dual-read origin guard
 
 // Bound model-bound inputs to keep token cost + injection surface in check. The
@@ -68,6 +68,9 @@ function createOperatorSpecialistRouter({ specialistService, runService, operato
     if (originRunId.length > ID_MAX) {
       throw new BadRequestError(`originRunId too long (max ${ID_MAX} chars)`);
     }
+    if (req.auth?.actor === 'manager' && req.auth.managerRunId !== originRunId) {
+      throw new ForbiddenError('manager capability must use its own originRunId');
+    }
     // Contract A (PF-3): the operator profile is authoritative for persona +
     // capabilities. Reject request-level values (rather than silently discarding)
     // so there is no audit ambiguity about what actually ran. Use `!== undefined`
@@ -87,19 +90,15 @@ function createOperatorSpecialistRouter({ specialistService, runService, operato
     // The specialist is invoked in the context of an ACTIVE MANAGER turn; events
     // are emitted onto that run's stream. A worker / terminal run is rejected.
     //
-    // ACCEPTED TRACE-INTEGRITY DEBT (MD-3, user decision 2026-07-01): the gate is
-    // "is this SOME active manager run", NOT "is this the CALLER's own run". With a
-    // shared PALANTIR_TOKEN there is no per-caller identity, so a manager COULD name
-    // another active manager's run as originRunId → the specialist trace
+    // Run-bound manager capabilities are self-bound above. Legacy trusted
+    // external bearer automation has no per-caller run identity and therefore
+    // may still name another active manager's run as originRunId → the specialist trace
     // (specialist:invoked/result) would land on THAT run's stream. This is bounded to
     // trace-attribution confusion — NO content leak (run:event frames + event payloads
     // carry lengths/ids, plus a capped error message on the error path, but never
     // memory/prompt/output) — and single-tenant + trusted
-    // managers make it out of the threat model. MD-2a already mitigates the ACCIDENTAL
-    // case (each manager is told its own top_run_id/pm_run_id). Enforcing self-reference
-    // needs a minted per-run secret (env→header→validate) and is deferred to a
-    // multi-tenant initiative; the self-ref-not-enforced behavior is locked by
-    // specialist-entry.test.js so a future change is a conscious one.
+    // external automation makes it out of the threat model. Agent-originated
+    // calls use the minted per-run capability and cannot cross-attribute.
     const originRun = runService.getRun(originRunId);
     if (originRun.is_manager !== 1) { // strict (SQLite 0/1); not a truthy check
       throw new BadRequestError('originRunId must reference a manager run');

@@ -44,18 +44,91 @@ function timingSafeEqualStr(a, b) {
   return crypto.timingSafeEqual(aBuf, bBuf);
 }
 
-function createAuthMiddleware({ token = process.env.PALANTIR_TOKEN, pmToken = process.env.PALANTIR_PM_TOKEN } = {}) {
+function workerProposalRunId(req) {
+  const rawPath = String(req.originalUrl || req.url || '').split('?')[0];
+  const match = /^\/api\/runs\/([^/]+)\/memory\/propose\/?$/.exec(rawPath);
+  if (!match) return null;
+  try { return decodeURIComponent(match[1]); } catch { return null; }
+}
+
+function conversationMessageTarget(rawPath) {
+  const match = /^\/api\/conversations\/([^/]+)\/message\/?$/.exec(rawPath);
+  if (!match) return null;
+  try { return decodeURIComponent(match[1]); } catch { return null; }
+}
+
+function managerCapabilityRequestAllowed(req, grant = null) {
+  const rawPath = String(req.originalUrl || req.url || '').split('?')[0];
+  const method = String(req.method || 'GET').toUpperCase();
+  if (method === 'GET') {
+    return /^\/api\/(?:runs(?:\/[^/]+(?:\/(?:events|output))?)?|tasks(?:\/[^/]+)?|projects(?:\/[^/]+\/(?:tasks|memory|skill-packs))?|agents|skill-packs|operator\/profiles|conversations\/[^/]+\/events)\/?$/.test(rawPath)
+      || (
+        grant?.layer !== 'top'
+        && /^\/api\/verify-checks(?:\/[^/]+)?\/?$/.test(rawPath)
+      );
+  }
+  if (method === 'POST') {
+    const conversationTarget = conversationMessageTarget(rawPath);
+    if (
+      grant?.layer === 'top'
+      && (
+        rawPath === '/api/dispatch-audit'
+        || /^\/api\/runs\/[^/]+\/(?:input|cancel)\/?$/.test(rawPath)
+        // `/api/conversations/worker:<runId>/message` is an alias for worker
+        // input. Apply the same Top-layer intervention restriction to both
+        // literal and percent-encoded conversation ids.
+        || conversationTarget?.startsWith('worker:')
+      )
+    ) {
+      return false;
+    }
+    return rawPath === '/api/tasks'
+      || rawPath === '/api/dispatch-audit'
+      || (
+        grant?.layer !== 'top'
+        && (
+          rawPath === '/api/verify-checks'
+          || rawPath === '/api/verify-checks/assign'
+        )
+      )
+      || /^\/api\/tasks\/[^/]+\/execute\/?$/.test(rawPath)
+      || /^\/api\/runs\/[^/]+\/(?:input|cancel)\/?$/.test(rawPath)
+      || /^\/api\/conversations\/[^/]+\/(?:message|memory\/propose)\/?$/.test(rawPath)
+      || rawPath === '/api/operator/specialist';
+  }
+  if (method === 'PATCH') {
+    return /^\/api\/tasks\/[^/]+(?:\/status)?\/?$/.test(rawPath)
+      || (
+        grant?.layer !== 'top'
+        && /^\/api\/verify-checks\/[^/]+\/?$/.test(rawPath)
+      );
+  }
+  if (method === 'DELETE') {
+    return /^\/api\/tasks\/[^/]+\/?$/.test(rawPath)
+      || (
+        grant?.layer !== 'top'
+        && /^\/api\/verify-checks\/[^/]+\/?$/.test(rawPath)
+      );
+  }
+  return false;
+}
+
+function createAuthMiddleware({
+  token = process.env.PALANTIR_TOKEN,
+  pmToken = process.env.PALANTIR_PM_TOKEN,
+  workerProposalTokenService = null,
+  managerCapabilityTokenService = null,
+  isManagerCapabilityActive = null,
+} = {}) {
   return (req, res, next) => {
     // req.auth.method records HOW the caller authenticated so routes can make
     // actor decisions (ML R4: cookie=human→active vs bearer=PM/CLI→candidate).
     //
-    // Actor split & spoofing: when a distinct PALANTIR_PM_TOKEN is configured,
-    // the PM/CLI authenticates with it as bearer and CANNOT present the human
-    // cookie (which only matches PALANTIR_TOKEN) — that's the spoof-proof path,
-    // PROVIDED the PM is given only PALANTIR_PM_TOKEN. Without a separate PM
-    // token the bearer/cookie split falls back to the shared PALANTIR_TOKEN and
-    // is a best-effort actor hint, NOT a security boundary (a token holder can
-    // present either form). See routes/memory.js R4 + docs.
+    // Managers use a boot-local, run-bound capability and are represented as
+    // bearer actors so memory writes remain candidate-only. PALANTIR_PM_TOKEN
+    // is retained only for trusted external bearer automation. A human holding
+    // PALANTIR_TOKEN can still present it as bearer intentionally; cookie auth
+    // is the sole human-review authority. See routes/memory.js R4 + docs.
     if (!token) { req.auth = { method: 'none' }; return next(); } // auth disabled
 
     // Precedence: Bearer header is evaluated FIRST, and a present-but-
@@ -72,6 +145,46 @@ function createAuthMiddleware({ token = process.env.PALANTIR_TOKEN, pmToken = pr
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const presented = authHeader.slice(7);
+      const managerGrant = managerCapabilityTokenService
+        && typeof managerCapabilityTokenService.verify === 'function'
+        ? managerCapabilityTokenService.verify(presented)
+        : null;
+      if (managerGrant) {
+        const active = typeof isManagerCapabilityActive === 'function'
+          && isManagerCapabilityActive(managerGrant);
+        if (!active) {
+          throw new ForbiddenError('Manager capability is no longer active');
+        }
+        if (!managerCapabilityRequestAllowed(req, managerGrant)) {
+          throw new ForbiddenError('Manager capability is limited to orchestration endpoints');
+        }
+        // Keep method='bearer' for existing route actor semantics: manager
+        // memory writes are proposals, never human-active writes.
+        req.auth = {
+          method: 'bearer',
+          actor: 'manager',
+          managerRunId: managerGrant.runId,
+          conversationId: managerGrant.conversationId,
+          layer: managerGrant.layer,
+        };
+        return next();
+      }
+      const workerGrant = workerProposalTokenService
+        && typeof workerProposalTokenService.verify === 'function'
+        ? workerProposalTokenService.verify(presented)
+        : null;
+      if (workerGrant) {
+        const pathRunId = workerProposalRunId(req);
+        if (req.method !== 'POST' || !pathRunId || pathRunId !== workerGrant.runId) {
+          throw new ForbiddenError('Worker token is limited to its memory proposal endpoint');
+        }
+        req.auth = {
+          method: 'worker',
+          runId: workerGrant.runId,
+          projectId: workerGrant.projectId || null,
+        };
+        return next();
+      }
       // A separate PM token (if set) is bearer-only and never matches the human
       // cookie path below, so a PM holding only it cannot spoof a human write.
       if (pmToken && timingSafeEqualStr(presented, pmToken)) { req.auth = { method: 'bearer' }; return next(); }
@@ -93,4 +206,10 @@ function createAuthMiddleware({ token = process.env.PALANTIR_TOKEN, pmToken = pr
   };
 }
 
-module.exports = { createAuthMiddleware, parseCookies, timingSafeEqualStr };
+module.exports = {
+  createAuthMiddleware,
+  parseCookies,
+  timingSafeEqualStr,
+  workerProposalRunId,
+  managerCapabilityRequestAllowed,
+};

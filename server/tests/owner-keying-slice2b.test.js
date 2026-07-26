@@ -437,7 +437,8 @@ test('10. residual restore, expire, update, and archive paths bump their own sco
   const folded = svc.restoreMemory(archivedCross.id);
   assert.equal(folded.id, activeUser.id);
   assert.equal(folded.origin, 'human');
-  assert.equal(svc.getMemoryItem(archivedCross.id).status, 'archived');
+  assert.equal(svc.getMemoryItem(archivedCross.id).status, 'superseded');
+  assert.equal(svc.restoreMemory(archivedCross.id), null, 'folded restore source is consumed once');
 
   // cross_project update/archive bumps cross_project revision, NOT user revision
   const cross = svc.createMemoryItem({

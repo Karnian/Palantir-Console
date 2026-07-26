@@ -1,10 +1,8 @@
-// MemoryView — L1 project memory inspection + post-hoc correction (PR4b).
+// Unified Memory Hub — user / workspace / Operator profile memory.
 //
-// Lists a project's accumulated memory (active / archived / all) and lets a
-// human correct it: edit content, archive/restore, mark reviewed, pin (protect
-// from PR5 decay), and view provenance (server-redacted evidence). Every
-// mutation is cookie(human)-only — the server (PATCH) returns 403 for
-// bearer/none, so this view is for the browser operator.
+// Human mutations remain cookie-only at the server. In auth-disabled mode a
+// "remember" request is intentionally staged as a candidate, never written
+// active. Candidate raw_json never crosses an API boundary.
 
 import { h } from '../../vendor/preact.module.js';
 import { useState, useEffect, useCallback, useRef } from '../../vendor/hooks.module.js';
@@ -18,33 +16,45 @@ import { EmptyState } from './EmptyState.js';
 import { Dropdown } from './Dropdown.js';
 import { Modal } from './Modal.js';
 
+const SCOPE_TABS = [
+  { key: 'user', label: '전체' },
+  { key: 'workspace', label: '프로젝트' },
+  { key: 'profile', label: 'Operator' },
+  { key: 'cross_project', label: '공통 후보' },
+];
 const STATUS_TABS = [
   { key: 'active', label: '활성' },
+  { key: 'candidate', label: '후보' },
   { key: 'archived', label: '보관' },
-  { key: 'all', label: '전체' },
+  { key: 'all', label: '전체 이력' },
 ];
+const L1_KINDS = ['convention', 'pitfall', 'heuristic', 'constraint'];
+const WORKSPACE_KINDS = [...L1_KINDS, 'fact'];
+const MASTER_KINDS = ['preference', 'constraint', 'commitment', 'decision', 'pattern', 'fact'];
 
 export function MemoryView({ projects = [] }) {
-  const [projectId, setProjectId] = useState('');
+  const [scope, setScope] = useState('user');
   const [status, setStatus] = useState('active');
+  const [projectId, setProjectId] = useState('');
+  const [profiles, setProfiles] = useState([]);
+  const [profileId, setProfileId] = useState('');
   const [items, setItems] = useState([]);
+  const [candidates, setCandidates] = useState([]);
+  const [nextCursor, setNextCursor] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [diagnostics, setDiagnostics] = useState(null);
   const [editing, setEditing] = useState(null);
   const [editContent, setEditContent] = useState('');
+  const [candidateEditing, setCandidateEditing] = useState(null);
+  const [candidateDraft, setCandidateDraft] = useState({ kind: '', content: '', importance: 5 });
+  const [adding, setAdding] = useState(false);
+  const [addDraft, setAddDraft] = useState({ kind: 'preference', content: '', importance: 5, factKey: '' });
   const [provenance, setProvenance] = useState(null);
-  const [diagnostics, setDiagnostics] = useState(null);
-  const [profiles, setProfiles] = useState([]);
-  const [candidateScope, setCandidateScope] = useState('workspace');
-  const [profileId, setProfileId] = useState('');
-  const [candidates, setCandidates] = useState([]);
-  const [candidateNextCursor, setCandidateNextCursor] = useState(null);
-  const [candidateLoading, setCandidateLoading] = useState(false);
-  // monotonic fetch token: a slower earlier request must not overwrite a newer
-  // project/status's result (Codex SERIOUS A2 — stale-fetch race).
-  const reqSeqRef = useRef(0);
-  const candidateReqSeqRef = useRef(0);
-  const candidateCursorRef = useRef(null);
-  const candidateBaseRef = useRef('');
+  const [candidateBusy, setCandidateBusy] = useState('');
+  const requestSeqRef = useRef(0);
+  const cursorRef = useRef(null);
+  const ownerKeyRef = useRef('');
+  const reloadRef = useRef(null);
   const liveReloadTimerRef = useRef(null);
 
   useEffect(() => {
@@ -64,24 +74,10 @@ export function MemoryView({ projects = [] }) {
     return () => { active = false; };
   }, []);
 
-  const reload = useCallback(async () => {
-    if (!projectId) { setItems([]); return; }
-    const seq = ++reqSeqRef.current;
-    setLoading(true);
-    try {
-      const data = await apiFetch(`/api/projects/${projectId}/memory?status=${status}`);
-      if (seq !== reqSeqRef.current) return; // a newer request superseded this one
-      setItems(Array.isArray(data.memory) ? data.memory : []);
-    } catch (err) {
-      if (seq !== reqSeqRef.current) return;
-      addToast(`메모리 로드 실패: ${err.message}`, 'error');
-      setItems([]);
-    } finally {
-      if (seq === reqSeqRef.current) setLoading(false);
-    }
-  }, [projectId, status]);
-
-  useEffect(() => { reload(); }, [reload]);
+  // Include the status tab in the async commit fence. A mutation started from
+  // "active" must not reload that list over a newly selected "archived" tab.
+  const ownerKey = `${scope}:${scope === 'workspace' ? projectId : scope === 'profile' ? profileId : scope}:${status}`;
+  ownerKeyRef.current = ownerKey;
 
   const reloadDiagnostics = useCallback(async () => {
     try {
@@ -91,55 +87,78 @@ export function MemoryView({ projects = [] }) {
     }
   }, []);
 
-  const candidateBase = candidateScope === 'workspace'
-    ? (projectId ? `/api/projects/${projectId}/memory/candidates` : '')
-    : (profileId ? `/api/operator/profiles/${profileId}/memory/candidates` : '');
-  candidateBaseRef.current = candidateBase;
-
-  const reloadCandidates = useCallback(async ({ append = false } = {}) => {
-    const base = candidateScope === 'workspace'
-      ? (projectId ? `/api/projects/${projectId}/memory/candidates` : '')
-      : (profileId ? `/api/operator/profiles/${profileId}/memory/candidates` : '');
-    const canReview = diagnostics && diagnostics.approval && diagnostics.approval.can_review;
-    if (!base || !canReview) {
-      candidateReqSeqRef.current += 1;
+  const reload = useCallback(async ({ append = false } = {}) => {
+    const descriptor = describeScope(scope, projectId, profileId);
+    if (!descriptor.ready) {
+      requestSeqRef.current += 1;
+      setLoading(false);
+      setItems([]);
       setCandidates([]);
-      candidateCursorRef.current = null;
-      setCandidateNextCursor(null);
-      setCandidateLoading(false);
+      setNextCursor(null);
+      cursorRef.current = null;
       return;
     }
-    const cursor = append ? candidateCursorRef.current : null;
-    if (append && !cursor) return;
-    const seq = ++candidateReqSeqRef.current;
-    setCandidateLoading(true);
-    try {
-      const cursorQuery = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
-      const data = await apiFetch(`${base}?status=pending&limit=50${cursorQuery}`);
-      if (seq !== candidateReqSeqRef.current) return;
-      const next = Array.isArray(data.candidates) ? data.candidates : [];
-      setCandidates((current) => append ? mergeCandidates(current, next) : next);
-      candidateCursorRef.current = data.next_cursor || null;
-      setCandidateNextCursor(data.next_cursor || null);
-    } catch (err) {
-      if (seq !== candidateReqSeqRef.current) return;
-      addToast(`후보 로드 실패: ${err.message}`, 'error');
-      if (!append) setCandidates([]);
-    } finally {
-      if (seq === candidateReqSeqRef.current) setCandidateLoading(false);
+    if (status === 'candidate' && !diagnostics?.approval?.can_review) {
+      requestSeqRef.current += 1;
+      setLoading(false);
+      setItems([]);
+      setCandidates([]);
+      setNextCursor(null);
+      cursorRef.current = null;
+      return;
     }
-  }, [candidateScope, projectId, profileId, diagnostics]);
+    const cursor = append ? cursorRef.current : null;
+    if (append && !cursor) return;
+    const myOwner = ownerKey;
+    const seq = ++requestSeqRef.current;
+    setLoading(true);
+    try {
+      if (status === 'candidate') {
+        const data = await apiFetch(withQuery(descriptor.candidates, [
+          descriptor.listScopeQuery,
+          'status=pending',
+          'limit=50',
+          cursor ? `cursor=${encodeURIComponent(cursor)}` : '',
+        ]));
+        if (seq !== requestSeqRef.current || ownerKeyRef.current !== myOwner) return;
+        const next = Array.isArray(data.candidates) ? data.candidates : [];
+        setCandidates((current) => append ? mergeCandidates(current, next) : next);
+        setItems([]);
+        cursorRef.current = data.next_cursor || null;
+        setNextCursor(data.next_cursor || null);
+      } else {
+        const data = await apiFetch(withQuery(descriptor.items, [
+          descriptor.listScopeQuery,
+          `status=${status}`,
+        ]));
+        if (seq !== requestSeqRef.current || ownerKeyRef.current !== myOwner) return;
+        setItems(Array.isArray(data.memory) ? data.memory : []);
+        setCandidates([]);
+        cursorRef.current = null;
+        setNextCursor(null);
+      }
+    } catch (err) {
+      if (seq !== requestSeqRef.current || ownerKeyRef.current !== myOwner) return;
+      addToast(`메모리 로드 실패: ${err.message}`, 'error');
+      if (!append) {
+        setItems([]);
+        setCandidates([]);
+      }
+    } finally {
+      if (seq === requestSeqRef.current) setLoading(false);
+    }
+  }, [scope, projectId, profileId, status, diagnostics, ownerKey]);
+  reloadRef.current = reload;
 
   useEffect(() => { reloadDiagnostics(); }, [reloadDiagnostics]);
-  useEffect(() => { reloadCandidates(); }, [reloadCandidates]);
+  useEffect(() => { reload(); }, [reload]);
 
   useEffect(() => {
-    const refreshLive = () => {
+    const refresh = () => {
       if (liveReloadTimerRef.current) clearTimeout(liveReloadTimerRef.current);
       liveReloadTimerRef.current = setTimeout(() => {
         reload();
         reloadDiagnostics();
-        reloadCandidates();
       }, 120);
     };
     const channels = [
@@ -148,217 +167,395 @@ export function MemoryView({ projects = [] }) {
       'memory:promoted',
       'memory:evicted',
       'memory:decayed',
+      'master_memory:candidate_created',
+      'master_memory:candidate_rejected',
       'master_memory:promoted',
       'master_memory:evicted',
       'master_memory:decayed',
     ];
-    const unsubs = channels.map((channel) => sseBroker.subscribe(channel, refreshLive));
+    const unsubs = channels.map((channel) => sseBroker.subscribe(channel, refresh));
     return () => {
       unsubs.forEach((unsubscribe) => unsubscribe());
       if (liveReloadTimerRef.current) clearTimeout(liveReloadTimerRef.current);
     };
-  }, [reload, reloadCandidates, reloadDiagnostics]);
+  }, [reload, reloadDiagnostics]);
 
-  async function reviewCandidate(candidate, action) {
-    const reviewBase = candidateBase;
-    if (!reviewBase) return;
+  function selectScope(nextScope) {
+    setScope(nextScope);
+    setStatus(nextScope === 'cross_project' ? 'candidate' : 'active');
+    setCandidateEditing(null);
+    setEditing(null);
+  }
+
+  function openAdd() {
+    const kinds = kindsForScope(scope);
+    setAddDraft({ kind: kinds[0], content: '', importance: 5, factKey: '' });
+    setAdding(true);
+  }
+
+  async function saveAdd() {
+    const descriptor = describeScope(scope, projectId, profileId);
+    if (!descriptor.ready || !addDraft.content.trim()) return;
+    const myOwner = ownerKey;
     try {
-      await apiFetchWithToast(`${reviewBase}/${candidate.id}/${action}`, {
+      const data = await apiFetchWithToast(descriptor.remember, {
         method: 'POST',
+        body: JSON.stringify({
+          kind: addDraft.kind,
+          content: addDraft.content,
+          importance: Number(addDraft.importance),
+          ...(addDraft.kind === 'fact' ? { factKey: addDraft.factKey } : {}),
+          ...(scope === 'user' || scope === 'cross_project' ? { scope } : {}),
+        }),
       });
-      addToast(action === 'promote' ? '메모리 후보 승인됨' : '메모리 후보 거절됨', 'success');
-      // The operator may switch project/profile while the mutation is in
-      // flight. Old-owner reload closures must not overwrite the new view.
-      if (candidateBaseRef.current === reviewBase) {
-        await Promise.all([reloadCandidates(), reloadDiagnostics(), reload()]);
+      if (data.memory) {
+        addToast(`${scopeLabel(scope)} 메모리에 저장됨`, 'success');
+        setStatus('active');
+      } else {
+        addToast(`${scopeLabel(scope)} 후보로 등록됨 — 로그인 후 승인하세요`, 'info');
+        setStatus('candidate');
+      }
+      setAdding(false);
+      if (ownerKeyRef.current === myOwner) {
+        await Promise.all([reload(), reloadDiagnostics()]);
       } else {
         await reloadDiagnostics();
       }
     } catch {
-      // apiFetchWithToast already surfaced the error.
+      // apiFetchWithToast already surfaced the error; keep the draft open.
     }
   }
 
-  async function patch(itemId, body, okMsg) {
+  async function patchItem(item, body, okMessage) {
+    const descriptor = describeScope(scope, projectId, profileId);
     try {
-      await apiFetchWithToast(`/api/projects/${projectId}/memory/${itemId}`, {
-        method: 'PATCH', body: JSON.stringify(body),
+      await apiFetchWithToast(`${descriptor.itemBase}/${encodeURIComponent(item.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
       });
-      addToast(okMsg, 'success');
-      await reload();
+      addToast(okMessage, 'success');
+      // Always refresh through the latest render's callback. If the user moved
+      // to another status/owner while the mutation was pending, refreshing the
+      // initiating closure would either overwrite or leave the current view stale.
+      if (reloadRef.current) await reloadRef.current();
       return true;
     } catch {
-      return false; // apiFetchWithToast already surfaced the error
+      return false;
     }
   }
 
-  function openEdit(item) { setEditing(item); setEditContent(item.content); }
+  function openEdit(item) {
+    setEditing(item);
+    setEditContent(item.content || '');
+  }
+
   async function saveEdit() {
     if (!editing) return;
-    // Close ONLY on success — keep the modal + draft on failure (Codex SERIOUS A5).
-    const ok = await patch(editing.id, { action: 'update', content: editContent }, '메모리 수정됨');
+    const ok = await patchItem(editing, { action: 'update', content: editContent }, '메모리 수정됨');
     if (ok) setEditing(null);
   }
 
   async function openProvenance(item) {
+    const descriptor = describeScope(scope, projectId, profileId);
     try {
-      const data = await apiFetch(`/api/projects/${projectId}/memory/${item.id}/provenance`);
-      setProvenance(data);
+      setProvenance(await apiFetch(`${descriptor.itemBase}/${encodeURIComponent(item.id)}/provenance`));
     } catch (err) {
       addToast(`출처 로드 실패: ${err.message}`, 'error');
     }
   }
 
+  async function reviewCandidate(candidate, action, override = null) {
+    const descriptor = describeScope(scope, projectId, profileId);
+    setCandidateBusy(candidate.id);
+    try {
+      await apiFetchWithToast(
+        `${descriptor.candidates}/${encodeURIComponent(candidate.id)}/${action}${descriptor.candidateScopeQuery}`,
+        {
+          method: 'POST',
+          body: override ? JSON.stringify(override) : undefined,
+        },
+      );
+      addToast(action === 'promote' ? '메모리 후보 승인됨' : '메모리 후보 거절됨', 'success');
+      if (action === 'promote') setCandidateEditing(null);
+      await Promise.all([
+        reloadRef.current ? reloadRef.current() : Promise.resolve(),
+        reloadDiagnostics(),
+      ]);
+    } catch {
+      // apiFetchWithToast already surfaced the error.
+      // A terminal server-side rejection can intentionally return 409 after
+      // moving the candidate out of `pending`. Refresh even on failure so the
+      // inbox cannot retain a stale, retryable-looking card if SSE is delayed
+      // or disconnected.
+      await Promise.all([
+        reloadRef.current ? reloadRef.current() : Promise.resolve(),
+        reloadDiagnostics(),
+      ]);
+    } finally {
+      setCandidateBusy((current) => current === candidate.id ? '' : current);
+    }
+  }
+
+  function openCandidateEdit(candidate) {
+    const kinds = kindsForScope(scope).filter((kind) => kind !== 'fact');
+    // Cross-project candidates originate from L1 workspace memory. Their
+    // convention/pitfall/heuristic kinds are represented as the L2 `pattern`
+    // kind after approval; defaulting them to the first master kind
+    // (`preference`) silently changes their meaning.
+    const proposedKind = scope === 'cross_project' && L1_KINDS.includes(candidate.kind)
+      ? 'pattern'
+      : candidate.kind;
+    const initialKind = kinds.includes(proposedKind) ? proposedKind : kinds[0];
+    setCandidateDraft({
+      kind: initialKind,
+      content: candidate.preview || '',
+      importance: Number.isInteger(Number(candidate.importance))
+        && Number(candidate.importance) >= 1
+        && Number(candidate.importance) <= 10
+        ? Number(candidate.importance)
+        : 5,
+    });
+    setCandidateEditing(candidate);
+  }
+
+  async function saveCandidateEdit() {
+    if (!candidateEditing || !candidateDraft.content.trim()) return;
+    await reviewCandidate(candidateEditing, 'promote', {
+      kind: candidateDraft.kind,
+      content: candidateDraft.content,
+      importance: Number(candidateDraft.importance),
+    });
+  }
+
+  const descriptor = describeScope(scope, projectId, profileId);
+  const canReview = !!diagnostics?.approval?.can_review;
+
   return html`
-    <div class="page memory-page" data-view="memory">
-      <div class="page-header">
-        <h1>메모리</h1>
-        <div class="memory-controls">
-          <${Dropdown}
-            wide
-            ariaLabel="프로젝트 폴더 선택"
-            value=${projectId}
-            onChange=${setProjectId}
-            options=${projects.length === 0
-              ? [{ value: '', label: '프로젝트 폴더 없음' }]
-              : projects.map((p) => ({ value: p.id, label: p.name }))}
-          />
-          <div class="memory-tabs" role="tablist" aria-label="메모리 상태 필터">
-            ${STATUS_TABS.map((tab) => html`
-              <button
-                type="button"
-                role="tab"
-                aria-selected=${status === tab.key}
-                class=${`memory-tab ${status === tab.key ? 'is-active' : ''}`}
-                onClick=${() => setStatus(tab.key)}
-              >${tab.label}</button>
-            `)}
+    <div class="page memory-page memory-hub" data-view="memory">
+      <div class="page-header memory-hub-header">
+        <div>
+          <h1>Memory Hub</h1>
+          <p class="memory-page-subtitle">수집 → 검토 → 활성화 → 주입 흐름을 범위별로 관리합니다.</p>
+        </div>
+        <button
+          type="button"
+          class="btn btn-primary"
+          onClick=${openAdd}
+          disabled=${!descriptor.ready || scope === 'cross_project'}
+          title=${scope === 'cross_project' ? '공통 지식은 여러 프로젝트의 관측에서 후보로 생성됩니다' : ''}
+        >
+          기억 추가
+        </button>
+      </div>
+
+      <nav class="memory-scope-tabs" role="tablist" aria-label="메모리 범위">
+        ${SCOPE_TABS.map((tab) => html`
+          <button
+            type="button"
+            role="tab"
+            aria-selected=${scope === tab.key}
+            class=${`memory-scope-tab ${scope === tab.key ? 'is-active' : ''}`}
+            onClick=${() => selectScope(tab.key)}
+          >${tab.label}</button>
+        `)}
+      </nav>
+
+      <div class="memory-hub-toolbar">
+        <div class="memory-owner-picker">
+          ${scope === 'workspace' ? html`
+            <${Dropdown}
+              wide
+              ariaLabel="프로젝트 폴더 선택"
+              value=${projectId}
+              onChange=${setProjectId}
+              options=${projects.length
+                ? projects.map((project) => ({ value: project.id, label: project.name }))
+                : [{ value: '', label: '프로젝트 폴더 없음' }]}
+            />
+          ` : null}
+          ${scope === 'profile' ? html`
+            <${Dropdown}
+              wide
+              ariaLabel="Operator 프로필 선택"
+              value=${profileId}
+              onChange=${setProfileId}
+              options=${profiles.length
+                ? profiles.map((profile) => ({ value: profile.id, label: profile.name }))
+                : [{ value: '', label: 'Operator 프로필 없음' }]}
+            />
+          ` : null}
+          <div class="memory-owner-summary">
+            <strong>${scopeLabel(scope)}</strong>
+            <span>${scopeDescription(scope)}</span>
           </div>
+        </div>
+        <div class="memory-tabs" role="tablist" aria-label="메모리 상태">
+          ${STATUS_TABS.map((tab) => html`
+            <button
+              type="button"
+              role="tab"
+              aria-selected=${status === tab.key}
+              class=${`memory-tab ${status === tab.key ? 'is-active' : ''}`}
+              onClick=${() => setStatus(tab.key)}
+            >${tab.label}</button>
+          `)}
         </div>
       </div>
 
-      <section class="memory-section memory-status-section" aria-labelledby="memory-status-title">
+      <section class="memory-status-section" aria-labelledby="memory-status-title">
         <div class="memory-section-heading">
           <div>
             <h2 id="memory-status-title">누적 상태</h2>
-            <p>후보가 실제 메모리로 전환되는 경로와 대기열 상태입니다.</p>
+            <p>후보가 활성 메모리로 전환되지 않는 원인을 여기서 확인합니다.</p>
           </div>
           <button type="button" class="btn btn-sm" onClick=${() => {
             reloadDiagnostics();
-            reloadCandidates();
+            reload();
           }}>새로고침</button>
         </div>
-        ${diagnostics
-          ? html`<div class="memory-status-grid">
-              <${StatusMetric}
-                label="정제기"
-                value=${distillerLabel(diagnostics.distiller)}
-                tone=${diagnostics.distiller && diagnostics.distiller.state}
-              />
-              <${StatusMetric} label="대기 후보" value=${diagnostics.queue?.pending ?? 0} />
-              <${StatusMetric} label="프로젝트" value=${diagnostics.queue?.workspace_pending ?? 0} />
-              <${StatusMetric} label="오퍼레이터" value=${diagnostics.queue?.profile_pending ?? 0} />
-            </div>`
-          : html`<div class="loading">상태 확인 중…</div>`}
-        ${diagnostics?.distiller?.state === 'missing_credential'
-          ? html`<div class="memory-status-notice is-warning">
-              자동 정제가 멈춰 있습니다. 서버에 ANTHROPIC_API_KEY를 설정하거나 후보를 직접 검토하세요.
-            </div>`
-          : null}
-        ${diagnostics && !diagnostics.approval?.can_review
-          ? html`<div class="memory-status-notice">
-              후보 승인·거절은 PALANTIR_TOKEN으로 로그인한 브라우저 세션에서만 가능합니다.
-            </div>`
-          : null}
+        ${diagnostics ? html`
+          <div class="memory-status-grid">
+            <${StatusMetric}
+              label="정제기"
+              value=${distillerLabel(diagnostics.distiller)}
+              tone=${diagnostics.distiller?.state}
+            />
+            <${StatusMetric} label="대기 후보" value=${diagnostics.queue?.pending ?? 0} />
+            <${StatusMetric} label="프로젝트" value=${diagnostics.queue?.workspace_pending ?? 0} />
+            <${StatusMetric} label="Operator" value=${diagnostics.queue?.profile_pending ?? 0} />
+            <${StatusMetric} label="현재 표시" value=${status === 'candidate' ? candidates.length : items.length} />
+          </div>
+        ` : html`<div class="loading">상태 확인 중…</div>`}
+        ${diagnostics?.distiller?.state === 'missing_credential' ? html`
+          <div class="memory-status-notice is-warning">
+            자동 정제가 멈춰 있습니다. ANTHROPIC_API_KEY를 설정하거나 후보를 수정 후 승인하세요.
+          </div>
+        ` : null}
+        ${diagnostics && !canReview ? html`
+          <div class="memory-status-notice">
+            현재 요청은 사람이 인증된 세션이 아닙니다. 기억 추가는 후보로 저장되며,
+            승인·수정·보관은 PALANTIR_TOKEN 로그인 후 가능합니다.
+          </div>
+        ` : null}
+        ${diagnostics?.approval?.actor_boundary === 'run_capabilities_unverified' ? html`
+          <div class="memory-status-notice is-warning">
+            에이전트는 실행 범위 capability만 받지만, 서버의 전역 토큰 저장소 경계가 확인되지 않았습니다.
+            POSIX에서는 일회성 PALANTIR_ACTOR_TOKEN_FILE, Windows에서는 OS·컨테이너 secret 경계를 사용해
+            재시작해야 사람 전용 승인을 보안 경계로 사용할 수 있습니다.
+          </div>
+        ` : null}
+        ${diagnostics?.queue?.oldest_pending_at ? html`
+          <div class="memory-oldest-pending">가장 오래된 대기 후보: ${diagnostics.queue.oldest_pending_at}</div>
+        ` : null}
       </section>
 
-      <section class="memory-section memory-candidate-section" aria-labelledby="memory-candidate-title">
+      <section class="memory-content-section" aria-labelledby="memory-content-title">
         <div class="memory-section-heading">
           <div>
-            <h2 id="memory-candidate-title">후보 Inbox</h2>
-            <p>R4 후보는 모델 호출 없이 승인되고, 작업 신호 후보는 자동 정제를 기다립니다.</p>
-          </div>
-          <div class="memory-candidate-controls">
-            <div class="memory-tabs" role="tablist" aria-label="후보 소유자 범위">
-              <button
-                type="button"
-                role="tab"
-                aria-selected=${candidateScope === 'workspace'}
-                class=${`memory-tab ${candidateScope === 'workspace' ? 'is-active' : ''}`}
-                onClick=${() => setCandidateScope('workspace')}
-              >프로젝트</button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected=${candidateScope === 'profile'}
-                class=${`memory-tab ${candidateScope === 'profile' ? 'is-active' : ''}`}
-                onClick=${() => setCandidateScope('profile')}
-              >오퍼레이터</button>
-            </div>
-            ${candidateScope === 'profile' ? html`
-              <${Dropdown}
-                wide
-                ariaLabel="오퍼레이터 프로필 선택"
-                value=${profileId}
-                onChange=${setProfileId}
-                options=${profiles.length === 0
-                  ? [{ value: '', label: '오퍼레이터 프로필 없음' }]
-                  : profiles.map((profile) => ({ value: profile.id, label: profile.name }))}
-              />
-            ` : null}
+            <h2 id="memory-content-title">${scopeLabel(scope)} · ${statusLabel(status)}</h2>
+            <p>${status === 'candidate'
+              ? '정제된 제안만 표시합니다. 작업 신호의 raw JSON은 브라우저로 전송하지 않습니다.'
+              : status === 'all'
+                ? '활성·보관·대체된 메모리를 함께 확인합니다. 대체된 항목은 감사용 읽기 전용 이력입니다.'
+                : '활성 메모리는 다음 관련 turn의 조합 대상이며, 보관 메모리는 주입되지 않습니다.'}</p>
           </div>
         </div>
-        ${candidateLoading
-          ? html`<div class="loading">후보 불러오는 중…</div>`
-          : (!diagnostics?.approval?.can_review
-            ? html`<div class="memory-candidate-empty">로그인 후 후보 원문을 안전하게 검토할 수 있습니다.</div>`
-            : candidates.length === 0
-              ? html`<div class="memory-candidate-empty">대기 중인 후보가 없습니다.</div>`
-              : html`<div class="memory-candidate-list">
-                  ${candidates.map((candidate) => html`
-                    <${CandidateCard}
-                      key=${candidate.id}
-                      candidate=${candidate}
-                      onPromote=${() => reviewCandidate(candidate, 'promote')}
-                      onReject=${() => reviewCandidate(candidate, 'reject')}
+
+        ${loading ? html`<div class="loading">불러오는 중…</div>` : status === 'candidate'
+          ? (!canReview
+              ? html`<${EmptyState} title="로그인이 필요합니다" message="후보 내용은 사람 세션에서만 검토할 수 있습니다." />`
+              : candidates.length === 0
+                ? html`<${EmptyState} title="대기 후보가 없습니다" message="제안 또는 작업 신호가 들어오면 여기에 표시됩니다." />`
+                : html`<div class="memory-candidate-list">
+                    ${candidates.map((candidate) => html`
+                      <${CandidateCard}
+                        key=${candidate.id}
+                        candidate=${candidate}
+                        busy=${candidateBusy === candidate.id}
+                        onPromote=${() => reviewCandidate(candidate, 'promote')}
+                        onEdit=${() => openCandidateEdit(candidate)}
+                        onReject=${() => reviewCandidate(candidate, 'reject')}
+                      />
+                    `)}
+                  </div>`)
+          : (items.length === 0
+              ? html`<${EmptyState}
+                  title=${emptyTitle(status)}
+                  message=${emptyMessage(scope, status, diagnostics)}
+                />`
+              : html`<div class="memory-list">
+                  ${items.map((item) => html`
+                    <${MemoryCard}
+                      key=${item.id}
+                      item=${item}
+                      onEdit=${() => openEdit(item)}
+                      onArchive=${() => patchItem(item, { action: 'archive' }, '보관됨')}
+                      onRestore=${() => patchItem(item, { action: 'restore' }, '복원됨')}
+                      onReview=${() => patchItem(item, { action: 'review' }, '검토 표시됨')}
+                      onPin=${() => patchItem(item, { action: 'pin', pinned: !item.pinned }, item.pinned ? '고정 해제됨' : '고정됨')}
+                      onProvenance=${() => openProvenance(item)}
                     />
                   `)}
                 </div>`)}
-        ${candidateNextCursor && !candidateLoading
-          ? html`<div class="memory-candidate-more">
-              <button
-                type="button"
-                class="btn btn-sm"
-                onClick=${() => reloadCandidates({ append: true })}
-              >더 보기</button>
-            </div>`
-          : null}
-      </section>
-
-      <section class="memory-section memory-active-section" aria-labelledby="memory-active-title">
-        <div class="memory-section-heading">
-          <div>
-            <h2 id="memory-active-title">프로젝트 메모리</h2>
-            <p>현재 선택한 프로젝트의 활성·보관 메모리입니다.</p>
+        ${nextCursor && !loading ? html`
+          <div class="memory-candidate-more">
+            <button type="button" class="btn btn-sm" onClick=${() => reload({ append: true })}>더 보기</button>
           </div>
-        </div>
-      ${loading
-        ? html`<div class="loading">불러오는 중…</div>`
-        : (items.length === 0
-          ? html`<${EmptyState} title="메모리가 없습니다" message="이 프로젝트 폴더에 표시할 메모리가 아직 없습니다." />`
-          : html`<div class="memory-list">
-              ${items.map((it) => MemoryCard({ it, patch, openEdit, openProvenance }))}
-            </div>`)}
+        ` : null}
       </section>
 
-      ${editing && html`
+      ${adding ? html`
+        <${Modal} open ariaLabel="기억 추가" onClose=${() => setAdding(false)}>
+          <div class="modal-header"><h2>기억 추가</h2></div>
+          <div class="memory-form">
+            <label>범위<input value=${scopeLabel(scope)} disabled /></label>
+            <label>종류
+              <select value=${addDraft.kind} onChange=${(event) => setAddDraft({ ...addDraft, kind: event.target.value })}>
+                ${kindsForScope(scope).map((kind) => html`<option value=${kind}>${kind}</option>`)}
+              </select>
+            </label>
+            ${addDraft.kind === 'fact' ? html`
+              <label>Fact key
+                <input
+                  value=${addDraft.factKey}
+                  onInput=${(event) => setAddDraft({ ...addDraft, factKey: event.target.value })}
+                  placeholder="tool.example"
+                />
+              </label>
+            ` : null}
+            <label>내용
+              <textarea
+                rows="6"
+                value=${addDraft.content}
+                onInput=${(event) => setAddDraft({ ...addDraft, content: event.target.value })}
+                placeholder="다음 관련 작업에서도 재사용할 내용을 입력하세요"
+              ></textarea>
+            </label>
+            <label>중요도
+              <input
+                type="number"
+                min="1"
+                max="10"
+                value=${addDraft.importance}
+                onInput=${(event) => setAddDraft({ ...addDraft, importance: event.target.value })}
+              />
+            </label>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="btn" onClick=${() => setAdding(false)}>취소</button>
+            <button type="button" class="btn btn-primary" onClick=${saveAdd}>저장</button>
+          </div>
+        </${Modal}>
+      ` : null}
+
+      ${editing ? html`
         <${Modal} open ariaLabel="메모리 수정" onClose=${() => setEditing(null)}>
           <div class="modal-header"><h2>메모리 수정</h2></div>
           <textarea
             class="memory-edit-textarea"
-            rows="5"
+            rows="6"
             value=${editContent}
-            onInput=${(e) => setEditContent(e.target.value)}
+            onInput=${(event) => setEditContent(event.target.value)}
             aria-label="메모리 내용"
           ></textarea>
           <div class="modal-actions">
@@ -366,9 +563,50 @@ export function MemoryView({ projects = [] }) {
             <button type="button" class="btn btn-primary" onClick=${saveEdit}>저장</button>
           </div>
         </${Modal}>
-      `}
+      ` : null}
 
-      ${provenance && html`
+      ${candidateEditing ? html`
+        <${Modal} open ariaLabel="후보 수정 후 승인" onClose=${() => setCandidateEditing(null)}>
+          <div class="modal-header"><h2>후보 수정 후 승인</h2></div>
+          <p class="memory-modal-note">
+            아래 내용은 사람이 작성하는 최종 메모리입니다. 작업 신호 원문은 보안상 노출되지 않습니다.
+          </p>
+          <div class="memory-form">
+            <label>종류
+              <select
+                value=${candidateDraft.kind}
+                onChange=${(event) => setCandidateDraft({ ...candidateDraft, kind: event.target.value })}
+              >
+                ${kindsForScope(scope).filter((kind) => kind !== 'fact').map((kind) => html`
+                  <option value=${kind}>${kind}</option>
+                `)}
+              </select>
+            </label>
+            <label>최종 내용
+              <textarea
+                rows="6"
+                value=${candidateDraft.content}
+                onInput=${(event) => setCandidateDraft({ ...candidateDraft, content: event.target.value })}
+              ></textarea>
+            </label>
+            <label>중요도
+              <input
+                type="number"
+                min="1"
+                max="10"
+                value=${candidateDraft.importance}
+                onInput=${(event) => setCandidateDraft({ ...candidateDraft, importance: event.target.value })}
+              />
+            </label>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="btn" onClick=${() => setCandidateEditing(null)}>취소</button>
+            <button type="button" class="btn btn-primary" onClick=${saveCandidateEdit}>수정 내용 승인</button>
+          </div>
+        </${Modal}>
+      ` : null}
+
+      ${provenance ? html`
         <${Modal} open ariaLabel="출처 (provenance)" onClose=${() => setProvenance(null)}>
           <div class="modal-header"><h2>출처 (provenance)</h2></div>
           <div class="memory-provenance">
@@ -376,9 +614,104 @@ export function MemoryView({ projects = [] }) {
             <pre class="memory-provenance-json">${JSON.stringify(provenance.evidence ?? {}, null, 2)}</pre>
           </div>
         </${Modal}>
-      `}
+      ` : null}
     </div>
   `;
+}
+
+function describeScope(scope, projectId, profileId) {
+  if (scope === 'workspace') {
+    const base = projectId ? `/api/projects/${encodeURIComponent(projectId)}/memory` : '';
+    return {
+      ready: !!projectId,
+      items: base,
+      remember: `${base}/remember`,
+      candidates: `${base}/candidates`,
+      itemBase: base,
+      listScopeQuery: '',
+      candidateScopeQuery: '',
+    };
+  }
+  if (scope === 'profile') {
+    const base = profileId ? `/api/operator/profiles/${encodeURIComponent(profileId)}/memory` : '';
+    return {
+      ready: !!profileId,
+      items: base,
+      remember: `${base}/remember`,
+      candidates: `${base}/candidates`,
+      itemBase: base,
+      listScopeQuery: '',
+      candidateScopeQuery: '',
+    };
+  }
+  const query = `scope=${encodeURIComponent(scope)}`;
+  return {
+    ready: true,
+    items: '/api/master-memory',
+    remember: '/api/master-memory/remember',
+    candidates: '/api/master-memory/candidates',
+    itemBase: '/api/master-memory',
+    listScopeQuery: query,
+    candidateScopeQuery: `?${query}`,
+  };
+}
+
+function withQuery(url, parts) {
+  const query = parts.filter(Boolean).join('&');
+  return query ? `${url}?${query}` : url;
+}
+
+function kindsForScope(scope) {
+  if (scope === 'workspace') return WORKSPACE_KINDS;
+  if (scope === 'profile') return L1_KINDS;
+  return MASTER_KINDS;
+}
+
+function scopeLabel(scope) {
+  return {
+    user: '전체 메모리',
+    workspace: '프로젝트 메모리',
+    profile: 'Operator 메모리',
+    cross_project: 'Cross-project 메모리',
+  }[scope] || scope;
+}
+
+function scopeDescription(scope) {
+  return {
+    user: 'Top과 관련 Operator가 공유하는 선호·공통 제약',
+    workspace: '선택한 코드베이스에서만 사용하는 규칙·사실·함정',
+    profile: '선택한 Operator 역할의 지속적인 작업 방식',
+    cross_project: '여러 코드베이스에서 반복 관측되어 전체 승인을 기다리는 지식',
+  }[scope] || '';
+}
+
+function statusLabel(status) {
+  return {
+    active: '활성',
+    candidate: '후보',
+    archived: '보관',
+    all: '전체 이력',
+  }[status] || status;
+}
+
+function emptyTitle(status) {
+  return {
+    active: '활성 메모리가 없습니다',
+    archived: '보관된 메모리가 없습니다',
+    all: '메모리 이력이 없습니다',
+  }[status] || '메모리가 없습니다';
+}
+
+function emptyMessage(scope, status, diagnostics) {
+  if (status === 'archived') return '보관 처리된 항목이 없습니다.';
+  if (status === 'all') return '활성·보관·대체된 메모리 이력이 없습니다.';
+  if (!diagnostics?.approval?.can_review) {
+    return 'PALANTIR_TOKEN 로그인 후 기억을 추가하면 다음 관련 turn부터 사용할 수 있습니다.';
+  }
+  if (scope === 'cross_project') {
+    return '두 개 이상의 프로젝트에서 동일하게 관측된 지식이 생기면 후보로 표시됩니다.';
+  }
+  return '기억 추가를 누르거나 작업 중 재사용 가능한 지식을 후보로 제안하세요.';
 }
 
 function mergeCandidates(current, next) {
@@ -395,7 +728,7 @@ function distillerLabel(distiller) {
     failed: '시작 실패',
     unavailable: '확인 불가',
   };
-  return labels[distiller && distiller.state] || '확인 중';
+  return labels[distiller?.state] || '확인 중';
 }
 
 function StatusMetric({ label, value, tone = '' }) {
@@ -407,55 +740,63 @@ function StatusMetric({ label, value, tone = '' }) {
   `;
 }
 
-function CandidateCard({ candidate, onPromote, onReject }) {
-  const deterministic = candidate.approval_mode === 'deterministic';
+function CandidateCard({ candidate, busy, onPromote, onEdit, onReject }) {
+  const direct = candidate.approval_mode === 'deterministic';
   return html`
     <article class="memory-candidate-card">
       <div class="memory-card-head">
         <span class="memory-badge memory-kind">${candidate.kind || candidate.rule}</span>
         <span class="memory-badge memory-origin">${candidate.rule}</span>
-        <span class=${`memory-badge ${deterministic ? 'memory-candidate-ready' : 'memory-candidate-distill'}`}>
-          ${deterministic ? '즉시 승인 가능' : '자동 정제 필요'}
+        <span class=${`memory-badge ${direct ? 'memory-candidate-ready' : 'memory-candidate-distill'}`}>
+          ${direct ? '즉시 승인 가능' : '정제 또는 수정 필요'}
         </span>
       </div>
       <div class="memory-card-content">
-        ${candidate.preview || '원시 작업 신호입니다. 모델 정제 전에는 메모리 내용으로 노출되지 않습니다.'}
+        ${candidate.preview || '원시 작업 신호입니다. raw JSON은 노출되지 않으며 그대로 승인할 수 없습니다.'}
       </div>
       <div class="memory-candidate-meta">${candidate.created_at || ''}</div>
       <div class="memory-card-actions">
-        ${candidate.can_promote
-          ? html`<button type="button" class="btn btn-sm btn-primary" onClick=${onPromote}>승인</button>`
-          : null}
-        <button type="button" class="btn btn-sm" onClick=${onReject}>거절</button>
+        ${candidate.can_promote && direct ? html`
+          <button type="button" class="btn btn-sm btn-primary" disabled=${busy} onClick=${onPromote}>승인</button>
+        ` : null}
+        <button type="button" class="btn btn-sm" disabled=${busy} onClick=${onEdit}>수정 후 승인</button>
+        <button type="button" class="btn btn-sm" disabled=${busy} onClick=${onReject}>거절</button>
       </div>
     </article>
   `;
 }
 
-function MemoryCard({ it, patch, openEdit, openProvenance }) {
-  const archived = it.status === 'archived';
-  const conf = typeof it.confidence === 'number' ? it.confidence.toFixed(2) : null;
+function MemoryCard({ item, onEdit, onArchive, onRestore, onReview, onPin, onProvenance }) {
+  const archived = item.status === 'archived';
+  const superseded = item.status === 'superseded';
+  const confidence = typeof item.confidence === 'number' ? item.confidence.toFixed(2) : null;
   return html`
-    <div class=${`memory-card ${archived ? 'is-archived' : ''}`} key=${it.id}>
+    <article class=${`memory-card ${archived || superseded ? 'is-archived' : ''}`}>
       <div class="memory-card-head">
-        <span class="memory-badge memory-kind">${it.kind}</span>
-        <span class="memory-badge memory-origin">${it.origin}</span>
-        ${it.pinned ? html`<span class="memory-badge memory-pinned" title="고정됨">📌 고정</span>` : null}
-        ${conf !== null ? html`<span class="memory-badge memory-conf" title="신뢰도">${conf}</span>` : null}
+        <span class="memory-badge memory-kind">${item.kind}</span>
+        <span class="memory-badge memory-origin">${item.origin}</span>
+        ${item.pinned ? html`<span class="memory-badge memory-pinned">📌 고정</span>` : null}
+        ${confidence !== null ? html`<span class="memory-badge memory-conf">${confidence}</span>` : null}
         ${archived ? html`<span class="memory-badge memory-archived">보관됨</span>` : null}
+        ${superseded ? html`<span class="memory-badge memory-archived">대체됨</span>` : null}
       </div>
-      <div class="memory-card-content">${it.content}</div>
+      <div class="memory-card-content">${item.content}</div>
+      <div class="memory-card-meta">
+        <span>중요도 ${item.importance ?? '—'}</span>
+        <span>${item.updated_at || item.created_at || ''}</span>
+      </div>
       <div class="memory-card-actions">
-        ${!archived ? html`<button type="button" class="btn btn-sm" onClick=${() => openEdit(it)}>수정</button>` : null}
-        ${archived
-          ? html`<button type="button" class="btn btn-sm" onClick=${() => patch(it.id, { action: 'restore' }, '복원됨')}>복원</button>`
-          : html`<button type="button" class="btn btn-sm" onClick=${() => patch(it.id, { action: 'archive' }, '보관됨')}>보관</button>`}
-        <button type="button" class="btn btn-sm" onClick=${() => patch(it.id, { action: 'review' }, '검토 표시됨')}>검토</button>
-        <button type="button" class="btn btn-sm" onClick=${() => patch(it.id, { action: 'pin', pinned: !it.pinned }, it.pinned ? '고정 해제됨' : '고정됨')}>
-          ${it.pinned ? '고정 해제' : '고정'}
-        </button>
-        <button type="button" class="btn btn-sm" onClick=${() => openProvenance(it)}>출처</button>
+        ${item.status === 'active' ? html`
+          <button type="button" class="btn btn-sm" onClick=${onEdit}>수정</button>
+          <button type="button" class="btn btn-sm" onClick=${onArchive}>보관</button>
+          <button type="button" class="btn btn-sm" onClick=${onReview}>검토</button>
+        ` : null}
+        ${archived ? html`<button type="button" class="btn btn-sm" onClick=${onRestore}>복원</button>` : null}
+        ${!superseded ? html`
+          <button type="button" class="btn btn-sm" onClick=${onPin}>${item.pinned ? '고정 해제' : '고정'}</button>
+        ` : null}
+        <button type="button" class="btn btn-sm" onClick=${onProvenance}>출처</button>
       </div>
-    </div>
+    </article>
   `;
 }

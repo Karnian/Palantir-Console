@@ -31,6 +31,7 @@ const crypto = require('node:crypto');
 const { BadRequestError, NotFoundError, ConflictError } = require('../utils/errors');
 const { isEnvKeyDenied } = require('./envDenylist');
 const { assertSafeUrl } = require('./ssrf');
+const { isActorCredentialKey } = require('./actorTokenPolicy');
 
 // M4-a: bearer_token_env_var has a NARROWER denylist than allowed_env_keys.
 // The shared `isEnvKeyDenied` rejects credential-suffix names (`_TOKEN$`,
@@ -186,6 +187,15 @@ function validateBearerTokenEnvVar(name) {
   if (isBearerEnvKeyDenied(trimmed)) {
     throw new BadRequestError(
       `bearer_token_env_var is globally-denied: '${trimmed}' (process-loader / path-hijack pattern rejected)`,
+    );
+  }
+  // These names are Console control-plane credentials. Worker isolation
+  // deliberately strips/replaces them, so accepting one here would let
+  // preflight authenticate with a value the spawned MCP client cannot receive
+  // (or leak the run-bound worker capability to an unrelated MCP endpoint).
+  if (isActorCredentialKey(trimmed)) {
+    throw new BadRequestError(
+      `bearer_token_env_var is reserved for Palantir actor authentication: '${trimmed}'`,
     );
   }
   return trimmed;

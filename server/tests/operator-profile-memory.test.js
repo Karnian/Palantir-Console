@@ -89,6 +89,7 @@ test('validation: bad kind / blank content / bad importance → 400', async (t) 
   assert.equal((await request(app).post(B(pid)).set(COOKIE).send({ kind: 'nope', content: 'x' })).status, 400);
   assert.equal((await request(app).post(B(pid)).set(COOKIE).send({ kind: 'convention', content: '   ' })).status, 400);
   assert.equal((await request(app).post(B(pid)).set(COOKIE).send({ kind: 'convention', content: 'x', importance: 99 })).status, 400);
+  assert.equal((await request(app).post(B(pid)).set(COOKIE).send({ kind: 'convention', content: 'x', importance: '7abc' })).status, 400);
 });
 
 test('sanitization: injection content rejected → 400', async (t) => {

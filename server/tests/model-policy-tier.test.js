@@ -232,6 +232,38 @@ test('Codex worker refuses tier tokens from args_template and accepts a normal t
     assert.equal(emptyTemplateSpawn.stdin, '--help');
     assert.equal(emptyTemplateSpawn.args.includes('--help'), false);
   }
+
+  for (const [label, argsTemplate, expectedTail] of [
+    [
+      'Top-level Codex options',
+      '-m gpt-x {prompt}',
+      ['exec', '-m', 'gpt-x', '-'],
+    ],
+    [
+      'Option value named exec',
+      '-m exec {prompt}',
+      ['exec', '-m', 'exec', '-'],
+    ],
+    [
+      'Codex exec alias',
+      'e -m gpt-x {prompt}',
+      ['e', '-m', 'gpt-x', '-'],
+    ],
+  ]) {
+    const topLevelOptionsTask = taskService.createTask({
+      project_id: project.id,
+      title: label,
+      description: 'must use a real non-interactive exec subcommand',
+    });
+    const topLevelOptionsProfileId = insertCodexProfile(db, argsTemplate);
+    await lifecycleService.executeTask(topLevelOptionsTask.id, {
+      agentProfileId: topLevelOptionsProfileId,
+      prompt: '--help',
+    });
+    const topLevelOptionsSpawn = executionEngine.spawned.at(-1).opts;
+    assert.deepEqual(topLevelOptionsSpawn.args.slice(-expectedTail.length), expectedTail);
+    assert.equal(topLevelOptionsSpawn.stdin, '--help');
+  }
 });
 
 test('putPolicy: stale edit after delete → NotFoundError, not a revived INSERT', async (t) => {

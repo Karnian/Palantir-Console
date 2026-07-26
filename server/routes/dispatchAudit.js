@@ -16,7 +16,7 @@
 
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
-const { BadRequestError } = require('../utils/errors');
+const { BadRequestError, ForbiddenError } = require('../utils/errors');
 
 function createDispatchAuditRouter({ reconciliationService }) {
   const router = express.Router();
@@ -31,6 +31,9 @@ function createDispatchAuditRouter({ reconciliationService }) {
     if (!project_id) throw new BadRequestError('project_id is required');
     if (!pm_claim || typeof pm_claim !== 'object') {
       throw new BadRequestError('pm_claim object is required');
+    }
+    if (req.auth?.actor === 'manager' && req.auth.managerRunId !== pm_run_id) {
+      throw new ForbiddenError('manager capability must audit its own run');
     }
     try {
       const row = reconciliationService.recordClaim({
