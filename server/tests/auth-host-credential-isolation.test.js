@@ -38,7 +38,31 @@ const ENV_KEYS = [
   'ANTHROPIC_API_KEY',
   'CLAUDE_CODE_OAUTH_TOKEN',
   'ANTHROPIC_BASE_URL',
+  // resolveCodexAuth reads these straight from the environment, so leaving
+  // them set makes the Codex cases assert against the developer's own shell:
+  // `CODEX_API_KEY=… node --test <this file>` fails without them here.
+  'CODEX_API_KEY',
+  'OPENAI_API_KEY',
 ];
+
+// os.homedir() reads USERPROFILE on Windows and HOME elsewhere, so a fixture
+// that sets only HOME leaves a Windows run resolving at the real profile —
+// reading the developer's actual ~/.claude and ~/.codex stores.
+function redirectHome(t, dir) {
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = dir;
+  process.env.USERPROFILE = dir;
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+}
+
+// Separator-correct fragments — a hardcoded '/' misses Windows' '\'.
+const CLAUDE_CLI_CREDENTIALS = path.join('.claude', '.credentials.json');
+const CODEX_AUTH_RELPATH = path.join('.codex', 'auth.json');
 
 // CLAUDE_AUTH_FILE is resolved at module load, so the override has to be in
 // place before the require — hence the cache bust on every load.
@@ -150,7 +174,7 @@ function spyOnNativeProbes(t) {
   return {
     securityCalls: () => calls.exec.filter((c) => c.startsWith('security ')),
     claudeCliCalls: () => calls.exec.filter((c) => c.startsWith('claude auth status')),
-    credentialFileReads: () => calls.read.filter((p) => p.includes('.credentials.json')),
+    credentialFileReads: () => calls.read.filter((p) => p.includes(CLAUDE_CLI_CREDENTIALS)),
     // Any access at all — read or probe — of a path containing `needle`.
     touches: (needle) => [...calls.read, ...calls.exists].filter((p) => p.includes(needle)),
   };
@@ -263,16 +287,25 @@ function asLinuxHostWithCredentials(t) {
   );
 
   const savedPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
-  const savedHome = process.env.HOME;
   Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
-  process.env.HOME = dir;
+  redirectHome(t, dir);
 
   t.after(() => {
     Object.defineProperty(process, 'platform', savedPlatform);
-    if (savedHome === undefined) delete process.env.HOME;
-    else process.env.HOME = savedHome;
     fs.rmSync(dir, { recursive: true, force: true });
   });
+}
+
+// Plant a Codex credential under an isolated home and return to it.
+function withCodexCredentialFixture(t, label) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), label));
+  fs.mkdirSync(path.join(home, '.codex'));
+  fs.writeFileSync(
+    path.join(home, '.codex', 'auth.json'),
+    JSON.stringify({ OPENAI_API_KEY: 'sk-fixture' }),
+  );
+  redirectHome(t, home);
+  t.after(() => { fs.rmSync(home, { recursive: true, force: true }); });
 }
 
 test('isolation suppresses the CLI credential store on a Linux-shaped host', async (t) => {
@@ -338,18 +371,9 @@ test('isolation stops resolveClaudeAuthForIsolated materializing a token', async
 
 test('isolation stops resolveCodexAuth probing the codex auth file', (t) => {
   const box = sandbox(t);
-  // CODEX_AUTH_FILE is homedir-derived and resolved at module load, so HOME has
-  // to point at the fixture before the require.
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-codexauth-'));
-  fs.mkdirSync(path.join(home, '.codex'));
-  fs.writeFileSync(path.join(home, '.codex', 'auth.json'), JSON.stringify({ OPENAI_API_KEY: 'sk-fixture' }));
-  const savedHome = process.env.HOME;
-  process.env.HOME = home;
-  t.after(() => {
-    if (savedHome === undefined) delete process.env.HOME;
-    else process.env.HOME = savedHome;
-    fs.rmSync(home, { recursive: true, force: true });
-  });
+  // CODEX_AUTH_FILE is homedir-derived and resolved at module load, so the home
+  // redirect has to be in place before the require.
+  withCodexCredentialFixture(t, 'palantir-codexauth-');
 
   box.plant({ ANTHROPIC_API_KEY: 'sk-ant-fixture' });
   process.env.PALANTIR_SKIP_HOST_CREDENTIALS = '1';
@@ -357,7 +381,7 @@ test('isolation stops resolveCodexAuth probing the codex auth file', (t) => {
   const resolver = loadResolver();
 
   const auth = resolver.resolveCodexAuth({});
-  assert.deepEqual(probes.touches('.codex/auth.json'), []);
+  assert.deepEqual(probes.touches(CODEX_AUTH_RELPATH), []);
   assert.equal(auth.canAuth, false, 'a planted codex credential must not look usable');
 });
 
@@ -365,16 +389,7 @@ test('positive control: unisolated resolvers do probe both auth files', (t) => {
   // Keeps the three assertions above honest — without this, they would also
   // pass if the resolvers simply never looked at these paths.
   const box = sandbox(t);
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-codexauth-pc-'));
-  fs.mkdirSync(path.join(home, '.codex'));
-  fs.writeFileSync(path.join(home, '.codex', 'auth.json'), JSON.stringify({ OPENAI_API_KEY: 'sk-fixture' }));
-  const savedHome = process.env.HOME;
-  process.env.HOME = home;
-  t.after(() => {
-    if (savedHome === undefined) delete process.env.HOME;
-    else process.env.HOME = savedHome;
-    fs.rmSync(home, { recursive: true, force: true });
-  });
+  withCodexCredentialFixture(t, 'palantir-codexauth-pc-');
 
   box.plant({ ANTHROPIC_API_KEY: 'sk-ant-fixture' });
   const probes = spyOnNativeProbes(t);
@@ -383,7 +398,7 @@ test('positive control: unisolated resolvers do probe both auth files', (t) => {
   const claude = resolver.resolveClaudeAuth();
   const codex = resolver.resolveCodexAuth({});
   assert.ok(probes.touches('.claude-auth.json').length > 0, 'auth file is probed when not isolated');
-  assert.ok(probes.touches('.codex/auth.json').length > 0, 'codex auth file is probed when not isolated');
+  assert.ok(probes.touches(CODEX_AUTH_RELPATH).length > 0, 'codex auth file is probed when not isolated');
   assert.equal(claude.canAuth, true);
   assert.equal(codex.canAuth, true);
 });
