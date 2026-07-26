@@ -264,6 +264,11 @@ test('resolveClaudeAuth re-reads .claude-auth.json on demand', async (t) => {
   // touches the real one. The override is read at module load, so it has to be
   // set before the require below.
   const savedAuthPath = process.env.PALANTIR_CLAUDE_AUTH_FILE;
+  // This test asserts the file IS read, so it must run with host credential
+  // discovery on — otherwise it fails for anyone who has the isolation flag
+  // exported (as the visual server sets it).
+  const savedSkipFlag = process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
+  delete process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
   const tmpDir = fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), 'palantir-mgr-auth-'));
   process.env.PALANTIR_CLAUDE_AUTH_FILE = pathMod.join(tmpDir, '.claude-auth.json');
   delete require.cache[require.resolve('../services/authResolver')];
@@ -272,6 +277,8 @@ test('resolveClaudeAuth re-reads .claude-auth.json on demand', async (t) => {
   t.after(() => {
     if (savedAuthPath === undefined) delete process.env.PALANTIR_CLAUDE_AUTH_FILE;
     else process.env.PALANTIR_CLAUDE_AUTH_FILE = savedAuthPath;
+    if (savedSkipFlag === undefined) delete process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
+    else process.env.PALANTIR_SKIP_HOST_CREDENTIALS = savedSkipFlag;
     delete require.cache[require.resolve('../services/authResolver')];
     try { fsMod.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
     for (const k of Object.keys(saved)) {
