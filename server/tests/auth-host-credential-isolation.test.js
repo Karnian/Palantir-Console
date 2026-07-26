@@ -247,16 +247,35 @@ test('isolation suppresses the native probes themselves, not just their results'
   assert.deepEqual(probes.credentialFileReads(), []);
 });
 
-// Positive controls: without these the assertions above could pass simply
-// because the spy is blind, and a deleted guard would go unnoticed. Each
-// platform can only observe the probe that is not platform-gated for it, so
-// there is one control per platform rather than one shared control.
-test('positive control (macOS): unisolated keychain probes are observable', async (t) => {
-  if (process.platform !== 'darwin') {
-    t.skip('keychain probes are macOS-only');
-    return;
-  }
+// The keychain entry points are the mirror image of the CLI-store ones: they
+// return early unless process.platform is 'darwin', so on Linux their isolation
+// guards are dead code and deleting one changes nothing observable. Testing
+// them on the real platform therefore only verifies whichever half of the pair
+// matches the host. Fake the platform for both directions instead, so the whole
+// matrix holds wherever the suite runs.
+function asDarwinHost(t) {
+  const savedPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+  t.after(() => { Object.defineProperty(process, 'platform', savedPlatform); });
+}
+
+test('isolation suppresses the keychain probes on a Darwin-shaped host', async (t) => {
   sandbox(t);
+  asDarwinHost(t);
+  process.env.PALANTIR_SKIP_HOST_CREDENTIALS = '1';
+  const probes = spyOnNativeProbes(t);
+  const resolver = loadResolver();
+
+  assert.equal(resolver.hasClaudeKeychainCredentials(), false);
+  assert.equal(await resolver.readClaudeKeychainToken(), null);
+  assert.deepEqual(probes.securityCalls(), [], 'the keychain must not even be probed');
+});
+
+// Positive controls: without these the isolation assertions could pass simply
+// because the spy is blind, and a deleted guard would go unnoticed.
+test('positive control: unisolated keychain probes are observable', async (t) => {
+  sandbox(t);
+  asDarwinHost(t);
   const probes = spyOnNativeProbes(t);
   const resolver = loadResolver();
 
