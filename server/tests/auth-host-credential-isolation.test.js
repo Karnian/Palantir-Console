@@ -73,29 +73,56 @@ function sandbox(t) {
   };
 }
 
-// Record the underlying syscalls the native readers make. promisify() captures
-// execFile at module load, so the spy has to be installed before the require.
+// Record the underlying syscalls the native readers make.
+//
+// All FOUR channels matter, and an earlier version of this helper watched only
+// the two async ones. That left the sync probes unobserved, so deleting
+// hasClaudeLinuxCredentials()'s or hasClaudeKeychainCredentials()'s guard still
+// passed here. authResolver destructures execFile/execFileSync at module load
+// and promisify() captures execFile there too, so the spies must be installed
+// BEFORE the require — every caller pairs this with loadResolver().
 function spyOnNativeProbes(t) {
   const childProcess = require('node:child_process');
   const fsPromises = require('node:fs/promises');
-  const originalExecFile = childProcess.execFile;
-  const originalReadFile = fsPromises.readFile;
-  const calls = { execFile: [], readFile: [] };
+  const fsSync = require('node:fs');
+  const original = {
+    execFile: childProcess.execFile,
+    execFileSync: childProcess.execFileSync,
+    readFile: fsPromises.readFile,
+    readFileSync: fsSync.readFileSync,
+  };
+  const calls = { exec: [], read: [] };
+  const argvOf = (file, args) => [file, ...(Array.isArray(args) ? args : [])].join(' ');
 
   childProcess.execFile = function spy(file, args, ...rest) {
-    calls.execFile.push([file, ...(Array.isArray(args) ? args : [])].join(' '));
-    return originalExecFile.call(this, file, args, ...rest);
+    calls.exec.push(argvOf(file, args));
+    return original.execFile.call(this, file, args, ...rest);
+  };
+  childProcess.execFileSync = function spy(file, args, ...rest) {
+    calls.exec.push(argvOf(file, args));
+    return original.execFileSync.call(this, file, args, ...rest);
   };
   fsPromises.readFile = function spy(target, ...rest) {
-    calls.readFile.push(String(target));
-    return originalReadFile.call(this, target, ...rest);
+    calls.read.push(String(target));
+    return original.readFile.call(this, target, ...rest);
   };
+  fsSync.readFileSync = function spy(target, ...rest) {
+    calls.read.push(String(target));
+    return original.readFileSync.call(this, target, ...rest);
+  };
+
   t.after(() => {
-    childProcess.execFile = originalExecFile;
-    fsPromises.readFile = originalReadFile;
+    childProcess.execFile = original.execFile;
+    childProcess.execFileSync = original.execFileSync;
+    fsPromises.readFile = original.readFile;
+    fsSync.readFileSync = original.readFileSync;
   });
 
-  return calls;
+  return {
+    securityCalls: () => calls.exec.filter((c) => c.startsWith('security ')),
+    claudeCliCalls: () => calls.exec.filter((c) => c.startsWith('claude auth status')),
+    credentialFileReads: () => calls.read.filter((p) => p.includes('.credentials.json')),
+  };
 }
 
 test('isolation stops .claude-auth.json from hydrating process.env', (t) => {
@@ -147,36 +174,98 @@ test('isolation suppresses the native probes themselves, not just their results'
   const box = sandbox(t);
   box.plant({ ANTHROPIC_API_KEY: 'sk-ant-fixture' });
   process.env.PALANTIR_SKIP_HOST_CREDENTIALS = '1';
-  const calls = spyOnNativeProbes(t);
+  const probes = spyOnNativeProbes(t);
   const resolver = loadResolver();
 
+  // Every entry point, sync and async — the existence probes and the token
+  // extractors are separate guards and each one has to hold.
+  assert.equal(resolver.hasClaudeKeychainCredentials(), false);
+  assert.equal(resolver.hasClaudeLinuxCredentials(), false);
   assert.equal(await resolver.readClaudeKeychainToken(), null);
   assert.equal(await resolver.readClaudeLinuxCredentialsToken(), null);
-  resolver.hasClaudeKeychainCredentials();
+  resolver.resolveClaudeAuth();
 
   // The point of the switch: no `security` invocation and no read of the CLI
-  // credential store. Asserting only on the null return would still pass with
-  // the guards removed on a machine that has no credentials.
-  assert.deepEqual(calls.execFile.filter((c) => c.startsWith('security ')), []);
-  assert.deepEqual(calls.readFile.filter((p) => p.includes('.credentials.json')), []);
+  // credential store. Asserting only on the null returns would still pass with
+  // the guards removed on a machine that happens to have no credentials.
+  assert.deepEqual(probes.securityCalls(), []);
+  assert.deepEqual(probes.credentialFileReads(), []);
 });
 
-test('without the switch the keychain probe does run (the spy can observe it)', async (t) => {
-  // Guards the assertion above from silently becoming vacuous: if the spy could
-  // never see a probe, the isolated case would prove nothing. macOS only —
-  // elsewhere readClaudeKeychainToken is platform-gated before any syscall.
+// Positive controls: without these the assertions above could pass simply
+// because the spy is blind, and a deleted guard would go unnoticed. Each
+// platform can only observe the probe that is not platform-gated for it, so
+// there is one control per platform rather than one shared control.
+test('positive control (macOS): unisolated keychain probes are observable', async (t) => {
   if (process.platform !== 'darwin') {
-    t.skip('keychain probe is macOS-only');
+    t.skip('keychain probes are macOS-only');
     return;
   }
   sandbox(t);
-  const calls = spyOnNativeProbes(t);
+  const probes = spyOnNativeProbes(t);
   const resolver = loadResolver();
 
-  await resolver.readClaudeKeychainToken();
-  assert.ok(
-    calls.execFile.some((c) => c.startsWith('security find-generic-password')),
-    'unisolated path must still probe the keychain',
+  resolver.hasClaudeKeychainCredentials();   // execFileSync
+  await resolver.readClaudeKeychainToken();  // execFile (promisified)
+  assert.equal(
+    probes.securityCalls().length,
+    2,
+    'both the sync existence probe and the async token read must be observable',
+  );
+});
+
+// The CLI-credential-file path is dead code on macOS: both entry points return
+// early on `process.platform === 'darwin'`, so deleting their isolation guard
+// changes nothing observable on a Mac and the mutation goes unnoticed. Fake the
+// platform (and HOME, which is where the file path comes from) so both branches
+// are exercised on whatever machine runs the suite.
+function asLinuxHostWithCredentials(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-linuxcreds-'));
+  fs.mkdirSync(path.join(dir, '.claude'));
+  fs.writeFileSync(
+    path.join(dir, '.claude', '.credentials.json'),
+    JSON.stringify({
+      claudeAiOauth: { accessToken: 'oauth-fixture-token', expiresAt: Date.now() + 3600_000 },
+    }),
+  );
+
+  const savedPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+  const savedHome = process.env.HOME;
+  Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+  process.env.HOME = dir;
+
+  t.after(() => {
+    Object.defineProperty(process, 'platform', savedPlatform);
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+}
+
+test('isolation suppresses the CLI credential store on a Linux-shaped host', async (t) => {
+  sandbox(t);
+  asLinuxHostWithCredentials(t);
+  process.env.PALANTIR_SKIP_HOST_CREDENTIALS = '1';
+  const probes = spyOnNativeProbes(t);
+  const resolver = loadResolver();
+
+  assert.equal(resolver.hasClaudeLinuxCredentials(), false);
+  assert.equal(await resolver.readClaudeLinuxCredentialsToken(), null);
+  assert.deepEqual(probes.credentialFileReads(), [], 'the store must not even be read');
+});
+
+test('positive control: unisolated CLI credential reads are observable', async (t) => {
+  sandbox(t);
+  asLinuxHostWithCredentials(t);
+  const probes = spyOnNativeProbes(t);
+  const resolver = loadResolver();
+
+  assert.equal(resolver.hasClaudeLinuxCredentials(), true);          // readFileSync
+  assert.equal(await resolver.readClaudeLinuxCredentialsToken(), 'oauth-fixture-token'); // readFile
+  assert.equal(
+    probes.credentialFileReads().length,
+    2,
+    'both the sync existence probe and the async token read must be observable',
   );
 });
 
@@ -198,16 +287,12 @@ test('the usage provider skips `claude auth status` under isolation', async (t) 
   // even with every credential env var cleared.
   sandbox(t);
   process.env.PALANTIR_SKIP_HOST_CREDENTIALS = '1';
-  const calls = spyOnNativeProbes(t);
+  const probes = spyOnNativeProbes(t);
   delete require.cache[require.resolve('../services/providers/claude-code.js')];
   loadResolver();
   const provider = require('../services/providers/claude-code.js');
   t.after(() => { delete require.cache[require.resolve('../services/providers/claude-code.js')]; });
 
   await provider.fetchClaudeCodeUsage().catch(() => {});
-  assert.deepEqual(
-    calls.execFile.filter((c) => c.startsWith('claude auth status')),
-    [],
-    'the account probe must not run under isolation',
-  );
+  assert.deepEqual(probes.claudeCliCalls(), [], 'the account probe must not run under isolation');
 });
