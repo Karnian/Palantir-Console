@@ -250,27 +250,39 @@ test('resolveClaudeAuth returns canAuth=false with diagnostics when no creds', a
 // merges allowed keys into the local env, which both flips canAuth and makes
 // the token available for forwarding to the spawned subprocess.
 test('resolveClaudeAuth re-reads .claude-auth.json on demand', async (t) => {
-  const { resolveClaudeAuth, CLAUDE_AUTH_FILE } = require('../services/authResolver');
   const fsMod = require('node:fs');
+  const osMod = require('node:os');
+  const pathMod = require('node:path');
   const saved = {};
   for (const k of ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL']) {
     saved[k] = process.env[k];
     delete process.env[k];
   }
-  // Stash any pre-existing file so the test is hermetic and we don't clobber
-  // a real cred file on the dev box.
-  let savedFile = null;
-  try {
-    if (fsMod.existsSync(CLAUDE_AUTH_FILE)) {
-      savedFile = fsMod.readFileSync(CLAUDE_AUTH_FILE, 'utf-8');
-      fsMod.unlinkSync(CLAUDE_AUTH_FILE);
-    }
-  } catch { /* ignore */ }
+  // #416: this used to stash and restore the developer's REAL repo-root
+  // .claude-auth.json. `node --test` runs files concurrently, so that
+  // unlink/restore pair could interleave with another file's teardown and lose
+  // the file — and a hard kill between the unlink and the restore lost it
+  // outright. Redirect the resolver at a temp path instead; nothing here
+  // touches the real one. The override is read at module load, so it has to be
+  // set before the require below.
+  const savedAuthPath = process.env.PALANTIR_CLAUDE_AUTH_FILE;
+  // This test asserts the file IS read, so it must run with host credential
+  // discovery on — otherwise it fails for anyone who has the isolation flag
+  // exported (as the visual server sets it).
+  const savedSkipFlag = process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
+  delete process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
+  const tmpDir = fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), 'palantir-mgr-auth-'));
+  process.env.PALANTIR_CLAUDE_AUTH_FILE = pathMod.join(tmpDir, '.claude-auth.json');
+  delete require.cache[require.resolve('../services/authResolver')];
+  const { resolveClaudeAuth, CLAUDE_AUTH_FILE } = require('../services/authResolver');
+
   t.after(() => {
-    try { fsMod.unlinkSync(CLAUDE_AUTH_FILE); } catch { /* ignore */ }
-    if (savedFile != null) {
-      try { fsMod.writeFileSync(CLAUDE_AUTH_FILE, savedFile, { mode: 0o600 }); } catch { /* ignore */ }
-    }
+    if (savedAuthPath === undefined) delete process.env.PALANTIR_CLAUDE_AUTH_FILE;
+    else process.env.PALANTIR_CLAUDE_AUTH_FILE = savedAuthPath;
+    if (savedSkipFlag === undefined) delete process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
+    else process.env.PALANTIR_SKIP_HOST_CREDENTIALS = savedSkipFlag;
+    delete require.cache[require.resolve('../services/authResolver')];
+    try { fsMod.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
     for (const k of Object.keys(saved)) {
       if (saved[k] != null) process.env[k] = saved[k];
     }

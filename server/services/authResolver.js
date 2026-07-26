@@ -32,7 +32,13 @@ const { promisify } = require('node:util');
 
 const execFileAsync = promisify(execFile);
 
-const CLAUDE_AUTH_FILE = path.join(__dirname, '..', '..', '.claude-auth.json');
+// Overridable so a test can exercise the real read/write paths against its own
+// temp file. Without a seam, a test has to plant a fixture at the repo-root
+// path that manager.test.js also stashes and restores — and `node --test` runs
+// files concurrently, so the two teardowns interleave and can delete a
+// developer's real credentials. Also lets a deployment relocate the cache.
+const CLAUDE_AUTH_FILE = process.env.PALANTIR_CLAUDE_AUTH_FILE
+  || path.join(__dirname, '..', '..', '.claude-auth.json');
 const CLAUDE_AUTH_KEYS = ['ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
 const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials';
 const CODEX_AUTH_KEYS = ['CODEX_API_KEY', 'OPENAI_API_KEY'];
@@ -41,6 +47,26 @@ const CODEX_AUTH_FILE = path.join(os.homedir(), '.codex', 'auth.json');
 // keychain (Linux — e.g. `claude login` on a headless box). Same JSON shape
 // as the macOS keychain payload (`claudeAiOauth.accessToken`).
 const CLAUDE_LINUX_CREDENTIALS_FILE = path.join(os.homedir(), '.claude', '.credentials.json');
+
+/**
+ * Opt-in switch that makes host credential discovery inert: no reading or
+ * writing of `.claude-auth.json`, no keychain probe, no CLI credential file.
+ *
+ * The visual-regression server (#416) needs this. Overriding HOME isolates the
+ * stores that live under it, but `.claude-auth.json` sits at the REPO root, and
+ * the macOS keychain is not path-scoped at all — so a developer who has either
+ * one renders a different credential state than the committed baselines, and
+ * the gate goes red on their machine for reasons that have nothing to do with
+ * their change. Clearing the env vars alone does not help: an empty value is
+ * falsy, which is exactly the condition that makes the file get loaded.
+ *
+ * Deliberately not a general "no auth" mode — it only suppresses discovery of
+ * AMBIENT host credentials. Values passed explicitly in the environment are
+ * still honoured, so this cannot silently disable auth for a real deployment.
+ */
+function hostCredentialDiscoveryDisabled() {
+  return process.env.PALANTIR_SKIP_HOST_CREDENTIALS === '1';
+}
 
 /**
  * Check whether the macOS Keychain has a Claude Code OAuth credentials item.
@@ -70,6 +96,7 @@ const CLAUDE_LINUX_CREDENTIALS_FILE = path.join(os.homedir(), '.claude', '.crede
  *     authoritative signal.
  */
 function hasClaudeKeychainCredentials() {
+  if (hostCredentialDiscoveryDisabled()) return false;
   if (process.platform !== 'darwin') return false;
   try {
     execFileSync('security', ['find-generic-password', '-s', CLAUDE_KEYCHAIN_SERVICE], {
@@ -107,6 +134,7 @@ function hasClaudeKeychainCredentials() {
  * single static token with no refresh capability.)
  */
 function hasClaudeLinuxCredentials() {
+  if (hostCredentialDiscoveryDisabled()) return false;
   if (process.platform === 'darwin') return false;
   try {
     const raw = fs.readFileSync(CLAUDE_LINUX_CREDENTIALS_FILE, 'utf-8');
@@ -131,6 +159,7 @@ function hasClaudeLinuxCredentials() {
  * subprocess can refresh itself from the same file's refreshToken.
  */
 async function readClaudeLinuxCredentialsToken() {
+  if (hostCredentialDiscoveryDisabled()) return null;
   if (process.platform === 'darwin') return null;
   try {
     const raw = await fsp.readFile(CLAUDE_LINUX_CREDENTIALS_FILE, 'utf-8');
@@ -154,6 +183,7 @@ async function readClaudeLinuxCredentialsToken() {
  * non-object payload).
  */
 function readClaudeAuthFile(allowSet) {
+  if (hostCredentialDiscoveryDisabled()) return {};
   try {
     const raw = fs.readFileSync(CLAUDE_AUTH_FILE, 'utf-8');
     const parsed = JSON.parse(raw);
@@ -180,6 +210,8 @@ function readClaudeAuthFile(allowSet) {
  * Mirrors the logic that previously lived inline in server/index.js.
  */
 function bootstrapClaudeAuthFromEnv({ logger = console } = {}) {
+  // Never persist to, or hydrate from, the repo-root auth file under isolation.
+  if (hostCredentialDiscoveryDisabled()) return false;
   if (process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY) {
     const auth = {};
     for (const k of CLAUDE_AUTH_KEYS) {
@@ -294,7 +326,7 @@ function resolveClaudeAuth({
   let fileEnv = {};
   let fileExists = false;
   try {
-    fileExists = fs.existsSync(CLAUDE_AUTH_FILE);
+    fileExists = !hostCredentialDiscoveryDisabled() && fs.existsSync(CLAUDE_AUTH_FILE);
   } catch { /* ignore */ }
   if (fileExists) {
     fileEnv = readClaudeAuthFile(allow);
@@ -356,7 +388,11 @@ function resolveCodexAuth({ envAllowlist } = {}) {
   }
 
   let hasCodexFile = false;
-  try { hasCodexFile = fs.existsSync(CODEX_AUTH_FILE); } catch { /* ignore */ }
+  // CODEX_HOME/HOME isolation already moves this path, but gate it too so the
+  // switch means one thing everywhere: no ambient host credentials, period.
+  try {
+    hasCodexFile = !hostCredentialDiscoveryDisabled() && fs.existsSync(CODEX_AUTH_FILE);
+  } catch { /* ignore */ }
   if (hasCodexFile) sources.push(`file:${CODEX_AUTH_FILE}`);
 
   const canAuth = !!(env.CODEX_API_KEY || env.OPENAI_API_KEY || hasCodexFile);
@@ -394,6 +430,7 @@ function resolveCodexAuth({ envAllowlist } = {}) {
  * data; the legacy bare-string fallback below is unaffected.
  */
 async function readClaudeKeychainToken() {
+  if (hostCredentialDiscoveryDisabled()) return null;
   if (process.platform !== 'darwin') return null;
   try {
     const { stdout } = await execFileAsync(
@@ -709,6 +746,7 @@ module.exports = {
   bootstrapClaudeAuthFromEnv,
   resolveClaudeAuth,
   resolveClaudeAuthForIsolated,
+  hostCredentialDiscoveryDisabled,
   readClaudeKeychainToken,
   resolveCodexAuth,
   resolveManagerAuth,

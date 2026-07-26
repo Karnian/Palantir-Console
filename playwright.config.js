@@ -66,8 +66,17 @@ module.exports = defineConfig({
       //   * OPENCODE_STORAGE / CODEX_HOME → also tmp dirs so the
       //                   service constructors can't reach back into
       //                   real host state via fallback paths.
+      //   * credential + feature env → cleared, see below.
       // reuseExistingServer must stay false — a stale 4189 from a prior
       // run could otherwise serve dirty data. (Codex K-5 r2 BLOCK fix.)
+      //
+      // #416: HOME/CODEX_HOME cover credentials that live on DISK, but the
+      // resolvers also read them from the ENVIRONMENT, which this server
+      // inherits. Those values reach the DOM — the manager route renders a
+      // per-profile credential error, and #413's memory diagnostics panel
+      // renders distiller status straight off ANTHROPIC_API_KEY. A developer
+      // who exports a key would then diff against a baseline captured without
+      // one. Clear them so a snapshot depends on the repo, not the shell.
       command: [
         // K-5 r3 BLOCK fix: rebuild better-sqlite3 first because we
         // bypass `npm start`'s `prestart` hook below. Without this a
@@ -78,7 +87,39 @@ module.exports = defineConfig({
         'mkdir -p /tmp/palantir-visual-home /tmp/palantir-visual-opencode /tmp/palantir-visual-codex',
         // PALANTIR_SKIP_DOTENV — same leak this isolation block already
         // guards against, just for .env instead of ~/.claude etc.
-        'HOME=/tmp/palantir-visual-home OPENCODE_STORAGE=/tmp/palantir-visual-opencode CODEX_HOME=/tmp/palantir-visual-codex PALANTIR_DB=/tmp/palantir-visual-db PORT=4189 PALANTIR_SKIP_DOTENV=1 node server/index.js',
+        [
+          'HOME=/tmp/palantir-visual-home',
+          'OPENCODE_STORAGE=/tmp/palantir-visual-opencode',
+          'CODEX_HOME=/tmp/palantir-visual-codex',
+          'PALANTIR_DB=/tmp/palantir-visual-db',
+          'PORT=4189',
+          'PALANTIR_SKIP_DOTENV=1',
+          // Bind explicitly — an inherited HOST can stop the server booting.
+          'HOST=127.0.0.1',
+          // Credentials the auth resolvers read from the environment.
+          'ANTHROPIC_API_KEY=',
+          'ANTHROPIC_BASE_URL=',
+          'CLAUDE_CODE_OAUTH_TOKEN=',
+          'CODEX_API_KEY=',
+          'OPENAI_API_KEY=',
+          // Changes the usage-provider error text the registry renders.
+          'GEMINI_API_KEY=',
+          // Clearing the env vars is not enough on its own: `.claude-auth.json`
+          // lives at the REPO root (HOME cannot move it) and the macOS keychain
+          // is not path-scoped, and an empty env value is precisely the falsy
+          // condition that makes the resolver fall back to them. This switch
+          // makes ambient host credential discovery inert.
+          'PALANTIR_SKIP_HOST_CREDENTIALS=1',
+          // Auth mode: a set token would bounce every route to /login.html.
+          'PALANTIR_TOKEN=',
+          // Feature flags whose state is surfaced in the UI.
+          'PALANTIR_MEMORY_DISTILL=',
+          'PALANTIR_OPERATOR_SPECIALIST=',
+          'PALANTIR_WEBHOOK_URL=',
+          // Rendered on #resources/models as the effective service tier.
+          'PALANTIR_CODEX_FAST=',
+          'node server/index.js',
+        ].join(' '),
       ].join(' && '),
       port: 4189,
       reuseExistingServer: false,
