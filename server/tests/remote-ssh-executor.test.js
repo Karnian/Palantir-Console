@@ -1124,6 +1124,53 @@ test('spawnWorker transports prompt text through a guarded mode-0600 stdin file'
   );
 });
 
+test('spawnWorker never follows a stdin.txt symlink that points at another in-root file', async () => {
+  // A link to a file that is itself inside the exposed roots passes the
+  // exposed-roots check, so resolving the final component would hand the upload
+  // a victim path to delete and overwrite with the prompt. The prompt path must
+  // come from the canonical PARENT plus the fixed basename.
+  const runId = 'stdin_symlink';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const stdinFile = `${statusDir}/stdin.txt`;
+  const victim = '/real/root/project/victim.txt';
+  const expectedStdin = `/real/root/.palantir-runs/${runId}/stdin.txt`;
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    const routes = {
+      "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
+      "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+      "exec 'realpath' '/srv/root/.palantir-runs'": { stdout: '/real/root/.palantir-runs\n' },
+      [`exec 'realpath' ${shq(statusDir)}`]: { stdout: `/real/root/.palantir-runs/${runId}\n` },
+      // stdin.txt already exists as a symlink aimed at an in-root file.
+      [`exec 'realpath' ${shq(stdinFile)}`]: { stdout: `${victim}\n` },
+      "exec 'mkdir' '-p' '/srv/root/.palantir-runs'": { code: 0 },
+      [`exec 'mkdir' '-p' ${shq(statusDir)}`]: { code: 0 },
+    };
+    if (script.startsWith('umask 077 && cleanup()')) return complete(child, { code: 0 });
+    if (Object.hasOwn(routes, script)) return complete(child, routes[script]);
+    complete(child, { code: 1, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await exec.spawnWorker(runId, {
+    command: 'codex',
+    args: ['exec', '-'],
+    stdin: '--help\n',
+    cwd: '/srv/root/project',
+  });
+
+  const combined = spawn.calls.map(scriptOf).find((script) => script.includes('cat > '));
+  assert.ok(combined);
+  assert.ok(
+    !combined.includes(victim),
+    'the symlink target must never appear in the upload script',
+  );
+  assert.ok(combined.includes(`rm -f -- ${shq(expectedStdin)}`));
+  assert.ok(combined.includes(`cat > ${shq(expectedStdin)}`));
+  // noclobber stops a symlink recreated between the unlink and the redirect.
+  assert.ok(combined.includes(`set -C && cat > ${shq(expectedStdin)} && set +C`));
+});
+
 test('spawnWorker cleans a partial remote stdin file when SSH upload rejects', async () => {
   const runId = 'stdin_upload_failure';
   const statusDir = `/srv/root/.palantir-runs/${runId}`;

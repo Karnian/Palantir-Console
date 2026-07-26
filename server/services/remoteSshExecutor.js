@@ -939,13 +939,17 @@ function createRemoteSshNodeExecutor(node, {
     let canonicalStdin = null;
     if (spec.stdin !== undefined) {
       // Resolve the prompt path BEFORE the file exists so upload and handoff can
-      // share one SSH invocation (see the crash-safety note below). allowMissing
-      // canonicalises the parent and rejects an escape, and a leftover symlink at
-      // the path resolves for real and fails closed on the exposed-roots check.
-      canonicalStdin = (await assertWithinRoots(paths.stdinFile, { allowMissing: true })).canonical;
-      if (!canonicalStdin) {
-        throw exposedRootsError(`spawnWorker cannot resolve a prompt path within exposed roots: ${paths.stdinFile}`);
-      }
+      // share one SSH invocation (see the crash-safety note below).
+      //
+      // Canonicalise the PARENT only, then append the fixed basename — never
+      // realpath the final component. Resolving it would follow a pre-existing
+      // `stdin.txt` symlink, and since a link pointing at another in-root file
+      // passes the exposed-roots check, the upload below would delete that file
+      // and overwrite it with the prompt. Naming the parent's canonical child
+      // instead means `rm` unlinks the link itself (rm never follows a final
+      // symlink) and `cat` then creates a fresh regular file.
+      const promptParent = await assertWithinRoots(paths.stdinFile, { parentOnly: true });
+      canonicalStdin = path.posix.join(promptParent.canonical, path.posix.basename(paths.stdinFile));
     }
 
     const stdinRedirect = canonicalStdin ? ` < ${shq(canonicalStdin)}` : '';
@@ -999,7 +1003,12 @@ function createRemoteSshNodeExecutor(node, {
       `trap 'exit 130' INT`,
       `trap 'exit 143' TERM`,
       `rm -f -- ${shq(canonicalStdin)}`,
+      // noclobber closes the gap between the unlink and the redirect: if anything
+      // recreates the name (a symlink aimed at another file) in between, the
+      // redirect fails instead of following it.
+      'set -C',
       `cat > ${shq(canonicalStdin)}`,
+      'set +C',
       `[ "$(wc -c < ${shq(canonicalStdin)})" -eq ${promptBytes} ]`,
       `chmod 600 ${shq(canonicalStdin)}`,
       startWorker,
