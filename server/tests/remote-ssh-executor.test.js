@@ -1734,7 +1734,7 @@ test('remote worker methods ignore trailing engine argument', async () => {
   assert.ok(spawn.calls.some((call) => scriptOf(call) === "exec 'tmux' 'kill-session' '-t' 'palantir-run-killme'"));
 });
 
-test('remote worker kill uses tmux and cleanupRun removes only guarded status dir', async () => {
+test('state 5: terminal remote run cleanup reaps only its guarded statusDir', async () => {
   const statusDir = '/srv/root/.palantir-runs/run6';
   const spawn = rootGuardSpawn({
     [`exec 'tmux' 'kill-session' '-t' 'palantir-run-run6'`]: { code: 0 },
@@ -1756,6 +1756,47 @@ test('remote worker kill uses tmux and cleanupRun removes only guarded status di
   await assert.rejects(
     () => escape.cleanupRun('escape'),
     (err) => err.code === 'EXPOSED_ROOTS',
+  );
+});
+
+test('remote cleanup fail-safe preserves statusDir on SSH transport failure', async () => {
+  const statusDir = '/srv/root/.palantir-runs/transport-failure';
+  const spawn = rootGuardSpawn({
+    [`exec 'realpath' ${shq(statusDir)}`]: { code: 255, stderr: 'connection lost' },
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => exec.cleanupRun('transport-failure'),
+    (err) => err.code === 'SSH_TRANSPORT',
+  );
+  assert.equal(
+    spawn.calls.some((call) => scriptOf(call).includes("'rm' '-rf'")),
+    false,
+    'transport uncertainty must not issue a delete command',
+  );
+});
+
+test('remote cleanup fail-safe preserves statusDir when SSH inspection times out', async () => {
+  const statusDir = '/srv/root/.palantir-runs/timeout';
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script === `exec 'realpath' ${shq(statusDir)}`) return;
+    complete(child, { code: 0 });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), {
+    spawnFn: spawn,
+    connectTimeoutMs: 20,
+  });
+
+  await assert.rejects(
+    () => exec.cleanupRun('timeout'),
+    (err) => err.code === 'ETIMEDOUT',
+  );
+  assert.equal(
+    spawn.calls.some((call) => scriptOf(call).includes("'rm' '-rf'")),
+    false,
+    'timeout uncertainty must not issue a delete command',
   );
 });
 

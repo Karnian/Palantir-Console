@@ -79,17 +79,13 @@ function cleanupStaleTmuxStartupArtifacts({
     return { prompts: 0, capabilities: 0 };
   }
 
-  let prompts = 0;
+  // Prompt files are run-owned. They cannot be classified safely until the
+  // lifecycle service has loaded the corresponding DB row and inspected the
+  // tmux session, so this pre-DB sweep deliberately leaves them alone.
+  const prompts = 0;
   let capabilities = 0;
   for (const entry of entries) {
     const name = typeof entry === 'string' ? entry : entry.name;
-    if (/^palantir-run-[a-zA-Z0-9_-]+\.stdin$/.test(name)) {
-      try {
-        unlinkSync(path.join(scriptDir, name));
-        prompts += 1;
-      } catch {}
-      continue;
-    }
     if (/^\.worker-token-[a-zA-Z0-9_-]+$/.test(name)) {
       try {
         rmSync(path.join(scriptDir, name), { recursive: true, force: true });
@@ -124,6 +120,7 @@ function createTmuxEngine({
       stdinPath: path.join(scriptDir, `${name}.stdin`),
       exitSentinelPath: path.join(scriptDir, `${name}.exit`),
       exitSentinelTmpPath: path.join(scriptDir, `${name}.exit.tmp`),
+      startedPath: path.join(scriptDir, `${name}.started`),
     };
   }
 
@@ -143,6 +140,7 @@ function createTmuxEngine({
       stdinPath,
       exitSentinelPath,
       exitSentinelTmpPath,
+      startedPath,
     } = artifactPaths(runId);
     const safeCwd = validateCwd(cwd);
     assertSpawnAllowed({ command, source: 'executionEngine:tmux' });
@@ -158,6 +156,7 @@ function createTmuxEngine({
     try { fs.unlinkSync(exitSentinelPath); } catch {}
     try { fs.unlinkSync(exitSentinelTmpPath); } catch {}
     try { fs.unlinkSync(stdinPath); } catch {}
+    try { fs.unlinkSync(startedPath); } catch {}
 
     const profileEnv = buildWorkerProcessEnv(
       process.env,
@@ -213,6 +212,7 @@ function createTmuxEngine({
       '#!/bin/bash',
       PATH_PREFIX,
       `${publishPathVar}="$PATH"`,
+      `: > ${shq(startedPath)}`,
       // A long-lived tmux server can retain credentials from an older Console
       // configuration. Clear actor tokens as defense-in-depth; the agent
       // command itself is launched with env -i below so no other inherited
@@ -276,6 +276,7 @@ function createTmuxEngine({
     lines.push(`printf '%s\\n' "$agent_exit_code" > '${safeSentinelTmp}'`);
     lines.push('echo "___EXIT_CODE_${agent_exit_code}___"');
     lines.push(`PATH="$${publishPathVar}" mv -f -- '${safeSentinelTmp}' '${safeSentinel}'`);
+    lines.push(`PATH="$${publishPathVar}" rm -f -- ${shq(startedPath)}`);
 
     // Persist the prompt only after every other fallible preparation step has
     // completed. This keeps token-directory/configuration failures from
@@ -333,6 +334,7 @@ function createTmuxEngine({
       try { fs.unlinkSync(stdinPath); } catch {}
       try { fs.unlinkSync(exitSentinelPath); } catch {}
       try { fs.unlinkSync(exitSentinelTmpPath); } catch {}
+      try { fs.unlinkSync(startedPath); } catch {}
       cleanupTokenArtifact(runId);
       try { runTmuxCommand('tmux', ['kill-session', '-t', name], { stdio: 'pipe' }); } catch {}
       throw new Error(`Failed to spawn tmux session: ${error.message}`);
@@ -383,6 +385,7 @@ function createTmuxEngine({
       stdinPath,
       exitSentinelPath,
       exitSentinelTmpPath,
+      startedPath,
     } = artifactPaths(runId);
     let killed = false;
     try {
@@ -395,8 +398,149 @@ function createTmuxEngine({
     try { fs.unlinkSync(stdinPath); } catch {}
     try { fs.unlinkSync(exitSentinelPath); } catch {}
     try { fs.unlinkSync(exitSentinelTmpPath); } catch {}
+    try { fs.unlinkSync(startedPath); } catch {}
     cleanupTokenArtifact(runId);
     return killed;
+  }
+
+  /**
+   * Classify a boot-time tmux artifact without changing it.
+   *
+   * The durable .started marker is written by the bootstrap script itself, not
+   * by the controller. For pre-marker workers, fall back to the pane process
+   * tree and require the exact generated script path. Any inspection failure is
+   * "unknown", which callers must preserve.
+   */
+  function inspectStartupArtifacts(runId) {
+    const paths = artifactPaths(runId);
+    const artifactFiles = [
+      paths.scriptPath,
+      paths.stdinPath,
+      paths.exitSentinelPath,
+      paths.exitSentinelTmpPath,
+      paths.startedPath,
+    ];
+    const existingArtifacts = artifactFiles.filter((filePath) => fs.existsSync(filePath));
+    const sessionExists = isAlive(runId);
+    if (!sessionExists) {
+      return {
+        state: 'no_session',
+        sessionExists: false,
+        existingArtifacts,
+      };
+    }
+    if (fs.existsSync(paths.startedPath)) {
+      return {
+        state: 'running',
+        sessionExists: true,
+        existingArtifacts,
+      };
+    }
+
+    let panePid;
+    try {
+      const value = runTmuxCommand(
+        'tmux',
+        ['display-message', '-p', '-t', paths.name, '#{pane_pid}'],
+        { stdio: 'pipe', encoding: 'utf-8', timeout: 3000 },
+      );
+      panePid = Number.parseInt(String(value).trim(), 10);
+      if (!Number.isInteger(panePid) || panePid <= 0) throw new Error('invalid pane pid');
+    } catch {
+      return {
+        state: 'unknown',
+        sessionExists: true,
+        existingArtifacts,
+      };
+    }
+
+    try {
+      const output = runTmuxCommand(
+        'ps',
+        ['-axo', 'pid=,ppid=,command='],
+        { stdio: 'pipe', encoding: 'utf-8', timeout: 3000 },
+      );
+      const processes = String(output).split('\n').map((line) => {
+        const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
+        return match
+          ? { pid: Number(match[1]), ppid: Number(match[2]), command: match[3] }
+          : null;
+      }).filter(Boolean);
+      const descendants = new Set([panePid]);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const proc of processes) {
+          if (descendants.has(proc.ppid) && !descendants.has(proc.pid)) {
+            descendants.add(proc.pid);
+            changed = true;
+          }
+        }
+      }
+      const scriptIsRunning = processes.some(
+        (proc) => descendants.has(proc.pid) && proc.pid !== panePid
+          && proc.command.includes(paths.scriptPath),
+      );
+      return {
+        state: scriptIsRunning ? 'running' : 'idle_shell',
+        sessionExists: true,
+        existingArtifacts,
+      };
+    } catch {
+      return {
+        state: 'unknown',
+        sessionExists: true,
+        existingArtifacts,
+      };
+    }
+  }
+
+  /**
+   * Reap only artifacts whose inactivity was positively established. This is
+   * intentionally fail-safe: a live worker or an uncertain inspection is never
+   * killed and no file is removed.
+   */
+  function reapStartupArtifacts(runId) {
+    let inspected = inspectStartupArtifacts(runId);
+    if (inspected.state === 'running' || inspected.state === 'unknown') {
+      return { action: 'preserved', reason: inspected.state, removed: [] };
+    }
+    if (inspected.existingArtifacts.length === 0) {
+      return { action: 'none', reason: inspected.state, removed: [] };
+    }
+
+    if (inspected.state === 'idle_shell') {
+      // Close the classify→kill race as far as a synchronous tmux API permits.
+      // If the script starts between checks, its marker/process tree wins.
+      inspected = inspectStartupArtifacts(runId);
+      if (inspected.state !== 'idle_shell') {
+        return { action: 'preserved', reason: inspected.state, removed: [] };
+      }
+      try {
+        runTmuxCommand('tmux', ['kill-session', '-t', artifactPaths(runId).name], {
+          stdio: 'pipe',
+          timeout: 3000,
+        });
+      } catch {
+        return { action: 'preserved', reason: 'kill_failed', removed: [] };
+      }
+    }
+
+    const removed = [];
+    for (const filePath of inspected.existingArtifacts) {
+      try {
+        fs.unlinkSync(filePath);
+        removed.push(filePath);
+      } catch {
+        // A partial cleanup is still reported accurately for the run event.
+      }
+    }
+    cleanupTokenArtifact(runId);
+    return {
+      action: removed.length > 0 ? 'removed' : 'none',
+      reason: inspected.state,
+      removed,
+    };
   }
 
   function isAlive(runId) {
@@ -464,6 +608,8 @@ function createTmuxEngine({
     detectExitCode,
     listSessions,
     discoverGhostSessions,
+    inspectStartupArtifacts,
+    reapStartupArtifacts,
   };
 }
 

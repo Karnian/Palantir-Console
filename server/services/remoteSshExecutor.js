@@ -1072,14 +1072,16 @@ function createRemoteSshNodeExecutor(node, {
     return Buffer.from(String(res.stdout).trim(), 'base64');
   }
 
-  async function rmrf(remotePath) {
-    const checked = await assertWithinRoots(remotePath, { allowMissing: true });
+  async function rmrf(remotePath, { deadlineAt } = {}) {
+    const checked = await assertWithinRoots(remotePath, { allowMissing: true, deadlineAt });
     if (!checked.exists) return;
-    const roots = await canonicalRoots();
+    const roots = await canonicalRoots({ deadlineAt });
     if (roots.some((root) => checked.canonical === root)) {
       throw exposedRootsError(`Refusing to remove exposed root: ${remotePath}`);
     }
-    const res = await runRemoteCommand('rm', ['-rf', checked.canonical]);
+    const res = await runRemoteCommand('rm', ['-rf', checked.canonical], {
+      timeoutMs: remainingTimeoutMs(deadlineAt),
+    });
     if (res.code !== 0) throw commandError('rm', ['-rf', checked.canonical], res);
   }
 
@@ -1335,7 +1337,7 @@ function createRemoteSshNodeExecutor(node, {
 
   async function cleanupRun(runId) {
     const paths = workerPaths(runId);
-    await rmrf(paths.statusDir);
+    await rmrf(paths.statusDir, { deadlineAt: Date.now() + connectTimeoutMs });
   }
 
   return {

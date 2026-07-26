@@ -2608,8 +2608,89 @@ function createLifecycleService({
     // queued/materializing runs have no accepted live worker yet and can be
     // started normally with a newly minted grant by the boot queue drain.
     const activeStatuses = new Set(['running', 'paused', 'needs_input']);
+    const terminalStatuses = new Set(['completed', 'failed', 'cancelled', 'stopped']);
     let persistedRuns = [];
     try { persistedRuns = runService.listRuns(); } catch { persistedRuns = []; }
+
+    // Snapshot local sessions before the artifact sweep. If the sweep proves a
+    // session is only the empty shell left between new-session and send-keys,
+    // the normal recovery loop below will still observe that former ghost as
+    // dead instead of reattaching it as a worker.
+    let ghostSessions = [];
+    if (executionEngine.type === 'tmux') {
+      try { ghostSessions = executionEngine.discoverGhostSessions(); } catch { ghostSessions = []; }
+    }
+
+    // DB status is the authority for whether a run's startup residue is even
+    // eligible for inspection. The engine then applies the second fail-safe:
+    // live or uncertain pane state is always preserved.
+    if (
+      executionEngine.type === 'tmux'
+      && typeof executionEngine.reapStartupArtifacts === 'function'
+    ) {
+      for (const run of persistedRuns) {
+        if (
+          !run
+          || run.is_manager
+          || (run.node_id && run.node_id !== 'local')
+          || (!['queued', 'running'].includes(run.status) && !terminalStatuses.has(run.status))
+        ) {
+          continue;
+        }
+        let result;
+        try { result = await executionEngine.reapStartupArtifacts(run.id); } catch { continue; }
+        if (!result || result.action !== 'removed') continue;
+        try {
+          runService.addRunEvent(run.id, 'runtime:artifacts_reaped', JSON.stringify({
+            kind: 'local_tmux_startup',
+            reason: result.reason,
+            removed_count: Array.isArray(result.removed) ? result.removed.length : 0,
+          }));
+        } catch { /* deletion already succeeded; recovery must continue */ }
+      }
+    }
+
+    // Terminal remote runs can leave their guarded status directory behind.
+    // Cleanup is one-shot and annotate-on-success. Any SSH/timeout/path-guard
+    // failure is a preservation decision: no success event and no retry in this
+    // boot sweep.
+    for (const run of persistedRuns) {
+      if (
+        !run
+        || run.is_manager
+        || !terminalStatuses.has(run.status)
+        || !run.node_id
+        || run.node_id === 'local'
+      ) {
+        continue;
+      }
+      let priorEvents;
+      try { priorEvents = runService.getRunEvents(run.id); } catch { continue; }
+      if (priorEvents.some((event) => (
+        event.event_type === 'runtime:artifacts_reaped'
+        && (() => {
+          try { return JSON.parse(event.payload_json || '{}').kind === 'remote_status_dir'; } catch { return false; }
+        })()
+      ))) {
+        continue;
+      }
+      try {
+        const node = getDispatchNode(run.node_id);
+        if (!node || (node.kind || 'local') === 'local') continue;
+        const channel = channelForNode(run.node_id);
+        if (!channel || typeof channel.cleanupRun !== 'function') continue;
+        await channel.cleanupRun(run.id);
+        runService.addRunEvent(run.id, 'runtime:artifacts_reaped', JSON.stringify({
+          kind: 'remote_status_dir',
+          reason: 'terminal_run',
+          removed_count: 1,
+        }));
+      } catch {
+        // Fail-safe = preserve. SSH transport failure, timeout, and uncertain
+        // remote path state must never be converted into a deletion annotation.
+      }
+    }
+
     for (const run of persistedRuns) {
       if (
         !run
@@ -2672,8 +2753,6 @@ function createLifecycleService({
     // Boot orphan discovery remains executionEngine-direct; ghost sessions are
     // local tmux sessions.
     if (executionEngine.type !== 'tmux') return recovered;
-
-    const ghostSessions = executionEngine.discoverGhostSessions();
 
     for (const session of ghostSessions) {
       // Extract runId from session name (palantir-run-<runId>)
