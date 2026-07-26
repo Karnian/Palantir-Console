@@ -24,6 +24,8 @@
 //     unguarded code both return null, so a result-only assertion passes even
 //     if the guard is deleted.
 
+process.env.PALANTIR_SKIP_HOST_CREDENTIALS = '1';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

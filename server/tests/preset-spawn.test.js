@@ -10,6 +10,8 @@
 // (e) Tier 2 isolated preset emits a `preset:tier2_pending` warn but does not
 // add --bare / --plugin-dir yet (Phase 10D).
 
+process.env.PALANTIR_SKIP_HOST_CREDENTIALS = '1';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

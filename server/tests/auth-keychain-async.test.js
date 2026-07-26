@@ -1,5 +1,11 @@
 'use strict';
 
+// #423: this file exists to verify that host credential discovery HAPPENS —
+// that the keychain is probed and the provider shells out. `npm test` pins the
+// skip flag on by default, which would turn these into assertions that nothing
+// occurs, so this file opts back in for its own scope.
+require('./helpers/host-credential-discovery').enableHostCredentialDiscoveryForFile();
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const childProcess = require('node:child_process');

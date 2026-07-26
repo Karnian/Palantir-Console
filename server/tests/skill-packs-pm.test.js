@@ -7,6 +7,13 @@
 // 4. /execute skill_pack_ids documented in PM layer prompt
 // 5. excluded user packs cannot be overridden via skill_pack_ids (integration)
 
+// #423: these tests spawn a codex Operator, which needs resolveCodexAuth to
+// report usable credentials. They used to pass only because the developer
+// running them happened to have ~/.codex/auth.json — the exact host dependence
+// this issue removes. Inject a fixture credential instead of re-enabling host
+// discovery, so the result is the same on a machine with no codex login.
+process.env.CODEX_API_KEY = process.env.CODEX_API_KEY || 'test-fixture-codex-key';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');

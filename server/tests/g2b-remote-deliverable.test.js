@@ -40,8 +40,7 @@ function mockExecutor(fileSet, opts = {}) {
 
 async function harness(t, { executor }) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'palantir-g2b-'));
-  const cwd = process.cwd();
-  process.chdir(dir); // control-plane bundle root = <dir>/runtime/goal-artifacts
+  const goalArtifactsRoot = path.join(dir, 'goal-artifacts');
   const { db, migrate, close } = createDatabase(path.join(dir, 'test.db'));
   migrate();
   const eventBus = createEventBus();
@@ -56,9 +55,17 @@ async function harness(t, { executor }) {
     getNode: () => ({ id: 'pi', kind: 'ssh' }), // remote → isLocalNodeRun=false
   };
   const vcs = createVerifyCheckService(db);
-  const harvest = createHarvestService({ runService: rs, eventBus, projectService: ps, taskService: ts, verifyCheckService: vcs, nodeService });
-  t.after(async () => { process.chdir(cwd); close(); await fsp.rm(dir, { recursive: true, force: true }); });
-  return { db, rs, ts, ps, aps, vcs, harvest, dir };
+  const harvest = createHarvestService({
+    runService: rs,
+    eventBus,
+    projectService: ps,
+    taskService: ts,
+    verifyCheckService: vcs,
+    nodeService,
+    goalArtifactsRoot,
+  });
+  t.after(async () => { close(); await fsp.rm(dir, { recursive: true, force: true }); });
+  return { db, rs, ts, ps, aps, vcs, harvest, dir, goalArtifactsRoot };
 }
 
 function makeRemoteDeliverableRun(h, wsPath = '/exposed/.palantir-goal-workspaces/run_x') {
@@ -76,7 +83,7 @@ function makeRemoteDeliverableRun(h, wsPath = '/exposed/.palantir-goal-workspace
 }
 
 function bundleDir(h, run) {
-  return path.join(h.dir, 'runtime', 'goal-artifacts', run.task_id, run.id);
+  return path.join(h.goalArtifactsRoot, run.task_id, run.id);
 }
 function events(h, runId) { return (h.rs.getRunEvents(runId) || []).map((e) => e.event_type); }
 
