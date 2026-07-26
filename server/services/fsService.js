@@ -3,6 +3,8 @@ const { isWithinRoot } = require('../utils/pathGuard');
 const { createLocalNodeExecutor } = require('./nodeExecutor');
 const { sanitizeMessage } = require('../utils/errors');
 
+const REMOTE_BROWSE_TIMEOUT_MS = 30000;
+
 // task_85d43f96 — node-aware directory browsing.
 //
 // The project form picks an execution node FIRST and then browses that node's
@@ -35,6 +37,28 @@ function browseError(message, status, reason) {
   err.status = status;
   err.reason = reason;
   return err;
+}
+
+function browseTimeoutError() {
+  const err = new Error('Remote browse operation timed out');
+  err.code = 'ETIMEDOUT';
+  return err;
+}
+
+async function withDeadline(operation, deadlineAt) {
+  const timeoutMs = Math.max(0, Number(deadlineAt) - Date.now());
+  if (timeoutMs <= 0) throw browseTimeoutError();
+  let timer;
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(browseTimeoutError()), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function parseExposedRoots(value) {
@@ -107,7 +131,11 @@ function classifyBrowseError(error) {
   return { status: 500, reason: BROWSE_REASONS.browseFailed, message: 'Failed to read directory' };
 }
 
-function createFsService(storage, { nodeExecutor = createLocalNodeExecutor(), nodeService = null } = {}) {
+function createFsService(storage, {
+  nodeExecutor = createLocalNodeExecutor(),
+  nodeService = null,
+  remoteBrowseTimeoutMs = REMOTE_BROWSE_TIMEOUT_MS,
+} = {}) {
 
   async function listDirectories(resolved, showHidden) {
     const entries = await nodeExecutor.readdir(resolved, { withFileTypes: true });
@@ -190,30 +218,37 @@ function createFsService(storage, { nodeExecutor = createLocalNodeExecutor(), no
       throw browseError(`Node ${node.id} executor cannot list directories`, 501, BROWSE_REASONS.nodeNotBrowsable);
     }
 
-    const requested = typeof requestedPath === 'string' && requestedPath.trim()
-      ? requestedPath.trim()
-      : roots[0];
-    // listDirectoryEntries runs the exposed_roots realpath guard itself, so an
-    // out-of-root or symlink-escaping target throws before anything is read.
-    const listing = await executor.listDirectoryEntries(requested);
-    const canonicalRoots = typeof executor.canonicalExposedRoots === 'function'
-      ? await executor.canonicalExposedRoots()
-      : roots;
-    const directories = (listing.entries || [])
-      .filter((entry) => entry.isDirectory)
-      .filter((entry) => showHidden || !entry.name.startsWith('.'))
-      .map((entry) => ({ name: entry.name, path: path.posix.join(listing.path, entry.name) }))
-      .sort(sortByName);
+    const timeoutMs = Number(remoteBrowseTimeoutMs);
+    const deadlineAt = Date.now() + (
+      Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : REMOTE_BROWSE_TIMEOUT_MS
+    );
+    return withDeadline(async () => {
+      const requested = typeof requestedPath === 'string' && requestedPath.trim()
+        ? requestedPath.trim()
+        : roots[0];
+      // The absolute deadline is browse-owned and is threaded only into the
+      // executor's internal filesystem helpers. Worker commands, repo
+      // materialization, and harvest keep their intentionally unbounded path.
+      const listing = await executor.listDirectoryEntries(requested, { deadlineAt });
+      const canonicalRoots = typeof executor.canonicalExposedRoots === 'function'
+        ? await executor.canonicalExposedRoots({ deadlineAt })
+        : roots;
+      const directories = (listing.entries || [])
+        .filter((entry) => entry.isDirectory)
+        .filter((entry) => showHidden || !entry.name.startsWith('.'))
+        .map((entry) => ({ name: entry.name, path: path.posix.join(listing.path, entry.name) }))
+        .sort(sortByName);
 
-    return {
-      root: canonicalRoots.find((root) => isWithinPosixRoot(listing.path, root)) || canonicalRoots[0],
-      roots: canonicalRoots,
-      path: listing.path,
-      directories,
-      node_id: node.id,
-      node_kind: node.kind,
-      truncated: Boolean(listing.truncated),
-    };
+      return {
+        root: canonicalRoots.find((root) => isWithinPosixRoot(listing.path, root)) || canonicalRoots[0],
+        roots: canonicalRoots,
+        path: listing.path,
+        directories,
+        node_id: node.id,
+        node_kind: node.kind,
+        truncated: Boolean(listing.truncated),
+      };
+    }, deadlineAt);
   }
 
   function browse({ nodeId, path: requestedPath, showHidden } = {}) {
