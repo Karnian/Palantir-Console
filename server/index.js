@@ -22,11 +22,22 @@ if (!process.env.PALANTIR_SKIP_DOTENV) {
 
 const { createApp } = require('./app');
 const { bootstrapClaudeAuthFromEnv } = require('./services/authResolver');
+const { cleanupStaleTmuxStartupArtifacts } = require('./services/executionEngine');
 
 // PR2: Claude auth bootstrap now lives in authResolver. The behavior is
 // identical: if running inside a Claude Code session, persist credentials to
 // .claude-auth.json; otherwise load them back into process.env.
 bootstrapClaudeAuthFromEnv();
+
+// A SIGKILL between persisting a worker's stdin/capability and the tmux
+// bootstrap consuming it bypasses in-process cleanup. Sweep only Palantir's
+// exact one-shot artifact names before any worker can be recovered or spawned.
+const staleTmuxArtifacts = cleanupStaleTmuxStartupArtifacts();
+if (staleTmuxArtifacts.prompts || staleTmuxArtifacts.capabilities) {
+  console.warn(
+    `[security] Removed stale tmux worker artifacts: prompts=${staleTmuxArtifacts.prompts} capabilities=${staleTmuxArtifacts.capabilities}`,
+  );
+}
 
 const port = process.env.PORT || 4177;
 const app = createApp({

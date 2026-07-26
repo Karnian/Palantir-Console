@@ -236,11 +236,40 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
         />
         ${managerStatus?.active && (() => {
           const isSelected = conversationTarget === 'top';
+          // /api/manager/status exposes both the current `top.run` shape and
+          // the legacy top-level `run` alias. Prefer the canonical snapshot
+          // while retaining the alias during the compatibility window.
+          const topRun = managerStatus.top?.run || managerStatus.run || null;
+          const topStatus = topRun?.status;
+          const topLabel = topStatus
+            ? statusLabel(RUN_STATUS_LABELS, topStatus)
+            : MANAGER_STATUS_LABELS.active;
+          const topColor = runStatusColor(topStatus || 'running');
           return html`
-            <div class="manager-session-row ${isSelected ? 'selected' : ''}" ...${clickableProps(() => onSelectConversation && onSelectConversation('top'))}>
-              <span class="manager-session-icon">\u2726</span>
-              <span class="manager-session-label">${MANAGER_LABELS.managerSession}</span>
-              <span class="manager-session-badge running">${MANAGER_STATUS_LABELS.active}</span>
+            <div
+              class="manager-session-row ${isSelected ? 'selected' : ''}"
+              data-role="top-manager-session-row"
+              ...${clickableProps(() => onSelectConversation && onSelectConversation('top'))}
+            >
+              <span class="manager-session-icon" style="color:${topColor}">\u2726</span>
+              <span class="operator-session-main">
+                <span class="operator-session-heading">
+                  <span class="manager-session-label">${MANAGER_LABELS.managerSession}</span>
+                  ${topRun && html`<span class="operator-session-adapter"> \u00B7 adapter ${topRun.manager_adapter || '알 수 없음'}</span>`}
+                </span>
+                ${topRun && html`
+                  <span class="operator-session-meta">
+                    <${NodeBadge} run=${topRun} showLocal=${true} link=${false} />
+                    ${topRun.started_at && html`<span> \u00B7 시작 ${formatTime(topRun.started_at)}</span>`}
+                    ${topRun.ended_at && html`<span> \u00B7 종료 ${formatTime(topRun.ended_at)}</span>`}
+                  </span>
+                `}
+              </span>
+              <span
+                class="operator-session-status"
+                data-role="top-manager-run-status"
+                style="color:${topColor}"
+              >${topLabel}${topStatus === 'running' ? html` <span class="operator-spinner"></span>` : ''}</span>
             </div>
           `;
         })()}

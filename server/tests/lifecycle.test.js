@@ -449,7 +449,8 @@ test('executeTask: worker receives only a run-bound memory proposal capability',
   assert.equal(spawned.env.PALANTIR_API_BASE, 'http://console.internal:4177');
   assert.equal('PALANTIR_TOKEN' in spawned.env, false);
   assert.equal('PALANTIR_PM_TOKEN' in spawned.env, false);
-  assert.match(spawned.args.join(' '), new RegExp(`/api/runs/${run.id}/memory/propose`));
+  assert.doesNotMatch(spawned.args.join(' '), /memory\/propose/);
+  assert.match(spawned.stdin, new RegExp(`/api/runs/${run.id}/memory/propose`));
   assert.deepEqual(minted, [{
     runId: run.id,
     claims: { projectId: project.id },

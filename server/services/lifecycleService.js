@@ -1666,7 +1666,6 @@ function createLifecycleService({
           if (profile.model) extraArgs.push('-m', profile.model);
           extraArgs.push('-c', 'service_tier="default"');
         }
-        const baseArgs = buildAgentArgs(profile, prompt, placeholders);
         if (adapterName === 'codex' && hasForbiddenWorkerTierArg(profile.args_template)) {
           runService.addRunEvent(run.id, 'worker:tier_forbidden', JSON.stringify({
             adapter: 'codex',
@@ -1674,6 +1673,14 @@ function createLifecycleService({
           }));
           throw new Error('worker args_template must not set service_tier/features.fast_mode');
         }
+        // Codex reads the task prompt from stdin, matching the Operator
+        // adapter contract. Keeping arbitrary user text out of argv prevents a
+        // leading `-` (diff headers, `--help`, `-c ...`) from becoming a CLI
+        // option and avoids argv quoting/size limits for multiline prompts.
+        const workerInvocation = adapterName === 'codex'
+          ? buildCodexWorkerInvocation(profile, prompt, placeholders)
+          : { args: buildAgentArgs(profile, prompt, placeholders), stdin: undefined };
+        const baseArgs = workerInvocation.args;
         const args = adapterName === 'codex' ? [...extraArgs, ...baseArgs] : baseArgs;
         // G1: for a LOCAL goal worker, tee stdout to a file so the final output
         // survives past the process-local buffer (§5k-2). Remote workers keep
@@ -1693,6 +1700,7 @@ function createLifecycleService({
           spec: {
             command: profile.command,
             args,
+            stdin: workerInvocation.stdin,
             cwd,
             env: buildWorkerEnv(
               parseEnvAllowlist(profile.env_allowlist, httpBearerEnvKeys),
@@ -1748,10 +1756,9 @@ function createLifecycleService({
   function hasForbiddenWorkerTierArg(argsTemplate) {
     // Scan the RAW args_template string — BEFORE {prompt}/placeholder
     // substitution (Codex final-review R2). The tier can only be injected via
-    // the author-written template STRUCTURE (a `-c` fragment); a substituted
-    // {prompt} value is positional data that codex never parses as config, so
-    // scanning the post-substitution args would falsely refuse a normal worker
-    // whose PROMPT merely mentions "service_tier"/"fast_mode".
+    // the author-written template STRUCTURE (a `-c` fragment). Prompt text is
+    // transported over stdin, so scanning it would both be unnecessary and
+    // falsely refuse a normal task that merely discusses these settings.
     //
     // Broad, case-insensitive substring denylist: a `-c` fragment can spell the
     // tier as valid TOML in many shapes — `service_tier="fast"`,
@@ -1792,6 +1799,100 @@ function createLifecycleService({
       }
     }
     return args.length > 0 ? args : [prompt];
+  }
+
+  /**
+   * Build a Codex worker invocation while preserving existing
+   * `exec {prompt}` profiles. The editable template remains unchanged in the
+   * database; at spawn time its one standalone prompt marker becomes Codex's
+   * stdin sentinel (`-`) and is moved behind all static options.
+   *
+   * Embedded or repeated prompt markers cannot be translated without changing
+   * their argument semantics, so fail closed instead of silently falling back
+   * to the vulnerable argv transport.
+   */
+  function buildCodexWorkerInvocation(profile, prompt, placeholders = {}) {
+    if (!profile.args_template) {
+      return { args: ['exec', '-'], stdin: prompt };
+    }
+
+    const parts = profile.args_template.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
+    const args = [];
+    let promptMarkers = 0;
+
+    for (const part of parts) {
+      const unquoted = part.replace(/^"(.*)"$/, '$1');
+      if (unquoted === '{prompt}') {
+        promptMarkers += 1;
+        continue;
+      }
+      if (unquoted.includes('{prompt}')) {
+        throw new Error(
+          'codex worker args_template must use {prompt} as a standalone argument for stdin transport',
+        );
+      }
+      if (unquoted === '{system_prompt_file}') {
+        if (placeholders.system_prompt_file) args.push(placeholders.system_prompt_file);
+        continue;
+      }
+      if (unquoted.includes('{system_prompt_file}')) {
+        const resolved = unquoted.replace(
+          /\{system_prompt_file\}/g,
+          placeholders.system_prompt_file || '',
+        );
+        if (resolved.trim()) args.push(resolved);
+        continue;
+      }
+      args.push(unquoted);
+    }
+
+    if (promptMarkers > 1) {
+      throw new Error('codex worker args_template must contain at most one {prompt} argument');
+    }
+    if (promptMarkers === 0) {
+      // A whitespace-only template (or one whose sole optional system-prompt
+      // placeholder resolved away) used to fall through buildAgentArgs()'s
+      // `[prompt]` fallback, putting option-like task text back on argv. Treat
+      // an effectively empty template exactly like the safe Codex default.
+      if (args.length === 0) {
+        return { args: ['exec', '-'], stdin: prompt };
+      }
+      // Backward compatibility for intentionally prompt-less custom Codex
+      // templates. Their argv stays byte-identical and stdin remains open to
+      // the execution engine's normal interactive channel.
+      return { args, stdin: undefined };
+    }
+    // stdin prompt transport is a `codex exec` contract. Legacy profiles may
+    // contain only top-level Codex options (`-m gpt-x {prompt}`) rather than
+    // spelling the subcommand themselves; prepend `exec` so redirecting stdin
+    // never sends the worker into the TUI's non-TTY failure path. Existing
+    // `exec ... {prompt}` / `exec resume ... {prompt}` templates retain their
+    // ordering.
+    const codexOptionsWithValues = new Set([
+      '-c', '--config',
+      '--enable', '--disable',
+      '--remote', '--remote-auth-token-env',
+      '-i', '--image',
+      '-m', '--model',
+      '--local-provider',
+      '-p', '--profile',
+      '-s', '--sandbox',
+      '-C', '--cd',
+      '--add-dir',
+      '-a', '--ask-for-approval',
+    ]);
+    let hasExecSubcommand = false;
+    for (let index = 0; index < args.length; index += 1) {
+      const arg = args[index];
+      if (arg === 'exec' || arg === 'e') {
+        hasExecSubcommand = true;
+        break;
+      }
+      if (arg === '--') break;
+      if (codexOptionsWithValues.has(arg)) index += 1;
+    }
+    const stdinArgs = hasExecSubcommand ? args : ['exec', ...args];
+    return { args: [...stdinArgs, '-'], stdin: prompt };
   }
 
   /**

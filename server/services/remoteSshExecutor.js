@@ -82,6 +82,13 @@ function validateSshDestinationPart(value, field) {
   }
 }
 
+function validateSshPort(value, field) {
+  if (value === undefined || value === null) return;
+  if (!Number.isInteger(value) || value < 1 || value > 65535) {
+    throw new Error(`${field} must be an integer between 1 and 65535`);
+  }
+}
+
 function parseExposedRoots(node) {
   let roots;
   try {
@@ -230,6 +237,9 @@ function validateWorkerSpec(spec) {
     throw new Error('spawnWorker requires a non-empty command');
   }
   if (spec.args !== undefined && !Array.isArray(spec.args)) throw new Error('spawnWorker args must be an array');
+  if (spec.stdin !== undefined && typeof spec.stdin !== 'string') {
+    throw new Error('spawnWorker stdin must be a string when provided');
+  }
   if (typeof spec.cwd !== 'string' || spec.cwd.length === 0) {
     throw new Error('spawnWorker requires a cwd');
   }
@@ -313,6 +323,7 @@ function createRemoteSshNodeExecutor(node, {
   }
   validateSshDestinationPart(node.ssh_host, 'ssh_host');
   validateSshDestinationPart(node.ssh_user, 'ssh_user');
+  validateSshPort(node.ssh_port, 'ssh_port');
 
   const exposedRoots = parseExposedRoots(node);
   const connectTimeoutSeconds = Math.max(1, Math.ceil(Number(connectTimeoutMs || 10000) / 1000));
@@ -338,6 +349,7 @@ function createRemoteSshNodeExecutor(node, {
       '-o', 'BatchMode=yes',
       '-o', `ConnectTimeout=${connectTimeoutSeconds}`,
       '-o', 'StrictHostKeyChecking=accept-new',
+      ...(node.ssh_port == null ? [] : ['-p', String(node.ssh_port)]),
       ...(keepAlive ? [
         '-o', `ServerAliveInterval=${SSH_SERVER_ALIVE_INTERVAL_SECONDS}`,
         '-o', `ServerAliveCountMax=${SSH_SERVER_ALIVE_COUNT_MAX}`,
@@ -947,6 +959,7 @@ function createRemoteSshNodeExecutor(node, {
       statusDir,
       stdoutLog: path.posix.join(statusDir, 'stdout.log'),
       exitSentinel: path.posix.join(statusDir, 'exit.code'),
+      stdinFile: path.posix.join(statusDir, 'stdin.txt'),
     };
   }
 
@@ -1027,10 +1040,83 @@ function createRemoteSshNodeExecutor(node, {
         workerTokenFile = await putSecretFile('worker_capability', workerToken, 0o600);
       }
       const workerInvocation = buildWorkerInvocation(spec, { workerTokenFile });
-      const innerScript = `${workerInvocation} > ${shq(paths.stdoutLog)} 2>&1; echo $? > ${shq(paths.exitSentinel)}`;
-      const script = `cd ${shq(safeCwd)} && tmux new-session -d -s ${shq(paths.sessionName)} ${shq(innerScript)}`;
-      const res = await runRemoteScript(script);
+      let canonicalStdin = null;
+      if (spec.stdin !== undefined) {
+        // Resolve the prompt path BEFORE the file exists so upload and handoff can
+        // share one SSH invocation (see the crash-safety note below).
+        //
+        // Canonicalise the PARENT only, then append the fixed basename — never
+        // realpath the final component. Resolving it would follow a pre-existing
+        // `stdin.txt` symlink, and since a link pointing at another in-root file
+        // passes the exposed-roots check, the upload below would delete that file
+        // and overwrite it with the prompt. Naming the parent's canonical child
+        // instead means `rm` unlinks the link itself (rm never follows a final
+        // symlink) and `cat` then creates a fresh regular file.
+        const promptParent = await assertWithinRoots(paths.stdinFile, { parentOnly: true });
+        canonicalStdin = path.posix.join(promptParent.canonical, path.posix.basename(paths.stdinFile));
+      }
+
+      const stdinRedirect = canonicalStdin ? ` < ${shq(canonicalStdin)}` : '';
+      const cleanupStdinCommand = canonicalStdin ? `rm -f -- ${shq(canonicalStdin)}` : '';
+      const cleanupStdin = canonicalStdin ? `; ${cleanupStdinCommand}` : '';
+      const stdinTrap = canonicalStdin
+        ? `trap ${shq(cleanupStdinCommand)} EXIT HUP INT TERM; `
+        : '';
+      const clearStdinTrap = canonicalStdin ? '; trap - EXIT HUP INT TERM' : '';
+      // Remove BEFORE disarming the trap: clearing it first leaves a window where
+      // a HUP/TERM arriving before the `rm` has no handler left to run.
+      const exitWrite = canonicalStdin
+        ? `; agent_exit_code=$?${cleanupStdin}${clearStdinTrap}; echo "$agent_exit_code" > ${shq(paths.exitSentinel)}`
+        : `; echo $? > ${shq(paths.exitSentinel)}`;
+      const innerScript = `${stdinTrap}${workerInvocation}${stdinRedirect} > ${shq(paths.stdoutLog)} 2>&1${exitWrite}`;
+      const startWorker = `cd ${shq(safeCwd)} && tmux new-session -d -s ${shq(paths.sessionName)} ${shq(innerScript)}`;
+
+      if (!canonicalStdin) {
+        const res = await runRemoteScript(startWorker);
+        if (res.code !== 0) {
+          throw commandError('tmux', ['new-session', '-d', '-s', paths.sessionName], res);
+        }
+        return { sessionName: paths.sessionName };
+      }
+
+      // Prompt upload and tmux handoff MUST be one SSH invocation. Splitting them
+      // leaves a window where the prompt exists on disk but nothing owns it: if the
+      // controller dies in between, the JS cleanup never runs and the tmux trap does
+      // not exist yet, so a 0600 prompt is stranded for a run that never started.
+      //
+      // Arming the trap before `cat` closes that window from the remote side — the
+      // controller dying drops the SSH connection, the remote shell takes SIGHUP,
+      // and the handler removes the prompt. It is disarmed only once tmux owns the
+      // file, after which the worker's own trap is responsible for it.
+      const promptBytes = Buffer.byteLength(spec.stdin, 'utf8');
+      const script = [
+        'umask 077',
+        `cleanup() { ${cleanupStdinCommand}; }`,
+        `trap 'rc=$?; cleanup; exit "$rc"' 0`,
+        `trap 'exit 129' HUP`,
+        `trap 'exit 130' INT`,
+        `trap 'exit 143' TERM`,
+        `rm -f -- ${shq(canonicalStdin)}`,
+        'set -C',
+        `cat > ${shq(canonicalStdin)}`,
+        'set +C',
+        `[ "$(wc -c < ${shq(canonicalStdin)})" -eq ${promptBytes} ]`,
+        `chmod 600 ${shq(canonicalStdin)}`,
+        startWorker,
+        'trap - 0 HUP INT TERM',
+      ].join(' && ');
+
+      let res;
+      try {
+        res = await runRemoteScript(script, { input: spec.stdin });
+      } catch (err) {
+        // The remote trap handles a dropped connection; this covers a local-side
+        // rejection where the remote shell may never have run at all.
+        try { await runRemoteCommand('rm', ['-f', canonicalStdin]); } catch {}
+        throw err;
+      }
       if (res.code !== 0) {
+        try { await runRemoteCommand('rm', ['-f', canonicalStdin]); } catch {}
         throw commandError('tmux', ['new-session', '-d', '-s', paths.sessionName], res);
       }
       return { sessionName: paths.sessionName };
@@ -1093,6 +1179,9 @@ function createRemoteSshNodeExecutor(node, {
   async function kill(runId, _engine) {
     const paths = workerPaths(runId);
     const res = await runRemoteCommand('tmux', ['kill-session', '-t', paths.sessionName]);
+    // A killed tmux shell may not reach its normal post-command cleanup.
+    // stdinFile is controller-owned and lives inside the validated status dir.
+    try { await runRemoteCommand('rm', ['-f', paths.stdinFile]); } catch {}
     return res.code === 0;
   }
 

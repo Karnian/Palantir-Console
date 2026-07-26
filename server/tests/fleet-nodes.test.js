@@ -15,6 +15,7 @@ const { createTaskService } = require('../services/taskService');
 const { createRunService } = require('../services/runService');
 const { createAgentProfileService } = require('../services/agentProfileService');
 const { createLifecycleService } = require('../services/lifecycleService');
+const { BadRequestError } = require('../utils/errors');
 
 async function mkdb(t, prefix = 'palantir-fleet-nodes-') {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -248,6 +249,45 @@ test('nodeService CRUD validates nodes and refuses unsafe deletes', async (t) =>
     () => h.nodeService.deleteNode('bound-pod'),
     (err) => err.httpStatus === 409 && /project/.test(err.message),
   );
+});
+
+test('nodeService normalizes and validates ssh_port as an integer', async (t) => {
+  const { db } = await mkdb(t);
+  const { nodeService } = buildHarness(db);
+  const base = {
+    name: 'SSH Port Node',
+    kind: 'ssh',
+    ssh_host: 'pod.example',
+    ssh_user: 'runner',
+    exposed_roots: ['/srv/root'],
+  };
+
+  const defaultPort = nodeService.createNode({ id: 'port-default', ...base });
+  assert.equal(defaultPort.ssh_port, null);
+
+  const blankPort = nodeService.createNode({ id: 'port-blank', ...base, ssh_port: '' });
+  assert.equal(blankPort.ssh_port, null);
+
+  const customPort = nodeService.createNode({ id: 'port-custom', ...base, ssh_port: '2222' });
+  assert.equal(customPort.ssh_port, 2222);
+  assert.equal(typeof customPort.ssh_port, 'number');
+  assert.equal(nodeService.updateNode('port-custom', { ssh_port: '2200' }).ssh_port, 2200);
+
+  for (const [index, sshPort] of [
+    0,
+    65536,
+    -1,
+    22.5,
+    '22abc',
+    '22 -o ProxyCommand=x',
+    true,
+    [2222],
+  ].entries()) {
+    assert.throws(
+      () => nodeService.createNode({ id: `port-invalid-${index}`, ...base, ssh_port: sshPort }),
+      (err) => err instanceof BadRequestError && err.status === 400 && /ssh_port/.test(err.message),
+    );
+  }
 });
 
 test('/api/nodes routes expose CRUD', async (t) => {

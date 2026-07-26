@@ -36,6 +36,15 @@ function sanitizeSessionName(name) {
 }
 
 /**
+ * Wrap a value in POSIX single quotes so a shell parses it as one literal
+ * argument. Nest the call to quote a value that will be evaluated twice
+ * (a `trap` body, `sh -c`), matching remoteSshExecutor's `shq`.
+ */
+function shq(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+/**
  * Validate and sanitize a directory path.
  * Must be absolute and exist on disk.
  */
@@ -50,11 +59,53 @@ function validateCwd(dir) {
   return resolved;
 }
 
+/**
+ * Remove one-shot secrets that survived an ungraceful Console exit before
+ * the tmux bootstrap script could unlink them. This is intentionally called
+ * once from the real server entry point, not from createTmuxEngine(), so
+ * isolated app/test instances cannot sweep artifacts owned by one another.
+ */
+function cleanupStaleTmuxStartupArtifacts({
+  tmpDir = os.tmpdir(),
+  readdirSync = fs.readdirSync,
+  unlinkSync = fs.unlinkSync,
+  rmSync = fs.rmSync,
+} = {}) {
+  const scriptDir = path.join(tmpDir, 'palantir-scripts');
+  let entries;
+  try {
+    entries = readdirSync(scriptDir, { withFileTypes: true });
+  } catch {
+    return { prompts: 0, capabilities: 0 };
+  }
+
+  let prompts = 0;
+  let capabilities = 0;
+  for (const entry of entries) {
+    const name = typeof entry === 'string' ? entry : entry.name;
+    if (/^palantir-run-[a-zA-Z0-9_-]+\.stdin$/.test(name)) {
+      try {
+        unlinkSync(path.join(scriptDir, name));
+        prompts += 1;
+      } catch {}
+      continue;
+    }
+    if (/^\.worker-token-[a-zA-Z0-9_-]+$/.test(name)) {
+      try {
+        rmSync(path.join(scriptDir, name), { recursive: true, force: true });
+        capabilities += 1;
+      } catch {}
+    }
+  }
+  return { prompts, capabilities };
+}
+
 // ---------- TmuxEngine ----------
 
 function createTmuxEngine({
   execFileSync: runTmuxCommand = execFileSync,
   actorTokens = resolveActorTokenPolicy(),
+  writeFileSync = fs.writeFileSync,
 } = {}) {
   const PATH_PREFIX = 'export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"';
   const tokenArtifacts = new Map();
@@ -70,6 +121,7 @@ function createTmuxEngine({
       name,
       scriptDir,
       scriptPath: path.join(scriptDir, `${name}.sh`),
+      stdinPath: path.join(scriptDir, `${name}.stdin`),
       exitSentinelPath: path.join(scriptDir, `${name}.exit`),
       exitSentinelTmpPath: path.join(scriptDir, `${name}.exit.tmp`),
     };
@@ -83,16 +135,20 @@ function createTmuxEngine({
     tokenArtifacts.delete(runId);
   }
 
-  function spawnAgent(runId, { command, args, cwd, env, outputLogPath }) {
+  function spawnAgent(runId, { command, args, stdin, cwd, env, outputLogPath }) {
     const {
       name,
       scriptDir,
       scriptPath,
+      stdinPath,
       exitSentinelPath,
       exitSentinelTmpPath,
     } = artifactPaths(runId);
     const safeCwd = validateCwd(cwd);
     assertSpawnAllowed({ command, source: 'executionEngine:tmux' });
+    if (stdin !== undefined && typeof stdin !== 'string') {
+      throw new Error('worker stdin must be a string when provided');
+    }
 
     // SECURITY: Write the agent command to a temp script file instead of
     // interpolating into a shell string. This eliminates all injection vectors.
@@ -101,6 +157,7 @@ function createTmuxEngine({
     // session name. Never let a new worker inherit that stale exit code.
     try { fs.unlinkSync(exitSentinelPath); } catch {}
     try { fs.unlinkSync(exitSentinelTmpPath); } catch {}
+    try { fs.unlinkSync(stdinPath); } catch {}
 
     const profileEnv = buildWorkerProcessEnv(
       process.env,
@@ -129,13 +186,20 @@ function createTmuxEngine({
     cleanupTokenArtifact(runId);
     let tokenArtifact = null;
     if (workerToken) {
-      const tokenDir = fs.mkdtempSync(path.join(scriptDir, '.worker-token-'));
-      fs.chmodSync(tokenDir, 0o700);
-      const tokenPath = path.join(tokenDir, 'token');
+      let tokenDir = null;
+      let tokenPath = null;
       try {
-        fs.writeFileSync(tokenPath, workerToken, { flag: 'wx', mode: 0o600 });
+        tokenDir = fs.mkdtempSync(path.join(scriptDir, '.worker-token-'));
+        fs.chmodSync(tokenDir, 0o700);
+        tokenPath = path.join(tokenDir, 'token');
+        writeFileSync(tokenPath, workerToken, { flag: 'wx', mode: 0o600 });
       } catch (error) {
-        try { fs.rmdirSync(tokenDir); } catch {}
+        if (tokenPath) {
+          try { fs.unlinkSync(tokenPath); } catch {}
+        }
+        if (tokenDir) {
+          try { fs.rmdirSync(tokenDir); } catch {}
+        }
         throw error;
       }
       tokenArtifact = { tokenDir, tokenPath };
@@ -183,19 +247,55 @@ function createTmuxEngine({
     const workerTokenAssignment = tokenArtifact
       ? ' PALANTIR_WORKER_TOKEN="$__palantir_worker_token"'
       : '';
-    lines.push(`env -i ${workerEnvArgs.join(' ')}${workerTokenAssignment} '${safeCmd}' ${quotedArgs.join(' ')}`);
+    const quotedStdin = shq(stdinPath);
+    const stdinRedirect = stdin !== undefined ? ` < ${quotedStdin}` : '';
+    // The trap body is evaluated TWICE — once when the script itself is parsed,
+    // and again when the shell runs the handler. A path quoted only once has
+    // its escapes consumed by the first pass, so a `'` in TMPDIR would make the
+    // handler a syntax error. Quote the fully-formed command a second time, the
+    // same nesting the remote executor uses (shq of an already-shq'd path).
+    const stdinCleanupCommand = `PATH="$${publishPathVar}" rm -f -- ${quotedStdin}`;
+    if (stdin !== undefined) {
+      // Ensure signals or an unexpected script error do not strand prompt
+      // material on disk. The explicit normal-path cleanup below removes the
+      // file first and only then clears this trap.
+      lines.push(`trap ${shq(stdinCleanupCommand)} EXIT HUP INT TERM`);
+    }
+    lines.push(`env -i ${workerEnvArgs.join(' ')}${workerTokenAssignment} '${safeCmd}' ${quotedArgs.join(' ')}${stdinRedirect}`);
     // Capture $? exactly once so the durable sentinel and scrollback marker
     // always describe the same agent exit. Rename makes the sentinel atomic.
     const safeSentinel = exitSentinelPath.replace(/'/g, "'\\''");
     const safeSentinelTmp = exitSentinelTmpPath.replace(/'/g, "'\\''");
     lines.push('agent_exit_code=$?');
+    if (stdin !== undefined) {
+      // Remove BEFORE disarming: clearing the trap first leaves a window where
+      // a HUP/TERM arriving between the two lines has no handler left to run.
+      lines.push(stdinCleanupCommand);
+      lines.push('trap - EXIT HUP INT TERM');
+    }
     lines.push(`printf '%s\\n' "$agent_exit_code" > '${safeSentinelTmp}'`);
     lines.push('echo "___EXIT_CODE_${agent_exit_code}___"');
     lines.push(`PATH="$${publishPathVar}" mv -f -- '${safeSentinelTmp}' '${safeSentinel}'`);
 
+    // Persist the prompt only after every other fallible preparation step has
+    // completed. This keeps token-directory/configuration failures from
+    // stranding sensitive prompt material before the worker script owns it.
+    if (stdin !== undefined) {
+      try {
+        writeFileSync(stdinPath, stdin, { mode: 0o600, flag: 'wx' });
+      } catch (error) {
+        // writeFileSync can fail after creating a partial file (ENOSPC/EIO).
+        // Never leave either the prompt fragment or a prepared capability.
+        try { fs.unlinkSync(stdinPath); } catch {}
+        cleanupTokenArtifact(runId);
+        throw error;
+      }
+    }
+
     try {
-      fs.writeFileSync(scriptPath, lines.join('\n') + '\n', { mode: 0o700 });
+      writeFileSync(scriptPath, lines.join('\n') + '\n', { mode: 0o700 });
     } catch (error) {
+      try { fs.unlinkSync(stdinPath); } catch {}
       cleanupTokenArtifact(runId);
       throw error;
     }
@@ -218,8 +318,11 @@ function createTmuxEngine({
         } catch { /* tee best-effort — capture falls back to capture-pane */ }
       }
 
-      // Execute the script in the tmux session
-      runTmuxCommand('tmux', ['send-keys', '-t', name, `bash '${scriptPath}'`, 'Enter'], {
+      // Execute the script in the tmux session. send-keys types this into the
+      // pane's interactive shell, so the path must be quoted — an unquoted
+      // scriptPath silently fails to start the worker when TMPDIR contains a
+      // quote or space, stranding the run and its prompt file.
+      runTmuxCommand('tmux', ['send-keys', '-t', name, `bash ${shq(scriptPath)}`, 'Enter'], {
         stdio: 'pipe',
       });
 
@@ -227,6 +330,7 @@ function createTmuxEngine({
     } catch (error) {
       // Cleanup script, sentinel artifacts, AND tmux session on failure
       try { fs.unlinkSync(scriptPath); } catch {}
+      try { fs.unlinkSync(stdinPath); } catch {}
       try { fs.unlinkSync(exitSentinelPath); } catch {}
       try { fs.unlinkSync(exitSentinelTmpPath); } catch {}
       cleanupTokenArtifact(runId);
@@ -276,6 +380,7 @@ function createTmuxEngine({
     const {
       name,
       scriptPath,
+      stdinPath,
       exitSentinelPath,
       exitSentinelTmpPath,
     } = artifactPaths(runId);
@@ -287,6 +392,7 @@ function createTmuxEngine({
       // The session may already be gone; local artifacts still need cleanup.
     }
     try { fs.unlinkSync(scriptPath); } catch {}
+    try { fs.unlinkSync(stdinPath); } catch {}
     try { fs.unlinkSync(exitSentinelPath); } catch {}
     try { fs.unlinkSync(exitSentinelTmpPath); } catch {}
     cleanupTokenArtifact(runId);
@@ -367,9 +473,12 @@ function createSubprocessEngine({ actorTokens = resolveActorTokenPolicy() } = {}
   const processes = new Map();
   const PROCESS_TTL_MS = 10 * 60 * 1000; // Cleanup dead processes after 10 min
 
-  function spawnAgent(runId, { command, args, cwd, env, outputLogPath }) {
+  function spawnAgent(runId, { command, args, stdin, cwd, env, outputLogPath }) {
     const safeCwd = validateCwd(cwd);
     assertSpawnAllowed({ command, source: 'executionEngine:subprocess' });
+    if (stdin !== undefined && typeof stdin !== 'string') {
+      throw new Error('worker stdin must be a string when provided');
+    }
 
     const workerEnv = buildWorkerProcessEnv(process.env, env, actorTokens);
     // Ensure common binary paths are available (e.g., homebrew, nvm, local bins)
@@ -426,6 +535,14 @@ function createSubprocessEngine({ actorTokens = resolveActorTokenPolicy() } = {}
     // 'close' fires after the child's streams have fully flushed.
     if (logStream) {
       child.on('close', () => { try { logStream.end(); } catch { /* ignore */ } });
+    }
+
+    if (stdin !== undefined) {
+      // A fast-failing child may close the pipe before end() completes. Handle
+      // EPIPE locally so hostile/invalid prompt content can never become an
+      // uncaught server error; the child's real exit code remains authoritative.
+      child.stdin.on('error', () => {});
+      child.stdin.end(stdin);
     }
 
     // Periodic cleanup of dead processes
@@ -531,5 +648,6 @@ module.exports = {
   createExecutionEngine,
   createTmuxEngine,
   createSubprocessEngine,
+  cleanupStaleTmuxStartupArtifacts,
   buildWorkerProcessEnv,
 };

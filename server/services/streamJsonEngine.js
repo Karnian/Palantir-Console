@@ -72,6 +72,7 @@ function createStreamJsonEngine({
       '--output-format', 'stream-json',
       '--verbose',
     ];
+    let workerPrompt = null;
 
     // For manager (multi-turn): use stream-json input format
     // IMPORTANT: Do NOT use -p with --input-format stream-json — they conflict.
@@ -79,9 +80,13 @@ function createStreamJsonEngine({
     if (opts.isManager) {
       args.push('--input-format', 'stream-json');
     } else {
-      // Worker (single-shot): use -p with prompt
+      // Worker (single-shot): -p is a mode flag; defer the positional prompt
+      // until every option is assembled so it can sit behind `--`. Without
+      // the option terminator, a normal diff prompt beginning with `---` (or
+      // an adversarial `--help`) is parsed as another Claude CLI option.
       if (opts.prompt) {
-        args.push('-p', opts.prompt);
+        args.push('-p');
+        workerPrompt = opts.prompt;
       }
     }
 
@@ -145,6 +150,9 @@ function createStreamJsonEngine({
       // without being cut short by CLI default limits.
       const maxTurns = opts.maxTurns ?? 200;
       args.push('--max-turns', String(maxTurns));
+      if (workerPrompt !== null) {
+        args.push('--', workerPrompt);
+      }
     }
 
     return args;

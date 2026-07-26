@@ -227,7 +227,7 @@ test('engine: worker spawn args contain --print --output-format stream-json --no
   const { engine } = makeEngine();
 
   const args = await spawnAndCaptureArgs(engine, 'run-args-worker', {
-    prompt: 'do the thing',
+    prompt: '--- a/server/file.js',
     isManager: false,
   });
 
@@ -235,9 +235,33 @@ test('engine: worker spawn args contain --print --output-format stream-json --no
   assert.ok(args.includes('--output-format'), '--output-format 포함');
   assert.ok(args.includes('stream-json'), 'stream-json 포함');
   assert.ok(args.includes('-p'), 'worker는 -p 사용');
-  assert.ok(args.includes('do the thing'), 'prompt 값 포함');
+  assert.deepEqual(
+    args.slice(-2),
+    ['--', '--- a/server/file.js'],
+    'dash-leading prompt stays positional behind the option terminator',
+  );
   assert.ok(!args.includes('--input-format'), 'worker에는 --input-format 없음');
   assert.ok(args.includes('--no-session-persistence'), '--no-session-persistence 포함');
+});
+
+test('engine: worker option-like prompts cannot be parsed as Claude CLI flags', async () => {
+  process.env.CLAUDE_BIN = fakeClaudioPath;
+  const { engine } = makeEngine();
+
+  for (const [index, prompt] of [
+    '-c service_tier="fast"',
+    '--help',
+  ].entries()) {
+    const args = await spawnAndCaptureArgs(engine, `run-args-option-prompt-${index}`, {
+      prompt,
+      isManager: false,
+    });
+    assert.deepEqual(args.slice(-2), ['--', prompt]);
+    assert.ok(
+      args.indexOf('--max-turns') < args.lastIndexOf('--'),
+      'all Claude options are assembled before the terminator',
+    );
+  }
 });
 
 test('engine: manager spawn args contain --input-format stream-json, no -p', async () => {

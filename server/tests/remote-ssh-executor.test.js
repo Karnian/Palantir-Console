@@ -17,6 +17,7 @@ function nodeRow(fields = {}) {
     kind: 'ssh',
     ssh_host: 'pod.example',
     ssh_user: 'runner',
+    ssh_port: null,
     exposed_roots: JSON.stringify(['/srv/root']),
     updated_at: '2026-07-03 00:00:00',
     ...fields,
@@ -74,7 +75,7 @@ function sshDestinationIndex(args) {
       afterDashDash = true;
       continue;
     }
-    if (arg === '-o') {
+    if (arg === '-o' || arg === '-p') {
       i += 1;
       continue;
     }
@@ -264,6 +265,7 @@ test('ssh argv and script quote injection attempts literally', async () => {
   ]);
   assert.equal(call.args[6], '--');
   assert.equal(call.args[7], 'runner@pod.example');
+  assert.equal(call.args.filter((arg) => arg === '-p').length, 0);
   assert.equal(call.args.some((arg) => String(arg).startsWith('ServerAlive')), false);
   const script = scriptOf(call);
   assert.deepEqual(call.args.slice(8), [`sh -c ${shq(script)}`]);
@@ -273,6 +275,40 @@ test('ssh argv and script quote injection attempts literally', async () => {
   assert.match(script, /SAFE='\$\(literal\)'/);
   assert.match(script, /'say'\\''hi'/);
   for (const arg of args) assert.ok(script.includes(shq(arg)), `missing quoted arg ${arg}`);
+});
+
+test('custom ssh port is emitted exactly once before -- for exec and keepAlive paths', async () => {
+  const spawn = simpleSpawn({ code: 0 });
+  const exec = createRemoteSshNodeExecutor(nodeRow({ ssh_port: 2222 }), {
+    spawnFn: spawn,
+  });
+
+  await exec.exec('git', ['--version']);
+  await exec.spawnInteractive('codex', ['exec']);
+
+  assert.equal(spawn.calls.length, 2);
+  for (const call of spawn.calls) {
+    const portIndexes = call.args
+      .map((arg, index) => arg === '-p' ? index : -1)
+      .filter((index) => index !== -1);
+    assert.deepEqual(portIndexes, [call.args.indexOf('-p')]);
+    assert.equal(portIndexes.length, 1);
+    assert.equal(call.args[portIndexes[0] + 1], '2222');
+    assert.ok(portIndexes[0] < call.args.indexOf('--'));
+  }
+  assertSshOptionPairsInOrder(spawn.calls[1].args, [
+    'ServerAliveInterval=15',
+    'ServerAliveCountMax=4',
+  ]);
+});
+
+test('remote ssh executor rejects invalid raw ssh_port values', () => {
+  for (const sshPort of [0, 65536, -1, 22.5, '2222', '22 -o ProxyCommand=x', true, [2222]]) {
+    assert.throws(
+      () => createRemoteSshNodeExecutor(nodeRow({ ssh_port: sshPort })),
+      /ssh_port/,
+    );
+  }
 });
 
 test('loopback ssh simulator preserves exec stdout across ssh argument join', async () => {
@@ -1089,6 +1125,254 @@ test('spawnWorker file-backs a scoped capability and keeps it out of SSH command
   }
 });
 
+test('spawnWorker transports prompt text through a guarded mode-0600 stdin file', async () => {
+  const runId = 'stdin_worker';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const stdinFile = `${statusDir}/stdin.txt`;
+  const canonicalStdin = `/real/root/.palantir-runs/${runId}/stdin.txt`;
+  const prompt = '--- a/file.js\n-c service_tier="fast"\n--help\n';
+  // The prompt file does not exist yet when its path is resolved, so realpath on
+  // it fails and allowMissing canonicalises the parent instead.
+  const routes = {
+    "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
+    "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+    "exec 'realpath' '/srv/root/.palantir-runs'": { stdout: '/real/root/.palantir-runs\n' },
+    [`exec 'realpath' ${shq(statusDir)}`]: { stdout: `/real/root/.palantir-runs/${runId}\n` },
+    "exec 'mkdir' '-p' '/srv/root/.palantir-runs'": { code: 0 },
+    [`exec 'mkdir' '-p' ${shq(statusDir)}`]: { code: 0 },
+  };
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script.startsWith('umask 077 && cleanup()')) return complete(child, { code: 0 });
+    if (Object.hasOwn(routes, script)) return complete(child, routes[script]);
+    complete(child, { code: 1, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await exec.spawnWorker(runId, {
+    command: 'codex',
+    args: ['exec', '-'],
+    stdin: prompt,
+    cwd: '/srv/root/project',
+  });
+
+  // Upload and handoff must be ONE invocation. Two calls would leave the prompt
+  // on disk owned by nobody if the controller died in between.
+  const uploadCalls = spawn.calls.filter((call) => scriptOf(call).includes('cat > '));
+  assert.equal(uploadCalls.length, 1, 'prompt upload and tmux handoff share one SSH invocation');
+  const combined = scriptOf(uploadCalls[0]);
+  assert.equal(uploadCalls[0].stdin, prompt);
+  assert.ok(combined.includes('tmux new-session'), 'the upload invocation also starts the worker');
+  assert.doesNotMatch(combined, /service_tier="fast"|--- a\/file\.js|--help/);
+
+  // Trap armed before the file can exist, disarmed only after tmux owns it.
+  const armIndex = combined.indexOf(`trap 'rc=$?; cleanup; exit "$rc"' 0`);
+  const catIndex = combined.indexOf(`cat > ${shq(canonicalStdin)}`);
+  const tmuxIndex = combined.indexOf('tmux new-session');
+  const disarmIndex = combined.lastIndexOf('trap - 0 HUP INT TERM');
+  assert.ok(armIndex >= 0 && armIndex < catIndex, 'cleanup trap is armed before the upload starts');
+  assert.ok(tmuxIndex < disarmIndex, 'cleanup trap stays armed until tmux owns the prompt file');
+  assert.ok(combined.includes(`cleanup() { rm -f -- ${shq(canonicalStdin)}; }`));
+
+  // Signal handlers must exit, not fall through — otherwise the && chain keeps
+  // going and starts a worker on the prompt the handler just deleted.
+  for (const [signal, code] of [['HUP', 129], ['INT', 130], ['TERM', 143]]) {
+    assert.ok(
+      combined.includes(`trap 'exit ${code}' ${signal}`),
+      `${signal} aborts the chain instead of falling through`,
+    );
+  }
+
+  // A dying controller closes stdin, which cat reads as a clean EOF — the byte
+  // check is what stops a truncated prompt from launching a worker.
+  assert.ok(
+    combined.includes(`[ "$(wc -c < ${shq(canonicalStdin)})" -eq ${Buffer.byteLength(prompt, 'utf8')} ]`),
+    'short uploads fail the chain instead of starting a worker',
+  );
+  assert.ok(combined.indexOf('chmod 600') < tmuxIndex);
+
+  // Isolate the quoted innerScript tmux runs, between the new-session prefix and
+  // the outer shell's trailing disarm.
+  const disarmSuffix = ' && trap - 0 HUP INT TERM';
+  assert.ok(combined.endsWith(disarmSuffix));
+  const prefix = `${combined.slice(0, tmuxIndex)}tmux new-session -d -s ${shq(`palantir-run-${runId}`)} `;
+  const quotedInnerScript = combined.slice(prefix.length, combined.length - disarmSuffix.length);
+  assert.equal(
+    unshq(quotedInnerScript),
+    [
+      'trap',
+      shq(`rm -f -- ${shq(canonicalStdin)}`),
+      'EXIT',
+      'HUP',
+      'INT',
+      'TERM;',
+      'env',
+      `PALANTIR_TOKEN=${shq('')}`,
+      `PALANTIR_PM_TOKEN=${shq('')}`,
+      `PALANTIR_WORKER_TOKEN=${shq('')}`,
+      `PALANTIR_MANAGER_TOKEN=${shq('')}`,
+      shq('codex'),
+      shq('exec'),
+      shq('-'),
+      '<',
+      shq(canonicalStdin),
+      '>',
+      shq(`${statusDir}/stdout.log`),
+      '2>&1;',
+      'agent_exit_code=$?;',
+      // The prompt file is removed BEFORE the trap is disarmed — disarming
+      // first leaves a window where a HUP/TERM has no handler left to run.
+      'rm',
+      '-f',
+      '--',
+      shq(canonicalStdin) + ';',
+      'trap',
+      '-',
+      'EXIT',
+      'HUP',
+      'INT',
+      'TERM;',
+      'echo',
+      '"$agent_exit_code"',
+      '>',
+      shq(`${statusDir}/exit.code`),
+    ].join(' '),
+  );
+});
+
+test('spawnWorker never follows a stdin.txt symlink that points at another in-root file', async () => {
+  // A link to a file that is itself inside the exposed roots passes the
+  // exposed-roots check, so resolving the final component would hand the upload
+  // a victim path to delete and overwrite with the prompt. The prompt path must
+  // come from the canonical PARENT plus the fixed basename.
+  const runId = 'stdin_symlink';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const stdinFile = `${statusDir}/stdin.txt`;
+  const victim = '/real/root/project/victim.txt';
+  const expectedStdin = `/real/root/.palantir-runs/${runId}/stdin.txt`;
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    const routes = {
+      "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
+      "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+      "exec 'realpath' '/srv/root/.palantir-runs'": { stdout: '/real/root/.palantir-runs\n' },
+      [`exec 'realpath' ${shq(statusDir)}`]: { stdout: `/real/root/.palantir-runs/${runId}\n` },
+      // stdin.txt already exists as a symlink aimed at an in-root file.
+      [`exec 'realpath' ${shq(stdinFile)}`]: { stdout: `${victim}\n` },
+      "exec 'mkdir' '-p' '/srv/root/.palantir-runs'": { code: 0 },
+      [`exec 'mkdir' '-p' ${shq(statusDir)}`]: { code: 0 },
+    };
+    if (script.startsWith('umask 077 && cleanup()')) return complete(child, { code: 0 });
+    if (Object.hasOwn(routes, script)) return complete(child, routes[script]);
+    complete(child, { code: 1, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await exec.spawnWorker(runId, {
+    command: 'codex',
+    args: ['exec', '-'],
+    stdin: '--help\n',
+    cwd: '/srv/root/project',
+  });
+
+  const combined = spawn.calls.map(scriptOf).find((script) => script.includes('cat > '));
+  assert.ok(combined);
+  assert.ok(
+    !combined.includes(victim),
+    'the symlink target must never appear in the upload script',
+  );
+  assert.ok(combined.includes(`rm -f -- ${shq(expectedStdin)}`));
+  assert.ok(combined.includes(`cat > ${shq(expectedStdin)}`));
+  // noclobber stops a symlink recreated between the unlink and the redirect.
+  assert.ok(combined.includes(`set -C && cat > ${shq(expectedStdin)} && set +C`));
+});
+
+test('spawnWorker cleans a partial remote stdin file when SSH upload rejects', async () => {
+  const runId = 'stdin_upload_failure';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const canonicalStdin = `/real/root/.palantir-runs/${runId}/stdin.txt`;
+  const cleanupScript = `exec 'rm' '-f' ${shq(canonicalStdin)}`;
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    const routes = {
+      "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
+      "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+      "exec 'realpath' '/srv/root/.palantir-runs'": { stdout: '/real/root/.palantir-runs\n' },
+      [`exec 'realpath' ${shq(statusDir)}`]: { stdout: `/real/root/.palantir-runs/${runId}\n` },
+      "exec 'mkdir' '-p' '/srv/root/.palantir-runs'": { code: 0 },
+      [`exec 'mkdir' '-p' ${shq(statusDir)}`]: { code: 0 },
+      [cleanupScript]: { code: 0 },
+    };
+    if (script.startsWith('umask 077 && cleanup()')) {
+      child.stdin = new Writable({
+        write(_chunk, _encoding, callback) {
+          const error = new Error('simulated upload EPIPE');
+          error.code = 'EPIPE';
+          callback(error);
+        },
+      });
+      return;
+    }
+    if (Object.hasOwn(routes, script)) return complete(child, routes[script]);
+    complete(child, { code: 1, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => exec.spawnWorker(runId, {
+      command: 'codex',
+      args: ['exec', '-'],
+      stdin: '--help\n',
+      cwd: '/srv/root/project',
+    }),
+    (error) => error.code === 'EPIPE',
+  );
+
+  // The remote trap covers a dropped connection; this local-side rejection may
+  // leave a remote shell that never ran, so the controller still sweeps.
+  assert.ok(
+    spawn.calls.some((call) => scriptOf(call) === cleanupScript),
+    'rejected upload must attempt to remove the partial remote prompt file',
+  );
+});
+
+test('spawnWorker removes the remote prompt when the combined upload/handoff fails', async () => {
+  const runId = 'stdin_handoff_failure';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const canonicalStdin = `/real/root/.palantir-runs/${runId}/stdin.txt`;
+  const cleanupScript = `exec 'rm' '-f' ${shq(canonicalStdin)}`;
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    const routes = {
+      "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
+      "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+      "exec 'realpath' '/srv/root/.palantir-runs'": { stdout: '/real/root/.palantir-runs\n' },
+      [`exec 'realpath' ${shq(statusDir)}`]: { stdout: `/real/root/.palantir-runs/${runId}\n` },
+      "exec 'mkdir' '-p' '/srv/root/.palantir-runs'": { code: 0 },
+      [`exec 'mkdir' '-p' ${shq(statusDir)}`]: { code: 0 },
+      [cleanupScript]: { code: 0 },
+    };
+    // Whole chain fails the way a short upload (byte check) or a tmux failure
+    // would — the run must not be reported as started.
+    if (script.startsWith('umask 077 && cleanup()')) return complete(child, { code: 1, stderr: 'tmux: no server' });
+    if (Object.hasOwn(routes, script)) return complete(child, routes[script]);
+    complete(child, { code: 1, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(() => exec.spawnWorker(runId, {
+    command: 'codex',
+    args: ['exec', '-'],
+    stdin: '--help\n',
+    cwd: '/srv/root/project',
+  }));
+
+  assert.ok(
+    spawn.calls.some((call) => scriptOf(call) === cleanupScript),
+    'a failed handoff must not leave the prompt behind',
+  );
+});
+
 test('spawnWorker accepts canonical cli worker envelope', async () => {
   const runId = 'canonical_cli';
   const spawn = workerSpawnHarness(runId);
@@ -1196,6 +1480,10 @@ test('spawnWorker validates args and workerPath before building the tmux script'
   await assert.rejects(
     () => invalid.spawnWorker('badargs2', { command: 'codex', args: 'x', cwd: '/srv/root' }),
     /spawnWorker args must be an array/,
+  );
+  await assert.rejects(
+    () => invalid.spawnWorker('badstdin', { command: 'codex', args: [], stdin: Buffer.from('x'), cwd: '/srv/root' }),
+    /spawnWorker stdin must be a string/,
   );
   for (const workerPath of ['relative/bin', '/x\nety', '']) {
     await assert.rejects(
