@@ -189,19 +189,49 @@ test('Codex worker refuses tier tokens from args_template and accepts a normal t
   // scan targets the raw template structure, not user prompt data.
   const safeRun = await lifecycleService.executeTask(safeTask.id, {
     agentProfileId: safeProfileId,
-    prompt: 'please fix the service_tier bug and the fast_mode flag handling',
+    prompt: '-c service_tier="fast"',
   });
 
   assert.equal(safeRun.status, 'running');
   assert.equal(executionEngine.spawned.length, 1);
+  const safeSpawn = executionEngine.spawned[0].opts;
   assert.deepEqual(
-    executionEngine.spawned[0].opts.args.slice(0, 2),
+    safeSpawn.args.slice(0, 2),
     ['-c', 'service_tier="default"'],
+  );
+  assert.deepEqual(safeSpawn.args.slice(2), ['exec', '-']);
+  assert.equal(safeSpawn.stdin, '-c service_tier="fast"');
+  assert.equal(
+    safeSpawn.args.includes('-c service_tier="fast"'),
+    false,
+    'prompt cannot become a last-wins argv config override',
   );
   assert.ok(
     !runService.getRunEvents(safeRun.id)
       .some((event) => event.event_type === 'worker:tier_forbidden'),
   );
+
+  for (const [label, argsTemplate] of [
+    ['Whitespace template', '   '],
+    ['Missing system prompt placeholder', '{system_prompt_file}'],
+    ['Prompt-only legacy template', '{prompt}'],
+  ]) {
+    const emptyTemplateTask = taskService.createTask({
+      project_id: project.id,
+      title: label,
+      description: 'must use safe stdin fallback',
+    });
+    const emptyTemplateProfileId = insertCodexProfile(db, argsTemplate);
+    await lifecycleService.executeTask(emptyTemplateTask.id, {
+      agentProfileId: emptyTemplateProfileId,
+      prompt: '--help',
+    });
+
+    const emptyTemplateSpawn = executionEngine.spawned.at(-1).opts;
+    assert.deepEqual(emptyTemplateSpawn.args.slice(-2), ['exec', '-']);
+    assert.equal(emptyTemplateSpawn.stdin, '--help');
+    assert.equal(emptyTemplateSpawn.args.includes('--help'), false);
+  }
 });
 
 test('putPolicy: stale edit after delete → NotFoundError, not a revived INSERT', async (t) => {

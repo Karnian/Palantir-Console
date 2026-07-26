@@ -87,13 +87,14 @@ test('spawnQueuedRun compiles the goal prompt for a goal-enabled task', async (t
   db.prepare('UPDATE tasks SET goal_enabled = 1, goal_max_attempts = 4 WHERE id = ?').run(task.id);
   const profile = seedProfile(db);
   await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'caller says hi' });
-  const args = exec.spawned[0].opts.args.join('\n');
-  assert.match(args, /\[GOAL\]/);
-  assert.match(args, /Do the thing/);
-  assert.match(args, /\[ACCEPTANCE CRITERIA/);
-  assert.match(args, /\[ATTEMPT 1\/4\]/, 'uses task.goal_max_attempts');
-  assert.match(args, /caller says hi/, 'caller prompt preserved');
-  assert.match(args, /palantir-goal-report/, 'requests completion report');
+  const prompt = exec.spawned[0].opts.stdin;
+  assert.deepEqual(exec.spawned[0].opts.args.slice(-1), ['-']);
+  assert.match(prompt, /\[GOAL\]/);
+  assert.match(prompt, /Do the thing/);
+  assert.match(prompt, /\[ACCEPTANCE CRITERIA/);
+  assert.match(prompt, /\[ATTEMPT 1\/4\]/, 'uses task.goal_max_attempts');
+  assert.match(prompt, /caller says hi/, 'caller prompt preserved');
+  assert.match(prompt, /palantir-goal-report/, 'requests completion report');
 });
 
 test('G3: a retry child is spawned with its real attempt number + prior-attempt feedback', async (t) => {
@@ -117,9 +118,9 @@ test('G3: a retry child is spawned with its real attempt number + prior-attempt 
 
   exec.spawned.length = 0;
   await lc.spawnQueuedRun(childId);
-  const args = exec.spawned[0].opts.args.join('\n');
-  assert.match(args, /\[ATTEMPT 2\/3\]/, 'real attempt number, not hardcoded 1');
-  assert.match(args, /이전 판정 사유|Gate 1 검증|AssertionError/, 'prior-attempt feedback injected');
+  const prompt = exec.spawned[0].opts.stdin;
+  assert.match(prompt, /\[ATTEMPT 2\/3\]/, 'real attempt number, not hardcoded 1');
+  assert.match(prompt, /이전 판정 사유|Gate 1 검증|AssertionError/, 'prior-attempt feedback injected');
 });
 
 test('captureGoalOutput persists final_output + goal_report on terminal (goal run)', async (t) => {
