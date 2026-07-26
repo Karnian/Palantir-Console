@@ -8,7 +8,7 @@
     "pretest": "node scripts/ensure-sqlite-binding.mjs",
     "dev": "node server/index.js",
     "start": "node server/index.js",
-    "test": "node --test",
+    "test": "node scripts/run-tests.mjs",
     "test:e2e": "npx playwright test",
     "test:a11y": "npx playwright test --grep @a11y",
     "test:visual": "PALANTIR_VISUAL_ONLY=1 npx playwright test --grep @visual",

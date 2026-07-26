@@ -2,6 +2,13 @@
 // + the /api/master-memory remember/list route. No real CLI: a codex-adapter-shaped fake captures
 // runTurn payloads so we assert the `## User Memory` block lands in the USER payload, Top-only, ledger-gated.
 
+// #423: these tests spawn a codex Operator, which needs resolveCodexAuth to
+// report usable credentials. They used to pass only because the developer
+// running them happened to have ~/.codex/auth.json — the exact host dependence
+// this issue removes. Inject a fixture credential instead of re-enabling host
+// discovery, so the result is the same on a machine with no codex login.
+process.env.CODEX_API_KEY = process.env.CODEX_API_KEY || 'test-fixture-codex-key';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
