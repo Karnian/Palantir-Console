@@ -40,6 +40,7 @@ after(() => {
 // The fake binary must live under server/tests/fixtures/ so spawnGuard can
 // allow it while blocking real Claude/Codex CLIs during node --test.
 const fakeClaudioPath = path.join(__dirname, 'fixtures', 'bin', 'fake-claude-stream-json.js');
+const fakeClosedStdinPath = path.join(__dirname, 'fixtures', 'bin', 'fake-claude-close-stdin.sh');
 
 // ---------------------------------------------------------------------------
 // 헬퍼: 엔진 생성 (매 테스트마다 독립 인스턴스)
@@ -65,7 +66,7 @@ function makeRunService() {
 
 function createFakeRemoteChild() {
   const child = new EventEmitter();
-  const stdin = {
+  const stdin = Object.assign(new EventEmitter(), {
     writes: [],
     endCalls: 0,
     destroyed: false,
@@ -80,7 +81,7 @@ function createFakeRemoteChild() {
       this.writableEnded = true;
       this.writable = false;
     },
-  };
+  });
   child.pid = 424242;
   child.stdin = stdin;
   child.stdout = new PassThrough();
@@ -186,6 +187,7 @@ async function spawnAndCaptureArgs(engine, runId, opts, timeoutMs = 2500) {
     env: {
       ...((opts && opts.env) || {}),
       CLAUDE_ARGS_FILE: argsFile,
+      PATH: process.env.PATH,
     },
   });
 
@@ -671,6 +673,87 @@ test('engine: manager initial prompt is sent via stdin as stream-json after spaw
   await waitForEvent(engine, 'run-init-prompt', e => e.type === 'assistant', 1000);
   const output = engine.getOutput('run-init-prompt');
   assert.ok(output && output.includes('echo:'), '초기 프롬프트가 echo됨 = stdin으로 전송됨 확인');
+});
+
+test('engine: manager stdin EPIPE is observed and exit still owns failure state', async () => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const rs = makeRunService();
+  rs._setRun('run-stdin-epipe', { status: 'running' });
+  const previousBin = process.env.CLAUDE_BIN;
+  process.env.CLAUDE_BIN = fakeClosedStdinPath;
+  const engine = createStreamJsonEngine({ runService: rs });
+  _allEngines.push(engine);
+
+  try {
+    engine.spawnAgent('run-stdin-epipe', {
+      prompt: 'manager initial',
+      cwd: os.tmpdir(),
+      isManager: true,
+    });
+  } finally {
+    if (previousBin === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = previousBin;
+  }
+
+  await waitForEvent(engine, 'run-stdin-epipe', e => e.type === 'system', 2000);
+  engine.sendInput('run-stdin-epipe', 'write after fixture closed stdin');
+
+  const stdinErrorDeadline = Date.now() + 2000;
+  while (Date.now() < stdinErrorDeadline
+    && !rs._events.some(e => e.runId === 'run-stdin-epipe' && e.type === 'stdin_error')) {
+    await new Promise(r => setTimeout(r, 20));
+  }
+
+  const stdinError = rs._events.find(
+    e => e.runId === 'run-stdin-epipe' && e.type === 'stdin_error'
+  );
+  assert.ok(stdinError, 'stdin EPIPE is recorded instead of becoming uncaught');
+  assert.equal(JSON.parse(stdinError.data).code, 'EPIPE');
+
+  const exitDeadline = Date.now() + 2000;
+  while (engine.isAlive('run-stdin-epipe') && Date.now() < exitDeadline) {
+    await new Promise(r => setTimeout(r, 20));
+  }
+
+  assert.equal(engine.isAlive('run-stdin-epipe'), false);
+  assert.equal(engine.detectExitCode('run-stdin-epipe'), 1);
+  assert.ok(
+    rs._statusUpdates.some(u => u.runId === 'run-stdin-epipe' && u.status === 'failed'),
+    'child exit finalizes the run as failed'
+  );
+  assert.ok(
+    rs._events.some(e => e.runId === 'run-stdin-epipe' && e.type === 'exit'),
+    'child exit remains observable'
+  );
+});
+
+test('engine: remote stdin errors are contained by the shared attach path', async () => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const rs = makeRunService();
+  const child = createFakeRemoteChild();
+  const engine = createStreamJsonEngine({ runService: rs });
+
+  await spawnFakeRemoteManager(engine, 'run-remote-stdin-error', child);
+  const err = new Error('remote stdin destroyed');
+  err.code = 'ERR_STREAM_DESTROYED';
+  child.stdin.emit('error', err);
+
+  const stdinError = rs._events.find(
+    e => e.runId === 'run-remote-stdin-error' && e.type === 'stdin_error'
+  );
+  assert.ok(stdinError);
+  assert.deepEqual(JSON.parse(stdinError.data), {
+    message: 'remote stdin destroyed',
+    code: 'ERR_STREAM_DESTROYED',
+  });
+  assert.equal(
+    rs._statusUpdates.filter(u => u.runId === 'run-remote-stdin-error').length,
+    0,
+    'a stdin error never transitions the run state',
+  );
+  assert.equal(engine.isAlive('run-remote-stdin-error'), true);
+
+  engine.kill('run-remote-stdin-error');
 });
 
 // ---------------------------------------------------------------------------
