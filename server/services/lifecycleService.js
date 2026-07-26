@@ -2614,8 +2614,49 @@ function createLifecycleService({
     // queued/materializing runs have no accepted live worker yet and can be
     // started normally with a newly minted grant by the boot queue drain.
     const activeStatuses = new Set(['running', 'paused', 'needs_input']);
+    const terminalStatuses = new Set(['completed', 'failed', 'cancelled', 'stopped']);
     let persistedRuns = [];
     try { persistedRuns = runService.listRuns(); } catch { persistedRuns = []; }
+
+    // Snapshot local sessions before the artifact sweep. If the sweep proves a
+    // session is only the empty shell left between new-session and send-keys,
+    // the normal recovery loop below will still observe that former ghost as
+    // dead instead of reattaching it as a worker.
+    let ghostSessions = [];
+    if (executionEngine.type === 'tmux') {
+      try { ghostSessions = executionEngine.discoverGhostSessions(); } catch { ghostSessions = []; }
+    }
+
+    // DB status is the authority for whether a run's startup residue is even
+    // eligible for inspection. The engine then applies the second fail-safe:
+    // live or uncertain pane state is always preserved.
+    if (
+      executionEngine.type === 'tmux'
+      && typeof executionEngine.reapStartupArtifacts === 'function'
+    ) {
+      for (const run of persistedRuns) {
+        if (
+          !run
+          || run.is_manager
+          || (run.node_id && run.node_id !== 'local')
+          || (!['queued', 'running'].includes(run.status) && !terminalStatuses.has(run.status))
+        ) {
+          continue;
+        }
+        let result;
+        try { result = await executionEngine.reapStartupArtifacts(run.id); } catch { continue; }
+        if (!result || result.action !== 'removed') continue;
+        try {
+          runService.addRunEvent(run.id, 'runtime:artifacts_reaped', JSON.stringify({
+            kind: 'local_tmux_startup',
+            reason: result.reason,
+            removed_count: Array.isArray(result.removed) ? result.removed.length : 0,
+          }));
+        } catch { /* deletion already succeeded; recovery must continue */ }
+      }
+    }
+
+
     for (const run of persistedRuns) {
       if (
         !run
@@ -2675,11 +2716,68 @@ function createLifecycleService({
       recovered.push({ runId: run.id, status: 'credential_revoked' });
     }
 
+    // Housekeeping runs AFTER the active-worker sweep above on purpose. Each
+    // cleanup is one SSH round trip and an offline node costs the full timeout,
+    // so putting this first would delay revoking capabilities on workers that
+    // are still running — the one thing here with a security deadline. Also
+    // bounded: a backlog of old runs must not stretch boot indefinitely.
+    const HOUSEKEEPING_BUDGET_MS = 30_000;
+    const housekeepingStartedAt = Date.now();
+
+    for (const run of persistedRuns) {
+      if (Date.now() - housekeepingStartedAt > HOUSEKEEPING_BUDGET_MS) break;
+      if (
+        !run
+        || run.is_manager
+        || !terminalStatuses.has(run.status)
+        || !run.node_id
+        || run.node_id === 'local'
+      ) {
+        continue;
+      }
+      let priorEvents;
+      try { priorEvents = runService.getRunEvents(run.id); } catch { continue; }
+      if (priorEvents.some((event) => (
+        event.event_type === 'runtime:artifacts_reaped'
+        && (() => {
+          try { return JSON.parse(event.payload_json || '{}').kind === 'remote_status_dir'; } catch { return false; }
+        })()
+      ))) {
+        continue;
+      }
+      // cleanupRun removes the whole status dir, stdout.log included. Terminal
+      // status is committed to the DB before capture/harvest, which run
+      // asynchronously off run:ended — so a controller that died in that window
+      // leaves the remote stdout as the ONLY copy of the result, and boot has no
+      // path that re-runs the capture. Delete only once something durable shows
+      // the output was consumed; otherwise leave it for a later boot.
+      const consumed = priorEvents.some((event) => (
+        event.event_type === 'harvest:goal_capture'
+        || event.event_type === 'harvest:diff'
+        || event.event_type === 'harvest:test'
+        || event.event_type === 'harvest:error'
+      ));
+      if (!consumed) continue;
+      try {
+        const node = getDispatchNode(run.node_id);
+        if (!node || (node.kind || 'local') === 'local') continue;
+        const channel = channelForNode(run.node_id);
+        if (!channel || typeof channel.cleanupRun !== 'function') continue;
+        await channel.cleanupRun(run.id);
+        runService.addRunEvent(run.id, 'runtime:artifacts_reaped', JSON.stringify({
+          kind: 'remote_status_dir',
+          reason: 'terminal_run',
+          removed_count: 1,
+        }));
+      } catch {
+        // Fail-safe = preserve. SSH transport failure, timeout, and uncertain
+        // remote path state must never be converted into a deletion annotation.
+      }
+    }
+
     // Boot orphan discovery remains executionEngine-direct; ghost sessions are
     // local tmux sessions.
     if (executionEngine.type !== 'tmux') return recovered;
-
-    const ghostSessions = executionEngine.discoverGhostSessions();
 
     for (const session of ghostSessions) {
       // Extract runId from session name (palantir-run-<runId>)
@@ -2808,6 +2906,8 @@ function createLifecycleService({
         recovered.push({ runId, status: 'unknown_orphan', sessionName: session.name });
       }
     }
+
+
 
     return recovered;
   }

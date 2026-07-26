@@ -28,6 +28,7 @@ function artifactPaths(runId) {
     stdinPath: path.join(scriptDir, `${name}.stdin`),
     sentinelPath: path.join(scriptDir, `${name}.exit`),
     sentinelTmpPath: path.join(scriptDir, `${name}.exit.tmp`),
+    startedPath: path.join(scriptDir, `${name}.started`),
   };
 }
 
@@ -69,7 +70,7 @@ function runBash(scriptPath) {
   });
 }
 
-test('startup cleanup removes stranded prompt and capability artifacts only', (t) => {
+test('pre-DB startup cleanup preserves run-owned prompts and removes capabilities only', (t) => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-startup-cleanup-'));
   const scriptDir = path.join(tmpRoot, 'palantir-scripts');
   const promptPath = path.join(scriptDir, 'palantir-run-crashed_worker.stdin');
@@ -85,9 +86,9 @@ test('startup cleanup removes stranded prompt and capability artifacts only', (t
 
   assert.deepEqual(
     cleanupStaleTmuxStartupArtifacts({ tmpDir: tmpRoot }),
-    { prompts: 1, capabilities: 1 },
+    { prompts: 0, capabilities: 1 },
   );
-  assert.equal(fs.existsSync(promptPath), false);
+  assert.equal(fs.existsSync(promptPath), true, 'DB-aware lifecycle sweep owns prompt cleanup');
   assert.equal(fs.existsSync(tokenDir), false);
   assert.equal(fs.existsSync(scriptPath), true, 'non-secret diagnostic script is retained');
   assert.equal(fs.existsSync(unrelatedPath), true, 'non-Palantir stdin file is retained');
@@ -479,4 +480,136 @@ test('kill cleans script and sentinel artifacts even when the tmux session is al
   assert.equal(fs.existsSync(paths.stdinPath), false);
   assert.equal(fs.existsSync(paths.sentinelPath), false);
   assert.equal(fs.existsSync(paths.sentinelTmpPath), false);
+});
+
+// ---------------------------------------------------------------------------
+// #417 local startup state table.
+//
+// The remote half (state 5) and the SSH fail-safes were covered; these are the
+// four local rows. Row 3 is the one that matters most — a sweep that reaps a
+// LIVE worker is far worse than the leak it was written to fix — and row 2 is
+// the case that made this issue worth filing: a session that exists but never
+// got its send-keys looks alive to a naive check and gets reattached forever.
+//
+// The pane state is driven through the injected tmux command rather than a real
+// server, so the classification is exercised without a tmux dependency.
+// ---------------------------------------------------------------------------
+
+function makeStateTmux({ sessionExists, panePid = null, psOutput = '' }) {
+  const calls = [];
+  return {
+    calls,
+    execFileSync(command, args) {
+      calls.push({ command, args });
+      if (command === 'ps') return psOutput;
+      if (args[0] === 'has-session') {
+        if (!sessionExists) throw new Error('no session');
+        return '';
+      }
+      if (args[0] === 'display-message') {
+        if (panePid === null) throw new Error('no pane');
+        return `${panePid}\n`;
+      }
+      return '';
+    },
+  };
+}
+
+function seedArtifacts(t, runId, { started = false } = {}) {
+  const paths = artifactPaths(runId);
+  fs.mkdirSync(path.dirname(paths.scriptPath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(paths.scriptPath, '#!/bin/bash\ntrue\n', { mode: 0o700 });
+  fs.writeFileSync(paths.stdinPath, 'prompt\n', { mode: 0o600 });
+  if (started) fs.writeFileSync(paths.startedPath, '');
+  t.after(() => {
+    for (const p of Object.values(paths)) { try { fs.unlinkSync(p); } catch { /* ignore */ } }
+  });
+  return paths;
+}
+
+test('#417 state 1: no session, artifacts present -> reaped', (t) => {
+  const runId = uniqueRunId('state1');
+  const paths = seedArtifacts(t, runId);
+  const tmux = makeStateTmux({ sessionExists: false });
+
+  const result = createTmuxEngine({ execFileSync: tmux.execFileSync }).reapStartupArtifacts(runId);
+
+  assert.equal(result.action, 'removed');
+  assert.equal(result.reason, 'no_session');
+  assert.equal(fs.existsSync(paths.scriptPath), false);
+  assert.equal(fs.existsSync(paths.stdinPath), false, 'the prompt must not survive');
+});
+
+test('#417 state 2: idle shell (session up, send-keys never landed) -> killed and reaped', (t) => {
+  const runId = uniqueRunId('state2');
+  const paths = seedArtifacts(t, runId);
+  // Pane exists and its process tree is just the shell — no worker was ever
+  // started, so nothing here is worth preserving.
+  const tmux = makeStateTmux({
+    sessionExists: true,
+    panePid: 424242,
+    psOutput: '424242 1 -bash\n',
+  });
+
+  const engine = createTmuxEngine({ execFileSync: tmux.execFileSync });
+  const result = engine.reapStartupArtifacts(runId);
+
+  assert.equal(result.action, 'removed');
+  assert.equal(result.reason, 'idle_shell');
+  assert.equal(fs.existsSync(paths.stdinPath), false);
+  assert.ok(
+    tmux.calls.some(({ args }) => args[0] === 'kill-session'),
+    'the ghost session must be killed so recovery cannot reattach it as a worker',
+  );
+});
+
+test('#417 state 3: a RUNNING worker is preserved untouched', (t) => {
+  const runId = uniqueRunId('state3');
+  const paths = seedArtifacts(t, runId, { started: true });
+  const tmux = makeStateTmux({
+    sessionExists: true,
+    panePid: 515151,
+    psOutput: '515151 1 -bash\n515152 515151 codex exec -\n',
+  });
+
+  const result = createTmuxEngine({ execFileSync: tmux.execFileSync }).reapStartupArtifacts(runId);
+
+  assert.equal(result.action, 'preserved');
+  assert.equal(result.reason, 'running');
+  assert.deepEqual(result.removed, []);
+  assert.equal(fs.existsSync(paths.scriptPath), true, 'a live worker must keep its script');
+  assert.equal(fs.existsSync(paths.stdinPath), true, 'a live worker must keep its prompt');
+  assert.equal(
+    tmux.calls.some(({ args }) => args[0] === 'kill-session'),
+    false,
+    'a live worker must never be killed by the sweep',
+  );
+});
+
+test('#417 state 4: terminal run with a leftover sentinel -> reaped', (t) => {
+  const runId = uniqueRunId('state4');
+  const paths = seedArtifacts(t, runId);
+  fs.writeFileSync(paths.sentinelPath, '0\n');
+  const tmux = makeStateTmux({ sessionExists: false });
+
+  const result = createTmuxEngine({ execFileSync: tmux.execFileSync }).reapStartupArtifacts(runId);
+
+  assert.equal(result.action, 'removed');
+  assert.ok(result.removed.includes(paths.sentinelPath));
+  assert.equal(fs.existsSync(paths.sentinelPath), false);
+});
+
+test('#417 fail-safe: an unreadable pane is treated as uncertain and preserved', (t) => {
+  // Local counterpart to the remote SSH fail-safes: if the engine cannot prove
+  // the pane is idle, it must not delete anything.
+  const runId = uniqueRunId('state-unknown');
+  const paths = seedArtifacts(t, runId);
+  const tmux = makeStateTmux({ sessionExists: true, panePid: null });
+
+  const result = createTmuxEngine({ execFileSync: tmux.execFileSync }).reapStartupArtifacts(runId);
+
+  assert.equal(result.action, 'preserved');
+  assert.equal(result.reason, 'unknown');
+  assert.equal(fs.existsSync(paths.stdinPath), true);
+  assert.equal(tmux.calls.some(({ args }) => args[0] === 'kill-session'), false);
 });
