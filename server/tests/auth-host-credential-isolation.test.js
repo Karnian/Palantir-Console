@@ -90,8 +90,9 @@ function spyOnNativeProbes(t) {
     execFileSync: childProcess.execFileSync,
     readFile: fsPromises.readFile,
     readFileSync: fsSync.readFileSync,
+    existsSync: fsSync.existsSync,
   };
-  const calls = { exec: [], read: [] };
+  const calls = { exec: [], read: [], exists: [] };
   const argvOf = (file, args) => [file, ...(Array.isArray(args) ? args : [])].join(' ');
 
   // Record and STUB the credential probes — never let them reach the host.
@@ -131,18 +132,27 @@ function spyOnNativeProbes(t) {
     calls.read.push(String(target));
     return original.readFileSync.call(this, target, ...rest);
   };
+  // Several guards only prevent an existence PROBE, never a read, so watching
+  // reads alone leaves them mutation-invisible.
+  fsSync.existsSync = function spy(target, ...rest) {
+    calls.exists.push(String(target));
+    return original.existsSync.call(this, target, ...rest);
+  };
 
   t.after(() => {
     childProcess.execFile = original.execFile;
     childProcess.execFileSync = original.execFileSync;
     fsPromises.readFile = original.readFile;
     fsSync.readFileSync = original.readFileSync;
+    fsSync.existsSync = original.existsSync;
   });
 
   return {
     securityCalls: () => calls.exec.filter((c) => c.startsWith('security ')),
     claudeCliCalls: () => calls.exec.filter((c) => c.startsWith('claude auth status')),
     credentialFileReads: () => calls.read.filter((p) => p.includes('.credentials.json')),
+    // Any access at all — read or probe — of a path containing `needle`.
+    touches: (needle) => [...calls.read, ...calls.exists].filter((p) => p.includes(needle)),
   };
 }
 
@@ -290,6 +300,92 @@ test('positive control: unisolated CLI credential reads are observable', async (
     2,
     'both the sync existence probe and the async token read must be observable',
   );
+});
+
+test('isolation stops resolveClaudeAuth probing the auth file at all', (t) => {
+  // A separate guard from readClaudeAuthFile's: this one only suppresses the
+  // existence probe, so a read-only spy could never see it disappear.
+  const box = sandbox(t);
+  box.plant({ ANTHROPIC_API_KEY: 'sk-ant-fixture' });
+  process.env.PALANTIR_SKIP_HOST_CREDENTIALS = '1';
+  const probes = spyOnNativeProbes(t);
+  const resolver = loadResolver();
+
+  const auth = resolver.resolveClaudeAuth();
+  assert.deepEqual(probes.touches('.claude-auth.json'), []);
+  assert.equal(auth.canAuth, false);
+});
+
+test('isolation stops resolveClaudeAuthForIsolated materializing a token', async (t) => {
+  // The sharpest case: this entry point calls readClaudeAuthFile() directly,
+  // with no outer guard to fall back on, and it MATERIALIZES a token rather
+  // than just reporting availability. Losing that single guard hands a real
+  // host credential to an isolated worker.
+  const box = sandbox(t);
+  box.plant({ CLAUDE_CODE_OAUTH_TOKEN: 'oauth-fixture-token', ANTHROPIC_API_KEY: 'sk-ant-fixture' });
+  process.env.PALANTIR_SKIP_HOST_CREDENTIALS = '1';
+  const probes = spyOnNativeProbes(t);
+  const resolver = loadResolver();
+
+  const auth = await resolver.resolveClaudeAuthForIsolated({});
+  assert.deepEqual(probes.touches('.claude-auth.json'), []);
+  assert.equal(auth.canAuth, false);
+  assert.ok(
+    !JSON.stringify(auth).includes('fixture'),
+    'no host credential may be materialized for an isolated worker',
+  );
+});
+
+test('isolation stops resolveCodexAuth probing the codex auth file', (t) => {
+  const box = sandbox(t);
+  // CODEX_AUTH_FILE is homedir-derived and resolved at module load, so HOME has
+  // to point at the fixture before the require.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-codexauth-'));
+  fs.mkdirSync(path.join(home, '.codex'));
+  fs.writeFileSync(path.join(home, '.codex', 'auth.json'), JSON.stringify({ OPENAI_API_KEY: 'sk-fixture' }));
+  const savedHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  box.plant({ ANTHROPIC_API_KEY: 'sk-ant-fixture' });
+  process.env.PALANTIR_SKIP_HOST_CREDENTIALS = '1';
+  const probes = spyOnNativeProbes(t);
+  const resolver = loadResolver();
+
+  const auth = resolver.resolveCodexAuth({});
+  assert.deepEqual(probes.touches('.codex/auth.json'), []);
+  assert.equal(auth.canAuth, false, 'a planted codex credential must not look usable');
+});
+
+test('positive control: unisolated resolvers do probe both auth files', (t) => {
+  // Keeps the three assertions above honest — without this, they would also
+  // pass if the resolvers simply never looked at these paths.
+  const box = sandbox(t);
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-codexauth-pc-'));
+  fs.mkdirSync(path.join(home, '.codex'));
+  fs.writeFileSync(path.join(home, '.codex', 'auth.json'), JSON.stringify({ OPENAI_API_KEY: 'sk-fixture' }));
+  const savedHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  box.plant({ ANTHROPIC_API_KEY: 'sk-ant-fixture' });
+  const probes = spyOnNativeProbes(t);
+  const resolver = loadResolver();
+
+  const claude = resolver.resolveClaudeAuth();
+  const codex = resolver.resolveCodexAuth({});
+  assert.ok(probes.touches('.claude-auth.json').length > 0, 'auth file is probed when not isolated');
+  assert.ok(probes.touches('.codex/auth.json').length > 0, 'codex auth file is probed when not isolated');
+  assert.equal(claude.canAuth, true);
+  assert.equal(codex.canAuth, true);
 });
 
 test('explicit env credentials still authenticate under isolation (not a kill switch)', (t) => {
