@@ -1540,10 +1540,14 @@ function createApp(options = {}) {
           missingReason = (cliAuth && cliAuth.diagnostics && cliAuth.diagnostics[0])
             || 'Claude Code CLI credentials are not available';
         } else {
+          // cliAuth above only answers "are there credentials at all", for the
+          // status surface. The token itself is materialized per call inside
+          // the distiller — `--bare` cannot read the keychain or OAuth env, so
+          // it has to arrive as an apiKeyHelper settings file.
           distiller = createLiveDistiller({
             cliBin,
-            authEnv: cliAuth.env,
             envAllowlist: CLAUDE_AUTH_KEYS,
+            resolveIsolatedAuth: options.memoryDistillIsolatedAuth,
           });
         }
       }

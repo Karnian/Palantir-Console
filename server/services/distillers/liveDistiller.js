@@ -18,7 +18,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { summarizeR4ReferenceContent } = require('../memoryPolarity');
-const { buildManagerSpawnEnv } = require('../authResolver');
+const { buildManagerSpawnEnv, resolveClaudeAuthForIsolated } = require('../authResolver');
 const { assertSpawnAllowed } = require('../../utils/spawnGuard');
 
 const DEFAULT_MODEL = 'claude-haiku-4-5';
@@ -244,17 +244,37 @@ function scrubServerTokens(env) {
   return out;
 }
 
-function defaultCallClaudeCli({
+async function defaultCallClaudeCli({
   system,
   user,
   model,
   cliBin,
-  authEnv,
   envAllowlist,
   timeoutMs,
   spawnImpl = spawn,
+  resolveIsolatedAuth = resolveClaudeAuthForIsolated,
 }) {
-  if (!cliBin) return Promise.reject(new Error('Claude Code CLI binary is unavailable'));
+  if (!cliBin) throw new Error('Claude Code CLI binary is unavailable');
+
+  // `--bare` deliberately ignores OAuth env, the macOS keychain and the CLI
+  // credential store, so a subscription login does NOT reach the child by
+  // itself — the repo's own spike measured that (worker-preset-and-plugin-
+  // injection.md Round 6: env-token variant FAILS, apiKeyHelper PASSES).
+  // Materialize the token into an apiKeyHelper settings file instead, which
+  // also keeps it out of the child's environment and out of `ps`.
+  //
+  // Resolved per call rather than at boot: createApp is synchronous, the temp
+  // material gets a bounded lifetime, and a `claude login` performed after the
+  // server started is picked up without a restart.
+  const isolated = await resolveIsolatedAuth({ envAllowlist });
+  if (!isolated || !isolated.canAuth) {
+    const why = (isolated && isolated.diagnostics && isolated.diagnostics[0])
+      || 'Claude Code CLI credentials are not available';
+    throw new Error(`Claude Code CLI auth unavailable: ${why}`);
+  }
+  const settingsPath = isolated.apiKeyHelperSettings?.settingsPath || null;
+  const cleanupAuth = isolated.apiKeyHelperSettings?.cleanup || (() => {});
+  const authEnv = isolated.env || {};
 
   const args = [
     '--print',
@@ -265,14 +285,28 @@ function defaultCallClaudeCli({
     '--setting-sources', '',
     '--no-session-persistence',
     '--max-turns', '1',
+    // Candidate text is untrusted — it comes from worker output and from
+    // whatever a user or agent typed at /remember. Distillation needs no tools
+    // at all, so leaving the built-ins enabled would hand a prompt-injection
+    // payload a file system and a shell for nothing.
+    '--allowedTools', '',
   ];
-  const prompt = `${system}\n\n${user}`;
+  // Keep the instructions in the system channel rather than concatenating them
+  // onto the candidate text. Merged into one user turn, a candidate that says
+  // "ignore the above" is competing with the instructions on equal footing.
+  if (system) args.push('--append-system-prompt', system);
+  if (settingsPath) args.push('--settings', settingsPath);
+
+  const prompt = user;
   const filteredEnv = buildManagerSpawnEnv({ authEnv, envAllowlist });
   const childEnv = scrubServerTokens(filteredEnv);
 
   assertSpawnAllowed({ command: cliBin, source: 'liveDistiller:claude-cli' });
 
-  return new Promise((resolve, reject) => {
+  // The helper script holds the live token, so it must be removed whichever way
+  // this call ends — success, spawn failure, timeout or output cap.
+  try {
+    return await new Promise((resolve, reject) => {
     let child;
     try {
       child = spawnImpl(cliBin, args, {
@@ -326,19 +360,27 @@ function defaultCallClaudeCli({
       finish(new Error(`Claude Code CLI timed out after ${timeoutMs || DEFAULT_TIMEOUT_MS}ms`));
     }, timeoutMs || DEFAULT_TIMEOUT_MS);
     child.stdin.end(prompt);
-  });
+    });
+  } finally {
+    try { cleanupAuth(); } catch { /* best effort — temp dir only */ }
+  }
 }
 
-// createLiveDistiller({ apiKey?, cliBin?, authEnv?, envAllowlist?, model?,
-//   callModel?, maxTokens?, fetchImpl?, timeoutMs? })
+// createLiveDistiller({ apiKey?, cliBin?, authEnv?, envAllowlist?, settingsPath?,
+//   model?, callModel?, maxTokens?, fetchImpl?, timeoutMs? })
+// - settingsPath points at an apiKeyHelper settings.json from
+//   resolveClaudeAuthForIsolated(). `--bare` ignores OAuth env, the keychain and
+//   the CLI credential store, so a subscription token only authenticates when it
+//   is materialized this way (repo spike, worker-preset-and-plugin-injection.md
+//   Round 6: variant A env-token FAILS, apiKeyHelper and API-key-slot PASS).
 // - callModel({system,user}) -> text : inject to bypass the network (tests).
 // - without callModel, apiKey selects the existing Anthropic API path.
 // - without apiKey, cliBin selects the Claude Code subscription path.
 function createLiveDistiller({
   apiKey,
   cliBin,
-  authEnv,
   envAllowlist,
+  resolveIsolatedAuth,
   model = DEFAULT_MODEL,
   callModel,
   maxTokens = 1024,
@@ -373,10 +415,10 @@ function createLiveDistiller({
       ...args,
       model,
       cliBin,
-      authEnv,
       envAllowlist,
       timeoutMs,
       spawnImpl,
+      resolveIsolatedAuth,
     });
   }
 
