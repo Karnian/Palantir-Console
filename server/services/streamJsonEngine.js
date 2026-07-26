@@ -249,6 +249,24 @@ function createStreamJsonEngine({
     const attachChild = (child) => {
       proc.child = child;
 
+      // Writable stream errors are delivered asynchronously and are not caught
+      // by the try/catch around write(). Keep them observable without letting an
+      // EPIPE or destroyed stdin terminate the console server; exit/error owns
+      // the run state transition.
+      if (child.stdin && typeof child.stdin.on === 'function') {
+        child.stdin.on('error', (err) => {
+          console.warn(`[engine] stdin error for ${runId}: ${err.message}`);
+          if (runService) {
+            try {
+              runService.addRunEvent(runId, 'stdin_error', JSON.stringify({
+                message: err.message,
+                code: err.code || null,
+              }));
+            } catch { /* ignore */ }
+          }
+        });
+      }
+
       // Parse NDJSON from stdout
       const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
       rl.on('line', (line) => {
@@ -358,7 +376,14 @@ function createStreamJsonEngine({
           message: { role: 'user', content: prompt },
         });
         console.log(`[engine] Sending initial prompt via stdin for ${runId}`);
-        child.stdin.write(initMsg + '\n');
+        const stdin = child.stdin;
+        if (stdin && !stdin.destroyed && !stdin.writableEnded && stdin.writable) {
+          try {
+            stdin.write(initMsg + '\n');
+          } catch (err) {
+            console.warn(`[engine] stdin write failed for ${runId}: ${err.message}`);
+          }
+        }
       }
 
       // Flush any input buffered by sendInput while a REMOTE spawn was still
