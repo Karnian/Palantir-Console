@@ -140,8 +140,11 @@ test('spawnAgent publishes the sentinel when profile PATH excludes mv', async (t
   });
 
   const script = fs.readFileSync(paths.scriptPath, 'utf-8');
+  const workerInvocation = script.split('\n').find((line) => line.startsWith('env -i '));
   const markerIndex = script.indexOf('echo "___EXIT_CODE_${agent_exit_code}___"');
   const sentinelRenameIndex = script.indexOf('PATH="$__palantir_sentinel_publish_path" mv -f --');
+  assert.match(workerInvocation, /'PATH=\/opt\/homebrew\/bin:\/opt\/homebrew\/sbin:/);
+  assert.match(workerInvocation, new RegExp(`${runId}-no-binaries`));
   assert.notEqual(markerIndex, -1);
   assert.notEqual(sentinelRenameIndex, -1);
   assert.ok(markerIndex < sentinelRenameIndex, 'marker must be written before sentinel publication');
@@ -151,6 +154,80 @@ test('spawnAgent publishes the sentinel when profile PATH excludes mv', async (t
   assert.equal(fs.readFileSync(paths.sentinelPath, 'utf-8'), '37\n');
   assert.equal(fs.existsSync(paths.sentinelTmpPath), false);
   assert.match(output, /___EXIT_CODE_37___/);
+});
+
+test('spawnAgent clears stale tmux actor credentials and file-backs the current worker token', async (t) => {
+  const runId = uniqueRunId('actor-env');
+  const paths = artifactPaths(runId);
+  t.after(() => {
+    for (const filePath of Object.values(paths)) {
+      try { fs.unlinkSync(filePath); } catch {}
+    }
+  });
+
+  const tmux = makeTmuxCommand();
+  createTmuxEngine({ execFileSync: tmux.execFileSync }).spawnAgent(runId, {
+    command: process.execPath,
+    args: ['--version'],
+    cwd: os.tmpdir(),
+    env: {
+      PALANTIR_TOKEN: 'must-not-leak',
+      PALANTIR_PM_TOKEN: 'must-not-leak-either',
+      PALANTIR_WORKER_TOKEN: 'current-run-token',
+    },
+  });
+
+  const script = fs.readFileSync(paths.scriptPath, 'utf-8');
+  const unsetIndex = script.indexOf('unset PALANTIR_TOKEN PALANTIR_PM_TOKEN PALANTIR_WORKER_TOKEN PALANTIR_MANAGER_TOKEN');
+  const cleanEnvIndex = script.indexOf('env -i ');
+  const workerTokenIndex = script.indexOf('PALANTIR_WORKER_TOKEN="$__palantir_worker_token"');
+  const tokenPathMatch = script.match(/__palantir_worker_token="\$\(cat -- '([^']+)'\)"/);
+  assert.notEqual(unsetIndex, -1);
+  assert.notEqual(cleanEnvIndex, -1);
+  assert.notEqual(workerTokenIndex, -1);
+  assert.ok(tokenPathMatch);
+  assert.ok(unsetIndex < cleanEnvIndex);
+  assert.ok(cleanEnvIndex < workerTokenIndex);
+  assert.doesNotMatch(script, /'PALANTIR_TOKEN=/);
+  assert.doesNotMatch(script, /'PALANTIR_PM_TOKEN=/);
+  assert.doesNotMatch(script, /current-run-token/);
+  assert.equal(fs.readFileSync(tokenPathMatch[1], 'utf-8'), 'current-run-token');
+
+  await runBash(paths.scriptPath);
+  assert.equal(fs.existsSync(tokenPathMatch[1]), false);
+});
+
+test('spawnAgent runs tmux workers without ambient server credentials', async (t) => {
+  const runId = uniqueRunId('ambient-server-credential');
+  const paths = artifactPaths(runId);
+  const previous = process.env.CODEX_API_KEY;
+  process.env.CODEX_API_KEY = 'ambient-server-secret-must-not-leak';
+  t.after(() => {
+    if (previous === undefined) delete process.env.CODEX_API_KEY;
+    else process.env.CODEX_API_KEY = previous;
+    for (const filePath of Object.values(paths)) {
+      try { fs.unlinkSync(filePath); } catch {}
+    }
+  });
+
+  const tmux = makeTmuxCommand();
+  createTmuxEngine({ execFileSync: tmux.execFileSync }).spawnAgent(runId, {
+    command: process.execPath,
+    args: [
+      '-e',
+      "console.log(`${process.env.CODEX_API_KEY || 'missing'}|${process.env.SAFE_PROFILE_VALUE || 'missing'}`)",
+    ],
+    cwd: os.tmpdir(),
+    env: { SAFE_PROFILE_VALUE: 'ok' },
+  });
+
+  const script = fs.readFileSync(paths.scriptPath, 'utf-8');
+  assert.match(script, /env -i /);
+  assert.match(script, /'SAFE_PROFILE_VALUE=ok'/);
+  assert.doesNotMatch(script, /'CODEX_API_KEY=/);
+  assert.doesNotMatch(script, /ambient-server-secret-must-not-leak/);
+  const output = await runBash(paths.scriptPath);
+  assert.match(output, /^missing\|ok$/m);
 });
 
 test('kill cleans script and sentinel artifacts even when the tmux session is already gone', (t) => {

@@ -60,6 +60,7 @@ test('workspace R4 inbox hides raw JSON and promotes deterministically as human 
   assert.equal(listed.body.candidates[0].id, candidateId);
   assert.equal(listed.body.candidates[0].approval_mode, 'deterministic');
   assert.equal(listed.body.candidates[0].can_promote, true);
+  assert.equal(listed.body.candidates[0].importance, 7);
   assert.match(listed.body.candidates[0].preview, /focused tests/);
   assert.equal('raw_json' in listed.body.candidates[0], false);
   assert.equal('dedup_key' in listed.body.candidates[0], false);
@@ -265,6 +266,110 @@ test('raw R3 candidate stays pending on promote and can be explicitly rejected',
   );
 });
 
+test('human can author the final memory while approving a raw candidate without exposing its signal', async (t) => {
+  const app = setupApp(t);
+  const candidate = app.services.memoryService.createCandidate({
+    projectId: 'p1',
+    rule: 'R3',
+    rawJson: {
+      schema_version: 1,
+      verdict: 'approved',
+      raw_excerpt: 'Authorization: Bearer never-return-this-signal',
+    },
+    dedupKey: 'r3-human-override',
+  });
+
+  const listed = await request(app)
+    .get('/api/projects/p1/memory/candidates')
+    .set(COOKIE)
+    .expect(200);
+  assert.equal(listed.body.candidates[0].preview, '');
+  assert.doesNotMatch(JSON.stringify(listed.body), /never-return-this-signal/);
+
+  const promoted = await request(app)
+    .post(`/api/projects/p1/memory/candidates/${candidate.id}/promote`)
+    .set(COOKIE)
+    .send({
+      kind: 'constraint',
+      content: 'Release approval must include a focused regression test.',
+      importance: 9,
+    })
+    .expect(200);
+  assert.equal(promoted.body.memory.kind, 'constraint');
+  assert.equal(promoted.body.memory.content, 'Release approval must include a focused regression test.');
+  assert.equal(promoted.body.memory.importance, 9);
+  assert.equal(promoted.body.memory.origin, 'human');
+  assert.doesNotMatch(JSON.stringify(promoted.body), /never-return-this-signal/);
+
+  const evidence = JSON.parse(app.services._rawDb.prepare(
+    'SELECT evidence_json FROM memory_items WHERE id=?'
+  ).get(promoted.body.memory.id).evidence_json);
+  assert.equal(evidence.origin, 'human_approved');
+  assert.equal(evidence.approved_without_llm, true);
+  assert.doesNotMatch(JSON.stringify(evidence), /never-return-this-signal/);
+});
+
+test('edited human approval applies importance when merging into an existing item', async (t) => {
+  const app = setupApp(t);
+  const content = 'Release approval must include a focused regression test.';
+  const existing = app.services.memoryService.createMemoryItem({
+    projectId: 'p1',
+    kind: 'constraint',
+    content,
+    origin: 'batch_llm',
+    importance: 2,
+    confidence: 0.6,
+  });
+  const candidate = app.services.memoryService.createCandidate({
+    projectId: 'p1',
+    rule: 'R3',
+    rawJson: {
+      schema_version: 1,
+      verdict: 'approved',
+      raw_excerpt: 'server-only signal',
+    },
+    dedupKey: 'r3-human-override-merge',
+  });
+
+  const promoted = await request(app)
+    .post(`/api/projects/p1/memory/candidates/${candidate.id}/promote`)
+    .set(COOKIE)
+    .send({ kind: 'constraint', content, importance: 9 })
+    .expect(200);
+
+  assert.equal(promoted.body.candidate.status, 'merged');
+  assert.equal(promoted.body.memory.id, existing.id);
+  assert.equal(promoted.body.memory.importance, 9);
+  assert.equal(
+    app.services.memoryService.getMemoryItem(existing.id).importance,
+    9,
+  );
+});
+
+test('invalid candidate approval edit is rejected atomically and stays pending', async (t) => {
+  const app = setupApp(t);
+  const candidateId = await stageWorkspace(app, 'p1');
+
+  await request(app)
+    .post(`/api/projects/p1/memory/candidates/${candidateId}/promote`)
+    .set(COOKIE)
+    .send({
+      kind: 'fact',
+      content: 'A human edit cannot bypass the reserved fact boundary.',
+      importance: 8,
+    })
+    .expect(400);
+
+  assert.equal(
+    app.services._rawDb.prepare('SELECT status FROM memory_candidates WHERE id=?').get(candidateId).status,
+    'pending',
+  );
+  assert.equal(
+    app.services._rawDb.prepare("SELECT COUNT(*) n FROM memory_items WHERE project_id='p1'").get().n,
+    0,
+  );
+});
+
 test('candidate review is cookie-only and owner-bound for workspace and profile', async (t) => {
   const app = setupApp(t);
   const p1Candidate = await stageWorkspace(app, 'p1');
@@ -302,6 +407,50 @@ test('candidate review is cookie-only and owner-bound for workspace and profile'
   assert.equal(promoted.body.memory.owner_type, 'profile');
   assert.equal(promoted.body.memory.owner_id, profileId);
   assert.equal(promoted.body.memory.origin, 'human');
+});
+
+test('profile memory supports list, correction, provenance, and strict profile binding', async (t) => {
+  const app = setupApp(t);
+  const profileA = app.services.operatorProfileService.createProfile({ name: 'profile-a' }).id;
+  const profileB = app.services.operatorProfileService.createProfile({ name: 'profile-b' }).id;
+  const created = await request(app)
+    .post(`/api/operator/profiles/${profileA}/memory/remember`)
+    .set(COOKIE)
+    .send({ kind: 'convention', content: 'Always include the failing command in review notes.' })
+    .expect(201);
+  const memoryId = created.body.memory.id;
+
+  const listed = await request(app)
+    .get(`/api/operator/profiles/${profileA}/memory?status=active`)
+    .set(COOKIE)
+    .expect(200);
+  assert.equal(listed.body.memory.length, 1);
+  assert.equal(listed.body.memory[0].owner_id, profileA);
+
+  const updated = await request(app)
+    .patch(`/api/operator/profiles/${profileA}/memory/${memoryId}`)
+    .set(COOKIE)
+    .send({ action: 'update', content: 'Always include the exact failing command in review notes.' })
+    .expect(200);
+  assert.match(updated.body.memory.content, /exact failing command/);
+
+  const provenance = await request(app)
+    .get(`/api/operator/profiles/${profileA}/memory/${memoryId}/provenance`)
+    .set(COOKIE)
+    .expect(200);
+  assert.equal(provenance.body.id, memoryId);
+  assert.equal(provenance.body.origin, 'human');
+  assert.equal('raw_json' in provenance.body.evidence, false);
+
+  await request(app)
+    .patch(`/api/operator/profiles/${profileB}/memory/${memoryId}`)
+    .set(COOKIE)
+    .send({ action: 'archive' })
+    .expect(404);
+  await request(app)
+    .get(`/api/operator/profiles/${profileB}/memory/${memoryId}/provenance`)
+    .set(COOKIE)
+    .expect(404);
 });
 
 test('auth-disabled callers can stage candidates but cannot review them', async (t) => {
@@ -358,11 +507,22 @@ test('malformed R4 content is rejected at the approval boundary', async (t) => {
 test('memory diagnostics exposes distiller state, queue counts, and review capability', async (t) => {
   const missing = setupApp(t, { memoryDistillEnabled: true, memoryDistillApiKey: null });
   await stageWorkspace(missing, 'p1');
+  missing.services.masterMemoryService.createCandidate({
+    scope: 'user',
+    rule: 'R4',
+    rawJson: {
+      schema_version: 1,
+      kind: 'preference',
+      content: 'Prefer compact final summaries after implementation.',
+    },
+    dedupKey: 'diagnostic-master-candidate',
+  });
   const status = await request(missing).get('/api/memory/status').set(COOKIE).expect(200);
   assert.equal(status.body.distiller.state, 'missing_credential');
-  assert.equal(status.body.queue.pending, 1);
+  assert.equal(status.body.queue.pending, 2);
   assert.equal(status.body.queue.workspace_pending, 1);
-  assert.equal(status.body.queue.deterministic_pending, 1);
+  assert.equal(status.body.queue.user_pending, 1);
+  assert.equal(status.body.queue.deterministic_pending, 2);
   assert.equal(status.body.approval.can_review, true);
 
   const disabled = setupApp(t, { memoryDistillEnabled: false });
@@ -380,4 +540,65 @@ test('memory diagnostics exposes distiller state, queue counts, and review capab
   assert.equal(runningStatus.body.distiller.state, 'running');
   assert.equal(runningStatus.body.distiller.provider, 'fake-distiller');
   assert.equal(runningStatus.body.distiller.interval_ms, 60000);
+});
+
+test('separated PM automation token remains candidate-only under run capabilities', async (t) => {
+  const app = setupApp(t, {
+    pmToken: 'agent-only-token',
+    agentProcessIsolation: true,
+  });
+  const pmBearer = { Authorization: 'Bearer agent-only-token' };
+
+  const status = await request(app).get('/api/memory/status').set(pmBearer).expect(200);
+  assert.equal(status.body.approval.actor, 'bearer');
+  assert.equal(status.body.approval.can_review, false);
+  assert.equal(status.body.approval.actor_boundary, 'run_capabilities');
+
+  const staged = await request(app)
+    .post('/api/projects/p1/memory/remember')
+    .set(pmBearer)
+    .send({ kind: 'constraint', content: 'Agent-authored memory must remain pending.' })
+    .expect(202);
+  assert.equal(staged.body.candidate.status, 'pending');
+  assert.equal(app.services.memoryService.listForProject('p1').length, 0);
+
+  await request(app)
+    .post(`/api/projects/p1/memory/candidates/${staged.body.candidate.id}/promote`)
+    .set(pmBearer)
+    .expect(403);
+  await request(app)
+    .get('/api/memory/status')
+    .set({ Cookie: 'palantir_token=agent-only-token' })
+    .expect(403);
+});
+
+test('direct-environment token split is candidate-only but reported as unverified', async (t) => {
+  const app = setupApp(t, {
+    pmToken: 'agent-only-token',
+    actorTokenSource: 'environment',
+    agentProcessIsolation: true,
+  });
+  const status = await request(app)
+    .get('/api/memory/status')
+    .set({ Authorization: 'Bearer agent-only-token' })
+    .expect(200);
+  assert.equal(status.body.approval.actor, 'bearer');
+  assert.equal(status.body.approval.can_review, false);
+  assert.equal(status.body.approval.actor_boundary, 'run_capabilities_unverified');
+});
+
+test('mixed option and ambient actor tokens are reported as unverified', async (t) => {
+  const previousPmToken = process.env.PALANTIR_PM_TOKEN;
+  process.env.PALANTIR_PM_TOKEN = 'ambient-agent-token';
+  t.after(() => {
+    if (previousPmToken === undefined) delete process.env.PALANTIR_PM_TOKEN;
+    else process.env.PALANTIR_PM_TOKEN = previousPmToken;
+  });
+
+  const app = setupApp(t, { agentProcessIsolation: true });
+  const status = await request(app)
+    .get('/api/memory/status')
+    .set({ Authorization: 'Bearer ambient-agent-token' })
+    .expect(200);
+  assert.equal(status.body.approval.actor_boundary, 'run_capabilities_unverified');
 });

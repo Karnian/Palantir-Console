@@ -11,7 +11,8 @@ const { resolveSpawnCwd } = require('../utils/spawnCwd');
 const { resolveProjectSource } = require('../services/projectSource');
 const { buildProjectScopedSystemSection } = require('../services/operatorPromptSections'); // A2b: shared with operatorSpawnService
 const { resolveCodexServiceTier } = require('../services/managerAdapters/codexAdapter'); // F-1
-const { goalFeatureActive } = require('../services/goalMode'); // G2 §6
+const { goalFeatureActive: defaultGoalFeatureActive } = require('../services/goalMode'); // G2 §6
+const { resolveActorTokenPolicy, applyManagerCredentialPolicy } = require('../services/actorTokenPolicy');
 const {
   repoFeatureEnabled,
   cwdFromWorkspacePath,
@@ -61,8 +62,21 @@ function parseMcpTools(capabilitiesJson) {
 // so tests can inject `hasKeychain` (and any future DI hooks) without
 // monkey-patching child_process. Production callers leave this empty and
 // get the real keychain probe.
-function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, operatorInstanceService, modelPolicyService, isSpecialistAvailable = () => false, authResolverOpts = {} }) {
+function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, operatorInstanceService, modelPolicyService, isSpecialistAvailable = () => false, authResolverOpts = {}, actorTokens = resolveActorTokenPolicy(), managerCapabilityTokenService = null, goalFeatureActive = defaultGoalFeatureActive }) {
   const router = express.Router();
+  const actorSpawnBaseEnv = applyManagerCredentialPolicy(process.env);
+  if (actorTokens.humanToken && !managerCapabilityTokenService) {
+    throw new Error('authenticated manager router requires managerCapabilityTokenService');
+  }
+  const managerTokenFor = (run, layer, conversationId) => {
+    if (managerCapabilityTokenService && typeof managerCapabilityTokenService.mint === 'function') {
+      return managerCapabilityTokenService.mint(run.id || run, {
+        conversationId,
+        layer,
+      });
+    }
+    return null;
+  };
 
   // PR1a: ManagerAdapter seam. The factory is the single entrypoint for
   // engine operations; routes never call streamJsonEngine directly anymore.
@@ -95,6 +109,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     if (typeof managerRegistry.onSlotCleared === 'function') {
       managerRegistry.onSlotCleared(({ runId }) => {
         try { conversationService.clearParentNotices(runId); } catch { /* ignore */ }
+        try { conversationService.clearTurnContext(runId); } catch { /* ignore */ }
       });
     }
   }
@@ -139,14 +154,21 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           const adapter = managerAdapterFactory.getAdapter('claude-code');
           // Rebuild system prompt + env for the resumed session.
           const port = process.env.PORT || 4177;
-          const token = process.env.PALANTIR_TOKEN;
+          const token = managerTokenFor(r, r.manager_layer || 'top', r.conversation_id || 'top');
           const systemPrompt = [
-            buildManagerSystemPromptModule({ adapter, port, token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable() }),
+            buildManagerSystemPromptModule({ adapter, port, token: !!token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable() }),
             buildTopIdentitySection({ topRunId: r.id }), // MD-2a: resumed Top's own run id
           ].filter(Boolean).join('\n\n');
           const authCtx = resolveManagerAuth(adapterType, authResolverOpts);
           if (authCtx.canAuth) {
-            const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env });
+            const spawnEnv = applyManagerCredentialPolicy(
+              buildManagerSpawnEnv({
+                baseEnv: actorSpawnBaseEnv,
+                authEnv: authCtx.env,
+                scrubHumanToken: actorTokens.separated,
+              }),
+              { managerToken: token, actorTokens },
+            );
             const safeCwd = resolveSpawnCwd({});
             adapter.startSession(r.id, {
               cwd: safeCwd,
@@ -339,11 +361,11 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   nodePrefix = node && node.node_prefix ? node.node_prefix : undefined;
                 }
                 const port = process.env.PORT || 4177;
-                // G2 §6: goal mode → the resumed Operator's API examples + spawn
-                // env reference the separated PM token, never the human token.
+                // A separated actor token applies to all resumed managers, not
+                // only goal mode.
                 const goalActive = goalFeatureActive();
-                const token = goalActive ? process.env.PALANTIR_PM_TOKEN : process.env.PALANTIR_TOKEN;
-                const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token, layer: 'operator', adapterType, specialistAvailable: isSpecialistAvailable() });
+                const token = managerTokenFor(r, r.manager_layer || 'operator', r.conversation_id);
+                const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token: !!token, layer: 'operator', adapterType, specialistAvailable: isSpecialistAvailable() });
                 // A2b: shared builder — the resumed Operator's project-scoped
                 // sections are assembled by the SAME function as fresh spawn
                 // (server/services/operatorPromptSections), so the two paths can
@@ -366,9 +388,14 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 // absent (else a restart would stop a healthy pod Operator).
                 // Local still requires canAuth. (Codex S3b review.)
                 if (isRemoteNode || authCtx.canAuth) {
-                  // G2 §6 (Codex BLOCKER-1): scrub PALANTIR_TOKEN from the resumed
-                  // Operator's local spawn env in goal mode.
-                  const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env, scrubHumanToken: goalActive });
+                  const spawnEnv = applyManagerCredentialPolicy(
+                    buildManagerSpawnEnv({
+                      baseEnv: actorSpawnBaseEnv,
+                      authEnv: authCtx.env,
+                      scrubHumanToken: actorTokens.separated || goalActive,
+                    }),
+                    { managerToken: token, actorTokens },
+                  );
                   const cwd = isRepoProject
                     ? (threadState.pm_thread_cwd || cwdFromWorkspacePath(threadState.pm_thread_workspace_path, project))
                     : (isRemoteNode ? (project.directory || null) : resolveSpawnCwd({ workspaceDir: project.directory }));
@@ -387,7 +414,11 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                     // (process.env-based) — it overrides the pod pathPrefix and
                     // leaks creds; the pod provides its own env + ~/.codex.
                     // (Mirror of the operatorSpawnService fix; real-Pi finding.)
-                    env: isRemoteNode ? {} : spawnEnv,
+                    // Remote managers receive only the run capability from the
+                    // control plane; vendor auth/PATH remain pod-owned.
+                    env: isRemoteNode
+                      ? applyManagerCredentialPolicy({}, { managerToken: token, actorTokens })
+                      : spawnEnv,
                     role: 'manager',
                     nodeId,
                     // F-1: per-turn tier resolver — re-reads this instance's
@@ -662,9 +693,9 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     // v3 Phase 0: layer='top' (all current manager starts are Top layer).
     const adapter = managerAdapterFactory.getAdapter(adapterType);
     const port = process.env.PORT || 4177;
-    const token = process.env.PALANTIR_TOKEN;
+    const token = managerTokenFor(runId, 'top', 'top');
     const systemPrompt = [
-      buildManagerSystemPromptModule({ adapter, port, token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable() }),
+      buildManagerSystemPromptModule({ adapter, port, token: !!token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable() }),
       buildTopIdentitySection({ topRunId: runId }), // MD-2a: Top's own run id (cache-safe, appended after base)
     ].filter(Boolean).join('\n\n');
     const initialUserContext = buildInitialUserContext({
@@ -680,10 +711,15 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     // profile's env_allowlist, then layers resolved auth env on top. Tool
     // CLIs still inherit PATH/HOME/etc., but cross-vendor credentials can
     // no longer leak.
-    const spawnEnv = buildManagerSpawnEnv({
-      authEnv: authCtx.env,
-      envAllowlist,
-    });
+    const spawnEnv = applyManagerCredentialPolicy(
+      buildManagerSpawnEnv({
+        baseEnv: actorSpawnBaseEnv,
+        authEnv: authCtx.env,
+        envAllowlist,
+        scrubHumanToken: actorTokens.separated,
+      }),
+      { managerToken: token, actorTokens },
+    );
 
     // P3-4: extract MCP tool patterns from the agent profile's capabilities_json
     // so Manager (Top layer) can access MCP tools. The claudeAdapter.startSession
@@ -1091,6 +1127,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         legacyConversationId, // A2b-3: canonical→primary recovery for the codebase picker
         primaryProjectId,
         instanceId,
+        profileId: operatorInstance?.profile_id || null,
         displayName: operatorInstance?.display_name || operatorInstance?.profile_name || null,
         run: pmRun,
         usage: pmAdapter.getUsage ? pmAdapter.getUsage(pmRun.id) : null,

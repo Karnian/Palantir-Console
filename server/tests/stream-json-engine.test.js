@@ -122,6 +122,36 @@ async function spawnFakeRemoteManager(engine, runId, child, opts = {}) {
   await new Promise((r) => setImmediate(r));
 }
 
+test('engine: remote manager forwards only its run capability to the executor', async () => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const child = createFakeRemoteChild();
+  let spawnOptions = null;
+  const executor = {
+    spawnInteractive(command, args, options) {
+      spawnOptions = options;
+      return child;
+    },
+  };
+  const engine = createStreamJsonEngine();
+  engine.spawnAgent('run-remote-capability', {
+    cwd: '/pod/ws',
+    isManager: true,
+    executor,
+    nodePrefix: '/pod/bin',
+    env: {
+      PALANTIR_MANAGER_TOKEN: 'run-bound-manager-capability',
+      PALANTIR_TOKEN: 'human-token-must-not-cross',
+      ANTHROPIC_API_KEY: 'controller-model-secret-must-not-cross',
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(spawnOptions.env, {
+    PALANTIR_MANAGER_TOKEN: 'run-bound-manager-capability',
+  });
+  engine.kill('run-remote-capability');
+});
+
 /**
  * createStreamJsonEngine 인스턴스를 만들되 CLAUDE_BIN 을 fake-claude.js 로 설정.
  * CLAUDE_ARGS_FILE 을 개별 tmpfile 로 설정하여 args 캡처.
@@ -147,12 +177,17 @@ async function spawnAndCaptureArgs(engine, runId, opts, timeoutMs = 2500) {
   // took >1s to flush its args file, surfacing as
   // 'args file not written within 1000ms' on shared disks.
   const argsFile = path.join(os.tmpdir(), `palantir-claude-args-${runId}.json`);
-  process.env.CLAUDE_ARGS_FILE = argsFile;
-  try {
-    engine.spawnAgent(runId, { cwd: os.tmpdir(), ...opts });
-  } finally {
-    delete process.env.CLAUDE_ARGS_FILE;
-  }
+  // Pass the fixture channel explicitly. Worker engines intentionally no
+  // longer inherit arbitrary process.env values because that would bypass the
+  // profile env_allowlist and leak server credentials into the worker.
+  engine.spawnAgent(runId, {
+    cwd: os.tmpdir(),
+    ...opts,
+    env: {
+      ...((opts && opts.env) || {}),
+      CLAUDE_ARGS_FILE: argsFile,
+    },
+  });
 
   // args 파일이 생길 때까지 최대 timeoutMs 동안 poll
   const deadline = Date.now() + timeoutMs;

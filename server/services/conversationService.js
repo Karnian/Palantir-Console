@@ -131,6 +131,10 @@ function createConversationService({
   }) {
   // parentRunId -> array of notice strings
   const pendingNotices = new Map();
+  // Manager run id -> server-derived context for its most recently accepted
+  // turn. Memory proposals use this instead of a caller-supplied project id so
+  // a secondary-codebase turn cannot poison the Operator's primary workspace.
+  const lastTurnContexts = new Map();
 
   const log = logger || ((msg) => console.log(`[conversation] ${msg}`));
 
@@ -170,6 +174,16 @@ function createConversationService({
   function clearParentNotices(parentRunId) {
     if (!parentRunId) return;
     pendingNotices.delete(parentRunId);
+  }
+
+  function clearTurnContext(runId) {
+    if (!runId) return;
+    lastTurnContexts.delete(runId);
+  }
+
+  function getLastTurnContext(runId) {
+    const context = runId ? lastTurnContexts.get(runId) : null;
+    return context ? { ...context } : null;
   }
 
   // Prepend drained notices to the user's own text. If there are no
@@ -896,6 +910,25 @@ function createConversationService({
       : undefined;
 
     let accepted = false;
+    const priorTurnContext = !isTop ? lastTurnContexts.get(run.id) : null;
+    if (!isTop && turnCodebaseContext) {
+      // Set before runTurn: a freshly spawned local agent can issue a proposal
+      // as soon as its turn starts. Refusal paths below restore the prior
+      // accepted context, keeping this map truthful.
+      lastTurnContexts.set(run.id, {
+        conversationId,
+        instanceId: turnCodebaseContext.instanceId,
+        primaryProjectId: turnCodebaseContext.primaryProjectId,
+        workspaceProjectId: turnCodebaseContext.workspaceProjectId,
+        turnMode: turnCodebaseContext.turnMode,
+        source: turnCodebaseContext.source,
+      });
+    }
+    const rollbackTurnContext = () => {
+      if (isTop) return;
+      if (priorTurnContext) lastTurnContexts.set(run.id, priorTurnContext);
+      else lastTurnContexts.delete(run.id);
+    };
     try {
       const result = adapter.runTurn(run.id, {
         text: effectiveText,
@@ -914,6 +947,7 @@ function createConversationService({
       // (accepted:false) correctly 502s without committing a notice drain.
       accepted = !!(result && result.accepted);
     } catch (runErr) {
+      rollbackTurnContext();
       // Notice queue is untouched — next send will retry.
       const err = new Error(`Failed to deliver message to ${layerLabel} manager: ${runErr.message}`);
       err.httpStatus = 502;
@@ -924,6 +958,7 @@ function createConversationService({
       throw err;
     }
     if (!accepted) {
+      rollbackTurnContext();
       // Notice queue is untouched — next send will retry.
       let sessionAlive = false;
       try {
@@ -1009,9 +1044,30 @@ function createConversationService({
       }
     }
 
+    let memoryOwnerType = null;
+    let memoryOwnerId = null;
+    if (!isTop && turnCodebaseContext?.workspaceProjectId) {
+      memoryOwnerType = 'workspace';
+      memoryOwnerId = turnCodebaseContext.workspaceProjectId;
+    } else if (!isTop && turnCodebaseContext?.instanceId && runService?.getOperatorInstance) {
+      try {
+        const instance = runService.getOperatorInstance(turnCodebaseContext.instanceId);
+        if (instance?.profile_id) {
+          memoryOwnerType = 'profile';
+          memoryOwnerId = instance.profile_id;
+        }
+      } catch { /* unresolved owner stays null and the UI suppresses memory actions */ }
+    }
     const target = isTop
       ? { kind: 'top', runId: run.id }
-      : { kind: 'pm', runId: run.id, projectId, instanceId: operatorResolved?.instanceId || run.operator_instance_id || null };
+      : {
+          kind: 'pm',
+          runId: run.id,
+          projectId,
+          instanceId: operatorResolved?.instanceId || run.operator_instance_id || null,
+          memoryOwnerType,
+          memoryOwnerId,
+        };
     return { status: 'sent', target };
   }
 
@@ -1198,6 +1254,8 @@ function createConversationService({
     queueParentNotice,
     consumeParentNotices,
     clearParentNotices,
+    clearTurnContext,
+    getLastTurnContext,
     prependPendingNotices,
     formatParentNotice,
     // routing

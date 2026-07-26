@@ -15,6 +15,7 @@ const { asyncHandler } = require('../middleware/asyncHandler');
 const { BadRequestError, NotFoundError } = require('../utils/errors');
 const { sanitizeProposalContent, redactSecrets, detectInjection } = require('../services/memorySanitize');
 const {
+  candidateApprovalOverride,
   candidatePage,
   candidateStatus,
   requireHumanCookie,
@@ -221,9 +222,20 @@ function createMemoryRouter({ memoryService, projectService }) {
       try { project = projectService.getProject(projectId); } catch { project = null; }
       if (!project) throw new NotFoundError(`project not found: ${projectId}`);
     }
-    const result = memoryService.promoteCandidateByHuman({
-      candidateId: id, ownerType: 'workspace', ownerId: projectId,
-    });
+    let result;
+    try {
+      result = memoryService.promoteCandidateByHuman({
+        candidateId: id,
+        ownerType: 'workspace',
+        ownerId: projectId,
+        override: candidateApprovalOverride(req.body),
+      });
+    } catch (err) {
+      if (err && err.code === 'MEMORY_CANDIDATE_OVERRIDE_INVALID') {
+        throw new BadRequestError(err.message);
+      }
+      throw err;
+    }
     if (!result) throw new NotFoundError('memory candidate not found');
     if (!result.promoted) {
       return res.status(409).json({
@@ -343,4 +355,4 @@ function createMemoryRouter({ memoryService, projectService }) {
   return router;
 }
 
-module.exports = { createMemoryRouter, toPublicMemory };
+module.exports = { createMemoryRouter, redactEvidence, toPublicMemory };

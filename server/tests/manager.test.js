@@ -45,6 +45,7 @@ test('GET /api/manager/status resolves Operator instance metadata when the run i
   const runService = app.services.runService;
   const project = app.services.projectService.createProject({ name: 'operator visibility' });
   const resolved = runService.ensurePrimaryOperatorInstanceForProject(project.id);
+  const instance = runService.getOperatorInstance(resolved.instanceId);
   app.services._rawDb.prepare(
     'UPDATE operator_instances SET display_name = ?, fast_mode = ? WHERE id = ?'
   ).run('Visibility Operator', 1, resolved.instanceId);
@@ -84,6 +85,7 @@ test('GET /api/manager/status resolves Operator instance metadata when the run i
   assert.equal(pm.legacyConversationId, `operator:${project.id}`);
   assert.equal(pm.primaryProjectId, project.id);
   assert.equal(pm.instanceId, resolved.instanceId);
+  assert.equal(pm.profileId, instance.profile_id);
   assert.equal(pm.displayName, 'Visibility Operator');
   assert.equal(pm.fastMode, 1);
   assert.equal(pm.run.operator_instance_id, null);
@@ -630,6 +632,7 @@ test('claudeAdapter dual-emits normalized events alongside legacy ones', async (
   // turnIndex on assistant message should be 0; turn_completed advances state for next turn
   const am = captured.find(c => c.eventType === NORMALIZED_EVENT_TYPES.ASSISTANT_MESSAGE);
   assert.equal(am.payload.turnIndex, 0);
+  assert.equal(am.payload.data.invocationId, 'oinv_claude_test');
 
   // Drive a second turn — should now be turnIndex 1.
   capturedHook({ type: 'assistant', message: { content: [{ type: 'text', text: 'turn 2' }] } }, fakeProc);
@@ -706,6 +709,9 @@ test('v3 Phase 0: managerSystemPrompt top layer excludes worker intervention API
   // Dispatch API MUST appear
   assert.ok(prompt.includes('/api/tasks/TASK_ID/execute'),
     'top layer must document /execute');
+  assert.ok(prompt.includes('/api/conversations/top/memory/propose'),
+    'top layer must document candidate-only memory proposals');
+  assert.match(prompt, /candidate only/i);
   // File modification guardrail MUST appear
   assert.ok(prompt.includes('Do NOT directly modify project files'),
     'top layer must explain file modification prohibition');
@@ -724,6 +730,9 @@ test('v3 Phase 0: managerSystemPrompt pm layer includes worker intervention APIs
     'pm layer must document PATCH /api/tasks/:id/status');
   assert.ok(prompt.includes('project-scoped dispatcher'),
     'pm layer must identify itself as an Operator / project-scoped dispatcher');
+  assert.ok(prompt.includes('/memory/propose'),
+    'operator layer must document candidate-only memory proposals');
+  assert.match(prompt, /stable, reusable/i);
 });
 
 test('favorite A-track: Operator prompt drives pm_run_id at /execute and drops the hard project lock', async () => {

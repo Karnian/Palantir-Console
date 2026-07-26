@@ -81,6 +81,12 @@ const { createMemoryDistillService } = require('./services/memoryDistillService'
 const { createLiveDistiller } = require('./services/distillers/liveDistiller');
 const { createMemoryRouter } = require('./routes/memory');
 const { createMemoryDiagnosticsRouter } = require('./routes/memoryDiagnostics');
+const { createMemoryProposalsRouter } = require('./routes/memoryProposals');
+const {
+  resolveActorTokenPolicy,
+  createWorkerProposalTokenService,
+  createManagerCapabilityTokenService,
+} = require('./services/actorTokenPolicy');
 const { createOperatorSpecialistRouter } = require('./routes/operatorSpecialist');
 const { createOperatorProfilesRouter } = require('./routes/operatorProfiles');
 const { createOperatorProfileMemoryRouter } = require('./routes/operatorProfileMemory');
@@ -1041,12 +1047,60 @@ function createApp(options = {}) {
   const authToken = options.authToken !== undefined
     ? options.authToken
     : process.env.PALANTIR_TOKEN;
+  const pmToken = options.pmToken !== undefined
+    ? options.pmToken
+    : process.env.PALANTIR_PM_TOKEN;
+  // An application-owned boundary is valid only when every configured actor
+  // credential came from options. Supplying just one option must not relabel
+  // a sibling token inherited from process.env as securely isolated.
+  const allConfiguredActorTokensFromOptions = (
+    (!authToken || options.authToken !== undefined)
+    && (!pmToken || options.pmToken !== undefined)
+  );
+  const actorTokenPolicy = resolveActorTokenPolicy({
+    PALANTIR_TOKEN: authToken,
+    PALANTIR_PM_TOKEN: pmToken,
+    // An explicit false is a real opt-out for embedders/tests. Only absence
+    // inherits the process-wide deployment assertion.
+    PALANTIR_AGENT_PROCESS_ISOLATION: options.agentProcessIsolation === undefined
+      ? process.env.PALANTIR_AGENT_PROCESS_ISOLATION
+      : (options.agentProcessIsolation === true ? 'verified' : null),
+    PALANTIR_ACTOR_TOKEN_SOURCE: options.actorTokenSource
+      || (allConfiguredActorTokensFromOptions
+        ? 'application_options'
+        : 'environment'),
+  });
+  const workerProposalTokenService = createWorkerProposalTokenService({
+    actorTokens: actorTokenPolicy,
+  });
+  const managerCapabilityTokenService = createManagerCapabilityTokenService({
+    actorTokens: actorTokenPolicy,
+  });
+  // Actor tokens loaded from the one-shot file stay in application-owned
+  // state. Goal-mode policy still needs their separation signal, so evaluate
+  // it against an app-local view instead of republishing secrets to
+  // process.env.
+  const goalModeEnv = { ...process.env };
+  if (authToken) goalModeEnv.PALANTIR_TOKEN = authToken;
+  else delete goalModeEnv.PALANTIR_TOKEN;
+  if (pmToken) goalModeEnv.PALANTIR_PM_TOKEN = pmToken;
+  else delete goalModeEnv.PALANTIR_PM_TOKEN;
+  const defaultGoalFeatureActive = () => (
+    require('./services/goalMode').goalFeatureActive(goalModeEnv)
+  );
+  const workerProposalEndpoints = resolveWorkerProposalEndpoints({
+    explicitBaseUrl: options.workerProposalBaseUrl ?? process.env.PALANTIR_BASE_URL,
+    host: options.host ?? process.env.HOST,
+    port: options.port ?? process.env.PORT,
+  });
+  const workerProposalBaseUrl = workerProposalEndpoints.local;
+  const workerProposalRemoteBaseUrl = workerProposalEndpoints.remote;
   // G2 §6: surface the goal-mode activation state at boot. When goal mode is
   // requested without a separated PALANTIR_PM_TOKEN it is DISABLED (fail-closed);
   // warn loudly so the operator knows why goal features are inert.
   try {
     const { goalModeDiagnostic } = require('./services/goalMode');
-    const diag = goalModeDiagnostic();
+    const diag = goalModeDiagnostic(goalModeEnv);
     if (diag) (diag.active ? console.log : console.warn)(diag.message);
   } catch { /* diagnostic only */ }
 
@@ -1171,8 +1225,14 @@ function createApp(options = {}) {
   const modelPolicyService = createModelPolicyService(db);
 
   // Execution engines
-  const executionEngine = options.executionEngine || createExecutionEngine();
-  const streamJsonEngine = createStreamJsonEngine({ runService, eventBus });
+  const executionEngine = options.executionEngine || createExecutionEngine({
+    actorTokens: actorTokenPolicy,
+  });
+  const streamJsonEngine = createStreamJsonEngine({
+    runService,
+    eventBus,
+    actorTokens: actorTokenPolicy,
+  });
   // Fleet P3: remote executors implement this worker channel natively.
   nodeExecutor.attachEngines({ executionEngine, streamJsonEngine });
   const managerAdapterFactory = createManagerAdapterFactory({ streamJsonEngine, runService });
@@ -1188,13 +1248,13 @@ function createApp(options = {}) {
   const verifyCheckService = createVerifyCheckService(db);
   // G2 §6: single goal-feature gate (injectable for tests). Threaded into every
   // goal surface so they activate in lock-step with the PALANTIR_TOKEN scrub.
-  const goalFeatureActive = options.goalFeatureActive || require('./services/goalMode').goalFeatureActive;
+  const goalFeatureActive = options.goalFeatureActive || defaultGoalFeatureActive;
   // G3c §5k-4: Gate 1.5 judge — OFF by default. Injected for tests; else built
   // only when goal mode + PALANTIR_GOAL_JUDGE=1 + ANTHROPIC_API_KEY. When null,
   // harvest's judge stage is a no-op (and no run is goal_judge_active anyway,
   // since spawn gates that on goalJudgeActive()).
   let goalJudgeService = options.goalJudgeService || null;
-  if (!goalJudgeService && require('./services/goalMode').goalJudgeActive()) {
+  if (!goalJudgeService && require('./services/goalMode').goalJudgeActive(goalModeEnv)) {
     const judgeApiKey = process.env.ANTHROPIC_API_KEY;
     if (judgeApiKey) {
       try { goalJudgeService = createGoalJudge({ apiKey: judgeApiKey }); }
@@ -1249,6 +1309,10 @@ function createApp(options = {}) {
     // Phase 10D: isolated-preset auth materialization honors the same
     // `authResolverOpts` tests already pass for manager-path preflight.
     authResolverOpts: options.authResolverOpts || {},
+    actorTokens: actorTokenPolicy,
+    workerProposalTokenService,
+    workerProposalBaseUrl,
+    workerProposalRemoteBaseUrl,
     goalFeatureActive, // G2 §6
   });
 
@@ -1303,6 +1367,9 @@ function createApp(options = {}) {
     modelPolicyService,
     isSpecialistAvailable,
     authResolverOpts: options.authResolverOpts || {},
+    actorTokens: actorTokenPolicy,
+    managerCapabilityTokenService,
+    goalFeatureActive,
   });
   const operatorCleanupService = createOperatorCleanupService({
     projectService,
@@ -1375,6 +1442,7 @@ function createApp(options = {}) {
   // be misapplied to some future unrelated run. Codex R1 blocker fix.
   managerRegistry.onSlotCleared(({ runId }) => {
     try { conversationService.clearParentNotices(runId); } catch { /* ignore */ }
+    try { conversationService.clearTurnContext(runId); } catch { /* ignore */ }
   });
   managerRegistry.onSlotCleared(({ conversationId, runId }) => {
     try {
@@ -1571,7 +1639,32 @@ function createApp(options = {}) {
   app.use('/api/auth', createAuthRouter({ token: authToken }));
 
   // Auth middleware for API routes (skips static files + health + /api/auth)
-  const auth = createAuthMiddleware({ token: authToken });
+  const auth = createAuthMiddleware({
+    token: authToken,
+    pmToken,
+    workerProposalTokenService,
+    managerCapabilityTokenService,
+    isManagerCapabilityActive(grant) {
+      try {
+        // A registry entry can briefly outlive a crashed manager process.
+        // Probe on every capability request so the dead slot is cleared and
+        // its run-bound credential is revoked before authorizing the route.
+        const run = managerRegistry.probeActive(grant.conversationId);
+        if (!run || run.id !== grant.runId) return false;
+        const conversationId = run.conversation_id
+          || (run.manager_layer === 'top' || !run.manager_layer ? 'top' : null);
+        const managerLayer = run.manager_layer
+          || (conversationId === 'top' ? 'top' : null);
+        return !!(
+          run.is_manager
+          && conversationId === grant.conversationId
+          && managerLayer === grant.layer
+        );
+      } catch {
+        return false;
+      }
+    },
+  });
   app.use('/api', auth);
 
   // Existing routes
@@ -1592,8 +1685,20 @@ function createApp(options = {}) {
   app.use('/api', createOperatorSchedulesRouter({ operatorScheduleService, operatorScheduler }));
   app.use('/api/nodes', createNodesRouter({ nodeService, nodeUsageService, nodeSummaryService, lifecycleService }));
   app.use('/api/projects', createMemoryRouter({ memoryService, projectService })); // ML PR1: GET /:projectId/memory
-  app.use('/api/memory', createMemoryDiagnosticsRouter({ memoryService, getDistillStatus: getMemoryDistillStatus }));
+  app.use('/api/memory', createMemoryDiagnosticsRouter({
+    memoryService,
+    masterMemoryService,
+    getDistillStatus: getMemoryDistillStatus,
+    actorBoundary: actorTokenPolicy.boundary,
+  }));
   app.use('/api/master-memory', createMasterMemoryRouter({ masterMemoryService })); // L2 P1b: GET / + POST /remember
+  app.use('/api', createMemoryProposalsRouter({
+    conversationService,
+    runService,
+    memoryService,
+    masterMemoryService,
+    projectService,
+  }));
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService, goalDeliveryService, runService, verifyCheckService }));
   app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService, nodeExecutor }));
   // PR18: tests can pass options.authResolverOpts (e.g. a fake `hasKeychain`)
@@ -1604,7 +1709,7 @@ function createApp(options = {}) {
   app.use('/api/agents', createAgentsRouter({ agentProfileService, providerRegistry, authResolverOpts }));
   app.use('/api/events', createEventsRouter({ eventBus }));
   app.use('/api/claude-sessions', createClaudeSessionsRouter());
-  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, operatorInstanceService, modelPolicyService, isSpecialistAvailable, authResolverOpts }));
+  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, operatorInstanceService, modelPolicyService, isSpecialistAvailable, authResolverOpts, actorTokens: actorTokenPolicy, managerCapabilityTokenService, goalFeatureActive }));
   app.use('/api/conversations', createConversationsRouter({ conversationService, runService }));
   // Operator P-B2c-3: specialist entry. Mounted ONLY when the feature is enabled
   // (specialistService is null unless PALANTIR_OPERATOR_SPECIALIST=1 + a backend),
@@ -1791,6 +1896,8 @@ function createApp(options = {}) {
     operatorScheduleService,
     operatorScheduler,
     managerMessageQueueService,
+    workerProposalTokenService,
+    managerCapabilityTokenService,
     resolveOperatorConversationId, // W-P2+: instance-aware dual-read resolver (legacy alias + operator:oi_*)
     // R2-C.1: manager-summary.test.js needs raw SQL access to fabricate
     // run rows with specific status / cost_usd / backdated created_at
@@ -1913,8 +2020,34 @@ function createApp(options = {}) {
   return app;
 }
 
+function resolveWorkerProposalEndpoints({
+  explicitBaseUrl,
+  host,
+  port = 4177,
+} = {}) {
+  if (typeof explicitBaseUrl === 'string' && explicitBaseUrl.trim()) {
+    const normalized = explicitBaseUrl.trim().replace(/\/+$/, '');
+    return { local: normalized, remote: normalized };
+  }
+  const bindHost = typeof host === 'string' && host.trim()
+    ? host.trim()
+    : '127.0.0.1';
+  const destinationHost = bindHost === '0.0.0.0' || bindHost === '::'
+    ? '127.0.0.1'
+    : bindHost;
+  const formattedHost = destinationHost.includes(':')
+    && !destinationHost.startsWith('[')
+    ? `[${destinationHost}]`
+    : destinationHost;
+  return {
+    local: `http://${formattedHost}:${port || 4177}`,
+    remote: null,
+  };
+}
+
 module.exports = {
   createApp,
+  resolveWorkerProposalEndpoints,
   createPmAutoReview,
   createR6FactCapture,
   isStableEnvFact,

@@ -107,6 +107,7 @@ function buildHarness(db, {
   remoteChannel = makeRemoteChannel(),
   worktreeService = null,
   skillPackService = null,
+  lifecycleOptions = {},
 } = {}) {
   const remoteFactoryCalls = [];
   const nodeService = createNodeService(db, {
@@ -141,6 +142,7 @@ function buildHarness(db, {
     eventBus: null,
     presetService: null,
     skillPackService,
+    ...lifecycleOptions,
   });
 
   return {
@@ -232,6 +234,168 @@ test('reachable executable ssh node dispatches through pickExecutor and remote w
   assert.equal(spawn.payload.spec.cwd, '/workspace/project');
   assert.equal(spawn.payload.spec.workerPath, '/opt/codex/bin');
   assert.equal(h.runService.getRun(run.id).tmux_session, `remote-${run.id}`);
+});
+
+test('remote worker gets no loopback memory capability without a public Console base URL', async (t) => {
+  const db = await mkdb(t);
+  const minted = [];
+  const h = buildHarness(db, {
+    lifecycleOptions: {
+      workerProposalTokenService: {
+        mint(runId, claims) {
+          minted.push({ runId, claims });
+          return 'scoped-token';
+        },
+      },
+      workerProposalBaseUrl: 'http://127.0.0.1:4177',
+      workerProposalRemoteBaseUrl: null,
+    },
+  });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db);
+  const project = h.projectService.createProject({
+    name: 'RemoteNoPublicBase',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+
+  await h.lifecycleService.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'run remotely',
+  });
+
+  const spec = h.remoteChannel.spawned[0].payload.spec;
+  assert.deepEqual(minted, []);
+  assert.equal('PALANTIR_WORKER_TOKEN' in spec.env, false);
+  assert.equal('PALANTIR_API_BASE' in spec.env, false);
+  assert.doesNotMatch(spec.args.join(' '), /memory\/propose/);
+});
+
+test('remote worker receives memory capability with an explicitly reachable Console base URL', async (t) => {
+  const db = await mkdb(t);
+  const h = buildHarness(db, {
+    lifecycleOptions: {
+      actorTokens: {
+        humanToken: 'human-secret',
+        agentToken: 'automation-secret',
+        separated: true,
+        processIsolated: true,
+        capabilitiesEnabled: true,
+        boundary: 'run_capabilities',
+      },
+      workerProposalTokenService: {
+        mint: () => 'remote-scoped-token',
+      },
+      workerProposalBaseUrl: 'http://127.0.0.1:4177',
+      workerProposalRemoteBaseUrl: 'https://console.tailnet.example',
+    },
+  });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db);
+  const project = h.projectService.createProject({
+    name: 'RemotePublicBase',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+
+  const run = await h.lifecycleService.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'run remotely',
+  });
+
+  const spec = h.remoteChannel.spawned[0].payload.spec;
+  assert.equal(spec.env.PALANTIR_WORKER_TOKEN, 'remote-scoped-token');
+  assert.equal(spec.env.PALANTIR_API_BASE, 'https://console.tailnet.example');
+  assert.match(spec.args.join(' '), new RegExp(`/api/runs/${run.id}/memory/propose`));
+});
+
+test('restart revokes a remote worker whose boot-local memory capability expired', async (t) => {
+  const db = await mkdb(t);
+  const remoteChannel = makeRemoteChannel({ alive: false });
+  const h = buildHarness(db, {
+    remoteChannel,
+    lifecycleOptions: {
+      actorTokens: {
+        humanToken: 'human-secret',
+        agentToken: 'automation-secret',
+        separated: true,
+        processIsolated: true,
+        capabilitiesEnabled: true,
+        boundary: 'run_capabilities',
+      },
+      workerProposalTokenService: {
+        mint: () => 'remote-boot-local-token',
+      },
+      workerProposalBaseUrl: 'http://127.0.0.1:4177',
+      workerProposalRemoteBaseUrl: 'https://console.tailnet.example',
+    },
+  });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db);
+  const project = h.projectService.createProject({
+    name: 'RemoteRestartCapability',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = await h.lifecycleService.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'run remotely across a Console restart',
+  });
+
+  const recovered = await h.lifecycleService.recoverOrphanSessions();
+
+  assert.deepEqual(recovered, [{ runId: run.id, status: 'credential_revoked' }]);
+  assert.deepEqual(remoteChannel.killed, [{ runId: run.id, engine: 'cli' }]);
+  assert.equal(h.runService.getRun(run.id).status, 'stopped');
+  const revoked = h.runService.getRunEvents(run.id)
+    .find((event) => event.event_type === 'security:credential_revoked');
+  assert.equal(JSON.parse(revoked.payload_json).reason, 'worker_capability_restart');
+});
+
+test('restart preserves a completed remote worker result before capability revocation', async (t) => {
+  const db = await mkdb(t);
+  const remoteChannel = makeRemoteChannel({ alive: false, exitCode: 0, output: 'done' });
+  const h = buildHarness(db, {
+    remoteChannel,
+    lifecycleOptions: {
+      actorTokens: {
+        humanToken: 'human-secret',
+        agentToken: 'automation-secret',
+        separated: true,
+        processIsolated: true,
+        capabilitiesEnabled: true,
+        boundary: 'run_capabilities',
+      },
+      workerProposalTokenService: {
+        mint: () => 'remote-boot-local-token',
+      },
+      workerProposalBaseUrl: 'http://127.0.0.1:4177',
+      workerProposalRemoteBaseUrl: 'https://console.tailnet.example',
+    },
+  });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db);
+  const project = h.projectService.createProject({
+    name: 'RemoteRestartCompleted',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = await h.lifecycleService.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'finish while Console is offline',
+  });
+
+  const recovered = await h.lifecycleService.recoverOrphanSessions();
+
+  assert.deepEqual(recovered, [{ runId: run.id, status: 'terminated' }]);
+  assert.deepEqual(remoteChannel.killed, [{ runId: run.id, engine: 'cli' }]);
+  assert.equal(h.runService.getRun(run.id).status, 'completed');
+  assert.equal(h.runService.getRun(run.id).exit_code, 0);
+  assert.equal(h.taskService.getTask(task.id).status, 'review');
 });
 
 test('issue #113: remote Codex MCP secret placement and cleanup stay on selected executor', async (t) => {

@@ -20,6 +20,10 @@ const { parseGoalReport } = require('./goalReport'); // G1
 const { createGoalVerdictService } = require('./goalVerdictService'); // G3
 const { VERDICT_TO_TASK_STATUS } = require('./goalVerdict'); // G3
 const {
+  resolveActorTokenPolicy,
+  applyWorkerCredentialPolicy,
+} = require('./actorTokenPolicy');
+const {
   prepareCodexMcpArgs,
   removeSecretDirWithRetry,
 } = require('./managerAdapters/codexMcpSecretTransport');
@@ -86,6 +90,11 @@ function createLifecycleService({
   materializeStuckMs,
   queueStuckMs,
   now,
+  actorTokens = resolveActorTokenPolicy(),
+  workerProposalTokenService = null,
+  workerProposalBaseUrl = null,
+  workerProposalRemoteBaseUrl = null,
+  runtimeMcpDir = path.resolve(process.cwd(), 'runtime', 'mcp'),
   // G2 §6 (Codex BLOCKER-1): goal features only activate when goal mode is on
   // AND the PM token is separated. Injectable for tests; defaults to the real
   // env-derived gate. When it returns false, a goal_enabled task runs exactly
@@ -998,6 +1007,41 @@ function createLifecycleService({
         attemptFeedback,
       });
     }
+    const node = getDispatchNode(run.node_id);
+    const isRemoteNode = node && (node.kind || 'local') !== 'local';
+    // Loopback is a valid destination only for local workers. Remote workers
+    // receive the proposal capability solely when the operator configured a
+    // PALANTIR_BASE_URL that is reachable from the worker node.
+    const proposalApiBase = isRemoteNode
+      ? workerProposalRemoteBaseUrl
+      : workerProposalBaseUrl;
+    const workerProposalProjectId = task && task.project_id ? task.project_id : null;
+    const workerProposalToken = workerProposalProjectId
+      && proposalApiBase
+      && workerProposalTokenService
+      && typeof workerProposalTokenService.mint === 'function'
+      ? workerProposalTokenService.mint(run.id, { projectId: workerProposalProjectId })
+      : null;
+    if (workerProposalToken) {
+      runService.addRunEvent(run.id, 'security:worker_capability_scoped', JSON.stringify({
+        version: 1,
+        capability: 'memory_propose',
+        project_id: workerProposalProjectId,
+      }));
+      prompt = [
+        prompt,
+        '## Durable memory proposals',
+        'If you discover a stable reusable convention, pitfall, heuristic, or constraint, you may stage it for human review.',
+        `POST $PALANTIR_API_BASE/api/runs/${run.id}/memory/propose with Authorization: Bearer $PALANTIR_WORKER_TOKEN`,
+        'JSON body: {"kind":"convention|pitfall|heuristic|constraint","content":"...","importance":5}',
+        'This capability is run-bound and candidate-only. Never include secrets, raw logs, transient status, or conversation transcripts.',
+      ].filter(Boolean).join('\n\n');
+    }
+    const buildWorkerEnv = (explicitEnv) => applyWorkerCredentialPolicy(explicitEnv, {
+      workerToken: workerProposalToken,
+      apiBase: proposalApiBase,
+      actorTokens,
+    });
     const profile = agentProfileService.getProfile(agentProfileId);
     try {
       runService.setSessionSnapshot(run.id, {
@@ -1006,8 +1050,6 @@ function createLifecycleService({
       });
     } catch { /* annotate-only */ }
     const adapterName = resolveAdapterName(profile);
-    const node = getDispatchNode(run.node_id);
-    const isRemoteNode = node && (node.kind || 'local') !== 'local';
 
     runService.addRunEvent(run.id, 'queue:dequeued', JSON.stringify({
       profile_id: agentProfileId,
@@ -1260,7 +1302,7 @@ function createLifecycleService({
       if (!/^[a-zA-Z0-9_-]+$/.test(run.id)) {
         throw new Error(`Invalid run id for MCP config path: ${run.id}`);
       }
-      const mcpConfigFilePath = pathW.resolve(process.cwd(), 'runtime', 'mcp', `${run.id}.json`);
+      const mcpConfigFilePath = pathW.resolve(runtimeMcpDir, `${run.id}.json`);
       fsW.mkdirSync(pathW.dirname(mcpConfigFilePath), { recursive: true, mode: 0o700 });
       fsW.writeFileSync(mcpConfigFilePath, JSON.stringify(mergedMcp, null, 2), { mode: 0o600 });
       skillPackMcpConfigPath = mcpConfigFilePath;
@@ -1448,7 +1490,9 @@ function createLifecycleService({
         // fallback). Fail-closed: the run is marked failed and the 400
         // message surfaces in the response.
         let isolatedOpts = null;
-        let spawnEnv = parseEnvAllowlist(profile.env_allowlist, httpBearerEnvKeys);
+        let spawnEnv = buildWorkerEnv(
+          parseEnvAllowlist(profile.env_allowlist, httpBearerEnvKeys),
+        );
         let presetAuthCleanup = null;
         if (presetResolution && presetResolution.isolated) {
           const auth = await _authResolver.resolveClaudeAuthForIsolated({
@@ -1512,7 +1556,7 @@ function createLifecycleService({
             profile.args_template && profile.args_template.includes('{system_prompt_file}')) {
           const fs = require('node:fs');
           const path = require('node:path');
-          const promptFilePath = path.resolve(process.cwd(), 'runtime', 'mcp', `${run.id}-system-prompt.md`);
+          const promptFilePath = path.resolve(runtimeMcpDir, `${run.id}-system-prompt.md`);
           fs.mkdirSync(path.dirname(promptFilePath), { recursive: true, mode: 0o700 });
           fs.writeFileSync(promptFilePath, composedSystemPrompt, { mode: 0o600 });
           placeholders.system_prompt_file = promptFilePath;
@@ -1650,12 +1694,24 @@ function createLifecycleService({
             command: profile.command,
             args,
             cwd,
-            env: parseEnvAllowlist(profile.env_allowlist, httpBearerEnvKeys),
+            env: buildWorkerEnv(
+              parseEnvAllowlist(profile.env_allowlist, httpBearerEnvKeys),
+            ),
             workerPath: isRemoteNode ? (node.node_prefix || undefined) : undefined,
             outputLogPath: goalOutputLog || undefined,
           },
         });
       }
+
+      // Persist the recovery safety marker only after the worker channel has
+      // accepted the cleaned spawn. If spawn fails (or the server dies before
+      // this point), orphan recovery must fail closed and revoke the session as
+      // potentially legacy/credential-bearing.
+      runService.addRunEvent(run.id, 'security:worker_credential_policy_applied', JSON.stringify({
+        version: 1,
+        policy: 'actor_tokens_scrubbed',
+        memory_propose: !!workerProposalToken,
+      }));
 
       // Mark run as started
       runService.markRunStarted(run.id, {
@@ -2417,16 +2473,186 @@ function createLifecycleService({
    * Crash recovery — detect orphan tmux sessions on startup.
    */
   async function recoverOrphanSessions() {
+    const recovered = [];
+    const recoverTerminalResult = async (run, channel) => {
+      const alive = await channel.isAlive(run.id, 'cli');
+      if (alive) return false;
+
+      const exitCode = await channel.detectExitCode(run.id, 'cli');
+      if (exitCode === null) return false;
+
+      const status = exitCode === 0 ? 'completed' : 'failed';
+      runService.updateRunStatus(run.id, status, {
+        force: true,
+        reason: agentExitReason(exitCode),
+      });
+      runService.updateRunResult(run.id, {
+        exit_code: exitCode,
+        result_summary: status === 'completed'
+          ? 'Agent completed (recovered after restart)'
+          : `Agent exited with code ${exitCode} (recovered after restart)`,
+      });
+      // The process is already dead, but this best-effort call clears local
+      // artifacts and any stale tmux metadata without masking its result.
+      try { await channel.kill(run.id, 'cli'); } catch { /* terminal result is authoritative */ }
+      if (run.task_id) checkTaskCompletion(run.task_id);
+      return true;
+    };
+
+    // Remote workers are not discoverable through the control plane's local
+    // tmux session list. A project worker that received a boot-local proposal
+    // capability must still be stopped on restart: its live environment cannot
+    // be rewritten and the new Console signing key will reject the old grant.
+    // Scan persisted active remote runs before the local-engine early return.
+    // queued/materializing runs have no accepted live worker yet and can be
+    // started normally with a newly minted grant by the boot queue drain.
+    const activeStatuses = new Set(['running', 'paused', 'needs_input']);
+    let persistedRuns = [];
+    try { persistedRuns = runService.listRuns(); } catch { persistedRuns = []; }
+    for (const run of persistedRuns) {
+      if (
+        !run
+        || run.is_manager
+        || !activeStatuses.has(run.status)
+        || !run.node_id
+        || run.node_id === 'local'
+      ) {
+        continue;
+      }
+      const node = getDispatchNode(run.node_id);
+      if (!node || (node.kind || 'local') === 'local') continue;
+
+      let hasExpiredProposalGrant = false;
+      try {
+        hasExpiredProposalGrant = runService.getRunEvents(run.id).some(
+          (event) => event.event_type === 'security:worker_capability_scoped',
+        );
+      } catch {
+        continue;
+      }
+      if (!hasExpiredProposalGrant) continue;
+
+      let channel;
+      try {
+        channel = channelForNode(run.node_id);
+        if (await recoverTerminalResult(run, channel)) {
+          recovered.push({ runId: run.id, status: 'terminated' });
+          continue;
+        }
+        await channel.kill(run.id, 'cli');
+        if (await channel.isAlive(run.id, 'cli')) {
+          throw new Error('worker remained alive after kill');
+        }
+      } catch (err) {
+        const reason = err && err.message ? err.message : String(err);
+        try {
+          runService.addRunEvent(run.id, 'security:credential_revoke_failed', JSON.stringify({
+            message: 'Remote worker proposal capability revocation failed',
+            reason,
+          }));
+        } catch { /* continue revoking remaining remote workers */ }
+        console.error(`[lifecycle] Failed to revoke remote worker ${run.id}: ${reason}`);
+        recovered.push({ runId: run.id, status: 'credential_revocation_failed' });
+        continue;
+      }
+
+      runService.updateRunStatus(run.id, 'stopped', {
+        force: true,
+        reason: 'worker_capability_restart',
+      });
+      runService.addRunEvent(run.id, 'security:credential_revoked', JSON.stringify({
+        message: 'Remote worker stopped because its boot-local proposal capability expired on restart',
+        reason: 'worker_capability_restart',
+      }));
+      if (run.task_id) checkTaskCompletion(run.task_id);
+      recovered.push({ runId: run.id, status: 'credential_revoked' });
+    }
+
     // Boot orphan discovery remains executionEngine-direct; ghost sessions are
     // local tmux sessions.
-    if (executionEngine.type !== 'tmux') return [];
+    if (executionEngine.type !== 'tmux') return recovered;
 
     const ghostSessions = executionEngine.discoverGhostSessions();
-    const recovered = [];
 
     for (const session of ghostSessions) {
       // Extract runId from session name (palantir-run-<runId>)
       const runId = session.name.replace('palantir-run-', '');
+      let persistedRun = null;
+      try { persistedRun = runService.getRun(runId); } catch { /* unknown orphan */ }
+      const securityEvents = persistedRun ? runService.getRunEvents(runId) : [];
+      const hasSafeCredentialPolicy = !!(
+        persistedRun
+        && securityEvents.some(
+          (event) => [
+            'security:worker_credential_policy_applied',
+            // Compatibility with workers started earlier in this rollout:
+            // receiving a scoped proposal token also proves the global actor
+            // credentials were scrubbed at that spawn seam.
+            'security:worker_capability_scoped',
+          ].includes(event.event_type),
+        )
+      );
+      const hasExpiredProposalGrant = securityEvents.some(
+        (event) => event.event_type === 'security:worker_capability_scoped',
+      );
+
+      // Authenticated restarts revoke two kinds of worker:
+      //   1. legacy/unmarked workers that may still carry a global actor token;
+      //   2. workers with a proposal grant signed by the prior boot-local key.
+      // A live process environment cannot be rewritten safely, so reattaching
+      // either would preserve excess authority or a permanently broken 403
+      // grant. Safely scrubbed project-less workers (no proposal grant) remain
+      // recoverable.
+      if (hasExpiredProposalGrant || (actorTokens.humanToken && !hasSafeCredentialPolicy)) {
+        const revokeReason = hasExpiredProposalGrant
+          ? 'worker_capability_restart'
+          : 'actor_token_boundary_restart';
+        const revokeMessage = hasExpiredProposalGrant
+          ? 'Worker stopped because its boot-local proposal capability expired on restart'
+          : 'Legacy worker stopped before scoped-capability recovery';
+        try {
+          if (persistedRun && await recoverTerminalResult(persistedRun, workerChannel)) {
+            recovered.push({ runId, status: 'terminated' });
+            continue;
+          }
+          await workerChannel.kill(runId, 'cli');
+          if (await workerChannel.isAlive(runId, 'cli')) {
+            throw new Error(`worker remained alive after kill`);
+          }
+        } catch (err) {
+          const reason = err && err.message ? err.message : String(err);
+          if (persistedRun) {
+            try {
+              runService.addRunEvent(runId, 'security:credential_revoke_failed', JSON.stringify({
+                message: 'Legacy worker credential revocation failed',
+                reason,
+              }));
+            } catch { /* continue revoking the remaining legacy workers */ }
+          }
+          console.error(`[lifecycle] Failed to revoke legacy worker ${runId}: ${reason}`);
+          recovered.push({ runId, status: 'credential_revocation_failed' });
+          continue;
+        }
+        const run = persistedRun;
+        if (run) {
+          if (['queued', 'materializing', 'running', 'paused', 'needs_input'].includes(run.status)) {
+            runService.updateRunStatus(runId, 'stopped', {
+              force: true,
+              reason: revokeReason,
+            });
+            runService.addRunEvent(runId, 'security:credential_revoked', JSON.stringify({
+              message: revokeMessage,
+              reason: revokeReason,
+            }));
+            if (run.task_id) checkTaskCompletion(run.task_id);
+          }
+          recovered.push({ runId, status: 'credential_revoked' });
+        } else {
+          // Unknown local Palantir sessions are still killed above.
+          recovered.push({ runId, status: 'unknown_orphan_revoked', sessionName: session.name });
+        }
+        continue;
+      }
 
       try {
         const run = runService.getRun(runId);
@@ -2741,7 +2967,7 @@ function createLifecycleService({
   function cleanupOrphanMcpConfigs() {
     const fs = require('node:fs');
     const path = require('node:path');
-    const mcpDir = path.resolve(process.cwd(), 'runtime', 'mcp');
+    const mcpDir = runtimeMcpDir;
     if (!fs.existsSync(mcpDir)) return 0;
     let cleaned = 0;
     try {

@@ -290,7 +290,13 @@ test('correction service: update sanitizes and bumps; pin/review no-bump; restor
   assert.equal(folded.id, active.id);
   assert.equal(folded.origin, 'human', 'restoring human duplicate upgrades active deterministic row');
   assert.equal(folded.valid_to, null);
-  assert.equal(svc.getMemoryItem(archived.id).status, 'archived');
+  assert.equal(folded.source_count, 2);
+  const consumed = svc.getMemoryItem(archived.id);
+  assert.equal(consumed.status, 'superseded');
+  assert.equal(consumed.superseded_by, active.id);
+  assert.equal(consumed.archive_reason, 'restore_folded');
+  assert.equal(svc.restoreMemory(archived.id), null, 'a folded source cannot be restored twice');
+  assert.equal(svc.getMemoryItem(active.id).source_count, 2, 'repeat restore cannot manufacture evidence');
   assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE scope='user' AND status='active'").get().n, 500);
 });
 

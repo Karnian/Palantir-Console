@@ -754,13 +754,57 @@ test('spawnInteractive builds piped ssh child with canonical cwd explicit env an
   ]);
   assert.equal(
     script,
-    `cd ${shq('/real/root/project')} && exec env LC_ALL=${shq('C')} TOKEN=${shq("a'b")} ${shq('codex')} ${shq('exec')} ${shq(hostileArg)}`,
+    `cd ${shq('/real/root/project')} && exec env PALANTIR_TOKEN=${shq('')} PALANTIR_PM_TOKEN=${shq('')} PALANTIR_WORKER_TOKEN=${shq('')} PALANTIR_MANAGER_TOKEN=${shq('')} LC_ALL=${shq('C')} TOKEN=${shq("a'b")} ${shq('codex')} ${shq('exec')} ${shq(hostileArg)}`,
   );
   assert.ok(script.includes(shq(hostileArg)));
   assert.doesNotMatch(script, /REMOTE_SSH_EXECUTOR_INTERACTIVE_SECRET_SHOULD_NOT_APPEAR/);
   assert.equal(child.stdin.writable, true);
   assert.equal(typeof child.stdout.on, 'function');
   assert.equal(typeof child.stderr.on, 'function');
+});
+
+test('spawnInteractive bootstraps a manager capability through stdin, never SSH argv', async () => {
+  const managerToken = 'mgr_run_capability_secret';
+  const spawn = rootGuardSpawn({
+    "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  const child = await exec.spawnInteractive('codex', ['exec', '-'], {
+    cwd: '/srv/root/project',
+    env: {
+      PALANTIR_MANAGER_TOKEN: managerToken,
+      PALANTIR_TOKEN: 'must-be-scrubbed',
+      LC_ALL: 'C',
+    },
+  });
+  child.stdin.write('manager prompt');
+
+  const call = spawn.calls.at(-1);
+  const script = scriptOf(call);
+  assert.match(
+    script,
+    /^IFS= read -r PALANTIR_MANAGER_TOKEN \|\| exit 126; export PALANTIR_MANAGER_TOKEN; /,
+  );
+  assert.match(script, /PALANTIR_TOKEN=''/);
+  assert.doesNotMatch(script, /PALANTIR_MANAGER_TOKEN=''/);
+  assert.doesNotMatch(script, /must-be-scrubbed/);
+  assert.equal(call.stdin, `${managerToken}\nmanager prompt`);
+  for (const entry of spawn.calls) {
+    assert.doesNotMatch(JSON.stringify(entry.args), new RegExp(managerToken));
+  }
+});
+
+test('spawnInteractive rejects a manager capability that cannot be line-framed', async () => {
+  const spawn = makeSpawn(() => {});
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+  await assert.rejects(
+    () => exec.spawnInteractive('codex', ['exec'], {
+      env: { PALANTIR_MANAGER_TOKEN: 'bad\ncapability' },
+    }),
+    (err) => err.code === 'SECRET_TRANSPORT_INVALID',
+  );
+  assert.equal(spawn.calls.length, 0);
 });
 
 test('spawnInteractive injects pathPrefix as PATH prepend with unquoted :$PATH', async () => {
@@ -773,7 +817,7 @@ test('spawnInteractive injects pathPrefix as PATH prepend with unquoted :$PATH',
   const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
   await exec.spawnInteractive('codex', ['exec'], { pathPrefix: '/home/karnian/.npm-global/bin' });
   const script = scriptOf(spawn.calls.at(-1));
-  assert.equal(script, `exec env PATH=${shq('/home/karnian/.npm-global/bin')}:$PATH ${shq('codex')} ${shq('exec')}`);
+  assert.equal(script, `exec env PATH=${shq('/home/karnian/.npm-global/bin')}:$PATH PALANTIR_TOKEN=${shq('')} PALANTIR_PM_TOKEN=${shq('')} PALANTIR_WORKER_TOKEN=${shq('')} PALANTIR_MANAGER_TOKEN=${shq('')} ${shq('codex')} ${shq('exec')}`);
   // The prefix is single-quoted (literal) but :$PATH stays outside the quotes.
   assert.ok(script.includes(`PATH=${shq('/home/karnian/.npm-global/bin')}:$PATH`));
 });
@@ -799,7 +843,10 @@ test('spawnInteractive allows only trusted manager commands independent from pub
   });
 
   await exec.spawnInteractive('claude', ['--version']);
-  assert.equal(scriptOf(spawn.calls.at(-1)), "exec 'claude' '--version'");
+  assert.equal(
+    scriptOf(spawn.calls.at(-1)),
+    `exec env PALANTIR_TOKEN=${shq('')} PALANTIR_PM_TOKEN=${shq('')} PALANTIR_WORKER_TOKEN=${shq('')} PALANTIR_MANAGER_TOKEN=${shq('')} 'claude' '--version'`,
+  );
 
   for (const command of ['bash', 'git']) {
     await assert.rejects(
@@ -958,6 +1005,10 @@ test('spawnWorker builds file-backed tmux script through the internal runner', a
     [
       `PATH=${shq('/home/karnian/.npm-global/bin')}:$PATH`,
       'env',
+      `PALANTIR_TOKEN=${shq('')}`,
+      `PALANTIR_PM_TOKEN=${shq('')}`,
+      `PALANTIR_WORKER_TOKEN=${shq('')}`,
+      `PALANTIR_MANAGER_TOKEN=${shq('')}`,
       `LC_ALL=${shq('C')}`,
       `QUOTE=${shq("a'b")}`,
       shq('codex'),
@@ -975,6 +1026,67 @@ test('spawnWorker builds file-backed tmux script through the internal runner', a
   );
   assert.ok(spawn.calls.some((call) => scriptOf(call) === "exec 'mkdir' '-p' '/srv/root/.palantir-runs'"));
   assert.ok(spawn.calls.some((call) => scriptOf(call) === `exec 'mkdir' '-p' ${shq(statusDir)}`));
+});
+
+test('spawnWorker file-backs a scoped capability and keeps it out of SSH command strings', async () => {
+  const runId = 'run_secret_transport';
+  const workerToken = 'worker_run_capability_secret';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const secretDir = '/srv/root/.palantir-secret-worker123';
+  const secretPath = `${secretDir}/worker_capability`;
+  const routes = {
+    "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
+    "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+    "exec 'realpath' '/srv/root/.palantir-runs'": { stdout: '/real/root/.palantir-runs\n' },
+    [`exec 'realpath' ${shq(statusDir)}`]: { stdout: `/real/root/.palantir-runs/${runId}\n` },
+    [`exec 'realpath' ${shq(secretPath)}`]: {
+      stdout: `/real/root/.palantir-secret-worker123/worker_capability\n`,
+    },
+    "exec 'mkdir' '-p' '/srv/root/.palantir-runs'": { code: 0 },
+    [`exec 'mkdir' '-p' ${shq(statusDir)}`]: { code: 0 },
+  };
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (/mktemp -d '\/srv\/root\/\.palantir-secret-XXXXXX'/.test(script)) {
+      child.stdin.on('finish', () => complete(child, { stdout: `${secretPath}\n` }));
+      return;
+    }
+    if (script.includes(`tmux new-session -d -s ${shq(`palantir-run-${runId}`)}`)) {
+      complete(child, { code: 0 });
+      return;
+    }
+    if (Object.hasOwn(routes, script)) {
+      complete(child, routes[script]);
+      return;
+    }
+    complete(child, { code: 1, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  const result = await exec.spawnWorker(runId, {
+    command: 'codex',
+    args: ['exec'],
+    cwd: '/srv/root/project',
+    env: {
+      PALANTIR_WORKER_TOKEN: workerToken,
+      PALANTIR_MANAGER_TOKEN: 'must-be-scrubbed',
+      LC_ALL: 'C',
+    },
+  });
+
+  assert.deepEqual(result, { sessionName: `palantir-run-${runId}` });
+  const writeCall = spawn.calls.find((call) => /mktemp -d/.test(scriptOf(call)));
+  assert.equal(writeCall.stdin, workerToken);
+  const workerScript = spawn.calls.map(scriptOf).find((script) => script.includes('tmux new-session'));
+  const prefix = `cd '/real/root/project' && tmux new-session -d -s ${shq(`palantir-run-${runId}`)} `;
+  const inner = unshq(workerScript.slice(prefix.length));
+  assert.ok(inner.includes(`PALANTIR_WORKER_TOKEN=$(cat ${shq(secretPath)})`));
+  assert.ok(inner.includes(`rm -f -- ${shq(secretPath)}`));
+  assert.doesNotMatch(inner, /PALANTIR_WORKER_TOKEN=''/);
+  assert.doesNotMatch(inner, /must-be-scrubbed/);
+  for (const entry of spawn.calls) {
+    assert.doesNotMatch(JSON.stringify(entry.args), new RegExp(workerToken));
+  }
 });
 
 test('spawnWorker accepts canonical cli worker envelope', async () => {
@@ -1127,6 +1239,10 @@ test('spawnWorker validates args and workerPath before building the tmux script'
     [
       `PATH=${shq('/home/x/.npm-global/bin')}:$PATH`,
       'env',
+      `PALANTIR_TOKEN=${shq('')}`,
+      `PALANTIR_PM_TOKEN=${shq('')}`,
+      `PALANTIR_WORKER_TOKEN=${shq('')}`,
+      `PALANTIR_MANAGER_TOKEN=${shq('')}`,
       shq('codex'),
       '>',
       shq(`${statusDir}/stdout.log`),

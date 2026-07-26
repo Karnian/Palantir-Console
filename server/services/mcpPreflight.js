@@ -30,7 +30,7 @@
 // where reason ∈ {
 //   'preflight_timeout', 'preflight_4xx', 'preflight_5xx',
 //   'preflight_connect_refused', 'redirect_blocked',
-//   'bearer_env_missing', 'ssrf_blocked',
+//   'bearer_env_missing', 'bearer_env_reserved', 'ssrf_blocked',
 // }.
 
 const http = require('node:http');
@@ -38,6 +38,7 @@ const https = require('node:https');
 
 const { assertSafeUrl } = require('./ssrf');
 const { resolveBearerForPreflight } = require('./authResolver');
+const { isActorCredentialKey } = require('./actorTokenPolicy');
 
 const PREFLIGHT_TIMEOUT_MS = 3000;
 const PASS_STATUSES = new Set([200, 204, 405, 501]);
@@ -193,6 +194,15 @@ async function preflightHttpAlias({ alias, cfg, fetchHook }) {
   let bearerEnvKey = null;
   if (cfg.bearer_token_env_var) {
     bearerEnvKey = cfg.bearer_token_env_var;
+    if (isActorCredentialKey(bearerEnvKey)) {
+      return {
+        ok: false,
+        alias,
+        url: resolved.url,
+        reason: 'bearer_env_reserved',
+        bearer_env: bearerEnvKey,
+      };
+    }
     const lookup = resolveBearerForPreflight(cfg.bearer_token_env_var);
     if (!lookup.ok) {
       return {
@@ -245,6 +255,25 @@ async function preflightHttpAlias({ alias, cfg, fetchHook }) {
 async function preflightHttpMcpConfig(mcpConfig, { fetchHook } = {}) {
   const aliases = collectHttpAliases(mcpConfig);
   if (aliases.length === 0) return { results: [], failures: [], skipped: false };
+  // The debug network-skip flag must not bypass configuration safety checks.
+  // Existing/hand-edited rows can predate CRUD validation, so reject reserved
+  // control-plane credential aliases before considering the skip toggle.
+  const reservedFailures = aliases
+    .filter(({ cfg }) => isActorCredentialKey(cfg.bearer_token_env_var))
+    .map(({ alias, cfg }) => ({
+      ok: false,
+      alias,
+      url: cfg.url,
+      reason: 'bearer_env_reserved',
+      bearer_env: cfg.bearer_token_env_var,
+    }));
+  if (reservedFailures.length > 0) {
+    return {
+      results: reservedFailures,
+      failures: reservedFailures,
+      skipped: false,
+    };
+  }
   if (isPreflightSkipped()) {
     return {
       results: aliases.map(a => ({ ok: true, alias: a.alias, url: a.cfg.url, skipped: true })),

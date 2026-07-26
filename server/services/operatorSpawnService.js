@@ -60,7 +60,8 @@ const {
 } = require('./managerSystemPrompt');
 const { resolveSpawnCwd } = require('../utils/spawnCwd');
 const { resolveCodexServiceTier } = require('./managerAdapters/codexAdapter'); // F-1
-const { goalFeatureActive } = require('./goalMode'); // G2 §6
+const { goalFeatureActive: defaultGoalFeatureActive } = require('./goalMode'); // G2 §6
+const { resolveActorTokenPolicy, applyManagerCredentialPolicy } = require('./actorTokenPolicy');
 const { conversationIdForProject } = require('../utils/conversationId'); // PM→Operator Phase 0 producer seam
 const { deriveLegacyContext, enforceWorkspace } = require('../utils/operatorContext');
 const { resolveProjectSource } = require('./projectSource');
@@ -92,9 +93,16 @@ function createOperatorSpawnService({
   isSpecialistAvailable = () => false, // MD-1: mid-turn specialist delegation prompt gate
   authResolverOpts = {},
   resolveManagerAuth = defaultResolveManagerAuth, // optional DI — tests inject to force canAuth
+  actorTokens = resolveActorTokenPolicy(),
+  managerCapabilityTokenService = null,
+  goalFeatureActive = defaultGoalFeatureActive,
   logger,
 }) {
   const log = logger || ((msg) => console.log(`[pmSpawn] ${msg}`));
+  const actorSpawnBaseEnv = applyManagerCredentialPolicy(process.env);
+  if (actorTokens.humanToken && !managerCapabilityTokenService) {
+    throw new Error('authenticated Operator spawn requires managerCapabilityTokenService');
+  }
   // Async repo materialization leaves a window between the initial registry
   // probe and setActive(). Keep one promise per canonical instance slot so a
   // user send and a scheduler send cannot create two Operator runs.
@@ -433,9 +441,15 @@ function createOperatorSpawnService({
       err.details = { sources: authCtx.sources, diagnostics: authCtx.diagnostics };
       throw err;
     }
-    // G2 §6 (Codex BLOCKER-1): scrub PALANTIR_TOKEN from the Operator's spawn
-    // env in goal mode so it cannot read the human token and spoof the gate.
-    const spawnEnv = buildManagerSpawnEnv({ authEnv: authCtx.env, envAllowlist, scrubHumanToken: goalFeatureActive() });
+    // Global actor credentials are stripped below. The run-bound Console
+    // capability is added only after the run exists; it never enters this
+    // reusable base environment or the persisted system prompt.
+    const spawnEnv = applyManagerCredentialPolicy(buildManagerSpawnEnv({
+      baseEnv: actorSpawnBaseEnv,
+      authEnv: authCtx.env,
+      envAllowlist,
+      scrubHumanToken: actorTokens.separated || goalFeatureActive(),
+    }));
 
     // Load brief content (conventions/pitfalls) plus the thread handle. W-P3
     // moves thread ownership to operator_instances; project_briefs remains a
@@ -583,11 +597,17 @@ function createOperatorSpawnService({
     // runTurn (which would race with the user's first send; codex R1
     // finding #1). The whole blob is still cached across turns.
     const port = process.env.PORT || 4177;
-    // G2 §6: in goal mode the Operator's API-call examples must reference the
-    // separated PM token, never the human PALANTIR_TOKEN. Non-goal → unchanged.
-    const goalActive = goalFeatureActive();
-    const token = goalActive ? process.env.PALANTIR_PM_TOKEN : process.env.PALANTIR_TOKEN;
-    const baseSystemPrompt = buildManagerSystemPrompt({ adapter, port, token, layer: 'operator', adapterType, specialistAvailable: isSpecialistAvailable() });
+    // Mint a boot-local, run-bound capability. The prompt receives only an
+    // environment-variable reference; the value crosses at the final manager
+    // process seam and is absent from the persisted prompt file and argv.
+    const token = managerCapabilityTokenService
+      && typeof managerCapabilityTokenService.mint === 'function'
+      ? managerCapabilityTokenService.mint(runId, {
+          conversationId: slotKey,
+          layer: 'operator',
+        })
+      : null;
+    const baseSystemPrompt = buildManagerSystemPrompt({ adapter, port, token: !!token, layer: 'operator', adapterType, specialistAvailable: isSpecialistAvailable() });
     const projectSection = buildProjectScopedSystemSection({ project, brief, operatorRunId: runId });
     const systemPrompt = [baseSystemPrompt, projectSection].filter(Boolean).join('\n\n');
 
@@ -715,7 +735,10 @@ function createOperatorSpawnService({
           // The pod provides its own env + ~/.codex auth; codex is resolved via
           // nodePrefix→PATH. Local keeps the filtered spawnEnv. (Real-Pi finding;
           // S3a review SERIOUS-3.)
-          env: isRemoteNode ? {} : spawnEnv,
+          env: applyManagerCredentialPolicy(
+            isRemoteNode ? {} : spawnEnv,
+            { managerToken: token, actorTokens },
+          ),
           role: 'manager',
           nodeId,
           resumeThreadId,

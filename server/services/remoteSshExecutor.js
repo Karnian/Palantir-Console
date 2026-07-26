@@ -136,6 +136,19 @@ function normalizeEnv(env) {
     });
 }
 
+function normalizeTransportSecret(value, key) {
+  if (value === undefined || value === null || value === '') return null;
+  if (
+    typeof value !== 'string'
+    || /[\r\n\x00]/.test(value)
+  ) {
+    const err = new Error(`${key} must be a non-empty single-line string`);
+    err.code = 'SECRET_TRANSPORT_INVALID';
+    throw err;
+  }
+  return value;
+}
+
 function stripOneTrailingNewline(value) {
   return String(value || '').replace(/\n$/, '');
 }
@@ -585,8 +598,57 @@ function createRemoteSshNodeExecutor(node, {
     }
     let safeCwd = cwd;
     if (cwd) safeCwd = (await assertWithinRoots(cwd)).canonical;
-    const script = buildCommandScript(commandName, args, { cwd: safeCwd, env, pathPrefix });
-    return spawnFn('ssh', sshArgsFor(script, { keepAlive: true }), { stdio: ['pipe', 'pipe', 'pipe'] });
+    const explicitEnv = { ...(env || {}) };
+    const managerToken = normalizeTransportSecret(
+      explicitEnv.PALANTIR_MANAGER_TOKEN,
+      'PALANTIR_MANAGER_TOKEN',
+    );
+    delete explicitEnv.PALANTIR_TOKEN;
+    delete explicitEnv.PALANTIR_PM_TOKEN;
+    delete explicitEnv.PALANTIR_WORKER_TOKEN;
+    delete explicitEnv.PALANTIR_MANAGER_TOKEN;
+    const script = buildCommandScript(commandName, args, {
+      cwd: safeCwd,
+      // The remote login shell may have controller credentials configured.
+      // Strip global actor tokens. A run-bound Manager capability is bootstrapped
+      // from SSH stdin below, so its value never appears in the local SSH argv or
+      // the remote command string.
+      env: {
+        PALANTIR_TOKEN: null,
+        PALANTIR_PM_TOKEN: null,
+        PALANTIR_WORKER_TOKEN: null,
+        ...(managerToken ? {} : { PALANTIR_MANAGER_TOKEN: null }),
+        ...explicitEnv,
+      },
+      pathPrefix,
+    });
+    const bootstrapScript = managerToken
+      ? `IFS= read -r PALANTIR_MANAGER_TOKEN || exit 126; export PALANTIR_MANAGER_TOKEN; ${script}`
+      : script;
+    const child = spawnFn(
+      'ssh',
+      sshArgsFor(bootstrapScript, { keepAlive: true }),
+      { stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+    if (managerToken) {
+      if (!child || !child.stdin || typeof child.stdin.write !== 'function') {
+        try { child?.kill?.('SIGTERM'); } catch { /* best-effort */ }
+        throw new Error('spawnInteractive requires writable SSH stdin for manager capability transport');
+      }
+      // The caller writes the model prompt only after this async method resolves,
+      // so this framed first line is consumed by the bootstrap before the
+      // remaining stdin is handed unchanged to codex/claude.
+      if (typeof child.stdin.on === 'function') {
+        child.stdin.on('error', () => { /* child close/error is authoritative */ });
+      }
+      try {
+        child.stdin.write(`${managerToken}\n`);
+      } catch (err) {
+        try { child.kill?.('SIGTERM'); } catch { /* best-effort */ }
+        throw err;
+      }
+    }
+    return child;
   }
 
   /**
@@ -888,12 +950,41 @@ function createRemoteSshNodeExecutor(node, {
     };
   }
 
-  function buildWorkerInvocation({ command, args = [], env, workerPath }) {
-    const envParts = normalizeEnv(env);
+  function buildWorkerInvocation({ command, args = [], env, workerPath }, {
+    workerTokenFile = null,
+  } = {}) {
+    // `env` assignments alone preserve variables inherited from the pod login
+    // shell. Empty assignments deliberately clear both actor credentials first;
+    // an explicit server-selected value below then restores only the permitted
+    // credential for the current policy.
+    const workerEnv = { ...(env || {}) };
+    delete workerEnv.PALANTIR_TOKEN;
+    delete workerEnv.PALANTIR_PM_TOKEN;
+    delete workerEnv.PALANTIR_WORKER_TOKEN;
+    delete workerEnv.PALANTIR_MANAGER_TOKEN;
+    const envParts = normalizeEnv({
+      PALANTIR_TOKEN: null,
+      PALANTIR_PM_TOKEN: null,
+      ...(workerTokenFile ? {} : { PALANTIR_WORKER_TOKEN: null }),
+      PALANTIR_MANAGER_TOKEN: null,
+      ...workerEnv,
+    });
     const list = Array.isArray(args) ? args : [];
     const argv = [shq(command), ...list.map((arg) => shq(arg))];
     const invocation = ['env', ...envParts, ...argv].join(' ');
-    return workerPath ? `PATH=${shq(workerPath)}:$PATH ${invocation}` : invocation;
+    const commandLine = workerPath ? `PATH=${shq(workerPath)}:$PATH ${invocation}` : invocation;
+    if (!workerTokenFile) return commandLine;
+
+    const tokenDir = path.posix.dirname(workerTokenFile);
+    return [
+      `PALANTIR_WORKER_TOKEN=$(cat ${shq(workerTokenFile)})`,
+      'worker_token_rc=$?',
+      `rm -f -- ${shq(workerTokenFile)}`,
+      `rmdir -- ${shq(tokenDir)} 2>/dev/null || true`,
+      '[ "$worker_token_rc" -eq 0 ] || exit "$worker_token_rc"',
+      'export PALANTIR_WORKER_TOKEN',
+      commandLine,
+    ].join('; ');
   }
 
   async function ensureWorkerStatusDir(paths) {
@@ -922,14 +1013,33 @@ function createRemoteSshNodeExecutor(node, {
     const safeCwd = (await assertWithinRoots(spec.cwd)).canonical;
     await ensureWorkerStatusDir(paths);
 
-    const workerInvocation = buildWorkerInvocation(spec);
-    const innerScript = `${workerInvocation} > ${shq(paths.stdoutLog)} 2>&1; echo $? > ${shq(paths.exitSentinel)}`;
-    const script = `cd ${shq(safeCwd)} && tmux new-session -d -s ${shq(paths.sessionName)} ${shq(innerScript)}`;
-    const res = await runRemoteScript(script);
-    if (res.code !== 0) {
-      throw commandError('tmux', ['new-session', '-d', '-s', paths.sessionName], res);
+    const workerToken = normalizeTransportSecret(
+      spec.env && spec.env.PALANTIR_WORKER_TOKEN,
+      'PALANTIR_WORKER_TOKEN',
+    );
+    let workerTokenFile = null;
+    try {
+      if (workerToken) {
+        // tmux may be a long-lived server and cannot safely receive a fresh
+        // run capability through its inherited environment. Place the token
+        // through SSH stdin in a 0600 file; the detached child reads and
+        // deletes it before exec. Only the random path enters SSH argv.
+        workerTokenFile = await putSecretFile('worker_capability', workerToken, 0o600);
+      }
+      const workerInvocation = buildWorkerInvocation(spec, { workerTokenFile });
+      const innerScript = `${workerInvocation} > ${shq(paths.stdoutLog)} 2>&1; echo $? > ${shq(paths.exitSentinel)}`;
+      const script = `cd ${shq(safeCwd)} && tmux new-session -d -s ${shq(paths.sessionName)} ${shq(innerScript)}`;
+      const res = await runRemoteScript(script);
+      if (res.code !== 0) {
+        throw commandError('tmux', ['new-session', '-d', '-s', paths.sessionName], res);
+      }
+      return { sessionName: paths.sessionName };
+    } catch (err) {
+      if (workerTokenFile) {
+        await cleanupCreatedPath(path.posix.dirname(workerTokenFile));
+      }
+      throw err;
     }
-    return { sessionName: paths.sessionName };
   }
 
   async function ownerOf(runId) {

@@ -76,7 +76,8 @@ test('createCandidate dedups by UNIQUE; listCandidates returns sanitized preview
   const rows = svc.listCandidates('user');
   assert.equal(rows.length, 1);
   assert.deepEqual(Object.keys(rows[0]).sort(), [
-    'created_at', 'dedup_key', 'id', 'kind', 'preview', 'promoted_to', 'rule', 'scope', 'status',
+    'created_at', 'dedup_key', 'id', 'importance', 'kind', 'preview',
+    'promoted_to', 'rule', 'scope', 'status',
   ].sort());
   assert.equal(rows[0].kind, 'preference');
   assert.match(rows[0].preview, /Prefer concise status updates/);
@@ -115,6 +116,32 @@ test('createCandidate sanitizes content in raw_json and rejects injection at the
     db.prepare("SELECT COUNT(*) n FROM master_memory_candidates WHERE dedup_key='service-injection'").get().n,
     0,
   );
+});
+
+test('candidate diagnostics exclude cross-project review from the distillation backlog', (t) => {
+  const db = setupDb(t);
+  const svc = createMasterMemoryService(db);
+  svc.createCandidate({
+    scope: 'user',
+    rule: 'R4',
+    rawJson: { schema_version: 1, kind: 'preference', content: 'Keep final summaries concise.' },
+    dedupKey: 'diagnostic-r4',
+  });
+  svc.createCandidate({
+    scope: 'cross_project',
+    rule: 'XPROJECT',
+    rawJson: { schema_version: 1, kind: 'pattern', content: 'Reuse transactional migrations.' },
+    dedupKey: 'diagnostic-xproject',
+  });
+
+  assert.deepEqual(svc.getCandidateQueueSummary(), {
+    pending: 2,
+    user_pending: 1,
+    cross_project_pending: 1,
+    deterministic_pending: 1,
+    distillation_pending: 0,
+    oldest_pending_at: svc.getCandidateQueueSummary().oldest_pending_at,
+  });
 });
 
 test('promoteCandidate maps L1 kinds to pattern and writes deterministic origin', (t) => {
@@ -163,7 +190,12 @@ test('promoteCandidate rejects injection content even when a candidate already e
 
 test('promoteCandidate rejects directly-created fact candidates as terminal', (t) => {
   const db = setupDb(t);
-  const svc = createMasterMemoryService(db);
+  const events = [];
+  const svc = createMasterMemoryService(db, {
+    emit(channel, data) {
+      events.push({ channel, data });
+    },
+  });
   svc.upsertFact({ scope: 'user', factKey: 'deploy.region', content: 'Deploys to nrt region.', origin: 'human' });
   const cand = svc.createCandidate({
     scope: 'user',
@@ -183,6 +215,14 @@ test('promoteCandidate rejects directly-created fact candidates as terminal', (t
   assert.equal(db.prepare('SELECT status FROM master_memory_candidates WHERE id=?').get(cand.id).status, 'rejected');
   assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_items WHERE fact_key='deploy.region' AND status='active'").get().n, 1);
   assert.equal(db.prepare("SELECT COUNT(*) n FROM master_memory_candidates WHERE status='pending'").get().n, 0);
+  assert.deepEqual(events.filter((event) => event.channel === 'master_memory:candidate_rejected'), [{
+    channel: 'master_memory:candidate_rejected',
+    data: {
+      candidateId: cand.id,
+      scope: 'user',
+      reason: 'fact_not_allowed',
+    },
+  }]);
 });
 
 test('promoteCandidate marks exact content_hash collisions as merged', (t) => {
@@ -204,6 +244,163 @@ test('promoteCandidate marks exact content_hash collisions as merged', (t) => {
   const stored = db.prepare('SELECT status, promoted_to FROM master_memory_candidates WHERE id=?').get(cand.id);
   assert.equal(stored.status, 'merged');
   assert.equal(stored.promoted_to, existing.id);
+});
+
+test('edited approval merge preserves the human-selected metadata and provenance', (t) => {
+  const db = setupDb(t);
+  const svc = createMasterMemoryService(db);
+  const content = 'Keep release summaries concise.';
+  const existing = svc.createMemoryItem({
+    scope: 'user',
+    kind: 'preference',
+    content,
+    origin: 'deterministic',
+    importance: 2,
+    confidence: 0.4,
+    evidenceJson: { schema_version: 1, source: 'legacy_observation' },
+  });
+  const candidate = svc.createCandidate({
+    scope: 'user',
+    rule: 'R4',
+    rawJson: {
+      schema_version: 1,
+      kind: 'preference',
+      content: 'A different draft that the human edits before approval.',
+    },
+    dedupKey: 'edited-merge-metadata',
+  });
+
+  const result = svc.promoteCandidate({
+    candidateId: candidate.id,
+    override: {
+      kind: 'decision',
+      content,
+      importance: 9,
+    },
+  });
+
+  assert.equal(result.promoted, true);
+  assert.equal(result.merged, true);
+  assert.equal(result.item.id, existing.id);
+  assert.equal(result.item.kind, 'decision');
+  assert.equal(result.item.importance, 9);
+  assert.equal(result.item.origin, 'human');
+  assert.equal(result.item.valid_to, null);
+  assert.ok(result.item.confidence >= 0.9);
+  const evidence = JSON.parse(result.item.evidence_json);
+  assert.equal(evidence.source, 'legacy_observation');
+  assert.equal(evidence.origin, 'human_approved');
+  assert.equal(evidence.approved_override, true);
+  assert.deepEqual(evidence.candidate_ids, [candidate.id]);
+});
+
+test('edited approval merge preserves existing importance when it is omitted', (t) => {
+  const db = setupDb(t);
+  const svc = createMasterMemoryService(db);
+  const content = 'Preserve the reviewed release priority.';
+  const existing = svc.createMemoryItem({
+    scope: 'user',
+    kind: 'preference',
+    content,
+    origin: 'deterministic',
+    importance: 8,
+  });
+  const candidate = svc.createCandidate({
+    scope: 'user',
+    rule: 'R4',
+    rawJson: {
+      schema_version: 1,
+      kind: 'preference',
+      content: 'A draft that will be edited to the existing content.',
+    },
+    dedupKey: 'edited-merge-importance-omitted',
+  });
+
+  const result = svc.promoteCandidate({
+    candidateId: candidate.id,
+    override: {
+      kind: 'decision',
+      content,
+    },
+  });
+
+  assert.equal(result.promoted, true);
+  assert.equal(result.merged, true);
+  assert.equal(result.item.id, existing.id);
+  assert.equal(result.item.kind, 'decision');
+  assert.equal(result.item.importance, 8);
+});
+
+test('edited cross-scope approval bumps the merged item actual scope revision', (t) => {
+  const db = setupDb(t);
+  const svc = createMasterMemoryService(db);
+  const content = 'Use the release checklist before deployment.';
+  const existing = svc.createMemoryItem({
+    scope: 'user',
+    kind: 'preference',
+    content,
+    origin: 'deterministic',
+    importance: 2,
+  });
+  const candidate = svc.createCandidate({
+    scope: 'cross_project',
+    rule: 'R4',
+    rawJson: {
+      schema_version: 1,
+      kind: 'pattern',
+      content: 'A cross-project draft edited during approval.',
+    },
+    dedupKey: 'edited-cross-scope-merge',
+  });
+  const userRevisionBefore = svc.getRevision('user');
+  const crossProjectRevisionBefore = svc.getRevision('cross_project');
+
+  const result = svc.promoteCandidate({
+    candidateId: candidate.id,
+    override: {
+      kind: 'decision',
+      content,
+      importance: 9,
+    },
+  });
+
+  assert.equal(result.promoted, true);
+  assert.equal(result.merged, true);
+  assert.equal(result.item.id, existing.id);
+  assert.equal(result.item.scope, 'user');
+  assert.equal(result.item.kind, 'decision');
+  assert.equal(svc.getRevision('user'), userRevisionBefore + 1);
+  assert.equal(svc.getRevision('cross_project'), crossProjectRevisionBefore);
+});
+
+test('edited approval rejects non-string master memory content', (t) => {
+  const db = setupDb(t);
+  const svc = createMasterMemoryService(db);
+  const candidate = svc.createCandidate({
+    scope: 'user',
+    rule: 'R4',
+    rawJson: {
+      schema_version: 1,
+      kind: 'preference',
+      content: 'Original candidate content.',
+    },
+    dedupKey: 'edited-non-string-content',
+  });
+
+  for (const content of [123, { text: 'object content' }, null]) {
+    assert.throws(
+      () => svc.promoteCandidate({
+        candidateId: candidate.id,
+        override: { kind: 'preference', content },
+      }),
+      (err) => err.code === 'MEMORY_CANDIDATE_OVERRIDE_INVALID'
+        && /content must be a string/.test(err.message),
+    );
+  }
+  assert.equal(
+    db.prepare('SELECT status FROM master_memory_candidates WHERE id=?').get(candidate.id).status,
+    'pending',
+  );
 });
 
 test('promoteCandidate rejects XPROJECT content/hash mismatch', (t) => {
@@ -313,6 +510,151 @@ test('routes: bearer remember creates candidate; candidates are cookie-only; coo
   assert.equal(promoted.body.candidate.status, 'promoted');
 });
 
+test('routes: master inbox shows the full approval payload and supports edit-approval plus rejection', async (t) => {
+  const app = await setupApp(t);
+  const original = `${'Reusable preference guidance. '.repeat(45)}VISIBLE-END`;
+  const candidate = app.services.masterMemoryService.createCandidate({
+    scope: 'user',
+    rule: 'R4',
+    rawJson: {
+      schema_version: 1,
+      kind: 'preference',
+      content: original,
+      importance: 8,
+    },
+    dedupKey: 'full-preview-edit-approval',
+  });
+  const rejectable = app.services.masterMemoryService.createCandidate({
+    scope: 'cross_project',
+    rule: 'XPROJECT',
+    rawJson: {
+      schema_version: 1,
+      kind: 'pattern',
+      content: 'A cross-project signal awaiting explicit review.',
+    },
+    dedupKey: 'reject-cross-project',
+  });
+
+  const list = await invokeApp(app, {
+    method: 'GET',
+    path: '/api/master-memory/candidates?scope=user',
+    headers: COOKIE,
+  });
+  assert.equal(list.status, 200);
+  assert.ok(list.body.candidates[0].preview.length > 240);
+  assert.match(list.body.candidates[0].preview, /VISIBLE-END$/);
+  assert.equal(list.body.candidates[0].importance, 8);
+  assert.equal('raw_json' in list.body.candidates[0], false);
+
+  const promoted = await invokeApp(app, {
+    method: 'POST',
+    path: `/api/master-memory/candidates/${candidate.id}/promote?scope=user`,
+    headers: COOKIE,
+    body: {
+      kind: 'decision',
+      content: 'Use concise final summaries after implementation and verification.',
+      importance: 8,
+    },
+  });
+  assert.equal(promoted.status, 200);
+  assert.equal(promoted.body.memory.kind, 'decision');
+  assert.equal(promoted.body.memory.origin, 'human');
+  assert.equal(promoted.body.memory.importance, 8);
+
+  const wrongScope = await invokeApp(app, {
+    method: 'POST',
+    path: `/api/master-memory/candidates/${rejectable.id}/reject?scope=user`,
+    headers: COOKIE,
+  });
+  assert.equal(wrongScope.status, 404);
+  assert.equal(
+    app.services._rawDb.prepare('SELECT status FROM master_memory_candidates WHERE id=?').get(rejectable.id).status,
+    'pending',
+  );
+  const rejected = await invokeApp(app, {
+    method: 'POST',
+    path: `/api/master-memory/candidates/${rejectable.id}/reject?scope=cross_project`,
+    headers: COOKIE,
+  });
+  assert.equal(rejected.status, 200);
+  assert.equal(rejected.body.candidate.status, 'rejected');
+});
+
+test('routes: short valid master candidates stay visible and directly approvable', async (t) => {
+  const app = await setupApp(t);
+  const staged = await invokeApp(app, {
+    method: 'POST',
+    path: '/api/master-memory/remember',
+    headers: BEARER,
+    body: { scope: 'user', kind: 'preference', content: 'Use tabs' },
+  });
+  assert.equal(staged.status, 202);
+
+  const list = await invokeApp(app, {
+    method: 'GET',
+    path: '/api/master-memory/candidates?scope=user',
+    headers: COOKIE,
+  });
+  assert.equal(list.status, 200);
+  assert.equal(list.body.candidates[0].preview, 'Use tabs');
+  assert.equal(list.body.candidates[0].approval_mode, 'deterministic');
+  assert.equal(list.body.candidates[0].can_promote, true);
+});
+
+test('routes: master candidate inbox is bounded and cursor-paginated per scope', async (t) => {
+  const app = await setupApp(t);
+  for (let i = 0; i < 3; i += 1) {
+    app.services.masterMemoryService.createCandidate({
+      scope: 'user',
+      rule: 'R4',
+      rawJson: {
+        schema_version: 1,
+        kind: 'preference',
+        content: `User preference candidate number ${i}.`,
+      },
+      dedupKey: `master-page-${i}`,
+    });
+  }
+  app.services.masterMemoryService.createCandidate({
+    scope: 'cross_project',
+    rule: 'XPROJECT',
+    rawJson: {
+      schema_version: 1,
+      kind: 'pattern',
+      content: 'A different scope must not enter the user page.',
+    },
+    dedupKey: 'master-page-other-scope',
+  });
+
+  const first = await invokeApp(app, {
+    method: 'GET',
+    path: '/api/master-memory/candidates?scope=user&limit=2',
+    headers: COOKIE,
+  });
+  assert.equal(first.status, 200);
+  assert.equal(first.body.candidates.length, 2);
+  assert.ok(first.body.next_cursor);
+  const second = await invokeApp(app, {
+    method: 'GET',
+    path: `/api/master-memory/candidates?scope=user&limit=2&cursor=${encodeURIComponent(first.body.next_cursor)}`,
+    headers: COOKIE,
+  });
+  assert.equal(second.status, 200);
+  assert.equal(second.body.candidates.length, 1);
+  assert.equal(second.body.next_cursor, null);
+  assert.doesNotMatch(
+    JSON.stringify([...first.body.candidates, ...second.body.candidates]),
+    /different scope/,
+  );
+
+  const invalid = await invokeApp(app, {
+    method: 'GET',
+    path: '/api/master-memory/candidates?scope=user&cursor=not-valid',
+    headers: COOKIE,
+  });
+  assert.equal(invalid.status, 400);
+});
+
 test('routes: bearer remember refuses fact candidates', async (t) => {
   const app = await setupApp(t);
 
@@ -348,6 +690,15 @@ test('routes: directly-created fact candidate promotion returns 409 fact_not_all
     },
     dedupKey: 'fact-candidate-route',
   });
+
+  const listed = await invokeApp(app, {
+    method: 'GET',
+    path: '/api/master-memory/candidates?scope=user',
+    headers: COOKIE,
+  });
+  assert.equal(listed.status, 200);
+  assert.equal(listed.body.candidates[0].approval_mode, 'review');
+  assert.equal(listed.body.candidates[0].can_promote, false);
 
   const rejected = await invokeApp(app, {
     method: 'POST',

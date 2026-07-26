@@ -1,10 +1,23 @@
+const {
+  prepareActorTokenEnvironment,
+  resolveDotEnvPath,
+} = require('./services/actorTokenPolicy');
+
+// Actor credentials must never live in the repository .env that a
+// Top/Operator CLI can read. A one-shot mode-0600 JSON file is validated,
+// consumed, and unlinked before dotenv or any agent starts.
+// Resolve the path once and pass that exact path to both the security check
+// and dotenv. dotenv.config() does not itself honor DOTENV_CONFIG_PATH.
+const dotenvPath = resolveDotEnvPath();
+const actorTokenBootstrap = prepareActorTokenEnvironment({ envPath: dotenvPath });
+
 // quiet: true — dotenv prints a promotional "tip" line (linking an unrelated
 // third-party site) on every load by default; suppress it for clean boot logs.
 // PALANTIR_SKIP_DOTENV opts out entirely — playwright.config.js sets it for
 // both e2e webServers so a developer's local .env (PALANTIR_TOKEN, PORT,
 // etc.) can't leak into test runs that assume no-auth on the default port.
 if (!process.env.PALANTIR_SKIP_DOTENV) {
-  require('dotenv').config({ quiet: true });
+  require('dotenv').config({ quiet: true, path: dotenvPath });
 }
 
 const { createApp } = require('./app');
@@ -16,7 +29,16 @@ const { bootstrapClaudeAuthFromEnv } = require('./services/authResolver');
 bootstrapClaudeAuthFromEnv();
 
 const port = process.env.PORT || 4177;
-const app = createApp();
+const app = createApp({
+  actorTokenSource: actorTokenBootstrap?.source || 'environment',
+  agentProcessIsolation: process.env.PALANTIR_AGENT_PROCESS_ISOLATION === 'verified',
+  ...(actorTokenBootstrap
+    ? {
+        authToken: actorTokenBootstrap.authToken,
+        pmToken: actorTokenBootstrap.pmToken,
+      }
+    : {}),
+});
 
 // Bind policy (PR1 / NEW-S1 + P0-1): do NOT expose an unauthenticated
 // console to the network. Default to loopback. Allow 0.0.0.0 only when:
@@ -24,7 +46,7 @@ const app = createApp();
 //   (b) the operator explicitly sets HOST (e.g. HOST=0.0.0.0).
 // This is a breaking change for deployments that previously relied on the
 // implicit 0.0.0.0 bind — see README "Binding policy" for the migration.
-const hasAuth = Boolean(process.env.PALANTIR_TOKEN);
+const hasAuth = Boolean(actorTokenBootstrap?.authToken || process.env.PALANTIR_TOKEN);
 const explicitHost = process.env.HOST;
 let host;
 if (explicitHost) {
@@ -39,6 +61,9 @@ if (explicitHost) {
 if (!hasAuth) {
   console.warn('[security] No PALANTIR_TOKEN set — auth disabled.');
   console.warn(`[security] Listening on ${host}. Set PALANTIR_TOKEN to require auth and expose on 0.0.0.0.`);
+}
+if (hasAuth && process.env.PALANTIR_AGENT_PROCESS_ISOLATION !== 'verified') {
+  console.warn('[security] Agent API capabilities disabled: managers/workers are not declared OS-user/container isolated.');
 }
 
 const bootInfo = app.bootInfo || {};

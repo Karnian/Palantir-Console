@@ -253,6 +253,7 @@ function createCodexAdapter({
     const invocationId = sessions.get(runId)?.currentInvocationId;
     if (invocationId && [
       NORMALIZED_EVENT_TYPES.TURN_STARTED,
+      NORMALIZED_EVENT_TYPES.ASSISTANT_MESSAGE,
       NORMALIZED_EVENT_TYPES.TURN_COMPLETED,
       NORMALIZED_EVENT_TYPES.TURN_FAILED,
     ].includes(type)) {
