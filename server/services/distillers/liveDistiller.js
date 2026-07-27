@@ -298,7 +298,11 @@ async function defaultCallClaudeCli({
   if (settingsPath) args.push('--settings', settingsPath);
 
   const prompt = user;
-  const filteredEnv = buildManagerSpawnEnv({ authEnv, envAllowlist });
+  const filteredEnv = buildManagerSpawnEnv({
+    authEnv,
+    envAllowlist,
+    vendor: 'claude',
+  });
   const childEnv = scrubServerTokens(filteredEnv);
 
   assertSpawnAllowed({ command: cliBin, source: 'liveDistiller:claude-cli' });

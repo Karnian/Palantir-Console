@@ -5,9 +5,48 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
-const request = require('supertest');
 const { createApp } = require('../app');
 const { invokeApp } = require('./helpers/invokeApp');
+
+// The managed test sandbox does not allow Supertest's ephemeral TCP listener.
+// Keep the familiar request(app).post(...).send(...) test shape while driving
+// Express directly through the repository's in-memory request helper.
+function request(app) {
+  const build = (method, requestPath) => {
+    let body;
+    const headers = {};
+    let pending;
+    const execute = () => {
+      if (!pending) pending = invokeApp(app, { method, path: requestPath, headers, body });
+      return pending;
+    };
+    const chain = {
+      send(value) {
+        body = value;
+        return chain;
+      },
+      set(key, value) {
+        headers[key] = value;
+        return chain;
+      },
+      expect(status) {
+        return execute().then((response) => {
+          assert.equal(response.status, status, response.text);
+          return response;
+        });
+      },
+      then(resolve, reject) {
+        return execute().then(resolve, reject);
+      },
+    };
+    return chain;
+  };
+  return {
+    get: (requestPath) => build('GET', requestPath),
+    post: (requestPath) => build('POST', requestPath),
+    patch: (requestPath) => build('PATCH', requestPath),
+  };
+}
 
 async function createTempDir(prefix) {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -395,7 +434,7 @@ test('resolveCodexAuth canAuth=true when CODEX_API_KEY set and allowed', async (
   assert.equal(r.env.CODEX_API_KEY, 'codex-fake-2');
 });
 
-test('buildManagerSpawnEnv strips cross-vendor credentials not on allowlist', async (t) => {
+test('buildManagerSpawnEnv keeps only the manager baseline plus explicit additions', async (t) => {
   const { buildManagerSpawnEnv } = require('../services/authResolver');
   const base = {
     PATH: '/usr/bin',
@@ -409,6 +448,7 @@ test('buildManagerSpawnEnv strips cross-vendor credentials not on allowlist', as
   // Claude profile allowlist excludes Codex + OpenAI keys.
   const env = buildManagerSpawnEnv({
     baseEnv: base,
+    vendor: 'claude-code',
     envAllowlist: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL'],
     authEnv: { CLAUDE_CODE_OAUTH_TOKEN: 'claude-token' },
   });
@@ -417,7 +457,11 @@ test('buildManagerSpawnEnv strips cross-vendor credentials not on allowlist', as
   assert.equal(env.CODEX_API_KEY, undefined, 'CODEX_API_KEY must be stripped');
   assert.equal(env.OPENAI_API_KEY, undefined, 'OPENAI_API_KEY must be stripped');
   assert.equal(env.PATH, '/usr/bin', 'PATH must be preserved');
-  assert.equal(env.UNRELATED, 'keep-me', 'unrelated vars must be preserved');
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(env, 'UNRELATED'),
+    false,
+    'unregistered variables must be absent',
+  );
 });
 
 test('resolveManagerAuth dispatches by type', async (t) => {

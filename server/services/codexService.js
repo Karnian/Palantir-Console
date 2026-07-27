@@ -1,6 +1,7 @@
 const { spawn } = require('node:child_process');
 const { AppError } = require('../utils/errors');
 const { assertSpawnAllowed } = require('../utils/spawnGuard');
+const { buildManagerSpawnEnv } = require('./authResolver');
 
 const DEFAULT_TIMEOUT_MS = 8000;
 
@@ -202,7 +203,10 @@ class AppServerSession {
 
 function createCodexService({ codexBin, codexHome, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   const env = {
-    ...process.env,
+    ...buildManagerSpawnEnv({
+      vendor: 'codex',
+      envAllowlist: ['CODEX_API_KEY', 'OPENAI_API_KEY'],
+    }),
     CODEX_HOME: codexHome
   };
   const session = new AppServerSession([codexBin, 'app-server'], env);

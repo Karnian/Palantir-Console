@@ -5,6 +5,10 @@ const assert = require('node:assert/strict');
 
 const { goalModeEnabled, pmTokenSeparated, goalFeatureActive, goalModeDiagnostic } = require('../services/goalMode');
 const { buildManagerSpawnEnv } = require('../services/authResolver');
+const {
+  applyManagerCredentialPolicy,
+  resolveActorTokenPolicy,
+} = require('../services/actorTokenPolicy');
 
 test('goalFeatureActive: requires mode ON and a SEPARATED PM token', () => {
   // mode off → never active
@@ -31,23 +35,30 @@ test('goalModeDiagnostic: null when off, fail-closed warning when unseparated', 
   assert.match(active.message, /ACTIVE/);
 });
 
-test('buildManagerSpawnEnv: scrubHumanToken removes PALANTIR_TOKEN, keeps PM token', () => {
-  const base = { PATH: '/bin', PALANTIR_TOKEN: 'human-secret', PALANTIR_PM_TOKEN: 'pm-secret', HOME: '/h' };
-  const scrubbed = buildManagerSpawnEnv({ baseEnv: base, scrubHumanToken: true });
-  assert.equal(scrubbed.PALANTIR_TOKEN, undefined, 'human token removed');
-  assert.equal(scrubbed.PALANTIR_PM_TOKEN, 'pm-secret', 'PM token retained');
-  assert.equal(scrubbed.PATH, '/bin', 'other env untouched');
-});
+test('final manager spawn env contains no global actor token and only the run capability', () => {
+  const base = {
+    PATH: '/bin',
+    HOME: '/h',
+    PALANTIR_TOKEN: 'human-secret',
+    PALANTIR_PM_TOKEN: 'pm-secret',
+    PALANTIR_MANAGER_TOKEN: 'stale-manager',
+  };
+  const actorTokens = resolveActorTokenPolicy({
+    ...base,
+    PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
+  });
+  const finalEnv = applyManagerCredentialPolicy(
+    buildManagerSpawnEnv({
+      baseEnv: base,
+      authEnv: { PALANTIR_TOKEN: 'sneaky' },
+      scrubHumanToken: true,
+    }),
+    { managerToken: 'run-bound-manager', actorTokens },
+  );
 
-test('buildManagerSpawnEnv: without scrub (non-goal) PALANTIR_TOKEN passes through unchanged', () => {
-  const base = { PATH: '/bin', PALANTIR_TOKEN: 'human-secret', PALANTIR_PM_TOKEN: 'pm-secret' };
-  const passthrough = buildManagerSpawnEnv({ baseEnv: base });
-  assert.equal(passthrough.PALANTIR_TOKEN, 'human-secret', 'non-goal deployments are byte-identical');
-  assert.equal(passthrough.PALANTIR_PM_TOKEN, 'pm-secret');
-});
-
-test('buildManagerSpawnEnv: scrub is defense-in-depth against authEnv smuggling the human token back', () => {
-  const base = { PALANTIR_TOKEN: 'human-secret' };
-  const scrubbed = buildManagerSpawnEnv({ baseEnv: base, authEnv: { PALANTIR_TOKEN: 'sneaky' }, scrubHumanToken: true });
-  assert.equal(scrubbed.PALANTIR_TOKEN, undefined, 'authEnv cannot re-introduce the human token under scrub');
+  assert.equal(Object.prototype.hasOwnProperty.call(finalEnv, 'PALANTIR_TOKEN'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(finalEnv, 'PALANTIR_PM_TOKEN'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(finalEnv, 'PALANTIR_WORKER_TOKEN'), false);
+  assert.equal(finalEnv.PALANTIR_MANAGER_TOKEN, 'run-bound-manager');
+  assert.equal(finalEnv.PATH, '/bin');
 });

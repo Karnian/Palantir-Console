@@ -430,6 +430,16 @@ function createOperatorSpawnService({
     } catch { /* ignore — fall through to defaults */ }
 
     const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
+    // Resolve before the auth gate so migration diagnostics are observable
+    // even when a legacy ambient auth mode is no longer sufficient.
+    const spawnEnv = applyManagerCredentialPolicy(buildManagerSpawnEnv({
+      baseEnv: actorSpawnBaseEnv,
+      authEnv: authCtx.env,
+      envAllowlist,
+      vendor: adapterType,
+      scrubHumanToken: actorTokens.separated || goalFeatureActive(),
+      diagnosticContext: 'manager:fresh:operator',
+    }));
     // A REMOTE Operator authenticates on the POD (its own ~/.codex), not the
     // control plane, and gets env:{} at runtime — so control-plane Codex auth is
     // irrelevant and must NOT preflight-block a remote spawn (the pod may be
@@ -441,15 +451,9 @@ function createOperatorSpawnService({
       err.details = { sources: authCtx.sources, diagnostics: authCtx.diagnostics };
       throw err;
     }
-    // Global actor credentials are stripped below. The run-bound Console
+    // Global actor credentials are stripped above. The run-bound Console
     // capability is added only after the run exists; it never enters this
     // reusable base environment or the persisted system prompt.
-    const spawnEnv = applyManagerCredentialPolicy(buildManagerSpawnEnv({
-      baseEnv: actorSpawnBaseEnv,
-      authEnv: authCtx.env,
-      envAllowlist,
-      scrubHumanToken: actorTokens.separated || goalFeatureActive(),
-    }));
 
     // Load brief content (conventions/pitfalls) plus the thread handle. W-P3
     // moves thread ownership to operator_instances; project_briefs remains a

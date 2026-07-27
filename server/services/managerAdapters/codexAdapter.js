@@ -606,10 +606,14 @@ function createCodexAdapter({
     // remote returns a Promise<child>.
     const spawned = state.executor.spawnInteractive(codexBin, args, {
       cwd: state.cwd,
-      // PR4: use the filtered env from buildManagerSpawnEnv if the caller
-      // provided one. Only the default local executor inherits process.env;
-      // injected executors must receive an explicit env object.
-      env: state.usingDefaultLocalExecutor ? (state.env || process.env) : (state.env || {}),
+      // Manager turns fail closed when a caller omits the filtered spawn env.
+      // A worker-role caller keeps its historical process.env fallback; local
+      // manager regressions must never reopen ambient host credential access.
+      env: state.env || (
+        state.usingDefaultLocalExecutor && state.role !== 'manager'
+          ? process.env
+          : {}
+      ),
       pathPrefix: state.nodePrefix,
     });
     const child = (spawned && typeof spawned.then === 'function') ? await spawned : spawned;

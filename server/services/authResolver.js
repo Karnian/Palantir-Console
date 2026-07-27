@@ -29,6 +29,8 @@ const path = require('node:path');
 const os = require('node:os');
 const { execFile, execFileSync } = require('node:child_process');
 const { promisify } = require('node:util');
+const { MANAGER_BASE_ENV_KEYS } = require('./actorTokenPolicy');
+const { resolveAgentVendor } = require('../utils/agentVendor');
 
 const execFileAsync = promisify(execFile);
 
@@ -631,22 +633,16 @@ function resolveManagerAuth(type, opts = {}) {
 /**
  * Build a filtered subprocess env for a manager adapter spawn.
  *
- * Strategy (defensive, low blast radius):
- *   - Start from process.env
- *   - Remove known-credential keys that are NOT on the allowlist. This
- *     prevents a Claude-type profile from leaking CODEX_API_KEY / OPENAI_API_KEY
- *     into the subprocess (and vice versa), which was the explicit threat
- *     model in the PR2/3/4 reviews.
- *   - Keep everything else (PATH, HOME, LANG, tool-specific config dirs)
- *     because both CLIs rely on a lot of environment for normal operation.
- *   - Merge authCtx.env on top so any values that passed the allowlist are
- *     definitely present.
+ * Strategy:
+ *   - Pick only the common manager baseline, normalized vendor extras,
+ *     profile env_allowlist, and bearerEnvKeys from baseEnv.
+ *   - Merge authCtx.env last so resolved auth always wins.
+ *   - Apply the existing human-token scrub as the final defense-in-depth step.
  *
  * M4-a: `bearerEnvKeys` is an optional list of env var names that the
  * spawned worker NEEDS to read (Codex CLI's `bearer_token_env_var` lookup
  * happens inside the child process, not in argv). When supplied:
- *   - keys are auto-added to the allowlist (so the credential-strip step
- *     leaves them alone)
+ *   - keys are auto-added to the allowlist
  *   - their values are forwarded from baseEnv to the child env. This is
  *     the M4-a single auto-allowlist hook so per-template bearer env vars
  *     don't have to be hand-listed in agent_profiles.env_allowlist.
@@ -660,56 +656,63 @@ function buildManagerSpawnEnv({
   authEnv = {},
   envAllowlist,
   bearerEnvKeys,
+  vendor,
   scrubHumanToken = false,
+  diagnosticContext,
 } = {}) {
-  const env = { ...baseEnv };
-  const baseAllowlist = Array.isArray(envAllowlist) ? envAllowlist : null;
-  // M4-a: bearerEnvKeys auto-extend the allowlist. Empty/missing list means
-  // no auto-allowlist behavior — back-compatible with PR2/PR3 callers.
+  const env = {};
   const bearer = Array.isArray(bearerEnvKeys)
     ? bearerEnvKeys.filter(k => typeof k === 'string' && k)
     : [];
-  // When no baseAllowlist is provided we keep the legacy "no credential
-  // strip" behavior — every key in baseEnv (including the bearer ones)
-  // already flows through. The bearer auto-allowlist only adds value
-  // when a baseAllowlist exists; without one, the bearer keys are
-  // already forwarded by virtue of the unfiltered baseEnv copy.
-  const allowSet = baseAllowlist
-    ? new Set([...baseAllowlist, ...bearer])
-    : null;
-
-  const KNOWN_CREDENTIAL_KEYS = [
-    ...CLAUDE_AUTH_KEYS,
-    ...CODEX_AUTH_KEYS,
-  ];
-  for (const key of KNOWN_CREDENTIAL_KEYS) {
-    if (allowSet && !allowSet.has(key)) {
-      delete env[key];
+  const allowSet = new Set([
+    ...MANAGER_BASE_ENV_KEYS(vendor),
+    ...(Array.isArray(envAllowlist) ? envAllowlist : []),
+    ...bearer,
+  ]);
+  for (const key of allowSet) {
+    if (
+      baseEnv
+      && Object.prototype.hasOwnProperty.call(baseEnv, key)
+      && baseEnv[key] != null
+    ) {
+      env[key] = baseEnv[key];
     }
   }
-  // Forward bearer env values from base when present. Without an explicit
-  // baseAllowlist the env starts as a full copy of process.env, so the
-  // values are already there — this loop is a defensive belt-and-suspenders
-  // and a no-op in the common case.
-  for (const key of bearer) {
-    if (baseEnv[key] != null && env[key] == null) env[key] = baseEnv[key];
-  }
-  // G2 §6 (Codex BLOCKER-1): in goal mode the Operator must NOT be able to read
-  // the human PALANTIR_TOKEN from its environment — otherwise it could send that
-  // as a cookie and spoof the cookie-only human gate on command verify_checks.
-  // Strip PALANTIR_TOKEN and keep only the separated PALANTIR_PM_TOKEN as the
-  // Operator's bearer. Off by default → non-goal spawns are byte-identical.
-  if (scrubHumanToken) {
-    delete env.PALANTIR_TOKEN;
-    if (baseEnv.PALANTIR_PM_TOKEN != null) env.PALANTIR_PM_TOKEN = baseEnv.PALANTIR_PM_TOKEN;
-  }
+
   // Merge resolved auth env last so it always wins.
   for (const [k, v] of Object.entries(authEnv)) {
     if (v != null) env[k] = v;
   }
-  // Defense-in-depth: authEnv must never smuggle the human token back in when
-  // scrubbing (it shouldn't contain it, but enforce the invariant).
-  if (scrubHumanToken) delete env.PALANTIR_TOKEN;
+
+  // G2 §6 (Codex BLOCKER-1): authEnv must never smuggle the human Console
+  // credential into a goal-mode child. Preserve the historical separated PM
+  // token seam until applyManagerCredentialPolicy replaces it with the
+  // run-bound manager capability.
+  if (scrubHumanToken) {
+    delete env.PALANTIR_TOKEN;
+    if (
+      !Object.prototype.hasOwnProperty.call(env, 'PALANTIR_PM_TOKEN')
+      && baseEnv
+      && baseEnv.PALANTIR_PM_TOKEN != null
+    ) {
+      env.PALANTIR_PM_TOKEN = baseEnv.PALANTIR_PM_TOKEN;
+    }
+  }
+
+  if (diagnosticContext && baseEnv) {
+    const droppedKeys = Object.keys(baseEnv)
+      .filter((key) => baseEnv[key] != null && !Object.prototype.hasOwnProperty.call(env, key))
+      .sort();
+    if (droppedKeys.length > 0) {
+      console.warn(
+        `[security] manager_spawn_env_dropped ${JSON.stringify({
+          context: diagnosticContext,
+          vendor: resolveAgentVendor(vendor),
+          keys: droppedKeys,
+        })}`
+      );
+    }
+  }
   return env;
 }
 
