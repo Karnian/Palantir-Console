@@ -11,6 +11,8 @@ const {
   consumeActorTokenFile,
   prepareActorTokenEnvironment,
   resolveActorTokenPolicy,
+  scanAmbientActorTokens,
+  hadAmbientActorTokensAtLoad,
   buildWorkerProcessEnv,
   augmentProcessPath,
   applyManagerCredentialPolicy,
@@ -18,11 +20,24 @@ const {
   createWorkerProposalTokenService,
   createManagerCapabilityTokenService,
 } = require('../services/actorTokenPolicy');
+const { createAuthMiddleware } = require('../middleware/auth');
 
 function isolatedPolicy(env = {}) {
   return resolveActorTokenPolicy({
     ...env,
     PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
+  });
+}
+
+// The attenuated grade requires a bootstrap that keeps PALANTIR_TOKEN out of
+// the Console's environment; otherwise an agent can read it and present it as a
+// cookie, bypassing every capability limit. Tests that want the grade must say
+// so, exactly as an operator has to.
+function attenuatedPolicy(env = {}) {
+  return resolveActorTokenPolicy({
+    PALANTIR_TOKEN: 'human-secret',
+    ...env,
+    PALANTIR_ACTOR_TOKEN_SOURCE: 'ephemeral_file',
   });
 }
 
@@ -32,30 +47,39 @@ test('actor token policy separates token-source assurance from process isolation
     agentToken: null,
     separated: false,
     processIsolated: false,
+    capabilitiesForcedDisabled: false,
+    capabilityTier: 'disabled',
     capabilitiesEnabled: false,
     boundary: 'auth_disabled',
   });
+  // A token that reached the Console through its own environment cannot support
+  // the attenuated grade: a same-UID agent reads `/proc/<pid>/environ`, presents
+  // PALANTIR_TOKEN as a cookie, and the allowlist/TTL/run-binding/audit never
+  // see the request at all.
+  assert.equal(resolveActorTokenPolicy({ PALANTIR_TOKEN: 'shared' }).capabilityTier, 'disabled');
   assert.equal(resolveActorTokenPolicy({ PALANTIR_TOKEN: 'shared' }).boundary, 'agent_capabilities_disabled');
-  assert.equal(resolveActorTokenPolicy({
+  assert.equal(attenuatedPolicy({ PALANTIR_TOKEN: 'shared' }).boundary, 'shared_uid_attenuated');
+  assert.equal(attenuatedPolicy({
     PALANTIR_TOKEN: 'same',
     PALANTIR_PM_TOKEN: 'same',
-  }).boundary, 'agent_capabilities_disabled');
+  }).boundary, 'shared_uid_attenuated');
 
-  const separated = resolveActorTokenPolicy({
+  const separated = attenuatedPolicy({
     PALANTIR_TOKEN: 'human-secret',
     PALANTIR_PM_TOKEN: 'agent-secret',
   });
-  assert.equal(separated.boundary, 'agent_capabilities_disabled');
+  assert.equal(separated.boundary, 'shared_uid_attenuated');
   assert.equal(separated.humanToken, 'human-secret');
   assert.equal(separated.agentToken, 'agent-secret');
   assert.equal(separated.separated, true);
   assert.equal(separated.processIsolated, false);
-  assert.equal(separated.capabilitiesEnabled, false);
+  assert.equal(separated.capabilityTier, 'shared_uid_attenuated');
+  assert.equal(separated.capabilitiesEnabled, true);
   assert.equal(resolveActorTokenPolicy({
     PALANTIR_TOKEN: 'human-secret',
     PALANTIR_PM_TOKEN: 'agent-secret',
     PALANTIR_ACTOR_TOKEN_SOURCE: 'ephemeral_file',
-  }).boundary, 'agent_capabilities_disabled');
+  }).boundary, 'shared_uid_attenuated');
   assert.equal(resolveActorTokenPolicy({
     PALANTIR_TOKEN: 'human-secret',
     PALANTIR_PM_TOKEN: 'agent-secret',
@@ -148,7 +172,12 @@ test('one-shot actor token file is mode-checked, consumed, and unlinked', (t) =>
     palantir_pm_token: 'ambient-manager-must-be-removed',
   };
   const result = consumeActorTokenFile({ env, cwd: dir, fsImpl: fs });
-  assert.equal(result.source, 'ephemeral_file');
+  // Ambient actor tokens were present at exec, so `/proc/<pid>/environ` still
+  // exposes them however thoroughly `process.env` is cleaned afterwards. The
+  // boot is reported as tainted, which withholds the attenuated grade — this
+  // configuration used to be accepted as fully assured.
+  assert.equal(result.source, 'ephemeral_file_tainted');
+  assert.equal(result.ambientActorTokens, true);
   assert.equal(fs.existsSync(tokenPath), false);
   assert.equal(result.authToken, 'human-secret');
   assert.equal(result.pmToken, 'manager-secret');
@@ -545,10 +574,11 @@ test('manager capabilities are boot-local and bind run, conversation, and layer'
   assert.equal(first.verify(`${token}tampered`), null);
 });
 
-test('agent capabilities fail closed without verified process isolation', () => {
+test('operator can force the agent capability tier to disabled', () => {
   const actorTokens = resolveActorTokenPolicy({
     PALANTIR_TOKEN: 'human-secret',
     PALANTIR_ACTOR_TOKEN_SOURCE: 'ephemeral_file',
+    PALANTIR_AGENT_CAPABILITIES: 'disabled',
   });
   assert.equal(createWorkerProposalTokenService({ actorTokens }).mint('run_alpha'), null);
   assert.equal(createManagerCapabilityTokenService({ actorTokens }).mint('run_top', {
@@ -560,13 +590,376 @@ test('agent capabilities fail closed without verified process isolation', () => 
       managerToken: 'must-not-cross',
       actorTokens,
     }),
-    /verified agent process isolation/,
+    /disabled by actor token policy/,
   );
   assert.throws(
     () => applyWorkerCredentialPolicy({}, {
       workerToken: 'must-not-cross',
       actorTokens,
     }),
-    /verified agent process isolation/,
+    /disabled by actor token policy/,
   );
+});
+
+test('shared-UID manager capability is minted, honestly tiered, and expires', () => {
+  let clock = 1_000;
+  const actorTokens = attenuatedPolicy();
+  assert.equal(actorTokens.capabilityTier, 'shared_uid_attenuated');
+  const service = createManagerCapabilityTokenService({
+    actorTokens,
+    signingKey: Buffer.alloc(32, 7),
+    now: () => clock,
+    attenuatedTtlMs: 30_000,
+  });
+  const token = service.mint('run_top', {
+    conversationId: 'top',
+    layer: 'top',
+  });
+  assert.equal(typeof token, 'string');
+  assert.match(token, /^palm2\./);
+  assert.deepEqual(service.verify(token), {
+    runId: 'run_top',
+    conversationId: 'top',
+    layer: 'top',
+    capabilityTier: 'shared_uid_attenuated',
+    expiresAt: 31_000,
+  });
+  clock = 31_000;
+  assert.equal(service.verify(token), null);
+});
+
+test('attenuated manager capability is allowlisted to the manager job and audits denials', () => {
+  const actorTokens = attenuatedPolicy();
+  const service = createManagerCapabilityTokenService({
+    actorTokens,
+    signingKey: Buffer.alloc(32, 8),
+  });
+  const token = service.mint('run_top', {
+    conversationId: 'top',
+    layer: 'top',
+  });
+  let active = true;
+  const audit = [];
+  const middleware = createAuthMiddleware({
+    token: 'human-secret',
+    managerCapabilityTokenService: service,
+    isManagerCapabilityActive: () => active,
+    onManagerCapabilityUse: (req, grant, outcome) => audit.push({
+      runId: grant.runId,
+      method: req.method,
+      path: req.originalUrl,
+      ...outcome,
+    }),
+  });
+  const invoke = (method, originalUrl) => {
+    const req = {
+      method,
+      originalUrl,
+      headers: { authorization: `Bearer ${token}` },
+    };
+    let passed = false;
+    let error = null;
+    try {
+      middleware(req, {}, () => { passed = true; });
+    } catch (err) {
+      error = err;
+    }
+    return { req, passed, error };
+  };
+
+  // The allowlist covers what the manager is FOR — dispatch, observe, review,
+  // converse. Narrower than this and it cannot review a worker, which is the
+  // capability #436 exists to restore.
+  for (const [method, url] of [
+    ['GET', '/api/runs'],
+    ['GET', '/api/agents'],
+    ['GET', '/api/tasks'],
+    ['GET', '/api/projects'],
+    ['GET', '/api/runs/run_one'],
+    ['GET', '/api/runs/run_one/events'],
+    ['GET', '/api/runs/run_one/output'],
+    ['GET', '/api/projects/project_one/tasks'],
+    ['GET', '/api/conversations/top/events'],
+    ['POST', '/api/tasks'],
+    ['POST', '/api/tasks/task_one/execute'],
+    ['POST', '/api/conversations/top/message'],
+    ['PATCH', '/api/tasks/task_one/status'],
+  ]) {
+    assert.equal(invoke(method, url).passed, true, `${method} ${url}`);
+  }
+
+  // Run intervention and dispatch-audit belong to the Operator layer. A Top
+  // grant is refused at BOTH grades — the attenuated grade must never hand Top
+  // something the isolated grade withholds.
+  for (const [method, url] of [
+    ['POST', '/api/runs/run_one/input'],
+    ['POST', '/api/runs/run_one/cancel'],
+    ['POST', '/api/dispatch-audit'],
+  ]) {
+    assert.equal(invoke(method, url).passed, false, `top must not reach ${method} ${url}`);
+  }
+
+  // Representative paths from every current cookie-only family remain beyond
+  // the attenuated boundary. These requests fail in auth before route logic.
+  for (const [method, url] of [
+    ['PATCH', '/api/operator/profiles/profile_one/memory'],
+    ['PUT', '/api/model-policies/top'],
+    ['POST', '/api/operator-schedules'],
+    ['POST', '/api/tasks/task_one/goal/deliver'],
+    ['PATCH', '/api/projects/project_one/memory/memory_one'],
+    ['POST', '/api/memory-candidates/candidate_one/promote'],
+    ['GET', '/api/memory/diagnostics'],
+    ['PATCH', '/api/operator-instances/instance_one'],
+    ['PATCH', '/api/master-memory/memory_one'],
+    ['POST', '/api/verify-checks'],
+    ['DELETE', '/api/tasks/task_one'],
+    // The generic task edit stays out: only the status transition is allowed,
+    // so a goal `done` remains visible to the delivery provenance guard.
+    ['PATCH', '/api/tasks/task_one'],
+  ]) {
+    const result = invoke(method, url);
+    assert.equal(result.passed, false, `${method} ${url}`);
+    assert.equal(result.error?.statusCode || result.error?.status, 403);
+  }
+  assert.ok(audit.some((event) => (
+    event.runId === 'run_top'
+    && event.allowed === false
+    && event.reason === 'endpoint_not_allowed'
+  )));
+
+  active = false;
+  const ended = invoke('GET', '/api/runs');
+  assert.equal(ended.passed, false);
+  assert.equal(ended.error?.statusCode || ended.error?.status, 403);
+  assert.equal(audit.at(-1).reason, 'inactive_run');
+});
+
+// The invariant that makes the attenuated grade safe by construction, rather
+// than by a hand-maintained list staying in sync. A review round found the
+// attenuated grade granting Top three routes the isolated grade denied — the
+// weaker credential was strictly WIDER. Deriving attenuated as
+// `isolated MINUS exclusions` fixes that, and this test pins the derivation.
+test('attenuated capability is a strict subset of isolated, for every layer', () => {
+  // Each grade needs its OWN service and middleware: `verify` refuses a token
+  // whose grade does not match its policy, so a single middleware would deny
+  // every attenuated request for the wrong reason and make this test vacuous.
+  const build = (actorTokens) => {
+    const service = createManagerCapabilityTokenService({
+      actorTokens,
+      signingKey: Buffer.alloc(32, 9),
+    });
+    const middleware = createAuthMiddleware({
+      token: 'human-secret',
+      managerCapabilityTokenService: service,
+      isManagerCapabilityActive: () => true,
+      // Every run in this matrix is a worker run, so the manager-run rule never
+      // fires and cannot mask a widening.
+      isManagerRun: () => false,
+    });
+    return { service, middleware };
+  };
+  const isolatedTokens = isolatedPolicy({
+    PALANTIR_TOKEN: 'human-secret',
+    PALANTIR_PM_TOKEN: 'agent-secret',
+    PALANTIR_ACTOR_TOKEN_SOURCE: 'ephemeral_file',
+  });
+  assert.equal(isolatedTokens.capabilityTier, 'isolated');
+  const attenuatedTokens = attenuatedPolicy();
+  assert.equal(attenuatedTokens.capabilityTier, 'shared_uid_attenuated');
+  const iso = build(isolatedTokens);
+  const att = build(attenuatedTokens);
+
+  const allows = (grade, token, method, originalUrl) => {
+    let passed = false;
+    try {
+      grade.middleware({ method, originalUrl, headers: { authorization: `Bearer ${token}` } },
+        {}, () => { passed = true; });
+    } catch { /* denial */ }
+    return passed;
+  };
+
+  const PATHS = [
+    '/api/runs', '/api/agents', '/api/tasks', '/api/projects', '/api/skill-packs',
+    '/api/runs/run_one', '/api/runs/run_one/events', '/api/runs/run_one/output',
+    '/api/projects/project_one/tasks', '/api/projects/project_one/memory',
+    '/api/operator/profiles', '/api/operator/specialist',
+    '/api/tasks/task_one', '/api/tasks/task_one/status', '/api/tasks/task_one/execute',
+    '/api/runs/run_one/input', '/api/runs/run_one/cancel', '/api/dispatch-audit',
+    '/api/verify-checks', '/api/verify-checks/check_one', '/api/verify-checks/assign',
+    '/api/conversations/top/events', '/api/conversations/top/message',
+    '/api/conversations/top/memory/propose',
+    '/api/model-policies/top', '/api/master-memory', '/api/operator-instances/oi_one',
+  ];
+  const METHODS = ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'];
+  const LAYERS = [
+    ['top', 'top'],
+    ['operator', 'operator:oi_one'],
+  ];
+
+  let comparisons = 0;
+  let attenuatedAllowed = 0;
+  for (const [layer, conversationId] of LAYERS) {
+    const isolatedToken = iso.service.mint(`run_${layer}`, { conversationId, layer });
+    const attenuatedToken = att.service.mint(`run_${layer}`, { conversationId, layer });
+
+    for (const method of METHODS) {
+      for (const path of PATHS) {
+        const attOk = allows(att, attenuatedToken, method, path);
+        const isoOk = allows(iso, isolatedToken, method, path);
+        comparisons += 1;
+        if (attOk) attenuatedAllowed += 1;
+        assert.equal(attOk && !isoOk, false,
+          `attenuated ${layer} gained ${method} ${path} that isolated denies`);
+      }
+    }
+  }
+  // Guard against the comparison silently becoming vacuous — if authentication
+  // broke, every attenuated request would be "denied" and the subset assertion
+  // above would hold for the wrong reason.
+  assert.ok(comparisons > 200, `expected a broad matrix, got ${comparisons}`);
+  assert.ok(attenuatedAllowed > 15,
+    `attenuated grade allowed only ${attenuatedAllowed} routes — the matrix is not exercising it`);
+});
+
+// Direction, not identity. Restricting an attenuated grant to its own
+// conversation id looked safe and passed every allowlist test, but it broke
+// Top→Operator delegation — the core three-layer flow. The rule is that a
+// manager addresses itself or a layer BELOW it.
+test('attenuated conversation access follows the layer hierarchy downward', () => {
+  const actorTokens = attenuatedPolicy();
+  const service = createManagerCapabilityTokenService({
+    actorTokens,
+    signingKey: Buffer.alloc(32, 11),
+  });
+  const middleware = createAuthMiddleware({
+    token: 'human-secret',
+    managerCapabilityTokenService: service,
+    isManagerCapabilityActive: () => true,
+    isManagerRun: () => false,
+  });
+  const allows = (token, originalUrl) => {
+    let passed = false;
+    try {
+      middleware({ method: 'POST', originalUrl, headers: { authorization: `Bearer ${token}` } },
+        {}, () => { passed = true; });
+    } catch { /* denial */ }
+    return passed;
+  };
+  const top = service.mint('run_top', { conversationId: 'top', layer: 'top' });
+  const operator = service.mint('run_op', { conversationId: 'operator:oi_1', layer: 'operator' });
+
+  // Percent-encoded ids are used throughout: the rule must decode before
+  // comparing, or `operator%3Aoi_2` would slip past a prefix test.
+  for (const [label, token, url, expected] of [
+    ['top delegates to an operator', top, '/api/conversations/operator%3Aoi_1/message', true],
+    ['top addresses itself', top, '/api/conversations/top/message', true],
+    ['top must not drive a worker', top, '/api/conversations/worker%3Ar9/message', false],
+    ['operator must not drive its parent', operator, '/api/conversations/top/message', false],
+    ['operator must not drive a peer', operator, '/api/conversations/operator%3Aoi_2/message', false],
+    ['operator addresses itself', operator, '/api/conversations/operator%3Aoi_1/message', true],
+    ['operator drives its workers', operator, '/api/conversations/worker%3Ar9/message', true],
+  ]) {
+    assert.equal(allows(token, url), expected, label);
+  }
+});
+
+// The clean bootstrap — no actor token in the environment at all — is the only
+// one that earns the attenuated grade, and it must keep earning it.
+test('a token file consumed without ambient actor tokens is fully assured', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-actor-clean-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const tokenPath = path.join(dir, 'tokens.json');
+  fs.writeFileSync(tokenPath, JSON.stringify({ PALANTIR_TOKEN: 'file-only-secret' }), { mode: 0o600 });
+
+  const result = consumeActorTokenFile({
+    env: { PALANTIR_ACTOR_TOKEN_FILE: tokenPath }, cwd: dir, fsImpl: fs,
+  });
+
+  assert.equal(result.source, 'ephemeral_file');
+  assert.equal(result.ambientActorTokens, false);
+  assert.equal(
+    resolveActorTokenPolicy({
+      PALANTIR_TOKEN: result.authToken,
+      PALANTIR_ACTOR_TOKEN_SOURCE: result.source,
+    }).capabilityTier,
+    'shared_uid_attenuated',
+  );
+  // ...and the tainted variant must NOT reach that grade.
+  assert.equal(
+    resolveActorTokenPolicy({
+      PALANTIR_TOKEN: result.authToken,
+      PALANTIR_ACTOR_TOKEN_SOURCE: 'ephemeral_file_tainted',
+    }).capabilityTier,
+    'disabled',
+  );
+});
+
+// An empty value is not a credential. Launchers commonly declare optional
+// secrets as empty strings, and treating that as taint disabled capabilities
+// for a bootstrap that was never at risk.
+test('empty ambient actor token values do not taint a file bootstrap', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-actor-empty-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const tokenPath = path.join(dir, 'tokens.json');
+  fs.writeFileSync(tokenPath, JSON.stringify({ PALANTIR_TOKEN: 'file-secret' }), { mode: 0o600 });
+
+  const result = consumeActorTokenFile({
+    env: { PALANTIR_ACTOR_TOKEN_FILE: tokenPath, PALANTIR_TOKEN: '', PALANTIR_PM_TOKEN: '' },
+    cwd: dir,
+    fsImpl: fs,
+  });
+
+  assert.equal(result.ambientActorTokens, false);
+  assert.equal(result.source, 'ephemeral_file');
+  // ...while a non-empty one still taints.
+  fs.writeFileSync(tokenPath, JSON.stringify({ PALANTIR_TOKEN: 'file-secret' }), { mode: 0o600 });
+  assert.equal(
+    consumeActorTokenFile({
+      env: { PALANTIR_ACTOR_TOKEN_FILE: tokenPath, PALANTIR_TOKEN: 'ambient' },
+      cwd: dir,
+      fsImpl: fs,
+    }).source,
+    'ephemeral_file_tainted',
+  );
+});
+
+// Deleting the variable before constructing the app does not undo the process
+// image. `/proc/<pid>/environ` still holds what exec saw, so the taint check has
+// to be anchored at load time, not at createApp time.
+test('ambient actor token detection survives a later delete, and is case-insensitive', () => {
+  assert.equal(scanAmbientActorTokens({ PALANTIR_TOKEN: 'secret' }), true);
+  assert.equal(scanAmbientActorTokens({ palantir_token: 'secret' }), true,
+    'the environment is not case-sensitive, so neither is this');
+  assert.equal(scanAmbientActorTokens({ Palantir_Pm_Token: 'secret' }), true);
+  assert.equal(scanAmbientActorTokens({ PALANTIR_TOKEN: '' }), false, 'empty is not a credential');
+  assert.equal(scanAmbientActorTokens({}), false);
+  // The load-time capture is a plain boolean about THIS process, so it must at
+  // least be readable and stable.
+  assert.equal(typeof hadAmbientActorTokensAtLoad(), 'boolean');
+  assert.equal(hadAmbientActorTokensAtLoad(), hadAmbientActorTokensAtLoad());
+});
+
+// An expired capability is a REAL credential used past its life. Checking expiry
+// before the signature made that indistinguishable from a forgery, so it left no
+// audit trail at all.
+test('an expired capability is distinguishable from a forgery', () => {
+  let clock = 1_000;
+  const service = createManagerCapabilityTokenService({
+    actorTokens: attenuatedPolicy(),
+    signingKey: Buffer.alloc(32, 13),
+    now: () => clock,
+  });
+  const token = service.mint('run_x', { conversationId: 'top', layer: 'top' });
+  assert.ok(service.verify(token), 'valid while fresh');
+
+  clock += 25 * 60 * 60 * 1000;
+  assert.equal(service.verify(token), null, 'expired must not authorize');
+  const expired = service.inspect(token);
+  assert.equal(expired.signatureValid, true);
+  assert.equal(expired.expired, true);
+  assert.equal(expired.grant.runId, 'run_x', 'the audit needs to know WHICH run');
+
+  const forged = service.inspect('palm2.eyJhIjoxfQ.AAAA');
+  assert.equal(forged.signatureValid, false);
+  assert.equal(forged.grant, null);
 });

@@ -1,5 +1,5 @@
 const crypto = require('node:crypto');
-const { BadRequestError, NotFoundError } = require('../utils/errors');
+const { BadRequestError, NotFoundError, ForbiddenError } = require('../utils/errors');
 
 const VALID_STATUSES = ['backlog', 'todo', 'in_progress', 'review', 'done', 'failed'];
 const VALID_PRIORITIES = ['low', 'medium', 'high', 'critical'];
@@ -297,14 +297,32 @@ function createTaskService(db, eventBus, opts = {}) {
     return task;
   }
 
-  function updateTaskStatus(id, status) {
+  function updateTaskStatus(id, status, { actor = null } = {}) {
+    // #436: actor rides along so downstream side effects can tell WHO caused
+    // the transition. A done transition auto-triggers goal delivery, which the
+    // manual route treats as human-authority — without provenance an attenuated
+    // manager token reaches that authority indirectly.
     if (!VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid status: ${status}`);
     }
     const before = getTask(id);
+    // #436: refuse the transition itself rather than filtering the event it
+    // emits. Guarding the subscriber only worked for the FIRST `task:updated`:
+    // an attacker could flip a goal task to done, let that delivery be skipped,
+    // then wait for harvest's `setDeliverableJson` to emit a second, actor-less
+    // `task:updated` on a task that is still done — and delivery would run.
+    // Whether a goal is met is decided by its verdict or by a human, never by
+    // the agent asserting it.
+    if (
+      status === 'done'
+      && before && before.goal_enabled
+      && actor && actor.capabilityTier === 'shared_uid_attenuated'
+    ) {
+      throw new ForbiddenError('attenuated manager capability cannot mark a goal task done');
+    }
     stmts.updateStatus.run(status, id);
     const task = parseRow(stmts.getById.get(id));
-    if (eventBus) eventBus.emit('task:updated', { task });
+    if (eventBus) eventBus.emit('task:updated', { task, actor });
     // Recurring task completion: spawn next instance.
     // Only fires on the done transition (avoids duplicates if PATCHed twice).
     // If the parent has a due_date, the next instance gets the next computed

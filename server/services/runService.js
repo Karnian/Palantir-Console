@@ -207,6 +207,15 @@ function createRunService(db, eventBus) {
         AND status = 'running'
         AND is_manager = 0
     `),
+    // #436: how much work one manager capability grant has put in flight.
+    // Bounds what a COPIED attenuated credential can spend — each execute
+    // creates a run and, past max_concurrent, silently queues more.
+    countUnfinishedForManagerRun: db.prepare(`
+      SELECT COUNT(*) as count FROM runs
+      WHERE parent_run_id = ?
+        AND is_manager = 0
+        AND status IN ('queued', 'materializing', 'running', 'paused', 'needs_input')
+    `),
     getOldestQueued: db.prepare(`
       SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
              t.title as task_title, t.project_id as project_id, p.name as project_name
@@ -948,7 +957,14 @@ function createRunService(db, eventBus) {
       id
     );
     const run = stmts.getById.get(id);
-    addRunEvent(id, 'started', JSON.stringify({ tmux_session, worktree_path, branch }));
+    // #436: the tmux session NAME is enough to attach to the worker's terminal,
+    // which is authority well beyond the Console API. The run row still stores
+    // it for the server's own use; it just does not go into an event payload
+    // that observation endpoints hand back verbatim. Fixing it at the producer
+    // is sound in a way that filtering it out of arbitrary responses is not —
+    // a response filter cannot see through size limits, double encoding, or a
+    // `toJSON()` that materialises the field at serialization time.
+    addRunEvent(id, 'started', JSON.stringify({ worktree_path, branch }));
     if (eventBus) {
       eventBus.emit('run:status', {
         run,
@@ -961,6 +977,11 @@ function createRunService(db, eventBus) {
       });
     }
     return run;
+  }
+
+  function countUnfinishedForManagerRun(pmRunId) {
+    if (typeof pmRunId !== 'string' || !pmRunId) return 0;
+    return stmts.countUnfinishedForManagerRun.get(pmRunId).count;
   }
 
   function countRunning(profileId) {
@@ -1763,6 +1784,7 @@ function createRunService(db, eventBus) {
     getGoalRetryParentFingerprint, getGoalRetryParent,
     listReviewableGoalRunsWithoutReview, getNewestGoalRun, listCapturedDeliverableRuns,
     countRunning, countRunningOnNode, countRunningTotalOnNode,
+    countUnfinishedForManagerRun,
     getOldestQueued, getOldestQueuedOnNode, getOldestQueuedReadyOnNode,
     getOldestMaterializableOnNode,
     countMaterializingOnNode, countMaterializingGlobal,

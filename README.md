@@ -113,26 +113,48 @@ only by that run's candidate-only memory proposal endpoint. `PALANTIR_PM_TOKEN`
 is optional and retained as a distinct bearer credential for trusted external
 automation; it is not injected into agents.
 
-Authenticated installs default to `agent_capabilities_disabled`. A same-UID
-process can inspect another process's environment (or temporary launch state),
-so the built-in local tmux/subprocess topology is not a capability boundary.
+Installs that bootstrap their token through `PALANTIR_ACTOR_TOKEN_FILE` get
+`shared_uid_attenuated`: the manager receives a run-bound, allowlisted, audited
+capability token so the three-layer orchestration works. Whether a same-UID
+sibling can read another process's environment depends on OS policy, code
+signing and LSM configuration — assume it can. That credential is therefore
+attenuated, not confidential: it reaches only the dispatch/observe/review
+endpoints the manager actually needs, never the cookie-only human-authority
+routes, and it dies with its run.
+
+**The attenuated grade requires that bootstrap.** If `PALANTIR_TOKEN` is passed
+through the environment it stays in the Console process, where the very sibling
+this grade defends against can read it (`/proc/<pid>/environ` on Linux) and
+present it as a `palantir_token` cookie — reaching every human-authority route
+with none of the allowlist, TTL, run-binding or audit applying. Capabilities
+therefore stay `disabled` on the direct-environment path, and startup says so.
+`isolated` has no such requirement: verified process isolation is what stops the
+sibling read in the first place.
+
 Set `PALANTIR_AGENT_PROCESS_ISOLATION=verified` only when the deployment
 actually runs every capability-bearing agent behind a separate OS account or
-container boundary that prevents peer and Console-process inspection. Without
-that explicit attestation, managers receive no orchestration credential and
-workers receive no memory-proposal credential. This is fail-closed; browser and
-trusted external bearer access continue to work.
+container boundary that prevents peer and Console-process inspection. That
+attestation upgrades the tier to `isolated`, where the credential is treated as
+confidential between siblings. Without it the tier is `shared_uid_attenuated`
+when the token was bootstrapped from a one-shot file — orchestration works, but
+the credential is assumed copyable, so it is allowlisted, run-bound and audited
+rather than trusted — and `disabled` when it was not.
+`PALANTIR_AGENT_CAPABILITIES=disabled` is the fail-closed setting: no manager
+orchestration credential and no worker memory-proposal credential are issued at
+all. Browser and trusted external bearer access are unaffected by any of the
+three tiers.
 
 Local installs must not store either global token in the repository
 `.env` (startup rejects that configuration). For the secure path, create a
 mode-`0600`, non-symlink JSON file containing `PALANTIR_TOKEN` and optionally
 `PALANTIR_PM_TOKEN`, then start with
 `PALANTIR_ACTOR_TOKEN_FILE=/path/to/file`; the Console validates ownership,
-reads it once, and unlinks it before spawning agents. This verifies token
-bootstrap, independently from the required agent process-isolation attestation.
-Direct environment variables remain supported for compatibility but are
-reported as an unverified token-source boundary because an unsandboxed CLI may
-be able to inspect its parent environment. Use an OS/container boundary if the one-shot
+reads it once, and unlinks it before spawning agents. This is what makes the
+attenuated grade available; it is independent of the process-isolation
+attestation, which upgrades the grade further. Direct environment variables
+remain supported for browser and external bearer auth, but they leave the token
+readable in the Console's environment, so agent capabilities stay disabled on
+that path. Use an OS/container boundary if the one-shot
 file itself cannot be protected until startup. Windows currently rejects the
 one-shot file transport because Node's portable filesystem API cannot verify
 its DACL; use application-owned options or an OS/container secret boundary
@@ -504,8 +526,10 @@ hashes. Deleting a preset later does not erase past snapshot rows;
 | `PORT` | `4177` | Server port |
 | `PALANTIR_TOKEN` | (none) | Enables Bearer/cookie auth and promotes bind from `127.0.0.1` to `0.0.0.0` |
 | `PALANTIR_PM_TOKEN` | (none) | Optional distinct bearer credential for trusted external automation; never injected into agent processes |
-| `PALANTIR_ACTOR_TOKEN_FILE` | (none) | POSIX only: mode-`0600` one-shot JSON containing the two actor tokens; consumed and unlinked before agent startup (Windows fails closed because DACLs cannot be verified portably) |
-| `PALANTIR_AGENT_PROCESS_ISOLATION` | (none) | Set to `verified` only when every capability-bearing agent is isolated by a separate OS account or container; otherwise run-bound agent capabilities stay disabled |
+| `PALANTIR_ACTOR_TOKEN_FILE` | (none) | POSIX only: mode-`0600` one-shot JSON containing the two actor tokens; consumed and unlinked before agent startup (Windows fails closed because DACLs cannot be verified portably). **Required for the `shared_uid_attenuated` grade** — without it `PALANTIR_TOKEN` stays readable in the Console's environment and capabilities are disabled |
+| `PALANTIR_AGENT_PROCESS_ISOLATION` | (none) | Set to `verified` only when every capability-bearing agent is isolated by a separate OS account or container. This upgrades the grade from `shared_uid_attenuated` to `isolated`; it is not required to have capabilities at all |
+| `PALANTIR_AGENT_CAPABILITIES` | (none) | Set to `disabled` to turn run-bound agent capabilities off entirely. Any other value is rejected at startup |
+| `PALANTIR_MANAGER_TOKEN_TTL_MS` | `8h` | Lifetime of a run-bound manager capability token. Capped at 24h |
 | `HOST` | auto | Override the bind address. `0.0.0.0` without a token logs a security warning |
 | `PALANTIR_ALLOWED_COMMANDS` | (none) | Additional allowed CLI commands (comma-separated) |
 | `PALANTIR_DEFAULT_PM_ADAPTER` | `codex` | Global Operator adapter fallback when an instance uses Auto and its project has no `preferred_pm_adapter` |

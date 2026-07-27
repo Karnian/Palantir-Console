@@ -91,7 +91,7 @@ function seedTop({ rs, registry, adapter }) {
 test('PM layer prompt includes Skill Packs section with API docs', () => {
   const fakeAdapter = { buildGuardrailsSection() { return ''; } };
   const prompt = buildManagerSystemPrompt({
-    adapter: fakeAdapter, port: 4177, token: null, layer: 'operator', adapterType: 'codex',
+    adapter: fakeAdapter, port: 4177, token: 'cap-token', layer: 'operator', adapterType: 'codex',
   });
   assert.match(prompt, /Skill Packs.*PM-only/);
   assert.match(prompt, /skill_pack_ids/);
@@ -103,7 +103,7 @@ test('PM layer prompt includes Skill Packs section with API docs', () => {
 test('Top layer prompt does NOT include Skill Packs section', () => {
   const fakeAdapter = { buildGuardrailsSection() { return ''; } };
   const prompt = buildManagerSystemPrompt({
-    adapter: fakeAdapter, port: 4177, token: null, layer: 'top', adapterType: 'codex',
+    adapter: fakeAdapter, port: 4177, token: 'cap-token', layer: 'top', adapterType: 'codex',
   });
   assert.ok(!prompt.includes('Skill Packs (PM-only'));
 });
@@ -111,7 +111,7 @@ test('Top layer prompt does NOT include Skill Packs section', () => {
 test('PM layer /execute doc includes skill_pack_ids parameter', () => {
   const fakeAdapter = { buildGuardrailsSection() { return ''; } };
   const prompt = buildManagerSystemPrompt({
-    adapter: fakeAdapter, port: 4177, token: null, layer: 'operator', adapterType: 'codex',
+    adapter: fakeAdapter, port: 4177, token: 'cap-token', layer: 'operator', adapterType: 'codex',
   });
   // The execute line should mention skill_pack_ids for PM
   assert.match(prompt, /execute.*skill_pack_ids/s);
@@ -120,7 +120,7 @@ test('PM layer /execute doc includes skill_pack_ids parameter', () => {
 test('Top layer /execute doc does NOT include skill_pack_ids', () => {
   const fakeAdapter = { buildGuardrailsSection() { return ''; } };
   const prompt = buildManagerSystemPrompt({
-    adapter: fakeAdapter, port: 4177, token: null, layer: 'top', adapterType: 'codex',
+    adapter: fakeAdapter, port: 4177, token: 'cap-token', layer: 'top', adapterType: 'codex',
   });
   // The execute task line should not have skill_pack_ids for top
   const executeLineMatch = prompt.match(/Execute task with agent:.*$/m);

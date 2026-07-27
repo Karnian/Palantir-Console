@@ -57,12 +57,17 @@ function createConversationsRouter({ conversationService, runService }) {
     const { text, images, codebaseProjectId, turnMode, idempotencyKey: bodyKey } = req.body || {};
     const idempotencyKey = bodyKey || req.get('Idempotency-Key') || undefined;
     try {
+      // #436: the cross-manager confused-deputy rule (an attenuated grant must
+      // not drive a peer or its parent) lives in the auth-layer capability
+      // predicate, not here — see `attenuatedConversationAllowed`. Keeping it
+      // there is what makes the `manager_capability:used` audit truthful.
       const result = await conversationService.sendMessage(id, {
         text,
         images,
         codebaseProjectId,
         turnMode,
         idempotencyKey,
+        source: req.auth?.capabilityTier === 'shared_uid_attenuated' ? 'manager_capability' : undefined,
       });
       res.json(result);
     } catch (err) {

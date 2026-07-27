@@ -72,9 +72,17 @@ if (explicitHost) {
 if (!hasAuth) {
   console.warn('[security] No PALANTIR_TOKEN set — auth disabled.');
   console.warn(`[security] Listening on ${host}. Set PALANTIR_TOKEN to require auth and expose on 0.0.0.0.`);
+  console.warn('[security] Agent API capability tier=disabled: Top manager cannot inspect runs/agents, delegate or execute tasks, or review workers. Configure PALANTIR_TOKEN and restart to restore attenuated orchestration.');
 }
-if (hasAuth && process.env.PALANTIR_AGENT_PROCESS_ISOLATION !== 'verified') {
-  console.warn('[security] Agent API capabilities disabled: managers/workers are not declared OS-user/container isolated.');
+if (hasAuth && process.env.PALANTIR_AGENT_CAPABILITIES === 'disabled') {
+  console.warn('[security] Agent API capability tier=disabled: Top manager cannot inspect runs/agents, delegate or execute tasks, or review workers. Remove PALANTIR_AGENT_CAPABILITIES=disabled and restart to restore orchestration.');
+} else if (hasAuth && app.actorTokenPolicy?.capabilityTier === 'disabled') {
+  // The attenuated grade is refused when PALANTIR_TOKEN lives in this process's
+  // environment: a same-UID agent could read it and present it as a cookie,
+  // which would bypass the allowlist, TTL, run binding and audit entirely.
+  console.warn('[security] Agent API capability tier=disabled: PALANTIR_TOKEN is in the Console process environment, so a same-UID agent could recover it and bypass every capability limit. Bootstrap the token through PALANTIR_ACTOR_TOKEN_FILE (a mode-0600 one-shot JSON file, consumed and unlinked at startup) to enable the attenuated grade, or set PALANTIR_AGENT_PROCESS_ISOLATION=verified with a real isolation boundary.');
+} else if (hasAuth && app.actorTokenPolicy?.capabilityTier === 'shared_uid_attenuated') {
+  console.warn('[security] Agent API capability tier=shared_uid_attenuated: a same-UID sibling may be able to copy manager tokens depending on OS policy, code signing and LSM. Cookie-only human routes are not reachable with this credential, and orchestration is allowlisted, run-bound and audited — but this is attenuation, not confidentiality. Set PALANTIR_AGENT_PROCESS_ISOLATION=verified only with a real isolation boundary.');
 }
 
 const bootInfo = app.bootInfo || {};

@@ -2,6 +2,12 @@ const express = require('express');
 const path = require('node:path');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { createLocalNodeExecutor } = require('../services/nodeExecutor');
+const {
+  attenuatedRunGrant,
+  canObserveRun,
+  toCapabilityRunView,
+  applyCapabilityRunFilter,
+} = require('../utils/capabilityRunView');
 
 // R2-B.2: maximum unified-diff payload size, in bytes. Diffs larger than
 // this are truncated and the client is warned via a `truncated` flag so
@@ -200,11 +206,22 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
     const { task_id, status } = req.query;
     const runs = runService.listRuns({ task_id, status });
     // Strip the internal rowid: getByTask exposes _seq only for R1b ordering.
-    res.json({ runs: runs.map(({ _seq, ...rest }) => rest) });
+    const rows = runs.map(({ _seq, ...rest }) => rest);
+    // #436: an attenuated capability sees only the runs its layer may observe,
+    // projected onto an allowlist. Without this the run list is a side channel
+    // around the conversation direction rule.
+    res.json({ runs: applyCapabilityRunFilter(rows, attenuatedRunGrant(req)) });
   }));
 
   router.get('/:id', asyncHandler(async (req, res) => {
     const run = runService.getRun(req.params.id);
+    const grant = attenuatedRunGrant(req);
+    if (grant) {
+      if (!canObserveRun(run, grant)) {
+        return res.status(404).json({ error: 'Run not found' });
+      }
+      return res.json({ run: toCapabilityRunView(run) });
+    }
     res.json({ run });
   }));
 
@@ -360,6 +377,12 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
   }));
 
   router.get('/:id/events', asyncHandler(async (req, res) => {
+    // #436: events carry a manager's assistant text, so the same direction rule
+    // that governs `/api/conversations/:id/events` has to govern this alias.
+    const grant = attenuatedRunGrant(req);
+    if (grant && !canObserveRun(runService.getRun(req.params.id), grant)) {
+      return res.status(404).json({ error: 'Run not found' });
+    }
     const afterId = req.query.after ? Number(req.query.after) : undefined;
     const events = runService.getRunEvents(req.params.id, afterId);
     res.json({ events });
@@ -411,6 +434,11 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
     if (!lifecycleService) {
       return res.status(501).json({ error: 'Lifecycle service not configured' });
     }
+    // #436: an attenuated manager credential exists to supervise WORKERS, and
+    // must not intervene in a manager run (that would flip the DB row while the
+    // adapter is never disposed, orphaning a privileged process). That rule is
+    // enforced in the auth-layer capability predicate so the refusal is audited
+    // and independent of route ordering — see `managerCapabilityRequestAllowed`.
     const sent = await lifecycleService.sendAgentInput(req.params.id, text);
     if (!sent) return res.status(502).json({ error: 'Failed to deliver input to agent' });
     res.json({ status: 'ok' });
@@ -421,6 +449,11 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
     if (!lifecycleService) {
       return res.status(501).json({ error: 'Lifecycle service not configured' });
     }
+    // #436: an attenuated manager credential exists to supervise WORKERS, and
+    // must not intervene in a manager run (that would flip the DB row while the
+    // adapter is never disposed, orphaning a privileged process). That rule is
+    // enforced in the auth-layer capability predicate so the refusal is audited
+    // and independent of route ordering — see `managerCapabilityRequestAllowed`.
     await lifecycleService.cancelRun(req.params.id);
     res.json({ status: 'ok' });
   }));
@@ -429,6 +462,12 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
   router.get('/:id/output', asyncHandler(async (req, res) => {
     if (!executionEngine) {
       return res.status(501).json({ error: 'Execution engine not configured' });
+    }
+    // #436: raw terminal output of another manager is at least as revealing as
+    // its events, so it follows the same direction rule.
+    const grant = attenuatedRunGrant(req);
+    if (grant && !canObserveRun(runService.getRun(req.params.id), grant)) {
+      return res.status(404).json({ error: 'Run not found' });
     }
     const lines = Math.min(Math.max(1, Number(req.query.lines || 100)), 2000);
     // Try streamJsonEngine first (claude workers), fall back to executionEngine (tmux)

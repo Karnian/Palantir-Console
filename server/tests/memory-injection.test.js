@@ -19,6 +19,7 @@ const path = require('node:path');
 const os = require('node:os');
 
 const { createDatabase } = require('../db/database');
+const { resolveActorTokenPolicy } = require('../services/actorTokenPolicy');
 const { createRunService } = require('../services/runService');
 const { createProjectService } = require('../services/projectService');
 const { createProjectBriefService } = require('../services/projectBriefService');
@@ -205,6 +206,12 @@ function realFreshSpawnSystemPrompt(t, db, { projectName, conventions, knownPitf
     managerAdapterFactory: wireFactory(fakePm),
     projectService, projectBriefService,
     authResolverOpts: { hasKeychain: true },
+    // #436: without a capability grant the prompt builder now emits the
+    // degraded section instead of the API/memory surface, which is not what
+    // these assembly-parity tests are about. Give both paths a capability so
+    // the subject stays "do fresh-spawn and boot-resume agree".
+    actorTokens: resolveActorTokenPolicy({ PALANTIR_TOKEN: 'human', PALANTIR_ACTOR_TOKEN_SOURCE: 'ephemeral_file' }),
+    managerCapabilityTokenService: { mint: () => 'cap-token' },
   });
   seedTop({ rs, registry, adapter: topAdapter });
 
@@ -248,6 +255,10 @@ function realBootResumeSystemPrompt(t, db, { projectName, conventions, knownPitf
     projectService,
     projectBriefService,
     authResolverOpts: { hasKeychain: true },
+    // Same capability grant the fresh-spawn side gets, so the comparison is
+    // about prompt assembly rather than about one path being degraded (#436).
+    actorTokens: resolveActorTokenPolicy({ PALANTIR_TOKEN: 'human', PALANTIR_ACTOR_TOKEN_SOURCE: 'ephemeral_file' }),
+    managerCapabilityTokenService: { mint: () => 'cap-token' },
   });
 
   const session = fakePm._sessions.get(pmRun.id);
@@ -336,8 +347,8 @@ test('REGRESSION: REAL fresh-spawn and boot-resume produce the SAME PM prompt fo
 
 test('Part D: fixed Learned Memory pointer line present in PM base, ABSENT from top base, content-free', (t) => {
   const adapter = makeFakeCodexAdapter();
-  const pmBase = buildManagerSystemPrompt({ adapter, port: 4177, token: null, layer: 'operator', adapterType: 'codex' });
-  const topBase = buildManagerSystemPrompt({ adapter, port: 4177, token: null, layer: 'top', adapterType: 'codex' });
+  const pmBase = buildManagerSystemPrompt({ adapter, port: 4177, token: 'cap-token', layer: 'operator', adapterType: 'codex' });
+  const topBase = buildManagerSystemPrompt({ adapter, port: 4177, token: 'cap-token', layer: 'top', adapterType: 'codex' });
 
   // The fixed informational line landed in pm.
   assert.match(pmBase, /Learned Memory/, 'pm base mentions Learned Memory');
@@ -377,6 +388,12 @@ function wirePmStack(db, { memoryMultiOwner = false } = {}) {
     managerAdapterFactory: wireFactory(fakePm),
     projectService, projectBriefService,
     authResolverOpts: { hasKeychain: true },
+    // #436: without a capability grant the prompt builder now emits the
+    // degraded section instead of the API/memory surface, which is not what
+    // these assembly-parity tests are about. Give both paths a capability so
+    // the subject stays "do fresh-spawn and boot-resume agree".
+    actorTokens: resolveActorTokenPolicy({ PALANTIR_TOKEN: 'human', PALANTIR_ACTOR_TOKEN_SOURCE: 'ephemeral_file' }),
+    managerCapabilityTokenService: { mint: () => 'cap-token' },
   });
   const conv = createConversationService({
     runService: rs, managerRegistry: registry,
@@ -519,6 +536,12 @@ test('INTEGRATION: memoryService failure degrades to no-injection (message still
     managerAdapterFactory: wireFactory(fakePm),
     projectService, projectBriefService,
     authResolverOpts: { hasKeychain: true },
+    // #436: without a capability grant the prompt builder now emits the
+    // degraded section instead of the API/memory surface, which is not what
+    // these assembly-parity tests are about. Give both paths a capability so
+    // the subject stays "do fresh-spawn and boot-resume agree".
+    actorTokens: resolveActorTokenPolicy({ PALANTIR_TOKEN: 'human', PALANTIR_ACTOR_TOKEN_SOURCE: 'ephemeral_file' }),
+    managerCapabilityTokenService: { mint: () => 'cap-token' },
   });
   const conv = createConversationService({
     runService: rs, managerRegistry: registry,

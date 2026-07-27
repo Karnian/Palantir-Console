@@ -717,7 +717,7 @@ test('Phase 4: R2 fix — pm_run_id and pm_claim.run_id are distinct identities'
 test('Phase 4: R2 fix — PM prompt clarifies pm_run_id vs pm_claim.run_id distinction', () => {
   const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
   const fakeAdapter = { buildGuardrailsSection: () => '' };
-  const pmPrompt = buildManagerSystemPrompt({ adapter: fakeAdapter, port: 4177, layer: 'operator' });
+  const pmPrompt = buildManagerSystemPrompt({ token: 'cap-token', adapter: fakeAdapter, port: 4177, layer: 'operator' });
   // The prompt must explicitly say the two ids are DIFFERENT identities.
   assert.match(pmPrompt, /DIFFERENT identities/);
   assert.match(pmPrompt, /YOUR OWN Operator run id/);
@@ -729,8 +729,8 @@ test('Phase 4: R2 fix — PM prompt clarifies pm_run_id vs pm_claim.run_id disti
 test('Phase 4: R1 fix — PM system prompt documents POST /api/dispatch-audit', () => {
   const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
   const fakeAdapter = { buildGuardrailsSection: () => '' };
-  const pmPrompt = buildManagerSystemPrompt({ adapter: fakeAdapter, port: 4177, layer: 'operator' });
-  const topPrompt = buildManagerSystemPrompt({ adapter: fakeAdapter, port: 4177, layer: 'top' });
+  const pmPrompt = buildManagerSystemPrompt({ token: 'cap-token', adapter: fakeAdapter, port: 4177, layer: 'operator' });
+  const topPrompt = buildManagerSystemPrompt({ token: 'cap-token', adapter: fakeAdapter, port: 4177, layer: 'top' });
   assert.match(pmPrompt, /\/api\/dispatch-audit/);
   assert.match(pmPrompt, /task_complete/);
   assert.match(pmPrompt, /worker_spawned/);

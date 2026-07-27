@@ -42,39 +42,58 @@ Your role:
  *
  * See docs/specs/manager-v3-multilayer.md principle 8 (prompt 계층별 분기).
  */
-function buildCommonBase({ port, token, layer = 'top', adapterType, specialistAvailable = false }) {
-  // When the server is bound to 0.0.0.0 (external access), use the
-  // machine's actual IP so remote Codex/Claude processes can reach the
-  // API. PALANTIR_BASE_URL takes highest priority (explicit override),
-  // then HOST env detection, then localhost fallback.
+// Single source for the API base the manager should call: PALANTIR_BASE_URL
+// wins, then HOST detection, then localhost. Every prompt section must use this
+// — a section that hardcodes localhost sends a remote manager's bearer token to
+// whatever listens on that port on its own host (#436).
+function resolveApiBase(port) {
   let host = 'localhost';
   if (process.env.PALANTIR_BASE_URL) {
-    // User explicitly set the full base URL — use it directly.
-    const base = process.env.PALANTIR_BASE_URL.replace(/\/+$/, '');
-    return _buildCommonBaseInner({ base, token, layer, adapterType, specialistAvailable });
-  }
-  const bindHost = process.env.HOST || '';
-  if (bindHost === '0.0.0.0') {
-    // Resolve to a reachable IP. Prefer non-internal IPv4.
     try {
-      const os = require('os');
-      const ifaces = os.networkInterfaces();
-      for (const name of Object.keys(ifaces)) {
-        for (const iface of ifaces[name]) {
-          if (iface.family === 'IPv4' && !iface.internal) {
-            host = iface.address;
-            break;
-          }
-        }
-        if (host !== 'localhost') break;
-      }
-    } catch { /* fallback to localhost */ }
+      // Keep the path prefix. Dropping it to `.origin` breaks path-based
+      // reverse-proxy deployments (`https://host/palantir/`), where the worker
+      // base preserves the prefix and only the manager prompt would lose it.
+      const url = new URL(process.env.PALANTIR_BASE_URL);
+      return `${url.origin}${url.pathname}`.replace(/\/+$/, '');
+    } catch { /* fall through */ }
   }
-  const base = `http://${host}:${port}`;
-  return _buildCommonBaseInner({ base, token, layer, adapterType, specialistAvailable });
+  const configuredHost = process.env.HOST;
+  if (configuredHost && configuredHost !== '127.0.0.1' && configuredHost !== 'localhost') {
+    // A wildcard bind names no reachable address, so pick one. Anything else is
+    // a deliberate choice by the operator and is used verbatim: guessing an
+    // interface on a multi-NIC or IPv6 host can point the manager at an address
+    // it cannot reach — or at a different service on the same port, which would
+    // be handed its bearer token.
+    if (configuredHost === '0.0.0.0' || configuredHost === '::') {
+      try {
+        const nets = require('node:os').networkInterfaces();
+        for (const name of Object.keys(nets)) {
+          for (const net of nets[name] || []) {
+            if (net.family === 'IPv4' && !net.internal) { host = net.address; break; }
+          }
+          if (host !== 'localhost') break;
+        }
+      } catch { /* fallback to localhost */ }
+    } else {
+      host = configuredHost;
+    }
+  }
+  // Bracket a bare IPv6 literal so the URL stays parseable.
+  const authority = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+  return `http://${authority}:${port}`;
 }
 
-function _buildCommonBaseInner({ base, token, layer, adapterType, specialistAvailable = false }) {
+function buildCommonBase({ port, token, layer = 'top', adapterType, specialistAvailable = false, capabilityTier = 'isolated' }) {
+  // An attenuated grant can only reach the dispatch/observe/review endpoints the
+  // middleware whitelists. Documenting anything else here would hand the
+  // manager a guaranteed 403 — the same defect this issue is about, just
+  // relocated from the missing-token case to the attenuated one.
+  const attenuated = capabilityTier === 'shared_uid_attenuated';
+  const base = resolveApiBase(port);
+  return _buildCommonBaseInner({ base, token, layer, adapterType, specialistAvailable, attenuated });
+}
+
+function _buildCommonBaseInner({ base, token, layer, adapterType, specialistAvailable = false, attenuated = false }) {
   // P4-7 kept the auth variable for backward-compat with PM layer docs.
   // Fleet P5 restores curl examples for curl-capable manager adapters.
   // `token` is an availability flag only. The secret is never rendered into
@@ -104,7 +123,7 @@ You MUST review the worker's output and take action:
 Do NOT ask the user for permission to review — this is your autonomous responsibility as PM.
 Be thorough but efficient: check the output, make a decision, act on it.
 
-학습된 프로젝트 메모리(Learned Memory)는 작업 통지(user message)에 자동 첨부되며, \`GET ${base}/api/projects/<projectId>/memory\` 로도 조회할 수 있습니다. 작업을 시작하기 전에 이를 확인하세요.`
+학습된 프로젝트 메모리(Learned Memory)는 작업 통지(user message)에 자동 첨부됩니다.${attenuated ? '' : ` \`GET ${base}/api/projects/<projectId>/memory\` 로도 조회할 수 있습니다.`} 작업을 시작하기 전에 이를 확인하세요.`
     : `\n\nYou are running as the **top-level dispatcher**. You route user requests, spawn workers via /execute, and summarize board state. You do NOT modify in-flight workers directly — that is the PM layer's responsibility (or user-direct intervention via the UI). If a worker needs plan modification, delegate to the appropriate PM or ask the user.
 
 ## MANDATORY: Project-related work MUST go through PM
@@ -116,7 +135,7 @@ Send your message to the PM conversation endpoint:
 POST ${base}/api/conversations/operator:PROJECT_ID/message  body: {"text":"your instructions here"}
 
 **Workflow:**
-1. Identify which project the request belongs to (check GET ${base}/api/projects)
+1. Identify which project the request belongs to${attenuated ? '' : ` (check GET ${base}/api/projects)`}
 2. Send the instruction to the PM via the conversation endpoint above
 3. The PM will handle task creation, worker spawning, and monitoring within its project scope
 4. Report back to the user that the work has been delegated to the PM
@@ -209,8 +228,8 @@ curl -s -X POST ${base}/api/tasks${authHeader} -H "Content-Type: application/jso
 # PATCH (update)
 curl -s -X PATCH ${base}/api/tasks/TASK_ID/status${authHeader} -H "Content-Type: application/json" -d '{"status":"done"}'
 
-# DELETE
-curl -s -X DELETE ${base}/api/tasks/TASK_ID${authHeader}
+${attenuated ? '' : `# DELETE
+curl -s -X DELETE ${base}/api/tasks/TASK_ID${authHeader}`}
 \`\`\``
     : `Use WebFetch to query it (do NOT use Bash with curl — curl is not in your tool allowlist).`;
 
@@ -295,16 +314,16 @@ ${token && adapterType !== 'codex' ? '\nIMPORTANT: All API requests require auth
 - Filter by project: GET ${base}/api/tasks?project_id=PROJECT_ID
 - Create task: POST ${base}/api/tasks  body: {"title":"...","description":"...","priority":"medium","project_id":"PROJECT_ID"}
   Only include project_id if the task clearly belongs to an existing project. If unrelated, omit project_id (the task will be unassigned). Do NOT guess or force a project assignment.
-- Update task: PATCH ${base}/api/tasks/TASK_ID  body: {"title":"...","description":"...","priority":"high"}
-- Update task status: PATCH ${base}/api/tasks/TASK_ID/status  body: {"status":"done"}
-- Delete task: DELETE ${base}/api/tasks/TASK_ID
+${attenuated ? '' : `- Update task: PATCH ${base}/api/tasks/TASK_ID  body: {"title":"...","description":"...","priority":"high"}
+`}- Update task status: PATCH ${base}/api/tasks/TASK_ID/status  body: {"status":"done"}
+${attenuated ? '' : `- Delete task: DELETE ${base}/api/tasks/TASK_ID`}
 - Execute task with agent: POST ${base}/api/tasks/TASK_ID/execute  body: {"agent_profile_id":"AGENT_ID","prompt":"detailed work instructions here"${isProjectLayer(layer) ? ',"pm_run_id":"YOUR_OWN_OPERATOR_RUN_ID","skill_pack_ids":["PACK_ID",...]' : ''}}${isProjectLayer(layer) ? `
   pm_run_id (ALWAYS include this when you dispatch): YOUR OWN Operator run id (shown in your Project Scope section). It attributes the spawned worker to YOU so the worker's completion/failure review notification comes back to YOU — including for a turn directed at a codebase you don't primarily own. Omitting it leaves the worker unattributed and its review falls back to the codebase's default Operator.
   skill_pack_ids (optional): array of skill pack IDs to equip on the worker for this run. These are per-run ephemeral — they do NOT persist as task bindings. Omit to use only project auto_apply + task persistent bindings.` : ''}
 
 ### Projects
-- List projects: GET ${base}/api/projects
-- Get project tasks: GET ${base}/api/projects/PROJECT_ID/tasks
+${attenuated ? '' : `- List projects: GET ${base}/api/projects
+- Get project tasks: GET ${base}/api/projects/PROJECT_ID/tasks`}
 
 ### Agent Profiles
 - List agents: GET ${base}/api/agents
@@ -324,7 +343,7 @@ Skill packs equip workers with specialized knowledge (prompt overlays), tools (M
   Query global packs only: GET ${base}/api/skill-packs?scope=global
   Query project-effective view: GET ${base}/api/skill-packs?project_id=PROJECT_ID
   Do lazy lookup — do NOT call this every turn. Cache the result mentally and re-query only when you need a pack you haven't seen.
-- View project bindings: GET ${base}/api/projects/PROJECT_ID/skill-packs
+${attenuated ? '' : `- View project bindings: GET ${base}/api/projects/PROJECT_ID/skill-packs`}
 
 **How to equip workers with skills:**
 When calling POST /api/tasks/TASK_ID/execute, include skill_pack_ids to add extra skills for that run:
@@ -358,14 +377,98 @@ Always query the actual Palantir API to get real data — never guess or assume.
  * is used by Operator activation via operatorSpawnService and the resume path in manager.js.
  * See docs/specs/manager-v3-multilayer.md principle 8.
  */
-function buildManagerSystemPrompt({ adapter, port, token, layer = 'top', adapterType, specialistAvailable = false }) {
+function buildDegradedCapabilitySection() {
+  return `## Degraded mode
+
+Console API capabilities are disabled. You cannot inspect live board state, delegate tasks, execute workers, or review worker results through the Console API.
+
+There are three causes, and they need different fixes:
+- No human authentication token is configured — set PALANTIR_TOKEN.
+- The operator disabled agent capabilities — remove PALANTIR_AGENT_CAPABILITIES=disabled.
+- PALANTIR_TOKEN reached the Console through its own environment, where a same-UID process could read it back. Setting the token again does NOT help here. Bootstrap it instead through a mode-0600 one-shot file (PALANTIR_ACTOR_TOKEN_FILE), with no PALANTIR_TOKEN in the environment, or declare real process isolation with PALANTIR_AGENT_PROCESS_ISOLATION=verified.
+
+Explain the limitation to the user instead of attempting live API verification, and say that you cannot tell from inside which of the three applies. Any change requires restarting the Console.`;
+}
+
+function buildDegradedRoleSection() {
+  return `You are the Palantir Manager running without live Console capabilities.
+
+Your role in this mode is to explain the limitation accurately, help the user recover configuration, and avoid claiming that live board, task, agent, or worker state was verified.`;
+}
+
+function buildAttenuatedCapabilitySection({ base, adapterType, layer }) {
+  // base is computed once by the caller (PALANTIR_BASE_URL → HOST → localhost).
+  // Hardcoding localhost here made a remote manager send its bearer to whatever
+  // happened to listen on that port on ITS host.
+  const transport = (adapterType === 'codex' || adapterType === 'claude-code')
+    ? `Use curl with the runtime-only PALANTIR_MANAGER_TOKEN:
+\`\`\`
+curl -s ${base}/api/runs -H "Authorization: Bearer $PALANTIR_MANAGER_TOKEN"
+curl -s ${base}/api/agents -H "Authorization: Bearer $PALANTIR_MANAGER_TOKEN"
+curl -s -X POST ${base}/api/tasks -H "Authorization: Bearer $PALANTIR_MANAGER_TOKEN" -H "Content-Type: application/json" -d '{"title":"...","project_id":"..."}'
+curl -s -X POST ${base}/api/tasks/TASK_ID/execute -H "Authorization: Bearer $PALANTIR_MANAGER_TOKEN" -H "Content-Type: application/json" -d '{"agent_profile_id":"..."}'
+curl -s -X PATCH ${base}/api/tasks/TASK_ID/status -H "Authorization: Bearer $PALANTIR_MANAGER_TOKEN" -H "Content-Type: application/json" -d '{"status":"done"}'
+\`\`\``
+    : `Use WebFetch with Authorization: Bearer $PALANTIR_MANAGER_TOKEN for the allowed Console endpoints.`;
+  const approval = isProjectLayer(layer)
+    ? 'As an Operator, review worker results from the live run list and use corrective task execution when needed.'
+    : 'As the top-level dispatcher, never execute a task without explicit user approval.';
+  return `## Console API — shared-UID attenuated capability
+
+This process is not claimed to be isolated from same-UID siblings. They may be able to copy this capability. Its value comes from strict endpoint limits, short lifetime, run binding, a closed human cookie boundary, and audit events — not from sibling secrecy.
+
+The Console API section above still applies — dispatching, reading runs and events, and reviewing workers all work normally. This grade only narrows it, as follows.
+
+Refused at this grade (the server enforces each; do not attempt or recommend them):
+- Any DELETE.
+- PATCH /api/tasks/:id — use PATCH /api/tasks/:id/status instead.
+- Creating or changing verify checks. You may read them.
+- Posting to another manager's conversation. Address your own, or one a layer below you.
+- Sending input to, or cancelling, a manager run. Worker runs only.
+
+Human-authority endpoints (memory review, model policy, schedules, operator instances) require a human's cookie session and are refused for every manager grade, not just this one.
+
+${approval}
+
+${transport}`;
+}
+
+function buildManagerSystemPrompt({
+  adapter,
+  port,
+  token,
+  layer = 'top',
+  adapterType,
+  specialistAvailable = false,
+  capabilityTier = token ? 'isolated' : 'disabled',
+}) {
   const guardrails = adapter && typeof adapter.buildGuardrailsSection === 'function'
     ? adapter.buildGuardrailsSection()
     : '';
+  if (!token || capabilityTier === 'disabled') {
+    return [
+      buildDegradedRoleSection(),
+      guardrails,
+      buildDegradedCapabilitySection(),
+    ].filter(Boolean).join('\n\n');
+  }
+  if (capabilityTier === 'shared_uid_attenuated') {
+    // Attenuated is a WORKING grade — the manager really can dispatch, review
+    // workers and read the board. Only the credential's strength differs, so it
+    // keeps the full common base (layer role, worker review loop, Learned Memory
+    // pointer) and gains a section describing the narrowed surface. Dropping the
+    // base here silently demoted the Operator to something close to degraded.
+    return [
+      buildRoleSection(),
+      guardrails,
+      buildCommonBase({ port, token, layer, adapterType, specialistAvailable, capabilityTier }),
+      buildAttenuatedCapabilitySection({ base: resolveApiBase(port), adapterType, layer }),
+    ].filter(Boolean).join('\n\n');
+  }
   return [
     buildRoleSection(),
     guardrails,
-    buildCommonBase({ port, token, layer, adapterType, specialistAvailable }),
+    buildCommonBase({ port, token, layer, adapterType, specialistAvailable, capabilityTier }),
   ].filter(Boolean).join('\n\n');
 }
 

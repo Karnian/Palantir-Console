@@ -154,15 +154,32 @@ function consumeActorTokenFile({
 
   // Never publish these globals into process.env: same-UID local agents may
   // be able to inspect the Console environment.
+  let ambientActorTokens = false;
   for (const key of Object.keys(env)) {
     const normalized = key.toUpperCase();
     if (normalized === 'PALANTIR_TOKEN' || normalized === 'PALANTIR_PM_TOKEN') {
+      // An empty value is not a usable credential, so it is nothing for a
+      // sibling to recover. Launchers routinely declare optional secrets as
+      // empty; treating that as taint would disable capabilities for a
+      // perfectly safe bootstrap.
+      if (typeof env[key] === 'string' && env[key] !== '') ambientActorTokens = true;
       delete env[key];
     }
   }
   delete env.PALANTIR_ACTOR_TOKEN_FILE;
   return {
-    source: 'ephemeral_file',
+    // Deleting a key from `process.env` does NOT rewrite the process image that
+    // `/proc/<pid>/environ` exposes on Linux — that reflects the environment as
+    // it was at exec. So a deployment that sets PALANTIR_TOKEN in the
+    // environment AND passes a token file (the obvious way to migrate) leaves
+    // the original token recoverable by exactly the same-UID sibling this
+    // bootstrap exists to defend against.
+    //
+    // Such a boot is reported as tainted rather than assured. Auth still works;
+    // only the attenuated capability grade, whose whole premise is that the
+    // human token is unrecoverable, is withheld.
+    source: ambientActorTokens ? 'ephemeral_file_tainted' : 'ephemeral_file',
+    ambientActorTokens,
     tokenPath,
     authToken: humanToken,
     pmToken: pmToken || null,
@@ -185,10 +202,41 @@ function prepareActorTokenEnvironment(options = {}) {
 // is verified only when boot consumed an ephemeral token file (or an embedder
 // supplied application-owned options); direct env is marked unverified.
 //
-// Run capabilities are a second, independent boundary. A same-UID process can
-// inspect another process's environment on supported hosts, so no manager or
-// worker capability may be minted unless the deployer has placed agents behind
-// a real OS-user/container boundary and explicitly attested that fact.
+// Run capabilities are a second, independent boundary. PALANTIR_AGENT_PROCESS_ISOLATION
+// may claim sibling confidentiality only when it is explicitly `verified`.
+// Without that claim, a same-UID sibling may be able to read a manager's
+// environment (subject to the host's ptrace/dumpable/LSM or code-signing
+// controls). We therefore describe the default honestly as attenuated, not
+// isolated: a stolen capability still cannot cross the human cookie boundary,
+// is restricted to a small orchestration allowlist, expires, and is audited.
+
+// #436: whether an actor token was in THIS process's environment, captured at
+// module load — the earliest point this file can observe. `/proc/<pid>/environ`
+// reports the environment as it was at exec, so a token that was ever there
+// stays recoverable by a same-UID sibling however thoroughly it is deleted
+// afterwards. A check that reads `process.env` later is defeated by simply
+// deleting the variable first, which is exactly what a careful embedder does:
+//
+//   const token = process.env.PALANTIR_TOKEN;
+//   delete process.env.PALANTIR_TOKEN;
+//   createApp({ authToken: token });      // looks clean, is not
+//
+// Keys are matched case-insensitively because the environment is not.
+function scanAmbientActorTokens(env) {
+  for (const key of Object.keys(env || {})) {
+    const normalized = key.toUpperCase();
+    if (normalized !== 'PALANTIR_TOKEN' && normalized !== 'PALANTIR_PM_TOKEN') continue;
+    // An empty value is not a usable credential and so is nothing to recover.
+    if (typeof env[key] === 'string' && env[key] !== '') return true;
+  }
+  return false;
+}
+
+const AMBIENT_ACTOR_TOKENS_AT_LOAD = scanAmbientActorTokens(process.env);
+
+function hadAmbientActorTokensAtLoad() {
+  return AMBIENT_ACTOR_TOKENS_AT_LOAD;
+}
 
 function resolveActorTokenPolicy(env = process.env) {
   const humanToken = typeof env.PALANTIR_TOKEN === 'string' && env.PALANTIR_TOKEN
@@ -201,18 +249,51 @@ function resolveActorTokenPolicy(env = process.env) {
   const source = env.PALANTIR_ACTOR_TOKEN_SOURCE;
   const sourceAssured = source === 'ephemeral_file' || source === 'application_options';
   const processIsolated = env.PALANTIR_AGENT_PROCESS_ISOLATION === 'verified';
-  const capabilitiesEnabled = !!(humanToken && processIsolated);
+  // A security kill switch must not fail open on a typo: anything other than
+  // the two known values aborts rather than silently granting capabilities.
+  const rawCapabilities = env.PALANTIR_AGENT_CAPABILITIES;
+  if (rawCapabilities !== undefined && rawCapabilities !== ''
+      && rawCapabilities !== 'disabled' && rawCapabilities !== 'enabled') {
+    const err = new Error(
+      `PALANTIR_AGENT_CAPABILITIES must be 'disabled' or 'enabled' (got ${JSON.stringify(rawCapabilities)})`);
+    err.code = 'PALANTIR_AGENT_CAPABILITIES_INVALID';
+    throw err;
+  }
+  const capabilitiesForcedDisabled = rawCapabilities === 'disabled';
+  // #436: the `shared_uid_attenuated` grade was designed, reviewed across eight
+  // adversarial rounds, and withdrawn. Making a COPYABLE credential safe needs
+  // an ownership model this codebase does not have — per-grant ownership on
+  // every run, event and output; no vendor resume handles in event payloads
+  // (four producers write them); exec-time proof that the human token was never
+  // in this process's environment; and a cost budget that bounds a copied token
+  // without denying the real manager. `isolated` needs none of that, because
+  // there the credential is not copyable in the first place.
+  //
+  // So the grade stays binary. What survived that work — the allowlist being
+  // DERIVED from the isolated rules, the conversation direction rule, the
+  // manager-run intervention guard, the audit — applies to `isolated` and is
+  // kept. See the attenuated-grade issue before reintroducing a middle grade.
+  const capabilityTier = !humanToken || capabilitiesForcedDisabled || !processIsolated
+    ? 'disabled'
+    : 'isolated';
+  const capabilitiesEnabled = capabilityTier !== 'disabled';
   return {
     humanToken,
     agentToken: separated ? pmToken : humanToken,
     separated,
     processIsolated,
+    capabilitiesForcedDisabled,
+    capabilityTier,
     capabilitiesEnabled,
     boundary: humanToken
       ? (
-        capabilitiesEnabled
+        capabilityTier === 'isolated'
           ? (sourceAssured ? 'run_capabilities' : 'run_capabilities_unverified')
-          : 'agent_capabilities_disabled'
+          : (
+            capabilityTier === 'shared_uid_attenuated'
+              ? 'shared_uid_attenuated'
+              : 'agent_capabilities_disabled'
+          )
       )
       : 'auth_disabled',
   };
@@ -348,7 +429,7 @@ function applyManagerCredentialPolicy(explicitEnv = {}, {
   const env = stripActorCredentials({ ...(explicitEnv || {}) });
   if (typeof managerToken === 'string' && managerToken) {
     if (!actorTokenPolicyFrom(actorTokens).capabilitiesEnabled) {
-      throw new Error('manager capability requires verified agent process isolation');
+      throw new Error('manager capability is disabled by actor token policy');
     }
     env.PALANTIR_MANAGER_TOKEN = managerToken;
   }
@@ -363,7 +444,7 @@ function applyWorkerCredentialPolicy(explicitEnv = {}, {
   const merged = stripActorCredentials({ ...(explicitEnv || {}) });
   if (typeof workerToken === 'string' && workerToken) {
     if (!actorTokenPolicyFrom(actorTokens).capabilitiesEnabled) {
-      throw new Error('worker capability requires verified agent process isolation');
+      throw new Error('worker capability is disabled by actor token policy');
     }
     merged.PALANTIR_WORKER_TOKEN = workerToken;
   }
@@ -452,11 +533,30 @@ function createWorkerProposalTokenService({
 function createManagerCapabilityTokenService({
   actorTokens = resolveActorTokenPolicy(),
   signingKey: injectedSigningKey = null,
+  now = () => Date.now(),
+  // Managers are long-lived sessions and the token is injected once, at spawn —
+  // there is no channel to hand the process a fresh one. A 5-minute TTL
+  // therefore did not attenuate anything, it just made the whole capability
+  // stop working five minutes in, which is the exact 403 this issue is about.
+  //
+  // Real revocation here is run-boundedness, enforced synchronously on EVERY
+  // request: the grant must match a live registry slot whose run is still
+  // non-terminal (see isManagerCapabilityActive). Ending the run kills the
+  // token immediately, which a wall clock cannot do. The absolute expiry stays
+  // as a backstop for a credential that leaks into a log and is replayed long
+  // after, so it is sized to a working session rather than to a turn.
+  attenuatedTtlMs = Number.parseInt(process.env.PALANTIR_MANAGER_TOKEN_TTL_MS || '', 10) > 0
+    ? Math.min(Number.parseInt(process.env.PALANTIR_MANAGER_TOKEN_TTL_MS, 10), 24 * 60 * 60 * 1000)
+    : 8 * 60 * 60 * 1000,
 } = {}) {
   const policy = actorTokenPolicyFrom(actorTokens);
   const signingKey = policy.capabilitiesEnabled
     ? (injectedSigningKey || crypto.randomBytes(32))
     : null;
+  const MAX_ATTENUATED_TTL_MS = 24 * 60 * 60 * 1000;
+  if (!Number.isSafeInteger(attenuatedTtlMs) || attenuatedTtlMs <= 0 || attenuatedTtlMs > MAX_ATTENUATED_TTL_MS) {
+    throw new Error(`attenuated manager capability TTL must be 1..${MAX_ATTENUATED_TTL_MS}ms`);
+  }
 
   function mint(runId, {
     conversationId,
@@ -478,27 +578,48 @@ function createManagerCapabilityTokenService({
     if (managerLayer !== 'top' && managerLayer !== 'operator' && managerLayer !== 'pm') {
       throw new Error('manager capability requires a valid layer');
     }
-    const encoded = Buffer.from(JSON.stringify({
+    const baseClaims = {
       runId: id,
       conversationId: conversation,
       layer: managerLayer,
-    }), 'utf8').toString('base64url');
+    };
+    // Keep verified/isolated tokens byte-for-byte compatible. The attenuated
+    // format carries its honest tier plus an absolute expiry and is never
+    // accepted after that deadline.
+    const claims = policy.capabilityTier === 'shared_uid_attenuated'
+      ? {
+        ...baseClaims,
+        capabilityTier: 'shared_uid_attenuated',
+        expiresAt: now() + attenuatedTtlMs,
+      }
+      : baseClaims;
+    const encoded = Buffer.from(JSON.stringify(claims), 'utf8').toString('base64url');
+    const version = policy.capabilityTier === 'shared_uid_attenuated'
+      ? 'manager-v2'
+      : 'manager-v1';
     const signature = crypto
       .createHmac('sha256', signingKey)
-      .update(`manager-v1\0${encoded}`)
+      .update(`${version}\0${encoded}`)
       .digest('base64url');
-    return `palm1.${encoded}.${signature}`;
+    return `${version === 'manager-v2' ? 'palm2' : 'palm1'}.${encoded}.${signature}`;
   }
 
-  function verify(token) {
-    if (!signingKey || typeof token !== 'string') return null;
+  const NOT_A_TOKEN = Object.freeze({ signatureValid: false, expired: false, grant: null });
+
+  function inspectToken(token) {
+    if (!signingKey || typeof token !== 'string') return NOT_A_TOKEN;
     const parts = token.split('.');
-    if (parts.length !== 3 || parts[0] !== 'palm1') return null;
+    const attenuated = parts[0] === 'palm2';
+    if (
+      parts.length !== 3
+      || (parts[0] !== 'palm1' && !attenuated)
+      || (attenuated && policy.capabilityTier !== 'shared_uid_attenuated')
+    ) return NOT_A_TOKEN;
     let claims;
     try {
       claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
     } catch {
-      return null;
+      return NOT_A_TOKEN;
     }
     const runId = claims && typeof claims === 'object' && !Array.isArray(claims)
       ? claims.runId
@@ -507,6 +628,15 @@ function createManagerCapabilityTokenService({
       ? claims.conversationId
       : null;
     const layer = claims && typeof claims === 'object' ? claims.layer : null;
+    const capabilityTier = claims && typeof claims === 'object'
+      ? claims.capabilityTier
+      : null;
+    const expiresAt = claims && typeof claims === 'object'
+      ? claims.expiresAt
+      : null;
+    const canonicalClaims = attenuated
+      ? { runId, conversationId, layer, capabilityTier, expiresAt }
+      : { runId, conversationId, layer };
     if (
       typeof runId !== 'string'
       || !/^[A-Za-z0-9_-]{1,128}$/.test(runId)
@@ -515,23 +645,46 @@ function createManagerCapabilityTokenService({
         && !/^operator:[A-Za-z0-9_-]{1,128}$/.test(conversationId)
       )
       || !['top', 'operator', 'pm'].includes(layer)
-      || Buffer.from(JSON.stringify({ runId, conversationId, layer }), 'utf8').toString('base64url') !== parts[1]
+      || (attenuated && (
+        capabilityTier !== 'shared_uid_attenuated'
+        || !Number.isSafeInteger(expiresAt)
+      ))
+      || Buffer.from(JSON.stringify(canonicalClaims), 'utf8').toString('base64url') !== parts[1]
     ) {
-      return null;
+      return NOT_A_TOKEN;
     }
     const expected = crypto
       .createHmac('sha256', signingKey)
-      .update(`manager-v1\0${parts[1]}`)
+      .update(`${attenuated ? 'manager-v2' : 'manager-v1'}\0${parts[1]}`)
       .digest();
     let presented;
-    try { presented = Buffer.from(parts[2], 'base64url'); } catch { return null; }
+    try { presented = Buffer.from(parts[2], 'base64url'); } catch { return NOT_A_TOKEN; }
     if (presented.length !== expected.length || !crypto.timingSafeEqual(presented, expected)) {
-      return null;
+      return NOT_A_TOKEN;
     }
-    return { runId, conversationId, layer };
+    // #436: expiry is evaluated AFTER the signature so a validly-signed but
+    // expired capability is distinguishable from a forgery. It still fails, but
+    // it is a REAL credential used past its life, which the audit has to record.
+    // Checking expiry first made that request look like garbage and it left no
+    // trace at all.
+    const grant = attenuated
+      ? { runId, conversationId, layer, capabilityTier, expiresAt }
+      : { runId, conversationId, layer };
+    return { signatureValid: true, expired: !!(attenuated && expiresAt <= now()), grant };
   }
 
-  return { mint, verify };
+  // Full-fidelity result for the audit path: tells "not our token" apart from
+  // "our token, expired". Authorization callers use verify().
+  function inspect(token) {
+    return inspectToken(token);
+  }
+
+  function verify(token) {
+    const result = inspectToken(token);
+    return result.signatureValid && !result.expired ? result.grant : null;
+  }
+
+  return { mint, verify, inspect };
 }
 
 module.exports = {
@@ -541,6 +694,8 @@ module.exports = {
   consumeActorTokenFile,
   prepareActorTokenEnvironment,
   resolveActorTokenPolicy,
+  scanAmbientActorTokens,
+  hadAmbientActorTokensAtLoad,
   isActorCredentialKey,
   buildWorkerProcessEnv,
   augmentProcessPath,

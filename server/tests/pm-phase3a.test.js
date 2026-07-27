@@ -1523,8 +1523,8 @@ test('Phase 3a: PM system prompt uses layer=operator variant', () => {
   const fakeAdapter = {
     buildGuardrailsSection: () => '## Adapter Guardrails\nTest.',
   };
-  const topPrompt = buildManagerSystemPrompt({ adapter: fakeAdapter, port: 4177, layer: 'top' });
-  const pmPrompt = buildManagerSystemPrompt({ adapter: fakeAdapter, port: 4177, layer: 'operator' });
+  const topPrompt = buildManagerSystemPrompt({ token: 'cap-token', adapter: fakeAdapter, port: 4177, layer: 'top' });
+  const pmPrompt = buildManagerSystemPrompt({ token: 'cap-token', adapter: fakeAdapter, port: 4177, layer: 'operator' });
   assert.match(topPrompt, /top-level dispatcher/);
   assert.match(pmPrompt, /project-scoped dispatcher/);
   // PM gets worker intervention APIs (input/cancel), Top does not

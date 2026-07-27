@@ -43,7 +43,7 @@ test('buildManagerSystemPrompt composes role + adapter guardrails + base', () =>
     type: 'fake',
     buildGuardrailsSection() { return '## fake adapter notes\nDo nothing.'; },
   };
-  const out = buildManagerSystemPrompt({ adapter: fakeAdapter, port: 4177, token: null });
+  const out = buildManagerSystemPrompt({ adapter: fakeAdapter, port: 4177, token: true });
   assert.match(out, /Palantir Manager/);
   assert.match(out, /fake adapter notes/);
   assert.match(out, /\/api\/runs/);
@@ -823,11 +823,14 @@ test('Fleet P5: source invariant — Bash(curl string literal exists in claudeAd
   assert.equal(hasCurlLiteral, true, 'Bash(curl must appear as a string literal in baseTools array');
 });
 
-test('P4-7: system prompt fallback for non-curl adapters does not use curl examples', () => {
+test('P4-7: manager without a capability receives degraded guidance and no API instructions', () => {
   const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
   const out = buildManagerSystemPrompt({ adapter: null, port: 4177, token: 'tok' });
-  assert.match(out, /WebFetch/, 'system prompt should mention WebFetch');
+  const degraded = buildManagerSystemPrompt({ adapter: null, port: 4177, token: null });
+  assert.match(out, /WebFetch/, 'isolated non-curl prompt should mention WebFetch');
   assert.doesNotMatch(out, /curl -s/, 'system prompt should not contain curl -s examples');
+  assert.match(degraded, /Degraded mode/);
+  assert.doesNotMatch(degraded, /\/api\//);
 });
 
 test('Fleet P5: claude-code manager prompt emits curl POST templates', () => {

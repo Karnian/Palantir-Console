@@ -623,7 +623,7 @@ test('app manager capability expires with the active registry slot', async (t) =
   assert.equal(app.managerRegistry.getActiveRunId('top'), null);
 });
 
-test('app honors an explicit agent process isolation opt-out over ambient verification', async (t) => {
+test('app turns an explicit process isolation opt-out into the attenuated grade', async (t) => {
   const previousIsolation = process.env.PALANTIR_AGENT_PROCESS_ISOLATION;
   process.env.PALANTIR_AGENT_PROCESS_ISOLATION = 'verified';
   t.after(() => {
@@ -636,11 +636,16 @@ test('app honors an explicit agent process isolation opt-out over ambient verifi
     pmToken: 'automation-global',
     agentProcessIsolation: false,
   });
-  assert.equal(app.services.managerCapabilityTokenService.mint('run_top', {
+  const managerToken = app.services.managerCapabilityTokenService.mint('run_top', {
     conversationId: 'top',
     layer: 'top',
-  }), null);
-  assert.equal(app.services.workerProposalTokenService.mint('run_worker', {
+  });
+  assert.match(managerToken, /^palm2\./);
+  assert.equal(
+    app.services.managerCapabilityTokenService.verify(managerToken).capabilityTier,
+    'shared_uid_attenuated',
+  );
+  assert.match(app.services.workerProposalTokenService.mint('run_worker', {
     projectId: 'project_one',
-  }), null);
+  }), /^palw2\./);
 });

@@ -87,6 +87,8 @@ const {
   resolveActorTokenPolicy,
   createWorkerProposalTokenService,
   createManagerCapabilityTokenService,
+  scanAmbientActorTokens,
+  hadAmbientActorTokensAtLoad,
 } = require('./services/actorTokenPolicy');
 const { createOperatorSpecialistRouter } = require('./routes/operatorSpecialist');
 const { createOperatorProfilesRouter } = require('./routes/operatorProfiles');
@@ -137,6 +139,7 @@ const { createCompositionLedger } = require('./services/compositionLedger');
 // Operator P-B2c: folder-less specialist backend + spawn service (flag-gated, unrouted)
 const { createSpecialistBackend } = require('./services/specialistBackend');
 const { createSpecialistService } = require('./services/specialistService');
+
 
 const AUTO_REVIEW_MAX = 5;
 const REVIEW_TEXT_CAP = 1000;
@@ -1071,9 +1074,20 @@ function createApp(options = {}) {
   // An application-owned boundary is valid only when every configured actor
   // credential came from options. Supplying just one option must not relabel
   // a sibling token inherited from process.env as securely isolated.
+  // ...and only when no actor token is ALSO sitting in this process's
+  // environment. On Linux `/proc/<pid>/environ` reports the environment as it
+  // was at exec, so an ambient token stays readable by a same-UID sibling no
+  // matter what the embedder passes in options.
+  // Reading process.env HERE is too late — an embedder that deletes the
+  // variable before calling createApp would look clean while the token is still
+  // in the process image. Use the load-time capture instead, and keep the live
+  // read as well so a token added after load is not missed either.
+  const ambientActorTokenPresent = hadAmbientActorTokensAtLoad()
+    || scanAmbientActorTokens(process.env);
   const allConfiguredActorTokensFromOptions = (
     (!authToken || options.authToken !== undefined)
     && (!pmToken || options.pmToken !== undefined)
+    && !ambientActorTokenPresent
   );
   const actorTokenPolicy = resolveActorTokenPolicy({
     PALANTIR_TOKEN: authToken,
@@ -1083,6 +1097,9 @@ function createApp(options = {}) {
     PALANTIR_AGENT_PROCESS_ISOLATION: options.agentProcessIsolation === undefined
       ? process.env.PALANTIR_AGENT_PROCESS_ISOLATION
       : (options.agentProcessIsolation === true ? 'verified' : null),
+    PALANTIR_AGENT_CAPABILITIES: options.agentCapabilities === undefined
+      ? process.env.PALANTIR_AGENT_CAPABILITIES
+      : options.agentCapabilities,
     PALANTIR_ACTOR_TOKEN_SOURCE: options.actorTokenSource
       || (allConfiguredActorTokensFromOptions
         ? 'application_options'
@@ -1350,6 +1367,15 @@ function createApp(options = {}) {
     if (event.channel !== 'task:updated') return;
     const task = event.data && event.data.task;
     if (!task || !task.goal_enabled || task.status !== 'done') return;
+    // #436: delivery force-points a git ref, which routes/tasks.js declares a
+    // human-authority action (cookie-only on the manual endpoint). An attenuated
+    // manager token may PATCH status, so without this check it would reach that
+    // same authority through the side effect instead of the guarded route.
+    const actor = event.data && event.data.actor;
+    if (actor && actor.capabilityTier === 'shared_uid_attenuated') {
+      console.warn(`[app] Goal delivery skipped for task ${task.id}: attenuated manager capability is not human authority`);
+      return;
+    }
     Promise.resolve(goalDeliveryService.deliver(task.id)).catch((err) => {
       console.warn(`[app] Goal delivery failed for task ${task.id}: ${err && err.message}`);
     });
@@ -1720,6 +1746,84 @@ function createApp(options = {}) {
     pmToken,
     workerProposalTokenService,
     managerCapabilityTokenService,
+    onManagerCapabilityUse(req, grant, outcome) {
+      const rawPath = String(req.originalUrl || req.url || '').split('?')[0];
+      const method = String(req.method || 'GET').toUpperCase();
+      const allowed = outcome.allowed === true;
+
+      // #436: every capability request is audited. This write is unbounded by
+      // design here — bounding it correctly needs a time-windowed rate limit and
+      // an audit store separate from `run_events` (whose cursor-less reads
+      // return only the oldest 1,000 rows, so audit rows can push out the
+      // manager's own assistant/result events). A per-run lifetime budget was
+      // tried and withdrawn: it let a copied token permanently 429 the real
+      // manager, and it applied to the isolated tier too, which has no such
+      // exposure. Tracked separately rather than half-solved here.
+      try {
+        runService.addRunEvent(
+          grant.runId,
+          'manager_capability:used',
+          JSON.stringify({
+            capability_tier: grant.capabilityTier || 'isolated',
+            method,
+            path: rawPath,
+            // The capability LAYER's decision. Route-level ownership checks run
+            // after this and can still refuse; `outcome_status` below carries
+            // what actually happened so the two are never conflated.
+            allowed,
+            reason: outcome.reason || null,
+          }),
+        );
+      } catch (err) {
+        // An unrecorded allow is exactly the case the control exists for, so it
+        // cannot be best-effort. Denials still swallow: the request is refused
+        // either way and the run row may already be gone.
+        if (allowed) {
+          const error = new Error('manager capability audit could not be recorded');
+          error.statusCode = 503;
+          error.cause = err;
+          throw error;
+        }
+        return;
+      }
+
+      // The capability layer allowed it, but four routes still apply their own
+      // ownership checks (task execute `pm_run_id`, dispatch audit, operator
+      // specialist origin run, conversation memory proposals). Without this the
+      // audit reported `allowed:true` for a request that ended in 403. Record
+      // the refusal once the real status is known; successes add no extra row.
+      const res = outcome.res;
+      if (allowed && res && typeof res.once === 'function') {
+        res.once('finish', () => {
+          try {
+            const status = Number(res.statusCode) || 0;
+            if (status < 400) return;
+            runService.addRunEvent(
+              grant.runId,
+              'manager_capability:refused_downstream',
+              JSON.stringify({
+                capability_tier: grant.capabilityTier || 'isolated',
+                method,
+                path: rawPath,
+                outcome_status: status,
+              }),
+            );
+          } catch { /* the response is already sent; nothing to fail closed on */ }
+        });
+      }
+    },
+    // #436: lets the capability predicate refuse manager-to-manager
+    // intervention at the auth layer, so the refusal is audited and cannot be
+    // stranded behind a route's own ordering. Fails closed on lookup error.
+    isManagerRun(runId) {
+      try {
+        const run = runService.getRun(runId);
+        if (!run) return null;
+        return !!run.is_manager;
+      } catch {
+        return null;
+      }
+    },
     isManagerCapabilityActive(grant) {
       try {
         // A registry entry can briefly outlive a crashed manager process.
@@ -1731,6 +1835,14 @@ function createApp(options = {}) {
           || (run.manager_layer === 'top' || !run.manager_layer ? 'top' : null);
         const managerLayer = run.manager_layer
           || (conversationId === 'top' ? 'top' : null);
+        // #436: registry liveness alone is not revocation. A run whose DB status
+        // is terminal must not keep authorizing requests just because a slot and
+        // an adapter still look alive.
+        const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'stopped']);
+        if (TERMINAL.has(String(run.status || ''))) {
+          try { managerRegistry.clearActive(grant.conversationId); } catch { /* best effort */ }
+          return false;
+        }
         return !!(
           run.is_manager
           && conversationId === grant.conversationId
@@ -1921,6 +2033,9 @@ function createApp(options = {}) {
   // app.shutdown() with a live slot without reimplementing the sweep
   // algorithm. Production callers have no reason to reach for it.
   app.managerRegistry = managerRegistry;
+  // Exposed so the startup banner reports the tier that was actually RESOLVED
+  // rather than re-deriving it from env and drifting out of sync.
+  app.actorTokenPolicy = actorTokenPolicy;
   app.closeDb = closeDb;
   // R2-B.2: tests need direct service access to craft run rows with a
   // worktree_path without spinning up the full tmux/adapter pipeline.

@@ -1,5 +1,10 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
+const { attenuatedRunGrant, toCapabilityRunView } = require('../utils/capabilityRunView');
+
+// Ceiling on unfinished worker runs a single attenuated grant may have in
+// flight. Far above what one manager legitimately drives at once.
+const ATTENUATED_INFLIGHT_RUN_LIMIT = 50;
 const { validateCreateTask, validateUpdateTask } = require('../middleware/validate');
 const { NotFoundError } = require('../utils/errors');
 const { redactSecrets } = require('../services/memorySanitize');
@@ -155,7 +160,9 @@ function createTasksRouter({ taskService, lifecycleService, presetService, goalD
 
   router.patch('/:id/status', asyncHandler(async (req, res) => {
     const { status } = req.body || {};
-    const task = taskService.updateTaskStatus(req.params.id, status);
+    const task = taskService.updateTaskStatus(req.params.id, status, {
+      actor: { method: req.auth?.method || 'none', capabilityTier: req.auth?.capabilityTier || null },
+    });
     res.json({ task });
   }));
 
@@ -208,6 +215,29 @@ function createTasksRouter({ taskService, lifecycleService, presetService, goalD
         return res.status(403).json({ error: 'Operator capability must use its own pm_run_id' });
       }
     }
+    // #436: an attenuated credential is assumed copyable, so dispatch authority
+    // needs a ceiling on work IN FLIGHT — not on requests. `max_concurrent` only
+    // paces execution; past it the extra runs queue and still run later, so a
+    // copied token could pile up unbounded worker spawns, model cost, worktrees
+    // and processes for the life of the grant. Finished runs free the budget, so
+    // a real manager working through its queue is never blocked.
+    const attenuatedGrant = attenuatedRunGrant(req);
+    if (attenuatedGrant && attenuatedGrant.managerRunId
+      && typeof runService?.countUnfinishedForManagerRun === 'function') {
+      let inFlight = 0;
+      try {
+        inFlight = runService.countUnfinishedForManagerRun(attenuatedGrant.managerRunId);
+      } catch {
+        inFlight = 0; // an accounting failure must not stop legitimate dispatch
+      }
+      if (inFlight >= ATTENUATED_INFLIGHT_RUN_LIMIT) {
+        return res.status(429).json({
+          error: 'attenuated manager capability has too many runs in flight',
+          in_flight: inFlight,
+          limit: ATTENUATED_INFLIGHT_RUN_LIMIT,
+        });
+      }
+    }
     if (!agent_profile_id) {
       return res.status(400).json({ error: 'agent_profile_id is required' });
     }
@@ -224,7 +254,11 @@ function createTasksRouter({ taskService, lifecycleService, presetService, goalD
       presetId: preset_id || undefined,
       pmRunId: typeof pm_run_id === 'string' ? pm_run_id : null,
     });
-    res.status(201).json({ run });
+    // #436: this returns a freshly written run row, which by then carries
+    // `mcp_config_snapshot` and `tmux_session`. Project it the same way the run
+    // observation routes do, or execute becomes the hole the DTO closed there.
+    const grant = attenuatedRunGrant(req);
+    res.status(201).json({ run: grant ? toCapabilityRunView(run) : run });
   }));
 
   return router;

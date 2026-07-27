@@ -64,6 +64,16 @@ function parseMcpTools(capabilitiesJson) {
 // get the real keychain probe.
 function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, operatorInstanceService, modelPolicyService, isSpecialistAvailable = () => false, authResolverOpts = {}, actorTokens = resolveActorTokenPolicy(), managerCapabilityTokenService = null, goalFeatureActive = defaultGoalFeatureActive }) {
   const router = express.Router();
+  // Expose the grade even with no active slot so the UI can explain whether
+  // orchestration is isolated, honestly attenuated, or disabled.
+  router.use('/status', (req, res, next) => {
+    const sendJson = res.json.bind(res);
+    res.json = (body) => sendJson({
+      ...(body && typeof body === 'object' ? body : {}),
+      capabilityTier: actorTokens.capabilityTier,
+    });
+    next();
+  });
   const actorSpawnBaseEnv = applyManagerCredentialPolicy(process.env);
   if (actorTokens.humanToken && !managerCapabilityTokenService) {
     throw new Error('authenticated manager router requires managerCapabilityTokenService');
@@ -156,7 +166,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           const port = process.env.PORT || 4177;
           const token = managerTokenFor(r, r.manager_layer || 'top', r.conversation_id || 'top');
           const systemPrompt = [
-            buildManagerSystemPromptModule({ adapter, port, token: !!token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable() }),
+            buildManagerSystemPromptModule({ adapter, port, token: !!token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable(), capabilityTier: actorTokens.capabilityTier }),
             buildTopIdentitySection({ topRunId: r.id }), // MD-2a: resumed Top's own run id
           ].filter(Boolean).join('\n\n');
           const authCtx = resolveManagerAuth(adapterType, authResolverOpts);
@@ -365,7 +375,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 // only goal mode.
                 const goalActive = goalFeatureActive();
                 const token = managerTokenFor(r, r.manager_layer || 'operator', r.conversation_id);
-                const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token: !!token, layer: 'operator', adapterType, specialistAvailable: isSpecialistAvailable() });
+                const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token: !!token, layer: 'operator', adapterType, specialistAvailable: isSpecialistAvailable(), capabilityTier: actorTokens.capabilityTier });
                 // A2b: shared builder — the resumed Operator's project-scoped
                 // sections are assembled by the SAME function as fresh spawn
                 // (server/services/operatorPromptSections), so the two paths can
@@ -695,7 +705,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     const port = process.env.PORT || 4177;
     const token = managerTokenFor(runId, 'top', 'top');
     const systemPrompt = [
-      buildManagerSystemPromptModule({ adapter, port, token: !!token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable() }),
+      buildManagerSystemPromptModule({ adapter, port, token: !!token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable(), capabilityTier: actorTokens.capabilityTier }),
       buildTopIdentitySection({ topRunId: runId }), // MD-2a: Top's own run id (cache-safe, appended after base)
     ].filter(Boolean).join('\n\n');
     const initialUserContext = buildInitialUserContext({

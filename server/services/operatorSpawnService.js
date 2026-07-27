@@ -607,7 +607,15 @@ function createOperatorSpawnService({
           layer: 'operator',
         })
       : null;
-    const baseSystemPrompt = buildManagerSystemPrompt({ adapter, port, token: !!token, layer: 'operator', adapterType, specialistAvailable: isSpecialistAvailable() });
+    const baseSystemPrompt = buildManagerSystemPrompt({
+      adapter,
+      port,
+      token: !!token,
+      layer: 'operator',
+      adapterType,
+      specialistAvailable: isSpecialistAvailable(),
+      capabilityTier: actorTokens.capabilityTier,
+    });
     const projectSection = buildProjectScopedSystemSection({ project, brief, operatorRunId: runId });
     const systemPrompt = [baseSystemPrompt, projectSection].filter(Boolean).join('\n\n');
 
