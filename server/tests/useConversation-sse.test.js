@@ -107,8 +107,24 @@ test('P2-8: useConversation SSE handler fences on activeIdRef and runIdRef befor
 
 test('P2-8: runIdRef is populated by resolve() after mount', () => {
   const body = sliceFn('useConversation');
-  assert.match(body, /runIdRef\.current\s*=\s*nextRun\s*\?\s*nextRun\.id\s*:\s*null/,
+  assert.match(body, /const\s+nextRunId\s*=\s*nextRun\?\.id\s*\|\|\s*null[\s\S]{0,500}?runIdRef\.current\s*=\s*nextRunId/,
     'resolve() must keep runIdRef in sync with the backing run id');
+});
+
+test('useConversation resets its event cursor when a stable conversation gets a new backing run', () => {
+  const body = sliceFn('useConversation');
+  assert.match(body, /const\s+lastBackingRunIdRef\s*=\s*useRef\(null\)/,
+    'the hook must retain the previous non-null backing run id');
+  assert.match(
+    body,
+    /lastBackingRunIdRef\.current\s*!==\s*nextRunId[\s\S]{0,180}?lastEventIdRef\.current\s*=\s*0[\s\S]{0,80}?setEvents\(\[\]\)/,
+    'a backing-run rollover must clear the incremental cursor and stale transcript',
+  );
+  assert.match(
+    body,
+    /const\s+result\s*=\s*await\s+resolve\(\)[\s\S]{0,260}?loadEvents\(\{\s*reset:\s*forceReset\s*\|\|\s*Boolean\(result\?\.runChanged\)\s*\}\)/,
+    'event loading must wait for run resolution and force a full load after rollover',
+  );
 });
 
 // ---- P2-8 R2 blocker: unmount race ----

@@ -237,6 +237,51 @@ test('MentionInput jsdom: inputRef.current.style.height is accessible', async (t
   inputRef.current.style.height = originalHeight;
 });
 
+test('MentionInput jsdom: controlled value changes resize and clear the textarea without input events', async (t) => {
+  const env = createEnv();
+  t.after(env.cleanup);
+  const { render, h } = env.context.preact;
+  const root = env.document.getElementById('root');
+  let measuredHeight = 240;
+
+  render(
+    h(env.context.MentionInput, {
+      value: '',
+      projects: PROJECTS,
+      onInput: () => {},
+    }),
+    root,
+  );
+  const textarea = root.querySelector('textarea');
+  Object.defineProperty(textarea, 'scrollHeight', {
+    configurable: true,
+    get: () => measuredHeight,
+  });
+
+  render(
+    h(env.context.MentionInput, {
+      value: '복원된 긴 초안',
+      projects: PROJECTS,
+      onInput: () => {},
+    }),
+    root,
+  );
+  await flushEffects();
+  assert.equal(textarea.style.height, '240px', 'programmatically restored drafts grow to their content');
+
+  measuredHeight = 40;
+  render(
+    h(env.context.MentionInput, {
+      value: '',
+      projects: PROJECTS,
+      onInput: () => {},
+    }),
+    root,
+  );
+  await flushEffects();
+  assert.equal(textarea.style.height, '40px', 'programmatic clears shrink the composer');
+});
+
 test('MentionInput jsdom: inputRef.current.focus() works without throwing', async (t) => {
   const env = createEnv();
   t.after(env.cleanup);

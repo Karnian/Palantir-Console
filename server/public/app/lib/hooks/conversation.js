@@ -38,6 +38,11 @@ export function useConversation(conversationId, { poll = true, pollMs = 10000 } 
   // subscription time — a ref lets us read the latest id without
   // re-subscribing on every resolve() completion.
   const runIdRef = useRef(null);
+  // Unlike runIdRef, retain the last non-null backing run across an inactive
+  // interval. A manager can stop and start again without changing its stable
+  // conversation id (`top` / `operator:*`), and that rollover must reset the
+  // event cursor instead of merging two run transcripts.
+  const lastBackingRunIdRef = useRef(null);
   // P2-8 R2 fix (Codex R1 blocker): an unmount-only tombstone separate
   // from activeIdRef. The existing activeIdRef fence catches id
   // CHANGES mid-await (the next render re-seats activeIdRef to the new
@@ -77,10 +82,22 @@ export function useConversation(conversationId, { poll = true, pollMs = 10000 } 
       if (!mountedRef.current) return;
       if (activeIdRef.current !== myId) return; // user already moved
       const nextRun = data.conversation?.run || null;
+      const nextRunId = nextRun?.id || null;
+      const runChanged = Boolean(
+        nextRunId
+        && lastBackingRunIdRef.current
+        && lastBackingRunIdRef.current !== nextRunId
+      );
+      if (runChanged) {
+        lastEventIdRef.current = 0;
+        setEvents([]);
+      }
       setRun(nextRun);
       // P2-8: keep runIdRef in sync so the SSE subscription filter can
       // tell which `run:event` frames belong to this conversation.
-      runIdRef.current = nextRun ? nextRun.id : null;
+      runIdRef.current = nextRunId;
+      if (nextRunId) lastBackingRunIdRef.current = nextRunId;
+      return { runChanged };
     } catch { /* 4xx — leave run null */ }
   }, [conversationId]);
 
@@ -242,10 +259,17 @@ export function useConversation(conversationId, { poll = true, pollMs = 10000 } 
     setLoading(false);
     lastEventIdRef.current = 0;
     runIdRef.current = null;
+    lastBackingRunIdRef.current = null;
 
-    resolve();
-    loadEvents({ reset: true });
-    loadQueuedMessages();
+    const refreshConversation = async ({ forceReset = false } = {}) => {
+      const result = await resolve();
+      if (!mountedRef.current || activeIdRef.current !== conversationId) return;
+      await Promise.all([
+        loadEvents({ reset: forceReset || Boolean(result?.runChanged) }),
+        loadQueuedMessages(),
+      ]);
+    };
+    refreshConversation({ forceReset: true });
 
     // P2-8: subscribe to run:event SSE frames on the module broker and
     // filter to this conversation's current backing run id. Handler
@@ -281,9 +305,7 @@ export function useConversation(conversationId, { poll = true, pollMs = 10000 } 
     }
     pollRef.current = setInterval(() => {
       if (activeIdRef.current !== conversationId) return;
-      resolve();
-      loadEvents();
-      loadQueuedMessages();
+      refreshConversation();
     }, pollMs);
     return () => {
       unsubscribe();
