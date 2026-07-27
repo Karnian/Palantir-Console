@@ -17,7 +17,7 @@ const { preflightHttpMcpConfig } = require('../services/mcpPreflight');
 
 const PROCESS_HIJACK_KEYS = ['LD_PRELOAD', 'NODE_OPTIONS', 'PATH', 'HOME'];
 
-async function makeHarness(t) {
+async function makeHarness(t, overrides = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'palantir-mcp-bearer-deny-'));
   const { db, migrate, close } = createDatabase(path.join(root, 'test.db'));
   migrate();
@@ -45,13 +45,20 @@ async function makeHarness(t) {
   const taskService = createTaskService(db);
   const projectService = createProjectService(db);
   const agentProfileService = createAgentProfileService(db);
-  const presetService = createPresetService(db, { pluginsRoot });
+  const defaultPresetService = createPresetService(db, { pluginsRoot });
+  // `presetService: null` is a supported production shape (the legacy merge
+  // fallback), so the override must be able to force it off rather than only
+  // replace it.
+  const presetService = Object.prototype.hasOwnProperty.call(overrides, 'presetService')
+    ? overrides.presetService
+    : defaultPresetService;
   const lifecycleService = createLifecycleService({
     runService,
     taskService,
     projectService,
     agentProfileService,
     presetService,
+    skillPackService: overrides.skillPackService || undefined,
     executionEngine,
     streamJsonEngine: null,
     worktreeService: null,
@@ -71,7 +78,7 @@ async function makeHarness(t) {
     runService,
     taskService,
     projectService,
-    presetService,
+    presetService: defaultPresetService,
     lifecycleService,
   };
 }
@@ -383,4 +390,102 @@ test('network preflight skip does not bypass process-hijack validation', async (
   assert.equal(out.failures.length, 1);
   assert.equal(out.failures[0].reason, 'bearer_env_process_hijack');
   assert.equal(out.failures[0].bearer_env, 'NODE_OPTIONS');
+});
+
+// ── codex adversarial review (PR B, MINOR): the three policy branches that the
+// first test matrix asserted only by reading the code. Each is a distinct way
+// the provenance gate could be wrong without any existing test noticing.
+
+function stubSkillPackService(mcpConfig) {
+  return {
+    resolveForRun: () => ({
+      mcpConfig,
+      warnings: [],
+      appliedPacks: [],
+      promptSections: [],
+    }),
+    recordRunSnapshots() {},
+  };
+}
+
+test('skill-pack MCP is trusted provenance and auto-allows its bearer key', async (t) => {
+  const h = await makeHarness(t, {
+    skillPackService: stubSkillPackService({
+      mcpServers: {
+        packHttp: {
+          url: 'http://127.0.0.1:3100/mcp',
+          bearer_token_env_var: 'PACK_MCP_TOKEN',
+        },
+      },
+    }),
+  });
+  enablePreflightSkip(t);
+  setEnv(t, 'PACK_MCP_TOKEN', 'host-value-for-PACK_MCP_TOKEN');
+
+  const project = h.projectService.createProject({ name: 'pack-trusted', directory: h.root });
+  const run = seedQueuedRun(h, project);
+  await h.lifecycleService.spawnQueuedRun(run.id);
+
+  assert.equal(h.runService.getRun(run.id).status !== 'failed', true, 'trusted pack must not be rejected');
+  assert.equal(
+    materializedSpawnEnv(h.spawned).PACK_MCP_TOKEN,
+    'host-value-for-PACK_MCP_TOKEN',
+    'skill-pack bearer key must reach the worker without a profile allowlist entry',
+  );
+});
+
+test('a shadowed alias is judged by the merge winner, not by the losing source', async (t) => {
+  // mergeMcp3 applies skillPack -> project -> preset with later overwriting, so
+  // preset WINS. If the gate walked sources in the other order it would judge
+  // the project's GITHUB_TOKEN for an alias the merge never uses, and fail a
+  // run that is actually safe.
+  const project = { name: 'alias-shadow' };
+  const h = await makeHarness(t);
+  enablePreflightSkip(t);
+  setEnv(t, 'SHADOW_MCP_TOKEN', 'host-value-for-SHADOW_MCP_TOKEN');
+  setEnv(t, 'GITHUB_TOKEN', 'host-value-for-GITHUB_TOKEN');
+
+  const projectDir = path.join(h.root, project.name);
+  fs.mkdirSync(projectDir);
+  const configPath = path.join(projectDir, 'mcp.json');
+  // Same alias the preset uses, but naming an unrelated host secret.
+  fs.writeFileSync(configPath, JSON.stringify({
+    mcpServers: {
+      sharedAlias: {
+        url: 'http://127.0.0.1:3100/mcp',
+        bearer_token_env_var: 'GITHUB_TOKEN',
+      },
+    },
+  }));
+  const proj = h.projectService.createProject({
+    name: project.name,
+    directory: projectDir,
+    mcp_config_path: configPath,
+  });
+  const preset = createRawHttpPreset(h, 'SHADOW_MCP_TOKEN', 'sharedAlias');
+
+  const run = seedQueuedRun(h, proj, { presetId: preset.id });
+  await h.lifecycleService.spawnQueuedRun(run.id);
+
+  assert.notEqual(h.runService.getRun(run.id).status, 'failed', 'winning preset alias is safe');
+  const env = materializedSpawnEnv(h.spawned);
+  assert.equal(env.SHADOW_MCP_TOKEN, 'host-value-for-SHADOW_MCP_TOKEN');
+  assertEnvAbsent(h.spawned, 'GITHUB_TOKEN');
+});
+
+test('the presetService-absent fallback still denies project bearer keys', async (t) => {
+  // presetService is optional; the legacy merge path below it must not become a
+  // hole where a project config regains auto-forwarding.
+  const h = await makeHarness(t, { presetService: null });
+  enablePreflightSkip(t);
+  setEnv(t, 'GITHUB_TOKEN', 'host-value-for-GITHUB_TOKEN');
+
+  const proj = writeProjectMcp(h, 'GITHUB_TOKEN', 'fallback-project');
+  const run = seedQueuedRun(h, proj);
+  await assert.rejects(
+    () => h.lifecycleService.spawnQueuedRun(run.id),
+    /bearer_env_untrusted_source/,
+  );
+
+  assertDeniedRun(h, run, 'GITHUB_TOKEN', 'bearer_env_untrusted_source', 'project');
 });
