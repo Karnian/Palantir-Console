@@ -53,6 +53,20 @@ export function MentionInput({ projects = [], inputRef: forwardedRef, onInput, o
   const [mentionIdx, setMentionIdx] = useState(0);
   const popupRef = useRef(null);
 
+  const resizeTextarea = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+  }, [textareaRef]);
+
+  // Keep controlled, programmatic value changes in sync too. ManagerChat may
+  // restore a draft after a failed send or clear it from a suggested action;
+  // neither path emits a native input event.
+  useEffect(() => {
+    resizeTextarea();
+  }, [value, resizeTextarea]);
+
   // Filtered candidates — case-insensitive prefix match on project name,
   // sorted by recently-used first.
   const candidates = useMemo(() => {
@@ -100,13 +114,12 @@ export function MentionInput({ projects = [], inputRef: forwardedRef, onInput, o
     const newValue = `${leading}@${project.name} `;
     // Synthesise an input event so the parent state (setInput) updates.
     el.value = newValue;
-    el.style.height = 'auto';
-    el.style.height = el.scrollHeight + 'px';
+    resizeTextarea();
     el.dispatchEvent(new Event('input', { bubbles: true }));
     setMentionQuery(null);
     recordRecent(project.id);
     el.focus();
-  }, [value, textareaRef]);
+  }, [value, textareaRef, resizeTextarea]);
 
   // Handle keydown: intercept up/down/Enter/Esc when popup is open, then fall
   // through to the parent's onKeyDown for everything else.
@@ -146,10 +159,11 @@ export function MentionInput({ projects = [], inputRef: forwardedRef, onInput, o
 
   // Handle input: keep mention query in sync with textarea value.
   const handleInput = useCallback((e) => {
+    resizeTextarea();
     const q = computeMentionQuery(e.target.value);
     setMentionQuery(q);
     if (onInput) onInput(e);
-  }, [computeMentionQuery, onInput]);
+  }, [computeMentionQuery, onInput, resizeTextarea]);
 
   // Sync query when value changes externally (e.g. on send the parent
   // resets value to '').

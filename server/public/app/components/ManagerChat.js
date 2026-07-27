@@ -201,6 +201,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
   // but a deliberate scroll upward must survive subsequent SSE/queue renders.
   const stickToBottomRef = useRef(true);
   const lastScrolledConversationRef = useRef(null);
+  const lastScrolledRunRef = useRef(null);
   const fileInputRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -222,6 +223,7 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     ));
     return [...serverQueuedMessages, ...local];
   }, [serverQueuedMessages, localQueuedMessages, conversationTarget]);
+  const chatRunId = isPm ? (pmConv.run?.id || null) : (status.run?.id || null);
 
   // Once SSE/the durable projection contains a message, retire its local
   // optimistic copy permanently. Otherwise an old optimistic row could
@@ -249,13 +251,18 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
   // following updates while the user remains at (or very near) the bottom.
   useEffect(() => {
     const targetChanged = lastScrolledConversationRef.current !== conversationTarget;
-    if (targetChanged) {
+    const runChanged = !targetChanged
+      && chatRunId
+      && lastScrolledRunRef.current
+      && lastScrolledRunRef.current !== chatRunId;
+    if (targetChanged || runChanged) {
       lastScrolledConversationRef.current = conversationTarget;
       stickToBottomRef.current = true;
     }
+    if (chatRunId) lastScrolledRunRef.current = chatRunId;
     if (!stickToBottomRef.current || !messagesRef.current) return;
     messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
-  }, [conversationTarget, events, visibleQueuedMessages]);
+  }, [conversationTarget, chatRunId, events, visibleQueuedMessages]);
 
   // Read file as base64
   const readFileAsBase64 = (file) => {
@@ -1396,8 +1403,6 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
               projects=${projects}
               onInput=${(e) => {
                 setInput(e.target.value);
-                e.target.style.height = 'auto';
-                e.target.style.height = e.target.scrollHeight + 'px';
               }}
               onKeyDown=${handleKeyDown}
               onPaste=${handlePaste}

@@ -41,9 +41,14 @@ function createEnv({ apiFetch } = {}) {
   env.loadComponent('ManagerChat');
 
   const root = env.document.getElementById('root');
-  const renderChat = (queuedMessages = [], events = []) => {
+  const renderChat = (queuedMessages = [], events = [], runId = null) => {
     const manager = {
-      status: { active: true, usage: null, pms: [] },
+      status: {
+        active: true,
+        run: runId ? { id: runId } : null,
+        usage: null,
+        pms: [],
+      },
       events,
       queuedMessages,
       loading: false,
@@ -186,6 +191,30 @@ test('ManagerChat follows the initial bottom but preserves an intentional scroll
   ctx.renderChat([row('delivered')]);
   await flushEffects();
   assert.equal(messages.scrollTop, 1200, 'updates keep following after the reader returns to the bottom');
+});
+
+test('ManagerChat re-arms initial bottom scrolling when the backing run changes', async (t) => {
+  const ctx = createEnv();
+  t.after(ctx.env.cleanup);
+
+  ctx.renderChat([], [], 'run-old');
+  const messages = ctx.root.querySelector('.manager-messages');
+  Object.defineProperties(messages, {
+    scrollHeight: { configurable: true, value: 1000 },
+    clientHeight: { configurable: true, value: 200 },
+  });
+  await flushEffects();
+
+  messages.scrollTop = 250;
+  messages.dispatchEvent(new ctx.env.window.Event('scroll', { bubbles: true }));
+  ctx.renderChat([row('processing')], [], 'run-old');
+  await flushEffects();
+  assert.equal(messages.scrollTop, 250, 'same-run updates preserve the intentional scroll-up');
+
+  Object.defineProperty(messages, 'scrollHeight', { configurable: true, value: 1400 });
+  ctx.renderChat([row('delivered')], [], 'run-new');
+  await flushEffects();
+  assert.equal(messages.scrollTop, 1400, 'a new backing run opens at its latest message');
 });
 
 test('ManagerChat composer becomes vertically scrollable after reaching its height cap', () => {
