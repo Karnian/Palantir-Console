@@ -66,6 +66,12 @@ function createOperatorInstanceService(db, {
       WHERE oi.id=?
     `),
     listInstanceIdsForProfile: db.prepare('SELECT id FROM operator_instances WHERE profile_id = ?'),
+    listInstanceIdsForProject: db.prepare(`
+      SELECT instance_id AS id
+      FROM operator_codebase_refs
+      WHERE project_id = ?
+      ORDER BY instance_id
+    `),
     getPrimaryProjectIdForInstance: db.prepare(`
       SELECT project_id
       FROM operator_codebase_refs
@@ -288,6 +294,11 @@ function createOperatorInstanceService(db, {
     return stmts.listInstanceIdsForProfile.all(profileId).map((row) => row.id);
   }
 
+  function listInstanceIdsForProject(projectId) {
+    const normalizedProjectId = requiredString(projectId, 'project_id');
+    return stmts.listInstanceIdsForProject.all(normalizedProjectId).map((row) => row.id);
+  }
+
   function getPrimaryProjectIdForInstance(instanceId) {
     return stmts.getPrimaryProjectIdForInstance.get(instanceId)?.project_id || null;
   }
@@ -489,6 +500,7 @@ function createOperatorInstanceService(db, {
     listInstances,
     getInstance,
     listInstanceIdsForProfile,
+    listInstanceIdsForProject,
     getPrimaryProjectIdForInstance,
     createInstance,
     setProfileId,

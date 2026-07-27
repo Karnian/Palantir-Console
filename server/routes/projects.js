@@ -96,6 +96,7 @@ function createProjectsRouter({
   taskService,
   runService,
   projectBriefService,
+  operatorBriefService,
   operatorCleanupService,
   operatorInstanceService,
   operatorScheduleService,
@@ -314,8 +315,12 @@ function createProjectsRouter({
     const fields = {};
     if ('conventions' in body) fields.conventions = body.conventions;
     if ('known_pitfalls' in body) fields.known_pitfalls = body.known_pitfalls;
+    if (operatorBriefService && typeof operatorBriefService.updateProjectContext === 'function') {
+      const result = await operatorBriefService.updateProjectContext(req.params.id, fields);
+      return res.json(result);
+    }
     const brief = projectBriefService.updateBrief(req.params.id, fields);
-    res.json({ brief });
+    return res.json({ brief });
   }));
 
   return router;

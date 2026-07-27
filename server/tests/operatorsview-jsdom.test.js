@@ -383,6 +383,138 @@ test('OperatorsView saves CLI changes independently across configured Operator c
   });
 });
 
+test('OperatorsView edits persona and selected codebase context in one Operator Brief', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  const saveGate = deferred();
+  const instance = {
+    id: 'oi_brief',
+    display_name: 'Brief Operator',
+    profile_id: 'op_brief',
+    profile_name: 'Brief Profile',
+    preferred_adapter: 'codex',
+    refs: [
+      {
+        instance_id: 'oi_brief',
+        project_id: 'proj_alpha',
+        role: 'primary',
+        project: { id: 'proj_alpha', name: 'Alpha Console' },
+      },
+      {
+        instance_id: 'oi_brief',
+        project_id: 'proj_beta',
+        role: 'reference',
+        project: { id: 'proj_beta', name: 'Beta API' },
+      },
+    ],
+  };
+  const calls = installRosterStubs(env, {
+    managerStatus: { active: false, top: null, pms: [] },
+    profiles: [{
+      id: 'op_brief',
+      name: 'Brief Profile',
+      persona: 'Initial persona.',
+      capabilities: [],
+    }],
+    instances: [instance],
+    operatorInstancesHandler: async ({ url, opts }) => {
+      if (!url.includes('/brief')) throw new Error(`unexpected operator-instances url ${url}`);
+      const beta = url.includes('project_id=proj_beta');
+      if (!opts.method || opts.method === 'GET') {
+        return {
+          brief: {
+            instance_id: instance.id,
+            profile: { id: 'op_brief', name: 'Brief Profile' },
+            project: {
+              id: beta ? 'proj_beta' : 'proj_alpha',
+              name: beta ? 'Beta API' : 'Alpha Console',
+              role: beta ? 'reference' : 'primary',
+            },
+            persona: 'Initial persona.',
+            conventions: beta ? 'Beta convention.' : 'Alpha convention.',
+            known_pitfalls: beta ? 'Beta pitfall.' : 'Alpha pitfall.',
+          },
+        };
+      }
+      await saveGate.promise;
+      return {
+        brief: {
+          profile: { id: 'op_brief', name: 'Brief Profile' },
+          persona: 'Updated persona.',
+        },
+        reset_instance_ids: ['oi_brief'],
+      };
+    },
+  });
+  loadOperatorsComponents(env);
+  const root = renderOperatorsView(env, {
+    projects: [
+      { id: 'proj_alpha', name: 'Alpha Console' },
+      { id: 'proj_beta', name: 'Beta API' },
+    ],
+  });
+
+  const card = await waitFor(() => {
+    const el = root.querySelector('[data-role="operator-configured-card"]');
+    assert.ok(el);
+    return el;
+  });
+  card.click();
+  const detail = await waitFor(() => {
+    const el = root.querySelector('#operator-roster-detail-title')?.closest('[role="dialog"]');
+    assert.ok(el);
+    return el;
+  });
+  detail.querySelector('[data-role="operator-brief-button"]').click();
+
+  const editor = await waitFor(() => {
+    const el = root.querySelector('#operator-brief-editor-title')?.closest('[role="dialog"]');
+    assert.ok(el);
+    assert.equal(el.querySelector('#operator-brief-persona').value, 'Initial persona.');
+    return el;
+  });
+  assert.match(editor.textContent, /오퍼레이터 전체/);
+  assert.match(editor.textContent, /코드베이스 공통/);
+  assert.equal(editor.querySelector('#operator-brief-conventions').value, 'Alpha convention.');
+  assert.equal(editor.querySelector('#operator-brief-pitfalls').value, 'Alpha pitfall.');
+  assert.equal(editor.querySelector('#operator-brief-persona').getAttribute('maxlength'), '2000');
+  assert.equal(editor.querySelector('#operator-brief-conventions').getAttribute('maxlength'), '12000');
+
+  await changeValue(env, editor.querySelector('[data-role="operator-brief-project"]'), 'proj_beta');
+  await waitFor(() => {
+    assert.equal(editor.querySelector('#operator-brief-conventions').value, 'Beta convention.');
+    assert.equal(editor.querySelector('#operator-brief-pitfalls').value, 'Beta pitfall.');
+  });
+
+  inputValue(env, editor.querySelector('#operator-brief-persona'), 'Updated persona.');
+  inputValue(env, editor.querySelector('#operator-brief-conventions'), 'Updated Beta convention.');
+  inputValue(env, editor.querySelector('#operator-brief-pitfalls'), 'Updated Beta pitfall.');
+  const save = editor.querySelector('[data-role="operator-brief-save"]');
+  await waitFor(() => assert.equal(save.disabled, false));
+  save.click();
+  await waitFor(() => {
+    assert.equal(editor.querySelector('[data-role="operator-brief-close"]').disabled, true);
+    assert.equal(editor.querySelector('.modal-footer .ghost').disabled, true);
+  });
+
+  const patch = await waitFor(() => {
+    const call = calls.find((entry) => entry.opts.method === 'PATCH' && entry.url.includes('/brief'));
+    assert.ok(call);
+    return call;
+  });
+  assert.equal(
+    patch.url,
+    '/api/operator-instances/oi_brief/brief?project_id=proj_beta',
+  );
+  assert.deepEqual(JSON.parse(patch.opts.body), {
+    persona: 'Updated persona.',
+    conventions: 'Updated Beta convention.',
+    known_pitfalls: 'Updated Beta pitfall.',
+  });
+  saveGate.resolve();
+  await waitFor(() => assert.equal(root.querySelector('#operator-brief-editor-title'), null));
+});
+
 test('OperatorsView renders watch-list badges and edits reference refs from the Live card', async (t) => {
   const env = createPreactEnv();
   t.after(env.cleanup);

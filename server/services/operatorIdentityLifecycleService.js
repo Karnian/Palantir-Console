@@ -7,29 +7,48 @@ function createOperatorIdentityLifecycleService({
   operatorSpawnService,
   logger,
 }) {
-  async function resetSharers(profileId) {
-    for (const instanceId of operatorInstanceService.listInstanceIdsForProfile(profileId)) {
+  async function withInstanceTransitions(instanceIds, action, index = 0) {
+    if (index >= instanceIds.length) return action();
+    if (!operatorSpawnService || typeof operatorSpawnService.withInstanceTransition !== 'function') {
+      return withInstanceTransitions(instanceIds, action, index + 1);
+    }
+    return operatorSpawnService.withInstanceTransition(
+      instanceIds[index],
+      () => withInstanceTransitions(instanceIds, action, index + 1),
+    );
+  }
+
+  async function resetInstances(instanceIds) {
+    for (const instanceId of instanceIds) {
       await operatorCleanupService.resetInstance(instanceId);
     }
   }
 
   async function updateProfileContent(id, data) {
     const { identityChanged } = operatorProfileService.prepareUpdate(id, data);
-    if (identityChanged) await resetSharers(id);
-    return operatorProfileService.updateProfile(id, data);
+    if (!identityChanged) return operatorProfileService.updateProfile(id, data);
+    const instanceIds = operatorInstanceService.listInstanceIdsForProfile(id).sort();
+    return withInstanceTransitions(instanceIds, async () => {
+      await resetInstances(instanceIds);
+      return operatorProfileService.updateProfile(id, data);
+    });
   }
 
   async function assignProfile(instanceId, profileId) {
     operatorInstanceService.getInstance(instanceId);
     operatorProfileService.getProfile(profileId);
-    await operatorCleanupService.resetInstance(instanceId);
-    return operatorInstanceService.setProfileId(instanceId, profileId);
+    return withInstanceTransitions([instanceId], async () => {
+      await operatorCleanupService.resetInstance(instanceId);
+      return operatorInstanceService.setProfileId(instanceId, profileId);
+    });
   }
 
   async function unassignProfile(instanceId) {
     operatorInstanceService.getInstance(instanceId);
-    await operatorCleanupService.resetInstance(instanceId);
-    return operatorInstanceService.createPrivateProfileFor(instanceId);
+    return withInstanceTransitions([instanceId], async () => {
+      await operatorCleanupService.resetInstance(instanceId);
+      return operatorInstanceService.createPrivateProfileFor(instanceId);
+    });
   }
 
   async function setPreferredAdapter(instanceId, preferredAdapter) {

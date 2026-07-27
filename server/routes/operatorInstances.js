@@ -15,7 +15,11 @@ function assertHumanSameOrigin(req) {
   }
 }
 
-function createOperatorInstancesRouter({ operatorInstanceService, operatorIdentityLifecycleService }) {
+function createOperatorInstancesRouter({
+  operatorInstanceService,
+  operatorIdentityLifecycleService,
+  operatorBriefService,
+}) {
   const router = express.Router();
 
   router.get('/', asyncHandler(async (req, res) => {
@@ -30,6 +34,28 @@ function createOperatorInstancesRouter({ operatorInstanceService, operatorIdenti
 
   router.get('/:id', asyncHandler(async (req, res) => {
     res.json({ instance: operatorInstanceService.getInstance(req.params.id) });
+  }));
+
+  router.get('/:id/brief', asyncHandler(async (req, res) => {
+    if (!operatorBriefService) {
+      return res.status(501).json({ error: 'operator_brief_service_unavailable' });
+    }
+    const brief = operatorBriefService.readEffectiveBrief(req.params.id, {
+      projectId: req.query.project_id,
+    });
+    res.json({ brief });
+  }));
+
+  router.patch('/:id/brief', asyncHandler(async (req, res) => {
+    assertHumanSameOrigin(req);
+    if (!operatorBriefService) {
+      return res.status(501).json({ error: 'operator_brief_service_unavailable' });
+    }
+    const result = await operatorBriefService.updateEffectiveBrief(req.params.id, {
+      projectId: req.query.project_id,
+      body: req.body || {},
+    });
+    res.json(result);
   }));
 
   router.post('/:id/refs', asyncHandler(async (req, res) => {

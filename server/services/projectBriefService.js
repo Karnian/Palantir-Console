@@ -22,6 +22,7 @@ const { BadRequestError, NotFoundError } = require('../utils/errors');
  */
 
 const VALID_PM_ADAPTERS = ['claude', 'codex'];
+const BRIEF_FIELD_MAX = 12000;
 
 function createProjectBriefService(db) {
   const stmts = {
@@ -80,18 +81,58 @@ function createProjectBriefService(db) {
 
   const BRIEF_UPDATABLE = ['conventions', 'known_pitfalls'];
 
+  function normalizeBriefFields(fields) {
+    if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+      throw new BadRequestError('brief fields must be an object');
+    }
+    const normalized = {};
+    for (const col of BRIEF_UPDATABLE) {
+      if (!(col in fields)) continue;
+      const value = fields[col];
+      if (value != null && typeof value !== 'string') {
+        throw new BadRequestError(`${col} must be a string or null`);
+      }
+      if (typeof value === 'string' && value.length > BRIEF_FIELD_MAX) {
+        throw new BadRequestError(`${col} too long (max ${BRIEF_FIELD_MAX})`);
+      }
+      normalized[col] = value == null || value === '' ? null : value;
+    }
+    return normalized;
+  }
+
+  function prepareUpdate(projectId, fields) {
+    if (!projectId) throw new BadRequestError('project_id is required');
+    const normalized = normalizeBriefFields(fields);
+    const current = stmts.getById.get(projectId) || {
+      project_id: projectId,
+      conventions: null,
+      known_pitfalls: null,
+      pm_thread_id: null,
+      pm_adapter: null,
+      created_at: null,
+      updated_at: null,
+    };
+    const merged = { ...current, ...normalized };
+    const contentChanged = BRIEF_UPDATABLE.some(
+      (col) => Object.prototype.hasOwnProperty.call(normalized, col)
+        && normalized[col] !== current[col],
+    );
+    return { current, normalized, merged, contentChanged };
+  }
+
   /**
    * Update brief content (conventions / known_pitfalls). Does NOT touch
    * Operator thread fields — those are managed by setPmThread / clearPmThread.
    */
   function updateBrief(projectId, fields) {
+    const { normalized } = prepareUpdate(projectId, fields);
     ensureBrief(projectId);
     const setClauses = [];
     const params = { project_id: projectId };
     for (const col of BRIEF_UPDATABLE) {
-      if (col in fields) {
+      if (col in normalized) {
         setClauses.push(`${col} = @${col}`);
-        params[col] = fields[col] ?? null;
+        params[col] = normalized[col];
       }
     }
     if (setClauses.length === 0) return stmts.getById.get(projectId);
@@ -160,6 +201,7 @@ function createProjectBriefService(db) {
   return {
     getBrief,
     ensureBrief,
+    prepareUpdate,
     updateBrief,
     setPmThread,
     clearPmThread,
