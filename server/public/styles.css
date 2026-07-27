@@ -5791,7 +5791,8 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   resize: none;
   min-height: 40px;
   max-height: 40vh;
-  overflow: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   font-family: inherit;
   transition: border-color 0.15s;
 }

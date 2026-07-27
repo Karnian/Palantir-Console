@@ -29,6 +29,7 @@ import { operatorConversationId, parseProjectConversationId, conversationIdMatch
 // with PROFILE_TYPE_TO_ADAPTER in server/routes/manager.js.
 const MANAGER_PROFILE_TYPES = ['claude-code', 'codex'];
 const MANAGER_PROFILE_PICK_KEY = 'palantir.manager.lastProfileId';
+const MESSAGE_BOTTOM_THRESHOLD_PX = 32;
 const MESSAGE_QUEUE_STATUS_LABELS = Object.freeze({
   queued: '대기 중',
   sending: '전송 중',
@@ -195,6 +196,11 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
   const submittingRef = useRef(false);
   const [attachedImages, setAttachedImages] = useState([]);
   const messagesRef = useRef(null);
+  // Follow new messages only while the viewport is already at the bottom.
+  // This starts enabled so an initial load/refresh opens on the latest message,
+  // but a deliberate scroll upward must survive subsequent SSE/queue renders.
+  const stickToBottomRef = useRef(true);
+  const lastScrolledConversationRef = useRef(null);
   const fileInputRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -232,12 +238,24 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     )));
   }, [serverQueuedMessages]);
 
-  // Auto-scroll to bottom on new events/queue transitions.
+  const handleMessagesScroll = () => {
+    const el = messagesRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.clientHeight - el.scrollTop;
+    stickToBottomRef.current = distanceFromBottom <= MESSAGE_BOTTOM_THRESHOLD_PX;
+  };
+
+  // Open each conversation at its latest message. After that, only keep
+  // following updates while the user remains at (or very near) the bottom.
   useEffect(() => {
-    if (messagesRef.current) {
-      messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
+    const targetChanged = lastScrolledConversationRef.current !== conversationTarget;
+    if (targetChanged) {
+      lastScrolledConversationRef.current = conversationTarget;
+      stickToBottomRef.current = true;
     }
-  }, [events, visibleQueuedMessages]);
+    if (!stickToBottomRef.current || !messagesRef.current) return;
+    messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
+  }, [conversationTarget, events, visibleQueuedMessages]);
 
   // Read file as base64
   const readFileAsBase64 = (file) => {
@@ -1163,7 +1181,8 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
         </div>
       </div>
 
-      <div class="manager-messages" ref=${messagesRef} tabindex="0" role="log" aria-label="대화 메시지">
+      <div class="manager-messages" ref=${messagesRef} onScroll=${handleMessagesScroll}
+        tabindex="0" role="log" aria-label="대화 메시지">
         ${!status.active && messages.length === 0 && html`
           <div class="manager-empty">
             <div class="manager-empty-icon">\u2726</div>

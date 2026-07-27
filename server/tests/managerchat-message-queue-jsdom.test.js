@@ -2,6 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { createPreactEnv, flushEffects } = require('./helpers/jsdom-preact');
 
 function createEnv({ apiFetch } = {}) {
@@ -39,10 +41,10 @@ function createEnv({ apiFetch } = {}) {
   env.loadComponent('ManagerChat');
 
   const root = env.document.getElementById('root');
-  const renderChat = (queuedMessages = []) => {
+  const renderChat = (queuedMessages = [], events = []) => {
     const manager = {
       status: { active: true, usage: null, pms: [] },
-      events: [],
+      events,
       queuedMessages,
       loading: false,
       start: async () => {},
@@ -156,4 +158,44 @@ test('ManagerChat paints an optimistic queued bubble before the enqueue request 
     message: row('queued', { display_text: '빠르게 연속 입력' }),
   });
   await flushEffects();
+});
+
+test('ManagerChat follows the initial bottom but preserves an intentional scroll-up across updates', async (t) => {
+  const ctx = createEnv();
+  t.after(ctx.env.cleanup);
+
+  const messages = ctx.root.querySelector('.manager-messages');
+  Object.defineProperties(messages, {
+    scrollHeight: { configurable: true, value: 1000 },
+    clientHeight: { configurable: true, value: 200 },
+  });
+  await flushEffects();
+  assert.equal(messages.scrollTop, 1000, 'initial render opens at the latest message');
+
+  messages.scrollTop = 300;
+  messages.dispatchEvent(new ctx.env.window.Event('scroll', { bubbles: true }));
+
+  ctx.renderChat([row('processing')]);
+  await flushEffects();
+  assert.equal(messages.scrollTop, 300, 'queue updates do not pull a reader back to the bottom');
+
+  messages.scrollTop = 800;
+  messages.dispatchEvent(new ctx.env.window.Event('scroll', { bubbles: true }));
+  Object.defineProperty(messages, 'scrollHeight', { configurable: true, value: 1200 });
+
+  ctx.renderChat([row('delivered')]);
+  await flushEffects();
+  assert.equal(messages.scrollTop, 1200, 'updates keep following after the reader returns to the bottom');
+});
+
+test('ManagerChat composer becomes vertically scrollable after reaching its height cap', () => {
+  const styles = fs.readFileSync(
+    path.join(__dirname, '..', 'public', 'styles.css'),
+    'utf8',
+  );
+  const rule = styles.match(/\.manager-input\s*\{([\s\S]*?)\}/)?.[1] || '';
+
+  assert.match(rule, /max-height\s*:\s*40vh\s*;/);
+  assert.match(rule, /overflow-y\s*:\s*auto\s*;/);
+  assert.doesNotMatch(rule, /overflow\s*:\s*hidden\s*;/);
 });
