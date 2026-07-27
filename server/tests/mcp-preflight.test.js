@@ -227,6 +227,33 @@ test('preflight: Palantir actor credentials are reserved and never read', async 
   }
 });
 
+test('preflight: process-hijack bearer env is rejected and never read', async () => {
+  const previous = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = 'must-not-reach-mcp';
+  let fetched = false;
+  try {
+    const r = await preflightHttpAlias({
+      alias: 'a',
+      cfg: {
+        url: 'http://localhost:3100/mcp',
+        bearer_token_env_var: 'NODE_OPTIONS',
+      },
+      fetchHook: async () => {
+        fetched = true;
+        return { ok: true, status: 200 };
+      },
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'bearer_env_process_hijack');
+    assert.equal(r.bearer_env, 'NODE_OPTIONS');
+    assert.equal(fetched, false);
+    assert.equal(JSON.stringify(r).includes('must-not-reach-mcp'), false);
+  } finally {
+    if (previous === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = previous;
+  }
+});
+
 test('preflight: network skip cannot bypass reserved actor credential rejection', async () => {
   const previousSkip = process.env.PALANTIR_MCP_ALLOW_PREFLIGHT_SKIP;
   process.env.PALANTIR_MCP_ALLOW_PREFLIGHT_SKIP = '1';
