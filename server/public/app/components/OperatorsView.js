@@ -765,6 +765,22 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
     }
   };
 
+  const removeMapping = async (ref) => {
+    if (!refsEditorInstance?.id || !ref?.project_id) return;
+    setRefsSaving(true);
+    try {
+      await apiFetchWithToast(
+        `/api/operator-instances/${encodeURIComponent(refsEditorInstance.id)}/refs/${encodeURIComponent(ref.project_id)}`,
+        { method: 'DELETE' },
+      );
+      await refreshOperatorInstances();
+    } catch (err) {
+      // apiFetchWithToast owns the error toast.
+    } finally {
+      setRefsSaving(false);
+    }
+  };
+
   const openCreateOperatorModal = () => {
     setCreateProfileId(profiles[0]?.id || '');
     setCreateDisplayName('');
@@ -1283,39 +1299,85 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
           >${COMMON_ACTIONS.close}</button>
         </div>
         <div class="modal-body">
-          <div class="form-field">
-            <label class="form-label" for="operator-roster-ref-role">${OPERATOR_ROSTER_LABELS.mappingRoleLabel}</label>
-            <${Dropdown}
-              id="operator-roster-ref-role"
-              className="dropdown-field"
-              value=${selectedRefRole}
-              onChange=${changeRefRole}
-              disabled=${refsSaving}
-              options=${[
-                ...(!refsEditorHasPrimary
-                  ? [{ value: 'primary', label: OPERATOR_ROSTER_LABELS.mappingPrimaryRole }]
-                  : []),
-                { value: 'reference', label: OPERATOR_ROSTER_LABELS.mappingReferenceRole },
-              ]}
-            />
-          </div>
-          <div class="form-field">
-            <label class="form-label" for="operator-roster-ref-project">${OPERATOR_ROSTER_LABELS.referenceProjectLabel}</label>
-            <${Dropdown}
-              id="operator-roster-ref-project"
-              className="dropdown-field"
-              dataRole="operator-roster-ref-project-select"
-              value=${selectedRefProjectId}
-              onChange=${setSelectedRefProjectId}
-              disabled=${refsEditorAvailableProjects.length === 0 || refsSaving}
-              options=${refsEditorAvailableProjects.length === 0
-                ? [{ value: '', label: OPERATOR_ROSTER_LABELS.noReferenceProjects }]
-                : refsEditorAvailableProjects.map((project) => ({
-                  value: project.id,
-                  label: projectPlacementLabel(project),
-                }))}
-            />
-          </div>
+          <section class="operator-mapping-section" aria-labelledby="operator-roster-current-mappings-title">
+            <h3 class="operator-mapping-heading" id="operator-roster-current-mappings-title">
+              ${OPERATOR_ROSTER_LABELS.currentMappings}
+            </h3>
+            ${arrayValue(refsEditorLatest?.refs).length === 0
+              ? html`<p class="form-help">${OPERATOR_ROSTER_LABELS.noCurrentMappings}</p>`
+              : html`
+                <ul
+                  class="operator-mapping-list"
+                  data-role="operator-roster-current-mappings"
+                >
+                  ${arrayValue(refsEditorLatest?.refs).map((ref) => {
+                    const project = {
+                      id: ref.project_id,
+                      ...(projectsById.get(String(ref.project_id)) || {}),
+                      ...(ref.project || {}),
+                    };
+                    const projectName = refProjectName(ref, projectsById);
+                    return html`
+                      <li class="operator-mapping-row" key=${`${ref.project_id}:${ref.role}`}>
+                        <span class="operator-mapping-summary">
+                          <span class="operator-mapping-placement">${projectPlacementLabel(project)}</span>
+                          <span class="operator-mapping-role">${refRoleLabel(ref.role)}</span>
+                        </span>
+                        <button
+                          type="button"
+                          class="ghost small"
+                          data-role="operator-roster-mapping-remove"
+                          aria-label=${`${projectName} ${OPERATOR_ROSTER_LABELS.removeMapping}`}
+                          aria-busy=${refsSaving ? 'true' : 'false'}
+                          disabled=${refsSaving}
+                          onClick=${() => removeMapping(ref)}
+                        >${OPERATOR_ROSTER_LABELS.removeMapping}</button>
+                      </li>
+                    `;
+                  })}
+                </ul>
+              `}
+          </section>
+
+          <section class="operator-mapping-section" aria-labelledby="operator-roster-add-mapping-title">
+            <h3 class="operator-mapping-heading" id="operator-roster-add-mapping-title">
+              ${OPERATOR_ROSTER_LABELS.addMapping}
+            </h3>
+            <div class="form-field">
+              <label class="form-label" for="operator-roster-ref-role">${OPERATOR_ROSTER_LABELS.mappingRoleLabel}</label>
+              <${Dropdown}
+                id="operator-roster-ref-role"
+                className="dropdown-field"
+                value=${selectedRefRole}
+                onChange=${changeRefRole}
+                disabled=${refsSaving}
+                options=${[
+                  ...(!refsEditorHasPrimary
+                    ? [{ value: 'primary', label: OPERATOR_ROSTER_LABELS.mappingPrimaryRole }]
+                    : []),
+                  { value: 'reference', label: OPERATOR_ROSTER_LABELS.mappingReferenceRole },
+                ]}
+              />
+              <p class="form-help">${OPERATOR_ROSTER_LABELS.mappingRoleHelp}</p>
+            </div>
+            <div class="form-field">
+              <label class="form-label" for="operator-roster-ref-project">${OPERATOR_ROSTER_LABELS.referenceProjectLabel}</label>
+              <${Dropdown}
+                id="operator-roster-ref-project"
+                className="dropdown-field"
+                dataRole="operator-roster-ref-project-select"
+                value=${selectedRefProjectId}
+                onChange=${setSelectedRefProjectId}
+                disabled=${refsEditorAvailableProjects.length === 0 || refsSaving}
+                options=${refsEditorAvailableProjects.length === 0
+                  ? [{ value: '', label: OPERATOR_ROSTER_LABELS.noReferenceProjects }]
+                  : refsEditorAvailableProjects.map((project) => ({
+                    value: project.id,
+                    label: projectPlacementLabel(project),
+                  }))}
+              />
+            </div>
+          </section>
         </div>
         <div class="modal-footer">
           <button
@@ -1331,7 +1393,7 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
             onClick=${addReference}
             disabled=${refsSaving || !selectedRefProjectId}
             aria-busy=${refsSaving ? 'true' : 'false'}
-          >${refsSaving ? COMMON_ACTIONS.saving : OPERATOR_ROSTER_LABELS.folderMappings}</button>
+          >${refsSaving ? COMMON_ACTIONS.saving : OPERATOR_ROSTER_LABELS.addMapping}</button>
         </div>
       <//>
 

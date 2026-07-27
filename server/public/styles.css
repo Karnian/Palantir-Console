@@ -8450,6 +8450,56 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   padding: 2px 0;
 }
 
+.operator-mapping-section + .operator-mapping-section {
+  margin-top: 20px;
+}
+
+.operator-mapping-heading {
+  margin: 0 0 10px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.operator-mapping-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.operator-mapping-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+}
+
+.operator-mapping-summary {
+  min-width: 0;
+  flex: 1;
+}
+
+.operator-mapping-placement,
+.operator-mapping-role {
+  display: block;
+}
+
+.operator-mapping-placement {
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+}
+
+.operator-mapping-role {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .operator-schedule-warning {
   margin: 0;
   padding: 8px 10px;
