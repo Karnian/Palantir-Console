@@ -1,5 +1,5 @@
 const crypto = require('node:crypto');
-const { BadRequestError, NotFoundError } = require('../utils/errors');
+const { BadRequestError, NotFoundError, ForbiddenError } = require('../utils/errors');
 
 const VALID_STATUSES = ['backlog', 'todo', 'in_progress', 'review', 'done', 'failed'];
 const VALID_PRIORITIES = ['low', 'medium', 'high', 'critical'];
@@ -233,8 +233,31 @@ function createTaskService(db, eventBus, opts = {}) {
     'goal_enabled', 'goal_max_attempts', 'goal_judge_enabled',
   ];
 
-  function updateTask(id, fields) {
-    getTask(id);
+  function updateTask(id, fields, { actor = null } = {}) {
+    const before = getTask(id);
+    // #436: the same authority rule as updateTaskStatus, stated as an invariant
+    // on the RESULT rather than on one field. Guarding only the status route was
+    // bypassable in two ways, both reproduced in review:
+    //   * goal_enabled=0 → status=done → goal_enabled=1 (delivery ran, real ref)
+    //   * patching any field on a task already done+goal_enabled re-emits
+    //     `task:updated` and retries a failed delivery
+    // So: a manager mutation may not LEAVE a task in `done && goal_enabled`.
+    // A human cookie session, an internal call (actor null), a non-goal task and
+    // recurring/harvest flows are all unaffected.
+    if (actor && actor.actor === 'manager') {
+      // Compute the result from the fields this call will ACTUALLY write, not
+      // from the raw request. `status` is not in TASK_UPDATABLE, so merging the
+      // raw body let `{status:'todo', description:'x'}` fool the check into
+      // seeing `todo` while the row stayed done+goal_enabled — and the write
+      // still emitted `task:updated`, re-running delivery. Reproduced in review.
+      const after = { ...before };
+      for (const col of TASK_UPDATABLE) {
+        if (col in fields) after[col] = fields[col];
+      }
+      if (String(after.status) === 'done' && after.goal_enabled) {
+        throw new ForbiddenError('manager capability cannot leave a goal task done');
+      }
+    }
     if (fields.priority && !VALID_PRIORITIES.includes(fields.priority)) {
       throw new BadRequestError(`Invalid priority: ${fields.priority}`);
     }
@@ -297,11 +320,24 @@ function createTaskService(db, eventBus, opts = {}) {
     return task;
   }
 
-  function updateTaskStatus(id, status) {
+  function updateTaskStatus(id, status, { actor = null } = {}) {
     if (!VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid status: ${status}`);
     }
     const before = getTask(id);
+    // #436: a goal task reaching `done` auto-triggers goal delivery, which
+    // force-points a git ref — an action routes/tasks.js declares cookie-only
+    // human authority on its manual endpoint. Without this a manager capability
+    // reaches that authority through the side effect instead of the guarded
+    // route. Refuse the TRANSITION, not the delivery: guarding the delivery
+    // subscriber only covers the first `task:updated`, and harvest emits a
+    // second, actor-less one for a task that is still done.
+    //
+    // Whether a goal is met is decided by its verdict or by a human — never by
+    // the agent asserting it. A null actor is an internal call and is allowed.
+    if (status === 'done' && before && before.goal_enabled && actor && actor.actor === 'manager') {
+      throw new ForbiddenError('manager capability cannot mark a goal task done');
+    }
     stmts.updateStatus.run(status, id);
     const task = parseRow(stmts.getById.get(id));
     if (eventBus) eventBus.emit('task:updated', { task });

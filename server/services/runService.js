@@ -948,7 +948,11 @@ function createRunService(db, eventBus) {
       id
     );
     const run = stmts.getById.get(id);
-    addRunEvent(id, 'started', JSON.stringify({ tmux_session, worktree_path, branch }));
+    // #436: the tmux session NAME is enough to attach to the worker's terminal,
+    // which is authority well beyond the Console API. The run row still stores it
+    // for the server's own use; it just does not go into an event payload that
+    // observation endpoints hand back verbatim to a manager capability.
+    addRunEvent(id, 'started', JSON.stringify({ worktree_path, branch }));
     if (eventBus) {
       eventBus.emit('run:status', {
         run,

@@ -1,5 +1,6 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
+const { withoutSessionHandle } = require('../utils/managerRunView');
 const { validateCreateTask, validateUpdateTask } = require('../middleware/validate');
 const { NotFoundError } = require('../utils/errors');
 const { redactSecrets } = require('../services/memorySanitize');
@@ -149,13 +150,20 @@ function createTasksRouter({ taskService, lifecycleService, presetService, goalD
         }
       }
     }
-    const task = taskService.updateTask(req.params.id, body);
+    const task = taskService.updateTask(req.params.id, body, {
+      // Provenance from req.auth only — never from the request body.
+      actor: { method: req.auth?.method || 'none', actor: req.auth?.actor || null },
+    });
     res.json({ task });
   }));
 
   router.patch('/:id/status', asyncHandler(async (req, res) => {
     const { status } = req.body || {};
-    const task = taskService.updateTaskStatus(req.params.id, status);
+    // Provenance so the service can tell a human cookie session from a manager
+    // capability. Derived from req.auth only — never from the request body.
+    const task = taskService.updateTaskStatus(req.params.id, status, {
+      actor: { method: req.auth?.method || 'none', actor: req.auth?.actor || null },
+    });
     res.json({ task });
   }));
 
@@ -224,7 +232,10 @@ function createTasksRouter({ taskService, lifecycleService, presetService, goalD
       presetId: preset_id || undefined,
       pmRunId: typeof pm_run_id === 'string' ? pm_run_id : null,
     });
-    res.status(201).json({ run });
+    // The run has just been started, so it carries the session handle. This is
+    // the route the field was missed on when the run list and single-run routes
+    // were fixed — hence the shared projector.
+    res.status(201).json({ run: withoutSessionHandle(req, run) });
   }));
 
   return router;
