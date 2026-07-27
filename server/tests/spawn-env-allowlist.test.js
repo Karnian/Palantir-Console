@@ -1,0 +1,732 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const childProcess = require('node:child_process');
+const fs = require('node:fs');
+const fsp = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { EventEmitter } = require('node:events');
+const { PassThrough } = require('node:stream');
+const express = require('express');
+
+const { buildManagerSpawnEnv } = require('../services/authResolver');
+const {
+  PROCESS_BASE_ENV_KEYS,
+  WORKER_BASE_ENV_KEYS,
+  NETWORK_ENV_KEYS,
+  VENDOR_ENV_KEYS,
+  buildWorkerProcessEnv,
+} = require('../services/actorTokenPolicy');
+const { createLiveDistiller } = require('../services/distillers/liveDistiller');
+const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+const { invokeApp } = require('./helpers/invokeApp');
+
+const FIXTURE_BIN = path.join(__dirname, 'fixtures', 'bin');
+const FAKE_CODEX_STDIN = path.join(FIXTURE_BIN, 'fake-codex-stdin.js');
+const FAKE_OPENCODE = path.join(FIXTURE_BIN, 'fake-opencode.js');
+const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+
+async function withProcessEnv(changes, action) {
+  const saved = new Map();
+  for (const [key, value] of Object.entries(changes)) {
+    saved.set(key, hasOwn(process.env, key) ? process.env[key] : undefined);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return await action();
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+async function waitForJson(filePath, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      return JSON.parse(await fsp.readFile(filePath, 'utf8'));
+    } catch (err) {
+      lastError = err;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw lastError || new Error(`timed out waiting for ${filePath}`);
+}
+
+function makeFakeCodexChild() {
+  return Object.assign(new EventEmitter(), {
+    stdin: {
+      write() {},
+      end() {},
+    },
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    kill() {},
+  });
+}
+
+test('manager allowlist removes opaque and named ambient keys, including empty values', () => {
+  const env = buildManagerSpawnEnv({
+    baseEnv: {
+      PATH: '/bin',
+      HOME: '/home/test',
+      UNRELATED_CANARY_7F3A: '',
+      GITHUB_TOKEN: 'github-secret',
+      AWS_SECRET_ACCESS_KEY: 'aws-secret',
+    },
+  });
+
+  assert.equal(env.PATH, '/bin');
+  assert.equal(env.HOME, '/home/test');
+  assert.equal(hasOwn(env, 'UNRELATED_CANARY_7F3A'), false);
+  assert.equal(hasOwn(env, 'GITHUB_TOKEN'), false);
+  assert.equal(hasOwn(env, 'AWS_SECRET_ACCESS_KEY'), false);
+});
+
+for (const key of VENDOR_ENV_KEYS.claude) {
+  test(`claude-code manager vendor admits ${key}`, () => {
+    const env = buildManagerSpawnEnv({
+      baseEnv: { [key]: `claude-${key}`, CODEX_HOME: '/host/codex' },
+      vendor: 'claude-code',
+    });
+    assert.equal(env[key], `claude-${key}`);
+    assert.equal(hasOwn(env, 'CODEX_HOME'), false);
+  });
+
+  test(`codex manager vendor rejects Claude-only ${key}`, () => {
+    const env = buildManagerSpawnEnv({
+      baseEnv: { [key]: `claude-${key}` },
+      vendor: 'codex',
+    });
+    assert.equal(hasOwn(env, key), false);
+  });
+}
+
+for (const key of VENDOR_ENV_KEYS.codex) {
+  test(`codex manager vendor admits ${key}`, () => {
+    const env = buildManagerSpawnEnv({
+      baseEnv: { [key]: `codex-${key}`, CLAUDE_CONFIG_DIR: '/host/claude' },
+      vendor: 'codex',
+    });
+    assert.equal(env[key], `codex-${key}`);
+    assert.equal(hasOwn(env, 'CLAUDE_CONFIG_DIR'), false);
+  });
+
+  test(`claude-code manager vendor rejects Codex-only ${key}`, () => {
+    const env = buildManagerSpawnEnv({
+      baseEnv: { [key]: `codex-${key}` },
+      vendor: 'claude-code',
+    });
+    assert.equal(hasOwn(env, key), false);
+  });
+}
+
+test('manager allowlist forwards all proxy spellings but blocks XDG homes and SSH agent', () => {
+  const baseEnv = {};
+  for (const key of NETWORK_ENV_KEYS) baseEnv[key] = `proxy-${key}`;
+  for (const key of [
+    'XDG_CONFIG_HOME',
+    'XDG_DATA_HOME',
+    'XDG_CACHE_HOME',
+    'XDG_STATE_HOME',
+    'SSH_AUTH_SOCK',
+  ]) {
+    baseEnv[key] = `/sensitive/${key}`;
+  }
+
+  const env = buildManagerSpawnEnv({ baseEnv });
+  for (const key of NETWORK_ENV_KEYS) assert.equal(env[key], `proxy-${key}`);
+  for (const key of [
+    'XDG_CONFIG_HOME',
+    'XDG_DATA_HOME',
+    'XDG_CACHE_HOME',
+    'XDG_STATE_HOME',
+    'SSH_AUTH_SOCK',
+  ]) {
+    assert.equal(hasOwn(env, key), false, `${key} must be absent`);
+  }
+});
+
+test('profile env_allowlist and bearerEnvKeys are additive and authEnv wins last', () => {
+  const env = buildManagerSpawnEnv({
+    baseEnv: {
+      PROFILE_CUSTOM_ENV: '',
+      CUSTOM_BEARER_ENV: 'base-bearer',
+      AUTH_OVERRIDE: 'base-auth',
+      UNLISTED: 'drop',
+    },
+    envAllowlist: ['PROFILE_CUSTOM_ENV', 'AUTH_OVERRIDE'],
+    bearerEnvKeys: ['CUSTOM_BEARER_ENV'],
+    authEnv: {
+      AUTH_OVERRIDE: 'resolved-auth',
+      AUTH_ONLY: 'resolved-only',
+    },
+  });
+
+  assert.equal(hasOwn(env, 'PROFILE_CUSTOM_ENV'), true);
+  assert.equal(env.PROFILE_CUSTOM_ENV, '');
+  assert.equal(env.CUSTOM_BEARER_ENV, 'base-bearer');
+  assert.equal(env.AUTH_OVERRIDE, 'resolved-auth');
+  assert.equal(env.AUTH_ONLY, 'resolved-only');
+  assert.equal(hasOwn(env, 'UNLISTED'), false);
+});
+
+test('security migration diagnostic logs dropped key names, contexts, and no values', () => {
+  const lines = [];
+  const originalWarn = console.warn;
+  console.warn = (line) => lines.push(String(line));
+  try {
+    buildManagerSpawnEnv({
+      baseEnv: {
+        PATH: '/bin',
+        BEDROCK_REGION_CUSTOM: 'do-not-log-this-value',
+        CUSTOM_PROVIDER_ENV_KEY: 'nor-this-value',
+      },
+      vendor: 'claude-code',
+      diagnosticContext: 'manager:test:migration',
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^\[security\] manager_spawn_env_dropped /);
+  assert.match(lines[0], /"context":"manager:test:migration"/);
+  assert.match(lines[0], /"vendor":"claude"/);
+  assert.match(lines[0], /BEDROCK_REGION_CUSTOM/);
+  assert.match(lines[0], /CUSTOM_PROVIDER_ENV_KEY/);
+  assert.doesNotMatch(lines[0], /do-not-log-this-value|nor-this-value/);
+});
+
+test('worker process env remains byte-identical to the pre-manager-allowlist contract', () => {
+  // Containment, NOT object identity: the worker set is its own array so a
+  // future worker-only key can be added without flowing into managers. What
+  // must hold is that workers never lose a shared baseline key — the exact
+  // pre-change output is pinned by the expected map below.
+  for (const key of PROCESS_BASE_ENV_KEYS) {
+    assert.ok(WORKER_BASE_ENV_KEYS.includes(key), `worker baseline lost ${key}`);
+  }
+  // Pinned literal, NOT derived from the constant under test. Building both the
+  // input and the expectation from PROCESS_BASE_ENV_KEYS would make this test
+  // vacuous: deleting a key from the constant would delete it from `expected`
+  // too and still pass. This snapshot is the pre-#431 worker contract.
+  const PRE_431_WORKER_KEYS = [
+    'PATH', 'Path', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'USER',
+    'USERNAME', 'LOGNAME', 'SHELL', 'SystemRoot', 'SYSTEMROOT', 'WINDIR',
+    'ComSpec', 'COMSPEC', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA',
+    'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'TERM',
+    'COLORTERM', 'NO_COLOR', 'FORCE_COLOR',
+  ];
+  assert.deepEqual(
+    [...WORKER_BASE_ENV_KEYS].sort(),
+    [...PRE_431_WORKER_KEYS].sort(),
+    'worker baseline drifted from the pre-#431 contract',
+  );
+
+  const baseEnv = Object.fromEntries(PRE_431_WORKER_KEYS.map((key, index) => [key, `v${index}`]));
+  Object.assign(baseEnv, {
+    CODEX_API_KEY: 'ambient-codex',
+    UNRELATED_CANARY_7F3A: 'ambient-opaque',
+    PALANTIR_TOKEN: 'human',
+    PALANTIR_PM_TOKEN: 'pm',
+    PALANTIR_WORKER_TOKEN: 'ambient-worker',
+    PALANTIR_MANAGER_TOKEN: 'ambient-manager',
+  });
+  const explicitEnv = {
+    PROFILE_ALLOWED: '',
+    PALANTIR_TOKEN: 'smuggled-human',
+    PALANTIR_PM_TOKEN: 'smuggled-pm',
+    PALANTIR_MANAGER_TOKEN: 'smuggled-manager',
+    PALANTIR_WORKER_TOKEN: 'run-worker',
+  };
+  const expected = Object.fromEntries(PRE_431_WORKER_KEYS.map((key, index) => [key, `v${index}`]));
+  expected.PROFILE_ALLOWED = '';
+  expected.PALANTIR_WORKER_TOKEN = 'run-worker';
+
+  const actual = buildWorkerProcessEnv(baseEnv, explicitEnv);
+  assert.equal(JSON.stringify(actual), JSON.stringify(expected));
+});
+
+test('liveDistiller actual child sees the Claude allowlist and no opaque host env', async () => {
+  const childScript = String.raw`
+    let input = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', chunk => { input += chunk; });
+    process.stdin.on('end', () => {
+      const own = key => Object.prototype.hasOwnProperty.call(process.env, key);
+      const observed = {
+        opaque: own('UNRELATED_CANARY_7F3A'),
+        github: own('GITHUB_TOKEN'),
+        claudeCa: process.env.NODE_EXTRA_CA_CERTS,
+        codexHome: own('CODEX_HOME'),
+        custom: process.env.DISTILLER_PROFILE_ENV,
+      };
+      process.stdout.write(JSON.stringify([{
+        candidateId: 'env-live',
+        kind: 'heuristic',
+        content: 'ENV:' + JSON.stringify(observed),
+        confidence: 0.5,
+        importance: 5
+      }]));
+    });
+  `;
+
+  await withProcessEnv({
+    UNRELATED_CANARY_7F3A: '',
+    GITHUB_TOKEN: 'github-secret',
+    NODE_EXTRA_CA_CERTS: '/corp/claude-ca.pem',
+    CODEX_HOME: '/host/codex',
+    DISTILLER_PROFILE_ENV: 'profile-value',
+  }, async () => {
+    const distiller = createLiveDistiller({
+      cliBin: FAKE_CODEX_STDIN,
+      envAllowlist: ['DISTILLER_PROFILE_ENV'],
+      resolveIsolatedAuth: async () => ({
+        canAuth: true,
+        env: {},
+        sources: ['test'],
+        diagnostics: [],
+      }),
+      spawnImpl: (_command, _args, opts) => childProcess.spawn(
+        process.execPath,
+        ['-e', childScript],
+        opts,
+      ),
+    });
+
+    const [proposal] = await distiller.distill({
+      candidates: [{ id: 'env-live', rule: 'R3', raw_json: '{}' }],
+    });
+    const observed = JSON.parse(proposal.content.slice('ENV:'.length));
+    assert.equal(observed.opaque, false);
+    assert.equal(observed.github, false);
+    assert.equal(observed.claudeCa, '/corp/claude-ca.pem');
+    assert.equal(observed.codexHome, false);
+    assert.equal(observed.custom, 'profile-value');
+  });
+});
+
+test('opencodeService actual child sees storage, TLS default, and no ambient canary', async (t) => {
+  const probePath = path.join(os.tmpdir(), `palantir-opencode-env-${process.pid}-${Date.now()}.json`);
+  t.after(() => fsp.rm(probePath, { force: true }));
+  const modulePath = require.resolve('../services/opencodeService');
+  const originalSpawn = childProcess.spawn;
+  delete require.cache[modulePath];
+  childProcess.spawn = (_command, _args, opts) => originalSpawn(
+    process.execPath,
+    [
+      '-e',
+      "require('node:fs').writeFileSync(process.argv[1], JSON.stringify(process.env))",
+      probePath,
+    ],
+    opts,
+  );
+
+  try {
+    await withProcessEnv({
+      UNRELATED_CANARY_7F3A: '',
+      AWS_SECRET_ACCESS_KEY: 'aws-secret',
+      OPENCODE_STORAGE: '/tmp/opencode-shared-storage',
+      NODE_TLS_REJECT_UNAUTHORIZED: undefined,
+    }, async () => {
+      const { createOpencodeService } = require('../services/opencodeService');
+      const service = createOpencodeService({ opencodeBin: FAKE_OPENCODE });
+      await service.queueMessage({ sessionId: 'session-env', content: 'probe', cwd: os.tmpdir() });
+      const observed = await waitForJson(probePath);
+      assert.equal(hasOwn(observed, 'UNRELATED_CANARY_7F3A'), false);
+      assert.equal(hasOwn(observed, 'AWS_SECRET_ACCESS_KEY'), false);
+      assert.equal(observed.OPENCODE_STORAGE, '/tmp/opencode-shared-storage');
+      assert.equal(observed.NODE_TLS_REJECT_UNAUTHORIZED, '1');
+    });
+  } finally {
+    delete require.cache[modulePath];
+    childProcess.spawn = originalSpawn;
+  }
+});
+
+test('codexService actual child gets Codex auth and injected codexHome wins', async (t) => {
+  const probePath = path.join(os.tmpdir(), `palantir-codex-service-env-${process.pid}-${Date.now()}.json`);
+  t.after(() => fsp.rm(probePath, { force: true }));
+  const childScript = String.raw`
+    const fs = require('node:fs');
+    const readline = require('node:readline');
+    fs.writeFileSync(process.argv[1], JSON.stringify(process.env));
+    const rl = readline.createInterface({ input: process.stdin });
+    rl.on('line', line => {
+      const req = JSON.parse(line);
+      let result = {};
+      if (req.method === 'account/read') {
+        result = { account: { type: 'test' }, requiresOpenaiAuth: false };
+      } else if (req.method === 'account/rateLimits/read') {
+        result = { rateLimits: { primary: { windowDurationMins: 300, remaining_pct: 75 } } };
+      }
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result }) + '\n', () => {
+        if (req.method === 'account/rateLimits/read') process.exit(0);
+      });
+    });
+  `;
+  const modulePath = require.resolve('../services/codexService');
+  const originalSpawn = childProcess.spawn;
+  delete require.cache[modulePath];
+  childProcess.spawn = (_command, _args, opts) => originalSpawn(
+    process.execPath,
+    ['-e', childScript, probePath],
+    opts,
+  );
+
+  try {
+    await withProcessEnv({
+      UNRELATED_CANARY_7F3A: '',
+      GITHUB_TOKEN: 'github-secret',
+      CODEX_API_KEY: 'codex-api',
+      OPENAI_API_KEY: 'openai-api',
+      CODEX_HOME: '/host/codex-home',
+      CLAUDE_CONFIG_DIR: '/host/claude',
+    }, async () => {
+      const { createCodexService } = require('../services/codexService');
+      const service = createCodexService({
+        codexBin: FAKE_CODEX_STDIN,
+        codexHome: '/injected/codex-home',
+        timeoutMs: 3000,
+      });
+      await service.getStatus();
+      const observed = await waitForJson(probePath);
+      assert.equal(hasOwn(observed, 'UNRELATED_CANARY_7F3A'), false);
+      assert.equal(hasOwn(observed, 'GITHUB_TOKEN'), false);
+      assert.equal(observed.CODEX_API_KEY, 'codex-api');
+      assert.equal(observed.OPENAI_API_KEY, 'openai-api');
+      assert.equal(observed.CODEX_HOME, '/injected/codex-home');
+      assert.equal(hasOwn(observed, 'CLAUDE_CONFIG_DIR'), false);
+    });
+  } finally {
+    delete require.cache[modulePath];
+    childProcess.spawn = originalSpawn;
+  }
+});
+
+test('CodexAdapter manager role fails closed when the caller omits env', async (t) => {
+  let capturedEnv = null;
+  const adapter = createCodexAdapter({
+    runService: null,
+    codexBin: FAKE_CODEX_STDIN,
+    spawnFn: (_command, _args, opts) => {
+      capturedEnv = opts.env;
+      return makeFakeCodexChild();
+    },
+  });
+  t.after(() => adapter.disposeSession('run-fail-closed'));
+
+  await withProcessEnv({ UNRELATED_CANARY_7F3A: 'ambient-secret' }, async () => {
+    adapter.startSession('run-fail-closed', {
+      systemPrompt: 'system',
+      cwd: process.cwd(),
+      role: 'manager',
+    });
+    const result = adapter.runTurn('run-fail-closed', { text: 'hello' });
+    assert.equal(result.accepted, true);
+    assert.ok(capturedEnv);
+    assert.equal(hasOwn(capturedEnv, 'UNRELATED_CANARY_7F3A'), false);
+    assert.deepEqual(capturedEnv, {});
+  });
+});
+
+function createMockManagerAdapter(calls) {
+  return {
+    type: 'claude-code',
+    capabilities: {
+      supportsResume: true,
+      persistentProcess: true,
+      persistentSession: true,
+    },
+    startSession(runId, opts) {
+      calls.push({ runId, opts });
+      return { sessionRef: { pid: 123 } };
+    },
+    runTurn: () => ({ accepted: true }),
+    isSessionAlive: () => true,
+    disposeSession: () => {},
+    emitSessionEndedIfNeeded: () => {},
+    detectExitCode: () => null,
+    getUsage: () => null,
+    getSessionId: () => null,
+    getOutput: () => null,
+    buildGuardrailsSection: () => '',
+  };
+}
+
+async function createManagerDbHarness(t, name) {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), `${name}-`));
+  const { createDatabase } = require('../db/database');
+  const { createRunService } = require('../services/runService');
+  const { createAgentProfileService } = require('../services/agentProfileService');
+  const { createManagerRegistry } = require('../services/managerRegistry');
+  const { createConversationService } = require('../services/conversationService');
+  const { db, migrate, close } = createDatabase(path.join(root, 'test.db'));
+  migrate();
+  const runService = createRunService(db, null);
+  const agentProfileService = createAgentProfileService(db);
+  agentProfileService.updateProfile('claude-code', {
+    env_allowlist: JSON.stringify(['PROFILE_RESUME_ENV']),
+  });
+  const calls = [];
+  const adapter = createMockManagerAdapter(calls);
+  const managerAdapterFactory = { getAdapter: () => adapter };
+  const managerRegistry = createManagerRegistry({ runService });
+  const conversationService = createConversationService({
+    runService,
+    managerRegistry,
+    managerAdapterFactory,
+    lifecycleService: null,
+  });
+  t.after(async () => {
+    close();
+    await fsp.rm(root, { recursive: true, force: true });
+  });
+  return {
+    root,
+    db,
+    runService,
+    agentProfileService,
+    calls,
+    managerAdapterFactory,
+    managerRegistry,
+    conversationService,
+  };
+}
+
+test('fresh Top and boot-resumed Top/Operator use the same profile env_allowlist', async (t) => {
+  await withProcessEnv({
+    PROFILE_RESUME_ENV: 'profile-visible',
+    RESUME_DROPPED_CANARY_7F3A: 'never-log-this-value',
+  }, async () => {
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (line) => warnings.push(String(line));
+    try {
+      const { createManagerRouter } = require('../routes/manager');
+
+      const fresh = await createManagerDbHarness(t, 'palantir-env-fresh');
+      const freshApp = express();
+      freshApp.use(express.json());
+      freshApp.use('/api/manager', createManagerRouter({
+        runService: fresh.runService,
+        managerAdapterFactory: fresh.managerAdapterFactory,
+        managerRegistry: fresh.managerRegistry,
+        conversationService: fresh.conversationService,
+        agentProfileService: fresh.agentProfileService,
+        authResolverOpts: {
+          hasKeychain: () => true,
+          hasCredentialsFile: () => false,
+        },
+      }));
+      const response = await invokeApp(freshApp, {
+        method: 'POST',
+        path: '/api/manager/start',
+        body: {
+          prompt: 'fresh allowlist',
+          agent_profile_id: 'claude-code',
+        },
+      });
+      assert.equal(response.status, 201, JSON.stringify(response.body));
+      const freshCall = fresh.calls.find((call) => !call.opts.resumeSessionId);
+      assert.ok(freshCall, 'fresh Top spawn must be captured');
+
+      const resumed = await createManagerDbHarness(t, 'palantir-env-resume');
+      const { createProjectService } = require('../services/projectService');
+      const { createProjectBriefService } = require('../services/projectBriefService');
+      const projectService = createProjectService(resumed.db);
+      const projectBriefService = createProjectBriefService(resumed.db);
+      const project = projectService.createProject({
+        name: 'resume-env-project',
+        directory: resumed.root,
+      });
+      projectBriefService.ensureBrief(project.id);
+      const ensured = resumed.runService.ensurePrimaryOperatorInstanceForProject(project.id);
+      resumed.runService.setOperatorInstanceThread(ensured.instanceId, {
+        thread_id: 'resume-operator-session',
+        pm_adapter: 'claude',
+        node_id: 'local',
+        cwd: resumed.root,
+      });
+
+      const topRun = resumed.runService.createRun({
+        is_manager: true,
+        prompt: 'resume top',
+        agent_profile_id: 'claude-code',
+        manager_adapter: 'claude-code',
+        manager_layer: 'top',
+        conversation_id: 'top',
+      });
+      resumed.runService.updateRunStatus(topRun.id, 'running', { force: true });
+      resumed.runService.updateClaudeSessionId(topRun.id, 'resume-top-session');
+
+      const operatorRun = resumed.runService.createRun({
+        is_manager: true,
+        prompt: 'resume operator',
+        agent_profile_id: 'claude-code',
+        manager_adapter: 'claude-code',
+        manager_layer: 'operator',
+        conversation_id: ensured.instanceConversationId,
+        operator_instance_id: ensured.instanceId,
+      });
+      resumed.runService.updateRunStatus(operatorRun.id, 'running', { force: true });
+
+      createManagerRouter({
+        runService: resumed.runService,
+        projectService,
+        projectBriefService,
+        managerAdapterFactory: resumed.managerAdapterFactory,
+        managerRegistry: resumed.managerRegistry,
+        conversationService: resumed.conversationService,
+        agentProfileService: resumed.agentProfileService,
+        authResolverOpts: {
+          hasKeychain: () => true,
+          hasCredentialsFile: () => false,
+        },
+      });
+
+      const resumedTopCall = resumed.calls.find((call) => call.runId === topRun.id);
+      const resumedOperatorCall = resumed.calls.find((call) => call.runId === operatorRun.id);
+      assert.ok(resumedTopCall, 'boot resume Top spawn must be captured');
+      assert.ok(resumedOperatorCall, 'boot resume Operator spawn must be captured');
+      for (const captured of [freshCall, resumedTopCall, resumedOperatorCall]) {
+        assert.equal(captured.opts.env.PROFILE_RESUME_ENV, 'profile-visible');
+        assert.equal(hasOwn(captured.opts.env, 'RESUME_DROPPED_CANARY_7F3A'), false);
+      }
+      assert.deepEqual(resumedTopCall.opts.env, freshCall.opts.env);
+      assert.deepEqual(resumedOperatorCall.opts.env, freshCall.opts.env);
+
+      for (const context of [
+        'manager:fresh:top',
+        'manager:resume:top',
+        'manager:resume:operator',
+      ]) {
+        const line = warnings.find((entry) => entry.includes(`"context":"${context}"`));
+        assert.ok(line, `missing security diagnostic for ${context}`);
+        assert.match(line, /RESUME_DROPPED_CANARY_7F3A/);
+        assert.doesNotMatch(line, /never-log-this-value/);
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+});
+
+test('fresh and resume security diagnostics are emitted before an unavailable-auth gate', async (t) => {
+  await withProcessEnv({
+    PALANTIR_SKIP_HOST_CREDENTIALS: '1',
+    MIGRATED_AUTH_ENV_KEY: 'migration-secret-must-not-be-logged',
+  }, async () => {
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (line) => warnings.push(String(line));
+    try {
+      const { createManagerRouter } = require('../routes/manager');
+      const authResolverOpts = {
+        hasKeychain: () => false,
+        hasCredentialsFile: () => false,
+      };
+
+      const fresh = await createManagerDbHarness(t, 'palantir-env-auth-gate-fresh');
+      const freshApp = express();
+      freshApp.use(express.json());
+      freshApp.use('/api/manager', createManagerRouter({
+        runService: fresh.runService,
+        managerAdapterFactory: fresh.managerAdapterFactory,
+        managerRegistry: fresh.managerRegistry,
+        conversationService: fresh.conversationService,
+        agentProfileService: fresh.agentProfileService,
+        authResolverOpts,
+      }));
+      const freshResponse = await invokeApp(freshApp, {
+        method: 'POST',
+        path: '/api/manager/start',
+        body: {
+          prompt: 'migration diagnostic',
+          agent_profile_id: 'claude-code',
+        },
+      });
+      assert.equal(freshResponse.status, 400);
+      assert.equal(freshResponse.body.error, 'manager_auth_unavailable');
+
+      const resumed = await createManagerDbHarness(t, 'palantir-env-auth-gate-resume');
+      const stale = resumed.runService.createRun({
+        is_manager: true,
+        prompt: 'stale migration diagnostic',
+        agent_profile_id: 'claude-code',
+        manager_adapter: 'claude-code',
+        manager_layer: 'top',
+        conversation_id: 'top',
+      });
+      resumed.runService.updateRunStatus(stale.id, 'running', { force: true });
+      resumed.runService.updateClaudeSessionId(stale.id, 'resume-auth-gate');
+      createManagerRouter({
+        runService: resumed.runService,
+        managerAdapterFactory: resumed.managerAdapterFactory,
+        managerRegistry: resumed.managerRegistry,
+        conversationService: resumed.conversationService,
+        agentProfileService: resumed.agentProfileService,
+        authResolverOpts,
+      });
+      assert.equal(resumed.runService.getRun(stale.id).status, 'stopped');
+
+      for (const context of ['manager:fresh:top', 'manager:resume:top']) {
+        const line = warnings.find((entry) => (
+          entry.includes(`"context":"${context}"`)
+          && entry.includes('MIGRATED_AUTH_ENV_KEY')
+        ));
+        assert.ok(line, `missing pre-auth-gate diagnostic for ${context}`);
+        assert.doesNotMatch(line, /migration-secret-must-not-be-logged/);
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+});
+
+// codex adversarial review (PR A, SERIOUS): a malformed profile env_allowlist
+// must not make boot resume behave differently from a fresh spawn. The first
+// implementation threw here; the per-run resume handler caught it and marked an
+// otherwise healthy manager stopped, so one bad profile row could stop resume
+// for every manager sharing its adapter while fresh spawns sailed past.
+test('a malformed profile env_allowlist degrades identically on fresh and resume', () => {
+  const { __testables } = require('../routes/manager');
+  const resolveResumeEnvAllowlist = __testables && __testables.resolveResumeEnvAllowlist;
+  assert.ok(resolveResumeEnvAllowlist, 'resolveResumeEnvAllowlist must be exported for test');
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (line) => warnings.push(String(line));
+  try {
+    for (const broken of ['{not json', '"a string"', '{"a":1}', '42']) {
+      const svc = {
+        listProfiles: () => [{ id: 'ap_broken', type: 'codex', env_allowlist: broken }],
+      };
+      const result = resolveResumeEnvAllowlist(svc, { adapterType: 'codex' });
+      assert.equal(result, undefined, `malformed allowlist ${broken} must degrade to undefined`);
+    }
+    // A profile whose row cannot even be read must not throw either.
+    const throwing = { listProfiles: () => { throw new Error('db gone'); } };
+    assert.equal(resolveResumeEnvAllowlist(throwing, { adapterType: 'codex' }), undefined);
+
+    // Degradation is observable, and never echoes an allowlist value.
+    assert.ok(
+      warnings.some((line) => line.includes('manager_env_allowlist_unreadable')),
+      'degradation must be observable',
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  // A well-formed allowlist still resolves — the guard must not swallow those.
+  const good = {
+    listProfiles: () => [{ id: 'ap_ok', type: 'codex', env_allowlist: '["KEEP_ME"]' }],
+  };
+  assert.deepEqual(resolveResumeEnvAllowlist(good, { adapterType: 'codex' }), ['KEEP_ME']);
+});

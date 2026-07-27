@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { resolveAgentVendor } = require('../utils/agentVendor');
 const dotenv = require('dotenv');
 
 const ACTOR_TOKEN_KEYS = Object.freeze([
@@ -248,11 +249,16 @@ function stripActorCredentials(env) {
   return env;
 }
 
-// Worker profiles explicitly choose credential-bearing variables through
-// agent_profiles.env_allowlist. Only a small, non-secret process baseline may
-// cross the final engine boundary implicitly; merging all of process.env here
-// would silently bypass that allowlist for tmux/subprocess workers.
-const WORKER_BASE_ENV_KEYS = Object.freeze([
+// Worker and manager profiles explicitly choose additional variables through
+// agent_profiles.env_allowlist. This shared process baseline is intentionally
+// narrow; merging all of process.env at either engine boundary would silently
+// bypass that allowlist.
+//
+// HOME, APPDATA, and LOCALAPPDATA are credential/config locators rather than
+// merely non-secret runtime variables: Claude and Codex use them to find stores
+// such as ~/.claude and ~/.codex. They remain here because both CLIs require
+// their normal home/config location to operate.
+const PROCESS_BASE_ENV_KEYS = Object.freeze([
   'PATH',
   'Path',
   'HOME',
@@ -263,8 +269,9 @@ const WORKER_BASE_ENV_KEYS = Object.freeze([
   'USERNAME',
   'LOGNAME',
   'SHELL',
-  // Windows subprocesses need these non-secret runtime variables to resolve
-  // .cmd shims, start the command shell, and locate CLI config/auth stores.
+  // Windows subprocesses need these runtime variables to resolve .cmd shims
+  // and start the command shell. APPDATA and LOCALAPPDATA also deliberately
+  // locate CLI configuration and credential stores.
   'SystemRoot',
   'SYSTEMROOT',
   'WINDIR',
@@ -286,6 +293,50 @@ const WORKER_BASE_ENV_KEYS = Object.freeze([
   'NO_COLOR',
   'FORCE_COLOR',
 ]);
+
+// Workers and managers each derive their own set from the common baseline.
+// This is a distinct array, not an alias: a future worker-only key is appended
+// HERE, so it cannot flow into managers. Managers likewise extend the shared
+// baseline in MANAGER_BASE_ENV_KEYS below and never read this set. Deriving one
+// from the other in either direction would make the more privileged surface
+// grow silently whenever the other one does.
+const WORKER_BASE_ENV_KEYS = Object.freeze([...PROCESS_BASE_ENV_KEYS]);
+
+// Proxy URLs can contain credentials (for example,
+// http://user:password@proxy:3128), so these are not part of the nominal
+// process baseline. They are forwarded as a separate, explicit compatibility
+// set for corporate networks. Masking is intentionally deferred.
+const NETWORK_ENV_KEYS = Object.freeze([
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'all_proxy',
+  'no_proxy',
+]);
+
+const VENDOR_ENV_KEYS = Object.freeze({
+  claude: Object.freeze([
+    'NODE_EXTRA_CA_CERTS',
+    'CLAUDE_CONFIG_DIR',
+  ]),
+  codex: Object.freeze([
+    'CODEX_HOME',
+    'CODEX_CA_CERTIFICATE',
+    'SSL_CERT_FILE',
+  ]),
+});
+
+function MANAGER_BASE_ENV_KEYS(vendor) {
+  const normalizedVendor = resolveAgentVendor(vendor);
+  return [
+    ...PROCESS_BASE_ENV_KEYS,
+    ...NETWORK_ENV_KEYS,
+    ...(VENDOR_ENV_KEYS[normalizedVendor] || []),
+  ];
+}
 
 function buildWorkerProcessEnv(baseEnv = process.env, explicitEnv = {}, policySource = baseEnv) {
   // Keep the policy parameter in the public seam: callers pass the app-scoped
@@ -542,6 +593,11 @@ module.exports = {
   prepareActorTokenEnvironment,
   resolveActorTokenPolicy,
   isActorCredentialKey,
+  PROCESS_BASE_ENV_KEYS,
+  WORKER_BASE_ENV_KEYS,
+  NETWORK_ENV_KEYS,
+  VENDOR_ENV_KEYS,
+  MANAGER_BASE_ENV_KEYS,
   buildWorkerProcessEnv,
   augmentProcessPath,
   applyManagerCredentialPolicy,

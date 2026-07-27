@@ -58,6 +58,43 @@ function parseMcpTools(capabilitiesJson) {
   }
 }
 
+// #431: boot resume must resolve the SAME profile env_allowlist a fresh spawn
+// does, or an allowlisted custom variable silently disappears after a restart.
+//
+// A malformed allowlist degrades to `undefined` (base allowlist only) rather
+// than throwing. Throwing here would be caught by the per-run resume handler
+// and mark an otherwise healthy manager stopped — one bad profile row taking
+// down resume for every manager sharing its adapter. The fresh spawn paths
+// already swallow the same parse error, and diverging would recreate exactly
+// the fresh/resume asymmetry this function exists to remove. `undefined` is
+// the safe direction: it grants no extra keys.
+function resolveResumeEnvAllowlist(agentProfileService, { profileId, adapterType } = {}) {
+  if (!agentProfileService) return undefined;
+  let profile = null;
+  try {
+    if (profileId && typeof agentProfileService.getProfile === 'function') {
+      profile = agentProfileService.getProfile(profileId);
+    } else if (typeof agentProfileService.listProfiles === 'function') {
+      profile = agentProfileService.listProfiles().find((candidate) => candidate.type === adapterType) || null;
+    }
+  } catch { /* treat an unreadable profile as "no allowlist" */ }
+  if (!profile || !profile.env_allowlist) return undefined;
+  try {
+    const parsed = JSON.parse(profile.env_allowlist);
+    if (!Array.isArray(parsed)) throw new Error('not an array');
+    return parsed;
+  } catch (err) {
+    console.warn(
+      `[security] manager_env_allowlist_unreadable ${JSON.stringify({
+        profile_id: profile.id,
+        adapter: adapterType,
+        reason: err && err.message,
+      })}`
+    );
+    return undefined;
+  }
+}
+
 // authResolverOpts is forwarded into resolveManagerAuth for every preflight
 // so tests can inject `hasKeychain` (and any future DI hooks) without
 // monkey-patching child_process. Production callers leave this empty and
@@ -159,14 +196,22 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
             buildManagerSystemPromptModule({ adapter, port, token: !!token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable() }),
             buildTopIdentitySection({ topRunId: r.id }), // MD-2a: resumed Top's own run id
           ].filter(Boolean).join('\n\n');
-          const authCtx = resolveManagerAuth(adapterType, authResolverOpts);
+          const envAllowlist = resolveResumeEnvAllowlist(agentProfileService, {
+            profileId: r.agent_profile_id,
+            adapterType,
+          });
+          const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
+          const resolvedSpawnEnv = buildManagerSpawnEnv({
+            baseEnv: actorSpawnBaseEnv,
+            authEnv: authCtx.env,
+            envAllowlist,
+            vendor: adapterType,
+            scrubHumanToken: actorTokens.separated,
+            diagnosticContext: 'manager:resume:top',
+          });
           if (authCtx.canAuth) {
             const spawnEnv = applyManagerCredentialPolicy(
-              buildManagerSpawnEnv({
-                baseEnv: actorSpawnBaseEnv,
-                authEnv: authCtx.env,
-                scrubHumanToken: actorTokens.separated,
-              }),
+              resolvedSpawnEnv,
               { managerToken: token, actorTokens },
             );
             const safeCwd = resolveSpawnCwd({});
@@ -385,18 +430,25 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 // (P5-S4c) — resolve auth for the run's ACTUAL adapter, not a
                 // hardcoded 'codex' (a local Claude Operator would otherwise be
                 // stopped/misauthed via Codex auth). (Codex P5-S4c BLOCKER.)
-                const authCtx = resolveManagerAuth(adapterType, authResolverOpts);
+                const envAllowlist = resolveResumeEnvAllowlist(agentProfileService, {
+                  adapterType,
+                });
+                const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
+                const resolvedSpawnEnv = buildManagerSpawnEnv({
+                  baseEnv: actorSpawnBaseEnv,
+                  authEnv: authCtx.env,
+                  envAllowlist,
+                  vendor: adapterType,
+                  scrubHumanToken: actorTokens.separated || goalActive,
+                  diagnosticContext: 'manager:resume:operator',
+                });
                 // A REMOTE Operator authenticates on the pod (~/.codex), not the
                 // control plane — resume it even when control-plane Codex auth is
                 // absent (else a restart would stop a healthy pod Operator).
                 // Local still requires canAuth. (Codex S3b review.)
                 if (isRemoteNode || authCtx.canAuth) {
                   const spawnEnv = applyManagerCredentialPolicy(
-                    buildManagerSpawnEnv({
-                      baseEnv: actorSpawnBaseEnv,
-                      authEnv: authCtx.env,
-                      scrubHumanToken: actorTokens.separated || goalActive,
-                    }),
+                    resolvedSpawnEnv,
                     { managerToken: token, actorTokens },
                   );
                   const cwd = isRepoProject
@@ -598,6 +650,14 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       envAllowlist = undefined;
     }
     const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
+    const resolvedSpawnEnv = buildManagerSpawnEnv({
+      baseEnv: actorSpawnBaseEnv,
+      authEnv: authCtx.env,
+      envAllowlist,
+      vendor: adapterType,
+      scrubHumanToken: actorTokens.separated,
+      diagnosticContext: 'manager:fresh:top',
+    });
     if (!authCtx.canAuth) {
       startingManager = false;
       return res.status(400).json({
@@ -709,18 +769,11 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       userPrompt: prompt || 'You are now active as the Palantir Manager. Await instructions.',
     });
 
-    // PR4: finally propagate the filtered env to the spawned subprocess.
-    // buildManagerSpawnEnv strips credential-like vars that are NOT on the
-    // profile's env_allowlist, then layers resolved auth env on top. Tool
-    // CLIs still inherit PATH/HOME/etc., but cross-vendor credentials can
-    // no longer leak.
+    // Propagate the allowlisted env to the subprocess. The builder admits only
+    // the common/vendor baseline plus profile additions, then layers resolved
+    // auth on top.
     const spawnEnv = applyManagerCredentialPolicy(
-      buildManagerSpawnEnv({
-        baseEnv: actorSpawnBaseEnv,
-        authEnv: authCtx.env,
-        envAllowlist,
-        scrubHumanToken: actorTokens.separated,
-      }),
+      resolvedSpawnEnv,
       { managerToken: token, actorTokens },
     );
 
@@ -1279,4 +1332,9 @@ function buildRunSummary(runService) {
 // agent lists) can be sent as the first user message — protecting Codex's
 // model_instructions_file caching. Do not re-add the inline version.
 
-module.exports = { createManagerRouter };
+module.exports = {
+  createManagerRouter,
+  // #431: exported for the fresh/resume parity test only. Not a public seam —
+  // production callers reach this through the resume paths above.
+  __testables: { resolveResumeEnvAllowlist },
+};
