@@ -37,9 +37,21 @@ export async function apiFetch(url, opts = {}) {
   // the machine-readable `reason` field: the auth middleware rejects before
   // any route runs, so an auth 403 can never carry one. Stripped here so it
   // never reaches fetch().
-  const { allowAppForbidden = false, ...fetchOpts } = opts;
-  const headers = { 'Content-Type': 'application/json', ...fetchOpts.headers };
-  const res = await fetch(url, { headers, credentials: 'same-origin', ...fetchOpts });
+  // `headers` must be pulled out of the rest object too. It used to stay in
+  // `fetchOpts`, and because that spread comes AFTER `headers:` below, a caller
+  // that passed any custom header replaced the merged object wholesale and lost
+  // `Content-Type: application/json`. express.json() then skipped the body, so
+  // the route saw `{}` — POST /api/conversations/:id/message answered 400
+  // "text or images is required" for every message sent from the Manager chat
+  // (its Idempotency-Key was the only custom header in the app).
+  // Normalize through Headers rather than object spread: HeaderInit is also
+  // allowed to be a Headers instance or an array of tuples, and header names
+  // are case-insensitive — a caller passing `content-type` must REPLACE the
+  // default, not end up combined with it as `application/json, text/plain`.
+  const { allowAppForbidden = false, headers: callerHeaders, ...fetchOpts } = opts;
+  const headers = new Headers(callerHeaders || undefined);
+  if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+  const res = await fetch(url, { credentials: 'same-origin', ...fetchOpts, headers });
   // Auth failures → bounce to login. We normally check the status BEFORE
   // trying to parse JSON, because middleware may respond with { error } HTML
   // in some proxy setups; the opt-in path above has to peek at the body first.

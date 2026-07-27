@@ -200,3 +200,79 @@ test('apiFetch returns parsed data on a 2xx response', async () => {
     restore();
   }
 });
+
+// A caller-supplied header must ADD to the defaults, never replace them.
+// Regression: `headers` stayed inside the rest object and the trailing
+// `...fetchOpts` spread clobbered the merged headers, dropping
+// `Content-Type: application/json`. express.json() then left req.body empty and
+// every Manager chat message (the only custom-header caller — it sends
+// Idempotency-Key) came back 400 "text or images is required".
+test('apiFetch keeps the JSON Content-Type when the caller adds a header', async () => {
+  const restore = stubGlobals(jsonResponse({ status: 200, ok: true, body: { ok: true } }));
+  try {
+    const { apiFetch } = await import(API_URL);
+    await apiFetch('/api/conversations/top/message', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': 'key-1' },
+      body: JSON.stringify({ text: 'hello' }),
+    });
+    const [opts] = restore.seen.fetchOpts;
+    assert.equal(opts.headers.get('Content-Type'), 'application/json');
+    assert.equal(opts.headers.get('Idempotency-Key'), 'key-1');
+  } finally {
+    restore();
+  }
+});
+
+test('apiFetch lets the caller override Content-Type explicitly', async () => {
+  const restore = stubGlobals(jsonResponse({ status: 200, ok: true, body: { ok: true } }));
+  try {
+    const { apiFetch } = await import(API_URL);
+    await apiFetch('/api/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+    });
+    const [opts] = restore.seen.fetchOpts;
+    assert.equal(opts.headers.get('Content-Type'), 'text/plain');
+  } finally {
+    restore();
+  }
+});
+
+// Header names are case-insensitive. A lowercase override must REPLACE the
+// default; a plain-object merge would emit both and fetch would send the
+// combined `application/json, text/plain` (codex review P2).
+test('apiFetch honors a case-insensitive Content-Type override', async () => {
+  const restore = stubGlobals(jsonResponse({ status: 200, ok: true, body: { ok: true } }));
+  try {
+    const { apiFetch } = await import(API_URL);
+    await apiFetch('/api/upload', {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+    });
+    const [opts] = restore.seen.fetchOpts;
+    assert.equal(opts.headers.get('Content-Type'), 'text/plain');
+  } finally {
+    restore();
+  }
+});
+
+// HeaderInit also allows a Headers instance and tuple arrays; an object spread
+// silently dropped the former and turned the latter into numeric header names.
+test('apiFetch accepts a Headers instance and a tuple array', async () => {
+  for (const init of [
+    new Headers({ 'Idempotency-Key': 'key-2' }),
+    [['Idempotency-Key', 'key-2']],
+  ]) {
+    const restore = stubGlobals(jsonResponse({ status: 200, ok: true, body: { ok: true } }));
+    try {
+      const { apiFetch } = await import(API_URL);
+      await apiFetch('/api/conversations/top/message', { method: 'POST', headers: init });
+      const [opts] = restore.seen.fetchOpts;
+      assert.equal(opts.headers.get('Idempotency-Key'), 'key-2');
+      assert.equal(opts.headers.get('Content-Type'), 'application/json');
+    } finally {
+      restore();
+    }
+  }
+});
