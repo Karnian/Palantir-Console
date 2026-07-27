@@ -13,14 +13,19 @@ async function createTempDir(prefix) {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
-async function createTestApp(t) {
+async function createTestApp(t, options = {}) {
   const storageRoot = await createTempDir('palantir-mgr-storage-');
   const fsRoot = await createTempDir('palantir-mgr-fs-');
   // Per-test SQLite so the suite can never leak fixture rows into the
   // dev DB at server/palantir.db.
   const dbDir = await createTempDir('palantir-mgr-db-');
   const dbPath = path.join(dbDir, 'test.db');
-  const app = createApp({ storageRoot, fsRoot, opencodeBin: 'opencode', dbPath, authToken: null });
+  // `authToken: null` stays the default — passing nothing must not fall back to
+  // process.env.PALANTIR_TOKEN, which a sibling test file may have set. Tests
+  // that need a real capability credential opt in explicitly.
+  const app = createApp({
+    storageRoot, fsRoot, opencodeBin: 'opencode', dbPath, authToken: null, ...options,
+  });
 
   t.after(async () => {
     if (app.shutdown) app.shutdown();
@@ -1266,4 +1271,196 @@ test('v3 Phase 0: codexAdapter unconditionally bypasses sandbox', async () => {
   // --full-auto should NOT be used (bypass already implies auto-approval)
   assert.ok(!src.includes("args.push('--full-auto')"),
     '--full-auto should not be used when bypass is always active');
+});
+
+// #436: four boundary fixes for the run-bound manager capability. Each is a way
+// the credential reached authority the Console declares to be someone else's.
+
+test('a manager capability stops authorizing once its run is terminal', async (t) => {
+  // A registry entry can outlive the run row's terminal transition. Liveness of
+  // the slot was the only check, so a completed manager's token kept working.
+  const { app } = await createTestApp(t, { authToken: 'human-token', agentProcessIsolation: true });
+  const rs = app.services.runService;
+  const top = rs.createRun({
+    is_manager: true, manager_layer: 'top', conversation_id: 'top',
+    manager_adapter: 'codex', prompt: 'top',
+  });
+  rs.updateRunStatus(top.id, 'running', { force: true });
+  app.managerRegistry.setActive('top', top.id, {
+    isSessionAlive: () => true, detectExitCode: () => null, disposeSession: () => true,
+  });
+  const token = app.services.managerCapabilityTokenService.mint(top.id, {
+    conversationId: 'top', layer: 'top',
+  });
+  await request(app).get('/api/runs').set('Authorization', `Bearer ${token}`).expect(200);
+
+  // The adapter still looks alive; only the DB row moved on.
+  rs.updateRunStatus(top.id, 'completed', { force: true });
+  await request(app).get('/api/runs').set('Authorization', `Bearer ${token}`).expect(403);
+
+  // ...and refusing must NOT drop the registry's reference. clearActive() does
+  // not dispose the adapter, so clearing from an auth check would strand a live
+  // privileged process where reset and shutdown can no longer find it.
+  assert.equal(app.managerRegistry.snapshot().top?.runId, top.id,
+    'the slot must survive so the cleanup path can still dispose the adapter');
+});
+
+test('a manager capability cannot intervene in another manager run', async (t) => {
+  const { app } = await createTestApp(t, { authToken: 'human-token', agentProcessIsolation: true });
+  const rs = app.services.runService;
+  const top = rs.createRun({
+    is_manager: true, manager_layer: 'top', conversation_id: 'top',
+    manager_adapter: 'codex', prompt: 'top',
+  });
+  rs.updateRunStatus(top.id, 'running', { force: true });
+
+  const project = app.services.projectService.createProject({ name: 'intervene' });
+  const resolved = rs.ensurePrimaryOperatorInstanceForProject(project.id);
+  const operator = rs.createRun({
+    is_manager: true, manager_layer: 'operator',
+    conversation_id: resolved.instanceConversationId,
+    manager_adapter: 'codex', prompt: 'operator',
+  });
+  rs.updateRunStatus(operator.id, 'running', { force: true });
+  app.managerRegistry.setActive(resolved.instanceConversationId, operator.id, {
+    isSessionAlive: () => true, detectExitCode: () => null, disposeSession: () => true,
+  });
+  const token = app.services.managerCapabilityTokenService.mint(operator.id, {
+    conversationId: resolved.instanceConversationId, layer: 'operator',
+  });
+
+  // Cancelling a manager run flips the DB row without disposing the adapter,
+  // stranding a privileged process whose registry slot then disappears.
+  await request(app).post(`/api/runs/${top.id}/cancel`)
+    .set('Authorization', `Bearer ${token}`).expect(403);
+  await request(app).post(`/api/runs/${top.id}/input`)
+    .set('Authorization', `Bearer ${token}`).send({ text: 'x' }).expect(403);
+  assert.equal(rs.getRun(top.id).status, 'running', 'the manager run must be untouched');
+});
+
+test('a manager capability cannot mark a GOAL task done', async (t) => {
+  // `done` on a goal task auto-triggers goal delivery, which force-points a git
+  // ref — cookie-only human authority on the manual endpoint.
+  const { app } = await createTestApp(t, { authToken: 'human-token' });
+  const ts = app.services.taskService;
+  const project = app.services.projectService.createProject({ name: 'goalguard' });
+  const task = ts.createTask({ title: 'goal task', project_id: project.id });
+  ts.updateTask(task.id, { goal_enabled: 1 });
+
+  assert.throws(
+    () => ts.updateTaskStatus(task.id, 'done', { actor: { method: 'bearer', actor: 'manager' } }),
+    /goal task done/,
+  );
+  assert.notEqual(ts.getTask(task.id).status, 'done', 'the transition itself must not happen');
+
+  // A human cookie session still may, an internal call still may, and a
+  // non-goal task is unaffected either way.
+  ts.updateTaskStatus(task.id, 'done', { actor: { method: 'cookie', actor: null } });
+  assert.equal(ts.getTask(task.id).status, 'done');
+  const plain = ts.createTask({ title: 'plain', project_id: project.id });
+  ts.updateTaskStatus(plain.id, 'done', { actor: { method: 'bearer', actor: 'manager' } });
+  assert.equal(ts.getTask(plain.id).status, 'done');
+
+  // Guarding only the status route was bypassable two ways, both reproduced in
+  // review. The invariant is on the RESULT of a manager mutation, so both close.
+  const manager = { method: 'bearer', actor: 'manager' };
+  const round = ts.createTask({ title: 'round trip', project_id: project.id });
+  ts.updateTask(round.id, { goal_enabled: 1 });
+  // (a) turn the goal off, complete it, turn it back on
+  ts.updateTask(round.id, { goal_enabled: 0 }, { actor: manager });
+  ts.updateTaskStatus(round.id, 'done', { actor: manager });
+  assert.throws(
+    () => ts.updateTask(round.id, { goal_enabled: 1 }, { actor: manager }),
+    /goal task done/,
+    'a manager must not be able to re-arm a goal it already marked done',
+  );
+  // (b) touch an unrelated field on a task that is ALREADY done+goal_enabled,
+  //     which re-emits task:updated and would retry a failed delivery
+  const settled = ts.createTask({ title: 'settled', project_id: project.id, description: 'nudge-free' });
+  ts.updateTask(settled.id, { goal_enabled: 1 });
+  ts.updateTaskStatus(settled.id, 'done', { actor: { method: 'cookie', actor: null } });
+  assert.throws(
+    () => ts.updateTask(settled.id, { description: 'nudge' }, { actor: manager }),
+    /goal task done/,
+  );
+  // (c) `status` is NOT a writable field on this route, so merging the raw body
+  //     let a manager claim a result the write would never produce. The check
+  //     has to use the fields that will actually be persisted.
+  assert.throws(
+    () => ts.updateTask(settled.id, { status: 'todo', description: 'spoof' }, { actor: manager }),
+    /goal task done/,
+    'an unwritable status must not talk the guard out of the real result',
+  );
+  assert.equal(ts.getTask(settled.id).description, 'nudge-free',
+    'the spoofed write must not have landed');
+
+  // A human and an internal call are still free to edit it.
+  ts.updateTask(settled.id, { description: 'human edit' }, { actor: { method: 'cookie', actor: null } });
+  ts.updateTask(settled.id, { description: 'internal edit' });
+  assert.equal(ts.getTask(settled.id).description, 'internal edit');
+});
+
+test('the run started event does not carry the tmux session name', async (t) => {
+  // Naming the session is enough to attach to the worker's terminal, which is
+  // authority far beyond the Console API.
+  const { app } = await createTestApp(t, { authToken: 'human-token' });
+  const rs = app.services.runService;
+  const project = app.services.projectService.createProject({ name: 'started' });
+  const task = app.services.taskService.createTask({ title: 't', project_id: project.id });
+  const profile = app.services.agentProfileService.createProfile({
+    name: 'w', type: 'codex', command: 'codex',
+  });
+  const run = rs.createRun({ task_id: task.id, agent_profile_id: profile.id, prompt: 'p' });
+  rs.markRunStarted(run.id, {
+    tmux_session: 'palantir-secret-session', worktree_path: '/tmp/wt', branch: 'feat/x',
+  });
+
+  const events = JSON.stringify(rs.getRunEvents(run.id));
+  assert.doesNotMatch(events, /palantir-secret-session|tmux_session/);
+  assert.match(events, /feat\/x/, 'the useful fields must survive');
+  assert.equal(rs.getRun(run.id).tmux_session, 'palantir-secret-session',
+    'the run row still stores it for the server itself');
+});
+
+test('run responses do not hand the tmux session name to a manager capability', async (t) => {
+  // Removing it from the `started` event was not enough: GET /api/runs and
+  // GET /api/runs/:id return the run row, which still carries the column.
+  const { app } = await createTestApp(t, { authToken: 'human-token', agentProcessIsolation: true });
+  const rs = app.services.runService;
+  const project = app.services.projectService.createProject({ name: 'sessions' });
+  const task = app.services.taskService.createTask({ title: 't', project_id: project.id });
+  const profile = app.services.agentProfileService.createProfile({
+    name: 'w', type: 'codex', command: 'codex',
+  });
+  const worker = rs.createRun({ task_id: task.id, agent_profile_id: profile.id, prompt: 'p' });
+  rs.markRunStarted(worker.id, { tmux_session: 'palantir-secret-proof', worktree_path: '/w', branch: 'b' });
+
+  const top = rs.createRun({
+    is_manager: true, manager_layer: 'top', conversation_id: 'top',
+    manager_adapter: 'codex', prompt: 'top',
+  });
+  rs.updateRunStatus(top.id, 'running', { force: true });
+  app.managerRegistry.setActive('top', top.id, {
+    isSessionAlive: () => true, detectExitCode: () => null, disposeSession: () => true,
+  });
+  const token = app.services.managerCapabilityTokenService.mint(top.id, {
+    conversationId: 'top', layer: 'top',
+  });
+
+  const list = await request(app).get('/api/runs').set('Authorization', `Bearer ${token}`).expect(200);
+  assert.doesNotMatch(JSON.stringify(list.body), /palantir-secret-proof|tmux_session/);
+  const one = await request(app).get(`/api/runs/${worker.id}`).set('Authorization', `Bearer ${token}`).expect(200);
+  assert.doesNotMatch(JSON.stringify(one.body), /palantir-secret-proof|tmux_session/);
+  assert.equal(one.body.run.id, worker.id, 'the rest of the run must still be readable');
+
+  // The projector is shared precisely because enumerating run-returning routes
+  // is what failed: the list and single-run routes were fixed while
+  // POST /api/tasks/:id/execute still handed the handle back.
+  const { withoutSessionHandle } = require('../utils/managerRunView');
+  const managerReq = { auth: { actor: 'manager' } };
+  const humanReq = { auth: { actor: null, method: 'cookie' } };
+  const row = rs.getRun(worker.id);
+  assert.ok(!('tmux_session' in withoutSessionHandle(managerReq, row)));
+  assert.equal(withoutSessionHandle(humanReq, row).tmux_session, 'palantir-secret-proof',
+    'the human UI keeps its view of the run');
 });

@@ -1731,6 +1731,19 @@ function createApp(options = {}) {
           || (run.manager_layer === 'top' || !run.manager_layer ? 'top' : null);
         const managerLayer = run.manager_layer
           || (conversationId === 'top' ? 'top' : null);
+        // #436: registry liveness is not revocation. A run whose DB status is
+        // already terminal must not keep authorizing requests just because a
+        // slot and an adapter still look alive.
+        //
+        // Refuse only — deliberately do NOT clear the slot here.
+        // `managerRegistry.clearActive()` does not dispose the adapter (see
+        // operatorCleanupService, which disposes first and clears second), so
+        // clearing from an auth check would drop the only reference to a live
+        // privileged process and leave reset and graceful shutdown unable to
+        // find it. Revoking the credential is this function's job; reaping the
+        // process belongs to the cleanup path that can do it safely.
+        const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'stopped']);
+        if (TERMINAL.has(String(run.status || ''))) return false;
         return !!(
           run.is_manager
           && conversationId === grant.conversationId

@@ -1,6 +1,7 @@
 const express = require('express');
 const path = require('node:path');
 const { asyncHandler } = require('../middleware/asyncHandler');
+const { withoutSessionHandle } = require('../utils/managerRunView');
 const { createLocalNodeExecutor } = require('../services/nodeExecutor');
 
 // R2-B.2: maximum unified-diff payload size, in bytes. Diffs larger than
@@ -200,12 +201,12 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
     const { task_id, status } = req.query;
     const runs = runService.listRuns({ task_id, status });
     // Strip the internal rowid: getByTask exposes _seq only for R1b ordering.
-    res.json({ runs: runs.map(({ _seq, ...rest }) => rest) });
+    res.json({ runs: runs.map(({ _seq, ...rest }) => withoutSessionHandle(req, rest)) });
   }));
 
   router.get('/:id', asyncHandler(async (req, res) => {
     const run = runService.getRun(req.params.id);
-    res.json({ run });
+    res.json({ run: withoutSessionHandle(req, run) });
   }));
 
   // Phase 10F: per-run preset snapshot + drift comparison against current
@@ -391,6 +392,22 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
     const { text } = req.body || {};
     if (!text) return res.status(400).json({ error: 'text is required' });
 
+    // #436: a manager capability exists to supervise WORKERS. Left unrestricted
+    // it can cancel a live manager run — the DB row flips to cancelled while the
+    // adapter is never disposed, so the privileged process is orphaned and its
+    // registry slot disappears. Managers are off-limits. Fails closed: an
+    // unknown or unreadable run is not provably a worker run.
+    if (req.auth?.actor === 'manager') {
+      let target = null;
+      try { target = runService.getRun(req.params.id); } catch { target = null; }
+      if (!target) return res.status(404).json({ error: 'Run not found' });
+      if (target.is_manager) {
+        return res.status(403).json({
+          error: 'manager capability may not intervene in a manager run',
+        });
+      }
+    }
+
     if (conversationService) {
       try {
         const result = await conversationService.sendMessage(`worker:${req.params.id}`, { text });
@@ -420,6 +437,21 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
   router.post('/:id/cancel', asyncHandler(async (req, res) => {
     if (!lifecycleService) {
       return res.status(501).json({ error: 'Lifecycle service not configured' });
+    }
+    // #436: a manager capability exists to supervise WORKERS. Left unrestricted
+    // it can cancel a live manager run — the DB row flips to cancelled while the
+    // adapter is never disposed, so the privileged process is orphaned and its
+    // registry slot disappears. Managers are off-limits. Fails closed: an
+    // unknown or unreadable run is not provably a worker run.
+    if (req.auth?.actor === 'manager') {
+      let target = null;
+      try { target = runService.getRun(req.params.id); } catch { target = null; }
+      if (!target) return res.status(404).json({ error: 'Run not found' });
+      if (target.is_manager) {
+        return res.status(403).json({
+          error: 'manager capability may not intervene in a manager run',
+        });
+      }
     }
     await lifecycleService.cancelRun(req.params.id);
     res.json({ status: 'ok' });
