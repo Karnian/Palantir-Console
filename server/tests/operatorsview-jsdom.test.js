@@ -394,7 +394,12 @@ test('OperatorsView renders watch-list badges and edits reference refs from the 
         instance_id: 'oi_alpha',
         project_id: 'proj_alpha',
         role: 'primary',
-        project: { id: 'proj_alpha', name: 'Alpha Console' },
+        project: {
+          id: 'proj_alpha',
+          name: 'Alpha Console',
+          node_id: 'node-a',
+          directory: '/workspace/alpha',
+        },
       },
       {
         instance_id: 'oi_alpha',
@@ -448,6 +453,13 @@ test('OperatorsView renders watch-list badges and edits reference refs from the 
         }];
         return { instance: currentInstances[0] };
       }
+      if (url === '/api/operator-instances/oi_alpha/refs/proj_alpha' && opts.method === 'DELETE') {
+        currentInstances = [{
+          ...currentInstances[0],
+          refs: currentInstances[0].refs.filter((ref) => ref.project_id !== 'proj_alpha'),
+        }];
+        return { instance: currentInstances[0] };
+      }
       throw new Error(`unexpected operator-instances url ${url}`);
     },
   });
@@ -489,6 +501,14 @@ test('OperatorsView renders watch-list badges and edits reference refs from the 
     return el;
   });
   assert.equal(dialog.getAttribute('aria-labelledby'), 'operator-roster-refs-title');
+  const currentMappings = dialog.querySelector('[data-role="operator-roster-current-mappings"]');
+  assert.ok(currentMappings);
+  assert.match(currentMappings.textContent, /Alpha Console · node-a · \/workspace\/alpha/);
+  assert.match(currentMappings.textContent, /Beta API/);
+  assert.match(currentMappings.textContent, /담당/);
+  assert.match(currentMappings.textContent, /참조/);
+  assert.match(dialog.textContent, /추가할 코드베이스/);
+  assert.match(dialog.textContent, /디스패치 권한 없이 컨텍스트 참조와 watch/);
   const select = dialog.querySelector('[data-role="operator-roster-ref-project-select"]');
   assert.ok(select);
   assert.deepEqual((await readDropdownOptions(env, select)).map((option) => option.value), ['proj_gamma']);
@@ -496,6 +516,22 @@ test('OperatorsView renders watch-list badges and edits reference refs from the 
   // Close the menu again so the submit button below is not covered logically.
   select.click();
   await flushEffects(20);
+
+  const primaryRemove = Array.from(dialog.querySelectorAll('[data-role="operator-roster-mapping-remove"]'))
+    .find((button) => button.getAttribute('aria-label') === 'Alpha Console 매핑 해제');
+  assert.ok(primaryRemove);
+  primaryRemove.click();
+  const primaryDelete = await waitFor(() => {
+    const call = apiCalls.find((entry) => entry.url === '/api/operator-instances/oi_alpha/refs/proj_alpha');
+    assert.ok(call);
+    return call;
+  });
+  assert.equal(primaryDelete.opts.method, 'DELETE');
+  await waitFor(() => assert.doesNotMatch(
+    dialog.querySelector('[data-role="operator-roster-current-mappings"]').textContent,
+    /Alpha Console/,
+  ));
+
   dialog.querySelector('[data-role="operator-roster-ref-submit"]').click();
 
   const post = await waitFor(() => {
