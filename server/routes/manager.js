@@ -58,20 +58,41 @@ function parseMcpTools(capabilitiesJson) {
   }
 }
 
+// #431: boot resume must resolve the SAME profile env_allowlist a fresh spawn
+// does, or an allowlisted custom variable silently disappears after a restart.
+//
+// A malformed allowlist degrades to `undefined` (base allowlist only) rather
+// than throwing. Throwing here would be caught by the per-run resume handler
+// and mark an otherwise healthy manager stopped — one bad profile row taking
+// down resume for every manager sharing its adapter. The fresh spawn paths
+// already swallow the same parse error, and diverging would recreate exactly
+// the fresh/resume asymmetry this function exists to remove. `undefined` is
+// the safe direction: it grants no extra keys.
 function resolveResumeEnvAllowlist(agentProfileService, { profileId, adapterType } = {}) {
   if (!agentProfileService) return undefined;
   let profile = null;
-  if (profileId && typeof agentProfileService.getProfile === 'function') {
-    profile = agentProfileService.getProfile(profileId);
-  } else if (typeof agentProfileService.listProfiles === 'function') {
-    profile = agentProfileService.listProfiles().find((candidate) => candidate.type === adapterType) || null;
-  }
+  try {
+    if (profileId && typeof agentProfileService.getProfile === 'function') {
+      profile = agentProfileService.getProfile(profileId);
+    } else if (typeof agentProfileService.listProfiles === 'function') {
+      profile = agentProfileService.listProfiles().find((candidate) => candidate.type === adapterType) || null;
+    }
+  } catch { /* treat an unreadable profile as "no allowlist" */ }
   if (!profile || !profile.env_allowlist) return undefined;
-  const parsed = JSON.parse(profile.env_allowlist);
-  if (!Array.isArray(parsed)) {
-    throw new Error(`env_allowlist for profile ${profile.id} must be a JSON array`);
+  try {
+    const parsed = JSON.parse(profile.env_allowlist);
+    if (!Array.isArray(parsed)) throw new Error('not an array');
+    return parsed;
+  } catch (err) {
+    console.warn(
+      `[security] manager_env_allowlist_unreadable ${JSON.stringify({
+        profile_id: profile.id,
+        adapter: adapterType,
+        reason: err && err.message,
+      })}`
+    );
+    return undefined;
   }
-  return parsed;
 }
 
 // authResolverOpts is forwarded into resolveManagerAuth for every preflight
@@ -1308,4 +1329,9 @@ function buildRunSummary(runService) {
 // agent lists) can be sent as the first user message — protecting Codex's
 // model_instructions_file caching. Do not re-add the inline version.
 
-module.exports = { createManagerRouter };
+module.exports = {
+  createManagerRouter,
+  // #431: exported for the fresh/resume parity test only. Not a public seam —
+  // production callers reach this through the resume paths above.
+  __testables: { resolveResumeEnvAllowlist },
+};

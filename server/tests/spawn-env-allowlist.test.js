@@ -212,7 +212,24 @@ test('worker process env remains byte-identical to the pre-manager-allowlist con
   for (const key of PROCESS_BASE_ENV_KEYS) {
     assert.ok(WORKER_BASE_ENV_KEYS.includes(key), `worker baseline lost ${key}`);
   }
-  const baseEnv = Object.fromEntries(PROCESS_BASE_ENV_KEYS.map((key, index) => [key, `v${index}`]));
+  // Pinned literal, NOT derived from the constant under test. Building both the
+  // input and the expectation from PROCESS_BASE_ENV_KEYS would make this test
+  // vacuous: deleting a key from the constant would delete it from `expected`
+  // too and still pass. This snapshot is the pre-#431 worker contract.
+  const PRE_431_WORKER_KEYS = [
+    'PATH', 'Path', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'USER',
+    'USERNAME', 'LOGNAME', 'SHELL', 'SystemRoot', 'SYSTEMROOT', 'WINDIR',
+    'ComSpec', 'COMSPEC', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA',
+    'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'TERM',
+    'COLORTERM', 'NO_COLOR', 'FORCE_COLOR',
+  ];
+  assert.deepEqual(
+    [...WORKER_BASE_ENV_KEYS].sort(),
+    [...PRE_431_WORKER_KEYS].sort(),
+    'worker baseline drifted from the pre-#431 contract',
+  );
+
+  const baseEnv = Object.fromEntries(PRE_431_WORKER_KEYS.map((key, index) => [key, `v${index}`]));
   Object.assign(baseEnv, {
     CODEX_API_KEY: 'ambient-codex',
     UNRELATED_CANARY_7F3A: 'ambient-opaque',
@@ -228,7 +245,7 @@ test('worker process env remains byte-identical to the pre-manager-allowlist con
     PALANTIR_MANAGER_TOKEN: 'smuggled-manager',
     PALANTIR_WORKER_TOKEN: 'run-worker',
   };
-  const expected = Object.fromEntries(PROCESS_BASE_ENV_KEYS.map((key, index) => [key, `v${index}`]));
+  const expected = Object.fromEntries(PRE_431_WORKER_KEYS.map((key, index) => [key, `v${index}`]));
   expected.PROFILE_ALLOWED = '';
   expected.PALANTIR_WORKER_TOKEN = 'run-worker';
 
@@ -671,4 +688,45 @@ test('fresh and resume security diagnostics are emitted before an unavailable-au
       console.warn = originalWarn;
     }
   });
+});
+
+// codex adversarial review (PR A, SERIOUS): a malformed profile env_allowlist
+// must not make boot resume behave differently from a fresh spawn. The first
+// implementation threw here; the per-run resume handler caught it and marked an
+// otherwise healthy manager stopped, so one bad profile row could stop resume
+// for every manager sharing its adapter while fresh spawns sailed past.
+test('a malformed profile env_allowlist degrades identically on fresh and resume', () => {
+  const { __testables } = require('../routes/manager');
+  const resolveResumeEnvAllowlist = __testables && __testables.resolveResumeEnvAllowlist;
+  assert.ok(resolveResumeEnvAllowlist, 'resolveResumeEnvAllowlist must be exported for test');
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (line) => warnings.push(String(line));
+  try {
+    for (const broken of ['{not json', '"a string"', '{"a":1}', '42']) {
+      const svc = {
+        listProfiles: () => [{ id: 'ap_broken', type: 'codex', env_allowlist: broken }],
+      };
+      const result = resolveResumeEnvAllowlist(svc, { adapterType: 'codex' });
+      assert.equal(result, undefined, `malformed allowlist ${broken} must degrade to undefined`);
+    }
+    // A profile whose row cannot even be read must not throw either.
+    const throwing = { listProfiles: () => { throw new Error('db gone'); } };
+    assert.equal(resolveResumeEnvAllowlist(throwing, { adapterType: 'codex' }), undefined);
+
+    // Degradation is observable, and never echoes an allowlist value.
+    assert.ok(
+      warnings.some((line) => line.includes('manager_env_allowlist_unreadable')),
+      'degradation must be observable',
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  // A well-formed allowlist still resolves — the guard must not swallow those.
+  const good = {
+    listProfiles: () => [{ id: 'ap_ok', type: 'codex', env_allowlist: '["KEEP_ME"]' }],
+  };
+  assert.deepEqual(resolveResumeEnvAllowlist(good, { adapterType: 'codex' }), ['KEEP_ME']);
 });
