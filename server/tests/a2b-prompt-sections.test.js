@@ -14,6 +14,7 @@ const { buildProjectScopedSystemSection, PM_ROLE_SECTION } = require('../service
 test('A2b: shared builder emits the expected sections + favorite-pool PM Role', () => {
   const section = buildProjectScopedSystemSection({
     project: { name: 'Alpha', id: 'proj_1', directory: '/tmp/alpha' },
+    profile: { persona: 'Act as a cautious release operator.' },
     brief: { conventions: 'use tabs', known_pitfalls: 'flaky test X' },
     operatorRunId: 'run_mgr_1',
   });
@@ -22,8 +23,10 @@ test('A2b: shared builder emits the expected sections + favorite-pool PM Role', 
   assert.match(section, /id: proj_1/);
   assert.match(section, /directory: \/tmp\/alpha/);
   assert.match(section, /pm_run_id: run_mgr_1/);
-  assert.match(section, /## Project Conventions\nuse tabs/);
-  assert.match(section, /## Known Pitfalls\nflaky test X/);
+  assert.match(section, /## Operator Brief/);
+  assert.match(section, /### Role and Behavior\nAct as a cautious release operator\./);
+  assert.match(section, /### Codebase Conventions\nuse tabs/);
+  assert.match(section, /### Known Pitfalls\nflaky test X/);
   assert.match(section, /## PM Role/);
   // favorite-pool wording present, pre-favorite hard lock gone
   assert.match(section, /shared codebase pool/i);
@@ -39,8 +42,9 @@ test('A2b: optional brief fields + skill packs are conditionally included', () =
   });
   assert.match(minimal, /## Project Scope/);
   assert.match(minimal, /## PM Role/);
-  assert.ok(!/## Project Conventions/.test(minimal));
-  assert.ok(!/## Known Pitfalls/.test(minimal));
+  assert.ok(!/## Operator Brief/.test(minimal));
+  assert.ok(!/### Codebase Conventions/.test(minimal));
+  assert.ok(!/### Known Pitfalls/.test(minimal));
   assert.ok(!/directory:/.test(minimal)); // no directory field
   assert.ok(!/pm_run_id:/.test(minimal)); // no run id
 

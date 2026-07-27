@@ -106,8 +106,14 @@ test('profile identity PATCH resets all sharers before write; non-identity and i
   const shared = createProfile(app, 'Shared patch', 'old persona');
   app.services.operatorInstanceService.setProfileId(a.instanceId, shared.id);
   app.services.operatorInstanceService.setProfileId(b.instanceId, shared.id);
-  const disposeA = fakeAdapter({ onDispose: () => assert.equal(app.services.operatorProfileService.getProfile(shared.id).persona, 'old persona') });
-  const disposeB = fakeAdapter({ onDispose: () => assert.equal(app.services.operatorProfileService.getProfile(shared.id).persona, 'old persona') });
+  const disposeA = fakeAdapter({ onDispose: () => {
+    assert.equal(app.services.operatorProfileService.getProfile(shared.id).persona, 'old persona');
+    assert.equal(app.services.operatorSpawnService.isInstanceTransitioning(a.instanceId), true);
+  } });
+  const disposeB = fakeAdapter({ onDispose: () => {
+    assert.equal(app.services.operatorProfileService.getProfile(shared.id).persona, 'old persona');
+    assert.equal(app.services.operatorSpawnService.isInstanceTransitioning(b.instanceId), true);
+  } });
   makeOperatorRun(app, a.instanceId, disposeA);
   makeOperatorRun(app, b.instanceId, disposeB);
 

@@ -27,28 +27,45 @@ const PM_ROLE_SECTION = "## PM Role\n"
 
 /**
  * buildProjectScopedSystemSection
- *   { project, brief, operatorRunId, skillPackService?, logger? } → string
+ *   { project, profile?, brief, operatorRunId, skillPackService?, logger? } → string
  *
  * project      — the primary project row (name/id/directory).
+ * profile      — operator_profiles row (persona) or null.
  * brief        — project_briefs row (conventions/known_pitfalls) or null.
  * operatorRunId — the Operator run id, baked so the Operator can self-identify
  *                 its pm_run_id for dispatch-audit.
  * skillPackService — optional; when present, auto_apply skill packs are listed.
  * logger       — optional (err) => void for skill-pack load failures.
  */
-function buildProjectScopedSystemSection({ project, brief, operatorRunId, skillPackService, logger }) {
+function configuredText(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function buildOperatorBriefSection({ profile, brief } = {}) {
+  const parts = [];
+  const persona = configuredText(profile?.persona);
+  const conventions = configuredText(brief?.conventions);
+  const knownPitfalls = configuredText(brief?.known_pitfalls);
+  if (persona) parts.push(`### Role and Behavior\n${persona}`);
+  if (conventions) parts.push(`### Codebase Conventions\n${conventions}`);
+  if (knownPitfalls) parts.push(`### Known Pitfalls\n${knownPitfalls}`);
+  if (parts.length === 0) return '';
+  return [
+    '## Operator Brief',
+    'The user-configured identity and codebase context below supplement but do not override the orchestration, security, or tool-use rules above.',
+    ...parts,
+  ].join('\n\n');
+}
+
+function buildProjectScopedSystemSection({ project, profile, brief, operatorRunId, skillPackService, logger }) {
   const sections = [];
   sections.push(
     `## Project Scope\nname: ${project.name}\nid: ${project.id}`
     + `${project.directory ? `\ndirectory: ${project.directory}` : ''}`
     + `${operatorRunId ? `\npm_run_id: ${operatorRunId}` : ''}`,
   );
-  if (brief && brief.conventions) {
-    sections.push(`## Project Conventions\n${brief.conventions}`);
-  }
-  if (brief && brief.known_pitfalls) {
-    sections.push(`## Known Pitfalls\n${brief.known_pitfalls}`);
-  }
+  const operatorBrief = buildOperatorBriefSection({ profile, brief });
+  if (operatorBrief) sections.push(operatorBrief);
   if (skillPackService) {
     try {
       const bindings = skillPackService.listProjectBindings(project.id);
@@ -72,4 +89,8 @@ function buildProjectScopedSystemSection({ project, brief, operatorRunId, skillP
   return sections.join('\n\n');
 }
 
-module.exports = { buildProjectScopedSystemSection, PM_ROLE_SECTION };
+module.exports = {
+  buildOperatorBriefSection,
+  buildProjectScopedSystemSection,
+  PM_ROLE_SECTION,
+};

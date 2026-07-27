@@ -357,6 +357,7 @@ function ConfiguredOperatorDetails({
   onOpenRefs,
   onRemoveReference,
   onOpenSchedules,
+  onOpenBrief,
   onChangeAdapter,
   adapterSaving,
 }) {
@@ -404,6 +405,9 @@ function ConfiguredOperatorDetails({
         </div>
       </div>
       <div class="modal-footer">
+        <button type="button" class="ghost" data-role="operator-brief-button" onClick=${() => onOpenBrief(instance)}>
+          ${OPERATOR_ROSTER_LABELS.briefAction}
+        </button>
         <button type="button" class="ghost" data-role="operator-folder-mapping-button" onClick=${() => onOpenRefs(instance)}>
           ${OPERATOR_ROSTER_LABELS.folderMappings}
         </button>
@@ -428,6 +432,7 @@ function LiveOperatorDetails({
   runs,
   taskById,
   onOpenRefs,
+  onOpenBrief,
   onRemoveReference,
 }) {
   const run = entry?.run || {};
@@ -479,6 +484,12 @@ function LiveOperatorDetails({
           <button
             type="button"
             class="ghost"
+            data-role="operator-brief-button"
+            onClick=${() => onOpenBrief(instance)}
+          >${OPERATOR_ROSTER_LABELS.briefAction}</button>
+          <button
+            type="button"
+            class="ghost"
             data-role="operator-roster-add-reference-button"
             onClick=${() => onOpenRefs(instance)}
           >${OPERATOR_ROSTER_LABELS.addReference}</button>
@@ -491,6 +502,248 @@ function LiveOperatorDetails({
         </a>
       </div>
     </div>
+  `;
+}
+
+function OperatorBriefEditorModal({ instance, onClose, onSaved }) {
+  const [projectId, setProjectId] = useState('');
+  const [persona, setPersona] = useState('');
+  const [conventions, setConventions] = useState('');
+  const [knownPitfalls, setKnownPitfalls] = useState('');
+  const [original, setOriginal] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const requestSeqRef = useRef(0);
+  const refs = arrayValue(instance?.refs);
+  const defaultProjectId = primaryRef(instance)?.project_id || refs[0]?.project_id || '';
+  const mappedProjectIds = new Set(refs.map((ref) => String(ref.project_id)));
+  const selectedProjectId = mappedProjectIds.has(String(projectId || ''))
+    ? String(projectId)
+    : String(defaultProjectId || '');
+
+  useEffect(() => {
+    setProjectId(defaultProjectId || '');
+  }, [instance?.id]);
+
+  useEffect(() => {
+    if (!instance?.id) {
+      requestSeqRef.current += 1;
+      setOriginal(null);
+      return undefined;
+    }
+    const seq = ++requestSeqRef.current;
+    const instanceId = instance.id;
+    const projectQuery = selectedProjectId
+      ? `?project_id=${encodeURIComponent(selectedProjectId)}`
+      : '';
+    setLoading(true);
+    setOriginal(null);
+    apiFetch(`/api/operator-instances/${encodeURIComponent(instanceId)}/brief${projectQuery}`)
+      .then((data) => {
+        if (seq !== requestSeqRef.current || instanceId !== instance.id) return;
+        const brief = data?.brief || {};
+        const next = {
+          persona: brief.persona || '',
+          conventions: brief.conventions || '',
+          knownPitfalls: brief.known_pitfalls || '',
+        };
+        setPersona(next.persona);
+        setConventions(next.conventions);
+        setKnownPitfalls(next.knownPitfalls);
+        setOriginal(next);
+      })
+      .catch((err) => {
+        if (seq === requestSeqRef.current) addToast(err.message, 'error');
+      })
+      .finally(() => {
+        if (seq === requestSeqRef.current) setLoading(false);
+      });
+    return () => {
+      requestSeqRef.current += 1;
+    };
+  }, [instance?.id, selectedProjectId]);
+
+  const dirty = Boolean(original && (
+    persona !== original.persona
+    || conventions !== original.conventions
+    || knownPitfalls !== original.knownPitfalls
+  ));
+
+  const changeProject = (nextProjectId) => {
+    if (
+      dirty
+      && typeof window !== 'undefined'
+      && !window.confirm(COMMON_ACTIONS.discardChanges)
+    ) {
+      return;
+    }
+    setProjectId(nextProjectId);
+  };
+
+  const requestClose = () => {
+    if (saving) return;
+    if (
+      dirty
+      && typeof window !== 'undefined'
+      && !window.confirm(COMMON_ACTIONS.discardChanges)
+    ) {
+      return;
+    }
+    onClose();
+  };
+
+  const saveBrief = async () => {
+    if (!instance?.id || !original || saving || !dirty) return;
+    setSaving(true);
+    const projectQuery = selectedProjectId
+      ? `?project_id=${encodeURIComponent(selectedProjectId)}`
+      : '';
+    try {
+      const result = await apiFetchWithToast(
+        `/api/operator-instances/${encodeURIComponent(instance.id)}/brief${projectQuery}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({
+            persona: persona || null,
+            ...(selectedProjectId
+              ? {
+                  conventions: conventions || null,
+                  known_pitfalls: knownPitfalls || null,
+                }
+              : {}),
+          }),
+        },
+      );
+      const resetCount = arrayValue(result?.reset_instance_ids).length;
+      addToast(
+        resetCount > 0
+          ? OPERATOR_ROSTER_LABELS.briefSavedWithReset
+          : OPERATOR_ROSTER_LABELS.briefSaved,
+        'success',
+      );
+      if (typeof onSaved === 'function') onSaved(result?.brief || null);
+      onClose();
+    } catch {
+      // apiFetchWithToast owns the error toast.
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const titleId = 'operator-brief-editor-title';
+  return html`
+    <${Modal}
+      open=${Boolean(instance)}
+      onClose=${requestClose}
+      labelledBy=${titleId}
+      maxWidth="720px"
+      backdropClose=${!saving}
+      escapeClose=${!saving}
+    >
+      <div class="modal-header">
+        <div>
+          <h2 class="modal-title" id=${titleId}>${OPERATOR_ROSTER_LABELS.briefTitle}</h2>
+          <p class="modal-subtitle">
+            ${operatorDisplayName(instance)} · ${OPERATOR_ROSTER_LABELS.briefDescription}
+          </p>
+        </div>
+        <button
+          type="button"
+          class="ghost small"
+          data-role="operator-brief-close"
+          disabled=${saving}
+          onClick=${requestClose}
+        >${COMMON_ACTIONS.close}</button>
+      </div>
+      <div class="modal-body operator-brief-editor">
+        ${refs.length > 0 && html`
+          <div class="form-field">
+            <label class="form-label" for="operator-brief-project">${OPERATOR_ROSTER_LABELS.briefProjectLabel}</label>
+            <${Dropdown}
+              id="operator-brief-project"
+              dataRole="operator-brief-project"
+              className="dropdown-field"
+              value=${selectedProjectId}
+              disabled=${loading || saving}
+              onChange=${changeProject}
+              options=${refs.map((ref) => ({
+                value: ref.project_id,
+                label: `${ref.role === 'primary' ? OPERATOR_ROSTER_LABELS.primaryRefRole : OPERATOR_ROSTER_LABELS.referenceRefRole} · ${refProjectName(ref, new Map())}`,
+              }))}
+            />
+          </div>
+        `}
+        ${refs.length === 0 && html`
+          <p class="form-hint">${OPERATOR_ROSTER_LABELS.briefNoProject}</p>
+        `}
+        ${loading && html`<${Loading} />`}
+        ${!loading && original && html`
+          <section class="operator-brief-field">
+            <div class="operator-brief-label-row">
+              <label class="form-label" for="operator-brief-persona">${OPERATOR_ROSTER_LABELS.briefPersonaLabel}</label>
+              <span class="operator-brief-scope">${OPERATOR_ROSTER_LABELS.briefPersonaScope}</span>
+            </div>
+            <p class="form-hint">${OPERATOR_ROSTER_LABELS.briefPersonaHelp}</p>
+            <textarea
+              id="operator-brief-persona"
+              class="form-textarea"
+              rows="6"
+              maxlength="2000"
+              disabled=${saving}
+              value=${persona}
+              placeholder=${OPERATOR_ROSTER_LABELS.briefPersonaPlaceholder}
+              onInput=${(event) => setPersona(event.target.value)}
+            ></textarea>
+          </section>
+          ${selectedProjectId && html`
+            <section class="operator-brief-field">
+              <div class="operator-brief-label-row">
+                <label class="form-label" for="operator-brief-conventions">${OPERATOR_ROSTER_LABELS.briefConventionsLabel}</label>
+                <span class="operator-brief-scope">${OPERATOR_ROSTER_LABELS.briefProjectScope}</span>
+              </div>
+              <p class="form-hint">${OPERATOR_ROSTER_LABELS.briefConventionsHelp}</p>
+              <textarea
+                id="operator-brief-conventions"
+                class="form-textarea"
+                rows="6"
+                maxlength="12000"
+                disabled=${saving}
+                value=${conventions}
+                placeholder=${OPERATOR_ROSTER_LABELS.briefConventionsPlaceholder}
+                onInput=${(event) => setConventions(event.target.value)}
+              ></textarea>
+            </section>
+            <section class="operator-brief-field">
+              <div class="operator-brief-label-row">
+                <label class="form-label" for="operator-brief-pitfalls">${OPERATOR_ROSTER_LABELS.briefPitfallsLabel}</label>
+                <span class="operator-brief-scope">${OPERATOR_ROSTER_LABELS.briefProjectScope}</span>
+              </div>
+              <textarea
+                id="operator-brief-pitfalls"
+                class="form-textarea"
+                rows="5"
+                maxlength="12000"
+                disabled=${saving}
+                value=${knownPitfalls}
+                placeholder=${OPERATOR_ROSTER_LABELS.briefPitfallsPlaceholder}
+                onInput=${(event) => setKnownPitfalls(event.target.value)}
+              ></textarea>
+            </section>
+          `}
+          <p class="operator-brief-reset-warning">${OPERATOR_ROSTER_LABELS.briefResetWarning}</p>
+        `}
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="ghost" disabled=${saving} onClick=${requestClose}>${COMMON_ACTIONS.cancel}</button>
+        <button
+          type="button"
+          class="primary"
+          data-role="operator-brief-save"
+          disabled=${loading || saving || !dirty}
+          onClick=${saveBrief}
+        >${saving ? COMMON_ACTIONS.saving : COMMON_ACTIONS.save}</button>
+      </div>
+    <//>
   `;
 }
 
@@ -534,6 +787,7 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
   const [loadingProfiles, setLoadingProfiles] = useState(true);
   const [invokeProfile, setInvokeProfile] = useState(null);
   const [detailSelection, setDetailSelection] = useState(null);
+  const [briefEditorInstance, setBriefEditorInstance] = useState(null);
   const [showCreateOperator, setShowCreateOperator] = useState(false);
   const [createDisplayName, setCreateDisplayName] = useState('');
   const [createProfileId, setCreateProfileId] = useState('');
@@ -989,6 +1243,9 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
         ? OPERATOR_ROSTER_LABELS.availableBinding
         : '';
   const detailOpen = Boolean(detailConfiguredInstance || detailLiveEntry || detailAvailableProfile);
+  const briefEditorLatest = briefEditorInstance?.id
+    ? instancesById.get(String(briefEditorInstance.id)) || briefEditorInstance
+    : null;
   const invokeModalTitleId = 'operator-roster-specialist-invoke-title';
   const detailModalTitleId = 'operator-roster-detail-title';
   const refsModalTitleId = 'operator-roster-refs-title';
@@ -1228,6 +1485,10 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
               setDetailSelection(null);
               openSchedules(instance);
             }}
+            onOpenBrief=${(instance) => {
+              setDetailSelection(null);
+              setBriefEditorInstance(instance);
+            }}
             onChangeAdapter=${changeOperatorAdapter}
             adapterSaving=${adapterSavingIds.has(detailConfiguredInstance.id)}
           />
@@ -1244,6 +1505,10 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
               setDetailSelection(null);
               openRefsEditor(instance);
             }}
+            onOpenBrief=${(instance) => {
+              setDetailSelection(null);
+              setBriefEditorInstance(instance);
+            }}
             onRemoveReference=${removeReference}
           />
         `}
@@ -1257,6 +1522,19 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
           />
         `}
       <//>
+
+      <${OperatorBriefEditorModal}
+        instance=${briefEditorLatest}
+        onClose=${() => setBriefEditorInstance(null)}
+        onSaved=${(brief) => {
+          if (!brief?.profile?.id) return;
+          setProfiles((current) => current.map((profile) => (
+            profile.id === brief.profile.id
+              ? { ...profile, persona: brief.persona || null }
+              : profile
+          )));
+        }}
+      />
 
       <${Modal}
         open=${Boolean(invokeProfile)}

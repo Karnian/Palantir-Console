@@ -22,6 +22,7 @@ const { createDatabase } = require('../db/database');
 const { createRunService } = require('../services/runService');
 const { createProjectService } = require('../services/projectService');
 const { createProjectBriefService } = require('../services/projectBriefService');
+const { createOperatorProfileService } = require('../services/operatorProfileService');
 const { createManagerRegistry } = require('../services/managerRegistry');
 const { createConversationService } = require('../services/conversationService');
 const { createOperatorSpawnService } = require('../services/operatorSpawnService');
@@ -187,10 +188,13 @@ function normalizeVolatile(prompt, { runId, projectId }) {
 // Drive the REAL fresh-spawn path and return the actual systemPrompt the
 // adapter was handed. memoryFixture(memoryService, projectId) seeds memory
 // (or not) BEFORE the spawn so we can prove the spawn ignores it.
-function realFreshSpawnSystemPrompt(t, db, { projectName, conventions, knownPitfalls, seedMemory }) {
+function realFreshSpawnSystemPrompt(t, db, {
+  projectName, persona, conventions, knownPitfalls, seedMemory,
+}) {
   const rs = createRunService(db, null);
   const projectService = createProjectService(db);
   const projectBriefService = createProjectBriefService(db);
+  const operatorProfileService = createOperatorProfileService(db);
   const registry = createManagerRegistry({ runService: rs });
   const memoryService = createMemoryService(db);
   const fakePm = makeFakeCodexAdapter();
@@ -198,12 +202,15 @@ function realFreshSpawnSystemPrompt(t, db, { projectName, conventions, knownPitf
 
   const project = projectService.createProject({ name: projectName, directory: '/tmp/fixedcwd' });
   projectBriefService.updateBrief(project.id, { conventions, known_pitfalls: knownPitfalls });
+  const resolved = rs.ensurePrimaryOperatorInstanceForProject(project.id);
+  const instance = rs.getOperatorInstance(resolved.instanceId);
+  operatorProfileService.updateProfile(instance.profile_id, { persona });
   if (seedMemory) seedMemory(memoryService, project.id);
 
   const spawn = createOperatorSpawnService({
     runService: rs, managerRegistry: registry,
     managerAdapterFactory: wireFactory(fakePm),
-    projectService, projectBriefService,
+    projectService, projectBriefService, operatorProfileService,
     authResolverOpts: { hasKeychain: true },
   });
   seedTop({ rs, registry, adapter: topAdapter });
@@ -215,10 +222,13 @@ function realFreshSpawnSystemPrompt(t, db, { projectName, conventions, knownPitf
 
 // Drive the REAL boot-resume path (createManagerRouter constructor) and
 // return the actual systemPrompt handed to the adapter on resume.
-function realBootResumeSystemPrompt(t, db, { projectName, conventions, knownPitfalls, seedMemory }) {
+function realBootResumeSystemPrompt(t, db, {
+  projectName, persona, conventions, knownPitfalls, seedMemory,
+}) {
   const rs = createRunService(db, null);
   const projectService = createProjectService(db);
   const projectBriefService = createProjectBriefService(db);
+  const operatorProfileService = createOperatorProfileService(db);
   const registry = createManagerRegistry({ runService: rs });
   const memoryService = createMemoryService(db);
   const fakePm = makeFakeCodexAdapter();
@@ -226,6 +236,9 @@ function realBootResumeSystemPrompt(t, db, { projectName, conventions, knownPitf
 
   const project = projectService.createProject({ name: projectName, directory: '/tmp/fixedcwd' });
   projectBriefService.updateBrief(project.id, { conventions, known_pitfalls: knownPitfalls });
+  const resolved = rs.ensurePrimaryOperatorInstanceForProject(project.id);
+  const instance = rs.getOperatorInstance(resolved.instanceId);
+  operatorProfileService.updateProfile(instance.profile_id, { persona });
   // A persisted PM thread is the precondition for resume.
   projectBriefService.setPmThread(project.id, { pm_thread_id: 'thread_resume_fixed', pm_adapter: 'codex' });
   if (seedMemory) seedMemory(memoryService, project.id);
@@ -236,7 +249,9 @@ function realBootResumeSystemPrompt(t, db, { projectName, conventions, knownPitf
   // Create the stale PM run that boot-resume will pick up.
   const pmRun = rs.createRun({
     is_manager: true, manager_layer: 'operator', manager_adapter: 'codex',
-    conversation_id: `operator:${project.id}`, prompt: `PM ${projectName}`,
+    conversation_id: `operator:${resolved.instanceId}`,
+    operator_instance_id: resolved.instanceId,
+    prompt: `PM ${projectName}`,
   });
   rs.updateRunStatus(pmRun.id, 'running', { force: true });
 
@@ -247,6 +262,7 @@ function realBootResumeSystemPrompt(t, db, { projectName, conventions, knownPitf
     managerRegistry: registry,
     projectService,
     projectBriefService,
+    operatorProfileService,
     authResolverOpts: { hasKeychain: true },
   });
 
@@ -265,18 +281,25 @@ test('REGRESSION: REAL fresh-spawn PM system prompt is INVARIANT w.r.t. memory s
   // Two identical projects (same brief), differing ONLY in memory state.
   const dbEmpty = await mkdb(t);
   const empty = realFreshSpawnSystemPrompt(t, dbEmpty, {
-    projectName: 'alpha', conventions: 'tabs only', knownPitfalls: 'no double runTurn',
+    projectName: 'alpha',
+    persona: 'Coordinate cautiously.',
+    conventions: 'tabs only',
+    knownPitfalls: 'no double runTurn',
   });
 
   const dbSeeded = await mkdb(t);
   const seeded = realFreshSpawnSystemPrompt(t, dbSeeded, {
-    projectName: 'alpha', conventions: 'tabs only', knownPitfalls: 'no double runTurn',
+    projectName: 'alpha',
+    persona: 'Coordinate cautiously.',
+    conventions: 'tabs only',
+    knownPitfalls: 'no double runTurn',
     seedMemory: SEED_THREE,
   });
   assert.equal(seeded.memoryService.getRevision(seeded.projectId), 3, 'memory state really changed in the seeded case');
 
   // The captured prompt must carry the brief (proves we captured the real thing)...
   assert.match(empty.systemPrompt, /## Project Scope/);
+  assert.match(empty.systemPrompt, /### Role and Behavior\nCoordinate cautiously\./);
   assert.match(empty.systemPrompt, /no double runTurn/);
   // ...but NEVER a memory content block, and none of the seeded memory content.
   assert.doesNotMatch(seeded.systemPrompt, /## Learned Memory/, 'real fresh-spawn must NOT bake a memory block');
@@ -294,17 +317,24 @@ test('REGRESSION: REAL fresh-spawn PM system prompt is INVARIANT w.r.t. memory s
 test('REGRESSION: REAL boot-resume PM system prompt is INVARIANT w.r.t. memory state', async (t) => {
   const dbEmpty = await mkdb(t);
   const empty = realBootResumeSystemPrompt(t, dbEmpty, {
-    projectName: 'beta', conventions: 'spaces', knownPitfalls: 'watch races',
+    projectName: 'beta',
+    persona: 'Prefer evidence over guesses.',
+    conventions: 'spaces',
+    knownPitfalls: 'watch races',
   });
 
   const dbSeeded = await mkdb(t);
   const seeded = realBootResumeSystemPrompt(t, dbSeeded, {
-    projectName: 'beta', conventions: 'spaces', knownPitfalls: 'watch races',
+    projectName: 'beta',
+    persona: 'Prefer evidence over guesses.',
+    conventions: 'spaces',
+    knownPitfalls: 'watch races',
     seedMemory: SEED_THREE,
   });
   assert.equal(seeded.memoryService.getRevision(seeded.projectId), 3, 'memory state really changed in the seeded case');
 
   assert.match(empty.systemPrompt, /## Project Scope/);
+  assert.match(empty.systemPrompt, /### Role and Behavior\nPrefer evidence over guesses\./);
   assert.match(empty.systemPrompt, /watch races/);
   assert.doesNotMatch(seeded.systemPrompt, /## Learned Memory/, 'real boot-resume must NOT bake a memory block');
   assert.doesNotMatch(seeded.systemPrompt, /never call runTurn twice on codex/, 'no memory row content in resumed system prompt');
@@ -320,15 +350,22 @@ test('REGRESSION: REAL fresh-spawn and boot-resume produce the SAME PM prompt fo
   // this pins them together so they cannot drift, with or without the Part D line).
   const db1 = await mkdb(t);
   const fresh = realFreshSpawnSystemPrompt(t, db1, {
-    projectName: 'gamma', conventions: 'c-line', knownPitfalls: 'p-line',
+    projectName: 'gamma',
+    persona: 'Shared persona line.',
+    conventions: 'c-line',
+    knownPitfalls: 'p-line',
   });
   const db2 = await mkdb(t);
   const resume = realBootResumeSystemPrompt(t, db2, {
-    projectName: 'gamma', conventions: 'c-line', knownPitfalls: 'p-line',
+    projectName: 'gamma',
+    persona: 'Shared persona line.',
+    conventions: 'c-line',
+    knownPitfalls: 'p-line',
   });
   const a = normalizeVolatile(fresh.systemPrompt, fresh);
   const b = normalizeVolatile(resume.systemPrompt, resume);
   assert.equal(b, a, 'fresh-spawn and boot-resume real assemblies must be identical');
+  assert.match(fresh.systemPrompt, /### Role and Behavior\nShared persona line\./);
   // Both real PM prompts carry the Part D pointer line.
   assert.match(fresh.systemPrompt, /학습된 프로젝트 메모리/);
   assert.match(resume.systemPrompt, /학습된 프로젝트 메모리/);

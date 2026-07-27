@@ -92,6 +92,7 @@ const { createOperatorSpecialistRouter } = require('./routes/operatorSpecialist'
 const { createOperatorProfilesRouter } = require('./routes/operatorProfiles');
 const { createOperatorProfileMemoryRouter } = require('./routes/operatorProfileMemory');
 const { createOperatorProfileService } = require('./services/operatorProfileService');
+const { createOperatorBriefService } = require('./services/operatorBriefService');
 const { createMasterMemoryRouter } = require('./routes/masterMemory');
 const { createOperatorInstanceService } = require('./services/operatorInstanceService');
 const { createOperatorIdentityLifecycleService } = require('./services/operatorIdentityLifecycleService');
@@ -1381,6 +1382,7 @@ function createApp(options = {}) {
     managerAdapterFactory,
     projectService,
     projectBriefService,
+    operatorProfileService,
     agentProfileService,
     skillPackService,
     nodeService,
@@ -1404,6 +1406,14 @@ function createApp(options = {}) {
   const operatorIdentityLifecycleService = createOperatorIdentityLifecycleService({
     operatorProfileService,
     operatorInstanceService,
+    operatorCleanupService,
+    operatorSpawnService,
+  });
+  const operatorBriefService = createOperatorBriefService({
+    db,
+    operatorInstanceService,
+    operatorProfileService,
+    projectBriefService,
     operatorCleanupService,
     operatorSpawnService,
   });
@@ -1756,8 +1766,8 @@ function createApp(options = {}) {
   app.use('/api/usage', createUsageRouter({ codexService, providerRegistry }));
 
   // New routes (v2)
-  app.use('/api/projects', createProjectsRouter({ projectService, taskService, runService, projectBriefService, operatorCleanupService, operatorInstanceService, operatorScheduleService, nodeBindingValidator, lifecycleService, repoPreflightService }));
-  app.use('/api/operator-instances', createOperatorInstancesRouter({ operatorInstanceService, operatorIdentityLifecycleService }));
+  app.use('/api/projects', createProjectsRouter({ projectService, taskService, runService, projectBriefService, operatorBriefService, operatorCleanupService, operatorInstanceService, operatorScheduleService, nodeBindingValidator, lifecycleService, repoPreflightService }));
+  app.use('/api/operator-instances', createOperatorInstancesRouter({ operatorInstanceService, operatorIdentityLifecycleService, operatorBriefService }));
   app.use('/api', createOperatorSchedulesRouter({ operatorScheduleService, operatorScheduler }));
   app.use('/api/nodes', createNodesRouter({ nodeService, nodeUsageService, nodeSummaryService, lifecycleService }));
   app.use('/api/projects', createMemoryRouter({ memoryService, projectService })); // ML PR1: GET /:projectId/memory
@@ -1785,7 +1795,7 @@ function createApp(options = {}) {
   app.use('/api/agents', createAgentsRouter({ agentProfileService, providerRegistry, authResolverOpts }));
   app.use('/api/events', createEventsRouter({ eventBus }));
   app.use('/api/claude-sessions', createClaudeSessionsRouter());
-  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, operatorInstanceService, modelPolicyService, isSpecialistAvailable, authResolverOpts, actorTokens: actorTokenPolicy, managerCapabilityTokenService, goalFeatureActive }));
+  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, operatorInstanceService, modelPolicyService, isSpecialistAvailable, authResolverOpts, actorTokens: actorTokenPolicy, managerCapabilityTokenService, goalFeatureActive }));
   app.use('/api/conversations', createConversationsRouter({ conversationService, runService }));
   // Operator P-B2c-3: specialist entry. Mounted ONLY when the feature is enabled
   // (specialistService is null unless PALANTIR_OPERATOR_SPECIALIST=1 + a backend),
@@ -1967,8 +1977,10 @@ function createApp(options = {}) {
     specialistService, // Operator P-B2c-2: null unless PALANTIR_OPERATOR_SPECIALIST=1 (unrouted)
     operatorProfileService, // Operator Profile entity (PF-1)
     operatorInstanceService,
+    operatorBriefService,
     operatorCleanupService,
     operatorIdentityLifecycleService,
+    operatorSpawnService,
     operatorScheduleService,
     operatorScheduler,
     managerMessageQueueService,

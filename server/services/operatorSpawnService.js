@@ -85,6 +85,7 @@ function createOperatorSpawnService({
   managerAdapterFactory,
   projectService,
   projectBriefService,
+  operatorProfileService, // optional in legacy test seams; production injects it
   agentProfileService, // optional — used for env_allowlist resolution
   skillPackService,    // optional — Phase 2: inject project skill pack list into PM prompt
   nodeService,         // optional — Fleet P4: run Operators on the project's bound node
@@ -275,9 +276,10 @@ function createOperatorSpawnService({
   // so the fresh-spawn and boot-resume paths assemble byte-identical sections
   // from one source (Codex R2 BLOCKER 3). operatorRunId is baked so the Operator
   // can self-identify its pm_run_id for /api/dispatch-audit.
-  function buildProjectScopedSystemSection({ project, brief, operatorRunId }) {
+  function buildProjectScopedSystemSection({ project, profile, brief, operatorRunId }) {
     return buildSharedProjectScopedSection({
       project,
+      profile,
       brief,
       operatorRunId,
       skillPackService,
@@ -607,8 +609,18 @@ function createOperatorSpawnService({
           layer: 'operator',
         })
       : null;
+    let operatorProfile = null;
+    if (operatorProfileService && operatorInstanceId) {
+      const currentInstance = runService.getOperatorInstance(operatorInstanceId);
+      operatorProfile = operatorProfileService.getProfile(currentInstance.profile_id);
+    }
     const baseSystemPrompt = buildManagerSystemPrompt({ adapter, port, token: !!token, layer: 'operator', adapterType, specialistAvailable: isSpecialistAvailable() });
-    const projectSection = buildProjectScopedSystemSection({ project, brief, operatorRunId: runId });
+    const projectSection = buildProjectScopedSystemSection({
+      project,
+      profile: operatorProfile,
+      brief,
+      operatorRunId: runId,
+    });
     const systemPrompt = [baseSystemPrompt, projectSection].filter(Boolean).join('\n\n');
 
     // Hook that persists a freshly captured thread id into the brief AND

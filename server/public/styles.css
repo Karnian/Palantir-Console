@@ -8451,6 +8451,57 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   padding: 2px 0;
 }
 
+.operator-brief-editor {
+  display: grid;
+  gap: 18px;
+}
+
+.operator-brief-field {
+  display: grid;
+  gap: 7px;
+}
+
+.operator-brief-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.operator-brief-label-row .form-label,
+.operator-brief-field .form-hint {
+  margin: 0;
+}
+
+.operator-brief-scope {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-xs);
+  background: var(--accent-muted);
+  color: var(--accent-light);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.operator-brief-field .form-textarea {
+  min-height: 112px;
+  max-height: 260px;
+  overflow-y: auto;
+  resize: vertical;
+}
+
+.operator-brief-reset-warning {
+  margin: 0;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--status-warning) 36%, var(--border));
+  border-radius: var(--radius-sm);
+  background: var(--warning-bg-subtle);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .operator-mapping-section + .operator-mapping-section {
   margin-top: 20px;
 }

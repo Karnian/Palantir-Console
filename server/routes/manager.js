@@ -62,7 +62,7 @@ function parseMcpTools(capabilitiesJson) {
 // so tests can inject `hasKeychain` (and any future DI hooks) without
 // monkey-patching child_process. Production callers leave this empty and
 // get the real keychain probe.
-function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, operatorInstanceService, modelPolicyService, isSpecialistAvailable = () => false, authResolverOpts = {}, actorTokens = resolveActorTokenPolicy(), managerCapabilityTokenService = null, goalFeatureActive = defaultGoalFeatureActive }) {
+function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, operatorInstanceService, modelPolicyService, isSpecialistAvailable = () => false, authResolverOpts = {}, actorTokens = resolveActorTokenPolicy(), managerCapabilityTokenService = null, goalFeatureActive = defaultGoalFeatureActive }) {
   const router = express.Router();
   const actorSpawnBaseEnv = applyManagerCredentialPolicy(process.env);
   if (actorTokens.humanToken && !managerCapabilityTokenService) {
@@ -372,6 +372,9 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 // never drift (Codex R2 BLOCKER 3).
                 const briefSection = buildProjectScopedSystemSection({
                   project,
+                  profile: operatorProfileService && instanceThread?.profile_id
+                    ? operatorProfileService.getProfile(instanceThread.profile_id)
+                    : null,
                   brief,
                   operatorRunId: r.id,
                   skillPackService,
