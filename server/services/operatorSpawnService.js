@@ -755,6 +755,7 @@ function createOperatorSpawnService({
             isRemoteNode ? {} : spawnEnv,
             { managerToken: token, actorTokens },
           ),
+          envAllowlist,
           role: 'manager',
           nodeId,
           resumeThreadId,

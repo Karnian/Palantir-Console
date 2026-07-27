@@ -122,6 +122,7 @@ function chunkToString(chunk) {
 
 async function withProbeChild(spawnInteractive, commandSpec, {
   pathPrefix,
+  cleanEnv,
   timeoutMs,
   killGraceMs,
   maxOutputBytes,
@@ -166,6 +167,7 @@ async function withProbeChild(spawnInteractive, commandSpec, {
     child = await spawnInteractive(command, Array.from(args), {
       env: {},
       pathPrefix: pathPrefix || undefined,
+      ...(cleanEnv ? { cleanEnv: true } : {}),
     });
 
     closePromise = new Promise((resolve) => {
@@ -254,7 +256,13 @@ function closeInfoToRpcError(closeInfo) {
 }
 
 async function runCodexRpcProbe(spawnInteractive, opts) {
-  return withProbeChild(spawnInteractive, COMMANDS.codexAppServer, opts, async ({
+  // app-server is a long-lived agent CLI child, so explicitly opt it into the
+  // remote executor's pod-side env -i boundary. Version/auth probes retain
+  // their existing call contract.
+  return withProbeChild(spawnInteractive, COMMANDS.codexAppServer, {
+    ...opts,
+    cleanEnv: true,
+  }, async ({
     child,
     output,
     closePromise,

@@ -165,7 +165,7 @@ function createStreamJsonEngine({
     allowedTools, maxBudgetUsd, model, mcpConfig, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent,
     // Phase 10D Tier 2
     isolated, pluginDirs, settingsPath, settingSources, onCleanup,
-    executor, nodePrefix, nodeId }) {
+    executor, nodePrefix, envAllowlist, nodeId }) {
 
     const usingRemoteExecutor = !!executor;
     const claudeBin = usingRemoteExecutor ? 'claude' : resolveClaudeBin();
@@ -433,6 +433,7 @@ function createStreamJsonEngine({
           cwd: safeCwd,
           env: spawnEnv,
           pathPrefix: nodePrefix,
+          ...(Array.isArray(envAllowlist) ? { envAllowlist } : {}),
         }))
         .then((child) => attachChild(child))
         .catch(surfaceSpawnFailure);

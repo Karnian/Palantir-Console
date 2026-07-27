@@ -285,6 +285,13 @@ test('ssh node usage probes fixed commands with empty env, pathPrefix, RPC seque
     assert.deepEqual(call.opts.env, {});
     assert.equal(call.opts.pathPrefix, '/home/agent/.npm-global/bin');
   }
+  const appServerCall = executor.calls.find(
+    (call) => call.command === 'codex' && call.args.join(' ') === 'app-server',
+  );
+  assert.equal(appServerCall.opts.cleanEnv, true);
+  for (const call of executor.calls.filter((candidate) => candidate !== appServerCall)) {
+    assert.equal(call.opts.cleanEnv, undefined);
+  }
 });
 
 test('ssh codex requiresOpenaiAuth=true passes through as data, not not_logged_in', async () => {

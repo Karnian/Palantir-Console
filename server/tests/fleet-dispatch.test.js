@@ -160,15 +160,15 @@ function buildHarness(db, {
   };
 }
 
-function seedProfile(db, { command = 'codex', max = 5 } = {}) {
+function seedProfile(db, { command = 'codex', max = 5, envAllowlist = [] } = {}) {
   const id = `profile-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const argsTemplate = path.basename(command).toLowerCase().includes('codex')
     ? 'exec {prompt}'
     : '{prompt}';
   db.prepare(`
     INSERT INTO agent_profiles (id, name, type, command, args_template, capabilities_json, env_allowlist, max_concurrent)
-    VALUES (?, 'FleetDispatchAgent', 'codex', ?, ?, '{}', '[]', ?)
-  `).run(id, command, argsTemplate, max);
+    VALUES (?, 'FleetDispatchAgent', 'codex', ?, ?, '{}', ?, ?)
+  `).run(id, command, argsTemplate, JSON.stringify(envAllowlist), max);
   return { id, command, max_concurrent: max };
 }
 
@@ -207,7 +207,7 @@ test('reachable executable ssh node dispatches through pickExecutor and remote w
     },
   });
   createSshNode(h.nodeService);
-  const profile = seedProfile(db);
+  const profile = seedProfile(db, { envAllowlist: ['POD_ONLY_PROVIDER_KEY'] });
   const project = h.projectService.createProject({
     name: 'RemoteProject',
     directory: '/workspace/project',
@@ -237,6 +237,7 @@ test('reachable executable ssh node dispatches through pickExecutor and remote w
   assert.equal(spawn.payload.spec.stdin, 'run remotely');
   assert.equal(spawn.payload.spec.cwd, '/workspace/project');
   assert.equal(spawn.payload.spec.workerPath, '/opt/codex/bin');
+  assert.deepEqual(spawn.payload.spec.envAllowlist, ['POD_ONLY_PROVIDER_KEY']);
   assert.equal(h.runService.getRun(run.id).tmux_session, `remote-${run.id}`);
 });
 

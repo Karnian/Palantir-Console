@@ -431,6 +431,7 @@ test('P4-S3a: CodexAdapter uses injected executor for prompt placement, spawn, r
     systemPrompt: 'remote system prompt',
     cwd,
     env,
+    envAllowlist: ['POD_ONLY_MANAGER_KEY'],
     nodePrefix: '/pod/bin',
     executor: fakeExecutor,
     onThreadStarted(threadId) { threadStarted.push(threadId); },
@@ -458,6 +459,7 @@ test('P4-S3a: CodexAdapter uses injected executor for prompt placement, spawn, r
   assert.equal(spawnCalls[0].opts.cwd, cwd);
   assert.deepEqual(spawnCalls[0].opts.env, env);
   assert.equal(spawnCalls[0].opts.pathPrefix, '/pod/bin');
+  assert.deepEqual(spawnCalls[0].opts.envAllowlist, ['POD_ONLY_MANAGER_KEY']);
   assert.equal(children[0].stdinWrites.join(''), 'first user text');
 
   children[0].stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'thread-remote-1' }) + '\n');
@@ -476,6 +478,7 @@ test('P4-S3a: CodexAdapter uses injected executor for prompt placement, spawn, r
   assert.equal(spawnCalls[1].args.includes('-C'), false, 'resume turn must omit -C');
   assert.ok(spawnCalls[1].args.includes('model_instructions_file="/pod/.palantir-secret-001/system_prompt.md"'));
   assert.equal(spawnCalls[1].opts.pathPrefix, '/pod/bin');
+  assert.deepEqual(spawnCalls[1].opts.envAllowlist, ['POD_ONLY_MANAGER_KEY']);
   assert.equal(children[1].stdinWrites.join(''), 'resume user text');
 
   await adapter.disposeSession('run_mgr_codex_remote');

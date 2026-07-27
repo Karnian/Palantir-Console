@@ -823,9 +823,15 @@ test('spawnInteractive builds piped ssh child with canonical cwd explicit env an
     'ServerAliveInterval=15',
     'ServerAliveCountMax=4',
   ]);
-  assert.equal(
-    script,
-    `cd ${shq('/real/root/project')} && exec env PALANTIR_TOKEN=${shq('')} PALANTIR_PM_TOKEN=${shq('')} PALANTIR_WORKER_TOKEN=${shq('')} PALANTIR_MANAGER_TOKEN=${shq('')} LC_ALL=${shq('C')} TOKEN=${shq("a'b")} ${shq('codex')} ${shq('exec')} ${shq(hostileArg)}`,
+  assert.ok(script.startsWith('set --; for k in '), script);
+  assert.ok(
+    script.includes(
+      `cd ${shq('/real/root/project')} && exec env -i "$@" PATH="$PATH" `
+      + `PALANTIR_TOKEN=${shq('')} PALANTIR_PM_TOKEN=${shq('')} `
+      + `PALANTIR_WORKER_TOKEN=${shq('')} PALANTIR_MANAGER_TOKEN=${shq('')} `
+      + `LC_ALL=${shq('C')} TOKEN=${shq("a'b")} `
+      + `${shq('codex')} ${shq('exec')} ${shq(hostileArg)}`,
+    ),
   );
   assert.ok(script.includes(shq(hostileArg)));
   assert.doesNotMatch(script, /REMOTE_SSH_EXECUTOR_INTERACTIVE_SECRET_SHOULD_NOT_APPEAR/);
@@ -888,7 +894,15 @@ test('spawnInteractive injects pathPrefix as PATH prepend with unquoted :$PATH',
   const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
   await exec.spawnInteractive('codex', ['exec'], { pathPrefix: '/home/karnian/.npm-global/bin' });
   const script = scriptOf(spawn.calls.at(-1));
-  assert.equal(script, `exec env PATH=${shq('/home/karnian/.npm-global/bin')}:$PATH PALANTIR_TOKEN=${shq('')} PALANTIR_PM_TOKEN=${shq('')} PALANTIR_WORKER_TOKEN=${shq('')} PALANTIR_MANAGER_TOKEN=${shq('')} ${shq('codex')} ${shq('exec')}`);
+  assert.ok(
+    script.includes(
+      `exec env -i "$@" PATH=${shq('/home/karnian/.npm-global/bin')}:$PATH `
+      + `PALANTIR_TOKEN=${shq('')} PALANTIR_PM_TOKEN=${shq('')} `
+      + `PALANTIR_WORKER_TOKEN=${shq('')} PALANTIR_MANAGER_TOKEN=${shq('')} `
+      + `${shq('codex')} ${shq('exec')}`,
+    ),
+    script,
+  );
   // The prefix is single-quoted (literal) but :$PATH stays outside the quotes.
   assert.ok(script.includes(`PATH=${shq('/home/karnian/.npm-global/bin')}:$PATH`));
 });
@@ -914,9 +928,12 @@ test('spawnInteractive allows only trusted manager commands independent from pub
   });
 
   await exec.spawnInteractive('claude', ['--version']);
-  assert.equal(
-    scriptOf(spawn.calls.at(-1)),
-    `exec env PALANTIR_TOKEN=${shq('')} PALANTIR_PM_TOKEN=${shq('')} PALANTIR_WORKER_TOKEN=${shq('')} PALANTIR_MANAGER_TOKEN=${shq('')} 'claude' '--version'`,
+  assert.ok(
+    scriptOf(spawn.calls.at(-1)).endsWith(
+      `exec env -i "$@" PATH="$PATH" PALANTIR_TOKEN=${shq('')} `
+      + `PALANTIR_PM_TOKEN=${shq('')} PALANTIR_WORKER_TOKEN=${shq('')} `
+      + `PALANTIR_MANAGER_TOKEN=${shq('')} 'claude' '--version'`,
+    ),
   );
 
   for (const command of ['bash', 'git']) {
@@ -1071,29 +1088,17 @@ test('spawnWorker builds file-backed tmux script through the internal runner', a
   const prefix = "cd '/real/root/project' && tmux new-session -d -s 'palantir-run-run_1' ";
   assert.ok(workerScript.startsWith(prefix), workerScript);
   const inner = unshq(workerScript.slice(prefix.length));
-  assert.equal(
+  assert.ok(inner.startsWith('set --; for k in '), inner);
+  assert.ok(
+    inner.includes(
+      `env -i "$@" PATH=${shq('/home/karnian/.npm-global/bin')}:$PATH `
+      + `PALANTIR_TOKEN=${shq('')} PALANTIR_PM_TOKEN=${shq('')} `
+      + `PALANTIR_WORKER_TOKEN=${shq('')} PALANTIR_MANAGER_TOKEN=${shq('')} `
+      + `LC_ALL=${shq('C')} QUOTE=${shq("a'b")} ${shq('codex')} `
+      + `${shq('--version')} ${shq(hostile)} ${shq('$(literal)')} `
+      + `> ${shq(stdoutLog)} 2>&1; echo $? > ${shq(exitSentinel)}`,
+    ),
     inner,
-    [
-      `PATH=${shq('/home/karnian/.npm-global/bin')}:$PATH`,
-      'env',
-      `PALANTIR_TOKEN=${shq('')}`,
-      `PALANTIR_PM_TOKEN=${shq('')}`,
-      `PALANTIR_WORKER_TOKEN=${shq('')}`,
-      `PALANTIR_MANAGER_TOKEN=${shq('')}`,
-      `LC_ALL=${shq('C')}`,
-      `QUOTE=${shq("a'b")}`,
-      shq('codex'),
-      shq('--version'),
-      shq(hostile),
-      shq('$(literal)'),
-      '>',
-      shq(stdoutLog),
-      '2>&1;',
-      'echo',
-      '$?',
-      '>',
-      shq(exitSentinel),
-    ].join(' '),
   );
   assert.ok(spawn.calls.some((call) => scriptOf(call) === "exec 'mkdir' '-p' '/srv/root/.palantir-runs'"));
   assert.ok(spawn.calls.some((call) => scriptOf(call) === `exec 'mkdir' '-p' ${shq(statusDir)}`));
@@ -1232,46 +1237,24 @@ test('spawnWorker transports prompt text through a guarded mode-0600 stdin file'
   assert.ok(combined.endsWith(disarmSuffix));
   const prefix = `${combined.slice(0, tmuxIndex)}tmux new-session -d -s ${shq(`palantir-run-${runId}`)} `;
   const quotedInnerScript = combined.slice(prefix.length, combined.length - disarmSuffix.length);
-  assert.equal(
-    unshq(quotedInnerScript),
-    [
-      'trap',
-      shq(`rm -f -- ${shq(canonicalStdin)}`),
-      'EXIT',
-      'HUP',
-      'INT',
-      'TERM;',
-      'env',
-      `PALANTIR_TOKEN=${shq('')}`,
-      `PALANTIR_PM_TOKEN=${shq('')}`,
-      `PALANTIR_WORKER_TOKEN=${shq('')}`,
-      `PALANTIR_MANAGER_TOKEN=${shq('')}`,
-      shq('codex'),
-      shq('exec'),
-      shq('-'),
-      '<',
-      shq(canonicalStdin),
-      '>',
-      shq(`${statusDir}/stdout.log`),
-      '2>&1;',
-      'agent_exit_code=$?;',
-      // The prompt file is removed BEFORE the trap is disarmed — disarming
-      // first leaves a window where a HUP/TERM has no handler left to run.
-      'rm',
-      '-f',
-      '--',
-      shq(canonicalStdin) + ';',
-      'trap',
-      '-',
-      'EXIT',
-      'HUP',
-      'INT',
-      'TERM;',
-      'echo',
-      '"$agent_exit_code"',
-      '>',
-      shq(`${statusDir}/exit.code`),
-    ].join(' '),
+  const inner = unshq(quotedInnerScript);
+  assert.ok(
+    inner.startsWith(
+      `trap ${shq(`rm -f -- ${shq(canonicalStdin)}`)} EXIT HUP INT TERM; set --; for k in `,
+    ),
+    inner,
+  );
+  assert.ok(
+    inner.includes(
+      `env -i "$@" PATH="$PATH" PALANTIR_TOKEN=${shq('')} `
+      + `PALANTIR_PM_TOKEN=${shq('')} PALANTIR_WORKER_TOKEN=${shq('')} `
+      + `PALANTIR_MANAGER_TOKEN=${shq('')} ${shq('codex')} ${shq('exec')} `
+      + `${shq('-')} < ${shq(canonicalStdin)} > ${shq(`${statusDir}/stdout.log`)} `
+      + `2>&1; agent_exit_code=$?; rm -f -- ${shq(canonicalStdin)}; `
+      // The prompt file is removed BEFORE the trap is disarmed.
+      + `trap - EXIT HUP INT TERM; echo "$agent_exit_code" > ${shq(`${statusDir}/exit.code`)}`,
+    ),
+    inner,
   );
 });
 
@@ -1557,24 +1540,17 @@ test('spawnWorker validates args and workerPath before building the tmux script'
 
   const workerScript = spawn.calls.map(scriptOf).find((script) => script.includes('tmux new-session'));
   const prefix = "cd '/real/root/project' && tmux new-session -d -s 'palantir-run-noargs' ";
-  assert.equal(
-    unshq(workerScript.slice(prefix.length)),
-    [
-      `PATH=${shq('/home/x/.npm-global/bin')}:$PATH`,
-      'env',
-      `PALANTIR_TOKEN=${shq('')}`,
-      `PALANTIR_PM_TOKEN=${shq('')}`,
-      `PALANTIR_WORKER_TOKEN=${shq('')}`,
-      `PALANTIR_MANAGER_TOKEN=${shq('')}`,
-      shq('codex'),
-      '>',
-      shq(`${statusDir}/stdout.log`),
-      '2>&1;',
-      'echo',
-      '$?',
-      '>',
-      shq(`${statusDir}/exit.code`),
-    ].join(' '),
+  const inner = unshq(workerScript.slice(prefix.length));
+  assert.ok(inner.startsWith('set --; for k in '), inner);
+  assert.ok(
+    inner.endsWith(
+      `env -i "$@" PATH=${shq('/home/x/.npm-global/bin')}:$PATH `
+      + `PALANTIR_TOKEN=${shq('')} PALANTIR_PM_TOKEN=${shq('')} `
+      + `PALANTIR_WORKER_TOKEN=${shq('')} PALANTIR_MANAGER_TOKEN=${shq('')} `
+      + `${shq('codex')} > ${shq(`${statusDir}/stdout.log`)} `
+      + `2>&1; echo $? > ${shq(`${statusDir}/exit.code`)}`,
+    ),
+    inner,
   );
 });
 

@@ -241,7 +241,23 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
    *
    * See docs/specs/manager-v3-multilayer.md principle 1.
    */
-  function startSession(runId, { prompt, cwd, systemPrompt, model, allowedTools, mcpTools, mcpConfig, permissionMode, env, resumeSessionId, executor, nodePrefix, nodeId, onSessionStarted } = {}) {
+  function startSession(runId, {
+    prompt,
+    cwd,
+    systemPrompt,
+    model,
+    allowedTools,
+    mcpTools,
+    mcpConfig,
+    permissionMode,
+    env,
+    envAllowlist,
+    resumeSessionId,
+    executor,
+    nodePrefix,
+    nodeId,
+    onSessionStarted,
+  } = {}) {
     // Reset normalizer state in case the runId is recycled.
     runState.delete(runId);
     const state = getState(runId);
@@ -281,6 +297,7 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
       // Local (no executor) is byte-equivalent — spawnAgent uses child_process.
       executor: executor || undefined,
       nodePrefix: nodePrefix || undefined,
+      envAllowlist: Array.isArray(envAllowlist) ? envAllowlist : undefined,
       nodeId: nodeId || undefined,
       onVendorEvent: (event, proc) => normalizeClaudeEvent(runId, event, proc),
     });
