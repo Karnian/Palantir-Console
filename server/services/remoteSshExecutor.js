@@ -21,22 +21,37 @@ const FILESYSTEM_LOCALE_ENV = Object.freeze({ LC_ALL: 'C' });
 //     as `trace-ascii = -` could otherwise echo the Authorization header back
 //     across SSH — R1 BLOCKER). Only the usage-report JSON body (HTTP 200)
 //     crosses the transport back.
+//   * An expired access token is REPORTED, never refreshed. Refreshing would
+//     mean rewriting the CLI's own credential file on the pod, and if the
+//     grant rotates the refresh token, discarding the new one revokes the
+//     user's login — on every poll of an idle node. Recovery is running Claude
+//     once on that node. A supported refresh path is tracked separately (#437).
 //   * Exit codes: 3 = no readable token (paired with __NO_CLAUDE_TOKEN__ on
-//     stdout), 5 = HTTP non-200 (status-only sentinel, body deliberately
-//     dropped), 6 = oversized response, 7 = network/timeout. Callers must
-//     match code AND sentinel, not code alone.
+//     stdout), 4 = the access token is expired (paired with
+//     __CLAUDE_TOKEN_EXPIRED__; reported locally, no request is made),
+//     5 = HTTP non-200 (status-only sentinel, body deliberately dropped),
+//     6 = oversized response, 7 = network/timeout. Callers must match codes
+//     with sentinels where one is defined, not codes alone.
 //   * PATH-resolved `node` is trusted per the fleet threat model (pods are
 //     operator-controlled — same trust as every other executor script that
 //     resolves sh/realpath/tmux from the pod PATH).
 const CLAUDE_OAUTH_USAGE_JS = [
   'const https=require("https");const os=require("os");',
-  'let tok="";try{const c=require(os.homedir()+"/.claude/.credentials.json");tok=(c.claudeAiOauth&&c.claudeAiOauth.accessToken)||""}catch(e){}',
-  'if(!tok){process.stdout.write("__NO_CLAUDE_TOKEN__");process.exit(3)}',
+  'let oauth={};try{const c=require(os.homedir()+"/.claude/.credentials.json");oauth=(c&&c.claudeAiOauth)||{}}catch(e){}',
+  'let finished=false;function finish(code,out){if(finished)return;finished=true;if(out)process.stdout.write(out);process.exit(code)}',
+  'const tok=typeof oauth.accessToken==="string"?oauth.accessToken:"";',
+  'if(!tok){finish(3,"__NO_CLAUDE_TOKEN__")}else{',
+  // An expired access token is reported WITHOUT calling the API. Refreshing it
+  // here would mean writing the CLI's own credential file back on the pod, and
+  // if the grant rotates the refresh token, dropping the new one would revoke
+  // the user's CLI login on every idle-node poll. Detect and report; recovery
+  // is "run Claude once on that node". See #437.
+  'const exp=Number(oauth.expiresAt);if(Number.isFinite(exp)&&Date.now()>=exp){finish(4,"__CLAUDE_TOKEN_EXPIRED__")}else{',
   'const req=https.request({host:"api.anthropic.com",path:"/api/oauth/usage",method:"GET",headers:{Authorization:"Bearer "+tok,"anthropic-beta":"oauth-2025-04-20",Accept:"application/json"},timeout:8000},(res)=>{',
-  'let b="";res.on("data",(d)=>{b+=d;if(b.length>262144){process.exit(6)}});',
-  'res.on("end",()=>{if(res.statusCode!==200){process.stdout.write("__CLAUDE_USAGE_HTTP_"+res.statusCode+"__");process.exit(5)}process.stdout.write(b);process.exit(0)});',
-  '});',
-  'req.on("timeout",()=>{req.destroy();process.exit(7)});req.on("error",()=>process.exit(7));req.end();',
+  'let b="";res.on("data",(d)=>{if(finished)return;b+=d;if(Buffer.byteLength(b)>262144){req.destroy();finish(6)}});',
+  'res.on("end",()=>{if(finished)return;if(res.statusCode!==200){finish(5,"__CLAUDE_USAGE_HTTP_"+res.statusCode+"__");return}finish(0,b)})});',
+  'req.on("timeout",()=>{req.destroy();finish(7)});req.on("error",()=>finish(7));req.end();',
+  '}}',
 ].join('');
 const CLAUDE_OAUTH_USAGE_SCRIPT = `exec node -e '${CLAUDE_OAUTH_USAGE_JS.replace(/'/g, "'\\''")}'`;
 
@@ -1375,4 +1390,5 @@ function createRemoteSshNodeExecutor(node, {
 module.exports = {
   createRemoteSshNodeExecutor,
   shq,
+  CLAUDE_OAUTH_USAGE_JS,
 };

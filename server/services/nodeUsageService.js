@@ -14,6 +14,10 @@ const ERROR_CODES = new Set([
   'no_data',
   'not_logged_in',
   'quota_unsupported',
+  'token_expired',
+  'http_error',
+  'response_too_large',
+  'network_error',
 ]);
 
 const COMMANDS = Object.freeze({
@@ -24,9 +28,10 @@ const COMMANDS = Object.freeze({
 });
 
 class UsageProbeError extends Error {
-  constructor(code, message) {
+  constructor(code, message, details = {}) {
     super(sanitizeMessage(message || code));
     this.usageCode = ERROR_CODES.has(code) ? code : 'probe_failed';
+    if (Number.isInteger(details.httpStatus)) this.httpStatus = details.httpStatus;
   }
 }
 
@@ -55,11 +60,13 @@ function card(id, fields = {}) {
   };
 }
 
-function errorObject(code, message) {
-  return {
+function errorObject(code, message, details = {}) {
+  const error = {
     code: ERROR_CODES.has(code) ? code : 'probe_failed',
     message: sanitizeMessage(message || code),
   };
+  if (Number.isInteger(details.httpStatus)) error.httpStatus = details.httpStatus;
+  return error;
 }
 
 function errorCard(id, code, message, fields = {}) {
@@ -68,14 +75,14 @@ function errorCard(id, code, message, fields = {}) {
     version: fields.version ?? null,
     usage: null,
     authStatus: fields.authStatus ?? null,
-    error: errorObject(code, message),
+    error: errorObject(code, message, fields.errorDetails),
     updatedAt: fields.updatedAt,
   });
 }
 
 function normalizeUsageError(err, fallbackCode = 'probe_failed', fallbackMessage = 'probe failed') {
-  if (err instanceof UsageProbeError) return errorObject(err.usageCode, err.message);
-  if (err?.usageCode && ERROR_CODES.has(err.usageCode)) return errorObject(err.usageCode, err.message);
+  if (err instanceof UsageProbeError) return errorObject(err.usageCode, err.message, err);
+  if (err?.usageCode && ERROR_CODES.has(err.usageCode)) return errorObject(err.usageCode, err.message, err);
   if (err?.code === 'SSH_TRANSPORT' || err?.exitCode === 255) {
     return errorObject('transport_lost', 'ssh transport lost');
   }
@@ -497,9 +504,36 @@ async function getSshClaudeCard(node, spawnInteractive, opts, readClaudeUsage) {
     if (res?.code === 3 && (res?.stdout || '').trim() === '__NO_CLAUDE_TOKEN__') {
       throw new UsageProbeError('not_logged_in', 'claude has no usable token on this node');
     }
+    // The pod reports an expired access token WITHOUT calling the API, so this
+    // is a definite local fact rather than an inferred 401. Recovery is running
+    // Claude once on that node; the probe deliberately does not refresh, since
+    // that would mean rewriting the CLI's credential file and could revoke the
+    // user's login if the grant rotates its refresh token (#437).
+    if (res?.code === 4 && (res?.stdout || '').trim() === '__CLAUDE_TOKEN_EXPIRED__') {
+      throw new UsageProbeError(
+        'token_expired',
+        'claude access token on this node has expired — run Claude once there to renew it',
+      );
+    }
+    if (res?.code === 5) {
+      const match = /^__CLAUDE_USAGE_HTTP_(\d{3})__$/.exec((res?.stdout || '').trim());
+      if (match) {
+        const httpStatus = Number(match[1]);
+        throw new UsageProbeError(
+          'http_error',
+          `claude quota probe returned HTTP ${httpStatus}`,
+          { httpStatus },
+        );
+      }
+    }
+    if (res?.code === 6) {
+      throw new UsageProbeError('response_too_large', 'claude quota probe response exceeded limit');
+    }
+    if (res?.code === 7) {
+      throw new UsageProbeError('network_error', 'claude quota probe network request failed or timed out');
+    }
     if (res?.code !== 0) {
-      // Includes HTTP non-200 (exit 5 — body dropped pod-side so an error
-      // JSON can never masquerade as a successful usage report, R1 SERIOUS 2).
+      // Unknown/malformed code+sentinel combinations remain fail-closed.
       throw new UsageProbeError('probe_failed', 'claude quota probe failed');
     }
     let data;
@@ -524,6 +558,7 @@ async function getSshClaudeCard(node, spawnInteractive, opts, readClaudeUsage) {
       installed: true,
       version,
       authStatus,
+      errorDetails: normalized,
     });
   }
 }

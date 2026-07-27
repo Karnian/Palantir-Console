@@ -12,8 +12,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
+const vm = require('node:vm');
+const { EventEmitter } = require('node:events');
 const request = require('supertest');
 const { createApp } = require('../app');
+const { CLAUDE_OAUTH_USAGE_JS } = require('../services/remoteSshExecutor');
 
 async function createTempDir(prefix) {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -90,6 +93,102 @@ function assertProviderShape(provider, label) {
   // Sanity-check ISO 8601
   assert.ok(!Number.isNaN(Date.parse(provider.updatedAt)), `${label}: updatedAt parses as date`);
 }
+
+function runClaudeUsageProbe(credentials, responses) {
+  const requests = [];
+  let stdout = '';
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('mock Claude usage probe timed out')), 1000);
+    const fakeProcess = {
+      stdout: { write(chunk) { stdout += String(chunk); } },
+      exit(code) {
+        clearTimeout(timer);
+        resolve({ code, stdout, requests });
+      },
+    };
+    const https = {
+      request(options, onResponse) {
+        const request = new EventEmitter();
+        const recorded = { options, body: '' };
+        requests.push(recorded);
+        request.write = (chunk) => { recorded.body += String(chunk); };
+        request.destroy = () => {};
+        request.end = () => {
+          const responseSpec = responses.shift();
+          if (!responseSpec) {
+            reject(new Error(`unexpected HTTPS request: ${options.method} ${options.host}${options.path}`));
+            return;
+          }
+          process.nextTick(() => {
+            const response = new EventEmitter();
+            response.statusCode = responseSpec.statusCode;
+            onResponse(response);
+            if (responseSpec.body) response.emit('data', Buffer.from(responseSpec.body));
+            response.emit('end');
+          });
+        };
+        return request;
+      },
+    };
+    const context = {
+      Buffer,
+      Date,
+      process: fakeProcess,
+      require(id) {
+        if (id === 'https') return https;
+        if (id === 'os') return { homedir: () => '/mock-home' };
+        if (id === '/mock-home/.claude/.credentials.json') {
+          return { claudeAiOauth: credentials };
+        }
+        throw new Error(`unexpected require: ${id}`);
+      },
+    };
+
+    try {
+      vm.runInNewContext(CLAUDE_OAUTH_USAGE_JS, context);
+    } catch (err) {
+      clearTimeout(timer);
+      reject(err);
+    }
+  });
+}
+
+test('an expired access token is reported locally, with no network call at all', async () => {
+  // The probe must NOT try to refresh. Refreshing would mean rewriting the
+  // CLI's own credential file on the pod, and if the grant rotates the refresh
+  // token, discarding the new one revokes the user's login — on every poll of
+  // an idle node. Detect, report, and let the user run Claude there once.
+  const result = await runClaudeUsageProbe({
+    accessToken: 'expired-access',
+    refreshToken: 'still-valid-refresh',
+    expiresAt: Date.now() - 60_000,
+    scopes: ['user:profile', 'user:inference'],
+  }, []);
+
+  assert.equal(result.code, 4);
+  assert.equal(result.stdout, '__CLAUDE_TOKEN_EXPIRED__');
+  assert.deepEqual(
+    result.requests,
+    [],
+    'a known-expired token must not reach the network, and must never spend the refresh token',
+  );
+});
+
+test('a live access token still queries usage directly', async () => {
+  const usageBody = JSON.stringify({ five_hour: { utilization: 25 } });
+  const result = await runClaudeUsageProbe({
+    accessToken: 'live-access',
+    expiresAt: Date.now() + 3_600_000,
+  }, [{ statusCode: 200, body: usageBody }]);
+
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout, usageBody);
+  assert.equal(result.requests.length, 1);
+  assert.equal(result.requests[0].options.host, 'api.anthropic.com');
+  assert.equal(result.requests[0].options.path, '/api/oauth/usage');
+  assert.equal(result.requests[0].options.headers.Authorization, 'Bearer live-access');
+});
 
 // ---- /api/usage/providers ----
 

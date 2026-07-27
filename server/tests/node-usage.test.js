@@ -571,7 +571,7 @@ test('ssh claude quota probe maps NO_TOKEN to not_logged_in and bad JSON to prob
   assert.equal(badJson.clis.find((item) => item.id === 'claude').error.code, 'probe_failed');
 });
 
-test('ssh claude quota exit-3 without the exact sentinel is probe_failed, and HTTP-fail exit 5 too', async () => {
+test('ssh claude quota maps refresh-unavailable and exit 5/6/7 to distinct errors', async () => {
   function makeService(readResult) {
     const executor = makeExecutor({
       'codex --version': () => new FakeChild({ code: 127 }),
@@ -591,9 +591,57 @@ test('ssh claude quota exit-3 without the exact sentinel is probe_failed, and HT
   const looseThree = await makeService({ code: 3, stdout: 'something else', stderr: '' }).getUsageSnapshot('pod');
   assert.equal(looseThree.clis.find((c) => c.id === 'claude').error.code, 'probe_failed');
 
-  // HTTP non-200: pod 쪽에서 body 를 버리고 status sentinel + exit 5
-  const httpFail = await makeService({ code: 5, stdout: '__CLAUDE_USAGE_HTTP_401__', stderr: '' }).getUsageSnapshot('pod');
-  const claude = httpFail.clis.find((c) => c.id === 'claude');
-  assert.equal(claude.error.code, 'probe_failed');
-  assert.ok(claude.authStatus, 'authStatus survives HTTP failure');
+  const refreshUnavailable = await makeService({
+    code: 4,
+    stdout: '__CLAUDE_TOKEN_EXPIRED__',
+    stderr: '',
+  }).getUsageSnapshot('pod');
+  const expiredError = refreshUnavailable.clis.find((c) => c.id === 'claude').error;
+  assert.equal(expiredError.code, 'token_expired');
+  assert.ok(refreshUnavailable.clis.find((c) => c.id === 'claude').authStatus);
+
+  for (const httpStatus of [401, 403, 429]) {
+    const httpFail = await makeService({
+      code: 5,
+      stdout: `__CLAUDE_USAGE_HTTP_${httpStatus}__`,
+      stderr: '',
+    }).getUsageSnapshot('pod');
+    const httpError = httpFail.clis.find((c) => c.id === 'claude').error;
+    assert.equal(httpError.code, 'http_error');
+    assert.equal(httpError.httpStatus, httpStatus);
+  }
+
+  const oversized = await makeService({ code: 6, stdout: '', stderr: '' }).getUsageSnapshot('pod');
+  assert.equal(oversized.clis.find((c) => c.id === 'claude').error.code, 'response_too_large');
+
+  const network = await makeService({ code: 7, stdout: '', stderr: '' }).getUsageSnapshot('pod');
+  assert.equal(network.clis.find((c) => c.id === 'claude').error.code, 'network_error');
+
+  assert.equal(new Set([
+    expiredError.code,
+    oversized.clis.find((c) => c.id === 'claude').error.code,
+    network.clis.find((c) => c.id === 'claude').error.code,
+  ]).size, 3);
+});
+
+test('ssh claude quota keeps malformed exit sentinels fail-closed', async () => {
+  const executor = makeExecutor({
+    'codex --version': () => new FakeChild({ code: 127 }),
+    'claude --version': () => new FakeChild({ stdout: '2.1.179\n' }),
+    'claude auth status': () => new FakeChild({ stdout: `${JSON.stringify({ loggedIn: true })}\n` }),
+  });
+  const service = createNodeUsageService({
+    nodeService: {
+      getNode() { return { id: 'pod', name: 'Pod', kind: 'ssh', reachable: 1 }; },
+      pickExecutor() { return executor; },
+    },
+    readClaudeOAuthUsageFn: async () => ({
+      code: 5,
+      stdout: '__CLAUDE_USAGE_HTTP_not-a-status__',
+      stderr: '',
+    }),
+  });
+
+  const snapshot = await service.getUsageSnapshot('pod');
+  assert.equal(snapshot.clis.find((c) => c.id === 'claude').error.code, 'probe_failed');
 });
