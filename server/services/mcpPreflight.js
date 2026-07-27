@@ -30,7 +30,9 @@
 // where reason ∈ {
 //   'preflight_timeout', 'preflight_4xx', 'preflight_5xx',
 //   'preflight_connect_refused', 'redirect_blocked',
-//   'bearer_env_missing', 'bearer_env_reserved', 'ssrf_blocked',
+//   'bearer_env_missing', 'bearer_env_reserved',
+//   'bearer_env_process_hijack', 'bearer_env_untrusted_source',
+//   'ssrf_blocked',
 // }.
 
 const http = require('node:http');
@@ -39,12 +41,21 @@ const https = require('node:https');
 const { assertSafeUrl } = require('./ssrf');
 const { resolveBearerForPreflight } = require('./authResolver');
 const { isActorCredentialKey } = require('./actorTokenPolicy');
+const { isBearerEnvKeyDenied } = require('./envDenylist');
 
 const PREFLIGHT_TIMEOUT_MS = 3000;
 const PASS_STATUSES = new Set([200, 204, 405, 501]);
 
 function isPreflightSkipped() {
   return process.env.PALANTIR_MCP_ALLOW_PREFLIGHT_SKIP === '1';
+}
+
+function bearerEnvRejectionReason(key) {
+  if (isActorCredentialKey(key)) return 'bearer_env_reserved';
+  if (typeof key === 'string' && key && isBearerEnvKeyDenied(key)) {
+    return 'bearer_env_process_hijack';
+  }
+  return null;
 }
 
 /**
@@ -194,12 +205,13 @@ async function preflightHttpAlias({ alias, cfg, fetchHook }) {
   let bearerEnvKey = null;
   if (cfg.bearer_token_env_var) {
     bearerEnvKey = cfg.bearer_token_env_var;
-    if (isActorCredentialKey(bearerEnvKey)) {
+    const rejectionReason = bearerEnvRejectionReason(bearerEnvKey);
+    if (rejectionReason) {
       return {
         ok: false,
         alias,
         url: resolved.url,
-        reason: 'bearer_env_reserved',
+        reason: rejectionReason,
         bearer_env: bearerEnvKey,
       };
     }
@@ -257,20 +269,25 @@ async function preflightHttpMcpConfig(mcpConfig, { fetchHook } = {}) {
   if (aliases.length === 0) return { results: [], failures: [], skipped: false };
   // The debug network-skip flag must not bypass configuration safety checks.
   // Existing/hand-edited rows can predate CRUD validation, so reject reserved
-  // control-plane credential aliases before considering the skip toggle.
-  const reservedFailures = aliases
-    .filter(({ cfg }) => isActorCredentialKey(cfg.bearer_token_env_var))
-    .map(({ alias, cfg }) => ({
-      ok: false,
-      alias,
-      url: cfg.url,
-      reason: 'bearer_env_reserved',
-      bearer_env: cfg.bearer_token_env_var,
-    }));
-  if (reservedFailures.length > 0) {
+  // control-plane credential aliases and hard-denied host env keys before
+  // considering the network-only skip toggle.
+  const configFailures = aliases
+    .map(({ alias, cfg }) => {
+      const reason = bearerEnvRejectionReason(cfg.bearer_token_env_var);
+      if (!reason) return null;
+      return {
+        ok: false,
+        alias,
+        url: cfg.url,
+        reason,
+        bearer_env: cfg.bearer_token_env_var,
+      };
+    })
+    .filter(Boolean);
+  if (configFailures.length > 0) {
     return {
-      results: reservedFailures,
-      failures: reservedFailures,
+      results: configFailures,
+      failures: configFailures,
       skipped: false,
     };
   }

@@ -26,8 +26,30 @@ const ENV_HARD_DENYLIST_PATTERNS = [
   /^XDG_CONFIG_HOME$/,
 ];
 
+// bearer_token_env_var values are read from process.env by the MCP client and
+// do not travel through argv. Credential-looking suffixes are therefore valid
+// here (BIFROST_MCP_TOKEN, LINEAR_API_KEY). Only variables that can alter the
+// worker's loader, runtime, executable resolution, or global config remain
+// unconditionally forbidden. This list is the canonical copy shared by
+// template CRUD, lifecycle provenance enforcement, and HTTP preflight.
+const BEARER_ENV_HARD_DENYLIST_PATTERNS = [
+  /^NODE_OPTIONS$/, /^NODE_EXTRA_CA_CERTS$/, /^LD_PRELOAD$/, /^LD_LIBRARY_PATH$/,
+  /^DYLD_/, /^PYTHONPATH$/, /^RUBYOPT$/, /^PERL5OPT$/, /^JAVA_TOOL_OPTIONS$/,
+  /^PATH$/, /^HOME$/, /^SHELL$/, /^GIT_CONFIG_GLOBAL$/, /^GIT_CONFIG_SYSTEM$/,
+  /^XDG_CONFIG_HOME$/,
+];
+
 function isEnvKeyDenied(key) {
   return ENV_HARD_DENYLIST_PATTERNS.some((pattern) => pattern.test(key));
 }
 
-module.exports = { ENV_HARD_DENYLIST_PATTERNS, isEnvKeyDenied };
+function isBearerEnvKeyDenied(key) {
+  return BEARER_ENV_HARD_DENYLIST_PATTERNS.some((pattern) => pattern.test(key));
+}
+
+module.exports = {
+  ENV_HARD_DENYLIST_PATTERNS,
+  BEARER_ENV_HARD_DENYLIST_PATTERNS,
+  isEnvKeyDenied,
+  isBearerEnvKeyDenied,
+};

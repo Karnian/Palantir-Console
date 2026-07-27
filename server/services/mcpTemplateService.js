@@ -29,29 +29,15 @@
 
 const crypto = require('node:crypto');
 const { BadRequestError, NotFoundError, ConflictError } = require('../utils/errors');
-const { isEnvKeyDenied } = require('./envDenylist');
+const { isEnvKeyDenied, isBearerEnvKeyDenied } = require('./envDenylist');
 const { assertSafeUrl } = require('./ssrf');
 const { isActorCredentialKey } = require('./actorTokenPolicy');
 
-// M4-a: bearer_token_env_var has a NARROWER denylist than allowed_env_keys.
-// The shared `isEnvKeyDenied` rejects credential-suffix names (`_TOKEN$`,
-// `_KEY$`) because skill packs put those into MCP `env={...}` and the
-// values would leak via argv. For `bearer_token_env_var` the value never
-// reaches argv (the worker reads `process.env[<name>]` directly at MCP
-// connect), and `_TOKEN`/`_KEY` is exactly the natural way to name
-// bearer-token env vars (e.g. `BIFROST_MCP_TOKEN`, `LINEAR_API_KEY`).
-// Only the process-loader / path-hijack patterns still apply — those would
-// hijack the worker process regardless of how the value is read.
-const BEARER_ENV_HARD_DENYLIST_PATTERNS = [
-  /^NODE_OPTIONS$/, /^NODE_EXTRA_CA_CERTS$/, /^LD_PRELOAD$/, /^LD_LIBRARY_PATH$/,
-  /^DYLD_/, /^PYTHONPATH$/, /^RUBYOPT$/, /^PERL5OPT$/, /^JAVA_TOOL_OPTIONS$/,
-  /^PATH$/, /^HOME$/, /^SHELL$/, /^GIT_CONFIG_GLOBAL$/, /^GIT_CONFIG_SYSTEM$/,
-  /^XDG_CONFIG_HOME$/,
-];
-
-function isBearerEnvKeyDenied(key) {
-  return BEARER_ENV_HARD_DENYLIST_PATTERNS.some((pattern) => pattern.test(key));
-}
+// M4-a: bearer_token_env_var has a NARROWER denylist than allowed_env_keys —
+// see `isBearerEnvKeyDenied` in ./envDenylist for the rule and its rationale.
+// That list now lives there because #431 made lifecycle provenance enforcement
+// and HTTP preflight share it; a second copy here would let the input paths
+// drift apart, which is the exact class of defect #431 closes.
 
 // Same alias regex codexMcpFlatten enforces. Keeping it here too means a
 // UI-created template cannot reach spawn time with a flatten-unsafe alias.

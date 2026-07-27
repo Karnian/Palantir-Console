@@ -22,7 +22,9 @@ const { VERDICT_TO_TASK_STATUS } = require('./goalVerdict'); // G3
 const {
   resolveActorTokenPolicy,
   applyWorkerCredentialPolicy,
+  isActorCredentialKey,
 } = require('./actorTokenPolicy');
+const { isBearerEnvKeyDenied } = require('./envDenylist');
 const {
   prepareCodexMcpArgs,
   removeSecretDirWithRetry,
@@ -1243,6 +1245,64 @@ function createLifecycleService({
       _runProjectDirs.delete(run.id);
       throw err;
     }
+    // M4-a / issue #431 PR B: this is the last point where bearer env-key
+    // provenance still exists. Preset and skill-pack MCP configs came through
+    // operator-controlled template CRUD and retain auto-forwarding. Project MCP
+    // files (including repo_relpath) never grant themselves host-env access:
+    // their bearer key must already be in the operator-managed profile
+    // env_allowlist. mergeMcp3 erases this provenance, so collection and policy
+    // enforcement must happen before the merge.
+    const trustedBearerEnvKeys = [];
+    const bearerEnvFailures = [];
+    const explicitProfileEnvKeys = new Set(parseEnvAllowlistArray(profile.env_allowlist));
+    const effectiveAliases = new Set();
+    const mcpSources = [
+      { source: 'preset', config: presetMcp, autoAllow: true },
+      { source: 'project', config: projectMcpObj, autoAllow: false },
+      { source: 'skill_pack', config: skillPackMcp, autoAllow: true },
+    ];
+    for (const { source, config, autoAllow } of mcpSources) {
+      for (const [alias, cfg] of Object.entries(config?.mcpServers || {})) {
+        // Preserve merge precedence (preset > project > skill pack): a
+        // shadowed alias cannot affect either the merged config or env policy.
+        if (effectiveAliases.has(alias)) continue;
+        effectiveAliases.add(alias);
+        if (cfg && typeof cfg === 'object' && typeof cfg.bearer_token_env_var === 'string'
+            && cfg.bearer_token_env_var) {
+          const bearerEnvKey = cfg.bearer_token_env_var;
+          const reason = isActorCredentialKey(bearerEnvKey)
+            ? 'bearer_env_reserved'
+            : isBearerEnvKeyDenied(bearerEnvKey)
+              ? 'bearer_env_process_hijack'
+              : !autoAllow && !explicitProfileEnvKeys.has(bearerEnvKey)
+                ? 'bearer_env_untrusted_source'
+                : null;
+          if (reason) {
+            bearerEnvFailures.push({
+              alias,
+              url: typeof cfg.url === 'string' ? cfg.url : null,
+              reason,
+              bearer_env: bearerEnvKey,
+              source,
+            });
+          } else if (autoAllow && !trustedBearerEnvKeys.includes(bearerEnvKey)) {
+            trustedBearerEnvKeys.push(bearerEnvKey);
+          }
+        }
+      }
+    }
+    if (bearerEnvFailures.length > 0) {
+      for (const failure of bearerEnvFailures) {
+        runService.addRunEvent(run.id, 'preset:mcp_unreachable', JSON.stringify(failure));
+      }
+      runService.updateRunStatus(run.id, 'failed', { force: true });
+      const first = bearerEnvFailures[0];
+      const msg = `MCP preflight failed: ${first.alias} (${first.reason})`;
+      runService.addRunEvent(run.id, 'error', JSON.stringify({ message: msg }));
+      _runProjectDirs.delete(run.id);
+      throw new Error(msg);
+    }
+
     let mergedMcp = null;
     if (presetService) {
       mergedMcp = presetService.mergeMcp3(presetMcp, projectMcpObj, skillPackMcp, {
@@ -1256,22 +1316,6 @@ function createLifecycleService({
         servers[alias] = config;
       }
       mergedMcp = Object.keys(servers).length > 0 ? { mcpServers: servers } : null;
-    }
-    // M4-a: collect http-transport bearer env keys for auto-allowlisting
-    // into the worker spawn env. Per-alias env names are derived from the
-    // merged config (cfg.bearer_token_env_var) so a preset/skill pack can
-    // ship http aliases without the operator hand-listing the key in
-    // agent_profiles.env_allowlist.
-    const httpBearerEnvKeys = [];
-    if (mergedMcp && mergedMcp.mcpServers) {
-      for (const cfg of Object.values(mergedMcp.mcpServers)) {
-        if (cfg && typeof cfg === 'object' && typeof cfg.bearer_token_env_var === 'string'
-            && cfg.bearer_token_env_var) {
-          if (!httpBearerEnvKeys.includes(cfg.bearer_token_env_var)) {
-            httpBearerEnvKeys.push(cfg.bearer_token_env_var);
-          }
-        }
-      }
     }
 
     // M4-a: HTTP MCP preflight — fail-closed on bad endpoint / SSRF / dead
@@ -1497,7 +1541,7 @@ function createLifecycleService({
         // message surfaces in the response.
         let isolatedOpts = null;
         let spawnEnv = buildWorkerEnv(
-          parseEnvAllowlist(profile.env_allowlist, httpBearerEnvKeys),
+          parseEnvAllowlist(profile.env_allowlist, trustedBearerEnvKeys),
         );
         let presetAuthCleanup = null;
         if (presetResolution && presetResolution.isolated) {
@@ -1709,7 +1753,7 @@ function createLifecycleService({
             stdin: workerInvocation.stdin,
             cwd,
             env: buildWorkerEnv(
-              parseEnvAllowlist(profile.env_allowlist, httpBearerEnvKeys),
+              parseEnvAllowlist(profile.env_allowlist, trustedBearerEnvKeys),
             ),
             workerPath: isRemoteNode ? (node.node_prefix || undefined) : undefined,
             outputLogPath: goalOutputLog || undefined,
@@ -1904,12 +1948,13 @@ function createLifecycleService({
   /**
    * Parse env_allowlist JSON and extract allowed env vars from process.env.
    *
-   * M4-a: optional `bearerEnvKeys` extends the allowlist with per-template
-   * bearer-token env var names so http MCP templates carry their token
-   * forwarding into the worker spawn without hand-editing agent profile
-   * env_allowlist. Keys are forwarded only if process.env has a value
-   * (resolveBearerForPreflight already enforced that, but keep the guard
-   * here so the spawn env doesn't carry noise empty entries).
+   * M4-a: optional `bearerEnvKeys` contains only keys from trusted preset /
+   * skill-pack provenance. Project MCP keys are materialized solely through
+   * the profile's explicit env_allowlist. This function is private and cannot
+   * independently re-read an MCP config or grant it auto-forwarding. Keys are
+   * forwarded only if process.env has a value (resolveBearerForPreflight
+   * already enforced that for non-skipped HTTP aliases, but keep the guard here
+   * so the spawn env doesn't carry noise empty entries).
    */
   function parseEnvAllowlist(allowlistJson, bearerEnvKeys) {
     try {
