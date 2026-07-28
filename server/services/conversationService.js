@@ -104,6 +104,7 @@ function createConversationService({
   // returning "No active Operator manager session". Tests that don't care about
   // lazy spawn can omit this dependency and keep the pre-3a behavior.
   operatorSpawnService,
+  operatorInstanceService,
   // A2b-2: optional. When wired, a turn that targets a NON-primary codebase in
   // the shared pool gets a `## Turn Codebase` block (name/id/directory) prepended
   // to the user payload so the Operator focuses on the right folder for the turn.
@@ -137,6 +138,35 @@ function createConversationService({
   const lastTurnContexts = new Map();
 
   const log = logger || ((msg) => console.log(`[conversation] ${msg}`));
+
+  function assertActiveOperatorInstance(instanceId) {
+    if (!instanceId) return null;
+    if (operatorInstanceService && typeof operatorInstanceService.assertActiveInstance === 'function') {
+      return operatorInstanceService.assertActiveInstance(instanceId);
+    }
+    if (runService && typeof runService.assertActiveOperatorInstance === 'function') {
+      return runService.assertActiveOperatorInstance(instanceId);
+    }
+    if (runService && typeof runService.getOperatorInstance === 'function') {
+      const instance = runService.getOperatorInstance(instanceId);
+      if (!instance) {
+        const err = new Error(`operator instance not found: ${instanceId}`);
+        err.httpStatus = 404;
+        err.code = 'OPERATOR_TARGET_NOT_FOUND';
+        err.retryable = false;
+        throw err;
+      }
+      if (instance.archived_at) {
+        const err = new Error(`operator instance is archived: ${instanceId}`);
+        err.httpStatus = 409;
+        err.code = 'OPERATOR_ARCHIVED';
+        err.retryable = false;
+        throw err;
+      }
+      return instance;
+    }
+    return null;
+  }
 
   // Formats the outbound notice text that the parent will see prepended
   // to its own next user message. Kept centralized so the shape can
@@ -352,6 +382,7 @@ function createConversationService({
       const operator = parseOperatorRoute(conversationId) || parsed;
       const targetConversationId = operator.conversationId || conversationId;
       const targetProjectId = operator.projectId || parsed.projectId || null;
+      if (operator.instanceId) assertActiveOperatorInstance(operator.instanceId);
 
       // Queue admission keeps the old target validation envelope: a
       // syntactically valid but unknown project/instance must not become an
@@ -362,22 +393,6 @@ function createConversationService({
             projectService.getProject(targetProjectId);
           } catch {
             const err = new Error(`project not found: ${targetProjectId}`);
-            err.httpStatus = 404;
-            err.code = 'OPERATOR_TARGET_NOT_FOUND';
-            err.retryable = false;
-            throw err;
-          }
-        }
-        if (
-          operator.instanceId
-          && runService
-          && typeof runService.getOperatorInstance === 'function'
-        ) {
-          try {
-            const instance = runService.getOperatorInstance(operator.instanceId);
-            if (!instance) throw new Error('not found');
-          } catch {
-            const err = new Error(`operator instance not found: ${operator.instanceId}`);
             err.httpStatus = 404;
             err.code = 'OPERATOR_TARGET_NOT_FOUND';
             err.retryable = false;
@@ -453,6 +468,9 @@ function createConversationService({
     let operatorResolved = null;
     if (!isTop) {
       operatorResolved = resolveOperatorConversation(conversationId);
+      if (operatorResolved?.instanceId) {
+        assertActiveOperatorInstance(operatorResolved.instanceId);
+      }
       if (operatorResolved?.instanceConversationId) conversationId = operatorResolved.instanceConversationId;
       if (!projectId) projectId = operatorResolved?.primaryProjectId || operatorResolved?.legacyProjectId || null;
       if (

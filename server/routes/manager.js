@@ -270,6 +270,18 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         try { bootResolved = runService.resolveOperatorConversationId(r.conversation_id); }
         catch { bootResolved = null; }
       }
+      if (
+        bootResolved?.instanceId
+        && operatorInstanceService
+        && typeof operatorInstanceService.assertActiveInstance === 'function'
+      ) {
+        try {
+          operatorInstanceService.assertActiveInstance(bootResolved.instanceId);
+        } catch (err) {
+          console.warn(`[boot] Skipping archived/missing Operator run=${r.id}: ${err.message}`);
+          bootResolved = null;
+        }
+      }
       let projectId = bootResolved
         ? (bootResolved.primaryProjectId || bootResolved.legacyProjectId || null)
         : null;

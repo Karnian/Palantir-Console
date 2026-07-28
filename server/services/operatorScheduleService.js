@@ -499,6 +499,12 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     const id = nonEmptyString(instanceId, 'operator_instance_id', 200);
     const row = stmts.getInstance.get(id);
     if (!row) throw new NotFoundError(`Operator instance not found: ${id}`);
+    if (row.archived_at) {
+      const err = new ConflictError(`Operator instance is archived: ${id}`);
+      err.code = 'OPERATOR_ARCHIVED';
+      err.retryable = false;
+      throw err;
+    }
     return row;
   }
 
@@ -573,6 +579,7 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
 
   function updateSchedule(id, input = {}, now = new Date()) {
     const current = getSchedule(id);
+    assertInstance(current.operator_instance_id);
     if (current.archived_at) throw new ConflictError('Archived schedules cannot be updated');
     const expectedRevision = Number(input.expected_revision);
     if (!Number.isInteger(expectedRevision) || expectedRevision < 1) {
@@ -692,6 +699,7 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
 
   function runNow(id, now = new Date()) {
     const schedule = getSchedule(id);
+    assertInstance(schedule.operator_instance_id);
     if (schedule.archived_at) throw new ConflictError('Archived schedules cannot run');
     assertMappedProject(schedule.operator_instance_id, schedule.codebase_project_id);
     const since = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();

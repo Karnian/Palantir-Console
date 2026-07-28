@@ -52,6 +52,7 @@ function createOperatorInstanceService(db, {
                WHERE os.operator_instance_id=oi.id AND os.archived_at IS NULL AND os.enabled=1) AS next_schedule_at
       FROM operator_instances oi
       LEFT JOIN operator_profiles op ON op.id=oi.profile_id
+      WHERE oi.archived_at IS NULL
       ORDER BY oi.updated_at DESC, oi.created_at DESC, oi.id ASC
     `),
     getInstance: db.prepare(`
@@ -65,12 +66,17 @@ function createOperatorInstanceService(db, {
       LEFT JOIN operator_profiles op ON op.id=oi.profile_id
       WHERE oi.id=?
     `),
-    listInstanceIdsForProfile: db.prepare('SELECT id FROM operator_instances WHERE profile_id = ?'),
+    listInstanceIdsForProfile: db.prepare(`
+      SELECT id
+      FROM operator_instances
+      WHERE profile_id = ? AND archived_at IS NULL
+    `),
     listInstanceIdsForProject: db.prepare(`
-      SELECT instance_id AS id
-      FROM operator_codebase_refs
-      WHERE project_id = ?
-      ORDER BY instance_id
+      SELECT r.instance_id AS id
+      FROM operator_codebase_refs r
+      JOIN operator_instances oi ON oi.id = r.instance_id
+      WHERE r.project_id = ? AND oi.archived_at IS NULL
+      ORDER BY r.instance_id
     `),
     getPrimaryProjectIdForInstance: db.prepare(`
       SELECT project_id
@@ -180,6 +186,7 @@ function createOperatorInstanceService(db, {
       JOIN operator_instances oi ON oi.id = r.instance_id
       WHERE r.project_id = ?
         AND r.role = 'primary'
+        AND oi.archived_at IS NULL
       LIMIT 1
     `),
     latestRunForInstance: db.prepare(`
@@ -197,6 +204,42 @@ function createOperatorInstanceService(db, {
          SET fast_mode = ?,
              updated_at = datetime('now')
        WHERE id = ?
+    `),
+    archiveInstance: db.prepare(`
+      UPDATE operator_instances
+         SET archived_at = ?,
+             updated_at = ?
+       WHERE id = ? AND archived_at IS NULL
+    `),
+    deleteAllRefs: db.prepare(`
+      DELETE FROM operator_codebase_refs
+      WHERE instance_id = ?
+    `),
+    schedulesForArchive: db.prepare(`
+      SELECT id
+      FROM operator_schedules
+      WHERE operator_instance_id = ? AND archived_at IS NULL
+      ORDER BY id
+    `),
+    archiveSchedules: db.prepare(`
+      UPDATE operator_schedules
+         SET archived_at = ?,
+             enabled = 0,
+             next_fire_at = NULL,
+             updated_at = ?
+       WHERE operator_instance_id = ? AND archived_at IS NULL
+    `),
+    cancelPendingInvocations: db.prepare(`
+      UPDATE operator_invocations
+         SET status = 'cancelled',
+             claim_token = NULL,
+             locked_at = NULL,
+             waiting_reason = 'operator_archived',
+             last_error = COALESCE(last_error, 'Operator instance archived before delivery'),
+             completed_at = ?,
+             updated_at = ?
+       WHERE operator_instance_id = ?
+         AND status IN ('pending', 'claimed')
     `),
   };
 
@@ -230,6 +273,20 @@ function createOperatorInstanceService(db, {
     const instance = stmts.getInstance.get(instanceId);
     if (!instance) throw new NotFoundError(`Operator instance not found: ${instanceId}`);
     return instance;
+  }
+
+  function archivedInstanceError(instanceId) {
+    const err = new ConflictError(`Operator instance is archived: ${instanceId}`);
+    err.httpStatus = 409;
+    err.code = 'OPERATOR_ARCHIVED';
+    err.retryable = false;
+    return err;
+  }
+
+  function assertActiveInstance(id) {
+    const instance = assertInstance(id);
+    if (instance.archived_at) throw archivedInstanceError(instance.id);
+    return withRefs(instance);
   }
 
   function assertProject(id) {
@@ -304,7 +361,7 @@ function createOperatorInstanceService(db, {
   }
 
   function setProfileId(instanceId, profileId) {
-    const instance = assertInstance(instanceId);
+    const instance = assertActiveInstance(instanceId);
     const profile = stmts.getProfileById.get(profileId);
     if (!profile) throw new NotFoundError(`operator profile not found: ${profileId}`);
     stmts.updateInstanceProfile.run(profile.id, instance.id);
@@ -312,7 +369,7 @@ function createOperatorInstanceService(db, {
   }
 
   function preparePreferredAdapterUpdate(instanceId, value) {
-    const instance = getInstance(instanceId);
+    const instance = assertActiveInstance(instanceId);
     const preferredAdapter = normalizePreferredAdapter(value);
     return {
       instance,
@@ -322,7 +379,7 @@ function createOperatorInstanceService(db, {
   }
 
   function setPreferredAdapter(instanceId, value) {
-    const instance = assertInstance(instanceId);
+    const instance = assertActiveInstance(instanceId);
     const preferredAdapter = normalizePreferredAdapter(value);
     stmts.updatePreferredAdapter.run(preferredAdapter, instance.id);
     return withRefs(stmts.getInstance.get(instance.id));
@@ -361,7 +418,7 @@ function createOperatorInstanceService(db, {
   }
 
   function createPrivateProfileFor(instanceId) {
-    const instance = assertInstance(instanceId);
+    const instance = assertActiveInstance(instanceId);
     const newId = `op_priv_${randomUUID()}`;
     const newName = `Private: ${instance.id} (${randomUUID().slice(0, 8)})`;
     db.transaction(() => {
@@ -396,7 +453,7 @@ function createOperatorInstanceService(db, {
   }
 
   function addRef(instanceId, input = {}) {
-    const instance = assertInstance(instanceId);
+    const instance = assertActiveInstance(instanceId);
     const project = assertProject(input.project_id);
     const role = normalizeRole(input.role);
     let version = 0;
@@ -420,7 +477,7 @@ function createOperatorInstanceService(db, {
   }
 
   function removeRef(instanceId, projectId) {
-    const instance = assertInstance(instanceId);
+    const instance = assertActiveInstance(instanceId);
     const normalizedProjectId = requiredString(projectId, 'projectId');
     const ref = stmts.getRef.get(instance.id, normalizedProjectId);
     if (!ref) {
@@ -487,7 +544,7 @@ function createOperatorInstanceService(db, {
   // read fresh per turn by the codex adapter's resolver, so a live Operator picks
   // up the change on its next turn without a re-spawn.
   function setFastMode(instanceId, fastMode) {
-    const instance = assertInstance(instanceId);
+    const instance = assertActiveInstance(instanceId);
     let value;
     if (fastMode === null || fastMode === undefined) value = null;
     else value = fastMode ? 1 : 0;
@@ -495,10 +552,64 @@ function createOperatorInstanceService(db, {
     return withRefs(stmts.getInstance.get(instance.id));
   }
 
+  function archiveDatabaseState(instanceId, {
+    now = new Date(),
+    terminalizeQueued = null,
+  } = {}) {
+    const date = now instanceof Date ? now : new Date(now);
+    if (!Number.isFinite(date.getTime())) throw new BadRequestError('now must be a valid timestamp');
+    const archivedAt = date.toISOString();
+
+    return db.transaction(() => {
+      const current = assertInstance(instanceId);
+      if (current.archived_at) {
+        return {
+          instance: withRefs(current),
+          already_archived: true,
+          affected_codebases: [],
+          archived_schedule_ids: [],
+          cancelled_invocation_count: 0,
+          terminalized_queue_messages: [],
+        };
+      }
+
+      const refs = stmts.listRefsForInstance.all(current.id).map(normalizeRef);
+      const scheduleIds = stmts.schedulesForArchive.all(current.id).map((row) => row.id);
+      const archiveResult = stmts.archiveInstance.run(archivedAt, archivedAt, current.id);
+      if (archiveResult.changes !== 1) {
+        throw new ConflictError(`Operator instance archive lost a concurrent update: ${current.id}`);
+      }
+      stmts.deleteAllRefs.run(current.id);
+      stmts.archiveSchedules.run(archivedAt, archivedAt, current.id);
+      const cancelledInvocations = stmts.cancelPendingInvocations.run(
+        archivedAt,
+        archivedAt,
+        current.id,
+      );
+      const terminalizedQueueMessages = typeof terminalizeQueued === 'function'
+        ? terminalizeQueued(conversationIdForProject(current.id), { now: archivedAt })
+        : [];
+
+      return {
+        instance: withRefs(stmts.getInstance.get(current.id)),
+        already_archived: false,
+        affected_codebases: refs.map((ref) => ({
+          id: ref.project_id,
+          name: ref.project?.name || null,
+          role: ref.role,
+        })),
+        archived_schedule_ids: scheduleIds,
+        cancelled_invocation_count: cancelledInvocations.changes,
+        terminalized_queue_messages: terminalizedQueueMessages,
+      };
+    }).immediate();
+  }
+
   return {
     withTransaction,
     listInstances,
     getInstance,
+    assertActiveInstance,
     listInstanceIdsForProfile,
     listInstanceIdsForProject,
     getPrimaryProjectIdForInstance,
@@ -513,6 +624,7 @@ function createOperatorInstanceService(db, {
     removeRef,
     removeRefsForProject,
     setFastMode,
+    archiveDatabaseState,
   };
 }
 

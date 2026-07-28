@@ -36,6 +36,15 @@ function createOperatorInstancesRouter({
     res.json({ instance: operatorInstanceService.getInstance(req.params.id) });
   }));
 
+  // Archive is intentionally cookie-only + same-origin. The instance/profile
+  // rows remain available for historical attribution; active runtime and
+  // mutable dependants are retired by the lifecycle service.
+  router.delete('/:id', asyncHandler(async (req, res) => {
+    assertHumanSameOrigin(req);
+    const result = await operatorIdentityLifecycleService.archiveInstance(req.params.id);
+    res.json(result);
+  }));
+
   router.get('/:id/brief', asyncHandler(async (req, res) => {
     if (!operatorBriefService) {
       return res.status(501).json({ error: 'operator_brief_service_unavailable' });
