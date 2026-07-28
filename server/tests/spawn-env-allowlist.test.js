@@ -153,6 +153,96 @@ test('manager allowlist forwards all proxy spellings but blocks XDG homes and SS
   }
 });
 
+test('credentialed proxy forwarding emits a value-free security diagnostic', () => {
+  const lines = [];
+  const originalWarn = console.warn;
+  console.warn = (line) => lines.push(String(line));
+  try {
+    const env = buildManagerSpawnEnv({
+      baseEnv: {
+        HTTP_PROXY: 'http://proxy-user:proxy-password@proxy.example:3128',
+        all_proxy: 'socks5:/encoded%40user:encoded%2Fpassword@proxy.example:1080',
+        HTTPS_PROXY: 'scheme-user:scheme-password@proxy.example:8443',
+        https_proxy: 'http://malformed-user:malformed#password@proxy.example:9443',
+        ALL_PROXY: String.raw`http://DOMAIN\domain-user:domain-password@proxy.example:10443`,
+        http_proxy: 'http:/slash-user:slash-password@proxy.example:11443',
+        NO_PROXY: 'user@example.internal',
+      },
+      vendor: 'codex',
+      diagnosticContext: 'manager:test:proxy',
+    });
+    assert.equal(env.HTTP_PROXY, 'http://proxy-user:proxy-password@proxy.example:3128');
+    assert.equal(env.all_proxy, 'socks5:/encoded%40user:encoded%2Fpassword@proxy.example:1080');
+    assert.equal(env.HTTPS_PROXY, 'scheme-user:scheme-password@proxy.example:8443');
+    assert.equal(env.https_proxy, 'http://malformed-user:malformed#password@proxy.example:9443');
+    assert.equal(
+      env.ALL_PROXY,
+      String.raw`http://DOMAIN\domain-user:domain-password@proxy.example:10443`,
+    );
+    assert.equal(env.http_proxy, 'http:/slash-user:slash-password@proxy.example:11443');
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^\[security\] manager_spawn_proxy_userinfo /);
+  assert.match(lines[0], /"context":"manager:test:proxy"/);
+  assert.match(lines[0], /"vendor":"codex"/);
+  const payload = JSON.parse(lines[0].slice(lines[0].indexOf('{')));
+  assert.deepEqual(
+    payload.keys,
+    ['ALL_PROXY', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy', 'http_proxy', 'https_proxy'].sort(),
+  );
+  assert.doesNotMatch(
+    lines[0],
+    /proxy-user|proxy-password|scheme-user|scheme-password|malformed-user|malformed#password|domain-user|domain-password|slash-user|slash-password|DOMAIN|encoded%40user|encoded%2Fpassword|proxy\.example|3128|8443|9443|10443|11443|1080/,
+  );
+});
+
+test('proxy diagnostic stays silent without URL userinfo', () => {
+  const lines = [];
+  const originalWarn = console.warn;
+  console.warn = (line) => lines.push(String(line));
+  try {
+    buildManagerSpawnEnv({
+      baseEnv: {
+        HTTP_PROXY: 'http://proxy.example:3128',
+        HTTPS_PROXY: 'not-a-url',
+        ALL_PROXY: 'http://proxy.example:bad/path@name',
+        all_proxy: 'http://[::1/path@name',
+        http_proxy: 'http://proxy.example:bad?next=user@example.internal',
+        https_proxy: 'mailto:user@example.internal',
+        NO_PROXY: 'user@example.internal',
+      },
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.deepEqual(lines, []);
+});
+
+test('proxy diagnostic catches curl-compatible triple-slash SOCKS userinfo', () => {
+  const lines = [];
+  const originalWarn = console.warn;
+  console.warn = (line) => lines.push(String(line));
+  try {
+    buildManagerSpawnEnv({
+      baseEnv: {
+        ALL_PROXY: 'socks5:///triple-user:triple-password@proxy.example:1080',
+      },
+      diagnosticContext: 'manager:test:socks-slashes',
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /manager_spawn_proxy_userinfo/);
+  assert.match(lines[0], /"keys":\["ALL_PROXY"\]/);
+  assert.doesNotMatch(lines[0], /triple-user|triple-password|proxy\.example|1080/);
+});
+
 test('profile env_allowlist and bearerEnvKeys are additive and authEnv wins last', () => {
   const env = buildManagerSpawnEnv({
     baseEnv: {
@@ -607,7 +697,10 @@ test('fresh Top and boot-resumed Top/Operator use the same profile env_allowlist
         'manager:resume:top',
         'manager:resume:operator',
       ]) {
-        const line = warnings.find((entry) => entry.includes(`"context":"${context}"`));
+        const line = warnings.find((entry) => (
+          entry.includes('manager_spawn_env_dropped')
+          && entry.includes(`"context":"${context}"`)
+        ));
         assert.ok(line, `missing security diagnostic for ${context}`);
         assert.match(line, /RESUME_DROPPED_CANARY_7F3A/);
         assert.doesNotMatch(line, /never-log-this-value/);

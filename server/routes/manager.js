@@ -466,7 +466,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   adapterType,
                 });
                 const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
-                const resolvedSpawnEnv = buildManagerSpawnEnv({
+                const resolvedSpawnEnv = isRemoteNode ? {} : buildManagerSpawnEnv({
                   baseEnv: actorSpawnBaseEnv,
                   authEnv: authCtx.env,
                   envAllowlist,

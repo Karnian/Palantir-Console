@@ -188,6 +188,16 @@ test('local Operator spawn passes no executor or nodePrefix', async (t) => {
 test('remote Operator spawn uses node executor, pod cwd, placement persistence, and manager node_id', async (t) => {
   withCodexAuth(t);
   withoutBaseUrl(t);
+  const oldProxy = process.env.HTTP_PROXY;
+  const originalWarn = console.warn;
+  const warnings = [];
+  process.env.HTTP_PROXY = 'http://controller-user:controller-password@controller-proxy:3128';
+  console.warn = (line) => warnings.push(String(line));
+  t.after(() => {
+    if (oldProxy === undefined) delete process.env.HTTP_PROXY;
+    else process.env.HTTP_PROXY = oldProxy;
+    console.warn = originalWarn;
+  });
   const db = await mkdb(t);
   const runService = createRunService(db, null);
   const projectService = createProjectService(db);
@@ -217,6 +227,11 @@ test('remote Operator spawn uses node executor, pod cwd, placement persistence, 
   // breaking codex resolution, and leak CODEX_API_KEY). Real-Pi finding.
   assert.deepEqual(start.opts.env, {}, 'remote Operator env must be minimal ({})');
   assert.equal(start.opts.env.CODEX_API_KEY, undefined, 'no control-plane creds to the pod');
+  assert.equal(
+    warnings.some((line) => line.includes('manager_spawn_proxy_userinfo')),
+    false,
+    'discarded control-plane proxy env must not emit a forwarding diagnostic',
+  );
   assert.equal(runService.getRun(result.run.id).node_id, 'nodeA');
   assert.deepEqual(nodeService._calls.pickExecutor, ['nodeA']);
 
@@ -333,6 +348,16 @@ test('createRun preserves manager node_id when provided', async (t) => {
 test('boot resume uses remote node executor, nodePrefix, pod cwd, and thread affinity', async (t) => {
   withCodexAuth(t);
   withoutBaseUrl(t);
+  const oldProxy = process.env.HTTP_PROXY;
+  const originalWarn = console.warn;
+  const warnings = [];
+  process.env.HTTP_PROXY = 'http://controller-user:controller-password@controller-proxy:3128';
+  console.warn = (line) => warnings.push(String(line));
+  t.after(() => {
+    if (oldProxy === undefined) delete process.env.HTTP_PROXY;
+    else process.env.HTTP_PROXY = oldProxy;
+    console.warn = originalWarn;
+  });
   const db = await mkdb(t);
   const runService = createRunService(db, null);
   const projectService = createProjectService(db);
@@ -387,6 +412,11 @@ test('boot resume uses remote node executor, nodePrefix, pod cwd, and thread aff
   assert.equal(adapter._starts[0].opts.executor, remoteExecutor);
   assert.equal(adapter._starts[0].opts.nodePrefix, '/opt/nodeA/bin');
   assert.equal(adapter._starts[0].opts.cwd, '/workspace/boot');
+  assert.equal(
+    warnings.some((line) => line.includes('manager_spawn_proxy_userinfo')),
+    false,
+    'remote boot resume must not diagnose a discarded control-plane proxy',
+  );
   const warning = runService.getRunEvents(run.id).find(e => e.event_type === 'operator:remote_base_url_localhost');
   assert.ok(warning, 'boot resume should record remote localhost base URL warning');
 });
