@@ -21,6 +21,7 @@ const { createProjectMaterializationService } = require('./projectMaterializatio
 const { validateStructuredModelEffort } = require('./agentProfileService');
 const { compileGoalPrompt } = require('./goalPrompt'); // G1
 const { parseGoalReport } = require('./goalReport'); // G1
+const { parseClaudeStreamJsonOutput } = require('./claudeStreamJson');
 const { createGoalVerdictService } = require('./goalVerdictService'); // G3
 const { VERDICT_TO_TASK_STATUS } = require('./goalVerdict'); // G3
 const {
@@ -35,21 +36,17 @@ const {
 } = require('./managerAdapters/codexMcpSecretTransport');
 
 // G1: cap a string to at most maxBytes UTF-8 bytes without splitting a
-// multi-byte codepoint (final_output is stored raw; the 64KB bound is on bytes,
-// not chars). Truncates at a real codepoint boundary \u2014 it backs the cut off
-// any trailing continuation bytes rather than letting toString emit/strip a
-// replacement char, so legitimate U+FFFD content is preserved. null \u2192 null.
-function capUtf8Bytes(value, maxBytes) {
+// multi-byte codepoint, retaining the tail. Goal reports are emitted at the end
+// of a worker response, so prefix truncation could discard the report from a
+// long detached result even though file-backed capture is already tail-first.
+function capUtf8Tail(value, maxBytes) {
   if (value == null) return null;
   const str = String(value);
   const buf = Buffer.from(str, 'utf8');
   if (buf.length <= maxBytes) return str;
-  // If the byte at the cut is a UTF-8 continuation byte (0b10xxxxxx), the
-  // codepoint straddles the boundary \u2014 back off until the next dropped byte
-  // starts a new codepoint, so we never split one.
-  let end = maxBytes;
-  while (end > 0 && (buf[end] & 0xC0) === 0x80) end--;
-  return buf.subarray(0, end).toString('utf8');
+  let start = buf.length - maxBytes;
+  while (start < buf.length && (buf[start] & 0xC0) === 0x80) start++;
+  return buf.subarray(start).toString('utf8');
 }
 
 // G1: file-backed output log for a local goal worker (§5k-2 — codex/tmux/
@@ -1541,10 +1538,10 @@ function createLifecycleService({
         // anything merged, else plain project MCP, else undefined.
         const effectiveMcpConfig = skillPackMcpConfigPath || projectMcpConfig || undefined;
 
-        // The basic SSH duplex path is pod-native, but these two optional
-        // features still materialize control-plane-local files. Never pass
-        // those paths to the pod: fail non-retryably until a node-side asset
-        // transport exists. Plain remote Claude workers remain supported.
+        // The detached SSH path is pod-native, but these two optional features
+        // still materialize control-plane-local files. Never pass those paths
+        // to the pod: fail non-retryably until a node-side asset transport
+        // exists. Plain remote Claude workers remain supported.
         if (isRemoteNode && (effectiveMcpConfig || presetResolution?.isolated)) {
           const unsupported = {
             node_id: run.node_id,
@@ -1602,6 +1599,15 @@ function createLifecycleService({
         }
 
         try {
+          if (isRemoteNode) {
+            // Durable run-owned engine identity: profiles are mutable and their
+            // FK is cleared on delete, so recovery must never infer the engine
+            // from the current profile row after the detached spawn boundary.
+            runService.addRunEvent(run.id, 'runtime:remote_worker_engine', JSON.stringify({
+              engine: 'claude-stream-json',
+              version: 1,
+            }));
+          }
           result = await channelForNode(run.node_id).spawnWorker(run.id, {
             engine: 'stream-json',
             spec: {
@@ -1830,6 +1836,49 @@ function createLifecycleService({
 
       return runService.getRun(run.id);
     } catch (error) {
+      if (isRemoteNode && error.code === 'REMOTE_SPAWN_UNCERTAIN') {
+        // The SSH acknowledgement was lost after the detached start command
+        // may have crossed the node boundary. Keep this SAME run as the durable
+        // owner and let tmux/exit-sentinel health reconciliation decide whether
+        // it actually started. Marking failed here would enqueue a retry that
+        // can overlap the still-live remote Claude process in the same cwd.
+        try {
+          if (nodeService && typeof nodeService.setReachable === 'function') {
+            let wasReachable = true;
+            if (typeof nodeService.getNode === 'function') {
+              wasReachable = Number(nodeService.getNode(run.node_id)?.reachable) === 1;
+            }
+            await nodeService.setReachable(run.node_id, false);
+            if (wasReachable && eventBus) {
+              eventBus.emit('node:status', {
+                node_id: run.node_id,
+                from_reachable: 1,
+                to_reachable: 0,
+                at: new Date().toISOString(),
+              });
+            }
+          }
+        } catch { /* ownership fencing is authoritative even if reachability write fails */ }
+        runService.addRunEvent(run.id, 'security:worker_credential_policy_applied', JSON.stringify({
+          version: 1,
+          policy: 'actor_tokens_scrubbed',
+          memory_propose: !!workerProposalToken,
+        }));
+        runService.addRunEvent(run.id, 'spawn:remote_ownership_uncertain', JSON.stringify({
+          node_id: run.node_id,
+          session_name: error.sessionName || `palantir-run-${run.id}`,
+          reason: 'ssh_ack_lost_after_detached_start',
+        }));
+        runService.markRunStarted(run.id, {
+          tmux_session: error.sessionName || `palantir-run-${run.id}`,
+          worktree_path: worktreePath,
+          branch,
+        });
+        if (task.status !== 'in_progress') {
+          taskService.updateTaskStatus(taskId, 'in_progress');
+        }
+        return runService.getRun(run.id);
+      }
       runService.updateRunStatus(run.id, 'failed', { force: true });
       runService.addRunEvent(run.id, 'error', JSON.stringify({ message: error.message }));
       // Awaited cleanup so the worktree AND the in-memory _runProjectDirs entry
@@ -2456,6 +2505,128 @@ function createLifecycleService({
     return exitCode === 0 ? 'Agent completed successfully' : `Agent exited with code ${exitCode}`;
   }
 
+  function isDetachedRemoteClaudeRun(run) {
+    if (!run || !run.node_id || run.node_id === 'local') return false;
+    try {
+      const engineEvent = runService.getRunEvents(run.id)
+        .find((event) => event.event_type === 'runtime:remote_worker_engine');
+      if (engineEvent) {
+        const payload = JSON.parse(engineEvent.payload_json || '{}');
+        return payload.engine === 'claude-stream-json';
+      }
+    } catch {
+      // Older runs have no durable marker; fall back to their immutable-enough
+      // profile reference for backward-compatible recovery.
+    }
+    if (!run.agent_profile_id) return false;
+    try {
+      return resolveAdapterName(agentProfileService.getProfile(run.agent_profile_id)) === 'claude';
+    } catch {
+      return false;
+    }
+  }
+
+  async function inspectDetachedClaudeResult(run, channel) {
+    if (!isDetachedRemoteClaudeRun(run)) return null;
+    const recentOutput = await channel.getOutput(run.id, 500, 'cli');
+    const durableResult = typeof channel.getStructuredResult === 'function'
+      ? await channel.getStructuredResult(run.id)
+      : '';
+    // The normal tail is intentionally bounded for UI/health safety. Append the
+    // separately harvested final result record so usage/status/goal semantics
+    // survive even when that tail exceeds its byte cap and returns empty.
+    const raw = [recentOutput, durableResult].filter(Boolean).join('\n');
+    const parsed = parseClaudeStreamJsonOutput(raw);
+    if (!parsed.recognized) return null;
+
+    const priorEvents = runService.getRunEvents(run.id);
+    const alreadyParsed = priorEvents.some(
+      (event) => event.event_type === 'runtime:remote_claude_stream_parsed',
+    );
+    if (!alreadyParsed) {
+      for (const event of parsed.events) {
+        if (event.type === 'system' && event.subtype === 'init') {
+          runService.addRunEvent(run.id, 'init', JSON.stringify({
+            session_id: event.session_id,
+            model: event.model,
+            tools: (event.tools || []).slice(0, 20),
+            cwd: event.cwd,
+          }));
+          continue;
+        }
+        if (event.type !== 'assistant' || !Array.isArray(event.message?.content)) continue;
+        const text = event.message.content
+          .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+          .map((block) => block.text)
+          .join('\n');
+        if (text) {
+          runService.addRunEvent(
+            run.id,
+            'assistant_text',
+            JSON.stringify({ text: text.slice(0, 5000) }),
+          );
+        }
+        for (const toolUse of event.message.content.filter((block) => block?.type === 'tool_use')) {
+          runService.addRunEvent(
+            run.id,
+            'tool_use',
+            JSON.stringify({ tool: toolUse.name, id: toolUse.id }),
+          );
+        }
+      }
+
+      if (parsed.result) {
+        runService.addRunEvent(run.id, 'result', JSON.stringify({
+          is_error: parsed.result.is_error,
+          duration_ms: parsed.result.duration_ms,
+          stop_reason: parsed.result.stop_reason,
+          result: typeof parsed.result.result === 'string'
+            ? parsed.result.result.slice(0, 5000)
+            : null,
+          total_cost_usd: parsed.result.total_cost_usd,
+          num_turns: parsed.result.num_turns,
+        }));
+      }
+      runService.addRunEvent(run.id, 'runtime:remote_claude_stream_parsed', JSON.stringify({
+        events: parsed.events.length,
+        has_result: !!parsed.result,
+      }));
+    }
+
+    if (!parsed.result) {
+      // Recognized NDJSON may consist solely of user/tool events. Never fall
+      // back to that raw stream: tool inputs/results can contain file contents
+      // or tokens that must not enter observable final_output events.
+      return { output: parsed.text || '', status: null, reason: null };
+    }
+
+    runService.updateRunResult(run.id, {
+      result_summary: typeof parsed.result.result === 'string'
+        ? parsed.result.result.slice(0, 2000)
+        : null,
+      exit_code: parsed.result.is_error ? 1 : 0,
+      input_tokens: parsed.usage.inputTokens,
+      output_tokens: parsed.usage.outputTokens,
+      cost_usd: parsed.usage.costUsd,
+    });
+
+    const stopReason = parsed.result.stop_reason;
+    const hitLimit = stopReason === 'max_turns' || stopReason === 'max_tokens';
+    if (hitLimit && !alreadyParsed) {
+      runService.addRunEvent(run.id, 'limit_reached', JSON.stringify({
+        message: `Agent stopped due to ${stopReason} — task may be incomplete`,
+        stop_reason: stopReason,
+        num_turns: parsed.result.num_turns,
+      }));
+    }
+    return {
+      output: parsed.text || '',
+      status: parsed.result.is_error ? 'failed' : hitLimit ? 'needs_input' : 'completed',
+      reason: parsed.result.is_error ? 'claude-result-error' : hitLimit ? stopReason : 'agent-exit-success',
+      result: parsed.result,
+    };
+  }
+
   async function _doHealthCheck() {
     const runningRuns = runService.listRuns({ status: 'running' });
 
@@ -2487,15 +2658,18 @@ function createLifecycleService({
       const exitCode = await channel.detectExitCode(run.id, 'cli');
 
       if (!alive || exitCode !== null) {
-        // Agent has terminated
-        const status = (exitCode === 0) ? 'completed' : 'failed';
+        // Detached remote Claude still writes stream-json. Parse that durable
+        // log before committing status so result semantics (limits/errors),
+        // usage, and goal-output text remain equivalent to the local engine.
+        const claudeResult = await inspectDetachedClaudeResult(run, channel);
+        const status = claudeResult?.status || ((exitCode === 0) ? 'completed' : 'failed');
         // v3 Phase 5: propagate the actual transition reason so
         // subscribers see WHY the run ended, not just that it did.
-        const reason = agentExitReason(exitCode);
+        const reason = claudeResult?.reason || agentExitReason(exitCode);
         const fromStatus = run.status;
         runService.updateRunStatus(run.id, status, { force: true, reason });
 
-        if (exitCode !== null) {
+        if (!claudeResult?.result && exitCode !== null) {
           runService.updateRunResult(run.id, {
             exit_code: exitCode,
             result_summary: agentExitSummary(exitCode),
@@ -2503,7 +2677,9 @@ function createLifecycleService({
         }
 
         // Capture final output
-        const output = await channel.getOutput(run.id, 200);
+        const output = claudeResult
+          ? claudeResult.output
+          : await channel.getOutput(run.id, 200);
         if (output) {
           runService.addRunEvent(run.id, 'final_output', JSON.stringify({ output: output.slice(-2000) }));
         }
@@ -2517,7 +2693,20 @@ function createLifecycleService({
         await channel.kill(run.id, 'cli');
         _outputHashes.delete(run.id);
 
-        if (eventBus) {
+        if (eventBus && status === 'needs_input') {
+          const finalRun = runService.getRun(run.id);
+          eventBus.emit('run:needs_input', {
+            runId: run.id,
+            run: finalRun,
+            from_status: fromStatus,
+            to_status: status,
+            reason,
+            task_id: finalRun.task_id || null,
+            project_id: finalRun.project_id || null,
+            node_id: finalRun.node_id || null,
+            priority: 'alert',
+          });
+        } else if (eventBus) {
           // v3 Phase 5: enrich run:completed with the same semantic
           // envelope fields so clients can filter priority alerts
           // (task_id / project_id) without re-reading the row.
@@ -2540,9 +2729,31 @@ function createLifecycleService({
         _outputHashes.set(run.id, outputHash);
 
         if (outputHash !== prevHash) {
-          // Output changed — agent is actively working, record heartbeat with snippet
-          const snippet = currentOutput ? currentOutput.trim().split('\n').pop()?.slice(0, 200) : '';
-          runService.addRunEvent(run.id, 'heartbeat', snippet ? JSON.stringify({ output: snippet }) : null);
+          // Output changed — agent is actively working. Detached Claude stdout
+          // is raw NDJSON and may contain tool inputs/results, so never persist
+          // its raw last line into the observable heartbeat event.
+          if (isDetachedRemoteClaudeRun(run)) {
+            const parsed = parseClaudeStreamJsonOutput(currentOutput);
+            const snippet = parsed.text
+              ? parsed.text.trim().split('\n').pop()?.slice(0, 200)
+              : '';
+            runService.addRunEvent(
+              run.id,
+              'heartbeat',
+              JSON.stringify(snippet
+                ? { output: snippet }
+                : { status: 'claude_stream_activity' }),
+            );
+          } else {
+            const snippet = currentOutput
+              ? currentOutput.trim().split('\n').pop()?.slice(0, 200)
+              : '';
+            runService.addRunEvent(
+              run.id,
+              'heartbeat',
+              snippet ? JSON.stringify({ output: snippet }) : null,
+            );
+          }
         } else {
           // Output unchanged — but check if the process is still alive and consuming CPU
           // before declaring it idle. Agents may be thinking/processing without terminal output.
@@ -2611,6 +2822,20 @@ function createLifecycleService({
       const channel = channelForNode(run.node_id);
       const owner = await channel.ownerOf(run.id);
       if (owner === 'stream-json') continue;
+      const hasDetachedLimit = typeof runService.hasRunEvent === 'function'
+        ? runService.hasRunEvent(run.id, 'limit_reached')
+        : runService.getRunEvents(run.id)
+          .some((event) => event.event_type === 'limit_reached');
+      if (
+        isDetachedRemoteClaudeRun(run)
+        && hasDetachedLimit
+      ) {
+        // A detached single-shot Claude worker cannot resume after max_turns;
+        // keep the semantic needs_input result instead of reclassifying its
+        // clean process exit as completed on every health tick. hasRunEvent
+        // intentionally bypasses getRunEvents' oldest-first 1,000-row window.
+        continue;
+      }
 
       const alive = await channel.isAlive(run.id, 'cli');
       if (alive) {
@@ -2678,20 +2903,46 @@ function createLifecycleService({
       const exitCode = await channel.detectExitCode(run.id, 'cli');
       if (exitCode === null) return false;
 
-      const status = exitCode === 0 ? 'completed' : 'failed';
+      const claudeResult = await inspectDetachedClaudeResult(run, channel);
+      const status = claudeResult?.status || (exitCode === 0 ? 'completed' : 'failed');
+      const fromStatus = run.status;
       runService.updateRunStatus(run.id, status, {
         force: true,
-        reason: agentExitReason(exitCode),
+        reason: claudeResult?.reason || agentExitReason(exitCode),
       });
-      runService.updateRunResult(run.id, {
-        exit_code: exitCode,
-        result_summary: status === 'completed'
-          ? 'Agent completed (recovered after restart)'
-          : `Agent exited with code ${exitCode} (recovered after restart)`,
-      });
+      if (eventBus && status === 'needs_input') {
+        const finalRun = runService.getRun(run.id);
+        eventBus.emit('run:needs_input', {
+          runId: run.id,
+          run: finalRun,
+          from_status: fromStatus,
+          to_status: 'needs_input',
+          reason: claudeResult?.reason || 'needs_input',
+          task_id: finalRun.task_id || null,
+          project_id: finalRun.project_id || null,
+          node_id: finalRun.node_id || null,
+          priority: 'alert',
+        });
+      }
+      if (!claudeResult?.result) {
+        runService.updateRunResult(run.id, {
+          exit_code: exitCode,
+          result_summary: status === 'completed'
+            ? 'Agent completed (recovered after restart)'
+            : `Agent exited with code ${exitCode} (recovered after restart)`,
+        });
+      }
+      if (claudeResult?.output) {
+        runService.addRunEvent(
+          run.id,
+          'final_output',
+          JSON.stringify({ output: claudeResult.output.slice(-2000) }),
+        );
+      }
       // The process is already dead, but this best-effort call clears local
       // artifacts and any stale tmux metadata without masking its result.
       try { await channel.kill(run.id, 'cli'); } catch { /* terminal result is authoritative */ }
+      if (run.goal_active) await captureGoalOutput(runService.getRun(run.id));
       if (run.task_id) checkTaskCompletion(run.task_id);
       return true;
     };
@@ -3168,7 +3419,8 @@ function createLifecycleService({
   // Runs at run-terminal (alongside harvest). Output source, in priority:
   //   1. the file-backed tee at goalOutputLogPath (§5k-2 — restart-safe, local
   //      codex/tmux/subprocess), read tail-first;
-  //   2. channel.getOutput (in-process buffer / remote node-side log via executor).
+  //   2. channel.getOutput (in-process buffer / remote node-side log via executor),
+  //      plus the durable final result record for detached remote Claude.
   // Contract: annotate-only, NEVER throws (mirrors harvest) and ONLY touches
   // goal-enabled runs, so every non-goal run is byte-for-byte unaffected.
   async function captureGoalOutput(run) {
@@ -3181,14 +3433,24 @@ function createLifecycleService({
       let raw = readGoalOutputLogTail(run.id);
       if (raw == null) {
         try {
-          raw = await channelForNode(run.node_id).getOutput(run.id, GOAL_OUTPUT_LINES);
+          const channel = channelForNode(run.node_id);
+          raw = await channel.getOutput(run.id, GOAL_OUTPUT_LINES);
+          if (isDetachedRemoteClaudeRun(run)) {
+            const durableResult = typeof channel.getStructuredResult === 'function'
+              ? await channel.getStructuredResult(run.id)
+              : '';
+            const parsed = parseClaudeStreamJsonOutput(
+              [raw, durableResult].filter(Boolean).join('\n'),
+            );
+            if (parsed.recognized) raw = parsed.text || null;
+          }
         } catch (err) {
           // getOutput can legitimately fail (buffer gone, remote unreachable) —
           // capture is best-effort. The report parser re-runs from harvest tail.
           raw = null;
         }
       }
-      const finalOutput = capUtf8Bytes(raw, GOAL_FINAL_OUTPUT_MAX_BYTES);
+      const finalOutput = capUtf8Tail(raw, GOAL_FINAL_OUTPUT_MAX_BYTES);
       const report = parseGoalReport(finalOutput || '');
       runService.updateGoalCapture(run.id, {
         final_output: finalOutput,

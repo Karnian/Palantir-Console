@@ -218,6 +218,18 @@ function workerSpawnHarness(runId) {
   });
 }
 
+function tmuxInnerScript(script, runId) {
+  const marker = `tmux new-session -d -s ${shq(`palantir-run-${runId}`)} `;
+  const start = script.indexOf(marker);
+  assert.notEqual(start, -1, `tmux handoff missing for ${runId}`);
+  const suffix = ' && trap - 0 HUP INT TERM';
+  const raw = script.slice(
+    start + marker.length,
+    script.endsWith(suffix) ? -suffix.length : undefined,
+  );
+  return unshq(raw);
+}
+
 async function mkdb(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-remote-ssh-'));
   const dbPath = path.join(dir, 'test.db');
@@ -1138,7 +1150,7 @@ test('spawnWorker builds file-backed tmux script through the internal runner', a
   const prefix = "cd '/real/root/project' && tmux new-session -d -s 'palantir-run-run_1' ";
   assert.ok(workerScript.startsWith(prefix), workerScript);
   const inner = unshq(workerScript.slice(prefix.length));
-  assert.ok(inner.startsWith('set --; for k in '), inner);
+  assert.ok(inner.startsWith('umask 077; set --; for k in '), inner);
   assert.ok(
     inner.includes(
       `env -i "$@" PATH=${shq('/home/karnian/.npm-global/bin')}:"$PATH" `
@@ -1158,26 +1170,19 @@ test('spawnWorker file-backs a scoped capability and keeps it out of SSH command
   const runId = 'run_secret_transport';
   const workerToken = 'worker_run_capability_secret';
   const statusDir = `/srv/root/.palantir-runs/${runId}`;
-  const secretDir = '/srv/root/.palantir-secret-worker123';
-  const secretPath = `${secretDir}/worker_capability`;
+  const bundlePath = `/real/root/.palantir-runs/${runId}/worker-input.bundle`;
+  const secretPath = `/real/root/.palantir-runs/${runId}/worker-capability`;
   const routes = {
     "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
     "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
     "exec 'realpath' '/srv/root/.palantir-runs'": { stdout: '/real/root/.palantir-runs\n' },
     [`exec 'realpath' ${shq(statusDir)}`]: { stdout: `/real/root/.palantir-runs/${runId}\n` },
-    [`exec 'realpath' ${shq(secretPath)}`]: {
-      stdout: `/real/root/.palantir-secret-worker123/worker_capability\n`,
-    },
     "exec 'mkdir' '-p' '/srv/root/.palantir-runs'": { code: 0 },
     [`exec 'mkdir' '-p' ${shq(statusDir)}`]: { code: 0 },
   };
   const spawn = makeSpawn((call, child) => {
     const script = scriptOf(call);
-    if (/mktemp -d '\/srv\/root\/\.palantir-secret-XXXXXX'/.test(script)) {
-      child.stdin.on('finish', () => complete(child, { stdout: `${secretPath}\n` }));
-      return;
-    }
-    if (script.includes(`tmux new-session -d -s ${shq(`palantir-run-${runId}`)}`)) {
+    if (script.startsWith('umask 077 && cleanup()')) {
       complete(child, { code: 0 });
       return;
     }
@@ -1201,11 +1206,15 @@ test('spawnWorker file-backs a scoped capability and keeps it out of SSH command
   });
 
   assert.deepEqual(result, { sessionName: `palantir-run-${runId}` });
-  const writeCall = spawn.calls.find((call) => /mktemp -d/.test(scriptOf(call)));
+  const writeCall = spawn.calls.find((call) => scriptOf(call).startsWith('umask 077'));
   assert.equal(writeCall.stdin, workerToken);
-  const workerScript = spawn.calls.map(scriptOf).find((script) => script.includes('tmux new-session'));
-  const prefix = `cd '/real/root/project' && tmux new-session -d -s ${shq(`palantir-run-${runId}`)} `;
-  const inner = unshq(workerScript.slice(prefix.length));
+  const handoffScript = scriptOf(writeCall);
+  const inner = tmuxInnerScript(handoffScript, runId);
+  assert.ok(handoffScript.includes(`head -c ${Buffer.byteLength(workerToken)} > ${shq(bundlePath)}`));
+  assert.ok(inner.includes(
+    `head -c ${Buffer.byteLength(workerToken)} ${shq(bundlePath)} > ${shq(secretPath)}`,
+  ));
+  assert.ok(handoffScript.includes('tmux new-session'));
   // Read inside the clean shell (`cat --` guards a leading-dash path); the
   // value is never an env -i argument, so it stays out of /usr/bin/env's argv.
   // The read now lives in a nested `sh -c` body, so its own quoting is escaped
@@ -1216,6 +1225,11 @@ test('spawnWorker file-backs a scoped capability and keeps it out of SSH command
   assert.ok(inner.includes('rm -f -- '));
   assert.doesNotMatch(inner, /PALANTIR_WORKER_TOKEN=''/);
   assert.doesNotMatch(inner, /must-be-scrubbed/);
+  assert.equal(
+    spawn.calls.some((call) => scriptOf(call).includes('.palantir-secret-')),
+    false,
+    'capability recovery must not depend on a random directory outside run status',
+  );
   for (const entry of spawn.calls) {
     assert.doesNotMatch(JSON.stringify(entry.args), new RegExp(workerToken));
   }
@@ -1226,6 +1240,7 @@ test('spawnWorker transports prompt text through a guarded mode-0600 stdin file'
   const statusDir = `/srv/root/.palantir-runs/${runId}`;
   const stdinFile = `${statusDir}/stdin.txt`;
   const canonicalStdin = `/real/root/.palantir-runs/${runId}/stdin.txt`;
+  const canonicalBundle = `/real/root/.palantir-runs/${runId}/worker-input.bundle`;
   const prompt = '--- a/file.js\n-c service_tier="fast"\n--help\n';
   // The prompt file does not exist yet when its path is resolved, so realpath on
   // it fails and allowMissing canonicalises the parent instead.
@@ -1254,7 +1269,9 @@ test('spawnWorker transports prompt text through a guarded mode-0600 stdin file'
 
   // Upload and handoff must be ONE invocation. Two calls would leave the prompt
   // on disk owned by nobody if the controller died in between.
-  const uploadCalls = spawn.calls.filter((call) => scriptOf(call).includes('cat > '));
+  const uploadCalls = spawn.calls.filter((call) => (
+    scriptOf(call).includes(`head -c ${Buffer.byteLength(prompt, 'utf8')} > ${shq(canonicalBundle)}`)
+  ));
   assert.equal(uploadCalls.length, 1, 'prompt upload and tmux handoff share one SSH invocation');
   const combined = scriptOf(uploadCalls[0]);
   assert.equal(uploadCalls[0].stdin, prompt);
@@ -1263,12 +1280,16 @@ test('spawnWorker transports prompt text through a guarded mode-0600 stdin file'
 
   // Trap armed before the file can exist, disarmed only after tmux owns it.
   const armIndex = combined.indexOf(`trap 'rc=$?; cleanup; exit "$rc"' 0`);
-  const catIndex = combined.indexOf(`cat > ${shq(canonicalStdin)}`);
+  const writeIndex = combined.indexOf(
+    `head -c ${Buffer.byteLength(prompt, 'utf8')} > ${shq(canonicalBundle)}`,
+  );
   const tmuxIndex = combined.indexOf('tmux new-session');
   const disarmIndex = combined.lastIndexOf('trap - 0 HUP INT TERM');
-  assert.ok(armIndex >= 0 && armIndex < catIndex, 'cleanup trap is armed before the upload starts');
+  assert.ok(armIndex >= 0 && armIndex < writeIndex, 'cleanup trap is armed before the upload starts');
   assert.ok(tmuxIndex < disarmIndex, 'cleanup trap stays armed until tmux owns the prompt file');
-  assert.ok(combined.includes(`cleanup() { rm -f -- ${shq(canonicalStdin)}; }`));
+  assert.ok(combined.includes(
+    `cleanup() { rm -f -- ${shq(canonicalStdin)} ${shq(canonicalBundle)}; }`,
+  ));
 
   // Signal handlers must exit, not fall through — otherwise the && chain keeps
   // going and starts a worker on the prompt the handler just deleted.
@@ -1279,10 +1300,10 @@ test('spawnWorker transports prompt text through a guarded mode-0600 stdin file'
     );
   }
 
-  // A dying controller closes stdin, which cat reads as a clean EOF — the byte
-  // check is what stops a truncated prompt from launching a worker.
+  // A dying controller closes stdin, which head reads as a clean EOF — the
+  // single bundle byte check stops a truncated handoff from launching a worker.
   assert.ok(
-    combined.includes(`[ "$(wc -c < ${shq(canonicalStdin)})" -eq ${Buffer.byteLength(prompt, 'utf8')} ]`),
+    combined.includes(`[ "$(wc -c < ${shq(canonicalBundle)})" -eq ${Buffer.byteLength(prompt, 'utf8')} ]`),
     'short uploads fail the chain instead of starting a worker',
   );
   assert.ok(combined.indexOf('chmod 600') < tmuxIndex);
@@ -1296,22 +1317,98 @@ test('spawnWorker transports prompt text through a guarded mode-0600 stdin file'
   const inner = unshq(quotedInnerScript);
   assert.ok(
     inner.startsWith(
-      `trap ${shq(`rm -f -- ${shq(canonicalStdin)}`)} EXIT HUP INT TERM; set --; for k in `,
+      `umask 077; trap ${shq(`rm -f -- ${shq(canonicalStdin)} ${shq(canonicalBundle)}`)} `
+      + `EXIT HUP INT TERM; set -C && head -c ${Buffer.byteLength(prompt, 'utf8')} `
+      + `${shq(canonicalBundle)} > ${shq(canonicalStdin)}`,
     ),
     inner,
   );
   assert.ok(
+    inner.includes(`rm -f -- ${shq(canonicalBundle)} && ( set --; for k in `),
+    inner,
+  );
+  assert.ok(
+    inner.includes(`${shq('codex')} ${shq('exec')} ${shq('-')} ) < ${shq(canonicalStdin)} `
+      + `> ${shq(`${statusDir}/stdout.log`)} 2>&1; agent_exit_code=$?; `),
+    inner,
+  );
+  assert.ok(
     inner.includes(
-      `env -i "$@" PATH="$PATH" PALANTIR_TOKEN=${shq('')} `
-      + `PALANTIR_PM_TOKEN=${shq('')} PALANTIR_WORKER_TOKEN=${shq('')} `
-      + `PALANTIR_MANAGER_TOKEN=${shq('')} ${shq('codex')} ${shq('exec')} `
-      + `${shq('-')} < ${shq(canonicalStdin)} > ${shq(`${statusDir}/stdout.log`)} `
-      + `2>&1; agent_exit_code=$?; rm -f -- ${shq(canonicalStdin)}; `
-      // The prompt file is removed BEFORE the trap is disarmed.
+      `rm -f -- ${shq(canonicalStdin)} ${shq(canonicalBundle)}; `
       + `trap - EXIT HUP INT TERM; echo "$agent_exit_code" > ${shq(`${statusDir}/exit.code`)}`,
     ),
     inner,
   );
+});
+
+test('detached Claude worker composes pod auth with file-backed user/system prompts', async () => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const runId = 'claude_prompt_boundary';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const canonicalDir = `/real/root/.palantir-runs/${runId}`;
+  const userPrompt = 'user prompt pasted-secret';
+  const systemPrompt = 'private system context';
+  const routes = {
+    "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
+    "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+    "exec 'realpath' '/srv/root/.palantir-runs'": { stdout: '/real/root/.palantir-runs\n' },
+    [`exec 'realpath' ${shq(statusDir)}`]: { stdout: `${canonicalDir}\n` },
+    "exec 'mkdir' '-p' '/srv/root/.palantir-runs'": { code: 0 },
+    [`exec 'mkdir' '-p' ${shq(statusDir)}`]: { code: 0 },
+  };
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script.startsWith('umask 077 && cleanup()')) return complete(child, { code: 0 });
+    if (Object.hasOwn(routes, script)) return complete(child, routes[script]);
+    complete(child, { code: 1, stderr: `unexpected script: ${script}` });
+  });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+  const streamEngine = createStreamJsonEngine();
+  const spec = streamEngine.buildDetachedWorkerSpec({
+    prompt: userPrompt,
+    systemPrompt,
+    cwd: '/srv/root/project',
+    envAllowlist: ['ANTHROPIC_API_KEY'],
+    env: {
+      ANTHROPIC_API_KEY: 'controller-secret-must-not-cross',
+      PALANTIR_WORKER_TOKEN: '',
+    },
+  }, { workerPath: '/home/runner/.npm-global/bin' });
+
+  await executor.spawnWorker(runId, { engine: 'stream-json', spec });
+
+  const upload = spawn.calls.find((call) => scriptOf(call).startsWith('umask 077'));
+  assert.ok(upload);
+  assert.equal(upload.stdin, systemPrompt + userPrompt);
+  for (const call of spawn.calls) {
+    const serialized = JSON.stringify(call.args);
+    assert.doesNotMatch(serialized, /pasted-secret|private system context|controller-secret-must-not-cross/);
+  }
+  const script = scriptOf(upload);
+  const workerScript = tmuxInnerScript(script, runId);
+  const systemFile = `${canonicalDir}/system-prompt.txt`;
+  const stdinFile = `${canonicalDir}/stdin.txt`;
+  const bundleFile = `${canonicalDir}/worker-input.bundle`;
+  const totalBytes = Buffer.byteLength(systemPrompt + userPrompt, 'utf8');
+  assert.ok(script.includes(
+    `head -c ${totalBytes} > ${shq(bundleFile)}`,
+  ));
+  assert.ok(workerScript.includes(
+    `head -c ${Buffer.byteLength(systemPrompt, 'utf8')} ${shq(bundleFile)} > ${shq(systemFile)}`,
+  ));
+  assert.ok(workerScript.includes(
+    `tail -c +${Buffer.byteLength(systemPrompt, 'utf8') + 1} ${shq(bundleFile)} `
+    + `| head -c ${Buffer.byteLength(userPrompt, 'utf8')} > ${shq(stdinFile)}`,
+  ));
+  assert.ok(script.includes('--append-system-prompt-file'));
+  assert.ok(script.includes(systemFile));
+  assert.ok(script.includes(stdinFile));
+  assert.ok(script.includes(`${statusDir}/result.jsonl.tmp`));
+  assert.ok(script.includes(`${statusDir}/result.jsonl`));
+  assert.match(script, /awk .*"type".*"result"/);
+  assert.ok(script.includes(shq('HOME')), 'pod HOME must survive env -i');
+  assert.ok(script.includes(shq('ANTHROPIC_API_KEY')), 'only the allowlisted key name crosses');
+  assert.doesNotMatch(script, /ANTHROPIC_API_KEY='controller-secret/);
 });
 
 test('spawnWorker never follows a stdin.txt symlink that points at another in-root file', async () => {
@@ -1324,6 +1421,7 @@ test('spawnWorker never follows a stdin.txt symlink that points at another in-ro
   const stdinFile = `${statusDir}/stdin.txt`;
   const victim = '/real/root/project/victim.txt';
   const expectedStdin = `/real/root/.palantir-runs/${runId}/stdin.txt`;
+  const expectedBundle = `/real/root/.palantir-runs/${runId}/worker-input.bundle`;
   const spawn = makeSpawn((call, child) => {
     const script = scriptOf(call);
     const routes = {
@@ -1349,23 +1447,30 @@ test('spawnWorker never follows a stdin.txt symlink that points at another in-ro
     cwd: '/srv/root/project',
   });
 
-  const combined = spawn.calls.map(scriptOf).find((script) => script.includes('cat > '));
+  const combined = spawn.calls.map(scriptOf).find((script) => script.includes('head -c '));
+  const workerScript = tmuxInnerScript(combined, runId);
   assert.ok(combined);
   assert.ok(
     !combined.includes(victim),
     'the symlink target must never appear in the upload script',
   );
-  assert.ok(combined.includes(`rm -f -- ${shq(expectedStdin)}`));
-  assert.ok(combined.includes(`cat > ${shq(expectedStdin)}`));
+  assert.ok(combined.includes(`rm -f -- ${shq(expectedStdin)} ${shq(expectedBundle)}`));
+  assert.ok(combined.includes(`head -c 7 > ${shq(expectedBundle)}`));
+  assert.ok(workerScript.includes(`head -c 7 ${shq(expectedBundle)} > ${shq(expectedStdin)}`));
   // noclobber stops a symlink recreated between the unlink and the redirect.
-  assert.ok(combined.includes(`set -C && cat > ${shq(expectedStdin)} && set +C`));
+  assert.ok(workerScript.includes(`set -C && head -c 7 ${shq(expectedBundle)} > ${shq(expectedStdin)}`));
+  assert.ok(
+    workerScript.includes(`rm -f -- ${shq(expectedBundle)} && ( set --; for k in `),
+    'the complete worker invocation must remain guarded by successful input materialization',
+  );
 });
 
 test('spawnWorker cleans a partial remote stdin file when SSH upload rejects', async () => {
   const runId = 'stdin_upload_failure';
   const statusDir = `/srv/root/.palantir-runs/${runId}`;
   const canonicalStdin = `/real/root/.palantir-runs/${runId}/stdin.txt`;
-  const cleanupScript = `exec 'rm' '-f' ${shq(canonicalStdin)}`;
+  const canonicalBundle = `/real/root/.palantir-runs/${runId}/worker-input.bundle`;
+  const cleanupScript = `exec 'rm' '-f' ${shq(canonicalStdin)} ${shq(canonicalBundle)}`;
   const spawn = makeSpawn((call, child) => {
     const script = scriptOf(call);
     const routes = {
@@ -1414,7 +1519,8 @@ test('spawnWorker removes the remote prompt when the combined upload/handoff fai
   const runId = 'stdin_handoff_failure';
   const statusDir = `/srv/root/.palantir-runs/${runId}`;
   const canonicalStdin = `/real/root/.palantir-runs/${runId}/stdin.txt`;
-  const cleanupScript = `exec 'rm' '-f' ${shq(canonicalStdin)}`;
+  const canonicalBundle = `/real/root/.palantir-runs/${runId}/worker-input.bundle`;
+  const cleanupScript = `exec 'rm' '-f' ${shq(canonicalStdin)} ${shq(canonicalBundle)}`;
   const spawn = makeSpawn((call, child) => {
     const script = scriptOf(call);
     const routes = {
@@ -1447,6 +1553,267 @@ test('spawnWorker removes the remote prompt when the combined upload/handoff fai
   );
 });
 
+test('detached spawn SSH acknowledgement loss preserves deterministic ownership', async () => {
+  const runId = 'spawn_ack_lost';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const canonicalStdin = `/real/root/.palantir-runs/${runId}/stdin.txt`;
+  const canonicalBundle = `/real/root/.palantir-runs/${runId}/worker-input.bundle`;
+  const cleanupScript = `exec 'rm' '-f' ${shq(canonicalStdin)} ${shq(canonicalBundle)}`;
+  const ownerProbe = `exec 'tmux' 'has-session' '-t' ${shq(`palantir-run-${runId}`)}`;
+  const routes = {
+    "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
+    "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+    "exec 'realpath' '/srv/root/.palantir-runs'": { stdout: '/real/root/.palantir-runs\n' },
+    [`exec 'realpath' ${shq(statusDir)}`]: { stdout: `/real/root/.palantir-runs/${runId}\n` },
+    "exec 'mkdir' '-p' '/srv/root/.palantir-runs'": { code: 0 },
+    [`exec 'mkdir' '-p' ${shq(statusDir)}`]: { code: 0 },
+    [ownerProbe]: { code: 0 },
+    [cleanupScript]: { code: 0 },
+  };
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script.startsWith('umask 077 && cleanup()')) {
+      return complete(child, { code: 255, stderr: 'ssh transport lost after remote start' });
+    }
+    if (Object.hasOwn(routes, script)) return complete(child, routes[script]);
+    complete(child, { code: 1, stderr: `unexpected script: ${script}` });
+  });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => executor.spawnWorker(runId, {
+      command: 'claude',
+      args: ['--print', '-p'],
+      stdin: 'work',
+      cwd: '/srv/root/project',
+    }),
+    (err) => (
+      err.code === 'REMOTE_SPAWN_UNCERTAIN'
+      && err.transportCode === 'SSH_TRANSPORT'
+      && err.sessionName === `palantir-run-${runId}`
+    ),
+  );
+  assert.ok(spawn.calls.some((call) => scriptOf(call) === ownerProbe));
+  assert.equal(
+    spawn.calls.some((call) => scriptOf(call) === cleanupScript),
+    false,
+    'a confirmed detached owner must retain prompts until its own trap removes them',
+  );
+});
+
+test('detached spawn stdin EPIPE also preserves a confirmed remote owner', async () => {
+  const runId = 'spawn_epipe_owner';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const canonicalStdin = `/real/root/.palantir-runs/${runId}/stdin.txt`;
+  const canonicalBundle = `/real/root/.palantir-runs/${runId}/worker-input.bundle`;
+  const cleanupScript = `exec 'rm' '-f' ${shq(canonicalStdin)} ${shq(canonicalBundle)}`;
+  const ownerProbe = `exec 'tmux' 'has-session' '-t' ${shq(`palantir-run-${runId}`)}`;
+  const routes = {
+    "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
+    "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+    "exec 'realpath' '/srv/root/.palantir-runs'": { stdout: '/real/root/.palantir-runs\n' },
+    [`exec 'realpath' ${shq(statusDir)}`]: { stdout: `/real/root/.palantir-runs/${runId}\n` },
+    "exec 'mkdir' '-p' '/srv/root/.palantir-runs'": { code: 0 },
+    [`exec 'mkdir' '-p' ${shq(statusDir)}`]: { code: 0 },
+    [ownerProbe]: { code: 0 },
+    [cleanupScript]: { code: 0 },
+  };
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script.startsWith('umask 077 && cleanup()')) {
+      child.stdin = new Writable({
+        write(_chunk, _encoding, callback) {
+          const error = new Error('SSH stdin closed after detached start');
+          error.code = 'EPIPE';
+          callback(error);
+        },
+      });
+      return;
+    }
+    if (Object.hasOwn(routes, script)) return complete(child, routes[script]);
+    complete(child, { code: 1, stderr: `unexpected script: ${script}` });
+  });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => executor.spawnWorker(runId, {
+      command: 'claude',
+      args: ['--print', '-p'],
+      stdin: 'work',
+      cwd: '/srv/root/project',
+    }),
+    (err) => (
+      err.code === 'REMOTE_SPAWN_UNCERTAIN'
+      && err.transportCode === 'EPIPE'
+      && err.sessionName === `palantir-run-${runId}`
+    ),
+  );
+  assert.ok(spawn.calls.some((call) => scriptOf(call) === ownerProbe));
+  assert.equal(
+    spawn.calls.some((call) => scriptOf(call) === cleanupScript),
+    false,
+    'an EPIPE after start must not delete files owned by the remote pane',
+  );
+});
+
+test('detached spawn transport loss with confirmed absent owner remains a spawn failure', async () => {
+  const runId = 'spawn_ack_lost_no_owner';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const canonicalDir = `/real/root/.palantir-runs/${runId}`;
+  const canonicalStdin = `${canonicalDir}/stdin.txt`;
+  const canonicalBundle = `${canonicalDir}/worker-input.bundle`;
+  const ownerProbe = `exec 'tmux' 'has-session' '-t' ${shq(`palantir-run-${runId}`)}`;
+  const cleanupScript = `exec 'rm' '-f' ${shq(canonicalStdin)} ${shq(canonicalBundle)}`;
+  const routes = {
+    "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
+    "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+    "exec 'realpath' '/srv/root/.palantir-runs'": { stdout: '/real/root/.palantir-runs\n' },
+    [`exec 'realpath' ${shq(statusDir)}`]: { stdout: `${canonicalDir}\n` },
+    "exec 'mkdir' '-p' '/srv/root/.palantir-runs'": { code: 0 },
+    [`exec 'mkdir' '-p' ${shq(statusDir)}`]: { code: 0 },
+    [ownerProbe]: { code: 1 },
+    [cleanupScript]: { code: 0 },
+  };
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script.startsWith('umask 077 && cleanup()')) {
+      return complete(child, { code: 255, stderr: 'ssh transport lost before start' });
+    }
+    if (Object.hasOwn(routes, script)) return complete(child, routes[script]);
+    complete(child, { code: 1, stderr: `unexpected script: ${script}` });
+  });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => executor.spawnWorker(runId, {
+      command: 'claude',
+      args: ['--print', '-p'],
+      stdin: 'work',
+      cwd: '/srv/root/project',
+    }),
+    (err) => err.code === 'SSH_TRANSPORT' && err.code !== 'REMOTE_SPAWN_UNCERTAIN',
+  );
+  assert.ok(spawn.calls.some((call) => scriptOf(call) === ownerProbe));
+  assert.ok(spawn.calls.some((call) => scriptOf(call) === cleanupScript));
+});
+
+test('detached spawn transport loss preserves a worker that finished before the owner probe', async () => {
+  const runId = 'spawn_ack_lost_fast_finish';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const canonicalDir = `/real/root/.palantir-runs/${runId}`;
+  const canonicalStdin = `${canonicalDir}/stdin.txt`;
+  const canonicalBundle = `${canonicalDir}/worker-input.bundle`;
+  const ownerProbe = `exec 'tmux' 'has-session' '-t' ${shq(`palantir-run-${runId}`)}`;
+  const completionProbe = `exec 'test' '-f' ${shq(`${statusDir}/exit.code`)}`;
+  const cleanupScript = `exec 'rm' '-f' ${shq(canonicalStdin)} ${shq(canonicalBundle)}`;
+  const routes = {
+    "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
+    "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+    "exec 'realpath' '/srv/root/.palantir-runs'": { stdout: '/real/root/.palantir-runs\n' },
+    [`exec 'realpath' ${shq(statusDir)}`]: { stdout: `${canonicalDir}\n` },
+    "exec 'mkdir' '-p' '/srv/root/.palantir-runs'": { code: 0 },
+    [`exec 'mkdir' '-p' ${shq(statusDir)}`]: { code: 0 },
+    [ownerProbe]: { code: 1 },
+    [completionProbe]: { code: 0 },
+    [cleanupScript]: { code: 0 },
+  };
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script.startsWith('umask 077 && cleanup()')) {
+      return complete(child, { code: 255, stderr: 'ssh acknowledgement lost after fast completion' });
+    }
+    if (Object.hasOwn(routes, script)) return complete(child, routes[script]);
+    complete(child, { code: 1, stderr: `unexpected script: ${script}` });
+  });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => executor.spawnWorker(runId, {
+      command: 'claude',
+      args: ['--print', '-p'],
+      stdin: 'work',
+      cwd: '/srv/root/project',
+    }),
+    (err) => err.code === 'REMOTE_SPAWN_UNCERTAIN' && err.preserveRemoteFiles,
+  );
+  assert.ok(spawn.calls.some((call) => scriptOf(call) === ownerProbe));
+  assert.ok(spawn.calls.some((call) => scriptOf(call) === completionProbe));
+  assert.equal(
+    spawn.calls.some((call) => scriptOf(call) === cleanupScript),
+    false,
+    'a completed detached owner must not be retried or have its artifacts swept',
+  );
+});
+
+test('uncertain detached start keeps the capability in run status for later reap', async () => {
+  const runId = 'spawn_ack_and_probe_lost';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const canonicalDir = `/real/root/.palantir-runs/${runId}`;
+  const tokenPath = `${canonicalDir}/worker-capability`;
+  const killCommand = `exec 'tmux' 'kill-session' '-t' ${shq(`palantir-run-${runId}`)}`;
+  const cleanupCommand = [
+    'exec',
+    shq('rm'),
+    shq('-f'),
+    shq(`${statusDir}/stdin.txt`),
+    shq(`${statusDir}/system-prompt.txt`),
+    shq(`${statusDir}/worker-capability`),
+    shq(`${statusDir}/worker-input.bundle`),
+    shq(`${statusDir}/result.jsonl.tmp`),
+  ].join(' ');
+  let afterUncertainStart = false;
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    const routes = {
+      "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
+      "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+      "exec 'realpath' '/srv/root/.palantir-runs'": { stdout: '/real/root/.palantir-runs\n' },
+      [`exec 'realpath' ${shq(statusDir)}`]: { stdout: `${canonicalDir}\n` },
+      "exec 'mkdir' '-p' '/srv/root/.palantir-runs'": { code: 0 },
+      [`exec 'mkdir' '-p' ${shq(statusDir)}`]: { code: 0 },
+    };
+    if (script.startsWith('umask 077 && cleanup()')) {
+      afterUncertainStart = true;
+      return complete(child, { code: 255, stderr: 'start acknowledgement lost' });
+    }
+    if (
+      afterUncertainStart
+      && script === `exec 'tmux' 'has-session' '-t' ${shq(`palantir-run-${runId}`)}`
+    ) {
+      return complete(child, { code: 255, stderr: 'probe transport lost' });
+    }
+    if (script === killCommand) return complete(child, { code: 1 });
+    if (script === cleanupCommand) return complete(child, { code: 0 });
+    if (Object.hasOwn(routes, script)) return complete(child, routes[script]);
+    complete(child, { code: 1, stderr: `unexpected script: ${script}` });
+  });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => executor.spawnWorker(runId, {
+      command: 'claude',
+      args: ['--print', '-p'],
+      cwd: '/srv/root/project',
+      env: { PALANTIR_WORKER_TOKEN: 'scoped-run-token' },
+    }),
+    error => error.code === 'REMOTE_SPAWN_UNCERTAIN' && error.preserveRemoteFiles,
+  );
+
+  const upload = spawn.calls.find(call => scriptOf(call).startsWith('umask 077'));
+  assert.equal(upload.stdin, 'scoped-run-token');
+  assert.ok(scriptOf(upload).includes(tokenPath));
+  assert.equal(
+    spawn.calls.some(call => scriptOf(call).includes('.palantir-secret-')),
+    false,
+  );
+
+  assert.equal(await executor.kill(runId), false);
+  assert.ok(
+    spawn.calls.some(call => scriptOf(call) === cleanupCommand),
+    'ownership resolution must reap the deterministic capability path',
+  );
+});
+
 test('spawnWorker accepts canonical cli worker envelope', async () => {
   const runId = 'canonical_cli';
   const spawn = workerSpawnHarness(runId);
@@ -1466,18 +1833,16 @@ test('spawnWorker accepts canonical cli worker envelope', async () => {
   assert.ok(spawn.calls.some((call) => scriptOf(call).includes(`tmux new-session -d -s ${shq(`palantir-run-${runId}`)}`)));
 });
 
-test('raw spawnWorker rejects stream-json envelopes that bypass the duplex bridge', async () => {
+test('raw spawnWorker accepts a prepared stream-json spec on the durable channel', async () => {
   const spawn = simpleSpawn();
   const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
 
-  await assert.rejects(
-    () => exec.spawnWorker('claude_remote', {
-      engine: 'stream-json',
-      spec: { command: 'claude', args: [], cwd: '/srv/root/project' },
-    }),
-    (err) => err.message === 'stream-json workers require the remote duplex worker channel',
-  );
-  assert.equal(spawn.calls.length, 0);
+  const result = await exec.spawnWorker('claude_remote', {
+    engine: 'stream-json',
+    spec: { command: 'claude', args: [], cwd: '/srv/root/project' },
+  });
+  assert.deepEqual(result, { sessionName: 'palantir-run-claude_remote' });
+  assert.ok(spawn.calls.some((call) => scriptOf(call).includes('tmux new-session')));
 });
 
 test('spawnWorker preserves direct spec backward compatibility', async () => {
@@ -1559,10 +1924,13 @@ test('spawnWorker validates args and workerPath before building the tmux script'
     () => invalid.spawnWorker('badstdin', { command: 'codex', args: [], stdin: Buffer.from('x'), cwd: '/srv/root' }),
     /spawnWorker stdin must be a string/,
   );
-  for (const workerPath of ['relative/bin', '/x\nety', '']) {
+  for (const workerPath of [
+    'relative/bin', '/x\nety', '',
+    '/opt/bin:relative/bin', '/opt/bin:.', '/opt/bin:', ':/opt/bin',
+  ]) {
     await assert.rejects(
       () => invalid.spawnWorker('badpath', { command: 'codex', args: [], cwd: '/srv/root', workerPath }),
-      /spawnWorker workerPath must be an absolute POSIX path without control characters/,
+      /spawnWorker workerPath entries must be absolute POSIX paths without control characters/,
     );
   }
   assert.equal(invalidSpawn.calls.length, 0);
@@ -1597,7 +1965,7 @@ test('spawnWorker validates args and workerPath before building the tmux script'
   const workerScript = spawn.calls.map(scriptOf).find((script) => script.includes('tmux new-session'));
   const prefix = "cd '/real/root/project' && tmux new-session -d -s 'palantir-run-noargs' ";
   const inner = unshq(workerScript.slice(prefix.length));
-  assert.ok(inner.startsWith('set --; for k in '), inner);
+  assert.ok(inner.startsWith('umask 077; set --; for k in '), inner);
   assert.ok(
     inner.endsWith(
       `env -i "$@" PATH=${shq('/home/x/.npm-global/bin')}:"$PATH" `
@@ -1691,6 +2059,46 @@ test('remote worker getOutput caps remote tail lines and applies maxBuffer', asy
   assert.equal(await huge.getOutput('huge'), '');
   const tailCall = hugeSpawn.calls.find((call) => scriptOf(call) === "exec 'tail' '-n' '200' '/real/root/.palantir-runs/huge/stdout.log'");
   assert.equal(tailCall.killed, 'SIGTERM');
+});
+
+test('remote worker getStructuredResult reads the durable final result record', async () => {
+  const resultPath = '/srv/root/.palantir-runs/structured/result.jsonl';
+  const payload = JSON.stringify({
+    type: 'result',
+    stop_reason: 'max_turns',
+    result: 'x'.repeat(300 * 1024),
+    usage: { input_tokens: 10, output_tokens: 20 },
+  }) + '\n';
+  const spawn = rootGuardSpawn({
+    [`exec 'realpath' ${shq(resultPath)}`]: {
+      stdout: '/real/root/.palantir-runs/structured/result.jsonl\n',
+    },
+    "exec 'cat' '/real/root/.palantir-runs/structured/result.jsonl'": {
+      stdout: payload,
+    },
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  assert.equal(await exec.getStructuredResult('structured'), payload);
+});
+
+test('remote worker getStructuredResult applies maxBuffer', async () => {
+  const resultPath = '/srv/root/.palantir-runs/huge-result/result.jsonl';
+  const spawn = rootGuardSpawn({
+    [`exec 'realpath' ${shq(resultPath)}`]: {
+      stdout: '/real/root/.palantir-runs/huge-result/result.jsonl\n',
+    },
+    "exec 'cat' '/real/root/.palantir-runs/huge-result/result.jsonl'": {
+      stdout: 'x'.repeat((4 * 1024 * 1024) + 1),
+    },
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  assert.equal(await exec.getStructuredResult('huge-result'), '');
+  const catCall = spawn.calls.find((call) => (
+    scriptOf(call) === "exec 'cat' '/real/root/.palantir-runs/huge-result/result.jsonl'"
+  ));
+  assert.equal(catCall.killed, 'SIGTERM');
 });
 
 test('remote worker detectExitCode reads sentinel and treats missing sentinel as running', async () => {

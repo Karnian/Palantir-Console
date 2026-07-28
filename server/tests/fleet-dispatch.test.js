@@ -12,6 +12,7 @@ const { createAgentProfileService } = require('../services/agentProfileService')
 const { createNodeService } = require('../services/nodeService');
 const { createLifecycleService } = require('../services/lifecycleService');
 const { createPresetService } = require('../services/presetService');
+const { createEventBus } = require('../services/eventBus');
 
 async function mkdb(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-fleet-dispatch-'));
@@ -68,10 +69,32 @@ function stubStreamJsonEngine() {
     getOutput() { return ''; },
     sendInput(runId, text) { inputs.push({ runId, text }); return true; },
     kill(runId) { killed.push(runId); active.delete(runId); return true; },
+    buildDetachedWorkerSpec(spec, { workerPath } = {}) {
+      return {
+        command: 'claude',
+        args: ['--print', '--output-format', 'stream-json', '-p'],
+        stdin: spec.prompt || '',
+        systemPrompt: spec.systemPrompt,
+        systemPromptFileFlag: spec.systemPrompt ? '--append-system-prompt-file' : undefined,
+        cwd: spec.cwd,
+        env: Object.fromEntries(
+          Object.entries(spec.env || {}).filter(([key]) => (
+            key === 'PALANTIR_API_BASE' || key === 'PALANTIR_WORKER_TOKEN'
+          )),
+        ),
+        envAllowlist: spec.envAllowlist || [],
+        workerPath,
+      };
+    },
   };
 }
 
-function makeRemoteChannel({ alive = true, exitCode = null, output = '' } = {}) {
+function makeRemoteChannel({
+  alive = true,
+  exitCode = null,
+  output = '',
+  structuredResult = '',
+} = {}) {
   const channel = {
     spawned: [],
     killed: [],
@@ -79,6 +102,7 @@ function makeRemoteChannel({ alive = true, exitCode = null, output = '' } = {}) 
     isAliveCalls: [],
     detectExitCodeCalls: [],
     getOutputCalls: [],
+    getStructuredResultCalls: [],
     async spawnWorker(runId, payload) {
       channel.spawned.push({ runId, payload });
       return { sessionName: `remote-${runId}` };
@@ -99,6 +123,10 @@ function makeRemoteChannel({ alive = true, exitCode = null, output = '' } = {}) 
       channel.getOutputCalls.push({ runId, lines, engine });
       return output;
     },
+    async getStructuredResult(runId) {
+      channel.getStructuredResultCalls.push({ runId });
+      return structuredResult;
+    },
     async sendInput() {
       return false;
     },
@@ -116,6 +144,7 @@ function buildHarness(db, {
   worktreeService = null,
   skillPackService = null,
   presetService = null,
+  eventBus = null,
   lifecycleOptions = {},
 } = {}) {
   const remoteFactoryCalls = [];
@@ -132,7 +161,7 @@ function buildHarness(db, {
     return basePickExecutor(nodeId);
   };
 
-  const runService = createRunService(db, null);
+  const runService = createRunService(db, eventBus);
   const taskService = createTaskService(db);
   const projectService = createProjectService(db);
   const agentProfileService = createAgentProfileService(db);
@@ -148,7 +177,7 @@ function buildHarness(db, {
     streamJsonEngine,
     worktreeService,
     harvestService: null,
-    eventBus: null,
+    eventBus,
     presetService,
     skillPackService,
     ...lifecycleOptions,
@@ -348,7 +377,7 @@ test('restart revokes a remote worker whose boot-local memory capability expired
     },
   });
   createSshNode(h.nodeService);
-  const profile = seedProfile(db);
+  const profile = seedProfile(db, { command: 'claude' });
   const project = h.projectService.createProject({
     name: 'RemoteRestartCapability',
     directory: '/workspace/project',
@@ -392,7 +421,7 @@ test('restart preserves a completed remote worker result before capability revoc
     },
   });
   createSshNode(h.nodeService);
-  const profile = seedProfile(db);
+  const profile = seedProfile(db, { command: 'claude' });
   const project = h.projectService.createProject({
     name: 'RemoteRestartCompleted',
     directory: '/workspace/project',
@@ -411,6 +440,69 @@ test('restart preserves a completed remote worker result before capability revoc
   assert.equal(h.runService.getRun(run.id).status, 'completed');
   assert.equal(h.runService.getRun(run.id).exit_code, 0);
   assert.equal(h.taskService.getTask(task.id).status, 'review');
+});
+
+test('restart recovery emits the dedicated needs_input alert for a detached Claude limit', async (t) => {
+  const db = await mkdb(t);
+  const structuredResult = JSON.stringify({
+    type: 'result',
+    is_error: false,
+    stop_reason: 'max_tokens',
+    result: 'partial recovery result',
+    usage: { input_tokens: 12, output_tokens: 34 },
+  });
+  const remoteChannel = makeRemoteChannel({
+    alive: false,
+    exitCode: 0,
+    structuredResult,
+  });
+  const eventBus = createEventBus();
+  const alerts = [];
+  eventBus.subscribe((event) => {
+    if (event.channel === 'run:needs_input') alerts.push(event.data);
+  });
+  const h = buildHarness(db, {
+    remoteChannel,
+    eventBus,
+    lifecycleOptions: {
+      actorTokens: {
+        humanToken: 'human-secret',
+        agentToken: 'automation-secret',
+        separated: true,
+        processIsolated: true,
+        capabilitiesEnabled: true,
+        boundary: 'run_capabilities',
+      },
+      workerProposalTokenService: {
+        mint: () => 'remote-boot-local-token',
+      },
+      workerProposalBaseUrl: 'http://127.0.0.1:4177',
+      workerProposalRemoteBaseUrl: 'https://console.tailnet.example',
+    },
+  });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { command: 'claude' });
+  const project = h.projectService.createProject({
+    name: 'RemoteRestartNeedsInput',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = await h.lifecycleService.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'hit a limit while Console is offline',
+  });
+
+  const recovered = await h.lifecycleService.recoverOrphanSessions();
+
+  assert.deepEqual(recovered, [{ runId: run.id, status: 'terminated' }]);
+  assert.equal(h.runService.getRun(run.id).status, 'needs_input');
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].runId, run.id);
+  assert.equal(alerts[0].from_status, 'running');
+  assert.equal(alerts[0].to_status, 'needs_input');
+  assert.equal(alerts[0].reason, 'max_tokens');
+  assert.equal(alerts[0].priority, 'alert');
 });
 
 test('issue #113: remote Codex MCP secret placement and cleanup stay on selected executor', async (t) => {
@@ -521,7 +613,7 @@ test('local runs keep using the injected global worker channel', async (t) => {
   assert.equal(h.executionEngine.spawned[0].opts.workerPath, undefined);
 });
 
-test('remote claude stream-json worker spawns through the SSH duplex bridge', async (t) => {
+test('remote claude worker uses detached SSH ownership with pod-native auth', async (t) => {
   const db = await mkdb(t);
   const remoteChannel = makeRemoteChannel();
   const h = buildHarness(db, { remoteChannel });
@@ -543,25 +635,78 @@ test('remote claude stream-json worker spawns through the SSH duplex bridge', as
   });
 
   assert.equal(run.status, 'running');
-  assert.equal(remoteChannel.spawned.length, 0);
-  assert.equal(h.streamJsonEngine.spawned.length, 1);
+  assert.equal(remoteChannel.spawned.length, 1);
+  assert.equal(h.streamJsonEngine.spawned.length, 0);
   assert.equal(h.executionEngine.spawned.length, 0);
-  const spawn = h.streamJsonEngine.spawned[0];
+  const spawn = remoteChannel.spawned[0];
   assert.equal(spawn.runId, run.id);
-  assert.equal(spawn.opts.prompt, 'claude remotely');
-  assert.equal(spawn.opts.cwd, '/workspace/project');
-  assert.equal(spawn.opts.executor, remoteChannel);
-  assert.equal(spawn.opts.nodePrefix, '/opt/codex/bin');
-  assert.equal(spawn.opts.nodeId, 'ssh-pod');
-  assert.equal(spawn.opts.isManager, false);
-  assert.deepEqual(spawn.opts.envAllowlist, ['POD_ONLY_PROVIDER_KEY']);
+  assert.equal(spawn.payload.engine, 'stream-json');
+  assert.equal(spawn.payload.spec.stdin, 'claude remotely');
+  assert.equal(spawn.payload.spec.cwd, '/workspace/project');
+  assert.equal(spawn.payload.spec.workerPath, '/opt/codex/bin');
+  assert.deepEqual(spawn.payload.spec.envAllowlist, ['POD_ONLY_PROVIDER_KEY']);
+  assert.equal(
+    spawn.payload.spec.args.includes('claude remotely'),
+    false,
+    'worker prompt must not enter remote argv',
+  );
   const events = h.runService.getRunEvents(run.id);
   assert.equal(events.some(e => e.event_type === 'spawn:remote_claude_unsupported'), false);
+  const engineEvent = events.find(e => e.event_type === 'runtime:remote_worker_engine');
+  assert.deepEqual(JSON.parse(engineEvent.payload_json), {
+    engine: 'claude-stream-json',
+    version: 1,
+  });
 
-  assert.equal(h.lifecycleService.sendAgentInput(run.id, 'continue remotely'), true);
-  assert.deepEqual(h.streamJsonEngine.inputs, [
-    { runId: run.id, text: 'continue remotely' },
-  ]);
+  assert.equal(await h.lifecycleService.sendAgentInput(run.id, 'continue remotely'), false);
+});
+
+test('remote Claude start acknowledgement loss keeps one running owner and never retries', async (t) => {
+  const db = await mkdb(t);
+  const eventBus = createEventBus();
+  const nodeStatusEvents = [];
+  eventBus.subscribe((event) => {
+    if (event.channel === 'node:status') nodeStatusEvents.push(event.data);
+  });
+  const remoteChannel = makeRemoteChannel();
+  remoteChannel.spawnWorker = async (runId, payload) => {
+    remoteChannel.spawned.push({ runId, payload });
+    const err = new Error('ssh acknowledgement lost');
+    err.code = 'REMOTE_SPAWN_UNCERTAIN';
+    err.transportCode = 'SSH_TRANSPORT';
+    err.sessionName = `palantir-run-${runId}`;
+    throw err;
+  };
+  const h = buildHarness(db, { remoteChannel, eventBus });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { command: 'claude' });
+  const project = h.projectService.createProject({
+    name: 'RemoteClaudeUncertain',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+
+  const run = await h.lifecycleService.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'start once',
+  });
+
+  assert.equal(run.status, 'running');
+  assert.equal(run.tmux_session, `palantir-run-${run.id}`);
+  assert.equal(h.runService.listRuns({}).length, 1, 'no retry run may be created');
+  assert.equal(h.nodeService.getNode('ssh-pod').reachable, 0);
+  assert.equal(nodeStatusEvents.length, 1);
+  assert.deepEqual(nodeStatusEvents[0], {
+    node_id: 'ssh-pod',
+    from_reachable: 1,
+    to_reachable: 0,
+    at: nodeStatusEvents[0].at,
+  });
+  assert.ok(Number.isFinite(Date.parse(nodeStatusEvents[0].at)));
+  const events = h.runService.getRunEvents(run.id);
+  assert.ok(events.some((event) => event.event_type === 'spawn:remote_ownership_uncertain'));
+  assert.equal(events.some((event) => event.event_type === 'error'), false);
 });
 
 test('remote claude preset version gate probes the selected SSH node', async (t) => {
@@ -759,4 +904,327 @@ test('async remote health handles dead process with unresolved exit code', async
 
   assert.equal(h.runService.getRun(run.id).status, 'failed');
   assert.equal(remoteChannel.killed.length, 1);
+});
+
+test('detached remote Claude health restores structured result, usage, and events', async (t) => {
+  const db = await mkdb(t);
+  const resultText = [
+    'done',
+    '```palantir-goal-report',
+    '{"goal_status":"achieved","summary":"complete","blockers":[]}',
+    '```',
+  ].join('\n');
+  const output = [
+    JSON.stringify({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'text', text: resultText },
+          { type: 'tool_use', name: 'Bash', id: 'tool-1' },
+        ],
+        usage: { input_tokens: 3, output_tokens: 4 },
+      },
+    }),
+    JSON.stringify({
+      type: 'result',
+      is_error: false,
+      stop_reason: 'end_turn',
+      result: resultText,
+      usage: { input_tokens: 7, output_tokens: 8 },
+      total_cost_usd: 0.5,
+      num_turns: 2,
+    }),
+  ].join('\n');
+  const remoteChannel = makeRemoteChannel({ alive: false, exitCode: 0, output });
+  const h = buildHarness(db, { remoteChannel });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { command: 'claude' });
+  const project = h.projectService.createProject({
+    name: 'RemoteClaudeStructuredResult',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = h.runService.createRun({
+    task_id: task.id,
+    agent_profile_id: profile.id,
+    prompt: 'health',
+    node_id: 'ssh-pod',
+  });
+  h.runService.markRunStarted(run.id, { tmux_session: `palantir-run-${run.id}` });
+
+  await h.lifecycleService.checkHealth();
+
+  const after = h.runService.getRun(run.id);
+  assert.equal(after.status, 'completed');
+  assert.equal(after.result_summary, resultText);
+  assert.equal(after.input_tokens, 7);
+  assert.equal(after.output_tokens, 8);
+  assert.equal(after.cost_usd, 0.5);
+  const events = h.runService.getRunEvents(run.id);
+  assert.ok(events.some((event) => event.event_type === 'assistant_text'));
+  assert.ok(events.some((event) => event.event_type === 'tool_use'));
+  assert.ok(events.some((event) => event.event_type === 'result'));
+  const finalOutput = events.find((event) => event.event_type === 'final_output');
+  assert.match(JSON.parse(finalOutput.payload_json).output, /palantir-goal-report/);
+});
+
+test('detached remote Claude heartbeat never persists raw tool input', async (t) => {
+  const db = await mkdb(t);
+  const secret = 'tool-input-secret-must-not-enter-events';
+  const output = JSON.stringify({
+    type: 'assistant',
+    message: {
+      content: [
+        { type: 'text', text: 'working safely' },
+        { type: 'tool_use', name: 'Bash', input: { command: secret } },
+      ],
+    },
+  });
+  const remoteChannel = makeRemoteChannel({ alive: true, exitCode: null, output });
+  const h = buildHarness(db, { remoteChannel });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { command: 'claude' });
+  const project = h.projectService.createProject({
+    name: 'RemoteClaudeHeartbeat',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = h.runService.createRun({
+    task_id: task.id,
+    agent_profile_id: profile.id,
+    prompt: 'health',
+    node_id: 'ssh-pod',
+  });
+  h.runService.addRunEvent(run.id, 'runtime:remote_worker_engine', JSON.stringify({
+    engine: 'claude-stream-json',
+    version: 1,
+  }));
+  h.runService.markRunStarted(run.id, { tmux_session: `palantir-run-${run.id}` });
+
+  await h.lifecycleService.checkHealth();
+
+  const heartbeat = h.runService.getRunEvents(run.id)
+    .find((event) => event.event_type === 'heartbeat');
+  assert.ok(heartbeat);
+  assert.deepEqual(JSON.parse(heartbeat.payload_json), { output: 'working safely' });
+  assert.equal(heartbeat.payload_json.includes(secret), false);
+});
+
+test('detached remote Claude tool-only termination never persists raw NDJSON', async (t) => {
+  const db = await mkdb(t);
+  const secret = 'terminal-tool-secret-must-not-enter-events';
+  const output = JSON.stringify({
+    type: 'assistant',
+    message: {
+      content: [
+        {
+          type: 'tool_use',
+          name: 'Bash',
+          id: 'tool-terminal',
+          input: { command: secret },
+        },
+      ],
+    },
+  });
+  const remoteChannel = makeRemoteChannel({ alive: false, exitCode: 0, output });
+  const eventBus = createEventBus();
+  const h = buildHarness(db, { remoteChannel, eventBus });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { command: 'claude' });
+  const project = h.projectService.createProject({
+    name: 'RemoteClaudeToolOnly',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = h.runService.createRun({
+    task_id: task.id,
+    agent_profile_id: profile.id,
+    prompt: 'health',
+    node_id: 'ssh-pod',
+  });
+  h.runService.setGoalActive(run.id, true);
+  h.runService.addRunEvent(run.id, 'runtime:remote_worker_engine', JSON.stringify({
+    engine: 'claude-stream-json',
+    version: 1,
+  }));
+  h.runService.markRunStarted(run.id, { tmux_session: `palantir-run-${run.id}` });
+  h.lifecycleService.startMonitoring();
+  t.after(() => h.lifecycleService.stopMonitoring());
+
+  await h.lifecycleService.checkHealth();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const after = h.runService.getRun(run.id);
+  assert.equal(after.status, 'completed');
+  assert.equal(after.final_output, null);
+  const events = h.runService.getRunEvents(run.id);
+  assert.equal(events.some((event) => event.event_type === 'final_output'), false);
+  assert.equal(events.some((event) => (event.payload_json || '').includes(secret)), false);
+  const toolEvent = events.find((event) => event.event_type === 'tool_use');
+  assert.deepEqual(JSON.parse(toolEvent.payload_json), {
+    tool: 'Bash',
+    id: 'tool-terminal',
+  });
+});
+
+test('detached remote Claude harvests the durable result when the bounded tail is empty', async (t) => {
+  const db = await mkdb(t);
+  const structuredResult = JSON.stringify({
+    type: 'result',
+    is_error: false,
+    stop_reason: 'end_turn',
+    result: 'durable result after oversized tail',
+    usage: { input_tokens: 21, output_tokens: 34 },
+    total_cost_usd: 0.75,
+  });
+  const remoteChannel = makeRemoteChannel({
+    alive: false,
+    exitCode: 0,
+    output: '',
+    structuredResult,
+  });
+  const h = buildHarness(db, { remoteChannel });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { command: 'claude' });
+  const project = h.projectService.createProject({
+    name: 'RemoteClaudeDurableResult',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = h.runService.createRun({
+    task_id: task.id,
+    agent_profile_id: profile.id,
+    prompt: 'health',
+    node_id: 'ssh-pod',
+  });
+  h.runService.addRunEvent(run.id, 'runtime:remote_worker_engine', JSON.stringify({
+    engine: 'claude-stream-json',
+    version: 1,
+  }));
+  h.runService.markRunStarted(run.id, { tmux_session: `palantir-run-${run.id}` });
+
+  await h.lifecycleService.checkHealth();
+
+  const after = h.runService.getRun(run.id);
+  assert.equal(after.status, 'completed');
+  assert.equal(after.result_summary, 'durable result after oversized tail');
+  assert.equal(after.input_tokens, 21);
+  assert.equal(after.output_tokens, 34);
+  assert.equal(after.cost_usd, 0.75);
+  assert.deepEqual(remoteChannel.getStructuredResultCalls, [{ runId: run.id }]);
+});
+
+test('detached remote Claude goal capture parses the semantic result instead of raw NDJSON', async (t) => {
+  const db = await mkdb(t);
+  const goalText = [
+    'finished',
+    '```palantir-goal-report',
+    '{"goal_status":"achieved","summary":"remote complete","blockers":[]}',
+    '```',
+  ].join('\n');
+  const longResult = `${'x'.repeat(70 * 1024)}\n${goalText}`;
+  const output = JSON.stringify({
+    type: 'result',
+    is_error: false,
+    stop_reason: 'end_turn',
+    result: longResult,
+    usage: { input_tokens: 1, output_tokens: 2 },
+  });
+  const remoteChannel = makeRemoteChannel({
+    alive: false,
+    exitCode: 0,
+    output: '',
+    structuredResult: output,
+  });
+  const eventBus = createEventBus();
+  const h = buildHarness(db, { remoteChannel, eventBus });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { command: 'claude' });
+  const project = h.projectService.createProject({
+    name: 'RemoteClaudeGoalResult',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = h.runService.createRun({
+    task_id: task.id,
+    agent_profile_id: profile.id,
+    prompt: 'health',
+    node_id: 'ssh-pod',
+  });
+  h.runService.setGoalActive(run.id, true);
+  h.runService.markRunStarted(run.id, { tmux_session: `palantir-run-${run.id}` });
+  h.lifecycleService.startMonitoring();
+  t.after(() => h.lifecycleService.stopMonitoring());
+
+  await h.lifecycleService.checkHealth();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const after = h.runService.getRun(run.id);
+  assert.ok(Buffer.byteLength(after.final_output, 'utf8') <= 64 * 1024);
+  assert.ok(after.final_output.endsWith(goalText));
+  assert.deepEqual(JSON.parse(after.goal_report), {
+    goal_status: 'achieved',
+    summary: 'remote complete',
+    blockers: [],
+  });
+});
+
+test('detached remote Claude max_turns remains needs_input after later health ticks', async (t) => {
+  const db = await mkdb(t);
+  const output = JSON.stringify({
+    type: 'result',
+    is_error: false,
+    stop_reason: 'max_turns',
+    result: 'partial result',
+    usage: { input_tokens: 9, output_tokens: 10 },
+    num_turns: 200,
+  });
+  const remoteChannel = makeRemoteChannel({ alive: false, exitCode: 0, output });
+  const h = buildHarness(db, { remoteChannel });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { command: 'claude' });
+  const project = h.projectService.createProject({
+    name: 'RemoteClaudeLimitResult',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = h.runService.createRun({
+    task_id: task.id,
+    agent_profile_id: profile.id,
+    prompt: 'health',
+    node_id: 'ssh-pod',
+  });
+  h.runService.markRunStarted(run.id, { tmux_session: `palantir-run-${run.id}` });
+  h.runService.addRunEvent(run.id, 'runtime:remote_worker_engine', JSON.stringify({
+    engine: 'claude-stream-json',
+    version: 1,
+  }));
+  for (let index = 0; index < 1001; index++) {
+    h.runService.addRunEvent(run.id, 'heartbeat', null);
+  }
+  h.agentProfileService.deleteProfile(profile.id);
+  assert.equal(h.runService.getRun(run.id).agent_profile_id, null);
+
+  await h.lifecycleService.checkHealth();
+  await h.lifecycleService.checkHealth();
+
+  const after = h.runService.getRun(run.id);
+  assert.equal(after.status, 'needs_input');
+  assert.equal(after.result_summary, 'partial result');
+  assert.equal(after.exit_code, 0);
+  assert.equal(h.runService.hasRunEvent(run.id, 'limit_reached'), true);
+  assert.equal(
+    h.runService.getRunEvents(run.id)
+      .some((event) => event.event_type === 'limit_reached'),
+    false,
+    'the marker sits beyond the legacy oldest-first 1,000-event window',
+  );
 });

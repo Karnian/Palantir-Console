@@ -140,12 +140,10 @@ function createLocalWorkerChannel({ streamJsonEngine, executionEngine } = {}) {
 }
 
 /**
- * Overlay the process-local stream-json engine on a remote transport.
- *
- * Remote CLI workers are owned by the executor's detached tmux channel. Claude
- * stream-json workers instead keep a live SSH duplex attached to the shared
- * streamJsonEngine, so lifecycle/input/kill calls must follow that owner while
- * filesystem and CLI operations continue to use the raw remote executor.
+ * Build the remote worker channel on the executor's detached tmux/sentinel
+ * ownership model. Claude still emits stream-json output, but the controller
+ * does not keep the SSH transport as process ownership: an SSH disconnect must
+ * never imply that the pod process exited or make a retry overlap it.
  */
 function createRemoteWorkerChannel({
   remoteExecutor,
@@ -171,22 +169,12 @@ function createRemoteWorkerChannel({
     return streamJsonEngine[method].bind(streamJsonEngine);
   }
 
-  function streamJsonOwns(runId) {
-    return Boolean(
-      streamJsonEngine
-      && typeof streamJsonEngine.hasProcess === 'function'
-      && streamJsonEngine.hasProcess(runId),
-    );
-  }
-
   function spawnWorker(runId, { engine, spec } = {}) {
     if (engine === 'stream-json') {
-      return requireStream('spawnAgent')(runId, {
-        ...(spec || {}),
-        executor: remoteExecutor,
-        nodePrefix: nodePrefix || undefined,
-        nodeId: nodeId || undefined,
+      const detachedSpec = requireStream('buildDetachedWorkerSpec')(spec || {}, {
+        workerPath: nodePrefix || undefined,
       });
+      return requireRemote('spawnWorker')(runId, { engine, spec: detachedSpec });
     }
     if (engine === 'cli') {
       return requireRemote('spawnWorker')(runId, { engine, spec });
@@ -195,40 +183,30 @@ function createRemoteWorkerChannel({
   }
 
   function ownerOf(runId) {
-    if (streamJsonOwns(runId)) return 'stream-json';
     return requireRemote('ownerOf')(runId);
   }
 
   function isAlive(runId, engine) {
-    if (engine === 'stream-json' || (!engine && streamJsonOwns(runId))) {
-      return requireStream('isAlive')(runId);
-    }
     return requireRemote('isAlive')(runId, engine);
   }
 
   function detectExitCode(runId, engine) {
-    if (engine === 'stream-json' || (!engine && streamJsonOwns(runId))) {
-      return requireStream('detectExitCode')(runId);
-    }
     return requireRemote('detectExitCode')(runId, engine);
   }
 
   function getOutput(runId, lines, engine) {
-    if (engine === 'stream-json' || (!engine && streamJsonOwns(runId))) {
-      return requireStream('getOutput')(runId, lines);
-    }
     return requireRemote('getOutput')(runId, lines, engine);
   }
 
+  function getStructuredResult(runId) {
+    return requireRemote('getStructuredResult')(runId);
+  }
+
   function sendInput(runId, text) {
-    if (streamJsonOwns(runId)) return requireStream('sendInput')(runId, text);
     return requireRemote('sendInput')(runId, text);
   }
 
   function kill(runId, engine) {
-    if (engine === 'stream-json' || (!engine && streamJsonOwns(runId))) {
-      return requireStream('kill')(runId);
-    }
     return requireRemote('kill')(runId, engine);
   }
 
@@ -238,6 +216,7 @@ function createRemoteWorkerChannel({
     isAlive,
     detectExitCode,
     getOutput,
+    getStructuredResult,
     sendInput,
     kill,
   });

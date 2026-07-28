@@ -9,31 +9,16 @@ const {
   resolveActorTokenPolicy,
   buildWorkerProcessEnv,
   augmentProcessPath,
-  isActorCredentialKey,
 } = require('./actorTokenPolicy');
 
-const REMOTE_NODE_ENV_KEYS = new Set([
-  'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TEMP', 'TMP',
-]);
-
-function buildRemoteWorkerEnv(env, envAllowlist) {
-  const allowed = new Set(
-    (Array.isArray(envAllowlist) ? envAllowlist : [])
-      .filter((key) => (
-        typeof key === 'string'
-        && !REMOTE_NODE_ENV_KEYS.has(key)
-        && !isActorCredentialKey(key)
-      )),
-  );
+function buildRemoteWorkerEnv(env) {
   const selected = {};
-  for (const [key, value] of Object.entries(env || {})) {
-    if (value === undefined || isActorCredentialKey(key)) continue;
-    if (key === 'PALANTIR_API_BASE' || allowed.has(key)) {
-      selected[key] = value;
-    }
+  if (typeof env?.PALANTIR_API_BASE === 'string' && env.PALANTIR_API_BASE) {
+    selected.PALANTIR_API_BASE = env.PALANTIR_API_BASE;
   }
   // The worker capability is the one actor credential allowed across this
-  // seam. It is framed through SSH stdin by RemoteSshNodeExecutor, never argv.
+  // seam. Profile allowlists carry NAMES only; their values are selected from
+  // the pod login shell so the controller can never override pod credentials.
   if (typeof env?.PALANTIR_WORKER_TOKEN === 'string' && env.PALANTIR_WORKER_TOKEN) {
     selected.PALANTIR_WORKER_TOKEN = env.PALANTIR_WORKER_TOKEN;
   }
@@ -46,8 +31,10 @@ function buildRemoteWorkerEnv(env, envAllowlist) {
  * Uses `--print --input-format stream-json --output-format stream-json --verbose`
  * for structured NDJSON stdin/stdout communication with Claude Code CLI.
  *
- * Auth: Uses the user's existing Claude Code credentials (OAuth or API key)
- * loaded from .claude-auth.json at server startup (see index.js).
+ * Auth: Local processes use the Console's resolved Claude credentials.
+ * Detached remote workers preserve the pod login shell's HOME and therefore
+ * use that pod's own `claude login` state; controller credential values are
+ * never copied into their spec.
  */
 
 function createStreamJsonEngine({
@@ -150,9 +137,9 @@ function createStreamJsonEngine({
       // until every option is assembled so it can sit behind `--`. Without
       // the option terminator, a normal diff prompt beginning with `---` (or
       // an adversarial `--help`) is parsed as another Claude CLI option.
-      if (opts.prompt) {
+      if (opts.prompt || opts.promptFromStdin) {
         args.push('-p');
-        workerPrompt = opts.prompt;
+        if (!opts.promptFromStdin) workerPrompt = opts.prompt;
       }
     }
 
@@ -225,6 +212,41 @@ function createStreamJsonEngine({
   }
 
   /**
+   * Build a detached remote Claude worker spec.
+   *
+   * Unlike the local stream-json process, the remote worker is owned by the
+   * executor's tmux/sentinel channel. User input is stdin-backed and the
+   * system prompt is materialized as a mode-0600 remote file, so neither value
+   * enters local ssh, remote shell, env, or Claude argv.
+   */
+  function buildDetachedWorkerSpec(spec = {}, { workerPath } = {}) {
+    if (spec.isManager) {
+      throw new Error('detached remote Claude workers do not support manager mode');
+    }
+    const args = buildArgs({
+      ...spec,
+      prompt: undefined,
+      systemPrompt: undefined,
+      promptFromStdin: true,
+      isManager: false,
+    });
+    const detachedSystemPrompt = typeof spec.systemPrompt === 'string' && spec.systemPrompt
+      ? spec.systemPrompt
+      : undefined;
+    return {
+      command: 'claude',
+      args,
+      stdin: typeof spec.prompt === 'string' ? spec.prompt : '',
+      systemPrompt: detachedSystemPrompt,
+      systemPromptFileFlag: detachedSystemPrompt ? '--append-system-prompt-file' : undefined,
+      cwd: spec.cwd,
+      env: buildRemoteWorkerEnv(spec.env),
+      envAllowlist: Array.isArray(spec.envAllowlist) ? spec.envAllowlist : [],
+      workerPath: workerPath || undefined,
+    };
+  }
+
+  /**
    * Spawn a Claude Code agent with stream-json protocol.
    */
   function spawnAgent(runId, { prompt, cwd, env, systemPrompt, permissionMode,
@@ -234,6 +256,11 @@ function createStreamJsonEngine({
     executor, nodePrefix, envAllowlist, nodeId }) {
 
     const usingRemoteExecutor = !!executor;
+    if (usingRemoteExecutor && !isManager) {
+      const err = new Error('remote Claude workers require the detached worker channel');
+      err.code = 'REMOTE_WORKER_DETACHED_REQUIRED';
+      throw err;
+    }
     const claudeBin = usingRemoteExecutor ? 'claude' : resolveClaudeBin();
     const args = buildArgs({
       prompt, systemPrompt, permissionMode, allowedTools,
@@ -264,7 +291,7 @@ function createStreamJsonEngine({
             ? { PALANTIR_MANAGER_TOKEN: env.PALANTIR_MANAGER_TOKEN }
             : {}
         )
-        : buildRemoteWorkerEnv(env, envAllowlist);
+        : buildRemoteWorkerEnv(env);
     } else {
       // PR4: if the caller passes a filtered env (manager adapter path), use it
       // as the authoritative base instead of process.env. Worker/legacy callers
@@ -913,6 +940,7 @@ function createStreamJsonEngine({
     type: 'stream-json',
     spawnAgent, sendInput, getOutput, getEvents, getUsage, getSessionId,
     kill, hasProcess, isAlive, detectExitCode, isUnreachable, listSessions, discoverGhostSessions,
+    buildDetachedWorkerSpec,
     // Exposed for tests that need to assert argv shape without spawning.
     _buildArgs: buildArgs,
   };
