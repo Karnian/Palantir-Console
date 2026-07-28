@@ -305,7 +305,8 @@ const WORKER_BASE_ENV_KEYS = Object.freeze([...PROCESS_BASE_ENV_KEYS]);
 // Proxy URLs can contain credentials (for example,
 // http://user:password@proxy:3128), so these are not part of the nominal
 // process baseline. They are forwarded as a separate, explicit compatibility
-// set for corporate networks. Masking is intentionally deferred.
+// set for corporate networks. buildManagerSpawnEnv emits a value-free security
+// diagnostic when a forwarded proxy URL contains userinfo.
 const NETWORK_ENV_KEYS = Object.freeze([
   'HTTP_PROXY',
   'HTTPS_PROXY',

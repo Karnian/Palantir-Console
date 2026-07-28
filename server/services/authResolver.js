@@ -49,6 +49,67 @@ const CODEX_AUTH_FILE = path.join(os.homedir(), '.codex', 'auth.json');
 // keychain (Linux — e.g. `claude login` on a headless box). Same JSON shape
 // as the macOS keychain payload (`claudeAiOauth.accessToken`).
 const CLAUDE_LINUX_CREDENTIALS_FILE = path.join(os.homedir(), '.claude', '.credentials.json');
+const PROXY_URL_ENV_KEYS = Object.freeze([
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'all_proxy',
+]);
+
+function proxyUrlContainsUserinfo(value) {
+  if (typeof value !== 'string' || !value) return false;
+
+  // Inspect the raw authority before WHATWG normalization. In particular,
+  // `DOMAIN\user:pass@proxy` is accepted by curl as proxy userinfo, while
+  // WHATWG URL treats the backslash as a path separator and loses it.
+  const scheme = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.exec(value);
+  const authorityAndRest = value.slice(scheme ? scheme[0].length : 0);
+  const authorityEnd = authorityAndRest.search(/[/?#]/);
+  const rawAuthority = authorityEnd === -1
+    ? authorityAndRest
+    : authorityAndRest.slice(0, authorityEnd);
+  if (rawAuthority.indexOf('@') > 0) return true;
+
+  try {
+    // curl and common proxy consumers accept both absolute proxy URLs and
+    // scheme-less authority forms such as user:pass@proxy.example:3128.
+    // WHATWG URL treats the latter's `user:` prefix as an opaque scheme.
+    // curl also tolerates one or three slashes after known proxy schemes;
+    // canonicalize those spellings so URL still exposes their userinfo.
+    const proxyScheme = /^((?:https?|socks(?:4a?|5h?))):\/*/i.exec(value);
+    const candidate = proxyScheme
+      ? `${proxyScheme[1]}://${value.slice(proxyScheme[0].length)}`
+      : (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value) ? value : `http://${value}`);
+    const parsed = new URL(candidate);
+    return Boolean(parsed.username || parsed.password);
+  } catch {
+    // A malformed but still-forwarded proxy may contain unescaped password
+    // delimiters (`http://user:pa#ss@proxy`). URL rejects it, while child
+    // clients may parse it differently. Treat an `@` marker conservatively as
+    // possible userinfo; the diagnostic exposes only the environment key.
+    return value.includes('@');
+  }
+}
+
+function warnForwardedProxyUserinfo(env, { diagnosticContext, vendor } = {}) {
+  const keys = PROXY_URL_ENV_KEYS
+    .filter((key) => proxyUrlContainsUserinfo(env?.[key]))
+    .sort();
+  if (keys.length === 0) return;
+
+  // Never include the proxy URL, username, or password. Even URL redaction is
+  // avoided here because malformed/encoded userinfo is easy to leak by
+  // accident; key names are sufficient for an operator to locate the source.
+  console.warn(
+    `[security] manager_spawn_proxy_userinfo ${JSON.stringify({
+      context: diagnosticContext || 'manager:spawn',
+      vendor: resolveAgentVendor(vendor),
+      keys,
+    })}`
+  );
+}
 
 /**
  * Opt-in switch that makes host credential discovery inert: no reading or
@@ -698,6 +759,8 @@ function buildManagerSpawnEnv({
       env.PALANTIR_PM_TOKEN = baseEnv.PALANTIR_PM_TOKEN;
     }
   }
+
+  warnForwardedProxyUserinfo(env, { diagnosticContext, vendor });
 
   if (diagnosticContext && baseEnv) {
     const droppedKeys = Object.keys(baseEnv)

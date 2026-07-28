@@ -434,7 +434,7 @@ function createOperatorSpawnService({
     const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
     // Resolve before the auth gate so migration diagnostics are observable
     // even when a legacy ambient auth mode is no longer sufficient.
-    const spawnEnv = applyManagerCredentialPolicy(buildManagerSpawnEnv({
+    const spawnEnv = applyManagerCredentialPolicy(isRemoteNode ? {} : buildManagerSpawnEnv({
       baseEnv: actorSpawnBaseEnv,
       authEnv: authCtx.env,
       envAllowlist,
