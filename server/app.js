@@ -291,6 +291,7 @@ function createPmAutoReview({
   managerRegistry,
   conversationService,
   runService,
+  operatorInstanceService = null,
   taskService = null,
   autoReviewMax = AUTO_REVIEW_MAX,
   defer = setImmediate,
@@ -357,6 +358,13 @@ function createPmAutoReview({
     if (!resolved?.instanceId || !resolved?.primaryProjectId || !resolved?.instanceConversationId) {
       return null;
     }
+    if (operatorInstanceService && typeof operatorInstanceService.assertActiveInstance === 'function') {
+      try {
+        operatorInstanceService.assertActiveInstance(resolved.instanceId);
+      } catch {
+        return null;
+      }
+    }
     return {
       slotKey: resolved.instanceConversationId,
       receiverInstanceId: resolved.instanceId,
@@ -370,6 +378,15 @@ function createPmAutoReview({
     if (!run?.project_id) return null;
 
     if (run.operator_instance_id) {
+      // An ARCHIVED dispatcher is not "no primary" — it is a dispatcher that
+      // deliberately no longer exists. Falling back to Top would attribute this
+      // review to a manager that never dispatched the run, which is exactly the
+      // attribution contract archiving exists to protect. Suppress instead.
+      if (operatorInstanceService && typeof operatorInstanceService.getInstance === 'function') {
+        let dispatcher = null;
+        try { dispatcher = operatorInstanceService.getInstance(run.operator_instance_id); } catch { dispatcher = null; }
+        if (dispatcher?.archived_at) return null;
+      }
       const resolved = resolveOperatorConversation(conversationIdForProject(run.operator_instance_id));
       return receiverFromResolved(run, resolved, 'attributed_instance')
         || topReceiver(run, run.operator_instance_id);
@@ -1403,11 +1420,22 @@ function createApp(options = {}) {
     eventBus,
     operatorInstanceService,
   });
+  const managerMessageQueueService = createManagerMessageQueueService({
+    db,
+    eventBus,
+    runService,
+    perConversationCap: options.managerMessageQueueCap,
+    tickMs: options.managerMessageQueueTickMs,
+    immediateDispatchTimeoutMs: options.operatorSchedulerDeliveryTimeoutMs
+      ?? (Number.parseInt(process.env.PALANTIR_OPERATOR_SCHEDULER_DELIVERY_TIMEOUT_MS, 10) || undefined),
+  });
   const operatorIdentityLifecycleService = createOperatorIdentityLifecycleService({
     operatorProfileService,
     operatorInstanceService,
     operatorCleanupService,
     operatorSpawnService,
+    managerMessageQueueService,
+    eventBus,
   });
   const operatorBriefService = createOperatorBriefService({
     db,
@@ -1426,21 +1454,13 @@ function createApp(options = {}) {
     },
   });
   const compositionLedger = createCompositionLedger(db);
-  const managerMessageQueueService = createManagerMessageQueueService({
-    db,
-    eventBus,
-    runService,
-    perConversationCap: options.managerMessageQueueCap,
-    tickMs: options.managerMessageQueueTickMs,
-    immediateDispatchTimeoutMs: options.operatorSchedulerDeliveryTimeoutMs
-      ?? (Number.parseInt(process.env.PALANTIR_OPERATOR_SCHEDULER_DELIVERY_TIMEOUT_MS, 10) || undefined),
-  });
   const conversationService = createConversationService({
     runService,
     managerRegistry,
     managerAdapterFactory,
     lifecycleService,
     operatorSpawnService,
+    operatorInstanceService,
     projectService, // A2b-2: per-turn codebase context block (name/directory of a non-primary turn codebase)
     projectBriefService, // A2b-2: brief summary in the ## Turn Codebase block
     memoryService, // ML PR1: user-payload Learned Memory injection (Operator slots)
@@ -1455,7 +1475,11 @@ function createApp(options = {}) {
   // OS: Operator-owned durable schedules. The service owns persisted schedule
   // and invocation state; the driver only materializes due rows and delivers
   // them through conversationService so identity/memory routing stays unified.
-  const operatorScheduleService = createOperatorScheduleService(db, { eventBus, runService });
+  const operatorScheduleService = createOperatorScheduleService(db, {
+    eventBus,
+    runService,
+    operatorInstanceService,
+  });
   const operatorScheduler = createOperatorScheduler({
     operatorScheduleService,
     conversationService,
@@ -1490,7 +1514,14 @@ function createApp(options = {}) {
   // PM auto-review: harvest is the single completion gate. `run:ended`
   // drives harvest first, and harvest emits exactly one `run:harvested`
   // for each review-target worker run; only then do we notify the PM.
-  const pmAutoReview = createPmAutoReview({ eventBus, managerRegistry, conversationService, runService, taskService });
+  const pmAutoReview = createPmAutoReview({
+    eventBus,
+    managerRegistry,
+    conversationService,
+    runService,
+    taskService,
+    operatorInstanceService,
+  });
   // ML PR2a: R6 environment-fact capture (test_command / node resolution).
   createR6FactCapture({ eventBus, runService, memoryService });
   // ML PR2b: R1b failure->fix pair capture (stages candidates for PR3 distill).
