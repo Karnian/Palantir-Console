@@ -61,11 +61,19 @@ const PROXY_URL_ENV_KEYS = Object.freeze([
 function proxyUrlContainsUserinfo(value) {
   if (typeof value !== 'string' || !value) return false;
 
+  const proxyScheme = /^((?:https?|socks(?:4a?|5h?))):\/*/i.exec(value);
+  const explicitAuthorityScheme = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.exec(value);
+  const knownOpaqueScheme = /^(?:data|file|mailto|urn):/i.test(value);
+  if (!proxyScheme && !explicitAuthorityScheme && knownOpaqueScheme) return false;
+
   // Inspect the raw authority before WHATWG normalization. In particular,
   // `DOMAIN\user:pass@proxy` is accepted by curl as proxy userinfo, while
   // WHATWG URL treats the backslash as a path separator and loses it.
-  const scheme = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.exec(value);
-  const authorityAndRest = value.slice(scheme ? scheme[0].length : 0);
+  const authorityAndRest = value.slice(
+    proxyScheme
+      ? proxyScheme[0].length
+      : (explicitAuthorityScheme ? explicitAuthorityScheme[0].length : 0),
+  );
   const authorityEnd = authorityAndRest.search(/[/?#]/);
   const rawAuthority = authorityEnd === -1
     ? authorityAndRest
@@ -78,7 +86,6 @@ function proxyUrlContainsUserinfo(value) {
     // WHATWG URL treats the latter's `user:` prefix as an opaque scheme.
     // curl also tolerates one or three slashes after known proxy schemes;
     // canonicalize those spellings so URL still exposes their userinfo.
-    const proxyScheme = /^((?:https?|socks(?:4a?|5h?))):\/*/i.exec(value);
     const candidate = proxyScheme
       ? `${proxyScheme[1]}://${value.slice(proxyScheme[0].length)}`
       : (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value) ? value : `http://${value}`);
@@ -87,9 +94,15 @@ function proxyUrlContainsUserinfo(value) {
   } catch {
     // A malformed but still-forwarded proxy may contain unescaped password
     // delimiters (`http://user:pa#ss@proxy`). URL rejects it, while child
-    // clients may parse it differently. Treat an `@` marker conservatively as
-    // possible userinfo; the diagnostic exposes only the environment key.
-    return value.includes('@');
+    // clients may parse it differently. Keep that conservative check scoped
+    // to the authority candidate: `@` in a path/query is not userinfo.
+    // `#` is deliberately tolerated here because it may be an unescaped
+    // password byte in a malformed proxy URL; valid fragment URLs parsed above.
+    const fallbackEnd = authorityAndRest.search(/[/?]/);
+    const fallbackAuthority = fallbackEnd === -1
+      ? authorityAndRest
+      : authorityAndRest.slice(0, fallbackEnd);
+    return fallbackAuthority.indexOf('@') > 0;
   }
 }
 

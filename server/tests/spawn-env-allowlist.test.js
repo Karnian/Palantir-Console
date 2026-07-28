@@ -208,6 +208,10 @@ test('proxy diagnostic stays silent without URL userinfo', () => {
       baseEnv: {
         HTTP_PROXY: 'http://proxy.example:3128',
         HTTPS_PROXY: 'not-a-url',
+        ALL_PROXY: 'http://proxy.example:bad/path@name',
+        all_proxy: 'http://[::1/path@name',
+        http_proxy: 'http://proxy.example:bad?next=user@example.internal',
+        https_proxy: 'mailto:user@example.internal',
         NO_PROXY: 'user@example.internal',
       },
     });
