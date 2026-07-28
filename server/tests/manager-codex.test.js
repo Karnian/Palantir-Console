@@ -85,6 +85,54 @@ test('CodexAdapter exposes Codex capabilities', () => {
   assert.match(adapter.buildGuardrailsSection(), /Codex CLI adapter notes/);
 });
 
+test('Codex Operator prompt requires tracked worker delegation without false sandbox claims', () => {
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
+  const adapter = createCodexAdapter({ runService: null });
+  const prompt = buildManagerSystemPrompt({
+    adapter,
+    port: 4177,
+    token: null,
+    layer: 'operator',
+    adapterType: 'codex',
+  });
+
+  assert.doesNotMatch(prompt, /filesystem sandbox is active/i);
+  assert.doesNotMatch(prompt, /tools are limited to read operations/i);
+  assert.match(prompt, /do not edit code directly[\s\S]*always delegate edits to a\s+worker/i);
+  assert.match(prompt, /direct writes are technically possible/i);
+  for (const trackedBoundary of [
+    /worktree isolation/i,
+    /diff capture/i,
+    /harvest/i,
+    /run attribution/i,
+  ]) {
+    assert.match(prompt, trackedBoundary);
+  }
+});
+
+// The guardrails section does not branch on layer today, so this duplicates the
+// assertions above. That is the point: it pins the property for Top as well, so
+// reintroducing the claim behind a layer condition — telling Top it is sandboxed
+// while Operator gets the truth — cannot pass. Top is the role that most needs
+// the honest version: its default cwd is the Console's own source tree.
+test('Codex Top prompt makes no false sandbox claim either', () => {
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
+  const adapter = createCodexAdapter({ runService: null });
+  const prompt = buildManagerSystemPrompt({
+    adapter,
+    port: 4177,
+    token: null,
+    layer: 'top',
+    adapterType: 'codex',
+  });
+
+  assert.doesNotMatch(prompt, /filesystem sandbox is active/i);
+  assert.doesNotMatch(prompt, /tools are limited to read operations/i);
+  assert.match(prompt, /direct writes are technically possible/i);
+});
+
 test('CodexAdapter lazily writes a system prompt temp file and disposeSession cleans it up', async () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
   const { PassThrough } = require('node:stream');

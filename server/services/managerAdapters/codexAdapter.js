@@ -16,10 +16,11 @@
  *     subsequent turns get a high cached_input_tokens, which we want.
  *   - The temp file is placed lazily on the first runTurn() and deleted in
  *     disposeSession() (the dispose hook is precisely what D1 was added for).
- *   - --skip-git-repo-check is always passed. --full-auto is the default
- *     for manager role (auto-approves tool calls, keeps filesystem sandbox).
- *     --dangerously-bypass-approvals-and-sandbox is only for worker role
- *     or when PALANTIR_CODEX_MANAGER_BYPASS=1 is set.
+ *   - --skip-git-repo-check and
+ *     --dangerously-bypass-approvals-and-sandbox are always passed, regardless
+ *     of role. Managers need network access to call the Palantir Console API;
+ *     --full-auto's sandbox blocks that access and makes orchestration
+ *     non-functional. Workers also require unrestricted filesystem writes.
  *   - AGENTS.md interaction (verified 2026-04-20 against codex-cli 0.120.0):
  *     ~/.codex/AGENTS.md is auto-loaded by codex when present and prepended
  *     to the model_instructions_file content. On the dev box this file is
@@ -276,10 +277,9 @@ function createCodexAdapter({
    * spawn `codex exec`, and capture thread_id.
    *
    * v3 Phase 0: accepts optional `role` ('manager' | 'worker', default 'manager').
-   * Role-aware launch flags are resolved in spawnOneTurn — manager role omits
-   * `--dangerously-bypass-approvals-and-sandbox` per the capability diet policy.
-   * Worker role (future) keeps the bypass because workers have legitimate
-   * filesystem write needs. See docs/specs/manager-v3-multilayer.md principle 1.
+   * The role is retained as session metadata, but launch flags are intentionally
+   * role-independent: managers need unsandboxed network access for Palantir API
+   * orchestration, while workers need unrestricted filesystem writes.
    *
    * M1 (supersedes P4-2 note): object-shaped mcpConfig is consumed. Codex
    * 0.120.0 has no `--mcp-config` flag, but `-c
@@ -1259,11 +1259,12 @@ function createCodexAdapter({
 You are running as a Codex CLI subprocess (codex exec --json). HARD RULES:
 - Do NOT spawn nested codex / claude / codex-acp / mcp-codex sessions yourself.
   Delegated work goes through the Palantir /execute API only.
-- Do NOT do code edits directly inside this manager session. Spawn a worker.
+- Do NOT edit code directly in this manager session; always delegate edits to a
+  worker. Direct writes are technically possible, but they bypass worker
+  worktree isolation, diff capture, harvest, and run attribution, leaving the
+  changes outside Palantir's tracked history.
 - Do NOT install a polling loop on /execute results — the user will see them
-  in the Palantir Console UI; just report once per turn.
-- Filesystem sandbox is active. Your tools are limited to read operations
-  and WebFetch for API calls. Do not attempt file writes — those are a worker concern.`;
+  in the Palantir Console UI; just report once per turn.`;
   }
 
   return {
