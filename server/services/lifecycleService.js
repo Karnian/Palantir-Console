@@ -1108,7 +1108,7 @@ function createLifecycleService({
     }
     const buildWorkerEnv = (explicitEnv) => applyWorkerCredentialPolicy(explicitEnv, {
       workerToken: workerProposalToken,
-      apiBase: proposalApiBase,
+      apiBase: workerProposalToken ? proposalApiBase : null,
       actorTokens,
     });
     const profile = agentProfileService.getProfile(agentProfileId);

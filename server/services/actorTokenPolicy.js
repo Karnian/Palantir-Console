@@ -407,21 +407,53 @@ function applyManagerCredentialPolicy(explicitEnv = {}, {
   return env;
 }
 
+function normalizeWorkerApiBase(apiBase) {
+  if (apiBase === undefined || apiBase === null || apiBase === '') return null;
+  if (typeof apiBase !== 'string' || /[\r\n\x00]/.test(apiBase)) {
+    const err = new Error('PALANTIR_API_BASE must be a non-empty single-line URL');
+    err.code = 'WORKER_API_BASE_INVALID';
+    throw err;
+  }
+  const normalized = apiBase.trim().replace(/\/+$/, '');
+  let parsed;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    const err = new Error('PALANTIR_API_BASE must be a valid URL');
+    err.code = 'WORKER_API_BASE_INVALID';
+    throw err;
+  }
+  if (parsed.username || parsed.password) {
+    const err = new Error('PALANTIR_API_BASE must not contain URL userinfo');
+    err.code = 'WORKER_API_BASE_USERINFO';
+    throw err;
+  }
+  return normalized;
+}
+
 function applyWorkerCredentialPolicy(explicitEnv = {}, {
   workerToken = null,
   apiBase = null,
   actorTokens = null,
 } = {}) {
   const merged = stripActorCredentials({ ...(explicitEnv || {}) });
-  if (typeof workerToken === 'string' && workerToken) {
+  // Drop profile-provided values first; only the server-selected apiBase may
+  // reintroduce this address.
+  delete merged.PALANTIR_API_BASE;
+  const hasWorkerToken = typeof workerToken === 'string' && !!workerToken;
+  if (hasWorkerToken) {
     if (!actorTokenPolicyFrom(actorTokens).capabilitiesEnabled) {
       throw new Error('worker capability requires verified agent process isolation');
     }
     merged.PALANTIR_WORKER_TOKEN = workerToken;
   }
-  if (typeof apiBase === 'string' && apiBase) {
-    merged.PALANTIR_API_BASE = apiBase.replace(/\/+$/, '');
-  }
+  // Enforced HERE, not left to callers. The endpoint is only useful with a
+  // capability to present at it, and this function's name says it is where the
+  // worker credential policy lives — a caller that trusts it without adding its
+  // own gate would otherwise ship the address alone. The existing callers do
+  // gate, so this changes nothing today; it means a future one cannot forget.
+  const normalizedApiBase = hasWorkerToken ? normalizeWorkerApiBase(apiBase) : null;
+  if (normalizedApiBase) merged.PALANTIR_API_BASE = normalizedApiBase;
   return merged;
 }
 
@@ -602,6 +634,7 @@ module.exports = {
   buildWorkerProcessEnv,
   augmentProcessPath,
   applyManagerCredentialPolicy,
+  normalizeWorkerApiBase,
   applyWorkerCredentialPolicy,
   createWorkerProposalTokenService,
   createManagerCapabilityTokenService,

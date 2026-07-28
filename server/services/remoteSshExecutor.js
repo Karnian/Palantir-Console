@@ -7,6 +7,7 @@ const {
   WORKER_BASE_ENV_KEYS,
   MANAGER_BASE_ENV_KEYS,
   isActorCredentialKey,
+  normalizeWorkerApiBase,
 } = require('./actorTokenPolicy');
 
 const WORKER_OUTPUT_MAX_LINES = 500;
@@ -1387,6 +1388,7 @@ function createRemoteSshNodeExecutor(node, {
       stdinFile: path.posix.join(statusDir, 'stdin.txt'),
       systemPromptFile: path.posix.join(statusDir, 'system-prompt.txt'),
       workerTokenFile: path.posix.join(statusDir, 'worker-capability'),
+      workerApiBaseFile: path.posix.join(statusDir, 'worker-api-base'),
       uploadBundle: path.posix.join(statusDir, 'worker-input.bundle'),
     };
   }
@@ -1399,6 +1401,7 @@ function createRemoteSshNodeExecutor(node, {
     envAllowlist,
   }, {
     workerTokenFile = null,
+    workerApiBaseFile = null,
   } = {}) {
     // env -i is the primary ambient-credential boundary. Empty actor
     // assignments remain as defense in depth; the server-selected run
@@ -1413,6 +1416,7 @@ function createRemoteSshNodeExecutor(node, {
     delete workerEnv.PALANTIR_PM_TOKEN;
     delete workerEnv.PALANTIR_WORKER_TOKEN;
     delete workerEnv.PALANTIR_MANAGER_TOKEN;
+    delete workerEnv.PALANTIR_API_BASE;
     const envParts = normalizeEnv({
       PALANTIR_TOKEN: null,
       PALANTIR_PM_TOKEN: null,
@@ -1451,6 +1455,15 @@ function createRemoteSshNodeExecutor(node, {
           `rm -f -- ${shq(workerTokenFile)}`,
           '[ "$worker_token_rc" -eq 0 ] || exit 78',
           'export PALANTIR_WORKER_TOKEN',
+          ...(workerApiBaseFile
+            ? [
+                `PALANTIR_API_BASE=$(cat -- ${shq(workerApiBaseFile)})`,
+                'worker_api_base_rc=$?',
+                `rm -f -- ${shq(workerApiBaseFile)}`,
+                '[ "$worker_api_base_rc" -eq 0 ] || exit 78',
+                'export PALANTIR_API_BASE',
+              ]
+            : []),
           'exec "$@"',
         ].join('; ')),
         shq('sh'),
@@ -1547,7 +1560,11 @@ function createRemoteSshNodeExecutor(node, {
       spec.env && spec.env.PALANTIR_WORKER_TOKEN,
       'PALANTIR_WORKER_TOKEN',
     );
+    const workerApiBase = workerToken
+      ? normalizeWorkerApiBase(spec.env && spec.env.PALANTIR_API_BASE)
+      : null;
     let workerTokenFile = null;
+    let workerApiBaseFile = null;
     try {
       if (workerToken) {
         // Keep the scoped capability in the deterministic run status directory.
@@ -1562,6 +1579,16 @@ function createRemoteSshNodeExecutor(node, {
         workerTokenFile = path.posix.join(
           tokenParent.canonical,
           path.posix.basename(paths.workerTokenFile),
+        );
+      }
+      if (workerApiBase) {
+        const apiBaseParent = await assertWithinRoots(
+          paths.workerApiBaseFile,
+          { parentOnly: true },
+        );
+        workerApiBaseFile = path.posix.join(
+          apiBaseParent.canonical,
+          path.posix.basename(paths.workerApiBaseFile),
         );
       }
       let canonicalStdin = null;
@@ -1591,7 +1618,7 @@ function createRemoteSshNodeExecutor(node, {
         );
       }
       let canonicalUploadBundle = null;
-      if (workerTokenFile || canonicalSystemPrompt || canonicalStdin) {
+      if (workerTokenFile || workerApiBaseFile || canonicalSystemPrompt || canonicalStdin) {
         const bundleParent = await assertWithinRoots(
           paths.uploadBundle,
           { parentOnly: true },
@@ -1612,11 +1639,15 @@ function createRemoteSshNodeExecutor(node, {
             ],
           }
         : spec;
-      const workerInvocation = buildWorkerInvocation(effectiveSpec, { workerTokenFile });
+      const workerInvocation = buildWorkerInvocation(effectiveSpec, {
+        workerTokenFile,
+        workerApiBaseFile,
+      });
       const materializedFiles = [
         canonicalStdin,
         canonicalSystemPrompt,
         workerTokenFile,
+        workerApiBaseFile,
         canonicalUploadBundle,
       ].filter(Boolean);
       const stdinRedirect = canonicalStdin ? ` < ${shq(canonicalStdin)}` : '';
@@ -1645,6 +1676,9 @@ function createRemoteSshNodeExecutor(node, {
       const uploads = [
         workerTokenFile
           ? { path: workerTokenFile, content: workerToken }
+          : null,
+        workerApiBaseFile
+          ? { path: workerApiBaseFile, content: workerApiBase }
           : null,
         canonicalSystemPrompt
           ? { path: canonicalSystemPrompt, content: spec.systemPrompt }
@@ -1756,8 +1790,9 @@ function createRemoteSshNodeExecutor(node, {
       }
       return { sessionName: paths.sessionName };
     } catch (err) {
-      if (workerTokenFile && !err.preserveRemoteFiles) {
-        try { await runRemoteCommand('rm', ['-f', workerTokenFile]); } catch {}
+      const capabilityFiles = [workerTokenFile, workerApiBaseFile].filter(Boolean);
+      if (capabilityFiles.length > 0 && !err.preserveRemoteFiles) {
+        try { await runRemoteCommand('rm', ['-f', ...capabilityFiles]); } catch {}
       }
       throw err;
     }
@@ -1839,6 +1874,7 @@ function createRemoteSshNodeExecutor(node, {
         paths.stdinFile,
         paths.systemPromptFile,
         paths.workerTokenFile,
+        paths.workerApiBaseFile,
         paths.uploadBundle,
         paths.structuredResultTmp,
       ]);

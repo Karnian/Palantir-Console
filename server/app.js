@@ -87,6 +87,7 @@ const {
   resolveActorTokenPolicy,
   createWorkerProposalTokenService,
   createManagerCapabilityTokenService,
+  normalizeWorkerApiBase,
 } = require('./services/actorTokenPolicy');
 const { createOperatorSpecialistRouter } = require('./routes/operatorSpecialist');
 const { createOperatorProfilesRouter } = require('./routes/operatorProfiles');
@@ -2169,7 +2170,7 @@ function resolveWorkerProposalEndpoints({
   port = 4177,
 } = {}) {
   if (typeof explicitBaseUrl === 'string' && explicitBaseUrl.trim()) {
-    const normalized = explicitBaseUrl.trim().replace(/\/+$/, '');
+    const normalized = normalizeWorkerApiBase(explicitBaseUrl);
     return { local: normalized, remote: normalized };
   }
   const bindHost = typeof host === 'string' && host.trim()

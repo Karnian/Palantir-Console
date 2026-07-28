@@ -128,6 +128,9 @@ function createTmuxEngine({
     const artifact = tokenArtifacts.get(runId);
     if (!artifact) return;
     try { fs.unlinkSync(artifact.tokenPath); } catch {}
+    if (artifact.apiBasePath) {
+      try { fs.unlinkSync(artifact.apiBasePath); } catch {}
+    }
     try { fs.rmdirSync(artifact.tokenDir); } catch {}
     tokenArtifacts.delete(runId);
   }
@@ -182,17 +185,37 @@ function createTmuxEngine({
       ? augmentedProfileEnv.PALANTIR_WORKER_TOKEN
       : null;
     delete augmentedProfileEnv.PALANTIR_WORKER_TOKEN;
+    // The endpoint that pairs with the capability rides the same transport. It
+    // is not itself a credential, but `env -i` puts every assignment into the
+    // env process's own argv, which /proc exposes to other users on this host
+    // for the window before it execs — the same exposure the remote path was
+    // fixed for. Only meaningful alongside a minted token, so it is dropped
+    // outright when there is none.
+    const workerApiBase = workerToken
+      && typeof augmentedProfileEnv.PALANTIR_API_BASE === 'string'
+      && augmentedProfileEnv.PALANTIR_API_BASE
+      ? augmentedProfileEnv.PALANTIR_API_BASE
+      : null;
+    delete augmentedProfileEnv.PALANTIR_API_BASE;
     cleanupTokenArtifact(runId);
     let tokenArtifact = null;
     if (workerToken) {
       let tokenDir = null;
       let tokenPath = null;
+      let apiBasePath = null;
       try {
         tokenDir = fs.mkdtempSync(path.join(scriptDir, '.worker-token-'));
         fs.chmodSync(tokenDir, 0o700);
         tokenPath = path.join(tokenDir, 'token');
         writeFileSync(tokenPath, workerToken, { flag: 'wx', mode: 0o600 });
+        if (workerApiBase) {
+          apiBasePath = path.join(tokenDir, 'api-base');
+          writeFileSync(apiBasePath, workerApiBase, { flag: 'wx', mode: 0o600 });
+        }
       } catch (error) {
+        if (apiBasePath) {
+          try { fs.unlinkSync(apiBasePath); } catch {}
+        }
         if (tokenPath) {
           try { fs.unlinkSync(tokenPath); } catch {}
         }
@@ -201,7 +224,7 @@ function createTmuxEngine({
         }
         throw error;
       }
-      tokenArtifact = { tokenDir, tokenPath };
+      tokenArtifact = { tokenDir, tokenPath, apiBasePath };
       tokenArtifacts.set(runId, tokenArtifact);
     }
     let publishPathVar = '__palantir_sentinel_publish_path';
@@ -224,6 +247,15 @@ function createTmuxEngine({
       const safeTokenDir = tokenArtifact.tokenDir.replace(/'/g, "'\\''");
       lines.push(`__palantir_worker_token="$(cat -- '${safeTokenPath}')" || exit 78`);
       lines.push(`rm -f -- '${safeTokenPath}'`);
+      if (tokenArtifact.apiBasePath) {
+        const safeApiBasePath = tokenArtifact.apiBasePath.replace(/'/g, "'\\''");
+        // Read status is captured and the file removed UNCONDITIONALLY before
+        // acting on it, so a failed read cannot leave the file behind.
+        lines.push(`__palantir_api_base="$(cat -- '${safeApiBasePath}')"`);
+        lines.push('__palantir_api_base_rc=$?');
+        lines.push(`rm -f -- '${safeApiBasePath}'`);
+        lines.push('[ "$__palantir_api_base_rc" -eq 0 ] || exit 78');
+      }
       lines.push(`rmdir -- '${safeTokenDir}' 2>/dev/null || true`);
     }
 
@@ -247,6 +279,10 @@ function createTmuxEngine({
     const workerTokenAssignment = tokenArtifact
       ? ' PALANTIR_WORKER_TOKEN="$__palantir_worker_token"'
       : '';
+    // Expanded by the bootstrap shell, so the VALUE never appears in argv.
+    const workerApiBaseAssignment = tokenArtifact && tokenArtifact.apiBasePath
+      ? ' PALANTIR_API_BASE="$__palantir_api_base"'
+      : '';
     const quotedStdin = shq(stdinPath);
     const stdinRedirect = stdin !== undefined ? ` < ${quotedStdin}` : '';
     // The trap body is evaluated TWICE — once when the script itself is parsed,
@@ -261,7 +297,7 @@ function createTmuxEngine({
       // file first and only then clears this trap.
       lines.push(`trap ${shq(stdinCleanupCommand)} EXIT HUP INT TERM`);
     }
-    lines.push(`env -i ${workerEnvArgs.join(' ')}${workerTokenAssignment} '${safeCmd}' ${quotedArgs.join(' ')}${stdinRedirect}`);
+    lines.push(`env -i ${workerEnvArgs.join(' ')}${workerTokenAssignment}${workerApiBaseAssignment} '${safeCmd}' ${quotedArgs.join(' ')}${stdinRedirect}`);
     // Capture $? exactly once so the durable sentinel and scrollback marker
     // always describe the same agent exit. Rename makes the sentinel atomic.
     const safeSentinel = exitSentinelPath.replace(/'/g, "'\\''");

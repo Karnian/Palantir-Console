@@ -229,6 +229,65 @@ test('spawnAgent clears stale tmux actor credentials and file-backs the current 
   assert.equal(fs.existsSync(tokenPathMatch[1]), false);
 });
 
+test('spawnAgent keeps the API base out of the env -i argv and drops it without a token', async (t) => {
+  // `env -i KEY=value ...` puts every assignment into the env process's own
+  // argv, which /proc exposes to other users on this host until it execs. The
+  // remote path was fixed for exactly this; the local one runs the same risk.
+  const apiBase = 'http://console.internal:4177';
+  const withToken = uniqueRunId('api-base-filed');
+  const withoutToken = uniqueRunId('api-base-unpaired');
+  const paths = artifactPaths(withToken);
+  const bare = artifactPaths(withoutToken);
+  t.after(() => {
+    for (const filePath of [...Object.values(paths), ...Object.values(bare)]) {
+      try { fs.unlinkSync(filePath); } catch {}
+    }
+  });
+
+  const tmux = makeTmuxCommand();
+  const engine = createTmuxEngine({ execFileSync: tmux.execFileSync });
+  engine.spawnAgent(withToken, {
+    command: process.execPath,
+    args: ['--version'],
+    cwd: os.tmpdir(),
+    env: { PALANTIR_WORKER_TOKEN: 'current-run-token', PALANTIR_API_BASE: apiBase },
+  });
+
+  const script = fs.readFileSync(paths.scriptPath, 'utf-8');
+  const argvLine = script.split('\n').find((line) => line.startsWith('env -i '));
+  assert.ok(argvLine);
+  assert.equal(
+    argvLine.includes(apiBase),
+    false,
+    'the value must never appear in the env -i argument list',
+  );
+  assert.ok(
+    argvLine.includes('PALANTIR_API_BASE="$__palantir_api_base"'),
+    'it must arrive expanded by the bootstrap shell instead',
+  );
+  const apiBasePathMatch = script.match(/__palantir_api_base="\$\(cat -- '([^']+)'\)"/);
+  assert.ok(apiBasePathMatch);
+  assert.equal(fs.readFileSync(apiBasePathMatch[1], 'utf-8'), apiBase);
+
+  await runBash(paths.scriptPath);
+  assert.equal(
+    fs.existsSync(apiBasePathMatch[1]),
+    false,
+    'the bootstrap shell must unlink it before exec',
+  );
+
+  // The endpoint is only useful with a capability to present at it.
+  engine.spawnAgent(withoutToken, {
+    command: process.execPath,
+    args: ['--version'],
+    cwd: os.tmpdir(),
+    env: { PALANTIR_API_BASE: apiBase },
+  });
+  const bareScript = fs.readFileSync(bare.scriptPath, 'utf-8');
+  assert.equal(bareScript.includes(apiBase), false);
+  assert.equal(bareScript.includes('PALANTIR_API_BASE'), false);
+});
+
 test('spawnAgent runs tmux workers without ambient server credentials', async (t) => {
   const runId = uniqueRunId('ambient-server-credential');
   const paths = artifactPaths(runId);

@@ -256,6 +256,7 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
   const cwd = '/srv/root/project';
   const prefix = `/home/runner/agent bin/'quoted" $cash/*glob*`;
   const workerToken = 'worker-capability-literal-must-not-enter-argv';
+  const apiBase = 'https://argv-zero.example:8443/proxy-prefix';
   const explicitValue = `controller ' " $HOME * ? [abc]`;
   const spawn = rootAwareSpawn({ cwd });
   const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
@@ -272,6 +273,7 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
       PALANTIR_PM_TOKEN: 'pm-global-secret',
       PALANTIR_MANAGER_TOKEN: 'wrong-run-secret',
       PALANTIR_WORKER_TOKEN: workerToken,
+      PALANTIR_API_BASE: apiBase,
     },
   });
 
@@ -308,15 +310,24 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
   assert.equal(inner.includes('PALANTIR_WORKER_TOKEN="$PALANTIR_WORKER_TOKEN"'), false);
   assert.ok(inner.includes('PALANTIR_WORKER_TOKEN=$(cat --'));
   assert.ok(inner.includes('export PALANTIR_WORKER_TOKEN'));
+  assert.ok(inner.includes('PALANTIR_API_BASE=$(cat --'));
+  assert.ok(inner.includes('export PALANTIR_API_BASE'));
   assert.equal(inner.includes(workerToken), false);
+  assert.equal(inner.includes(apiBase), false);
   for (const secret of ['human-global-secret', 'pm-global-secret', 'wrong-run-secret']) {
     assert.equal(inner.includes(secret), false);
   }
-  const tokenWrite = spawn.calls.find((call) => call.stdin === workerToken);
-  assert.ok(tokenWrite, 'worker capability is transported through the secret file write');
+  const bundleWrite = spawn.calls.find((call) => call.stdin === workerToken + apiBase);
+  assert.ok(bundleWrite, 'worker capability and API base share one stdin bundle write');
   for (const call of spawn.calls) {
     assert.equal(JSON.stringify(call.args).includes(workerToken), false);
+    assert.equal(JSON.stringify(call.args).includes(apiBase), false);
   }
+  assert.equal(
+    spawn.calls.reduce((count, call) => count + call.stdin.split(apiBase).length - 1, 0),
+    1,
+    'the API base value appears exactly once, in upload stdin',
+  );
 });
 
 test('git/materialize and filesystem exec paths keep their inherited-env behavior', async () => {

@@ -15,6 +15,7 @@ const {
   augmentProcessPath,
   applyManagerCredentialPolicy,
   applyWorkerCredentialPolicy,
+  normalizeWorkerApiBase,
   createWorkerProposalTokenService,
   createManagerCapabilityTokenService,
 } = require('../services/actorTokenPolicy');
@@ -481,6 +482,17 @@ test('worker credential policy pins a run-bound token and proposal base', () => 
     PALANTIR_WORKER_TOKEN: 'run-only',
     PALANTIR_API_BASE: 'http://console.internal:4177',
   });
+});
+
+test('worker API base normalization rejects URL userinfo fail-closed', () => {
+  assert.throws(
+    () => normalizeWorkerApiBase('http://worker-user:worker-password@console.internal:4177'),
+    (err) => (
+      err.code === 'WORKER_API_BASE_USERINFO'
+      && /userinfo/.test(err.message)
+      && !/worker-user|worker-password/.test(err.message)
+    ),
+  );
 });
 
 test('worker proposal tokens are signed and bound to one run id', () => {

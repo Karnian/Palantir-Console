@@ -15,6 +15,19 @@ test('explicit worker proposal base is shared by local and remote workers', () =
   });
 });
 
+test('explicit worker proposal base rejects URL userinfo without echoing it', () => {
+  assert.throws(
+    () => resolveWorkerProposalEndpoints({
+      explicitBaseUrl: 'http://proposal-user:proposal-password@console.internal:4177',
+    }),
+    (err) => (
+      err.code === 'WORKER_API_BASE_USERINFO'
+      && /userinfo/.test(err.message)
+      && !/proposal-user|proposal-password/.test(err.message)
+    ),
+  );
+});
+
 test('local worker proposal base follows a concrete bind host without enabling remote loopback', () => {
   assert.deepEqual(resolveWorkerProposalEndpoints({
     host: '192.168.10.4',
