@@ -321,6 +321,11 @@ async function runExecutorTestCommand({
     res = await executor.exec(testRunner.bin, args, {
       cwd,
       env: useLocalNodeResolution ? buildHarvestEnvFromNode(projectNode) : undefined,
+      // The project's own test command, not one of the executor's git calls, so
+      // it keeps the full ambient environment it has always had. The git exec
+      // allowlist would strip whatever the suite happens to need and the failure
+      // would read as the agent's code breaking the tests.
+      inheritFullEnv: true,
       timeoutMs,
       maxBuffer: MAX_OUTPUT_TAIL_CHARS * 2,
     });

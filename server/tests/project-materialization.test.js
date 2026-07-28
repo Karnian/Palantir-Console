@@ -15,6 +15,7 @@ const { createAgentProfileService } = require('../services/agentProfileService')
 const { createLifecycleService } = require('../services/lifecycleService');
 const { createProjectMaterializationService } = require('../services/projectMaterializationService');
 const { createEventBus } = require('../services/eventBus');
+const { createLocalNodeExecutor } = require('../services/nodeExecutor');
 
 async function mkdb(t, prefix = 'project-materialization-') {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -162,6 +163,47 @@ function buildMaterializeHarness(db, { executor, eventBus = null } = {}) {
   });
   return { runService, projectService, taskService, nodeService, materializationService };
 }
+
+test('local materialization resolves Git through the allowlisted PATH', async (t) => {
+  const root = await tempRoot(t, 'project-materialization-exec-env-');
+  withRepoEnv(t, root);
+  const previousPath = process.env.PATH;
+  const fixtureBin = path.join(__dirname, 'fixtures', 'bin');
+  process.env.PATH = [
+    fixtureBin,
+    path.dirname(process.execPath),
+    '/usr/bin',
+    '/bin',
+  ].join(path.delimiter);
+  t.after(() => {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  });
+
+  const db = await mkdb(t, 'project-materialization-exec-env-db-');
+  const h = buildMaterializeHarness(db, { executor: createLocalNodeExecutor() });
+  const profile = seedProfile(db, { id: 'profile_exec_env' });
+  const project = h.projectService.createProject({
+    name: 'Exec env canary',
+    source_type: 'git',
+    // The fixture Git accepts this path; a system Git selected after removing
+    // PATH from the policy fails because the source deliberately does not exist.
+    repo_url: '/fixture/repo-that-does-not-exist',
+    repo_ref: 'main',
+  });
+  const task = seedTask(h.taskService, project.id, 'exec env');
+  const run = seedRun(h.runService, task.id, profile.id);
+  h.runService.claimQueuedRunForMaterialization(run.id);
+
+  const result = await h.materializationService.ensureWorkspace({
+    project,
+    nodeId: 'local',
+    runId: run.id,
+  });
+
+  assert.equal(result.ready, true);
+  assert.equal(fs.existsSync(result.workspacePath), true);
+});
 
 test('single-flight cache materialization clones once and creates per-run worktrees', async (t) => {
   const root = await tempRoot(t, 'project-materialization-root-');

@@ -12,6 +12,10 @@ const {
 } = require('../services/nodeExecutor');
 const { createWorktreeService } = require('../services/worktreeService');
 const { createFsService } = require('../services/fsService');
+const {
+  EXEC_ENV_KEYS,
+  buildExecEnv,
+} = require('../services/execEnvPolicy');
 
 test('LocalNodeExecutor resolves the current absolute Node runtime for MCP wrappers', () => {
   const executor = createLocalNodeExecutor();
@@ -338,22 +342,145 @@ test('LocalNodeExecutor.exec resolves nonzero exit without rejecting', async () 
   assert.equal(result.stderr, 'bad');
 });
 
-test('LocalNodeExecutor.exec merges override-only env with process.env base', async () => {
-  const oldBase = process.env.LOCAL_NODE_EXECUTOR_BASE_ENV;
-  process.env.LOCAL_NODE_EXECUTOR_BASE_ENV = 'base-visible';
+test('exec env policy is non-empty and keeps measured Git prerequisites', () => {
+  const selected = buildExecEnv({
+    PATH: '/fixture/bin',
+    HOME: '/fixture/home',
+    GIT_AUTHOR_EMAIL: 'fixture@example.com',
+    SSH_AUTH_SOCK: '/fixture/agent.sock',
+    LC_ALL: 'C',
+    TMPDIR: '/fixture/tmp',
+    PALANTIR_TOKEN: 'must-not-pass',
+  });
+
+  assert.ok(EXEC_ENV_KEYS.length > 0, 'exec env allowlist must not be empty');
+  assert.deepEqual(selected, {
+    PATH: '/fixture/bin',
+    HOME: '/fixture/home',
+    GIT_AUTHOR_EMAIL: 'fixture@example.com',
+    SSH_AUTH_SOCK: '/fixture/agent.sock',
+    LC_ALL: 'C',
+    TMPDIR: '/fixture/tmp',
+  });
+});
+
+test('exec env policy rejects ambient command/config/TLS bypass vectors but keeps explicit hardening', () => {
+  const ambient = {
+    GIT_SSH_COMMAND: 'ambient-command',
+    GIT_SSH: 'ambient-command',
+    GIT_PROXY_COMMAND: 'ambient-command',
+    GIT_ASKPASS: 'ambient-command',
+    GIT_TERMINAL_PROMPT: '1',
+    SSH_ASKPASS: 'ambient-command',
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'core.sshCommand',
+    GIT_CONFIG_VALUE_0: 'ambient-command',
+    GIT_CONFIG_PARAMETERS: "'core.sshCommand=ambient-command'",
+    GIT_CONFIG_GLOBAL: '/tmp/ambient-config',
+    GIT_CONFIG_SYSTEM: '/tmp/ambient-config',
+    GIT_SSL_NO_VERIFY: '1',
+    GIT_EXTERNAL_DIFF: 'ambient-command',
+    GIT_TEXTCONV_DIFF: 'ambient-command',
+    GIT_EDITOR: 'ambient-command',
+    GIT_SEQUENCE_EDITOR: 'ambient-command',
+    EDITOR: 'ambient-command',
+    VISUAL: 'ambient-command',
+    PAGER: 'ambient-command',
+  };
+  const hardening = {
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_SSH_COMMAND: 'ssh -oBatchMode=yes',
+    GIT_EXTERNAL_DIFF: '',
+    GIT_TEXTCONV_DIFF: '',
+  };
+
+  assert.deepEqual(buildExecEnv(ambient), {});
+  assert.deepEqual(buildExecEnv(ambient, hardening), hardening);
+});
+
+test('LocalNodeExecutor.exec filters ambient env, keeps explicit overrides, and leaks zero secret keys', async () => {
+  const keys = [
+    'LOCAL_NODE_EXECUTOR_BASE_ENV',
+    'PALANTIR_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'AWS_SECRET_ACCESS_KEY',
+  ];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  process.env.LOCAL_NODE_EXECUTOR_BASE_ENV = 'ambient-must-not-pass';
+  process.env.PALANTIR_TOKEN = 'palantir-secret';
+  process.env.ANTHROPIC_API_KEY = 'anthropic-secret';
+  process.env.AWS_SECRET_ACCESS_KEY = 'aws-secret';
   try {
     const executor = createLocalNodeExecutor();
     const result = await executor.exec(
       process.execPath,
-      ['-e', 'process.stdout.write(`${process.env.LOCAL_NODE_EXECUTOR_BASE_ENV}:${process.env.LOCAL_NODE_EXECUTOR_OVERRIDE_ENV}`)'],
+      [
+        '-e',
+        [
+          'const secretKeys=["PALANTIR_TOKEN","ANTHROPIC_API_KEY","AWS_SECRET_ACCESS_KEY"];',
+          'process.stdout.write(JSON.stringify({',
+          'hasPath:Object.hasOwn(process.env,"PATH"),',
+          'ambient:process.env.LOCAL_NODE_EXECUTOR_BASE_ENV,',
+          'override:process.env.LOCAL_NODE_EXECUTOR_OVERRIDE_ENV,',
+          'secretKeys:secretKeys.filter((key)=>Object.hasOwn(process.env,key))',
+          '}));',
+        ].join(''),
+      ],
       { env: { LOCAL_NODE_EXECUTOR_OVERRIDE_ENV: 'override-visible' } },
     );
 
     assert.equal(result.code, 0);
-    assert.equal(result.stdout, 'base-visible:override-visible');
+    assert.deepEqual(JSON.parse(result.stdout), {
+      hasPath: true,
+      override: 'override-visible',
+      secretKeys: [],
+    });
   } finally {
-    if (oldBase === undefined) delete process.env.LOCAL_NODE_EXECUTOR_BASE_ENV;
-    else process.env.LOCAL_NODE_EXECUTOR_BASE_ENV = oldBase;
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+});
+
+test('LocalNodeExecutor.exec keeps the full environment when a caller opts in', async () => {
+  // The project's declared test_command runs through this same exec, so the git
+  // allowlist would strip whatever the suite needs — and the resulting
+  // harvest:test failure would look like the agent broke the tests. That caller
+  // opts in; nothing else does, and the default stays filtered.
+  const keys = ['LOCAL_NODE_EXECUTOR_PROJECT_ENV', 'PALANTIR_TOKEN'];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  process.env.LOCAL_NODE_EXECUTOR_PROJECT_ENV = 'project-suite-needs-this';
+  process.env.PALANTIR_TOKEN = 'palantir-secret';
+  try {
+    const executor = createLocalNodeExecutor();
+    const script = [
+      'process.stdout.write(JSON.stringify({',
+      'project:process.env.LOCAL_NODE_EXECUTOR_PROJECT_ENV ?? null,',
+      'override:process.env.LOCAL_NODE_EXECUTOR_OVERRIDE_ENV ?? null,',
+      '}));',
+    ].join('');
+    const opts = { env: { LOCAL_NODE_EXECUTOR_OVERRIDE_ENV: 'override-visible' } };
+
+    const inherited = await executor.exec(process.execPath, ['-e', script], {
+      ...opts,
+      inheritFullEnv: true,
+    });
+    assert.deepEqual(JSON.parse(inherited.stdout), {
+      project: 'project-suite-needs-this',
+      override: 'override-visible',
+    }, 'opting in must restore the ambient variable a test suite may depend on');
+
+    const filtered = await executor.exec(process.execPath, ['-e', script], opts);
+    assert.deepEqual(JSON.parse(filtered.stdout), {
+      project: null,
+      override: 'override-visible',
+    }, 'the default must stay filtered so a new consumer cannot widen it by omission');
+  } finally {
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
   }
 });
 

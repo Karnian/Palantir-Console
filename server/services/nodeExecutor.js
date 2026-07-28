@@ -2,6 +2,7 @@ const childProcess = require('node:child_process');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
+const { buildExecEnv } = require('./execEnvPolicy');
 
 /**
  * NodeExecutor is the transport-neutral seam between the control plane and a
@@ -250,14 +251,26 @@ function createLocalNodeExecutor({ executionEngine, streamJsonEngine } = {}) {
    * operational failures into a fake exit code would make "command failed"
    * indistinguishable from "transport/limit failed" once executors go remote.
    */
-  function exec(command, args = [], { cwd, env, timeoutMs, maxBuffer } = {}) {
+  // `inheritFullEnv` exists for one caller: the project's own declared
+  // test_command. The allowlist here is scoped to what git and filesystem probes
+  // need, and a project's test suite is not that — it may want NODE_ENV, a
+  // version-manager root, a virtualenv, or any project-specific variable the
+  // operator exported before starting the console. Narrowing it would surface as
+  // a failing harvest:test and get blamed on the agent's code rather than on the
+  // environment, which is the worst shape this class of bug can take.
+  //
+  // It is opt-IN so that adding a new exec consumer cannot widen the env by
+  // accident; the default stays the allowlist.
+  function exec(command, args = [], { cwd, env, timeoutMs, maxBuffer, inheritFullEnv = false } = {}) {
     return new Promise((resolve, reject) => {
       childProcess.execFile(
         command,
         args,
         {
           cwd,
-          env: env ? { ...process.env, ...env } : undefined,
+          env: inheritFullEnv
+            ? { ...process.env, ...(env || {}) }
+            : buildExecEnv(process.env, env),
           timeout: timeoutMs,
           maxBuffer,
           encoding: 'utf-8',
