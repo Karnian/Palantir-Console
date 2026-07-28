@@ -41,10 +41,16 @@ test('migration adds structured columns and create/read round-trips them', (t) =
   const columns = db.prepare('PRAGMA table_info(agent_profiles)').all().map(row => row.name);
   assert.ok(columns.includes('model'));
   assert.ok(columns.includes('reasoning_effort'));
+  assert.ok(columns.includes('permission_mode'));
+  assert.equal(
+    db.prepare('SELECT permission_mode FROM agent_profiles WHERE id = ?').get('claude-code').permission_mode,
+    null,
+  );
 
   const created = service.createProfile(profile({ model: 'gpt-5', reasoning_effort: 'medium' }));
   assert.equal(created.model, 'gpt-5');
   assert.equal(created.reasoning_effort, 'medium');
+  assert.equal(created.permission_mode, null);
   assert.equal(service.getProfile(created.id).model, 'gpt-5');
   assert.equal(service.getProfile(created.id).reasoning_effort, 'medium');
 });
@@ -100,6 +106,107 @@ test('structured values are validated at create time', (t) => {
   }
 });
 
+test('permission_mode accepts only Claude CLI modes and only for claude workers', (t) => {
+  const { service } = setup(t);
+  const validModes = [
+    'acceptEdits',
+    'auto',
+    'bypassPermissions',
+    'default',
+    'dontAsk',
+    'manual',
+    'plan',
+  ];
+
+  for (const permission_mode of validModes) {
+    const created = service.createProfile(profile({
+      name: `Claude ${permission_mode}`,
+      command: 'claude',
+      type: 'claude-code',
+      args_template: '-p {prompt}',
+      permission_mode,
+    }));
+    assert.equal(created.permission_mode, permission_mode);
+  }
+
+  assertBadRequest(
+    () => service.createProfile(profile({
+      command: 'claude',
+      type: 'claude-code',
+      permission_mode: 'unrestricted',
+    })),
+    /permission_mode must be one of/,
+  );
+  assertBadRequest(
+    () => service.createProfile(profile({ permission_mode: 'plan' })),
+    /permission_mode only supported for claude workers/,
+  );
+});
+
+test('claude save rejects permission mode flags in the raw args_template', (t) => {
+  const { service } = setup(t);
+  for (const args_template of [
+    '-p {prompt} --permission-mode acceptEdits',
+    '-p {prompt} --permission-mode=plan',
+    '-p {prompt} "--permission-mode" bypassPermissions',
+  ]) {
+    assertBadRequest(
+      () => service.createProfile(profile({
+        command: 'claude',
+        type: 'claude-code',
+        args_template,
+      })),
+      /args_template must not set --permission-mode/,
+    );
+  }
+
+  const clean = service.createProfile(profile({
+    command: 'claude',
+    type: 'claude-code',
+    args_template: '-p {prompt}',
+  }));
+  assert.equal(clean.args_template, '-p {prompt}');
+  assertBadRequest(
+    () => service.updateProfile(clean.id, {
+      args_template: '-p {prompt} --permission-mode dontAsk',
+    }),
+    /args_template must not set --permission-mode/,
+  );
+});
+
+test('a legacy claude profile carrying the flag stays editable until the template is touched', (t) => {
+  const { service, db } = setup(t);
+  // Rows like this exist by construction: putting --permission-mode in
+  // args_template is precisely the workaround #469 describes, and the Claude
+  // spawn path has always ignored it. Raw SQL because createProfile now refuses
+  // this shape — the point is a row written before that rule existed.
+  const legacy = service.createProfile(profile({
+    command: 'claude',
+    type: 'claude-code',
+    args_template: '-p {prompt}',
+  }));
+  db.prepare('UPDATE agent_profiles SET args_template = ? WHERE id = ?')
+    .run('-p {prompt} --permission-mode acceptEdits', legacy.id);
+
+  // Editing anything else must still work. Rejecting here would 400 every
+  // future PATCH and leave the row fixable only by hand-editing the database.
+  const renamed = service.updateProfile(legacy.id, { name: 'renamed legacy' });
+  assert.equal(renamed.name, 'renamed legacy');
+  assert.equal(renamed.args_template, '-p {prompt} --permission-mode acceptEdits');
+
+  // Setting the structured field is likewise allowed; it is what fixes the row.
+  const structured = service.updateProfile(legacy.id, { permission_mode: 'plan' });
+  assert.equal(structured.permission_mode, 'plan');
+
+  // But touching the template itself now has to clean it up.
+  assertBadRequest(
+    () => service.updateProfile(legacy.id, {
+      args_template: '-p {prompt} --permission-mode acceptEdits --verbose',
+    }),
+    /args_template must not set --permission-mode/,
+  );
+});
+
 test('create rejects structured fields duplicated in args_template', (t) => {
   const { service } = setup(t);
   assertBadRequest(
@@ -130,7 +237,7 @@ test('unrelated options do not false-positive as model flags', (t) => {
     command: 'claude',
     type: 'claude-code',
     model: 'x',
-    args_template: '-p {prompt} --permission-mode bypassPermissions --mcp-config foo --max-budget-usd 5',
+    args_template: '-p {prompt} --mcp-config foo --max-budget-usd 5',
   }));
   assert.equal(claude.model, 'x');
 });
@@ -150,5 +257,16 @@ test('update validates the merged persisted and patched state', (t) => {
   assertBadRequest(
     () => service.updateProfile(structured.id, { command: 'gemini' }),
     /model only supported for codex\/claude workers/,
+  );
+
+  const claude = service.createProfile(profile({
+    command: 'claude',
+    type: 'claude-code',
+    args_template: '-p {prompt}',
+    permission_mode: 'acceptEdits',
+  }));
+  assertBadRequest(
+    () => service.updateProfile(claude.id, { command: 'codex' }),
+    /permission_mode only supported for claude workers/,
   );
 });

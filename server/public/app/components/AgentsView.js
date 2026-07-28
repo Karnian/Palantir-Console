@@ -41,6 +41,7 @@ function AgentModal({ open, onClose, agent, onSaved }) {
   const [argsTemplate, setArgsTemplate] = useState('');
   const [model, setModel] = useState('');
   const [reasoningEffort, setReasoningEffort] = useState('');
+  const [permissionMode, setPermissionMode] = useState('');
   const [icon, setIcon] = useState('');
   const [color, setColor] = useState('');
   const [maxConcurrent, setMaxConcurrent] = useState(1);
@@ -55,6 +56,7 @@ function AgentModal({ open, onClose, agent, onSaved }) {
       setArgsTemplate(agent.args_template || '');
       setModel(agent.model || '');
       setReasoningEffort(agent.reasoning_effort || '');
+      setPermissionMode(agent.permission_mode || '');
       setIcon(agent.icon || '');
       setColor(agent.color || '');
       setMaxConcurrent(agent.max_concurrent || 1);
@@ -65,6 +67,7 @@ function AgentModal({ open, onClose, agent, onSaved }) {
     } else if (open) {
       setName(''); setType('claude-code'); setCommand(''); setArgsTemplate('');
       setModel(''); setReasoningEffort('');
+      setPermissionMode('');
       setIcon(''); setColor(''); setMaxConcurrent(1); setMcpTools('');
     }
   }, [open, agent]);
@@ -87,6 +90,7 @@ function AgentModal({ open, onClose, agent, onSaved }) {
         // not reach the server's merged-state validator and 400.
         model: (vendor === 'codex' || vendor === 'claude') ? (model.trim() || null) : null,
         reasoning_effort: vendor === 'codex' ? (reasoningEffort || null) : null,
+        permission_mode: vendor === 'claude' ? (permissionMode || null) : null,
         icon: icon.trim() || undefined,
         color: color.trim() || undefined,
         max_concurrent: parseInt(maxConcurrent, 10) || 1,
@@ -130,7 +134,7 @@ function AgentModal({ open, onClose, agent, onSaved }) {
                 setType(t);
                 if (!agent) {
                   const presets = {
-                    'claude-code': { cmd: 'claude', args: '-p {prompt} --permission-mode bypassPermissions' },
+                    'claude-code': { cmd: 'claude', args: '-p {prompt}' },
                     'codex': { cmd: 'codex', args: 'exec --full-auto --skip-git-repo-check {prompt}' },
                     'gemini': { cmd: 'gemini', args: '-p {prompt} --yolo' },
                   };
@@ -170,6 +174,27 @@ function AgentModal({ open, onClose, agent, onSaved }) {
                   { value: 'low', label: 'low' },
                   { value: 'medium', label: 'medium' },
                   { value: 'high', label: 'high' },
+                ]}
+              />
+            </div>
+          `}
+          ${vendor === 'claude' && html`
+            <div class="form-field">
+              <label class="form-label" for="agent-permission-mode">Permission mode</label>
+              <${Dropdown}
+                id="agent-permission-mode"
+                className="dropdown-field"
+                value=${permissionMode}
+                onChange=${setPermissionMode}
+                options=${[
+                  { value: '', label: '(none — current default)' },
+                  { value: 'acceptEdits', label: 'acceptEdits' },
+                  { value: 'auto', label: 'auto' },
+                  { value: 'bypassPermissions', label: 'bypassPermissions' },
+                  { value: 'default', label: 'default' },
+                  { value: 'dontAsk', label: 'dontAsk' },
+                  { value: 'manual', label: 'manual' },
+                  { value: 'plan', label: 'plan' },
                 ]}
               />
             </div>

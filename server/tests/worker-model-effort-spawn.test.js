@@ -92,14 +92,15 @@ function insertProfile(db, {
   argsTemplate = 'exec --full-auto --skip-git-repo-check {prompt}',
   model = null,
   reasoningEffort = null,
+  permissionMode = null,
 }) {
   const id = `${command}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   db.prepare(`
     INSERT INTO agent_profiles (
       id, name, type, command, args_template, capabilities_json,
-      env_allowlist, max_concurrent, model, reasoning_effort
-    ) VALUES (?, ?, ?, ?, ?, '{}', '[]', 5, ?, ?)
-  `).run(id, id, command, command, argsTemplate, model, reasoningEffort);
+      env_allowlist, max_concurrent, model, reasoning_effort, permission_mode
+    ) VALUES (?, ?, ?, ?, ?, '{}', '[]', 5, ?, ?, ?)
+  `).run(id, id, command, command, argsTemplate, model, reasoningEffort, permissionMode);
   return id;
 }
 
@@ -163,6 +164,33 @@ test('claude worker forwards structured model to the stream-json spec', async (t
   assert.equal(harness.streamJsonEngine.spawned.length, 1);
   assert.equal(harness.streamJsonEngine.spawned[0].opts.model, 'claude-x');
   assert.equal(harness.executionEngine.spawned.length, 0);
+});
+
+test('claude worker keeps the existing bypassPermissions argument when permission_mode is NULL', async (t) => {
+  const harness = await createHarness(t);
+  const profileId = insertProfile(harness.db, {
+    command: 'claude',
+    argsTemplate: '-p {prompt} --permission-mode acceptEdits',
+  });
+
+  await executeWorker(harness, profileId, 'Legacy claude worker');
+
+  assert.equal(harness.streamJsonEngine.spawned.length, 1);
+  assert.equal(harness.streamJsonEngine.spawned[0].opts.permissionMode, 'bypassPermissions');
+});
+
+test('claude worker forwards structured permission_mode to the stream-json spec', async (t) => {
+  const harness = await createHarness(t);
+  const profileId = insertProfile(harness.db, {
+    command: 'claude',
+    argsTemplate: '-p {prompt}',
+    permissionMode: 'acceptEdits',
+  });
+
+  await executeWorker(harness, profileId, 'Structured claude permission mode');
+
+  assert.equal(harness.streamJsonEngine.spawned.length, 1);
+  assert.equal(harness.streamJsonEngine.spawned[0].opts.permissionMode, 'acceptEdits');
 });
 
 test('raw-SQL-contaminated structured profile fails before claim and never spawns', async (t) => {

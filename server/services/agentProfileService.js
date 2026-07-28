@@ -2,6 +2,22 @@ const crypto = require('node:crypto');
 const { BadRequestError, NotFoundError } = require('../utils/errors');
 const { resolveAgentVendor } = require('../utils/agentVendor');
 
+// Accepting a mode here means the CLI recognises the spelling, not that this
+// installation will honour it: `manual` needs a recent enough Claude Code, and
+// `auto` depends on plan/model entitlement. Neither is checkable from the
+// control plane, so an unsupported pick surfaces at spawn rather than at save.
+// Narrowing the set to dodge that would instead reject values that DO work for
+// operators who have them.
+const CLAUDE_PERMISSION_MODES = new Set([
+  'acceptEdits',
+  'auto',
+  'bypassPermissions',
+  'default',
+  'dontAsk',
+  'manual',
+  'plan',
+]);
+
 // Allowlist of safe agent commands — only these can be used as agent executables
 const ALLOWED_COMMANDS = new Set([
   'claude', 'codex', 'gemini', // known agent CLIs
@@ -72,15 +88,38 @@ function getConfigFragments(tokens) {
   return fragments.map(normalizeConfigFragment);
 }
 
+function tokenizeArgsTemplate(argsTemplate) {
+  return (String(argsTemplate || '').match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(unquoteToken);
+}
+
+function hasPermissionModeOption(tokens) {
+  return tokens.some(token => /^--permission-mode($|=)/.test(token));
+}
+
 function validateStructuredModelEffort(mergedProfile) {
   const vendor = resolveAgentVendor(mergedProfile.command);
-  const { model, reasoning_effort: reasoningEffort } = mergedProfile;
+  const {
+    model,
+    reasoning_effort: reasoningEffort,
+    permission_mode: permissionMode,
+  } = mergedProfile;
   const argsTemplate = String(mergedProfile.args_template || '');
   // Unquote each token to mirror buildAgentArgs' execution-time quote stripping
   // (Codex P2 review) so a quoted flag like `"--model"` / `"-c"` cannot evade
   // the conflict scan and re-inject at runtime.
-  const tokens = (argsTemplate.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(unquoteToken);
+  const tokens = tokenizeArgsTemplate(argsTemplate);
   const configFragments = getConfigFragments(tokens);
+
+  if (permissionMode != null) {
+    if (vendor !== 'claude') {
+      throw new BadRequestError('permission_mode only supported for claude workers');
+    }
+    if (typeof permissionMode !== 'string' || !CLAUDE_PERMISSION_MODES.has(permissionMode)) {
+      throw new BadRequestError(
+        `permission_mode must be one of: ${Array.from(CLAUDE_PERMISSION_MODES).join(', ')}`,
+      );
+    }
+  }
 
   if (reasoningEffort != null) {
     if (vendor !== 'codex') {
@@ -120,13 +159,41 @@ function validateStructuredModelEffort(mergedProfile) {
   }
 }
 
+// `templateIsBeingSet` is what keeps this from stranding legacy rows. The scan
+// has to run against the merged state to see the vendor, but rejecting on a
+// template the caller did not touch would 400 every future PATCH of a profile
+// that already carries the flag — including one that only renames it. Such rows
+// exist by construction: putting --permission-mode in args_template is exactly
+// the workaround #469 says users reach for. They would then be uneditable
+// through the API or UI, fixable only by hand-editing the database.
+//
+// Migrating the flag into the column instead was rejected: the Claude spawn path
+// ignores args_template entirely, so a stored `--permission-mode acceptEdits`
+// has never had any effect. Lifting it into the structured field would start
+// honouring it at upgrade time — a silent permission change on rows nobody
+// touched. Leaving it inert and refusing it the moment the template is edited
+// keeps every behaviour change explicit.
+function validateAgentProfileForSave(mergedProfile, { templateIsBeingSet = true } = {}) {
+  validateStructuredModelEffort(mergedProfile);
+
+  if (
+    templateIsBeingSet
+    && resolveAgentVendor(mergedProfile.command) === 'claude'
+    && hasPermissionModeOption(tokenizeArgsTemplate(mergedProfile.args_template))
+  ) {
+    throw new BadRequestError(
+      'args_template must not set --permission-mode; use the structured permission_mode field',
+    );
+  }
+}
+
 function createAgentProfileService(db) {
   const stmts = {
     getAll: db.prepare('SELECT * FROM agent_profiles ORDER BY name ASC'),
     getById: db.prepare('SELECT * FROM agent_profiles WHERE id = ?'),
     insert: db.prepare(`
-      INSERT INTO agent_profiles (id, name, type, command, args_template, capabilities_json, env_allowlist, icon, color, max_concurrent, model, reasoning_effort)
-      VALUES (@id, @name, @type, @command, @args_template, @capabilities_json, @env_allowlist, @icon, @color, @max_concurrent, @model, @reasoning_effort)
+      INSERT INTO agent_profiles (id, name, type, command, args_template, capabilities_json, env_allowlist, icon, color, max_concurrent, model, reasoning_effort, permission_mode)
+      VALUES (@id, @name, @type, @command, @args_template, @capabilities_json, @env_allowlist, @icon, @color, @max_concurrent, @model, @reasoning_effort, @permission_mode)
     `),
     // update: dynamic — see updateProfile() below
     delete: db.prepare('DELETE FROM agent_profiles WHERE id = ?'),
@@ -150,12 +217,18 @@ function createAgentProfileService(db) {
     return profile;
   }
 
-  function createProfile({ name, type, command, args_template, capabilities_json, env_allowlist, icon, color, max_concurrent, model, reasoning_effort }) {
+  function createProfile({ name, type, command, args_template, capabilities_json, env_allowlist, icon, color, max_concurrent, model, reasoning_effort, permission_mode }) {
     if (!name) throw new BadRequestError('Agent name is required');
     if (!type) throw new BadRequestError('Agent type is required');
     rejectRetiredAgentType(type);
     const validatedCommand = validateCommand(command);
-    validateStructuredModelEffort({ command: validatedCommand, args_template, model, reasoning_effort });
+    validateAgentProfileForSave({
+      command: validatedCommand,
+      args_template,
+      model,
+      reasoning_effort,
+      permission_mode,
+    });
     const id = `agent_${crypto.randomUUID().slice(0, 8)}`;
     stmts.insert.run({
       id, name, type, command: validatedCommand,
@@ -167,11 +240,12 @@ function createAgentProfileService(db) {
       max_concurrent: max_concurrent || 3,
       model: model || null,
       reasoning_effort: reasoning_effort || null,
+      permission_mode: permission_mode || null,
     });
     return stmts.getById.get(id);
   }
 
-  const AGENT_UPDATABLE = ['name', 'type', 'command', 'args_template', 'capabilities_json', 'env_allowlist', 'icon', 'color', 'max_concurrent', 'model', 'reasoning_effort'];
+  const AGENT_UPDATABLE = ['name', 'type', 'command', 'args_template', 'capabilities_json', 'env_allowlist', 'icon', 'color', 'max_concurrent', 'model', 'reasoning_effort', 'permission_mode'];
 
   function updateProfile(id, fields) {
     const existing = getProfile(id);
@@ -181,7 +255,11 @@ function createAgentProfileService(db) {
       fields.command = validateCommand(fields.command);
       mergedProfile.command = fields.command;
     }
-    validateStructuredModelEffort(mergedProfile);
+    validateAgentProfileForSave(mergedProfile, {
+      // Also re-scan when the vendor changes into claude: the template was
+      // legitimate for the old vendor but is not for this one.
+      templateIsBeingSet: 'args_template' in fields || 'command' in fields,
+    });
     const setClauses = [];
     const params = { id };
     for (const col of AGENT_UPDATABLE) {

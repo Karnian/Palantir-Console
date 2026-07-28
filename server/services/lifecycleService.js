@@ -1659,7 +1659,7 @@ function createLifecycleService({
               env: spawnEnv,
               model: profile.model || undefined,
               systemPrompt,
-              permissionMode: 'bypassPermissions',
+              permissionMode: profile.permission_mode ?? 'bypassPermissions',
               allowedTools: mcpTools.length > 0 ? mcpTools : undefined,
               mcpConfig: effectiveMcpConfig,
               isManager: false,
