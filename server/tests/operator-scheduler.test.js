@@ -12,6 +12,8 @@ const { createRunService } = require('../services/runService');
 const { createProjectService } = require('../services/projectService');
 const { createNodeService } = require('../services/nodeService');
 const { createOperatorInstanceService } = require('../services/operatorInstanceService');
+const { createManagerRegistry } = require('../services/managerRegistry');
+const { createManagerMessageQueueService } = require('../services/managerMessageQueueService');
 const {
   createOperatorScheduleService,
   nextFireForRule,
@@ -265,6 +267,333 @@ test('restart marks the external delivery window uncertain instead of replaying 
   assert.equal(h.scheduleService.claimNext(new Date('2026-07-23T00:02:00.000Z')), null);
 });
 
+// Seeds an invocation that reached `running` against a manager run which then
+// SURVIVES the restart (boot resume leaves it 'running'), i.e. the state where
+// no recovery evidence exists.
+function seedRunningInvocation(h, instance, schedule, { at = '2026-07-23T00:00:01.000Z' } = {}) {
+  h.scheduleService.runNow(schedule.id, new Date('2026-07-23T00:00:00.000Z'));
+  const claimed = h.scheduleService.claimNext(new Date(at));
+  h.scheduleService.markDelivering(claimed.id, claimed.claim_token);
+  const managerRun = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: `operator:${instance.id}`,
+    operator_instance_id: instance.id,
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(managerRun.id, 'running', { force: true });
+  h.scheduleService.markRunning(claimed.id, claimed.claim_token, managerRun.id);
+  h.db.prepare('UPDATE operator_invocations SET started_at=? WHERE id=?').run(at, claimed.id);
+  return { claimed, managerRun };
+}
+
+// Regression: narrowing the restart backstop to 'delivering' stranded these
+// forever, and the per-Operator active UNIQUE index then blocked the Operator's
+// every later invocation — across restarts. Asserting the status is not enough:
+// what actually matters is that the OS-4 slot is free again.
+test('restart releases a running invocation that has no recovery evidence at all', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Lost completion', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  const { managerRun } = seedRunningInvocation(h, instance, schedule);
+
+  const recovery = h.scheduleService.recoverAfterRestart(new Date('2026-07-23T00:00:30.000Z'));
+
+  // The manager run resumed, and there is no queue row (migration 071 does not
+  // backfill pre-existing invocations) — neither evidence path can fire.
+  assert.equal(h.runService.getRun(managerRun.id).status, 'running');
+  assert.deepEqual(recovery, { pending: 0, uncertain: 1 });
+  const released = h.scheduleService.listInvocations(schedule.id)[0];
+  assert.equal(released.status, 'uncertain');
+  assert.equal(released.waiting_reason, 'restart_delivery_uncertain');
+  assert.equal(
+    h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+    'pending',
+    'OS-4 must be free again after the restart backstop',
+  );
+});
+
+// Pins the recoverAfterRestart ORDER: the evidence-based sweep must run before
+// the unconditional backstop, or every dead manager run collapses into the
+// generic reason and the operator loses the diagnosis.
+test('restart prefers the specific manager-run reason over the generic backstop', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Dead manager', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  const { managerRun } = seedRunningInvocation(h, instance, schedule);
+  h.runService.updateRunStatus(managerRun.id, 'stopped', { force: true });
+
+  const recovery = h.scheduleService.recoverAfterRestart(new Date('2026-07-23T00:10:00.000Z'));
+
+  assert.deepEqual(recovery, { pending: 0, uncertain: 1 });
+  const reconciled = h.scheduleService.listInvocations(schedule.id)[0];
+  assert.equal(reconciled.status, 'uncertain');
+  assert.equal(reconciled.waiting_reason, 'manager_run_terminal');
+  assert.match(reconciled.last_error, /status stopped/);
+});
+
+test('manager slot replacement terminals the superseded run so its stale invocation can recover', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Replaced manager', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  h.scheduleService.runNow(schedule.id, new Date('2026-07-23T00:00:00.000Z'));
+  const claimed = h.scheduleService.claimNext(new Date('2026-07-23T00:00:01.000Z'));
+  h.scheduleService.markDelivering(claimed.id, claimed.claim_token);
+  const oldRun = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: `operator:${instance.id}`,
+    operator_instance_id: instance.id,
+    prompt: 'old operator',
+  });
+  const replacementRun = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: `operator:${instance.id}`,
+    operator_instance_id: instance.id,
+    prompt: 'replacement operator',
+  });
+  h.runService.updateRunStatus(oldRun.id, 'running', { force: true });
+  h.runService.updateRunStatus(replacementRun.id, 'running', { force: true });
+  h.scheduleService.markRunning(claimed.id, claimed.claim_token, oldRun.id);
+  h.db.prepare('UPDATE operator_invocations SET started_at=? WHERE id=?')
+    .run('2026-07-23T00:00:01.000Z', claimed.id);
+
+  const registry = createManagerRegistry({ runService: h.runService });
+  const adapter = {
+    isSessionAlive: () => true,
+    disposeSession: () => true,
+  };
+  registry.setActive(`operator:${instance.id}`, oldRun.id, adapter);
+  registry.setActive(`operator:${instance.id}`, replacementRun.id, adapter);
+
+  assert.equal(h.runService.getRun(oldRun.id).status, 'stopped');
+  assert.equal(h.runService.getRun(replacementRun.id).status, 'running');
+  const swept = h.scheduleService.sweepTerminalRunning(
+    new Date('2026-07-23T00:10:00.000Z'),
+    5 * 60 * 1000,
+  );
+  assert.equal(swept.length, 1);
+  assert.equal(swept[0].status, 'uncertain');
+  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].waiting_reason, 'manager_run_terminal');
+});
+
+// Regression, driven through the REAL path rather than a pre-seeded queue row:
+// codexAdapter persists non-terminal failures under the same event_type and
+// invocationId as a completion. The queue's restart reconciler used to accept
+// them, terminalizing the row under a reason the scheduler's recovery does not
+// recognize — which, combined with a resumed manager run, stranded the
+// invocation and shut that Operator down permanently.
+test('a non-terminal turn failure neither closes the queue lane nor strands the invocation', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Transient codex error', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+
+  // An in-flight scheduler queue row from before the restart: claimed by an
+  // owner that no longer exists, lease long expired.
+  h.db.prepare(`
+    INSERT INTO manager_message_queue (
+      id, conversation_id, idempotency_key, adapter_invocation_id,
+      payload_json, display_text, status, available_at,
+      claim_token, claimed_by, lease_expires_at, run_id
+    ) VALUES (?,?,?,?,'{"text":"go"}','go','processing',0,?,?,?,?)
+  `).run('msg_transient', `operator:${instance.id}`, `invocation:${claimed.id}`,
+    claimed.id, 'tok_old', 'owner_before_restart', 1, managerRun.id);
+
+  // codexAdapter's non-terminal failure — same event type, same invocation id.
+  h.runService.addRunEvent(managerRun.id, 'mgr.turn_failed', JSON.stringify({
+    summaryText: 'transient codex error',
+    data: {
+      kind: 'codex_error', errorKind: 'stream', message: 'boom',
+      terminal: false, invocationId: claimed.id,
+    },
+  }));
+
+  const queue = createManagerMessageQueueService({ db: h.db, eventBus: h.eventBus, tickMs: 100000 });
+  t.after(() => queue.stop());
+  assert.equal(queue.reconcileStaleClaims(), 1);
+
+  const queueRow = h.db
+    .prepare('SELECT status, terminal_reason FROM manager_message_queue WHERE id=?')
+    .get('msg_transient');
+  assert.equal(
+    queueRow.terminal_reason,
+    'restart_delivery_uncertain',
+    'a non-terminal failure must not be mistaken for a completion',
+  );
+
+  h.scheduleService.recoverAfterRestart(new Date('2026-07-23T00:10:00.000Z'));
+  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'uncertain');
+  assert.equal(
+    h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+    'pending',
+    'OS-4 must be free again',
+  );
+});
+
+test('restart reconciles a persisted terminal turn event even while the manager run is active', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Persisted completion', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  h.scheduleService.runNow(schedule.id, new Date('2026-07-23T00:00:00.000Z'));
+  const claimed = h.scheduleService.claimNext(new Date('2026-07-23T00:00:01.000Z'));
+  h.scheduleService.markDelivering(claimed.id, claimed.claim_token);
+  const managerRun = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: `operator:${instance.id}`,
+    operator_instance_id: instance.id,
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(managerRun.id, 'running');
+  h.scheduleService.markRunning(claimed.id, claimed.claim_token, managerRun.id);
+  h.runService.addRunEvent(managerRun.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: claimed.id, terminal: true },
+  }));
+
+  const recovered = h.scheduleService.recoverAfterRestart(
+    new Date('2026-07-23T00:01:00.000Z'),
+  );
+  assert.deepEqual(recovered, { pending: 0, uncertain: 0 });
+  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'completed');
+});
+
+test('restart correlation loss releases a stale invocation even when the manager resumed', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Resumed manager', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  h.scheduleService.runNow(schedule.id, new Date('2026-07-23T00:00:00.000Z'));
+  const claimed = h.scheduleService.claimNext(new Date('2026-07-23T00:00:01.000Z'));
+  h.scheduleService.markDelivering(claimed.id, claimed.claim_token);
+  const managerRun = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: `operator:${instance.id}`,
+    operator_instance_id: instance.id,
+    prompt: 'resumed operator',
+  });
+  h.runService.updateRunStatus(managerRun.id, 'running', { force: true });
+  h.scheduleService.markRunning(claimed.id, claimed.claim_token, managerRun.id);
+  h.db.prepare('UPDATE operator_invocations SET started_at=? WHERE id=?')
+    .run('2026-07-23T00:00:01.000Z', claimed.id);
+  h.db.prepare(`
+    INSERT INTO manager_message_queue (
+      id, conversation_id, idempotency_key, adapter_invocation_id,
+      payload_json, display_text, status, available_at, run_id, terminal_reason, failed_at
+    ) VALUES (?, ?, ?, ?, '{}', '', 'failed', 0, ?, 'restart_delivery_uncertain', datetime('now'))
+  `).run(
+    'msg_restart_correlation',
+    `operator:${instance.id}`,
+    `invocation:${claimed.id}`,
+    claimed.id,
+    managerRun.id,
+  );
+
+  const swept = h.scheduleService.sweepTerminalRunning(
+    new Date('2026-07-23T00:10:00.000Z'),
+    5 * 60 * 1000,
+  );
+  assert.equal(h.runService.getRun(managerRun.id).status, 'running');
+  assert.equal(swept.length, 1);
+  assert.equal(swept[0].status, 'uncertain');
+  assert.equal(swept[0].waiting_reason, 'restart_delivery_uncertain');
+  assert.match(swept[0].last_error, /correlation was lost/);
+});
+
+test('unreachable manager slot releases a stale invocation when its queue row records session end', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Unreachable manager', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  h.scheduleService.runNow(schedule.id, new Date('2026-07-23T00:00:00.000Z'));
+  const claimed = h.scheduleService.claimNext(new Date('2026-07-23T00:00:01.000Z'));
+  h.scheduleService.markDelivering(claimed.id, claimed.claim_token);
+  const managerRun = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: `operator:${instance.id}`,
+    operator_instance_id: instance.id,
+    prompt: 'unreachable operator',
+  });
+  h.runService.updateRunStatus(managerRun.id, 'running', { force: true });
+  h.scheduleService.markRunning(claimed.id, claimed.claim_token, managerRun.id);
+  h.db.prepare('UPDATE operator_invocations SET started_at=? WHERE id=?')
+    .run('2026-07-23T00:00:01.000Z', claimed.id);
+  h.db.prepare(`
+    INSERT INTO manager_message_queue (
+      id, conversation_id, idempotency_key, adapter_invocation_id,
+      payload_json, display_text, status, available_at, run_id, terminal_reason, failed_at
+    ) VALUES (?, ?, ?, ?, '{}', '', 'failed', 0, ?, 'session_ended_during_processing', datetime('now'))
+  `).run(
+    'msg_session_ended',
+    `operator:${instance.id}`,
+    `invocation:${claimed.id}`,
+    claimed.id,
+    managerRun.id,
+  );
+
+  const swept = h.scheduleService.sweepTerminalRunning(
+    new Date('2026-07-23T00:10:00.000Z'),
+    5 * 60 * 1000,
+  );
+  assert.equal(h.runService.getRun(managerRun.id).status, 'running');
+  assert.equal(swept.length, 1);
+  assert.equal(swept[0].status, 'uncertain');
+  assert.equal(swept[0].waiting_reason, 'session_ended_during_processing');
+  assert.match(swept[0].last_error, /session ended/);
+});
+
+test('terminal manager-run audit waits for the running staleness threshold', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Young terminal', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  h.scheduleService.runNow(schedule.id, new Date('2026-07-23T00:00:00.000Z'));
+  const claimed = h.scheduleService.claimNext(new Date('2026-07-23T00:00:01.000Z'));
+  h.scheduleService.markDelivering(claimed.id, claimed.claim_token);
+  const managerRun = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: `operator:${instance.id}`,
+    operator_instance_id: instance.id,
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(managerRun.id, 'running');
+  h.scheduleService.markRunning(claimed.id, claimed.claim_token, managerRun.id);
+  h.db.prepare('UPDATE operator_invocations SET started_at=? WHERE id=?')
+    .run('2026-07-23T00:09:00.000Z', claimed.id);
+  h.runService.updateRunStatus(managerRun.id, 'failed');
+  h.runService.deleteRun(managerRun.id);
+
+  assert.deepEqual(
+    h.scheduleService.sweepTerminalRunning(new Date('2026-07-23T00:10:00.000Z'), 5 * 60 * 1000),
+    [],
+  );
+  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
+  const swept = h.scheduleService.sweepTerminalRunning(
+    new Date('2026-07-23T00:14:01.000Z'),
+    5 * 60 * 1000,
+  );
+  assert.equal(swept.length, 1);
+  assert.equal(swept[0].status, 'uncertain');
+  assert.match(swept[0].last_error, /status missing/);
+});
+
 test('scheduler delivers through the instance conversation and correlates turn completion', async (t) => {
   const h = harness(t);
   const { project, instance } = createMappedOperator(h);
@@ -452,6 +781,135 @@ test('scheduler marks ambiguous delivery failures uncertain and never replays th
   assert.equal(sends, 1);
 });
 
+// The delivery deadline has ONE owner: the durable queue. The scheduler used to
+// arm a second timer over the same await, but because the queue arms its timer
+// synchronously inside drainConversation — before sendMessage even returns —
+// the queue always won and the scheduler's branch was unreachable. This wires
+// BOTH layers so the real interaction is what gets asserted.
+test('a hung delivery times out uncertain through the real queue and never reaches the adapter', async (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h, { name: 'Hung folder' });
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Hung', prompt: 'Hang', rule: { kind: 'interval', minutes: 60 },
+  });
+  h.scheduleService.runNow(schedule.id, new Date('2026-07-23T00:00:00.000Z'));
+  const top = h.runService.createRun({
+    is_manager: true, manager_layer: 'top', conversation_id: 'top', prompt: 'top',
+  });
+
+  const queue = createManagerMessageQueueService({
+    db: h.db, eventBus: h.eventBus, tickMs: 100000, immediateDispatchTimeoutMs: 25,
+  });
+  t.after(() => queue.stop());
+  let releaseColdSpawn;
+  const adapterCalls = [];
+  queue.setDispatcher(async (_conversationId, _payload, invocationId, control) => {
+    // Stands in for a cold spawn that outruns the deadline.
+    await new Promise((resolve) => { releaseColdSpawn = resolve; });
+    if (!control.canDispatch()) {
+      const err = new Error('delivery fenced before adapter');
+      err.code = 'OPERATOR_DELIVERY_CANCELLED';
+      throw err;
+    }
+    adapterCalls.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: top.id } };
+  });
+
+  const scheduler = createOperatorScheduler({
+    operatorScheduleService: h.scheduleService,
+    conversationService: {
+      sendMessage(conversationId, { text, invocationId }) {
+        return queue.enqueue(conversationId, { text }, {
+          idempotencyKey: `invocation:${invocationId}`,
+          adapterInvocationId: invocationId,
+          requireImmediate: true,
+        });
+      },
+    },
+    managerRegistry: { getActiveRunId() { return top.id; } },
+    projectService: h.projectService,
+    runService: h.runService,
+    clock: () => new Date('2026-07-23T00:00:02.000Z'),
+  });
+
+  await scheduler.tick();
+
+  const hung = h.scheduleService.listInvocations(schedule.id)[0];
+  assert.equal(hung.status, 'uncertain');
+  assert.match(hung.last_error, /timed out after 25ms/);
+  assert.equal(
+    h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+    'pending',
+    'the timeout must release the Operator single-flight slot',
+  );
+
+  // The abandoned cold spawn finishes late: the durable claim fence must keep
+  // it out of the adapter, or the turn runs twice.
+  releaseColdSpawn();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(adapterCalls, [], 'a timed-out delivery must never reach the adapter');
+});
+
+// Isolation half of #458: one hung delivery must not hold up other Operators.
+test('a hung delivery does not stop another Operator from being delivered in the same tick', async (t) => {
+  const h = harness(t);
+  const first = createMappedOperator(h, { name: 'Hung folder' });
+  const second = createMappedOperator(h, { name: 'Healthy folder' });
+  const hungSchedule = h.scheduleService.createSchedule(first.instance.id, {
+    name: 'Hung', prompt: 'Hang', rule: { kind: 'interval', minutes: 60 },
+  });
+  const healthySchedule = h.scheduleService.createSchedule(second.instance.id, {
+    name: 'Healthy', prompt: 'Proceed', rule: { kind: 'interval', minutes: 60 },
+  });
+  h.scheduleService.runNow(hungSchedule.id, new Date('2026-07-23T00:00:00.000Z'));
+  h.scheduleService.runNow(healthySchedule.id, new Date('2026-07-23T00:00:01.000Z'));
+  const top = h.runService.createRun({
+    is_manager: true, manager_layer: 'top', conversation_id: 'top', prompt: 'top',
+  });
+  const healthyRun = h.runService.createRun({
+    is_manager: true, manager_layer: 'operator',
+    conversation_id: `operator:${second.instance.id}`,
+    operator_instance_id: second.instance.id, parent_run_id: top.id,
+    prompt: 'healthy operator',
+  });
+
+  let resolveHung;
+  const sends = [];
+  const scheduler = createOperatorScheduler({
+    operatorScheduleService: h.scheduleService,
+    conversationService: {
+      sendMessage(conversationId) {
+        sends.push(conversationId);
+        if (conversationId === `operator:${first.instance.id}`) {
+          return new Promise((resolve) => { resolveHung = resolve; });
+        }
+        return { status: 'sent', target: { kind: 'pm', runId: healthyRun.id } };
+      },
+    },
+    managerRegistry: { getActiveRunId() { return top.id; } },
+    projectService: h.projectService,
+    runService: h.runService,
+    clock: () => new Date('2026-07-23T00:00:02.000Z'),
+  });
+
+  const tick = scheduler.tick();
+  // The healthy Operator is delivered on its own lane while the first is stuck.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    h.scheduleService.listInvocations(healthySchedule.id)[0].status,
+    'running',
+    'a hung lane must not hold up another Operator',
+  );
+  assert.deepEqual(sends, [
+    `operator:${first.instance.id}`,
+    `operator:${second.instance.id}`,
+  ]);
+
+  resolveHung({ status: 'sent', target: { kind: 'pm', runId: healthyRun.id } });
+  await tick;
+});
+
+
 test('scheduler fails a structured permanent rejection even when its message says deliver message', async (t) => {
   const h = harness(t);
   const { instance } = createMappedOperator(h);
@@ -516,4 +974,62 @@ test('scheduler retries only an explicitly retryable busy rejection', async (t) 
   const row = h.scheduleService.listInvocations(schedule.id)[0];
   assert.equal(row.status, 'pending');
   assert.equal(row.waiting_reason, 'operator_busy');
+});
+
+// claimNext opens a BEGIN IMMEDIATE and can throw. If that escaped the lane,
+// Promise.all would reject the tick while siblings were still delivering,
+// tick()'s finally would release `inflight`, and the next tick would stack a
+// fresh set of lanes on top of the in-flight ones — silently exceeding the cap.
+test('a claim failure ends only its own lane and never releases the tick early', async (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Claim race', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  h.scheduleService.runNow(schedule.id, new Date('2026-07-23T00:00:00.000Z'));
+  const top = h.runService.createRun({
+    is_manager: true, manager_layer: 'top', conversation_id: 'top', prompt: 'top',
+  });
+
+  let claims = 0;
+  let releaseDelivery;
+  let deliverySettled = false;
+  const scheduleService = {
+    ...h.scheduleService,
+    claimNext(now) {
+      claims += 1;
+      // Second lane races the first into BEGIN IMMEDIATE and loses.
+      if (claims === 2) throw new Error('database is locked');
+      return h.scheduleService.claimNext(now);
+    },
+  };
+  const scheduler = createOperatorScheduler({
+    operatorScheduleService: scheduleService,
+    conversationService: {
+      sendMessage() {
+        return new Promise((resolve) => {
+          releaseDelivery = () => {
+            deliverySettled = true;
+            resolve({ status: 'sent', target: { kind: 'pm', runId: top.id } });
+          };
+        });
+      },
+    },
+    managerRegistry: { getActiveRunId() { return top.id; } },
+    projectService: h.projectService,
+    runService: h.runService,
+    clock: () => new Date('2026-07-23T00:00:02.000Z'),
+  });
+
+  const tick = scheduler.tick();
+  let resolvedEarly = false;
+  await Promise.race([
+    tick.then(() => { resolvedEarly = true; }),
+    new Promise((resolve) => setTimeout(resolve, 50)),
+  ]);
+  assert.equal(deliverySettled, false, 'the surviving lane is still delivering');
+  assert.equal(resolvedEarly, false, 'the tick must not resolve while a lane is in flight');
+
+  releaseDelivery();
+  await tick;
 });

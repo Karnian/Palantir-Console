@@ -267,6 +267,13 @@ test('attempted once and manual invocations expire after the conservative 24-hou
 test('expiry sweep runs before materialization in every scheduler tick', async () => {
   const calls = [];
   const service = {
+    reconcilePersistedTerminalEvents() {
+      calls.push('events');
+    },
+    sweepTerminalRunning(now) {
+      assert.equal(now.toISOString(), '2026-07-02T01:00:00.000Z');
+      calls.push('terminal');
+    },
     sweepExpired(now) {
       assert.equal(now.toISOString(), '2026-07-02T01:00:00.000Z');
       calls.push('sweep');
@@ -285,7 +292,37 @@ test('expiry sweep runs before materialization in every scheduler tick', async (
     clock: () => new Date('2026-07-02T01:00:00.000Z'),
   });
   await scheduler.tick();
-  assert.deepEqual(calls, ['sweep', 'materialize', 'claim']);
+  // Recovery/materialization order is the contract; the trailing claims are one
+  // per delivery lane (each lane polls claimNext until it comes back empty).
+  assert.deepEqual(calls.slice(0, 4), ['events', 'terminal', 'sweep', 'materialize']);
+  assert.ok(calls.length > 4, 'the tick must go on to claim work');
+  assert.deepEqual([...new Set(calls.slice(4))], ['claim']);
+});
+
+test('scheduler forwards the configured running staleness threshold during restart recovery', async () => {
+  const calls = [];
+  const service = {
+    recoverAfterRestart(now, runningStaleMs) {
+      calls.push(['recover', now.toISOString(), runningStaleMs]);
+    },
+    reconcilePersistedTerminalEvents() {},
+    sweepTerminalRunning() {},
+    sweepExpired() {},
+    materializeDue() {},
+    claimNext() { return null; },
+  };
+  const scheduler = createOperatorScheduler({
+    operatorScheduleService: service,
+    clock: () => new Date('2026-07-02T01:00:00.000Z'),
+    runningStaleMs: 60 * 60 * 1000,
+    intervalMs: 999999,
+  });
+  scheduler.start();
+  await scheduler.awaitDrain();
+  scheduler.stop();
+  assert.deepEqual(calls, [
+    ['recover', '2026-07-02T01:00:00.000Z', 60 * 60 * 1000],
+  ]);
 });
 
 const workerSource = `

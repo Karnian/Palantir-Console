@@ -463,7 +463,25 @@ function createConversationService({
   //          on success, queue an Operator→Top notice on the Operator run's parent
   //          (but only if that parent still matches the currently active
   //           Top, to avoid leaking stale signals into unrelated runs).
-  function sendToManagerSlot(conversationId, { text, images, projectId, codebaseProjectId, turnMode, source, invocationId } = {}) {
+  function sendToManagerSlot(conversationId, {
+    text,
+    images,
+    projectId,
+    codebaseProjectId,
+    turnMode,
+    source,
+    invocationId,
+    dispatchFence,
+  } = {}) {
+    const assertDispatchAllowed = () => {
+      if (typeof dispatchFence !== 'function' || dispatchFence() === true) return;
+      const err = new Error('scheduled manager delivery was cancelled before adapter acceptance');
+      err.httpStatus = 409;
+      err.code = 'OPERATOR_DELIVERY_CANCELLED';
+      err.retryable = false;
+      throw err;
+    };
+    assertDispatchAllowed();
     const isTop = conversationId === 'top';
     let operatorResolved = null;
     if (!isTop) {
@@ -516,7 +534,16 @@ function createConversationService({
             })
             .then((spawnResult) => sendToManagerSlot(
               spawnResult?.run?.conversation_id || conversationId,
-              { text, images, projectId, codebaseProjectId, turnMode, source, invocationId }, // A2a/OS-3: preserve turn context through async cold-spawn recursion
+              {
+                text,
+                images,
+                projectId,
+                codebaseProjectId,
+                turnMode,
+                source,
+                invocationId,
+                dispatchFence,
+              }, // A2a/OS-3: preserve turn context and the durable delivery fence through async cold-spawn recursion
             ));
         }
         run = spawn.run;
@@ -948,6 +975,10 @@ function createConversationService({
       else lastTurnContexts.delete(run.id);
     };
     try {
+      // Cold spawn/materialization may have taken longer than the scheduler
+      // deadline. Re-check the durable queue claim immediately before crossing
+      // the adapter boundary so a timed-out invocation cannot execute late.
+      assertDispatchAllowed();
       const result = adapter.runTurn(run.id, {
         text: effectiveText,
         // The adapter must deliver `text` to the model, but persist this
@@ -1274,10 +1305,11 @@ function createConversationService({
   // manager path. Memory/codebase injection, binding checks, parent-notice
   // peek→commit-drain, and adapter acceptance therefore stay single-sourced.
   if (managerMessageQueueService) {
-    managerMessageQueueService.setDispatcher((conversationId, payload, messageId) => (
+    managerMessageQueueService.setDispatcher((conversationId, payload, messageId, control) => (
       sendToManagerSlot(conversationId, {
         ...(payload || {}),
         invocationId: messageId,
+        dispatchFence: control?.canDispatch,
       })
     ));
   }

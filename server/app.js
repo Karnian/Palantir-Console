@@ -1426,6 +1426,12 @@ function createApp(options = {}) {
     runService,
     perConversationCap: options.managerMessageQueueCap,
     tickMs: options.managerMessageQueueTickMs,
+    // Single owner of the scheduled-delivery deadline. The scheduler used to
+    // arm a second timer over the same await; because this one is armed first
+    // (synchronously, inside drainConversation) it always won, leaving the
+    // scheduler's branch unreachable.
+    immediateDispatchTimeoutMs: options.managerDispatchTimeoutMs
+      ?? (Number.parseInt(process.env.PALANTIR_MANAGER_DISPATCH_TIMEOUT_MS, 10) || undefined),
   });
   const operatorIdentityLifecycleService = createOperatorIdentityLifecycleService({
     operatorProfileService,
@@ -1488,6 +1494,10 @@ function createApp(options = {}) {
     eventBus,
     intervalMs: options.operatorSchedulerIntervalMs
       ?? (Number.parseInt(process.env.PALANTIR_OPERATOR_SCHEDULER_INTERVAL_MS, 10) || 20000),
+    maxConcurrentDeliveries: options.operatorSchedulerMaxConcurrentDeliveries
+      ?? (Number.parseInt(process.env.PALANTIR_OPERATOR_SCHEDULER_MAX_CONCURRENT_DELIVERIES, 10) || undefined),
+    runningStaleMs: options.operatorSchedulerRunningStaleMs
+      ?? (Number.parseInt(process.env.PALANTIR_OPERATOR_SCHEDULER_RUNNING_STALE_MS, 10) || undefined),
   });
   const operatorSchedulerEnabled = options.operatorSchedulerEnabled ?? !process.env.NODE_TEST_CONTEXT;
   if (operatorSchedulerEnabled) operatorScheduler.start();
