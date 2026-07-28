@@ -408,13 +408,20 @@ function createOperatorSpawnService({
     // construct, not a user-selected profile), so if no profile is found we
     // fall through to the resolver's defaults.
     let envAllowlist;
+    let providerEnv = [];
     let pmMcpTools = [];
     try {
       if (agentProfileService) {
         const profiles = agentProfileService.listProfiles();
         const managerProfile = profiles.find(p => p.type === adapterType);
         if (managerProfile) {
-          if (managerProfile.env_allowlist) {
+          if (typeof agentProfileService.resolveEnvPolicy === 'function') {
+            const policy = agentProfileService.resolveEnvPolicy(managerProfile);
+            if (policy.valid) {
+              envAllowlist = policy.effectiveKeys;
+              providerEnv = policy.providers;
+            }
+          } else if (managerProfile.env_allowlist) {
             const parsed = JSON.parse(managerProfile.env_allowlist);
             if (Array.isArray(parsed)) envAllowlist = parsed;
           }
@@ -441,6 +448,7 @@ function createOperatorSpawnService({
       vendor: adapterType,
       scrubHumanToken: actorTokens.separated || goalFeatureActive(),
       diagnosticContext: 'manager:fresh:operator',
+      providerEnv,
     }));
     // A REMOTE Operator authenticates on the POD (its own ~/.codex), not the
     // control plane, and gets env:{} at runtime — so control-plane Codex auth is

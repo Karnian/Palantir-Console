@@ -229,6 +229,9 @@ function validateCreateAgent(req, res, next) {
   optionalString(body, 'icon', 'icon');
   optionalString(body, 'color', 'color');
   optionalNumber(body, 'max_concurrent', 'max_concurrent');
+  if ('environment_provider_ids' in body && !Array.isArray(body.environment_provider_ids)) {
+    throw new BadRequestError('environment_provider_ids must be an array');
+  }
   next();
 }
 
@@ -271,6 +274,9 @@ function validateUpdateAgent(req, res, next) {
   optionalString(body, 'icon', 'icon');
   optionalString(body, 'color', 'color');
   optionalNumber(body, 'max_concurrent', 'max_concurrent');
+  if ('environment_provider_ids' in body && !Array.isArray(body.environment_provider_ids)) {
+    throw new BadRequestError('environment_provider_ids must be an array');
+  }
   next();
 }
 

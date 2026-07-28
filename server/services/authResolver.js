@@ -730,6 +730,7 @@ function buildManagerSpawnEnv({
   authEnv = {},
   envAllowlist,
   bearerEnvKeys,
+  providerEnv,
   vendor,
   scrubHumanToken = false,
   diagnosticContext,
@@ -780,12 +781,29 @@ function buildManagerSpawnEnv({
       .filter((key) => baseEnv[key] != null && !Object.prototype.hasOwnProperty.call(env, key))
       .sort();
     if (droppedKeys.length > 0) {
+      const droppedSet = new Set(droppedKeys);
+      const providerMatches = Array.isArray(providerEnv)
+        ? providerEnv.map((provider) => ({
+          id: provider && provider.id,
+          name: provider && provider.name,
+          keys: Array.isArray(provider && provider.envKeys)
+            ? provider.envKeys.filter((key) => droppedSet.has(key)).sort()
+            : [],
+        })).filter((provider) => provider.keys.length > 0)
+        : [];
+      const diagnostic = {
+        context: diagnosticContext,
+        vendor: resolveAgentVendor(vendor),
+        keys: droppedKeys,
+      };
+      // Keep the no-provider diagnostic byte-identical. Provider annotations
+      // exist only when an operator declaration actually explains a dropped
+      // key, and they contain names only, never process-env values.
+      if (providerMatches.length > 0) {
+        diagnostic.providers = providerMatches;
+      }
       console.warn(
-        `[security] manager_spawn_env_dropped ${JSON.stringify({
-          context: diagnosticContext,
-          vendor: resolveAgentVendor(vendor),
-          keys: droppedKeys,
-        })}`
+        `[security] manager_spawn_env_dropped ${JSON.stringify(diagnostic)}`
       );
     }
   }

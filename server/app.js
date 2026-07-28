@@ -73,6 +73,8 @@ const { createPresetService } = require('./services/presetService');
 const { createWorkerPresetsRouter } = require('./routes/workerPresets');
 const { createMcpTemplateService } = require('./services/mcpTemplateService');
 const { createMcpTemplatesRouter } = require('./routes/mcpTemplates');
+const { createEnvironmentProviderService } = require('./services/environmentProviderService');
+const { createEnvironmentProvidersRouter } = require('./routes/environmentProviders');
 const { createModelPolicyService } = require('./services/modelPolicyService');
 const { createModelPoliciesRouter } = require('./routes/modelPolicies');
 const { createMemoryService } = require('./services/memoryService');
@@ -1244,6 +1246,7 @@ function createApp(options = {}) {
   const runService = createRunService(db, eventBus);
   const resolveOperatorConversationId = createOperatorConversationIdResolver(db);
   const agentProfileService = createAgentProfileService(db);
+  const environmentProviderService = createEnvironmentProviderService(db);
   const nodeSummaryService = options.nodeSummaryService || createNodeSummaryService({
     nodeService,
     runService,
@@ -1867,6 +1870,7 @@ function createApp(options = {}) {
   // the same base — the CRUD router's /:id routes don't match the deeper path.
   app.use('/api/operator/profiles', createOperatorProfileMemoryRouter({ memoryService, operatorProfileService }));
   app.use('/api/mcp-server-templates', createMcpTemplatesRouter({ mcpTemplateService }));
+  app.use('/api/environment-providers', createEnvironmentProvidersRouter({ environmentProviderService }));
   app.use('/api/model-policies', createModelPoliciesRouter({ modelPolicyService }));
   app.use('/api/skill-packs', createSkillPacksRouter({ skillPackService, registryService }));
   app.use('/api/projects', createSkillPacksRouter.projectBindings({ skillPackService }));
@@ -2014,6 +2018,7 @@ function createApp(options = {}) {
     nodeService,
     repoPreflightService,
     agentProfileService,
+    environmentProviderService,
     nodeSummaryService,
     lifecycleService,
     projectMaterializationService,

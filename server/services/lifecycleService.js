@@ -1112,6 +1112,13 @@ function createLifecycleService({
       actorTokens,
     });
     const profile = agentProfileService.getProfile(agentProfileId);
+    const profileEnvPolicy = typeof agentProfileService.resolveEnvPolicy === 'function'
+      ? agentProfileService.resolveEnvPolicy(profile)
+      : null;
+    const effectiveProfileEnvKeys = profileEnvPolicy
+      ? (profileEnvPolicy.valid ? profileEnvPolicy.effectiveKeys : [])
+      : parseEnvAllowlistArray(profile.env_allowlist);
+    const effectiveProfileEnvAllowlist = JSON.stringify(effectiveProfileEnvKeys);
     try {
       runService.setSessionSnapshot(run.id, {
         sessionModel: profile.model || null,
@@ -1310,12 +1317,13 @@ function createLifecycleService({
     // provenance still exists. Preset and skill-pack MCP configs came through
     // operator-controlled template CRUD and retain auto-forwarding. Project MCP
     // files (including repo_relpath) never grant themselves host-env access:
-    // their bearer key must already be in the operator-managed profile
-    // env_allowlist. mergeMcp3 erases this provenance, so collection and policy
-    // enforcement must happen before the merge.
+    // their bearer key must already be in the operator-managed profile's
+    // effective env policy (explicit env_allowlist plus non-secret provider
+    // declarations). mergeMcp3 erases this provenance, so collection and
+    // policy enforcement must happen before the merge.
     const trustedBearerEnvKeys = [];
     const bearerEnvFailures = [];
-    const explicitProfileEnvKeys = new Set(parseEnvAllowlistArray(profile.env_allowlist));
+    const explicitProfileEnvKeys = new Set(effectiveProfileEnvKeys);
     const effectiveAliases = new Set();
     const mcpSources = [
       { source: 'preset', config: presetMcp, autoAllow: true },
@@ -1612,12 +1620,12 @@ function createLifecycleService({
         // message surfaces in the response.
         let isolatedOpts = null;
         let spawnEnv = buildWorkerEnv(
-          parseEnvAllowlist(profile.env_allowlist, trustedBearerEnvKeys),
+          parseEnvAllowlist(effectiveProfileEnvAllowlist, trustedBearerEnvKeys),
         );
         let presetAuthCleanup = null;
         if (presetResolution && presetResolution.isolated) {
           const auth = await _authResolver.resolveClaudeAuthForIsolated({
-            envAllowlist: parseEnvAllowlistArray(profile.env_allowlist),
+            envAllowlist: effectiveProfileEnvKeys,
             ..._authResolverOpts,
           });
           runService.addRunEvent(run.id, 'preset:auth_sources', JSON.stringify({
@@ -1664,7 +1672,7 @@ function createLifecycleService({
               mcpConfig: effectiveMcpConfig,
               isManager: false,
               envAllowlist: [
-                ...parseEnvAllowlistArray(profile.env_allowlist),
+                ...effectiveProfileEnvKeys,
                 ...trustedBearerEnvKeys,
               ],
               ...(isolatedOpts || {}),
@@ -1837,7 +1845,7 @@ function createLifecycleService({
             stdin: workerInvocation.stdin,
             cwd,
             env: buildWorkerEnv(
-              parseEnvAllowlist(profile.env_allowlist, trustedBearerEnvKeys),
+              parseEnvAllowlist(effectiveProfileEnvAllowlist, trustedBearerEnvKeys),
             ),
             // Remote clean-env execution must preserve allowlisted variables
             // that exist only in the pod login shell. Values present on the
@@ -1845,7 +1853,7 @@ function createLifecycleService({
             // explicit env -i assignments.
             envAllowlist: isRemoteNode
               ? [...new Set([
-                ...parseEnvAllowlistArray(profile.env_allowlist),
+                ...effectiveProfileEnvKeys,
                 ...(Array.isArray(trustedBearerEnvKeys) ? trustedBearerEnvKeys : []),
               ])]
               : undefined,

@@ -68,7 +68,7 @@ function parseMcpTools(capabilitiesJson) {
 // already swallow the same parse error, and diverging would recreate exactly
 // the fresh/resume asymmetry this function exists to remove. `undefined` is
 // the safe direction: it grants no extra keys.
-function resolveResumeEnvAllowlist(agentProfileService, { profileId, adapterType } = {}) {
+function resolveResumeEnvPolicy(agentProfileService, { profileId, adapterType } = {}) {
   if (!agentProfileService) return undefined;
   let profile = null;
   try {
@@ -80,9 +80,17 @@ function resolveResumeEnvAllowlist(agentProfileService, { profileId, adapterType
   } catch { /* treat an unreadable profile as "no allowlist" */ }
   if (!profile || !profile.env_allowlist) return undefined;
   try {
+    if (typeof agentProfileService.resolveEnvPolicy === 'function') {
+      const policy = agentProfileService.resolveEnvPolicy(profile);
+      if (!policy.valid) throw new Error('env policy contains invalid JSON');
+      return {
+        envAllowlist: policy.effectiveKeys,
+        providers: policy.providers,
+      };
+    }
     const parsed = JSON.parse(profile.env_allowlist);
     if (!Array.isArray(parsed)) throw new Error('not an array');
-    return parsed;
+    return { envAllowlist: parsed, providers: [] };
   } catch (err) {
     console.warn(
       `[security] manager_env_allowlist_unreadable ${JSON.stringify({
@@ -93,6 +101,10 @@ function resolveResumeEnvAllowlist(agentProfileService, { profileId, adapterType
     );
     return undefined;
   }
+}
+
+function resolveResumeEnvAllowlist(agentProfileService, opts = {}) {
+  return resolveResumeEnvPolicy(agentProfileService, opts)?.envAllowlist;
 }
 
 // authResolverOpts is forwarded into resolveManagerAuth for every preflight
@@ -196,10 +208,11 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
             buildManagerSystemPromptModule({ adapter, port, token: !!token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable() }),
             buildTopIdentitySection({ topRunId: r.id }), // MD-2a: resumed Top's own run id
           ].filter(Boolean).join('\n\n');
-          const envAllowlist = resolveResumeEnvAllowlist(agentProfileService, {
+          const envPolicy = resolveResumeEnvPolicy(agentProfileService, {
             profileId: r.agent_profile_id,
             adapterType,
           });
+          const envAllowlist = envPolicy?.envAllowlist;
           const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
           const resolvedSpawnEnv = buildManagerSpawnEnv({
             baseEnv: actorSpawnBaseEnv,
@@ -208,6 +221,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
             vendor: adapterType,
             scrubHumanToken: actorTokens.separated,
             diagnosticContext: 'manager:resume:top',
+            providerEnv: envPolicy?.providers,
           });
           if (authCtx.canAuth) {
             const spawnEnv = applyManagerCredentialPolicy(
@@ -462,9 +476,10 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 // (P5-S4c) — resolve auth for the run's ACTUAL adapter, not a
                 // hardcoded 'codex' (a local Claude Operator would otherwise be
                 // stopped/misauthed via Codex auth). (Codex P5-S4c BLOCKER.)
-                const envAllowlist = resolveResumeEnvAllowlist(agentProfileService, {
+                const envPolicy = resolveResumeEnvPolicy(agentProfileService, {
                   adapterType,
                 });
+                const envAllowlist = envPolicy?.envAllowlist;
                 const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
                 const resolvedSpawnEnv = isRemoteNode ? {} : buildManagerSpawnEnv({
                   baseEnv: actorSpawnBaseEnv,
@@ -473,6 +488,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   vendor: adapterType,
                   scrubHumanToken: actorTokens.separated || goalActive,
                   diagnosticContext: 'manager:resume:operator',
+                  providerEnv: envPolicy?.providers,
                 });
                 // A REMOTE Operator authenticates on the pod (~/.codex), not the
                 // control plane — resume it even when control-plane Codex auth is
@@ -661,13 +677,26 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     // Fail-closed on malformed env_allowlist: a user who hand-edits the row
     // and corrupts it must NOT silently re-enable all default credentials.
     let envAllowlist;
+    let providerEnv = [];
     if (resolvedProfile && resolvedProfile.env_allowlist) {
       try {
-        const parsed = JSON.parse(resolvedProfile.env_allowlist);
-        if (!Array.isArray(parsed)) {
-          throw new Error('env_allowlist must be a JSON array');
+        if (
+          agentProfileService
+          && typeof agentProfileService.resolveEnvPolicy === 'function'
+        ) {
+          const policy = agentProfileService.resolveEnvPolicy(resolvedProfile);
+          if (!policy.valid) {
+            throw new Error('env policy contains invalid JSON');
+          }
+          envAllowlist = policy.effectiveKeys;
+          providerEnv = policy.providers;
+        } else {
+          const parsed = JSON.parse(resolvedProfile.env_allowlist);
+          if (!Array.isArray(parsed)) {
+            throw new Error('env_allowlist must be a JSON array');
+          }
+          envAllowlist = parsed;
         }
-        envAllowlist = parsed;
       } catch (parseErr) {
         startingManager = false;
         return res.status(400).json({
@@ -690,6 +719,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       vendor: adapterType,
       scrubHumanToken: actorTokens.separated,
       diagnosticContext: 'manager:fresh:top',
+      providerEnv,
     });
     if (!authCtx.canAuth) {
       startingManager = false;

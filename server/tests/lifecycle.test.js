@@ -15,6 +15,7 @@ const { createRunService } = require('../services/runService');
 const { createTaskService } = require('../services/taskService');
 const { createProjectService } = require('../services/projectService');
 const { createAgentProfileService } = require('../services/agentProfileService');
+const { createEnvironmentProviderService } = require('../services/environmentProviderService');
 const { createLifecycleService } = require('../services/lifecycleService');
 const { createEventBus } = require('../services/eventBus');
 
@@ -399,6 +400,90 @@ test('executeTask: env_allowlist is filtered from process.env', async (t) => {
 
   // Cleanup
   delete process.env._PALANTIR_TEST_VAR;
+});
+
+test('executeTask: provider env reaches the child but provider-only secrets stay blocked until profile approval', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const environmentProviders = createEnvironmentProviderService(db);
+  const execEngine = makeStubExecutionEngine();
+  const sje = makeStubStreamJsonEngine();
+  const lc = createLifecycleService({
+    runService: rs,
+    taskService: ts,
+    agentProfileService: aps,
+    projectService: ps,
+    executionEngine: execEngine,
+    streamJsonEngine: sje,
+    worktreeService: null,
+    eventBus: null,
+  });
+
+  const previous = {
+    PROVIDER_REGION_CANARY: process.env.PROVIDER_REGION_CANARY,
+    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
+    CUSTOM_PROVIDER_API_KEY: process.env.CUSTOM_PROVIDER_API_KEY,
+  };
+  process.env.PROVIDER_REGION_CANARY = 'ap-northeast-test';
+  process.env.AWS_SECRET_ACCESS_KEY = 'aws-secret-value';
+  process.env.CUSTOM_PROVIDER_API_KEY = 'custom-secret-value';
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const provider = environmentProviders.createProvider({
+    name: 'operator-declared-provider',
+    env_keys: [
+      'PROVIDER_REGION_CANARY',
+      'AWS_SECRET_ACCESS_KEY',
+      'CUSTOM_PROVIDER_API_KEY',
+    ],
+  });
+  const project = seedProject(db);
+  const firstTask = seedTask(db, project.id);
+  const profile = seedProfile(db, { command: 'codex' });
+  aps.updateProfile(profile.id, {
+    environment_provider_ids: [provider.id],
+  });
+
+  await lc.executeTask(firstTask.id, {
+    agentProfileId: profile.id,
+    prompt: 'provider env test',
+  });
+
+  const providerOnlyEnv = execEngine.spawned[0].opts.env;
+  assert.equal(providerOnlyEnv.PROVIDER_REGION_CANARY, 'ap-northeast-test');
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(providerOnlyEnv, 'AWS_SECRET_ACCESS_KEY'),
+    false,
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(providerOnlyEnv, 'CUSTOM_PROVIDER_API_KEY'),
+    false,
+  );
+
+  aps.updateProfile(profile.id, {
+    env_allowlist: JSON.stringify([
+      'AWS_SECRET_ACCESS_KEY',
+      'CUSTOM_PROVIDER_API_KEY',
+    ]),
+  });
+  const secondTask = seedTask(db, project.id);
+  await lc.executeTask(secondTask.id, {
+    agentProfileId: profile.id,
+    prompt: 'explicit secret approval test',
+  });
+
+  const explicitlyApprovedEnv = execEngine.spawned[1].opts.env;
+  assert.equal(explicitlyApprovedEnv.PROVIDER_REGION_CANARY, 'ap-northeast-test');
+  assert.equal(explicitlyApprovedEnv.AWS_SECRET_ACCESS_KEY, 'aws-secret-value');
+  assert.equal(explicitlyApprovedEnv.CUSTOM_PROVIDER_API_KEY, 'custom-secret-value');
 });
 
 test('executeTask: worker receives only a run-bound memory proposal capability', async (t) => {

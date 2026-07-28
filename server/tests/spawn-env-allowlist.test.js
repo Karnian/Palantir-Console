@@ -711,6 +711,99 @@ test('fresh Top and boot-resumed Top/Operator use the same profile env_allowlist
   });
 });
 
+test('fresh and resumed managers inherit declared provider env while provider-only secrets remain dropped and attributed', async (t) => {
+  await withProcessEnv({
+    PROVIDER_MANAGER_REGION: 'manager-region',
+    AWS_SECRET_ACCESS_KEY: 'manager-secret-must-not-be-logged',
+  }, async () => {
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (line) => warnings.push(String(line));
+    try {
+      const { createManagerRouter } = require('../routes/manager');
+      const { createEnvironmentProviderService } = require('../services/environmentProviderService');
+      const configureProvider = (harness) => {
+        const provider = createEnvironmentProviderService(harness.db).createProvider({
+          name: 'manager-declared-provider',
+          env_keys: ['PROVIDER_MANAGER_REGION', 'AWS_SECRET_ACCESS_KEY'],
+        });
+        harness.agentProfileService.updateProfile('claude-code', {
+          environment_provider_ids: [provider.id],
+        });
+      };
+      const authResolverOpts = {
+        hasKeychain: () => true,
+        hasCredentialsFile: () => false,
+      };
+
+      const fresh = await createManagerDbHarness(t, 'palantir-provider-env-fresh');
+      configureProvider(fresh);
+      const freshApp = express();
+      freshApp.use(express.json());
+      freshApp.use('/api/manager', createManagerRouter({
+        runService: fresh.runService,
+        managerAdapterFactory: fresh.managerAdapterFactory,
+        managerRegistry: fresh.managerRegistry,
+        conversationService: fresh.conversationService,
+        agentProfileService: fresh.agentProfileService,
+        authResolverOpts,
+      }));
+      const response = await invokeApp(freshApp, {
+        method: 'POST',
+        path: '/api/manager/start',
+        body: {
+          prompt: 'fresh provider allowlist',
+          agent_profile_id: 'claude-code',
+        },
+      });
+      assert.equal(response.status, 201, JSON.stringify(response.body));
+      const freshCall = fresh.calls.find((call) => !call.opts.resumeSessionId);
+      assert.ok(freshCall);
+
+      const resumed = await createManagerDbHarness(t, 'palantir-provider-env-resume');
+      configureProvider(resumed);
+      const stale = resumed.runService.createRun({
+        is_manager: true,
+        prompt: 'resume provider allowlist',
+        agent_profile_id: 'claude-code',
+        manager_adapter: 'claude-code',
+        manager_layer: 'top',
+        conversation_id: 'top',
+      });
+      resumed.runService.updateRunStatus(stale.id, 'running', { force: true });
+      resumed.runService.updateClaudeSessionId(stale.id, 'resume-provider-session');
+      createManagerRouter({
+        runService: resumed.runService,
+        managerAdapterFactory: resumed.managerAdapterFactory,
+        managerRegistry: resumed.managerRegistry,
+        conversationService: resumed.conversationService,
+        agentProfileService: resumed.agentProfileService,
+        authResolverOpts,
+      });
+      const resumedCall = resumed.calls.find((call) => call.runId === stale.id);
+      assert.ok(resumedCall);
+
+      for (const captured of [freshCall, resumedCall]) {
+        assert.equal(captured.opts.env.PROVIDER_MANAGER_REGION, 'manager-region');
+        assert.equal(hasOwn(captured.opts.env, 'AWS_SECRET_ACCESS_KEY'), false);
+      }
+      assert.deepEqual(resumedCall.opts.env, freshCall.opts.env);
+
+      for (const context of ['manager:fresh:top', 'manager:resume:top']) {
+        const line = warnings.find((entry) => (
+          entry.includes(`"context":"${context}"`)
+          && entry.includes('"name":"manager-declared-provider"')
+          && entry.includes('AWS_SECRET_ACCESS_KEY')
+        ));
+        assert.ok(line, `missing provider-attributed diagnostic for ${context}`);
+        assert.doesNotMatch(line, /manager-secret-must-not-be-logged/);
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+});
+
 test('fresh and resume security diagnostics are emitted before an unavailable-auth gate', async (t) => {
   await withProcessEnv({
     PALANTIR_SKIP_HOST_CREDENTIALS: '1',

@@ -17,7 +17,7 @@ const MANAGER_PROFILE_TYPES = {
   'codex': 'codex',
 };
 
-function computeAuthForProfile(profile, resolverOpts = {}) {
+function computeAuthForProfile(profile, resolverOpts = {}, agentProfileService = null) {
   const adapterType = MANAGER_PROFILE_TYPES[profile && profile.type];
   if (!adapterType) return null;
   let envAllowlist;
@@ -45,6 +45,20 @@ function computeAuthForProfile(profile, resolverOpts = {}) {
     }
     envAllowlist = parsed;
   }
+  if (
+    agentProfileService
+    && typeof agentProfileService.resolveEnvPolicy === 'function'
+  ) {
+    const policy = agentProfileService.resolveEnvPolicy(profile);
+    if (!policy.valid) {
+      return {
+        canAuth: false,
+        sources: [],
+        diagnostics: ['environment provider env_keys must be valid JSON arrays'],
+      };
+    }
+    envAllowlist = policy.effectiveKeys;
+  }
   const ctx = resolveManagerAuth(adapterType, { envAllowlist, ...resolverOpts });
   return {
     canAuth: !!ctx.canAuth,
@@ -64,7 +78,10 @@ function createAgentsRouter({ agentProfileService, providerRegistry, authResolve
     // PR5: attach per-profile manager auth preflight so the frontend picker
     // can render a green/red status dot without N+1 probing. Non-manager
     // profiles get `auth: null` and stay untouched.
-    const enriched = agents.map(a => ({ ...a, auth: computeAuthForProfile(a, authResolverOpts) }));
+    const enriched = agents.map(a => ({
+      ...a,
+      auth: computeAuthForProfile(a, authResolverOpts, agentProfileService),
+    }));
     res.json({ agents: enriched });
   }));
 
@@ -88,7 +105,7 @@ function createAgentsRouter({ agentProfileService, providerRegistry, authResolve
     const runningCount = agentProfileService.getRunningCount(req.params.id);
     // PR5: include auth preflight so a targeted fetch (e.g. picker refresh
     // after credentials are added) doesn't need a second round-trip.
-    const auth = computeAuthForProfile(agent, authResolverOpts);
+    const auth = computeAuthForProfile(agent, authResolverOpts, agentProfileService);
     res.json({ agent: { ...agent, auth }, runningCount });
   }));
 

@@ -1,6 +1,7 @@
 const crypto = require('node:crypto');
 const { BadRequestError, NotFoundError } = require('../utils/errors');
 const { resolveAgentVendor } = require('../utils/agentVendor');
+const { resolveProviderEnvPolicy } = require('./providerEnvPolicy');
 
 // Allowlist of safe agent commands — only these can be used as agent executables
 const ALLOWED_COMMANDS = new Set([
@@ -134,47 +135,147 @@ function createAgentProfileService(db) {
       SELECT COUNT(*) as count FROM runs
       WHERE agent_profile_id = ? AND status = 'running'
     `),
+    getEnvironmentProviders: db.prepare(`
+      SELECT ep.*
+      FROM environment_providers ep
+      JOIN agent_profile_environment_providers apep
+        ON apep.environment_provider_id = ep.id
+      WHERE apep.agent_profile_id = ?
+      ORDER BY ep.name ASC
+    `),
+    getEnvironmentProviderById: db.prepare(
+      'SELECT id FROM environment_providers WHERE id = ?',
+    ),
+    deleteEnvironmentProviderBindings: db.prepare(
+      'DELETE FROM agent_profile_environment_providers WHERE agent_profile_id = ?',
+    ),
+    insertEnvironmentProviderBinding: db.prepare(`
+      INSERT INTO agent_profile_environment_providers (
+        agent_profile_id, environment_provider_id
+      ) VALUES (?, ?)
+    `),
   };
+
+  function validateEnvironmentProviderIds(value) {
+    if (value == null) return [];
+    if (!Array.isArray(value)) {
+      throw new BadRequestError('environment_provider_ids must be an array');
+    }
+    const ids = [];
+    const seen = new Set();
+    for (const id of value) {
+      if (typeof id !== 'string' || !id) {
+        throw new BadRequestError(
+          'environment_provider_ids entries must be non-empty strings',
+        );
+      }
+      if (seen.has(id)) continue;
+      if (!stmts.getEnvironmentProviderById.get(id)) {
+        throw new BadRequestError(`environment provider not found: ${id}`);
+      }
+      seen.add(id);
+      ids.push(id);
+    }
+    return ids;
+  }
+
+  function replaceEnvironmentProviderBindings(profileId, providerIds) {
+    stmts.deleteEnvironmentProviderBindings.run(profileId);
+    for (const providerId of providerIds) {
+      stmts.insertEnvironmentProviderBinding.run(profileId, providerId);
+    }
+  }
+
+  function resolveEnvPolicy(profileOrId) {
+    const profile = typeof profileOrId === 'string'
+      ? stmts.getById.get(profileOrId)
+      : profileOrId;
+    if (!profile) {
+      throw new NotFoundError(`Agent profile not found: ${profileOrId}`);
+    }
+    const providers = stmts.getEnvironmentProviders.all(profile.id);
+    return resolveProviderEnvPolicy(profile.env_allowlist, providers);
+  }
+
+  function hydrateEnvironmentProviders(profile) {
+    const policy = resolveEnvPolicy(profile);
+    // Preserve the exact pre-#457 profile shape while no provider is bound.
+    // This keeps existing API consumers and spawn/auth behavior byte-identical.
+    if (policy.providers.length === 0) return profile;
+    return {
+      ...profile,
+      environment_provider_ids: policy.providers.map((provider) => provider.id),
+      environment_providers: policy.providers.map((provider) => ({
+        id: provider.id,
+        name: provider.name,
+        env_keys: provider.envKeys,
+        inherited_env_keys: provider.inheritedKeys,
+        secret_env_keys: provider.secretKeys,
+        withheld_secret_env_keys: provider.withheldSecretKeys,
+      })),
+      effective_env_allowlist: policy.effectiveKeys,
+    };
+  }
 
   function listProfiles() {
     // A profile of a retired type (e.g. a migration-retained opencode row —
     // see 069_remove_opencode_agent_profile.sql's live-run guard) stays in
     // the table for FK/recovery purposes but must not be offered as a
     // pickable choice going forward.
-    return stmts.getAll.all().filter((profile) => profile.type !== 'opencode');
+    return stmts.getAll.all()
+      .filter((profile) => profile.type !== 'opencode')
+      .map(hydrateEnvironmentProviders);
   }
 
   function getProfile(id) {
     const profile = stmts.getById.get(id);
     if (!profile) throw new NotFoundError(`Agent profile not found: ${id}`);
-    return profile;
+    return hydrateEnvironmentProviders(profile);
   }
 
-  function createProfile({ name, type, command, args_template, capabilities_json, env_allowlist, icon, color, max_concurrent, model, reasoning_effort }) {
+  function createProfile({
+    name,
+    type,
+    command,
+    args_template,
+    capabilities_json,
+    env_allowlist,
+    icon,
+    color,
+    max_concurrent,
+    model,
+    reasoning_effort,
+    environment_provider_ids,
+  } = {}) {
     if (!name) throw new BadRequestError('Agent name is required');
     if (!type) throw new BadRequestError('Agent type is required');
     rejectRetiredAgentType(type);
     const validatedCommand = validateCommand(command);
     validateStructuredModelEffort({ command: validatedCommand, args_template, model, reasoning_effort });
+    const providerIds = validateEnvironmentProviderIds(environment_provider_ids);
     const id = `agent_${crypto.randomUUID().slice(0, 8)}`;
-    stmts.insert.run({
-      id, name, type, command: validatedCommand,
-      args_template: args_template || null,
-      capabilities_json: capabilities_json || '{}',
-      env_allowlist: env_allowlist || '[]',
-      icon: icon || null,
-      color: color || null,
-      max_concurrent: max_concurrent || 3,
-      model: model || null,
-      reasoning_effort: reasoning_effort || null,
-    });
-    return stmts.getById.get(id);
+    db.transaction(() => {
+      stmts.insert.run({
+        id, name, type, command: validatedCommand,
+        args_template: args_template || null,
+        capabilities_json: capabilities_json || '{}',
+        env_allowlist: env_allowlist || '[]',
+        icon: icon || null,
+        color: color || null,
+        max_concurrent: max_concurrent || 3,
+        model: model || null,
+        reasoning_effort: reasoning_effort || null,
+      });
+      replaceEnvironmentProviderBindings(id, providerIds);
+    })();
+    return getProfile(id);
   }
 
   const AGENT_UPDATABLE = ['name', 'type', 'command', 'args_template', 'capabilities_json', 'env_allowlist', 'icon', 'color', 'max_concurrent', 'model', 'reasoning_effort'];
 
   function updateProfile(id, fields) {
-    const existing = getProfile(id);
+    const existing = stmts.getById.get(id);
+    if (!existing) throw new NotFoundError(`Agent profile not found: ${id}`);
     const mergedProfile = { ...existing, ...fields };
     rejectRetiredAgentType(mergedProfile.type);
     if (fields.command) {
@@ -182,6 +283,13 @@ function createAgentProfileService(db) {
       mergedProfile.command = fields.command;
     }
     validateStructuredModelEffort(mergedProfile);
+    const shouldReplaceProviders = Object.prototype.hasOwnProperty.call(
+      fields,
+      'environment_provider_ids',
+    );
+    const providerIds = shouldReplaceProviders
+      ? validateEnvironmentProviderIds(fields.environment_provider_ids)
+      : null;
     const setClauses = [];
     const params = { id };
     for (const col of AGENT_UPDATABLE) {
@@ -190,10 +298,15 @@ function createAgentProfileService(db) {
         params[col] = fields[col] ?? null;
       }
     }
-    if (setClauses.length > 0) {
-      db.prepare(`UPDATE agent_profiles SET ${setClauses.join(', ')} WHERE id = @id`).run(params);
-    }
-    return stmts.getById.get(id);
+    db.transaction(() => {
+      if (setClauses.length > 0) {
+        db.prepare(`UPDATE agent_profiles SET ${setClauses.join(', ')} WHERE id = @id`).run(params);
+      }
+      if (shouldReplaceProviders) {
+        replaceEnvironmentProviderBindings(id, providerIds);
+      }
+    })();
+    return getProfile(id);
   }
 
   function deleteProfile(id) {
@@ -205,7 +318,15 @@ function createAgentProfileService(db) {
     return stmts.countRunning.get(profileId).count;
   }
 
-  return { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, getRunningCount };
+  return {
+    listProfiles,
+    getProfile,
+    createProfile,
+    updateProfile,
+    deleteProfile,
+    getRunningCount,
+    resolveEnvPolicy,
+  };
 }
 
 module.exports = { createAgentProfileService, validateStructuredModelEffort };
