@@ -41,7 +41,8 @@ function stubExecEngine() {
     },
     isAlive() { return true; },
     detectExitCode() { return null; },
-    getOutput() { return ''; },
+    output: '',
+    getOutput() { return this.output; },
     sendInput(runId, text) { inputs.push({ runId, text }); return true; },
     kill(runId) { killed.push(runId); return true; },
     discoverGhostSessions() { return []; },
@@ -707,6 +708,179 @@ test('remote Claude start acknowledgement loss keeps one running owner and never
   const events = h.runService.getRunEvents(run.id);
   assert.ok(events.some((event) => event.event_type === 'spawn:remote_ownership_uncertain'));
   assert.equal(events.some((event) => event.event_type === 'error'), false);
+});
+
+test('a node whose kind is local is not treated as remote just because its id is not "local"', async (t) => {
+  const db = await mkdb(t);
+  const h = buildHarness(db, { eventBus: createEventBus() });
+  // nodeService supports registering a local node under any id and routes it to
+  // the local executor. `node_id !== 'local'` is therefore not a remote test —
+  // using it would push a purely local Claude run down the remote branches.
+  h.nodeService.createNode({
+    id: 'local-alias',
+    name: 'Local Alias',
+    kind: 'local',
+    exposed_roots: ['/workspace'],
+    can_execute: true,
+    reachable: true,
+  });
+  const profile = seedProfile(db, { command: 'claude' });
+  const project = h.projectService.createProject({
+    name: 'LocalAlias',
+    directory: '/workspace/project',
+    node_id: 'local-alias',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = await h.lifecycleService.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'run here',
+  });
+
+  assert.equal(h.remoteChannel.spawned.length, 0, 'a local-kind node must not use the remote channel');
+  assert.equal(
+    h.runService.getRunEvents(run.id)
+      .some((event) => event.event_type === 'runtime:remote_worker_engine'),
+    false,
+    'no remote engine marker may be written for a local-kind node',
+  );
+});
+
+test('an unresolved uncertain spawn survives the health check that would otherwise terminalize it', async (t) => {
+  const db = await mkdb(t);
+  // The pod reports exactly what an ownership-uncertain start looks like from
+  // the controller: no tmux session and no exit sentinel. That is the SAME
+  // observation a genuinely dead worker produces, so the health check must
+  // decide on the durable uncertainty marker rather than on this absence.
+  const remoteChannel = makeRemoteChannel({ alive: false, exitCode: null });
+  remoteChannel.spawnWorker = async (runId, payload) => {
+    remoteChannel.spawned.push({ runId, payload });
+    const err = new Error('ssh acknowledgement lost');
+    err.code = 'REMOTE_SPAWN_UNCERTAIN';
+    err.transportCode = 'SSH_TRANSPORT';
+    err.sessionName = `palantir-run-${runId}`;
+    throw err;
+  };
+  const h = buildHarness(db, { remoteChannel });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { command: 'claude' });
+  const project = h.projectService.createProject({
+    name: 'RemoteClaudeUncertainHealth',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+
+  const run = await h.lifecycleService.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'start once',
+  });
+  assert.equal(run.status, 'running');
+
+  await h.lifecycleService.checkHealth();
+  await h.lifecycleService.checkHealth();
+
+  const after = h.runService.getRun(run.id);
+  assert.equal(after.status, 'running', 'absence is not evidence: the pane may still be starting');
+  assert.equal(after.exit_code, null);
+  assert.equal(h.runService.listRuns({}).length, 1, 'no retry run may be created');
+  assert.equal(remoteChannel.killed.length, 0, 'a possibly-live remote owner must not be killed');
+  assert.equal(
+    h.runService.getRunEvents(run.id).some((event) => event.event_type === 'error'),
+    false,
+  );
+});
+
+test('an uncertain spawn that never produces an owner expires instead of holding the slot', async (t) => {
+  const db = await mkdb(t);
+  const remoteChannel = makeRemoteChannel({ alive: false, exitCode: null });
+  remoteChannel.spawnWorker = async (runId, payload) => {
+    remoteChannel.spawned.push({ runId, payload });
+    const err = new Error('ssh acknowledgement lost');
+    err.code = 'REMOTE_SPAWN_UNCERTAIN';
+    err.transportCode = 'SSH_TRANSPORT';
+    err.sessionName = `palantir-run-${runId}`;
+    throw err;
+  };
+  // Nothing else reaps this state — not the materialization sweep, not the
+  // startup artifact sweep, not remote housekeeping. Without the TTL the run
+  // would sit in `running` (and occupy a worker slot) until a human cancelled it.
+  let clock = Date.now();
+  const h = buildHarness(db, { remoteChannel, lifecycleOptions: { now: () => clock } });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { command: 'claude' });
+  const project = h.projectService.createProject({
+    name: 'RemoteClaudeUncertainTtl',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = await h.lifecycleService.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'start once',
+  });
+
+  await h.lifecycleService.checkHealth();
+  assert.equal(h.runService.getRun(run.id).status, 'running', 'still inside the window');
+
+  clock += 11 * 60 * 1000;
+  await h.lifecycleService.checkHealth();
+  assert.notEqual(
+    h.runService.getRun(run.id).status,
+    'running',
+    'a pane that never appeared must stop suppressing terminalize',
+  );
+});
+
+test('an uncertain spawn is released once its remote owner is actually observed', async (t) => {
+  const db = await mkdb(t);
+  let alive = false;
+  const remoteChannel = makeRemoteChannel();
+  remoteChannel.isAlive = async (runId, engine) => {
+    remoteChannel.isAliveCalls.push({ runId, engine });
+    return alive;
+  };
+  remoteChannel.detectExitCode = async () => null;
+  remoteChannel.spawnWorker = async (runId, payload) => {
+    remoteChannel.spawned.push({ runId, payload });
+    const err = new Error('ssh acknowledgement lost');
+    err.code = 'REMOTE_SPAWN_UNCERTAIN';
+    err.transportCode = 'SSH_TRANSPORT';
+    err.sessionName = `palantir-run-${runId}`;
+    throw err;
+  };
+  const h = buildHarness(db, { remoteChannel });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { command: 'claude' });
+  const project = h.projectService.createProject({
+    name: 'RemoteClaudeUncertainResolve',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = await h.lifecycleService.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'start once',
+  });
+
+  // The pane turns up late — exactly the case the absence probes could not see.
+  alive = true;
+  await h.lifecycleService.checkHealth();
+
+  const eventTypes = h.runService.getRunEvents(run.id).map((event) => event.event_type);
+  assert.ok(
+    eventTypes.includes('spawn:remote_ownership_confirmed'),
+    'observing the owner must resolve the uncertainty rather than leave it latched forever',
+  );
+  assert.equal(h.runService.getRun(run.id).status, 'running');
+
+  // Resolved uncertainty means the ordinary terminal rules apply again.
+  alive = false;
+  await h.lifecycleService.checkHealth();
+  assert.notEqual(
+    h.runService.getRun(run.id).status,
+    'running',
+    'a confirmed owner that later disappears must terminalize normally',
+  );
 });
 
 test('remote claude preset version gate probes the selected SSH node', async (t) => {

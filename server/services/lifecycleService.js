@@ -36,9 +36,44 @@ const {
 } = require('./managerAdapters/codexMcpSecretTransport');
 
 // G1: cap a string to at most maxBytes UTF-8 bytes without splitting a
-// multi-byte codepoint, retaining the tail. Goal reports are emitted at the end
-// of a worker response, so prefix truncation could discard the report from a
-// long detached result even though file-backed capture is already tail-first.
+// multi-byte codepoint (final_output is stored raw; the 64KB bound is on bytes,
+// not chars). Truncates at a real codepoint boundary — it backs the cut off
+// any trailing continuation bytes rather than letting toString emit/strip a
+// replacement char, so legitimate U+FFFD content is preserved. null → null.
+// SQLite's `datetime('now')` yields `YYYY-MM-DD HH:MM:SS` in UTC with no zone
+// marker, which Date.parse reads as LOCAL time. Comparing that against Date.now()
+// skews the result by the machine's UTC offset — enough, east of Greenwich, to
+// make a sub-offset TTL read as already expired everywhere. Pin the zone.
+function parseSqliteUtc(value) {
+  if (typeof value !== 'string') return NaN;
+  const text = value.trim();
+  if (!text) return NaN;
+  return Date.parse(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(text)
+    ? `${text.replace(' ', 'T')}Z`
+    : text);
+}
+
+function capUtf8Bytes(value, maxBytes) {
+  if (value == null) return null;
+  const str = String(value);
+  const buf = Buffer.from(str, 'utf8');
+  if (buf.length <= maxBytes) return str;
+  // If the byte at the cut is a UTF-8 continuation byte (0b10xxxxxx), the
+  // codepoint straddles the boundary — back off until the next dropped byte
+  // starts a new codepoint, so we never split one.
+  let end = maxBytes;
+  while (end > 0 && (buf[end] & 0xC0) === 0x80) end--;
+  return buf.subarray(0, end).toString('utf8');
+}
+
+// Same bound, opposite end. A detached remote Claude result is reassembled from
+// NDJSON rather than teed to a file, so there is no tail-first capture ahead of
+// this cap and a long response would lose its goal report — which the worker
+// emits last — to prefix truncation.
+//
+// Deliberately NOT the default: the local path keeps capUtf8Bytes so this PR
+// leaves non-remote goal capture byte-identical. Whether head truncation is the
+// right choice for local runs too is a separate question, tracked on its own.
 function capUtf8Tail(value, maxBytes) {
   if (value == null) return null;
   const str = String(value);
@@ -169,6 +204,14 @@ function createLifecycleService({
   // G1: goal final-output capture bounds (§5k-2 — final_output cap 64KB).
   const GOAL_FINAL_OUTPUT_MAX_BYTES = 64 * 1024;
   const GOAL_OUTPUT_LINES = 2000; // read a generous tail so the report fence is included
+  // How long an unresolved spawn-ownership uncertainty suppresses terminalize.
+  // It covers a pane that starts after the controller lost the acknowledgement —
+  // seconds in practice — so minutes is already generous, and bounding it is
+  // what stops the guard from pinning a worker slot forever.
+  const REMOTE_OWNERSHIP_UNCERTAIN_TTL_MS = (() => {
+    const raw = Number(process.env.PALANTIR_REMOTE_OWNERSHIP_UNCERTAIN_TTL_MS);
+    return Number.isFinite(raw) && raw > 0 ? raw : 10 * 60 * 1000;
+  })();
   const MAX_MATERIALIZE_ATTEMPTS = 3;
   let heartbeatTimer = null;
   let goalSweepTimer = null; // G3: periodic verdict-loop self-heal
@@ -2505,8 +2548,24 @@ function createLifecycleService({
     return exitCode === 0 ? 'Agent completed successfully' : `Agent exited with code ${exitCode}`;
   }
 
+  // `node_id !== 'local'` is NOT the same question. A node may be registered
+  // under any id while declaring kind 'local', and nodeService routes it to the
+  // local executor. Treating such a run as remote would hand a purely local
+  // worker the remote-only branches — including the tail-truncating goal
+  // capture, which must stay head-truncating off the ssh path.
+  // This is deliberately the SAME predicate channelForNode routes on, so that
+  // "remote" cannot mean one thing to the channel and another to the callers
+  // below. Any divergence would hand a locally-executed run the remote-only
+  // branches — including the tail-truncating goal capture, which must stay
+  // head-truncating anywhere the local worker channel is used.
+  function isRemoteNodeId(nodeId) {
+    if (!nodeId || nodeId === 'local') return false;
+    const node = getDispatchNode(nodeId);
+    return !!node && (node.kind || 'local') !== 'local';
+  }
+
   function isDetachedRemoteClaudeRun(run) {
-    if (!run || !run.node_id || run.node_id === 'local') return false;
+    if (!run || !isRemoteNodeId(run.node_id)) return false;
     try {
       const engineEvent = runService.getRunEvents(run.id)
         .find((event) => event.event_type === 'runtime:remote_worker_engine');
@@ -2627,6 +2686,36 @@ function createLifecycleService({
     };
   }
 
+  // True while a run carries a spawn-ownership uncertainty that no later
+  // observation has resolved AND that is still young enough to be plausible.
+  // Both markers are durable run events, so this survives a controller restart —
+  // the window it guards can outlive one.
+  //
+  // The TTL is what keeps this from becoming a permanent latch. Nothing else
+  // reaps it: the materialization sweep only touches `materializing`, the
+  // startup artifact sweep skips remote runs, and remote housekeeping only
+  // handles terminal runs. Without an expiry a pane that never appears would
+  // hold `running` — and a worker slot — until a human cancelled it. The window
+  // it protects is a late pane start, which is seconds, so once the TTL passes
+  // the ordinary terminal rules take over again.
+  function hasUnresolvedRemoteOwnershipUncertainty(run, now = Date.now()) {
+    if (!isRemoteNodeId(run && run.node_id)) return false;
+    let events;
+    try { events = runService.getRunEvents(run.id) || []; } catch { return false; }
+    let uncertainAt = null;
+    for (const event of events) {
+      if (event.event_type === 'spawn:remote_ownership_uncertain') {
+        uncertainAt = parseSqliteUtc(event.created_at);
+      } else if (event.event_type === 'spawn:remote_ownership_confirmed') {
+        uncertainAt = null;
+      }
+    }
+    if (uncertainAt === null) return false;
+    // An unparseable stamp must not grant an unbounded reprieve.
+    if (!Number.isFinite(uncertainAt)) return false;
+    return now - uncertainAt < REMOTE_OWNERSHIP_UNCERTAIN_TTL_MS;
+  }
+
   async function _doHealthCheck() {
     const runningRuns = runService.listRuns({ status: 'running' });
 
@@ -2656,6 +2745,27 @@ function createLifecycleService({
 
       const alive = await channel.isAlive(run.id, 'cli');
       const exitCode = await channel.detectExitCode(run.id, 'cli');
+
+      // A spawn whose SSH acknowledgement was lost may still be starting on the
+      // pod. "No tmux session and no exit sentinel" is exactly what a remote
+      // shell that has not run YET looks like, so terminalizing on it would
+      // enqueue a retry that overlaps the late original in the same cwd — the
+      // duplicate this uncertainty exists to prevent. Absence is not evidence
+      // here; only positive evidence resolves it:
+      //   tmux observed alive  → confirmed, uncertainty cleared below
+      //   exit sentinel written → confirmed, terminalize normally
+      // Until the TTL runs out the run stays `running`; after it, the ordinary
+      // terminal rules apply again so the slot is never held indefinitely.
+      if (!alive && exitCode === null && hasUnresolvedRemoteOwnershipUncertainty(run, nowMs())) {
+        continue;
+      }
+      if (alive && hasUnresolvedRemoteOwnershipUncertainty(run, nowMs())) {
+        try {
+          runService.addRunEvent(run.id, 'spawn:remote_ownership_confirmed', JSON.stringify({
+            node: run.node_id || null,
+          }));
+        } catch { /* annotate-only */ }
+      }
 
       if (!alive || exitCode !== null) {
         // Detached remote Claude still writes stream-json. Parse that durable
@@ -3450,7 +3560,9 @@ function createLifecycleService({
           raw = null;
         }
       }
-      const finalOutput = capUtf8Tail(raw, GOAL_FINAL_OUTPUT_MAX_BYTES);
+      const finalOutput = isDetachedRemoteClaudeRun(run)
+        ? capUtf8Tail(raw, GOAL_FINAL_OUTPUT_MAX_BYTES)
+        : capUtf8Bytes(raw, GOAL_FINAL_OUTPUT_MAX_BYTES);
       const report = parseGoalReport(finalOutput || '');
       runService.updateGoalCapture(run.id, {
         final_output: finalOutput,

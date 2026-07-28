@@ -1593,11 +1593,16 @@ test('detached spawn SSH acknowledgement loss preserves deterministic ownership'
       && err.sessionName === `palantir-run-${runId}`
     ),
   );
-  assert.ok(spawn.calls.some((call) => scriptOf(call) === ownerProbe));
+  assert.equal(
+    spawn.calls.some((call) => scriptOf(call) === ownerProbe),
+    false,
+    'the payload was delivered, so no probe answer could change the outcome — '
+      + 'do not spend a round-trip on a link that just failed',
+  );
   assert.equal(
     spawn.calls.some((call) => scriptOf(call) === cleanupScript),
     false,
-    'a confirmed detached owner must retain prompts until its own trap removes them',
+    'a detached owner that may exist must retain prompts until its own trap removes them',
   );
 });
 
@@ -1642,6 +1647,8 @@ test('detached spawn stdin EPIPE also preserves a confirmed remote owner', async
       stdin: 'work',
       cwd: '/srv/root/project',
     }),
+    // An observed pane outranks the undelivered-payload proof. Retries carry a
+    // fresh run id, so a session under this run's name is this run's own start.
     (err) => (
       err.code === 'REMOTE_SPAWN_UNCERTAIN'
       && err.transportCode === 'EPIPE'
@@ -1656,7 +1663,120 @@ test('detached spawn stdin EPIPE also preserves a confirmed remote owner', async
   );
 });
 
-test('detached spawn transport loss with confirmed absent owner remains a spawn failure', async () => {
+test('a stdin failure AFTER the payload was fully written stays uncertain', async () => {
+  const runId = 'spawn_stdin_shutdown';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const canonicalStdin = `/real/root/.palantir-runs/${runId}/stdin.txt`;
+  const canonicalBundle = `/real/root/.palantir-runs/${runId}/worker-input.bundle`;
+  const cleanupScript = `exec 'rm' '-f' ${shq(canonicalStdin)} ${shq(canonicalBundle)}`;
+  const ownerProbe = `exec 'tmux' 'has-session' '-t' ${shq(`palantir-run-${runId}`)}`;
+  const completionProbe = `exec 'test' '-f' ${shq(`${statusDir}/exit.code`)}`;
+  const routes = {
+    "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
+    "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+    "exec 'realpath' '/srv/root/.palantir-runs'": { stdout: '/real/root/.palantir-runs\n' },
+    [`exec 'realpath' ${shq(statusDir)}`]: { stdout: `/real/root/.palantir-runs/${runId}\n` },
+    "exec 'mkdir' '-p' '/srv/root/.palantir-runs'": { code: 0 },
+    [`exec 'mkdir' '-p' ${shq(statusDir)}`]: { code: 0 },
+    [ownerProbe]: { code: 1 },
+    [completionProbe]: { code: 1 },
+    [cleanupScript]: { code: 0 },
+  };
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script.startsWith('umask 077 && cleanup()')) {
+      // Every byte is accepted; only the shutdown that follows fails. The
+      // remote byte-count guard therefore PASSED and `tmux new-session` may
+      // already own the run, so this must not read as "never delivered".
+      child.stdin = new Writable({
+        write(_chunk, _encoding, callback) { callback(); },
+        final(callback) {
+          const error = new Error('socket shutdown failed after full delivery');
+          error.code = 'EPIPE';
+          callback(error);
+        },
+      });
+      return;
+    }
+    if (Object.hasOwn(routes, script)) return complete(child, routes[script]);
+    complete(child, { code: 1, stderr: `unexpected script: ${script}` });
+  });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => executor.spawnWorker(runId, {
+      command: 'claude',
+      args: ['--print', '-p'],
+      stdin: 'work',
+      cwd: '/srv/root/project',
+    }),
+    (err) => err.code === 'REMOTE_SPAWN_UNCERTAIN' && err.preserveRemoteFiles === true,
+  );
+  assert.equal(
+    spawn.calls.some((call) => scriptOf(call) === cleanupScript),
+    false,
+    'a delivered payload whose shutdown failed may already be owned by a pane',
+  );
+});
+
+test('a SYNCHRONOUS end() throw after a written payload stays uncertain', async () => {
+  const runId = 'spawn_stdin_sync_end';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const canonicalStdin = `/real/root/.palantir-runs/${runId}/stdin.txt`;
+  const canonicalBundle = `/real/root/.palantir-runs/${runId}/worker-input.bundle`;
+  const cleanupScript = `exec 'rm' '-f' ${shq(canonicalStdin)} ${shq(canonicalBundle)}`;
+  const ownerProbe = `exec 'tmux' 'has-session' '-t' ${shq(`palantir-run-${runId}`)}`;
+  const completionProbe = `exec 'test' '-f' ${shq(`${statusDir}/exit.code`)}`;
+  const routes = {
+    "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
+    "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+    "exec 'realpath' '/srv/root/.palantir-runs'": { stdout: '/real/root/.palantir-runs\n' },
+    [`exec 'realpath' ${shq(statusDir)}`]: { stdout: `/real/root/.palantir-runs/${runId}\n` },
+    "exec 'mkdir' '-p' '/srv/root/.palantir-runs'": { code: 0 },
+    [`exec 'mkdir' '-p' ${shq(statusDir)}`]: { code: 0 },
+    [ownerProbe]: { code: 1 },
+    [completionProbe]: { code: 1 },
+    [cleanupScript]: { code: 0 },
+  };
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script.startsWith('umask 077 && cleanup()')) {
+      // The payload write is accepted; only the shutdown throws, and it throws
+      // SYNCHRONOUSLY. Sharing one catch with the write would record this as an
+      // undelivered payload and license a retry against a pane that may exist.
+      child.stdin = {
+        write(_chunk, callback) { if (typeof callback === 'function') callback(); },
+        end() {
+          const error = new Error('synchronous shutdown failure');
+          error.code = 'EPIPE';
+          throw error;
+        },
+        once() {},
+      };
+      return;
+    }
+    if (Object.hasOwn(routes, script)) return complete(child, routes[script]);
+    complete(child, { code: 1, stderr: `unexpected script: ${script}` });
+  });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => executor.spawnWorker(runId, {
+      command: 'claude',
+      args: ['--print', '-p'],
+      stdin: 'work',
+      cwd: '/srv/root/project',
+    }),
+    (err) => err.code === 'REMOTE_SPAWN_UNCERTAIN' && err.preserveRemoteFiles === true,
+  );
+  assert.equal(
+    spawn.calls.some((call) => scriptOf(call) === cleanupScript),
+    false,
+    'a delivered payload whose shutdown threw may already be owned by a pane',
+  );
+});
+
+test('a transport loss whose payload was fully delivered stays uncertain despite an absent owner', async () => {
   const runId = 'spawn_ack_lost_no_owner';
   const statusDir = `/srv/root/.palantir-runs/${runId}`;
   const canonicalDir = `/real/root/.palantir-runs/${runId}`;
@@ -1691,10 +1811,26 @@ test('detached spawn transport loss with confirmed absent owner remains a spawn 
       stdin: 'work',
       cwd: '/srv/root/project',
     }),
-    (err) => err.code === 'SSH_TRANSPORT' && err.code !== 'REMOTE_SPAWN_UNCERTAIN',
+    // The exec request may have reached sshd before the acknowledgement was
+    // lost. `has-session` says "not there YET"; the pane can still start after
+    // the probe answers. Retrying on that answer puts a second worker in the
+    // same remote cwd, so absence is never treated as proof.
+    (err) => (
+      err.code === 'REMOTE_SPAWN_UNCERTAIN'
+      && err.transportCode === 'SSH_TRANSPORT'
+      && err.preserveRemoteFiles === true
+    ),
   );
-  assert.ok(spawn.calls.some((call) => scriptOf(call) === ownerProbe));
-  assert.ok(spawn.calls.some((call) => scriptOf(call) === cleanupScript));
+  assert.equal(
+    spawn.calls.some((call) => scriptOf(call) === ownerProbe),
+    false,
+    'no probe answer could license a retry here',
+  );
+  assert.equal(
+    spawn.calls.some((call) => scriptOf(call) === cleanupScript),
+    false,
+    'files a possibly-live pane owns must survive for the reap path',
+  );
 });
 
 test('detached spawn transport loss preserves a worker that finished before the owner probe', async () => {
@@ -1736,8 +1872,11 @@ test('detached spawn transport loss preserves a worker that finished before the 
     }),
     (err) => err.code === 'REMOTE_SPAWN_UNCERTAIN' && err.preserveRemoteFiles,
   );
-  assert.ok(spawn.calls.some((call) => scriptOf(call) === ownerProbe));
-  assert.ok(spawn.calls.some((call) => scriptOf(call) === completionProbe));
+  assert.equal(
+    spawn.calls.some((call) => scriptOf(call) === completionProbe),
+    false,
+    'the payload was delivered, so uncertainty already holds without probing',
+  );
   assert.equal(
     spawn.calls.some((call) => scriptOf(call) === cleanupScript),
     false,

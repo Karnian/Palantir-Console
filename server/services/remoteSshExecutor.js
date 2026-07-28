@@ -560,6 +560,21 @@ function createRemoteSshNodeExecutor(node, {
         return !hasInput && ['EPIPE', 'ERR_STREAM_DESTROYED', 'EOF', 'ECONNRESET'].includes(err && err.code);
       }
 
+      // A rejected PAYLOAD WRITE means fewer than `input.length` bytes reached
+      // the remote shell. Callers that guard the payload with a byte-count test
+      // can use this as PROOF that the commands after that guard never ran; it
+      // is the only such proof available, since every other transport error is
+      // reported identically whether the remote shell ran or not.
+      //
+      // The shutdown that follows the write must NOT set this. `end(chunk)`
+      // bundles the write with `_final`, and a socket can deliver every byte and
+      // still fail its shutdown — that error would otherwise be read as "never
+      // delivered" for a payload the remote already acted on. So the payload is
+      // written on its own and only that callback marks the failure.
+      function markPayloadWriteFailure(err) {
+        if (hasInput && err && typeof err === 'object') err.stdinWriteFailed = true;
+      }
+
       function bufferedText(which) {
         if (which === 'stdout') return Buffer.concat(stdoutChunks, stdoutBytes).toString('utf8');
         return Buffer.concat(stderrChunks, stderrBytes).toString('utf8');
@@ -664,15 +679,36 @@ function createRemoteSshNodeExecutor(node, {
       });
 
       if (child.stdin && typeof child.stdin.end === 'function') {
-        try {
-          child.stdin.end(input === undefined ? '' : input);
-        } catch (err) {
+        const failStdin = (err, fromPayloadWrite) => {
           // Match the async error path for the normal empty-stdin/remote-exit race.
           if (isIgnorableEmptyStdinError(err)) return;
           if (typeof child.kill === 'function') {
             try { child.kill('SIGTERM'); } catch { /* best-effort */ }
           }
+          if (fromPayloadWrite) markPayloadWriteFailure(err);
           finishReject(err);
+        };
+        if (hasInput && typeof child.stdin.write === 'function') {
+          // Separate try blocks, NOT one around both: a throw out of `end()`
+          // is a shutdown failure even though the payload write above already
+          // succeeded, and sharing a catch would mark it as an undelivered
+          // payload — the very misread this split exists to prevent.
+          try {
+            child.stdin.write(input, (err) => { if (err) failStdin(err, true); });
+          } catch (err) {
+            failStdin(err, true);
+          }
+          try {
+            child.stdin.end();
+          } catch (err) {
+            failStdin(err, false);
+          }
+        } else {
+          try {
+            child.stdin.end(input === undefined ? '' : input);
+          } catch (err) {
+            failStdin(err, false);
+          }
         }
       }
     });
@@ -1453,32 +1489,44 @@ function createRemoteSshNodeExecutor(node, {
     );
     if (!mayHaveCrossedSshBoundary) return false;
 
-    // The start command may already have crossed the SSH boundary. Never
-    // delete files a live pane has not opened yet. A fresh connection that
-    // conclusively reports neither a deterministic tmux owner NOR a completed
-    // owner sentinel is the only case where controller-side cleanup is safe;
-    // otherwise the pane's EXIT trap owns it.
-    let ownerDefinitelyAbsent = false;
-    try {
-      const probe = await runRemoteCommand('tmux', ['has-session', '-t', paths.sessionName]);
-      ownerDefinitelyAbsent = probe.code === 1;
-    } catch {
-      ownerDefinitelyAbsent = false;
-    }
-    if (ownerDefinitelyAbsent) {
-      // A very short worker can finish between the lost SSH acknowledgement
-      // and this tmux probe. In that case has-session=1 means "owner exited",
-      // not "spawn never crossed the boundary". The pane writes exit.code only
-      // after the worker/result capture completes, so retry is safe only when a
-      // second bounded probe also conclusively reports that sentinel absent.
-      let completionDefinitelyAbsent = false;
-      try {
-        const completionProbe = await runRemoteCommand('test', ['-f', paths.exitSentinel]);
-        completionDefinitelyAbsent = completionProbe.code === 1;
-      } catch {
-        completionDefinitelyAbsent = false;
+    // The start command may already have crossed the SSH boundary, so the
+    // default is uncertainty: never delete files a pane may not have opened
+    // yet, and never let a retry race a start we cannot see.
+    //
+    // Exactly one exception is admissible, and it is STRUCTURAL rather than
+    // observational. When the payload is uploaded, the remote script is a
+    // single `&&` chain whose byte-count guard precedes `tmux new-session`:
+    //
+    //   head -c N > bundle && [ "$(wc -c < bundle)" -eq N ] && ... && tmux ...
+    //
+    // A rejected stdin write means fewer than N bytes arrived, so that guard
+    // fails and the start command provably never ran. The absence of a spawn
+    // is then proved by the remote script's own control flow.
+    //
+    // Probing is worth a round-trip only when that exception is in play; every
+    // other path ends at uncertainty regardless, and this is exactly the moment
+    // the link is already unwell.
+    if (err.stdinWriteFailed && materializedFiles.length > 0) {
+      // The probes are asymmetric ON PURPOSE. A hit is positive evidence that
+      // this run already owns a pane — retries carry a fresh run id, so a
+      // session under THIS run's name can only be this run's own start, and it
+      // overrides the structural argument. Absence proves nothing: both report
+      // state at probe time, and an exec request that reached sshd can still
+      // start its pane after the probe answers. Licensing a retry on "not there
+      // yet" is what puts two workers in one remote cwd.
+      const observed = async (command, args) => {
+        try {
+          return (await runRemoteCommand(command, args)).code === 0;
+        } catch {
+          return false;
+        }
+      };
+      // The pane writes exit.code only after the worker and its result capture
+      // finish, so a sentinel means a start that has already completed.
+      if (!await observed('tmux', ['has-session', '-t', paths.sessionName])
+          && !await observed('test', ['-f', paths.exitSentinel])) {
+        return false;
       }
-      if (completionDefinitelyAbsent) return false;
     }
 
     err.transportCode = err.code;
