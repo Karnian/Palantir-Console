@@ -153,6 +153,51 @@ test('engine: remote manager forwards only its run capability to the executor', 
   engine.kill('run-remote-capability');
 });
 
+test('engine: remote worker forwards only scoped env and selects worker transport', async () => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const child = createFakeRemoteChild();
+  let spawnOptions = null;
+  const executor = {
+    spawnInteractive(command, args, options) {
+      spawnOptions = options;
+      return child;
+    },
+  };
+  const engine = createStreamJsonEngine();
+  engine.spawnAgent('run-remote-worker-env', {
+    cwd: '/pod/ws',
+    prompt: 'remote worker',
+    isManager: false,
+    executor,
+    nodePrefix: '/pod/bin',
+    envAllowlist: ['EXPLICIT_PROFILE_KEY'],
+    env: {
+      EXPLICIT_PROFILE_KEY: 'profile-value',
+      PALANTIR_WORKER_TOKEN: 'run-bound-worker-capability',
+      PALANTIR_API_BASE: 'https://console.example',
+      PALANTIR_TOKEN: 'human-token-must-not-cross',
+      PALANTIR_MANAGER_TOKEN: 'manager-token-must-not-cross',
+      HOME: '/controller/home-must-not-cross',
+      PATH: '/controller/bin-must-not-cross',
+      ANTHROPIC_API_KEY: 'not-allowlisted-must-not-cross',
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(spawnOptions, {
+    cwd: '/pod/ws',
+    env: {
+      EXPLICIT_PROFILE_KEY: 'profile-value',
+      PALANTIR_WORKER_TOKEN: 'run-bound-worker-capability',
+      PALANTIR_API_BASE: 'https://console.example',
+    },
+    pathPrefix: '/pod/bin',
+    envAllowlist: ['EXPLICIT_PROFILE_KEY'],
+    worker: true,
+  });
+  engine.kill('run-remote-worker-env');
+});
+
 /**
  * createStreamJsonEngine 인스턴스를 만들되 CLAUDE_BIN 을 fake-claude.js 로 설정.
  * CLAUDE_ARGS_FILE 을 개별 tmpfile 로 설정하여 args 캡처.
@@ -946,6 +991,144 @@ test('engine: remote ssh transport drop becomes unreachable without finalizing f
   // check was exitCode===null && !spawnError, which stayed true here).
   const droppedSession = engine.listSessions().find(s => s.sessionId === 'remote-drop-sess');
   assert.ok(droppedSession && droppedSession.alive === false, 'unreachable session not listed alive');
+});
+
+test('engine: remote worker SSH transport drop terminalizes for retry policy', async () => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const rs = makeRunService();
+  rs._setRun('run-remote-worker-drop', { status: 'running' });
+  const child = createFakeRemoteChild();
+  const transitions = [];
+  const originalUpdateRunStatus = rs.updateRunStatus;
+  rs.updateRunStatus = (...args) => {
+    transitions.push('run:failed');
+    return originalUpdateRunStatus(...args);
+  };
+  const nodeService = {
+    async setReachable(nodeId, reachable) {
+      transitions.push(`node:${nodeId}:${reachable}`);
+    },
+  };
+  const engine = createStreamJsonEngine({ runService: rs, nodeService });
+  const executor = {
+    spawnInteractive() {
+      return Promise.resolve(child);
+    },
+  };
+
+  engine.spawnAgent('run-remote-worker-drop', {
+    prompt: 'work',
+    cwd: '/pod/ws',
+    isManager: false,
+    executor,
+    nodePrefix: '/pod/bin',
+    nodeId: 'pod-a',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  child.emit('exit', 255, null);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(engine.isAlive('run-remote-worker-drop'), false);
+  assert.equal(engine.isUnreachable('run-remote-worker-drop'), false);
+  assert.equal(engine.detectExitCode('run-remote-worker-drop'), 255);
+  assert.deepEqual(
+    transitions,
+    ['node:pod-a:false', 'run:failed'],
+    'node must be fenced before run:ended can enqueue the retry',
+  );
+  assert.ok(
+    rs._statusUpdates.some(
+      update => update.runId === 'run-remote-worker-drop' && update.status === 'failed',
+    ),
+    'single-shot worker must reach a terminal state',
+  );
+  assert.ok(
+    rs._events.some(
+      event => event.runId === 'run-remote-worker-drop' && event.type === 'transport_lost',
+    ),
+  );
+});
+
+test('engine: remote worker pre-child SSH failure fences node before terminalizing', async () => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const rs = makeRunService();
+  rs._setRun('run-remote-worker-spawn-drop', { status: 'running' });
+  const transitions = [];
+  const originalUpdateRunStatus = rs.updateRunStatus;
+  rs.updateRunStatus = (...args) => {
+    transitions.push('run:failed');
+    return originalUpdateRunStatus(...args);
+  };
+  const nodeService = {
+    getNode() {
+      return { id: 'pod-a', reachable: 1 };
+    },
+    async setReachable(nodeId, reachable) {
+      transitions.push(`node:${nodeId}:${reachable}`);
+    },
+  };
+  const engine = createStreamJsonEngine({ runService: rs, nodeService });
+  const executor = {
+    async spawnInteractive() {
+      const err = new Error('SSH transport failed');
+      err.code = 'SSH_TRANSPORT';
+      err.exitCode = 255;
+      throw err;
+    },
+  };
+
+  engine.spawnAgent('run-remote-worker-spawn-drop', {
+    prompt: 'work',
+    cwd: '/pod/ws',
+    isManager: false,
+    executor,
+    nodePrefix: '/pod/bin',
+    nodeId: 'pod-a',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(
+    transitions,
+    ['node:pod-a:false', 'run:failed'],
+    'async placement failure must fence the node before run:ended',
+  );
+  assert.equal(engine.detectExitCode('run-remote-worker-spawn-drop'), 1);
+});
+
+test('engine: a real node whose id is remote is still fenced on SSH drop', async () => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const rs = makeRunService();
+  rs._setRun('run-node-named-remote', { status: 'running' });
+  const child = createFakeRemoteChild();
+  const fenced = [];
+  const engine = createStreamJsonEngine({
+    runService: rs,
+    nodeService: {
+      async setReachable(nodeId, reachable) {
+        fenced.push([nodeId, reachable]);
+      },
+    },
+  });
+
+  engine.spawnAgent('run-node-named-remote', {
+    prompt: 'work',
+    cwd: '/pod/ws',
+    isManager: false,
+    executor: { spawnInteractive: async () => child },
+    nodeId: 'remote',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  child.emit('exit', 255, null);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(fenced, [['remote', false]]);
+  assert.ok(
+    rs._statusUpdates.some(
+      update => update.runId === 'run-node-named-remote' && update.status === 'failed',
+    ),
+  );
 });
 
 test('engine: remote ssh transport drop records concrete node id when provided', async () => {

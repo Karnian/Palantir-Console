@@ -10,7 +10,11 @@
  */
 
 const path = require('node:path');
-const { createLocalNodeExecutor, createLocalWorkerChannel } = require('./nodeExecutor');
+const {
+  createLocalNodeExecutor,
+  createLocalWorkerChannel,
+  createRemoteWorkerChannel,
+} = require('./nodeExecutor');
 const { explainDispatch } = require('./dispatchPolicy');
 const { resolveProjectSource } = require('./projectSource');
 const { createProjectMaterializationService } = require('./projectMaterializationService');
@@ -128,7 +132,13 @@ function createLifecycleService({
     if (!nodeService || typeof nodeService.pickExecutor !== 'function') {
       throw new Error(`Remote node ${nodeId} requires nodeService.pickExecutor; refusing to run a remote worker on the control plane`);
     }
-    return nodeService.pickExecutor(nodeId);
+    const remoteExecutor = nodeService.pickExecutor(nodeId);
+    return createRemoteWorkerChannel({
+      remoteExecutor,
+      streamJsonEngine,
+      nodePrefix: node.node_prefix,
+      nodeId: node.id || nodeId,
+    });
   }
   // Lazy-require default authResolver so tests that don't use Tier 2 don't
   // force a load of the real keychain probe.
@@ -524,9 +534,20 @@ function createLifecycleService({
    * fall back to passing the preset through unchanged (documented in the
    * gate call site). Test path injects `claudeVersionResolver`.
    */
-  function resolveClaudeVersion() {
+  async function resolveClaudeVersion({ node, isRemoteNode } = {}) {
     if (typeof claudeVersionResolver === 'function') {
-      try { return claudeVersionResolver() || null; } catch { return null; }
+      try { return (await claudeVersionResolver({ node, isRemoteNode })) || null; } catch { return null; }
+    }
+    if (isRemoteNode) {
+      try {
+        const executor = channelForNode(node?.id);
+        if (!executor || typeof executor.readClaudeVersion !== 'function') return null;
+        return (await executor.readClaudeVersion({
+          pathPrefix: node?.node_prefix || undefined,
+        })) || null;
+      } catch {
+        return null;
+      }
     }
     try {
       const { execFileSync } = require('node:child_process');
@@ -1130,7 +1151,7 @@ function createLifecycleService({
         // can't meaningfully satisfy a Claude CLI version constraint). If
         // we cannot resolve the installed CLI version we warn and proceed.
         if (adapterName === 'claude' && presetResolution.minClaudeVersion) {
-          const found = resolveClaudeVersion();
+          const found = await resolveClaudeVersion({ node, isRemoteNode });
           if (!found) {
             runService.addRunEvent(run.id, 'preset:version_unverified', JSON.stringify({
               min_claude_version: presetResolution.minClaudeVersion,
@@ -1507,21 +1528,6 @@ function createLifecycleService({
       // as adapterName / save-time validation (a custom `Claude` command must
       // not fall through to the tmux branch and drop the structured model).
       const isClaude = adapterName === 'claude';
-      if (isRemoteNode && isClaude) {
-        runService.addRunEvent(run.id, 'spawn:remote_claude_unsupported', JSON.stringify({
-          node_id: run.node_id || 'local',
-          reason: 'remote_stream_json_unsupported',
-        }));
-        runService.updateRunStatus(run.id, 'failed', { force: true, reason: 'remote_claude_unsupported' });
-        await cleanupRunWorktree({
-          ...runService.getRun(run.id),
-          is_manager: false,
-          worktree_path: worktreePath,
-          branch,
-          task_id: run.task_id,
-        });
-        return null;
-      }
 
       let result;
       if (isClaude && streamJsonEngine) {
@@ -1534,6 +1540,31 @@ function createLifecycleService({
         // MCP config file: unified (preset > project > skill pack) if
         // anything merged, else plain project MCP, else undefined.
         const effectiveMcpConfig = skillPackMcpConfigPath || projectMcpConfig || undefined;
+
+        // The basic SSH duplex path is pod-native, but these two optional
+        // features still materialize control-plane-local files. Never pass
+        // those paths to the pod: fail non-retryably until a node-side asset
+        // transport exists. Plain remote Claude workers remain supported.
+        if (isRemoteNode && (effectiveMcpConfig || presetResolution?.isolated)) {
+          const unsupported = {
+            node_id: run.node_id,
+            mcp_config: !!effectiveMcpConfig,
+            isolated_preset: !!presetResolution?.isolated,
+            reason: 'remote_claude_assets_not_materialized',
+          };
+          runService.addRunEvent(
+            run.id,
+            'spawn:remote_claude_assets_unsupported',
+            JSON.stringify(unsupported),
+          );
+          runService.markRunNonRetryable(run.id, MAX_RETRY);
+          runService.updateRunStatus(run.id, 'failed', {
+            force: true,
+            reason: 'remote_claude_assets_unsupported',
+          });
+          await cleanupRunWorktree(runService.getRun(run.id) || run);
+          return null;
+        }
 
         // Phase 10D Tier 2: isolated Claude worker. `--bare` path needs
         // explicit auth materialization (apiKeyHelper by default, env
@@ -1583,6 +1614,10 @@ function createLifecycleService({
               allowedTools: mcpTools.length > 0 ? mcpTools : undefined,
               mcpConfig: effectiveMcpConfig,
               isManager: false,
+              envAllowlist: [
+                ...parseEnvAllowlistArray(profile.env_allowlist),
+                ...trustedBearerEnvKeys,
+              ],
               ...(isolatedOpts || {}),
             },
           });

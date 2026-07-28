@@ -1035,6 +1035,18 @@ function createRunService(db, eventBus) {
     db.prepare('UPDATE runs SET retry_count = ? WHERE id = ?').run(Number(n) || 0, id);
   }
 
+  // Durable post-claim counterpart to rejectQueuedRun. Some structural checks
+  // can only run after preset/skill-pack resolution has claimed the run; mark
+  // those failures non-retryable for both B-lite and the goal verdict loop.
+  function markRunNonRetryable(id, retryCount = 0) {
+    db.prepare(`
+      UPDATE runs
+         SET retry_count = MAX(retry_count, ?),
+             non_retryable = 1
+       WHERE id = ?
+    `).run(Number(retryCount) || 0, id);
+  }
+
   function claimQueuedRun(id) {
     if (repoFeatureEnabled()) {
       const current = stmts.getById.get(id);
@@ -1777,7 +1789,7 @@ function createRunService(db, eventBus) {
     acquireWorkspaceRef, releaseWorkspaceRefByRun, releaseWorkspaceRefByRunAndPath,
     requeueMaterializingRun, forceRequeueTokenlessMaterializingRun,
     failMaterializingRun, forceFailTokenlessMaterializingRun, staleMaterializationLeases,
-    setRetryCount,
+    setRetryCount, markRunNonRetryable,
     retargetQueuedRuns,
     updateManagerThreadId, updateClaudeSessionId,
     updateRunMcpConfig,

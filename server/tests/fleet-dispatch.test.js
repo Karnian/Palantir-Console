@@ -11,6 +11,7 @@ const { createProjectService } = require('../services/projectService');
 const { createAgentProfileService } = require('../services/agentProfileService');
 const { createNodeService } = require('../services/nodeService');
 const { createLifecycleService } = require('../services/lifecycleService');
+const { createPresetService } = require('../services/presetService');
 
 async function mkdb(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-fleet-dispatch-'));
@@ -49,17 +50,24 @@ function stubExecEngine() {
 
 function stubStreamJsonEngine() {
   const spawned = [];
+  const active = new Set();
+  const inputs = [];
+  const killed = [];
   return {
     spawned,
+    inputs,
+    killed,
     spawnAgent(runId, opts) {
       spawned.push({ runId, opts });
+      active.add(runId);
       return { sessionName: null };
     },
-    hasProcess() { return false; },
+    hasProcess(runId) { return active.has(runId); },
     isAlive() { return true; },
     detectExitCode() { return null; },
-    sendInput() { return true; },
-    kill() { return true; },
+    getOutput() { return ''; },
+    sendInput(runId, text) { inputs.push({ runId, text }); return true; },
+    kill(runId) { killed.push(runId); active.delete(runId); return true; },
   };
 }
 
@@ -107,6 +115,7 @@ function buildHarness(db, {
   remoteChannel = makeRemoteChannel(),
   worktreeService = null,
   skillPackService = null,
+  presetService = null,
   lifecycleOptions = {},
 } = {}) {
   const remoteFactoryCalls = [];
@@ -140,7 +149,7 @@ function buildHarness(db, {
     worktreeService,
     harvestService: null,
     eventBus: null,
-    presetService: null,
+    presetService,
     skillPackService,
     ...lifecycleOptions,
   });
@@ -512,12 +521,15 @@ test('local runs keep using the injected global worker channel', async (t) => {
   assert.equal(h.executionEngine.spawned[0].opts.workerPath, undefined);
 });
 
-test('remote claude stream-json worker fails closed without spawning', async (t) => {
+test('remote claude stream-json worker spawns through the SSH duplex bridge', async (t) => {
   const db = await mkdb(t);
   const remoteChannel = makeRemoteChannel();
   const h = buildHarness(db, { remoteChannel });
   createSshNode(h.nodeService);
-  const profile = seedProfile(db, { command: 'claude' });
+  const profile = seedProfile(db, {
+    command: 'claude',
+    envAllowlist: ['POD_ONLY_PROVIDER_KEY'],
+  });
   const project = h.projectService.createProject({
     name: 'RemoteClaudeProject',
     directory: '/workspace/project',
@@ -530,12 +542,169 @@ test('remote claude stream-json worker fails closed without spawning', async (t)
     prompt: 'claude remotely',
   });
 
-  assert.equal(run.status, 'failed');
+  assert.equal(run.status, 'running');
   assert.equal(remoteChannel.spawned.length, 0);
-  assert.equal(h.streamJsonEngine.spawned.length, 0);
+  assert.equal(h.streamJsonEngine.spawned.length, 1);
   assert.equal(h.executionEngine.spawned.length, 0);
+  const spawn = h.streamJsonEngine.spawned[0];
+  assert.equal(spawn.runId, run.id);
+  assert.equal(spawn.opts.prompt, 'claude remotely');
+  assert.equal(spawn.opts.cwd, '/workspace/project');
+  assert.equal(spawn.opts.executor, remoteChannel);
+  assert.equal(spawn.opts.nodePrefix, '/opt/codex/bin');
+  assert.equal(spawn.opts.nodeId, 'ssh-pod');
+  assert.equal(spawn.opts.isManager, false);
+  assert.deepEqual(spawn.opts.envAllowlist, ['POD_ONLY_PROVIDER_KEY']);
   const events = h.runService.getRunEvents(run.id);
-  assert.ok(events.some(e => e.event_type === 'spawn:remote_claude_unsupported'));
+  assert.equal(events.some(e => e.event_type === 'spawn:remote_claude_unsupported'), false);
+
+  assert.equal(h.lifecycleService.sendAgentInput(run.id, 'continue remotely'), true);
+  assert.deepEqual(h.streamJsonEngine.inputs, [
+    { runId: run.id, text: 'continue remotely' },
+  ]);
+});
+
+test('remote claude preset version gate probes the selected SSH node', async (t) => {
+  const db = await mkdb(t);
+  const pluginsRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-fleet-plugins-'));
+  t.after(() => fs.rm(pluginsRoot, { recursive: true, force: true }));
+  const presetService = createPresetService(db, { pluginsRoot });
+  const versionCalls = [];
+  const remoteChannel = makeRemoteChannel();
+  remoteChannel.readClaudeVersion = async (options) => {
+    versionCalls.push(options);
+    return '1.0.0';
+  };
+  const h = buildHarness(db, { remoteChannel, presetService });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { command: 'claude' });
+  const project = h.projectService.createProject({
+    name: 'RemoteClaudeVersionProject',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const preset = presetService.createPreset({
+    name: 'RemoteVersionGate',
+    min_claude_version: '2.0.0',
+  });
+
+  await assert.rejects(
+    () => h.lifecycleService.executeTask(task.id, {
+      agentProfileId: profile.id,
+      prompt: 'check remote version',
+      presetId: preset.id,
+    }),
+    /requires Claude CLI >= 2.0.0, found 1.0.0/,
+  );
+
+  assert.deepEqual(versionCalls, [{ pathPrefix: '/opt/codex/bin' }]);
+  assert.equal(h.streamJsonEngine.spawned.length, 0);
+  const run = h.runService.listRuns({})[0];
+  assert.equal(run.status, 'failed');
+  assert.ok(
+    h.runService.getRunEvents(run.id)
+      .some(event => event.event_type === 'preset:version_mismatch'),
+  );
+});
+
+test('remote claude rejects control-plane MCP paths nonretryably', async (t) => {
+  const db = await mkdb(t);
+  const runtimeMcpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-fleet-mcp-'));
+  t.after(() => fs.rm(runtimeMcpDir, { recursive: true, force: true }));
+  const skillPackService = {
+    resolveForRun() {
+      return {
+        warnings: [],
+        appliedPacks: [],
+        promptSections: [],
+        checklist: [],
+        mcpConfig: {
+          mcpServers: {
+            localOnly: { command: 'node', args: ['server.js'] },
+          },
+        },
+      };
+    },
+  };
+  const h = buildHarness(db, {
+    skillPackService,
+    lifecycleOptions: { runtimeMcpDir },
+  });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { command: 'claude' });
+  const project = h.projectService.createProject({
+    name: 'RemoteClaudeMcpProject',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+
+  const result = await h.lifecycleService.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'must not receive controller path',
+  });
+
+  assert.equal(result.status, 'failed');
+  assert.equal(h.streamJsonEngine.spawned.length, 0);
+  const run = h.runService.listRuns({})[0];
+  assert.equal(run.status, 'failed');
+  assert.equal(run.retry_count, 1);
+  assert.equal(run.non_retryable, 1);
+  assert.ok(
+    h.runService.getRunEvents(run.id)
+      .some(event => event.event_type === 'spawn:remote_claude_assets_unsupported'),
+  );
+  assert.deepEqual(await fs.readdir(runtimeMcpDir), [], 'controller MCP file cleaned');
+});
+
+test('remote claude rejects isolated preset assets before resolving controller auth', async (t) => {
+  const db = await mkdb(t);
+  const pluginsRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-fleet-plugins-'));
+  t.after(() => fs.rm(pluginsRoot, { recursive: true, force: true }));
+  const presetService = createPresetService(db, { pluginsRoot });
+  let authCalls = 0;
+  const h = buildHarness(db, {
+    presetService,
+    lifecycleOptions: {
+      authResolver: {
+        async resolveClaudeAuthForIsolated() {
+          authCalls += 1;
+          throw new Error('controller auth must not be used for remote worker');
+        },
+      },
+    },
+  });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { command: 'claude' });
+  const project = h.projectService.createProject({
+    name: 'RemoteClaudeIsolatedProject',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const preset = presetService.createPreset({
+    name: 'RemoteIsolated',
+    isolated: true,
+  });
+
+  const result = await h.lifecycleService.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'must not receive controller plugin paths',
+    presetId: preset.id,
+  });
+
+  assert.equal(result.status, 'failed');
+  assert.equal(authCalls, 0);
+  assert.equal(h.streamJsonEngine.spawned.length, 0);
+  const run = h.runService.listRuns({})[0];
+  assert.equal(run.status, 'failed');
+  assert.equal(run.retry_count, 1);
+  assert.equal(run.non_retryable, 1);
+  const event = h.runService.getRunEvents(run.id)
+    .find(item => item.event_type === 'spawn:remote_claude_assets_unsupported');
+  assert.ok(event);
+  assert.equal(JSON.parse(event.payload_json).isolated_preset, true);
 });
 
 test('async remote health completes a run when detectExitCode resolves zero', async (t) => {

@@ -878,6 +878,42 @@ test('spawnInteractive bootstraps a manager capability through stdin, never SSH 
   }
 });
 
+test('spawnInteractive bootstraps a worker capability through stdin with worker env policy', async () => {
+  const workerToken = 'worker_run_capability_secret';
+  const spawn = rootGuardSpawn({
+    "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  const child = await exec.spawnInteractive('claude', ['--print'], {
+    cwd: '/srv/root/project',
+    worker: true,
+    envAllowlist: ['POD_ONLY_WORKER_KEY'],
+    env: {
+      PALANTIR_WORKER_TOKEN: workerToken,
+      PALANTIR_MANAGER_TOKEN: 'must-be-scrubbed',
+      PALANTIR_API_BASE: 'https://console.example',
+    },
+  });
+  child.stdin.write('worker follow-up');
+
+  const call = spawn.calls.at(-1);
+  const script = scriptOf(call);
+  assert.match(
+    script,
+    /\/bin\/sh -c 'IFS= read -r PALANTIR_WORKER_TOKEN \|\| exit 126; export PALANTIR_WORKER_TOKEN; exec "\$@"'/,
+  );
+  assert.doesNotMatch(script, /PALANTIR_WORKER_TOKEN="\$PALANTIR_WORKER_TOKEN"/);
+  assert.match(script, /PALANTIR_MANAGER_TOKEN=''/);
+  assert.doesNotMatch(script, /must-be-scrubbed/);
+  assert.match(script, /PALANTIR_API_BASE='https:\/\/console\.example'/);
+  assert.match(script, /POD_ONLY_WORKER_KEY/);
+  assert.equal(call.stdin, `${workerToken}\nworker follow-up`);
+  for (const entry of spawn.calls) {
+    assert.doesNotMatch(JSON.stringify(entry.args), new RegExp(workerToken));
+  }
+});
+
 test('spawnInteractive rejects a manager capability that cannot be line-framed', async () => {
   const spawn = makeSpawn(() => {});
   const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
@@ -921,10 +957,13 @@ test('spawnInteractive injects pathPrefix as PATH prepend with quoted "$PATH"', 
 test('spawnInteractive rejects relative/control-char/non-string pathPrefix (PATH-trust guard)', async () => {
   const spawn = makeSpawn(() => {});
   const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
-  for (const bad of ['.', 'relative/bin', '', '/x\nety', '/x\x00y', 123, {}]) {
+  for (const bad of [
+    '.', 'relative/bin', '', '/x\nety', '/x\x00y', 123, {},
+    '/opt/bin:relative/bin', '/opt/bin:.', '/opt/bin:', ':/opt/bin',
+  ]) {
     await assert.rejects(
       () => exec.spawnInteractive('codex', ['exec'], { pathPrefix: bad }),
-      /pathPrefix must be an absolute POSIX path/,
+      /pathPrefix must be one or more absolute POSIX paths/,
     );
   }
   // absolute + clean → accepted (no throw, spawns)
@@ -1427,7 +1466,7 @@ test('spawnWorker accepts canonical cli worker envelope', async () => {
   assert.ok(spawn.calls.some((call) => scriptOf(call).includes(`tmux new-session -d -s ${shq(`palantir-run-${runId}`)}`)));
 });
 
-test('spawnWorker rejects stream-json worker envelope on remote nodes', async () => {
+test('raw spawnWorker rejects stream-json envelopes that bypass the duplex bridge', async () => {
   const spawn = simpleSpawn();
   const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
 
@@ -1436,7 +1475,7 @@ test('spawnWorker rejects stream-json worker envelope on remote nodes', async ()
       engine: 'stream-json',
       spec: { command: 'claude', args: [], cwd: '/srv/root/project' },
     }),
-    (err) => err.message === 'remote nodes cannot run stream-json/claude workers yet — P5',
+    (err) => err.message === 'stream-json workers require the remote duplex worker channel',
   );
   assert.equal(spawn.calls.length, 0);
 });
@@ -2015,4 +2054,34 @@ test('readClaudeOAuthUsage with no pathPrefix runs the script unchanged (back-co
   await exec.readClaudeOAuthUsage({ timeoutMs: 1000 });
   const script = scriptOf(spawn.calls.at(-1));
   assert.ok(script.startsWith("exec node -e '"), 'no pathPrefix means the original exec form is untouched');
+});
+
+test('readClaudeVersion probes the selected pod with its node_prefix', async () => {
+  const spawn = makeSpawn((_call, child) => complete(child, {
+    code: 0,
+    stdout: '2.1.42 (Claude Code)\\n',
+  }));
+  const exec = createRemoteSshNodeExecutor(nodeRow({
+    node_prefix: '/opt/claude/bin:/usr/local/bin',
+  }), { spawnFn: spawn });
+
+  assert.equal(await exec.readClaudeVersion(), '2.1.42');
+  assert.equal(
+    scriptOf(spawn.calls.at(-1)),
+    `exec env PATH=${shq('/opt/claude/bin:/usr/local/bin')}:"$PATH" claude --version`,
+  );
+});
+
+test('readClaudeVersion rejects untrusted path segments and returns null for bad output', async () => {
+  const spawn = makeSpawn((_call, child) => complete(child, {
+    code: 0,
+    stdout: 'unknown version\\n',
+  }));
+  const exec = createRemoteSshNodeExecutor(nodeRow({ node_prefix: null }), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => exec.readClaudeVersion({ pathPrefix: '/opt/claude/bin:relative/bin' }),
+    /pathPrefix must be one or more absolute POSIX paths/,
+  );
+  assert.equal(await exec.readClaudeVersion({ pathPrefix: '/opt/claude/bin' }), null);
 });

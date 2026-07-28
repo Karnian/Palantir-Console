@@ -139,6 +139,110 @@ function createLocalWorkerChannel({ streamJsonEngine, executionEngine } = {}) {
   };
 }
 
+/**
+ * Overlay the process-local stream-json engine on a remote transport.
+ *
+ * Remote CLI workers are owned by the executor's detached tmux channel. Claude
+ * stream-json workers instead keep a live SSH duplex attached to the shared
+ * streamJsonEngine, so lifecycle/input/kill calls must follow that owner while
+ * filesystem and CLI operations continue to use the raw remote executor.
+ */
+function createRemoteWorkerChannel({
+  remoteExecutor,
+  streamJsonEngine,
+  nodePrefix,
+  nodeId,
+} = {}) {
+  if (!remoteExecutor || typeof remoteExecutor !== 'object') {
+    throw new Error('Remote worker channel requires a remote executor');
+  }
+
+  function requireRemote(method) {
+    if (typeof remoteExecutor[method] !== 'function') {
+      throw new Error(`Remote worker executor does not implement ${method}`);
+    }
+    return remoteExecutor[method].bind(remoteExecutor);
+  }
+
+  function requireStream(method) {
+    if (!streamJsonEngine || typeof streamJsonEngine[method] !== 'function') {
+      throw new Error(`Remote worker channel stream-json engine is not attached or does not implement ${method}`);
+    }
+    return streamJsonEngine[method].bind(streamJsonEngine);
+  }
+
+  function streamJsonOwns(runId) {
+    return Boolean(
+      streamJsonEngine
+      && typeof streamJsonEngine.hasProcess === 'function'
+      && streamJsonEngine.hasProcess(runId),
+    );
+  }
+
+  function spawnWorker(runId, { engine, spec } = {}) {
+    if (engine === 'stream-json') {
+      return requireStream('spawnAgent')(runId, {
+        ...(spec || {}),
+        executor: remoteExecutor,
+        nodePrefix: nodePrefix || undefined,
+        nodeId: nodeId || undefined,
+      });
+    }
+    if (engine === 'cli') {
+      return requireRemote('spawnWorker')(runId, { engine, spec });
+    }
+    throw new Error(`Remote worker channel cannot spawn unknown worker engine: ${engine}`);
+  }
+
+  function ownerOf(runId) {
+    if (streamJsonOwns(runId)) return 'stream-json';
+    return requireRemote('ownerOf')(runId);
+  }
+
+  function isAlive(runId, engine) {
+    if (engine === 'stream-json' || (!engine && streamJsonOwns(runId))) {
+      return requireStream('isAlive')(runId);
+    }
+    return requireRemote('isAlive')(runId, engine);
+  }
+
+  function detectExitCode(runId, engine) {
+    if (engine === 'stream-json' || (!engine && streamJsonOwns(runId))) {
+      return requireStream('detectExitCode')(runId);
+    }
+    return requireRemote('detectExitCode')(runId, engine);
+  }
+
+  function getOutput(runId, lines, engine) {
+    if (engine === 'stream-json' || (!engine && streamJsonOwns(runId))) {
+      return requireStream('getOutput')(runId, lines);
+    }
+    return requireRemote('getOutput')(runId, lines, engine);
+  }
+
+  function sendInput(runId, text) {
+    if (streamJsonOwns(runId)) return requireStream('sendInput')(runId, text);
+    return requireRemote('sendInput')(runId, text);
+  }
+
+  function kill(runId, engine) {
+    if (engine === 'stream-json' || (!engine && streamJsonOwns(runId))) {
+      return requireStream('kill')(runId);
+    }
+    return requireRemote('kill')(runId, engine);
+  }
+
+  return Object.assign(Object.create(remoteExecutor), {
+    spawnWorker,
+    ownerOf,
+    isAlive,
+    detectExitCode,
+    getOutput,
+    sendInput,
+    kill,
+  });
+}
+
 function createLocalNodeExecutor({ executionEngine, streamJsonEngine } = {}) {
   let workerChannel = (executionEngine || streamJsonEngine)
     ? createLocalWorkerChannel({ executionEngine, streamJsonEngine })
@@ -265,5 +369,6 @@ function createLocalNodeExecutor({ executionEngine, streamJsonEngine } = {}) {
 
 module.exports = {
   createLocalWorkerChannel,
+  createRemoteWorkerChannel,
   createLocalNodeExecutor,
 };

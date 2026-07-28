@@ -1253,6 +1253,7 @@ function createApp(options = {}) {
   const streamJsonEngine = createStreamJsonEngine({
     runService,
     eventBus,
+    nodeService,
     actorTokens: actorTokenPolicy,
   });
   // Fleet P3: remote executors implement this worker channel natively.

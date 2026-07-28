@@ -812,6 +812,7 @@ function createRemoteSshNodeExecutor(node, {
     env,
     pathPrefix,
     envAllowlist,
+    worker = false,
   } = {}) {
     const commandName = String(command);
     if (!managerInteractiveCommands.has(commandName)) throw managerCommandNotAllowedError(command);
@@ -821,28 +822,35 @@ function createRemoteSshNodeExecutor(node, {
     // without control chars — same contract as the worker channel's workerPath.
     // (Codex P4-S1 review.)
     if (pathPrefix !== undefined && pathPrefix !== null) {
+      const segments = typeof pathPrefix === 'string' ? pathPrefix.split(':') : null;
+      const segmentsValid = Array.isArray(segments)
+        && segments.length > 0
+        && segments.every((segment) => segment.length > 0 && path.posix.isAbsolute(segment));
       if (
         typeof pathPrefix !== 'string'
         || pathPrefix.length === 0
-        || !path.posix.isAbsolute(pathPrefix)
+        || !segmentsValid
         || /[\x00-\x1F\x7F]/.test(pathPrefix)
       ) {
-        throw new Error('spawnInteractive pathPrefix must be an absolute POSIX path without control characters');
+        throw new Error('spawnInteractive pathPrefix must be one or more absolute POSIX paths (colon-separated) without control characters');
       }
     }
     let safeCwd = cwd;
     if (cwd) safeCwd = (await assertWithinRoots(cwd)).canonical;
     const explicitEnv = { ...(env || {}) };
-    const managerToken = normalizeTransportSecret(
-      explicitEnv.PALANTIR_MANAGER_TOKEN,
-      'PALANTIR_MANAGER_TOKEN',
+    const runBoundTokenKey = worker
+      ? 'PALANTIR_WORKER_TOKEN'
+      : 'PALANTIR_MANAGER_TOKEN';
+    const runBoundToken = normalizeTransportSecret(
+      explicitEnv[runBoundTokenKey],
+      runBoundTokenKey,
     );
     delete explicitEnv.PALANTIR_TOKEN;
     delete explicitEnv.PALANTIR_PM_TOKEN;
     delete explicitEnv.PALANTIR_WORKER_TOKEN;
     delete explicitEnv.PALANTIR_MANAGER_TOKEN;
-    const managerEnvKeys = [
-      ...remoteManagerBaseEnvKeys(commandName),
+    const processEnvKeys = [
+      ...(worker ? REMOTE_WORKER_BASE_ENV_KEYS : remoteManagerBaseEnvKeys(commandName)),
       ...normalizeEnvKeyList(envAllowlist),
     ];
     const script = buildCommandScript(commandName, args, {
@@ -855,14 +863,14 @@ function createRemoteSshNodeExecutor(node, {
       env: {
         PALANTIR_TOKEN: null,
         PALANTIR_PM_TOKEN: null,
-        PALANTIR_WORKER_TOKEN: null,
-        ...(managerToken ? {} : { PALANTIR_MANAGER_TOKEN: null }),
+        ...(worker && runBoundToken ? {} : { PALANTIR_WORKER_TOKEN: null }),
+        ...(!worker && runBoundToken ? {} : { PALANTIR_MANAGER_TOKEN: null }),
         ...explicitEnv,
       },
       pathPrefix,
       cleanEnv: true,
-      cleanEnvKeys: managerEnvKeys,
-      runBoundTokenKey: managerToken ? 'PALANTIR_MANAGER_TOKEN' : null,
+      cleanEnvKeys: processEnvKeys,
+      runBoundTokenKey: runBoundToken ? runBoundTokenKey : null,
     });
     // The capability read moved INSIDE the clean shell (buildCommandScript):
     // reading it out here would require re-injecting the value as an env -i
@@ -874,10 +882,10 @@ function createRemoteSshNodeExecutor(node, {
       sshArgsFor(bootstrapScript, { keepAlive: true }),
       { stdio: ['pipe', 'pipe', 'pipe'] },
     );
-    if (managerToken) {
+    if (runBoundToken) {
       if (!child || !child.stdin || typeof child.stdin.write !== 'function') {
         try { child?.kill?.('SIGTERM'); } catch { /* best-effort */ }
-        throw new Error('spawnInteractive requires writable SSH stdin for manager capability transport');
+        throw new Error('spawnInteractive requires writable SSH stdin for run capability transport');
       }
       // The caller writes the model prompt only after this async method resolves,
       // so this framed first line is consumed by the bootstrap before the
@@ -886,7 +894,7 @@ function createRemoteSshNodeExecutor(node, {
         child.stdin.on('error', () => { /* child close/error is authoritative */ });
       }
       try {
-        child.stdin.write(`${managerToken}\n`);
+        child.stdin.write(`${runBoundToken}\n`);
       } catch (err) {
         try { child.kill?.('SIGTERM'); } catch { /* best-effort */ }
         throw err;
@@ -934,6 +942,39 @@ function createRemoteSshNodeExecutor(node, {
       script = script.replace(/^exec /, `exec env PATH=${shq(pathPrefix)}:$PATH `);
     }
     return runRemoteScript(script, { timeoutMs, maxBuffer });
+  }
+
+  /**
+   * Resolve the Claude CLI version on this execution node. This is a fixed
+   * probe rather than public exec so preset version gates cannot accidentally
+   * inspect the Console host while dispatching to an SSH node.
+   */
+  async function readClaudeVersion({
+    timeoutMs = 3000,
+    maxBuffer = 4096,
+    pathPrefix = node.node_prefix || undefined,
+  } = {}) {
+    if (pathPrefix !== undefined && pathPrefix !== null) {
+      const segments = typeof pathPrefix === 'string' ? pathPrefix.split(':') : null;
+      const segmentsValid = Array.isArray(segments)
+        && segments.length > 0
+        && segments.every((segment) => segment.length > 0 && path.posix.isAbsolute(segment));
+      if (
+        typeof pathPrefix !== 'string'
+        || pathPrefix.length === 0
+        || !segmentsValid
+        || /[\x00-\x1F\x7F]/.test(pathPrefix)
+      ) {
+        throw new Error('readClaudeVersion pathPrefix must be one or more absolute POSIX paths (colon-separated) without control characters');
+      }
+    }
+    const script = pathPrefix
+      ? `exec env PATH=${shq(pathPrefix)}:"$PATH" claude --version`
+      : 'exec claude --version';
+    const result = await runRemoteScript(script, { timeoutMs, maxBuffer });
+    if (result.code !== 0) return null;
+    const match = String(result.stdout || '').match(/(\d+\.\d+\.\d+)/);
+    return match ? match[1] : null;
   }
 
   async function fileExists(remotePath) {
@@ -1362,7 +1403,7 @@ function createRemoteSshNodeExecutor(node, {
       && Object.prototype.hasOwnProperty.call(workerRequest, 'engine')
     ) {
       if (workerRequest.engine !== 'cli') {
-        throw new Error('remote nodes cannot run stream-json/claude workers yet — P5');
+        throw new Error('stream-json workers require the remote duplex worker channel');
       }
       return workerRequest.spec;
     }
@@ -1544,6 +1585,7 @@ function createRemoteSshNodeExecutor(node, {
     exec,
     spawnInteractive,
     readClaudeOAuthUsage,
+    readClaudeVersion,
     spawnWorker,
     ownerOf,
     isAlive,

@@ -5,7 +5,11 @@ const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 
-const { createLocalNodeExecutor, createLocalWorkerChannel } = require('../services/nodeExecutor');
+const {
+  createLocalNodeExecutor,
+  createLocalWorkerChannel,
+  createRemoteWorkerChannel,
+} = require('../services/nodeExecutor');
 const { createWorktreeService } = require('../services/worktreeService');
 const { createFsService } = require('../services/fsService');
 
@@ -154,6 +158,85 @@ test('createLocalWorkerChannel cleanupRun is an awaitable no-op', async () => {
   const channel = createLocalWorkerChannel();
 
   assert.equal(await channel.cleanupRun('r1'), undefined);
+});
+
+test('createRemoteWorkerChannel bridges stream-json ownership over a remote executor', () => {
+  const streamCalls = [];
+  const active = new Set();
+  const remoteExecutor = {
+    marker: 'raw-remote-filesystem-surface',
+    spawnWorker() { throw new Error('stream-json must not use remote tmux spawnWorker'); },
+    ownerOf() { return 'cli'; },
+    isAlive() { return false; },
+    detectExitCode() { return 9; },
+    getOutput() { return 'raw-output'; },
+    sendInput() { return false; },
+    kill() { return false; },
+  };
+  const streamJsonEngine = {
+    spawnAgent(runId, spec) {
+      active.add(runId);
+      streamCalls.push({ type: 'spawn', runId, spec });
+      return { pid: null, engine: 'stream-json' };
+    },
+    hasProcess(runId) { return active.has(runId); },
+    isAlive(runId) { streamCalls.push({ type: 'alive', runId }); return true; },
+    detectExitCode(runId) { streamCalls.push({ type: 'exit', runId }); return null; },
+    getOutput(runId, lines) { streamCalls.push({ type: 'output', runId, lines }); return 'stream-output'; },
+    sendInput(runId, text) { streamCalls.push({ type: 'input', runId, text }); return true; },
+    kill(runId) { streamCalls.push({ type: 'kill', runId }); return true; },
+  };
+  const channel = createRemoteWorkerChannel({
+    remoteExecutor,
+    streamJsonEngine,
+    nodePrefix: '/pod/bin',
+    nodeId: 'pod-a',
+  });
+
+  const result = channel.spawnWorker('remote-claude', {
+    engine: 'stream-json',
+    spec: { prompt: 'hello', cwd: '/pod/ws' },
+  });
+
+  assert.deepEqual(result, { pid: null, engine: 'stream-json' });
+  assert.equal(channel.marker, 'raw-remote-filesystem-surface');
+  assert.equal(channel.ownerOf('remote-claude'), 'stream-json');
+  assert.equal(channel.isAlive('remote-claude'), true);
+  assert.equal(channel.detectExitCode('remote-claude'), null);
+  assert.equal(channel.getOutput('remote-claude', 12), 'stream-output');
+  assert.equal(channel.sendInput('remote-claude', 'continue'), true);
+  assert.equal(channel.kill('remote-claude'), true);
+  assert.strictEqual(streamCalls[0].spec.executor, remoteExecutor);
+  assert.equal(streamCalls[0].spec.nodePrefix, '/pod/bin');
+  assert.equal(streamCalls[0].spec.nodeId, 'pod-a');
+  assert.deepEqual(streamCalls.map((call) => call.type), [
+    'spawn', 'alive', 'exit', 'output', 'input', 'kill',
+  ]);
+});
+
+test('createRemoteWorkerChannel preserves the remote CLI worker channel', async () => {
+  const calls = [];
+  const remoteExecutor = {
+    async spawnWorker(runId, request) {
+      calls.push({ type: 'spawn', runId, request });
+      return { sessionName: `remote-${runId}` };
+    },
+    async ownerOf(runId) { calls.push({ type: 'owner', runId }); return 'cli'; },
+    async isAlive(runId, engine) { calls.push({ type: 'alive', runId, engine }); return true; },
+    async detectExitCode() { return null; },
+    async getOutput() { return 'cli-output'; },
+    async sendInput() { return false; },
+    async kill() { return true; },
+  };
+  const channel = createRemoteWorkerChannel({ remoteExecutor });
+  const request = { engine: 'cli', spec: { command: 'codex', args: [] } };
+
+  assert.deepEqual(await channel.spawnWorker('remote-cli', request), {
+    sessionName: 'remote-remote-cli',
+  });
+  assert.equal(await channel.ownerOf('remote-cli'), 'cli');
+  assert.equal(await channel.isAlive('remote-cli', 'cli'), true);
+  assert.deepEqual(calls[0].request, request);
 });
 
 test('LocalNodeExecutor worker channel methods fail fast before attachEngines', () => {

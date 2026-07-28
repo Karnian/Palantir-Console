@@ -97,6 +97,20 @@ test('PATCH cordon (0→1) does NOT trigger drain', async () => {
   assert.deepEqual(drained, []);
 });
 
+test('PATCH reachable recovery (0→1) triggers scheduleDrainForNode', async () => {
+  const drained = [];
+  const app = createRouteApp({
+    nodeService: fakeNodeService(
+      { id: 'pod-a', reachable: 0, cordoned: 0 },
+      { id: 'pod-a', reachable: 1, cordoned: 0 },
+    ),
+    lifecycleService: { scheduleDrainForNode: (id) => drained.push(id) },
+  });
+  const res = await dispatch(app, 'PATCH', '/api/nodes/pod-a', { reachable: 1 });
+  assert.equal(res.status, 200);
+  assert.deepEqual(drained, ['pod-a']);
+});
+
 test('PATCH unrelated field on a cordoned node does NOT trigger drain', async () => {
   const drained = [];
   const app = createRouteApp({
