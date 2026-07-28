@@ -368,6 +368,7 @@ test('engine: remote executor uses pod cwd/env/pathPrefix and preserves stream-j
     isManager: true,
     executor,
     nodePrefix: '/pod/bin',
+    envAllowlist: ['POD_ONLY_MANAGER_KEY'],
   });
 
   // Remote spawnInteractive is async (a remote realpath guard) — spawnAgent
@@ -382,6 +383,7 @@ test('engine: remote executor uses pod cwd/env/pathPrefix and preserves stream-j
     cwd: '/pod/ws',
     env: {},
     pathPrefix: '/pod/bin',
+    envAllowlist: ['POD_ONLY_MANAGER_KEY'],
   });
   assert.ok(spawnCalls[0].args.includes('--input-format'));
   assert.ok(spawnCalls[0].args.includes('stream-json'));

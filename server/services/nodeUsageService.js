@@ -122,6 +122,7 @@ function chunkToString(chunk) {
 
 async function withProbeChild(spawnInteractive, commandSpec, {
   pathPrefix,
+  cleanEnv,
   timeoutMs,
   killGraceMs,
   maxOutputBytes,
@@ -166,6 +167,7 @@ async function withProbeChild(spawnInteractive, commandSpec, {
     child = await spawnInteractive(command, Array.from(args), {
       env: {},
       pathPrefix: pathPrefix || undefined,
+      ...(cleanEnv ? { cleanEnv: true } : {}),
     });
 
     closePromise = new Promise((resolve) => {
@@ -254,6 +256,11 @@ function closeInfoToRpcError(closeInfo) {
 }
 
 async function runCodexRpcProbe(spawnInteractive, opts) {
+  // #431: every remote `spawnInteractive` launches an agent CLI, and the remote
+  // executor gives all of them the pod-side `env -i` boundary unconditionally —
+  // including the version and auth probes. There is deliberately no per-call
+  // opt-in: an option the executor ignores would read as a choice that isn't
+  // one, and the first caller to omit it would silently expect inheritance.
   return withProbeChild(spawnInteractive, COMMANDS.codexAppServer, opts, async ({
     child,
     output,

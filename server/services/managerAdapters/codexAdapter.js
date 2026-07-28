@@ -289,7 +289,21 @@ function createCodexAdapter({
    * turn via codexMcpSecretTransport. String config paths are for the
    * Claude adapter's `--mcp-config` path and are skipped here.
    */
-  function startSession(runId, { systemPrompt, cwd, model, reasoning_effort, env, role, resumeThreadId, onThreadStarted, mcpConfig, executor, nodePrefix, serviceTier } = {}) {
+  function startSession(runId, {
+    systemPrompt,
+    cwd,
+    model,
+    reasoning_effort,
+    env,
+    envAllowlist,
+    role,
+    resumeThreadId,
+    onThreadStarted,
+    mcpConfig,
+    executor,
+    nodePrefix,
+    serviceTier,
+  } = {}) {
     if (sessions.has(runId)) {
       throw new Error(`codexAdapter: session ${runId} already started`);
     }
@@ -324,6 +338,7 @@ function createCodexAdapter({
       model: model || null,
       effort: reasoning_effort || null,
       env: env || null, // PR4: filtered subprocess env from routes/manager.js
+      envAllowlist: Array.isArray(envAllowlist) ? [...envAllowlist] : null,
       role: role || 'manager', // v3 Phase 0: default to manager (tightened)
       // v3 Phase 3a: fires exactly once when thread.started arrives or on
       // synthetic emission for resumes. operatorSpawnService uses this to
@@ -615,6 +630,7 @@ function createCodexAdapter({
           : {}
       ),
       pathPrefix: state.nodePrefix,
+      ...(state.envAllowlist ? { envAllowlist: state.envAllowlist } : {}),
     });
     const child = (spawned && typeof spawned.then === 'function') ? await spawned : spawned;
     if (state.ended) {

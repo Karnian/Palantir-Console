@@ -285,6 +285,16 @@ test('ssh node usage probes fixed commands with empty env, pathPrefix, RPC seque
     assert.deepEqual(call.opts.env, {});
     assert.equal(call.opts.pathPrefix, '/home/agent/.npm-global/bin');
   }
+  const appServerCall = executor.calls.find(
+    (call) => call.command === 'codex' && call.args.join(' ') === 'app-server',
+  );
+  assert.ok(appServerCall);
+  // #431: no probe carries a per-call env mode. The remote executor cleans
+  // every interactive spawn, so a flag here would describe a choice that the
+  // executor does not actually offer.
+  for (const call of executor.calls) {
+    assert.equal(call.opts.cleanEnv, undefined, `${call.command} must not request an env mode`);
+  }
 });
 
 test('ssh codex requiresOpenaiAuth=true passes through as data, not not_logged_in', async () => {

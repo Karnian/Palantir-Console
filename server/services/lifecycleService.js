@@ -1755,6 +1755,16 @@ function createLifecycleService({
             env: buildWorkerEnv(
               parseEnvAllowlist(profile.env_allowlist, trustedBearerEnvKeys),
             ),
+            // Remote clean-env execution must preserve allowlisted variables
+            // that exist only in the pod login shell. Values present on the
+            // controller are still sent in env above and therefore win as
+            // explicit env -i assignments.
+            envAllowlist: isRemoteNode
+              ? [...new Set([
+                ...parseEnvAllowlistArray(profile.env_allowlist),
+                ...(Array.isArray(trustedBearerEnvKeys) ? trustedBearerEnvKeys : []),
+              ])]
+              : undefined,
             workerPath: isRemoteNode ? (node.node_prefix || undefined) : undefined,
             outputLogPath: goalOutputLog || undefined,
           },

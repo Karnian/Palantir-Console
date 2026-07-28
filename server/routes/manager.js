@@ -219,6 +219,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
               cwd: safeCwd,
               systemPrompt,
               env: spawnEnv,
+              envAllowlist,
               resumeSessionId: r.claude_session_id,
               model: r.session_model || undefined,
               reasoning_effort: r.session_effort || undefined,
@@ -474,6 +475,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                     env: isRemoteNode
                       ? applyManagerCredentialPolicy({}, { managerToken: token, actorTokens })
                       : spawnEnv,
+                    envAllowlist,
                     role: 'manager',
                     nodeId,
                     // F-1: per-turn tier resolver — re-reads this instance's
@@ -800,6 +802,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         model: eff.model || undefined,
         reasoning_effort: eff.effort || undefined,
         env: spawnEnv,
+        envAllowlist,
         mcpTools: mcpTools.length > 0 ? mcpTools : undefined,
         // v3 Phase 0: all current manager starts are Top layer. PM layer
         // (Phase 3a) will pass role='manager' with layer='pm' system prompt.
