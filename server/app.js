@@ -1270,6 +1270,7 @@ function createApp(options = {}) {
   const streamJsonEngine = createStreamJsonEngine({
     runService,
     eventBus,
+    nodeService,
     actorTokens: actorTokenPolicy,
   });
   // Fleet P3: remote executors implement this worker channel natively.
@@ -1840,7 +1841,7 @@ function createApp(options = {}) {
     projectService,
   }));
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService, goalDeliveryService, runService, verifyCheckService }));
-  app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService, nodeExecutor }));
+  app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService, nodeExecutor, nodeService }));
   // PR18: tests can pass options.authResolverOpts (e.g. a fake `hasKeychain`)
   // so /api/agents and /api/manager preflights are deterministic across CI
   // hosts that may or may not have a Claude keychain item. Production callers

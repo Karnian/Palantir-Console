@@ -92,6 +92,19 @@ function unshq(value) {
   return value.slice(1, -1).replace(/'\\''/g, "'");
 }
 
+function firstShqWord(value) {
+  assert.equal(value[0], "'");
+  for (let index = 1; index < value.length; index += 1) {
+    if (value[index] !== "'") continue;
+    if (value.slice(index, index + 4) === "'\\''") {
+      index += 3;
+      continue;
+    }
+    return value.slice(0, index + 1);
+  }
+  assert.fail('unterminated shell-quoted word');
+}
+
 function destinationIndex(args) {
   const separator = args.indexOf('--');
   assert.notEqual(separator, -1);
@@ -243,9 +256,8 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
   const cwd = '/srv/root/project';
   const prefix = `/home/runner/agent bin/'quoted" $cash/*glob*`;
   const workerToken = 'worker-capability-literal-must-not-enter-argv';
-  const secretPath = '/srv/root/.palantir-secret-worker-clean/worker_capability';
   const explicitValue = `controller ' " $HOME * ? [abc]`;
-  const spawn = rootAwareSpawn({ cwd, secretPath });
+  const spawn = rootAwareSpawn({ cwd });
   const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
 
   await executor.spawnWorker(runId, {
@@ -267,7 +279,9 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
     .map(logicalScriptOf)
     .find((script) => script.includes('tmux new-session -d -s '));
   const tmuxPrefix = `tmux new-session -d -s ${shq(`palantir-run-${runId}`)} `;
-  const inner = unshq(tmuxScript.slice(tmuxScript.indexOf(tmuxPrefix) + tmuxPrefix.length));
+  const tmuxIndex = tmuxScript.indexOf(tmuxPrefix);
+  assert.notEqual(tmuxIndex, -1);
+  const inner = unshq(firstShqWord(tmuxScript.slice(tmuxIndex + tmuxPrefix.length)));
   assert.ok(inner.includes('env -i "$@"'));
   assertSingleInnerPath(inner, prefix);
   assertBaselineLoop(inner);

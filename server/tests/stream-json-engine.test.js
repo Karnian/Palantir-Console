@@ -153,6 +153,54 @@ test('engine: remote manager forwards only its run capability to the executor', 
   engine.kill('run-remote-capability');
 });
 
+test('engine: direct live-SSH remote worker spawn is rejected in favor of detached ownership', () => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const engine = createStreamJsonEngine();
+  assert.throws(
+    () => engine.spawnAgent('run-remote-worker-env', {
+      cwd: '/pod/ws',
+      prompt: 'remote worker',
+      isManager: false,
+      executor: { spawnInteractive() {} },
+    }),
+    (err) => err.code === 'REMOTE_WORKER_DETACHED_REQUIRED',
+  );
+  assert.equal(engine.hasProcess('run-remote-worker-env'), false);
+});
+
+test('engine: detached remote worker keeps prompts and controller credentials out of argv/env', () => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const engine = createStreamJsonEngine();
+  const spec = engine.buildDetachedWorkerSpec({
+    prompt: 'user prompt with pasted-secret',
+    systemPrompt: 'system prompt with private-context',
+    cwd: '/pod/ws',
+    model: 'sonnet',
+    envAllowlist: ['ANTHROPIC_API_KEY', 'PROFILE_VALUE'],
+    env: {
+      ANTHROPIC_API_KEY: 'controller-secret',
+      PROFILE_VALUE: 'controller-profile-value',
+      PALANTIR_WORKER_TOKEN: 'run-capability',
+      PALANTIR_API_BASE: 'https://console.example',
+      HOME: '/controller/home',
+    },
+  }, { workerPath: '/pod/bin' });
+
+  assert.equal(spec.command, 'claude');
+  assert.equal(spec.stdin, 'user prompt with pasted-secret');
+  assert.equal(spec.systemPrompt, 'system prompt with private-context');
+  assert.equal(spec.systemPromptFileFlag, '--append-system-prompt-file');
+  assert.equal(spec.workerPath, '/pod/bin');
+  assert.deepEqual(spec.envAllowlist, ['ANTHROPIC_API_KEY', 'PROFILE_VALUE']);
+  assert.deepEqual(spec.env, {
+    PALANTIR_API_BASE: 'https://console.example',
+    PALANTIR_WORKER_TOKEN: 'run-capability',
+  });
+  assert.ok(spec.args.includes('-p'));
+  assert.ok(spec.args.includes('--model'));
+  assert.doesNotMatch(JSON.stringify(spec.args), /pasted-secret|private-context|controller-secret/);
+});
+
 /**
  * createStreamJsonEngine 인스턴스를 만들되 CLAUDE_BIN 을 fake-claude.js 로 설정.
  * CLAUDE_ARGS_FILE 을 개별 tmpfile 로 설정하여 args 캡처.

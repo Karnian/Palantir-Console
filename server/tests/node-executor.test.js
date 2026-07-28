@@ -5,7 +5,11 @@ const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 
-const { createLocalNodeExecutor, createLocalWorkerChannel } = require('../services/nodeExecutor');
+const {
+  createLocalNodeExecutor,
+  createLocalWorkerChannel,
+  createRemoteWorkerChannel,
+} = require('../services/nodeExecutor');
 const { createWorktreeService } = require('../services/worktreeService');
 const { createFsService } = require('../services/fsService');
 
@@ -154,6 +158,100 @@ test('createLocalWorkerChannel cleanupRun is an awaitable no-op', async () => {
   const channel = createLocalWorkerChannel();
 
   assert.equal(await channel.cleanupRun('r1'), undefined);
+});
+
+test('createRemoteWorkerChannel gives stream-json workers durable remote ownership', async () => {
+  const calls = [];
+  const remoteExecutor = {
+    marker: 'raw-remote-filesystem-surface',
+    spawnWorker(runId, request) {
+      calls.push({ type: 'spawn', runId, request });
+      return { sessionName: `palantir-run-${runId}` };
+    },
+    ownerOf(runId) { calls.push({ type: 'owner', runId }); return 'cli'; },
+    isAlive(runId, engine) { calls.push({ type: 'alive', runId, engine }); return true; },
+    detectExitCode(runId, engine) { calls.push({ type: 'exit', runId, engine }); return null; },
+    getOutput(runId, lines, engine) {
+      calls.push({ type: 'output', runId, lines, engine });
+      return 'remote-output';
+    },
+    getStructuredResult(runId) {
+      calls.push({ type: 'structured-result', runId });
+      return '{"type":"result"}';
+    },
+    sendInput(runId, text) { calls.push({ type: 'input', runId, text }); return false; },
+    kill(runId, engine) { calls.push({ type: 'kill', runId, engine }); return true; },
+  };
+  const streamJsonEngine = {
+    buildDetachedWorkerSpec(spec, { workerPath }) {
+      calls.push({ type: 'build', spec, workerPath });
+      return {
+        command: 'claude',
+        args: ['--print', '-p'],
+        stdin: spec.prompt,
+        cwd: spec.cwd,
+        env: {},
+        envAllowlist: [],
+        workerPath,
+      };
+    },
+  };
+  const channel = createRemoteWorkerChannel({
+    remoteExecutor,
+    streamJsonEngine,
+    nodePrefix: '/pod/bin',
+    nodeId: 'pod-a',
+  });
+
+  const result = await channel.spawnWorker('remote-claude', {
+    engine: 'stream-json',
+    spec: { prompt: 'hello', cwd: '/pod/ws' },
+  });
+
+  assert.deepEqual(result, { sessionName: 'palantir-run-remote-claude' });
+  assert.equal(channel.marker, 'raw-remote-filesystem-surface');
+  assert.equal(await channel.ownerOf('remote-claude'), 'cli');
+  assert.equal(channel.isAlive('remote-claude'), true);
+  assert.equal(channel.detectExitCode('remote-claude'), null);
+  assert.equal(channel.getOutput('remote-claude', 12), 'remote-output');
+  assert.equal(channel.getStructuredResult('remote-claude'), '{"type":"result"}');
+  assert.equal(channel.sendInput('remote-claude', 'continue'), false);
+  assert.equal(channel.kill('remote-claude'), true);
+  assert.deepEqual(calls[0], {
+    type: 'build',
+    spec: { prompt: 'hello', cwd: '/pod/ws' },
+    workerPath: '/pod/bin',
+  });
+  assert.equal(calls[1].request.engine, 'stream-json');
+  assert.equal(calls[1].request.spec.stdin, 'hello');
+  assert.deepEqual(calls.map((call) => call.type), [
+    'build', 'spawn', 'owner', 'alive', 'exit', 'output', 'structured-result', 'input', 'kill',
+  ]);
+});
+
+test('createRemoteWorkerChannel preserves the remote CLI worker channel', async () => {
+  const calls = [];
+  const remoteExecutor = {
+    async spawnWorker(runId, request) {
+      calls.push({ type: 'spawn', runId, request });
+      return { sessionName: `remote-${runId}` };
+    },
+    async ownerOf(runId) { calls.push({ type: 'owner', runId }); return 'cli'; },
+    async isAlive(runId, engine) { calls.push({ type: 'alive', runId, engine }); return true; },
+    async detectExitCode() { return null; },
+    async getOutput() { return 'cli-output'; },
+    async sendInput() { return false; },
+    async kill() { return true; },
+  };
+  const channel = createRemoteWorkerChannel({ remoteExecutor });
+  const request = { engine: 'cli', spec: { command: 'codex', args: [] } };
+
+  assert.deepEqual(await channel.spawnWorker('remote-cli', request), {
+    sessionName: 'remote-remote-cli',
+  });
+  assert.equal(await channel.ownerOf('remote-cli'), 'cli');
+  assert.equal(await channel.isAlive('remote-cli', 'cli'), true);
+  assert.deepEqual(calls[0].request, request);
 });
 
 test('LocalNodeExecutor worker channel methods fail fast before attachEngines', () => {
@@ -483,7 +581,7 @@ test('createHarvestService routes worktree existence through injected executor',
   assert.equal(harvested.payload.summary.harvested, false);
 });
 
-test('runs diff route consults injected executor for worktree existence', async () => {
+test('runs diff route consults injected executor for worktree existence', async (t) => {
   const express = require('express');
   const request = require('supertest');
   const { createRunsRouter } = require('../routes/runs');
@@ -503,11 +601,175 @@ test('runs diff route consults injected executor for worktree existence', async 
     nodeExecutor: fake,
   }));
 
-  const res = await request(app).get('/api/runs/r1/diff');
+  const server = app.listen(0);
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const res = await request(server).get('/api/runs/r1/diff');
 
   assert.equal(res.status, 200);
   assert.deepEqual(res.body, { diff: null, reason: 'worktree_missing' });
   assert.deepEqual(calls, ['/nope']);
+});
+
+test('runs output route reads detached output through the run node executor', async (t) => {
+  const express = require('express');
+  const request = require('supertest');
+  const { createRunsRouter } = require('../routes/runs');
+  const calls = [];
+  const remoteExecutor = {
+    async getOutput(runId, lines) {
+      calls.push({ runId, lines });
+      return [
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"remote"},{"type":"tool_use","name":"Bash","input":{"secret":"must-not-render"}}]}}',
+        '{"type":"result","result":"remote"}',
+      ].join('\n');
+    },
+  };
+  const app = express();
+  app.use('/api/runs', createRunsRouter({
+    runService: {
+      getRun: () => ({ id: 'r-remote', node_id: 'ssh-pod' }),
+      hasRunEvent: (_runId, eventType) => eventType === 'runtime:remote_worker_engine',
+    },
+    lifecycleService: {},
+    executionEngine: {
+      getOutput() {
+        throw new Error('local execution engine must not serve remote output');
+      },
+    },
+    streamJsonEngine: {
+      getOutput() {
+        throw new Error('local stream-json engine must not serve remote output');
+      },
+    },
+    conversationService: {},
+    presetService: {},
+    mcpTemplateService: {},
+    projectService: {},
+    taskService: {},
+    nodeExecutor: {},
+    nodeService: {
+      pickExecutor(nodeId) {
+        assert.equal(nodeId, 'ssh-pod');
+        return remoteExecutor;
+      },
+    },
+  }));
+
+  const server = app.listen(0);
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const res = await request(server).get('/api/runs/r-remote/output?lines=321');
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.output, 'remote');
+  assert.equal(res.body.output.includes('must-not-render'), false);
+  assert.deepEqual(calls, [{ runId: 'r-remote', lines: 321 }]);
+});
+
+test('runs output route falls back to the durable detached Claude result', async (t) => {
+  const express = require('express');
+  const request = require('supertest');
+  const { createRunsRouter } = require('../routes/runs');
+  const calls = [];
+  const remoteExecutor = {
+    async getOutput(runId, lines) {
+      calls.push({ type: 'output', runId, lines });
+      return '';
+    },
+    async getStructuredResult(runId) {
+      calls.push({ type: 'result', runId });
+      return JSON.stringify({
+        type: 'result',
+        is_error: false,
+        result: 'durable oversized result',
+      });
+    },
+  };
+  const app = express();
+  app.use('/api/runs', createRunsRouter({
+    runService: {
+      getRun: () => ({
+        id: 'r-durable',
+        node_id: 'ssh-pod',
+        status: 'completed',
+      }),
+      hasRunEvent: (_runId, eventType) => eventType === 'runtime:remote_worker_engine',
+    },
+    lifecycleService: {},
+    executionEngine: {},
+    streamJsonEngine: {},
+    conversationService: {},
+    presetService: {},
+    mcpTemplateService: {},
+    projectService: {},
+    taskService: {},
+    nodeExecutor: {},
+    nodeService: {
+      pickExecutor() {
+        return remoteExecutor;
+      },
+    },
+  }));
+
+  const server = app.listen(0);
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const res = await request(server).get('/api/runs/r-durable/output?lines=200');
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.output, 'durable oversized result');
+  assert.deepEqual(calls, [
+    { type: 'output', runId: 'r-durable', lines: 200 },
+    { type: 'result', runId: 'r-durable' },
+  ]);
+});
+
+test('runs output route keeps remote manager output on its live stream-json owner', async (t) => {
+  const express = require('express');
+  const request = require('supertest');
+  const { createRunsRouter } = require('../routes/runs');
+  let remotePicks = 0;
+  const app = express();
+  app.use('/api/runs', createRunsRouter({
+    runService: {
+      getRun: () => ({
+        id: 'r-remote-manager',
+        node_id: 'ssh-pod',
+        is_manager: 1,
+      }),
+    },
+    lifecycleService: {},
+    executionEngine: {
+      getOutput() {
+        throw new Error('CLI fallback must not win while the manager stream is live');
+      },
+    },
+    streamJsonEngine: {
+      getOutput(runId, lines) {
+        assert.equal(runId, 'r-remote-manager');
+        assert.equal(lines, 200);
+        return 'live remote manager output';
+      },
+    },
+    conversationService: {},
+    presetService: {},
+    mcpTemplateService: {},
+    projectService: {},
+    taskService: {},
+    nodeExecutor: {},
+    nodeService: {
+      pickExecutor() {
+        remotePicks++;
+        throw new Error('remote manager output must stay on the live duplex owner');
+      },
+    },
+  }));
+
+  const server = app.listen(0);
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const res = await request(server).get('/api/runs/r-remote-manager/output?lines=200');
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.output, 'live remote manager output');
+  assert.equal(remotePicks, 0);
 });
 
 test('createFsService routes directory listing through injected executor', async () => {

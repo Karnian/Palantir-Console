@@ -3,6 +3,7 @@ const path = require('node:path');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { withoutSessionHandle } = require('../utils/managerRunView');
 const { createLocalNodeExecutor } = require('../services/nodeExecutor');
+const { parseClaudeStreamJsonOutput } = require('../services/claudeStreamJson');
 
 // R2-B.2: maximum unified-diff payload size, in bytes. Diffs larger than
 // this are truncated and the client is warned via a `truncated` flag so
@@ -194,7 +195,7 @@ function computeMcpTemplateDrift(snapshotCore, snapshotAppliedAt, mcpTemplateSer
   return { templates: drifted, modified_count: drifted.length };
 }
 
-function createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService, nodeExecutor = createLocalNodeExecutor() }) {
+function createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService, nodeExecutor = createLocalNodeExecutor(), nodeService = null }) {
   const router = express.Router();
 
   router.get('/', asyncHandler(async (req, res) => {
@@ -463,9 +464,46 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
       return res.status(501).json({ error: 'Execution engine not configured' });
     }
     const lines = Math.min(Math.max(1, Number(req.query.lines || 100)), 2000);
-    // Try streamJsonEngine first (claude workers), fall back to executionEngine (tmux)
-    const output = (streamJsonEngine && streamJsonEngine.getOutput(req.params.id, lines))
-      || executionEngine.getOutput(req.params.id, lines);
+    const run = runService.getRun(req.params.id);
+    const isRemoteWorker = run.node_id
+      && run.node_id !== 'local'
+      && Number(run.is_manager || 0) !== 1;
+    // Detached remote Claude workers are not registered in the controller's
+    // streamJsonEngine. Read their tmux-owned log through the run's execution
+    // node. Remote managers still use the controller-owned live SSH duplex
+    // process, while local runs retain the existing stream-json -> CLI fallback.
+    let output;
+    if (isRemoteWorker && nodeService) {
+      const runExecutor = nodeService.pickExecutor(run.node_id);
+      const rawOutput = await runExecutor.getOutput(run.id, lines);
+      const isDetachedClaude = typeof runService.hasRunEvent === 'function'
+        ? runService.hasRunEvent(run.id, 'runtime:remote_worker_engine')
+        : typeof runService.getRunEvents === 'function'
+          && runService.getRunEvents(run.id)
+            .some((event) => event.event_type === 'runtime:remote_worker_engine');
+      if (isDetachedClaude) {
+        // A single result event can exceed the bounded live-output transport,
+        // which deliberately returns an empty string on overflow. The detached
+        // worker separately persists its final result record with a larger
+        // bound; use it as the terminal/empty-tail fallback so RunInspector
+        // still shows the semantic result without exposing raw NDJSON.
+        const shouldReadDurableResult = !rawOutput
+          || ['completed', 'failed', 'cancelled', 'stopped', 'needs_input'].includes(run.status);
+        const durableResult = shouldReadDurableResult
+          && typeof runExecutor.getStructuredResult === 'function'
+          ? await runExecutor.getStructuredResult(run.id)
+          : '';
+        const parsed = parseClaudeStreamJsonOutput(
+          [rawOutput, durableResult].filter(Boolean).join('\n'),
+        );
+        output = parsed.recognized ? parsed.text : rawOutput;
+      } else {
+        output = rawOutput;
+      }
+    } else {
+      output = (streamJsonEngine && streamJsonEngine.getOutput(run.id, lines))
+        || executionEngine.getOutput(run.id, lines);
+    }
     res.json({ output });
   }));
 

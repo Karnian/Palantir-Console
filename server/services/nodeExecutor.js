@@ -139,6 +139,89 @@ function createLocalWorkerChannel({ streamJsonEngine, executionEngine } = {}) {
   };
 }
 
+/**
+ * Build the remote worker channel on the executor's detached tmux/sentinel
+ * ownership model. Claude still emits stream-json output, but the controller
+ * does not keep the SSH transport as process ownership: an SSH disconnect must
+ * never imply that the pod process exited or make a retry overlap it.
+ */
+function createRemoteWorkerChannel({
+  remoteExecutor,
+  streamJsonEngine,
+  nodePrefix,
+  nodeId,
+} = {}) {
+  if (!remoteExecutor || typeof remoteExecutor !== 'object') {
+    throw new Error('Remote worker channel requires a remote executor');
+  }
+
+  function requireRemote(method) {
+    if (typeof remoteExecutor[method] !== 'function') {
+      throw new Error(`Remote worker executor does not implement ${method}`);
+    }
+    return remoteExecutor[method].bind(remoteExecutor);
+  }
+
+  function requireStream(method) {
+    if (!streamJsonEngine || typeof streamJsonEngine[method] !== 'function') {
+      throw new Error(`Remote worker channel stream-json engine is not attached or does not implement ${method}`);
+    }
+    return streamJsonEngine[method].bind(streamJsonEngine);
+  }
+
+  function spawnWorker(runId, { engine, spec } = {}) {
+    if (engine === 'stream-json') {
+      const detachedSpec = requireStream('buildDetachedWorkerSpec')(spec || {}, {
+        workerPath: nodePrefix || undefined,
+      });
+      return requireRemote('spawnWorker')(runId, { engine, spec: detachedSpec });
+    }
+    if (engine === 'cli') {
+      return requireRemote('spawnWorker')(runId, { engine, spec });
+    }
+    throw new Error(`Remote worker channel cannot spawn unknown worker engine: ${engine}`);
+  }
+
+  function ownerOf(runId) {
+    return requireRemote('ownerOf')(runId);
+  }
+
+  function isAlive(runId, engine) {
+    return requireRemote('isAlive')(runId, engine);
+  }
+
+  function detectExitCode(runId, engine) {
+    return requireRemote('detectExitCode')(runId, engine);
+  }
+
+  function getOutput(runId, lines, engine) {
+    return requireRemote('getOutput')(runId, lines, engine);
+  }
+
+  function getStructuredResult(runId) {
+    return requireRemote('getStructuredResult')(runId);
+  }
+
+  function sendInput(runId, text) {
+    return requireRemote('sendInput')(runId, text);
+  }
+
+  function kill(runId, engine) {
+    return requireRemote('kill')(runId, engine);
+  }
+
+  return Object.assign(Object.create(remoteExecutor), {
+    spawnWorker,
+    ownerOf,
+    isAlive,
+    detectExitCode,
+    getOutput,
+    getStructuredResult,
+    sendInput,
+    kill,
+  });
+}
+
 function createLocalNodeExecutor({ executionEngine, streamJsonEngine } = {}) {
   let workerChannel = (executionEngine || streamJsonEngine)
     ? createLocalWorkerChannel({ executionEngine, streamJsonEngine })
@@ -265,5 +348,6 @@ function createLocalNodeExecutor({ executionEngine, streamJsonEngine } = {}) {
 
 module.exports = {
   createLocalWorkerChannel,
+  createRemoteWorkerChannel,
   createLocalNodeExecutor,
 };

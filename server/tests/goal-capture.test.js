@@ -202,6 +202,68 @@ test('captureGoalOutput prefers the file-backed tee log over channel.getOutput (
   assert.equal(JSON.parse(after.goal_report).goal_status, 'done');
 });
 
+test('a local goal run over the byte cap keeps the HEAD of its output', async (t) => {
+  const { db, rs, ts, ps, outputByRun } = await harness(t);
+  const project = ps.createProject({ name: 'P', directory: null });
+  const task = ts.createTask({ project_id: project.id, title: 'T', description: 'd' });
+  db.prepare('UPDATE tasks SET goal_enabled = 1 WHERE id = ?').run(task.id);
+  const profile = seedProfile(db);
+  const run = rs.createRun({ is_manager: false, task_id: task.id, agent_profile_id: profile.id, node_id: 'local', prompt: 'x' });
+  rs.setGoalActive(run.id, 1);
+
+  // Detached remote Claude keeps the TAIL, because its durable result record is
+  // appended last. The local channel must keep the HEAD exactly as it did
+  // before remote support existed — this PR enables a remote path and must not
+  // change what a local goal worker records.
+  const CAP = 64 * 1024;
+  const head = 'HEAD_MARKER';
+  const tail = 'TAIL_MARKER';
+  outputByRun.set(run.id, `${head}${'x'.repeat(CAP)}${tail}`);
+  rs.updateRunStatus(run.id, 'completed', { force: true });
+  await tick();
+
+  const after = rs.getRun(run.id);
+  assert.equal(Buffer.byteLength(after.final_output, 'utf8'), CAP, 'capped at exactly the cap');
+  assert.ok(after.final_output.startsWith(head), 'the head must survive on the local path');
+  assert.equal(after.final_output.includes(tail), false, 'the tail is what gets dropped');
+});
+
+test('a local-kind node registered under another id still keeps the HEAD', async (t) => {
+  const { db, rs, ts, ps, outputByRun } = await harness(t);
+  const project = ps.createProject({ name: 'P', directory: null });
+  const task = ts.createTask({ project_id: project.id, title: 'T', description: 'd' });
+  db.prepare('UPDATE tasks SET goal_enabled = 1 WHERE id = ?').run(task.id);
+  // A Claude profile on a node whose id is not the literal 'local'. nodeService
+  // supports exactly this (kind 'local' under any id) and routes it to the local
+  // executor, so "remote" must be decided by node KIND. Deciding it by
+  // `node_id !== 'local'` would silently give this local run the remote-only
+  // tail truncation.
+  db.prepare("INSERT INTO nodes (id, name, kind) VALUES ('local-alias', 'Local Alias', 'local')").run();
+  const claudeProfile = `profile-claude-${Date.now()}`;
+  db.prepare(
+    `INSERT INTO agent_profiles (id, name, type, command, args_template, capabilities_json, env_allowlist, max_concurrent)
+     VALUES (?, 'C', 'claude', 'claude', '{prompt}', '{}', '[]', 5)`,
+  ).run(claudeProfile);
+  const run = rs.createRun({
+    is_manager: false, task_id: task.id, agent_profile_id: claudeProfile,
+    node_id: 'local-alias', prompt: 'x',
+  });
+  rs.setGoalActive(run.id, 1);
+
+  // No tee log: that reader is tail-seeking by construction, so it cannot show
+  // which cap the channel path applies. Route through channel.getOutput.
+  const CAP = 64 * 1024;
+  outputByRun.set(run.id, `HEAD_MARKER${'x'.repeat(CAP)}TAIL_MARKER`);
+
+  rs.updateRunStatus(run.id, 'completed', { force: true });
+  await tick();
+
+  const after = rs.getRun(run.id);
+  assert.ok(after.final_output, 'goal capture ran');
+  assert.ok(after.final_output.startsWith('HEAD_MARKER'), 'local-kind node keeps head truncation');
+  assert.equal(after.final_output.includes('TAIL_MARKER'), false);
+});
+
 test('migration 054: goal columns exist', async (t) => {
   const { db } = await harness(t);
   const taskCols = db.prepare('PRAGMA table_info(tasks)').all().map((c) => c.name);

@@ -11,8 +11,26 @@ const {
 
 const WORKER_OUTPUT_MAX_LINES = 500;
 const WORKER_OUTPUT_MAX_BUFFER = 256 * 1024;
+// A Claude result event repeats the full final answer in one JSONL record, so
+// it can legitimately exceed the small live-tail ceiling. Keep this separately
+// bounded at 4 MiB: large enough for Claude's practical output window while
+// still preventing an untrusted remote file from growing controller memory
+// without limit.
+const CLAUDE_RESULT_MAX_BUFFER = 4 * 1024 * 1024;
 const SSH_SERVER_ALIVE_INTERVAL_SECONDS = 15;
 const SSH_SERVER_ALIVE_COUNT_MAX = 4;
+// Errors that can be observed after bytes have crossed the SSH stdin/channel
+// boundary. A detached tmux start may already own the run when any of these is
+// reported, so retry is unsafe until ownership probes prove otherwise.
+const DETACHED_START_TRANSPORT_ERROR_CODES = new Set([
+  'SSH_TRANSPORT',
+  'EPIPE',
+  'ECONNRESET',
+  'ECONNABORTED',
+  'ETIMEDOUT',
+  'ERR_STREAM_DESTROYED',
+  'EOF',
+]);
 // Executor-owned filesystem probes need stable diagnostics for reason mapping.
 // Never apply this to public exec, worker, or manager command output.
 const FILESYSTEM_LOCALE_ENV = Object.freeze({ LC_ALL: 'C' });
@@ -390,6 +408,18 @@ function validateWorkerSpec(spec) {
   if (spec.stdin !== undefined && typeof spec.stdin !== 'string') {
     throw new Error('spawnWorker stdin must be a string when provided');
   }
+  if (spec.systemPrompt !== undefined && typeof spec.systemPrompt !== 'string') {
+    throw new Error('spawnWorker systemPrompt must be a string when provided');
+  }
+  if (
+    spec.systemPromptFileFlag !== undefined
+    && spec.systemPromptFileFlag !== '--append-system-prompt-file'
+  ) {
+    throw new Error('spawnWorker systemPromptFileFlag is not allowed');
+  }
+  if (spec.systemPrompt && !spec.systemPromptFileFlag) {
+    throw new Error('spawnWorker systemPrompt requires systemPromptFileFlag');
+  }
   if (typeof spec.cwd !== 'string' || spec.cwd.length === 0) {
     throw new Error('spawnWorker requires a cwd');
   }
@@ -401,12 +431,15 @@ function validateWorkerSpec(spec) {
     throw new Error('spawnWorker workerPath must be a string when provided');
   }
   if (spec.workerPath !== undefined && spec.workerPath !== null) {
+    const segments = typeof spec.workerPath === 'string' ? spec.workerPath.split(':') : [];
+    const segmentsValid = segments.length > 0
+      && segments.every((segment) => segment.length > 0 && path.posix.isAbsolute(segment));
     if (
       spec.workerPath.length === 0
-      || !path.posix.isAbsolute(spec.workerPath)
+      || !segmentsValid
       || /[\x00-\x1F\x7F]/.test(spec.workerPath)
     ) {
-      throw new Error('spawnWorker workerPath must be an absolute POSIX path without control characters');
+      throw new Error('spawnWorker workerPath entries must be absolute POSIX paths without control characters');
     }
   }
   normalizeEnvKeyList(spec.envAllowlist);
@@ -457,9 +490,9 @@ function validateWorkerSpec(spec) {
  * refuses to delete an exposed root itself.
  *
  * Remote requirements: /bin/sh, coreutils-compatible realpath, find, mktemp,
- * chmod, cat, test, mkdir, rm, and tail (getOutput), plus tmux (worker channel
- * spawn/isAlive/kill). readdir implements names only via find and does not
- * support withFileTypes or other readdir options.
+ * chmod, cat, test, mkdir, rm, head, tail, wc, awk, and mv, plus tmux (worker
+ * channel spawn/isAlive/kill). readdir implements names only via find and does
+ * not support withFileTypes or other readdir options.
  */
 function createRemoteSshNodeExecutor(node, {
   spawnFn = childProcess.spawn,
@@ -525,6 +558,21 @@ function createRemoteSshNodeExecutor(node, {
 
       function isIgnorableEmptyStdinError(err) {
         return !hasInput && ['EPIPE', 'ERR_STREAM_DESTROYED', 'EOF', 'ECONNRESET'].includes(err && err.code);
+      }
+
+      // A rejected PAYLOAD WRITE means fewer than `input.length` bytes reached
+      // the remote shell. Callers that guard the payload with a byte-count test
+      // can use this as PROOF that the commands after that guard never ran; it
+      // is the only such proof available, since every other transport error is
+      // reported identically whether the remote shell ran or not.
+      //
+      // The shutdown that follows the write must NOT set this. `end(chunk)`
+      // bundles the write with `_final`, and a socket can deliver every byte and
+      // still fail its shutdown — that error would otherwise be read as "never
+      // delivered" for a payload the remote already acted on. So the payload is
+      // written on its own and only that callback marks the failure.
+      function markPayloadWriteFailure(err) {
+        if (hasInput && err && typeof err === 'object') err.stdinWriteFailed = true;
       }
 
       function bufferedText(which) {
@@ -631,15 +679,36 @@ function createRemoteSshNodeExecutor(node, {
       });
 
       if (child.stdin && typeof child.stdin.end === 'function') {
-        try {
-          child.stdin.end(input === undefined ? '' : input);
-        } catch (err) {
+        const failStdin = (err, fromPayloadWrite) => {
           // Match the async error path for the normal empty-stdin/remote-exit race.
           if (isIgnorableEmptyStdinError(err)) return;
           if (typeof child.kill === 'function') {
             try { child.kill('SIGTERM'); } catch { /* best-effort */ }
           }
+          if (fromPayloadWrite) markPayloadWriteFailure(err);
           finishReject(err);
+        };
+        if (hasInput && typeof child.stdin.write === 'function') {
+          // Separate try blocks, NOT one around both: a throw out of `end()`
+          // is a shutdown failure even though the payload write above already
+          // succeeded, and sharing a catch would mark it as an undelivered
+          // payload — the very misread this split exists to prevent.
+          try {
+            child.stdin.write(input, (err) => { if (err) failStdin(err, true); });
+          } catch (err) {
+            failStdin(err, true);
+          }
+          try {
+            child.stdin.end();
+          } catch (err) {
+            failStdin(err, false);
+          }
+        } else {
+          try {
+            child.stdin.end(input === undefined ? '' : input);
+          } catch (err) {
+            failStdin(err, false);
+          }
         }
       }
     });
@@ -812,6 +881,7 @@ function createRemoteSshNodeExecutor(node, {
     env,
     pathPrefix,
     envAllowlist,
+    worker = false,
   } = {}) {
     const commandName = String(command);
     if (!managerInteractiveCommands.has(commandName)) throw managerCommandNotAllowedError(command);
@@ -821,28 +891,35 @@ function createRemoteSshNodeExecutor(node, {
     // without control chars — same contract as the worker channel's workerPath.
     // (Codex P4-S1 review.)
     if (pathPrefix !== undefined && pathPrefix !== null) {
+      const segments = typeof pathPrefix === 'string' ? pathPrefix.split(':') : null;
+      const segmentsValid = Array.isArray(segments)
+        && segments.length > 0
+        && segments.every((segment) => segment.length > 0 && path.posix.isAbsolute(segment));
       if (
         typeof pathPrefix !== 'string'
         || pathPrefix.length === 0
-        || !path.posix.isAbsolute(pathPrefix)
+        || !segmentsValid
         || /[\x00-\x1F\x7F]/.test(pathPrefix)
       ) {
-        throw new Error('spawnInteractive pathPrefix must be an absolute POSIX path without control characters');
+        throw new Error('spawnInteractive pathPrefix must be one or more absolute POSIX paths (colon-separated) without control characters');
       }
     }
     let safeCwd = cwd;
     if (cwd) safeCwd = (await assertWithinRoots(cwd)).canonical;
     const explicitEnv = { ...(env || {}) };
-    const managerToken = normalizeTransportSecret(
-      explicitEnv.PALANTIR_MANAGER_TOKEN,
-      'PALANTIR_MANAGER_TOKEN',
+    const runBoundTokenKey = worker
+      ? 'PALANTIR_WORKER_TOKEN'
+      : 'PALANTIR_MANAGER_TOKEN';
+    const runBoundToken = normalizeTransportSecret(
+      explicitEnv[runBoundTokenKey],
+      runBoundTokenKey,
     );
     delete explicitEnv.PALANTIR_TOKEN;
     delete explicitEnv.PALANTIR_PM_TOKEN;
     delete explicitEnv.PALANTIR_WORKER_TOKEN;
     delete explicitEnv.PALANTIR_MANAGER_TOKEN;
-    const managerEnvKeys = [
-      ...remoteManagerBaseEnvKeys(commandName),
+    const processEnvKeys = [
+      ...(worker ? REMOTE_WORKER_BASE_ENV_KEYS : remoteManagerBaseEnvKeys(commandName)),
       ...normalizeEnvKeyList(envAllowlist),
     ];
     const script = buildCommandScript(commandName, args, {
@@ -855,14 +932,14 @@ function createRemoteSshNodeExecutor(node, {
       env: {
         PALANTIR_TOKEN: null,
         PALANTIR_PM_TOKEN: null,
-        PALANTIR_WORKER_TOKEN: null,
-        ...(managerToken ? {} : { PALANTIR_MANAGER_TOKEN: null }),
+        ...(worker && runBoundToken ? {} : { PALANTIR_WORKER_TOKEN: null }),
+        ...(!worker && runBoundToken ? {} : { PALANTIR_MANAGER_TOKEN: null }),
         ...explicitEnv,
       },
       pathPrefix,
       cleanEnv: true,
-      cleanEnvKeys: managerEnvKeys,
-      runBoundTokenKey: managerToken ? 'PALANTIR_MANAGER_TOKEN' : null,
+      cleanEnvKeys: processEnvKeys,
+      runBoundTokenKey: runBoundToken ? runBoundTokenKey : null,
     });
     // The capability read moved INSIDE the clean shell (buildCommandScript):
     // reading it out here would require re-injecting the value as an env -i
@@ -874,10 +951,10 @@ function createRemoteSshNodeExecutor(node, {
       sshArgsFor(bootstrapScript, { keepAlive: true }),
       { stdio: ['pipe', 'pipe', 'pipe'] },
     );
-    if (managerToken) {
+    if (runBoundToken) {
       if (!child || !child.stdin || typeof child.stdin.write !== 'function') {
         try { child?.kill?.('SIGTERM'); } catch { /* best-effort */ }
-        throw new Error('spawnInteractive requires writable SSH stdin for manager capability transport');
+        throw new Error('spawnInteractive requires writable SSH stdin for run capability transport');
       }
       // The caller writes the model prompt only after this async method resolves,
       // so this framed first line is consumed by the bootstrap before the
@@ -886,7 +963,7 @@ function createRemoteSshNodeExecutor(node, {
         child.stdin.on('error', () => { /* child close/error is authoritative */ });
       }
       try {
-        child.stdin.write(`${managerToken}\n`);
+        child.stdin.write(`${runBoundToken}\n`);
       } catch (err) {
         try { child.kill?.('SIGTERM'); } catch { /* best-effort */ }
         throw err;
@@ -934,6 +1011,39 @@ function createRemoteSshNodeExecutor(node, {
       script = script.replace(/^exec /, `exec env PATH=${shq(pathPrefix)}:$PATH `);
     }
     return runRemoteScript(script, { timeoutMs, maxBuffer });
+  }
+
+  /**
+   * Resolve the Claude CLI version on this execution node. This is a fixed
+   * probe rather than public exec so preset version gates cannot accidentally
+   * inspect the Console host while dispatching to an SSH node.
+   */
+  async function readClaudeVersion({
+    timeoutMs = 3000,
+    maxBuffer = 4096,
+    pathPrefix = node.node_prefix || undefined,
+  } = {}) {
+    if (pathPrefix !== undefined && pathPrefix !== null) {
+      const segments = typeof pathPrefix === 'string' ? pathPrefix.split(':') : null;
+      const segmentsValid = Array.isArray(segments)
+        && segments.length > 0
+        && segments.every((segment) => segment.length > 0 && path.posix.isAbsolute(segment));
+      if (
+        typeof pathPrefix !== 'string'
+        || pathPrefix.length === 0
+        || !segmentsValid
+        || /[\x00-\x1F\x7F]/.test(pathPrefix)
+      ) {
+        throw new Error('readClaudeVersion pathPrefix must be one or more absolute POSIX paths (colon-separated) without control characters');
+      }
+    }
+    const script = pathPrefix
+      ? `exec env PATH=${shq(pathPrefix)}:"$PATH" claude --version`
+      : 'exec claude --version';
+    const result = await runRemoteScript(script, { timeoutMs, maxBuffer });
+    if (result.code !== 0) return null;
+    const match = String(result.stdout || '').match(/(\d+\.\d+\.\d+)/);
+    return match ? match[1] : null;
   }
 
   async function fileExists(remotePath) {
@@ -1271,8 +1381,13 @@ function createRemoteSshNodeExecutor(node, {
       runsRoot,
       statusDir,
       stdoutLog: path.posix.join(statusDir, 'stdout.log'),
+      structuredResult: path.posix.join(statusDir, 'result.jsonl'),
+      structuredResultTmp: path.posix.join(statusDir, 'result.jsonl.tmp'),
       exitSentinel: path.posix.join(statusDir, 'exit.code'),
       stdinFile: path.posix.join(statusDir, 'stdin.txt'),
+      systemPromptFile: path.posix.join(statusDir, 'system-prompt.txt'),
+      workerTokenFile: path.posix.join(statusDir, 'worker-capability'),
+      uploadBundle: path.posix.join(statusDir, 'worker-input.bundle'),
     };
   }
 
@@ -1324,20 +1439,16 @@ function createRemoteSshNodeExecutor(node, {
       // Same argv contract as the manager path: the capability is read from its
       // 0600 file INSIDE the clean shell. Passing it as `KEY="$KEY"` would place
       // the value in the real /usr/bin/env argv, which /proc exposes.
-      const tokenDirInner = path.posix.dirname(workerTokenFile);
       cleanParts.push(
         SH_BIN,
         '-c',
         shq([
           // Capture the read status, clean up UNCONDITIONALLY, and only then
-          // act on it. Exiting on a failed `cat` before the rm would strand the
-          // capability file outside statusDir forever: tmux has already
-          // returned success by this point, so spawnWorker's catch never runs
-          // and nothing else knows the file exists.
+          // act on it. Exiting on a failed `cat` before the rm would retain the
+          // capability until the later run-status cleanup path.
           `PALANTIR_WORKER_TOKEN=$(cat -- ${shq(workerTokenFile)})`,
           'worker_token_rc=$?',
           `rm -f -- ${shq(workerTokenFile)}`,
-          `rmdir -- ${shq(tokenDirInner)} 2>/dev/null || true`,
           '[ "$worker_token_rc" -eq 0 ] || exit 78',
           'export PALANTIR_WORKER_TOKEN',
           'exec "$@"',
@@ -1355,22 +1466,78 @@ function createRemoteSshNodeExecutor(node, {
     await mkdir(paths.statusDir, { recursive: true });
   }
 
-  function resolveWorkerSpec(workerRequest) {
+  function resolveWorkerRequest(workerRequest) {
     if (
       workerRequest
       && typeof workerRequest === 'object'
       && Object.prototype.hasOwnProperty.call(workerRequest, 'engine')
     ) {
-      if (workerRequest.engine !== 'cli') {
-        throw new Error('remote nodes cannot run stream-json/claude workers yet — P5');
+      if (!['cli', 'stream-json'].includes(workerRequest.engine)) {
+        throw new Error(`unsupported remote worker engine: ${workerRequest.engine}`);
       }
-      return workerRequest.spec;
+      return { engine: workerRequest.engine, spec: workerRequest.spec };
     }
-    return workerRequest;
+    return { engine: 'cli', spec: workerRequest };
+  }
+
+  async function classifyUncertainDetachedStart(err, paths, materializedFiles = []) {
+    const mayHaveCrossedSshBoundary = !!err && (
+      DETACHED_START_TRANSPORT_ERROR_CODES.has(err.code)
+      || err.exitCode === 255
+      || err.killed === true
+      || typeof err.signal === 'string'
+    );
+    if (!mayHaveCrossedSshBoundary) return false;
+
+    // The start command may already have crossed the SSH boundary, so the
+    // default is uncertainty: never delete files a pane may not have opened
+    // yet, and never let a retry race a start we cannot see.
+    //
+    // Exactly one exception is admissible, and it is STRUCTURAL rather than
+    // observational. When the payload is uploaded, the remote script is a
+    // single `&&` chain whose byte-count guard precedes `tmux new-session`:
+    //
+    //   head -c N > bundle && [ "$(wc -c < bundle)" -eq N ] && ... && tmux ...
+    //
+    // A rejected stdin write means fewer than N bytes arrived, so that guard
+    // fails and the start command provably never ran. The absence of a spawn
+    // is then proved by the remote script's own control flow.
+    //
+    // Probing is worth a round-trip only when that exception is in play; every
+    // other path ends at uncertainty regardless, and this is exactly the moment
+    // the link is already unwell.
+    if (err.stdinWriteFailed && materializedFiles.length > 0) {
+      // The probes are asymmetric ON PURPOSE. A hit is positive evidence that
+      // this run already owns a pane — retries carry a fresh run id, so a
+      // session under THIS run's name can only be this run's own start, and it
+      // overrides the structural argument. Absence proves nothing: both report
+      // state at probe time, and an exec request that reached sshd can still
+      // start its pane after the probe answers. Licensing a retry on "not there
+      // yet" is what puts two workers in one remote cwd.
+      const observed = async (command, args) => {
+        try {
+          return (await runRemoteCommand(command, args)).code === 0;
+        } catch {
+          return false;
+        }
+      };
+      // The pane writes exit.code only after the worker and its result capture
+      // finish, so a sentinel means a start that has already completed.
+      if (!await observed('tmux', ['has-session', '-t', paths.sessionName])
+          && !await observed('test', ['-f', paths.exitSentinel])) {
+        return false;
+      }
+    }
+
+    err.transportCode = err.code;
+    err.code = 'REMOTE_SPAWN_UNCERTAIN';
+    err.sessionName = paths.sessionName;
+    err.preserveRemoteFiles = true;
+    return true;
   }
 
   async function spawnWorker(runId, workerRequest) {
-    const spec = resolveWorkerSpec(workerRequest);
+    const { engine, spec } = resolveWorkerRequest(workerRequest);
     validateWorkerSpec(spec);
     const paths = workerPaths(runId);
     const safeCwd = (await assertWithinRoots(spec.cwd)).canonical;
@@ -1383,13 +1550,20 @@ function createRemoteSshNodeExecutor(node, {
     let workerTokenFile = null;
     try {
       if (workerToken) {
-        // tmux may be a long-lived server and cannot safely receive a fresh
-        // run capability through its inherited environment. Place the token
-        // through SSH stdin in a 0600 file; the detached child reads and
-        // deletes it before exec. Only the random path enters SSH argv.
-        workerTokenFile = await putSecretFile('worker_capability', workerToken, 0o600);
+        // Keep the scoped capability in the deterministic run status directory.
+        // It is uploaded in the same guarded SSH handoff as the prompts, so an
+        // uncertain start can always be reaped later by kill()/cleanupRun() even
+        // after an executor/server restart. The detached child deletes it before
+        // exec, and only this fixed path (never the value) enters argv.
+        const tokenParent = await assertWithinRoots(
+          paths.workerTokenFile,
+          { parentOnly: true },
+        );
+        workerTokenFile = path.posix.join(
+          tokenParent.canonical,
+          path.posix.basename(paths.workerTokenFile),
+        );
       }
-      const workerInvocation = buildWorkerInvocation(spec, { workerTokenFile });
       let canonicalStdin = null;
       if (spec.stdin !== undefined) {
         // Resolve the prompt path BEFORE the file exists so upload and handoff can
@@ -1405,74 +1579,185 @@ function createRemoteSshNodeExecutor(node, {
         const promptParent = await assertWithinRoots(paths.stdinFile, { parentOnly: true });
         canonicalStdin = path.posix.join(promptParent.canonical, path.posix.basename(paths.stdinFile));
       }
+      let canonicalSystemPrompt = null;
+      if (spec.systemPrompt !== undefined) {
+        const systemPromptParent = await assertWithinRoots(
+          paths.systemPromptFile,
+          { parentOnly: true },
+        );
+        canonicalSystemPrompt = path.posix.join(
+          systemPromptParent.canonical,
+          path.posix.basename(paths.systemPromptFile),
+        );
+      }
+      let canonicalUploadBundle = null;
+      if (workerTokenFile || canonicalSystemPrompt || canonicalStdin) {
+        const bundleParent = await assertWithinRoots(
+          paths.uploadBundle,
+          { parentOnly: true },
+        );
+        canonicalUploadBundle = path.posix.join(
+          bundleParent.canonical,
+          path.posix.basename(paths.uploadBundle),
+        );
+      }
 
+      const effectiveSpec = canonicalSystemPrompt
+        ? {
+            ...spec,
+            args: [
+              ...(spec.args || []),
+              spec.systemPromptFileFlag,
+              canonicalSystemPrompt,
+            ],
+          }
+        : spec;
+      const workerInvocation = buildWorkerInvocation(effectiveSpec, { workerTokenFile });
+      const materializedFiles = [
+        canonicalStdin,
+        canonicalSystemPrompt,
+        workerTokenFile,
+        canonicalUploadBundle,
+      ].filter(Boolean);
       const stdinRedirect = canonicalStdin ? ` < ${shq(canonicalStdin)}` : '';
-      const cleanupStdinCommand = canonicalStdin ? `rm -f -- ${shq(canonicalStdin)}` : '';
-      const cleanupStdin = canonicalStdin ? `; ${cleanupStdinCommand}` : '';
-      const stdinTrap = canonicalStdin
-        ? `trap ${shq(cleanupStdinCommand)} EXIT HUP INT TERM; `
+      const cleanupPromptCommand = materializedFiles.length > 0
+        ? `rm -f -- ${materializedFiles.map((file) => shq(file)).join(' ')}`
         : '';
-      const clearStdinTrap = canonicalStdin ? '; trap - EXIT HUP INT TERM' : '';
+      const cleanupPrompt = cleanupPromptCommand ? `; ${cleanupPromptCommand}` : '';
+      const promptTrap = cleanupPromptCommand
+        ? `trap ${shq(cleanupPromptCommand)} EXIT HUP INT TERM; `
+        : '';
+      const clearPromptTrap = cleanupPromptCommand ? '; trap - EXIT HUP INT TERM' : '';
+      const captureStructuredResult = engine === 'stream-json'
+        ? [
+            `; awk ${shq('/^[[:space:]]*\\{[[:space:]]*"type"[[:space:]]*:[[:space:]]*"result"/ { last=$0 } END { if (last != "") print last }')} ${shq(paths.stdoutLog)} > ${shq(paths.structuredResultTmp)}`,
+            `chmod 600 ${shq(paths.structuredResultTmp)}`,
+            `mv -f ${shq(paths.structuredResultTmp)} ${shq(paths.structuredResult)}`,
+          ].join(' && ')
+        : '';
       // Remove BEFORE disarming the trap: clearing it first leaves a window where
       // a HUP/TERM arriving before the `rm` has no handler left to run.
-      const exitWrite = canonicalStdin
-        ? `; agent_exit_code=$?${cleanupStdin}${clearStdinTrap}; echo "$agent_exit_code" > ${shq(paths.exitSentinel)}`
-        : `; echo $? > ${shq(paths.exitSentinel)}`;
-      const innerScript = `${stdinTrap}${workerInvocation}${stdinRedirect} > ${shq(paths.stdoutLog)} 2>&1${exitWrite}`;
+      const exitWrite = cleanupPromptCommand
+        ? `; agent_exit_code=$?${captureStructuredResult}${cleanupPrompt}${clearPromptTrap}; echo "$agent_exit_code" > ${shq(paths.exitSentinel)}`
+        : captureStructuredResult
+          ? `; agent_exit_code=$?${captureStructuredResult}; echo "$agent_exit_code" > ${shq(paths.exitSentinel)}`
+          : `; echo $? > ${shq(paths.exitSentinel)}`;
+      const uploads = [
+        workerTokenFile
+          ? { path: workerTokenFile, content: workerToken }
+          : null,
+        canonicalSystemPrompt
+          ? { path: canonicalSystemPrompt, content: spec.systemPrompt }
+          : null,
+        canonicalStdin
+          ? { path: canonicalStdin, content: spec.stdin }
+          : null,
+      ].filter(Boolean);
+      let uploadOffset = 0;
+      const uploadSlices = uploads.map((upload) => {
+        const bytes = Buffer.byteLength(upload.content, 'utf8');
+        const slice = { ...upload, bytes, offset: uploadOffset };
+        uploadOffset += bytes;
+        return slice;
+      });
+      const extractCommands = uploadSlices.flatMap((upload) => {
+        const extract = upload.bytes === 0
+          ? `: > ${shq(upload.path)}`
+          : upload.offset === 0
+            ? `head -c ${upload.bytes} ${shq(canonicalUploadBundle)} > ${shq(upload.path)}`
+            : `tail -c +${upload.offset + 1} ${shq(canonicalUploadBundle)} | head -c ${upload.bytes} > ${shq(upload.path)}`;
+        return [
+          extract,
+          `[ "$(wc -c < ${shq(upload.path)})" -eq ${upload.bytes} ]`,
+        ];
+      });
+      const materializeInputs = uploadSlices.length > 0
+        ? [
+            'set -C',
+            ...extractCommands,
+            'set +C',
+            `chmod 600 -- ${uploads.map((upload) => shq(upload.path)).join(' ')}`,
+            `rm -f -- ${shq(canonicalUploadBundle)}`,
+          ].join(' && ') + ' && '
+        : '';
+      // tmux server processes can predate this SSH request and retain a broad
+      // umask. Set it inside the pane-owned shell so stdout/result/sentinel
+      // files remain 0600 regardless of the server's inherited environment.
+      // buildWorkerInvocation is a compound list (`set --; ...; env ...`).
+      // Group it so materialization's final `&&` guards the ENTIRE invocation,
+      // not only its first `set --` command.
+      const guardedWorkerInvocation = uploadSlices.length > 0
+        ? `( ${workerInvocation} )`
+        : workerInvocation;
+      const innerScript = `umask 077; ${promptTrap}${materializeInputs}${guardedWorkerInvocation}${stdinRedirect} > ${shq(paths.stdoutLog)} 2>&1${exitWrite}`;
       const startWorker = `cd ${shq(safeCwd)} && tmux new-session -d -s ${shq(paths.sessionName)} ${shq(innerScript)}`;
 
-      if (!canonicalStdin) {
-        const res = await runRemoteScript(startWorker);
+      if (materializedFiles.length === 0) {
+        let res;
+        try {
+          res = await runRemoteScript(startWorker);
+        } catch (err) {
+          await classifyUncertainDetachedStart(err, paths);
+          throw err;
+        }
         if (res.code !== 0) {
           throw commandError('tmux', ['new-session', '-d', '-s', paths.sessionName], res);
         }
         return { sessionName: paths.sessionName };
       }
 
-      // Prompt upload and tmux handoff MUST be one SSH invocation. Splitting them
-      // leaves a window where the prompt exists on disk but nothing owns it: if the
-      // controller dies in between, the JS cleanup never runs and the tmux trap does
-      // not exist yet, so a 0600 prompt is stranded for a run that never started.
+      // User/system prompt upload and tmux handoff MUST be one SSH invocation.
+      // A single mode-0600 bundle consumes SSH stdin; the pane extracts each
+      // destination from that regular file. Multiple `head` readers on the live
+      // pipe are unsafe because some implementations read ahead and discard
+      // bytes belonging to the next payload.
       //
       // Arming the trap before `cat` closes that window from the remote side — the
       // controller dying drops the SSH connection, the remote shell takes SIGHUP,
       // and the handler removes the prompt. It is disarmed only once tmux owns the
       // file, after which the worker's own trap is responsible for it.
-      const promptBytes = Buffer.byteLength(spec.stdin, 'utf8');
+      const uploadInput = uploads.map((upload) => upload.content).join('');
+      const bundleBytes = Buffer.byteLength(uploadInput, 'utf8');
+      const writeBundle = bundleBytes > 0
+        ? `head -c ${bundleBytes} > ${shq(canonicalUploadBundle)}`
+        : `: > ${shq(canonicalUploadBundle)}`;
       const script = [
         'umask 077',
-        `cleanup() { ${cleanupStdinCommand}; }`,
+        `cleanup() { ${cleanupPromptCommand}; }`,
         `trap 'rc=$?; cleanup; exit "$rc"' 0`,
         `trap 'exit 129' HUP`,
         `trap 'exit 130' INT`,
         `trap 'exit 143' TERM`,
-        `rm -f -- ${shq(canonicalStdin)}`,
+        cleanupPromptCommand,
         'set -C',
-        `cat > ${shq(canonicalStdin)}`,
+        writeBundle,
+        `[ "$(wc -c < ${shq(canonicalUploadBundle)})" -eq ${bundleBytes} ]`,
         'set +C',
-        `[ "$(wc -c < ${shq(canonicalStdin)})" -eq ${promptBytes} ]`,
-        `chmod 600 ${shq(canonicalStdin)}`,
+        `chmod 600 -- ${shq(canonicalUploadBundle)}`,
         startWorker,
         'trap - 0 HUP INT TERM',
       ].join(' && ');
 
       let res;
       try {
-        res = await runRemoteScript(script, { input: spec.stdin });
+        res = await runRemoteScript(script, { input: uploadInput });
       } catch (err) {
         // The remote trap handles a dropped connection; this covers a local-side
         // rejection where the remote shell may never have run at all.
-        try { await runRemoteCommand('rm', ['-f', canonicalStdin]); } catch {}
+        const uncertain = await classifyUncertainDetachedStart(err, paths, materializedFiles);
+        if (!uncertain) {
+          try { await runRemoteCommand('rm', ['-f', ...materializedFiles]); } catch {}
+        }
         throw err;
       }
       if (res.code !== 0) {
-        try { await runRemoteCommand('rm', ['-f', canonicalStdin]); } catch {}
+        try { await runRemoteCommand('rm', ['-f', ...materializedFiles]); } catch {}
         throw commandError('tmux', ['new-session', '-d', '-s', paths.sessionName], res);
       }
       return { sessionName: paths.sessionName };
     } catch (err) {
-      if (workerTokenFile) {
-        await cleanupCreatedPath(path.posix.dirname(workerTokenFile));
+      if (workerTokenFile && !err.preserveRemoteFiles) {
+        try { await runRemoteCommand('rm', ['-f', workerTokenFile]); } catch {}
       }
       throw err;
     }
@@ -1496,6 +1781,22 @@ function createRemoteSshNodeExecutor(node, {
       const tailPath = checked.exists ? checked.canonical : paths.stdoutLog;
       const res = await runRemoteCommand('tail', ['-n', String(cappedLines), tailPath], {
         maxBuffer: WORKER_OUTPUT_MAX_BUFFER,
+      });
+      if (res.code !== 0) return '';
+      return res.stdout;
+    } catch (err) {
+      if (err.code === 'SSH_TRANSPORT' || err.code === 'EXPOSED_ROOTS') throw err;
+      return '';
+    }
+  }
+
+  async function getStructuredResult(runId) {
+    const paths = workerPaths(runId);
+    try {
+      const checked = await assertWithinRoots(paths.structuredResult, { allowMissing: true });
+      if (!checked.exists) return '';
+      const res = await runRemoteCommand('cat', [checked.canonical], {
+        maxBuffer: CLAUDE_RESULT_MAX_BUFFER,
       });
       if (res.code !== 0) return '';
       return res.stdout;
@@ -1530,8 +1831,18 @@ function createRemoteSshNodeExecutor(node, {
     const paths = workerPaths(runId);
     const res = await runRemoteCommand('tmux', ['kill-session', '-t', paths.sessionName]);
     // A killed tmux shell may not reach its normal post-command cleanup.
-    // stdinFile is controller-owned and lives inside the validated status dir.
-    try { await runRemoteCommand('rm', ['-f', paths.stdinFile]); } catch {}
+    // Prompt/capability files are controller-owned and live inside the validated
+    // status dir, so this also reaps an uncertain start that never gained an owner.
+    try {
+      await runRemoteCommand('rm', [
+        '-f',
+        paths.stdinFile,
+        paths.systemPromptFile,
+        paths.workerTokenFile,
+        paths.uploadBundle,
+        paths.structuredResultTmp,
+      ]);
+    } catch {}
     return res.code === 0;
   }
 
@@ -1544,11 +1855,13 @@ function createRemoteSshNodeExecutor(node, {
     exec,
     spawnInteractive,
     readClaudeOAuthUsage,
+    readClaudeVersion,
     spawnWorker,
     ownerOf,
     isAlive,
     detectExitCode,
     getOutput,
+    getStructuredResult,
     sendInput,
     kill,
     cleanupRun,

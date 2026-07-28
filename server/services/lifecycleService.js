@@ -10,13 +10,18 @@
  */
 
 const path = require('node:path');
-const { createLocalNodeExecutor, createLocalWorkerChannel } = require('./nodeExecutor');
+const {
+  createLocalNodeExecutor,
+  createLocalWorkerChannel,
+  createRemoteWorkerChannel,
+} = require('./nodeExecutor');
 const { explainDispatch } = require('./dispatchPolicy');
 const { resolveProjectSource } = require('./projectSource');
 const { createProjectMaterializationService } = require('./projectMaterializationService');
 const { validateStructuredModelEffort } = require('./agentProfileService');
 const { compileGoalPrompt } = require('./goalPrompt'); // G1
 const { parseGoalReport } = require('./goalReport'); // G1
+const { parseClaudeStreamJsonOutput } = require('./claudeStreamJson');
 const { createGoalVerdictService } = require('./goalVerdictService'); // G3
 const { VERDICT_TO_TASK_STATUS } = require('./goalVerdict'); // G3
 const {
@@ -32,20 +37,51 @@ const {
 
 // G1: cap a string to at most maxBytes UTF-8 bytes without splitting a
 // multi-byte codepoint (final_output is stored raw; the 64KB bound is on bytes,
-// not chars). Truncates at a real codepoint boundary \u2014 it backs the cut off
+// not chars). Truncates at a real codepoint boundary — it backs the cut off
 // any trailing continuation bytes rather than letting toString emit/strip a
-// replacement char, so legitimate U+FFFD content is preserved. null \u2192 null.
+// replacement char, so legitimate U+FFFD content is preserved. null → null.
+// SQLite's `datetime('now')` yields `YYYY-MM-DD HH:MM:SS` in UTC with no zone
+// marker, which Date.parse reads as LOCAL time. Comparing that against Date.now()
+// skews the result by the machine's UTC offset — enough, east of Greenwich, to
+// make a sub-offset TTL read as already expired everywhere. Pin the zone.
+function parseSqliteUtc(value) {
+  if (typeof value !== 'string') return NaN;
+  const text = value.trim();
+  if (!text) return NaN;
+  return Date.parse(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(text)
+    ? `${text.replace(' ', 'T')}Z`
+    : text);
+}
+
 function capUtf8Bytes(value, maxBytes) {
   if (value == null) return null;
   const str = String(value);
   const buf = Buffer.from(str, 'utf8');
   if (buf.length <= maxBytes) return str;
   // If the byte at the cut is a UTF-8 continuation byte (0b10xxxxxx), the
-  // codepoint straddles the boundary \u2014 back off until the next dropped byte
+  // codepoint straddles the boundary — back off until the next dropped byte
   // starts a new codepoint, so we never split one.
   let end = maxBytes;
   while (end > 0 && (buf[end] & 0xC0) === 0x80) end--;
   return buf.subarray(0, end).toString('utf8');
+}
+
+// Same bound, opposite end. A detached remote Claude result is reassembled from
+// NDJSON rather than teed to a file, so there is no tail-first capture ahead of
+// this cap and a long response would lose its goal report — which the worker
+// emits last — to prefix truncation.
+//
+// Deliberately NOT the default: the local path keeps capUtf8Bytes so this PR
+// leaves non-remote goal capture byte-identical. Whether head truncation is the
+// right choice for local runs too is a separate question, tracked on its own.
+function capUtf8Tail(value, maxBytes) {
+  if (value == null) return null;
+  const str = String(value);
+  const buf = Buffer.from(str, 'utf8');
+  if (buf.length <= maxBytes) return str;
+  let start = buf.length - maxBytes;
+  while (start < buf.length && (buf[start] & 0xC0) === 0x80) start++;
+  return buf.subarray(start).toString('utf8');
 }
 
 // G1: file-backed output log for a local goal worker (§5k-2 — codex/tmux/
@@ -128,7 +164,13 @@ function createLifecycleService({
     if (!nodeService || typeof nodeService.pickExecutor !== 'function') {
       throw new Error(`Remote node ${nodeId} requires nodeService.pickExecutor; refusing to run a remote worker on the control plane`);
     }
-    return nodeService.pickExecutor(nodeId);
+    const remoteExecutor = nodeService.pickExecutor(nodeId);
+    return createRemoteWorkerChannel({
+      remoteExecutor,
+      streamJsonEngine,
+      nodePrefix: node.node_prefix,
+      nodeId: node.id || nodeId,
+    });
   }
   // Lazy-require default authResolver so tests that don't use Tier 2 don't
   // force a load of the real keychain probe.
@@ -162,6 +204,14 @@ function createLifecycleService({
   // G1: goal final-output capture bounds (§5k-2 — final_output cap 64KB).
   const GOAL_FINAL_OUTPUT_MAX_BYTES = 64 * 1024;
   const GOAL_OUTPUT_LINES = 2000; // read a generous tail so the report fence is included
+  // How long an unresolved spawn-ownership uncertainty suppresses terminalize.
+  // It covers a pane that starts after the controller lost the acknowledgement —
+  // seconds in practice — so minutes is already generous, and bounding it is
+  // what stops the guard from pinning a worker slot forever.
+  const REMOTE_OWNERSHIP_UNCERTAIN_TTL_MS = (() => {
+    const raw = Number(process.env.PALANTIR_REMOTE_OWNERSHIP_UNCERTAIN_TTL_MS);
+    return Number.isFinite(raw) && raw > 0 ? raw : 10 * 60 * 1000;
+  })();
   const MAX_MATERIALIZE_ATTEMPTS = 3;
   let heartbeatTimer = null;
   let goalSweepTimer = null; // G3: periodic verdict-loop self-heal
@@ -524,9 +574,20 @@ function createLifecycleService({
    * fall back to passing the preset through unchanged (documented in the
    * gate call site). Test path injects `claudeVersionResolver`.
    */
-  function resolveClaudeVersion() {
+  async function resolveClaudeVersion({ node, isRemoteNode } = {}) {
     if (typeof claudeVersionResolver === 'function') {
-      try { return claudeVersionResolver() || null; } catch { return null; }
+      try { return (await claudeVersionResolver({ node, isRemoteNode })) || null; } catch { return null; }
+    }
+    if (isRemoteNode) {
+      try {
+        const executor = channelForNode(node?.id);
+        if (!executor || typeof executor.readClaudeVersion !== 'function') return null;
+        return (await executor.readClaudeVersion({
+          pathPrefix: node?.node_prefix || undefined,
+        })) || null;
+      } catch {
+        return null;
+      }
     }
     try {
       const { execFileSync } = require('node:child_process');
@@ -1130,7 +1191,7 @@ function createLifecycleService({
         // can't meaningfully satisfy a Claude CLI version constraint). If
         // we cannot resolve the installed CLI version we warn and proceed.
         if (adapterName === 'claude' && presetResolution.minClaudeVersion) {
-          const found = resolveClaudeVersion();
+          const found = await resolveClaudeVersion({ node, isRemoteNode });
           if (!found) {
             runService.addRunEvent(run.id, 'preset:version_unverified', JSON.stringify({
               min_claude_version: presetResolution.minClaudeVersion,
@@ -1507,21 +1568,6 @@ function createLifecycleService({
       // as adapterName / save-time validation (a custom `Claude` command must
       // not fall through to the tmux branch and drop the structured model).
       const isClaude = adapterName === 'claude';
-      if (isRemoteNode && isClaude) {
-        runService.addRunEvent(run.id, 'spawn:remote_claude_unsupported', JSON.stringify({
-          node_id: run.node_id || 'local',
-          reason: 'remote_stream_json_unsupported',
-        }));
-        runService.updateRunStatus(run.id, 'failed', { force: true, reason: 'remote_claude_unsupported' });
-        await cleanupRunWorktree({
-          ...runService.getRun(run.id),
-          is_manager: false,
-          worktree_path: worktreePath,
-          branch,
-          task_id: run.task_id,
-        });
-        return null;
-      }
 
       let result;
       if (isClaude && streamJsonEngine) {
@@ -1534,6 +1580,31 @@ function createLifecycleService({
         // MCP config file: unified (preset > project > skill pack) if
         // anything merged, else plain project MCP, else undefined.
         const effectiveMcpConfig = skillPackMcpConfigPath || projectMcpConfig || undefined;
+
+        // The detached SSH path is pod-native, but these two optional features
+        // still materialize control-plane-local files. Never pass those paths
+        // to the pod: fail non-retryably until a node-side asset transport
+        // exists. Plain remote Claude workers remain supported.
+        if (isRemoteNode && (effectiveMcpConfig || presetResolution?.isolated)) {
+          const unsupported = {
+            node_id: run.node_id,
+            mcp_config: !!effectiveMcpConfig,
+            isolated_preset: !!presetResolution?.isolated,
+            reason: 'remote_claude_assets_not_materialized',
+          };
+          runService.addRunEvent(
+            run.id,
+            'spawn:remote_claude_assets_unsupported',
+            JSON.stringify(unsupported),
+          );
+          runService.markRunNonRetryable(run.id, MAX_RETRY);
+          runService.updateRunStatus(run.id, 'failed', {
+            force: true,
+            reason: 'remote_claude_assets_unsupported',
+          });
+          await cleanupRunWorktree(runService.getRun(run.id) || run);
+          return null;
+        }
 
         // Phase 10D Tier 2: isolated Claude worker. `--bare` path needs
         // explicit auth materialization (apiKeyHelper by default, env
@@ -1571,6 +1642,15 @@ function createLifecycleService({
         }
 
         try {
+          if (isRemoteNode) {
+            // Durable run-owned engine identity: profiles are mutable and their
+            // FK is cleared on delete, so recovery must never infer the engine
+            // from the current profile row after the detached spawn boundary.
+            runService.addRunEvent(run.id, 'runtime:remote_worker_engine', JSON.stringify({
+              engine: 'claude-stream-json',
+              version: 1,
+            }));
+          }
           result = await channelForNode(run.node_id).spawnWorker(run.id, {
             engine: 'stream-json',
             spec: {
@@ -1583,6 +1663,10 @@ function createLifecycleService({
               allowedTools: mcpTools.length > 0 ? mcpTools : undefined,
               mcpConfig: effectiveMcpConfig,
               isManager: false,
+              envAllowlist: [
+                ...parseEnvAllowlistArray(profile.env_allowlist),
+                ...trustedBearerEnvKeys,
+              ],
               ...(isolatedOpts || {}),
             },
           });
@@ -1795,6 +1879,49 @@ function createLifecycleService({
 
       return runService.getRun(run.id);
     } catch (error) {
+      if (isRemoteNode && error.code === 'REMOTE_SPAWN_UNCERTAIN') {
+        // The SSH acknowledgement was lost after the detached start command
+        // may have crossed the node boundary. Keep this SAME run as the durable
+        // owner and let tmux/exit-sentinel health reconciliation decide whether
+        // it actually started. Marking failed here would enqueue a retry that
+        // can overlap the still-live remote Claude process in the same cwd.
+        try {
+          if (nodeService && typeof nodeService.setReachable === 'function') {
+            let wasReachable = true;
+            if (typeof nodeService.getNode === 'function') {
+              wasReachable = Number(nodeService.getNode(run.node_id)?.reachable) === 1;
+            }
+            await nodeService.setReachable(run.node_id, false);
+            if (wasReachable && eventBus) {
+              eventBus.emit('node:status', {
+                node_id: run.node_id,
+                from_reachable: 1,
+                to_reachable: 0,
+                at: new Date().toISOString(),
+              });
+            }
+          }
+        } catch { /* ownership fencing is authoritative even if reachability write fails */ }
+        runService.addRunEvent(run.id, 'security:worker_credential_policy_applied', JSON.stringify({
+          version: 1,
+          policy: 'actor_tokens_scrubbed',
+          memory_propose: !!workerProposalToken,
+        }));
+        runService.addRunEvent(run.id, 'spawn:remote_ownership_uncertain', JSON.stringify({
+          node_id: run.node_id,
+          session_name: error.sessionName || `palantir-run-${run.id}`,
+          reason: 'ssh_ack_lost_after_detached_start',
+        }));
+        runService.markRunStarted(run.id, {
+          tmux_session: error.sessionName || `palantir-run-${run.id}`,
+          worktree_path: worktreePath,
+          branch,
+        });
+        if (task.status !== 'in_progress') {
+          taskService.updateTaskStatus(taskId, 'in_progress');
+        }
+        return runService.getRun(run.id);
+      }
       runService.updateRunStatus(run.id, 'failed', { force: true });
       runService.addRunEvent(run.id, 'error', JSON.stringify({ message: error.message }));
       // Awaited cleanup so the worktree AND the in-memory _runProjectDirs entry
@@ -2421,6 +2548,174 @@ function createLifecycleService({
     return exitCode === 0 ? 'Agent completed successfully' : `Agent exited with code ${exitCode}`;
   }
 
+  // `node_id !== 'local'` is NOT the same question. A node may be registered
+  // under any id while declaring kind 'local', and nodeService routes it to the
+  // local executor. Treating such a run as remote would hand a purely local
+  // worker the remote-only branches — including the tail-truncating goal
+  // capture, which must stay head-truncating off the ssh path.
+  // This is deliberately the SAME predicate channelForNode routes on, so that
+  // "remote" cannot mean one thing to the channel and another to the callers
+  // below. Any divergence would hand a locally-executed run the remote-only
+  // branches — including the tail-truncating goal capture, which must stay
+  // head-truncating anywhere the local worker channel is used.
+  function isRemoteNodeId(nodeId) {
+    if (!nodeId || nodeId === 'local') return false;
+    const node = getDispatchNode(nodeId);
+    return !!node && (node.kind || 'local') !== 'local';
+  }
+
+  function isDetachedRemoteClaudeRun(run) {
+    if (!run || !isRemoteNodeId(run.node_id)) return false;
+    try {
+      const engineEvent = runService.getRunEvents(run.id)
+        .find((event) => event.event_type === 'runtime:remote_worker_engine');
+      if (engineEvent) {
+        const payload = JSON.parse(engineEvent.payload_json || '{}');
+        return payload.engine === 'claude-stream-json';
+      }
+    } catch {
+      // Older runs have no durable marker; fall back to their immutable-enough
+      // profile reference for backward-compatible recovery.
+    }
+    if (!run.agent_profile_id) return false;
+    try {
+      return resolveAdapterName(agentProfileService.getProfile(run.agent_profile_id)) === 'claude';
+    } catch {
+      return false;
+    }
+  }
+
+  async function inspectDetachedClaudeResult(run, channel) {
+    if (!isDetachedRemoteClaudeRun(run)) return null;
+    const recentOutput = await channel.getOutput(run.id, 500, 'cli');
+    const durableResult = typeof channel.getStructuredResult === 'function'
+      ? await channel.getStructuredResult(run.id)
+      : '';
+    // The normal tail is intentionally bounded for UI/health safety. Append the
+    // separately harvested final result record so usage/status/goal semantics
+    // survive even when that tail exceeds its byte cap and returns empty.
+    const raw = [recentOutput, durableResult].filter(Boolean).join('\n');
+    const parsed = parseClaudeStreamJsonOutput(raw);
+    if (!parsed.recognized) return null;
+
+    const priorEvents = runService.getRunEvents(run.id);
+    const alreadyParsed = priorEvents.some(
+      (event) => event.event_type === 'runtime:remote_claude_stream_parsed',
+    );
+    if (!alreadyParsed) {
+      for (const event of parsed.events) {
+        if (event.type === 'system' && event.subtype === 'init') {
+          runService.addRunEvent(run.id, 'init', JSON.stringify({
+            session_id: event.session_id,
+            model: event.model,
+            tools: (event.tools || []).slice(0, 20),
+            cwd: event.cwd,
+          }));
+          continue;
+        }
+        if (event.type !== 'assistant' || !Array.isArray(event.message?.content)) continue;
+        const text = event.message.content
+          .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+          .map((block) => block.text)
+          .join('\n');
+        if (text) {
+          runService.addRunEvent(
+            run.id,
+            'assistant_text',
+            JSON.stringify({ text: text.slice(0, 5000) }),
+          );
+        }
+        for (const toolUse of event.message.content.filter((block) => block?.type === 'tool_use')) {
+          runService.addRunEvent(
+            run.id,
+            'tool_use',
+            JSON.stringify({ tool: toolUse.name, id: toolUse.id }),
+          );
+        }
+      }
+
+      if (parsed.result) {
+        runService.addRunEvent(run.id, 'result', JSON.stringify({
+          is_error: parsed.result.is_error,
+          duration_ms: parsed.result.duration_ms,
+          stop_reason: parsed.result.stop_reason,
+          result: typeof parsed.result.result === 'string'
+            ? parsed.result.result.slice(0, 5000)
+            : null,
+          total_cost_usd: parsed.result.total_cost_usd,
+          num_turns: parsed.result.num_turns,
+        }));
+      }
+      runService.addRunEvent(run.id, 'runtime:remote_claude_stream_parsed', JSON.stringify({
+        events: parsed.events.length,
+        has_result: !!parsed.result,
+      }));
+    }
+
+    if (!parsed.result) {
+      // Recognized NDJSON may consist solely of user/tool events. Never fall
+      // back to that raw stream: tool inputs/results can contain file contents
+      // or tokens that must not enter observable final_output events.
+      return { output: parsed.text || '', status: null, reason: null };
+    }
+
+    runService.updateRunResult(run.id, {
+      result_summary: typeof parsed.result.result === 'string'
+        ? parsed.result.result.slice(0, 2000)
+        : null,
+      exit_code: parsed.result.is_error ? 1 : 0,
+      input_tokens: parsed.usage.inputTokens,
+      output_tokens: parsed.usage.outputTokens,
+      cost_usd: parsed.usage.costUsd,
+    });
+
+    const stopReason = parsed.result.stop_reason;
+    const hitLimit = stopReason === 'max_turns' || stopReason === 'max_tokens';
+    if (hitLimit && !alreadyParsed) {
+      runService.addRunEvent(run.id, 'limit_reached', JSON.stringify({
+        message: `Agent stopped due to ${stopReason} — task may be incomplete`,
+        stop_reason: stopReason,
+        num_turns: parsed.result.num_turns,
+      }));
+    }
+    return {
+      output: parsed.text || '',
+      status: parsed.result.is_error ? 'failed' : hitLimit ? 'needs_input' : 'completed',
+      reason: parsed.result.is_error ? 'claude-result-error' : hitLimit ? stopReason : 'agent-exit-success',
+      result: parsed.result,
+    };
+  }
+
+  // True while a run carries a spawn-ownership uncertainty that no later
+  // observation has resolved AND that is still young enough to be plausible.
+  // Both markers are durable run events, so this survives a controller restart —
+  // the window it guards can outlive one.
+  //
+  // The TTL is what keeps this from becoming a permanent latch. Nothing else
+  // reaps it: the materialization sweep only touches `materializing`, the
+  // startup artifact sweep skips remote runs, and remote housekeeping only
+  // handles terminal runs. Without an expiry a pane that never appears would
+  // hold `running` — and a worker slot — until a human cancelled it. The window
+  // it protects is a late pane start, which is seconds, so once the TTL passes
+  // the ordinary terminal rules take over again.
+  function hasUnresolvedRemoteOwnershipUncertainty(run, now = Date.now()) {
+    if (!isRemoteNodeId(run && run.node_id)) return false;
+    let events;
+    try { events = runService.getRunEvents(run.id) || []; } catch { return false; }
+    let uncertainAt = null;
+    for (const event of events) {
+      if (event.event_type === 'spawn:remote_ownership_uncertain') {
+        uncertainAt = parseSqliteUtc(event.created_at);
+      } else if (event.event_type === 'spawn:remote_ownership_confirmed') {
+        uncertainAt = null;
+      }
+    }
+    if (uncertainAt === null) return false;
+    // An unparseable stamp must not grant an unbounded reprieve.
+    if (!Number.isFinite(uncertainAt)) return false;
+    return now - uncertainAt < REMOTE_OWNERSHIP_UNCERTAIN_TTL_MS;
+  }
+
   async function _doHealthCheck() {
     const runningRuns = runService.listRuns({ status: 'running' });
 
@@ -2451,16 +2746,40 @@ function createLifecycleService({
       const alive = await channel.isAlive(run.id, 'cli');
       const exitCode = await channel.detectExitCode(run.id, 'cli');
 
+      // A spawn whose SSH acknowledgement was lost may still be starting on the
+      // pod. "No tmux session and no exit sentinel" is exactly what a remote
+      // shell that has not run YET looks like, so terminalizing on it would
+      // enqueue a retry that overlaps the late original in the same cwd — the
+      // duplicate this uncertainty exists to prevent. Absence is not evidence
+      // here; only positive evidence resolves it:
+      //   tmux observed alive  → confirmed, uncertainty cleared below
+      //   exit sentinel written → confirmed, terminalize normally
+      // Until the TTL runs out the run stays `running`; after it, the ordinary
+      // terminal rules apply again so the slot is never held indefinitely.
+      if (!alive && exitCode === null && hasUnresolvedRemoteOwnershipUncertainty(run, nowMs())) {
+        continue;
+      }
+      if (alive && hasUnresolvedRemoteOwnershipUncertainty(run, nowMs())) {
+        try {
+          runService.addRunEvent(run.id, 'spawn:remote_ownership_confirmed', JSON.stringify({
+            node: run.node_id || null,
+          }));
+        } catch { /* annotate-only */ }
+      }
+
       if (!alive || exitCode !== null) {
-        // Agent has terminated
-        const status = (exitCode === 0) ? 'completed' : 'failed';
+        // Detached remote Claude still writes stream-json. Parse that durable
+        // log before committing status so result semantics (limits/errors),
+        // usage, and goal-output text remain equivalent to the local engine.
+        const claudeResult = await inspectDetachedClaudeResult(run, channel);
+        const status = claudeResult?.status || ((exitCode === 0) ? 'completed' : 'failed');
         // v3 Phase 5: propagate the actual transition reason so
         // subscribers see WHY the run ended, not just that it did.
-        const reason = agentExitReason(exitCode);
+        const reason = claudeResult?.reason || agentExitReason(exitCode);
         const fromStatus = run.status;
         runService.updateRunStatus(run.id, status, { force: true, reason });
 
-        if (exitCode !== null) {
+        if (!claudeResult?.result && exitCode !== null) {
           runService.updateRunResult(run.id, {
             exit_code: exitCode,
             result_summary: agentExitSummary(exitCode),
@@ -2468,7 +2787,9 @@ function createLifecycleService({
         }
 
         // Capture final output
-        const output = await channel.getOutput(run.id, 200);
+        const output = claudeResult
+          ? claudeResult.output
+          : await channel.getOutput(run.id, 200);
         if (output) {
           runService.addRunEvent(run.id, 'final_output', JSON.stringify({ output: output.slice(-2000) }));
         }
@@ -2482,7 +2803,20 @@ function createLifecycleService({
         await channel.kill(run.id, 'cli');
         _outputHashes.delete(run.id);
 
-        if (eventBus) {
+        if (eventBus && status === 'needs_input') {
+          const finalRun = runService.getRun(run.id);
+          eventBus.emit('run:needs_input', {
+            runId: run.id,
+            run: finalRun,
+            from_status: fromStatus,
+            to_status: status,
+            reason,
+            task_id: finalRun.task_id || null,
+            project_id: finalRun.project_id || null,
+            node_id: finalRun.node_id || null,
+            priority: 'alert',
+          });
+        } else if (eventBus) {
           // v3 Phase 5: enrich run:completed with the same semantic
           // envelope fields so clients can filter priority alerts
           // (task_id / project_id) without re-reading the row.
@@ -2505,9 +2839,31 @@ function createLifecycleService({
         _outputHashes.set(run.id, outputHash);
 
         if (outputHash !== prevHash) {
-          // Output changed — agent is actively working, record heartbeat with snippet
-          const snippet = currentOutput ? currentOutput.trim().split('\n').pop()?.slice(0, 200) : '';
-          runService.addRunEvent(run.id, 'heartbeat', snippet ? JSON.stringify({ output: snippet }) : null);
+          // Output changed — agent is actively working. Detached Claude stdout
+          // is raw NDJSON and may contain tool inputs/results, so never persist
+          // its raw last line into the observable heartbeat event.
+          if (isDetachedRemoteClaudeRun(run)) {
+            const parsed = parseClaudeStreamJsonOutput(currentOutput);
+            const snippet = parsed.text
+              ? parsed.text.trim().split('\n').pop()?.slice(0, 200)
+              : '';
+            runService.addRunEvent(
+              run.id,
+              'heartbeat',
+              JSON.stringify(snippet
+                ? { output: snippet }
+                : { status: 'claude_stream_activity' }),
+            );
+          } else {
+            const snippet = currentOutput
+              ? currentOutput.trim().split('\n').pop()?.slice(0, 200)
+              : '';
+            runService.addRunEvent(
+              run.id,
+              'heartbeat',
+              snippet ? JSON.stringify({ output: snippet }) : null,
+            );
+          }
         } else {
           // Output unchanged — but check if the process is still alive and consuming CPU
           // before declaring it idle. Agents may be thinking/processing without terminal output.
@@ -2576,6 +2932,20 @@ function createLifecycleService({
       const channel = channelForNode(run.node_id);
       const owner = await channel.ownerOf(run.id);
       if (owner === 'stream-json') continue;
+      const hasDetachedLimit = typeof runService.hasRunEvent === 'function'
+        ? runService.hasRunEvent(run.id, 'limit_reached')
+        : runService.getRunEvents(run.id)
+          .some((event) => event.event_type === 'limit_reached');
+      if (
+        isDetachedRemoteClaudeRun(run)
+        && hasDetachedLimit
+      ) {
+        // A detached single-shot Claude worker cannot resume after max_turns;
+        // keep the semantic needs_input result instead of reclassifying its
+        // clean process exit as completed on every health tick. hasRunEvent
+        // intentionally bypasses getRunEvents' oldest-first 1,000-row window.
+        continue;
+      }
 
       const alive = await channel.isAlive(run.id, 'cli');
       if (alive) {
@@ -2643,20 +3013,46 @@ function createLifecycleService({
       const exitCode = await channel.detectExitCode(run.id, 'cli');
       if (exitCode === null) return false;
 
-      const status = exitCode === 0 ? 'completed' : 'failed';
+      const claudeResult = await inspectDetachedClaudeResult(run, channel);
+      const status = claudeResult?.status || (exitCode === 0 ? 'completed' : 'failed');
+      const fromStatus = run.status;
       runService.updateRunStatus(run.id, status, {
         force: true,
-        reason: agentExitReason(exitCode),
+        reason: claudeResult?.reason || agentExitReason(exitCode),
       });
-      runService.updateRunResult(run.id, {
-        exit_code: exitCode,
-        result_summary: status === 'completed'
-          ? 'Agent completed (recovered after restart)'
-          : `Agent exited with code ${exitCode} (recovered after restart)`,
-      });
+      if (eventBus && status === 'needs_input') {
+        const finalRun = runService.getRun(run.id);
+        eventBus.emit('run:needs_input', {
+          runId: run.id,
+          run: finalRun,
+          from_status: fromStatus,
+          to_status: 'needs_input',
+          reason: claudeResult?.reason || 'needs_input',
+          task_id: finalRun.task_id || null,
+          project_id: finalRun.project_id || null,
+          node_id: finalRun.node_id || null,
+          priority: 'alert',
+        });
+      }
+      if (!claudeResult?.result) {
+        runService.updateRunResult(run.id, {
+          exit_code: exitCode,
+          result_summary: status === 'completed'
+            ? 'Agent completed (recovered after restart)'
+            : `Agent exited with code ${exitCode} (recovered after restart)`,
+        });
+      }
+      if (claudeResult?.output) {
+        runService.addRunEvent(
+          run.id,
+          'final_output',
+          JSON.stringify({ output: claudeResult.output.slice(-2000) }),
+        );
+      }
       // The process is already dead, but this best-effort call clears local
       // artifacts and any stale tmux metadata without masking its result.
       try { await channel.kill(run.id, 'cli'); } catch { /* terminal result is authoritative */ }
+      if (run.goal_active) await captureGoalOutput(runService.getRun(run.id));
       if (run.task_id) checkTaskCompletion(run.task_id);
       return true;
     };
@@ -3133,7 +3529,8 @@ function createLifecycleService({
   // Runs at run-terminal (alongside harvest). Output source, in priority:
   //   1. the file-backed tee at goalOutputLogPath (§5k-2 — restart-safe, local
   //      codex/tmux/subprocess), read tail-first;
-  //   2. channel.getOutput (in-process buffer / remote node-side log via executor).
+  //   2. channel.getOutput (in-process buffer / remote node-side log via executor),
+  //      plus the durable final result record for detached remote Claude.
   // Contract: annotate-only, NEVER throws (mirrors harvest) and ONLY touches
   // goal-enabled runs, so every non-goal run is byte-for-byte unaffected.
   async function captureGoalOutput(run) {
@@ -3146,14 +3543,26 @@ function createLifecycleService({
       let raw = readGoalOutputLogTail(run.id);
       if (raw == null) {
         try {
-          raw = await channelForNode(run.node_id).getOutput(run.id, GOAL_OUTPUT_LINES);
+          const channel = channelForNode(run.node_id);
+          raw = await channel.getOutput(run.id, GOAL_OUTPUT_LINES);
+          if (isDetachedRemoteClaudeRun(run)) {
+            const durableResult = typeof channel.getStructuredResult === 'function'
+              ? await channel.getStructuredResult(run.id)
+              : '';
+            const parsed = parseClaudeStreamJsonOutput(
+              [raw, durableResult].filter(Boolean).join('\n'),
+            );
+            if (parsed.recognized) raw = parsed.text || null;
+          }
         } catch (err) {
           // getOutput can legitimately fail (buffer gone, remote unreachable) —
           // capture is best-effort. The report parser re-runs from harvest tail.
           raw = null;
         }
       }
-      const finalOutput = capUtf8Bytes(raw, GOAL_FINAL_OUTPUT_MAX_BYTES);
+      const finalOutput = isDetachedRemoteClaudeRun(run)
+        ? capUtf8Tail(raw, GOAL_FINAL_OUTPUT_MAX_BYTES)
+        : capUtf8Bytes(raw, GOAL_FINAL_OUTPUT_MAX_BYTES);
       const report = parseGoalReport(finalOutput || '');
       runService.updateGoalCapture(run.id, {
         final_output: finalOutput,
