@@ -245,6 +245,27 @@ function createManagerMessageQueueService({
         AND status IN ('sending', 'processing')
       ORDER BY sequence
     `),
+    queuedForConversation: db.prepare(`
+      SELECT *
+      FROM manager_message_queue
+      WHERE conversation_id = ? AND status IN ('queued', 'sending', 'processing')
+      ORDER BY sequence
+    `),
+    terminalizeQueuedForConversation: db.prepare(`
+      UPDATE manager_message_queue
+      SET status = 'cancelled',
+          -- Every ACTIVE status, not just queued. A row the dispatcher has
+          -- already moved to sending would otherwise sail past archive and
+          -- become processing against a disposed Operator.
+          last_error = 'Operator instance archived before delivery',
+          terminal_reason = 'operator_archived',
+          claim_token = NULL,
+          claimed_by = NULL,
+          lease_expires_at = NULL,
+          cancelled_at = ?,
+          updated_at = ?
+      WHERE conversation_id = ? AND status IN ('queued', 'sending', 'processing')
+    `),
   };
 
   const enqueueTx = db.transaction((
@@ -744,6 +765,25 @@ function createManagerMessageQueueService({
     return failed.map(publicRow);
   }
 
+  // Synchronous by design: archiveDatabaseState calls this while its own
+  // better-sqlite3 transaction is open, so queued-message terminalization is
+  // committed or rolled back with the instance/refs/schedules/invocations.
+  // Emission is split into notifyTerminalized() and must run only after commit.
+  function terminalizeQueuedForConversation(conversationId, { now = new Date().toISOString() } = {}) {
+    if (!conversationId) return [];
+    const queued = stmts.queuedForConversation.all(conversationId);
+    if (queued.length === 0) return [];
+    stmts.terminalizeQueuedForConversation.run(now, now, conversationId);
+    return queued
+      .map((row) => stmts.getById.get(row.id))
+      .filter(Boolean);
+  }
+
+  function notifyTerminalized(rows) {
+    for (const row of rows || []) emitRow(row);
+    return (rows || []).map(publicRow);
+  }
+
   async function tick() {
     if (stopped) return [];
     stmts.renewOwnLeases.run(Date.now() + leaseMs, ownerId);
@@ -788,6 +828,8 @@ function createManagerMessageQueueService({
     drainConversation,
     completeFromEvent,
     handleSlotCleared,
+    terminalizeQueuedForConversation,
+    notifyTerminalized,
     reconcileStaleClaims,
     tick,
     start,

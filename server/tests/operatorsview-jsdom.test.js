@@ -1147,6 +1147,86 @@ test('OperatorsView only offers scheduled folders on the Operator primary node',
   assert.deepEqual((await readDropdownOptions(env, select)).map((option) => option.value), ['proj_a']);
 });
 
+test('OperatorsView confirms affected codebases and archives a configured Operator', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+
+  let currentInstances = [{
+    id: 'oi_archive_ui',
+    display_name: 'Archive UI Operator',
+    profile_id: 'op_preserved',
+    profile_name: 'Preserved profile',
+    refs: [
+      {
+        instance_id: 'oi_archive_ui',
+        project_id: 'proj_primary',
+        role: 'primary',
+        project: { id: 'proj_primary', name: 'Primary folder' },
+      },
+      {
+        instance_id: 'oi_archive_ui',
+        project_id: 'proj_reference',
+        role: 'reference',
+        project: { id: 'proj_reference', name: 'Reference folder' },
+      },
+    ],
+  }];
+  let confirmText = '';
+  env.window.confirm = (message) => {
+    confirmText = message;
+    return true;
+  };
+  const calls = installRosterStubs(env, {
+    managerStatus: { active: false, top: null, pms: [] },
+    profiles: [{ id: 'op_preserved', name: 'Preserved profile', capabilities: [] }],
+    instances: () => currentInstances,
+    operatorInstancesHandler: ({ url, opts }) => {
+      if (url === '/api/operator-instances/oi_archive_ui' && opts.method === 'DELETE') {
+        currentInstances = [];
+        return {
+          already_archived: false,
+          affected_codebases: [
+            { id: 'proj_primary', name: 'Primary folder', role: 'primary' },
+            { id: 'proj_reference', name: 'Reference folder', role: 'reference' },
+          ],
+        };
+      }
+      return {};
+    },
+  });
+  loadOperatorsComponents(env);
+  const root = renderOperatorsView(env, {
+    projects: [
+      { id: 'proj_primary', name: 'Primary folder' },
+      { id: 'proj_reference', name: 'Reference folder' },
+    ],
+  });
+
+  const card = await waitFor(() => {
+    const el = root.querySelector('[data-role="operator-configured-card"]');
+    assert.ok(el);
+    return el;
+  });
+  card.click();
+  const archiveButton = await waitFor(() => {
+    const el = root.querySelector('[data-role="operator-archive-button"]');
+    assert.ok(el);
+    return el;
+  });
+  archiveButton.click();
+
+  await waitFor(() => {
+    assert.ok(calls.some(call => (
+      call.url === '/api/operator-instances/oi_archive_ui'
+      && call.opts.method === 'DELETE'
+    )));
+    assert.equal(root.querySelector('[data-role="operator-configured-card"]'), null);
+  });
+  assert.match(confirmText, /Primary folder/);
+  assert.match(confirmText, /Reference folder/);
+  assert.match(confirmText, /프로필은 보존/);
+});
+
 test('OperatorsView delegates specialist invoke contract to SpecialistInvokePanel source', () => {
   const operatorsSource = fs.readFileSync(path.join(COMPONENTS_DIR, 'OperatorsView.js'), 'utf8');
   const specialistViewSource = fs.readFileSync(path.join(COMPONENTS_DIR, 'SpecialistView.js'), 'utf8');

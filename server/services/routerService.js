@@ -51,6 +51,7 @@
 
 const {
   isOperatorConversationId,
+  isInstanceConversationId,
   isProjectConversationId,
   conversationIdForProject,
 } = require('../utils/conversationId'); // PM→Operator rename Phase 0
@@ -104,6 +105,42 @@ function createRouterService({ projectService, operatorInstanceService, logger }
     return conversationIdForProject(projectId);
   }
 
+  // Refuse an ARCHIVED instance, but keep passing an UNKNOWN one through.
+  //
+  // The router is a pure matcher — its own header says it "accepts plain values
+  // so tests don't need to mock", and rule 2 is documented as "valid
+  // currentConversationId → keep it". Requiring the row to exist turns a
+  // syntactically valid conversation id into a 404 and changes the contract for
+  // every caller; `operator:oi_current` with no DB row used to resolve fine.
+  // Archived-ness is the only new fact this issue introduces, so that is the
+  // only thing checked here. Delivery to a missing instance is still refused
+  // downstream, at the send/lazy-spawn path.
+  function assertActiveTarget(conversationId) {
+    if (
+      !isInstanceConversationId(conversationId)
+      || !operatorInstanceService
+      || typeof operatorInstanceService.getInstance !== 'function'
+      || typeof operatorInstanceService.assertActiveInstance !== 'function'
+    ) {
+      return;
+    }
+    const instanceId = conversationId.slice('operator:'.length);
+    let existing = null;
+    try {
+      existing = operatorInstanceService.getInstance(instanceId);
+    } catch {
+      return; // unknown id keeps its historical pass-through behavior
+    }
+    if (!existing || !existing.archived_at) return;
+    operatorInstanceService.assertActiveInstance(instanceId);
+  }
+
+  function resolvedDefaultTarget(defaultConversationId) {
+    const target = isValidConversationId(defaultConversationId) ? defaultConversationId : 'top';
+    assertActiveTarget(target);
+    return target;
+  }
+
   // Core matcher. Accepts plain values so tests don't need to mock.
   function resolveTarget({
     text,
@@ -129,6 +166,7 @@ function createRouterService({ projectService, operatorInstanceService, logger }
         // 유지하고 이번 turn만 멘션 codebase로 향하게 한다. Top/worker/
         // absent context는 기존 primary Operator 재라우팅을 유지한다.
         if (currentConversationId && isOperatorConversationId(currentConversationId)) {
+          assertActiveTarget(currentConversationId);
           return {
             target: currentConversationId,
             codebaseProjectId: hit.id,
@@ -150,6 +188,7 @@ function createRouterService({ projectService, operatorInstanceService, logger }
 
     // --- Rule 2: current UI context ---
     if (currentConversationId && isValidConversationId(currentConversationId)) {
+      assertActiveTarget(currentConversationId);
       return {
         target: currentConversationId,
         text: original,
@@ -177,7 +216,7 @@ function createRouterService({ projectService, operatorInstanceService, logger }
       }
       if (hits.length > 1) {
         return {
-          target: defaultConversationId,
+          target: resolvedDefaultTarget(defaultConversationId),
           text: original,
           matchedRule: '3_namematch',
           ambiguous: true,
@@ -188,7 +227,7 @@ function createRouterService({ projectService, operatorInstanceService, logger }
 
     // --- Rule 4: default ---
     return {
-      target: isValidConversationId(defaultConversationId) ? defaultConversationId : 'top',
+      target: resolvedDefaultTarget(defaultConversationId),
       text: original,
       matchedRule: '4_default',
     };

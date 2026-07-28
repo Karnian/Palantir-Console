@@ -37,6 +37,33 @@ function createManagerRegistry({ runService }) {
   // to import conversationService. v3 Phase 2 fixes a codex-R1 finding
   // where PM notice queues survived PM rotation and became undrainable.
   const slotClearedListeners = [];
+
+  function assertActiveInstance(instanceId) {
+    if (!instanceId || !runService) return null;
+    if (typeof runService.assertActiveOperatorInstance === 'function') {
+      return runService.assertActiveOperatorInstance(instanceId);
+    }
+    if (typeof runService.getOperatorInstance === 'function') {
+      const instance = runService.getOperatorInstance(instanceId);
+      if (!instance) {
+        const err = new Error(`Operator instance not found: ${instanceId}`);
+        err.httpStatus = 404;
+        err.code = 'OPERATOR_TARGET_NOT_FOUND';
+        err.retryable = false;
+        throw err;
+      }
+      if (instance.archived_at) {
+        const err = new Error(`Operator instance is archived: ${instanceId}`);
+        err.httpStatus = 409;
+        err.code = 'OPERATOR_ARCHIVED';
+        err.retryable = false;
+        throw err;
+      }
+      return instance;
+    }
+    return null;
+  }
+
   function notifySlotCleared(conversationId, runId) {
     for (const cb of slotClearedListeners) {
       try { cb({ conversationId, runId }); } catch { /* ignore */ }
@@ -46,17 +73,19 @@ function createManagerRegistry({ runService }) {
   function resolveOperatorSlot(conversationId, { ensure = false } = {}) {
     if (!isOperatorConversationId(conversationId)) return null;
     if (runService && typeof runService.resolveOperatorConversationId === 'function') {
+      let resolved = null;
       try {
-        const resolved = runService.resolveOperatorConversationId(conversationId);
-        if (resolved?.instanceId) {
-          return {
-            conversationId: conversationIdForProject(resolved.instanceId),
-            legacyConversationId: resolved.legacySlotId || (resolved.primaryProjectId ? conversationIdForProject(resolved.primaryProjectId) : null),
-            primaryProjectId: resolved.primaryProjectId || resolved.legacyProjectId || null,
-            instanceId: resolved.instanceId,
-          };
-        }
+        resolved = runService.resolveOperatorConversationId(conversationId);
       } catch { /* fall through */ }
+      if (resolved?.instanceId) {
+        assertActiveInstance(resolved.instanceId);
+        return {
+          conversationId: conversationIdForProject(resolved.instanceId),
+          legacyConversationId: resolved.legacySlotId || (resolved.primaryProjectId ? conversationIdForProject(resolved.primaryProjectId) : null),
+          primaryProjectId: resolved.primaryProjectId || resolved.legacyProjectId || null,
+          instanceId: resolved.instanceId,
+        };
+      }
     }
     const parsed = parseProjectConversationId(conversationId);
     if (ensure && parsed?.projectId && runService && typeof runService.ensurePrimaryOperatorInstanceForProject === 'function') {
@@ -73,11 +102,13 @@ function createManagerRegistry({ runService }) {
       } catch { /* fall through */ }
     }
     if (isInstanceConversationId(conversationId)) {
+      const instanceId = conversationId.slice('operator:'.length);
+      assertActiveInstance(instanceId);
       return {
         conversationId,
         legacyConversationId: null,
         primaryProjectId: null,
-        instanceId: conversationId.slice('operator:'.length),
+        instanceId,
       };
     }
     return null;
