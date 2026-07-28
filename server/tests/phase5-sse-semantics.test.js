@@ -83,6 +83,96 @@ test('Phase 5: terminal transition emits run:ended with semantic envelope', asyn
   assert.equal(ended.data.node_id, 'local');
 });
 
+test('Phase 5: repeated forced write of the same terminal state is a silent no-op', async (t) => {
+  const db = await mkdb(t);
+  const bus = createEventBus();
+  const rs = createRunService(db, bus);
+  const ps = createProjectService(db);
+  const ts = createTaskService(db, null);
+  const project = ps.createProject({ name: 'terminal-cas' });
+  const task = ts.createTask({ title: 'T', project_id: project.id });
+  db.prepare(`INSERT INTO agent_profiles (id, name, type, command) VALUES ('a1','A','codex','codex')`).run();
+  const run = rs.createRun({ task_id: task.id, agent_profile_id: 'a1' });
+  rs.updateRunStatus(run.id, 'running', { force: true });
+
+  const { events } = collectEvents(bus);
+  const first = rs.updateRunStatus(run.id, 'failed', { force: true, reason: 'first' });
+  const second = rs.updateRunStatus(run.id, 'failed', { force: true, reason: 'duplicate' });
+
+  assert.equal(second.status, 'failed');
+  assert.equal(second.ended_at, first.ended_at);
+  assert.equal(events.filter((event) => event.channel === 'run:ended').length, 1);
+  assert.equal(events.filter((event) => event.channel === 'run:status').length, 1);
+  assert.equal(
+    rs.getRunEvents(run.id).filter((event) => event.event_type === 'status:failed').length,
+    1,
+  );
+
+  // The dropped write still leaves a trace. The observer that loses the race
+  // may be the one that knew why — an idle timeout can beat a rate-limit
+  // classification — so its reason is kept as an annotate-only event rather
+  // than discarded.
+  const duplicates = rs.getRunEvents(run.id)
+    .filter((event) => event.event_type === 'status:duplicate_terminal');
+  assert.equal(duplicates.length, 1);
+  assert.deepEqual(JSON.parse(duplicates[0].payload_json), {
+    status: 'failed',
+    reason: 'duplicate',
+  });
+
+  // `force` still permits a real transition away from a terminal state.
+  rs.updateRunStatus(run.id, 'queued', { force: true, reason: 'manual-requeue' });
+  assert.equal(rs.getRun(run.id).status, 'queued');
+});
+
+test('Phase 5: the unforced status route still rejects a repeated terminal write', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, createEventBus());
+  const ps = createProjectService(db);
+  const ts = createTaskService(db, null);
+  const project = ps.createProject({ name: 'terminal-unforced' });
+  const task = ts.createTask({ title: 'T', project_id: project.id });
+  db.prepare(`INSERT INTO agent_profiles (id, name, type, command) VALUES ('a1','A','codex','codex')`).run();
+  const run = rs.createRun({ task_id: task.id, agent_profile_id: 'a1' });
+  rs.updateRunStatus(run.id, 'running', { force: true });
+  rs.updateRunStatus(run.id, 'completed', { force: true });
+
+  // De-duplicating internal observers must not quietly relax the external API
+  // contract: PATCH /api/runs/:id/status is unforced, and a terminal run
+  // refusing further writes is the behavior its callers were given.
+  assert.throws(
+    () => rs.updateRunStatus(run.id, 'completed'),
+    /Cannot transition run from 'completed' to 'completed'/,
+  );
+});
+
+test('Phase 5: force still permits transitions between distinct terminal states', async (t) => {
+  const db = await mkdb(t);
+  const bus = createEventBus();
+  const rs = createRunService(db, bus);
+  const ps = createProjectService(db);
+  const ts = createTaskService(db, null);
+  const project = ps.createProject({ name: 'terminal-force' });
+  const task = ts.createTask({ title: 'T', project_id: project.id });
+  db.prepare(`INSERT INTO agent_profiles (id, name, type, command) VALUES ('a1','A','codex','codex')`).run();
+  const run = rs.createRun({ task_id: task.id, agent_profile_id: 'a1' });
+  rs.updateRunStatus(run.id, 'running', { force: true });
+  rs.updateRunStatus(run.id, 'completed', { force: true, reason: 'first-observation' });
+
+  const { events } = collectEvents(bus);
+  const corrected = rs.updateRunStatus(run.id, 'failed', {
+    force: true,
+    reason: 'authoritative-correction',
+  });
+
+  assert.equal(corrected.status, 'failed');
+  const ended = events.filter((event) => event.channel === 'run:ended');
+  assert.equal(ended.length, 1);
+  assert.equal(ended[0].data.from_status, 'completed');
+  assert.equal(ended[0].data.to_status, 'failed');
+  assert.equal(ended[0].data.reason, 'authoritative-correction');
+});
+
 test('Phase 5: markRunStarted emits run:status with from_status and reason', async (t) => {
   const db = await mkdb(t);
   const bus = createEventBus();

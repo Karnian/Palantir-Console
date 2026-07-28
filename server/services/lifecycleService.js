@@ -26,6 +26,11 @@ const {
 const { compileGoalPrompt } = require('./goalPrompt'); // G1
 const { parseGoalReport } = require('./goalReport'); // G1
 const { parseClaudeStreamJsonOutput } = require('./claudeStreamJson');
+const {
+  classifyClaudeRateLimitEvents,
+  classifyCodexWorkerOutput,
+  markWorkerLimitFailure,
+} = require('./workerLimit');
 const { createGoalVerdictService } = require('./goalVerdictService'); // G3
 const { VERDICT_TO_TASK_STATUS } = require('./goalVerdict'); // G3
 const {
@@ -507,6 +512,22 @@ function createLifecycleService({
     // Legacy-data-only safety net for opencode profiles created before new profiles were blocked.
     if (cmd.includes('opencode')) return 'opencode';
     return 'other';
+  }
+
+  function markCodexLimitFailure(run, output) {
+    if (!run?.agent_profile_id) return false;
+    let profile;
+    try {
+      profile = agentProfileService.getProfile(run.agent_profile_id);
+    } catch {
+      return false;
+    }
+    if (resolveAdapterName(profile) !== 'codex') return false;
+    return markWorkerLimitFailure(
+      runService,
+      run.id,
+      classifyCodexWorkerOutput(output),
+    );
   }
 
   // Fail-closed: a corrupt queued_args (manual DB edit, partial write) must
@@ -2244,17 +2265,22 @@ function createLifecycleService({
   }
 
   function createRetryRun(run) {
-    const retryRun = runService.createRun({
+    const retryRootRunId = run.retry_root_run_id || run.id;
+    const retryCount = Number(run.retry_count || 0) + 1;
+    if (runService.findRetryAttempt(retryRootRunId, retryCount)) return null;
+
+    const retryRun = runService.insertRetryRun({
       task_id: run.task_id,
       agent_profile_id: run.agent_profile_id,
       prompt: run.prompt || '',
       node_id: run.node_id || 'local',
       queued_args: run.queued_args || null,
-      retry_count: Number(run.retry_count || 0) + 1,
+      retry_count: retryCount,
       operator_instance_id: run.operator_instance_id || null,
       parent_run_id: run.parent_run_id || null,
-      retry_root_run_id: run.retry_root_run_id || run.id,
+      retry_root_run_id: retryRootRunId,
     });
+    if (!retryRun) return null;
     runService.addRunEvent(retryRun.id, 'queue:retry', JSON.stringify({
       profile_id: run.agent_profile_id,
     }));
@@ -2776,6 +2802,12 @@ function createLifecycleService({
 
     const stopReason = parsed.result.stop_reason;
     const hitLimit = stopReason === 'max_turns' || stopReason === 'max_tokens';
+    const limitFailure = parsed.result.is_error
+      ? classifyClaudeRateLimitEvents(parsed.events)
+      : null;
+    if (limitFailure && !alreadyParsed) {
+      markWorkerLimitFailure(runService, run.id, limitFailure);
+    }
     if (hitLimit && !alreadyParsed) {
       runService.addRunEvent(run.id, 'limit_reached', JSON.stringify({
         message: `Agent stopped due to ${stopReason} — task may be incomplete`,
@@ -2786,7 +2818,13 @@ function createLifecycleService({
     return {
       output: parsed.text || '',
       status: parsed.result.is_error ? 'failed' : hitLimit ? 'needs_input' : 'completed',
-      reason: parsed.result.is_error ? 'claude-result-error' : hitLimit ? stopReason : 'agent-exit-success',
+      reason: limitFailure
+        ? 'claude-rate-limit'
+        : parsed.result.is_error
+          ? 'claude-result-error'
+          : hitLimit
+            ? stopReason
+            : 'agent-exit-success',
       result: parsed.result,
     };
   }
@@ -2878,9 +2916,16 @@ function createLifecycleService({
         // usage, and goal-output text remain equivalent to the local engine.
         const claudeResult = await inspectDetachedClaudeResult(run, channel);
         const status = claudeResult?.status || ((exitCode === 0) ? 'completed' : 'failed');
+        const output = claudeResult
+          ? claudeResult.output
+          : await channel.getOutput(run.id, 200);
+        const codexLimitFailure = status === 'failed' && !claudeResult
+          ? markCodexLimitFailure(run, output)
+          : false;
         // v3 Phase 5: propagate the actual transition reason so
         // subscribers see WHY the run ended, not just that it did.
-        const reason = claudeResult?.reason || agentExitReason(exitCode);
+        const reason = claudeResult?.reason
+          || (codexLimitFailure ? 'codex-rate-limit' : agentExitReason(exitCode));
         const fromStatus = run.status;
         runService.updateRunStatus(run.id, status, { force: true, reason });
 
@@ -2892,9 +2937,6 @@ function createLifecycleService({
         }
 
         // Capture final output
-        const output = claudeResult
-          ? claudeResult.output
-          : await channel.getOutput(run.id, 200);
         if (output) {
           runService.addRunEvent(run.id, 'final_output', JSON.stringify({ output: output.slice(-2000) }));
         }
@@ -3129,10 +3171,19 @@ function createLifecycleService({
 
       const claudeResult = await inspectDetachedClaudeResult(run, channel);
       const status = claudeResult?.status || (exitCode === 0 ? 'completed' : 'failed');
+      const output = claudeResult
+        ? claudeResult.output
+        : status === 'failed'
+          ? await channel.getOutput(run.id, 200, 'cli')
+          : null;
+      const codexLimitFailure = status === 'failed' && !claudeResult
+        ? markCodexLimitFailure(run, output)
+        : false;
       const fromStatus = run.status;
       runService.updateRunStatus(run.id, status, {
         force: true,
-        reason: claudeResult?.reason || agentExitReason(exitCode),
+        reason: claudeResult?.reason
+          || (codexLimitFailure ? 'codex-rate-limit' : agentExitReason(exitCode)),
         // A run that health already parked as idle keeps that provenance when a
         // restart's orphan sweep finalizes it. Without this the history shows a
         // plain `completed` and the idle origin is lost — exactly the "timeout
@@ -3452,9 +3503,15 @@ function createLifecycleService({
             // Session exists but agent terminated
             const exitCode = await workerChannel.detectExitCode(runId, 'cli');
             const status = (exitCode === 0) ? 'completed' : 'failed';
+            const output = status === 'failed'
+              ? await workerChannel.getOutput(runId, 200, 'cli')
+              : null;
+            const codexLimitFailure = status === 'failed'
+              ? markCodexLimitFailure(run, output)
+              : false;
             runService.updateRunStatus(runId, status, {
               force: true,
-              reason: agentExitReason(exitCode),
+              reason: codexLimitFailure ? 'codex-rate-limit' : agentExitReason(exitCode),
             });
             if (exitCode !== null) {
               runService.updateRunResult(runId, {
@@ -3540,6 +3597,7 @@ function createLifecycleService({
           toStatus === 'failed'
           && !run.is_manager
           && !run.goal_active   // G3: goal runs retry via the verdict loop, not B-lite
+          && !run.non_retryable
           && run.started_at
           && Number(run.retry_count || 0) < MAX_RETRY
         ) {

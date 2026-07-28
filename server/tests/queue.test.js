@@ -103,13 +103,23 @@ function seedProfile(db, { max = 1, command = 'codex' } = {}) {
   return { id, max_concurrent: max, command };
 }
 
-function buildHarness(db, { eventBus = null, harvestService = null, presetService = null } = {}) {
-  const runService = createRunService(db, eventBus);
+function buildHarness(db, {
+  eventBus = null,
+  harvestService = null,
+  presetService = null,
+  executionEngine: injectedExecutionEngine = null,
+  streamJsonEngine: injectedStreamJsonEngine = null,
+  wrapRunService = null,
+} = {}) {
+  const baseRunService = createRunService(db, eventBus);
+  const runService = typeof wrapRunService === 'function'
+    ? wrapRunService(baseRunService)
+    : baseRunService;
   const taskService = createTaskService(db);
   const projectService = createProjectService(db);
   const agentProfileService = createAgentProfileService(db);
-  const executionEngine = stubExecEngine();
-  const streamJsonEngine = stubStreamJsonEngine();
+  const executionEngine = injectedExecutionEngine || stubExecEngine();
+  const streamJsonEngine = injectedStreamJsonEngine || stubStreamJsonEngine();
   const lifecycleService = createLifecycleService({
     runService,
     taskService,
@@ -281,6 +291,172 @@ test('queue: failed worker creates one new retry attempt and second failure skip
   assert.equal(runs.length, 2, 'retry_count=1 failure must not enqueue a third run');
 });
 
+test('queue: repeated failed observation emits one terminal event and one retry', async (t) => {
+  const { db } = await mkdb(t);
+  const eventBus = createEventBus();
+  const h = buildHarness(db, { eventBus });
+  t.after(() => h.lifecycleService.stopMonitoring());
+  let endedCount = 0;
+  const unsubscribe = eventBus.subscribe((event) => {
+    if (event.channel === 'run:ended') endedCount += 1;
+  });
+  t.after(unsubscribe);
+
+  const project = seedProject(h.projectService);
+  const task = seedTask(h.taskService, project.id);
+  const profile = seedProfile(db, { max: 0 });
+  const original = createRunningRun(h.runService, {
+    taskId: task.id,
+    profileId: profile.id,
+  });
+
+  h.lifecycleService.startMonitoring();
+  h.runService.updateRunStatus(original.id, 'failed', { force: true });
+  h.runService.updateRunStatus(original.id, 'failed', { force: true });
+
+  assert.equal(endedCount, 1);
+  assert.equal(h.runService.listRuns({ task_id: task.id }).length, 2);
+});
+
+test('queue: duplicate run:ended delivery creates one retry attempt', async (t) => {
+  const { db } = await mkdb(t);
+  const eventBus = createEventBus();
+  let retryInsertCalls = 0;
+  const h = buildHarness(db, {
+    eventBus,
+    wrapRunService(base) {
+      return new Proxy(base, {
+        get(target, property, receiver) {
+          if (property !== 'insertRetryRun') return Reflect.get(target, property, receiver);
+          return (...args) => {
+            retryInsertCalls += 1;
+            return target.insertRetryRun(...args);
+          };
+        },
+      });
+    },
+  });
+  t.after(() => h.lifecycleService.stopMonitoring());
+
+  const project = seedProject(h.projectService);
+  const task = seedTask(h.taskService, project.id);
+  const profile = seedProfile(db, { max: 0 });
+  const original = createRunningRun(h.runService, {
+    taskId: task.id,
+    profileId: profile.id,
+  });
+
+  h.lifecycleService.startMonitoring();
+  const failed = h.runService.updateRunStatus(original.id, 'failed', { force: true });
+  eventBus.emit('run:ended', {
+    run: failed,
+    from_status: 'running',
+    to_status: 'failed',
+    reason: 'duplicate-delivery',
+    task_id: task.id,
+    project_id: project.id,
+    node_id: 'local',
+  });
+
+  assert.equal(h.runService.listRuns({ task_id: task.id }).length, 2);
+  assert.equal(retryInsertCalls, 1, 'the sibling read must stop a second insert attempt');
+});
+
+test('queue: two run:ended consumers share one retry enqueue', async (t) => {
+  const { db } = await mkdb(t);
+  const eventBus = createEventBus();
+  let retryInsertCalls = 0;
+  const wrapRunService = (base) => new Proxy(base, {
+    get(target, property, receiver) {
+      if (property !== 'insertRetryRun') return Reflect.get(target, property, receiver);
+      return (...args) => {
+        retryInsertCalls += 1;
+        return target.insertRetryRun(...args);
+      };
+    },
+  });
+  const first = buildHarness(db, { eventBus, wrapRunService });
+  const second = buildHarness(db, { eventBus, wrapRunService });
+  t.after(() => first.lifecycleService.stopMonitoring());
+  t.after(() => second.lifecycleService.stopMonitoring());
+
+  const project = seedProject(first.projectService);
+  const task = seedTask(first.taskService, project.id);
+  const profile = seedProfile(db, { max: 0 });
+  const original = createRunningRun(first.runService, {
+    taskId: task.id,
+    profileId: profile.id,
+  });
+
+  first.lifecycleService.startMonitoring();
+  second.lifecycleService.startMonitoring();
+  first.runService.updateRunStatus(original.id, 'failed', { force: true });
+
+  assert.equal(first.runService.listRuns({ task_id: task.id }).length, 2);
+  assert.equal(
+    retryInsertCalls,
+    1,
+    'the second consumer must observe the sibling before reaching the DB barrier',
+  );
+});
+
+test('queue: retry unique-index loser returns null without changing the failed root', async (t) => {
+  const { db } = await mkdb(t);
+  const h = buildHarness(db);
+  const project = seedProject(h.projectService);
+  const task = seedTask(h.taskService, project.id);
+  const profile = seedProfile(db, { max: 0 });
+  const original = createRunningRun(h.runService, {
+    taskId: task.id,
+    profileId: profile.id,
+  });
+  h.runService.updateRunStatus(original.id, 'failed', { force: true });
+
+  const retryArgs = {
+    task_id: task.id,
+    agent_profile_id: profile.id,
+    prompt: original.prompt,
+    retry_root_run_id: original.id,
+    retry_count: 1,
+  };
+  const winner = h.runService.insertRetryRun(retryArgs);
+  const loser = h.runService.insertRetryRun(retryArgs);
+
+  assert.ok(winner);
+  assert.equal(loser, null);
+  assert.equal(h.runService.getRun(original.id).status, 'failed');
+  assert.equal(h.runService.listRuns({ task_id: task.id }).length, 2);
+});
+
+test('queue: Codex rate-limit output marks the run non-retryable before run:ended', async (t) => {
+  const { db } = await mkdb(t);
+  const eventBus = createEventBus();
+  const executionEngine = stubExecEngine();
+  executionEngine.isAlive = () => false;
+  executionEngine.detectExitCode = () => 1;
+  executionEngine.getOutput = () => 'Rate limit exceeded';
+  const h = buildHarness(db, { eventBus, executionEngine });
+  t.after(() => h.lifecycleService.stopMonitoring());
+
+  const project = seedProject(h.projectService);
+  const task = seedTask(h.taskService, project.id);
+  const profile = seedProfile(db, { max: 0, command: 'codex' });
+  const original = createRunningRun(h.runService, {
+    taskId: task.id,
+    profileId: profile.id,
+  });
+
+  h.lifecycleService.startMonitoring();
+  await h.lifecycleService.checkHealth();
+
+  const after = h.runService.getRun(original.id);
+  assert.equal(after.status, 'failed');
+  assert.equal(after.non_retryable, 1);
+  assert.equal(after.retry_count, 0, 'non_retryable is independent of the retry counter');
+  assert.equal(h.runService.listRuns({ task_id: task.id }).length, 1);
+  assert.equal(eventsOf(h.runService, original.id, 'worker:limit_rejected').length, 1);
+});
+
 test('queue: failed run that never started (no started_at) does not auto-retry', async (t) => {
   const { db } = await mkdb(t);
   const eventBus = createEventBus();
@@ -307,6 +483,64 @@ test('queue: failed run that never started (no started_at) does not auto-retry',
 
   const runs = h.runService.listRuns({ task_id: task.id });
   assert.equal(runs.length, 1, 'un-started failed run must not create a retry attempt');
+});
+
+test('queue: goal failures bypass B-lite and remain owned by the verdict loop', async (t) => {
+  const { db } = await mkdb(t);
+  const eventBus = createEventBus();
+  const h = buildHarness(db, { eventBus });
+  t.after(() => h.lifecycleService.stopMonitoring());
+
+  const project = seedProject(h.projectService);
+  const task = seedTask(h.taskService, project.id);
+  const profile = seedProfile(db, { max: 0 });
+  const run = createRunningRun(h.runService, {
+    taskId: task.id,
+    profileId: profile.id,
+  });
+  h.runService.setGoalActive(run.id, 1);
+
+  h.lifecycleService.startMonitoring();
+  h.runService.updateRunStatus(run.id, 'failed', { force: true });
+
+  assert.equal(
+    h.runService.listRuns({ task_id: task.id }).length,
+    1,
+    'run:ended must not create a B-lite child for a goal-owned run',
+  );
+  assert.equal(h.runService.getRun(run.id).goal_retry_run_id, null);
+  assert.equal(eventsOf(h.runService, run.id, 'queue:retry').length, 0);
+});
+
+test('queue: manual execute remains allowed beside an automatic retry lineage', async (t) => {
+  const { db } = await mkdb(t);
+  const eventBus = createEventBus();
+  const h = buildHarness(db, { eventBus });
+  t.after(() => h.lifecycleService.stopMonitoring());
+
+  const project = seedProject(h.projectService);
+  const task = seedTask(h.taskService, project.id);
+  const profile = seedProfile(db, { max: 0 });
+  const original = createRunningRun(h.runService, {
+    taskId: task.id,
+    profileId: profile.id,
+  });
+
+  h.lifecycleService.startMonitoring();
+  h.runService.updateRunStatus(original.id, 'failed', { force: true });
+  const automatic = h.runService.listRuns({ task_id: task.id })
+    .find((run) => run.retry_root_run_id === original.id);
+  assert.ok(automatic, 'precondition: the automatic retry lineage exists');
+
+  const manual = await h.lifecycleService.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'explicit manual rerun',
+  });
+
+  assert.ok(manual);
+  assert.equal(manual.retry_root_run_id, null);
+  assert.equal(manual.retry_count, 0);
+  assert.equal(h.runService.listRuns({ task_id: task.id }).length, 3);
 });
 
 test('queue: original failed run is harvested once while retry is separate', async (t) => {

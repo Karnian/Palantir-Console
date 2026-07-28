@@ -50,14 +50,19 @@ function makeRunService() {
   const events = [];
   const statusUpdates = [];
   const claudeSessionUpdates = [];
+  const nonRetryableUpdates = [];
   const runs = new Map();
   return {
     _events: events,
     _statusUpdates: statusUpdates,
     _claudeSessionUpdates: claudeSessionUpdates,
+    _nonRetryableUpdates: nonRetryableUpdates,
     addRunEvent(runId, type, data) { events.push({ runId, type, data }); },
-    updateRunStatus(runId, status) { statusUpdates.push({ runId, status }); },
+    updateRunStatus(runId, status, options) { statusUpdates.push({ runId, status, options }); },
     updateRunResult(runId, result) {},
+    markRunNonRetryable(runId, retryCount) {
+      nonRetryableUpdates.push({ runId, retryCount });
+    },
     updateClaudeSessionId(runId, sessionId) { claudeSessionUpdates.push({ runId, sessionId }); },
     getRun(runId) { return runs.get(runId) || null; },
     _setRun(runId, run) { runs.set(runId, run); },
@@ -644,6 +649,73 @@ test('engine: result event for worker triggers updateRunStatus completed', async
   // updateRunStatus가 'completed'로 호출됐는지 확인
   const completedUpdates = rs._statusUpdates.filter(u => u.status === 'completed');
   assert.ok(completedUpdates.length >= 1, 'completed status 업데이트 호출됨');
+});
+
+test('engine: rejected Claude rate-limit event makes a worker failure non-retryable', async (t) => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const rs = makeRunService();
+  rs._setRun('run-rate-limit-worker', { status: 'running' });
+  const limitBin = writeGeneratedFixtureExecutable(`#!/usr/bin/env node
+'use strict';
+const events = [
+  {
+    type: 'rate_limit_event',
+    rate_limit_info: {
+      status: 'rejected',
+      rateLimitType: 'five_hour',
+      resetsAt: 1785312000000,
+    },
+  },
+  {
+    type: 'result',
+    is_error: true,
+    stop_reason: null,
+    result: 'request rejected',
+  },
+];
+process.stdout.write(events.map((event) => JSON.stringify(event)).join('\\n') + '\\n', () => process.exit(1));
+`);
+  t.after(() => {
+    try { fs.unlinkSync(limitBin); } catch { /* ignore */ }
+  });
+
+  const previousClaudeBin = process.env.CLAUDE_BIN;
+  process.env.CLAUDE_BIN = limitBin;
+  const engine = createStreamJsonEngine({ runService: rs });
+  _allEngines.push(engine);
+  try {
+    engine.spawnAgent('run-rate-limit-worker', {
+      cwd: os.tmpdir(),
+      prompt: 'x',
+      isManager: false,
+    });
+  } finally {
+    if (previousClaudeBin === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = previousClaudeBin;
+  }
+
+  await waitForEvent(
+    engine,
+    'run-rate-limit-worker',
+    (event) => event.type === 'result',
+    2000,
+  );
+
+  assert.deepEqual(rs._nonRetryableUpdates, [{
+    runId: 'run-rate-limit-worker',
+    retryCount: undefined,
+  }]);
+  const failed = rs._statusUpdates.find(
+    (update) => update.runId === 'run-rate-limit-worker' && update.status === 'failed',
+  );
+  assert.equal(failed.options.reason, 'claude-rate-limit');
+  const limitEvent = rs._events.find((event) => event.type === 'worker:limit_rejected');
+  assert.deepEqual(JSON.parse(limitEvent.data), {
+    provider: 'claude',
+    kind: 'rate_limit',
+    rate_limit_type: 'five_hour',
+    resets_at: 1785312000000,
+  });
 });
 
 test('engine: result event for manager does NOT call updateRunStatus on non-error', async (t) => {
