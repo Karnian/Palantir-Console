@@ -497,12 +497,27 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
              waiting_reason='recovered_claim', updated_at=datetime('now')
        WHERE status='claimed'
     `),
+    // The unconditional restart backstop. Every ACTIVE status that crossed the
+    // external delivery window is released here, NOT just 'delivering'.
+    //
+    // A restart kills the adapter child, so an in-flight turn is definitively
+    // gone — `uncertain` records "we do not know the outcome", it does not
+    // cancel anything. Narrowing this to 'delivering' and leaving 'running' to
+    // evidence-based recovery (a terminal manager run, or a queue row carrying
+    // one of two specific terminal_reasons) is not safe: the evidence can be
+    // absent (no queue row at all — migration 071 does not backfill) or wear a
+    // different reason, and the per-Operator active UNIQUE index then blocks
+    // that Operator's every later invocation, permanently, across restarts.
+    //
+    // Evidence-based classification still runs FIRST (see recoverAfterRestart)
+    // so a recoverable outcome keeps its precise status/waiting_reason; this
+    // statement only catches whatever is left.
     markDeliveryUncertain: db.prepare(`
       UPDATE operator_invocations
          SET status='uncertain', claim_token=NULL, locked_at=NULL,
              waiting_reason='restart_delivery_uncertain',
              completed_at=datetime('now'), updated_at=datetime('now')
-       WHERE status='delivering'
+       WHERE status IN ('delivering','running')
     `),
     terminalRunningCandidates: db.prepare(`
       SELECT i.*,
@@ -1093,9 +1108,15 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     runningStaleMs = RUNNING_RECONCILE_MIN_AGE_MS,
   ) {
     const pending = stmts.recoverClaimed.run(now.toISOString()).changes;
-    const uncertainDelivery = stmts.markDeliveryUncertain.run().changes;
+    // Order is the contract: most-informative first, unconditional backstop
+    // last. Reversing it would release every 'running' row generically before
+    // either reconciler could see it, throwing away the real outcome.
+    //   1. a persisted terminal turn event  → the ACTUAL outcome (completed/failed)
+    //   2. a provably dead manager run      → 'uncertain' + a specific reason
+    //   3. anything still active            → 'uncertain' + restart_delivery_uncertain
     reconcilePersistedTerminalEvents();
     const uncertainRunning = sweepTerminalRunning(now, runningStaleMs).length;
+    const uncertainDelivery = stmts.markDeliveryUncertain.run().changes;
     const uncertain = uncertainDelivery + uncertainRunning;
     return { pending, uncertain };
   }

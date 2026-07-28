@@ -259,12 +259,23 @@ function createManagerMessageQueueService({
       SET lease_expires_at = ?, updated_at = datetime('now')
       WHERE claimed_by = ? AND status IN ('sending', 'processing')
     `),
+    // `data.terminal` is REQUIRED, exactly as the live paths require it
+    // (parseTerminalEvent below, and operatorScheduler.onEvent). codexAdapter
+    // persists non-terminal failures under the same event_type + invocationId
+    // (`kind: 'codex_error', terminal: false`), so matching on invocationId
+    // alone made restart reconciliation mistake a transient error for a
+    // completion — closing the queue lane and, worse, stamping the row with a
+    // terminal_reason the scheduler's recovery does not recognize.
     terminalEvent: db.prepare(`
       SELECT event_type, payload_json
       FROM run_events
       WHERE run_id = ?
         AND event_type IN ('mgr.turn_completed', 'mgr.turn_failed')
         AND json_extract(payload_json, '$.data.invocationId') = ?
+        AND json_extract(
+          CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
+          '$.data.terminal'
+        ) = 1
       ORDER BY id DESC
       LIMIT 1
     `),

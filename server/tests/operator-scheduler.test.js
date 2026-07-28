@@ -13,6 +13,7 @@ const { createProjectService } = require('../services/projectService');
 const { createNodeService } = require('../services/nodeService');
 const { createOperatorInstanceService } = require('../services/operatorInstanceService');
 const { createManagerRegistry } = require('../services/managerRegistry');
+const { createManagerMessageQueueService } = require('../services/managerMessageQueueService');
 const {
   createOperatorScheduleService,
   nextFireForRule,
@@ -266,14 +267,12 @@ test('restart marks the external delivery window uncertain instead of replaying 
   assert.equal(h.scheduleService.claimNext(new Date('2026-07-23T00:02:00.000Z')), null);
 });
 
-test('restart preserves a running invocation until its manager run is terminal and stale', (t) => {
-  const h = harness(t);
-  const { instance } = createMappedOperator(h);
-  const schedule = h.scheduleService.createSchedule(instance.id, {
-    name: 'Lost completion', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
-  });
+// Seeds an invocation that reached `running` against a manager run which then
+// SURVIVES the restart (boot resume leaves it 'running'), i.e. the state where
+// no recovery evidence exists.
+function seedRunningInvocation(h, instance, schedule, { at = '2026-07-23T00:00:01.000Z' } = {}) {
   h.scheduleService.runNow(schedule.id, new Date('2026-07-23T00:00:00.000Z'));
-  const claimed = h.scheduleService.claimNext(new Date('2026-07-23T00:00:01.000Z'));
+  const claimed = h.scheduleService.claimNext(new Date(at));
   h.scheduleService.markDelivering(claimed.id, claimed.claim_token);
   const managerRun = h.runService.createRun({
     is_manager: true,
@@ -282,22 +281,55 @@ test('restart preserves a running invocation until its manager run is terminal a
     operator_instance_id: instance.id,
     prompt: 'operator',
   });
-  h.runService.updateRunStatus(managerRun.id, 'running');
+  h.runService.updateRunStatus(managerRun.id, 'running', { force: true });
   h.scheduleService.markRunning(claimed.id, claimed.claim_token, managerRun.id);
-  h.db.prepare('UPDATE operator_invocations SET started_at=? WHERE id=?')
-    .run('2026-07-23T00:00:01.000Z', claimed.id);
+  h.db.prepare('UPDATE operator_invocations SET started_at=? WHERE id=?').run(at, claimed.id);
+  return { claimed, managerRun };
+}
 
-  const activeRecovery = h.scheduleService.recoverAfterRestart(
-    new Date('2026-07-23T01:00:00.000Z'),
-  );
-  assert.deepEqual(activeRecovery, { pending: 0, uncertain: 0 });
-  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
+// Regression: narrowing the restart backstop to 'delivering' stranded these
+// forever, and the per-Operator active UNIQUE index then blocked the Operator's
+// every later invocation — across restarts. Asserting the status is not enough:
+// what actually matters is that the OS-4 slot is free again.
+test('restart releases a running invocation that has no recovery evidence at all', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Lost completion', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  const { managerRun } = seedRunningInvocation(h, instance, schedule);
 
-  h.runService.updateRunStatus(managerRun.id, 'stopped');
-  const terminalRecovery = h.scheduleService.recoverAfterRestart(
-    new Date('2026-07-23T01:00:01.000Z'),
+  const recovery = h.scheduleService.recoverAfterRestart(new Date('2026-07-23T00:00:30.000Z'));
+
+  // The manager run resumed, and there is no queue row (migration 071 does not
+  // backfill pre-existing invocations) — neither evidence path can fire.
+  assert.equal(h.runService.getRun(managerRun.id).status, 'running');
+  assert.deepEqual(recovery, { pending: 0, uncertain: 1 });
+  const released = h.scheduleService.listInvocations(schedule.id)[0];
+  assert.equal(released.status, 'uncertain');
+  assert.equal(released.waiting_reason, 'restart_delivery_uncertain');
+  assert.equal(
+    h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+    'pending',
+    'OS-4 must be free again after the restart backstop',
   );
-  assert.deepEqual(terminalRecovery, { pending: 0, uncertain: 1 });
+});
+
+// Pins the recoverAfterRestart ORDER: the evidence-based sweep must run before
+// the unconditional backstop, or every dead manager run collapses into the
+// generic reason and the operator loses the diagnosis.
+test('restart prefers the specific manager-run reason over the generic backstop', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Dead manager', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  const { managerRun } = seedRunningInvocation(h, instance, schedule);
+  h.runService.updateRunStatus(managerRun.id, 'stopped', { force: true });
+
+  const recovery = h.scheduleService.recoverAfterRestart(new Date('2026-07-23T00:10:00.000Z'));
+
+  assert.deepEqual(recovery, { pending: 0, uncertain: 1 });
   const reconciled = h.scheduleService.listInvocations(schedule.id)[0];
   assert.equal(reconciled.status, 'uncertain');
   assert.equal(reconciled.waiting_reason, 'manager_run_terminal');
@@ -350,6 +382,62 @@ test('manager slot replacement terminals the superseded run so its stale invocat
   assert.equal(swept.length, 1);
   assert.equal(swept[0].status, 'uncertain');
   assert.equal(h.scheduleService.listInvocations(schedule.id)[0].waiting_reason, 'manager_run_terminal');
+});
+
+// Regression, driven through the REAL path rather than a pre-seeded queue row:
+// codexAdapter persists non-terminal failures under the same event_type and
+// invocationId as a completion. The queue's restart reconciler used to accept
+// them, terminalizing the row under a reason the scheduler's recovery does not
+// recognize — which, combined with a resumed manager run, stranded the
+// invocation and shut that Operator down permanently.
+test('a non-terminal turn failure neither closes the queue lane nor strands the invocation', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Transient codex error', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+
+  // An in-flight scheduler queue row from before the restart: claimed by an
+  // owner that no longer exists, lease long expired.
+  h.db.prepare(`
+    INSERT INTO manager_message_queue (
+      id, conversation_id, idempotency_key, adapter_invocation_id,
+      payload_json, display_text, status, available_at,
+      claim_token, claimed_by, lease_expires_at, run_id
+    ) VALUES (?,?,?,?,'{"text":"go"}','go','processing',0,?,?,?,?)
+  `).run('msg_transient', `operator:${instance.id}`, `invocation:${claimed.id}`,
+    claimed.id, 'tok_old', 'owner_before_restart', 1, managerRun.id);
+
+  // codexAdapter's non-terminal failure — same event type, same invocation id.
+  h.runService.addRunEvent(managerRun.id, 'mgr.turn_failed', JSON.stringify({
+    summaryText: 'transient codex error',
+    data: {
+      kind: 'codex_error', errorKind: 'stream', message: 'boom',
+      terminal: false, invocationId: claimed.id,
+    },
+  }));
+
+  const queue = createManagerMessageQueueService({ db: h.db, eventBus: h.eventBus, tickMs: 100000 });
+  t.after(() => queue.stop());
+  assert.equal(queue.reconcileStaleClaims(), 1);
+
+  const queueRow = h.db
+    .prepare('SELECT status, terminal_reason FROM manager_message_queue WHERE id=?')
+    .get('msg_transient');
+  assert.equal(
+    queueRow.terminal_reason,
+    'restart_delivery_uncertain',
+    'a non-terminal failure must not be mistaken for a completion',
+  );
+
+  h.scheduleService.recoverAfterRestart(new Date('2026-07-23T00:10:00.000Z'));
+  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'uncertain');
+  assert.equal(
+    h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+    'pending',
+    'OS-4 must be free again',
+  );
 });
 
 test('restart reconciles a persisted terminal turn event even while the manager run is active', (t) => {

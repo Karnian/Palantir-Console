@@ -231,6 +231,52 @@ test('expired processing claim is recovered after restart and replayed at least 
   assert.deepEqual(replayed, ['survive restart']);
 });
 
+test('a non-terminal turn failure must not consume an ordinary chat row at-least-once replay', async (t) => {
+  const h = createHarness(t);
+  const runService = createRunService(h.db, h.eventBus);
+  const run = runService.createRun({
+    is_manager: true, manager_layer: 'top', conversation_id: 'top', prompt: 'top',
+  });
+  h.service.setDispatcher(() => ({ status: 'sent', target: { kind: 'top', runId: run.id } }));
+  const original = await h.service.enqueue(
+    'top',
+    { text: 'replay me' },
+    { idempotencyKey: 'non-terminal-key' },
+  );
+  assert.equal(original.message.status, 'processing');
+  h.service.stop();
+
+  // codexAdapter's non-terminal failure, carrying this row's invocation id.
+  // It is NOT a completion, so restart recovery must fall through to the
+  // ordinary at-least-once replay rather than terminalizing the row.
+  runService.addRunEvent(run.id, 'mgr.turn_failed', JSON.stringify({
+    summaryText: 'transient codex error',
+    data: {
+      kind: 'codex_error', message: 'boom',
+      terminal: false, invocationId: original.message.id,
+    },
+  }));
+  h.db.prepare('UPDATE manager_message_queue SET lease_expires_at = 0 WHERE id = ?')
+    .run(original.message.id);
+
+  const restarted = createManagerMessageQueueService({
+    db: h.db, eventBus: h.eventBus, tickMs: 100000,
+  });
+  t.after(() => restarted.stop());
+  const replayed = [];
+  restarted.setDispatcher((_conversationId, payload) => {
+    replayed.push(payload.text);
+    return { status: 'sent', target: { kind: 'top', runId: run.id } };
+  });
+
+  assert.equal(restarted.reconcileStaleClaims(), 1);
+  await restarted.drainConversation('top');
+  const recovered = restarted.getMessage(original.message.id);
+  assert.equal(recovered.status, 'processing', 'must not be terminalized by a non-terminal event');
+  assert.equal(recovered.terminal_reason, null);
+  assert.deepEqual(replayed, ['replay me']);
+});
+
 test('expired scheduler delivery becomes uncertain after restart and is never replayed', async (t) => {
   const h = createHarness(t, { leaseMs: 5 });
   let firstDispatches = 0;
