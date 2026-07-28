@@ -122,7 +122,10 @@ function logicalScriptOf(call) {
 function assertSingleInnerPath(script, prefix) {
   const assignments = script.match(/\bPATH=/g) || [];
   assert.equal(assignments.length, 1, script);
-  const expected = `PATH=${shq(prefix)}:$PATH`;
+  // The pod PATH expansion is DOUBLE-QUOTED: under env -i this is an ordinary
+  // argument, not an assignment word, so an unquoted $PATH containing a space
+  // splits into two arguments and env exits 127.
+  const expected = `PATH=${shq(prefix)}:"$PATH"`;
   assert.ok(script.includes(`env -i "$@" ${expected}`), script);
   assert.ok(script.indexOf('env -i') < script.indexOf(expected), script);
 }
@@ -209,7 +212,14 @@ test('manager spawn builds a pod-derived clean env with one PATH and reference-o
   for (const key of ['NODE_EXTRA_CA_CERTS', 'CLAUDE_CONFIG_DIR']) {
     assert.equal(script.includes(shq(key)), false, `codex manager received claude-only ${key}`);
   }
-  assert.ok(script.includes(`PALANTIR_MANAGER_TOKEN="$PALANTIR_MANAGER_TOKEN"`));
+  // Read from SSH stdin INSIDE the clean shell, never handed to env as an
+  // argument — otherwise the real /usr/bin/env argv carries the value and
+  // /proc/<pid>/cmdline exposes it to every process on the pod. Verified on a
+  // live pod: zero process argv contained the value while the child env did.
+  assert.equal(script.includes(`PALANTIR_MANAGER_TOKEN="$PALANTIR_MANAGER_TOKEN"`), false);
+  assert.ok(script.includes('IFS= read -r PALANTIR_MANAGER_TOKEN || exit 126'));
+  assert.ok(script.includes('export PALANTIR_MANAGER_TOKEN; exec "$@"'));
+  assert.ok(script.includes('/bin/sh -c '), 'clean shell must be an absolute path under env -i');
   assert.equal(script.includes(managerToken), false);
   for (const secret of ['human-global-secret', 'pm-global-secret', 'wrong-run-secret']) {
     assert.equal(script.includes(secret), false);
@@ -278,7 +288,12 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
   ]) {
     assert.equal(inner.includes(shq(key)), false, `worker received manager-only ${key}`);
   }
-  assert.ok(inner.includes('PALANTIR_WORKER_TOKEN="$PALANTIR_WORKER_TOKEN"'));
+  // The capability is read from its 0600 file INSIDE the clean shell. It must
+  // NOT be an env -i argument: `KEY="$KEY"` is expanded before exec, so the real
+  // /usr/bin/env argv would carry the value (world-readable via /proc).
+  assert.equal(inner.includes('PALANTIR_WORKER_TOKEN="$PALANTIR_WORKER_TOKEN"'), false);
+  assert.ok(inner.includes('PALANTIR_WORKER_TOKEN=$(cat --'));
+  assert.ok(inner.includes('export PALANTIR_WORKER_TOKEN'));
   assert.equal(inner.includes(workerToken), false);
   for (const secret of ['human-global-secret', 'pm-global-secret', 'wrong-run-secret']) {
     assert.equal(inner.includes(secret), false);

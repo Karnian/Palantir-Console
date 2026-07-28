@@ -859,10 +859,16 @@ test('spawnInteractive bootstraps a manager capability through stdin, never SSH 
 
   const call = spawn.calls.at(-1);
   const script = scriptOf(call);
+  // #431: the read moved INSIDE the clean shell. Reading it in the outer
+  // bootstrap would force re-injecting the value as an `env -i` argument, and
+  // the real /usr/bin/env argv is world-readable through /proc/<pid>/cmdline.
+  // The stdin transport itself is unchanged.
+  assert.doesNotMatch(script, /^IFS= read -r PALANTIR_MANAGER_TOKEN/);
   assert.match(
     script,
-    /^IFS= read -r PALANTIR_MANAGER_TOKEN \|\| exit 126; export PALANTIR_MANAGER_TOKEN; /,
+    /\/bin\/sh -c 'IFS= read -r PALANTIR_MANAGER_TOKEN \|\| exit 126; export PALANTIR_MANAGER_TOKEN; exec "\$@"'/,
   );
+  assert.doesNotMatch(script, /PALANTIR_MANAGER_TOKEN="\$PALANTIR_MANAGER_TOKEN"/);
   assert.match(script, /PALANTIR_TOKEN=''/);
   assert.doesNotMatch(script, /PALANTIR_MANAGER_TOKEN=''/);
   assert.doesNotMatch(script, /must-be-scrubbed/);
@@ -884,27 +890,32 @@ test('spawnInteractive rejects a manager capability that cannot be line-framed',
   assert.equal(spawn.calls.length, 0);
 });
 
-test('spawnInteractive injects pathPrefix as PATH prepend with unquoted :$PATH', async () => {
+test('spawnInteractive injects pathPrefix as PATH prepend with quoted "$PATH"', async () => {
   // codex/claude live outside the pod's minimal non-interactive-ssh PATH
-  // (~/.npm-global/bin). pathPrefix must prepend the literal (shq-quoted) dir
-  // while keeping :$PATH UNQUOTED so the pod's own PATH still resolves the
-  // codex shebang's node. Real-Pi validated: without this the remote codex
-  // exec exits 127. (P4-S1 supervisor addition.)
+  // (~/.npm-global/bin). pathPrefix prepends the literal (shq-quoted) dir while
+  // the pod's own PATH still resolves the codex shebang's node.
+  //
+  // The expansion is DOUBLE-QUOTED. In the pre-#431 form this was an assignment
+  // word, which POSIX exempts from field splitting, so bare :$PATH was safe.
+  // Under `env -i` it is an ordinary argument: a pod PATH containing a space
+  // splits into two arguments and env fails with 127 (reproduced on a live pod
+  // with PATH="/opt/my bin:...").
   const spawn = makeSpawn(() => {});
   const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
   await exec.spawnInteractive('codex', ['exec'], { pathPrefix: '/home/karnian/.npm-global/bin' });
   const script = scriptOf(spawn.calls.at(-1));
   assert.ok(
     script.includes(
-      `exec env -i "$@" PATH=${shq('/home/karnian/.npm-global/bin')}:$PATH `
+      `exec env -i "$@" PATH=${shq('/home/karnian/.npm-global/bin')}:"$PATH" `
       + `PALANTIR_TOKEN=${shq('')} PALANTIR_PM_TOKEN=${shq('')} `
       + `PALANTIR_WORKER_TOKEN=${shq('')} PALANTIR_MANAGER_TOKEN=${shq('')} `
       + `${shq('codex')} ${shq('exec')}`,
     ),
     script,
   );
-  // The prefix is single-quoted (literal) but :$PATH stays outside the quotes.
-  assert.ok(script.includes(`PATH=${shq('/home/karnian/.npm-global/bin')}:$PATH`));
+  // The prefix is single-quoted (literal); the pod expansion is double-quoted.
+  assert.ok(script.includes(`PATH=${shq('/home/karnian/.npm-global/bin')}:"$PATH"`));
+  assert.doesNotMatch(script, /PATH='[^']*':\$PATH(?!")/, 'bare :$PATH would field-split');
 });
 
 test('spawnInteractive rejects relative/control-char/non-string pathPrefix (PATH-trust guard)', async () => {
@@ -1091,7 +1102,7 @@ test('spawnWorker builds file-backed tmux script through the internal runner', a
   assert.ok(inner.startsWith('set --; for k in '), inner);
   assert.ok(
     inner.includes(
-      `env -i "$@" PATH=${shq('/home/karnian/.npm-global/bin')}:$PATH `
+      `env -i "$@" PATH=${shq('/home/karnian/.npm-global/bin')}:"$PATH" `
       + `PALANTIR_TOKEN=${shq('')} PALANTIR_PM_TOKEN=${shq('')} `
       + `PALANTIR_WORKER_TOKEN=${shq('')} PALANTIR_MANAGER_TOKEN=${shq('')} `
       + `LC_ALL=${shq('C')} QUOTE=${shq("a'b")} ${shq('codex')} `
@@ -1156,8 +1167,14 @@ test('spawnWorker file-backs a scoped capability and keeps it out of SSH command
   const workerScript = spawn.calls.map(scriptOf).find((script) => script.includes('tmux new-session'));
   const prefix = `cd '/real/root/project' && tmux new-session -d -s ${shq(`palantir-run-${runId}`)} `;
   const inner = unshq(workerScript.slice(prefix.length));
-  assert.ok(inner.includes(`PALANTIR_WORKER_TOKEN=$(cat ${shq(secretPath)})`));
-  assert.ok(inner.includes(`rm -f -- ${shq(secretPath)}`));
+  // Read inside the clean shell (`cat --` guards a leading-dash path); the
+  // value is never an env -i argument, so it stays out of /usr/bin/env's argv.
+  // The read now lives in a nested `sh -c` body, so its own quoting is escaped
+  // one extra level inside this tmux script. Assert quoting-agnostically.
+  assert.ok(inner.includes('PALANTIR_WORKER_TOKEN=$(cat -- '));
+  assert.ok(inner.includes(secretPath), 'the token file path must be referenced');
+  assert.doesNotMatch(inner, /PALANTIR_WORKER_TOKEN="\$PALANTIR_WORKER_TOKEN"/);
+  assert.ok(inner.includes('rm -f -- '));
   assert.doesNotMatch(inner, /PALANTIR_WORKER_TOKEN=''/);
   assert.doesNotMatch(inner, /must-be-scrubbed/);
   for (const entry of spawn.calls) {
@@ -1544,7 +1561,7 @@ test('spawnWorker validates args and workerPath before building the tmux script'
   assert.ok(inner.startsWith('set --; for k in '), inner);
   assert.ok(
     inner.endsWith(
-      `env -i "$@" PATH=${shq('/home/x/.npm-global/bin')}:$PATH `
+      `env -i "$@" PATH=${shq('/home/x/.npm-global/bin')}:"$PATH" `
       + `PALANTIR_TOKEN=${shq('')} PALANTIR_PM_TOKEN=${shq('')} `
       + `PALANTIR_WORKER_TOKEN=${shq('')} PALANTIR_MANAGER_TOKEN=${shq('')} `
       + `${shq('codex')} > ${shq(`${statusDir}/stdout.log`)} `

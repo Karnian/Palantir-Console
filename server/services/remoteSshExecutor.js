@@ -16,6 +16,9 @@ const SSH_SERVER_ALIVE_COUNT_MAX = 4;
 // Executor-owned filesystem probes need stable diagnostics for reason mapping.
 // Never apply this to public exec, worker, or manager command output.
 const FILESYSTEM_LOCALE_ENV = Object.freeze({ LC_ALL: 'C' });
+// Absolute path: under `env -i` there is no PATH yet when the shell itself is
+// resolved, so a bare `sh` would not be found.
+const SH_BIN = '/bin/sh';
 // Remote agents inherit their runtime baseline from the pod login shell, not
 // from the Console process. Filter the shared policy to POSIX-relevant names;
 // Windows-only locator/runtime keys have no meaning in Linux pods and are
@@ -306,21 +309,35 @@ function buildCommandScript(command, args = [], {
   const argv = [shq(command), ...(args || []).map((arg) => shq(arg))];
   // Optional PATH prepend for binaries that live outside the pod's minimal
   // non-interactive-ssh PATH (codex/claude under ~/.npm-global/bin). The prefix
-  // is shq-quoted (a literal path) but `:$PATH` stays UNQUOTED so the pod's own
-  // PATH still resolves (e.g. /usr/bin/node for the codex shebang). Same proven
-  // shape as the worker channel's PATH injection.
-  const pathAssign = pathPrefix ? `PATH=${shq(pathPrefix)}:$PATH` : null;
+  // is shq-quoted (a literal path) and the pod's own PATH expansion is
+  // DOUBLE-QUOTED. In the legacy branch below this is an assignment word, which
+  // is exempt from field splitting; under `env -i` it is an ordinary argument,
+  // where an unquoted $PATH containing a space splits into two arguments and
+  // env fails with exit 127 (reproduced on a pod whose PATH held "/opt/my bin").
+  const pathAssign = pathPrefix ? `PATH=${shq(pathPrefix)}:"$PATH"` : null;
   if (cleanEnv) {
     const cleanParts = ['exec', 'env', '-i', '"$@"'];
     // PATH is deliberately not collected by the set -- loop. It is emitted
     // exactly once, inside env -i, so the pod shell expands its own PATH and a
     // pathPrefix cannot be lost to simple-command assignment expansion order.
     cleanParts.push(pathAssign || 'PATH="$PATH"');
+    cleanParts.push(...envParts);
     if (runBoundTokenKey) {
       normalizeEnvKeyList([runBoundTokenKey]);
-      cleanParts.push(`${runBoundTokenKey}="$${runBoundTokenKey}"`);
+      // The capability is read from stdin INSIDE the clean shell, never passed
+      // as an argument. `env -i ... KEY="$KEY"` would expand the value before
+      // exec, so the real /usr/bin/env argv — world-readable through
+      // /proc/<pid>/cmdline — would carry the token for the life of that exec.
+      // Reading it here keeps the pre-existing contract: the value exists only
+      // in the SSH stdin stream and the child's own environment.
+      cleanParts.push(
+        SH_BIN,
+        '-c',
+        shq(`IFS= read -r ${runBoundTokenKey} || exit 126; export ${runBoundTokenKey}; exec "$@"`),
+        shq('sh'),
+      );
     }
-    cleanParts.push(...envParts, ...argv);
+    cleanParts.push(...argv);
     const commandScript = cleanParts.join(' ');
     const prefix = buildCleanEnvPrefix(cleanEnvKeys);
     return cwd
@@ -847,9 +864,11 @@ function createRemoteSshNodeExecutor(node, {
       cleanEnvKeys: managerEnvKeys,
       runBoundTokenKey: managerToken ? 'PALANTIR_MANAGER_TOKEN' : null,
     });
-    const bootstrapScript = managerToken
-      ? `IFS= read -r PALANTIR_MANAGER_TOKEN || exit 126; export PALANTIR_MANAGER_TOKEN; ${script}`
-      : script;
+    // The capability read moved INSIDE the clean shell (buildCommandScript):
+    // reading it out here would require re-injecting the value as an env -i
+    // argument, which puts it in the real /usr/bin/env argv. The stdin
+    // transport is unchanged — only the reader moved.
+    const bootstrapScript = script;
     const child = spawnFn(
       'ssh',
       sshArgsFor(bootstrapScript, { keepAlive: true }),
@@ -1270,6 +1289,11 @@ function createRemoteSshNodeExecutor(node, {
     // assignments remain as defense in depth; the server-selected run
     // capability is restored only by variable reference after env -i.
     const workerEnv = { ...(env || {}) };
+    // The pod owns PATH. A profile that allowlists PATH materializes the
+    // CONTROLLER's value into spec.env; appending it after the pod assembly
+    // would overwrite prefix+pod PATH with a path that does not exist on the
+    // pod. The manager path drops it for the same reason.
+    delete workerEnv.PATH;
     delete workerEnv.PALANTIR_TOKEN;
     delete workerEnv.PALANTIR_PM_TOKEN;
     delete workerEnv.PALANTIR_WORKER_TOKEN;
@@ -1294,24 +1318,29 @@ function createRemoteSshNodeExecutor(node, {
     // Assemble PATH exactly once inside env -i. Keeping this out of an outer
     // assignment is required: all simple-command expansions happen before
     // assignment application and would otherwise discard workerPath.
-    cleanParts.push(workerPath ? `PATH=${shq(workerPath)}:$PATH` : 'PATH="$PATH"');
+    cleanParts.push(workerPath ? `PATH=${shq(workerPath)}:"$PATH"` : 'PATH="$PATH"');
+    cleanParts.push(...envParts);
     if (workerTokenFile) {
-      cleanParts.push('PALANTIR_WORKER_TOKEN="$PALANTIR_WORKER_TOKEN"');
+      // Same argv contract as the manager path: the capability is read from its
+      // 0600 file INSIDE the clean shell. Passing it as `KEY="$KEY"` would place
+      // the value in the real /usr/bin/env argv, which /proc exposes.
+      const tokenDirInner = path.posix.dirname(workerTokenFile);
+      cleanParts.push(
+        SH_BIN,
+        '-c',
+        shq([
+          `PALANTIR_WORKER_TOKEN=$(cat -- ${shq(workerTokenFile)}) || exit 78`,
+          'export PALANTIR_WORKER_TOKEN',
+          `rm -f -- ${shq(workerTokenFile)}`,
+          `rmdir -- ${shq(tokenDirInner)} 2>/dev/null || true`,
+          'exec "$@"',
+        ].join('; ')),
+        shq('sh'),
+      );
     }
-    cleanParts.push(...envParts, ...argv);
+    cleanParts.push(...argv);
     const commandLine = `${buildCleanEnvPrefix(cleanEnvKeys)}; ${cleanParts.join(' ')}`;
-    if (!workerTokenFile) return commandLine;
-
-    const tokenDir = path.posix.dirname(workerTokenFile);
-    return [
-      `PALANTIR_WORKER_TOKEN=$(cat ${shq(workerTokenFile)})`,
-      'worker_token_rc=$?',
-      `rm -f -- ${shq(workerTokenFile)}`,
-      `rmdir -- ${shq(tokenDir)} 2>/dev/null || true`,
-      '[ "$worker_token_rc" -eq 0 ] || exit "$worker_token_rc"',
-      'export PALANTIR_WORKER_TOKEN',
-      commandLine,
-    ].join('; ');
+    return commandLine;
   }
 
   async function ensureWorkerStatusDir(paths) {
