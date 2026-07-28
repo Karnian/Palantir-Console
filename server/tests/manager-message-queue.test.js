@@ -12,6 +12,7 @@ const { createDatabase } = require('../db/database');
 const { createEventBus } = require('../services/eventBus');
 const { createRunService } = require('../services/runService');
 const { createManagerRegistry } = require('../services/managerRegistry');
+const { createProjectService } = require('../services/projectService');
 const { createConversationService } = require('../services/conversationService');
 const {
   createManagerMessageQueueService,
@@ -229,6 +230,41 @@ test('expired processing claim is recovered after restart and replayed at least 
   assert.equal(recovered.attempt_count, 2);
   assert.deepEqual(firstDispatch, ['survive restart']);
   assert.deepEqual(replayed, ['survive restart']);
+});
+
+// Why the delivery deadline can stay scheduler-row-only: a dispatch that has
+// not yet been accepted has run_id=NULL, and handleSlotCleared matches on an
+// exact run_id. It therefore CANNOT terminalize an in-flight row, so a later
+// scheduled delivery can never slip past single-flight (countActive would have
+// to be 0) and inherit the still-held drain lock. If this ever changes, an
+// unbounded await opens up and the scheduler tick can hang on it.
+test('a slot clear cannot terminalize a dispatch that has not been accepted yet', async (t) => {
+  const h = createHarness(t);
+  let releaseColdSpawn;
+  h.service.setDispatcher(async () => {
+    await new Promise((resolve) => { releaseColdSpawn = resolve; });
+    return { status: 'sent', target: { kind: 'pm', runId: 'run_operator' } };
+  });
+  const pending = h.service.enqueue('operator:oi_slot', { text: 'cold spawn' }, {
+    idempotencyKey: 'slot-clear-key',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const inFlight = h.db
+    .prepare('SELECT id, status, run_id FROM manager_message_queue')
+    .get();
+  assert.equal(inFlight.status, 'sending');
+  assert.equal(inFlight.run_id, null, 'run_id is only stamped after adapter acceptance');
+
+  assert.deepEqual(
+    h.service.handleSlotCleared({ conversationId: 'operator:oi_slot', runId: 'run_operator' }),
+    [],
+    'a slot clear must not terminalize an unaccepted row',
+  );
+  assert.equal(h.service.getMessage(inFlight.id).status, 'sending');
+
+  releaseColdSpawn();
+  await pending;
 });
 
 test('a non-terminal turn failure must not consume an ordinary chat row at-least-once replay', async (t) => {
@@ -664,4 +700,83 @@ test('real API keeps a busy Top turn single-flight and auto-dispatches the FIFO 
   const statuses = new Map(listed.body.messages.map(item => [item.idempotency_key, item.status]));
   assert.equal(statuses.get('api-first'), 'delivered');
   assert.equal(statuses.get('api-second'), 'processing');
+});
+
+// S1: the durable claim fence is what keeps a timed-out scheduled delivery out
+// of the adapter (issue #458 "중복 실행 0"). Every other test drives it through
+// a dispatcher fake that calls control.canDispatch() itself, which proves the
+// queue exposes the fence but NOT that conversationService honours it. This
+// wires the real conversationService dispatcher so the production check is what
+// gets exercised.
+//
+// Note the two assertDispatchAllowed() calls in sendToManagerSlot are
+// deliberately redundant: the entry one rejects an already-dead delivery before
+// doing any work, the adapter-boundary one closes the async cold-spawn window.
+// Deleting only the second therefore survives — that is defense in depth, not a
+// gap. What this test pins is that the fence reaches the recursion at all.
+test('the real dispatcher keeps a timed-out cold spawn out of the adapter', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-queue-fence-'));
+  const handle = createDatabase(path.join(dir, 'test.db'));
+  handle.migrate();
+  const eventBus = createEventBus();
+  const runService = createRunService(handle.db, eventBus);
+  const projectService = createProjectService(handle.db);
+  const managerRegistry = createManagerRegistry({ runService });
+  const queue = createManagerMessageQueueService({
+    db: handle.db, eventBus, runService, tickMs: 100000, immediateDispatchTimeoutMs: 25,
+  });
+  t.after(() => {
+    queue.stop();
+    try { handle.close(); } catch { /* already closed */ }
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const project = projectService.createProject({ name: 'Fence folder', directory: '/tmp' });
+
+  const runTurnCalls = [];
+  const adapter = {
+    isSessionAlive: () => true,
+    disposeSession: () => true,
+    runTurn: (runId) => { runTurnCalls.push(runId); return { accepted: true }; },
+  };
+  let releaseColdSpawn;
+  const conversationService = createConversationService({
+    runService,
+    managerRegistry,
+    projectService,
+    lifecycleService: {},
+    managerAdapterFactory: { getAdapter: () => adapter },
+    eventBus,
+    managerMessageQueueService: queue,
+    operatorSpawnService: {
+      // A cold spawn that outruns the delivery deadline — materialize + clone
+      // + CLI spawn routinely can.
+      ensureLiveOperator: () => new Promise((resolve) => {
+        releaseColdSpawn = () => {
+          const run = runService.createRun({
+            is_manager: true,
+            manager_layer: 'operator',
+            conversation_id: `operator:${project.id}`,
+            prompt: 'operator',
+          });
+          runService.updateRunStatus(run.id, 'running', { force: true });
+          managerRegistry.setActive(`operator:${project.id}`, run.id, adapter);
+          resolve({ run });
+        };
+      }),
+    },
+  });
+
+  await assert.rejects(
+    conversationService.sendMessage(`operator:${project.id}`, {
+      text: 'scheduled turn',
+      invocationId: 'oinv_fence',
+    }),
+    err => err.code === 'OPERATOR_DELIVERY_TIMEOUT',
+  );
+
+  // The abandoned spawn finishes afterwards and the recursion resumes.
+  releaseColdSpawn();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(runTurnCalls, [], 'a timed-out delivery must never reach the adapter');
 });
