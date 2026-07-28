@@ -100,7 +100,7 @@ function createOperatorBriefService({
 
   async function updateEffectiveBrief(instanceId, { projectId = null, body = {} } = {}) {
     assertUpdateBody(body);
-    const instance = operatorInstanceService.getInstance(instanceId);
+    const instance = operatorInstanceService.assertActiveInstance(instanceId);
     const profile = operatorProfileService.getProfile(instance.profile_id);
     const projectRef = mappedProjectRef(instance, projectId);
     const hasPersona = Object.prototype.hasOwnProperty.call(body, 'persona');
