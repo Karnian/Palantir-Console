@@ -8,6 +8,11 @@ const {
   MANAGER_BASE_ENV_KEYS,
   isActorCredentialKey,
 } = require('./actorTokenPolicy');
+const {
+  CONFIG_ENV_KEY: CLAUDE_REFRESH_CONFIG_ENV_KEY,
+  CLAUDE_CREDENTIAL_REFRESH_PROBE_JS,
+  resolveClaudeRefreshConfig,
+} = require('./claudeCredentialRefresh');
 
 const WORKER_OUTPUT_MAX_LINES = 500;
 const WORKER_OUTPUT_MAX_BUFFER = 256 * 1024;
@@ -107,6 +112,7 @@ const CLAUDE_OAUTH_USAGE_JS = [
   '}}',
 ].join('');
 const CLAUDE_OAUTH_USAGE_SCRIPT = `exec node -e '${CLAUDE_OAUTH_USAGE_JS.replace(/'/g, "'\\''")}'`;
+const CLAUDE_OAUTH_USAGE_REFRESH_SCRIPT = `exec node -e '${CLAUDE_CREDENTIAL_REFRESH_PROBE_JS.replace(/'/g, "'\\''")}'`;
 
 /**
  * POSIX single-quote escaping for remote shell insertion. Every string placed
@@ -498,6 +504,7 @@ function createRemoteSshNodeExecutor(node, {
   spawnFn = childProcess.spawn,
   connectTimeoutMs = 10000,
   commandAllowlist = ['git'],
+  claudeRefreshConfig,
 } = {}) {
   if (!node || node.kind !== 'ssh') {
     throw new Error('createRemoteSshNodeExecutor requires an ssh node row');
@@ -513,6 +520,11 @@ function createRemoteSshNodeExecutor(node, {
   const connectTimeoutSeconds = Math.max(1, Math.ceil(Number(connectTimeoutMs || 10000) / 1000));
   const allowedCommands = new Set((commandAllowlist || []).map(String));
   const managerInteractiveCommands = new Set(['codex', 'claude']);
+  const claudeRefreshResolution = claudeRefreshConfig === undefined
+    ? resolveClaudeRefreshConfig(process.env)
+    : resolveClaudeRefreshConfig({ [CLAUDE_REFRESH_CONFIG_ENV_KEY]: claudeRefreshConfig });
+  const effectiveClaudeRefreshConfig = claudeRefreshResolution.config;
+  let claudeUsageRefreshTail = Promise.resolve();
   let canonicalRootsPromise = null;
   let canonicalRootsValue = null;
 
@@ -979,38 +991,57 @@ function createRemoteSshNodeExecutor(node, {
    * SSH transport failure rejects with code='SSH_TRANSPORT'.
    */
   async function readClaudeOAuthUsage({ timeoutMs = 15000, maxBuffer = 256 * 1024, pathPrefix } = {}) {
-    let script = CLAUDE_OAUTH_USAGE_SCRIPT;
-    if (pathPrefix !== undefined && pathPrefix !== null) {
-      // node_prefix may be a single dir or a `:`-joined list (multiple CLIs
-      // installed in different places). path.posix.isAbsolute() only checks
-      // the FIRST character of the whole string, so '/opt/bin:relative/bin'
-      // would otherwise pass — a relative segment there resolves against the
-      // remote CWD at exec time, letting anything writable to that directory
-      // supply the `node` binary this script runs (and thus see the pod's
-      // Claude OAuth token). Every colon-separated segment must be absolute
-      // (Codex adversarial review catch).
-      const segments = typeof pathPrefix === 'string' ? pathPrefix.split(':') : null;
-      const segmentsValid = Array.isArray(segments)
-        && segments.length > 0
-        && segments.every((segment) => segment.length > 0 && path.posix.isAbsolute(segment));
-      if (
-        typeof pathPrefix !== 'string'
-        || pathPrefix.length === 0
-        || !segmentsValid
-        || /[\x00-\x1F\x7F]/.test(pathPrefix)
-      ) {
-        throw new Error('readClaudeOAuthUsage pathPrefix must be one or more absolute POSIX paths (colon-separated) without control characters');
+    async function runProbe() {
+      // The opt-in script is a separate constant. When config is absent or
+      // invalid, the original #437 script and its argv are byte-identical.
+      let script = effectiveClaudeRefreshConfig
+        ? CLAUDE_OAUTH_USAGE_REFRESH_SCRIPT
+        : CLAUDE_OAUTH_USAGE_SCRIPT;
+      if (pathPrefix !== undefined && pathPrefix !== null) {
+        // node_prefix may be a single dir or a `:`-joined list (multiple CLIs
+        // installed in different places). path.posix.isAbsolute() only checks
+        // the FIRST character of the whole string, so '/opt/bin:relative/bin'
+        // would otherwise pass — a relative segment there resolves against the
+        // remote CWD at exec time, letting anything writable to that directory
+        // supply the `node` binary this script runs (and thus see the pod's
+        // Claude OAuth token). Every colon-separated segment must be absolute
+        // (Codex adversarial review catch).
+        const segments = typeof pathPrefix === 'string' ? pathPrefix.split(':') : null;
+        const segmentsValid = Array.isArray(segments)
+          && segments.length > 0
+          && segments.every((segment) => segment.length > 0 && path.posix.isAbsolute(segment));
+        if (
+          typeof pathPrefix !== 'string'
+          || pathPrefix.length === 0
+          || !segmentsValid
+          || /[\x00-\x1F\x7F]/.test(pathPrefix)
+        ) {
+          throw new Error('readClaudeOAuthUsage pathPrefix must be one or more absolute POSIX paths (colon-separated) without control characters');
+        }
+        // Same PATH-prepend shape as buildCommandScript — the pod's `node`
+        // often lives outside the minimal non-interactive-ssh PATH (Homebrew/
+        // nvm/npm-global installs never get sourced by a bare `ssh host cmd`).
+        // The selected JS body is untouched — only the outer `exec` wrapper
+        // gains the same env PATH prefix used by other remote commands.
+        script = script.replace(/^exec /, `exec env PATH=${shq(pathPrefix)}:$PATH `);
       }
-      // Same PATH-prepend shape as buildCommandScript — the pod's `node`
-      // often lives outside the minimal non-interactive-ssh PATH (Homebrew/
-      // nvm/npm-global installs never get sourced by a bare `ssh host cmd`).
-      // CLAUDE_OAUTH_USAGE_JS itself is untouched (constant, security-
-      // hardened per the module comment above) — only the outer `exec`
-      // wrapper gains an `env PATH=...` prefix, exactly like
-      // buildCommandScript does for every other remote command.
-      script = script.replace(/^exec /, `exec env PATH=${shq(pathPrefix)}:$PATH `);
+      return runRemoteScript(script, {
+        timeoutMs,
+        maxBuffer,
+        ...(effectiveClaudeRefreshConfig
+          ? { input: JSON.stringify(effectiveClaudeRefreshConfig) }
+          : {}),
+      });
     }
-    return runRemoteScript(script, { timeoutMs, maxBuffer });
+
+    if (!effectiveClaudeRefreshConfig) return runProbe();
+
+    // One controller process may receive overlapping usage polls for the same
+    // node. Queue the whole configured probe so only one can spend a refresh
+    // token; the pod-side CLI lock covers other processes and Claude itself.
+    const queued = claudeUsageRefreshTail.then(runProbe, runProbe);
+    claudeUsageRefreshTail = queued.catch(() => {});
+    return queued;
   }
 
   /**
