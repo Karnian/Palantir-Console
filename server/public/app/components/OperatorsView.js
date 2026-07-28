@@ -359,7 +359,9 @@ function ConfiguredOperatorDetails({
   onOpenSchedules,
   onOpenBrief,
   onChangeAdapter,
+  onArchive,
   adapterSaving,
+  archiveSaving,
 }) {
   const primary = primaryRef(instance);
   const live = Boolean(liveEntry?.run);
@@ -405,6 +407,15 @@ function ConfiguredOperatorDetails({
         </div>
       </div>
       <div class="modal-footer">
+        <button
+          type="button"
+          class="ghost danger"
+          data-role="operator-archive-button"
+          disabled=${archiveSaving}
+          onClick=${() => onArchive(instance)}
+        >
+          ${archiveSaving ? OPERATOR_ROSTER_LABELS.archivingAction : OPERATOR_ROSTER_LABELS.archiveAction}
+        </button>
         <button type="button" class="ghost" data-role="operator-brief-button" onClick=${() => onOpenBrief(instance)}>
           ${OPERATOR_ROSTER_LABELS.briefAction}
         </button>
@@ -794,6 +805,7 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
   const [createPrimaryProjectId, setCreatePrimaryProjectId] = useState('');
   const [createPreferredAdapter, setCreatePreferredAdapter] = useState('codex');
   const [creatingOperator, setCreatingOperator] = useState(false);
+  const [archivingOperatorId, setArchivingOperatorId] = useState(null);
   const adapterSavingIdsRef = useRef(new Set());
   const [adapterSavingIds, setAdapterSavingIds] = useState(() => new Set());
   const [refsEditorInstance, setRefsEditorInstance] = useState(null);
@@ -1096,6 +1108,36 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
     } finally {
       adapterSavingIdsRef.current.delete(instance.id);
       setAdapterSavingIds(new Set(adapterSavingIdsRef.current));
+    }
+  };
+
+  const archiveOperator = async (instance) => {
+    if (!instance?.id || archivingOperatorId) return;
+    const affected = arrayValue(instance.refs).map((ref) => (
+      `${refRoleLabel(ref.role)}: ${refProjectName(ref, projectsById)}`
+    ));
+    const affectedText = affected.length
+      ? `${OPERATOR_ROSTER_LABELS.archiveAffectedCodebases}:\n- ${affected.join('\n- ')}`
+      : OPERATOR_ROSTER_LABELS.archiveNoCodebases;
+    if (
+      typeof window !== 'undefined'
+      && !window.confirm(`${OPERATOR_ROSTER_LABELS.archiveConfirm}\n\n${affectedText}`)
+    ) {
+      return;
+    }
+    setArchivingOperatorId(instance.id);
+    try {
+      await apiFetchWithToast(
+        `/api/operator-instances/${encodeURIComponent(instance.id)}`,
+        { method: 'DELETE' },
+      );
+      setDetailSelection(null);
+      await refreshOperatorInstances();
+      addToast(OPERATOR_ROSTER_LABELS.archiveSuccess, 'success');
+    } catch {
+      // apiFetchWithToast owns the error toast.
+    } finally {
+      setArchivingOperatorId(null);
     }
   };
 
@@ -1514,7 +1556,9 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
               setBriefEditorInstance(instance);
             }}
             onChangeAdapter=${changeOperatorAdapter}
+            onArchive=${archiveOperator}
             adapterSaving=${adapterSavingIds.has(detailConfiguredInstance.id)}
+            archiveSaving=${archivingOperatorId === detailConfiguredInstance.id}
           />
         `}
         ${detailLiveEntry && html`

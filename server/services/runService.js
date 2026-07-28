@@ -795,10 +795,21 @@ function createRunService(db, eventBus) {
   function ensurePrimaryOperatorInstanceForProject(projectId) {
     if (!projectId) return null;
     const existing = resolveOperatorConversationFromDb(conversationIdForProject(projectId));
-    if (existing && existing.instanceId) return existing;
+    if (existing && existing.instanceId) {
+      const existingInstance = stmts.getOperatorInstance.get(existing.instanceId);
+      if (existingInstance && !existingInstance.archived_at) return existing;
+    }
 
-    const instanceId = `oi_${projectId}`;
+    const deterministicInstanceId = `oi_${projectId}`;
+    let instanceId = deterministicInstanceId;
     const tx = db.transaction(() => {
+      const deterministicInstance = stmts.getOperatorInstance.get(deterministicInstanceId);
+      // The deterministic compatibility id remains reserved for historical
+      // attribution after archive. Automatic re-creation therefore gets a new
+      // UUID-backed id instead of mutating the archived row back into service.
+      instanceId = deterministicInstance?.archived_at
+        ? `oi_${crypto.randomUUID()}`
+        : deterministicInstanceId;
       const instance = stmts.getOperatorInstance.get(instanceId);
       if (!instance) {
         const profileId = `op_priv_${instanceId}`;
@@ -835,6 +846,19 @@ function createRunService(db, eventBus) {
     return stmts.getOperatorInstance.get(instanceId) || null;
   }
 
+  function assertActiveOperatorInstance(instanceId) {
+    const instance = getOperatorInstance(instanceId);
+    if (!instance) throw new NotFoundError(`Operator instance not found: ${instanceId}`);
+    if (instance.archived_at) {
+      const err = new ConflictError(`Operator instance is archived: ${instanceId}`);
+      err.httpStatus = 409;
+      err.code = 'OPERATOR_ARCHIVED';
+      err.retryable = false;
+      throw err;
+    }
+    return instance;
+  }
+
   function getOperatorInstanceRef(instanceId, projectId) {
     if (!instanceId || !projectId) return null;
     return stmts.getOperatorRef.get(instanceId, projectId) || null;
@@ -854,6 +878,7 @@ function createRunService(db, eventBus) {
 
   function setOperatorInstanceThread(instanceId, fields = {}) {
     if (!instanceId) return null;
+    assertActiveOperatorInstance(instanceId);
     stmts.updateOperatorThread.run({
       id: instanceId,
       thread_id: fields.thread_id ?? fields.pm_thread_id ?? null,
@@ -1797,6 +1822,7 @@ function createRunService(db, eventBus) {
     resolveOperatorConversationId: resolveOperatorConversationIdWithDb,
     ensurePrimaryOperatorInstanceForProject,
     getOperatorInstance,
+    assertActiveOperatorInstance,
     getOperatorInstanceRef,
     operatorInstanceHasRef,
     getOperatorThreadForProject,
