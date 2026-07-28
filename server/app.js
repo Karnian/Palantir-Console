@@ -1432,6 +1432,8 @@ function createApp(options = {}) {
     runService,
     perConversationCap: options.managerMessageQueueCap,
     tickMs: options.managerMessageQueueTickMs,
+    immediateDispatchTimeoutMs: options.operatorSchedulerDeliveryTimeoutMs
+      ?? (Number.parseInt(process.env.PALANTIR_OPERATOR_SCHEDULER_DELIVERY_TIMEOUT_MS, 10) || undefined),
   });
   const conversationService = createConversationService({
     runService,
@@ -1464,6 +1466,10 @@ function createApp(options = {}) {
     eventBus,
     intervalMs: options.operatorSchedulerIntervalMs
       ?? (Number.parseInt(process.env.PALANTIR_OPERATOR_SCHEDULER_INTERVAL_MS, 10) || 20000),
+    deliveryTimeoutMs: options.operatorSchedulerDeliveryTimeoutMs
+      ?? (Number.parseInt(process.env.PALANTIR_OPERATOR_SCHEDULER_DELIVERY_TIMEOUT_MS, 10) || undefined),
+    runningStaleMs: options.operatorSchedulerRunningStaleMs
+      ?? (Number.parseInt(process.env.PALANTIR_OPERATOR_SCHEDULER_RUNNING_STALE_MS, 10) || undefined),
   });
   const operatorSchedulerEnabled = options.operatorSchedulerEnabled ?? !process.env.NODE_TEST_CONTEXT;
   if (operatorSchedulerEnabled) operatorScheduler.start();

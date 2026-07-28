@@ -231,6 +231,48 @@ test('expired processing claim is recovered after restart and replayed at least 
   assert.deepEqual(replayed, ['survive restart']);
 });
 
+test('expired scheduler delivery becomes uncertain after restart and is never replayed', async (t) => {
+  const h = createHarness(t, { leaseMs: 5 });
+  let firstDispatches = 0;
+  h.service.setDispatcher(() => {
+    firstDispatches += 1;
+    return { status: 'sent', target: { kind: 'pm', runId: 'run_before_restart' } };
+  });
+  const original = await h.service.enqueue(
+    'operator:oi_restart',
+    { text: 'do not duplicate', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_restart',
+      adapterInvocationId: 'oinv_restart',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(original.message.status, 'processing');
+  assert.equal(firstDispatches, 1);
+  h.service.stop();
+  h.db.prepare('UPDATE manager_message_queue SET lease_expires_at = 0 WHERE id = ?')
+    .run(original.message.id);
+
+  const replayed = [];
+  const restarted = createManagerMessageQueueService({
+    db: h.db,
+    eventBus: h.eventBus,
+    tickMs: 100000,
+  });
+  t.after(() => restarted.stop());
+  restarted.setDispatcher((_conversationId, payload) => {
+    replayed.push(payload.text);
+    return { status: 'sent', target: { kind: 'pm', runId: 'run_after_restart' } };
+  });
+
+  assert.equal(restarted.reconcileStaleClaims(), 1);
+  await restarted.drainConversation('operator:oi_restart');
+  const recovered = restarted.getMessage(original.message.id);
+  assert.equal(recovered.status, 'failed');
+  assert.equal(recovered.terminal_reason, 'restart_delivery_uncertain');
+  assert.deepEqual(replayed, []);
+});
+
 test('terminal turn failure is visible and is not automatically replayed', async (t) => {
   const h = createHarness(t);
   let calls = 0;
@@ -391,6 +433,63 @@ test('a rejected immediate scheduler reservation can retry the same invocation i
   );
   assert.equal(retried.status, 'sent');
   assert.equal(retried.message.client_message_id, 'oinv_retry');
+});
+
+test('a hung immediate scheduler dispatch times out and releases its conversation lane', async (t) => {
+  const h = createHarness(t, { immediateDispatchTimeoutMs: 20 });
+  let releaseColdSpawn;
+  const invocationIds = [];
+  const adapterCalls = [];
+  h.service.setDispatcher(async (_conversationId, _payload, invocationId, control) => {
+    invocationIds.push(invocationId);
+    if (invocationId === 'oinv_hung') {
+      await new Promise((resolve) => { releaseColdSpawn = resolve; });
+      if (!control.canDispatch()) {
+        const err = new Error('delivery fenced before adapter');
+        err.code = 'OPERATOR_DELIVERY_CANCELLED';
+        err.retryable = false;
+        throw err;
+      }
+    }
+    adapterCalls.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: 'run_operator' } };
+  });
+
+  await assert.rejects(
+    h.service.enqueue(
+      'operator:oi_test',
+      { text: 'hung scheduled turn' },
+      {
+        idempotencyKey: 'invocation:oinv_hung',
+        adapterInvocationId: 'oinv_hung',
+        requireImmediate: true,
+      },
+    ),
+    err => err.code === 'OPERATOR_DELIVERY_TIMEOUT' && err.retryable === false,
+  );
+  assert.equal(
+    h.db.prepare('SELECT COUNT(*) AS count FROM manager_message_queue').get().count,
+    0,
+    'timed-out immediate reservation must not keep the FIFO lane active',
+  );
+
+  const next = await h.service.enqueue(
+    'operator:oi_test',
+    { text: 'next scheduled turn' },
+    {
+      idempotencyKey: 'invocation:oinv_next',
+      adapterInvocationId: 'oinv_next',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.deepEqual(invocationIds, ['oinv_hung', 'oinv_next']);
+  assert.deepEqual(adapterCalls, ['oinv_next']);
+
+  releaseColdSpawn();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(adapterCalls, ['oinv_next'], 'timed-out cold spawn must never enter the adapter');
+  assert.equal(h.service.getMessage(next.message.id).status, 'processing');
 });
 
 test('conversation queue API forwards idempotency, lists messages, and cancels queued rows', async () => {

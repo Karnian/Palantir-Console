@@ -15,6 +15,7 @@ const DEFAULT_TIMEZONE = 'UTC';
 const MAX_PROMPT_LENGTH = 12000;
 const MIN_EXPIRY_AGE_MS = 24 * 60 * 60 * 1000;
 const CLAIM_LEASE_MS = 5 * 60 * 1000;
+const RUNNING_RECONCILE_MIN_AGE_MS = 5 * 60 * 1000;
 
 function nonEmptyString(value, name, maxLength) {
   if (typeof value !== 'string' || value.trim() === '') {
@@ -457,6 +458,28 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
          SET status=?, last_error=?, completed_at=datetime('now'), updated_at=datetime('now')
        WHERE id=? AND manager_run_id=? AND status='running'
     `),
+    persistedTerminalEvents: db.prepare(`
+      SELECT i.id AS invocation_id, i.manager_run_id, e.event_type, e.payload_json
+        FROM operator_invocations i
+        JOIN run_events e ON e.id=(
+          SELECT terminal.id
+            FROM run_events terminal
+           WHERE terminal.run_id=i.manager_run_id
+             AND terminal.event_type IN ('mgr.turn_completed','mgr.turn_failed')
+             AND json_extract(
+               CASE WHEN json_valid(terminal.payload_json) THEN terminal.payload_json ELSE '{}' END,
+               '$.data.invocationId'
+             )=i.id
+             AND json_extract(
+               CASE WHEN json_valid(terminal.payload_json) THEN terminal.payload_json ELSE '{}' END,
+               '$.data.terminal'
+             )=1
+           ORDER BY terminal.id ASC
+           LIMIT 1
+        )
+       WHERE i.status='running'
+       ORDER BY e.id ASC
+    `),
     resetFailures: db.prepare(`
       UPDATE operator_schedules SET consecutive_failures=0, updated_at=datetime('now') WHERE id=?
     `),
@@ -476,9 +499,73 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     `),
     markDeliveryUncertain: db.prepare(`
       UPDATE operator_invocations
-         SET status='uncertain', waiting_reason='restart_delivery_uncertain',
+         SET status='uncertain', claim_token=NULL, locked_at=NULL,
+             waiting_reason='restart_delivery_uncertain',
              completed_at=datetime('now'), updated_at=datetime('now')
-       WHERE status IN ('delivering','running')
+       WHERE status='delivering'
+    `),
+    terminalRunningCandidates: db.prepare(`
+      SELECT i.*,
+             COALESCE(r.status, 'missing') AS manager_run_status,
+             CASE
+               WHEN r.id IS NULL OR r.status IN ('completed','failed','cancelled','stopped')
+                 THEN 'manager_run_terminal'
+               ELSE COALESCE((
+                 SELECT q.terminal_reason
+                   FROM manager_message_queue q
+                  WHERE q.adapter_invocation_id=i.id
+                    AND q.status='failed'
+                    AND q.terminal_reason IN (
+                      'restart_delivery_uncertain',
+                      'session_ended_during_processing'
+                    )
+                  ORDER BY q.sequence ASC
+                  LIMIT 1
+               ), 'restart_delivery_uncertain')
+             END AS reconcile_reason
+        FROM operator_invocations i
+        LEFT JOIN runs r ON r.id=i.manager_run_id
+       WHERE i.status='running'
+         AND julianday(COALESCE(i.started_at, i.updated_at, i.created_at)) <= julianday(?)
+         AND (
+           r.id IS NULL
+           OR r.status IN ('completed','failed','cancelled','stopped')
+           OR EXISTS (
+             SELECT 1
+              FROM manager_message_queue q
+             WHERE q.adapter_invocation_id=i.id
+                AND q.status='failed'
+                AND q.terminal_reason IN (
+                  'restart_delivery_uncertain',
+                  'session_ended_during_processing'
+                )
+           )
+         )
+       ORDER BY COALESCE(i.started_at, i.updated_at, i.created_at) ASC, i.id ASC
+    `),
+    markTerminalRunningUncertain: db.prepare(`
+      UPDATE operator_invocations
+         SET status='uncertain', waiting_reason=?,
+             last_error=?, completed_at=datetime('now'), updated_at=datetime('now')
+       WHERE id=? AND status='running'
+         AND (
+           manager_run_id IS NULL
+           OR EXISTS (
+             SELECT 1 FROM runs
+              WHERE runs.id=operator_invocations.manager_run_id
+                AND runs.status IN ('completed','failed','cancelled','stopped')
+           )
+           OR EXISTS (
+             SELECT 1
+              FROM manager_message_queue q
+             WHERE q.adapter_invocation_id=operator_invocations.id
+                AND q.status='failed'
+                AND q.terminal_reason IN (
+                  'restart_delivery_uncertain',
+                  'session_ended_during_processing'
+                )
+           )
+         )
     `),
   };
 
@@ -941,9 +1028,67 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     return invocation;
   }
 
-  function recoverAfterRestart(now = new Date()) {
+  function reconcilePersistedTerminalEvents() {
+    const reconciled = [];
+    for (const row of stmts.persistedTerminalEvents.all()) {
+      let payload;
+      try { payload = row.payload_json ? JSON.parse(row.payload_json) : null; } catch { payload = null; }
+      const success = row.event_type === 'mgr.turn_completed';
+      const invocation = completeInvocation(
+        row.invocation_id,
+        row.manager_run_id,
+        success,
+        success ? null : (payload?.summaryText || 'manager turn failed'),
+      );
+      if (invocation) reconciled.push(invocation);
+    }
+    return reconciled;
+  }
+
+  function sweepTerminalRunning(
+    now = new Date(),
+    minAgeMs = RUNNING_RECONCILE_MIN_AGE_MS,
+  ) {
+    const nowMs = now.getTime();
+    if (!Number.isFinite(nowMs)) throw new BadRequestError('now must be a valid timestamp');
+    const configuredAgeMs = Number(minAgeMs);
+    const ageMs = Number.isFinite(configuredAgeMs) && configuredAgeMs >= 0
+      ? configuredAgeMs
+      : RUNNING_RECONCILE_MIN_AGE_MS;
+    const staleBefore = new Date(nowMs - ageMs).toISOString();
+    const reconciled = db.transaction(() => {
+      const settled = [];
+      for (const row of stmts.terminalRunningCandidates.all(staleBefore)) {
+        let error;
+        if (row.reconcile_reason === 'restart_delivery_uncertain') {
+          error = 'server restarted after scheduler delivery; turn completion correlation was lost';
+        } else if (row.reconcile_reason === 'session_ended_during_processing') {
+          error = 'manager session ended after scheduler delivery; turn completion could not be observed';
+        } else {
+          error = `manager run ended with status ${row.manager_run_status} before turn completion was observed`;
+        }
+        const info = stmts.markTerminalRunningUncertain.run(
+          row.reconcile_reason,
+          error,
+          row.id,
+        );
+        if (info.changes === 1) settled.push(stmts.getInvocation.get(row.id));
+      }
+      return settled;
+    }).immediate();
+    for (const invocation of reconciled) emit('invocation_status', null, invocation);
+    return reconciled;
+  }
+
+  function recoverAfterRestart(
+    now = new Date(),
+    runningStaleMs = RUNNING_RECONCILE_MIN_AGE_MS,
+  ) {
     const pending = stmts.recoverClaimed.run(now.toISOString()).changes;
-    const uncertain = stmts.markDeliveryUncertain.run().changes;
+    const uncertainDelivery = stmts.markDeliveryUncertain.run().changes;
+    reconcilePersistedTerminalEvents();
+    const uncertainRunning = sweepTerminalRunning(now, runningStaleMs).length;
+    const uncertain = uncertainDelivery + uncertainRunning;
     return { pending, uncertain };
   }
 
@@ -976,6 +1121,8 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     cancelClaim,
     markClaimUncertain,
     completeInvocation,
+    reconcilePersistedTerminalEvents,
+    sweepTerminalRunning,
     recoverAfterRestart,
     getInvocationContext,
   };
@@ -987,6 +1134,7 @@ module.exports = {
   MIN_INTERVAL_MINUTES,
   MIN_EXPIRY_AGE_MS,
   CLAIM_LEASE_MS,
+  RUNNING_RECONCILE_MIN_AGE_MS,
   normalizeRule,
   normalizeTimezone,
   nextFireForRule,

@@ -137,6 +137,17 @@ function createManagerRegistry({ runService }) {
           `setActive replacement of ${conversationId}/${prev.runId}`,
         );
       }
+      // A replaced session is no longer reachable through the registry even
+      // when its adapter teardown is asynchronous or fails. Persist that
+      // ownership change as terminal so durable consumers linked to the old
+      // run (notably Operator scheduler invocations) can reconcile instead of
+      // treating the superseded run as live forever.
+      try {
+        runService.updateRunStatus(prev.runId, 'stopped', {
+          force: true,
+          reason: 'manager_slot_replaced',
+        });
+      } catch { /* missing/already-removed run; replacement must still proceed */ }
       notifySlotCleared(conversationId, prev.runId);
     }
     active.set(conversationId, { runId, adapter });

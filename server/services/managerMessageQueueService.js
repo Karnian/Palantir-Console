@@ -5,6 +5,7 @@ const { randomUUID } = require('node:crypto');
 const DEFAULT_PER_CONVERSATION_CAP = 50;
 const DEFAULT_TICK_MS = 1000;
 const DEFAULT_LEASE_MS = 30000;
+const DEFAULT_IMMEDIATE_DISPATCH_TIMEOUT_MS = 30000;
 const MAX_PAYLOAD_BYTES = 12 * 1024 * 1024;
 const MAX_TERMINAL_RETRIES = 3;
 const ACTIVE_STATUSES = Object.freeze(['queued', 'sending', 'processing']);
@@ -24,6 +25,7 @@ function createManagerMessageQueueService({
   perConversationCap = DEFAULT_PER_CONVERSATION_CAP,
   tickMs = DEFAULT_TICK_MS,
   leaseMs = DEFAULT_LEASE_MS,
+  immediateDispatchTimeoutMs = DEFAULT_IMMEDIATE_DISPATCH_TIMEOUT_MS,
   logger,
 } = {}) {
   if (!db) throw new Error('managerMessageQueueService: db is required');
@@ -36,6 +38,11 @@ function createManagerMessageQueueService({
   let unsubscribe = null;
   let started = false;
   let stopped = false;
+  const configuredImmediateTimeoutMs = Number(immediateDispatchTimeoutMs);
+  const immediateTimeoutMs = Number.isFinite(configuredImmediateTimeoutMs)
+    && configuredImmediateTimeoutMs > 0
+    ? configuredImmediateTimeoutMs
+    : DEFAULT_IMMEDIATE_DISPATCH_TIMEOUT_MS;
 
   const stmts = {
     getById: db.prepare('SELECT * FROM manager_message_queue WHERE id = ?'),
@@ -209,6 +216,43 @@ function createManagerMessageQueueService({
         AND status IN ('sending', 'processing')
         AND claimed_by = ?
         AND lease_expires_at <= ?
+    `),
+    failStaleImmediate: db.prepare(`
+      UPDATE manager_message_queue
+      SET status = 'failed',
+          last_error = 'server restarted after scheduler delivery crossed the adapter boundary',
+          terminal_reason = 'restart_delivery_uncertain',
+          claim_token = NULL,
+          claimed_by = NULL,
+          lease_expires_at = NULL,
+          failed_at = datetime('now'),
+          updated_at = datetime('now')
+      WHERE id = ?
+        AND status IN ('sending', 'processing')
+        AND claimed_by = ?
+        AND lease_expires_at <= ?
+    `),
+    abortImmediateDelivery: db.prepare(`
+      UPDATE manager_message_queue
+      SET status = 'failed',
+          last_error = ?,
+          terminal_reason = 'delivery_timeout',
+          claim_token = NULL,
+          claimed_by = NULL,
+          lease_expires_at = NULL,
+          failed_at = datetime('now'),
+          updated_at = datetime('now')
+      WHERE adapter_invocation_id = ?
+        AND adapter_invocation_id <> id
+        AND status = 'sending'
+    `),
+    claimDispatchable: db.prepare(`
+      SELECT 1
+      FROM manager_message_queue
+      WHERE id = ?
+        AND status = 'sending'
+        AND claim_token = ?
+        AND claimed_by = ?
     `),
     renewOwnLeases: db.prepare(`
       UPDATE manager_message_queue
@@ -402,6 +446,26 @@ function createManagerMessageQueueService({
     return { retry: false };
   }
 
+  async function awaitImmediateDispatch(value) {
+    if (!value || typeof value.then !== 'function') return value;
+    let timeout;
+    try {
+      return await Promise.race([
+        Promise.resolve(value),
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(createHttpError(
+            `scheduled manager delivery timed out after ${immediateTimeoutMs}ms; adapter acceptance is unknown`,
+            504,
+            'OPERATOR_DELIVERY_TIMEOUT',
+            false,
+          )), immediateTimeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
   async function drainConversation(conversationId) {
     if (stopped) return null;
     if (!dispatcher) return null;
@@ -429,11 +493,25 @@ function createManagerMessageQueueService({
       }
 
       try {
-        const result = await dispatcher(
+        const dispatchControl = Object.freeze({
+          canDispatch: () => Boolean(stmts.claimDispatchable.get(
+            claimed.id,
+            claimed.claim_token,
+            ownerId,
+          )),
+        });
+        const dispatched = dispatcher(
           claimed.conversation_id,
           payload,
           claimed.adapter_invocation_id,
+          dispatchControl,
         );
+        // Immediate scheduler rows carry the durable operator invocation id;
+        // ordinary chat rows use their queue id as the adapter invocation id.
+        const isImmediateSchedulerRow = claimed.adapter_invocation_id !== claimed.id;
+        const result = isImmediateSchedulerRow
+          ? await awaitImmediateDispatch(dispatched)
+          : await dispatched;
         const runId = result?.target?.runId || null;
         if (!runId) {
           throw createHttpError(
@@ -627,6 +705,18 @@ function createManagerMessageQueueService({
     return publicRow(row);
   }
 
+  function abortImmediateDelivery(adapterInvocationId, reason) {
+    if (typeof adapterInvocationId !== 'string' || !adapterInvocationId) return null;
+    const info = stmts.abortImmediateDelivery.run(
+      String(reason || 'scheduled manager delivery timed out').slice(0, 2000),
+      adapterInvocationId,
+    );
+    if (info.changes !== 1) return null;
+    const row = stmts.getByAdapterInvocation.get(adapterInvocationId);
+    emitRow(row);
+    return publicRow(row);
+  }
+
   function completeFromEvent(invocationId, runId, success, errorMessage = null) {
     const existing = stmts.getById.get(invocationId)
       || stmts.getByAdapterInvocation.get(invocationId);
@@ -714,6 +804,20 @@ function createManagerMessageQueueService({
         );
         continue;
       }
+      // Ordinary chat is at-least-once and may be retried after a crashed
+      // owner. Scheduler rows are different: operator_invocations already owns
+      // their durable state, and replaying a turn that may have crossed the
+      // adapter boundary would duplicate autonomous work. Persist uncertainty
+      // instead; operatorScheduleService releases OS-4 after its stale fence.
+      if (row.adapter_invocation_id !== row.id) {
+        const failed = stmts.failStaleImmediate.run(
+          row.id,
+          row.claimed_by,
+          now,
+        );
+        if (failed.changes === 1) emitRow(stmts.getById.get(row.id));
+        continue;
+      }
       const recovered = stmts.recoverClaim.run(
         now,
         'recovered after server/claim owner restart; delivery may be retried',
@@ -785,6 +889,7 @@ function createManagerMessageQueueService({
     getMessage,
     listMessages,
     cancel,
+    abortImmediateDelivery,
     drainConversation,
     completeFromEvent,
     handleSlotCleared,
@@ -800,6 +905,7 @@ function createManagerMessageQueueService({
 module.exports = {
   ACTIVE_STATUSES,
   DEFAULT_PER_CONVERSATION_CAP,
+  DEFAULT_IMMEDIATE_DISPATCH_TIMEOUT_MS,
   MAX_PAYLOAD_BYTES,
   MAX_TERMINAL_RETRIES,
   createManagerMessageQueueService,

@@ -73,18 +73,22 @@ function seedManagerRun(db, { conversationId = 'top', layer = 'top' } = {}) {
 
 test('P1-4 setActive replacement disposes previous adapter', async (t) => {
   const db = await mkdb(t);
-  const { runService: rs } = seedManagerRun(db);
+  const { run: run1, runService: rs } = seedManagerRun(db);
   const { run: run2 } = seedManagerRun(db);
   const reg = createManagerRegistry({ runService: rs });
   const adapter1 = makeFakeAdapter();
   const adapter2 = makeFakeAdapter();
 
-  reg.setActive('top', 'run-1', adapter1);
+  rs.updateRunStatus(run1.id, 'running', { force: true });
+  rs.updateRunStatus(run2.id, 'running', { force: true });
+  reg.setActive('top', run1.id, adapter1);
   reg.setActive('top', run2.id, adapter2);
 
-  assert.deepEqual(adapter1.calls.dispose, ['run-1'], 'previous adapter must be disposed');
+  assert.deepEqual(adapter1.calls.dispose, [run1.id], 'previous adapter must be disposed');
   assert.deepEqual(adapter2.calls.dispose, [], 'new adapter must NOT be disposed on install');
   assert.equal(reg.getActiveRunId('top'), run2.id);
+  assert.equal(rs.getRun(run1.id).status, 'stopped', 'superseded run must become terminal');
+  assert.equal(rs.getRun(run2.id).status, 'running');
 });
 
 test('P1-4 setActive replacement still installs new run when dispose throws', async (t) => {

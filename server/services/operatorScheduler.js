@@ -1,9 +1,12 @@
 'use strict';
 
 const { conversationIdForProject } = require('../utils/conversationId');
+const { RUNNING_RECONCILE_MIN_AGE_MS } = require('./operatorScheduleService');
 
 const DEFAULT_INTERVAL_MS = 20000;
 const DEFAULT_MAX_JOBS = 20;
+const DEFAULT_DELIVERY_TIMEOUT_MS = 30000;
+const DEFAULT_RUNNING_STALE_MS = RUNNING_RECONCILE_MIN_AGE_MS;
 const RETRY_BASE_MS = 60 * 1000;
 const RETRY_CAP_MS = 15 * 60 * 1000;
 const RETRY_JITTER_RATIO = 0.2;
@@ -27,6 +30,8 @@ function createOperatorScheduler({
   logger,
   intervalMs = DEFAULT_INTERVAL_MS,
   maxJobs = DEFAULT_MAX_JOBS,
+  deliveryTimeoutMs = DEFAULT_DELIVERY_TIMEOUT_MS,
+  runningStaleMs = DEFAULT_RUNNING_STALE_MS,
   clock = () => new Date(),
   random = Math.random,
 } = {}) {
@@ -36,6 +41,33 @@ function createOperatorScheduler({
   let inflight = null;
   let unsubscribe = null;
   let stopped = false;
+  const configuredDeliveryTimeoutMs = Number(deliveryTimeoutMs);
+  const deliveryDeadlineMs = Number.isFinite(configuredDeliveryTimeoutMs)
+    && configuredDeliveryTimeoutMs > 0
+    ? configuredDeliveryTimeoutMs
+    : DEFAULT_DELIVERY_TIMEOUT_MS;
+  const configuredRunningStaleMs = Number(runningStaleMs);
+  const runningReconcileAgeMs = Number.isFinite(configuredRunningStaleMs)
+    && configuredRunningStaleMs >= 0
+    ? configuredRunningStaleMs
+    : DEFAULT_RUNNING_STALE_MS;
+
+  const DELIVERY_TIMED_OUT = Symbol('delivery_timed_out');
+
+  async function awaitDelivery(value) {
+    if (!value || typeof value.then !== 'function') return value;
+    let timeout;
+    try {
+      return await Promise.race([
+        Promise.resolve(value),
+        new Promise((resolve) => {
+          timeout = setTimeout(() => resolve(DELIVERY_TIMED_OUT), deliveryDeadlineMs);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
 
   function wait(invocation, reason, error) {
     // Top/node/operator recovery intentionally has no immediate wake-up in
@@ -113,7 +145,7 @@ function createOperatorScheduler({
           invocationId: invocation.id,
         },
       );
-      if (sent && typeof sent.then === 'function') sent = await sent;
+      sent = await awaitDelivery(sent);
     } catch (err) {
       const status = Number(err?.httpStatus || err?.status || 0);
       if (err?.retryable === true || err?.code === 'OPERATOR_BUSY') {
@@ -142,6 +174,23 @@ function createOperatorScheduler({
       // not replay automatically: a duplicate LLM turn is more harmful than a
       // human-visible uncertain invocation.
       operatorScheduleService.markClaimUncertain(invocation.id, invocation.claim_token, err.message);
+      return null;
+    }
+
+    if (sent === DELIVERY_TIMED_OUT) {
+      const timeoutMessage = `delivery timed out after ${deliveryDeadlineMs}ms; adapter acceptance is unknown`;
+      try {
+        if (typeof conversationService.cancelScheduledDelivery === 'function') {
+          conversationService.cancelScheduledDelivery(invocation.id, timeoutMessage);
+        }
+      } catch (err) {
+        log(`delivery fence ${invocation.id}: ${err.message}`);
+      }
+      operatorScheduleService.markClaimUncertain(
+        invocation.id,
+        invocation.claim_token,
+        timeoutMessage,
+      );
       return null;
     }
 
@@ -183,6 +232,8 @@ function createOperatorScheduler({
 
   async function runTick() {
     const now = clock();
+    operatorScheduleService.reconcilePersistedTerminalEvents();
+    operatorScheduleService.sweepTerminalRunning(now, runningReconcileAgeMs);
     operatorScheduleService.sweepExpired(now);
     operatorScheduleService.materializeDue(now);
     return drainAll();
@@ -224,7 +275,7 @@ function createOperatorScheduler({
   function start() {
     if (timer) return { stop, tick, awaitDrain };
     stopped = false;
-    operatorScheduleService.recoverAfterRestart(clock());
+    operatorScheduleService.recoverAfterRestart(clock(), runningReconcileAgeMs);
     if (eventBus && typeof eventBus.subscribe === 'function') unsubscribe = eventBus.subscribe(onEvent);
     timer = setInterval(tick, Math.max(1000, Number(intervalMs) || DEFAULT_INTERVAL_MS));
     if (typeof timer.unref === 'function') timer.unref();
@@ -249,6 +300,8 @@ function createOperatorScheduler({
 
 module.exports = {
   DEFAULT_INTERVAL_MS,
+  DEFAULT_DELIVERY_TIMEOUT_MS,
+  DEFAULT_RUNNING_STALE_MS,
   RETRY_BASE_MS,
   RETRY_CAP_MS,
   RETRY_JITTER_RATIO,
