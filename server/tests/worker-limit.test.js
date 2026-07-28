@@ -1,0 +1,39 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+
+const {
+  classifyClaudeRateLimitEvent,
+  classifyCodexWorkerOutput,
+} = require('../services/workerLimit');
+
+test('worker limit: Claude only classifies a structured rejected status', () => {
+  assert.equal(classifyClaudeRateLimitEvent({
+    type: 'rate_limit_event',
+    rate_limit_info: { status: 'allowed_warning' },
+  }), null);
+  assert.deepEqual(classifyClaudeRateLimitEvent({
+    type: 'rate_limit_event',
+    rate_limit_info: {
+      status: 'rejected',
+      rateLimitType: 'seven_day',
+      resetsAt: 1785312000000,
+    },
+  }), {
+    provider: 'claude',
+    kind: 'rate_limit',
+    rate_limit_type: 'seven_day',
+    resets_at: 1785312000000,
+  });
+});
+
+test('worker limit: Codex reuses the existing rate-limit classifier', () => {
+  assert.deepEqual(classifyCodexWorkerOutput('Rate limit exceeded'), {
+    provider: 'codex',
+    kind: 'rate_limit',
+    rate_limit_type: null,
+    resets_at: null,
+  });
+  assert.equal(classifyCodexWorkerOutput('Connection timeout'), null);
+});

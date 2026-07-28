@@ -10,6 +10,7 @@ const {
 } = require('../utils/conversationId'); // PM→Operator rename Phase 4: operator: only
 
 const VALID_STATUSES = ['queued', 'materializing', 'running', 'paused', 'needs_input', 'completed', 'failed', 'cancelled', 'stopped'];
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'stopped']);
 
 // State machine: allowed transitions
 const VALID_TRANSITIONS = {
@@ -184,8 +185,21 @@ function createRunService(db, eventBus) {
     updateClaudeSessionId: db.prepare(`
       UPDATE runs SET claude_session_id = ? WHERE id = ?
     `),
-    updateStatus: db.prepare(`
-      UPDATE runs SET status = ?, ended_at = CASE WHEN ? IN ('completed','failed','cancelled','stopped') THEN datetime('now') ELSE ended_at END WHERE id = ?
+    updateStatusCas: db.prepare(`
+      UPDATE runs
+         SET status = ?,
+             ended_at = CASE
+               WHEN ? IN ('completed','failed','cancelled','stopped') THEN datetime('now')
+               ELSE ended_at
+             END
+       WHERE id = ? AND status = ?
+    `),
+    findRetryAttempt: db.prepare(`
+      SELECT *
+        FROM runs
+       WHERE retry_root_run_id = ? AND retry_count = ?
+       ORDER BY rowid ASC
+       LIMIT 1
     `),
     updateStarted: db.prepare(`
       UPDATE runs SET status = 'running', started_at = datetime('now'), tmux_session = ?, worktree_path = ?, branch = ? WHERE id = ?
@@ -791,6 +805,36 @@ function createRunService(db, eventBus) {
     return run;
   }
 
+  function findRetryAttempt(retryRootRunId, retryCount) {
+    if (!retryRootRunId) return null;
+    return stmts.findRetryAttempt.get(
+      retryRootRunId,
+      normalizeRetryCount(retryCount),
+    ) || null;
+  }
+
+  // The lifecycle service performs the cheap sibling read before reaching this
+  // insert. This second boundary exists for the cross-process race where two
+  // readers both observed absence: the partial unique index chooses one winner,
+  // and the loser returns null instead of failing the terminal run callback.
+  function insertRetryRun(args) {
+    if (!args?.retry_root_run_id) {
+      throw new BadRequestError('retry_root_run_id is required for an automatic retry');
+    }
+    try {
+      return createRun(args);
+    } catch (error) {
+      const isUniqueConflict = error?.code === 'SQLITE_CONSTRAINT_UNIQUE';
+      if (
+        isUniqueConflict
+        && findRetryAttempt(args.retry_root_run_id, args.retry_count)
+      ) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
   const resolveOperatorConversationFromDb = createOperatorConversationIdResolver(db);
 
   function resolveOperatorConversationIdWithDb(conversationId) {
@@ -913,18 +957,56 @@ function createRunService(db, eventBus) {
     if (!VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid run status: ${status}`);
     }
-    const current = getRun(id);
-    // Enforce state machine unless forced (internal lifecycle use)
-    if (!force) {
-      const allowed = VALID_TRANSITIONS[current.status] || [];
-      if (!allowed.includes(status)) {
-        throw new BadRequestError(
-          `Cannot transition run from '${current.status}' to '${status}'. Allowed: ${allowed.join(', ') || 'none (terminal state)'}`
-        );
+    let current = null;
+    let updated = false;
+
+    // A conditional write makes duplicate terminal observations idempotent
+    // across callers and processes. `force` still bypasses transition
+    // validation and can still move between different states; only writing the
+    // same terminal state again is a no-op with no events.
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      current = getRun(id);
+      // Gated on `force` so this stays an internal-writer concession. The one
+      // unforced caller is PATCH /api/runs/:id/status, whose contract is that a
+      // terminal run rejects further writes; turning that 400 into a silent 200
+      // would change an external API as a side effect of de-duplicating
+      // internal observers.
+      if (force && TERMINAL_STATUSES.has(status) && current.status === status) {
+        // The write is dropped, but the observation is not. Whichever observer
+        // loses this race may be the one carrying the useful reason — an idle
+        // timeout can beat a rate-limit classification — and discarding it
+        // outright would leave the audit trail describing the less informative
+        // cause. Recorded as an annotate-only event: no status row, no
+        // run:ended, so the de-duplication the CAS exists for is preserved.
+        if (reason) {
+          try {
+            addRunEvent(id, 'status:duplicate_terminal', JSON.stringify({ status, reason }));
+          } catch { /* annotate-only */ }
+        }
+        return current;
+      }
+
+      // Enforce state machine unless forced (internal lifecycle use)
+      if (!force) {
+        const allowed = VALID_TRANSITIONS[current.status] || [];
+        if (!allowed.includes(status)) {
+          throw new BadRequestError(
+            `Cannot transition run from '${current.status}' to '${status}'. Allowed: ${allowed.join(', ') || 'none (terminal state)'}`
+          );
+        }
+      }
+
+      const info = stmts.updateStatusCas.run(status, status, id, current.status);
+      if (info.changes > 0) {
+        updated = true;
+        break;
       }
     }
+    if (!updated) {
+      throw new ConflictError(`Run status changed concurrently too many times: ${id}`);
+    }
+
     const fromStatus = current.status;
-    stmts.updateStatus.run(status, status, id);
     const run = stmts.getById.get(id);
     addRunEvent(id, `status:${status}`, reason ? JSON.stringify({ reason }) : null);
     if (eventBus) {
@@ -954,7 +1036,7 @@ function createRunService(db, eventBus) {
     }
 
     // Emit run:ended for terminal states so lifecycleService can sync task status
-    if (['completed', 'failed', 'cancelled', 'stopped'].includes(status) && eventBus) {
+    if (TERMINAL_STATUSES.has(status) && eventBus) {
       eventBus.emit('run:ended', {
         run,
         from_status: fromStatus,
@@ -1803,7 +1885,7 @@ function createRunService(db, eventBus) {
   }
 
   return {
-    listRuns, getRun, createRun,
+    listRuns, getRun, createRun, findRetryAttempt, insertRetryRun,
     updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture, setSessionSnapshot, sumProjectCost, rejectQueuedRun, setGoalActive, setGoalWorkspacePath,
     updateGoalAcceptance, setDeliverableState,
     setGoalJudgeActive, casJudgePending, finalizeJudge, casJudgeExpiredToError,

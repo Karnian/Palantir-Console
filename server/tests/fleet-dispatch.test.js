@@ -1143,6 +1143,64 @@ test('detached remote Claude health restores structured result, usage, and event
   assert.match(JSON.parse(finalOutput.payload_json).output, /palantir-goal-report/);
 });
 
+test('detached remote Claude rejected limit is non-retryable before terminal emission', async (t) => {
+  const db = await mkdb(t);
+  const output = [
+    JSON.stringify({
+      type: 'rate_limit_event',
+      rate_limit_info: {
+        status: 'rejected',
+        rateLimitType: 'five_hour',
+        resetsAt: 1785312000000,
+      },
+    }),
+    JSON.stringify({
+      type: 'result',
+      is_error: true,
+      stop_reason: null,
+      result: 'request rejected',
+      usage: { input_tokens: 1, output_tokens: 0 },
+    }),
+  ].join('\n');
+  const remoteChannel = makeRemoteChannel({ alive: false, exitCode: 1, output });
+  const eventBus = createEventBus();
+  const h = buildHarness(db, { remoteChannel, eventBus });
+  t.after(() => h.lifecycleService.stopMonitoring());
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { command: 'claude' });
+  const project = h.projectService.createProject({
+    name: 'RemoteClaudeRejectedLimit',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = h.runService.createRun({
+    task_id: task.id,
+    agent_profile_id: profile.id,
+    prompt: 'health',
+    node_id: 'ssh-pod',
+  });
+  h.runService.addRunEvent(run.id, 'runtime:remote_worker_engine', JSON.stringify({
+    engine: 'claude-stream-json',
+    version: 1,
+  }));
+  h.runService.markRunStarted(run.id, { tmux_session: `palantir-run-${run.id}` });
+
+  h.lifecycleService.startMonitoring();
+  await h.lifecycleService.checkHealth();
+
+  const after = h.runService.getRun(run.id);
+  assert.equal(after.status, 'failed');
+  assert.equal(after.non_retryable, 1);
+  assert.equal(after.retry_count, 0);
+  assert.equal(h.runService.listRuns({ task_id: task.id }).length, 1);
+  assert.equal(
+    h.runService.getRunEvents(run.id)
+      .filter((event) => event.event_type === 'worker:limit_rejected').length,
+    1,
+  );
+});
+
 test('detached remote Claude heartbeat never persists raw tool input', async (t) => {
   const db = await mkdb(t);
   const secret = 'tool-input-secret-must-not-enter-events';
