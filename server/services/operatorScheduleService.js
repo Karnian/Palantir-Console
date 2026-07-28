@@ -13,6 +13,8 @@ const MIN_INTERVAL_MINUTES = 15;
 const MAX_INTERVAL_MINUTES = 7 * 24 * 60;
 const DEFAULT_TIMEZONE = 'UTC';
 const MAX_PROMPT_LENGTH = 12000;
+const MIN_EXPIRY_AGE_MS = 24 * 60 * 60 * 1000;
+const CLAIM_LEASE_MS = 5 * 60 * 1000;
 
 function nonEmptyString(value, name, maxLength) {
   if (typeof value !== 'string' || value.trim() === '') {
@@ -201,6 +203,7 @@ function parseSchedule(row) {
     revision: Number(row.revision),
     max_runs_per_day: Number(row.max_runs_per_day),
     consecutive_failures: Number(row.consecutive_failures),
+    attempts: row.active_invocation_id ? Number(row.attempts) : null,
     rule,
   };
 }
@@ -213,11 +216,30 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     getPrimaryRef: db.prepare("SELECT project_id FROM operator_codebase_refs WHERE instance_id = ? AND role = 'primary' LIMIT 1"),
     getRef: db.prepare('SELECT role FROM operator_codebase_refs WHERE instance_id = ? AND project_id = ? LIMIT 1'),
     list: db.prepare(`
-      SELECT * FROM operator_schedules
-      WHERE operator_instance_id = ? AND archived_at IS NULL
-      ORDER BY created_at DESC, id DESC
+      SELECT os.*,
+             oi.id AS active_invocation_id,
+             oi.status AS active_invocation_status,
+             oi.waiting_reason,
+             oi.attempts
+        FROM operator_schedules os
+        LEFT JOIN operator_invocations oi
+          ON oi.schedule_id=os.id
+         AND oi.status IN ('pending','claimed','delivering','running')
+       WHERE os.operator_instance_id = ? AND os.archived_at IS NULL
+       ORDER BY os.created_at DESC, os.id DESC
     `),
-    get: db.prepare('SELECT * FROM operator_schedules WHERE id = ?'),
+    get: db.prepare(`
+      SELECT os.*,
+             oi.id AS active_invocation_id,
+             oi.status AS active_invocation_status,
+             oi.waiting_reason,
+             oi.attempts
+        FROM operator_schedules os
+        LEFT JOIN operator_invocations oi
+          ON oi.schedule_id=os.id
+         AND oi.status IN ('pending','claimed','delivering','running')
+       WHERE os.id=?
+    `),
     insert: db.prepare(`
       INSERT INTO operator_schedules (
         id, operator_instance_id, name, prompt, codebase_project_id,
@@ -292,9 +314,9 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
       ORDER BY next_fire_at ASC, id ASC
       LIMIT ?
     `),
-    activeInvocation: db.prepare(`
+    activeInvocationForOperator: db.prepare(`
       SELECT * FROM operator_invocations
-      WHERE schedule_id=? AND status IN ('pending','claimed','delivering','running')
+      WHERE operator_instance_id=? AND status IN ('pending','claimed','delivering','running')
       LIMIT 1
     `),
     updateNextFire: db.prepare(`
@@ -305,6 +327,8 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     countRecent: db.prepare(`
       SELECT COUNT(*) AS count FROM operator_invocations
       WHERE schedule_id=? AND scheduled_for >= ?
+        -- The daily cap counts accepted executions, not superseded, skipped,
+        -- or expired terminal records.
         AND status NOT IN ('cancelled')
     `),
     insertInvocation: db.prepare(`
@@ -318,6 +342,22 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
         @scheduled_for, 'pending', @run_after
       )
     `),
+    insertTerminalInvocation: db.prepare(`
+      INSERT INTO operator_invocations (
+        id, schedule_id, operator_instance_id, schedule_revision, source,
+        prompt_snapshot, codebase_project_id, rule_snapshot_json,
+        scheduled_for, status, run_after, waiting_reason, completed_at
+      ) VALUES (
+        @id, @schedule_id, @operator_instance_id, @schedule_revision, @source,
+        @prompt_snapshot, @codebase_project_id, @rule_snapshot_json,
+        @scheduled_for, 'cancelled', @run_after, @waiting_reason, datetime('now')
+      )
+    `),
+    invocationForOccurrence: db.prepare(`
+      SELECT * FROM operator_invocations
+       WHERE schedule_id=? AND scheduled_for=?
+       LIMIT 1
+    `),
     listInvocations: db.prepare(`
       SELECT * FROM operator_invocations
       WHERE schedule_id=?
@@ -325,6 +365,41 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
       LIMIT ?
     `),
     getInvocation: db.prepare('SELECT * FROM operator_invocations WHERE id=?'),
+    cancelSuperseded: db.prepare(`
+      UPDATE operator_invocations
+         SET status='cancelled', claim_token=NULL, locked_at=NULL,
+             waiting_reason='superseded', completed_at=datetime('now'), updated_at=datetime('now')
+       WHERE id=?
+         AND source='scheduled'
+         AND status IN ('pending','claimed')
+         AND scheduled_for < ?
+    `),
+    expiryCandidates: db.prepare(`
+      SELECT * FROM operator_invocations
+       WHERE attempts >= 1
+         AND (
+           status='pending'
+           OR (
+             status='claimed'
+             AND (locked_at IS NULL OR locked_at <= ?)
+           )
+         )
+       ORDER BY scheduled_for ASC, id ASC
+    `),
+    expireInvocation: db.prepare(`
+      UPDATE operator_invocations
+         SET status='cancelled', claim_token=NULL, locked_at=NULL,
+             waiting_reason='expired', completed_at=datetime('now'), updated_at=datetime('now')
+       WHERE id=?
+         AND attempts >= 1
+         AND (
+           status='pending'
+           OR (
+             status='claimed'
+             AND (locked_at IS NULL OR locked_at <= ?)
+           )
+         )
+    `),
     dueInvocation: db.prepare(`
       SELECT * FROM operator_invocations
       WHERE status='pending' AND run_after <= ?
@@ -590,6 +665,31 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     return stmts.getInvocation.get(invocation.id);
   }
 
+  function insertTerminalInvocationFromSchedule(schedule, {
+    source = 'scheduled',
+    scheduledFor,
+    runAfter,
+    waitingReason,
+  }) {
+    const existing = stmts.invocationForOccurrence.get(schedule.id, scheduledFor);
+    if (existing) return { invocation: existing, inserted: false };
+    const invocation = {
+      id: `oinv_${crypto.randomUUID()}`,
+      schedule_id: schedule.id,
+      operator_instance_id: schedule.operator_instance_id,
+      schedule_revision: schedule.revision,
+      source,
+      prompt_snapshot: schedule.prompt,
+      codebase_project_id: schedule.codebase_project_id,
+      rule_snapshot_json: schedule.rule_json,
+      scheduled_for: scheduledFor,
+      run_after: runAfter,
+      waiting_reason: waitingReason,
+    };
+    stmts.insertTerminalInvocation.run(invocation);
+    return { invocation: stmts.getInvocation.get(invocation.id), inserted: true };
+  }
+
   function runNow(id, now = new Date()) {
     const schedule = getSchedule(id);
     if (schedule.archived_at) throw new ConflictError('Archived schedules cannot run');
@@ -623,6 +723,43 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     return { scheduledFor, next: cursor };
   }
 
+  function recurrencePeriodMs(invocation) {
+    if (invocation.source === 'manual_run_now') return null;
+    let rule;
+    try { rule = JSON.parse(invocation.rule_snapshot_json); } catch { return null; }
+    if (!rule || rule.kind === 'once') return null;
+    if (rule.kind === 'interval') return Number(rule.minutes) * 60 * 1000;
+    if (rule.kind === 'daily') return 24 * 60 * 60 * 1000;
+    // Use the longest gap in the rule so expiry remains conservative across
+    // weekends. DST shifts are shorter than this whole-day safety margin.
+    if (rule.kind === 'weekdays') return 3 * 24 * 60 * 60 * 1000;
+    if (rule.kind === 'weekly') return 7 * 24 * 60 * 60 * 1000;
+    return null;
+  }
+
+  function expiryAgeMs(invocation) {
+    const period = recurrencePeriodMs(invocation);
+    return Math.max(MIN_EXPIRY_AGE_MS, period ? 2 * period : 0);
+  }
+
+  function sweepExpired(now = new Date()) {
+    const nowMs = now.getTime();
+    if (!Number.isFinite(nowMs)) throw new BadRequestError('now must be a valid timestamp');
+    const staleBefore = new Date(nowMs - CLAIM_LEASE_MS).toISOString();
+    const expired = db.transaction(() => {
+      const settled = [];
+      for (const row of stmts.expiryCandidates.all(staleBefore)) {
+        const scheduledMs = new Date(row.scheduled_for).getTime();
+        if (!Number.isFinite(scheduledMs) || nowMs - scheduledMs <= expiryAgeMs(row)) continue;
+        const info = stmts.expireInvocation.run(row.id, staleBefore);
+        if (info.changes === 1) settled.push(stmts.getInvocation.get(row.id));
+      }
+      return settled;
+    }).immediate();
+    for (const invocation of expired) emit('invocation_status', null, invocation);
+    return expired;
+  }
+
   function materializeDue(now = new Date(), limit = 100) {
     const nowIso = now.toISOString();
     const rows = stmts.dueSchedules.all(nowIso, Math.max(1, Math.min(Number(limit) || 100, 500)));
@@ -636,21 +773,65 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
           if (!scheduledFor) return null;
           const nextEnabled = fresh.rule.kind === 'once' ? 0 : 1;
           stmts.updateNextFire.run(next ? next.toISOString() : null, nextEnabled, fresh.id, fresh.revision);
-          if (stmts.activeInvocation.get(fresh.id)) return null; // coalesce while an earlier turn is active
+          const scheduledForIso = scheduledFor.toISOString();
+          const changed = [];
+          // The daily cap is decided BEFORE touching the active invocation.
+          // Superseding first and then returning on the cap commits the
+          // cancellation without a replacement: the older occurrence is
+          // destroyed, this one is never created, and the cursor has already
+          // advanced past both. Reproduced with a capped schedule sharing an
+          // Operator with a pending `once` — both occurrences vanished.
           const since = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
-          if (Number(stmts.countRecent.get(fresh.id, since)?.count || 0) >= fresh.max_runs_per_day) return null;
-          return insertInvocationFromSchedule(fresh, {
+          if (Number(stmts.countRecent.get(fresh.id, since)?.count || 0) >= fresh.max_runs_per_day) {
+            const capped = insertTerminalInvocationFromSchedule(fresh, {
+              scheduledFor: scheduledForIso,
+              runAfter: nowIso,
+              waitingReason: 'daily_cap_reached',
+            });
+            if (capped.inserted) changed.push(capped.invocation);
+            return { invocation: null, changed };
+          }
+          const active = stmts.activeInvocationForOperator.get(fresh.operator_instance_id);
+          if (active) {
+            const canSupersede = active.source === 'scheduled'
+              && (active.status === 'pending' || active.status === 'claimed')
+              && active.scheduled_for < scheduledForIso;
+            if (canSupersede) {
+              const info = stmts.cancelSuperseded.run(active.id, scheduledForIso);
+              if (info.changes !== 1) {
+                throw new ConflictError(`Active invocation changed before supersede: ${active.id}`);
+              }
+              changed.push(stmts.getInvocation.get(active.id));
+            } else {
+              const skipped = insertTerminalInvocationFromSchedule(fresh, {
+                scheduledFor: scheduledForIso,
+                runAfter: nowIso,
+                waitingReason: 'operator_active_skipped',
+              });
+              if (skipped.inserted) changed.push(skipped.invocation);
+              return { invocation: null, changed };
+            }
+          }
+          const invocation = insertInvocationFromSchedule(fresh, {
             source: 'scheduled',
-            scheduledFor: scheduledFor.toISOString(),
+            scheduledFor: scheduledForIso,
             runAfter: nowIso,
           });
-        })();
+          return { invocation, changed };
+        }).immediate();
         if (result) {
-          created.push(result);
-          emit('invocation_status', parseSchedule(stmts.get.get(result.schedule_id)), result);
+          for (const invocation of result.changed) emit('invocation_status', null, invocation);
+          if (result.invocation) {
+            created.push(result.invocation);
+            emit(
+              'invocation_status',
+              parseSchedule(stmts.get.get(result.invocation.schedule_id)),
+              result.invocation,
+            );
+          }
         }
       } catch (err) {
-        if (!(err instanceof ConflictError)) log(`materialize ${raw.id}: ${err.message}`);
+        log(`materialize ${raw.id}: ${err.message}`);
       }
     }
     return created;
@@ -665,11 +846,16 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
       const info = stmts.claimInvocation.run(token, nowIso, row.id, nowIso);
       if (info.changes !== 1) return null;
       return { ...stmts.getInvocation.get(row.id), claim_token: token };
-    })();
+    }).immediate();
   }
 
-  function releaseClaim(id, token, { waitingReason, error, delayMs = 30000 } = {}) {
-    const runAfter = new Date(Date.now() + Math.max(1000, Number(delayMs) || 30000)).toISOString();
+  function releaseClaim(id, token, {
+    waitingReason,
+    error,
+    delayMs = 30000,
+    now = new Date(),
+  } = {}) {
+    const runAfter = new Date(now.getTime() + Math.max(1000, Number(delayMs) || 30000)).toISOString();
     const info = stmts.releaseClaim.run(runAfter, waitingReason || null, error ? String(error).slice(0, 2000) : null, id, token);
     if (info.changes !== 1) return null;
     const invocation = stmts.getInvocation.get(id);
@@ -780,6 +966,7 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     notifySchedulesChanged,
     runNow,
     listInvocations,
+    sweepExpired,
     materializeDue,
     claimNext,
     releaseClaim,
@@ -798,6 +985,8 @@ module.exports = {
   ACTIVE_INVOCATION_STATUSES,
   TERMINAL_INVOCATION_STATUSES,
   MIN_INTERVAL_MINUTES,
+  MIN_EXPIRY_AGE_MS,
+  CLAIM_LEASE_MS,
   normalizeRule,
   normalizeTimezone,
   nextFireForRule,
