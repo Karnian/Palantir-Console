@@ -5,7 +5,16 @@ const { randomUUID } = require('node:crypto');
 const DEFAULT_PER_CONVERSATION_CAP = 50;
 const DEFAULT_TICK_MS = 1000;
 const DEFAULT_LEASE_MS = 30000;
-const DEFAULT_IMMEDIATE_DISPATCH_TIMEOUT_MS = 30000;
+// Operational SLO for one scheduled delivery, NOT a derived safe ceiling — no
+// such ceiling exists in code. A cold spawn runs several git commands in
+// sequence (rev-parse, ls-remote, fetch/clone, worktree prune/add) and EACH
+// gets DEFAULT_GIT_TIMEOUT_MS (5 min) on its own, so any finite value can in
+// principle cut off a legitimately slow spawn. 12 minutes is chosen as "long
+// enough that a real clone finishes, short enough that a hang is caught";
+// the previous 30s was shorter than a single git command in the same call
+// chain and fenced healthy first deliveries. Tune via
+// PALANTIR_MANAGER_DISPATCH_TIMEOUT_MS.
+const DEFAULT_IMMEDIATE_DISPATCH_TIMEOUT_MS = 12 * 60 * 1000;
 const MAX_PAYLOAD_BYTES = 12 * 1024 * 1024;
 const MAX_TERMINAL_RETRIES = 3;
 const ACTIVE_STATUSES = Object.freeze(['queued', 'sending', 'processing']);
@@ -231,20 +240,6 @@ function createManagerMessageQueueService({
         AND status IN ('sending', 'processing')
         AND claimed_by = ?
         AND lease_expires_at <= ?
-    `),
-    abortImmediateDelivery: db.prepare(`
-      UPDATE manager_message_queue
-      SET status = 'failed',
-          last_error = ?,
-          terminal_reason = 'delivery_timeout',
-          claim_token = NULL,
-          claimed_by = NULL,
-          lease_expires_at = NULL,
-          failed_at = datetime('now'),
-          updated_at = datetime('now')
-      WHERE adapter_invocation_id = ?
-        AND adapter_invocation_id <> id
-        AND status = 'sending'
     `),
     claimDispatchable: db.prepare(`
       SELECT 1
@@ -737,18 +732,6 @@ function createManagerMessageQueueService({
     return publicRow(row);
   }
 
-  function abortImmediateDelivery(adapterInvocationId, reason) {
-    if (typeof adapterInvocationId !== 'string' || !adapterInvocationId) return null;
-    const info = stmts.abortImmediateDelivery.run(
-      String(reason || 'scheduled manager delivery timed out').slice(0, 2000),
-      adapterInvocationId,
-    );
-    if (info.changes !== 1) return null;
-    const row = stmts.getByAdapterInvocation.get(adapterInvocationId);
-    emitRow(row);
-    return publicRow(row);
-  }
-
   function completeFromEvent(invocationId, runId, success, errorMessage = null) {
     const existing = stmts.getById.get(invocationId)
       || stmts.getByAdapterInvocation.get(invocationId);
@@ -940,7 +923,6 @@ function createManagerMessageQueueService({
     getMessage,
     listMessages,
     cancel,
-    abortImmediateDelivery,
     drainConversation,
     completeFromEvent,
     handleSlotCleared,

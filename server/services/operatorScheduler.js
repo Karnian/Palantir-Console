@@ -5,7 +5,16 @@ const { RUNNING_RECONCILE_MIN_AGE_MS } = require('./operatorScheduleService');
 
 const DEFAULT_INTERVAL_MS = 20000;
 const DEFAULT_MAX_JOBS = 20;
-const DEFAULT_DELIVERY_TIMEOUT_MS = 30000;
+// A delivery can cold-spawn an Operator (materialize → clone → CLI spawn), so
+// deliveries run in parallel lanes rather than one after another: a slow or
+// hung one must not hold up every other Operator's turn (issue #458 allows
+// "per-job timeout OR isolation" — this is the isolation half).
+//
+// Kept deliberately small. Operator materialization does NOT pass through the
+// worker materialization gate (that counter is `is_manager = 0`), so this is
+// the only bound on concurrent clones/CLI spawns from the scheduler. 2 matches
+// the per-node worker default.
+const DEFAULT_MAX_CONCURRENT_DELIVERIES = 2;
 const DEFAULT_RUNNING_STALE_MS = RUNNING_RECONCILE_MIN_AGE_MS;
 const RETRY_BASE_MS = 60 * 1000;
 const RETRY_CAP_MS = 15 * 60 * 1000;
@@ -30,7 +39,7 @@ function createOperatorScheduler({
   logger,
   intervalMs = DEFAULT_INTERVAL_MS,
   maxJobs = DEFAULT_MAX_JOBS,
-  deliveryTimeoutMs = DEFAULT_DELIVERY_TIMEOUT_MS,
+  maxConcurrentDeliveries = DEFAULT_MAX_CONCURRENT_DELIVERIES,
   runningStaleMs = DEFAULT_RUNNING_STALE_MS,
   clock = () => new Date(),
   random = Math.random,
@@ -41,33 +50,15 @@ function createOperatorScheduler({
   let inflight = null;
   let unsubscribe = null;
   let stopped = false;
-  const configuredDeliveryTimeoutMs = Number(deliveryTimeoutMs);
-  const deliveryDeadlineMs = Number.isFinite(configuredDeliveryTimeoutMs)
-    && configuredDeliveryTimeoutMs > 0
-    ? configuredDeliveryTimeoutMs
-    : DEFAULT_DELIVERY_TIMEOUT_MS;
   const configuredRunningStaleMs = Number(runningStaleMs);
   const runningReconcileAgeMs = Number.isFinite(configuredRunningStaleMs)
     && configuredRunningStaleMs >= 0
     ? configuredRunningStaleMs
     : DEFAULT_RUNNING_STALE_MS;
-
-  const DELIVERY_TIMED_OUT = Symbol('delivery_timed_out');
-
-  async function awaitDelivery(value) {
-    if (!value || typeof value.then !== 'function') return value;
-    let timeout;
-    try {
-      return await Promise.race([
-        Promise.resolve(value),
-        new Promise((resolve) => {
-          timeout = setTimeout(() => resolve(DELIVERY_TIMED_OUT), deliveryDeadlineMs);
-        }),
-      ]);
-    } finally {
-      if (timeout) clearTimeout(timeout);
-    }
-  }
+  const configuredConcurrency = Number(maxConcurrentDeliveries);
+  const deliveryConcurrency = Number.isInteger(configuredConcurrency) && configuredConcurrency > 0
+    ? configuredConcurrency
+    : DEFAULT_MAX_CONCURRENT_DELIVERIES;
 
   function wait(invocation, reason, error) {
     // Top/node/operator recovery intentionally has no immediate wake-up in
@@ -145,7 +136,7 @@ function createOperatorScheduler({
           invocationId: invocation.id,
         },
       );
-      sent = await awaitDelivery(sent);
+      sent = await sent;
     } catch (err) {
       const status = Number(err?.httpStatus || err?.status || 0);
       if (err?.retryable === true || err?.code === 'OPERATOR_BUSY') {
@@ -177,23 +168,6 @@ function createOperatorScheduler({
       return null;
     }
 
-    if (sent === DELIVERY_TIMED_OUT) {
-      const timeoutMessage = `delivery timed out after ${deliveryDeadlineMs}ms; adapter acceptance is unknown`;
-      try {
-        if (typeof conversationService.cancelScheduledDelivery === 'function') {
-          conversationService.cancelScheduledDelivery(invocation.id, timeoutMessage);
-        }
-      } catch (err) {
-        log(`delivery fence ${invocation.id}: ${err.message}`);
-      }
-      operatorScheduleService.markClaimUncertain(
-        invocation.id,
-        invocation.claim_token,
-        timeoutMessage,
-      );
-      return null;
-    }
-
     const managerRunId = sent?.target?.runId;
     if (!managerRunId) {
       operatorScheduleService.markClaimUncertain(
@@ -215,18 +189,38 @@ function createOperatorScheduler({
     return running;
   }
 
+  async function deliverGuarded(invocation) {
+    try {
+      return await deliver(invocation);
+    } catch (err) {
+      log(`delivery ${invocation.id}: ${err.message}`);
+      try { operatorScheduleService.failClaim(invocation.id, invocation.claim_token, err.message); } catch { /* lost claim */ }
+      return null;
+    }
+  }
+
+  // Lanes, not a queue: `claimNext` keeps handing out work until it runs dry or
+  // `maxJobs` is reached, and each lane takes the next one as it frees up. A
+  // delivery that cold-spawns for a minute therefore delays only its own lane.
+  //
+  // Claims stay serialized (claimNext is a synchronous CAS) and OS-4 guarantees
+  // at most one active invocation per Operator, so concurrent lanes always hold
+  // DIFFERENT Operators — no shared conversation, adapter slot, or queue lane.
   async function drainAll() {
     const results = [];
-    for (let i = 0; i < maxJobs; i += 1) {
-      const invocation = operatorScheduleService.claimNext(clock());
-      if (!invocation) break;
-      try {
-        results.push(await deliver(invocation));
-      } catch (err) {
-        log(`delivery ${invocation.id}: ${err.message}`);
-        try { operatorScheduleService.failClaim(invocation.id, invocation.claim_token, err.message); } catch { /* lost claim */ }
+    let claimed = 0;
+    const lane = async () => {
+      for (;;) {
+        if (claimed >= maxJobs) return;
+        const invocation = operatorScheduleService.claimNext(clock());
+        if (!invocation) return;
+        claimed += 1;
+        results.push(await deliverGuarded(invocation));
       }
-    }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(deliveryConcurrency, maxJobs) }, () => lane()),
+    );
     return results;
   }
 
@@ -300,7 +294,7 @@ function createOperatorScheduler({
 
 module.exports = {
   DEFAULT_INTERVAL_MS,
-  DEFAULT_DELIVERY_TIMEOUT_MS,
+  DEFAULT_MAX_CONCURRENT_DELIVERIES,
   DEFAULT_RUNNING_STALE_MS,
   RETRY_BASE_MS,
   RETRY_CAP_MS,

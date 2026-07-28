@@ -1301,14 +1301,6 @@ function createConversationService({
     );
   }
 
-  function cancelScheduledDelivery(invocationId, reason) {
-    if (!managerMessageQueueService
-        || typeof managerMessageQueueService.abortImmediateDelivery !== 'function') {
-      return null;
-    }
-    return managerMessageQueueService.abortImmediateDelivery(invocationId, reason);
-  }
-
   // The durable driver deliberately dispatches through the exact existing
   // manager path. Memory/codebase injection, binding checks, parent-notice
   // peek→commit-drain, and adapter acceptance therefore stay single-sourced.
@@ -1338,7 +1330,6 @@ function createConversationService({
     getEvents,
     listManagerMessages,
     cancelManagerMessage,
-    cancelScheduledDelivery,
   };
 }
 

@@ -781,35 +781,100 @@ test('scheduler marks ambiguous delivery failures uncertain and never replays th
   assert.equal(sends, 1);
 });
 
-test('a hung delivery times out uncertain and does not block another Operator or replay', async (t) => {
+// The delivery deadline has ONE owner: the durable queue. The scheduler used to
+// arm a second timer over the same await, but because the queue arms its timer
+// synchronously inside drainConversation — before sendMessage even returns —
+// the queue always won and the scheduler's branch was unreachable. This wires
+// BOTH layers so the real interaction is what gets asserted.
+test('a hung delivery times out uncertain through the real queue and never reaches the adapter', async (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h, { name: 'Hung folder' });
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Hung', prompt: 'Hang', rule: { kind: 'interval', minutes: 60 },
+  });
+  h.scheduleService.runNow(schedule.id, new Date('2026-07-23T00:00:00.000Z'));
+  const top = h.runService.createRun({
+    is_manager: true, manager_layer: 'top', conversation_id: 'top', prompt: 'top',
+  });
+
+  const queue = createManagerMessageQueueService({
+    db: h.db, eventBus: h.eventBus, tickMs: 100000, immediateDispatchTimeoutMs: 25,
+  });
+  t.after(() => queue.stop());
+  let releaseColdSpawn;
+  const adapterCalls = [];
+  queue.setDispatcher(async (_conversationId, _payload, invocationId, control) => {
+    // Stands in for a cold spawn that outruns the deadline.
+    await new Promise((resolve) => { releaseColdSpawn = resolve; });
+    if (!control.canDispatch()) {
+      const err = new Error('delivery fenced before adapter');
+      err.code = 'OPERATOR_DELIVERY_CANCELLED';
+      throw err;
+    }
+    adapterCalls.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: top.id } };
+  });
+
+  const scheduler = createOperatorScheduler({
+    operatorScheduleService: h.scheduleService,
+    conversationService: {
+      sendMessage(conversationId, { text, invocationId }) {
+        return queue.enqueue(conversationId, { text }, {
+          idempotencyKey: `invocation:${invocationId}`,
+          adapterInvocationId: invocationId,
+          requireImmediate: true,
+        });
+      },
+    },
+    managerRegistry: { getActiveRunId() { return top.id; } },
+    projectService: h.projectService,
+    runService: h.runService,
+    clock: () => new Date('2026-07-23T00:00:02.000Z'),
+  });
+
+  await scheduler.tick();
+
+  const hung = h.scheduleService.listInvocations(schedule.id)[0];
+  assert.equal(hung.status, 'uncertain');
+  assert.match(hung.last_error, /timed out after 25ms/);
+  assert.equal(
+    h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+    'pending',
+    'the timeout must release the Operator single-flight slot',
+  );
+
+  // The abandoned cold spawn finishes late: the durable claim fence must keep
+  // it out of the adapter, or the turn runs twice.
+  releaseColdSpawn();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(adapterCalls, [], 'a timed-out delivery must never reach the adapter');
+});
+
+// Isolation half of #458: one hung delivery must not hold up other Operators.
+test('a hung delivery does not stop another Operator from being delivered in the same tick', async (t) => {
   const h = harness(t);
   const first = createMappedOperator(h, { name: 'Hung folder' });
   const second = createMappedOperator(h, { name: 'Healthy folder' });
-  const firstSchedule = h.scheduleService.createSchedule(first.instance.id, {
+  const hungSchedule = h.scheduleService.createSchedule(first.instance.id, {
     name: 'Hung', prompt: 'Hang', rule: { kind: 'interval', minutes: 60 },
   });
-  const secondSchedule = h.scheduleService.createSchedule(second.instance.id, {
+  const healthySchedule = h.scheduleService.createSchedule(second.instance.id, {
     name: 'Healthy', prompt: 'Proceed', rule: { kind: 'interval', minutes: 60 },
   });
-  h.scheduleService.runNow(firstSchedule.id, new Date('2026-07-23T00:00:00.000Z'));
-  h.scheduleService.runNow(secondSchedule.id, new Date('2026-07-23T00:00:01.000Z'));
+  h.scheduleService.runNow(hungSchedule.id, new Date('2026-07-23T00:00:00.000Z'));
+  h.scheduleService.runNow(healthySchedule.id, new Date('2026-07-23T00:00:01.000Z'));
   const top = h.runService.createRun({
-    is_manager: true,
-    manager_layer: 'top',
-    conversation_id: 'top',
-    prompt: 'top',
+    is_manager: true, manager_layer: 'top', conversation_id: 'top', prompt: 'top',
   });
   const healthyRun = h.runService.createRun({
-    is_manager: true,
-    manager_layer: 'operator',
+    is_manager: true, manager_layer: 'operator',
     conversation_id: `operator:${second.instance.id}`,
-    operator_instance_id: second.instance.id,
-    parent_run_id: top.id,
+    operator_instance_id: second.instance.id, parent_run_id: top.id,
     prompt: 'healthy operator',
   });
+
   let resolveHung;
   const sends = [];
-  const cancelledDeliveries = [];
   const scheduler = createOperatorScheduler({
     operatorScheduleService: h.scheduleService,
     conversationService: {
@@ -820,57 +885,30 @@ test('a hung delivery times out uncertain and does not block another Operator or
         }
         return { status: 'sent', target: { kind: 'pm', runId: healthyRun.id } };
       },
-      cancelScheduledDelivery(invocationId, reason) {
-        cancelledDeliveries.push({ invocationId, reason });
-      },
     },
     managerRegistry: { getActiveRunId() { return top.id; } },
     projectService: h.projectService,
     runService: h.runService,
-    deliveryTimeoutMs: 20,
     clock: () => new Date('2026-07-23T00:00:02.000Z'),
   });
 
-  let guardTimer;
-  try {
-    await Promise.race([
-      scheduler.tick(),
-      new Promise((_, reject) => {
-        guardTimer = setTimeout(
-          () => reject(new Error('scheduler remained stuck behind hung delivery')),
-          500,
-        );
-      }),
-    ]);
-  } finally {
-    clearTimeout(guardTimer);
-  }
+  const tick = scheduler.tick();
+  // The healthy Operator is delivered on its own lane while the first is stuck.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    h.scheduleService.listInvocations(healthySchedule.id)[0].status,
+    'running',
+    'a hung lane must not hold up another Operator',
+  );
   assert.deepEqual(sends, [
     `operator:${first.instance.id}`,
     `operator:${second.instance.id}`,
   ]);
-  const hung = h.scheduleService.listInvocations(firstSchedule.id)[0];
-  const healthy = h.scheduleService.listInvocations(secondSchedule.id)[0];
-  assert.equal(hung.status, 'uncertain');
-  assert.equal(hung.waiting_reason, 'delivery_uncertain');
-  assert.match(hung.last_error, /timed out after 20ms/);
-  assert.equal(healthy.status, 'running');
-  assert.deepEqual(cancelledDeliveries, [{
-    invocationId: hung.id,
-    reason: 'delivery timed out after 20ms; adapter acceptance is unknown',
-  }]);
 
   resolveHung({ status: 'sent', target: { kind: 'pm', runId: healthyRun.id } });
-  await Promise.resolve();
-  await scheduler.tick();
-  assert.equal(h.scheduleService.listInvocations(firstSchedule.id)[0].status, 'uncertain');
-  assert.equal(sends.length, 2);
-  const replacement = h.scheduleService.runNow(
-    firstSchedule.id,
-    new Date('2026-07-23T00:00:03.000Z'),
-  );
-  assert.equal(replacement.status, 'pending', 'timeout must release the Operator single-flight slot');
+  await tick;
 });
+
 
 test('scheduler fails a structured permanent rejection even when its message says deliver message', async (t) => {
   const h = harness(t);

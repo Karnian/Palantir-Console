@@ -292,7 +292,11 @@ test('expiry sweep runs before materialization in every scheduler tick', async (
     clock: () => new Date('2026-07-02T01:00:00.000Z'),
   });
   await scheduler.tick();
-  assert.deepEqual(calls, ['events', 'terminal', 'sweep', 'materialize', 'claim']);
+  // Recovery/materialization order is the contract; the trailing claims are one
+  // per delivery lane (each lane polls claimNext until it comes back empty).
+  assert.deepEqual(calls.slice(0, 4), ['events', 'terminal', 'sweep', 'materialize']);
+  assert.ok(calls.length > 4, 'the tick must go on to claim work');
+  assert.deepEqual([...new Set(calls.slice(4))], ['claim']);
 });
 
 test('scheduler forwards the configured running staleness threshold during restart recovery', async () => {
