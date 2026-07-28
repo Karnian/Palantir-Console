@@ -68,6 +68,16 @@ show every subsequent transition. A terminal failure includes `last_error`.
 - **Graceful server restart:** queued rows remain queued. A prior
   sending/processing claim remains durable, its lease expires, and the new
   owner first looks for a correlated terminal event before replaying it.
+- **Lost live completion callback (no restart):** the same correlated-terminal-event
+  lookup also runs each tick against the CURRENT owner's own sending/processing
+  rows. The live `run:event` callback is therefore not the only path that can
+  settle a row — if it is dropped or throws, the persisted event still closes the
+  lane. Without this, the row stays `processing` under an owner that keeps renewing
+  its lease (so stale recovery, which excludes the current owner, never sees it),
+  and every later scheduled turn fails `OPERATOR_BUSY` until the Operator is
+  replaced. Settlement still requires a persisted event matching that row's exact
+  `(run_id, invocation id)` with `terminal = 1`, so a turn that is genuinely still
+  running is never cut short — there is deliberately no age or lease heuristic here.
 - **Explicit Manager stop/reset or adapter replacement:** queued rows are
   preserved for the next session with the same conversation identity. An
   already sending/processing row is marked failed with

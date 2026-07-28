@@ -261,6 +261,13 @@ function createManagerMessageQueueService({
       SET lease_expires_at = ?, updated_at = datetime('now')
       WHERE claimed_by = ? AND status IN ('sending', 'processing')
     `),
+    ownActiveClaims: db.prepare(`
+      SELECT *
+      FROM manager_message_queue
+      WHERE claimed_by = ?
+        AND status IN ('sending', 'processing')
+      ORDER BY sequence
+    `),
     // `data.terminal` is REQUIRED, exactly as the live paths require it
     // (parseTerminalEvent below, and operatorScheduler.onEvent). codexAdapter
     // persists non-terminal failures under the same event_type + invocationId
@@ -801,31 +808,42 @@ function createManagerMessageQueueService({
     }
   }
 
+  function completeFromPersistedTerminalEvent(row) {
+    if (!row?.run_id) return null;
+    let terminal;
+    try {
+      terminal = stmts.terminalEvent.get(row.run_id, row.adapter_invocation_id);
+    } catch {
+      return null;
+    }
+    if (!terminal) return null;
+    let payload;
+    try { payload = JSON.parse(terminal.payload_json || '{}'); } catch { payload = {}; }
+    return completeFromEvent(
+      row.adapter_invocation_id,
+      row.run_id,
+      terminal.event_type === 'mgr.turn_completed',
+      terminal.event_type === 'mgr.turn_failed'
+        ? (payload?.summaryText || 'manager turn failed')
+        : null,
+    );
+  }
+
+  function reconcilePersistedTerminalEvents() {
+    let reconciled = 0;
+    for (const row of stmts.ownActiveClaims.all(ownerId)) {
+      // A lease proves only that this process is alive; it cannot prove that
+      // the lossy live callback reflected the durable run outcome.
+      if (completeFromPersistedTerminalEvent(row)) reconciled += 1;
+    }
+    return reconciled;
+  }
+
   function reconcileStaleClaims() {
     const now = Date.now();
     const stale = stmts.staleClaims.all(ownerId, now);
     for (const row of stale) {
-      let terminal = null;
-      if (row.run_id) {
-        try {
-          terminal = stmts.terminalEvent.get(row.run_id, row.adapter_invocation_id);
-        } catch {
-          terminal = null;
-        }
-      }
-      if (terminal) {
-        let payload;
-        try { payload = JSON.parse(terminal.payload_json || '{}'); } catch { payload = {}; }
-        completeFromEvent(
-          row.adapter_invocation_id,
-          row.run_id,
-          terminal.event_type === 'mgr.turn_completed',
-          terminal.event_type === 'mgr.turn_failed'
-            ? (payload?.summaryText || 'manager turn failed')
-            : null,
-        );
-        continue;
-      }
+      if (completeFromPersistedTerminalEvent(row)) continue;
       // Ordinary chat is at-least-once and may be retried after a crashed
       // owner. Scheduler rows are different: operator_invocations already owns
       // their durable state, and replaying a turn that may have crossed the
@@ -892,6 +910,7 @@ function createManagerMessageQueueService({
   async function tick() {
     if (stopped) return [];
     stmts.renewOwnLeases.run(Date.now() + leaseMs, ownerId);
+    reconcilePersistedTerminalEvents();
     reconcileStaleClaims();
     const conversations = stmts.runnableConversations.all(Date.now());
     return Promise.all(conversations.map(row => drainConversation(row.conversation_id)));
@@ -935,6 +954,7 @@ function createManagerMessageQueueService({
     handleSlotCleared,
     terminalizeQueuedForConversation,
     notifyTerminalized,
+    reconcilePersistedTerminalEvents,
     reconcileStaleClaims,
     tick,
     start,

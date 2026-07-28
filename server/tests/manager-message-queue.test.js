@@ -23,19 +23,28 @@ function createHarness(t, options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-manager-queue-'));
   const handle = createDatabase(path.join(dir, 'test.db'));
   handle.migrate();
-  const eventBus = createEventBus();
+  const {
+    eventBus: providedEventBus,
+    withRunService = false,
+    ...queueOptions
+  } = options;
+  const eventBus = providedEventBus || createEventBus();
+  const runService = withRunService ? createRunService(handle.db, eventBus) : null;
   const service = createManagerMessageQueueService({
     db: handle.db,
     eventBus,
+    ...(runService ? { runService } : {}),
     tickMs: 100000,
-    ...options,
+    ...queueOptions,
   });
   t.after(() => {
     service.stop();
     try { handle.close(); } catch { /* already closed */ }
     fs.rmSync(dir, { recursive: true, force: true });
   });
-  return { dir, handle, db: handle.db, eventBus, service };
+  return {
+    dir, handle, db: handle.db, eventBus, runService, service,
+  };
 }
 
 test('durable queue preserves per-conversation FIFO and single-flight under concurrent sends', async (t) => {
@@ -168,6 +177,177 @@ test('a terminal event racing dispatcher return still persists the dispatch-deri
     memoryOwnerType: 'workspace',
     memoryOwnerId: 'proj_fast',
   });
+});
+
+test('a persisted terminal event closes the current owner lane after its live callback is lost', async (t) => {
+  const baseEventBus = createEventBus();
+  let droppedCallbacks = 0;
+  const eventBus = {
+    ...baseEventBus,
+    subscribe(callback) {
+      return baseEventBus.subscribe((event) => {
+        if (
+          droppedCallbacks === 0
+          && event?.channel === 'run:event'
+          && event.data?.eventType === 'mgr.turn_completed'
+        ) {
+          droppedCallbacks += 1;
+          throw new Error('simulated lost queue completion callback');
+        }
+        callback(event);
+      });
+    },
+  };
+  const h = createHarness(t, { eventBus, withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_lost_completion',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+  h.service.start();
+
+  const first = await h.service.enqueue(
+    'operator:oi_lost_completion',
+    { text: 'first scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_lost_completion',
+      adapterInvocationId: 'oinv_lost_completion',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  h.runService.addRunEvent(run.id, 'mgr.turn_completed', JSON.stringify({
+    summaryText: 'turn completed',
+    data: { terminal: true, invocationId: 'oinv_lost_completion' },
+  }));
+  assert.equal(droppedCallbacks, 1, 'the live completion callback must actually be lost');
+  assert.equal(
+    h.service.getMessage(first.message.id).status,
+    'processing',
+    'the live path must not have completed the row',
+  );
+
+  await h.service.tick();
+  assert.equal(h.service.getMessage(first.message.id).status, 'delivered');
+
+  const next = await h.service.enqueue(
+    'operator:oi_lost_completion',
+    { text: 'next scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_after_lost_completion',
+      adapterInvocationId: 'oinv_after_lost_completion',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.equal(next.message.status, 'processing');
+  assert.deepEqual(dispatched, [
+    'oinv_lost_completion',
+    'oinv_after_lost_completion',
+  ]);
+});
+
+test('the current owner reconciler ignores non-terminal failures and preserves chat replay', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'top',
+    conversation_id: 'top',
+    prompt: 'top',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  h.service.setDispatcher(() => ({
+    status: 'sent',
+    target: { kind: 'top', runId: run.id },
+  }));
+  h.service.start();
+
+  const original = await h.service.enqueue(
+    'top',
+    { text: 'replay after restart' },
+    { idempotencyKey: 'own-non-terminal-key' },
+  );
+  h.runService.addRunEvent(run.id, 'mgr.turn_failed', JSON.stringify({
+    summaryText: 'transient codex error',
+    data: {
+      kind: 'codex_error',
+      message: 'boom',
+      terminal: false,
+      invocationId: original.message.id,
+    },
+  }));
+
+  await h.service.tick();
+  assert.equal(h.service.getMessage(original.message.id).status, 'processing');
+  assert.equal(h.service.getMessage(original.message.id).terminal_reason, null);
+
+  h.service.stop();
+  h.db.prepare('UPDATE manager_message_queue SET lease_expires_at = 0 WHERE id = ?')
+    .run(original.message.id);
+  const restarted = createManagerMessageQueueService({
+    db: h.db,
+    eventBus: h.eventBus,
+    tickMs: 100000,
+  });
+  t.after(() => restarted.stop());
+  const replayed = [];
+  restarted.setDispatcher((_conversationId, payload) => {
+    replayed.push(payload.text);
+    return { status: 'sent', target: { kind: 'top', runId: run.id } };
+  });
+
+  assert.equal(restarted.reconcileStaleClaims(), 1);
+  await restarted.drainConversation('top');
+  assert.equal(restarted.getMessage(original.message.id).status, 'processing');
+  assert.deepEqual(replayed, ['replay after restart']);
+});
+
+test('the current owner reconciler never terminalizes an old but live turn', async (t) => {
+  const h = createHarness(t, { withRunService: true, leaseMs: 1000 });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_long_turn',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  h.service.setDispatcher(() => ({
+    status: 'sent',
+    target: { kind: 'pm', runId: run.id },
+  }));
+  h.service.start();
+
+  const active = await h.service.enqueue(
+    'operator:oi_long_turn',
+    { text: 'still working' },
+    { idempotencyKey: 'long-live-turn' },
+  );
+  h.db.prepare(`
+    UPDATE manager_message_queue
+       SET created_at = '2000-01-01 00:00:00',
+           updated_at = '2000-01-01 00:00:00',
+           lease_expires_at = 0
+     WHERE id = ?
+  `).run(active.message.id);
+
+  await h.service.tick();
+  const afterTick = h.db.prepare(
+    'SELECT status, claimed_by, lease_expires_at FROM manager_message_queue WHERE id = ?',
+  ).get(active.message.id);
+  assert.equal(afterTick.status, 'processing');
+  assert.equal(afterTick.claimed_by, h.service._ownerId);
+  assert.ok(
+    Number(afterTick.lease_expires_at) > Date.now(),
+    'a live turn keeps its lease regardless of absolute age',
+  );
 });
 
 test('queue cap applies backpressure and queued-only cancellation is CAS-safe', async (t) => {
