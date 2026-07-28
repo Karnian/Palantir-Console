@@ -748,3 +748,42 @@ test('boot resume skips a run whose durable owner is archived, even via a legacy
     'attribution still resolves to the archived instance',
   );
 });
+
+// Re-review BLOCKER: the first legacy-alias cleanup terminalized every ref of
+// the archived instance. But `operator:<projectId>` resolves to that project's
+// PRIMARY instance, and it is legal for A to REFERENCE a project that B owns as
+// primary — so archiving A deleted B's live messages. Reproduced before the fix.
+test('archive leaves a peer queue alone when it only references that project', async (t) => {
+  const { app, db } = await createTestApp(t);
+  const { project: shared, instance: owner } = createMappedInstance(app, 'Primary owner');
+  const referencing = app.services.operatorInstanceService.createInstance({
+    profile_id: createProfile(app, 'Referencing profile').id,
+    display_name: 'Referencing peer',
+  });
+  app.services.operatorInstanceService.addRef(referencing.id, { project_id: shared.id, role: 'reference' });
+
+  const enqueue = (id, convId, status) => {
+    db.prepare(`
+      INSERT INTO manager_message_queue (
+        id, conversation_id, idempotency_key, adapter_invocation_id,
+        payload_json, display_text, status, available_at
+      ) VALUES (?, ?, ?, ?, '{"text":"hi"}', 'hi', ?, 0)
+    `).run(id, convId, `idem-${id}`, `inv-${id}`, status);
+  };
+  // The shared project's legacy alias belongs to the PRIMARY owner, not to the
+  // instance being archived.
+  enqueue('mq_owner_legacy', `operator:${shared.id}`, 'queued');
+  // The archived instance's own canonical queue, in every active status.
+  enqueue('mq_self_queued', `operator:${referencing.id}`, 'queued');
+  enqueue('mq_self_sending', `operator:${referencing.id}`, 'sending');
+  enqueue('mq_self_processing', `operator:${referencing.id}`, 'processing');
+
+  assert.equal((await archive(app, referencing.id)).status, 200);
+
+  const status = (id) => db.prepare('SELECT status FROM manager_message_queue WHERE id=?').get(id).status;
+  assert.equal(status('mq_owner_legacy'), 'queued', "a peer's primary alias queue must be untouched");
+  for (const id of ['mq_self_queued', 'mq_self_sending', 'mq_self_processing']) {
+    assert.equal(status(id), 'cancelled', `${id} must be terminal — every ACTIVE status, not just queued`);
+  }
+  assert.ok(app.services.operatorInstanceService.getInstance(owner.id).archived_at === null);
+});

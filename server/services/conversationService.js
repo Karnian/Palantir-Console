@@ -1216,7 +1216,13 @@ function createConversationService({
     let activePmRunId = null;
     try {
       activePmRunId = managerRegistry.getActiveRunId(normalizedSlot);
-    } catch {
+    } catch (err) {
+      // An archived parent is expected here and is simply inactive. Anything
+      // else (DB failure, a registry programming error) must not vanish without
+      // a trace just because the notice is a side effect.
+      if (!/archiv/i.test(err?.message || '')) {
+        console.warn(`[conversation] parent notice slot lookup failed for ${normalizedSlot}: ${err?.message}`);
+      }
       return null;
     }
     if (activePmRunId && activePmRunId === parentRunId) return normalizedSlot;

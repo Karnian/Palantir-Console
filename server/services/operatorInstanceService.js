@@ -614,9 +614,15 @@ function createOperatorInstanceService(db, {
       // `operator:<projectId>` alias this instance answered for. A legacy row
       // left behind would be drained after the refs are gone, which ensures a
       // REPLACEMENT instance and delivers the archived Operator's backlog to it.
+      // PRIMARY refs only. A legacy `operator:<projectId>` conversation resolves
+      // to that project's PRIMARY instance, so a project this instance merely
+      // REFERENCES belongs to whichever instance is primary there — cancelling
+      // its queue would delete a live peer's messages.
       const queueConversationIds = [
         conversationIdForProject(current.id),
-        ...refs.map((ref) => conversationIdForProject(ref.project_id)),
+        ...refs
+          .filter((ref) => ref.role === 'primary')
+          .map((ref) => conversationIdForProject(ref.project_id)),
       ].filter((value, index, all) => value && all.indexOf(value) === index);
       const terminalizedQueueMessages = typeof terminalizeQueued === 'function'
         ? queueConversationIds.flatMap(
