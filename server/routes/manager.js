@@ -265,8 +265,27 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       // resolver and parser return null for it, which is fine.) Without the
       // resolver-first order, post-W-P5 canonical operators never enter the
       // resume branch below (projectId=null) and get marked stopped on boot.
+      // Check the DURABLE attribution first. `r.conversation_id` may be a legacy
+      // 'operator:<projectId>' alias, which resolves to whatever instance is
+      // primary NOW — after an archive that is the REPLACEMENT instance, so the
+      // check below would pass and this old run would be resumed onto a new
+      // thread/profile and registered in the new slot. `r.operator_instance_id`
+      // is the instance that actually owned this run.
+      let archivedOwner = false;
+      if (
+        r.operator_instance_id
+        && operatorInstanceService
+        && typeof operatorInstanceService.getInstance === 'function'
+      ) {
+        let owner = null;
+        try { owner = operatorInstanceService.getInstance(r.operator_instance_id); } catch { owner = null; }
+        if (owner?.archived_at) {
+          console.warn(`[boot] Skipping run of archived Operator run=${r.id} instance=${r.operator_instance_id}`);
+          archivedOwner = true;
+        }
+      }
       let bootResolved = null;
-      if (runService && typeof runService.resolveOperatorConversationId === 'function') {
+      if (!archivedOwner && runService && typeof runService.resolveOperatorConversationId === 'function') {
         try { bootResolved = runService.resolveOperatorConversationId(r.conversation_id); }
         catch { bootResolved = null; }
       }
@@ -285,7 +304,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       let projectId = bootResolved
         ? (bootResolved.primaryProjectId || bootResolved.legacyProjectId || null)
         : null;
-      if (!projectId) {
+      if (!projectId && !archivedOwner) {
         const parsedConv = parseProjectConversationId(r.conversation_id);
         projectId = parsedConv ? parsedConv.projectId : null;
       }

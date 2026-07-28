@@ -241,6 +241,24 @@ function createOperatorInstanceService(db, {
        WHERE operator_instance_id = ?
          AND status IN ('pending', 'claimed')
     `),
+    // #453 leaves delivering/running alone because the adapter may still be
+    // working. That premise does not hold here: archive runs AFTER a successful
+    // dispose, so no completion event is coming. Leaving them active would hold
+    // the per-Operator unique-index slot forever. They crossed the adapter
+    // boundary, so they settle as `uncertain` — the same classification
+    // migration 068 uses for exactly this case — not as `cancelled`.
+    uncertainInflightInvocations: db.prepare(`
+      UPDATE operator_invocations
+         SET status = 'uncertain',
+             claim_token = NULL,
+             locked_at = NULL,
+             waiting_reason = 'operator_archived',
+             last_error = COALESCE(last_error, 'Operator instance archived while a turn was in flight'),
+             completed_at = ?,
+             updated_at = ?
+       WHERE operator_instance_id = ?
+         AND status IN ('delivering', 'running')
+    `),
   };
 
   function normalizeRef(row) {
@@ -569,6 +587,7 @@ function createOperatorInstanceService(db, {
           affected_codebases: [],
           archived_schedule_ids: [],
           cancelled_invocation_count: 0,
+          uncertain_invocation_count: 0,
           terminalized_queue_messages: [],
         };
       }
@@ -586,8 +605,23 @@ function createOperatorInstanceService(db, {
         archivedAt,
         current.id,
       );
+      const uncertainInvocations = stmts.uncertainInflightInvocations.run(
+        archivedAt,
+        archivedAt,
+        current.id,
+      );
+      // Both the canonical `operator:<instanceId>` conversation AND every legacy
+      // `operator:<projectId>` alias this instance answered for. A legacy row
+      // left behind would be drained after the refs are gone, which ensures a
+      // REPLACEMENT instance and delivers the archived Operator's backlog to it.
+      const queueConversationIds = [
+        conversationIdForProject(current.id),
+        ...refs.map((ref) => conversationIdForProject(ref.project_id)),
+      ].filter((value, index, all) => value && all.indexOf(value) === index);
       const terminalizedQueueMessages = typeof terminalizeQueued === 'function'
-        ? terminalizeQueued(conversationIdForProject(current.id), { now: archivedAt })
+        ? queueConversationIds.flatMap(
+            (conversationId) => terminalizeQueued(conversationId, { now: archivedAt }),
+          )
         : [];
 
       return {
@@ -600,6 +634,7 @@ function createOperatorInstanceService(db, {
         })),
         archived_schedule_ids: scheduleIds,
         cancelled_invocation_count: cancelledInvocations.changes,
+        uncertain_invocation_count: uncertainInvocations.changes,
         terminalized_queue_messages: terminalizedQueueMessages,
       };
     }).immediate();

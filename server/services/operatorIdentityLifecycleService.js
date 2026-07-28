@@ -89,6 +89,7 @@ function createOperatorIdentityLifecycleService({
         affected_codebases: [],
         archived_schedule_ids: [],
         cancelled_invocation_count: 0,
+        uncertain_invocation_count: 0,
         terminalized_queue_count: 0,
         reset: null,
       };
@@ -108,6 +109,7 @@ function createOperatorIdentityLifecycleService({
           affected_codebases: [],
           archived_schedule_ids: [],
           cancelled_invocation_count: 0,
+        uncertain_invocation_count: 0,
           terminalized_queue_count: 0,
           reset: null,
         };

@@ -378,6 +378,15 @@ function createPmAutoReview({
     if (!run?.project_id) return null;
 
     if (run.operator_instance_id) {
+      // An ARCHIVED dispatcher is not "no primary" — it is a dispatcher that
+      // deliberately no longer exists. Falling back to Top would attribute this
+      // review to a manager that never dispatched the run, which is exactly the
+      // attribution contract archiving exists to protect. Suppress instead.
+      if (operatorInstanceService && typeof operatorInstanceService.getInstance === 'function') {
+        let dispatcher = null;
+        try { dispatcher = operatorInstanceService.getInstance(run.operator_instance_id); } catch { dispatcher = null; }
+        if (dispatcher?.archived_at) return null;
+      }
       const resolved = resolveOperatorConversation(conversationIdForProject(run.operator_instance_id));
       return receiverFromResolved(run, resolved, 'attributed_instance')
         || topReceiver(run, run.operator_instance_id);

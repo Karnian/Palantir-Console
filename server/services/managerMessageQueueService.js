@@ -248,12 +248,15 @@ function createManagerMessageQueueService({
     queuedForConversation: db.prepare(`
       SELECT *
       FROM manager_message_queue
-      WHERE conversation_id = ? AND status = 'queued'
+      WHERE conversation_id = ? AND status IN ('queued', 'sending', 'processing')
       ORDER BY sequence
     `),
     terminalizeQueuedForConversation: db.prepare(`
       UPDATE manager_message_queue
       SET status = 'cancelled',
+          -- Every ACTIVE status, not just queued. A row the dispatcher has
+          -- already moved to sending would otherwise sail past archive and
+          -- become processing against a disposed Operator.
           last_error = 'Operator instance archived before delivery',
           terminal_reason = 'operator_archived',
           claim_token = NULL,
@@ -261,7 +264,7 @@ function createManagerMessageQueueService({
           lease_expires_at = NULL,
           cancelled_at = ?,
           updated_at = ?
-      WHERE conversation_id = ? AND status = 'queued'
+      WHERE conversation_id = ? AND status IN ('queued', 'sending', 'processing')
     `),
   };
 

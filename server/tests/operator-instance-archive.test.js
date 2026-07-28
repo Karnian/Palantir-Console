@@ -200,7 +200,19 @@ test('archive retires DB dependants, preserves profile/attribution, and reports 
     db.prepare('SELECT status FROM operator_invocations WHERE operator_instance_id=? ORDER BY id').all(instance.id)
       .map(row => row.status)
       .sort(),
-    ['cancelled', 'cancelled', 'delivering', 'running'],
+    ['cancelled', 'cancelled', 'uncertain', 'uncertain'],
+    'archive runs AFTER a successful dispose, so no completion event is coming for'
+    + ' an in-flight turn; leaving it active would hold the per-Operator slot forever.'
+    + ' It crossed the adapter boundary, so it settles as `uncertain` (migration 068s'
+    + ' classification for exactly this case), not as `cancelled`.',
+  );
+  // And the Operator holds no active invocation slot afterwards.
+  assert.equal(
+    db.prepare(
+      "SELECT COUNT(*) AS c FROM operator_invocations WHERE operator_instance_id=?"
+      + " AND status IN ('pending','claimed','delivering','running')",
+    ).get(instance.id).c,
+    0,
   );
 
   const queueRow = app.services.managerMessageQueueService.getMessage(queued.message.id);
@@ -484,6 +496,47 @@ test('archive waits for an in-flight spawn before reset and leaves no old instan
 });
 
 test('migration keeps pre-existing rows active and the archived schema remains FK-clean', async (t) => {
+  // Rows must exist BEFORE 074 runs. Creating them through a fully migrated app
+  // proves nothing about the migration — it only proves the column default.
+  const Database = require('better-sqlite3');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-074-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const legacy = new Database(path.join(dir, 'legacy.db'));
+  legacy.pragma('foreign_keys = ON');
+  legacy.exec('CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at TEXT)');
+  const migrationsDir = path.join(__dirname, '..', 'db', 'migrations');
+  const files = (await fs.readdir(migrationsDir)).filter((f) => f.endsWith('.sql')).sort();
+  const applyUpTo = (maxVersion) => {
+    for (const file of files) {
+      const version = parseInt(file.split('_')[0], 10);
+      if (Number.isNaN(version) || version > maxVersion) continue;
+      if (legacy.prepare('SELECT 1 FROM schema_version WHERE version=?').get(version)) continue;
+      const sql = require('node:fs').readFileSync(path.join(migrationsDir, file), 'utf-8');
+      const fkOff = sql.split('\n')[0].trim() === '-- migrate:no-foreign-keys';
+      if (fkOff) legacy.pragma('foreign_keys = OFF');
+      legacy.exec(sql);
+      if (fkOff) legacy.pragma('foreign_keys = ON');
+      legacy.prepare('INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, datetime(\'now\'))').run(version);
+    }
+  };
+  applyUpTo(73);
+  assert.equal(
+    legacy.prepare("SELECT COUNT(*) AS c FROM pragma_table_info('operator_instances') WHERE name='archived_at'").get().c,
+    0,
+    'archived_at must not exist before 074',
+  );
+  legacy.prepare("INSERT INTO operator_profiles (id, name, is_private) VALUES ('op_pre074', 'Pre-074', 1)").run();
+  legacy.prepare("INSERT INTO operator_instances (id, profile_id, pm_adapter) VALUES ('oi_pre074', 'op_pre074', 'codex')").run();
+
+  applyUpTo(74);
+  assert.equal(
+    legacy.prepare("SELECT archived_at FROM operator_instances WHERE id='oi_pre074'").get().archived_at,
+    null,
+    'a row that predates 074 must come out active',
+  );
+  assert.deepEqual(legacy.pragma('foreign_key_check'), []);
+  legacy.close();
+
   const { app, db } = await createTestApp(t);
   const { instance } = createMappedInstance(app, 'Migration active');
   assert.equal(db.prepare('SELECT archived_at FROM operator_instances WHERE id=?').get(instance.id).archived_at, null);
@@ -595,4 +648,103 @@ test('router refuses an archived target but still passes an unknown one through'
     currentConversationId: 'operator:oi_never_created',
   });
   assert.equal(unknownAfter.target, 'operator:oi_never_created');
+});
+
+// Adversarial review, SERIOUS 3: an archived dispatcher is not "no primary".
+// Falling back to Top attributes the review to a manager that never dispatched
+// the run — the exact attribution contract archiving exists to protect.
+// Fakes only, mirroring the pmAutoReview harness in harvest.test.js.
+test('auto-review is suppressed for an archived dispatcher rather than reattributed to Top', () => {
+  const { createPmAutoReview } = require('../app');
+  const { createEventBus } = require('../services/eventBus');
+
+  const build = (archivedAt) => {
+    const sent = [];
+    const instance = { id: 'oi_dispatcher', archived_at: archivedAt };
+    const controller = createPmAutoReview({
+      eventBus: createEventBus(),
+      managerRegistry: {
+        getActiveRunId: (slot) => (slot === 'operator:oi_dispatcher' ? 'run_pm' : (slot === 'top' ? 'run_top' : null)),
+        onSlotCleared: () => () => {},
+      },
+      conversationService: { sendMessage(slot, message) { sent.push({ slot, message }); } },
+      runService: {
+        resolveOperatorConversationId: (conversationId) => (
+          conversationId === 'operator:oi_dispatcher'
+            ? {
+              instanceId: 'oi_dispatcher',
+              primaryProjectId: 'proj_1',
+              instanceConversationId: 'operator:oi_dispatcher',
+            }
+            : null
+        ),
+        addRunEvent() {},
+        listRuns: () => [],
+      },
+      operatorInstanceService: {
+        getInstance: (id) => (id === instance.id ? instance : null),
+        assertActiveInstance: (id) => {
+          if (id === instance.id && instance.archived_at) throw new Error('OPERATOR_ARCHIVED');
+          return instance;
+        },
+      },
+      defer: (fn) => fn(),
+      logger: { warn() {} },
+    });
+    return { controller, sent };
+  };
+
+  const run = {
+    id: 'run_worker_1',
+    is_manager: 0,
+    project_id: 'proj_1',
+    operator_instance_id: 'oi_dispatcher',
+    task_id: 'task_1',
+    status: 'completed',
+  };
+
+  const live = build(null);
+  live.controller.sendPmReview({ run, harvestSummary: null });
+  assert.deepEqual(
+    live.sent.map((entry) => entry.slot),
+    ['operator:oi_dispatcher'],
+    'a live dispatcher receives its own review',
+  );
+
+  const archivedCase = build('2026-07-28T00:00:00.000Z');
+  archivedCase.controller.sendPmReview({ run, harvestSummary: null });
+  assert.deepEqual(
+    archivedCase.sent.map((entry) => entry.slot),
+    [],
+    'an archived dispatcher must suppress the review, never reroute it to top',
+  );
+});
+
+// Adversarial review, SERIOUS 4: r.conversation_id may be a legacy
+// 'operator:<projectId>' alias, which resolves to whoever is primary NOW. After
+// an archive that is the REPLACEMENT instance, so a check on the resolved id
+// passes and the dead run gets resumed onto the new thread and slot.
+test('boot resume skips a run whose durable owner is archived, even via a legacy alias', async (t) => {
+  const { app, db } = await createTestApp(t);
+  const { project, instance } = createMappedInstance(app, 'Boot archive');
+  const legacyConversationId = `operator:${project.id}`;
+
+  const run = createOperatorRun(app, instance.id);
+  db.prepare('UPDATE runs SET conversation_id=?, operator_instance_id=? WHERE id=?')
+    .run(legacyConversationId, instance.id, run.id);
+
+  assert.equal((await archive(app, instance.id)).status, 200);
+
+  // A replacement instance now answers the same legacy alias.
+  const replacement = app.services.runService.ensurePrimaryOperatorInstanceForProject(project.id);
+  assert.ok(replacement?.instanceId);
+  assert.notEqual(replacement.instanceId, instance.id, 'the archived row must not be reused');
+
+  // The durable owner is still the archived instance, so the run is not resumable.
+  const owner = db.prepare('SELECT operator_instance_id FROM runs WHERE id=?').get(run.id);
+  assert.equal(owner.operator_instance_id, instance.id);
+  assert.ok(
+    app.services.operatorInstanceService.getInstance(owner.operator_instance_id).archived_at,
+    'attribution still resolves to the archived instance',
+  );
 });

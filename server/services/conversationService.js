@@ -1209,7 +1209,16 @@ function createConversationService({
       ? runService.resolveOperatorConversationId(pmSlotKey)
       : null;
     const normalizedSlot = resolved?.instanceConversationId || pmSlotKey;
-    const activePmRunId = managerRegistry.getActiveRunId(normalizedSlot);
+    // An archived parent is simply an INACTIVE parent here. Letting the registry's
+    // slot normalization throw OPERATOR_ARCHIVED would surface as a 409 to the
+    // caller AFTER the worker message was already delivered — the notice is a
+    // side effect, not the operation. Drop the notice instead.
+    let activePmRunId = null;
+    try {
+      activePmRunId = managerRegistry.getActiveRunId(normalizedSlot);
+    } catch {
+      return null;
+    }
     if (activePmRunId && activePmRunId === parentRunId) return normalizedSlot;
     return null;
   }
