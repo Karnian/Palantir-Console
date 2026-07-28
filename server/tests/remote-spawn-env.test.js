@@ -396,7 +396,7 @@ function appServerChild() {
   });
 }
 
-test('nodeUsage remote codex app-server probe explicitly requests clean env', async () => {
+test('nodeUsage remote probes go through the executor clean-env boundary', async () => {
   const calls = [];
   const spawnInteractiveFn = async (command, args, opts) => {
     calls.push({ command, args, opts });
@@ -431,8 +431,23 @@ test('nodeUsage remote codex app-server probe explicitly requests clean env', as
     (call) => call.command === 'codex' && call.args.join(' ') === 'app-server',
   );
   assert.ok(appCall);
-  assert.equal(appCall.opts.cleanEnv, true);
-  for (const call of calls.filter((candidate) => candidate !== appCall)) {
-    assert.equal(call.opts.cleanEnv, undefined);
+  // Asserting a `cleanEnv` flag on the fake would prove nothing: the real SSH
+  // executor's spawnInteractive does not take that option and cleans every
+  // interactive spawn. Pin the property that actually holds — no probe asks for
+  // inherited env — and pin the real script shape separately below.
+  for (const call of calls) {
+    assert.equal(call.opts.cleanEnv, undefined, `${call.command} must not request an env mode`);
   }
+
+  // The contract that matters: a real remote executor emits env -i for every
+  // interactive probe, version and auth included.
+  const scripts = [];
+  const probeSpawn = makeSpawn((call, child) => {
+    scripts.push(logicalScriptOf(call));
+    complete(child, { stdout: 'codex-cli 1.0\n' });
+  });
+  const realExecutor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: probeSpawn });
+  await realExecutor.spawnInteractive('codex', ['--version'], {});
+  assert.equal(scripts.length, 1);
+  assert.ok(scripts[0].includes('env -i "$@"'), scripts[0]);
 });

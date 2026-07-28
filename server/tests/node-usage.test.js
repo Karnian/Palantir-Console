@@ -288,9 +288,12 @@ test('ssh node usage probes fixed commands with empty env, pathPrefix, RPC seque
   const appServerCall = executor.calls.find(
     (call) => call.command === 'codex' && call.args.join(' ') === 'app-server',
   );
-  assert.equal(appServerCall.opts.cleanEnv, true);
-  for (const call of executor.calls.filter((candidate) => candidate !== appServerCall)) {
-    assert.equal(call.opts.cleanEnv, undefined);
+  assert.ok(appServerCall);
+  // #431: no probe carries a per-call env mode. The remote executor cleans
+  // every interactive spawn, so a flag here would describe a choice that the
+  // executor does not actually offer.
+  for (const call of executor.calls) {
+    assert.equal(call.opts.cleanEnv, undefined, `${call.command} must not request an env mode`);
   }
 });
 

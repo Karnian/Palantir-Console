@@ -1329,10 +1329,17 @@ function createRemoteSshNodeExecutor(node, {
         SH_BIN,
         '-c',
         shq([
-          `PALANTIR_WORKER_TOKEN=$(cat -- ${shq(workerTokenFile)}) || exit 78`,
-          'export PALANTIR_WORKER_TOKEN',
+          // Capture the read status, clean up UNCONDITIONALLY, and only then
+          // act on it. Exiting on a failed `cat` before the rm would strand the
+          // capability file outside statusDir forever: tmux has already
+          // returned success by this point, so spawnWorker's catch never runs
+          // and nothing else knows the file exists.
+          `PALANTIR_WORKER_TOKEN=$(cat -- ${shq(workerTokenFile)})`,
+          'worker_token_rc=$?',
           `rm -f -- ${shq(workerTokenFile)}`,
           `rmdir -- ${shq(tokenDirInner)} 2>/dev/null || true`,
+          '[ "$worker_token_rc" -eq 0 ] || exit 78',
+          'export PALANTIR_WORKER_TOKEN',
           'exec "$@"',
         ].join('; ')),
         shq('sh'),
