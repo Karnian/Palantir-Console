@@ -995,6 +995,10 @@ test('OperatorsView supports Operator-first create then hourly schedule registra
         currentSchedules = [{
           id: 'os_hourly', ...body, rule_json: JSON.stringify(body.rule),
           enabled: true, revision: 1, next_fire_at: '2026-07-23T01:00:00.000Z',
+          active_invocation_id: 'oinv_waiting',
+          active_invocation_status: 'pending',
+          waiting_reason: 'top_unavailable',
+          attempts: 3,
         }];
         currentInstances = [{ ...currentInstances[0], schedule_count: 1, next_schedule_at: currentSchedules[0].next_fire_at }];
         return { schedule: currentSchedules[0] };
@@ -1074,6 +1078,8 @@ test('OperatorsView supports Operator-first create then hourly schedule registra
   scheduleDialog.querySelector('[data-role="operator-schedule-create-submit"]').click();
 
   await waitFor(() => assert.match(scheduleDialog.textContent, /Hourly audit/));
+  assert.match(scheduleDialog.textContent, /top_unavailable/);
+  assert.match(scheduleDialog.textContent, /시도 3/);
   const createCall = apiCalls.find((call) => call.url === '/api/operator-instances' && call.opts.method === 'POST');
   assert.deepEqual(JSON.parse(createCall.opts.body), {
     profile_id: 'op_hourly',

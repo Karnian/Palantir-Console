@@ -4,6 +4,17 @@ const { conversationIdForProject } = require('../utils/conversationId');
 
 const DEFAULT_INTERVAL_MS = 20000;
 const DEFAULT_MAX_JOBS = 20;
+const RETRY_BASE_MS = 60 * 1000;
+const RETRY_CAP_MS = 15 * 60 * 1000;
+const RETRY_JITTER_RATIO = 0.2;
+
+function retryDelayMs(attempts, random = Math.random) {
+  const exponent = Math.max(0, Math.min(30, Number(attempts || 1) - 1));
+  const nominal = Math.min(RETRY_CAP_MS, RETRY_BASE_MS * (2 ** exponent));
+  const sample = Math.max(0, Math.min(1, Number(random()) || 0));
+  const jittered = nominal * (1 - RETRY_JITTER_RATIO + (2 * RETRY_JITTER_RATIO * sample));
+  return Math.min(RETRY_CAP_MS, Math.round(jittered));
+}
 
 function createOperatorScheduler({
   operatorScheduleService,
@@ -16,6 +27,8 @@ function createOperatorScheduler({
   logger,
   intervalMs = DEFAULT_INTERVAL_MS,
   maxJobs = DEFAULT_MAX_JOBS,
+  clock = () => new Date(),
+  random = Math.random,
 } = {}) {
   if (!operatorScheduleService) throw new Error('operatorScheduleService is required');
   const log = logger || ((message) => console.warn(`[operator-scheduler] ${message}`));
@@ -24,11 +37,15 @@ function createOperatorScheduler({
   let unsubscribe = null;
   let stopped = false;
 
-  function wait(invocation, reason, error, delayMs) {
+  function wait(invocation, reason, error) {
+    // Top/node/operator recovery intentionally has no immediate wake-up in
+    // this issue. Exponential jitter bounds retry writes while accepting up
+    // to the 15-minute cap as recovery latency.
     return operatorScheduleService.releaseClaim(invocation.id, invocation.claim_token, {
       waitingReason: reason,
       error,
-      delayMs,
+      delayMs: retryDelayMs(invocation.attempts, random),
+      now: clock(),
     });
   }
 
@@ -55,7 +72,7 @@ function createOperatorScheduler({
       ? managerRegistry.getActiveRunId('top')
       : null;
     if (!activeTopRunId) {
-      return wait(invocation, 'top_unavailable', 'Top manager is not active', 60000);
+      return wait(invocation, 'top_unavailable', 'Top manager is not active');
     }
 
     let primaryProject;
@@ -74,9 +91,9 @@ function createOperatorScheduler({
     if (nodeId !== 'local' && nodeService && typeof nodeService.getNode === 'function') {
       let node;
       try { node = nodeService.getNode(nodeId); } catch { node = null; }
-      if (!node) return wait(invocation, 'node_unavailable', `Node not found: ${nodeId}`, 60000);
-      if (Number(node.cordoned) === 1) return wait(invocation, 'node_cordoned', `Node is cordoned: ${nodeId}`, 60000);
-      if (Number(node.reachable) !== 1) return wait(invocation, 'node_unreachable', `Node is unreachable: ${nodeId}`, 60000);
+      if (!node) return wait(invocation, 'node_unavailable', `Node not found: ${nodeId}`);
+      if (Number(node.cordoned) === 1) return wait(invocation, 'node_cordoned', `Node is cordoned: ${nodeId}`);
+      if (Number(node.reachable) !== 1) return wait(invocation, 'node_unreachable', `Node is unreachable: ${nodeId}`);
     }
 
     // Persist the non-atomic external delivery window before touching the
@@ -101,13 +118,13 @@ function createOperatorScheduler({
       const status = Number(err?.httpStatus || err?.status || 0);
       if (err?.retryable === true || err?.code === 'OPERATOR_BUSY') {
         const busy = err?.code === 'OPERATOR_BUSY';
-        return wait(invocation, busy ? 'operator_busy' : 'operator_unavailable', err.message, busy ? 30000 : 60000);
+        return wait(invocation, busy ? 'operator_busy' : 'operator_unavailable', err.message);
       }
       if (status === 404 || err?.code === 'OPERATOR_MISSING') {
-        return wait(invocation, 'operator_missing', err.message, 60000);
+        return wait(invocation, 'operator_missing', err.message);
       }
       if (status === 409 && !err?.code) {
-        return wait(invocation, 'operator_unavailable', err.message, 60000);
+        return wait(invocation, 'operator_unavailable', err.message);
       }
       if (
         status === 400
@@ -152,7 +169,7 @@ function createOperatorScheduler({
   async function drainAll() {
     const results = [];
     for (let i = 0; i < maxJobs; i += 1) {
-      const invocation = operatorScheduleService.claimNext(new Date());
+      const invocation = operatorScheduleService.claimNext(clock());
       if (!invocation) break;
       try {
         results.push(await deliver(invocation));
@@ -165,7 +182,9 @@ function createOperatorScheduler({
   }
 
   async function runTick() {
-    operatorScheduleService.materializeDue(new Date());
+    const now = clock();
+    operatorScheduleService.sweepExpired(now);
+    operatorScheduleService.materializeDue(now);
     return drainAll();
   }
 
@@ -205,7 +224,7 @@ function createOperatorScheduler({
   function start() {
     if (timer) return { stop, tick, awaitDrain };
     stopped = false;
-    operatorScheduleService.recoverAfterRestart(new Date());
+    operatorScheduleService.recoverAfterRestart(clock());
     if (eventBus && typeof eventBus.subscribe === 'function') unsubscribe = eventBus.subscribe(onEvent);
     timer = setInterval(tick, Math.max(1000, Number(intervalMs) || DEFAULT_INTERVAL_MS));
     if (typeof timer.unref === 'function') timer.unref();
@@ -228,4 +247,11 @@ function createOperatorScheduler({
   return { start, stop, tick, awaitDrain, drainAll, deliver };
 }
 
-module.exports = { DEFAULT_INTERVAL_MS, createOperatorScheduler };
+module.exports = {
+  DEFAULT_INTERVAL_MS,
+  RETRY_BASE_MS,
+  RETRY_CAP_MS,
+  RETRY_JITTER_RATIO,
+  retryDelayMs,
+  createOperatorScheduler,
+};

@@ -130,7 +130,7 @@ test('schedule boolean flags reject truthy strings instead of silently enabling'
   );
 });
 
-test('due materialization coalesces missed intervals into one durable invocation', (t) => {
+test('due materialization coalesces missed intervals and a newer period supersedes stale pending work', (t) => {
   const h = harness(t);
   const { instance } = createMappedOperator(h);
   const schedule = h.scheduleService.createSchedule(instance.id, {
@@ -143,7 +143,10 @@ test('due materialization coalesces missed intervals into one durable invocation
   assert.equal(h.scheduleService.getSchedule(schedule.id).next_fire_at, '2026-07-23T05:00:00.000Z');
 
   const again = h.scheduleService.materializeDue(new Date('2026-07-23T06:30:00.000Z'));
-  assert.equal(again.length, 0, 'active invocation prevents overlap');
+  assert.equal(again.length, 1);
+  assert.equal(again[0].scheduled_for, '2026-07-23T06:00:00.000Z');
+  const first = h.db.prepare('SELECT status, waiting_reason FROM operator_invocations WHERE id=?').get(created[0].id);
+  assert.deepEqual(first, { status: 'cancelled', waiting_reason: 'superseded' });
   assert.equal(h.scheduleService.getSchedule(schedule.id).next_fire_at, '2026-07-23T07:00:00.000Z');
 });
 
@@ -170,8 +173,12 @@ test('one Operator materializes at most one active invocation across schedules',
 
   h.db.prepare("UPDATE operator_invocations SET status='completed', completed_at=datetime('now') WHERE id=?").run(created[0].id);
   const next = h.scheduleService.materializeDue(new Date('2026-07-23T01:00:01.000Z'));
-  assert.equal(next.length, 1);
-  assert.notEqual(next[0].schedule_id, created[0].schedule_id);
+  assert.equal(next.length, 0);
+  const skippedScheduleId = created[0].schedule_id === first.id ? second.id : first.id;
+  const skipped = h.scheduleService.listInvocations(skippedScheduleId);
+  assert.equal(skipped.length, 1);
+  assert.equal(skipped[0].status, 'cancelled');
+  assert.equal(skipped[0].waiting_reason, 'operator_active_skipped');
 });
 
 test('068 migration reconciles legacy overlapping Operator turns before adding single-flight index', (t) => {

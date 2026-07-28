@@ -1702,6 +1702,13 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
                     ${schedule.rule?.minutes ? ` ${schedule.rule.minutes}m` : ''}
                     · ${OPERATOR_SCHEDULER_LABELS.nextFire} ${formatDateTime(schedule.next_fire_at)}
                   </div>
+                  ${schedule.active_invocation_id && html`
+                    <div class="form-hint" data-role="operator-schedule-waiting">
+                      ${schedule.active_invocation_status}
+                      · 대기 사유 ${schedule.waiting_reason || '—'}
+                      · 시도 ${Number(schedule.attempts) || 0}
+                    </div>
+                  `}
                 </div>
                 <div class="operator-schedule-actions">
                   <button type="button" class="ghost small" onClick=${() => runScheduleNow(schedule)}>${OPERATOR_SCHEDULER_LABELS.runNow}</button>
