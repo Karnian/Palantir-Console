@@ -775,6 +775,22 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
           stmts.updateNextFire.run(next ? next.toISOString() : null, nextEnabled, fresh.id, fresh.revision);
           const scheduledForIso = scheduledFor.toISOString();
           const changed = [];
+          // The daily cap is decided BEFORE touching the active invocation.
+          // Superseding first and then returning on the cap commits the
+          // cancellation without a replacement: the older occurrence is
+          // destroyed, this one is never created, and the cursor has already
+          // advanced past both. Reproduced with a capped schedule sharing an
+          // Operator with a pending `once` — both occurrences vanished.
+          const since = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
+          if (Number(stmts.countRecent.get(fresh.id, since)?.count || 0) >= fresh.max_runs_per_day) {
+            const capped = insertTerminalInvocationFromSchedule(fresh, {
+              scheduledFor: scheduledForIso,
+              runAfter: nowIso,
+              waitingReason: 'daily_cap_reached',
+            });
+            if (capped.inserted) changed.push(capped.invocation);
+            return { invocation: null, changed };
+          }
           const active = stmts.activeInvocationForOperator.get(fresh.operator_instance_id);
           if (active) {
             const canSupersede = active.source === 'scheduled'
@@ -795,10 +811,6 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
               if (skipped.inserted) changed.push(skipped.invocation);
               return { invocation: null, changed };
             }
-          }
-          const since = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
-          if (Number(stmts.countRecent.get(fresh.id, since)?.count || 0) >= fresh.max_runs_per_day) {
-            return { invocation: null, changed };
           }
           const invocation = insertInvocationFromSchedule(fresh, {
             source: 'scheduled',

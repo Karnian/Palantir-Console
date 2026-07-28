@@ -555,3 +555,65 @@ test('expired claimed rows require both age and an expired claim lease', (t) => 
   assert.equal(h.db.prepare('SELECT waiting_reason FROM operator_invocations WHERE id=?').get(invocation.id).waiting_reason, 'expired');
   assertSingleFlight(h, instance.id);
 });
+
+// codex adversarial review (BLOCKER): the daily cap must be decided BEFORE the
+// active invocation is touched. Superseding first and then returning on the cap
+// commits the cancellation without a replacement — the older occurrence is
+// destroyed, this one is never created, and the cursor has already advanced
+// past both. Reproduced against the pre-fix code.
+test('a capped schedule never destroys another schedule\'s waiting invocation', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const base = new Date('2026-07-01T00:00:00.000Z');
+  const scheduleA = createHourly(h, instance, base, 'A');
+  const scheduleB = createHourly(h, instance, base, 'B');
+
+  // Whichever schedule wins the Operator's single active slot becomes the
+  // holder; the other one is the capped peer. Which one wins is decided by
+  // (next_fire_at, id) ordering and is not what this test is about.
+  h.scheduleService.materializeDue(new Date('2026-07-01T01:00:00.000Z'));
+  const active = h.db.prepare(`
+    SELECT * FROM operator_invocations
+     WHERE operator_instance_id=? AND status IN ('pending','claimed')
+     LIMIT 1
+  `).get(instance.id);
+  assert.ok(active, 'one schedule must hold the active slot');
+  const holderId = active.schedule_id;
+  const cappedId = holderId === scheduleA.id ? scheduleB.id : scheduleA.id;
+  const aActive = active;
+
+  // Park the holder far in the future so only the capped peer is due below.
+  // Otherwise the holder legitimately supersedes its own older occurrence and
+  // the cap path under test is never reached.
+  h.db.prepare("UPDATE operator_schedules SET next_fire_at='2026-08-01T00:00:00.000Z' WHERE id=?")
+    .run(holderId);
+
+  // The peer is already at its cap for the window.
+  h.db.prepare('UPDATE operator_schedules SET max_runs_per_day=1 WHERE id=?').run(cappedId);
+  h.db.prepare(`
+    INSERT INTO operator_invocations (
+      id, schedule_id, operator_instance_id, source, prompt_snapshot,
+      scheduled_for, status, run_after, completed_at
+    ) VALUES (?, ?, ?, 'scheduled', 'p', ?, 'completed', ?, datetime('now'))
+  `).run(
+    `oinv_capped_${Math.random().toString(16).slice(2)}`,
+    cappedId,
+    instance.id,
+    '2026-07-01T00:30:00.000Z',
+    '2026-07-01T00:30:00.000Z',
+  );
+
+  // A newer occurrence of the capped peer comes due while the holder waits.
+  h.scheduleService.materializeDue(new Date('2026-07-01T02:00:00.000Z'));
+
+  const aAfter = h.db.prepare('SELECT * FROM operator_invocations WHERE id=?').get(aActive.id);
+  assert.equal(aAfter.status, 'pending', 'a capped peer must not supersede the waiting occurrence');
+  assert.equal(aAfter.waiting_reason, aActive.waiting_reason);
+
+  // B's occurrence is refused, but durably — not silently dropped.
+  const bCapped = invocations(h, cappedId)
+    .filter((row) => row.waiting_reason === 'daily_cap_reached');
+  assert.equal(bCapped.length, 1, 'the capped occurrence must leave a durable record');
+  assert.equal(bCapped[0].status, 'cancelled');
+  assert.equal(bCapped[0].completed_at !== null, true);
+});

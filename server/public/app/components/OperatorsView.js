@@ -1113,6 +1113,30 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
     }
   };
 
+  // #453: the roster's live refresh only refetches manager/instance data, so an
+  // OPEN schedule modal kept showing the waiting_reason/attempts it was opened
+  // with. Those fields are exactly the ones that make a stalled schedule
+  // visible, so they must not go stale while the operator is looking at them.
+  const scheduleInstanceId = scheduleInstance?.id || null;
+  useEffect(() => {
+    if (!scheduleInstanceId) return undefined;
+    const broker = typeof sseBroker !== 'undefined' ? sseBroker : null;
+    if (!broker || typeof broker.subscribe !== 'function') return undefined;
+    let timer = null;
+    const refresh = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        fetchSchedules({ id: scheduleInstanceId });
+      }, ROSTER_REFRESH_DEBOUNCE_MS);
+    };
+    const unsubscribe = broker.subscribe('operator:schedule', refresh);
+    return () => {
+      if (timer) clearTimeout(timer);
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
+  }, [scheduleInstanceId]);
+
   const openSchedules = (instance) => {
     const primary = primaryRef(instance);
     setScheduleInstance(instance);
