@@ -212,13 +212,26 @@ function createOperatorScheduler({
     const lane = async () => {
       for (;;) {
         if (claimed >= maxJobs) return;
-        const invocation = operatorScheduleService.claimNext(clock());
+        let invocation;
+        // claimNext opens a BEGIN IMMEDIATE, so it CAN throw (a writer it races
+        // past busy_timeout). That must end this lane only. Letting it escape
+        // would reject the tick while sibling lanes are still delivering, and
+        // tick()'s finally would clear `inflight` — so the next tick opens a
+        // fresh set of lanes on top of them and the concurrency cap is gone.
+        try {
+          invocation = operatorScheduleService.claimNext(clock());
+        } catch (err) {
+          log(`claim failed: ${err.message}`);
+          return;
+        }
         if (!invocation) return;
         claimed += 1;
         results.push(await deliverGuarded(invocation));
       }
     };
-    await Promise.all(
+    // allSettled, not all: `inflight` must stay held until every lane has
+    // settled, for the same reason.
+    await Promise.allSettled(
       Array.from({ length: Math.min(deliveryConcurrency, maxJobs) }, () => lane()),
     );
     return results;

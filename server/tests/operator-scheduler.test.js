@@ -975,3 +975,61 @@ test('scheduler retries only an explicitly retryable busy rejection', async (t) 
   assert.equal(row.status, 'pending');
   assert.equal(row.waiting_reason, 'operator_busy');
 });
+
+// claimNext opens a BEGIN IMMEDIATE and can throw. If that escaped the lane,
+// Promise.all would reject the tick while siblings were still delivering,
+// tick()'s finally would release `inflight`, and the next tick would stack a
+// fresh set of lanes on top of the in-flight ones — silently exceeding the cap.
+test('a claim failure ends only its own lane and never releases the tick early', async (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Claim race', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  h.scheduleService.runNow(schedule.id, new Date('2026-07-23T00:00:00.000Z'));
+  const top = h.runService.createRun({
+    is_manager: true, manager_layer: 'top', conversation_id: 'top', prompt: 'top',
+  });
+
+  let claims = 0;
+  let releaseDelivery;
+  let deliverySettled = false;
+  const scheduleService = {
+    ...h.scheduleService,
+    claimNext(now) {
+      claims += 1;
+      // Second lane races the first into BEGIN IMMEDIATE and loses.
+      if (claims === 2) throw new Error('database is locked');
+      return h.scheduleService.claimNext(now);
+    },
+  };
+  const scheduler = createOperatorScheduler({
+    operatorScheduleService: scheduleService,
+    conversationService: {
+      sendMessage() {
+        return new Promise((resolve) => {
+          releaseDelivery = () => {
+            deliverySettled = true;
+            resolve({ status: 'sent', target: { kind: 'pm', runId: top.id } });
+          };
+        });
+      },
+    },
+    managerRegistry: { getActiveRunId() { return top.id; } },
+    projectService: h.projectService,
+    runService: h.runService,
+    clock: () => new Date('2026-07-23T00:00:02.000Z'),
+  });
+
+  const tick = scheduler.tick();
+  let resolvedEarly = false;
+  await Promise.race([
+    tick.then(() => { resolvedEarly = true; }),
+    new Promise((resolve) => setTimeout(resolve, 50)),
+  ]);
+  assert.equal(deliverySettled, false, 'the surviving lane is still delivering');
+  assert.equal(resolvedEarly, false, 'the tick must not resolve while a lane is in flight');
+
+  releaseDelivery();
+  await tick;
+});

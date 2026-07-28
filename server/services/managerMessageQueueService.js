@@ -9,12 +9,19 @@ const DEFAULT_LEASE_MS = 30000;
 // such ceiling exists in code. A cold spawn runs several git commands in
 // sequence (rev-parse, ls-remote, fetch/clone, worktree prune/add) and EACH
 // gets DEFAULT_GIT_TIMEOUT_MS (5 min) on its own, so any finite value can in
-// principle cut off a legitimately slow spawn. 12 minutes is chosen as "long
-// enough that a real clone finishes, short enough that a hang is caught";
-// the previous 30s was shorter than a single git command in the same call
-// chain and fenced healthy first deliveries. Tune via
-// PALANTIR_MANAGER_DISPATCH_TIMEOUT_MS.
-const DEFAULT_IMMEDIATE_DISPATCH_TIMEOUT_MS = 12 * 60 * 1000;
+// principle cut off a legitimately slow spawn. The previous 30s was shorter
+// than a single git command in the same call chain and fenced healthy first
+// deliveries.
+//
+// There IS a hard upper bound though, and it is not the git budget: lifecycle
+// sweeps materialization leases it considers stuck at
+// MATERIALIZE_STUCK_THRESHOLD_MS (default 10 min). Past that, a second owner
+// can take the lease on the same git cache while the first is still running —
+// so a dispatch must NOT be allowed to outlive it, or two owners mutate one
+// cache. 9 minutes keeps a margin under that fence. Raising this via
+// PALANTIR_MANAGER_DISPATCH_TIMEOUT_MS means raising
+// PALANTIR_MATERIALIZE_STUCK_MS with it.
+const DEFAULT_IMMEDIATE_DISPATCH_TIMEOUT_MS = 9 * 60 * 1000;
 const MAX_PAYLOAD_BYTES = 12 * 1024 * 1024;
 const MAX_TERMINAL_RETRIES = 3;
 const ACTIVE_STATUSES = Object.freeze(['queued', 'sending', 'processing']);
