@@ -898,15 +898,15 @@ test('checkHealth: transitions stale running run to needs_input on idle timeout 
   const profile = seedProfile(db, { command: 'codex' });
   const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'go' });
 
-  // Backdate the run's started_at so the idle timeout fires (10 min)
-  const pastTime = new Date(Date.now() - 11 * 60 * 1000).toISOString();
-  db.prepare(`UPDATE runs SET started_at = ? WHERE id = ?`).run(pastTime, run.id);
-  // Also backdate any events so lastActivity is also old
-  db.prepare(`UPDATE run_events SET created_at = ? WHERE run_id = ?`).run(pastTime, run.id);
-
-  // First health check: records outputHash baseline (prevHash undefined → sets hash, no idle check yet)
-  // Second health check: same hash as prev → checks idle timeout → triggers
+  // Establish the output hash first; that poll records a fresh heartbeat.
   await lc.checkHealth();
+  // Use SQLite's stored format beyond the 30-minute timeout so the regression
+  // covers the same zone-less UTC timestamps produced in production. Backdate
+  // after the baseline poll so its heartbeat cannot mask the simulated idle.
+  db.prepare(`UPDATE runs SET started_at = datetime('now', '-31 minutes') WHERE id = ?`).run(run.id);
+  db.prepare(`UPDATE run_events SET created_at = datetime('now', '-31 minutes') WHERE run_id = ?`).run(run.id);
+
+  // The same output now reaches the idle check against the backdated heartbeat.
   await lc.checkHealth();
 
   const after = rs.getRun(run.id);
@@ -915,6 +915,51 @@ test('checkHealth: transitions stale running run to needs_input on idle timeout 
   assert.equal(needsInputEvents[0].priority, 'alert');
   assert.equal(needsInputEvents[0].reason, 'idle_timeout');
 });
+
+// The direction that matches the original bug report: a run that is NOT idle
+// must survive the idle check. Under the local-time misparse its zone-less
+// stamps read as hours old the moment they are written, so a run whose output
+// simply has not changed between two polls gets flagged straight away. Both
+// offsets are exercised because only the eastern one produces that inflation —
+// on a UTC host the broken and fixed parses are the same instant.
+for (const tz of ['Asia/Seoul', 'America/Los_Angeles']) {
+  test(`[TZ=${tz}] checkHealth: a fresh run with unchanged output is not idle-timed-out`, async (t) => {
+    const db = await mkdb(t);
+    const rs = createRunService(db, null);
+    const ts = createTaskService(db);
+    const ps = createProjectService(db);
+    const aps = createAgentProfileService(db);
+    const execEngine = makeStubExecutionEngine({ alive: true, exitCode: null, output: 'same output' });
+
+    const lc = createLifecycleService({
+      runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+      executionEngine: execEngine, streamJsonEngine: null, worktreeService: null, eventBus: null,
+    });
+
+    const project = seedProject(db);
+    const task = seedTask(db, project.id);
+    const profile = seedProfile(db, { command: 'codex' });
+    const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'go' });
+
+    const previousTz = process.env.TZ;
+    process.env.TZ = tz;
+    try {
+      // First poll records the heartbeat; the second reaches the idle comparison
+      // with identical output. No backdating — every stamp is genuinely fresh.
+      await lc.checkHealth();
+      await lc.checkHealth();
+    } finally {
+      if (previousTz === undefined) delete process.env.TZ;
+      else process.env.TZ = previousTz;
+    }
+
+    assert.equal(
+      rs.getRun(run.id).status,
+      'running',
+      'a run that has been alive for seconds must not be treated as 30 minutes idle',
+    );
+  });
+}
 
 // ---------------------------------------------------------------------------
 // INS-02: needs_input → sendAgentInput → running recovery
@@ -944,11 +989,12 @@ test('INS-02: sendAgentInput recovers needs_input run back to running', async (t
   const profile = seedProfile(db, { command: 'codex' });
   const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'work' });
 
-  // Simulate idle timeout: backdate + double checkHealth → needs_input
-  const pastTime = new Date(Date.now() - 11 * 60 * 1000).toISOString();
-  db.prepare(`UPDATE runs SET started_at = ? WHERE id = ?`).run(pastTime, run.id);
-  db.prepare(`UPDATE run_events SET created_at = ? WHERE run_id = ?`).run(pastTime, run.id);
   await lc.checkHealth();
+  // Keep this in SQLite's zone-less UTC format so idle recovery exercises the
+  // production parse path rather than an already-zoned ISO test value. Apply
+  // it after the baseline poll, which creates a heartbeat event.
+  db.prepare(`UPDATE runs SET started_at = datetime('now', '-31 minutes') WHERE id = ?`).run(run.id);
+  db.prepare(`UPDATE run_events SET created_at = datetime('now', '-31 minutes') WHERE run_id = ?`).run(run.id);
   await lc.checkHealth();
 
   const afterIdle = rs.getRun(run.id);

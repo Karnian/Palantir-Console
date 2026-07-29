@@ -136,7 +136,7 @@ export function DriftDrawer({ open, onClose, driftAudit, projects }) {
                     ${statusLabel(INCOHERENCE_KIND_LABELS, row.incoherence_kind || 'unknown')}
                   </span>
                   <span class="drift-row-project">${pname}</span>
-                  <span class="drift-row-time">${timeAgo(new Date(row.created_at).toISOString())}</span>
+                  <span class="drift-row-time">${timeAgo(row.created_at)}</span>
                   <button
                     class="ghost"
                     style="margin-left:auto"
