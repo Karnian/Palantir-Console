@@ -601,6 +601,75 @@ process.stdout.write(events.map((event) => JSON.stringify(event)).join('\\n') + 
   });
 });
 
+test('engine: rejected Claude rate-limit event survives abrupt exit without a result', async (t) => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const rs = makeRunService();
+  rs._setRun('run-rate-limit-no-result', { status: 'running' });
+  const limitBin = writeGeneratedFixtureExecutable(`#!/usr/bin/env node
+'use strict';
+const event = {
+  type: 'rate_limit_event',
+  rate_limit_info: {
+    status: 'rejected',
+    rateLimitType: 'five_hour',
+    resetsAt: 1785312000000,
+  },
+};
+process.stdout.write(JSON.stringify(event) + '\\n', () => process.exit(1));
+`);
+  t.after(() => {
+    try { fs.unlinkSync(limitBin); } catch { /* ignore */ }
+  });
+
+  const previousClaudeBin = process.env.CLAUDE_BIN;
+  process.env.CLAUDE_BIN = limitBin;
+  const engine = createStreamJsonEngine({ runService: rs });
+  _allEngines.push(engine);
+  try {
+    engine.spawnAgent('run-rate-limit-no-result', {
+      cwd: os.tmpdir(),
+      prompt: 'x',
+      isManager: false,
+    });
+  } finally {
+    if (previousClaudeBin === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = previousClaudeBin;
+  }
+
+  await waitForEvent(
+    engine,
+    'run-rate-limit-no-result',
+    (event) => event.type === 'rate_limit_event',
+    2000,
+  );
+  const deadline = Date.now() + 2000;
+  while (
+    !rs._statusUpdates.some((update) => update.runId === 'run-rate-limit-no-result')
+    && Date.now() < deadline
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
+  assert.deepEqual(rs._nonRetryableUpdates, [{
+    runId: 'run-rate-limit-no-result',
+    retryCount: undefined,
+  }]);
+  const failed = rs._statusUpdates.find(
+    (update) => update.runId === 'run-rate-limit-no-result' && update.status === 'failed',
+  );
+  assert.equal(failed.options.reason, 'claude-rate-limit');
+  const limitEvent = rs._events.find(
+    (event) => event.runId === 'run-rate-limit-no-result'
+      && event.type === 'worker:limit_rejected',
+  );
+  assert.deepEqual(JSON.parse(limitEvent.data), {
+    provider: 'claude',
+    kind: 'rate_limit',
+    rate_limit_type: 'five_hour',
+    resets_at: 1785312000000,
+  });
+});
+
 test('engine: result event for manager does NOT call updateRunStatus on non-error', async (t) => {
   process.env.CLAUDE_BIN = fakeClaudioPath;
   const rs = makeRunService();

@@ -2611,12 +2611,29 @@ function createLifecycleService({
     }
   }
 
+  async function getWorkerOutputBestEffort(channel, runId, lines, engine = 'cli') {
+    try {
+      return await channel.getOutput(runId, lines, engine);
+    } catch {
+      // Output is diagnostic and is only fetched here to refine terminal
+      // classification. A missing tmux capture must never prevent the
+      // authoritative exit observation from terminalizing the run.
+      return null;
+    }
+  }
+
   async function inspectDetachedClaudeResult(run, channel) {
     if (!isDetachedRemoteClaudeRun(run)) return null;
-    const recentOutput = await channel.getOutput(run.id, 500, 'cli');
-    const durableResult = typeof channel.getStructuredResult === 'function'
-      ? await channel.getStructuredResult(run.id)
-      : '';
+    const recentOutput = await getWorkerOutputBestEffort(channel, run.id, 500, 'cli');
+    let durableResult = '';
+    if (typeof channel.getStructuredResult === 'function') {
+      try {
+        durableResult = await channel.getStructuredResult(run.id);
+      } catch {
+        // The bounded stdout tail may still contain enough structured output
+        // to classify the terminal result.
+      }
+    }
     // The normal tail is intentionally bounded for UI/health safety. Append the
     // separately harvested final result record so usage/status/goal semantics
     // survive even when that tail exceeds its byte cap and returns empty.
@@ -2678,11 +2695,19 @@ function createLifecycleService({
       }));
     }
 
+    const rejectedLimit = classifyClaudeRateLimitEvents(parsed.events);
     if (!parsed.result) {
       // Recognized NDJSON may consist solely of user/tool events. Never fall
       // back to that raw stream: tool inputs/results can contain file contents
       // or tokens that must not enter observable final_output events.
-      return { output: parsed.text || '', status: null, reason: null };
+      if (rejectedLimit && !alreadyParsed) {
+        markWorkerLimitFailure(runService, run.id, rejectedLimit);
+      }
+      return {
+        output: parsed.text || '',
+        status: rejectedLimit ? 'failed' : null,
+        reason: rejectedLimit ? 'claude-rate-limit' : null,
+      };
     }
 
     runService.updateRunResult(run.id, {
@@ -2698,7 +2723,7 @@ function createLifecycleService({
     const stopReason = parsed.result.stop_reason;
     const hitLimit = stopReason === 'max_turns' || stopReason === 'max_tokens';
     const limitFailure = parsed.result.is_error
-      ? classifyClaudeRateLimitEvents(parsed.events)
+      ? rejectedLimit
       : null;
     if (limitFailure && !alreadyParsed) {
       markWorkerLimitFailure(runService, run.id, limitFailure);
@@ -2813,7 +2838,7 @@ function createLifecycleService({
         const status = claudeResult?.status || ((exitCode === 0) ? 'completed' : 'failed');
         const output = claudeResult
           ? claudeResult.output
-          : await channel.getOutput(run.id, 200);
+          : await getWorkerOutputBestEffort(channel, run.id, 200);
         const codexLimitFailure = status === 'failed' && !claudeResult
           ? markCodexLimitFailure(run, output)
           : false;
@@ -3060,7 +3085,7 @@ function createLifecycleService({
       const output = claudeResult
         ? claudeResult.output
         : status === 'failed'
-          ? await channel.getOutput(run.id, 200, 'cli')
+          ? await getWorkerOutputBestEffort(channel, run.id, 200, 'cli')
           : null;
       const codexLimitFailure = status === 'failed' && !claudeResult
         ? markCodexLimitFailure(run, output)
@@ -3384,7 +3409,7 @@ function createLifecycleService({
             const exitCode = await workerChannel.detectExitCode(runId, 'cli');
             const status = (exitCode === 0) ? 'completed' : 'failed';
             const output = status === 'failed'
-              ? await workerChannel.getOutput(runId, 200, 'cli')
+              ? await getWorkerOutputBestEffort(workerChannel, runId, 200, 'cli')
               : null;
             const codexLimitFailure = status === 'failed'
               ? markCodexLimitFailure(run, output)

@@ -457,6 +457,73 @@ test('queue: Codex rate-limit output marks the run non-retryable before run:ende
   assert.equal(eventsOf(h.runService, original.id, 'worker:limit_rejected').length, 1);
 });
 
+test('queue: output capture failure cannot strand an exited worker or suppress its retry', async (t) => {
+  const { db } = await mkdb(t);
+  const eventBus = createEventBus();
+  const executionEngine = stubExecEngine();
+  executionEngine.isAlive = () => false;
+  executionEngine.detectExitCode = () => 1;
+  executionEngine.getOutput = () => {
+    throw new Error('tmux capture unavailable');
+  };
+  const h = buildHarness(db, { eventBus, executionEngine });
+  t.after(() => h.lifecycleService.stopMonitoring());
+
+  const project = seedProject(h.projectService);
+  const task = seedTask(h.taskService, project.id);
+  const profile = seedProfile(db, { max: 0, command: 'codex' });
+  const original = createRunningRun(h.runService, {
+    taskId: task.id,
+    profileId: profile.id,
+  });
+
+  h.lifecycleService.startMonitoring();
+  await h.lifecycleService.checkHealth();
+
+  const after = h.runService.getRun(original.id);
+  assert.equal(after.status, 'failed');
+  assert.ok(after.ended_at, 'terminal transition must set ended_at');
+  assert.equal(after.non_retryable, 0);
+  const runs = h.runService.listRuns({ task_id: task.id });
+  assert.equal(runs.length, 2, 'ordinary exit failure must still enqueue the B-lite retry');
+  const retry = runs.find((run) => run.id !== original.id);
+  assert.equal(retry.retry_count, 1);
+  assert.equal(retry.status, 'queued');
+});
+
+test('queue: task prose mentioning rate limits remains an ordinary retryable Codex failure', async (t) => {
+  const { db } = await mkdb(t);
+  const eventBus = createEventBus();
+  const executionEngine = stubExecEngine();
+  executionEngine.isAlive = () => false;
+  executionEngine.detectExitCode = () => 1;
+  executionEngine.getOutput = () => [
+    'Implemented the API rate limit middleware.',
+    'AssertionError: expected 200, got 500',
+  ].join('\n');
+  const h = buildHarness(db, { eventBus, executionEngine });
+  t.after(() => h.lifecycleService.stopMonitoring());
+
+  const project = seedProject(h.projectService);
+  const task = seedTask(h.taskService, project.id);
+  const profile = seedProfile(db, { max: 0, command: 'codex' });
+  const original = createRunningRun(h.runService, {
+    taskId: task.id,
+    profileId: profile.id,
+  });
+
+  h.lifecycleService.startMonitoring();
+  await h.lifecycleService.checkHealth();
+
+  const after = h.runService.getRun(original.id);
+  assert.equal(after.status, 'failed');
+  assert.equal(after.non_retryable, 0);
+  assert.equal(eventsOf(h.runService, original.id, 'worker:limit_rejected').length, 0);
+  const runs = h.runService.listRuns({ task_id: task.id });
+  assert.equal(runs.length, 2, 'ordinary failure must receive the one B-lite retry');
+  assert.equal(runs.find((run) => run.id !== original.id).retry_count, 1);
+});
+
 test('queue: failed run that never started (no started_at) does not auto-retry', async (t) => {
   const { db } = await mkdb(t);
   const eventBus = createEventBus();
@@ -541,6 +608,50 @@ test('queue: manual execute remains allowed beside an automatic retry lineage', 
   assert.equal(manual.retry_root_run_id, null);
   assert.equal(manual.retry_count, 0);
   assert.equal(h.runService.listRuns({ task_id: task.id }).length, 3);
+});
+
+test('queue: corrupt later retry attempt fails closed without colliding with an earlier attempt', async (t) => {
+  const { db } = await mkdb(t);
+  const h = buildHarness(db);
+  const project = seedProject(h.projectService);
+  const task = seedTask(h.taskService, project.id);
+  const profile = seedProfile(db, { max: 1 });
+  const root = createRunningRun(h.runService, {
+    taskId: task.id,
+    profileId: profile.id,
+  });
+  h.runService.updateRunStatus(root.id, 'failed', { force: true });
+
+  const commonRetryArgs = {
+    task_id: task.id,
+    agent_profile_id: profile.id,
+    prompt: root.prompt,
+    retry_root_run_id: root.id,
+  };
+  const firstAttempt = h.runService.insertRetryRun({
+    ...commonRetryArgs,
+    retry_count: 1,
+    queued_args: { skillPackIds: null, presetId: null },
+  });
+  h.runService.markRunStarted(firstAttempt.id, {
+    tmux_session: `session-${firstAttempt.id}`,
+  });
+  h.runService.updateRunStatus(firstAttempt.id, 'failed', { force: true });
+
+  const corruptAttempt = h.runService.insertRetryRun({
+    ...commonRetryArgs,
+    retry_count: 2,
+    queued_args: '{not-json',
+  });
+
+  await assert.doesNotReject(() => h.lifecycleService.drainQueue(profile.id));
+
+  const after = h.runService.getRun(corruptAttempt.id);
+  assert.equal(after.status, 'failed');
+  assert.ok(after.started_at, 'queue claim must be recorded');
+  assert.ok(after.ended_at, 'fail-closed transition must terminalize the claimed run');
+  assert.equal(after.retry_count, 2, 'exhaustion must never lower a later attempt number');
+  assert.equal(eventsOf(h.runService, corruptAttempt.id, 'queue:args_invalid').length, 1);
 });
 
 test('queue: original failed run is harvested once while retry is separate', async (t) => {

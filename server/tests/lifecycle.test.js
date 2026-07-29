@@ -228,6 +228,51 @@ test('recoverOrphanSessions continues revoking legacy workers after one kill fai
   );
 });
 
+test('recoverOrphanSessions terminalizes a dead local worker when output capture throws', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, { command: 'codex' });
+  const run = rs.createRun({
+    task_id: task.id,
+    agent_profile_id: profile.id,
+    prompt: 'recover failed worker',
+  });
+  rs.markRunStarted(run.id, { tmux_session: `palantir-run-${run.id}` });
+
+  const execEngine = makeStubExecutionEngine({ alive: false, exitCode: 1 });
+  execEngine.type = 'tmux';
+  execEngine.discoverGhostSessions = () => [{
+    name: `palantir-run-${run.id}`,
+    isPalantir: true,
+  }];
+  execEngine.getOutput = () => {
+    throw new Error('tmux capture unavailable');
+  };
+  const lc = createLifecycleService({
+    runService: rs,
+    taskService: ts,
+    agentProfileService: aps,
+    projectService: ps,
+    executionEngine: execEngine,
+    streamJsonEngine: makeStubStreamJsonEngine(),
+    worktreeService: null,
+    eventBus: null,
+  });
+
+  const recovered = await lc.recoverOrphanSessions();
+
+  assert.deepEqual(recovered, [{ runId: run.id, status: 'terminated' }]);
+  const after = rs.getRun(run.id);
+  assert.equal(after.status, 'failed');
+  assert.ok(after.ended_at);
+  assert.equal(after.exit_code, 1);
+});
+
 test('recoverOrphanSessions preserves a completed scoped worker result before revocation', async (t) => {
   const db = await mkdb(t);
   const rs = createRunService(db, null);

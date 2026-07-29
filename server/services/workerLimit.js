@@ -31,7 +31,14 @@ function classifyClaudeRateLimitEvents(events) {
 
 function classifyCodexWorkerOutput(output) {
   if (typeof output !== 'string' || !output.trim()) return null;
-  if (classifyCodexErrorKind({ message: output }) !== 'rate_limit') return null;
+  // classifyCodexErrorKind expects one vendor error item. A worker capture is
+  // the entire output tail and can contain successful task prose mentioning
+  // "rate limit" before an unrelated terminal assertion. Restrict the legacy
+  // plain-text fallback to the terminal non-empty line, which is where Codex
+  // reports an unstructured fatal error.
+  const lines = output.trim().split(/\r?\n/);
+  const terminalMessage = lines[lines.length - 1].trim();
+  if (classifyCodexErrorKind({ message: terminalMessage }) !== 'rate_limit') return null;
   return {
     provider: 'codex',
     kind: 'rate_limit',

@@ -1144,7 +1144,8 @@ function createRunService(db, eventBus) {
   // retrying (e.g. corrupt queued_args — a retry would copy the same bad args
   // and fail identically). Idempotent raw write; no state-machine transition.
   function setRetryCount(id, n) {
-    db.prepare('UPDATE runs SET retry_count = ? WHERE id = ?').run(Number(n) || 0, id);
+    db.prepare('UPDATE runs SET retry_count = MAX(retry_count, ?) WHERE id = ?')
+      .run(Number(n) || 0, id);
   }
 
   // Durable post-claim counterpart to rejectQueuedRun. Some structural checks

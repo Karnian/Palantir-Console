@@ -479,7 +479,20 @@ function createStreamJsonEngine({
             try { currentStatus = runService.getRun(runId)?.status; } catch { /* ignore */ }
             const terminal = ['completed', 'failed', 'cancelled', 'stopped'];
             if (!terminal.includes(currentStatus)) {
-              runService.updateRunStatus(runId, dbStatus, { force: true });
+              let reason = null;
+              if (!proc.isManager && dbStatus === 'failed') {
+                const limitFailure = classifyClaudeRateLimitEvents(proc.events);
+                if (limitFailure) {
+                  try {
+                    markWorkerLimitFailure(runService, runId, limitFailure);
+                    reason = 'claude-rate-limit';
+                  } catch {
+                    // A classification side effect must not strand the exited
+                    // worker in running.
+                  }
+                }
+              }
+              runService.updateRunStatus(runId, dbStatus, { force: true, reason });
             }
             runService.addRunEvent(runId, 'exit', JSON.stringify({
               exit_code: code,

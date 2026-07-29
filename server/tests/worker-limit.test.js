@@ -37,3 +37,10 @@ test('worker limit: Codex reuses the existing rate-limit classifier', () => {
   });
   assert.equal(classifyCodexWorkerOutput('Connection timeout'), null);
 });
+
+test('worker limit: Codex does not classify task prose in a failed output tail', () => {
+  assert.equal(classifyCodexWorkerOutput([
+    'Implemented the API rate limit middleware.',
+    'AssertionError: expected 200, got 500',
+  ].join('\n')), null);
+});

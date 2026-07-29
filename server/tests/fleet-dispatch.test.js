@@ -443,6 +443,39 @@ test('restart preserves a completed remote worker result before capability revoc
   assert.equal(h.taskService.getTask(task.id).status, 'review');
 });
 
+test('restart terminal recovery survives unavailable worker output capture', async (t) => {
+  const db = await mkdb(t);
+  const remoteChannel = makeRemoteChannel({ alive: false, exitCode: 1 });
+  remoteChannel.getOutput = async () => {
+    throw new Error('tmux capture unavailable');
+  };
+  const h = buildHarness(db, { remoteChannel });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { command: 'codex' });
+  const project = h.projectService.createProject({
+    name: 'RemoteRestartCaptureFailure',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = h.runService.createRun({
+    task_id: task.id,
+    agent_profile_id: profile.id,
+    prompt: 'finish while Console is offline',
+    node_id: 'ssh-pod',
+  });
+  h.runService.addRunEvent(run.id, 'security:worker_capability_scoped', '{}');
+  h.runService.markRunStarted(run.id, { tmux_session: `remote-${run.id}` });
+
+  const recovered = await h.lifecycleService.recoverOrphanSessions();
+
+  assert.deepEqual(recovered, [{ runId: run.id, status: 'terminated' }]);
+  const after = h.runService.getRun(run.id);
+  assert.equal(after.status, 'failed');
+  assert.ok(after.ended_at);
+  assert.equal(after.exit_code, 1);
+});
+
 test('restart recovery emits the dedicated needs_input alert for a detached Claude limit', async (t) => {
   const db = await mkdb(t);
   const structuredResult = JSON.stringify({
@@ -1170,6 +1203,55 @@ test('detached remote Claude rejected limit is non-retryable before terminal emi
   const profile = seedProfile(db, { command: 'claude' });
   const project = h.projectService.createProject({
     name: 'RemoteClaudeRejectedLimit',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = h.runService.createRun({
+    task_id: task.id,
+    agent_profile_id: profile.id,
+    prompt: 'health',
+    node_id: 'ssh-pod',
+  });
+  h.runService.addRunEvent(run.id, 'runtime:remote_worker_engine', JSON.stringify({
+    engine: 'claude-stream-json',
+    version: 1,
+  }));
+  h.runService.markRunStarted(run.id, { tmux_session: `palantir-run-${run.id}` });
+
+  h.lifecycleService.startMonitoring();
+  await h.lifecycleService.checkHealth();
+
+  const after = h.runService.getRun(run.id);
+  assert.equal(after.status, 'failed');
+  assert.equal(after.non_retryable, 1);
+  assert.equal(after.retry_count, 0);
+  assert.equal(h.runService.listRuns({ task_id: task.id }).length, 1);
+  assert.equal(
+    h.runService.getRunEvents(run.id)
+      .filter((event) => event.event_type === 'worker:limit_rejected').length,
+    1,
+  );
+});
+
+test('detached remote Claude rejected limit without a result record is non-retryable', async (t) => {
+  const db = await mkdb(t);
+  const output = JSON.stringify({
+    type: 'rate_limit_event',
+    rate_limit_info: {
+      status: 'rejected',
+      rateLimitType: 'five_hour',
+      resetsAt: 1785312000000,
+    },
+  });
+  const remoteChannel = makeRemoteChannel({ alive: false, exitCode: 1, output });
+  const eventBus = createEventBus();
+  const h = buildHarness(db, { remoteChannel, eventBus });
+  t.after(() => h.lifecycleService.stopMonitoring());
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { command: 'claude' });
+  const project = h.projectService.createProject({
+    name: 'RemoteClaudeRejectedLimitNoResult',
     directory: '/workspace/project',
     node_id: 'ssh-pod',
   });
