@@ -318,6 +318,7 @@ function buildCommandScript(command, args = [], {
   cleanEnv = false,
   cleanEnvKeys = [],
   runBoundTokenKey = null,
+  runBoundApiBase = false,
 } = {}) {
   const explicitEnv = cleanEnv
     // The pod owns PATH. A controller PATH must never override it; pathPrefix
@@ -341,18 +342,25 @@ function buildCommandScript(command, args = [], {
     // pathPrefix cannot be lost to simple-command assignment expansion order.
     cleanParts.push(pathAssign || 'PATH="$PATH"');
     cleanParts.push(...envParts);
-    if (runBoundTokenKey) {
-      normalizeEnvKeyList([runBoundTokenKey]);
-      // The capability is read from stdin INSIDE the clean shell, never passed
-      // as an argument. `env -i ... KEY="$KEY"` would expand the value before
-      // exec, so the real /usr/bin/env argv — world-readable through
-      // /proc/<pid>/cmdline — would carry the token for the life of that exec.
-      // Reading it here keeps the pre-existing contract: the value exists only
-      // in the SSH stdin stream and the child's own environment.
+    const stdinEnvKeys = [
+      ...(runBoundTokenKey ? [runBoundTokenKey] : []),
+      ...(runBoundApiBase ? ['PALANTIR_API_BASE'] : []),
+    ];
+    if (stdinEnvKeys.length > 0) {
+      normalizeEnvKeyList(stdinEnvKeys);
+      // Run-bound values are read from stdin INSIDE the clean shell, never
+      // passed as arguments. `env -i ... KEY="$KEY"` would expand a value
+      // before exec, so the real /usr/bin/env argv — world-readable through
+      // /proc/<pid>/cmdline — would carry it for the life of that exec. Reading
+      // here keeps those values in the SSH stdin stream and child environment.
+      const stdinBootstrap = stdinEnvKeys.flatMap((key) => [
+        `IFS= read -r ${key} || exit 126`,
+        `export ${key}`,
+      ]);
       cleanParts.push(
         SH_BIN,
         '-c',
-        shq(`IFS= read -r ${runBoundTokenKey} || exit 126; export ${runBoundTokenKey}; exec "$@"`),
+        shq([...stdinBootstrap, 'exec "$@"'].join('; ')),
         shq('sh'),
       );
     }
@@ -915,10 +923,14 @@ function createRemoteSshNodeExecutor(node, {
       explicitEnv[runBoundTokenKey],
       runBoundTokenKey,
     );
+    const workerApiBase = worker && runBoundToken
+      ? normalizeWorkerApiBase(explicitEnv.PALANTIR_API_BASE)
+      : null;
     delete explicitEnv.PALANTIR_TOKEN;
     delete explicitEnv.PALANTIR_PM_TOKEN;
     delete explicitEnv.PALANTIR_WORKER_TOKEN;
     delete explicitEnv.PALANTIR_MANAGER_TOKEN;
+    if (worker) delete explicitEnv.PALANTIR_API_BASE;
     const processEnvKeys = [
       ...(worker ? REMOTE_WORKER_BASE_ENV_KEYS : remoteManagerBaseEnvKeys(commandName)),
       ...normalizeEnvKeyList(envAllowlist),
@@ -941,11 +953,11 @@ function createRemoteSshNodeExecutor(node, {
       cleanEnv: true,
       cleanEnvKeys: processEnvKeys,
       runBoundTokenKey: runBoundToken ? runBoundTokenKey : null,
+      runBoundApiBase: !!workerApiBase,
     });
-    // The capability read moved INSIDE the clean shell (buildCommandScript):
-    // reading it out here would require re-injecting the value as an env -i
-    // argument, which puts it in the real /usr/bin/env argv. The stdin
-    // transport is unchanged — only the reader moved.
+    // The run-bound reads happen INSIDE the clean shell (buildCommandScript):
+    // reading values out here would require re-injecting them as env -i
+    // arguments, which puts them in the real /usr/bin/env argv.
     const bootstrapScript = script;
     const child = spawnFn(
       'ssh',
@@ -964,7 +976,9 @@ function createRemoteSshNodeExecutor(node, {
         child.stdin.on('error', () => { /* child close/error is authoritative */ });
       }
       try {
-        child.stdin.write(`${runBoundToken}\n`);
+        child.stdin.write(
+          `${runBoundToken}\n${workerApiBase ? `${workerApiBase}\n` : ''}`,
+        );
       } catch (err) {
         try { child.kill?.('SIGTERM'); } catch { /* best-effort */ }
         throw err;

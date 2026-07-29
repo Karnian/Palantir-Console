@@ -242,21 +242,37 @@ function createTmuxEngine({
       // server credential can cross the profile allowlist boundary either.
       'unset PALANTIR_TOKEN PALANTIR_PM_TOKEN PALANTIR_WORKER_TOKEN PALANTIR_MANAGER_TOKEN',
     ];
+    let workerCapabilityBootstrap = null;
     if (tokenArtifact) {
-      const safeTokenPath = tokenArtifact.tokenPath.replace(/'/g, "'\\''");
-      const safeTokenDir = tokenArtifact.tokenDir.replace(/'/g, "'\\''");
-      lines.push(`__palantir_worker_token="$(cat -- '${safeTokenPath}')" || exit 78`);
-      lines.push(`rm -f -- '${safeTokenPath}'`);
+      // Restore run-bound values only after env -i has started a clean shell.
+      // Expanding KEY="$value" as an env argument would put the value in the
+      // real /usr/bin/env argv before the child replaces it.
+      workerCapabilityBootstrap = [
+        `PALANTIR_WORKER_TOKEN=$(cat -- ${shq(tokenArtifact.tokenPath)})`,
+        'worker_token_rc=$?',
+        `rm -f -- ${shq(tokenArtifact.tokenPath)}`,
+      ];
       if (tokenArtifact.apiBasePath) {
-        const safeApiBasePath = tokenArtifact.apiBasePath.replace(/'/g, "'\\''");
-        // Read status is captured and the file removed UNCONDITIONALLY before
-        // acting on it, so a failed read cannot leave the file behind.
-        lines.push(`__palantir_api_base="$(cat -- '${safeApiBasePath}')"`);
-        lines.push('__palantir_api_base_rc=$?');
-        lines.push(`rm -f -- '${safeApiBasePath}'`);
-        lines.push('[ "$__palantir_api_base_rc" -eq 0 ] || exit 78');
+        workerCapabilityBootstrap.push(
+          `PALANTIR_API_BASE=$(cat -- ${shq(tokenArtifact.apiBasePath)})`,
+          'worker_api_base_rc=$?',
+          `rm -f -- ${shq(tokenArtifact.apiBasePath)}`,
+        );
       }
-      lines.push(`rmdir -- '${safeTokenDir}' 2>/dev/null || true`);
+      workerCapabilityBootstrap.push(
+        `rmdir -- ${shq(tokenArtifact.tokenDir)} 2>/dev/null || true`,
+        '[ "$worker_token_rc" -eq 0 ] || exit 78',
+      );
+      if (tokenArtifact.apiBasePath) {
+        workerCapabilityBootstrap.push(
+          '[ "$worker_api_base_rc" -eq 0 ] || exit 78',
+        );
+      }
+      workerCapabilityBootstrap.push(
+        'export PALANTIR_WORKER_TOKEN',
+        ...(tokenArtifact.apiBasePath ? ['export PALANTIR_API_BASE'] : []),
+        'exec "$@"',
+      );
     }
 
     // Build an explicit clean environment for the worker. Merely exporting
@@ -276,12 +292,8 @@ function createTmuxEngine({
       return `'${safeArg}'`;
     });
     const safeCmd = String(command).replace(/'/g, "'\\''");
-    const workerTokenAssignment = tokenArtifact
-      ? ' PALANTIR_WORKER_TOKEN="$__palantir_worker_token"'
-      : '';
-    // Expanded by the bootstrap shell, so the VALUE never appears in argv.
-    const workerApiBaseAssignment = tokenArtifact && tokenArtifact.apiBasePath
-      ? ' PALANTIR_API_BASE="$__palantir_api_base"'
+    const workerCapabilityArgs = workerCapabilityBootstrap
+      ? ` /bin/sh -c ${shq(workerCapabilityBootstrap.join('; '))} ${shq('sh')}`
       : '';
     const quotedStdin = shq(stdinPath);
     const stdinRedirect = stdin !== undefined ? ` < ${quotedStdin}` : '';
@@ -297,7 +309,7 @@ function createTmuxEngine({
       // file first and only then clears this trap.
       lines.push(`trap ${shq(stdinCleanupCommand)} EXIT HUP INT TERM`);
     }
-    lines.push(`env -i ${workerEnvArgs.join(' ')}${workerTokenAssignment}${workerApiBaseAssignment} '${safeCmd}' ${quotedArgs.join(' ')}${stdinRedirect}`);
+    lines.push(`env -i ${workerEnvArgs.join(' ')}${workerCapabilityArgs} '${safeCmd}' ${quotedArgs.join(' ')}${stdinRedirect}`);
     // Capture $? exactly once so the durable sentinel and scrollback marker
     // always describe the same agent exit. Rename makes the sentinel atomic.
     const safeSentinel = exitSentinelPath.replace(/'/g, "'\\''");
