@@ -10,7 +10,7 @@ import { apiFetch } from '../lib/api.js';
 import { addToast } from '../lib/toast.js';
 import { useConversation } from '../lib/hooks.js';
 import { renderMarkdown } from '../lib/markdown.js';
-import { timeAgo } from '../lib/format.js';
+import { parseDate, timeAgo } from '../lib/format.js';
 import { Dropdown } from './Dropdown.js';
 import { EmptyState } from './EmptyState.js';
 import {
@@ -474,8 +474,8 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
     // Queue rows and run events have independent monotonic ids. Timestamp
     // order preserves conversational chronology; numeric event id breaks ties.
     out.sort((a, b) => {
-      const at = Date.parse(a.time || '') || 0;
-      const bt = Date.parse(b.time || '') || 0;
+      const at = parseDate(a.time || '').getTime() || 0;
+      const bt = parseDate(b.time || '').getTime() || 0;
       if (at !== bt) return at - bt;
       const ai = typeof a.id === 'number' ? a.id : Number.MAX_SAFE_INTEGER;
       const bi = typeof b.id === 'number' ? b.id : Number.MAX_SAFE_INTEGER;

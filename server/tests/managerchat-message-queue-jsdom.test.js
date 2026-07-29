@@ -6,6 +6,19 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createPreactEnv, flushEffects } = require('./helpers/jsdom-preact');
 
+const TIMEZONES = ['Asia/Seoul', 'UTC', 'America/Los_Angeles'];
+
+async function withTimezone(tz, fn) {
+  const previous = process.env.TZ;
+  process.env.TZ = tz;
+  try {
+    return await fn();
+  } finally {
+    if (previous === undefined) delete process.env.TZ;
+    else process.env.TZ = previous;
+  }
+}
+
 function createEnv({ apiFetch } = {}) {
   const env = createPreactEnv();
   const requests = [];
@@ -164,6 +177,36 @@ test('ManagerChat paints an optimistic queued bubble before the enqueue request 
   });
   await flushEffects();
 });
+
+for (const tz of TIMEZONES) {
+  test(`[TZ=${tz}] ManagerChat orders SQLite UTC events before later zoned optimistic messages`, async (t) => {
+    const ctx = createEnv();
+    t.after(ctx.env.cleanup);
+    const assistantEvent = {
+      id: 1,
+      event_type: 'assistant_text',
+      payload_json: JSON.stringify({ text: '기존 assistant 응답' }),
+      created_at: '2026-07-29 12:00:00',
+    };
+    const optimisticMessage = row('queued', {
+      id: 'optimistic:new-message',
+      idempotency_key: 'new-message',
+      display_text: '새 사용자 메시지',
+      created_at: '2026-07-29T12:01:00.000Z',
+      updated_at: '2026-07-29T12:01:00.000Z',
+    });
+
+    await withTimezone(tz, async () => {
+      ctx.renderChat([optimisticMessage], [assistantEvent]);
+      await flushEffects();
+
+      assert.deepEqual(
+        Array.from(ctx.root.querySelectorAll('.manager-msg-content'), el => el.textContent),
+        ['기존 assistant 응답', '새 사용자 메시지'],
+      );
+    });
+  });
+}
 
 test('ManagerChat follows the initial bottom but preserves an intentional scroll-up across updates', async (t) => {
   const ctx = createEnv();

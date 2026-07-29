@@ -1,6 +1,6 @@
 // Node-first UI helpers shared by board/detail/inspector/dashboard surfaces.
-// Kept dependency-free so jsdom tests can preload the exports as sandbox
-// globals while browser ESM imports use the same functions.
+
+import { parseDate } from './format.js';
 
 export function shouldRenderNodeBadge(run) {
   const nodeId = run?.node_id;
@@ -16,8 +16,8 @@ export function latestRunForTask(runs, taskId) {
   const taskRuns = (runs || []).filter(r => r.task_id === taskId);
   if (taskRuns.length === 0) return null;
   return taskRuns.slice().sort((a, b) => {
-    const at = Date.parse(a.created_at || a.updated_at || '') || 0;
-    const bt = Date.parse(b.created_at || b.updated_at || '') || 0;
+    const at = parseDate(a.created_at || a.updated_at || '').getTime() || 0;
+    const bt = parseDate(b.created_at || b.updated_at || '').getTime() || 0;
     return bt - at;
   })[0];
 }
