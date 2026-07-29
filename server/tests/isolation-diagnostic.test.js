@@ -6,7 +6,8 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const {
-  resolveActorTokenPolicy,
+  buildActorTokenAppOptions,
+  resolveAppActorTokenPolicy,
 } = require('../services/actorTokenPolicy');
 const {
   CHECK_IDS,
@@ -32,7 +33,7 @@ function runDiagnostic(args, overrides = {}) {
   });
 }
 
-test('isolation diagnostic stays lock-step with resolveActorTokenPolicy capabilitiesEnabled', () => {
+test('isolation diagnostic stays lock-step with the policy inputs used by createApp', () => {
   const values = [undefined, '', 'other', 'verified'];
   const sources = [undefined, 'environment', 'ephemeral_file', 'application_options'];
   const tokens = [undefined, '', 'human-secret'];
@@ -45,7 +46,13 @@ test('isolation diagnostic stays lock-step with resolveActorTokenPolicy capabili
         if (isolation !== undefined) env.PALANTIR_AGENT_PROCESS_ISOLATION = isolation;
         if (source !== undefined) env.PALANTIR_ACTOR_TOKEN_SOURCE = source;
 
-        const policy = resolveActorTokenPolicy(env);
+        // Both functions are the exact production seams invoked by index.js
+        // and createApp, so ambient source labels cannot make this comparison
+        // vacuous.
+        const policy = resolveAppActorTokenPolicy(
+          buildActorTokenAppOptions({ env }),
+          env,
+        );
         const diagnostic = diagnoseIsolation(env, {
           platform: 'test',
           arch: 'test',
@@ -111,8 +118,9 @@ test('diagnose:isolation --json exits 0 when the runtime policy enables capabili
   assert.equal(result.stderr, '');
   const parsed = JSON.parse(result.stdout);
   assert.equal(parsed.capabilitiesEnabled, true);
-  assert.equal(parsed.boundary, 'run_capabilities');
+  assert.equal(parsed.boundary, 'run_capabilities_unverified');
   assert.equal(parsed.checks.every((check) => check.ok), true);
+  assert.equal(parsed.advisories[0].level, 'warning');
   assert.equal(result.stdout.includes(secret), false);
 });
 
@@ -125,25 +133,105 @@ test('diagnose:isolation rejects unknown options with exit 1 JSON', () => {
   assert.match(parsed.error, /unknown option/);
 });
 
-test('the recommended file-based deployment is reported as indeterminate, not as not-ready', () => {
-  const { diagnoseIsolation } = require('../services/isolationDiagnostic');
+test('a definite failed gate takes precedence over an unknown file-backed token', () => {
+  const result = runDiagnostic(['--json'], {
+    PALANTIR_ACTOR_TOKEN_FILE: '/missing/token.json',
+  });
+
+  assert.equal(result.status, 2, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.capabilitiesEnabled, false);
+  assert.equal(parsed.indeterminate, false);
+  assert.equal(parsed.checks[0].indeterminate, true);
+  assert.equal(parsed.checks[1].ok, false);
+
+  const whitespace = runDiagnostic(['--json'], {
+    PALANTIR_ACTOR_TOKEN_FILE: '   ',
+  });
+  assert.equal(whitespace.status, 2, whitespace.stderr);
+  const whitespaceParsed = JSON.parse(whitespace.stdout);
+  assert.equal(whitespaceParsed.indeterminate, false);
+  assert.equal(whitespaceParsed.checks[0].indeterminate, false);
+  assert.equal(whitespaceParsed.checks[0].actual, 'missing');
+});
+
+test('one-shot file precedence makes an ambient token indeterminate, not ready', () => {
+  const result = runDiagnostic(['--json'], {
+    PALANTIR_TOKEN: 'ambient-canary',
+    PALANTIR_ACTOR_TOKEN_FILE: '/missing/token.json',
+    PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
+  });
+
+  assert.equal(result.status, 3, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.capabilitiesEnabled, false);
+  assert.equal(parsed.indeterminate, true);
+  assert.equal(parsed.boundary, null);
+  assert.equal(parsed.checks[0].indeterminate, true);
+  assert.equal(result.stdout.includes('ambient-canary'), false);
+});
+
+test('ambient source labels cannot claim the application-owned production boundary', () => {
+  const result = runDiagnostic(['--json'], {
+    PALANTIR_TOKEN: 'source-canary',
+    PALANTIR_ACTOR_TOKEN_SOURCE: 'ephemeral_file',
+    PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.capabilitiesEnabled, true);
+  assert.equal(parsed.boundary, 'run_capabilities_unverified');
+  assert.equal(parsed.advisories[0].level, 'warning');
+  assert.equal(parsed.advisories[0].ok, false);
+  assert.equal(result.stdout.includes('source-canary'), false);
+});
+
+test('production bootstrap options replace ambient actor inputs', () => {
+  const env = {
+    PALANTIR_TOKEN: 'ambient-human',
+    PALANTIR_PM_TOKEN: 'ambient-pm',
+    PALANTIR_ACTOR_TOKEN_SOURCE: 'application_options',
+    PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
+  };
+  const options = buildActorTokenAppOptions({
+    env,
+    actorTokenBootstrap: {
+      source: 'ephemeral_file',
+      authToken: 'file-human',
+      pmToken: 'file-pm',
+    },
+  });
+  const policy = resolveAppActorTokenPolicy(options, env);
+
+  assert.equal(options.actorTokenSource, 'ephemeral_file');
+  assert.equal(policy.humanToken, 'file-human');
+  assert.equal(policy.agentToken, 'file-pm');
+  assert.equal(policy.boundary, 'run_capabilities');
+});
+
+test('the recommended file-based deployment CLI reports an indeterminate state', () => {
   // index.js consumes PALANTIR_ACTOR_TOKEN_FILE at boot and passes the token to
   // createApp as an option, so it never becomes an environment variable. A flat
   // "missing" here would tell an operator running the documented secure recipe
   // that they are NOT READY when the server would in fact enable capabilities —
   // a diagnostic disagreeing with the runtime is the failure this tool exists
   // to prevent.
-  const result = diagnoseIsolation({
+  const result = runDiagnostic([], {
     PALANTIR_ACTOR_TOKEN_FILE: '/secure/tokens.json',
     PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
   });
-  assert.equal(result.indeterminate, true);
-  const tokenCheck = result.checks.find((check) => check.id === 'human_token');
-  assert.equal(tokenCheck.indeterminate, true);
-  assert.match(tokenCheck.actual, /not evaluable/);
 
-  // Without that file it is a genuine, determinable failure.
-  const plain = diagnoseIsolation({ PALANTIR_AGENT_PROCESS_ISOLATION: 'verified' });
-  assert.equal(plain.indeterminate, false);
-  assert.equal(plain.checks.find((check) => check.id === 'human_token').actual, 'missing');
+  assert.equal(result.status, 3, result.stderr);
+  assert.match(result.stdout, /^Agent capability isolation: INDETERMINATE$/m);
+  assert.match(result.stdout, /^  UNKNOWN human_token$/m);
+  assert.match(
+    result.stdout,
+    /^Policy boundary: not evaluable until PALANTIR_ACTOR_TOKEN_FILE is consumed$/m,
+  );
+  assert.match(result.stdout, /^  INFO token_source_assurance:/m);
+  assert.doesNotMatch(result.stdout, /NOT READY/);
+  assert.doesNotMatch(result.stdout, /^  FAIL human_token$/m);
+  assert.doesNotMatch(result.stdout, /Policy boundary: auth_disabled/);
+  assert.doesNotMatch(result.stdout, /^  WARNING token_source_assurance:/m);
 });

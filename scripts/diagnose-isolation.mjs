@@ -76,17 +76,22 @@ if (unknownArgs.length > 0) {
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     } else {
       const lines = [];
-      lines.push(`Agent capability isolation: ${result.capabilitiesEnabled ? 'READY' : 'NOT READY'}`);
+      const readiness = result.capabilitiesEnabled
+        ? 'READY'
+        : (result.indeterminate ? 'INDETERMINATE' : 'NOT READY');
+      lines.push(`Agent capability isolation: ${readiness}`);
       lines.push('');
       lines.push('Runtime gates');
       for (const check of result.checks) {
-        lines.push(`  ${check.ok ? 'PASS' : 'FAIL'} ${check.id}`);
+        const verdict = check.indeterminate ? 'UNKNOWN' : (check.ok ? 'PASS' : 'FAIL');
+        lines.push(`  ${verdict} ${check.id}`);
         lines.push(`       required: ${check.required}`);
         lines.push(`       actual:   ${check.actual}`);
         if (check.remediation) lines.push(`       fix:      ${check.remediation}`);
       }
       lines.push('');
-      lines.push(`Policy boundary: ${result.boundary}`);
+      lines.push(`Policy boundary: ${result.boundary
+        || 'not evaluable until PALANTIR_ACTOR_TOKEN_FILE is consumed'}`);
       lines.push('');
       lines.push('Advisories');
       for (const advisory of result.advisories) {
@@ -95,11 +100,17 @@ if (unknownArgs.length > 0) {
       process.stdout.write(`${lines.join('\n')}\n`);
     }
 
-    // 3, not 2: "cannot tell from here" is not "not ready". A CI gate that
-    // treats the recommended file-based deployment as a failure would push
-    // operators away from it.
-    if (result.indeterminate) process.exitCode = 3;
-    else if (!result.capabilitiesEnabled) process.exitCode = 2;
+    // A definite failed gate takes precedence over an unrelated unknown check.
+    // Exit 3 means every known gate passed and the file-backed token alone
+    // remains unevaluated.
+    const hasDefiniteFailure = result.checks.some(
+      (check) => !check.ok && !check.indeterminate,
+    );
+    if (hasDefiniteFailure || (!result.capabilitiesEnabled && !result.indeterminate)) {
+      process.exitCode = 2;
+    } else if (result.indeterminate) {
+      process.exitCode = 3;
+    }
   } catch (err) {
     writeFatal(err && err.message ? err.message : String(err));
   }

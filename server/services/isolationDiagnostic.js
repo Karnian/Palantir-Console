@@ -1,6 +1,9 @@
 'use strict';
 
-const { resolveActorTokenPolicy } = require('./actorTokenPolicy');
+const {
+  buildActorTokenAppOptions,
+  resolveAppActorTokenPolicy,
+} = require('./actorTokenPolicy');
 
 const CHECK_IDS = Object.freeze({
   HUMAN_TOKEN: 'human_token',
@@ -10,22 +13,30 @@ const CHECK_IDS = Object.freeze({
 /**
  * Diagnose the exact environment inputs that gate run-bound capabilities.
  *
- * Keep these predicates independent from resolveActorTokenPolicy on purpose.
- * The lock-step test compares both implementations over a truth table, so a
- * future runtime-policy edit cannot silently leave an obsolete diagnostic
- * behind.
+ * Keep the gate predicates explicit, then compare them with the shared
+ * createApp policy-input resolver over a truth table. This catches both policy
+ * changes and drift in production option/environment precedence.
  */
 function diagnoseIsolation(env = process.env, {
   platform = process.platform,
   arch = process.arch,
   uid = typeof process.getuid === 'function' ? process.getuid() : null,
 } = {}) {
-  const humanTokenPresent = !!(
+  const actorTokenFile = typeof env.PALANTIR_ACTOR_TOKEN_FILE === 'string'
+    ? env.PALANTIR_ACTOR_TOKEN_FILE.trim()
+    : '';
+  const actorTokenFileConfigured = actorTokenFile.length > 0;
+  // A configured one-shot file takes precedence over ambient credentials in
+  // prepareActorTokenEnvironment. Do not claim that the ambient token is what
+  // the server will use, and do not consume the file from a diagnostic command.
+  const humanTokenPresent = !actorTokenFileConfigured && !!(
     typeof env.PALANTIR_TOKEN === 'string'
     && env.PALANTIR_TOKEN
   );
   const isolationAttested = env.PALANTIR_AGENT_PROCESS_ISOLATION === 'verified';
-  const policy = resolveActorTokenPolicy(env);
+  const policy = actorTokenFileConfigured
+    ? null
+    : resolveAppActorTokenPolicy(buildActorTokenAppOptions({ env }), env);
 
   const checks = [
     {
@@ -39,18 +50,16 @@ function diagnoseIsolation(env = process.env, {
       // tells operators to use — a diagnostic that disagrees with the server is
       // the failure this tool exists to prevent, so say what is actually true:
       // the answer is not determinable from the environment alone.
-      indeterminate: !humanTokenPresent && !!(
-        typeof env.PALANTIR_ACTOR_TOKEN_FILE === 'string' && env.PALANTIR_ACTOR_TOKEN_FILE
-      ),
+      indeterminate: actorTokenFileConfigured,
       actual: humanTokenPresent
         ? 'present'
-        : (typeof env.PALANTIR_ACTOR_TOKEN_FILE === 'string' && env.PALANTIR_ACTOR_TOKEN_FILE
+        : (actorTokenFileConfigured
           ? 'not evaluable — PALANTIR_ACTOR_TOKEN_FILE is set and is consumed at boot, not exported'
           : 'missing'),
       remediation: humanTokenPresent
         ? null
-        : (typeof env.PALANTIR_ACTOR_TOKEN_FILE === 'string' && env.PALANTIR_ACTOR_TOKEN_FILE
-          ? 'Nothing to fix if that file holds a valid PALANTIR_TOKEN — this check cannot read it without consuming it. Confirm from the running server, or re-run with PALANTIR_TOKEN set to any placeholder to exercise the rest of the policy.'
+        : (actorTokenFileConfigured
+          ? 'Nothing to fix if that file holds a valid PALANTIR_TOKEN — this check cannot read it without consuming it. Confirm from the running server, or re-run in a separate process with PALANTIR_ACTOR_TOKEN_FILE unset and PALANTIR_TOKEN set to a non-secret placeholder.'
           : 'Configure PALANTIR_TOKEN, or start the Console through PALANTIR_ACTOR_TOKEN_FILE so bootstrap supplies it as application-owned state.'),
     },
     {
@@ -68,22 +77,21 @@ function diagnoseIsolation(env = process.env, {
   ];
 
   const capabilitiesEnabled = checks.every((check) => check.ok);
-  const sourceAssured = env.PALANTIR_ACTOR_TOKEN_SOURCE === 'ephemeral_file'
-    || env.PALANTIR_ACTOR_TOKEN_SOURCE === 'application_options';
-
-  // capabilitiesEnabled deliberately still mirrors resolveActorTokenPolicy for
-  // THIS env — the two must never disagree. `indeterminate` is a separate axis:
-  // the policy is right that this environment does not enable capabilities, and
-  // also this environment is not what the server will actually see. Reporting a
-  // flat NOT READY for the recommended file-based deployment is what would make
-  // the tool untrustworthy.
-  const indeterminate = checks.some((check) => check.indeterminate);
+  // A check that is unknown must not hide a different, definite failed gate.
+  // Exit 3 is reserved for cases where every known requirement passes.
+  const hasIndeterminateCheck = checks.some((check) => check.indeterminate);
+  const hasDefiniteFailure = checks.some((check) => !check.ok && !check.indeterminate);
+  const indeterminate = hasIndeterminateCheck && !hasDefiniteFailure;
+  // index.js only supplies an assured source after successful one-shot-file
+  // bootstrap. Without that bootstrap it forces `environment`, regardless of
+  // an ambient PALANTIR_ACTOR_TOKEN_SOURCE value.
+  const sourceAssured = actorTokenFileConfigured;
 
   return {
     schemaVersion: 1,
     capabilitiesEnabled,
     indeterminate,
-    boundary: policy.boundary,
+    boundary: policy ? policy.boundary : null,
     checks,
     advisories: [
       {
@@ -91,7 +99,7 @@ function diagnoseIsolation(env = process.env, {
         level: sourceAssured ? 'info' : 'warning',
         ok: sourceAssured,
         message: sourceAssured
-          ? 'Actor credentials are marked as application-owned or one-shot-file sourced.'
+          ? 'PALANTIR_ACTOR_TOKEN_FILE takes precedence; a successful bootstrap supplies an assured one-shot-file source.'
           : 'Token-source assurance is not a capabilitiesEnabled gate, but direct environment credentials produce run_capabilities_unverified.',
       },
       {

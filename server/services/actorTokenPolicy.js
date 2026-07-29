@@ -219,6 +219,51 @@ function resolveActorTokenPolicy(env = process.env) {
   };
 }
 
+function buildActorTokenAppOptions({
+  env = process.env,
+  actorTokenBootstrap = null,
+} = {}) {
+  return {
+    actorTokenSource: actorTokenBootstrap?.source || 'environment',
+    agentProcessIsolation: env.PALANTIR_AGENT_PROCESS_ISOLATION === 'verified',
+    ...(actorTokenBootstrap
+      ? {
+          authToken: actorTokenBootstrap.authToken,
+          pmToken: actorTokenBootstrap.pmToken,
+        }
+      : {}),
+  };
+}
+
+/**
+ * Resolve the policy from the same option/environment precedence used by
+ * createApp. Production passes actorTokenSource explicitly, so an ambient
+ * PALANTIR_ACTOR_TOKEN_SOURCE must never relabel a direct environment token.
+ */
+function resolveAppActorTokenPolicy(options = {}, env = process.env) {
+  const authToken = options.authToken !== undefined
+    ? options.authToken
+    : env.PALANTIR_TOKEN;
+  const pmToken = options.pmToken !== undefined
+    ? options.pmToken
+    : env.PALANTIR_PM_TOKEN;
+  const allConfiguredActorTokensFromOptions = (
+    (!authToken || options.authToken !== undefined)
+    && (!pmToken || options.pmToken !== undefined)
+  );
+  return resolveActorTokenPolicy({
+    PALANTIR_TOKEN: authToken,
+    PALANTIR_PM_TOKEN: pmToken,
+    PALANTIR_AGENT_PROCESS_ISOLATION: options.agentProcessIsolation === undefined
+      ? env.PALANTIR_AGENT_PROCESS_ISOLATION
+      : (options.agentProcessIsolation === true ? 'verified' : null),
+    PALANTIR_ACTOR_TOKEN_SOURCE: options.actorTokenSource
+      || (allConfiguredActorTokensFromOptions
+        ? 'application_options'
+        : 'environment'),
+  });
+}
+
 function isResolvedActorTokenPolicy(value) {
   return !!(value
     && typeof value === 'object'
@@ -593,6 +638,8 @@ module.exports = {
   consumeActorTokenFile,
   prepareActorTokenEnvironment,
   resolveActorTokenPolicy,
+  buildActorTokenAppOptions,
+  resolveAppActorTokenPolicy,
   isActorCredentialKey,
   PROCESS_BASE_ENV_KEYS,
   WORKER_BASE_ENV_KEYS,
