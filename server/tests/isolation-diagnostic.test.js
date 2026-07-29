@@ -7,6 +7,7 @@ const { spawnSync } = require('node:child_process');
 
 const {
   buildActorTokenAppOptions,
+  consumeActorTokenFile,
   resolveAppActorTokenPolicy,
 } = require('../services/actorTokenPolicy');
 const {
@@ -27,6 +28,19 @@ function cleanProcessEnv(overrides = {}) {
 
 function runDiagnostic(args, overrides = {}) {
   return spawnSync(process.execPath, [scriptPath, ...args], {
+    cwd: path.resolve(__dirname, '../..'),
+    env: cleanProcessEnv(overrides),
+    encoding: 'utf8',
+  });
+}
+
+function runDiagnosticAsPlatform(args, overrides, platform) {
+  const launcher = [
+    `Object.defineProperty(process, 'platform', { value: ${JSON.stringify(platform)} });`,
+    `process.argv = [process.execPath, ${JSON.stringify(scriptPath)}, ...${JSON.stringify(args)}];`,
+    `import(${JSON.stringify(scriptPath)});`,
+  ].join('\n');
+  return spawnSync(process.execPath, ['--eval', launcher], {
     cwd: path.resolve(__dirname, '../..'),
     env: cleanProcessEnv(overrides),
     encoding: 'utf8',
@@ -207,6 +221,40 @@ test('one-shot file precedence makes an ambient token indeterminate, not ready',
   assert.equal(parsed.boundary, null);
   assert.equal(parsed.checks[0].indeterminate, true);
   assert.equal(result.stdout.includes('ambient-canary'), false);
+});
+
+test('Windows token-file diagnostics fail exactly as bootstrap does', () => {
+  const env = {
+    PALANTIR_ACTOR_TOKEN_FILE: 'C:\\secure\\tokens.json',
+    PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
+  };
+
+  assert.throws(
+    () => consumeActorTokenFile({ env: { ...env }, platform: 'win32' }),
+    /PALANTIR_ACTOR_TOKEN_FILE is unsupported on Windows because its ACL cannot be verified/,
+  );
+
+  const diagnostic = diagnoseIsolation(env, {
+    platform: 'win32',
+    arch: 'x64',
+    uid: null,
+  });
+  assert.equal(diagnostic.capabilitiesEnabled, false);
+  assert.equal(diagnostic.indeterminate, false);
+  assert.equal(diagnostic.boundary, null);
+  assert.equal(diagnostic.checks[0].ok, false);
+  assert.equal(diagnostic.checks[0].indeterminate, false);
+  assert.match(diagnostic.checks[0].actual, /unsupported on Windows/);
+  assert.match(diagnostic.checks[0].remediation, /Unset PALANTIR_ACTOR_TOKEN_FILE/);
+  assert.equal(diagnostic.advisories[0].level, 'warning');
+  assert.equal(diagnostic.advisories[0].ok, false);
+
+  const cli = runDiagnosticAsPlatform(['--json'], env, 'win32');
+  assert.equal(cli.status, 2, cli.stderr);
+  const parsed = JSON.parse(cli.stdout);
+  assert.equal(parsed.indeterminate, false);
+  assert.equal(parsed.checks[0].indeterminate, false);
+  assert.match(parsed.checks[0].actual, /unsupported on Windows/);
 });
 
 test('ambient source labels cannot claim the application-owned production boundary', () => {

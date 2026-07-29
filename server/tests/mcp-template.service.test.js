@@ -111,6 +111,48 @@ test('createMcpTemplateService: env denylist pre-rejects forbidden keys', async 
   }
 });
 
+test('stdio template env denylist rejects Windows case variants', async (t) => {
+  const db = setupDb(t);
+  createSkillPackService(db);
+  const templateSvc = createMcpTemplateService(db);
+
+  await assert.rejects(
+    () => templateSvc.createTemplate({
+      alias: 'lowercase_node_options',
+      command: 'node',
+      allowed_env_keys: ['node_options'],
+    }),
+    (err) => err.status === 400 && /globally-denied key/.test(err.message),
+  );
+});
+
+test('skill-pack env denylist rejects Windows case variants from legacy templates', async (t) => {
+  const db = setupDb(t);
+  const packSvc = createSkillPackService(db);
+  const templateSvc = createMcpTemplateService(db);
+  // Keep the skill-pack validation independently non-vacuous for templates
+  // persisted before this rule existed or inserted outside template CRUD.
+  const legacy = await templateSvc.createTemplate({
+    alias: 'legacy_lowercase_node_options',
+    command: 'node',
+    allowed_env_keys: ['SAFE_OPTION'],
+  });
+  db.prepare('UPDATE mcp_server_templates SET allowed_env_keys = ? WHERE id = ?')
+    .run(JSON.stringify(['node_options']), legacy.id);
+
+  assert.throws(
+    () => packSvc.createSkillPack({
+      name: 'Denied lowercase NODE_OPTIONS',
+      mcp_servers: {
+        [legacy.alias]: {
+          env_overrides: { node_options: '--require=C:\\attacker\\hook.js' },
+        },
+      },
+    }),
+    (err) => err.status === 400 && /blocked by security policy/.test(err.message),
+  );
+});
+
 test('createMcpTemplateService: command rejects surrounding whitespace', async (t) => {
   const db = setupDb(t);
   createSkillPackService(db);

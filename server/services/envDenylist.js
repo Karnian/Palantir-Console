@@ -40,7 +40,12 @@ const BEARER_ENV_HARD_DENYLIST_PATTERNS = [
 ];
 
 function isEnvKeyDenied(key) {
-  return ENV_HARD_DENYLIST_PATTERNS.some((pattern) => pattern.test(key));
+  if (typeof key !== 'string') return false;
+  // Templates and skill packs can be authored on one OS and spawned on
+  // another. Windows resolves environment keys case-insensitively, so reject
+  // every spelling of a globally-denied key before it can reach a worker.
+  const normalizedKey = key.toUpperCase();
+  return ENV_HARD_DENYLIST_PATTERNS.some((pattern) => pattern.test(normalizedKey));
 }
 
 function isBearerEnvKeyDenied(key) {

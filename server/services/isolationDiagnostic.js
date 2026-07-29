@@ -26,6 +26,8 @@ function diagnoseIsolation(env = process.env, {
     ? env.PALANTIR_ACTOR_TOKEN_FILE.trim()
     : '';
   const actorTokenFileConfigured = actorTokenFile.length > 0;
+  const actorTokenFileUnsupported = actorTokenFileConfigured && platform === 'win32';
+  const actorTokenFileIndeterminate = actorTokenFileConfigured && !actorTokenFileUnsupported;
   // A configured one-shot file takes precedence over ambient credentials in
   // prepareActorTokenEnvironment. Do not claim that the ambient token is what
   // the server will use, and do not consume the file from a diagnostic command.
@@ -49,17 +51,23 @@ function diagnoseIsolation(env = process.env, {
       // that "missing" would report NOT READY for the very setup the runbook
       // tells operators to use — a diagnostic that disagrees with the server is
       // the failure this tool exists to prevent, so say what is actually true:
-      // the answer is not determinable from the environment alone.
-      indeterminate: actorTokenFileConfigured,
+      // the answer is not determinable from the environment alone on supported
+      // platforms. Windows is a definite failure because bootstrap rejects the
+      // file before reading it when its ACL cannot be verified.
+      indeterminate: actorTokenFileIndeterminate,
       actual: humanTokenPresent
         ? 'present'
         : (actorTokenFileConfigured
-          ? 'not evaluable — PALANTIR_ACTOR_TOKEN_FILE is set and is consumed at boot, not exported'
+          ? (actorTokenFileUnsupported
+            ? 'invalid — PALANTIR_ACTOR_TOKEN_FILE is unsupported on Windows because its ACL cannot be verified'
+            : 'not evaluable — PALANTIR_ACTOR_TOKEN_FILE is set and is consumed at boot, not exported')
           : 'missing'),
       remediation: humanTokenPresent
         ? null
         : (actorTokenFileConfigured
-          ? 'Nothing to fix if that file holds a valid PALANTIR_TOKEN — this check cannot read it without consuming it. Confirm from the running server, or re-run in a separate process with PALANTIR_ACTOR_TOKEN_FILE unset and PALANTIR_TOKEN set to a non-secret placeholder.'
+          ? (actorTokenFileUnsupported
+            ? 'Unset PALANTIR_ACTOR_TOKEN_FILE on Windows and inject the actor token through an OS/container secret boundary supported by the Console deployment.'
+            : 'Nothing to fix if that file holds a valid PALANTIR_TOKEN — this check cannot read it without consuming it. Confirm from the running server, or re-run in a separate process with PALANTIR_ACTOR_TOKEN_FILE unset and PALANTIR_TOKEN set to a non-secret placeholder.')
           : 'Configure PALANTIR_TOKEN, or start the Console through PALANTIR_ACTOR_TOKEN_FILE so bootstrap supplies it as application-owned state.'),
     },
     {
@@ -85,7 +93,7 @@ function diagnoseIsolation(env = process.env, {
   // index.js only supplies an assured source after successful one-shot-file
   // bootstrap. Without that bootstrap it forces `environment`, regardless of
   // an ambient PALANTIR_ACTOR_TOKEN_SOURCE value.
-  const sourceAssured = actorTokenFileConfigured;
+  const sourceAssured = actorTokenFileConfigured && !actorTokenFileUnsupported;
 
   return {
     schemaVersion: 1,
@@ -98,9 +106,11 @@ function diagnoseIsolation(env = process.env, {
         id: 'token_source_assurance',
         level: sourceAssured ? 'info' : 'warning',
         ok: sourceAssured,
-        message: sourceAssured
-          ? 'PALANTIR_ACTOR_TOKEN_FILE takes precedence; a successful bootstrap supplies an assured one-shot-file source.'
-          : 'Token-source assurance is not a capabilitiesEnabled gate, but direct environment credentials produce run_capabilities_unverified.',
+        message: actorTokenFileUnsupported
+          ? 'PALANTIR_ACTOR_TOKEN_FILE cannot supply an assured source on Windows because bootstrap rejects it before reading the token.'
+          : (sourceAssured
+            ? 'PALANTIR_ACTOR_TOKEN_FILE takes precedence; a successful bootstrap supplies an assured one-shot-file source.'
+            : 'Token-source assurance is not a capabilitiesEnabled gate, but direct environment credentials produce run_capabilities_unverified.'),
       },
       {
         id: 'os_boundary_manual_verification',
