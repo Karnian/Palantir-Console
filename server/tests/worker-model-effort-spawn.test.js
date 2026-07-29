@@ -201,11 +201,11 @@ test('claude worker forwards structured permission_mode to the stream-json spec'
   assert.equal(harness.streamJsonEngine.spawned[0].opts.permissionMode, 'acceptEdits');
 });
 
-test('claude worker carries max-budget and strict MCP template options into the stream-json spec', async (t) => {
+test('claude worker carries security template options into the stream-json spec', async (t) => {
   const harness = await createHarness(t);
   const profileId = insertProfile(harness.db, {
     command: 'claude',
-    argsTemplate: '-p {prompt} --max-budget-usd 0.01 --mcp-config /tmp/intended.json --strict-mcp-config',
+    argsTemplate: '-p {prompt} --max-budget-usd 0.01 --mcp-config /tmp/intended.json --strict-mcp-config --safe-mode --setting-sources ""',
   });
 
   await executeWorker(harness, profileId, 'Claude template runtime options');
@@ -217,6 +217,8 @@ test('claude worker carries max-budget and strict MCP template options into the 
     '/tmp/intended.json',
   );
   assert.equal(harness.streamJsonEngine.spawned[0].opts.strictMcpConfig, true);
+  assert.equal(harness.streamJsonEngine.spawned[0].opts.safeMode, true);
+  assert.equal(harness.streamJsonEngine.spawned[0].opts.settingSources, '');
 });
 
 test('saved Claude disallowedTools template reaches the stream-json worker spec', async (t) => {

@@ -121,6 +121,15 @@ function resolveResumeClaudeTemplateOptions(agentProfileService, options = {}) {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new Error('invalid Claude session options snapshot');
     }
+    if (
+      parsed.legacyProfileSnapshot === true
+      && typeof parsed.argsTemplate === 'string'
+    ) {
+      return {
+        ...parseClaudeArgsTemplate(parsed.argsTemplate),
+        legacyProfileSnapshot: true,
+      };
+    }
     return {
       tools: Array.isArray(parsed.tools) ? parsed.tools : [],
       disallowedTools: Array.isArray(parsed.disallowedTools)
@@ -129,6 +138,10 @@ function resolveResumeClaudeTemplateOptions(agentProfileService, options = {}) {
       maxBudgetUsd: parsed.maxBudgetUsd ?? null,
       mcpConfig: parsed.mcpConfig ?? null,
       strictMcpConfig: parsed.strictMcpConfig === true,
+      safeMode: parsed.safeMode === true,
+      settingSources: typeof parsed.settingSources === 'string'
+        ? parsed.settingSources
+        : null,
     };
   }
   const profile = resolveResumeAgentProfile(agentProfileService, options);
@@ -286,6 +299,10 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
               maxBudgetUsd: templateOptions?.maxBudgetUsd || undefined,
               mcpConfig: templateOptions?.mcpConfig || undefined,
               strictMcpConfig: templateOptions?.strictMcpConfig || undefined,
+              safeMode: templateOptions?.safeMode || undefined,
+              settingSources: typeof templateOptions?.settingSources === 'string'
+                ? templateOptions.settingSources
+                : undefined,
               resumeSessionId: r.claude_session_id,
               model: r.session_model || undefined,
               reasoning_effort: r.session_effort || undefined,
@@ -592,13 +609,20 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                       ? templateOptions.disallowedTools
                       : undefined,
                     maxBudgetUsd: templateOptions?.maxBudgetUsd || undefined,
-                    mcpConfig: r.session_claude_options_json != null
+                    mcpConfig: (
+                      r.session_claude_options_json != null
+                      && !templateOptions?.legacyProfileSnapshot
+                    )
                       ? (templateOptions?.mcpConfig || undefined)
                       : mergeClaudeMcpConfigs(
                         templateOptions?.mcpConfig,
                         project.mcp_config_path,
                       ),
                     strictMcpConfig: templateOptions?.strictMcpConfig || undefined,
+                    safeMode: templateOptions?.safeMode || undefined,
+                    settingSources: typeof templateOptions?.settingSources === 'string'
+                      ? templateOptions.settingSources
+                      : undefined,
                     role: 'manager',
                     nodeId,
                     // F-1: per-turn tier resolver — re-reads this instance's
@@ -944,6 +968,12 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 maxBudgetUsd: claudeTemplateOptions.maxBudgetUsd,
                 mcpConfig: claudeTemplateOptions.mcpConfig,
                 strictMcpConfig: claudeTemplateOptions.strictMcpConfig,
+                ...(claudeTemplateOptions.safeMode
+                  ? { safeMode: true }
+                  : {}),
+                ...(typeof claudeTemplateOptions.settingSources === 'string'
+                  ? { settingSources: claudeTemplateOptions.settingSources }
+                  : {}),
               }
             : null,
         });
@@ -971,6 +1001,10 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         maxBudgetUsd: claudeTemplateOptions?.maxBudgetUsd || undefined,
         mcpConfig: claudeTemplateOptions?.mcpConfig || undefined,
         strictMcpConfig: claudeTemplateOptions?.strictMcpConfig || undefined,
+        safeMode: claudeTemplateOptions?.safeMode || undefined,
+        settingSources: typeof claudeTemplateOptions?.settingSources === 'string'
+          ? claudeTemplateOptions.settingSources
+          : undefined,
         env: spawnEnv,
         envAllowlist,
         mcpTools: mcpTools.length > 0 ? mcpTools : undefined,

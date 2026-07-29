@@ -425,6 +425,8 @@ function createOperatorSpawnService({
     let maxBudgetUsd = null;
     let profileMcpConfig = null;
     let strictMcpConfig = false;
+    let safeMode = false;
+    let settingSources = null;
     let permissionMode = adapterType === 'claude-code' ? 'bypassPermissions' : undefined;
     try {
       if (agentProfileService) {
@@ -454,6 +456,8 @@ function createOperatorSpawnService({
             maxBudgetUsd = templateOptions.maxBudgetUsd;
             profileMcpConfig = templateOptions.mcpConfig;
             strictMcpConfig = templateOptions.strictMcpConfig;
+            safeMode = templateOptions.safeMode;
+            settingSources = templateOptions.settingSources;
           }
           if (managerProfile.env_allowlist) {
             const parsed = JSON.parse(managerProfile.env_allowlist);
@@ -798,6 +802,10 @@ function createOperatorSpawnService({
                   maxBudgetUsd,
                   mcpConfig: effectiveMcpConfig || null,
                   strictMcpConfig,
+                  ...(safeMode ? { safeMode: true } : {}),
+                  ...(typeof settingSources === 'string'
+                    ? { settingSources }
+                    : {}),
                 }
               : null,
           });
@@ -825,6 +833,10 @@ function createOperatorSpawnService({
           disallowedTools: disallowedTools.length > 0 ? disallowedTools : undefined,
           maxBudgetUsd: maxBudgetUsd || undefined,
           strictMcpConfig: strictMcpConfig || undefined,
+          safeMode: safeMode || undefined,
+          settingSources: typeof settingSources === 'string'
+            ? settingSources
+            : undefined,
           role: 'manager',
           nodeId,
           resumeThreadId,

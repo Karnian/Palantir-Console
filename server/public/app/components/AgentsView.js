@@ -32,10 +32,33 @@ function vendorFromCommand(command) {
 
 function effectivePermissionMode(agent) {
   if (agent?.permission_mode) return agent.permission_mode;
-  const match = String(agent?.args_template || '').match(
-    /--permission-mode(?:=|\s+)(acceptEdits|auto|bypassPermissions|default|dontAsk|manual|plan)(?:\s|$)/,
-  );
-  return match ? match[1] : 'bypassPermissions';
+  // Match the server/runtime tokenizer: a value wrapped in double quotes is
+  // one token and loses those surrounding quotes before option resolution.
+  // Keeping a separate regex here previously made `"acceptEdits"` invisible,
+  // so an unrelated edit sent an explicit NULL and elevated the profile to
+  // bypassPermissions.
+  const tokens = (
+    String(agent?.args_template || '').match(/(?:[^\s"]+|"[^"]*")+/g) || []
+  ).map(token => token.replace(/^"(.*)"$/, '$1'));
+  const validModes = new Set([
+    'acceptEdits',
+    'auto',
+    'bypassPermissions',
+    'default',
+    'dontAsk',
+    'manual',
+    'plan',
+  ]);
+  for (let i = 0; i < tokens.length; i += 1) {
+    let value = null;
+    if (tokens[i] === '--permission-mode') {
+      value = tokens[i + 1];
+    } else if (tokens[i].startsWith('--permission-mode=')) {
+      value = tokens[i].slice('--permission-mode='.length);
+    }
+    if (validModes.has(value)) return value;
+  }
+  return 'bypassPermissions';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

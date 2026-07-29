@@ -168,6 +168,99 @@ test('migration 077 repairs multi-space rows in databases that already recorded 
   );
 });
 
+test('migration 079 snapshots pre-existing Claude manager templates', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-claude-options-migration-'));
+  const db = new Database(path.join(dir, 'test.db'));
+  t.after(() => {
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  db.exec(`
+    CREATE TABLE agent_profiles (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      args_template TEXT
+    );
+    CREATE TABLE runs (
+      id TEXT PRIMARY KEY,
+      agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE SET NULL,
+      is_manager INTEGER,
+      manager_adapter TEXT,
+      session_claude_options_json TEXT
+    );
+    INSERT INTO agent_profiles (id, name, type, args_template)
+    VALUES (
+      'restricted-claude',
+      'Restricted Claude',
+      'claude-code',
+      '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config locked.json --strict-mcp-config'
+    );
+    INSERT INTO runs (id, agent_profile_id, is_manager, manager_adapter)
+    VALUES ('top-before-upgrade', 'restricted-claude', 1, 'claude-code');
+    INSERT INTO runs (id, agent_profile_id, is_manager, manager_adapter)
+    VALUES ('operator-before-upgrade', NULL, 1, 'claude-code');
+    INSERT INTO runs (
+      id, agent_profile_id, is_manager, manager_adapter,
+      session_claude_options_json
+    ) VALUES (
+      'already-snapshotted',
+      'restricted-claude',
+      1,
+      'claude-code',
+      '{"tools":[]}'
+    );
+  `);
+
+  db.exec(fs.readFileSync(
+    path.join(
+      __dirname,
+      '..',
+      'db',
+      'migrations',
+      '079_backfill_claude_session_options.sql',
+    ),
+    'utf8',
+  ));
+
+  const expectedTemplate = '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config locked.json --strict-mcp-config';
+  for (const id of ['top-before-upgrade', 'operator-before-upgrade']) {
+    assert.deepEqual(
+      JSON.parse(db.prepare(`
+        SELECT session_claude_options_json
+        FROM runs
+        WHERE id = ?
+      `).get(id).session_claude_options_json),
+      {
+        argsTemplate: expectedTemplate,
+        legacyProfileSnapshot: true,
+      },
+    );
+  }
+  assert.equal(
+    db.prepare(`
+      SELECT session_claude_options_json
+      FROM runs
+      WHERE id = 'already-snapshotted'
+    `).get().session_claude_options_json,
+    '{"tools":[]}',
+  );
+
+  db.prepare(`
+    UPDATE agent_profiles
+    SET args_template = '-p {prompt}'
+    WHERE id = 'restricted-claude'
+  `).run();
+  assert.equal(
+    JSON.parse(db.prepare(`
+      SELECT session_claude_options_json
+      FROM runs
+      WHERE id = 'top-before-upgrade'
+    `).get().session_claude_options_json).argsTemplate,
+    expectedTemplate,
+  );
+});
+
 test('vendor rules reject unsupported fields and allow clean codex fields', (t) => {
   const { service } = setup(t);
   assertBadRequest(
@@ -330,6 +423,39 @@ test('claude template parser preserves tool and strict MCP rules', (t) => {
   );
 });
 
+test('claude template parser preserves safe mode and an empty setting source', (t) => {
+  const { service } = setup(t);
+  const argsTemplate = '-p {prompt} --safe-mode --setting-sources ""';
+  const parsed = parseClaudeArgsTemplate(argsTemplate);
+
+  assert.equal(parsed.safeMode, true);
+  assert.equal(parsed.settingSources, '');
+
+  const created = service.createProfile(profile({
+    command: 'claude',
+    type: 'claude-code',
+    args_template: argsTemplate,
+  }));
+  assert.equal(created.args_template, argsTemplate);
+
+  assertBadRequest(
+    () => service.createProfile(profile({
+      command: 'claude',
+      type: 'claude-code',
+      args_template: '-p {prompt} --safe-mode=true',
+    })),
+    /--safe-mode in args_template does not accept a value/,
+  );
+  assertBadRequest(
+    () => service.createProfile(profile({
+      command: 'claude',
+      type: 'claude-code',
+      args_template: '-p {prompt} --setting-sources',
+    })),
+    /--setting-sources in args_template requires a value/,
+  );
+});
+
 test('legacy multi-space permission remains stable across an Agents UI-shaped rename', (t) => {
   const { service, db } = setup(t);
   const legacy = service.createProfile(profile({
@@ -351,6 +477,37 @@ test('legacy multi-space permission remains stable across an Agents UI-shaped re
     type: 'claude-code',
     command: 'claude',
     args_template: '-p {prompt} --permission-mode   acceptEdits',
+    model: null,
+    reasoning_effort: null,
+    permission_mode: 'acceptEdits',
+    max_concurrent: 1,
+    capabilities_json: '{}',
+  });
+
+  assert.equal(renamed.permission_mode, 'acceptEdits');
+  assert.equal(resolveClaudePermissionMode(renamed), 'acceptEdits');
+});
+
+test('quoted raw permission remains stable across an Agents UI-shaped rename', (t) => {
+  const { service, db } = setup(t);
+  const legacy = service.createProfile(profile({
+    name: 'Legacy quoted Claude',
+    command: 'claude',
+    type: 'claude-code',
+    args_template: '-p {prompt}',
+  }));
+  db.prepare(`
+    UPDATE agent_profiles
+    SET args_template = ?, permission_mode = NULL
+    WHERE id = ?
+  `).run('-p {prompt} --permission-mode "acceptEdits"', legacy.id);
+
+  assert.equal(resolveClaudePermissionMode(service.getProfile(legacy.id)), 'acceptEdits');
+  const renamed = service.updateProfile(legacy.id, {
+    name: 'Renamed quoted Claude',
+    type: 'claude-code',
+    command: 'claude',
+    args_template: '-p {prompt} --permission-mode "acceptEdits"',
     model: null,
     reasoning_effort: null,
     permission_mode: 'acceptEdits',

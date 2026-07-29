@@ -241,7 +241,7 @@ test('Top Manager snapshots and resumes Claude runtime options after profile rem
     starts,
   } = await createCapturingManagerHarness(t);
   agentProfileService.updateProfile('claude-code', {
-    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config profile.json --strict-mcp-config',
+    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config profile.json --strict-mcp-config --safe-mode --setting-sources ""',
   });
 
   const response = await invokeApp(app, {
@@ -256,6 +256,8 @@ test('Top Manager snapshots and resumes Claude runtime options after profile rem
   assert.equal(starts[0].opts.maxBudgetUsd, 0.01);
   assert.equal(starts[0].opts.mcpConfig, 'profile.json');
   assert.equal(starts[0].opts.strictMcpConfig, true);
+  assert.equal(starts[0].opts.safeMode, true);
+  assert.equal(starts[0].opts.settingSources, '');
   const run = runService.getRun(managerRegistry.getActiveRunId('top'));
   assert.deepEqual(JSON.parse(run.session_claude_options_json), {
     tools: ['Read,Grep'],
@@ -263,6 +265,8 @@ test('Top Manager snapshots and resumes Claude runtime options after profile rem
     maxBudgetUsd: 0.01,
     mcpConfig: 'profile.json',
     strictMcpConfig: true,
+    safeMode: true,
+    settingSources: '',
   });
 
   runService.updateClaudeSessionId(run.id, 'sess-profile-options');
@@ -315,6 +319,76 @@ test('Top Manager snapshots and resumes Claude runtime options after profile rem
   assert.deepEqual(resumed.opts.disallowedTools, ['Bash']);
   assert.equal(resumed.opts.maxBudgetUsd, 0.01);
   assert.equal(resumed.opts.mcpConfig, 'profile.json');
+  assert.equal(resumed.opts.strictMcpConfig, true);
+  assert.equal(resumed.opts.safeMode, true);
+  assert.equal(resumed.opts.settingSources, '');
+});
+
+test('Manager boot-resume reparses a migration-backfilled template snapshot', async (t) => {
+  const {
+    agentProfileService,
+    runService,
+  } = await createCapturingManagerHarness(t);
+  const template = '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config locked.json --strict-mcp-config';
+  const staleRun = runService.createRun({
+    is_manager: true,
+    agent_profile_id: 'claude-code',
+    prompt: 'pre-migration manager',
+    manager_adapter: 'claude-code',
+  });
+  runService.updateRunStatus(staleRun.id, 'running', { force: true });
+  runService.updateClaudeSessionId(staleRun.id, 'sess-pre-migration');
+  runService.setSessionSnapshot(staleRun.id, {
+    sessionPermissionMode: 'acceptEdits',
+    sessionClaudeOptions: {
+      argsTemplate: template,
+      legacyProfileSnapshot: true,
+    },
+  });
+  agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt}',
+  });
+
+  const resumeStarts = [];
+  const resumeAdapter = {
+    type: 'claude-code',
+    capabilities: { persistentProcess: true, supportsResume: true },
+    startSession(runId, opts) {
+      resumeStarts.push({ runId, opts });
+      return { sessionRef: { pid: 7654 } };
+    },
+    isSessionAlive() { return true; },
+    detectExitCode() { return null; },
+    disposeSession() { return true; },
+    buildGuardrailsSection() { return ''; },
+  };
+  const resumeFactory = { getAdapter: () => resumeAdapter };
+  const resumeRegistry = createManagerRegistry({ runService });
+  const resumeConversationService = createConversationService({
+    runService,
+    managerRegistry: resumeRegistry,
+    managerAdapterFactory: resumeFactory,
+    lifecycleService: null,
+  });
+  createManagerRouter({
+    runService,
+    managerAdapterFactory: resumeFactory,
+    managerRegistry: resumeRegistry,
+    conversationService: resumeConversationService,
+    agentProfileService,
+    authResolverOpts: {
+      hasKeychain: () => true,
+      hasCredentialsFile: () => false,
+    },
+  });
+
+  const resumed = resumeStarts.find((entry) => entry.runId === staleRun.id);
+  assert.ok(resumed);
+  assert.equal(resumed.opts.resumeSessionId, 'sess-pre-migration');
+  assert.deepEqual(resumed.opts.tools, ['Read,Grep']);
+  assert.deepEqual(resumed.opts.disallowedTools, ['Bash']);
+  assert.equal(resumed.opts.maxBudgetUsd, 0.01);
+  assert.equal(resumed.opts.mcpConfig, 'locked.json');
   assert.equal(resumed.opts.strictMcpConfig, true);
 });
 

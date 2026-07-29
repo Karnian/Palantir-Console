@@ -184,6 +184,14 @@ function createStreamJsonEngine({
       args.push('--strict-mcp-config');
     }
 
+    if (opts.safeMode) {
+      args.push('--safe-mode');
+    }
+
+    if (!opts.isolated && typeof opts.settingSources === 'string') {
+      args.push('--setting-sources', opts.settingSources);
+    }
+
     // Phase 10D Tier 2 (Claude isolated worker): drop host ~/.claude/
     // inheritance, inject preset-supplied plugins, and point at a
     // temp settings file when apiKeyHelper is used for auth. Manager
@@ -267,9 +275,9 @@ function createStreamJsonEngine({
    * Spawn a Claude Code agent with stream-json protocol.
    */
   function spawnAgent(runId, { prompt, cwd, env, systemPrompt, permissionMode,
-    tools, allowedTools, disallowedTools, maxBudgetUsd, model, mcpConfig, strictMcpConfig, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent,
+    tools, allowedTools, disallowedTools, maxBudgetUsd, model, mcpConfig, strictMcpConfig, safeMode, settingSources, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent,
     // Phase 10D Tier 2
-    isolated, pluginDirs, settingsPath, settingSources, onCleanup,
+    isolated, pluginDirs, settingsPath, onCleanup,
     executor, nodePrefix, envAllowlist, nodeId }) {
 
     const usingRemoteExecutor = !!executor;
@@ -281,8 +289,9 @@ function createStreamJsonEngine({
     const claudeBin = usingRemoteExecutor ? 'claude' : resolveClaudeBin();
     const args = buildArgs({
       prompt, systemPrompt, permissionMode, tools, allowedTools, disallowedTools,
-      maxBudgetUsd, model, mcpConfig, strictMcpConfig, addDir, isManager, maxTurns, resumeSessionId,
-      isolated, pluginDirs, settingsPath, settingSources,
+      maxBudgetUsd, model, mcpConfig, strictMcpConfig, safeMode, settingSources,
+      addDir, isManager, maxTurns, resumeSessionId,
+      isolated, pluginDirs, settingsPath,
     });
 
     const safeCwd = usingRemoteExecutor ? cwd : resolveSpawnCwd({ workspaceDir: cwd });

@@ -190,6 +190,34 @@ function readClaudeTemplateBooleanOption(tokens, flag) {
   return occurrences === 1;
 }
 
+function readClaudeTemplateStringOption(tokens, flag, { allowEmpty = false } = {}) {
+  const values = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token === flag) {
+      if (i + 1 >= tokens.length) {
+        throw new BadRequestError(`${flag} in args_template requires a value`);
+      }
+      const value = tokens[i + 1];
+      if ((!allowEmpty && !value) || (value && value.startsWith('-'))) {
+        throw new BadRequestError(`${flag} in args_template requires a value`);
+      }
+      values.push(value);
+      i += 1;
+    } else if (token.startsWith(`${flag}=`)) {
+      const value = token.slice(flag.length + 1);
+      if (!allowEmpty && !value) {
+        throw new BadRequestError(`${flag} in args_template requires a value`);
+      }
+      values.push(value);
+    }
+  }
+  if (values.length > 1) {
+    throw new BadRequestError(`${flag} must appear at most once in args_template`);
+  }
+  return values[0] ?? null;
+}
+
 function readClaudeTemplateListOption(tokens, flags, displayFlag) {
   const values = [];
   let occurrences = 0;
@@ -241,6 +269,12 @@ function parseClaudeArgsTemplate(argsTemplate) {
   const rawMaxBudgetUsd = readSingleClaudeTemplateOption(tokens, '--max-budget-usd');
   const mcpConfig = readSingleClaudeTemplateOption(tokens, '--mcp-config');
   const strictMcpConfig = readClaudeTemplateBooleanOption(tokens, '--strict-mcp-config');
+  const safeMode = readClaudeTemplateBooleanOption(tokens, '--safe-mode');
+  const settingSources = readClaudeTemplateStringOption(
+    tokens,
+    '--setting-sources',
+    { allowEmpty: true },
+  );
   const tools = readClaudeTemplateListOption(
     tokens,
     ['--tools'],
@@ -271,6 +305,8 @@ function parseClaudeArgsTemplate(argsTemplate) {
     maxBudgetUsd,
     mcpConfig,
     strictMcpConfig,
+    safeMode,
+    settingSources,
     tools,
     disallowedTools,
   };

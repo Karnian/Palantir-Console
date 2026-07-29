@@ -254,6 +254,48 @@ test('legacy multi-space permission initializes the edit dropdown and survives r
   assert.equal(body.permission_mode, 'acceptEdits');
 });
 
+test('quoted legacy permission initializes the edit dropdown and survives rename', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  const { calls } = installAgentsStubs(env);
+  env.loadComponent('Dropdown');
+  env.loadComponent('AgentsView');
+
+  const agent = {
+    id: 'legacy_quoted_permission',
+    name: 'Legacy quoted Claude',
+    type: 'claude-code',
+    command: 'claude',
+    args_template: '-p {prompt} --permission-mode "acceptEdits"',
+    permission_mode: null,
+    max_concurrent: 1,
+    capabilities_json: '{}',
+  };
+  const root = renderAgentsView(env, { agents: [agent] });
+  root.querySelector('.agent-card-actions button').click();
+
+  await waitFor(() => {
+    assert.equal(
+      root.querySelector('#agent-permission-mode').dataset.value,
+      'acceptEdits',
+    );
+  });
+  setInput(env, root.querySelector('#agent-name'), 'Renamed quoted Claude');
+  await flushEffects(30);
+  root.querySelector('.modal-footer button.primary').click();
+
+  const call = await waitFor(() => {
+    const match = calls.find(
+      (entry) => entry.url === '/api/agents/legacy_quoted_permission',
+    );
+    assert.ok(match);
+    return match;
+  });
+  const body = JSON.parse(call.options.body);
+  assert.equal(body.name, 'Renamed quoted Claude');
+  assert.equal(body.permission_mode, 'acceptEdits');
+});
+
 test('changing an existing manager profile type also changes its command vendor', async (t) => {
   const env = createPreactEnv();
   t.after(env.cleanup);

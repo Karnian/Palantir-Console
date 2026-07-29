@@ -344,6 +344,8 @@ test('engine: optional args including strict MCP config are appended', async () 
     disallowedTools: ['Bash', 'Edit'],
     permissionMode: 'acceptEdits',
     maxBudgetUsd: 1.5,
+    safeMode: true,
+    settingSources: '',
   });
 
   assert.ok(args.includes('--model'));
@@ -361,6 +363,10 @@ test('engine: optional args including strict MCP config are appended', async () 
   assert.ok(args.includes('acceptEdits'));
   assert.ok(args.includes('--max-budget-usd'));
   assert.ok(args.includes('1.5'));
+  assert.ok(args.includes('--safe-mode'));
+  const settingSourcesIndex = args.indexOf('--setting-sources');
+  assert.notEqual(settingSourcesIndex, -1);
+  assert.equal(args[settingSourcesIndex + 1], '');
 });
 
 test('engine: profile and materialized MCP configs are both passed to Claude', async () => {
