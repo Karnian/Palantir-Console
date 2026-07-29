@@ -268,10 +268,12 @@ function createManagerMessageQueueService({
         AND status IN ('sending', 'processing')
       ORDER BY sequence
     `),
-    // This statement is shared by current-owner and stale-claim reconciliation;
-    // both intentionally require JSON boolean `true`, exactly as the live paths
-    // do (parseTerminalEvent below, and operatorScheduler.onEvent). `json_type`
-    // is deliberate because `json_extract` conflates boolean true with number 1.
+    // This statement is shared by current-owner and stale-claim reconciliation.
+    // It narrows candidates to JSON boolean `true`; the JavaScript check below
+    // remains authoritative so reconciliation follows the live path's parsed
+    // value. That second check matters because SQLite JSON1 keeps the first
+    // duplicate object key while JSON.parse keeps the last. `json_type` is
+    // deliberate because `json_extract` conflates boolean true with number 1.
     // codexAdapter
     // persists non-terminal failures under the same event_type + invocationId
     // (`kind: 'codex_error', terminal: false`), so matching on invocationId
@@ -283,7 +285,10 @@ function createManagerMessageQueueService({
       FROM run_events
       WHERE run_id = ?
         AND event_type IN ('mgr.turn_completed', 'mgr.turn_failed')
-        AND json_extract(payload_json, '$.data.invocationId') = ?
+        AND json_extract(
+          CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
+          '$.data.invocationId'
+        ) = ?
         AND json_type(
           CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
           '$.data.terminal'
@@ -821,7 +826,11 @@ function createManagerMessageQueueService({
     }
     if (!terminal) return null;
     let payload;
-    try { payload = JSON.parse(terminal.payload_json || '{}'); } catch { payload = {}; }
+    try { payload = JSON.parse(terminal.payload_json || '{}'); } catch { return null; }
+    if (
+      payload?.data?.invocationId !== row.adapter_invocation_id
+      || payload?.data?.terminal !== true
+    ) return null;
     return completeFromEvent(
       row.adapter_invocation_id,
       row.run_id,

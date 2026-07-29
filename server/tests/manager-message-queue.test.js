@@ -311,6 +311,118 @@ test('a persisted numeric terminal flag cannot close the current owner lane', as
   assert.deepEqual(dispatched, ['oinv_first']);
 });
 
+test('persisted duplicate terminal keys cannot disagree with the live JSON parser', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_duplicate_terminal',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+  h.service.start();
+
+  const first = await h.service.enqueue(
+    'operator:oi_duplicate_terminal',
+    { text: 'first scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_first',
+      adapterInvocationId: 'oinv_first',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  h.runService.addRunEvent(
+    run.id,
+    'mgr.turn_failed',
+    '{"data":{"invocationId":"oinv_first","terminal":true,"terminal":false}}',
+  );
+  assert.equal(
+    h.service.getMessage(first.message.id).status,
+    'processing',
+    'the live path must use JSON.parse and keep the last terminal value',
+  );
+
+  await h.service.tick();
+  assert.equal(h.db.prepare('SELECT status FROM runs WHERE id = ?').get(run.id).status, 'running');
+  assert.equal(h.service.getMessage(first.message.id).status, 'processing');
+  assert.equal(h.service.getMessage(first.message.id).terminal_reason, null);
+
+  await assert.rejects(
+    h.service.enqueue(
+      'operator:oi_duplicate_terminal',
+      { text: 'second scheduled turn', source: 'scheduled' },
+      {
+        idempotencyKey: 'invocation:oinv_second',
+        adapterInvocationId: 'oinv_second',
+        requireImmediate: true,
+      },
+    ),
+    err => err.code === 'OPERATOR_BUSY' && err.retryable === true,
+  );
+  assert.deepEqual(dispatched, ['oinv_first']);
+});
+
+test('a malformed newer event cannot hide an earlier persisted terminal event', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_malformed_terminal',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+  h.service.start();
+
+  const first = await h.service.enqueue(
+    'operator:oi_malformed_terminal',
+    { text: 'first scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_first',
+      adapterInvocationId: 'oinv_first',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  insertEvent.run(run.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: 'oinv_first', terminal: true },
+  }));
+  insertEvent.run(run.id, 'mgr.turn_failed', '{broken');
+
+  assert.equal(h.service.reconcilePersistedTerminalEvents(), 1);
+  assert.equal(h.service.getMessage(first.message.id).status, 'delivered');
+  await h.service.awaitDrain();
+
+  const next = await h.service.enqueue(
+    'operator:oi_malformed_terminal',
+    { text: 'second scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_second',
+      adapterInvocationId: 'oinv_second',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.equal(next.message.status, 'processing');
+  assert.deepEqual(dispatched, ['oinv_first', 'oinv_second']);
+});
+
 test('the current owner reconciler ignores non-terminal failures and preserves chat replay', async (t) => {
   const h = createHarness(t, { withRunService: true });
   const run = h.runService.createRun({
