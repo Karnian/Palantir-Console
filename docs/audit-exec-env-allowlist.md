@@ -92,34 +92,35 @@ legacy commit 목록은 `GIT_EXTERNAL_DIFF=""`, `GIT_TEXTCONV_DIFF=""`만
 - **materialized(git repo) 경로** (`runExecutorTestCommand`): git 호출과
   **같은 `executor.exec`** 를 쓴다. 따라서 이 정책의 영향을 그대로 받는다.
 
-프로젝트가 선언한 `test_command` 는 git 호출이 아니라 임의의 테스트 스위트다.
-`NODE_ENV`, 버전 매니저 루트, virtualenv, 프로젝트별 설정 등 이 allowlist 에
-없는 값을 필요로 할 수 있고, 좁히면 **`harvest:test` 실패로 나타나 에이전트
-코드 탓으로 오인된다.** 환경 회귀가 코드 결함처럼 보이는 최악의 형태다.
+프로젝트가 선언한 `test_command` 는 git 호출이 아니라 에이전트가 수정할 수 있는
+임의 코드다. 따라서 Console의 전체 `process.env`를 상속하면 `PALANTIR_TOKEN`,
+모델 API key 등 제어면 시크릿을 그대로 읽을 수 있다. 반대로 Git 전용 목록만
+쓰면 `NODE_ENV`, 버전 매니저 루트, virtualenv 같은 테스트 런타임을 잃는다.
 
-그래서 `exec(..., { inheritFullEnv: true })` **opt-in** 을 두고 그 호출자만
-전체 환경을 유지한다. 로컬·원격 둘 다 같은 방식이다. **기본값은 allowlist 그대로**라
-새 `exec` 소비자가 옵션을 빠뜨려서 환경이 넓어지는 일은 없다.
-
-이 carve-out 은 test_command 환경을 좁히지 **않겠다**는 결정이 아니라, 그것이
-이 작업의 범위가 아니라는 판정이다. 좁히려면 어떤 프로젝트가 무엇을 필요로 하는지
-따로 조사해야 한다.
+`PROJECT_TEST_ENV_KEYS`는 이 두 경계를 분리한 별도 양성 목록이다. harvest는
+`exec(..., { projectTest: true })`만 요청하고, 로컬·원격 executor 모두 이
+목록으로 다시 만든 환경에서 실행한다. 원격 public exec의 기본 명령 목록은
+계속 `['git']`이며, `projectTest: true`일 때만 정확한 `/bin/sh`를 허용한다.
+`inheritFullEnv` 분기와 전체 환경 병합은 없다.
 
 ## 최종 allowlist와 각 키의 근거
 
-규범적 소스는 `server/services/execEnvPolicy.js`의 `EXEC_ENV_KEYS` 하나다.
+규범적 소스는 `server/services/execEnvPolicy.js`의 `EXEC_ENV_KEYS`와
+`PROJECT_TEST_ENV_KEYS`다.
 로컬은 컨트롤 플레인 env에서 이 목록만 선택하고, 원격은 pod login env에서
 같은 목록만 `env -i`에 재구성한다.
 
 | 정확한 키 | 보존 이유 | 코드/문서 근거 |
 |---|---|---|
-| `PATH` | 서비스가 `git`을 bare name으로 실행하며 Git도 `ssh`와 credential/remote helper를 찾는다. | 세 서비스의 `executor.exec('git', ...)`; [Node `execFile`](https://nodejs.org/api/child_process.html#child_processexecfilefile-args-options-callback), [git(1) `PATH`](https://git-scm.com/docs/git#Documentation/git.txt-codePATHcode) |
+| `PATH`, `Path` | 서비스가 `git`을 bare name으로 실행하며 Git도 `ssh`와 credential/remote helper를 찾는다. Windows 서비스의 실제 키 casing인 `Path`도 보존한다. | 세 서비스의 `executor.exec('git', ...)`; [Node `execFile`](https://nodejs.org/api/child_process.html#child_processexecfilefile-args-options-callback), [git(1) `PATH`](https://git-scm.com/docs/git#Documentation/git.txt-codePATHcode) |
 | `HOME` | clone/fetch/commit에 필요한 `~/.gitconfig`, credential helper 설정, `~/.ssh/config`와 known_hosts를 찾는다. | project materialization의 원격 Git 명령과 worktree auto-save commit; [git-config FILES](https://git-scm.com/docs/git-config#FILES), [ssh(1) FILES](https://man.openbsd.org/ssh.1#FILES) |
 | `XDG_CONFIG_HOME` | HOME과 같은 user-scoped Git config/credential store의 XDG 위치다. | 같은 clone/fetch/commit 경로; [git-config FILES](https://git-scm.com/docs/git-config#FILES) |
 | `HOMEDRIVE`, `HOMEPATH`, `USERPROFILE` | Windows에서 HOME이 없을 때 user Git config 위치를 계산하는 fallback이다. | 플랫폼 공용 local executor; [git(1) System env](https://git-scm.com/docs/git#Documentation/git.txt-codeHOMEcode) |
+| `SystemRoot`, `SYSTEMROOT`, `WINDIR`, `ComSpec`, `COMSPEC`, `PATHEXT` | Windows에서 Git/SSH와 `.cmd` credential helper가 실행 파일을 찾고 command shell을 시작하는 process-launch baseline이다. | `actorTokenPolicy.PROCESS_BASE_ENV_KEYS`의 기존 Windows subprocess 계약과 동일 |
 | `LANG`, `LANGUAGE`, `LC_ALL`, `LC_ADDRESS`, `LC_COLLATE`, `LC_CTYPE`, `LC_IDENTIFICATION`, `LC_MEASUREMENT`, `LC_MESSAGES`, `LC_MONETARY`, `LC_NAME`, `LC_NUMERIC`, `LC_PAPER`, `LC_TELEPHONE`, `LC_TIME` | stderr 분류와 Git 출력/파일명 처리가 locale에 의존한다. 결정적 출력이 필요한 호출은 코드가 `LC_ALL=C`, `LANG=C`로 override한다. | `projectMaterializationService`, `worktreeService`, `harvestService`의 locale override |
 | `TMPDIR`, `TMP`, `TEMP` | clone/index/diff/helper가 쓰기 가능한 node-local 임시 위치를 사용한다. 세 이름은 POSIX/macOS 및 Windows 실행기를 함께 지원한다. | materialization의 clone/fetch/worktree와 2026-07-29 호스트의 실제 `TMPDIR` |
 | `SSH_AUTH_SOCK` | clone/fetch/ls-remote의 SSH 인증을 key 값이나 실행 helper 없이 agent socket으로 제공한다. | project materialization의 원격 전송 명령; [ssh-agent(1) ENVIRONMENT](https://man.openbsd.org/ssh-agent.1#ENVIRONMENT) |
+| `GIT_ASKPASS` | node-local helper가 private HTTPS 저장소의 유일한 비대화식 credential source일 수 있다. | 실제 자체 서명 HTTPS + Basic auth 저장소를 materialize하며 Username/Password askpass 호출과 인증 재시도를 검증 |
 | `http_proxy`, `https_proxy`, `ftp_proxy`, `all_proxy`, `no_proxy`, `HTTP_PROXY`, `HTTPS_PROXY`, `FTP_PROXY`, `ALL_PROXY`, `NO_PROXY` | HTTP(S) clone/fetch/ls-remote가 node의 proxy/no-proxy 경로를 유지한다. 대소문자 양쪽은 libcurl 소비자 호환용이다. | project materialization의 원격 전송 명령; [Git FAQ: proxies](https://git-scm.com/docs/gitfaq#Documentation/gitfaq.txt-HowdoIconfigureaproxyforGit) |
 | `CURL_CA_BUNDLE`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `GIT_SSL_CAINFO`, `GIT_SSL_CAPATH` | 사내 CA를 쓰는 HTTPS clone/fetch를 지원하되 인증서 검증을 끄지는 않는다. | project materialization의 HTTPS 전송 명령; [curl environment](https://curl.se/docs/manpage.html#ENVIRONMENT), [git-config `http.sslCAInfo`](https://git-scm.com/docs/git-config#Documentation/git-config.txt-httpsslCAInfo) |
 | `EMAIL`, `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL` | `worktreeService`의 `git commit -m ... --no-verify`가 editor 없이 auto-save commit identity를 구성한다. HOME config가 없는 CI도 지원한다. | `worktreeService.js` auto-save commit; [git(1) Git Commits env](https://git-scm.com/docs/git#Documentation/git.txt-codeGITAUTHORNAMEcode) |
@@ -134,7 +135,7 @@ materialization의 명시적 BatchMode 값이 ambient 값에 덮이지는 않았
 
 | 제거한 키 | 판단 근거 |
 |---|---|
-| `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_PROXY_COMMAND`, `GIT_ASKPASS`, `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE`, `DISPLAY`, `GIT_SSH_VARIANT` | executable/helper 선택이다. materialization과 repo preflight가 필요한 `GIT_TERMINAL_PROMPT=0` 및 BatchMode `GIT_SSH_COMMAND`를 직접 넘긴다. ambient `GIT_TERMINAL_PROMPT`도 필요 없어 제거했다. |
+| `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_PROXY_COMMAND`, `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE`, `DISPLAY`, `GIT_SSH_VARIANT` | executable/helper 선택이다. materialization과 repo preflight가 필요한 `GIT_TERMINAL_PROMPT=0` 및 BatchMode `GIT_SSH_COMMAND`를 직접 넘긴다. ambient `GIT_TERMINAL_PROMPT`도 필요 없어 제거했다. `GIT_ASKPASS`는 실제 private HTTPS 회귀 때문에 보존 목록으로 이동했다. |
 | `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_NOSYSTEM` | `core.sshCommand` 같은 임의 command-scope config를 주입하거나 config source를 교체할 수 있다. 호스트에서 COUNT family가 관측됐지만 서비스 코드가 요구하지 않으며, 필요한 node-local config는 `HOME`/`XDG_CONFIG_HOME`으로 읽는다. |
 | `GIT_SSL_NO_VERIFY` | HTTPS 인증서 검증을 조용히 비활성화한다. 코드가 요구하지 않는다. CA 경로 변수만 남겼다. |
 | `GIT_EXTERNAL_DIFF`, `GIT_TEXTCONV_DIFF`, `GIT_EXTERNAL_DIFF_TRUST_EXIT_CODE` | diff helper 실행 벡터다. harvest/worktree는 필요한 두 값을 명시적으로 빈 문자열로 넘기고 `--no-ext-diff`/`--no-textconv`도 사용한다. ambient 상속은 필요 없다. |
@@ -168,37 +169,43 @@ materialization의 명시적 BatchMode 값이 ambient 값에 덮이지는 않았
   수행했고 제품 저장소 파일은 변경하지 않았다.
 
 최초 재생은 후보 목록의 회귀 탐색 자료이고, 최종 정책의 합격 근거는 최종
-`npm test`다. SSH/HTTPS private remote 인증을 새로 수행한 것은 아니며, 그
-계약은 Git/OpenSSH 문서와 기존 node-local credential helper 구성으로만
-확인했다.
+`npm test`다. 추가로 실제 Git, 자체 서명 HTTPS 서버, Basic 인증 challenge,
+실행 가능한 askpass helper를 묶어 materialization을 수행했다. 최초 요청은
+401이고 Git이 askpass의 Username/Password 응답으로 재시도해 worktree의
+파일까지 읽히는 것을 확인했다.
 
 ## 테스트와 뮤테이션 검출
 
-- 최종 `npm test`: tests `2959`, suites `6`, pass `2959`, fail `0`.
+- 최종 `npm test`: tests `2966`, suites `6`, pass `2966`, fail `0`.
 - 핵심 정책/materialization/remote 묶음:
   `node --test server/tests/node-executor.test.js
   server/tests/project-materialization.test.js
   server/tests/remote-spawn-env.test.js
-  server/tests/remote-ssh-executor.test.js` → tests `140`, fail `0`.
-- `EXEC_ENV_KEYS`에서 `PATH`를 실제 제거하고
-  `node --test server/tests/project-materialization.test.js` 실행 →
-  `local materialization resolves Git through the allowlisted PATH` 실패
-  (tests `17`, pass `16`, fail `1`). system Git이 의도적으로 존재하지 않는
-  fixture URL을 clone하려 해 exit `128`이 됐다. 이후 `PATH`를 원복했다.
-- 로컬 `exec`를 기존 `{ ...process.env, ...env }` 전체 병합으로 실제 되돌리고
-  `node --test server/tests/node-executor.test.js` 실행 →
-  `LocalNodeExecutor.exec filters ambient env, keeps explicit overrides, and
-  leaks zero secret keys` 실패 (tests `33`, pass `32`, fail `1`).
-  자식 env에서 `PALANTIR_TOKEN`, `ANTHROPIC_API_KEY`,
-  `AWS_SECRET_ACCESS_KEY` 세 키가 모두 검출됐다. 이후 shared policy 호출로
-  원복했다.
-- 원복 후 로컬 카나리와 원격 loopback 카나리는 같은 세 시크릿 키가 실제
-  자식 env에 0회 등장함을 각각 확인했다.
+  server/tests/remote-ssh-executor.test.js
+  server/tests/harvest-materialized.test.js` → tests `153`, pass `153`, fail `0`.
+- project-test 로컬 환경을 `{ ...process.env, ...env }`로 되돌리면 실제 harvest
+  probe에서 `PALANTIR_TOKEN=control-plane-secret`,
+  `ANTHROPIC_API_KEY=model-secret`이 검출되어 tests `1`, fail `1`. 원복 후
+  tests `1`, pass `1`.
+- 원격 `/bin/sh` 예외를 제거하면 실제 harvest가
+  `Remote exec command is not allowed: /bin/sh`를 기록하여 tests `1`, fail `1`.
+  원복 후 tests `1`, pass `1`.
+- Windows process-launch 키를 제거하면 결과가 `USERPROFILE`만 남아 tests `1`,
+  fail `1`. 원복 후 tests `1`, pass `1`.
+- `GIT_ASKPASS`를 제거하면 실제 원격 HTTPS materialization이 exit `128`,
+  `could not read Username ... terminal prompts disabled`로 tests `1`, fail `1`.
+  원복 후 tests `1`, pass `1`.
+- harvest의 `projectTest: true`를 제거하면 double의 소비자 계약 단언과 실제
+  remote harvest가 함께 실패해 tests `2`, fail `2`. 원복 후 tests `2`,
+  pass `2`.
+- 원격 project-test 전용 env 선택을 Git 목록으로 되돌리면 실제 test의
+  `NODE_ENV`가 null이 되고 script 계약에서도 `USER`가 빠져 tests `2`,
+  fail `2`. 원복 후 tests `2`, pass `2`.
 
 ## 남은 검증 경계
 
-이 워크트리에는 원격 Pi 노드가 없다. 따라서 원격 경로는 공유 정책을
-로컬/원격 executor가 같은 소스에서 생성하는지와 fake SSH 회귀 테스트까지만
-검증한다. 실제 Pi의 login env, SSH agent/credential helper, private remote
-clone/fetch는 실 Pi에서 별도 검증해야 한다. 없는 Pi 검증을 완료로 간주하지
-않는다.
+이 워크트리에는 원격 Pi 노드가 없다. private HTTPS + askpass 인증은 실제
+remote SSH executor의 loopback transport로 materialization 전체를 수행했고,
+pod login env에서 키를 선택하는 스크립트까지 함께 실행했다. 다만 실제 Pi의
+login env/SSH agent 상태를 포함한 운영 노드 검증은 별도이며, 없는 Pi 검증을
+완료로 간주하지 않는다.

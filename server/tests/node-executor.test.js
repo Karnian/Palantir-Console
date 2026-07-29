@@ -14,7 +14,9 @@ const { createWorktreeService } = require('../services/worktreeService');
 const { createFsService } = require('../services/fsService');
 const {
   EXEC_ENV_KEYS,
+  PROJECT_TEST_ENV_KEYS,
   buildExecEnv,
+  buildProjectTestEnv,
 } = require('../services/execEnvPolicy');
 
 test('LocalNodeExecutor resolves the current absolute Node runtime for MCP wrappers', () => {
@@ -364,12 +366,30 @@ test('exec env policy is non-empty and keeps measured Git prerequisites', () => 
   });
 });
 
+test('exec env policy preserves Windows process-launch prerequisites with native casing', () => {
+  const selected = buildExecEnv({
+    Path: 'C:\\Program Files\\Git\\cmd;C:\\Windows\\System32',
+    SystemRoot: 'C:\\Windows',
+    ComSpec: 'C:\\Windows\\System32\\cmd.exe',
+    PATHEXT: '.COM;.EXE;.BAT;.CMD',
+    USERPROFILE: 'C:\\Users\\runner',
+    PALANTIR_TOKEN: 'must-not-pass',
+  });
+
+  assert.deepEqual(selected, {
+    Path: 'C:\\Program Files\\Git\\cmd;C:\\Windows\\System32',
+    SystemRoot: 'C:\\Windows',
+    ComSpec: 'C:\\Windows\\System32\\cmd.exe',
+    PATHEXT: '.COM;.EXE;.BAT;.CMD',
+    USERPROFILE: 'C:\\Users\\runner',
+  });
+});
+
 test('exec env policy rejects ambient command/config/TLS bypass vectors but keeps explicit hardening', () => {
   const ambient = {
     GIT_SSH_COMMAND: 'ambient-command',
     GIT_SSH: 'ambient-command',
     GIT_PROXY_COMMAND: 'ambient-command',
-    GIT_ASKPASS: 'ambient-command',
     GIT_TERMINAL_PROMPT: '1',
     SSH_ASKPASS: 'ambient-command',
     GIT_CONFIG_COUNT: '1',
@@ -396,6 +416,15 @@ test('exec env policy rejects ambient command/config/TLS bypass vectors but keep
 
   assert.deepEqual(buildExecEnv(ambient), {});
   assert.deepEqual(buildExecEnv(ambient, hardening), hardening);
+});
+
+test('exec env policy preserves node-local GIT_ASKPASS for private HTTPS authentication', () => {
+  assert.deepEqual(buildExecEnv({
+    GIT_ASKPASS: '/opt/palantir/askpass',
+    ANTHROPIC_API_KEY: 'must-not-pass',
+  }), {
+    GIT_ASKPASS: '/opt/palantir/askpass',
+  });
 });
 
 test('LocalNodeExecutor.exec filters ambient env, keeps explicit overrides, and leaks zero secret keys', async () => {
@@ -443,39 +472,69 @@ test('LocalNodeExecutor.exec filters ambient env, keeps explicit overrides, and 
   }
 });
 
-test('LocalNodeExecutor.exec keeps the full environment when a caller opts in', async () => {
-  // The project's declared test_command runs through this same exec, so the git
-  // allowlist would strip whatever the suite needs — and the resulting
-  // harvest:test failure would look like the agent broke the tests. That caller
-  // opts in; nothing else does, and the default stays filtered.
-  const keys = ['LOCAL_NODE_EXECUTOR_PROJECT_ENV', 'PALANTIR_TOKEN'];
+test('LocalNodeExecutor.exec projectTest keeps runtime keys without control-plane secrets', async () => {
+  const keys = [
+    'NODE_ENV',
+    'VIRTUAL_ENV',
+    'PALANTIR_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'GIT_ASKPASS',
+    'HTTPS_PROXY',
+  ];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
-  process.env.LOCAL_NODE_EXECUTOR_PROJECT_ENV = 'project-suite-needs-this';
+  process.env.NODE_ENV = 'project-suite-needs-this';
+  process.env.VIRTUAL_ENV = '/fixture/venv';
   process.env.PALANTIR_TOKEN = 'palantir-secret';
+  process.env.ANTHROPIC_API_KEY = 'model-secret';
+  process.env.GIT_ASKPASS = '/fixture/credential-helper';
+  process.env.HTTPS_PROXY = 'http://user:password@proxy.example';
   try {
     const executor = createLocalNodeExecutor();
     const script = [
       'process.stdout.write(JSON.stringify({',
-      'project:process.env.LOCAL_NODE_EXECUTOR_PROJECT_ENV ?? null,',
+      'project:process.env.NODE_ENV ?? null,',
+      'virtualEnv:process.env.VIRTUAL_ENV ?? null,',
       'override:process.env.LOCAL_NODE_EXECUTOR_OVERRIDE_ENV ?? null,',
+      'palantir:process.env.PALANTIR_TOKEN ?? null,',
+      'anthropic:process.env.ANTHROPIC_API_KEY ?? null,',
+      'askpass:process.env.GIT_ASKPASS ?? null,',
+      'proxy:process.env.HTTPS_PROXY ?? null,',
       '}));',
     ].join('');
     const opts = { env: { LOCAL_NODE_EXECUTOR_OVERRIDE_ENV: 'override-visible' } };
 
-    const inherited = await executor.exec(process.execPath, ['-e', script], {
+    const projectTest = await executor.exec(process.execPath, ['-e', script], {
       ...opts,
-      inheritFullEnv: true,
+      projectTest: true,
     });
-    assert.deepEqual(JSON.parse(inherited.stdout), {
+    assert.deepEqual(JSON.parse(projectTest.stdout), {
       project: 'project-suite-needs-this',
+      virtualEnv: '/fixture/venv',
       override: 'override-visible',
-    }, 'opting in must restore the ambient variable a test suite may depend on');
+      palantir: null,
+      anthropic: null,
+      askpass: null,
+      proxy: null,
+    }, 'project tests keep runtime discovery without inheriting server credentials');
 
     const filtered = await executor.exec(process.execPath, ['-e', script], opts);
     assert.deepEqual(JSON.parse(filtered.stdout), {
       project: null,
+      virtualEnv: null,
       override: 'override-visible',
-    }, 'the default must stay filtered so a new consumer cannot widen it by omission');
+      palantir: null,
+      anthropic: null,
+      askpass: '/fixture/credential-helper',
+      proxy: 'http://user:password@proxy.example',
+    }, 'the default keeps the separate Git authentication policy');
+
+    assert.ok(PROJECT_TEST_ENV_KEYS.includes('NODE_ENV'));
+    assert.deepEqual(buildProjectTestEnv({
+      NODE_ENV: 'test',
+      PALANTIR_TOKEN: 'secret',
+    }), {
+      NODE_ENV: 'test',
+    });
   } finally {
     for (const key of keys) {
       if (previous[key] === undefined) delete process.env[key];

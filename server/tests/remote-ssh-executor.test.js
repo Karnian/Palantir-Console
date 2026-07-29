@@ -10,13 +10,29 @@ const os = require('node:os');
 const { createDatabase } = require('../db/database');
 const { createRemoteSshNodeExecutor, shq } = require('../services/remoteSshExecutor');
 const { createNodeService } = require('../services/nodeService');
-const { EXEC_ENV_KEYS } = require('../services/execEnvPolicy');
+const { EXEC_ENV_KEYS, PROJECT_TEST_ENV_KEYS } = require('../services/execEnvPolicy');
 
 function assertSharedExecEnvScript(script) {
   assert.ok(script.startsWith('set --; for k in '), script);
   assert.ok(script.includes('exec env -i "$@"'), script);
   for (const key of EXEC_ENV_KEYS) {
     assert.ok(script.includes(shq(key)), `remote exec lost shared policy key ${key}`);
+  }
+}
+
+function assertProjectTestEnvScript(script) {
+  assert.ok(script.startsWith('set --; for k in '), script);
+  assert.ok(script.includes('exec env -i "$@"'), script);
+  for (const key of PROJECT_TEST_ENV_KEYS) {
+    assert.ok(script.includes(shq(key)), `remote project test lost policy key ${key}`);
+  }
+  for (const secretKey of [
+    'PALANTIR_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'GIT_ASKPASS',
+    'HTTPS_PROXY',
+  ]) {
+    assert.equal(script.includes(secretKey), false, `remote project test exposed ${secretKey}`);
   }
 }
 
@@ -1081,6 +1097,33 @@ test('public exec enforces command allowlist while internal fs primitives still 
   const internal = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: internalSpawn });
   assert.equal(await internal.fileExists('/srv/root/file'), true);
   assert.equal(await internal.realpath('/srv/root/file'), '/real/root/file');
+});
+
+test('projectTest alone permits /bin/sh and still emits a clean positive-list environment', async () => {
+  const spawn = rootGuardSpawn({
+    "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  const result = await exec.exec('/bin/sh', ['-c', 'npm test'], {
+    cwd: '/srv/root/project',
+    projectTest: true,
+  });
+
+  assert.equal(result.code, 0);
+  const commandCall = spawn.calls.at(-1);
+  const script = scriptOf(commandCall);
+  assertProjectTestEnvScript(script);
+  assert.ok(script.endsWith("'/bin/sh' '-c' 'npm test'"), script);
+
+  await assert.rejects(
+    () => exec.exec('/bin/sh', ['-c', 'npm test'], { cwd: '/srv/root/project' }),
+    (err) => err.code === 'COMMAND_NOT_ALLOWED',
+  );
+  await assert.rejects(
+    () => exec.exec('sh', ['-c', 'npm test'], { projectTest: true }),
+    (err) => err.code === 'COMMAND_NOT_ALLOWED',
+  );
 });
 
 test('ssh destination components reject option smuggling and unsafe separators', async (t) => {

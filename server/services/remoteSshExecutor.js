@@ -8,7 +8,7 @@ const {
   MANAGER_BASE_ENV_KEYS,
   isActorCredentialKey,
 } = require('./actorTokenPolicy');
-const { EXEC_ENV_KEYS } = require('./execEnvPolicy');
+const { EXEC_ENV_KEYS, PROJECT_TEST_ENV_KEYS } = require('./execEnvPolicy');
 
 const WORKER_OUTPUT_MAX_LINES = 500;
 const WORKER_OUTPUT_MAX_BUFFER = 256 * 1024;
@@ -471,7 +471,8 @@ function validateWorkerSpec(spec) {
  *
  * The public exec surface is guarded by an exact command-name allowlist. The
  * default allowlist is ['git']; shell interpreters such as sh, bash, and env
- * are not included and are rejected unless an explicit caller opts into them.
+ * are not included. The sole exception is /bin/sh under projectTest mode,
+ * which harvest uses for a project's declared test_command.
  * This allowlist guards public exec only. Trusted executor-owned filesystem
  * primitives build their own scripts and do not go through the public exec
  * allowlist.
@@ -875,29 +876,26 @@ function createRemoteSshNodeExecutor(node, {
   }
 
   async function exec(command, args = [], {
-    cwd, env, timeoutMs, maxBuffer, inheritFullEnv = false,
+    cwd, env, timeoutMs, maxBuffer, projectTest = false,
   } = {}) {
-    if (!allowedCommands.has(String(command))) throw commandNotAllowedError(command);
+    const commandName = String(command);
+    const projectTestCommand = projectTest === true && commandName === SH_BIN;
+    if (!allowedCommands.has(commandName) && !projectTestCommand) {
+      throw commandNotAllowedError(command);
+    }
     let safeCwd = cwd;
     if (cwd) safeCwd = (await assertWithinRoots(cwd)).canonical;
     // The pod, not the controller, remains the source of Git configuration and
     // credentials. Filtering that source with the shared exec policy keeps
     // local and remote materialization behavior aligned without forwarding the
     // controller's unrelated secrets.
-    // Same carve-out as the local executor: the project's own test command keeps
-    // the pod login shell's environment, because the git allowlist is not a
-    // description of what an arbitrary project's test suite needs. Opt-in, so a
-    // new consumer cannot widen this by omission.
-    if (inheritFullEnv) {
-      return runRemoteCommand(command, args, { cwd: safeCwd, env, timeoutMs, maxBuffer });
-    }
     return runRemoteCommand(command, args, {
       cwd: safeCwd,
       env,
       timeoutMs,
       maxBuffer,
       cleanEnv: true,
-      cleanEnvKeys: EXEC_ENV_KEYS,
+      cleanEnvKeys: projectTest ? PROJECT_TEST_ENV_KEYS : EXEC_ENV_KEYS,
       cleanEnvPathFromKeys: true,
       cleanEnvAllowExplicitPath: true,
     });
