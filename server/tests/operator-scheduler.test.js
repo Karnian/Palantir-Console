@@ -523,7 +523,7 @@ test('a persisted numeric terminal flag cannot complete a running invocation', (
   );
 });
 
-test('scheduler does not settle when JavaScript rejects the SQL terminal candidate', (t) => {
+test('a newer duplicate-terminal candidate cannot hide an earlier scheduled terminal event', (t) => {
   const h = harness(t);
   const { instance } = createMappedOperator(h);
   const schedule = h.scheduleService.createSchedule(instance.id, {
@@ -544,9 +544,14 @@ test('scheduler does not settle when JavaScript rejects the SQL terminal candida
   );
 
   const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
-  assert.deepEqual(reconciled, []);
-  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].status, 'completed');
   assert.equal(h.scheduleService.getSchedule(schedule.id).consecutive_failures, 0);
+  assert.equal(
+    h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+    'pending',
+    'the earlier terminal event must release the OS-4 slot',
+  );
 });
 
 test('persisted candidates skip malformed newer events and keep scanning', (t) => {

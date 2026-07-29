@@ -255,6 +255,121 @@ test('a persisted terminal event closes the current owner lane after its live ca
   ]);
 });
 
+test('a structured failure summary settles from persistence after the live callback throws', async (t) => {
+  const baseEventBus = createEventBus();
+  let droppedCallbacks = 0;
+  const eventBus = {
+    ...baseEventBus,
+    subscribe(callback) {
+      return baseEventBus.subscribe((event) => {
+        if (
+          droppedCallbacks === 0
+          && event?.channel === 'run:event'
+          && event.data?.eventType === 'mgr.turn_failed'
+        ) {
+          droppedCallbacks += 1;
+          throw new Error('simulated throwing queue completion callback');
+        }
+        callback(event);
+      });
+    },
+  };
+  const h = createHarness(t, { eventBus, withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_structured_failure',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+  h.service.start();
+
+  const first = await h.service.enqueue(
+    'operator:oi_structured_failure',
+    { text: 'first scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_bad_summary',
+      adapterInvocationId: 'oinv_bad_summary',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  h.runService.addRunEvent(run.id, 'mgr.turn_failed', JSON.stringify({
+    summaryText: { message: 'structured failure' },
+    data: { invocationId: 'oinv_bad_summary', terminal: true },
+  }));
+  assert.equal(droppedCallbacks, 1, 'the live failure callback must actually throw');
+  assert.equal(h.service.getMessage(first.message.id).status, 'processing');
+
+  await assert.doesNotReject(() => h.service.tick());
+  const failed = h.service.getMessage(first.message.id);
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.last_error, '[object Object]');
+  await h.service.awaitDrain();
+
+  const next = await h.service.enqueue(
+    'operator:oi_structured_failure',
+    { text: 'next scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_after_bad_summary',
+      adapterInvocationId: 'oinv_after_bad_summary',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.equal(next.message.status, 'processing');
+  assert.deepEqual(dispatched, ['oinv_bad_summary', 'oinv_after_bad_summary']);
+});
+
+test('a persisted terminal settlement error does not escape the queue tick', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_settlement_error',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  h.service.setDispatcher(() => ({
+    status: 'sent',
+    target: { kind: 'pm', runId: run.id },
+  }));
+
+  const first = await h.service.enqueue(
+    'operator:oi_settlement_error',
+    { text: 'scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_settlement_error',
+      adapterInvocationId: 'oinv_settlement_error',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+  h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, 'mgr.turn_completed', ?)
+  `).run(run.id, JSON.stringify({
+    data: { invocationId: 'oinv_settlement_error', terminal: true },
+  }));
+  h.db.exec(`
+    CREATE TRIGGER reject_queue_terminal_settlement
+    BEFORE UPDATE ON manager_message_queue
+    WHEN OLD.status = 'processing' AND NEW.status = 'delivered'
+    BEGIN
+      SELECT RAISE(ABORT, 'simulated terminal settlement failure');
+    END
+  `);
+
+  await assert.doesNotReject(() => h.service.tick());
+  assert.equal(h.service.getMessage(first.message.id).status, 'processing');
+});
+
 test('same-invocation non-terminal failures cannot exhaust persisted terminal reconciliation', async (t) => {
   const h = createHarness(t, { withRunService: true });
   const run = h.runService.createRun({
@@ -428,6 +543,67 @@ test('persisted duplicate terminal keys cannot disagree with the live JSON parse
     err => err.code === 'OPERATOR_BUSY' && err.retryable === true,
   );
   assert.deepEqual(dispatched, ['oinv_first']);
+});
+
+test('a newer duplicate-terminal candidate cannot hide an earlier terminal event', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_shadow',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+  h.service.start();
+
+  const first = await h.service.enqueue(
+    'operator:oi_shadow',
+    { text: 'first scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_shadow',
+      adapterInvocationId: 'oinv_shadow',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  insertEvent.run(
+    run.id,
+    'mgr.turn_completed',
+    '{"data":{"invocationId":"oinv_shadow","terminal":true}}',
+  );
+  insertEvent.run(
+    run.id,
+    'mgr.turn_failed',
+    '{"data":{"invocationId":"oinv_shadow","terminal":true,"terminal":false}}',
+  );
+
+  await h.service.tick();
+  assert.equal(h.db.prepare('SELECT status FROM runs WHERE id = ?').get(run.id).status, 'running');
+  assert.equal(h.service.getMessage(first.message.id).status, 'delivered');
+  await h.service.awaitDrain();
+
+  const next = await h.service.enqueue(
+    'operator:oi_shadow',
+    { text: 'second scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_after_shadow',
+      adapterInvocationId: 'oinv_after_shadow',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.equal(next.message.status, 'processing');
+  assert.deepEqual(dispatched, ['oinv_shadow', 'oinv_after_shadow']);
 });
 
 test('a malformed newer event cannot hide an earlier persisted terminal event', async (t) => {

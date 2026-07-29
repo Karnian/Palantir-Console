@@ -1,5 +1,12 @@
 'use strict';
 
+// SQL admits only rows whose JSON1 terminal value is boolean true before this
+// bound is applied. Same-invocation non-terminal failures therefore consume no
+// slots and cannot exhaust the scan; eight candidates still bound JSON.parse
+// work while allowing JavaScript to reject a newer anomalous row and fall back
+// to an earlier terminal event.
+const MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES = 8;
+
 function parseTerminalEventPayload(payloadJson) {
   try {
     return payloadJson ? JSON.parse(payloadJson) : null;
@@ -13,23 +20,20 @@ function isTerminalEventForInvocation(payload, invocationId) {
     && payload?.data?.terminal === true;
 }
 
-// SQLite JSON1 uses the first duplicate object key while JSON.parse uses the
-// last, so duplicate-key payloads can make the SQL and JavaScript decisions
-// diverge. Normal writers use JSON.stringify and cannot produce duplicate keys.
-// Trying to defend this unrealizable input in SQL twice caused real regressions:
-// normal terminal events were hidden, then a bounded candidate scan was
-// exhausted. We intentionally do not defend duplicate keys here.
-//
-// SQL returns at most one correlated terminal candidate. JavaScript still
-// revalidates the live-parser contract; a mismatch leaves the owner unsettled.
-function findPersistedTerminalEvent(candidate, invocationId) {
-  if (!candidate) return null;
-  const payload = parseTerminalEventPayload(candidate.payload_json);
-  if (!isTerminalEventForInvocation(payload, invocationId)) return null;
-  return { ...candidate, payload };
+// Candidates are newest-first. JSON.parse is the live-parser authority, so a
+// SQL/JavaScript disagreement on an anomalous row rejects only that row and the
+// scan continues to any earlier durable terminal evidence.
+function findPersistedTerminalEvent(candidates, invocationId) {
+  for (const candidate of candidates) {
+    const payload = parseTerminalEventPayload(candidate.payload_json);
+    if (!isTerminalEventForInvocation(payload, invocationId)) continue;
+    return { ...candidate, payload };
+  }
+  return null;
 }
 
 module.exports = {
+  MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
   parseTerminalEventPayload,
   isTerminalEventForInvocation,
   findPersistedTerminalEvent,

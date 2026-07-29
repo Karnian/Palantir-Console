@@ -7,6 +7,7 @@ const {
   NotFoundError,
 } = require('../utils/errors');
 const {
+  MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
   findPersistedTerminalEvent,
 } = require('./terminalEventReconciliation');
 
@@ -467,9 +468,9 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
       WHERE status='running' AND manager_run_id IS NOT NULL
       ORDER BY started_at ASC, id ASC
     `),
-    // Filter terminality before LIMIT so same-invocation non-terminal failures
-    // cannot exhaust reconciliation. The shared JavaScript validator remains
-    // authoritative for the single returned row.
+    // Filter terminality before the bounded scan so same-invocation
+    // non-terminal failures consume no candidate slots. JavaScript then
+    // validates terminality newest-first and may fall back to an earlier row.
     persistedTerminalEvents: db.prepare(`
       SELECT event_type, payload_json
       FROM run_events
@@ -484,7 +485,7 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
               '$.data.terminal'
             )='true'
       ORDER BY id DESC
-      LIMIT 1
+      LIMIT ?
     `),
     resetFailures: db.prepare(`
       UPDATE operator_schedules SET consecutive_failures=0, updated_at=datetime('now') WHERE id=?
@@ -1060,11 +1061,12 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
   function reconcilePersistedTerminalEvents() {
     const reconciled = [];
     for (const row of stmts.runningInvocationsForTerminalReconciliation.all()) {
-      const candidate = stmts.persistedTerminalEvents.get(
+      const candidates = stmts.persistedTerminalEvents.all(
         row.manager_run_id,
         row.invocation_id,
+        MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
       );
-      const terminal = findPersistedTerminalEvent(candidate, row.invocation_id);
+      const terminal = findPersistedTerminalEvent(candidates, row.invocation_id);
       if (!terminal) continue;
       const success = terminal.event_type === 'mgr.turn_completed';
       const invocation = completeInvocation(

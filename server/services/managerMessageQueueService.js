@@ -2,6 +2,7 @@
 
 const { randomUUID } = require('node:crypto');
 const {
+  MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
   parseTerminalEventPayload,
   isTerminalEventForInvocation,
   findPersistedTerminalEvent,
@@ -273,9 +274,9 @@ function createManagerMessageQueueService({
         AND status IN ('sending', 'processing')
       ORDER BY sequence
     `),
-    // Filter terminality before LIMIT so same-invocation non-terminal failures
-    // cannot exhaust reconciliation. The shared JavaScript validator remains
-    // authoritative for the single returned row.
+    // Filter terminality before the bounded scan so same-invocation
+    // non-terminal failures consume no candidate slots. JavaScript then
+    // validates terminality newest-first and may fall back to an earlier row.
     terminalEventCandidates: db.prepare(`
       SELECT event_type, payload_json
       FROM run_events
@@ -290,7 +291,7 @@ function createManagerMessageQueueService({
               '$.data.terminal'
             ) = 'true'
       ORDER BY id DESC
-      LIMIT 1
+      LIMIT ?
     `),
     failRunActive: db.prepare(`
       UPDATE manager_message_queue
@@ -757,9 +758,12 @@ function createManagerMessageQueueService({
     const id = existing.id;
     const status = success ? 'delivered' : 'failed';
     const reason = success ? 'turn_completed' : 'turn_failed';
+    const normalizedError = errorMessage == null
+      ? null
+      : String(errorMessage).slice(0, 2000);
     const result = stmts.complete.run(
       status,
-      errorMessage,
+      normalizedError,
       reason,
       status,
       status,
@@ -815,25 +819,28 @@ function createManagerMessageQueueService({
     // Current-owner and stale-claim reconciliation both enter through here, so
     // neither recovery path can drift from the shared live-parser contract.
     if (!row?.run_id) return null;
-    let terminal;
     try {
-      const candidate = stmts.terminalEventCandidates.get(
+      const candidates = stmts.terminalEventCandidates.all(
         row.run_id,
         row.adapter_invocation_id,
+        MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
       );
-      terminal = findPersistedTerminalEvent(candidate, row.adapter_invocation_id);
+      const terminal = findPersistedTerminalEvent(
+        candidates,
+        row.adapter_invocation_id,
+      );
+      if (!terminal) return null;
+      return completeFromEvent(
+        row.adapter_invocation_id,
+        row.run_id,
+        terminal.event_type === 'mgr.turn_completed',
+        terminal.event_type === 'mgr.turn_failed'
+          ? (terminal.payload?.summaryText || 'manager turn failed')
+          : null,
+      );
     } catch {
       return null;
     }
-    if (!terminal) return null;
-    return completeFromEvent(
-      row.adapter_invocation_id,
-      row.run_id,
-      terminal.event_type === 'mgr.turn_completed',
-      terminal.event_type === 'mgr.turn_failed'
-        ? (terminal.payload?.summaryText || 'manager turn failed')
-        : null,
-    );
   }
 
   function reconcilePersistedTerminalEvents() {
