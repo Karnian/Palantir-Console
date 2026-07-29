@@ -325,6 +325,20 @@ test('default Codex worker omits manager bypass and public docs distinguish the 
   assert.doesNotMatch(agentGuide, /두 역할 모두 .*dangerously-bypass/);
 });
 
+test('dispatch-audit comment does not claim the Codex manager is sandboxed', async () => {
+  const repoRoot = path.join(__dirname, '..', '..');
+  const source = await fsp.readFile(
+    path.join(repoRoot, 'server', 'routes', 'dispatchAudit.js'),
+    'utf8'
+  );
+
+  assert.doesNotMatch(source, /inside (?:its|a|the) sandboxed session/i);
+  assert.match(
+    source,
+    /Codex managers always launch with[\s\S]{0,120}--dangerously-bypass-approvals-and-sandbox/
+  );
+});
+
 test('putPolicy: stale edit after delete → NotFoundError, not a revived INSERT', async (t) => {
   // Codex final-review blocker: a PUT that carries expectedRevision means the
   // caller believes it is EDITING an existing row. If that row was deleted
