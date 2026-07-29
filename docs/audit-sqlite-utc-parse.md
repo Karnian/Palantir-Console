@@ -14,10 +14,12 @@
 |---|---|---|
 | `server/routes/manager.js:1076-1111` (`GET /api/manager/summary`) | `runs.created_at` | **이미 정확** — 비교 전에 `Z`를 명시적으로 붙인다. 다만 바로 위 `:1100-1103` 주석이 "zone 표시 없는 JS `Date()`가 마침 원하는 동작" 이라고 반대로 설명하고 있어 코드와 모순된다. 이 PR 이전부터 있던 것이라 건드리지 않았다 |
 | `server/public/app/lib/format.js:31-39`, `NodesView.js:169-190` | 표시용 상대 시각 | **이미 정확** — 이전 K-low-3 수정으로 TZ-safe |
+| `server/public/app/components/ManagerChat.js`의 메시지 정렬 | `run_events.created_at`, `manager_message_queue.created_at` | **결함 발견 및 수정** — SQLite UTC 행과 `toISOString()` optimistic 행을 같은 배열에서 정렬하면서 둘 다 `Date.parse`에 직접 전달했다. 공용 `parseDate`를 사용해 SQLite 형식은 UTC로 고정하고 zone 포함 ISO는 그대로 해석한다. |
 
 즉 이 감사의 1차 스윕은 `migrations/` + `services/` 였고, `routes/` 와
-프런트엔드는 교차검토 단계에서 별도 확인했다. 결함은 없었으나,
-"전수 조사" 라는 표현이 1차 스윕 범위만 가리키지 않도록 여기 명시한다.
+프런트엔드는 교차검토 단계에서 별도 확인했다. 그 과정에서
+`ManagerChat`의 혼합 timestamp 정렬 결함이 발견되어 수정했다.
+"전수 조사"라는 표현이 1차 스윕 범위만 가리키지 않도록 여기 명시한다.
 
 SQLite의 `datetime('now')`는 UTC를 `YYYY-MM-DD HH:MM:SS` 형식으로
 저장하지만 zone 표시는 붙이지 않는다. 이 문자열을 JS의 `Date.parse`나
@@ -42,10 +44,11 @@ SQLite의 `datetime('now')`는 UTC를 `YYYY-MM-DD HH:MM:SS` 형식으로
 | `runs.created_at` | `001_initial.sql:58`, 최종 runs 재구성 `050_project_repo_source.sql:68` | `lifecycleService.js:2465`의 queue 대기시간, `lifecycleService.js:2882`의 idle fallback | 두 곳 모두 `parseSqliteUtc`로 수정. 경과시간 계산이다. |
 | `runs.materialize_started_at` | 컬럼은 `050_project_repo_source.sql:94`, 값은 `runService.js:285-301`의 `datetime('now')` | `lifecycleService.js:2512`의 materialize 대기시간 | `parseSqliteUtc`로 수정. 경과시간 계산이다. |
 | `runs.started_at` | 컬럼은 `001_initial.sql:56`, 값은 `runService.js:190-192`, `281-283`의 `datetime('now')` | `lifecycleService.js:2882`의 idle fallback | `parseSqliteUtc`로 수정. 경과시간 계산이다. |
-| `run_events.created_at` | `001_initial.sql:66` 기본값 | `lifecycleService.js:2708`의 remote ownership TTL, `lifecycleService.js:2881`의 idle activity | remote ownership 경로는 PR #463에서 이미 수정됨. idle 경로도 이번에 `parseSqliteUtc`로 수정. 둘 다 경과시간 계산이다. |
+| `run_events.created_at` | `001_initial.sql:66` 기본값 | `lifecycleService.js:2708`의 remote ownership TTL, `lifecycleService.js:2881`의 idle activity, `ManagerChat.js`의 메시지 정렬 | 경과시간 소비는 모두 `parseSqliteUtc`를 사용한다. UI 정렬은 공용 `parseDate`를 사용해 queue 행과 같은 UTC 체계로 비교하도록 수정했다. |
+| `manager_message_queue.created_at` | `071_manager_message_queue.sql:27` 기본값 | `ManagerChat.js`의 메시지 정렬 | `run_events` 행 및 zone 포함 optimistic 행과 섞여 정렬되므로 공용 `parseDate`를 사용하도록 수정했다. |
 
-위 네 컬럼 외에는 `datetime('now')`로 기록된 값을 서비스의
-`Date.parse` / `new Date`가 소비하는 교차점이 없었다.
+위 다섯 컬럼 외에는 `datetime('now')`로 기록된 값을 서비스 또는
+확인된 프런트엔드 정렬의 `Date.parse` / `new Date`가 소비하는 교차점이 없었다.
 
 ## `datetime('now')` 기록 컬럼 전체 목록
 
@@ -59,7 +62,7 @@ SQLite의 `datetime('now')`는 UTC를 `YYYY-MM-DD HH:MM:SS` 형식으로
 | `tasks` | `created_at`, `updated_at` | `001_initial.sql:23-24`, 재구성 `048_task_status_failed.sql:14-15`; 갱신은 `taskService.js` | JS 파서 없음. SQL 정렬/API 반환만 하므로 미수정. |
 | `agent_profiles` | `created_at` | `001_initial.sql:38` | JS 파서 없음. 미수정. |
 | `runs` | `created_at`, `started_at`, `ended_at`, `materialize_started_at`, `materialize_run_after`, `workspace_ref_released_at` | `001_initial.sql`, runs 재구성 `012`, `045`, `046`, `050`; 쓰기는 `runService.js:188-191`, `282-318`, `448-493`, `069_remove_opencode_agent_profile.sql:12` | `created_at`, `started_at`, `materialize_started_at`의 경과시간 소비는 위 교차표처럼 수정. 나머지는 JS 파서 없음. |
-| `run_events` | `created_at` | `001_initial.sql:66` | 경과시간 소비 두 곳 모두 위 교차표처럼 `parseSqliteUtc` 사용. |
+| `run_events` | `created_at` | `001_initial.sql:66` | 경과시간 소비 두 곳은 위 교차표처럼 `parseSqliteUtc` 사용. `ManagerChat` 정렬은 공용 `parseDate` 사용. |
 | `approvals` | `created_at` | `001_initial.sql:74` | JS 파서 없음. 미수정. |
 | `external_sessions` | `created_at` | `001_initial.sql:83` | JS 파서 없음. 미수정. |
 | `project_briefs` | `created_at`, `updated_at` | `008_project_brief.sql:30-31`; `projectBriefService.js:29-49`, 동적 갱신 | JS 파서 없음. 미수정. |
@@ -84,7 +87,7 @@ SQLite의 `datetime('now')`는 UTC를 `YYYY-MM-DD HH:MM:SS` 형식으로
 | `model_policy_audit` | `created_at` | `061_model_policies.sql:42` | JS 파서 없음. 미수정. |
 | `operator_schedules` | `created_at`, `updated_at`, `archived_at` | `067_operator_scheduler.sql:24-25`; 갱신/보관은 `operatorScheduleService.js` | JS 파서 없음. SQL due/정렬과 raw 반환만 하므로 미수정. |
 | `operator_invocations` | `created_at`, `updated_at`, `started_at`, `completed_at` | `067_operator_scheduler.sql:59-60`; 상태 기록은 `operatorScheduleService.js`, 보정은 `068_operator_scheduler_hardening.sql` | JS 파서 없음. `scheduled_for` 파싱은 아래처럼 ISO 기록이므로 이 행과 무관하다. |
-| `manager_message_queue` | `created_at`, `updated_at`, `delivered_at`, `failed_at`, `cancelled_at` | `071_manager_message_queue.sql:27-28`; 상태 기록은 `managerMessageQueueService.js` | JS 파서 없음. FIFO는 정수 `sequence`, lease는 정수 epoch이므로 미수정. |
+| `manager_message_queue` | `created_at`, `updated_at`, `delivered_at`, `failed_at`, `cancelled_at` | `071_manager_message_queue.sql:27-28`; 상태 기록은 `managerMessageQueueService.js` | `created_at`은 `ManagerChat`에서 run event 및 optimistic 행과 함께 정렬되며 공용 `parseDate`로 수정. FIFO는 정수 `sequence`, lease는 정수 epoch이다. 나머지 timestamp는 JS 파서 없음. |
 | `project_node_workspaces` | `materialized_at`, `last_used_at` | 컬럼은 `050_project_repo_source.sql:148-149`; 기록은 `runService.js:360-402` | JS 파서 없음. 미수정. |
 | `project_materialization_leases` | `locked_at` | 컬럼은 `050_project_repo_source.sql:160`; 기록은 `runService.js:414-424` | JS 파서 없음. stale 판정은 SQLite `datetime(...)` 비교라 미수정. |
 | `project_workspace_refs` | `acquired_at`, `heartbeat_at`, `released_at` | 컬럼은 `050_project_repo_source.sql:179-181`; 기록은 `runService.js:431-446` | JS 파서 없음. 미수정. |

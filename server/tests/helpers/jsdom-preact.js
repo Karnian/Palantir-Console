@@ -34,6 +34,7 @@ const nodeUiSrc = fs.readFileSync(path.join(APP_LIB_DIR, 'nodeUi.js'), 'utf8');
 // real hook implementations exist as sandbox globals; they resolve
 // `apiFetch` / `sseBroker` at call time, so per-test stubs keep working.
 const dataHooksSrc = fs.readFileSync(path.join(APP_LIB_DIR, 'hooks', 'data.js'), 'utf8');
+const formatSrc = fs.readFileSync(path.join(APP_LIB_DIR, 'format.js'), 'utf8');
 
 /**
  * Load an ES-module component file into a vm context by stripping `export`
@@ -128,6 +129,14 @@ function createPreactEnv() {
   // `window.preactHooks` are already accessible (set by the UMD bundles).
   // htm UMD sets `self.htm` — ensure it's also reachable as `this.htm`.
   vm.runInContext('this.htm = htm;', context);
+
+  // Components import the shared timestamp parser directly. Preload the real
+  // formatter module so import-stripped jsdom components exercise the same
+  // SQLite-UTC/explicit-zone contract as the browser.
+  vm.runInContext(
+    formatSrc.replace(/^export\s+function\s+/gm, 'function '),
+    context,
+  );
 
   // Mount copy.js named exports as bare globals so loadComponent()'s
   // import-stripping doesn't leave components with undefined references.
