@@ -506,6 +506,8 @@ hashes. Deleting a preset later does not erase past snapshot rows;
 | `PALANTIR_PM_TOKEN` | (none) | Optional distinct bearer credential for trusted external automation; never injected into agent processes |
 | `PALANTIR_ACTOR_TOKEN_FILE` | (none) | POSIX only: mode-`0600` one-shot JSON containing the two actor tokens; consumed and unlinked before agent startup (Windows fails closed because DACLs cannot be verified portably) |
 | `PALANTIR_AGENT_PROCESS_ISOLATION` | (none) | Set to `verified` only when every capability-bearing agent is isolated by a separate OS account or container; otherwise run-bound agent capabilities stay disabled |
+| `PALANTIR_GIT_ENV_ALLOWLIST` | (none) | Additional node-local environment variable names inherited by Git operations (comma-separated), for example an askpass helper's companion credential |
+| `PALANTIR_PROJECT_TEST_ENV_ALLOWLIST` | (none) | Additional node-local environment variable names inherited by materialized project test commands (comma-separated), for example `PYTHONPATH` |
 | `HOST` | auto | Override the bind address. `0.0.0.0` without a token logs a security warning |
 | `PALANTIR_ALLOWED_COMMANDS` | (none) | Additional allowed CLI commands (comma-separated) |
 | `PALANTIR_DEFAULT_PM_ADAPTER` | `codex` | Global Operator adapter fallback when an instance uses Auto and its project has no `preferred_pm_adapter` |
