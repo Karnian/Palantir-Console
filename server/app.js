@@ -1080,23 +1080,30 @@ function createApp(options = {}) {
   // while production either supplies one-shot-file options or falls back to
   // the environment. Keep that precedence in the shared policy resolver used
   // by the standalone isolation diagnostic too.
+  // Snapshot before reading any injectable option accessors, which may have side effects.
+  const actorTokenEnv = {
+    PALANTIR_TOKEN: process.env.PALANTIR_TOKEN,
+    PALANTIR_PM_TOKEN: process.env.PALANTIR_PM_TOKEN,
+    PALANTIR_AGENT_PROCESS_ISOLATION: process.env.PALANTIR_AGENT_PROCESS_ISOLATION,
+    PALANTIR_ACTOR_TOKEN_SOURCE: process.env.PALANTIR_ACTOR_TOKEN_SOURCE,
+  };
   const optionAuthToken = options.authToken;
   const optionPmToken = options.pmToken;
   const authTokenFromOptions = optionAuthToken !== undefined;
   const pmTokenFromOptions = optionPmToken !== undefined;
   const authToken = authTokenFromOptions
     ? optionAuthToken
-    : process.env.PALANTIR_TOKEN;
+    : actorTokenEnv.PALANTIR_TOKEN;
   const pmToken = pmTokenFromOptions
     ? optionPmToken
-    : process.env.PALANTIR_PM_TOKEN;
+    : actorTokenEnv.PALANTIR_PM_TOKEN;
   const actorTokenOptions = {
     actorTokenSource: options.actorTokenSource,
     agentProcessIsolation: options.agentProcessIsolation,
   };
   if (authTokenFromOptions) actorTokenOptions.authToken = authToken;
   if (pmTokenFromOptions) actorTokenOptions.pmToken = pmToken;
-  const actorTokenPolicy = resolveAppActorTokenPolicy(actorTokenOptions, process.env);
+  const actorTokenPolicy = resolveAppActorTokenPolicy(actorTokenOptions, actorTokenEnv);
   const workerProposalTokenService = createWorkerProposalTokenService({
     actorTokens: actorTokenPolicy,
   });
@@ -1755,12 +1762,12 @@ function createApp(options = {}) {
   // and logout have to be reachable without an existing session cookie.
   // /api/auth/login performs its own timing-safe comparison against
   // PALANTIR_TOKEN; logout always succeeds (it just clears the cookie).
-  app.use('/api/auth', createAuthRouter({ token: authToken }));
+  app.use('/api/auth', createAuthRouter({ token: authToken ?? null }));
 
   // Auth middleware for API routes (skips static files + health + /api/auth)
   const auth = createAuthMiddleware({
-    token: authToken,
-    pmToken,
+    token: authToken ?? null,
+    pmToken: pmToken ?? null,
     workerProposalTokenService,
     managerCapabilityTokenService,
     isManagerCapabilityActive(grant) {
