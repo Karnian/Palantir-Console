@@ -2,7 +2,6 @@
 
 const { randomUUID } = require('node:crypto');
 const {
-  MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
   parseTerminalEventPayload,
   isTerminalEventForInvocation,
   findPersistedTerminalEvent,
@@ -274,22 +273,24 @@ function createManagerMessageQueueService({
         AND status IN ('sending', 'processing')
       ORDER BY sequence
     `),
-    // Correlate before LIMIT so unrelated turns cannot consume this row's
-    // candidate budget. JSON1 reads the first duplicate invocationId key while
-    // JSON.parse reads the last; that mismatch is intentionally unsupported
-    // because normal writers use JSON.stringify and cannot create duplicate
-    // object keys. JavaScript below remains authoritative for terminal === true.
+    // Filter terminality before LIMIT so same-invocation non-terminal failures
+    // cannot exhaust reconciliation. The shared JavaScript validator remains
+    // authoritative for the single returned row.
     terminalEventCandidates: db.prepare(`
       SELECT event_type, payload_json
       FROM run_events
       WHERE run_id = ?
         AND event_type IN ('mgr.turn_completed', 'mgr.turn_failed')
-        AND CASE
-              WHEN json_valid(payload_json)
-              THEN json_extract(payload_json, '$.data.invocationId')
-            END = ?
+        AND json_extract(
+              CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
+              '$.data.invocationId'
+            ) = ?
+        AND json_type(
+              CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
+              '$.data.terminal'
+            ) = 'true'
       ORDER BY id DESC
-      LIMIT ?
+      LIMIT 1
     `),
     failRunActive: db.prepare(`
       UPDATE manager_message_queue
@@ -816,12 +817,11 @@ function createManagerMessageQueueService({
     if (!row?.run_id) return null;
     let terminal;
     try {
-      const candidates = stmts.terminalEventCandidates.all(
+      const candidate = stmts.terminalEventCandidates.get(
         row.run_id,
         row.adapter_invocation_id,
-        MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
       );
-      terminal = findPersistedTerminalEvent(candidates);
+      terminal = findPersistedTerminalEvent(candidate, row.adapter_invocation_id);
     } catch {
       return null;
     }

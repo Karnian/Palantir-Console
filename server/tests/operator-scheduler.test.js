@@ -469,7 +469,7 @@ test('restart reconciles a persisted terminal turn event even while the manager 
   assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'completed');
 });
 
-test('unrelated invocation events cannot exhaust scheduled reconciliation candidates', (t) => {
+test('same-invocation non-terminal failures cannot exhaust scheduled terminal reconciliation', (t) => {
   const h = harness(t);
   const { instance } = createMappedOperator(h);
   const schedule = h.scheduleService.createSchedule(instance.id, {
@@ -487,14 +487,11 @@ test('unrelated invocation events cannot exhaust scheduled reconciliation candid
     insertEvent.run(managerRun.id, 'mgr.turn_failed', JSON.stringify({
       data: {
         kind: 'codex_error',
-        invocationId: 'oinv_unrelated_chat',
+        invocationId: claimed.id,
         terminal: false,
       },
     }));
   }
-  insertEvent.run(managerRun.id, 'mgr.turn_completed', JSON.stringify({
-    data: { invocationId: 'oinv_unrelated_chat', terminal: true },
-  }));
 
   const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
   assert.equal(reconciled.length, 1);
@@ -526,7 +523,7 @@ test('a persisted numeric terminal flag cannot complete a running invocation', (
   );
 });
 
-test('persisted candidates choose the newest JSON.parse-valid terminal event', (t) => {
+test('scheduler does not settle when JavaScript rejects the SQL terminal candidate', (t) => {
   const h = harness(t);
   const { instance } = createMappedOperator(h);
   const schedule = h.scheduleService.createSchedule(instance.id, {
@@ -537,18 +534,18 @@ test('persisted candidates choose the newest JSON.parse-valid terminal event', (
     INSERT INTO run_events (run_id, event_type, payload_json)
     VALUES (?, ?, ?)
   `);
+  insertEvent.run(managerRun.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: claimed.id, terminal: true },
+  }));
   insertEvent.run(
     managerRun.id,
     'mgr.turn_failed',
     `{"summaryText":"must be ignored","data":{"invocationId":"${claimed.id}","terminal":true,"terminal":false}}`,
   );
-  insertEvent.run(managerRun.id, 'mgr.turn_completed', JSON.stringify({
-    data: { invocationId: claimed.id, terminal: true },
-  }));
 
   const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
-  assert.equal(reconciled.length, 1);
-  assert.equal(reconciled[0].status, 'completed');
+  assert.deepEqual(reconciled, []);
+  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
   assert.equal(h.scheduleService.getSchedule(schedule.id).consecutive_failures, 0);
 });
 

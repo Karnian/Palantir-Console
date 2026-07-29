@@ -7,7 +7,6 @@ const {
   NotFoundError,
 } = require('../utils/errors');
 const {
-  MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
   findPersistedTerminalEvent,
 } = require('./terminalEventReconciliation');
 
@@ -468,22 +467,24 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
       WHERE status='running' AND manager_run_id IS NOT NULL
       ORDER BY started_at ASC, id ASC
     `),
-    // Correlate before LIMIT so unrelated turns cannot consume this invocation's
-    // candidate budget. JSON1 reads the first duplicate invocationId key while
-    // JSON.parse reads the last; that mismatch is intentionally unsupported
-    // because normal writers use JSON.stringify and cannot create duplicate
-    // object keys. JavaScript below remains authoritative for terminal === true.
+    // Filter terminality before LIMIT so same-invocation non-terminal failures
+    // cannot exhaust reconciliation. The shared JavaScript validator remains
+    // authoritative for the single returned row.
     persistedTerminalEvents: db.prepare(`
       SELECT event_type, payload_json
       FROM run_events
       WHERE run_id=?
         AND event_type IN ('mgr.turn_completed','mgr.turn_failed')
-        AND CASE
-              WHEN json_valid(payload_json)
-              THEN json_extract(payload_json, '$.data.invocationId')
-            END=?
+        AND json_extract(
+              CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
+              '$.data.invocationId'
+            )=?
+        AND json_type(
+              CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
+              '$.data.terminal'
+            )='true'
       ORDER BY id DESC
-      LIMIT ?
+      LIMIT 1
     `),
     resetFailures: db.prepare(`
       UPDATE operator_schedules SET consecutive_failures=0, updated_at=datetime('now') WHERE id=?
@@ -1059,12 +1060,11 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
   function reconcilePersistedTerminalEvents() {
     const reconciled = [];
     for (const row of stmts.runningInvocationsForTerminalReconciliation.all()) {
-      const candidates = stmts.persistedTerminalEvents.all(
+      const candidate = stmts.persistedTerminalEvents.get(
         row.manager_run_id,
         row.invocation_id,
-        MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
       );
-      const terminal = findPersistedTerminalEvent(candidates);
+      const terminal = findPersistedTerminalEvent(candidate, row.invocation_id);
       if (!terminal) continue;
       const success = terminal.event_type === 'mgr.turn_completed';
       const invocation = completeInvocation(
