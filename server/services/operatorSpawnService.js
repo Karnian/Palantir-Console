@@ -426,6 +426,8 @@ function createOperatorSpawnService({
     let profileMcpConfig = null;
     let strictMcpConfig = false;
     let safeMode = false;
+    let bare = false;
+    let disableSlashCommands = false;
     let settingSources = null;
     let permissionMode = adapterType === 'claude-code' ? 'bypassPermissions' : undefined;
     try {
@@ -457,6 +459,8 @@ function createOperatorSpawnService({
             profileMcpConfig = templateOptions.mcpConfig;
             strictMcpConfig = templateOptions.strictMcpConfig;
             safeMode = templateOptions.safeMode;
+            bare = templateOptions.bare;
+            disableSlashCommands = templateOptions.disableSlashCommands;
             settingSources = templateOptions.settingSources;
           }
           if (managerProfile.env_allowlist) {
@@ -803,6 +807,8 @@ function createOperatorSpawnService({
                   mcpConfig: effectiveMcpConfig || null,
                   strictMcpConfig,
                   ...(safeMode ? { safeMode: true } : {}),
+                  ...(bare ? { bare: true } : {}),
+                  ...(disableSlashCommands ? { disableSlashCommands: true } : {}),
                   ...(typeof settingSources === 'string'
                     ? { settingSources }
                     : {}),
@@ -834,6 +840,8 @@ function createOperatorSpawnService({
           maxBudgetUsd: maxBudgetUsd || undefined,
           strictMcpConfig: strictMcpConfig || undefined,
           safeMode: safeMode || undefined,
+          bare: bare || undefined,
+          disableSlashCommands: disableSlashCommands || undefined,
           settingSources: typeof settingSources === 'string'
             ? settingSources
             : undefined,

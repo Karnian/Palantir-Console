@@ -345,6 +345,8 @@ test('engine: optional args including strict MCP config are appended', async () 
     permissionMode: 'acceptEdits',
     maxBudgetUsd: 1.5,
     safeMode: true,
+    bare: true,
+    disableSlashCommands: true,
     settingSources: '',
   });
 
@@ -364,6 +366,8 @@ test('engine: optional args including strict MCP config are appended', async () 
   assert.ok(args.includes('--max-budget-usd'));
   assert.ok(args.includes('1.5'));
   assert.ok(args.includes('--safe-mode'));
+  assert.equal(args.filter((arg) => arg === '--bare').length, 1);
+  assert.ok(args.includes('--disable-slash-commands'));
   const settingSourcesIndex = args.indexOf('--setting-sources');
   assert.notEqual(settingSourcesIndex, -1);
   assert.equal(args[settingSourcesIndex + 1], '');

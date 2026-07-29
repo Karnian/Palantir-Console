@@ -158,7 +158,7 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   const projectBriefService = createProjectBriefService(db);
   const agentProfileService = createAgentProfileService(db);
   agentProfileService.updateProfile('claude-code', {
-    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config profile.json --strict-mcp-config',
+    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config profile.json --strict-mcp-config --bare --disable-slash-commands',
     permission_mode: 'acceptEdits',
   });
   const registry = createManagerRegistry({ runService });
@@ -201,6 +201,8 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   assert.equal(start.opts.maxBudgetUsd, 0.01);
   assert.equal(start.opts.mcpConfig, 'profile.json');
   assert.equal(start.opts.strictMcpConfig, true);
+  assert.equal(start.opts.bare, true);
+  assert.equal(start.opts.disableSlashCommands, true);
   assert.equal(
     runService.getRun(result.run.id).session_permission_mode,
     'acceptEdits',
@@ -213,6 +215,8 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
       maxBudgetUsd: 0.01,
       mcpConfig: 'profile.json',
       strictMcpConfig: true,
+      bare: true,
+      disableSlashCommands: true,
     },
   );
   assert.equal(runService.getRun(result.run.id).status, 'queued');
@@ -263,6 +267,8 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   assert.equal(resumedOperator.opts.maxBudgetUsd, 0.01);
   assert.equal(resumedOperator.opts.mcpConfig, 'profile.json');
   assert.equal(resumedOperator.opts.strictMcpConfig, true);
+  assert.equal(resumedOperator.opts.bare, true);
+  assert.equal(resumedOperator.opts.disableSlashCommands, true);
 });
 
 test('Claude operator rejects malformed template options instead of falling back to bypass', async (t) => {

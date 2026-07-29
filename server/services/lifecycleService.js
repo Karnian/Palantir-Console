@@ -1682,6 +1682,8 @@ function createLifecycleService({
               mcpConfig: effectiveMcpConfig,
               strictMcpConfig: templateOptions.strictMcpConfig || undefined,
               safeMode: templateOptions.safeMode || undefined,
+              bare: templateOptions.bare || undefined,
+              disableSlashCommands: templateOptions.disableSlashCommands || undefined,
               settingSources: typeof templateOptions.settingSources === 'string'
                 ? templateOptions.settingSources
                 : undefined,

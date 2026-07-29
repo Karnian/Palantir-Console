@@ -241,7 +241,7 @@ test('Top Manager snapshots and resumes Claude runtime options after profile rem
     starts,
   } = await createCapturingManagerHarness(t);
   agentProfileService.updateProfile('claude-code', {
-    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config profile.json --strict-mcp-config --safe-mode --setting-sources ""',
+    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config profile.json --strict-mcp-config --safe-mode --bare --disable-slash-commands --setting-sources ""',
   });
 
   const response = await invokeApp(app, {
@@ -257,6 +257,8 @@ test('Top Manager snapshots and resumes Claude runtime options after profile rem
   assert.equal(starts[0].opts.mcpConfig, 'profile.json');
   assert.equal(starts[0].opts.strictMcpConfig, true);
   assert.equal(starts[0].opts.safeMode, true);
+  assert.equal(starts[0].opts.bare, true);
+  assert.equal(starts[0].opts.disableSlashCommands, true);
   assert.equal(starts[0].opts.settingSources, '');
   const run = runService.getRun(managerRegistry.getActiveRunId('top'));
   assert.deepEqual(JSON.parse(run.session_claude_options_json), {
@@ -266,6 +268,8 @@ test('Top Manager snapshots and resumes Claude runtime options after profile rem
     mcpConfig: 'profile.json',
     strictMcpConfig: true,
     safeMode: true,
+    bare: true,
+    disableSlashCommands: true,
     settingSources: '',
   });
 
@@ -321,6 +325,8 @@ test('Top Manager snapshots and resumes Claude runtime options after profile rem
   assert.equal(resumed.opts.mcpConfig, 'profile.json');
   assert.equal(resumed.opts.strictMcpConfig, true);
   assert.equal(resumed.opts.safeMode, true);
+  assert.equal(resumed.opts.bare, true);
+  assert.equal(resumed.opts.disableSlashCommands, true);
   assert.equal(resumed.opts.settingSources, '');
 });
 
@@ -421,6 +427,8 @@ test('Manager boot-resume uses the fresh-spawn permission snapshot after profile
       maxBudgetUsd: 0.01,
       mcpConfig: 'locked.json',
       strictMcpConfig: true,
+      bare: true,
+      disableSlashCommands: true,
     },
   });
 
@@ -483,6 +491,8 @@ test('Manager boot-resume uses the fresh-spawn permission snapshot after profile
     args.filter((arg) => arg === '--strict-mcp-config').length,
     1,
   );
+  assert.equal(args.filter((arg) => arg === '--bare').length, 1);
+  assert.equal(args.filter((arg) => arg === '--disable-slash-commands').length, 1);
   const resumeIndex = args.indexOf('--resume');
   assert.notEqual(resumeIndex, -1, `missing --resume in ${JSON.stringify(args)}`);
   assert.equal(args[resumeIndex + 1], 'sess-review');

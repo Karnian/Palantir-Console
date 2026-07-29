@@ -270,6 +270,11 @@ function parseClaudeArgsTemplate(argsTemplate) {
   const mcpConfig = readSingleClaudeTemplateOption(tokens, '--mcp-config');
   const strictMcpConfig = readClaudeTemplateBooleanOption(tokens, '--strict-mcp-config');
   const safeMode = readClaudeTemplateBooleanOption(tokens, '--safe-mode');
+  const bare = readClaudeTemplateBooleanOption(tokens, '--bare');
+  const disableSlashCommands = readClaudeTemplateBooleanOption(
+    tokens,
+    '--disable-slash-commands',
+  );
   const settingSources = readClaudeTemplateStringOption(
     tokens,
     '--setting-sources',
@@ -306,6 +311,8 @@ function parseClaudeArgsTemplate(argsTemplate) {
     mcpConfig,
     strictMcpConfig,
     safeMode,
+    bare,
+    disableSlashCommands,
     settingSources,
     tools,
     disallowedTools,

@@ -135,6 +135,8 @@ function resolveResumeClaudeTemplateOptions(agentProfileService, options = {}) {
       mcpConfig: parsed.mcpConfig ?? null,
       strictMcpConfig: parsed.strictMcpConfig === true,
       safeMode: parsed.safeMode === true,
+      bare: parsed.bare === true,
+      disableSlashCommands: parsed.disableSlashCommands === true,
       settingSources: typeof parsed.settingSources === 'string'
         ? parsed.settingSources
         : null,
@@ -296,6 +298,8 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
               mcpConfig: templateOptions?.mcpConfig || undefined,
               strictMcpConfig: templateOptions?.strictMcpConfig || undefined,
               safeMode: templateOptions?.safeMode || undefined,
+              bare: templateOptions?.bare || undefined,
+              disableSlashCommands: templateOptions?.disableSlashCommands || undefined,
               settingSources: typeof templateOptions?.settingSources === 'string'
                 ? templateOptions.settingSources
                 : undefined,
@@ -613,6 +617,8 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                       ),
                     strictMcpConfig: templateOptions?.strictMcpConfig || undefined,
                     safeMode: templateOptions?.safeMode || undefined,
+                    bare: templateOptions?.bare || undefined,
+                    disableSlashCommands: templateOptions?.disableSlashCommands || undefined,
                     settingSources: typeof templateOptions?.settingSources === 'string'
                       ? templateOptions.settingSources
                       : undefined,
@@ -964,6 +970,12 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 ...(claudeTemplateOptions.safeMode
                   ? { safeMode: true }
                   : {}),
+                ...(claudeTemplateOptions.bare
+                  ? { bare: true }
+                  : {}),
+                ...(claudeTemplateOptions.disableSlashCommands
+                  ? { disableSlashCommands: true }
+                  : {}),
                 ...(typeof claudeTemplateOptions.settingSources === 'string'
                   ? { settingSources: claudeTemplateOptions.settingSources }
                   : {}),
@@ -995,6 +1007,8 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         mcpConfig: claudeTemplateOptions?.mcpConfig || undefined,
         strictMcpConfig: claudeTemplateOptions?.strictMcpConfig || undefined,
         safeMode: claudeTemplateOptions?.safeMode || undefined,
+        bare: claudeTemplateOptions?.bare || undefined,
+        disableSlashCommands: claudeTemplateOptions?.disableSlashCommands || undefined,
         settingSources: typeof claudeTemplateOptions?.settingSources === 'string'
           ? claudeTemplateOptions.settingSources
           : undefined,

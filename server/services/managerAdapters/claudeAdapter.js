@@ -254,6 +254,8 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
     mcpConfig,
     strictMcpConfig,
     safeMode,
+    bare,
+    disableSlashCommands,
     settingSources,
     permissionMode,
     env,
@@ -300,6 +302,8 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
       mcpConfig: mcpConfig || undefined, // P4-2: project-scoped MCP config path
       strictMcpConfig: strictMcpConfig || undefined,
       safeMode: safeMode || undefined,
+      bare: bare || undefined,
+      disableSlashCommands: disableSlashCommands || undefined,
       settingSources: typeof settingSources === 'string' ? settingSources : undefined,
       model: model || undefined,
       isManager: true,

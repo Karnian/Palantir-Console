@@ -227,13 +227,14 @@ test('streamJsonEngine buildArgs: isolated=true emits expected flags', () => {
   });
   const args = engine._buildArgs({
     isolated: true,
+    bare: true,
     pluginDirs: ['/tmp/pd1', '/tmp/pd2'],
     settingsPath: '/tmp/s.json',
     settingSources: '',
     isManager: false,
     prompt: 'hi',
   });
-  assert.ok(args.includes('--bare'));
+  assert.equal(args.filter((arg) => arg === '--bare').length, 1);
   assert.ok(args.includes('--strict-mcp-config'));
   const ssIdx = args.indexOf('--setting-sources');
   assert.ok(ssIdx >= 0 && args[ssIdx + 1] === '');

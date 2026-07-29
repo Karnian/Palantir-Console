@@ -205,7 +205,7 @@ test('claude worker carries security template options into the stream-json spec'
   const harness = await createHarness(t);
   const profileId = insertProfile(harness.db, {
     command: 'claude',
-    argsTemplate: '-p {prompt} --max-budget-usd 0.01 --mcp-config /tmp/intended.json --strict-mcp-config --safe-mode --setting-sources ""',
+    argsTemplate: '-p {prompt} --max-budget-usd 0.01 --mcp-config /tmp/intended.json --strict-mcp-config --safe-mode --bare --disable-slash-commands --setting-sources ""',
   });
 
   await executeWorker(harness, profileId, 'Claude template runtime options');
@@ -218,6 +218,8 @@ test('claude worker carries security template options into the stream-json spec'
   );
   assert.equal(harness.streamJsonEngine.spawned[0].opts.strictMcpConfig, true);
   assert.equal(harness.streamJsonEngine.spawned[0].opts.safeMode, true);
+  assert.equal(harness.streamJsonEngine.spawned[0].opts.bare, true);
+  assert.equal(harness.streamJsonEngine.spawned[0].opts.disableSlashCommands, true);
   assert.equal(harness.streamJsonEngine.spawned[0].opts.settingSources, '');
 });
 

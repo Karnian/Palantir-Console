@@ -419,12 +419,14 @@ test('claude template parser preserves tool and strict MCP rules', (t) => {
   );
 });
 
-test('claude template parser preserves safe mode and an empty setting source', (t) => {
+test('claude template parser preserves boolean security flags and an empty setting source', (t) => {
   const { service } = setup(t);
-  const argsTemplate = '-p {prompt} --safe-mode --setting-sources ""';
+  const argsTemplate = '-p {prompt} --safe-mode --bare --disable-slash-commands --setting-sources ""';
   const parsed = parseClaudeArgsTemplate(argsTemplate);
 
   assert.equal(parsed.safeMode, true);
+  assert.equal(parsed.bare, true);
+  assert.equal(parsed.disableSlashCommands, true);
   assert.equal(parsed.settingSources, '');
 
   const created = service.createProfile(profile({
@@ -442,6 +444,20 @@ test('claude template parser preserves safe mode and an empty setting source', (
     })),
     /--safe-mode in args_template does not accept a value/,
   );
+  for (const [flag, field] of [
+    ['--bare', 'bare'],
+    ['--disable-slash-commands', 'disableSlashCommands'],
+  ]) {
+    assertBadRequest(
+      () => service.createProfile(profile({
+        command: 'claude',
+        type: 'claude-code',
+        args_template: `-p {prompt} ${flag}=true`,
+      })),
+      new RegExp(`${flag} in args_template does not accept a value`),
+    );
+    assert.equal(parseClaudeArgsTemplate('-p {prompt}')[field], false);
+  }
   assertBadRequest(
     () => service.createProfile(profile({
       command: 'claude',

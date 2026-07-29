@@ -188,6 +188,14 @@ function createStreamJsonEngine({
       args.push('--safe-mode');
     }
 
+    if (opts.bare && !opts.isolated) {
+      args.push('--bare');
+    }
+
+    if (opts.disableSlashCommands) {
+      args.push('--disable-slash-commands');
+    }
+
     if (!opts.isolated && typeof opts.settingSources === 'string') {
       args.push('--setting-sources', opts.settingSources);
     }
@@ -275,7 +283,7 @@ function createStreamJsonEngine({
    * Spawn a Claude Code agent with stream-json protocol.
    */
   function spawnAgent(runId, { prompt, cwd, env, systemPrompt, permissionMode,
-    tools, allowedTools, disallowedTools, maxBudgetUsd, model, mcpConfig, strictMcpConfig, safeMode, settingSources, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent,
+    tools, allowedTools, disallowedTools, maxBudgetUsd, model, mcpConfig, strictMcpConfig, safeMode, bare, disableSlashCommands, settingSources, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent,
     // Phase 10D Tier 2
     isolated, pluginDirs, settingsPath, onCleanup,
     executor, nodePrefix, envAllowlist, nodeId }) {
@@ -289,7 +297,8 @@ function createStreamJsonEngine({
     const claudeBin = usingRemoteExecutor ? 'claude' : resolveClaudeBin();
     const args = buildArgs({
       prompt, systemPrompt, permissionMode, tools, allowedTools, disallowedTools,
-      maxBudgetUsd, model, mcpConfig, strictMcpConfig, safeMode, settingSources,
+      maxBudgetUsd, model, mcpConfig, strictMcpConfig, safeMode, bare,
+      disableSlashCommands, settingSources,
       addDir, isManager, maxTurns, resumeSessionId,
       isolated, pluginDirs, settingsPath,
     });
