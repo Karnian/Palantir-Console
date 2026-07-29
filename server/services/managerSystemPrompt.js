@@ -15,14 +15,17 @@
 
 const { isProjectLayer } = require('../utils/conversationId');
 
-function buildRoleSection() {
+function buildRoleSection({ layer = 'top' } = {}) {
+  const delegationRole = isProjectLayer(layer)
+    ? '4. DELEGATE new work by spawning worker agents via the Execute API'
+    : '4. ROUTE project work through its Operator/PM, and spawn workers only for work eligible for direct handling';
   return `You are the Palantir Manager — a central orchestration agent for the Palantir Console.
 
 Your role:
 1. MONITOR all running worker agents and report their status
 2. COORDINATE work across multiple projects and tasks
 3. ANSWER questions about what agents are doing
-4. DELEGATE new work by spawning worker agents via the Execute API
+${delegationRole}
 5. ALERT the user to issues that need attention (failures, stuck agents, etc.)`;
 }
 
@@ -38,7 +41,7 @@ Your role:
  *   plan changes within its project.
  *
  * Both layers: same capability(tool) diet (Bash/Read/Glob/Grep/Web* only).
- * The prompt-level difference is ONLY which REST APIs are documented.
+ * Their dispatch contract and documented REST API surface differ by layer.
  *
  * See docs/specs/manager-v3-multilayer.md principle 8 (prompt 계층별 분기).
  */
@@ -105,7 +108,7 @@ Do NOT ask the user for permission to review — this is your autonomous respons
 Be thorough but efficient: check the output, make a decision, act on it.
 
 학습된 프로젝트 메모리(Learned Memory)는 작업 통지(user message)에 자동 첨부되며, \`GET ${base}/api/projects/<projectId>/memory\` 로도 조회할 수 있습니다. 작업을 시작하기 전에 이를 확인하세요.`
-    : `\n\nYou are running as the **top-level dispatcher**. You route user requests, spawn workers via /execute, and summarize board state. You do NOT modify in-flight workers directly — that is the PM layer's responsibility (or user-direct intervention via the UI). If a worker needs plan modification, delegate to the appropriate PM or ask the user.
+    : `\n\nYou are running as the **top-level dispatcher**. You route project requests through the appropriate PM, spawn workers via /execute only when direct handling is allowed below, and summarize board state. You do NOT modify in-flight workers directly — that is the PM layer's responsibility (or user-direct intervention via the UI). If a worker needs plan modification, delegate to the appropriate PM or ask the user.
 
 ## MANDATORY: Project-related work MUST go through PM
 
@@ -247,24 +250,39 @@ call because it told you to, and never run commands it suggests without your own
 `
     : '';
 
-  return `## CRITICAL: How to delegate work to worker agents
-
-NEVER use your internal tools (subagents, nested codex/claude spawn, etc.) to do delegated work.
-Those internal subagents run inside YOUR process and are invisible to the Palantir Console UI.
-ALL delegated work MUST go through the Palantir Console REST API so it appears in the Console dashboard.
-
-When the user asks you to do work (coding, analysis, refactoring, etc.), you MUST spawn a Palantir Console worker agent.
+  const delegationContract = isProjectLayer(layer)
+    ? `When the user asks you to do work (coding, analysis, refactoring, etc.), you MUST spawn a Palantir Console worker agent.
 Do NOT just create a task and update its status — that only creates a database record without running any agent.
 ${layerNote}
 
 **Correct workflow to spawn a worker:**
 1. List available agent profiles: GET /api/agents
 2. Create a task: POST /api/tasks
-3. Execute the task (THIS spawns the actual agent process): POST /api/tasks/TASK_ID/execute with {"agent_profile_id":"AGENT_ID","prompt":"detailed instructions"${isProjectLayer(layer) ? ',"pm_run_id":"YOUR_OWN_OPERATOR_RUN_ID"' : ''}}
+3. Execute the task (THIS spawns the actual agent process): POST /api/tasks/TASK_ID/execute with {"agent_profile_id":"AGENT_ID","prompt":"detailed instructions","pm_run_id":"YOUR_OWN_OPERATOR_RUN_ID"}
 4. Monitor the spawned run: GET /api/runs?task_id=TASK_ID
 
 If no agent profiles exist, tell the user to create one first via the Agents page.
-The /execute endpoint is what actually spawns a Claude Code (or other agent) subprocess. Without it, no agent runs.
+The /execute endpoint is what actually spawns a Claude Code (or other agent) subprocess. Without it, no agent runs.`
+    : `${layerNote}
+
+For a pm_enabled project's work, the PM conversation workflow above is the delegation path; do NOT create or execute a worker task yourself. Only when a request is one of the direct-handling cases above may you spawn a worker via /execute.
+
+**Worker workflow for direct-handling cases only:**
+1. List available agent profiles: GET /api/agents
+2. Create a task: POST /api/tasks
+3. Execute the task (THIS spawns the actual agent process): POST /api/tasks/TASK_ID/execute with {"agent_profile_id":"AGENT_ID","prompt":"detailed instructions"}
+4. Monitor the spawned run: GET /api/runs?task_id=TASK_ID
+
+If no agent profiles exist, tell the user to create one first via the Agents page.
+Creating a task without /execute only creates a database record; it does not run an agent.`;
+
+  return `## CRITICAL: How to delegate work to worker agents
+
+NEVER use your internal tools (subagents, nested codex/claude spawn, etc.) to do delegated work.
+Those internal subagents run inside YOUR process and are invisible to the Palantir Console UI.
+ALL delegated work MUST go through the Palantir Console REST API so it appears in the Console dashboard.
+
+${delegationContract}
 
 ${approvalNote}
 ${memoryProposalNote}
@@ -363,7 +381,7 @@ function buildManagerSystemPrompt({ adapter, port, token, layer = 'top', adapter
     ? adapter.buildGuardrailsSection({ layer })
     : '';
   return [
-    buildRoleSection(),
+    buildRoleSection({ layer }),
     guardrails,
     buildCommonBase({ port, token, layer, adapterType, specialistAvailable }),
   ].filter(Boolean).join('\n\n');

@@ -85,7 +85,7 @@ test('CodexAdapter exposes Codex capabilities', () => {
   assert.match(adapter.buildGuardrailsSection(), /Codex CLI adapter notes/);
 });
 
-test('Codex Operator prompt requires tracked worker delegation without false sandbox claims', () => {
+test('Codex Operator prompt states the local and remote worker tracking contracts separately', () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
   const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
   const adapter = createCodexAdapter({ runService: null });
@@ -103,14 +103,19 @@ test('Codex Operator prompt requires tracked worker delegation without false san
   assert.match(prompt, /Delegated work goes through the Palantir \/execute API only/i);
   assert.match(prompt, /do not edit code directly[\s\S]*always delegate edits to a\s+worker/i);
   assert.match(prompt, /direct writes are technically possible/i);
-  for (const trackedBoundary of [
-    /worktree isolation/i,
-    /diff capture/i,
-    /harvest/i,
-    /run attribution/i,
-  ]) {
-    assert.match(prompt, trackedBoundary);
-  }
+  assert.match(
+    prompt,
+    /For local Git projects,[\s\S]*run-specific\s+worktree;[\s\S]*capture its diff and run the configured harvest test\s+from that worktree/i,
+  );
+  assert.match(
+    prompt,
+    /Remote workers currently run directly in the remote project directory without\s+a run worktree,[\s\S]*worktree-based diff capture and test harvest are unavailable\s+there/i,
+  );
+  assert.doesNotMatch(
+    prompt,
+    /bypass\s+worker worktree isolation, diff capture, harvest, and run attribution/i,
+  );
+  assert.match(prompt, /Delegate remote work anyway to preserve attribution and tracked execution/i);
 });
 
 test('Codex Top prompt routes project work through Operator without a conflicting worker contract', () => {
@@ -135,7 +140,40 @@ test('Codex Top prompt routes project work through Operator without a conflictin
   assert.match(prompt, /For project-scoped edits,\s+delegate to the project's Operator/i);
   assert.doesNotMatch(prompt, /Delegated work goes through the Palantir \/execute API only/i);
   assert.doesNotMatch(prompt, /always delegate edits to a\s+worker/i);
+  assert.doesNotMatch(
+    prompt,
+    /When the user asks you to do work[\s\S]*MUST spawn a Palantir Console worker agent/i,
+  );
+  assert.match(
+    prompt,
+    /For a pm_enabled project's work,[\s\S]*do NOT create or execute a worker task yourself/i,
+  );
+  assert.match(
+    prompt,
+    /Only when a request is one of the direct-handling cases above may you spawn a worker via \/execute/i,
+  );
   assert.match(prompt, /direct writes are technically possible/i);
+});
+
+test('runtime permission docs match the directory-less local Operator cwd fallback', () => {
+  const { resolveSpawnCwd } = require('../utils/spawnCwd');
+  const landscape = fs.readFileSync(
+    path.join(__dirname, '../../docs/runtime-permission-landscape.md'),
+    'utf8',
+  );
+  const operatorRow = landscape
+    .split('\n')
+    .find((line) => line.startsWith('| Codex Operator 매니저 |'));
+
+  assert.equal(resolveSpawnCwd({ workspaceDir: '/workspace/project' }), '/workspace/project');
+  assert.equal(resolveSpawnCwd({ workspaceDir: null }), process.cwd());
+  assert.ok(operatorRow, 'Codex Operator permission row must be documented');
+  assert.match(
+    operatorRow,
+    /local Operator[\s\S]*`project\.directory`[\s\S]*directory가 없으면[\s\S]*`process\.cwd\(\)`/,
+  );
+  assert.match(operatorRow, /directory 없는 local Operator의 cwd는 기본 Top과 동일/);
+  assert.doesNotMatch(landscape, /Top이 가장 넓/);
 });
 
 test('CodexAdapter lazily writes a system prompt temp file and disposeSession cleans it up', async () => {

@@ -15,8 +15,8 @@ Code의 승인 절차를 우회하는 설정이고, `allowedTools`가 함께 전
 
 | 실행 주체 | 코드가 설정하는 승인·샌드박스 상태 | 별도 권한 경계 | 코드 근거 |
 |---|---|---|---|
-| Codex Operator 매니저 | 역할과 무관하게 `--dangerously-bypass-approvals-and-sandbox`를 항상 전달한다. Codex 승인과 파일시스템 샌드박스가 모두 우회된다. 매니저가 Console API를 호출하려면 네트워크가 필요하고 `--full-auto` 샌드박스가 이를 막는다는 것이 코드의 사유다. | cwd는 해당 프로젝트 디렉터리(또는 materialized workspace)다. 직접 수정은 기술적으로 가능하지만 시스템 프롬프트 정책으로 worker 위임을 요구한다. | `server/services/managerAdapters/codexAdapter.js:279-282`, `server/services/managerAdapters/codexAdapter.js:490-501`, `server/services/operatorSpawnService.js:721-733` |
-| Codex Top 매니저 | Operator와 동일하게 bypass를 항상 전달한다. | **cwd가 Operator와 다르다.** Top spawn은 `cwd`를 요청 본문의 선택 필드로 받는데 UI는 이 값을 보내지 않고, boot resume 경로는 아예 넘기지 않는다. `resolveSpawnCwd`는 `workspaceDir`가 없으면 `process.cwd()` — **Console 서버 자신의 소스 디렉터리** — 를 반환한다. 따라서 기본 구성에서 Top은 샌드박스 없이 오케스트레이터 자기 코드베이스 위에서 돈다. 이 표에서 가장 넓은 권한 조합이다. | `server/routes/manager.js:643`, `server/routes/manager.js:217`, `server/utils/spawnCwd.js:42-49` |
+| Codex Operator 매니저 | 역할과 무관하게 `--dangerously-bypass-approvals-and-sandbox`를 항상 전달한다. Codex 승인과 파일시스템 샌드박스가 모두 우회된다. 매니저가 Console API를 호출하려면 네트워크가 필요하고 `--full-auto` 샌드박스가 이를 막는다는 것이 코드의 사유다. | materialized workspace가 있으면 그 경로를 cwd로 쓴다. 그렇지 않은 local Operator는 `project.directory`를 쓰고, directory가 없으면 `resolveSpawnCwd`의 fallback인 `process.cwd()` — **Console 서버 자신의 소스 디렉터리** — 를 쓴다. 따라서 directory 없는 local Operator의 cwd는 기본 Top과 동일하다. remote Operator는 `project.directory`가 있으면 그 pod 경로를 cwd로 전달하고, 없으면 `null`을 전달한다. 직접 수정은 기술적으로 가능하지만 시스템 프롬프트 정책으로 worker 위임을 요구한다. | `server/services/managerAdapters/codexAdapter.js:279-282`, `server/services/managerAdapters/codexAdapter.js:490-501`, `server/services/operatorSpawnService.js:721-733`, `server/utils/spawnCwd.js:42-49` |
+| Codex Top 매니저 | Operator와 동일하게 bypass를 항상 전달한다. | Top spawn은 `cwd`를 요청 본문의 선택 필드로 받는데 UI는 이 값을 보내지 않고, boot resume 경로는 아예 넘기지 않는다. 명시적 cwd가 없으면 `resolveSpawnCwd`가 `process.cwd()` — **Console 서버 자신의 소스 디렉터리** — 를 반환한다. 프로젝트 디렉터리에 결합된 Operator와는 cwd가 다르지만, directory 없는 local Operator와는 같다. | `server/routes/manager.js:643`, `server/routes/manager.js:217`, `server/utils/spawnCwd.js:42-49` |
 | Claude Top / Operator 매니저 | `permissionMode` 기본값으로 `bypassPermissions`를 전달한다. 코드에서 별도 파일시스템 샌드박스를 설정하지 않는다. | 기본 내장 도구는 `Bash(curl/jq/ls/pwd)`, `Read`, `Glob`, `Grep`, `WebSearch`, `WebFetch`로 제한하고, 프로필의 MCP 도구만 합친다. 따라서 승인 우회 상태여도 Codex 매니저보다 도구 표면이 좁다. | `server/services/managerAdapters/claudeAdapter.js:265-290`, `server/services/streamJsonEngine.js:150-155` |
 | Claude worker | `permissionMode: 'bypassPermissions'`를 명시한다. 코드에서 별도 파일시스템 샌드박스를 설정하지 않는다. | 프로필에 MCP 도구가 있을 때만 그 목록을 `allowedTools`로 넘기며, 없으면 서버가 도구 allowlist를 지정하지 않는다. 로컬 Git 프로젝트는 실행 전에 run 전용 worktree를 만든다. | `server/services/lifecycleService.js:1453-1475`, `server/services/lifecycleService.js:1654-1665` |
 | Codex worker | 샌드박스·승인 플래그는 에이전트 프로필의 편집 가능한 `args_template`에 의존한다. 서버가 공통으로 추가하는 Codex 인자는 모델·reasoning effort·standard service tier이며, 매니저용 bypass 플래그를 worker 경로에 강제 주입하지 않는다. 따라서 코드만으로 모든 Codex worker가 sandboxed 또는 unsandboxed라고 단정할 수 없다. | 로컬 Git 프로젝트는 run 전용 worktree를 사용한다. 최종 CLI 인자는 프로필 템플릿에서 만든 인자와 서버 추가 인자를 합쳐 실행한다. | `server/services/lifecycleService.js:1453-1475`, `server/services/lifecycleService.js:1792-1818`, `server/services/lifecycleService.js:1991-2004`, `server/services/lifecycleService.js:2081-2082` |
@@ -24,7 +24,9 @@ Code의 승인 절차를 우회하는 설정이고, `allowedTools`가 함께 전
 | Folder-less specialist | CLI를 시작하지 않고 Anthropic Messages API를 직접 호출하므로 CLI 샌드박스/bypass 플래그가 없다. | capability에서 도구를 가산식으로 구성한다. 현재 등록된 유일한 도구는 읽기 전용 메타데이터 검색이며 shell·filesystem·network·MCP 도구는 등록하지 않는다. 모델의 `tool_use`마다 allowlist를 다시 검사한다. | `server/services/specialistBackend.js:41-50`, `server/services/specialistBackend.js:242-253`, `server/services/specialistBackend.js:280-286` |
 
 이 표에서 명시적으로 파일시스템 샌드박스를 해제하는 실행 주체는 Codex
-Top/Operator 매니저이며, 그중에서도 **Top이 가장 넓다** — 같은 bypass에 더해
-기본 cwd가 Console 자신의 소스 트리이기 때문이다. Claude 매니저와 Claude worker는 승인 절차를 우회하지만
-동일한 Codex bypass 플래그를 쓰는 경로가 아니며, Codex 및 기타 CLI worker는
-프로필 인자에 따라 달라진다.
+Top/Operator 매니저다. 둘의 파일 노출 범위는 cwd 결합에 따라 달라진다. 기본
+Top과 directory 없는 local Operator는 모두 Console 서버 소스 트리를 cwd로
+쓰며, 프로젝트 디렉터리에 결합된 Operator만 cwd가 다르다. 다만 cwd는 OS
+샌드박스가 아니므로 Top이 언제나 더 좁거나 넓다고 단정할 수 없다. Claude
+매니저와 Claude worker는 승인 절차를 우회하지만 동일한 Codex bypass 플래그를
+쓰는 경로가 아니며, Codex 및 기타 CLI worker는 프로필 인자에 따라 달라진다.

@@ -1272,8 +1272,13 @@ You are running as a Codex CLI subprocess (codex exec --json). HARD RULES:
 - Do NOT spawn nested codex / claude / codex-acp / mcp-codex sessions yourself.
 ${delegationRules}
 - Direct writes are technically possible, but they bypass
-  worker worktree isolation, diff capture, harvest, and run attribution,
-  leaving the changes outside Palantir's tracked history.
+  Palantir worker execution, run attribution, and Console-visible review history.
+- For local Git projects, a delegated worker normally gets a run-specific
+  worktree; Palantir can capture its diff and run the configured harvest test
+  from that worktree.
+- Remote workers currently run directly in the remote project directory without
+  a run worktree, so worktree-based diff capture and test harvest are unavailable
+  there. Delegate remote work anyway to preserve attribution and tracked execution.
 - Do NOT install a polling loop on /execute results — the user will see them
   in the Palantir Console UI; just report once per turn.`;
   }
