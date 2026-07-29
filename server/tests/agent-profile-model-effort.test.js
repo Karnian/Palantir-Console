@@ -188,9 +188,20 @@ test('a legacy claude profile carrying the flag stays editable until the templat
   db.prepare('UPDATE agent_profiles SET args_template = ? WHERE id = ?')
     .run('-p {prompt} --permission-mode acceptEdits', legacy.id);
 
-  // Editing anything else must still work. Rejecting here would 400 every
-  // future PATCH and leave the row fixable only by hand-editing the database.
-  const renamed = service.updateProfile(legacy.id, { name: 'renamed legacy' });
+  // AgentsView sends the whole visible form even when only the name changed.
+  // This UI-shaped PATCH must not make unchanged command/template keys look
+  // like an attempt to introduce the legacy raw flag.
+  const renamed = service.updateProfile(legacy.id, {
+    name: 'renamed legacy',
+    type: 'claude-code',
+    command: 'claude',
+    args_template: '-p {prompt} --permission-mode acceptEdits',
+    model: null,
+    reasoning_effort: null,
+    permission_mode: null,
+    max_concurrent: 1,
+    capabilities_json: '{}',
+  });
   assert.equal(renamed.name, 'renamed legacy');
   assert.equal(renamed.args_template, '-p {prompt} --permission-mode acceptEdits');
 

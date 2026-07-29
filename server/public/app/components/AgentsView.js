@@ -187,7 +187,7 @@ function AgentModal({ open, onClose, agent, onSaved }) {
                 value=${permissionMode}
                 onChange=${setPermissionMode}
                 options=${[
-                  { value: '', label: '(none — current default)' },
+                  { value: '', label: '(none — runs as bypassPermissions)' },
                   { value: 'acceptEdits', label: 'acceptEdits' },
                   { value: 'auto', label: 'auto' },
                   { value: 'bypassPermissions', label: 'bypassPermissions' },

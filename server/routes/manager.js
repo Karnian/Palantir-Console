@@ -832,6 +832,9 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         systemPrompt,
         model: eff.model || undefined,
         reasoning_effort: eff.effort || undefined,
+        // Match lifecycleService's Claude worker rule exactly: a NULL profile
+        // value preserves the historical bypassPermissions default.
+        permissionMode: resolvedProfile?.permission_mode ?? 'bypassPermissions',
         env: spawnEnv,
         envAllowlist,
         mcpTools: mcpTools.length > 0 ? mcpTools : undefined,

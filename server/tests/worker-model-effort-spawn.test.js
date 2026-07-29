@@ -166,7 +166,7 @@ test('claude worker forwards structured model to the stream-json spec', async (t
   assert.equal(harness.executionEngine.spawned.length, 0);
 });
 
-test('claude worker keeps the existing bypassPermissions argument when permission_mode is NULL', async (t) => {
+test('claude worker maps the UI empty permission_mode NULL to bypassPermissions', async (t) => {
   const harness = await createHarness(t);
   const profileId = insertProfile(harness.db, {
     command: 'claude',

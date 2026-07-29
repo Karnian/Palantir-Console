@@ -100,10 +100,10 @@ test('codex preset uses structured high effort without a baked args flag', async
   });
 });
 
-test('claude preset uses a structured permission mode without a baked args flag', async (t) => {
+test('claude preset labels and saves the null permission mode as bypassPermissions', async (t) => {
   const env = createPreactEnv();
   t.after(env.cleanup);
-  installAgentsStubs(env);
+  const { calls } = installAgentsStubs(env);
   env.loadComponent('Dropdown');
   env.loadComponent('AgentsView');
 
@@ -117,7 +117,24 @@ test('claude preset uses a structured permission mode without a baked args flag'
     assert.equal(root.querySelector('#agent-args').value, '-p {prompt}');
     assert.doesNotMatch(root.querySelector('#agent-args').value, /permission-mode/);
     assert.equal(root.querySelector('#agent-permission-mode').dataset.value, '');
+    assert.equal(
+      root.querySelector('#agent-permission-mode .dropdown-label').textContent,
+      '(none — runs as bypassPermissions)',
+    );
   });
+
+  setInput(env, root.querySelector('#agent-name'), 'Default Claude');
+  await flushEffects(30);
+  root.querySelector('.modal-footer button.primary').click();
+
+  const call = await waitFor(() => {
+    const match = calls.find((entry) => entry.url === '/api/agents');
+    assert.ok(match);
+    return match;
+  });
+  const body = JSON.parse(call.options.body);
+  assert.equal(call.options.method, 'POST');
+  assert.equal(body.permission_mode, null);
 });
 
 test('structured controls follow the command vendor', async (t) => {

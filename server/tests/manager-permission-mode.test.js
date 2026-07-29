@@ -1,0 +1,127 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const express = require('express');
+
+const { createDatabase } = require('../db/database');
+const { createRunService } = require('../services/runService');
+const { createAgentProfileService } = require('../services/agentProfileService');
+const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+const { createManagerAdapterFactory } = require('../services/managerAdapters');
+const { createManagerRegistry } = require('../services/managerRegistry');
+const { createConversationService } = require('../services/conversationService');
+const { createManagerRouter } = require('../routes/manager');
+const { invokeApp } = require('./helpers/invokeApp');
+
+const FAKE_CLAUDE = path.join(
+  __dirname,
+  'fixtures',
+  'bin',
+  'fake-claude-stream-json.js',
+);
+
+async function readArgs(filePath, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      return JSON.parse(await fs.readFile(filePath, 'utf8'));
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw lastError || new Error(`Claude args were not written: ${filePath}`);
+}
+
+function permissionModeArg(args) {
+  const index = args.indexOf('--permission-mode');
+  assert.notEqual(index, -1, `missing --permission-mode in ${JSON.stringify(args)}`);
+  return args[index + 1];
+}
+
+test('Manager profile permission_mode reaches Claude CLI and NULL matches the worker default', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-manager-permission-'));
+  const argsFile = path.join(root, 'claude-args.json');
+  const previousClaudeBin = process.env.CLAUDE_BIN;
+  const previousArgsFile = process.env.CLAUDE_ARGS_FILE;
+  process.env.CLAUDE_BIN = FAKE_CLAUDE;
+  process.env.CLAUDE_ARGS_FILE = argsFile;
+
+  const database = createDatabase(path.join(root, 'test.db'));
+  database.migrate();
+  const runService = createRunService(database.db, null);
+  const agentProfileService = createAgentProfileService(database.db);
+  const streamJsonEngine = createStreamJsonEngine({ runService });
+  const managerAdapterFactory = createManagerAdapterFactory({ streamJsonEngine, runService });
+  const managerRegistry = createManagerRegistry({ runService });
+  const conversationService = createConversationService({
+    runService,
+    managerRegistry,
+    managerAdapterFactory,
+    lifecycleService: null,
+  });
+
+  const app = express();
+  app.use(express.json());
+  app.use('/api/manager', createManagerRouter({
+    runService,
+    streamJsonEngine,
+    managerAdapterFactory,
+    managerRegistry,
+    conversationService,
+    agentProfileService,
+    authResolverOpts: {
+      hasKeychain: () => true,
+      hasCredentialsFile: () => false,
+    },
+  }));
+
+  t.after(async () => {
+    const activeRunId = managerRegistry.getActiveRunId('top');
+    if (activeRunId) {
+      try {
+        await managerRegistry.getActiveAdapter('top')?.disposeSession(activeRunId);
+      } catch { /* already stopped */ }
+    }
+    database.close();
+    if (previousClaudeBin === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = previousClaudeBin;
+    if (previousArgsFile === undefined) delete process.env.CLAUDE_ARGS_FILE;
+    else process.env.CLAUDE_ARGS_FILE = previousArgsFile;
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  agentProfileService.updateProfile('claude-code', {
+    permission_mode: 'acceptEdits',
+    env_allowlist: JSON.stringify(['CLAUDE_ARGS_FILE']),
+  });
+
+  let response = await invokeApp(app, {
+    method: 'POST',
+    path: '/api/manager/start',
+    body: { agent_profile_id: 'claude-code', prompt: 'explicit permission mode' },
+  });
+  assert.equal(response.status, 201, response.text);
+  assert.equal(permissionModeArg(await readArgs(argsFile)), 'acceptEdits');
+
+  response = await invokeApp(app, { method: 'POST', path: '/api/manager/stop' });
+  assert.equal(response.status, 200, response.text);
+  await fs.rm(argsFile, { force: true });
+
+  agentProfileService.updateProfile('claude-code', { permission_mode: null });
+  response = await invokeApp(app, {
+    method: 'POST',
+    path: '/api/manager/start',
+    body: { agent_profile_id: 'claude-code', prompt: 'default permission mode' },
+  });
+  assert.equal(response.status, 201, response.text);
+  assert.equal(permissionModeArg(await readArgs(argsFile)), 'bypassPermissions');
+
+  response = await invokeApp(app, { method: 'POST', path: '/api/manager/stop' });
+  assert.equal(response.status, 200, response.text);
+});
