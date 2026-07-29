@@ -111,7 +111,8 @@ runtime/mcp/            — MCP config files (Skill Pack runtime, app boot 시 m
 - **`theme-init.js` 위치 고정**: `server/public/theme-init.js` 는 반드시 `<head>` 에서 `tokens.css` 보다 먼저 로드 (defer/ESM 변경 시 FOUC 회귀)
 - **K-4 axe-core a11y 가드**: `npm run test:a11y` (32 시나리오 axe scan, K-4 PR #163 부터). 신규 contrast violation 은 waiver 불가 — 즉시 fix. spec: `docs/specs/k4-wcag-a11y-automation-brief.md`
 - **K-5 시각 회귀 가드**: `npm run test:visual` (32 시나리오 Playwright screenshot diff, K-5 PR #169 부터). baseline 은 git 추적, macOS arm64 lock-in. 갱신 PR 은 사유 명시. spec: `docs/specs/k5-visual-regression-brief.md`
-- 환경변수: `PALANTIR_DEFAULT_PM_ADAPTER`, `PALANTIR_CODEX_MANAGER_BYPASS`, Claude/Codex auth 키들
+- **Codex 매니저/워커 권한**: 두 역할 모두 `--dangerously-bypass-approvals-and-sandbox` 를 항상 사용하며 전환 환경변수는 없다. 매니저의 Console API 네트워크 접근을 `--full-auto` 샌드박스가 차단하면 오케스트레이션이 불가능해지기 때문이다
+- 환경변수: `PALANTIR_DEFAULT_PM_ADAPTER`, Claude/Codex auth 키들
 
 ## 관련 문서
 
