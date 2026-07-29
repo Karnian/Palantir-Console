@@ -274,13 +274,20 @@ function createManagerMessageQueueService({
         AND status IN ('sending', 'processing')
       ORDER BY sequence
     `),
-    // SQL only collects bounded candidates. JavaScript below owns correlation
-    // and terminality because the live path's contract is JSON.parse semantics.
+    // Correlate before LIMIT so unrelated turns cannot consume this row's
+    // candidate budget. JSON1 reads the first duplicate invocationId key while
+    // JSON.parse reads the last; that mismatch is intentionally unsupported
+    // because normal writers use JSON.stringify and cannot create duplicate
+    // object keys. JavaScript below remains authoritative for terminal === true.
     terminalEventCandidates: db.prepare(`
       SELECT event_type, payload_json
       FROM run_events
       WHERE run_id = ?
         AND event_type IN ('mgr.turn_completed', 'mgr.turn_failed')
+        AND CASE
+              WHEN json_valid(payload_json)
+              THEN json_extract(payload_json, '$.data.invocationId')
+            END = ?
       ORDER BY id DESC
       LIMIT ?
     `),
@@ -811,9 +818,10 @@ function createManagerMessageQueueService({
     try {
       const candidates = stmts.terminalEventCandidates.all(
         row.run_id,
+        row.adapter_invocation_id,
         MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
       );
-      terminal = findPersistedTerminalEvent(candidates, row.adapter_invocation_id);
+      terminal = findPersistedTerminalEvent(candidates);
     } catch {
       return null;
     }

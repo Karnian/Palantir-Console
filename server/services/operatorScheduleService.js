@@ -468,13 +468,20 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
       WHERE status='running' AND manager_run_id IS NOT NULL
       ORDER BY started_at ASC, id ASC
     `),
-    // As in managerMessageQueueService, SQL is a bounded candidate collector;
-    // JSON.parse in findPersistedTerminalEvent is the authoritative classifier.
+    // Correlate before LIMIT so unrelated turns cannot consume this invocation's
+    // candidate budget. JSON1 reads the first duplicate invocationId key while
+    // JSON.parse reads the last; that mismatch is intentionally unsupported
+    // because normal writers use JSON.stringify and cannot create duplicate
+    // object keys. JavaScript below remains authoritative for terminal === true.
     persistedTerminalEvents: db.prepare(`
       SELECT event_type, payload_json
       FROM run_events
       WHERE run_id=?
         AND event_type IN ('mgr.turn_completed','mgr.turn_failed')
+        AND CASE
+              WHEN json_valid(payload_json)
+              THEN json_extract(payload_json, '$.data.invocationId')
+            END=?
       ORDER BY id DESC
       LIMIT ?
     `),
@@ -1054,9 +1061,10 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     for (const row of stmts.runningInvocationsForTerminalReconciliation.all()) {
       const candidates = stmts.persistedTerminalEvents.all(
         row.manager_run_id,
+        row.invocation_id,
         MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
       );
-      const terminal = findPersistedTerminalEvent(candidates, row.invocation_id);
+      const terminal = findPersistedTerminalEvent(candidates);
       if (!terminal) continue;
       const success = terminal.event_type === 'mgr.turn_completed';
       const invocation = completeInvocation(

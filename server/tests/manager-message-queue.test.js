@@ -255,6 +255,70 @@ test('a persisted terminal event closes the current owner lane after its live ca
   ]);
 });
 
+test('unrelated invocation events cannot exhaust persisted reconciliation candidates', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_candidate_exhaustion',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+  h.service.start();
+
+  const first = await h.service.enqueue(
+    'operator:oi_candidate_exhaustion',
+    { text: 'scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_target',
+      adapterInvocationId: 'oinv_target',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  insertEvent.run(run.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: 'oinv_target', terminal: true },
+  }));
+  for (let index = 0; index < 255; index += 1) {
+    insertEvent.run(run.id, 'mgr.turn_failed', JSON.stringify({
+      data: {
+        kind: 'codex_error',
+        invocationId: 'oinv_unrelated_chat',
+        terminal: false,
+      },
+    }));
+  }
+  insertEvent.run(run.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: 'oinv_unrelated_chat', terminal: true },
+  }));
+
+  assert.equal(h.service.reconcilePersistedTerminalEvents(), 1);
+  assert.equal(h.service.getMessage(first.message.id).status, 'delivered');
+  await h.service.awaitDrain();
+
+  const next = await h.service.enqueue(
+    'operator:oi_candidate_exhaustion',
+    { text: 'next scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_after_exhaustion',
+      adapterInvocationId: 'oinv_after_exhaustion',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.deepEqual(dispatched, ['oinv_target', 'oinv_after_exhaustion']);
+});
+
 test('a persisted numeric terminal flag cannot close the current owner lane', async (t) => {
   const h = createHarness(t, { withRunService: true });
   const run = h.runService.createRun({
@@ -428,62 +492,6 @@ test('a newer duplicate-terminal candidate cannot hide an earlier terminal event
   assert.equal(next.status, 'sent');
   assert.equal(next.message.status, 'processing');
   assert.deepEqual(dispatched, ['oinv_shadow', 'oinv_after_shadow']);
-});
-
-test('a duplicate invocationId candidate is correlated with JSON.parse semantics', async (t) => {
-  const h = createHarness(t, { withRunService: true });
-  const run = h.runService.createRun({
-    is_manager: true,
-    manager_layer: 'operator',
-    conversation_id: 'operator:oi_duplicate_invocation',
-    prompt: 'operator',
-  });
-  h.runService.updateRunStatus(run.id, 'running', { force: true });
-  const dispatched = [];
-  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
-    dispatched.push(invocationId);
-    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
-  });
-  h.service.start();
-
-  const first = await h.service.enqueue(
-    'operator:oi_duplicate_invocation',
-    { text: 'first scheduled turn', source: 'scheduled' },
-    {
-      idempotencyKey: 'invocation:oinv_duplicate_invocation',
-      adapterInvocationId: 'oinv_duplicate_invocation',
-      requireImmediate: true,
-    },
-  );
-  assert.equal(first.message.status, 'processing');
-
-  h.db.prepare(`
-    INSERT INTO run_events (run_id, event_type, payload_json)
-    VALUES (?, ?, ?)
-  `).run(
-    run.id,
-    'mgr.turn_completed',
-    '{"data":{"invocationId":"wrong","invocationId":"oinv_duplicate_invocation","terminal":true}}',
-  );
-
-  assert.equal(h.service.reconcilePersistedTerminalEvents(), 1);
-  assert.equal(h.service.getMessage(first.message.id).status, 'delivered');
-  await h.service.awaitDrain();
-
-  const next = await h.service.enqueue(
-    'operator:oi_duplicate_invocation',
-    { text: 'second scheduled turn', source: 'scheduled' },
-    {
-      idempotencyKey: 'invocation:oinv_after_duplicate_invocation',
-      adapterInvocationId: 'oinv_after_duplicate_invocation',
-      requireImmediate: true,
-    },
-  );
-  assert.equal(next.status, 'sent');
-  assert.deepEqual(dispatched, [
-    'oinv_duplicate_invocation',
-    'oinv_after_duplicate_invocation',
-  ]);
 });
 
 test('a malformed newer event cannot hide an earlier persisted terminal event', async (t) => {

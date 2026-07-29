@@ -1,9 +1,10 @@
 'use strict';
 
-// A terminal event for the single in-flight turn should be the newest terminal
-// event on its run. Keep a generous corruption/mismatch budget (255 newer rows)
-// while bounding JSON parsing on every queue tick and scheduler restart.
-const MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES = 256;
+// SQL narrows candidates to one invocation before this bound is applied. A
+// normal writer emits one terminal outcome, so 32 still leaves room to skip 31
+// malformed/non-terminal anomalies while bounding parse work on every queue
+// tick and scheduler restart.
+const MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES = 32;
 
 function parseTerminalEventPayload(payloadJson) {
   try {
@@ -18,12 +19,13 @@ function isTerminalEventForInvocation(payload, invocationId) {
     && payload?.data?.terminal === true;
 }
 
-// Candidates must be newest-first. Invalid or mismatched rows are skipped so
-// they cannot shadow an earlier event that the live JSON parser would accept.
-function findPersistedTerminalEvent(candidates, invocationId) {
+// Candidates are already correlated by SQL and must be newest-first. Invalid
+// or non-terminal rows are skipped so they cannot shadow an earlier event that
+// the live JSON parser would accept.
+function findPersistedTerminalEvent(candidates) {
   for (const candidate of candidates) {
     const payload = parseTerminalEventPayload(candidate.payload_json);
-    if (!isTerminalEventForInvocation(payload, invocationId)) continue;
+    if (payload?.data?.terminal !== true) continue;
     return { ...candidate, payload };
   }
   return null;
