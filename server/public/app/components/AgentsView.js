@@ -76,6 +76,7 @@ function AgentModal({ open, onClose, agent, onSaved }) {
   const [icon, setIcon] = useState('');
   const [color, setColor] = useState('');
   const [maxConcurrent, setMaxConcurrent] = useState(1);
+  const [idleTimeoutMinutes, setIdleTimeoutMinutes] = useState('');
   const [mcpTools, setMcpTools] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -91,6 +92,9 @@ function AgentModal({ open, onClose, agent, onSaved }) {
       setIcon(agent.icon || '');
       setColor(agent.color || '');
       setMaxConcurrent(agent.max_concurrent || 1);
+      setIdleTimeoutMinutes(
+        agent.idle_timeout_ms == null ? '' : String(agent.idle_timeout_ms / 60000),
+      );
       try {
         const caps = JSON.parse(agent.capabilities_json || '{}');
         setMcpTools(Array.isArray(caps.mcp_tools) ? caps.mcp_tools.join('\n') : '');
@@ -99,7 +103,7 @@ function AgentModal({ open, onClose, agent, onSaved }) {
       setName(''); setType('claude-code'); setCommand(''); setArgsTemplate('');
       setModel(''); setReasoningEffort('');
       setPermissionMode('');
-      setIcon(''); setColor(''); setMaxConcurrent(1); setMcpTools('');
+      setIcon(''); setColor(''); setMaxConcurrent(1); setIdleTimeoutMinutes(''); setMcpTools('');
     }
   }, [open, agent]);
 
@@ -125,6 +129,9 @@ function AgentModal({ open, onClose, agent, onSaved }) {
         icon: icon.trim() || undefined,
         color: color.trim() || undefined,
         max_concurrent: parseInt(maxConcurrent, 10) || 1,
+        idle_timeout_ms: idleTimeoutMinutes === ''
+          ? null
+          : Math.round(Number(idleTimeoutMinutes) * 60000),
         capabilities_json: JSON.stringify(capsObj),
       };
       if (agent) {
@@ -245,6 +252,20 @@ function AgentModal({ open, onClose, agent, onSaved }) {
             <input id="agent-max-concurrent" class="form-input" type="number" min="1" value=${maxConcurrent} onInput=${e => setMaxConcurrent(e.target.value)} />
           </div>
           <div class="form-field">
+            <label class="form-label" for="agent-idle-timeout">${AGENTS_LABELS.fieldIdleTimeout}</label>
+            <input
+              id="agent-idle-timeout"
+              class="form-input"
+              type="number"
+              min="0.001"
+              step="0.001"
+              value=${idleTimeoutMinutes}
+              onInput=${e => setIdleTimeoutMinutes(e.target.value)}
+              placeholder=${AGENTS_LABELS.idleTimeoutPlaceholder}
+            />
+            <small class="form-hint">${AGENTS_LABELS.idleTimeoutHint}</small>
+          </div>
+          <div class="form-field">
             <label class="form-label" for="agent-mcp-tools">${AGENTS_LABELS.fieldMcpTools}</label>
             <textarea id="agent-mcp-tools" class="form-input" rows="3" value=${mcpTools}
               onInput=${e => setMcpTools(e.target.value)}
@@ -362,6 +383,14 @@ function AgentDetailModal({ agent, open, onClose, onEdit }) {
           <div class="agent-detail-field">
             <span class="agent-detail-field-label">${AGENTS_LABELS.fieldMaxConcurrent}</span>
             <span class="agent-detail-field-value">${agent.max_concurrent || 1}</span>
+          </div>
+          <div class="agent-detail-field">
+            <span class="agent-detail-field-label">${AGENTS_LABELS.fieldIdleTimeout}</span>
+            <span class="agent-detail-field-value">
+              ${agent.idle_timeout_ms == null
+                ? AGENTS_LABELS.idleTimeoutDefault
+                : `${agent.idle_timeout_ms / 60000}${AGENTS_LABELS.minutesSuffix}`}
+            </span>
           </div>
           <div class="agent-detail-field">
             <span class="agent-detail-field-label">${AGENTS_LABELS.fieldRunningNow}</span>

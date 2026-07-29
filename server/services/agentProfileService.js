@@ -66,6 +66,13 @@ function validateTypeCommandVendor(profile) {
   }
 }
 
+function validateIdleTimeoutMs(value) {
+  if (value == null) return;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new BadRequestError('idle_timeout_ms must be a positive integer or null');
+  }
+}
+
 // Codex P2 review: buildAgentArgs strips a token's surrounding double quotes at
 // EXECUTION (`part.replace(/^"(.*)"$/, '$1')`), so a template token `"--model"`
 // runs as the real `--model` flag. The conflict scanner must unquote each token
@@ -460,8 +467,8 @@ function createAgentProfileService(db) {
     getAll: db.prepare('SELECT * FROM agent_profiles ORDER BY name ASC'),
     getById: db.prepare('SELECT * FROM agent_profiles WHERE id = ?'),
     insert: db.prepare(`
-      INSERT INTO agent_profiles (id, name, type, command, args_template, capabilities_json, env_allowlist, icon, color, max_concurrent, model, reasoning_effort, permission_mode)
-      VALUES (@id, @name, @type, @command, @args_template, @capabilities_json, @env_allowlist, @icon, @color, @max_concurrent, @model, @reasoning_effort, @permission_mode)
+      INSERT INTO agent_profiles (id, name, type, command, args_template, capabilities_json, env_allowlist, icon, color, max_concurrent, model, reasoning_effort, permission_mode, idle_timeout_ms)
+      VALUES (@id, @name, @type, @command, @args_template, @capabilities_json, @env_allowlist, @icon, @color, @max_concurrent, @model, @reasoning_effort, @permission_mode, @idle_timeout_ms)
     `),
     // update: dynamic — see updateProfile() below
     delete: db.prepare('DELETE FROM agent_profiles WHERE id = ?'),
@@ -485,7 +492,7 @@ function createAgentProfileService(db) {
     return profile;
   }
 
-  function createProfile({ name, type, command, args_template, capabilities_json, env_allowlist, icon, color, max_concurrent, model, reasoning_effort, permission_mode }) {
+  function createProfile({ name, type, command, args_template, capabilities_json, env_allowlist, icon, color, max_concurrent, model, reasoning_effort, permission_mode, idle_timeout_ms }) {
     if (!name) throw new BadRequestError('Agent name is required');
     if (!type) throw new BadRequestError('Agent type is required');
     rejectRetiredAgentType(type);
@@ -498,6 +505,7 @@ function createAgentProfileService(db) {
       reasoning_effort,
       permission_mode,
     });
+    validateIdleTimeoutMs(idle_timeout_ms);
     const id = `agent_${crypto.randomUUID().slice(0, 8)}`;
     stmts.insert.run({
       id, name, type, command: validatedCommand,
@@ -510,11 +518,12 @@ function createAgentProfileService(db) {
       model: model || null,
       reasoning_effort: reasoning_effort || null,
       permission_mode: permission_mode || null,
+      idle_timeout_ms: idle_timeout_ms ?? null,
     });
     return stmts.getById.get(id);
   }
 
-  const AGENT_UPDATABLE = ['name', 'type', 'command', 'args_template', 'capabilities_json', 'env_allowlist', 'icon', 'color', 'max_concurrent', 'model', 'reasoning_effort', 'permission_mode'];
+  const AGENT_UPDATABLE = ['name', 'type', 'command', 'args_template', 'capabilities_json', 'env_allowlist', 'icon', 'color', 'max_concurrent', 'model', 'reasoning_effort', 'permission_mode', 'idle_timeout_ms'];
 
   function updateProfile(id, fields) {
     const existing = getProfile(id);
@@ -576,6 +585,7 @@ function createAgentProfileService(db) {
       // legitimate for the old vendor but is not for this one.
       templateIsBeingSet: templateActuallyChanged,
     });
+    validateIdleTimeoutMs(mergedProfile.idle_timeout_ms);
     const setClauses = [];
     const params = { id };
     for (const col of AGENT_UPDATABLE) {
@@ -607,4 +617,5 @@ module.exports = {
   parseClaudeArgsTemplate,
   resolveClaudePermissionMode,
   validateStructuredModelEffort,
+  validateIdleTimeoutMs,
 };
