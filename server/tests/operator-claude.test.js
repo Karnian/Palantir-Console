@@ -156,7 +156,7 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   const projectBriefService = createProjectBriefService(db);
   const agentProfileService = createAgentProfileService(db);
   agentProfileService.updateProfile('claude-code', {
-    args_template: '-p {prompt} --disallowedTools Bash',
+    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config profile.json',
     permission_mode: 'acceptEdits',
   });
   const registry = createManagerRegistry({ runService });
@@ -194,7 +194,10 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   assert.equal(typeof start.opts.onThreadStarted, 'function');
   assert.equal(start.opts.resumeSessionId, null);
   assert.equal(start.opts.permissionMode, 'acceptEdits');
+  assert.deepEqual(start.opts.tools, ['Read,Grep']);
   assert.deepEqual(start.opts.disallowedTools, ['Bash']);
+  assert.equal(start.opts.maxBudgetUsd, 0.01);
+  assert.equal(start.opts.mcpConfig, 'profile.json');
   assert.equal(
     runService.getRun(result.run.id).session_permission_mode,
     'acceptEdits',

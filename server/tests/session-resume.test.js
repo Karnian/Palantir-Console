@@ -224,7 +224,10 @@ test('createManagerRouter resumes top manager on boot', async (t) => {
   const rs = createRunService(db, null);
   const { createAgentProfileService } = require('../services/agentProfileService');
   const agentProfileService = createAgentProfileService(db);
-  agentProfileService.updateProfile('claude-code', { permission_mode: 'acceptEdits' });
+  agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt} --disallowedTools Bash',
+    permission_mode: 'acceptEdits',
+  });
 
   // Create a stale top manager with session_id.
   const run = rs.createRun({
@@ -287,6 +290,7 @@ test('createManagerRouter resumes top manager on boot', async (t) => {
   assert.equal(startSessionCalls[0].runId, run.id);
   assert.equal(startSessionCalls[0].opts.resumeSessionId, 'sess_boot_test');
   assert.equal(startSessionCalls[0].opts.permissionMode, 'acceptEdits');
+  assert.deepEqual(startSessionCalls[0].opts.disallowedTools, ['Bash']);
 
   // Verify the run is still 'running' (not stopped).
   const resumed = rs.getRun(run.id);
@@ -515,7 +519,10 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
   const projectBriefService = createProjectBriefService(db);
   const { createAgentProfileService } = require('../services/agentProfileService');
   const agentProfileService = createAgentProfileService(db);
-  agentProfileService.updateProfile('claude-code', { permission_mode: 'acceptEdits' });
+  agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt} --disallowedTools Bash',
+    permission_mode: 'acceptEdits',
+  });
 
   // Local folder project — directory must exist so resolveSpawnCwd resolves.
   const project = projectService.createProject({ name: 'canon', directory: dbDir });
@@ -612,5 +619,6 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
   assert.ok(opResume, 'canonical operator:oi_* run should be resumed via startSession');
   assert.equal(opResume.opts.resumeSessionId, 'sess_canon_resume', 'resumes the instance thread handle');
   assert.equal(opResume.opts.permissionMode, 'acceptEdits', 'resumes with the fresh-spawn permission snapshot');
+  assert.deepEqual(opResume.opts.disallowedTools, ['Bash']);
   assert.equal(rs.getRun(opRun.id).status, 'running', 'canonical Operator stays running (not stopped)');
 });

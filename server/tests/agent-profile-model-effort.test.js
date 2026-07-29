@@ -314,28 +314,40 @@ test('explicit permission reset wins over legacy promotion while omitted fields 
     capabilities_json: '{}',
   });
   assert.equal(reset.name, 'reset legacy');
-  assert.equal(reset.args_template, '-p {prompt} --permission-mode acceptEdits');
   assert.equal(reset.permission_mode, null);
+  assert.equal(resolveClaudePermissionMode(reset), 'bypassPermissions');
+  assert.equal(reset.args_template, '-p {prompt}');
 
   // A caller that truly omits the structured field still gets the legacy
   // promotion used for raw-imported/pre-backfill rows.
-  const promoted = service.updateProfile(legacy.id, { name: 'promoted legacy' });
+  const rawImported = service.createProfile(profile({
+    name: 'raw imported',
+    command: 'claude',
+    type: 'claude-code',
+    args_template: '-p {prompt}',
+  }));
+  db.prepare(`
+    UPDATE agent_profiles
+    SET args_template = ?, permission_mode = NULL
+    WHERE id = ?
+  `).run('-p {prompt} --permission-mode acceptEdits', rawImported.id);
+  const promoted = service.updateProfile(rawImported.id, { name: 'promoted legacy' });
   assert.equal(promoted.permission_mode, 'acceptEdits');
 
   // Changing only the executable path keeps the same Claude vendor and must
   // not revalidate an untouched legacy template.
-  const relocated = service.updateProfile(legacy.id, { command: '/usr/local/bin/claude' });
+  const relocated = service.updateProfile(rawImported.id, { command: '/usr/local/bin/claude' });
   assert.equal(relocated.command, '/usr/local/bin/claude');
   assert.equal(relocated.args_template, '-p {prompt} --permission-mode acceptEdits');
   assert.equal(relocated.permission_mode, 'acceptEdits');
 
   // Setting the structured field is likewise allowed; it is what fixes the row.
-  const structured = service.updateProfile(legacy.id, { permission_mode: 'plan' });
+  const structured = service.updateProfile(rawImported.id, { permission_mode: 'plan' });
   assert.equal(structured.permission_mode, 'plan');
 
   // But touching the template itself now has to clean it up.
   assertBadRequest(
-    () => service.updateProfile(legacy.id, {
+    () => service.updateProfile(rawImported.id, {
       args_template: '-p {prompt} --permission-mode acceptEdits --verbose',
     }),
     /args_template must not set --permission-mode/,

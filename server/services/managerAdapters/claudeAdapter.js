@@ -246,8 +246,10 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
     cwd,
     systemPrompt,
     model,
+    tools,
     allowedTools,
     disallowedTools,
+    maxBudgetUsd,
     mcpTools,
     mcpConfig,
     permissionMode,
@@ -288,8 +290,10 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
       env, // PR4: filtered env from buildManagerSpawnEnv — overrides process.env
       systemPrompt,
       permissionMode: permissionMode || 'bypassPermissions',
+      tools: tools || undefined,
       allowedTools: mergedTools,
       disallowedTools: disallowedTools || undefined,
+      maxBudgetUsd: maxBudgetUsd || undefined,
       mcpConfig: mcpConfig || undefined, // P4-2: project-scoped MCP config path
       model: model || undefined,
       isManager: true,

@@ -230,14 +230,14 @@ test('Top Manager clears its starting guard when Claude template parsing fails',
   assert.equal(starts.length, 0);
 });
 
-test('Top Manager forwards saved Claude disallowedTools to its adapter', async (t) => {
+test('Top Manager forwards saved Claude runtime template options to its adapter', async (t) => {
   const {
     app,
     agentProfileService,
     starts,
   } = await createCapturingManagerHarness(t);
   agentProfileService.updateProfile('claude-code', {
-    args_template: '-p {prompt} --disallowedTools Bash',
+    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config profile.json',
   });
 
   const response = await invokeApp(app, {
@@ -247,7 +247,10 @@ test('Top Manager forwards saved Claude disallowedTools to its adapter', async (
   });
   assert.equal(response.status, 201, response.text);
   assert.equal(starts.length, 1);
+  assert.deepEqual(starts[0].opts.tools, ['Read,Grep']);
   assert.deepEqual(starts[0].opts.disallowedTools, ['Bash']);
+  assert.equal(starts[0].opts.maxBudgetUsd, 0.01);
+  assert.equal(starts[0].opts.mcpConfig, 'profile.json');
 });
 
 test('Manager boot-resume uses the fresh-spawn permission snapshot after profile deletion', async (t) => {

@@ -114,6 +114,18 @@ function resolveResumePermissionMode(agentProfileService, options = {}) {
     : 'bypassPermissions';
 }
 
+function resolveResumeClaudeTemplateOptions(agentProfileService, options = {}) {
+  if (options.adapterType !== 'claude-code') return null;
+  const profile = resolveResumeAgentProfile(agentProfileService, options);
+  return profile ? parseClaudeArgsTemplate(profile.args_template) : null;
+}
+
+function mergeClaudeMcpConfigs(...configs) {
+  const present = configs.filter(Boolean);
+  if (present.length === 0) return undefined;
+  return present.length === 1 ? present[0] : present;
+}
+
 // authResolverOpts is forwarded into resolveManagerAuth for every preflight
 // so tests can inject `hasKeychain` (and any future DI hooks) without
 // monkey-patching child_process. Production callers leave this empty and
@@ -224,6 +236,10 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
             adapterType,
             sessionPermissionMode: r.session_permission_mode,
           });
+          const templateOptions = resolveResumeClaudeTemplateOptions(agentProfileService, {
+            profileId: r.agent_profile_id,
+            adapterType,
+          });
           const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
           const resolvedSpawnEnv = buildManagerSpawnEnv({
             baseEnv: actorSpawnBaseEnv,
@@ -245,6 +261,14 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
               env: spawnEnv,
               envAllowlist,
               permissionMode,
+              tools: templateOptions?.tools.length > 0
+                ? templateOptions.tools
+                : undefined,
+              disallowedTools: templateOptions?.disallowedTools.length > 0
+                ? templateOptions.disallowedTools
+                : undefined,
+              maxBudgetUsd: templateOptions?.maxBudgetUsd || undefined,
+              mcpConfig: templateOptions?.mcpConfig || undefined,
               resumeSessionId: r.claude_session_id,
               model: r.session_model || undefined,
               reasoning_effort: r.session_effort || undefined,
@@ -494,6 +518,10 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   adapterType,
                   sessionPermissionMode: r.session_permission_mode,
                 });
+                const templateOptions = resolveResumeClaudeTemplateOptions(
+                  agentProfileService,
+                  { adapterType },
+                );
                 const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
                 const resolvedSpawnEnv = isRemoteNode ? {} : buildManagerSpawnEnv({
                   baseEnv: actorSpawnBaseEnv,
@@ -537,6 +565,19 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                       : spawnEnv,
                     envAllowlist,
                     permissionMode,
+                    tools: templateOptions?.tools.length > 0
+                      ? templateOptions.tools
+                      : undefined,
+                    disallowedTools: templateOptions?.disallowedTools.length > 0
+                      ? templateOptions.disallowedTools
+                      : undefined,
+                    maxBudgetUsd: templateOptions?.maxBudgetUsd || undefined,
+                    mcpConfig: adapterType === 'claude-code'
+                      ? mergeClaudeMcpConfigs(
+                        templateOptions?.mcpConfig,
+                        project.mcp_config_path,
+                      )
+                      : undefined,
                     role: 'manager',
                     nodeId,
                     // F-1: per-turn tier resolver — re-reads this instance's
@@ -891,9 +932,14 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         // Match lifecycleService's Claude worker rule exactly: a NULL profile
         // value preserves the historical bypassPermissions default.
         permissionMode,
+        tools: claudeTemplateOptions?.tools.length > 0
+          ? claudeTemplateOptions.tools
+          : undefined,
         disallowedTools: claudeTemplateOptions?.disallowedTools.length > 0
           ? claudeTemplateOptions.disallowedTools
           : undefined,
+        maxBudgetUsd: claudeTemplateOptions?.maxBudgetUsd || undefined,
+        mcpConfig: claudeTemplateOptions?.mcpConfig || undefined,
         env: spawnEnv,
         envAllowlist,
         mcpTools: mcpTools.length > 0 ? mcpTools : undefined,

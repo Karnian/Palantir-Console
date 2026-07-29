@@ -110,6 +110,48 @@ function hasPermissionModeOption(tokens) {
   return tokens.some(token => /^--permission-mode($|=)/.test(token));
 }
 
+function stripClaudePermissionModeOption(argsTemplate) {
+  const source = String(argsTemplate || '');
+  const matches = Array.from(
+    source.matchAll(/(?:[^\s"]+|"[^"]*")+/g),
+    match => ({
+      token: unquoteToken(match[0]),
+      start: match.index,
+      end: match.index + match[0].length,
+    }),
+  );
+  const removals = [];
+
+  for (let i = 0; i < matches.length; i += 1) {
+    const match = matches[i];
+    if (match.token === '--permission-mode') {
+      const value = matches[i + 1];
+      removals.push({
+        start: match.start,
+        end: value && !value.token.startsWith('-') ? value.end : match.end,
+      });
+      if (value && !value.token.startsWith('-')) i += 1;
+    } else if (match.token.startsWith('--permission-mode=')) {
+      removals.push({ start: match.start, end: match.end });
+    }
+  }
+
+  if (removals.length === 0) return source;
+  let result = '';
+  let cursor = 0;
+  for (const removal of removals) {
+    let { start, end } = removal;
+    if (start > cursor && /\s/.test(source[start - 1])) {
+      while (start > cursor && /\s/.test(source[start - 1])) start -= 1;
+    } else {
+      while (end < source.length && /\s/.test(source[end])) end += 1;
+    }
+    result += source.slice(cursor, start);
+    cursor = end;
+  }
+  return (result + source.slice(cursor)).trim();
+}
+
 function readSingleClaudeTemplateOption(tokens, flag) {
   const values = [];
   for (let i = 0; i < tokens.length; i += 1) {
@@ -404,6 +446,24 @@ function createAgentProfileService(db) {
     if (fields.command) {
       fields.command = validateCommand(fields.command);
       mergedProfile.command = fields.command;
+    }
+    // NULL is the UI/API's explicit "run as bypassPermissions" selection.
+    // A migrated legacy row can still carry the old raw flag beside its
+    // structured value. Remove that compatibility copy on reset; otherwise
+    // the resolver cannot distinguish this explicit NULL from a pre-migration
+    // row and would immediately promote the stale raw value again at runtime.
+    if (
+      resolveAgentVendor(mergedProfile.command) === 'claude'
+      && Object.prototype.hasOwnProperty.call(fields, 'permission_mode')
+      && fields.permission_mode == null
+    ) {
+      const cleanedTemplate = stripClaudePermissionModeOption(
+        mergedProfile.args_template,
+      );
+      if (cleanedTemplate !== mergedProfile.args_template) {
+        fields.args_template = cleanedTemplate || null;
+        mergedProfile.args_template = fields.args_template;
+      }
     }
     // Migration 076 backfills normal legacy rows. Keep this runtime promotion
     // for databases that had already recorded 075 before the backfill shipped,

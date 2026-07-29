@@ -84,6 +84,12 @@ const {
 // operator spawn gives up with a 409 pending_timeout (client may retry).
 const MATERIALIZE_PENDING_MAX_ATTEMPTS = 15;
 
+function mergeClaudeMcpConfigs(...configs) {
+  const present = configs.filter(Boolean);
+  if (present.length === 0) return undefined;
+  return present.length === 1 ? present[0] : present;
+}
+
 function createOperatorSpawnService({
   runService,
   managerRegistry,
@@ -414,7 +420,10 @@ function createOperatorSpawnService({
     // fall through to the resolver's defaults.
     let envAllowlist;
     let pmMcpTools = [];
+    let tools = [];
     let disallowedTools = [];
+    let maxBudgetUsd = null;
+    let profileMcpConfig = null;
     let permissionMode = adapterType === 'claude-code' ? 'bypassPermissions' : undefined;
     try {
       if (agentProfileService) {
@@ -439,7 +448,10 @@ function createOperatorSpawnService({
           if (adapterType === 'claude-code') {
             permissionMode = resolveClaudePermissionMode(managerProfile);
             const templateOptions = parseClaudeArgsTemplate(managerProfile.args_template);
+            tools = templateOptions.tools;
             disallowedTools = templateOptions.disallowedTools;
+            maxBudgetUsd = templateOptions.maxBudgetUsd;
+            profileMcpConfig = templateOptions.mcpConfig;
           }
           if (managerProfile.env_allowlist) {
             const parsed = JSON.parse(managerProfile.env_allowlist);
@@ -795,7 +807,9 @@ function createOperatorSpawnService({
           ),
           envAllowlist,
           permissionMode,
+          tools: tools.length > 0 ? tools : undefined,
           disallowedTools: disallowedTools.length > 0 ? disallowedTools : undefined,
+          maxBudgetUsd: maxBudgetUsd || undefined,
           role: 'manager',
           nodeId,
           resumeThreadId,
@@ -826,7 +840,9 @@ function createOperatorSpawnService({
           // Claude adapter forwards this to streamJsonEngine as --mcp-config.
           // Codex adapter accepts only object-shaped MCP config for dotted
           // -c flattening, so it skips path strings and annotates the run.
-          mcpConfig: project.mcp_config_path || undefined,
+          mcpConfig: adapterType === 'claude-code'
+            ? mergeClaudeMcpConfigs(profileMcpConfig, project.mcp_config_path)
+            : (project.mcp_config_path || undefined),
         };
         if (isRemoteNode) {
           startOpts.executor = executor;
