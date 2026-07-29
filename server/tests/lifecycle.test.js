@@ -42,6 +42,8 @@ function makeStubExecutionEngine({ alive = true, exitCode = null, output = '' } 
   const spawned = [];
   const killed = [];
   const inputs = [];
+  let aliveState = alive;
+  let exitCodeState = exitCode;
   return {
     type: 'subprocess',
     spawned,
@@ -51,8 +53,10 @@ function makeStubExecutionEngine({ alive = true, exitCode = null, output = '' } 
       spawned.push({ runId, opts });
       return { sessionName: `session-${runId}` };
     },
-    isAlive(runId) { return alive; },
-    detectExitCode(runId) { return exitCode; },
+    isAlive(runId) { return aliveState; },
+    detectExitCode(runId) { return exitCodeState; },
+    setAlive(value) { aliveState = value; },
+    setExitCode(value) { exitCodeState = value; },
     getOutput(runId) { return output; },
     sendInput(runId, text) { inputs.push({ runId, text }); return true; },
     kill(runId) { killed.push(runId); },
@@ -96,13 +100,20 @@ function seedTask(db, projectId) {
   return ts.createTask({ project_id: projectId, title: 'Do something', description: 'desc' });
 }
 
-function seedProfile(db, { command = 'codex', capabilities_json = '{}', env_allowlist = '[]' } = {}) {
+function seedProfile(db, {
+  command = 'codex',
+  capabilities_json = '{}',
+  env_allowlist = '[]',
+  idle_timeout_ms = null,
+} = {}) {
   // Insert directly so we can use any command string without the allowlist guard.
   const id = `profile-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   db.prepare(
-    `INSERT INTO agent_profiles (id, name, type, command, capabilities_json, env_allowlist, max_concurrent)
-     VALUES (?, ?, ?, ?, ?, ?, 5)`
-  ).run(id, 'TestAgent', 'codex', command, capabilities_json, env_allowlist);
+    `INSERT INTO agent_profiles (
+       id, name, type, command, capabilities_json, env_allowlist,
+       max_concurrent, idle_timeout_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, 5, ?)`
+  ).run(id, 'TestAgent', 'codex', command, capabilities_json, env_allowlist, idle_timeout_ms);
   return { id, name: 'TestAgent', type: 'codex', command, capabilities_json, env_allowlist, max_concurrent: 5 };
 }
 
@@ -898,15 +909,12 @@ test('checkHealth: transitions stale running run to needs_input on idle timeout 
   const profile = seedProfile(db, { command: 'codex' });
   const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'go' });
 
-  // Backdate the run's started_at so the idle timeout fires (10 min)
-  const pastTime = new Date(Date.now() - 11 * 60 * 1000).toISOString();
-  db.prepare(`UPDATE runs SET started_at = ? WHERE id = ?`).run(pastTime, run.id);
-  // Also backdate any events so lastActivity is also old
-  db.prepare(`UPDATE run_events SET created_at = ? WHERE run_id = ?`).run(pastTime, run.id);
-
-  // First health check: records outputHash baseline (prevHash undefined → sets hash, no idle check yet)
-  // Second health check: same hash as prev → checks idle timeout → triggers
+  // Establish the output baseline, then make the latest meaningful activity
+  // older than the unchanged 30-minute default.
   await lc.checkHealth();
+  const pastTime = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+  db.prepare(`UPDATE runs SET started_at = ? WHERE id = ?`).run(pastTime, run.id);
+  db.prepare(`UPDATE run_events SET created_at = ? WHERE run_id = ?`).run(pastTime, run.id);
   await lc.checkHealth();
 
   const after = rs.getRun(run.id);
@@ -914,6 +922,132 @@ test('checkHealth: transitions stale running run to needs_input on idle timeout 
   assert.equal(needsInputEvents.length, 1, 'run:needs_input event emitted');
   assert.equal(needsInputEvents[0].priority, 'alert');
   assert.equal(needsInputEvents[0].reason, 'idle_timeout');
+});
+
+test('checkHealth: profile idle_timeout_ms overrides the default while NULL opts out', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const execEngine = makeStubExecutionEngine({
+    alive: true,
+    exitCode: null,
+    output: 'same output',
+  });
+  const clockNow = Math.floor(Date.now() / 1000) * 1000;
+  const sqliteUtc = (milliseconds) => (
+    new Date(milliseconds).toISOString().slice(0, 19).replace('T', ' ')
+  );
+  const lc = createLifecycleService({
+    runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+    executionEngine: execEngine, streamJsonEngine: null, worktreeService: null, eventBus: null,
+    now: () => clockNow,
+  });
+  const project = seedProject(db);
+
+  const configuredTask = seedTask(db, project.id);
+  const configuredProfile = seedProfile(db, {
+    command: 'codex',
+    idle_timeout_ms: 60 * 1000,
+  });
+  const configuredRun = await lc.executeTask(configuredTask.id, {
+    agentProfileId: configuredProfile.id,
+    prompt: 'configured',
+  });
+  await lc.checkHealth();
+
+  const twoMinutesAgo = sqliteUtc(clockNow - 2 * 60 * 1000);
+  db.prepare('UPDATE run_events SET created_at = ? WHERE run_id = ?')
+    .run(twoMinutesAgo, configuredRun.id);
+  await lc.checkHealth();
+  assert.equal(rs.getRun(configuredRun.id).status, 'needs_input');
+
+  const defaultTask = seedTask(db, project.id);
+  const defaultProfile = seedProfile(db, { command: 'codex', idle_timeout_ms: null });
+  const defaultRun = await lc.executeTask(defaultTask.id, {
+    agentProfileId: defaultProfile.id,
+    prompt: 'default',
+  });
+  await lc.checkHealth();
+  const exactlyThirtyMinutesAgo = sqliteUtc(clockNow - 30 * 60 * 1000);
+  db.prepare('UPDATE run_events SET created_at = ? WHERE run_id = ?')
+    .run(exactlyThirtyMinutesAgo, defaultRun.id);
+  await lc.checkHealth();
+  assert.equal(
+    rs.getRun(defaultRun.id).status,
+    'running',
+    'NULL preserves the strict greater-than comparison at the 30-minute default',
+  );
+  const justOverThirtyMinutesAgo = sqliteUtc(clockNow - 30 * 60 * 1000 - 1000);
+  db.prepare('UPDATE run_events SET created_at = ? WHERE run_id = ?')
+    .run(justOverThirtyMinutesAgo, defaultRun.id);
+  await lc.checkHealth();
+  assert.equal(
+    rs.getRun(defaultRun.id).status,
+    'needs_input',
+    'NULL preserves the existing 30-minute threshold',
+  );
+});
+
+test('checkHealth: a run finalized after idle timeout keeps completed compatibility and terminal provenance', async (t) => {
+  const db = await mkdb(t);
+  const eventBus = createEventBus();
+  const rs = createRunService(db, eventBus);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const execEngine = makeStubExecutionEngine({
+    alive: true,
+    exitCode: null,
+    output: 'same output',
+  });
+  const endedEvents = [];
+  eventBus.subscribe((event) => {
+    if (event.channel === 'run:ended') endedEvents.push(event.data);
+  });
+  const lc = createLifecycleService({
+    runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+    executionEngine: execEngine, streamJsonEngine: null, worktreeService: null, eventBus,
+  });
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, {
+    command: 'codex',
+    idle_timeout_ms: 60 * 1000,
+  });
+  const run = await lc.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'timeout',
+  });
+  await lc.checkHealth();
+  const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+  db.prepare('UPDATE run_events SET created_at = ? WHERE run_id = ?')
+    .run(twoMinutesAgo, run.id);
+  await lc.checkHealth();
+  assert.equal(rs.getRun(run.id).status, 'needs_input');
+
+  execEngine.setAlive(false);
+  execEngine.setExitCode(0);
+  await lc.checkHealth();
+
+  const finalized = rs.getRun(run.id);
+  assert.equal(finalized.status, 'completed');
+  assert.equal(finalized.terminal_reason, 'idle_timeout');
+  assert.ok(endedEvents.some(event => (
+    event.run.id === run.id
+    && event.to_status === 'completed'
+    && event.run.terminal_reason === 'idle_timeout'
+  )));
+
+  const normalTask = seedTask(db, project.id);
+  const normalRun = await lc.executeTask(normalTask.id, {
+    agentProfileId: profile.id,
+    prompt: 'normal',
+  });
+  await lc.checkHealth();
+  assert.equal(rs.getRun(normalRun.id).status, 'completed');
+  assert.equal(rs.getRun(normalRun.id).terminal_reason, null);
 });
 
 // ---------------------------------------------------------------------------
@@ -944,11 +1078,11 @@ test('INS-02: sendAgentInput recovers needs_input run back to running', async (t
   const profile = seedProfile(db, { command: 'codex' });
   const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'work' });
 
-  // Simulate idle timeout: backdate + double checkHealth → needs_input
-  const pastTime = new Date(Date.now() - 11 * 60 * 1000).toISOString();
+  // Simulate idle timeout after establishing the output baseline.
+  await lc.checkHealth();
+  const pastTime = new Date(Date.now() - 31 * 60 * 1000).toISOString();
   db.prepare(`UPDATE runs SET started_at = ? WHERE id = ?`).run(pastTime, run.id);
   db.prepare(`UPDATE run_events SET created_at = ? WHERE run_id = ?`).run(pastTime, run.id);
-  await lc.checkHealth();
   await lc.checkHealth();
 
   const afterIdle = rs.getRun(run.id);

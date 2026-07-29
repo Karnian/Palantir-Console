@@ -185,7 +185,17 @@ function createRunService(db, eventBus) {
       UPDATE runs SET claude_session_id = ? WHERE id = ?
     `),
     updateStatus: db.prepare(`
-      UPDATE runs SET status = ?, ended_at = CASE WHEN ? IN ('completed','failed','cancelled','stopped') THEN datetime('now') ELSE ended_at END WHERE id = ?
+      UPDATE runs
+         SET status = ?,
+             ended_at = CASE
+               WHEN ? IN ('completed','failed','cancelled','stopped') THEN datetime('now')
+               ELSE ended_at
+             END,
+             terminal_reason = CASE
+               WHEN ? IN ('completed','failed','cancelled','stopped') THEN ?
+               ELSE NULL
+             END
+       WHERE id = ?
     `),
     updateStarted: db.prepare(`
       UPDATE runs SET status = 'running', started_at = datetime('now'), tmux_session = ?, worktree_path = ?, branch = ? WHERE id = ?
@@ -678,6 +688,20 @@ function createRunService(db, eventBus) {
     getEventById: db.prepare(`
       SELECT * FROM run_events WHERE run_id = ? AND id = ? LIMIT 1
     `),
+    getLatestEventByType: db.prepare(`
+      SELECT * FROM run_events
+      WHERE run_id = ? AND event_type = ?
+      ORDER BY id DESC
+      LIMIT 1
+    `),
+    getLatestActivityAt: db.prepare(`
+      SELECT created_at
+      FROM run_events
+      WHERE run_id = ?
+        AND NOT (event_type = 'heartbeat' AND payload_json IS NULL)
+      ORDER BY id DESC
+      LIMIT 1
+    `),
     hasEventType: db.prepare(`
       SELECT 1 AS found FROM run_events
       WHERE run_id = ? AND event_type = ?
@@ -909,7 +933,11 @@ function createRunService(db, eventBus) {
     return stmts.getById.get(id);
   }
 
-  function updateRunStatus(id, status, { force = false, reason = null } = {}) {
+  function updateRunStatus(id, status, {
+    force = false,
+    reason = null,
+    terminalReason = null,
+  } = {}) {
     if (!VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid run status: ${status}`);
     }
@@ -924,7 +952,7 @@ function createRunService(db, eventBus) {
       }
     }
     const fromStatus = current.status;
-    stmts.updateStatus.run(status, status, id);
+    stmts.updateStatus.run(status, status, status, terminalReason, id);
     const run = stmts.getById.get(id);
     addRunEvent(id, `status:${status}`, reason ? JSON.stringify({ reason }) : null);
     if (eventBus) {
@@ -1676,6 +1704,16 @@ function createRunService(db, eventBus) {
     return stmts.getEventById.get(runId, eventId) || null;
   }
 
+  function getLatestRunEvent(runId, eventType) {
+    getRun(runId);
+    return stmts.getLatestEventByType.get(runId, eventType) || null;
+  }
+
+  function getLatestActivityAt(runId) {
+    getRun(runId);
+    return stmts.getLatestActivityAt.get(runId)?.created_at || null;
+  }
+
   function hasRunEvent(runId, eventType) {
     return !!stmts.hasEventType.get(runId, eventType);
   }
@@ -1836,7 +1874,7 @@ function createRunService(db, eventBus) {
     operatorInstanceHasRef,
     getOperatorThreadForProject,
     setOperatorInstanceThread,
-    deleteRun, addRunEvent, getRunEvents, getRunEventById, hasRunEvent,
+    deleteRun, addRunEvent, getRunEvents, getRunEventById, getLatestRunEvent, getLatestActivityAt, hasRunEvent,
     getActiveManager, getActiveManagers, getRunByConversationId, getWorkerRuns,
   };
 }

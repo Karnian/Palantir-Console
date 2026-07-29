@@ -180,6 +180,49 @@ function createLifecycleService({
   const _authResolverOpts = authResolverOpts || {};
   const HEARTBEAT_INTERVAL_MS = 30000;  // 30s
   const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min (increased from 10 min for long-running tasks)
+  function resolveWorkerIdleTimeoutMs(run) {
+    if (!run?.agent_profile_id || !agentProfileService?.getProfile) {
+      return IDLE_TIMEOUT_MS;
+    }
+    try {
+      const configured = agentProfileService.getProfile(run.agent_profile_id)?.idle_timeout_ms;
+      return configured == null ? IDLE_TIMEOUT_MS : configured;
+    } catch {
+      // A deleted/missing profile must not make health monitoring fail closed.
+      return IDLE_TIMEOUT_MS;
+    }
+  }
+
+  function latestWorkerActivityAt(run) {
+    let value = null;
+    if (typeof runService.getLatestActivityAt === 'function') {
+      try { value = runService.getLatestActivityAt(run.id); } catch { value = null; }
+    } else {
+      // Compatibility for narrow test doubles. Null heartbeats are health
+      // observations, not worker activity, so they cannot extend the timeout.
+      try {
+        const events = runService.getRunEvents(run.id) || [];
+        const latest = [...events].reverse().find(
+          event => event.event_type !== 'heartbeat' || event.payload_json != null,
+        );
+        value = latest?.created_at || null;
+      } catch { value = null; }
+    }
+    return parseSqliteUtc(value || run.started_at || run.created_at);
+  }
+
+  function idleTimeoutTerminalReason(run) {
+    if (run?.status !== 'needs_input' || typeof runService.getLatestRunEvent !== 'function') {
+      return null;
+    }
+    try {
+      const event = runService.getLatestRunEvent(run.id, 'status:needs_input');
+      const payload = event?.payload_json ? JSON.parse(event.payload_json) : null;
+      return payload?.reason === 'idle_timeout' ? 'idle_timeout' : null;
+    } catch {
+      return null;
+    }
+  }
   // Normalize BOTH the injected option and the env var through Number() so a
   // caller passing '0' / 'abc' / a negative falls back to the 15-min default
   // (Codex N3-2 review NIT — the option was previously trusted verbatim).
@@ -2875,12 +2918,13 @@ function createLifecycleService({
             runService.addRunEvent(run.id, 'heartbeat', JSON.stringify({ status: 'process_active_no_output' }));
           } else {
             // Process is idle or dead — check idle timeout
-            const events = runService.getRunEvents(run.id);
-            const lastEvent = events[events.length - 1];
-            const lastActivity = lastEvent ? new Date(lastEvent.created_at).getTime() : new Date(run.started_at || run.created_at).getTime();
-            const idleTime = Date.now() - lastActivity;
+            const lastActivity = latestWorkerActivityAt(run);
+            const idleTime = Number.isFinite(lastActivity)
+              ? Math.max(0, nowMs() - lastActivity)
+              : 0;
+            const idleTimeoutMs = resolveWorkerIdleTimeoutMs(run);
 
-            if (idleTime > IDLE_TIMEOUT_MS) {
+            if (idleTime > idleTimeoutMs) {
               // Double-check: is the process truly dead or just idle?
               const alive = await channel.isAlive(run.id, 'cli');
               if (!alive) {
@@ -2964,7 +3008,11 @@ function createLifecycleService({
         // Process died while in needs_input
         const exitCode = await channel.detectExitCode(run.id, 'cli');
         const status = (exitCode === 0) ? 'completed' : 'failed';
-        runService.updateRunStatus(run.id, status, { force: true, reason: agentExitReason(exitCode) });
+        runService.updateRunStatus(run.id, status, {
+          force: true,
+          reason: agentExitReason(exitCode),
+          terminalReason: idleTimeoutTerminalReason(run),
+        });
         if (run.task_id) checkTaskCompletion(run.task_id);
         await channel.kill(run.id, 'cli');
         _outputHashes.delete(run.id);

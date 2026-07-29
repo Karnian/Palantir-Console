@@ -17,12 +17,12 @@ import { nodeDetailHref, queueReasonsByRunId, shouldRenderNodeBadge } from '../l
 import {
   COMMON_ACTIONS,
   TASK_STATUS_LABELS,
-  RUN_STATUS_LABELS,
   QUEUE_REASON_LABELS,
   FILTER_LABELS,
   TASK_DETAIL_LABELS,
   NEW_TASK_LABELS,
   EXECUTE_MODAL_LABELS,
+  runStatusLabel,
   statusLabel,
 } from '../lib/copy.js';
 
@@ -852,7 +852,7 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
                     <span class="run-status-dot ${r.status}"></span>
                     <span style="flex:1;min-width:0;">
                       <span style="color:var(--text-primary);font-size:13px;">${r.agent_name || TASK_DETAIL_LABELS.agentFallback}</span>
-                      <span style="color:var(--text-muted);font-size:11px;margin-left:6px;">${statusLabel(RUN_STATUS_LABELS, r.status)}</span>
+                      <span style="color:var(--text-muted);font-size:11px;margin-left:6px;">${runStatusLabel(r)}</span>
                       <span class="run-row-badges">
                         <${NodeBadge} run=${r} />
                         ${r.status === 'queued' && html`<${QueueReasonChip} reason=${queueReasons[r.id]} />`}

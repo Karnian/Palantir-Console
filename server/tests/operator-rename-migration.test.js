@@ -89,6 +89,9 @@ const RUN_COLUMNS = [
   // P2/P3 review (migration 063): durable non-retryable flag for pre-claim
   // rejected runs (worker_profile_invalid / budget_exceeded).
   'non_retryable',
+  // Worker idle timeout (#466, migration 076): preserves the existing terminal
+  // status while recording why health cleanup finalized the run.
+  'terminal_reason',
 ];
 
 const COMPOSITION_EVENT_COLUMNS = [
