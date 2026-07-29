@@ -2182,6 +2182,35 @@ function createLifecycleService({
     return retryRun;
   }
 
+  function recoverMissedTerminalRetries() {
+    let recovered = 0;
+    let failedRuns = [];
+    try { failedRuns = runService.listRuns({ status: 'failed' }); } catch { return recovered; }
+
+    for (const run of failedRuns) {
+      // A terminal status/event commit can survive a controller crash that
+      // occurs immediately before the in-process run:ended publication. Reuse
+      // the listener's exact B-lite eligibility rules and the retry unique
+      // index so boot can recreate only the missing child, never a duplicate.
+      if (
+        !run
+        || run.is_manager
+        || run.goal_active
+        || run.non_retryable
+        || !run.started_at
+        || Number(run.retry_count || 0) >= MAX_RETRY
+      ) {
+        continue;
+      }
+      try {
+        if (createRetryRun(run)) recovered++;
+      } catch (err) {
+        console.warn(`[lifecycle] Missed retry recovery failed for run ${run.id}: ${err.message}`);
+      }
+    }
+    return recovered;
+  }
+
   function scheduleMaterializeRetry(profileId, nodeId, delayMs) {
     const timer = setTimeout(() => {
       _materializationTimers.delete(timer);
@@ -2383,6 +2412,11 @@ function createLifecycleService({
   }
 
   async function drainAllQueues() {
+    // Recover a run:ended delivery lost to a commit→publish controller crash
+    // before scanning queued profiles. createRetryRun is idempotent across
+    // repeated boots and concurrent controllers.
+    recoverMissedTerminalRetries();
+
     const profileIds = new Set();
     const statuses = repoFeatureEnabled() ? ['queued', 'materializing'] : ['queued'];
     for (const status of statuses) {
@@ -3035,7 +3069,16 @@ function createLifecycleService({
         // Process died while in needs_input
         const exitCode = await channel.detectExitCode(run.id, 'cli');
         const status = (exitCode === 0) ? 'completed' : 'failed';
-        runService.updateRunStatus(run.id, status, { force: true, reason: agentExitReason(exitCode) });
+        const output = status === 'failed'
+          ? await getWorkerOutputBestEffort(channel, run.id, 200, 'cli')
+          : null;
+        const codexLimitFailure = status === 'failed'
+          ? markCodexLimitFailure(run, output)
+          : false;
+        runService.updateRunStatus(run.id, status, {
+          force: true,
+          reason: codexLimitFailure ? 'codex-rate-limit' : agentExitReason(exitCode),
+        });
         if (run.task_id) checkTaskCompletion(run.task_id);
         await channel.kill(run.id, 'cli');
         _outputHashes.delete(run.id);

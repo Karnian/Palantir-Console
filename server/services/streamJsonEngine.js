@@ -408,6 +408,7 @@ function createStreamJsonEngine({
         fireCleanup();
 
         if (proc.isRemote && code === 255) {
+          proc.transportExitHandled = true;
           // Fence this node before terminalizing a worker. updateRunStatus emits
           // run:ended synchronously, and that listener may enqueue the only retry;
           // marking the node unreachable first keeps that retry queued until the
@@ -462,8 +463,30 @@ function createStreamJsonEngine({
         if (proc.status === 'starting' || proc.status === 'running') {
           proc.status = code === 0 ? 'completed' : 'failed';
         }
+        // A descendant can keep inherited stdio open indefinitely. Prefer the
+        // real close event, but do not let a leaked descriptor strand the run.
+        proc.stdioDrainTimer = setTimeout(() => {
+          finalizeRunAfterStdio(code, signal);
+        }, 1000);
+        if (typeof proc.stdioDrainTimer.unref === 'function') {
+          proc.stdioDrainTimer.unref();
+        }
+      });
 
-        // Finalize DB status on exit.
+      // Node may emit `exit` before inherited stdout/stderr descriptors drain.
+      // `close` is emitted only after the stdio streams close, so classification
+      // here sees every promptly delivered NDJSON line that belongs to the
+      // process tree. The bounded exit fallback above prevents a descendant
+      // with a leaked descriptor from holding the run open forever.
+      const finalizeRunAfterStdio = (code, signal) => {
+        if (proc.stdioFinalized || proc.transportExitHandled || !proc.exited) return;
+        proc.stdioFinalized = true;
+        if (proc.stdioDrainTimer) {
+          clearTimeout(proc.stdioDrainTimer);
+          proc.stdioDrainTimer = null;
+        }
+
+        // Finalize DB status after stdio drain.
         // - Worker (single-shot): only if no `result` event arrived (the result handler
         //   already updates the DB; skipping prevents duplicate transitions).
         // - Manager (multi-turn): `result` arrives every turn but the session keeps
@@ -501,7 +524,8 @@ function createStreamJsonEngine({
             }));
           } catch { /* ignore */ }
         }
-      });
+      };
+      child.on('close', finalizeRunAfterStdio);
 
       // A dispose/kill that arrived while the remote spawn was still resolving
       // set proc.killPending. The handlers above are now attached (so the exit

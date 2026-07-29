@@ -670,6 +670,75 @@ process.stdout.write(JSON.stringify(event) + '\\n', () => process.exit(1));
   });
 });
 
+test('engine: rejected Claude rate-limit waits for inherited stdout after parent exit', async (t) => {
+  const { createStreamJsonEngine } = require('../services/streamJsonEngine');
+  const rs = makeRunService();
+  rs._setRun('run-rate-limit-delayed-stdout', { status: 'running' });
+  const limitEvent = {
+    type: 'rate_limit_event',
+    rate_limit_info: {
+      status: 'rejected',
+      rateLimitType: 'five_hour',
+      resetsAt: 1785312000000,
+    },
+  };
+  const delayedWriter = `
+    setTimeout(() => {
+      process.stdout.write(${JSON.stringify(`${JSON.stringify(limitEvent)}\n`)});
+    }, 100);
+  `;
+  const limitBin = writeGeneratedFixtureExecutable(`#!/usr/bin/env node
+'use strict';
+const { spawn } = require('node:child_process');
+spawn(process.execPath, ['-e', ${JSON.stringify(delayedWriter)}], {
+  stdio: ['ignore', process.stdout, 'ignore'],
+}).unref();
+process.exit(1);
+`);
+  t.after(() => {
+    try { fs.unlinkSync(limitBin); } catch { /* ignore */ }
+  });
+
+  const previousClaudeBin = process.env.CLAUDE_BIN;
+  process.env.CLAUDE_BIN = limitBin;
+  const engine = createStreamJsonEngine({ runService: rs });
+  _allEngines.push(engine);
+  try {
+    engine.spawnAgent('run-rate-limit-delayed-stdout', {
+      cwd: os.tmpdir(),
+      prompt: 'x',
+      isManager: false,
+    });
+  } finally {
+    if (previousClaudeBin === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = previousClaudeBin;
+  }
+
+  const deadline = Date.now() + 3000;
+  while (
+    !rs._statusUpdates.some((update) => update.runId === 'run-rate-limit-delayed-stdout')
+    && Date.now() < deadline
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
+  assert.deepEqual(rs._nonRetryableUpdates, [{
+    runId: 'run-rate-limit-delayed-stdout',
+    retryCount: undefined,
+  }]);
+  const failed = rs._statusUpdates.find(
+    (update) => update.runId === 'run-rate-limit-delayed-stdout' && update.status === 'failed',
+  );
+  assert.equal(failed.options.reason, 'claude-rate-limit');
+  assert.equal(
+    rs._events.filter(
+      (event) => event.runId === 'run-rate-limit-delayed-stdout'
+        && event.type === 'worker:limit_rejected',
+    ).length,
+    1,
+  );
+});
+
 test('engine: result event for manager does NOT call updateRunStatus on non-error', async (t) => {
   process.env.CLAUDE_BIN = fakeClaudioPath;
   const rs = makeRunService();
@@ -1180,6 +1249,7 @@ test('engine: remote natural exit finalizes completed with real exit code', asyn
 
   await spawnFakeRemoteManager(engine, 'run-remote-natural', child);
   child.emit('exit', 0, null);
+  child.emit('close', 0, null);
 
   assert.equal(engine.isAlive('run-remote-natural'), false);
   assert.equal(engine.detectExitCode('run-remote-natural'), 0);

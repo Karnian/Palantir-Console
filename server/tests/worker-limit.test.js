@@ -61,3 +61,10 @@ test('worker limit: Codex does not classify task prose in a failed output tail',
     '___EXIT_CODE_1___',
   ].join('\n')), null);
 });
+
+test('worker limit: Codex does not classify an assertion about a usage-limit feature', () => {
+  assert.equal(classifyCodexWorkerOutput([
+    'AssertionError: expected usage limit reached banner, got success',
+    '___EXIT_CODE_1___',
+  ].join('\n')), null);
+});

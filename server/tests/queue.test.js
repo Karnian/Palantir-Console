@@ -362,6 +362,51 @@ test('queue: failed status event insert rolls back the transition so a later obs
   assert.equal(h.runService.listRuns({ task_id: task.id }).length, 2);
 });
 
+test('queue: app boot recovers a retry lost after terminal commit but before run:ended', async (t) => {
+  const { db, dbPath } = await mkdb(t, 'palantir-queue-crash-recovery-');
+  const eventBus = createEventBus();
+  const runService = createRunService(db, eventBus);
+  const taskService = createTaskService(db);
+  const projectService = createProjectService(db);
+  const project = seedProject(projectService);
+  const task = seedTask(taskService, project.id);
+  // Capacity zero keeps the recovered child queued so the assertion observes
+  // recovery itself rather than a later spawn transition.
+  const profile = seedProfile(db, { max: 0 });
+  const original = createRunningRun(runService, {
+    taskId: task.id,
+    profileId: profile.id,
+  });
+
+  // No lifecycle subscriber is installed: this models a controller dying
+  // after the transaction commits status:failed but before run:ended publish.
+  runService.updateRunStatus(original.id, 'failed', { force: true });
+  assert.equal(eventsOf(runService, original.id, 'status:failed').length, 1);
+  assert.equal(runService.listRuns({ task_id: task.id }).length, 1);
+  db.close();
+
+  const executionEngine = stubExecEngine();
+  const app = createApp({
+    dbPath,
+    authToken: null,
+    executionEngine,
+    forceBootDrain: true,
+    storageRoot: path.join(os.tmpdir(), `palantir-storage-${Date.now()}`),
+    fsRoot: os.tmpdir(),
+  });
+  t.after(() => app.shutdown());
+
+  await waitFor(() => app.services.runService.listRuns({ task_id: task.id }).length === 2);
+  const runs = app.services.runService.listRuns({ task_id: task.id });
+  const retry = runs.find((run) => run.id !== original.id);
+  assert.equal(app.services.runService.getRun(original.id).status, 'failed');
+  assert.equal(eventsOf(app.services.runService, original.id, 'status:failed').length, 1);
+  assert.equal(retry.status, 'queued');
+  assert.equal(retry.retry_count, 1);
+  assert.equal(eventsOf(app.services.runService, retry.id, 'queue:retry').length, 1);
+  assert.equal(executionEngine.spawned.length, 0);
+});
+
 test('queue: duplicate run:ended delivery creates one retry attempt', async (t) => {
   const { db } = await mkdb(t);
   const eventBus = createEventBus();
@@ -599,6 +644,72 @@ test('queue: task prose mentioning rate limits remains an ordinary retryable Cod
   const runs = h.runService.listRuns({ task_id: task.id });
   assert.equal(runs.length, 2, 'ordinary failure must receive the one B-lite retry');
   assert.equal(runs.find((run) => run.id !== original.id).retry_count, 1);
+});
+
+test('queue: usage-limit assertion remains an ordinary retryable Codex failure', async (t) => {
+  const { db } = await mkdb(t);
+  const eventBus = createEventBus();
+  const executionEngine = stubExecEngine();
+  executionEngine.isAlive = () => false;
+  executionEngine.detectExitCode = () => 1;
+  executionEngine.getOutput = () => [
+    'AssertionError: expected usage limit reached banner, got success',
+    '___EXIT_CODE_1___',
+  ].join('\n');
+  const h = buildHarness(db, { eventBus, executionEngine });
+  t.after(() => h.lifecycleService.stopMonitoring());
+
+  const project = seedProject(h.projectService);
+  const task = seedTask(h.taskService, project.id);
+  const profile = seedProfile(db, { max: 0, command: 'codex' });
+  const original = createRunningRun(h.runService, {
+    taskId: task.id,
+    profileId: profile.id,
+  });
+
+  h.lifecycleService.startMonitoring();
+  await h.lifecycleService.checkHealth();
+
+  const after = h.runService.getRun(original.id);
+  assert.equal(after.status, 'failed');
+  assert.equal(after.non_retryable, 0);
+  assert.equal(eventsOf(h.runService, original.id, 'worker:limit_rejected').length, 0);
+  const runs = h.runService.listRuns({ task_id: task.id });
+  assert.equal(runs.length, 2);
+  assert.equal(runs.find((run) => run.id !== original.id).retry_count, 1);
+});
+
+test('queue: Codex usage limit is classified when a needs_input process exits', async (t) => {
+  const { db } = await mkdb(t);
+  const eventBus = createEventBus();
+  const executionEngine = stubExecEngine();
+  executionEngine.isAlive = () => false;
+  executionEngine.detectExitCode = () => 1;
+  executionEngine.getOutput = () => [
+    "You've hit your usage limit. Upgrade to Pro or try again in 2 hours.",
+    '___EXIT_CODE_1___',
+  ].join('\n');
+  const h = buildHarness(db, { eventBus, executionEngine });
+  t.after(() => h.lifecycleService.stopMonitoring());
+
+  const project = seedProject(h.projectService);
+  const task = seedTask(h.taskService, project.id);
+  const profile = seedProfile(db, { max: 0, command: 'codex' });
+  const original = createRunningRun(h.runService, {
+    taskId: task.id,
+    profileId: profile.id,
+  });
+  h.runService.updateRunStatus(original.id, 'needs_input', { force: true });
+
+  h.lifecycleService.startMonitoring();
+  await h.lifecycleService.checkHealth();
+
+  const after = h.runService.getRun(original.id);
+  assert.equal(after.status, 'failed');
+  assert.equal(after.non_retryable, 1);
+  assert.equal(after.retry_count, 0);
+  assert.equal(eventsOf(h.runService, original.id, 'worker:limit_rejected').length, 1);
+  assert.equal(h.runService.listRuns({ task_id: task.id }).length, 1);
 });
 
 test('queue: failed run that never started (no started_at) does not auto-retry', async (t) => {

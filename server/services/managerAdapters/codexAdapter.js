@@ -78,7 +78,7 @@ const LOCAL_FAILED_PLACEMENT_DIRS = Symbol('localFailedPlacementDirs');
 // error message when no structured `item.code` or `item.error_type` field
 // provides a category directly.
 const ERROR_CLASSIFICATION_PATTERNS = [
-  [/\b(?:rate.?limit|(?:hit|reached|exceeded)(?:\s+(?:your|the))?\s+usage limit|usage limit\s+(?:reached|exceeded))\b/i, 'rate_limit'],
+  [/\b(?:rate.?limit|(?:hit|reached|exceeded)(?:\s+(?:your|the))?\s+usage limit)\b/i, 'rate_limit'],
   [/\b(auth|unauthorized|forbidden|401|403)\b/i, 'auth_error'],
   [/\b(timeout|timed?\s*out|ETIMEDOUT|ESOCKETTIMEDOUT)\b/i, 'timeout'],
   [/\b(network|ECONNREFUSED|ECONNRESET|ENOTFOUND|fetch failed)\b/i, 'network_error'],

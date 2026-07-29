@@ -747,6 +747,12 @@ test('classifyCodexErrorKind classifies common error patterns via regex', () => 
     }),
     'rate_limit',
   );
+  assert.equal(
+    classifyCodexErrorKind({
+      message: 'AssertionError: expected usage limit reached banner, got success',
+    }),
+    'unknown_error',
+  );
 
   // auth_error
   assert.equal(classifyCodexErrorKind({ message: 'Unauthorized access' }), 'auth_error');
