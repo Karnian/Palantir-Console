@@ -175,6 +175,21 @@ function readSingleClaudeTemplateOption(tokens, flag) {
   return values[0] ?? null;
 }
 
+function readClaudeTemplateBooleanOption(tokens, flag) {
+  let occurrences = 0;
+  for (const token of tokens) {
+    if (token === flag) {
+      occurrences += 1;
+    } else if (token.startsWith(`${flag}=`)) {
+      throw new BadRequestError(`${flag} in args_template does not accept a value`);
+    }
+  }
+  if (occurrences > 1) {
+    throw new BadRequestError(`${flag} must appear at most once in args_template`);
+  }
+  return occurrences === 1;
+}
+
 function readClaudeTemplateListOption(tokens, flags, displayFlag) {
   const values = [];
   let occurrences = 0;
@@ -225,6 +240,7 @@ function parseClaudeArgsTemplate(argsTemplate) {
   const permissionMode = readSingleClaudeTemplateOption(tokens, '--permission-mode');
   const rawMaxBudgetUsd = readSingleClaudeTemplateOption(tokens, '--max-budget-usd');
   const mcpConfig = readSingleClaudeTemplateOption(tokens, '--mcp-config');
+  const strictMcpConfig = readClaudeTemplateBooleanOption(tokens, '--strict-mcp-config');
   const tools = readClaudeTemplateListOption(
     tokens,
     ['--tools'],
@@ -254,6 +270,7 @@ function parseClaudeArgsTemplate(argsTemplate) {
     permissionMode,
     maxBudgetUsd,
     mcpConfig,
+    strictMcpConfig,
     tools,
     disallowedTools,
   };

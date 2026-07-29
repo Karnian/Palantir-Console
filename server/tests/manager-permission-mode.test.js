@@ -99,6 +99,8 @@ async function createCapturingManagerHarness(t) {
     app,
     database,
     agentProfileService,
+    runService,
+    managerRegistry,
     starts,
   };
 }
@@ -230,14 +232,16 @@ test('Top Manager clears its starting guard when Claude template parsing fails',
   assert.equal(starts.length, 0);
 });
 
-test('Top Manager forwards saved Claude runtime template options to its adapter', async (t) => {
+test('Top Manager snapshots and resumes Claude runtime options after profile removal', async (t) => {
   const {
     app,
     agentProfileService,
+    runService,
+    managerRegistry,
     starts,
   } = await createCapturingManagerHarness(t);
   agentProfileService.updateProfile('claude-code', {
-    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config profile.json',
+    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config profile.json --strict-mcp-config',
   });
 
   const response = await invokeApp(app, {
@@ -251,6 +255,67 @@ test('Top Manager forwards saved Claude runtime template options to its adapter'
   assert.deepEqual(starts[0].opts.disallowedTools, ['Bash']);
   assert.equal(starts[0].opts.maxBudgetUsd, 0.01);
   assert.equal(starts[0].opts.mcpConfig, 'profile.json');
+  assert.equal(starts[0].opts.strictMcpConfig, true);
+  const run = runService.getRun(managerRegistry.getActiveRunId('top'));
+  assert.deepEqual(JSON.parse(run.session_claude_options_json), {
+    tools: ['Read,Grep'],
+    disallowedTools: ['Bash'],
+    maxBudgetUsd: 0.01,
+    mcpConfig: 'profile.json',
+    strictMcpConfig: true,
+  });
+
+  runService.updateClaudeSessionId(run.id, 'sess-profile-options');
+  agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt}',
+  });
+
+  const resumeStarts = [];
+  const resumeAdapter = {
+    type: 'claude-code',
+    capabilities: { persistentProcess: true, supportsResume: true },
+    startSession(runId, opts) {
+      resumeStarts.push({ runId, opts });
+      return { sessionRef: { pid: 9876 } };
+    },
+    isSessionAlive() { return true; },
+    detectExitCode() { return null; },
+    disposeSession() { return true; },
+    buildGuardrailsSection() { return ''; },
+  };
+  const resumeFactory = {
+    getAdapter(type) {
+      assert.equal(type, 'claude-code');
+      return resumeAdapter;
+    },
+  };
+  const resumeRegistry = createManagerRegistry({ runService });
+  const resumeConversationService = createConversationService({
+    runService,
+    managerRegistry: resumeRegistry,
+    managerAdapterFactory: resumeFactory,
+    lifecycleService: null,
+  });
+  createManagerRouter({
+    runService,
+    managerAdapterFactory: resumeFactory,
+    managerRegistry: resumeRegistry,
+    conversationService: resumeConversationService,
+    agentProfileService,
+    authResolverOpts: {
+      hasKeychain: () => true,
+      hasCredentialsFile: () => false,
+    },
+  });
+
+  const resumed = resumeStarts.find((entry) => entry.runId === run.id);
+  assert.ok(resumed);
+  assert.equal(resumed.opts.resumeSessionId, 'sess-profile-options');
+  assert.deepEqual(resumed.opts.tools, ['Read,Grep']);
+  assert.deepEqual(resumed.opts.disallowedTools, ['Bash']);
+  assert.equal(resumed.opts.maxBudgetUsd, 0.01);
+  assert.equal(resumed.opts.mcpConfig, 'profile.json');
+  assert.equal(resumed.opts.strictMcpConfig, true);
 });
 
 test('Manager boot-resume uses the fresh-spawn permission snapshot after profile deletion', async (t) => {
@@ -266,6 +331,7 @@ test('Manager boot-resume uses the fresh-spawn permission snapshot after profile
   const runService = createRunService(database.db, null);
   const agentProfileService = createAgentProfileService(database.db);
   agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config locked.json --strict-mcp-config',
     permission_mode: 'acceptEdits',
     env_allowlist: JSON.stringify(['CLAUDE_ARGS_FILE']),
   });
@@ -282,6 +348,13 @@ test('Manager boot-resume uses the fresh-spawn permission snapshot after profile
   runService.updateClaudeSessionId(staleRun.id, 'sess-review');
   runService.setSessionSnapshot(staleRun.id, {
     sessionPermissionMode: 'acceptEdits',
+    sessionClaudeOptions: {
+      tools: ['Read,Grep'],
+      disallowedTools: ['Bash'],
+      maxBudgetUsd: 0.01,
+      mcpConfig: 'locked.json',
+      strictMcpConfig: true,
+    },
   });
 
   agentProfileService.deleteProfile('claude-code');
@@ -335,6 +408,14 @@ test('Manager boot-resume uses the fresh-spawn permission snapshot after profile
 
   const args = await readArgs(argsFile);
   assert.equal(permissionModeArg(args), 'acceptEdits');
+  assert.equal(args[args.indexOf('--tools') + 1], 'Read,Grep');
+  assert.equal(args[args.indexOf('--disallowedTools') + 1], 'Bash');
+  assert.equal(args[args.indexOf('--max-budget-usd') + 1], '0.01');
+  assert.equal(args[args.indexOf('--mcp-config') + 1], 'locked.json');
+  assert.equal(
+    args.filter((arg) => arg === '--strict-mcp-config').length,
+    1,
+  );
   const resumeIndex = args.indexOf('--resume');
   assert.notEqual(resumeIndex, -1, `missing --resume in ${JSON.stringify(args)}`);
   assert.equal(args[resumeIndex + 1], 'sess-review');

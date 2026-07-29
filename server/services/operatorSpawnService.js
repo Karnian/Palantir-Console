@@ -424,6 +424,7 @@ function createOperatorSpawnService({
     let disallowedTools = [];
     let maxBudgetUsd = null;
     let profileMcpConfig = null;
+    let strictMcpConfig = false;
     let permissionMode = adapterType === 'claude-code' ? 'bypassPermissions' : undefined;
     try {
       if (agentProfileService) {
@@ -452,6 +453,7 @@ function createOperatorSpawnService({
             disallowedTools = templateOptions.disallowedTools;
             maxBudgetUsd = templateOptions.maxBudgetUsd;
             profileMcpConfig = templateOptions.mcpConfig;
+            strictMcpConfig = templateOptions.strictMcpConfig;
           }
           if (managerProfile.env_allowlist) {
             const parsed = JSON.parse(managerProfile.env_allowlist);
@@ -781,11 +783,23 @@ function createOperatorSpawnService({
         const opEff = modelPolicyService
           ? modelPolicyService.resolveEffective({ layer: 'operator', vendor: opVendor, projectId: project.id, env: process.env })
           : { model: null, effort: null };
+        const effectiveMcpConfig = adapterType === 'claude-code'
+          ? mergeClaudeMcpConfigs(profileMcpConfig, project.mcp_config_path)
+          : (project.mcp_config_path || undefined);
         try {
           runService.setSessionSnapshot(runId, {
             sessionModel: opEff.model,
             sessionEffort: opEff.effort,
             sessionPermissionMode: permissionMode || null,
+            sessionClaudeOptions: adapterType === 'claude-code'
+              ? {
+                  tools,
+                  disallowedTools,
+                  maxBudgetUsd,
+                  mcpConfig: effectiveMcpConfig || null,
+                  strictMcpConfig,
+                }
+              : null,
           });
         } catch { /* annotate-only */ }
 
@@ -810,6 +824,7 @@ function createOperatorSpawnService({
           tools: tools.length > 0 ? tools : undefined,
           disallowedTools: disallowedTools.length > 0 ? disallowedTools : undefined,
           maxBudgetUsd: maxBudgetUsd || undefined,
+          strictMcpConfig: strictMcpConfig || undefined,
           role: 'manager',
           nodeId,
           resumeThreadId,
@@ -840,9 +855,7 @@ function createOperatorSpawnService({
           // Claude adapter forwards this to streamJsonEngine as --mcp-config.
           // Codex adapter accepts only object-shaped MCP config for dotted
           // -c flattening, so it skips path strings and annotates the run.
-          mcpConfig: adapterType === 'claude-code'
-            ? mergeClaudeMcpConfigs(profileMcpConfig, project.mcp_config_path)
-            : (project.mcp_config_path || undefined),
+          mcpConfig: effectiveMcpConfig,
         };
         if (isRemoteNode) {
           startOpts.executor = executor;

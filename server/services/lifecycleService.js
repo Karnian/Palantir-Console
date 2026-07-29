@@ -1680,6 +1680,7 @@ function createLifecycleService({
                 : undefined,
               maxBudgetUsd: templateOptions.maxBudgetUsd || undefined,
               mcpConfig: effectiveMcpConfig,
+              strictMcpConfig: templateOptions.strictMcpConfig || undefined,
               isManager: false,
               envAllowlist: [
                 ...parseEnvAllowlistArray(profile.env_allowlist),

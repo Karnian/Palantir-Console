@@ -64,7 +64,7 @@ function AgentModal({ open, onClose, agent, onSaved }) {
       setArgsTemplate(agent.args_template || '');
       setModel(agent.model || '');
       setReasoningEffort(agent.reasoning_effort || '');
-      setPermissionMode(agent.permission_mode || '');
+      setPermissionMode(effectivePermissionMode(agent));
       setIcon(agent.icon || '');
       setColor(agent.color || '');
       setMaxConcurrent(agent.max_concurrent || 1);

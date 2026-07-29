@@ -252,6 +252,7 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
     maxBudgetUsd,
     mcpTools,
     mcpConfig,
+    strictMcpConfig,
     permissionMode,
     env,
     envAllowlist,
@@ -295,6 +296,7 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
       disallowedTools: disallowedTools || undefined,
       maxBudgetUsd: maxBudgetUsd || undefined,
       mcpConfig: mcpConfig || undefined, // P4-2: project-scoped MCP config path
+      strictMcpConfig: strictMcpConfig || undefined,
       model: model || undefined,
       isManager: true,
       resumeSessionId: resumeSessionId || undefined,

@@ -14,6 +14,8 @@ const { createManagerRegistry } = require('../services/managerRegistry');
 const { createNodeService } = require('../services/nodeService');
 const { createOperatorSpawnService } = require('../services/operatorSpawnService');
 const { createAgentProfileService } = require('../services/agentProfileService');
+const { createConversationService } = require('../services/conversationService');
+const { createManagerRouter } = require('../routes/manager');
 
 async function mkdb(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-operator-claude-'));
@@ -156,7 +158,7 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   const projectBriefService = createProjectBriefService(db);
   const agentProfileService = createAgentProfileService(db);
   agentProfileService.updateProfile('claude-code', {
-    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config profile.json',
+    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config profile.json --strict-mcp-config',
     permission_mode: 'acceptEdits',
   });
   const registry = createManagerRegistry({ runService });
@@ -182,7 +184,7 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
     resolveManagerAuth: authOk,
   });
   const project = projectService.createProject({ name: 'claude-op', preferred_pm_adapter: 'claude' });
-  seedTop({ runService, registry, adapter: topAdapter });
+  const topRun = seedTop({ runService, registry, adapter: topAdapter });
 
   const result = spawn.ensureLiveOperator({ projectId: project.id });
   assert.equal(result.spawned, true);
@@ -198,9 +200,20 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   assert.deepEqual(start.opts.disallowedTools, ['Bash']);
   assert.equal(start.opts.maxBudgetUsd, 0.01);
   assert.equal(start.opts.mcpConfig, 'profile.json');
+  assert.equal(start.opts.strictMcpConfig, true);
   assert.equal(
     runService.getRun(result.run.id).session_permission_mode,
     'acceptEdits',
+  );
+  assert.deepEqual(
+    JSON.parse(runService.getRun(result.run.id).session_claude_options_json),
+    {
+      tools: ['Read,Grep'],
+      disallowedTools: ['Bash'],
+      maxBudgetUsd: 0.01,
+      mcpConfig: 'profile.json',
+      strictMcpConfig: true,
+    },
   );
   assert.equal(runService.getRun(result.run.id).status, 'queued');
 
@@ -212,6 +225,44 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   assert.equal(thread.pm_adapter, 'claude');
   assert.equal(thread.node_id, null);
   assert.equal(thread.cwd, null);
+
+  runService.updateClaudeSessionId(topRun.id, 'sess_top_restart');
+  agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt}',
+  });
+  const resumeRegistry = createManagerRegistry({ runService });
+  const resumeAdapter = makeFakeManagerAdapter('claude-code');
+  const resumeFactory = makeAdapterFactory({
+    claudeAdapter: resumeAdapter,
+    codexAdapter: makeFakeManagerAdapter('codex'),
+  });
+  const resumeConversationService = createConversationService({
+    runService,
+    managerRegistry: resumeRegistry,
+    managerAdapterFactory: resumeFactory,
+    lifecycleService: null,
+  });
+  createManagerRouter({
+    runService,
+    projectService,
+    projectBriefService,
+    managerAdapterFactory: resumeFactory,
+    managerRegistry: resumeRegistry,
+    conversationService: resumeConversationService,
+    agentProfileService,
+    authResolverOpts: { hasKeychain: () => true },
+  });
+
+  const resumedOperator = resumeAdapter._starts.find(
+    (entry) => entry.runId === result.run.id,
+  );
+  assert.ok(resumedOperator);
+  assert.equal(resumedOperator.opts.resumeSessionId, 'sess_claude_1');
+  assert.deepEqual(resumedOperator.opts.tools, ['Read,Grep']);
+  assert.deepEqual(resumedOperator.opts.disallowedTools, ['Bash']);
+  assert.equal(resumedOperator.opts.maxBudgetUsd, 0.01);
+  assert.equal(resumedOperator.opts.mcpConfig, 'profile.json');
+  assert.equal(resumedOperator.opts.strictMcpConfig, true);
 });
 
 test('Claude operator rejects malformed template options instead of falling back to bypass', async (t) => {

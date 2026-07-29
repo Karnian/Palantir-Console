@@ -116,6 +116,21 @@ function resolveResumePermissionMode(agentProfileService, options = {}) {
 
 function resolveResumeClaudeTemplateOptions(agentProfileService, options = {}) {
   if (options.adapterType !== 'claude-code') return null;
+  if (options.sessionClaudeOptionsJson != null) {
+    const parsed = JSON.parse(options.sessionClaudeOptionsJson);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('invalid Claude session options snapshot');
+    }
+    return {
+      tools: Array.isArray(parsed.tools) ? parsed.tools : [],
+      disallowedTools: Array.isArray(parsed.disallowedTools)
+        ? parsed.disallowedTools
+        : [],
+      maxBudgetUsd: parsed.maxBudgetUsd ?? null,
+      mcpConfig: parsed.mcpConfig ?? null,
+      strictMcpConfig: parsed.strictMcpConfig === true,
+    };
+  }
   const profile = resolveResumeAgentProfile(agentProfileService, options);
   return profile ? parseClaudeArgsTemplate(profile.args_template) : null;
 }
@@ -239,6 +254,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           const templateOptions = resolveResumeClaudeTemplateOptions(agentProfileService, {
             profileId: r.agent_profile_id,
             adapterType,
+            sessionClaudeOptionsJson: r.session_claude_options_json,
           });
           const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
           const resolvedSpawnEnv = buildManagerSpawnEnv({
@@ -269,6 +285,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 : undefined,
               maxBudgetUsd: templateOptions?.maxBudgetUsd || undefined,
               mcpConfig: templateOptions?.mcpConfig || undefined,
+              strictMcpConfig: templateOptions?.strictMcpConfig || undefined,
               resumeSessionId: r.claude_session_id,
               model: r.session_model || undefined,
               reasoning_effort: r.session_effort || undefined,
@@ -520,7 +537,10 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 });
                 const templateOptions = resolveResumeClaudeTemplateOptions(
                   agentProfileService,
-                  { adapterType },
+                  {
+                    adapterType,
+                    sessionClaudeOptionsJson: r.session_claude_options_json,
+                  },
                 );
                 const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
                 const resolvedSpawnEnv = isRemoteNode ? {} : buildManagerSpawnEnv({
@@ -572,12 +592,13 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                       ? templateOptions.disallowedTools
                       : undefined,
                     maxBudgetUsd: templateOptions?.maxBudgetUsd || undefined,
-                    mcpConfig: adapterType === 'claude-code'
-                      ? mergeClaudeMcpConfigs(
+                    mcpConfig: r.session_claude_options_json != null
+                      ? (templateOptions?.mcpConfig || undefined)
+                      : mergeClaudeMcpConfigs(
                         templateOptions?.mcpConfig,
                         project.mcp_config_path,
-                      )
-                      : undefined,
+                      ),
+                    strictMcpConfig: templateOptions?.strictMcpConfig || undefined,
                     role: 'manager',
                     nodeId,
                     // F-1: per-turn tier resolver — re-reads this instance's
@@ -916,6 +937,15 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           sessionModel: eff.model,
           sessionEffort: eff.effort,
           sessionPermissionMode: permissionMode || null,
+          sessionClaudeOptions: claudeTemplateOptions
+            ? {
+                tools: claudeTemplateOptions.tools,
+                disallowedTools: claudeTemplateOptions.disallowedTools,
+                maxBudgetUsd: claudeTemplateOptions.maxBudgetUsd,
+                mcpConfig: claudeTemplateOptions.mcpConfig,
+                strictMcpConfig: claudeTemplateOptions.strictMcpConfig,
+              }
+            : null,
         });
       } catch { /* annotate-only */ }
 
@@ -940,6 +970,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           : undefined,
         maxBudgetUsd: claudeTemplateOptions?.maxBudgetUsd || undefined,
         mcpConfig: claudeTemplateOptions?.mcpConfig || undefined,
+        strictMcpConfig: claudeTemplateOptions?.strictMcpConfig || undefined,
         env: spawnEnv,
         envAllowlist,
         mcpTools: mcpTools.length > 0 ? mcpTools : undefined,

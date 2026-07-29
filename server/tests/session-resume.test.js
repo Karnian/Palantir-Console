@@ -225,7 +225,7 @@ test('createManagerRouter resumes top manager on boot', async (t) => {
   const { createAgentProfileService } = require('../services/agentProfileService');
   const agentProfileService = createAgentProfileService(db);
   agentProfileService.updateProfile('claude-code', {
-    args_template: '-p {prompt} --disallowedTools Bash',
+    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config locked.json --strict-mcp-config',
     permission_mode: 'acceptEdits',
   });
 
@@ -562,12 +562,20 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
   rs.updateRunStatus(opRun.id, 'running', { force: true });
   rs.setSessionSnapshot(opRun.id, {
     sessionPermissionMode: 'acceptEdits',
+    sessionClaudeOptions: {
+      tools: ['Read,Grep'],
+      disallowedTools: ['Bash'],
+      maxBudgetUsd: 0.01,
+      mcpConfig: 'locked.json',
+      strictMcpConfig: true,
+    },
   });
   // Operator runs intentionally have no agent_profile_id. Changing the
   // name-sorted fallback profile after the fresh spawn must not escalate the
   // resumed session to that mutable value.
   agentProfileService.updateProfile('claude-code', {
     permission_mode: 'bypassPermissions',
+    args_template: '-p {prompt}',
   });
 
   // Active Top (claude session) so the Operator loop has parent-notice routing.
@@ -619,6 +627,10 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
   assert.ok(opResume, 'canonical operator:oi_* run should be resumed via startSession');
   assert.equal(opResume.opts.resumeSessionId, 'sess_canon_resume', 'resumes the instance thread handle');
   assert.equal(opResume.opts.permissionMode, 'acceptEdits', 'resumes with the fresh-spawn permission snapshot');
+  assert.deepEqual(opResume.opts.tools, ['Read,Grep']);
   assert.deepEqual(opResume.opts.disallowedTools, ['Bash']);
+  assert.equal(opResume.opts.maxBudgetUsd, 0.01);
+  assert.equal(opResume.opts.mcpConfig, 'locked.json');
+  assert.equal(opResume.opts.strictMcpConfig, true);
   assert.equal(rs.getRun(opRun.id).status, 'running', 'canonical Operator stays running (not stopped)');
 });

@@ -36,6 +36,7 @@ test('model policy migration creates its tables and run snapshot columns', (t) =
   assert.equal(runColumns.has('session_model'), true);
   assert.equal(runColumns.has('session_effort'), true);
   assert.equal(runColumns.has('session_permission_mode'), true);
+  assert.equal(runColumns.has('session_claude_options_json'), true);
 });
 
 test('model policy scope, uniqueness, and JSON checks reject invalid rows', (t) => {

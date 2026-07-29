@@ -92,6 +92,9 @@ const RUN_COLUMNS = [
   // Issue #469 (migration 076): immutable Claude permission snapshot used by
   // manager boot resume after its mutable agent profile changes or disappears.
   'session_permission_mode',
+  // Issue #469 follow-up (migration 078): exact Claude template runtime options
+  // used to resume the same manager session after profile edits.
+  'session_claude_options_json',
 ];
 
 const COMPOSITION_EVENT_COLUMNS = [

@@ -56,7 +56,7 @@ test('codexAdapter emits reasoning effort only when configured', async () => {
   await adapter.disposeSession('without_effort');
 });
 
-test('runService session snapshot round-trips model, effort, and permission mode', (t) => {
+test('runService session snapshot round-trips model, effort, permission, and Claude options', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-model-policy-wiring-'));
   const dbPath = path.join(dir, 'test.db');
   const { createDatabase } = require('../db/database');
@@ -74,10 +74,24 @@ test('runService session snapshot round-trips model, effort, and permission mode
     sessionModel: 'm',
     sessionEffort: 'high',
     sessionPermissionMode: 'acceptEdits',
+    sessionClaudeOptions: {
+      tools: ['Read'],
+      disallowedTools: ['Bash'],
+      maxBudgetUsd: 0.01,
+      mcpConfig: 'locked.json',
+      strictMcpConfig: true,
+    },
   });
 
   const persisted = runService.getRun(run.id);
   assert.equal(persisted.session_model, 'm');
   assert.equal(persisted.session_effort, 'high');
   assert.equal(persisted.session_permission_mode, 'acceptEdits');
+  assert.deepEqual(JSON.parse(persisted.session_claude_options_json), {
+    tools: ['Read'],
+    disallowedTools: ['Bash'],
+    maxBudgetUsd: 0.01,
+    mcpConfig: 'locked.json',
+    strictMcpConfig: true,
+  });
 });
