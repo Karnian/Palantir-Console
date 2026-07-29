@@ -1672,6 +1672,9 @@ function createLifecycleService({
               systemPrompt,
               permissionMode: resolveClaudePermissionMode(profile),
               allowedTools: mcpTools.length > 0 ? mcpTools : undefined,
+              disallowedTools: templateOptions.disallowedTools.length > 0
+                ? templateOptions.disallowedTools
+                : undefined,
               maxBudgetUsd: templateOptions.maxBudgetUsd || undefined,
               mcpConfig: effectiveMcpConfig,
               isManager: false,

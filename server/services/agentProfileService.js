@@ -133,11 +133,61 @@ function readSingleClaudeTemplateOption(tokens, flag) {
   return values[0] ?? null;
 }
 
+function readClaudeTemplateListOption(tokens, flags, displayFlag) {
+  const values = [];
+  let occurrences = 0;
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    const flag = flags.find(candidate => (
+      token === candidate || token.startsWith(`${candidate}=`)
+    ));
+    if (!flag) continue;
+
+    occurrences += 1;
+    if (occurrences > 1) {
+      throw new BadRequestError(
+        `${displayFlag} must appear at most once in args_template`,
+      );
+    }
+
+    if (token.startsWith(`${flag}=`)) {
+      const value = token.slice(flag.length + 1);
+      if (!value) {
+        throw new BadRequestError(
+          `${displayFlag} in args_template requires at least one value`,
+        );
+      }
+      values.push(value);
+      continue;
+    }
+
+    let valueCount = 0;
+    while (i + 1 < tokens.length && !tokens[i + 1].startsWith('-')) {
+      values.push(tokens[i + 1]);
+      valueCount += 1;
+      i += 1;
+    }
+    if (valueCount === 0) {
+      throw new BadRequestError(
+        `${displayFlag} in args_template requires at least one value`,
+      );
+    }
+  }
+
+  return values;
+}
+
 function parseClaudeArgsTemplate(argsTemplate) {
   const tokens = tokenizeArgsTemplate(argsTemplate);
   const permissionMode = readSingleClaudeTemplateOption(tokens, '--permission-mode');
   const rawMaxBudgetUsd = readSingleClaudeTemplateOption(tokens, '--max-budget-usd');
   const mcpConfig = readSingleClaudeTemplateOption(tokens, '--mcp-config');
+  const disallowedTools = readClaudeTemplateListOption(
+    tokens,
+    ['--disallowedTools', '--disallowed-tools'],
+    '--disallowedTools',
+  );
 
   if (permissionMode != null && !CLAUDE_PERMISSION_MODES.has(permissionMode)) {
     throw new BadRequestError(
@@ -153,7 +203,7 @@ function parseClaudeArgsTemplate(argsTemplate) {
     }
   }
 
-  return { permissionMode, maxBudgetUsd, mcpConfig };
+  return { permissionMode, maxBudgetUsd, mcpConfig, disallowedTools };
 }
 
 function resolveClaudePermissionMode(profile) {

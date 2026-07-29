@@ -6,7 +6,10 @@ const os = require('node:os');
 const Database = require('better-sqlite3');
 
 const { createDatabase } = require('../db/database');
-const { createAgentProfileService } = require('../services/agentProfileService');
+const {
+  createAgentProfileService,
+  parseClaudeArgsTemplate,
+} = require('../services/agentProfileService');
 
 function setup(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-agent-model-effort-'));
@@ -237,6 +240,35 @@ test('claude save rejects permission mode flags in the raw args_template', (t) =
       args_template: '-p {prompt} --permission-mode dontAsk',
     }),
     /args_template must not set --permission-mode/,
+  );
+});
+
+test('claude template parser preserves disallowed tool deny rules', (t) => {
+  const { service } = setup(t);
+  const parsed = parseClaudeArgsTemplate(
+    '-p {prompt} --disallowedTools Bash "Bash(rm *)" --max-budget-usd 1',
+  );
+  assert.deepEqual(parsed.disallowedTools, ['Bash', 'Bash(rm *)']);
+
+  const aliasParsed = parseClaudeArgsTemplate(
+    '-p {prompt} --disallowed-tools=Edit',
+  );
+  assert.deepEqual(aliasParsed.disallowedTools, ['Edit']);
+
+  const created = service.createProfile(profile({
+    command: 'claude',
+    type: 'claude-code',
+    args_template: '-p {prompt} --disallowedTools Bash',
+  }));
+  assert.equal(created.args_template, '-p {prompt} --disallowedTools Bash');
+
+  assertBadRequest(
+    () => service.createProfile(profile({
+      command: 'claude',
+      type: 'claude-code',
+      args_template: '-p {prompt} --disallowedTools --verbose',
+    })),
+    /--disallowedTools in args_template requires at least one value/,
   );
 });
 

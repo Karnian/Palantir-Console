@@ -25,8 +25,8 @@ function vendorFromCommand(command) {
   // Case-insensitive to match the server's resolveAgentVendor (Codex P3 review:
   // an uppercase `Claude` command must not hide/null the model field on edit).
   const cmd = String(command || '').toLowerCase();
-  if (cmd.includes('codex')) return 'codex';
   if (cmd.includes('claude')) return 'claude';
+  if (cmd.includes('codex')) return 'codex';
   return 'other';
 }
 

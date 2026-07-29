@@ -27,10 +27,11 @@ async function createHarness(t) {
   const projectService = createProjectService(db);
   const executionEngine = createExecutionEngine();
   const streamJsonEngine = createStreamJsonEngine();
+  const agentProfileService = createAgentProfileService(db);
   const lifecycleService = createLifecycleService({
     runService,
     taskService,
-    agentProfileService: createAgentProfileService(db),
+    agentProfileService,
     projectService,
     executionEngine,
     streamJsonEngine,
@@ -48,6 +49,7 @@ async function createHarness(t) {
     taskService,
     executionEngine,
     streamJsonEngine,
+    agentProfileService,
     lifecycleService,
     project,
   };
@@ -213,6 +215,24 @@ test('claude worker carries max-budget and MCP template options into the stream-
   assert.equal(
     harness.streamJsonEngine.spawned[0].opts.mcpConfig,
     '/tmp/intended.json',
+  );
+});
+
+test('saved Claude disallowedTools template reaches the stream-json worker spec', async (t) => {
+  const harness = await createHarness(t);
+  const profile = harness.agentProfileService.createProfile({
+    name: 'Restricted Claude',
+    type: 'claude-code',
+    command: 'claude',
+    args_template: '-p {prompt} --disallowedTools Bash',
+  });
+
+  await executeWorker(harness, profile.id, 'Restricted Claude worker');
+
+  assert.equal(harness.streamJsonEngine.spawned.length, 1);
+  assert.deepEqual(
+    harness.streamJsonEngine.spawned[0].opts.disallowedTools,
+    ['Bash'],
   );
 });
 

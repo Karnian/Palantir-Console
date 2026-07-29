@@ -207,6 +207,59 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   assert.equal(thread.cwd, null);
 });
 
+test('Claude operator rejects a raw-SQL profile vendor mismatch before spawn', async (t) => {
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const agentProfileService = createAgentProfileService(db);
+  db.prepare(`
+    UPDATE agent_profiles
+    SET command = 'codex', permission_mode = 'acceptEdits'
+    WHERE id = 'claude-code'
+  `).run();
+  const registry = createManagerRegistry({ runService });
+  const claudeAdapter = makeFakeManagerAdapter('claude-code');
+  const codexAdapter = makeFakeManagerAdapter('codex');
+  const spawn = createOperatorSpawnService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory({ claudeAdapter, codexAdapter }),
+    projectService,
+    projectBriefService,
+    agentProfileService,
+    resolveManagerAuth: authOk,
+  });
+  const project = projectService.createProject({
+    name: 'claude-profile-vendor-mismatch',
+    preferred_pm_adapter: 'claude',
+  });
+  seedTop({ runService, registry, adapter: makeFakeManagerAdapter('claude-code') });
+
+  assert.throws(
+    () => spawn.ensureLiveOperator({ projectId: project.id }),
+    (error) => {
+      assert.equal(error.code, 'OPERATOR_PROFILE_VENDOR_MISMATCH');
+      assert.equal(error.httpStatus, 400);
+      assert.deepEqual(error.details, {
+        profileId: 'claude-code',
+        profileType: 'claude-code',
+        command: 'codex',
+      });
+      return true;
+    },
+  );
+  assert.equal(claudeAdapter._starts.length, 0);
+  assert.equal(
+    db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM runs
+      WHERE manager_layer = 'operator'
+    `).get().count,
+    0,
+  );
+});
+
 test('P5-S4c: Claude lazy-spawn resumes a persisted session on the matching remote node', async (t) => {
   const db = await mkdb(t);
   const runService = createRunService(db, null);

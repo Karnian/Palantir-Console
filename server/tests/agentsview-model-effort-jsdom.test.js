@@ -169,6 +169,49 @@ test('structured controls follow the command vendor', async (t) => {
   });
 });
 
+test('Claude-first wrapper classification preserves permission_mode on edit', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  const { calls } = installAgentsStubs(env);
+  env.loadComponent('Dropdown');
+  env.loadComponent('AgentsView');
+
+  const agent = {
+    id: 'agent_claude_codex_wrapper',
+    name: 'Wrapped Claude',
+    type: 'claude-code',
+    command: '/usr/local/bin/claude-codex-wrapper',
+    args_template: '-p {prompt}',
+    permission_mode: 'acceptEdits',
+    max_concurrent: 1,
+    capabilities_json: '{}',
+  };
+  const root = renderAgentsView(env, { agents: [agent] });
+  root.querySelector('.agent-card-actions button').click();
+
+  await waitFor(() => {
+    assert.ok(root.querySelector('#agent-permission-mode'));
+    assert.equal(
+      root.querySelector('#agent-permission-mode').dataset.value,
+      'acceptEdits',
+    );
+  });
+  setInput(env, root.querySelector('#agent-name'), 'Renamed wrapped Claude');
+  await flushEffects(30);
+  root.querySelector('.modal-footer button.primary').click();
+
+  const call = await waitFor(() => {
+    const match = calls.find(
+      (entry) => entry.url === '/api/agents/agent_claude_codex_wrapper',
+    );
+    assert.ok(match);
+    return match;
+  });
+  const body = JSON.parse(call.options.body);
+  assert.equal(body.name, 'Renamed wrapped Claude');
+  assert.equal(body.permission_mode, 'acceptEdits');
+});
+
 test('changing an existing manager profile type also changes its command vendor', async (t) => {
   const env = createPreactEnv();
   t.after(env.cleanup);

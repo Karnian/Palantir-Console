@@ -155,6 +155,10 @@ function createStreamJsonEngine({
       args.push('--allowedTools', opts.allowedTools.join(','));
     }
 
+    if (opts.disallowedTools && opts.disallowedTools.length > 0) {
+      args.push('--disallowedTools', opts.disallowedTools.join(','));
+    }
+
     if (opts.maxBudgetUsd) {
       args.push('--max-budget-usd', String(opts.maxBudgetUsd));
     }
@@ -255,7 +259,7 @@ function createStreamJsonEngine({
    * Spawn a Claude Code agent with stream-json protocol.
    */
   function spawnAgent(runId, { prompt, cwd, env, systemPrompt, permissionMode,
-    allowedTools, maxBudgetUsd, model, mcpConfig, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent,
+    allowedTools, disallowedTools, maxBudgetUsd, model, mcpConfig, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent,
     // Phase 10D Tier 2
     isolated, pluginDirs, settingsPath, settingSources, onCleanup,
     executor, nodePrefix, envAllowlist, nodeId }) {
@@ -268,7 +272,7 @@ function createStreamJsonEngine({
     }
     const claudeBin = usingRemoteExecutor ? 'claude' : resolveClaudeBin();
     const args = buildArgs({
-      prompt, systemPrompt, permissionMode, allowedTools,
+      prompt, systemPrompt, permissionMode, allowedTools, disallowedTools,
       maxBudgetUsd, model, mcpConfig, addDir, isManager, maxTurns, resumeSessionId,
       isolated, pluginDirs, settingsPath, settingSources,
     });

@@ -63,6 +63,7 @@ const { resolveCodexServiceTier } = require('./managerAdapters/codexAdapter'); /
 const { goalFeatureActive: defaultGoalFeatureActive } = require('./goalMode'); // G2 §6
 const { resolveActorTokenPolicy, applyManagerCredentialPolicy } = require('./actorTokenPolicy');
 const { resolveClaudePermissionMode } = require('./agentProfileService');
+const { resolveAgentVendor } = require('../utils/agentVendor');
 const { conversationIdForProject } = require('../utils/conversationId'); // PM→Operator Phase 0 producer seam
 const { deriveLegacyContext, enforceWorkspace } = require('../utils/operatorContext');
 const { resolveProjectSource } = require('./projectSource');
@@ -416,6 +417,21 @@ function createOperatorSpawnService({
         const profiles = agentProfileService.listProfiles();
         const managerProfile = profiles.find(p => p.type === adapterType);
         if (managerProfile) {
+          const expectedVendor = adapterType === 'claude-code' ? 'claude' : 'codex';
+          const commandVendor = resolveAgentVendor(managerProfile.command);
+          if (commandVendor !== expectedVendor) {
+            const err = new Error(
+              `Operator profile ${managerProfile.id} command vendor does not match ${adapterType}`,
+            );
+            err.httpStatus = 400;
+            err.code = 'OPERATOR_PROFILE_VENDOR_MISMATCH';
+            err.details = {
+              profileId: managerProfile.id,
+              profileType: managerProfile.type,
+              command: managerProfile.command,
+            };
+            throw err;
+          }
           if (adapterType === 'claude-code') {
             permissionMode = resolveClaudePermissionMode(managerProfile);
           }
@@ -434,7 +450,12 @@ function createOperatorSpawnService({
           }
         }
       }
-    } catch { /* ignore — fall through to defaults */ }
+    } catch (err) {
+      if (err?.code === 'OPERATOR_PROFILE_VENDOR_MISMATCH') {
+        throw err;
+      }
+      // Ignore malformed optional profile data and fall through to defaults.
+    }
 
     const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
     // Resolve before the auth gate so migration diagnostics are observable

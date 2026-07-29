@@ -329,7 +329,7 @@ test('engine: manager spawn args contain --input-format stream-json, no -p', asy
   assert.ok(!args.includes('--no-session-persistence'), 'manager는 session persistence 유지');
 });
 
-test('engine: optional args (model, mcpConfig, allowedTools, permissionMode, maxBudgetUsd) appended', async () => {
+test('engine: optional args (model, mcpConfig, allowedTools, disallowedTools, permissionMode, maxBudgetUsd) appended', async () => {
   process.env.CLAUDE_BIN = fakeClaudioPath;
   const { engine } = makeEngine();
 
@@ -339,6 +339,7 @@ test('engine: optional args (model, mcpConfig, allowedTools, permissionMode, max
     model: 'claude-opus-4',
     mcpConfig: '/tmp/mcp.json',
     allowedTools: ['Read', 'Write'],
+    disallowedTools: ['Bash', 'Edit'],
     permissionMode: 'acceptEdits',
     maxBudgetUsd: 1.5,
   });
@@ -349,6 +350,8 @@ test('engine: optional args (model, mcpConfig, allowedTools, permissionMode, max
   assert.ok(args.includes('/tmp/mcp.json'));
   assert.ok(args.includes('--allowedTools'));
   assert.ok(args.includes('Read,Write'), 'allowedTools 쉼표 결합');
+  assert.ok(args.includes('--disallowedTools'));
+  assert.ok(args.includes('Bash,Edit'), 'disallowedTools 쉼표 결합');
   assert.ok(args.includes('--permission-mode'));
   assert.ok(args.includes('acceptEdits'));
   assert.ok(args.includes('--max-budget-usd'));
