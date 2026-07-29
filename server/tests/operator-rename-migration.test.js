@@ -89,6 +89,9 @@ const RUN_COLUMNS = [
   // P2/P3 review (migration 063): durable non-retryable flag for pre-claim
   // rejected runs (worker_profile_invalid / budget_exceeded).
   'non_retryable',
+  // Issue #469 (migration 076): immutable Claude permission snapshot used by
+  // manager boot resume after its mutable agent profile changes or disappears.
+  'session_permission_mode',
 ];
 
 const COMPOSITION_EVENT_COLUMNS = [

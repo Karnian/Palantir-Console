@@ -164,7 +164,12 @@ function createStreamJsonEngine({
     }
 
     if (opts.mcpConfig) {
-      args.push('--mcp-config', opts.mcpConfig);
+      if (Array.isArray(opts.mcpConfig)) {
+        const configs = opts.mcpConfig.filter(Boolean);
+        if (configs.length > 0) args.push('--mcp-config', ...configs);
+      } else {
+        args.push('--mcp-config', opts.mcpConfig);
+      }
     }
 
     // Phase 10D Tier 2 (Claude isolated worker): drop host ~/.claude/

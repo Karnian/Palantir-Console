@@ -191,6 +191,10 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   assert.equal(typeof start.opts.onThreadStarted, 'function');
   assert.equal(start.opts.resumeSessionId, null);
   assert.equal(start.opts.permissionMode, 'acceptEdits');
+  assert.equal(
+    runService.getRun(result.run.id).session_permission_mode,
+    'acceptEdits',
+  );
   assert.equal(runService.getRun(result.run.id).status, 'queued');
 
   start.opts.onSessionStarted('sess_claude_1');

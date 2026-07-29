@@ -30,6 +30,14 @@ function vendorFromCommand(command) {
   return 'other';
 }
 
+function effectivePermissionMode(agent) {
+  if (agent?.permission_mode) return agent.permission_mode;
+  const match = String(agent?.args_template || '').match(
+    /--permission-mode(?:=|\s+)(acceptEdits|auto|bypassPermissions|default|dontAsk|manual|plan)(?:\s|$)/,
+  );
+  return match ? match[1] : 'bypassPermissions';
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AgentModal — create / edit agent profile (module-internal)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -132,16 +140,14 @@ function AgentModal({ open, onClose, agent, onSaved }) {
               value=${type}
               onChange=${t => {
                 setType(t);
-                if (!agent) {
-                  const presets = {
-                    'claude-code': { cmd: 'claude', args: '-p {prompt}' },
-                    'codex': { cmd: 'codex', args: 'exec --full-auto --skip-git-repo-check {prompt}' },
-                    'gemini': { cmd: 'gemini', args: '-p {prompt} --yolo' },
-                  };
-                  const p = presets[t];
-                  if (p) { setCommand(p.cmd); setArgsTemplate(p.args); }
-                  if (t === 'codex') { setModel(''); setReasoningEffort('high'); }
-                }
+                const presets = {
+                  'claude-code': { cmd: 'claude', args: '-p {prompt}' },
+                  'codex': { cmd: 'codex', args: 'exec --full-auto --skip-git-repo-check {prompt}' },
+                  'gemini': { cmd: 'gemini', args: '-p {prompt} --yolo' },
+                };
+                const p = presets[t];
+                if (p) { setCommand(p.cmd); setArgsTemplate(p.args); }
+                if (t === 'codex') { setModel(''); setReasoningEffort('high'); }
               }}
               options=${[
                 { value: 'claude-code', label: 'claude-code' },
@@ -322,6 +328,12 @@ function AgentDetailModal({ agent, open, onClose, onEdit }) {
             <div class="agent-detail-field">
               <span class="agent-detail-field-label">${AGENTS_LABELS.fieldArgsTemplate}</span>
               <span class="agent-detail-field-value mono">${agent.args_template}</span>
+            </div>
+          `}
+          ${vendorFromCommand(agent.command) === 'claude' && html`
+            <div class="agent-detail-field" data-role="agent-permission-mode">
+              <span class="agent-detail-field-label">Permission mode</span>
+              <span class="agent-detail-field-value mono">${effectivePermissionMode(agent)}</span>
             </div>
           `}
           <div class="agent-detail-field">

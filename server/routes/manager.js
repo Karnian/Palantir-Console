@@ -13,6 +13,8 @@ const { buildProjectScopedSystemSection } = require('../services/operatorPromptS
 const { resolveCodexServiceTier } = require('../services/managerAdapters/codexAdapter'); // F-1
 const { goalFeatureActive: defaultGoalFeatureActive } = require('../services/goalMode'); // G2 §6
 const { resolveActorTokenPolicy, applyManagerCredentialPolicy } = require('../services/actorTokenPolicy');
+const { resolveClaudePermissionMode } = require('../services/agentProfileService');
+const { resolveAgentVendor } = require('../utils/agentVendor');
 const {
   repoFeatureEnabled,
   cwdFromWorkspacePath,
@@ -102,8 +104,11 @@ function resolveResumeEnvAllowlist(agentProfileService, options = {}) {
 
 function resolveResumePermissionMode(agentProfileService, options = {}) {
   if (options.adapterType !== 'claude-code') return undefined;
+  if (options.sessionPermissionMode) return options.sessionPermissionMode;
   const profile = resolveResumeAgentProfile(agentProfileService, options);
-  return profile?.permission_mode ?? 'bypassPermissions';
+  return profile
+    ? resolveClaudePermissionMode(profile)
+    : 'bypassPermissions';
 }
 
 // authResolverOpts is forwarded into resolveManagerAuth for every preflight
@@ -214,6 +219,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           const permissionMode = resolveResumePermissionMode(agentProfileService, {
             profileId: r.agent_profile_id,
             adapterType,
+            sessionPermissionMode: r.session_permission_mode,
           });
           const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
           const resolvedSpawnEnv = buildManagerSpawnEnv({
@@ -483,6 +489,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 });
                 const permissionMode = resolveResumePermissionMode(agentProfileService, {
                   adapterType,
+                  sessionPermissionMode: r.session_permission_mode,
                 });
                 const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
                 const resolvedSpawnEnv = isRemoteNode ? {} : buildManagerSpawnEnv({
@@ -648,6 +655,17 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
             supported: Object.keys(PROFILE_TYPE_TO_ADAPTER),
           });
         }
+        const commandVendor = resolveAgentVendor(resolvedProfile.command);
+        const expectedVendor = mapped === 'claude-code' ? 'claude' : 'codex';
+        if (commandVendor !== expectedVendor) {
+          startingManager = false;
+          return res.status(400).json({
+            error: 'manager_profile_vendor_mismatch',
+            profileId: resolvedProfile.id,
+            profileType: resolvedProfile.type,
+            command: resolvedProfile.command,
+          });
+        }
         adapterType = mapped;
       }
     } catch (err) {
@@ -658,6 +676,11 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         message: err.message,
       });
     }
+    const permissionMode = adapterType === 'claude-code'
+      ? (resolvedProfile
+        ? resolveClaudePermissionMode(resolvedProfile)
+        : 'bypassPermissions')
+      : undefined;
 
     // Validate cwd if provided — must be under home directory or current working dir
     let safeCwd = resolveSpawnCwd({ workspaceDir: cwd });
@@ -840,7 +863,13 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       const eff = modelPolicyService
         ? modelPolicyService.resolveEffective({ layer: 'top', vendor, requestModel: model, env: process.env })
         : { model: model || null, effort: null };
-      try { runService.setSessionSnapshot(runId, { sessionModel: eff.model, sessionEffort: eff.effort }); } catch { /* annotate-only */ }
+      try {
+        runService.setSessionSnapshot(runId, {
+          sessionModel: eff.model,
+          sessionEffort: eff.effort,
+          sessionPermissionMode: permissionMode || null,
+        });
+      } catch { /* annotate-only */ }
 
       const { sessionRef } = adapter.startSession(runId, {
         // For Claude (persistent process) the prompt argument is the FIRST
@@ -854,7 +883,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         reasoning_effort: eff.effort || undefined,
         // Match lifecycleService's Claude worker rule exactly: a NULL profile
         // value preserves the historical bypassPermissions default.
-        permissionMode: resolvedProfile?.permission_mode ?? 'bypassPermissions',
+        permissionMode,
         env: spawnEnv,
         envAllowlist,
         mcpTools: mcpTools.length > 0 ? mcpTools : undefined,

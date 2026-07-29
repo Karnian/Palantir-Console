@@ -169,6 +169,80 @@ test('structured controls follow the command vendor', async (t) => {
   });
 });
 
+test('changing an existing manager profile type also changes its command vendor', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  const { calls } = installAgentsStubs(env);
+  env.loadComponent('Dropdown');
+  env.loadComponent('AgentsView');
+
+  const agent = {
+    id: 'agent_codex_to_claude',
+    name: 'Existing manager',
+    type: 'codex',
+    command: 'codex',
+    args_template: 'exec --full-auto --skip-git-repo-check {prompt}',
+    max_concurrent: 1,
+    capabilities_json: '{}',
+  };
+  const root = renderAgentsView(env, { agents: [agent] });
+  root.querySelector('.agent-card-actions button').click();
+  await waitFor(() => assert.ok(root.querySelector('#agent-type')));
+
+  await setSelect(env, root.querySelector('#agent-type'), 'claude-code');
+  await waitFor(() => {
+    assert.equal(root.querySelector('#agent-command').value, 'claude');
+    assert.equal(root.querySelector('#agent-args').value, '-p {prompt}');
+    assert.ok(root.querySelector('#agent-permission-mode'));
+  });
+
+  root.querySelector('.modal-footer button.primary').click();
+  const call = await waitFor(() => {
+    const match = calls.find(
+      (entry) => entry.url === '/api/agents/agent_codex_to_claude',
+    );
+    assert.ok(match);
+    return match;
+  });
+  const body = JSON.parse(call.options.body);
+  assert.equal(body.type, 'claude-code');
+  assert.equal(body.command, 'claude');
+});
+
+test('Claude detail displays the effective structured permission beside the raw template', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  installAgentsStubs(env);
+  env.loadComponent('Dropdown');
+  env.loadComponent('AgentsView');
+
+  const agent = {
+    id: 'legacy_safer',
+    name: 'Legacy safer Claude',
+    type: 'claude-code',
+    command: 'claude',
+    args_template: '-p {prompt} --permission-mode acceptEdits',
+    permission_mode: 'acceptEdits',
+    max_concurrent: 1,
+    capabilities_json: '{}',
+  };
+  const root = renderAgentsView(env, { agents: [agent] });
+  root.querySelector('.agent-card-trigger').click();
+
+  await waitFor(() => {
+    const permission = root.querySelector('[data-role="agent-permission-mode"]');
+    assert.ok(permission);
+    assert.equal(
+      permission.querySelector('.agent-detail-field-value').textContent,
+      'acceptEdits',
+    );
+    assert.match(
+      root.querySelector('.agent-detail-grid').textContent,
+      /--permission-mode acceptEdits/,
+    );
+  });
+});
+
 test('create payload includes structured model and reasoning effort', async (t) => {
   const env = createPreactEnv();
   t.after(env.cleanup);

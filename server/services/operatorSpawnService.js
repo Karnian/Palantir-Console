@@ -62,6 +62,7 @@ const { resolveSpawnCwd } = require('../utils/spawnCwd');
 const { resolveCodexServiceTier } = require('./managerAdapters/codexAdapter'); // F-1
 const { goalFeatureActive: defaultGoalFeatureActive } = require('./goalMode'); // G2 §6
 const { resolveActorTokenPolicy, applyManagerCredentialPolicy } = require('./actorTokenPolicy');
+const { resolveClaudePermissionMode } = require('./agentProfileService');
 const { conversationIdForProject } = require('../utils/conversationId'); // PM→Operator Phase 0 producer seam
 const { deriveLegacyContext, enforceWorkspace } = require('../utils/operatorContext');
 const { resolveProjectSource } = require('./projectSource');
@@ -416,7 +417,7 @@ function createOperatorSpawnService({
         const managerProfile = profiles.find(p => p.type === adapterType);
         if (managerProfile) {
           if (adapterType === 'claude-code') {
-            permissionMode = managerProfile.permission_mode ?? 'bypassPermissions';
+            permissionMode = resolveClaudePermissionMode(managerProfile);
           }
           if (managerProfile.env_allowlist) {
             const parsed = JSON.parse(managerProfile.env_allowlist);
@@ -741,7 +742,13 @@ function createOperatorSpawnService({
         const opEff = modelPolicyService
           ? modelPolicyService.resolveEffective({ layer: 'operator', vendor: opVendor, projectId: project.id, env: process.env })
           : { model: null, effort: null };
-        try { runService.setSessionSnapshot(runId, { sessionModel: opEff.model, sessionEffort: opEff.effort }); } catch { /* annotate-only */ }
+        try {
+          runService.setSessionSnapshot(runId, {
+            sessionModel: opEff.model,
+            sessionEffort: opEff.effort,
+            sessionPermissionMode: permissionMode || null,
+          });
+        } catch { /* annotate-only */ }
 
         const startOpts = {
           systemPrompt,

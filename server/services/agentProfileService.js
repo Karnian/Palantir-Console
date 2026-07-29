@@ -52,6 +52,20 @@ function rejectRetiredAgentType(type) {
   }
 }
 
+function validateTypeCommandVendor(profile) {
+  const expectedVendor = {
+    'claude-code': 'claude',
+    codex: 'codex',
+  }[profile.type];
+  if (!expectedVendor) return;
+  const commandVendor = resolveAgentVendor(profile.command);
+  if (commandVendor !== expectedVendor) {
+    throw new BadRequestError(
+      `agent type ${profile.type} requires a ${expectedVendor} command`,
+    );
+  }
+}
+
 // Codex P2 review: buildAgentArgs strips a token's surrounding double quotes at
 // EXECUTION (`part.replace(/^"(.*)"$/, '$1')`), so a template token `"--model"`
 // runs as the real `--model` flag. The conflict scanner must unquote each token
@@ -94,6 +108,59 @@ function tokenizeArgsTemplate(argsTemplate) {
 
 function hasPermissionModeOption(tokens) {
   return tokens.some(token => /^--permission-mode($|=)/.test(token));
+}
+
+function readSingleClaudeTemplateOption(tokens, flag) {
+  const values = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token === flag) {
+      const value = tokens[i + 1];
+      if (!value || value.startsWith('-')) {
+        throw new BadRequestError(`${flag} in args_template requires a value`);
+      }
+      values.push(value);
+      i += 1;
+    } else if (token.startsWith(`${flag}=`)) {
+      const value = token.slice(flag.length + 1);
+      if (!value) throw new BadRequestError(`${flag} in args_template requires a value`);
+      values.push(value);
+    }
+  }
+  if (values.length > 1) {
+    throw new BadRequestError(`${flag} must appear at most once in args_template`);
+  }
+  return values[0] ?? null;
+}
+
+function parseClaudeArgsTemplate(argsTemplate) {
+  const tokens = tokenizeArgsTemplate(argsTemplate);
+  const permissionMode = readSingleClaudeTemplateOption(tokens, '--permission-mode');
+  const rawMaxBudgetUsd = readSingleClaudeTemplateOption(tokens, '--max-budget-usd');
+  const mcpConfig = readSingleClaudeTemplateOption(tokens, '--mcp-config');
+
+  if (permissionMode != null && !CLAUDE_PERMISSION_MODES.has(permissionMode)) {
+    throw new BadRequestError(
+      `--permission-mode in args_template must be one of: ${Array.from(CLAUDE_PERMISSION_MODES).join(', ')}`,
+    );
+  }
+
+  let maxBudgetUsd = null;
+  if (rawMaxBudgetUsd != null) {
+    maxBudgetUsd = Number(rawMaxBudgetUsd);
+    if (!Number.isFinite(maxBudgetUsd) || maxBudgetUsd <= 0) {
+      throw new BadRequestError('--max-budget-usd in args_template must be a positive number');
+    }
+  }
+
+  return { permissionMode, maxBudgetUsd, mcpConfig };
+}
+
+function resolveClaudePermissionMode(profile) {
+  if (resolveAgentVendor(profile?.command) !== 'claude') return undefined;
+  return profile.permission_mode
+    ?? parseClaudeArgsTemplate(profile.args_template).permissionMode
+    ?? 'bypassPermissions';
 }
 
 function validateStructuredModelEffort(mergedProfile) {
@@ -174,7 +241,16 @@ function validateStructuredModelEffort(mergedProfile) {
 // touched. Leaving it inert and refusing it the moment the template is edited
 // keeps every behaviour change explicit.
 function validateAgentProfileForSave(mergedProfile, { templateIsBeingSet = true } = {}) {
+  validateTypeCommandVendor(mergedProfile);
   validateStructuredModelEffort(mergedProfile);
+
+  if (templateIsBeingSet && resolveAgentVendor(mergedProfile.command) === 'claude') {
+    // Claude workers use the stream-json engine instead of executing the raw
+    // template. Parse every template option that engine deliberately carries
+    // forward so malformed values fail at save time instead of becoming a
+    // silent runtime no-op.
+    parseClaudeArgsTemplate(mergedProfile.args_template);
+  }
 
   if (
     templateIsBeingSet
@@ -223,6 +299,7 @@ function createAgentProfileService(db) {
     rejectRetiredAgentType(type);
     const validatedCommand = validateCommand(command);
     validateAgentProfileForSave({
+      type,
       command: validatedCommand,
       args_template,
       model,
@@ -254,6 +331,23 @@ function createAgentProfileService(db) {
     if (fields.command) {
       fields.command = validateCommand(fields.command);
       mergedProfile.command = fields.command;
+    }
+    // Migration 076 backfills normal legacy rows. Keep this runtime promotion
+    // for databases that had already recorded 075 before the backfill shipped,
+    // and for rows imported later through raw SQL. An unchanged legacy flag
+    // must become the structured value on the next save; otherwise the UI can
+    // display acceptEdits while the stream-json worker defaults to bypass.
+    if (
+      resolveAgentVendor(mergedProfile.command) === 'claude'
+      && mergedProfile.permission_mode == null
+    ) {
+      const legacyPermissionMode = parseClaudeArgsTemplate(
+        mergedProfile.args_template,
+      ).permissionMode;
+      if (legacyPermissionMode) {
+        fields.permission_mode = legacyPermissionMode;
+        mergedProfile.permission_mode = legacyPermissionMode;
+      }
     }
     // AgentsView sends command and args_template on every PATCH, including a
     // name-only edit. Compare persisted values instead of key presence so an
@@ -297,4 +391,9 @@ function createAgentProfileService(db) {
   return { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, getRunningCount };
 }
 
-module.exports = { createAgentProfileService, validateStructuredModelEffort };
+module.exports = {
+  createAgentProfileService,
+  parseClaudeArgsTemplate,
+  resolveClaudePermissionMode,
+  validateStructuredModelEffort,
+};

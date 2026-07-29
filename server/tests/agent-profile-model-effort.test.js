@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const Database = require('better-sqlite3');
 
 const { createDatabase } = require('../db/database');
 const { createAgentProfileService } = require('../services/agentProfileService');
@@ -42,6 +43,8 @@ test('migration adds structured columns and create/read round-trips them', (t) =
   assert.ok(columns.includes('model'));
   assert.ok(columns.includes('reasoning_effort'));
   assert.ok(columns.includes('permission_mode'));
+  const runColumns = db.prepare('PRAGMA table_info(runs)').all().map(row => row.name);
+  assert.ok(runColumns.includes('session_permission_mode'));
   assert.equal(
     db.prepare('SELECT permission_mode FROM agent_profiles WHERE id = ?').get('claude-code').permission_mode,
     null,
@@ -53,6 +56,69 @@ test('migration adds structured columns and create/read round-trips them', (t) =
   assert.equal(created.permission_mode, null);
   assert.equal(service.getProfile(created.id).model, 'gpt-5');
   assert.equal(service.getProfile(created.id).reasoning_effort, 'medium');
+});
+
+test('migration preserves legacy raw Claude permission intent and snapshots manager runs', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-permission-migration-'));
+  const db = new Database(path.join(dir, 'test.db'));
+  t.after(() => {
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  db.exec(`
+    CREATE TABLE agent_profiles (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      command TEXT NOT NULL,
+      args_template TEXT
+    );
+    CREATE TABLE runs (
+      id TEXT PRIMARY KEY,
+      agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE SET NULL,
+      is_manager INTEGER,
+      manager_adapter TEXT
+    );
+    INSERT INTO agent_profiles (id, name, type, command, args_template)
+    VALUES (
+      'legacy-safer',
+      'Legacy safer Claude',
+      'claude-code',
+      'claude',
+      '-p {prompt} --permission-mode acceptEdits'
+    );
+    INSERT INTO runs (id, agent_profile_id, is_manager, manager_adapter)
+    VALUES ('top-before-upgrade', 'legacy-safer', 1, 'claude-code');
+    INSERT INTO runs (id, agent_profile_id, is_manager, manager_adapter)
+    VALUES ('operator-before-upgrade', NULL, 1, 'claude-code');
+  `);
+
+  for (const migration of [
+    '075_agent_profile_permission_mode.sql',
+    '076_permission_mode_snapshots.sql',
+  ]) {
+    db.exec(fs.readFileSync(
+      path.join(__dirname, '..', 'db', 'migrations', migration),
+      'utf8',
+    ));
+  }
+
+  assert.equal(
+    db.prepare('SELECT permission_mode FROM agent_profiles WHERE id = ?')
+      .get('legacy-safer').permission_mode,
+    'acceptEdits',
+  );
+  assert.deepEqual(
+    db.prepare(`
+      SELECT id, session_permission_mode
+      FROM runs
+      ORDER BY id
+    `).all(),
+    [
+      { id: 'operator-before-upgrade', session_permission_mode: 'acceptEdits' },
+      { id: 'top-before-upgrade', session_permission_mode: 'acceptEdits' },
+    ],
+  );
 });
 
 test('vendor rules reject unsupported fields and allow clean codex fields', (t) => {
@@ -174,7 +240,7 @@ test('claude save rejects permission mode flags in the raw args_template', (t) =
   );
 });
 
-test('a legacy claude profile carrying the flag stays editable until the template is touched', (t) => {
+test('saving a legacy claude profile promotes its displayed raw permission flag', (t) => {
   const { service, db } = setup(t);
   // Rows like this exist by construction: putting --permission-mode in
   // args_template is precisely the workaround #469 describes, and the Claude
@@ -204,12 +270,14 @@ test('a legacy claude profile carrying the flag stays editable until the templat
   });
   assert.equal(renamed.name, 'renamed legacy');
   assert.equal(renamed.args_template, '-p {prompt} --permission-mode acceptEdits');
+  assert.equal(renamed.permission_mode, 'acceptEdits');
 
   // Changing only the executable path keeps the same Claude vendor and must
   // not revalidate an untouched legacy template.
   const relocated = service.updateProfile(legacy.id, { command: '/usr/local/bin/claude' });
   assert.equal(relocated.command, '/usr/local/bin/claude');
   assert.equal(relocated.args_template, '-p {prompt} --permission-mode acceptEdits');
+  assert.equal(relocated.permission_mode, 'acceptEdits');
 
   // Setting the structured field is likewise allowed; it is what fixes the row.
   const structured = service.updateProfile(legacy.id, { permission_mode: 'plan' });
@@ -272,7 +340,7 @@ test('update validates the merged persisted and patched state', (t) => {
 
   const structured = service.createProfile(profile({ model: 'x' }));
   assertBadRequest(
-    () => service.updateProfile(structured.id, { command: 'gemini' }),
+    () => service.updateProfile(structured.id, { type: 'custom', command: 'gemini' }),
     /model only supported for codex\/claude workers/,
   );
 
@@ -284,6 +352,23 @@ test('update validates the merged persisted and patched state', (t) => {
   }));
   assertBadRequest(
     () => service.updateProfile(claude.id, { command: 'codex' }),
-    /permission_mode only supported for claude workers/,
+    /agent type claude-code requires a claude command/,
+  );
+});
+
+test('manager-capable profile types reject a mismatched command vendor', (t) => {
+  const { service } = setup(t);
+  assertBadRequest(
+    () => service.createProfile(profile({
+      type: 'claude-code',
+      command: 'codex',
+    })),
+    /agent type claude-code requires a claude command/,
+  );
+
+  const codex = service.createProfile(profile());
+  assertBadRequest(
+    () => service.updateProfile(codex.id, { type: 'claude-code' }),
+    /agent type claude-code requires a claude command/,
   );
 });

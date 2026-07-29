@@ -108,6 +108,11 @@ test('Manager profile permission_mode reaches Claude CLI and NULL matches the wo
   });
   assert.equal(response.status, 201, response.text);
   assert.equal(permissionModeArg(await readArgs(argsFile)), 'acceptEdits');
+  const explicitRunId = managerRegistry.getActiveRunId('top');
+  assert.equal(
+    runService.getRun(explicitRunId).session_permission_mode,
+    'acceptEdits',
+  );
 
   response = await invokeApp(app, { method: 'POST', path: '/api/manager/stop' });
   assert.equal(response.status, 200, response.text);
@@ -124,9 +129,25 @@ test('Manager profile permission_mode reaches Claude CLI and NULL matches the wo
 
   response = await invokeApp(app, { method: 'POST', path: '/api/manager/stop' });
   assert.equal(response.status, 200, response.text);
+
+  // A raw legacy/imported row can still violate the new save-time invariant.
+  // Manager start must fail closed instead of selecting Claude by type while
+  // the rest of the profile stack treats this as a Codex command.
+  database.db.prepare(`
+    UPDATE agent_profiles
+    SET type = 'claude-code', command = 'codex'
+    WHERE id = 'claude-code'
+  `).run();
+  response = await invokeApp(app, {
+    method: 'POST',
+    path: '/api/manager/start',
+    body: { agent_profile_id: 'claude-code', prompt: 'mismatched vendor' },
+  });
+  assert.equal(response.status, 400, response.text);
+  assert.equal(JSON.parse(response.text).error, 'manager_profile_vendor_mismatch');
 });
 
-test('Manager boot-resume preserves the stored Claude profile permission_mode', async (t) => {
+test('Manager boot-resume uses the fresh-spawn permission snapshot after profile deletion', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-manager-resume-permission-'));
   const argsFile = path.join(root, 'claude-resume-args.json');
   const previousClaudeBin = process.env.CLAUDE_BIN;
@@ -153,6 +174,20 @@ test('Manager boot-resume preserves the stored Claude profile permission_mode', 
   });
   runService.updateRunStatus(staleRun.id, 'running', { force: true });
   runService.updateClaudeSessionId(staleRun.id, 'sess-review');
+  runService.setSessionSnapshot(staleRun.id, {
+    sessionPermissionMode: 'acceptEdits',
+  });
+
+  agentProfileService.deleteProfile('claude-code');
+  assert.equal(runService.getRun(staleRun.id).agent_profile_id, null);
+  agentProfileService.createProfile({
+    name: 'Fallback bypass Claude',
+    type: 'claude-code',
+    command: 'claude',
+    args_template: '-p {prompt}',
+    permission_mode: 'bypassPermissions',
+    env_allowlist: JSON.stringify(['CLAUDE_ARGS_FILE']),
+  });
 
   const streamJsonEngine = createStreamJsonEngine({ runService });
   const managerAdapterFactory = createManagerAdapterFactory({ streamJsonEngine, runService });

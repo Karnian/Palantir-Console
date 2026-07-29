@@ -56,7 +56,7 @@ test('codexAdapter emits reasoning effort only when configured', async () => {
   await adapter.disposeSession('without_effort');
 });
 
-test('runService session snapshot round-trips model and effort', (t) => {
+test('runService session snapshot round-trips model, effort, and permission mode', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-model-policy-wiring-'));
   const dbPath = path.join(dir, 'test.db');
   const { createDatabase } = require('../db/database');
@@ -70,9 +70,14 @@ test('runService session snapshot round-trips model and effort', (t) => {
 
   const runService = createRunService(db, null);
   const run = runService.createRun({ is_manager: true, prompt: 'snapshot test' });
-  runService.setSessionSnapshot(run.id, { sessionModel: 'm', sessionEffort: 'high' });
+  runService.setSessionSnapshot(run.id, {
+    sessionModel: 'm',
+    sessionEffort: 'high',
+    sessionPermissionMode: 'acceptEdits',
+  });
 
   const persisted = runService.getRun(run.id);
   assert.equal(persisted.session_model, 'm');
   assert.equal(persisted.session_effort, 'high');
+  assert.equal(persisted.session_permission_mode, 'acceptEdits');
 });

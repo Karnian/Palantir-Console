@@ -355,6 +355,24 @@ test('engine: optional args (model, mcpConfig, allowedTools, permissionMode, max
   assert.ok(args.includes('1.5'));
 });
 
+test('engine: profile and materialized MCP configs are both passed to Claude', async () => {
+  process.env.CLAUDE_BIN = fakeClaudioPath;
+  const { engine } = makeEngine();
+
+  const args = await spawnAndCaptureArgs(engine, 'run-args-multi-mcp', {
+    prompt: 'x',
+    isManager: false,
+    mcpConfig: ['/tmp/profile-mcp.json', '/tmp/materialized-mcp.json'],
+  });
+
+  const mcpIndex = args.indexOf('--mcp-config');
+  assert.notEqual(mcpIndex, -1);
+  assert.deepEqual(args.slice(mcpIndex + 1, mcpIndex + 3), [
+    '/tmp/profile-mcp.json',
+    '/tmp/materialized-mcp.json',
+  ]);
+});
+
 test('engine: systemPrompt and addDir appended when provided', async () => {
   process.env.CLAUDE_BIN = fakeClaudioPath;
   const { engine } = makeEngine();

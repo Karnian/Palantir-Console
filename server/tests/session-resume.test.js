@@ -553,6 +553,15 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
     prompt: 'PM canon',
   });
   rs.updateRunStatus(opRun.id, 'running', { force: true });
+  rs.setSessionSnapshot(opRun.id, {
+    sessionPermissionMode: 'acceptEdits',
+  });
+  // Operator runs intentionally have no agent_profile_id. Changing the
+  // name-sorted fallback profile after the fresh spawn must not escalate the
+  // resumed session to that mutable value.
+  agentProfileService.updateProfile('claude-code', {
+    permission_mode: 'bypassPermissions',
+  });
 
   // Active Top (claude session) so the Operator loop has parent-notice routing.
   const topRun = rs.createRun({
@@ -602,6 +611,6 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
   const opResume = startSessionCalls.find((c) => c.runId === opRun.id);
   assert.ok(opResume, 'canonical operator:oi_* run should be resumed via startSession');
   assert.equal(opResume.opts.resumeSessionId, 'sess_canon_resume', 'resumes the instance thread handle');
-  assert.equal(opResume.opts.permissionMode, 'acceptEdits', 'resumes with the Claude profile permission mode');
+  assert.equal(opResume.opts.permissionMode, 'acceptEdits', 'resumes with the fresh-spawn permission snapshot');
   assert.equal(rs.getRun(opRun.id).status, 'running', 'canonical Operator stays running (not stopped)');
 });

@@ -166,7 +166,7 @@ test('claude worker forwards structured model to the stream-json spec', async (t
   assert.equal(harness.executionEngine.spawned.length, 0);
 });
 
-test('claude worker maps the UI empty permission_mode NULL to bypassPermissions', async (t) => {
+test('legacy Claude raw permission flag remains effective when the structured column is NULL', async (t) => {
   const harness = await createHarness(t);
   const profileId = insertProfile(harness.db, {
     command: 'claude',
@@ -176,7 +176,13 @@ test('claude worker maps the UI empty permission_mode NULL to bypassPermissions'
   await executeWorker(harness, profileId, 'Legacy claude worker');
 
   assert.equal(harness.streamJsonEngine.spawned.length, 1);
-  assert.equal(harness.streamJsonEngine.spawned[0].opts.permissionMode, 'bypassPermissions');
+  assert.equal(harness.streamJsonEngine.spawned[0].opts.permissionMode, 'acceptEdits');
+  assert.equal(
+    harness.runService.getRun(
+      harness.streamJsonEngine.spawned[0].runId,
+    ).session_permission_mode,
+    'acceptEdits',
+  );
 });
 
 test('claude worker forwards structured permission_mode to the stream-json spec', async (t) => {
@@ -191,6 +197,23 @@ test('claude worker forwards structured permission_mode to the stream-json spec'
 
   assert.equal(harness.streamJsonEngine.spawned.length, 1);
   assert.equal(harness.streamJsonEngine.spawned[0].opts.permissionMode, 'acceptEdits');
+});
+
+test('claude worker carries max-budget and MCP template options into the stream-json spec', async (t) => {
+  const harness = await createHarness(t);
+  const profileId = insertProfile(harness.db, {
+    command: 'claude',
+    argsTemplate: '-p {prompt} --max-budget-usd 0.01 --mcp-config /tmp/intended.json',
+  });
+
+  await executeWorker(harness, profileId, 'Claude template runtime options');
+
+  assert.equal(harness.streamJsonEngine.spawned.length, 1);
+  assert.equal(harness.streamJsonEngine.spawned[0].opts.maxBudgetUsd, 0.01);
+  assert.equal(
+    harness.streamJsonEngine.spawned[0].opts.mcpConfig,
+    '/tmp/intended.json',
+  );
 });
 
 test('raw-SQL-contaminated structured profile fails before claim and never spawns', async (t) => {
