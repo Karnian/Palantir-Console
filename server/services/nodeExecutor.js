@@ -4,6 +4,28 @@ const os = require('node:os');
 const path = require('node:path');
 const { buildExecEnv, buildProjectTestEnv } = require('./execEnvPolicy');
 
+const PROJECT_TEST_BROKER = path.join(__dirname, 'projectTestBroker.js');
+const PROJECT_TEST_SPAWN_ERROR_MARKER = '__PALANTIR_PROJECT_TEST_SPAWN_ERROR__';
+
+function projectTestSpawnError(stderr) {
+  const text = String(stderr || '');
+  const markerIndex = text.lastIndexOf(PROJECT_TEST_SPAWN_ERROR_MARKER);
+  if (markerIndex === -1) return null;
+  const encoded = text
+    .slice(markerIndex + PROJECT_TEST_SPAWN_ERROR_MARKER.length)
+    .split(/\r?\n/, 1)[0];
+  try {
+    const payload = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+    const err = new Error(payload.message || 'project test spawn failed');
+    for (const key of ['code', 'errno', 'syscall', 'path', 'spawnargs']) {
+      if (payload[key] !== undefined) err[key] = payload[key];
+    }
+    return err;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * NodeExecutor is the transport-neutral seam between the control plane and a
  * future execution node. The full contract from the fleet brief is:
@@ -251,20 +273,22 @@ function createLocalNodeExecutor({ executionEngine, streamJsonEngine } = {}) {
    * operational failures into a fake exit code would make "command failed"
    * indistinguishable from "transport/limit failed" once executors go remote.
    */
-  // projectTest selects a broader *positive* runtime allowlist for repository
-  // tests. It never re-merges process.env, because test_command executes code
-  // the agent may have modified and therefore cannot receive control-plane or
-  // model credentials.
+  // projectTest selects a broader positive runtime allowlist for repository
+  // tests. A clean broker remains the test process's direct parent, closing the
+  // /proc/$PPID/environ bypass that exists when the Console spawns it directly.
+  // This is not an OS-user boundary: deployments that grant agent capabilities
+  // still require the separate process-isolation policy enforced elsewhere.
   function exec(command, args = [], { cwd, env, timeoutMs, maxBuffer, projectTest = false } = {}) {
     return new Promise((resolve, reject) => {
+      const childEnv = projectTest
+        ? buildProjectTestEnv(process.env, env)
+        : buildExecEnv(process.env, env);
       childProcess.execFile(
-        command,
-        args,
+        projectTest ? process.execPath : command,
+        projectTest ? [PROJECT_TEST_BROKER, command, ...args] : args,
         {
           cwd,
-          env: projectTest
-            ? buildProjectTestEnv(process.env, env)
-            : buildExecEnv(process.env, env),
+          env: childEnv,
           timeout: timeoutMs,
           maxBuffer,
           encoding: 'utf-8',
@@ -273,6 +297,15 @@ function createLocalNodeExecutor({ executionEngine, streamJsonEngine } = {}) {
           if (!err) {
             resolve({ code: 0, stdout: String(stdout || ''), stderr: String(stderr || '') });
             return;
+          }
+          if (projectTest) {
+            const spawnErr = projectTestSpawnError(stderr);
+            if (spawnErr) {
+              spawnErr.stdout = String(stdout || '');
+              spawnErr.stderr = String(stderr || '');
+              reject(spawnErr);
+              return;
+            }
           }
           // A numeric code with no kill signal is a genuine process exit.
           if (typeof err.code === 'number' && !err.signal && !err.killed) {

@@ -181,6 +181,7 @@ test('materialized local harvest keeps test runtime env but exposes zero server 
   fs.writeFileSync(path.join(workspace, 'probe.js'), [
     'process.stdout.write(JSON.stringify({',
     'nodeEnv: process.env.NODE_ENV ?? null,',
+    'pythonPath: process.env.PYTHONPATH ?? null,',
     'palantir: process.env.PALANTIR_TOKEN ?? null,',
     'anthropic: process.env.ANTHROPIC_API_KEY ?? null,',
     'askpass: process.env.GIT_ASKPASS ?? null,',
@@ -191,6 +192,8 @@ test('materialized local harvest keeps test runtime env but exposes zero server 
 
   const envKeys = [
     'NODE_ENV',
+    'PYTHONPATH',
+    'PALANTIR_PROJECT_TEST_ENV_ALLOWLIST',
     'PALANTIR_TOKEN',
     'ANTHROPIC_API_KEY',
     'GIT_ASKPASS',
@@ -198,6 +201,8 @@ test('materialized local harvest keeps test runtime env but exposes zero server 
   ];
   const previous = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
   process.env.NODE_ENV = 'project-test-runtime';
+  process.env.PYTHONPATH = '/opt/project-specific-python-libs';
+  process.env.PALANTIR_PROJECT_TEST_ENV_ALLOWLIST = 'PYTHONPATH';
   process.env.PALANTIR_TOKEN = 'control-plane-secret';
   process.env.ANTHROPIC_API_KEY = 'model-secret';
   process.env.GIT_ASKPASS = '/fixture/credential-helper';
@@ -228,11 +233,28 @@ test('materialized local harvest keeps test runtime env but exposes zero server 
   assert.equal(payload.passed, true);
   assert.deepEqual(JSON.parse(payload.output_tail), {
     nodeEnv: 'project-test-runtime',
+    pythonPath: '/opt/project-specific-python-libs',
     palantir: null,
     anthropic: null,
     askpass: null,
     proxy: null,
   });
+});
+
+test('materialized local harvest hides the Console environment from test_command parent lookup', {
+  skip: process.platform === 'win32' ? 'requires /proc or POSIX ps' : false,
+}, () => {
+  const secret = 'review-control-plane-secret';
+  const fixture = path.join(__dirname, 'fixtures', 'harvest-parent-env-probe.js');
+  const raw = childProcess.execFileSync(process.execPath, [fixture], {
+    env: { ...process.env, PALANTIR_TOKEN: secret },
+    encoding: 'utf8',
+  });
+  const payload = JSON.parse(raw);
+
+  assert.equal(payload.secret, secret, 'fixture Console started with the control-plane secret');
+  assert.equal(payload.passed, true);
+  assert.equal(payload.output_tail, '');
 });
 
 test('materialized remote harvest runs the real executor contract without leaking server secrets', async (t) => {
@@ -244,6 +266,7 @@ test('materialized remote harvest runs the real executor contract without leakin
   fs.writeFileSync(path.join(workspace, 'probe.js'), [
     'process.stdout.write(JSON.stringify({',
     'nodeEnv: process.env.NODE_ENV ?? null,',
+    'pythonPath: process.env.PYTHONPATH ?? null,',
     'palantir: process.env.PALANTIR_TOKEN ?? null,',
     'anthropic: process.env.ANTHROPIC_API_KEY ?? null,',
     'askpass: process.env.GIT_ASKPASS ?? null,',
@@ -254,6 +277,8 @@ test('materialized remote harvest runs the real executor contract without leakin
 
   const envKeys = [
     'NODE_ENV',
+    'PYTHONPATH',
+    'PALANTIR_PROJECT_TEST_ENV_ALLOWLIST',
     'PALANTIR_TOKEN',
     'ANTHROPIC_API_KEY',
     'GIT_ASKPASS',
@@ -261,6 +286,8 @@ test('materialized remote harvest runs the real executor contract without leakin
   ];
   const previous = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
   process.env.NODE_ENV = 'project-test-runtime';
+  process.env.PYTHONPATH = '/opt/project-specific-python-libs';
+  process.env.PALANTIR_PROJECT_TEST_ENV_ALLOWLIST = 'PYTHONPATH';
   process.env.PALANTIR_TOKEN = 'control-plane-secret';
   process.env.ANTHROPIC_API_KEY = 'model-secret';
   process.env.GIT_ASKPASS = '/fixture/credential-helper';
@@ -320,6 +347,7 @@ test('materialized remote harvest runs the real executor contract without leakin
   assert.equal(payload.passed, true);
   assert.deepEqual(JSON.parse(payload.output_tail), {
     nodeEnv: 'project-test-runtime',
+    pythonPath: '/opt/project-specific-python-libs',
     palantir: null,
     anthropic: null,
     askpass: null,

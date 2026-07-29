@@ -8,7 +8,7 @@ const {
   MANAGER_BASE_ENV_KEYS,
   isActorCredentialKey,
 } = require('./actorTokenPolicy');
-const { EXEC_ENV_KEYS, PROJECT_TEST_ENV_KEYS } = require('./execEnvPolicy');
+const { execEnvKeys, projectTestEnvKeys } = require('./execEnvPolicy');
 
 const WORKER_OUTPUT_MAX_LINES = 500;
 const WORKER_OUTPUT_MAX_BUFFER = 256 * 1024;
@@ -895,7 +895,9 @@ function createRemoteSshNodeExecutor(node, {
       timeoutMs,
       maxBuffer,
       cleanEnv: true,
-      cleanEnvKeys: projectTest ? PROJECT_TEST_ENV_KEYS : EXEC_ENV_KEYS,
+      cleanEnvKeys: projectTest
+        ? projectTestEnvKeys(process.env)
+        : execEnvKeys(process.env),
       cleanEnvPathFromKeys: true,
       cleanEnvAllowExplicitPath: true,
     });

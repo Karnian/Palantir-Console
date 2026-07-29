@@ -1,5 +1,10 @@
 'use strict';
 
+const { isActorCredentialKey } = require('./actorTokenPolicy');
+
+const GIT_ENV_ALLOWLIST_VARIABLE = 'PALANTIR_GIT_ENV_ALLOWLIST';
+const PROJECT_TEST_ENV_ALLOWLIST_VARIABLE = 'PALANTIR_PROJECT_TEST_ENV_ALLOWLIST';
+
 // Keep only ambient values required to locate Git and its node-local config,
 // authenticate, reach remotes, create commits, and preserve locale/temp behavior.
 // Command-bearing Git settings stay caller overrides except GIT_ASKPASS: some
@@ -155,6 +160,43 @@ const PROJECT_TEST_ENV_KEYS = Object.freeze([
 
 const PROJECT_TEST_ENV_KEY_SET = new Set(PROJECT_TEST_ENV_KEYS);
 
+function configuredEnvKeys(sourceEnv, variableName) {
+  const raw = sourceEnv?.[variableName];
+  if (raw === undefined || raw === null || raw === '') return [];
+  if (typeof raw !== 'string') {
+    throw new Error(`${variableName} must be a comma-separated environment variable list`);
+  }
+  const configured = [];
+  const seen = new Set();
+  for (const entry of raw.split(',')) {
+    const key = entry.trim();
+    if (!key || seen.has(key)) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      throw new Error(`${variableName} contains an invalid environment variable name: ${key}`);
+    }
+    if (isActorCredentialKey(key)) {
+      throw new Error(`${variableName} cannot include control-plane credential ${key}`);
+    }
+    seen.add(key);
+    configured.push(key);
+  }
+  return configured;
+}
+
+function execEnvKeys(sourceEnv = {}) {
+  return [
+    ...EXEC_ENV_KEYS,
+    ...configuredEnvKeys(sourceEnv, GIT_ENV_ALLOWLIST_VARIABLE),
+  ];
+}
+
+function projectTestEnvKeys(sourceEnv = {}) {
+  return [
+    ...PROJECT_TEST_ENV_KEYS,
+    ...configuredEnvKeys(sourceEnv, PROJECT_TEST_ENV_ALLOWLIST_VARIABLE),
+  ];
+}
+
 function isExecEnvKeyAllowed(key) {
   return EXEC_ENV_KEY_SET.has(key);
 }
@@ -177,7 +219,7 @@ function mergeEnvOverrides(selected, overrides) {
 }
 
 function selectExecEnv(sourceEnv = {}) {
-  return selectEnv(sourceEnv, EXEC_ENV_KEY_SET);
+  return selectEnv(sourceEnv, new Set(execEnvKeys(sourceEnv)));
 }
 
 function buildExecEnv(sourceEnv = {}, overrides) {
@@ -186,7 +228,7 @@ function buildExecEnv(sourceEnv = {}, overrides) {
 
 function buildProjectTestEnv(sourceEnv = {}, overrides) {
   return mergeEnvOverrides(
-    selectEnv(sourceEnv, PROJECT_TEST_ENV_KEY_SET),
+    selectEnv(sourceEnv, new Set(projectTestEnvKeys(sourceEnv))),
     overrides,
   );
 }
@@ -194,6 +236,10 @@ function buildProjectTestEnv(sourceEnv = {}, overrides) {
 module.exports = {
   EXEC_ENV_KEYS,
   PROJECT_TEST_ENV_KEYS,
+  GIT_ENV_ALLOWLIST_VARIABLE,
+  PROJECT_TEST_ENV_ALLOWLIST_VARIABLE,
+  execEnvKeys,
+  projectTestEnvKeys,
   isExecEnvKeyAllowed,
   selectExecEnv,
   buildExecEnv,

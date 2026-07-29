@@ -15,6 +15,8 @@ const { createFsService } = require('../services/fsService');
 const {
   EXEC_ENV_KEYS,
   PROJECT_TEST_ENV_KEYS,
+  GIT_ENV_ALLOWLIST_VARIABLE,
+  PROJECT_TEST_ENV_ALLOWLIST_VARIABLE,
   buildExecEnv,
   buildProjectTestEnv,
 } = require('../services/execEnvPolicy');
@@ -418,12 +420,15 @@ test('exec env policy rejects ambient command/config/TLS bypass vectors but keep
   assert.deepEqual(buildExecEnv(ambient, hardening), hardening);
 });
 
-test('exec env policy preserves node-local GIT_ASKPASS for private HTTPS authentication', () => {
+test('exec env policy preserves node-local GIT_ASKPASS and an allowlisted companion credential', () => {
   assert.deepEqual(buildExecEnv({
     GIT_ASKPASS: '/opt/palantir/askpass',
+    REPO_PASSWORD: 'private-secret',
+    [GIT_ENV_ALLOWLIST_VARIABLE]: 'REPO_PASSWORD',
     ANTHROPIC_API_KEY: 'must-not-pass',
   }), {
     GIT_ASKPASS: '/opt/palantir/askpass',
+    REPO_PASSWORD: 'private-secret',
   });
 });
 
@@ -476,6 +481,8 @@ test('LocalNodeExecutor.exec projectTest keeps runtime keys without control-plan
   const keys = [
     'NODE_ENV',
     'VIRTUAL_ENV',
+    'PYTHONPATH',
+    PROJECT_TEST_ENV_ALLOWLIST_VARIABLE,
     'PALANTIR_TOKEN',
     'ANTHROPIC_API_KEY',
     'GIT_ASKPASS',
@@ -484,6 +491,8 @@ test('LocalNodeExecutor.exec projectTest keeps runtime keys without control-plan
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   process.env.NODE_ENV = 'project-suite-needs-this';
   process.env.VIRTUAL_ENV = '/fixture/venv';
+  process.env.PYTHONPATH = '/opt/project-specific-python-libs';
+  process.env[PROJECT_TEST_ENV_ALLOWLIST_VARIABLE] = 'PYTHONPATH';
   process.env.PALANTIR_TOKEN = 'palantir-secret';
   process.env.ANTHROPIC_API_KEY = 'model-secret';
   process.env.GIT_ASKPASS = '/fixture/credential-helper';
@@ -494,6 +503,7 @@ test('LocalNodeExecutor.exec projectTest keeps runtime keys without control-plan
       'process.stdout.write(JSON.stringify({',
       'project:process.env.NODE_ENV ?? null,',
       'virtualEnv:process.env.VIRTUAL_ENV ?? null,',
+      'pythonPath:process.env.PYTHONPATH ?? null,',
       'override:process.env.LOCAL_NODE_EXECUTOR_OVERRIDE_ENV ?? null,',
       'palantir:process.env.PALANTIR_TOKEN ?? null,',
       'anthropic:process.env.ANTHROPIC_API_KEY ?? null,',
@@ -510,6 +520,7 @@ test('LocalNodeExecutor.exec projectTest keeps runtime keys without control-plan
     assert.deepEqual(JSON.parse(projectTest.stdout), {
       project: 'project-suite-needs-this',
       virtualEnv: '/fixture/venv',
+      pythonPath: '/opt/project-specific-python-libs',
       override: 'override-visible',
       palantir: null,
       anthropic: null,
@@ -521,6 +532,7 @@ test('LocalNodeExecutor.exec projectTest keeps runtime keys without control-plan
     assert.deepEqual(JSON.parse(filtered.stdout), {
       project: null,
       virtualEnv: null,
+      pythonPath: null,
       override: 'override-visible',
       palantir: null,
       anthropic: null,
@@ -531,9 +543,12 @@ test('LocalNodeExecutor.exec projectTest keeps runtime keys without control-plan
     assert.ok(PROJECT_TEST_ENV_KEYS.includes('NODE_ENV'));
     assert.deepEqual(buildProjectTestEnv({
       NODE_ENV: 'test',
+      PYTHONPATH: '/fixture/python',
+      [PROJECT_TEST_ENV_ALLOWLIST_VARIABLE]: 'PYTHONPATH',
       PALANTIR_TOKEN: 'secret',
     }), {
       NODE_ENV: 'test',
+      PYTHONPATH: '/fixture/python',
     });
   } finally {
     for (const key of keys) {
@@ -541,6 +556,25 @@ test('LocalNodeExecutor.exec projectTest keeps runtime keys without control-plan
       else process.env[key] = previous[key];
     }
   }
+});
+
+test('configured exec allowlists reject control-plane credential names', () => {
+  assert.throws(
+    () => buildExecEnv({
+      [GIT_ENV_ALLOWLIST_VARIABLE]: 'REPO_PASSWORD,PALANTIR_TOKEN',
+      REPO_PASSWORD: 'private-secret',
+      PALANTIR_TOKEN: 'control-plane-secret',
+    }),
+    /cannot include control-plane credential PALANTIR_TOKEN/,
+  );
+  assert.throws(
+    () => buildProjectTestEnv({
+      [PROJECT_TEST_ENV_ALLOWLIST_VARIABLE]: 'PYTHONPATH,PALANTIR_PM_TOKEN',
+      PYTHONPATH: '/fixture/python',
+      PALANTIR_PM_TOKEN: 'control-plane-secret',
+    }),
+    /cannot include control-plane credential PALANTIR_PM_TOKEN/,
+  );
 });
 
 test('LocalNodeExecutor.exec rejects missing binary as spawn-level failure', async () => {

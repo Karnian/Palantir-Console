@@ -249,7 +249,7 @@ test('remote materialization authenticates private HTTPS through pod GIT_ASKPASS
     `printf '%s\\n' "$1" >> ${JSON.stringify(askpassLog)}`,
     'case "$1" in',
     '  *Username*) printf \'%s\\n\' runner ;;',
-    '  *Password*) printf \'%s\\n\' private-secret ;;',
+    '  *Password*) printf \'%s\\n\' "$REPO_PASSWORD" ;;',
     '  *) exit 1 ;;',
     'esac',
     '',
@@ -302,12 +302,21 @@ test('remote materialization authenticates private HTTPS through pod GIT_ASKPASS
   });
   t.after(() => new Promise(resolve => server.close(resolve)));
 
-  const envKeys = ['GIT_ASKPASS', 'GIT_SSL_CAINFO', 'NO_PROXY', 'no_proxy'];
+  const envKeys = [
+    'GIT_ASKPASS',
+    'GIT_SSL_CAINFO',
+    'NO_PROXY',
+    'no_proxy',
+    'REPO_PASSWORD',
+    'PALANTIR_GIT_ENV_ALLOWLIST',
+  ];
   const previous = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
   process.env.GIT_ASKPASS = askpass;
   process.env.GIT_SSL_CAINFO = tlsCert;
   process.env.NO_PROXY = '127.0.0.1';
   process.env.no_proxy = '127.0.0.1';
+  process.env.REPO_PASSWORD = 'private-secret';
+  process.env.PALANTIR_GIT_ENV_ALLOWLIST = 'REPO_PASSWORD';
   t.after(() => {
     for (const key of envKeys) {
       if (previous[key] === undefined) delete process.env[key];
