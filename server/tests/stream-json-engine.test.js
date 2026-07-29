@@ -329,7 +329,7 @@ test('engine: manager spawn args contain --input-format stream-json, no -p', asy
   assert.ok(!args.includes('--no-session-persistence'), 'manager는 session persistence 유지');
 });
 
-test('engine: optional args (model, mcpConfig, allowedTools, disallowedTools, permissionMode, maxBudgetUsd) appended', async () => {
+test('engine: optional args (model, mcpConfig, tools, allowedTools, disallowedTools, permissionMode, maxBudgetUsd) appended', async () => {
   process.env.CLAUDE_BIN = fakeClaudioPath;
   const { engine } = makeEngine();
 
@@ -338,6 +338,7 @@ test('engine: optional args (model, mcpConfig, allowedTools, disallowedTools, pe
     isManager: false,
     model: 'claude-opus-4',
     mcpConfig: '/tmp/mcp.json',
+    tools: ['Read', 'Grep'],
     allowedTools: ['Read', 'Write'],
     disallowedTools: ['Bash', 'Edit'],
     permissionMode: 'acceptEdits',
@@ -348,6 +349,8 @@ test('engine: optional args (model, mcpConfig, allowedTools, disallowedTools, pe
   assert.ok(args.includes('claude-opus-4'));
   assert.ok(args.includes('--mcp-config'));
   assert.ok(args.includes('/tmp/mcp.json'));
+  assert.ok(args.includes('--tools'));
+  assert.ok(args.includes('Read,Grep'), 'tools 쉼표 결합');
   assert.ok(args.includes('--allowedTools'));
   assert.ok(args.includes('Read,Write'), 'allowedTools 쉼표 결합');
   assert.ok(args.includes('--disallowedTools'));

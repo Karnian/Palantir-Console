@@ -1671,6 +1671,9 @@ function createLifecycleService({
               model: profile.model || undefined,
               systemPrompt,
               permissionMode: resolveClaudePermissionMode(profile),
+              tools: templateOptions.tools.length > 0
+                ? templateOptions.tools
+                : undefined,
               allowedTools: mcpTools.length > 0 ? mcpTools : undefined,
               disallowedTools: templateOptions.disallowedTools.length > 0
                 ? templateOptions.disallowedTools

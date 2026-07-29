@@ -13,7 +13,10 @@ const { buildProjectScopedSystemSection } = require('../services/operatorPromptS
 const { resolveCodexServiceTier } = require('../services/managerAdapters/codexAdapter'); // F-1
 const { goalFeatureActive: defaultGoalFeatureActive } = require('../services/goalMode'); // G2 §6
 const { resolveActorTokenPolicy, applyManagerCredentialPolicy } = require('../services/actorTokenPolicy');
-const { resolveClaudePermissionMode } = require('../services/agentProfileService');
+const {
+  parseClaudeArgsTemplate,
+  resolveClaudePermissionMode,
+} = require('../services/agentProfileService');
 const { resolveAgentVendor } = require('../utils/agentVendor');
 const {
   repoFeatureEnabled,
@@ -619,6 +622,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       return res.status(409).json({ error: 'Manager session is starting' });
     }
     startingManager = true;
+    try {
     const existing = getActiveManager();
     if (existing) {
       startingManager = false;
@@ -676,6 +680,9 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         message: err.message,
       });
     }
+    const claudeTemplateOptions = adapterType === 'claude-code' && resolvedProfile
+      ? parseClaudeArgsTemplate(resolvedProfile.args_template)
+      : null;
     const permissionMode = adapterType === 'claude-code'
       ? (resolvedProfile
         ? resolveClaudePermissionMode(resolvedProfile)
@@ -884,6 +891,9 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         // Match lifecycleService's Claude worker rule exactly: a NULL profile
         // value preserves the historical bypassPermissions default.
         permissionMode,
+        disallowedTools: claudeTemplateOptions?.disallowedTools.length > 0
+          ? claudeTemplateOptions.disallowedTools
+          : undefined,
         env: spawnEnv,
         envAllowlist,
         mcpTools: mcpTools.length > 0 ? mcpTools : undefined,
@@ -938,6 +948,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         runService.addRunEvent(runId, 'error', JSON.stringify({ message: error.message }));
       } catch { /* ignore */ }
       throw error;
+    }
     } finally {
       startingManager = false;
     }

@@ -9,6 +9,7 @@ const { createDatabase } = require('../db/database');
 const {
   createAgentProfileService,
   parseClaudeArgsTemplate,
+  resolveClaudePermissionMode,
 } = require('../services/agentProfileService');
 
 function setup(t) {
@@ -243,11 +244,12 @@ test('claude save rejects permission mode flags in the raw args_template', (t) =
   );
 });
 
-test('claude template parser preserves disallowed tool deny rules', (t) => {
+test('claude template parser preserves available and disallowed tool rules', (t) => {
   const { service } = setup(t);
   const parsed = parseClaudeArgsTemplate(
-    '-p {prompt} --disallowedTools Bash "Bash(rm *)" --max-budget-usd 1',
+    '-p {prompt} --tools Read,Grep --disallowedTools Bash "Bash(rm *)" --max-budget-usd 1',
   );
+  assert.deepEqual(parsed.tools, ['Read,Grep']);
   assert.deepEqual(parsed.disallowedTools, ['Bash', 'Bash(rm *)']);
 
   const aliasParsed = parseClaudeArgsTemplate(
@@ -272,25 +274,36 @@ test('claude template parser preserves disallowed tool deny rules', (t) => {
   );
 });
 
-test('saving a legacy claude profile promotes its displayed raw permission flag', (t) => {
+test('permission resolution ignores malformed unrelated Claude template options', () => {
+  assert.equal(
+    resolveClaudePermissionMode({
+      command: 'claude',
+      permission_mode: null,
+      args_template: '-p {prompt} --permission-mode acceptEdits --max-budget-usd nope',
+    }),
+    'acceptEdits',
+  );
+});
+
+test('explicit permission reset wins over legacy promotion while omitted fields still promote', (t) => {
   const { service, db } = setup(t);
-  // Rows like this exist by construction: putting --permission-mode in
-  // args_template is precisely the workaround #469 describes, and the Claude
-  // spawn path has always ignored it. Raw SQL because createProfile now refuses
-  // this shape — the point is a row written before that rule existed.
+  // Migration 076 produces this dual representation for legacy rows.
   const legacy = service.createProfile(profile({
     command: 'claude',
     type: 'claude-code',
     args_template: '-p {prompt}',
   }));
-  db.prepare('UPDATE agent_profiles SET args_template = ? WHERE id = ?')
+  db.prepare(`
+    UPDATE agent_profiles
+    SET args_template = ?, permission_mode = 'acceptEdits'
+    WHERE id = ?
+  `)
     .run('-p {prompt} --permission-mode acceptEdits', legacy.id);
 
-  // AgentsView sends the whole visible form even when only the name changed.
-  // This UI-shaped PATCH must not make unchanged command/template keys look
-  // like an attempt to introduce the legacy raw flag.
-  const renamed = service.updateProfile(legacy.id, {
-    name: 'renamed legacy',
+  // AgentsView sends the whole visible form. Selecting "(none)" is an explicit
+  // reset and must not be overwritten by the unchanged raw compatibility flag.
+  const reset = service.updateProfile(legacy.id, {
+    name: 'reset legacy',
     type: 'claude-code',
     command: 'claude',
     args_template: '-p {prompt} --permission-mode acceptEdits',
@@ -300,9 +313,14 @@ test('saving a legacy claude profile promotes its displayed raw permission flag'
     max_concurrent: 1,
     capabilities_json: '{}',
   });
-  assert.equal(renamed.name, 'renamed legacy');
-  assert.equal(renamed.args_template, '-p {prompt} --permission-mode acceptEdits');
-  assert.equal(renamed.permission_mode, 'acceptEdits');
+  assert.equal(reset.name, 'reset legacy');
+  assert.equal(reset.args_template, '-p {prompt} --permission-mode acceptEdits');
+  assert.equal(reset.permission_mode, null);
+
+  // A caller that truly omits the structured field still gets the legacy
+  // promotion used for raw-imported/pre-backfill rows.
+  const promoted = service.updateProfile(legacy.id, { name: 'promoted legacy' });
+  assert.equal(promoted.permission_mode, 'acceptEdits');
 
   // Changing only the executable path keeps the same Claude vendor and must
   // not revalidate an untouched legacy template.

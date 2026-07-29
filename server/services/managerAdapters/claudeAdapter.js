@@ -247,6 +247,7 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
     systemPrompt,
     model,
     allowedTools,
+    disallowedTools,
     mcpTools,
     mcpConfig,
     permissionMode,
@@ -288,6 +289,7 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
       systemPrompt,
       permissionMode: permissionMode || 'bypassPermissions',
       allowedTools: mergedTools,
+      disallowedTools: disallowedTools || undefined,
       mcpConfig: mcpConfig || undefined, // P4-2: project-scoped MCP config path
       model: model || undefined,
       isManager: true,

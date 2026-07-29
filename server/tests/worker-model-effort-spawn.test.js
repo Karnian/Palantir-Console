@@ -236,6 +236,24 @@ test('saved Claude disallowedTools template reaches the stream-json worker spec'
   );
 });
 
+test('saved Claude tools template restricts the stream-json worker spec', async (t) => {
+  const harness = await createHarness(t);
+  const profile = harness.agentProfileService.createProfile({
+    name: 'Read-only Claude',
+    type: 'claude-code',
+    command: 'claude',
+    args_template: '-p {prompt} --tools Read,Grep',
+  });
+
+  await executeWorker(harness, profile.id, 'Read-only Claude worker');
+
+  assert.equal(harness.streamJsonEngine.spawned.length, 1);
+  assert.deepEqual(
+    harness.streamJsonEngine.spawned[0].opts.tools,
+    ['Read,Grep'],
+  );
+});
+
 test('raw-SQL-contaminated structured profile fails before claim and never spawns', async (t) => {
   const harness = await createHarness(t);
   const profileId = insertProfile(harness.db, {

@@ -876,6 +876,7 @@ test('v3 Phase 0 behavior: claudeAdapter.startSession passes restricted Bash all
     prompt: 'test',
     cwd: process.cwd(),
     systemPrompt: 'test',
+    disallowedTools: ['Bash'],
   });
   assert.ok(capturedArgs, 'spawnAgent must be called');
   const tools = capturedArgs.allowedTools;
@@ -891,6 +892,7 @@ test('v3 Phase 0 behavior: claudeAdapter.startSession passes restricted Bash all
   assert.ok(tools.includes('Bash(jq:*)'), 'must include Bash(jq:*)');
   assert.ok(tools.includes('WebFetch'), 'must keep WebFetch for read-only HTTP fetches');
   assert.ok(tools.includes('Read'), 'must include Read');
+  assert.deepEqual(capturedArgs.disallowedTools, ['Bash']);
   assert.equal(capturedArgs.isManager, true, 'must spawn as manager');
 });
 

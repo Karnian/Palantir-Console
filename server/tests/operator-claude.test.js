@@ -155,7 +155,10 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   const projectService = createProjectService(db);
   const projectBriefService = createProjectBriefService(db);
   const agentProfileService = createAgentProfileService(db);
-  agentProfileService.updateProfile('claude-code', { permission_mode: 'acceptEdits' });
+  agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt} --disallowedTools Bash',
+    permission_mode: 'acceptEdits',
+  });
   const registry = createManagerRegistry({ runService });
   const topAdapter = makeFakeManagerAdapter('claude-code');
   const claudeAdapter = makeFakeManagerAdapter('claude-code');
@@ -191,6 +194,7 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   assert.equal(typeof start.opts.onThreadStarted, 'function');
   assert.equal(start.opts.resumeSessionId, null);
   assert.equal(start.opts.permissionMode, 'acceptEdits');
+  assert.deepEqual(start.opts.disallowedTools, ['Bash']);
   assert.equal(
     runService.getRun(result.run.id).session_permission_mode,
     'acceptEdits',
@@ -205,6 +209,54 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   assert.equal(thread.pm_adapter, 'claude');
   assert.equal(thread.node_id, null);
   assert.equal(thread.cwd, null);
+});
+
+test('Claude operator rejects malformed template options instead of falling back to bypass', async (t) => {
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const agentProfileService = createAgentProfileService(db);
+  db.prepare(`
+    UPDATE agent_profiles
+    SET args_template = ?, permission_mode = NULL
+    WHERE id = 'claude-code'
+  `).run('-p {prompt} --permission-mode acceptEdits --max-budget-usd nope');
+  const registry = createManagerRegistry({ runService });
+  const claudeAdapter = makeFakeManagerAdapter('claude-code');
+  const codexAdapter = makeFakeManagerAdapter('codex');
+  const spawn = createOperatorSpawnService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory({ claudeAdapter, codexAdapter }),
+    projectService,
+    projectBriefService,
+    agentProfileService,
+    resolveManagerAuth: authOk,
+  });
+  const project = projectService.createProject({
+    name: 'claude-malformed-profile',
+    preferred_pm_adapter: 'claude',
+  });
+  seedTop({ runService, registry, adapter: makeFakeManagerAdapter('claude-code') });
+
+  assert.throws(
+    () => spawn.ensureLiveOperator({ projectId: project.id }),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.match(error.message, /--max-budget-usd.*positive number/);
+      return true;
+    },
+  );
+  assert.equal(claudeAdapter._starts.length, 0);
+  assert.equal(
+    db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM runs
+      WHERE manager_layer = 'operator'
+    `).get().count,
+    0,
+  );
 });
 
 test('Claude operator rejects a raw-SQL profile vendor mismatch before spawn', async (t) => {

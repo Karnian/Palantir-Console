@@ -183,6 +183,11 @@ function parseClaudeArgsTemplate(argsTemplate) {
   const permissionMode = readSingleClaudeTemplateOption(tokens, '--permission-mode');
   const rawMaxBudgetUsd = readSingleClaudeTemplateOption(tokens, '--max-budget-usd');
   const mcpConfig = readSingleClaudeTemplateOption(tokens, '--mcp-config');
+  const tools = readClaudeTemplateListOption(
+    tokens,
+    ['--tools'],
+    '--tools',
+  );
   const disallowedTools = readClaudeTemplateListOption(
     tokens,
     ['--disallowedTools', '--disallowed-tools'],
@@ -203,14 +208,32 @@ function parseClaudeArgsTemplate(argsTemplate) {
     }
   }
 
-  return { permissionMode, maxBudgetUsd, mcpConfig, disallowedTools };
+  return {
+    permissionMode,
+    maxBudgetUsd,
+    mcpConfig,
+    tools,
+    disallowedTools,
+  };
 }
 
 function resolveClaudePermissionMode(profile) {
   if (resolveAgentVendor(profile?.command) !== 'claude') return undefined;
-  return profile.permission_mode
-    ?? parseClaudeArgsTemplate(profile.args_template).permissionMode
-    ?? 'bypassPermissions';
+  if (profile.permission_mode != null) return profile.permission_mode;
+
+  // Permission resolution is a security boundary. Parse only its own option so
+  // a malformed unrelated template value (for example max-budget) cannot make
+  // a caller fall back to the more permissive default.
+  const permissionMode = readSingleClaudeTemplateOption(
+    tokenizeArgsTemplate(profile.args_template),
+    '--permission-mode',
+  );
+  if (permissionMode != null && !CLAUDE_PERMISSION_MODES.has(permissionMode)) {
+    throw new BadRequestError(
+      `--permission-mode in args_template must be one of: ${Array.from(CLAUDE_PERMISSION_MODES).join(', ')}`,
+    );
+  }
+  return permissionMode ?? 'bypassPermissions';
 }
 
 function validateStructuredModelEffort(mergedProfile) {
@@ -384,12 +407,13 @@ function createAgentProfileService(db) {
     }
     // Migration 076 backfills normal legacy rows. Keep this runtime promotion
     // for databases that had already recorded 075 before the backfill shipped,
-    // and for rows imported later through raw SQL. An unchanged legacy flag
-    // must become the structured value on the next save; otherwise the UI can
-    // display acceptEdits while the stream-json worker defaults to bypass.
+    // and for rows imported later through raw SQL, but only when the caller
+    // omits permission_mode. An explicit null is the UI's bypass selection and
+    // must win over an unchanged compatibility flag in args_template.
     if (
       resolveAgentVendor(mergedProfile.command) === 'claude'
       && mergedProfile.permission_mode == null
+      && !Object.prototype.hasOwnProperty.call(fields, 'permission_mode')
     ) {
       const legacyPermissionMode = parseClaudeArgsTemplate(
         mergedProfile.args_template,

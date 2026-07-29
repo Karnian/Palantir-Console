@@ -44,6 +44,65 @@ function permissionModeArg(args) {
   return args[index + 1];
 }
 
+async function createCapturingManagerHarness(t) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-manager-profile-'));
+  const database = createDatabase(path.join(root, 'test.db'));
+  database.migrate();
+  const runService = createRunService(database.db, null);
+  const agentProfileService = createAgentProfileService(database.db);
+  const managerRegistry = createManagerRegistry({ runService });
+  const starts = [];
+  const adapter = {
+    type: 'claude-code',
+    capabilities: { persistentProcess: true, supportsResume: true },
+    startSession(runId, opts) {
+      starts.push({ runId, opts });
+      return { sessionRef: { pid: 4321 } };
+    },
+    isSessionAlive() { return true; },
+    detectExitCode() { return null; },
+    disposeSession() { return true; },
+    buildGuardrailsSection() { return ''; },
+  };
+  const managerAdapterFactory = {
+    getAdapter(type) {
+      assert.equal(type, 'claude-code');
+      return adapter;
+    },
+  };
+  const conversationService = createConversationService({
+    runService,
+    managerRegistry,
+    managerAdapterFactory,
+    lifecycleService: null,
+  });
+  const app = express();
+  app.use(express.json());
+  app.use('/api/manager', createManagerRouter({
+    runService,
+    managerAdapterFactory,
+    managerRegistry,
+    conversationService,
+    agentProfileService,
+    authResolverOpts: {
+      hasKeychain: () => true,
+      hasCredentialsFile: () => false,
+    },
+  }));
+
+  t.after(async () => {
+    database.close();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  return {
+    app,
+    database,
+    agentProfileService,
+    starts,
+  };
+}
+
 test('Manager profile permission_mode reaches Claude CLI and NULL matches the worker default', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-manager-permission-'));
   const argsFile = path.join(root, 'claude-args.json');
@@ -145,6 +204,50 @@ test('Manager profile permission_mode reaches Claude CLI and NULL matches the wo
   });
   assert.equal(response.status, 400, response.text);
   assert.equal(JSON.parse(response.text).error, 'manager_profile_vendor_mismatch');
+});
+
+test('Top Manager clears its starting guard when Claude template parsing fails', async (t) => {
+  const {
+    app,
+    database,
+    starts,
+  } = await createCapturingManagerHarness(t);
+  database.db.prepare(`
+    UPDATE agent_profiles
+    SET args_template = ?, permission_mode = NULL
+    WHERE id = 'claude-code'
+  `).run('-p {prompt} --max-budget-usd nope');
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const response = await invokeApp(app, {
+      method: 'POST',
+      path: '/api/manager/start',
+      body: { agent_profile_id: 'claude-code', prompt: `invalid template ${attempt}` },
+    });
+    assert.equal(response.status, 400, response.text);
+    assert.doesNotMatch(response.text, /Manager session is starting/);
+  }
+  assert.equal(starts.length, 0);
+});
+
+test('Top Manager forwards saved Claude disallowedTools to its adapter', async (t) => {
+  const {
+    app,
+    agentProfileService,
+    starts,
+  } = await createCapturingManagerHarness(t);
+  agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt} --disallowedTools Bash',
+  });
+
+  const response = await invokeApp(app, {
+    method: 'POST',
+    path: '/api/manager/start',
+    body: { agent_profile_id: 'claude-code', prompt: 'deny Bash' },
+  });
+  assert.equal(response.status, 201, response.text);
+  assert.equal(starts.length, 1);
+  assert.deepEqual(starts[0].opts.disallowedTools, ['Bash']);
 });
 
 test('Manager boot-resume uses the fresh-spawn permission snapshot after profile deletion', async (t) => {

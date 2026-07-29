@@ -62,7 +62,10 @@ const { resolveSpawnCwd } = require('../utils/spawnCwd');
 const { resolveCodexServiceTier } = require('./managerAdapters/codexAdapter'); // F-1
 const { goalFeatureActive: defaultGoalFeatureActive } = require('./goalMode'); // G2 §6
 const { resolveActorTokenPolicy, applyManagerCredentialPolicy } = require('./actorTokenPolicy');
-const { resolveClaudePermissionMode } = require('./agentProfileService');
+const {
+  parseClaudeArgsTemplate,
+  resolveClaudePermissionMode,
+} = require('./agentProfileService');
 const { resolveAgentVendor } = require('../utils/agentVendor');
 const { conversationIdForProject } = require('../utils/conversationId'); // PM→Operator Phase 0 producer seam
 const { deriveLegacyContext, enforceWorkspace } = require('../utils/operatorContext');
@@ -411,6 +414,7 @@ function createOperatorSpawnService({
     // fall through to the resolver's defaults.
     let envAllowlist;
     let pmMcpTools = [];
+    let disallowedTools = [];
     let permissionMode = adapterType === 'claude-code' ? 'bypassPermissions' : undefined;
     try {
       if (agentProfileService) {
@@ -434,6 +438,8 @@ function createOperatorSpawnService({
           }
           if (adapterType === 'claude-code') {
             permissionMode = resolveClaudePermissionMode(managerProfile);
+            const templateOptions = parseClaudeArgsTemplate(managerProfile.args_template);
+            disallowedTools = templateOptions.disallowedTools;
           }
           if (managerProfile.env_allowlist) {
             const parsed = JSON.parse(managerProfile.env_allowlist);
@@ -451,7 +457,7 @@ function createOperatorSpawnService({
         }
       }
     } catch (err) {
-      if (err?.code === 'OPERATOR_PROFILE_VENDOR_MISMATCH') {
+      if (err?.code === 'OPERATOR_PROFILE_VENDOR_MISMATCH' || err?.status === 400) {
         throw err;
       }
       // Ignore malformed optional profile data and fall through to defaults.
@@ -789,6 +795,7 @@ function createOperatorSpawnService({
           ),
           envAllowlist,
           permissionMode,
+          disallowedTools: disallowedTools.length > 0 ? disallowedTools : undefined,
           role: 'manager',
           nodeId,
           resumeThreadId,
