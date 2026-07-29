@@ -85,7 +85,7 @@ test('CodexAdapter exposes Codex capabilities', () => {
   assert.match(adapter.buildGuardrailsSection(), /Codex CLI adapter notes/);
 });
 
-test('Codex Operator prompt states the local and remote worker tracking contracts separately', () => {
+test('Codex Operator prompt distinguishes repo-defined worktrees from remote legacy-directory execution', () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
   const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
   const adapter = createCodexAdapter({ runService: null });
@@ -105,17 +105,22 @@ test('Codex Operator prompt states the local and remote worker tracking contract
   assert.match(prompt, /direct writes are technically possible/i);
   assert.match(
     prompt,
-    /For local Git projects,[\s\S]*run-specific\s+worktree;[\s\S]*capture its diff and run the configured harvest test\s+from that worktree/i,
+    /For repo-defined Git projects,[\s\S]*enabled by default:[\s\S]*both local and remote nodes[\s\S]*run-specific\s+materialized worktrees/i,
   );
   assert.match(
     prompt,
-    /Remote workers currently run directly in the remote project directory without\s+a run worktree,[\s\S]*worktree-based diff capture and test harvest are unavailable\s+there/i,
+    /captures their diffs against the resolved\s+commit and runs the configured harvest test through the selected node executor/i,
   );
+  assert.match(
+    prompt,
+    /A remote legacy-directory project is the exception:[\s\S]*configured remote directory without a run worktree,[\s\S]*diff capture and test harvest are unavailable for that path/i,
+  );
+  assert.doesNotMatch(prompt, /Remote workers currently run directly/i);
   assert.doesNotMatch(
     prompt,
     /bypass\s+worker worktree isolation, diff capture, harvest, and run attribution/i,
   );
-  assert.match(prompt, /Delegate remote work anyway to preserve attribution and tracked execution/i);
+  assert.match(prompt, /Delegate remote\s+work anyway to preserve attribution and tracked execution/i);
 });
 
 test('Codex Top prompt routes project work through Operator without a conflicting worker contract', () => {
@@ -153,6 +158,15 @@ test('Codex Top prompt routes project work through Operator without a conflictin
     /Only when a request is one of the direct-handling cases above may you spawn a worker via \/execute/i,
   );
   assert.match(prompt, /direct writes are technically possible/i);
+  assert.match(
+    prompt,
+    /For repo-defined Git projects,[\s\S]*both local and remote nodes[\s\S]*run-specific\s+materialized worktrees/i,
+  );
+  assert.match(
+    prompt,
+    /A remote legacy-directory project is the exception:[\s\S]*configured remote directory without a run worktree/i,
+  );
+  assert.doesNotMatch(prompt, /Remote workers currently run directly/i);
 });
 
 test('runtime permission docs match the directory-less local Operator cwd fallback', () => {

@@ -34,6 +34,15 @@ function withRepoFlag(t) {
   });
 }
 
+function withDefaultRepoFlag(t) {
+  const prev = process.env.PALANTIR_PROJECT_REPO;
+  delete process.env.PALANTIR_PROJECT_REPO;
+  t.after(() => {
+    if (prev === undefined) delete process.env.PALANTIR_PROJECT_REPO;
+    else process.env.PALANTIR_PROJECT_REPO = prev;
+  });
+}
+
 function seedProfile(db) {
   db.prepare(`
     INSERT INTO agent_profiles (id, name, type, command, args_template, capabilities_json, env_allowlist, max_concurrent)
@@ -220,8 +229,8 @@ function assertExecCallsDoNotContain(executor, secret) {
   }
 }
 
-test('remote clone and worktree use exposed root paths and executor filesystem primitives', async (t) => {
-  withRepoFlag(t);
+test('default-on remote repo materialization and manager prompt agree on worktree capabilities', async (t) => {
+  withDefaultRepoFlag(t);
   const db = await mkdb(t);
   const executor = createRemoteExecutor();
   const h = buildHarness(db, { executor });
@@ -265,6 +274,20 @@ test('remote clone and worktree use exposed root paths and executor filesystem p
   assert.ok(worktree);
   assert.equal(worktree.args[2], '--');
   assert.equal(worktree.args[3], result.workspacePath);
+
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const guardrails = createCodexAdapter({ runService: null })
+    .buildGuardrailsSection({ layer: 'operator' });
+  assert.match(
+    guardrails,
+    /For repo-defined Git projects,[\s\S]*enabled by default:[\s\S]*both local and remote nodes[\s\S]*run-specific\s+materialized worktrees/i,
+    'the manager prompt must describe the default-on remote worktree path exercised above',
+  );
+  assert.match(
+    guardrails,
+    /captures their diffs against the resolved\s+commit and runs the configured harvest test through the selected node executor/i,
+  );
+  assert.doesNotMatch(guardrails, /Remote workers currently run directly/i);
 });
 
 test('remote clone and worktree argv use canonical-safe targets before writing', async (t) => {

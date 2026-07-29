@@ -286,8 +286,8 @@ test('reachable executable ssh node dispatches through pickExecutor and remote w
     .buildGuardrailsSection({ layer: 'operator' });
   assert.match(
     guardrails,
-    /Remote workers currently run directly in the remote project directory without\s+a run worktree,[\s\S]*worktree-based diff capture and test harvest are unavailable\s+there/i,
-    'the manager prompt must describe the remote no-worktree path exercised above',
+    /A remote legacy-directory project is the exception:[\s\S]*configured remote directory without a run worktree,[\s\S]*diff capture and test harvest are unavailable for that path/i,
+    'the manager prompt must describe the remote legacy-directory no-worktree path exercised above',
   );
 });
 

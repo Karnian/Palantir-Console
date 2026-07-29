@@ -1273,12 +1273,14 @@ You are running as a Codex CLI subprocess (codex exec --json). HARD RULES:
 ${delegationRules}
 - Direct writes are technically possible, but they bypass
   Palantir worker execution, run attribution, and Console-visible review history.
-- For local Git projects, a delegated worker normally gets a run-specific
-  worktree; Palantir can capture its diff and run the configured harvest test
-  from that worktree.
-- Remote workers currently run directly in the remote project directory without
-  a run worktree, so worktree-based diff capture and test harvest are unavailable
-  there. Delegate remote work anyway to preserve attribution and tracked execution.
+- For repo-defined Git projects, repo materialization is enabled by default:
+  delegated workers on both local and remote nodes normally get run-specific
+  materialized worktrees. Palantir captures their diffs against the resolved
+  commit and runs the configured harvest test through the selected node executor.
+- A remote legacy-directory project is the exception: its worker runs directly
+  in the configured remote directory without a run worktree, so worktree-based
+  diff capture and test harvest are unavailable for that path. Delegate remote
+  work anyway to preserve attribution and tracked execution.
 - Do NOT install a polling loop on /execute results — the user will see them
   in the Palantir Console UI; just report once per turn.`;
   }
