@@ -266,6 +266,65 @@ test('Codex worker refuses tier tokens from args_template and accepts a normal t
   }
 });
 
+test('default Codex worker omits manager bypass and public docs distinguish the worker path', async (t) => {
+  const db = await createTestDatabase(t);
+  const runService = createRunService(db, null);
+  const taskService = createTaskService(db);
+  const projectService = createProjectService(db);
+  const executionEngine = createExecutionEngine();
+  const agentProfileService = createAgentProfileService(db);
+  const lifecycleService = createLifecycleService({
+    runService,
+    taskService,
+    agentProfileService,
+    projectService,
+    executionEngine,
+    streamJsonEngine: createStreamJsonEngine(),
+    worktreeService: null,
+    eventBus: null,
+  });
+  const project = projectService.createProject({
+    name: 'Default Codex worker contract',
+    directory: null,
+  });
+  const task = taskService.createTask({
+    project_id: project.id,
+    title: 'Use migrated default profile',
+    description: 'capture exact worker argv',
+  });
+
+  const defaultProfile = agentProfileService.getProfile('codex');
+  assert.equal(defaultProfile.args_template, 'exec {prompt}');
+  await lifecycleService.executeTask(task.id, {
+    agentProfileId: defaultProfile.id,
+    prompt: 'hello',
+  });
+
+  assert.equal(executionEngine.spawned.length, 1);
+  const actualArgs = executionEngine.spawned[0].opts.args;
+  assert.deepEqual(actualArgs, ['-c', 'service_tier="default"', 'exec', '-']);
+  assert.equal(actualArgs.includes('--dangerously-bypass-approvals-and-sandbox'), false);
+
+  const repoRoot = path.join(__dirname, '..', '..');
+  const [readme, readmeKo, agentGuide] = await Promise.all([
+    fsp.readFile(path.join(repoRoot, 'README.md'), 'utf8'),
+    fsp.readFile(path.join(repoRoot, 'README.ko.md'), 'utf8'),
+    fsp.readFile(path.join(repoRoot, 'AGENT.md'), 'utf8'),
+  ]);
+  for (const [name, document] of [
+    ['README.md', readme],
+    ['README.ko.md', readmeKo],
+    ['AGENT.md', agentGuide],
+  ]) {
+    assert.match(document, /codexAdapter/i, `${name} must scope unconditional bypass to codexAdapter`);
+    assert.match(document, /args_template/, `${name} must describe profile-controlled worker flags`);
+    assert.match(document, /exec \{prompt\}/, `${name} must identify the default worker profile`);
+  }
+  assert.doesNotMatch(readme, /manager and worker roles always run with/i);
+  assert.doesNotMatch(readmeKo, /매니저와 워커 역할은 모두/);
+  assert.doesNotMatch(agentGuide, /두 역할 모두 .*dangerously-bypass/);
+});
+
 test('putPolicy: stale edit after delete → NotFoundError, not a revived INSERT', async (t) => {
   // Codex final-review blocker: a PUT that carries expectedRevision means the
   // caller believes it is EDITING an existing row. If that row was deleted

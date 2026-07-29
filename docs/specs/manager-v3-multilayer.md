@@ -346,7 +346,8 @@ diet        모델         Conversation
   - `layer='pm'`: Top 5개 + 워커 내부 개입 API (`PATCH /tasks/:id/status`, `POST /runs/:id/input`, `POST /runs/:id/cancel`) — Phase 3a에서 사용
   - 두 변형 모두 "Always query the actual Palantir API" 조항 유지
 - `server/services/managerAdapters/codexAdapter.js` — `spawnOneTurn`에 `role` 인자 추가 (`'manager' | 'worker'`)
-  - 역할은 세션 메타데이터로만 유지하며 두 역할 모두 `--dangerously-bypass-approvals-and-sandbox` 를 항상 전달
+  - 두 역할 모두 `--dangerously-bypass-approvals-and-sandbox` 를 항상 전달하므로 launch flag는 역할과 무관
+  - 역할은 환경 경계에도 사용: 호출자가 `env`를 생략한 기본 로컬 실행에서 manager는 ambient 환경을 상속하지 않고 `{}`를 전달하지만 worker는 기존 호환성을 위해 `process.env`를 상속
   - 매니저가 Palantir Console API 를 호출하는 데 필요한 네트워크를 `--full-auto` 샌드박스가 차단하므로 역할별 sandbox 분기는 적용하지 않음
 - `server/tests/manager.test.js` — 회귀 테스트 추가
 
@@ -671,7 +672,7 @@ MVP 트랙 종료. 트리거 조건 모니터링 시작. PM 트랙 진입 여부
 
 | Phase | 설명 | PR | 상태 |
 |---|---|---|---|
-| 0 | Capability Diet (Write/Edit 제거, layer prompt, Codex role metadata; bypass는 역할 독립) | #20 | ✅ merged |
+| 0 | Capability Diet (Write/Edit 제거, layer prompt, Codex role별 환경 fallback; bypass는 역할 독립) | #20 | ✅ merged |
 | 1 | 데이터 모델 풍부화 (task_kind, pm settings, project_briefs, agent dormant fields) | #21 | ✅ merged |
 | 1.5 | Conversation identity + worker→Top parent notice (`managerRegistry`, `conversationService`, migration 009, `/api/conversations/*`, `/api/runs/:id/input` alias, Principle 9 hints) | #22 | ✅ merged |
 | 2 | 멀티 슬롯 PM 런타임 + PM-layer parent notice 확장 (`sendToManagerSlot`, `resolveParentSlot`, `POST /api/manager/pm/:projectId/message`, `status.pms[]`, `onSlotCleared` 리스너, race-safe drain splice) | #27 | ✅ merged |

@@ -497,11 +497,14 @@ spawn), keyed by `run_id` with `<pluginRef>/<relpath>` namespaced file
 hashes. Deleting a preset later does not erase past snapshot rows;
 `tasks.preferred_preset_id` is set NULL via app-level cascade.
 
-Codex manager and worker roles always run with
+Codex manager sessions launched through `codexAdapter` always run with
 `--dangerously-bypass-approvals-and-sandbox`; there is no environment-variable
 switch for this behavior. Managers need network access to call the Palantir
 Console API, and the `--full-auto` sandbox blocks that access, making
-orchestration impossible.
+orchestration impossible. Codex task workers use the separate lifecycle worker
+path: their approval and sandbox flags come from the profile's editable
+`args_template`. The default `exec {prompt}` profile does not add the bypass
+flag.
 
 ## Environment Variables
 

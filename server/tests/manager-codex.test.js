@@ -664,6 +664,56 @@ test('P4-S3a: injected executor without explicit env does not receive process.en
   assert.equal(capturedEnv[sentinelName], undefined);
 });
 
+test('Codex role selects omitted-env inheritance and the multilayer spec documents the boundary', async (t) => {
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const sentinelName = 'PALANTIR_CODEX_ROLE_ENV_SENTINEL';
+  const previousSentinel = process.env[sentinelName];
+  process.env[sentinelName] = 'ambient-host-credential';
+  t.after(() => {
+    if (previousSentinel === undefined) delete process.env[sentinelName];
+    else process.env[sentinelName] = previousSentinel;
+  });
+
+  const captured = {};
+  const adapters = [];
+  for (const role of ['manager', 'worker']) {
+    const adapter = createCodexAdapter({
+      runService: null,
+      codexBin: 'codex-test-bin',
+      spawnFn(_command, args, opts) {
+        captured[role] = { args: [...args], env: opts.env };
+        return createFakeDuplexChild();
+      },
+    });
+    adapters.push({ adapter, runId: `run_codex_role_env_${role}` });
+    adapter.startSession(`run_codex_role_env_${role}`, {
+      systemPrompt: 'environment boundary',
+      cwd: process.cwd(),
+      role,
+    });
+    adapter.runTurn(`run_codex_role_env_${role}`, { text: 'hi' });
+  }
+  t.after(async () => {
+    await Promise.all(adapters.map(({ adapter, runId }) => adapter.disposeSession(runId)));
+  });
+
+  assert.deepEqual(captured.manager.env, {});
+  assert.equal(captured.manager.env[sentinelName], undefined);
+  assert.equal(captured.worker.env[sentinelName], 'ambient-host-credential');
+  for (const role of ['manager', 'worker']) {
+    assert.ok(captured[role].args.includes('--dangerously-bypass-approvals-and-sandbox'));
+  }
+
+  const spec = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'docs', 'specs', 'manager-v3-multilayer.md'),
+    'utf8',
+  );
+  assert.doesNotMatch(spec, /역할은 세션 메타데이터로만 유지/);
+  assert.match(spec, /역할은 환경 경계에도 사용/);
+  assert.match(spec, /manager는 ambient 환경을 상속하지 않고 `\{\}`를 전달/);
+  assert.match(spec, /worker는 .*`process\.env`를 상속/);
+});
+
 test('P4-S3a: dispose during pending remote prompt placement removes created secret dir', async () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
   let resolvePlacement;

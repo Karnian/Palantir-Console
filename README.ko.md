@@ -521,11 +521,13 @@ PATCH  /api/runs/:id/skill-packs/checks — 팩 체크 업데이트
 
 > **API 레퍼런스 완결성**: 위 섹션들은 `server/app.js` (Phase 10G merge 시점) 가 mount 하는 모든 라우트를 열거한다. 새 라우트 추가 시 `app.js` 에 mount 하는 동시에 이 섹션에도 추가하지 않으면 이 파일이 서버와 조용히 drift 됨.
 
-Codex 매니저와 워커 역할은 모두
+`codexAdapter` 로 시작한 Codex 매니저 세션은
 `--dangerously-bypass-approvals-and-sandbox` 를 붙여 항상 실행되며, 이 동작을
 전환하는 환경변수는 없다. 매니저가 Palantir Console API 를 호출하려면 네트워크
 접근이 필요하고, `--full-auto` 샌드박스가 이를 차단해 오케스트레이션이
-불가능해지기 때문이다.
+불가능해지기 때문이다. Codex 작업 워커는 별도의 lifecycle worker 경로를
+사용하므로 승인·샌드박스 플래그가 편집 가능한 프로필 `args_template` 에
+의존한다. 기본 `exec {prompt}` 프로필은 bypass 플래그를 추가하지 않는다.
 
 ## 환경변수
 

@@ -277,9 +277,11 @@ function createCodexAdapter({
    * spawn `codex exec`, and capture thread_id.
    *
    * v3 Phase 0: accepts optional `role` ('manager' | 'worker', default 'manager').
-   * The role is retained as session metadata, but launch flags are intentionally
-   * role-independent: managers need unsandboxed network access for Palantir API
-   * orchestration, while workers need unrestricted filesystem writes.
+   * Launch flags are intentionally role-independent: managers need unsandboxed
+   * network access for Palantir API orchestration, while workers need
+   * unrestricted filesystem writes. Role is not metadata-only: when a default
+   * local caller omits env, it also selects the fail-closed manager `{}` env or
+   * the legacy worker `process.env` fallback.
    *
    * M1 (supersedes P4-2 note): object-shaped mcpConfig is consumed. Codex
    * 0.120.0 has no `--mcp-config` flag, but `-c
