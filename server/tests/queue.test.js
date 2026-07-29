@@ -318,6 +318,50 @@ test('queue: repeated failed observation emits one terminal event and one retry'
   assert.equal(h.runService.listRuns({ task_id: task.id }).length, 2);
 });
 
+test('queue: failed status event insert rolls back the transition so a later observation retries', async (t) => {
+  const { db } = await mkdb(t);
+  const eventBus = createEventBus();
+  const h = buildHarness(db, { eventBus });
+  t.after(() => h.lifecycleService.stopMonitoring());
+
+  const project = seedProject(h.projectService);
+  const task = seedTask(h.taskService, project.id);
+  const profile = seedProfile(db, { max: 0 });
+  const original = createRunningRun(h.runService, {
+    taskId: task.id,
+    profileId: profile.id,
+  });
+
+  db.exec(`
+    CREATE TRIGGER fail_failed_status_event
+    BEFORE INSERT ON run_events
+    WHEN NEW.run_id = '${original.id}' AND NEW.event_type = 'status:failed'
+    BEGIN
+      SELECT RAISE(ABORT, 'simulated status event failure');
+    END
+  `);
+
+  h.lifecycleService.startMonitoring();
+  assert.throws(
+    () => h.runService.updateRunStatus(original.id, 'failed', { force: true }),
+    /simulated status event failure/,
+  );
+  assert.equal(
+    h.runService.getRun(original.id).status,
+    'running',
+    'the status CAS and its durable event must roll back together',
+  );
+  assert.equal(eventsOf(h.runService, original.id, 'status:failed').length, 0);
+  assert.equal(h.runService.listRuns({ task_id: task.id }).length, 1);
+
+  db.exec('DROP TRIGGER fail_failed_status_event');
+  h.runService.updateRunStatus(original.id, 'failed', { force: true });
+
+  assert.equal(h.runService.getRun(original.id).status, 'failed');
+  assert.equal(eventsOf(h.runService, original.id, 'status:failed').length, 1);
+  assert.equal(h.runService.listRuns({ task_id: task.id }).length, 2);
+});
+
 test('queue: duplicate run:ended delivery creates one retry attempt', async (t) => {
   const { db } = await mkdb(t);
   const eventBus = createEventBus();
@@ -434,7 +478,7 @@ test('queue: Codex rate-limit output marks the run non-retryable before run:ende
   const executionEngine = stubExecEngine();
   executionEngine.isAlive = () => false;
   executionEngine.detectExitCode = () => 1;
-  executionEngine.getOutput = () => 'Rate limit exceeded';
+  executionEngine.getOutput = () => 'Rate limit exceeded\n___EXIT_CODE_1___';
   const h = buildHarness(db, { eventBus, executionEngine });
   t.after(() => h.lifecycleService.stopMonitoring());
 
@@ -453,6 +497,38 @@ test('queue: Codex rate-limit output marks the run non-retryable before run:ende
   assert.equal(after.status, 'failed');
   assert.equal(after.non_retryable, 1);
   assert.equal(after.retry_count, 0, 'non_retryable is independent of the retry counter');
+  assert.equal(h.runService.listRuns({ task_id: task.id }).length, 1);
+  assert.equal(eventsOf(h.runService, original.id, 'worker:limit_rejected').length, 1);
+});
+
+test('queue: Codex usage-limit output marks the run non-retryable before run:ended', async (t) => {
+  const { db } = await mkdb(t);
+  const eventBus = createEventBus();
+  const executionEngine = stubExecEngine();
+  executionEngine.isAlive = () => false;
+  executionEngine.detectExitCode = () => 1;
+  executionEngine.getOutput = () => [
+    "You've hit your usage limit. Upgrade to Pro or try again in 2 hours.",
+    '___EXIT_CODE_1___',
+  ].join('\n');
+  const h = buildHarness(db, { eventBus, executionEngine });
+  t.after(() => h.lifecycleService.stopMonitoring());
+
+  const project = seedProject(h.projectService);
+  const task = seedTask(h.taskService, project.id);
+  const profile = seedProfile(db, { max: 0, command: 'codex' });
+  const original = createRunningRun(h.runService, {
+    taskId: task.id,
+    profileId: profile.id,
+  });
+
+  h.lifecycleService.startMonitoring();
+  await h.lifecycleService.checkHealth();
+
+  const after = h.runService.getRun(original.id);
+  assert.equal(after.status, 'failed');
+  assert.equal(after.non_retryable, 1);
+  assert.equal(after.retry_count, 0);
   assert.equal(h.runService.listRuns({ task_id: task.id }).length, 1);
   assert.equal(eventsOf(h.runService, original.id, 'worker:limit_rejected').length, 1);
 });
@@ -500,6 +576,7 @@ test('queue: task prose mentioning rate limits remains an ordinary retryable Cod
   executionEngine.getOutput = () => [
     'Implemented the API rate limit middleware.',
     'AssertionError: expected 200, got 500',
+    '___EXIT_CODE_1___',
   ].join('\n');
   const h = buildHarness(db, { eventBus, executionEngine });
   t.after(() => h.lifecycleService.stopMonitoring());

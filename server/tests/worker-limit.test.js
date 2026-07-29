@@ -29,7 +29,11 @@ test('worker limit: Claude only classifies a structured rejected status', () => 
 });
 
 test('worker limit: Codex reuses the existing rate-limit classifier', () => {
-  assert.deepEqual(classifyCodexWorkerOutput('Rate limit exceeded'), {
+  assert.deepEqual(classifyCodexWorkerOutput([
+    'Rate limit exceeded',
+    '___EXIT_CODE_1___',
+    'runner@host project %',
+  ].join('\n')), {
     provider: 'codex',
     kind: 'rate_limit',
     rate_limit_type: null,
@@ -38,9 +42,22 @@ test('worker limit: Codex reuses the existing rate-limit classifier', () => {
   assert.equal(classifyCodexWorkerOutput('Connection timeout'), null);
 });
 
+test('worker limit: Codex classifies the subscription usage-limit message', () => {
+  assert.deepEqual(classifyCodexWorkerOutput([
+    "You've hit your usage limit. Upgrade to Pro or try again in 2 hours.",
+    '___EXIT_CODE_1___',
+  ].join('\n')), {
+    provider: 'codex',
+    kind: 'rate_limit',
+    rate_limit_type: null,
+    resets_at: null,
+  });
+});
+
 test('worker limit: Codex does not classify task prose in a failed output tail', () => {
   assert.equal(classifyCodexWorkerOutput([
     'Implemented the API rate limit middleware.',
     'AssertionError: expected 200, got 500',
+    '___EXIT_CODE_1___',
   ].join('\n')), null);
 });

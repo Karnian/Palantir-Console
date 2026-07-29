@@ -741,6 +741,12 @@ test('classifyCodexErrorKind classifies common error patterns via regex', () => 
   // rate_limit
   assert.equal(classifyCodexErrorKind({ message: 'Rate limit exceeded' }), 'rate_limit');
   assert.equal(classifyCodexErrorKind({ message: 'rate-limit reached' }), 'rate_limit');
+  assert.equal(
+    classifyCodexErrorKind({
+      message: "You've hit your usage limit. Upgrade to Pro or try again in 2 hours.",
+    }),
+    'rate_limit',
+  );
 
   // auth_error
   assert.equal(classifyCodexErrorKind({ message: 'Unauthorized access' }), 'auth_error');

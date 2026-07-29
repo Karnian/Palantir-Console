@@ -1283,6 +1283,90 @@ test('detached remote Claude rejected limit without a result record is non-retry
   );
 });
 
+test('detached remote Claude limit classification survives a crash after the parsed marker', async (t) => {
+  for (const hasResult of [true, false]) {
+    await t.test(hasResult ? 'with result' : 'without result', async (t) => {
+      const db = await mkdb(t);
+      const records = [{
+        type: 'rate_limit_event',
+        rate_limit_info: {
+          status: 'rejected',
+          rateLimitType: 'five_hour',
+          resetsAt: 1785312000000,
+        },
+      }];
+      if (hasResult) {
+        records.push({
+          type: 'result',
+          is_error: true,
+          stop_reason: null,
+          result: 'request rejected',
+          usage: { input_tokens: 1, output_tokens: 0 },
+        });
+      }
+      const output = records.map((record) => JSON.stringify(record)).join('\n');
+      const remoteChannel = makeRemoteChannel({ alive: false, exitCode: 1, output });
+      const eventBus = createEventBus();
+      const h = buildHarness(db, { remoteChannel, eventBus });
+      t.after(() => h.lifecycleService.stopMonitoring());
+      createSshNode(h.nodeService);
+      const profile = seedProfile(db, { command: 'claude' });
+      const project = h.projectService.createProject({
+        name: `RemoteClaudeParsedCrash${hasResult ? 'Result' : 'NoResult'}`,
+        directory: '/workspace/project',
+        node_id: 'ssh-pod',
+      });
+      const task = seedTask(h.taskService, project.id);
+      const run = h.runService.createRun({
+        task_id: task.id,
+        agent_profile_id: profile.id,
+        prompt: 'health',
+        node_id: 'ssh-pod',
+      });
+      h.runService.addRunEvent(run.id, 'runtime:remote_worker_engine', JSON.stringify({
+        engine: 'claude-stream-json',
+        version: 1,
+      }));
+      h.runService.markRunStarted(run.id, { tmux_session: `palantir-run-${run.id}` });
+
+      const originalAddRunEvent = h.runService.addRunEvent;
+      let simulatedCrash = false;
+      h.runService.addRunEvent = (...args) => {
+        const eventId = originalAddRunEvent(...args);
+        if (!simulatedCrash && args[1] === 'runtime:remote_claude_stream_parsed') {
+          simulatedCrash = true;
+          throw new Error('simulated controller crash after parsed marker');
+        }
+        return eventId;
+      };
+
+      h.lifecycleService.startMonitoring();
+      await h.lifecycleService.checkHealth();
+      assert.equal(simulatedCrash, true);
+      assert.equal(h.runService.getRun(run.id).status, 'running');
+      assert.equal(
+        h.runService.getRunEvents(run.id)
+          .filter((event) => event.event_type === 'runtime:remote_claude_stream_parsed').length,
+        1,
+      );
+
+      h.runService.addRunEvent = originalAddRunEvent;
+      await h.lifecycleService.checkHealth();
+
+      const after = h.runService.getRun(run.id);
+      assert.equal(after.status, 'failed');
+      assert.equal(after.non_retryable, 1);
+      assert.equal(after.retry_count, 0);
+      assert.equal(h.runService.listRuns({ task_id: task.id }).length, 1);
+      assert.equal(
+        h.runService.getRunEvents(run.id)
+          .filter((event) => event.event_type === 'worker:limit_rejected').length,
+        1,
+      );
+    });
+  }
+});
+
 test('detached remote Claude heartbeat never persists raw tool input', async (t) => {
   const db = await mkdb(t);
   const secret = 'tool-input-secret-must-not-enter-events';

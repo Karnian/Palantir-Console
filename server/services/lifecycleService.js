@@ -2641,6 +2641,10 @@ function createLifecycleService({
     const parsed = parseClaudeStreamJsonOutput(raw);
     if (!parsed.recognized) return null;
 
+    const rejectedLimit = classifyClaudeRateLimitEvents(parsed.events);
+    const rejectedLimitFailure = rejectedLimit && (!parsed.result || parsed.result.is_error)
+      ? rejectedLimit
+      : null;
     const priorEvents = runService.getRunEvents(run.id);
     const alreadyParsed = priorEvents.some(
       (event) => event.event_type === 'runtime:remote_claude_stream_parsed',
@@ -2689,20 +2693,23 @@ function createLifecycleService({
           num_turns: parsed.result.num_turns,
         }));
       }
+      // This durable classification must precede the parsed marker. If the
+      // controller dies after that marker, the next controller intentionally
+      // skips replaying parse side effects; non_retryable therefore has to be
+      // committed before the marker can advertise completion.
+      if (rejectedLimitFailure) {
+        markWorkerLimitFailure(runService, run.id, rejectedLimitFailure);
+      }
       runService.addRunEvent(run.id, 'runtime:remote_claude_stream_parsed', JSON.stringify({
         events: parsed.events.length,
         has_result: !!parsed.result,
       }));
     }
 
-    const rejectedLimit = classifyClaudeRateLimitEvents(parsed.events);
     if (!parsed.result) {
       // Recognized NDJSON may consist solely of user/tool events. Never fall
       // back to that raw stream: tool inputs/results can contain file contents
       // or tokens that must not enter observable final_output events.
-      if (rejectedLimit && !alreadyParsed) {
-        markWorkerLimitFailure(runService, run.id, rejectedLimit);
-      }
       return {
         output: parsed.text || '',
         status: rejectedLimit ? 'failed' : null,
@@ -2725,9 +2732,6 @@ function createLifecycleService({
     const limitFailure = parsed.result.is_error
       ? rejectedLimit
       : null;
-    if (limitFailure && !alreadyParsed) {
-      markWorkerLimitFailure(runService, run.id, limitFailure);
-    }
     if (hitLimit && !alreadyParsed) {
       runService.addRunEvent(run.id, 'limit_reached', JSON.stringify({
         message: `Agent stopped due to ${stopReason} — task may be incomplete`,

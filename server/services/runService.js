@@ -953,12 +953,26 @@ function createRunService(db, eventBus) {
     return stmts.getById.get(id);
   }
 
+  // The durable status event is part of the transition commit. Publishing to
+  // the in-process bus remains outside this transaction, after SQLite commits.
+  // If the event INSERT fails, the CAS is rolled back and a later terminal
+  // observation can perform the transition instead of being mistaken for a
+  // duplicate of a partially committed transition.
+  const persistStatusTransition = db.transaction((id, status, fromStatus, payloadJson) => {
+    const info = stmts.updateStatusCas.run(status, status, id, fromStatus);
+    if (info.changes === 0) return null;
+    const run = stmts.getById.get(id);
+    const eventInfo = stmts.insertEvent.run(id, `status:${status}`, payloadJson);
+    return { run, eventId: eventInfo.lastInsertRowid };
+  });
+
   function updateRunStatus(id, status, { force = false, reason = null } = {}) {
     if (!VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid run status: ${status}`);
     }
     let current = null;
     let updated = false;
+    let transition = null;
 
     // A conditional write makes duplicate terminal observations idempotent
     // across callers and processes. `force` still bypasses transition
@@ -996,8 +1010,13 @@ function createRunService(db, eventBus) {
         }
       }
 
-      const info = stmts.updateStatusCas.run(status, status, id, current.status);
-      if (info.changes > 0) {
+      transition = persistStatusTransition(
+        id,
+        status,
+        current.status,
+        reason ? JSON.stringify({ reason }) : null,
+      );
+      if (transition) {
         updated = true;
         break;
       }
@@ -1007,9 +1026,13 @@ function createRunService(db, eventBus) {
     }
 
     const fromStatus = current.status;
-    const run = stmts.getById.get(id);
-    addRunEvent(id, `status:${status}`, reason ? JSON.stringify({ reason }) : null);
+    const { run, eventId: statusEventId } = transition;
     if (eventBus) {
+      eventBus.emit('run:event', {
+        runId: id,
+        eventType: `status:${status}`,
+        eventId: statusEventId,
+      });
       // v3 Phase 5 semantic event fields (spec §9.8):
       //   from_status / to_status — the transition, not just the
       //     terminal state. A client that missed the previous status
