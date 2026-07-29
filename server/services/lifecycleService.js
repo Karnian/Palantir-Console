@@ -2474,7 +2474,7 @@ function createLifecycleService({
           if (!run || Number(run.is_manager || 0) === 1) continue;
 
           const nodeId = run.node_id || 'local';
-          const createdAtMs = Date.parse(run.created_at || '');
+          const createdAtMs = parseSqliteUtc(run.created_at);
           if (!Number.isFinite(createdAtMs)) continue;
 
           const waitedMs = timestamp - createdAtMs;
@@ -2521,7 +2521,7 @@ function createLifecycleService({
       for (const run of runs) {
         try {
           if (!run || Number(run.is_manager || 0) === 1) continue;
-          const started = Date.parse(run.materialize_started_at || '');
+          const started = parseSqliteUtc(run.materialize_started_at);
           if (!Number.isFinite(started)) continue;
           if (timestamp - started <= MATERIALIZE_STUCK_THRESHOLD_MS) continue;
           const token = run.materialize_claim_token || null;
@@ -2889,7 +2889,9 @@ function createLifecycleService({
             // Process is idle or dead — check idle timeout
             const events = runService.getRunEvents(run.id);
             const lastEvent = events[events.length - 1];
-            const lastActivity = lastEvent ? new Date(lastEvent.created_at).getTime() : new Date(run.started_at || run.created_at).getTime();
+            const lastActivity = lastEvent
+              ? parseSqliteUtc(lastEvent.created_at)
+              : parseSqliteUtc(run.started_at || run.created_at);
             const idleTime = Date.now() - lastActivity;
 
             if (idleTime > IDLE_TIMEOUT_MS) {

@@ -8,10 +8,9 @@
 //
 // K-low-3 round 2 (Codex BLOCK): the previous implementation appended
 // 'Z' unconditionally to every string, which silently broke proper ISO
-// inputs (DriftDrawer normalizes via `new Date(row.created_at).toISOString()`
-// before calling these helpers). We now route through the existing
-// `Date` parser for already-zoned strings and only force the UTC suffix
-// when the SQLite shape (no T/Z) is detected.
+// inputs (including optimistic UI timestamps produced by `toISOString()`).
+// We now route through the existing `Date` parser for already-zoned strings
+// and only force the UTC suffix when the input has no zone.
 // Exported so other components can normalize the same SQLite/ISO/numeric
 // inputs without re-rolling the parser. `formatTs` in McpTemplatesView
 // used to inline a copy of this logic and broke on ISO Z input —
