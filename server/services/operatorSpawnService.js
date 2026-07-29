@@ -831,14 +831,6 @@ function createOperatorSpawnService({
           409,
         );
       }
-      if (isRemoteNode) {
-        failOperatorRun(
-          runId,
-          'operator:repo_remote_unsupported',
-          { project_id: project.id, node_id: nodeId || 'local' },
-          'repo materialization is unsupported on remote nodes',
-        );
-      }
       if (resumeRepoWorkspace) {
         return finishSpawn(resumeRepoWorkspace);
       }

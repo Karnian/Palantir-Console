@@ -226,15 +226,19 @@ curl -s -X DELETE ${base}/api/tasks/TASK_ID${authHeader}
   const runIdHint = isProjectLayer(layer)
     ? 'your pm_run_id (shown in your project section)'
     : 'your top_run_id (shown in the Manager Identity section)';
+  const specialistWorkRouting = isProjectLayer(layer)
+    ? 'For any substantial work (coding, refactoring, analysis) still delegate to a worker via /execute.'
+    : `For any substantial work (coding, refactoring, analysis), follow the Top delegation contract
+below: route pm_enabled project work through that project's PM, and use /execute only for
+direct-handling cases.`;
   const specialistNote = (specialistAvailable && adapterType === 'codex')
     ? `
 ## Consulting an Operator specialist (mid-turn, read-only)
 
 For a focused sub-question you can consult a **specialist** DURING your turn (e.g. "which agent
 profile fits X?", "summarize the registry metadata for Y"). A specialist has NO workspace and NO
-tools beyond internal registry/metadata lookup — it returns text ADVICE only. For any substantial
-work (coding, refactoring, analysis) still delegate to a worker via /execute; the specialist is for
-quick read-only consultation.
+tools beyond internal registry/metadata lookup — it returns text ADVICE only. ${specialistWorkRouting}
+The specialist is for quick read-only consultation.
 
 1. Pick a profile id: curl -s ${base}/api/operator/profiles${authHeader}
 2. Invoke it (blocks until it answers — allow up to ~2 min):

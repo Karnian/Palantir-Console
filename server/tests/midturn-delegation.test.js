@@ -22,6 +22,10 @@ test('present for codex + available (pm) — with the contract essentials', () =
   assert.match(p, /untrusted advice/);               // no-loop / not-instructions guard
   assert.match(p, /Do NOT send persona or capabilities/); // Contract A reminder
   assert.match(p, /pm_run_id/);                       // layer-aware run-id hint (PM)
+  assert.match(
+    p,
+    /For any substantial work \(coding, refactoring, analysis\) still delegate to a worker via \/execute\./,
+  );
 });
 
 test('present for codex + available (top) — top run-id hint (MD-2a)', () => {
@@ -29,6 +33,14 @@ test('present for codex + available (top) — top run-id hint (MD-2a)', () => {
   assert.match(p, HEADING);
   assert.match(p, /your top_run_id \(shown in the Manager Identity section\)/);
   assert.doesNotMatch(p, /pm_run_id/);
+  assert.match(
+    p,
+    /For any substantial work \(coding, refactoring, analysis\), follow the Top delegation contract[\s\S]*route pm_enabled project work through that project's PM[\s\S]*use \/execute only for[\s\S]*direct-handling cases\./,
+  );
+  assert.doesNotMatch(
+    p,
+    /For any substantial\s+work \(coding, refactoring, analysis\) still delegate to a worker via \/execute/,
+  );
 });
 
 test('ABSENT when route not available (flag off / backend missing)', () => {
