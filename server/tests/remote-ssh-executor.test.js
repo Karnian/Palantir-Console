@@ -1034,6 +1034,23 @@ test('spawnInteractive worker rejects API base URL userinfo before spawning ssh'
   assert.equal(spawn.calls.length, 0);
 });
 
+test('spawnInteractive worker removes a case-variant API base from explicit env and allowlist', async () => {
+  const apiBase = 'http://case-user:case-password@console.internal:4177';
+  const spawn = rootGuardSpawn();
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await exec.spawnInteractive('claude', ['--print'], {
+    worker: true,
+    envAllowlist: ['palantir_api_base'],
+    env: { palantir_api_base: apiBase },
+  });
+
+  assert.equal(spawn.calls.length, 1);
+  const callText = JSON.stringify(spawn.calls[0].args);
+  assert.equal(callText.includes(apiBase), false);
+  assert.doesNotMatch(callText, /palantir_api_base/i);
+});
+
 test('spawnInteractive rejects a manager capability that cannot be line-framed', async () => {
   const spawn = makeSpawn(() => {});
   const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
@@ -1467,6 +1484,27 @@ test('spawnWorker ignores allowlisted ambient API base without a worker capabili
     .split('\0')
     .filter(Boolean);
   assert.equal(actualEnvArgv.some((arg) => arg.includes(ambientApiBase)), false, actualEnvArgv);
+});
+
+test('spawnWorker removes a case-variant API base from SSH argv and the pod allowlist', async () => {
+  const runId = 'case_variant_api_base';
+  const apiBase = 'http://case-user:case-password@console.internal:4177';
+  const spawn = workerSpawnHarness(runId);
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await executor.spawnWorker(runId, {
+    command: 'codex',
+    args: ['exec'],
+    cwd: '/srv/root/project',
+    env: { palantir_api_base: apiBase },
+    envAllowlist: ['palantir_api_base'],
+  });
+
+  const tmuxCall = spawn.calls.find((call) => scriptOf(call).includes('tmux new-session'));
+  assert.ok(tmuxCall);
+  const callText = JSON.stringify(tmuxCall.args);
+  assert.equal(callText.includes(apiBase), false);
+  assert.doesNotMatch(callText, /palantir_api_base/i);
 });
 
 test('spawnWorker rejects an API base with URL userinfo before handoff', async () => {

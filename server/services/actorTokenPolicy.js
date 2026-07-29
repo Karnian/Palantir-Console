@@ -242,6 +242,10 @@ function isActorCredentialKey(key) {
     || normalized === 'PALANTIR_MANAGER_TOKEN';
 }
 
+function isWorkerApiBaseKey(key) {
+  return typeof key === 'string' && key.toUpperCase() === 'PALANTIR_API_BASE';
+}
+
 function stripActorCredentials(env) {
   for (const key of Object.keys(env)) {
     if (isActorCredentialKey(key)) delete env[key];
@@ -439,7 +443,9 @@ function applyWorkerCredentialPolicy(explicitEnv = {}, {
   const merged = stripActorCredentials({ ...(explicitEnv || {}) });
   // Drop profile-provided values first; only the server-selected apiBase may
   // reintroduce this address.
-  delete merged.PALANTIR_API_BASE;
+  for (const key of Object.keys(merged)) {
+    if (isWorkerApiBaseKey(key)) delete merged[key];
+  }
   const hasWorkerToken = typeof workerToken === 'string' && !!workerToken;
   if (hasWorkerToken) {
     if (!actorTokenPolicyFrom(actorTokens).capabilitiesEnabled) {
@@ -626,6 +632,7 @@ module.exports = {
   prepareActorTokenEnvironment,
   resolveActorTokenPolicy,
   isActorCredentialKey,
+  isWorkerApiBaseKey,
   PROCESS_BASE_ENV_KEYS,
   WORKER_BASE_ENV_KEYS,
   NETWORK_ENV_KEYS,

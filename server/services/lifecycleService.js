@@ -28,6 +28,7 @@ const {
   resolveActorTokenPolicy,
   applyWorkerCredentialPolicy,
   isActorCredentialKey,
+  isWorkerApiBaseKey,
 } = require('./actorTokenPolicy');
 const { isBearerEnvKeyDenied } = require('./envDenylist');
 const {
@@ -2121,7 +2122,7 @@ function createLifecycleService({
       // run-bound worker capability. Never ask a remote executor to recover an
       // ambient pod value for it; the executor enforces the same boundary.
       return Array.isArray(arr)
-        ? arr.filter(k => typeof k === 'string' && k !== 'PALANTIR_API_BASE')
+        ? arr.filter(k => typeof k === 'string' && !isWorkerApiBaseKey(k))
         : [];
     } catch {
       return [];

@@ -7,6 +7,7 @@ const {
   WORKER_BASE_ENV_KEYS,
   MANAGER_BASE_ENV_KEYS,
   isActorCredentialKey,
+  isWorkerApiBaseKey,
   normalizeWorkerApiBase,
 } = require('./actorTokenPolicy');
 
@@ -232,7 +233,7 @@ function normalizeEnvKeyList(keys) {
     // explicitly after env -i, from stdin or a mode-0600 file.
     if (
       key === 'PATH'
-      || key === 'PALANTIR_API_BASE'
+      || isWorkerApiBaseKey(key)
       || isActorCredentialKey(key)
       || seen.has(key)
     ) continue;
@@ -935,7 +936,11 @@ function createRemoteSshNodeExecutor(node, {
     delete explicitEnv.PALANTIR_PM_TOKEN;
     delete explicitEnv.PALANTIR_WORKER_TOKEN;
     delete explicitEnv.PALANTIR_MANAGER_TOKEN;
-    if (worker) delete explicitEnv.PALANTIR_API_BASE;
+    if (worker) {
+      for (const key of Object.keys(explicitEnv)) {
+        if (isWorkerApiBaseKey(key)) delete explicitEnv[key];
+      }
+    }
     const processEnvKeys = [
       ...(worker ? REMOTE_WORKER_BASE_ENV_KEYS : remoteManagerBaseEnvKeys(commandName)),
       ...normalizeEnvKeyList(envAllowlist),
@@ -1435,7 +1440,9 @@ function createRemoteSshNodeExecutor(node, {
     delete workerEnv.PALANTIR_PM_TOKEN;
     delete workerEnv.PALANTIR_WORKER_TOKEN;
     delete workerEnv.PALANTIR_MANAGER_TOKEN;
-    delete workerEnv.PALANTIR_API_BASE;
+    for (const key of Object.keys(workerEnv)) {
+      if (isWorkerApiBaseKey(key)) delete workerEnv[key];
+    }
     const envParts = normalizeEnv({
       PALANTIR_TOKEN: null,
       PALANTIR_PM_TOKEN: null,

@@ -20,6 +20,17 @@ function uniqueRunId(label) {
   return `${label}-${process.pid}-${runSequence}`;
 }
 
+function isolatedActorPolicy() {
+  return {
+    humanToken: 'human-secret',
+    agentToken: 'automation-secret',
+    separated: true,
+    processIsolated: true,
+    capabilitiesEnabled: true,
+    boundary: 'run_capabilities',
+  };
+}
+
 function artifactPaths(runId) {
   const name = `palantir-run-${runId}`.replace(/[^a-zA-Z0-9_-]/g, '_');
   const scriptDir = path.join(os.tmpdir(), 'palantir-scripts');
@@ -204,7 +215,10 @@ test('spawnAgent clears stale tmux actor credentials and file-backs the current 
   });
 
   const tmux = makeTmuxCommand();
-  createTmuxEngine({ execFileSync: tmux.execFileSync }).spawnAgent(runId, {
+  createTmuxEngine({
+    execFileSync: tmux.execFileSync,
+    actorTokens: isolatedActorPolicy(),
+  }).spawnAgent(runId, {
     command: process.execPath,
     args: ['--version'],
     cwd: os.tmpdir(),
@@ -273,7 +287,10 @@ test('spawnAgent keeps run-bound values out of the actual env argv and drops an 
   });
 
   const tmux = makeTmuxCommand();
-  const engine = createTmuxEngine({ execFileSync: tmux.execFileSync });
+  const engine = createTmuxEngine({
+    execFileSync: tmux.execFileSync,
+    actorTokens: isolatedActorPolicy(),
+  });
   engine.spawnAgent(withToken, {
     command: process.execPath,
     args: [
@@ -318,6 +335,40 @@ test('spawnAgent keeps run-bound values out of the actual env argv and drops an 
   const bareScript = fs.readFileSync(bare.scriptPath, 'utf-8');
   assert.equal(bareScript.includes(apiBase), false);
   assert.equal(bareScript.includes('PALANTIR_API_BASE'), false);
+});
+
+test('tmux worker rejects API base URL userinfo before persisting startup artifacts', (t) => {
+  const runId = uniqueRunId('tmux-userinfo-api-base');
+  const paths = artifactPaths(runId);
+  const tmux = makeTmuxCommand();
+  const engine = createTmuxEngine({
+    execFileSync: tmux.execFileSync,
+    actorTokens: isolatedActorPolicy(),
+  });
+  t.after(() => {
+    engine.kill(runId);
+    for (const filePath of Object.values(paths)) {
+      try { fs.unlinkSync(filePath); } catch {}
+    }
+  });
+
+  assert.throws(
+    () => engine.spawnAgent(runId, {
+      command: process.execPath,
+      args: ['--version'],
+      cwd: os.tmpdir(),
+      env: {
+        PALANTIR_WORKER_TOKEN: 'scoped-token',
+        PALANTIR_API_BASE: 'http://tmux-user:tmux-password@console.internal:4177',
+      },
+    }),
+    (err) => (
+      err.code === 'WORKER_API_BASE_USERINFO'
+      && !/tmux-user|tmux-password/.test(err.message)
+    ),
+  );
+  assert.equal(tmux.calls.length, 0);
+  assert.equal(fs.existsSync(paths.scriptPath), false);
 });
 
 test('spawnAgent runs tmux workers without ambient server credentials', async (t) => {
@@ -497,6 +548,7 @@ test('tmux worker leaves no prompt or capability artifact when token persistence
   const tmux = makeTmuxCommand();
   const engine = createTmuxEngine({
     execFileSync: tmux.execFileSync,
+    actorTokens: isolatedActorPolicy(),
     writeFileSync(filePath, data, options) {
       if (path.basename(filePath) === 'token' && filePath.includes('.worker-token-')) {
         failedTokenPath = filePath;
@@ -551,15 +603,7 @@ test('subprocess worker writes the initial prompt to stdin and keeps it out of a
 });
 
 function createIsolatedSubprocessEngine() {
-  const actorTokens = {
-    humanToken: 'human-secret',
-    agentToken: 'automation-secret',
-    separated: true,
-    processIsolated: true,
-    capabilitiesEnabled: true,
-    boundary: 'run_capabilities',
-  };
-  return createSubprocessEngine({ actorTokens });
+  return createSubprocessEngine({ actorTokens: isolatedActorPolicy() });
 }
 
 function spawnRealCommand(engine, runId, spec) {

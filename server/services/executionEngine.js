@@ -167,13 +167,18 @@ function createTmuxEngine({
       env && typeof env === 'object' ? env : {},
       actorTokens,
     );
+    const workerEnv = applyWorkerCredentialPolicy(profileEnv, {
+      workerToken: profileEnv.PALANTIR_WORKER_TOKEN,
+      apiBase: profileEnv.PALANTIR_API_BASE,
+      actorTokens,
+    });
     // PATH_PREFIX is required on macOS installations where the Console starts
-    // with a restricted PATH but worker CLIs live under Homebrew. profileEnv
+    // with a restricted PATH but worker CLIs live under Homebrew. workerEnv
     // contains process.env.PATH, so exporting it unchanged below would silently
     // undo that prefix. Preserve the caller's PATH while keeping the required
     // lookup directories at the front.
     const augmentedProfileEnv = augmentProcessPath(
-      profileEnv,
+      workerEnv,
       ['/opt/homebrew/bin', '/opt/homebrew/sbin'],
     );
     // A worker capability must never be serialized into the long-lived tmux

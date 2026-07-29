@@ -319,6 +319,13 @@ test('remote worker gets no loopback memory capability without a public Console 
 test('remote worker gets no API base when proposal token mint returns null', async (t) => {
   const db = await mkdb(t);
   const minted = [];
+  const caseVariantApiBase = 'http://case-user:case-password@console.internal:4177';
+  const previousCaseVariantApiBase = process.env.palantir_api_base;
+  process.env.palantir_api_base = caseVariantApiBase;
+  t.after(() => {
+    if (previousCaseVariantApiBase === undefined) delete process.env.palantir_api_base;
+    else process.env.palantir_api_base = previousCaseVariantApiBase;
+  });
   const h = buildHarness(db, {
     lifecycleOptions: {
       workerProposalTokenService: {
@@ -332,7 +339,7 @@ test('remote worker gets no API base when proposal token mint returns null', asy
     },
   });
   createSshNode(h.nodeService);
-  const profile = seedProfile(db, { envAllowlist: ['PALANTIR_API_BASE'] });
+  const profile = seedProfile(db, { envAllowlist: ['palantir_api_base'] });
   const project = h.projectService.createProject({
     name: 'RemoteMintDisabled',
     directory: '/workspace/project',
@@ -349,7 +356,9 @@ test('remote worker gets no API base when proposal token mint returns null', asy
   const spec = h.remoteChannel.spawned[0].payload.spec;
   assert.equal('PALANTIR_WORKER_TOKEN' in spec.env, false);
   assert.equal('PALANTIR_API_BASE' in spec.env, false);
+  assert.equal('palantir_api_base' in spec.env, false);
   assert.deepEqual(spec.envAllowlist, []);
+  assert.equal(JSON.stringify(spec).includes(caseVariantApiBase), false);
   assert.doesNotMatch(spec.stdin, /memory\/propose/);
 });
 
