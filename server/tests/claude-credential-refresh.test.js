@@ -21,7 +21,9 @@ const EXPECTED_DEFAULT_PROBE_SHA256 = '820308350719054371674a32b5223987fd021e98a
 function refreshConfig() {
   return {
     enabled: true,
-    endpoint: 'https://documented-endpoint.invalid/token',
+    // Test-only path on an allowlisted Anthropic host. No test performs a live
+    // request; endpoint/client/grant/rotation behavior remains unverified.
+    endpoint: 'https://api.anthropic.com/test-only-unverified-refresh',
     timeoutMs: 2000,
     request: {
       method: 'POST',
@@ -94,6 +96,26 @@ function successfulProbeOptions(credentialsPath, overrides = {}) {
   };
 }
 
+function httpsResponseTransport({ statusCode = 200, body, onRequest } = {}) {
+  return {
+    request(requestOptions, onResponse) {
+      onRequest?.(requestOptions);
+      const request = new EventEmitter();
+      request.destroy = (error) => {
+        if (error) queueMicrotask(() => request.emit('error', error));
+      };
+      request.end = () => {
+        const response = new EventEmitter();
+        response.statusCode = statusCode;
+        onResponse(response);
+        response.emit('data', body);
+        response.emit('end');
+      };
+      return request;
+    },
+  };
+}
+
 test('refresh stays disabled and the #437 probe stays byte-identical without complete config', async (t) => {
   assert.deepEqual(
     resolveClaudeRefreshConfig({}),
@@ -122,6 +144,54 @@ test('refresh stays disabled and the #437 probe stays byte-identical without com
     crypto.createHash('sha256').update(CLAUDE_OAUTH_USAGE_JS).digest('hex'),
     EXPECTED_DEFAULT_PROBE_SHA256,
   );
+});
+
+test('BLOCKER 2: non-Anthropic refresh endpoint fails closed and emits a value-free event', async (t) => {
+  const rejectedConfig = {
+    ...refreshConfig(),
+    endpoint: 'https://collector.example/anything?source=secret-marker',
+  };
+  assert.deepEqual(
+    resolveClaudeRefreshConfig({ [CONFIG_ENV_KEY]: JSON.stringify(rejectedConfig) }),
+    { enabled: false, reason: 'endpoint_not_allowed', config: null },
+  );
+
+  const { credentialsPath } = await createCredentialFixture(t, expiredDocument());
+  let networkCalls = 0;
+  const result = await runClaudeCredentialRefreshProbe({
+    config: rejectedConfig,
+    credentialsPath,
+    platform: 'linux',
+    https: {
+      request() {
+        networkCalls += 1;
+        throw new Error('rejected endpoint must never reach HTTPS');
+      },
+    },
+  });
+  assert.equal(result.code, 4);
+  assert.equal(result.reason, 'refresh_config_invalid');
+  assert.equal(networkCalls, 0);
+
+  const warnings = [];
+  createRemoteSshNodeExecutor({
+    id: 'pod-rejected-endpoint',
+    kind: 'ssh',
+    ssh_host: 'pod.example',
+    ssh_user: 'runner',
+    exposed_roots: ['/srv/root'],
+  }, {
+    claudeRefreshConfig: rejectedConfig,
+    logger: { warn: (...args) => warnings.push(args) },
+  });
+  assert.equal(warnings.length, 1);
+  assert.deepEqual(warnings[0][1], {
+    event: 'claude_refresh_config_rejected',
+    nodeId: 'pod-rejected-endpoint',
+    reason: 'endpoint_not_allowed',
+  });
+  assert.ok(!JSON.stringify(warnings).includes('collector.example'));
+  assert.ok(!JSON.stringify(warnings).includes('secret-marker'));
 });
 
 test('refresh writeback preserves unknown root and OAuth fields', async (t) => {
@@ -193,6 +263,56 @@ test('CAS loss after refresh never overwrites a concurrent credential writer', a
   assert.equal(result.code, 8);
   assert.equal(result.stdout, '__CLAUDE_REFRESH_AMBIGUOUS__');
   assert.deepEqual(JSON.parse(await fs.readFile(credentialsPath, 'utf8')), concurrent);
+});
+
+test('BLOCKER 1: staged rotated token survives a later baseline conflict', async (t) => {
+  const { directory, credentialsPath } = await createCredentialFixture(t, expiredDocument());
+  const concurrent = expiredDocument({ concurrentUnknown: 'preserve-this-writer' });
+  let refreshCalls = 0;
+
+  const first = await runClaudeCredentialRefreshProbe(
+    successfulProbeOptions(credentialsPath, {
+      requestRefresh: async () => {
+        refreshCalls += 1;
+        // Preserve the old expired tokens but change otherwise-unknown bytes,
+        // exactly the baseline-hash conflict that used to delete the staged
+        // successor on the next probe.
+        await fs.writeFile(credentialsPath, JSON.stringify(concurrent), { mode: 0o600 });
+        return refreshResponse({ configured_refresh_field: 'new-rotated-refresh' });
+      },
+    }),
+  );
+  assert.equal(first.code, 8);
+  assert.equal(first.reason, 'credential_cas_lost');
+
+  const journalPath = path.join(directory, '.palantir-claude-refresh-transaction.json');
+  const stagedBefore = JSON.parse(await fs.readFile(journalPath, 'utf8'));
+  assert.equal(stagedBefore.state, 'staged');
+  assert.equal(
+    stagedBefore.nextCredentials.claudeAiOauth.refreshToken,
+    'new-rotated-refresh',
+  );
+
+  const second = await runClaudeCredentialRefreshProbe(
+    successfulProbeOptions(credentialsPath, {
+      requestRefresh: async () => {
+        refreshCalls += 1;
+        throw new Error('baseline conflict must not retry refresh');
+      },
+    }),
+  );
+  assert.equal(second.code, 8);
+  assert.equal(second.reason, 'staged_credential_conflict');
+  assert.equal(refreshCalls, 1);
+  assert.deepEqual(JSON.parse(await fs.readFile(credentialsPath, 'utf8')), concurrent);
+
+  const stagedAfter = JSON.parse(await fs.readFile(journalPath, 'utf8'));
+  assert.equal(stagedAfter.state, 'staged');
+  assert.equal(
+    stagedAfter.nextCredentials.claudeAiOauth.refreshToken,
+    'new-rotated-refresh',
+    'the only copy of the rotated successor must remain recoverable',
+  );
 });
 
 test('a staged response survives a crash and is committed without a second refresh', async (t) => {
@@ -385,4 +505,110 @@ test('an unreadable refresh response is journaled, not thrown away', async (t) =
     JSON.parse(await fs.readFile(credentialsPath, 'utf8')).claudeAiOauth.accessToken,
     'old-access-token',
   );
+});
+
+test('SERIOUS 3: malformed JSON from the default HTTPS transport is journaled verbatim', async (t) => {
+  const { credentialsPath } = await createCredentialFixture(t, expiredDocument());
+  const malformedBody = '{"configured_access_field":"issued","configured_refresh_field":"rotated-only-copy"';
+  let networkCalls = 0;
+
+  const result = await runClaudeCredentialRefreshProbe(
+    successfulProbeOptions(credentialsPath, {
+      requestRefresh: undefined,
+      https: httpsResponseTransport({
+        body: malformedBody,
+        onRequest: () => { networkCalls += 1; },
+      }),
+    }),
+  );
+  assert.equal(result.code, 8);
+  assert.equal(result.reason, 'refresh_response_unknown');
+  assert.equal(networkCalls, 1);
+
+  const journalPath = path.join(
+    path.dirname(credentialsPath),
+    '.palantir-claude-refresh-transaction.json',
+  );
+  const journal = JSON.parse(await fs.readFile(journalPath, 'utf8'));
+  assert.equal(journal.state, 'ambiguous');
+  assert.equal(journal.unreadableResponse, malformedBody);
+  assert.equal((await fs.stat(journalPath)).mode & 0o777, 0o600);
+  assert.deepEqual(
+    JSON.parse(await fs.readFile(credentialsPath, 'utf8')),
+    expiredDocument(),
+  );
+});
+
+test('SERIOUS 4: production path honors CLAUDE_CONFIG_DIR instead of stale default store', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-claude-config-dir-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const home = path.join(root, 'home');
+  const defaultDirectory = path.join(home, '.claude');
+  const customDirectory = path.join(root, 'custom-claude');
+  await fs.mkdir(defaultDirectory, { recursive: true });
+  await fs.mkdir(customDirectory, { recursive: true });
+
+  const staleDefault = expiredDocument({ store: 'stale-default' });
+  const activeCustom = expiredDocument({ store: 'active-custom' });
+  const defaultPath = path.join(defaultDirectory, '.credentials.json');
+  const customPath = path.join(customDirectory, '.credentials.json');
+  await fs.writeFile(defaultPath, JSON.stringify(staleDefault), { mode: 0o600 });
+  await fs.writeFile(customPath, JSON.stringify(activeCustom), { mode: 0o600 });
+
+  const result = await runClaudeCredentialRefreshProbe(
+    successfulProbeOptions(undefined, {
+      env: { CLAUDE_CONFIG_DIR: customDirectory },
+      os: { homedir: () => home },
+    }),
+  );
+  assert.equal(result.code, 0);
+  assert.deepEqual(JSON.parse(await fs.readFile(defaultPath, 'utf8')), staleDefault);
+  const writtenCustom = JSON.parse(await fs.readFile(customPath, 'utf8'));
+  assert.equal(writtenCustom.claudeAiOauth.store, 'active-custom');
+  assert.equal(writtenCustom.claudeAiOauth.accessToken, 'new-access-token');
+  assert.equal(writtenCustom.claudeAiOauth.refreshToken, 'new-refresh-token');
+});
+
+test('SERIOUS 5: overflowing expires_in is quarantined without repeated rotation', async (t) => {
+  const original = expiredDocument();
+  const { credentialsPath } = await createCredentialFixture(t, original);
+  let refreshCalls = 0;
+  const options = successfulProbeOptions(credentialsPath, {
+    requestRefresh: async () => {
+      refreshCalls += 1;
+      return refreshResponse({ configured_access_ttl_field: 1e308 });
+    },
+  });
+
+  const first = await runClaudeCredentialRefreshProbe(options);
+  assert.equal(first.code, 8);
+  assert.equal(first.reason, 'refresh_response_invalid');
+  assert.equal(refreshCalls, 1);
+  assert.deepEqual(JSON.parse(await fs.readFile(credentialsPath, 'utf8')), original);
+
+  const second = await runClaudeCredentialRefreshProbe(options);
+  assert.equal(second.code, 8);
+  assert.equal(refreshCalls, 1, 'invalid expiry must not consume the refresh token again');
+  assert.deepEqual(JSON.parse(await fs.readFile(credentialsPath, 'utf8')), original);
+});
+
+test('SERIOUS 5: absolute expiry must resolve to a future timestamp', async (t) => {
+  const original = expiredDocument();
+  const { credentialsPath } = await createCredentialFixture(t, original);
+  const config = refreshConfig();
+  delete config.response.accessTokenExpiresInField;
+  config.response.accessTokenExpiresAtField = 'configured_access_expiry_at';
+  config.response.accessTokenExpiresUnit = 'seconds';
+
+  const result = await runClaudeCredentialRefreshProbe(
+    successfulProbeOptions(credentialsPath, {
+      config,
+      requestRefresh: async () => refreshResponse({
+        configured_access_expiry_at: 9,
+      }),
+    }),
+  );
+  assert.equal(result.code, 8);
+  assert.equal(result.reason, 'refresh_response_invalid');
+  assert.deepEqual(JSON.parse(await fs.readFile(credentialsPath, 'utf8')), original);
 });

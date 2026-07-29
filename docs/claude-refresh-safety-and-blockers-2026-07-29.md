@@ -16,6 +16,10 @@ JSON이 불완전하거나, `enabled`가 명시적으로 `true`가 아니면 기
 - SHA-256: `820308350719054371674a32b5223987fd021e98a0b643da447fad083479a88a`
 
 설정이 완전할 때만 별도 probe를 선택한다. 설정값은 SSH argv에 넣지 않고 stdin으로 전달한다.
+endpoint host는 `api.anthropic.com` 또는 `console.anthropic.com` exact allowlist로 제한한다.
+그 밖의 host는 fail-closed로 기존 non-refresh probe를 선택하고
+`claude_refresh_config_rejected` 구조화 경고 이벤트를 남긴다. 경고에는 URL이나 token을
+포함하지 않는다.
 환경변수에는 다음 항목을 모두 명시해야 하며 코드에는 기본 endpoint, grant parameter 이름,
 grant 값, `client_id`, 응답 필드 이름이 없다.
 
@@ -29,8 +33,9 @@ grant 값, `client_id`, 응답 필드 이름이 없다.
 - refresh token 응답 생략을 허용할지 여부
 - 필요하면 refresh token 만료 필드와 단위
 
-이 스키마는 지원되는 값을 알아낸 뒤 넣을 자리만 제공한다. 아래 blocker가 해소되기 전에는
-실운영 환경변수를 설정하면 안 된다.
+이 스키마는 지원되는 값을 알아낸 뒤 넣을 자리만 제공한다. **이 경로는 아직 실 endpoint로
+검증되지 않았고 grant의 refresh token 회전 동작도 미검증이다.** 아래 blocker가 해소되기
+전에는 실운영 환경변수를 설정하면 안 되며, 기능은 명시적인 `enabled=true` 없이는 비활성이다.
 
 ## Claude CLI lock 근거
 
@@ -75,6 +80,9 @@ Claude CLI 저장 작업과도 경합한다.
 
 - 응답을 `staged` journal에 저장한 뒤 프로세스가 죽으면 다음 probe가 CAS 후 journal을
   자격증명 파일에 반영한다. refresh endpoint를 다시 호출하지 않는다.
+- `staged` 뒤 다른 writer가 자격증명 bytes를 바꾸면 자동 반영은 중단하되 journal은 절대
+  삭제하지 않는다. staged refresh token이 회전 후 남은 유일본일 수 있으므로 수동 복구
+  근거를 보존한다.
 - 자격증명 rename 뒤 journal 삭제 전에 죽으면 다음 처리에서 이미 반영된 SHA-256을 확인하고
   journal만 정리한다.
 - 요청 후 응답을 받기 전에 연결이 끊기면 서버가 refresh token을 이미 회전했을 수 있다.
@@ -146,7 +154,9 @@ macOS에서는 Keychain이 진실이고 `.credentials.json`은 잔재일 수 있
 모두 같은 ambiguous 격리로 간다. 안전한 방향이지만, `client_id` 하나 틀린 것만으로
 그 토큰이 영구히 refresh 불가가 된다. 실제 엔드포인트의 오류 의미가 확인되면 완화한다.
 
-**4. 이 경로는 실제로 도달 가능하다.**
-`PALANTIR_CLAUDE_REFRESH_CONFIG_JSON` 을 완전해 보이는 값으로 설정하면 실 pod 의
-자격증명 파일을 대상으로 **진짜 refresh 가 시도된다.** 차단은 코드 레벨 게이트가 아니라
-"아직 아무도 설정하지 않음 + 이 문서" 다. 위 세 blocker 가 해소되기 전에는 설정하지 말 것.
+**4. 이 경로는 명시적으로 켤 수 있지만 아직 검증되지 않았다.**
+`PALANTIR_CLAUDE_REFRESH_CONFIG_JSON` 을 완전해 보이는 값과 `enabled=true`로 설정하면
+allowlist 안의 host에 한해 실 pod 자격증명 파일을 대상으로 **진짜 refresh가 시도된다.**
+allowlist 밖 endpoint는 코드가 fail-closed로 거부하고 관측 가능한 경고를 남기지만,
+allowlist 안 endpoint의 정확한 path·client_id·grant·회전 계약은 여전히 실증되지 않았다.
+위 세 blocker가 해소되기 전에는 설정하지 말 것.

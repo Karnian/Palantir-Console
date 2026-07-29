@@ -1,6 +1,13 @@
 const CONFIG_ENV_KEY = 'PALANTIR_CLAUDE_REFRESH_CONFIG_JSON';
 
 const UNSAFE_OBJECT_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+// This path is opt-in and has NOT been verified against a live refresh
+// endpoint. Until endpoint/client/grant/rotation behavior is proven, accept
+// only exact Anthropic-owned hosts and fail closed for every other host.
+const CLAUDE_REFRESH_ENDPOINT_HOST_ALLOWLIST = Object.freeze([
+  'api.anthropic.com',
+  'console.anthropic.com',
+]);
 
 function isPlainObject(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -61,6 +68,11 @@ function validateClaudeRefreshConfig(input) {
     || endpointUrl.hash
   ) {
     throw new Error('endpoint must be an HTTPS URL without credentials or a fragment');
+  }
+  if (!CLAUDE_REFRESH_ENDPOINT_HOST_ALLOWLIST.includes(endpointUrl.hostname)) {
+    const error = new Error('endpoint host is not an allowed Anthropic host');
+    error.code = 'CLAUDE_REFRESH_ENDPOINT_NOT_ALLOWED';
+    throw error;
   }
 
   const request = input.request;
@@ -159,8 +171,14 @@ function resolveClaudeRefreshConfig(env = process.env) {
       reason: null,
       config: validateClaudeRefreshConfig(parsed),
     };
-  } catch {
-    return { enabled: false, reason: 'invalid', config: null };
+  } catch (error) {
+    return {
+      enabled: false,
+      reason: error?.code === 'CLAUDE_REFRESH_ENDPOINT_NOT_ALLOWED'
+        ? 'endpoint_not_allowed'
+        : 'invalid',
+      config: null,
+    };
   }
 }
 
@@ -199,6 +217,7 @@ async function runClaudeCredentialRefreshProbe(options = {}) {
   const os = options.os || require('node:os');
   const crypto = options.crypto || require('node:crypto');
   const https = options.https || require('node:https');
+  const env = options.env || process.env;
   const now = options.now || (() => Date.now());
   const sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const platform = options.platform || process.platform;
@@ -459,7 +478,12 @@ async function runClaudeCredentialRefreshProbe(options = {}) {
       throw new Error(`${label} is missing or invalid`);
     }
     const milliseconds = mapping.unit === 'seconds' ? value * 1000 : value;
-    return mapping.kind === 'in' ? now() + milliseconds : milliseconds;
+    const currentTime = now();
+    const expiresAt = mapping.kind === 'in' ? currentTime + milliseconds : milliseconds;
+    if (!Number.isFinite(milliseconds) || !Number.isFinite(expiresAt) || expiresAt <= currentTime) {
+      throw new Error(`${label} must resolve to a finite future timestamp`);
+    }
+    return expiresAt;
   }
 
   function normalizeRefreshResponse(payload, config, previousRefreshToken) {
@@ -567,7 +591,14 @@ async function runClaudeCredentialRefreshProbe(options = {}) {
       MAX_REFRESH_RESPONSE_BYTES,
     );
     if (response.statusCode !== 200) throw new Error('refresh endpoint rejected request');
-    return JSON.parse(response.body);
+    try {
+      return JSON.parse(response.body);
+    } catch {
+      const error = new Error('refresh endpoint returned unreadable JSON');
+      error.code = 'CLAUDE_REFRESH_RESPONSE_UNREADABLE';
+      error.unreadableResponse = response.body;
+      throw error;
+    }
   }
 
   async function defaultRequestUsage({ accessToken }) {
@@ -617,8 +648,9 @@ async function runClaudeCredentialRefreshProbe(options = {}) {
   // The plaintext file is not Claude Code's source of truth on macOS.
   if (platform === 'darwin') return tokenExpired('plaintext_not_authoritative');
 
+  const configDirectory = env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
   const credentialsPath = options.credentialsPath
-    || path.join(os.homedir(), '.claude', '.credentials.json');
+    || path.join(configDirectory, '.credentials.json');
   let initial;
   try {
     initial = await readCredentialSnapshot(credentialsPath);
@@ -657,11 +689,18 @@ async function runClaudeCredentialRefreshProbe(options = {}) {
         await removeJournal(journalPath, lockedSnapshot.directory);
         outcome = { kind: 'usage', accessToken: lockedSnapshot.document.claudeAiOauth.accessToken };
       } else if (lockedSnapshot.sha256 !== journal.baselineSha256) {
-        await removeJournal(journalPath, lockedSnapshot.directory);
-        const currentOauth = lockedSnapshot.document.claudeAiOauth;
-        outcome = isExpired(currentOauth)
-          ? { kind: 'result', value: tokenExpired('credential_changed') }
-          : { kind: 'usage', accessToken: currentOauth.accessToken };
+        // A staged token may be the only surviving copy after rotation. A
+        // concurrent writer makes automatic commit unsafe, but it never makes
+        // deleting the journal safe. Preserve every conflicting journal for
+        // manual recovery rather than destroying possible successor material.
+        outcome = {
+          kind: 'result',
+          value: ambiguous(
+            journal.state === 'staged'
+              ? 'staged_credential_conflict'
+              : 'refresh_journal_credential_conflict',
+          ),
+        };
       } else if (journal.state === 'staged') {
         const nextRaw = JSON.stringify(journal.nextCredentials);
         if (hash(nextRaw) !== journal.nextSha256) {
@@ -712,6 +751,9 @@ async function runClaudeCredentialRefreshProbe(options = {}) {
           state: 'ambiguous',
           baselineSha256: baseline.sha256,
           createdAt: now(),
+          ...(Object.prototype.hasOwnProperty.call(error || {}, 'unreadableResponse')
+            ? { unreadableResponse: error.unreadableResponse }
+            : {}),
         }, baseline);
         outcome = { kind: 'result', value: ambiguous('refresh_response_unknown') };
       }
@@ -795,6 +837,7 @@ async function runClaudeCredentialRefreshProbe(options = {}) {
 
 const CLAUDE_CREDENTIAL_REFRESH_PROBE_JS = [
   `const UNSAFE_OBJECT_KEYS=new Set(${JSON.stringify(Array.from(UNSAFE_OBJECT_KEYS))});`,
+  `const CLAUDE_REFRESH_ENDPOINT_HOST_ALLOWLIST=Object.freeze(${JSON.stringify(CLAUDE_REFRESH_ENDPOINT_HOST_ALLOWLIST)});`,
   `const isPlainObject=${isPlainObject.toString()};`,
   `const assertConfigString=${assertConfigString.toString()};`,
   `const assertFieldName=${assertFieldName.toString()};`,

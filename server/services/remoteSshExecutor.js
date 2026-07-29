@@ -505,6 +505,7 @@ function createRemoteSshNodeExecutor(node, {
   connectTimeoutMs = 10000,
   commandAllowlist = ['git'],
   claudeRefreshConfig,
+  logger = console,
 } = {}) {
   if (!node || node.kind !== 'ssh') {
     throw new Error('createRemoteSshNodeExecutor requires an ssh node row');
@@ -523,6 +524,18 @@ function createRemoteSshNodeExecutor(node, {
   const claudeRefreshResolution = claudeRefreshConfig === undefined
     ? resolveClaudeRefreshConfig(process.env)
     : resolveClaudeRefreshConfig({ [CLAUDE_REFRESH_CONFIG_ENV_KEY]: claudeRefreshConfig });
+  if (claudeRefreshResolution.reason === 'endpoint_not_allowed') {
+    // Value-free structured security event: never log the rejected URL because
+    // it may itself contain sensitive query data. The unverified refresh path
+    // remains disabled and the byte-stable non-refresh probe is selected.
+    try {
+      logger?.warn?.('[remoteSshExecutor] claude_refresh_config_rejected', {
+        event: 'claude_refresh_config_rejected',
+        nodeId: node.id,
+        reason: claudeRefreshResolution.reason,
+      });
+    } catch { /* diagnostics must not break fail-closed construction */ }
+  }
   const effectiveClaudeRefreshConfig = claudeRefreshResolution.config;
   let claudeUsageRefreshTail = Promise.resolve();
   let canonicalRootsPromise = null;
