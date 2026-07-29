@@ -2505,7 +2505,7 @@ function createLifecycleService({
           if (!run || Number(run.is_manager || 0) === 1) continue;
 
           const nodeId = run.node_id || 'local';
-          const createdAtMs = Date.parse(run.created_at || '');
+          const createdAtMs = parseSqliteUtc(run.created_at);
           if (!Number.isFinite(createdAtMs)) continue;
 
           const waitedMs = timestamp - createdAtMs;
@@ -2552,7 +2552,7 @@ function createLifecycleService({
       for (const run of runs) {
         try {
           if (!run || Number(run.is_manager || 0) === 1) continue;
-          const started = Date.parse(run.materialize_started_at || '');
+          const started = parseSqliteUtc(run.materialize_started_at);
           if (!Number.isFinite(started)) continue;
           if (timestamp - started <= MATERIALIZE_STUCK_THRESHOLD_MS) continue;
           const token = run.materialize_claim_token || null;
