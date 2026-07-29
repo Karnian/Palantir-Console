@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const net = require('node:net');
 const path = require('node:path');
 const { resolveAgentVendor } = require('../utils/agentVendor');
 const dotenv = require('dotenv');
@@ -411,6 +412,37 @@ function applyManagerCredentialPolicy(explicitEnv = {}, {
   return env;
 }
 
+function normalizeScopedIpv6ApiBase(apiBase) {
+  const match = apiBase.match(
+    /^([a-zA-Z][a-zA-Z\d+.-]*:)\/\/\[([^\]]+)\](?::([^/?#]*))?([/?#].*)?$/,
+  );
+  if (!match) return null;
+
+  // WHATWG URL deliberately does not implement RFC 6874 zone identifiers,
+  // while curl (the worker-side consumer) does. Validate the IPv6 address and
+  // zone independently, then let URL validate/canonicalize every other URL
+  // component using the same authority with the zone temporarily removed.
+  const scopedHost = match[2].match(
+    /^([0-9a-f:.]+)%25((?:[a-z0-9._~-]|%[0-9a-f]{2})+)$/i,
+  );
+  if (!scopedHost || !net.isIPv6(scopedHost[1])) return null;
+
+  const port = match[3] === undefined ? '' : `:${match[3]}`;
+  const suffix = match[4] || '';
+  let parsed;
+  try {
+    parsed = new URL(`${match[1]}//[${scopedHost[1]}]${port}${suffix}`);
+  } catch {
+    return null;
+  }
+
+  const canonicalAddress = parsed.hostname.replace(/^\[|\]$/g, '');
+  const canonicalAuthority = `[${canonicalAddress}%25${scopedHost[2]}]`
+    + (parsed.port ? `:${parsed.port}` : '');
+  return `${parsed.protocol}//${canonicalAuthority}${parsed.pathname}${parsed.search}${parsed.hash}`
+    .replace(/\/+$/, '');
+}
+
 function normalizeWorkerApiBase(apiBase) {
   if (apiBase === undefined || apiBase === null || apiBase === '') return null;
   if (typeof apiBase !== 'string' || /[\r\n\x00]/.test(apiBase)) {
@@ -434,6 +466,8 @@ function normalizeWorkerApiBase(apiBase) {
   try {
     parsed = new URL(normalized);
   } catch {
+    const scopedIpv6Base = normalizeScopedIpv6ApiBase(normalized);
+    if (scopedIpv6Base !== null) return scopedIpv6Base;
     const err = new Error('PALANTIR_API_BASE must be a valid URL');
     err.code = 'WORKER_API_BASE_INVALID';
     throw err;

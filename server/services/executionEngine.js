@@ -101,16 +101,11 @@ function cleanupStaleTmuxStartupArtifacts({
 
 function createTmuxEngine({
   execFileSync: runTmuxCommand = execFileSync,
-  actorTokens: initialActorTokens = resolveActorTokenPolicy(),
+  actorTokens = resolveActorTokenPolicy(),
   writeFileSync = fs.writeFileSync,
 } = {}) {
   const PATH_PREFIX = 'export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"';
   const tokenArtifacts = new Map();
-  let actorTokens = initialActorTokens;
-
-  function setActorTokenPolicy(nextActorTokens) {
-    actorTokens = nextActorTokens;
-  }
 
   function sessionName(runId) {
     return sanitizeSessionName(`palantir-run-${runId}`);
@@ -141,7 +136,11 @@ function createTmuxEngine({
     tokenArtifacts.delete(runId);
   }
 
-  function spawnAgent(runId, { command, args, stdin, cwd, env, outputLogPath }) {
+  function spawnAgent(
+    runId,
+    { command, args, stdin, cwd, env, outputLogPath },
+    spawnActorTokens = actorTokens,
+  ) {
     const {
       name,
       scriptDir,
@@ -170,12 +169,12 @@ function createTmuxEngine({
     const profileEnv = buildWorkerProcessEnv(
       process.env,
       env && typeof env === 'object' ? env : {},
-      actorTokens,
+      spawnActorTokens,
     );
     const workerEnv = applyWorkerCredentialPolicy(profileEnv, {
       workerToken: profileEnv.PALANTIR_WORKER_TOKEN,
       apiBase: profileEnv.PALANTIR_API_BASE,
-      actorTokens,
+      actorTokens: spawnActorTokens,
     });
     // PATH_PREFIX is required on macOS installations where the Console starts
     // with a restricted PATH but worker CLIs live under Homebrew. workerEnv
@@ -657,9 +656,19 @@ function createTmuxEngine({
     return listSessions().filter(s => s.isPalantir);
   }
 
-  return {
+  let api;
+  function withActorTokenPolicy(nextActorTokens) {
+    return {
+      ...api,
+      spawnAgent(runId, spec) {
+        return spawnAgent(runId, spec, nextActorTokens);
+      },
+    };
+  }
+
+  api = {
     type: 'tmux',
-    setActorTokenPolicy,
+    withActorTokenPolicy,
     spawnAgent,
     getOutput,
     sendInput,
@@ -671,33 +680,33 @@ function createTmuxEngine({
     inspectStartupArtifacts,
     reapStartupArtifacts,
   };
+  return api;
 }
 
 // ---------- SubprocessEngine (fallback) ----------
 
 function createSubprocessEngine({
-  actorTokens: initialActorTokens = resolveActorTokenPolicy(),
+  actorTokens = resolveActorTokenPolicy(),
 } = {}) {
   const processes = new Map();
   const PROCESS_TTL_MS = 10 * 60 * 1000; // Cleanup dead processes after 10 min
-  let actorTokens = initialActorTokens;
 
-  function setActorTokenPolicy(nextActorTokens) {
-    actorTokens = nextActorTokens;
-  }
-
-  function spawnAgent(runId, { command, args, stdin, cwd, env, outputLogPath }) {
+  function spawnAgent(
+    runId,
+    { command, args, stdin, cwd, env, outputLogPath },
+    spawnActorTokens = actorTokens,
+  ) {
     const safeCwd = validateCwd(cwd);
     assertSpawnAllowed({ command, source: 'executionEngine:subprocess' });
     if (stdin !== undefined && typeof stdin !== 'string') {
       throw new Error('worker stdin must be a string when provided');
     }
 
-    const profileEnv = buildWorkerProcessEnv(process.env, env, actorTokens);
+    const profileEnv = buildWorkerProcessEnv(process.env, env, spawnActorTokens);
     const workerEnv = applyWorkerCredentialPolicy(profileEnv, {
       workerToken: profileEnv.PALANTIR_WORKER_TOKEN,
       apiBase: profileEnv.PALANTIR_API_BASE,
-      actorTokens,
+      actorTokens: spawnActorTokens,
     });
     // Ensure common binary paths are available (e.g., homebrew, nvm, local bins)
     const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
@@ -837,9 +846,19 @@ function createSubprocessEngine({
     return []; // subprocess engine can't discover external processes
   }
 
-  return {
+  let api;
+  function withActorTokenPolicy(nextActorTokens) {
+    return {
+      ...api,
+      spawnAgent(runId, spec) {
+        return spawnAgent(runId, spec, nextActorTokens);
+      },
+    };
+  }
+
+  api = {
     type: 'subprocess',
-    setActorTokenPolicy,
+    withActorTokenPolicy,
     spawnAgent,
     getOutput,
     sendInput,
@@ -849,6 +868,7 @@ function createSubprocessEngine({
     listSessions,
     discoverGhostSessions,
   };
+  return api;
 }
 
 // ---------- Factory ----------

@@ -11,8 +11,9 @@ const { createSubprocessEngine } = require('../services/executionEngine');
 
 const fakeCodexPath = path.join(__dirname, 'fixtures', 'bin', 'fake-codex-stdin.js');
 
-test('injected execution engine uses the app capability policy at spawn', async (t) => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-app-engine-policy-'));
+test('shared injected execution engine keeps each app capability policy at spawn', async (t) => {
+  const tmpA = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-app-engine-policy-a-'));
+  const tmpB = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-app-engine-policy-b-'));
   const policyKeys = [
     'PALANTIR_TOKEN',
     'PALANTIR_PM_TOKEN',
@@ -30,9 +31,9 @@ test('injected execution engine uses the app capability policy at spawn', async 
   }
 
   const app = createApp({
-    storageRoot: tmp,
-    fsRoot: tmp,
-    dbPath: path.join(tmp, 'test.db'),
+    storageRoot: tmpA,
+    fsRoot: tmpA,
+    dbPath: path.join(tmpA, 'test.db'),
     executionEngine,
     authToken: 'human-token',
     pmToken: 'automation-token',
@@ -42,9 +43,24 @@ test('injected execution engine uses the app capability policy at spawn', async 
     operatorSchedulerEnabled: false,
     authResolverOpts: { hasKeychain: () => false },
   });
+  const appWithoutIsolation = createApp({
+    storageRoot: tmpB,
+    fsRoot: tmpB,
+    dbPath: path.join(tmpB, 'test.db'),
+    executionEngine,
+    authToken: 'other-human-token',
+    pmToken: 'other-automation-token',
+    agentProcessIsolation: false,
+    workerProposalBaseUrl: 'https://other-console.example',
+    memoryDistillEnabled: false,
+    operatorSchedulerEnabled: false,
+    authResolverOpts: { hasKeychain: () => false },
+  });
   t.after(async () => {
     try { await app.shutdown(); } catch { /* ignore */ }
-    fs.rmSync(tmp, { recursive: true, force: true });
+    try { await appWithoutIsolation.shutdown(); } catch { /* ignore */ }
+    fs.rmSync(tmpA, { recursive: true, force: true });
+    fs.rmSync(tmpB, { recursive: true, force: true });
   });
 
   const project = app.services.projectService.createProject({

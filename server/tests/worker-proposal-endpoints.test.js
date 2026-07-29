@@ -2,7 +2,10 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { resolveWorkerProposalEndpoints } = require('../app');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { createApp, resolveWorkerProposalEndpoints } = require('../app');
 
 test('explicit worker proposal base is shared by local and remote workers', () => {
   assert.deepEqual(resolveWorkerProposalEndpoints({
@@ -29,6 +32,33 @@ test('explicit worker proposal base rejects URL userinfo without echoing it', ()
       ),
     );
   }
+});
+
+test('RFC 6874 scoped IPv6 proposal base is preserved and does not block app boot', async (t) => {
+  const explicitBaseUrl = 'http://[fe80::1%25eth0]:4177/proxy-prefix';
+  assert.deepEqual(resolveWorkerProposalEndpoints({ explicitBaseUrl }), {
+    local: explicitBaseUrl,
+    remote: explicitBaseUrl,
+  });
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-scoped-ipv6-base-'));
+  const app = createApp({
+    storageRoot: tmp,
+    fsRoot: tmp,
+    dbPath: path.join(tmp, 'test.db'),
+    authToken: null,
+    pmToken: null,
+    agentProcessIsolation: false,
+    workerProposalBaseUrl: explicitBaseUrl,
+    memoryDistillEnabled: false,
+    operatorSchedulerEnabled: false,
+  });
+  t.after(async () => {
+    try { await app.shutdown(); } catch { /* ignore */ }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  assert.equal(typeof app.shutdown, 'function');
 });
 
 test('local worker proposal base follows a concrete bind host without enabling remote loopback', () => {

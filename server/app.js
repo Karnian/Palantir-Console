@@ -1265,16 +1265,16 @@ function createApp(options = {}) {
   const modelPolicyService = createModelPolicyService(db);
 
   // Execution engines
-  const executionEngine = options.executionEngine || createExecutionEngine({
+  const sharedExecutionEngine = options.executionEngine || createExecutionEngine({
     actorTokens: actorTokenPolicy,
   });
   // createApp owns capability issuance, while the concrete engine revalidates
-  // the capability immediately before spawn. An engine may have been created
-  // before it was injected, so make the app's resolved policy the single source
-  // for both decisions instead of retaining the engine's construction-time view.
-  if (typeof executionEngine.setActorTokenPolicy === 'function') {
-    executionEngine.setActorTokenPolicy(actorTokenPolicy);
-  }
+  // the capability immediately before spawn. Bind the resolved policy to an
+  // app-local facade so two apps may share process ownership without either
+  // app mutating the other's spawn policy.
+  const executionEngine = typeof sharedExecutionEngine.withActorTokenPolicy === 'function'
+    ? sharedExecutionEngine.withActorTokenPolicy(actorTokenPolicy)
+    : sharedExecutionEngine;
   const streamJsonEngine = createStreamJsonEngine({
     runService,
     eventBus,
