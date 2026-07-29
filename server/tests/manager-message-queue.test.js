@@ -369,6 +369,123 @@ test('persisted duplicate terminal keys cannot disagree with the live JSON parse
   assert.deepEqual(dispatched, ['oinv_first']);
 });
 
+test('a newer duplicate-terminal candidate cannot hide an earlier terminal event', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_shadow',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+  h.service.start();
+
+  const first = await h.service.enqueue(
+    'operator:oi_shadow',
+    { text: 'first scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_shadow',
+      adapterInvocationId: 'oinv_shadow',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  insertEvent.run(
+    run.id,
+    'mgr.turn_completed',
+    '{"data":{"invocationId":"oinv_shadow","terminal":true}}',
+  );
+  insertEvent.run(
+    run.id,
+    'mgr.turn_failed',
+    '{"data":{"invocationId":"oinv_shadow","terminal":true,"terminal":false}}',
+  );
+
+  await h.service.tick();
+  assert.equal(h.db.prepare('SELECT status FROM runs WHERE id = ?').get(run.id).status, 'running');
+  assert.equal(h.service.getMessage(first.message.id).status, 'delivered');
+  await h.service.awaitDrain();
+
+  const next = await h.service.enqueue(
+    'operator:oi_shadow',
+    { text: 'second scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_after_shadow',
+      adapterInvocationId: 'oinv_after_shadow',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.equal(next.message.status, 'processing');
+  assert.deepEqual(dispatched, ['oinv_shadow', 'oinv_after_shadow']);
+});
+
+test('a duplicate invocationId candidate is correlated with JSON.parse semantics', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_duplicate_invocation',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+  h.service.start();
+
+  const first = await h.service.enqueue(
+    'operator:oi_duplicate_invocation',
+    { text: 'first scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_duplicate_invocation',
+      adapterInvocationId: 'oinv_duplicate_invocation',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `).run(
+    run.id,
+    'mgr.turn_completed',
+    '{"data":{"invocationId":"wrong","invocationId":"oinv_duplicate_invocation","terminal":true}}',
+  );
+
+  assert.equal(h.service.reconcilePersistedTerminalEvents(), 1);
+  assert.equal(h.service.getMessage(first.message.id).status, 'delivered');
+  await h.service.awaitDrain();
+
+  const next = await h.service.enqueue(
+    'operator:oi_duplicate_invocation',
+    { text: 'second scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_after_duplicate_invocation',
+      adapterInvocationId: 'oinv_after_duplicate_invocation',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.deepEqual(dispatched, [
+    'oinv_duplicate_invocation',
+    'oinv_after_duplicate_invocation',
+  ]);
+});
+
 test('a malformed newer event cannot hide an earlier persisted terminal event', async (t) => {
   const h = createHarness(t, { withRunService: true });
   const run = h.runService.createRun({
@@ -421,6 +538,54 @@ test('a malformed newer event cannot hide an earlier persisted terminal event', 
   assert.equal(next.status, 'sent');
   assert.equal(next.message.status, 'processing');
   assert.deepEqual(dispatched, ['oinv_first', 'oinv_second']);
+});
+
+test('stale-claim reconciliation uses the same terminal candidate scan', async (t) => {
+  const h = createHarness(t);
+  const runService = createRunService(h.db, h.eventBus);
+  const run = runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_stale_terminal',
+    prompt: 'operator',
+  });
+  h.service.setDispatcher(() => ({
+    status: 'sent',
+    target: { kind: 'pm', runId: run.id },
+  }));
+  const original = await h.service.enqueue(
+    'operator:oi_stale_terminal',
+    { text: 'scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_stale_terminal',
+      adapterInvocationId: 'oinv_stale_terminal',
+      requireImmediate: true,
+    },
+  );
+  h.service.stop();
+
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  insertEvent.run(run.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: 'oinv_stale_terminal', terminal: true },
+  }));
+  insertEvent.run(run.id, 'mgr.turn_failed', '{broken');
+  h.db.prepare('UPDATE manager_message_queue SET lease_expires_at = 0 WHERE id = ?')
+    .run(original.message.id);
+
+  const restarted = createManagerMessageQueueService({
+    db: h.db,
+    eventBus: h.eventBus,
+    tickMs: 100000,
+  });
+  t.after(() => restarted.stop());
+
+  assert.equal(restarted.reconcileStaleClaims(), 1);
+  const recovered = restarted.getMessage(original.message.id);
+  assert.equal(recovered.status, 'delivered');
+  assert.equal(recovered.terminal_reason, 'turn_completed');
 });
 
 test('the current owner reconciler ignores non-terminal failures and preserves chat replay', async (t) => {

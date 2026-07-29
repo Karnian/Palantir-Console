@@ -1,6 +1,12 @@
 'use strict';
 
 const { randomUUID } = require('node:crypto');
+const {
+  MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
+  parseTerminalEventPayload,
+  isTerminalEventForInvocation,
+  findPersistedTerminalEvent,
+} = require('./terminalEventReconciliation');
 
 const DEFAULT_PER_CONVERSATION_CAP = 50;
 const DEFAULT_TICK_MS = 1000;
@@ -268,33 +274,15 @@ function createManagerMessageQueueService({
         AND status IN ('sending', 'processing')
       ORDER BY sequence
     `),
-    // This statement is shared by current-owner and stale-claim reconciliation.
-    // It narrows candidates to JSON boolean `true`; the JavaScript check below
-    // remains authoritative so reconciliation follows the live path's parsed
-    // value. That second check matters because SQLite JSON1 keeps the first
-    // duplicate object key while JSON.parse keeps the last. `json_type` is
-    // deliberate because `json_extract` conflates boolean true with number 1.
-    // codexAdapter
-    // persists non-terminal failures under the same event_type + invocationId
-    // (`kind: 'codex_error', terminal: false`), so matching on invocationId
-    // alone made restart reconciliation mistake a transient error for a
-    // completion — closing the queue lane and, worse, stamping the row with a
-    // terminal_reason the scheduler's recovery does not recognize.
-    terminalEvent: db.prepare(`
+    // SQL only collects bounded candidates. JavaScript below owns correlation
+    // and terminality because the live path's contract is JSON.parse semantics.
+    terminalEventCandidates: db.prepare(`
       SELECT event_type, payload_json
       FROM run_events
       WHERE run_id = ?
         AND event_type IN ('mgr.turn_completed', 'mgr.turn_failed')
-        AND json_extract(
-          CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
-          '$.data.invocationId'
-        ) = ?
-        AND json_type(
-          CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
-          '$.data.terminal'
-        ) = 'true'
       ORDER BY id DESC
-      LIMIT 1
+      LIMIT ?
     `),
     failRunActive: db.prepare(`
       UPDATE manager_message_queue
@@ -795,10 +783,9 @@ function createManagerMessageQueueService({
       ? runService.getRunEventById(runId, eventId)
       : null;
     if (!event || event.event_type !== eventType) return null;
-    let payload;
-    try { payload = event.payload_json ? JSON.parse(event.payload_json) : null; } catch { return null; }
+    const payload = parseTerminalEventPayload(event.payload_json);
     const id = payload?.data?.invocationId;
-    if (!id || payload?.data?.terminal !== true) return null;
+    if (!id || !isTerminalEventForInvocation(payload, id)) return null;
     return completeFromEvent(
       id,
       runId,
@@ -817,26 +804,26 @@ function createManagerMessageQueueService({
   }
 
   function completeFromPersistedTerminalEvent(row) {
+    // Current-owner and stale-claim reconciliation both enter through here, so
+    // neither recovery path can drift from the shared live-parser contract.
     if (!row?.run_id) return null;
     let terminal;
     try {
-      terminal = stmts.terminalEvent.get(row.run_id, row.adapter_invocation_id);
+      const candidates = stmts.terminalEventCandidates.all(
+        row.run_id,
+        MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
+      );
+      terminal = findPersistedTerminalEvent(candidates, row.adapter_invocation_id);
     } catch {
       return null;
     }
     if (!terminal) return null;
-    let payload;
-    try { payload = JSON.parse(terminal.payload_json || '{}'); } catch { return null; }
-    if (
-      payload?.data?.invocationId !== row.adapter_invocation_id
-      || payload?.data?.terminal !== true
-    ) return null;
     return completeFromEvent(
       row.adapter_invocation_id,
       row.run_id,
       terminal.event_type === 'mgr.turn_completed',
       terminal.event_type === 'mgr.turn_failed'
-        ? (payload?.summaryText || 'manager turn failed')
+        ? (terminal.payload?.summaryText || 'manager turn failed')
         : null,
     );
   }

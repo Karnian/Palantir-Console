@@ -6,6 +6,10 @@ const {
   ConflictError,
   NotFoundError,
 } = require('../utils/errors');
+const {
+  MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
+  findPersistedTerminalEvent,
+} = require('./terminalEventReconciliation');
 
 const ACTIVE_INVOCATION_STATUSES = new Set(['pending', 'claimed', 'delivering', 'running']);
 const TERMINAL_INVOCATION_STATUSES = new Set(['completed', 'failed', 'cancelled', 'uncertain']);
@@ -458,27 +462,21 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
          SET status=?, last_error=?, completed_at=datetime('now'), updated_at=datetime('now')
        WHERE id=? AND manager_run_id=? AND status='running'
     `),
+    runningInvocationsForTerminalReconciliation: db.prepare(`
+      SELECT id AS invocation_id, manager_run_id
+      FROM operator_invocations
+      WHERE status='running' AND manager_run_id IS NOT NULL
+      ORDER BY started_at ASC, id ASC
+    `),
+    // As in managerMessageQueueService, SQL is a bounded candidate collector;
+    // JSON.parse in findPersistedTerminalEvent is the authoritative classifier.
     persistedTerminalEvents: db.prepare(`
-      SELECT i.id AS invocation_id, i.manager_run_id, e.event_type, e.payload_json
-        FROM operator_invocations i
-        JOIN run_events e ON e.id=(
-          SELECT terminal.id
-            FROM run_events terminal
-           WHERE terminal.run_id=i.manager_run_id
-             AND terminal.event_type IN ('mgr.turn_completed','mgr.turn_failed')
-             AND json_extract(
-               CASE WHEN json_valid(terminal.payload_json) THEN terminal.payload_json ELSE '{}' END,
-               '$.data.invocationId'
-             )=i.id
-             AND json_type(
-               CASE WHEN json_valid(terminal.payload_json) THEN terminal.payload_json ELSE '{}' END,
-               '$.data.terminal'
-             )='true'
-           ORDER BY terminal.id ASC
-           LIMIT 1
-        )
-       WHERE i.status='running'
-       ORDER BY e.id ASC
+      SELECT event_type, payload_json
+      FROM run_events
+      WHERE run_id=?
+        AND event_type IN ('mgr.turn_completed','mgr.turn_failed')
+      ORDER BY id DESC
+      LIMIT ?
     `),
     resetFailures: db.prepare(`
       UPDATE operator_schedules SET consecutive_failures=0, updated_at=datetime('now') WHERE id=?
@@ -1053,15 +1051,19 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
 
   function reconcilePersistedTerminalEvents() {
     const reconciled = [];
-    for (const row of stmts.persistedTerminalEvents.all()) {
-      let payload;
-      try { payload = row.payload_json ? JSON.parse(row.payload_json) : null; } catch { payload = null; }
-      const success = row.event_type === 'mgr.turn_completed';
+    for (const row of stmts.runningInvocationsForTerminalReconciliation.all()) {
+      const candidates = stmts.persistedTerminalEvents.all(
+        row.manager_run_id,
+        MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
+      );
+      const terminal = findPersistedTerminalEvent(candidates, row.invocation_id);
+      if (!terminal) continue;
+      const success = terminal.event_type === 'mgr.turn_completed';
       const invocation = completeInvocation(
         row.invocation_id,
         row.manager_run_id,
         success,
-        success ? null : (payload?.summaryText || 'manager turn failed'),
+        success ? null : (terminal.payload?.summaryText || 'manager turn failed'),
       );
       if (invocation) reconciled.push(invocation);
     }

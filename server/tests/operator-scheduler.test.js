@@ -489,6 +489,74 @@ test('a persisted numeric terminal flag cannot complete a running invocation', (
   );
 });
 
+test('persisted candidates choose the newest JSON.parse-valid terminal event', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Duplicate terminal candidate', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  insertEvent.run(
+    managerRun.id,
+    'mgr.turn_failed',
+    `{"summaryText":"must be ignored","data":{"invocationId":"${claimed.id}","terminal":true,"terminal":false}}`,
+  );
+  insertEvent.run(managerRun.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: claimed.id, terminal: true },
+  }));
+
+  const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].status, 'completed');
+  assert.equal(h.scheduleService.getSchedule(schedule.id).consecutive_failures, 0);
+});
+
+test('persisted candidates correlate duplicate invocationId keys with JSON.parse semantics', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Duplicate invocation candidate', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `).run(
+    managerRun.id,
+    'mgr.turn_completed',
+    `{"data":{"invocationId":"wrong","invocationId":"${claimed.id}","terminal":true}}`,
+  );
+
+  const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].status, 'completed');
+});
+
+test('persisted candidates skip malformed newer events and keep scanning', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Malformed terminal candidate', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  insertEvent.run(managerRun.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: claimed.id, terminal: true },
+  }));
+  insertEvent.run(managerRun.id, 'mgr.turn_failed', '{broken');
+
+  const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].status, 'completed');
+});
+
 test('restart correlation loss releases a stale invocation even when the manager resumed', (t) => {
   const h = harness(t);
   const { instance } = createMappedOperator(h);
