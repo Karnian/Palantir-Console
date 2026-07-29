@@ -1080,13 +1080,23 @@ function createApp(options = {}) {
   // while production either supplies one-shot-file options or falls back to
   // the environment. Keep that precedence in the shared policy resolver used
   // by the standalone isolation diagnostic too.
-  const authToken = options.authToken !== undefined
-    ? options.authToken
+  const optionAuthToken = options.authToken;
+  const optionPmToken = options.pmToken;
+  const authTokenFromOptions = optionAuthToken !== undefined;
+  const pmTokenFromOptions = optionPmToken !== undefined;
+  const authToken = authTokenFromOptions
+    ? optionAuthToken
     : process.env.PALANTIR_TOKEN;
-  const pmToken = options.pmToken !== undefined
-    ? options.pmToken
+  const pmToken = pmTokenFromOptions
+    ? optionPmToken
     : process.env.PALANTIR_PM_TOKEN;
-  const actorTokenPolicy = resolveAppActorTokenPolicy(options, process.env);
+  const actorTokenOptions = {
+    actorTokenSource: options.actorTokenSource,
+    agentProcessIsolation: options.agentProcessIsolation,
+  };
+  if (authTokenFromOptions) actorTokenOptions.authToken = authToken;
+  if (pmTokenFromOptions) actorTokenOptions.pmToken = pmToken;
+  const actorTokenPolicy = resolveAppActorTokenPolicy(actorTokenOptions, process.env);
   const workerProposalTokenService = createWorkerProposalTokenService({
     actorTokens: actorTokenPolicy,
   });

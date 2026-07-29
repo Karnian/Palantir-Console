@@ -70,6 +70,44 @@ test('isolation diagnostic stays lock-step with the policy inputs used by create
   }
 });
 
+test('app actor token policy snapshots accessor-backed token options', () => {
+  let authReads = 0;
+  let pmReads = 0;
+  const options = { agentProcessIsolation: true };
+  Object.defineProperties(options, {
+    authToken: {
+      enumerable: true,
+      get() {
+        authReads += 1;
+        return authReads === 1 ? 'first-human' : 'late-human';
+      },
+    },
+    pmToken: {
+      enumerable: true,
+      get() {
+        pmReads += 1;
+        return pmReads === 1 ? 'first-pm' : 'late-pm';
+      },
+    },
+  });
+
+  const policy = resolveAppActorTokenPolicy(options, {});
+
+  assert.deepEqual({
+    authReads,
+    pmReads,
+    humanToken: policy.humanToken,
+    agentToken: policy.agentToken,
+    boundary: policy.boundary,
+  }, {
+    authReads: 1,
+    pmReads: 1,
+    humanToken: 'first-human',
+    agentToken: 'first-pm',
+    boundary: 'run_capabilities',
+  });
+});
+
 test('isolation diagnostic names both blocking requirements without exposing tokens', () => {
   const secret = 'must-never-appear';
   const result = diagnoseIsolation({

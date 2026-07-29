@@ -241,15 +241,19 @@ function buildActorTokenAppOptions({
  * PALANTIR_ACTOR_TOKEN_SOURCE must never relabel a direct environment token.
  */
 function resolveAppActorTokenPolicy(options = {}, env = process.env) {
-  const authToken = options.authToken !== undefined
-    ? options.authToken
+  const optionAuthToken = options.authToken;
+  const optionPmToken = options.pmToken;
+  const authTokenFromOptions = optionAuthToken !== undefined;
+  const pmTokenFromOptions = optionPmToken !== undefined;
+  const authToken = authTokenFromOptions
+    ? optionAuthToken
     : env.PALANTIR_TOKEN;
-  const pmToken = options.pmToken !== undefined
-    ? options.pmToken
+  const pmToken = pmTokenFromOptions
+    ? optionPmToken
     : env.PALANTIR_PM_TOKEN;
   const allConfiguredActorTokensFromOptions = (
-    (!authToken || options.authToken !== undefined)
-    && (!pmToken || options.pmToken !== undefined)
+    (!authToken || authTokenFromOptions)
+    && (!pmToken || pmTokenFromOptions)
   );
   return resolveActorTokenPolicy({
     PALANTIR_TOKEN: authToken,
