@@ -68,8 +68,8 @@ function parseMcpTools(capabilitiesJson) {
 // already swallow the same parse error, and diverging would recreate exactly
 // the fresh/resume asymmetry this function exists to remove. `undefined` is
 // the safe direction: it grants no extra keys.
-function resolveResumeEnvAllowlist(agentProfileService, { profileId, adapterType } = {}) {
-  if (!agentProfileService) return undefined;
+function resolveResumeAgentProfile(agentProfileService, { profileId, adapterType } = {}) {
+  if (!agentProfileService) return null;
   let profile = null;
   try {
     if (profileId && typeof agentProfileService.getProfile === 'function') {
@@ -78,6 +78,11 @@ function resolveResumeEnvAllowlist(agentProfileService, { profileId, adapterType
       profile = agentProfileService.listProfiles().find((candidate) => candidate.type === adapterType) || null;
     }
   } catch { /* treat an unreadable profile as "no allowlist" */ }
+  return profile;
+}
+
+function resolveResumeEnvAllowlist(agentProfileService, options = {}) {
+  const profile = resolveResumeAgentProfile(agentProfileService, options);
   if (!profile || !profile.env_allowlist) return undefined;
   try {
     const parsed = JSON.parse(profile.env_allowlist);
@@ -87,12 +92,18 @@ function resolveResumeEnvAllowlist(agentProfileService, { profileId, adapterType
     console.warn(
       `[security] manager_env_allowlist_unreadable ${JSON.stringify({
         profile_id: profile.id,
-        adapter: adapterType,
+        adapter: options.adapterType,
         reason: err && err.message,
       })}`
     );
     return undefined;
   }
+}
+
+function resolveResumePermissionMode(agentProfileService, options = {}) {
+  if (options.adapterType !== 'claude-code') return undefined;
+  const profile = resolveResumeAgentProfile(agentProfileService, options);
+  return profile?.permission_mode ?? 'bypassPermissions';
 }
 
 // authResolverOpts is forwarded into resolveManagerAuth for every preflight
@@ -200,6 +211,10 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
             profileId: r.agent_profile_id,
             adapterType,
           });
+          const permissionMode = resolveResumePermissionMode(agentProfileService, {
+            profileId: r.agent_profile_id,
+            adapterType,
+          });
           const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
           const resolvedSpawnEnv = buildManagerSpawnEnv({
             baseEnv: actorSpawnBaseEnv,
@@ -220,6 +235,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
               systemPrompt,
               env: spawnEnv,
               envAllowlist,
+              permissionMode,
               resumeSessionId: r.claude_session_id,
               model: r.session_model || undefined,
               reasoning_effort: r.session_effort || undefined,
@@ -465,6 +481,9 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 const envAllowlist = resolveResumeEnvAllowlist(agentProfileService, {
                   adapterType,
                 });
+                const permissionMode = resolveResumePermissionMode(agentProfileService, {
+                  adapterType,
+                });
                 const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
                 const resolvedSpawnEnv = isRemoteNode ? {} : buildManagerSpawnEnv({
                   baseEnv: actorSpawnBaseEnv,
@@ -507,6 +526,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                       ? applyManagerCredentialPolicy({}, { managerToken: token, actorTokens })
                       : spawnEnv,
                     envAllowlist,
+                    permissionMode,
                     role: 'manager',
                     nodeId,
                     // F-1: per-turn tier resolver — re-reads this instance's

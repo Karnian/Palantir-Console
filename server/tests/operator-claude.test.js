@@ -13,6 +13,7 @@ const { createProjectBriefService } = require('../services/projectBriefService')
 const { createManagerRegistry } = require('../services/managerRegistry');
 const { createNodeService } = require('../services/nodeService');
 const { createOperatorSpawnService } = require('../services/operatorSpawnService');
+const { createAgentProfileService } = require('../services/agentProfileService');
 
 async function mkdb(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-operator-claude-'));
@@ -153,6 +154,8 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   const runService = createRunService(db, null);
   const projectService = createProjectService(db);
   const projectBriefService = createProjectBriefService(db);
+  const agentProfileService = createAgentProfileService(db);
+  agentProfileService.updateProfile('claude-code', { permission_mode: 'acceptEdits' });
   const registry = createManagerRegistry({ runService });
   const topAdapter = makeFakeManagerAdapter('claude-code');
   const claudeAdapter = makeFakeManagerAdapter('claude-code');
@@ -172,6 +175,7 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
     managerAdapterFactory,
     projectService,
     projectBriefService,
+    agentProfileService,
     resolveManagerAuth: authOk,
   });
   const project = projectService.createProject({ name: 'claude-op', preferred_pm_adapter: 'claude' });
@@ -186,6 +190,7 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   assert.equal(typeof start.opts.onSessionStarted, 'function');
   assert.equal(typeof start.opts.onThreadStarted, 'function');
   assert.equal(start.opts.resumeSessionId, null);
+  assert.equal(start.opts.permissionMode, 'acceptEdits');
   assert.equal(runService.getRun(result.run.id).status, 'queued');
 
   start.opts.onSessionStarted('sess_claude_1');

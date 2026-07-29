@@ -261,7 +261,10 @@ function createAgentProfileService(db) {
     // or changing such a flag still enters the validator and is rejected.
     const templateActuallyChanged = (
       ('args_template' in fields && fields.args_template !== existing.args_template)
-      || ('command' in fields && fields.command !== existing.command)
+      || (
+        'command' in fields
+        && resolveAgentVendor(fields.command) !== resolveAgentVendor(existing.command)
+      )
     );
     validateAgentProfileForSave(mergedProfile, {
       // Also re-scan when the vendor changes into claude: the template was

@@ -409,11 +409,15 @@ function createOperatorSpawnService({
     // fall through to the resolver's defaults.
     let envAllowlist;
     let pmMcpTools = [];
+    let permissionMode = adapterType === 'claude-code' ? 'bypassPermissions' : undefined;
     try {
       if (agentProfileService) {
         const profiles = agentProfileService.listProfiles();
         const managerProfile = profiles.find(p => p.type === adapterType);
         if (managerProfile) {
+          if (adapterType === 'claude-code') {
+            permissionMode = managerProfile.permission_mode ?? 'bypassPermissions';
+          }
           if (managerProfile.env_allowlist) {
             const parsed = JSON.parse(managerProfile.env_allowlist);
             if (Array.isArray(parsed)) envAllowlist = parsed;
@@ -756,6 +760,7 @@ function createOperatorSpawnService({
             { managerToken: token, actorTokens },
           ),
           envAllowlist,
+          permissionMode,
           role: 'manager',
           nodeId,
           resumeThreadId,

@@ -125,3 +125,76 @@ test('Manager profile permission_mode reaches Claude CLI and NULL matches the wo
   response = await invokeApp(app, { method: 'POST', path: '/api/manager/stop' });
   assert.equal(response.status, 200, response.text);
 });
+
+test('Manager boot-resume preserves the stored Claude profile permission_mode', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-manager-resume-permission-'));
+  const argsFile = path.join(root, 'claude-resume-args.json');
+  const previousClaudeBin = process.env.CLAUDE_BIN;
+  const previousArgsFile = process.env.CLAUDE_ARGS_FILE;
+  process.env.CLAUDE_BIN = FAKE_CLAUDE;
+  process.env.CLAUDE_ARGS_FILE = argsFile;
+
+  const database = createDatabase(path.join(root, 'test.db'));
+  database.migrate();
+  const runService = createRunService(database.db, null);
+  const agentProfileService = createAgentProfileService(database.db);
+  agentProfileService.updateProfile('claude-code', {
+    permission_mode: 'acceptEdits',
+    env_allowlist: JSON.stringify(['CLAUDE_ARGS_FILE']),
+  });
+
+  const staleRun = runService.createRun({
+    is_manager: true,
+    agent_profile_id: 'claude-code',
+    prompt: 'resume stored session',
+    manager_adapter: 'claude-code',
+    manager_layer: 'top',
+    conversation_id: 'top',
+  });
+  runService.updateRunStatus(staleRun.id, 'running', { force: true });
+  runService.updateClaudeSessionId(staleRun.id, 'sess-review');
+
+  const streamJsonEngine = createStreamJsonEngine({ runService });
+  const managerAdapterFactory = createManagerAdapterFactory({ streamJsonEngine, runService });
+  const managerRegistry = createManagerRegistry({ runService });
+  const conversationService = createConversationService({
+    runService,
+    managerRegistry,
+    managerAdapterFactory,
+    lifecycleService: null,
+  });
+
+  createManagerRouter({
+    runService,
+    streamJsonEngine,
+    managerAdapterFactory,
+    managerRegistry,
+    conversationService,
+    agentProfileService,
+    authResolverOpts: {
+      hasKeychain: () => true,
+      hasCredentialsFile: () => false,
+    },
+  });
+
+  t.after(async () => {
+    const activeRunId = managerRegistry.getActiveRunId('top');
+    if (activeRunId) {
+      try {
+        await managerRegistry.getActiveAdapter('top')?.disposeSession(activeRunId);
+      } catch { /* already stopped */ }
+    }
+    database.close();
+    if (previousClaudeBin === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = previousClaudeBin;
+    if (previousArgsFile === undefined) delete process.env.CLAUDE_ARGS_FILE;
+    else process.env.CLAUDE_ARGS_FILE = previousArgsFile;
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  const args = await readArgs(argsFile);
+  assert.equal(permissionModeArg(args), 'acceptEdits');
+  const resumeIndex = args.indexOf('--resume');
+  assert.notEqual(resumeIndex, -1, `missing --resume in ${JSON.stringify(args)}`);
+  assert.equal(args[resumeIndex + 1], 'sess-review');
+});

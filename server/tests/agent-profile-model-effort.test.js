@@ -205,6 +205,12 @@ test('a legacy claude profile carrying the flag stays editable until the templat
   assert.equal(renamed.name, 'renamed legacy');
   assert.equal(renamed.args_template, '-p {prompt} --permission-mode acceptEdits');
 
+  // Changing only the executable path keeps the same Claude vendor and must
+  // not revalidate an untouched legacy template.
+  const relocated = service.updateProfile(legacy.id, { command: '/usr/local/bin/claude' });
+  assert.equal(relocated.command, '/usr/local/bin/claude');
+  assert.equal(relocated.args_template, '-p {prompt} --permission-mode acceptEdits');
+
   // Setting the structured field is likewise allowed; it is what fixes the row.
   const structured = service.updateProfile(legacy.id, { permission_mode: 'plan' });
   assert.equal(structured.permission_mode, 'plan');
