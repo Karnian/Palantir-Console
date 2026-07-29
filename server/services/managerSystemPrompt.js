@@ -360,7 +360,7 @@ Always query the actual Palantir API to get real data — never guess or assume.
  */
 function buildManagerSystemPrompt({ adapter, port, token, layer = 'top', adapterType, specialistAvailable = false }) {
   const guardrails = adapter && typeof adapter.buildGuardrailsSection === 'function'
-    ? adapter.buildGuardrailsSection()
+    ? adapter.buildGuardrailsSection({ layer })
     : '';
   return [
     buildRoleSection(),

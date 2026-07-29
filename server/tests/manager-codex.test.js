@@ -99,6 +99,8 @@ test('Codex Operator prompt requires tracked worker delegation without false san
 
   assert.doesNotMatch(prompt, /filesystem sandbox is active/i);
   assert.doesNotMatch(prompt, /tools are limited to read operations/i);
+  assert.doesNotMatch(prompt, /Project-related work MUST go through PM/i);
+  assert.match(prompt, /Delegated work goes through the Palantir \/execute API only/i);
   assert.match(prompt, /do not edit code directly[\s\S]*always delegate edits to a\s+worker/i);
   assert.match(prompt, /direct writes are technically possible/i);
   for (const trackedBoundary of [
@@ -111,12 +113,7 @@ test('Codex Operator prompt requires tracked worker delegation without false san
   }
 });
 
-// The guardrails section does not branch on layer today, so this duplicates the
-// assertions above. That is the point: it pins the property for Top as well, so
-// reintroducing the claim behind a layer condition — telling Top it is sandboxed
-// while Operator gets the truth — cannot pass. Top is the role that most needs
-// the honest version: its default cwd is the Console's own source tree.
-test('Codex Top prompt makes no false sandbox claim either', () => {
+test('Codex Top prompt routes project work through Operator without a conflicting worker contract', () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
   const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
   const adapter = createCodexAdapter({ runService: null });
@@ -130,6 +127,14 @@ test('Codex Top prompt makes no false sandbox claim either', () => {
 
   assert.doesNotMatch(prompt, /filesystem sandbox is active/i);
   assert.doesNotMatch(prompt, /tools are limited to read operations/i);
+  assert.match(prompt, /Project-related work MUST go through PM/i);
+  assert.match(
+    prompt,
+    /MUST delegate it to that project's PM[\s\S]*Do NOT spawn workers yourself for project-scoped work/i,
+  );
+  assert.match(prompt, /For project-scoped edits,\s+delegate to the project's Operator/i);
+  assert.doesNotMatch(prompt, /Delegated work goes through the Palantir \/execute API only/i);
+  assert.doesNotMatch(prompt, /always delegate edits to a\s+worker/i);
   assert.match(prompt, /direct writes are technically possible/i);
 });
 

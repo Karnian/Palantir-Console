@@ -65,6 +65,7 @@ const {
   resolveCodexUserConfigPath,
 } = require('./codexUserConfigScan');
 const { resolveSpawnCwd } = require('../../utils/spawnCwd');
+const { isProjectLayer } = require('../../utils/conversationId');
 
 // P2-2: vendor item.type='error' classification constants. Kept at
 // module scope so the exported helper `classifyCodexErrorAsNotice` (below
@@ -1255,16 +1256,24 @@ function createCodexAdapter({
     return null;
   }
 
-  function buildGuardrailsSection() {
+  function buildGuardrailsSection({ layer = 'top' } = {}) {
+    const delegationRules = isProjectLayer(layer)
+      ? `- Delegated work goes through the Palantir /execute API only.
+- Do NOT edit code directly in this manager session; always delegate edits to a
+  worker.`
+      : `- For project-scoped work, delegate to the project's Operator. Do NOT spawn
+  project workers directly.
+- Do NOT edit code directly in this manager session. For project-scoped edits,
+  delegate to the project's Operator.`;
+
     return `## Codex CLI adapter notes
 
 You are running as a Codex CLI subprocess (codex exec --json). HARD RULES:
 - Do NOT spawn nested codex / claude / codex-acp / mcp-codex sessions yourself.
-  Delegated work goes through the Palantir /execute API only.
-- Do NOT edit code directly in this manager session; always delegate edits to a
-  worker. Direct writes are technically possible, but they bypass worker
-  worktree isolation, diff capture, harvest, and run attribution, leaving the
-  changes outside Palantir's tracked history.
+${delegationRules}
+- Direct writes are technically possible, but they bypass
+  worker worktree isolation, diff capture, harvest, and run attribution,
+  leaving the changes outside Palantir's tracked history.
 - Do NOT install a polling loop on /execute results — the user will see them
   in the Palantir Console UI; just report once per turn.`;
   }
