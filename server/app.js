@@ -1414,6 +1414,7 @@ function createApp(options = {}) {
     agentProfileService,
     skillPackService,
     nodeService,
+    nodeUsageService,
     projectMaterializationService,
     modelPolicyService,
     isSpecialistAvailable,

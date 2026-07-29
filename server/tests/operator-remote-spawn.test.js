@@ -12,6 +12,7 @@ const { createManagerRegistry } = require('../services/managerRegistry');
 const { createConversationService } = require('../services/conversationService');
 const { createNodeService } = require('../services/nodeService');
 const { createOperatorSpawnService } = require('../services/operatorSpawnService');
+const { resolveManagerApiEndpoints } = require('../services/managerSystemPrompt');
 const { createManagerRouter } = require('../routes/manager');
 const { createApp } = require('../app');
 
@@ -52,6 +53,7 @@ function withoutBaseUrl(t) {
 
 function makeAdapter(type = 'codex') {
   const starts = [];
+  const turns = [];
   const disposes = [];
   return {
     type,
@@ -66,7 +68,10 @@ function makeAdapter(type = 'codex') {
       }
       return { sessionRef: { resumedThreadId: opts.resumeThreadId || null } };
     },
-    runTurn() { return { accepted: true }; },
+    runTurn(runId, payload) {
+      turns.push({ runId, payload });
+      return { accepted: true };
+    },
     isSessionAlive() { return true; },
     detectExitCode() { return null; },
     emitSessionEndedIfNeeded() {},
@@ -76,6 +81,7 @@ function makeAdapter(type = 'codex') {
     disposeSession(runId) { disposes.push(runId); },
     buildGuardrailsSection() { return ''; },
     _starts: starts,
+    _turns: turns,
     _disposes: disposes,
   };
 }
@@ -159,19 +165,24 @@ function makeSpawn({
   runService,
   registry,
   adapter,
+  managerAdapterFactory,
   projectService,
   projectBriefService,
   nodeService,
+  nodeUsageService,
+  agentProfileService,
   resolveManagerAuth,
   managerApiEndpoints = TEST_MANAGER_API_ENDPOINTS,
 }) {
   return createOperatorSpawnService({
     runService,
     managerRegistry: registry,
-    managerAdapterFactory: wireFactory(adapter),
+    managerAdapterFactory: managerAdapterFactory || wireFactory(adapter),
     projectService,
     projectBriefService,
     nodeService,
+    nodeUsageService,
+    agentProfileService,
     managerApiEndpoints,
     authResolverOpts: {},
     ...(resolveManagerAuth ? { resolveManagerAuth } : {}),
@@ -215,8 +226,19 @@ test('createApp derives and wires a remote Manager API endpoint for the implicit
     agentProcessIsolation: true,
     memoryDistillEnabled: false,
     masterMemoryXprojectScanEnabled: false,
+    nodeUsageService: {
+      async getUsageSnapshot() {
+        return {
+          clis: [
+            { id: 'codex', installed: true, authStatus: null, error: null },
+            { id: 'claude', installed: true, authStatus: { loggedIn: true }, error: null },
+          ],
+        };
+      },
+    },
     networkInterfaces: () => ({
-      tailnet0: [{ family: 'IPv4', internal: false, address: '100.120.25.112' }],
+      en0: [{ family: 'IPv4', internal: false, address: '192.168.1.20' }],
+      utun4: [{ family: 'IPv4', internal: false, address: '100.120.25.112' }],
       lo0: [{ family: 'IPv4', internal: true, address: '127.0.0.1' }],
     }),
   });
@@ -251,10 +273,55 @@ test('createApp derives and wires a remote Manager API endpoint for the implicit
     adapter: topAdapter,
   });
 
-  const result = app.services.operatorSpawnService.ensureLiveOperator({ projectId: project.id });
+  const result = await app.services.operatorSpawnService.ensureLiveOperator({ projectId: project.id });
 
   assert.equal(result.spawned, true);
   assert.equal(result.run.node_id, 'nodeA');
+});
+
+test('wildcard Manager endpoint prefers the tailnet address in the actual remote Operator prompt', async (t) => {
+  const managerApiEndpoints = resolveManagerApiEndpoints({
+    explicitBaseUrl: null,
+    host: '0.0.0.0',
+    port: 4177,
+    networkInterfaces: () => ({
+      en0: [{ family: 'IPv4', internal: false, address: '192.168.1.20' }],
+      utun4: [{ family: 'IPv4', internal: false, address: '100.120.25.112' }],
+      lo0: [{ family: 'IPv4', internal: true, address: '127.0.0.1' }],
+    }),
+  });
+  assert.equal(managerApiEndpoints.remote, 'http://100.120.25.112:4177');
+
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const realNodeService = createNodeService(db, { localExecutor: { local: true } });
+  createSshNode(realNodeService, 'nodeA');
+  const nodeService = wrapNodeService(realNodeService, { executor: { remote: 'executor' } });
+  const registry = createManagerRegistry({ runService });
+  const adapter = makeAdapter();
+  seedTop({ runService, registry, adapter: makeAdapter() });
+  const project = projectService.createProject({
+    name: 'tailnet-prompt',
+    directory: '/workspace/tailnet-prompt',
+    node_id: 'nodeA',
+  });
+  const spawn = makeSpawn({
+    runService,
+    registry,
+    adapter,
+    projectService,
+    projectBriefService,
+    nodeService,
+    managerApiEndpoints,
+  });
+
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
+
+  assert.equal(result.spawned, true);
+  assert.match(adapter._starts[0].opts.systemPrompt, /http:\/\/100\.120\.25\.112:4177\/api\/tasks/);
+  assert.doesNotMatch(adapter._starts[0].opts.systemPrompt, /http:\/\/192\.168\.1\.20:4177/);
 });
 
 test('remote Operator spawn uses node executor, pod cwd, placement persistence, and manager node_id', async (t) => {
@@ -649,6 +716,157 @@ test('remote Operator spawns even when control-plane Codex auth is unavailable (
   assert.ok(result && result.spawned, 'remote Operator spawned without control-plane auth');
   assert.equal(adapter._starts[0].opts.executor, remoteExecutor);
   assert.deepEqual(adapter._starts[0].opts.env, {});
+});
+
+test('remote NULL preference selects the authenticated Claude CLI on the execution node', async (t) => {
+  const previousDefault = process.env.PALANTIR_DEFAULT_PM_ADAPTER;
+  delete process.env.PALANTIR_DEFAULT_PM_ADAPTER;
+  t.after(() => {
+    if (previousDefault === undefined) delete process.env.PALANTIR_DEFAULT_PM_ADAPTER;
+    else process.env.PALANTIR_DEFAULT_PM_ADAPTER = previousDefault;
+  });
+
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const realNodeService = createNodeService(db, { localExecutor: { local: true } });
+  createSshNode(realNodeService, 'nodeA');
+  const remoteExecutor = { remote: 'executor' };
+  const nodeService = wrapNodeService(realNodeService, { executor: remoteExecutor });
+  const registry = createManagerRegistry({ runService });
+  const codexAdapter = makeAdapter('codex');
+  const claudeAdapter = makeAdapter('claude-code');
+  const requestedAdapters = [];
+  const managerAdapterFactory = {
+    getAdapter(type) {
+      requestedAdapters.push(type);
+      return type === 'claude-code' ? claudeAdapter : codexAdapter;
+    },
+  };
+  const usageCalls = [];
+  const nodeUsageService = {
+    async getUsageSnapshot(nodeId) {
+      usageCalls.push(nodeId);
+      return {
+        clis: [
+          {
+            id: 'codex',
+            installed: false,
+            authStatus: null,
+            error: { code: 'not_installed', message: 'codex is not installed' },
+          },
+          {
+            id: 'claude',
+            installed: true,
+            authStatus: { loggedIn: true },
+            // Quota lookup failure must not hide the already-proven CLI auth.
+            error: { code: 'network_error', message: 'quota endpoint unavailable' },
+          },
+        ],
+      };
+    },
+  };
+  seedTop({ runService, registry, adapter: makeAdapter() });
+  const project = projectService.createProject({
+    name: 'remote-claude-only',
+    directory: '/workspace/remote-claude-only',
+    node_id: 'nodeA',
+  });
+  assert.equal(project.preferred_pm_adapter, null);
+  const spawn = makeSpawn({
+    runService,
+    registry,
+    adapter: codexAdapter,
+    managerAdapterFactory,
+    projectService,
+    projectBriefService,
+    nodeService,
+    nodeUsageService,
+  });
+  const conversationService = createConversationService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory,
+    lifecycleService: null,
+    operatorSpawnService: spawn,
+    projectService,
+    projectBriefService,
+  });
+
+  const delivery = await conversationService.sendMessage(
+    `operator:${project.id}`,
+    { text: 'start with the node-authenticated CLI' },
+  );
+
+  assert.equal(delivery.status, 'sent');
+  assert.deepEqual(usageCalls, ['nodeA']);
+  assert.deepEqual(requestedAdapters, ['claude-code']);
+  assert.equal(codexAdapter._starts.length, 0);
+  assert.equal(claudeAdapter._starts.length, 1);
+  const run = runService.getRun(claudeAdapter._starts[0].runId);
+  assert.equal(run.manager_adapter, 'claude-code');
+  assert.equal(claudeAdapter._starts[0].opts.executor, remoteExecutor);
+  assert.equal(claudeAdapter._turns.length, 1);
+  assert.equal(claudeAdapter._turns[0].payload.text, 'start with the node-authenticated CLI');
+});
+
+test('remote NULL preference keeps Codex first when both node CLIs are authenticated', async (t) => {
+  const previousDefault = process.env.PALANTIR_DEFAULT_PM_ADAPTER;
+  delete process.env.PALANTIR_DEFAULT_PM_ADAPTER;
+  t.after(() => {
+    if (previousDefault === undefined) delete process.env.PALANTIR_DEFAULT_PM_ADAPTER;
+    else process.env.PALANTIR_DEFAULT_PM_ADAPTER = previousDefault;
+  });
+
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const realNodeService = createNodeService(db, { localExecutor: { local: true } });
+  createSshNode(realNodeService, 'nodeA');
+  const nodeService = wrapNodeService(realNodeService, { executor: { remote: 'executor' } });
+  const registry = createManagerRegistry({ runService });
+  const codexAdapter = makeAdapter('codex');
+  const claudeAdapter = makeAdapter('claude-code');
+  const requestedAdapters = [];
+  seedTop({ runService, registry, adapter: makeAdapter() });
+  const project = projectService.createProject({
+    name: 'remote-both-authenticated',
+    directory: '/workspace/remote-both-authenticated',
+    node_id: 'nodeA',
+  });
+  const spawn = makeSpawn({
+    runService,
+    registry,
+    adapter: codexAdapter,
+    managerAdapterFactory: {
+      getAdapter(type) {
+        requestedAdapters.push(type);
+        return type === 'claude-code' ? claudeAdapter : codexAdapter;
+      },
+    },
+    projectService,
+    projectBriefService,
+    nodeService,
+    nodeUsageService: {
+      async getUsageSnapshot() {
+        return {
+          clis: [
+            { id: 'codex', installed: true, authStatus: null, error: null },
+            { id: 'claude', installed: true, authStatus: { loggedIn: true }, error: null },
+          ],
+        };
+      },
+    },
+  });
+
+  const result = await spawn.ensureLiveOperator({ projectId: project.id });
+
+  assert.deepEqual(requestedAdapters, ['codex']);
+  assert.equal(result.run.manager_adapter, 'codex');
+  assert.equal(codexAdapter._starts.length, 1);
+  assert.equal(claudeAdapter._starts.length, 0);
 });
 
 test('local Operator still fails closed when control-plane Codex auth is unavailable', async (t) => {

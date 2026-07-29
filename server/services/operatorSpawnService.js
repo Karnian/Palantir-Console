@@ -90,6 +90,7 @@ function createOperatorSpawnService({
   agentProfileService, // optional — used for env_allowlist resolution
   skillPackService,    // optional — Phase 2: inject project skill pack list into PM prompt
   nodeService,         // optional — Fleet P4: run Operators on the project's bound node
+  nodeUsageService,    // optional — probes remote CLI installation/auth for NULL preference fallback
   projectMaterializationService,
   modelPolicyService,
   isSpecialistAvailable = () => false, // MD-1: mid-turn specialist delegation prompt gate
@@ -292,6 +293,35 @@ function createOperatorSpawnService({
     return { adapterType, envAllowlist, mcpTools, authCtx };
   }
 
+  function remoteManagerAdapterCanStart(card) {
+    if (!card || card.installed !== true) return false;
+    if (card.id === 'codex') {
+      // A successful Codex app-server usage probe proves both the CLI and its
+      // node-local auth can start. Installation alone is not enough.
+      return !card.error;
+    }
+    if (card.id === 'claude') {
+      // Claude auth status is captured before the optional quota lookup. Keep
+      // a logged-in CLI eligible even when only the quota endpoint is down.
+      return Boolean(card.authStatus && card.authStatus.loggedIn !== false);
+    }
+    return false;
+  }
+
+  async function resolveRemoteDefaultAdapter(nodeId) {
+    try {
+      const snapshot = await nodeUsageService.getUsageSnapshot(nodeId);
+      const cards = new Map((snapshot?.clis || []).map(card => [card?.id, card]));
+      if (remoteManagerAdapterCanStart(cards.get('codex'))) return 'codex';
+      if (remoteManagerAdapterCanStart(cards.get('claude'))) return 'claude-code';
+    } catch (err) {
+      log(`remote adapter availability probe failed node=${nodeId}: ${err.message}`);
+    }
+    // Probe uncertainty must not turn the legacy default into a hard failure.
+    // The first real turn will still surface an actionable adapter error.
+    return 'codex';
+  }
+
   // Build the project-scoped SYSTEM prompt section that gets appended to
   // the shared PM layer template. Spec §9.5: "system prompt 완전히 정적
   // (cached_input_tokens 보호)". The brief is stable per run so baking
@@ -324,7 +354,7 @@ function createOperatorSpawnService({
   // fresh run was created in this call, `resumed` is true iff we passed
   // a persisted thread id to the adapter (i.e. reused an existing Codex
   // vendor thread).
-  function ensureLiveOperator({ projectId, seedText }) {
+  function ensureLiveOperatorResolved({ projectId, seedText }, remoteDefaultAdapter = null) {
     if (!projectId) {
       const err = new Error('projectId is required');
       err.httpStatus = 400;
@@ -453,7 +483,32 @@ function createOperatorSpawnService({
       || project?.preferred_pm_adapter
       || process.env.PALANTIR_DEFAULT_PM_ADAPTER,
     );
-    let adapterType = resolveOperatorAdapterType(project, adapterPreferenceInstance);
+    if (
+      isRemoteNode
+      && !configuredPreference
+      && !remoteDefaultAdapter
+      && nodeUsageService
+      && typeof nodeUsageService.getUsageSnapshot === 'function'
+    ) {
+      // Remote Operators authenticate on their execution node, so the local
+      // auth resolver cannot choose the fallback adapter. Probe the pod before
+      // persisting the manager_adapter. Keep this in the existing spawn-flight
+      // fence: concurrent first messages must share one probe and one spawn.
+      let flight;
+      flight = resolveRemoteDefaultAdapter(nodeId)
+        .then((resolvedAdapter) => {
+          if (spawnFlights.get(slotKey) === flight) spawnFlights.delete(slotKey);
+          return ensureLiveOperatorResolved({ projectId, seedText }, resolvedAdapter);
+        })
+        .finally(() => {
+          if (spawnFlights.get(slotKey) === flight) spawnFlights.delete(slotKey);
+        });
+      spawnFlights.set(slotKey, flight);
+      return flight;
+    }
+
+    let adapterType = remoteDefaultAdapter
+      || resolveOperatorAdapterType(project, adapterPreferenceInstance);
     let managerRuntime;
     if (!isRemoteNode && !configuredPreference) {
       // The null-preference contract keeps Codex first, but it is a fallback
@@ -898,6 +953,10 @@ function createOperatorSpawnService({
     }
 
     return finishSpawn();
+  }
+
+  function ensureLiveOperator(args) {
+    return ensureLiveOperatorResolved(args);
   }
 
   return {

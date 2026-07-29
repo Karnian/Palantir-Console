@@ -20,6 +20,15 @@ function formatUrlHost(host) {
   return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
 }
 
+function isTailnetIpv4(address) {
+  const octets = String(address || '').split('.').map(Number);
+  return octets.length === 4
+    && octets.every(octet => Number.isInteger(octet) && octet >= 0 && octet <= 255)
+    && octets[0] === 100
+    && octets[1] >= 64
+    && octets[1] <= 127;
+}
+
 function resolveManagerApiEndpoints({
   explicitBaseUrl = process.env.PALANTIR_BASE_URL,
   host,
@@ -39,14 +48,20 @@ function resolveManagerApiEndpoints({
     let remoteHost = null;
     try {
       const ifaces = networkInterfaces();
-      outer: for (const name of Object.keys(ifaces || {})) {
+      const candidates = [];
+      for (const name of Object.keys(ifaces || {})) {
         for (const iface of ifaces[name] || []) {
           if ((iface.family === 'IPv4' || iface.family === 4) && !iface.internal) {
-            remoteHost = iface.address;
-            break outer;
+            candidates.push(iface.address);
           }
         }
       }
+      // Fleet nodes commonly reach the controller only through Tailscale.
+      // macOS enumerates en0 before utun, so "first non-internal IPv4" embeds
+      // an unreachable LAN address in the remote Operator prompt. Prefer the
+      // RFC 6598 address space used by Tailscale; otherwise retain interface
+      // order for the established single-interface/LAN behavior.
+      remoteHost = candidates.find(isTailnetIpv4) || candidates[0] || null;
     } catch { /* remote stays unavailable */ }
     return {
       local: `http://localhost:${port}`,
