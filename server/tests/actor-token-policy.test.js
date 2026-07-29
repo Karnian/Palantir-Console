@@ -485,13 +485,25 @@ test('worker credential policy pins a run-bound token and proposal base', () => 
 });
 
 test('worker API base normalization rejects URL userinfo fail-closed', () => {
-  assert.throws(
-    () => normalizeWorkerApiBase('http://worker-user:worker-password@console.internal:4177'),
-    (err) => (
-      err.code === 'WORKER_API_BASE_USERINFO'
-      && /userinfo/.test(err.message)
-      && !/worker-user|worker-password/.test(err.message)
-    ),
+  for (const apiBase of [
+    'http://worker-user:worker-password@console.internal:4177',
+    'http://secret-user\\:secret-pass@127.0.0.1:4177',
+  ]) {
+    assert.throws(
+      () => normalizeWorkerApiBase(apiBase),
+      (err) => (
+        err.code === 'WORKER_API_BASE_USERINFO'
+        && /userinfo/.test(err.message)
+        && !/worker-user|worker-password|secret-user|secret-pass/.test(err.message)
+      ),
+    );
+  }
+});
+
+test('worker API base normalization returns the validated URL serialization', () => {
+  assert.equal(
+    normalizeWorkerApiBase('HTTP://CONSOLE.EXAMPLE:80/a/../worker///'),
+    'http://console.example/worker',
   );
 });
 

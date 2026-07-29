@@ -1268,6 +1268,13 @@ function createApp(options = {}) {
   const executionEngine = options.executionEngine || createExecutionEngine({
     actorTokens: actorTokenPolicy,
   });
+  // createApp owns capability issuance, while the concrete engine revalidates
+  // the capability immediately before spawn. An engine may have been created
+  // before it was injected, so make the app's resolved policy the single source
+  // for both decisions instead of retaining the engine's construction-time view.
+  if (typeof executionEngine.setActorTokenPolicy === 'function') {
+    executionEngine.setActorTokenPolicy(actorTokenPolicy);
+  }
   const streamJsonEngine = createStreamJsonEngine({
     runService,
     eventBus,

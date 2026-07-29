@@ -101,11 +101,16 @@ function cleanupStaleTmuxStartupArtifacts({
 
 function createTmuxEngine({
   execFileSync: runTmuxCommand = execFileSync,
-  actorTokens = resolveActorTokenPolicy(),
+  actorTokens: initialActorTokens = resolveActorTokenPolicy(),
   writeFileSync = fs.writeFileSync,
 } = {}) {
   const PATH_PREFIX = 'export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"';
   const tokenArtifacts = new Map();
+  let actorTokens = initialActorTokens;
+
+  function setActorTokenPolicy(nextActorTokens) {
+    actorTokens = nextActorTokens;
+  }
 
   function sessionName(runId) {
     return sanitizeSessionName(`palantir-run-${runId}`);
@@ -654,6 +659,7 @@ function createTmuxEngine({
 
   return {
     type: 'tmux',
+    setActorTokenPolicy,
     spawnAgent,
     getOutput,
     sendInput,
@@ -669,9 +675,16 @@ function createTmuxEngine({
 
 // ---------- SubprocessEngine (fallback) ----------
 
-function createSubprocessEngine({ actorTokens = resolveActorTokenPolicy() } = {}) {
+function createSubprocessEngine({
+  actorTokens: initialActorTokens = resolveActorTokenPolicy(),
+} = {}) {
   const processes = new Map();
   const PROCESS_TTL_MS = 10 * 60 * 1000; // Cleanup dead processes after 10 min
+  let actorTokens = initialActorTokens;
+
+  function setActorTokenPolicy(nextActorTokens) {
+    actorTokens = nextActorTokens;
+  }
 
   function spawnAgent(runId, { command, args, stdin, cwd, env, outputLogPath }) {
     const safeCwd = validateCwd(cwd);
@@ -826,6 +839,7 @@ function createSubprocessEngine({ actorTokens = resolveActorTokenPolicy() } = {}
 
   return {
     type: 'subprocess',
+    setActorTokenPolicy,
     spawnAgent,
     getOutput,
     sendInput,

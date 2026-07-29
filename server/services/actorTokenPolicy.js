@@ -419,6 +419,17 @@ function normalizeWorkerApiBase(apiBase) {
     throw err;
   }
   const normalized = apiBase.trim().replace(/\/+$/, '');
+  // Reject userinfo from the original authority before WHATWG parsing. Curl,
+  // which ultimately consumes this value, treats backslashes differently from
+  // URL: `http://user\:pass@host` has credentials to curl but not to URL.
+  // Returning or handing off any raw authority containing `@` would therefore
+  // make the parser-only check below an unsafe disagreement between consumers.
+  const rawAuthority = normalized.match(/^[a-zA-Z][a-zA-Z\d+.-]*:\/\/([^/?#]*)/);
+  if (rawAuthority && rawAuthority[1].includes('@')) {
+    const err = new Error('PALANTIR_API_BASE must not contain URL userinfo');
+    err.code = 'WORKER_API_BASE_USERINFO';
+    throw err;
+  }
   let parsed;
   try {
     parsed = new URL(normalized);
@@ -432,7 +443,9 @@ function normalizeWorkerApiBase(apiBase) {
     err.code = 'WORKER_API_BASE_USERINFO';
     throw err;
   }
-  return normalized;
+  // Hand off the serialization that was actually validated. Preserve the
+  // existing no-trailing-slash API-base contract after canonicalization.
+  return parsed.href.replace(/\/+$/, '');
 }
 
 function applyWorkerCredentialPolicy(explicitEnv = {}, {
