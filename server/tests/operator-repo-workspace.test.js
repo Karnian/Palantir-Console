@@ -13,6 +13,7 @@ const { createNodeService } = require('../services/nodeService');
 const { createOperatorSpawnService } = require('../services/operatorSpawnService');
 const { createConversationService } = require('../services/conversationService');
 const { createManagerRouter } = require('../routes/manager');
+const { resolveManagerApiEndpoints } = require('../services/managerSystemPrompt');
 const { repoSourceHash } = require('../utils/repoOperatorThread');
 
 async function mkdb(t) {
@@ -131,7 +132,16 @@ function makeNodeService(realNodeService, { remote = false } = {}) {
   };
 }
 
-function makeSpawn({ runService, registry, adapter, projectService, projectBriefService, nodeService, materializationService }) {
+function makeSpawn({
+  runService,
+  registry,
+  adapter,
+  projectService,
+  projectBriefService,
+  nodeService,
+  materializationService,
+  managerApiEndpoints = { local: 'http://localhost:4177', remote: null },
+}) {
   return createOperatorSpawnService({
     runService,
     managerRegistry: registry,
@@ -140,6 +150,7 @@ function makeSpawn({ runService, registry, adapter, projectService, projectBrief
     projectBriefService,
     nodeService,
     projectMaterializationService: materializationService,
+    managerApiEndpoints,
   });
 }
 
@@ -382,7 +393,25 @@ test('default-on remote git cold PM message materializes workspace and reaches t
     workspacePath: '/workspace/.palantir-workspaces/remote-repo/run-1',
     cwd: '/workspace/.palantir-workspaces/remote-repo/run-1/packages/api',
   });
-  const spawn = makeSpawn({ runService, registry, adapter, projectService, projectBriefService, nodeService, materializationService });
+  const managerApiEndpoints = resolveManagerApiEndpoints({
+    explicitBaseUrl: null,
+    host: '0.0.0.0',
+    port: 4177,
+    networkInterfaces: () => ({
+      tailnet0: [{ family: 'IPv4', internal: false, address: '100.120.25.112' }],
+      lo0: [{ family: 'IPv4', internal: true, address: '127.0.0.1' }],
+    }),
+  });
+  const spawn = makeSpawn({
+    runService,
+    registry,
+    adapter,
+    projectService,
+    projectBriefService,
+    nodeService,
+    materializationService,
+    managerApiEndpoints,
+  });
   const conversationService = createConversationService({
     runService,
     managerRegistry: registry,
@@ -409,6 +438,8 @@ test('default-on remote git cold PM message materializes workspace and reaches t
   assert.equal(adapter._starts[0].opts.nodeId, 'nodeA');
   assert.equal(adapter._starts[0].opts.nodePrefix, '/opt/nodeA/bin');
   assert.ok(adapter._starts[0].opts.executor);
+  assert.match(adapter._starts[0].opts.systemPrompt, /http:\/\/100\.120\.25\.112:4177\/api\/tasks/);
+  assert.doesNotMatch(adapter._starts[0].opts.systemPrompt, /http:\/\/localhost:4177/);
   assert.equal(adapter._turns.length, 1);
   assert.equal(adapter._turns[0].payload.text, 'implement the remote change');
 });

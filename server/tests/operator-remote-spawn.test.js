@@ -13,6 +13,12 @@ const { createConversationService } = require('../services/conversationService')
 const { createNodeService } = require('../services/nodeService');
 const { createOperatorSpawnService } = require('../services/operatorSpawnService');
 const { createManagerRouter } = require('../routes/manager');
+const { createApp } = require('../app');
+
+const TEST_MANAGER_API_ENDPOINTS = {
+  local: 'http://localhost:4177',
+  remote: 'http://console.test:4177',
+};
 
 async function mkdb(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-operator-remote-'));
@@ -149,7 +155,16 @@ function seedTop({ runService, registry, adapter }) {
   return run;
 }
 
-function makeSpawn({ runService, registry, adapter, projectService, projectBriefService, nodeService, resolveManagerAuth }) {
+function makeSpawn({
+  runService,
+  registry,
+  adapter,
+  projectService,
+  projectBriefService,
+  nodeService,
+  resolveManagerAuth,
+  managerApiEndpoints = TEST_MANAGER_API_ENDPOINTS,
+}) {
   return createOperatorSpawnService({
     runService,
     managerRegistry: registry,
@@ -157,6 +172,7 @@ function makeSpawn({ runService, registry, adapter, projectService, projectBrief
     projectService,
     projectBriefService,
     nodeService,
+    managerApiEndpoints,
     authResolverOpts: {},
     ...(resolveManagerAuth ? { resolveManagerAuth } : {}),
   });
@@ -183,6 +199,62 @@ test('local Operator spawn passes no executor or nodePrefix', async (t) => {
   assert.equal(Object.prototype.hasOwnProperty.call(adapter._starts[0].opts, 'executor'), false);
   assert.equal(Object.prototype.hasOwnProperty.call(adapter._starts[0].opts, 'nodePrefix'), false);
   assert.equal(nodeService._calls.pickExecutor.length, 0);
+});
+
+test('createApp derives and wires a remote Manager API endpoint for the implicit authenticated wildcard bind', async (t) => {
+  const previousBaseUrl = process.env.PALANTIR_BASE_URL;
+  const previousHost = process.env.HOST;
+  delete process.env.PALANTIR_BASE_URL;
+  delete process.env.HOST;
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-operator-app-base-'));
+  const app = createApp({
+    dbPath: path.join(dir, 'test.db'),
+    storageRoot: path.join(dir, 'storage'),
+    fsRoot: dir,
+    authToken: 'test-console-token',
+    agentProcessIsolation: true,
+    memoryDistillEnabled: false,
+    masterMemoryXprojectScanEnabled: false,
+    networkInterfaces: () => ({
+      tailnet0: [{ family: 'IPv4', internal: false, address: '100.120.25.112' }],
+      lo0: [{ family: 'IPv4', internal: true, address: '127.0.0.1' }],
+    }),
+  });
+  t.after(async () => {
+    await app.shutdown();
+    await fs.rm(dir, { recursive: true, force: true });
+    if (previousBaseUrl === undefined) delete process.env.PALANTIR_BASE_URL;
+    else process.env.PALANTIR_BASE_URL = previousBaseUrl;
+    if (previousHost === undefined) delete process.env.HOST;
+    else process.env.HOST = previousHost;
+  });
+
+  app.services.nodeService.createNode({
+    id: 'nodeA',
+    name: 'nodeA',
+    kind: 'ssh',
+    ssh_host: 'nodeA.example',
+    ssh_user: 'runner',
+    exposed_roots: ['/workspace'],
+    can_execute: true,
+    reachable: true,
+  });
+  const project = app.services.projectService.createProject({
+    name: 'app-wired-remote',
+    directory: '/workspace/app-wired-remote',
+    node_id: 'nodeA',
+  });
+  const topAdapter = makeAdapter();
+  seedTop({
+    runService: app.services.runService,
+    registry: app.managerRegistry,
+    adapter: topAdapter,
+  });
+
+  const result = app.services.operatorSpawnService.ensureLiveOperator({ projectId: project.id });
+
+  assert.equal(result.spawned, true);
+  assert.equal(result.run.node_id, 'nodeA');
 });
 
 test('remote Operator spawn uses node executor, pod cwd, placement persistence, and manager node_id', async (t) => {
@@ -241,8 +313,8 @@ test('remote Operator spawn uses node executor, pod cwd, placement persistence, 
   assert.equal(thread.node_id, 'nodeA');
   assert.equal(thread.cwd, '/workspace/remote-project');
 
-  const warning = runService.getRunEvents(result.run.id).find(e => e.event_type === 'operator:remote_base_url_localhost');
-  assert.ok(warning, 'remote localhost base URL warning should be observable');
+  assert.match(start.opts.systemPrompt, /http:\/\/console\.test:4177\/api\/tasks/);
+  assert.doesNotMatch(start.opts.systemPrompt, /http:\/\/localhost:4177/);
 });
 
 test('remote pickExecutor failure marks the Operator run failed and never starts locally', async (t) => {
@@ -403,6 +475,7 @@ test('boot resume uses remote node executor, nodePrefix, pod cwd, and thread aff
     projectService,
     projectBriefService,
     nodeService,
+    managerApiEndpoints: TEST_MANAGER_API_ENDPOINTS,
     authResolverOpts: {},
   });
 
@@ -417,8 +490,8 @@ test('boot resume uses remote node executor, nodePrefix, pod cwd, and thread aff
     false,
     'remote boot resume must not diagnose a discarded control-plane proxy',
   );
-  const warning = runService.getRunEvents(run.id).find(e => e.event_type === 'operator:remote_base_url_localhost');
-  assert.ok(warning, 'boot resume should record remote localhost base URL warning');
+  assert.match(adapter._starts[0].opts.systemPrompt, /http:\/\/console\.test:4177\/api\/tasks/);
+  assert.doesNotMatch(adapter._starts[0].opts.systemPrompt, /http:\/\/localhost:4177/);
 });
 
 test('boot resume uses remote node executor, nodePrefix, pod cwd, and Claude session affinity', async (t) => {
@@ -473,6 +546,7 @@ test('boot resume uses remote node executor, nodePrefix, pod cwd, and Claude ses
     projectService,
     projectBriefService,
     nodeService,
+    managerApiEndpoints: TEST_MANAGER_API_ENDPOINTS,
     authResolverOpts: {},
   });
 
@@ -484,8 +558,8 @@ test('boot resume uses remote node executor, nodePrefix, pod cwd, and Claude ses
   assert.equal(adapter._starts[0].opts.nodePrefix, '/opt/nodeA/bin');
   assert.equal(adapter._starts[0].opts.cwd, '/workspace/claude-boot');
   assert.deepEqual(adapter._starts[0].opts.env, {});
-  const warning = runService.getRunEvents(run.id).find(e => e.event_type === 'operator:remote_base_url_localhost');
-  assert.ok(warning, 'Claude boot resume should record remote localhost base URL warning');
+  assert.match(adapter._starts[0].opts.systemPrompt, /http:\/\/console\.test:4177\/api\/tasks/);
+  assert.doesNotMatch(adapter._starts[0].opts.systemPrompt, /http:\/\/localhost:4177/);
 });
 
 test('boot resume clears a Claude session bound to a different node and leaves it for lazy fresh spawn', async (t) => {

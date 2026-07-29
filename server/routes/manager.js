@@ -6,6 +6,7 @@ const {
   buildManagerSystemPrompt: buildManagerSystemPromptModule,
   buildTopIdentitySection,
   buildInitialUserContext,
+  resolveManagerApiEndpoints,
 } = require('../services/managerSystemPrompt');
 const { resolveSpawnCwd } = require('../utils/spawnCwd');
 const { resolveProjectSource } = require('../services/projectSource');
@@ -99,9 +100,10 @@ function resolveResumeEnvAllowlist(agentProfileService, { profileId, adapterType
 // so tests can inject `hasKeychain` (and any future DI hooks) without
 // monkey-patching child_process. Production callers leave this empty and
 // get the real keychain probe.
-function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, operatorInstanceService, modelPolicyService, isSpecialistAvailable = () => false, authResolverOpts = {}, actorTokens = resolveActorTokenPolicy(), managerCapabilityTokenService = null, goalFeatureActive = defaultGoalFeatureActive }) {
+function createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, operatorInstanceService, modelPolicyService, isSpecialistAvailable = () => false, authResolverOpts = {}, actorTokens = resolveActorTokenPolicy(), managerCapabilityTokenService = null, managerApiEndpoints = null, goalFeatureActive = defaultGoalFeatureActive }) {
   const router = express.Router();
   const actorSpawnBaseEnv = applyManagerCredentialPolicy(process.env);
+  const promptApiEndpoints = managerApiEndpoints || resolveManagerApiEndpoints();
   if (actorTokens.humanToken && !managerCapabilityTokenService) {
     throw new Error('authenticated manager router requires managerCapabilityTokenService');
   }
@@ -193,7 +195,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           const port = process.env.PORT || 4177;
           const token = managerTokenFor(r, r.manager_layer || 'top', r.conversation_id || 'top');
           const systemPrompt = [
-            buildManagerSystemPromptModule({ adapter, port, token: !!token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable() }),
+            buildManagerSystemPromptModule({ adapter, port, token: !!token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable(), apiBaseUrl: promptApiEndpoints.local }),
             buildTopIdentitySection({ topRunId: r.id }), // MD-2a: resumed Top's own run id
           ].filter(Boolean).join('\n\n');
           const envAllowlist = resolveResumeEnvAllowlist(agentProfileService, {
@@ -429,6 +431,17 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   } catch { /* ignore */ }
                   throw new Error('repo materialization is unsupported on remote nodes');
                 }
+                if (isRemoteNode && !promptApiEndpoints.remote) {
+                  try {
+                    runService.addRunEvent(r.id, 'operator:remote_base_url_unavailable', JSON.stringify({
+                      node_id: nodeId,
+                      project_id: projectId,
+                    }));
+                  } catch { /* ignore */ }
+                  throw new Error(
+                    'remote Operator requires a Console URL reachable from its node; set PALANTIR_BASE_URL or bind the Console to a non-loopback host',
+                  );
+                }
                 let executor;
                 let nodePrefix;
                 if (isRemoteNode) {
@@ -442,7 +455,15 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 // only goal mode.
                 const goalActive = goalFeatureActive();
                 const token = managerTokenFor(r, r.manager_layer || 'operator', r.conversation_id);
-                const baseSystemPrompt = buildManagerSystemPromptModule({ adapter, port, token: !!token, layer: 'operator', adapterType, specialistAvailable: isSpecialistAvailable() });
+                const baseSystemPrompt = buildManagerSystemPromptModule({
+                  adapter,
+                  port,
+                  token: !!token,
+                  layer: 'operator',
+                  adapterType,
+                  specialistAvailable: isSpecialistAvailable(),
+                  apiBaseUrl: isRemoteNode ? promptApiEndpoints.remote : promptApiEndpoints.local,
+                });
                 // A2b: shared builder — the resumed Operator's project-scoped
                 // sections are assembled by the SAME function as fresh spawn
                 // (server/services/operatorPromptSections), so the two paths can
@@ -488,9 +509,6 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                     : (isRemoteNode ? (project.directory || null) : resolveSpawnCwd({ workspaceDir: project.directory }));
                   if (isRepoProject && !cwd) {
                     throw new Error('repo Operator resume has no materialized cwd');
-                  }
-                  if (isRemoteNode && !process.env.PALANTIR_BASE_URL) {
-                    try { runService.addRunEvent(r.id, 'operator:remote_base_url_localhost', JSON.stringify({ node_id: nodeId })); } catch { /* ignore */ }
                   }
                   const startOpts = {
                     systemPrompt,
@@ -791,7 +809,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     const port = process.env.PORT || 4177;
     const token = managerTokenFor(runId, 'top', 'top');
     const systemPrompt = [
-      buildManagerSystemPromptModule({ adapter, port, token: !!token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable() }),
+      buildManagerSystemPromptModule({ adapter, port, token: !!token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable(), apiBaseUrl: promptApiEndpoints.local }),
       buildTopIdentitySection({ topRunId: runId }), // MD-2a: Top's own run id (cache-safe, appended after base)
     ].filter(Boolean).join('\n\n');
     const initialUserContext = buildInitialUserContext({

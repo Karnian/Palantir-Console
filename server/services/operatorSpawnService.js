@@ -57,6 +57,7 @@ const { resolveManagerAuth: defaultResolveManagerAuth, buildManagerSpawnEnv } = 
 const {
   buildManagerSystemPrompt,
   buildInitialUserContext,
+  resolveManagerApiEndpoints,
 } = require('./managerSystemPrompt');
 const { resolveSpawnCwd } = require('../utils/spawnCwd');
 const { resolveCodexServiceTier } = require('./managerAdapters/codexAdapter'); // F-1
@@ -96,11 +97,20 @@ function createOperatorSpawnService({
   resolveManagerAuth = defaultResolveManagerAuth, // optional DI — tests inject to force canAuth
   actorTokens = resolveActorTokenPolicy(),
   managerCapabilityTokenService = null,
+  managerApiEndpoints = null,
   goalFeatureActive = defaultGoalFeatureActive,
   logger,
 }) {
   const log = logger || ((msg) => console.log(`[pmSpawn] ${msg}`));
   const actorSpawnBaseEnv = applyManagerCredentialPolicy(process.env);
+  const promptApiEndpoints = managerApiEndpoints || resolveManagerApiEndpoints();
+  const normalizedAuthResolverOpts = { ...authResolverOpts };
+  for (const key of ['hasKeychain', 'hasCredentialsFile']) {
+    if (key in normalizedAuthResolverOpts && typeof normalizedAuthResolverOpts[key] !== 'function') {
+      const available = Boolean(normalizedAuthResolverOpts[key]);
+      normalizedAuthResolverOpts[key] = () => available;
+    }
+  }
   if (actorTokens.humanToken && !managerCapabilityTokenService) {
     throw new Error('authenticated Operator spawn requires managerCapabilityTokenService');
   }
@@ -260,6 +270,28 @@ function createOperatorSpawnService({
     return 'codex';
   }
 
+  function resolveManagerProfileRuntime(adapterType, profiles) {
+    const managerProfile = profiles.find(p => p.type === adapterType) || null;
+    let envAllowlist;
+    let mcpTools = [];
+    if (managerProfile?.env_allowlist) {
+      try {
+        const parsed = JSON.parse(managerProfile.env_allowlist);
+        if (Array.isArray(parsed)) envAllowlist = parsed;
+      } catch { /* use resolver defaults */ }
+    }
+    if (managerProfile?.capabilities_json) {
+      try {
+        const caps = JSON.parse(managerProfile.capabilities_json);
+        if (Array.isArray(caps.mcp_tools)) {
+          mcpTools = caps.mcp_tools.filter(t => typeof t === 'string' && t.trim());
+        }
+      } catch { /* no MCP tools */ }
+    }
+    const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...normalizedAuthResolverOpts });
+    return { adapterType, envAllowlist, mcpTools, authCtx };
+  }
+
   // Build the project-scoped SYSTEM prompt section that gets appended to
   // the shared PM layer template. Spec §9.5: "system prompt 완전히 정적
   // (cached_input_tokens 보호)". The brief is stable per run so baking
@@ -370,12 +402,11 @@ function createOperatorSpawnService({
     } catch (err) {
       log(`operator adapter preference read failed instance=${ensuredOperatorInstance.instanceId}: ${err.message}`);
     }
-    const adapterType = resolveOperatorAdapterType(project, adapterPreferenceInstance);
-    const adapter = managerAdapterFactory.getAdapter(adapterType);
     const nodeId = (nodeService && typeof nodeService.resolveNode === 'function')
       ? (nodeService.resolveNode(project) || 'local')
       : 'local';
     const isRemoteNode = !!(nodeId && nodeId !== 'local');
+
     const projectSource = resolveProjectSource(project);
     const isRepoProject = projectSource.isRepo;
     if (isRemoteNode && nodeService && typeof nodeService.getNode === 'function') {
@@ -396,42 +427,60 @@ function createOperatorSpawnService({
         throw err;
       }
     }
+    if (isRemoteNode && !promptApiEndpoints.remote) {
+      try {
+        runService.addRunEvent(activeTopRunId, 'operator:remote_base_url_unavailable', JSON.stringify({
+          node_id: nodeId,
+          project_id: projectId,
+        }));
+      } catch { /* ignore */ }
+      const err = new Error(
+        'remote Operator requires a Console URL reachable from its node; set PALANTIR_BASE_URL or bind the Console to a non-loopback host',
+      );
+      err.httpStatus = 409;
+      err.code = 'OPERATOR_REMOTE_BASE_URL_UNAVAILABLE';
+      err.retryable = false;
+      throw err;
+    }
+
+    let profiles = [];
+    try {
+      if (agentProfileService) profiles = agentProfileService.listProfiles();
+    } catch { /* use resolver defaults */ }
+
+    const configuredPreference = Boolean(
+      adapterPreferenceInstance?.preferred_adapter
+      || project?.preferred_pm_adapter
+      || process.env.PALANTIR_DEFAULT_PM_ADAPTER,
+    );
+    let adapterType = resolveOperatorAdapterType(project, adapterPreferenceInstance);
+    let managerRuntime;
+    if (!isRemoteNode && !configuredPreference) {
+      // The null-preference contract keeps Codex first, but it is a fallback
+      // order rather than an instruction to select an unusable adapter. Probe
+      // each locally available manager credential path with that adapter's own
+      // profile allowlist and pick the first one that can actually start.
+      const candidates = ['codex', 'claude-code'].map(type => resolveManagerProfileRuntime(type, profiles));
+      managerRuntime = candidates.find(candidate => candidate.authCtx.canAuth) || candidates[0];
+      adapterType = managerRuntime.adapterType;
+    } else {
+      managerRuntime = resolveManagerProfileRuntime(adapterType, profiles);
+    }
+    const adapter = managerAdapterFactory.getAdapter(adapterType);
 
     // P5-S4b: remote (pod) Claude Operators are now ENABLED + validated on a real
     // pod. The executor/nodePrefix routing below is adapter-generic (P4-S3b) and
     // the persistent Claude stream-json runs over the ssh duplex (P5-S0); the
     // S4a fail-closed gate that blocked isRemoteNode && 'claude-code' is removed.
 
-    // Resolve env_allowlist and mcp_tools from the agent profile of the same
-    // type if one exists — mirrors routes/manager.js /start behavior. We do
-    // NOT require agent_profile_id for PM spawns (the PM is a server-owned
-    // construct, not a user-selected profile), so if no profile is found we
-    // fall through to the resolver's defaults.
-    let envAllowlist;
-    let pmMcpTools = [];
-    try {
-      if (agentProfileService) {
-        const profiles = agentProfileService.listProfiles();
-        const managerProfile = profiles.find(p => p.type === adapterType);
-        if (managerProfile) {
-          if (managerProfile.env_allowlist) {
-            const parsed = JSON.parse(managerProfile.env_allowlist);
-            if (Array.isArray(parsed)) envAllowlist = parsed;
-          }
-          // P3-4: extract mcp_tools for PM adapter startup
-          if (managerProfile.capabilities_json) {
-            try {
-              const caps = JSON.parse(managerProfile.capabilities_json);
-              if (Array.isArray(caps.mcp_tools)) {
-                pmMcpTools = caps.mcp_tools.filter(t => typeof t === 'string' && t.trim());
-              }
-            } catch { /* ignore */ }
-          }
-        }
-      }
-    } catch { /* ignore — fall through to defaults */ }
-
-    const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
+    // Resolve env_allowlist and mcp_tools from the selected adapter's profile.
+    // The auth context was resolved at selection time so the null-preference
+    // fallback and the eventual spawn use exactly the same allowlist.
+    const {
+      envAllowlist,
+      mcpTools: pmMcpTools,
+      authCtx,
+    } = managerRuntime;
     // Resolve before the auth gate so migration diagnostics are observable
     // even when a legacy ambient auth mode is no longer sufficient.
     const spawnEnv = applyManagerCredentialPolicy(isRemoteNode ? {} : buildManagerSpawnEnv({
@@ -573,10 +622,6 @@ function createOperatorSpawnService({
     if (threadSourceReset) {
       try { runService.addRunEvent(runId, 'operator:thread_source_reset', JSON.stringify(threadSourceReset)); } catch { /* ignore */ }
     }
-    if (isRemoteNode && !process.env.PALANTIR_BASE_URL) {
-      try { runService.addRunEvent(runId, 'operator:remote_base_url_localhost', JSON.stringify({ node_id: nodeId })); } catch { /* ignore */ }
-    }
-
     const finishSpawn = (materializedRepoWorkspace = null) => {
       let executor;
       let nodePrefix;
@@ -618,7 +663,15 @@ function createOperatorSpawnService({
       const currentInstance = runService.getOperatorInstance(operatorInstanceId);
       operatorProfile = operatorProfileService.getProfile(currentInstance.profile_id);
     }
-    const baseSystemPrompt = buildManagerSystemPrompt({ adapter, port, token: !!token, layer: 'operator', adapterType, specialistAvailable: isSpecialistAvailable() });
+    const baseSystemPrompt = buildManagerSystemPrompt({
+      adapter,
+      port,
+      token: !!token,
+      layer: 'operator',
+      adapterType,
+      specialistAvailable: isSpecialistAvailable(),
+      apiBaseUrl: isRemoteNode ? promptApiEndpoints.remote : promptApiEndpoints.local,
+    });
     const projectSection = buildProjectScopedSystemSection({
       project,
       profile: operatorProfile,

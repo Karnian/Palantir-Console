@@ -14,6 +14,11 @@ const { createManagerRegistry } = require('../services/managerRegistry');
 const { createNodeService } = require('../services/nodeService');
 const { createOperatorSpawnService } = require('../services/operatorSpawnService');
 
+const TEST_MANAGER_API_ENDPOINTS = {
+  local: 'http://localhost:4177',
+  remote: 'http://console.test:4177',
+};
+
 async function mkdb(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-operator-claude-'));
   const dbPath = path.join(dir, 'test.db');
@@ -148,6 +153,77 @@ test('P5-S4a: resolveOperatorAdapterType maps Claude preferences to claude-code'
   }
 });
 
+test('null PM preference falls back to the locally authenticated Claude profile when Codex cannot authenticate', async (t) => {
+  const previousDefault = process.env.PALANTIR_DEFAULT_PM_ADAPTER;
+  delete process.env.PALANTIR_DEFAULT_PM_ADAPTER;
+  t.after(() => {
+    if (previousDefault === undefined) delete process.env.PALANTIR_DEFAULT_PM_ADAPTER;
+    else process.env.PALANTIR_DEFAULT_PM_ADAPTER = previousDefault;
+  });
+
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const registry = createManagerRegistry({ runService });
+  const claudeAdapter = makeFakeManagerAdapter('claude-code');
+  const codexAdapter = makeFakeManagerAdapter('codex');
+  const authCalls = [];
+  const resolveManagerAuth = (type, { envAllowlist } = {}) => {
+    authCalls.push({ type, envAllowlist });
+    if (type === 'claude-code') {
+      return {
+        canAuth: true,
+        env: { CLAUDE_CODE_OAUTH_TOKEN: 'claude-only-token' },
+        sources: ['test:claude'],
+        diagnostics: [],
+      };
+    }
+    return {
+      canAuth: false,
+      env: {},
+      sources: [],
+      diagnostics: ['No Codex credentials'],
+    };
+  };
+  const agentProfileService = {
+    listProfiles: () => [{
+      id: 'claude-only',
+      type: 'claude-code',
+      env_allowlist: '["CLAUDE_CODE_OAUTH_TOKEN"]',
+      capabilities_json: '{}',
+    }],
+  };
+  const spawn = createOperatorSpawnService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory({ claudeAdapter, codexAdapter }),
+    projectService,
+    projectBriefService,
+    agentProfileService,
+    resolveManagerAuth,
+  });
+  const project = projectService.createProject({ name: 'default-project-claude-only' });
+  assert.equal(project.pm_enabled, 1);
+  assert.equal(project.preferred_pm_adapter, null);
+  seedTop({ runService, registry, adapter: makeFakeManagerAdapter('claude-code') });
+
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
+
+  assert.equal(result.spawned, true);
+  assert.equal(result.run.manager_adapter, 'claude-code');
+  assert.equal(codexAdapter._starts.length, 0);
+  assert.equal(claudeAdapter._starts.length, 1);
+  assert.equal(
+    claudeAdapter._starts[0].opts.env.CLAUDE_CODE_OAUTH_TOKEN,
+    'claude-only-token',
+  );
+  assert.deepEqual(authCalls, [
+    { type: 'codex', envAllowlist: undefined },
+    { type: 'claude-code', envAllowlist: ['CLAUDE_CODE_OAUTH_TOKEN'] },
+  ]);
+});
+
 test('P5-S4c: Claude operator spawn persists local claude_session_id affinity from onSessionStarted', async (t) => {
   const db = await mkdb(t);
   const runService = createRunService(db, null);
@@ -215,6 +291,7 @@ test('P5-S4c: Claude lazy-spawn resumes a persisted session on the matching remo
     projectService,
     projectBriefService,
     nodeService,
+    managerApiEndpoints: TEST_MANAGER_API_ENDPOINTS,
     resolveManagerAuth: authOk,
   });
   const project = projectService.createProject({
@@ -258,6 +335,7 @@ test('P5-S4c: Claude lazy-spawn clears a persisted session bound to a different 
     projectService,
     projectBriefService,
     nodeService,
+    managerApiEndpoints: TEST_MANAGER_API_ENDPOINTS,
     resolveManagerAuth: authOk,
   });
   const project = projectService.createProject({
@@ -507,6 +585,7 @@ test('P5-S4b: remote node + Claude preference spawns a remote Claude Operator (e
   const spawn = createOperatorSpawnService({
     runService, managerRegistry: registry, managerAdapterFactory,
     projectService, projectBriefService, nodeService,
+    managerApiEndpoints: TEST_MANAGER_API_ENDPOINTS,
     resolveManagerAuth: authOk,
   });
   const project = projectService.createProject({

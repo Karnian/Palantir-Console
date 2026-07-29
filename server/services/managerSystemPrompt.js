@@ -13,7 +13,54 @@
  * a stable system prompt → cached_input_tokens hit on every turn.
  */
 
+const os = require('node:os');
 const { isProjectLayer } = require('../utils/conversationId');
+
+function formatUrlHost(host) {
+  return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+}
+
+function resolveManagerApiEndpoints({
+  explicitBaseUrl = process.env.PALANTIR_BASE_URL,
+  host,
+  port = process.env.PORT || 4177,
+  networkInterfaces = os.networkInterfaces,
+} = {}) {
+  if (typeof explicitBaseUrl === 'string' && explicitBaseUrl.trim()) {
+    const normalized = explicitBaseUrl.trim().replace(/\/+$/, '');
+    return { local: normalized, remote: normalized };
+  }
+
+  const bindHost = typeof host === 'string' && host.trim()
+    ? host.trim()
+    : '127.0.0.1';
+  const wildcard = bindHost === '0.0.0.0' || bindHost === '::';
+  if (wildcard) {
+    let remoteHost = null;
+    try {
+      const ifaces = networkInterfaces();
+      outer: for (const name of Object.keys(ifaces || {})) {
+        for (const iface of ifaces[name] || []) {
+          if ((iface.family === 'IPv4' || iface.family === 4) && !iface.internal) {
+            remoteHost = iface.address;
+            break outer;
+          }
+        }
+      }
+    } catch { /* remote stays unavailable */ }
+    return {
+      local: `http://localhost:${port}`,
+      remote: remoteHost ? `http://${formatUrlHost(remoteHost)}:${port}` : null,
+    };
+  }
+
+  const formattedHost = formatUrlHost(bindHost);
+  const local = `http://${formattedHost}:${port}`;
+  const loopback = bindHost === 'localhost'
+    || bindHost === '::1'
+    || /^127(?:\.\d{1,3}){3}$/.test(bindHost);
+  return { local, remote: loopback ? null : local };
+}
 
 function buildRoleSection({ layer = 'top' } = {}) {
   const delegationRole = isProjectLayer(layer)
@@ -45,35 +92,11 @@ ${delegationRole}
  *
  * See docs/specs/manager-v3-multilayer.md principle 8 (prompt 계층별 분기).
  */
-function buildCommonBase({ port, token, layer = 'top', adapterType, specialistAvailable = false }) {
-  // When the server is bound to 0.0.0.0 (external access), use the
-  // machine's actual IP so remote Codex/Claude processes can reach the
-  // API. PALANTIR_BASE_URL takes highest priority (explicit override),
-  // then HOST env detection, then localhost fallback.
-  let host = 'localhost';
-  if (process.env.PALANTIR_BASE_URL) {
-    // User explicitly set the full base URL — use it directly.
-    const base = process.env.PALANTIR_BASE_URL.replace(/\/+$/, '');
-    return _buildCommonBaseInner({ base, token, layer, adapterType, specialistAvailable });
-  }
-  const bindHost = process.env.HOST || '';
-  if (bindHost === '0.0.0.0') {
-    // Resolve to a reachable IP. Prefer non-internal IPv4.
-    try {
-      const os = require('os');
-      const ifaces = os.networkInterfaces();
-      for (const name of Object.keys(ifaces)) {
-        for (const iface of ifaces[name]) {
-          if (iface.family === 'IPv4' && !iface.internal) {
-            host = iface.address;
-            break;
-          }
-        }
-        if (host !== 'localhost') break;
-      }
-    } catch { /* fallback to localhost */ }
-  }
-  const base = `http://${host}:${port}`;
+function buildCommonBase({ port, token, layer = 'top', adapterType, specialistAvailable = false, apiBaseUrl }) {
+  const base = apiBaseUrl || resolveManagerApiEndpoints({
+    port,
+    host: '127.0.0.1',
+  }).local.replace('127.0.0.1', 'localhost');
   return _buildCommonBaseInner({ base, token, layer, adapterType, specialistAvailable });
 }
 
@@ -380,14 +403,14 @@ Always query the actual Palantir API to get real data — never guess or assume.
  * is used by Operator activation via operatorSpawnService and the resume path in manager.js.
  * See docs/specs/manager-v3-multilayer.md principle 8.
  */
-function buildManagerSystemPrompt({ adapter, port, token, layer = 'top', adapterType, specialistAvailable = false }) {
+function buildManagerSystemPrompt({ adapter, port, token, layer = 'top', adapterType, specialistAvailable = false, apiBaseUrl }) {
   const guardrails = adapter && typeof adapter.buildGuardrailsSection === 'function'
     ? adapter.buildGuardrailsSection({ layer })
     : '';
   return [
     buildRoleSection({ layer }),
     guardrails,
-    buildCommonBase({ port, token, layer, adapterType, specialistAvailable }),
+    buildCommonBase({ port, token, layer, adapterType, specialistAvailable, apiBaseUrl }),
   ].filter(Boolean).join('\n\n');
 }
 
@@ -442,4 +465,5 @@ module.exports = {
   // Exposed for tests
   buildRoleSection,
   buildCommonBase,
+  resolveManagerApiEndpoints,
 };
