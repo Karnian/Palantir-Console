@@ -332,7 +332,7 @@ test('remote worker gets no API base when proposal token mint returns null', asy
     },
   });
   createSshNode(h.nodeService);
-  const profile = seedProfile(db);
+  const profile = seedProfile(db, { envAllowlist: ['PALANTIR_API_BASE'] });
   const project = h.projectService.createProject({
     name: 'RemoteMintDisabled',
     directory: '/workspace/project',
@@ -349,6 +349,7 @@ test('remote worker gets no API base when proposal token mint returns null', asy
   const spec = h.remoteChannel.spawned[0].payload.spec;
   assert.equal('PALANTIR_WORKER_TOKEN' in spec.env, false);
   assert.equal('PALANTIR_API_BASE' in spec.env, false);
+  assert.deepEqual(spec.envAllowlist, []);
   assert.doesNotMatch(spec.stdin, /memory\/propose/);
 });
 

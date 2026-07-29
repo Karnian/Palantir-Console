@@ -7,6 +7,7 @@ const {
   resolveActorTokenPolicy,
   buildWorkerProcessEnv,
   augmentProcessPath,
+  applyWorkerCredentialPolicy,
 } = require('./actorTokenPolicy');
 
 /**
@@ -674,7 +675,12 @@ function createSubprocessEngine({ actorTokens = resolveActorTokenPolicy() } = {}
       throw new Error('worker stdin must be a string when provided');
     }
 
-    const workerEnv = buildWorkerProcessEnv(process.env, env, actorTokens);
+    const profileEnv = buildWorkerProcessEnv(process.env, env, actorTokens);
+    const workerEnv = applyWorkerCredentialPolicy(profileEnv, {
+      workerToken: profileEnv.PALANTIR_WORKER_TOKEN,
+      apiBase: profileEnv.PALANTIR_API_BASE,
+      actorTokens,
+    });
     // Ensure common binary paths are available (e.g., homebrew, nvm, local bins)
     const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
     const spawnEnv = augmentProcessPath(workerEnv, extraPaths);

@@ -928,9 +928,10 @@ test('spawnInteractive bootstraps a worker capability through stdin with worker 
   }
 });
 
-test('spawnInteractive worker values reach the child but not the actual env argv', async (t) => {
+test('spawnInteractive worker ignores allowlisted ambient API base and keeps run-bound values out of env argv', async (t) => {
   const workerToken = 'worker_run_capability_secret';
   const apiBase = 'https://argv-zero.example:8443/proxy-prefix';
+  const ambientApiBase = 'http://pod-user:pod-password@ambient-console:4177';
   const sandbox = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-interactive-argv-'));
   const argvCapturePath = path.join(sandbox, 'argv.bin');
   const envShimPath = path.join(sandbox, 'env');
@@ -956,11 +957,13 @@ test('spawnInteractive worker values reach the child but not the actual env argv
     env: {
       PATH: `${sandbox}:${process.env.PATH || ''}`,
       PALANTIR_TEST_ENV_ARGV_CAPTURE: argvCapturePath,
+      PALANTIR_API_BASE: ambientApiBase,
     },
   });
   const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
   const child = await exec.spawnInteractive('claude', ['--print'], {
     worker: true,
+    envAllowlist: ['PALANTIR_API_BASE'],
     env: {
       PALANTIR_WORKER_TOKEN: workerToken,
       PALANTIR_API_BASE: apiBase,
@@ -983,9 +986,32 @@ test('spawnInteractive worker values reach the child but not the actual env argv
   assert.ok(actualEnvArgv.includes('/bin/sh'), actualEnvArgv);
   assert.equal(actualEnvArgv.some((arg) => arg.includes(workerToken)), false, actualEnvArgv);
   assert.equal(actualEnvArgv.some((arg) => arg.includes(apiBase)), false, actualEnvArgv);
+  assert.equal(actualEnvArgv.some((arg) => arg.includes(ambientApiBase)), false, actualEnvArgv);
   const sshCall = spawn.calls.at(-1);
   assert.equal(JSON.stringify(sshCall.args).includes(workerToken), false);
   assert.equal(JSON.stringify(sshCall.args).includes(apiBase), false);
+  assert.equal(JSON.stringify(sshCall.args).includes(ambientApiBase), false);
+
+  const bareChild = await exec.spawnInteractive('claude', ['--print'], {
+    worker: true,
+    envAllowlist: ['PALANTIR_API_BASE'],
+    env: {},
+  });
+  let bareStdout = '';
+  let bareStderr = '';
+  bareChild.stdout.on('data', (chunk) => { bareStdout += chunk.toString(); });
+  bareChild.stderr.on('data', (chunk) => { bareStderr += chunk.toString(); });
+  const bareClosed = new Promise((resolve) => bareChild.once('close', (...args) => resolve(args)));
+  bareChild.stdin.end('worker prompt without capability');
+  const [bareCode] = await bareClosed;
+
+  assert.equal(bareCode, 0, bareStderr);
+  assert.equal(bareStdout, '\n\n');
+  const bareEnvArgv = (await fs.readFile(argvCapturePath))
+    .toString()
+    .split('\0')
+    .filter(Boolean);
+  assert.equal(bareEnvArgv.some((arg) => arg.includes(ambientApiBase)), false, bareEnvArgv);
 });
 
 test('spawnInteractive worker rejects API base URL userinfo before spawning ssh', async () => {
@@ -1388,6 +1414,59 @@ test('spawnWorker exports the file-backed API base inside the pod clean shell', 
   for (const call of spawn.calls) {
     assert.equal(JSON.stringify(call.args).includes(apiBase), false);
   }
+});
+
+test('spawnWorker ignores allowlisted ambient API base without a worker capability', async (t) => {
+  const root = await mkLoopbackRoot(t);
+  const projectDir = path.join(root, 'project');
+  const fakeBin = await mkLoopbackRoot(t);
+  const fakeTmux = path.join(fakeBin, 'tmux');
+  const envShim = path.join(fakeBin, 'env');
+  const argvCapturePath = path.join(fakeBin, 'env-argv.bin');
+  const ambientApiBase = 'http://pod-user:pod-password@ambient-console:4177';
+  const runId = 'ambient_api_base_denied';
+  await fs.mkdir(projectDir);
+  await fs.writeFile(
+    fakeTmux,
+    '#!/bin/sh\nexec /bin/sh -c "$5"\n',
+    { mode: 0o700 },
+  );
+  await fs.writeFile(envShim, [
+    '#!/bin/sh',
+    ': > "$PALANTIR_TEST_ENV_ARGV_CAPTURE"',
+    'for arg do',
+    '  printf \'%s\\0\' "$arg" >> "$PALANTIR_TEST_ENV_ARGV_CAPTURE"',
+    'done',
+    'exec /usr/bin/env "$@"',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  const spawn = loopbackSshSpawn({
+    env: {
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      PALANTIR_TEST_ENV_ARGV_CAPTURE: argvCapturePath,
+      PALANTIR_API_BASE: ambientApiBase,
+    },
+  });
+  const executor = createRemoteSshNodeExecutor(nodeRow({
+    exposed_roots: JSON.stringify([root]),
+  }), { spawnFn: spawn });
+
+  await executor.spawnWorker(runId, {
+    command: '/usr/bin/env',
+    cwd: projectDir,
+    workerPath: '/usr/bin:/bin',
+    envAllowlist: ['PALANTIR_API_BASE'],
+    env: {},
+  });
+
+  const statusDir = path.join(root, '.palantir-runs', runId);
+  const output = await fs.readFile(path.join(statusDir, 'stdout.log'), 'utf8');
+  assert.equal(output.includes('PALANTIR_API_BASE='), false, output);
+  const actualEnvArgv = (await fs.readFile(argvCapturePath))
+    .toString()
+    .split('\0')
+    .filter(Boolean);
+  assert.equal(actualEnvArgv.some((arg) => arg.includes(ambientApiBase)), false, actualEnvArgv);
 });
 
 test('spawnWorker rejects an API base with URL userinfo before handoff', async () => {

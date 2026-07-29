@@ -2117,7 +2117,12 @@ function createLifecycleService({
   function parseEnvAllowlistArray(allowlistJson) {
     try {
       const arr = JSON.parse(allowlistJson || '[]');
-      return Array.isArray(arr) ? arr.filter(k => typeof k === 'string') : [];
+      // This endpoint is selected by the server and is meaningful only with a
+      // run-bound worker capability. Never ask a remote executor to recover an
+      // ambient pod value for it; the executor enforces the same boundary.
+      return Array.isArray(arr)
+        ? arr.filter(k => typeof k === 'string' && k !== 'PALANTIR_API_BASE')
+        : [];
     } catch {
       return [];
     }

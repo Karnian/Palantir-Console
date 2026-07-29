@@ -550,6 +550,92 @@ test('subprocess worker writes the initial prompt to stdin and keeps it out of a
   assert.equal(payload.stdin, prompt);
 });
 
+function createIsolatedSubprocessEngine() {
+  const actorTokens = {
+    humanToken: 'human-secret',
+    agentToken: 'automation-secret',
+    separated: true,
+    processIsolated: true,
+    capabilitiesEnabled: true,
+    boundary: 'run_capabilities',
+  };
+  return createSubprocessEngine({ actorTokens });
+}
+
+function spawnRealCommand(engine, runId, spec) {
+  const previous = process.env.PALANTIR_ALLOW_REAL_SPAWN;
+  process.env.PALANTIR_ALLOW_REAL_SPAWN = '1';
+  try {
+    return engine.spawnAgent(runId, spec);
+  } finally {
+    if (previous === undefined) delete process.env.PALANTIR_ALLOW_REAL_SPAWN;
+    else process.env.PALANTIR_ALLOW_REAL_SPAWN = previous;
+  }
+}
+
+async function waitForSubprocessExit(engine, runId) {
+  const deadline = Date.now() + 2000;
+  while (engine.detectExitCode(runId) === null && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(engine.detectExitCode(runId), 0);
+}
+
+test('subprocess worker preserves a valid token-coupled API base', async () => {
+  const engine = createIsolatedSubprocessEngine();
+  const apiBase = 'https://console.example:8443/proxy-prefix';
+  const pairedRunId = uniqueRunId('subprocess-paired-api-base');
+
+  spawnRealCommand(engine, pairedRunId, {
+    command: '/usr/bin/env',
+    args: [],
+    cwd: os.tmpdir(),
+    env: {
+      PALANTIR_WORKER_TOKEN: 'scoped-token',
+      PALANTIR_API_BASE: apiBase,
+    },
+  });
+  await waitForSubprocessExit(engine, pairedRunId);
+  const pairedOutput = engine.getOutput(pairedRunId, 200);
+  assert.ok(pairedOutput.split('\n').includes('PALANTIR_WORKER_TOKEN=scoped-token'));
+  assert.ok(pairedOutput.split('\n').includes(`PALANTIR_API_BASE=${apiBase}`));
+});
+
+test('subprocess worker drops an API base without a worker capability', async () => {
+  const engine = createIsolatedSubprocessEngine();
+  const apiBase = 'https://console.example:8443/proxy-prefix';
+  const unpairedRunId = uniqueRunId('subprocess-unpaired-api-base');
+
+  spawnRealCommand(engine, unpairedRunId, {
+    command: '/usr/bin/env',
+    args: [],
+    cwd: os.tmpdir(),
+    env: { PALANTIR_API_BASE: apiBase },
+  });
+  await waitForSubprocessExit(engine, unpairedRunId);
+  const unpairedOutput = engine.getOutput(unpairedRunId, 200);
+  assert.equal(unpairedOutput.includes('PALANTIR_API_BASE='), false, unpairedOutput);
+});
+
+test('subprocess worker rejects API base URL userinfo before spawn', () => {
+  const engine = createIsolatedSubprocessEngine();
+  assert.throws(
+    () => spawnRealCommand(engine, uniqueRunId('subprocess-userinfo-api-base'), {
+      command: '/usr/bin/env',
+      args: [],
+      cwd: os.tmpdir(),
+      env: {
+        PALANTIR_WORKER_TOKEN: 'scoped-token',
+        PALANTIR_API_BASE: 'http://local-user:local-password@console:4177',
+      },
+    }),
+    (err) => (
+      err.code === 'WORKER_API_BASE_USERINFO'
+      && !/local-user|local-password/.test(err.message)
+    ),
+  );
+});
+
 test('kill cleans script and sentinel artifacts even when the tmux session is already gone', (t) => {
   const runId = uniqueRunId('cleanup');
   const paths = artifactPaths(runId);

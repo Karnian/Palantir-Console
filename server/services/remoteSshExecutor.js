@@ -227,10 +227,15 @@ function normalizeEnvKeyList(keys) {
     if (typeof key !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
       throw envKeyInvalidError(key);
     }
-    // Ambient actor credentials are never preservable through an allowlist.
-    // The one permitted run-bound capability is reintroduced explicitly by
-    // variable reference after env -i.
-    if (key === 'PATH' || isActorCredentialKey(key) || seen.has(key)) continue;
+    // Ambient actor credentials and their paired API endpoint are never
+    // preservable through an allowlist. Run-bound values are reintroduced
+    // explicitly after env -i, from stdin or a mode-0600 file.
+    if (
+      key === 'PATH'
+      || key === 'PALANTIR_API_BASE'
+      || isActorCredentialKey(key)
+      || seen.has(key)
+    ) continue;
     seen.add(key);
     normalized.push(key);
   }
