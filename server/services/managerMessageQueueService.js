@@ -268,8 +268,11 @@ function createManagerMessageQueueService({
         AND status IN ('sending', 'processing')
       ORDER BY sequence
     `),
-    // `data.terminal` is REQUIRED, exactly as the live paths require it
-    // (parseTerminalEvent below, and operatorScheduler.onEvent). codexAdapter
+    // This statement is shared by current-owner and stale-claim reconciliation;
+    // both intentionally require JSON boolean `true`, exactly as the live paths
+    // do (parseTerminalEvent below, and operatorScheduler.onEvent). `json_type`
+    // is deliberate because `json_extract` conflates boolean true with number 1.
+    // codexAdapter
     // persists non-terminal failures under the same event_type + invocationId
     // (`kind: 'codex_error', terminal: false`), so matching on invocationId
     // alone made restart reconciliation mistake a transient error for a
@@ -281,10 +284,10 @@ function createManagerMessageQueueService({
       WHERE run_id = ?
         AND event_type IN ('mgr.turn_completed', 'mgr.turn_failed')
         AND json_extract(payload_json, '$.data.invocationId') = ?
-        AND json_extract(
+        AND json_type(
           CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
           '$.data.terminal'
-        ) = 1
+        ) = 'true'
       ORDER BY id DESC
       LIMIT 1
     `),
