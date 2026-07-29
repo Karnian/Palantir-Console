@@ -168,7 +168,7 @@ test('migration 077 repairs multi-space rows in databases that already recorded 
   );
 });
 
-test('migration 079 snapshots pre-existing Claude manager templates', (t) => {
+test('migration 079 marks pre-existing Claude managers unresumable', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-claude-options-migration-'));
   const db = new Database(path.join(dir, 'test.db'));
   t.after(() => {
@@ -223,7 +223,6 @@ test('migration 079 snapshots pre-existing Claude manager templates', (t) => {
     'utf8',
   ));
 
-  const expectedTemplate = '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config locked.json --strict-mcp-config';
   for (const id of ['top-before-upgrade', 'operator-before-upgrade']) {
     assert.deepEqual(
       JSON.parse(db.prepare(`
@@ -231,10 +230,7 @@ test('migration 079 snapshots pre-existing Claude manager templates', (t) => {
         FROM runs
         WHERE id = ?
       `).get(id).session_claude_options_json),
-      {
-        argsTemplate: expectedTemplate,
-        legacyProfileSnapshot: true,
-      },
+      { legacyUnresumable: true },
     );
   }
   assert.equal(
@@ -251,13 +247,13 @@ test('migration 079 snapshots pre-existing Claude manager templates', (t) => {
     SET args_template = '-p {prompt}'
     WHERE id = 'restricted-claude'
   `).run();
-  assert.equal(
+  assert.deepEqual(
     JSON.parse(db.prepare(`
       SELECT session_claude_options_json
       FROM runs
       WHERE id = 'top-before-upgrade'
-    `).get().session_claude_options_json).argsTemplate,
-    expectedTemplate,
+    `).get().session_claude_options_json),
+    { legacyUnresumable: true },
   );
 });
 

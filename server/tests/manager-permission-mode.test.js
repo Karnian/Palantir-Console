@@ -324,12 +324,11 @@ test('Top Manager snapshots and resumes Claude runtime options after profile rem
   assert.equal(resumed.opts.settingSources, '');
 });
 
-test('Manager boot-resume reparses a migration-backfilled template snapshot', async (t) => {
+test('Manager boot-resume stops a migration-marked session instead of using a mutable profile', async (t) => {
   const {
     agentProfileService,
     runService,
   } = await createCapturingManagerHarness(t);
-  const template = '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config locked.json --strict-mcp-config';
   const staleRun = runService.createRun({
     is_manager: true,
     agent_profile_id: 'claude-code',
@@ -340,10 +339,7 @@ test('Manager boot-resume reparses a migration-backfilled template snapshot', as
   runService.updateClaudeSessionId(staleRun.id, 'sess-pre-migration');
   runService.setSessionSnapshot(staleRun.id, {
     sessionPermissionMode: 'acceptEdits',
-    sessionClaudeOptions: {
-      argsTemplate: template,
-      legacyProfileSnapshot: true,
-    },
+    sessionClaudeOptions: { legacyUnresumable: true },
   });
   agentProfileService.updateProfile('claude-code', {
     args_template: '-p {prompt}',
@@ -382,14 +378,11 @@ test('Manager boot-resume reparses a migration-backfilled template snapshot', as
     },
   });
 
-  const resumed = resumeStarts.find((entry) => entry.runId === staleRun.id);
-  assert.ok(resumed);
-  assert.equal(resumed.opts.resumeSessionId, 'sess-pre-migration');
-  assert.deepEqual(resumed.opts.tools, ['Read,Grep']);
-  assert.deepEqual(resumed.opts.disallowedTools, ['Bash']);
-  assert.equal(resumed.opts.maxBudgetUsd, 0.01);
-  assert.equal(resumed.opts.mcpConfig, 'locked.json');
-  assert.equal(resumed.opts.strictMcpConfig, true);
+  assert.equal(
+    resumeStarts.some((entry) => entry.runId === staleRun.id),
+    false,
+  );
+  assert.equal(runService.getRun(staleRun.id).status, 'stopped');
 });
 
 test('Manager boot-resume uses the fresh-spawn permission snapshot after profile deletion', async (t) => {

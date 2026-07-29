@@ -121,14 +121,10 @@ function resolveResumeClaudeTemplateOptions(agentProfileService, options = {}) {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new Error('invalid Claude session options snapshot');
     }
-    if (
-      parsed.legacyProfileSnapshot === true
-      && typeof parsed.argsTemplate === 'string'
-    ) {
-      return {
-        ...parseClaudeArgsTemplate(parsed.argsTemplate),
-        legacyProfileSnapshot: true,
-      };
+    if (parsed.legacyUnresumable === true) {
+      throw new Error(
+        'pre-migration Claude session has no trustworthy runtime options snapshot',
+      );
     }
     return {
       tools: Array.isArray(parsed.tools) ? parsed.tools : [],
@@ -609,10 +605,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                       ? templateOptions.disallowedTools
                       : undefined,
                     maxBudgetUsd: templateOptions?.maxBudgetUsd || undefined,
-                    mcpConfig: (
-                      r.session_claude_options_json != null
-                      && !templateOptions?.legacyProfileSnapshot
-                    )
+                    mcpConfig: r.session_claude_options_json != null
                       ? (templateOptions?.mcpConfig || undefined)
                       : mergeClaudeMcpConfigs(
                         templateOptions?.mcpConfig,
