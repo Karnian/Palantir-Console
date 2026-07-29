@@ -110,11 +110,89 @@ function parseEnvKeyArray(value) {
   }
 }
 
-function resolveProviderEnvPolicy(explicitAllowlist, providers = []) {
+function parseProviderGate(provider) {
+  const gateEnvKey = provider && provider.gate_env_key;
+  const gateEnvValue = provider && provider.gate_env_value;
+  if (gateEnvKey == null && gateEnvValue == null) {
+    return {
+      valid: true,
+      key: null,
+      value: null,
+    };
+  }
+  if (
+    typeof gateEnvKey !== 'string'
+    || !ENV_VAR_NAME_RE.test(gateEnvKey)
+    || typeof gateEnvValue !== 'string'
+    || gateEnvValue.length === 0
+  ) {
+    return {
+      valid: false,
+      key: null,
+      value: null,
+    };
+  }
+  return {
+    valid: true,
+    key: gateEnvKey,
+    value: gateEnvValue,
+  };
+}
+
+function resolveProviderEnvPolicy(
+  explicitAllowlist,
+  providers = [],
+  hostEnv = process.env,
+) {
   const parsedExplicit = parseEnvKeyArray(explicitAllowlist);
+  const explicitSet = new Set(parsedExplicit.keys);
+  const parsedProviders = providers.map((provider) => {
+    const parsedProviderKeys = parseEnvKeyArray(provider.env_keys);
+    const envKeys = parsedProviderKeys.valid ? parsedProviderKeys.keys : [];
+    const gate = parseProviderGate(provider);
+    const gateDeclared = !gate.key || envKeys.includes(gate.key);
+    const active = gate.valid
+      && gateDeclared
+      && (
+        !gate.key
+        || (
+          hostEnv
+          && Object.prototype.hasOwnProperty.call(hostEnv, gate.key)
+          && hostEnv[gate.key] != null
+          && String(hostEnv[gate.key]) === gate.value
+        )
+      );
+    return {
+      provider,
+      envKeys,
+      gate,
+      active,
+      valid: parsedProviderKeys.valid && gate.valid && gateDeclared,
+    };
+  });
+
+  // An inactive gated provider suppresses its declared keys even when a
+  // credential-shaped key is present in the profile's explicit allowlist.
+  // The explicit entry is the second approval; the gate remains the first.
+  // If another active provider declares the same key, that active declaration
+  // is sufficient to keep the shared key eligible.
+  const activeDeclaredKeys = new Set(
+    parsedProviders
+      .filter((provider) => provider.active)
+      .flatMap((provider) => provider.envKeys),
+  );
+  const blockedKeys = new Set();
+  for (const provider of parsedProviders) {
+    if (provider.active || !provider.gate.key) continue;
+    for (const key of provider.envKeys) {
+      if (!activeDeclaredKeys.has(key)) blockedKeys.add(key);
+    }
+  }
+
   const effectiveKeys = [];
   const effectiveSet = new Set();
   for (const key of parsedExplicit.keys) {
+    if (blockedKeys.has(key)) continue;
     if (!effectiveSet.has(key)) {
       effectiveSet.add(key);
       effectiveKeys.push(key);
@@ -122,19 +200,30 @@ function resolveProviderEnvPolicy(explicitAllowlist, providers = []) {
   }
 
   const resolvedProviders = [];
-  for (const provider of providers) {
-    const parsedProviderKeys = parseEnvKeyArray(provider.env_keys);
-    const envKeys = parsedProviderKeys.valid ? parsedProviderKeys.keys : [];
+  for (const parsedProvider of parsedProviders) {
+    const {
+      provider,
+      envKeys,
+      gate,
+      active,
+      valid,
+    } = parsedProvider;
     const inheritedKeys = [];
     const secretKeys = [];
     const withheldSecretKeys = [];
+    const approvedSecretKeys = [];
 
     for (const key of envKeys) {
       if (isProviderSecretEnvKey(key)) {
         secretKeys.push(key);
-        if (!effectiveSet.has(key)) withheldSecretKeys.push(key);
+        if (!explicitSet.has(key)) {
+          withheldSecretKeys.push(key);
+        } else if (active) {
+          approvedSecretKeys.push(key);
+        }
         continue;
       }
+      if (!active) continue;
       inheritedKeys.push(key);
       if (!effectiveSet.has(key)) {
         effectiveSet.add(key);
@@ -149,7 +238,12 @@ function resolveProviderEnvPolicy(explicitAllowlist, providers = []) {
       inheritedKeys,
       secretKeys,
       withheldSecretKeys,
-      valid: parsedProviderKeys.valid,
+      approvedSecretKeys,
+      gateEnvKey: gate.key,
+      gateEnvValue: gate.value,
+      active,
+      inactiveKeys: active ? [] : envKeys,
+      valid,
     });
   }
 
@@ -157,6 +251,8 @@ function resolveProviderEnvPolicy(explicitAllowlist, providers = []) {
     valid: parsedExplicit.valid && resolvedProviders.every((provider) => provider.valid),
     explicitKeys: parsedExplicit.keys,
     effectiveKeys,
+    allowDefaultAuth: parsedExplicit.keys.length === 0,
+    blockedKeys: [...blockedKeys],
     providers: resolvedProviders,
   };
 }
@@ -167,5 +263,6 @@ module.exports = {
   isProviderSecretEnvKey,
   normalizeProviderEnvKeys,
   parseEnvKeyArray,
+  parseProviderGate,
   resolveProviderEnvPolicy,
 };

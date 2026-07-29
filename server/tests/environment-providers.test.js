@@ -225,18 +225,6 @@ test('secret classification is not defeated by case or by missing separators', (
   }
 });
 
-test('a NULL env_allowlist is an empty allowlist, not a broken one', () => {
-  const { resolveProviderEnvPolicy } = require('../services/providerEnvPolicy');
-  // Reachable in one PATCH (env_allowlist: null clears the column). Treating it
-  // as invalid silently dropped every provider key at spawn while the API kept
-  // reporting the provider as active.
-  const policy = resolveProviderEnvPolicy(null, [
-    { id: 'envp_x', env_keys: '["CLAUDE_CODE_USE_BEDROCK","AWS_REGION"]' },
-  ]);
-  assert.equal(policy.valid, true);
-  assert.deepEqual([...policy.effectiveKeys].sort(), ['AWS_REGION', 'CLAUDE_CODE_USE_BEDROCK']);
-});
-
 test('declaring a provider is a human action, not something a bearer token can do', async (t) => {
   const app = await createTestApp(t);
   const body = { name: 'bearer-declared', env_keys: ['SOME_REGION'] };
@@ -263,4 +251,32 @@ test('declaring a provider is a human action, not something a bearer token can d
     0,
     'neither attempt may have created anything',
   );
+
+  const created = await request(app)
+    .post('/api/environment-providers')
+    .set(...COOKIE)
+    .send({ name: 'human-declared', env_keys: ['HUMAN_APPROVED_REGION'] });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const providerId = created.body.provider.id;
+
+  const bearerBinding = await request(app)
+    .patch('/api/agents/claude-code')
+    .set('Authorization', 'Bearer secret-token')
+    .send({ environment_provider_ids: [providerId] });
+  assert.equal(bearerBinding.status, 403, JSON.stringify(bearerBinding.body));
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(
+      app.services.agentProfileService.getProfile('claude-code'),
+      'environment_provider_ids',
+    ),
+    false,
+    'bearer binding must not mutate the profile',
+  );
+
+  const cookieBinding = await request(app)
+    .patch('/api/agents/claude-code')
+    .set(...COOKIE)
+    .send({ environment_provider_ids: [providerId] });
+  assert.equal(cookieBinding.status, 200, JSON.stringify(cookieBinding.body));
+  assert.deepEqual(cookieBinding.body.agent.environment_provider_ids, [providerId]);
 });

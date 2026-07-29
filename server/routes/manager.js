@@ -78,7 +78,7 @@ function resolveResumeEnvPolicy(agentProfileService, { profileId, adapterType } 
       profile = agentProfileService.listProfiles().find((candidate) => candidate.type === adapterType) || null;
     }
   } catch { /* treat an unreadable profile as "no allowlist" */ }
-  if (!profile || !profile.env_allowlist) return undefined;
+  if (!profile) return undefined;
   try {
     if (typeof agentProfileService.resolveEnvPolicy === 'function') {
       const policy = agentProfileService.resolveEnvPolicy(profile);
@@ -86,11 +86,18 @@ function resolveResumeEnvPolicy(agentProfileService, { profileId, adapterType } 
       return {
         envAllowlist: policy.effectiveKeys,
         providers: policy.providers,
+        allowDefaultAuth: policy.allowDefaultAuth,
+        blockedEnvKeys: policy.blockedKeys,
       };
     }
-    const parsed = JSON.parse(profile.env_allowlist);
+    const parsed = JSON.parse(profile.env_allowlist || '[]');
     if (!Array.isArray(parsed)) throw new Error('not an array');
-    return { envAllowlist: parsed, providers: [] };
+    return {
+      envAllowlist: parsed,
+      providers: [],
+      allowDefaultAuth: parsed.length === 0,
+      blockedEnvKeys: [],
+    };
   } catch (err) {
     console.warn(
       `[security] manager_env_allowlist_unreadable ${JSON.stringify({
@@ -213,7 +220,13 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
             adapterType,
           });
           const envAllowlist = envPolicy?.envAllowlist;
-          const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
+          const authCtx = resolveManagerAuth(adapterType, {
+            envAllowlist,
+            providerEnv: envPolicy?.providers,
+            allowDefaultAuth: envPolicy?.allowDefaultAuth,
+            blockedEnvKeys: envPolicy?.blockedEnvKeys,
+            ...authResolverOpts,
+          });
           const resolvedSpawnEnv = buildManagerSpawnEnv({
             baseEnv: actorSpawnBaseEnv,
             authEnv: authCtx.env,
@@ -480,7 +493,13 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   adapterType,
                 });
                 const envAllowlist = envPolicy?.envAllowlist;
-                const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
+                const authCtx = resolveManagerAuth(adapterType, {
+                  envAllowlist,
+                  providerEnv: envPolicy?.providers,
+                  allowDefaultAuth: envPolicy?.allowDefaultAuth,
+                  blockedEnvKeys: envPolicy?.blockedEnvKeys,
+                  ...authResolverOpts,
+                });
                 const resolvedSpawnEnv = isRemoteNode ? {} : buildManagerSpawnEnv({
                   baseEnv: actorSpawnBaseEnv,
                   authEnv: authCtx.env,
@@ -677,8 +696,8 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     // Fail-closed on malformed env_allowlist: a user who hand-edits the row
     // and corrupts it must NOT silently re-enable all default credentials.
     let envAllowlist;
-    let providerEnv = [];
-    if (resolvedProfile && resolvedProfile.env_allowlist) {
+    let envPolicy;
+    if (resolvedProfile) {
       try {
         if (
           agentProfileService
@@ -688,14 +707,19 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           if (!policy.valid) {
             throw new Error('env policy contains invalid JSON');
           }
+          envPolicy = policy;
           envAllowlist = policy.effectiveKeys;
-          providerEnv = policy.providers;
         } else {
-          const parsed = JSON.parse(resolvedProfile.env_allowlist);
+          const parsed = JSON.parse(resolvedProfile.env_allowlist || '[]');
           if (!Array.isArray(parsed)) {
             throw new Error('env_allowlist must be a JSON array');
           }
           envAllowlist = parsed;
+          envPolicy = {
+            providers: [],
+            allowDefaultAuth: parsed.length === 0,
+            blockedKeys: [],
+          };
         }
       } catch (parseErr) {
         startingManager = false;
@@ -711,7 +735,14 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       // fall through to the resolver's defaults.
       envAllowlist = undefined;
     }
-    const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
+    const providerEnv = envPolicy?.providers || [];
+    const authCtx = resolveManagerAuth(adapterType, {
+      envAllowlist,
+      providerEnv,
+      allowDefaultAuth: envPolicy?.allowDefaultAuth,
+      blockedEnvKeys: envPolicy?.blockedKeys,
+      ...authResolverOpts,
+    });
     const resolvedSpawnEnv = buildManagerSpawnEnv({
       baseEnv: actorSpawnBaseEnv,
       authEnv: authCtx.env,

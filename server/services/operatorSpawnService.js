@@ -409,6 +409,8 @@ function createOperatorSpawnService({
     // fall through to the resolver's defaults.
     let envAllowlist;
     let providerEnv = [];
+    let allowDefaultAuth;
+    let blockedEnvKeys = [];
     let pmMcpTools = [];
     try {
       if (agentProfileService) {
@@ -420,6 +422,8 @@ function createOperatorSpawnService({
             if (policy.valid) {
               envAllowlist = policy.effectiveKeys;
               providerEnv = policy.providers;
+              allowDefaultAuth = policy.allowDefaultAuth;
+              blockedEnvKeys = policy.blockedKeys;
             }
           } else if (managerProfile.env_allowlist) {
             const parsed = JSON.parse(managerProfile.env_allowlist);
@@ -438,7 +442,13 @@ function createOperatorSpawnService({
       }
     } catch { /* ignore — fall through to defaults */ }
 
-    const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
+    const authCtx = resolveManagerAuth(adapterType, {
+      envAllowlist,
+      providerEnv,
+      allowDefaultAuth,
+      blockedEnvKeys,
+      ...authResolverOpts,
+    });
     // Resolve before the auth gate so migration diagnostics are observable
     // even when a legacy ambient auth mode is no longer sufficient.
     const spawnEnv = applyManagerCredentialPolicy(isRemoteNode ? {} : buildManagerSpawnEnv({

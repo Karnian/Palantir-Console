@@ -13,7 +13,8 @@ Foundry 또는 custom provider의 환경 변수 집합을 코드가 추측하지
 ## 데이터 모델
 
 - `environment_providers`: 운영자가 정한 이름, 필요한 환경 변수 **이름**
-  목록(`env_keys`), 설명을 저장한다. 환경 변수 값은 저장하지 않는다.
+  목록(`env_keys`), 선택적 활성화 조건(`gate_env_key` +
+  `gate_env_value`), 설명을 저장한다. 환경 변수 값은 저장하지 않는다.
 - `agent_profile_environment_providers`: `agent_profiles`와 provider 선언을
   ID로 연결한다.
 - `agent_profiles.env_allowlist`: 기존의 프로필별 명시적 승인 목록으로
@@ -27,7 +28,7 @@ provider가 연결되지 않은 프로필은 기존 행과 같은 `env_allowlist
 provider 선언은 “이 provider에 이 키가 필요하다”는 요구사항 기록이지,
 모든 키를 자식 프로세스로 보낼 권한이 아니다.
 
-provider를 프로필에 연결하면 credential 형태가 아닌 키만 기존
+활성 provider를 프로필에 연결하면 credential 형태가 아닌 키만 기존
 `env_allowlist`에 합쳐져 유효 allowlist가 된다. 이름에 `SECRET`,
 `API_KEY`, `ACCESS_KEY` 토큰이 있거나 `_KEY`, `_TOKEN`, `_PASSWORD`,
 `_CREDENTIAL(S)`, `_CERT`, `_PRIVATE`로 끝나는 키는 secret으로 분류한다.
@@ -35,7 +36,8 @@ provider를 프로필에 연결하면 credential 형태가 아닌 키만 기존
 기존 `envDenylist.js`의 credential 패턴을 더 보수적으로 적용한 것이다.
 
 secret으로 분류된 키는 provider를 선택하는 것만으로는 합쳐지지 않는다.
-동일한 키가 프로필의 기존 `env_allowlist`에도 직접 적혀 있어야 전달된다.
+동일한 키가 프로필의 기존 `env_allowlist`에도 직접 적혀 있고 provider의
+gate 조건도 충족되어야 전달된다.
 따라서 provider 선언과 secret 전달 승인은 서로 다른 운영자 행위와 저장
 필드로 남는다. `AWS_SECRET_ACCESS_KEY`와 `*_API_KEY`가 provider 선언에
 있더라도 프로필의 명시적 승인 전에는 자식 환경에 없다.
@@ -48,6 +50,13 @@ API가 반환하는 연결된 프로필에는 다음 진단 필드가 추가된�
 - `environment_providers[].secret_env_keys`: secret으로 분류된 키
 - `environment_providers[].withheld_secret_env_keys`: 아직 프로필에서
   명시적으로 승인하지 않아 보류된 키
+- `environment_providers[].active`: 현재 호스트 환경에서 gate가 활성인지
+- `environment_providers[].inactive_env_keys`: gate 불일치로 보류된 키
+
+명시 allowlist가 `[]` 또는 `NULL`이면 기존처럼 adapter의 기본 인증 키를
+허용한다. provider의 일반 설정 키를 병합해도 이 기본 의미는 바뀌지 않는다.
+반대로 활성 provider의 secret 키가 명시 승인되고 호스트에 존재하면,
+표준 Claude/Codex 자격증명이 없어도 manager 인증 preflight의 근거가 된다.
 
 ## API 사용
 
@@ -61,10 +70,17 @@ Content-Type: application/json
 
 {
   "name": "confirmed-provider",
-  "env_keys": ["EXAMPLE_REGION", "EXAMPLE_API_KEY"],
+  "env_keys": ["USE_EXAMPLE_PROVIDER", "EXAMPLE_REGION", "EXAMPLE_API_KEY"],
+  "gate_env_key": "USE_EXAMPLE_PROVIDER",
+  "gate_env_value": "1",
   "description": "확인된 운영 환경과 문서 링크를 내부 기록에 남긴다"
 }
 ```
+
+`gate_env_key`는 `env_keys`에도 포함되어야 한다. `gate_env_value`를 생략하면
+`"1"`을 사용한다. gate 키가 없거나 값이 정확히 일치하지 않으면 provider가
+선언한 일반 키와 명시 승인 secret 모두 child 환경에서 보류된다. gate가
+필요 없는 custom provider는 두 필드를 생략할 수 있다.
 
 목록·단건 조회·수정·삭제 API는 다음과 같다.
 
@@ -109,8 +125,6 @@ provider가 연결되지 않았거나 관련 키가 없으면 기존 로그 JSON
 
 1. 실제 사용자가 어떤 provider와 실행 경로(manager/worker, local/remote)를
    쓰는지 확인한다.
-2. 필요한 키 목록과 gate 조건을 provider 공식 문서로 확정한다.
-3. ambient secret이 gate 미설정 상태에서 계속 차단되는지 실제 실행으로
-   검증한다.
-4. 확인된 목록은 운영자 선언으로 등록한다. 저장소 코드에 `AWS_*` 같은
+2. 필요한 키 목록과 gate 조건을 provider 공식 문서로 확정해 선언한다.
+3. 확인된 목록은 운영자 선언으로 등록한다. 저장소 코드에 `AWS_*` 같은
    추정 allowlist를 추가하지 않는다.

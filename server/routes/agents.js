@@ -2,6 +2,7 @@ const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { resolveManagerAuth } = require('../services/authResolver');
 const { validateCreateAgent, validateUpdateAgent } = require('../middleware/validate');
+const { assertHumanWrite } = require('./environmentProviders');
 
 /**
  * Agent routes. Per-agent usage dispatch goes through the provider registry,
@@ -21,6 +22,7 @@ function computeAuthForProfile(profile, resolverOpts = {}, agentProfileService =
   const adapterType = MANAGER_PROFILE_TYPES[profile && profile.type];
   if (!adapterType) return null;
   let envAllowlist;
+  let envPolicy;
   if (profile.env_allowlist) {
     // D7 fail-closed: must match the strict parse in routes/manager.js
     // /api/manager/start. Both syntax errors AND non-array JSON must
@@ -57,9 +59,16 @@ function computeAuthForProfile(profile, resolverOpts = {}, agentProfileService =
         diagnostics: ['environment provider env_keys must be valid JSON arrays'],
       };
     }
+    envPolicy = policy;
     envAllowlist = policy.effectiveKeys;
   }
-  const ctx = resolveManagerAuth(adapterType, { envAllowlist, ...resolverOpts });
+  const ctx = resolveManagerAuth(adapterType, {
+    envAllowlist,
+    providerEnv: envPolicy?.providers,
+    allowDefaultAuth: envPolicy?.allowDefaultAuth,
+    blockedEnvKeys: envPolicy?.blockedKeys,
+    ...resolverOpts,
+  });
   return {
     canAuth: !!ctx.canAuth,
     sources: ctx.sources || [],
@@ -110,11 +119,17 @@ function createAgentsRouter({ agentProfileService, providerRegistry, authResolve
   }));
 
   router.post('/', validateCreateAgent, asyncHandler(async (req, res) => {
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'environment_provider_ids')) {
+      assertHumanWrite(req);
+    }
     const agent = agentProfileService.createProfile(req.body || {});
     res.status(201).json({ agent });
   }));
 
   router.patch('/:id', validateUpdateAgent, asyncHandler(async (req, res) => {
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'environment_provider_ids')) {
+      assertHumanWrite(req);
+    }
     const agent = agentProfileService.updateProfile(req.params.id, req.body || {});
     res.json({ agent });
   }));

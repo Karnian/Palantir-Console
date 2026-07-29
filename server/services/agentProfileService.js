@@ -212,6 +212,11 @@ function createAgentProfileService(db) {
         inherited_env_keys: provider.inheritedKeys,
         secret_env_keys: provider.secretKeys,
         withheld_secret_env_keys: provider.withheldSecretKeys,
+        approved_secret_env_keys: provider.approvedSecretKeys,
+        gate_env_key: provider.gateEnvKey,
+        gate_env_value: provider.gateEnvValue,
+        active: provider.active,
+        inactive_env_keys: provider.inactiveKeys,
       })),
       effective_env_allowlist: policy.effectiveKeys,
     };

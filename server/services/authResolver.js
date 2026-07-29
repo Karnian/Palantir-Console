@@ -369,8 +369,55 @@ function bootstrapClaudeAuthFromEnv({ logger = console } = {}) {
  *                                           credentials-file probe.
  * @returns {{ canAuth: boolean, env: object, sources: string[], diagnostics: string[] }}
  */
+function resolveAuthAllowSet(
+  envAllowlist,
+  defaultAuthKeys,
+  { allowDefaultAuth = false, blockedEnvKeys = [] } = {},
+) {
+  const useDefaults = (
+    !Array.isArray(envAllowlist)
+    || envAllowlist.length === 0
+    || allowDefaultAuth
+  );
+  const allow = new Set(useDefaults ? defaultAuthKeys : []);
+  if (Array.isArray(envAllowlist)) {
+    for (const key of envAllowlist) allow.add(key);
+  }
+  if (Array.isArray(blockedEnvKeys)) {
+    for (const key of blockedEnvKeys) allow.delete(key);
+  }
+  return allow;
+}
+
+function resolveProviderAuthSources(providerEnv, allow) {
+  const sources = [];
+  if (!Array.isArray(providerEnv)) return sources;
+  for (const provider of providerEnv) {
+    if (!provider || provider.active === false) continue;
+    const keys = Array.isArray(provider.approvedSecretKeys)
+      ? provider.approvedSecretKeys
+      : [];
+    for (const key of keys) {
+      if (
+        allow.has(key)
+        && process.env[key]
+        && !sources.some((source) => source.key === key)
+      ) {
+        sources.push({
+          key,
+          source: `provider-env:${provider.id || provider.name || 'declared'}:${key}`,
+        });
+      }
+    }
+  }
+  return sources;
+}
+
 function resolveClaudeAuth({
   envAllowlist,
+  providerEnv,
+  allowDefaultAuth = false,
+  blockedEnvKeys,
   hasKeychain = hasClaudeKeychainCredentials,
   hasCredentialsFile = hasClaudeLinuxCredentials,
 } = {}) {
@@ -378,9 +425,10 @@ function resolveClaudeAuth({
   const sources = [];
   const diagnostics = [];
 
-  const allow = Array.isArray(envAllowlist) && envAllowlist.length > 0
-    ? new Set(envAllowlist)
-    : new Set(CLAUDE_AUTH_KEYS);
+  const allow = resolveAuthAllowSet(envAllowlist, CLAUDE_AUTH_KEYS, {
+    allowDefaultAuth,
+    blockedEnvKeys,
+  });
 
   // (1) Direct env vars
   if (process.env.CLAUDE_CODE_OAUTH_TOKEN && allow.has('CLAUDE_CODE_OAUTH_TOKEN')) {
@@ -426,9 +474,18 @@ function resolveClaudeAuth({
   const credentialsFile = hasCredentialsFile();
   if (credentialsFile) sources.push('file:~/.claude/.credentials.json');
 
-  const canAuth = !!(env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY || keychain || credentialsFile);
+  const providerAuth = resolveProviderAuthSources(providerEnv, allow);
+  sources.push(...providerAuth.map((entry) => entry.source));
+
+  const canAuth = !!(
+    env.CLAUDE_CODE_OAUTH_TOKEN
+    || env.ANTHROPIC_API_KEY
+    || keychain
+    || credentialsFile
+    || providerAuth.length > 0
+  );
   if (!canAuth) {
-    diagnostics.push('No Claude credentials found. Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, run `claude login` (populates the macOS keychain, or ~/.claude/.credentials.json on Linux/Windows), or start the server once from inside a Claude Code session to seed .claude-auth.json.');
+    diagnostics.push('No Claude credentials found. Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, activate a declared provider with an explicitly approved credential env key, run `claude login` (populates the macOS keychain, or ~/.claude/.credentials.json on Linux/Windows), or start the server once from inside a Claude Code session to seed .claude-auth.json.');
     if (Array.isArray(envAllowlist) && envAllowlist.length > 0) {
       const blocked = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']
         .filter(k => process.env[k] && !allow.has(k));
@@ -445,14 +502,20 @@ function resolveClaudeAuth({
  * Resolve auth for a Codex manager session (PR4 will use this — kept here so
  * PR2 establishes the contract for both adapters).
  */
-function resolveCodexAuth({ envAllowlist } = {}) {
+function resolveCodexAuth({
+  envAllowlist,
+  providerEnv,
+  allowDefaultAuth = false,
+  blockedEnvKeys,
+} = {}) {
   const env = {};
   const sources = [];
   const diagnostics = [];
 
-  const allow = Array.isArray(envAllowlist) && envAllowlist.length > 0
-    ? new Set(envAllowlist)
-    : new Set(CODEX_AUTH_KEYS);
+  const allow = resolveAuthAllowSet(envAllowlist, CODEX_AUTH_KEYS, {
+    allowDefaultAuth,
+    blockedEnvKeys,
+  });
 
   if (process.env.CODEX_API_KEY && allow.has('CODEX_API_KEY')) {
     env.CODEX_API_KEY = process.env.CODEX_API_KEY;
@@ -471,9 +534,17 @@ function resolveCodexAuth({ envAllowlist } = {}) {
   } catch { /* ignore */ }
   if (hasCodexFile) sources.push(`file:${CODEX_AUTH_FILE}`);
 
-  const canAuth = !!(env.CODEX_API_KEY || env.OPENAI_API_KEY || hasCodexFile);
+  const providerAuth = resolveProviderAuthSources(providerEnv, allow);
+  sources.push(...providerAuth.map((entry) => entry.source));
+
+  const canAuth = !!(
+    env.CODEX_API_KEY
+    || env.OPENAI_API_KEY
+    || hasCodexFile
+    || providerAuth.length > 0
+  );
   if (!canAuth) {
-    diagnostics.push(`No Codex credentials found. Set CODEX_API_KEY/OPENAI_API_KEY or run \`codex login\` to create ${CODEX_AUTH_FILE}.`);
+    diagnostics.push(`No Codex credentials found. Set CODEX_API_KEY/OPENAI_API_KEY, activate a declared provider with an explicitly approved credential env key, or run \`codex login\` to create ${CODEX_AUTH_FILE}.`);
     if (Array.isArray(envAllowlist) && envAllowlist.length > 0) {
       const blocked = CODEX_AUTH_KEYS.filter(k => process.env[k] && !allow.has(k));
       if (blocked.length > 0) {

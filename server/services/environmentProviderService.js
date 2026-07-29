@@ -7,6 +7,7 @@ const {
   NotFoundError,
 } = require('../utils/errors');
 const {
+  ENV_VAR_NAME_RE,
   isProviderSecretEnvKey,
   normalizeProviderEnvKeys,
   parseEnvKeyArray,
@@ -14,6 +15,7 @@ const {
 
 const NAME_MAX = 128;
 const DESCRIPTION_MAX = 1000;
+const GATE_VALUE_MAX = 256;
 
 function normalizeName(value) {
   if (typeof value !== 'string' || !value.trim()) {
@@ -37,6 +39,42 @@ function normalizeDescription(value) {
   return value;
 }
 
+function normalizeGate(data, existingRow, envKeys) {
+  const hasGateKey = Object.prototype.hasOwnProperty.call(data, 'gate_env_key');
+  const hasGateValue = Object.prototype.hasOwnProperty.call(data, 'gate_env_value');
+  let gateEnvKey = hasGateKey
+    ? data.gate_env_key
+    : (existingRow ? existingRow.gate_env_key : null);
+  let gateEnvValue = hasGateValue
+    ? data.gate_env_value
+    : (existingRow ? existingRow.gate_env_value : null);
+
+  if (gateEnvKey == null || gateEnvKey === '') {
+    if (hasGateValue && gateEnvValue != null && gateEnvValue !== '') {
+      throw new BadRequestError('gate_env_value requires gate_env_key');
+    }
+    return { gateEnvKey: null, gateEnvValue: null };
+  }
+  if (typeof gateEnvKey !== 'string' || !ENV_VAR_NAME_RE.test(gateEnvKey)) {
+    throw new BadRequestError(
+      `gate_env_key must match ${ENV_VAR_NAME_RE} (POSIX env var name)`,
+    );
+  }
+  if (!envKeys.includes(gateEnvKey)) {
+    throw new BadRequestError('gate_env_key must also be present in env_keys');
+  }
+  if (!hasGateValue && (!existingRow || existingRow.gate_env_key == null)) {
+    gateEnvValue = '1';
+  }
+  if (typeof gateEnvValue !== 'string' || gateEnvValue.length === 0) {
+    throw new BadRequestError('gate_env_value must be a non-empty string');
+  }
+  if (gateEnvValue.length > GATE_VALUE_MAX) {
+    throw new BadRequestError(`gate_env_value too long (max ${GATE_VALUE_MAX})`);
+  }
+  return { gateEnvKey, gateEnvValue };
+}
+
 function rowToProvider(row) {
   if (!row) return null;
   const parsed = parseEnvKeyArray(row.env_keys);
@@ -46,6 +84,8 @@ function rowToProvider(row) {
     name: row.name,
     env_keys: envKeys,
     secret_env_keys: envKeys.filter(isProviderSecretEnvKey),
+    gate_env_key: row.gate_env_key ?? null,
+    gate_env_value: row.gate_env_value ?? null,
     description: row.description ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -58,17 +98,25 @@ function createEnvironmentProviderService(db) {
     getById: db.prepare('SELECT * FROM environment_providers WHERE id = ?'),
     getByName: db.prepare('SELECT * FROM environment_providers WHERE name = ?'),
     insert: db.prepare(`
-      INSERT INTO environment_providers (id, name, env_keys, description)
-      VALUES (@id, @name, @env_keys, @description)
+      INSERT INTO environment_providers (
+        id, name, env_keys, gate_env_key, gate_env_value, description
+      )
+      VALUES (
+        @id, @name, @env_keys, @gate_env_key, @gate_env_value, @description
+      )
     `),
     update: db.prepare(`
       UPDATE environment_providers
       SET name = @name,
           env_keys = @env_keys,
+          gate_env_key = @gate_env_key,
+          gate_env_value = @gate_env_value,
           description = @description,
           updated_at = CASE
             WHEN name != @name
               OR env_keys != @env_keys
+              OR COALESCE(gate_env_key, '') != COALESCE(@gate_env_key, '')
+              OR COALESCE(gate_env_value, '') != COALESCE(@gate_env_value, '')
               OR COALESCE(description, '') != COALESCE(@description, '')
             THEN datetime('now')
             ELSE updated_at
@@ -102,6 +150,7 @@ function createEnvironmentProviderService(db) {
     }
     const name = normalizeName(data.name);
     const envKeys = normalizeProviderEnvKeys(data.env_keys ?? []);
+    const { gateEnvKey, gateEnvValue } = normalizeGate(data, null, envKeys);
     const description = normalizeDescription(data.description);
     if (stmts.getByName.get(name)) {
       throw new ConflictError(`environment provider name already exists: ${name}`);
@@ -112,6 +161,8 @@ function createEnvironmentProviderService(db) {
         id,
         name,
         env_keys: JSON.stringify(envKeys),
+        gate_env_key: gateEnvKey,
+        gate_env_value: gateEnvValue,
         description,
       });
     } catch (err) {
@@ -137,6 +188,7 @@ function createEnvironmentProviderService(db) {
     const envKeys = Object.prototype.hasOwnProperty.call(data, 'env_keys')
       ? normalizeProviderEnvKeys(data.env_keys)
       : parseEnvKeyArray(existingRow.env_keys).keys;
+    const { gateEnvKey, gateEnvValue } = normalizeGate(data, existingRow, envKeys);
     const description = Object.prototype.hasOwnProperty.call(data, 'description')
       ? normalizeDescription(data.description)
       : existingRow.description;
@@ -149,6 +201,8 @@ function createEnvironmentProviderService(db) {
         id,
         name,
         env_keys: JSON.stringify(envKeys),
+        gate_env_key: gateEnvKey,
+        gate_env_value: gateEnvValue,
         description,
       });
     } catch (err) {

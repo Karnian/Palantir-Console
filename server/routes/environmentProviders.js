@@ -67,4 +67,4 @@ function createEnvironmentProvidersRouter({ environmentProviderService }) {
   return router;
 }
 
-module.exports = { createEnvironmentProvidersRouter };
+module.exports = { createEnvironmentProvidersRouter, assertHumanWrite };
