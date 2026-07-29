@@ -419,15 +419,18 @@ test('claude template parser preserves tool and strict MCP rules', (t) => {
   );
 });
 
-test('claude template parser preserves boolean security flags and an empty setting source', (t) => {
+test('claude template parser preserves worker runtime and security options', (t) => {
   const { service } = setup(t);
-  const argsTemplate = '-p {prompt} --safe-mode --bare --disable-slash-commands --setting-sources ""';
+  const argsTemplate = '-p {prompt} --safe-mode --bare --disable-slash-commands --no-chrome --setting-sources "" --settings locked.json --max-turns 5';
   const parsed = parseClaudeArgsTemplate(argsTemplate);
 
   assert.equal(parsed.safeMode, true);
   assert.equal(parsed.bare, true);
   assert.equal(parsed.disableSlashCommands, true);
+  assert.equal(parsed.noChrome, true);
   assert.equal(parsed.settingSources, '');
+  assert.equal(parsed.settings, 'locked.json');
+  assert.equal(parsed.maxTurns, 5);
 
   const created = service.createProfile(profile({
     command: 'claude',
@@ -447,6 +450,7 @@ test('claude template parser preserves boolean security flags and an empty setti
   for (const [flag, field] of [
     ['--bare', 'bare'],
     ['--disable-slash-commands', 'disableSlashCommands'],
+    ['--no-chrome', 'noChrome'],
   ]) {
     assertBadRequest(
       () => service.createProfile(profile({
@@ -466,6 +470,24 @@ test('claude template parser preserves boolean security flags and an empty setti
     })),
     /--setting-sources in args_template requires a value/,
   );
+  assertBadRequest(
+    () => service.createProfile(profile({
+      command: 'claude',
+      type: 'claude-code',
+      args_template: '-p {prompt} --settings',
+    })),
+    /--settings in args_template requires a value/,
+  );
+  for (const invalidMaxTurns of ['0', '1.5', 'nope']) {
+    assertBadRequest(
+      () => service.createProfile(profile({
+        command: 'claude',
+        type: 'claude-code',
+        args_template: `-p {prompt} --max-turns ${invalidMaxTurns}`,
+      })),
+      /--max-turns in args_template must be a positive integer/,
+    );
+  }
 });
 
 test('legacy multi-space permission remains stable across an Agents UI-shaped rename', (t) => {

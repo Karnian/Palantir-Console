@@ -1684,9 +1684,12 @@ function createLifecycleService({
               safeMode: templateOptions.safeMode || undefined,
               bare: templateOptions.bare || undefined,
               disableSlashCommands: templateOptions.disableSlashCommands || undefined,
+              noChrome: templateOptions.noChrome || undefined,
               settingSources: typeof templateOptions.settingSources === 'string'
                 ? templateOptions.settingSources
                 : undefined,
+              settings: templateOptions.settings || undefined,
+              maxTurns: templateOptions.maxTurns ?? undefined,
               isManager: false,
               envAllowlist: [
                 ...parseEnvAllowlistArray(profile.env_allowlist),

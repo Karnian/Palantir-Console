@@ -347,7 +347,10 @@ test('engine: optional args including strict MCP config are appended', async () 
     safeMode: true,
     bare: true,
     disableSlashCommands: true,
+    noChrome: true,
     settingSources: '',
+    settings: 'locked.json',
+    maxTurns: 5,
   });
 
   assert.ok(args.includes('--model'));
@@ -368,9 +371,16 @@ test('engine: optional args including strict MCP config are appended', async () 
   assert.ok(args.includes('--safe-mode'));
   assert.equal(args.filter((arg) => arg === '--bare').length, 1);
   assert.ok(args.includes('--disable-slash-commands'));
+  assert.equal(args.filter((arg) => arg === '--no-chrome').length, 1);
   const settingSourcesIndex = args.indexOf('--setting-sources');
   assert.notEqual(settingSourcesIndex, -1);
   assert.equal(args[settingSourcesIndex + 1], '');
+  const settingsIndex = args.indexOf('--settings');
+  assert.notEqual(settingsIndex, -1);
+  assert.equal(args[settingsIndex + 1], 'locked.json');
+  const maxTurnsIndex = args.indexOf('--max-turns');
+  assert.notEqual(maxTurnsIndex, -1);
+  assert.equal(args[maxTurnsIndex + 1], '5');
 });
 
 test('engine: profile and materialized MCP configs are both passed to Claude', async () => {

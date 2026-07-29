@@ -275,11 +275,14 @@ function parseClaudeArgsTemplate(argsTemplate) {
     tokens,
     '--disable-slash-commands',
   );
+  const noChrome = readClaudeTemplateBooleanOption(tokens, '--no-chrome');
   const settingSources = readClaudeTemplateStringOption(
     tokens,
     '--setting-sources',
     { allowEmpty: true },
   );
+  const settings = readClaudeTemplateStringOption(tokens, '--settings');
+  const rawMaxTurns = readSingleClaudeTemplateOption(tokens, '--max-turns');
   const tools = readClaudeTemplateListOption(
     tokens,
     ['--tools'],
@@ -305,6 +308,17 @@ function parseClaudeArgsTemplate(argsTemplate) {
     }
   }
 
+  let maxTurns = null;
+  if (rawMaxTurns != null) {
+    maxTurns = Number(rawMaxTurns);
+    if (
+      !/^[1-9]\d*$/.test(rawMaxTurns)
+      || !Number.isSafeInteger(maxTurns)
+    ) {
+      throw new BadRequestError('--max-turns in args_template must be a positive integer');
+    }
+  }
+
   return {
     permissionMode,
     maxBudgetUsd,
@@ -313,7 +327,10 @@ function parseClaudeArgsTemplate(argsTemplate) {
     safeMode,
     bare,
     disableSlashCommands,
+    noChrome,
     settingSources,
+    settings,
+    maxTurns,
     tools,
     disallowedTools,
   };

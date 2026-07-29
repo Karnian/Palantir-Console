@@ -11,6 +11,9 @@ const { createAgentProfileService } = require('../services/agentProfileService')
 const { createLifecycleService } = require('../services/lifecycleService');
 const { createProjectService } = require('../services/projectService');
 const { createRunService } = require('../services/runService');
+const {
+  createStreamJsonEngine: createProductionStreamJsonEngine,
+} = require('../services/streamJsonEngine');
 const { createTaskService } = require('../services/taskService');
 
 async function createHarness(t) {
@@ -75,10 +78,11 @@ function createExecutionEngine() {
 
 function createStreamJsonEngine() {
   const spawned = [];
+  const buildArgs = createProductionStreamJsonEngine()._buildArgs;
   return {
     spawned,
     spawnAgent(runId, opts) {
-      spawned.push({ runId, opts });
+      spawned.push({ runId, opts, args: buildArgs(opts) });
       return { sessionName: null };
     },
     hasProcess(runId) { return spawned.some((spawn) => spawn.runId === runId); },
@@ -205,7 +209,7 @@ test('claude worker carries security template options into the stream-json spec'
   const harness = await createHarness(t);
   const profileId = insertProfile(harness.db, {
     command: 'claude',
-    argsTemplate: '-p {prompt} --max-budget-usd 0.01 --mcp-config /tmp/intended.json --strict-mcp-config --safe-mode --bare --disable-slash-commands --setting-sources ""',
+    argsTemplate: '-p {prompt} --max-budget-usd 0.01 --mcp-config /tmp/intended.json --strict-mcp-config --safe-mode --bare --disable-slash-commands --no-chrome --setting-sources "" --settings locked.json --max-turns 5',
   });
 
   await executeWorker(harness, profileId, 'Claude template runtime options');
@@ -220,7 +224,19 @@ test('claude worker carries security template options into the stream-json spec'
   assert.equal(harness.streamJsonEngine.spawned[0].opts.safeMode, true);
   assert.equal(harness.streamJsonEngine.spawned[0].opts.bare, true);
   assert.equal(harness.streamJsonEngine.spawned[0].opts.disableSlashCommands, true);
+  assert.equal(harness.streamJsonEngine.spawned[0].opts.noChrome, true);
   assert.equal(harness.streamJsonEngine.spawned[0].opts.settingSources, '');
+  assert.equal(harness.streamJsonEngine.spawned[0].opts.settings, 'locked.json');
+  assert.equal(harness.streamJsonEngine.spawned[0].opts.maxTurns, 5);
+
+  const { args } = harness.streamJsonEngine.spawned[0];
+  assert.equal(args.filter((arg) => arg === '--no-chrome').length, 1);
+  const settingsIndex = args.indexOf('--settings');
+  assert.notEqual(settingsIndex, -1);
+  assert.equal(args[settingsIndex + 1], 'locked.json');
+  const maxTurnsIndex = args.indexOf('--max-turns');
+  assert.notEqual(maxTurnsIndex, -1);
+  assert.equal(args[maxTurnsIndex + 1], '5');
 });
 
 test('saved Claude disallowedTools template reaches the stream-json worker spec', async (t) => {

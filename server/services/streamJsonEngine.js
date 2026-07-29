@@ -196,8 +196,16 @@ function createStreamJsonEngine({
       args.push('--disable-slash-commands');
     }
 
+    if (opts.noChrome) {
+      args.push('--no-chrome');
+    }
+
     if (!opts.isolated && typeof opts.settingSources === 'string') {
       args.push('--setting-sources', opts.settingSources);
+    }
+
+    if (!opts.isolated && opts.settings) {
+      args.push('--settings', opts.settings);
     }
 
     // Phase 10D Tier 2 (Claude isolated worker): drop host ~/.claude/
@@ -216,8 +224,15 @@ function createStreamJsonEngine({
           args.push('--plugin-dir', dir);
         }
       }
+      if (opts.settings && opts.settingsPath) {
+        throw new Error(
+          'isolated Claude worker cannot combine profile --settings with generated auth settings',
+        );
+      }
       if (opts.settingsPath) {
         args.push('--settings', opts.settingsPath);
+      } else if (opts.settings) {
+        args.push('--settings', opts.settings);
       }
     }
 
@@ -283,7 +298,7 @@ function createStreamJsonEngine({
    * Spawn a Claude Code agent with stream-json protocol.
    */
   function spawnAgent(runId, { prompt, cwd, env, systemPrompt, permissionMode,
-    tools, allowedTools, disallowedTools, maxBudgetUsd, model, mcpConfig, strictMcpConfig, safeMode, bare, disableSlashCommands, settingSources, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent,
+    tools, allowedTools, disallowedTools, maxBudgetUsd, model, mcpConfig, strictMcpConfig, safeMode, bare, disableSlashCommands, noChrome, settingSources, settings, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent,
     // Phase 10D Tier 2
     isolated, pluginDirs, settingsPath, onCleanup,
     executor, nodePrefix, envAllowlist, nodeId }) {
@@ -298,7 +313,7 @@ function createStreamJsonEngine({
     const args = buildArgs({
       prompt, systemPrompt, permissionMode, tools, allowedTools, disallowedTools,
       maxBudgetUsd, model, mcpConfig, strictMcpConfig, safeMode, bare,
-      disableSlashCommands, settingSources,
+      disableSlashCommands, noChrome, settingSources, settings,
       addDir, isManager, maxTurns, resumeSessionId,
       isolated, pluginDirs, settingsPath,
     });
