@@ -9,7 +9,7 @@ const html = htm.bind(h);
 import { apiFetch } from '../lib/api.js';
 import { addToast } from '../lib/toast.js';
 import { useEscape } from '../lib/hooks.js';
-import { formatTime, timeAgo } from '../lib/format.js';
+import { formatTime, parseDate, timeAgo } from '../lib/format.js';
 import { dueDateMeta } from '../lib/dueDate.js';
 import { Dropdown } from './Dropdown.js';
 import { Modal } from './Modal.js';
@@ -516,7 +516,7 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
   if (!task) return null;
 
   const taskRuns = runs.filter(r => r.task_id === task.id)
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    .sort((a, b) => parseDate(b.created_at) - parseDate(a.created_at));
   const project = projects.find(p => p.id === task.project_id);
   const activeRun = taskRuns.find(r => r.status === 'running' || r.status === 'needs_input');
 

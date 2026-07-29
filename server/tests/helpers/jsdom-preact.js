@@ -149,6 +149,7 @@ function createPreactEnv() {
     .replace(/^export\s+function\s+/gm, 'function ');
   vm.runInContext(copyTransformed, context);
   const nodeUiTransformed = nodeUiSrc
+    .replace(/^import\s+.*$/gm, '')
     .replace(/^export\s+const\s+/gm, 'const ')
     .replace(/^export\s+function\s+/gm, 'function ');
   vm.runInContext(nodeUiTransformed, context);
