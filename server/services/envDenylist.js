@@ -44,7 +44,11 @@ function isEnvKeyDenied(key) {
 }
 
 function isBearerEnvKeyDenied(key) {
-  return BEARER_ENV_HARD_DENYLIST_PATTERNS.some((pattern) => pattern.test(key));
+  if (typeof key !== 'string') return false;
+  // Windows resolves environment keys case-insensitively, so every spelling
+  // must be checked against the canonical uppercase patterns.
+  const normalizedKey = key.toUpperCase();
+  return BEARER_ENV_HARD_DENYLIST_PATTERNS.some((pattern) => pattern.test(normalizedKey));
 }
 
 module.exports = {
