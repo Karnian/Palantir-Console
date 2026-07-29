@@ -470,10 +470,10 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
                CASE WHEN json_valid(terminal.payload_json) THEN terminal.payload_json ELSE '{}' END,
                '$.data.invocationId'
              )=i.id
-             AND json_extract(
+             AND json_type(
                CASE WHEN json_valid(terminal.payload_json) THEN terminal.payload_json ELSE '{}' END,
                '$.data.terminal'
-             )=1
+             )='true'
            ORDER BY terminal.id ASC
            LIMIT 1
         )

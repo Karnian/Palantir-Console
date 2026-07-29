@@ -469,6 +469,26 @@ test('restart reconciles a persisted terminal turn event even while the manager 
   assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'completed');
 });
 
+test('a persisted numeric terminal flag cannot complete a running invocation', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Numeric terminal', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  h.runService.addRunEvent(managerRun.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: claimed.id, terminal: 1 },
+  }));
+
+  assert.deepEqual(h.scheduleService.reconcilePersistedTerminalEvents(), []);
+  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
+  assert.throws(
+    () => h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')),
+    /Operator already has an active invocation/,
+    'the numeric flag must not release the OS-4 slot',
+  );
+});
+
 test('restart correlation loss releases a stale invocation even when the manager resumed', (t) => {
   const h = harness(t);
   const { instance } = createMappedOperator(h);
