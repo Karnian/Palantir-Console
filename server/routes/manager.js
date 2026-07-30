@@ -275,6 +275,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
             envAllowlist,
             ...authResolverOpts,
             bare: templateOptions?.bare === true,
+            settings: templateOptions?.settings,
           });
           const resolvedSpawnEnv = buildManagerSpawnEnv({
             baseEnv: actorSpawnBaseEnv,
@@ -575,6 +576,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   // Remote Claude resumes materialize `--bare` auth on the pod,
                   // not from the controller's credential stores.
                   bare: !isRemoteNode && templateOptions?.bare === true,
+                  settings: templateOptions?.settings,
                 });
                 const resolvedSpawnEnv = isRemoteNode ? {} : buildManagerSpawnEnv({
                   baseEnv: actorSpawnBaseEnv,
@@ -839,6 +841,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       envAllowlist,
       ...authResolverOpts,
       bare: claudeTemplateOptions?.bare === true,
+      settings: claudeTemplateOptions?.settings,
     });
     const resolvedSpawnEnv = buildManagerSpawnEnv({
       baseEnv: actorSpawnBaseEnv,

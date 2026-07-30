@@ -1639,6 +1639,7 @@ function createLifecycleService({
             envAllowlist: parseEnvAllowlistArray(profile.env_allowlist),
             ..._authResolverOpts,
             bare: true,
+            settings: templateOptions.settings,
           });
           runService.addRunEvent(run.id, 'worker:auth_sources', JSON.stringify({
             sources: auth.sources,

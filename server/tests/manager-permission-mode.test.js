@@ -44,7 +44,13 @@ function permissionModeArg(args) {
   return args[index + 1];
 }
 
-async function createCapturingManagerHarness(t) {
+async function createCapturingManagerHarness(t, {
+  authResolverOpts = {
+    hasKeychain: () => true,
+    readKeychainTokenSync: () => 'manager-test-keychain-token',
+    hasCredentialsFile: () => false,
+  },
+} = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-manager-profile-'));
   const database = createDatabase(path.join(root, 'test.db'));
   database.migrate();
@@ -84,11 +90,7 @@ async function createCapturingManagerHarness(t) {
     managerRegistry,
     conversationService,
     agentProfileService,
-    authResolverOpts: {
-      hasKeychain: () => true,
-      readKeychainTokenSync: () => 'manager-test-keychain-token',
-      hasCredentialsFile: () => false,
-    },
+    authResolverOpts,
   }));
 
   t.after(async () => {
@@ -105,6 +107,35 @@ async function createCapturingManagerHarness(t) {
     starts,
   };
 }
+
+test('Top Manager starts --bare with settings apiKeyHelper as its only auth source', async (t) => {
+  const {
+    app,
+    agentProfileService,
+    starts,
+  } = await createCapturingManagerHarness(t, {
+    authResolverOpts: {
+      hasKeychain: () => false,
+      hasCredentialsFile: () => false,
+    },
+  });
+  agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt} --bare --settings /pod/settings.json',
+    env_allowlist: JSON.stringify(['NO_AUTH_ENV']),
+  });
+
+  const response = await invokeApp(app, {
+    method: 'POST',
+    path: '/api/manager/start',
+    body: { agent_profile_id: 'claude-code', prompt: 'settings helper auth' },
+  });
+
+  assert.equal(response.status, 201, response.text);
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].opts.bare, true);
+  assert.equal(starts[0].opts.settings, '/pod/settings.json');
+  assert.equal(starts[0].opts.env.ANTHROPIC_API_KEY, undefined);
+});
 
 test('Manager profile permission_mode reaches Claude CLI and NULL matches the worker default', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-manager-permission-'));

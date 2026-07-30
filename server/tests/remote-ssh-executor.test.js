@@ -990,6 +990,66 @@ test('remote --bare Claude materializes pod login auth inside the clean child on
   }
 });
 
+test('remote --bare Claude defers to settings apiKeyHelper when pod login auth is absent', async (t) => {
+  const root = await mkLoopbackRoot(t);
+  const home = path.join(root, 'home');
+  const bin = path.join(root, 'bin');
+  const fakeClaude = path.join(bin, 'claude');
+  const settings = path.join(home, 'settings.json');
+  const helper = path.join(home, 'auth-helper.sh');
+  await fs.mkdir(home, { recursive: true });
+  await fs.mkdir(bin, { recursive: true });
+  await fs.writeFile(
+    helper,
+    '#!/bin/sh\nprintf settings-helper-token\n',
+    { mode: 0o700 },
+  );
+  await fs.writeFile(
+    settings,
+    JSON.stringify({ apiKeyHelper: helper }),
+    { mode: 0o600 },
+  );
+  await fs.writeFile(
+    fakeClaude,
+    [
+      '#!/bin/sh',
+      '[ "$1" = "--bare" ] || exit 91',
+      '[ "$2" = "--settings" ] || exit 92',
+      '[ "$3" = "$HOME/settings.json" ] || exit 93',
+      '[ -z "${ANTHROPIC_API_KEY:-}" ] || exit 94',
+      '[ "$(cat "$HOME/settings.json")" = "{\\"apiKeyHelper\\":\\"$HOME/auth-helper.sh\\"}" ] || exit 95',
+      '[ "$("$HOME/auth-helper.sh")" = "settings-helper-token" ] || exit 96',
+      'printf SETTINGS_AUTH_OK',
+    ].join('\n'),
+    { mode: 0o700 },
+  );
+
+  const spawn = loopbackSshSpawn({ env: { HOME: home } });
+  const executor = createRemoteSshNodeExecutor(nodeRow({
+    exposed_roots: JSON.stringify([root]),
+  }), { spawnFn: spawn });
+  const child = await executor.spawnInteractive(
+    'claude',
+    ['--bare', '--settings', settings],
+    {
+      cwd: root,
+      pathPrefix: bin,
+      claudeBareAuth: true,
+    },
+  );
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+  child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+  const [code] = await new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (...args) => resolve(args));
+  });
+
+  assert.equal(code, 0, stderr);
+  assert.equal(stdout, 'SETTINGS_AUTH_OK');
+});
+
 test('spawnInteractive rejects a manager capability that cannot be line-framed', async () => {
   const spawn = makeSpawn(() => {});
   const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });

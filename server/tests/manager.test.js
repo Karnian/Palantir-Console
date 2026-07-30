@@ -415,6 +415,22 @@ test('resolveClaudeAuth fails closed when --bare native auth cannot be materiali
   assert.match(r.diagnostics[0], /--bare requires a materialized API credential/);
 });
 
+test('resolveClaudeAuth accepts explicit --settings as a --bare apiKeyHelper contract', () => {
+  const { resolveClaudeAuth } = require('../services/authResolver');
+  const r = resolveClaudeAuth({
+    envAllowlist: ['NO_AUTH_ENV'],
+    bare: true,
+    settings: '/pod/settings.json',
+    hasKeychain: () => false,
+    hasCredentialsFile: () => false,
+  });
+
+  assert.equal(r.canAuth, true);
+  assert.equal(r.env.ANTHROPIC_API_KEY, undefined);
+  assert.ok(r.sources.includes('cli:--settings'));
+  assert.deepEqual(r.diagnostics, []);
+});
+
 test('resolveCodexAuth honors env_allowlist diagnostics', async (t) => {
   // Deterministic: stub fs.existsSync so the test outcome doesn't depend on
   // whether the dev box happens to have ~/.codex/auth.json.

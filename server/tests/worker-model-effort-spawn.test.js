@@ -275,6 +275,23 @@ test('claude --bare worker fails before spawn when native auth cannot be materia
   assert.equal(harness.streamJsonEngine.spawned.length, 0);
 });
 
+test('claude --bare worker starts when explicit settings provides apiKeyHelper auth', async (t) => {
+  const harness = await createHarness(t, { bareToken: null });
+  const profileId = insertProfile(harness.db, {
+    command: 'claude',
+    argsTemplate: '-p {prompt} --bare --settings /pod/settings.json',
+    envAllowlist: ['NO_AUTH_ENV'],
+  });
+
+  await executeWorker(harness, profileId, 'Claude settings helper auth');
+
+  assert.equal(harness.streamJsonEngine.spawned.length, 1);
+  const { opts, args } = harness.streamJsonEngine.spawned[0];
+  assert.equal(opts.settings, '/pod/settings.json');
+  assert.equal(opts.env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(args[args.indexOf('--settings') + 1], '/pod/settings.json');
+});
+
 test('saved Claude disallowedTools template reaches the stream-json worker spec', async (t) => {
   const harness = await createHarness(t);
   const profile = harness.agentProfileService.createProfile({

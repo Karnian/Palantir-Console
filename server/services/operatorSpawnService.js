@@ -496,6 +496,7 @@ function createOperatorSpawnService({
       // login store inside the executor. Do not read/materialize controller
       // credentials that will deliberately be discarded at this boundary.
       bare: !isRemoteNode && bare === true,
+      settings,
     });
     // Resolve before the auth gate so migration diagnostics are observable
     // even when a legacy ambient auth mode is no longer sufficient.

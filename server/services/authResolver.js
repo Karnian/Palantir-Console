@@ -415,6 +415,9 @@ function bootstrapClaudeAuthFromEnv({ logger = console } = {}) {
  * @param {boolean} [opts.bare] When true, native/OAuth credentials are
  *                              materialized as ANTHROPIC_API_KEY because
  *                              Claude cannot read them under `--bare`.
+ * @param {string} [opts.settings] Explicit Claude `--settings` value. Under
+ *                                `--bare`, the CLI itself must validate any
+ *                                apiKeyHelper in this child-local file.
  * @returns {{ canAuth: boolean, env: object, sources: string[], diagnostics: string[] }}
  */
 function resolveClaudeAuth({
@@ -422,6 +425,7 @@ function resolveClaudeAuth({
   hasKeychain = hasClaudeKeychainCredentials,
   hasCredentialsFile = hasClaudeLinuxCredentials,
   bare = false,
+  settings,
   readKeychainTokenSync = readClaudeKeychainTokenSync,
   readCredentialsFileTokenSync = readClaudeLinuxCredentialsTokenSync,
 } = {}) {
@@ -502,12 +506,24 @@ function resolveClaudeAuth({
     }
   }
 
+  // An explicit --settings value may point at a child-local file containing
+  // apiKeyHelper. The controller cannot safely or reliably pre-read it: manager
+  // cwd may differ, and remote paths exist only on the pod. Treat it as a
+  // spawn-time auth contract and let Claude perform the authoritative
+  // settings/helper validation. Existing env/native materialization above is
+  // retained so settings files without apiKeyHelper keep working when another
+  // usable credential exists.
+  const settingsAuth = bare
+    && typeof settings === 'string'
+    && settings.trim().length > 0;
+  if (settingsAuth) sources.push('cli:--settings');
+
   const canAuth = bare
-    ? !!env.ANTHROPIC_API_KEY
+    ? !!env.ANTHROPIC_API_KEY || settingsAuth
     : !!(env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY || keychain || credentialsFile);
   if (!canAuth) {
     diagnostics.push(bare
-      ? 'Claude --bare requires a materialized API credential, but no usable token could be read. Set ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN or refresh `claude login` credentials.'
+      ? 'Claude --bare requires a materialized API credential or apiKeyHelper via --settings, but neither was available. Set ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN, refresh `claude login` credentials, or provide explicit settings with apiKeyHelper.'
       : 'No Claude credentials found. Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, run `claude login` (populates the macOS keychain, or ~/.claude/.credentials.json on Linux/Windows), or start the server once from inside a Claude Code session to seed .claude-auth.json.');
     if (Array.isArray(envAllowlist) && envAllowlist.length > 0) {
       const blocked = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']

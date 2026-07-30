@@ -131,17 +131,31 @@ const CLAUDE_BARE_AUTH_JS = [
   'process.stdout.write(t);',
 ].join('');
 
-const CLAUDE_BARE_AUTH_SHELL = [
-  'if [ -z "${ANTHROPIC_API_KEY:-}" ]; then',
-  'if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then',
-  'ANTHROPIC_API_KEY=$CLAUDE_CODE_OAUTH_TOKEN;',
-  'else',
-  `ANTHROPIC_API_KEY=$(node -e ${shq(CLAUDE_BARE_AUTH_JS)}) || exit 78;`,
-  'fi;',
-  'fi;',
-  '[ -n "$ANTHROPIC_API_KEY" ] || { echo "Claude --bare auth unavailable on remote node" >&2; exit 78; };',
-  'export ANTHROPIC_API_KEY',
-].join(' ');
+function hasExplicitClaudeSettings(args) {
+  if (!Array.isArray(args)) return false;
+  const index = args.indexOf('--settings');
+  return index >= 0
+    && typeof args[index + 1] === 'string'
+    && args[index + 1].length > 0;
+}
+
+function buildClaudeBareAuthShell(args) {
+  const settingsAuth = hasExplicitClaudeSettings(args);
+  return [
+    'if [ -z "${ANTHROPIC_API_KEY:-}" ]; then',
+    'if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then',
+    'ANTHROPIC_API_KEY=$CLAUDE_CODE_OAUTH_TOKEN;',
+    'else',
+    settingsAuth
+      ? `ANTHROPIC_API_KEY=$(node -e ${shq(CLAUDE_BARE_AUTH_JS)}) || ANTHROPIC_API_KEY=;`
+      : `ANTHROPIC_API_KEY=$(node -e ${shq(CLAUDE_BARE_AUTH_JS)}) || exit 78;`,
+    'fi;',
+    'fi;',
+    settingsAuth
+      ? '[ -z "${ANTHROPIC_API_KEY:-}" ] || export ANTHROPIC_API_KEY'
+      : '[ -n "$ANTHROPIC_API_KEY" ] || { echo "Claude --bare auth unavailable on remote node" >&2; exit 78; }; export ANTHROPIC_API_KEY',
+  ].join(' ');
+}
 
 function exposedRootsError(message, reason) {
   const err = new Error(message);
@@ -376,7 +390,7 @@ function buildCommandScript(command, args = [], {
           `export ${runBoundTokenKey}`,
         );
       }
-      if (claudeBareAuth) bootstrap.push(CLAUDE_BARE_AUTH_SHELL);
+      if (claudeBareAuth) bootstrap.push(buildClaudeBareAuthShell(args));
       // The capability is read from stdin INSIDE the clean shell, never passed
       // as an argument. `env -i ... KEY="$KEY"` would expand the value before
       // exec, so the real /usr/bin/env argv — world-readable through
@@ -1503,7 +1517,7 @@ function createRemoteSshNodeExecutor(node, {
           'export PALANTIR_WORKER_TOKEN',
         );
       }
-      if (claudeBareAuth) bootstrap.push(CLAUDE_BARE_AUTH_SHELL);
+      if (claudeBareAuth) bootstrap.push(buildClaudeBareAuthShell(list));
       // Same argv contract as the manager path: the capability is read from its
       // 0600 file INSIDE the clean shell. Passing it as `KEY="$KEY"` would place
       // the value in the real /usr/bin/env argv, which /proc exposes.
