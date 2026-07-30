@@ -9,6 +9,7 @@ const {
   isActorCredentialKey,
 } = require('./actorTokenPolicy');
 const { CLAUDE_PROVIDER_AUTH_ENV_KEYS } = require('./authResolver');
+const { execEnvKeys, projectTestEnvKeys } = require('./execEnvPolicy');
 
 const WORKER_OUTPUT_MAX_LINES = 500;
 const WORKER_OUTPUT_MAX_BUFFER = 256 * 1024;
@@ -263,7 +264,7 @@ function normalizeEnv(env) {
     });
 }
 
-function normalizeEnvKeyList(keys) {
+function normalizeEnvKeyList(keys, { allowPath = false } = {}) {
   if (keys === undefined || keys === null) return [];
   if (!Array.isArray(keys)) {
     throw new Error('remote env allowlist must be an array when provided');
@@ -277,7 +278,7 @@ function normalizeEnvKeyList(keys) {
     // Ambient actor credentials are never preservable through an allowlist.
     // The one permitted run-bound capability is reintroduced explicitly by
     // variable reference after env -i.
-    if (key === 'PATH' || isActorCredentialKey(key) || seen.has(key)) continue;
+    if ((!allowPath && key === 'PATH') || isActorCredentialKey(key) || seen.has(key)) continue;
     seen.add(key);
     normalized.push(key);
   }
@@ -295,19 +296,25 @@ function remoteManagerBaseEnvKeys(vendor) {
   ));
 }
 
-function buildCleanEnvPrefix(keys) {
-  const loopKeys = normalizeEnvKeyList(keys);
-  if (loopKeys.length === 0) return 'set --';
+function buildCleanEnvPrefix(keys, {
+  allowPath = false,
+} = {}) {
+  const loopKeys = normalizeEnvKeyList(keys, { allowPath });
   // `${$k+x}` tests existence without materialising an unset key as KEY=.
   // The second eval expands the selected pod variable inside double quotes,
   // so whitespace, quotes, dollars, and glob characters remain one "$@" item.
-  return [
+  const parts = [
     'set --',
-    `for k in ${loopKeys.map((key) => shq(key)).join(' ')}`,
-    'do eval "v=\\${$k+x}"',
-    '[ -n "$v" ] && eval "set -- \\"\\$@\\" \\"$k=\\$$k\\""',
-    'done',
-  ].join('; ');
+  ];
+  if (loopKeys.length > 0) {
+    parts.push(
+      `for k in ${loopKeys.map((key) => shq(key)).join(' ')}`,
+      'do eval "v=\\${$k+x}"',
+      '[ -n "$v" ] && eval "set -- \\"\\$@\\" \\"$k=\\$$k\\""',
+      'done',
+    );
+  }
+  return parts.join('; ');
 }
 
 function normalizeTransportSecret(value, key) {
@@ -364,10 +371,12 @@ function buildCommandScript(command, args = [], {
   pathPrefix,
   cleanEnv = false,
   cleanEnvKeys = [],
+  cleanEnvPathFromKeys = false,
+  cleanEnvAllowExplicitPath = false,
   runBoundTokenKey = null,
   claudeBareAuth = false,
 } = {}) {
-  const explicitEnv = cleanEnv
+  const explicitEnv = cleanEnv && !cleanEnvAllowExplicitPath
     // The pod owns PATH. A controller PATH must never override it; pathPrefix
     // is the sole remote PATH input and is assembled once below.
     ? Object.fromEntries(Object.entries(env || {}).filter(([key]) => key !== 'PATH'))
@@ -384,10 +393,10 @@ function buildCommandScript(command, args = [], {
   const pathAssign = pathPrefix ? `PATH=${shq(pathPrefix)}:"$PATH"` : null;
   if (cleanEnv) {
     const cleanParts = ['exec', 'env', '-i', '"$@"'];
-    // PATH is deliberately not collected by the set -- loop. It is emitted
-    // exactly once, inside env -i, so the pod shell expands its own PATH and a
-    // pathPrefix cannot be lost to simple-command assignment expansion order.
-    cleanParts.push(pathAssign || 'PATH="$PATH"');
+    // Agent spawns keep PATH out of their allowlist loop and emit it exactly
+    // once here so a pathPrefix cannot be lost to assignment expansion order.
+    // Public exec instead collects PATH through its shared policy.
+    if (!cleanEnvPathFromKeys) cleanParts.push(pathAssign || 'PATH="$PATH"');
     cleanParts.push(...envParts);
     if (runBoundTokenKey || claudeBareAuth) {
       const bootstrap = [];
@@ -415,7 +424,9 @@ function buildCommandScript(command, args = [], {
     }
     cleanParts.push(...argv);
     const commandScript = cleanParts.join(' ');
-    const prefix = buildCleanEnvPrefix(cleanEnvKeys);
+    const prefix = buildCleanEnvPrefix(cleanEnvKeys, {
+      allowPath: cleanEnvPathFromKeys,
+    });
     return cwd
       ? `${prefix}; cd ${shq(cwd)} && ${commandScript}`
       : `${prefix}; ${commandScript}`;
@@ -520,16 +531,15 @@ function validateWorkerSpec(spec) {
  * P3b, not here. SSH nodes have no heartbeat source yet, so the dispatch gate
  * remains a lifecycle concern.
  *
- * Environment handling intentionally differs from local execFile: process.env
- * is never merged automatically. Only env keys explicitly supplied by the
- * caller are sent to the pod, to avoid leaking controller secrets into remote
- * environments. The remote base env comes from the pod login shell; the
- * controller NEVER forwards process.env. Callers should pass non-secret
+ * Environment handling intentionally differs from local execFile: controller
+ * process.env is never sent to the pod. Public exec rebuilds the same shared
+ * allowlist from the pod login environment, then applies caller-supplied
  * overrides such as LC_ALL/LANG. Env keys must be shell-identifier-safe.
  *
  * The public exec surface is guarded by an exact command-name allowlist. The
  * default allowlist is ['git']; shell interpreters such as sh, bash, and env
- * are not included and are rejected unless an explicit caller opts into them.
+ * are not included. The sole exception is /bin/sh under projectTest mode,
+ * which harvest uses for a project's declared test_command.
  * This allowlist guards public exec only. Trusted executor-owned filesystem
  * primitives build their own scripts and do not go through the public exec
  * allowlist.
@@ -794,10 +804,9 @@ function createRemoteSshNodeExecutor(node, {
 
   function runFilesystemCommand(command, args = [], { deadlineAt } = {}) {
     const timeoutMs = remainingTimeoutMs(deadlineAt);
-    // Deliberately do not opt into cleanEnv here. Filesystem guards and the
-    // public git/materialization exec surface keep their established pod-login
-    // environment; changing them alongside agent spawn would broaden this
-    // security fix into unrelated command behavior and risk regressions.
+    // Filesystem primitives are not the public exec surface and keep their
+    // established pod-login environment. Public git/materialization exec applies
+    // the shared allowlist separately in exec() below.
     return runRemoteCommand(command, args, {
       env: FILESYSTEM_LOCALE_ENV,
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
@@ -933,14 +942,32 @@ function createRemoteSshNodeExecutor(node, {
     }
   }
 
-  async function exec(command, args = [], { cwd, env, timeoutMs, maxBuffer } = {}) {
-    if (!allowedCommands.has(String(command))) throw commandNotAllowedError(command);
+  async function exec(command, args = [], {
+    cwd, env, timeoutMs, maxBuffer, projectTest = false,
+  } = {}) {
+    const commandName = String(command);
+    const projectTestCommand = projectTest === true && commandName === SH_BIN;
+    if (!allowedCommands.has(commandName) && !projectTestCommand) {
+      throw commandNotAllowedError(command);
+    }
     let safeCwd = cwd;
     if (cwd) safeCwd = (await assertWithinRoots(cwd)).canonical;
-    // This shared path backs git/materialization as well as public exec. It
-    // intentionally retains the historical login-shell environment; cleanEnv
-    // is an explicit agent-spawn opt-in below, not an executor-wide default.
-    return runRemoteCommand(command, args, { cwd: safeCwd, env, timeoutMs, maxBuffer });
+    // The pod, not the controller, remains the source of Git configuration and
+    // credentials. Filtering that source with the shared exec policy keeps
+    // local and remote materialization behavior aligned without forwarding the
+    // controller's unrelated secrets.
+    return runRemoteCommand(command, args, {
+      cwd: safeCwd,
+      env,
+      timeoutMs,
+      maxBuffer,
+      cleanEnv: true,
+      cleanEnvKeys: projectTest
+        ? projectTestEnvKeys(process.env)
+        : execEnvKeys(process.env),
+      cleanEnvPathFromKeys: true,
+      cleanEnvAllowExplicitPath: true,
+    });
   }
 
   async function spawnInteractive(command, args = [], {

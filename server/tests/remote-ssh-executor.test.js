@@ -10,6 +10,31 @@ const os = require('node:os');
 const { createDatabase } = require('../db/database');
 const { createRemoteSshNodeExecutor, shq } = require('../services/remoteSshExecutor');
 const { createNodeService } = require('../services/nodeService');
+const { EXEC_ENV_KEYS, PROJECT_TEST_ENV_KEYS } = require('../services/execEnvPolicy');
+
+function assertSharedExecEnvScript(script) {
+  assert.ok(script.startsWith('set --; for k in '), script);
+  assert.ok(script.includes('exec env -i "$@"'), script);
+  for (const key of EXEC_ENV_KEYS) {
+    assert.ok(script.includes(shq(key)), `remote exec lost shared policy key ${key}`);
+  }
+}
+
+function assertProjectTestEnvScript(script) {
+  assert.ok(script.startsWith('set --; for k in '), script);
+  assert.ok(script.includes('exec env -i "$@"'), script);
+  for (const key of PROJECT_TEST_ENV_KEYS) {
+    assert.ok(script.includes(shq(key)), `remote project test lost policy key ${key}`);
+  }
+  for (const secretKey of [
+    'PALANTIR_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'GIT_ASKPASS',
+    'HTTPS_PROXY',
+  ]) {
+    assert.equal(script.includes(secretKey), false, `remote project test exposed ${secretKey}`);
+  }
+}
 
 function nodeRow(fields = {}) {
   return {
@@ -295,7 +320,7 @@ test('ssh argv and script quote injection attempts literally', async () => {
   assert.equal(call.args.some((arg) => String(arg).startsWith('ServerAlive')), false);
   const script = scriptOf(call);
   assert.deepEqual(call.args.slice(8), [`sh -c ${shq(script)}`]);
-  assert.match(script, /^exec env /);
+  assertSharedExecEnvScript(script);
   assert.match(script, /LC_ALL='C'/);
   assert.match(script, /LANG='en'\\''US'/);
   assert.match(script, /SAFE='\$\(literal\)'/);
@@ -348,8 +373,35 @@ test('loopback ssh simulator preserves exec stdout across ssh argument join', as
 
   assert.deepEqual(res, { code: 0, stdout: 'fleet-ok\n', stderr: '' });
   assert.equal(spawn.calls[0].destination, 'runner@pod.example');
-  assert.deepEqual(spawn.calls[0].remoteCommandArgs, [`sh -c ${shq("exec 'echo' 'fleet-ok'")}`]);
-  assert.equal(spawn.calls[0].joined, `sh -c ${shq("exec 'echo' 'fleet-ok'")}`);
+  const script = rawScriptOf(spawn.calls[0]);
+  assertSharedExecEnvScript(script);
+  assert.ok(script.endsWith("exec env -i \"$@\" 'echo' 'fleet-ok'"));
+  assert.deepEqual(spawn.calls[0].remoteCommandArgs, [`sh -c ${shq(script)}`]);
+  assert.equal(spawn.calls[0].joined, `sh -c ${shq(script)}`);
+});
+
+test('loopback remote exec leaks zero ambient pod secret keys', async () => {
+  const secretKeys = [
+    'PALANTIR_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'AWS_SECRET_ACCESS_KEY',
+  ];
+  const spawn = loopbackSshSpawn({
+    env: Object.fromEntries(secretKeys.map((key) => [key, 'must-not-pass'])),
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), {
+    spawnFn: spawn,
+    commandAllowlist: [process.execPath],
+  });
+
+  const res = await exec.exec(process.execPath, [
+    '-e',
+    `process.stdout.write(JSON.stringify(${JSON.stringify(secretKeys)}.filter((key)=>Object.hasOwn(process.env,key))))`,
+  ]);
+
+  assert.equal(res.code, 0);
+  assert.deepEqual(JSON.parse(res.stdout), []);
+  assertSharedExecEnvScript(rawScriptOf(spawn.calls[0]));
 });
 
 test('exec ignores stdin EPIPE without input and resolves from process close', async () => {
@@ -527,7 +579,9 @@ test('exposed_roots guard allows canonical inside path', async () => {
   const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn, commandAllowlist: ['pwd'] });
   const res = await exec.exec('pwd', [], { cwd: '/srv/root/project' });
   assert.equal(res.code, 0);
-  assert.equal(scriptOf(spawn.calls.at(-1)), "cd '/real/root/project' && exec 'pwd'");
+  const script = scriptOf(spawn.calls.at(-1));
+  assertSharedExecEnvScript(script);
+  assert.ok(script.endsWith("cd '/real/root/project' && exec env -i \"$@\" 'pwd'"));
 });
 
 test('exposed_roots rejects outside, symlink escapes, and prefix traps', async () => {
@@ -636,7 +690,7 @@ test('stat returns isDirectory/isFile shape', async () => {
   assert.equal(stat.isFile(), false);
 });
 
-test('internal filesystem helpers force C locale without changing public exec locale', async () => {
+test('internal filesystem helpers force C locale while public exec uses the shared env policy', async () => {
   const spawn = rootGuardSpawn({
     "exec 'realpath' '/srv/root/dir'": { stdout: '/real/root/dir\n' },
     "exec 'test' '-d' '/real/root/dir'": { code: 0 },
@@ -654,7 +708,8 @@ test('internal filesystem helpers force C locale without changing public exec lo
   for (const call of filesystemCalls) {
     assert.match(rawScriptOf(call), /^exec env LC_ALL='C' '(?:realpath|test)' /);
   }
-  assert.equal(rawScriptOf(spawn.calls.at(-1)), "exec 'git' 'status'");
+  assertSharedExecEnvScript(rawScriptOf(spawn.calls.at(-1)));
+  assert.ok(rawScriptOf(spawn.calls.at(-1)).endsWith("exec env -i \"$@\" 'git' 'status'"));
 });
 
 test('writeTempFile rejects non-bare names and sends content via stdin', async () => {
@@ -1210,7 +1265,8 @@ test('public exec enforces command allowlist while internal fs primitives still 
   const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
   const res = await exec.exec('git', ['status']);
   assert.equal(res.code, 0);
-  assert.equal(scriptOf(spawn.calls[0]), "exec 'git' 'status'");
+  assertSharedExecEnvScript(scriptOf(spawn.calls[0]));
+  assert.ok(scriptOf(spawn.calls[0]).endsWith("exec env -i \"$@\" 'git' 'status'"));
 
   for (const command of ['cat', 'sh']) {
     await assert.rejects(
@@ -1228,6 +1284,33 @@ test('public exec enforces command allowlist while internal fs primitives still 
   const internal = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: internalSpawn });
   assert.equal(await internal.fileExists('/srv/root/file'), true);
   assert.equal(await internal.realpath('/srv/root/file'), '/real/root/file');
+});
+
+test('projectTest alone permits /bin/sh and still emits a clean positive-list environment', async () => {
+  const spawn = rootGuardSpawn({
+    "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  const result = await exec.exec('/bin/sh', ['-c', 'npm test'], {
+    cwd: '/srv/root/project',
+    projectTest: true,
+  });
+
+  assert.equal(result.code, 0);
+  const commandCall = spawn.calls.at(-1);
+  const script = scriptOf(commandCall);
+  assertProjectTestEnvScript(script);
+  assert.ok(script.endsWith("'/bin/sh' '-c' 'npm test'"), script);
+
+  await assert.rejects(
+    () => exec.exec('/bin/sh', ['-c', 'npm test'], { cwd: '/srv/root/project' }),
+    (err) => err.code === 'COMMAND_NOT_ALLOWED',
+  );
+  await assert.rejects(
+    () => exec.exec('sh', ['-c', 'npm test'], { projectTest: true }),
+    (err) => err.code === 'COMMAND_NOT_ALLOWED',
+  );
 });
 
 test('ssh destination components reject option smuggling and unsafe separators', async (t) => {
@@ -1273,7 +1356,7 @@ test('ssh destination components reject option smuggling and unsafe separators',
   }).id, 'good-ssh');
 });
 
-test('remote exec serializes only explicit env keys and validates key syntax', async () => {
+test('remote exec filters pod env, serializes explicit overrides, and validates key syntax', async () => {
   const oldSecret = process.env.REMOTE_EXEC_FAKE_CONTROLLER_SECRET;
   process.env.REMOTE_EXEC_FAKE_CONTROLLER_SECRET = 'do-not-forward';
   try {
@@ -1281,7 +1364,8 @@ test('remote exec serializes only explicit env keys and validates key syntax', a
     const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
     await exec.exec('git', ['status'], { env: { LC_ALL: 'C' } });
     const script = scriptOf(spawn.calls[0]);
-    assert.match(script, /^exec env LC_ALL='C' 'git' 'status'$/);
+    assertSharedExecEnvScript(script);
+    assert.ok(script.endsWith("exec env -i \"$@\" LC_ALL='C' 'git' 'status'"));
     assert.doesNotMatch(script, /REMOTE_EXEC_FAKE_CONTROLLER_SECRET/);
     assert.doesNotMatch(script, /do-not-forward/);
 
