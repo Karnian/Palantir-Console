@@ -926,6 +926,70 @@ test('spawnInteractive bootstraps a worker capability through stdin with worker 
   }
 });
 
+test('remote --bare Claude materializes pod login auth inside the clean child only', async (t) => {
+  const root = await mkLoopbackRoot(t);
+  const home = path.join(root, 'home');
+  const claudeDir = path.join(home, '.claude');
+  const bin = path.join(root, 'bin');
+  const fakeClaude = path.join(bin, 'claude');
+  const podToken = 'pod-login-access-token';
+  const managerToken = 'run-bound-manager-capability';
+  await fs.mkdir(claudeDir, { recursive: true });
+  await fs.mkdir(bin, { recursive: true });
+  await fs.writeFile(
+    path.join(claudeDir, '.credentials.json'),
+    JSON.stringify({
+      claudeAiOauth: {
+        accessToken: podToken,
+        expiresAt: Date.now() + 60_000,
+      },
+    }),
+    { mode: 0o600 },
+  );
+  await fs.writeFile(
+    fakeClaude,
+    [
+      '#!/bin/sh',
+      '[ "$1" = "--bare" ] || exit 91',
+      '[ "$ANTHROPIC_API_KEY" = "pod-login-access-token" ] || exit 92',
+      '[ "$PALANTIR_MANAGER_TOKEN" = "run-bound-manager-capability" ] || exit 93',
+      'printf AUTH_OK',
+    ].join('\n'),
+    { mode: 0o700 },
+  );
+
+  const spawn = loopbackSshSpawn({ env: { HOME: home } });
+  const executor = createRemoteSshNodeExecutor(nodeRow({
+    exposed_roots: JSON.stringify([root]),
+  }), { spawnFn: spawn });
+  const child = await executor.spawnInteractive('claude', ['--bare'], {
+    cwd: root,
+    pathPrefix: bin,
+    claudeBareAuth: true,
+    env: { PALANTIR_MANAGER_TOKEN: managerToken },
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+  child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+  const [code] = await new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (...args) => resolve(args));
+  });
+
+  assert.equal(code, 0, stderr);
+  assert.equal(stdout, 'AUTH_OK');
+  for (const secret of [podToken, managerToken]) {
+    for (const call of spawn.calls) {
+      assert.doesNotMatch(
+        JSON.stringify(call.args),
+        new RegExp(secret),
+        'pod and run-bound tokens must stay out of local SSH argv',
+      );
+    }
+  }
+});
+
 test('spawnInteractive rejects a manager capability that cannot be line-framed', async () => {
   const spawn = makeSpawn(() => {});
   const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
@@ -1368,6 +1432,7 @@ test('detached Claude worker composes pod auth with file-backed user/system prom
     prompt: userPrompt,
     systemPrompt,
     cwd: '/srv/root/project',
+    bare: true,
     envAllowlist: ['ANTHROPIC_API_KEY'],
     env: {
       ANTHROPIC_API_KEY: 'controller-secret-must-not-cross',
@@ -1386,6 +1451,7 @@ test('detached Claude worker composes pod auth with file-backed user/system prom
   }
   const script = scriptOf(upload);
   const workerScript = tmuxInnerScript(script, runId);
+  assert.equal(spec.claudeBareAuth, true);
   const systemFile = `${canonicalDir}/system-prompt.txt`;
   const stdinFile = `${canonicalDir}/stdin.txt`;
   const bundleFile = `${canonicalDir}/worker-input.bundle`;
@@ -1408,6 +1474,7 @@ test('detached Claude worker composes pod auth with file-backed user/system prom
   assert.match(script, /awk .*"type".*"result"/);
   assert.ok(script.includes(shq('HOME')), 'pod HOME must survive env -i');
   assert.ok(script.includes(shq('ANTHROPIC_API_KEY')), 'only the allowlisted key name crosses');
+  assert.ok(workerScript.includes('.credentials.json'), 'pod login token is materialized inside tmux');
   assert.doesNotMatch(script, /ANTHROPIC_API_KEY='controller-secret/);
 });
 

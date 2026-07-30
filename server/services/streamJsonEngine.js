@@ -32,9 +32,10 @@ function buildRemoteWorkerEnv(env) {
  * for structured NDJSON stdin/stdout communication with Claude Code CLI.
  *
  * Auth: Local processes use the Console's resolved Claude credentials.
- * Detached remote workers preserve the pod login shell's HOME and therefore
- * use that pod's own `claude login` state; controller credential values are
- * never copied into their spec.
+ * Detached remote workers preserve the pod login shell's HOME and use that
+ * pod's own `claude login` state. For `--bare`, the remote executor materializes
+ * the pod token inside the clean child; controller credential values are never
+ * copied into their spec.
  */
 
 function createStreamJsonEngine({
@@ -290,6 +291,7 @@ function createStreamJsonEngine({
       cwd: spec.cwd,
       env: buildRemoteWorkerEnv(spec.env),
       envAllowlist: Array.isArray(spec.envAllowlist) ? spec.envAllowlist : [],
+      claudeBareAuth: spec.bare === true && !spec.isolated,
       workerPath: workerPath || undefined,
     };
   }
@@ -620,6 +622,7 @@ function createStreamJsonEngine({
           cwd: safeCwd,
           env: spawnEnv,
           pathPrefix: nodePrefix,
+          ...(bare && !isolated ? { claudeBareAuth: true } : {}),
           ...(Array.isArray(envAllowlist) ? { envAllowlist } : {}),
           ...(!isManager ? { worker: true } : {}),
         }))

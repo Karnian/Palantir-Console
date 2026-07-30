@@ -1626,7 +1626,15 @@ function createLifecycleService({
           parseEnvAllowlist(profile.env_allowlist, trustedBearerEnvKeys),
         );
         let presetAuthCleanup = null;
-        if (templateOptions.bare && !(presetResolution && presetResolution.isolated)) {
+        // A detached remote `--bare` worker must resolve auth on the pod. The
+        // remote executor materializes the pod login token inside its clean
+        // shell, keeping the credential out of the controller and SSH argv.
+        // Only local workers preflight/materialize controller auth here.
+        if (
+          !isRemoteNode
+          && templateOptions.bare
+          && !(presetResolution && presetResolution.isolated)
+        ) {
           const auth = _authResolver.resolveClaudeAuth({
             envAllowlist: parseEnvAllowlistArray(profile.env_allowlist),
             ..._authResolverOpts,

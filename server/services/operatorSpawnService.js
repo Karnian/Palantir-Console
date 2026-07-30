@@ -492,7 +492,10 @@ function createOperatorSpawnService({
     const authCtx = resolveManagerAuth(adapterType, {
       envAllowlist,
       ...authResolverOpts,
-      bare: bare === true,
+      // A remote Claude Operator materializes `--bare` auth from the pod's
+      // login store inside the executor. Do not read/materialize controller
+      // credentials that will deliberately be discarded at this boundary.
+      bare: !isRemoteNode && bare === true,
     });
     // Resolve before the auth gate so migration diagnostics are observable
     // even when a legacy ambient auth mode is no longer sufficient.

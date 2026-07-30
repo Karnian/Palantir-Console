@@ -572,7 +572,9 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 const authCtx = resolveManagerAuth(adapterType, {
                   envAllowlist,
                   ...authResolverOpts,
-                  bare: templateOptions?.bare === true,
+                  // Remote Claude resumes materialize `--bare` auth on the pod,
+                  // not from the controller's credential stores.
+                  bare: !isRemoteNode && templateOptions?.bare === true,
                 });
                 const resolvedSpawnEnv = isRemoteNode ? {} : buildManagerSpawnEnv({
                   baseEnv: actorSpawnBaseEnv,

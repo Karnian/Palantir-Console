@@ -123,7 +123,7 @@ async function spawnFakeRemoteManager(engine, runId, child, opts = {}) {
   await new Promise((r) => setImmediate(r));
 }
 
-test('engine: remote manager forwards only its run capability to the executor', async () => {
+test('engine: remote --bare manager requests pod auth and forwards only its run capability', async () => {
   const { createStreamJsonEngine } = require('../services/streamJsonEngine');
   const child = createFakeRemoteChild();
   let spawnOptions = null;
@@ -139,6 +139,7 @@ test('engine: remote manager forwards only its run capability to the executor', 
     isManager: true,
     executor,
     nodePrefix: '/pod/bin',
+    bare: true,
     env: {
       PALANTIR_MANAGER_TOKEN: 'run-bound-manager-capability',
       PALANTIR_TOKEN: 'human-token-must-not-cross',
@@ -150,6 +151,7 @@ test('engine: remote manager forwards only its run capability to the executor', 
   assert.deepEqual(spawnOptions.env, {
     PALANTIR_MANAGER_TOKEN: 'run-bound-manager-capability',
   });
+  assert.equal(spawnOptions.claudeBareAuth, true);
   engine.kill('run-remote-capability');
 });
 
@@ -176,6 +178,7 @@ test('engine: detached remote worker keeps prompts and controller credentials ou
     systemPrompt: 'system prompt with private-context',
     cwd: '/pod/ws',
     model: 'sonnet',
+    bare: true,
     envAllowlist: ['ANTHROPIC_API_KEY', 'PROFILE_VALUE'],
     env: {
       ANTHROPIC_API_KEY: 'controller-secret',
@@ -196,7 +199,9 @@ test('engine: detached remote worker keeps prompts and controller credentials ou
     PALANTIR_API_BASE: 'https://console.example',
     PALANTIR_WORKER_TOKEN: 'run-capability',
   });
+  assert.equal(spec.claudeBareAuth, true);
   assert.ok(spec.args.includes('-p'));
+  assert.ok(spec.args.includes('--bare'));
   assert.ok(spec.args.includes('--model'));
   assert.doesNotMatch(JSON.stringify(spec.args), /pasted-secret|private-context|controller-secret/);
 });

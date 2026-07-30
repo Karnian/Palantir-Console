@@ -73,7 +73,13 @@ function stubStreamJsonEngine() {
     buildDetachedWorkerSpec(spec, { workerPath } = {}) {
       return {
         command: 'claude',
-        args: ['--print', '--output-format', 'stream-json', '-p'],
+        args: [
+          '--print',
+          '--output-format',
+          'stream-json',
+          '-p',
+          ...(spec.bare ? ['--bare'] : []),
+        ],
         stdin: spec.prompt || '',
         systemPrompt: spec.systemPrompt,
         systemPromptFileFlag: spec.systemPrompt ? '--append-system-prompt-file' : undefined,
@@ -84,6 +90,7 @@ function stubStreamJsonEngine() {
           )),
         ),
         envAllowlist: spec.envAllowlist || [],
+        claudeBareAuth: spec.bare === true && !spec.isolated,
         workerPath,
       };
     },
@@ -199,11 +206,18 @@ function buildHarness(db, {
   };
 }
 
-function seedProfile(db, { command = 'codex', max = 5, envAllowlist = [] } = {}) {
+function seedProfile(db, {
+  command = 'codex',
+  max = 5,
+  envAllowlist = [],
+  argsTemplate: argsTemplateOverride,
+} = {}) {
   const id = `profile-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const argsTemplate = path.basename(command).toLowerCase().includes('codex')
-    ? 'exec {prompt}'
-    : '{prompt}';
+  const argsTemplate = argsTemplateOverride || (
+    path.basename(command).toLowerCase().includes('codex')
+      ? 'exec {prompt}'
+      : '{prompt}'
+  );
   db.prepare(`
     INSERT INTO agent_profiles (id, name, type, command, args_template, capabilities_json, env_allowlist, max_concurrent)
     VALUES (?, 'FleetDispatchAgent', 'codex', ?, ?, '{}', ?, ?)
@@ -617,11 +631,23 @@ test('local runs keep using the injected global worker channel', async (t) => {
 test('remote claude worker uses detached SSH ownership with pod-native auth', async (t) => {
   const db = await mkdb(t);
   const remoteChannel = makeRemoteChannel();
-  const h = buildHarness(db, { remoteChannel });
+  let controllerAuthCalls = 0;
+  const h = buildHarness(db, {
+    remoteChannel,
+    lifecycleOptions: {
+      authResolver: {
+        resolveClaudeAuth() {
+          controllerAuthCalls += 1;
+          throw new Error('remote --bare worker must not resolve controller auth');
+        },
+      },
+    },
+  });
   createSshNode(h.nodeService);
   const profile = seedProfile(db, {
     command: 'claude',
     envAllowlist: ['POD_ONLY_PROVIDER_KEY'],
+    argsTemplate: '{prompt} --bare',
   });
   const project = h.projectService.createProject({
     name: 'RemoteClaudeProject',
@@ -646,6 +672,9 @@ test('remote claude worker uses detached SSH ownership with pod-native auth', as
   assert.equal(spawn.payload.spec.cwd, '/workspace/project');
   assert.equal(spawn.payload.spec.workerPath, '/opt/codex/bin');
   assert.deepEqual(spawn.payload.spec.envAllowlist, ['POD_ONLY_PROVIDER_KEY']);
+  assert.equal(spawn.payload.spec.claudeBareAuth, true);
+  assert.ok(spawn.payload.spec.args.includes('--bare'));
+  assert.equal(controllerAuthCalls, 0);
   assert.equal(
     spawn.payload.spec.args.includes('claude remotely'),
     false,

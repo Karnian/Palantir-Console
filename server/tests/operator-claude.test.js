@@ -671,6 +671,10 @@ test('P5-S4b: remote node + Claude preference spawns a remote Claude Operator (e
   const runService = createRunService(db, null);
   const projectService = createProjectService(db);
   const projectBriefService = createProjectBriefService(db);
+  const agentProfileService = createAgentProfileService(db);
+  agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt} --bare',
+  });
   const registry = createManagerRegistry({ runService });
   const claudeAdapter = makeFakeManagerAdapter('claude-code');
   const codexAdapter = makeFakeManagerAdapter('codex');
@@ -687,10 +691,14 @@ test('P5-S4b: remote node + Claude preference spawns a remote Claude Operator (e
     id: 'nodeA', name: 'nodeA', kind: 'ssh', ssh_host: 'nodeA.example', ssh_user: 'runner',
     exposed_roots: ['/workspace'], can_execute: true, reachable: true, node_prefix: '/opt/nodeA/bin',
   });
+  const authCalls = [];
   const spawn = createOperatorSpawnService({
     runService, managerRegistry: registry, managerAdapterFactory,
-    projectService, projectBriefService, nodeService,
-    resolveManagerAuth: authOk,
+    projectService, projectBriefService, agentProfileService, nodeService,
+    resolveManagerAuth(type, opts) {
+      authCalls.push({ type, bare: opts.bare });
+      return { canAuth: false, env: {}, sources: [], diagnostics: [] };
+    },
   });
   const project = projectService.createProject({
     name: 'remote-claude', preferred_pm_adapter: 'claude', node_id: 'nodeA', directory: '/workspace/remote-claude',
@@ -708,6 +716,8 @@ test('P5-S4b: remote node + Claude preference spawns a remote Claude Operator (e
   assert.equal(start.opts.nodePrefix, '/opt/nodeA/bin');
   assert.equal(start.opts.cwd, '/workspace/remote-claude', 'pod cwd (project.directory)');
   assert.deepEqual(start.opts.env, {}, 'remote Operator gets a minimal env (no control-plane creds)');
+  assert.equal(start.opts.bare, true);
+  assert.deepEqual(authCalls, [{ type: 'claude-code', bare: false }]);
   // Claude uses onSessionStarted for markRunStarted (not codex onThreadStarted).
   assert.equal(typeof start.opts.onSessionStarted, 'function');
 
