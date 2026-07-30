@@ -517,17 +517,20 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
       LIMIT ?
     `),
     // SQLite's JSON parser rejects otherwise valid JSON beyond its nesting
-    // limit. Stream only those rejected rows through the authoritative
-    // JavaScript parser, stopping before an already-found earlier terminal
-    // event when possible.
+    // limit. A matching JSON string literal is still necessary for correlation,
+    // so use it as a cheap prefilter before the bounded authoritative parse.
+    // The explicit limit prevents anomalous rejected history from monopolizing
+    // the synchronous scheduler tick.
     sqliteRejectedTerminalEvents: db.prepare(`
       SELECT id, event_type, payload_json
       FROM run_events
       WHERE run_id=?
         AND event_type IN ('mgr.turn_completed','mgr.turn_failed')
         AND json_valid(payload_json)=0
+        AND instr(payload_json, ?)>0
         AND (? IS NULL OR id < ?)
       ORDER BY id ASC
+      LIMIT ?
     `),
     resetFailures: db.prepare(`
       UPDATE operator_schedules SET consecutive_failures=0, updated_at=datetime('now') WHERE id=?
@@ -1113,8 +1116,10 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
       const terminal = findPersistedTerminalEvent(
         stmts.sqliteRejectedTerminalEvents.iterate(
           row.manager_run_id,
+          JSON.stringify(row.invocation_id),
           sqlTerminal?.id ?? null,
           sqlTerminal?.id ?? null,
+          MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
         ),
         row.invocation_id,
       ) || sqlTerminal;

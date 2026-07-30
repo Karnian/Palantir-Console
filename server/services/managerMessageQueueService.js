@@ -323,17 +323,20 @@ function createManagerMessageQueueService({
       LIMIT ?
     `),
     // SQLite's JSON parser rejects otherwise valid JSON beyond its nesting
-    // limit. Stream only those rejected rows through the authoritative
-    // JavaScript parser, stopping before an already-found earlier terminal
-    // event when possible.
+    // limit. A matching JSON string literal is still necessary for correlation,
+    // so use it as a cheap prefilter before the bounded authoritative parse.
+    // The explicit limit prevents anomalous rejected history from monopolizing
+    // the synchronous queue tick.
     sqliteRejectedTerminalEvents: db.prepare(`
       SELECT id, event_type, payload_json
       FROM run_events
       WHERE run_id = ?
         AND event_type IN ('mgr.turn_completed', 'mgr.turn_failed')
         AND json_valid(payload_json) = 0
+        AND instr(payload_json, ?) > 0
         AND (? IS NULL OR id < ?)
       ORDER BY id ASC
+      LIMIT ?
     `),
     failRunActive: db.prepare(`
       UPDATE manager_message_queue
@@ -873,8 +876,10 @@ function createManagerMessageQueueService({
       const terminal = findPersistedTerminalEvent(
         stmts.sqliteRejectedTerminalEvents.iterate(
           row.run_id,
+          JSON.stringify(row.adapter_invocation_id),
           sqlTerminal?.id ?? null,
           sqlTerminal?.id ?? null,
+          MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
         ),
         row.adapter_invocation_id,
       ) || sqlTerminal;

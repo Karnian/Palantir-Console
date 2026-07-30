@@ -372,6 +372,48 @@ test('current-owner reconciliation stays within a 128 MB heap with 90 large payl
   }
 });
 
+test('SQLite-rejected history is filtered before the bounded queue fallback parse', (t) => {
+  const fixture = path.join(
+    __dirname,
+    'fixtures',
+    'manager-queue-sqlite-rejected-history.js',
+  );
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-queue-rejected-parent-'));
+  try {
+    const child = spawnSync(
+      process.execPath,
+      ['--max-old-space-size=128', fixture],
+      {
+        encoding: 'utf8',
+        timeout: 60_000,
+        env: {
+          ...process.env,
+          PALANTIR_SKIP_HOST_CREDENTIALS: '1',
+          PALANTIR_SKIP_DOTENV: '1',
+          PALANTIR_QUEUE_REJECTED_HISTORY_DIR: fixtureDir,
+        },
+      },
+    );
+
+    assert.equal(
+      child.status,
+      0,
+      [
+        `signal=${child.signal || 'none'} error=${child.error?.message || 'none'}`,
+        child.stdout,
+        child.stderr,
+      ].join('\n'),
+    );
+    assert.match(
+      child.stdout,
+      /history=12 payload_bytes=2000069 parsed=0 reconciled=0 .* target_reconciled=1 status=delivered/,
+    );
+    t.diagnostic(child.stdout.trim());
+  } finally {
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
+
 test('a non-coercible failure summary settles from persistence after the live callback throws', async (t) => {
   const baseEventBus = createEventBus();
   let droppedCallbacks = 0;

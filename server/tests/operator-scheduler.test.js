@@ -517,6 +517,66 @@ test('scheduled reconciliation does not parse unrelated terminal history', (t) =
   assert.equal(reconciled[0].status, 'completed');
 });
 
+test('SQLite-rejected history is filtered before the bounded scheduler fallback parse', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Rejected terminal history',
+    prompt: 'Check',
+    rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, 'mgr.turn_completed', ?)
+  `);
+  const opening = '['.repeat(1000);
+  const closing = ']'.repeat(1000);
+  let samplePayload;
+  for (let index = 0; index < 12; index += 1) {
+    const payload = `{"extra":${opening}0${closing},`
+      + `"data":{"invocationId":"oinv_history_${index}","terminal":true}}`;
+    samplePayload = payload;
+    insertEvent.run(managerRun.id, payload);
+  }
+  assert.equal(JSON.parse(samplePayload).data.terminal, true);
+  assert.equal(h.db.prepare('SELECT json_valid(?) AS valid').get(samplePayload).valid, 0);
+
+  const originalParse = JSON.parse;
+  let historicalPayloadParses = 0;
+  let targetPayloadParses = 0;
+  JSON.parse = function countedParse(value, ...args) {
+    if (typeof value === 'string' && value.includes('"invocationId":"oinv_history_')) {
+      historicalPayloadParses += 1;
+    }
+    if (typeof value === 'string' && value.includes(`"invocationId":"${claimed.id}"`)) {
+      targetPayloadParses += 1;
+    }
+    return originalParse.call(this, value, ...args);
+  };
+  try {
+    assert.deepEqual(h.scheduleService.reconcilePersistedTerminalEvents(), []);
+    assert.equal(historicalPayloadParses, 0);
+    assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
+
+    const targetPayload = `{"extra":${opening}0${closing},`
+      + `"data":{"invocationId":"${claimed.id}","terminal":true}}`;
+    insertEvent.run(managerRun.id, targetPayload);
+    const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+    assert.equal(reconciled.length, 1);
+    assert.equal(reconciled[0].status, 'completed');
+    assert.equal(targetPayloadParses, 1);
+  } finally {
+    JSON.parse = originalParse;
+  }
+
+  assert.equal(
+    h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+    'pending',
+    'the SQLite-rejected target must still release the OS-4 slot',
+  );
+});
+
 test('same-invocation non-terminal failures cannot exhaust scheduled terminal reconciliation', (t) => {
   const h = harness(t);
   const { instance } = createMappedOperator(h);
