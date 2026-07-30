@@ -14,6 +14,11 @@ const { resolveCodexServiceTier } = require('../services/managerAdapters/codexAd
 const { goalFeatureActive: defaultGoalFeatureActive } = require('../services/goalMode'); // G2 §6
 const { resolveActorTokenPolicy, applyManagerCredentialPolicy } = require('../services/actorTokenPolicy');
 const {
+  parseClaudeArgsTemplate,
+  resolveClaudePermissionMode,
+} = require('../services/agentProfileService');
+const { resolveAgentVendor } = require('../utils/agentVendor');
+const {
   repoFeatureEnabled,
   cwdFromWorkspacePath,
   repoThreadSourceReset,
@@ -68,8 +73,8 @@ function parseMcpTools(capabilitiesJson) {
 // already swallow the same parse error, and diverging would recreate exactly
 // the fresh/resume asymmetry this function exists to remove. `undefined` is
 // the safe direction: it grants no extra keys.
-function resolveResumeEnvAllowlist(agentProfileService, { profileId, adapterType } = {}) {
-  if (!agentProfileService) return undefined;
+function resolveResumeAgentProfile(agentProfileService, { profileId, adapterType } = {}) {
+  if (!agentProfileService) return null;
   let profile = null;
   try {
     if (profileId && typeof agentProfileService.getProfile === 'function') {
@@ -78,6 +83,11 @@ function resolveResumeEnvAllowlist(agentProfileService, { profileId, adapterType
       profile = agentProfileService.listProfiles().find((candidate) => candidate.type === adapterType) || null;
     }
   } catch { /* treat an unreadable profile as "no allowlist" */ }
+  return profile;
+}
+
+function resolveResumeEnvAllowlist(agentProfileService, options = {}) {
+  const profile = resolveResumeAgentProfile(agentProfileService, options);
   if (!profile || !profile.env_allowlist) return undefined;
   try {
     const parsed = JSON.parse(profile.env_allowlist);
@@ -87,12 +97,63 @@ function resolveResumeEnvAllowlist(agentProfileService, { profileId, adapterType
     console.warn(
       `[security] manager_env_allowlist_unreadable ${JSON.stringify({
         profile_id: profile.id,
-        adapter: adapterType,
+        adapter: options.adapterType,
         reason: err && err.message,
       })}`
     );
     return undefined;
   }
+}
+
+function resolveResumePermissionMode(agentProfileService, options = {}) {
+  if (options.adapterType !== 'claude-code') return undefined;
+  if (options.sessionPermissionMode) return options.sessionPermissionMode;
+  const profile = resolveResumeAgentProfile(agentProfileService, options);
+  return profile
+    ? resolveClaudePermissionMode(profile)
+    : 'bypassPermissions';
+}
+
+function resolveResumeClaudeTemplateOptions(agentProfileService, options = {}) {
+  if (options.adapterType !== 'claude-code') return null;
+  if (options.sessionClaudeOptionsJson != null) {
+    const parsed = JSON.parse(options.sessionClaudeOptionsJson);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('invalid Claude session options snapshot');
+    }
+    if (parsed.legacyUnresumable === true) {
+      throw new Error(
+        'pre-migration Claude session has no trustworthy runtime options snapshot',
+      );
+    }
+    return {
+      tools: Array.isArray(parsed.tools) ? parsed.tools : [],
+      disallowedTools: Array.isArray(parsed.disallowedTools)
+        ? parsed.disallowedTools
+        : [],
+      maxBudgetUsd: parsed.maxBudgetUsd ?? null,
+      mcpConfig: parsed.mcpConfig ?? null,
+      strictMcpConfig: parsed.strictMcpConfig === true,
+      safeMode: parsed.safeMode === true,
+      bare: parsed.bare === true,
+      disableSlashCommands: parsed.disableSlashCommands === true,
+      noChrome: parsed.noChrome === true,
+      settingSources: typeof parsed.settingSources === 'string'
+        ? parsed.settingSources
+        : null,
+      settings: typeof parsed.settings === 'string'
+        ? parsed.settings
+        : null,
+    };
+  }
+  const profile = resolveResumeAgentProfile(agentProfileService, options);
+  return profile ? parseClaudeArgsTemplate(profile.args_template) : null;
+}
+
+function mergeClaudeMcpConfigs(...configs) {
+  const present = configs.filter(Boolean);
+  if (present.length === 0) return undefined;
+  return present.length === 1 ? present[0] : present;
 }
 
 // authResolverOpts is forwarded into resolveManagerAuth for every preflight
@@ -200,7 +261,22 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
             profileId: r.agent_profile_id,
             adapterType,
           });
-          const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
+          const permissionMode = resolveResumePermissionMode(agentProfileService, {
+            profileId: r.agent_profile_id,
+            adapterType,
+            sessionPermissionMode: r.session_permission_mode,
+          });
+          const templateOptions = resolveResumeClaudeTemplateOptions(agentProfileService, {
+            profileId: r.agent_profile_id,
+            adapterType,
+            sessionClaudeOptionsJson: r.session_claude_options_json,
+          });
+          const authCtx = resolveManagerAuth(adapterType, {
+            envAllowlist,
+            ...authResolverOpts,
+            bare: templateOptions?.bare === true,
+            settings: templateOptions?.settings,
+          });
           const resolvedSpawnEnv = buildManagerSpawnEnv({
             baseEnv: actorSpawnBaseEnv,
             authEnv: authCtx.env,
@@ -220,6 +296,24 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
               systemPrompt,
               env: spawnEnv,
               envAllowlist,
+              permissionMode,
+              tools: templateOptions?.tools.length > 0
+                ? templateOptions.tools
+                : undefined,
+              disallowedTools: templateOptions?.disallowedTools.length > 0
+                ? templateOptions.disallowedTools
+                : undefined,
+              maxBudgetUsd: templateOptions?.maxBudgetUsd || undefined,
+              mcpConfig: templateOptions?.mcpConfig || undefined,
+              strictMcpConfig: templateOptions?.strictMcpConfig || undefined,
+              safeMode: templateOptions?.safeMode || undefined,
+              bare: templateOptions?.bare || undefined,
+              disableSlashCommands: templateOptions?.disableSlashCommands || undefined,
+              noChrome: templateOptions?.noChrome || undefined,
+              settingSources: typeof templateOptions?.settingSources === 'string'
+                ? templateOptions.settingSources
+                : undefined,
+              settings: templateOptions?.settings || undefined,
               resumeSessionId: r.claude_session_id,
               model: r.session_model || undefined,
               reasoning_effort: r.session_effort || undefined,
@@ -465,7 +559,25 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 const envAllowlist = resolveResumeEnvAllowlist(agentProfileService, {
                   adapterType,
                 });
-                const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
+                const permissionMode = resolveResumePermissionMode(agentProfileService, {
+                  adapterType,
+                  sessionPermissionMode: r.session_permission_mode,
+                });
+                const templateOptions = resolveResumeClaudeTemplateOptions(
+                  agentProfileService,
+                  {
+                    adapterType,
+                    sessionClaudeOptionsJson: r.session_claude_options_json,
+                  },
+                );
+                const authCtx = resolveManagerAuth(adapterType, {
+                  envAllowlist,
+                  ...authResolverOpts,
+                  // Remote Claude resumes materialize `--bare` auth on the pod,
+                  // not from the controller's credential stores.
+                  bare: !isRemoteNode && templateOptions?.bare === true,
+                  settings: templateOptions?.settings,
+                });
                 const resolvedSpawnEnv = isRemoteNode ? {} : buildManagerSpawnEnv({
                   baseEnv: actorSpawnBaseEnv,
                   authEnv: authCtx.env,
@@ -507,6 +619,29 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                       ? applyManagerCredentialPolicy({}, { managerToken: token, actorTokens })
                       : spawnEnv,
                     envAllowlist,
+                    permissionMode,
+                    tools: templateOptions?.tools.length > 0
+                      ? templateOptions.tools
+                      : undefined,
+                    disallowedTools: templateOptions?.disallowedTools.length > 0
+                      ? templateOptions.disallowedTools
+                      : undefined,
+                    maxBudgetUsd: templateOptions?.maxBudgetUsd || undefined,
+                    mcpConfig: r.session_claude_options_json != null
+                      ? (templateOptions?.mcpConfig || undefined)
+                      : mergeClaudeMcpConfigs(
+                        templateOptions?.mcpConfig,
+                        project.mcp_config_path,
+                      ),
+                    strictMcpConfig: templateOptions?.strictMcpConfig || undefined,
+                    safeMode: templateOptions?.safeMode || undefined,
+                    bare: templateOptions?.bare || undefined,
+                    disableSlashCommands: templateOptions?.disableSlashCommands || undefined,
+                    noChrome: templateOptions?.noChrome || undefined,
+                    settingSources: typeof templateOptions?.settingSources === 'string'
+                      ? templateOptions.settingSources
+                      : undefined,
+                    settings: templateOptions?.settings || undefined,
                     role: 'manager',
                     nodeId,
                     // F-1: per-turn tier resolver — re-reads this instance's
@@ -592,6 +727,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       return res.status(409).json({ error: 'Manager session is starting' });
     }
     startingManager = true;
+    try {
     const existing = getActiveManager();
     if (existing) {
       startingManager = false;
@@ -628,6 +764,17 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
             supported: Object.keys(PROFILE_TYPE_TO_ADAPTER),
           });
         }
+        const commandVendor = resolveAgentVendor(resolvedProfile.command);
+        const expectedVendor = mapped === 'claude-code' ? 'claude' : 'codex';
+        if (commandVendor !== expectedVendor) {
+          startingManager = false;
+          return res.status(400).json({
+            error: 'manager_profile_vendor_mismatch',
+            profileId: resolvedProfile.id,
+            profileType: resolvedProfile.type,
+            command: resolvedProfile.command,
+          });
+        }
         adapterType = mapped;
       }
     } catch (err) {
@@ -638,6 +785,14 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         message: err.message,
       });
     }
+    const claudeTemplateOptions = adapterType === 'claude-code' && resolvedProfile
+      ? parseClaudeArgsTemplate(resolvedProfile.args_template)
+      : null;
+    const permissionMode = adapterType === 'claude-code'
+      ? (resolvedProfile
+        ? resolveClaudePermissionMode(resolvedProfile)
+        : 'bypassPermissions')
+      : undefined;
 
     // Validate cwd if provided — must be under home directory or current working dir
     let safeCwd = resolveSpawnCwd({ workspaceDir: cwd });
@@ -682,7 +837,12 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       // fall through to the resolver's defaults.
       envAllowlist = undefined;
     }
-    const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
+    const authCtx = resolveManagerAuth(adapterType, {
+      envAllowlist,
+      ...authResolverOpts,
+      bare: claudeTemplateOptions?.bare === true,
+      settings: claudeTemplateOptions?.settings,
+    });
     const resolvedSpawnEnv = buildManagerSpawnEnv({
       baseEnv: actorSpawnBaseEnv,
       authEnv: authCtx.env,
@@ -820,7 +980,40 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       const eff = modelPolicyService
         ? modelPolicyService.resolveEffective({ layer: 'top', vendor, requestModel: model, env: process.env })
         : { model: model || null, effort: null };
-      try { runService.setSessionSnapshot(runId, { sessionModel: eff.model, sessionEffort: eff.effort }); } catch { /* annotate-only */ }
+      try {
+        runService.setSessionSnapshot(runId, {
+          sessionModel: eff.model,
+          sessionEffort: eff.effort,
+          sessionPermissionMode: permissionMode || null,
+          sessionClaudeOptions: claudeTemplateOptions
+            ? {
+                tools: claudeTemplateOptions.tools,
+                disallowedTools: claudeTemplateOptions.disallowedTools,
+                maxBudgetUsd: claudeTemplateOptions.maxBudgetUsd,
+                mcpConfig: claudeTemplateOptions.mcpConfig,
+                strictMcpConfig: claudeTemplateOptions.strictMcpConfig,
+                ...(claudeTemplateOptions.safeMode
+                  ? { safeMode: true }
+                  : {}),
+                ...(claudeTemplateOptions.bare
+                  ? { bare: true }
+                  : {}),
+                ...(claudeTemplateOptions.disableSlashCommands
+                  ? { disableSlashCommands: true }
+                  : {}),
+                ...(claudeTemplateOptions.noChrome
+                  ? { noChrome: true }
+                  : {}),
+                ...(typeof claudeTemplateOptions.settingSources === 'string'
+                  ? { settingSources: claudeTemplateOptions.settingSources }
+                  : {}),
+                ...(claudeTemplateOptions.settings
+                  ? { settings: claudeTemplateOptions.settings }
+                  : {}),
+              }
+            : null,
+        });
+      } catch { /* annotate-only */ }
 
       const { sessionRef } = adapter.startSession(runId, {
         // For Claude (persistent process) the prompt argument is the FIRST
@@ -832,6 +1025,26 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         systemPrompt,
         model: eff.model || undefined,
         reasoning_effort: eff.effort || undefined,
+        // Match lifecycleService's Claude worker rule exactly: a NULL profile
+        // value preserves the historical bypassPermissions default.
+        permissionMode,
+        tools: claudeTemplateOptions?.tools.length > 0
+          ? claudeTemplateOptions.tools
+          : undefined,
+        disallowedTools: claudeTemplateOptions?.disallowedTools.length > 0
+          ? claudeTemplateOptions.disallowedTools
+          : undefined,
+        maxBudgetUsd: claudeTemplateOptions?.maxBudgetUsd || undefined,
+        mcpConfig: claudeTemplateOptions?.mcpConfig || undefined,
+        strictMcpConfig: claudeTemplateOptions?.strictMcpConfig || undefined,
+        safeMode: claudeTemplateOptions?.safeMode || undefined,
+        bare: claudeTemplateOptions?.bare || undefined,
+        disableSlashCommands: claudeTemplateOptions?.disableSlashCommands || undefined,
+        noChrome: claudeTemplateOptions?.noChrome || undefined,
+        settingSources: typeof claudeTemplateOptions?.settingSources === 'string'
+          ? claudeTemplateOptions.settingSources
+          : undefined,
+        settings: claudeTemplateOptions?.settings || undefined,
         env: spawnEnv,
         envAllowlist,
         mcpTools: mcpTools.length > 0 ? mcpTools : undefined,
@@ -886,6 +1099,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         runService.addRunEvent(runId, 'error', JSON.stringify({ message: error.message }));
       } catch { /* ignore */ }
       throw error;
+    }
     } finally {
       startingManager = false;
     }

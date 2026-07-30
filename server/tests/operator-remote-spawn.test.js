@@ -463,8 +463,12 @@ test('boot resume uses remote node executor, nodePrefix, pod cwd, and Claude ses
     prompt: 'boot resume claude',
     node_id: 'nodeA',
   });
+  runService.setSessionSnapshot(run.id, {
+    sessionClaudeOptions: { bare: true },
+  });
   runService.updateRunStatus(run.id, 'running', { force: true });
 
+  let controllerTokenReads = 0;
   createManagerRouter({
     runService,
     managerAdapterFactory: factory,
@@ -473,7 +477,14 @@ test('boot resume uses remote node executor, nodePrefix, pod cwd, and Claude ses
     projectService,
     projectBriefService,
     nodeService,
-    authResolverOpts: {},
+    authResolverOpts: {
+      hasKeychain: () => true,
+      readKeychainTokenSync: () => {
+        controllerTokenReads += 1;
+        return 'controller-token-must-not-be-materialized';
+      },
+      hasCredentialsFile: () => false,
+    },
   });
 
   assert.equal(adapter._starts.length, 1);
@@ -484,6 +495,8 @@ test('boot resume uses remote node executor, nodePrefix, pod cwd, and Claude ses
   assert.equal(adapter._starts[0].opts.nodePrefix, '/opt/nodeA/bin');
   assert.equal(adapter._starts[0].opts.cwd, '/workspace/claude-boot');
   assert.deepEqual(adapter._starts[0].opts.env, {});
+  assert.equal(adapter._starts[0].opts.bare, true);
+  assert.equal(controllerTokenReads, 0);
   const warning = runService.getRunEvents(run.id).find(e => e.event_type === 'operator:remote_base_url_localhost');
   assert.ok(warning, 'Claude boot resume should record remote localhost base URL warning');
 });

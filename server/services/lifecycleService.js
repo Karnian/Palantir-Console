@@ -18,7 +18,11 @@ const {
 const { explainDispatch } = require('./dispatchPolicy');
 const { resolveProjectSource } = require('./projectSource');
 const { createProjectMaterializationService } = require('./projectMaterializationService');
-const { validateStructuredModelEffort } = require('./agentProfileService');
+const {
+  parseClaudeArgsTemplate,
+  resolveClaudePermissionMode,
+  validateStructuredModelEffort,
+} = require('./agentProfileService');
 const { compileGoalPrompt } = require('./goalPrompt'); // G1
 const { parseGoalReport } = require('./goalReport'); // G1
 const { parseClaudeStreamJsonOutput } = require('./claudeStreamJson');
@@ -1117,6 +1121,7 @@ function createLifecycleService({
       runService.setSessionSnapshot(run.id, {
         sessionModel: profile.model || null,
         sessionEffort: profile.reasoning_effort || null,
+        sessionPermissionMode: resolveClaudePermissionMode(profile) || null,
       });
     } catch { /* annotate-only */ }
     const adapterName = resolveAdapterName(profile);
@@ -1574,22 +1579,28 @@ function createLifecycleService({
       if (isClaude && streamJsonEngine) {
         // Use streamJsonEngine — same as Manager but isManager=false (single-shot worker)
         const mcpTools = parseMcpTools(profile.capabilities_json);
+        const templateOptions = parseClaudeArgsTemplate(profile.args_template);
 
         // Preset/skill-pack composed prompt (Phase 10C §6.8).
         const systemPrompt = composedSystemPrompt || undefined;
 
         // MCP config file: unified (preset > project > skill pack) if
         // anything merged, else plain project MCP, else undefined.
-        const effectiveMcpConfig = skillPackMcpConfigPath || projectMcpConfig || undefined;
+        const materializedMcpConfig = skillPackMcpConfigPath || projectMcpConfig || undefined;
+        const mcpConfigs = [
+          templateOptions.mcpConfig,
+          materializedMcpConfig,
+        ].filter(Boolean);
+        const effectiveMcpConfig = mcpConfigs.length > 1 ? mcpConfigs : mcpConfigs[0];
 
         // The detached SSH path is pod-native, but these two optional features
         // still materialize control-plane-local files. Never pass those paths
         // to the pod: fail non-retryably until a node-side asset transport
         // exists. Plain remote Claude workers remain supported.
-        if (isRemoteNode && (effectiveMcpConfig || presetResolution?.isolated)) {
+        if (isRemoteNode && (materializedMcpConfig || presetResolution?.isolated)) {
           const unsupported = {
             node_id: run.node_id,
-            mcp_config: !!effectiveMcpConfig,
+            mcp_config: !!materializedMcpConfig,
             isolated_preset: !!presetResolution?.isolated,
             reason: 'remote_claude_assets_not_materialized',
           };
@@ -1616,6 +1627,34 @@ function createLifecycleService({
           parseEnvAllowlist(profile.env_allowlist, trustedBearerEnvKeys),
         );
         let presetAuthCleanup = null;
+        // A detached remote `--bare` worker must resolve auth on the pod. The
+        // remote executor materializes the pod login token inside its clean
+        // shell, keeping the credential out of the controller and SSH argv.
+        // Only local workers preflight/materialize controller auth here.
+        if (
+          !isRemoteNode
+          && templateOptions.bare
+          && !(presetResolution && presetResolution.isolated)
+        ) {
+          const auth = _authResolver.resolveClaudeAuth({
+            envAllowlist: parseEnvAllowlistArray(profile.env_allowlist),
+            ..._authResolverOpts,
+            bare: true,
+            settings: templateOptions.settings,
+          });
+          runService.addRunEvent(run.id, 'worker:auth_sources', JSON.stringify({
+            sources: auth.sources,
+            bare: true,
+          }));
+          if (!auth.canAuth) {
+            const err = new Error(
+              auth.diagnostics[0] || 'Claude --bare requires a materialized API credential.',
+            );
+            err.status = 400;
+            throw err;
+          }
+          spawnEnv = { ...spawnEnv, ...auth.env };
+        }
         if (presetResolution && presetResolution.isolated) {
           const auth = await _authResolver.resolveClaudeAuthForIsolated({
             envAllowlist: parseEnvAllowlistArray(profile.env_allowlist),
@@ -1660,9 +1699,26 @@ function createLifecycleService({
               env: spawnEnv,
               model: profile.model || undefined,
               systemPrompt,
-              permissionMode: 'bypassPermissions',
+              permissionMode: resolveClaudePermissionMode(profile),
+              tools: templateOptions.tools.length > 0
+                ? templateOptions.tools
+                : undefined,
               allowedTools: mcpTools.length > 0 ? mcpTools : undefined,
+              disallowedTools: templateOptions.disallowedTools.length > 0
+                ? templateOptions.disallowedTools
+                : undefined,
+              maxBudgetUsd: templateOptions.maxBudgetUsd || undefined,
               mcpConfig: effectiveMcpConfig,
+              strictMcpConfig: templateOptions.strictMcpConfig || undefined,
+              safeMode: templateOptions.safeMode || undefined,
+              bare: templateOptions.bare || undefined,
+              disableSlashCommands: templateOptions.disableSlashCommands || undefined,
+              noChrome: templateOptions.noChrome || undefined,
+              settingSources: typeof templateOptions.settingSources === 'string'
+                ? templateOptions.settingSources
+                : undefined,
+              settings: templateOptions.settings || undefined,
+              maxTurns: templateOptions.maxTurns ?? undefined,
               isManager: false,
               envAllowlist: [
                 ...parseEnvAllowlistArray(profile.env_allowlist),

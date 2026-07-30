@@ -10,6 +10,7 @@ const {
   isWorkerApiBaseKey,
   normalizeWorkerApiBase,
 } = require('./actorTokenPolicy');
+const { CLAUDE_PROVIDER_AUTH_ENV_KEYS } = require('./authResolver');
 const { execEnvKeys, projectTestEnvKeys } = require('./execEnvPolicy');
 
 const WORKER_OUTPUT_MAX_LINES = 500;
@@ -109,6 +110,9 @@ const CLAUDE_OAUTH_USAGE_JS = [
   'req.on("timeout",()=>{req.destroy();finish(7)});req.on("error",()=>finish(7));req.end();',
   '}}',
 ].join('');
+const CLAUDE_PROVIDER_AUTH_SHELL = CLAUDE_PROVIDER_AUTH_ENV_KEYS
+  .map((key) => `[ "\${${key}:-}" = "1" ]`)
+  .join(' || ');
 const CLAUDE_OAUTH_USAGE_SCRIPT = `exec node -e '${CLAUDE_OAUTH_USAGE_JS.replace(/'/g, "'\\''")}'`;
 
 /**
@@ -118,6 +122,50 @@ const CLAUDE_OAUTH_USAGE_SCRIPT = `exec node -e '${CLAUDE_OAUTH_USAGE_JS.replace
  */
 function shq(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+// `claude --bare` does not read ~/.claude/.credentials.json. Remote Claude
+// processes nevertheless need to use the pod's own `claude login` state
+// without copying that token through the controller or placing it in SSH/env
+// argv. This fixed pod-side reader prints only the access token to a shell
+// command substitution inside the final clean process environment.
+const CLAUDE_BARE_AUTH_JS = [
+  'const fs=require("node:fs"),p=require("node:path");',
+  'let o={};try{const c=JSON.parse(fs.readFileSync(p.join(process.env.HOME||"",".claude",".credentials.json"),"utf8"));o=(c&&c.claudeAiOauth)||{}}catch(e){}',
+  'const t=typeof o.accessToken==="string"?o.accessToken:"";',
+  'const x=Number(o.expiresAt);',
+  'if(!t||(Number.isFinite(x)&&Date.now()>=x))process.exit(78);',
+  'process.stdout.write(t);',
+].join('');
+
+function hasExplicitClaudeSettings(args) {
+  if (!Array.isArray(args)) return false;
+  const index = args.indexOf('--settings');
+  return index >= 0
+    && typeof args[index + 1] === 'string'
+    && args[index + 1].length > 0;
+}
+
+function buildClaudeBareAuthShell(args) {
+  const settingsAuth = hasExplicitClaudeSettings(args);
+  return [
+    `if { ${CLAUDE_PROVIDER_AUTH_SHELL}; }; then`,
+    ':;',
+    'else',
+    'if [ -z "${ANTHROPIC_API_KEY:-}" ]; then',
+    'if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then',
+    'ANTHROPIC_API_KEY=$CLAUDE_CODE_OAUTH_TOKEN;',
+    'else',
+    settingsAuth
+      ? `ANTHROPIC_API_KEY=$(node -e ${shq(CLAUDE_BARE_AUTH_JS)}) || ANTHROPIC_API_KEY=;`
+      : `ANTHROPIC_API_KEY=$(node -e ${shq(CLAUDE_BARE_AUTH_JS)}) || exit 78;`,
+    'fi;',
+    'fi;',
+    settingsAuth
+      ? '[ -z "${ANTHROPIC_API_KEY:-}" ] || export ANTHROPIC_API_KEY'
+      : '[ -n "$ANTHROPIC_API_KEY" ] || { echo "Claude --bare auth unavailable on remote node" >&2; exit 78; }; export ANTHROPIC_API_KEY',
+    '; fi',
+  ].join(' ');
 }
 
 function exposedRootsError(message, reason) {
@@ -335,6 +383,7 @@ function buildCommandScript(command, args = [], {
   cleanEnvAllowExplicitPath = false,
   runBoundTokenKey = null,
   runBoundApiBase = false,
+  claudeBareAuth = false,
 } = {}) {
   const explicitEnv = cleanEnv && !cleanEnvAllowExplicitPath
     // The pod owns PATH. A controller PATH must never override it; pathPrefix
@@ -362,21 +411,23 @@ function buildCommandScript(command, args = [], {
       ...(runBoundTokenKey ? [runBoundTokenKey] : []),
       ...(runBoundApiBase ? ['PALANTIR_API_BASE'] : []),
     ];
-    if (stdinEnvKeys.length > 0) {
+    if (stdinEnvKeys.length > 0 || claudeBareAuth) {
       normalizeEnvKeyList(stdinEnvKeys);
       // Run-bound values are read from stdin INSIDE the clean shell, never
       // passed as arguments. `env -i ... KEY="$KEY"` would expand a value
       // before exec, so the real /usr/bin/env argv — world-readable through
       // /proc/<pid>/cmdline — would carry it for the life of that exec. Reading
       // here keeps those values in the SSH stdin stream and child environment.
-      const stdinBootstrap = stdinEnvKeys.flatMap((key) => [
+      const bootstrap = stdinEnvKeys.flatMap((key) => [
         `IFS= read -r ${key} || exit 126`,
         `export ${key}`,
       ]);
+      if (claudeBareAuth) bootstrap.push(buildClaudeBareAuthShell(args));
+      bootstrap.push('exec "$@"');
       cleanParts.push(
         SH_BIN,
         '-c',
-        shq([...stdinBootstrap, 'exec "$@"'].join('; ')),
+        shq(bootstrap.join('; ')),
         shq('sh'),
       );
     }
@@ -468,6 +519,15 @@ function validateWorkerSpec(spec) {
     ) {
       throw new Error('spawnWorker workerPath entries must be absolute POSIX paths without control characters');
     }
+  }
+  if (
+    spec.claudeBareAuth !== undefined
+    && typeof spec.claudeBareAuth !== 'boolean'
+  ) {
+    throw new Error('spawnWorker claudeBareAuth must be a boolean when provided');
+  }
+  if (spec.claudeBareAuth && spec.command !== 'claude') {
+    throw new Error('spawnWorker claudeBareAuth is only valid for claude');
   }
   normalizeEnvKeyList(spec.envAllowlist);
 }
@@ -925,9 +985,16 @@ function createRemoteSshNodeExecutor(node, {
     pathPrefix,
     envAllowlist,
     worker = false,
+    claudeBareAuth = false,
   } = {}) {
     const commandName = String(command);
     if (!managerInteractiveCommands.has(commandName)) throw managerCommandNotAllowedError(command);
+    if (claudeBareAuth !== false && claudeBareAuth !== true) {
+      throw new Error('spawnInteractive claudeBareAuth must be a boolean');
+    }
+    if (claudeBareAuth && commandName !== 'claude') {
+      throw new Error('spawnInteractive claudeBareAuth is only valid for claude');
+    }
     // PATH-trust guard: a relative/control-char pathPrefix ('.', 'relative/bin')
     // would let the remote cwd/project supply a fake codex/claude on PATH,
     // defeating the manager-command allowlist. Require an absolute POSIX path
@@ -992,6 +1059,7 @@ function createRemoteSshNodeExecutor(node, {
       cleanEnvKeys: processEnvKeys,
       runBoundTokenKey: runBoundToken ? runBoundTokenKey : null,
       runBoundApiBase: !!workerApiBase,
+      claudeBareAuth,
     });
     // The run-bound reads happen INSIDE the clean shell (buildCommandScript):
     // reading values out here would require re-injecting them as env -i
@@ -1451,6 +1519,7 @@ function createRemoteSshNodeExecutor(node, {
     env,
     workerPath,
     envAllowlist,
+    claudeBareAuth = false,
   }, {
     workerTokenFile = null,
     workerApiBaseFile = null,
@@ -1493,14 +1562,10 @@ function createRemoteSshNodeExecutor(node, {
     // assignment application and would otherwise discard workerPath.
     cleanParts.push(workerPath ? `PATH=${shq(workerPath)}:"$PATH"` : 'PATH="$PATH"');
     cleanParts.push(...envParts);
-    if (workerTokenFile) {
-      // Same argv contract as the manager path: the capability is read from its
-      // 0600 file INSIDE the clean shell. Passing it as `KEY="$KEY"` would place
-      // the value in the real /usr/bin/env argv, which /proc exposes.
-      cleanParts.push(
-        SH_BIN,
-        '-c',
-        shq([
+    if (workerTokenFile || workerApiBaseFile || claudeBareAuth) {
+      const bootstrap = [];
+      if (workerTokenFile) {
+        bootstrap.push(
           // Capture the read status, clean up UNCONDITIONALLY, and only then
           // act on it. Exiting on a failed `cat` before the rm would retain the
           // capability until the later run-status cleanup path.
@@ -1509,17 +1574,27 @@ function createRemoteSshNodeExecutor(node, {
           `rm -f -- ${shq(workerTokenFile)}`,
           '[ "$worker_token_rc" -eq 0 ] || exit 78',
           'export PALANTIR_WORKER_TOKEN',
-          ...(workerApiBaseFile
-            ? [
-                `PALANTIR_API_BASE=$(cat -- ${shq(workerApiBaseFile)})`,
-                'worker_api_base_rc=$?',
-                `rm -f -- ${shq(workerApiBaseFile)}`,
-                '[ "$worker_api_base_rc" -eq 0 ] || exit 78',
-                'export PALANTIR_API_BASE',
-              ]
-            : []),
-          'exec "$@"',
-        ].join('; ')),
+        );
+      }
+      if (workerApiBaseFile) {
+        bootstrap.push(
+          `PALANTIR_API_BASE=$(cat -- ${shq(workerApiBaseFile)})`,
+          'worker_api_base_rc=$?',
+          `rm -f -- ${shq(workerApiBaseFile)}`,
+          '[ "$worker_api_base_rc" -eq 0 ] || exit 78',
+          'export PALANTIR_API_BASE',
+        );
+      }
+      if (claudeBareAuth) bootstrap.push(buildClaudeBareAuthShell(list));
+      // Same argv contract as the manager path: run-bound values are read from
+      // their 0600 files INSIDE the clean shell. Passing them as `KEY="$KEY"`
+      // would place the values in the real /usr/bin/env argv, which /proc
+      // exposes.
+      bootstrap.push('exec "$@"');
+      cleanParts.push(
+        SH_BIN,
+        '-c',
+        shq(bootstrap.join('; ')),
         shq('sh'),
       );
     }

@@ -18,6 +18,23 @@ const argsFile = process.env.CLAUDE_ARGS_FILE;
 if (argsFile) {
   try { fs.writeFileSync(argsFile, JSON.stringify(args)); } catch { /* ignore */ }
 }
+const authContractFile = process.env.CLAUDE_AUTH_CONTRACT_FILE;
+if (authContractFile) {
+  try {
+    fs.writeFileSync(authContractFile, JSON.stringify({
+      bare: args.includes('--bare'),
+      hasAnthropicApiKey: Boolean(process.env.ANTHROPIC_API_KEY),
+    }));
+  } catch { /* ignore */ }
+}
+if (
+  process.env.CLAUDE_REQUIRE_BARE_API_KEY === '1'
+  && args.includes('--bare')
+  && !process.env.ANTHROPIC_API_KEY
+) {
+  process.stderr.write('Not logged in · Please run /login\n');
+  process.exit(1);
+}
 
 const isManager = args.includes('--input-format');
 

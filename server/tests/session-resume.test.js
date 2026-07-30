@@ -222,10 +222,17 @@ test('createManagerRouter resumes top manager on boot', async (t) => {
   });
 
   const rs = createRunService(db, null);
+  const { createAgentProfileService } = require('../services/agentProfileService');
+  const agentProfileService = createAgentProfileService(db);
+  agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config locked.json --strict-mcp-config',
+    permission_mode: 'acceptEdits',
+  });
 
   // Create a stale top manager with session_id.
   const run = rs.createRun({
     is_manager: true,
+    agent_profile_id: 'claude-code',
     prompt: 'resume test',
     manager_adapter: 'claude-code',
     manager_layer: 'top',
@@ -274,6 +281,7 @@ test('createManagerRouter resumes top manager on boot', async (t) => {
     managerAdapterFactory: mockFactory,
     managerRegistry: registry,
     conversationService: convService,
+    agentProfileService,
     authResolverOpts: { hasKeychain: () => true },
   });
 
@@ -281,6 +289,8 @@ test('createManagerRouter resumes top manager on boot', async (t) => {
   assert.equal(startSessionCalls.length, 1);
   assert.equal(startSessionCalls[0].runId, run.id);
   assert.equal(startSessionCalls[0].opts.resumeSessionId, 'sess_boot_test');
+  assert.equal(startSessionCalls[0].opts.permissionMode, 'acceptEdits');
+  assert.deepEqual(startSessionCalls[0].opts.disallowedTools, ['Bash']);
 
   // Verify the run is still 'running' (not stopped).
   const resumed = rs.getRun(run.id);
@@ -507,6 +517,12 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
   const rs = createRunService(db, null);
   const projectService = createProjectService(db);
   const projectBriefService = createProjectBriefService(db);
+  const { createAgentProfileService } = require('../services/agentProfileService');
+  const agentProfileService = createAgentProfileService(db);
+  agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt} --disallowedTools Bash',
+    permission_mode: 'acceptEdits',
+  });
 
   // Local folder project — directory must exist so resolveSpawnCwd resolves.
   const project = projectService.createProject({ name: 'canon', directory: dbDir });
@@ -544,6 +560,23 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
     prompt: 'PM canon',
   });
   rs.updateRunStatus(opRun.id, 'running', { force: true });
+  rs.setSessionSnapshot(opRun.id, {
+    sessionPermissionMode: 'acceptEdits',
+    sessionClaudeOptions: {
+      tools: ['Read,Grep'],
+      disallowedTools: ['Bash'],
+      maxBudgetUsd: 0.01,
+      mcpConfig: 'locked.json',
+      strictMcpConfig: true,
+    },
+  });
+  // Operator runs intentionally have no agent_profile_id. Changing the
+  // name-sorted fallback profile after the fresh spawn must not escalate the
+  // resumed session to that mutable value.
+  agentProfileService.updateProfile('claude-code', {
+    permission_mode: 'bypassPermissions',
+    args_template: '-p {prompt}',
+  });
 
   // Active Top (claude session) so the Operator loop has parent-notice routing.
   const topRun = rs.createRun({
@@ -585,6 +618,7 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
     managerAdapterFactory: mockFactory,
     managerRegistry: registry,
     conversationService: convService,
+    agentProfileService,
     authResolverOpts: { hasKeychain: () => true },
   });
 
@@ -592,5 +626,11 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
   const opResume = startSessionCalls.find((c) => c.runId === opRun.id);
   assert.ok(opResume, 'canonical operator:oi_* run should be resumed via startSession');
   assert.equal(opResume.opts.resumeSessionId, 'sess_canon_resume', 'resumes the instance thread handle');
+  assert.equal(opResume.opts.permissionMode, 'acceptEdits', 'resumes with the fresh-spawn permission snapshot');
+  assert.deepEqual(opResume.opts.tools, ['Read,Grep']);
+  assert.deepEqual(opResume.opts.disallowedTools, ['Bash']);
+  assert.equal(opResume.opts.maxBudgetUsd, 0.01);
+  assert.equal(opResume.opts.mcpConfig, 'locked.json');
+  assert.equal(opResume.opts.strictMcpConfig, true);
   assert.equal(rs.getRun(opRun.id).status, 'running', 'canonical Operator stays running (not stopped)');
 });

@@ -522,7 +522,12 @@ function createRunService(db, eventBus) {
       UPDATE runs SET final_output = ?, goal_report = ? WHERE id = ?
     `),
     setSessionSnapshot: db.prepare(`
-      UPDATE runs SET session_model = ?, session_effort = ? WHERE id = ?
+      UPDATE runs
+      SET session_model = ?,
+          session_effort = ?,
+          session_permission_mode = ?,
+          session_claude_options_json = ?
+      WHERE id = ?
     `),
     // Phase 3 (cost cap): total recorded cost of a project's task-linked runs.
     sumProjectCost: db.prepare(`
@@ -1508,9 +1513,23 @@ function createRunService(db, eventBus) {
     return stmts.getById.get(id);
   }
 
-  function setSessionSnapshot(id, { sessionModel = null, sessionEffort = null } = {}) {
+  function setSessionSnapshot(
+    id,
+    {
+      sessionModel = null,
+      sessionEffort = null,
+      sessionPermissionMode = null,
+      sessionClaudeOptions = null,
+    } = {},
+  ) {
     getRun(id);
-    stmts.setSessionSnapshot.run(sessionModel, sessionEffort, id);
+    stmts.setSessionSnapshot.run(
+      sessionModel,
+      sessionEffort,
+      sessionPermissionMode,
+      sessionClaudeOptions == null ? null : JSON.stringify(sessionClaudeOptions),
+      id,
+    );
     return stmts.getById.get(id);
   }
 
