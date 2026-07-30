@@ -517,10 +517,11 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
       LIMIT ?
     `),
     // SQLite's JSON parser rejects otherwise valid JSON beyond its nesting
-    // limit. A matching JSON string literal is still necessary for correlation,
-    // so use it as a cheap prefilter before the bounded authoritative parse.
-    // The explicit limit prevents anomalous rejected history from monopolizing
-    // the synchronous scheduler tick.
+    // limit. The correlation literal drops ordinary unrelated history before
+    // the authoritative parse; the remaining fallback uses the same shared
+    // eight-candidate budget as the SQL-valid scan so one anomalous run cannot
+    // monopolize a synchronous scheduler tick. A SQL terminal id is an
+    // exclusive upper bound, preserving first-event-wins ordering across scans.
     sqliteRejectedTerminalEvents: db.prepare(`
       SELECT id, event_type, payload_json
       FROM run_events

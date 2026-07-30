@@ -517,7 +517,7 @@ test('scheduled reconciliation does not parse unrelated terminal history', (t) =
   assert.equal(reconciled[0].status, 'completed');
 });
 
-test('SQLite-rejected history is filtered before the bounded scheduler fallback parse', (t) => {
+test('SQLite-rejected scheduler fallback parsing has the shared candidate bound', (t) => {
   const h = harness(t);
   const { instance } = createMappedOperator(h);
   const schedule = h.scheduleService.createSchedule(instance.id, {
@@ -535,6 +535,7 @@ test('SQLite-rejected history is filtered before the bounded scheduler fallback 
   let samplePayload;
   for (let index = 0; index < 12; index += 1) {
     const payload = `{"extra":${opening}0${closing},`
+      + `"correlationHint":"${claimed.id}",`
       + `"data":{"invocationId":"oinv_history_${index}","terminal":true}}`;
     samplePayload = payload;
     insertEvent.run(managerRun.id, payload);
@@ -556,9 +557,10 @@ test('SQLite-rejected history is filtered before the bounded scheduler fallback 
   };
   try {
     assert.deepEqual(h.scheduleService.reconcilePersistedTerminalEvents(), []);
-    assert.equal(historicalPayloadParses, 0);
+    assert.equal(historicalPayloadParses, 8);
     assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
 
+    h.db.prepare('DELETE FROM run_events WHERE run_id = ?').run(managerRun.id);
     const targetPayload = `{"extra":${opening}0${closing},`
       + `"data":{"invocationId":"${claimed.id}","terminal":true}}`;
     insertEvent.run(managerRun.id, targetPayload);

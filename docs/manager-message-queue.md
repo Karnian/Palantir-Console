@@ -76,8 +76,9 @@ show every subsequent transition. A terminal failure includes `last_error`.
   its lease (so stale recovery, which excludes the current owner, never sees it),
   and every later scheduled turn fails `OPERATOR_BUSY` until the Operator is
   replaced. Settlement still requires a persisted event matching that row's exact
-  `(run_id, invocation id)` with `terminal = 1`, so a turn that is genuinely still
-  running is never cut short — there is deliberately no age or lease heuristic here.
+  `(run_id, invocation id)` with `payload.data.terminal === true` (the JSON boolean),
+  so a turn that is genuinely still running is never cut short — there is deliberately
+  no age or lease heuristic here.
 - **Explicit Manager stop/reset or adapter replacement:** queued rows are
   preserved for the next session with the same conversation identity. An
   already sending/processing row is marked failed with

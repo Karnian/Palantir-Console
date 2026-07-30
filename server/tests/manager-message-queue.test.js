@@ -372,7 +372,7 @@ test('current-owner reconciliation stays within a 128 MB heap with 90 large payl
   }
 });
 
-test('SQLite-rejected history is filtered before the bounded queue fallback parse', (t) => {
+test('SQLite-rejected queue fallback parsing has the shared candidate bound', (t) => {
   const fixture = path.join(
     __dirname,
     'fixtures',
@@ -406,7 +406,7 @@ test('SQLite-rejected history is filtered before the bounded queue fallback pars
     );
     assert.match(
       child.stdout,
-      /history=12 payload_bytes=2000069 parsed=0 reconciled=0 .* target_reconciled=1 status=delivered/,
+      /history=12 payload_bytes=2000069 parsed=0 reconciled=0 .*heap_peak_mb=\d+\.\d .*\nbounded_history=12 bounded_parsed=8 bounded_reconciled=0\ntarget_reconciled=1 status=delivered/s,
     );
     t.diagnostic(child.stdout.trim());
   } finally {
@@ -571,16 +571,27 @@ test('a persisted terminal settlement error does not escape the queue tick', asy
   `).run(run.id, JSON.stringify({
     data: { invocationId: 'oinv_settlement_error', terminal: true },
   }));
+  let settlementAttempts = 0;
+  h.db.function('record_queue_terminal_settlement', () => {
+    settlementAttempts += 1;
+    return null;
+  });
   h.db.exec(`
     CREATE TRIGGER reject_queue_terminal_settlement
     BEFORE UPDATE ON manager_message_queue
     WHEN OLD.status = 'processing' AND NEW.status = 'delivered'
     BEGIN
+      SELECT record_queue_terminal_settlement();
       SELECT RAISE(ABORT, 'simulated terminal settlement failure');
     END
   `);
 
   await assert.doesNotReject(() => h.service.tick());
+  assert.equal(
+    settlementAttempts,
+    1,
+    'tick must run persisted reconciliation and reach the rejecting trigger',
+  );
   assert.equal(h.service.getMessage(first.message.id).status, 'processing');
 });
 

@@ -11,10 +11,15 @@ const { createRunService } = require('../../services/runService');
 const {
   createManagerMessageQueueService,
 } = require('../../services/managerMessageQueueService');
+const {
+  MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
+} = require('../../services/terminalEventReconciliation');
 
 const HISTORY_COUNT = 12;
 const NESTING_DEPTH = 1_000_000;
 const EXPECTED_HISTORY_PAYLOAD_BYTES = 2_000_069;
+const MAX_RECONCILIATION_MS = 500;
+const MAX_HEAP_DELTA_BYTES = 32 * 1024 * 1024;
 const dir = process.env.PALANTIR_QUEUE_REJECTED_HISTORY_DIR
   || fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-queue-rejected-history-'));
 const handle = createDatabase(path.join(dir, 'test.db'));
@@ -78,25 +83,78 @@ try {
 
   originalParse = JSON.parse;
   let historicalPayloadParses = 0;
+  let boundedPayloadParses = 0;
+  let peakHeapBytes = process.memoryUsage().heapUsed;
   JSON.parse = function countedParse(value, ...args) {
+    const parsed = originalParse.call(this, value, ...args);
     if (typeof value === 'string' && value.includes('"invocationId":"oinv_history_')) {
       historicalPayloadParses += 1;
+      peakHeapBytes = Math.max(peakHeapBytes, process.memoryUsage().heapUsed);
     }
-    return originalParse.call(this, value, ...args);
+    if (typeof value === 'string' && value.includes('"fallbackBoundMarker":true')) {
+      boundedPayloadParses += 1;
+    }
+    return parsed;
   };
+  const initialHeapBytes = process.memoryUsage().heapUsed;
+  peakHeapBytes = Math.max(peakHeapBytes, initialHeapBytes);
   const startedAt = performance.now();
   const reconciledWithoutTarget = service.reconcilePersistedTerminalEvents();
   const elapsedMs = performance.now() - startedAt;
+  console.log(
+    `history=${HISTORY_COUNT} payload_bytes=${EXPECTED_HISTORY_PAYLOAD_BYTES} `
+      + `parsed=${historicalPayloadParses} reconciled=${reconciledWithoutTarget} `
+      + `elapsed_ms=${elapsedMs.toFixed(1)} `
+      + `heap_before_mb=${(initialHeapBytes / 1024 / 1024).toFixed(1)} `
+      + `heap_peak_mb=${(peakHeapBytes / 1024 / 1024).toFixed(1)} `
+      + `heap_delta_mb=${((peakHeapBytes - initialHeapBytes) / 1024 / 1024).toFixed(1)}`,
+  );
   if (reconciledWithoutTarget !== 0) {
     throw new Error(`unexpected reconciliation count: ${reconciledWithoutTarget}`);
   }
   if (historicalPayloadParses !== 0) {
     throw new Error(`parsed ${historicalPayloadParses} unrelated rejected payloads`);
   }
+  if (elapsedMs > MAX_RECONCILIATION_MS) {
+    throw new Error(`reconciliation took ${elapsedMs.toFixed(1)} ms`);
+  }
+  if (peakHeapBytes - initialHeapBytes > MAX_HEAP_DELTA_BYTES) {
+    throw new Error(
+      `reconciliation heap grew by `
+        + `${((peakHeapBytes - initialHeapBytes) / 1024 / 1024).toFixed(1)} MB`,
+    );
+  }
   if (service.getMessage('msg_rejected_history').status !== 'processing') {
     throw new Error('unrelated rejected history settled the target row');
   }
 
+  handle.db.prepare('DELETE FROM run_events WHERE run_id = ?').run(run.id);
+  const boundedOpening = '['.repeat(1000);
+  const boundedClosing = ']'.repeat(1000);
+  for (let index = 0; index < HISTORY_COUNT; index += 1) {
+    insertEvent.run(
+      run.id,
+      `{"extra":${boundedOpening}0${boundedClosing},`
+        + '"correlationHint":"oinv_target","fallbackBoundMarker":true,'
+        + `"data":{"invocationId":"oinv_bounded_${index}","terminal":true}}`,
+    );
+  }
+  const boundedReconciled = service.reconcilePersistedTerminalEvents();
+  console.log(
+    `bounded_history=${HISTORY_COUNT} bounded_parsed=${boundedPayloadParses} `
+      + `bounded_reconciled=${boundedReconciled}`,
+  );
+  if (boundedPayloadParses !== MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES) {
+    throw new Error(
+      `parsed ${boundedPayloadParses} bounded candidates; `
+        + `limit is ${MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES}`,
+    );
+  }
+  if (boundedReconciled !== 0) {
+    throw new Error(`unexpected bounded reconciliation count: ${boundedReconciled}`);
+  }
+
+  handle.db.prepare('DELETE FROM run_events WHERE run_id = ?').run(run.id);
   const targetPayload = `{"extra":${opening}0${closing},`
     + '"data":{"invocationId":"oinv_target","terminal":true}}';
   if (handle.db.prepare('SELECT json_valid(?) AS valid').get(targetPayload).valid !== 0) {
@@ -109,11 +167,7 @@ try {
     throw new Error(`deep target did not settle: reconciled=${reconciledTarget} status=${status}`);
   }
 
-  console.log(
-    `history=${HISTORY_COUNT} payload_bytes=${EXPECTED_HISTORY_PAYLOAD_BYTES} `
-      + `parsed=${historicalPayloadParses} reconciled=${reconciledWithoutTarget} `
-      + `elapsed_ms=${elapsedMs.toFixed(1)} target_reconciled=${reconciledTarget} status=${status}`,
-  );
+  console.log(`target_reconciled=${reconciledTarget} status=${status}`);
 } finally {
   if (originalParse) JSON.parse = originalParse;
   if (service) service.stop();
