@@ -459,6 +459,11 @@ function createSkillPackService(db) {
         continue;
       }
 
+      // Revalidate persisted overrides at use time. Packs written before the
+      // current denylist (or outside service CRUD) must not bypass policy
+      // merely because they were already stored when the process upgraded.
+      validateMcpEnvOverrides({ [alias]: config });
+
       let args = [];
       try { args = template.args ? JSON.parse(template.args) : []; } catch { /* malformed args — use empty */ }
       const env = {};

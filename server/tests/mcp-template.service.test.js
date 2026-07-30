@@ -153,6 +153,69 @@ test('skill-pack env denylist rejects Windows case variants from legacy template
   );
 });
 
+test('runtime resolution rejects denied env overrides already stored in legacy skill packs', async (t) => {
+  const db = setupDb(t);
+  const packSvc = createSkillPackService(db);
+  const templateSvc = createMcpTemplateService(db);
+  const legacy = await templateSvc.createTemplate({
+    alias: 'legacy_runtime_node_options',
+    command: 'node',
+    allowed_env_keys: ['SAFE_OPTION'],
+  });
+  db.prepare('UPDATE mcp_server_templates SET allowed_env_keys = ? WHERE id = ?')
+    .run(JSON.stringify(['node_options']), legacy.id);
+
+  const storedMcpServers = JSON.stringify({
+    [legacy.alias]: {
+      env_overrides: { node_options: '--require=C:\\attacker\\hook.js' },
+    },
+  });
+  db.prepare(`
+    INSERT INTO skill_packs (id, name, mcp_servers)
+    VALUES (?, ?, ?)
+  `).run('sp_legacy_runtime_denied', 'Legacy runtime denied env', storedMcpServers);
+
+  assert.throws(
+    () => packSvc.resolveMcpServers(storedMcpServers),
+    (err) => err.status === 400 && /blocked by security policy/.test(err.message),
+  );
+
+  const deps = {
+    taskService: {
+      getTask: () => ({ id: 'task_legacy_runtime', project_id: null }),
+    },
+    agentProfileService: {
+      getProfile: () => ({
+        id: 'profile_claude',
+        name: 'Claude',
+        command: 'claude',
+        args_template: '',
+        capabilities_json: '{}',
+      }),
+    },
+  };
+  assert.throws(
+    () => packSvc.resolveForRun(deps, {
+      taskId: 'task_legacy_runtime',
+      explicitPackIds: ['sp_legacy_runtime_denied'],
+      agentProfileId: 'profile_claude',
+    }),
+    (err) => err.status === 400 && /blocked by security policy/.test(err.message),
+  );
+});
+
+test('runtime resolution preserves allowed env overrides', async (t) => {
+  const db = setupDb(t);
+  const packSvc = createSkillPackService(db);
+
+  const { servers, warnings } = packSvc.resolveMcpServers({
+    playwright: { env_overrides: { BROWSER: 'firefox' } },
+  });
+
+  assert.deepEqual(warnings, []);
+  assert.deepEqual(servers.playwright.env, { BROWSER: 'firefox' });
+});
+
 test('createMcpTemplateService: command rejects surrounding whitespace', async (t) => {
   const db = setupDb(t);
   createSkillPackService(db);
