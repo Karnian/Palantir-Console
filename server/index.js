@@ -1,6 +1,7 @@
 const {
   prepareActorTokenEnvironment,
   resolveDotEnvPath,
+  buildActorTokenAppOptions,
 } = require('./services/actorTokenPolicy');
 
 // Actor credentials must never live in the repository .env that a
@@ -40,16 +41,10 @@ if (staleTmuxArtifacts.prompts || staleTmuxArtifacts.capabilities) {
 }
 
 const port = process.env.PORT || 4177;
-const app = createApp({
-  actorTokenSource: actorTokenBootstrap?.source || 'environment',
-  agentProcessIsolation: process.env.PALANTIR_AGENT_PROCESS_ISOLATION === 'verified',
-  ...(actorTokenBootstrap
-    ? {
-        authToken: actorTokenBootstrap.authToken,
-        pmToken: actorTokenBootstrap.pmToken,
-      }
-    : {}),
-});
+const app = createApp(buildActorTokenAppOptions({
+  env: process.env,
+  actorTokenBootstrap,
+}));
 
 // Bind policy (PR1 / NEW-S1 + P0-1): do NOT expose an unauthenticated
 // console to the network. Default to loopback. Allow 0.0.0.0 only when:
