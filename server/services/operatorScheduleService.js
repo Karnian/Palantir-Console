@@ -216,6 +216,7 @@ function parseSchedule(row) {
 
 function createOperatorScheduleService(db, { eventBus, runService, logger } = {}) {
   const log = logger || ((message) => console.warn(`[operator-schedule] ${message}`));
+  const sqliteRejectedTerminalCursors = new Map();
   const stmts = {
     getInstance: db.prepare('SELECT * FROM operator_instances WHERE id = ?'),
     getProject: db.prepare('SELECT * FROM projects WHERE id = ?'),
@@ -518,10 +519,9 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     `),
     // SQLite's JSON parser rejects otherwise valid JSON beyond its nesting
     // limit. The correlation literal drops ordinary unrelated history before
-    // the authoritative parse; the remaining fallback uses the same shared
-    // eight-candidate budget as the SQL-valid scan so one anomalous run cannot
-    // monopolize a synchronous scheduler tick. A SQL terminal id is an
-    // exclusive upper bound, preserving first-event-wins ordering across scans.
+    // the authoritative parse. The cursor advances the bounded fallback across
+    // ticks, while the SQL terminal id remains an exclusive upper bound so a
+    // later SQL-valid event cannot overtake an earlier rejected completion.
     sqliteRejectedTerminalEvents: db.prepare(`
       SELECT id, event_type, payload_json
       FROM run_events
@@ -529,6 +529,7 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
         AND event_type IN ('mgr.turn_completed','mgr.turn_failed')
         AND json_valid(payload_json)=0
         AND instr(payload_json, ?)>0
+        AND (? IS NULL OR id>?)
         AND (? IS NULL OR id < ?)
       ORDER BY id ASC
       LIMIT ?
@@ -1087,6 +1088,7 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
       managerRunId,
     );
     if (info.changes !== 1) return null;
+    sqliteRejectedTerminalCursors.delete(invocationId);
     if (running.schedule_id) {
       if (success) stmts.resetFailures.run(running.schedule_id);
       else stmts.incrementFailures.run(running.schedule_id);
@@ -1114,16 +1116,42 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
         MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
       );
       const sqlTerminal = findPersistedTerminalEvent(candidates, row.invocation_id);
-      const terminal = findPersistedTerminalEvent(
-        stmts.sqliteRejectedTerminalEvents.iterate(
-          row.manager_run_id,
-          JSON.stringify(row.invocation_id),
-          sqlTerminal?.id ?? null,
-          sqlTerminal?.id ?? null,
-          MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
-        ),
+      const cursor = sqliteRejectedTerminalCursors.get(row.invocation_id) ?? null;
+      const sqliteRejectedCandidates = stmts.sqliteRejectedTerminalEvents.all(
+        row.manager_run_id,
+        JSON.stringify(row.invocation_id),
+        cursor,
+        cursor,
+        sqlTerminal?.id ?? null,
+        sqlTerminal?.id ?? null,
+        MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
+      );
+      const sqliteRejectedTerminal = findPersistedTerminalEvent(
+        sqliteRejectedCandidates,
         row.invocation_id,
-      ) || sqlTerminal;
+      );
+      let terminal;
+      if (sqliteRejectedTerminal) {
+        sqliteRejectedTerminalCursors.delete(row.invocation_id);
+        terminal = sqliteRejectedTerminal;
+      } else if (
+        sqliteRejectedCandidates.length >= MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES
+      ) {
+        sqliteRejectedTerminalCursors.set(
+          row.invocation_id,
+          sqliteRejectedCandidates[sqliteRejectedCandidates.length - 1].id,
+        );
+        continue;
+      } else {
+        if (sqliteRejectedCandidates.length > 0) {
+          sqliteRejectedTerminalCursors.set(
+            row.invocation_id,
+            sqliteRejectedCandidates[sqliteRejectedCandidates.length - 1].id,
+          );
+        }
+        terminal = sqlTerminal;
+        if (terminal) sqliteRejectedTerminalCursors.delete(row.invocation_id);
+      }
       if (!terminal) continue;
       const success = terminal.event_type === 'mgr.turn_completed';
       const invocation = completeInvocation(

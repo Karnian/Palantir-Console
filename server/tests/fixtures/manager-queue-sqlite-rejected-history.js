@@ -131,7 +131,7 @@ try {
   handle.db.prepare('DELETE FROM run_events WHERE run_id = ?').run(run.id);
   const boundedOpening = '['.repeat(1000);
   const boundedClosing = ']'.repeat(1000);
-  for (let index = 0; index < HISTORY_COUNT; index += 1) {
+  for (let index = 0; index < MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES; index += 1) {
     insertEvent.run(
       run.id,
       `{"extra":${boundedOpening}0${boundedClosing},`
@@ -141,7 +141,8 @@ try {
   }
   const boundedReconciled = service.reconcilePersistedTerminalEvents();
   console.log(
-    `bounded_history=${HISTORY_COUNT} bounded_parsed=${boundedPayloadParses} `
+    `bounded_history=${MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES} `
+      + `bounded_parsed=${boundedPayloadParses} `
       + `bounded_reconciled=${boundedReconciled}`,
   );
   if (boundedPayloadParses !== MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES) {
@@ -154,7 +155,6 @@ try {
     throw new Error(`unexpected bounded reconciliation count: ${boundedReconciled}`);
   }
 
-  handle.db.prepare('DELETE FROM run_events WHERE run_id = ?').run(run.id);
   const targetPayload = `{"extra":${opening}0${closing},`
     + '"data":{"invocationId":"oinv_target","terminal":true}}';
   if (handle.db.prepare('SELECT json_valid(?) AS valid').get(targetPayload).valid !== 0) {

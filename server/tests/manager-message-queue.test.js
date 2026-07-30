@@ -406,7 +406,7 @@ test('SQLite-rejected queue fallback parsing has the shared candidate bound', (t
     );
     assert.match(
       child.stdout,
-      /history=12 payload_bytes=2000069 parsed=0 reconciled=0 .*heap_peak_mb=\d+\.\d .*\nbounded_history=12 bounded_parsed=8 bounded_reconciled=0\ntarget_reconciled=1 status=delivered/s,
+      /history=12 payload_bytes=2000069 parsed=0 reconciled=0 .*heap_peak_mb=\d+\.\d .*\nbounded_history=8 bounded_parsed=8 bounded_reconciled=0\ntarget_reconciled=1 status=delivered/s,
     );
     t.diagnostic(child.stdout.trim());
   } finally {
@@ -595,6 +595,68 @@ test('a persisted terminal settlement error does not escape the queue tick', asy
   assert.equal(h.service.getMessage(first.message.id).status, 'processing');
 });
 
+test('a stale chat settlement error cannot be mistaken for missing terminal evidence and replayed', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'top',
+    conversation_id: 'top',
+    prompt: 'top',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  let dispatches = 0;
+  const dispatcher = () => {
+    dispatches += 1;
+    return { status: 'sent', target: { kind: 'top', runId: run.id } };
+  };
+  h.service.setDispatcher(dispatcher);
+
+  const original = await h.service.enqueue(
+    'top',
+    { text: 'must not replay after terminal settlement failure' },
+    { idempotencyKey: 'stale-settlement-error' },
+  );
+  assert.equal(original.message.status, 'processing');
+  assert.equal(dispatches, 1);
+  h.service.stop();
+
+  h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, 'mgr.turn_completed', ?)
+  `).run(run.id, JSON.stringify({
+    data: { invocationId: original.message.id, terminal: true },
+  }));
+  h.db.prepare(`
+    UPDATE manager_message_queue
+    SET lease_expires_at = 0
+    WHERE id = ?
+  `).run(original.message.id);
+  h.db.exec(`
+    CREATE TRIGGER reject_stale_queue_terminal_settlement
+    BEFORE UPDATE ON manager_message_queue
+    WHEN OLD.status = 'processing' AND NEW.status = 'delivered'
+    BEGIN
+      SELECT RAISE(ABORT, 'simulated stale terminal settlement failure');
+    END
+  `);
+
+  const restarted = createManagerMessageQueueService({
+    db: h.db,
+    eventBus: h.eventBus,
+    tickMs: 100000,
+  });
+  restarted.setDispatcher(dispatcher);
+  t.after(() => restarted.stop());
+
+  assert.throws(
+    () => restarted.reconcileStaleClaims(),
+    /simulated stale terminal settlement failure/,
+  );
+  await restarted.drainConversation('top');
+  assert.equal(dispatches, 1, 'the durable terminal turn must not be dispatched twice');
+  assert.equal(restarted.getMessage(original.message.id).status, 'processing');
+});
+
 test('same-invocation non-terminal failures cannot exhaust persisted terminal reconciliation', async (t) => {
   const h = createHarness(t, { withRunService: true });
   const run = h.runService.createRun({
@@ -654,6 +716,63 @@ test('same-invocation non-terminal failures cannot exhaust persisted terminal re
   );
   assert.equal(next.status, 'sent');
   assert.deepEqual(dispatched, ['oinv_target', 'oinv_after_exhaustion']);
+});
+
+test('SQLite-rejected fallback preserves first-terminal-event-wins across bounded pages', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_rejected_first_terminal',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  h.service.setDispatcher(() => ({
+    status: 'sent',
+    target: { kind: 'pm', runId: run.id },
+  }));
+
+  const first = await h.service.enqueue(
+    'operator:oi_rejected_first_terminal',
+    { text: 'oldest terminal must win', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_rejected_first_terminal',
+      adapterInvocationId: 'oinv_rejected_first_terminal',
+      requireImmediate: true,
+    },
+  );
+  const opening = '['.repeat(1000);
+  const closing = ']'.repeat(1000);
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  for (let index = 0; index < 8; index += 1) {
+    insertEvent.run(
+      run.id,
+      'mgr.turn_failed',
+      `{"extra":${opening}0${closing},`
+        + '"data":{"invocationId":"oinv_rejected_first_terminal","terminal":false}}',
+    );
+  }
+  insertEvent.run(
+    run.id,
+    'mgr.turn_completed',
+    `{"extra":${opening}0${closing},`
+      + '"data":{"invocationId":"oinv_rejected_first_terminal","terminal":true}}',
+  );
+  insertEvent.run(run.id, 'mgr.turn_failed', JSON.stringify({
+    summaryText: 'later failure',
+    data: { invocationId: 'oinv_rejected_first_terminal', terminal: true },
+  }));
+
+  assert.equal(h.service.reconcilePersistedTerminalEvents(), 0);
+  assert.equal(h.service.getMessage(first.message.id).status, 'processing');
+  assert.equal(h.service.reconcilePersistedTerminalEvents(), 1);
+  const delivered = h.service.getMessage(first.message.id);
+  assert.equal(delivered.status, 'delivered');
+  assert.equal(delivered.terminal_reason, 'turn_completed');
+  assert.equal(delivered.last_error, null);
 });
 
 test('JSON.parse-valid deeply nested completion closes the current owner lane', async (t) => {

@@ -32,6 +32,7 @@ const DEFAULT_IMMEDIATE_DISPATCH_TIMEOUT_MS = 9 * 60 * 1000;
 const MAX_PAYLOAD_BYTES = 12 * 1024 * 1024;
 const MAX_TERMINAL_RETRIES = 3;
 const ACTIVE_STATUSES = Object.freeze(['queued', 'sending', 'processing']);
+const PERSISTED_TERMINAL_SCAN_PENDING = Symbol('persisted-terminal-scan-pending');
 
 function createHttpError(message, httpStatus, code, retryable = false) {
   const err = new Error(message);
@@ -56,6 +57,7 @@ function createManagerMessageQueueService({
   const ownerId = randomUUID();
   const log = logger || ((message) => console.warn(`[manager-message-queue] ${message}`));
   const drains = new Map();
+  const sqliteRejectedTerminalCursors = new Map();
   let dispatcher = null;
   let timer = null;
   let unsubscribe = null;
@@ -269,7 +271,7 @@ function createManagerMessageQueueService({
       WHERE claimed_by = ? AND status IN ('sending', 'processing')
     `),
     ownActiveClaims: db.prepare(`
-      SELECT run_id, adapter_invocation_id
+      SELECT id, run_id, adapter_invocation_id
       FROM manager_message_queue
       WHERE claimed_by = ?
         AND status IN ('sending', 'processing')
@@ -324,10 +326,9 @@ function createManagerMessageQueueService({
     `),
     // SQLite's JSON parser rejects otherwise valid JSON beyond its nesting
     // limit. The correlation literal drops ordinary unrelated history before
-    // the authoritative parse; the remaining fallback uses the same shared
-    // eight-candidate budget as the SQL-valid scan so one anomalous run cannot
-    // monopolize a synchronous queue tick. A SQL terminal id is an exclusive
-    // upper bound, preserving first-event-wins ordering across both scans.
+    // the authoritative parse. The cursor advances the bounded fallback across
+    // ticks, while the SQL terminal id remains an exclusive upper bound so a
+    // later SQL-valid event cannot overtake an earlier rejected completion.
     sqliteRejectedTerminalEvents: db.prepare(`
       SELECT id, event_type, payload_json
       FROM run_events
@@ -335,6 +336,7 @@ function createManagerMessageQueueService({
         AND event_type IN ('mgr.turn_completed', 'mgr.turn_failed')
         AND json_valid(payload_json) = 0
         AND instr(payload_json, ?) > 0
+        AND (? IS NULL OR id > ?)
         AND (? IS NULL OR id < ?)
       ORDER BY id ASC
       LIMIT ?
@@ -816,6 +818,7 @@ function createManagerMessageQueueService({
       runId,
     );
     if (result.changes !== 1) return null;
+    sqliteRejectedTerminalCursors.delete(id);
     const row = stmts.getById.get(id);
     emitRow(row);
     // A very fast adapter can emit the terminal event while the accepting
@@ -863,6 +866,7 @@ function createManagerMessageQueueService({
     // Current-owner and stale-claim reconciliation both enter through here, so
     // neither recovery path can drift from the shared live-parser contract.
     if (!row?.run_id) return null;
+    let terminal;
     try {
       const candidates = stmts.terminalEventCandidates.all(
         row.run_id,
@@ -874,28 +878,56 @@ function createManagerMessageQueueService({
         candidates,
         row.adapter_invocation_id,
       );
-      const terminal = findPersistedTerminalEvent(
-        stmts.sqliteRejectedTerminalEvents.iterate(
-          row.run_id,
-          JSON.stringify(row.adapter_invocation_id),
-          sqlTerminal?.id ?? null,
-          sqlTerminal?.id ?? null,
-          MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
-        ),
-        row.adapter_invocation_id,
-      ) || sqlTerminal;
-      if (!terminal) return null;
-      return completeFromEvent(
-        row.adapter_invocation_id,
+      const cursor = sqliteRejectedTerminalCursors.get(row.id) ?? null;
+      const sqliteRejectedCandidates = stmts.sqliteRejectedTerminalEvents.all(
         row.run_id,
-        terminal.event_type === 'mgr.turn_completed',
-        terminal.event_type === 'mgr.turn_failed'
-          ? (terminal.payload?.summaryText || 'manager turn failed')
-          : null,
+        JSON.stringify(row.adapter_invocation_id),
+        cursor,
+        cursor,
+        sqlTerminal?.id ?? null,
+        sqlTerminal?.id ?? null,
+        MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
       );
+      const sqliteRejectedTerminal = findPersistedTerminalEvent(
+        sqliteRejectedCandidates,
+        row.adapter_invocation_id,
+      );
+      if (sqliteRejectedTerminal) {
+        sqliteRejectedTerminalCursors.delete(row.id);
+        terminal = sqliteRejectedTerminal;
+      } else if (
+        sqliteRejectedCandidates.length >= MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES
+      ) {
+        sqliteRejectedTerminalCursors.set(
+          row.id,
+          sqliteRejectedCandidates[sqliteRejectedCandidates.length - 1].id,
+        );
+        return PERSISTED_TERMINAL_SCAN_PENDING;
+      } else {
+        if (sqliteRejectedCandidates.length > 0) {
+          sqliteRejectedTerminalCursors.set(
+            row.id,
+            sqliteRejectedCandidates[sqliteRejectedCandidates.length - 1].id,
+          );
+        }
+        terminal = sqlTerminal;
+        if (terminal) sqliteRejectedTerminalCursors.delete(row.id);
+      }
     } catch {
       return null;
     }
+    if (!terminal) return null;
+    // Lookup failures are ignorable, but a matched event whose durable state
+    // transition fails must escape. In particular, stale recovery must not
+    // reinterpret a failed settlement as missing evidence and replay the turn.
+    return completeFromEvent(
+      row.adapter_invocation_id,
+      row.run_id,
+      terminal.event_type === 'mgr.turn_completed',
+      terminal.event_type === 'mgr.turn_failed'
+        ? (terminal.payload?.summaryText || 'manager turn failed')
+        : null,
+    );
   }
 
   function reconcilePersistedTerminalEvents() {
@@ -903,7 +935,14 @@ function createManagerMessageQueueService({
     for (const row of stmts.ownActiveClaims.all(ownerId)) {
       // A lease proves only that this process is alive; it cannot prove that
       // the lossy live callback reflected the durable run outcome.
-      if (completeFromPersistedTerminalEvent(row)) reconciled += 1;
+      try {
+        const result = completeFromPersistedTerminalEvent(row);
+        if (result && result !== PERSISTED_TERMINAL_SCAN_PENDING) reconciled += 1;
+      } catch (err) {
+        // Current-owner polling is best-effort and retries the settlement on a
+        // later tick. The stale path deliberately does not catch this error.
+        log(`persisted terminal settlement failed for ${row.id}: ${err.message}`);
+      }
     }
     return reconciled;
   }

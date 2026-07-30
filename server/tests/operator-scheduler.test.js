@@ -19,6 +19,9 @@ const {
   nextFireForRule,
 } = require('../services/operatorScheduleService');
 const { createOperatorScheduler } = require('../services/operatorScheduler');
+const {
+  MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
+} = require('../services/terminalEventReconciliation');
 
 function harness(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-operator-scheduler-'));
@@ -517,7 +520,7 @@ test('scheduled reconciliation does not parse unrelated terminal history', (t) =
   assert.equal(reconciled[0].status, 'completed');
 });
 
-test('SQLite-rejected scheduler fallback parsing has the shared candidate bound', (t) => {
+test('SQLite-rejected scheduler fallback paginates after the shared candidate bound', (t) => {
   const h = harness(t);
   const { instance } = createMappedOperator(h);
   const schedule = h.scheduleService.createSchedule(instance.id, {
@@ -533,7 +536,7 @@ test('SQLite-rejected scheduler fallback parsing has the shared candidate bound'
   const opening = '['.repeat(1000);
   const closing = ']'.repeat(1000);
   let samplePayload;
-  for (let index = 0; index < 12; index += 1) {
+  for (let index = 0; index < MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES; index += 1) {
     const payload = `{"extra":${opening}0${closing},`
       + `"correlationHint":"${claimed.id}",`
       + `"data":{"invocationId":"oinv_history_${index}","terminal":true}}`;
@@ -560,7 +563,6 @@ test('SQLite-rejected scheduler fallback parsing has the shared candidate bound'
     assert.equal(historicalPayloadParses, 8);
     assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
 
-    h.db.prepare('DELETE FROM run_events WHERE run_id = ?').run(managerRun.id);
     const targetPayload = `{"extra":${opening}0${closing},`
       + `"data":{"invocationId":"${claimed.id}","terminal":true}}`;
     insertEvent.run(managerRun.id, targetPayload);
@@ -577,6 +579,49 @@ test('SQLite-rejected scheduler fallback parsing has the shared candidate bound'
     'pending',
     'the SQLite-rejected target must still release the OS-4 slot',
   );
+});
+
+test('scheduled SQLite-rejected fallback preserves first-terminal-event-wins across pages', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Rejected first terminal',
+    prompt: 'Check',
+    rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  const opening = '['.repeat(1000);
+  const closing = ']'.repeat(1000);
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  for (let index = 0; index < MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES; index += 1) {
+    insertEvent.run(
+      managerRun.id,
+      'mgr.turn_failed',
+      `{"extra":${opening}0${closing},`
+        + `"data":{"invocationId":"${claimed.id}","terminal":false}}`,
+    );
+  }
+  insertEvent.run(
+    managerRun.id,
+    'mgr.turn_completed',
+    `{"extra":${opening}0${closing},`
+      + `"data":{"invocationId":"${claimed.id}","terminal":true}}`,
+  );
+  insertEvent.run(managerRun.id, 'mgr.turn_failed', JSON.stringify({
+    summaryText: 'later failure',
+    data: { invocationId: claimed.id, terminal: true },
+  }));
+
+  assert.deepEqual(h.scheduleService.reconcilePersistedTerminalEvents(), []);
+  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
+  const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].status, 'completed');
+  assert.equal(reconciled[0].last_error, null);
+  assert.equal(h.scheduleService.getSchedule(schedule.id).consecutive_failures, 0);
 });
 
 test('same-invocation non-terminal failures cannot exhaust scheduled terminal reconciliation', (t) => {
