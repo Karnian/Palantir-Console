@@ -551,6 +551,35 @@ test('same-invocation non-terminal failures cannot exhaust scheduled terminal re
   );
 });
 
+test('JSON.parse-valid deeply nested completion releases the scheduled OS-4 slot', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Deep terminal payload',
+    prompt: 'Check',
+    rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  const payload = `{"extra":${'['.repeat(1000)}0${']'.repeat(1000)},`
+    + `"data":{"invocationId":"${claimed.id}","terminal":true}}`;
+  assert.equal(JSON.parse(payload).data.terminal, true);
+  assert.equal(h.db.prepare('SELECT json_valid(?) AS valid').get(payload).valid, 0);
+  h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, 'mgr.turn_completed', ?)
+  `).run(managerRun.id, payload);
+
+  const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].status, 'completed');
+  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'completed');
+  assert.equal(
+    h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+    'pending',
+    'the persisted completion must release the OS-4 slot',
+  );
+});
+
 test('a persisted numeric terminal flag cannot complete a running invocation', (t) => {
   const h = harness(t);
   const { instance } = createMappedOperator(h);

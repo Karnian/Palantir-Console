@@ -475,7 +475,7 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     // the nested scans remain authoritative because merge patch may combine
     // repeated objects. Oldest-first ordering preserves the live CAS contract.
     persistedTerminalEvents: db.prepare(`
-      SELECT event_type, payload_json
+      SELECT id, event_type, payload_json
       FROM run_events
       WHERE run_id=?
         AND event_type IN ('mgr.turn_completed','mgr.turn_failed')
@@ -515,6 +515,19 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
         )
       ORDER BY id ASC
       LIMIT ?
+    `),
+    // SQLite's JSON parser rejects otherwise valid JSON beyond its nesting
+    // limit. Stream only those rejected rows through the authoritative
+    // JavaScript parser, stopping before an already-found earlier terminal
+    // event when possible.
+    sqliteRejectedTerminalEvents: db.prepare(`
+      SELECT id, event_type, payload_json
+      FROM run_events
+      WHERE run_id=?
+        AND event_type IN ('mgr.turn_completed','mgr.turn_failed')
+        AND json_valid(payload_json)=0
+        AND (? IS NULL OR id < ?)
+      ORDER BY id ASC
     `),
     resetFailures: db.prepare(`
       UPDATE operator_schedules SET consecutive_failures=0, updated_at=datetime('now') WHERE id=?
@@ -1096,7 +1109,15 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
         row.invocation_id,
         MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
       );
-      const terminal = findPersistedTerminalEvent(candidates, row.invocation_id);
+      const sqlTerminal = findPersistedTerminalEvent(candidates, row.invocation_id);
+      const terminal = findPersistedTerminalEvent(
+        stmts.sqliteRejectedTerminalEvents.iterate(
+          row.manager_run_id,
+          sqlTerminal?.id ?? null,
+          sqlTerminal?.id ?? null,
+        ),
+        row.invocation_id,
+      ) || sqlTerminal;
       if (!terminal) continue;
       const success = terminal.event_type === 'mgr.turn_completed';
       const invocation = completeInvocation(

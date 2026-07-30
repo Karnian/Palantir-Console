@@ -269,7 +269,7 @@ function createManagerMessageQueueService({
       WHERE claimed_by = ? AND status IN ('sending', 'processing')
     `),
     ownActiveClaims: db.prepare(`
-      SELECT *
+      SELECT run_id, adapter_invocation_id
       FROM manager_message_queue
       WHERE claimed_by = ?
         AND status IN ('sending', 'processing')
@@ -281,7 +281,7 @@ function createManagerMessageQueueService({
     // the nested scans remain authoritative because merge patch may combine
     // repeated objects. Oldest-first ordering preserves the live CAS contract.
     terminalEventCandidates: db.prepare(`
-      SELECT event_type, payload_json
+      SELECT id, event_type, payload_json
       FROM run_events
       WHERE run_id = ?
         AND event_type IN ('mgr.turn_completed', 'mgr.turn_failed')
@@ -321,6 +321,19 @@ function createManagerMessageQueueService({
         )
       ORDER BY id ASC
       LIMIT ?
+    `),
+    // SQLite's JSON parser rejects otherwise valid JSON beyond its nesting
+    // limit. Stream only those rejected rows through the authoritative
+    // JavaScript parser, stopping before an already-found earlier terminal
+    // event when possible.
+    sqliteRejectedTerminalEvents: db.prepare(`
+      SELECT id, event_type, payload_json
+      FROM run_events
+      WHERE run_id = ?
+        AND event_type IN ('mgr.turn_completed', 'mgr.turn_failed')
+        AND json_valid(payload_json) = 0
+        AND (? IS NULL OR id < ?)
+      ORDER BY id ASC
     `),
     failRunActive: db.prepare(`
       UPDATE manager_message_queue
@@ -853,10 +866,18 @@ function createManagerMessageQueueService({
         row.adapter_invocation_id,
         MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
       );
-      const terminal = findPersistedTerminalEvent(
+      const sqlTerminal = findPersistedTerminalEvent(
         candidates,
         row.adapter_invocation_id,
       );
+      const terminal = findPersistedTerminalEvent(
+        stmts.sqliteRejectedTerminalEvents.iterate(
+          row.run_id,
+          sqlTerminal?.id ?? null,
+          sqlTerminal?.id ?? null,
+        ),
+        row.adapter_invocation_id,
+      ) || sqlTerminal;
       if (!terminal) return null;
       return completeFromEvent(
         row.adapter_invocation_id,

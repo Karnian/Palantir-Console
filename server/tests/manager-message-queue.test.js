@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const express = require('express');
 const request = require('supertest');
 
@@ -333,6 +334,44 @@ test('a long run does not parse unrelated terminal history during a queue tick',
   );
 });
 
+test('current-owner reconciliation stays within a 128 MB heap with 90 large payloads', () => {
+  const fixture = path.join(
+    __dirname,
+    'fixtures',
+    'manager-queue-reconcile-memory.js',
+  );
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-queue-memory-parent-'));
+  try {
+    const child = spawnSync(
+      process.execPath,
+      ['--max-old-space-size=128', fixture],
+      {
+        encoding: 'utf8',
+        timeout: 60_000,
+        env: {
+          ...process.env,
+          PALANTIR_SKIP_HOST_CREDENTIALS: '1',
+          PALANTIR_SKIP_DOTENV: '1',
+          PALANTIR_QUEUE_MEMORY_DIR: fixtureDir,
+        },
+      },
+    );
+
+    assert.equal(
+      child.status,
+      0,
+      [
+        `signal=${child.signal || 'none'} error=${child.error?.message || 'none'}`,
+        child.stdout,
+        child.stderr,
+      ].join('\n'),
+    );
+    assert.match(child.stdout, /reconciled=0 rows=90 payload_bytes=1843232/);
+  } finally {
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
+
 test('a non-coercible failure summary settles from persistence after the live callback throws', async (t) => {
   const baseEventBus = createEventBus();
   let droppedCallbacks = 0;
@@ -562,6 +601,62 @@ test('same-invocation non-terminal failures cannot exhaust persisted terminal re
   );
   assert.equal(next.status, 'sent');
   assert.deepEqual(dispatched, ['oinv_target', 'oinv_after_exhaustion']);
+});
+
+test('JSON.parse-valid deeply nested completion closes the current owner lane', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_deep_terminal',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+
+  const first = await h.service.enqueue(
+    'operator:oi_deep_terminal',
+    { text: 'deeply nested completion', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_deep_terminal',
+      adapterInvocationId: 'oinv_deep_terminal',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  const payload = `{"extra":${'['.repeat(1000)}0${']'.repeat(1000)},`
+    + '"data":{"invocationId":"oinv_deep_terminal","terminal":true}}';
+  assert.equal(JSON.parse(payload).data.terminal, true);
+  assert.equal(h.db.prepare('SELECT json_valid(?) AS valid').get(payload).valid, 0);
+  h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, 'mgr.turn_completed', ?)
+  `).run(run.id, payload);
+
+  assert.equal(h.service.reconcilePersistedTerminalEvents(), 1);
+  assert.equal(h.service.getMessage(first.message.id).status, 'delivered');
+  await h.service.awaitDrain();
+
+  const next = await h.service.enqueue(
+    'operator:oi_deep_terminal',
+    { text: 'next scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_after_deep_terminal',
+      adapterInvocationId: 'oinv_after_deep_terminal',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.equal(next.message.status, 'processing');
+  assert.deepEqual(dispatched, [
+    'oinv_deep_terminal',
+    'oinv_after_deep_terminal',
+  ]);
 });
 
 test('a persisted numeric terminal flag cannot close the current owner lane', async (t) => {
