@@ -87,6 +87,7 @@ const {
   resolveAppActorTokenPolicy,
   createWorkerProposalTokenService,
   createManagerCapabilityTokenService,
+  normalizeWorkerApiBase,
 } = require('./services/actorTokenPolicy');
 const { createOperatorSpecialistRouter } = require('./routes/operatorSpecialist');
 const { createOperatorProfilesRouter } = require('./routes/operatorProfiles');
@@ -1262,9 +1263,16 @@ function createApp(options = {}) {
   const modelPolicyService = createModelPolicyService(db);
 
   // Execution engines
-  const executionEngine = options.executionEngine || createExecutionEngine({
+  const sharedExecutionEngine = options.executionEngine || createExecutionEngine({
     actorTokens: actorTokenPolicy,
   });
+  // createApp owns capability issuance, while the concrete engine revalidates
+  // the capability immediately before spawn. Bind the resolved policy to an
+  // app-local facade so two apps may share process ownership without either
+  // app mutating the other's spawn policy.
+  const executionEngine = typeof sharedExecutionEngine.withActorTokenPolicy === 'function'
+    ? sharedExecutionEngine.withActorTokenPolicy(actorTokenPolicy)
+    : sharedExecutionEngine;
   const streamJsonEngine = createStreamJsonEngine({
     runService,
     eventBus,
@@ -2167,7 +2175,7 @@ function resolveWorkerProposalEndpoints({
   port = 4177,
 } = {}) {
   if (typeof explicitBaseUrl === 'string' && explicitBaseUrl.trim()) {
-    const normalized = explicitBaseUrl.trim().replace(/\/+$/, '');
+    const normalized = normalizeWorkerApiBase(explicitBaseUrl);
     return { local: normalized, remote: normalized };
   }
   const bindHost = typeof host === 'string' && host.trim()

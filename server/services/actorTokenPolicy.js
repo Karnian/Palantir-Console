@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const net = require('node:net');
 const path = require('node:path');
 const { resolveAgentVendor } = require('../utils/agentVendor');
 const dotenv = require('dotenv');
@@ -291,6 +292,10 @@ function isActorCredentialKey(key) {
     || normalized === 'PALANTIR_MANAGER_TOKEN';
 }
 
+function isWorkerApiBaseKey(key) {
+  return typeof key === 'string' && key.toUpperCase() === 'PALANTIR_API_BASE';
+}
+
 function stripActorCredentials(env) {
   for (const key of Object.keys(env)) {
     if (isActorCredentialKey(key)) delete env[key];
@@ -456,21 +461,101 @@ function applyManagerCredentialPolicy(explicitEnv = {}, {
   return env;
 }
 
+function normalizeScopedIpv6ApiBase(apiBase) {
+  const match = apiBase.match(
+    /^([a-zA-Z][a-zA-Z\d+.-]*:)\/\/\[([^\]]+)\](?::([^/?#]*))?([/?#].*)?$/,
+  );
+  if (!match) return null;
+
+  // WHATWG URL deliberately does not implement RFC 6874 zone identifiers,
+  // while curl (the worker-side consumer) does. Validate the IPv6 address and
+  // zone independently, then let URL validate/canonicalize every other URL
+  // component using the same authority with the zone temporarily removed.
+  const scopedHost = match[2].match(
+    /^([0-9a-f:.]+)%25((?:[a-z0-9._~-]|%[0-9a-f]{2})+)$/i,
+  );
+  if (!scopedHost || !net.isIPv6(scopedHost[1])) return null;
+
+  const port = match[3] === undefined ? '' : `:${match[3]}`;
+  const suffix = match[4] || '';
+  let parsed;
+  try {
+    parsed = new URL(`${match[1]}//[${scopedHost[1]}]${port}${suffix}`);
+  } catch {
+    return null;
+  }
+
+  const canonicalAddress = parsed.hostname.replace(/^\[|\]$/g, '');
+  const canonicalAuthority = `[${canonicalAddress}%25${scopedHost[2]}]`
+    + (parsed.port ? `:${parsed.port}` : '');
+  return `${parsed.protocol}//${canonicalAuthority}${parsed.pathname}${parsed.search}${parsed.hash}`
+    .replace(/\/+$/, '');
+}
+
+function normalizeWorkerApiBase(apiBase) {
+  if (apiBase === undefined || apiBase === null || apiBase === '') return null;
+  if (typeof apiBase !== 'string' || /[\r\n\x00]/.test(apiBase)) {
+    const err = new Error('PALANTIR_API_BASE must be a non-empty single-line URL');
+    err.code = 'WORKER_API_BASE_INVALID';
+    throw err;
+  }
+  const normalized = apiBase.trim().replace(/\/+$/, '');
+  // Reject userinfo from the original authority before WHATWG parsing. Curl,
+  // which ultimately consumes this value, treats backslashes differently from
+  // URL: `http://user\:pass@host` has credentials to curl but not to URL.
+  // Returning or handing off any raw authority containing `@` would therefore
+  // make the parser-only check below an unsafe disagreement between consumers.
+  const rawAuthority = normalized.match(/^[a-zA-Z][a-zA-Z\d+.-]*:\/\/([^/?#]*)/);
+  if (rawAuthority && rawAuthority[1].includes('@')) {
+    const err = new Error('PALANTIR_API_BASE must not contain URL userinfo');
+    err.code = 'WORKER_API_BASE_USERINFO';
+    throw err;
+  }
+  let parsed;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    const scopedIpv6Base = normalizeScopedIpv6ApiBase(normalized);
+    if (scopedIpv6Base !== null) return scopedIpv6Base;
+    const err = new Error('PALANTIR_API_BASE must be a valid URL');
+    err.code = 'WORKER_API_BASE_INVALID';
+    throw err;
+  }
+  if (parsed.username || parsed.password) {
+    const err = new Error('PALANTIR_API_BASE must not contain URL userinfo');
+    err.code = 'WORKER_API_BASE_USERINFO';
+    throw err;
+  }
+  // Hand off the serialization that was actually validated. Preserve the
+  // existing no-trailing-slash API-base contract after canonicalization.
+  return parsed.href.replace(/\/+$/, '');
+}
+
 function applyWorkerCredentialPolicy(explicitEnv = {}, {
   workerToken = null,
   apiBase = null,
   actorTokens = null,
 } = {}) {
   const merged = stripActorCredentials({ ...(explicitEnv || {}) });
-  if (typeof workerToken === 'string' && workerToken) {
+  // Drop profile-provided values first; only the server-selected apiBase may
+  // reintroduce this address.
+  for (const key of Object.keys(merged)) {
+    if (isWorkerApiBaseKey(key)) delete merged[key];
+  }
+  const hasWorkerToken = typeof workerToken === 'string' && !!workerToken;
+  if (hasWorkerToken) {
     if (!actorTokenPolicyFrom(actorTokens).capabilitiesEnabled) {
       throw new Error('worker capability requires verified agent process isolation');
     }
     merged.PALANTIR_WORKER_TOKEN = workerToken;
   }
-  if (typeof apiBase === 'string' && apiBase) {
-    merged.PALANTIR_API_BASE = apiBase.replace(/\/+$/, '');
-  }
+  // Enforced HERE, not left to callers. The endpoint is only useful with a
+  // capability to present at it, and this function's name says it is where the
+  // worker credential policy lives — a caller that trusts it without adding its
+  // own gate would otherwise ship the address alone. The existing callers do
+  // gate, so this changes nothing today; it means a future one cannot forget.
+  const normalizedApiBase = hasWorkerToken ? normalizeWorkerApiBase(apiBase) : null;
+  if (normalizedApiBase) merged.PALANTIR_API_BASE = normalizedApiBase;
   return merged;
 }
 
@@ -645,6 +730,7 @@ module.exports = {
   buildActorTokenAppOptions,
   resolveAppActorTokenPolicy,
   isActorCredentialKey,
+  isWorkerApiBaseKey,
   PROCESS_BASE_ENV_KEYS,
   WORKER_BASE_ENV_KEYS,
   NETWORK_ENV_KEYS,
@@ -653,6 +739,7 @@ module.exports = {
   buildWorkerProcessEnv,
   augmentProcessPath,
   applyManagerCredentialPolicy,
+  normalizeWorkerApiBase,
   applyWorkerCredentialPolicy,
   createWorkerProposalTokenService,
   createManagerCapabilityTokenService,

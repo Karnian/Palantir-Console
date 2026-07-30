@@ -7,6 +7,8 @@ const {
   WORKER_BASE_ENV_KEYS,
   MANAGER_BASE_ENV_KEYS,
   isActorCredentialKey,
+  isWorkerApiBaseKey,
+  normalizeWorkerApiBase,
 } = require('./actorTokenPolicy');
 const { execEnvKeys, projectTestEnvKeys } = require('./execEnvPolicy');
 
@@ -227,10 +229,16 @@ function normalizeEnvKeyList(keys, { allowPath = false } = {}) {
     if (typeof key !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
       throw envKeyInvalidError(key);
     }
-    // Ambient actor credentials are never preservable through an allowlist.
-    // The one permitted run-bound capability is reintroduced explicitly by
-    // variable reference after env -i.
-    if ((!allowPath && key === 'PATH') || isActorCredentialKey(key) || seen.has(key)) continue;
+    // PATH is preservable only when public exec opts into its shared policy.
+    // Ambient actor credentials and their paired API endpoint are never
+    // preservable through an allowlist. Run-bound values are reintroduced
+    // explicitly after env -i, from stdin or a mode-0600 file.
+    if (
+      (!allowPath && key === 'PATH')
+      || isWorkerApiBaseKey(key)
+      || isActorCredentialKey(key)
+      || seen.has(key)
+    ) continue;
     seen.add(key);
     normalized.push(key);
   }
@@ -326,6 +334,7 @@ function buildCommandScript(command, args = [], {
   cleanEnvPathFromKeys = false,
   cleanEnvAllowExplicitPath = false,
   runBoundTokenKey = null,
+  runBoundApiBase = false,
 } = {}) {
   const explicitEnv = cleanEnv && !cleanEnvAllowExplicitPath
     // The pod owns PATH. A controller PATH must never override it; pathPrefix
@@ -349,18 +358,25 @@ function buildCommandScript(command, args = [], {
     // Public exec instead collects PATH through its shared policy.
     if (!cleanEnvPathFromKeys) cleanParts.push(pathAssign || 'PATH="$PATH"');
     cleanParts.push(...envParts);
-    if (runBoundTokenKey) {
-      normalizeEnvKeyList([runBoundTokenKey]);
-      // The capability is read from stdin INSIDE the clean shell, never passed
-      // as an argument. `env -i ... KEY="$KEY"` would expand the value before
-      // exec, so the real /usr/bin/env argv — world-readable through
-      // /proc/<pid>/cmdline — would carry the token for the life of that exec.
-      // Reading it here keeps the pre-existing contract: the value exists only
-      // in the SSH stdin stream and the child's own environment.
+    const stdinEnvKeys = [
+      ...(runBoundTokenKey ? [runBoundTokenKey] : []),
+      ...(runBoundApiBase ? ['PALANTIR_API_BASE'] : []),
+    ];
+    if (stdinEnvKeys.length > 0) {
+      normalizeEnvKeyList(stdinEnvKeys);
+      // Run-bound values are read from stdin INSIDE the clean shell, never
+      // passed as arguments. `env -i ... KEY="$KEY"` would expand a value
+      // before exec, so the real /usr/bin/env argv — world-readable through
+      // /proc/<pid>/cmdline — would carry it for the life of that exec. Reading
+      // here keeps those values in the SSH stdin stream and child environment.
+      const stdinBootstrap = stdinEnvKeys.flatMap((key) => [
+        `IFS= read -r ${key} || exit 126`,
+        `export ${key}`,
+      ]);
       cleanParts.push(
         SH_BIN,
         '-c',
-        shq(`IFS= read -r ${runBoundTokenKey} || exit 126; export ${runBoundTokenKey}; exec "$@"`),
+        shq([...stdinBootstrap, 'exec "$@"'].join('; ')),
         shq('sh'),
       );
     }
@@ -941,10 +957,18 @@ function createRemoteSshNodeExecutor(node, {
       explicitEnv[runBoundTokenKey],
       runBoundTokenKey,
     );
+    const workerApiBase = worker && runBoundToken
+      ? normalizeWorkerApiBase(explicitEnv.PALANTIR_API_BASE)
+      : null;
     delete explicitEnv.PALANTIR_TOKEN;
     delete explicitEnv.PALANTIR_PM_TOKEN;
     delete explicitEnv.PALANTIR_WORKER_TOKEN;
     delete explicitEnv.PALANTIR_MANAGER_TOKEN;
+    if (worker) {
+      for (const key of Object.keys(explicitEnv)) {
+        if (isWorkerApiBaseKey(key)) delete explicitEnv[key];
+      }
+    }
     const processEnvKeys = [
       ...(worker ? REMOTE_WORKER_BASE_ENV_KEYS : remoteManagerBaseEnvKeys(commandName)),
       ...normalizeEnvKeyList(envAllowlist),
@@ -967,11 +991,11 @@ function createRemoteSshNodeExecutor(node, {
       cleanEnv: true,
       cleanEnvKeys: processEnvKeys,
       runBoundTokenKey: runBoundToken ? runBoundTokenKey : null,
+      runBoundApiBase: !!workerApiBase,
     });
-    // The capability read moved INSIDE the clean shell (buildCommandScript):
-    // reading it out here would require re-injecting the value as an env -i
-    // argument, which puts it in the real /usr/bin/env argv. The stdin
-    // transport is unchanged — only the reader moved.
+    // The run-bound reads happen INSIDE the clean shell (buildCommandScript):
+    // reading values out here would require re-injecting them as env -i
+    // arguments, which puts them in the real /usr/bin/env argv.
     const bootstrapScript = script;
     const child = spawnFn(
       'ssh',
@@ -990,7 +1014,9 @@ function createRemoteSshNodeExecutor(node, {
         child.stdin.on('error', () => { /* child close/error is authoritative */ });
       }
       try {
-        child.stdin.write(`${runBoundToken}\n`);
+        child.stdin.write(
+          `${runBoundToken}\n${workerApiBase ? `${workerApiBase}\n` : ''}`,
+        );
       } catch (err) {
         try { child.kill?.('SIGTERM'); } catch { /* best-effort */ }
         throw err;
@@ -1414,6 +1440,7 @@ function createRemoteSshNodeExecutor(node, {
       stdinFile: path.posix.join(statusDir, 'stdin.txt'),
       systemPromptFile: path.posix.join(statusDir, 'system-prompt.txt'),
       workerTokenFile: path.posix.join(statusDir, 'worker-capability'),
+      workerApiBaseFile: path.posix.join(statusDir, 'worker-api-base'),
       uploadBundle: path.posix.join(statusDir, 'worker-input.bundle'),
     };
   }
@@ -1426,6 +1453,7 @@ function createRemoteSshNodeExecutor(node, {
     envAllowlist,
   }, {
     workerTokenFile = null,
+    workerApiBaseFile = null,
   } = {}) {
     // env -i is the primary ambient-credential boundary. Empty actor
     // assignments remain as defense in depth; the server-selected run
@@ -1440,6 +1468,9 @@ function createRemoteSshNodeExecutor(node, {
     delete workerEnv.PALANTIR_PM_TOKEN;
     delete workerEnv.PALANTIR_WORKER_TOKEN;
     delete workerEnv.PALANTIR_MANAGER_TOKEN;
+    for (const key of Object.keys(workerEnv)) {
+      if (isWorkerApiBaseKey(key)) delete workerEnv[key];
+    }
     const envParts = normalizeEnv({
       PALANTIR_TOKEN: null,
       PALANTIR_PM_TOKEN: null,
@@ -1478,6 +1509,15 @@ function createRemoteSshNodeExecutor(node, {
           `rm -f -- ${shq(workerTokenFile)}`,
           '[ "$worker_token_rc" -eq 0 ] || exit 78',
           'export PALANTIR_WORKER_TOKEN',
+          ...(workerApiBaseFile
+            ? [
+                `PALANTIR_API_BASE=$(cat -- ${shq(workerApiBaseFile)})`,
+                'worker_api_base_rc=$?',
+                `rm -f -- ${shq(workerApiBaseFile)}`,
+                '[ "$worker_api_base_rc" -eq 0 ] || exit 78',
+                'export PALANTIR_API_BASE',
+              ]
+            : []),
           'exec "$@"',
         ].join('; ')),
         shq('sh'),
@@ -1574,7 +1614,11 @@ function createRemoteSshNodeExecutor(node, {
       spec.env && spec.env.PALANTIR_WORKER_TOKEN,
       'PALANTIR_WORKER_TOKEN',
     );
+    const workerApiBase = workerToken
+      ? normalizeWorkerApiBase(spec.env && spec.env.PALANTIR_API_BASE)
+      : null;
     let workerTokenFile = null;
+    let workerApiBaseFile = null;
     try {
       if (workerToken) {
         // Keep the scoped capability in the deterministic run status directory.
@@ -1589,6 +1633,16 @@ function createRemoteSshNodeExecutor(node, {
         workerTokenFile = path.posix.join(
           tokenParent.canonical,
           path.posix.basename(paths.workerTokenFile),
+        );
+      }
+      if (workerApiBase) {
+        const apiBaseParent = await assertWithinRoots(
+          paths.workerApiBaseFile,
+          { parentOnly: true },
+        );
+        workerApiBaseFile = path.posix.join(
+          apiBaseParent.canonical,
+          path.posix.basename(paths.workerApiBaseFile),
         );
       }
       let canonicalStdin = null;
@@ -1618,7 +1672,7 @@ function createRemoteSshNodeExecutor(node, {
         );
       }
       let canonicalUploadBundle = null;
-      if (workerTokenFile || canonicalSystemPrompt || canonicalStdin) {
+      if (workerTokenFile || workerApiBaseFile || canonicalSystemPrompt || canonicalStdin) {
         const bundleParent = await assertWithinRoots(
           paths.uploadBundle,
           { parentOnly: true },
@@ -1639,11 +1693,15 @@ function createRemoteSshNodeExecutor(node, {
             ],
           }
         : spec;
-      const workerInvocation = buildWorkerInvocation(effectiveSpec, { workerTokenFile });
+      const workerInvocation = buildWorkerInvocation(effectiveSpec, {
+        workerTokenFile,
+        workerApiBaseFile,
+      });
       const materializedFiles = [
         canonicalStdin,
         canonicalSystemPrompt,
         workerTokenFile,
+        workerApiBaseFile,
         canonicalUploadBundle,
       ].filter(Boolean);
       const stdinRedirect = canonicalStdin ? ` < ${shq(canonicalStdin)}` : '';
@@ -1672,6 +1730,9 @@ function createRemoteSshNodeExecutor(node, {
       const uploads = [
         workerTokenFile
           ? { path: workerTokenFile, content: workerToken }
+          : null,
+        workerApiBaseFile
+          ? { path: workerApiBaseFile, content: workerApiBase }
           : null,
         canonicalSystemPrompt
           ? { path: canonicalSystemPrompt, content: spec.systemPrompt }
@@ -1783,8 +1844,9 @@ function createRemoteSshNodeExecutor(node, {
       }
       return { sessionName: paths.sessionName };
     } catch (err) {
-      if (workerTokenFile && !err.preserveRemoteFiles) {
-        try { await runRemoteCommand('rm', ['-f', workerTokenFile]); } catch {}
+      const capabilityFiles = [workerTokenFile, workerApiBaseFile].filter(Boolean);
+      if (capabilityFiles.length > 0 && !err.preserveRemoteFiles) {
+        try { await runRemoteCommand('rm', ['-f', ...capabilityFiles]); } catch {}
       }
       throw err;
     }
@@ -1866,6 +1928,7 @@ function createRemoteSshNodeExecutor(node, {
         paths.stdinFile,
         paths.systemPromptFile,
         paths.workerTokenFile,
+        paths.workerApiBaseFile,
         paths.uploadBundle,
         paths.structuredResultTmp,
       ]);

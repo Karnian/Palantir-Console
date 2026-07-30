@@ -20,6 +20,17 @@ function uniqueRunId(label) {
   return `${label}-${process.pid}-${runSequence}`;
 }
 
+function isolatedActorPolicy() {
+  return {
+    humanToken: 'human-secret',
+    agentToken: 'automation-secret',
+    separated: true,
+    processIsolated: true,
+    capabilitiesEnabled: true,
+    boundary: 'run_capabilities',
+  };
+}
+
 function artifactPaths(runId) {
   const name = `palantir-run-${runId}`.replace(/[^a-zA-Z0-9_-]/g, '_');
   const scriptDir = path.join(os.tmpdir(), 'palantir-scripts');
@@ -68,6 +79,12 @@ function runBash(scriptPath) {
       else resolve(stdout);
     });
   });
+}
+
+function startupArtifactPath(script, basename) {
+  const matches = script.match(new RegExp(`[^\\s'\\\\;]+/${basename}`, 'g')) || [];
+  assert.ok(matches.length > 0, `missing ${basename} startup artifact path`);
+  return matches[0];
 }
 
 test('pre-DB startup cleanup preserves run-owned prompts and removes capabilities only', (t) => {
@@ -198,7 +215,10 @@ test('spawnAgent clears stale tmux actor credentials and file-backs the current 
   });
 
   const tmux = makeTmuxCommand();
-  createTmuxEngine({ execFileSync: tmux.execFileSync }).spawnAgent(runId, {
+  createTmuxEngine({
+    execFileSync: tmux.execFileSync,
+    actorTokens: isolatedActorPolicy(),
+  }).spawnAgent(runId, {
     command: process.execPath,
     args: ['--version'],
     cwd: os.tmpdir(),
@@ -212,21 +232,143 @@ test('spawnAgent clears stale tmux actor credentials and file-backs the current 
   const script = fs.readFileSync(paths.scriptPath, 'utf-8');
   const unsetIndex = script.indexOf('unset PALANTIR_TOKEN PALANTIR_PM_TOKEN PALANTIR_WORKER_TOKEN PALANTIR_MANAGER_TOKEN');
   const cleanEnvIndex = script.indexOf('env -i ');
-  const workerTokenIndex = script.indexOf('PALANTIR_WORKER_TOKEN="$__palantir_worker_token"');
-  const tokenPathMatch = script.match(/__palantir_worker_token="\$\(cat -- '([^']+)'\)"/);
+  const workerTokenIndex = script.indexOf('PALANTIR_WORKER_TOKEN=$(cat --');
+  const tokenPath = startupArtifactPath(script, 'token');
   assert.notEqual(unsetIndex, -1);
   assert.notEqual(cleanEnvIndex, -1);
   assert.notEqual(workerTokenIndex, -1);
-  assert.ok(tokenPathMatch);
   assert.ok(unsetIndex < cleanEnvIndex);
   assert.ok(cleanEnvIndex < workerTokenIndex);
   assert.doesNotMatch(script, /'PALANTIR_TOKEN=/);
   assert.doesNotMatch(script, /'PALANTIR_PM_TOKEN=/);
   assert.doesNotMatch(script, /current-run-token/);
-  assert.equal(fs.readFileSync(tokenPathMatch[1], 'utf-8'), 'current-run-token');
+  assert.equal(fs.readFileSync(tokenPath, 'utf-8'), 'current-run-token');
 
   await runBash(paths.scriptPath);
-  assert.equal(fs.existsSync(tokenPathMatch[1]), false);
+  assert.equal(fs.existsSync(tokenPath), false);
+});
+
+test('spawnAgent keeps run-bound values out of the actual env argv and drops an unpaired API base', async (t) => {
+  // `env -i KEY=value ...` puts every assignment into the env process's own
+  // argv, which /proc exposes to other users on this host until it execs.
+  // Capture the executable's received arguments after shell expansion; checking
+  // the pre-expansion bootstrap text would be vacuous.
+  const workerToken = 'current-run-token';
+  const apiBase = 'https://argv-zero.example:8443/proxy-prefix';
+  const withToken = uniqueRunId('api-base-filed');
+  const withoutToken = uniqueRunId('api-base-unpaired');
+  const paths = artifactPaths(withToken);
+  const bare = artifactPaths(withoutToken);
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-env-argv-'));
+  const argvCapturePath = path.join(sandbox, 'argv.bin');
+  const envShimPath = path.join(sandbox, 'env');
+  const originalPath = process.env.PATH;
+  const originalCapturePath = process.env.PALANTIR_TEST_ENV_ARGV_CAPTURE;
+  fs.writeFileSync(envShimPath, [
+    '#!/bin/sh',
+    ': > "$PALANTIR_TEST_ENV_ARGV_CAPTURE"',
+    'for arg do',
+    '  printf \'%s\\0\' "$arg" >> "$PALANTIR_TEST_ENV_ARGV_CAPTURE"',
+    'done',
+    'exec /usr/bin/env "$@"',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  process.env.PATH = `${sandbox}:${originalPath || ''}`;
+  process.env.PALANTIR_TEST_ENV_ARGV_CAPTURE = argvCapturePath;
+  t.after(() => {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalCapturePath === undefined) delete process.env.PALANTIR_TEST_ENV_ARGV_CAPTURE;
+    else process.env.PALANTIR_TEST_ENV_ARGV_CAPTURE = originalCapturePath;
+    for (const filePath of [...Object.values(paths), ...Object.values(bare)]) {
+      try { fs.unlinkSync(filePath); } catch {}
+    }
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  });
+
+  const tmux = makeTmuxCommand();
+  const engine = createTmuxEngine({
+    execFileSync: tmux.execFileSync,
+    actorTokens: isolatedActorPolicy(),
+  });
+  engine.spawnAgent(withToken, {
+    command: process.execPath,
+    args: [
+      '-e',
+      'console.log(JSON.stringify({ token: process.env.PALANTIR_WORKER_TOKEN, apiBase: process.env.PALANTIR_API_BASE }))',
+    ],
+    cwd: os.tmpdir(),
+    env: { PALANTIR_WORKER_TOKEN: workerToken, PALANTIR_API_BASE: apiBase },
+  });
+
+  const script = fs.readFileSync(paths.scriptPath, 'utf-8');
+  const argvLine = script.split('\n').find((line) => line.startsWith('env -i '));
+  assert.ok(argvLine);
+  assert.equal(argvLine.includes(apiBase), false);
+  assert.equal(argvLine.includes(workerToken), false);
+  const apiBasePath = startupArtifactPath(script, 'api-base');
+  assert.equal(fs.readFileSync(apiBasePath, 'utf-8'), apiBase);
+
+  const output = await runBash(paths.scriptPath);
+  const childEnv = JSON.parse(output.split('\n').find((line) => line.startsWith('{')));
+  assert.deepEqual(childEnv, { token: workerToken, apiBase });
+  const actualEnvArgv = fs.readFileSync(argvCapturePath)
+    .toString()
+    .split('\0')
+    .filter(Boolean);
+  assert.equal(actualEnvArgv.some((arg) => arg.includes(workerToken)), false, actualEnvArgv);
+  assert.equal(actualEnvArgv.some((arg) => arg.includes(apiBase)), false, actualEnvArgv);
+  assert.ok(actualEnvArgv.includes('/bin/sh'), actualEnvArgv);
+  assert.equal(
+    fs.existsSync(apiBasePath),
+    false,
+    'the clean bootstrap shell must unlink it before the worker exec',
+  );
+
+  // The endpoint is only useful with a capability to present at it.
+  engine.spawnAgent(withoutToken, {
+    command: process.execPath,
+    args: ['--version'],
+    cwd: os.tmpdir(),
+    env: { PALANTIR_API_BASE: apiBase },
+  });
+  const bareScript = fs.readFileSync(bare.scriptPath, 'utf-8');
+  assert.equal(bareScript.includes(apiBase), false);
+  assert.equal(bareScript.includes('PALANTIR_API_BASE'), false);
+});
+
+test('tmux worker rejects API base URL userinfo before persisting startup artifacts', (t) => {
+  const runId = uniqueRunId('tmux-userinfo-api-base');
+  const paths = artifactPaths(runId);
+  const tmux = makeTmuxCommand();
+  const engine = createTmuxEngine({
+    execFileSync: tmux.execFileSync,
+    actorTokens: isolatedActorPolicy(),
+  });
+  t.after(() => {
+    engine.kill(runId);
+    for (const filePath of Object.values(paths)) {
+      try { fs.unlinkSync(filePath); } catch {}
+    }
+  });
+
+  assert.throws(
+    () => engine.spawnAgent(runId, {
+      command: process.execPath,
+      args: ['--version'],
+      cwd: os.tmpdir(),
+      env: {
+        PALANTIR_WORKER_TOKEN: 'scoped-token',
+        PALANTIR_API_BASE: 'http://tmux-user:tmux-password@console.internal:4177',
+      },
+    }),
+    (err) => (
+      err.code === 'WORKER_API_BASE_USERINFO'
+      && !/tmux-user|tmux-password/.test(err.message)
+    ),
+  );
+  assert.equal(tmux.calls.length, 0);
+  assert.equal(fs.existsSync(paths.scriptPath), false);
 });
 
 test('spawnAgent runs tmux workers without ambient server credentials', async (t) => {
@@ -406,6 +548,7 @@ test('tmux worker leaves no prompt or capability artifact when token persistence
   const tmux = makeTmuxCommand();
   const engine = createTmuxEngine({
     execFileSync: tmux.execFileSync,
+    actorTokens: isolatedActorPolicy(),
     writeFileSync(filePath, data, options) {
       if (path.basename(filePath) === 'token' && filePath.includes('.worker-token-')) {
         failedTokenPath = filePath;
@@ -457,6 +600,84 @@ test('subprocess worker writes the initial prompt to stdin and keeps it out of a
   const payload = JSON.parse(output.split('\n').find((line) => line.startsWith('{')));
   assert.deepEqual(payload.args, ['exec', '-']);
   assert.equal(payload.stdin, prompt);
+});
+
+function createIsolatedSubprocessEngine() {
+  return createSubprocessEngine({ actorTokens: isolatedActorPolicy() });
+}
+
+function spawnRealCommand(engine, runId, spec) {
+  const previous = process.env.PALANTIR_ALLOW_REAL_SPAWN;
+  process.env.PALANTIR_ALLOW_REAL_SPAWN = '1';
+  try {
+    return engine.spawnAgent(runId, spec);
+  } finally {
+    if (previous === undefined) delete process.env.PALANTIR_ALLOW_REAL_SPAWN;
+    else process.env.PALANTIR_ALLOW_REAL_SPAWN = previous;
+  }
+}
+
+async function waitForSubprocessExit(engine, runId) {
+  const deadline = Date.now() + 2000;
+  while (engine.detectExitCode(runId) === null && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(engine.detectExitCode(runId), 0);
+}
+
+test('subprocess worker preserves a valid token-coupled API base', async () => {
+  const engine = createIsolatedSubprocessEngine();
+  const apiBase = 'https://console.example:8443/proxy-prefix';
+  const pairedRunId = uniqueRunId('subprocess-paired-api-base');
+
+  spawnRealCommand(engine, pairedRunId, {
+    command: '/usr/bin/env',
+    args: [],
+    cwd: os.tmpdir(),
+    env: {
+      PALANTIR_WORKER_TOKEN: 'scoped-token',
+      PALANTIR_API_BASE: apiBase,
+    },
+  });
+  await waitForSubprocessExit(engine, pairedRunId);
+  const pairedOutput = engine.getOutput(pairedRunId, 200);
+  assert.ok(pairedOutput.split('\n').includes('PALANTIR_WORKER_TOKEN=scoped-token'));
+  assert.ok(pairedOutput.split('\n').includes(`PALANTIR_API_BASE=${apiBase}`));
+});
+
+test('subprocess worker drops an API base without a worker capability', async () => {
+  const engine = createIsolatedSubprocessEngine();
+  const apiBase = 'https://console.example:8443/proxy-prefix';
+  const unpairedRunId = uniqueRunId('subprocess-unpaired-api-base');
+
+  spawnRealCommand(engine, unpairedRunId, {
+    command: '/usr/bin/env',
+    args: [],
+    cwd: os.tmpdir(),
+    env: { PALANTIR_API_BASE: apiBase },
+  });
+  await waitForSubprocessExit(engine, unpairedRunId);
+  const unpairedOutput = engine.getOutput(unpairedRunId, 200);
+  assert.equal(unpairedOutput.includes('PALANTIR_API_BASE='), false, unpairedOutput);
+});
+
+test('subprocess worker rejects API base URL userinfo before spawn', () => {
+  const engine = createIsolatedSubprocessEngine();
+  assert.throws(
+    () => spawnRealCommand(engine, uniqueRunId('subprocess-userinfo-api-base'), {
+      command: '/usr/bin/env',
+      args: [],
+      cwd: os.tmpdir(),
+      env: {
+        PALANTIR_WORKER_TOKEN: 'scoped-token',
+        PALANTIR_API_BASE: 'http://local-user:local-password@console:4177',
+      },
+    }),
+    (err) => (
+      err.code === 'WORKER_API_BASE_USERINFO'
+      && !/local-user|local-password/.test(err.message)
+    ),
+  );
 });
 
 test('kill cleans script and sentinel artifacts even when the tmux session is already gone', (t) => {

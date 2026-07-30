@@ -947,6 +947,7 @@ test('spawnInteractive bootstraps a manager capability through stdin, never SSH 
 
 test('spawnInteractive bootstraps a worker capability through stdin with worker env policy', async () => {
   const workerToken = 'worker_run_capability_secret';
+  const apiBase = 'https://argv-zero.example:8443/proxy-prefix';
   const spawn = rootGuardSpawn({
     "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
   });
@@ -959,7 +960,7 @@ test('spawnInteractive bootstraps a worker capability through stdin with worker 
     env: {
       PALANTIR_WORKER_TOKEN: workerToken,
       PALANTIR_MANAGER_TOKEN: 'must-be-scrubbed',
-      PALANTIR_API_BASE: 'https://console.example',
+      PALANTIR_API_BASE: apiBase,
     },
   });
   child.stdin.write('worker follow-up');
@@ -968,17 +969,141 @@ test('spawnInteractive bootstraps a worker capability through stdin with worker 
   const script = scriptOf(call);
   assert.match(
     script,
-    /\/bin\/sh -c 'IFS= read -r PALANTIR_WORKER_TOKEN \|\| exit 126; export PALANTIR_WORKER_TOKEN; exec "\$@"'/,
+    /\/bin\/sh -c 'IFS= read -r PALANTIR_WORKER_TOKEN \|\| exit 126; export PALANTIR_WORKER_TOKEN; IFS= read -r PALANTIR_API_BASE \|\| exit 126; export PALANTIR_API_BASE; exec "\$@"'/,
   );
   assert.doesNotMatch(script, /PALANTIR_WORKER_TOKEN="\$PALANTIR_WORKER_TOKEN"/);
   assert.match(script, /PALANTIR_MANAGER_TOKEN=''/);
   assert.doesNotMatch(script, /must-be-scrubbed/);
-  assert.match(script, /PALANTIR_API_BASE='https:\/\/console\.example'/);
+  assert.doesNotMatch(script, new RegExp(apiBase));
   assert.match(script, /POD_ONLY_WORKER_KEY/);
-  assert.equal(call.stdin, `${workerToken}\nworker follow-up`);
+  assert.equal(call.stdin, `${workerToken}\n${apiBase}\nworker follow-up`);
   for (const entry of spawn.calls) {
     assert.doesNotMatch(JSON.stringify(entry.args), new RegExp(workerToken));
+    assert.doesNotMatch(JSON.stringify(entry.args), new RegExp(apiBase));
   }
+});
+
+test('spawnInteractive worker ignores allowlisted ambient API base and keeps run-bound values out of env argv', async (t) => {
+  const workerToken = 'worker_run_capability_secret';
+  const apiBase = 'https://argv-zero.example:8443/proxy-prefix';
+  const ambientApiBase = 'http://pod-user:pod-password@ambient-console:4177';
+  const sandbox = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-interactive-argv-'));
+  const argvCapturePath = path.join(sandbox, 'argv.bin');
+  const envShimPath = path.join(sandbox, 'env');
+  const claudeShimPath = path.join(sandbox, 'claude');
+  t.after(async () => fs.rm(sandbox, { recursive: true, force: true }));
+  await fs.writeFile(envShimPath, [
+    '#!/bin/sh',
+    ': > "$PALANTIR_TEST_ENV_ARGV_CAPTURE"',
+    'for arg do',
+    '  printf \'%s\\0\' "$arg" >> "$PALANTIR_TEST_ENV_ARGV_CAPTURE"',
+    'done',
+    'exec /usr/bin/env "$@"',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  await fs.writeFile(claudeShimPath, [
+    '#!/bin/sh',
+    'cat >/dev/null',
+    'printf \'%s\\n%s\\n\' "$PALANTIR_WORKER_TOKEN" "$PALANTIR_API_BASE"',
+    '',
+  ].join('\n'), { mode: 0o700 });
+
+  const spawn = loopbackSshSpawn({
+    env: {
+      PATH: `${sandbox}:${process.env.PATH || ''}`,
+      PALANTIR_TEST_ENV_ARGV_CAPTURE: argvCapturePath,
+      PALANTIR_API_BASE: ambientApiBase,
+    },
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+  const child = await exec.spawnInteractive('claude', ['--print'], {
+    worker: true,
+    envAllowlist: ['PALANTIR_API_BASE'],
+    env: {
+      PALANTIR_WORKER_TOKEN: workerToken,
+      PALANTIR_API_BASE: apiBase,
+    },
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+  child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+  const closed = new Promise((resolve) => child.once('close', (...args) => resolve(args)));
+  child.stdin.end('worker prompt');
+  const [code] = await closed;
+
+  assert.equal(code, 0, stderr);
+  assert.equal(stdout, `${workerToken}\n${apiBase}\n`);
+  const actualEnvArgv = (await fs.readFile(argvCapturePath))
+    .toString()
+    .split('\0')
+    .filter(Boolean);
+  assert.ok(actualEnvArgv.includes('/bin/sh'), actualEnvArgv);
+  assert.equal(actualEnvArgv.some((arg) => arg.includes(workerToken)), false, actualEnvArgv);
+  assert.equal(actualEnvArgv.some((arg) => arg.includes(apiBase)), false, actualEnvArgv);
+  assert.equal(actualEnvArgv.some((arg) => arg.includes(ambientApiBase)), false, actualEnvArgv);
+  const sshCall = spawn.calls.at(-1);
+  assert.equal(JSON.stringify(sshCall.args).includes(workerToken), false);
+  assert.equal(JSON.stringify(sshCall.args).includes(apiBase), false);
+  assert.equal(JSON.stringify(sshCall.args).includes(ambientApiBase), false);
+
+  const bareChild = await exec.spawnInteractive('claude', ['--print'], {
+    worker: true,
+    envAllowlist: ['PALANTIR_API_BASE'],
+    env: {},
+  });
+  let bareStdout = '';
+  let bareStderr = '';
+  bareChild.stdout.on('data', (chunk) => { bareStdout += chunk.toString(); });
+  bareChild.stderr.on('data', (chunk) => { bareStderr += chunk.toString(); });
+  const bareClosed = new Promise((resolve) => bareChild.once('close', (...args) => resolve(args)));
+  bareChild.stdin.end('worker prompt without capability');
+  const [bareCode] = await bareClosed;
+
+  assert.equal(bareCode, 0, bareStderr);
+  assert.equal(bareStdout, '\n\n');
+  const bareEnvArgv = (await fs.readFile(argvCapturePath))
+    .toString()
+    .split('\0')
+    .filter(Boolean);
+  assert.equal(bareEnvArgv.some((arg) => arg.includes(ambientApiBase)), false, bareEnvArgv);
+});
+
+test('spawnInteractive worker rejects API base URL userinfo before spawning ssh', async () => {
+  const spawn = makeSpawn(() => {});
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+  await assert.rejects(
+    () => exec.spawnInteractive('claude', ['--print'], {
+      worker: true,
+      env: {
+        PALANTIR_WORKER_TOKEN: 'token',
+        PALANTIR_API_BASE: 'http://user:pass@console:4177',
+      },
+    }),
+    (err) => (
+      err.code === 'WORKER_API_BASE_USERINFO'
+      && /userinfo/.test(err.message)
+      && !/user|pass/.test(err.message.replace('userinfo', ''))
+    ),
+  );
+  assert.equal(spawn.calls.length, 0);
+});
+
+test('spawnInteractive worker removes a case-variant API base from explicit env and allowlist', async () => {
+  const apiBase = 'http://case-user:case-password@console.internal:4177';
+  const spawn = rootGuardSpawn();
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await exec.spawnInteractive('claude', ['--print'], {
+    worker: true,
+    envAllowlist: ['palantir_api_base'],
+    env: { palantir_api_base: apiBase },
+  });
+
+  assert.equal(spawn.calls.length, 1);
+  const callText = JSON.stringify(spawn.calls[0].args);
+  assert.equal(callText.includes(apiBase), false);
+  assert.doesNotMatch(callText, /palantir_api_base/i);
 });
 
 test('spawnInteractive rejects a manager capability that cannot be line-framed', async () => {
@@ -1253,9 +1378,11 @@ test('spawnWorker builds file-backed tmux script through the internal runner', a
 test('spawnWorker file-backs a scoped capability and keeps it out of SSH command strings', async () => {
   const runId = 'run_secret_transport';
   const workerToken = 'worker_run_capability_secret';
+  const apiBase = 'https://argv-zero.example:8443/console-prefix';
   const statusDir = `/srv/root/.palantir-runs/${runId}`;
   const bundlePath = `/real/root/.palantir-runs/${runId}/worker-input.bundle`;
   const secretPath = `/real/root/.palantir-runs/${runId}/worker-capability`;
+  const apiBasePath = `/real/root/.palantir-runs/${runId}/worker-api-base`;
   const routes = {
     "exec 'realpath' '/srv/root'": { stdout: '/real/root\n' },
     "exec 'realpath' '/srv/root/project'": { stdout: '/real/root/project\n' },
@@ -1284,6 +1411,7 @@ test('spawnWorker file-backs a scoped capability and keeps it out of SSH command
     cwd: '/srv/root/project',
     env: {
       PALANTIR_WORKER_TOKEN: workerToken,
+      PALANTIR_API_BASE: apiBase,
       PALANTIR_MANAGER_TOKEN: 'must-be-scrubbed',
       LC_ALL: 'C',
     },
@@ -1291,12 +1419,18 @@ test('spawnWorker file-backs a scoped capability and keeps it out of SSH command
 
   assert.deepEqual(result, { sessionName: `palantir-run-${runId}` });
   const writeCall = spawn.calls.find((call) => scriptOf(call).startsWith('umask 077'));
-  assert.equal(writeCall.stdin, workerToken);
+  assert.equal(writeCall.stdin, workerToken + apiBase);
   const handoffScript = scriptOf(writeCall);
   const inner = tmuxInnerScript(handoffScript, runId);
-  assert.ok(handoffScript.includes(`head -c ${Buffer.byteLength(workerToken)} > ${shq(bundlePath)}`));
+  assert.ok(handoffScript.includes(
+    `head -c ${Buffer.byteLength(workerToken + apiBase)} > ${shq(bundlePath)}`,
+  ));
   assert.ok(inner.includes(
     `head -c ${Buffer.byteLength(workerToken)} ${shq(bundlePath)} > ${shq(secretPath)}`,
+  ));
+  assert.ok(inner.includes(
+    `tail -c +${Buffer.byteLength(workerToken) + 1} ${shq(bundlePath)} `
+    + `| head -c ${Buffer.byteLength(apiBase)} > ${shq(apiBasePath)}`,
   ));
   assert.ok(handoffScript.includes('tmux new-session'));
   // Read inside the clean shell (`cat --` guards a leading-dash path); the
@@ -1305,7 +1439,11 @@ test('spawnWorker file-backs a scoped capability and keeps it out of SSH command
   // one extra level inside this tmux script. Assert quoting-agnostically.
   assert.ok(inner.includes('PALANTIR_WORKER_TOKEN=$(cat -- '));
   assert.ok(inner.includes(secretPath), 'the token file path must be referenced');
+  assert.ok(inner.includes('PALANTIR_API_BASE=$(cat -- '));
+  assert.ok(inner.includes(apiBasePath), 'the API base file path must be referenced');
+  assert.ok(inner.includes('export PALANTIR_API_BASE'));
   assert.doesNotMatch(inner, /PALANTIR_WORKER_TOKEN="\$PALANTIR_WORKER_TOKEN"/);
+  assert.equal(inner.includes(apiBase), false);
   assert.ok(inner.includes('rm -f -- '));
   assert.doesNotMatch(inner, /PALANTIR_WORKER_TOKEN=''/);
   assert.doesNotMatch(inner, /must-be-scrubbed/);
@@ -1316,6 +1454,170 @@ test('spawnWorker file-backs a scoped capability and keeps it out of SSH command
   );
   for (const entry of spawn.calls) {
     assert.doesNotMatch(JSON.stringify(entry.args), new RegExp(workerToken));
+    assert.equal(JSON.stringify(entry.args).includes(apiBase), false);
+  }
+  assert.equal(
+    spawn.calls.reduce((count, call) => count + call.stdin.split(apiBase).length - 1, 0),
+    1,
+    'the API base value appears exactly once, in upload stdin',
+  );
+});
+
+test('spawnWorker exports the file-backed API base inside the pod clean shell', async (t) => {
+  const root = await mkLoopbackRoot(t);
+  const projectDir = path.join(root, 'project');
+  const fakeBin = await mkLoopbackRoot(t);
+  const fakeTmux = path.join(fakeBin, 'tmux');
+  const portableChmod = path.join(fakeBin, 'chmod');
+  const runId = 'api_base_export';
+  const workerToken = 'loopback-worker-capability';
+  const apiBase = 'https://console.example:8443/proxy-prefix';
+  await fs.mkdir(projectDir);
+  await fs.writeFile(
+    fakeTmux,
+    '#!/bin/sh\nexec /bin/sh -c "$5"\n',
+    { mode: 0o700 },
+  );
+  await fs.writeFile(
+    portableChmod,
+    '#!/bin/sh\nmode=$1\nshift\n[ "$1" = "--" ] && shift\nexec /bin/chmod "$mode" "$@"\n',
+    { mode: 0o700 },
+  );
+  const spawn = loopbackSshSpawn({
+    env: { PATH: `${fakeBin}:${process.env.PATH}` },
+  });
+  const executor = createRemoteSshNodeExecutor(nodeRow({
+    exposed_roots: JSON.stringify([root]),
+  }), { spawnFn: spawn });
+
+  await executor.spawnWorker(runId, {
+    command: '/usr/bin/env',
+    cwd: projectDir,
+    workerPath: '/usr/bin:/bin',
+    env: {
+      PALANTIR_WORKER_TOKEN: workerToken,
+      PALANTIR_API_BASE: apiBase,
+    },
+  });
+
+  const statusDir = path.join(root, '.palantir-runs', runId);
+  const output = await fs.readFile(path.join(statusDir, 'stdout.log'), 'utf8');
+  assert.ok(output.split('\n').includes(`PALANTIR_WORKER_TOKEN=${workerToken}`));
+  assert.ok(output.split('\n').includes(`PALANTIR_API_BASE=${apiBase}`));
+  await assert.rejects(
+    () => fs.stat(path.join(statusDir, 'worker-capability')),
+    (err) => err.code === 'ENOENT',
+  );
+  await assert.rejects(
+    () => fs.stat(path.join(statusDir, 'worker-api-base')),
+    (err) => err.code === 'ENOENT',
+  );
+  for (const call of spawn.calls) {
+    assert.equal(JSON.stringify(call.args).includes(apiBase), false);
+  }
+});
+
+test('spawnWorker ignores allowlisted ambient API base without a worker capability', async (t) => {
+  const root = await mkLoopbackRoot(t);
+  const projectDir = path.join(root, 'project');
+  const fakeBin = await mkLoopbackRoot(t);
+  const fakeTmux = path.join(fakeBin, 'tmux');
+  const envShim = path.join(fakeBin, 'env');
+  const argvCapturePath = path.join(fakeBin, 'env-argv.bin');
+  const ambientApiBase = 'http://pod-user:pod-password@ambient-console:4177';
+  const runId = 'ambient_api_base_denied';
+  await fs.mkdir(projectDir);
+  await fs.writeFile(
+    fakeTmux,
+    '#!/bin/sh\nexec /bin/sh -c "$5"\n',
+    { mode: 0o700 },
+  );
+  await fs.writeFile(envShim, [
+    '#!/bin/sh',
+    ': > "$PALANTIR_TEST_ENV_ARGV_CAPTURE"',
+    'for arg do',
+    '  printf \'%s\\0\' "$arg" >> "$PALANTIR_TEST_ENV_ARGV_CAPTURE"',
+    'done',
+    'exec /usr/bin/env "$@"',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  const spawn = loopbackSshSpawn({
+    env: {
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      PALANTIR_TEST_ENV_ARGV_CAPTURE: argvCapturePath,
+      PALANTIR_API_BASE: ambientApiBase,
+    },
+  });
+  const executor = createRemoteSshNodeExecutor(nodeRow({
+    exposed_roots: JSON.stringify([root]),
+  }), { spawnFn: spawn });
+
+  await executor.spawnWorker(runId, {
+    command: '/usr/bin/env',
+    cwd: projectDir,
+    workerPath: '/usr/bin:/bin',
+    envAllowlist: ['PALANTIR_API_BASE'],
+    env: {},
+  });
+
+  const statusDir = path.join(root, '.palantir-runs', runId);
+  const output = await fs.readFile(path.join(statusDir, 'stdout.log'), 'utf8');
+  assert.equal(output.includes('PALANTIR_API_BASE='), false, output);
+  const actualEnvArgv = (await fs.readFile(argvCapturePath))
+    .toString()
+    .split('\0')
+    .filter(Boolean);
+  assert.equal(actualEnvArgv.some((arg) => arg.includes(ambientApiBase)), false, actualEnvArgv);
+});
+
+test('spawnWorker removes a case-variant API base from SSH argv and the pod allowlist', async () => {
+  const runId = 'case_variant_api_base';
+  const apiBase = 'http://case-user:case-password@console.internal:4177';
+  const spawn = workerSpawnHarness(runId);
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await executor.spawnWorker(runId, {
+    command: 'codex',
+    args: ['exec'],
+    cwd: '/srv/root/project',
+    env: { palantir_api_base: apiBase },
+    envAllowlist: ['palantir_api_base'],
+  });
+
+  const tmuxCall = spawn.calls.find((call) => scriptOf(call).includes('tmux new-session'));
+  assert.ok(tmuxCall);
+  const callText = JSON.stringify(tmuxCall.args);
+  assert.equal(callText.includes(apiBase), false);
+  assert.doesNotMatch(callText, /palantir_api_base/i);
+});
+
+test('spawnWorker rejects an API base with URL userinfo before handoff', async () => {
+  const runId = 'api_base_userinfo';
+  const apiBase = 'http://worker-user:worker-password@console.internal:4177';
+  const spawn = workerSpawnHarness(runId);
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => executor.spawnWorker(runId, {
+      command: 'codex',
+      args: ['exec'],
+      cwd: '/srv/root/project',
+      env: {
+        PALANTIR_WORKER_TOKEN: 'scoped-worker-token',
+        PALANTIR_API_BASE: apiBase,
+      },
+    }),
+    (err) => (
+      err.code === 'WORKER_API_BASE_USERINFO'
+      && !/worker-user|worker-password/.test(err.message)
+    ),
+  );
+  assert.equal(
+    spawn.calls.some((call) => scriptOf(call).includes('tmux new-session')),
+    false,
+  );
+  for (const call of spawn.calls) {
+    assert.equal(JSON.stringify(call.args).includes(apiBase), false);
   }
 });
 
@@ -1981,6 +2283,7 @@ test('uncertain detached start keeps the capability in run status for later reap
     shq(`${statusDir}/stdin.txt`),
     shq(`${statusDir}/system-prompt.txt`),
     shq(`${statusDir}/worker-capability`),
+    shq(`${statusDir}/worker-api-base`),
     shq(`${statusDir}/worker-input.bundle`),
     shq(`${statusDir}/result.jsonl.tmp`),
   ].join(' ');
