@@ -1,11 +1,6 @@
 'use strict';
 
-// SQL admits only rows whose JSON1 terminal value is boolean true before this
-// bound is applied. Same-invocation non-terminal failures therefore consume no
-// slots and cannot exhaust the scan; eight candidates still bound JSON.parse
-// work while allowing JavaScript to reject a newer anomalous row and fall back
-// to an earlier terminal event.
-const MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES = 8;
+const MAX_TERMINAL_ERROR_LENGTH = 2000;
 
 function parseTerminalEventPayload(payloadJson) {
   try {
@@ -20,21 +15,40 @@ function isTerminalEventForInvocation(payload, invocationId) {
     && payload?.data?.terminal === true;
 }
 
-// Candidates are newest-first. JSON.parse is the live-parser authority, so a
-// SQL/JavaScript disagreement on an anomalous row rejects only that row and the
-// scan continues to any earlier durable terminal evidence.
+function normalizeTerminalError(error, fallback = 'manager turn failed') {
+  if (error == null) return null;
+  let normalized;
+  try {
+    normalized = String(error);
+  } catch {
+    try {
+      normalized = JSON.stringify(error);
+    } catch {
+      normalized = null;
+    }
+  }
+  if (typeof normalized !== 'string' || normalized.length === 0) {
+    normalized = fallback;
+  }
+  return normalized.slice(0, MAX_TERMINAL_ERROR_LENGTH);
+}
+
+// Candidates are newest-first. Keep the oldest valid match so persisted
+// reconciliation has the same first-terminal-event-wins semantics as the live
+// CAS path. JSON.parse remains the only payload authority.
 function findPersistedTerminalEvent(candidates, invocationId) {
+  let terminal = null;
   for (const candidate of candidates) {
     const payload = parseTerminalEventPayload(candidate.payload_json);
     if (!isTerminalEventForInvocation(payload, invocationId)) continue;
-    return { ...candidate, payload };
+    terminal = { ...candidate, payload };
   }
-  return null;
+  return terminal;
 }
 
 module.exports = {
-  MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
   parseTerminalEventPayload,
   isTerminalEventForInvocation,
+  normalizeTerminalError,
   findPersistedTerminalEvent,
 };

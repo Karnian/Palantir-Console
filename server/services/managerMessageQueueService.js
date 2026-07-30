@@ -2,9 +2,9 @@
 
 const { randomUUID } = require('node:crypto');
 const {
-  MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
   parseTerminalEventPayload,
   isTerminalEventForInvocation,
+  normalizeTerminalError,
   findPersistedTerminalEvent,
 } = require('./terminalEventReconciliation');
 
@@ -274,24 +274,15 @@ function createManagerMessageQueueService({
         AND status IN ('sending', 'processing')
       ORDER BY sequence
     `),
-    // Filter terminality before the bounded scan so same-invocation
-    // non-terminal failures consume no candidate slots. JavaScript then
-    // validates terminality newest-first and may fall back to an earlier row.
+    // Payload correlation stays in JavaScript so SQLite JSON1 cannot disagree
+    // with JSON.parse on duplicate keys. The unbounded scan is required because
+    // any finite newest-first window can hide the first durable terminal event.
     terminalEventCandidates: db.prepare(`
       SELECT event_type, payload_json
       FROM run_events
       WHERE run_id = ?
         AND event_type IN ('mgr.turn_completed', 'mgr.turn_failed')
-        AND json_extract(
-              CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
-              '$.data.invocationId'
-            ) = ?
-        AND json_type(
-              CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
-              '$.data.terminal'
-            ) = 'true'
       ORDER BY id DESC
-      LIMIT ?
     `),
     failRunActive: db.prepare(`
       UPDATE manager_message_queue
@@ -758,9 +749,7 @@ function createManagerMessageQueueService({
     const id = existing.id;
     const status = success ? 'delivered' : 'failed';
     const reason = success ? 'turn_completed' : 'turn_failed';
-    const normalizedError = errorMessage == null
-      ? null
-      : String(errorMessage).slice(0, 2000);
+    const normalizedError = normalizeTerminalError(errorMessage);
     const result = stmts.complete.run(
       status,
       normalizedError,
@@ -820,11 +809,7 @@ function createManagerMessageQueueService({
     // neither recovery path can drift from the shared live-parser contract.
     if (!row?.run_id) return null;
     try {
-      const candidates = stmts.terminalEventCandidates.all(
-        row.run_id,
-        row.adapter_invocation_id,
-        MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
-      );
+      const candidates = stmts.terminalEventCandidates.all(row.run_id);
       const terminal = findPersistedTerminalEvent(
         candidates,
         row.adapter_invocation_id,
