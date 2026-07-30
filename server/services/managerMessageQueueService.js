@@ -276,8 +276,10 @@ function createManagerMessageQueueService({
       ORDER BY sequence
     `),
     // Correlate before the bounded scan so unrelated and non-terminal events
-    // consume no JavaScript parsing budget. Oldest-first ordering preserves the
-    // live CAS path's first-terminal-event-wins contract.
+    // consume no JavaScript parsing budget. The path lookup cheaply prunes
+    // unrelated invocations; the nested scan then selects the last duplicate
+    // object member to match JSON.parse terminality before LIMIT is applied.
+    // Oldest-first ordering preserves the live CAS contract.
     terminalEventCandidates: db.prepare(`
       SELECT event_type, payload_json
       FROM run_events
@@ -287,10 +289,33 @@ function createManagerMessageQueueService({
               CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
               '$.data.invocationId'
             ) = ?
-        AND json_type(
-              CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
-              '$.data.terminal'
-            ) = 'true'
+        AND EXISTS (
+          SELECT 1
+          FROM (
+            SELECT value, type
+            FROM json_each(
+              CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END
+            )
+            WHERE key = 'data'
+            ORDER BY id DESC
+            LIMIT 1
+          ) AS parsed_data
+          WHERE parsed_data.type = 'object'
+            AND 1 = (
+              SELECT member.type = 'text' AND member.value = ?
+              FROM json_each(parsed_data.value) AS member
+              WHERE member.key = 'invocationId'
+              ORDER BY member.id DESC
+              LIMIT 1
+            )
+            AND 'true' = (
+              SELECT member.type
+              FROM json_each(parsed_data.value) AS member
+              WHERE member.key = 'terminal'
+              ORDER BY member.id DESC
+              LIMIT 1
+            )
+        )
       ORDER BY id ASC
       LIMIT ?
     `),
@@ -821,6 +846,7 @@ function createManagerMessageQueueService({
     try {
       const candidates = stmts.terminalEventCandidates.all(
         row.run_id,
+        row.adapter_invocation_id,
         row.adapter_invocation_id,
         MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
       );

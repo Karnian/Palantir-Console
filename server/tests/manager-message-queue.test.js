@@ -741,6 +741,69 @@ test('eight newer duplicate-terminal candidates cannot hide an earlier terminal 
   assert.deepEqual(dispatched, ['oinv_shadow', 'oinv_after_shadow']);
 });
 
+test('eight earlier duplicate-terminal candidates cannot hide a later terminal event', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_earlier_shadow',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+  h.service.start();
+
+  const first = await h.service.enqueue(
+    'operator:oi_earlier_shadow',
+    { text: 'first scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_earlier_shadow',
+      adapterInvocationId: 'oinv_earlier_shadow',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  for (let index = 0; index < 8; index += 1) {
+    insertEvent.run(
+      run.id,
+      'mgr.turn_failed',
+      '{"data":{"invocationId":"oinv_earlier_shadow","terminal":true,"terminal":false}}',
+    );
+  }
+  insertEvent.run(
+    run.id,
+    'mgr.turn_completed',
+    '{"data":{"invocationId":"oinv_earlier_shadow","terminal":true}}',
+  );
+
+  await h.service.tick();
+  assert.equal(h.db.prepare('SELECT status FROM runs WHERE id = ?').get(run.id).status, 'running');
+  assert.equal(h.service.getMessage(first.message.id).status, 'delivered');
+  await h.service.awaitDrain();
+
+  const next = await h.service.enqueue(
+    'operator:oi_earlier_shadow',
+    { text: 'second scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_after_earlier_shadow',
+      adapterInvocationId: 'oinv_after_earlier_shadow',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.equal(next.message.status, 'processing');
+  assert.deepEqual(dispatched, ['oinv_earlier_shadow', 'oinv_after_earlier_shadow']);
+});
+
 test('persisted reconciliation preserves first-terminal-event-wins ordering', async (t) => {
   const h = createHarness(t, { withRunService: true });
   const run = h.runService.createRun({
