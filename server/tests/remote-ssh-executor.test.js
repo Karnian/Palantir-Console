@@ -1050,6 +1050,69 @@ test('remote --bare Claude defers to settings apiKeyHelper when pod login auth i
   assert.equal(stdout, 'SETTINGS_AUTH_OK');
 });
 
+test('remote --bare Claude preserves allowlisted Bedrock auth through the clean child', async (t) => {
+  const root = await mkLoopbackRoot(t);
+  const home = path.join(root, 'home');
+  const bin = path.join(root, 'bin');
+  const fakeClaude = path.join(bin, 'claude');
+  const providerEnv = {
+    CLAUDE_CODE_USE_BEDROCK: '1',
+    AWS_REGION: 'us-east-1',
+    AWS_ACCESS_KEY_ID: 'remote-bedrock-access-key',
+    AWS_SECRET_ACCESS_KEY: 'remote-bedrock-secret-key',
+  };
+  await fs.mkdir(home, { recursive: true });
+  await fs.mkdir(bin, { recursive: true });
+  await fs.writeFile(
+    fakeClaude,
+    [
+      '#!/bin/sh',
+      '[ "$1" = "--bare" ] || exit 91',
+      '[ "$CLAUDE_CODE_USE_BEDROCK" = "1" ] || exit 92',
+      '[ "$AWS_REGION" = "us-east-1" ] || exit 93',
+      '[ "$AWS_ACCESS_KEY_ID" = "remote-bedrock-access-key" ] || exit 94',
+      '[ "$AWS_SECRET_ACCESS_KEY" = "remote-bedrock-secret-key" ] || exit 95',
+      '[ -z "${ANTHROPIC_API_KEY:-}" ] || exit 96',
+      'printf BEDROCK_AUTH_OK',
+    ].join('\n'),
+    { mode: 0o700 },
+  );
+
+  const spawn = loopbackSshSpawn({ env: { HOME: home, ...providerEnv } });
+  const executor = createRemoteSshNodeExecutor(nodeRow({
+    exposed_roots: JSON.stringify([root]),
+  }), { spawnFn: spawn });
+  const child = await executor.spawnInteractive('claude', ['--bare'], {
+    cwd: root,
+    pathPrefix: bin,
+    claudeBareAuth: true,
+    envAllowlist: Object.keys(providerEnv),
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+  child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+  const [code] = await new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (...args) => resolve(args));
+  });
+
+  assert.equal(code, 0, stderr);
+  assert.equal(stdout, 'BEDROCK_AUTH_OK');
+  for (const secret of [
+    providerEnv.AWS_ACCESS_KEY_ID,
+    providerEnv.AWS_SECRET_ACCESS_KEY,
+  ]) {
+    for (const call of spawn.calls) {
+      assert.doesNotMatch(
+        JSON.stringify(call.args),
+        new RegExp(secret),
+        'provider credentials must stay out of local SSH argv',
+      );
+    }
+  }
+});
+
 test('spawnInteractive rejects a manager capability that cannot be line-framed', async () => {
   const spawn = makeSpawn(() => {});
   const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });

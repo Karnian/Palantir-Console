@@ -292,6 +292,43 @@ test('claude --bare worker starts when explicit settings provides apiKeyHelper a
   assert.equal(args[args.indexOf('--settings') + 1], '/pod/settings.json');
 });
 
+test('claude --bare worker starts with allowlisted Bedrock provider credentials', async (t) => {
+  const providerEnv = {
+    CLAUDE_CODE_USE_BEDROCK: '1',
+    AWS_REGION: 'us-east-1',
+    AWS_ACCESS_KEY_ID: 'worker-bedrock-access-key',
+    AWS_SECRET_ACCESS_KEY: 'worker-bedrock-secret-key',
+  };
+  const previous = Object.fromEntries(
+    Object.keys(providerEnv).map((key) => [key, process.env[key]]),
+  );
+  Object.assign(process.env, providerEnv);
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const harness = await createHarness(t, { bareToken: null });
+  const profileId = insertProfile(harness.db, {
+    command: 'claude',
+    argsTemplate: '-p {prompt} --bare',
+    envAllowlist: Object.keys(providerEnv),
+  });
+
+  await executeWorker(harness, profileId, 'Claude Bedrock bare auth');
+
+  assert.equal(harness.streamJsonEngine.spawned.length, 1);
+  const { opts, args } = harness.streamJsonEngine.spawned[0];
+  assert.equal(opts.bare, true);
+  assert.equal(args.filter((arg) => arg === '--bare').length, 1);
+  for (const [key, value] of Object.entries(providerEnv)) {
+    assert.equal(opts.env[key], value, key);
+  }
+  assert.equal(opts.env.ANTHROPIC_API_KEY, undefined);
+});
+
 test('saved Claude disallowedTools template reaches the stream-json worker spec', async (t) => {
   const harness = await createHarness(t);
   const profile = harness.agentProfileService.createProfile({

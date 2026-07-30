@@ -431,6 +431,58 @@ test('resolveClaudeAuth accepts explicit --settings as a --bare apiKeyHelper con
   assert.deepEqual(r.diagnostics, []);
 });
 
+test('resolveClaudeAuth accepts only enabled, allowlisted cloud-provider auth modes under --bare', () => {
+  const {
+    CLAUDE_PROVIDER_AUTH_ENV_KEYS,
+    resolveClaudeAuth,
+  } = require('../services/authResolver');
+  const saved = Object.fromEntries(
+    CLAUDE_PROVIDER_AUTH_ENV_KEYS.map((key) => [key, process.env[key]]),
+  );
+
+  try {
+    for (const key of CLAUDE_PROVIDER_AUTH_ENV_KEYS) delete process.env[key];
+
+    for (const key of CLAUDE_PROVIDER_AUTH_ENV_KEYS) {
+      process.env[key] = '1';
+      const r = resolveClaudeAuth({
+        envAllowlist: [key],
+        bare: true,
+        hasKeychain: () => false,
+        hasCredentialsFile: () => false,
+      });
+      assert.equal(r.canAuth, true, key);
+      assert.equal(r.env[key], '1', key);
+      assert.ok(r.sources.includes(`env:${key}`), key);
+      assert.deepEqual(r.diagnostics, [], key);
+      delete process.env[key];
+    }
+
+    process.env.CLAUDE_CODE_USE_BEDROCK = '0';
+    const disabled = resolveClaudeAuth({
+      envAllowlist: ['CLAUDE_CODE_USE_BEDROCK'],
+      bare: true,
+      hasKeychain: () => false,
+      hasCredentialsFile: () => false,
+    });
+    assert.equal(disabled.canAuth, false, 'disabled provider mode stays fail-closed');
+
+    process.env.CLAUDE_CODE_USE_BEDROCK = '1';
+    const excluded = resolveClaudeAuth({
+      envAllowlist: ['AWS_REGION'],
+      bare: true,
+      hasKeychain: () => false,
+      hasCredentialsFile: () => false,
+    });
+    assert.equal(excluded.canAuth, false, 'excluded provider selector stays fail-closed');
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test('resolveCodexAuth honors env_allowlist diagnostics', async (t) => {
   // Deterministic: stub fs.existsSync so the test outcome doesn't depend on
   // whether the dev box happens to have ~/.codex/auth.json.

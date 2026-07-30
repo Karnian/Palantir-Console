@@ -666,6 +666,67 @@ test('P5-S4a: Claude operator preflights auth with the claude-code profile allow
   assert.ok(!capturedAllowlist.includes('CODEX_API_KEY'), 'not the codex profile allowlist');
 });
 
+test('local Claude Operator starts --bare with allowlisted Bedrock provider credentials', async (t) => {
+  const providerEnv = {
+    CLAUDE_CODE_USE_BEDROCK: '1',
+    AWS_REGION: 'us-east-1',
+    AWS_ACCESS_KEY_ID: 'operator-bedrock-access-key',
+    AWS_SECRET_ACCESS_KEY: 'operator-bedrock-secret-key',
+  };
+  const previous = Object.fromEntries(
+    Object.keys(providerEnv).map((key) => [key, process.env[key]]),
+  );
+  Object.assign(process.env, providerEnv);
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const agentProfileService = createAgentProfileService(db);
+  agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt} --bare',
+    env_allowlist: JSON.stringify(Object.keys(providerEnv)),
+  });
+  const registry = createManagerRegistry({ runService });
+  const topAdapter = makeFakeManagerAdapter('claude-code');
+  const claudeAdapter = makeFakeManagerAdapter('claude-code');
+  const codexAdapter = makeFakeManagerAdapter('codex');
+  const spawn = createOperatorSpawnService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory({ claudeAdapter, codexAdapter }),
+    projectService,
+    projectBriefService,
+    agentProfileService,
+    authResolverOpts: {
+      hasKeychain: () => false,
+      hasCredentialsFile: () => false,
+    },
+  });
+  const project = projectService.createProject({
+    name: 'local-bedrock-operator',
+    preferred_pm_adapter: 'claude',
+  });
+  seedTop({ runService, registry, adapter: topAdapter });
+
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
+
+  assert.equal(result.spawned, true);
+  assert.equal(claudeAdapter._starts.length, 1);
+  const { opts } = claudeAdapter._starts[0];
+  assert.equal(opts.bare, true);
+  for (const [key, value] of Object.entries(providerEnv)) {
+    assert.equal(opts.env[key], value, key);
+  }
+  assert.equal(opts.env.ANTHROPIC_API_KEY, undefined);
+});
+
 test('P5-S4b: remote node + Claude preference spawns a remote Claude Operator (executor + nodePrefix + pod cwd + minimal env)', async (t) => {
   const db = await mkdb(t);
   const runService = createRunService(db, null);

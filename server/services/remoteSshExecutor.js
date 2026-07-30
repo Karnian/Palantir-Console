@@ -8,6 +8,7 @@ const {
   MANAGER_BASE_ENV_KEYS,
   isActorCredentialKey,
 } = require('./actorTokenPolicy');
+const { CLAUDE_PROVIDER_AUTH_ENV_KEYS } = require('./authResolver');
 
 const WORKER_OUTPUT_MAX_LINES = 500;
 const WORKER_OUTPUT_MAX_BUFFER = 256 * 1024;
@@ -106,6 +107,9 @@ const CLAUDE_OAUTH_USAGE_JS = [
   'req.on("timeout",()=>{req.destroy();finish(7)});req.on("error",()=>finish(7));req.end();',
   '}}',
 ].join('');
+const CLAUDE_PROVIDER_AUTH_SHELL = CLAUDE_PROVIDER_AUTH_ENV_KEYS
+  .map((key) => `[ "\${${key}:-}" = "1" ]`)
+  .join(' || ');
 const CLAUDE_OAUTH_USAGE_SCRIPT = `exec node -e '${CLAUDE_OAUTH_USAGE_JS.replace(/'/g, "'\\''")}'`;
 
 /**
@@ -142,6 +146,9 @@ function hasExplicitClaudeSettings(args) {
 function buildClaudeBareAuthShell(args) {
   const settingsAuth = hasExplicitClaudeSettings(args);
   return [
+    `if { ${CLAUDE_PROVIDER_AUTH_SHELL}; }; then`,
+    ':;',
+    'else',
     'if [ -z "${ANTHROPIC_API_KEY:-}" ]; then',
     'if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then',
     'ANTHROPIC_API_KEY=$CLAUDE_CODE_OAUTH_TOKEN;',
@@ -154,6 +161,7 @@ function buildClaudeBareAuthShell(args) {
     settingsAuth
       ? '[ -z "${ANTHROPIC_API_KEY:-}" ] || export ANTHROPIC_API_KEY'
       : '[ -n "$ANTHROPIC_API_KEY" ] || { echo "Claude --bare auth unavailable on remote node" >&2; exit 78; }; export ANTHROPIC_API_KEY',
+    '; fi',
   ].join(' ');
 }
 

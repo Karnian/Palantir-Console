@@ -209,6 +209,24 @@ test('resolveClaudeAuthForIsolated: envAllowlist blocks env ANTHROPIC_API_KEY so
   assert.equal(result.canAuth, false);
 });
 
+test('resolveClaudeAuthForIsolated: allowlisted Bedrock mode keeps provider auth child-resolved', async () => {
+  const result = await withEnv('CLAUDE_CODE_USE_BEDROCK', '1', () => {
+    return authResolverModule.resolveClaudeAuthForIsolated({
+      envAllowlist: ['CLAUDE_CODE_USE_BEDROCK'],
+      hasKeychain: () => false,
+      readKeychainToken: () => null,
+      hasCredentialsFile: () => false,
+      readCredentialsFileToken: () => null,
+    });
+  });
+
+  assert.equal(result.canAuth, true);
+  assert.deepEqual(result.env, { CLAUDE_CODE_USE_BEDROCK: '1' });
+  assert.deepEqual(result.sources, ['env:CLAUDE_CODE_USE_BEDROCK']);
+  assert.equal(result.apiKeyHelperSettings, undefined);
+  assert.deepEqual(result.diagnostics, []);
+});
+
 // --------------------------------------------------------------------------
 // streamJsonEngine buildArgs (isolated)
 // --------------------------------------------------------------------------

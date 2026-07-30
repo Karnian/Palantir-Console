@@ -42,6 +42,16 @@ const execFileAsync = promisify(execFile);
 const CLAUDE_AUTH_FILE = process.env.PALANTIR_CLAUDE_AUTH_FILE
   || path.join(__dirname, '..', '..', '.claude-auth.json');
 const CLAUDE_AUTH_KEYS = ['ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
+// Claude Code can authenticate through cloud-provider credential chains
+// instead of Anthropic credentials. These selectors are themselves
+// non-secret, but only count as an auth contract when they are explicitly
+// enabled and pass the profile env_allowlist; the CLI remains responsible for
+// validating the corresponding AWS/GCP/Azure credentials at spawn time.
+const CLAUDE_PROVIDER_AUTH_ENV_KEYS = Object.freeze([
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY',
+]);
 const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials';
 const CODEX_AUTH_KEYS = ['CODEX_API_KEY', 'OPENAI_API_KEY'];
 const CODEX_AUTH_FILE = path.join(os.homedir(), '.codex', 'auth.json');
@@ -142,6 +152,18 @@ function warnForwardedProxyUserinfo(env, { diagnosticContext, vendor } = {}) {
  */
 function hostCredentialDiscoveryDisabled() {
   return process.env.PALANTIR_SKIP_HOST_CREDENTIALS === '1';
+}
+
+function resolveClaudeProviderAuthEnv(allow) {
+  const env = {};
+  const sources = [];
+  for (const key of CLAUDE_PROVIDER_AUTH_ENV_KEYS) {
+    if (allow.has(key) && process.env[key] === '1') {
+      env[key] = '1';
+      sources.push(`env:${key}`);
+    }
+  }
+  return { env, sources };
 }
 
 /**
@@ -415,6 +437,9 @@ function bootstrapClaudeAuthFromEnv({ logger = console } = {}) {
  * @param {boolean} [opts.bare] When true, native/OAuth credentials are
  *                              materialized as ANTHROPIC_API_KEY because
  *                              Claude cannot read them under `--bare`.
+ *                              Cloud-provider credential chains remain
+ *                              child-resolved when their allowlisted selector
+ *                              is enabled.
  * @param {string} [opts.settings] Explicit Claude `--settings` value. Under
  *                                `--bare`, the CLI itself must validate any
  *                                apiKeyHelper in this child-local file.
@@ -435,7 +460,7 @@ function resolveClaudeAuth({
 
   const allow = Array.isArray(envAllowlist) && envAllowlist.length > 0
     ? new Set(envAllowlist)
-    : new Set(CLAUDE_AUTH_KEYS);
+    : new Set([...CLAUDE_AUTH_KEYS, ...CLAUDE_PROVIDER_AUTH_ENV_KEYS]);
 
   // (1) Direct env vars
   if (process.env.CLAUDE_CODE_OAUTH_TOKEN && allow.has('CLAUDE_CODE_OAUTH_TOKEN')) {
@@ -450,6 +475,10 @@ function resolveClaudeAuth({
     env.ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL;
     sources.push('env:ANTHROPIC_BASE_URL');
   }
+  const providerAuth = resolveClaudeProviderAuthEnv(allow);
+  Object.assign(env, providerAuth.env);
+  sources.push(...providerAuth.sources);
+  const hasProviderAuth = providerAuth.sources.length > 0;
 
   // (2) Saved auth file — re-read on demand. If the file has keys we
   //     don't yet have in env, merge them. This makes "drop file in,
@@ -519,14 +548,19 @@ function resolveClaudeAuth({
   if (settingsAuth) sources.push('cli:--settings');
 
   const canAuth = bare
-    ? !!env.ANTHROPIC_API_KEY || settingsAuth
-    : !!(env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY || keychain || credentialsFile);
+    ? hasProviderAuth || !!env.ANTHROPIC_API_KEY || settingsAuth
+    : hasProviderAuth
+      || !!(env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY || keychain || credentialsFile);
   if (!canAuth) {
     diagnostics.push(bare
-      ? 'Claude --bare requires a materialized API credential or apiKeyHelper via --settings, but neither was available. Set ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN, refresh `claude login` credentials, or provide explicit settings with apiKeyHelper.'
-      : 'No Claude credentials found. Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, run `claude login` (populates the macOS keychain, or ~/.claude/.credentials.json on Linux/Windows), or start the server once from inside a Claude Code session to seed .claude-auth.json.');
+      ? 'Claude --bare requires a materialized API credential, an allowlisted cloud-provider auth mode, or apiKeyHelper via --settings, but none was available. Enable CLAUDE_CODE_USE_BEDROCK/CLAUDE_CODE_USE_VERTEX/CLAUDE_CODE_USE_FOUNDRY with its provider credentials, set ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN, refresh `claude login` credentials, or provide explicit settings with apiKeyHelper.'
+      : 'No Claude credentials found. Enable an allowlisted CLAUDE_CODE_USE_BEDROCK/CLAUDE_CODE_USE_VERTEX/CLAUDE_CODE_USE_FOUNDRY provider auth mode, set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, run `claude login` (populates the macOS keychain, or ~/.claude/.credentials.json on Linux/Windows), or start the server once from inside a Claude Code session to seed .claude-auth.json.');
     if (Array.isArray(envAllowlist) && envAllowlist.length > 0) {
-      const blocked = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']
+      const blocked = [
+        'CLAUDE_CODE_OAUTH_TOKEN',
+        'ANTHROPIC_API_KEY',
+        ...CLAUDE_PROVIDER_AUTH_ENV_KEYS,
+      ]
         .filter(k => process.env[k] && !allow.has(k));
       if (blocked.length > 0) {
         diagnostics.push(`Profile env_allowlist excluded these present env vars: ${blocked.join(', ')}.`);
@@ -634,7 +668,9 @@ async function readClaudeKeychainToken() {
  * `--bare` strips the CLI's ability to read OAuth / keychain / settings, so
  * we must materialize a token as `ANTHROPIC_API_KEY` and wire it via either
  * an `apiKeyHelper` script (default — token stays off `ps`/`/proc`) or an
- * env pass-through (fallback — test / temporary use).
+ * env pass-through (fallback — test / temporary use). An explicitly enabled,
+ * allowlisted cloud-provider mode instead keeps its provider credential chain
+ * child-resolved and needs no Anthropic token materialization.
  *
  * Token source priority (first hit wins) — normative per
  * docs/specs/worker-preset-and-plugin-injection.md §6.9:
@@ -680,7 +716,17 @@ async function resolveClaudeAuthForIsolated({
 
   const allow = Array.isArray(envAllowlist) && envAllowlist.length > 0
     ? new Set(envAllowlist)
-    : new Set(CLAUDE_AUTH_KEYS);
+    : new Set([...CLAUDE_AUTH_KEYS, ...CLAUDE_PROVIDER_AUTH_ENV_KEYS]);
+
+  const providerAuth = resolveClaudeProviderAuthEnv(allow);
+  if (providerAuth.sources.length > 0) {
+    return {
+      canAuth: true,
+      env: providerAuth.env,
+      sources: providerAuth.sources,
+      diagnostics,
+    };
+  }
 
   let token = null;
 
@@ -931,6 +977,7 @@ module.exports = {
   CLAUDE_AUTH_FILE,
   CODEX_AUTH_FILE,
   CLAUDE_AUTH_KEYS,
+  CLAUDE_PROVIDER_AUTH_ENV_KEYS,
   CODEX_AUTH_KEYS,
   CLAUDE_KEYCHAIN_SERVICE,
   CLAUDE_LINUX_CREDENTIALS_FILE,
