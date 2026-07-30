@@ -158,7 +158,7 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   const projectBriefService = createProjectBriefService(db);
   const agentProfileService = createAgentProfileService(db);
   agentProfileService.updateProfile('claude-code', {
-    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config profile.json --strict-mcp-config --bare --disable-slash-commands',
+    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config profile.json --strict-mcp-config --bare --disable-slash-commands --no-chrome --settings locked.json',
     permission_mode: 'acceptEdits',
   });
   const registry = createManagerRegistry({ runService });
@@ -203,6 +203,8 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   assert.equal(start.opts.strictMcpConfig, true);
   assert.equal(start.opts.bare, true);
   assert.equal(start.opts.disableSlashCommands, true);
+  assert.equal(start.opts.noChrome, true);
+  assert.equal(start.opts.settings, 'locked.json');
   assert.equal(
     runService.getRun(result.run.id).session_permission_mode,
     'acceptEdits',
@@ -217,6 +219,8 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
       strictMcpConfig: true,
       bare: true,
       disableSlashCommands: true,
+      noChrome: true,
+      settings: 'locked.json',
     },
   );
   assert.equal(runService.getRun(result.run.id).status, 'queued');
@@ -254,7 +258,10 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
     managerRegistry: resumeRegistry,
     conversationService: resumeConversationService,
     agentProfileService,
-    authResolverOpts: { hasKeychain: () => true },
+    authResolverOpts: {
+      hasKeychain: () => true,
+      readKeychainTokenSync: () => 'operator-test-keychain-token',
+    },
   });
 
   const resumedOperator = resumeAdapter._starts.find(
@@ -269,6 +276,8 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   assert.equal(resumedOperator.opts.strictMcpConfig, true);
   assert.equal(resumedOperator.opts.bare, true);
   assert.equal(resumedOperator.opts.disableSlashCommands, true);
+  assert.equal(resumedOperator.opts.noChrome, true);
+  assert.equal(resumedOperator.opts.settings, 'locked.json');
 });
 
 test('Claude operator rejects malformed template options instead of falling back to bypass', async (t) => {

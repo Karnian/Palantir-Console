@@ -16,7 +16,7 @@ const {
 } = require('../services/streamJsonEngine');
 const { createTaskService } = require('../services/taskService');
 
-async function createHarness(t) {
+async function createHarness(t, { bareToken = 'worker-keychain-access-token' } = {}) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'palantir-worker-model-effort-'));
   const { db, migrate, close } = createDatabase(path.join(dir, 'test.db'));
   migrate();
@@ -40,6 +40,11 @@ async function createHarness(t) {
     streamJsonEngine,
     worktreeService: null,
     eventBus: null,
+    authResolverOpts: {
+      hasKeychain: () => true,
+      readKeychainTokenSync: () => bareToken,
+      hasCredentialsFile: () => false,
+    },
   });
   const project = projectService.createProject({
     name: 'Worker model/effort project',
@@ -99,14 +104,25 @@ function insertProfile(db, {
   model = null,
   reasoningEffort = null,
   permissionMode = null,
+  envAllowlist = [],
 }) {
   const id = `${command}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   db.prepare(`
     INSERT INTO agent_profiles (
       id, name, type, command, args_template, capabilities_json,
       env_allowlist, max_concurrent, model, reasoning_effort, permission_mode
-    ) VALUES (?, ?, ?, ?, ?, '{}', '[]', 5, ?, ?, ?)
-  `).run(id, id, command, command, argsTemplate, model, reasoningEffort, permissionMode);
+    ) VALUES (?, ?, ?, ?, ?, '{}', ?, 5, ?, ?, ?)
+  `).run(
+    id,
+    id,
+    command,
+    command,
+    argsTemplate,
+    JSON.stringify(envAllowlist),
+    model,
+    reasoningEffort,
+    permissionMode,
+  );
   return id;
 }
 
@@ -210,6 +226,7 @@ test('claude worker carries security template options into the stream-json spec'
   const profileId = insertProfile(harness.db, {
     command: 'claude',
     argsTemplate: '-p {prompt} --max-budget-usd 0.01 --mcp-config /tmp/intended.json --strict-mcp-config --safe-mode --bare --disable-slash-commands --no-chrome --setting-sources "" --settings locked.json --max-turns 5',
+    envAllowlist: ['NO_AUTH_ENV'],
   });
 
   await executeWorker(harness, profileId, 'Claude template runtime options');
@@ -228,6 +245,10 @@ test('claude worker carries security template options into the stream-json spec'
   assert.equal(harness.streamJsonEngine.spawned[0].opts.settingSources, '');
   assert.equal(harness.streamJsonEngine.spawned[0].opts.settings, 'locked.json');
   assert.equal(harness.streamJsonEngine.spawned[0].opts.maxTurns, 5);
+  assert.equal(
+    harness.streamJsonEngine.spawned[0].opts.env.ANTHROPIC_API_KEY,
+    'worker-keychain-access-token',
+  );
 
   const { args } = harness.streamJsonEngine.spawned[0];
   assert.equal(args.filter((arg) => arg === '--no-chrome').length, 1);
@@ -237,6 +258,21 @@ test('claude worker carries security template options into the stream-json spec'
   const maxTurnsIndex = args.indexOf('--max-turns');
   assert.notEqual(maxTurnsIndex, -1);
   assert.equal(args[maxTurnsIndex + 1], '5');
+});
+
+test('claude --bare worker fails before spawn when native auth cannot be materialized', async (t) => {
+  const harness = await createHarness(t, { bareToken: null });
+  const profileId = insertProfile(harness.db, {
+    command: 'claude',
+    argsTemplate: '-p {prompt} --bare',
+    envAllowlist: ['NO_AUTH_ENV'],
+  });
+
+  await assert.rejects(
+    () => executeWorker(harness, profileId, 'Claude bare auth unavailable'),
+    /--bare requires a materialized API credential/,
+  );
+  assert.equal(harness.streamJsonEngine.spawned.length, 0);
 });
 
 test('saved Claude disallowedTools template reaches the stream-json worker spec', async (t) => {

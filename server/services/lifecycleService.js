@@ -1626,6 +1626,25 @@ function createLifecycleService({
           parseEnvAllowlist(profile.env_allowlist, trustedBearerEnvKeys),
         );
         let presetAuthCleanup = null;
+        if (templateOptions.bare && !(presetResolution && presetResolution.isolated)) {
+          const auth = _authResolver.resolveClaudeAuth({
+            envAllowlist: parseEnvAllowlistArray(profile.env_allowlist),
+            ..._authResolverOpts,
+            bare: true,
+          });
+          runService.addRunEvent(run.id, 'worker:auth_sources', JSON.stringify({
+            sources: auth.sources,
+            bare: true,
+          }));
+          if (!auth.canAuth) {
+            const err = new Error(
+              auth.diagnostics[0] || 'Claude --bare requires a materialized API credential.',
+            );
+            err.status = 400;
+            throw err;
+          }
+          spawnEnv = { ...spawnEnv, ...auth.env };
+        }
         if (presetResolution && presetResolution.isolated) {
           const auth = await _authResolver.resolveClaudeAuthForIsolated({
             envAllowlist: parseEnvAllowlistArray(profile.env_allowlist),

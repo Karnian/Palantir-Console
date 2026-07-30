@@ -221,6 +221,55 @@ function hasClaudeLinuxCredentials() {
   }
 }
 
+function parseClaudeOAuthAccessToken(raw) {
+  const parsed = JSON.parse(raw);
+  const oauth = parsed?.claudeAiOauth;
+  const token = oauth?.accessToken;
+  if (typeof token !== 'string' || !token) return null;
+  if (typeof oauth.expiresAt === 'number' && Date.now() >= oauth.expiresAt) return null;
+  return token;
+}
+
+/**
+ * Synchronous token readers for regular `--bare` spawns. Manager and
+ * Operator startup/resume are synchronous APIs, so they cannot use the
+ * Promise-based isolated-preset readers below. `--bare` cannot read either
+ * native credential store itself; materializing the access token before
+ * spawn is therefore part of the auth preflight contract.
+ */
+function readClaudeKeychainTokenSync() {
+  if (hostCredentialDiscoveryDisabled()) return null;
+  if (process.platform !== 'darwin') return null;
+  try {
+    const raw = execFileSync(
+      'security',
+      ['find-generic-password', '-s', CLAUDE_KEYCHAIN_SERVICE, '-w'],
+      { stdio: 'pipe', timeout: 3000, encoding: 'utf8' },
+    ).trim();
+    if (!raw) return null;
+    try {
+      return parseClaudeOAuthAccessToken(raw);
+    } catch {
+      // Older keychain schemas stored the token as a bare string.
+      return raw;
+    }
+  } catch {
+    return null;
+  }
+}
+
+function readClaudeLinuxCredentialsTokenSync() {
+  if (hostCredentialDiscoveryDisabled()) return null;
+  if (process.platform === 'darwin') return null;
+  try {
+    return parseClaudeOAuthAccessToken(
+      fs.readFileSync(CLAUDE_LINUX_CREDENTIALS_FILE, 'utf-8'),
+    );
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Read the access token out of ~/.claude/.credentials.json. File-based
  * counterpart to readClaudeKeychainToken() (non-macOS platforms — see
@@ -238,13 +287,9 @@ async function readClaudeLinuxCredentialsToken() {
   if (hostCredentialDiscoveryDisabled()) return null;
   if (process.platform === 'darwin') return null;
   try {
-    const raw = await fsp.readFile(CLAUDE_LINUX_CREDENTIALS_FILE, 'utf-8');
-    const parsed = JSON.parse(raw);
-    const oauth = parsed?.claudeAiOauth;
-    const token = oauth?.accessToken;
-    if (typeof token !== 'string' || !token) return null;
-    if (typeof oauth.expiresAt === 'number' && Date.now() >= oauth.expiresAt) return null;
-    return token;
+    return parseClaudeOAuthAccessToken(
+      await fsp.readFile(CLAUDE_LINUX_CREDENTIALS_FILE, 'utf-8'),
+    );
   } catch {
     return null;
   }
@@ -367,12 +412,18 @@ function bootstrapClaudeAuthFromEnv({ logger = console } = {}) {
  * @param {() => boolean} [opts.hasCredentialsFile] DI hook for tests;
  *                                           defaults to the real Linux
  *                                           credentials-file probe.
+ * @param {boolean} [opts.bare] When true, native/OAuth credentials are
+ *                              materialized as ANTHROPIC_API_KEY because
+ *                              Claude cannot read them under `--bare`.
  * @returns {{ canAuth: boolean, env: object, sources: string[], diagnostics: string[] }}
  */
 function resolveClaudeAuth({
   envAllowlist,
   hasKeychain = hasClaudeKeychainCredentials,
   hasCredentialsFile = hasClaudeLinuxCredentials,
+  bare = false,
+  readKeychainTokenSync = readClaudeKeychainTokenSync,
+  readCredentialsFileTokenSync = readClaudeLinuxCredentialsTokenSync,
 } = {}) {
   const env = {};
   const sources = [];
@@ -426,9 +477,38 @@ function resolveClaudeAuth({
   const credentialsFile = hasCredentialsFile();
   if (credentialsFile) sources.push('file:~/.claude/.credentials.json');
 
-  const canAuth = !!(env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY || keychain || credentialsFile);
+  if (bare && !env.ANTHROPIC_API_KEY) {
+    let token = env.CLAUDE_CODE_OAUTH_TOKEN || null;
+    if (token) {
+      sources.push('materialize:bare:CLAUDE_CODE_OAUTH_TOKEN');
+    } else if (keychain) {
+      try {
+        token = readKeychainTokenSync();
+      } catch { /* treat a failed materialization as unavailable auth */ }
+      if (typeof token === 'string' && token) {
+        sources.push('materialize:bare:keychain:claudeAiOauth.accessToken');
+      }
+    }
+    if (!token && credentialsFile) {
+      try {
+        token = readCredentialsFileTokenSync();
+      } catch { /* treat a failed materialization as unavailable auth */ }
+      if (typeof token === 'string' && token) {
+        sources.push('materialize:bare:file:~/.claude/.credentials.json');
+      }
+    }
+    if (typeof token === 'string' && token) {
+      env.ANTHROPIC_API_KEY = token;
+    }
+  }
+
+  const canAuth = bare
+    ? !!env.ANTHROPIC_API_KEY
+    : !!(env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY || keychain || credentialsFile);
   if (!canAuth) {
-    diagnostics.push('No Claude credentials found. Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, run `claude login` (populates the macOS keychain, or ~/.claude/.credentials.json on Linux/Windows), or start the server once from inside a Claude Code session to seed .claude-auth.json.');
+    diagnostics.push(bare
+      ? 'Claude --bare requires a materialized API credential, but no usable token could be read. Set ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN or refresh `claude login` credentials.'
+      : 'No Claude credentials found. Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, run `claude login` (populates the macOS keychain, or ~/.claude/.credentials.json on Linux/Windows), or start the server once from inside a Claude Code session to seed .claude-auth.json.');
     if (Array.isArray(envAllowlist) && envAllowlist.length > 0) {
       const blocked = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']
         .filter(k => process.env[k] && !allow.has(k));
@@ -519,12 +599,7 @@ async function readClaudeKeychainToken() {
     // Claude Code stores its credentials as JSON in the keychain payload.
     // Fields of interest: claudeAiOauth.accessToken (+ expiresAt).
     try {
-      const parsed = JSON.parse(raw);
-      const oauth = parsed?.claudeAiOauth;
-      const token = oauth?.accessToken;
-      if (typeof token !== 'string' || !token) return null;
-      if (typeof oauth.expiresAt === 'number' && Date.now() >= oauth.expiresAt) return null;
-      return token;
+      return parseClaudeOAuthAccessToken(raw);
     } catch {
       // Older schemas / test fixtures may store a bare token string instead
       // of JSON. Accept any non-empty string — the Anthropic API itself is
@@ -827,6 +902,7 @@ module.exports = {
   resolveClaudeAuthForIsolated,
   hostCredentialDiscoveryDisabled,
   readClaudeKeychainToken,
+  readClaudeKeychainTokenSync,
   resolveCodexAuth,
   resolveManagerAuth,
   buildManagerSpawnEnv,
@@ -834,6 +910,7 @@ module.exports = {
   hasClaudeKeychainCredentials,
   hasClaudeLinuxCredentials,
   readClaudeLinuxCredentialsToken,
+  readClaudeLinuxCredentialsTokenSync,
   // Exposed for tests
   CLAUDE_AUTH_FILE,
   CODEX_AUTH_FILE,

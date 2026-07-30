@@ -137,8 +137,12 @@ function resolveResumeClaudeTemplateOptions(agentProfileService, options = {}) {
       safeMode: parsed.safeMode === true,
       bare: parsed.bare === true,
       disableSlashCommands: parsed.disableSlashCommands === true,
+      noChrome: parsed.noChrome === true,
       settingSources: typeof parsed.settingSources === 'string'
         ? parsed.settingSources
+        : null,
+      settings: typeof parsed.settings === 'string'
+        ? parsed.settings
         : null,
     };
   }
@@ -267,7 +271,11 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
             adapterType,
             sessionClaudeOptionsJson: r.session_claude_options_json,
           });
-          const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
+          const authCtx = resolveManagerAuth(adapterType, {
+            envAllowlist,
+            ...authResolverOpts,
+            bare: templateOptions?.bare === true,
+          });
           const resolvedSpawnEnv = buildManagerSpawnEnv({
             baseEnv: actorSpawnBaseEnv,
             authEnv: authCtx.env,
@@ -300,9 +308,11 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
               safeMode: templateOptions?.safeMode || undefined,
               bare: templateOptions?.bare || undefined,
               disableSlashCommands: templateOptions?.disableSlashCommands || undefined,
+              noChrome: templateOptions?.noChrome || undefined,
               settingSources: typeof templateOptions?.settingSources === 'string'
                 ? templateOptions.settingSources
                 : undefined,
+              settings: templateOptions?.settings || undefined,
               resumeSessionId: r.claude_session_id,
               model: r.session_model || undefined,
               reasoning_effort: r.session_effort || undefined,
@@ -559,7 +569,11 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                     sessionClaudeOptionsJson: r.session_claude_options_json,
                   },
                 );
-                const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
+                const authCtx = resolveManagerAuth(adapterType, {
+                  envAllowlist,
+                  ...authResolverOpts,
+                  bare: templateOptions?.bare === true,
+                });
                 const resolvedSpawnEnv = isRemoteNode ? {} : buildManagerSpawnEnv({
                   baseEnv: actorSpawnBaseEnv,
                   authEnv: authCtx.env,
@@ -619,9 +633,11 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                     safeMode: templateOptions?.safeMode || undefined,
                     bare: templateOptions?.bare || undefined,
                     disableSlashCommands: templateOptions?.disableSlashCommands || undefined,
+                    noChrome: templateOptions?.noChrome || undefined,
                     settingSources: typeof templateOptions?.settingSources === 'string'
                       ? templateOptions.settingSources
                       : undefined,
+                    settings: templateOptions?.settings || undefined,
                     role: 'manager',
                     nodeId,
                     // F-1: per-turn tier resolver — re-reads this instance's
@@ -817,7 +833,11 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       // fall through to the resolver's defaults.
       envAllowlist = undefined;
     }
-    const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
+    const authCtx = resolveManagerAuth(adapterType, {
+      envAllowlist,
+      ...authResolverOpts,
+      bare: claudeTemplateOptions?.bare === true,
+    });
     const resolvedSpawnEnv = buildManagerSpawnEnv({
       baseEnv: actorSpawnBaseEnv,
       authEnv: authCtx.env,
@@ -976,8 +996,14 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 ...(claudeTemplateOptions.disableSlashCommands
                   ? { disableSlashCommands: true }
                   : {}),
+                ...(claudeTemplateOptions.noChrome
+                  ? { noChrome: true }
+                  : {}),
                 ...(typeof claudeTemplateOptions.settingSources === 'string'
                   ? { settingSources: claudeTemplateOptions.settingSources }
+                  : {}),
+                ...(claudeTemplateOptions.settings
+                  ? { settings: claudeTemplateOptions.settings }
                   : {}),
               }
             : null,
@@ -1009,9 +1035,11 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
         safeMode: claudeTemplateOptions?.safeMode || undefined,
         bare: claudeTemplateOptions?.bare || undefined,
         disableSlashCommands: claudeTemplateOptions?.disableSlashCommands || undefined,
+        noChrome: claudeTemplateOptions?.noChrome || undefined,
         settingSources: typeof claudeTemplateOptions?.settingSources === 'string'
           ? claudeTemplateOptions.settingSources
           : undefined,
+        settings: claudeTemplateOptions?.settings || undefined,
         env: spawnEnv,
         envAllowlist,
         mcpTools: mcpTools.length > 0 ? mcpTools : undefined,

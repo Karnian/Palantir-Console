@@ -86,6 +86,7 @@ async function createCapturingManagerHarness(t) {
     agentProfileService,
     authResolverOpts: {
       hasKeychain: () => true,
+      readKeychainTokenSync: () => 'manager-test-keychain-token',
       hasCredentialsFile: () => false,
     },
   }));
@@ -138,6 +139,7 @@ test('Manager profile permission_mode reaches Claude CLI and NULL matches the wo
     agentProfileService,
     authResolverOpts: {
       hasKeychain: () => true,
+      readKeychainTokenSync: () => 'manager-test-keychain-token',
       hasCredentialsFile: () => false,
     },
   }));
@@ -208,6 +210,90 @@ test('Manager profile permission_mode reaches Claude CLI and NULL matches the wo
   assert.equal(JSON.parse(response.text).error, 'manager_profile_vendor_mismatch');
 });
 
+test('Top Manager materializes Keychain-only auth for a real --bare child contract', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-manager-bare-auth-'));
+  const argsFile = path.join(root, 'claude-args.json');
+  const contractFile = path.join(root, 'claude-auth-contract.json');
+  const previous = {
+    CLAUDE_BIN: process.env.CLAUDE_BIN,
+    CLAUDE_ARGS_FILE: process.env.CLAUDE_ARGS_FILE,
+    CLAUDE_AUTH_CONTRACT_FILE: process.env.CLAUDE_AUTH_CONTRACT_FILE,
+    CLAUDE_REQUIRE_BARE_API_KEY: process.env.CLAUDE_REQUIRE_BARE_API_KEY,
+  };
+  process.env.CLAUDE_BIN = FAKE_CLAUDE;
+  process.env.CLAUDE_ARGS_FILE = argsFile;
+  process.env.CLAUDE_AUTH_CONTRACT_FILE = contractFile;
+  process.env.CLAUDE_REQUIRE_BARE_API_KEY = '1';
+
+  const database = createDatabase(path.join(root, 'test.db'));
+  database.migrate();
+  const runService = createRunService(database.db, null);
+  const agentProfileService = createAgentProfileService(database.db);
+  agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt} --bare --no-chrome --settings locked.json',
+    env_allowlist: JSON.stringify([
+      'CLAUDE_ARGS_FILE',
+      'CLAUDE_AUTH_CONTRACT_FILE',
+      'CLAUDE_REQUIRE_BARE_API_KEY',
+    ]),
+  });
+  const streamJsonEngine = createStreamJsonEngine({ runService });
+  const managerAdapterFactory = createManagerAdapterFactory({ streamJsonEngine, runService });
+  const managerRegistry = createManagerRegistry({ runService });
+  const conversationService = createConversationService({
+    runService,
+    managerRegistry,
+    managerAdapterFactory,
+    lifecycleService: null,
+  });
+  const app = express();
+  app.use(express.json());
+  app.use('/api/manager', createManagerRouter({
+    runService,
+    streamJsonEngine,
+    managerAdapterFactory,
+    managerRegistry,
+    conversationService,
+    agentProfileService,
+    authResolverOpts: {
+      hasKeychain: () => true,
+      readKeychainTokenSync: () => 'keychain-only-access-token',
+      hasCredentialsFile: () => false,
+    },
+  }));
+
+  t.after(async () => {
+    const activeRunId = managerRegistry.getActiveRunId('top');
+    if (activeRunId) {
+      try {
+        await managerRegistry.getActiveAdapter('top')?.disposeSession(activeRunId);
+      } catch { /* already stopped */ }
+    }
+    database.close();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  const response = await invokeApp(app, {
+    method: 'POST',
+    path: '/api/manager/start',
+    body: { agent_profile_id: 'claude-code', prompt: 'keychain-only bare auth' },
+  });
+  assert.equal(response.status, 201, response.text);
+
+  const args = await readArgs(argsFile);
+  assert.equal(args.filter((arg) => arg === '--bare').length, 1);
+  assert.equal(args.filter((arg) => arg === '--no-chrome').length, 1);
+  assert.equal(args[args.indexOf('--settings') + 1], 'locked.json');
+  assert.deepEqual(await readArgs(contractFile), {
+    bare: true,
+    hasAnthropicApiKey: true,
+  });
+});
+
 test('Top Manager clears its starting guard when Claude template parsing fails', async (t) => {
   const {
     app,
@@ -241,7 +327,7 @@ test('Top Manager snapshots and resumes Claude runtime options after profile rem
     starts,
   } = await createCapturingManagerHarness(t);
   agentProfileService.updateProfile('claude-code', {
-    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config profile.json --strict-mcp-config --safe-mode --bare --disable-slash-commands --setting-sources ""',
+    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config profile.json --strict-mcp-config --safe-mode --bare --disable-slash-commands --no-chrome --setting-sources "" --settings locked.json',
   });
 
   const response = await invokeApp(app, {
@@ -259,7 +345,9 @@ test('Top Manager snapshots and resumes Claude runtime options after profile rem
   assert.equal(starts[0].opts.safeMode, true);
   assert.equal(starts[0].opts.bare, true);
   assert.equal(starts[0].opts.disableSlashCommands, true);
+  assert.equal(starts[0].opts.noChrome, true);
   assert.equal(starts[0].opts.settingSources, '');
+  assert.equal(starts[0].opts.settings, 'locked.json');
   const run = runService.getRun(managerRegistry.getActiveRunId('top'));
   assert.deepEqual(JSON.parse(run.session_claude_options_json), {
     tools: ['Read,Grep'],
@@ -270,7 +358,9 @@ test('Top Manager snapshots and resumes Claude runtime options after profile rem
     safeMode: true,
     bare: true,
     disableSlashCommands: true,
+    noChrome: true,
     settingSources: '',
+    settings: 'locked.json',
   });
 
   runService.updateClaudeSessionId(run.id, 'sess-profile-options');
@@ -312,6 +402,7 @@ test('Top Manager snapshots and resumes Claude runtime options after profile rem
     agentProfileService,
     authResolverOpts: {
       hasKeychain: () => true,
+      readKeychainTokenSync: () => 'manager-test-keychain-token',
       hasCredentialsFile: () => false,
     },
   });
@@ -327,7 +418,9 @@ test('Top Manager snapshots and resumes Claude runtime options after profile rem
   assert.equal(resumed.opts.safeMode, true);
   assert.equal(resumed.opts.bare, true);
   assert.equal(resumed.opts.disableSlashCommands, true);
+  assert.equal(resumed.opts.noChrome, true);
   assert.equal(resumed.opts.settingSources, '');
+  assert.equal(resumed.opts.settings, 'locked.json');
 });
 
 test('Manager boot-resume stops a migration-marked session instead of using a mutable profile', async (t) => {
@@ -380,6 +473,7 @@ test('Manager boot-resume stops a migration-marked session instead of using a mu
     agentProfileService,
     authResolverOpts: {
       hasKeychain: () => true,
+      readKeychainTokenSync: () => 'manager-test-keychain-token',
       hasCredentialsFile: () => false,
     },
   });
@@ -429,6 +523,8 @@ test('Manager boot-resume uses the fresh-spawn permission snapshot after profile
       strictMcpConfig: true,
       bare: true,
       disableSlashCommands: true,
+      noChrome: true,
+      settings: 'locked.json',
     },
   });
 
@@ -462,6 +558,7 @@ test('Manager boot-resume uses the fresh-spawn permission snapshot after profile
     agentProfileService,
     authResolverOpts: {
       hasKeychain: () => true,
+      readKeychainTokenSync: () => 'manager-test-keychain-token',
       hasCredentialsFile: () => false,
     },
   });
@@ -493,6 +590,8 @@ test('Manager boot-resume uses the fresh-spawn permission snapshot after profile
   );
   assert.equal(args.filter((arg) => arg === '--bare').length, 1);
   assert.equal(args.filter((arg) => arg === '--disable-slash-commands').length, 1);
+  assert.equal(args.filter((arg) => arg === '--no-chrome').length, 1);
+  assert.equal(args[args.indexOf('--settings') + 1], 'locked.json');
   const resumeIndex = args.indexOf('--resume');
   assert.notEqual(resumeIndex, -1, `missing --resume in ${JSON.stringify(args)}`);
   assert.equal(args[resumeIndex + 1], 'sess-review');

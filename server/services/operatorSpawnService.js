@@ -428,7 +428,9 @@ function createOperatorSpawnService({
     let safeMode = false;
     let bare = false;
     let disableSlashCommands = false;
+    let noChrome = false;
     let settingSources = null;
+    let settings = null;
     let permissionMode = adapterType === 'claude-code' ? 'bypassPermissions' : undefined;
     try {
       if (agentProfileService) {
@@ -461,7 +463,9 @@ function createOperatorSpawnService({
             safeMode = templateOptions.safeMode;
             bare = templateOptions.bare;
             disableSlashCommands = templateOptions.disableSlashCommands;
+            noChrome = templateOptions.noChrome;
             settingSources = templateOptions.settingSources;
+            settings = templateOptions.settings;
           }
           if (managerProfile.env_allowlist) {
             const parsed = JSON.parse(managerProfile.env_allowlist);
@@ -485,7 +489,11 @@ function createOperatorSpawnService({
       // Ignore malformed optional profile data and fall through to defaults.
     }
 
-    const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...authResolverOpts });
+    const authCtx = resolveManagerAuth(adapterType, {
+      envAllowlist,
+      ...authResolverOpts,
+      bare: bare === true,
+    });
     // Resolve before the auth gate so migration diagnostics are observable
     // even when a legacy ambient auth mode is no longer sufficient.
     const spawnEnv = applyManagerCredentialPolicy(isRemoteNode ? {} : buildManagerSpawnEnv({
@@ -809,9 +817,11 @@ function createOperatorSpawnService({
                   ...(safeMode ? { safeMode: true } : {}),
                   ...(bare ? { bare: true } : {}),
                   ...(disableSlashCommands ? { disableSlashCommands: true } : {}),
+                  ...(noChrome ? { noChrome: true } : {}),
                   ...(typeof settingSources === 'string'
                     ? { settingSources }
                     : {}),
+                  ...(settings ? { settings } : {}),
                 }
               : null,
           });
@@ -842,9 +852,11 @@ function createOperatorSpawnService({
           safeMode: safeMode || undefined,
           bare: bare || undefined,
           disableSlashCommands: disableSlashCommands || undefined,
+          noChrome: noChrome || undefined,
           settingSources: typeof settingSources === 'string'
             ? settingSources
             : undefined,
+          settings: settings || undefined,
           role: 'manager',
           nodeId,
           resumeThreadId,

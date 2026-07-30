@@ -382,6 +382,39 @@ test('resolveClaudeAuth flips canAuth true on keychain only and does not leak to
   assert.deepEqual(r.diagnostics, []);
 });
 
+test('resolveClaudeAuth materializes Keychain-only auth when --bare requires env auth', () => {
+  const { resolveClaudeAuth } = require('../services/authResolver');
+  const r = resolveClaudeAuth({
+    envAllowlist: ['NO_AUTH_ENV'],
+    bare: true,
+    hasKeychain: () => true,
+    readKeychainTokenSync: () => 'keychain-access-token',
+    hasCredentialsFile: () => false,
+  });
+
+  assert.equal(r.canAuth, true);
+  assert.equal(r.env.ANTHROPIC_API_KEY, 'keychain-access-token');
+  assert.ok(
+    r.sources.includes('materialize:bare:keychain:claudeAiOauth.accessToken'),
+  );
+  assert.deepEqual(r.diagnostics, []);
+});
+
+test('resolveClaudeAuth fails closed when --bare native auth cannot be materialized', () => {
+  const { resolveClaudeAuth } = require('../services/authResolver');
+  const r = resolveClaudeAuth({
+    envAllowlist: ['NO_AUTH_ENV'],
+    bare: true,
+    hasKeychain: () => true,
+    readKeychainTokenSync: () => null,
+    hasCredentialsFile: () => false,
+  });
+
+  assert.equal(r.canAuth, false);
+  assert.equal(r.env.ANTHROPIC_API_KEY, undefined);
+  assert.match(r.diagnostics[0], /--bare requires a materialized API credential/);
+});
+
 test('resolveCodexAuth honors env_allowlist diagnostics', async (t) => {
   // Deterministic: stub fs.existsSync so the test outcome doesn't depend on
   // whether the dev box happens to have ~/.codex/auth.json.
