@@ -581,6 +581,51 @@ test('SQLite-rejected scheduler fallback paginates after the shared candidate bo
   );
 });
 
+test('restart drains SQLite-rejected fallback pages before applying the uncertain backstop', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Restart rejected terminal history',
+    prompt: 'Check',
+    rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  const opening = '['.repeat(1000);
+  const closing = ']'.repeat(1000);
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  let nonTerminalPayload;
+  for (let index = 0; index < MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES; index += 1) {
+    nonTerminalPayload = `{"extra":${opening}0${closing},`
+      + `"data":{"invocationId":"${claimed.id}","terminal":false}}`;
+    insertEvent.run(managerRun.id, 'mgr.turn_failed', nonTerminalPayload);
+  }
+  const terminalPayload = `{"extra":${opening}0${closing},`
+    + `"data":{"invocationId":"${claimed.id}","terminal":true}}`;
+  insertEvent.run(managerRun.id, 'mgr.turn_completed', terminalPayload);
+
+  assert.equal(JSON.parse(nonTerminalPayload).data.terminal, false);
+  assert.equal(JSON.parse(terminalPayload).data.terminal, true);
+  assert.equal(h.db.prepare('SELECT json_valid(?) AS valid').get(nonTerminalPayload).valid, 0);
+  assert.equal(h.db.prepare('SELECT json_valid(?) AS valid').get(terminalPayload).valid, 0);
+
+  const recovered = h.scheduleService.recoverAfterRestart(
+    new Date('2026-07-23T00:10:00.000Z'),
+  );
+
+  assert.deepEqual(recovered, { pending: 0, uncertain: 0 });
+  const invocation = h.scheduleService.listInvocations(schedule.id)[0];
+  assert.equal(invocation.status, 'completed');
+  assert.equal(invocation.waiting_reason, null);
+  assert.equal(
+    h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+    'pending',
+    'restart recovery must release the OS-4 slot with the persisted outcome',
+  );
+});
+
 test('scheduled SQLite-rejected fallback preserves first-terminal-event-wins across pages', (t) => {
   const h = harness(t);
   const { instance } = createMappedOperator(h);

@@ -1106,7 +1106,7 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     return invocation;
   }
 
-  function reconcilePersistedTerminalEvents() {
+  function reconcilePersistedTerminalEvents({ drainSQLiteRejectedCandidates = false } = {}) {
     const reconciled = [];
     for (const row of stmts.runningInvocationsForTerminalReconciliation.all()) {
       const candidates = stmts.persistedTerminalEvents.all(
@@ -1116,33 +1116,35 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
         MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
       );
       const sqlTerminal = findPersistedTerminalEvent(candidates, row.invocation_id);
-      const cursor = sqliteRejectedTerminalCursors.get(row.invocation_id) ?? null;
-      const sqliteRejectedCandidates = stmts.sqliteRejectedTerminalEvents.all(
-        row.manager_run_id,
-        JSON.stringify(row.invocation_id),
-        cursor,
-        cursor,
-        sqlTerminal?.id ?? null,
-        sqlTerminal?.id ?? null,
-        MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
-      );
-      const sqliteRejectedTerminal = findPersistedTerminalEvent(
-        sqliteRejectedCandidates,
-        row.invocation_id,
-      );
       let terminal;
-      if (sqliteRejectedTerminal) {
-        sqliteRejectedTerminalCursors.delete(row.invocation_id);
-        terminal = sqliteRejectedTerminal;
-      } else if (
-        sqliteRejectedCandidates.length >= MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES
-      ) {
-        sqliteRejectedTerminalCursors.set(
-          row.invocation_id,
-          sqliteRejectedCandidates[sqliteRejectedCandidates.length - 1].id,
+      do {
+        const cursor = sqliteRejectedTerminalCursors.get(row.invocation_id) ?? null;
+        const sqliteRejectedCandidates = stmts.sqliteRejectedTerminalEvents.all(
+          row.manager_run_id,
+          JSON.stringify(row.invocation_id),
+          cursor,
+          cursor,
+          sqlTerminal?.id ?? null,
+          sqlTerminal?.id ?? null,
+          MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
         );
-        continue;
-      } else {
+        const sqliteRejectedTerminal = findPersistedTerminalEvent(
+          sqliteRejectedCandidates,
+          row.invocation_id,
+        );
+        if (sqliteRejectedTerminal) {
+          sqliteRejectedTerminalCursors.delete(row.invocation_id);
+          terminal = sqliteRejectedTerminal;
+          break;
+        }
+        if (sqliteRejectedCandidates.length >= MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES) {
+          sqliteRejectedTerminalCursors.set(
+            row.invocation_id,
+            sqliteRejectedCandidates[sqliteRejectedCandidates.length - 1].id,
+          );
+          if (drainSQLiteRejectedCandidates) continue;
+          break;
+        }
         if (sqliteRejectedCandidates.length > 0) {
           sqliteRejectedTerminalCursors.set(
             row.invocation_id,
@@ -1151,7 +1153,8 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
         }
         terminal = sqlTerminal;
         if (terminal) sqliteRejectedTerminalCursors.delete(row.invocation_id);
-      }
+        break;
+      } while (drainSQLiteRejectedCandidates);
       if (!terminal) continue;
       const success = terminal.event_type === 'mgr.turn_completed';
       const invocation = completeInvocation(
@@ -1211,7 +1214,10 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     //   1. a persisted terminal turn event  → the ACTUAL outcome (completed/failed)
     //   2. a provably dead manager run      → 'uncertain' + a specific reason
     //   3. anything still active            → 'uncertain' + restart_delivery_uncertain
-    reconcilePersistedTerminalEvents();
+    // Normal ticks keep JSON parsing bounded to one fallback page. Restart is
+    // the last chance to consume those pages before the generic backstop makes
+    // the invocation terminal, so it must drain the finite persisted history.
+    reconcilePersistedTerminalEvents({ drainSQLiteRejectedCandidates: true });
     const uncertainRunning = sweepTerminalRunning(now, runningStaleMs).length;
     const uncertainDelivery = stmts.markDeliveryUncertain.run().changes;
     const uncertain = uncertainDelivery + uncertainRunning;
