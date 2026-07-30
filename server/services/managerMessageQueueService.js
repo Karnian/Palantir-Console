@@ -2,6 +2,7 @@
 
 const { randomUUID } = require('node:crypto');
 const {
+  MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
   parseTerminalEventPayload,
   isTerminalEventForInvocation,
   normalizeTerminalError,
@@ -274,15 +275,24 @@ function createManagerMessageQueueService({
         AND status IN ('sending', 'processing')
       ORDER BY sequence
     `),
-    // Payload correlation stays in JavaScript so SQLite JSON1 cannot disagree
-    // with JSON.parse on duplicate keys. The unbounded scan is required because
-    // any finite newest-first window can hide the first durable terminal event.
+    // Correlate before the bounded scan so unrelated and non-terminal events
+    // consume no JavaScript parsing budget. Oldest-first ordering preserves the
+    // live CAS path's first-terminal-event-wins contract.
     terminalEventCandidates: db.prepare(`
       SELECT event_type, payload_json
       FROM run_events
       WHERE run_id = ?
         AND event_type IN ('mgr.turn_completed', 'mgr.turn_failed')
-      ORDER BY id DESC
+        AND json_extract(
+              CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
+              '$.data.invocationId'
+            ) = ?
+        AND json_type(
+              CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
+              '$.data.terminal'
+            ) = 'true'
+      ORDER BY id ASC
+      LIMIT ?
     `),
     failRunActive: db.prepare(`
       UPDATE manager_message_queue
@@ -809,7 +819,11 @@ function createManagerMessageQueueService({
     // neither recovery path can drift from the shared live-parser contract.
     if (!row?.run_id) return null;
     try {
-      const candidates = stmts.terminalEventCandidates.all(row.run_id);
+      const candidates = stmts.terminalEventCandidates.all(
+        row.run_id,
+        row.adapter_invocation_id,
+        MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
+      );
       const terminal = findPersistedTerminalEvent(
         candidates,
         row.adapter_invocation_id,

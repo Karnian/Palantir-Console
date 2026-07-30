@@ -255,6 +255,84 @@ test('a persisted terminal event closes the current owner lane after its live ca
   ]);
 });
 
+test('a long run does not parse unrelated terminal history during a queue tick', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_long_run',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  h.service.setDispatcher(() => ({
+    status: 'sent',
+    target: { kind: 'pm', runId: run.id },
+  }));
+
+  const current = await h.service.enqueue(
+    'operator:oi_long_run',
+    { text: 'current scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_current_long_run',
+      adapterInvocationId: 'oinv_current_long_run',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(current.message.status, 'processing');
+
+  const historyCount = Number(process.env.PALANTIR_QUEUE_HISTORY_EVENT_COUNT || 20_000);
+  const historyPayload = JSON.stringify({
+    historyMarker: 'queue-unrelated-terminal-history',
+    data: { invocationId: 'oinv_historical', terminal: true },
+  });
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, 'mgr.turn_completed', ?)
+  `);
+  h.db.transaction(() => {
+    for (let index = 0; index < historyCount; index += 1) {
+      insertEvent.run(run.id, historyPayload);
+    }
+  })();
+
+  const originalParse = JSON.parse;
+  let historicalPayloadParses = 0;
+  JSON.parse = function countedParse(value, ...args) {
+    if (value === historyPayload) historicalPayloadParses += 1;
+    return originalParse.call(this, value, ...args);
+  };
+  const rssBefore = process.memoryUsage().rss;
+  const startedAt = performance.now();
+  try {
+    await h.service.tick();
+  } finally {
+    JSON.parse = originalParse;
+  }
+  const elapsedMs = performance.now() - startedAt;
+  const rssDeltaMb = (process.memoryUsage().rss - rssBefore) / (1024 * 1024);
+  t.diagnostic(
+    `history=${historyCount} parsed=${historicalPayloadParses} `
+      + `elapsed_ms=${elapsedMs.toFixed(1)} rss_delta_mb=${rssDeltaMb.toFixed(1)}`,
+  );
+
+  assert.equal(
+    historicalPayloadParses,
+    0,
+    'unrelated persisted events must not cross the SQL/JavaScript boundary',
+  );
+  assert.equal(h.service.getMessage(current.message.id).status, 'processing');
+
+  insertEvent.run(run.id, JSON.stringify({
+    data: { invocationId: 'oinv_current_long_run', terminal: true },
+  }));
+  await h.service.tick();
+  assert.equal(
+    h.service.getMessage(current.message.id).status,
+    'delivered',
+    'a normally correlated terminal event must still settle the lane',
+  );
+});
+
 test('a non-coercible failure summary settles from persistence after the live callback throws', async (t) => {
   const baseEventBus = createEventBus();
   let droppedCallbacks = 0;

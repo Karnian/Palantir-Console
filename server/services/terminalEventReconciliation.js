@@ -1,5 +1,9 @@
 'use strict';
 
+// SQL correlates by invocation and boolean terminality before applying this
+// bound. Oldest-first ordering preserves the live CAS path's first-event-wins
+// contract while keeping JSON.parse work bounded on every reconciliation.
+const MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES = 8;
 const MAX_TERMINAL_ERROR_LENGTH = 2000;
 
 function parseTerminalEventPayload(payloadJson) {
@@ -33,20 +37,20 @@ function normalizeTerminalError(error, fallback = 'manager turn failed') {
   return normalized.slice(0, MAX_TERMINAL_ERROR_LENGTH);
 }
 
-// Candidates are newest-first. Keep the oldest valid match so persisted
-// reconciliation has the same first-terminal-event-wins semantics as the live
-// CAS path. JSON.parse remains the only payload authority.
+// Candidates are oldest-first. JSON.parse remains the payload authority, so a
+// SQL/JavaScript disagreement on an anomalous duplicate-key row rejects that
+// row and falls through to the next bounded candidate.
 function findPersistedTerminalEvent(candidates, invocationId) {
-  let terminal = null;
   for (const candidate of candidates) {
     const payload = parseTerminalEventPayload(candidate.payload_json);
     if (!isTerminalEventForInvocation(payload, invocationId)) continue;
-    terminal = { ...candidate, payload };
+    return { ...candidate, payload };
   }
-  return terminal;
+  return null;
 }
 
 module.exports = {
+  MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
   parseTerminalEventPayload,
   isTerminalEventForInvocation,
   normalizeTerminalError,

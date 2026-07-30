@@ -7,6 +7,7 @@ const {
   NotFoundError,
 } = require('../utils/errors');
 const {
+  MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
   normalizeTerminalError,
   findPersistedTerminalEvent,
 } = require('./terminalEventReconciliation');
@@ -468,15 +469,24 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
       WHERE status='running' AND manager_run_id IS NOT NULL
       ORDER BY started_at ASC, id ASC
     `),
-    // Payload correlation stays in JavaScript so SQLite JSON1 cannot disagree
-    // with JSON.parse on duplicate keys. The unbounded scan is required because
-    // any finite newest-first window can hide the first durable terminal event.
+    // Correlate before the bounded scan so unrelated and non-terminal events
+    // consume no JavaScript parsing budget. Oldest-first ordering preserves the
+    // live CAS path's first-terminal-event-wins contract.
     persistedTerminalEvents: db.prepare(`
       SELECT event_type, payload_json
       FROM run_events
       WHERE run_id=?
         AND event_type IN ('mgr.turn_completed','mgr.turn_failed')
-      ORDER BY id DESC
+        AND json_extract(
+              CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
+              '$.data.invocationId'
+            )=?
+        AND json_type(
+              CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
+              '$.data.terminal'
+            )='true'
+      ORDER BY id ASC
+      LIMIT ?
     `),
     resetFailures: db.prepare(`
       UPDATE operator_schedules SET consecutive_failures=0, updated_at=datetime('now') WHERE id=?
@@ -1052,7 +1062,11 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
   function reconcilePersistedTerminalEvents() {
     const reconciled = [];
     for (const row of stmts.runningInvocationsForTerminalReconciliation.all()) {
-      const candidates = stmts.persistedTerminalEvents.all(row.manager_run_id);
+      const candidates = stmts.persistedTerminalEvents.all(
+        row.manager_run_id,
+        row.invocation_id,
+        MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
+      );
       const terminal = findPersistedTerminalEvent(candidates, row.invocation_id);
       if (!terminal) continue;
       const success = terminal.event_type === 'mgr.turn_completed';

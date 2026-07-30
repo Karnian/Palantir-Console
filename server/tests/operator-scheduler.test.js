@@ -469,6 +469,54 @@ test('restart reconciles a persisted terminal turn event even while the manager 
   assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'completed');
 });
 
+test('scheduled reconciliation does not parse unrelated terminal history', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Long manager run', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  const historyPayload = JSON.stringify({
+    historyMarker: 'schedule-unrelated-terminal-history',
+    data: { invocationId: 'oinv_historical', terminal: true },
+  });
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, 'mgr.turn_completed', ?)
+  `);
+  h.db.transaction(() => {
+    for (let index = 0; index < 20_000; index += 1) {
+      insertEvent.run(managerRun.id, historyPayload);
+    }
+  })();
+
+  const originalParse = JSON.parse;
+  let historicalPayloadParses = 0;
+  JSON.parse = function countedParse(value, ...args) {
+    if (value === historyPayload) historicalPayloadParses += 1;
+    return originalParse.call(this, value, ...args);
+  };
+  try {
+    assert.deepEqual(h.scheduleService.reconcilePersistedTerminalEvents(), []);
+  } finally {
+    JSON.parse = originalParse;
+  }
+
+  assert.equal(
+    historicalPayloadParses,
+    0,
+    'unrelated persisted events must not cross the SQL/JavaScript boundary',
+  );
+  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
+
+  insertEvent.run(managerRun.id, JSON.stringify({
+    data: { invocationId: claimed.id, terminal: true },
+  }));
+  const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].status, 'completed');
+});
+
 test('same-invocation non-terminal failures cannot exhaust scheduled terminal reconciliation', (t) => {
   const h = harness(t);
   const { instance } = createMappedOperator(h);
