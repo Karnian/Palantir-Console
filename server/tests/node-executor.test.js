@@ -12,6 +12,14 @@ const {
 } = require('../services/nodeExecutor');
 const { createWorktreeService } = require('../services/worktreeService');
 const { createFsService } = require('../services/fsService');
+const {
+  EXEC_ENV_KEYS,
+  PROJECT_TEST_ENV_KEYS,
+  GIT_ENV_ALLOWLIST_VARIABLE,
+  PROJECT_TEST_ENV_ALLOWLIST_VARIABLE,
+  buildExecEnv,
+  buildProjectTestEnv,
+} = require('../services/execEnvPolicy');
 
 test('LocalNodeExecutor resolves the current absolute Node runtime for MCP wrappers', () => {
   const executor = createLocalNodeExecutor();
@@ -338,23 +346,235 @@ test('LocalNodeExecutor.exec resolves nonzero exit without rejecting', async () 
   assert.equal(result.stderr, 'bad');
 });
 
-test('LocalNodeExecutor.exec merges override-only env with process.env base', async () => {
-  const oldBase = process.env.LOCAL_NODE_EXECUTOR_BASE_ENV;
-  process.env.LOCAL_NODE_EXECUTOR_BASE_ENV = 'base-visible';
+test('exec env policy is non-empty and keeps measured Git prerequisites', () => {
+  const selected = buildExecEnv({
+    PATH: '/fixture/bin',
+    HOME: '/fixture/home',
+    GIT_AUTHOR_EMAIL: 'fixture@example.com',
+    SSH_AUTH_SOCK: '/fixture/agent.sock',
+    LC_ALL: 'C',
+    TMPDIR: '/fixture/tmp',
+    PALANTIR_TOKEN: 'must-not-pass',
+  });
+
+  assert.ok(EXEC_ENV_KEYS.length > 0, 'exec env allowlist must not be empty');
+  assert.deepEqual(selected, {
+    PATH: '/fixture/bin',
+    HOME: '/fixture/home',
+    GIT_AUTHOR_EMAIL: 'fixture@example.com',
+    SSH_AUTH_SOCK: '/fixture/agent.sock',
+    LC_ALL: 'C',
+    TMPDIR: '/fixture/tmp',
+  });
+});
+
+test('exec env policy preserves Windows process-launch prerequisites with native casing', () => {
+  const selected = buildExecEnv({
+    Path: 'C:\\Program Files\\Git\\cmd;C:\\Windows\\System32',
+    SystemRoot: 'C:\\Windows',
+    ComSpec: 'C:\\Windows\\System32\\cmd.exe',
+    PATHEXT: '.COM;.EXE;.BAT;.CMD',
+    USERPROFILE: 'C:\\Users\\runner',
+    PALANTIR_TOKEN: 'must-not-pass',
+  });
+
+  assert.deepEqual(selected, {
+    Path: 'C:\\Program Files\\Git\\cmd;C:\\Windows\\System32',
+    SystemRoot: 'C:\\Windows',
+    ComSpec: 'C:\\Windows\\System32\\cmd.exe',
+    PATHEXT: '.COM;.EXE;.BAT;.CMD',
+    USERPROFILE: 'C:\\Users\\runner',
+  });
+});
+
+test('exec env policy rejects ambient command/config/TLS bypass vectors but keeps explicit hardening', () => {
+  const ambient = {
+    GIT_SSH_COMMAND: 'ambient-command',
+    GIT_SSH: 'ambient-command',
+    GIT_PROXY_COMMAND: 'ambient-command',
+    GIT_TERMINAL_PROMPT: '1',
+    SSH_ASKPASS: 'ambient-command',
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'core.sshCommand',
+    GIT_CONFIG_VALUE_0: 'ambient-command',
+    GIT_CONFIG_PARAMETERS: "'core.sshCommand=ambient-command'",
+    GIT_CONFIG_GLOBAL: '/tmp/ambient-config',
+    GIT_CONFIG_SYSTEM: '/tmp/ambient-config',
+    GIT_SSL_NO_VERIFY: '1',
+    GIT_EXTERNAL_DIFF: 'ambient-command',
+    GIT_TEXTCONV_DIFF: 'ambient-command',
+    GIT_EDITOR: 'ambient-command',
+    GIT_SEQUENCE_EDITOR: 'ambient-command',
+    EDITOR: 'ambient-command',
+    VISUAL: 'ambient-command',
+    PAGER: 'ambient-command',
+  };
+  const hardening = {
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_SSH_COMMAND: 'ssh -oBatchMode=yes',
+    GIT_EXTERNAL_DIFF: '',
+    GIT_TEXTCONV_DIFF: '',
+  };
+
+  assert.deepEqual(buildExecEnv(ambient), {});
+  assert.deepEqual(buildExecEnv(ambient, hardening), hardening);
+});
+
+test('exec env policy preserves node-local GIT_ASKPASS and an allowlisted companion credential', () => {
+  assert.deepEqual(buildExecEnv({
+    GIT_ASKPASS: '/opt/palantir/askpass',
+    REPO_PASSWORD: 'private-secret',
+    [GIT_ENV_ALLOWLIST_VARIABLE]: 'REPO_PASSWORD',
+    ANTHROPIC_API_KEY: 'must-not-pass',
+  }), {
+    GIT_ASKPASS: '/opt/palantir/askpass',
+    REPO_PASSWORD: 'private-secret',
+  });
+});
+
+test('LocalNodeExecutor.exec filters ambient env, keeps explicit overrides, and leaks zero secret keys', async () => {
+  const keys = [
+    'LOCAL_NODE_EXECUTOR_BASE_ENV',
+    'PALANTIR_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'AWS_SECRET_ACCESS_KEY',
+  ];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  process.env.LOCAL_NODE_EXECUTOR_BASE_ENV = 'ambient-must-not-pass';
+  process.env.PALANTIR_TOKEN = 'palantir-secret';
+  process.env.ANTHROPIC_API_KEY = 'anthropic-secret';
+  process.env.AWS_SECRET_ACCESS_KEY = 'aws-secret';
   try {
     const executor = createLocalNodeExecutor();
     const result = await executor.exec(
       process.execPath,
-      ['-e', 'process.stdout.write(`${process.env.LOCAL_NODE_EXECUTOR_BASE_ENV}:${process.env.LOCAL_NODE_EXECUTOR_OVERRIDE_ENV}`)'],
+      [
+        '-e',
+        [
+          'const secretKeys=["PALANTIR_TOKEN","ANTHROPIC_API_KEY","AWS_SECRET_ACCESS_KEY"];',
+          'process.stdout.write(JSON.stringify({',
+          'hasPath:Object.hasOwn(process.env,"PATH"),',
+          'ambient:process.env.LOCAL_NODE_EXECUTOR_BASE_ENV,',
+          'override:process.env.LOCAL_NODE_EXECUTOR_OVERRIDE_ENV,',
+          'secretKeys:secretKeys.filter((key)=>Object.hasOwn(process.env,key))',
+          '}));',
+        ].join(''),
+      ],
       { env: { LOCAL_NODE_EXECUTOR_OVERRIDE_ENV: 'override-visible' } },
     );
 
     assert.equal(result.code, 0);
-    assert.equal(result.stdout, 'base-visible:override-visible');
+    assert.deepEqual(JSON.parse(result.stdout), {
+      hasPath: true,
+      override: 'override-visible',
+      secretKeys: [],
+    });
   } finally {
-    if (oldBase === undefined) delete process.env.LOCAL_NODE_EXECUTOR_BASE_ENV;
-    else process.env.LOCAL_NODE_EXECUTOR_BASE_ENV = oldBase;
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
   }
+});
+
+test('LocalNodeExecutor.exec projectTest keeps runtime keys without control-plane secrets', async () => {
+  const keys = [
+    'NODE_ENV',
+    'VIRTUAL_ENV',
+    'PYTHONPATH',
+    PROJECT_TEST_ENV_ALLOWLIST_VARIABLE,
+    'PALANTIR_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'GIT_ASKPASS',
+    'HTTPS_PROXY',
+  ];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  process.env.NODE_ENV = 'project-suite-needs-this';
+  process.env.VIRTUAL_ENV = '/fixture/venv';
+  process.env.PYTHONPATH = '/opt/project-specific-python-libs';
+  process.env[PROJECT_TEST_ENV_ALLOWLIST_VARIABLE] = 'PYTHONPATH';
+  process.env.PALANTIR_TOKEN = 'palantir-secret';
+  process.env.ANTHROPIC_API_KEY = 'model-secret';
+  process.env.GIT_ASKPASS = '/fixture/credential-helper';
+  process.env.HTTPS_PROXY = 'http://user:password@proxy.example';
+  try {
+    const executor = createLocalNodeExecutor();
+    const script = [
+      'process.stdout.write(JSON.stringify({',
+      'project:process.env.NODE_ENV ?? null,',
+      'virtualEnv:process.env.VIRTUAL_ENV ?? null,',
+      'pythonPath:process.env.PYTHONPATH ?? null,',
+      'override:process.env.LOCAL_NODE_EXECUTOR_OVERRIDE_ENV ?? null,',
+      'palantir:process.env.PALANTIR_TOKEN ?? null,',
+      'anthropic:process.env.ANTHROPIC_API_KEY ?? null,',
+      'askpass:process.env.GIT_ASKPASS ?? null,',
+      'proxy:process.env.HTTPS_PROXY ?? null,',
+      '}));',
+    ].join('');
+    const opts = { env: { LOCAL_NODE_EXECUTOR_OVERRIDE_ENV: 'override-visible' } };
+
+    const projectTest = await executor.exec(process.execPath, ['-e', script], {
+      ...opts,
+      projectTest: true,
+    });
+    assert.deepEqual(JSON.parse(projectTest.stdout), {
+      project: 'project-suite-needs-this',
+      virtualEnv: '/fixture/venv',
+      pythonPath: '/opt/project-specific-python-libs',
+      override: 'override-visible',
+      palantir: null,
+      anthropic: null,
+      askpass: null,
+      proxy: null,
+    }, 'project tests keep runtime discovery without inheriting server credentials');
+
+    const filtered = await executor.exec(process.execPath, ['-e', script], opts);
+    assert.deepEqual(JSON.parse(filtered.stdout), {
+      project: null,
+      virtualEnv: null,
+      pythonPath: null,
+      override: 'override-visible',
+      palantir: null,
+      anthropic: null,
+      askpass: '/fixture/credential-helper',
+      proxy: 'http://user:password@proxy.example',
+    }, 'the default keeps the separate Git authentication policy');
+
+    assert.ok(PROJECT_TEST_ENV_KEYS.includes('NODE_ENV'));
+    assert.deepEqual(buildProjectTestEnv({
+      NODE_ENV: 'test',
+      PYTHONPATH: '/fixture/python',
+      [PROJECT_TEST_ENV_ALLOWLIST_VARIABLE]: 'PYTHONPATH',
+      PALANTIR_TOKEN: 'secret',
+    }), {
+      NODE_ENV: 'test',
+      PYTHONPATH: '/fixture/python',
+    });
+  } finally {
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+});
+
+test('configured exec allowlists reject control-plane credential names', () => {
+  assert.throws(
+    () => buildExecEnv({
+      [GIT_ENV_ALLOWLIST_VARIABLE]: 'REPO_PASSWORD,PALANTIR_TOKEN',
+      REPO_PASSWORD: 'private-secret',
+      PALANTIR_TOKEN: 'control-plane-secret',
+    }),
+    /cannot include control-plane credential PALANTIR_TOKEN/,
+  );
+  assert.throws(
+    () => buildProjectTestEnv({
+      [PROJECT_TEST_ENV_ALLOWLIST_VARIABLE]: 'PYTHONPATH,PALANTIR_PM_TOKEN',
+      PYTHONPATH: '/fixture/python',
+      PALANTIR_PM_TOKEN: 'control-plane-secret',
+    }),
+    /cannot include control-plane credential PALANTIR_PM_TOKEN/,
+  );
 });
 
 test('LocalNodeExecutor.exec rejects missing binary as spawn-level failure', async () => {

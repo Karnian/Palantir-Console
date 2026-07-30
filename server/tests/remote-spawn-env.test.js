@@ -7,6 +7,7 @@ const { PassThrough, Writable } = require('node:stream');
 
 const { createRemoteSshNodeExecutor, shq } = require('../services/remoteSshExecutor');
 const { createNodeUsageService } = require('../services/nodeUsageService');
+const { EXEC_ENV_KEYS } = require('../services/execEnvPolicy');
 
 const REMOTE_BASELINE = [
   'PATH',
@@ -330,7 +331,7 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
   );
 });
 
-test('git/materialize and filesystem exec paths keep their inherited-env behavior', async () => {
+test('git/materialize exec filters pod env with the shared policy while filesystem primitives stay separate', async () => {
   const spawn = makeSpawn((call, child) => {
     const script = logicalScriptOf(call);
     if (script === `exec ${shq('realpath')} ${shq('/srv/root')}`) {
@@ -346,14 +347,24 @@ test('git/materialize and filesystem exec paths keep their inherited-env behavio
     commandAllowlist: ['git'],
   });
 
-  await executor.exec('git', ['status'], { env: { LC_ALL: 'C' } });
+  await executor.exec('git', ['status'], {
+    env: { LC_ALL: 'C', PATH: '/explicit/git/bin' },
+  });
   await executor.realpath('/srv/root/project');
 
   const scripts = spawn.calls.map(logicalScriptOf);
   const gitScript = scripts.find((script) => script.includes(`${shq('git')} ${shq('status')}`));
   const filesystemScripts = scripts.filter((script) => script.includes(shq('realpath')));
-  assert.equal(gitScript, `exec env LC_ALL=${shq('C')} ${shq('git')} ${shq('status')}`);
-  assert.equal(gitScript.includes('env -i'), false);
+  assert.ok(gitScript.startsWith('set --; for k in '), gitScript);
+  assert.ok(gitScript.includes('exec env -i "$@"'), gitScript);
+  for (const key of EXEC_ENV_KEYS) {
+    assert.ok(gitScript.includes(shq(key)), `remote exec lost shared policy key ${key}`);
+  }
+  assert.ok(gitScript.includes(`PATH=${shq('/explicit/git/bin')}`));
+  assert.ok(gitScript.endsWith(`LC_ALL=${shq('C')} PATH=${shq('/explicit/git/bin')} ${shq('git')} ${shq('status')}`));
+  for (const secretKey of ['PALANTIR_TOKEN', 'ANTHROPIC_API_KEY', 'AWS_SECRET_ACCESS_KEY']) {
+    assert.equal(gitScript.includes(secretKey), false, `remote exec exposed ${secretKey}`);
+  }
   assert.ok(filesystemScripts.length > 0);
   for (const script of filesystemScripts) assert.equal(script.includes('env -i'), false);
 });

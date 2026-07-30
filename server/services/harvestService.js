@@ -321,6 +321,11 @@ async function runExecutorTestCommand({
     res = await executor.exec(testRunner.bin, args, {
       cwd,
       env: useLocalNodeResolution ? buildHarvestEnvFromNode(projectNode) : undefined,
+      // Repository tests may need runtime discovery beyond Git, but execute
+      // agent-modifiable code and therefore must not inherit the Console's full
+      // environment. Both executor implementations map this explicit mode to
+      // the shared project-test positive allowlist.
+      projectTest: true,
       timeoutMs,
       maxBuffer: MAX_OUTPUT_TAIL_CHARS * 2,
     });
