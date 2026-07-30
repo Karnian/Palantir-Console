@@ -32,6 +32,7 @@ const {
   resolveActorTokenPolicy,
   applyWorkerCredentialPolicy,
   isActorCredentialKey,
+  isWorkerApiBaseKey,
 } = require('./actorTokenPolicy');
 const { isBearerEnvKeyDenied } = require('./envDenylist');
 const {
@@ -1112,7 +1113,7 @@ function createLifecycleService({
     }
     const buildWorkerEnv = (explicitEnv) => applyWorkerCredentialPolicy(explicitEnv, {
       workerToken: workerProposalToken,
-      apiBase: proposalApiBase,
+      apiBase: workerProposalToken ? proposalApiBase : null,
       actorTokens,
     });
     const profile = agentProfileService.getProfile(agentProfileId);
@@ -2173,7 +2174,12 @@ function createLifecycleService({
   function parseEnvAllowlistArray(allowlistJson) {
     try {
       const arr = JSON.parse(allowlistJson || '[]');
-      return Array.isArray(arr) ? arr.filter(k => typeof k === 'string') : [];
+      // This endpoint is selected by the server and is meaningful only with a
+      // run-bound worker capability. Never ask a remote executor to recover an
+      // ambient pod value for it; the executor enforces the same boundary.
+      return Array.isArray(arr)
+        ? arr.filter(k => typeof k === 'string' && !isWorkerApiBaseKey(k))
+        : [];
     } catch {
       return [];
     }

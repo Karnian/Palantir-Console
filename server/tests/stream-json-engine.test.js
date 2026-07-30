@@ -95,6 +95,17 @@ function createFakeRemoteChild() {
   return child;
 }
 
+function isolatedActorPolicy() {
+  return {
+    humanToken: 'human-secret',
+    agentToken: 'automation-secret',
+    separated: true,
+    processIsolated: true,
+    capabilitiesEnabled: true,
+    boundary: 'run_capabilities',
+  };
+}
+
 function writeGeneratedFixtureExecutable(source) {
   const file = path.join(
     __dirname,
@@ -212,10 +223,10 @@ test('engine: detached remote worker keeps prompts and controller credentials ou
  *
  * @returns {{ engine, argsFile: string }}
  */
-function makeEngine({ runService = null, eventBus = null } = {}) {
+function makeEngine({ runService = null, eventBus = null, actorTokens = undefined } = {}) {
   process.env.CLAUDE_BIN = fakeClaudioPath;
   const { createStreamJsonEngine } = require('../services/streamJsonEngine');
-  const engine = createStreamJsonEngine({ runService, eventBus });
+  const engine = createStreamJsonEngine({ runService, eventBus, actorTokens });
   _allEngines.push(engine);
   return { engine };
 }
@@ -317,6 +328,61 @@ test('engine: worker option-like prompts cannot be parsed as Claude CLI flags', 
       'all Claude options are assembled before the terminator',
     );
   }
+});
+
+test('engine: local worker enforces token-coupled API base policy in the child environment', async (t) => {
+  const { engine } = makeEngine({ actorTokens: isolatedActorPolicy() });
+  const apiBase = 'https://console.example:8443/proxy-prefix';
+  const unpairedEnvFile = path.join(os.tmpdir(), `palantir-claude-env-unpaired-${process.pid}.json`);
+  const pairedEnvFile = path.join(os.tmpdir(), `palantir-claude-env-paired-${process.pid}.json`);
+  t.after(() => {
+    try { fs.unlinkSync(unpairedEnvFile); } catch {}
+    try { fs.unlinkSync(pairedEnvFile); } catch {}
+  });
+
+  await spawnAndCaptureArgs(engine, 'run-local-unpaired-api-base', {
+    prompt: 'inspect unpaired env',
+    isManager: false,
+    env: {
+      CLAUDE_ENV_FILE: unpairedEnvFile,
+      PALANTIR_API_BASE: apiBase,
+    },
+  });
+  assert.deepEqual(JSON.parse(fs.readFileSync(unpairedEnvFile, 'utf8')), {});
+
+  await spawnAndCaptureArgs(engine, 'run-local-paired-api-base', {
+    prompt: 'inspect paired env',
+    isManager: false,
+    env: {
+      CLAUDE_ENV_FILE: pairedEnvFile,
+      PALANTIR_WORKER_TOKEN: 'scoped-token',
+      PALANTIR_API_BASE: `${apiBase}/`,
+    },
+  });
+  assert.deepEqual(JSON.parse(fs.readFileSync(pairedEnvFile, 'utf8')), {
+    PALANTIR_WORKER_TOKEN: 'scoped-token',
+    PALANTIR_API_BASE: apiBase,
+  });
+});
+
+test('engine: local worker rejects API base URL userinfo before spawn', () => {
+  const { engine } = makeEngine({ actorTokens: isolatedActorPolicy() });
+  assert.throws(
+    () => engine.spawnAgent('run-local-userinfo-api-base', {
+      cwd: os.tmpdir(),
+      prompt: 'must not spawn',
+      isManager: false,
+      env: {
+        PALANTIR_WORKER_TOKEN: 'scoped-token',
+        PALANTIR_API_BASE: 'http://local-user:local-password@console.internal:4177',
+      },
+    }),
+    (err) => (
+      err.code === 'WORKER_API_BASE_USERINFO'
+      && !/local-user|local-password/.test(err.message)
+    ),
+  );
+  assert.equal(engine.hasProcess('run-local-userinfo-api-base'), false);
 });
 
 test('engine: manager spawn args contain --input-format stream-json, no -p', async () => {

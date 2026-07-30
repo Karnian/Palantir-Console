@@ -330,6 +330,52 @@ test('remote worker gets no loopback memory capability without a public Console 
   assert.doesNotMatch(spec.args.join(' '), /memory\/propose/);
 });
 
+test('remote worker gets no API base when proposal token mint returns null', async (t) => {
+  const db = await mkdb(t);
+  const minted = [];
+  const caseVariantApiBase = 'http://case-user:case-password@console.internal:4177';
+  const previousCaseVariantApiBase = process.env.palantir_api_base;
+  process.env.palantir_api_base = caseVariantApiBase;
+  t.after(() => {
+    if (previousCaseVariantApiBase === undefined) delete process.env.palantir_api_base;
+    else process.env.palantir_api_base = previousCaseVariantApiBase;
+  });
+  const h = buildHarness(db, {
+    lifecycleOptions: {
+      workerProposalTokenService: {
+        mint(runId, claims) {
+          minted.push({ runId, claims });
+          return null;
+        },
+      },
+      workerProposalBaseUrl: 'http://127.0.0.1:4177',
+      workerProposalRemoteBaseUrl: 'https://console.tailnet.example/proxy-prefix',
+    },
+  });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { envAllowlist: ['palantir_api_base'] });
+  const project = h.projectService.createProject({
+    name: 'RemoteMintDisabled',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+
+  await h.lifecycleService.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'run remotely without a minted capability',
+  });
+
+  assert.equal(minted.length, 1);
+  const spec = h.remoteChannel.spawned[0].payload.spec;
+  assert.equal('PALANTIR_WORKER_TOKEN' in spec.env, false);
+  assert.equal('PALANTIR_API_BASE' in spec.env, false);
+  assert.equal('palantir_api_base' in spec.env, false);
+  assert.deepEqual(spec.envAllowlist, []);
+  assert.equal(JSON.stringify(spec).includes(caseVariantApiBase), false);
+  assert.doesNotMatch(spec.stdin, /memory\/propose/);
+});
+
 test('remote worker receives memory capability with an explicitly reachable Console base URL', async (t) => {
   const db = await mkdb(t);
   const h = buildHarness(db, {

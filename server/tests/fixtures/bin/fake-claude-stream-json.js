@@ -5,6 +5,15 @@ const fs = require('node:fs');
 const readline = require('node:readline');
 
 const args = process.argv.slice(2);
+const envFile = process.env.CLAUDE_ENV_FILE;
+if (envFile) {
+  try {
+    fs.writeFileSync(envFile, JSON.stringify({
+      PALANTIR_WORKER_TOKEN: process.env.PALANTIR_WORKER_TOKEN,
+      PALANTIR_API_BASE: process.env.PALANTIR_API_BASE,
+    }));
+  } catch { /* ignore */ }
+}
 const argsFile = process.env.CLAUDE_ARGS_FILE;
 if (argsFile) {
   try { fs.writeFileSync(argsFile, JSON.stringify(args)); } catch { /* ignore */ }

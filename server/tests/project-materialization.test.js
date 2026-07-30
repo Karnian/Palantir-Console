@@ -223,10 +223,23 @@ test('remote materialization authenticates private HTTPS through pod GIT_ASKPASS
   const tlsCert = path.join(root, 'tls-cert.pem');
   const askpass = path.join(root, 'askpass.sh');
   const askpassLog = path.join(root, 'askpass.log');
+  const podHome = path.join(root, 'pod-home');
 
   fs.mkdirSync(source, { recursive: true });
   fs.mkdirSync(path.dirname(bare), { recursive: true });
   fs.mkdirSync(path.join(root, '.palantir-workspaces'));
+  fs.mkdirSync(podHome);
+  // The loopback shell models a separate pod, so its Git configuration must
+  // not inherit the test host's system credential helper. In particular,
+  // macOS credential-osxkeychain can block forever while storing this fixture
+  // credential under an isolated test HOME. An empty helper resets the system
+  // helper list while leaving GIT_ASKPASS as the authentication mechanism this
+  // test exercises.
+  fs.writeFileSync(path.join(podHome, '.gitconfig'), [
+    '[credential]',
+    '\thelper =',
+    '',
+  ].join('\n'));
   execFileSync('git', ['init', '-b', 'main', source], { stdio: 'ignore' });
   execFileSync('git', ['-C', source, 'config', 'user.name', 'Fixture']);
   execFileSync('git', ['-C', source, 'config', 'user.email', 'fixture@example.com']);
@@ -344,7 +357,7 @@ test('remote materialization authenticates private HTTPS through pod GIT_ASKPASS
     const remoteArgs = args.slice(separator + 2);
     return spawn('sh', ['-c', remoteArgs.join(' ')], {
       ...opts,
-      env: { ...process.env },
+      env: { ...process.env, HOME: podHome },
     });
   }
   const executor = createRemoteSshNodeExecutor(node, { spawnFn: loopbackSpawn });

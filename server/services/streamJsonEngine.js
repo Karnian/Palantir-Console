@@ -9,6 +9,7 @@ const {
   resolveActorTokenPolicy,
   buildWorkerProcessEnv,
   augmentProcessPath,
+  applyWorkerCredentialPolicy,
 } = require('./actorTokenPolicy');
 
 function buildRemoteWorkerEnv(env) {
@@ -348,9 +349,16 @@ function createStreamJsonEngine({
       // PR4: if the caller passes a filtered env (manager adapter path), use it
       // as the authoritative base instead of process.env. Worker/legacy callers
       // receive only the safe process baseline plus their explicit allowlist.
-      const baseEnv = (isManager && env)
+      const profileEnv = (isManager && env)
         ? env
         : buildWorkerProcessEnv(process.env, env, actorTokens);
+      const baseEnv = isManager
+        ? profileEnv
+        : applyWorkerCredentialPolicy(profileEnv, {
+          workerToken: profileEnv.PALANTIR_WORKER_TOKEN,
+          apiBase: profileEnv.PALANTIR_API_BASE,
+          actorTokens,
+        });
       const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
       spawnEnv = augmentProcessPath(baseEnv, extraPaths);
     }
