@@ -620,6 +620,105 @@ test('a persisted numeric terminal flag cannot close the current owner lane', as
   assert.deepEqual(dispatched, ['oinv_first']);
 });
 
+test('persisted reconciliation follows JSON.parse for duplicate correlation keys', async (t) => {
+  const cases = [
+    {
+      name: 'duplicate top-level data keys',
+      suffix: 'duplicate_data',
+      payload(invocationId) {
+        return `{"data":{"invocationId":"wrong","terminal":false},"data":{"invocationId":"${invocationId}","terminal":true}}`;
+      },
+    },
+    {
+      name: 'duplicate invocationId keys',
+      suffix: 'duplicate_invocation',
+      payload(invocationId) {
+        return `{"data":{"invocationId":"wrong","invocationId":"${invocationId}","terminal":true}}`;
+      },
+    },
+  ];
+
+  for (const regressionCase of cases) {
+    await t.test(regressionCase.name, async (t) => {
+      const baseEventBus = createEventBus();
+      let droppedCallbacks = 0;
+      const eventBus = {
+        ...baseEventBus,
+        subscribe(callback) {
+          return baseEventBus.subscribe((event) => {
+            if (
+              droppedCallbacks === 0
+              && event?.channel === 'run:event'
+              && event.data?.eventType === 'mgr.turn_completed'
+            ) {
+              droppedCallbacks += 1;
+              return;
+            }
+            callback(event);
+          });
+        },
+      };
+      const h = createHarness(t, { eventBus, withRunService: true });
+      const invocationId = `oinv_${regressionCase.suffix}`;
+      const conversationId = `operator:oi_${regressionCase.suffix}`;
+      const run = h.runService.createRun({
+        is_manager: true,
+        manager_layer: 'operator',
+        conversation_id: conversationId,
+        prompt: 'operator',
+      });
+      h.runService.updateRunStatus(run.id, 'running', { force: true });
+      const dispatched = [];
+      h.service.setDispatcher((_conversationId, _payload, adapterInvocationId) => {
+        dispatched.push(adapterInvocationId);
+        return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+      });
+      h.service.start();
+
+      const first = await h.service.enqueue(
+        conversationId,
+        { text: 'first scheduled turn', source: 'scheduled' },
+        {
+          idempotencyKey: `invocation:${invocationId}`,
+          adapterInvocationId: invocationId,
+          requireImmediate: true,
+        },
+      );
+      assert.equal(first.message.status, 'processing');
+
+      h.runService.addRunEvent(
+        run.id,
+        'mgr.turn_completed',
+        regressionCase.payload(invocationId),
+      );
+      assert.equal(droppedCallbacks, 1, 'the live completion callback must actually be lost');
+      assert.equal(
+        h.service.getMessage(first.message.id).status,
+        'processing',
+        'the persisted reconciler must be responsible for settlement',
+      );
+
+      await h.service.tick();
+      assert.equal(h.service.getMessage(first.message.id).status, 'delivered');
+      await h.service.awaitDrain();
+
+      const nextInvocationId = `${invocationId}_next`;
+      const next = await h.service.enqueue(
+        conversationId,
+        { text: 'next scheduled turn', source: 'scheduled' },
+        {
+          idempotencyKey: `invocation:${nextInvocationId}`,
+          adapterInvocationId: nextInvocationId,
+          requireImmediate: true,
+        },
+      );
+      assert.equal(next.status, 'sent');
+      assert.equal(next.message.status, 'processing');
+      assert.deepEqual(dispatched, [invocationId, nextInvocationId]);
+    });
+  }
+});
+
 test('persisted duplicate terminal keys cannot disagree with the live JSON parser', async (t) => {
   const h = createHarness(t, { withRunService: true });
   const run = h.runService.createRun({

@@ -571,6 +571,50 @@ test('a persisted numeric terminal flag cannot complete a running invocation', (
   );
 });
 
+test('scheduled reconciliation follows JSON.parse for duplicate correlation keys', async (t) => {
+  const cases = [
+    {
+      name: 'duplicate top-level data keys',
+      payload(invocationId) {
+        return `{"data":{"invocationId":"wrong","terminal":false},"data":{"invocationId":"${invocationId}","terminal":true}}`;
+      },
+    },
+    {
+      name: 'duplicate invocationId keys',
+      payload(invocationId) {
+        return `{"data":{"invocationId":"wrong","invocationId":"${invocationId}","terminal":true}}`;
+      },
+    },
+  ];
+
+  for (const regressionCase of cases) {
+    await t.test(regressionCase.name, (t) => {
+      const h = harness(t);
+      const { instance } = createMappedOperator(h);
+      const schedule = h.scheduleService.createSchedule(instance.id, {
+        name: 'Duplicate correlation keys',
+        prompt: 'Check',
+        rule: { kind: 'interval', minutes: 60 },
+      });
+      const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+      h.db.prepare(`
+        INSERT INTO run_events (run_id, event_type, payload_json)
+        VALUES (?, 'mgr.turn_completed', ?)
+      `).run(managerRun.id, regressionCase.payload(claimed.id));
+
+      const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+      assert.equal(reconciled.length, 1);
+      assert.equal(reconciled[0].status, 'completed');
+      assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'completed');
+      assert.equal(
+        h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+        'pending',
+        'the persisted completion must release the OS-4 slot',
+      );
+    });
+  }
+});
+
 test('eight newer duplicate-terminal candidates cannot hide an earlier scheduled terminal event', (t) => {
   const h = harness(t);
   const { instance } = createMappedOperator(h);

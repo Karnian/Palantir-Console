@@ -276,17 +276,20 @@ function createManagerMessageQueueService({
       ORDER BY sequence
     `),
     // Correlate before the bounded scan so unrelated and non-terminal events
-    // consume no JavaScript parsing budget. The path lookup cheaply prunes
-    // unrelated invocations; the nested scan then selects the last duplicate
-    // object member to match JSON.parse terminality before LIMIT is applied.
-    // Oldest-first ordering preserves the live CAS contract.
+    // consume no JavaScript parsing budget. Merge-patching into an empty object
+    // is a fast prefilter that preserves later duplicate correlation values;
+    // the nested scans remain authoritative because merge patch may combine
+    // repeated objects. Oldest-first ordering preserves the live CAS contract.
     terminalEventCandidates: db.prepare(`
       SELECT event_type, payload_json
       FROM run_events
       WHERE run_id = ?
         AND event_type IN ('mgr.turn_completed', 'mgr.turn_failed')
         AND json_extract(
-              CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
+              json_patch(
+                '{}',
+                CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END
+              ),
               '$.data.invocationId'
             ) = ?
         AND EXISTS (
