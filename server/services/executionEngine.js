@@ -693,7 +693,7 @@ function createSubprocessEngine({
 
   function spawnAgent(
     runId,
-    { command, args, stdin, cwd, env, outputLogPath },
+    { command, args, stdin, cwd, env, outputLogPath, leaseId, onExit },
     spawnActorTokens = actorTokens,
   ) {
     const safeCwd = validateCwd(cwd);
@@ -738,7 +738,17 @@ function createSubprocessEngine({
     child.stdout.on('data', appendOutput);
     child.stderr.on('data', appendOutput);
 
-    const proc = { child, outputBuffer, logStream, exitCode: null, exitedAt: null, spawnError: null };
+    const proc = {
+      child,
+      outputBuffer,
+      logStream,
+      exitCode: null,
+      exitedAt: null,
+      spawnError: null,
+      leaseId: leaseId || null,
+      onExit: typeof onExit === 'function' ? onExit : null,
+      ownerExitFired: false,
+    };
     processes.set(runId, proc);
 
     // CRITICAL: Handle spawn errors (e.g., command not found — ENOENT).
@@ -754,6 +764,13 @@ function createSubprocessEngine({
       if (proc) {
         proc.exitCode = code;
         proc.exitedAt = Date.now();
+        if (!proc.ownerExitFired && proc.onExit) {
+          proc.ownerExitFired = true;
+          try {
+            const pending = proc.onExit({ runId, leaseId: proc.leaseId, code });
+            if (pending && typeof pending.catch === 'function') pending.catch(() => {});
+          } catch { /* owner observation must not alter process handling */ }
+        }
       }
     });
 

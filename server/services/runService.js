@@ -687,6 +687,29 @@ function createRunService(db, eventBus) {
          )
     `),
     delete: db.prepare('DELETE FROM runs WHERE id = ?'),
+    // S1a owner leases. There is intentionally no FK to runs: a closed lease is
+    // durable ownership evidence and must survive deletion of its run row.
+    insertOwnerLease: db.prepare(`
+      INSERT INTO run_owner_leases (run_id, lease_id, state, acquired_at)
+      SELECT id, ?, 'held', NULL
+      FROM runs
+      WHERE id = ? AND is_manager = 0
+    `),
+    getHeldOwnerLease: db.prepare(`
+      SELECT * FROM run_owner_leases
+      WHERE run_id = ? AND state = 'held'
+      LIMIT 1
+    `),
+    stampOwnerLeaseAcquired: db.prepare(`
+      UPDATE run_owner_leases
+      SET acquired_at = datetime('now')
+      WHERE run_id = ? AND lease_id = ? AND state = 'held' AND acquired_at IS NULL
+    `),
+    closeOwnerLease: db.prepare(`
+      UPDATE run_owner_leases
+      SET state = ?, closed_at = datetime('now')
+      WHERE run_id = ? AND lease_id = ? AND state = 'held'
+    `),
     // Events
     insertEvent: db.prepare(`
       INSERT INTO run_events (run_id, event_type, payload_json)
@@ -721,6 +744,42 @@ function createRunService(db, eventBus) {
       LIMIT 1
     `),
   };
+
+  const claimQueuedRunTx = db.transaction((id, leaseId) => {
+    const info = stmts.claimQueued.run(id);
+    if (info.changes === 0) return null;
+    const leaseInfo = stmts.insertOwnerLease.run(leaseId, id);
+    return {
+      changes: info.changes,
+      leaseId: leaseInfo.changes > 0 ? leaseId : null,
+    };
+  });
+
+  const markRunStartedTx = db.transaction((id, leaseId, fields) => {
+    stmts.updateStarted.run(
+      fields.tmux_session || null,
+      fields.worktree_path || null,
+      fields.branch || null,
+      id
+    );
+    if (leaseId) {
+      stmts.stampOwnerLeaseAcquired.run(id, leaseId);
+    }
+  });
+
+  const releaseOwnerTx = db.transaction((runId, leaseId, state, evidence) => {
+    const info = stmts.closeOwnerLease.run(state, runId, leaseId);
+    if (info.changes === 0) return null;
+    const eventType = state === 'released'
+      ? 'worker:owner_released'
+      : 'worker:owner_abandoned';
+    const eventInfo = stmts.insertEvent.run(
+      runId,
+      eventType,
+      JSON.stringify({ lease_id: leaseId, evidence: evidence ?? null }),
+    );
+    return { eventType, eventId: eventInfo.lastInsertRowid };
+  });
 
   function listRuns({ task_id, status } = {}) {
     if (task_id) return stmts.getByTask.all(task_id);
@@ -1098,14 +1157,15 @@ function createRunService(db, eventBus) {
     return run;
   }
 
-  function markRunStarted(id, { tmux_session, worktree_path, branch } = {}) {
+  function markRunStarted(id, leaseIdOrFields = {}, maybeFields) {
+    const separateLeaseArg = arguments.length >= 3 || typeof leaseIdOrFields === 'string';
+    const leaseId = separateLeaseArg
+      ? (leaseIdOrFields || null)
+      : (leaseIdOrFields?.leaseId || leaseIdOrFields?.lease_id || null);
+    const fields = separateLeaseArg ? (maybeFields || {}) : (leaseIdOrFields || {});
+    const { tmux_session, worktree_path, branch } = fields;
     const prev = getRun(id);
-    stmts.updateStarted.run(
-      tmux_session || null,
-      worktree_path || null,
-      branch || null,
-      id
-    );
+    markRunStartedTx(id, leaseId, fields);
     const run = stmts.getById.get(id);
     // #436: the tmux session NAME is enough to attach to the worker's terminal,
     // which is authority well beyond the Console API. The run row still stores it
@@ -1206,13 +1266,13 @@ function createRunService(db, eventBus) {
     `).run(Number(retryCount) || 0, id);
   }
 
-  function claimQueuedRun(id) {
+  function claimQueuedRun(id, { withLease = false } = {}) {
     if (repoFeatureEnabled()) {
       const current = stmts.getById.get(id);
-      if (isUnreadyGitRun(current)) return 0;
+      if (isUnreadyGitRun(current)) return withLease ? null : 0;
     }
-    const info = stmts.claimQueued.run(id);
-    if (info.changes === 0) return 0;
+    const claimed = claimQueuedRunTx(id, crypto.randomUUID());
+    if (!claimed) return withLease ? null : 0;
     const run = stmts.getById.get(id);
     addRunEvent(id, 'status:running', JSON.stringify({ reason: 'queue:claim' }));
     if (eventBus) {
@@ -1226,7 +1286,35 @@ function createRunService(db, eventBus) {
         node_id: run.node_id || null,
       });
     }
-    return info.changes;
+    return withLease
+      ? { claimed: true, leaseId: claimed.leaseId }
+      : claimed.changes;
+  }
+
+  function getHeldLease(runId) {
+    return stmts.getHeldOwnerLease.get(runId) || null;
+  }
+
+  function releaseOwner(runId, leaseId, options = {}, legacyOptions = {}) {
+    const normalized = typeof options === 'string'
+      ? { ...legacyOptions, state: options }
+      : (options || {});
+    const { state, evidence = null } = normalized;
+    if (state !== 'released' && state !== 'abandoned') {
+      throw new BadRequestError('Owner lease state must be released or abandoned');
+    }
+    const released = releaseOwnerTx(runId, leaseId, state, evidence);
+    if (!released) return false;
+    if (eventBus) {
+      // releaseOwnerTx has returned, so its transaction is committed before
+      // subscribers can observe the lease/event pair.
+      eventBus.emit('run:event', {
+        runId,
+        eventType: released.eventType,
+        eventId: released.eventId,
+      });
+    }
+    return true;
   }
 
   function claimQueuedRunForMaterialization(id) {
@@ -1799,6 +1887,13 @@ function createRunService(db, eventBus) {
 
   function deleteRun(id) {
     getRun(id);
+    const heldLease = getHeldLease(id);
+    if (heldLease) {
+      releaseOwner(id, heldLease.lease_id, {
+        state: 'abandoned',
+        evidence: 'run_deleted',
+      });
+    }
     stmts.delete.run(id);
   }
 
@@ -1970,6 +2065,7 @@ function createRunService(db, eventBus) {
     getOldestMaterializableOnNode,
     countMaterializingOnNode, countMaterializingGlobal,
     claimQueuedRun, claimQueuedRunForMaterialization, restartMaterializationAttempt,
+    getHeldLease, releaseOwner,
     markMaterializePending, updateRunMaterialized, markMaterializedReady,
     getProjectNodeWorkspace, markProjectNodeWorkspaceReady, markProjectNodeWorkspaceFailed,
     touchProjectNodeWorkspace, acquireMaterializationLease, touchMaterializationLease, releaseMaterializationLease,

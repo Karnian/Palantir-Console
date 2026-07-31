@@ -1096,9 +1096,12 @@ function createLifecycleService({
         return null;
       }
     }
-    const claimed = runService.claimQueuedRun(runId);
+    const claimed = runService.claimQueuedRun(runId, { withLease: true });
     if (!claimed) return null;
+    const leaseId = claimed.leaseId;
+    let spawnAccepted = false;
 
+    try {
     const run = runService.getRun(runId);
     let queuedArgs;
     try {
@@ -1179,6 +1182,10 @@ function createLifecycleService({
     }
     const node = getDispatchNode(run.node_id);
     const isRemoteNode = node && (node.kind || 'local') !== 'local';
+    const releaseOnLocalProcessExit = () => runService.releaseOwner(run.id, leaseId, {
+      state: 'released',
+      evidence: 'process_exit',
+    });
     // Loopback is a valid destination only for local workers. Remote workers
     // receive the proposal capability solely when the operator configured a
     // PALANTIR_BASE_URL that is reachable from the worker node.
@@ -1820,9 +1827,14 @@ function createLifecycleService({
                 ...parseEnvAllowlistArray(profile.env_allowlist),
                 ...trustedBearerEnvKeys,
               ],
+              ...(!isRemoteNode ? {
+                leaseId,
+                onExit: releaseOnLocalProcessExit,
+              } : {}),
               ...(isolatedOpts || {}),
             },
           });
+          spawnAccepted = true;
         } catch (spawnErr) {
           // spawnAgent itself invokes its onCleanup before rethrow when
           // spawn() is called, so the temp dir is already gone. This is
@@ -2004,8 +2016,13 @@ function createLifecycleService({
               : undefined,
             workerPath: isRemoteNode ? (node.node_prefix || undefined) : undefined,
             outputLogPath: goalOutputLog || undefined,
+            ...(!isRemoteNode && executionEngine?.type === 'subprocess' ? {
+              leaseId,
+              onExit: releaseOnLocalProcessExit,
+            } : {}),
           },
         });
+        spawnAccepted = true;
       }
 
       // Persist the recovery safety marker only after the worker channel has
@@ -2019,7 +2036,7 @@ function createLifecycleService({
       }));
 
       // Mark run as started
-      runService.markRunStarted(run.id, {
+      runService.markRunStarted(run.id, leaseId, {
         tmux_session: result.sessionName || null,
         worktree_path: worktreePath,
         branch,
@@ -2033,6 +2050,7 @@ function createLifecycleService({
       return runService.getRun(run.id);
     } catch (error) {
       if (isRemoteNode && error.code === 'REMOTE_SPAWN_UNCERTAIN') {
+        spawnAccepted = true;
         // The SSH acknowledgement was lost after the detached start command
         // may have crossed the node boundary. Keep this SAME run as the durable
         // owner and let tmux/exit-sentinel health reconciliation decide whether
@@ -2065,7 +2083,7 @@ function createLifecycleService({
           session_name: error.sessionName || `palantir-run-${run.id}`,
           reason: 'ssh_ack_lost_after_detached_start',
         }));
-        runService.markRunStarted(run.id, {
+        runService.markRunStarted(run.id, leaseId, {
           tmux_session: error.sessionName || `palantir-run-${run.id}`,
           worktree_path: worktreePath,
           branch,
@@ -2090,6 +2108,14 @@ function createLifecycleService({
         task_id: run.task_id,
       });
       throw error;
+    }
+    } finally {
+      if (!spawnAccepted) {
+        runService.releaseOwner(runId, leaseId, {
+          state: 'released',
+          evidence: 'spawn_failed',
+        });
+      }
     }
   }
 
