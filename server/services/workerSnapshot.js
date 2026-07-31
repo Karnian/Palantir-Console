@@ -53,9 +53,25 @@ function validId(value) {
   return ID_RE.test(text) ? text : '<invalid-id>';
 }
 
+// A basename is NOT inherently safe: it is attacker-influenced input (a remote
+// executor's ps output, or a worker that exec'd a temp file). `/tmp/TOK_9C2D`
+// has a basename that passes any character-class check, so codex demonstrated
+// raw secrets surviving into the payload. Treat it like profile.command: known
+// executables pass through for observability, everything else collapses to a
+// stable hash so identical binaries still group without carrying their name.
+const KNOWN_EXECUTABLES = new Set([
+  'node', 'npm', 'npx', 'deno', 'bun',
+  'python', 'python3', 'pip', 'pip3',
+  'sh', 'bash', 'zsh', 'dash', 'env', 'tmux', 'ssh', 'sshd',
+  'git', 'make', 'cargo', 'go', 'ruby', 'java',
+  'codex', 'claude', 'gemini', 'opencode',
+]);
+
 function safeBasename(value) {
   const base = path.basename(typeof value === 'string' ? value : '');
-  return BASENAME_RE.test(base) ? base : '<invalid>';
+  if (!BASENAME_RE.test(base)) return '<invalid>';
+  if (KNOWN_EXECUTABLES.has(base)) return base;
+  return `custom:${crypto.createHash('sha256').update(base, 'utf8').digest('hex').slice(0, 8)}`;
 }
 
 function safeCommand(value) {
@@ -254,16 +270,25 @@ function parseProcessTable(stdout) {
   return rows;
 }
 
+// Index by parent and walk once. The previous fixed-point loop rescanned every
+// row per round, so a reversed parent chain made this O(n^2): codex measured a
+// 3.08s synchronous stall on an 18k-process table even with timeoutMs=50. The
+// collection deadline cannot cover synchronous work, so the work itself must be
+// linear — S0 must never delay the kill it precedes.
 function descendantsOf(rows, rootPid) {
+  const byParent = new Map();
+  for (const row of rows) {
+    let bucket = byParent.get(row.ppid);
+    if (!bucket) { bucket = []; byParent.set(row.ppid, bucket); }
+    bucket.push(row);
+  }
   const pids = new Set([rootPid]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const row of rows) {
-      if (pids.has(row.ppid) && !pids.has(row.pid)) {
-        pids.add(row.pid);
-        changed = true;
-      }
+  const stack = [rootPid];
+  while (stack.length) {
+    for (const child of byParent.get(stack.pop()) || []) {
+      if (pids.has(child.pid)) continue;
+      pids.add(child.pid);
+      stack.push(child.pid);
     }
   }
   return rows.filter(row => pids.has(row.pid));

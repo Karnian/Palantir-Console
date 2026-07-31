@@ -110,8 +110,9 @@ SIGINT 가 워커에 전파될 여지라도 있지만, 그룹을 분리하면 �
 | `profile.type` | 알려진 enum(`codex`·`claude-code`·`gemini`) 밖이면 `other`. **DB 에 enum 제약이 없다** |
 | `profile.args_template_keys` | **알려진 플래그 이름 enum** 밖이면 `<unknown-flag>`. 값은 전부 제거 |
 | `argv[0]` | 실행파일. basename 규칙(아래) 적용 |
+| **basename 규칙** | `path.basename` 후 `^[A-Za-z0-9._-]{1,64}$` 검증. **알려진 실행파일 집합**(node·python·sh·git·codex·claude 등)에 있으면 그대로, 그 외는 `custom:<sha256 앞 8자>`. **형식 검증만으로는 부족하다** — `/tmp/TOK_9C2D` 의 basename 은 어떤 문자클래스 검사도 통과하므로 원문이 그대로 남는다 |
 | `argv[1..]` | **알려진 플래그 이름**이면 그대로, 그 외 전부 `<redacted:N>`(N=바이트 길이). **basename 허용은 `argv[0]` 에만** — 영숫자 비밀값이 basename 규칙을 통과할 수 있다 |
-| `tree[].exe_basename` | `path.basename` 적용 후 `^[A-Za-z0-9._-]{1,64}$` 검증. 미달이면 `<invalid>` |
+| `tree[].exe_basename` | 위 **basename 규칙** 과 동일(미달 `<invalid>`, 미지 실행파일 `custom:<hash>`) |
 | `tree[].state` | 고정 enum `R`·`S`·`D`·`T`·`Z`·`I` 로 정규화. 그 외 전부 `?` |
 | `tree[]` 나머지 | `pid`·`ppid`·`pgid`·`cputime_s` **만**(정수/실수) |
 | `fd_summary` | 종류별 **개수만** `{file,socket,pipe,other}`. 경로 금지 |
@@ -124,6 +125,9 @@ SIGINT 가 워커에 전파될 여지라도 있지만, 그룹을 분리하면 �
   command 는 빌트인 집합 밖이면 해시, type/플래그는 enum, basename 은 문자 클래스 검증,
   argv 는 allowlist, 수집 오류는 고정 코드 집합.
 - 상한: 이벤트당 **16KB**, `tree` **64 노드**. 초과 시 절단 + `truncated:true`.
+- **수집은 선형이어야 한다.** 타임아웃은 동기 작업을 덮지 못한다 — 프로세스 트리 계산이
+  O(n²)면 `timeoutMs` 와 무관하게 health loop 와 뒤따르는 kill 이 멈춘다(codex 가 18k행
+  역순 부모 체인에서 3.08초 정지를 실측). 부모→자식 인덱스를 만들어 한 번만 순회한다.
 - 보존: 기존 `run_events` 정책. 별도 저장소를 만들지 않는다.
 - allowlist 를 통과하지 못한 토큰은 **기본 제거**(fail-closed).
 

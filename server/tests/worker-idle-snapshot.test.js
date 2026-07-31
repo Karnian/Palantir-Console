@@ -325,3 +325,64 @@ test('collector outer boundary handles unexpected hostile getters', async () => 
   assert.deepEqual(snapshot.collect_errors, ['proc_unreadable']);
   assert.equal(JSON.stringify(snapshot).includes('hostile getter secret'), false);
 });
+
+// --- codex adversarial review (post-delegation) -----------------------------
+
+test('an unknown executable basename is hashed, not passed through', () => {
+  // A basename is attacker-influenced input: a remote executor's ps output, or a
+  // worker that exec'd a temp file. `/tmp/ARGV_SECRET_9C2D` has a basename that
+  // passes any character-class check, so a format-only guard leaks it verbatim.
+  const payload = serializeWorkerSnapshot({
+    argv: ['/tmp/ARGV_SECRET_9C2D', '--resume'],
+    tree: [{ pid: 1, ppid: 0, pgid: 1, state: 'S', exe_basename: '/tmp/TREE_SECRET_7F3A' }],
+  });
+
+  const json = JSON.stringify(payload);
+  assert.equal(json.includes('ARGV_SECRET_9C2D'), false, 'argv[0] must not carry a raw name');
+  assert.equal(json.includes('TREE_SECRET_7F3A'), false, 'exe_basename must not carry a raw name');
+  assert.match(payload.argv[0], /^custom:[0-9a-f]{8}$/);
+  assert.match(payload.tree[0].exe_basename, /^custom:[0-9a-f]{8}$/);
+
+  // Known executables still pass through — the point is observability, and the
+  // hash is stable so identical binaries still group.
+  const known = serializeWorkerSnapshot({ argv: ['/usr/local/bin/node'] });
+  assert.equal(known.argv[0], 'node');
+  const again = serializeWorkerSnapshot({ argv: ['/tmp/ARGV_SECRET_9C2D'] });
+  assert.equal(again.argv[0], payload.argv[0], 'the same basename hashes identically');
+});
+
+test('a reversed parent chain stays linear and does not stall the caller', async () => {
+  // codex measured a 3.08s SYNCHRONOUS stall on an 18k-row reversed chain with
+  // timeoutMs=50: a collection deadline cannot cover synchronous work, so the
+  // work itself has to be linear. S0 must never delay the kill it precedes.
+  const n = 18000;
+  const rows = [];
+  for (let pid = n; pid >= 1; pid -= 1) {
+    rows.push(`${pid} ${pid === 1 ? 0 : pid - 1} 1 S 0:01 x`);
+  }
+  const table = rows.join('\n');
+  const executor = {
+    async exec(command, args) {
+      if (command === 'tmux') return { code: 0, stdout: '1\n' };
+      if (command === 'ps' && args[0] === '-axo') return { code: 0, stdout: table };
+      if (command === 'ps') return { code: 0, stdout: '/usr/bin/codex' };
+      return { code: 0, stdout: '' };
+    },
+  };
+
+  const started = process.hrtime.bigint();
+  const result = await collectWorkerSnapshot({
+    run: { id: 'run_1', agent_profile_id: 'profile_1', node_id: 'remote_1' },
+    profile: { type: 'codex', command: 'codex' },
+    remote: true,
+    executor,
+    timeoutMs: 50,
+  });
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+
+  assert.ok(result.tree.length <= MAX_TREE_NODES);
+  assert.ok(
+    elapsedMs < 1500,
+    `collection took ${Math.round(elapsedMs)}ms on ${n} rows — the tree walk regressed to superlinear`,
+  );
+});
