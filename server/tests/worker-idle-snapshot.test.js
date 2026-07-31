@@ -386,3 +386,33 @@ test('a reversed parent chain stays linear and does not stall the caller', async
     `collection took ${Math.round(elapsedMs)}ms on ${n} rows — the tree walk regressed to superlinear`,
   );
 });
+
+test('shedding an oversized payload stays sub-linear in serializations', () => {
+  // codex round 2: the first cap implementation re-serialized the whole payload
+  // once per removed element — 535ms at the 4096 argv cap. A deadline cannot
+  // cover synchronous work, so shedding itself must not be O(n^2).
+  const argv = ['/usr/local/bin/node'];
+  for (let i = 0; i < 4096; i += 1) argv.push(`--value-${'x'.repeat(40)}-${i}`);
+  const tree = [];
+  for (let pid = 1; pid <= 64; pid += 1) {
+    tree.push({ pid, ppid: pid - 1, pgid: 1, state: 'S', cputime_s: 1, exe_basename: 'node' });
+  }
+
+  const started = process.hrtime.bigint();
+  const payload = serializeWorkerSnapshot({ run_id: 'run_1', argv, tree });
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+
+  assert.equal(payload.truncated, true);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(payload), 'utf8') <= MAX_EVENT_BYTES,
+    'the shed payload must fit the cap',
+  );
+  assert.doesNotThrow(() => JSON.parse(JSON.stringify(payload)));
+  // Measured on this input: binary-search shedding ~3ms, per-element ~131ms.
+  // 40ms sits an order of magnitude above the good path and well below the bad
+  // one, so this fails on the regression without flaking on a loaded machine.
+  assert.ok(
+    elapsedMs < 40,
+    `shedding took ${Math.round(elapsedMs)}ms — the cap loop regressed to per-element serialization`,
+  );
+});

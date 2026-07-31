@@ -222,21 +222,36 @@ function serializeWorkerSnapshot(input = {}) {
 
   truncated = true;
   payload.truncated = true;
-  // Preserve process evidence as long as possible: template repetition and
-  // trailing argv are less useful than the tree for answering why it remained.
-  while (serializedBytes(payload) > MAX_EVENT_BYTES && payload.profile.args_template_keys.length) {
-    payload.profile.args_template_keys.pop();
+  // Shed with a BINARY SEARCH, not one pop per stringify. The naive loop
+  // re-serialized the whole payload for every removed element, so shedding was
+  // O(n^2) on the array length — codex measured 535ms at the 4096 cap, which a
+  // collection deadline cannot cover because the work is synchronous. Each
+  // array now costs O(log n) serializations.
+  //
+  // Shed order preserves process evidence longest: template repetition and
+  // trailing argv answer less than the tree does about why the run remained.
+  const shedTargets = [
+    { get: () => payload.profile.args_template_keys, set: v => { payload.profile.args_template_keys = v; }, floor: 0 },
+    { get: () => payload.argv, set: v => { payload.argv = v; }, floor: 1 },
+    { get: () => payload.tree, set: v => { payload.tree = v; }, floor: 1 },
+    // Final fallback: an adversarial collector can make even one element too
+    // large, so allow these two to empty completely.
+    { get: () => payload.argv, set: v => { payload.argv = v; }, floor: 0 },
+    { get: () => payload.tree, set: v => { payload.tree = v; }, floor: 0 },
+  ];
+  for (const target of shedTargets) {
+    if (serializedBytes(payload) <= MAX_EVENT_BYTES) break;
+    const original = target.get();
+    let low = target.floor;
+    let high = original.length;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      target.set(original.slice(0, mid));
+      if (serializedBytes(payload) <= MAX_EVENT_BYTES) low = mid;
+      else high = mid - 1;
+    }
+    target.set(original.slice(0, low));
   }
-  while (serializedBytes(payload) > MAX_EVENT_BYTES && payload.argv.length > 1) {
-    payload.argv.pop();
-  }
-  while (serializedBytes(payload) > MAX_EVENT_BYTES && payload.tree.length > 1) {
-    payload.tree.pop();
-  }
-  // Fixed allowlisted scalars are tightly bounded, but keep a final valid-JSON
-  // fallback for adversarially large arrays/numbers supplied by a collector.
-  while (serializedBytes(payload) > MAX_EVENT_BYTES && payload.argv.length) payload.argv.pop();
-  while (serializedBytes(payload) > MAX_EVENT_BYTES && payload.tree.length) payload.tree.pop();
   return payload;
 }
 
