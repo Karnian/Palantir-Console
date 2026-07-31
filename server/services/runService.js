@@ -1080,6 +1080,23 @@ function createRunService(db, eventBus) {
     if (!VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid run status: ${status}`);
     }
+    // Reclaim source-block (codex S1a R7). Seven review rounds of generation
+    // races (R4-R7) all traced to ONE opening: requeueing a run whose previous
+    // owner was never confirmed dead (lease still held — tmux, remote, or a
+    // crashed local worker). Every per-path guard sprouted a new bypass
+    // (REMOTE_SPAWN_UNCERTAIN being the last), so the opening itself closes:
+    // a run with a held lease cannot go back to 'queued'. The lease closes via
+    // exit-handler (local), DELETE (abandoned), or the S1b probe — after which
+    // requeue works again. force does not bypass this; force means "skip the
+    // state machine", not "race a possibly-live owner".
+    if (status === 'queued') {
+      const held = stmts.getHeldOwnerLease.get(id);
+      if (held) {
+        throw new ConflictError(
+          `Run ${id} still has a held owner lease (${held.lease_id}); its previous owner was never confirmed dead. Delete the run or wait for the owner observation before requeueing.`,
+        );
+      }
+    }
     // terminalReason may be a FUNCTION of the row being written. The CAS loop
     // below re-reads on every attempt, so a caller whose reason is derived from
     // the current status (idle provenance, #486) must be able to re-derive it —

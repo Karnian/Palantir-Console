@@ -702,3 +702,33 @@ test('a reclaim landing after spawn acceptance kills the stale process', async (
     1,
   );
 });
+
+test('a run with a held lease cannot be requeued; a closed lease unblocks it', async (t) => {
+  // codex R7 — the source-block that retires the whole generation-race class.
+  // R4-R7 all traced to requeueing a run whose previous owner was never
+  // confirmed dead. The requeue itself now 409s while the lease is held, and
+  // works again once the lease closes.
+  const db = await mkdb(t);
+  const runService = createRunService(db, createEventBus());
+
+  insertBareRun(db, 'requeue-blocked');
+  const claim = runService.claimQueuedRun('requeue-blocked', { withLease: true });
+  runService.updateRunStatus('requeue-blocked', 'failed', { force: true });
+
+  assert.throws(
+    () => runService.updateRunStatus('requeue-blocked', 'queued'),
+    /held owner lease/,
+    'requeue must 409 while the owner is unconfirmed',
+  );
+  assert.throws(
+    () => runService.updateRunStatus('requeue-blocked', 'queued', { force: true }),
+    /held owner lease/,
+    'force skips the state machine, not the live-owner guard',
+  );
+
+  runService.releaseOwner('requeue-blocked', claim.leaseId, {
+    state: 'released', evidence: 'process_exit',
+  });
+  const requeued = runService.updateRunStatus('requeue-blocked', 'queued');
+  assert.equal(requeued.status, 'queued', 'a closed lease unblocks the retry path');
+});
