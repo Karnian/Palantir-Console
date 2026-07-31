@@ -15,6 +15,7 @@ const {
   createLocalWorkerChannel,
   createRemoteWorkerChannel,
 } = require('./nodeExecutor');
+const { collectWorkerSnapshot: collectIdleWorkerSnapshot } = require('./workerSnapshot');
 const { explainDispatch } = require('./dispatchPolicy');
 const { resolveProjectSource } = require('./projectSource');
 const { createProjectMaterializationService } = require('./projectMaterializationService');
@@ -154,6 +155,7 @@ function createLifecycleService({
   // (injectable) goalFeatureActive + the judge flag, so an injected goal gate
   // never diverges from the judge gate (codex MINOR). Stamped per-run at spawn.
   goalJudgeActive = (e) => goalFeatureActive(e) && ((e || process.env).PALANTIR_GOAL_JUDGE === '1'),
+  workerSnapshotCollector = collectIdleWorkerSnapshot,
 }) {
   goalWorkspaceRoot = path.resolve(goalWorkspaceRoot);
   nodeExecutor = nodeExecutor || createLocalNodeExecutor({ executionEngine, streamJsonEngine });
@@ -231,6 +233,36 @@ function createLifecycleService({
       return payload?.reason === 'idle_timeout' ? 'idle_timeout' : null;
     } catch {
       return null;
+    }
+  }
+
+  async function annotateWorkerIdleSnapshot(run, lastActivity) {
+    try {
+      let profile = {};
+      try {
+        profile = run?.agent_profile_id && agentProfileService?.getProfile
+          ? (agentProfileService.getProfile(run.agent_profile_id) || {})
+          : {};
+      } catch {
+        // A deleted profile is still represented by the serializer's invalid
+        // defaults; profile lookup is observability-only too.
+      }
+      const remote = isRemoteNodeId(run?.node_id);
+      const executor = remote ? channelForNode(run.node_id) : nodeExecutor;
+      const snapshot = await workerSnapshotCollector({
+        run,
+        profile,
+        executor,
+        executionEngine: remote ? null : executionEngine,
+        remote,
+        lastOutputAt: Number.isFinite(lastActivity)
+          ? new Date(lastActivity).toISOString()
+          : null,
+      });
+      runService.addRunEvent(run.id, 'worker:idle_snapshot', JSON.stringify(snapshot));
+    } catch {
+      // S0 is annotate-only and never-throws. Collection, serialization, and
+      // persistence failures must not delay the existing terminal path.
     }
   }
   // Normalize BOTH the injected option and the env var through Number() so a
@@ -3033,6 +3065,9 @@ function createLifecycleService({
             const idleTimeoutMs = resolveWorkerIdleTimeoutMs(run);
 
             if (idleTime > idleTimeoutMs) {
+              // Capture the evidence the owner-exit investigation was missing
+              // before any liveness recheck can lead to terminalization/kill.
+              await annotateWorkerIdleSnapshot(run, lastActivity);
               // Double-check: is the process truly dead or just idle?
               const alive = await channel.isAlive(run.id, 'cli');
               if (!alive) {
