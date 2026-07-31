@@ -1,6 +1,6 @@
 # Worker owner-exit — 재설계 brief (v8)
 
-**상태**: S0 #489 / S1a #491 / S1b #493 머지됨 / S2~S3 미확정 (§8 의 S2·S3 항목 + S1b 구현이 추가한 계약: unknown 유예 TTL, 세대-원자 terminal write(requireHeldLease), '증거 파괴 블록이 lease 를 닫는다')
+**상태**: S0 #489 / S1a #491 / S1b #493 머지됨 / S2 계약 확정 검토 중(§8.3) / S3 미확정 (§8 의 S2·S3 항목 + S1b 구현이 추가한 계약: unknown 유예 TTL, 세대-원자 terminal write(requireHeldLease), '증거 파괴 블록이 lease 를 닫는다')
 **참고 자산**: `fix/465`(PR #478) · `fix/466`(PR #482) 의 미머지 잔여분
 **선행 완료**: #486(idle timeout + terminal_reason) · #487(terminal CAS + retry 유일성)
 
@@ -575,6 +575,99 @@ profile/node 단위이므로, 삭제 후 살아있는 고아 owner 가 **다른*
 - gate 진입 + in-flight 등록, shutdown 의 gate 폐쇄 + 대기 목록 확정이 각각 **원자적**이어야
   한다. 아니면 등록 직전에 폐쇄된 spawn 을 아무도 기다리지 않는다.
 - **boot recovery 완료 전 boot drain 금지**를 계약으로 확정한다(§6 에 문제로만 적어둔 것).
+
+### §8.3 S2 확정 계약
+
+코드 근거(현재 main): SubprocessEngine spawn `detached: false`(`executionEngine.js:719`),
+로컬 stream-json spawn `detached: false`(`streamJsonEngine.js:669`), boot drain 은
+fire-and-forget(`app.js:1920`), `app.shutdown` 에 worker sweep 없음(manager 슬롯만),
+SIGINT/SIGTERM → gracefulShutdown(`index.js:115`).
+
+**범위: 머지 단위 둘. 순서가 §3 과 반대다** — sweep(D3)을 먼저 넣어야 detached(D2)가
+안전하다. sweep 은 detached 이전에도 독립 가치가 있다(SIGKILL 로 죽는 서버는 지금도
+워커를 고아로 남긴다).
+
+- **S2a — admission gate + shutdown worker sweep + boot 순서** (**spawn/kill primitive
+  불변** — shutdown 이 워커를 새로 죽이므로 "프로세스 동작 불변"은 아니다, codex R1):
+  기존 kill 그대로, 진입·종료의 배선만 바꾼다.
+- **S2b — detached 그룹 + kill 에스컬레이션** (프로세스 동작 변경): S2a 의 sweep 이
+  머지된 뒤에만.
+
+**C12. admission gate (S2a)**
+
+- 위치: `spawnQueuedRun` 안, **claim 이전**. 모든 호출자(drainQueue/drainAllQueues/
+  scheduleDrainForNode/goal retry/materialization 후 drain/직접 호출)가 자동으로 걸린다
+  — R4 에서 확정한 "호출자 열거가 아니라 claim→handle 구간이 경계" 그대로.
+- **원자성(R3 미확정 해소)**: `gate.enter()` 는 **동기** — closed 면 즉시 거절(run 은
+  `queued` 유지, 실패 처리 아님), open 이면 같은 동기 tick 에 **deferred ticket** 을
+  in-flight 집합에 등록(spawnQueuedRun 의 반환 Promise 는 이 시점에 아직 없다 —
+  codex R1). ticket 은 finally 에서 resolve. JS 단일 스레드에서 동기 구간은
+  원자이므로 "등록 직전 폐쇄로 대기 누락" 창이 없다.
+- **거절 계약(R1)**: gate 거절 시 spawnQueuedRun 은 null 반환. drainQueue 계열은
+  spawn null 시 `lifecycle.admissionClosed()` 를 확인해 **루프를 즉시 종료**한다 —
+  아니면 queued 로 남은 같은 run 을 무한 반복한다(`lifecycleService.js:2607` 의
+  현재 drain 루프는 실패 시 break 하지 않는다).
+- **늦은 spawn 금지(R1)**: in-flight 대기에 상한을 두므로, 상한 후 완료되는 spawn 이
+  sweep 뒤에 프로세스를 올릴 수 있다. spawnQueuedRun 은 **채널 spawn 직전에
+  gate.closed 를 재확인**(기존 leaseStillCurrent 재검증과 같은 지점)해 stale-abort 한다.
+- **gate 생명주기(R1 — C14 통합)**: gate 는 boot 시 **closed 로 시작**하고,
+  `recoverOrphanSessions` 완료 후 open 된다. 서버 listen 이 recovery 보다 먼저여도
+  (`index.js:78`) API dispatch 는 gate 에서 거절되어 run 이 queued 로 대기한다.
+  recovery 가 throw 하면 gate 는 열되 boot drain 은 **하지 않는다**(annotate + 수동
+  개입 여지). shutdown 에서 닫힌 뒤 재개방 없음.
+
+**C13. shutdown 순서 (S2a)**
+
+```
+1. gate.close()                     — 동기. 이후 admission 전부 즉시 거절
+2. await allSettled(inFlight 스냅샷) — close 와 같은 tick 에 찍은 스냅샷, 상한 5s
+3. worker sweep                     — held lease 를 가진 로컬 run 에 **기존 engine.kill
+                                      1회, 에스컬레이션 없음**(subprocess/stream-json 은
+                                      SIGTERM, tmux 는 기존 kill-session — primitive
+                                      불변, codex R2). 상한 8s, best-effort, 실패 로그.
+                                      원격 워커는 대상 아님(의도적 detached 생존)
+4. manager dispose                  — 기존 그대로
+5. stopMonitoring / closeDb         — 기존 그대로
+```
+
+- **시간 예산은 S2a 계약이다**(codex R2): index.js 의 forced-exit watchdog 을
+  `PALANTIR_SHUTDOWN_WATCHDOG_MS`(기본 20000) 로 올리고, 그 안에서 2번 상한 5s +
+  3번 상한 8s 를 배분한다. C15 의 유예-에스컬레이션은 S2b 에서 이 예산 안으로 들어온다.
+
+- **sweep 은 kill 전에 dead 를 선확인한다(codex R1 — S1b 계약과의 모순 해소)**:
+  이미 sentinel 이 있는(dead 확정) run 은 **release 후 kill**(S1b 의 "증거 파괴 블록이
+  lease 를 닫는다" 그대로 — tmux kill 이 sentinel 을 무조건 지우기 때문). alive/unknown
+  run 은 SIGTERM 만 보내고 **lease 를 닫지 않는다** — 사망 미확인. 그 결과 다음 boot
+  은 세션 부재+sentinel 부재=unknown → 유예 → 기존 규칙(terminal 화, lease 는 held).
+  영구 held 는 아니다 — capacity flag 기본 off + S3 abandonment 소관이며, 이
+  트레이드오프를 여기 명시한다.
+- **sweep 라우팅은 lease.engine 기준**(R1) — 'cli' 고정은 stream-json kill 을
+  우회한다(`nodeExecutor.js:216`).
+
+**C14. boot readiness (S2a, §8 미확정 해소 — C12 의 gate 생명주기로 흡수)**
+
+- boot drain 과 **API 직접 dispatch 모두** recovery 완료 전에는 gate 거절로 대기한다
+  (C12). drain 시작 시점은 recovery 완료 이후, recovery 실패 시 drain 은 하지 않는다.
+- drain 자체는 여전히 비동기(부팅 블로킹 금지).
+
+**C15. detached 그룹 + kill 에스컬레이션 (S2b)**
+
+- 두 로컬 엔진 spawn 을 `detached: true` 로 — 워커가 자기 프로세스 그룹의 리더.
+  `unref()` 는 호출하지 않는다(exit 관측 유지). stdio 파이프 유지.
+- kill: `process.kill(-pid, 'SIGTERM')` → 즉시 반환(현재 kill 의 동기 계약 유지 —
+  cancel API 가 유예를 기다리지 않는다) → 내부 타이머가 유예
+  (`PALANTIR_KILL_GRACE_MS`, 기본 5000) 후 생존 확인, 잔존 시 `SIGKILL(-pid)` +
+  `worker:kill_escalated` annotate.
+- **shutdown sweep 만은 유예를 명시적으로 await** 한다(프로세스가 곧 죽으므로 타이머에
+  맡길 수 없다). **병렬 에스컬레이션**(R1): 전체 그룹에 SIGTERM 브로드캐스트 → 공유
+  유예 1회 → 잔존 일괄 SIGKILL. 순차 대기는 워커 수에 비례해 상한을 소진한다.
+- **시간 예산(R1)**: 현재 index.js 의 forced-exit watchdog 이 10s 인데 sweep 상한도
+  10s 면 선행 in-flight 대기까지 포함해 watchdog 이 먼저 죽인다. watchdog 을
+  `PALANTIR_SHUTDOWN_WATCHDOG_MS`(기본 20000) 로 올리고, 그 안에서 in-flight 대기
+  상한 5s + sweep 상한 8s 를 배분한다(합계 < watchdog − manager dispose 여유).
+- ESRCH(-pid 소멸)는 성공으로 취급. tmux·원격 kill 경로는 불변.
+- **회귀 위험(§3 명시)**: 그룹 분리로 터미널 SIGINT 가 워커에 전파되지 않는다 —
+  C13 의 sweep 이 그 자리를 대신한다는 것이 S2a 선행의 이유다.
 
 ### S3 — fence 범위와 순서
 
