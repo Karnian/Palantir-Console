@@ -259,3 +259,79 @@ test('Phase 5: backwards compat — run field still present at top level', async
   assert.equal(status.data.run.id, run.id);
   assert.equal(status.data.run.status, 'running');
 });
+
+// Codex review: the CAS loop re-reads the row on every attempt, so a
+// terminalReason captured BEFORE the loop describes a transition that may no
+// longer be the one being written. Passing a function makes the reason a
+// property of the row actually won, not of the row first observed.
+//
+// The race is injected by wrapping db.prepare(): the CAS statement mutates the
+// row through the same connection right before its first .run(), so attempt 1
+// matches nothing and attempt 2 writes against the new status. With a
+// non-conditional WHERE, attempt 1 would succeed and these assertions fail.
+for (const [parked, raced, expected] of [
+  ['needs_input', 'running', null],
+  ['running', 'needs_input', 'idle_timeout'],
+]) {
+  test(`Phase 5: terminalReason is derived per CAS attempt (${parked} → ${raced})`, async (t) => {
+    const db = await mkdb(t);
+    const ps = createProjectService(db);
+    const ts = createTaskService(db, null);
+    const task = ts.createTask({ title: 'T', project_id: ps.createProject({ name: 'cas-reason' }).id });
+    db.prepare(`INSERT INTO agent_profiles (id, name, type, command) VALUES ('a1','A','codex','codex')`).run();
+
+    let casStatement = null;
+    let raceArmed = false;
+    const realPrepare = db.prepare.bind(db);
+    const racingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== 'prepare') return Reflect.get(target, prop, receiver);
+        return (sql) => {
+          const stmt = realPrepare(sql);
+          if (!/UPDATE runs[\s\S]*WHERE id = \? AND status = \?/.test(sql)) return stmt;
+          casStatement = stmt;
+          return new Proxy(stmt, {
+            get(sTarget, sProp, sReceiver) {
+              if (sProp !== 'run') return Reflect.get(sTarget, sProp, sReceiver);
+              return (...args) => {
+                // Armed only for the cancel below; the setup transitions above
+                // use this same statement and must not consume the injection.
+                if (raceArmed) {
+                  raceArmed = false;
+                  // A competing writer lands between our read and our write.
+                  realPrepare('UPDATE runs SET status = ? WHERE id = ?').run(raced, args[args.length - 2]);
+                }
+                return sTarget.run(...args);
+              };
+            },
+          });
+        };
+      },
+    });
+
+    const rs = createRunService(racingDb, null);
+    const run = rs.createRun({ task_id: task.id, agent_profile_id: 'a1' });
+    rs.updateRunStatus(run.id, 'running', { force: true });
+    rs.updateRunStatus(run.id, parked, { force: true, reason: parked === 'needs_input' ? 'idle_timeout' : 'go' });
+
+    assert.ok(casStatement, 'the CAS statement must have been prepared');
+
+    raceArmed = true;
+    rs.updateRunStatus(run.id, 'cancelled', {
+      force: true,
+      // Stands in for lifecycleService's idleTimeoutTerminalReason: a pure
+      // function of the row it is handed. Whether THAT function reads the right
+      // signals is pinned in lifecycle.test.js; what matters here is only which
+      // row it gets handed.
+      terminalReason: latest => (latest.status === 'needs_input' ? 'idle_timeout' : null),
+    });
+
+    const final = rs.getRun(run.id);
+    assert.equal(final.status, 'cancelled');
+    assert.equal(
+      final.terminal_reason,
+      expected,
+      'terminal_reason must describe the row the winning CAS attempt wrote',
+    );
+  });
+}

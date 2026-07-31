@@ -984,6 +984,13 @@ function createRunService(db, eventBus) {
     if (!VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid run status: ${status}`);
     }
+    // terminalReason may be a FUNCTION of the row being written. The CAS loop
+    // below re-reads on every attempt, so a caller whose reason is derived from
+    // the current status (idle provenance, #486) must be able to re-derive it —
+    // a value captured before a lost race describes the wrong transition.
+    const resolveTerminalReason = typeof terminalReason === 'function'
+      ? terminalReason
+      : () => terminalReason;
     let current = null;
     let updated = false;
 
@@ -1023,11 +1030,13 @@ function createRunService(db, eventBus) {
         }
       }
 
+      // Re-derived per attempt against the row this write is actually racing.
+      const attemptTerminalReason = resolveTerminalReason(current);
       const info = stmts.updateStatusCas.run(
         status,
         status,
         status,
-        terminalReason,
+        attemptTerminalReason,
         id,
         current.status,
       );

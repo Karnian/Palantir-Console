@@ -7,11 +7,11 @@ const path = require('node:path');
 const Database = require('better-sqlite3');
 
 const migrationSql = fs.readFileSync(
-  path.join(__dirname, '..', 'db', 'migrations', '075_unique_retry_attempt.sql'),
+  path.join(__dirname, '..', 'db', 'migrations', '081_unique_retry_attempt.sql'),
   'utf8',
 );
 
-test('migration 075 preserves duplicate history and enforces one row per root attempt', () => {
+test('migration 081 preserves duplicate history and enforces one row per root attempt', () => {
   const db = new Database(':memory:');
   db.exec(`
     CREATE TABLE runs (
