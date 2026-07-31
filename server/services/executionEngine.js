@@ -7,6 +7,7 @@ const {
   resolveActorTokenPolicy,
   buildWorkerProcessEnv,
   augmentProcessPath,
+  applyWorkerCredentialPolicy,
 } = require('./actorTokenPolicy');
 
 /**
@@ -128,11 +129,18 @@ function createTmuxEngine({
     const artifact = tokenArtifacts.get(runId);
     if (!artifact) return;
     try { fs.unlinkSync(artifact.tokenPath); } catch {}
+    if (artifact.apiBasePath) {
+      try { fs.unlinkSync(artifact.apiBasePath); } catch {}
+    }
     try { fs.rmdirSync(artifact.tokenDir); } catch {}
     tokenArtifacts.delete(runId);
   }
 
-  function spawnAgent(runId, { command, args, stdin, cwd, env, outputLogPath }) {
+  function spawnAgent(
+    runId,
+    { command, args, stdin, cwd, env, outputLogPath },
+    spawnActorTokens = actorTokens,
+  ) {
     const {
       name,
       scriptDir,
@@ -161,15 +169,20 @@ function createTmuxEngine({
     const profileEnv = buildWorkerProcessEnv(
       process.env,
       env && typeof env === 'object' ? env : {},
-      actorTokens,
+      spawnActorTokens,
     );
+    const workerEnv = applyWorkerCredentialPolicy(profileEnv, {
+      workerToken: profileEnv.PALANTIR_WORKER_TOKEN,
+      apiBase: profileEnv.PALANTIR_API_BASE,
+      actorTokens: spawnActorTokens,
+    });
     // PATH_PREFIX is required on macOS installations where the Console starts
-    // with a restricted PATH but worker CLIs live under Homebrew. profileEnv
+    // with a restricted PATH but worker CLIs live under Homebrew. workerEnv
     // contains process.env.PATH, so exporting it unchanged below would silently
     // undo that prefix. Preserve the caller's PATH while keeping the required
     // lookup directories at the front.
     const augmentedProfileEnv = augmentProcessPath(
-      profileEnv,
+      workerEnv,
       ['/opt/homebrew/bin', '/opt/homebrew/sbin'],
     );
     // A worker capability must never be serialized into the long-lived tmux
@@ -182,17 +195,37 @@ function createTmuxEngine({
       ? augmentedProfileEnv.PALANTIR_WORKER_TOKEN
       : null;
     delete augmentedProfileEnv.PALANTIR_WORKER_TOKEN;
+    // The endpoint that pairs with the capability rides the same transport. It
+    // is not itself a credential, but `env -i` puts every assignment into the
+    // env process's own argv, which /proc exposes to other users on this host
+    // for the window before it execs — the same exposure the remote path was
+    // fixed for. Only meaningful alongside a minted token, so it is dropped
+    // outright when there is none.
+    const workerApiBase = workerToken
+      && typeof augmentedProfileEnv.PALANTIR_API_BASE === 'string'
+      && augmentedProfileEnv.PALANTIR_API_BASE
+      ? augmentedProfileEnv.PALANTIR_API_BASE
+      : null;
+    delete augmentedProfileEnv.PALANTIR_API_BASE;
     cleanupTokenArtifact(runId);
     let tokenArtifact = null;
     if (workerToken) {
       let tokenDir = null;
       let tokenPath = null;
+      let apiBasePath = null;
       try {
         tokenDir = fs.mkdtempSync(path.join(scriptDir, '.worker-token-'));
         fs.chmodSync(tokenDir, 0o700);
         tokenPath = path.join(tokenDir, 'token');
         writeFileSync(tokenPath, workerToken, { flag: 'wx', mode: 0o600 });
+        if (workerApiBase) {
+          apiBasePath = path.join(tokenDir, 'api-base');
+          writeFileSync(apiBasePath, workerApiBase, { flag: 'wx', mode: 0o600 });
+        }
       } catch (error) {
+        if (apiBasePath) {
+          try { fs.unlinkSync(apiBasePath); } catch {}
+        }
         if (tokenPath) {
           try { fs.unlinkSync(tokenPath); } catch {}
         }
@@ -201,7 +234,7 @@ function createTmuxEngine({
         }
         throw error;
       }
-      tokenArtifact = { tokenDir, tokenPath };
+      tokenArtifact = { tokenDir, tokenPath, apiBasePath };
       tokenArtifacts.set(runId, tokenArtifact);
     }
     let publishPathVar = '__palantir_sentinel_publish_path';
@@ -219,12 +252,37 @@ function createTmuxEngine({
       // server credential can cross the profile allowlist boundary either.
       'unset PALANTIR_TOKEN PALANTIR_PM_TOKEN PALANTIR_WORKER_TOKEN PALANTIR_MANAGER_TOKEN',
     ];
+    let workerCapabilityBootstrap = null;
     if (tokenArtifact) {
-      const safeTokenPath = tokenArtifact.tokenPath.replace(/'/g, "'\\''");
-      const safeTokenDir = tokenArtifact.tokenDir.replace(/'/g, "'\\''");
-      lines.push(`__palantir_worker_token="$(cat -- '${safeTokenPath}')" || exit 78`);
-      lines.push(`rm -f -- '${safeTokenPath}'`);
-      lines.push(`rmdir -- '${safeTokenDir}' 2>/dev/null || true`);
+      // Restore run-bound values only after env -i has started a clean shell.
+      // Expanding KEY="$value" as an env argument would put the value in the
+      // real /usr/bin/env argv before the child replaces it.
+      workerCapabilityBootstrap = [
+        `PALANTIR_WORKER_TOKEN=$(cat -- ${shq(tokenArtifact.tokenPath)})`,
+        'worker_token_rc=$?',
+        `rm -f -- ${shq(tokenArtifact.tokenPath)}`,
+      ];
+      if (tokenArtifact.apiBasePath) {
+        workerCapabilityBootstrap.push(
+          `PALANTIR_API_BASE=$(cat -- ${shq(tokenArtifact.apiBasePath)})`,
+          'worker_api_base_rc=$?',
+          `rm -f -- ${shq(tokenArtifact.apiBasePath)}`,
+        );
+      }
+      workerCapabilityBootstrap.push(
+        `rmdir -- ${shq(tokenArtifact.tokenDir)} 2>/dev/null || true`,
+        '[ "$worker_token_rc" -eq 0 ] || exit 78',
+      );
+      if (tokenArtifact.apiBasePath) {
+        workerCapabilityBootstrap.push(
+          '[ "$worker_api_base_rc" -eq 0 ] || exit 78',
+        );
+      }
+      workerCapabilityBootstrap.push(
+        'export PALANTIR_WORKER_TOKEN',
+        ...(tokenArtifact.apiBasePath ? ['export PALANTIR_API_BASE'] : []),
+        'exec "$@"',
+      );
     }
 
     // Build an explicit clean environment for the worker. Merely exporting
@@ -244,8 +302,8 @@ function createTmuxEngine({
       return `'${safeArg}'`;
     });
     const safeCmd = String(command).replace(/'/g, "'\\''");
-    const workerTokenAssignment = tokenArtifact
-      ? ' PALANTIR_WORKER_TOKEN="$__palantir_worker_token"'
+    const workerCapabilityArgs = workerCapabilityBootstrap
+      ? ` /bin/sh -c ${shq(workerCapabilityBootstrap.join('; '))} ${shq('sh')}`
       : '';
     const quotedStdin = shq(stdinPath);
     const stdinRedirect = stdin !== undefined ? ` < ${quotedStdin}` : '';
@@ -261,7 +319,7 @@ function createTmuxEngine({
       // file first and only then clears this trap.
       lines.push(`trap ${shq(stdinCleanupCommand)} EXIT HUP INT TERM`);
     }
-    lines.push(`env -i ${workerEnvArgs.join(' ')}${workerTokenAssignment} '${safeCmd}' ${quotedArgs.join(' ')}${stdinRedirect}`);
+    lines.push(`env -i ${workerEnvArgs.join(' ')}${workerCapabilityArgs} '${safeCmd}' ${quotedArgs.join(' ')}${stdinRedirect}`);
     // Capture $? exactly once so the durable sentinel and scrollback marker
     // always describe the same agent exit. Rename makes the sentinel atomic.
     const safeSentinel = exitSentinelPath.replace(/'/g, "'\\''");
@@ -598,8 +656,19 @@ function createTmuxEngine({
     return listSessions().filter(s => s.isPalantir);
   }
 
-  return {
+  let api;
+  function withActorTokenPolicy(nextActorTokens) {
+    return {
+      ...api,
+      spawnAgent(runId, spec) {
+        return spawnAgent(runId, spec, nextActorTokens);
+      },
+    };
+  }
+
+  api = {
     type: 'tmux',
+    withActorTokenPolicy,
     spawnAgent,
     getOutput,
     sendInput,
@@ -611,22 +680,34 @@ function createTmuxEngine({
     inspectStartupArtifacts,
     reapStartupArtifacts,
   };
+  return api;
 }
 
 // ---------- SubprocessEngine (fallback) ----------
 
-function createSubprocessEngine({ actorTokens = resolveActorTokenPolicy() } = {}) {
+function createSubprocessEngine({
+  actorTokens = resolveActorTokenPolicy(),
+} = {}) {
   const processes = new Map();
   const PROCESS_TTL_MS = 10 * 60 * 1000; // Cleanup dead processes after 10 min
 
-  function spawnAgent(runId, { command, args, stdin, cwd, env, outputLogPath }) {
+  function spawnAgent(
+    runId,
+    { command, args, stdin, cwd, env, outputLogPath },
+    spawnActorTokens = actorTokens,
+  ) {
     const safeCwd = validateCwd(cwd);
     assertSpawnAllowed({ command, source: 'executionEngine:subprocess' });
     if (stdin !== undefined && typeof stdin !== 'string') {
       throw new Error('worker stdin must be a string when provided');
     }
 
-    const workerEnv = buildWorkerProcessEnv(process.env, env, actorTokens);
+    const profileEnv = buildWorkerProcessEnv(process.env, env, spawnActorTokens);
+    const workerEnv = applyWorkerCredentialPolicy(profileEnv, {
+      workerToken: profileEnv.PALANTIR_WORKER_TOKEN,
+      apiBase: profileEnv.PALANTIR_API_BASE,
+      actorTokens: spawnActorTokens,
+    });
     // Ensure common binary paths are available (e.g., homebrew, nvm, local bins)
     const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
     const spawnEnv = augmentProcessPath(workerEnv, extraPaths);
@@ -765,8 +846,19 @@ function createSubprocessEngine({ actorTokens = resolveActorTokenPolicy() } = {}
     return []; // subprocess engine can't discover external processes
   }
 
-  return {
+  let api;
+  function withActorTokenPolicy(nextActorTokens) {
+    return {
+      ...api,
+      spawnAgent(runId, spec) {
+        return spawnAgent(runId, spec, nextActorTokens);
+      },
+    };
+  }
+
+  api = {
     type: 'subprocess',
+    withActorTokenPolicy,
     spawnAgent,
     getOutput,
     sendInput,
@@ -776,6 +868,7 @@ function createSubprocessEngine({ actorTokens = resolveActorTokenPolicy() } = {}
     listSessions,
     discoverGhostSessions,
   };
+  return api;
 }
 
 // ---------- Factory ----------

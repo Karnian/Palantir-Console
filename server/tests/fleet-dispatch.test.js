@@ -73,7 +73,13 @@ function stubStreamJsonEngine() {
     buildDetachedWorkerSpec(spec, { workerPath } = {}) {
       return {
         command: 'claude',
-        args: ['--print', '--output-format', 'stream-json', '-p'],
+        args: [
+          '--print',
+          '--output-format',
+          'stream-json',
+          '-p',
+          ...(spec.bare ? ['--bare'] : []),
+        ],
         stdin: spec.prompt || '',
         systemPrompt: spec.systemPrompt,
         systemPromptFileFlag: spec.systemPrompt ? '--append-system-prompt-file' : undefined,
@@ -84,6 +90,7 @@ function stubStreamJsonEngine() {
           )),
         ),
         envAllowlist: spec.envAllowlist || [],
+        claudeBareAuth: spec.bare === true && !spec.isolated,
         workerPath,
       };
     },
@@ -199,11 +206,18 @@ function buildHarness(db, {
   };
 }
 
-function seedProfile(db, { command = 'codex', max = 5, envAllowlist = [] } = {}) {
+function seedProfile(db, {
+  command = 'codex',
+  max = 5,
+  envAllowlist = [],
+  argsTemplate: argsTemplateOverride,
+} = {}) {
   const id = `profile-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const argsTemplate = path.basename(command).toLowerCase().includes('codex')
-    ? 'exec {prompt}'
-    : '{prompt}';
+  const argsTemplate = argsTemplateOverride || (
+    path.basename(command).toLowerCase().includes('codex')
+      ? 'exec {prompt}'
+      : '{prompt}'
+  );
   db.prepare(`
     INSERT INTO agent_profiles (id, name, type, command, args_template, capabilities_json, env_allowlist, max_concurrent)
     VALUES (?, 'FleetDispatchAgent', 'codex', ?, ?, '{}', ?, ?)
@@ -275,9 +289,20 @@ test('reachable executable ssh node dispatches through pickExecutor and remote w
   assert.deepEqual(spawn.payload.spec.args, ['-c', 'service_tier="default"', 'exec', '-']);
   assert.equal(spawn.payload.spec.stdin, 'run remotely');
   assert.equal(spawn.payload.spec.cwd, '/workspace/project');
+  assert.equal(run.worktree_path, null, 'remote worker runs do not receive a worktree');
+  assert.equal(run.branch, null, 'remote worker runs do not receive a worktree branch');
   assert.equal(spawn.payload.spec.workerPath, '/opt/codex/bin');
   assert.deepEqual(spawn.payload.spec.envAllowlist, ['POD_ONLY_PROVIDER_KEY']);
   assert.equal(h.runService.getRun(run.id).tmux_session, `remote-${run.id}`);
+
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const guardrails = createCodexAdapter({ runService: null })
+    .buildGuardrailsSection({ layer: 'operator' });
+  assert.match(
+    guardrails,
+    /A remote legacy-directory project is the exception:[\s\S]*configured remote directory without a run worktree,[\s\S]*diff capture and test harvest are unavailable for that path/i,
+    'the manager prompt must describe the remote legacy-directory no-worktree path exercised above',
+  );
 });
 
 test('remote worker gets no loopback memory capability without a public Console base URL', async (t) => {
@@ -314,6 +339,52 @@ test('remote worker gets no loopback memory capability without a public Console 
   assert.equal('PALANTIR_WORKER_TOKEN' in spec.env, false);
   assert.equal('PALANTIR_API_BASE' in spec.env, false);
   assert.doesNotMatch(spec.args.join(' '), /memory\/propose/);
+});
+
+test('remote worker gets no API base when proposal token mint returns null', async (t) => {
+  const db = await mkdb(t);
+  const minted = [];
+  const caseVariantApiBase = 'http://case-user:case-password@console.internal:4177';
+  const previousCaseVariantApiBase = process.env.palantir_api_base;
+  process.env.palantir_api_base = caseVariantApiBase;
+  t.after(() => {
+    if (previousCaseVariantApiBase === undefined) delete process.env.palantir_api_base;
+    else process.env.palantir_api_base = previousCaseVariantApiBase;
+  });
+  const h = buildHarness(db, {
+    lifecycleOptions: {
+      workerProposalTokenService: {
+        mint(runId, claims) {
+          minted.push({ runId, claims });
+          return null;
+        },
+      },
+      workerProposalBaseUrl: 'http://127.0.0.1:4177',
+      workerProposalRemoteBaseUrl: 'https://console.tailnet.example/proxy-prefix',
+    },
+  });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db, { envAllowlist: ['palantir_api_base'] });
+  const project = h.projectService.createProject({
+    name: 'RemoteMintDisabled',
+    directory: '/workspace/project',
+    node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+
+  await h.lifecycleService.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'run remotely without a minted capability',
+  });
+
+  assert.equal(minted.length, 1);
+  const spec = h.remoteChannel.spawned[0].payload.spec;
+  assert.equal('PALANTIR_WORKER_TOKEN' in spec.env, false);
+  assert.equal('PALANTIR_API_BASE' in spec.env, false);
+  assert.equal('palantir_api_base' in spec.env, false);
+  assert.deepEqual(spec.envAllowlist, []);
+  assert.equal(JSON.stringify(spec).includes(caseVariantApiBase), false);
+  assert.doesNotMatch(spec.stdin, /memory\/propose/);
 });
 
 test('remote worker receives memory capability with an explicitly reachable Console base URL', async (t) => {
@@ -617,11 +688,23 @@ test('local runs keep using the injected global worker channel', async (t) => {
 test('remote claude worker uses detached SSH ownership with pod-native auth', async (t) => {
   const db = await mkdb(t);
   const remoteChannel = makeRemoteChannel();
-  const h = buildHarness(db, { remoteChannel });
+  let controllerAuthCalls = 0;
+  const h = buildHarness(db, {
+    remoteChannel,
+    lifecycleOptions: {
+      authResolver: {
+        resolveClaudeAuth() {
+          controllerAuthCalls += 1;
+          throw new Error('remote --bare worker must not resolve controller auth');
+        },
+      },
+    },
+  });
   createSshNode(h.nodeService);
   const profile = seedProfile(db, {
     command: 'claude',
     envAllowlist: ['POD_ONLY_PROVIDER_KEY'],
+    argsTemplate: '{prompt} --bare',
   });
   const project = h.projectService.createProject({
     name: 'RemoteClaudeProject',
@@ -646,6 +729,9 @@ test('remote claude worker uses detached SSH ownership with pod-native auth', as
   assert.equal(spawn.payload.spec.cwd, '/workspace/project');
   assert.equal(spawn.payload.spec.workerPath, '/opt/codex/bin');
   assert.deepEqual(spawn.payload.spec.envAllowlist, ['POD_ONLY_PROVIDER_KEY']);
+  assert.equal(spawn.payload.spec.claudeBareAuth, true);
+  assert.ok(spawn.payload.spec.args.includes('--bare'));
+  assert.equal(controllerAuthCalls, 0);
   assert.equal(
     spawn.payload.spec.args.includes('claude remotely'),
     false,

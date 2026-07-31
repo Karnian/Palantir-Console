@@ -7,12 +7,14 @@
 //   GET  /api/dispatch-audit       — list recent claims (optional filters)
 //
 // The POST path is intentionally exposed so the PM itself can curl it
-// from inside its sandboxed session when it wants to record "I just
-// did X". This matches how the rest of the manager system prompt works
-// (PMs and Tops already drive REST endpoints via Bash curl). A future
-// phase may auto-parse PM responses server-side, but that's a harder
-// problem (item.completed interception + structured claim extraction)
-// and out of scope for annotate-only Phase 4.
+// from its manager session when it wants to record "I just did X".
+// Codex managers always launch with
+// --dangerously-bypass-approvals-and-sandbox, while Claude managers
+// receive Bash(curl). This matches how the rest of the manager system
+// prompt works (PMs and Tops already drive REST endpoints via Bash curl).
+// A future phase may auto-parse PM responses server-side, but that's a
+// harder problem (item.completed interception + structured claim
+// extraction) and out of scope for annotate-only Phase 4.
 
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');

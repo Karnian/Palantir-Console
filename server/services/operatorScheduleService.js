@@ -6,6 +6,11 @@ const {
   ConflictError,
   NotFoundError,
 } = require('../utils/errors');
+const {
+  MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
+  normalizeTerminalError,
+  findPersistedTerminalEvent,
+} = require('./terminalEventReconciliation');
 
 const ACTIVE_INVOCATION_STATUSES = new Set(['pending', 'claimed', 'delivering', 'running']);
 const TERMINAL_INVOCATION_STATUSES = new Set(['completed', 'failed', 'cancelled', 'uncertain']);
@@ -211,6 +216,7 @@ function parseSchedule(row) {
 
 function createOperatorScheduleService(db, { eventBus, runService, logger } = {}) {
   const log = logger || ((message) => console.warn(`[operator-schedule] ${message}`));
+  const sqliteRejectedTerminalCursors = new Map();
   const stmts = {
     getInstance: db.prepare('SELECT * FROM operator_instances WHERE id = ?'),
     getProject: db.prepare('SELECT * FROM projects WHERE id = ?'),
@@ -458,27 +464,75 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
          SET status=?, last_error=?, completed_at=datetime('now'), updated_at=datetime('now')
        WHERE id=? AND manager_run_id=? AND status='running'
     `),
+    runningInvocationsForTerminalReconciliation: db.prepare(`
+      SELECT id AS invocation_id, manager_run_id
+      FROM operator_invocations
+      WHERE status='running' AND manager_run_id IS NOT NULL
+      ORDER BY started_at ASC, id ASC
+    `),
+    // Correlate before the bounded scan so unrelated and non-terminal events
+    // consume no JavaScript parsing budget. Merge-patching into an empty object
+    // is a fast prefilter that preserves later duplicate correlation values;
+    // the nested scans remain authoritative because merge patch may combine
+    // repeated objects. Oldest-first ordering preserves the live CAS contract.
     persistedTerminalEvents: db.prepare(`
-      SELECT i.id AS invocation_id, i.manager_run_id, e.event_type, e.payload_json
-        FROM operator_invocations i
-        JOIN run_events e ON e.id=(
-          SELECT terminal.id
-            FROM run_events terminal
-           WHERE terminal.run_id=i.manager_run_id
-             AND terminal.event_type IN ('mgr.turn_completed','mgr.turn_failed')
-             AND json_extract(
-               CASE WHEN json_valid(terminal.payload_json) THEN terminal.payload_json ELSE '{}' END,
-               '$.data.invocationId'
-             )=i.id
-             AND json_extract(
-               CASE WHEN json_valid(terminal.payload_json) THEN terminal.payload_json ELSE '{}' END,
-               '$.data.terminal'
-             )=1
-           ORDER BY terminal.id ASC
-           LIMIT 1
+      SELECT id, event_type, payload_json
+      FROM run_events
+      WHERE run_id=?
+        AND event_type IN ('mgr.turn_completed','mgr.turn_failed')
+        AND json_extract(
+              json_patch(
+                '{}',
+                CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END
+              ),
+              '$.data.invocationId'
+            )=?
+        AND EXISTS (
+          SELECT 1
+          FROM (
+            SELECT value, type
+            FROM json_each(
+              CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END
+            )
+            WHERE key='data'
+            ORDER BY id DESC
+            LIMIT 1
+          ) AS parsed_data
+          WHERE parsed_data.type='object'
+            AND 1 = (
+              SELECT member.type='text' AND member.value=?
+              FROM json_each(parsed_data.value) AS member
+              WHERE member.key='invocationId'
+              ORDER BY member.id DESC
+              LIMIT 1
+            )
+            AND 'true' = (
+              SELECT member.type
+              FROM json_each(parsed_data.value) AS member
+              WHERE member.key='terminal'
+              ORDER BY member.id DESC
+              LIMIT 1
+            )
         )
-       WHERE i.status='running'
-       ORDER BY e.id ASC
+      ORDER BY id ASC
+      LIMIT ?
+    `),
+    // SQLite's JSON parser rejects otherwise valid JSON beyond its nesting
+    // limit. The correlation literal drops ordinary unrelated history before
+    // the authoritative parse. The cursor advances the bounded fallback across
+    // ticks, while the SQL terminal id remains an exclusive upper bound so a
+    // later SQL-valid event cannot overtake an earlier rejected completion.
+    sqliteRejectedTerminalEvents: db.prepare(`
+      SELECT id, event_type, payload_json
+      FROM run_events
+      WHERE run_id=?
+        AND event_type IN ('mgr.turn_completed','mgr.turn_failed')
+        AND json_valid(payload_json)=0
+        AND instr(payload_json, ?)>0
+        AND (? IS NULL OR id>?)
+        AND (? IS NULL OR id < ?)
+      ORDER BY id ASC
+      LIMIT ?
     `),
     resetFailures: db.prepare(`
       UPDATE operator_schedules SET consecutive_failures=0, updated_at=datetime('now') WHERE id=?
@@ -1029,11 +1083,12 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     const status = success ? 'completed' : 'failed';
     const info = stmts.completeInvocation.run(
       status,
-      error ? String(error).slice(0, 2000) : null,
+      normalizeTerminalError(error),
       running.id,
       managerRunId,
     );
     if (info.changes !== 1) return null;
+    sqliteRejectedTerminalCursors.delete(invocationId);
     if (running.schedule_id) {
       if (success) stmts.resetFailures.run(running.schedule_id);
       else stmts.incrementFailures.run(running.schedule_id);
@@ -1051,17 +1106,62 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     return invocation;
   }
 
-  function reconcilePersistedTerminalEvents() {
+  function reconcilePersistedTerminalEvents({ drainSQLiteRejectedCandidates = false } = {}) {
     const reconciled = [];
-    for (const row of stmts.persistedTerminalEvents.all()) {
-      let payload;
-      try { payload = row.payload_json ? JSON.parse(row.payload_json) : null; } catch { payload = null; }
-      const success = row.event_type === 'mgr.turn_completed';
+    for (const row of stmts.runningInvocationsForTerminalReconciliation.all()) {
+      const candidates = stmts.persistedTerminalEvents.all(
+        row.manager_run_id,
+        row.invocation_id,
+        row.invocation_id,
+        MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
+      );
+      const sqlTerminal = findPersistedTerminalEvent(candidates, row.invocation_id);
+      let terminal;
+      do {
+        const cursor = sqliteRejectedTerminalCursors.get(row.invocation_id) ?? null;
+        const sqliteRejectedCandidates = stmts.sqliteRejectedTerminalEvents.all(
+          row.manager_run_id,
+          JSON.stringify(row.invocation_id),
+          cursor,
+          cursor,
+          sqlTerminal?.id ?? null,
+          sqlTerminal?.id ?? null,
+          MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
+        );
+        const sqliteRejectedTerminal = findPersistedTerminalEvent(
+          sqliteRejectedCandidates,
+          row.invocation_id,
+        );
+        if (sqliteRejectedTerminal) {
+          sqliteRejectedTerminalCursors.delete(row.invocation_id);
+          terminal = sqliteRejectedTerminal;
+          break;
+        }
+        if (sqliteRejectedCandidates.length >= MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES) {
+          sqliteRejectedTerminalCursors.set(
+            row.invocation_id,
+            sqliteRejectedCandidates[sqliteRejectedCandidates.length - 1].id,
+          );
+          if (drainSQLiteRejectedCandidates) continue;
+          break;
+        }
+        if (sqliteRejectedCandidates.length > 0) {
+          sqliteRejectedTerminalCursors.set(
+            row.invocation_id,
+            sqliteRejectedCandidates[sqliteRejectedCandidates.length - 1].id,
+          );
+        }
+        terminal = sqlTerminal;
+        if (terminal) sqliteRejectedTerminalCursors.delete(row.invocation_id);
+        break;
+      } while (drainSQLiteRejectedCandidates);
+      if (!terminal) continue;
+      const success = terminal.event_type === 'mgr.turn_completed';
       const invocation = completeInvocation(
         row.invocation_id,
         row.manager_run_id,
         success,
-        success ? null : (payload?.summaryText || 'manager turn failed'),
+        success ? null : (terminal.payload?.summaryText || 'manager turn failed'),
       );
       if (invocation) reconciled.push(invocation);
     }
@@ -1114,7 +1214,10 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     //   1. a persisted terminal turn event  → the ACTUAL outcome (completed/failed)
     //   2. a provably dead manager run      → 'uncertain' + a specific reason
     //   3. anything still active            → 'uncertain' + restart_delivery_uncertain
-    reconcilePersistedTerminalEvents();
+    // Normal ticks keep JSON parsing bounded to one fallback page. Restart is
+    // the last chance to consume those pages before the generic backstop makes
+    // the invocation terminal, so it must drain the finite persisted history.
+    reconcilePersistedTerminalEvents({ drainSQLiteRejectedCandidates: true });
     const uncertainRunning = sweepTerminalRunning(now, runningStaleMs).length;
     const uncertainDelivery = stmts.markDeliveryUncertain.run().changes;
     const uncertain = uncertainDelivery + uncertainRunning;

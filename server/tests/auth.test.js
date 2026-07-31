@@ -78,6 +78,145 @@ test('no PALANTIR_TOKEN → /api/tasks is reachable without auth', async (t) => 
   assert.equal(res.status, 200);
 });
 
+test('createApp snapshots accessor-backed actor tokens for auth and capabilities', async (t) => {
+  const storageRoot = await createTempDir('palantir-storage-');
+  const fsRoot = await createTempDir('palantir-fs-');
+  const dbPath = path.join(await createTempDir('palantir-db-'), 'test.db');
+  let authReads = 0;
+  let pmReads = 0;
+  const options = {
+    storageRoot,
+    fsRoot,
+    dbPath,
+    agentProcessIsolation: true,
+    authResolverOpts: { hasKeychain: () => false },
+  };
+  Object.defineProperties(options, {
+    authToken: {
+      enumerable: true,
+      get() {
+        authReads += 1;
+        return authReads === 1 ? undefined : 'late-token';
+      },
+    },
+    pmToken: {
+      enumerable: true,
+      get() {
+        pmReads += 1;
+        return pmReads === 1 ? undefined : 'late-pm-token';
+      },
+    },
+  });
+  const previousAuthToken = process.env.PALANTIR_TOKEN;
+  const previousPmToken = process.env.PALANTIR_PM_TOKEN;
+  delete process.env.PALANTIR_TOKEN;
+  delete process.env.PALANTIR_PM_TOKEN;
+  let app;
+  try {
+    app = createApp(options);
+  } finally {
+    if (previousAuthToken === undefined) delete process.env.PALANTIR_TOKEN;
+    else process.env.PALANTIR_TOKEN = previousAuthToken;
+    if (previousPmToken === undefined) delete process.env.PALANTIR_PM_TOKEN;
+    else process.env.PALANTIR_PM_TOKEN = previousPmToken;
+  }
+  t.after(async () => {
+    await app.shutdown();
+    await fs.rm(storageRoot, { recursive: true, force: true });
+    await fs.rm(fsRoot, { recursive: true, force: true });
+    await fs.rm(path.dirname(dbPath), { recursive: true, force: true });
+  });
+
+  const status = await request(app).get('/api/memory/status').expect(200);
+  const workerGrant = app.services.workerProposalTokenService.mint(
+    'run_worker',
+    { projectId: 'project_one' },
+  );
+
+  assert.deepEqual({
+    authReads,
+    pmReads,
+    middlewareAuthMethod: status.body.approval.actor,
+    policyBoundary: status.body.approval.actor_boundary,
+    capabilitiesEnabled: workerGrant !== null,
+    workerGrantMinted: workerGrant !== null,
+  }, {
+    authReads: 1,
+    pmReads: 1,
+    middlewareAuthMethod: 'none',
+    policyBoundary: 'auth_disabled',
+    capabilitiesEnabled: false,
+    workerGrantMinted: false,
+  });
+});
+
+test('createApp snapshots env fallback tokens across unrelated option getters', async (t) => {
+  const storageRoot = await createTempDir('palantir-storage-');
+  const fsRoot = await createTempDir('palantir-fs-');
+  const dbPath = path.join(await createTempDir('palantir-db-'), 'test.db');
+  const options = {
+    storageRoot,
+    fsRoot,
+    dbPath,
+    authResolverOpts: { hasKeychain: () => false },
+  };
+  Object.defineProperties(options, {
+    agentProcessIsolation: {
+      enumerable: true,
+      get() {
+        process.env.PALANTIR_TOKEN = 'late-token';
+        return true;
+      },
+    },
+    workerProposalBaseUrl: {
+      enumerable: true,
+      get() {
+        delete process.env.PALANTIR_TOKEN;
+        return undefined;
+      },
+    },
+  });
+  const previousAuthToken = process.env.PALANTIR_TOKEN;
+  const previousPmToken = process.env.PALANTIR_PM_TOKEN;
+  delete process.env.PALANTIR_TOKEN;
+  delete process.env.PALANTIR_PM_TOKEN;
+  let app;
+  try {
+    app = createApp(options);
+  } finally {
+    if (previousAuthToken === undefined) delete process.env.PALANTIR_TOKEN;
+    else process.env.PALANTIR_TOKEN = previousAuthToken;
+    if (previousPmToken === undefined) delete process.env.PALANTIR_PM_TOKEN;
+    else process.env.PALANTIR_PM_TOKEN = previousPmToken;
+  }
+  t.after(async () => {
+    await app.shutdown();
+    await fs.rm(storageRoot, { recursive: true, force: true });
+    await fs.rm(fsRoot, { recursive: true, force: true });
+    await fs.rm(path.dirname(dbPath), { recursive: true, force: true });
+  });
+
+  const status = await request(app).get('/api/memory/status');
+  const workerGrant = app.services.workerProposalTokenService.mint(
+    'run_worker',
+    { projectId: 'project_one' },
+  );
+
+  assert.deepEqual({
+    status: status.status,
+    middlewareAuthMethod: status.body.approval.actor,
+    policyBoundary: status.body.approval.actor_boundary,
+    capabilitiesEnabled: workerGrant !== null,
+    workerGrantMinted: workerGrant !== null,
+  }, {
+    status: 200,
+    middlewareAuthMethod: 'none',
+    policyBoundary: 'auth_disabled',
+    capabilitiesEnabled: false,
+    workerGrantMinted: false,
+  });
+});
+
 // ---- Bearer header path (existing CLI behavior) ----
 
 test('PALANTIR_TOKEN set → Bearer header allows /api/tasks', async (t) => {

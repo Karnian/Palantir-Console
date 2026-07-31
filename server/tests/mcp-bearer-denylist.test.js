@@ -15,7 +15,16 @@ const { createMcpTemplateService } = require('../services/mcpTemplateService');
 const { createPresetService } = require('../services/presetService');
 const { preflightHttpMcpConfig } = require('../services/mcpPreflight');
 
-const PROCESS_HIJACK_KEYS = ['LD_PRELOAD', 'NODE_OPTIONS', 'PATH', 'HOME'];
+const PROCESS_HIJACK_KEYS = [
+  'LD_PRELOAD',
+  'NODE_OPTIONS',
+  'PATH',
+  'HOME',
+  // Windows environment keys are case-insensitive. These exact spellings
+  // previously bypassed the uppercase-only regexes.
+  'node_options',
+  'Path',
+];
 
 async function makeHarness(t, overrides = {}) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'palantir-mcp-bearer-deny-'));
@@ -211,7 +220,7 @@ function createRawHttpPreset(h, key, alias) {
   });
 }
 
-test('template CRUD shares the immutable bearer process-hijack denylist', async (t) => {
+test('template CRUD applies the immutable bearer process-hijack denylist case-insensitively', async (t) => {
   const h = await makeHarness(t);
   const service = createMcpTemplateService(h.db);
 
@@ -356,7 +365,7 @@ test('GITHUB_TOKEN from project/repo needs explicit profile authority', async (t
   });
 });
 
-test('process-loader/path hijack keys are rejected even from preset provenance', async (t) => {
+test('process-loader/path hijack keys are rejected case-insensitively even from preset provenance', async (t) => {
   for (const key of PROCESS_HIJACK_KEYS) {
     await t.test(key, async (st) => {
       const h = await makeHarness(st);
@@ -378,18 +387,20 @@ test('process-loader/path hijack keys are rejected even from preset provenance',
 
 test('network preflight skip does not bypass process-hijack validation', async (t) => {
   enablePreflightSkip(t);
-  const out = await preflightHttpMcpConfig({
-    mcpServers: {
-      hostile: {
-        url: 'http://127.0.0.1:3100/mcp',
-        bearer_token_env_var: 'NODE_OPTIONS',
+  for (const key of ['NODE_OPTIONS', 'node_options', 'Path']) {
+    const out = await preflightHttpMcpConfig({
+      mcpServers: {
+        hostile: {
+          url: 'http://127.0.0.1:3100/mcp',
+          bearer_token_env_var: key,
+        },
       },
-    },
-  });
-  assert.equal(out.skipped, false);
-  assert.equal(out.failures.length, 1);
-  assert.equal(out.failures[0].reason, 'bearer_env_process_hijack');
-  assert.equal(out.failures[0].bearer_env, 'NODE_OPTIONS');
+    });
+    assert.equal(out.skipped, false, `${key} must be validated before the network skip`);
+    assert.equal(out.failures.length, 1);
+    assert.equal(out.failures[0].reason, 'bearer_env_process_hijack');
+    assert.equal(out.failures[0].bearer_env, key);
+  }
 });
 
 // ── codex adversarial review (PR B, MINOR): the three policy branches that the

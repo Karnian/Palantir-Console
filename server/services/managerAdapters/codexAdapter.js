@@ -16,10 +16,11 @@
  *     subsequent turns get a high cached_input_tokens, which we want.
  *   - The temp file is placed lazily on the first runTurn() and deleted in
  *     disposeSession() (the dispose hook is precisely what D1 was added for).
- *   - --skip-git-repo-check is always passed. --full-auto is the default
- *     for manager role (auto-approves tool calls, keeps filesystem sandbox).
- *     --dangerously-bypass-approvals-and-sandbox is only for worker role
- *     or when PALANTIR_CODEX_MANAGER_BYPASS=1 is set.
+ *   - --skip-git-repo-check and
+ *     --dangerously-bypass-approvals-and-sandbox are always passed, regardless
+ *     of role. Managers need network access to call the Palantir Console API;
+ *     --full-auto's sandbox blocks that access and makes orchestration
+ *     non-functional. Workers also require unrestricted filesystem writes.
  *   - AGENTS.md interaction (verified 2026-04-20 against codex-cli 0.120.0):
  *     ~/.codex/AGENTS.md is auto-loaded by codex when present and prepended
  *     to the model_instructions_file content. On the dev box this file is
@@ -64,6 +65,7 @@ const {
   resolveCodexUserConfigPath,
 } = require('./codexUserConfigScan');
 const { resolveSpawnCwd } = require('../../utils/spawnCwd');
+const { isProjectLayer } = require('../../utils/conversationId');
 
 // P2-2: vendor item.type='error' classification constants. Kept at
 // module scope so the exported helper `classifyCodexErrorAsNotice` (below
@@ -276,10 +278,11 @@ function createCodexAdapter({
    * spawn `codex exec`, and capture thread_id.
    *
    * v3 Phase 0: accepts optional `role` ('manager' | 'worker', default 'manager').
-   * Role-aware launch flags are resolved in spawnOneTurn — manager role omits
-   * `--dangerously-bypass-approvals-and-sandbox` per the capability diet policy.
-   * Worker role (future) keeps the bypass because workers have legitimate
-   * filesystem write needs. See docs/specs/manager-v3-multilayer.md principle 1.
+   * Launch flags are intentionally role-independent: managers need unsandboxed
+   * network access for Palantir API orchestration, while workers need
+   * unrestricted filesystem writes. Role is not metadata-only: when a default
+   * local caller omits env, it also selects the fail-closed manager `{}` env or
+   * the legacy worker `process.env` fallback.
    *
    * M1 (supersedes P4-2 note): object-shaped mcpConfig is consumed. Codex
    * 0.120.0 has no `--mcp-config` flag, but `-c
@@ -1253,17 +1256,33 @@ function createCodexAdapter({
     return null;
   }
 
-  function buildGuardrailsSection() {
+  function buildGuardrailsSection({ layer = 'top' } = {}) {
+    const delegationRules = isProjectLayer(layer)
+      ? `- Delegated work goes through the Palantir /execute API only.
+- Do NOT edit code directly in this manager session; always delegate edits to a
+  worker.`
+      : `- For project-scoped work, delegate to the project's Operator. Do NOT spawn
+  project workers directly.
+- Do NOT edit code directly in this manager session. For project-scoped edits,
+  delegate to the project's Operator.`;
+
     return `## Codex CLI adapter notes
 
 You are running as a Codex CLI subprocess (codex exec --json). HARD RULES:
 - Do NOT spawn nested codex / claude / codex-acp / mcp-codex sessions yourself.
-  Delegated work goes through the Palantir /execute API only.
-- Do NOT do code edits directly inside this manager session. Spawn a worker.
+${delegationRules}
+- Direct writes are technically possible, but they bypass
+  Palantir worker execution, run attribution, and Console-visible review history.
+- For repo-defined Git projects, repo materialization is enabled by default:
+  delegated workers on both local and remote nodes normally get run-specific
+  materialized worktrees. Palantir captures their diffs against the resolved
+  commit and runs the configured harvest test through the selected node executor.
+- A remote legacy-directory project is the exception: its worker runs directly
+  in the configured remote directory without a run worktree, so worktree-based
+  diff capture and test harvest are unavailable for that path. Delegate remote
+  work anyway to preserve attribution and tracked execution.
 - Do NOT install a polling loop on /execute results — the user will see them
-  in the Palantir Console UI; just report once per turn.
-- Filesystem sandbox is active. Your tools are limited to read operations
-  and WebFetch for API calls. Do not attempt file writes — those are a worker concern.`;
+  in the Palantir Console UI; just report once per turn.`;
   }
 
   return {

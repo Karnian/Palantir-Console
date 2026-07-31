@@ -123,6 +123,16 @@ that explicit attestation, managers receive no orchestration credential and
 workers receive no memory-proposal credential. This is fail-closed; browser and
 trusted external bearer access continue to work.
 
+Run `npm run diagnose:isolation` (or
+`npm run --silent diagnose:isolation -- --json` for clean automation output)
+to see the exact policy inputs that currently block run-bound capabilities. A
+non-ready result exits with status 2. The command checks the runtime gate; it
+does not prove that an OS/container boundary exists. See the Korean
+[isolated capability runbook](docs/runbook-isolated-capabilities.md) before
+making the `verified` attestation.
+
+`PALANTIR_ACTOR_TOKEN_FILE` 로 기동하는 경우 이 명령은 **판정하지 못한다**(종료 코드 3). 그 파일은 부팅 때 한 번 소비되어 애플리케이션 옵션으로 넘어가므로 환경변수로 존재하지 않는다 — 실패가 아니라 "여기서는 알 수 없음" 이다. 종료 코드 2 만 실제 미충족을 뜻한다.
+
 Local installs must not store either global token in the repository
 `.env` (startup rejects that configuration). For the secure path, create a
 mode-`0600`, non-symlink JSON file containing `PALANTIR_TOKEN` and optionally
@@ -497,6 +507,15 @@ spawn), keyed by `run_id` with `<pluginRef>/<relpath>` namespaced file
 hashes. Deleting a preset later does not erase past snapshot rows;
 `tasks.preferred_preset_id` is set NULL via app-level cascade.
 
+Codex manager sessions launched through `codexAdapter` always run with
+`--dangerously-bypass-approvals-and-sandbox`; there is no environment-variable
+switch for this behavior. Managers need network access to call the Palantir
+Console API, and the `--full-auto` sandbox blocks that access, making
+orchestration impossible. Codex task workers use the separate lifecycle worker
+path: their approval and sandbox flags come from the profile's editable
+`args_template`. The default `exec {prompt}` profile does not add the bypass
+flag.
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -506,10 +525,11 @@ hashes. Deleting a preset later does not erase past snapshot rows;
 | `PALANTIR_PM_TOKEN` | (none) | Optional distinct bearer credential for trusted external automation; never injected into agent processes |
 | `PALANTIR_ACTOR_TOKEN_FILE` | (none) | POSIX only: mode-`0600` one-shot JSON containing the two actor tokens; consumed and unlinked before agent startup (Windows fails closed because DACLs cannot be verified portably) |
 | `PALANTIR_AGENT_PROCESS_ISOLATION` | (none) | Set to `verified` only when every capability-bearing agent is isolated by a separate OS account or container; otherwise run-bound agent capabilities stay disabled |
+| `PALANTIR_GIT_ENV_ALLOWLIST` | (none) | Additional node-local environment variable names inherited by Git operations (comma-separated), for example an askpass helper's companion credential |
+| `PALANTIR_PROJECT_TEST_ENV_ALLOWLIST` | (none) | Additional node-local environment variable names inherited by materialized project test commands (comma-separated), for example `PYTHONPATH` |
 | `HOST` | auto | Override the bind address. `0.0.0.0` without a token logs a security warning |
 | `PALANTIR_ALLOWED_COMMANDS` | (none) | Additional allowed CLI commands (comma-separated) |
 | `PALANTIR_DEFAULT_PM_ADAPTER` | `codex` | Global Operator adapter fallback when an instance uses Auto and its project has no `preferred_pm_adapter` |
-| `PALANTIR_CODEX_MANAGER_BYPASS` | (unset) | Set to `1` to let Codex manager turns run with `--dangerously-bypass-approvals-and-sandbox`. Default (unset) keeps the manager role in the sandboxed policy |
 | `ANTHROPIC_BASE_URL` / `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` | — | Claude Code auth (persisted to `.claude-auth.json` when set at server start) |
 | `CODEX_API_KEY` / `OPENAI_API_KEY` | — | Codex auth (preflight checks `~/.codex/auth.json`) |
 | `CODEX_BIN` | `codex` | Codex CLI path |

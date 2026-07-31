@@ -85,6 +85,111 @@ test('CodexAdapter exposes Codex capabilities', () => {
   assert.match(adapter.buildGuardrailsSection(), /Codex CLI adapter notes/);
 });
 
+test('Codex Operator prompt distinguishes repo-defined worktrees from remote legacy-directory execution', () => {
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
+  const adapter = createCodexAdapter({ runService: null });
+  const prompt = buildManagerSystemPrompt({
+    adapter,
+    port: 4177,
+    token: null,
+    layer: 'operator',
+    adapterType: 'codex',
+  });
+
+  assert.doesNotMatch(prompt, /filesystem sandbox is active/i);
+  assert.doesNotMatch(prompt, /tools are limited to read operations/i);
+  assert.doesNotMatch(prompt, /Project-related work MUST go through PM/i);
+  assert.match(prompt, /Delegated work goes through the Palantir \/execute API only/i);
+  assert.match(prompt, /do not edit code directly[\s\S]*always delegate edits to a\s+worker/i);
+  assert.match(prompt, /direct writes are technically possible/i);
+  assert.match(
+    prompt,
+    /For repo-defined Git projects,[\s\S]*enabled by default:[\s\S]*both local and remote nodes[\s\S]*run-specific\s+materialized worktrees/i,
+  );
+  assert.match(
+    prompt,
+    /captures their diffs against the resolved\s+commit and runs the configured harvest test through the selected node executor/i,
+  );
+  assert.match(
+    prompt,
+    /A remote legacy-directory project is the exception:[\s\S]*configured remote directory without a run worktree,[\s\S]*diff capture and test harvest are unavailable for that path/i,
+  );
+  assert.doesNotMatch(prompt, /Remote workers currently run directly/i);
+  assert.doesNotMatch(
+    prompt,
+    /bypass\s+worker worktree isolation, diff capture, harvest, and run attribution/i,
+  );
+  assert.match(prompt, /Delegate remote\s+work anyway to preserve attribution and tracked execution/i);
+});
+
+test('Codex Top prompt routes project work through Operator without a conflicting worker contract', () => {
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
+  const adapter = createCodexAdapter({ runService: null });
+  const prompt = buildManagerSystemPrompt({
+    adapter,
+    port: 4177,
+    token: null,
+    layer: 'top',
+    adapterType: 'codex',
+  });
+
+  assert.doesNotMatch(prompt, /filesystem sandbox is active/i);
+  assert.doesNotMatch(prompt, /tools are limited to read operations/i);
+  assert.match(prompt, /Project-related work MUST go through PM/i);
+  assert.match(
+    prompt,
+    /MUST delegate it to that project's PM[\s\S]*Do NOT spawn workers yourself for project-scoped work/i,
+  );
+  assert.match(prompt, /For project-scoped edits,\s+delegate to the project's Operator/i);
+  assert.doesNotMatch(prompt, /Delegated work goes through the Palantir \/execute API only/i);
+  assert.doesNotMatch(prompt, /always delegate edits to a\s+worker/i);
+  assert.doesNotMatch(
+    prompt,
+    /When the user asks you to do work[\s\S]*MUST spawn a Palantir Console worker agent/i,
+  );
+  assert.match(
+    prompt,
+    /For a pm_enabled project's work,[\s\S]*do NOT create or execute a worker task yourself/i,
+  );
+  assert.match(
+    prompt,
+    /Only when a request is one of the direct-handling cases above may you spawn a worker via \/execute/i,
+  );
+  assert.match(prompt, /direct writes are technically possible/i);
+  assert.match(
+    prompt,
+    /For repo-defined Git projects,[\s\S]*both local and remote nodes[\s\S]*run-specific\s+materialized worktrees/i,
+  );
+  assert.match(
+    prompt,
+    /A remote legacy-directory project is the exception:[\s\S]*configured remote directory without a run worktree/i,
+  );
+  assert.doesNotMatch(prompt, /Remote workers currently run directly/i);
+});
+
+test('runtime permission docs match the directory-less local Operator cwd fallback', () => {
+  const { resolveSpawnCwd } = require('../utils/spawnCwd');
+  const landscape = fs.readFileSync(
+    path.join(__dirname, '../../docs/runtime-permission-landscape.md'),
+    'utf8',
+  );
+  const operatorRow = landscape
+    .split('\n')
+    .find((line) => line.startsWith('| Codex Operator 매니저 |'));
+
+  assert.equal(resolveSpawnCwd({ workspaceDir: '/workspace/project' }), '/workspace/project');
+  assert.equal(resolveSpawnCwd({ workspaceDir: null }), process.cwd());
+  assert.ok(operatorRow, 'Codex Operator permission row must be documented');
+  assert.match(
+    operatorRow,
+    /local Operator[\s\S]*`project\.directory`[\s\S]*directory가 없으면[\s\S]*`process\.cwd\(\)`/,
+  );
+  assert.match(operatorRow, /directory 없는 local Operator의 cwd는 기본 Top과 동일/);
+  assert.doesNotMatch(landscape, /Top이 가장 넓/);
+});
+
 test('CodexAdapter lazily writes a system prompt temp file and disposeSession cleans it up', async () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
   const { PassThrough } = require('node:stream');
@@ -614,6 +719,56 @@ test('P4-S3a: injected executor without explicit env does not receive process.en
   assert.equal(result.accepted, true);
   assert.deepEqual(capturedEnv, {});
   assert.equal(capturedEnv[sentinelName], undefined);
+});
+
+test('Codex role selects omitted-env inheritance and the multilayer spec documents the boundary', async (t) => {
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const sentinelName = 'PALANTIR_CODEX_ROLE_ENV_SENTINEL';
+  const previousSentinel = process.env[sentinelName];
+  process.env[sentinelName] = 'ambient-host-credential';
+  t.after(() => {
+    if (previousSentinel === undefined) delete process.env[sentinelName];
+    else process.env[sentinelName] = previousSentinel;
+  });
+
+  const captured = {};
+  const adapters = [];
+  for (const role of ['manager', 'worker']) {
+    const adapter = createCodexAdapter({
+      runService: null,
+      codexBin: 'codex-test-bin',
+      spawnFn(_command, args, opts) {
+        captured[role] = { args: [...args], env: opts.env };
+        return createFakeDuplexChild();
+      },
+    });
+    adapters.push({ adapter, runId: `run_codex_role_env_${role}` });
+    adapter.startSession(`run_codex_role_env_${role}`, {
+      systemPrompt: 'environment boundary',
+      cwd: process.cwd(),
+      role,
+    });
+    adapter.runTurn(`run_codex_role_env_${role}`, { text: 'hi' });
+  }
+  t.after(async () => {
+    await Promise.all(adapters.map(({ adapter, runId }) => adapter.disposeSession(runId)));
+  });
+
+  assert.deepEqual(captured.manager.env, {});
+  assert.equal(captured.manager.env[sentinelName], undefined);
+  assert.equal(captured.worker.env[sentinelName], 'ambient-host-credential');
+  for (const role of ['manager', 'worker']) {
+    assert.ok(captured[role].args.includes('--dangerously-bypass-approvals-and-sandbox'));
+  }
+
+  const spec = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'docs', 'specs', 'manager-v3-multilayer.md'),
+    'utf8',
+  );
+  assert.doesNotMatch(spec, /역할은 세션 메타데이터로만 유지/);
+  assert.match(spec, /역할은 환경 경계에도 사용/);
+  assert.match(spec, /manager는 ambient 환경을 상속하지 않고 `\{\}`를 전달/);
+  assert.match(spec, /worker는 .*`process\.env`를 상속/);
 });
 
 test('P4-S3a: dispose during pending remote prompt placement removes created secret dir', async () => {

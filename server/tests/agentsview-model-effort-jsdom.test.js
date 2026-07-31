@@ -100,7 +100,44 @@ test('codex preset uses structured high effort without a baked args flag', async
   });
 });
 
-test('model and reasoning effort controls follow the command vendor', async (t) => {
+test('claude preset labels and saves the null permission mode as bypassPermissions', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  const { calls } = installAgentsStubs(env);
+  env.loadComponent('Dropdown');
+  env.loadComponent('AgentsView');
+
+  const root = renderAgentsView(env);
+  await openNewAgentModal(env, root);
+  await setSelect(env, root.querySelector('#agent-type'), 'codex');
+  await setSelect(env, root.querySelector('#agent-type'), 'claude-code');
+
+  await waitFor(() => {
+    assert.equal(root.querySelector('#agent-command').value, 'claude');
+    assert.equal(root.querySelector('#agent-args').value, '-p {prompt}');
+    assert.doesNotMatch(root.querySelector('#agent-args').value, /permission-mode/);
+    assert.equal(root.querySelector('#agent-permission-mode').dataset.value, '');
+    assert.equal(
+      root.querySelector('#agent-permission-mode .dropdown-label').textContent,
+      '(none — runs as bypassPermissions)',
+    );
+  });
+
+  setInput(env, root.querySelector('#agent-name'), 'Default Claude');
+  await flushEffects(30);
+  root.querySelector('.modal-footer button.primary').click();
+
+  const call = await waitFor(() => {
+    const match = calls.find((entry) => entry.url === '/api/agents');
+    assert.ok(match);
+    return match;
+  });
+  const body = JSON.parse(call.options.body);
+  assert.equal(call.options.method, 'POST');
+  assert.equal(body.permission_mode, null);
+});
+
+test('structured controls follow the command vendor', async (t) => {
   const env = createPreactEnv();
   t.after(env.cleanup);
   installAgentsStubs(env);
@@ -114,18 +151,222 @@ test('model and reasoning effort controls follow the command vendor', async (t) 
   await waitFor(() => {
     assert.ok(root.querySelector('#agent-model'));
     assert.ok(root.querySelector('#agent-reasoning-effort'));
+    assert.equal(root.querySelector('#agent-permission-mode'), null);
   });
 
   setInput(env, root.querySelector('#agent-command'), '/usr/local/bin/claude');
   await waitFor(() => {
     assert.ok(root.querySelector('#agent-model'));
     assert.equal(root.querySelector('#agent-reasoning-effort'), null);
+    assert.ok(root.querySelector('#agent-permission-mode'));
   });
 
   setInput(env, root.querySelector('#agent-command'), '/usr/local/bin/gemini');
   await waitFor(() => {
     assert.equal(root.querySelector('#agent-model'), null);
     assert.equal(root.querySelector('#agent-reasoning-effort'), null);
+    assert.equal(root.querySelector('#agent-permission-mode'), null);
+  });
+});
+
+test('Claude-first wrapper classification preserves permission_mode on edit', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  const { calls } = installAgentsStubs(env);
+  env.loadComponent('Dropdown');
+  env.loadComponent('AgentsView');
+
+  const agent = {
+    id: 'agent_claude_codex_wrapper',
+    name: 'Wrapped Claude',
+    type: 'claude-code',
+    command: '/usr/local/bin/claude-codex-wrapper',
+    args_template: '-p {prompt}',
+    permission_mode: 'acceptEdits',
+    max_concurrent: 1,
+    capabilities_json: '{}',
+  };
+  const root = renderAgentsView(env, { agents: [agent] });
+  root.querySelector('.agent-card-actions button').click();
+
+  await waitFor(() => {
+    assert.ok(root.querySelector('#agent-permission-mode'));
+    assert.equal(
+      root.querySelector('#agent-permission-mode').dataset.value,
+      'acceptEdits',
+    );
+  });
+  setInput(env, root.querySelector('#agent-name'), 'Renamed wrapped Claude');
+  await flushEffects(30);
+  root.querySelector('.modal-footer button.primary').click();
+
+  const call = await waitFor(() => {
+    const match = calls.find(
+      (entry) => entry.url === '/api/agents/agent_claude_codex_wrapper',
+    );
+    assert.ok(match);
+    return match;
+  });
+  const body = JSON.parse(call.options.body);
+  assert.equal(body.name, 'Renamed wrapped Claude');
+  assert.equal(body.permission_mode, 'acceptEdits');
+});
+
+test('legacy multi-space permission initializes the edit dropdown and survives rename', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  const { calls } = installAgentsStubs(env);
+  env.loadComponent('Dropdown');
+  env.loadComponent('AgentsView');
+
+  const agent = {
+    id: 'legacy_multi_space',
+    name: 'Legacy multi-space Claude',
+    type: 'claude-code',
+    command: 'claude',
+    args_template: '-p {prompt} --permission-mode   acceptEdits',
+    permission_mode: null,
+    max_concurrent: 1,
+    capabilities_json: '{}',
+  };
+  const root = renderAgentsView(env, { agents: [agent] });
+  root.querySelector('.agent-card-actions button').click();
+
+  await waitFor(() => {
+    assert.equal(
+      root.querySelector('#agent-permission-mode').dataset.value,
+      'acceptEdits',
+    );
+  });
+  setInput(env, root.querySelector('#agent-name'), 'Renamed multi-space Claude');
+  await flushEffects(30);
+  root.querySelector('.modal-footer button.primary').click();
+
+  const call = await waitFor(() => {
+    const match = calls.find(
+      (entry) => entry.url === '/api/agents/legacy_multi_space',
+    );
+    assert.ok(match);
+    return match;
+  });
+  const body = JSON.parse(call.options.body);
+  assert.equal(body.name, 'Renamed multi-space Claude');
+  assert.equal(body.permission_mode, 'acceptEdits');
+});
+
+test('quoted legacy permission initializes the edit dropdown and survives rename', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  const { calls } = installAgentsStubs(env);
+  env.loadComponent('Dropdown');
+  env.loadComponent('AgentsView');
+
+  const agent = {
+    id: 'legacy_quoted_permission',
+    name: 'Legacy quoted Claude',
+    type: 'claude-code',
+    command: 'claude',
+    args_template: '-p {prompt} --permission-mode "acceptEdits"',
+    permission_mode: null,
+    max_concurrent: 1,
+    capabilities_json: '{}',
+  };
+  const root = renderAgentsView(env, { agents: [agent] });
+  root.querySelector('.agent-card-actions button').click();
+
+  await waitFor(() => {
+    assert.equal(
+      root.querySelector('#agent-permission-mode').dataset.value,
+      'acceptEdits',
+    );
+  });
+  setInput(env, root.querySelector('#agent-name'), 'Renamed quoted Claude');
+  await flushEffects(30);
+  root.querySelector('.modal-footer button.primary').click();
+
+  const call = await waitFor(() => {
+    const match = calls.find(
+      (entry) => entry.url === '/api/agents/legacy_quoted_permission',
+    );
+    assert.ok(match);
+    return match;
+  });
+  const body = JSON.parse(call.options.body);
+  assert.equal(body.name, 'Renamed quoted Claude');
+  assert.equal(body.permission_mode, 'acceptEdits');
+});
+
+test('changing an existing manager profile type also changes its command vendor', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  const { calls } = installAgentsStubs(env);
+  env.loadComponent('Dropdown');
+  env.loadComponent('AgentsView');
+
+  const agent = {
+    id: 'agent_codex_to_claude',
+    name: 'Existing manager',
+    type: 'codex',
+    command: 'codex',
+    args_template: 'exec --full-auto --skip-git-repo-check {prompt}',
+    max_concurrent: 1,
+    capabilities_json: '{}',
+  };
+  const root = renderAgentsView(env, { agents: [agent] });
+  root.querySelector('.agent-card-actions button').click();
+  await waitFor(() => assert.ok(root.querySelector('#agent-type')));
+
+  await setSelect(env, root.querySelector('#agent-type'), 'claude-code');
+  await waitFor(() => {
+    assert.equal(root.querySelector('#agent-command').value, 'claude');
+    assert.equal(root.querySelector('#agent-args').value, '-p {prompt}');
+    assert.ok(root.querySelector('#agent-permission-mode'));
+  });
+
+  root.querySelector('.modal-footer button.primary').click();
+  const call = await waitFor(() => {
+    const match = calls.find(
+      (entry) => entry.url === '/api/agents/agent_codex_to_claude',
+    );
+    assert.ok(match);
+    return match;
+  });
+  const body = JSON.parse(call.options.body);
+  assert.equal(body.type, 'claude-code');
+  assert.equal(body.command, 'claude');
+});
+
+test('Claude detail displays the effective structured permission beside the raw template', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  installAgentsStubs(env);
+  env.loadComponent('Dropdown');
+  env.loadComponent('AgentsView');
+
+  const agent = {
+    id: 'legacy_safer',
+    name: 'Legacy safer Claude',
+    type: 'claude-code',
+    command: 'claude',
+    args_template: '-p {prompt} --permission-mode acceptEdits',
+    permission_mode: 'acceptEdits',
+    max_concurrent: 1,
+    capabilities_json: '{}',
+  };
+  const root = renderAgentsView(env, { agents: [agent] });
+  root.querySelector('.agent-card-trigger').click();
+
+  await waitFor(() => {
+    const permission = root.querySelector('[data-role="agent-permission-mode"]');
+    assert.ok(permission);
+    assert.equal(
+      permission.querySelector('.agent-detail-field-value').textContent,
+      'acceptEdits',
+    );
+    assert.match(
+      root.querySelector('.agent-detail-grid').textContent,
+      /--permission-mode acceptEdits/,
+    );
   });
 });
 
@@ -155,6 +396,34 @@ test('create payload includes structured model and reasoning effort', async (t) 
   assert.equal(call.options.method, 'POST');
   assert.equal(body.model, 'gpt-5.1-codex');
   assert.equal(body.reasoning_effort, 'medium');
+  assert.equal(body.permission_mode, null);
+});
+
+test('create payload includes structured Claude permission_mode', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  const { calls } = installAgentsStubs(env);
+  env.loadComponent('Dropdown');
+  env.loadComponent('AgentsView');
+
+  const root = renderAgentsView(env);
+  await openNewAgentModal(env, root);
+  await setSelect(env, root.querySelector('#agent-type'), 'codex');
+  await setSelect(env, root.querySelector('#agent-type'), 'claude-code');
+  await waitFor(() => assert.ok(root.querySelector('#agent-permission-mode')));
+  setInput(env, root.querySelector('#agent-name'), 'Safer Claude');
+  await setSelect(env, root.querySelector('#agent-permission-mode'), 'acceptEdits');
+  await flushEffects(30);
+  root.querySelector('.modal-footer button.primary').click();
+
+  const call = await waitFor(() => {
+    const match = calls.find((entry) => entry.url === '/api/agents');
+    assert.ok(match);
+    return match;
+  });
+  const body = JSON.parse(call.options.body);
+  assert.equal(call.options.method, 'POST');
+  assert.equal(body.permission_mode, 'acceptEdits');
 });
 
 test('clearing structured fields sends explicit nulls on edit', async (t) => {
