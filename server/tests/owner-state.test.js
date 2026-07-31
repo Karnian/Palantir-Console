@@ -328,3 +328,44 @@ test('a refused cancel kill leaves the lease held for the sweep', async (t) => {
   assert.equal(lease.state, 'held', 'a refused kill must not close the lease');
   assert.equal(h.runService.getRun(run.id).status, 'cancelled', 'the status contract is unchanged');
 });
+
+test('a dead observation made before a reclaim cannot close the next generation', async (t) => {
+  // codex R3: releaseDeadOwner re-read the CURRENT held lease, so observation A
+  // (probed before a reclaim) closed generation B's lease as probe:dead. The
+  // caller now threads the lease it probed; the CAS loses on the stale id.
+  const db = await mkdb(t);
+  const engine = makeEngine({ type: 'tmux', alive: true, exitCode: null });
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+  const genA = db.prepare("SELECT lease_id FROM run_owner_leases WHERE run_id = ? AND state = 'held'")
+    .get(run.id).lease_id;
+
+  // The worker recorded its exit: the next health pass probes DEAD (gen A).
+  engine.setExitCode(1);
+  // Inject the reclaim in the window between the probe and the release: the
+  // terminal block calls detectExitCode again before releasing, and that is
+  // exactly where a reclaim can land in production.
+  let genB = null;
+  const origDetect = engine.detectExitCode;
+  let armed = true;
+  engine.detectExitCode = (...args) => {
+    if (armed && genB === null) {
+      armed = false;
+      // Supersede A: close it as a reclaim would, requeue, claim generation B.
+      db.prepare("UPDATE runs SET status = 'queued' WHERE id = ?").run(run.id);
+      genB = h.runService.claimQueuedRun(run.id, { withLease: true });
+      db.prepare("UPDATE runs SET status = 'running' WHERE id = ?").run(run.id);
+    }
+    return origDetect(...args);
+  };
+
+  await h.lifecycleService.checkHealth();
+
+  assert.ok(genB && genB.leaseId, 'the reclaim happened inside the window');
+  const leaseB = db.prepare('SELECT state FROM run_owner_leases WHERE lease_id = ?').get(genB.leaseId);
+  assert.equal(
+    leaseB.state,
+    'held',
+    "generation A's dead observation must not close generation B's lease",
+  );
+});

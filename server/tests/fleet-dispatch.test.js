@@ -1584,6 +1584,10 @@ test('boot housekeeping releases a dead lease before reaping the sentinel dir', 
   });
   const claim = h.runService.claimQueuedRun(run.id, { withLease: true });
   db.prepare("UPDATE run_owner_leases SET engine = 'remote' WHERE run_id = ?").run(run.id);
+  // The run actually spawned (acquired), then finished — a reserved lease's
+  // sentinel evidence is deliberately distrusted, so this fixture must model
+  // the real spawn path.
+  h.runService.markRunStarted(run.id, claim.leaseId, { tmux_session: `palantir-run-${run.id}` });
   h.runService.updateRunStatus(run.id, 'completed', { force: true });
   h.runService.addRunEvent(run.id, 'harvest:diff', JSON.stringify({ ok: true }));
 

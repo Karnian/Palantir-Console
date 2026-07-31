@@ -2689,6 +2689,20 @@ function createLifecycleService({
     return run?.tmux_session ? 'tmux' : null;
   }
 
+  // A RESERVED lease (no acquired_at) never started a process, so any
+  // sentinel/session evidence on disk belongs to a PREVIOUS generation —
+  // trusting it kills or terminalizes the new claim before it spawns (found
+  // via the codex R3 fence test). Only handle-based engines can prove a
+  // reserved-generation death; sentinel-based ones demote dead → unknown.
+  // Central here so the sweep, the running pass, and the needs_input pass can
+  // never disagree.
+  function demoteReservedSentinelDead(run, lease, state) {
+    if (state !== 'dead' || !lease || lease.acquired_at) return state;
+    const sentinelBased = lease.engine === 'tmux' || lease.engine === 'remote'
+      || (!lease.engine && run.tmux_session);
+    return sentinelBased ? 'unknown' : state;
+  }
+
   async function probeOwner(run, lease = null) {
     const channel = channelForNode(run.node_id);
     const durableEngine = durableOwnerEngine(run, lease);
@@ -2705,7 +2719,10 @@ function createLifecycleService({
       let state;
       try { state = await channel.ownerState(run.id, durableEngine); }
       catch { state = 'unknown'; }
-      const normalized = ['alive', 'dead', 'unknown'].includes(state) ? state : 'unknown';
+      const normalized = demoteReservedSentinelDead(
+        run, lease,
+        ['alive', 'dead', 'unknown'].includes(state) ? state : 'unknown',
+      );
       // A live/dead verdict implies the channel found a handle; route as cli
       // when we had no durable identity so downstream detectExitCode works.
       return { channel, engine: engine || (normalized === 'unknown' ? null : 'cli'), state: normalized };
@@ -2718,7 +2735,11 @@ function createLifecycleService({
       const alive = await channel.isAlive(run.id, probeEngine);
       if (alive) return { channel, engine: probeEngine, state: 'alive' };
       const exitCode = await channel.detectExitCode(run.id, probeEngine);
-      return { channel, engine: probeEngine, state: exitCode === null ? 'unknown' : 'dead' };
+      return {
+        channel,
+        engine: probeEngine,
+        state: demoteReservedSentinelDead(run, lease, exitCode === null ? 'unknown' : 'dead'),
+      };
     } catch {
       return { channel, engine: engine || null, state: 'unknown' };
     }
@@ -2752,11 +2773,19 @@ function createLifecycleService({
     return now - sinceMs >= REMOTE_OWNERSHIP_UNCERTAIN_TTL_MS;
   }
 
-  function releaseDeadOwner(run, evidence = 'probe:dead') {
-    if (!runService || typeof runService.getHeldLease !== 'function') return false;
-    const lease = runService.getHeldLease(run.id);
-    if (!lease || typeof runService.releaseOwner !== 'function') return false;
-    if (typeof runService.releaseOwner !== 'function') return false;
+  // Generation fence (codex S1b R3): the caller passes the lease it PROBED.
+  // Re-reading the current held lease here would let observation A — made
+  // before a reclaim — close generation B's lease as probe:dead. When no lease
+  // is passed (legacy call shape), fall back to the current one but only
+  // because every caller below now threads its probed lease.
+  function releaseDeadOwner(run, probedLease = null, evidence = 'probe:dead') {
+    if (!runService || typeof runService.releaseOwner !== 'function') return false;
+    let lease = probedLease;
+    if (!lease) {
+      if (typeof runService.getHeldLease !== 'function') return false;
+      lease = runService.getHeldLease(run.id);
+    }
+    if (!lease) return false;
     return runService.releaseOwner(run.id, lease.lease_id, {
       state: 'released',
       evidence,
@@ -2783,13 +2812,14 @@ function createLifecycleService({
           tmux_session: lease.tmux_session,
         };
         const observed = await probeOwner(run, lease);
-        if (observed.state === 'dead') {
+        const state = observed.state;
+        if (state === 'dead') {
           const evidence = lease.acquired_at ? 'probe:dead' : 'boot:reserved_dead';
           if (typeof runService.releaseOwner === 'function' && runService.releaseOwner(run.id, lease.lease_id, {
             state: 'released',
             evidence,
           })) changed++;
-        } else if (observed.state === 'alive') {
+        } else if (state === 'alive') {
           // Recovery resets the unknown grace anchor (codex S1b R1 #3) — the
           // marker is written only when an unknown annotation is outstanding.
           if (typeof runService.annotateOwnerProbeAlive === 'function') {
@@ -2798,7 +2828,7 @@ function createLifecycleService({
           if (!lease.acquired_at
             && typeof runService.acquireOwnerLeaseLate === 'function'
             && runService.acquireOwnerLeaseLate(run.id, lease.lease_id)) changed++;
-        } else if (observed.state === 'unknown') {
+        } else if (state === 'unknown') {
           if (typeof runService.annotateOwnerProbeUnknown === 'function'
             && runService.annotateOwnerProbeUnknown(run.id, lease.lease_id)) changed++;
         }
@@ -3147,7 +3177,7 @@ function createLifecycleService({
         if (ownerState === 'dead') {
           const exitCode = await channel.detectExitCode(run.id, 'stream-json');
           if (exitCode !== null) {
-            releaseDeadOwner(run);
+            releaseDeadOwner(run, lease);
             const status = exitCode === 0 ? 'completed' : 'failed';
             try { runService.updateRunStatus(run.id, status, { force: true }); } catch {}
             if (run.task_id) checkTaskCompletion(run.task_id);
@@ -3230,7 +3260,7 @@ function createLifecycleService({
         // Cleanup tmux session and output tracking. The lease is released ONLY
         // on confirmed death — an expired-unknown terminalization leaves it
         // held (owner unconfirmed; requeue keeps 409ing).
-        if (ownerState === 'dead') releaseDeadOwner(run);
+        if (ownerState === 'dead') releaseDeadOwner(run, lease);
         await channel.kill(run.id, 'cli');
         _outputHashes.delete(run.id);
 
@@ -3333,7 +3363,7 @@ function createLifecycleService({
                 const reason = exitCode === null ? 'agent-exit-unknown' : 'process_dead_after_idle';
                 runService.updateRunStatus(run.id, status, { force: true, reason });
                 if (run.task_id) checkTaskCompletion(run.task_id);
-                releaseDeadOwner(run);
+                releaseDeadOwner(run, lease);
                 await reObserved.channel.kill(run.id, 'cli');
                 _outputHashes.delete(run.id);
               } else if (reObserved.state === 'alive') {
@@ -3429,7 +3459,7 @@ function createLifecycleService({
           terminalReason: latest => idleTimeoutTerminalReason(latest),
         });
         if (run.task_id) checkTaskCompletion(run.task_id);
-        if (ownerState === 'dead') releaseDeadOwner(run);
+        if (ownerState === 'dead') releaseDeadOwner(run, lease);
         await channel.kill(run.id, 'cli');
         _outputHashes.delete(run.id);
       }
