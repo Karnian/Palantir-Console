@@ -3698,19 +3698,29 @@ function createLifecycleService({
         // remote status dir INCLUDING the exit sentinel — the only durable
         // dead evidence. Probe and release the held lease first, or the sweep
         // can never close it (permanent held; permanent slot under the flag).
+        let reapSafe = true;
         try {
           const lease = typeof runService.getHeldLease === 'function'
             ? runService.getHeldLease(run.id)
             : null;
           if (lease) {
             const observed = await probeOwner(run, lease);
-            if (observed.state === 'dead' && typeof runService.releaseOwner === 'function') {
-              runService.releaseOwner(run.id, lease.lease_id, {
-                state: 'released', evidence: 'probe:dead',
-              });
+            if (observed.state === 'dead') {
+              if (typeof runService.releaseOwner === 'function') {
+                runService.releaseOwner(run.id, lease.lease_id, {
+                  state: 'released', evidence: 'probe:dead',
+                });
+              }
+            } else {
+              // codex S1b R2 #1: reaping an alive/unknown owner's status dir
+              // destroys where its exit sentinel WILL be written — permanent
+              // unknown. Held + not-confirmed-dead → leave the dir for a later
+              // boot or the sweep.
+              reapSafe = false;
             }
           }
-        } catch { /* observation only — never blocks the reap */ }
+        } catch { reapSafe = false; }
+        if (!reapSafe) continue;
         await channel.cleanupRun(run.id);
         runService.addRunEvent(run.id, 'runtime:artifacts_reaped', JSON.stringify({
           kind: 'remote_status_dir',
@@ -4139,19 +4149,40 @@ function createLifecycleService({
   // kill is a deliberate termination whose outcome we cannot verify afterwards:
   // abandoned(cancel_kill), which under S1 is observation-only and under S3's
   // matrix returns capacity without enabling owner-dependent side effects.
-  async function settleLeaseBeforeCancelKill(run) {
+  // Probe BEFORE the kill (the kill destroys the tmux sentinel), but abandon
+  // only AFTER the kill is accepted (codex S1b R2 #2): a refused/failed kill
+  // means the owner may be untouched, and closing the lease then would hand
+  // its capacity back while a live owner still runs. A refused kill leaves the
+  // lease held — the sweep and the grace TTL own it from there.
+  async function settleLeaseAroundCancelKill(run, killFn) {
+    let lease = null;
+    let observedState = null;
     try {
-      const lease = typeof runService.getHeldLease === 'function'
+      lease = typeof runService.getHeldLease === 'function'
         ? runService.getHeldLease(run.id)
         : null;
-      if (!lease || typeof runService.releaseOwner !== 'function') return;
-      const observed = await probeOwner(run, lease);
-      if (observed.state === 'dead') {
-        runService.releaseOwner(run.id, lease.lease_id, { state: 'released', evidence: 'probe:dead' });
+      if (lease && typeof runService.releaseOwner === 'function') {
+        const observed = await probeOwner(run, lease);
+        observedState = observed.state;
+        if (observedState === 'dead') {
+          runService.releaseOwner(run.id, lease.lease_id, { state: 'released', evidence: 'probe:dead' });
+          lease = null; // settled
+        }
       } else {
-        runService.releaseOwner(run.id, lease.lease_id, { state: 'abandoned', evidence: 'cancel_kill' });
+        lease = null;
       }
-    } catch { /* observation only — cancel must proceed regardless */ }
+    } catch { lease = null; }
+    let killAccepted = false;
+    try {
+      const killed = killFn();
+      killAccepted = isThenable(killed) ? (await killed) !== false : killed !== false;
+    } catch { killAccepted = false; }
+    if (lease && killAccepted) {
+      try {
+        runService.releaseOwner(run.id, lease.lease_id, { state: 'abandoned', evidence: 'cancel_kill' });
+      } catch { /* observation only */ }
+    }
+    return killAccepted;
   }
 
   function cancelRun(runId) {
@@ -4160,9 +4191,7 @@ function createLifecycleService({
     if (['completed', 'failed', 'cancelled', 'stopped'].includes(run.status)) {
       return run;
     }
-    const settled = settleLeaseBeforeCancelKill(run);
-    const proceed = () => channelForNode(run.node_id).kill(runId);
-    const killed = isThenable(settled) ? settled.then(proceed) : proceed();
+    const killed = settleLeaseAroundCancelKill(run, () => channelForNode(run.node_id).kill(runId));
     if (isThenable(killed)) {
       return killed.then(() => finishCancelRun(run));
     }

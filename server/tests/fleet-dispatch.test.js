@@ -1594,3 +1594,35 @@ test('boot housekeeping releases a dead lease before reaping the sentinel dir', 
   assert.equal(lease.state, 'released', 'the dead lease must be released before the evidence is destroyed');
   assert.equal(lease.lease_id, claim.leaseId);
 });
+
+test('boot housekeeping refuses to reap while the owner is not confirmed dead', async (t) => {
+  // codex S1b R2 #1: reaping an alive/unknown owner's status dir destroys
+  // where its exit sentinel WILL be written — permanent unknown. The reap must
+  // skip and leave the dir for a later boot or the sweep.
+  const db = await mkdb(t);
+  const remoteChannel = makeRemoteChannel({ alive: true, exitCode: null });
+  const cleanupCalls = [];
+  remoteChannel.cleanupRun = async (runId) => { cleanupCalls.push(runId); };
+  const h = buildHarness(db, { remoteChannel });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db);
+  const project = h.projectService.createProject({
+    name: 'ReapAliveProject', directory: '/workspace/project', node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = h.runService.createRun({
+    task_id: task.id, agent_profile_id: profile.id, prompt: 'reap-alive', node_id: 'ssh-pod',
+  });
+  h.runService.claimQueuedRun(run.id, { withLease: true });
+  db.prepare("UPDATE run_owner_leases SET engine = 'remote' WHERE run_id = ?").run(run.id);
+  h.runService.updateRunStatus(run.id, 'completed', { force: true });
+  h.runService.addRunEvent(run.id, 'harvest:diff', JSON.stringify({ ok: true }));
+
+  await h.lifecycleService.recoverOrphanSessions();
+
+  assert.deepEqual(cleanupCalls, [], 'an unconfirmed owner blocks the reap');
+  assert.equal(
+    db.prepare('SELECT state FROM run_owner_leases WHERE run_id = ?').get(run.id).state,
+    'held',
+  );
+});

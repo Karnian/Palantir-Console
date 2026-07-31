@@ -311,3 +311,20 @@ test('cancel settles the lease before the kill destroys the evidence', async (t)
   assert.equal(h.runService.getRun(run.id).status, 'cancelled');
 });
 
+
+test('a refused cancel kill leaves the lease held for the sweep', async (t) => {
+  // codex R2 #2: abandoning before the kill was accepted returned capacity
+  // while a live owner might still run. A refused kill must not settle the
+  // lease — the sweep and grace TTL own it from there.
+  const db = await mkdb(t);
+  const engine = makeEngine({ type: 'tmux', alive: true, exitCode: null });
+  engine.kill = () => false; // the channel refuses
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+
+  await h.lifecycleService.cancelRun(run.id);
+
+  const lease = db.prepare('SELECT state FROM run_owner_leases WHERE run_id = ?').get(run.id);
+  assert.equal(lease.state, 'held', 'a refused kill must not close the lease');
+  assert.equal(h.runService.getRun(run.id).status, 'cancelled', 'the status contract is unchanged');
+});
