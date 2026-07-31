@@ -378,3 +378,27 @@ test('a dead observation made before a reclaim cannot close the next generation'
   );
   assert.equal(engine.killed.length, 0, "generation A must not kill generation B's worker");
 });
+
+test('the idle recheck releases the generation it re-probed', async (t) => {
+  // codex R5: the idle block re-probed currentLease but released the
+  // pass-entry lease — one generation behind after a reclaim inside the pass,
+  // so the release lost its CAS after the kill destroyed the evidence and the
+  // current lease stayed held forever.
+  const db = await mkdb(t);
+  const engine = makeEngine({ type: 'subprocess', alive: true, exitCode: null });
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+
+  // Park activity far in the past so the second health pass enters the idle
+  // branch; the idle recheck then observes the dead process.
+  await h.lifecycleService.checkHealth();
+  db.prepare(`UPDATE run_events SET created_at = datetime('now', '-31 minutes') WHERE run_id = ?`).run(run.id);
+  db.prepare(`UPDATE runs SET started_at = datetime('now', '-31 minutes') WHERE id = ?`).run(run.id);
+  engine.setAlive(false);
+  engine.setExitCode(1);
+
+  await h.lifecycleService.checkHealth();
+
+  const lease = db.prepare('SELECT state FROM run_owner_leases WHERE run_id = ?').get(run.id);
+  assert.equal(lease.state, 'released', 'the re-probed generation must be the one released');
+});

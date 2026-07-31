@@ -3187,6 +3187,14 @@ function createLifecycleService({
       if (owner === 'stream-json') {
         // streamJsonEngine handles exit via its own event handler (result → updateRunStatus)
         // Just check for orphaned processes where exit was missed
+        if ((ownerState === 'dead' || unknownExpired) && !observationStillCurrent(run, lease)) {
+          try {
+            runService.addRunEvent(run.id, 'worker:stale_observation_ignored', JSON.stringify({
+              lease_id: lease?.lease_id ?? null, pass: 'running:stream-json',
+            }));
+          } catch { /* annotate-only */ }
+          continue;
+        }
         if (ownerState === 'dead') {
           const exitCode = await channel.detectExitCode(run.id, 'stream-json');
           if (exitCode !== null) {
@@ -3390,7 +3398,11 @@ function createLifecycleService({
                 const reason = exitCode === null ? 'agent-exit-unknown' : 'process_dead_after_idle';
                 runService.updateRunStatus(run.id, status, { force: true, reason });
                 if (run.task_id) checkTaskCompletion(run.task_id);
-                releaseDeadOwner(run, lease);
+                // Release the lease this block actually RE-probed — the
+                // pass-entry lease can be a generation behind, and a stale-id
+                // release loses the CAS after the kill destroys the evidence,
+                // stranding the current lease held forever (codex S1b R5).
+                releaseDeadOwner(run, currentLease);
                 await reObserved.channel.kill(run.id, 'cli');
                 _outputHashes.delete(run.id);
               } else if (reObserved.state === 'alive') {
