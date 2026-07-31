@@ -3981,6 +3981,12 @@ function createLifecycleService({
 
         // If run is still marked as running in DB, it's a valid orphan
         if (run.status === 'running' || run.status === 'queued') {
+          // Capture the observed generation BEFORE any await (codex S1b R11):
+          // captured after the liveness probe, a reclaim inside that await
+          // hands us generation B's lease and every gate below passes wrongly.
+          const observedLease = typeof runService.getHeldLease === 'function'
+            ? runService.getHeldLease(runId)
+            : null;
           const alive = await workerChannel.isAlive(runId, 'cli');
 
           if (alive) {
@@ -3996,11 +4002,8 @@ function createLifecycleService({
             recovered.push({ runId, status: 'reattached' });
           } else {
             // Session exists but agent terminated. Same generation contract as
-            // every other terminal path (codex S1b R10): capture the observed
-            // lease, gate the write on it, close it after the kill.
-            const observedLease = typeof runService.getHeldLease === 'function'
-              ? runService.getHeldLease(runId)
-              : null;
+            // every other terminal path (codex S1b R10); the observed lease was
+            // captured before the liveness await above (R11).
             const exitCode = await workerChannel.detectExitCode(runId, 'cli');
             const status = (exitCode === 0) ? 'completed' : 'failed';
             const output = status === 'failed'
