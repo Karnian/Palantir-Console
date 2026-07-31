@@ -95,6 +95,9 @@ const RUN_COLUMNS = [
   // Issue #469 follow-up (migration 078): exact Claude template runtime options
   // used to resume the same manager session after profile edits.
   'session_claude_options_json',
+  // Worker idle timeout (#466, migration 080): preserves the existing terminal
+  // status while recording why health cleanup finalized the run.
+  'terminal_reason',
 ];
 
 const COMPOSITION_EVENT_COLUMNS = [

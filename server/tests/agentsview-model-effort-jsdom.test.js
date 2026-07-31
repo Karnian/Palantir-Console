@@ -387,6 +387,7 @@ test('create payload includes structured model and reasoning effort', async (t) 
   await waitFor(() => assert.ok(root.querySelector('#agent-model')));
   setInput(env, root.querySelector('#agent-name'), 'Structured Codex');
   setInput(env, root.querySelector('#agent-model'), '  gpt-5.1-codex  ');
+  setInput(env, root.querySelector('#agent-idle-timeout'), '12.5');
   await setSelect(env, root.querySelector('#agent-reasoning-effort'), 'medium');
   await flushEffects(30);
   root.querySelector('.modal-footer button.primary').click();
@@ -400,6 +401,7 @@ test('create payload includes structured model and reasoning effort', async (t) 
   assert.equal(call.options.method, 'POST');
   assert.equal(body.model, 'gpt-5.1-codex');
   assert.equal(body.reasoning_effort, 'medium');
+  assert.equal(body.idle_timeout_ms, 12.5 * 60 * 1000);
   assert.equal(body.permission_mode, null);
 });
 
@@ -445,6 +447,7 @@ test('clearing structured fields sends explicit nulls on edit', async (t) => {
     args_template: 'exec --full-auto --skip-git-repo-check {prompt}',
     model: 'gpt-5.1-codex',
     reasoning_effort: 'high',
+    idle_timeout_ms: 15 * 60 * 1000,
     max_concurrent: 1,
     capabilities_json: '{}',
   };
@@ -454,8 +457,10 @@ test('clearing structured fields sends explicit nulls on edit', async (t) => {
   await waitFor(() => {
     assert.equal(root.querySelector('#agent-model').value, 'gpt-5.1-codex');
     assert.equal(root.querySelector('#agent-reasoning-effort').dataset.value, 'high');
+    assert.equal(root.querySelector('#agent-idle-timeout').value, '15');
   });
   setInput(env, root.querySelector('#agent-model'), '');
+  setInput(env, root.querySelector('#agent-idle-timeout'), '');
   await setSelect(env, root.querySelector('#agent-reasoning-effort'), '');
   await flushEffects(30);
   root.querySelector('.modal-footer button.primary').click();
@@ -469,4 +474,5 @@ test('clearing structured fields sends explicit nulls on edit', async (t) => {
   assert.equal(call.options.method, 'PATCH');
   assert.equal(body.model, null);
   assert.equal(body.reasoning_effort, null);
+  assert.equal(body.idle_timeout_ms, null);
 });

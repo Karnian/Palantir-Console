@@ -34,6 +34,10 @@ export const RUN_STATUS_LABELS = {
   cancelled: '취소됨',
 };
 
+export const RUN_TERMINAL_REASON_LABELS = {
+  idle_timeout: 'idle 타임아웃 정리',
+};
+
 export const QUEUE_REASON_LABELS = {
   node_unreachable: '노드 연결 불가',
   node_not_executable: '노드 실행 불가',
@@ -527,6 +531,11 @@ export const AGENTS_LABELS = {
   iconPlaceholder: '이모지 또는 기호',
   fieldColor: '색상',
   fieldMaxConcurrent: '동시 실행 최대',
+  fieldIdleTimeout: 'Idle 타임아웃 (분)',
+  idleTimeoutPlaceholder: '기본값 사용',
+  idleTimeoutHint: '비워 두면 현재 기본값 30분을 사용합니다.',
+  idleTimeoutDefault: '기본값 (30분)',
+  minutesSuffix: '분',
   fieldMcpTools: 'MCP 도구',
   mcpToolsHint: '한 줄당 하나의 패턴. 와일드카드 지원 (예: mcp__slack__*)',
   // Card actions — `update` / `delete` reuse COMMON_ACTIONS so the
@@ -1105,6 +1114,12 @@ export const PRESET_FILE_STATUS_LABELS = {
 export function statusLabel(map, status) {
   if (!status) return '';
   return map[status] || status;
+}
+
+export function runStatusLabel(run) {
+  const base = statusLabel(RUN_STATUS_LABELS, run?.status);
+  const reason = RUN_TERMINAL_REASON_LABELS[run?.terminal_reason];
+  return reason ? `${base} · ${reason}` : base;
 }
 
 // OperatorsView — Operator-first roster + folder mapping + schedules.

@@ -42,6 +42,8 @@ function makeStubExecutionEngine({ alive = true, exitCode = null, output = '' } 
   const spawned = [];
   const killed = [];
   const inputs = [];
+  let aliveState = alive;
+  let exitCodeState = exitCode;
   return {
     type: 'subprocess',
     spawned,
@@ -51,8 +53,10 @@ function makeStubExecutionEngine({ alive = true, exitCode = null, output = '' } 
       spawned.push({ runId, opts });
       return { sessionName: `session-${runId}` };
     },
-    isAlive(runId) { return alive; },
-    detectExitCode(runId) { return exitCode; },
+    isAlive(runId) { return aliveState; },
+    detectExitCode(runId) { return exitCodeState; },
+    setAlive(value) { aliveState = value; },
+    setExitCode(value) { exitCodeState = value; },
     getOutput(runId) { return output; },
     sendInput(runId, text) { inputs.push({ runId, text }); return true; },
     kill(runId) { killed.push(runId); },
@@ -96,13 +100,20 @@ function seedTask(db, projectId) {
   return ts.createTask({ project_id: projectId, title: 'Do something', description: 'desc' });
 }
 
-function seedProfile(db, { command = 'codex', capabilities_json = '{}', env_allowlist = '[]' } = {}) {
+function seedProfile(db, {
+  command = 'codex',
+  capabilities_json = '{}',
+  env_allowlist = '[]',
+  idle_timeout_ms = null,
+} = {}) {
   // Insert directly so we can use any command string without the allowlist guard.
   const id = `profile-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   db.prepare(
-    `INSERT INTO agent_profiles (id, name, type, command, capabilities_json, env_allowlist, max_concurrent)
-     VALUES (?, ?, ?, ?, ?, ?, 5)`
-  ).run(id, 'TestAgent', 'codex', command, capabilities_json, env_allowlist);
+    `INSERT INTO agent_profiles (
+       id, name, type, command, capabilities_json, env_allowlist,
+       max_concurrent, idle_timeout_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, 5, ?)`
+  ).run(id, 'TestAgent', 'codex', command, capabilities_json, env_allowlist, idle_timeout_ms);
   return { id, name: 'TestAgent', type: 'codex', command, capabilities_json, env_allowlist, max_concurrent: 5 };
 }
 
@@ -900,8 +911,9 @@ test('checkHealth: transitions stale running run to needs_input on idle timeout 
 
   // Establish the output hash first; that poll records a fresh heartbeat.
   await lc.checkHealth();
-  // Use SQLite's stored format beyond the 30-minute timeout so the regression
-  // covers the same zone-less UTC timestamps produced in production. Backdate
+  // Use SQLite's stored format beyond the 30-minute default so the regression
+  // covers the same zone-less UTC timestamps produced in production — an ISO
+  // string here would not exercise the parse this test exists for. Backdate
   // after the baseline poll so its heartbeat cannot mask the simulated idle.
   db.prepare(`UPDATE runs SET started_at = datetime('now', '-31 minutes') WHERE id = ?`).run(run.id);
   db.prepare(`UPDATE run_events SET created_at = datetime('now', '-31 minutes') WHERE run_id = ?`).run(run.id);
@@ -960,6 +972,242 @@ for (const tz of ['Asia/Seoul', 'America/Los_Angeles']) {
     );
   });
 }
+test('checkHealth: profile idle_timeout_ms overrides the default while NULL opts out', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const execEngine = makeStubExecutionEngine({
+    alive: true,
+    exitCode: null,
+    output: 'same output',
+  });
+  const clockNow = Math.floor(Date.now() / 1000) * 1000;
+  const sqliteUtc = (milliseconds) => (
+    new Date(milliseconds).toISOString().slice(0, 19).replace('T', ' ')
+  );
+  const lc = createLifecycleService({
+    runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+    executionEngine: execEngine, streamJsonEngine: null, worktreeService: null, eventBus: null,
+    now: () => clockNow,
+  });
+  const project = seedProject(db);
+
+  const configuredTask = seedTask(db, project.id);
+  const configuredProfile = seedProfile(db, {
+    command: 'codex',
+    idle_timeout_ms: 60 * 1000,
+  });
+  const configuredRun = await lc.executeTask(configuredTask.id, {
+    agentProfileId: configuredProfile.id,
+    prompt: 'configured',
+  });
+  await lc.checkHealth();
+
+  const twoMinutesAgo = sqliteUtc(clockNow - 2 * 60 * 1000);
+  db.prepare('UPDATE run_events SET created_at = ? WHERE run_id = ?')
+    .run(twoMinutesAgo, configuredRun.id);
+  await lc.checkHealth();
+  assert.equal(rs.getRun(configuredRun.id).status, 'needs_input');
+
+  const defaultTask = seedTask(db, project.id);
+  const defaultProfile = seedProfile(db, { command: 'codex', idle_timeout_ms: null });
+  const defaultRun = await lc.executeTask(defaultTask.id, {
+    agentProfileId: defaultProfile.id,
+    prompt: 'default',
+  });
+  await lc.checkHealth();
+  const exactlyThirtyMinutesAgo = sqliteUtc(clockNow - 30 * 60 * 1000);
+  db.prepare('UPDATE run_events SET created_at = ? WHERE run_id = ?')
+    .run(exactlyThirtyMinutesAgo, defaultRun.id);
+  await lc.checkHealth();
+  assert.equal(
+    rs.getRun(defaultRun.id).status,
+    'running',
+    'NULL preserves the strict greater-than comparison at the 30-minute default',
+  );
+  const justOverThirtyMinutesAgo = sqliteUtc(clockNow - 30 * 60 * 1000 - 1000);
+  db.prepare('UPDATE run_events SET created_at = ? WHERE run_id = ?')
+    .run(justOverThirtyMinutesAgo, defaultRun.id);
+  await lc.checkHealth();
+  assert.equal(
+    rs.getRun(defaultRun.id).status,
+    'needs_input',
+    'NULL preserves the existing 30-minute threshold',
+  );
+});
+
+test('checkHealth: a run finalized after idle timeout keeps completed compatibility and terminal provenance', async (t) => {
+  const db = await mkdb(t);
+  const eventBus = createEventBus();
+  const rs = createRunService(db, eventBus);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const execEngine = makeStubExecutionEngine({
+    alive: true,
+    exitCode: null,
+    output: 'same output',
+  });
+  const endedEvents = [];
+  eventBus.subscribe((event) => {
+    if (event.channel === 'run:ended') endedEvents.push(event.data);
+  });
+  const lc = createLifecycleService({
+    runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+    executionEngine: execEngine, streamJsonEngine: null, worktreeService: null, eventBus,
+  });
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, {
+    command: 'codex',
+    idle_timeout_ms: 60 * 1000,
+  });
+  const run = await lc.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'timeout',
+  });
+  await lc.checkHealth();
+  const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+  db.prepare('UPDATE run_events SET created_at = ? WHERE run_id = ?')
+    .run(twoMinutesAgo, run.id);
+  await lc.checkHealth();
+  assert.equal(rs.getRun(run.id).status, 'needs_input');
+
+  execEngine.setAlive(false);
+  execEngine.setExitCode(0);
+  await lc.checkHealth();
+
+  const finalized = rs.getRun(run.id);
+  assert.equal(finalized.status, 'completed');
+  assert.equal(finalized.terminal_reason, 'idle_timeout');
+  assert.ok(endedEvents.some(event => (
+    event.run.id === run.id
+    && event.to_status === 'completed'
+    && event.run.terminal_reason === 'idle_timeout'
+  )));
+
+  const normalTask = seedTask(db, project.id);
+  const normalRun = await lc.executeTask(normalTask.id, {
+    agentProfileId: profile.id,
+    prompt: 'normal',
+  });
+  await lc.checkHealth();
+  assert.equal(rs.getRun(normalRun.id).status, 'completed');
+  assert.equal(rs.getRun(normalRun.id).terminal_reason, null);
+});
+
+test('cancelling an idle-parked run keeps the idle provenance', async (t) => {
+  // Codex review: without this the operator's cancellation erases WHY the run
+  // was parked, and the history shows a bare `cancelled` — the same loss of
+  // provenance #466 is about.
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const execEngine = makeStubExecutionEngine({
+    alive: true,
+    exitCode: null,
+    output: 'same output',
+  });
+  const lc = createLifecycleService({
+    runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+    executionEngine: execEngine, streamJsonEngine: null, worktreeService: null, eventBus: null,
+  });
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, { command: 'codex', idle_timeout_ms: 60 * 1000 });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'timeout' });
+
+  await lc.checkHealth();
+  db.prepare('UPDATE run_events SET created_at = ? WHERE run_id = ?')
+    .run(new Date(Date.now() - 2 * 60 * 1000).toISOString(), run.id);
+  await lc.checkHealth();
+  assert.equal(rs.getRun(run.id).status, 'needs_input');
+
+  await lc.cancelRun(run.id);
+
+  const cancelled = rs.getRun(run.id);
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.terminal_reason, 'idle_timeout');
+});
+
+// Codex round-2 review: the first fix read the caller's run snapshot, so a
+// status change during the awaited kill() either stamped a stale idle_timeout
+// or dropped a fresh one. Both directions are pinned here with a kill() the
+// test controls, which is the only way to open that window deterministically.
+for (const [initial, during, expected] of [
+  ['needs_input', 'running', null],
+  ['running', 'needs_input', 'idle_timeout'],
+]) {
+  test(`cancel resolves idle provenance at write time (${initial} → ${during})`, async (t) => {
+    const db = await mkdb(t);
+    const rs = createRunService(db, null);
+    const ts = createTaskService(db);
+    const ps = createProjectService(db);
+    const aps = createAgentProfileService(db);
+    const project = seedProject(db);
+    const task = seedTask(db, project.id);
+    const profile = seedProfile(db, { command: 'codex' });
+    const run = rs.createRun({ task_id: task.id, agent_profile_id: profile.id, prompt: 'work' });
+    rs.markRunStarted(run.id, {});
+    rs.updateRunStatus(run.id, initial, {
+      force: true,
+      reason: initial === 'needs_input' ? 'idle_timeout' : 'started',
+    });
+
+    let releaseKill;
+    const execEngine = makeStubExecutionEngine({ alive: true, exitCode: null });
+    execEngine.kill = () => new Promise((resolve) => { releaseKill = resolve; });
+
+    const lc = createLifecycleService({
+      runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+      executionEngine: execEngine, streamJsonEngine: null, worktreeService: null, eventBus: null,
+    });
+
+    const pending = lc.cancelRun(run.id);
+    // The window: health re-parks or resumes the run while kill() is in flight.
+    rs.updateRunStatus(run.id, during, {
+      force: true,
+      reason: during === 'needs_input' ? 'idle_timeout' : 'user_input',
+    });
+    releaseKill(true);
+    await pending;
+
+    const cancelled = rs.getRun(run.id);
+    assert.equal(cancelled.status, 'cancelled');
+    assert.equal(
+      cancelled.terminal_reason,
+      expected,
+      'terminal_reason must reflect the status at write time, not at cancel entry',
+    );
+  });
+}
+
+test('cancelling a run that was never idle records no terminal reason', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const execEngine = makeStubExecutionEngine({ alive: true, exitCode: null, output: 'out' });
+  const lc = createLifecycleService({
+    runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+    executionEngine: execEngine, streamJsonEngine: null, worktreeService: null, eventBus: null,
+  });
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, { command: 'codex' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'work' });
+
+  await lc.cancelRun(run.id);
+
+  const cancelled = rs.getRun(run.id);
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.terminal_reason, null, 'a plain cancellation must not fabricate a reason');
+});
 
 // ---------------------------------------------------------------------------
 // INS-02: needs_input → sendAgentInput → running recovery
