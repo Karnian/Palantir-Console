@@ -4,8 +4,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
+const https = require('node:https');
 const os = require('node:os');
 const path = require('node:path');
+const { execFileSync, spawn } = require('node:child_process');
 
 const { createDatabase } = require('../db/database');
 const { createRunService } = require('../services/runService');
@@ -15,6 +17,8 @@ const { createAgentProfileService } = require('../services/agentProfileService')
 const { createLifecycleService } = require('../services/lifecycleService');
 const { createProjectMaterializationService } = require('../services/projectMaterializationService');
 const { createEventBus } = require('../services/eventBus');
+const { createLocalNodeExecutor } = require('../services/nodeExecutor');
+const { createRemoteSshNodeExecutor } = require('../services/remoteSshExecutor');
 
 async function mkdb(t, prefix = 'project-materialization-') {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -146,13 +150,17 @@ function fakeGitExecutor({ failClone = false, failFirstWorktreeAdd = false } = {
   };
 }
 
-function buildMaterializeHarness(db, { executor, eventBus = null } = {}) {
+function buildMaterializeHarness(db, {
+  executor,
+  eventBus = null,
+  node = { id: 'local', kind: 'local', reachable: 1, can_execute: 1, files_only: 0, cordoned: 0 },
+} = {}) {
   const runService = createRunService(db, eventBus);
   const projectService = createProjectService(db);
   const taskService = createTaskService(db);
   const nodeService = {
     pickExecutor() { return executor; },
-    getNode() { return { id: 'local', kind: 'local', reachable: 1, can_execute: 1, files_only: 0, cordoned: 0 }; },
+    getNode() { return node; },
   };
   const materializationService = createProjectMaterializationService({
     runService,
@@ -162,6 +170,223 @@ function buildMaterializeHarness(db, { executor, eventBus = null } = {}) {
   });
   return { runService, projectService, taskService, nodeService, materializationService };
 }
+
+test('local materialization resolves Git through the allowlisted PATH', async (t) => {
+  const root = await tempRoot(t, 'project-materialization-exec-env-');
+  withRepoEnv(t, root);
+  const previousPath = process.env.PATH;
+  const fixtureBin = path.join(__dirname, 'fixtures', 'bin');
+  process.env.PATH = [
+    fixtureBin,
+    path.dirname(process.execPath),
+    '/usr/bin',
+    '/bin',
+  ].join(path.delimiter);
+  t.after(() => {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  });
+
+  const db = await mkdb(t, 'project-materialization-exec-env-db-');
+  const h = buildMaterializeHarness(db, { executor: createLocalNodeExecutor() });
+  const profile = seedProfile(db, { id: 'profile_exec_env' });
+  const project = h.projectService.createProject({
+    name: 'Exec env canary',
+    source_type: 'git',
+    // The fixture Git accepts this path; a system Git selected after removing
+    // PATH from the policy fails because the source deliberately does not exist.
+    repo_url: '/fixture/repo-that-does-not-exist',
+    repo_ref: 'main',
+  });
+  const task = seedTask(h.taskService, project.id, 'exec env');
+  const run = seedRun(h.runService, task.id, profile.id);
+  h.runService.claimQueuedRunForMaterialization(run.id);
+
+  const result = await h.materializationService.ensureWorkspace({
+    project,
+    nodeId: 'local',
+    runId: run.id,
+  });
+
+  assert.equal(result.ready, true);
+  assert.equal(fs.existsSync(result.workspacePath), true);
+});
+
+test('remote materialization authenticates private HTTPS through pod GIT_ASKPASS', {
+  skip: process.platform === 'win32' ? 'POSIX askpass fixture' : false,
+}, async (t) => {
+  const root = await tempRoot(t, 'project-materialization-askpass-');
+  withRepoEnv(t, root);
+  const source = path.join(root, 'source');
+  const bare = path.join(root, 'served', 'repo.git');
+  const tlsKey = path.join(root, 'tls-key.pem');
+  const tlsCert = path.join(root, 'tls-cert.pem');
+  const askpass = path.join(root, 'askpass.sh');
+  const askpassLog = path.join(root, 'askpass.log');
+  const podHome = path.join(root, 'pod-home');
+
+  fs.mkdirSync(source, { recursive: true });
+  fs.mkdirSync(path.dirname(bare), { recursive: true });
+  fs.mkdirSync(path.join(root, '.palantir-workspaces'));
+  fs.mkdirSync(podHome);
+  // The loopback shell models a separate pod, so its Git configuration must
+  // not inherit the test host's system credential helper. In particular,
+  // macOS credential-osxkeychain can block forever while storing this fixture
+  // credential under an isolated test HOME. An empty helper resets the system
+  // helper list while leaving GIT_ASKPASS as the authentication mechanism this
+  // test exercises.
+  fs.writeFileSync(path.join(podHome, '.gitconfig'), [
+    '[credential]',
+    '\thelper =',
+    '',
+  ].join('\n'));
+  execFileSync('git', ['init', '-b', 'main', source], { stdio: 'ignore' });
+  execFileSync('git', ['-C', source, 'config', 'user.name', 'Fixture']);
+  execFileSync('git', ['-C', source, 'config', 'user.email', 'fixture@example.com']);
+  fs.writeFileSync(path.join(source, 'README.md'), 'private fixture\n');
+  execFileSync('git', ['-C', source, 'add', 'README.md']);
+  execFileSync('git', ['-C', source, 'commit', '-m', 'fixture'], { stdio: 'ignore' });
+  execFileSync('git', ['clone', '--bare', source, bare], { stdio: 'ignore' });
+  execFileSync('git', ['--git-dir', bare, 'update-server-info']);
+  execFileSync('openssl', [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+    '-keyout', tlsKey,
+    '-out', tlsCert,
+    '-subj', '/CN=127.0.0.1',
+    '-addext', 'subjectAltName=IP:127.0.0.1',
+    '-days', '1',
+  ], { stdio: 'ignore' });
+
+  fs.writeFileSync(askpass, [
+    '#!/bin/sh',
+    `printf '%s\\n' "$1" >> ${JSON.stringify(askpassLog)}`,
+    'case "$1" in',
+    '  *Username*) printf \'%s\\n\' runner ;;',
+    '  *Password*) printf \'%s\\n\' "$REPO_PASSWORD" ;;',
+    '  *) exit 1 ;;',
+    'esac',
+    '',
+  ].join('\n'), { mode: 0o700 });
+
+  const expectedAuthorization = `Basic ${Buffer.from('runner:private-secret').toString('base64')}`;
+  let unauthorizedRequests = 0;
+  let authenticatedRequests = 0;
+  const server = https.createServer({
+    key: fs.readFileSync(tlsKey),
+    cert: fs.readFileSync(tlsCert),
+  }, (req, res) => {
+    if (req.headers.authorization !== expectedAuthorization) {
+      unauthorizedRequests += 1;
+      res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="fixture"' });
+      res.end('authentication required');
+      return;
+    }
+    authenticatedRequests += 1;
+    const pathname = decodeURIComponent(new URL(req.url, 'https://127.0.0.1').pathname);
+    const relative = pathname.replace(/^\/repo\.git\/?/, '');
+    const target = path.resolve(bare, relative);
+    if (target !== bare && !target.startsWith(`${bare}${path.sep}`)) {
+      res.writeHead(403);
+      res.end();
+      return;
+    }
+    let stat;
+    try {
+      stat = fs.statSync(target);
+    } catch {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    if (!stat.isFile()) {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': stat.size,
+    });
+    fs.createReadStream(target).pipe(res);
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  t.after(() => new Promise(resolve => server.close(resolve)));
+
+  const envKeys = [
+    'GIT_ASKPASS',
+    'GIT_SSL_CAINFO',
+    'NO_PROXY',
+    'no_proxy',
+    'REPO_PASSWORD',
+    'PALANTIR_GIT_ENV_ALLOWLIST',
+  ];
+  const previous = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  process.env.GIT_ASKPASS = askpass;
+  process.env.GIT_SSL_CAINFO = tlsCert;
+  process.env.NO_PROXY = '127.0.0.1';
+  process.env.no_proxy = '127.0.0.1';
+  process.env.REPO_PASSWORD = 'private-secret';
+  process.env.PALANTIR_GIT_ENV_ALLOWLIST = 'REPO_PASSWORD';
+  t.after(() => {
+    for (const key of envKeys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  });
+
+  const address = server.address();
+  const db = await mkdb(t, 'project-materialization-askpass-db-');
+  const node = {
+    id: 'remote-askpass',
+    kind: 'ssh',
+    ssh_host: 'loopback.invalid',
+    ssh_user: 'runner',
+    exposed_roots: JSON.stringify([root]),
+    reachable: 1,
+    can_execute: 1,
+    files_only: 0,
+    cordoned: 0,
+  };
+  function loopbackSpawn(command, args, opts) {
+    assert.equal(command, 'ssh');
+    const separator = args.indexOf('--');
+    assert.notEqual(separator, -1);
+    const remoteArgs = args.slice(separator + 2);
+    return spawn('sh', ['-c', remoteArgs.join(' ')], {
+      ...opts,
+      env: { ...process.env, HOME: podHome },
+    });
+  }
+  const executor = createRemoteSshNodeExecutor(node, { spawnFn: loopbackSpawn });
+  const h = buildMaterializeHarness(db, { executor, node });
+  const profile = seedProfile(db, { id: 'profile_askpass' });
+  const project = h.projectService.createProject({
+    name: 'Private HTTPS askpass',
+    source_type: 'git',
+    repo_url: `https://127.0.0.1:${address.port}/repo.git`,
+    repo_ref: 'main',
+  });
+  const task = seedTask(h.taskService, project.id, 'askpass');
+  const run = seedRun(h.runService, task.id, profile.id);
+  h.runService.claimQueuedRunForMaterialization(run.id);
+
+  const result = await h.materializationService.ensureWorkspace({
+    project,
+    nodeId: node.id,
+    runId: run.id,
+  });
+
+  assert.equal(result.ready, true);
+  assert.equal(fs.readFileSync(path.join(result.workspacePath, 'README.md'), 'utf8'), 'private fixture\n');
+  assert.ok(unauthorizedRequests >= 1, 'server issued an authentication challenge');
+  assert.ok(authenticatedRequests >= 1, 'Git retried with askpass credentials');
+  const prompts = fs.readFileSync(askpassLog, 'utf8');
+  assert.match(prompts, /Username/);
+  assert.match(prompts, /Password/);
+});
 
 test('single-flight cache materialization clones once and creates per-run worktrees', async (t) => {
   const root = await tempRoot(t, 'project-materialization-root-');

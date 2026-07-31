@@ -95,6 +95,17 @@ function createFakeRemoteChild() {
   return child;
 }
 
+function isolatedActorPolicy() {
+  return {
+    humanToken: 'human-secret',
+    agentToken: 'automation-secret',
+    separated: true,
+    processIsolated: true,
+    capabilitiesEnabled: true,
+    boundary: 'run_capabilities',
+  };
+}
+
 function writeGeneratedFixtureExecutable(source) {
   const file = path.join(
     __dirname,
@@ -123,7 +134,7 @@ async function spawnFakeRemoteManager(engine, runId, child, opts = {}) {
   await new Promise((r) => setImmediate(r));
 }
 
-test('engine: remote manager forwards only its run capability to the executor', async () => {
+test('engine: remote --bare manager requests pod auth and forwards only its run capability', async () => {
   const { createStreamJsonEngine } = require('../services/streamJsonEngine');
   const child = createFakeRemoteChild();
   let spawnOptions = null;
@@ -139,6 +150,7 @@ test('engine: remote manager forwards only its run capability to the executor', 
     isManager: true,
     executor,
     nodePrefix: '/pod/bin',
+    bare: true,
     env: {
       PALANTIR_MANAGER_TOKEN: 'run-bound-manager-capability',
       PALANTIR_TOKEN: 'human-token-must-not-cross',
@@ -150,6 +162,7 @@ test('engine: remote manager forwards only its run capability to the executor', 
   assert.deepEqual(spawnOptions.env, {
     PALANTIR_MANAGER_TOKEN: 'run-bound-manager-capability',
   });
+  assert.equal(spawnOptions.claudeBareAuth, true);
   engine.kill('run-remote-capability');
 });
 
@@ -176,6 +189,7 @@ test('engine: detached remote worker keeps prompts and controller credentials ou
     systemPrompt: 'system prompt with private-context',
     cwd: '/pod/ws',
     model: 'sonnet',
+    bare: true,
     envAllowlist: ['ANTHROPIC_API_KEY', 'PROFILE_VALUE'],
     env: {
       ANTHROPIC_API_KEY: 'controller-secret',
@@ -196,7 +210,9 @@ test('engine: detached remote worker keeps prompts and controller credentials ou
     PALANTIR_API_BASE: 'https://console.example',
     PALANTIR_WORKER_TOKEN: 'run-capability',
   });
+  assert.equal(spec.claudeBareAuth, true);
   assert.ok(spec.args.includes('-p'));
+  assert.ok(spec.args.includes('--bare'));
   assert.ok(spec.args.includes('--model'));
   assert.doesNotMatch(JSON.stringify(spec.args), /pasted-secret|private-context|controller-secret/);
 });
@@ -207,10 +223,10 @@ test('engine: detached remote worker keeps prompts and controller credentials ou
  *
  * @returns {{ engine, argsFile: string }}
  */
-function makeEngine({ runService = null, eventBus = null } = {}) {
+function makeEngine({ runService = null, eventBus = null, actorTokens = undefined } = {}) {
   process.env.CLAUDE_BIN = fakeClaudioPath;
   const { createStreamJsonEngine } = require('../services/streamJsonEngine');
-  const engine = createStreamJsonEngine({ runService, eventBus });
+  const engine = createStreamJsonEngine({ runService, eventBus, actorTokens });
   _allEngines.push(engine);
   return { engine };
 }
@@ -314,6 +330,61 @@ test('engine: worker option-like prompts cannot be parsed as Claude CLI flags', 
   }
 });
 
+test('engine: local worker enforces token-coupled API base policy in the child environment', async (t) => {
+  const { engine } = makeEngine({ actorTokens: isolatedActorPolicy() });
+  const apiBase = 'https://console.example:8443/proxy-prefix';
+  const unpairedEnvFile = path.join(os.tmpdir(), `palantir-claude-env-unpaired-${process.pid}.json`);
+  const pairedEnvFile = path.join(os.tmpdir(), `palantir-claude-env-paired-${process.pid}.json`);
+  t.after(() => {
+    try { fs.unlinkSync(unpairedEnvFile); } catch {}
+    try { fs.unlinkSync(pairedEnvFile); } catch {}
+  });
+
+  await spawnAndCaptureArgs(engine, 'run-local-unpaired-api-base', {
+    prompt: 'inspect unpaired env',
+    isManager: false,
+    env: {
+      CLAUDE_ENV_FILE: unpairedEnvFile,
+      PALANTIR_API_BASE: apiBase,
+    },
+  });
+  assert.deepEqual(JSON.parse(fs.readFileSync(unpairedEnvFile, 'utf8')), {});
+
+  await spawnAndCaptureArgs(engine, 'run-local-paired-api-base', {
+    prompt: 'inspect paired env',
+    isManager: false,
+    env: {
+      CLAUDE_ENV_FILE: pairedEnvFile,
+      PALANTIR_WORKER_TOKEN: 'scoped-token',
+      PALANTIR_API_BASE: `${apiBase}/`,
+    },
+  });
+  assert.deepEqual(JSON.parse(fs.readFileSync(pairedEnvFile, 'utf8')), {
+    PALANTIR_WORKER_TOKEN: 'scoped-token',
+    PALANTIR_API_BASE: apiBase,
+  });
+});
+
+test('engine: local worker rejects API base URL userinfo before spawn', () => {
+  const { engine } = makeEngine({ actorTokens: isolatedActorPolicy() });
+  assert.throws(
+    () => engine.spawnAgent('run-local-userinfo-api-base', {
+      cwd: os.tmpdir(),
+      prompt: 'must not spawn',
+      isManager: false,
+      env: {
+        PALANTIR_WORKER_TOKEN: 'scoped-token',
+        PALANTIR_API_BASE: 'http://local-user:local-password@console.internal:4177',
+      },
+    }),
+    (err) => (
+      err.code === 'WORKER_API_BASE_USERINFO'
+      && !/local-user|local-password/.test(err.message)
+    ),
+  );
+  assert.equal(engine.hasProcess('run-local-userinfo-api-base'), false);
+});
+
 test('engine: manager spawn args contain --input-format stream-json, no -p', async () => {
   process.env.CLAUDE_BIN = fakeClaudioPath;
   const { engine } = makeEngine();
@@ -329,7 +400,7 @@ test('engine: manager spawn args contain --input-format stream-json, no -p', asy
   assert.ok(!args.includes('--no-session-persistence'), 'manager는 session persistence 유지');
 });
 
-test('engine: optional args (model, mcpConfig, allowedTools, permissionMode, maxBudgetUsd) appended', async () => {
+test('engine: optional args including strict MCP config are appended', async () => {
   process.env.CLAUDE_BIN = fakeClaudioPath;
   const { engine } = makeEngine();
 
@@ -338,21 +409,67 @@ test('engine: optional args (model, mcpConfig, allowedTools, permissionMode, max
     isManager: false,
     model: 'claude-opus-4',
     mcpConfig: '/tmp/mcp.json',
+    strictMcpConfig: true,
+    tools: ['Read', 'Grep'],
     allowedTools: ['Read', 'Write'],
+    disallowedTools: ['Bash', 'Edit'],
     permissionMode: 'acceptEdits',
     maxBudgetUsd: 1.5,
+    safeMode: true,
+    bare: true,
+    disableSlashCommands: true,
+    noChrome: true,
+    settingSources: '',
+    settings: 'locked.json',
+    maxTurns: 5,
   });
 
   assert.ok(args.includes('--model'));
   assert.ok(args.includes('claude-opus-4'));
   assert.ok(args.includes('--mcp-config'));
   assert.ok(args.includes('/tmp/mcp.json'));
+  assert.ok(args.includes('--strict-mcp-config'));
+  assert.ok(args.includes('--tools'));
+  assert.ok(args.includes('Read,Grep'), 'tools 쉼표 결합');
   assert.ok(args.includes('--allowedTools'));
   assert.ok(args.includes('Read,Write'), 'allowedTools 쉼표 결합');
+  assert.ok(args.includes('--disallowedTools'));
+  assert.ok(args.includes('Bash,Edit'), 'disallowedTools 쉼표 결합');
   assert.ok(args.includes('--permission-mode'));
   assert.ok(args.includes('acceptEdits'));
   assert.ok(args.includes('--max-budget-usd'));
   assert.ok(args.includes('1.5'));
+  assert.ok(args.includes('--safe-mode'));
+  assert.equal(args.filter((arg) => arg === '--bare').length, 1);
+  assert.ok(args.includes('--disable-slash-commands'));
+  assert.equal(args.filter((arg) => arg === '--no-chrome').length, 1);
+  const settingSourcesIndex = args.indexOf('--setting-sources');
+  assert.notEqual(settingSourcesIndex, -1);
+  assert.equal(args[settingSourcesIndex + 1], '');
+  const settingsIndex = args.indexOf('--settings');
+  assert.notEqual(settingsIndex, -1);
+  assert.equal(args[settingsIndex + 1], 'locked.json');
+  const maxTurnsIndex = args.indexOf('--max-turns');
+  assert.notEqual(maxTurnsIndex, -1);
+  assert.equal(args[maxTurnsIndex + 1], '5');
+});
+
+test('engine: profile and materialized MCP configs are both passed to Claude', async () => {
+  process.env.CLAUDE_BIN = fakeClaudioPath;
+  const { engine } = makeEngine();
+
+  const args = await spawnAndCaptureArgs(engine, 'run-args-multi-mcp', {
+    prompt: 'x',
+    isManager: false,
+    mcpConfig: ['/tmp/profile-mcp.json', '/tmp/materialized-mcp.json'],
+  });
+
+  const mcpIndex = args.indexOf('--mcp-config');
+  assert.notEqual(mcpIndex, -1);
+  assert.deepEqual(args.slice(mcpIndex + 1, mcpIndex + 3), [
+    '/tmp/profile-mcp.json',
+    '/tmp/materialized-mcp.json',
+  ]);
 });
 
 test('engine: systemPrompt and addDir appended when provided', async () => {

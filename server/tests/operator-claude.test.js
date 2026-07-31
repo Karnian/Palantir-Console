@@ -13,6 +13,9 @@ const { createProjectBriefService } = require('../services/projectBriefService')
 const { createManagerRegistry } = require('../services/managerRegistry');
 const { createNodeService } = require('../services/nodeService');
 const { createOperatorSpawnService } = require('../services/operatorSpawnService');
+const { createAgentProfileService } = require('../services/agentProfileService');
+const { createConversationService } = require('../services/conversationService');
+const { createManagerRouter } = require('../routes/manager');
 
 const TEST_MANAGER_API_ENDPOINTS = {
   local: 'http://localhost:4177',
@@ -190,6 +193,11 @@ test('null PM preference falls back to the locally authenticated Claude profile 
     listProfiles: () => [{
       id: 'claude-only',
       type: 'claude-code',
+      // agent_profiles.command is NOT NULL, and the spawn path rejects a
+      // profile whose command vendor contradicts its adapter type. Keep the
+      // stub faithful to the schema so this exercises the fallback, not the
+      // vendor guard.
+      command: 'claude',
       env_allowlist: '["CLAUDE_CODE_OAUTH_TOKEN"]',
       capabilities_json: '{}',
     }],
@@ -229,6 +237,11 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   const runService = createRunService(db, null);
   const projectService = createProjectService(db);
   const projectBriefService = createProjectBriefService(db);
+  const agentProfileService = createAgentProfileService(db);
+  agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt} --tools Read,Grep --disallowedTools Bash --max-budget-usd 0.01 --mcp-config profile.json --strict-mcp-config --bare --disable-slash-commands --no-chrome --settings locked.json',
+    permission_mode: 'acceptEdits',
+  });
   const registry = createManagerRegistry({ runService });
   const topAdapter = makeFakeManagerAdapter('claude-code');
   const claudeAdapter = makeFakeManagerAdapter('claude-code');
@@ -248,10 +261,11 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
     managerAdapterFactory,
     projectService,
     projectBriefService,
+    agentProfileService,
     resolveManagerAuth: authOk,
   });
   const project = projectService.createProject({ name: 'claude-op', preferred_pm_adapter: 'claude' });
-  seedTop({ runService, registry, adapter: topAdapter });
+  const topRun = seedTop({ runService, registry, adapter: topAdapter });
 
   const result = spawn.ensureLiveOperator({ projectId: project.id });
   assert.equal(result.spawned, true);
@@ -262,6 +276,34 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   assert.equal(typeof start.opts.onSessionStarted, 'function');
   assert.equal(typeof start.opts.onThreadStarted, 'function');
   assert.equal(start.opts.resumeSessionId, null);
+  assert.equal(start.opts.permissionMode, 'acceptEdits');
+  assert.deepEqual(start.opts.tools, ['Read,Grep']);
+  assert.deepEqual(start.opts.disallowedTools, ['Bash']);
+  assert.equal(start.opts.maxBudgetUsd, 0.01);
+  assert.equal(start.opts.mcpConfig, 'profile.json');
+  assert.equal(start.opts.strictMcpConfig, true);
+  assert.equal(start.opts.bare, true);
+  assert.equal(start.opts.disableSlashCommands, true);
+  assert.equal(start.opts.noChrome, true);
+  assert.equal(start.opts.settings, 'locked.json');
+  assert.equal(
+    runService.getRun(result.run.id).session_permission_mode,
+    'acceptEdits',
+  );
+  assert.deepEqual(
+    JSON.parse(runService.getRun(result.run.id).session_claude_options_json),
+    {
+      tools: ['Read,Grep'],
+      disallowedTools: ['Bash'],
+      maxBudgetUsd: 0.01,
+      mcpConfig: 'profile.json',
+      strictMcpConfig: true,
+      bare: true,
+      disableSlashCommands: true,
+      noChrome: true,
+      settings: 'locked.json',
+    },
+  );
   assert.equal(runService.getRun(result.run.id).status, 'queued');
 
   start.opts.onSessionStarted('sess_claude_1');
@@ -272,6 +314,152 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   assert.equal(thread.pm_adapter, 'claude');
   assert.equal(thread.node_id, null);
   assert.equal(thread.cwd, null);
+
+  runService.updateClaudeSessionId(topRun.id, 'sess_top_restart');
+  agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt}',
+  });
+  const resumeRegistry = createManagerRegistry({ runService });
+  const resumeAdapter = makeFakeManagerAdapter('claude-code');
+  const resumeFactory = makeAdapterFactory({
+    claudeAdapter: resumeAdapter,
+    codexAdapter: makeFakeManagerAdapter('codex'),
+  });
+  const resumeConversationService = createConversationService({
+    runService,
+    managerRegistry: resumeRegistry,
+    managerAdapterFactory: resumeFactory,
+    lifecycleService: null,
+  });
+  createManagerRouter({
+    runService,
+    projectService,
+    projectBriefService,
+    managerAdapterFactory: resumeFactory,
+    managerRegistry: resumeRegistry,
+    conversationService: resumeConversationService,
+    agentProfileService,
+    authResolverOpts: {
+      hasKeychain: () => true,
+      readKeychainTokenSync: () => 'operator-test-keychain-token',
+    },
+  });
+
+  const resumedOperator = resumeAdapter._starts.find(
+    (entry) => entry.runId === result.run.id,
+  );
+  assert.ok(resumedOperator);
+  assert.equal(resumedOperator.opts.resumeSessionId, 'sess_claude_1');
+  assert.deepEqual(resumedOperator.opts.tools, ['Read,Grep']);
+  assert.deepEqual(resumedOperator.opts.disallowedTools, ['Bash']);
+  assert.equal(resumedOperator.opts.maxBudgetUsd, 0.01);
+  assert.equal(resumedOperator.opts.mcpConfig, 'profile.json');
+  assert.equal(resumedOperator.opts.strictMcpConfig, true);
+  assert.equal(resumedOperator.opts.bare, true);
+  assert.equal(resumedOperator.opts.disableSlashCommands, true);
+  assert.equal(resumedOperator.opts.noChrome, true);
+  assert.equal(resumedOperator.opts.settings, 'locked.json');
+});
+
+test('Claude operator rejects malformed template options instead of falling back to bypass', async (t) => {
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const agentProfileService = createAgentProfileService(db);
+  db.prepare(`
+    UPDATE agent_profiles
+    SET args_template = ?, permission_mode = NULL
+    WHERE id = 'claude-code'
+  `).run('-p {prompt} --permission-mode acceptEdits --max-budget-usd nope');
+  const registry = createManagerRegistry({ runService });
+  const claudeAdapter = makeFakeManagerAdapter('claude-code');
+  const codexAdapter = makeFakeManagerAdapter('codex');
+  const spawn = createOperatorSpawnService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory({ claudeAdapter, codexAdapter }),
+    projectService,
+    projectBriefService,
+    agentProfileService,
+    resolveManagerAuth: authOk,
+  });
+  const project = projectService.createProject({
+    name: 'claude-malformed-profile',
+    preferred_pm_adapter: 'claude',
+  });
+  seedTop({ runService, registry, adapter: makeFakeManagerAdapter('claude-code') });
+
+  assert.throws(
+    () => spawn.ensureLiveOperator({ projectId: project.id }),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.match(error.message, /--max-budget-usd.*positive number/);
+      return true;
+    },
+  );
+  assert.equal(claudeAdapter._starts.length, 0);
+  assert.equal(
+    db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM runs
+      WHERE manager_layer = 'operator'
+    `).get().count,
+    0,
+  );
+});
+
+test('Claude operator rejects a raw-SQL profile vendor mismatch before spawn', async (t) => {
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const agentProfileService = createAgentProfileService(db);
+  db.prepare(`
+    UPDATE agent_profiles
+    SET command = 'codex', permission_mode = 'acceptEdits'
+    WHERE id = 'claude-code'
+  `).run();
+  const registry = createManagerRegistry({ runService });
+  const claudeAdapter = makeFakeManagerAdapter('claude-code');
+  const codexAdapter = makeFakeManagerAdapter('codex');
+  const spawn = createOperatorSpawnService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory({ claudeAdapter, codexAdapter }),
+    projectService,
+    projectBriefService,
+    agentProfileService,
+    resolveManagerAuth: authOk,
+  });
+  const project = projectService.createProject({
+    name: 'claude-profile-vendor-mismatch',
+    preferred_pm_adapter: 'claude',
+  });
+  seedTop({ runService, registry, adapter: makeFakeManagerAdapter('claude-code') });
+
+  assert.throws(
+    () => spawn.ensureLiveOperator({ projectId: project.id }),
+    (error) => {
+      assert.equal(error.code, 'OPERATOR_PROFILE_VENDOR_MISMATCH');
+      assert.equal(error.httpStatus, 400);
+      assert.deepEqual(error.details, {
+        profileId: 'claude-code',
+        profileType: 'claude-code',
+        command: 'codex',
+      });
+      return true;
+    },
+  );
+  assert.equal(claudeAdapter._starts.length, 0);
+  assert.equal(
+    db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM runs
+      WHERE manager_layer = 'operator'
+    `).get().count,
+    0,
+  );
 });
 
 test('P5-S4c: Claude lazy-spawn resumes a persisted session on the matching remote node', async (t) => {
@@ -561,11 +749,76 @@ test('P5-S4a: Claude operator preflights auth with the claude-code profile allow
   assert.ok(!capturedAllowlist.includes('CODEX_API_KEY'), 'not the codex profile allowlist');
 });
 
+test('local Claude Operator starts --bare with allowlisted Bedrock provider credentials', async (t) => {
+  const providerEnv = {
+    CLAUDE_CODE_USE_BEDROCK: '1',
+    AWS_REGION: 'us-east-1',
+    AWS_ACCESS_KEY_ID: 'operator-bedrock-access-key',
+    AWS_SECRET_ACCESS_KEY: 'operator-bedrock-secret-key',
+  };
+  const previous = Object.fromEntries(
+    Object.keys(providerEnv).map((key) => [key, process.env[key]]),
+  );
+  Object.assign(process.env, providerEnv);
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const agentProfileService = createAgentProfileService(db);
+  agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt} --bare',
+    env_allowlist: JSON.stringify(Object.keys(providerEnv)),
+  });
+  const registry = createManagerRegistry({ runService });
+  const topAdapter = makeFakeManagerAdapter('claude-code');
+  const claudeAdapter = makeFakeManagerAdapter('claude-code');
+  const codexAdapter = makeFakeManagerAdapter('codex');
+  const spawn = createOperatorSpawnService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory({ claudeAdapter, codexAdapter }),
+    projectService,
+    projectBriefService,
+    agentProfileService,
+    authResolverOpts: {
+      hasKeychain: () => false,
+      hasCredentialsFile: () => false,
+    },
+  });
+  const project = projectService.createProject({
+    name: 'local-bedrock-operator',
+    preferred_pm_adapter: 'claude',
+  });
+  seedTop({ runService, registry, adapter: topAdapter });
+
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
+
+  assert.equal(result.spawned, true);
+  assert.equal(claudeAdapter._starts.length, 1);
+  const { opts } = claudeAdapter._starts[0];
+  assert.equal(opts.bare, true);
+  for (const [key, value] of Object.entries(providerEnv)) {
+    assert.equal(opts.env[key], value, key);
+  }
+  assert.equal(opts.env.ANTHROPIC_API_KEY, undefined);
+});
+
 test('P5-S4b: remote node + Claude preference spawns a remote Claude Operator (executor + nodePrefix + pod cwd + minimal env)', async (t) => {
   const db = await mkdb(t);
   const runService = createRunService(db, null);
   const projectService = createProjectService(db);
   const projectBriefService = createProjectBriefService(db);
+  const agentProfileService = createAgentProfileService(db);
+  agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt} --bare',
+  });
   const registry = createManagerRegistry({ runService });
   const claudeAdapter = makeFakeManagerAdapter('claude-code');
   const codexAdapter = makeFakeManagerAdapter('codex');
@@ -582,11 +835,15 @@ test('P5-S4b: remote node + Claude preference spawns a remote Claude Operator (e
     id: 'nodeA', name: 'nodeA', kind: 'ssh', ssh_host: 'nodeA.example', ssh_user: 'runner',
     exposed_roots: ['/workspace'], can_execute: true, reachable: true, node_prefix: '/opt/nodeA/bin',
   });
+  const authCalls = [];
   const spawn = createOperatorSpawnService({
     runService, managerRegistry: registry, managerAdapterFactory,
-    projectService, projectBriefService, nodeService,
+    projectService, projectBriefService, agentProfileService, nodeService,
     managerApiEndpoints: TEST_MANAGER_API_ENDPOINTS,
-    resolveManagerAuth: authOk,
+    resolveManagerAuth(type, opts) {
+      authCalls.push({ type, bare: opts.bare });
+      return { canAuth: false, env: {}, sources: [], diagnostics: [] };
+    },
   });
   const project = projectService.createProject({
     name: 'remote-claude', preferred_pm_adapter: 'claude', node_id: 'nodeA', directory: '/workspace/remote-claude',
@@ -604,6 +861,8 @@ test('P5-S4b: remote node + Claude preference spawns a remote Claude Operator (e
   assert.equal(start.opts.nodePrefix, '/opt/nodeA/bin');
   assert.equal(start.opts.cwd, '/workspace/remote-claude', 'pod cwd (project.directory)');
   assert.deepEqual(start.opts.env, {}, 'remote Operator gets a minimal env (no control-plane creds)');
+  assert.equal(start.opts.bare, true);
+  assert.deepEqual(authCalls, [{ type: 'claude-code', bare: false }]);
   // Claude uses onSessionStarted for markRunStarted (not codex onThreadStarted).
   assert.equal(typeof start.opts.onSessionStarted, 'function');
 

@@ -19,6 +19,9 @@ const {
   nextFireForRule,
 } = require('../services/operatorScheduleService');
 const { createOperatorScheduler } = require('../services/operatorScheduler');
+const {
+  MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
+} = require('../services/terminalEventReconciliation');
 
 function harness(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-operator-scheduler-'));
@@ -467,6 +470,471 @@ test('restart reconciles a persisted terminal turn event even while the manager 
   );
   assert.deepEqual(recovered, { pending: 0, uncertain: 0 });
   assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'completed');
+});
+
+test('scheduled reconciliation does not parse unrelated terminal history', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Long manager run', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  const historyPayload = JSON.stringify({
+    historyMarker: 'schedule-unrelated-terminal-history',
+    data: { invocationId: 'oinv_historical', terminal: true },
+  });
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, 'mgr.turn_completed', ?)
+  `);
+  h.db.transaction(() => {
+    for (let index = 0; index < 20_000; index += 1) {
+      insertEvent.run(managerRun.id, historyPayload);
+    }
+  })();
+
+  const originalParse = JSON.parse;
+  let historicalPayloadParses = 0;
+  JSON.parse = function countedParse(value, ...args) {
+    if (value === historyPayload) historicalPayloadParses += 1;
+    return originalParse.call(this, value, ...args);
+  };
+  try {
+    assert.deepEqual(h.scheduleService.reconcilePersistedTerminalEvents(), []);
+  } finally {
+    JSON.parse = originalParse;
+  }
+
+  assert.equal(
+    historicalPayloadParses,
+    0,
+    'unrelated persisted events must not cross the SQL/JavaScript boundary',
+  );
+  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
+
+  insertEvent.run(managerRun.id, JSON.stringify({
+    data: { invocationId: claimed.id, terminal: true },
+  }));
+  const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].status, 'completed');
+});
+
+test('SQLite-rejected scheduler fallback paginates after the shared candidate bound', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Rejected terminal history',
+    prompt: 'Check',
+    rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, 'mgr.turn_completed', ?)
+  `);
+  const opening = '['.repeat(1000);
+  const closing = ']'.repeat(1000);
+  let samplePayload;
+  for (let index = 0; index < MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES; index += 1) {
+    const payload = `{"extra":${opening}0${closing},`
+      + `"correlationHint":"${claimed.id}",`
+      + `"data":{"invocationId":"oinv_history_${index}","terminal":true}}`;
+    samplePayload = payload;
+    insertEvent.run(managerRun.id, payload);
+  }
+  assert.equal(JSON.parse(samplePayload).data.terminal, true);
+  assert.equal(h.db.prepare('SELECT json_valid(?) AS valid').get(samplePayload).valid, 0);
+
+  const originalParse = JSON.parse;
+  let historicalPayloadParses = 0;
+  let targetPayloadParses = 0;
+  JSON.parse = function countedParse(value, ...args) {
+    if (typeof value === 'string' && value.includes('"invocationId":"oinv_history_')) {
+      historicalPayloadParses += 1;
+    }
+    if (typeof value === 'string' && value.includes(`"invocationId":"${claimed.id}"`)) {
+      targetPayloadParses += 1;
+    }
+    return originalParse.call(this, value, ...args);
+  };
+  try {
+    assert.deepEqual(h.scheduleService.reconcilePersistedTerminalEvents(), []);
+    assert.equal(historicalPayloadParses, 8);
+    assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
+
+    const targetPayload = `{"extra":${opening}0${closing},`
+      + `"data":{"invocationId":"${claimed.id}","terminal":true}}`;
+    insertEvent.run(managerRun.id, targetPayload);
+    const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+    assert.equal(reconciled.length, 1);
+    assert.equal(reconciled[0].status, 'completed');
+    assert.equal(targetPayloadParses, 1);
+  } finally {
+    JSON.parse = originalParse;
+  }
+
+  assert.equal(
+    h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+    'pending',
+    'the SQLite-rejected target must still release the OS-4 slot',
+  );
+});
+
+test('restart drains SQLite-rejected fallback pages before applying the uncertain backstop', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Restart rejected terminal history',
+    prompt: 'Check',
+    rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  const opening = '['.repeat(1000);
+  const closing = ']'.repeat(1000);
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  let nonTerminalPayload;
+  for (let index = 0; index < MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES; index += 1) {
+    nonTerminalPayload = `{"extra":${opening}0${closing},`
+      + `"data":{"invocationId":"${claimed.id}","terminal":false}}`;
+    insertEvent.run(managerRun.id, 'mgr.turn_failed', nonTerminalPayload);
+  }
+  const terminalPayload = `{"extra":${opening}0${closing},`
+    + `"data":{"invocationId":"${claimed.id}","terminal":true}}`;
+  insertEvent.run(managerRun.id, 'mgr.turn_completed', terminalPayload);
+
+  assert.equal(JSON.parse(nonTerminalPayload).data.terminal, false);
+  assert.equal(JSON.parse(terminalPayload).data.terminal, true);
+  assert.equal(h.db.prepare('SELECT json_valid(?) AS valid').get(nonTerminalPayload).valid, 0);
+  assert.equal(h.db.prepare('SELECT json_valid(?) AS valid').get(terminalPayload).valid, 0);
+
+  const recovered = h.scheduleService.recoverAfterRestart(
+    new Date('2026-07-23T00:10:00.000Z'),
+  );
+
+  assert.deepEqual(recovered, { pending: 0, uncertain: 0 });
+  const invocation = h.scheduleService.listInvocations(schedule.id)[0];
+  assert.equal(invocation.status, 'completed');
+  assert.equal(invocation.waiting_reason, null);
+  assert.equal(
+    h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+    'pending',
+    'restart recovery must release the OS-4 slot with the persisted outcome',
+  );
+});
+
+test('scheduled SQLite-rejected fallback preserves first-terminal-event-wins across pages', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Rejected first terminal',
+    prompt: 'Check',
+    rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  const opening = '['.repeat(1000);
+  const closing = ']'.repeat(1000);
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  for (let index = 0; index < MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES; index += 1) {
+    insertEvent.run(
+      managerRun.id,
+      'mgr.turn_failed',
+      `{"extra":${opening}0${closing},`
+        + `"data":{"invocationId":"${claimed.id}","terminal":false}}`,
+    );
+  }
+  insertEvent.run(
+    managerRun.id,
+    'mgr.turn_completed',
+    `{"extra":${opening}0${closing},`
+      + `"data":{"invocationId":"${claimed.id}","terminal":true}}`,
+  );
+  insertEvent.run(managerRun.id, 'mgr.turn_failed', JSON.stringify({
+    summaryText: 'later failure',
+    data: { invocationId: claimed.id, terminal: true },
+  }));
+
+  assert.deepEqual(h.scheduleService.reconcilePersistedTerminalEvents(), []);
+  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
+  const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].status, 'completed');
+  assert.equal(reconciled[0].last_error, null);
+  assert.equal(h.scheduleService.getSchedule(schedule.id).consecutive_failures, 0);
+});
+
+test('same-invocation non-terminal failures cannot exhaust scheduled terminal reconciliation', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Candidate exhaustion', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  insertEvent.run(managerRun.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: claimed.id, terminal: true },
+  }));
+  for (let index = 0; index < 255; index += 1) {
+    insertEvent.run(managerRun.id, 'mgr.turn_failed', JSON.stringify({
+      data: {
+        kind: 'codex_error',
+        invocationId: claimed.id,
+        terminal: false,
+      },
+    }));
+  }
+
+  const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].status, 'completed');
+  assert.equal(
+    h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+    'pending',
+    'the persisted target completion must release the OS-4 slot',
+  );
+});
+
+test('JSON.parse-valid deeply nested completion releases the scheduled OS-4 slot', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Deep terminal payload',
+    prompt: 'Check',
+    rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  const payload = `{"extra":${'['.repeat(1000)}0${']'.repeat(1000)},`
+    + `"data":{"invocationId":"${claimed.id}","terminal":true}}`;
+  assert.equal(JSON.parse(payload).data.terminal, true);
+  assert.equal(h.db.prepare('SELECT json_valid(?) AS valid').get(payload).valid, 0);
+  h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, 'mgr.turn_completed', ?)
+  `).run(managerRun.id, payload);
+
+  const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].status, 'completed');
+  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'completed');
+  assert.equal(
+    h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+    'pending',
+    'the persisted completion must release the OS-4 slot',
+  );
+});
+
+test('a persisted numeric terminal flag cannot complete a running invocation', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Numeric terminal', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  h.runService.addRunEvent(managerRun.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: claimed.id, terminal: 1 },
+  }));
+
+  assert.deepEqual(h.scheduleService.reconcilePersistedTerminalEvents(), []);
+  assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'running');
+  assert.throws(
+    () => h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')),
+    /Operator already has an active invocation/,
+    'the numeric flag must not release the OS-4 slot',
+  );
+});
+
+test('scheduled reconciliation follows JSON.parse for duplicate correlation keys', async (t) => {
+  const cases = [
+    {
+      name: 'duplicate top-level data keys',
+      payload(invocationId) {
+        return `{"data":{"invocationId":"wrong","terminal":false},"data":{"invocationId":"${invocationId}","terminal":true}}`;
+      },
+    },
+    {
+      name: 'duplicate invocationId keys',
+      payload(invocationId) {
+        return `{"data":{"invocationId":"wrong","invocationId":"${invocationId}","terminal":true}}`;
+      },
+    },
+  ];
+
+  for (const regressionCase of cases) {
+    await t.test(regressionCase.name, (t) => {
+      const h = harness(t);
+      const { instance } = createMappedOperator(h);
+      const schedule = h.scheduleService.createSchedule(instance.id, {
+        name: 'Duplicate correlation keys',
+        prompt: 'Check',
+        rule: { kind: 'interval', minutes: 60 },
+      });
+      const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+      h.db.prepare(`
+        INSERT INTO run_events (run_id, event_type, payload_json)
+        VALUES (?, 'mgr.turn_completed', ?)
+      `).run(managerRun.id, regressionCase.payload(claimed.id));
+
+      const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+      assert.equal(reconciled.length, 1);
+      assert.equal(reconciled[0].status, 'completed');
+      assert.equal(h.scheduleService.listInvocations(schedule.id)[0].status, 'completed');
+      assert.equal(
+        h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+        'pending',
+        'the persisted completion must release the OS-4 slot',
+      );
+    });
+  }
+});
+
+test('eight newer duplicate-terminal candidates cannot hide an earlier scheduled terminal event', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Duplicate terminal candidate', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  insertEvent.run(managerRun.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: claimed.id, terminal: true },
+  }));
+  for (let index = 0; index < 8; index += 1) {
+    insertEvent.run(
+      managerRun.id,
+      'mgr.turn_failed',
+      `{"summaryText":"must be ignored","data":{"invocationId":"${claimed.id}","terminal":true,"terminal":false}}`,
+    );
+  }
+
+  const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].status, 'completed');
+  assert.equal(h.scheduleService.getSchedule(schedule.id).consecutive_failures, 0);
+  assert.equal(
+    h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+    'pending',
+    'the earlier terminal event must release the OS-4 slot',
+  );
+});
+
+test('eight earlier duplicate-terminal candidates cannot hide a later scheduled terminal event', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Earlier duplicate terminal candidates',
+    prompt: 'Check',
+    rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  for (let index = 0; index < 8; index += 1) {
+    insertEvent.run(
+      managerRun.id,
+      'mgr.turn_failed',
+      `{"summaryText":"must be ignored","data":{"invocationId":"${claimed.id}","terminal":true,"terminal":false}}`,
+    );
+  }
+  insertEvent.run(managerRun.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: claimed.id, terminal: true },
+  }));
+
+  const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].status, 'completed');
+  assert.equal(reconciled[0].last_error, null);
+  assert.equal(h.scheduleService.getSchedule(schedule.id).consecutive_failures, 0);
+  assert.equal(
+    h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+    'pending',
+    'the later terminal event must release the OS-4 slot',
+  );
+});
+
+test('scheduled persisted reconciliation preserves first-terminal-event-wins ordering', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'First terminal wins', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  h.runService.addRunEvent(managerRun.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: claimed.id, terminal: true },
+  }));
+  h.runService.addRunEvent(managerRun.id, 'mgr.turn_failed', JSON.stringify({
+    summaryText: 'later failure must lose',
+    data: { invocationId: claimed.id, terminal: true },
+  }));
+
+  const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].status, 'completed');
+  assert.equal(reconciled[0].last_error, null);
+  assert.equal(h.scheduleService.getSchedule(schedule.id).consecutive_failures, 0);
+  assert.equal(
+    h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+    'pending',
+    'the first completion must release the OS-4 slot without counting a failure',
+  );
+});
+
+test('a non-coercible persisted failure summary fails and releases a scheduled invocation', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Non-coercible summary', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  h.runService.addRunEvent(managerRun.id, 'mgr.turn_failed', JSON.stringify({
+    summaryText: { toString: null, valueOf: null },
+    data: { invocationId: claimed.id, terminal: true },
+  }));
+
+  const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].status, 'failed');
+  assert.equal(reconciled[0].last_error, '{"toString":null,"valueOf":null}');
+  assert.equal(h.scheduleService.getSchedule(schedule.id).consecutive_failures, 1);
+  assert.equal(
+    h.scheduleService.runNow(schedule.id, new Date('2026-07-23T01:00:00.000Z')).status,
+    'pending',
+    'the terminal failure must release the OS-4 slot',
+  );
+});
+
+test('persisted candidates skip malformed newer events and keep scanning', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Malformed terminal candidate', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+  });
+  const { claimed, managerRun } = seedRunningInvocation(h, instance, schedule);
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  insertEvent.run(managerRun.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: claimed.id, terminal: true },
+  }));
+  insertEvent.run(managerRun.id, 'mgr.turn_failed', '{broken');
+
+  const reconciled = h.scheduleService.reconcilePersistedTerminalEvents();
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].status, 'completed');
 });
 
 test('restart correlation loss releases a stale invocation even when the manager resumed', (t) => {

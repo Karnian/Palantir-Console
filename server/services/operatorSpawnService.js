@@ -63,6 +63,11 @@ const { resolveSpawnCwd } = require('../utils/spawnCwd');
 const { resolveCodexServiceTier } = require('./managerAdapters/codexAdapter'); // F-1
 const { goalFeatureActive: defaultGoalFeatureActive } = require('./goalMode'); // G2 §6
 const { resolveActorTokenPolicy, applyManagerCredentialPolicy } = require('./actorTokenPolicy');
+const {
+  parseClaudeArgsTemplate,
+  resolveClaudePermissionMode,
+} = require('./agentProfileService');
+const { resolveAgentVendor } = require('../utils/agentVendor');
 const { conversationIdForProject } = require('../utils/conversationId'); // PM→Operator Phase 0 producer seam
 const { deriveLegacyContext, enforceWorkspace } = require('../utils/operatorContext');
 const { resolveProjectSource } = require('./projectSource');
@@ -79,6 +84,12 @@ const {
 // ensureLiveOperator). ~10s total across growing backoff (≤1s/step) before the
 // operator spawn gives up with a 409 pending_timeout (client may retry).
 const MATERIALIZE_PENDING_MAX_ATTEMPTS = 15;
+
+function mergeClaudeMcpConfigs(...configs) {
+  const present = configs.filter(Boolean);
+  if (present.length === 0) return undefined;
+  return present.length === 1 ? present[0] : present;
+}
 
 function createOperatorSpawnService({
   runService,
@@ -271,26 +282,101 @@ function createOperatorSpawnService({
     return 'codex';
   }
 
-  function resolveManagerProfileRuntime(adapterType, profiles) {
+  function resolveManagerProfileRuntime(adapterType, profiles, { isRemoteNode = false } = {}) {
     const managerProfile = profiles.find(p => p.type === adapterType) || null;
     let envAllowlist;
     let mcpTools = [];
-    if (managerProfile?.env_allowlist) {
-      try {
-        const parsed = JSON.parse(managerProfile.env_allowlist);
-        if (Array.isArray(parsed)) envAllowlist = parsed;
-      } catch { /* use resolver defaults */ }
+    let tools = [];
+    let disallowedTools = [];
+    let maxBudgetUsd = null;
+    let profileMcpConfig = null;
+    let strictMcpConfig = false;
+    let safeMode = false;
+    let bare = false;
+    let disableSlashCommands = false;
+    let noChrome = false;
+    let settingSources = null;
+    let settings = null;
+    let permissionMode = adapterType === 'claude-code' ? 'bypassPermissions' : undefined;
+    // The null-preference path evaluates BOTH adapters, so a mismatched profile
+    // for the adapter we end up discarding must not fail the spawn. Carry the
+    // error and let the caller throw only for the adapter it actually selects.
+    let vendorMismatchError = null;
+    if (managerProfile) {
+      const expectedVendor = adapterType === 'claude-code' ? 'claude' : 'codex';
+      const commandVendor = resolveAgentVendor(managerProfile.command);
+      if (commandVendor !== expectedVendor) {
+        const err = new Error(
+          `Operator profile ${managerProfile.id} command vendor does not match ${adapterType}`,
+        );
+        err.httpStatus = 400;
+        err.code = 'OPERATOR_PROFILE_VENDOR_MISMATCH';
+        err.details = {
+          profileId: managerProfile.id,
+          profileType: managerProfile.type,
+          command: managerProfile.command,
+        };
+        vendorMismatchError = err;
+      }
+      if (adapterType === 'claude-code') {
+        permissionMode = resolveClaudePermissionMode(managerProfile);
+        const templateOptions = parseClaudeArgsTemplate(managerProfile.args_template);
+        tools = templateOptions.tools;
+        disallowedTools = templateOptions.disallowedTools;
+        maxBudgetUsd = templateOptions.maxBudgetUsd;
+        profileMcpConfig = templateOptions.mcpConfig;
+        strictMcpConfig = templateOptions.strictMcpConfig;
+        safeMode = templateOptions.safeMode;
+        bare = templateOptions.bare;
+        disableSlashCommands = templateOptions.disableSlashCommands;
+        noChrome = templateOptions.noChrome;
+        settingSources = templateOptions.settingSources;
+        settings = templateOptions.settings;
+      }
+      if (managerProfile.env_allowlist) {
+        try {
+          const parsed = JSON.parse(managerProfile.env_allowlist);
+          if (Array.isArray(parsed)) envAllowlist = parsed;
+        } catch { /* use resolver defaults */ }
+      }
+      // P3-4: extract mcp_tools for PM adapter startup
+      if (managerProfile.capabilities_json) {
+        try {
+          const caps = JSON.parse(managerProfile.capabilities_json);
+          if (Array.isArray(caps.mcp_tools)) {
+            mcpTools = caps.mcp_tools.filter(t => typeof t === 'string' && t.trim());
+          }
+        } catch { /* no MCP tools */ }
+      }
     }
-    if (managerProfile?.capabilities_json) {
-      try {
-        const caps = JSON.parse(managerProfile.capabilities_json);
-        if (Array.isArray(caps.mcp_tools)) {
-          mcpTools = caps.mcp_tools.filter(t => typeof t === 'string' && t.trim());
-        }
-      } catch { /* no MCP tools */ }
-    }
-    const authCtx = resolveManagerAuth(adapterType, { envAllowlist, ...normalizedAuthResolverOpts });
-    return { adapterType, envAllowlist, mcpTools, authCtx };
+    const authCtx = resolveManagerAuth(adapterType, {
+      envAllowlist,
+      ...normalizedAuthResolverOpts,
+      // A remote Claude Operator materializes `--bare` auth from the pod's
+      // login store inside the executor. Do not read/materialize controller
+      // credentials that will deliberately be discarded at this boundary.
+      bare: !isRemoteNode && bare === true,
+      settings,
+    });
+    return {
+      adapterType,
+      envAllowlist,
+      mcpTools,
+      authCtx,
+      tools,
+      disallowedTools,
+      maxBudgetUsd,
+      profileMcpConfig,
+      strictMcpConfig,
+      safeMode,
+      bare,
+      disableSlashCommands,
+      noChrome,
+      settingSources,
+      settings,
+      permissionMode,
+      vendorMismatchError,
+    };
   }
 
   function remoteManagerAdapterCanStart(card) {
@@ -515,11 +601,12 @@ function createOperatorSpawnService({
       // order rather than an instruction to select an unusable adapter. Probe
       // each locally available manager credential path with that adapter's own
       // profile allowlist and pick the first one that can actually start.
-      const candidates = ['codex', 'claude-code'].map(type => resolveManagerProfileRuntime(type, profiles));
+      const candidates = ['codex', 'claude-code']
+        .map(type => resolveManagerProfileRuntime(type, profiles, { isRemoteNode }));
       managerRuntime = candidates.find(candidate => candidate.authCtx.canAuth) || candidates[0];
       adapterType = managerRuntime.adapterType;
     } else {
-      managerRuntime = resolveManagerProfileRuntime(adapterType, profiles);
+      managerRuntime = resolveManagerProfileRuntime(adapterType, profiles, { isRemoteNode });
     }
     const adapter = managerAdapterFactory.getAdapter(adapterType);
 
@@ -528,14 +615,31 @@ function createOperatorSpawnService({
     // the persistent Claude stream-json runs over the ssh duplex (P5-S0); the
     // S4a fail-closed gate that blocked isRemoteNode && 'claude-code' is removed.
 
-    // Resolve env_allowlist and mcp_tools from the selected adapter's profile.
-    // The auth context was resolved at selection time so the null-preference
-    // fallback and the eventual spawn use exactly the same allowlist.
+    // Resolve env_allowlist, mcp_tools and the Claude profile options from the
+    // SELECTED adapter's profile. The auth context was resolved at selection
+    // time so the null-preference fallback and the eventual spawn use exactly
+    // the same allowlist, bare flag and settings.
     const {
       envAllowlist,
       mcpTools: pmMcpTools,
       authCtx,
+      tools,
+      disallowedTools,
+      maxBudgetUsd,
+      profileMcpConfig,
+      strictMcpConfig,
+      safeMode,
+      bare,
+      disableSlashCommands,
+      noChrome,
+      settingSources,
+      settings,
+      permissionMode,
+      vendorMismatchError,
     } = managerRuntime;
+    // Same contract as before the null-preference probe: a profile whose
+    // command vendor contradicts the adapter we are about to spawn is a 400.
+    if (vendorMismatchError) throw vendorMismatchError;
     // Resolve before the auth gate so migration diagnostics are observable
     // even when a legacy ambient auth mode is no longer sufficient.
     const spawnEnv = applyManagerCredentialPolicy(isRemoteNode ? {} : buildManagerSpawnEnv({
@@ -845,7 +949,33 @@ function createOperatorSpawnService({
         const opEff = modelPolicyService
           ? modelPolicyService.resolveEffective({ layer: 'operator', vendor: opVendor, projectId: project.id, env: process.env })
           : { model: null, effort: null };
-        try { runService.setSessionSnapshot(runId, { sessionModel: opEff.model, sessionEffort: opEff.effort }); } catch { /* annotate-only */ }
+        const effectiveMcpConfig = adapterType === 'claude-code'
+          ? mergeClaudeMcpConfigs(profileMcpConfig, project.mcp_config_path)
+          : (project.mcp_config_path || undefined);
+        try {
+          runService.setSessionSnapshot(runId, {
+            sessionModel: opEff.model,
+            sessionEffort: opEff.effort,
+            sessionPermissionMode: permissionMode || null,
+            sessionClaudeOptions: adapterType === 'claude-code'
+              ? {
+                  tools,
+                  disallowedTools,
+                  maxBudgetUsd,
+                  mcpConfig: effectiveMcpConfig || null,
+                  strictMcpConfig,
+                  ...(safeMode ? { safeMode: true } : {}),
+                  ...(bare ? { bare: true } : {}),
+                  ...(disableSlashCommands ? { disableSlashCommands: true } : {}),
+                  ...(noChrome ? { noChrome: true } : {}),
+                  ...(typeof settingSources === 'string'
+                    ? { settingSources }
+                    : {}),
+                  ...(settings ? { settings } : {}),
+                }
+              : null,
+          });
+        } catch { /* annotate-only */ }
 
         const startOpts = {
           systemPrompt,
@@ -864,6 +994,19 @@ function createOperatorSpawnService({
             { managerToken: token, actorTokens },
           ),
           envAllowlist,
+          permissionMode,
+          tools: tools.length > 0 ? tools : undefined,
+          disallowedTools: disallowedTools.length > 0 ? disallowedTools : undefined,
+          maxBudgetUsd: maxBudgetUsd || undefined,
+          strictMcpConfig: strictMcpConfig || undefined,
+          safeMode: safeMode || undefined,
+          bare: bare || undefined,
+          disableSlashCommands: disableSlashCommands || undefined,
+          noChrome: noChrome || undefined,
+          settingSources: typeof settingSources === 'string'
+            ? settingSources
+            : undefined,
+          settings: settings || undefined,
           role: 'manager',
           nodeId,
           resumeThreadId,
@@ -894,7 +1037,7 @@ function createOperatorSpawnService({
           // Claude adapter forwards this to streamJsonEngine as --mcp-config.
           // Codex adapter accepts only object-shaped MCP config for dotted
           // -c flattening, so it skips path strings and annotates the run.
-          mcpConfig: project.mcp_config_path || undefined,
+          mcpConfig: effectiveMcpConfig,
         };
         if (isRemoteNode) {
           startOpts.executor = executor;

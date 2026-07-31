@@ -85,9 +85,10 @@ const { createMemoryRouter } = require('./routes/memory');
 const { createMemoryDiagnosticsRouter } = require('./routes/memoryDiagnostics');
 const { createMemoryProposalsRouter } = require('./routes/memoryProposals');
 const {
-  resolveActorTokenPolicy,
+  resolveAppActorTokenPolicy,
   createWorkerProposalTokenService,
   createManagerCapabilityTokenService,
+  normalizeWorkerApiBase,
 } = require('./services/actorTokenPolicy');
 const { createOperatorSpecialistRouter } = require('./routes/operatorSpecialist');
 const { createOperatorProfilesRouter } = require('./routes/operatorProfiles');
@@ -1077,36 +1078,34 @@ function createApp(options = {}) {
     return lastServer;
   };
   app.address = () => (lastServer ? lastServer.address() : null);
-  // PR1: tests pass `authToken` explicitly to avoid mutating
-  // process.env.PALANTIR_TOKEN (which would leak into sibling test files
-  // running in parallel via `node --test`). Production code path leaves
-  // options.authToken undefined and falls back to process.env.
-  const authToken = options.authToken !== undefined
-    ? options.authToken
-    : process.env.PALANTIR_TOKEN;
-  const pmToken = options.pmToken !== undefined
-    ? options.pmToken
-    : process.env.PALANTIR_PM_TOKEN;
-  // An application-owned boundary is valid only when every configured actor
-  // credential came from options. Supplying just one option must not relabel
-  // a sibling token inherited from process.env as securely isolated.
-  const allConfiguredActorTokensFromOptions = (
-    (!authToken || options.authToken !== undefined)
-    && (!pmToken || options.pmToken !== undefined)
-  );
-  const actorTokenPolicy = resolveActorTokenPolicy({
-    PALANTIR_TOKEN: authToken,
-    PALANTIR_PM_TOKEN: pmToken,
-    // An explicit false is a real opt-out for embedders/tests. Only absence
-    // inherits the process-wide deployment assertion.
-    PALANTIR_AGENT_PROCESS_ISOLATION: options.agentProcessIsolation === undefined
-      ? process.env.PALANTIR_AGENT_PROCESS_ISOLATION
-      : (options.agentProcessIsolation === true ? 'verified' : null),
-    PALANTIR_ACTOR_TOKEN_SOURCE: options.actorTokenSource
-      || (allConfiguredActorTokensFromOptions
-        ? 'application_options'
-        : 'environment'),
-  });
+  // PR1: tests pass actor tokens explicitly to avoid mutating process.env,
+  // while production either supplies one-shot-file options or falls back to
+  // the environment. Keep that precedence in the shared policy resolver used
+  // by the standalone isolation diagnostic too.
+  // Snapshot before reading any injectable option accessors, which may have side effects.
+  const actorTokenEnv = {
+    PALANTIR_TOKEN: process.env.PALANTIR_TOKEN,
+    PALANTIR_PM_TOKEN: process.env.PALANTIR_PM_TOKEN,
+    PALANTIR_AGENT_PROCESS_ISOLATION: process.env.PALANTIR_AGENT_PROCESS_ISOLATION,
+    PALANTIR_ACTOR_TOKEN_SOURCE: process.env.PALANTIR_ACTOR_TOKEN_SOURCE,
+  };
+  const optionAuthToken = options.authToken;
+  const optionPmToken = options.pmToken;
+  const authTokenFromOptions = optionAuthToken !== undefined;
+  const pmTokenFromOptions = optionPmToken !== undefined;
+  const authToken = authTokenFromOptions
+    ? optionAuthToken
+    : actorTokenEnv.PALANTIR_TOKEN;
+  const pmToken = pmTokenFromOptions
+    ? optionPmToken
+    : actorTokenEnv.PALANTIR_PM_TOKEN;
+  const actorTokenOptions = {
+    actorTokenSource: options.actorTokenSource,
+    agentProcessIsolation: options.agentProcessIsolation,
+  };
+  if (authTokenFromOptions) actorTokenOptions.authToken = authToken;
+  if (pmTokenFromOptions) actorTokenOptions.pmToken = pmToken;
+  const actorTokenPolicy = resolveAppActorTokenPolicy(actorTokenOptions, actorTokenEnv);
   const workerProposalTokenService = createWorkerProposalTokenService({
     actorTokens: actorTokenPolicy,
   });
@@ -1274,9 +1273,16 @@ function createApp(options = {}) {
   const modelPolicyService = createModelPolicyService(db);
 
   // Execution engines
-  const executionEngine = options.executionEngine || createExecutionEngine({
+  const sharedExecutionEngine = options.executionEngine || createExecutionEngine({
     actorTokens: actorTokenPolicy,
   });
+  // createApp owns capability issuance, while the concrete engine revalidates
+  // the capability immediately before spawn. Bind the resolved policy to an
+  // app-local facade so two apps may share process ownership without either
+  // app mutating the other's spawn policy.
+  const executionEngine = typeof sharedExecutionEngine.withActorTokenPolicy === 'function'
+    ? sharedExecutionEngine.withActorTokenPolicy(actorTokenPolicy)
+    : sharedExecutionEngine;
   const streamJsonEngine = createStreamJsonEngine({
     runService,
     eventBus,
@@ -1776,12 +1782,12 @@ function createApp(options = {}) {
   // and logout have to be reachable without an existing session cookie.
   // /api/auth/login performs its own timing-safe comparison against
   // PALANTIR_TOKEN; logout always succeeds (it just clears the cookie).
-  app.use('/api/auth', createAuthRouter({ token: authToken }));
+  app.use('/api/auth', createAuthRouter({ token: authToken ?? null }));
 
   // Auth middleware for API routes (skips static files + health + /api/auth)
   const auth = createAuthMiddleware({
-    token: authToken,
-    pmToken,
+    token: authToken ?? null,
+    pmToken: pmToken ?? null,
     workerProposalTokenService,
     managerCapabilityTokenService,
     isManagerCapabilityActive(grant) {
@@ -2181,7 +2187,7 @@ function resolveWorkerProposalEndpoints({
   port = 4177,
 } = {}) {
   if (typeof explicitBaseUrl === 'string' && explicitBaseUrl.trim()) {
-    const normalized = explicitBaseUrl.trim().replace(/\/+$/, '');
+    const normalized = normalizeWorkerApiBase(explicitBaseUrl);
     return { local: normalized, remote: normalized };
   }
   const bindHost = typeof host === 'string' && host.trim()

@@ -1,9 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const childProcess = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { createHarvestService } = require('../services/harvestService');
+const { createLocalNodeExecutor } = require('../services/nodeExecutor');
+const { createRemoteSshNodeExecutor } = require('../services/remoteSshExecutor');
 
 const WORKSPACE = '/pod/workspaces/run-1';
 const CACHE = '/pod/cache/project.gitcache';
@@ -161,10 +164,195 @@ test('harvestRun runs materialized test_command through the selected remote exec
   assert.ok(testCall, 'test command used executor.exec');
   assert.deepEqual(testCall.args, ['-c', 'npm test']);
   assert.equal(testCall.opts.cwd, `${WORKSPACE}/packages/app`);
+  assert.equal(testCall.opts.projectTest, true);
+  assert.equal(testCall.opts.inheritFullEnv, undefined);
   const testPayload = parseEvent(runService.events.find(evt => evt.event_type === 'harvest:test'));
   assert.equal(testPayload.node_major, null);
   assert.equal(testPayload.node_source, 'executor');
   assert.equal('declared_node_major' in testPayload, false);
+});
+
+test('materialized local harvest keeps test runtime env but exposes zero server secrets', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-harvest-local-'));
+  const workspace = path.join(root, 'workspace');
+  const cache = path.join(root, 'cache');
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(cache);
+  fs.writeFileSync(path.join(workspace, 'probe.js'), [
+    'process.stdout.write(JSON.stringify({',
+    'nodeEnv: process.env.NODE_ENV ?? null,',
+    'pythonPath: process.env.PYTHONPATH ?? null,',
+    'palantir: process.env.PALANTIR_TOKEN ?? null,',
+    'anthropic: process.env.ANTHROPIC_API_KEY ?? null,',
+    'askpass: process.env.GIT_ASKPASS ?? null,',
+    'proxy: process.env.HTTPS_PROXY ?? null,',
+    '}));',
+  ].join(''));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const envKeys = [
+    'NODE_ENV',
+    'PYTHONPATH',
+    'PALANTIR_PROJECT_TEST_ENV_ALLOWLIST',
+    'PALANTIR_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'GIT_ASKPASS',
+    'HTTPS_PROXY',
+  ];
+  const previous = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  process.env.NODE_ENV = 'project-test-runtime';
+  process.env.PYTHONPATH = '/opt/project-specific-python-libs';
+  process.env.PALANTIR_PROJECT_TEST_ENV_ALLOWLIST = 'PYTHONPATH';
+  process.env.PALANTIR_TOKEN = 'control-plane-secret';
+  process.env.ANTHROPIC_API_KEY = 'model-secret';
+  process.env.GIT_ASKPASS = '/fixture/credential-helper';
+  process.env.HTTPS_PROXY = 'http://user:password@proxy.example';
+  t.after(() => {
+    for (const key of envKeys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  });
+
+  const command = `${JSON.stringify(process.execPath)} probe.js`;
+  const { run, runService, harvestService } = createHarness(t, {
+    executor: createLocalNodeExecutor(),
+    project: { id: 'project-1', test_command: command },
+    runOverrides: {
+      workspace_path: workspace,
+      repo_cache_path: cache,
+      node_id: 'local',
+    },
+  });
+
+  await harvestService.harvestRun(run);
+
+  const testEvent = runService.events.find(evt => evt.event_type === 'harvest:test');
+  assert.ok(testEvent, 'production local executor emitted harvest:test');
+  const payload = parseEvent(testEvent);
+  assert.equal(payload.passed, true);
+  assert.deepEqual(JSON.parse(payload.output_tail), {
+    nodeEnv: 'project-test-runtime',
+    pythonPath: '/opt/project-specific-python-libs',
+    palantir: null,
+    anthropic: null,
+    askpass: null,
+    proxy: null,
+  });
+});
+
+test('materialized local harvest hides the Console environment from test_command parent lookup', {
+  skip: process.platform === 'win32' ? 'requires /proc or POSIX ps' : false,
+}, () => {
+  const secret = 'review-control-plane-secret';
+  const fixture = path.join(__dirname, 'fixtures', 'harvest-parent-env-probe.js');
+  const raw = childProcess.execFileSync(process.execPath, [fixture], {
+    env: { ...process.env, PALANTIR_TOKEN: secret },
+    encoding: 'utf8',
+  });
+  const payload = JSON.parse(raw);
+
+  assert.equal(payload.secret, secret, 'fixture Console started with the control-plane secret');
+  assert.equal(payload.passed, true);
+  assert.equal(payload.output_tail, '');
+});
+
+test('materialized remote harvest runs the real executor contract without leaking server secrets', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-harvest-remote-'));
+  const workspace = path.join(root, 'workspace');
+  const cache = path.join(root, 'cache');
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(cache);
+  fs.writeFileSync(path.join(workspace, 'probe.js'), [
+    'process.stdout.write(JSON.stringify({',
+    'nodeEnv: process.env.NODE_ENV ?? null,',
+    'pythonPath: process.env.PYTHONPATH ?? null,',
+    'palantir: process.env.PALANTIR_TOKEN ?? null,',
+    'anthropic: process.env.ANTHROPIC_API_KEY ?? null,',
+    'askpass: process.env.GIT_ASKPASS ?? null,',
+    'proxy: process.env.HTTPS_PROXY ?? null,',
+    '}));',
+  ].join(''));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const envKeys = [
+    'NODE_ENV',
+    'PYTHONPATH',
+    'PALANTIR_PROJECT_TEST_ENV_ALLOWLIST',
+    'PALANTIR_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'GIT_ASKPASS',
+    'HTTPS_PROXY',
+  ];
+  const previous = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  process.env.NODE_ENV = 'project-test-runtime';
+  process.env.PYTHONPATH = '/opt/project-specific-python-libs';
+  process.env.PALANTIR_PROJECT_TEST_ENV_ALLOWLIST = 'PYTHONPATH';
+  process.env.PALANTIR_TOKEN = 'control-plane-secret';
+  process.env.ANTHROPIC_API_KEY = 'model-secret';
+  process.env.GIT_ASKPASS = '/fixture/credential-helper';
+  process.env.HTTPS_PROXY = 'http://user:password@proxy.example';
+  t.after(() => {
+    for (const key of envKeys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  });
+
+  function loopbackSpawn(command, args, opts) {
+    assert.equal(command, 'ssh');
+    const separator = args.indexOf('--');
+    assert.notEqual(separator, -1);
+    const remoteArgs = args.slice(separator + 2);
+    return childProcess.spawn('sh', ['-c', remoteArgs.join(' ')], {
+      ...opts,
+      env: { ...process.env },
+    });
+  }
+
+  const remoteExecutor = createRemoteSshNodeExecutor({
+    id: 'remote-1',
+    kind: 'ssh',
+    ssh_host: 'loopback.invalid',
+    ssh_user: 'runner',
+    exposed_roots: JSON.stringify([root]),
+  }, {
+    spawnFn: loopbackSpawn,
+  });
+  const nodeService = {
+    pickExecutor() { return remoteExecutor; },
+    getNode() { return { id: 'remote-1', kind: 'ssh' }; },
+  };
+  const command = `${JSON.stringify(process.execPath)} probe.js`;
+  const { run, runService, harvestService } = createHarness(t, {
+    nodeService,
+    project: { id: 'project-1', test_command: command },
+    runOverrides: {
+      workspace_path: workspace,
+      repo_cache_path: cache,
+      node_id: 'remote-1',
+    },
+  });
+
+  await harvestService.harvestRun(run);
+
+  const testErrors = runService.events
+    .filter(evt => evt.event_type === 'harvest:error')
+    .map(parseEvent)
+    .filter(evt => evt.stage === 'test');
+  assert.deepEqual(testErrors, []);
+  const testEvent = runService.events.find(evt => evt.event_type === 'harvest:test');
+  assert.ok(testEvent, 'production remote executor emitted harvest:test');
+  const payload = parseEvent(testEvent);
+  assert.equal(payload.passed, true);
+  assert.deepEqual(JSON.parse(payload.output_tail), {
+    nodeEnv: 'project-test-runtime',
+    pythonPath: '/opt/project-specific-python-libs',
+    palantir: null,
+    anthropic: null,
+    askpass: null,
+    proxy: null,
+  });
 });
 
 test('harvestRun emits 3-way declared_node_major for materialized local workspaces', async (t) => {

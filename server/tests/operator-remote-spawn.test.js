@@ -603,8 +603,12 @@ test('boot resume uses remote node executor, nodePrefix, pod cwd, and Claude ses
     prompt: 'boot resume claude',
     node_id: 'nodeA',
   });
+  runService.setSessionSnapshot(run.id, {
+    sessionClaudeOptions: { bare: true },
+  });
   runService.updateRunStatus(run.id, 'running', { force: true });
 
+  let controllerTokenReads = 0;
   createManagerRouter({
     runService,
     managerAdapterFactory: factory,
@@ -614,7 +618,14 @@ test('boot resume uses remote node executor, nodePrefix, pod cwd, and Claude ses
     projectBriefService,
     nodeService,
     managerApiEndpoints: TEST_MANAGER_API_ENDPOINTS,
-    authResolverOpts: {},
+    authResolverOpts: {
+      hasKeychain: () => true,
+      readKeychainTokenSync: () => {
+        controllerTokenReads += 1;
+        return 'controller-token-must-not-be-materialized';
+      },
+      hasCredentialsFile: () => false,
+    },
   });
 
   assert.equal(adapter._starts.length, 1);
@@ -627,6 +638,13 @@ test('boot resume uses remote node executor, nodePrefix, pod cwd, and Claude ses
   assert.deepEqual(adapter._starts[0].opts.env, {});
   assert.match(adapter._starts[0].opts.systemPrompt, /http:\/\/console\.test:4177\/api\/tasks/);
   assert.doesNotMatch(adapter._starts[0].opts.systemPrompt, /http:\/\/localhost:4177/);
+  assert.equal(adapter._starts[0].opts.bare, true);
+  assert.equal(controllerTokenReads, 0);
+  // The `operator:remote_base_url_localhost` warning this test used to assert is
+  // gone on purpose: a remote Operator now RESOLVES a reachable endpoint (and
+  // fails closed with OPERATOR_REMOTE_BASE_URL_UNAVAILABLE when none exists)
+  // instead of being handed localhost with an annotation. The two assertions
+  // above cover the replacement contract.
 });
 
 test('boot resume clears a Claude session bound to a different node and leaves it for lazy fresh spawn', async (t) => {
