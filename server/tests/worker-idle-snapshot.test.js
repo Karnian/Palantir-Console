@@ -55,7 +55,11 @@ function makeIdleLifecycle({ collector, onOrder } = {}) {
       // idle branch, then its liveness recheck observes the dead process.
       return aliveChecks < 3;
     },
-    detectExitCode() { return null; },
+    // Under the S1b tri-state, absence + null exit code is honestly `unknown`
+    // (held for a grace window), which is not what this fixture is about. A
+    // recorded exit code makes the death CONFIRMED so the ordering contract
+    // (snapshot before terminalization and kill) stays the thing under test.
+    detectExitCode() { return aliveChecks < 3 ? null : 137; },
     getOutput() { return ''; },
     kill() { order.push('kill'); return true; },
   };

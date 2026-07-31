@@ -84,11 +84,94 @@ function createLocalWorkerChannel({ streamJsonEngine, executionEngine } = {}) {
     if (!executionEngine) return false;
     if (typeof executionEngine.isAlive === 'function' && executionEngine.isAlive(runId)) return true;
     if (executionSessionOwns(runId)) return true;
-    if (executionEngine.type) return true;
     return Boolean(
       typeof executionEngine.detectExitCode === 'function'
       && executionEngine.detectExitCode(runId) !== null,
     );
+  }
+
+  function normalizeEngineIdentity(engine) {
+    if (engine === 'stream-json') return 'stream-json';
+    if (engine === 'subprocess' || engine === 'tmux' || engine === 'remote' || engine === 'cli') {
+      return engine;
+    }
+    return null;
+  }
+
+  // Routing and liveness are deliberately separate. An attached engine tells
+  // us which API to call; it is not evidence that this run still has an owner.
+  function engineFor(runId, durableEngine = null) {
+    const identity = normalizeEngineIdentity(durableEngine);
+    if (identity === 'stream-json') return 'stream-json';
+    if (identity) return 'cli';
+    if (streamJsonOwns(runId)) return 'stream-json';
+    if (executionSessionOwns(runId)) return 'cli';
+    return null;
+  }
+
+  function executionHasHandle(runId) {
+    if (!executionEngine) return false;
+    try {
+      if (typeof executionEngine.hasProcess === 'function' && executionEngine.hasProcess(runId)) {
+        return true;
+      }
+    } catch {
+      return false;
+    }
+    return executionSessionOwns(runId);
+  }
+
+  async function ownerState(runId, durableEngine = null) {
+    let identity = normalizeEngineIdentity(durableEngine);
+    if (!identity) {
+      if (streamJsonOwns(runId)) identity = 'stream-json';
+      else if (executionHasHandle(runId)) identity = executionEngine?.type || 'subprocess';
+      else return 'unknown';
+    }
+
+    if (identity === 'stream-json') {
+      try {
+        if (!streamJsonEngine || typeof streamJsonEngine.hasProcess !== 'function') return 'unknown';
+        if (!streamJsonEngine.hasProcess(runId)) return 'unknown';
+        if (typeof streamJsonEngine.isUnreachable === 'function' && streamJsonEngine.isUnreachable(runId)) {
+          return 'unknown';
+        }
+        if (await requireEngine('stream-json', 'isAlive').isAlive(runId)) return 'alive';
+        const exitCode = await requireEngine('stream-json', 'detectExitCode').detectExitCode(runId);
+        return exitCode === null ? 'unknown' : 'dead';
+      } catch {
+        return 'unknown';
+      }
+    }
+
+    if (identity === 'tmux') {
+      try {
+        // Sentinel FIRST (codex S1b R1 #1): the worker writes its exit sentinel
+        // and terminates, but the surrounding tmux shell can outlive it — so a
+        // present session with a recorded exit code is a FINISHED worker, not a
+        // live one. Session existence only breaks the tie when no exit was
+        // recorded.
+        const exitCode = await requireEngine('cli', 'detectExitCode').detectExitCode(runId);
+        if (exitCode !== null) return 'dead';
+        if (await requireEngine('cli', 'isAlive').isAlive(runId)) return 'alive';
+        return 'unknown';
+      } catch {
+        return 'unknown';
+      }
+    }
+
+    if (identity === 'subprocess' || identity === 'cli') {
+      if (!executionHasHandle(runId)) return 'unknown';
+      try {
+        if (await requireEngine('cli', 'isAlive').isAlive(runId)) return 'alive';
+        const exitCode = await requireEngine('cli', 'detectExitCode').detectExitCode(runId);
+        return exitCode === null ? 'unknown' : 'dead';
+      } catch {
+        return 'unknown';
+      }
+    }
+
+    return 'unknown';
   }
 
   function ownerOf(runId) {
@@ -152,6 +235,8 @@ function createLocalWorkerChannel({ streamJsonEngine, executionEngine } = {}) {
 
   return {
     spawnWorker,
+    engineFor,
+    ownerState,
     ownerOf,
     isAlive,
     detectExitCode,
@@ -209,6 +294,26 @@ function createRemoteWorkerChannel({
     return requireRemote('ownerOf')(runId);
   }
 
+  function engineFor(_runId, durableEngine = null) {
+    return durableEngine === 'stream-json' ? 'stream-json' : 'cli';
+  }
+
+  async function ownerState(runId) {
+    try {
+      const owner = await requireRemote('ownerOf')(runId);
+      if (owner === 'alive' || owner === 'dead' || owner === 'unknown') return owner;
+      // ownerOf remains a routing-shaped compatibility API on remote
+      // executors. The actual tri-state comes from the durable tmux/sentinel
+      // probes below; transport rejection is caught as unknown.
+      if (await requireRemote('isAlive')(runId, owner || 'cli')) return 'alive';
+      const exitCode = await requireRemote('detectExitCode')(runId, 'cli');
+      return exitCode === null ? 'unknown' : 'dead';
+    } catch {
+      // SSH and all other transport/probe failures preserve ownership.
+      return 'unknown';
+    }
+  }
+
   function isAlive(runId, engine) {
     return requireRemote('isAlive')(runId, engine);
   }
@@ -235,6 +340,8 @@ function createRemoteWorkerChannel({
 
   return Object.assign(Object.create(remoteExecutor), {
     spawnWorker,
+    engineFor,
+    ownerState,
     ownerOf,
     isAlive,
     detectExitCode,
@@ -375,6 +482,8 @@ function createLocalNodeExecutor({ executionEngine, streamJsonEngine } = {}) {
     move: (src, dst) => fsp.rename(src, dst),
     attachEngines,
     spawnWorker: (...args) => requireWorkerChannel('spawnWorker').spawnWorker(...args),
+    engineFor: (...args) => requireWorkerChannel('engineFor').engineFor(...args),
+    ownerState: (...args) => requireWorkerChannel('ownerState').ownerState(...args),
     ownerOf: (...args) => requireWorkerChannel('ownerOf').ownerOf(...args),
     isAlive: (...args) => requireWorkerChannel('isAlive').isAlive(...args),
     detectExitCode: (...args) => requireWorkerChannel('detectExitCode').detectExitCode(...args),

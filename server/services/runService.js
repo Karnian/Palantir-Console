@@ -185,6 +185,23 @@ function createRunService(db, eventBus) {
     updateClaudeSessionId: db.prepare(`
       UPDATE runs SET claude_session_id = ? WHERE id = ?
     `),
+    updateStatusCasWithLease: db.prepare(`
+      UPDATE runs
+         SET status = ?,
+             ended_at = CASE
+               WHEN ? IN ('completed','failed','cancelled','stopped') THEN datetime('now')
+               ELSE ended_at
+             END,
+             terminal_reason = CASE
+               WHEN ? IN ('completed','failed','cancelled','stopped') THEN ?
+               ELSE NULL
+             END
+       WHERE id = ? AND status = ?
+         AND EXISTS (
+           SELECT 1 FROM run_owner_leases
+           WHERE run_id = ? AND lease_id = ? AND state = 'held'
+         )
+    `),
     updateStatusCas: db.prepare(`
       UPDATE runs
          SET status = ?,
@@ -224,6 +241,31 @@ function createRunService(db, eventBus) {
       WHERE COALESCE(node_id, 'local') = ?
         AND status = 'running'
         AND is_manager = 0
+    `),
+    countHeldOwners: db.prepare(`
+      SELECT COUNT(*) as count
+      FROM run_owner_leases l
+      JOIN runs r ON r.id = l.run_id
+      WHERE l.state = 'held'
+        AND r.agent_profile_id = ?
+        AND r.is_manager = 0
+    `),
+    countHeldOwnersOnNode: db.prepare(`
+      SELECT COUNT(*) as count
+      FROM run_owner_leases l
+      JOIN runs r ON r.id = l.run_id
+      WHERE l.state = 'held'
+        AND COALESCE(r.node_id, 'local') = ?
+        AND r.agent_profile_id = ?
+        AND r.is_manager = 0
+    `),
+    countHeldOwnersTotalOnNode: db.prepare(`
+      SELECT COUNT(*) as count
+      FROM run_owner_leases l
+      JOIN runs r ON r.id = l.run_id
+      WHERE l.state = 'held'
+        AND COALESCE(r.node_id, 'local') = ?
+        AND r.is_manager = 0
     `),
     getOldestQueued: db.prepare(`
       SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
@@ -700,6 +742,22 @@ function createRunService(db, eventBus) {
       WHERE run_id = ? AND state = 'held'
       LIMIT 1
     `),
+    listHeldOwnerLeases: db.prepare(`
+      SELECT l.*,
+             r.status AS run_status,
+             r.node_id AS node_id,
+             r.tmux_session AS tmux_session,
+             r.is_manager AS is_manager
+      FROM run_owner_leases l
+      JOIN runs r ON r.id = l.run_id
+      WHERE l.state = 'held'
+      ORDER BY l.created_at ASC, l.rowid ASC
+    `),
+    recordOwnerEngine: db.prepare(`
+      UPDATE run_owner_leases
+      SET engine = ?
+      WHERE run_id = ? AND lease_id = ? AND state = 'held'
+    `),
     stampOwnerLeaseAcquired: db.prepare(`
       UPDATE run_owner_leases
       SET acquired_at = datetime('now')
@@ -747,6 +805,46 @@ function createRunService(db, eventBus) {
     hasEventType: db.prepare(`
       SELECT 1 AS found FROM run_events
       WHERE run_id = ? AND event_type = ?
+      LIMIT 1
+    `),
+    hasOwnerProbeUnknown: db.prepare(`
+      SELECT 1 AS found FROM run_events
+      WHERE run_id = ?
+        AND event_type = 'worker:lease_probe_unknown'
+        AND json_extract(payload_json, '$.lease_id') = ?
+        AND rowid > COALESCE((
+          SELECT MAX(rowid) FROM run_events
+          WHERE run_id = ?
+            AND event_type = 'worker:lease_probe_alive'
+            AND json_extract(payload_json, '$.lease_id') = ?
+        ), 0)
+      LIMIT 1
+    `),
+    ownerProbeUnknownSince: db.prepare(`
+      SELECT created_at FROM run_events
+      WHERE run_id = ?
+        AND event_type = 'worker:lease_probe_unknown'
+        AND json_extract(payload_json, '$.lease_id') = ?
+        AND rowid > COALESCE((
+          SELECT MAX(rowid) FROM run_events
+          WHERE run_id = ?
+            AND event_type = 'worker:lease_probe_alive'
+            AND json_extract(payload_json, '$.lease_id') = ?
+        ), 0)
+      ORDER BY rowid ASC
+      LIMIT 1
+    `),
+    hasOwnerProbeAliveAfterUnknown: db.prepare(`
+      SELECT 1 AS found FROM run_events
+      WHERE run_id = ?
+        AND event_type = 'worker:lease_probe_unknown'
+        AND json_extract(payload_json, '$.lease_id') = ?
+        AND rowid > COALESCE((
+          SELECT MAX(rowid) FROM run_events
+          WHERE run_id = ?
+            AND event_type = 'worker:lease_probe_alive'
+            AND json_extract(payload_json, '$.lease_id') = ?
+        ), 0)
       LIMIT 1
     `),
   };
@@ -816,6 +914,29 @@ function createRunService(db, eventBus) {
       eventId = eventInfo.lastInsertRowid;
     }
     return { eventType, eventId };
+  });
+
+  const acquireOwnerLeaseLateTx = db.transaction((runId, leaseId) => {
+    const info = stmts.stampOwnerLeaseAcquired.run(runId, leaseId);
+    if (info.changes === 0 || !stmts.runRowExists.get(runId)) return null;
+    const eventInfo = stmts.insertEvent.run(
+      runId,
+      'worker:lease_acquired_late',
+      JSON.stringify({ lease_id: leaseId }),
+    );
+    return eventInfo.lastInsertRowid;
+  });
+
+  const annotateOwnerProbeUnknownTx = db.transaction((runId, leaseId) => {
+    if (!stmts.runRowExists.get(runId) || stmts.hasOwnerProbeUnknown.get(runId, leaseId, runId, leaseId)) {
+      return null;
+    }
+    const eventInfo = stmts.insertEvent.run(
+      runId,
+      'worker:lease_probe_unknown',
+      JSON.stringify({ lease_id: leaseId }),
+    );
+    return eventInfo.lastInsertRowid;
   });
 
   function listRuns({ task_id, status } = {}) {
@@ -1076,6 +1197,11 @@ function createRunService(db, eventBus) {
     force = false,
     reason = null,
     terminalReason = null,
+    // Generation-atomic terminal write (codex S1b R6): every check-then-act
+    // guard left an await window; conditioning the WRITE itself on the probed
+    // lease still being the current held one closes the class. On a stale
+    // generation the CAS matches nothing and the caller gets null back.
+    requireHeldLease = null,
   } = {}) {
     if (!VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid run status: ${status}`);
@@ -1119,6 +1245,14 @@ function createRunService(db, eventBus) {
       // would change an external API as a side effect of de-duplicating
       // internal observers.
       if (force && TERMINAL_STATUSES.has(status) && current.status === status) {
+        // Generation check applies to the duplicate fast path too (codex S1b
+        // R7): returning the row here without it lets a stale observation run
+        // its follow-ups (kill, cleanup) against the new generation whenever
+        // the statuses merely coincide.
+        if (requireHeldLease) {
+          const held = stmts.getHeldOwnerLease.get(id);
+          if (!held || held.lease_id !== requireHeldLease) return null;
+        }
         // Deliberately no terminal_reason backfill here. A reason is derived
         // from the row at write time, and by now the row is already terminal —
         // so the derivation has nothing left to read and would either produce
@@ -1146,14 +1280,29 @@ function createRunService(db, eventBus) {
 
       // Re-derived per attempt against the row this write is actually racing.
       const attemptTerminalReason = resolveTerminalReason(current);
-      const info = stmts.updateStatusCas.run(
-        status,
-        status,
-        status,
-        attemptTerminalReason,
-        id,
-        current.status,
-      );
+      const info = requireHeldLease
+        ? stmts.updateStatusCasWithLease.run(
+          status,
+          status,
+          status,
+          attemptTerminalReason,
+          id,
+          current.status,
+          id,
+          requireHeldLease,
+        )
+        : stmts.updateStatusCas.run(
+          status,
+          status,
+          status,
+          attemptTerminalReason,
+          id,
+          current.status,
+        );
+      if (requireHeldLease && info.changes === 0) {
+        const held = stmts.getHeldOwnerLease.get(id);
+        if (!held || held.lease_id !== requireHeldLease) return null; // stale generation
+      }
       if (info.changes > 0) {
         updated = true;
         break;
@@ -1247,14 +1396,23 @@ function createRunService(db, eventBus) {
   }
 
   function countRunning(profileId) {
+    if (process.env.PALANTIR_LEASE_CAPACITY === '1') {
+      return stmts.countHeldOwners.get(profileId).count;
+    }
     return stmts.countRunning.get(profileId).count;
   }
 
   function countRunningOnNode(nodeId, profileId) {
+    if (process.env.PALANTIR_LEASE_CAPACITY === '1') {
+      return stmts.countHeldOwnersOnNode.get(nodeId || 'local', profileId).count;
+    }
     return stmts.countRunningOnNode.get(nodeId || 'local', profileId).count;
   }
 
   function countRunningTotalOnNode(nodeId) {
+    if (process.env.PALANTIR_LEASE_CAPACITY === '1') {
+      return stmts.countHeldOwnersTotalOnNode.get(nodeId || 'local').count;
+    }
     return stmts.countRunningTotalOnNode.get(nodeId || 'local').count;
   }
 
@@ -1360,6 +1518,64 @@ function createRunService(db, eventBus) {
 
   function getHeldLease(runId) {
     return stmts.getHeldOwnerLease.get(runId) || null;
+  }
+
+  function listHeldOwnerLeases() {
+    return stmts.listHeldOwnerLeases.all();
+  }
+
+  function recordOwnerEngine(runId, leaseId, engine) {
+    if (!['subprocess', 'tmux', 'stream-json', 'remote'].includes(engine)) {
+      throw new BadRequestError(`Invalid owner engine: ${engine}`);
+    }
+    return stmts.recordOwnerEngine.run(engine, runId, leaseId).changes > 0;
+  }
+
+  function acquireOwnerLeaseLate(runId, leaseId) {
+    const eventId = acquireOwnerLeaseLateTx(runId, leaseId);
+    if (eventId === null) return false;
+    if (eventBus) {
+      eventBus.emit('run:event', {
+        runId,
+        eventType: 'worker:lease_acquired_late',
+        eventId,
+      });
+    }
+    return true;
+  }
+
+  // First moment this lease was observed as unknown — the anchor for the
+  // unknown grace TTL (see lifecycleService). Null until the first annotation.
+  // Anchored to the LAST alive observation (codex S1b R1 #3): a recovery must
+  // reset the grace clock, or a transient outage months ago strips every later
+  // unknown of its grace and terminalizes it instantly.
+  function ownerProbeUnknownSince(runId, leaseId) {
+    const row = stmts.ownerProbeUnknownSince.get(runId, leaseId, runId, leaseId);
+    return row ? row.created_at : null;
+  }
+
+  // Recovery marker: written only when an unknown annotation exists after the
+  // previous alive marker, so a healthy lease is not spammed every poll.
+  function annotateOwnerProbeAlive(runId, leaseId) {
+    try {
+      if (!stmts.runRowExists.get(runId)) return false;
+      if (!stmts.hasOwnerProbeAliveAfterUnknown.get(runId, leaseId, runId, leaseId)) return false;
+      stmts.insertEvent.run(runId, 'worker:lease_probe_alive', JSON.stringify({ lease_id: leaseId }));
+      return true;
+    } catch { return false; }
+  }
+
+  function annotateOwnerProbeUnknown(runId, leaseId) {
+    const eventId = annotateOwnerProbeUnknownTx(runId, leaseId);
+    if (eventId === null) return false;
+    if (eventBus) {
+      eventBus.emit('run:event', {
+        runId,
+        eventType: 'worker:lease_probe_unknown',
+        eventId,
+      });
+    }
+    return true;
   }
 
   function releaseOwner(runId, leaseId, options = {}, legacyOptions = {}) {
@@ -2132,7 +2348,8 @@ function createRunService(db, eventBus) {
     getOldestMaterializableOnNode,
     countMaterializingOnNode, countMaterializingGlobal,
     claimQueuedRun, claimQueuedRunForMaterialization, restartMaterializationAttempt,
-    getHeldLease, releaseOwner,
+    getHeldLease, listHeldOwnerLeases, recordOwnerEngine,
+    acquireOwnerLeaseLate, annotateOwnerProbeUnknown, annotateOwnerProbeAlive, ownerProbeUnknownSince, releaseOwner,
     markMaterializePending, updateRunMaterialized, markMaterializedReady,
     getProjectNodeWorkspace, markProjectNodeWorkspaceReady, markProjectNodeWorkspaceFailed,
     touchProjectNodeWorkspace, acquireMaterializationLease, touchMaterializationLease, releaseMaterializationLease,

@@ -512,6 +512,11 @@ test('restart preserves a completed remote worker result before capability revoc
   assert.equal(h.runService.getRun(run.id).status, 'completed');
   assert.equal(h.runService.getRun(run.id).exit_code, 0);
   assert.equal(h.taskService.getTask(task.id).status, 'review');
+  // codex S1b R8: this recovery confirmed death from the recorded exit and
+  // killed (destroying the sentinel) — it must close the lease it holds the
+  // evidence for, or the lease is permanently held.
+  const lease = db.prepare('SELECT state FROM run_owner_leases WHERE run_id = ?').get(run.id);
+  assert.equal(lease.state, 'released');
 });
 
 test('restart recovery emits the dedicated needs_input alert for a detached Claude limit', async (t) => {
@@ -876,7 +881,7 @@ test('an unresolved uncertain spawn survives the health check that would otherwi
   );
 });
 
-test('an uncertain spawn that never produces an owner expires instead of holding the slot', async (t) => {
+test('an uncertain spawn without durable dead evidence terminalizes after the grace TTL but keeps its lease held', async (t) => {
   const db = await mkdb(t);
   const remoteChannel = makeRemoteChannel({ alive: false, exitCode: null });
   remoteChannel.spawnWorker = async (runId, payload) => {
@@ -887,9 +892,10 @@ test('an uncertain spawn that never produces an owner expires instead of holding
     err.sessionName = `palantir-run-${runId}`;
     throw err;
   };
-  // Nothing else reaps this state — not the materialization sweep, not the
-  // startup artifact sweep, not remote housekeeping. Without the TTL the run
-  // would sit in `running` (and occupy a worker slot) until a human cancelled it.
+  // §8.2 C8 + grace TTL: session absence without an exit sentinel is unknown,
+  // held for ONE grace window; after it the legacy terminal rules apply so the
+  // slot is not held forever — but the LEASE stays held (owner unconfirmed),
+  // so requeue keeps 409ing.
   let clock = Date.now();
   const h = buildHarness(db, { remoteChannel, lifecycleOptions: { now: () => clock } });
   createSshNode(h.nodeService);
@@ -909,15 +915,24 @@ test('an uncertain spawn that never produces an owner expires instead of holding
   assert.equal(h.runService.getRun(run.id).status, 'running', 'still inside the window');
 
   clock += 11 * 60 * 1000;
+  // First post-TTL check starts the unknown grace clock (annotation), second
+  // check after the grace window terminalizes.
+  await h.lifecycleService.checkHealth();
+  clock += 11 * 60 * 1000;
   await h.lifecycleService.checkHealth();
   assert.notEqual(
     h.runService.getRun(run.id).status,
     'running',
-    'a pane that never appeared must stop suppressing terminalize',
+    'a pane that never appeared must stop suppressing terminalize after the grace TTL',
+  );
+  assert.equal(
+    h.runService.getHeldLease(run.id).state,
+    'held',
+    'the owner was never confirmed dead — the lease must survive terminalization',
   );
 });
 
-test('an uncertain spawn is released once its remote owner is actually observed', async (t) => {
+test('a confirmed remote owner that later vanishes without a sentinel terminalizes after the grace TTL', async (t) => {
   const db = await mkdb(t);
   let alive = false;
   const remoteChannel = makeRemoteChannel();
@@ -934,7 +949,8 @@ test('an uncertain spawn is released once its remote owner is actually observed'
     err.sessionName = `palantir-run-${runId}`;
     throw err;
   };
-  const h = buildHarness(db, { remoteChannel });
+  let clock = Date.now();
+  const h = buildHarness(db, { remoteChannel, lifecycleOptions: { now: () => clock } });
   createSshNode(h.nodeService);
   const profile = seedProfile(db, { command: 'claude' });
   const project = h.projectService.createProject({
@@ -959,14 +975,16 @@ test('an uncertain spawn is released once its remote owner is actually observed'
   );
   assert.equal(h.runService.getRun(run.id).status, 'running');
 
-  // Resolved uncertainty means the ordinary terminal rules apply again.
+  // A prior alive observation does not turn later absence into durable death —
+  // the run holds through the grace window, then terminalizes with the lease
+  // still held (owner unconfirmed).
   alive = false;
   await h.lifecycleService.checkHealth();
-  assert.notEqual(
-    h.runService.getRun(run.id).status,
-    'running',
-    'a confirmed owner that later disappears must terminalize normally',
-  );
+  assert.equal(h.runService.getRun(run.id).status, 'running', 'within the grace window');
+  clock += 11 * 60 * 1000;
+  await h.lifecycleService.checkHealth();
+  assert.notEqual(h.runService.getRun(run.id).status, 'running', 'after the grace window');
+  assert.equal(h.runService.getHeldLease(run.id).state, 'held');
 });
 
 test('remote claude preset version gate probes the selected SSH node', async (t) => {
@@ -1114,7 +1132,7 @@ test('remote claude rejects isolated preset assets before resolving controller a
 
 test('async remote health completes a run when detectExitCode resolves zero', async (t) => {
   const db = await mkdb(t);
-  const remoteChannel = makeRemoteChannel({ alive: true, exitCode: 0, output: 'done' });
+  const remoteChannel = makeRemoteChannel({ alive: false, exitCode: 0, output: 'done' });
   const h = buildHarness(db, { remoteChannel });
   createSshNode(h.nodeService);
   const profile = seedProfile(db);
@@ -1140,10 +1158,11 @@ test('async remote health completes a run when detectExitCode resolves zero', as
   assert.equal(remoteChannel.killed.length, 1);
 });
 
-test('async remote health handles dead process with unresolved exit code', async (t) => {
+test('a legacy run without a lease keeps the immediate terminal behavior', async (t) => {
   const db = await mkdb(t);
   const remoteChannel = makeRemoteChannel({ alive: false, exitCode: null, output: '' });
-  const h = buildHarness(db, { remoteChannel });
+  let clock = Date.now();
+  const h = buildHarness(db, { remoteChannel, lifecycleOptions: { now: () => clock } });
   createSshNode(h.nodeService);
   const profile = seedProfile(db);
   const project = h.projectService.createProject({
@@ -1160,10 +1179,12 @@ test('async remote health handles dead process with unresolved exit code', async
   });
   h.runService.markRunStarted(run.id, { tmux_session: `remote-${run.id}` });
 
+  // This run was created WITHOUT a claim, so it has no owner lease — the
+  // pre-S1a world. The unknown grace protects leases; a lease-less legacy run
+  // keeps the original immediate-terminal behavior, unchanged.
+  assert.equal(h.runService.getHeldLease(run.id), null, 'precondition: no lease');
   await h.lifecycleService.checkHealth();
-
-  assert.equal(h.runService.getRun(run.id).status, 'failed');
-  assert.equal(remoteChannel.killed.length, 1);
+  assert.equal(h.runService.getRun(run.id).status, 'failed', 'legacy behavior preserved');
 });
 
 test('detached remote Claude health restores structured result, usage, and events', async (t) => {
@@ -1546,3 +1567,72 @@ test('detached remote Claude max_turns remains needs_input after later health ti
     'the marker sits beyond the legacy oldest-first 1,000-event window',
   );
 });
+
+test('boot housekeeping releases a dead lease before reaping the sentinel dir', async (t) => {
+  // codex S1b R1 #4: the boot reap deleted the remote status dir — exit
+  // sentinel included — without releasing the held lease first. With the only
+  // durable dead evidence gone, the sweep could only ever say unknown and the
+  // lease stayed held forever (a permanent slot under the capacity flag).
+  const db = await mkdb(t);
+  const remoteChannel = makeRemoteChannel({ alive: false, exitCode: 1 });
+  const cleanupCalls = [];
+  remoteChannel.cleanupRun = async (runId) => { cleanupCalls.push(runId); };
+  const h = buildHarness(db, { remoteChannel });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db);
+  const project = h.projectService.createProject({
+    name: 'ReapProject', directory: '/workspace/project', node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = h.runService.createRun({
+    task_id: task.id, agent_profile_id: profile.id, prompt: 'reap', node_id: 'ssh-pod',
+  });
+  const claim = h.runService.claimQueuedRun(run.id, { withLease: true });
+  db.prepare("UPDATE run_owner_leases SET engine = 'remote' WHERE run_id = ?").run(run.id);
+  // The run actually spawned (acquired), then finished — a reserved lease's
+  // sentinel evidence is deliberately distrusted, so this fixture must model
+  // the real spawn path.
+  h.runService.markRunStarted(run.id, claim.leaseId, { tmux_session: `palantir-run-${run.id}` });
+  h.runService.updateRunStatus(run.id, 'completed', { force: true });
+  h.runService.addRunEvent(run.id, 'harvest:diff', JSON.stringify({ ok: true }));
+
+  await h.lifecycleService.recoverOrphanSessions();
+
+  assert.deepEqual(cleanupCalls, [run.id], 'the reap must still run');
+  const lease = db.prepare('SELECT state, lease_id FROM run_owner_leases WHERE run_id = ?').get(run.id);
+  assert.equal(lease.state, 'released', 'the dead lease must be released before the evidence is destroyed');
+  assert.equal(lease.lease_id, claim.leaseId);
+});
+
+test('boot housekeeping refuses to reap while the owner is not confirmed dead', async (t) => {
+  // codex S1b R2 #1: reaping an alive/unknown owner's status dir destroys
+  // where its exit sentinel WILL be written — permanent unknown. The reap must
+  // skip and leave the dir for a later boot or the sweep.
+  const db = await mkdb(t);
+  const remoteChannel = makeRemoteChannel({ alive: true, exitCode: null });
+  const cleanupCalls = [];
+  remoteChannel.cleanupRun = async (runId) => { cleanupCalls.push(runId); };
+  const h = buildHarness(db, { remoteChannel });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db);
+  const project = h.projectService.createProject({
+    name: 'ReapAliveProject', directory: '/workspace/project', node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = h.runService.createRun({
+    task_id: task.id, agent_profile_id: profile.id, prompt: 'reap-alive', node_id: 'ssh-pod',
+  });
+  h.runService.claimQueuedRun(run.id, { withLease: true });
+  db.prepare("UPDATE run_owner_leases SET engine = 'remote' WHERE run_id = ?").run(run.id);
+  h.runService.updateRunStatus(run.id, 'completed', { force: true });
+  h.runService.addRunEvent(run.id, 'harvest:diff', JSON.stringify({ ok: true }));
+
+  await h.lifecycleService.recoverOrphanSessions();
+
+  assert.deepEqual(cleanupCalls, [], 'an unconfirmed owner blocks the reap');
+  assert.equal(
+    db.prepare('SELECT state FROM run_owner_leases WHERE run_id = ?').get(run.id).state,
+    'held',
+  );
+});
+

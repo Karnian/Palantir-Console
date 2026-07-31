@@ -129,6 +129,7 @@ test('claim creates one reserved lease atomically and markRunStarted acquires it
     run_id: 'claim-winner',
     lease_id: claim.leaseId,
     state: 'held',
+    engine: null,
     acquired_at: null,
     terminal_observed_at: null,
     closed_at: null,
@@ -292,9 +293,13 @@ test('local subprocess exit releases its acquired lease exactly once', async (t)
 test('tmux spawn receives no deterministic exit callback and keeps its lease held', async (t) => {
   const db = await mkdb(t);
   const spawned = [];
+  let engineAtSpawn = null;
   const tmuxEngine = {
     type: 'tmux',
     spawnAgent(runId, spec) {
+      engineAtSpawn = db.prepare(
+        'SELECT engine FROM run_owner_leases WHERE run_id = ? AND state = \'held\'',
+      ).get(runId)?.engine;
       spawned.push({ runId, spec });
       return { sessionName: `palantir-run-${runId}` };
     },
@@ -314,6 +319,8 @@ test('tmux spawn receives no deterministic exit callback and keeps its lease hel
   assert.equal(Object.hasOwn(spawned[0].spec, 'onExit'), false);
   const lease = h.runService.getHeldLease(run.id);
   assert.equal(lease.state, 'held');
+  assert.equal(engineAtSpawn, 'tmux', 'engine identity is durable before spawn is called');
+  assert.equal(lease.engine, 'tmux');
   assert.ok(lease.acquired_at);
   assert.equal(ownerEvents(db, run.id).length, 0);
 });
@@ -338,6 +345,54 @@ test('deleteRun abandons a held lease with run_deleted evidence before deleting 
   assert.equal(lease.lease_id, leaseId);
   assert.equal(lease.state, 'abandoned');
   assert.ok(lease.closed_at);
+});
+
+test('lease capacity is opt-in and preserves the legacy running-status counts when off', async (t) => {
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const prior = process.env.PALANTIR_LEASE_CAPACITY;
+  t.after(() => {
+    if (prior === undefined) delete process.env.PALANTIR_LEASE_CAPACITY;
+    else process.env.PALANTIR_LEASE_CAPACITY = prior;
+  });
+
+  db.prepare(`
+    INSERT INTO agent_profiles (
+      id, name, type, command, capabilities_json, env_allowlist, max_concurrent
+    ) VALUES ('capacity-profile', 'Capacity', 'codex', 'codex', '{}', '[]', 5)
+  `).run();
+  db.prepare(`
+    INSERT INTO nodes (id, name, kind, can_execute, reachable)
+    VALUES (?, ?, 'local', 1, 1)
+  `).run('node-a', 'Node A');
+  db.prepare(`
+    INSERT INTO nodes (id, name, kind, can_execute, reachable)
+    VALUES (?, ?, 'local', 1, 1)
+  `).run('node-b', 'Node B');
+  const insert = db.prepare(`
+    INSERT INTO runs (id, status, is_manager, prompt, agent_profile_id, node_id)
+    VALUES (?, ?, ?, 'capacity', 'capacity-profile', ?)
+  `);
+  insert.run('status-running', 'running', 0, 'node-a');
+  insert.run('lease-paused', 'paused', 0, 'node-a');
+  insert.run('lease-other-node', 'completed', 0, 'node-b');
+  insert.run('lease-manager', 'running', 1, 'node-a');
+  for (const runId of ['lease-paused', 'lease-other-node', 'lease-manager']) {
+    db.prepare(`
+      INSERT INTO run_owner_leases (run_id, lease_id, state, engine, acquired_at)
+      VALUES (?, ?, 'held', 'tmux', datetime('now'))
+    `).run(runId, `lease-${runId}`);
+  }
+
+  delete process.env.PALANTIR_LEASE_CAPACITY;
+  assert.equal(runService.countRunning('capacity-profile'), 1);
+  assert.equal(runService.countRunningOnNode('node-a', 'capacity-profile'), 1);
+  assert.equal(runService.countRunningTotalOnNode('node-a'), 1);
+
+  process.env.PALANTIR_LEASE_CAPACITY = '1';
+  assert.equal(runService.countRunning('capacity-profile'), 2);
+  assert.equal(runService.countRunningOnNode('node-a', 'capacity-profile'), 1);
+  assert.equal(runService.countRunningTotalOnNode('node-a'), 1);
 });
 
 test('migration backfills only active workers as reserved leases', async () => {

@@ -61,7 +61,10 @@ function makeStubExecutionEngine({ alive = true, exitCode = null, output = '' } 
     sendInput(runId, text) { inputs.push({ runId, text }); return true; },
     kill(runId) { killed.push(runId); },
     discoverGhostSessions() { return []; },
-    hasProcess(runId) { return false; },
+    hasProcess(runId) { return spawned.some((entry) => entry.runId === runId); },
+    listSessions() {
+      return spawned.map(({ runId }) => ({ runId, name: `subprocess-${runId}` }));
+    },
   };
 }
 
@@ -773,7 +776,7 @@ test('checkHealth: nonzero exit code transitions a dead run to failed', async (t
   assert.equal(after.result_summary, 'Agent exited with code 9');
 });
 
-test('checkHealth: dead run with unknown exit code fails closed with an explicit reason', async (t) => {
+test('checkHealth: no exit evidence is unknown and preserves the running owner', async (t) => {
   const db = await mkdb(t);
   const eventBus = createEventBus();
   const rs = createRunService(db, eventBus);
@@ -800,14 +803,12 @@ test('checkHealth: dead run with unknown exit code fails closed with an explicit
   await lc.checkHealth();
 
   const after = rs.getRun(run.id);
-  assert.equal(after.status, 'failed');
+  assert.equal(after.status, 'running');
   assert.equal(after.exit_code, null);
   assert.equal(after.result_summary, null);
-  assert.ok(statusEvents.some((event) => (
-    event.run.id === run.id
-    && event.to_status === 'failed'
-    && event.reason === 'agent-exit-unknown'
-  )));
+  assert.equal(statusEvents.length, 0);
+  assert.equal(rs.getHeldLease(run.id).state, 'held');
+  assert.equal(execEngine.killed.includes(run.id), false);
 });
 
 test('checkHealth: unknown exit preserves previously persisted result and usage', async (t) => {
@@ -844,17 +845,14 @@ test('checkHealth: unknown exit preserves previously persisted result and usage'
   await lc.checkHealth();
 
   const after = rs.getRun(run.id);
-  assert.equal(after.status, 'failed');
+  assert.equal(after.status, 'running');
   assert.equal(after.result_summary, 'Persisted stream-json result');
   assert.equal(after.exit_code, 0);
   assert.equal(after.input_tokens, 123);
   assert.equal(after.output_tokens, 456);
   assert.equal(after.cost_usd, 0.789);
-  assert.ok(statusEvents.some((event) => (
-    event.run.id === run.id
-    && event.to_status === 'failed'
-    && event.reason === 'agent-exit-unknown'
-  )));
+  assert.equal(statusEvents.length, 0);
+  assert.equal(rs.getHeldLease(run.id).state, 'held');
 });
 
 test('checkHealth: alive run with unknown exit code remains running', async (t) => {
@@ -1168,6 +1166,9 @@ for (const [initial, during, expected] of [
     });
 
     const pending = lc.cancelRun(run.id);
+    // S1b settles the lease (async probe) BEFORE the kill, so the engine's
+    // kill() — and our injected release hook — arrives one tick later.
+    await new Promise((resolve) => setImmediate(resolve));
     // The window: health re-parks or resumes the run while kill() is in flight.
     rs.updateRunStatus(run.id, during, {
       force: true,

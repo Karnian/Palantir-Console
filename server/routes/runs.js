@@ -510,7 +510,16 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
   router.delete('/:id', asyncHandler(async (req, res) => {
     // Kill any running process before deleting
     const run = runService.getRun(req.params.id);
-    if (['running', 'queued', 'needs_input'].includes(run.status)) {
+    const heldLease = typeof runService.getHeldLease === 'function'
+      ? runService.getHeldLease(req.params.id)
+      : null;
+    if (heldLease) {
+      if (lifecycleService && typeof lifecycleService.killRunOwner === 'function') {
+        try { await lifecycleService.killRunOwner(req.params.id); } catch {}
+      } else if (executionEngine) {
+        try { executionEngine.kill(req.params.id); } catch {}
+      }
+    } else if (['running', 'queued', 'needs_input'].includes(run.status)) {
       if (lifecycleService) {
         try { await lifecycleService.cancelRun(req.params.id); } catch {}
       } else if (executionEngine) {

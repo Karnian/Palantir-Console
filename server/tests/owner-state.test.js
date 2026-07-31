@@ -1,0 +1,458 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+
+const { createDatabase } = require('../db/database');
+const { createEventBus } = require('../services/eventBus');
+const { createRunService } = require('../services/runService');
+const { createTaskService } = require('../services/taskService');
+const { createProjectService } = require('../services/projectService');
+const { createAgentProfileService } = require('../services/agentProfileService');
+const { createLifecycleService } = require('../services/lifecycleService');
+const { createLocalWorkerChannel } = require('../services/nodeExecutor');
+
+async function mkdb(t) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-owner-state-'));
+  const database = createDatabase(path.join(dir, 'test.db'));
+  database.migrate();
+  t.after(async () => {
+    try { database.close(); } catch { /* ignore */ }
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  return database.db;
+}
+
+function makeEngine({ type = 'tmux', alive = true, exitCode = null, onKill } = {}) {
+  const spawned = new Set();
+  const killed = [];
+  let aliveState = alive;
+  let exitCodeState = exitCode;
+  return {
+    type,
+    killed,
+    spawnAgent(runId) {
+      spawned.add(runId);
+      return { sessionName: type === 'tmux' ? `palantir-run-${runId}` : `subprocess-${runId}` };
+    },
+    hasProcess(runId) { return type === 'subprocess' && spawned.has(runId); },
+    listSessions() {
+      return [...spawned].map((runId) => ({
+        runId,
+        name: type === 'tmux' ? `palantir-run-${runId}` : `subprocess-${runId}`,
+      }));
+    },
+    isAlive() { return aliveState; },
+    detectExitCode() { return exitCodeState; },
+    setAlive(value) { aliveState = value; },
+    setExitCode(value) { exitCodeState = value; },
+    getOutput() { return ''; },
+    sendInput() { return false; },
+    kill(runId) {
+      killed.push(runId);
+      if (onKill) onKill(runId);
+      spawned.delete(runId);
+      return true;
+    },
+    discoverGhostSessions() { return []; },
+  };
+}
+
+function createHarness(db, executionEngine, eventBus = createEventBus()) {
+  const runService = createRunService(db, eventBus);
+  const taskService = createTaskService(db);
+  const projectService = createProjectService(db);
+  const agentProfileService = createAgentProfileService(db);
+  const project = projectService.createProject({ name: `Owner state ${Math.random()}` });
+  const task = taskService.createTask({ project_id: project.id, title: 'Probe owner' });
+  const profileId = `owner-state-${Math.random().toString(36).slice(2)}`;
+  db.prepare(`
+    INSERT INTO agent_profiles (
+      id, name, type, command, args_template, capabilities_json,
+      env_allowlist, max_concurrent
+    ) VALUES (?, 'Owner State', 'codex', 'codex', '', '{}', '[]', 5)
+  `).run(profileId);
+  const lifecycleService = createLifecycleService({
+    runService,
+    taskService,
+    projectService,
+    agentProfileService,
+    executionEngine,
+    streamJsonEngine: null,
+    worktreeService: null,
+    eventBus,
+  });
+  return { runService, lifecycleService, task, profileId };
+}
+
+async function spawnWorker(h) {
+  const run = h.runService.createRun({
+    task_id: h.task.id,
+    agent_profile_id: h.profileId,
+    prompt: 'probe me',
+    queued_args: {},
+  });
+  return h.lifecycleService.spawnQueuedRun(run.id);
+}
+
+test('engineFor routes an attached engine without claiming that a missing handle is alive', async () => {
+  const channel = createLocalWorkerChannel({
+    executionEngine: {
+      type: 'subprocess',
+      hasProcess() { return false; },
+      isAlive() { return false; },
+      detectExitCode() { return null; },
+      listSessions() { return []; },
+    },
+  });
+
+  assert.equal(channel.engineFor('restarted-run', 'subprocess'), 'cli');
+  assert.equal(await channel.ownerState('restarted-run', 'subprocess'), 'unknown');
+});
+
+test('dead evidence still falls through to terminalization after ownership routing is split', async (t) => {
+  const db = await mkdb(t);
+  const engine = makeEngine({ type: 'tmux', alive: true });
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+  engine.setAlive(false);
+  engine.setExitCode(0);
+
+  await h.lifecycleService.checkHealth();
+
+  assert.equal(h.runService.getRun(run.id).status, 'completed');
+});
+
+test('unknown owner evidence holds status, lease, and cleanup and annotates once per lease', async (t) => {
+  const db = await mkdb(t);
+  const engine = makeEngine({ type: 'subprocess', alive: false, exitCode: null });
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+  // Simulate a controller restart: the subprocess handle is not durable.
+  engine.kill(run.id);
+  engine.killed.length = 0;
+
+  await h.lifecycleService.checkHealth();
+  await h.lifecycleService.checkHealth();
+
+  assert.equal(h.runService.getRun(run.id).status, 'running');
+  assert.equal(h.runService.getHeldLease(run.id).state, 'held');
+  assert.deepEqual(engine.killed, []);
+  assert.equal(
+    h.runService.getRunEvents(run.id)
+      .filter((event) => event.event_type === 'worker:lease_probe_unknown').length,
+    1,
+  );
+});
+
+test('held-lease sweep releases a draining tmux lease from its durable exit sentinel', async (t) => {
+  const db = await mkdb(t);
+  const engine = makeEngine({ type: 'tmux', alive: true });
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+  h.runService.updateRunStatus(run.id, 'completed', { force: true });
+  engine.setAlive(false);
+  engine.setExitCode(0);
+
+  await h.lifecycleService.checkHealth();
+
+  const lease = db.prepare('SELECT * FROM run_owner_leases WHERE run_id = ?').get(run.id);
+  assert.equal(h.runService.getRun(run.id).status, 'completed', 'the lease sweep never writes run status');
+  assert.equal(lease.state, 'released');
+  assert.equal(lease.evidence, 'probe:dead');
+});
+
+test('terminal health handling closes the lease in the same pass that destroys the evidence', async (t) => {
+  // Contract evolution: R1 required release BEFORE the kill so the sweep never
+  // depended on a destroyed sentinel. R7 flipped the order (kill first) so a
+  // release cannot lift the requeue 409 and let generation B spawn into the
+  // kill — the ESSENCE survives both orders: the block that destroys the dead
+  // evidence must itself close the lease, never deferring to the sweep. The
+  // narrow kill→release crash window degrades to a held lease that S3's
+  // abandonment path owns (capacity flag is off by default).
+  const db = await mkdb(t);
+  let leaseStateAtKill = null;
+  const engine = makeEngine({
+    type: 'tmux',
+    alive: true,
+    onKill(runId) {
+      leaseStateAtKill = db.prepare(
+        'SELECT state FROM run_owner_leases WHERE run_id = ?',
+      ).get(runId)?.state;
+      engine.setExitCode(null); // the kill destroys the sentinel
+    },
+  });
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+  engine.setAlive(false);
+  engine.setExitCode(0);
+
+  await h.lifecycleService.checkHealth();
+
+  assert.equal(leaseStateAtKill, 'held', 'the kill goes first — our generation is write-confirmed');
+  assert.equal(h.runService.getHeldLease(run.id), null, 'the same pass still closes the lease');
+  assert.equal(
+    db.prepare('SELECT state FROM run_owner_leases WHERE run_id = ?').get(run.id).state,
+    'released',
+  );
+});
+
+test('reserved alive leases are acquired late exactly once without changing run status', async (t) => {
+  const db = await mkdb(t);
+  const engine = makeEngine({ type: 'tmux', alive: true });
+  const h = createHarness(db, engine);
+  const run = h.runService.createRun({
+    task_id: h.task.id,
+    agent_profile_id: h.profileId,
+    prompt: 'reserved',
+  });
+  const claim = h.runService.claimQueuedRun(run.id, { withLease: true });
+  h.runService.recordOwnerEngine(run.id, claim.leaseId, 'tmux');
+
+  await h.lifecycleService.checkHealth();
+  await h.lifecycleService.checkHealth();
+
+  assert.ok(h.runService.getHeldLease(run.id).acquired_at);
+  assert.equal(h.runService.getRun(run.id).status, 'running');
+  assert.equal(
+    h.runService.getRunEvents(run.id)
+      .filter((event) => event.event_type === 'worker:lease_acquired_late').length,
+    1,
+  );
+});
+
+// --- codex S1b adversarial round 1 -----------------------------------------
+
+test('a finished worker inside a surviving tmux shell is dead, not alive', async (t) => {
+  // codex R1 #1: session existence was checked before the exit sentinel, so a
+  // worker that wrote its exit code and terminated — while the surrounding
+  // tmux shell lived on — read as `alive` forever: running status, held lease,
+  // no terminalization.
+  const db = await mkdb(t);
+  const engine = makeEngine({ type: 'tmux', alive: true, exitCode: null });
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+
+  // Worker finishes and records its exit; the tmux shell is still present.
+  engine.setExitCode(0);
+
+  await h.lifecycleService.checkHealth();
+
+  assert.equal(h.runService.getRun(run.id).status, 'completed', 'the recorded exit code wins over the shell');
+  const lease = db.prepare('SELECT state FROM run_owner_leases WHERE run_id = ?').get(run.id);
+  assert.equal(lease.state, 'released');
+});
+
+test('a stream-json lease with an expired unknown grace still terminalizes', async (t) => {
+  // codex R1 #2: the stream-json branch handled dead only and continued on
+  // expired unknown — after a restart wipes the process map nothing else would
+  // ever terminalize the run.
+  const db = await mkdb(t);
+  const engine = makeEngine({ type: 'subprocess', alive: false, exitCode: null });
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+  // Simulate the restart: durable identity says stream-json, no handle exists.
+  db.prepare("UPDATE run_owner_leases SET engine = 'stream-json' WHERE run_id = ?").run(run.id);
+  engine.hasProcess = () => false;
+  const lease = db.prepare('SELECT lease_id FROM run_owner_leases WHERE run_id = ?').get(run.id);
+  // Expired anchor: backdate the first unknown annotation past the TTL.
+  h.runService.annotateOwnerProbeUnknown(run.id, lease.lease_id);
+  db.prepare(`
+    UPDATE run_events SET created_at = datetime('now', '-11 minutes')
+    WHERE run_id = ? AND event_type = 'worker:lease_probe_unknown'
+  `).run(run.id);
+
+  await h.lifecycleService.checkHealth();
+
+  assert.equal(h.runService.getRun(run.id).status, 'failed', 'expired unknown must terminalize stream-json too');
+  assert.equal(
+    db.prepare('SELECT state FROM run_owner_leases WHERE run_id = ?').get(run.id).state,
+    'held',
+    'no dead evidence — the lease stays held',
+  );
+});
+
+test('an alive recovery resets the unknown grace anchor', async (t) => {
+  // codex R1 #3: the anchor kept the FIRST unknown forever, so a transient
+  // outage long ago stripped every later unknown of its grace.
+  const db = await mkdb(t);
+  const runService = createRunService(db, createEventBus());
+  db.prepare(`
+    INSERT INTO runs (id, status, is_manager, prompt) VALUES ('anchor-run', 'queued', 0, 'p')
+  `).run();
+  const claim = runService.claimQueuedRun('anchor-run', { withLease: true });
+
+  // First unknown, long ago.
+  runService.annotateOwnerProbeUnknown('anchor-run', claim.leaseId);
+  db.prepare(`
+    UPDATE run_events SET created_at = datetime('now', '-2 hours')
+    WHERE run_id = 'anchor-run' AND event_type = 'worker:lease_probe_unknown'
+  `).run();
+  // Recovery: alive marker resets the window.
+  assert.equal(runService.annotateOwnerProbeAlive('anchor-run', claim.leaseId), true);
+  // A healthy lease is not spammed with markers on every poll.
+  assert.equal(runService.annotateOwnerProbeAlive('anchor-run', claim.leaseId), false);
+
+  // New transient unknown: the anchor must be NOW, not two hours ago.
+  assert.equal(runService.ownerProbeUnknownSince('anchor-run', claim.leaseId), null);
+  runService.annotateOwnerProbeUnknown('anchor-run', claim.leaseId);
+  const since = runService.ownerProbeUnknownSince('anchor-run', claim.leaseId);
+  assert.ok(since, 'a fresh unknown after recovery re-anchors');
+  const ageMs = Date.now() - Date.parse(`${since.replace(' ', 'T')}Z`);
+  assert.ok(ageMs < 60_000, `the anchor must be fresh, got ${Math.round(ageMs / 1000)}s old`);
+});
+
+test('cancel settles the lease before the kill destroys the evidence', async (t) => {
+  // codex R1 #5: cancelRun killed first (tmux kill removes the exit sentinel)
+  // and never settled the lease — cancelled/held forever, blocking requeue and
+  // (flag on) a capacity slot.
+  const db = await mkdb(t);
+  const order = [];
+  const engine = makeEngine({ type: 'tmux', alive: true, exitCode: null, onKill: () => order.push('kill') });
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+
+  await h.lifecycleService.cancelRun(run.id);
+
+  const lease = db.prepare('SELECT state, evidence FROM run_owner_leases WHERE run_id = ?').get(run.id);
+  assert.equal(lease.state, 'abandoned', 'an unverifiable kill is abandonment, not release');
+  assert.equal(lease.evidence, 'cancel_kill');
+  assert.deepEqual(order, ['kill'], 'the kill still happens, after the settle');
+  assert.equal(h.runService.getRun(run.id).status, 'cancelled');
+});
+
+
+test('a refused cancel kill leaves the lease held for the sweep', async (t) => {
+  // codex R2 #2: abandoning before the kill was accepted returned capacity
+  // while a live owner might still run. A refused kill must not settle the
+  // lease — the sweep and grace TTL own it from there.
+  const db = await mkdb(t);
+  const engine = makeEngine({ type: 'tmux', alive: true, exitCode: null });
+  engine.kill = () => false; // the channel refuses
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+
+  await h.lifecycleService.cancelRun(run.id);
+
+  const lease = db.prepare('SELECT state FROM run_owner_leases WHERE run_id = ?').get(run.id);
+  assert.equal(lease.state, 'held', 'a refused kill must not close the lease');
+  assert.equal(h.runService.getRun(run.id).status, 'cancelled', 'the status contract is unchanged');
+});
+
+test('a dead observation made before a reclaim cannot close the next generation', async (t) => {
+  // codex R3: releaseDeadOwner re-read the CURRENT held lease, so observation A
+  // (probed before a reclaim) closed generation B's lease as probe:dead. The
+  // caller now threads the lease it probed; the CAS loses on the stale id.
+  const db = await mkdb(t);
+  const engine = makeEngine({ type: 'tmux', alive: true, exitCode: null });
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+  const genA = db.prepare("SELECT lease_id FROM run_owner_leases WHERE run_id = ? AND state = 'held'")
+    .get(run.id).lease_id;
+
+  // The worker recorded its exit: the next health pass probes DEAD (gen A).
+  engine.setExitCode(1);
+  // Inject the reclaim in the window between the probe and the release: the
+  // terminal block calls detectExitCode again before releasing, and that is
+  // exactly where a reclaim can land in production.
+  let genB = null;
+  const origDetect = engine.detectExitCode;
+  let armed = true;
+  engine.detectExitCode = (...args) => {
+    if (armed && genB === null) {
+      armed = false;
+      // Supersede A: close it as a reclaim would, requeue, claim generation B.
+      db.prepare("UPDATE runs SET status = 'queued' WHERE id = ?").run(run.id);
+      genB = h.runService.claimQueuedRun(run.id, { withLease: true });
+      db.prepare("UPDATE runs SET status = 'running' WHERE id = ?").run(run.id);
+    }
+    return origDetect(...args);
+  };
+
+  await h.lifecycleService.checkHealth();
+
+  assert.ok(genB && genB.leaseId, 'the reclaim happened inside the window');
+  const leaseB = db.prepare('SELECT state FROM run_owner_leases WHERE lease_id = ?').get(genB.leaseId);
+  assert.equal(
+    leaseB.state,
+    'held',
+    "generation A's dead observation must not close generation B's lease",
+  );
+  // codex R4: the release CAS is not enough — the STATUS write and the kill in
+  // the same block were generation-blind. A's observation must not terminalize
+  // or kill B's run either.
+  assert.equal(
+    h.runService.getRun(run.id).status,
+    'running',
+    "generation A's observation must not terminalize generation B's run",
+  );
+  assert.equal(engine.killed.length, 0, "generation A must not kill generation B's worker");
+});
+
+test('the idle recheck releases the generation it re-probed', async (t) => {
+  // codex R5: the idle block re-probed currentLease but released the
+  // pass-entry lease — one generation behind after a reclaim inside the pass,
+  // so the release lost its CAS after the kill destroyed the evidence and the
+  // current lease stayed held forever.
+  const db = await mkdb(t);
+  const engine = makeEngine({ type: 'subprocess', alive: true, exitCode: null });
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+
+  // Park activity far in the past so the second health pass enters the idle
+  // branch; the idle recheck then observes the dead process.
+  await h.lifecycleService.checkHealth();
+  db.prepare(`UPDATE run_events SET created_at = datetime('now', '-31 minutes') WHERE run_id = ?`).run(run.id);
+  db.prepare(`UPDATE runs SET started_at = datetime('now', '-31 minutes') WHERE id = ?`).run(run.id);
+  engine.setAlive(false);
+  engine.setExitCode(1);
+
+  await h.lifecycleService.checkHealth();
+
+  const lease = db.prepare('SELECT state FROM run_owner_leases WHERE run_id = ?').get(run.id);
+  assert.equal(lease.state, 'released', 'the re-probed generation must be the one released');
+});
+
+test('a reclaim inside the terminal block awaits cannot fail the new generation', async (t) => {
+  // codex R6: every check-then-act guard left an await window (getOutput,
+  // detached-result parse). The terminal WRITE itself is now conditioned on the
+  // probed lease still being held (SQL EXISTS), so any interleaving loses
+  // atomically at write time.
+  const db = await mkdb(t);
+  const engine = makeEngine({ type: 'tmux', alive: true, exitCode: null });
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+
+  engine.setExitCode(1); // dead evidence for generation A
+  // Inject the reclaim inside the terminal block's output await — after the
+  // probe, after the pre-write guard, before the write.
+  const origGetOutput = engine.getOutput;
+  let genB = null;
+  engine.getOutput = (...args) => {
+    if (genB === null) {
+      db.prepare("UPDATE runs SET status = 'queued' WHERE id = ?").run(run.id);
+      genB = h.runService.claimQueuedRun(run.id, { withLease: true });
+      db.prepare("UPDATE runs SET status = 'running' WHERE id = ?").run(run.id);
+    }
+    return origGetOutput(...args);
+  };
+
+  await h.lifecycleService.checkHealth();
+
+  assert.ok(genB && genB.leaseId, 'the reclaim happened inside the await window');
+  assert.equal(
+    h.runService.getRun(run.id).status,
+    'running',
+    "generation A's write must lose atomically — B's run stays running",
+  );
+  assert.equal(
+    db.prepare('SELECT state FROM run_owner_leases WHERE lease_id = ?').get(genB.leaseId).state,
+    'held',
+  );
+  const annotated = db.prepare(`
+    SELECT COUNT(*) c FROM run_events
+    WHERE run_id = ? AND event_type = 'worker:stale_observation_ignored'
+  `).get(run.id).c;
+  assert.ok(annotated >= 1, 'the discarded observation is visible');
+});

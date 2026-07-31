@@ -6,6 +6,7 @@ CREATE TABLE run_owner_leases (
   run_id TEXT NOT NULL,
   lease_id TEXT NOT NULL,
   state TEXT NOT NULL CHECK(state IN ('held','released','abandoned')),
+  engine TEXT CHECK(engine IN ('subprocess','tmux','stream-json','remote')),
   acquired_at TEXT,
   terminal_observed_at TEXT,
   closed_at TEXT,
