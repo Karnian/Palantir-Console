@@ -516,3 +516,33 @@ test('a post-claim annotation failure cannot strand the committed claim', async 
   assert.equal(runService.getRun('annotate-crash').status, 'running');
   assert.equal(runService.getHeldLease('annotate-crash').lease_id, claim.leaseId);
 });
+
+test('a superseded generation cannot resurrect the run via a late markRunStarted', async (t) => {
+  // codex R4: updateStarted ran unconditionally before the lease CAS, so after
+  // generation A was superseded and generation B finished, A's late
+  // markRunStarted flipped the run back to 'running' with no held lease.
+  const db = await mkdb(t);
+  const runService = createRunService(db, createEventBus());
+
+  insertBareRun(db, 'gen-fence');
+  const genA = runService.claimQueuedRun('gen-fence', { withLease: true });
+  // Reclaim: back to queued, claim again → generation B supersedes A.
+  db.prepare("UPDATE runs SET status = 'queued' WHERE id = 'gen-fence'").run();
+  const genB = runService.claimQueuedRun('gen-fence', { withLease: true });
+  runService.markRunStarted('gen-fence', genB.leaseId, {});
+  runService.releaseOwner('gen-fence', genB.leaseId, { state: 'released', evidence: 'process_exit' });
+  runService.updateRunStatus('gen-fence', 'completed', { force: true });
+
+  // A's late start arrives after B already finished.
+  runService.markRunStarted('gen-fence', genA.leaseId, { tmux_session: 'stale-A' });
+
+  const run = runService.getRun('gen-fence');
+  assert.equal(run.status, 'completed', 'the finished run must not be resurrected to running');
+  assert.equal(runService.getHeldLease('gen-fence'), null);
+  const annotated = db.prepare(`
+    SELECT payload_json FROM run_events
+    WHERE run_id = 'gen-fence' AND event_type = 'worker:stale_start_ignored'
+  `).all();
+  assert.equal(annotated.length, 1, 'the ignored stale start is observable');
+  assert.equal(JSON.parse(annotated[0].payload_json).lease_id, genA.leaseId);
+});

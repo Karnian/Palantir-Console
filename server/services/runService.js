@@ -770,15 +770,24 @@ function createRunService(db, eventBus) {
   });
 
   const markRunStartedTx = db.transaction((id, leaseId, fields) => {
+    // Generation fence (codex S1a R4): when the caller carries a leaseId, the
+    // status write is gated on that lease still being the CURRENT held one. A
+    // superseded generation's late markRunStarted must not resurrect the run
+    // to 'running' after its replacement already finished. Legacy callers
+    // without a leaseId (manager runs, boot resume) keep the unconditional
+    // write.
+    if (leaseId) {
+      const held = stmts.getHeldOwnerLease.get(id);
+      if (!held || held.lease_id !== leaseId) return { stale: true };
+      stmts.stampOwnerLeaseAcquired.run(id, leaseId);
+    }
     stmts.updateStarted.run(
       fields.tmux_session || null,
       fields.worktree_path || null,
       fields.branch || null,
       id
     );
-    if (leaseId) {
-      stmts.stampOwnerLeaseAcquired.run(id, leaseId);
-    }
+    return { stale: false };
   });
 
   const releaseOwnerTx = db.transaction((runId, leaseId, state, evidence) => {
@@ -1188,7 +1197,13 @@ function createRunService(db, eventBus) {
     const fields = separateLeaseArg ? (maybeFields || {}) : (leaseIdOrFields || {});
     const { tmux_session, worktree_path, branch } = fields;
     const prev = getRun(id);
-    markRunStartedTx(id, leaseId, fields);
+    const outcome = markRunStartedTx(id, leaseId, fields);
+    if (outcome?.stale) {
+      try {
+        addRunEvent(id, 'worker:stale_start_ignored', JSON.stringify({ lease_id: leaseId }));
+      } catch { /* annotate-only */ }
+      return stmts.getById.get(id);
+    }
     const run = stmts.getById.get(id);
     // #436: the tmux session NAME is enough to attach to the worker's terminal,
     // which is authority well beyond the Console API. The run row still stores it
