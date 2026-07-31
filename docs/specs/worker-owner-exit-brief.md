@@ -1,6 +1,6 @@
 # Worker owner-exit — 재설계 brief (v8)
 
-**상태**: S0 머지됨(#489) / S1 계약 v8 (codex R1 반영) / S2~S3 미확정
+**상태**: S0 #489 / S1a #491 머지됨 / S1b 계약 확정 검토 중 / S2~S3 미확정
 **참고 자산**: `fix/465`(PR #478) · `fix/466`(PR #482) 의 미머지 잔여분
 **선행 완료**: #486(idle timeout + terminal_reason) · #487(terminal CAS + retry 유일성)
 
@@ -481,6 +481,94 @@ started_at=datetime('now') WHERE id=? AND status='queued'`), spawn 성공 기록
 - `if (executionEngine.type) return true`(`nodeExecutor.js:87` 부근) 제거. 제거 **전에**
   dead/unknown run 의 terminal 화 fall-through 를 테스트로 고정.
 - 원격은 tri-state 만 적용 — SSH 실패는 `unknown` 이지 `dead` 가 아니다.
+
+### §8.2 S1b 확정 계약
+
+S1a 가 머지된 상태(#491)를 전제한다. S1b 는 **판정과 probe** 다 — lease 를 닫는 두 번째
+손(첫 번째는 로컬 확정 신호)이자, requeue 409 를 실용적으로 만드는 열쇠다(owner 가
+dead 로 확인되어야 lease 가 닫히고 재클레임이 풀린다).
+
+**C8. `ownerState(runId)` — 엔진별 tri-state 정의 (코드 근거)**
+
+| 상황 | 판정 | 근거 |
+|---|---|---|
+| 로컬 engine 핸들 존재 + 미종료 | `alive` | in-memory map |
+| 로컬 engine 핸들 존재 + exit 기록됨 | `dead` | `proc.exitCode !== null` / spawnError |
+| tmux: `has-session` 성공 | `alive` | durable, 재시작 생존 (`executionEngine.js` isAlive) |
+| tmux: 세션 없음 + exit sentinel 존재 | `dead` | sentinel 파일은 durable |
+| tmux: 세션 없음 + sentinel 없음 | `unknown` | kill-session 은 sentinel 을 남기지 않을 수 있다 |
+| subprocess: 핸들 없음(재시작 후) | `unknown` | pid 가 durable 하지 않다 — **absence ≠ dead (D1 의 교훈)** |
+| 원격: executor probe 성공 | 결과대로 | remoteSshExecutor |
+| 원격: SSH/transport 실패 | `unknown` | 절대 dead 로 강등하지 않는다 |
+
+- `engineFor(runId)` 는 순수 라우팅(어느 엔진으로 다루나)으로 분리. `ownerOf` 소비자는
+  `lifecycleService` 두 곳뿐(2979, 3198) — 마이그레이션 표면이 작다.
+- **durable engine identity (codex R1)**: 현재 engine 기록은 원격에만 있다
+  (`runtime:remote_worker_engine`). 재시작 후 `engineFor` 가 라우팅할 근거로,
+  lease 행에 `engine` 컬럼('subprocess'|'tmux'|'stream-json'|'remote')을 기록한다
+  (084 미배포라 컬럼 추가 안전). **기록 시점은 `spawnWorker` 호출 전**,
+  `(run_id, lease_id, state='held')` CAS 로 — spawn 직후 crash 에도 durable 해야
+  재시작 라우팅이 성립한다(codex R2). 없으면(구 lease) tmux_session 유무로 추정,
+  그마저 없으면 unknown.
+- 로컬 stream-json 워커: 핸들 live=`alive`, exit/spawnError=`dead`, 재시작 후 핸들
+  없음=`unknown`(subprocess 와 동일 — durable 증거 없음). `needs_input` 은 status 와
+  무관하게 같은 규칙.
+- **D1 분기 제거**: `if (executionEngine.type) return true`(`nodeExecutor.js:85` 부근).
+  제거 전에 **dead 확정** run 의 terminal 화 fall-through 를 테스트로 고정.
+  **`unknown` 은 terminal 화·status 변경·cleanup 을 전부 보류한다**(codex R2 —
+  기존 코드의 exitCode null 보류와 정합). unknown 을 종결로 취급하는 것이 D1 이
+  만든 사고 형태다.
+
+**C9. held-lease sweep (run status 와 독립)**
+
+health loop 에 `state='held'` 직접 질의 pass 를 추가한다 — running/needs_input 순회에
+안 잡히는 `paused` 와 **draining**(terminal + held) 을 커버한다.
+
+| lease | run | ownerState | 행동 |
+|---|---|---|---|
+| held (acquired) | any | `dead` | `releaseOwner(released, 'probe:dead')` — draining 종료, requeue 409 해제, capacity 반환 |
+| held (acquired) | any | `alive` | 유지 (S3 전까지 관측만) |
+| held (acquired) | any | `unknown` | 유지 + `worker:lease_probe_unknown` (lease 당 상태 변화 시 1회) |
+| held (**reserved**) | any | `dead` | `releaseOwner(released, 'boot:reserved_dead')` |
+| held (reserved) | any | `alive` | `acquired_at` backfill(CAS) + `worker:lease_acquired_late` |
+| held (reserved) | any | `unknown` | 유지 + annotate 1회 |
+
+- sweep 은 annotate/release 만 한다 — **run status 를 절대 쓰지 않는다**(S3 범위).
+- probe 실패·예외는 unknown 취급, never-throws.
+- **release-before-cleanup (codex R1 — 필수 순서)**: 기존 terminal pass 의 tmux
+  `kill()` 은 exit sentinel 까지 삭제한다(`executionEngine.js:439` 이하 unlink).
+  dead 증거를 파괴하기 **전에** 그 자리에서 lease 를 release 해야 한다 — 안 하면
+  sweep 이 뒤늦게 sentinel 없는 세션-부재를 보고 unknown 으로 영구 held 가 된다.
+  구현: checkHealth 의 dead 판정 지점(kill/cleanup 직전)에서
+  `releaseOwner(..., 'probe:dead')` 를 먼저 호출. sweep 과의 중복은 기존 CAS 가
+  해소(패자 조용).
+
+**C10. capacity opt-in (`PALANTIR_LEASE_CAPACITY=1`)**
+
+- on 일 때 `countRunning`/`countRunningOnNode`/`countRunningTotalOnNode` 가
+  `run_owner_leases(state='held') JOIN runs` 기준. off(기본) = byte-identical.
+- **flip 전 전제**를 문서화한다: crash 로 남은 subprocess-계 unknown lease 는 S1b 가
+  닫지 못한다(durable 증거가 없다). capacity on 상태에서 이런 lease 는 슬롯을 점유하며,
+  해소 수단은 DELETE(abandoned) 또는 S3 의 관측-근거 abandonment 다. 그래서 기본 off.
+
+**C11. `run_deleted` 와 S3 fence 의 상호작용 (수정 — 면제 아님, 조건부)**
+
+v1 의 "면제" 근거(같은 run 재클레임 불가)는 **불성립** — capacity 는 run 이 아니라
+profile/node 단위이므로, 삭제 후 살아있는 고아 owner 가 **다른** queued run 과 노드
+자원·(원격이면) 같은 project directory 에서 겹칠 수 있다(codex R1).
+
+수정된 계약:
+
+- **명시적 run DELETE 라우트**: fence 조건을 "인간의 명시적 행위 + best-effort kill
+  시도"로 간주한다. 단, 현재 라우트는 `running|queued|needs_input` 만 kill 한다 —
+  **held lease 가 존재하면 status 와 무관하게 kill → abandon → delete** 로 확장한다
+  (`paused`·draining 포함, codex R2). S1b 구현 범위.
+- **task/project cascade**: kill 조차 우회하는 **알려진 갭**으로 명시한다. 트리거가
+  lease 를 abandoned 로 닫는 것은 정합성(영구 held 방지)이지 안전 승인이 아니다.
+  고아 owner 위험은 S2 의 shutdown sweep·S0 스냅샷·S3 의 노드 fence 가 다룬다.
+  cascade 삭제 경로에 kill 을 추가하는 것은 S2 범위로 이관.
+- capacity 정합은 자동이다: held-lease 카운트는 `JOIN runs` 라 삭제된 run 은 세어질
+  수 없고, 트리거가 lease 를 닫는다.
 
 ### S2 — admission
 
