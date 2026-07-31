@@ -146,9 +146,15 @@ function createLocalWorkerChannel({ streamJsonEngine, executionEngine } = {}) {
 
     if (identity === 'tmux') {
       try {
-        if (await requireEngine('cli', 'isAlive').isAlive(runId)) return 'alive';
+        // Sentinel FIRST (codex S1b R1 #1): the worker writes its exit sentinel
+        // and terminates, but the surrounding tmux shell can outlive it — so a
+        // present session with a recorded exit code is a FINISHED worker, not a
+        // live one. Session existence only breaks the tie when no exit was
+        // recorded.
         const exitCode = await requireEngine('cli', 'detectExitCode').detectExitCode(runId);
-        return exitCode === null ? 'unknown' : 'dead';
+        if (exitCode !== null) return 'dead';
+        if (await requireEngine('cli', 'isAlive').isAlive(runId)) return 'alive';
+        return 'unknown';
       } catch {
         return 'unknown';
       }

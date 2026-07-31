@@ -210,3 +210,104 @@ test('reserved alive leases are acquired late exactly once without changing run 
     1,
   );
 });
+
+// --- codex S1b adversarial round 1 -----------------------------------------
+
+test('a finished worker inside a surviving tmux shell is dead, not alive', async (t) => {
+  // codex R1 #1: session existence was checked before the exit sentinel, so a
+  // worker that wrote its exit code and terminated — while the surrounding
+  // tmux shell lived on — read as `alive` forever: running status, held lease,
+  // no terminalization.
+  const db = await mkdb(t);
+  const engine = makeEngine({ type: 'tmux', alive: true, exitCode: null });
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+
+  // Worker finishes and records its exit; the tmux shell is still present.
+  engine.setExitCode(0);
+
+  await h.lifecycleService.checkHealth();
+
+  assert.equal(h.runService.getRun(run.id).status, 'completed', 'the recorded exit code wins over the shell');
+  const lease = db.prepare('SELECT state FROM run_owner_leases WHERE run_id = ?').get(run.id);
+  assert.equal(lease.state, 'released');
+});
+
+test('a stream-json lease with an expired unknown grace still terminalizes', async (t) => {
+  // codex R1 #2: the stream-json branch handled dead only and continued on
+  // expired unknown — after a restart wipes the process map nothing else would
+  // ever terminalize the run.
+  const db = await mkdb(t);
+  const engine = makeEngine({ type: 'subprocess', alive: false, exitCode: null });
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+  // Simulate the restart: durable identity says stream-json, no handle exists.
+  db.prepare("UPDATE run_owner_leases SET engine = 'stream-json' WHERE run_id = ?").run(run.id);
+  engine.hasProcess = () => false;
+  const lease = db.prepare('SELECT lease_id FROM run_owner_leases WHERE run_id = ?').get(run.id);
+  // Expired anchor: backdate the first unknown annotation past the TTL.
+  h.runService.annotateOwnerProbeUnknown(run.id, lease.lease_id);
+  db.prepare(`
+    UPDATE run_events SET created_at = datetime('now', '-11 minutes')
+    WHERE run_id = ? AND event_type = 'worker:lease_probe_unknown'
+  `).run(run.id);
+
+  await h.lifecycleService.checkHealth();
+
+  assert.equal(h.runService.getRun(run.id).status, 'failed', 'expired unknown must terminalize stream-json too');
+  assert.equal(
+    db.prepare('SELECT state FROM run_owner_leases WHERE run_id = ?').get(run.id).state,
+    'held',
+    'no dead evidence — the lease stays held',
+  );
+});
+
+test('an alive recovery resets the unknown grace anchor', async (t) => {
+  // codex R1 #3: the anchor kept the FIRST unknown forever, so a transient
+  // outage long ago stripped every later unknown of its grace.
+  const db = await mkdb(t);
+  const runService = createRunService(db, createEventBus());
+  db.prepare(`
+    INSERT INTO runs (id, status, is_manager, prompt) VALUES ('anchor-run', 'queued', 0, 'p')
+  `).run();
+  const claim = runService.claimQueuedRun('anchor-run', { withLease: true });
+
+  // First unknown, long ago.
+  runService.annotateOwnerProbeUnknown('anchor-run', claim.leaseId);
+  db.prepare(`
+    UPDATE run_events SET created_at = datetime('now', '-2 hours')
+    WHERE run_id = 'anchor-run' AND event_type = 'worker:lease_probe_unknown'
+  `).run();
+  // Recovery: alive marker resets the window.
+  assert.equal(runService.annotateOwnerProbeAlive('anchor-run', claim.leaseId), true);
+  // A healthy lease is not spammed with markers on every poll.
+  assert.equal(runService.annotateOwnerProbeAlive('anchor-run', claim.leaseId), false);
+
+  // New transient unknown: the anchor must be NOW, not two hours ago.
+  assert.equal(runService.ownerProbeUnknownSince('anchor-run', claim.leaseId), null);
+  runService.annotateOwnerProbeUnknown('anchor-run', claim.leaseId);
+  const since = runService.ownerProbeUnknownSince('anchor-run', claim.leaseId);
+  assert.ok(since, 'a fresh unknown after recovery re-anchors');
+  const ageMs = Date.now() - Date.parse(`${since.replace(' ', 'T')}Z`);
+  assert.ok(ageMs < 60_000, `the anchor must be fresh, got ${Math.round(ageMs / 1000)}s old`);
+});
+
+test('cancel settles the lease before the kill destroys the evidence', async (t) => {
+  // codex R1 #5: cancelRun killed first (tmux kill removes the exit sentinel)
+  // and never settled the lease — cancelled/held forever, blocking requeue and
+  // (flag on) a capacity slot.
+  const db = await mkdb(t);
+  const order = [];
+  const engine = makeEngine({ type: 'tmux', alive: true, exitCode: null, onKill: () => order.push('kill') });
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+
+  await h.lifecycleService.cancelRun(run.id);
+
+  const lease = db.prepare('SELECT state, evidence FROM run_owner_leases WHERE run_id = ?').get(run.id);
+  assert.equal(lease.state, 'abandoned', 'an unverifiable kill is abandonment, not release');
+  assert.equal(lease.evidence, 'cancel_kill');
+  assert.deepEqual(order, ['kill'], 'the kill still happens, after the settle');
+  assert.equal(h.runService.getRun(run.id).status, 'cancelled');
+});
+

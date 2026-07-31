@@ -1562,3 +1562,35 @@ test('detached remote Claude max_turns remains needs_input after later health ti
     'the marker sits beyond the legacy oldest-first 1,000-event window',
   );
 });
+
+test('boot housekeeping releases a dead lease before reaping the sentinel dir', async (t) => {
+  // codex S1b R1 #4: the boot reap deleted the remote status dir — exit
+  // sentinel included — without releasing the held lease first. With the only
+  // durable dead evidence gone, the sweep could only ever say unknown and the
+  // lease stayed held forever (a permanent slot under the capacity flag).
+  const db = await mkdb(t);
+  const remoteChannel = makeRemoteChannel({ alive: false, exitCode: 1 });
+  const cleanupCalls = [];
+  remoteChannel.cleanupRun = async (runId) => { cleanupCalls.push(runId); };
+  const h = buildHarness(db, { remoteChannel });
+  createSshNode(h.nodeService);
+  const profile = seedProfile(db);
+  const project = h.projectService.createProject({
+    name: 'ReapProject', directory: '/workspace/project', node_id: 'ssh-pod',
+  });
+  const task = seedTask(h.taskService, project.id);
+  const run = h.runService.createRun({
+    task_id: task.id, agent_profile_id: profile.id, prompt: 'reap', node_id: 'ssh-pod',
+  });
+  const claim = h.runService.claimQueuedRun(run.id, { withLease: true });
+  db.prepare("UPDATE run_owner_leases SET engine = 'remote' WHERE run_id = ?").run(run.id);
+  h.runService.updateRunStatus(run.id, 'completed', { force: true });
+  h.runService.addRunEvent(run.id, 'harvest:diff', JSON.stringify({ ok: true }));
+
+  await h.lifecycleService.recoverOrphanSessions();
+
+  assert.deepEqual(cleanupCalls, [run.id], 'the reap must still run');
+  const lease = db.prepare('SELECT state, lease_id FROM run_owner_leases WHERE run_id = ?').get(run.id);
+  assert.equal(lease.state, 'released', 'the dead lease must be released before the evidence is destroyed');
+  assert.equal(lease.lease_id, claim.leaseId);
+});

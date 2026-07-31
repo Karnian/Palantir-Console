@@ -1166,6 +1166,9 @@ for (const [initial, during, expected] of [
     });
 
     const pending = lc.cancelRun(run.id);
+    // S1b settles the lease (async probe) BEFORE the kill, so the engine's
+    // kill() — and our injected release hook — arrives one tick later.
+    await new Promise((resolve) => setImmediate(resolve));
     // The window: health re-parks or resumes the run while kill() is in flight.
     rs.updateRunStatus(run.id, during, {
       force: true,

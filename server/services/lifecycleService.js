@@ -2789,8 +2789,14 @@ function createLifecycleService({
             state: 'released',
             evidence,
           })) changed++;
-        } else if (observed.state === 'alive' && !lease.acquired_at) {
-          if (typeof runService.acquireOwnerLeaseLate === 'function'
+        } else if (observed.state === 'alive') {
+          // Recovery resets the unknown grace anchor (codex S1b R1 #3) — the
+          // marker is written only when an unknown annotation is outstanding.
+          if (typeof runService.annotateOwnerProbeAlive === 'function') {
+            runService.annotateOwnerProbeAlive(run.id, lease.lease_id);
+          }
+          if (!lease.acquired_at
+            && typeof runService.acquireOwnerLeaseLate === 'function'
             && runService.acquireOwnerLeaseLate(run.id, lease.lease_id)) changed++;
         } else if (observed.state === 'unknown') {
           if (typeof runService.annotateOwnerProbeUnknown === 'function'
@@ -3146,6 +3152,15 @@ function createLifecycleService({
             try { runService.updateRunStatus(run.id, status, { force: true }); } catch {}
             if (run.task_id) checkTaskCompletion(run.task_id);
           }
+        } else if (unknownExpired) {
+          // A restart wipes the in-memory process map, so "manages its own
+          // lifecycle" no longer holds — nothing else will ever terminalize
+          // this run (codex S1b R1 #2). Same expired-unknown contract as the
+          // CLI path: terminalize without dead evidence, keep the lease held.
+          try {
+            runService.updateRunStatus(run.id, 'failed', { force: true, reason: 'agent-exit-unknown' });
+          } catch {}
+          if (run.task_id) checkTaskCompletion(run.task_id);
         }
         continue;
       }
@@ -3679,6 +3694,23 @@ function createLifecycleService({
         if (!node || (node.kind || 'local') === 'local') continue;
         const channel = channelForNode(run.node_id);
         if (!channel || typeof channel.cleanupRun !== 'function') continue;
+        // release-before-cleanup (codex S1b R1 #4): cleanupRun removes the
+        // remote status dir INCLUDING the exit sentinel — the only durable
+        // dead evidence. Probe and release the held lease first, or the sweep
+        // can never close it (permanent held; permanent slot under the flag).
+        try {
+          const lease = typeof runService.getHeldLease === 'function'
+            ? runService.getHeldLease(run.id)
+            : null;
+          if (lease) {
+            const observed = await probeOwner(run, lease);
+            if (observed.state === 'dead' && typeof runService.releaseOwner === 'function') {
+              runService.releaseOwner(run.id, lease.lease_id, {
+                state: 'released', evidence: 'probe:dead',
+              });
+            }
+          }
+        } catch { /* observation only — never blocks the reap */ }
         await channel.cleanupRun(run.id);
         runService.addRunEvent(run.id, 'runtime:artifacts_reaped', JSON.stringify({
           kind: 'remote_status_dir',
@@ -4101,13 +4133,36 @@ function createLifecycleService({
     return runService.getRun(run.id);
   }
 
+  // Cancel is an active kill, and a tmux kill destroys the exit sentinel —
+  // the only durable dead evidence — so the lease must be settled BEFORE the
+  // kill (codex S1b R1 #5). Dead already → released(probe:dead). Otherwise the
+  // kill is a deliberate termination whose outcome we cannot verify afterwards:
+  // abandoned(cancel_kill), which under S1 is observation-only and under S3's
+  // matrix returns capacity without enabling owner-dependent side effects.
+  async function settleLeaseBeforeCancelKill(run) {
+    try {
+      const lease = typeof runService.getHeldLease === 'function'
+        ? runService.getHeldLease(run.id)
+        : null;
+      if (!lease || typeof runService.releaseOwner !== 'function') return;
+      const observed = await probeOwner(run, lease);
+      if (observed.state === 'dead') {
+        runService.releaseOwner(run.id, lease.lease_id, { state: 'released', evidence: 'probe:dead' });
+      } else {
+        runService.releaseOwner(run.id, lease.lease_id, { state: 'abandoned', evidence: 'cancel_kill' });
+      }
+    } catch { /* observation only — cancel must proceed regardless */ }
+  }
+
   function cancelRun(runId) {
     const run = runService.getRun(runId);
     // Don't cancel already-terminal runs
     if (['completed', 'failed', 'cancelled', 'stopped'].includes(run.status)) {
       return run;
     }
-    const killed = channelForNode(run.node_id).kill(runId);
+    const settled = settleLeaseBeforeCancelKill(run);
+    const proceed = () => channelForNode(run.node_id).kill(runId);
+    const killed = isThenable(settled) ? settled.then(proceed) : proceed();
     if (isThenable(killed)) {
       return killed.then(() => finishCancelRun(run));
     }

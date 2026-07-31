@@ -795,6 +795,12 @@ function createRunService(db, eventBus) {
       WHERE run_id = ?
         AND event_type = 'worker:lease_probe_unknown'
         AND json_extract(payload_json, '$.lease_id') = ?
+        AND rowid > COALESCE((
+          SELECT MAX(rowid) FROM run_events
+          WHERE run_id = ?
+            AND event_type = 'worker:lease_probe_alive'
+            AND json_extract(payload_json, '$.lease_id') = ?
+        ), 0)
       LIMIT 1
     `),
     ownerProbeUnknownSince: db.prepare(`
@@ -802,7 +808,26 @@ function createRunService(db, eventBus) {
       WHERE run_id = ?
         AND event_type = 'worker:lease_probe_unknown'
         AND json_extract(payload_json, '$.lease_id') = ?
+        AND rowid > COALESCE((
+          SELECT MAX(rowid) FROM run_events
+          WHERE run_id = ?
+            AND event_type = 'worker:lease_probe_alive'
+            AND json_extract(payload_json, '$.lease_id') = ?
+        ), 0)
       ORDER BY rowid ASC
+      LIMIT 1
+    `),
+    hasOwnerProbeAliveAfterUnknown: db.prepare(`
+      SELECT 1 AS found FROM run_events
+      WHERE run_id = ?
+        AND event_type = 'worker:lease_probe_unknown'
+        AND json_extract(payload_json, '$.lease_id') = ?
+        AND rowid > COALESCE((
+          SELECT MAX(rowid) FROM run_events
+          WHERE run_id = ?
+            AND event_type = 'worker:lease_probe_alive'
+            AND json_extract(payload_json, '$.lease_id') = ?
+        ), 0)
       LIMIT 1
     `),
   };
@@ -886,7 +911,7 @@ function createRunService(db, eventBus) {
   });
 
   const annotateOwnerProbeUnknownTx = db.transaction((runId, leaseId) => {
-    if (!stmts.runRowExists.get(runId) || stmts.hasOwnerProbeUnknown.get(runId, leaseId)) {
+    if (!stmts.runRowExists.get(runId) || stmts.hasOwnerProbeUnknown.get(runId, leaseId, runId, leaseId)) {
       return null;
     }
     const eventInfo = stmts.insertEvent.run(
@@ -1476,9 +1501,23 @@ function createRunService(db, eventBus) {
 
   // First moment this lease was observed as unknown — the anchor for the
   // unknown grace TTL (see lifecycleService). Null until the first annotation.
+  // Anchored to the LAST alive observation (codex S1b R1 #3): a recovery must
+  // reset the grace clock, or a transient outage months ago strips every later
+  // unknown of its grace and terminalizes it instantly.
   function ownerProbeUnknownSince(runId, leaseId) {
-    const row = stmts.ownerProbeUnknownSince.get(runId, leaseId);
+    const row = stmts.ownerProbeUnknownSince.get(runId, leaseId, runId, leaseId);
     return row ? row.created_at : null;
+  }
+
+  // Recovery marker: written only when an unknown annotation exists after the
+  // previous alive marker, so a healthy lease is not spammed every poll.
+  function annotateOwnerProbeAlive(runId, leaseId) {
+    try {
+      if (!stmts.runRowExists.get(runId)) return false;
+      if (!stmts.hasOwnerProbeAliveAfterUnknown.get(runId, leaseId, runId, leaseId)) return false;
+      stmts.insertEvent.run(runId, 'worker:lease_probe_alive', JSON.stringify({ lease_id: leaseId }));
+      return true;
+    } catch { return false; }
   }
 
   function annotateOwnerProbeUnknown(runId, leaseId) {
@@ -2265,7 +2304,7 @@ function createRunService(db, eventBus) {
     countMaterializingOnNode, countMaterializingGlobal,
     claimQueuedRun, claimQueuedRunForMaterialization, restartMaterializationAttempt,
     getHeldLease, listHeldOwnerLeases, recordOwnerEngine,
-    acquireOwnerLeaseLate, annotateOwnerProbeUnknown, ownerProbeUnknownSince, releaseOwner,
+    acquireOwnerLeaseLate, annotateOwnerProbeUnknown, annotateOwnerProbeAlive, ownerProbeUnknownSince, releaseOwner,
     markMaterializePending, updateRunMaterialized, markMaterializedReady,
     getProjectNodeWorkspace, markProjectNodeWorkspaceReady, markProjectNodeWorkspaceFailed,
     touchProjectNodeWorkspace, acquireMaterializationLease, touchMaterializationLease, releaseMaterializationLease,
