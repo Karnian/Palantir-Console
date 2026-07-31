@@ -468,6 +468,9 @@ function createStreamJsonEngine({
         // Phase 10D: some spawn errors do not produce a subsequent 'exit'
         // (e.g. ENOENT on the binary), so we must fire cleanup here too.
         fireCleanup();
+        // Same reasoning for the owner observation (codex S1a R1): without this
+        // an async spawn failure leaves the lease held forever.
+        fireOwnerExit(1, null);
         if (runService) {
           runService.addRunEvent(runId, 'error', JSON.stringify({
             message: `Spawn error: ${err.message}`,

@@ -707,9 +707,15 @@ function createRunService(db, eventBus) {
     `),
     closeOwnerLease: db.prepare(`
       UPDATE run_owner_leases
-      SET state = ?, closed_at = datetime('now')
+      SET state = ?, closed_at = datetime('now'), evidence = ?
       WHERE run_id = ? AND lease_id = ? AND state = 'held'
     `),
+    closeAnyHeldOwnerLease: db.prepare(`
+      UPDATE run_owner_leases
+      SET state = 'abandoned', closed_at = datetime('now'), evidence = ?
+      WHERE run_id = ? AND state = 'held'
+    `),
+    runRowExists: db.prepare('SELECT 1 FROM runs WHERE id = ?'),
     // Events
     insertEvent: db.prepare(`
       INSERT INTO run_events (run_id, event_type, payload_json)
@@ -748,10 +754,18 @@ function createRunService(db, eventBus) {
   const claimQueuedRunTx = db.transaction((id, leaseId) => {
     const info = stmts.claimQueued.run(id);
     if (info.changes === 0) return null;
+    // A same-run reclaim path EXISTS: PATCH /api/runs/:id/status allows
+    // failed/cancelled/stopped → queued, and tmux/remote/migration runs can
+    // reach terminal with their lease still held. Without this supersede the
+    // partial unique index makes the claim throw and one stale run aborts the
+    // whole profile drain (codex S1a R1 #2). Ownership of the previous
+    // generation was never confirmed dead, so it closes as abandoned.
+    const superseded = stmts.closeAnyHeldOwnerLease.run('superseded_by_reclaim', id);
     const leaseInfo = stmts.insertOwnerLease.run(leaseId, id);
     return {
       changes: info.changes,
       leaseId: leaseInfo.changes > 0 ? leaseId : null,
+      supersededLease: superseded.changes > 0,
     };
   });
 
@@ -768,17 +782,26 @@ function createRunService(db, eventBus) {
   });
 
   const releaseOwnerTx = db.transaction((runId, leaseId, state, evidence) => {
-    const info = stmts.closeOwnerLease.run(state, runId, leaseId);
+    const info = stmts.closeOwnerLease.run(state, evidence ?? null, runId, leaseId);
     if (info.changes === 0) return null;
     const eventType = state === 'released'
       ? 'worker:owner_released'
       : 'worker:owner_abandoned';
-    const eventInfo = stmts.insertEvent.run(
-      runId,
-      eventType,
-      JSON.stringify({ lease_id: leaseId, evidence: evidence ?? null }),
-    );
-    return { eventType, eventId: eventInfo.lastInsertRowid };
+    // A task-delete cascade can remove the run row while its lease is still
+    // held; inserting a run_event would then hit the FK and roll the whole
+    // release back, leaving the lease held forever (codex S1a R1 #3). The lease
+    // row itself now carries the evidence, so closing without the event is
+    // still a complete durable record.
+    let eventId = null;
+    if (stmts.runRowExists.get(runId)) {
+      const eventInfo = stmts.insertEvent.run(
+        runId,
+        eventType,
+        JSON.stringify({ lease_id: leaseId, evidence: evidence ?? null }),
+      );
+      eventId = eventInfo.lastInsertRowid;
+    }
+    return { eventType, eventId };
   });
 
   function listRuns({ task_id, status } = {}) {

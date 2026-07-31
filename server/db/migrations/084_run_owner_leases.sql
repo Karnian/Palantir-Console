@@ -9,6 +9,10 @@ CREATE TABLE run_owner_leases (
   acquired_at TEXT,
   terminal_observed_at TEXT,
   closed_at TEXT,
+  -- Why the lease was closed. Lives HERE (not only in run_events) because a
+  -- deleted run cascades its events away; the lease row has no FK on purpose
+  -- and is the durable ownership record (codex S1a R1 #4).
+  evidence TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

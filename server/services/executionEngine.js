@@ -758,6 +758,15 @@ function createSubprocessEngine({
       proc.spawnError = err;
       proc.exitCode = 1;
       proc.exitedAt = Date.now();
+      // An async spawn failure (ENOENT) emits error → close and NEVER exit, so
+      // the owner observation must fire here too — exactly once (codex S1a R1).
+      if (!proc.ownerExitFired && proc.onExit) {
+        proc.ownerExitFired = true;
+        try {
+          const pending = proc.onExit({ runId, leaseId: proc.leaseId, code: 1, error: err.message });
+          if (pending && typeof pending.catch === 'function') pending.catch(() => {});
+        } catch { /* owner observation must not alter process handling */ }
+      }
     });
 
     child.on('exit', (code) => {

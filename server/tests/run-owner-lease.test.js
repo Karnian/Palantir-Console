@@ -1,4 +1,5 @@
 const test = require('node:test');
+const fsSync = require('node:fs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
@@ -131,6 +132,7 @@ test('claim creates one reserved lease atomically and markRunStarted acquires it
     acquired_at: null,
     terminal_observed_at: null,
     closed_at: null,
+    evidence: null,
     created_at: runService.getHeldLease('claim-winner').created_at,
   });
 
@@ -150,16 +152,25 @@ test('claim creates one reserved lease atomically and markRunStarted acquires it
   assert.equal(runService.claimQueuedRun('claim-loser', { withLease: true }), null);
   assert.equal(runService.getHeldLease('claim-loser'), null);
 
-  insertBareRun(db, 'claim-rollback');
+  // Reclaim path (codex S1a R1 #2): PATCH /api/runs/:id/status allows
+  // failed/cancelled/stopped → queued, and tmux/remote/migration runs can reach
+  // terminal with a held lease. The next claim must SUPERSEDE that stale lease
+  // (abandoned — ownership was never confirmed dead) instead of throwing on the
+  // partial unique index, which would let one stale run abort a whole drain.
+  insertBareRun(db, 'claim-reclaim');
   db.prepare(`
     INSERT INTO run_owner_leases (run_id, lease_id, state)
-    VALUES ('claim-rollback', 'preexisting', 'held')
+    VALUES ('claim-reclaim', 'preexisting', 'held')
   `).run();
-  assert.throws(
-    () => runService.claimQueuedRun('claim-rollback', { withLease: true }),
-    /UNIQUE constraint failed/,
-  );
-  assert.equal(runService.getRun('claim-rollback').status, 'queued', 'lease conflict rolls back claim CAS');
+  const reclaim = runService.claimQueuedRun('claim-reclaim', { withLease: true });
+  assert.equal(reclaim.claimed, true, 'a stale held lease must not block the claim');
+  const stale = db.prepare(
+    "SELECT * FROM run_owner_leases WHERE run_id = 'claim-reclaim' AND lease_id = 'preexisting'",
+  ).get();
+  assert.equal(stale.state, 'abandoned');
+  assert.equal(stale.evidence, 'superseded_by_reclaim');
+  assert.ok(stale.closed_at);
+  assert.equal(runService.getHeldLease('claim-reclaim').lease_id, reclaim.leaseId);
 
   runService.markRunStarted('claim-winner', claim.leaseId, {});
   const acquired = runService.getHeldLease('claim-winner');
@@ -375,4 +386,76 @@ test('migration backfills only active workers as reserved leases', async () => {
   } finally {
     db.close();
   }
+});
+
+// --- codex S1a adversarial round 1 -----------------------------------------
+
+test('an async spawn failure still releases the lease', async (t) => {
+  // Node delivers spawn syscall failures (ENOENT/EACCES) as error → close and
+  // NEVER exit, and the engine returns before the failure surfaces, so
+  // lifecycle reaches markRunStarted with spawnAccepted=true. Without the
+  // error-path observation the lease stayed held forever (codex R1 #1).
+  //
+  // The fixture: a file inside the spawnGuard-allowed fixtures/bin dir WITHOUT
+  // the execute bit — passes the guard, then fails asynchronously with EACCES.
+  const db = await mkdb(t);
+  const fixtureDir = path.join(__dirname, 'fixtures', 'bin');
+  const fixture = path.join(fixtureDir, `lease-eacces-${Math.random().toString(36).slice(2)}`);
+  fsSync.writeFileSync(fixture, '#!/bin/sh\nexit 0\n', { mode: 0o644 });
+  t.after(() => { try { fsSync.unlinkSync(fixture); } catch { /* best effort */ } });
+
+  const executionEngine = createSubprocessEngine();
+  const h = seedLifecycle(db, executionEngine);
+  db.prepare('UPDATE agent_profiles SET command = ?, args_template = NULL WHERE id = ?')
+    .run(fixture, h.profileId);
+  const run = createQueuedWorker(h, {});
+
+  await h.lifecycleService.spawnQueuedRun(run.id);
+  await waitFor(() => {
+    const lease = db.prepare('SELECT state FROM run_owner_leases WHERE run_id = ?').get(run.id);
+    return lease && lease.state !== 'held';
+  });
+
+  const lease = db.prepare('SELECT * FROM run_owner_leases WHERE run_id = ?').get(run.id);
+  assert.equal(lease.state, 'released');
+  assert.ok(lease.closed_at, 'the failure path must close the lease');
+});
+
+test('a run whose row was cascade-deleted can still close its lease', async (t) => {
+  // DELETE /api/tasks/:id cascades the run row away while the lease is held.
+  // Inserting the owner run_event would then hit the FK and roll the whole
+  // release back — permanent held (codex R1 #3). The lease row carries the
+  // evidence itself, so closing without the event is a complete record.
+  const db = await mkdb(t);
+  const runService = createRunService(db, createEventBus());
+
+  insertBareRun(db, 'cascade-victim');
+  const claim = runService.claimQueuedRun('cascade-victim', { withLease: true });
+  db.prepare('DELETE FROM runs WHERE id = ?').run('cascade-victim');
+
+  const ok = runService.releaseOwner('cascade-victim', claim.leaseId, {
+    state: 'released',
+    evidence: 'process_exit',
+  });
+  assert.equal(ok, true, 'release must not fail because the run row is gone');
+  const lease = db.prepare("SELECT * FROM run_owner_leases WHERE run_id = 'cascade-victim'").get();
+  assert.equal(lease.state, 'released');
+  assert.equal(lease.evidence, 'process_exit', 'evidence survives on the lease row');
+});
+
+test('deleting a run keeps the closure evidence on the lease row', async (t) => {
+  // The owner run_event is cascade-deleted with the run, so the durable record
+  // of WHY the lease closed must live on the lease row itself (codex R1 #4).
+  const db = await mkdb(t);
+  const runService = createRunService(db, createEventBus());
+
+  insertBareRun(db, 'delete-me');
+  runService.claimQueuedRun('delete-me', { withLease: true });
+  runService.deleteRun('delete-me');
+
+  assert.equal(db.prepare("SELECT COUNT(*) c FROM runs WHERE id = 'delete-me'").get().c, 0);
+  const lease = db.prepare("SELECT * FROM run_owner_leases WHERE run_id = 'delete-me'").get();
+  assert.equal(lease.state, 'abandoned');
+  assert.equal(lease.evidence, 'run_deleted', 'evidence must survive the cascade');
+  assert.ok(lease.closed_at);
 });
