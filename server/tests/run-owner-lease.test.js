@@ -546,3 +546,80 @@ test('a superseded generation cannot resurrect the run via a late markRunStarted
   assert.equal(annotated.length, 1, 'the ignored stale start is observable');
   assert.equal(JSON.parse(annotated[0].payload_json).lease_id, genA.leaseId);
 });
+
+test('a terminal run with a still-held lease cannot be restarted by a same-generation start', async (t) => {
+  // codex R5 #2: the run can be terminal while its lease is still held
+  // (draining). A late same-generation markRunStarted must not resurrect
+  // completed → running.
+  const db = await mkdb(t);
+  const runService = createRunService(db, createEventBus());
+
+  insertBareRun(db, 'drain-start');
+  const claim = runService.claimQueuedRun('drain-start', { withLease: true });
+  runService.updateRunStatus('drain-start', 'completed', { force: true });
+  assert.equal(runService.getHeldLease('drain-start').lease_id, claim.leaseId, 'lease still held (draining)');
+
+  runService.markRunStarted('drain-start', claim.leaseId, { tmux_session: 'late' });
+
+  assert.equal(runService.getRun('drain-start').status, 'completed', 'terminal status must survive a late start');
+  assert.equal(
+    db.prepare(`
+      SELECT COUNT(*) c FROM run_events
+      WHERE run_id = 'drain-start' AND event_type = 'worker:stale_start_ignored'
+    `).get().c,
+    1,
+  );
+});
+
+test('a superseded generation does not spawn and its failure does not overwrite the current one', async (t) => {
+  // codex R5 #1: async prep sits between claim and spawn. If the run was
+  // requeued and reclaimed meanwhile, the OLD generation must neither spawn a
+  // second worker nor mark the run failed under the current generation.
+  const db = await mkdb(t);
+  const spawns = [];
+  const slowEngine = {
+    type: 'subprocess',
+    spawnAgent(runId, spec) { spawns.push(runId); return { sessionName: null }; },
+    isAlive() { return true; },
+    detectExitCode() { return null; },
+    getOutput() { return ''; },
+    sendInput() { return true; },
+    kill() { return true; },
+    discoverGhostSessions() { return []; },
+    hasProcess() { return false; },
+  };
+  const h = seedLifecycle(db, slowEngine);
+  const run = createQueuedWorker(h, {});
+
+  // Generation A claims, then loses the run to a requeue + reclaim (B) before
+  // its spawn executes. We simulate by superseding A's lease the way a real
+  // reclaim does, right after A's claim — spawnQueuedRun re-checks before spawn.
+  const origClaim = h.runService.claimQueuedRun.bind(h.runService);
+  let firstClaim = null;
+  h.runService.claimQueuedRun = (id, opts) => {
+    const out = origClaim(id, opts);
+    if (out && !firstClaim) {
+      firstClaim = out;
+      // B supersedes A while A is still preparing.
+      db.prepare("UPDATE runs SET status = 'queued' WHERE id = ?").run(id);
+      const second = origClaim(id, opts);
+      db.prepare("UPDATE runs SET status = 'running' WHERE id = ?").run(id);
+      h.runService.claimQueuedRun = origClaim;
+      return out; // A continues with its now-stale lease
+    }
+    return out;
+  };
+
+  const result = await h.lifecycleService.spawnQueuedRun(run.id);
+
+  assert.equal(result, null, 'the stale generation must abort');
+  assert.equal(spawns.length, 0, 'no second worker process for the stale generation');
+  assert.notEqual(h.runService.getRun(run.id).status, 'failed', 'the current generation is not overwritten');
+  assert.equal(
+    db.prepare(`
+      SELECT COUNT(*) c FROM run_events
+      WHERE run_id = ? AND event_type = 'worker:stale_spawn_ignored'
+    `).get(run.id).c,
+    1,
+  );
+});

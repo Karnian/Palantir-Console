@@ -1100,6 +1100,15 @@ function createLifecycleService({
     if (!claimed) return null;
     const leaseId = claimed.leaseId;
     let spawnAccepted = false;
+    // Generation fence (codex S1a R5): async prep (materialization, worktree,
+    // MCP staging) sits between our claim and the actual spawn. If this run was
+    // requeued and reclaimed meanwhile, OUR lease is no longer the held one and
+    // spawning would race the current generation's worker.
+    const leaseStillCurrent = () => {
+      if (!leaseId || typeof runService.getHeldLease !== 'function') return true;
+      const held = runService.getHeldLease(runId);
+      return Boolean(held && held.lease_id === leaseId);
+    };
 
     try {
     const run = runService.getRun(runId);
@@ -1794,7 +1803,12 @@ function createLifecycleService({
               version: 1,
             }));
           }
-          result = await channelForNode(run.node_id).spawnWorker(run.id, {
+          if (!leaseStillCurrent()) {
+          const err = new Error('stale lease generation; spawn aborted');
+          err.code = 'STALE_LEASE_GENERATION';
+          throw err;
+        }
+        result = await channelForNode(run.node_id).spawnWorker(run.id, {
             engine: 'stream-json',
             spec: {
               prompt,
@@ -1994,6 +2008,11 @@ function createLifecycleService({
             } catch { goalOutputLog = null; }
           }
         }
+        if (!leaseStillCurrent()) {
+          const err = new Error('stale lease generation; spawn aborted');
+          err.code = 'STALE_LEASE_GENERATION';
+          throw err;
+        }
         result = await channelForNode(run.node_id).spawnWorker(run.id, {
           engine: 'cli',
           spec: {
@@ -2092,6 +2111,17 @@ function createLifecycleService({
           taskService.updateTaskStatus(taskId, 'in_progress');
         }
         return runService.getRun(run.id);
+      }
+      if (error?.code === 'STALE_LEASE_GENERATION' || !leaseStillCurrent()) {
+        // Our generation was superseded while we prepared. The CURRENT
+        // generation owns the run's status now — a late failure from us must
+        // not overwrite running → failed under it (codex S1a R5).
+        try {
+          runService.addRunEvent(run.id, 'worker:stale_spawn_ignored', JSON.stringify({
+            lease_id: leaseId, error: String(error?.message || error),
+          }));
+        } catch { /* annotate-only */ }
+        return null;
       }
       runService.updateRunStatus(run.id, 'failed', { force: true });
       runService.addRunEvent(run.id, 'error', JSON.stringify({ message: error.message }));

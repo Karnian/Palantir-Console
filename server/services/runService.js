@@ -779,6 +779,11 @@ function createRunService(db, eventBus) {
     if (leaseId) {
       const held = stmts.getHeldOwnerLease.get(id);
       if (!held || held.lease_id !== leaseId) return { stale: true };
+      // Same-generation late start (codex S1a R5): the run can already be
+      // terminal while its lease is still held (draining). A start arriving
+      // then must not resurrect completed → running.
+      const current = stmts.getById.get(id);
+      if (current && TERMINAL_STATUSES.has(current.status)) return { stale: true };
       stmts.stampOwnerLeaseAcquired.run(id, leaseId);
     }
     stmts.updateStarted.run(
