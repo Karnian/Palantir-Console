@@ -205,14 +205,6 @@ function createRunService(db, eventBus) {
        ORDER BY rowid ASC
        LIMIT 1
     `),
-    // Provenance-only backfill for a duplicate terminal observation. Guarded on
-    // the status AND on the reason still being empty, so it can never overwrite
-    // the winner's reason nor touch a row that has since moved on.
-    backfillTerminalReason: db.prepare(`
-      UPDATE runs
-         SET terminal_reason = ?
-       WHERE id = ? AND status = ? AND terminal_reason IS NULL
-    `),
     updateStarted: db.prepare(`
       UPDATE runs SET status = 'running', started_at = datetime('now'), tmux_session = ?, worktree_path = ?, branch = ? WHERE id = ?
     `),
@@ -1014,20 +1006,13 @@ function createRunService(db, eventBus) {
       // would change an external API as a side effect of de-duplicating
       // internal observers.
       if (force && TERMINAL_STATUSES.has(status) && current.status === status) {
-        // The winner may have written this terminal state WITHOUT a reason
-        // while this loser is the one that knows why (health parked the run as
-        // idle, then a cancel landed first). Before the unconditional write
-        // became a CAS, the later writer supplied that provenance; dropping the
-        // whole write would silently lose it. Backfill only into an empty
-        // reason — first reason wins — and only for this exact status, so the
-        // de-duplication stays intact: no status row, no run:ended.
-        const lateReason = resolveTerminalReason(current);
-        if (lateReason && !current.terminal_reason) {
-          try {
-            stmts.backfillTerminalReason.run(lateReason, id, status);
-            current = getRun(id);
-          } catch { /* annotate-only */ }
-        }
+        // Deliberately no terminal_reason backfill here. A reason is derived
+        // from the row at write time, and by now the row is already terminal —
+        // so the derivation has nothing left to read and would either produce
+        // nothing or, worse, describe a transition that already happened. A
+        // missing reason is better than a wrong one: terminal_reason is display
+        // provenance and never feeds retry or status decisions. The losing
+        // observer's own reason is still kept below as an annotate-only event.
         if (reason) {
           try {
             addRunEvent(id, 'status:duplicate_terminal', JSON.stringify({ status, reason }));

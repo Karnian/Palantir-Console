@@ -336,49 +336,40 @@ for (const [parked, raced, expected] of [
   });
 }
 
-test('Phase 5: a duplicate terminal observation backfills a missing reason without re-emitting', async (t) => {
-  // Codex round-2 review: when the winner writes the SAME terminal state with
-  // no reason, the loser is dropped by the duplicate guard — and before this
-  // backfill it took its provenance with it. The de-duplication must survive
-  // (no second run:ended), but the reason must not be lost.
+test('Phase 5: a duplicate terminal observation drops its reason rather than guessing', async (t) => {
+  // The backfill this test used to assert was removed on purpose. By the time a
+  // duplicate observation is dropped, the row is already terminal, so a
+  // write-time derivation has nothing left to read — it would either produce
+  // nothing or describe a transition that already happened. A missing reason
+  // beats a wrong one; terminal_reason is display provenance and never feeds
+  // retry or status decisions. The loser's reason survives as an annotate-only
+  // event, which is what the audit trail actually needs.
   const db = await mkdb(t);
   const bus = createEventBus();
   const rs = createRunService(db, bus);
   const ps = createProjectService(db);
   const ts = createTaskService(db, null);
-  const task = ts.createTask({ title: 'T', project_id: ps.createProject({ name: 'backfill' }).id });
+  const task = ts.createTask({ title: 'T', project_id: ps.createProject({ name: 'no-guess' }).id });
   db.prepare(`INSERT INTO agent_profiles (id, name, type, command) VALUES ('a1','A','codex','codex')`).run();
   const run = rs.createRun({ task_id: task.id, agent_profile_id: 'a1' });
   rs.updateRunStatus(run.id, 'running', { force: true });
-
-  // Winner: cancels with no reason at all.
   rs.updateRunStatus(run.id, 'cancelled', { force: true });
-  assert.equal(rs.getRun(run.id).terminal_reason, null);
 
   const { events } = collectEvents(bus);
-  // Loser: same terminal state, but it knows why.
-  rs.updateRunStatus(run.id, 'cancelled', { force: true, terminalReason: () => 'idle_timeout' });
+  rs.updateRunStatus(run.id, 'cancelled', {
+    force: true,
+    reason: 'idle_timeout',
+    terminalReason: () => 'idle_timeout',
+  });
 
-  assert.equal(rs.getRun(run.id).terminal_reason, 'idle_timeout', 'provenance is backfilled');
+  assert.equal(rs.getRun(run.id).terminal_reason, null, 'no reason is invented after the fact');
   assert.equal(
     events.filter(e => e.channel === 'run:ended').length,
     0,
-    'the backfill must not re-emit a terminal event',
+    'a duplicate terminal observation still emits nothing',
   );
-});
-
-test('Phase 5: a duplicate terminal observation never overwrites an existing reason', async (t) => {
-  const db = await mkdb(t);
-  const rs = createRunService(db, null);
-  const ps = createProjectService(db);
-  const ts = createTaskService(db, null);
-  const task = ts.createTask({ title: 'T', project_id: ps.createProject({ name: 'no-clobber' }).id });
-  db.prepare(`INSERT INTO agent_profiles (id, name, type, command) VALUES ('a1','A','codex','codex')`).run();
-  const run = rs.createRun({ task_id: task.id, agent_profile_id: 'a1' });
-  rs.updateRunStatus(run.id, 'running', { force: true });
-
-  rs.updateRunStatus(run.id, 'failed', { force: true, terminalReason: 'codex-rate-limit' });
-  rs.updateRunStatus(run.id, 'failed', { force: true, terminalReason: () => 'idle_timeout' });
-
-  assert.equal(rs.getRun(run.id).terminal_reason, 'codex-rate-limit', 'first reason wins');
+  const annotated = rs.getRunEvents(run.id)
+    .filter(e => e.event_type === 'status:duplicate_terminal');
+  assert.equal(annotated.length, 1, "the loser's reason is preserved as an annotation");
+  assert.equal(JSON.parse(annotated[0].payload_json).reason, 'idle_timeout');
 });
