@@ -3119,7 +3119,11 @@ function createLifecycleService({
         runService.updateRunStatus(run.id, status, {
           force: true,
           reason: agentExitReason(exitCode),
-          terminalReason: idleTimeoutTerminalReason(run),
+          // Derived at write time like the other two call sites: `run` is a
+          // snapshot from before the awaited detectExitCode(), and health can
+          // resume the run in that window — stamping idle_timeout on a run that
+          // had already recovered.
+          terminalReason: latest => idleTimeoutTerminalReason(latest),
         });
         if (run.task_id) checkTaskCompletion(run.task_id);
         await channel.kill(run.id, 'cli');
