@@ -87,9 +87,26 @@ function flagName(token) {
   return equals === -1 ? token : token.slice(0, equals);
 }
 
+// Bound the INPUT, not just the output. Tokenizing a whole args_template and
+// only then slicing to 4096 meant an oversized template paid full parse cost —
+// codex measured 51-62ms synchronous on a 1.9MB value. Nothing downstream can
+// use more than TOKEN_LIMIT tokens, so stop reading once we have them.
+const TOKEN_LIMIT = 4096;
+const TEMPLATE_SCAN_BYTES = 256 * 1024;
+
 function tokenizeTemplate(value) {
-  return (String(value || '').match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [])
-    .map(token => token.replace(/^(?:"([\s\S]*)"|'([\s\S]*)')$/, (_m, dq, sq) => dq ?? sq));
+  const text = String(value || '');
+  const scanned = text.length > TEMPLATE_SCAN_BYTES ? text.slice(0, TEMPLATE_SCAN_BYTES) : text;
+  const pattern = /(?:[^\s"']+|"[^"]*"|'[^']*')+/g;
+  const tokens = [];
+  let match = pattern.exec(scanned);
+  while (match && tokens.length <= TOKEN_LIMIT) {
+    tokens.push(match[0].replace(/^(?:"([\s\S]*)"|'([\s\S]*)')$/, (_m, dq, sq) => dq ?? sq));
+    match = pattern.exec(scanned);
+  }
+  // Signal truncation to templateKeys the same way an oversized array does.
+  if (text.length > scanned.length && tokens.length <= TOKEN_LIMIT) tokens.push('');
+  return tokens;
 }
 
 function templateKeys(profile) {
@@ -97,12 +114,12 @@ function templateKeys(profile) {
     ? profile.args_template_keys
     : tokenizeTemplate(profile?.args_template);
   const keys = [];
-  for (const token of source.slice(0, 4096)) {
+  for (const token of source.slice(0, TOKEN_LIMIT)) {
     const name = flagName(token);
     if (!name) continue;
     keys.push(KNOWN_FLAGS.has(name) ? name : '<unknown-flag>');
   }
-  return { keys, clipped: source.length > 4096 };
+  return { keys, clipped: source.length > TOKEN_LIMIT };
 }
 
 function safeArgv(argv) {

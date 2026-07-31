@@ -10,6 +10,8 @@ const {
   serializeWorkerSnapshot,
 } = require('../services/workerSnapshot');
 
+const KNOWN_FLAG_OR_PLACEHOLDER = /^(?:--[a-z0-9-]+|<unknown-flag>)$/;
+
 function makeIdleLifecycle({ collector, onOrder } = {}) {
   const order = [];
   const events = [];
@@ -414,5 +416,30 @@ test('shedding an oversized payload stays sub-linear in serializations', () => {
   assert.ok(
     elapsedMs < 40,
     `shedding took ${Math.round(elapsedMs)}ms — the cap loop regressed to per-element serialization`,
+  );
+});
+
+test('an oversized args_template is bounded and reported as truncated', () => {
+  // codex round 3: tokenizing the whole template and only then slicing to the
+  // token cap made an oversized profile field pay full parse cost. The read now
+  // stops at TEMPLATE_SCAN_BYTES / TOKEN_LIMIT.
+  //
+  // Deliberately NOT a timing assertion: on this fixture bounded vs unbounded is
+  // 2.7ms vs 6.2ms, too narrow to separate reliably. (The two timing tests above
+  // keep their assertions because their gaps are 40x and 20x.) What is pinned
+  // here is the contract — an oversized template is bounded and says so.
+  const template = `${'--flag-'.padEnd(68, 'x')} `.repeat(30000);
+  assert.ok(template.length > 1.5 * 1024 * 1024, 'the fixture must actually be oversized');
+
+  const payload = serializeWorkerSnapshot({ run_id: 'run_1', profile: { args_template: template } });
+
+  assert.equal(payload.truncated, true, 'an oversized template must be reported as truncated');
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(payload), 'utf8') <= MAX_EVENT_BYTES,
+    'the payload must still fit the cap',
+  );
+  assert.ok(
+    payload.profile.args_template_keys.every(key => KNOWN_FLAG_OR_PLACEHOLDER.test(key)),
+    'every surviving key must be a known flag or the placeholder',
   );
 });
