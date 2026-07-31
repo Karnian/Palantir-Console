@@ -3198,20 +3198,31 @@ function createLifecycleService({
         if (ownerState === 'dead') {
           const exitCode = await channel.detectExitCode(run.id, 'stream-json');
           if (exitCode !== null) {
-            releaseDeadOwner(run, lease);
             const status = exitCode === 0 ? 'completed' : 'failed';
-            try { runService.updateRunStatus(run.id, status, { force: true }); } catch {}
-            if (run.task_id) checkTaskCompletion(run.task_id);
+            let sjDeadWrite = null;
+            try {
+              sjDeadWrite = runService.updateRunStatus(run.id, status, {
+                force: true, requireHeldLease: lease?.lease_id ?? null,
+              });
+            } catch {}
+            if (sjDeadWrite !== null) {
+              releaseDeadOwner(run, lease);
+              if (run.task_id) checkTaskCompletion(run.task_id);
+            }
           }
         } else if (unknownExpired) {
           // A restart wipes the in-memory process map, so "manages its own
           // lifecycle" no longer holds — nothing else will ever terminalize
           // this run (codex S1b R1 #2). Same expired-unknown contract as the
           // CLI path: terminalize without dead evidence, keep the lease held.
+          let sjWrite = null;
           try {
-            runService.updateRunStatus(run.id, 'failed', { force: true, reason: 'agent-exit-unknown' });
+            sjWrite = runService.updateRunStatus(run.id, 'failed', {
+              force: true, reason: 'agent-exit-unknown',
+              requireHeldLease: lease?.lease_id ?? null,
+            });
           } catch {}
-          if (run.task_id) checkTaskCompletion(run.task_id);
+          if (sjWrite !== null && run.task_id) checkTaskCompletion(run.task_id);
         }
         continue;
       }
@@ -3306,8 +3317,12 @@ function createLifecycleService({
         // Cleanup tmux session and output tracking. The lease is released ONLY
         // on confirmed death — an expired-unknown terminalization leaves it
         // held (owner unconfirmed; requeue keeps 409ing).
-        if (ownerState === 'dead') releaseDeadOwner(run, lease);
+        // Kill BEFORE releasing (codex S1b R7): the generation-atomic write
+        // above proves our lease is still current, so the kill targets our own
+        // generation — a release first would lift the requeue 409 and let
+        // generation B claim and spawn into the kill.
         await channel.kill(run.id, 'cli');
+        if (ownerState === 'dead') releaseDeadOwner(run, lease);
         _outputHashes.delete(run.id);
 
         if (eventBus && status === 'needs_input') {
@@ -3413,14 +3428,27 @@ function createLifecycleService({
                 const exitCode = await reObserved.channel.detectExitCode(run.id, 'cli');
                 const status = (exitCode === 0) ? 'completed' : 'failed';
                 const reason = exitCode === null ? 'agent-exit-unknown' : 'process_dead_after_idle';
-                runService.updateRunStatus(run.id, status, { force: true, reason });
+                const idleWrite = runService.updateRunStatus(run.id, status, {
+                  force: true, reason,
+                  requireHeldLease: currentLease?.lease_id ?? null,
+                });
+                if (idleWrite === null) {
+                  try {
+                    runService.addRunEvent(run.id, 'worker:stale_observation_ignored', JSON.stringify({
+                      lease_id: currentLease?.lease_id ?? null, pass: 'idle:write',
+                    }));
+                  } catch { /* annotate-only */ }
+                  continue;
+                }
                 if (run.task_id) checkTaskCompletion(run.task_id);
                 // Release the lease this block actually RE-probed — the
                 // pass-entry lease can be a generation behind, and a stale-id
                 // release loses the CAS after the kill destroys the evidence,
                 // stranding the current lease held forever (codex S1b R5).
-                releaseDeadOwner(run, currentLease);
+                // Kill before release (R7 ordering), with the lease this
+                // block actually RE-probed (R5).
                 await reObserved.channel.kill(run.id, 'cli');
+                releaseDeadOwner(run, currentLease);
                 _outputHashes.delete(run.id);
               } else if (reObserved.state === 'alive') {
                 // Process alive but truly idle for too long — mark needs_input
@@ -3513,8 +3541,9 @@ function createLifecycleService({
           ? await channel.detectExitCode(run.id, 'cli')
           : null;
         const status = (exitCode === 0) ? 'completed' : 'failed';
-        runService.updateRunStatus(run.id, status, {
+        const niWrite = runService.updateRunStatus(run.id, status, {
           force: true,
+          requireHeldLease: lease?.lease_id ?? null,
           reason: agentExitReason(exitCode),
           // Derived at write time like the other two call sites: `run` is a
           // snapshot from before the awaited detectExitCode(), and health can
@@ -3522,9 +3551,18 @@ function createLifecycleService({
           // had already recovered.
           terminalReason: latest => idleTimeoutTerminalReason(latest),
         });
+        if (niWrite === null) {
+          try {
+            runService.addRunEvent(run.id, 'worker:stale_observation_ignored', JSON.stringify({
+              lease_id: lease?.lease_id ?? null, pass: 'needs_input:write',
+            }));
+          } catch { /* annotate-only */ }
+          continue;
+        }
         if (run.task_id) checkTaskCompletion(run.task_id);
-        if (ownerState === 'dead') releaseDeadOwner(run, lease);
+        // Kill before release — same ordering rationale as the running pass.
         await channel.kill(run.id, 'cli');
+        if (ownerState === 'dead') releaseDeadOwner(run, lease);
         _outputHashes.delete(run.id);
       }
     }

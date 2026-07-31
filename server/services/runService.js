@@ -1245,6 +1245,14 @@ function createRunService(db, eventBus) {
       // would change an external API as a side effect of de-duplicating
       // internal observers.
       if (force && TERMINAL_STATUSES.has(status) && current.status === status) {
+        // Generation check applies to the duplicate fast path too (codex S1b
+        // R7): returning the row here without it lets a stale observation run
+        // its follow-ups (kill, cleanup) against the new generation whenever
+        // the statuses merely coincide.
+        if (requireHeldLease) {
+          const held = stmts.getHeldOwnerLease.get(id);
+          if (!held || held.lease_id !== requireHeldLease) return null;
+        }
         // Deliberately no terminal_reason backfill here. A reason is derived
         // from the row at write time, and by now the row is already terminal —
         // so the derivation has nothing left to read and would either produce

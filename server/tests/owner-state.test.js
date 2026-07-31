@@ -163,7 +163,14 @@ test('held-lease sweep releases a draining tmux lease from its durable exit sent
   assert.equal(lease.evidence, 'probe:dead');
 });
 
-test('terminal health handling releases the lease before tmux cleanup destroys dead evidence', async (t) => {
+test('terminal health handling closes the lease in the same pass that destroys the evidence', async (t) => {
+  // Contract evolution: R1 required release BEFORE the kill so the sweep never
+  // depended on a destroyed sentinel. R7 flipped the order (kill first) so a
+  // release cannot lift the requeue 409 and let generation B spawn into the
+  // kill — the ESSENCE survives both orders: the block that destroys the dead
+  // evidence must itself close the lease, never deferring to the sweep. The
+  // narrow kill→release crash window degrades to a held lease that S3's
+  // abandonment path owns (capacity flag is off by default).
   const db = await mkdb(t);
   let leaseStateAtKill = null;
   const engine = makeEngine({
@@ -173,7 +180,7 @@ test('terminal health handling releases the lease before tmux cleanup destroys d
       leaseStateAtKill = db.prepare(
         'SELECT state FROM run_owner_leases WHERE run_id = ?',
       ).get(runId)?.state;
-      engine.setExitCode(null);
+      engine.setExitCode(null); // the kill destroys the sentinel
     },
   });
   const h = createHarness(db, engine);
@@ -183,8 +190,12 @@ test('terminal health handling releases the lease before tmux cleanup destroys d
 
   await h.lifecycleService.checkHealth();
 
-  assert.equal(leaseStateAtKill, 'released');
-  assert.equal(h.runService.getHeldLease(run.id), null);
+  assert.equal(leaseStateAtKill, 'held', 'the kill goes first — our generation is write-confirmed');
+  assert.equal(h.runService.getHeldLease(run.id), null, 'the same pass still closes the lease');
+  assert.equal(
+    db.prepare('SELECT state FROM run_owner_leases WHERE run_id = ?').get(run.id).state,
+    'released',
+  );
 });
 
 test('reserved alive leases are acquired late exactly once without changing run status', async (t) => {
