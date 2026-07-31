@@ -443,3 +443,43 @@ test('an oversized args_template is bounded and reported as truncated', () => {
     'every surviving key must be a known flag or the placeholder',
   );
 });
+
+test('a single oversized token still reports truncation and drops nothing silently', () => {
+  // codex round 4: the first bounded-read fix pushed a sentinel token and relied
+  // on the caller's length check. One 256KB token is a SINGLE token — under the
+  // cap — so an oversized template reported truncated:false while silently
+  // dropping every flag after it.
+  const template = `${'x'.repeat(256 * 1024 + 1)} --model`;
+
+  const payload = serializeWorkerSnapshot({ run_id: 'run_1', profile: { args_template: template } });
+
+  assert.equal(
+    payload.truncated,
+    true,
+    'an oversized template must report truncation even when it parses to few tokens',
+  );
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(payload), 'utf8') <= MAX_EVENT_BYTES,
+  );
+});
+
+test('a nearly spent budget skips the synchronous session lookup', async () => {
+  // listSessions() is execFileSync with a 5s timeout in the tmux engine, so it
+  // can block the health loop past any deadline we set. With no budget left it
+  // must not be called at all.
+  let called = 0;
+  const executionEngine = {
+    listSessions() { called += 1; return []; },
+  };
+  const executor = { async exec() { return { code: 1, stdout: '', stderr: '' }; } };
+
+  await collectWorkerSnapshot({
+    run: { id: 'run_1', agent_profile_id: 'profile_1' },
+    profile: { type: 'codex', command: 'codex' },
+    executor,
+    executionEngine,
+    timeoutMs: 1,
+  });
+
+  assert.equal(called, 0, 'the synchronous session lookup must be skipped when the budget is spent');
+});

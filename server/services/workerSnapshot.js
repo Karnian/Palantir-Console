@@ -104,22 +104,24 @@ function tokenizeTemplate(value) {
     tokens.push(match[0].replace(/^(?:"([\s\S]*)"|'([\s\S]*)')$/, (_m, dq, sq) => dq ?? sq));
     match = pattern.exec(scanned);
   }
-  // Signal truncation to templateKeys the same way an oversized array does.
-  if (text.length > scanned.length && tokens.length <= TOKEN_LIMIT) tokens.push('');
-  return tokens;
+  // Report truncation EXPLICITLY. An earlier version pushed a sentinel token and
+  // relied on the caller's length check, but a single 256KB token yields one
+  // token — under the cap — so an oversized template reported truncated:false
+  // while silently dropping the flags after it (codex round 4).
+  return { tokens, truncated: text.length > scanned.length || tokens.length > TOKEN_LIMIT };
 }
 
 function templateKeys(profile) {
-  const source = Array.isArray(profile?.args_template_keys)
-    ? profile.args_template_keys
-    : tokenizeTemplate(profile?.args_template);
+  const explicit = Array.isArray(profile?.args_template_keys) ? profile.args_template_keys : null;
+  const parsed = explicit ? null : tokenizeTemplate(profile?.args_template);
+  const source = explicit || parsed.tokens;
   const keys = [];
   for (const token of source.slice(0, TOKEN_LIMIT)) {
     const name = flagName(token);
     if (!name) continue;
     keys.push(KNOWN_FLAGS.has(name) ? name : '<unknown-flag>');
   }
-  return { keys, clipped: source.length > TOKEN_LIMIT };
+  return { keys, clipped: source.length > TOKEN_LIMIT || Boolean(parsed?.truncated) };
 }
 
 function safeArgv(argv) {
@@ -376,8 +378,17 @@ async function boundedExec(executor, command, args, deadlineAt, maxBuffer = 512 
   );
 }
 
-function sessionPid(executionEngine, run) {
+// listSessions() is SYNCHRONOUS — the tmux implementation is execFileSync with a
+// 5s timeout, so it can block the health loop for seconds regardless of our
+// deadline (codex round 4). Skip it entirely once the budget is nearly spent;
+// a missing root pid degrades the snapshot, which is the correct trade for S0.
+const SESSION_PID_MIN_BUDGET_MS = 500;
+
+function sessionPid(executionEngine, run, deadlineAt) {
   if (!executionEngine || typeof executionEngine.listSessions !== 'function') return null;
+  if (Number.isFinite(deadlineAt) && deadlineAt - Date.now() < SESSION_PID_MIN_BUDGET_MS) {
+    return null;
+  }
   try {
     const session = (executionEngine.listSessions() || []).find(item => (
       String(item?.runId || '') === String(run.id)
@@ -391,7 +402,7 @@ function sessionPid(executionEngine, run) {
 }
 
 async function resolveRootPid({ executor, executionEngine, run, deadlineAt }) {
-  const direct = sessionPid(executionEngine, run);
+  const direct = sessionPid(executionEngine, run, deadlineAt);
   if (direct) return direct;
   const sessionName = run.tmux_session
     || `palantir-run-${String(run.id || '').replace(/[^A-Za-z0-9_-]/g, '_')}`;
