@@ -3137,7 +3137,8 @@ function createLifecycleService({
         // restart's orphan sweep finalizes it. Without this the history shows a
         // plain `completed` and the idle origin is lost — exactly the "timeout
         // cleanup is indistinguishable from a real completion" case (#466).
-        terminalReason: idleTimeoutTerminalReason(run),
+        // Re-read: several awaits separate this from the `run` snapshot above.
+        terminalReason: idleTimeoutTerminalReason(runService.getRun(run.id) || run),
       });
       if (eventBus && status === 'needs_input') {
         const finalRun = runService.getRun(run.id);
@@ -3733,9 +3734,15 @@ function createLifecycleService({
     // Cancelling a run that health had parked as idle must not erase why it was
     // parked; the cancellation is the operator's response to the idle timeout,
     // not an unrelated terminal event.
+    //
+    // Re-read instead of trusting the caller's snapshot: cancelRun awaits an
+    // async kill(), and health can park or un-park the run in that window. The
+    // snapshot would then either stamp idle_timeout on a run that resumed, or
+    // drop it from a run that went idle mid-cancel.
+    const current = runService.getRun(run.id) || run;
     runService.updateRunStatus(run.id, 'cancelled', {
       force: true,
-      terminalReason: idleTimeoutTerminalReason(run),
+      terminalReason: idleTimeoutTerminalReason(current),
     });
     if (run.task_id) {
       checkTaskCompletion(run.task_id);

@@ -1134,6 +1134,58 @@ test('cancelling an idle-parked run keeps the idle provenance', async (t) => {
   assert.equal(cancelled.terminal_reason, 'idle_timeout');
 });
 
+// Codex round-2 review: the first fix read the caller's run snapshot, so a
+// status change during the awaited kill() either stamped a stale idle_timeout
+// or dropped a fresh one. Both directions are pinned here with a kill() the
+// test controls, which is the only way to open that window deterministically.
+for (const [initial, during, expected] of [
+  ['needs_input', 'running', null],
+  ['running', 'needs_input', 'idle_timeout'],
+]) {
+  test(`cancel resolves idle provenance at write time (${initial} → ${during})`, async (t) => {
+    const db = await mkdb(t);
+    const rs = createRunService(db, null);
+    const ts = createTaskService(db);
+    const ps = createProjectService(db);
+    const aps = createAgentProfileService(db);
+    const project = seedProject(db);
+    const task = seedTask(db, project.id);
+    const profile = seedProfile(db, { command: 'codex' });
+    const run = rs.createRun({ task_id: task.id, agent_profile_id: profile.id, prompt: 'work' });
+    rs.markRunStarted(run.id, {});
+    rs.updateRunStatus(run.id, initial, {
+      force: true,
+      reason: initial === 'needs_input' ? 'idle_timeout' : 'started',
+    });
+
+    let releaseKill;
+    const execEngine = makeStubExecutionEngine({ alive: true, exitCode: null });
+    execEngine.kill = () => new Promise((resolve) => { releaseKill = resolve; });
+
+    const lc = createLifecycleService({
+      runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+      executionEngine: execEngine, streamJsonEngine: null, worktreeService: null, eventBus: null,
+    });
+
+    const pending = lc.cancelRun(run.id);
+    // The window: health re-parks or resumes the run while kill() is in flight.
+    rs.updateRunStatus(run.id, during, {
+      force: true,
+      reason: during === 'needs_input' ? 'idle_timeout' : 'user_input',
+    });
+    releaseKill(true);
+    await pending;
+
+    const cancelled = rs.getRun(run.id);
+    assert.equal(cancelled.status, 'cancelled');
+    assert.equal(
+      cancelled.terminal_reason,
+      expected,
+      'terminal_reason must reflect the status at write time, not at cancel entry',
+    );
+  });
+}
+
 test('cancelling a run that was never idle records no terminal reason', async (t) => {
   const db = await mkdb(t);
   const rs = createRunService(db, null);
