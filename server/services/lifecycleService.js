@@ -3133,6 +3133,11 @@ function createLifecycleService({
       runService.updateRunStatus(run.id, status, {
         force: true,
         reason: claudeResult?.reason || agentExitReason(exitCode),
+        // A run that health already parked as idle keeps that provenance when a
+        // restart's orphan sweep finalizes it. Without this the history shows a
+        // plain `completed` and the idle origin is lost — exactly the "timeout
+        // cleanup is indistinguishable from a real completion" case (#466).
+        terminalReason: idleTimeoutTerminalReason(run),
       });
       if (eventBus && status === 'needs_input') {
         const finalRun = runService.getRun(run.id);
@@ -3725,7 +3730,13 @@ function createLifecycleService({
    * Cancel a running agent.
    */
   function finishCancelRun(run) {
-    runService.updateRunStatus(run.id, 'cancelled', { force: true });
+    // Cancelling a run that health had parked as idle must not erase why it was
+    // parked; the cancellation is the operator's response to the idle timeout,
+    // not an unrelated terminal event.
+    runService.updateRunStatus(run.id, 'cancelled', {
+      force: true,
+      terminalReason: idleTimeoutTerminalReason(run),
+    });
     if (run.task_id) {
       checkTaskCompletion(run.task_id);
     }

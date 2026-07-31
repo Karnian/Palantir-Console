@@ -1098,6 +1098,65 @@ test('checkHealth: a run finalized after idle timeout keeps completed compatibil
   assert.equal(rs.getRun(normalRun.id).terminal_reason, null);
 });
 
+test('cancelling an idle-parked run keeps the idle provenance', async (t) => {
+  // Codex review: without this the operator's cancellation erases WHY the run
+  // was parked, and the history shows a bare `cancelled` — the same loss of
+  // provenance #466 is about.
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const execEngine = makeStubExecutionEngine({
+    alive: true,
+    exitCode: null,
+    output: 'same output',
+  });
+  const lc = createLifecycleService({
+    runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+    executionEngine: execEngine, streamJsonEngine: null, worktreeService: null, eventBus: null,
+  });
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, { command: 'codex', idle_timeout_ms: 60 * 1000 });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'timeout' });
+
+  await lc.checkHealth();
+  db.prepare('UPDATE run_events SET created_at = ? WHERE run_id = ?')
+    .run(new Date(Date.now() - 2 * 60 * 1000).toISOString(), run.id);
+  await lc.checkHealth();
+  assert.equal(rs.getRun(run.id).status, 'needs_input');
+
+  await lc.cancelRun(run.id);
+
+  const cancelled = rs.getRun(run.id);
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.terminal_reason, 'idle_timeout');
+});
+
+test('cancelling a run that was never idle records no terminal reason', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const execEngine = makeStubExecutionEngine({ alive: true, exitCode: null, output: 'out' });
+  const lc = createLifecycleService({
+    runService: rs, taskService: ts, agentProfileService: aps, projectService: ps,
+    executionEngine: execEngine, streamJsonEngine: null, worktreeService: null, eventBus: null,
+  });
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, { command: 'codex' });
+  const run = await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'work' });
+
+  await lc.cancelRun(run.id);
+
+  const cancelled = rs.getRun(run.id);
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.terminal_reason, null, 'a plain cancellation must not fabricate a reason');
+});
+
 // ---------------------------------------------------------------------------
 // INS-02: needs_input → sendAgentInput → running recovery
 // ---------------------------------------------------------------------------
