@@ -687,6 +687,35 @@ function createRunService(db, eventBus) {
          )
     `),
     delete: db.prepare('DELETE FROM runs WHERE id = ?'),
+    // S1a owner leases. There is intentionally no FK to runs: a closed lease is
+    // durable ownership evidence and must survive deletion of its run row.
+    insertOwnerLease: db.prepare(`
+      INSERT INTO run_owner_leases (run_id, lease_id, state, acquired_at)
+      SELECT id, ?, 'held', NULL
+      FROM runs
+      WHERE id = ? AND is_manager = 0
+    `),
+    getHeldOwnerLease: db.prepare(`
+      SELECT * FROM run_owner_leases
+      WHERE run_id = ? AND state = 'held'
+      LIMIT 1
+    `),
+    stampOwnerLeaseAcquired: db.prepare(`
+      UPDATE run_owner_leases
+      SET acquired_at = datetime('now')
+      WHERE run_id = ? AND lease_id = ? AND state = 'held' AND acquired_at IS NULL
+    `),
+    closeOwnerLease: db.prepare(`
+      UPDATE run_owner_leases
+      SET state = ?, closed_at = datetime('now'), evidence = ?
+      WHERE run_id = ? AND lease_id = ? AND state = 'held'
+    `),
+    closeAnyHeldOwnerLease: db.prepare(`
+      UPDATE run_owner_leases
+      SET state = 'abandoned', closed_at = datetime('now'), evidence = ?
+      WHERE run_id = ? AND state = 'held'
+    `),
+    runRowExists: db.prepare('SELECT 1 FROM runs WHERE id = ?'),
     // Events
     insertEvent: db.prepare(`
       INSERT INTO run_events (run_id, event_type, payload_json)
@@ -721,6 +750,73 @@ function createRunService(db, eventBus) {
       LIMIT 1
     `),
   };
+
+  const claimQueuedRunTx = db.transaction((id, leaseId) => {
+    const info = stmts.claimQueued.run(id);
+    if (info.changes === 0) return null;
+    // A same-run reclaim path EXISTS: PATCH /api/runs/:id/status allows
+    // failed/cancelled/stopped → queued, and tmux/remote/migration runs can
+    // reach terminal with their lease still held. Without this supersede the
+    // partial unique index makes the claim throw and one stale run aborts the
+    // whole profile drain (codex S1a R1 #2). Ownership of the previous
+    // generation was never confirmed dead, so it closes as abandoned.
+    const superseded = stmts.closeAnyHeldOwnerLease.run('superseded_by_reclaim', id);
+    const leaseInfo = stmts.insertOwnerLease.run(leaseId, id);
+    return {
+      changes: info.changes,
+      leaseId: leaseInfo.changes > 0 ? leaseId : null,
+      supersededLease: superseded.changes > 0,
+    };
+  });
+
+  const markRunStartedTx = db.transaction((id, leaseId, fields) => {
+    // Generation fence (codex S1a R4): when the caller carries a leaseId, the
+    // status write is gated on that lease still being the CURRENT held one. A
+    // superseded generation's late markRunStarted must not resurrect the run
+    // to 'running' after its replacement already finished. Legacy callers
+    // without a leaseId (manager runs, boot resume) keep the unconditional
+    // write.
+    if (leaseId) {
+      const held = stmts.getHeldOwnerLease.get(id);
+      if (!held || held.lease_id !== leaseId) return { stale: true };
+      // Same-generation late start (codex S1a R5): the run can already be
+      // terminal while its lease is still held (draining). A start arriving
+      // then must not resurrect completed → running.
+      const current = stmts.getById.get(id);
+      if (current && TERMINAL_STATUSES.has(current.status)) return { stale: true };
+      stmts.stampOwnerLeaseAcquired.run(id, leaseId);
+    }
+    stmts.updateStarted.run(
+      fields.tmux_session || null,
+      fields.worktree_path || null,
+      fields.branch || null,
+      id
+    );
+    return { stale: false };
+  });
+
+  const releaseOwnerTx = db.transaction((runId, leaseId, state, evidence) => {
+    const info = stmts.closeOwnerLease.run(state, evidence ?? null, runId, leaseId);
+    if (info.changes === 0) return null;
+    const eventType = state === 'released'
+      ? 'worker:owner_released'
+      : 'worker:owner_abandoned';
+    // A task-delete cascade can remove the run row while its lease is still
+    // held; inserting a run_event would then hit the FK and roll the whole
+    // release back, leaving the lease held forever (codex S1a R1 #3). The lease
+    // row itself now carries the evidence, so closing without the event is
+    // still a complete durable record.
+    let eventId = null;
+    if (stmts.runRowExists.get(runId)) {
+      const eventInfo = stmts.insertEvent.run(
+        runId,
+        eventType,
+        JSON.stringify({ lease_id: leaseId, evidence: evidence ?? null }),
+      );
+      eventId = eventInfo.lastInsertRowid;
+    }
+    return { eventType, eventId };
+  });
 
   function listRuns({ task_id, status } = {}) {
     if (task_id) return stmts.getByTask.all(task_id);
@@ -984,6 +1080,23 @@ function createRunService(db, eventBus) {
     if (!VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid run status: ${status}`);
     }
+    // Reclaim source-block (codex S1a R7). Seven review rounds of generation
+    // races (R4-R7) all traced to ONE opening: requeueing a run whose previous
+    // owner was never confirmed dead (lease still held — tmux, remote, or a
+    // crashed local worker). Every per-path guard sprouted a new bypass
+    // (REMOTE_SPAWN_UNCERTAIN being the last), so the opening itself closes:
+    // a run with a held lease cannot go back to 'queued'. The lease closes via
+    // exit-handler (local), DELETE (abandoned), or the S1b probe — after which
+    // requeue works again. force does not bypass this; force means "skip the
+    // state machine", not "race a possibly-live owner".
+    if (status === 'queued') {
+      const held = stmts.getHeldOwnerLease.get(id);
+      if (held) {
+        throw new ConflictError(
+          `Run ${id} still has a held owner lease (${held.lease_id}); its previous owner was never confirmed dead. Delete the run or wait for the owner observation before requeueing.`,
+        );
+      }
+    }
     // terminalReason may be a FUNCTION of the row being written. The CAS loop
     // below re-reads on every attempt, so a caller whose reason is derived from
     // the current status (idle provenance, #486) must be able to re-derive it —
@@ -1098,14 +1211,21 @@ function createRunService(db, eventBus) {
     return run;
   }
 
-  function markRunStarted(id, { tmux_session, worktree_path, branch } = {}) {
+  function markRunStarted(id, leaseIdOrFields = {}, maybeFields) {
+    const separateLeaseArg = arguments.length >= 3 || typeof leaseIdOrFields === 'string';
+    const leaseId = separateLeaseArg
+      ? (leaseIdOrFields || null)
+      : (leaseIdOrFields?.leaseId || leaseIdOrFields?.lease_id || null);
+    const fields = separateLeaseArg ? (maybeFields || {}) : (leaseIdOrFields || {});
+    const { tmux_session, worktree_path, branch } = fields;
     const prev = getRun(id);
-    stmts.updateStarted.run(
-      tmux_session || null,
-      worktree_path || null,
-      branch || null,
-      id
-    );
+    const outcome = markRunStartedTx(id, leaseId, fields);
+    if (outcome?.stale) {
+      try {
+        addRunEvent(id, 'worker:stale_start_ignored', JSON.stringify({ lease_id: leaseId }));
+      } catch { /* annotate-only */ }
+      return stmts.getById.get(id);
+    }
     const run = stmts.getById.get(id);
     // #436: the tmux session NAME is enough to attach to the worker's terminal,
     // which is authority well beyond the Console API. The run row still stores it
@@ -1206,27 +1326,62 @@ function createRunService(db, eventBus) {
     `).run(Number(retryCount) || 0, id);
   }
 
-  function claimQueuedRun(id) {
+  function claimQueuedRun(id, { withLease = false } = {}) {
     if (repoFeatureEnabled()) {
       const current = stmts.getById.get(id);
-      if (isUnreadyGitRun(current)) return 0;
+      if (isUnreadyGitRun(current)) return withLease ? null : 0;
     }
-    const info = stmts.claimQueued.run(id);
-    if (info.changes === 0) return 0;
-    const run = stmts.getById.get(id);
-    addRunEvent(id, 'status:running', JSON.stringify({ reason: 'queue:claim' }));
+    const claimed = claimQueuedRunTx(id, crypto.randomUUID());
+    if (!claimed) return withLease ? null : 0;
+    // The claim + lease are already committed. Everything past this point is
+    // OBSERVATION — if it throws, the caller never learns the leaseId and its
+    // finally-release cannot run, stranding a running + held(reserved) pair
+    // forever (codex S1a R3). Annotation loss is acceptable; a stranded lease
+    // is not.
+    try {
+      const run = stmts.getById.get(id);
+      addRunEvent(id, 'status:running', JSON.stringify({ reason: 'queue:claim' }));
+      if (eventBus) {
+        eventBus.emit('run:status', {
+          run,
+          from_status: 'queued',
+          to_status: 'running',
+          reason: 'queue:claim',
+          task_id: run.task_id || null,
+          project_id: deriveOperatorProjectId(run),
+          node_id: run.node_id || null,
+        });
+      }
+    } catch { /* annotate-only — the committed claim must reach the caller */ }
+    return withLease
+      ? { claimed: true, leaseId: claimed.leaseId }
+      : claimed.changes;
+  }
+
+  function getHeldLease(runId) {
+    return stmts.getHeldOwnerLease.get(runId) || null;
+  }
+
+  function releaseOwner(runId, leaseId, options = {}, legacyOptions = {}) {
+    const normalized = typeof options === 'string'
+      ? { ...legacyOptions, state: options }
+      : (options || {});
+    const { state, evidence = null } = normalized;
+    if (state !== 'released' && state !== 'abandoned') {
+      throw new BadRequestError('Owner lease state must be released or abandoned');
+    }
+    const released = releaseOwnerTx(runId, leaseId, state, evidence);
+    if (!released) return false;
     if (eventBus) {
-      eventBus.emit('run:status', {
-        run,
-        from_status: 'queued',
-        to_status: 'running',
-        reason: 'queue:claim',
-        task_id: run.task_id || null,
-        project_id: deriveOperatorProjectId(run),
-        node_id: run.node_id || null,
+      // releaseOwnerTx has returned, so its transaction is committed before
+      // subscribers can observe the lease/event pair.
+      eventBus.emit('run:event', {
+        runId,
+        eventType: released.eventType,
+        eventId: released.eventId,
       });
     }
-    return info.changes;
+    return true;
   }
 
   function claimQueuedRunForMaterialization(id) {
@@ -1799,6 +1954,13 @@ function createRunService(db, eventBus) {
 
   function deleteRun(id) {
     getRun(id);
+    const heldLease = getHeldLease(id);
+    if (heldLease) {
+      releaseOwner(id, heldLease.lease_id, {
+        state: 'abandoned',
+        evidence: 'run_deleted',
+      });
+    }
     stmts.delete.run(id);
   }
 
@@ -1970,6 +2132,7 @@ function createRunService(db, eventBus) {
     getOldestMaterializableOnNode,
     countMaterializingOnNode, countMaterializingGlobal,
     claimQueuedRun, claimQueuedRunForMaterialization, restartMaterializationAttempt,
+    getHeldLease, releaseOwner,
     markMaterializePending, updateRunMaterialized, markMaterializedReady,
     getProjectNodeWorkspace, markProjectNodeWorkspaceReady, markProjectNodeWorkspaceFailed,
     touchProjectNodeWorkspace, acquireMaterializationLease, touchMaterializationLease, releaseMaterializationLease,

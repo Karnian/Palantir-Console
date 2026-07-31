@@ -308,7 +308,7 @@ function createStreamJsonEngine({
     tools, allowedTools, disallowedTools, maxBudgetUsd, model, mcpConfig, strictMcpConfig, safeMode, bare, disableSlashCommands, noChrome, settingSources, settings, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent,
     // Phase 10D Tier 2
     isolated, pluginDirs, settingsPath, onCleanup,
-    executor, nodePrefix, envAllowlist, nodeId }) {
+    executor, nodePrefix, envAllowlist, nodeId, leaseId, onExit }) {
 
     const usingRemoteExecutor = !!executor;
     if (usingRemoteExecutor && !isManager) {
@@ -400,8 +400,20 @@ function createStreamJsonEngine({
       status: 'starting',
       isManager: !!isManager,
       onVendorEvent: typeof onVendorEvent === 'function' ? onVendorEvent : null,
+      leaseId: leaseId || null,
+      onExit: typeof onExit === 'function' ? onExit : null,
+      ownerExitFired: false,
     };
     processes.set(runId, proc);
+
+    const fireOwnerExit = (code, signal) => {
+      if (proc.ownerExitFired || !proc.onExit) return;
+      proc.ownerExitFired = true;
+      try {
+        const pending = proc.onExit({ runId, leaseId: proc.leaseId, code, signal });
+        if (pending && typeof pending.catch === 'function') pending.catch(() => {});
+      } catch { /* owner observation must not alter process handling */ }
+    };
 
     // Wire a resolved child handle (local child_process OR remote ssh duplex)
     // into the proc: NDJSON stdout, stderr, error/exit handlers, and the manager
@@ -456,6 +468,9 @@ function createStreamJsonEngine({
         // Phase 10D: some spawn errors do not produce a subsequent 'exit'
         // (e.g. ENOENT on the binary), so we must fire cleanup here too.
         fireCleanup();
+        // Same reasoning for the owner observation (codex S1a R1): without this
+        // an async spawn failure leaves the lease held forever.
+        fireOwnerExit(1, null);
         if (runService) {
           runService.addRunEvent(runId, 'error', JSON.stringify({
             message: `Spawn error: ${err.message}`,
@@ -466,6 +481,7 @@ function createStreamJsonEngine({
       child.on('exit', async (code, signal) => {
         console.log(`[engine] Process ${runId} exited: code=${code} signal=${signal}`);
         fireCleanup();
+        fireOwnerExit(code, signal);
 
         if (proc.isRemote && code === 255) {
           // Fence this node before terminalizing a worker. updateRunStatus emits

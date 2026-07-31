@@ -1096,9 +1096,28 @@ function createLifecycleService({
         return null;
       }
     }
-    const claimed = runService.claimQueuedRun(runId);
+    const claimed = runService.claimQueuedRun(runId, { withLease: true });
     if (!claimed) return null;
+    const leaseId = claimed.leaseId;
+    let spawnAccepted = false;
+    // Generation fence (codex S1a R5): async prep (materialization, worktree,
+    // MCP staging) sits between our claim and the actual spawn. If this run was
+    // requeued and reclaimed meanwhile, OUR lease is no longer the held one and
+    // spawning would race the current generation's worker.
+    const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'stopped']);
+    const leaseStillCurrent = () => {
+      if (!leaseId || typeof runService.getHeldLease !== 'function') return true;
+      const held = runService.getHeldLease(runId);
+      if (!held || held.lease_id !== leaseId) return false;
+      // A run can go terminal while its lease is still held (draining — e.g. a
+      // cancel between claim and spawn). Spawning then would raise a worker for
+      // a finished run and a late failure would overwrite cancelled → failed
+      // (codex S1a R6 #1).
+      const current = runService.getRun(runId);
+      return Boolean(current && !TERMINAL_RUN_STATUSES.has(current.status));
+    };
 
+    try {
     const run = runService.getRun(runId);
     let queuedArgs;
     try {
@@ -1179,6 +1198,10 @@ function createLifecycleService({
     }
     const node = getDispatchNode(run.node_id);
     const isRemoteNode = node && (node.kind || 'local') !== 'local';
+    const releaseOnLocalProcessExit = () => runService.releaseOwner(run.id, leaseId, {
+      state: 'released',
+      evidence: 'process_exit',
+    });
     // Loopback is a valid destination only for local workers. Remote workers
     // receive the proposal capability solely when the operator configured a
     // PALANTIR_BASE_URL that is reachable from the worker node.
@@ -1787,7 +1810,12 @@ function createLifecycleService({
               version: 1,
             }));
           }
-          result = await channelForNode(run.node_id).spawnWorker(run.id, {
+          if (!leaseStillCurrent()) {
+          const err = new Error('stale lease generation; spawn aborted');
+          err.code = 'STALE_LEASE_GENERATION';
+          throw err;
+        }
+        result = await channelForNode(run.node_id).spawnWorker(run.id, {
             engine: 'stream-json',
             spec: {
               prompt,
@@ -1820,9 +1848,14 @@ function createLifecycleService({
                 ...parseEnvAllowlistArray(profile.env_allowlist),
                 ...trustedBearerEnvKeys,
               ],
+              ...(!isRemoteNode ? {
+                leaseId,
+                onExit: releaseOnLocalProcessExit,
+              } : {}),
               ...(isolatedOpts || {}),
             },
           });
+          spawnAccepted = true;
         } catch (spawnErr) {
           // spawnAgent itself invokes its onCleanup before rethrow when
           // spawn() is called, so the temp dir is already gone. This is
@@ -1982,6 +2015,11 @@ function createLifecycleService({
             } catch { goalOutputLog = null; }
           }
         }
+        if (!leaseStillCurrent()) {
+          const err = new Error('stale lease generation; spawn aborted');
+          err.code = 'STALE_LEASE_GENERATION';
+          throw err;
+        }
         result = await channelForNode(run.node_id).spawnWorker(run.id, {
           engine: 'cli',
           spec: {
@@ -2004,8 +2042,13 @@ function createLifecycleService({
               : undefined,
             workerPath: isRemoteNode ? (node.node_prefix || undefined) : undefined,
             outputLogPath: goalOutputLog || undefined,
+            ...(!isRemoteNode && executionEngine?.type === 'subprocess' ? {
+              leaseId,
+              onExit: releaseOnLocalProcessExit,
+            } : {}),
           },
         });
+        spawnAccepted = true;
       }
 
       // Persist the recovery safety marker only after the worker channel has
@@ -2018,8 +2061,23 @@ function createLifecycleService({
         memory_propose: !!workerProposalToken,
       }));
 
+      // TOCTOU seal (codex S1a R6 #2): the pre-spawn check and the async spawn
+      // acceptance leave a window where a reclaim can supersede us AFTER the
+      // process started. Recording a stale start is not enough — the process
+      // itself must go, or the current generation's lease and our orphan worker
+      // diverge. Best-effort kill; the annotate below makes the outcome visible.
+      if (!leaseStillCurrent()) {
+        try { await channelForNode(run.node_id).kill(run.id, 'cli'); } catch { /* best effort */ }
+        try {
+          runService.addRunEvent(run.id, 'worker:stale_spawn_killed', JSON.stringify({
+            lease_id: leaseId,
+          }));
+        } catch { /* annotate-only */ }
+        return null;
+      }
+
       // Mark run as started
-      runService.markRunStarted(run.id, {
+      runService.markRunStarted(run.id, leaseId, {
         tmux_session: result.sessionName || null,
         worktree_path: worktreePath,
         branch,
@@ -2033,6 +2091,7 @@ function createLifecycleService({
       return runService.getRun(run.id);
     } catch (error) {
       if (isRemoteNode && error.code === 'REMOTE_SPAWN_UNCERTAIN') {
+        spawnAccepted = true;
         // The SSH acknowledgement was lost after the detached start command
         // may have crossed the node boundary. Keep this SAME run as the durable
         // owner and let tmux/exit-sentinel health reconciliation decide whether
@@ -2065,7 +2124,7 @@ function createLifecycleService({
           session_name: error.sessionName || `palantir-run-${run.id}`,
           reason: 'ssh_ack_lost_after_detached_start',
         }));
-        runService.markRunStarted(run.id, {
+        runService.markRunStarted(run.id, leaseId, {
           tmux_session: error.sessionName || `palantir-run-${run.id}`,
           worktree_path: worktreePath,
           branch,
@@ -2074,6 +2133,17 @@ function createLifecycleService({
           taskService.updateTaskStatus(taskId, 'in_progress');
         }
         return runService.getRun(run.id);
+      }
+      if (error?.code === 'STALE_LEASE_GENERATION' || !leaseStillCurrent()) {
+        // Our generation was superseded while we prepared. The CURRENT
+        // generation owns the run's status now — a late failure from us must
+        // not overwrite running → failed under it (codex S1a R5).
+        try {
+          runService.addRunEvent(run.id, 'worker:stale_spawn_ignored', JSON.stringify({
+            lease_id: leaseId, error: String(error?.message || error),
+          }));
+        } catch { /* annotate-only */ }
+        return null;
       }
       runService.updateRunStatus(run.id, 'failed', { force: true });
       runService.addRunEvent(run.id, 'error', JSON.stringify({ message: error.message }));
@@ -2090,6 +2160,14 @@ function createLifecycleService({
         task_id: run.task_id,
       });
       throw error;
+    }
+    } finally {
+      if (!spawnAccepted) {
+        runService.releaseOwner(runId, leaseId, {
+          state: 'released',
+          evidence: 'spawn_failed',
+        });
+      }
     }
   }
 

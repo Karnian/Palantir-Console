@@ -436,9 +436,14 @@ started_at=datetime('now') WHERE id=? AND status='queued'`), spawn 성공 기록
 - **held lease sweep 은 run status 와 독립이어야 한다**(S1b). 현재 health 는 `running`
   (`lifecycleService.js:2894`)과 `needs_input`(`:3114`)만 순회하고 **`paused` 는 어느
   sweep 에도 없다** — lease 순회는 `state='held'` 를 직접 질의한다.
-- 현재 재클레임 경로가 없으므로 fence 가 실제로 막는 것은 **중복 관측자 경쟁**(exit
-  handler vs health loop)과 미래 경로다. 새 재클레임 경로를 추가하는 쪽이 기존 held
-  lease 를 닫을 책임을 진다.
+- **정정 2회(S1a 적대리뷰 R1→R7)**: "재클레임 경로가 없다"는 전제가 틀렸고
+  (`PATCH /api/runs/:id/status` 가 terminal → queued 허용), R4~R7 의 세대 경쟁
+  BLOCKER 가 전부 그 구멍에서 나왔다. 최종 계약:
+  - **→queued 전이는 held lease 존재 시 409** (force 우회 불가). lease 가
+    닫힌 뒤에만 재클레임 가능. 이것이 1차 방어이자 클래스의 종결이다.
+  - claim 트랜잭션의 supersede(`abandoned/superseded_by_reclaim`), start/spawn 의
+    세대+terminal fence, post-spawn kill seal 은 **defense-in-depth** 로 유지한다
+    (raw SQL 로는 여전히 같은 상태를 만들 수 있다).
 
 **C5. `releaseOwner(runId, leaseId, { state, evidence })` (S1a)**
 
