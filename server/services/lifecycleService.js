@@ -1709,7 +1709,14 @@ function createLifecycleService({
           && !(presetResolution && presetResolution.isolated)
         ) {
           const auth = _authResolver.resolveClaudeAuth({
-            envAllowlist: parseEnvAllowlistArray(profile.env_allowlist),
+            // The SAME effective keys the spawn env is built from. Reading the
+            // raw column here made a worker whose credentials come only from a
+            // declared provider fail auth before spawn, while the isolated
+            // branch below and the Manager/Operator paths accepted it (#457).
+            envAllowlist: effectiveProfileEnvKeys,
+            providerEnv: profileEnvPolicy?.valid ? profileEnvPolicy.providers : undefined,
+            allowDefaultAuth: profileEnvPolicy?.valid ? profileEnvPolicy.allowDefaultAuth : undefined,
+            blockedEnvKeys: profileEnvPolicy?.valid ? profileEnvPolicy.blockedKeys : undefined,
             ..._authResolverOpts,
             bare: true,
             settings: templateOptions.settings,
