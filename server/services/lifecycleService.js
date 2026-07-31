@@ -4005,6 +4005,19 @@ function createLifecycleService({
             // every other terminal path (codex S1b R10); the observed lease was
             // captured before the liveness await above (R11).
             const exitCode = await workerChannel.detectExitCode(runId, 'cli');
+            // C8: absence without a recorded exit is UNKNOWN, not death. A
+            // leased run holds (the sweep + grace TTL own it); only a legacy
+            // lease-less run keeps the original immediate-failed behavior
+            // (codex S1b R12).
+            if (exitCode === null && observedLease) {
+              try {
+                if (typeof runService.annotateOwnerProbeUnknown === 'function') {
+                  runService.annotateOwnerProbeUnknown(runId, observedLease.lease_id);
+                }
+              } catch { /* annotate-only */ }
+              recovered.push({ runId, status: 'unknown_preserved' });
+              continue;
+            }
             const status = (exitCode === 0) ? 'completed' : 'failed';
             const output = status === 'failed'
               ? await workerChannel.getOutput(runId, 200, 'cli')
