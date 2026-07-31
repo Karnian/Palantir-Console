@@ -614,6 +614,15 @@ function createOperatorSpawnService({
         .map(type => resolveManagerProfileRuntime(type, profiles, { isRemoteNode }));
       managerRuntime = candidates.find(candidate => candidate.authCtx.canAuth) || candidates[0];
       adapterType = managerRuntime.adapterType;
+      // A rejected profile on a candidate we did NOT select is not fatal (that
+      // is the point of the deferred throw), but silently dropping it leaves the
+      // operator staring at the OTHER adapter's auth error with no hint that a
+      // broken profile took this one out of the running.
+      for (const candidate of candidates) {
+        if (candidate !== managerRuntime && candidate.profileError) {
+          log(`adapter=${candidate.adapterType} profile rejected during null-preference probe: ${candidate.profileError.message}`);
+        }
+      }
     } else {
       managerRuntime = resolveManagerProfileRuntime(adapterType, profiles, { isRemoteNode });
     }
