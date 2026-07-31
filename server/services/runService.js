@@ -185,6 +185,23 @@ function createRunService(db, eventBus) {
     updateClaudeSessionId: db.prepare(`
       UPDATE runs SET claude_session_id = ? WHERE id = ?
     `),
+    updateStatusCasWithLease: db.prepare(`
+      UPDATE runs
+         SET status = ?,
+             ended_at = CASE
+               WHEN ? IN ('completed','failed','cancelled','stopped') THEN datetime('now')
+               ELSE ended_at
+             END,
+             terminal_reason = CASE
+               WHEN ? IN ('completed','failed','cancelled','stopped') THEN ?
+               ELSE NULL
+             END
+       WHERE id = ? AND status = ?
+         AND EXISTS (
+           SELECT 1 FROM run_owner_leases
+           WHERE run_id = ? AND lease_id = ? AND state = 'held'
+         )
+    `),
     updateStatusCas: db.prepare(`
       UPDATE runs
          SET status = ?,
@@ -1180,6 +1197,11 @@ function createRunService(db, eventBus) {
     force = false,
     reason = null,
     terminalReason = null,
+    // Generation-atomic terminal write (codex S1b R6): every check-then-act
+    // guard left an await window; conditioning the WRITE itself on the probed
+    // lease still being the current held one closes the class. On a stale
+    // generation the CAS matches nothing and the caller gets null back.
+    requireHeldLease = null,
   } = {}) {
     if (!VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid run status: ${status}`);
@@ -1250,14 +1272,29 @@ function createRunService(db, eventBus) {
 
       // Re-derived per attempt against the row this write is actually racing.
       const attemptTerminalReason = resolveTerminalReason(current);
-      const info = stmts.updateStatusCas.run(
-        status,
-        status,
-        status,
-        attemptTerminalReason,
-        id,
-        current.status,
-      );
+      const info = requireHeldLease
+        ? stmts.updateStatusCasWithLease.run(
+          status,
+          status,
+          status,
+          attemptTerminalReason,
+          id,
+          current.status,
+          id,
+          requireHeldLease,
+        )
+        : stmts.updateStatusCas.run(
+          status,
+          status,
+          status,
+          attemptTerminalReason,
+          id,
+          current.status,
+        );
+      if (requireHeldLease && info.changes === 0) {
+        const held = stmts.getHeldOwnerLease.get(id);
+        if (!held || held.lease_id !== requireHeldLease) return null; // stale generation
+      }
       if (info.changes > 0) {
         updated = true;
         break;

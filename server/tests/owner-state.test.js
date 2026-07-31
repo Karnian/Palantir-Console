@@ -402,3 +402,46 @@ test('the idle recheck releases the generation it re-probed', async (t) => {
   const lease = db.prepare('SELECT state FROM run_owner_leases WHERE run_id = ?').get(run.id);
   assert.equal(lease.state, 'released', 'the re-probed generation must be the one released');
 });
+
+test('a reclaim inside the terminal block awaits cannot fail the new generation', async (t) => {
+  // codex R6: every check-then-act guard left an await window (getOutput,
+  // detached-result parse). The terminal WRITE itself is now conditioned on the
+  // probed lease still being held (SQL EXISTS), so any interleaving loses
+  // atomically at write time.
+  const db = await mkdb(t);
+  const engine = makeEngine({ type: 'tmux', alive: true, exitCode: null });
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+
+  engine.setExitCode(1); // dead evidence for generation A
+  // Inject the reclaim inside the terminal block's output await — after the
+  // probe, after the pre-write guard, before the write.
+  const origGetOutput = engine.getOutput;
+  let genB = null;
+  engine.getOutput = (...args) => {
+    if (genB === null) {
+      db.prepare("UPDATE runs SET status = 'queued' WHERE id = ?").run(run.id);
+      genB = h.runService.claimQueuedRun(run.id, { withLease: true });
+      db.prepare("UPDATE runs SET status = 'running' WHERE id = ?").run(run.id);
+    }
+    return origGetOutput(...args);
+  };
+
+  await h.lifecycleService.checkHealth();
+
+  assert.ok(genB && genB.leaseId, 'the reclaim happened inside the await window');
+  assert.equal(
+    h.runService.getRun(run.id).status,
+    'running',
+    "generation A's write must lose atomically — B's run stays running",
+  );
+  assert.equal(
+    db.prepare('SELECT state FROM run_owner_leases WHERE lease_id = ?').get(genB.leaseId).state,
+    'held',
+  );
+  const annotated = db.prepare(`
+    SELECT COUNT(*) c FROM run_events
+    WHERE run_id = ? AND event_type = 'worker:stale_observation_ignored'
+  `).get(run.id).c;
+  assert.ok(annotated >= 1, 'the discarded observation is visible');
+});

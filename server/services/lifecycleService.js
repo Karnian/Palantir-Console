@@ -3267,7 +3267,24 @@ function createLifecycleService({
         const reason = claudeResult?.reason
           || (codexLimitFailure ? 'codex-rate-limit' : agentExitReason(exitCode));
         const fromStatus = run.status;
-        runService.updateRunStatus(run.id, status, { force: true, reason });
+        const terminalWrite = runService.updateRunStatus(run.id, status, {
+          force: true, reason,
+          requireHeldLease: lease?.lease_id ?? null,
+        });
+        if (terminalWrite === null) {
+          // The probed generation is no longer the current held one — a
+          // reclaim landed inside one of this block's awaits (getOutput,
+          // detached-result parse). The write matched nothing atomically;
+          // every follow-up (result, kill, cleanup) belongs to the NEW
+          // generation and must not run under this stale observation
+          // (codex S1b R6).
+          try {
+            runService.addRunEvent(run.id, 'worker:stale_observation_ignored', JSON.stringify({
+              lease_id: lease?.lease_id ?? null, pass: 'running:write',
+            }));
+          } catch { /* annotate-only */ }
+          continue;
+        }
 
         if (!claudeResult?.result && exitCode !== null) {
           runService.updateRunResult(run.id, {
