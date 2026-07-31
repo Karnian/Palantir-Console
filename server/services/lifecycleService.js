@@ -2773,6 +2773,19 @@ function createLifecycleService({
     return now - sinceMs >= REMOTE_OWNERSHIP_UNCERTAIN_TTL_MS;
   }
 
+  // Status-side generation fence (codex S1b R4): the release CAS already
+  // refuses a stale generation, but the terminal STATUS write and the kill in
+  // the same block were generation-blind — observation A could fail and kill
+  // generation B's run. An observation is only allowed to terminalize while
+  // the lease it probed is still the current held one. Legacy runs (no lease)
+  // keep the unconditional behavior.
+  function observationStillCurrent(run, probedLease) {
+    if (!probedLease) return true;
+    if (typeof runService.getHeldLease !== 'function') return true;
+    const held = runService.getHeldLease(run.id);
+    return Boolean(held && held.lease_id === probedLease.lease_id);
+  }
+
   // Generation fence (codex S1b R3): the caller passes the lease it PROBED.
   // Re-reading the current held lease here would let observation A — made
   // before a reclaim — close generation B's lease as probe:dead. When no lease
@@ -3222,6 +3235,14 @@ function createLifecycleService({
       }
 
       if (ownerState === 'dead' || unknownExpired) {
+        if (!observationStillCurrent(run, lease)) {
+          try {
+            runService.addRunEvent(run.id, 'worker:stale_observation_ignored', JSON.stringify({
+              lease_id: lease?.lease_id ?? null, pass: 'running',
+            }));
+          } catch { /* annotate-only */ }
+          continue;
+        }
         // Detached remote Claude still writes stream-json. Parse that durable
         // log before committing status so result semantics (limits/errors),
         // usage, and goal-output text remain equivalent to the local engine.
@@ -3356,7 +3377,13 @@ function createLifecycleService({
                 ? runService.getHeldLease(run.id)
                 : lease;
               const reObserved = await probeOwner(run, currentLease);
-              if (reObserved.state === 'dead') {
+              if (reObserved.state === 'dead' && !observationStillCurrent(run, currentLease)) {
+                try {
+                  runService.addRunEvent(run.id, 'worker:stale_observation_ignored', JSON.stringify({
+                    lease_id: currentLease?.lease_id ?? null, pass: 'idle',
+                  }));
+                } catch { /* annotate-only */ }
+              } else if (reObserved.state === 'dead') {
                 // Process is dead — finalize as completed/failed
                 const exitCode = await reObserved.channel.detectExitCode(run.id, 'cli');
                 const status = (exitCode === 0) ? 'completed' : 'failed';
@@ -3442,6 +3469,14 @@ function createLifecycleService({
           runService.addRunEvent(run.id, 'recovered', JSON.stringify({ message: 'Agent output detected, recovered from needs_input' }));
         }
       } else if (ownerState === 'dead' || unknownExpired) {
+        if (!observationStillCurrent(run, lease)) {
+          try {
+            runService.addRunEvent(run.id, 'worker:stale_observation_ignored', JSON.stringify({
+              lease_id: lease?.lease_id ?? null, pass: 'needs_input',
+            }));
+          } catch { /* annotate-only */ }
+          continue;
+        }
         // Process died while in needs_input — or its unknown grace expired
         // (owner unconfirmed: terminalize per the legacy contract, but the
         // lease stays held; only confirmed death releases it below).

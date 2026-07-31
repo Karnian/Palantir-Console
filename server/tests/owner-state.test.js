@@ -368,4 +368,13 @@ test('a dead observation made before a reclaim cannot close the next generation'
     'held',
     "generation A's dead observation must not close generation B's lease",
   );
+  // codex R4: the release CAS is not enough — the STATUS write and the kill in
+  // the same block were generation-blind. A's observation must not terminalize
+  // or kill B's run either.
+  assert.equal(
+    h.runService.getRun(run.id).status,
+    'running',
+    "generation A's observation must not terminalize generation B's run",
+  );
+  assert.equal(engine.killed.length, 0, "generation A must not kill generation B's worker");
 });
