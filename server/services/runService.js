@@ -1296,19 +1296,26 @@ function createRunService(db, eventBus) {
     }
     const claimed = claimQueuedRunTx(id, crypto.randomUUID());
     if (!claimed) return withLease ? null : 0;
-    const run = stmts.getById.get(id);
-    addRunEvent(id, 'status:running', JSON.stringify({ reason: 'queue:claim' }));
-    if (eventBus) {
-      eventBus.emit('run:status', {
-        run,
-        from_status: 'queued',
-        to_status: 'running',
-        reason: 'queue:claim',
-        task_id: run.task_id || null,
-        project_id: deriveOperatorProjectId(run),
-        node_id: run.node_id || null,
-      });
-    }
+    // The claim + lease are already committed. Everything past this point is
+    // OBSERVATION — if it throws, the caller never learns the leaseId and its
+    // finally-release cannot run, stranding a running + held(reserved) pair
+    // forever (codex S1a R3). Annotation loss is acceptable; a stranded lease
+    // is not.
+    try {
+      const run = stmts.getById.get(id);
+      addRunEvent(id, 'status:running', JSON.stringify({ reason: 'queue:claim' }));
+      if (eventBus) {
+        eventBus.emit('run:status', {
+          run,
+          from_status: 'queued',
+          to_status: 'running',
+          reason: 'queue:claim',
+          task_id: run.task_id || null,
+          project_id: deriveOperatorProjectId(run),
+          node_id: run.node_id || null,
+        });
+      }
+    } catch { /* annotate-only — the committed claim must reach the caller */ }
     return withLease
       ? { claimed: true, leaseId: claimed.leaseId }
       : claimed.changes;

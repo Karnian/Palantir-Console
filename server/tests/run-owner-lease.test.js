@@ -493,3 +493,26 @@ test('a task-cascade delete cannot leave a held lease behind', async (t) => {
   assert.equal(lease.evidence, 'run_deleted');
   assert.ok(lease.closed_at);
 });
+
+test('a post-claim annotation failure cannot strand the committed claim', async (t) => {
+  // The claim + lease commit BEFORE the status:running annotation. If the
+  // annotation throws, the caller never learns the leaseId, its finally-release
+  // cannot run, and a running + held(reserved) pair is stranded forever
+  // (codex R3). The committed claim must reach the caller regardless.
+  const db = await mkdb(t);
+  const explodingBus = {
+    emit() { throw new Error('bus exploded'); },
+    subscribe() { return () => {}; },
+  };
+  const runService = createRunService(db, explodingBus);
+
+  insertBareRun(db, 'annotate-crash');
+  let claim;
+  assert.doesNotThrow(() => {
+    claim = runService.claimQueuedRun('annotate-crash', { withLease: true });
+  });
+  assert.equal(claim.claimed, true);
+  assert.match(claim.leaseId, /^[0-9a-f-]{36}$/i);
+  assert.equal(runService.getRun('annotate-crash').status, 'running');
+  assert.equal(runService.getHeldLease('annotate-crash').lease_id, claim.leaseId);
+});
