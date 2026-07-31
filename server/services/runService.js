@@ -205,6 +205,14 @@ function createRunService(db, eventBus) {
        ORDER BY rowid ASC
        LIMIT 1
     `),
+    // Provenance-only backfill for a duplicate terminal observation. Guarded on
+    // the status AND on the reason still being empty, so it can never overwrite
+    // the winner's reason nor touch a row that has since moved on.
+    backfillTerminalReason: db.prepare(`
+      UPDATE runs
+         SET terminal_reason = ?
+       WHERE id = ? AND status = ? AND terminal_reason IS NULL
+    `),
     updateStarted: db.prepare(`
       UPDATE runs SET status = 'running', started_at = datetime('now'), tmux_session = ?, worktree_path = ?, branch = ? WHERE id = ?
     `),
@@ -1006,12 +1014,20 @@ function createRunService(db, eventBus) {
       // would change an external API as a side effect of de-duplicating
       // internal observers.
       if (force && TERMINAL_STATUSES.has(status) && current.status === status) {
-        // The write is dropped, but the observation is not. Whichever observer
-        // loses this race may be the one carrying the useful reason — an idle
-        // timeout can beat a rate-limit classification — and discarding it
-        // outright would leave the audit trail describing the less informative
-        // cause. Recorded as an annotate-only event: no status row, no
-        // run:ended, so the de-duplication the CAS exists for is preserved.
+        // The winner may have written this terminal state WITHOUT a reason
+        // while this loser is the one that knows why (health parked the run as
+        // idle, then a cancel landed first). Before the unconditional write
+        // became a CAS, the later writer supplied that provenance; dropping the
+        // whole write would silently lose it. Backfill only into an empty
+        // reason — first reason wins — and only for this exact status, so the
+        // de-duplication stays intact: no status row, no run:ended.
+        const lateReason = resolveTerminalReason(current);
+        if (lateReason && !current.terminal_reason) {
+          try {
+            stmts.backfillTerminalReason.run(lateReason, id, status);
+            current = getRun(id);
+          } catch { /* annotate-only */ }
+        }
         if (reason) {
           try {
             addRunEvent(id, 'status:duplicate_terminal', JSON.stringify({ status, reason }));

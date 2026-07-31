@@ -335,3 +335,50 @@ for (const [parked, raced, expected] of [
     );
   });
 }
+
+test('Phase 5: a duplicate terminal observation backfills a missing reason without re-emitting', async (t) => {
+  // Codex round-2 review: when the winner writes the SAME terminal state with
+  // no reason, the loser is dropped by the duplicate guard — and before this
+  // backfill it took its provenance with it. The de-duplication must survive
+  // (no second run:ended), but the reason must not be lost.
+  const db = await mkdb(t);
+  const bus = createEventBus();
+  const rs = createRunService(db, bus);
+  const ps = createProjectService(db);
+  const ts = createTaskService(db, null);
+  const task = ts.createTask({ title: 'T', project_id: ps.createProject({ name: 'backfill' }).id });
+  db.prepare(`INSERT INTO agent_profiles (id, name, type, command) VALUES ('a1','A','codex','codex')`).run();
+  const run = rs.createRun({ task_id: task.id, agent_profile_id: 'a1' });
+  rs.updateRunStatus(run.id, 'running', { force: true });
+
+  // Winner: cancels with no reason at all.
+  rs.updateRunStatus(run.id, 'cancelled', { force: true });
+  assert.equal(rs.getRun(run.id).terminal_reason, null);
+
+  const { events } = collectEvents(bus);
+  // Loser: same terminal state, but it knows why.
+  rs.updateRunStatus(run.id, 'cancelled', { force: true, terminalReason: () => 'idle_timeout' });
+
+  assert.equal(rs.getRun(run.id).terminal_reason, 'idle_timeout', 'provenance is backfilled');
+  assert.equal(
+    events.filter(e => e.channel === 'run:ended').length,
+    0,
+    'the backfill must not re-emit a terminal event',
+  );
+});
+
+test('Phase 5: a duplicate terminal observation never overwrites an existing reason', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ps = createProjectService(db);
+  const ts = createTaskService(db, null);
+  const task = ts.createTask({ title: 'T', project_id: ps.createProject({ name: 'no-clobber' }).id });
+  db.prepare(`INSERT INTO agent_profiles (id, name, type, command) VALUES ('a1','A','codex','codex')`).run();
+  const run = rs.createRun({ task_id: task.id, agent_profile_id: 'a1' });
+  rs.updateRunStatus(run.id, 'running', { force: true });
+
+  rs.updateRunStatus(run.id, 'failed', { force: true, terminalReason: 'codex-rate-limit' });
+  rs.updateRunStatus(run.id, 'failed', { force: true, terminalReason: () => 'idle_timeout' });
+
+  assert.equal(rs.getRun(run.id).terminal_reason, 'codex-rate-limit', 'first reason wins');
+});
