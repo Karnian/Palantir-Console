@@ -436,12 +436,14 @@ started_at=datetime('now') WHERE id=? AND status='queued'`), spawn 성공 기록
 - **held lease sweep 은 run status 와 독립이어야 한다**(S1b). 현재 health 는 `running`
   (`lifecycleService.js:2894`)과 `needs_input`(`:3114`)만 순회하고 **`paused` 는 어느
   sweep 에도 없다** — lease 순회는 `state='held'` 를 직접 질의한다.
-- **정정(S1a 적대리뷰)**: "재클레임 경로가 없다"는 전제가 틀렸다 —
-  `PATCH /api/runs/:id/status` 가 failed/cancelled/stopped → queued 를 허용한다
-  (`routes/runs.js:375`). 따라서 claim 트랜잭션이 **기존 held lease 를
-  `abandoned(evidence:'superseded_by_reclaim')` 로 닫고** 새 lease 를 삽입한다.
-  이전 세대의 owner 생사는 확인된 적 없으므로 released 가 아니라 abandoned 다.
-  partial unique 는 이제 "동시 claim 경쟁" 방어로만 작동한다.
+- **정정 2회(S1a 적대리뷰 R1→R7)**: "재클레임 경로가 없다"는 전제가 틀렸고
+  (`PATCH /api/runs/:id/status` 가 terminal → queued 허용), R4~R7 의 세대 경쟁
+  BLOCKER 가 전부 그 구멍에서 나왔다. 최종 계약:
+  - **→queued 전이는 held lease 존재 시 409** (force 우회 불가). lease 가
+    닫힌 뒤에만 재클레임 가능. 이것이 1차 방어이자 클래스의 종결이다.
+  - claim 트랜잭션의 supersede(`abandoned/superseded_by_reclaim`), start/spawn 의
+    세대+terminal fence, post-spawn kill seal 은 **defense-in-depth** 로 유지한다
+    (raw SQL 로는 여전히 같은 상태를 만들 수 있다).
 
 **C5. `releaseOwner(runId, leaseId, { state, evidence })` (S1a)**
 
