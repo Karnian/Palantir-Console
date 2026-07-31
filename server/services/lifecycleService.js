@@ -3603,6 +3603,13 @@ function createLifecycleService({
   async function recoverOrphanSessions() {
     const recovered = [];
     const recoverTerminalResult = async (run, channel) => {
+      // Capture the generation this recovery observes UP FRONT (codex S1b R9):
+      // everything below — the status write and the lease release — is scoped
+      // to this lease. A requeue/reclaim racing this boot pass must not have
+      // its new generation failed or released by our stale observation.
+      const observedLease = typeof runService.getHeldLease === 'function'
+        ? runService.getHeldLease(run.id)
+        : null;
       const alive = await channel.isAlive(run.id, 'cli');
       if (alive) return false;
 
@@ -3620,8 +3627,9 @@ function createLifecycleService({
         ? markCodexLimitFailure(run, output)
         : false;
       const fromStatus = run.status;
-      runService.updateRunStatus(run.id, status, {
+      const recoveryWrite = runService.updateRunStatus(run.id, status, {
         force: true,
+        requireHeldLease: observedLease?.lease_id ?? null,
         reason: claudeResult?.reason
           || (codexLimitFailure ? 'codex-rate-limit' : agentExitReason(exitCode)),
         // A run that health already parked as idle keeps that provenance when a
@@ -3632,6 +3640,14 @@ function createLifecycleService({
         // snapshot above, and the CAS loop may re-read again on a lost race.
         terminalReason: latest => idleTimeoutTerminalReason(latest),
       });
+      if (recoveryWrite === null) {
+        try {
+          runService.addRunEvent(run.id, 'worker:stale_observation_ignored', JSON.stringify({
+            lease_id: observedLease?.lease_id ?? null, pass: 'boot:recover',
+          }));
+        } catch { /* annotate-only */ }
+        return false;
+      }
       if (eventBus && status === 'needs_input') {
         const finalRun = runService.getRun(run.id);
         eventBus.emit('run:needs_input', {
@@ -3669,11 +3685,8 @@ function createLifecycleService({
       // as the health terminal blocks). Death is confirmed here: this path only
       // runs after reading a recorded exit.
       try {
-        const heldLease = typeof runService.getHeldLease === 'function'
-          ? runService.getHeldLease(run.id)
-          : null;
-        if (heldLease && typeof runService.releaseOwner === 'function') {
-          runService.releaseOwner(run.id, heldLease.lease_id, {
+        if (observedLease && typeof runService.releaseOwner === 'function') {
+          runService.releaseOwner(run.id, observedLease.lease_id, {
             state: 'released', evidence: 'probe:dead',
           });
         }
