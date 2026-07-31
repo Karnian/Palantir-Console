@@ -512,6 +512,11 @@ test('restart preserves a completed remote worker result before capability revoc
   assert.equal(h.runService.getRun(run.id).status, 'completed');
   assert.equal(h.runService.getRun(run.id).exit_code, 0);
   assert.equal(h.taskService.getTask(task.id).status, 'review');
+  // codex S1b R8: this recovery confirmed death from the recorded exit and
+  // killed (destroying the sentinel) — it must close the lease it holds the
+  // evidence for, or the lease is permanently held.
+  const lease = db.prepare('SELECT state FROM run_owner_leases WHERE run_id = ?').get(run.id);
+  assert.equal(lease.state, 'released');
 });
 
 test('restart recovery emits the dedicated needs_input alert for a detached Claude limit', async (t) => {
@@ -1630,3 +1635,4 @@ test('boot housekeeping refuses to reap while the owner is not confirmed dead', 
     'held',
   );
 });
+

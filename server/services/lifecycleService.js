@@ -3664,6 +3664,20 @@ function createLifecycleService({
       // The process is already dead, but this best-effort call clears local
       // artifacts and any stale tmux metadata without masking its result.
       try { await channel.kill(run.id, 'cli'); } catch { /* terminal result is authoritative */ }
+      // The kill above destroyed the sentinel — the block that destroys the
+      // dead evidence must itself close the lease (codex S1b R8; same contract
+      // as the health terminal blocks). Death is confirmed here: this path only
+      // runs after reading a recorded exit.
+      try {
+        const heldLease = typeof runService.getHeldLease === 'function'
+          ? runService.getHeldLease(run.id)
+          : null;
+        if (heldLease && typeof runService.releaseOwner === 'function') {
+          runService.releaseOwner(run.id, heldLease.lease_id, {
+            state: 'released', evidence: 'probe:dead',
+          });
+        }
+      } catch { /* observation only */ }
       if (run.goal_active) await captureGoalOutput(runService.getRun(run.id));
       if (run.task_id) checkTaskCompletion(run.task_id);
       return true;
