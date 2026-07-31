@@ -4,7 +4,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createPreactEnv, flushEffects, pickDropdownOption } = require('./helpers/jsdom-preact');
 
-async function waitFor(assertion, timeoutMs = 1000) {
+// 5s rather than 1s: `node --test` runs test FILES in parallel, so a loaded
+// machine can push a Preact effect flush past a 1s budget and fail a test that
+// is not actually broken. A satisfied assertion returns immediately, so the
+// higher ceiling only costs wall-clock on a genuine failure.
+async function waitFor(assertion, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   let lastErr;
   while (Date.now() < deadline) {
