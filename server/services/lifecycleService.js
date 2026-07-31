@@ -3995,7 +3995,12 @@ function createLifecycleService({
             }));
             recovered.push({ runId, status: 'reattached' });
           } else {
-            // Session exists but agent terminated
+            // Session exists but agent terminated. Same generation contract as
+            // every other terminal path (codex S1b R10): capture the observed
+            // lease, gate the write on it, close it after the kill.
+            const observedLease = typeof runService.getHeldLease === 'function'
+              ? runService.getHeldLease(runId)
+              : null;
             const exitCode = await workerChannel.detectExitCode(runId, 'cli');
             const status = (exitCode === 0) ? 'completed' : 'failed';
             const output = status === 'failed'
@@ -4004,10 +4009,19 @@ function createLifecycleService({
             const codexLimitFailure = status === 'failed'
               ? markCodexLimitFailure(run, output)
               : false;
-            runService.updateRunStatus(runId, status, {
+            const orphanWrite = runService.updateRunStatus(runId, status, {
               force: true,
+              requireHeldLease: observedLease?.lease_id ?? null,
               reason: codexLimitFailure ? 'codex-rate-limit' : agentExitReason(exitCode),
             });
+            if (orphanWrite === null) {
+              try {
+                runService.addRunEvent(runId, 'worker:stale_observation_ignored', JSON.stringify({
+                  lease_id: observedLease?.lease_id ?? null, pass: 'boot:orphan',
+                }));
+              } catch { /* annotate-only */ }
+              continue;
+            }
             if (exitCode !== null) {
               runService.updateRunResult(runId, {
                 exit_code: exitCode,
@@ -4017,6 +4031,13 @@ function createLifecycleService({
               });
             }
             await workerChannel.kill(runId, 'cli');
+            try {
+              if (observedLease && typeof runService.releaseOwner === 'function') {
+                runService.releaseOwner(runId, observedLease.lease_id, {
+                  state: 'released', evidence: 'probe:dead',
+                });
+              }
+            } catch { /* observation only */ }
             // Check if task should transition
             if (run.task_id) {
               checkTaskCompletion(run.task_id);
