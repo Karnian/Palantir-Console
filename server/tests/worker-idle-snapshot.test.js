@@ -463,23 +463,34 @@ test('a single oversized token still reports truncation and drops nothing silent
   );
 });
 
-test('a nearly spent budget skips the synchronous session lookup', async () => {
-  // listSessions() is execFileSync with a 5s timeout in the tmux engine, so it
-  // can block the health loop past any deadline we set. With no budget left it
-  // must not be called at all.
+test('the tmux engine never gets a synchronous session lookup', async () => {
+  // TmuxEngine.listSessions() is execFileSync with a 5s timeout AND returns no
+  // pid, so calling it can stall the health loop for seconds while answering
+  // nothing. A budget guard was not enough — codex measured an 800ms stall at a
+  // 600ms budget (round 5) — so the engine itself is the gate.
   let called = 0;
-  const executionEngine = {
-    listSessions() { called += 1; return []; },
-  };
   const executor = { async exec() { return { code: 1, stdout: '', stderr: '' }; } };
 
   await collectWorkerSnapshot({
     run: { id: 'run_1', agent_profile_id: 'profile_1' },
     profile: { type: 'codex', command: 'codex' },
     executor,
-    executionEngine,
-    timeoutMs: 1,
+    executionEngine: { type: 'tmux', listSessions() { called += 1; return []; } },
+    timeoutMs: 1500,
   });
+  assert.equal(called, 0, 'the tmux engine must never be asked for a session list here');
 
-  assert.equal(called, 0, 'the synchronous session lookup must be skipped when the budget is spent');
+  // The subprocess engine's list IS in-memory and does carry a pid, so it stays.
+  let subprocessCalls = 0;
+  await collectWorkerSnapshot({
+    run: { id: 'run_2', agent_profile_id: 'profile_1' },
+    profile: { type: 'codex', command: 'codex' },
+    executor,
+    executionEngine: {
+      type: 'subprocess',
+      listSessions() { subprocessCalls += 1; return [{ runId: 'run_2', pid: 4242 }]; },
+    },
+    timeoutMs: 1500,
+  });
+  assert.equal(subprocessCalls, 1, 'the in-memory subprocess list is still consulted');
 });

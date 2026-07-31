@@ -378,17 +378,17 @@ async function boundedExec(executor, command, args, deadlineAt, maxBuffer = 512 
   );
 }
 
-// listSessions() is SYNCHRONOUS — the tmux implementation is execFileSync with a
-// 5s timeout, so it can block the health loop for seconds regardless of our
-// deadline (codex round 4). Skip it entirely once the budget is nearly spent;
-// a missing root pid degrades the snapshot, which is the correct trade for S0.
-const SESSION_PID_MIN_BUDGET_MS = 500;
-
-function sessionPid(executionEngine, run, deadlineAt) {
-  if (!executionEngine || typeof executionEngine.listSessions !== 'function') return null;
-  if (Number.isFinite(deadlineAt) && deadlineAt - Date.now() < SESSION_PID_MIN_BUDGET_MS) {
-    return null;
-  }
+// listSessions() means two different things per engine:
+//   SubprocessEngine — in-memory map walk that DOES carry `pid`. Cheap, useful.
+//   TmuxEngine       — execFileSync(..., {timeout: 5000}) that does NOT carry a
+//                      pid at all. Expensive AND useless.
+// The budget guard that used to sit here was not enough: at the default 1500ms
+// budget it still called through, and codex measured an 800ms synchronous stall
+// (round 5). Gate on the engine instead — the tmux root pid is resolved by the
+// awaited `tmux display-message` path below, which the deadline does cover.
+function sessionPid(executionEngine, run) {
+  if (!executionEngine || executionEngine.type === 'tmux') return null;
+  if (typeof executionEngine.listSessions !== 'function') return null;
   try {
     const session = (executionEngine.listSessions() || []).find(item => (
       String(item?.runId || '') === String(run.id)
@@ -402,7 +402,7 @@ function sessionPid(executionEngine, run, deadlineAt) {
 }
 
 async function resolveRootPid({ executor, executionEngine, run, deadlineAt }) {
-  const direct = sessionPid(executionEngine, run, deadlineAt);
+  const direct = sessionPid(executionEngine, run);
   if (direct) return direct;
   const sessionName = run.tmux_session
     || `palantir-run-${String(run.id || '').replace(/[^A-Za-z0-9_-]/g, '_')}`;
