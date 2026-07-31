@@ -1,6 +1,6 @@
-# Worker owner-exit — 재설계 brief (v6)
+# Worker owner-exit — 재설계 brief (v8)
 
-**상태**: S0 착수 가능 / S1~S3 계약 미확정
+**상태**: S0 머지됨(#489) / S1 계약 v8 (codex R1 반영) / S2~S3 미확정
 **참고 자산**: `fix/465`(PR #478) · `fix/466`(PR #482) 의 미머지 잔여분
 **선행 완료**: #486(idle timeout + terminal_reason) · #487(terminal CAS + retry 유일성)
 
@@ -170,33 +170,17 @@ run_owner_leases
 UI·retry·harvest·SSE·dispatch audit 을 전부 끌어들였다. 여기서는 **status 가 아니라
 lease** 가 그 구간을 표현하므로 status 소비자는 영향을 받지 않는다.
 
-**lease_id 생명주기**
+**lease_id 생명주기** — 세부 계약은 **§8.1 C1~C5 가 규범**이다(발급=claim 과 같은 tx,
+acquired_at=markRunStarted CAS, 관측자는 자기 lease_id 로만, CAS 승자만 이벤트).
 
-- **발급**: worker claim 성공 직후, spawn 시도 **전에** `held/reserved` 행 생성.
-- **전달**: spawn 시 engine handle 에 실어 보낸다(로컬=프로세스 맵 엔트리, 원격=spawn
-  payload). 관측자는 자기가 든 `lease_id` 로만 release 를 시도한다.
-- **세대교체**: 재spawn·retry 는 **새 `lease_id`**. 이전 세대 행은 그대로 닫힌다.
-- **CAS**: `WHERE run_id=? AND lease_id=? AND state='held'` 로만 이긴다.
+**원자성·불변식** — §8.1 C1(원자성)·C2(crash 창)·C3(마이그레이션: **전부 reserved**)이
+규범이다. 이 절의 이전 버전이 말한 "started_at 있으면 acquired" 와 "boot 시 고착
+reserved 정리"는 **폐기됐다** — started_at 은 claim 이 찍으므로 spawn 증거가 아니고,
+reserved 정리는 probe(ownerState) 없이는 금지라 S1b 다.
 
-**원자성·불변식 (R4)**
-
-- **claim + reserved lease 생성은 단일 트랜잭션**이다. 둘 사이에 창이 있으면 claim 은
-  성공했는데 lease 가 없는 run 이 생겨 capacity 가 과소 계산된다.
-- **run 당 `held` lease 는 최대 1개.** partial unique index
-  (`UNIQUE(run_id) WHERE state='held'`) 로 강제한다.
-- **`acquired_at` 은 spawn 성공 시점에** 스탬프한다(reserved → acquired).
-- **pre-spawn 실패는 즉시 release** 한다(`evidence='spawn_failed'`). 그렇지 않으면
-  프로세스가 존재한 적 없는 reserved lease 가 capacity 를 영구 점유한다.
-- **재시작 복구**: boot 시 `held` + `acquired_at IS NULL`(고착 reserved)은 정리 대상이다.
-  `acquired_at` 이 있는 held 는 owner 를 재확인해야 하며, 확인 전에는 점유로 센다.
-- **기존 run 이관**: 마이그레이션이 현재 `status='running'` 인 worker run 에 대해
-  `held/acquired` lease 를 생성한다. 없으면 배포 직후 capacity 가 0 으로 보인다.
-- **lease 없는 run**: `queued`·`materializing`·manager run(`is_manager=1`)은 lease 를 갖지
-  않으며 capacity 계산에서 제외된다. goal retry child 는 **자기 lease** 부터 센다.
-
-**capacity 기준 변경**: 현재 `status='running'` 만 센다(`runService.js:211`). 이를
-**`lease.state='held'`** 로 바꾼다. 그래야 `needs_input`·`paused` 처럼 terminal 이 아닌 채
-owner 가 살아있는 구간도 점유로 계산된다.
+**capacity 기준 변경**: 현재 `status='running'` 만 센다(`runService.js:211`).
+held-lease 기준 전환은 **§8.1 C6 대로 `PALANTIR_LEASE_CAPACITY=1` opt-in(S1b)** 이다 —
+장기 `needs_input` 의 정상 점유가 큐를 막을 수 있어 무조건 전환하지 않는다.
 
 **독립 가치**: health 분기가 실제 상태를 보고 판단하고, capacity 가 실제 점유를 반영한다.
 
@@ -385,14 +369,113 @@ S0 이 detached descendant 를 실제 원인으로 지목하면, 그때 이 단�
 codex 5라운드가 지적한, **문서에서 아직 못 박지 않은** 것들이다. S0 은 이것들과 독립이므로
 먼저 착수할 수 있으나, **S1 이상은 여기를 확정한 뒤에 시작한다.**
 
-### S1 — lease
+### S1 — lease → **확정 계약 (§8.1)**
 
-- **spawn 성공 → `acquired_at` 기록 사이 crash.** 이 창에서 죽으면 살아 있는 owner 를
-  "고착 reserved"로 오인해 정리할 수 있다. spawn 성공을 `acquired_at` 과 원자적으로
-  묶거나(핸들 등록과 같은 트랜잭션), 정리 전에 `ownerState` 를 반드시 확인해야 한다.
-- **마이그레이션 대상**은 `running` 뿐 아니라 owner 가 존재할 수 있는 `paused`·`needs_input`
-  까지 포함해야 한다.
-- **복구된 핸들에 `lease_id` 를 결속**하는 방법(재시작 후 관측자가 어느 세대인지 아는 법).
+아래 §8.1 로 확정했다(v7 초안 → v8 에서 codex R1 6건 반영, R2 GO). 원문 미확정 3건(crash 창 / 마이그레이션 대상 / 핸들 결속)은
+각각 C2 / C3 / C4 가 답한다.
+
+### §8.1 S1 확정 계약
+
+코드 근거: claim CAS 는 `runService.js:299`(`UPDATE runs SET status='running',
+started_at=datetime('now') WHERE id=? AND status='queued'`), spawn 성공 기록은
+`markRunStarted`(`runService.js:208`, 채널이 spawn 을 수락한 뒤 호출,
+`lifecycleService.js:2022`), materialization claim 은 별도 statement
+(`claimQueuedForMaterialization`, 워커 슬롯 미소비 계약 유지), 현재 코드에 **같은 run 의
+재클레임 경로는 없다**(materializing→queued requeue 는 lease 생성 전 단계, goal retry 는
+새 run 생성 — #487).
+
+**범위: 머지 단위 둘로 쪼갠다.**
+
+- **S1a — lease 저장소** (동작 변경 0): migration + `runService` lease API + 관측자 배선.
+  이벤트만 추가되고 capacity·status·부수효과는 불변.
+- **S1b — ownership 판정 + capacity opt-in**: `engineFor`/`ownerState` 분리, D1 분기 제거,
+  capacity 를 플래그 뒤에서 lease 기준으로.
+
+**C1. 원자성 경계**
+
+- `held/reserved` lease 행 생성은 **`claimQueuedRun` 의 CAS 와 같은 better-sqlite3
+  트랜잭션**. 이중 방어 = claim CAS(0행이면 lease 도 없음) + partial unique
+  (`UNIQUE(run_id) WHERE state='held'`).
+- `acquired_at` 스탬프는 **`markRunStarted` 와 같은 트랜잭션**이되, 그 자체가 CAS 다:
+  `WHERE run_id=? AND lease_id=? AND state='held' AND acquired_at IS NULL`. release 가
+  먼저 이긴 lease 에는 backfill 도 이벤트도 없다. (주의: claim CAS 가 이미 `started_at`
+  을 찍으므로 **`started_at` 은 spawn 성공의 증거가 아니다** — codex R1 확인.)
+- `claimQueuedRunForMaterialization` 은 lease 를 만들지 **않는다**. materializing 은 워커
+  슬롯을 소비하지 않는 기존 계약 그대로.
+
+**C2. crash 창 규칙 (spawn 수락 ↔ markRunStarted 사이 서버 사망)**
+
+- 결과 상태: 살아있는 owner + `reserved` lease.
+- **규칙: reserved lease 는 `ownerState` 확인 없이 절대 정리하지 않는다.**
+  - probe `dead` → `releaseOwner(..., evidence:'boot:reserved_dead')`
+  - probe `alive` → `acquired_at` backfill(CAS, C1)＋`worker:lease_acquired_late`
+  - probe `unknown` → **유지** + `worker:lease_probe_unknown`. unknown 을 dead 로 취급하면
+    살아있는 워커 위에 새 워커가 뜬다.
+- **이 probe 기반 경로 전체는 S1b 다** — `ownerState` 없이는 unknown 을 안전하게 다룰 수
+  없다(codex R1). S1a 는 boot 시 reserved lease 를 건드리지 않고 그대로 둔다.
+
+**C3. 마이그레이션 (S1a)**
+
+- 대상: `is_manager=0 AND status IN ('running','paused','needs_input')`.
+- **전부 `held/reserved` 로 만든다.** `started_at` 으로 acquired 를 유추하지 않는다 —
+  claim 이 `started_at` 을 찍으므로 그 값은 spawn 성공의 증거가 아니다(codex R1).
+  acquired 승격은 S1b 의 probe(`alive` → backfill)가 한다.
+- **비-목표(명시)**: 마이그레이션 시점에 이미 terminal 인데 owner 가 살아있을 수 있는
+  run(사후적 draining)은 lease 를 만들지 않는다. 현재 동작이 이미 slot-free 라 악화가
+  아니고, 그 run 들은 S0 스냅샷과 orphan sweep 이 다룬다.
+
+**C4. 핸들-lease 결속**
+
+- 발급된 `lease_id` 는 spawn opts 로 엔진에 전달되어 로컬 processes 맵 엔트리에 저장된다.
+  exit handler 는 **핸들의 lease_id** 로 release 를 시도한다.
+- 재시작 후(in-memory 핸들 소실): health loop 는 **probe 를 시작하기 전에** DB 의 held
+  lease 를 읽고 그 lease_id 로 시도한다. probe 후에 읽으면 그 사이 세대가 바뀔 수 있다.
+  (probe 기반이므로 **S1b**.)
+- **S1a 의 관측자는 확정적 신호만 쓴다**: 로컬 exit handler(핸들의 lease_id, 프로세스
+  exit 이벤트) + pre-spawn 실패. probe 가 필요한 경로는 전부 S1b.
+- **held lease sweep 은 run status 와 독립이어야 한다**(S1b). 현재 health 는 `running`
+  (`lifecycleService.js:2894`)과 `needs_input`(`:3114`)만 순회하고 **`paused` 는 어느
+  sweep 에도 없다** — lease 순회는 `state='held'` 를 직접 질의한다.
+- 현재 재클레임 경로가 없으므로 fence 가 실제로 막는 것은 **중복 관측자 경쟁**(exit
+  handler vs health loop)과 미래 경로다. 새 재클레임 경로를 추가하는 쪽이 기존 held
+  lease 를 닫을 책임을 진다.
+
+**C5. `releaseOwner(runId, leaseId, { state, evidence })` (S1a)**
+
+- CAS: `UPDATE run_owner_leases SET state=?, closed_at=datetime('now')
+  WHERE run_id=? AND lease_id=? AND state='held'`. 승자만
+  `worker:owner_released`/`worker:owner_abandoned` emit.
+- S1 에서 release 는 **관측 기록일 뿐이다** — 부수효과 이동은 S3.
+- **pre-spawn 실패의 완전성(S1a 완료조건)**: claim 이후 spawn 수락 전의 **모든** 실패·
+  early-return 경로가 `releaseOwner(..., 'released', evidence:'spawn_failed')` 를 거친다.
+  하나라도 새면 유령 reserved 가 capacity 를 영구 점유한다(플래그 on 시).
+- **run 삭제 경로**: `DELETE /api/runs/:id`(`routes/runs.js:510`)는 kill 실패를 삼키고
+  행을 지운다. held lease 의 cascade 삭제·고아화는 금지 — 삭제 전에
+  `releaseOwner(..., 'abandoned', evidence:'run_deleted')` 로 닫는다. owner 생사를
+  확인하지 않았으므로 released 가 아니라 abandoned 가 정확하다. (따라서 "S1 에는
+  abandoned 경로가 없다"의 유일한 예외다. S1 에서 abandoned 는 여전히 관측 기록일 뿐이다.)
+- **S1b 착수 전 정리 필요(codex R2)**: capacity 가 lease 기준이 되는 순간
+  `run_deleted → abandoned` 는 slot 을 반환하는데, S3 은 "fence 없는 abandonment 금지"다.
+  S1b 는 이 경로에 한해 fence 요구를 어떻게 적용할지(삭제는 인간 행위이므로 명시적 승인으로
+  간주할지)를 확정해야 한다.
+- **이벤트 계약**: durable 기록(`run_events`)은 **상태 CAS 와 같은 트랜잭션**, eventBus
+  publish 는 **commit 후**. `worker:lease_probe_unknown` 은 lease 당 상태 변화 시 1회만
+  (반복 probe 마다 emit 금지).
+
+**C6. capacity 전환 (S1b, opt-in)**
+
+- `PALANTIR_LEASE_CAPACITY=1` 일 때만 `countRunning` 계열이 held-lease 기준. 기본 off =
+  **byte-identical**.
+- flag 인 이유: `needs_input` 은 "사용자 응답을 며칠 기다리는" 정상 상태일 수 있고, 그
+  워커가 슬롯을 무기한 점유하면 `max_concurrent=1` 프로필의 큐가 통째로 멈춘다. 정확한
+  회계가 곧 바람직한 운영은 아니므로, repo 관례(flag-then-flip)대로 관측 후 결정한다.
+
+**C7. ownership 판정 (S1b)**
+
+- `engineFor(runId)`(라우팅) / `ownerState(runId)` → `alive|dead|unknown` 분리.
+- `if (executionEngine.type) return true`(`nodeExecutor.js:87` 부근) 제거. 제거 **전에**
+  dead/unknown run 의 terminal 화 fall-through 를 테스트로 고정.
+- 원격은 tri-state 만 적용 — SSH 실패는 `unknown` 이지 `dead` 가 아니다.
 
 ### S2 — admission
 
