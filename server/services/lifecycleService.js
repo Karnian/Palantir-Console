@@ -1104,10 +1104,17 @@ function createLifecycleService({
     // MCP staging) sits between our claim and the actual spawn. If this run was
     // requeued and reclaimed meanwhile, OUR lease is no longer the held one and
     // spawning would race the current generation's worker.
+    const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'stopped']);
     const leaseStillCurrent = () => {
       if (!leaseId || typeof runService.getHeldLease !== 'function') return true;
       const held = runService.getHeldLease(runId);
-      return Boolean(held && held.lease_id === leaseId);
+      if (!held || held.lease_id !== leaseId) return false;
+      // A run can go terminal while its lease is still held (draining — e.g. a
+      // cancel between claim and spawn). Spawning then would raise a worker for
+      // a finished run and a late failure would overwrite cancelled → failed
+      // (codex S1a R6 #1).
+      const current = runService.getRun(runId);
+      return Boolean(current && !TERMINAL_RUN_STATUSES.has(current.status));
     };
 
     try {
@@ -2053,6 +2060,21 @@ function createLifecycleService({
         policy: 'actor_tokens_scrubbed',
         memory_propose: !!workerProposalToken,
       }));
+
+      // TOCTOU seal (codex S1a R6 #2): the pre-spawn check and the async spawn
+      // acceptance leave a window where a reclaim can supersede us AFTER the
+      // process started. Recording a stale start is not enough — the process
+      // itself must go, or the current generation's lease and our orphan worker
+      // diverge. Best-effort kill; the annotate below makes the outcome visible.
+      if (!leaseStillCurrent()) {
+        try { await channelForNode(run.node_id).kill(run.id, 'cli'); } catch { /* best effort */ }
+        try {
+          runService.addRunEvent(run.id, 'worker:stale_spawn_killed', JSON.stringify({
+            lease_id: leaseId,
+          }));
+        } catch { /* annotate-only */ }
+        return null;
+      }
 
       // Mark run as started
       runService.markRunStarted(run.id, leaseId, {

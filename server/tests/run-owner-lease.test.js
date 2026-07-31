@@ -623,3 +623,82 @@ test('a superseded generation does not spawn and its failure does not overwrite 
     1,
   );
 });
+
+test('a run cancelled between claim and spawn never spawns and keeps cancelled', async (t) => {
+  // codex R6 #1: leaseStillCurrent only compared generations, so a run that
+  // went terminal while its lease stayed held (draining) still spawned, and a
+  // spawn failure overwrote cancelled → failed.
+  const db = await mkdb(t);
+  const spawns = [];
+  const engine = {
+    type: 'subprocess',
+    spawnAgent(runId) { spawns.push(runId); return { sessionName: null }; },
+    isAlive() { return true; },
+    detectExitCode() { return null; },
+    getOutput() { return ''; },
+    sendInput() { return true; },
+    kill() { return true; },
+    discoverGhostSessions() { return []; },
+    hasProcess() { return false; },
+  };
+  const h = seedLifecycle(db, engine);
+  const run = createQueuedWorker(h, {});
+
+  const origClaim = h.runService.claimQueuedRun.bind(h.runService);
+  h.runService.claimQueuedRun = (id, opts) => {
+    const out = origClaim(id, opts);
+    if (out) {
+      // The operator cancels while the claim's async prep is still running;
+      // the lease stays held (draining).
+      db.prepare("UPDATE runs SET status = 'cancelled' WHERE id = ?").run(id);
+      h.runService.claimQueuedRun = origClaim;
+    }
+    return out;
+  };
+
+  const result = await h.lifecycleService.spawnQueuedRun(run.id);
+
+  assert.equal(result, null);
+  assert.equal(spawns.length, 0, 'a terminal run must not spawn a worker');
+  assert.equal(h.runService.getRun(run.id).status, 'cancelled', 'cancelled must survive');
+});
+
+test('a reclaim landing after spawn acceptance kills the stale process', async (t) => {
+  // codex R6 #2: between the pre-spawn check and async spawn acceptance a
+  // reclaim can supersede this generation. Annotating alone leaves an orphan
+  // worker running against the new generation's lease — the process must die.
+  const db = await mkdb(t);
+  const killed = [];
+  let h;
+  const engine = {
+    type: 'subprocess',
+    spawnAgent(runId) {
+      // The reclaim lands DURING spawn acceptance.
+      db.prepare("UPDATE runs SET status = 'queued' WHERE id = ?").run(runId);
+      const second = h.runService.claimQueuedRun(runId, { withLease: true });
+      db.prepare("UPDATE runs SET status = 'running' WHERE id = ?").run(runId);
+      return { sessionName: null };
+    },
+    isAlive() { return true; },
+    detectExitCode() { return null; },
+    getOutput() { return ''; },
+    sendInput() { return true; },
+    kill(runId) { killed.push(runId); return true; },
+    discoverGhostSessions() { return []; },
+    hasProcess() { return false; },
+  };
+  h = seedLifecycle(db, engine);
+  const run = createQueuedWorker(h, {});
+
+  const result = await h.lifecycleService.spawnQueuedRun(run.id);
+
+  assert.equal(result, null, 'the superseded generation must not report success');
+  assert.deepEqual(killed, [run.id], 'the stale process must be killed, not just annotated');
+  assert.equal(
+    db.prepare(`
+      SELECT COUNT(*) c FROM run_events
+      WHERE run_id = ? AND event_type = 'worker:stale_spawn_killed'
+    `).get(run.id).c,
+    1,
+  );
+});
