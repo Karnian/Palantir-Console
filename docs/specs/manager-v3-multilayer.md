@@ -345,9 +345,10 @@ diet        모델         Conversation
   - `layer='top'`: 디스패처 5개 API만 (`GET /runs`, `GET /projects`, `GET /agents`, `POST /tasks`, `POST /tasks/:id/execute`)
   - `layer='pm'`: Top 5개 + 워커 내부 개입 API (`PATCH /tasks/:id/status`, `POST /runs/:id/input`, `POST /runs/:id/cancel`) — Phase 3a에서 사용
   - 두 변형 모두 "Always query the actual Palantir API" 조항 유지
-- `server/services/managerAdapters/codexAdapter.js:142-143` — 매니저 역할 spawn에서 `--dangerously-bypass-approvals-and-sandbox` 비활성화
-  - `spawnOneTurn`에 `role` 인자 추가 (`'manager' | 'worker'`)
-  - 매니저 역할에서는 sandbox bypass 제외
+- `server/services/managerAdapters/codexAdapter.js` — `spawnOneTurn`에 `role` 인자 추가 (`'manager' | 'worker'`)
+  - 두 역할 모두 `--dangerously-bypass-approvals-and-sandbox` 를 항상 전달하므로 launch flag는 역할과 무관
+  - 역할은 환경 경계에도 사용: 호출자가 `env`를 생략한 기본 로컬 실행에서 manager는 ambient 환경을 상속하지 않고 `{}`를 전달하지만 worker는 기존 호환성을 위해 `process.env`를 상속
+  - 매니저가 Palantir Console API 를 호출하는 데 필요한 네트워크를 `--full-auto` 샌드박스가 차단하므로 역할별 sandbox 분기는 적용하지 않음
 - `server/tests/manager.test.js` — 회귀 테스트 추가
 
 **완료 정의**:
@@ -577,7 +578,7 @@ PM 트랙(Phase 2~5)은 아래 조건 **둘 이상**이 충족될 때만 진입�
 
 1. `server/services/managerAdapters/claudeAdapter.js:218` — `allowedTools`에서 `Write`, `Edit` 제거
 2. `server/services/managerSystemPrompt.js:buildCommonBase` 시그니처 변경 (`{ layer }`) + `layer='top'` 슬림화
-3. `server/services/managerAdapters/codexAdapter.js:spawnOneTurn` — `role` 인자 추가 + sandbox bypass 분기
+3. `server/services/managerAdapters/codexAdapter.js:spawnOneTurn` — `role` 인자 추가, bypass는 역할과 무관하게 유지
 4. `server/tests/manager.test.js` — 회귀 테스트
 5. (이미 완료) 본 문서 `docs/specs/manager-v3-multilayer.md` 저장
 
@@ -671,7 +672,7 @@ MVP 트랙 종료. 트리거 조건 모니터링 시작. PM 트랙 진입 여부
 
 | Phase | 설명 | PR | 상태 |
 |---|---|---|---|
-| 0 | Capability Diet (Write/Edit 제거, layer prompt, Codex role-based sandbox) | #20 | ✅ merged |
+| 0 | Capability Diet (Write/Edit 제거, layer prompt, Codex role별 환경 fallback; bypass는 역할 독립) | #20 | ✅ merged |
 | 1 | 데이터 모델 풍부화 (task_kind, pm settings, project_briefs, agent dormant fields) | #21 | ✅ merged |
 | 1.5 | Conversation identity + worker→Top parent notice (`managerRegistry`, `conversationService`, migration 009, `/api/conversations/*`, `/api/runs/:id/input` alias, Principle 9 hints) | #22 | ✅ merged |
 | 2 | 멀티 슬롯 PM 런타임 + PM-layer parent notice 확장 (`sendToManagerSlot`, `resolveParentSlot`, `POST /api/manager/pm/:projectId/message`, `status.pms[]`, `onSlotCleared` 리스너, race-safe drain splice) | #27 | ✅ merged |
@@ -721,4 +722,3 @@ Phase 2~7 merge 시점까지 누적 codex round: **17+ rounds** (Phase 4 가 6 r
 - **Reconciliation hard gate 승격** (§9.7 후반): 운영 false-positive 율 관찰 후 결정. Phase 7 로 UI 가 붙은 이후부터 데이터 수집 가능.
 - ~~**`useManager()` → `useConversation()` 전면 마이그레이션**~~: P8-3 에서 완료 (`useManagerLifecycle` + `useConversation('top')` 으로 분리).
 - **`dispatch_audit_log` CASCADE FK**: codex 상호 리뷰에서 "거절" — audit trail 의미 유지. 필요 시 read-side filter 로 대응.
-

@@ -507,6 +507,15 @@ spawn), keyed by `run_id` with `<pluginRef>/<relpath>` namespaced file
 hashes. Deleting a preset later does not erase past snapshot rows;
 `tasks.preferred_preset_id` is set NULL via app-level cascade.
 
+Codex manager sessions launched through `codexAdapter` always run with
+`--dangerously-bypass-approvals-and-sandbox`; there is no environment-variable
+switch for this behavior. Managers need network access to call the Palantir
+Console API, and the `--full-auto` sandbox blocks that access, making
+orchestration impossible. Codex task workers use the separate lifecycle worker
+path: their approval and sandbox flags come from the profile's editable
+`args_template`. The default `exec {prompt}` profile does not add the bypass
+flag.
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -521,7 +530,6 @@ hashes. Deleting a preset later does not erase past snapshot rows;
 | `HOST` | auto | Override the bind address. `0.0.0.0` without a token logs a security warning |
 | `PALANTIR_ALLOWED_COMMANDS` | (none) | Additional allowed CLI commands (comma-separated) |
 | `PALANTIR_DEFAULT_PM_ADAPTER` | `codex` | Global Operator adapter fallback when an instance uses Auto and its project has no `preferred_pm_adapter` |
-| `PALANTIR_CODEX_MANAGER_BYPASS` | (unset) | Set to `1` to let Codex manager turns run with `--dangerously-bypass-approvals-and-sandbox`. Default (unset) keeps the manager role in the sandboxed policy |
 | `ANTHROPIC_BASE_URL` / `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` | — | Claude Code auth (persisted to `.claude-auth.json` when set at server start) |
 | `CODEX_API_KEY` / `OPENAI_API_KEY` | — | Codex auth (preflight checks `~/.codex/auth.json`) |
 | `CODEX_BIN` | `codex` | Codex CLI path |

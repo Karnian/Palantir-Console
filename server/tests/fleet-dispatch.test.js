@@ -289,9 +289,20 @@ test('reachable executable ssh node dispatches through pickExecutor and remote w
   assert.deepEqual(spawn.payload.spec.args, ['-c', 'service_tier="default"', 'exec', '-']);
   assert.equal(spawn.payload.spec.stdin, 'run remotely');
   assert.equal(spawn.payload.spec.cwd, '/workspace/project');
+  assert.equal(run.worktree_path, null, 'remote worker runs do not receive a worktree');
+  assert.equal(run.branch, null, 'remote worker runs do not receive a worktree branch');
   assert.equal(spawn.payload.spec.workerPath, '/opt/codex/bin');
   assert.deepEqual(spawn.payload.spec.envAllowlist, ['POD_ONLY_PROVIDER_KEY']);
   assert.equal(h.runService.getRun(run.id).tmux_session, `remote-${run.id}`);
+
+  const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
+  const guardrails = createCodexAdapter({ runService: null })
+    .buildGuardrailsSection({ layer: 'operator' });
+  assert.match(
+    guardrails,
+    /A remote legacy-directory project is the exception:[\s\S]*configured remote directory without a run worktree,[\s\S]*diff capture and test harvest are unavailable for that path/i,
+    'the manager prompt must describe the remote legacy-directory no-worktree path exercised above',
+  );
 });
 
 test('remote worker gets no loopback memory capability without a public Console base URL', async (t) => {

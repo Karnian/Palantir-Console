@@ -228,7 +228,7 @@
   - `codex exec --json -C <cwd>` 가 **한 번** spawn 되어 첫 turn 진행 (stateless)
   - 턴 완료 후 subprocess 는 exit, `/var/folders/.../palantir-codex-run_mgr_*/system_prompt.md` 만 남음 (다음 턴은 resume)
   - status badge "Active", `run.manager_adapter='codex'`, `run.manager_thread_id` 에 vendor thread uuid 기록
-  - **Phase 0**: Codex manager 턴은 기본값에서 `--dangerously-bypass-approvals-and-sandbox` 를 **붙이지 않는다**. `PALANTIR_CODEX_MANAGER_BYPASS=1` 환경변수일 때만 붙인다
+  - Codex manager 턴은 역할과 무관하게 `--dangerously-bypass-approvals-and-sandbox` 를 항상 붙인다. Console API 호출에 필요한 네트워크를 `--full-auto` 샌드박스가 차단하기 때문이다
 
 ### MGR-02 — Manager에게 텍스트 메시지 전송
 - **Given** Manager 세션 active

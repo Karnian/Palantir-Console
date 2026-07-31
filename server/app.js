@@ -61,6 +61,7 @@ const {
 } = require('./utils/conversationId'); // PM→Operator Phase 0
 const { createOperatorCleanupService } = require('./services/operatorCleanupService');
 const { createOperatorSpawnService } = require('./services/operatorSpawnService');
+const { resolveManagerApiEndpoints } = require('./services/managerSystemPrompt');
 const { createReconciliationService } = require('./services/reconciliationService');
 const { createDispatchAuditRouter } = require('./routes/dispatchAudit');
 const { createRouterService } = require('./services/routerService');
@@ -1130,6 +1131,15 @@ function createApp(options = {}) {
   });
   const workerProposalBaseUrl = workerProposalEndpoints.local;
   const workerProposalRemoteBaseUrl = workerProposalEndpoints.remote;
+  // Match server/index.js's effective bind policy. With actor auth and no
+  // explicit HOST the server listens on all interfaces, so a remote Operator
+  // must receive a concrete controller address rather than localhost.
+  const managerApiEndpoints = resolveManagerApiEndpoints({
+    explicitBaseUrl: options.managerBaseUrl ?? process.env.PALANTIR_BASE_URL,
+    host: options.host ?? process.env.HOST ?? (authToken ? '0.0.0.0' : '127.0.0.1'),
+    port: options.port ?? process.env.PORT ?? 4177,
+    networkInterfaces: options.networkInterfaces,
+  });
   // G2 §6: surface the goal-mode activation state at boot. When goal mode is
   // requested without a separated PALANTIR_PM_TOKEN it is DISABLED (fail-closed);
   // warn loudly so the operator knows why goal features are inert.
@@ -1410,12 +1420,14 @@ function createApp(options = {}) {
     agentProfileService,
     skillPackService,
     nodeService,
+    nodeUsageService,
     projectMaterializationService,
     modelPolicyService,
     isSpecialistAvailable,
     authResolverOpts: options.authResolverOpts || {},
     actorTokens: actorTokenPolicy,
     managerCapabilityTokenService,
+    managerApiEndpoints,
     goalFeatureActive,
   });
   const operatorCleanupService = createOperatorCleanupService({
@@ -1856,7 +1868,7 @@ function createApp(options = {}) {
   app.use('/api/agents', createAgentsRouter({ agentProfileService, providerRegistry, authResolverOpts }));
   app.use('/api/events', createEventsRouter({ eventBus }));
   app.use('/api/claude-sessions', createClaudeSessionsRouter());
-  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, operatorInstanceService, modelPolicyService, isSpecialistAvailable, authResolverOpts, actorTokens: actorTokenPolicy, managerCapabilityTokenService, goalFeatureActive }));
+  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, operatorInstanceService, modelPolicyService, isSpecialistAvailable, authResolverOpts, actorTokens: actorTokenPolicy, managerCapabilityTokenService, managerApiEndpoints, goalFeatureActive }));
   app.use('/api/conversations', createConversationsRouter({ conversationService, runService }));
   // Operator P-B2c-3: specialist entry. Mounted ONLY when the feature is enabled
   // (specialistService is null unless PALANTIR_OPERATOR_SPECIALIST=1 + a backend),

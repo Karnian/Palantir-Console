@@ -57,6 +57,7 @@ const { resolveManagerAuth: defaultResolveManagerAuth, buildManagerSpawnEnv } = 
 const {
   buildManagerSystemPrompt,
   buildInitialUserContext,
+  resolveManagerApiEndpoints,
 } = require('./managerSystemPrompt');
 const { resolveSpawnCwd } = require('../utils/spawnCwd');
 const { resolveCodexServiceTier } = require('./managerAdapters/codexAdapter'); // F-1
@@ -100,6 +101,7 @@ function createOperatorSpawnService({
   agentProfileService, // optional — used for env_allowlist resolution
   skillPackService,    // optional — Phase 2: inject project skill pack list into PM prompt
   nodeService,         // optional — Fleet P4: run Operators on the project's bound node
+  nodeUsageService,    // optional — probes remote CLI installation/auth for NULL preference fallback
   projectMaterializationService,
   modelPolicyService,
   isSpecialistAvailable = () => false, // MD-1: mid-turn specialist delegation prompt gate
@@ -107,11 +109,20 @@ function createOperatorSpawnService({
   resolveManagerAuth = defaultResolveManagerAuth, // optional DI — tests inject to force canAuth
   actorTokens = resolveActorTokenPolicy(),
   managerCapabilityTokenService = null,
+  managerApiEndpoints = null,
   goalFeatureActive = defaultGoalFeatureActive,
   logger,
 }) {
   const log = logger || ((msg) => console.log(`[pmSpawn] ${msg}`));
   const actorSpawnBaseEnv = applyManagerCredentialPolicy(process.env);
+  const promptApiEndpoints = managerApiEndpoints || resolveManagerApiEndpoints();
+  const normalizedAuthResolverOpts = { ...authResolverOpts };
+  for (const key of ['hasKeychain', 'hasCredentialsFile']) {
+    if (key in normalizedAuthResolverOpts && typeof normalizedAuthResolverOpts[key] !== 'function') {
+      const available = Boolean(normalizedAuthResolverOpts[key]);
+      normalizedAuthResolverOpts[key] = () => available;
+    }
+  }
   if (actorTokens.humanToken && !managerCapabilityTokenService) {
     throw new Error('authenticated Operator spawn requires managerCapabilityTokenService');
   }
@@ -271,6 +282,141 @@ function createOperatorSpawnService({
     return 'codex';
   }
 
+  function resolveManagerProfileRuntime(adapterType, profiles, { isRemoteNode = false } = {}) {
+    const managerProfile = profiles.find(p => p.type === adapterType) || null;
+    let envAllowlist;
+    let mcpTools = [];
+    let tools = [];
+    let disallowedTools = [];
+    let maxBudgetUsd = null;
+    let profileMcpConfig = null;
+    let strictMcpConfig = false;
+    let safeMode = false;
+    let bare = false;
+    let disableSlashCommands = false;
+    let noChrome = false;
+    let settingSources = null;
+    let settings = null;
+    let permissionMode = adapterType === 'claude-code' ? 'bypassPermissions' : undefined;
+    // The null-preference path evaluates BOTH adapters, so a rejected profile
+    // for the adapter we end up discarding must not fail the spawn. Carry the
+    // error and let the caller throw only for the adapter it actually selects.
+    // This covers vendor mismatch AND a malformed args_template — both are 400s
+    // that used to be raised only for the already-selected adapter.
+    let profileError = null;
+    if (managerProfile) {
+      const expectedVendor = adapterType === 'claude-code' ? 'claude' : 'codex';
+      const commandVendor = resolveAgentVendor(managerProfile.command);
+      if (commandVendor !== expectedVendor) {
+        const err = new Error(
+          `Operator profile ${managerProfile.id} command vendor does not match ${adapterType}`,
+        );
+        err.httpStatus = 400;
+        err.code = 'OPERATOR_PROFILE_VENDOR_MISMATCH';
+        err.details = {
+          profileId: managerProfile.id,
+          profileType: managerProfile.type,
+          command: managerProfile.command,
+        };
+        profileError = err;
+      }
+      if (!profileError && adapterType === 'claude-code') {
+        try {
+          permissionMode = resolveClaudePermissionMode(managerProfile);
+          const templateOptions = parseClaudeArgsTemplate(managerProfile.args_template);
+          tools = templateOptions.tools;
+          disallowedTools = templateOptions.disallowedTools;
+          maxBudgetUsd = templateOptions.maxBudgetUsd;
+          profileMcpConfig = templateOptions.mcpConfig;
+          strictMcpConfig = templateOptions.strictMcpConfig;
+          safeMode = templateOptions.safeMode;
+          bare = templateOptions.bare;
+          disableSlashCommands = templateOptions.disableSlashCommands;
+          noChrome = templateOptions.noChrome;
+          settingSources = templateOptions.settingSources;
+          settings = templateOptions.settings;
+        } catch (err) {
+          // A malformed profile must NOT silently downgrade to bypass defaults,
+          // so keep the 400 — but only for the adapter that gets selected.
+          if (err?.status === 400 || err?.httpStatus === 400) profileError = err;
+          else throw err;
+        }
+      }
+      if (managerProfile.env_allowlist) {
+        try {
+          const parsed = JSON.parse(managerProfile.env_allowlist);
+          if (Array.isArray(parsed)) envAllowlist = parsed;
+        } catch { /* use resolver defaults */ }
+      }
+      // P3-4: extract mcp_tools for PM adapter startup
+      if (managerProfile.capabilities_json) {
+        try {
+          const caps = JSON.parse(managerProfile.capabilities_json);
+          if (Array.isArray(caps.mcp_tools)) {
+            mcpTools = caps.mcp_tools.filter(t => typeof t === 'string' && t.trim());
+          }
+        } catch { /* no MCP tools */ }
+      }
+    }
+    const authCtx = resolveManagerAuth(adapterType, {
+      envAllowlist,
+      ...normalizedAuthResolverOpts,
+      // A remote Claude Operator materializes `--bare` auth from the pod's
+      // login store inside the executor. Do not read/materialize controller
+      // credentials that will deliberately be discarded at this boundary.
+      bare: !isRemoteNode && bare === true,
+      settings,
+    });
+    return {
+      adapterType,
+      envAllowlist,
+      mcpTools,
+      authCtx,
+      tools,
+      disallowedTools,
+      maxBudgetUsd,
+      profileMcpConfig,
+      strictMcpConfig,
+      safeMode,
+      bare,
+      disableSlashCommands,
+      noChrome,
+      settingSources,
+      settings,
+      permissionMode,
+      profileError,
+    };
+  }
+
+  function remoteManagerAdapterCanStart(card) {
+    if (!card || card.installed !== true) return false;
+    if (card.id === 'codex') {
+      // A successful Codex app-server usage probe proves both the CLI and its
+      // node-local auth can start. Installation alone is not enough.
+      return !card.error;
+    }
+    if (card.id === 'claude') {
+      // Claude auth status is captured before the optional quota lookup. Keep
+      // a logged-in CLI eligible even when only the quota endpoint is down.
+      return Boolean(card.authStatus && card.authStatus.loggedIn !== false);
+    }
+    return false;
+  }
+
+  async function resolveRemoteDefaultAdapter(nodeId) {
+    try {
+      const snapshot = await nodeUsageService.getUsageSnapshot(nodeId);
+      const cards = new Map((snapshot?.clis || []).map(card => [card?.id, card]));
+      if (remoteManagerAdapterCanStart(cards.get('codex'))) return 'codex';
+      if (remoteManagerAdapterCanStart(cards.get('claude'))) return 'claude-code';
+    } catch (err) {
+      log(`remote adapter availability probe failed node=${nodeId}: ${err.message}`);
+    }
+    // Probe uncertainty must not turn the legacy default into a hard failure.
+    // The first real turn will still surface an actionable adapter error.
+    return 'codex';
+  }
+
   // Build the project-scoped SYSTEM prompt section that gets appended to
   // the shared PM layer template. Spec §9.5: "system prompt 완전히 정적
   // (cached_input_tokens 보호)". The brief is stable per run so baking
@@ -303,7 +449,7 @@ function createOperatorSpawnService({
   // fresh run was created in this call, `resumed` is true iff we passed
   // a persisted thread id to the adapter (i.e. reused an existing Codex
   // vendor thread).
-  function ensureLiveOperator({ projectId, seedText }) {
+  function ensureLiveOperatorResolved({ projectId, seedText }, remoteDefaultAdapter = null) {
     if (!projectId) {
       const err = new Error('projectId is required');
       err.httpStatus = 400;
@@ -381,12 +527,11 @@ function createOperatorSpawnService({
     } catch (err) {
       log(`operator adapter preference read failed instance=${ensuredOperatorInstance.instanceId}: ${err.message}`);
     }
-    const adapterType = resolveOperatorAdapterType(project, adapterPreferenceInstance);
-    const adapter = managerAdapterFactory.getAdapter(adapterType);
     const nodeId = (nodeService && typeof nodeService.resolveNode === 'function')
       ? (nodeService.resolveNode(project) || 'local')
       : 'local';
     const isRemoteNode = !!(nodeId && nodeId !== 'local');
+
     const projectSource = resolveProjectSource(project);
     const isRepoProject = projectSource.isRepo;
     if (isRemoteNode && nodeService && typeof nodeService.getNode === 'function') {
@@ -407,97 +552,113 @@ function createOperatorSpawnService({
         throw err;
       }
     }
+    if (isRemoteNode && !promptApiEndpoints.remote) {
+      try {
+        runService.addRunEvent(activeTopRunId, 'operator:remote_base_url_unavailable', JSON.stringify({
+          node_id: nodeId,
+          project_id: projectId,
+        }));
+      } catch { /* ignore */ }
+      const err = new Error(
+        'remote Operator requires a Console URL reachable from its node; set PALANTIR_BASE_URL or bind the Console to a non-loopback host',
+      );
+      err.httpStatus = 409;
+      err.code = 'OPERATOR_REMOTE_BASE_URL_UNAVAILABLE';
+      err.retryable = false;
+      throw err;
+    }
+
+    let profiles = [];
+    try {
+      if (agentProfileService) profiles = agentProfileService.listProfiles();
+    } catch { /* use resolver defaults */ }
+
+    const configuredPreference = Boolean(
+      adapterPreferenceInstance?.preferred_adapter
+      || project?.preferred_pm_adapter
+      || process.env.PALANTIR_DEFAULT_PM_ADAPTER,
+    );
+    if (
+      isRemoteNode
+      && !configuredPreference
+      && !remoteDefaultAdapter
+      && nodeUsageService
+      && typeof nodeUsageService.getUsageSnapshot === 'function'
+    ) {
+      // Remote Operators authenticate on their execution node, so the local
+      // auth resolver cannot choose the fallback adapter. Probe the pod before
+      // persisting the manager_adapter. Keep this in the existing spawn-flight
+      // fence: concurrent first messages must share one probe and one spawn.
+      let flight;
+      flight = resolveRemoteDefaultAdapter(nodeId)
+        .then((resolvedAdapter) => {
+          if (spawnFlights.get(slotKey) === flight) spawnFlights.delete(slotKey);
+          return ensureLiveOperatorResolved({ projectId, seedText }, resolvedAdapter);
+        })
+        .finally(() => {
+          if (spawnFlights.get(slotKey) === flight) spawnFlights.delete(slotKey);
+        });
+      spawnFlights.set(slotKey, flight);
+      return flight;
+    }
+
+    let adapterType = remoteDefaultAdapter
+      || resolveOperatorAdapterType(project, adapterPreferenceInstance);
+    let managerRuntime;
+    if (!isRemoteNode && !configuredPreference) {
+      // The null-preference contract keeps Codex first, but it is a fallback
+      // order rather than an instruction to select an unusable adapter. Probe
+      // each locally available manager credential path with that adapter's own
+      // profile allowlist and pick the first one that can actually start.
+      const candidates = ['codex', 'claude-code']
+        .map(type => resolveManagerProfileRuntime(type, profiles, { isRemoteNode }));
+      managerRuntime = candidates.find(candidate => candidate.authCtx.canAuth) || candidates[0];
+      adapterType = managerRuntime.adapterType;
+      // A rejected profile on a candidate we did NOT select is not fatal (that
+      // is the point of the deferred throw), but silently dropping it leaves the
+      // operator staring at the OTHER adapter's auth error with no hint that a
+      // broken profile took this one out of the running.
+      for (const candidate of candidates) {
+        if (candidate !== managerRuntime && candidate.profileError) {
+          log(`adapter=${candidate.adapterType} profile rejected during null-preference probe: ${candidate.profileError.message}`);
+        }
+      }
+    } else {
+      managerRuntime = resolveManagerProfileRuntime(adapterType, profiles, { isRemoteNode });
+    }
+    const adapter = managerAdapterFactory.getAdapter(adapterType);
 
     // P5-S4b: remote (pod) Claude Operators are now ENABLED + validated on a real
     // pod. The executor/nodePrefix routing below is adapter-generic (P4-S3b) and
     // the persistent Claude stream-json runs over the ssh duplex (P5-S0); the
     // S4a fail-closed gate that blocked isRemoteNode && 'claude-code' is removed.
 
-    // Resolve env_allowlist and mcp_tools from the agent profile of the same
-    // type if one exists — mirrors routes/manager.js /start behavior. We do
-    // NOT require agent_profile_id for PM spawns (the PM is a server-owned
-    // construct, not a user-selected profile), so if no profile is found we
-    // fall through to the resolver's defaults.
-    let envAllowlist;
-    let pmMcpTools = [];
-    let tools = [];
-    let disallowedTools = [];
-    let maxBudgetUsd = null;
-    let profileMcpConfig = null;
-    let strictMcpConfig = false;
-    let safeMode = false;
-    let bare = false;
-    let disableSlashCommands = false;
-    let noChrome = false;
-    let settingSources = null;
-    let settings = null;
-    let permissionMode = adapterType === 'claude-code' ? 'bypassPermissions' : undefined;
-    try {
-      if (agentProfileService) {
-        const profiles = agentProfileService.listProfiles();
-        const managerProfile = profiles.find(p => p.type === adapterType);
-        if (managerProfile) {
-          const expectedVendor = adapterType === 'claude-code' ? 'claude' : 'codex';
-          const commandVendor = resolveAgentVendor(managerProfile.command);
-          if (commandVendor !== expectedVendor) {
-            const err = new Error(
-              `Operator profile ${managerProfile.id} command vendor does not match ${adapterType}`,
-            );
-            err.httpStatus = 400;
-            err.code = 'OPERATOR_PROFILE_VENDOR_MISMATCH';
-            err.details = {
-              profileId: managerProfile.id,
-              profileType: managerProfile.type,
-              command: managerProfile.command,
-            };
-            throw err;
-          }
-          if (adapterType === 'claude-code') {
-            permissionMode = resolveClaudePermissionMode(managerProfile);
-            const templateOptions = parseClaudeArgsTemplate(managerProfile.args_template);
-            tools = templateOptions.tools;
-            disallowedTools = templateOptions.disallowedTools;
-            maxBudgetUsd = templateOptions.maxBudgetUsd;
-            profileMcpConfig = templateOptions.mcpConfig;
-            strictMcpConfig = templateOptions.strictMcpConfig;
-            safeMode = templateOptions.safeMode;
-            bare = templateOptions.bare;
-            disableSlashCommands = templateOptions.disableSlashCommands;
-            noChrome = templateOptions.noChrome;
-            settingSources = templateOptions.settingSources;
-            settings = templateOptions.settings;
-          }
-          if (managerProfile.env_allowlist) {
-            const parsed = JSON.parse(managerProfile.env_allowlist);
-            if (Array.isArray(parsed)) envAllowlist = parsed;
-          }
-          // P3-4: extract mcp_tools for PM adapter startup
-          if (managerProfile.capabilities_json) {
-            try {
-              const caps = JSON.parse(managerProfile.capabilities_json);
-              if (Array.isArray(caps.mcp_tools)) {
-                pmMcpTools = caps.mcp_tools.filter(t => typeof t === 'string' && t.trim());
-              }
-            } catch { /* ignore */ }
-          }
-        }
-      }
-    } catch (err) {
-      if (err?.code === 'OPERATOR_PROFILE_VENDOR_MISMATCH' || err?.status === 400) {
-        throw err;
-      }
-      // Ignore malformed optional profile data and fall through to defaults.
-    }
-
-    const authCtx = resolveManagerAuth(adapterType, {
+    // Resolve env_allowlist, mcp_tools and the Claude profile options from the
+    // SELECTED adapter's profile. The auth context was resolved at selection
+    // time so the null-preference fallback and the eventual spawn use exactly
+    // the same allowlist, bare flag and settings.
+    const {
       envAllowlist,
-      ...authResolverOpts,
-      // A remote Claude Operator materializes `--bare` auth from the pod's
-      // login store inside the executor. Do not read/materialize controller
-      // credentials that will deliberately be discarded at this boundary.
-      bare: !isRemoteNode && bare === true,
+      mcpTools: pmMcpTools,
+      authCtx,
+      tools,
+      disallowedTools,
+      maxBudgetUsd,
+      profileMcpConfig,
+      strictMcpConfig,
+      safeMode,
+      bare,
+      disableSlashCommands,
+      noChrome,
+      settingSources,
       settings,
-    });
+      permissionMode,
+      profileError,
+    } = managerRuntime;
+    // Same contract as before the null-preference probe: a profile that
+    // contradicts the adapter we are about to spawn (wrong command vendor, or a
+    // malformed args_template) is a 400 — but only for the SELECTED adapter.
+    if (profileError) throw profileError;
     // Resolve before the auth gate so migration diagnostics are observable
     // even when a legacy ambient auth mode is no longer sufficient.
     const spawnEnv = applyManagerCredentialPolicy(isRemoteNode ? {} : buildManagerSpawnEnv({
@@ -639,10 +800,6 @@ function createOperatorSpawnService({
     if (threadSourceReset) {
       try { runService.addRunEvent(runId, 'operator:thread_source_reset', JSON.stringify(threadSourceReset)); } catch { /* ignore */ }
     }
-    if (isRemoteNode && !process.env.PALANTIR_BASE_URL) {
-      try { runService.addRunEvent(runId, 'operator:remote_base_url_localhost', JSON.stringify({ node_id: nodeId })); } catch { /* ignore */ }
-    }
-
     const finishSpawn = (materializedRepoWorkspace = null) => {
       let executor;
       let nodePrefix;
@@ -684,7 +841,15 @@ function createOperatorSpawnService({
       const currentInstance = runService.getOperatorInstance(operatorInstanceId);
       operatorProfile = operatorProfileService.getProfile(currentInstance.profile_id);
     }
-    const baseSystemPrompt = buildManagerSystemPrompt({ adapter, port, token: !!token, layer: 'operator', adapterType, specialistAvailable: isSpecialistAvailable() });
+    const baseSystemPrompt = buildManagerSystemPrompt({
+      adapter,
+      port,
+      token: !!token,
+      layer: 'operator',
+      adapterType,
+      specialistAvailable: isSpecialistAvailable(),
+      apiBaseUrl: isRemoteNode ? promptApiEndpoints.remote : promptApiEndpoints.local,
+    });
     const projectSection = buildProjectScopedSystemSection({
       project,
       profile: operatorProfile,
@@ -936,14 +1101,6 @@ function createOperatorSpawnService({
           409,
         );
       }
-      if (isRemoteNode) {
-        failOperatorRun(
-          runId,
-          'operator:repo_remote_unsupported',
-          { project_id: project.id, node_id: nodeId || 'local' },
-          'repo materialization is unsupported on remote nodes',
-        );
-      }
       if (resumeRepoWorkspace) {
         return finishSpawn(resumeRepoWorkspace);
       }
@@ -958,6 +1115,10 @@ function createOperatorSpawnService({
     }
 
     return finishSpawn();
+  }
+
+  function ensureLiveOperator(args) {
+    return ensureLiveOperatorResolved(args);
   }
 
   return {

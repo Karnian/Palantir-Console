@@ -1001,7 +1001,7 @@ test('v3 Phase 0 behavior: claudeAdapter.startSession passes restricted Bash all
   assert.equal(capturedArgs.isManager, true, 'must spawn as manager');
 });
 
-test('v3 Phase 0 behavior: codexAdapter role=manager spawn args OMIT sandbox bypass flag', () => {
+test('v3 Phase 0 behavior: codexAdapter role=manager spawn args INCLUDE sandbox bypass flag', () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
 
   // Minimal fake child process — enough for spawnOneTurn to not throw
