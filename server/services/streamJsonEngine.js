@@ -11,6 +11,10 @@ const {
   augmentProcessPath,
   applyWorkerCredentialPolicy,
 } = require('./actorTokenPolicy');
+const {
+  classifyClaudeRateLimitEvents,
+  markWorkerLimitFailure,
+} = require('./workerLimit');
 
 function buildRemoteWorkerEnv(env) {
   const selected = {};
@@ -773,8 +777,15 @@ function createStreamJsonEngine({
               const hitLimit = stopReason === 'max_turns' || stopReason === 'max_tokens';
 
               if (event.is_error) {
+                const limitFailure = classifyClaudeRateLimitEvents(proc.events);
+                if (limitFailure) {
+                  markWorkerLimitFailure(runService, runId, limitFailure);
+                }
                 proc.status = 'failed';
-                runService.updateRunStatus(runId, 'failed', { force: true });
+                runService.updateRunStatus(runId, 'failed', {
+                  force: true,
+                  reason: limitFailure ? 'claude-rate-limit' : null,
+                });
               } else if (hitLimit) {
                 // Agent was cut short by turn/token limit — not a real completion
                 proc.status = 'needs_input';
