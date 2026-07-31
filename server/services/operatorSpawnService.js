@@ -298,10 +298,12 @@ function createOperatorSpawnService({
     let settingSources = null;
     let settings = null;
     let permissionMode = adapterType === 'claude-code' ? 'bypassPermissions' : undefined;
-    // The null-preference path evaluates BOTH adapters, so a mismatched profile
+    // The null-preference path evaluates BOTH adapters, so a rejected profile
     // for the adapter we end up discarding must not fail the spawn. Carry the
     // error and let the caller throw only for the adapter it actually selects.
-    let vendorMismatchError = null;
+    // This covers vendor mismatch AND a malformed args_template — both are 400s
+    // that used to be raised only for the already-selected adapter.
+    let profileError = null;
     if (managerProfile) {
       const expectedVendor = adapterType === 'claude-code' ? 'claude' : 'codex';
       const commandVendor = resolveAgentVendor(managerProfile.command);
@@ -316,22 +318,29 @@ function createOperatorSpawnService({
           profileType: managerProfile.type,
           command: managerProfile.command,
         };
-        vendorMismatchError = err;
+        profileError = err;
       }
-      if (adapterType === 'claude-code') {
-        permissionMode = resolveClaudePermissionMode(managerProfile);
-        const templateOptions = parseClaudeArgsTemplate(managerProfile.args_template);
-        tools = templateOptions.tools;
-        disallowedTools = templateOptions.disallowedTools;
-        maxBudgetUsd = templateOptions.maxBudgetUsd;
-        profileMcpConfig = templateOptions.mcpConfig;
-        strictMcpConfig = templateOptions.strictMcpConfig;
-        safeMode = templateOptions.safeMode;
-        bare = templateOptions.bare;
-        disableSlashCommands = templateOptions.disableSlashCommands;
-        noChrome = templateOptions.noChrome;
-        settingSources = templateOptions.settingSources;
-        settings = templateOptions.settings;
+      if (!profileError && adapterType === 'claude-code') {
+        try {
+          permissionMode = resolveClaudePermissionMode(managerProfile);
+          const templateOptions = parseClaudeArgsTemplate(managerProfile.args_template);
+          tools = templateOptions.tools;
+          disallowedTools = templateOptions.disallowedTools;
+          maxBudgetUsd = templateOptions.maxBudgetUsd;
+          profileMcpConfig = templateOptions.mcpConfig;
+          strictMcpConfig = templateOptions.strictMcpConfig;
+          safeMode = templateOptions.safeMode;
+          bare = templateOptions.bare;
+          disableSlashCommands = templateOptions.disableSlashCommands;
+          noChrome = templateOptions.noChrome;
+          settingSources = templateOptions.settingSources;
+          settings = templateOptions.settings;
+        } catch (err) {
+          // A malformed profile must NOT silently downgrade to bypass defaults,
+          // so keep the 400 — but only for the adapter that gets selected.
+          if (err?.status === 400 || err?.httpStatus === 400) profileError = err;
+          else throw err;
+        }
       }
       if (managerProfile.env_allowlist) {
         try {
@@ -375,7 +384,7 @@ function createOperatorSpawnService({
       settingSources,
       settings,
       permissionMode,
-      vendorMismatchError,
+      profileError,
     };
   }
 
@@ -635,11 +644,12 @@ function createOperatorSpawnService({
       settingSources,
       settings,
       permissionMode,
-      vendorMismatchError,
+      profileError,
     } = managerRuntime;
-    // Same contract as before the null-preference probe: a profile whose
-    // command vendor contradicts the adapter we are about to spawn is a 400.
-    if (vendorMismatchError) throw vendorMismatchError;
+    // Same contract as before the null-preference probe: a profile that
+    // contradicts the adapter we are about to spawn (wrong command vendor, or a
+    // malformed args_template) is a 400 — but only for the SELECTED adapter.
+    if (profileError) throw profileError;
     // Resolve before the auth gate so migration diagnostics are observable
     // even when a legacy ambient auth mode is no longer sufficient.
     const spawnEnv = applyManagerCredentialPolicy(isRemoteNode ? {} : buildManagerSpawnEnv({

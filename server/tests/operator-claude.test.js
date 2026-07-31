@@ -409,6 +409,57 @@ test('Claude operator rejects malformed template options instead of falling back
   );
 });
 
+test('null PM preference: a malformed Claude profile does not block the Codex spawn', async (t) => {
+  // The null-preference path evaluates BOTH adapters to find one that can
+  // authenticate. A 400 raised while inspecting the adapter we are about to
+  // DISCARD must not take down an otherwise healthy Codex spawn — that check
+  // belongs to the selected adapter only.
+  const previousDefault = process.env.PALANTIR_DEFAULT_PM_ADAPTER;
+  delete process.env.PALANTIR_DEFAULT_PM_ADAPTER;
+  t.after(() => {
+    if (previousDefault === undefined) delete process.env.PALANTIR_DEFAULT_PM_ADAPTER;
+    else process.env.PALANTIR_DEFAULT_PM_ADAPTER = previousDefault;
+  });
+
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const agentProfileService = createAgentProfileService(db);
+  db.prepare(`
+    UPDATE agent_profiles
+    SET args_template = ?, permission_mode = NULL
+    WHERE id = 'claude-code'
+  `).run('-p {prompt} --max-budget-usd nope');
+  const registry = createManagerRegistry({ runService });
+  const claudeAdapter = makeFakeManagerAdapter('claude-code');
+  const codexAdapter = makeFakeManagerAdapter('codex');
+  const spawn = createOperatorSpawnService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory({ claudeAdapter, codexAdapter }),
+    projectService,
+    projectBriefService,
+    agentProfileService,
+    resolveManagerAuth: type => ({
+      canAuth: type === 'codex',
+      env: {},
+      sources: type === 'codex' ? ['test:codex'] : [],
+      diagnostics: [],
+    }),
+  });
+  const project = projectService.createProject({ name: 'codex-with-broken-claude-profile' });
+  assert.equal(project.preferred_pm_adapter, null);
+  seedTop({ runService, registry, adapter: makeFakeManagerAdapter('claude-code') });
+
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
+
+  assert.equal(result.spawned, true);
+  assert.equal(result.run.manager_adapter, 'codex');
+  assert.equal(codexAdapter._starts.length, 1);
+  assert.equal(claudeAdapter._starts.length, 0);
+});
+
 test('Claude operator rejects a raw-SQL profile vendor mismatch before spawn', async (t) => {
   const db = await mkdb(t);
   const runService = createRunService(db, null);
