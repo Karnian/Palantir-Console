@@ -433,14 +433,21 @@ test('a run whose row was cascade-deleted can still close its lease', async (t) 
   const claim = runService.claimQueuedRun('cascade-victim', { withLease: true });
   db.prepare('DELETE FROM runs WHERE id = ?').run('cascade-victim');
 
-  const ok = runService.releaseOwner('cascade-victim', claim.leaseId, {
-    state: 'released',
-    evidence: 'process_exit',
+  // The AFTER DELETE trigger has already closed the lease at deletion time, so
+  // a late observer's release is a SILENT loser — crucially it must not throw
+  // (the run_events FK would have rolled the whole tx back before the
+  // runRowExists guard existed) and must not clobber the trigger's verdict.
+  let late;
+  assert.doesNotThrow(() => {
+    late = runService.releaseOwner('cascade-victim', claim.leaseId, {
+      state: 'released',
+      evidence: 'process_exit',
+    });
   });
-  assert.equal(ok, true, 'release must not fail because the run row is gone');
+  assert.equal(late, false, 'the trigger already won; the late observer loses quietly');
   const lease = db.prepare("SELECT * FROM run_owner_leases WHERE run_id = 'cascade-victim'").get();
-  assert.equal(lease.state, 'released');
-  assert.equal(lease.evidence, 'process_exit', 'evidence survives on the lease row');
+  assert.equal(lease.state, 'abandoned');
+  assert.equal(lease.evidence, 'run_deleted', 'the deletion evidence survives on the lease row');
 });
 
 test('deleting a run keeps the closure evidence on the lease row', async (t) => {
@@ -457,5 +464,32 @@ test('deleting a run keeps the closure evidence on the lease row', async (t) => 
   const lease = db.prepare("SELECT * FROM run_owner_leases WHERE run_id = 'delete-me'").get();
   assert.equal(lease.state, 'abandoned');
   assert.equal(lease.evidence, 'run_deleted', 'evidence must survive the cascade');
+  assert.ok(lease.closed_at);
+});
+
+test('a task-cascade delete cannot leave a held lease behind', async (t) => {
+  // taskService/project deletes cascade the run rows away without ever calling
+  // runService.deleteRun (codex R2). A tmux or remote run has no onExit to
+  // recover later, so the AFTER DELETE trigger is the last line of defense.
+  const db = await mkdb(t);
+  const runService = createRunService(db, createEventBus());
+  const taskService = createTaskService(db);
+  const projectService = createProjectService(db);
+  const project = projectService.createProject({ name: 'cascade-project' });
+  const task = taskService.createTask({ project_id: project.id, title: 'T' });
+  db.prepare(`
+    INSERT INTO agent_profiles (id, name, type, command) VALUES ('cascade-a', 'A', 'codex', 'codex')
+    ON CONFLICT DO NOTHING
+  `).run();
+  const run = runService.createRun({ task_id: task.id, agent_profile_id: 'cascade-a', prompt: 'p' });
+  const claim = runService.claimQueuedRun(run.id, { withLease: true });
+  assert.equal(claim.claimed, true);
+
+  taskService.deleteTask(task.id);
+
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM runs WHERE id = ?').get(run.id).c, 0);
+  const lease = db.prepare('SELECT * FROM run_owner_leases WHERE run_id = ?').get(run.id);
+  assert.equal(lease.state, 'abandoned', 'the cascade path must not leave a held lease');
+  assert.equal(lease.evidence, 'run_deleted');
   assert.ok(lease.closed_at);
 });

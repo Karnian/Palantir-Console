@@ -39,3 +39,17 @@ SELECT
 FROM runs
 WHERE is_manager = 0
   AND status IN ('running', 'paused', 'needs_input');
+
+-- Last line of defense for EVERY run-deletion path. runService.deleteRun closes
+-- the lease explicitly (with an event) before deleting; but task/project
+-- cascade deletes bypass the service entirely (codex S1a R2), and a tmux or
+-- remote run has no onExit to recover later — permanent held. AFTER DELETE
+-- catches them all; the explicit path has already closed its lease by the time
+-- this fires, so it is a no-op there.
+CREATE TRIGGER trg_run_owner_leases_run_deleted
+AFTER DELETE ON runs
+BEGIN
+  UPDATE run_owner_leases
+  SET state = 'abandoned', closed_at = datetime('now'), evidence = 'run_deleted'
+  WHERE run_id = OLD.id AND state = 'held';
+END;

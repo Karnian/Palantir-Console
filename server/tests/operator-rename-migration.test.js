@@ -379,7 +379,7 @@ test('(2) composition events, owner state, and item edges are preserved while sl
   });
 });
 
-test('(3) schema fidelity: columns, defaults, FKs, indexes, and no triggers', (t) => {
+test('(3) schema fidelity: columns, defaults, FKs, indexes, and the exact trigger set', (t) => {
   const db = migratedThrough045(t);
 
   assert.deepEqual(columnNames(db, 'runs'), RUN_COLUMNS);
@@ -417,8 +417,13 @@ test('(3) schema fidelity: columns, defaults, FKs, indexes, and no triggers', (t
   const triggers = db.prepare(`
     SELECT name FROM sqlite_master
     WHERE type = 'trigger' AND tbl_name IN ('runs', 'memory_composition_events')
+    ORDER BY name
   `).all();
-  assert.deepEqual(triggers, []);
+  // This pin exists so a future runs-table REBUILD migration cannot silently
+  // drop a trigger — any change to this set must be deliberate. S1a (migration
+  // 084) added the lease last-line-of-defense trigger; a rebuild that loses it
+  // reopens the permanent-held cascade hole it closes.
+  assert.deepEqual(triggers, [{ name: 'trg_run_owner_leases_run_deleted' }]);
 });
 
 test("(4) tightened CHECKs accept 'operator'/'top' but reject legacy 'pm' and garbage", (t) => {
